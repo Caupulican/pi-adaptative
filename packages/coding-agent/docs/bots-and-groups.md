@@ -47,14 +47,35 @@ as a bot named `<name>` and prints a join token once, `/remote revoke <name>` cu
 
 How it holds together:
 
-- Each side proves a shared secret by HMAC (the secret is never sent), and the joiner checks the hub proves it back. The
-  link does not encrypt: use a private network (Tailscale, WireGuard) or an SSH tunnel for another machine.
+- Each side proves a shared secret by HMAC (the secret is never sent), and the joiner checks the hub proves it back.
+- After that proof, a link between two current builds is sealed: every message, answer and keep-alive is encrypted and
+  authenticated (AES-256-GCM) with keys made fresh for each connection from the secret and both sides' handshake
+  nonces, one key per direction, and each frame carries the next number of its direction. A frame that was changed,
+  replayed, reordered, dropped or sent back to its sender does not open, and the connection closes. `/remote status`
+  says "not sealed" beside a link that is not.
+- A machine on an older build links unsealed, as before. Sealing is guaranteed only when both machines are current
+  and at least one refuses unsealed links: someone able to change the traffic between two current builds can remove
+  the offer to seal from the handshake and leave the link unsealed. To refuse unsealed links, write
+  `{ "requireSealed": true }` to `<agent dir>/remote/settings.json`: a hub then refuses a joiner that does not seal, and
+  a joining machine refuses a hub that does not. It is off by default so older builds keep linking. For another
+  machine, prefer a private network (Tailscale, WireGuard) or an SSH tunnel either way.
 - A joined machine's root session receives the hub's words as a peer's words under the `link` channel's usual bounds
-  (wakes and spend per day), never as its owner's. Settings may replace the implied policy with `channels.link`.
+  (wakes and spend per day), never as its owner's. Settings may replace the implied policy with `channels.link`. Its
+  conversation with a hub is keyed by the hub's install id, so two hubs with the same name keep separate conversations.
 - The hub refuses a machine that would make a loop of hubs (a machine already above it, or a chain more than three deep),
-  and a machine id that changed under a known name. The reasons show in `/remote status` in plain words.
+  a machine id that changed under a known name, and an install that already joined under another name. The reasons
+  show in `/remote status` in plain words.
+- Machines are told apart by the id each install generates, never by hostname: a WSL instance and its Windows host
+  that share a hostname are two machines. Names are the labels the owner gives.
+- One root session per agent directory hosts the hub (`remote/host.lock`). Another session on the same directory does
+  not bind the port and shows no warning; `/remote status` there names the hosting session and its machines, and
+  messages, `/remote listen` and `/remote stop` go through that session. When the hosting session stops the hub or
+  closes, a waiting session takes the hub over; a lock left by a session that crashed is replaced at the next start,
+  once that session's process is proven gone. A revoke from any session cuts the machine at once.
 - State lives under `<agent dir>/remote/`: this machine's id and name, the machines allowed to join, the hubs joined, each
-  machine's chat log and where each link stands (`links.json`). Secrets are stored for the owner only.
+  machine's chat log, the host lock, and where each link stands (`links.json`: `joins` by hub address with the hub's id
+  and the active features, `machines` by install id with the name and the active features). Secrets are stored for the
+  owner only: mode 0600 on POSIX, and on Windows an access list that names only the current account.
 
 ## Create and use a group
 

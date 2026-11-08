@@ -1,6 +1,8 @@
 /**
  * A session's hub: the machines the owner let join, shown as bots with a remote mark. It owns what survives a restart (where it
  * listens, who may join, each machine's chat log) and nothing about how a message is answered: the machine does that.
+ * One root session per agent directory hosts it (`host-lock.ts`); the others do not bind the port, read the hosting
+ * session's records for status, and take the hub over when that session lets it go.
  */
 
 import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
@@ -9,10 +11,12 @@ import type { AssistantMessage, UserMessage } from "@caupulican/pi-ai";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
+import { warmHostIdentity } from "../../kernel/reliability/host-identity.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { type HostLock, type LinkHostOwner, linkHostOwner, takeHostLock, watchHostLockRelease } from "./host-lock.ts";
 import { RemoteHub } from "./hub.ts";
-import { provideLinkContext } from "./link-context.ts";
+import { type HubMachineLinkState, hubMachinesFor, provideLinkContext } from "./link-context.ts";
 import {
 	addHubMachine,
 	formatJoinToken,
@@ -22,6 +26,7 @@ import {
 	type MachineIdentity,
 	updateHubMachine,
 } from "./registry.ts";
+import { SEALED_FEATURE } from "./session-keys.ts";
 
 const MAX_LOGGED = 200;
 const DEFAULT_PORT = 7788;
@@ -52,13 +57,15 @@ export class RemoteHubController {
 	private listeningOn: { host: string; port: number } | undefined;
 	private readonly identity: MachineIdentity;
 	private upSubtree: () => readonly string[] = () => [];
+	private hostLock: HostLock | undefined;
+	private stopWatchingHost: (() => void) | undefined;
 
 	constructor(deps: RemoteHubControllerDeps) {
 		this.deps = deps;
 		this.identity = loadIdentity(deps.agentDir);
 		provideLinkContext(deps.agentDir, {
 			subtree: () => this.reachableIds(),
-			depth: () => this.hub?.chainDepth() ?? 0,
+			depth: () => this.chainDepth(),
 		});
 	}
 
@@ -70,22 +77,89 @@ export class RemoteHubController {
 		return this.deps.agentDir;
 	}
 
-	/** Starts listening when the owner turned the hub on earlier; a port that cannot be had is reported, not thrown. */
+	/**
+	 * Starts listening when the owner turned the hub on earlier; a port that cannot be had is reported, not thrown. When
+	 * another session on this agent directory hosts the hub, this one does not bind and says nothing: `/remote status`
+	 * names the hosting session, and this session takes the hub over when that one lets it go.
+	 */
 	async start(): Promise<string | undefined> {
 		const config = this.readConfig();
-		if (!config?.enabled) return undefined;
 		try {
+			// Off Linux the OS machine id is read asynchronously; until it is, a recorded host lock cannot be judged.
+			await warmHostIdentity();
+			if (!config?.enabled || !this.takeHost()) {
+				// Not hosting: wait for the hosting session (or one started later) to let the hub go.
+				this.watchHost();
+				return undefined;
+			}
 			await this.listen(config.host, config.port);
 			return undefined;
 		} catch (error) {
-			return `The hub could not listen on ${config.host}:${config.port} (${error instanceof Error ? error.message : "unknown error"}).`;
+			const where = config ? ` on ${config.host}:${config.port}` : "";
+			return `The hub could not listen${where} (${error instanceof Error ? error.message : "unknown error"}).`;
 		}
 	}
 
 	async stop(): Promise<void> {
+		this.stopWatchingHost?.();
+		this.stopWatchingHost = undefined;
+		// The hub stops accepting as soon as its close starts, so the host is let go then: a session closing fast
+		// still removes the lock and wakes the session waiting to take over.
+		const closing = this.closeHub();
+		this.hostLock?.release();
+		this.hostLock = undefined;
+		await closing;
+	}
+
+	private async closeHub(): Promise<void> {
 		await this.hub?.close();
 		this.hub = undefined;
 		this.listeningOn = undefined;
+	}
+
+	/** Holds the link host for this agent directory (keeping a hold this session already has); false when another does. */
+	private takeHost(): boolean {
+		if (this.hostLock?.stillHeld()) return true;
+		this.hostLock = undefined;
+		const taken = takeHostLock(this.deps.agentDir);
+		if (!taken.held) return false;
+		this.hostLock = taken.lock;
+		this.stopWatchingHost?.();
+		this.stopWatchingHost = undefined;
+		return true;
+	}
+
+	/** Waits, by watching the lock file, for the hosting session to let the hub go, then starts it here. */
+	private watchHost(): void {
+		if (this.stopWatchingHost) return;
+		this.stopWatchingHost = watchHostLockRelease(this.deps.agentDir, () => {
+			if (this.hub) return;
+			void this.start().then((problem) => {
+				if (problem)
+					harnessLog.warn("link", "taking over the hub from a session that let it go failed", { problem });
+			});
+		});
+	}
+
+	/** The other session hosting the hub here, when this one does not. */
+	private hostedElsewhere(): LinkHostOwner | undefined {
+		return this.hub ? undefined : linkHostOwner(this.deps.agentDir);
+	}
+
+	/** The machines the hosting session has joined right now, by name, when that session is another one. */
+	private hostedMachines(): Map<string, HubMachineLinkState> {
+		if (!this.hostedElsewhere()) return new Map();
+		return new Map(
+			Object.values(hubMachinesFor(this.deps.agentDir))
+				.filter((machine) => machine.connected)
+				.map((machine) => [machine.name, machine]),
+		);
+	}
+
+	private chainDepth(): number {
+		if (this.hub) return this.hub.chainDepth();
+		const depths = [...this.hostedMachines().values()].map((machine) => machine.depth);
+		return depths.length === 0 ? 0 : 1 + Math.max(...depths);
 	}
 
 	/** Reports the ids of this machine's own joiners to a hub it joined, so that hub can refuse a loop. */
@@ -93,13 +167,19 @@ export class RemoteHubController {
 		this.upSubtree = read;
 	}
 
-	/** The ids of the machines joined here and theirs. */
+	/** The ids of the machines joined here and theirs (the hosting session's, when it is another one). */
 	reachableIds(): string[] {
-		return this.hub?.reachableIds() ?? [];
+		if (this.hub) return this.hub.reachableIds();
+		if (!this.hostedElsewhere()) return [];
+		return Object.entries(hubMachinesFor(this.deps.agentDir)).flatMap(([machineId, machine]) =>
+			machine.connected ? [machineId, ...machine.subtree] : [],
+		);
 	}
 
 	async listen(host = DEFAULT_HOST, port = DEFAULT_PORT): Promise<number> {
-		await this.stop();
+		await this.closeHub();
+		await warmHostIdentity();
+		if (!this.takeHost()) throw new Error(hostedElsewhereText(linkHostOwner(this.deps.agentDir), "listen there"));
 		const hub = new RemoteHub({
 			agentDir: this.deps.agentDir,
 			identity: this.identity,
@@ -109,7 +189,15 @@ export class RemoteHubController {
 				presence: (machine) => this.deps.changed(machine),
 			},
 		});
-		const bound = await hub.listen(host, port);
+		let bound: number;
+		try {
+			bound = await hub.listen(host, port);
+		} catch (error) {
+			// A hub that cannot bind hosts nothing: the next session to start may host it.
+			this.hostLock?.release();
+			this.hostLock = undefined;
+			throw error;
+		}
 		harnessLog.info("link", "the hub is listening", { host, port: bound });
 		this.hub = hub;
 		this.listeningOn = { host, port: bound };
@@ -118,30 +206,42 @@ export class RemoteHubController {
 	}
 
 	async stopListening(): Promise<void> {
-		await this.stop();
+		const elsewhere = this.hostedElsewhere();
+		if (elsewhere) throw new Error(hostedElsewhereText(elsewhere, "stop it there"));
+		// Turned off before the host is let go, so a session watching for the hub does not take it back up.
 		const config = this.readConfig();
 		if (config) this.writeConfig({ ...config, enabled: false });
+		await this.stop();
 	}
 
 	status(): {
 		name: string;
 		listening?: { host: string; port: number };
+		/** The other session on this agent directory that hosts the hub. */
+		hostedBy?: LinkHostOwner;
 		machines: ReturnType<RemoteHubController["list"]>;
 	} {
+		const hostedBy = this.listeningOn ? undefined : this.hostedElsewhere();
 		return {
 			name: this.identity.name,
 			...(this.listeningOn ? { listening: this.listeningOn } : {}),
+			...(hostedBy ? { hostedBy } : {}),
 			machines: this.list(),
 		};
 	}
 
-	list(): { name: string; connected: boolean; revoked: boolean; createdAt: string }[] {
-		return listHubMachines(this.deps.agentDir).map((machine) => ({
-			name: machine.name,
-			connected: this.hub?.isConnected(machine.name) === true,
-			revoked: machine.revoked === true,
-			createdAt: machine.createdAt,
-		}));
+	list(): { name: string; connected: boolean; sealed: boolean; revoked: boolean; createdAt: string }[] {
+		const hosted = this.hub ? undefined : this.hostedMachines();
+		return listHubMachines(this.deps.agentDir).map((machine) => {
+			const elsewhere = hosted?.get(machine.name);
+			return {
+				name: machine.name,
+				connected: this.hub ? this.hub.isConnected(machine.name) : elsewhere !== undefined,
+				sealed: this.hub ? this.hub.isSealed(machine.name) : elsewhere?.features.includes(SEALED_FEATURE) === true,
+				revoked: machine.revoked === true,
+				createdAt: machine.createdAt,
+			};
+		});
 	}
 
 	isRemote(agentId: string): boolean {
@@ -149,7 +249,7 @@ export class RemoteHubController {
 	}
 
 	isOnline(agentId: string): boolean {
-		return this.hub?.isConnected(agentId) === true;
+		return this.hub ? this.hub.isConnected(agentId) : this.hostedMachines().has(agentId);
 	}
 
 	/** Lets a machine join as a bot named `name`; the token goes to the owner once, to carry to that machine. */
@@ -185,7 +285,14 @@ export class RemoteHubController {
 
 	/** Sends the owner's (or the orchestrator's) words to a joined machine; its answer arrives into the machine's chat. */
 	send(name: string, text: string): string {
-		if (!this.hub) throw new Error("This session is not a hub: turn it on with /remote listen.");
+		if (!this.hub) {
+			const elsewhere = this.hostedElsewhere();
+			throw new Error(
+				elsewhere
+					? hostedElsewhereText(elsewhere, `message ${name} from there`)
+					: "This session is not a hub: turn it on with /remote listen.",
+			);
+		}
 		const id = this.hub.send(name, text);
 		harnessLog.debug("link", "a message was sent to a machine", { machine: name, chars: text.length });
 		this.log(name, { at: Date.now(), from: "hub", text });
@@ -275,6 +382,19 @@ export class RemoteHubController {
 
 function readPort(config: HubConfig | undefined): number {
 	return config?.port ?? DEFAULT_PORT;
+}
+
+/** The plain words for a hub another session on this agent directory hosts. */
+export function hostedElsewhereText(owner: LinkHostOwner | undefined, then: string): string {
+	if (!owner) return "Another session on this machine is taking the hub; try again in a moment.";
+	return `The hub for this agent directory runs in ${hostDescription(owner)}; ${then}.`;
+}
+
+/** The hosting session in the owner's words; one whose process cannot be checked is said to be so. */
+export function hostDescription(owner: LinkHostOwner): string {
+	if (owner.standing === "foreign") return "a session on another host";
+	if (owner.standing === "unknown") return `a session whose process (${owner.pid}) could not be checked`;
+	return `another session on this machine (process ${owner.pid})`;
 }
 
 export type { HubMachineRecord };

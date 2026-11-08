@@ -3,8 +3,8 @@
  * here names a machine or a path.
  */
 
-import type { RemoteHubController } from "../../core/remote/hub-controller.ts";
-import { joinStateFor } from "../../core/remote/link-context.ts";
+import { hostDescription, type RemoteHubController } from "../../core/remote/hub-controller.ts";
+import { type JoinLinkState, joinStateFor } from "../../core/remote/link-context.ts";
 import { isMachineName } from "../../core/remote/protocol.ts";
 import {
 	listJoins,
@@ -14,6 +14,7 @@ import {
 	renameIdentity,
 	saveJoin,
 } from "../../core/remote/registry.ts";
+import { SEALED_FEATURE } from "../../core/remote/session-keys.ts";
 
 const USAGE =
 	"Usage: /remote [status] | /remote listen [port] [host] | /remote stop | /remote add <name> | /remote revoke <name> | /remote join <host:port> <token> | /remote leave <host:port> | /remote name <name>";
@@ -33,6 +34,11 @@ function isLoopback(host: string): boolean {
 	return host === "127.0.0.1" || host === "::1" || host === "localhost";
 }
 
+function joinStateText(link: JoinLinkState): string {
+	if (link.state !== "connected") return link.state;
+	return link.features?.includes(SEALED_FEATURE) ? "connected" : "connected, not sealed";
+}
+
 function statusText(port: RemoteCommandPort): string {
 	const { hub } = port;
 	const status = hub.status();
@@ -41,12 +47,14 @@ function statusText(port: RemoteCommandPort): string {
 		`This machine is ${status.name}.`,
 		status.listening
 			? `Hub: listening on ${status.listening.host}:${status.listening.port}.`
-			: "Hub: not listening (/remote listen [port] [host]).",
+			: status.hostedBy
+				? `Hub: hosted by ${hostDescription(status.hostedBy)}; this session uses it.`
+				: "Hub: not listening (/remote listen [port] [host]).",
 		status.machines.length > 0
-			? `Machines: ${status.machines.map((m) => `${m.name} ${m.revoked ? "revoked" : m.connected ? "connected" : "offline"}`).join(", ")}.`
+			? `Machines: ${status.machines.map((m) => `${m.name} ${m.revoked ? "revoked" : m.connected ? `connected${m.sealed ? "" : " (not sealed)"}` : "offline"}`).join(", ")}.`
 			: "Machines: none yet (/remote add <name>).",
 		joins.length > 0
-			? `Joined to: ${joins.map((j) => `${j.hubName} at ${j.address} as ${j.name} (${joinStateFor(hub.agentDir, j.address)})`).join(", ")}.`
+			? `Joined to: ${joins.map((j) => `${j.hubName} at ${j.address} as ${j.name} (${joinStateText(joinStateFor(hub.agentDir, j.address))})`).join(", ")}.`
 			: "Joined to: no hub (/remote join <host:port> <token>).",
 	];
 	return lines.join("\n");
@@ -71,7 +79,7 @@ export async function runRemoteCommand(
 				host.showStatus(
 					`Listening on ${where?.host ?? "127.0.0.1"}:${bound}. ${
 						where && !isLoopback(where.host)
-							? "The link proves a secret per machine but does not encrypt: run it on a private network (Tailscale, WireGuard) or through an SSH tunnel."
+							? "The link proves a secret per machine and seals (encrypts and authenticates) every message with machines on a current build; a machine on an older build links unsealed. Prefer a private network (Tailscale, WireGuard) or an SSH tunnel."
 							: "Bound to this machine only; use an SSH tunnel or give a host to reach it from another machine."
 					}`,
 				);

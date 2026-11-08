@@ -2,6 +2,8 @@
  * The `link` channel: this machine's connections to the hubs it joined. A hub's message is a peer's words (the secret
  * proves which hub wrote it, not that its words are the owner's): it starts a turn under the channel's bounds, and the
  * answer goes back to that hub. The owner adds a hub with `/remote join`; nothing here names a machine or a path.
+ * A conversation is keyed by the hub's install id, proven at the welcome, so two hubs that share a name (a WSL
+ * instance and its Windows host) never share a conversation; the hub's name stays the sender label the policy reads.
  */
 
 import type {
@@ -15,7 +17,7 @@ import type {
 import { LinkClient, type LinkState } from "../remote/link-client.ts";
 import { linkContextFor, reportJoinState } from "../remote/link-context.ts";
 import { MAX_MESSAGE_CHARS } from "../remote/protocol.ts";
-import { listJoins, loadIdentity } from "../remote/registry.ts";
+import { listJoins, loadIdentity, loadLinkSettings } from "../remote/registry.ts";
 
 export const LINK_CHANNEL = "link";
 
@@ -44,19 +46,22 @@ export class LinkChannelProvider implements ChannelProvider {
 				identity,
 				subtree: context.subtree,
 				depth: context.depth,
+				requireSealed: () => loadLinkSettings(this.agentDir).requireSealed,
 				events: {
 					state: (state) => {
 						this.states.set(join.address, state);
 						reportJoinState(
 							this.agentDir,
 							join.address,
-							state.state === "connected" ? "connected" : state.reason,
+							state.state === "connected"
+								? { state: "connected", hubName: state.hubName, hubId: state.hubId, features: state.features }
+								: { state: state.reason, hubName: join.hubName },
 						);
 						this.publish();
 					},
-					message: (_hubId, _hubName, id, text) => {
+					message: (hubId, _hubName, id, text) => {
 						void onInbound({
-							conversationKey: `link:${join.hubName}`,
+							conversationKey: `link:${hubId}`,
 							text,
 							eventId: id,
 							sender: { id: join.hubName, label: join.hubName, verified: true },
