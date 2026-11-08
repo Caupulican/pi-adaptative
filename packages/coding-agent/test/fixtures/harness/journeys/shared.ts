@@ -9,6 +9,7 @@ import { stateFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession, AgentSessionEvent } from "../../../../src/core/agent-session.ts";
 import { KNOWLEDGE_JUDGMENT_TOOL_NAME } from "../../../../src/core/memory/knowledge-judgment-runner.ts";
 import { formatRuleHook, loadRuleHooks } from "../../../../src/core/rule-hooks/rule-hook-catalog.ts";
+import { SERIAL_CALL_HINT_PREFIX } from "../../../../src/core/serial-call-hint.ts";
 import { getDirectoryResourceProfileInfo } from "../../../../src/core/settings/settings-rules.ts";
 import type { Settings } from "../../../../src/core/settings/settings-schema.ts";
 import type { ExecutionState } from "../../../../src/core/system-one/types.ts";
@@ -1001,7 +1002,11 @@ export function latestBatchResults(
 	const results: Array<{ toolName: string; isError: boolean; text: string }> = [];
 	for (const message of messages.slice(start)) {
 		if (message.role !== "toolResult") continue;
-		const text = message.content.map((block) => (block.type === "text" ? block.text : block.type)).join("\n");
+		// The tool's own output only: the batching note the harness appends to a result is not part of it.
+		const text = message.content
+			.filter((block) => !(block.type === "text" && block.text.startsWith(SERIAL_CALL_HINT_PREFIX)))
+			.map((block) => (block.type === "text" ? block.text : block.type))
+			.join("\n");
 		results.push({ toolName: message.toolName, isError: message.isError, text });
 	}
 	return results;
