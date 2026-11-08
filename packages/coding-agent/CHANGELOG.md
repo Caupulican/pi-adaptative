@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Matrix theme: success is now a visibly dimmer green than the vivid accent (checked in a rendered swatch; the two were nearly the same green in 0.104.41).
+
+### Fixed
+
+- A diagnostic showing a worker's owner id (`pi-worker:<pid>:<uuid>`) printed `pi-worker:[REDACTED]` once the process id had six or seven digits, because the secret redactor read it as a Telegram bot token. A bot id has at least eight digits, so the rule now starts there.
+
 ## [0.104.41] - 2026-11-07
 
 ### Changed
