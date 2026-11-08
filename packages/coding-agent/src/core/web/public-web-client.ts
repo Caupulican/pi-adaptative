@@ -38,7 +38,7 @@ function publicUrl(input: string): URL {
 	return url;
 }
 
-function assertPublicAddress(address: string): void {
+export function assertPublicAddress(address: string): void {
 	const parsed = isIP(address) ? ipaddr.process(address) : undefined;
 	// ipaddr's default "unicast" also includes unallocated IPv6 space. Restrict IPv6 to
 	// the global-unicast allocation in addition to excluding its special-purpose subranges.
@@ -57,11 +57,14 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
 	});
 }
 
-async function collectResponse(response: WebResponse, signal: AbortSignal): Promise<Uint8Array> {
+async function collectResponse(
+	response: WebResponse,
+	signal: AbortSignal,
+	maxBytes = MAX_WEB_RESPONSE_BYTES,
+): Promise<Uint8Array> {
+	const tooLarge = () => new Error(`Response too large (${maxBytes / 1024 / 1024} MiB maximum)`);
 	const declared = response.headers.get("content-length");
-	if (declared && /^\d+$/.test(declared) && Number(declared) > MAX_WEB_RESPONSE_BYTES) {
-		throw new Error("Response too large (5 MiB maximum)");
-	}
+	if (declared && /^\d+$/.test(declared) && Number(declared) > maxBytes) throw tooLarge();
 	if (!response.body) return new Uint8Array();
 	const reader = response.body.getReader();
 	let body = Buffer.allocUnsafe(64 * 1024);
@@ -71,9 +74,9 @@ async function collectResponse(response: WebResponse, signal: AbortSignal): Prom
 			const chunk = await untilAborted(reader.read(), signal);
 			if (chunk.done) return body.subarray(0, length);
 			const next = length + chunk.value.byteLength;
-			if (next > MAX_WEB_RESPONSE_BYTES) throw new Error("Response too large (5 MiB maximum)");
+			if (next > maxBytes) throw tooLarge();
 			if (next > body.byteLength) {
-				const grown = Buffer.allocUnsafe(Math.min(MAX_WEB_RESPONSE_BYTES, Math.max(next, body.byteLength * 2)));
+				const grown = Buffer.allocUnsafe(Math.min(maxBytes, Math.max(next, body.byteLength * 2)));
 				body.copy(grown, 0, 0, length);
 				body = grown;
 			}
@@ -91,6 +94,8 @@ export interface FetchedWebContent {
 	contentType: string;
 	text: string;
 	bytes: number;
+	/** The final response's status (a 2xx: any other status is a {@link PublicWebHttpError}). */
+	status: number;
 }
 
 /** One deadline, public-address admission and streamed byte bound across the entire redirect chain. */
@@ -100,7 +105,13 @@ export class PublicWebClient {
 		this.operations = operations;
 	}
 
-	async get(input: string, accept: string, timeout = 30, parentSignal?: AbortSignal): Promise<FetchedWebContent> {
+	async get(
+		input: string,
+		accept: string,
+		timeout = 30,
+		parentSignal?: AbortSignal,
+		options: { readonly maxBytes?: number } = {},
+	): Promise<FetchedWebContent> {
 		if (!Number.isFinite(timeout) || timeout <= 0 || timeout > MAX_WEB_TIMEOUT_SECONDS) {
 			throw new Error(`Timeout must be greater than 0 and at most ${MAX_WEB_TIMEOUT_SECONDS} seconds`);
 		}
@@ -108,7 +119,7 @@ export class PublicWebClient {
 		const operation = Effect.acquireUseRelease(
 			Effect.sync(() => {
 				const controller = new AbortController();
-				return { controller, result: this.fetchChain(input, accept, controller.signal) };
+				return { controller, result: this.fetchChain(input, accept, controller.signal, options.maxBytes) };
 			}),
 			({ result }) => Effect.tryPromise({ try: () => result, catch: (error) => error }),
 			({ controller, result }) =>
@@ -125,7 +136,12 @@ export class PublicWebClient {
 		return result.right;
 	}
 
-	private async fetchChain(input: string, accept: string, signal: AbortSignal): Promise<FetchedWebContent> {
+	private async fetchChain(
+		input: string,
+		accept: string,
+		signal: AbortSignal,
+		maxBytes?: number,
+	): Promise<FetchedWebContent> {
 		let url = publicUrl(input);
 		const visited = new Set<string>();
 		let redirects = 0;
@@ -183,7 +199,7 @@ export class PublicWebClient {
 				) {
 					throw new Error(`Unsupported fetched content type: ${mime}`);
 				}
-				const bytes = await collectResponse(response, signal);
+				const bytes = await collectResponse(response, signal, maxBytes);
 				signal.throwIfAborted();
 				const charset = /charset\s*=\s*["']?([^;\s"']+)/i.exec(contentType)?.[1] ?? "utf-8";
 				return {
@@ -191,6 +207,7 @@ export class PublicWebClient {
 					contentType: mime,
 					text: new TextDecoder(charset).decode(bytes),
 					bytes: bytes.byteLength,
+					status: response.status,
 				};
 			} catch (error) {
 				requestFailed = true;

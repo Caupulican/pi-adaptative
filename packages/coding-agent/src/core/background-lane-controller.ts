@@ -206,7 +206,10 @@ import {
 } from "./routines/routine-scheduler-controller.ts";
 import { RoutineSessionController } from "./routines/routine-session-controller.ts";
 import { parseRoutineToolInput, type RoutineToolView } from "./routines/routine-tool.ts";
+import { RoutineWatchMonitor } from "./routines/routine-watch-monitor.ts";
 import { RoutineWorkerExecutor } from "./routines/routine-worker-executor.ts";
+import { WatchAdmission } from "./routines/watch-admission.ts";
+import { WatchSampler } from "./routines/watch-evaluators.ts";
 import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
 import { getSessionRole } from "./session-role.ts";
 import type { SessionSemanticPlaneController } from "./session-semantic-plane-controller.ts";
@@ -336,7 +339,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _managedLaneAbsenceLeafId: string | null | undefined;
 	private _botTeamStore: PersistentBotTeamStore | undefined;
 	private _routines:
-		| { scheduler: RoutineSchedulerController; session: RoutineSessionController; intake: RoutineIntake }
+		| {
+				scheduler: RoutineSchedulerController;
+				session: RoutineSessionController;
+				intake: RoutineIntake;
+				watches: RoutineWatchMonitor;
+		  }
 		| undefined;
 	private routinesStarted = false;
 	private _channelsHostedByDaemon = false;
@@ -1011,6 +1019,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._runTeardownStep("dispose worker usage delivery", () => this._workerUsage?.dispose());
 		this._runTeardownStep("dispose worker receipt delivery", () => this._workerReceipts?.dispose());
 		this._runTeardownStep("dispose worker notifications", () => this._workerNotifications?.dispose());
+		this._runTeardownStep("stop routine watches", () => this._routines?.watches.dispose());
 		let routineShutdown = Promise.resolve();
 		this._runTeardownStep("stop routine scheduler", () => {
 			routineShutdown = this._routines?.scheduler.close() ?? Promise.resolve();
@@ -1716,10 +1725,33 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			warn: (message) => this._safeWarn(message),
 		});
+		// One admission serves a watch when it is saved and at every evaluation, so a saved watch never runs with more
+		// authority than the session has now.
+		const watchAdmission = new WatchAdmission({
+			getCwd: () => this.deps.getCwd(),
+			getAgentDir: () => this.deps.getAgentDir(),
+			getCapabilityEnvelope: () => this.deps.getCapabilityEnvelope(),
+			getCredentialExposureBoundary: () => this.deps.getCredentialExposureBoundary?.(),
+		});
+		const routineTimers = this.deps.getTimers().port("routines");
+		const watches = new RoutineWatchMonitor({
+			store,
+			sampler: new WatchSampler({
+				admission: watchAdmission,
+				agentDir: () => this.deps.getAgentDir(),
+				now: () => routineTimers.now(),
+			}),
+			parentSessionId,
+			timers: routineTimers,
+			agentDir: () => this.deps.getAgentDir(),
+			isDisposed: () => this.deps.isDisposed(),
+			warn: (message) => this._safeWarn(message),
+		});
 		const session = new RoutineSessionController({
 			store,
 			scheduler,
 			parentSessionId,
+			admitWatch: (condition) => watchAdmission.admit(condition),
 			capture: (request, signal) => this._getWorkerController().captureSavedIntent(request, signal),
 			invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
 			eventAnchor: () => routineEventAnchor(this._getWorkerLifecycle().getTaskRuntimeSnapshot()),
@@ -1760,10 +1792,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			warn: (message) => this._safeWarn(message),
 		});
-		this._routines = { scheduler, session, intake };
+		this._routines = { scheduler, session, intake, watches };
 		if (this.routinesStarted) {
 			scheduler.start();
 			intake.start();
+			watches.start();
 		}
 	}
 
@@ -1865,6 +1898,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this.getBotTeamStore();
 		this._routines?.scheduler.start();
 		this._routines?.intake.start();
+		this._routines?.watches.start();
 		this._ensureBotDaemon();
 		this._unsubscribeAwayChannelSettings ??= this.deps.getSettingsManager().subscribeChanges(() => {
 			if (awayChannelsKey(this.deps.getSettingsManager()) !== this._awayChannelsKey) this._ensureBotDaemon();

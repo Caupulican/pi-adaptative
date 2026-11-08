@@ -12,6 +12,8 @@ import type {
 	RoutineOccurrenceListFilter,
 	RoutineRetireInput,
 	RoutineTerminalOutcome,
+	RoutineWatchObservationInput,
+	RoutineWatchOutcome,
 	UpsertPersistentRoutineInput,
 } from "./routine-contract.ts";
 
@@ -40,6 +42,8 @@ export interface RoutineStorePort {
 	clearRoutineAwayRefusals(input: { routineIds: readonly string[]; reasonPrefix: string }): void;
 	/** Away: records a closed parent's decided event attempts as pending occurrences (see the store). */
 	decideAwayEventRoutines(input: AwayEventDecisionInput): AwayEventDecisionResult;
+	/** A watch monitor's observation: moves the edge baseline or fires a pending occurrence (see the store). */
+	observeWatch(input: RoutineWatchObservationInput): RoutineWatchOutcome;
 	/** Returns a parent's away claims that lapsed before dispatch to pending without `executor`; whether any was. */
 	releaseLapsedAwayClaims(input: { parentSessionId: string; nowMs: number }): boolean;
 	claimManualRoutineOccurrence(input: {

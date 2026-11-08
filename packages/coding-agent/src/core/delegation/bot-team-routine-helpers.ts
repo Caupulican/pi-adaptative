@@ -412,6 +412,8 @@ export function readDaemonLeaseStatus(
 		if (!r.enabled) continue;
 		// An event routine has no slot: it stays active until it ends, and the daemon follows it for its closed session.
 		const next = nextRoutineAt(r.schedule, r.cursor);
+		// A watch is evaluated only while its session is open: the daemon has nothing to follow for it.
+		if (r.schedule.kind === "event" && r.schedule.source === "watch") continue;
 		if (r.schedule.kind === "event" ? routineEnded(r, nowMs) !== undefined : next === undefined) continue;
 		activeRoutines++;
 		if (next !== undefined && routineOpensAt(r, occurrences) <= nowMs) dueRoutines++;

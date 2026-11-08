@@ -342,6 +342,8 @@ export class AwayRoutineSupervisor {
 			// An event routine is due whenever its source delivers: its parent's feed decides it, no slot is due here. With
 			// no sources or CI events off (the owner's own switch, which stops CI in the session too) nothing is followed.
 			if (routine.schedule.kind === "event") {
+				// A watch is evaluated by its open session only; the away host has no condition to follow for it.
+				if (routine.schedule.source === "watch") continue;
 				if (!this.deps.eventSources || this.deps.ciEvents?.() === false) continue;
 				const entry = work(routine.target.parentSessionId);
 				const current = routine.awayRefusal?.reason;

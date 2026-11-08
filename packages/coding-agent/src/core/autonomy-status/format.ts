@@ -39,7 +39,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 			...list(
 				value.routines,
 				(routine) =>
-					`${routine.routineId}: ${routine.state}${routine.ended ? ` (${routine.ended})` : ""}, ${routine.schedule}, next ${at(routine.nextRunAt)}${routine.startsFrom !== undefined ? ` (starts from ${at(routine.startsFrom)})` : ""}, last ${routine.lastStatus ?? "-"}${routine.awayRefusal ? `, away refused: ${routine.awayRefusal.reason}` : ""}`,
+					`${routine.routineId}: ${routine.state}${routine.ended ? ` (${routine.ended})` : ""}, ${routine.watching ?? routine.schedule}, next ${at(routine.nextRunAt)}${routine.startsFrom !== undefined ? ` (starts from ${at(routine.startsFrom)})` : ""}, last ${routine.lastStatus ?? "-"}${routine.awayRefusal ? `, away refused: ${routine.awayRefusal.reason}` : ""}`,
 			),
 		]),
 		...block("Away daemon", status.awayDaemon, (value) => [

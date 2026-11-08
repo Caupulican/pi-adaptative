@@ -26,6 +26,7 @@ import { isModelReference } from "../../core/model-resolver.ts";
 import type { RemoteHubController } from "../../core/remote/hub-controller.ts";
 import { type AwayService, describeAwayServiceInspection } from "../../core/routines/away-service.ts";
 import { nextRoutineAt, type RoutineDefinitionView } from "../../core/routines/routine-contract.ts";
+import { describeWatchCondition } from "../../core/routines/watch-contract.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import { REMOTE_MARK } from "./components/bot-state-mark.ts";
@@ -129,6 +130,7 @@ function routineScheduleLabel(routine: RoutineDefinitionView): string {
 			return `"${routine.schedule.cron}" in ${routine.schedule.timeZone}`;
 		case "event": {
 			const schedule = routine.schedule;
+			if (schedule.source === "watch") return describeWatchCondition(schedule.condition);
 			if (schedule.source === "github") {
 				const scope = [
 					schedule.pullRequest === undefined ? undefined : `#${schedule.pullRequest}`,

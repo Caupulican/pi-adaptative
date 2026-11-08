@@ -28,6 +28,7 @@ import {
 	type RoutineToolSummary,
 	type RoutineToolView,
 } from "./routine-tool.ts";
+import { describeWatchCondition, parseWatchCondition, type WatchCondition } from "./watch-contract.ts";
 
 interface RoutineSessionDeps {
 	readonly store: RoutineStorePort;
@@ -37,6 +38,11 @@ interface RoutineSessionDeps {
 	invocationKey(callId: string): string;
 	/** The session ledger's current position; read only when an event routine is saved. */
 	eventAnchor(): RoutineEventAnchor;
+	/**
+	 * The session's admission of a watch condition, the one the monitor applies again at every evaluation: it returns the
+	 * condition in canonical form (a file's absolute path) or throws the reason the session may not watch it.
+	 */
+	admitWatch(condition: WatchCondition): WatchCondition;
 	/**
 	 * Owner sources recorded in the current run: the model's context holds every one of them while a tool call of the
 	 * run executes. Empty when the owner said nothing in it (a routine result, CI event or other host input opened it)
@@ -77,6 +83,9 @@ function summary(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs:
 		revision: routine.revision,
 		enabled: routine.enabled,
 		schedule: routineScheduleInputOf(routine.schedule),
+		...(routine.schedule.kind === "event" && routine.schedule.source === "watch"
+			? { scheduleText: describeWatchCondition(routine.schedule.condition) }
+			: {}),
 		...(nextRunAt === undefined ? {} : { nextRunAt }),
 		...(opensAt === undefined || nextRunAt === undefined || opensAt >= nextRunAt ? {} : { startsFrom: opensAt }),
 		...(routine.lastRunAt === undefined ? {} : { lastRunAt: routine.lastRunAt }),
@@ -281,18 +290,24 @@ export class RoutineSessionController implements RoutineToolPort {
 	): RoutineToolView {
 		if (savedIntent.receiptOrigin.sessionId !== this.deps.parentSessionId)
 			throw new Error("Routine parent changed during admission.");
+		const authored = input.schedule;
+		const watching = authored.kind === "event" && authored.source === "watch";
 		const saved = this.deps.store.upsertRoutine({
 			routineId: input.routineId,
 			prompt: input.prompt,
 			target: { kind: "session", parentSessionId: this.deps.parentSessionId },
 			// A calendar rule without a zone keeps the routine's saved zone, or follows the authoring session's wall clock.
+			// A watch condition is admitted by the session before it is saved, so only what it may watch is stored.
 			schedule:
-				input.schedule.kind === "calendar" && input.schedule.timeZone === undefined
-					? { ...input.schedule, timeZone: extras.timeZone ?? hostTimeZone() }
-					: input.schedule,
+				authored.kind === "calendar" && authored.timeZone === undefined
+					? { ...authored, timeZone: extras.timeZone ?? hostTimeZone() }
+					: authored.kind === "event" && authored.source === "watch"
+						? { ...authored, condition: this.deps.admitWatch(parseWatchCondition(authored.condition)) }
+						: authored,
 			enabled: extras.enabled,
 			nowMs: this.deps.now(),
-			...(input.schedule.kind === "event" ? { eventAnchor: this.deps.eventAnchor() } : {}),
+			// A watch is decided by its monitor and the store, not by the session's host-event ledger: no anchor, no ledger.
+			...(authored.kind === "event" && !watching ? { eventAnchor: this.deps.eventAnchor() } : {}),
 			executionSnapshot: {
 				parentSessionId: this.deps.parentSessionId,
 				parentBranchAnchor: savedIntent.receiptOrigin.leafId,

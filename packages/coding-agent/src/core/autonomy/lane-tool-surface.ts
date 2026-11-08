@@ -42,7 +42,6 @@ import {
 	isProtectedCredentialPath,
 	wrapToolWithCredentialExposureGuard,
 } from "../secrets/credential-exposure-guard.ts";
-import { redactKnownSecrets } from "../security/secret-text.ts";
 import { matchesResourceProfilePattern } from "../settings/settings-rules.ts";
 import { wrapToolWithVerification } from "../system-one/session-verification-host.ts";
 import type { VerificationCoordinator } from "../system-one/verification-coordinator.ts";
@@ -71,6 +70,7 @@ import { LaneToolAdmission, type LaneToolAdmissionEvent } from "./lane-tool-admi
 import { LaneToolUsage } from "./lane-tool-usage.ts";
 import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
 import type { ProtectedPathWatch } from "./protected-path-watch.ts";
+import { privatePathBoundary } from "./session-read-scope.ts";
 import { createWorkerRunEnvironment } from "./worker-run-environment.ts";
 import type { WorkerToolAdapterRegistry } from "./worker-tool-adapter-registry.ts";
 
@@ -574,13 +574,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	const projectSettingsPath = path.resolve(projectLaneSettingsPath(options.cwd));
 	// The lane's grep tool skips every protected file a directory search reaches (`excludeFile` below), so the
 	// boundary admits such a search without a file filter.
-	const privatePathBoundary: CredentialExposureBoundary = {
-		redactSensitiveText: redactKnownSecrets,
-		protectedFiles: deniedPaths ?? [],
-		protectedDirectories: deniedPaths ?? [],
-		searchableFiles: [projectSettingsPath],
-		grepToolSkipsProtectedFiles: true,
-	};
+	const laneBoundary: CredentialExposureBoundary = privatePathBoundary(deniedPaths, options.cwd);
 	const readEnvelope: CapabilityEnvelope = {
 		id: "isolated-lane-read-tools",
 		capabilities: [
@@ -663,7 +657,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				harnessStoragePaths: (deniedPaths ?? []).filter((entry) => entry !== projectSettingsPath),
 				// Scratch is admitted before this is asked; a confined lane reads nothing outside its roots.
 				isDeniedPath: (target) =>
-					isProtectedCredentialPath(target, options.cwd, privatePathBoundary) ||
+					isProtectedCredentialPath(target, options.cwd, laneBoundary) ||
 					(shellReadRoots !== undefined && !insideReadRoots(target, shellReadRoots)),
 			}
 		: undefined;
@@ -746,7 +740,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		fileMutationIntents,
 		mutationScope,
 		toolUsage,
-		privatePathBoundary,
+		laneBoundary,
 		options.memoryBroker,
 		options.memoryReadOptions,
 		options.executionPolicy,

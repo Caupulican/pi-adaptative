@@ -368,8 +368,12 @@ function formatRoutineActivitySummary(message: CustomMessage<unknown>): Backgrou
 			: undefined,
 		typeof details.resultPreview === "string" ? details.resultPreview : undefined,
 	].filter((part): part is string => part !== undefined);
+	// A watch run leads with what the host saw in plain words ('A watched file changed: notes.txt'), not the routine's id.
+	const cause = typeof details.cause === "string" ? details.cause : undefined;
 	return {
-		text: `Routine ${routineId} ${outcome}${note.length > 0 ? ` · ${note.join(" · ")}` : ""}`,
+		text: cause
+			? `${cause} · ${outcome}${note.length > 0 ? ` · ${note.join(" · ")}` : ""}`
+			: `Routine ${routineId} ${outcome}${note.length > 0 ? ` · ${note.join(" · ")}` : ""}`,
 		status: outcome === "succeeded" ? "success" : outcome === "failed" ? "error" : "warning",
 	};
 }

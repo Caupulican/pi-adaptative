@@ -16,6 +16,7 @@ import {
 	type RoutineOccurrence,
 	routineTriggerEvents,
 } from "./routine-contract.ts";
+import { describeWatchFired } from "./watch-contract.ts";
 
 export const ROUTINE_COMPLETION_TYPE = "routine-completion";
 /** Longest preview of a run's report the owner's history row carries; the model reads the whole fenced report. */
@@ -38,6 +39,9 @@ export const ROUTINE_INTAKE_NOTICE_TYPE = "routine-intake";
  */
 export function routineTurnOrigin(occurrence: Pick<RoutineOccurrence, "trigger">): TurnOriginRecord | undefined {
 	const trigger = occurrence.trigger;
+	// A watch firing's excerpt (a command's output, a page's words) is untrusted data: the run that reads it is not the owner's.
+	if (trigger.kind === "watch")
+		return trigger.event.excerpt === undefined ? undefined : { v: 1, k: "host-event", thirdParty: true };
 	if (
 		trigger.kind !== "event" ||
 		!routineTriggerEvents(trigger).some((event) => HOST_EVENT_KINDS[event.kind].authorship === "third-party-authored")
@@ -83,7 +87,7 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 	if (trigger.kind === "condition") return routineConditionNotice(delivery, trigger);
 	const quiet = result.ownerUpdate === "none";
 	const holds = held && !quiet;
-	const missedCount = trigger.kind === "manual" ? 0 : trigger.missedCount;
+	const missedCount = trigger.kind === "manual" || trigger.kind === "watch" ? 0 : trigger.missedCount;
 	// A count recorded at its saturation bound stands for that many or more.
 	const saturated =
 		trigger.kind === "event"
@@ -92,6 +96,7 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 	const count = saturated ? `at least ${missedCount}` : `${missedCount}`;
 	let missed = "";
 	if (trigger.kind === "event") missed = routineEventCause(trigger, count);
+	else if (trigger.kind === "watch") missed = ` It ran because of this: ${describeWatchFired(trigger.event)}.`;
 	else if (missedCount > 0)
 		missed = ` It also covers ${count} earlier scheduled ${missedCount === 1 ? "slot" : "slots"} that did not run.`;
 	const evidence = wrapUntrustedText(result.summary, `routine-result:${occurrence.occurrenceId}`, {
@@ -123,6 +128,12 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 								: { eventIds: routineTriggerEvents(trigger).map((event) => event.eventId) }),
 							...(trigger.historyGap ? { historyGap: true as const } : {}),
 						},
+					}
+				: {}),
+			...(trigger.kind === "watch"
+				? {
+						cause: describeWatchFired(trigger.event),
+						watch: { condition: trigger.event.condition, change: trigger.event.change },
 					}
 				: {}),
 			...(quiet ? { ownerUpdate: "none" as const } : {}),

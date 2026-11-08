@@ -38,6 +38,13 @@ import {
 	MAX_CALENDAR_TIME_ZONE_CHARS,
 	nextCalendarSlotAfter,
 } from "./calendar-schedule.ts";
+import {
+	parseWatchCondition,
+	parseWatchFiredEvent,
+	type WatchCondition,
+	type WatchFiredEvent,
+	watchConditionSchema,
+} from "./watch-contract.ts";
 
 export const MIN_ROUTINE_INTERVAL_MS = 10_000;
 export const MAX_ROUTINE_ID_CHARS = 128;
@@ -258,6 +265,25 @@ const githubEventSchema = Type.Object(
 	{ additionalProperties: false },
 );
 
+const watchEventSchema = Type.Object(
+	{
+		kind: Type.Literal("event"),
+		source: Type.Literal("watch", {
+			description:
+				"A condition the host evaluates in code with no model call while it waits (a file, a managed process, a local port, a read-only command or an https page); the routine's run starts only when the condition becomes true.",
+		}),
+		condition: watchConditionSchema,
+		stopAfterFirstRun: Type.Optional(
+			Type.Literal(true, {
+				description:
+					"Run once, the next time the condition becomes true, for a one-time 'tell me when X'; the routine is removed once that run's result is delivered.",
+			}),
+		),
+		expiresAt: expiresAtField,
+	},
+	{ additionalProperties: false },
+);
+
 /** Only schedules the host can execute are accepted; calendar rules are validated by the calendar owner. */
 export const routineScheduleInputSchema = Type.Union([
 	intervalSchema,
@@ -265,6 +291,7 @@ export const routineScheduleInputSchema = Type.Union([
 	calendarSchema,
 	eventSchema,
 	githubEventSchema,
+	watchEventSchema,
 ]);
 
 /** Model-facing authoring input. Recipient and compiled authority are host-owned and absent from this schema. */
@@ -308,6 +335,19 @@ export type RoutineCursor =
 			readonly skipped?: number;
 			readonly historyGap?: true;
 			/** A `stopAfterFirstRun` routine has taken its one run. */
+			readonly spent?: true;
+	  }
+	/**
+	 * A watch routine's edge state, written by the store in the same write as the occurrence it fires: `truth` is
+	 * whether the condition held at its last recorded observation (null before the first one, which only sets the
+	 * baseline), `state` the digest a change-style condition (a file's content) was last decided at, and `fires` the
+	 * firings taken so far. The firing count keys the occurrence, so a restart or a second process cannot repeat one.
+	 */
+	| {
+			readonly kind: "watch";
+			readonly truth: boolean | null;
+			readonly state?: string;
+			readonly fires: number;
 			readonly spent?: true;
 	  };
 
@@ -362,7 +402,9 @@ export type RoutineSchedule =
 	 * GitHub occurrences accepted into the session ledger after `anchorOrdinal` that happened at or after `anchorAt` (the
 	 * instant the filter was saved, kept while it is unchanged). Kinds are in contract order, authors lowercase.
 	 */
-	| RoutineGithubSchedule;
+	| RoutineGithubSchedule
+	/** A condition the host evaluates in code while the session is open; the store decides its firings. */
+	| RoutineWatchSchedule;
 
 /**
  * Early start of a clock slot: with `readyBy` the slot is when the result should be ready, so its run may be claimed
@@ -389,7 +431,20 @@ export interface RoutineGithubSchedule {
 	readonly anchorAt: number;
 }
 
-export type RoutineEventSchedule = Extract<RoutineSchedule, { kind: "event" }>;
+/**
+ * A condition the host evaluates in code while the session is open. It is decided by the watch monitor and the store,
+ * never by the session's host-event ledger, so it carries no ledger anchor.
+ */
+export interface RoutineWatchSchedule {
+	readonly kind: "event";
+	readonly source: "watch";
+	readonly condition: WatchCondition;
+	readonly stopAfterFirstRun?: true;
+	readonly expiresAt?: number;
+}
+
+/** The event schedules the session's host-event ledger decides: CI attempts and GitHub occurrences. */
+export type RoutineEventSchedule = Exclude<Extract<RoutineSchedule, { kind: "event" }>, RoutineWatchSchedule>;
 
 /** Host-owned ledger position an event routine is authored at: later events only. */
 export interface RoutineEventAnchor {
@@ -629,6 +684,8 @@ export type RoutineOccurrenceTrigger =
 	 * `bodiesElided`: the run's result was delivered, and the occurrences' bodies were dropped from history.
 	 */
 	| RoutineEventTrigger
+	/** A watch condition became true: `sequence` is the routine's firing count at this firing, which keys the occurrence. */
+	| RoutineWatchTrigger
 	/** The host's notice that the routine reached its `expiresAt` and was removed; recorded terminal, never run. */
 	| { readonly kind: "expiry"; readonly expiresAt: number }
 	/**
@@ -636,6 +693,12 @@ export type RoutineOccurrenceTrigger =
 	 * never run. Keyed by the reporting occurrence, so a replayed retirement writes the same notice.
 	 */
 	| { readonly kind: "condition"; readonly occurrenceId: string; readonly metAt: number };
+export interface RoutineWatchTrigger {
+	readonly kind: "watch";
+	readonly triggeredAt: number;
+	readonly sequence: number;
+	readonly event: WatchFiredEvent;
+}
 export type RoutineEventTrigger =
 	| {
 			readonly kind: "event";
@@ -976,7 +1039,12 @@ export function routineEnded(
 	const { schedule, cursor } = routine;
 	if (routine.conditionMet) return "condition";
 	if (schedule.kind === "once") return undefined;
-	if (schedule.kind === "event" && schedule.stopAfterFirstRun && cursor.kind === "event" && cursor.spent)
+	if (
+		schedule.kind === "event" &&
+		schedule.stopAfterFirstRun &&
+		(cursor.kind === "event" || cursor.kind === "watch") &&
+		cursor.spent
+	)
 		return "spent";
 	return schedule.expiresAt !== undefined && nowMs >= schedule.expiresAt ? "expired" : undefined;
 }
@@ -1126,7 +1194,7 @@ export interface RoutineEventDecision {
  * current root subject. The cursor never passes a matching event whose source has not sealed.
  */
 export function decideRoutineEvents(
-	schedule: Extract<RoutineSchedule, { kind: "event" }>,
+	schedule: RoutineEventSchedule,
 	cursor: Extract<RoutineCursor, { kind: "event" }>,
 	feed: RoutineHostEventFeed,
 ): RoutineEventDecision {
@@ -1169,6 +1237,50 @@ export function compareRoutineHostEvents(left: RoutineHostEventFact, right: Rout
 		left.sourceSequence - right.sourceSequence ||
 		(left.event.eventId < right.event.eventId ? -1 : left.event.eventId > right.event.eventId ? 1 : 0)
 	);
+}
+
+/** One observation of a watch condition, as the monitor reports it. Unknown observations are never reported. */
+export interface RoutineWatchObservation {
+	/** Whether a level condition holds now; ignored for a change-style condition (a file's content). */
+	readonly truth: boolean;
+	/** The digest a change-style condition is in now. */
+	readonly state?: string;
+}
+
+export interface RoutineWatchObservationInput {
+	readonly routineId: string;
+	readonly incarnationId: string;
+	readonly parentSessionId: string;
+	readonly nowMs: number;
+	readonly observation: RoutineWatchObservation;
+	/** The firing's bounded fact record, used only when the observation is an edge. */
+	readonly event: WatchFiredEvent;
+}
+
+/**
+ * How the store answered an observation: `fired` recorded a pending occurrence; `recorded` moved the baseline or re-armed
+ * the edge; `unchanged` changed nothing; `held` is an edge the store could not take yet (an earlier firing is not
+ * claimed, the journal is full or the routine's share is held), so the monitor offers it again on the next store change;
+ * `stale` means the routine is gone, paused, ended or another incarnation.
+ */
+export type RoutineWatchOutcome = "fired" | "recorded" | "unchanged" | "held" | "stale";
+
+/**
+ * The edge rule of a watch. A change-style observation (it carries `state`) fires when the state differs from the
+ * recorded one; the first observation only records the baseline. A level observation fires on the rising edge
+ * (false to true), re-arms when it falls, and the first observation only records the baseline: a condition that
+ * already holds when the watch is armed is its starting state. The firing count advances in the same write.
+ */
+export function decideWatchObservation(
+	cursor: Extract<RoutineCursor, { kind: "watch" }>,
+	observation: RoutineWatchObservation,
+): { readonly fire: boolean; readonly cursor: Extract<RoutineCursor, { kind: "watch" }> } {
+	if (observation.state !== undefined) {
+		const next = { ...cursor, truth: true, state: observation.state };
+		return { fire: cursor.state !== undefined && cursor.state !== observation.state, cursor: next };
+	}
+	const { state: _state, ...rest } = cursor;
+	return { fire: cursor.truth === false && observation.truth, cursor: { ...rest, truth: observation.truth } };
 }
 
 export interface RoutineOccurrenceListFilter {
@@ -1302,8 +1414,21 @@ export function parseRoutineScheduleInput(value: unknown): RoutineScheduleInput 
 			...(value.stopAfterFirstRun ? { stopAfterFirstRun: true } : {}),
 			...expiry,
 		};
+	if (
+		value.kind === "event" &&
+		value.source === "watch" &&
+		hasOnlyKeys(value, ["kind", "source", "condition", "stopAfterFirstRun", "expiresAt"]) &&
+		(value.stopAfterFirstRun === undefined || value.stopAfterFirstRun === true)
+	)
+		return {
+			kind: "event",
+			source: "watch",
+			condition: parseWatchCondition(value.condition),
+			...(value.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+			...expiry,
+		};
 	throw new TypeError(
-		"Routine schedule must be an executable interval, one-time UTC instant, calendar rule, CI event filter or GitHub event filter.",
+		"Routine schedule must be an executable interval, one-time UTC instant, calendar rule, CI event filter, GitHub event filter or watch condition.",
 	);
 }
 
@@ -1418,6 +1543,14 @@ export function routineScheduleInputOf(schedule: RoutineSchedule): RoutineSchedu
 				...ready,
 			};
 		case "event":
+			if (schedule.source === "watch")
+				return {
+					kind: "event",
+					source: "watch",
+					condition: schedule.condition,
+					...(schedule.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+					...expiry,
+				};
 			if (schedule.source === "github")
 				return {
 					...githubFilterOf(schedule),
@@ -1468,6 +1601,13 @@ export function routineSlotRule(schedule: RoutineScheduleInput): RoutineSchedule
 		case "event":
 			// The whole filter decides which events run it: any change re-anchors at the ledger's current position. The
 			// one-run flag is part of it, so turning it off after the run starts a fresh cursor instead of a spent one.
+			if (schedule.source === "watch")
+				return {
+					kind: "event",
+					source: "watch",
+					condition: parseWatchCondition(schedule.condition),
+					...(schedule.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+				};
 			if (schedule.source === "github")
 				return {
 					...githubRoutineFilter(schedule),
@@ -1584,7 +1724,11 @@ export function initialRoutineCursor(schedule: RoutineSchedule): RoutineCursor {
 		case "calendar":
 			return { kind: "calendar", nextAt: nextCalendarSlotAfter(schedule, schedule.anchorAt) ?? null };
 		case "event":
-			return { kind: "event", throughOrdinal: schedule.anchorOrdinal, replayGaps: schedule.anchorReplayGaps };
+			// A managed process is saved only while it runs, so its starting state is "not exited" even before the first
+			// observation: one that ends before it is made still fires.
+			return schedule.source === "watch"
+				? { kind: "watch", truth: schedule.condition.type === "process" ? false : null, fires: 0 }
+				: { kind: "event", throughOrdinal: schedule.anchorOrdinal, replayGaps: schedule.anchorReplayGaps };
 	}
 }
 
@@ -1755,6 +1899,7 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 			return undefined;
 		if (
 			definition.schedule.kind === "event" &&
+			definition.schedule.source !== "watch" &&
 			cursor.kind === "event" &&
 			cursor.throughOrdinal < definition.schedule.anchorOrdinal
 		)
@@ -1951,6 +2096,7 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			isPlainRecord(value.trigger) &&
 			value.trigger.kind === "event" &&
 			definition.schedule.kind === "event" &&
+			definition.schedule.source !== "watch" &&
 			hasOnlyKeys(value.trigger, [
 				"kind",
 				"triggeredAt",
@@ -2012,6 +2158,25 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			}
 		} else if (
 			isPlainRecord(value.trigger) &&
+			value.trigger.kind === "watch" &&
+			definition.schedule.kind === "event" &&
+			definition.schedule.source === "watch" &&
+			hasOnlyKeys(value.trigger, ["kind", "triggeredAt", "sequence", "event"]) &&
+			validInstant(value.trigger.triggeredAt) &&
+			value.trigger.triggeredAt === value.createdAt &&
+			Number.isSafeInteger(value.trigger.sequence) &&
+			(value.trigger.sequence as number) >= 1
+		) {
+			const event = parseWatchFiredEvent(value.trigger.event);
+			if (event.condition !== definition.schedule.condition.type) return undefined;
+			trigger = {
+				kind: "watch",
+				triggeredAt: value.trigger.triggeredAt,
+				sequence: value.trigger.sequence as number,
+				event,
+			};
+		} else if (
+			isPlainRecord(value.trigger) &&
 			value.trigger.kind === "expiry" &&
 			hasOnlyKeys(value.trigger, ["kind", "expiresAt"]) &&
 			definition.schedule.kind !== "once" &&
@@ -2038,7 +2203,7 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 				metAt: value.trigger.metAt,
 			};
 		} else return undefined;
-		if (target.kind !== "session" && trigger.kind === "event") return undefined;
+		if (target.kind !== "session" && (trigger.kind === "event" || trigger.kind === "watch")) return undefined;
 		if (value.occurrenceId !== routineOccurrenceId(definition, trigger)) return undefined;
 		const parentOrigin = workerReceiptOriginFromValue(value.parentOrigin);
 		if (
@@ -2314,6 +2479,18 @@ export function parseRoutineSchedule(value: unknown): RoutineSchedule {
 			"Persisted GitHub event schedule requires a canonical filter, a ledger anchor and its start.",
 		);
 	}
+	if (value.kind === "event" && value.source === "watch") {
+		const authored = parseRoutineScheduleInput(value);
+		if (authored.kind === "event" && authored.source === "watch" && isDeepStrictEqual(authored, value))
+			return {
+				kind: "event",
+				source: "watch",
+				condition: parseWatchCondition(authored.condition),
+				...(authored.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+				...expiry,
+			};
+		throw new TypeError("Persisted watch schedule requires a canonical condition.");
+	}
 	if (value.kind === "event") {
 		if (
 			hasOnlyKeys(value, [
@@ -2441,6 +2618,22 @@ export function parseRoutineCursor(value: unknown): RoutineCursor {
 			replayGaps: value.replayGaps,
 			...(value.skipped === undefined ? {} : { skipped: value.skipped as number }),
 			...(value.historyGap ? { historyGap: true as const } : {}),
+			...(value.spent ? { spent: true as const } : {}),
+		};
+	if (
+		value.kind === "watch" &&
+		hasOnlyKeys(value, ["kind", "truth", "state", "fires", "spent"]) &&
+		(value.truth === null || typeof value.truth === "boolean") &&
+		(value.state === undefined || isRoutineDigest(value.state)) &&
+		Number.isSafeInteger(value.fires) &&
+		(value.fires as number) >= 0 &&
+		(value.spent === undefined || value.spent === true)
+	)
+		return {
+			kind: "watch",
+			truth: value.truth,
+			...(value.state === undefined ? {} : { state: value.state }),
+			fires: value.fires as number,
 			...(value.spent ? { spent: true as const } : {}),
 		};
 	throw new TypeError("Routine cursor is invalid.");
@@ -2729,8 +2922,9 @@ export function nextRoutineAt(schedule: RoutineSchedule, cursor: RoutineCursor):
 		return cursor.nextAt ?? undefined;
 	}
 	if (schedule.kind === "event") {
-		if (cursor.kind !== "event") throw new TypeError("Routine cursor does not match its schedule.");
-		// Host events, not a clock, decide when an event routine runs.
+		if (cursor.kind !== (schedule.source === "watch" ? "watch" : "event"))
+			throw new TypeError("Routine cursor does not match its schedule.");
+		// Host events and watch observations, not a clock, decide when an event routine runs.
 		return undefined;
 	}
 	if (cursor.kind !== "interval") throw new TypeError("Routine cursor does not match its schedule.");
@@ -2789,6 +2983,11 @@ export function routineOccurrenceId(
 		suffix = `condition:${createHash("sha256").update(trigger.occurrenceId).digest("hex")}`;
 	else if (trigger.kind === "manual")
 		suffix = `manual:${createHash("sha256").update(trigger.commandId).digest("hex")}`;
+	else if (trigger.kind === "watch")
+		// Keyed by the routine's firing count, which the store advances in the write that records the occurrence.
+		suffix = `event:${createHash("sha256")
+			.update(JSON.stringify(["watch", trigger.sequence]))
+			.digest("hex")}`;
 	else if (!isCiAttemptEvent(trigger.event))
 		return githubBatchId(
 			definition,

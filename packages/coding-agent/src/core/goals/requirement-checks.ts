@@ -65,16 +65,20 @@ export function runRequirementCheck(
 		timeoutMs?: number;
 		signal?: AbortSignal;
 		terminateTree?: (child: ChildProcess) => Promise<KillTreeOutcome>;
+		/** Replaces the requirement line a command must pass (a stricter caller's own admission), judged before it runs. */
+		admit?: (check: RequirementCheck) => string | undefined;
+		/** The environment the command runs with; the harness's launch variables are removed from the process environment by default. */
+		env?: NodeJS.ProcessEnv;
 	},
 ): Promise<RequirementCheckResult> {
-	const violation = requirementCheckViolation(check, options.cwd);
+	const violation = (options.admit ?? ((candidate) => requirementCheckViolation(candidate, options.cwd)))(check);
 	if (violation) return Promise.resolve({ passed: false, exitCode: null, output: "", reason: violation });
 	let child: ChildProcess;
 	try {
 		const shell = getShellConfig(undefined, "bash");
 		child = spawnProcess(shell.shell, [...shell.args, check.command], {
 			cwd: options.cwd,
-			env: withoutHarnessLaunchEnv({ ...process.env }),
+			env: options.env ?? withoutHarnessLaunchEnv({ ...process.env }),
 			stdio: ["ignore", "pipe", "pipe"],
 			windowsHide: true,
 		});

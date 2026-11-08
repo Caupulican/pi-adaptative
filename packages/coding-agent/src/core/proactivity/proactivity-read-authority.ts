@@ -2,7 +2,8 @@ import { randomUUID } from "node:crypto";
 import { resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
-import { isPathWithinScope, pathScopesOverlap, safeRealpathSync } from "../autonomy/path-scope.ts";
+import { isPathWithinScope } from "../autonomy/path-scope.ts";
+import { readScopeRefusal } from "../autonomy/session-read-scope.ts";
 import { lendableToolSurface } from "../default-tool-surface.ts";
 import type { ParentExecutionContext } from "../delegation/parent-execution-context.ts";
 import { workerMachinePathRoots } from "../delegation/worker-machine-scope.ts";
@@ -131,18 +132,12 @@ export class ProactivityReadAuthority {
 	/** The canonical resolver bounds missing-parent and symlink recursion to 32 hops. */
 	authorizePath(path: string, subtree = false): void {
 		this.assertCurrent();
-		const lexical = resolve(this.cwd, path);
-		const canonical = safeRealpathSync(lexical);
-		const allowed = this.grant.readPaths.flatMap((root) => [resolve(this.cwd, root), safeRealpathSync(root)]);
-		for (const target of [lexical, canonical]) {
-			if (!allowed.some((root) => isPathWithinScope(target, root)))
-				throw new Error("Proactive read is outside its path grant.");
-			for (const denied of this.grant.deniedPaths) {
-				for (const root of [resolve(this.cwd, denied), safeRealpathSync(denied)]) {
-					if (subtree ? pathScopesOverlap(target, root) : isPathWithinScope(target, root))
-						throw new Error("Proactive read intersects a private or denied path.");
-				}
-			}
-		}
+		const refusal = readScopeRefusal(
+			{ cwd: this.cwd, readRoots: this.grant.readPaths, deniedPaths: this.grant.deniedPaths },
+			path,
+			subtree,
+		);
+		if (refusal === "outside") throw new Error("Proactive read is outside its path grant.");
+		if (refusal === "denied") throw new Error("Proactive read intersects a private or denied path.");
 	}
 }

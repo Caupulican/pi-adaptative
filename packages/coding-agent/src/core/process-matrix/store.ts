@@ -147,6 +147,10 @@ export async function readEntry(agentDir: string, entryId: string): Promise<Proc
 	return parseProcessMatrixEntry(await readJsonFile(entryPath(agentDir, entryId)));
 }
 
+export function readEntrySync(agentDir: string, entryId: string): ProcessMatrixEntry | undefined {
+	return parseProcessMatrixEntry(readJsonFileSync(entryPath(agentDir, entryId)));
+}
+
 export async function listEntries(agentDir: string): Promise<ProcessMatrixEntry[]> {
 	let names: string[];
 	try {

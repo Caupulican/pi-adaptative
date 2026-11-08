@@ -20,6 +20,7 @@ import {
 	type AwayEventDecisionInput,
 	type AwayEventDecisionResult,
 	decideRoutineEvents,
+	decideWatchObservation,
 	elideDeliveredRoutineEventBodies,
 	initialRoutineCursor,
 	MAX_ROUTINE_COMMAND_ID_CHARS,
@@ -70,6 +71,8 @@ import {
 	type RoutineRetireInput,
 	type RoutineSchedule,
 	type RoutineTerminalOutcome,
+	type RoutineWatchObservationInput,
+	type RoutineWatchOutcome,
 	rebasedRoutineCursor,
 	routineAwayHeld,
 	routineAwaySpendRoom,
@@ -92,6 +95,7 @@ import {
 	routineZoneUnsupported,
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
+import { MAX_WATCHES_PER_AGENT_DIR, MAX_WATCHES_PER_SESSION, parseWatchCondition } from "../routines/watch-contract.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
@@ -1811,10 +1815,24 @@ export class PersistentBotTeamStore {
 					...(scheduleInput.readyLeadMs === undefined ? {} : { readyLeadMs: scheduleInput.readyLeadMs }),
 				};
 			else if (scheduleInput.kind === "once") schedule = scheduleInput;
-			else if (scheduleInput.kind === "event") {
+			else if (scheduleInput.kind === "event" && scheduleInput.source === "watch") {
+				// A watch is evaluated by the session that holds it, while it is open; a bot or team has no session to watch for.
+				if (!session) throw new Error("Watch routines run in their owning session only.");
+				this.assertWatchRoom(normalizedId, input.target.kind === "session" ? input.target.parentSessionId : "");
+				schedule = {
+					kind: "event",
+					source: "watch",
+					condition: parseWatchCondition(scheduleInput.condition),
+					...(scheduleInput.stopAfterFirstRun ? { stopAfterFirstRun: true as const } : {}),
+					...(scheduleInput.expiresAt === undefined ? {} : { expiresAt: scheduleInput.expiresAt }),
+				};
+			} else if (scheduleInput.kind === "event") {
 				// Host events are decided by the session that owns their ledger; a bot or team has none.
 				if (!session) throw new Error("Event routines run in their owning session only.");
-				const kept = !scheduleChanged && existing?.schedule.kind === "event" ? existing.schedule : undefined;
+				const kept =
+					!scheduleChanged && existing?.schedule.kind === "event" && existing.schedule.source !== "watch"
+						? existing.schedule
+						: undefined;
 				const anchor = kept
 					? { ordinal: kept.anchorOrdinal, replayGaps: kept.anchorReplayGaps }
 					: input.eventAnchor;
@@ -2281,6 +2299,8 @@ export class PersistentBotTeamStore {
 				if (stored.target.kind === "session" && stored.target.parentSessionId !== input.parentSessionId) continue;
 				// An occurrence is never older than its definition: with the clock behind the last edit, wait for it.
 				if (input.nowMs < Date.parse(stored.updatedAt)) continue;
+				// A watch is decided by the monitor's observations (`observeWatch`), never by the host-event ledger.
+				if (stored.schedule.kind === "event" && stored.schedule.source === "watch") continue;
 				if (stored.schedule.kind === "event") {
 					const decided = input.hostEvents
 						? this.decideEventRoutine(stored, input, input.hostEvents, output, {
@@ -2340,6 +2360,7 @@ export class PersistentBotTeamStore {
 				if (
 					!stored?.enabled ||
 					stored.schedule.kind !== "event" ||
+					stored.schedule.source === "watch" ||
 					stored.target.kind !== "session" ||
 					stored.target.parentSessionId !== input.parentSessionId ||
 					routineEnded(stored, input.nowMs) ||
@@ -2555,7 +2576,8 @@ export class PersistentBotTeamStore {
 		output: RoutineOccurrence[],
 		claim: { readonly owner: string; readonly leaseMs: number } | undefined,
 	): "changed" | "unchanged" | "journal-full" | "share-full" {
-		if (routine.schedule.kind !== "event" || routine.cursor.kind !== "event") return "unchanged";
+		if (routine.schedule.kind !== "event" || routine.schedule.source === "watch" || routine.cursor.kind !== "event")
+			return "unchanged";
 		for (const occurrence of this.routineOccurrences.values())
 			if (
 				occurrence.routineId === routine.routineId &&
@@ -2629,6 +2651,92 @@ export class PersistentBotTeamStore {
 		if (isDeepStrictEqual(decision.cursor, routine.cursor)) return "unchanged";
 		this.routines.set(routine.routineId, { ...routine, cursor: decision.cursor });
 		return "changed";
+	}
+
+	/**
+	 * Refuses a watch routine beyond the per-session and per-agent-directory bounds. Called under the store lock with the
+	 * routine id being saved, which does not count against itself.
+	 */
+	private assertWatchRoom(routineId: string, parentSessionId: string): void {
+		let inSession = 0;
+		let total = 0;
+		for (const routine of this.routines.values()) {
+			if (
+				routine.routineId === routineId ||
+				routine.schedule.kind !== "event" ||
+				routine.schedule.source !== "watch"
+			)
+				continue;
+			total++;
+			if (routine.target.kind === "session" && routine.target.parentSessionId === parentSessionId) inSession++;
+		}
+		if (inSession >= MAX_WATCHES_PER_SESSION)
+			throw new Error(
+				`This session already holds ${MAX_WATCHES_PER_SESSION} watch routines, the most it may hold; delete one first.`,
+			);
+		if (total >= MAX_WATCHES_PER_AGENT_DIR)
+			throw new Error(
+				`This agent directory already holds ${MAX_WATCHES_PER_AGENT_DIR} watch routines across its sessions, the most it may hold; delete one first.`,
+			);
+	}
+
+	/**
+	 * Records one observation of a watch condition and, on an edge, the pending occurrence it fires, in one write under
+	 * the store lock: the edge rule reads the durable cursor, so two processes or a restart cannot fire one edge twice,
+	 * and the firing count that keys the occurrence advances in the write that records it. At most one undispatched
+	 * occurrence exists per routine: an edge that meets one, a full journal or a held share is `held` and consumes
+	 * nothing, so the monitor offers the same edge again on the next store change.
+	 */
+	observeWatch(input: RoutineWatchObservationInput): RoutineWatchOutcome {
+		return this.mutate(() => {
+			const routine = this.routines.get(input.routineId);
+			if (
+				!routine?.enabled ||
+				routine.incarnationId !== input.incarnationId ||
+				routine.schedule.kind !== "event" ||
+				routine.schedule.source !== "watch" ||
+				routine.cursor.kind !== "watch" ||
+				routine.target.kind !== "session" ||
+				routine.target.parentSessionId !== input.parentSessionId ||
+				routineEnded(routine, input.nowMs) ||
+				input.nowMs < Date.parse(routine.updatedAt)
+			)
+				return "stale";
+			const decision = decideWatchObservation(routine.cursor, input.observation);
+			if (!decision.fire) {
+				if (isDeepStrictEqual(decision.cursor, routine.cursor)) return "unchanged";
+				this.routines.set(routine.routineId, { ...routine, cursor: decision.cursor });
+				this.save();
+				return "recorded";
+			}
+			for (const occurrence of this.routineOccurrences.values())
+				if (
+					occurrence.routineId === routine.routineId &&
+					(occurrence.phase === "pending" || occurrence.phase === "claimed")
+				)
+					return "held";
+			const parentOrigin = routine.executionSnapshot?.savedIntent.receiptOrigin;
+			if (!parentOrigin || parentOrigin.sessionId !== input.parentSessionId) return "stale";
+			if (!this.routineJournalHasRoom(input.nowMs) || !this.routineHasJournalShare(routine.routineId, input.nowMs))
+				return "held";
+			const sequence = routine.cursor.fires + 1;
+			const trigger = { kind: "watch" as const, triggeredAt: input.nowMs, sequence, event: input.event };
+			const occurrenceId = routineOccurrenceId(routine, trigger);
+			// A replay of a firing already journaled advances the cursor past it without a second occurrence.
+			const occurrence =
+				this.routineOccurrences.get(occurrenceId) ??
+				this.createPendingOccurrence(routine, occurrenceId, trigger, input.nowMs, parentOrigin);
+			this.routineOccurrences.set(occurrenceId, occurrence);
+			const cursor: RoutineCursor = {
+				...decision.cursor,
+				fires: sequence,
+				// A one-run routine is spent in the write that records its run, so no second edge can start it.
+				...(routine.schedule.stopAfterFirstRun ? { spent: true as const } : {}),
+			};
+			this.routines.set(routine.routineId, { ...withRoutineRunState(routine, occurrence), cursor });
+			this.save();
+			return "fired";
+		});
 	}
 
 	claimManualRoutineOccurrence(input: {
