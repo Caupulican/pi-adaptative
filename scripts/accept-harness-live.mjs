@@ -15,9 +15,10 @@
  *   node scripts/accept-harness-live.mjs [--model-a xai/grok-4.7-build-fast] [--model-b google-antigravity/gemini-3.8-flash-high]
  *                                         [--only s3,s4] [--keep] [--installed]
  */
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
+	appendFileSync,
 	chmodSync,
 	copyFileSync,
 	cpSync,
@@ -26,12 +27,14 @@ import {
 	mkdtempSync,
 	readdirSync,
 	readFileSync,
+	realpathSync,
 	renameSync,
 	rmSync,
 	statfsSync,
 	statSync,
 	writeFileSync,
 } from "node:fs";
+import { connect, createServer } from "node:net";
 import { cpus, homedir, loadavg, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -258,6 +261,9 @@ const botStore = () => {
 	const file = join(AGENT, "state", "bots", "store.json");
 	return existsSync(file) ? JSON.parse(readFileSync(file, "utf8")) : { bots: {}, teams: {}, teamMessages: {} };
 };
+/** Routine definitions (with their durable cursors) and occurrences, as the routine store wrote them into the same file. */
+const routineDefinitions = () => botStore().routineSchedules ?? [];
+const routineOccurrences = () => botStore().routineOccurrences ?? [];
 const teamMessages = (teamId) => botStore().teamMessages?.[teamId] ?? [];
 const botIds = () => {
 	const bots = botStore().bots;
@@ -612,14 +618,15 @@ const SCENARIOS = [
 		writeFileSync(join(project, "util.ts"), 'export function slugify(text: string): string {\n  return text.toLowerCase().replace(/\\s+/g, "-")\n}\n');
 		const pane = openPane();
 		launch(pane, project, "", freshAgent);
-		await waitFor("the prompt on the default setup", () => /Ask anything/.test(screen(pane, 60)), 90_000, 2000, () => screen(pane, 20));
+		await waitFor("the prompt on the default setup", () => /Ask anything|Ready for operator instructions/.test(screen(pane, 60)), 90_000, 2000, () => screen(pane, 20));
 		const sessionCalls = () => {
 			const root = join(freshAgent, "sessions");
 			if (!existsSync(root)) return { calls: [], bounced: 0 };
 			const files = readdirSync(root, { recursive: true }).filter((name) => String(name).endsWith(".jsonl")).map((name) => join(root, String(name)));
 			const rows = files.flatMap((file) => jsonl(file));
 			const calls = rows.flatMap((row) => (row.message?.role === "assistant" ? row.message.content.filter((c) => c.type === "toolCall").map((c) => c.name) : []));
-			const bounced = rows.filter((row) => row.message?.role === "toolResult" && row.message?.isError && /\[harness\]/.test(JSON.stringify(row.message.content))).length;
+			// A read of a file that does not exist yet is a probe the model is entitled to make before creating it, not a fight with the harness.
+			const bounced = rows.filter((row) => row.message?.role === "toolResult" && row.message?.isError && /\[harness\]/.test(JSON.stringify(row.message.content)) && !/"failure_code":"file_not_found"/.test(JSON.stringify(row.message.content))).length;
 			return { calls, bounced };
 		};
 		await type(pane, "In util.ts, make slugify also strip punctuation, and add a one-line JSDoc comment above it. Then tell me what you changed.");
@@ -634,6 +641,141 @@ const SCENARIOS = [
 		if (second.bounced > 0) throw new Error(`the harness bounced ${second.bounced} call(s) while starting a worker: ${second.calls.join(", ")}`);
 		if (second.calls.length - first.calls.length > 8) throw new Error(`starting one worker took ${second.calls.length - first.calls.length} tool calls`);
 		return `a plain edit took ${first.calls.length} tool calls and a worker start ${second.calls.length - first.calls.length}, with no bounced call`;
+	}),
+	scenario("s16", "watch routines: made from plain words, quiet while idle, firing once on the change, no model use before it", async () => {
+		// A watch lives in its owning session: the main pane (or one this scenario starts when it runs alone).
+		if (state.main) {
+			await type(state.main, "/chat root");
+			await sleep(2000);
+		} else {
+			state.main = openPane();
+			launch(state.main, SANDBOX);
+			await waitFor("the prompt", () => /Ask anything/.test(screen(state.main, 60)), 90_000, 2000, () => screen(state.main, 20));
+		}
+		const notes = join(SANDBOX, "watched", "notes.txt");
+		mkdirSync(join(SANDBOX, "watched"), { recursive: true });
+		writeFileSync(notes, "alpha\n");
+		const portAccepts = (port) =>
+			new Promise((done) => {
+				const socket = connect({ host: "127.0.0.1", port });
+				socket.once("connect", () => (socket.destroy(), done(true)));
+				socket.once("error", () => done(false));
+			});
+		const freePort = () =>
+			new Promise((done, fail) => {
+				const server = createServer();
+				server.once("error", fail);
+				server.listen(0, () => {
+					const { port } = server.address();
+					server.close(() => done(port));
+				});
+			});
+		const port = await freePort();
+		if (await portAccepts(port)) throw inconclusive(`port ${port} was taken before the scenario started`);
+		const sameFile = (a, b) => {
+			try {
+				return realpathSync(a) === realpathSync(b);
+			} catch {
+				return resolve(a) === resolve(b);
+			}
+		};
+		const before = new Set(routineDefinitions().map((routine) => routine.routineId));
+		const fresh = () => routineDefinitions().filter((routine) => !before.has(routine.routineId) && routine.schedule?.kind === "event" && routine.schedule?.source === "watch");
+		const fileWatch = () => fresh().find((routine) => routine.schedule.condition?.type === "file");
+		const portWatch = () => fresh().find((routine) => routine.schedule.condition?.type === "port");
+		const occurrencesOf = (id) => routineOccurrences().filter((occurrence) => occurrence.routineId === id && occurrence.trigger?.kind === "watch");
+		await type(state.main, `Tell me when watched/notes.txt changes, and also tell me when something starts listening on port ${port} on this machine.`);
+		await waitFor("a file watch and a port watch in the routine store", () => fileWatch() && portWatch(), 300_000, 4000, () => screen(state.main, 20));
+		// What the model saved is checked against what was asked, from the store the harness wrote.
+		const fileCondition = fileWatch().schedule.condition;
+		const portCondition = portWatch().schedule.condition;
+		if (!sameFile(fileCondition.path, notes) || fileCondition.on !== "changed") throw new Error(`the file watch is not "notes.txt changed": ${JSON.stringify(fileCondition)}`);
+		if (portCondition.port !== port || portCondition.on !== "open" || !["localhost", "127.0.0.1", "::1"].includes(portCondition.host)) throw new Error(`the port watch is not "port ${port} opens on this machine": ${JSON.stringify(portCondition)}`);
+		const fileId = fileWatch().routineId;
+		const portId = portWatch().routineId;
+		// Changing the file before the first observation would make the change the baseline: wait for both baselines.
+		await waitFor("both baselines recorded", () => fileWatch()?.cursor?.state !== undefined && portWatch()?.cursor?.truth === false, 120_000, 2000);
+		const baselineAt = Date.now();
+		// Only the owning session's own log counts: another pane or bot writing meanwhile is not this watch's doing.
+		const sessionId = fileWatch().target.parentSessionId;
+		const ownEntries = () =>
+			sessionFiles().flatMap((file) => {
+				const rows = jsonl(file);
+				return rows[0]?.type === "session" && rows[0].id === sessionId ? rows : [];
+			});
+		const lastEntryMs = () => Math.max(0, ...ownEntries().map((entry) => Date.parse(entry.timestamp)).filter(Number.isFinite));
+		await waitFor("the creating turn to end", () => Date.now() - lastEntryMs() > 12_000, 240_000, 3000, () => screen(state.main, 20));
+		const idleFrom = Math.max(baselineAt, lastEntryMs());
+		// Idle: nothing changes for a while, and nothing may fire (edge-triggered, no false fire on the baseline).
+		await sleep(25_000);
+		const early = [fileId, portId].filter((id) => occurrencesOf(id).length > 0 || (routineDefinitions().find((routine) => routine.routineId === id)?.cursor?.fires ?? 0) > 0);
+		if (early.length > 0) throw new Error("a watch fired before its condition changed");
+		if (await portAccepts(port)) throw inconclusive(`something started listening on port ${port} by itself`);
+		// The change, made from outside the pane.
+		const beforeLines = new Set(screen(state.main, 800).split("\n"));
+		const editedAt = Date.now();
+		appendFileSync(notes, "beta\n");
+		let listener;
+		try {
+			listener = spawn(process.execPath, ["-e", "require('net').createServer().listen(Number(process.argv[1]))", String(port)], { stdio: "ignore" });
+			await waitFor("the listener accepting connections", () => portAccepts(port), 30_000, 500);
+			const fileFiring = await waitFor("the file watch firing in the routine store", () => occurrencesOf(fileId)[0], 120_000, 3000, () => screen(state.main, 20));
+			const portFiring = await waitFor("the port watch firing in the routine store", () => occurrencesOf(portId)[0], 120_000, 3000, () => screen(state.main, 20));
+			const fileEvent = fileFiring.trigger.event;
+			const portEvent = portFiring.trigger.event;
+			if (fileEvent.condition !== "file" || fileEvent.change !== "changed" || fileFiring.trigger.triggeredAt < editedAt) throw new Error(`the file firing is wrong: ${JSON.stringify(fileFiring.trigger)}`);
+			if (portEvent.condition !== "port" || portEvent.change !== "open" || portFiring.trigger.triggeredAt < editedAt) throw new Error(`the port firing is wrong: ${JSON.stringify(portFiring.trigger)}`);
+			// One edge, one run: a second occurrence for either watch is a duplicate firing.
+			await sleep(10_000);
+			const duplicates = [fileId, portId].filter((id) => occurrencesOf(id).length > 1);
+			if (duplicates.length > 0) throw new Error("a watch fired more than once for one change");
+			// No model use before the edge: no foreground turn of the owning session, no worker lane or claim in it, no run of
+			// either watch, and no semantic usage that is not session upkeep or the intake of owner messages (idle proactive
+			// review, compaction, summaries, routine intake reading what the owner typed) appears between the idle start and the change.
+			const upkeep = new Set(["proactivity", "knowledge_collection", "compaction", "branch_summary", "history_summary", "routine_intake"]);
+			const inWindow = (entry) => {
+				const at = Date.parse(entry.timestamp);
+				return at >= idleFrom && at < editedAt;
+			};
+			const rows = ownEntries().filter(inWindow);
+			const turns = rows.filter((entry) => entry.message?.role === "assistant").length;
+			const workers = rows.filter((entry) => entry.type === "custom" && (entry.customType === "lane_record" || entry.customType === "worker_claim")).length;
+			const usage = rows.filter((entry) => entry.type === "custom" && entry.customType === "semantic_usage" && !upkeep.has(entry.data?.route)).length;
+			const runs = routineOccurrences().filter((occurrence) => [fileId, portId].includes(occurrence.routineId) && occurrence.createdAt >= idleFrom && occurrence.createdAt < editedAt).length;
+			if (turns + workers + usage + runs > 0) throw new Error(`model use before the change: ${turns} assistant message(s), ${workers} worker record(s), ${usage} semantic usage record(s), ${runs} routine run(s)`);
+			// The run's result reaches the session as the routine's completion, and its cause is in plain words.
+			// A parent input keeps the caller's details under `originalDetails` beside the ledger's own metadata.
+			const detailsOf = (entry) => entry.details?.originalDetails ?? entry.details;
+			const completion = (id) => ownEntries().find((entry) => entry.type === "custom_message" && entry.customType === "routine-completion" && detailsOf(entry)?.routineId === id);
+			await waitFor("both watch results delivered to the session", () => completion(fileId) && completion(portId), 420_000, 5000, () => screen(state.main, 20));
+			const quiet = [fileId, portId].filter((id) => detailsOf(completion(id))?.ownerUpdate === "none");
+			if (quiet.length > 0) throw new Error("a watch's run reported no owner update, so its result waits for the owner's next turn and is not shown: the saved task did not ask to tell the owner");
+			const causes = [[fileId, "file", "changed"], [portId, "port", "open"]].map(([id, condition, change]) => {
+				const watch = detailsOf(completion(id)).watch;
+				if (watch?.condition !== condition || watch?.change !== change) throw new Error(`the delivered result of ${condition} names ${JSON.stringify(watch)}`);
+				return String(detailsOf(completion(id)).cause);
+			});
+			// On screen: words the owner can read, none of the harness's own identifiers (the screen sweep of the whole gate).
+			const shown = () => screen(state.main, 800).split("\n").filter((line) => !beforeLines.has(line)).join("\n");
+			await waitFor(
+				"the notification on screen",
+				() => /notes\.txt/.test(shown()) && /chang|modif|updat/i.test(shown()) && new RegExp(String(port)).test(shown()) && /open|listen|start/i.test(shown()),
+				300_000,
+				5000,
+				() => shown(),
+			);
+			const leak = agentFacingLeak(shown());
+			if (leak) throw new Error(`the notification screen shows machine text: ${leak}`);
+			// The routines are the owner's to remove; a one-run routine is already gone.
+			let removed = "removed";
+			if ([fileId, portId].some((id) => routineDefinitions().some((routine) => routine.routineId === id))) {
+				await type(state.main, `Delete the routines that watch watched/notes.txt and port ${port}; they have done their job.`);
+				removed = await waitFor("the watch routines deleted", () => (routineDefinitions().some((routine) => [fileId, portId].includes(routine.routineId)) ? undefined : "removed"), 180_000, 4000).catch(() => "left saved (the delete request was not carried out in time)");
+			}
+			return `file watch (changed) and port watch (open) saved from plain words; no fire during ${Math.round((editedAt - idleFrom) / 1000)}s idle and no model use in it; one firing each after the change (${causes.join("; ")}); results delivered and shown in plain words; routines ${removed}`;
+		} finally {
+			listener?.kill();
+		}
 	}),
 	scenario("s9", "harness health across everything that ran", async () => {
 		await sleep(20_000);

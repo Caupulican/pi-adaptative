@@ -7,18 +7,22 @@
 
 import { createHash } from "node:crypto";
 import { createReadStream } from "node:fs";
-import { access, stat } from "node:fs/promises";
+import { access, lstat, readdir, stat } from "node:fs/promises";
 import { createConnection } from "node:net";
+import { join } from "node:path";
+import { globIterate } from "glob";
 import { runRequirementCheck } from "../goals/requirement-checks.ts";
 import { entryPath, readEntry } from "../process-matrix/store.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { boundedText } from "../util/bounded-line.ts";
-import { PublicWebClient, PublicWebHttpError } from "../web/public-web-client.ts";
+import { PublicWebClient, PublicWebHttpError, PublicWebRedirectError } from "../web/public-web-client.ts";
 import type { RoutineWatchObservation } from "./routine-contract.ts";
-import { type WatchAdmission, watchCommandEnvironment } from "./watch-admission.ts";
+import { processIsRunning, type WatchAdmission, watchCommandEnvironment } from "./watch-admission.ts";
 import {
+	isWatchGlob,
 	MAX_WATCH_EXCERPT_CHARS,
 	MAX_WATCH_LABEL_CHARS,
+	WATCH_DEFAULT_COMMAND_TIMEOUT_MS,
 	type WatchCondition,
 	type WatchFiredEvent,
 	watchShortName,
@@ -31,16 +35,28 @@ export interface WatchSample {
 
 /** Longest a file is hashed in full; a larger one is judged by its size and modification time. */
 const MAX_HASHED_FILE_BYTES = 16 * 1024 * 1024;
+/** Most entries one check of a folder or a glob pattern lists; a larger set is no observation. */
+const MAX_WATCHED_ENTRIES = 10_000;
 const PORT_CONNECT_TIMEOUT_MS = 5_000;
-const COMMAND_TIMEOUT_MS = 20_000;
 const HTTP_TIMEOUT_SECONDS = 20;
 const MAX_HTTP_BODY_BYTES = 256 * 1024;
 const HTTP_ACCEPT = "text/plain,application/json;q=0.9,text/html;q=0.8,application/xml;q=0.7";
 /** Characters kept each side of a matched text in a page excerpt. */
 const EXCERPT_CONTEXT_CHARS = 100;
 
+/** One entry of a watched folder or pattern: its path, size, modification time and whether it is a folder. */
+type WatchedEntry = readonly [path: string, size: number, modifiedMs: number, folder: boolean];
+
+/** What a watched path is now: whether it exists, a file's size, a folder's or pattern's entry count, and the digest of its state. */
+interface PathSnapshot {
+	readonly exists: boolean;
+	readonly size?: number;
+	readonly entries?: number;
+	readonly state?: string;
+}
+
 export interface WatchSamplerDeps {
-	readonly admission: Pick<WatchAdmission, "authorize" | "commandViolation" | "cwd">;
+	readonly admission: Pick<WatchAdmission, "authorize" | "cwd" | "readsContent">;
 	readonly agentDir: () => string;
 	readonly now: () => number;
 	readonly web?: PublicWebClient;
@@ -75,6 +91,8 @@ export class WatchSampler {
 				return this.file(admitted, signal);
 			case "process":
 				return this.process(admitted);
+			case "pid":
+				return this.pid(admitted);
 			case "port":
 				return this.port(admitted, signal);
 			case "command":
@@ -108,33 +126,110 @@ export class WatchSampler {
 		signal: AbortSignal,
 	): Promise<WatchSample | undefined> {
 		const label = watchShortName(condition.path);
-		let size: number | undefined;
-		let modifiedMs = 0;
-		try {
-			const stats = await stat(condition.path);
-			if (!stats.isFile()) return undefined;
-			size = stats.size;
-			modifiedMs = Math.floor(stats.mtimeMs);
-		} catch (error) {
-			if ((error as NodeJS.ErrnoException).code !== "ENOENT") return undefined;
-		}
-		const exists = size !== undefined;
-		if (condition.on === "created" || condition.on === "deleted") {
-			const holds = condition.on === "created" ? exists : !exists;
-			return {
-				observation: { truth: holds },
-				event: this.event("file", condition.on, label, size === undefined ? {} : { sizeBytes: size }),
-			};
-		}
-		// A change is a different content: a file that is not there is no observation, and one that comes back with the
-		// same content is the state it was decided at.
-		if (size === undefined) return undefined;
-		const content = size <= MAX_HASHED_FILE_BYTES ? await this.contentDigest(condition.path, signal) : undefined;
-		if (size <= MAX_HASHED_FILE_BYTES && content === undefined) return undefined;
-		return {
-			observation: { truth: true, state: digest(["file", size, content ?? modifiedMs]) },
-			event: this.event("file", "changed", label, { sizeBytes: size }),
+		const changed = condition.on === "changed";
+		const seen = await this.snapshot(condition.path, changed, signal);
+		if (seen === undefined) return undefined;
+		const facts = {
+			...(seen.size === undefined ? {} : { sizeBytes: seen.size }),
+			...(seen.entries === undefined ? {} : { entries: seen.entries }),
 		};
+		if (!changed) {
+			const holds = condition.on === "created" ? seen.exists : !seen.exists;
+			return { observation: { truth: holds }, event: this.event("file", condition.on, label, facts) };
+		}
+		// A change is a different content (a folder or pattern: a different set of entries, sizes and times): a path that is
+		// not there is no observation, and one that comes back unchanged is the state it was decided at.
+		if (seen.state === undefined) return undefined;
+		return { observation: { truth: true, state: seen.state }, event: this.event("file", "changed", label, facts) };
+	}
+
+	/**
+	 * What one path (a file, a folder or a glob pattern) is now. Existence, size and times are metadata, observed for any
+	 * path the process can stat; a file's content is digested only where the session may read it, so elsewhere its size
+	 * and modification time stand for it. An observation that cannot be made is undefined.
+	 */
+	private async snapshot(path: string, wantState: boolean, signal: AbortSignal): Promise<PathSnapshot | undefined> {
+		if (isWatchGlob(path)) {
+			const matches = await this.listMatches(path, signal);
+			return matches === undefined
+				? undefined
+				: {
+						exists: matches.length > 0,
+						entries: matches.length,
+						state: wantState ? digest(["pattern", matches]) : undefined,
+					};
+		}
+		let stats: Awaited<ReturnType<typeof stat>>;
+		try {
+			stats = await stat(path);
+		} catch (error) {
+			return (error as NodeJS.ErrnoException).code === "ENOENT" ? { exists: false } : undefined;
+		}
+		if (stats.isDirectory()) {
+			if (!wantState) return { exists: true };
+			const listed = await this.listFolder(path, signal);
+			return listed === undefined
+				? undefined
+				: { exists: true, entries: listed.length, state: digest(["folder", listed]) };
+		}
+		if (!stats.isFile()) return undefined;
+		if (!wantState) return { exists: true, size: stats.size };
+		const hashable = stats.size <= MAX_HASHED_FILE_BYTES && this.deps.admission.readsContent(path);
+		const content = hashable ? await this.contentDigest(path, signal) : undefined;
+		if (hashable && content === undefined) return undefined;
+		return {
+			exists: true,
+			size: stats.size,
+			state: digest(["file", stats.size, content ?? Math.floor(stats.mtimeMs)]),
+		};
+	}
+
+	/** The direct entries of a folder as name, size, modification time and kind; undefined when it cannot be listed in bound. */
+	private async listFolder(path: string, signal: AbortSignal): Promise<WatchedEntry[] | undefined> {
+		try {
+			const names = await readdir(path);
+			if (names.length > MAX_WATCHED_ENTRIES) return undefined;
+			return await this.describeEntries(
+				names.map((name) => join(path, name)),
+				signal,
+			);
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** Every path a glob pattern matches now, as {@link listFolder} describes entries; undefined when it cannot be listed in bound. */
+	private async listMatches(pattern: string, signal: AbortSignal): Promise<WatchedEntry[] | undefined> {
+		try {
+			const paths: string[] = [];
+			for await (const match of globIterate(pattern, {
+				absolute: true,
+				dot: true,
+				signal,
+				windowsPathsNoEscape: process.platform === "win32",
+			})) {
+				if (paths.length === MAX_WATCHED_ENTRIES) return undefined;
+				paths.push(String(match));
+			}
+			return await this.describeEntries(paths, signal);
+		} catch {
+			return undefined;
+		}
+	}
+
+	/** An entry that vanished between listing and stat is simply not there; every other failure is no observation. */
+	private async describeEntries(paths: readonly string[], signal: AbortSignal): Promise<WatchedEntry[]> {
+		const entries: WatchedEntry[] = [];
+		for (const path of paths) {
+			signal.throwIfAborted();
+			try {
+				const stats = await lstat(path);
+				entries.push([path, stats.size, Math.floor(stats.mtimeMs), stats.isDirectory()]);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw error;
+			}
+		}
+		return entries.sort((left, right) => (left[0] < right[0] ? -1 : left[0] > right[0] ? 1 : 0));
 	}
 
 	private async contentDigest(path: string, signal: AbortSignal): Promise<string | undefined> {
@@ -173,6 +268,14 @@ export class WatchSampler {
 				...(terminal?.code != null ? { exitCode: terminal.code } : {}),
 				...(terminal?.signal != null ? { signal: terminal.signal } : {}),
 			}),
+		};
+	}
+
+	/** An operating-system process has no exit event to follow: its liveness is probed on the cadence. */
+	private pid(condition: Extract<WatchCondition, { type: "pid" }>): WatchSample {
+		return {
+			observation: { truth: !processIsRunning(condition.pid) },
+			event: this.event("pid", "exited", `process ${condition.pid}`, { pid: condition.pid }),
 		};
 	}
 
@@ -222,10 +325,10 @@ export class WatchSampler {
 			},
 			{
 				cwd: this.deps.admission.cwd(),
-				timeoutMs: COMMAND_TIMEOUT_MS,
+				timeoutMs: condition.timeoutMs ?? WATCH_DEFAULT_COMMAND_TIMEOUT_MS,
 				signal,
-				// The same read-only line as admission, never the requirement line that also admits test runs.
-				admit: (check) => this.deps.admission.commandViolation(check.command),
+				// The command was admitted by `sample` immediately before this run; the requirement line is not applied.
+				admit: () => undefined,
 				env: watchCommandEnvironment(),
 			},
 		);
@@ -245,10 +348,12 @@ export class WatchSampler {
 		const statusHolds = (status: number): boolean =>
 			condition.statusIs === undefined ? status >= 200 && status < 300 : condition.statusIs.includes(status);
 		let status: number;
+		let redirectHost: string | undefined;
 		let text = "";
 		try {
 			const page = await this.web.get(condition.url, HTTP_ACCEPT, HTTP_TIMEOUT_SECONDS, signal, {
 				maxBytes: MAX_HTTP_BODY_BYTES,
+				policy: { reach: "ownedServices" },
 			});
 			status = page.status;
 			text = page.text;
@@ -256,6 +361,8 @@ export class WatchSampler {
 			// A completed exchange with another status is a known status without a body; anything else is unknown.
 			if (!(error instanceof PublicWebHttpError)) return undefined;
 			status = error.status;
+			// A redirect to another scheme, host or port is not followed: it is reported by the host it points at.
+			if (error instanceof PublicWebRedirectError) redirectHost = error.target.host;
 		}
 		const at = condition.bodyContains === undefined ? -1 : text.indexOf(condition.bodyContains);
 		const bodyHolds = condition.bodyContains === undefined || at >= 0;
@@ -270,7 +377,13 @@ export class WatchSampler {
 				: undefined;
 		return {
 			observation: { truth: statusHolds(status) && bodyHolds },
-			event: this.event("http", "matched", label, { status }, excerpt),
+			event: this.event(
+				"http",
+				"matched",
+				label,
+				redirectHost === undefined ? { status } : { status, redirectHost },
+				excerpt,
+			),
 		};
 	}
 }

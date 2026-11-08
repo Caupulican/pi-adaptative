@@ -270,7 +270,7 @@ const watchEventSchema = Type.Object(
 		kind: Type.Literal("event"),
 		source: Type.Literal("watch", {
 			description:
-				"A condition the host evaluates in code with no model call while it waits (a file, a managed process, a local port, a read-only command or an https page); the routine's run starts only when the condition becomes true.",
+				"A condition the host evaluates in code with no model call while it waits (a file, folder or glob, a managed or operating-system process, a port on any host, a shell command or an http(s) page); the routine's run starts only when the condition becomes true.",
 		}),
 		condition: watchConditionSchema,
 		stopAfterFirstRun: Type.Optional(
@@ -1724,10 +1724,14 @@ export function initialRoutineCursor(schedule: RoutineSchedule): RoutineCursor {
 		case "calendar":
 			return { kind: "calendar", nextAt: nextCalendarSlotAfter(schedule, schedule.anchorAt) ?? null };
 		case "event":
-			// A managed process is saved only while it runs, so its starting state is "not exited" even before the first
-			// observation: one that ends before it is made still fires.
+			// A process (managed or an operating-system pid) is saved only while it runs, so its starting state is "not
+			// exited" even before the first observation: one that ends before it is made still fires.
 			return schedule.source === "watch"
-				? { kind: "watch", truth: schedule.condition.type === "process" ? false : null, fires: 0 }
+				? {
+						kind: "watch",
+						truth: schedule.condition.type === "process" || schedule.condition.type === "pid" ? false : null,
+						fires: 0,
+					}
 				: { kind: "event", throughOrdinal: schedule.anchorOrdinal, replayGaps: schedule.anchorReplayGaps };
 	}
 }

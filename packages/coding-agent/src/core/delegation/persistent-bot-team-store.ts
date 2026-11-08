@@ -95,7 +95,7 @@ import {
 	routineZoneUnsupported,
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
-import { MAX_WATCHES_PER_AGENT_DIR, MAX_WATCHES_PER_SESSION, parseWatchCondition } from "../routines/watch-contract.ts";
+import { parseWatchCondition } from "../routines/watch-contract.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
@@ -1818,7 +1818,6 @@ export class PersistentBotTeamStore {
 			else if (scheduleInput.kind === "event" && scheduleInput.source === "watch") {
 				// A watch is evaluated by the session that holds it, while it is open; a bot or team has no session to watch for.
 				if (!session) throw new Error("Watch routines run in their owning session only.");
-				this.assertWatchRoom(normalizedId, input.target.kind === "session" ? input.target.parentSessionId : "");
 				schedule = {
 					kind: "event",
 					source: "watch",
@@ -2651,33 +2650,6 @@ export class PersistentBotTeamStore {
 		if (isDeepStrictEqual(decision.cursor, routine.cursor)) return "unchanged";
 		this.routines.set(routine.routineId, { ...routine, cursor: decision.cursor });
 		return "changed";
-	}
-
-	/**
-	 * Refuses a watch routine beyond the per-session and per-agent-directory bounds. Called under the store lock with the
-	 * routine id being saved, which does not count against itself.
-	 */
-	private assertWatchRoom(routineId: string, parentSessionId: string): void {
-		let inSession = 0;
-		let total = 0;
-		for (const routine of this.routines.values()) {
-			if (
-				routine.routineId === routineId ||
-				routine.schedule.kind !== "event" ||
-				routine.schedule.source !== "watch"
-			)
-				continue;
-			total++;
-			if (routine.target.kind === "session" && routine.target.parentSessionId === parentSessionId) inSession++;
-		}
-		if (inSession >= MAX_WATCHES_PER_SESSION)
-			throw new Error(
-				`This session already holds ${MAX_WATCHES_PER_SESSION} watch routines, the most it may hold; delete one first.`,
-			);
-		if (total >= MAX_WATCHES_PER_AGENT_DIR)
-			throw new Error(
-				`This agent directory already holds ${MAX_WATCHES_PER_AGENT_DIR} watch routines across its sessions, the most it may hold; delete one first.`,
-			);
 	}
 
 	/**

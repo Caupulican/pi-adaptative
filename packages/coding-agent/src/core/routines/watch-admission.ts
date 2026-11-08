@@ -1,40 +1,52 @@
 /**
  * What a session may watch. The same rules admit a watch when it is saved and apply again at every evaluation, so a
  * condition saved earlier is never evaluated with more authority than the session has now:
- * - a file is read through the session's own read scope (its allowed roots, the harness's private paths, the
- *   credential policy), never a directory or a glob;
- * - a command passes the line of a read-only worker's shell (no writes, no network, no private paths) and runs with a
- *   bounded environment, never with more authority than that;
- * - a managed process is a process-matrix entry that has not ended yet.
+ * - a path (a file, a folder or a glob pattern) is observed through its metadata, which needs no read authority; its
+ *   content is digested only where the session's read scope and the credential policy allow reading it;
+ * - a command passes the admission the owner's own shell calls pass (the capability envelope, credential protection,
+ *   edge classification against the session's edge grants), non-interactively: whatever would ask the owner is
+ *   refused, since a watch cannot ask. It runs with a bounded environment;
+ * - a managed process is a process-matrix entry that has not ended yet, and an operating-system process must be running.
  * Ports, pages and the cadence are bounded by the condition's own schema; a page's address is checked again at fetch.
  */
 
 import { type Stats, statSync } from "node:fs";
 import { isIP } from "node:net";
-import { homedir } from "node:os";
-import { delimiter, dirname, isAbsolute, resolve } from "node:path";
+import { dirname, isAbsolute, resolve } from "node:path";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
-import { projectLaneSettingsPath } from "../autonomy/lane-private-paths.ts";
+import {
+	classifyAllEdgeOperations,
+	classifyYoloBoundary,
+	type EdgeGrantView,
+	isEdgeOperationGranted,
+} from "../autonomy/edge-policy.ts";
+import { evaluateToolGate } from "../autonomy/gates.ts";
 import {
 	privatePathBoundary,
 	readScopeRefusal,
 	type SessionReadScope,
 	sessionReadScope,
 } from "../autonomy/session-read-scope.ts";
-import { type ReadOnlyShellLaneScope, readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
 import { readEntrySync } from "../process-matrix/store.ts";
-import { type CredentialExposureBoundary, isProtectedCredentialPath } from "../secrets/credential-exposure-guard.ts";
-import { assertPublicAddress } from "../web/public-web-client.ts";
-import type { WatchCondition } from "./watch-contract.ts";
+import {
+	type CredentialExposureBoundary,
+	credentialToolBlockReason,
+	isProtectedCredentialPath,
+} from "../secrets/credential-exposure-guard.ts";
+import { assertReachableAddress } from "../web/public-web-client.ts";
+import { isWatchGlob, splitWatchPattern, type WatchCondition } from "./watch-contract.ts";
 
 export interface WatchAdmissionHost {
 	getCwd(): string;
 	getAgentDir(): string;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	getCredentialExposureBoundary?(): CredentialExposureBoundary | undefined;
+	/** The session's edge grants, as the owner's own shell calls read them: what was allowed ahead, never a prompt answered for one call. */
+	getEdgeGrants?(): readonly EdgeGrantView[];
+	/** `yolo` skips the edge classes and keeps the execution floor; any other mode classifies every operation. */
+	getEdgeMode?(): string | undefined;
+	getDenyCommands?(): readonly string[] | undefined;
 }
-
-const GLOB_CHARACTERS = /[*?[\]{}]/u;
 
 function statOrUndefined(path: string): Stats | undefined {
 	try {
@@ -42,6 +54,16 @@ function statOrUndefined(path: string): Stats | undefined {
 	} catch (error) {
 		if ((error as NodeJS.ErrnoException).code === "ENOENT") return undefined;
 		throw error;
+	}
+}
+
+/** Whether an operating-system process is running: signal 0 only probes. A process the probe may not signal still exists. */
+export function processIsRunning(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
 	}
 }
 
@@ -69,79 +91,112 @@ export class WatchAdmission {
 	}
 
 	/**
-	 * The condition as the session may watch it now, in canonical form (a file's absolute path), or an error naming the
+	 * The condition as the session may watch it now, in canonical form (a path's absolute form), or an error naming the
 	 * authority it lacks. This is the part applied at every evaluation: it checks authority only, never whether the
 	 * watched thing still exists, so a file that vanished or a process that ended is an observation, not a refusal.
 	 */
 	authorize(condition: WatchCondition): WatchCondition {
 		switch (condition.type) {
 			case "file":
-				return { ...condition, path: this.authorizeFile(condition.path) };
+				return {
+					...condition,
+					path: isAbsolute(condition.path) ? resolve(condition.path) : resolve(this.host.getCwd(), condition.path),
+				};
 			case "command": {
-				const violation = this.commandViolation(condition.command);
-				if (violation)
-					throw new Error(`A watched command may only observe, but it ${violation.replace(/^it /u, "")}.`);
+				const refusal = this.commandRefusal(condition.command);
+				if (refusal) throw new Error(`A watched command was refused. ${refusal}`);
 				return condition;
 			}
 			case "process":
+			case "pid":
 			case "port":
 			case "http":
 				return condition;
 		}
 	}
 
-	/** {@link authorize} plus what must hold when a watch is saved: the file or process exists and has not ended. */
+	/** {@link authorize} plus what must hold when a watch is saved: the folder, process or pid exists and has not ended. */
 	admit(condition: WatchCondition): WatchCondition {
 		const authorized = this.authorize(condition);
 		if (authorized.type === "file") {
-			const stats = statOrUndefined(authorized.path);
-			if (stats?.isDirectory()) throw new Error("A watched file is one file, not a directory.");
-			if (!stats && !statOrUndefined(dirname(authorized.path))?.isDirectory())
-				throw new Error("The folder of a watched file must exist.");
-		} else if (authorized.type === "http") {
-			// A literal address is checked now; a name that resolves to a private address is refused at every fetch.
-			const host = new URL(authorized.url).hostname.replace(/^\[|\]$/gu, "");
-			if (isIP(host) !== 0)
-				try {
-					assertPublicAddress(host);
-				} catch {
-					throw new Error("A watched page must be on a public internet address.");
-				}
+			// The harness's own storage changes whenever it works, so a watch there would fire on its own runs.
+			const target = isWatchGlob(authorized.path) ? splitWatchPattern(authorized.path).base : authorized.path;
+			if (readScopeRefusal(this.scope(), target, true) === "denied")
+				throw new Error("A watch cannot observe the harness's own storage: its writes would trigger the watch.");
+			if (isWatchGlob(authorized.path)) {
+				const { base } = splitWatchPattern(authorized.path);
+				if (dirname(base) === base)
+					throw new Error("A glob pattern needs a fixed folder before its first wildcard, not a filesystem root.");
+			} else if (!statOrUndefined(authorized.path) && !statOrUndefined(dirname(authorized.path))?.isDirectory())
+				throw new Error("The folder of a watched path must exist.");
 		} else if (authorized.type === "process") {
 			const entry = readEntrySync(this.host.getAgentDir(), authorized.processId);
 			if (!entry) throw new Error("No managed process with that id is recorded on this machine.");
 			if (entry.terminal !== undefined || entry.status === "closed")
 				throw new Error("That managed process has already exited.");
+		} else if (authorized.type === "http") {
+			// A literal address is checked now; a name that resolves to one is refused at every fetch.
+			const host = new URL(authorized.url).hostname.replace(/^\[|\]$/gu, "");
+			if (isIP(host) !== 0)
+				try {
+					assertReachableAddress(host, { reach: "ownedServices" });
+				} catch {
+					throw new Error("A watched page cannot be on a link-local, multicast, broadcast or reserved address.");
+				}
+		} else if (authorized.type === "pid") {
+			if (!processIsRunning(authorized.pid)) throw new Error("No process with that id is running.");
 		}
 		return authorized;
 	}
 
-	private authorizeFile(path: string): string {
-		if (GLOB_CHARACTERS.test(path)) throw new Error("A watched file is one file, not a glob.");
+	/**
+	 * Whether the session may read what `absolutePath` holds: inside its read scope and not private to the harness or
+	 * credential-bearing. Only then is a path's content digested; elsewhere it is observed by metadata alone.
+	 */
+	readsContent(absolutePath: string): boolean {
 		const scope = this.scope();
-		const absolute = isAbsolute(path) ? resolve(path) : resolve(scope.cwd, path);
-		const refusal = readScopeRefusal(scope, absolute);
-		if (refusal === "outside") throw new Error("That file is outside the paths this session may read.");
-		if (refusal === "denied" || isProtectedCredentialPath(absolute, scope.cwd, this.boundary(scope)))
-			throw new Error("That file is private to the harness or holds credentials, so it cannot be watched.");
-		return absolute;
+		return (
+			readScopeRefusal(scope, absolutePath) === undefined &&
+			!isProtectedCredentialPath(absolutePath, scope.cwd, this.boundary(scope))
+		);
 	}
 
-	/** Why a read-only worker's shell would refuse `command`, or undefined when it may run on a watch's cadence. */
-	commandViolation(command: string): string | undefined {
+	/**
+	 * Why the session's own shell would not run `command` unasked, as a sentence, or undefined when it may run on a
+	 * watch's cadence. The deterministic parts of the shell's admission apply (the capability envelope, credential
+	 * protection and the edge classes); what needs the owner's answer at the time is refused, because nobody is there.
+	 */
+	commandRefusal(command: string): string | undefined {
 		const scope = this.scope();
-		const boundary = this.boundary(scope);
-		const projectSettings = resolve(projectLaneSettingsPath(scope.cwd));
-		const lane: ReadOnlyShellLaneScope = {
-			network: false,
-			scratchRoots: [],
-			homeDir: homedir(),
-			cdPath: (process.env.CDPATH ?? "").split(delimiter).filter((entry) => entry.length > 0),
-			harnessStoragePaths: scope.deniedPaths.filter((entry) => resolve(entry) !== projectSettings),
-			isDeniedPath: (target) =>
-				isProtectedCredentialPath(target, scope.cwd, boundary) || readScopeRefusal(scope, target) !== undefined,
-		};
-		return readOnlyShellViolation(command, scope.cwd, { lane });
+		const cwd = scope.cwd;
+		const envelope = this.host.getCapabilityEnvelope();
+		if (envelope) {
+			const outcome = evaluateToolGate({ toolName: "bash", args: { command }, cwd, scopeCwd: cwd, envelope });
+			if (outcome.outcome !== "allow")
+				return outcome.message ?? "The session's capability envelope does not allow shell commands.";
+		}
+		const credential = credentialToolBlockReason("bash", { command }, cwd, this.boundary(scope));
+		if (credential) return credential;
+		if (this.host.getEdgeMode?.() === "yolo") {
+			const floor = classifyYoloBoundary({
+				toolName: "bash",
+				args: { command },
+				cwd,
+				scopeCwd: cwd,
+				denyCommands: this.host.getDenyCommands?.(),
+			});
+			return floor
+				? `This command ${floor.reason}, which needs the owner's approval each time and a watch cannot ask.`
+				: undefined;
+		}
+		const grants = this.host.getEdgeGrants?.() ?? [];
+		const ungranted = classifyAllEdgeOperations(
+			{ toolName: "bash", args: { command }, cwd, scopeCwd: cwd },
+			{ includeConditional: true },
+		).find((operation) => !isEdgeOperationGranted(operation, grants));
+		return ungranted
+			? `This command ${ungranted.reason}, which needs the owner's approval and a watch cannot ask (a grant of ${ungranted.class} allows it).`
+			: undefined;
 	}
 }
 

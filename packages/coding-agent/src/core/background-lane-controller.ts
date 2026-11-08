@@ -1732,6 +1732,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			getAgentDir: () => this.deps.getAgentDir(),
 			getCapabilityEnvelope: () => this.deps.getCapabilityEnvelope(),
 			getCredentialExposureBoundary: () => this.deps.getCredentialExposureBoundary?.(),
+			getEdgeGrants: () => this.deps.getEdgeGrants?.() ?? [],
+			getEdgeMode: () => this.deps.getSettingsManager().getEdgeSettings().mode,
+			getDenyCommands: () => this.deps.getSettingsManager().getEdgeSettings().deny,
 		});
 		const routineTimers = this.deps.getTimers().port("routines");
 		const watches = new RoutineWatchMonitor({

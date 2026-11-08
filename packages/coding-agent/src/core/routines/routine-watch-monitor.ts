@@ -1,7 +1,8 @@
 /**
  * Arms the session's watch routines and reports what they observe to the routine store. A watch costs no model call
- * while it waits: a file and a managed process are followed by operating-system events, and a port, command or page by
- * a timer on the owner's cadence that re-arms only after its check finished. Every observation goes through the store's
+ * while it waits: a path (a file, a folder or a glob pattern) and a managed process are followed by operating-system
+ * events, and a process id, port, command or page by a timer on the owner's cadence that re-arms only after its check
+ * finished. Every observation goes through the store's
  * edge rule (`observeWatch`), which fires a pending occurrence in the same write as the cursor it advances; this monitor
  * decides nothing. Nothing is evaluated while the session is closed.
  *
@@ -9,7 +10,7 @@
  * latest observation and offered again on the next store change, so a file that does not change twice still fires once.
  */
 
-import { type FSWatcher, watch as watchDirectory } from "node:fs";
+import { type FSWatcher, statSync, watch as watchDirectory } from "node:fs";
 import { basename, dirname } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { processMatrixDir } from "../process-matrix/store.ts";
@@ -17,7 +18,7 @@ import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { type RoutineDefinitionView, type RoutineWatchSchedule, routineEnded } from "./routine-contract.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
-import { type WatchCondition, watchCadenceMs } from "./watch-contract.ts";
+import { isWatchGlob, splitWatchPattern, type WatchCondition, watchCadenceMs } from "./watch-contract.ts";
 import type { WatchSample, WatchSampler } from "./watch-evaluators.ts";
 
 /** Wait after the last file-system event before a file or process is observed, so a burst of writes is one observation. */
@@ -41,7 +42,8 @@ interface ArmedWatch {
 	readonly condition: WatchCondition;
 	readonly abort: AbortController;
 	timer: unknown;
-	watcher: FSWatcher | undefined;
+	/** The directory watchers that report this watch's file-system events, by {@link followKey}. */
+	readonly watchers: Map<string, FSWatcher>;
 	/** The latest observation the store could not take yet. */
 	pending: WatchSample | undefined;
 	/** An observation is running; a trigger meanwhile asks for one more after it. */
@@ -50,7 +52,53 @@ interface ArmedWatch {
 }
 
 /** Why a condition is not being followed, as a class for the log; never the condition itself. */
-type SkipClass = "refused" | "watcher-failed";
+type SkipClass = "watcher-failed";
+
+/** One directory whose events report a path or a managed process; `name` limits them to one entry of it. */
+interface FollowTarget {
+	readonly directory: string;
+	readonly recursive: boolean;
+	readonly name?: string;
+}
+
+function followKey(target: FollowTarget): string {
+	return `${target.directory}|${target.recursive}|${target.name ?? ""}`;
+}
+
+function isDirectory(path: string): boolean {
+	try {
+		return statSync(path).isDirectory();
+	} catch {
+		return false;
+	}
+}
+
+/** The directories to watch for a path that is not a file: a pattern's fixed base (the nearest one that exists), recursive when it reaches deeper than one level. */
+function patternTarget(pattern: string): FollowTarget {
+	const { base, deeper } = splitWatchPattern(pattern);
+	let directory = base;
+	while (!isDirectory(directory) && dirname(directory) !== directory) directory = dirname(directory);
+	return { directory, recursive: deeper };
+}
+
+/**
+ * Where the events of a condition come from: a file or folder through its own folder (a rename-over save or a
+ * not-yet-existing path still reports) and, for a folder watched for changes, the folder itself; a pattern through
+ * its base; a managed process through the process matrix. Evaluated again after each observation, since a pattern's
+ * base or a watched folder may appear later.
+ */
+function followTargets(condition: WatchCondition, agentDir: string): FollowTarget[] {
+	if (condition.type === "process")
+		return [{ directory: processMatrixDir(agentDir), recursive: false, name: `${condition.processId}.json` }];
+	if (condition.type !== "file") return [];
+	if (isWatchGlob(condition.path)) return [patternTarget(condition.path)];
+	const targets: FollowTarget[] = [
+		{ directory: dirname(condition.path), recursive: false, name: basename(condition.path) },
+	];
+	if (condition.on === "changed" && isDirectory(condition.path))
+		targets.push({ directory: condition.path, recursive: false });
+	return targets;
+}
 
 function watchesOf(
 	routine: RoutineDefinitionView,
@@ -140,7 +188,7 @@ export class RoutineWatchMonitor {
 			condition,
 			abort: new AbortController(),
 			timer: undefined,
-			watcher: undefined,
+			watchers: new Map(),
 			pending: undefined,
 			running: false,
 			again: false,
@@ -148,7 +196,7 @@ export class RoutineWatchMonitor {
 		this.armed.set(routine.routineId, watch);
 		const cadence = watchCadenceMs(condition);
 		try {
-			if (cadence === undefined) this.followFilesystem(watch);
+			if (cadence === undefined) this.follow(watch);
 		} catch (error) {
 			// Without its file-system events the watch still takes its first observation, which sets the baseline or fires
 			// for what changed while the session was closed.
@@ -166,26 +214,33 @@ export class RoutineWatchMonitor {
 		void this.observe(watch);
 	}
 
-	/** A file or a managed process is followed through its directory: a rename-over save or a not-yet-existing file still reports. */
-	private followFilesystem(watch: ArmedWatch): void {
-		const condition = watch.condition;
-		let directory: string;
-		let name: string;
-		if (condition.type === "file") {
-			directory = dirname(condition.path);
-			name = basename(condition.path);
-		} else if (condition.type === "process") {
-			directory = processMatrixDir(this.deps.agentDir());
-			name = `${condition.processId}.json`;
-		} else return;
-		watch.watcher = watchDirectory(directory, { persistent: false }, (_event, filename) => {
-			if (filename === null || filename.toString() === name) this.debounce(watch);
-		});
-		watch.watcher.on("error", (error) => {
-			this.disarm(watch);
-			this.armed.delete(watch.routineId);
-			this.skip(watch.routineId, watch.key, condition, "watcher-failed", error);
-		});
+	/** Brings the directory watchers of an event-driven condition in line with where its events come from now. */
+	private follow(watch: ArmedWatch): void {
+		const wanted = new Map(
+			followTargets(watch.condition, this.deps.agentDir()).map((target) => [followKey(target), target] as const),
+		);
+		for (const [key, watcher] of [...watch.watchers])
+			if (!wanted.has(key)) {
+				watcher.close();
+				watch.watchers.delete(key);
+			}
+		for (const [key, target] of wanted) {
+			if (watch.watchers.has(key)) continue;
+			const watcher = watchDirectory(
+				target.directory,
+				{ persistent: false, recursive: target.recursive },
+				(_event, filename) => {
+					if (target.name === undefined || filename === null || filename.toString() === target.name)
+						this.debounce(watch);
+				},
+			);
+			watcher.on("error", (error) => {
+				this.disarm(watch);
+				this.armed.delete(watch.routineId);
+				this.skip(watch.routineId, watch.key, watch.condition, "watcher-failed", error);
+			});
+			watch.watchers.set(key, watcher);
+		}
 	}
 
 	private debounce(watch: ArmedWatch): void {
@@ -216,10 +271,7 @@ export class RoutineWatchMonitor {
 				sample = await this.deps.sampler.sample(watch.condition, watch.abort.signal);
 			} catch (error) {
 				if (watch.abort.signal.aborted || !this.active) return;
-				// The session no longer admits what it watches: the watch stops, and its routine stays for the owner to change.
-				this.disarm(watch);
-				this.armed.delete(watch.routineId);
-				this.skip(watch.routineId, watch.key, watch.condition, "refused", error);
+				this.refuse(watch, error);
 				return;
 			}
 			if (!this.active || watch.abort.signal.aborted) return;
@@ -234,6 +286,7 @@ export class RoutineWatchMonitor {
 			watch.running = false;
 			if (this.active && !watch.abort.signal.aborted && this.armed.get(watch.routineId) === watch) {
 				const cadence = watchCadenceMs(watch.condition);
+				if (cadence === undefined) this.refollow(watch);
 				if (watch.again) {
 					watch.again = false;
 					void this.observe(watch);
@@ -244,6 +297,38 @@ export class RoutineWatchMonitor {
 					}, cadence);
 				}
 			}
+		}
+	}
+
+	/**
+	 * The session does not admit this check now (a command its rules refuse): nothing is observed, nothing fires, and the
+	 * reason is recorded once in plain words. The watch stays armed and tries again on its next tick, since a grant the
+	 * owner gives later lifts the refusal; a success starts the reporting again.
+	 */
+	private refuse(watch: ArmedWatch, error: unknown): void {
+		harnessLog.debug("routines", "a watch observation was refused", {
+			routineId: watch.routineId,
+			condition: watch.condition.type,
+		});
+		this.reportOnce(watch.routineId, error);
+	}
+
+	/** One plain-words warning per distinct reason: a watch that keeps failing the same way says so once. */
+	private reportOnce(routineId: string, error: unknown): void {
+		const reason = error instanceof Error ? error.message : String(error);
+		if (this.faults.get(routineId) === reason) return;
+		this.faults.set(routineId, reason);
+		this.warn(error);
+	}
+
+	/** A pattern's base or a watched folder may appear after the watch is armed: its watchers move with it. */
+	private refollow(watch: ArmedWatch): void {
+		try {
+			this.follow(watch);
+		} catch (error) {
+			this.disarm(watch);
+			this.armed.delete(watch.routineId);
+			this.skip(watch.routineId, watch.key, watch.condition, "watcher-failed", error);
 		}
 	}
 
@@ -281,10 +366,7 @@ export class RoutineWatchMonitor {
 			// kept and offered again on the next store change, since an event-driven condition may never report again.
 			watch.pending = sample;
 			if ((error as NodeJS.ErrnoException | undefined)?.code === "ELOCKED") return;
-			const reason = error instanceof Error ? error.message : String(error);
-			if (this.faults.get(watch.routineId) === reason) return;
-			this.faults.set(watch.routineId, reason);
-			this.warn(error);
+			this.reportOnce(watch.routineId, error);
 		}
 	}
 
@@ -292,8 +374,8 @@ export class RoutineWatchMonitor {
 		watch.abort.abort();
 		if (watch.timer !== undefined) this.deps.timers.clearTimeout(watch.timer);
 		watch.timer = undefined;
-		watch.watcher?.close();
-		watch.watcher = undefined;
+		for (const watcher of watch.watchers.values()) watcher.close();
+		watch.watchers.clear();
 	}
 
 	private warn(error: unknown): void {

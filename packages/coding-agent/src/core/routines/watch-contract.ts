@@ -6,18 +6,23 @@
  */
 
 import { isIP } from "node:net";
+import { join, parse } from "node:path";
 import { StringEnum } from "@caupulican/pi-ai/typebox-helpers";
 import { Type } from "typebox";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 
 /** Shortest cadence of a timer-based condition, and the one an omitted `everyMs` takes. */
-export const WATCH_MIN_EVERY_MS = 10_000;
+export const WATCH_MIN_EVERY_MS = 1_000;
 export const WATCH_DEFAULT_EVERY_MS = 30_000;
 export const WATCH_MAX_EVERY_MS = 86_400_000;
-/** Watch routines one session may hold, and all sessions of one agent directory together. */
-export const MAX_WATCHES_PER_SESSION = 8;
-export const MAX_WATCHES_PER_AGENT_DIR = 32;
+/** How long one run of a command check may take: the default of an omitted `timeoutMs`, and its bounds. */
+export const WATCH_DEFAULT_COMMAND_TIMEOUT_MS = 20_000;
+export const WATCH_MIN_COMMAND_TIMEOUT_MS = 1_000;
+export const WATCH_MAX_COMMAND_TIMEOUT_MS = 600_000;
 export const MAX_WATCH_PATH_CHARS = 2_048;
+export const MAX_WATCH_HOST_CHARS = 253;
+/** The largest process id any supported platform assigns. */
+export const MAX_WATCH_PID = 2_147_483_647;
 export const MAX_WATCH_COMMAND_CHARS = 1_000;
 export const MAX_WATCH_URL_CHARS = 2_048;
 export const MAX_WATCH_MATCH_CHARS = 200;
@@ -28,10 +33,16 @@ export const MAX_WATCH_LABEL_CHARS = 80;
 const MAX_WATCH_FACTS = 8;
 const MAX_WATCH_FACT_TEXT_CHARS = 200;
 
-export const WATCH_HOSTS = ["localhost", "127.0.0.1", "::1"] as const;
+/** Characters that make a watched path a glob pattern instead of one path. */
+const WATCH_GLOB_CHARACTERS = /[*?[\]{}]/u;
+/** A host name (letters, digits, hyphen, underscore, dots) or an IP address; never a URL or a path. */
+const HOST_NAME_PATTERN =
+	/^[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?(?:\.[A-Za-z0-9_](?:[A-Za-z0-9_-]{0,61}[A-Za-z0-9_])?)*\.?$/u;
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(["localhost", "127.0.0.1", "::1"]);
+
 export const WATCH_FILE_EVENTS = ["changed", "created", "deleted"] as const;
 export const WATCH_PORT_STATES = ["open", "closed"] as const;
-export const WATCH_CONDITION_TYPES = ["file", "process", "port", "command", "http"] as const;
+export const WATCH_CONDITION_TYPES = ["file", "process", "pid", "port", "command", "http"] as const;
 export type WatchConditionType = (typeof WATCH_CONDITION_TYPES)[number];
 
 /** A process-matrix entry id: the role and session of a process the harness manages. Never a path. */
@@ -40,9 +51,10 @@ const PROCESS_ID_PATTERN = /^(?:master|worker)-[A-Za-z0-9][A-Za-z0-9._-]{0,199}$
 export type WatchCondition =
 	| { readonly type: "file"; readonly path: string; readonly on: (typeof WATCH_FILE_EVENTS)[number] }
 	| { readonly type: "process"; readonly processId: string; readonly on: "exited" }
+	| { readonly type: "pid"; readonly pid: number; readonly on: "exited"; readonly everyMs: number }
 	| {
 			readonly type: "port";
-			readonly host: (typeof WATCH_HOSTS)[number];
+			readonly host: string;
 			readonly port: number;
 			readonly on: (typeof WATCH_PORT_STATES)[number];
 			readonly everyMs: number;
@@ -51,6 +63,8 @@ export type WatchCondition =
 			readonly type: "command";
 			readonly command: string;
 			readonly everyMs: number;
+			/** Longest one run may take; absent means {@link WATCH_DEFAULT_COMMAND_TIMEOUT_MS}. */
+			readonly timeoutMs?: number;
 			readonly expect: { readonly exitCode?: number; readonly outputContains?: string };
 	  }
 	| {
@@ -78,7 +92,7 @@ export const watchConditionSchema = Type.Union([
 				minLength: 1,
 				maxLength: MAX_WATCH_PATH_CHARS,
 				description:
-					"One file (not a directory or a glob), inside the paths this session may read. Relative paths resolve against the working directory.",
+					"A file, a folder (any direct entry created, changed or deleted) or a glob pattern such as logs/**/*.log. Relative paths resolve against the working directory. Only the path's metadata is observed (existence, size, modification time, and a content digest where this session may read the file); no contents are carried.",
 			}),
 			on: StringEnum(WATCH_FILE_EVENTS),
 		},
@@ -99,8 +113,26 @@ export const watchConditionSchema = Type.Union([
 	),
 	Type.Object(
 		{
+			type: Type.Literal("pid"),
+			pid: Type.Integer({
+				minimum: 1,
+				maximum: MAX_WATCH_PID,
+				description: "The id of an operating-system process; the watch fires when it is no longer running.",
+			}),
+			on: Type.Literal("exited"),
+			everyMs: everyMsField,
+		},
+		{ additionalProperties: false },
+	),
+	Type.Object(
+		{
 			type: Type.Literal("port"),
-			host: StringEnum(WATCH_HOSTS),
+			host: Type.String({
+				minLength: 1,
+				maxLength: MAX_WATCH_HOST_CHARS,
+				description:
+					"A host name or IP address: localhost, a LAN host or a remote one. A connection sends nothing.",
+			}),
 			port: Type.Integer({ minimum: 1, maximum: 65_535 }),
 			on: StringEnum(WATCH_PORT_STATES),
 			everyMs: everyMsField,
@@ -114,9 +146,16 @@ export const watchConditionSchema = Type.Union([
 				minLength: 1,
 				maxLength: MAX_WATCH_COMMAND_CHARS,
 				description:
-					"A read-only shell command (judged by the same line as a read-only worker's shell: no writes, no network, no private paths). It runs on the cadence with a timeout and a capped output.",
+					"A shell command, admitted at every run by the same rules as the owner's own shell calls (edge classes, credential protection, the session's capability envelope). It runs on the cadence with a timeout and a capped output; one that is refused is skipped and fires nothing.",
 			}),
 			everyMs: everyMsField,
+			timeoutMs: Type.Optional(
+				Type.Integer({
+					minimum: WATCH_MIN_COMMAND_TIMEOUT_MS,
+					maximum: WATCH_MAX_COMMAND_TIMEOUT_MS,
+					description: `Longest one run may take, in ms; default ${WATCH_DEFAULT_COMMAND_TIMEOUT_MS}, at most ${WATCH_MAX_COMMAND_TIMEOUT_MS}.`,
+				}),
+			),
 			expect: Type.Optional(
 				Type.Object(
 					{
@@ -135,7 +174,8 @@ export const watchConditionSchema = Type.Union([
 			url: Type.String({
 				minLength: 1,
 				maxLength: MAX_WATCH_URL_CHARS,
-				description: "An https URL on the public internet. One GET per check, no credentials or cookies.",
+				description:
+					"An http or https URL on any host, loopback and private networks included. One GET per check, no credentials or cookies; a redirect to another scheme, host or port is not followed and is reported as the observed status.",
 			}),
 			statusIs: Type.Optional(
 				Type.Array(Type.Integer({ minimum: 100, maximum: 599 }), {
@@ -180,8 +220,8 @@ function oneOf<T extends string>(value: unknown, allowed: readonly T[], label: s
 	return value as T;
 }
 
-/** A host that names the machine itself or a private name can never be a public page. */
-function publicHttpsUrl(value: unknown): string {
+/** An http or https address on any host: the owner watches their own services too. Credentials never travel in it. */
+function watchUrl(value: unknown): string {
 	const text = boundedText(value, MAX_WATCH_URL_CHARS, "url");
 	let url: URL;
 	try {
@@ -189,21 +229,40 @@ function publicHttpsUrl(value: unknown): string {
 	} catch {
 		throw invalid("needs a valid url");
 	}
-	const host = url.hostname.replace(/^\[|\]$/gu, "").toLowerCase();
 	if (
-		url.protocol !== "https:" ||
+		(url.protocol !== "http:" && url.protocol !== "https:") ||
 		url.username ||
 		url.password ||
-		host.length === 0 ||
-		host === "localhost" ||
-		host.endsWith(".localhost") ||
-		host.endsWith(".local") ||
-		host.endsWith(".internal") ||
-		isIP(host) === 6
+		url.hostname.length === 0
 	)
-		throw invalid("needs an https url on a public host, without credentials");
+		throw invalid("needs an http or https url on a host, without credentials");
 	url.hash = "";
 	return url.href;
+}
+
+/** A host name or address in canonical form: lowercase, without the brackets of an IPv6 literal. */
+function watchHost(value: unknown): string {
+	const host = boundedText(value, MAX_WATCH_HOST_CHARS, "host")
+		.replace(/^\[|\]$/gu, "")
+		.toLowerCase();
+	if (isIP(host) === 0 && !HOST_NAME_PATTERN.test(host)) throw invalid("needs a host name or an address");
+	return host;
+}
+
+/** Whether a watched path is a glob pattern (a set of paths) rather than one path. */
+export function isWatchGlob(path: string): boolean {
+	return WATCH_GLOB_CHARACTERS.test(path);
+}
+
+/** A glob pattern's fixed folder (everything before its first wildcard segment) and whether it reaches below one level of it. */
+export function splitWatchPattern(pattern: string): { readonly base: string; readonly deeper: boolean } {
+	const { root } = parse(pattern);
+	const parts = pattern.slice(root.length).split(/[\\/]+/u);
+	const firstGlob = Math.max(
+		0,
+		parts.findIndex((part) => WATCH_GLOB_CHARACTERS.test(part)),
+	);
+	return { base: join(root, ...parts.slice(0, firstGlob)), deeper: parts.length - firstGlob > 1 };
 }
 
 /**
@@ -223,18 +282,28 @@ export function parseWatchCondition(value: unknown): WatchCondition {
 		if (!PROCESS_ID_PATTERN.test(processId) || processId.includes("..")) throw invalid("names an invalid process id");
 		return { type: "process", processId, on: oneOf(value.on, ["exited"], "on") };
 	}
+	if (value.type === "pid" && hasOnlyKeys(value, ["type", "pid", "on", "everyMs"])) {
+		if (!Number.isSafeInteger(value.pid) || (value.pid as number) < 1 || (value.pid as number) > MAX_WATCH_PID)
+			throw invalid(`needs a process id between 1 and ${MAX_WATCH_PID}`);
+		return {
+			type: "pid",
+			pid: value.pid as number,
+			on: oneOf(value.on, ["exited"], "on"),
+			everyMs: everyMsOf(value.everyMs),
+		};
+	}
 	if (value.type === "port" && hasOnlyKeys(value, ["type", "host", "port", "on", "everyMs"])) {
 		if (!Number.isSafeInteger(value.port) || (value.port as number) < 1 || (value.port as number) > 65_535)
 			throw invalid("needs a port between 1 and 65535");
 		return {
 			type: "port",
-			host: oneOf(value.host, WATCH_HOSTS, "host"),
+			host: watchHost(value.host),
 			port: value.port as number,
 			on: oneOf(value.on, WATCH_PORT_STATES, "on"),
 			everyMs: everyMsOf(value.everyMs),
 		};
 	}
-	if (value.type === "command" && hasOnlyKeys(value, ["type", "command", "everyMs", "expect"])) {
+	if (value.type === "command" && hasOnlyKeys(value, ["type", "command", "everyMs", "timeoutMs", "expect"])) {
 		const expect = value.expect === undefined ? {} : value.expect;
 		if (!isPlainRecord(expect) || !hasOnlyKeys(expect, ["exitCode", "outputContains"]))
 			throw invalid("has an invalid expect");
@@ -245,10 +314,18 @@ export function parseWatchCondition(value: unknown): WatchCondition {
 				(expect.exitCode as number) > 255)
 		)
 			throw invalid("needs expect.exitCode between 0 and 255");
+		if (
+			value.timeoutMs !== undefined &&
+			(!Number.isSafeInteger(value.timeoutMs) ||
+				(value.timeoutMs as number) < WATCH_MIN_COMMAND_TIMEOUT_MS ||
+				(value.timeoutMs as number) > WATCH_MAX_COMMAND_TIMEOUT_MS)
+		)
+			throw invalid(`needs timeoutMs between ${WATCH_MIN_COMMAND_TIMEOUT_MS} and ${WATCH_MAX_COMMAND_TIMEOUT_MS}`);
 		return {
 			type: "command",
 			command: boundedText(value.command, MAX_WATCH_COMMAND_CHARS, "command"),
 			everyMs: everyMsOf(value.everyMs),
+			...(value.timeoutMs === undefined ? {} : { timeoutMs: value.timeoutMs as number }),
 			expect: {
 				...(expect.exitCode === undefined ? {} : { exitCode: expect.exitCode as number }),
 				...(expect.outputContains === undefined
@@ -272,7 +349,7 @@ export function parseWatchCondition(value: unknown): WatchCondition {
 		}
 		return {
 			type: "http",
-			url: publicHttpsUrl(value.url),
+			url: watchUrl(value.url),
 			...(statusIs === undefined ? {} : { statusIs }),
 			...(value.bodyContains === undefined
 				? {}
@@ -280,7 +357,7 @@ export function parseWatchCondition(value: unknown): WatchCondition {
 			everyMs: everyMsOf(value.everyMs),
 		};
 	}
-	throw invalid("is not a supported file, process, port, command or http condition");
+	throw invalid("is not a supported file, process, pid, port, command or http condition");
 }
 
 /** The cadence of a timer-based condition; undefined for the event-driven ones. */
@@ -314,15 +391,25 @@ export function describeWatchCondition(condition: WatchCondition): string {
 	switch (condition.type) {
 		case "file": {
 			const name = watchShortName(condition.path);
+			if (isWatchGlob(condition.path)) {
+				if (condition.on === "changed") return `watching files matching ${name} for changes`;
+				return condition.on === "created"
+					? `waiting for a file matching ${name} to appear`
+					: `waiting for the files matching ${name} to be removed`;
+			}
 			if (condition.on === "changed") return `watching ${name} for changes`;
 			return condition.on === "created" ? `waiting for ${name} to appear` : `waiting for ${name} to be removed`;
 		}
 		case "process":
 			return "waiting for a managed process to exit";
-		case "port":
-			return `checking port ${condition.port} every ${plainEvery(condition.everyMs)} for it to ${condition.on === "open" ? "open" : "close"}`;
+		case "pid":
+			return `checking every ${plainEvery(condition.everyMs)} for process ${condition.pid} to exit`;
+		case "port": {
+			const where = LOOPBACK_HOSTS.has(condition.host) ? "" : ` on ${condition.host}`;
+			return `checking port ${condition.port}${where} every ${plainEvery(condition.everyMs)} for it to ${condition.on === "open" ? "open" : "close"}`;
+		}
 		case "command":
-			return `running a read-only check every ${plainEvery(condition.everyMs)}`;
+			return `running a command check every ${plainEvery(condition.everyMs)}`;
 		case "http":
 			return `checking ${hostOf(condition.url)} every ${plainEvery(condition.everyMs)}`;
 	}
@@ -408,8 +495,11 @@ export function describeWatchFired(event: WatchFiredEvent): string {
 				? `A watched file appeared${label}`
 				: event.change === "deleted"
 					? `A watched file was removed${label}`
-					: `A watched file changed${label}`;
+					: event.facts.entries === undefined
+						? `A watched file changed${label}`
+						: `A watched folder or file pattern changed${label}`;
 		case "process":
+		case "pid":
 			return "A watched process exited";
 		case "port":
 			return `A watched port is now ${event.change === "open" ? "open" : "closed"}${label}`;

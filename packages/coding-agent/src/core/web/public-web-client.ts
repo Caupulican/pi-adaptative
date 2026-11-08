@@ -24,6 +24,34 @@ export class PublicWebHttpError extends Error {
 	}
 }
 
+/** A redirect the request was told not to follow: the exchange is complete, its status and target are the observation. */
+export class PublicWebRedirectError extends PublicWebHttpError {
+	readonly target: URL;
+	constructor(status: number, url: string, target: URL) {
+		super(status, url);
+		this.name = "PublicWebRedirectError";
+		this.target = target;
+	}
+}
+
+/**
+ * Which addresses a request may reach and which redirects it follows. The default is the public Internet with every
+ * redirect followed (WebFetch). `ownedServices` is for pages the owner runs or watches: loopback, private and
+ * unique-local addresses are reachable too, link-local (cloud metadata), multicast, broadcast, unspecified and
+ * reserved ones never are, and a redirect to another scheme, host or port is returned as a status instead of followed.
+ */
+export interface PublicWebPolicy {
+	readonly reach: "public" | "ownedServices";
+}
+
+const UNREACHABLE_RANGES: ReadonlySet<string> = new Set([
+	"linkLocal",
+	"multicast",
+	"broadcast",
+	"unspecified",
+	"reserved",
+]);
+
 export const nativeOperations: PublicWebOperations = {
 	lookup: (hostname) => lookup(hostname, { all: true }),
 	request: requestPublicWeb,
@@ -45,6 +73,17 @@ export function assertPublicAddress(address: string): void {
 	if (parsed?.range() !== "unicast" || (parsed.kind() === "ipv6" && (parsed.toByteArray()[0] & 0xe0) !== 0x20)) {
 		throw new Error("WebFetch permits public Internet addresses only");
 	}
+}
+
+export function assertReachableAddress(address: string, policy: PublicWebPolicy | undefined): void {
+	if (policy?.reach !== "ownedServices") {
+		assertPublicAddress(address);
+		return;
+	}
+	if (isIP(address) === 0 || UNREACHABLE_RANGES.has(ipaddr.process(address).range()))
+		throw new Error(
+			"This address is not reachable by a watch: link-local, multicast, broadcast and reserved ranges are refused",
+		);
 }
 
 /** DNS cannot be canceled on every platform. Detach promptly, consuming late settlement safely. */
@@ -110,7 +149,7 @@ export class PublicWebClient {
 		accept: string,
 		timeout = 30,
 		parentSignal?: AbortSignal,
-		options: { readonly maxBytes?: number } = {},
+		options: { readonly maxBytes?: number; readonly policy?: PublicWebPolicy } = {},
 	): Promise<FetchedWebContent> {
 		if (!Number.isFinite(timeout) || timeout <= 0 || timeout > MAX_WEB_TIMEOUT_SECONDS) {
 			throw new Error(`Timeout must be greater than 0 and at most ${MAX_WEB_TIMEOUT_SECONDS} seconds`);
@@ -119,7 +158,10 @@ export class PublicWebClient {
 		const operation = Effect.acquireUseRelease(
 			Effect.sync(() => {
 				const controller = new AbortController();
-				return { controller, result: this.fetchChain(input, accept, controller.signal, options.maxBytes) };
+				return {
+					controller,
+					result: this.fetchChain(input, accept, controller.signal, options.maxBytes, options.policy),
+				};
 			}),
 			({ result }) => Effect.tryPromise({ try: () => result, catch: (error) => error }),
 			({ controller, result }) =>
@@ -141,6 +183,7 @@ export class PublicWebClient {
 		accept: string,
 		signal: AbortSignal,
 		maxBytes?: number,
+		policy?: PublicWebPolicy,
 	): Promise<FetchedWebContent> {
 		let url = publicUrl(input);
 		const visited = new Set<string>();
@@ -159,7 +202,7 @@ export class PublicWebClient {
 				? [{ address: hostname, family }]
 				: await untilAborted(this.operations.lookup(hostname), signal);
 			if (addresses.length === 0) throw new Error("DNS returned no addresses");
-			for (const address of addresses) assertPublicAddress(address.address);
+			for (const address of addresses) assertReachableAddress(address.address, policy);
 			signal.throwIfAborted();
 			const { response, close } = await this.operations.request({
 				url,
@@ -182,6 +225,8 @@ export class PublicWebClient {
 					const location = response.headers.get("location");
 					if (!location) throw new Error("Redirect has no Location header");
 					const next = publicUrl(new URL(location, url).href);
+					if (policy?.reach === "ownedServices" && next.origin !== url.origin)
+						throw new PublicWebRedirectError(response.status, url.href, next);
 					if (url.protocol === "https:" && next.protocol !== "https:")
 						throw new Error("HTTPS downgrade redirect denied");
 					url = next;
