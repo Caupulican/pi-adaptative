@@ -18,7 +18,13 @@ export type { EditorCodeTheme } from "./components/editor-code.ts";
 export { Image, type ImageOptions, type ImageTheme } from "./components/image.ts";
 export { Input, type InputOptions } from "./components/input.ts";
 export { Loader, type LoaderIndicatorOptions } from "./components/loader.ts";
-export { type DefaultTextStyle, Markdown, type MarkdownOptions, type MarkdownTheme } from "./components/markdown.ts";
+export {
+	type DefaultTextStyle,
+	Markdown,
+	type MarkdownAlertKind,
+	type MarkdownOptions,
+	type MarkdownTheme,
+} from "./components/markdown.ts";
 export {
 	type SelectItem,
 	SelectList,

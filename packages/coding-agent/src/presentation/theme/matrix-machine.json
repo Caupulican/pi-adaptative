@@ -68,6 +68,7 @@
 		"mdQuoteBorder": "rule",
 		"mdHr": "rule",
 		"mdListBullet": "muted",
+		"inlineCodeBg": "codeSurfaceActive",
 		"mdBold": "gold",
 		"mdItalic": "lilac",
 		"mdReference": "sky",

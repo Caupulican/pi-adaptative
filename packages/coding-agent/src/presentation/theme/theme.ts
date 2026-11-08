@@ -79,6 +79,8 @@ const ThemeJsonSchema = Type.Object({
 		codeBlockBg: Type.Optional(ColorValueSchema),
 		/** Surface tone under the code row holding the editor cursor; falls back to codeBlockBg. */
 		codeBlockActiveBg: Type.Optional(ColorValueSchema),
+		/** Pill tone under inline `code`; optional, inline code is foreground-only without it. */
+		inlineCodeBg: Type.Optional(ColorValueSchema),
 		/** Wash painted over mouse-selected conversation cells; optional, selection falls back to reverse video without it. */
 		selectionBg: Type.Optional(ColorValueSchema),
 		// Syntax Highlighting (9 colors)
@@ -419,6 +421,7 @@ function createTheme(themeJson: ThemeJson, mode?: ColorMode, sourcePath?: string
 		"toolDiffRemovedBg",
 		"codeBlockBg",
 		"codeBlockActiveBg",
+		"inlineCodeBg",
 		"selectionBg",
 	]);
 	for (const [key, value] of Object.entries(resolvedColors)) {

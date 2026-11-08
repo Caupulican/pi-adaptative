@@ -6,6 +6,7 @@
 
 ### Changed
 
+- Markdown replies: code blocks drop their fence rows (a quiet language tag and the code surface frame the block), inline code can sit on a tinted pill (`inlineCodeBg`), `> [!NOTE]`/`TIP`/`IMPORTANT`/`WARNING`/`CAUTION` quotes render as coloured callouts, task items show `[✓]`/`[ ]`, bullets are `•`, and tables use the rule tone for borders, honour column alignment and rule off rows only when a cell wraps.
 - Matrix theme: keywords are violet, inline code is orange, links stay cyan, references are blue, strong text is gold and emphasis lilac; plain code text is the body colour so the token colours stand out, and comments are italic in every theme.
 
 ## [0.104.43] - 2026-11-08

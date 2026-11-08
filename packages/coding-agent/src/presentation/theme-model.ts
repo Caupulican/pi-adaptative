@@ -1,4 +1,10 @@
-import type { EditorTheme, MarkdownTheme, SelectListTheme, SettingsListTheme } from "@caupulican/pi-tui";
+import type {
+	EditorTheme,
+	MarkdownAlertKind,
+	MarkdownTheme,
+	SelectListTheme,
+	SettingsListTheme,
+} from "@caupulican/pi-tui";
 import chalk from "chalk";
 import type { SourceInfo } from "../core/source-info.ts";
 
@@ -64,6 +70,7 @@ export type ThemeBg =
 	| "toolDiffRemovedBg"
 	| "codeBlockBg"
 	| "codeBlockActiveBg"
+	| "inlineCodeBg"
 	| "selectionBg";
 
 // ============================================================================
@@ -290,12 +297,27 @@ export function getLanguageFromPath(filePath: string): string | undefined {
 	return extToLang[ext];
 }
 
+/** The tone of each `> [!KIND]` callout, from tokens every theme defines. */
+const ALERT_TONES: Record<MarkdownAlertKind, ThemeColor> = {
+	note: "mdLink",
+	tip: "success",
+	important: "syntaxKeyword",
+	warning: "warning",
+	caution: "error",
+};
+
 export function getMarkdownTheme(): MarkdownTheme {
 	return {
-		heading: (text: string) => theme.fg("mdHeading", text),
+		// H1 takes the accent, H2 the heading tone, deeper levels the link tone: the outline reads at a glance.
+		heading: (text: string, level = 2) =>
+			theme.fg(level <= 1 ? "accent" : level === 2 ? "mdHeading" : "mdLink", text),
 		link: (text: string) => theme.fg("mdLink", text),
 		linkUrl: (text: string) => theme.fg("mdLinkUrl", text),
-		code: (text: string) => theme.fg("mdCode", text),
+		// Inline code sits on a tinted pill when the theme defines `inlineCodeBg`.
+		code: (text: string) =>
+			theme.hasBg("inlineCodeBg")
+				? theme.bg("inlineCodeBg", theme.fg("mdCode", ` ${text} `))
+				: theme.fg("mdCode", text),
 		codeBlock: (text: string) => theme.fg("mdCodeBlock", text),
 		codeBlockBorder: (text: string) => theme.fg("mdCodeBlockBorder", text),
 		quote: (text: string) => theme.fg("mdQuote", text),
@@ -310,6 +332,7 @@ export function getMarkdownTheme(): MarkdownTheme {
 		strong: (text: string) => (theme.hasFg("mdBold") ? theme.fg("mdBold", theme.bold(text)) : theme.bold(text)),
 		emphasis: (text: string) =>
 			theme.hasFg("mdItalic") ? theme.fg("mdItalic", theme.italic(text)) : theme.italic(text),
+		alert: (kind: MarkdownAlertKind, text: string) => theme.fg(ALERT_TONES[kind], text),
 		...(theme.hasFg("mdReference") ? { reference: (text: string) => theme.fg("mdReference", text) } : {}),
 		highlightCode: (code: string, lang?: string): string[] => highlightCodeLines(code, lang, "themed"),
 		codeBlockSurface: codeSurface,

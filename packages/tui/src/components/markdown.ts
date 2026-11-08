@@ -97,12 +97,24 @@ export interface DefaultTextStyle {
 	underline?: boolean;
 }
 
+export type MarkdownAlertKind = "note" | "tip" | "important" | "warning" | "caution";
+
+const ALERT_LABELS: Record<MarkdownAlertKind, string> = {
+	note: "Note",
+	tip: "Tip",
+	important: "Important",
+	warning: "Warning",
+	caution: "Caution",
+};
+const ALERT_MARKER = /^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*\n?/i;
+
 /**
  * Theme functions for markdown elements.
  * Each function takes text and returns styled text with ANSI codes.
  */
 export interface MarkdownTheme {
-	heading: (text: string) => string;
+	/** Heading text; `level` is 1 to 6 so a theme can tell the levels apart. */
+	heading: (text: string, level?: number) => string;
 	link: (text: string) => string;
 	linkUrl: (text: string) => string;
 	code: (text: string) => string;
@@ -122,12 +134,14 @@ export interface MarkdownTheme {
 	emphasis?: (text: string) => string;
 	/** File paths (`src/a.ts:12`) and issue numbers (`#42`) found in plain text; unstyled when absent. */
 	reference?: (text: string) => string;
+	/** Tone of a `> [!NOTE]` style callout's bar and label; such quotes render as plain quotes when absent. */
+	alert?: (kind: MarkdownAlertKind, text: string) => string;
 	highlightCode?: (code: string, lang?: string) => string[];
 	/** Prefix applied to each rendered code block line (default: "  ") */
 	codeBlockIndent?: string;
 	/** Surface tone painted behind every row of a code block, fence rows included. */
 	codeBlockSurface?: (text: string) => string;
-	/** Style for the language label after the opening fence (default: styled with codeBlockBorder). */
+	/** Style for the language tag above a code block (default: styled with codeBlockBorder). */
 	codeBlockLabel?: (text: string) => string;
 }
 
@@ -293,9 +307,9 @@ export class Markdown extends CachedTextComponent implements Component {
 				// the default text style.
 				let headingStyleFn: (text: string) => string;
 				if (headingLevel === 1) {
-					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(this.theme.underline(text)));
+					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(this.theme.underline(text)), 1);
 				} else {
-					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(text));
+					headingStyleFn = (text: string) => this.theme.heading(this.theme.bold(text), headingLevel);
 				}
 
 				const headingStyleContext: InlineStyleContext = {
@@ -304,7 +318,7 @@ export class Markdown extends CachedTextComponent implements Component {
 				};
 
 				const headingText = this.renderInlineTokens(token.tokens || [], headingStyleContext);
-				const styledHeading = headingLevel >= 3 ? headingStyleFn(headingPrefix) + headingText : headingText;
+				const styledHeading = headingLevel >= 2 ? headingStyleFn(headingPrefix) + headingText : headingText;
 				lines.push(styledHeading);
 				if (nextTokenType && nextTokenType !== "space") {
 					lines.push(""); // Add spacing after headings (unless space token follows)
@@ -329,14 +343,13 @@ export class Markdown extends CachedTextComponent implements Component {
 			case "code": {
 				const indent = this.theme.codeBlockIndent ?? "  ";
 				const label = this.theme.codeBlockLabel;
-				const rows: string[] = [
-					label && token.lang
-						? this.theme.codeBlockBorder("```") + label(token.lang)
-						: this.theme.codeBlockBorder(`\`\`\`${token.lang || ""}`),
-				];
+				// The language is a quiet tag above the code, not a fence; the surface (or the indent) frames the block.
+				const language = token.lang?.trim().split(/\s+/)[0] || undefined;
+				const surface = this.theme.codeBlockSurface;
+				const rows: string[] = [];
+				if (language) rows.push(indent + (label ?? this.theme.codeBlockBorder)(language));
+				else if (surface) rows.push("");
 				if (this.theme.highlightCode) {
-					// The language is the first word of the info string ("ts title=a.ts" is still ts).
-					const language = token.lang?.trim().split(/\s+/)[0] || undefined;
 					for (const hlLine of this.theme.highlightCode(token.text, language)) {
 						rows.push(`${indent}${hlLine}`);
 					}
@@ -346,12 +359,11 @@ export class Markdown extends CachedTextComponent implements Component {
 						rows.push(`${indent}${this.theme.codeBlock(codeLine)}`);
 					}
 				}
-				rows.push(this.theme.codeBlockBorder("```"));
-				const surface = this.theme.codeBlockSurface;
 				if (surface) {
+					rows.push("");
 					// Wrap first so every wrapped row carries the surface out to the content edge.
 					for (const row of rows) {
-						for (const wrapped of wrapTextWithAnsi(row, width)) {
+						for (const wrapped of row === "" ? [""] : wrapTextWithAnsi(row, width)) {
 							const padded = wrapped + " ".repeat(Math.max(0, width - visibleWidth(wrapped)));
 							const painted = surface(padded);
 							// A surface that paints nothing (theme without one, NO_COLOR) leaves the row unpadded.
@@ -382,7 +394,10 @@ export class Markdown extends CachedTextComponent implements Component {
 			}
 
 			case "blockquote": {
-				const quoteStyle = (text: string) => this.theme.quote(this.theme.italic(text));
+				const alertKind = this.theme.alert ? this.alertKindOf(token as Tokens.Blockquote) : undefined;
+				const quoteStyle = alertKind
+					? (text: string) => text
+					: (text: string) => this.theme.quote(this.theme.italic(text));
 				const quoteStylePrefix = this.getStylePrefix(quoteStyle);
 				const applyQuoteStyle = (line: string): string => {
 					if (!quoteStylePrefix) {
@@ -402,8 +417,13 @@ export class Markdown extends CachedTextComponent implements Component {
 					applyText: (text: string) => text,
 					stylePrefix: quoteStylePrefix,
 				};
-				const quoteTokens = token.tokens || [];
+				const quoteTokens = alertKind ? this.withoutAlertMarker(token as Tokens.Blockquote) : token.tokens || [];
 				const renderedQuoteLines: string[] = [];
+				const barStyle = alertKind
+					? (text: string) => this.theme.alert!(alertKind, text)
+					: (text: string) => this.theme.quoteBorder(text);
+				if (alertKind)
+					renderedQuoteLines.push(this.theme.alert!(alertKind, this.theme.bold(ALERT_LABELS[alertKind])));
 				for (let i = 0; i < quoteTokens.length; i++) {
 					const quoteToken = quoteTokens[i];
 					const nextQuoteToken = quoteTokens[i + 1];
@@ -421,7 +441,7 @@ export class Markdown extends CachedTextComponent implements Component {
 					const styledLine = applyQuoteStyle(quoteLine);
 					const wrappedLines = wrapTextWithAnsi(styledLine, quoteContentWidth);
 					for (const wrappedLine of wrappedLines) {
-						lines.push(this.theme.quoteBorder("│ ") + wrappedLine);
+						lines.push(barStyle("│ ") + wrappedLine);
 					}
 				}
 				if (nextTokenType && nextTokenType !== "space") {
@@ -457,6 +477,27 @@ export class Markdown extends CachedTextComponent implements Component {
 		}
 
 		return lines;
+	}
+
+	/** The callout kind of a `> [!NOTE]` style quote, when its first line is the marker. */
+	private alertKindOf(token: Tokens.Blockquote): MarkdownAlertKind | undefined {
+		const first = token.tokens?.[0];
+		if (first?.type !== "paragraph") return undefined;
+		const match = ALERT_MARKER.exec(first.text);
+		return match ? (match[1].toLowerCase() as MarkdownAlertKind) : undefined;
+	}
+
+	/** The quote's tokens with the `[!KIND]` marker taken off the first paragraph. */
+	private withoutAlertMarker(token: Tokens.Blockquote): Token[] {
+		const [first, ...rest] = token.tokens ?? [];
+		if (first?.type !== "paragraph") return token.tokens ?? [];
+		const marker = ALERT_MARKER.exec(first.text)?.[0] ?? "";
+		const inline = [...(first.tokens ?? [])];
+		const head = inline[0];
+		if (head && "text" in head) inline[0] = { ...head, text: head.text.slice(marker.length) } as Token;
+		return [{ ...first, text: first.text.slice(marker.length), tokens: inline } as Token, ...rest].filter(
+			(entry) => !(entry.type === "paragraph" && entry.text === ""),
+		);
 	}
 
 	/** Plain text with its references (paths, `#42`) in the theme's reference style; the rest keeps the surrounding style. */
@@ -592,8 +633,10 @@ export class Markdown extends CachedTextComponent implements Component {
 				? this.options.preserveOrderedListMarkers
 					? (this.getOrderedListMarker(item) ?? `${startNumber + i}. `)
 					: `${startNumber + i}. `
-				: "- ";
-			const taskMarker = item.task ? `[${item.checked ? "x" : " "}] ` : "";
+				: item.task
+					? ""
+					: "• ";
+			const taskMarker = item.task ? `[${item.checked ? "✓" : " "}] ` : "";
 			const marker = bullet + taskMarker;
 			const firstPrefix = indent + this.theme.listBullet(marker);
 			const continuationPrefix = indent + " ".repeat(visibleWidth(marker));
@@ -771,9 +814,21 @@ export class Markdown extends CachedTextComponent implements Component {
 			}
 		}
 
+		// Borders take the rule tone, so the cells carry the eye; columns follow the markdown alignment row.
+		const border = (text: string) => this.theme.hr(text);
+		const bar = border("│");
+		const alignCell = (text: string, colIdx: number): string => {
+			const gap = Math.max(0, columnWidths[colIdx] - visibleWidth(text));
+			const align = token.align?.[colIdx];
+			if (align === "right") return " ".repeat(gap) + text;
+			if (align === "center") return " ".repeat(Math.floor(gap / 2)) + text + " ".repeat(gap - Math.floor(gap / 2));
+			return text + " ".repeat(gap);
+		};
+		const joinRow = (cells: string[]) => `${bar} ${cells.join(` ${bar} `)} ${bar}`;
+
 		// Render top border
 		const topBorderCells = columnWidths.map((w) => "─".repeat(w));
-		lines.push(`┌─${topBorderCells.join("─┬─")}─┐`);
+		lines.push(border(`┌─${topBorderCells.join("─┬─")}─┐`));
 
 		// Render header with wrapping
 		const headerCellLines: string[][] = token.header.map((cell, i) => {
@@ -784,43 +839,40 @@ export class Markdown extends CachedTextComponent implements Component {
 
 		for (let lineIdx = 0; lineIdx < headerLineCount; lineIdx++) {
 			const rowParts = headerCellLines.map((cellLines, colIdx) => {
-				const text = cellLines[lineIdx] || "";
-				const padded = text + " ".repeat(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
-				return this.theme.bold(padded);
+				return this.theme.bold(alignCell(cellLines[lineIdx] || "", colIdx));
 			});
-			lines.push(`│ ${rowParts.join(" │ ")} │`);
+			lines.push(joinRow(rowParts));
 		}
 
 		// Render separator
 		const separatorCells = columnWidths.map((w) => "─".repeat(w));
-		const separatorLine = `├─${separatorCells.join("─┼─")}─┤`;
+		const separatorLine = border(`├─${separatorCells.join("─┼─")}─┤`);
 		lines.push(separatorLine);
 
-		// Render rows with wrapping
-		for (let rowIndex = 0; rowIndex < token.rows.length; rowIndex++) {
-			const row = token.rows[rowIndex];
-			const rowCellLines: string[][] = row.map((cell, i) => {
-				const text = this.renderInlineTokens(cell.tokens || [], styleContext);
-				return this.wrapCellText(text, columnWidths[i]);
-			});
+		// Render rows with wrapping; a row rule appears only when some cell wraps, so rows stay tellable apart.
+		const wrappedRows = token.rows.map((row) =>
+			row.map((cell, i) =>
+				this.wrapCellText(this.renderInlineTokens(cell.tokens || [], styleContext), columnWidths[i]),
+			),
+		);
+		const anyWrapped = wrappedRows.some((cells) => cells.some((cell) => cell.length > 1));
+		for (let rowIndex = 0; rowIndex < wrappedRows.length; rowIndex++) {
+			const rowCellLines = wrappedRows[rowIndex];
 			const rowLineCount = Math.max(...rowCellLines.map((c) => c.length));
 
 			for (let lineIdx = 0; lineIdx < rowLineCount; lineIdx++) {
-				const rowParts = rowCellLines.map((cellLines, colIdx) => {
-					const text = cellLines[lineIdx] || "";
-					return text + " ".repeat(Math.max(0, columnWidths[colIdx] - visibleWidth(text)));
-				});
-				lines.push(`│ ${rowParts.join(" │ ")} │`);
+				const rowParts = rowCellLines.map((cellLines, colIdx) => alignCell(cellLines[lineIdx] || "", colIdx));
+				lines.push(joinRow(rowParts));
 			}
 
-			if (rowIndex < token.rows.length - 1) {
+			if (anyWrapped && rowIndex < wrappedRows.length - 1) {
 				lines.push(separatorLine);
 			}
 		}
 
 		// Render bottom border
 		const bottomBorderCells = columnWidths.map((w) => "─".repeat(w));
-		lines.push(`└─${bottomBorderCells.join("─┴─")}─┘`);
+		lines.push(border(`└─${bottomBorderCells.join("─┴─")}─┘`));
 
 		if (nextTokenType && nextTokenType !== "space") {
 			lines.push(""); // Add spacing after table

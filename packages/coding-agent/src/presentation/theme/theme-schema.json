@@ -240,6 +240,10 @@
 					"$ref": "#/$defs/colorValue",
 					"description": "Context lines in tool diffs"
 				},
+				"inlineCodeBg": {
+					"$ref": "#/$defs/colorValue",
+					"description": "Optional pill tone under inline code"
+				},
 				"toolDiffAddedBg": {
 					"$ref": "#/$defs/colorValue",
 					"description": "Optional surface tone under added diff rows"
