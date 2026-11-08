@@ -134,6 +134,8 @@ export interface MarkdownTheme {
 	emphasis?: (text: string) => string;
 	/** File paths (`src/a.ts:12`) and issue numbers (`#42`) found in plain text; unstyled when absent. */
 	reference?: (text: string) => string;
+	/** A code line's own surface (an added or removed diff row), painted instead of the block surface; undefined keeps it. */
+	codeLineSurface?: (line: string, language?: string) => ((text: string) => string) | undefined;
 	/** Tone of a `> [!NOTE]` style callout's bar and label; such quotes render as plain quotes when absent. */
 	alert?: (kind: MarkdownAlertKind, text: string) => string;
 	highlightCode?: (code: string, lang?: string) => string[];
@@ -347,25 +349,23 @@ export class Markdown extends CachedTextComponent implements Component {
 				const language = token.lang?.trim().split(/\s+/)[0] || undefined;
 				const surface = this.theme.codeBlockSurface;
 				const rows: string[] = [];
+				const rowSurfaces: Array<((text: string) => string) | undefined> = [];
 				if (language) rows.push(indent + (label ?? this.theme.codeBlockBorder)(language));
 				else if (surface) rows.push("");
-				if (this.theme.highlightCode) {
-					for (const hlLine of this.theme.highlightCode(token.text, language)) {
-						rows.push(`${indent}${hlLine}`);
-					}
-				} else {
-					// Split code by newlines and style each line
-					for (const codeLine of token.text.split("\n")) {
-						rows.push(`${indent}${this.theme.codeBlock(codeLine)}`);
-					}
+				const sourceLines = token.text.split("\n");
+				const highlighted = this.theme.highlightCode?.(token.text, language);
+				for (const [lineIndex, sourceLine] of sourceLines.entries()) {
+					rowSurfaces[rows.length] = this.theme.codeLineSurface?.(sourceLine, language);
+					rows.push(`${indent}${highlighted ? (highlighted[lineIndex] ?? "") : this.theme.codeBlock(sourceLine)}`);
 				}
 				if (surface) {
 					rows.push("");
 					// Wrap first so every wrapped row carries the surface out to the content edge.
-					for (const row of rows) {
+					for (const [rowIndex, row] of rows.entries()) {
+						const paint = rowSurfaces[rowIndex] ?? surface;
 						for (const wrapped of row === "" ? [""] : wrapTextWithAnsi(row, width)) {
 							const padded = wrapped + " ".repeat(Math.max(0, width - visibleWidth(wrapped)));
-							const painted = surface(padded);
+							const painted = paint(padded);
 							// A surface that paints nothing (theme without one, NO_COLOR) leaves the row unpadded.
 							lines.push(painted === padded ? wrapped : painted);
 						}

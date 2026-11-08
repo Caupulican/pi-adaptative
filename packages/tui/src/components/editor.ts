@@ -397,6 +397,19 @@ function createScrollBorder(direction: "↑" | "↓", hiddenLineCount: number, w
 	return sliceByColumn(indicator, 0, indicatorWidth, true) + ellipsis;
 }
 
+/** A placeholder of " · " separated hints, kept to whole hints that fit; the tail is dropped, never cut mid-word. */
+function fitPlaceholder(text: string, width: number): string {
+	if (visibleWidth(text) <= width) return text;
+	const [first = "", ...rest] = text.split(" · ");
+	let fitted = first;
+	for (const hint of rest) {
+		const next = `${fitted} · ${hint}`;
+		if (visibleWidth(next) > width) break;
+		fitted = next;
+	}
+	return fitted;
+}
+
 export class Editor implements Component, Focusable {
 	private state: EditorState = {
 		lines: [""],
@@ -852,7 +865,11 @@ export class Editor implements Component, Focusable {
 					displayText = before + marker + cursor + restAfter;
 					// lineVisibleWidth stays the same - we're replacing, not adding
 				} else if (this.placeholder && !this.privateContent && this.isEditorEmpty()) {
-					const hint = truncateToWidth(this.placeholder, Math.max(1, contentWidth), "");
+					const hint = truncateToWidth(
+						fitPlaceholder(this.placeholder, contentWidth),
+						Math.max(1, contentWidth),
+						"",
+					);
 					const hintGraphemes = [...graphemeSegmenter.segment(hint)];
 					const firstGrapheme = hintGraphemes[0]?.segment || " ";
 					const restHint = hint.slice(firstGrapheme.length);

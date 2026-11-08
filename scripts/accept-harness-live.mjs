@@ -32,7 +32,7 @@ import {
 	statSync,
 	writeFileSync,
 } from "node:fs";
-import { homedir, tmpdir } from "node:os";
+import { cpus, homedir, loadavg, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { args, flag } from "./live-args.mjs";
@@ -197,12 +197,16 @@ const type = async (pane, text) => {
 	await sleep(400);
 };
 const screen = (pane, lines = 400) => herdr("pane", "read", pane, "--source", "recent-unwrapped", "--lines", String(lines));
-const waitFor = async (label, check, timeoutMs, everyMs = 3000) => {
+/** A timeout names the machine's load and, when the wait watches a pane, what that pane showed, so a slow start can be told from a stuck one. */
+const waitFor = async (label, check, timeoutMs, everyMs = 3000, evidence = undefined) => {
 	const end = Date.now() + timeoutMs;
 	for (;;) {
 		const value = await check();
 		if (value) return value;
-		if (Date.now() > end) throw new Error(`timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${label}`);
+		if (Date.now() > end) {
+			const shown = evidence ? `; it showed: ${evidence().trim().split("\n").slice(-6).join(" | ").slice(0, 400)}` : "";
+			throw new Error(`timed out after ${Math.round(timeoutMs / 1000)}s waiting for ${label} (load ${loadavg()[0].toFixed(1)} on ${cpus().length} cpus${shown})`);
+		}
 		await sleep(everyMs);
 	}
 };
@@ -320,7 +324,7 @@ const SCENARIOS = [
 	scenario("s1", "the build starts and shows the prompt", async () => {
 		state.main = openPane();
 		launch(state.main, SANDBOX);
-		await waitFor("the prompt", () => /Ask anything/.test(screen(state.main, 60)), 90_000, 2000);
+		await waitFor("the prompt", () => /Ask anything/.test(screen(state.main, 60)), 90_000, 2000, () => screen(state.main, 20));
 		return "prompt visible";
 	}),
 	scenario("s2", "bots are created with their own models", async () => {
@@ -417,7 +421,7 @@ const SCENARIOS = [
 	scenario("s8", "a bot answers a real question about this repository", async () => {
 		state.repo = openPane();
 		launch(state.repo, REPO);
-		await waitFor("the prompt in the repo session", () => /Ask anything/.test(screen(state.repo, 60)), 90_000, 2000);
+		await waitFor("the prompt in the repo session", () => /Ask anything/.test(screen(state.repo, 60)), 90_000, 2000, () => screen(state.repo, 20));
 		await type(state.repo, `/bot new auditor ${MODEL_A} You are a read-only engineer on the pi-adaptative repository. Cite file:line for every claim. Never edit files.`);
 		await waitFor("auditor", () => botIds().includes("auditor"), 60_000, 2000);
 		const source = readFileSync(join(REPO, "packages/coding-agent/src/core/channels/owner-channel.ts"), "utf8");

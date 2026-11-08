@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Changed
+
+- The input's key hints drop whole hints that do not fit a narrow row instead of cutting one mid-word, and added and removed rows of a fenced `diff` block carry the diff tone across the row.
+- The live gate's start-up timeouts name the machine's load and the last lines the pane showed, so a slow start can be told from a stuck one.
+
 ## [0.104.44] - 2026-11-08
 
 ### Added

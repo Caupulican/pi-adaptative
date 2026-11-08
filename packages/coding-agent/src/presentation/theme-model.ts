@@ -332,6 +332,17 @@ export function getMarkdownTheme(): MarkdownTheme {
 		strong: (text: string) => (theme.hasFg("mdBold") ? theme.fg("mdBold", theme.bold(text)) : theme.bold(text)),
 		emphasis: (text: string) =>
 			theme.hasFg("mdItalic") ? theme.fg("mdItalic", theme.italic(text)) : theme.italic(text),
+		// An added or removed row of a fenced diff takes the diff tone across the whole row, as tool diffs do.
+		codeLineSurface: (line: string, lang?: string) => {
+			if (lang !== "diff" && lang !== "patch") return undefined;
+			const tone: ThemeBg | undefined =
+				line.startsWith("+") && !line.startsWith("+++")
+					? "toolDiffAddedBg"
+					: line.startsWith("-") && !line.startsWith("---")
+						? "toolDiffRemovedBg"
+						: undefined;
+			return tone && theme.hasBg(tone) ? (text: string) => theme.bg(tone, text) : undefined;
+		},
 		alert: (kind: MarkdownAlertKind, text: string) => theme.fg(ALERT_TONES[kind], text),
 		...(theme.hasFg("mdReference") ? { reference: (text: string) => theme.fg("mdReference", text) } : {}),
 		highlightCode: (code: string, lang?: string): string[] => highlightCodeLines(code, lang, "themed"),
