@@ -344,7 +344,9 @@ export function getMarkdownTheme(): MarkdownTheme {
 			return tone && theme.hasBg(tone) ? (text: string) => theme.bg(tone, text) : undefined;
 		},
 		alert: (kind: MarkdownAlertKind, text: string) => theme.fg(ALERT_TONES[kind], text),
-		...(theme.hasFg("mdReference") ? { reference: (text: string) => theme.fg("mdReference", text) } : {}),
+		...(theme.hasFg("mdReference")
+			? { reference: (text: string) => theme.fg("mdReference", theme.underline(text)) }
+			: {}),
 		highlightCode: (code: string, lang?: string): string[] => highlightCodeLines(code, lang, "themed"),
 		codeBlockSurface: codeSurface,
 		codeBlockLabel: (text: string) => theme.fg("muted", text),

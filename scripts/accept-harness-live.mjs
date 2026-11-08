@@ -213,11 +213,15 @@ const waitFor = async (label, check, timeoutMs, everyMs = 3000, evidence = undef
 
 /** The agent-facing markers that must never reach the owner's screen, with the text around the first one found. */
 const AGENT_FACING = ["[team-bot-message]", "[bot:", "<untrusted_content", "[harness]", '"MUST"', "REPORT REVIEW"];
+/** A record or failure identifier (`background_tool_task`, `tool_result_error`): three or more snake_case parts, not part of a path. */
+const TECHNICAL_ID = /(?<![\w/.~@:-])[a-z]{2,}(?:_[a-z0-9]{2,}){2,}(?![\w/.@-])/;
 const agentFacingLeak = (text) => {
 	for (const marker of AGENT_FACING) {
 		const at = text.indexOf(marker);
 		if (at >= 0) return `${marker} in: ${text.slice(Math.max(0, at - 120), at + 160).replace(/\s+/g, " ")}`;
 	}
+	const id = TECHNICAL_ID.exec(text);
+	if (id) return `technical identifier ${id[0]} in: ${text.slice(Math.max(0, id.index - 120), id.index + 160).replace(/\s+/g, " ")}`;
 	return undefined;
 };
 
@@ -511,6 +515,10 @@ const SCENARIOS = [
 		const routineArgs = entries().filter((e) => e.message?.role === "toolResult" && e.message?.toolName === "routine" && (e.message?.details?.piToolFailureDirective || e.message?.details?.piToolFailureMemory)).length;
 		if (routineArgs > 0) problems.push(`${routineArgs} routine call(s) bounced for invalid arguments`);
 		if (fixtureDigest() !== FIXTURES_AT_START) problems.push("a fixture (mailbox or Trello export) was modified during the run");
+		for (const pane of [state.main, state.repo].filter(Boolean)) {
+			const leak = agentFacingLeak(screen(pane, 600));
+			if (leak) problems.push(`the owner's screen shows machine text: ${leak.slice(0, 220)}`);
+		}
 		const stuck = lanes().filter((l) => l.status === "awaiting_parent");
 		const bots = botStore().bots;
 		const stuckBots = (Array.isArray(bots) ? bots : Object.values(bots ?? {})).filter((b) => b.state === "awaiting_parent");

@@ -25,6 +25,7 @@ import type { ModelRegistry } from "../../core/model-registry.ts";
 import type { AutoLearnSettings } from "../../core/settings/settings-schema.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
 import { formatKeyText } from "../../presentation/keybinding-hints.ts";
+import { plainLabel } from "../../presentation/plain-text.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import { getChangelogPath, parseChangelog } from "../../utils/changelog.ts";
 import { getProcessMemoryMb } from "../../utils/process-memory.ts";
@@ -276,7 +277,7 @@ export function handleUsageCommand(host: UsageReportHost): void {
 			: hostTurn.lowered
 				? `${hostTurn.sessionLevel} to ${hostTurn.resolvedLevel}`
 				: "inherited";
-		info += `${theme.fg("dim", "Host-turn thinking:")} ${effect} (${loweredHostTurns} lowered; last ${hostTurn.customType})\n`;
+		info += `${theme.fg("dim", "Host-turn thinking:")} ${effect} (${loweredHostTurns} lowered; last ${hostTurn.customType ? plainLabel(hostTurn.customType) : "none"})\n`;
 	} else {
 		info += `${theme.fg("dim", "Host-turn thinking:")} no host-initiated turn yet\n`;
 	}

@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- A tool call the harness bounced now reads as one plain sentence in the Execution pane (it showed the `[harness] {"MUST":...}` record written for the model), and record types (`background_tool_task`, `parent_input_wake`, and the rest) show as plain labels in custom messages, the session tree and the report; a message body that is a payload for the model reads "Details for the assistant; they are kept in the transcript." File references in replies are underlined. The live gate now scans the owner's screens for machine text and snake_case identifiers.
+
 ## [0.104.45] - 2026-11-08
 
 ### Changed

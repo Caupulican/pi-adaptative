@@ -21,6 +21,7 @@ import {
 } from "../../../core/export-html/session-tree-foundations.mjs";
 import { isSessionLifecycleEntry, type SessionTreeNode } from "../../../kernel/node.ts";
 import { keyHint, keyText } from "../../../presentation/keybinding-hints.ts";
+import { isModelFacingText, MODEL_FACING_PLACEHOLDER, plainLabel } from "../../../presentation/plain-text.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import { renderTitleBadge } from "../../../presentation/tool-title.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -267,7 +268,7 @@ class TreeList implements Component {
 				break;
 			}
 			case "custom_message": {
-				parts.push(entry.customType);
+				parts.push(plainLabel(entry.customType));
 				if (typeof entry.content === "string") {
 					parts.push(entry.content);
 				} else {
@@ -292,7 +293,7 @@ class TreeList implements Component {
 				parts.push("thinking", entry.thinkingLevel);
 				break;
 			case "custom":
-				parts.push("custom", entry.customType);
+				parts.push("record", plainLabel(entry.customType));
 				break;
 			case "label":
 				parts.push("label", entry.label ?? "");
@@ -475,7 +476,7 @@ class TreeList implements Component {
 			}
 			case "custom_message": {
 				const content = extractTextContent(entry.content, 200);
-				result = `${renderTitleBadge(theme, { label: entry.customType })}: ${normalize(content)}`;
+				result = `${renderTitleBadge(theme, { label: plainLabel(entry.customType) })}: ${normalize(isModelFacingText(content) ? MODEL_FACING_PLACEHOLDER : content)}`;
 				break;
 			}
 			case "compaction": {
@@ -506,8 +507,8 @@ class TreeList implements Component {
 				break;
 			case "custom":
 				result = renderTitleBadge(theme, {
-					label: "custom",
-					details: [{ text: entry.customType, color: "dim" }],
+					label: "record",
+					details: [{ text: plainLabel(entry.customType), color: "dim" }],
 					badgeColor: "dim",
 				});
 				break;

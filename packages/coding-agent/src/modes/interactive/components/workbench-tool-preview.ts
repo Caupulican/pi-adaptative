@@ -10,6 +10,7 @@ import { renderDiff } from "../../../presentation/diff.ts";
 import { getLanguageFromPath, highlightCode, theme } from "../../../presentation/theme-model.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { SYSTEM_ONE_TONE } from "./decision-graph-render.ts";
+import { harnessRecordText, toolFailureText } from "./tool-failure-text.ts";
 import { metaRow, toneRow } from "./workbench-pane.ts";
 
 /** Who produced a piece of evidence, captured when the preview is created, never re-derived later. */
@@ -309,9 +310,13 @@ export function createWorkbenchToolPreview(
 			.join("\n");
 		diff = true;
 	} else {
-		for (const block of result.content) {
+		// A bounced call reads as the owner's sentence, never the JSON record written for the model.
+		const bounced = result.isError ? toolFailureText(result.details) : undefined;
+		if (bounced) body = `${bounced}\n`;
+		for (const block of bounced ? [] : result.content) {
 			if (body.length >= 16_384) break;
-			if (block.type === "text" && block.text) body += `${block.text.slice(0, 16_384 - body.length)}\n`;
+			if (block.type === "text" && block.text)
+				body += `${(result.isError ? harnessRecordText(block.text) : undefined) ?? block.text.slice(0, 16_384 - body.length)}\n`;
 		}
 	}
 	const bounded = sanitizeBinaryOutput(stripAnsi(body.slice(0, 16_384)))

@@ -18,6 +18,7 @@ import {
 } from "../../../core/foreground-terminal-handoff-controller.ts";
 import { isPlainRecord } from "../../../core/util/value-guards.ts";
 import type { CustomMessage } from "../../../kernel/index.ts";
+import { isModelFacingText, MODEL_FACING_PLACEHOLDER, plainLabel } from "../../../presentation/plain-text.ts";
 import { getMarkdownTheme, theme } from "../../../presentation/theme-model.ts";
 import { renderTitleBadge } from "../../../presentation/tool-title.ts";
 
@@ -112,7 +113,7 @@ export class CustomMessageComponent extends Container {
 		this.box.clear();
 
 		// Default rendering: label + content
-		this.box.addChild(new Text(renderTitleBadge(theme, { label: this.message.customType }), 0, 0));
+		this.box.addChild(new Text(renderTitleBadge(theme, { label: plainLabel(this.message.customType) }), 0, 0));
 		this.box.addChild(new Spacer(1));
 
 		// Extract text content
@@ -127,7 +128,7 @@ export class CustomMessageComponent extends Container {
 		}
 
 		this.box.addChild(
-			new Markdown(text, 0, 0, this.markdownTheme, {
+			new Markdown(isModelFacingText(text) ? MODEL_FACING_PLACEHOLDER : text, 0, 0, this.markdownTheme, {
 				color: (text: string) => theme.fg("customMessageText", text),
 			}),
 		);
