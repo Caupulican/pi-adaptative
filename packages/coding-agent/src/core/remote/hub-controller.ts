@@ -84,10 +84,12 @@ export class RemoteHubController {
 	 */
 	async start(): Promise<string | undefined> {
 		const config = this.readConfig();
+		// A hub the owner never turned on has nothing to host and nothing to wait for: no lock, no watch, no OS lookup.
+		if (!config?.enabled) return undefined;
 		try {
 			// Off Linux the OS machine id is read asynchronously; until it is, a recorded host lock cannot be judged.
 			await warmHostIdentity();
-			if (!config?.enabled || !this.takeHost()) {
+			if (!this.takeHost()) {
 				// Not hosting: wait for the hosting session (or one started later) to let the hub go.
 				this.watchHost();
 				return undefined;
