@@ -582,6 +582,28 @@ export function generateUnifiedPatch(path: string, oldContent: string, newConten
 	});
 }
 
+const MODEL_DIFF_MAX_LINES = 48;
+const MODEL_DIFF_MAX_CHARS = 4000;
+
+/**
+ * The changed region as the model should see it after an edit, so it does not spend a round reading the file back to
+ * check the result. Whole diff lines only, bounded; the rest is counted so the model knows to read if it needs more.
+ */
+export function boundedDiffForModel(diff: string): string {
+	const lines = diff.split("\n");
+	const kept: string[] = [];
+	let chars = 0;
+	for (const line of lines) {
+		if (kept.length >= MODEL_DIFF_MAX_LINES || chars + line.length > MODEL_DIFF_MAX_CHARS) break;
+		kept.push(line);
+		chars += line.length + 1;
+	}
+	const omitted = lines.length - kept.length;
+	return omitted > 0
+		? `${kept.join("\n")}\n... ${omitted} more changed line(s); read the file for the rest.`
+		: kept.join("\n");
+}
+
 /**
  * Generate a display-oriented diff string with line numbers and context.
  * Returns both the diff string and the first changed line number (in the new file).

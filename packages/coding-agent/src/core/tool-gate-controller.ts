@@ -29,6 +29,7 @@ import type {
 } from "./objective-execution/repository-mutation-observer.ts";
 import { detailsWithRuleIds, type RuleHookDelivery } from "./rule-hooks/rule-hook-delivery.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
+import { SerialCallHint } from "./serial-call-hint.ts";
 import type { SoulController } from "./soul/soul-controller.ts";
 import type { SystemOneController } from "./system-one/index.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
@@ -260,6 +261,7 @@ export class ToolGateController {
 	// Agent core retains this exact call object from admission through detached finalization.
 	// Provider IDs can repeat on later requests while an earlier background call remains live.
 	private readonly admittedInvocations = new WeakMap<AgentToolCall, AdmittedToolInvocation>();
+	private readonly serialCallHint = new SerialCallHint();
 
 	constructor(deps: ToolGateControllerDeps) {
 		this.deps = deps;
@@ -765,6 +767,8 @@ export class ToolGateController {
 			}
 			// A reverted soul.md change is told to the model in the result of the call that made it.
 			if (soulNotice) content = [...content, { type: "text", text: soulNotice }];
+			const serialNote = resolvedIsError ? undefined : this.serialCallHint.note(assistantMessage, toolCall.name);
+			if (serialNote) content = [...content, { type: "text", text: serialNote }];
 			finishSucceeded = !resolvedIsError;
 
 			if (

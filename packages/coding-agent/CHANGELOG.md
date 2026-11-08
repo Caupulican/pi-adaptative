@@ -16,6 +16,7 @@
 - The root's own file edits are no longer refused (`orchestrator.delegationGate` is off by default; the strict split stays as an opt-in), and the system prompt names the working directory's top-level entries so a plain request needs no searching.
 
 ### Changed
+- Fewer tool rounds: a successful `edit` returns the changed region with new-file line numbers (bounded), so the model no longer reads the file back to verify; after two consecutive rounds that each made a single independent lookup, the result carries a one-line note to batch independent reads and searches in one message. Measured over 147 sessions: 62% of rounds carried one call, about 9% of rounds were avoidable serial lookups, and 17% of edits were followed by a read of the same file.
 - Model router `selectionMode` now defaults to `hybrid`: unset tiers are chosen from the candidate pool (subscription first) instead of warning at startup that they are unset; pinned tiers are unchanged.
 
 - Bots have readable names: the id stays the handle, a display name (`Trello Scout`) is what the roster shows, a bot made on the fly without an id is named from its purpose (numbered when taken), `/bot rename <id> <name...>` renames, and the roster row shows the name while the selected bot's `@id` and model are hints on the line below.
