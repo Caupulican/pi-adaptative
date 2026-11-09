@@ -45,7 +45,7 @@ const step = Type.Object(
 			Type.Union(
 				PLAN_OFFERED_JOIN_KINDS.map((kind) => Type.Literal(kind)),
 				{
-					description: `Makes this step combine the steps in uses (${JOIN_KIND_LIST}): collect results, reduce findings to one answer, vote for the best, race for the first accepted, verify independently, or merge the files each step changed (each in its own worktree, landed in order).`,
+					description: `Makes this step combine the steps in uses (${JOIN_KIND_LIST}): collect results, reduce findings to one answer, vote for the best, race for the first accepted, verify independently, or merge: land each step's own worktree onto main, in order (every step in uses is plain work that names its files).`,
 				},
 			),
 		),

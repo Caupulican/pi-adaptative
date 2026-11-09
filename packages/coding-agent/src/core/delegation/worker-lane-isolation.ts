@@ -28,7 +28,14 @@ import type { WorkerExecutionContract, WorkerProfileExecutionContract } from "..
 import { parseWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
 import { quotedSpan } from "../util/bounded-line.ts";
 import type { ReleaseOutcome } from "../util/resource-release.ts";
-import { landLane, type WorktreeSyncEngineDeps } from "../worktree-sync/git-engine.ts";
+import type { AbortSyncResult, SyncLaneResult } from "../worktree-sync/codes.ts";
+import {
+	abortSync as abortLaneSync,
+	landLane,
+	syncLane as syncLaneEngine,
+	type WorktreeSyncEngineDeps,
+} from "../worktree-sync/git-engine.ts";
+import { laneTipContained } from "../worktree-sync/lane-containment.ts";
 import { type LaneLanding, landingOutcome } from "../worktree-sync/lane-landing.ts";
 import {
 	bindWorkerLaneByPath,
@@ -42,6 +49,7 @@ import {
 	type WorkerLaneCreation,
 } from "../worktree-sync/worker-lane.ts";
 import type { ParentWriteOrigin } from "./parent-execution-context.ts";
+import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 
 export interface WorkerLaneIsolationDeps {
 	/** Engine deps rooted at `cwd`; undefined only when no engine can be built. */
@@ -67,6 +75,28 @@ const RETRYABLE_LANE_RELEASE_CODES: ReadonlySet<string> = new Set([
 	"default_branch_unresolved",
 	"repository_checkout_unavailable",
 ]);
+
+/** Whether `target` is `base` or inside it, by path text (no filesystem access). */
+function isWithin(base: string, target: string): boolean {
+	const offset = relative(base, target);
+	return offset === "" || (offset !== ".." && !offset.startsWith(`..${sep}`) && !isAbsolute(offset));
+}
+
+/**
+ * The path `entry` names inside the lane at `laneRoot` when it lies under `root`, the directory it was stated against: the same
+ * place in the lane. A path already inside the lane, or outside `root`, is returned unchanged. Every move of a worker into its
+ * lane uses this one translation: a saved contract, a request's write paths and the grants derived from them.
+ */
+export function relocatedInto(root: string, laneRoot: string, entry: string): string {
+	if (isWithin(laneRoot, entry)) return entry;
+	return isWithin(root, entry) ? resolve(laneRoot, relative(root, entry)) : entry;
+}
+
+/** The lane directory's engine deps and lane key; undefined when `cwd` is not a lane. */
+interface LaneAt {
+	readonly engine: WorktreeSyncEngineDeps;
+	readonly laneKey: string;
+}
 
 export class WorkerLaneIsolation {
 	private readonly deps: WorkerLaneIsolationDeps;
@@ -130,22 +160,67 @@ export class WorkerLaneIsolation {
 		cwd: string,
 		gate: { readonly mode: "on" | "off"; readonly command?: string },
 	): Promise<LaneLanding | undefined> {
-		const engine = this.deps.engineDeps(cwd);
-		if (!engine || !isUnderLaneRoot(engine, cwd)) return undefined;
-		const lane = await describeWorkerLane(engine, cwd);
-		if (!lane) return undefined;
-		const result = await landLane(engine, {
-			laneKey: lane.laneKey,
+		const found = await this.laneAt(cwd);
+		if (!found) return undefined;
+		const result = await landLane(found.engine, {
+			laneKey: found.laneKey,
 			gate: gate.mode,
 			...(gate.command ? { gateCommand: gate.command } : {}),
 		});
-		return landingOutcome(lane.laneKey, result);
+		return landingOutcome(found.laneKey, result);
+	}
+
+	/**
+	 * Rebases main into the lane at `cwd` (the engine's sync). A conflict leaves the rebase in progress: `abortSync` returns the
+	 * lane to its tip before the sync. `undefined` when `cwd` is no lane.
+	 */
+	async sync(cwd: string): Promise<SyncLaneResult | undefined> {
+		const found = await this.laneAt(cwd);
+		return found ? syncLaneEngine(found.engine, { laneKey: found.laneKey }) : undefined;
+	}
+
+	/** Aborts the sync in progress in the lane at `cwd`. `undefined` when `cwd` is no lane. */
+	async abortSync(cwd: string): Promise<AbortSyncResult | undefined> {
+		const found = await this.laneAt(cwd);
+		return found ? abortLaneSync(found.engine, { laneKey: found.laneKey }) : undefined;
+	}
+
+	/**
+	 * Whether the lane at `cwd` has its tip in main, or in the lane at `into` when given. Read-only. A tip main contains has
+	 * landed; `undefined` when `cwd` (or `into`) is no lane. Only a lane the land gate reported stale is asked this: a clean
+	 * lane with no commits also has its tip in main, and that does not mean it has landed anything.
+	 */
+	async tipContained(cwd: string, into?: string): Promise<boolean | undefined> {
+		const found = await this.laneAt(cwd);
+		if (!found) return undefined;
+		let intoLaneKey: string | undefined;
+		if (into !== undefined) {
+			const other = await this.laneAt(into);
+			if (!other) return undefined;
+			intoLaneKey = other.laneKey;
+		}
+		return laneTipContained(found.engine, {
+			laneKey: found.laneKey,
+			...(intoLaneKey !== undefined ? { intoLaneKey } : {}),
+		});
 	}
 
 	/** Whether `directory` is the lane's worktree or inside it. */
 	isInsideLane(worktreePath: string, directory: string): boolean {
-		const offset = relative(worktreePath, directory);
-		return offset === "" || (!offset.startsWith("..") && !isAbsolute(offset));
+		return isWithin(worktreePath, directory);
+	}
+
+	/** The key of the lane at `cwd`; undefined when `cwd` is not a lane. */
+	async laneKeyAt(cwd: string): Promise<string | undefined> {
+		return (await this.laneAt(cwd))?.laneKey;
+	}
+
+	/** The engine deps and key of the lane at `cwd`; undefined when `cwd` is not a lane. */
+	private async laneAt(cwd: string): Promise<LaneAt | undefined> {
+		const engine = this.deps.engineDeps(cwd);
+		if (!engine || !isUnderLaneRoot(engine, cwd)) return undefined;
+		const lane = await describeWorkerLane(engine, cwd);
+		return lane ? { engine, laneKey: lane.laneKey } : undefined;
 	}
 
 	/** Whether `directory` lies in the area lane worktrees are created in (a cheap check, no git). */
@@ -154,17 +229,43 @@ export class WorkerLaneIsolation {
 		return engine !== undefined && isUnderLaneRoot(engine, directory);
 	}
 
+	/**
+	 * A request's granted write paths and saved intent, moved into the lane `context` names. The write paths were stated against
+	 * `root`, the session directory the request resolves them from; the saved contract against its own directory. Returns only the
+	 * fields the request carries, so a caller spreads it over the request.
+	 */
+	relocateRequest(
+		request: Pick<WorkerDelegationRequest, "authority" | "savedIntent">,
+		root: string,
+		context: ExecutionContext,
+	): Pick<WorkerDelegationRequest, "authority" | "savedIntent"> {
+		const writePaths = request.authority?.writePaths;
+		return {
+			...(request.authority && writePaths
+				? {
+						authority: {
+							...request.authority,
+							writePaths: writePaths.map((entry) => relocatedInto(root, context.cwd, entry)),
+						},
+					}
+				: {}),
+			...(request.savedIntent
+				? {
+						savedIntent: {
+							...request.savedIntent,
+							executionContract: this.relocateContract(request.savedIntent.executionContract, context),
+						},
+					}
+				: {}),
+		};
+	}
+
 	/** Translate an admitted workspace into the lane the host created for it, preserving all other grants. */
 	relocateContract(contract: WorkerExecutionContract, context: ExecutionContext): WorkerExecutionContract {
 		const original = contract.worker.authority.cwd;
 		if (!original || !this.isLaneDirectory(context.cwd))
 			throw new Error("Worker lane relocation lacks a managed destination.");
-		const translate = (entry: string): string => {
-			const offset = relative(original, entry);
-			return offset === "" || (offset !== ".." && !offset.startsWith(`..${sep}`) && !isAbsolute(offset))
-				? resolve(context.cwd, offset)
-				: entry;
-		};
+		const translate = (entry: string): string => relocatedInto(original, context.cwd, entry);
 		const move = (profile: WorkerProfileExecutionContract): WorkerProfileExecutionContract => {
 			const cwd = profile.authority.cwd;
 			if (!cwd || translate(cwd) === cwd) return profile;

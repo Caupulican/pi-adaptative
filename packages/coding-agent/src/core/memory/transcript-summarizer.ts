@@ -15,7 +15,7 @@ import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
 import { isLocalExecutionModel } from "../models/model-endpoint.ts";
 import type { HistoryUsageCall } from "../review/system-one-review-port.ts";
 import { hasReportableUsage } from "../spawned-usage.ts";
-import type { TranscriptSummarizerPort } from "./transcript-memory.ts";
+import type { TranscriptSummarizerPort } from "./transcript-memory-ports.ts";
 
 const SUMMARY_LANE_KIND = "memory-summary";
 const SUMMARY_USAGE_KIND = "memory-history-summary";

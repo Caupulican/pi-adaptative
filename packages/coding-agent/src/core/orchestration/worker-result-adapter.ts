@@ -11,6 +11,7 @@ import {
 	type EvidenceContract,
 	MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES,
 	ORCHESTRATION_SCHEMA_VERSION,
+	type WorkerBudgetRefusalContract,
 	type WorkerResultContract,
 } from "./contracts.ts";
 import type { StartedDelegationAttempt } from "./delegation-ledger.ts";
@@ -293,6 +294,8 @@ export interface CreateWorkerResultContractInput {
 	verificationCriterionIds?: readonly string[];
 	verificationSubject?: { taskId: string; attemptId: string };
 	reasonCode?: string;
+	/** The cost bound that refused the run's request, when one did: recorded on the result as its typed identity. */
+	budgetRefusal?: WorkerBudgetRefusalContract;
 	createdAt?: string;
 	outputArtifact?: ArtifactContract;
 	receipts?: WorkerResultReceipts;
@@ -384,6 +387,7 @@ export function createWorkerResultContract(args: CreateWorkerResultContractInput
 		},
 		createdAt,
 		...(receipts ? { receipts } : {}),
+		...(args.budgetRefusal ? { budgetRefusal: args.budgetRefusal } : {}),
 		// The worker's statements about the owner's attention and a routine's stated end count only on a clean,
 		// host-accepted completion; only the routine result path reads them.
 		...(cleanAccepted && claim.report?.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),

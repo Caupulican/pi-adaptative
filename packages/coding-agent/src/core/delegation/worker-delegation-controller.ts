@@ -290,7 +290,7 @@ import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./
 import { hostVerifiedChecks, reportCapabilitiesOf, workerReportClaimText } from "./worker-report.ts";
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
-import type { WorkerRunOutcome } from "./worker-runner.ts";
+import { type WorkerRunOutcome, workerRunTerminalFields } from "./worker-runner.ts";
 import { captureWorkerSavedIntent, parseWorkerSavedIntent, type WorkerSavedIntent } from "./worker-saved-intent.ts";
 import {
 	describeWorkerSpecialization,
@@ -4404,7 +4404,7 @@ export class WorkerDelegationController {
 		const cwd = priorDispatch?.executionContract?.worker.authority.cwd;
 		if (!cwd || !this.laneIsolation?.isLaneDirectory(cwd)) return;
 		try {
-			request.executionContext = await this.directories.contextForDirectory(
+			const executionContext = await this.directories.contextForDirectory(
 				cwd,
 				this.deps.getSessionId(),
 				AbortSignal.any([
@@ -4413,14 +4413,8 @@ export class WorkerDelegationController {
 					...(signal ? [signal] : []),
 				]),
 			);
-			if (request.savedIntent)
-				request.savedIntent = {
-					...request.savedIntent,
-					executionContract: this.laneIsolation.relocateContract(
-						request.savedIntent.executionContract,
-						request.executionContext,
-					),
-				};
+			request.executionContext = executionContext;
+			Object.assign(request, this.laneIsolation.relocateRequest(request, this.deps.getCwd(), executionContext));
 		} catch {
 			// The lane directory no longer exists or cannot be validated; the caller's directory is kept.
 		}
@@ -4472,23 +4466,11 @@ export class WorkerDelegationController {
 				this.deps.getSessionId(),
 				boundedSignal,
 			);
-			const savedIntent = request.savedIntent
-				? {
-						...request.savedIntent,
-						executionContract: isolation.relocateContract(
-							request.savedIntent.executionContract,
-							executionContext,
-						),
-					}
-				: undefined;
-			const admitted = await this.admitWorkerDirectory(
-				{ ...request, executionContext, ...(savedIntent ? { savedIntent } : {}) },
-				signal,
-				{
-					freshIdentity: false,
-					selectedBinding: shared.shipment.modelBinding,
-				},
-			);
+			const relocated = isolation.relocateRequest(request, this.deps.getCwd(), executionContext);
+			const admitted = await this.admitWorkerDirectory({ ...request, executionContext, ...relocated }, signal, {
+				freshIdentity: false,
+				selectedBinding: shared.shipment.modelBinding,
+			});
 			if (!admitted.ok) {
 				failure = admitted.skipReason;
 			} else if (
@@ -4505,7 +4487,7 @@ export class WorkerDelegationController {
 				failure = "the worker's workspace or granted write roots are outside the lane";
 			} else {
 				request.executionContext = executionContext;
-				if (savedIntent) request.savedIntent = savedIntent;
+				Object.assign(request, relocated);
 				return {
 					...admitted,
 					modelRouteSource: shared.modelRouteSource,
@@ -6386,10 +6368,9 @@ export class WorkerDelegationController {
 				let record = finalizeWorkerClaim(lifecycle, {
 					handle: durableHandle,
 					claim: outcome.claim,
-					accepted: outcome.accepted,
+					...workerRunTerminalFields(outcome),
 					receipts: resultReceipts,
 					costUsd: finalUsage.costUsd,
-					reasonCode: outcome.reasonCode,
 					cwd: executionPlan.cwd,
 					inputTokens: finalUsage.inputTokens,
 					outputTokens: finalUsage.outputTokens,

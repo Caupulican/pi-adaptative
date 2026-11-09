@@ -1055,16 +1055,6 @@ export class ProfileMenuController {
 		}
 	}
 
-	async refreshAfterProfileMutation(profileName: string): Promise<void> {
-		if (this.deps.getSettingsManager().getActiveResourceProfileNames().includes(profileName)) {
-			if (!(await this.ui.handleReloadCommand())) return;
-			const active = this.deps.getSettingsManager().getActiveResourceProfileNames()[0] ?? "(none)";
-			this.ui.footerDataProvider.setExtensionStatus("profile", active);
-			this.ui.invalidateFooter();
-			this.ui.updateEditorBorderColor();
-		}
-	}
-
 	private async createProfileFlow(): Promise<void> {
 		const name = await promptForTextInput(this.ui, "Create Profile / Situation", "Enter profile/situation name");
 

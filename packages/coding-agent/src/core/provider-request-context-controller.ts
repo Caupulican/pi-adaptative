@@ -302,32 +302,68 @@ function appendPathAliasLegend(
 	];
 }
 
+/**
+ * A conversation summary, by role. This is the one fact the authority decision reads that is not a record kind, so the record
+ * index does not answer it.
+ */
+function isConversationSummaryMessage(message: AgentMessage): boolean {
+	return message.role === "compactionSummary" || message.role === "branchSummary";
+}
+
+/** Whether the history or the extension view holds a conversation summary. A fresh read: no cached scan is consulted. */
 export function hasConversationSummaryMarker(
 	messages: readonly AgentMessage[],
 	extensionMessages?: readonly AgentMessage[],
 ): boolean {
-	const isSummary = (message: AgentMessage) =>
-		message.role === "compactionSummary" || message.role === "branchSummary";
-	return messages.some(isSummary) || (extensionMessages?.some(isSummary) ?? false);
+	return (
+		messages.some(isConversationSummaryMessage) || (extensionMessages?.some(isConversationSummaryMessage) ?? false)
+	);
+}
+
+/** What one pass over a request's extension view establishes (see {@link scanRequestView}). */
+interface RequestViewScan {
+	/** The view holds a conversation summary. */
+	readonly summaryMarker: boolean;
+	/** The view holds a task directory record (any record of the kind, as `holdsRecordOfKind` reads it). */
+	readonly directoryRecorded: boolean;
 }
 
 /**
- * The authority record this request carries: the active grants, the cleared record (no grant), or none. `recorded` is the last
- * record of each kind on the request's records (the history and its carried head): an authority record the request ever carried
- * is current until it is cleared. The extension view is not consulted for it: a view is the history minus what a projection
- * drops, and no extension may write this host-reserved kind, so the view holds no authority record the history lacks.
+ * One pass over a request's extension view, answering both view questions the planner asks: its summary marker and its
+ * directory record. `plan` runs it at most once per plan, on the first question that reaches the view, and reuses the result.
+ * The history is not part of this pass; a history that is a different array from the view is read for its summary marker
+ * separately, and only when that question needs it.
+ */
+function scanRequestView(view: readonly AgentMessage[]): RequestViewScan {
+	let summaryMarker = false;
+	let directoryRecorded = false;
+	for (const message of view) {
+		if (isConversationSummaryMessage(message)) {
+			summaryMarker = true;
+		} else if (message.role === "custom" && message.customType === TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE) {
+			directoryRecorded = true;
+		}
+	}
+	return { summaryMarker, directoryRecorded };
+}
+
+/**
+ * The authority record this request carries: the active grants, the cleared record (no grant), or none. `authorityRecorded` says
+ * whether the request's records (the history and its carried head) ever carried an authority record: such a record is current until
+ * it is cleared. Both history facts are read only when the grants leave the answer open, so a granted request reads neither.
+ * The extension view is not consulted for the authority record: a view is the history minus what a projection drops, and no
+ * extension may write this host-reserved kind, so the view holds no authority record the history lacks.
  */
 function resolveAuthorityContext(
 	getEdgeGrants: (() => readonly EdgeGrantView[]) | undefined,
-	recorded: ReturnType<typeof recordedTransientKinds>,
-	messages: readonly AgentMessage[],
-	extensionMessages: readonly AgentMessage[],
+	authorityRecorded: () => boolean,
+	conversationSummarized: () => boolean,
 ): AuthorityContextRecord | undefined {
 	const grants = getEdgeGrants?.();
 	if (grants && grants.length > 0) {
 		return buildAuthorityContextRecord(grants);
 	}
-	if (recorded.has(AUTHORITY_CONTEXT_CUSTOM_TYPE) || hasConversationSummaryMarker(messages, extensionMessages)) {
+	if (authorityRecorded() || conversationSummarized()) {
 		return buildAuthorityContextRecord([]);
 	}
 	return undefined;
@@ -423,13 +459,16 @@ export class ProviderRequestContextController {
 		const requestRecords: readonly AgentMessage[] =
 			carriedSubset.length === 0 ? messages : [...carriedSubset, ...messages];
 		const recorded = recordedTransientKinds(requestRecords);
+		// The view's facts come from one pass over the view, run by the first question that reaches the view and reused for the
+		// rest of this plan. A plan that asks neither question (a granted authority, no directory to judge) runs no pass.
+		let viewScan: RequestViewScan | undefined;
+		const scanView = (): RequestViewScan => (viewScan ??= scanRequestView(extensionPlan.messages));
 		const directoryPlan = this.deps.previewTaskDirectoryContext?.();
 		// The directory is judged on the request's view and on its carried head: a view a side trip narrows still reads its own.
-		const directoryRecorded =
-			holdsRecordOfKind(extensionPlan.messages, TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE) ||
-			holdsRecordOfKind(carriedSubset, TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE);
+		const directoryRecorded = () =>
+			scanView().directoryRecorded || holdsRecordOfKind(carriedSubset, TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE);
 		const directoryContent =
-			directoryPlan?.content ?? (directoryPlan && directoryRecorded ? TASK_DIRECTORY_CONTEXT_CLEARED : undefined);
+			directoryPlan?.content ?? (directoryPlan && directoryRecorded() ? TASK_DIRECTORY_CONTEXT_CLEARED : undefined);
 		const automationPlan = this.deps.previewTaskAutomationContext?.();
 		const rawAutomationContent = automationPlan?.isCurrent() ? automationPlan.content : undefined;
 		const hasPriorAutomationContext = recorded.has(TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE);
@@ -554,11 +593,13 @@ export class ProviderRequestContextController {
 		const exclusionReminder = skillVault?.previewExclusionReminder?.();
 		const skillRecords = skillVault ? skillTransientMessages(skillSections, recorded, exclusionReminder) : [];
 
+		// The history is a separate array from the view only when it is not the view itself; a view that is the history was scanned above.
 		const authorityContext = resolveAuthorityContext(
 			this.deps.getEdgeGrants,
-			recorded,
-			messages,
-			extensionPlan.messages,
+			() => recorded.has(AUTHORITY_CONTEXT_CUSTOM_TYPE),
+			() =>
+				scanView().summaryMarker ||
+				(messages !== extensionPlan.messages && messages.some(isConversationSummaryMessage)),
 		);
 
 		const withAuthority = appendAuthorityContext(beforeSkill.slice(compactableMessages.length), authorityContext);
@@ -594,11 +635,12 @@ export class ProviderRequestContextController {
 			this.deps.getRoutedGoalContext?.() === routedGoalContext &&
 			this.deps.getGoalAutoContinueNote?.() === goalAutoContinueNote &&
 			isDeepStrictEqual(
+				// Re-read on every currency check, never from the plan's scan: a summary or authority record that appeared in place
+				// after planning must still flip the result.
 				resolveAuthorityContext(
 					this.deps.getEdgeGrants,
-					recordedTransientKinds(requestRecords),
-					messages,
-					extensionPlan.messages,
+					() => recordedTransientKinds(requestRecords).has(AUTHORITY_CONTEXT_CUSTOM_TYPE),
+					() => hasConversationSummaryMarker(messages, extensionPlan.messages),
 				),
 				authorityContext,
 			);

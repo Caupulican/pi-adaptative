@@ -21,6 +21,7 @@ import type { PlacementPin } from "../placement/placement-types.ts";
 import type { PlanToolInput, PlanToolStep } from "./plan-executor-port.ts";
 import {
 	concurrentPlanPairs,
+	landStepOf,
 	normalizePlanWriteScope,
 	PLAN_LIMITS,
 	type PlanNodeSpec,
@@ -181,6 +182,14 @@ export function revisedNodes(
 	for (const id of removed) {
 		if (!record.nodes.some((node) => node.id === id)) problems.push(`remove names unknown step "${id}"`);
 	}
+	// A removed merge takes the land steps it made with it: left behind, one would run as an ordinary step in the shared checkout.
+	for (const node of record.nodes) {
+		if (node.kind !== "merge" || !removed.has(node.id)) continue;
+		for (const member of node.join?.members ?? []) {
+			const land = landStepOf(record, node.id, member);
+			if (land) removed.add(land.id);
+		}
+	}
 	const replacements = new Map((input.steps ?? []).map((step) => [step.id, nodeFromStep(step, version)]));
 	const nodes = record.nodes.filter((node) => !removed.has(node.id)).map((node) => replacements.get(node.id) ?? node);
 	for (const [id, node] of replacements) if (!record.nodes.some((existing) => existing.id === id)) nodes.push(node);
@@ -226,7 +235,8 @@ function replaceEdge(node: PlanNodeSpec, from: string, to: readonly string[]): P
 
 /**
  * Host revision for `verify_independently`: a read-only verify step over `nodeId` takes its place for every dependent
- * (and as the final step when it was). Undefined when the plan has no room for another step.
+ * (and as the final step when it was), a merge that lands `nodeId` waits for it instead. Undefined when the plan has no room
+ * for another step.
  */
 export function verifyWrapNodes(
 	record: PlanRecord,
@@ -250,8 +260,18 @@ export function verifyWrapNodes(
 		join: { members: [nodeId] },
 		since: version,
 	};
-	const nodes = [...record.nodes.map((node) => replaceEdge(node, nodeId, [id])), verify];
+	const nodes = [...record.nodes.map((node) => wrapDependent(node, nodeId, id)), verify];
 	return { nodes, final: record.final === nodeId ? id : record.final };
+}
+
+/**
+ * A dependent of a wrapped step now waits for its check instead of reading the step. A merge is the exception: it lands the
+ * step's own lane, so the step stays its member and the check is ordered before the merge.
+ */
+function wrapDependent(node: PlanNodeSpec, nodeId: string, checkId: string): PlanNodeSpec {
+	if (node.kind === "merge" && node.join?.members.includes(nodeId))
+		return { ...node, after: [...new Set([...node.after, checkId])] };
+	return replaceEdge(node, nodeId, [checkId]);
 }
 
 /** A vote's criteria: the rubric every candidate is judged on, or the one question it names when it states none. */

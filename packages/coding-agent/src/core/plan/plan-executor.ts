@@ -47,6 +47,7 @@ import {
 	type JoinResult,
 	joinArtifactPath,
 	joinOutcomeId,
+	mergeResult,
 	settleVote,
 	workerJoinResult,
 } from "./joins.ts";
@@ -65,6 +66,7 @@ import {
 	type PlanRecord,
 	type PlanRuntimeState,
 } from "./plan-graph.ts";
+import { MergeLandings, type MergeStep, mergeLanes, mergeWorkerNodes, WORKTREE_UNAVAILABLE } from "./plan-merge.ts";
 import { PLAN_NODE_MACHINE } from "./plan-node-machine.ts";
 import { placementFor } from "./plan-placement.ts";
 import { type PlanAction, type PlanUpdateIntent, reconcilePlans } from "./plan-reconcile.ts";
@@ -237,9 +239,10 @@ export class PlanExecutor implements PlanExecutorPort {
 	private readonly resultGates = new PlanResultGates({
 		engine: () => this.deps.engine(),
 		signal: this.abort.signal,
-		hold: (planId, nodeId, since, detail) => this.holdForReview(planId, nodeId, since, detail),
+		hold: (planId, nodeId, since, detail) => this.holdStep(planId, nodeId, since, detail),
 		drain: () => this.requestDrain(),
 	});
+	private readonly merges: MergeLandings;
 	/** A step's claim report, the source of its open items: the host's claim of that attempt. */
 	private readonly reportOf = (taskId: string, attemptId: string | undefined) =>
 		attemptId === undefined ? undefined : this.deps.workerClaim(taskId, attemptId)?.report;
@@ -253,6 +256,7 @@ export class PlanExecutor implements PlanExecutorPort {
 
 	constructor(deps: PlanExecutorDeps) {
 		this.deps = deps;
+		this.merges = new MergeLandings(deps, () => this.requestDrain());
 		this.unregisterMachine = registerMachine(this.nodeMachine, deps.sessionId());
 	}
 
@@ -272,6 +276,7 @@ export class PlanExecutor implements PlanExecutorPort {
 		this.unsubscribeCandidates = undefined;
 		for (const unsubscribe of this.roomSubscriptions.values()) unsubscribe();
 		this.roomSubscriptions.clear();
+		this.merges.dispose();
 		this.unregisterMachine();
 	}
 
@@ -362,22 +367,20 @@ export class PlanExecutor implements PlanExecutorPort {
 	private closePlan(planId: string, status: PlanCloseStatus, reason: string): void {
 		this.deps.runtime().closePlan({ planId, status, reason });
 		this.resultGates.forgetPlan(planId);
+		this.merges.forgetPlan(planId);
 		this.deps.fleet().cancel({ kind: "plan", planId }, "plan_closed");
 	}
 
 	/**
-	 * Holds a step whose predecessor's result changes its task. The hold lands only on the spec version the review asked
-	 * about and while the step still waits: a step revised, released or held since is left as it is.
+	 * Holds a step for re-planning in plain words, only on the spec version the caller read and while the step still waits: a
+	 * step revised, released or held since is left as it is.
 	 */
-	private holdForReview(planId: string, nodeId: string, since: number, detail: string): void {
+	private holdStep(planId: string, nodeId: string, since: number, detail: string): void {
 		const plan = this.deps.runtime().getSnapshot().plans[planId];
 		const runtime = plan?.nodes[nodeId];
 		if (!plan || plan.closed || !runtime || runtime.since !== since || runtime.release || runtime.held) return;
 		this.deps.runtime().holdPlanNode({ planId, nodeId, reason: "replan", detail, generation: since });
-		harnessLog.info("plan", "a plan step waits for re-planning: a result it depends on changes its task", {
-			planId,
-			nodeId,
-		});
+		harnessLog.info("plan", "a plan step waits for re-planning", { planId, nodeId });
 	}
 
 	/** Runs a drain now (parked work included) and waits for the releases it started. */
@@ -696,6 +699,10 @@ export class PlanExecutor implements PlanExecutorPort {
 		const identity = this.joinIdentity(plan, planId, nodeId);
 		const decision = decideCodeJoin(snapshot, plan, record, node, identity);
 		if (decision.kind === "wait") return;
+		if (decision.kind === "merge") {
+			this.landMerge(planId, nodeId, node.since);
+			return;
+		}
 		if (decision.kind === "settle") {
 			this.settleJoin(planId, nodeId, decision.result);
 			for (const member of decision.cancel) {
@@ -762,6 +769,29 @@ export class PlanExecutor implements PlanExecutorPort {
 			nodeId,
 			settleVote(current.snapshot, current.plan, current.record, node, identity, winner),
 		);
+	}
+
+	/** S7: lands a merge join's lanes in order, off the drain (`plan-merge.ts`). */
+	private landMerge(planId: string, nodeId: string, since: number): void {
+		const { snapshot, plan, record } = this.planOf(planId);
+		const lanes = mergeLanes(snapshot, plan, record, this.nodeOf(record, nodeId));
+		this.merges.start(planId, nodeId, lanes, (step) => this.actOnMerge(planId, nodeId, since, step));
+	}
+
+	/** Applies a landing's step to its merge join: settle, wait for a retry, add the merge worker, or hold with its words. */
+	private actOnMerge(planId: string, nodeId: string, since: number, step: MergeStep): void {
+		const { snapshot, plan, record } = this.planOf(planId);
+		if (plan.closed || plan.nodes[nodeId]?.join) return;
+		if (step.kind === "hold") this.holdStep(planId, nodeId, since, step.detail);
+		else if (step.kind === "retry") this.merges.retry(planId, nodeId, step.afterMs);
+		else if (step.kind === "merge_worker")
+			this.hostRevision(planId, nodeId, since, "a merge worker", (fresh, version) =>
+				mergeWorkerNodes(fresh, nodeId, step, version),
+			);
+		else {
+			const identity = this.joinIdentity(plan, planId, nodeId);
+			this.settleJoin(planId, nodeId, mergeResult(snapshot, plan, record, this.nodeOf(record, nodeId), identity));
+		}
 	}
 
 	/**
@@ -917,6 +947,8 @@ export class PlanExecutor implements PlanExecutorPort {
 		// releases the offer, the machine is not offered again for this release, and the next drain releases the step here
 		// (or on another candidate).
 		const refused = (refusal: { readonly reason: string; readonly detail: string; readonly retryAt?: number }) => {
+			if (refusal.detail.startsWith(WORKTREE_UNAVAILABLE))
+				return this.holdStep(planId, nodeId, version, "this step needs its own worktree and none can be made here");
 			if (placement.kind !== "remote_machine") return park(refusal.reason, refusal.detail);
 			const machineId = placement.machineId;
 			// A must-pinned step can only be placed on its machine, so only a candidate change can help it: every refusal parks it.

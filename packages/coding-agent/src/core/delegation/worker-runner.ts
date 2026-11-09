@@ -15,7 +15,7 @@ import {
 	projectEvidenceFindings,
 } from "../autonomy/evidence-finding-projection.ts";
 import type { LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
-import type { WorkerRole } from "../orchestration/contracts.ts";
+import type { WorkerBudgetRefusalContract, WorkerRole } from "../orchestration/contracts.ts";
 import { isVerdictReasonCodeList } from "../orchestration/verification-verdict.ts";
 import {
 	buildVerifierSystemPrompt,
@@ -42,6 +42,7 @@ import {
 	validateWorkerClaim,
 } from "./worker-claim.ts";
 import type { SubmittedWorkerReport } from "./worker-report.ts";
+import { WorkerRunCostRefusal } from "./worker-run-cost-refusal.ts";
 
 export {
 	buildVerifierSystemPrompt,
@@ -139,6 +140,8 @@ export interface WorkerRunOutcome {
 	reasonCode: string;
 	/** Underlying executor error for bounded failures; drives the in-process retry decision. */
 	reasonDetail?: string;
+	/** Set when a cost bound refused the run's request before it was sent: the refusing aggregate, read from the typed refusal. */
+	budgetRefusal?: WorkerBudgetRefusalContract;
 	costUsd: number;
 	/**
 	 * Set by the caller (worker-delegation-controller.ts admission), never by runWorker itself, when
@@ -146,6 +149,17 @@ export interface WorkerRunOutcome {
 	 * model — i.e. the owner's model pin was evaded, not merely inapplicable. Diagnostics only.
 	 */
 	modelPinBypass?: WorkerRole;
+}
+
+/** The terminal fields a finished run hands the result boundary: its acceptance, its reason code and any budget refusal. */
+export function workerRunTerminalFields(
+	outcome: WorkerRunOutcome,
+): Pick<WorkerRunOutcome, "accepted" | "reasonCode" | "budgetRefusal"> {
+	return {
+		accepted: outcome.accepted,
+		reasonCode: outcome.reasonCode,
+		...(outcome.budgetRefusal === undefined ? {} : { budgetRefusal: outcome.budgetRefusal }),
+	};
 }
 
 /** Said once, at the top of a task a reused specialist takes up in a new parent session. */
@@ -383,6 +397,7 @@ function finishOutcome(args: {
 	laneStatus: LaneTerminalStatus;
 	reasonCode: string;
 	reasonDetail?: string;
+	budgetRefusal?: WorkerBudgetRefusalContract;
 	costUsd: number;
 	cwd?: string;
 }): WorkerRunOutcome {
@@ -395,6 +410,7 @@ function finishOutcome(args: {
 		laneStatus: args.laneStatus,
 		reasonCode: args.reasonCode,
 		...(args.reasonDetail ? { reasonDetail: args.reasonDetail } : {}),
+		...(args.budgetRefusal ? { budgetRefusal: args.budgetRefusal } : {}),
 		costUsd: args.costUsd,
 	};
 }
@@ -467,27 +483,36 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		earlierSession: options.earlierSession === true,
 		reportTool: options.reportTool === true,
 	});
+	// The bounded envelope keeps only a refusal's code and text, so the typed refusal is taken here, before it is flattened.
+	const captured: { refusal?: WorkerBudgetRefusalContract } = {};
 	const bounded = await runBoundedCompletion({
 		maxWallClockMs: options.maxWallClockMs,
 		signal: options.signal,
 		execute: (signal) =>
-			options.complete({
-				systemPrompt: options.verificationSubjectTaskId
-					? buildVerifierSystemPrompt(
-							options.verificationSubjectTaskId,
-							options.systemOneCapable === true,
-							options.reportTool === true,
-						)
-					: buildWorkerSystemPrompt({
-							write: writeCapable,
-							process: options.processCapable === true,
-							systemOne: options.systemOneCapable === true,
-							report: options.reportTool === true,
-						}),
-				userPrompt: promptParts.prompt,
-				userPromptBody: promptParts.body,
-				signal,
-			}),
+			options
+				.complete({
+					systemPrompt: options.verificationSubjectTaskId
+						? buildVerifierSystemPrompt(
+								options.verificationSubjectTaskId,
+								options.systemOneCapable === true,
+								options.reportTool === true,
+							)
+						: buildWorkerSystemPrompt({
+								write: writeCapable,
+								process: options.processCapable === true,
+								systemOne: options.systemOneCapable === true,
+								report: options.reportTool === true,
+							}),
+					userPrompt: promptParts.prompt,
+					userPromptBody: promptParts.body,
+					signal,
+				})
+				.catch((error: unknown) => {
+					if (error instanceof WorkerRunCostRefusal) {
+						captured.refusal = { treeKey: error.treeKey, reasonCode: error.reasonCode };
+					}
+					throw error;
+				}),
 	});
 	const costUsd = bounded.completion?.costUsd ?? 0;
 	const liveChangedFilesReport = collectBoundedWorkerClaimChangedFiles(options.sealChangedFiles?.() ?? []);
@@ -503,6 +528,8 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		// A budget stop is named by its exact code, as the lane projection reads it. An unpriced model is refused by a cost
 		// bound too, with the same status, but it never ran and spent nothing: it is a failure, not a paused budget.
 		const isBudgetExhausted = BUDGET_EXHAUSTED_REASON_CODES.has(bounded.failure.reasonCode);
+		// A refusal belongs to this failure only when the envelope reports its code: an abort that raced it reports another.
+		const budgetRefusal = captured.refusal?.reasonCode === bounded.failure.reasonCode ? captured.refusal : undefined;
 		const failureLaneStatus =
 			bounded.failure.status === "budget_exhausted" && !isBudgetExhausted ? "failed" : bounded.failure.status;
 		const cancelled = bounded.failure.status === "canceled" || bounded.failure.status === "timeout";
@@ -545,6 +572,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 			laneStatus: failureLaneStatus,
 			reasonCode: bounded.failure.reasonCode,
 			...(bounded.failure.detail ? { reasonDetail: bounded.failure.detail } : {}),
+			...(budgetRefusal ? { budgetRefusal } : {}),
 			costUsd,
 		});
 	}

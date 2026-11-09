@@ -24,6 +24,7 @@ import {
 	type AttemptUsageGenerationIdentity,
 	totalAttemptGenerationUsage,
 } from "./attempt-usage-generations.ts";
+import { dispatchIdentifier, number, string } from "./codec-primitives.ts";
 import {
 	type AcceptanceCriterion,
 	AGENT_BINDING_STATUSES,
@@ -112,6 +113,7 @@ import {
 	type VerificationRecord,
 } from "./task-runtime-state.ts";
 import { assertVerificationRecord, verificationSubjectAttempt } from "./verification-identity.ts";
+import { budgetRefusalFromValue } from "./worker-budget-refusal-codec.ts";
 import { normalizeWorkerContextForkReference } from "./worker-context-fork-reference.ts";
 import { parseWorkerExecutionContract } from "./worker-execution-contract.ts";
 import { workerReceiptOriginFromValue } from "./worker-receipt-origin.ts";
@@ -120,6 +122,8 @@ import {
 	decodeWorkerReceiptAcknowledgement,
 } from "./worker-receipt-publication.ts";
 import { decodeWorkerResultReceipts } from "./worker-result-receipts.ts";
+
+export { dispatchIdentifier, number, string } from "./codec-primitives.ts";
 
 export const MAX_DATE_EPOCH_MS = 8_640_000_000_000_000;
 
@@ -220,21 +224,11 @@ export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: n
 	return normalized;
 }
 
-export function string(value: unknown, label: string): string {
-	if (typeof value !== "string" || value.length === 0) throw new DurableTaskRuntimeError(`${label} is required.`);
-	return value;
-}
-
 export function cancellationDetail(value: unknown, label: string): string {
 	const detail = string(value, label);
 	if (boundedRedactedDiagnosticText(detail) !== detail)
 		throw new DurableTaskRuntimeError(`${label} must be bounded, redacted diagnostic text.`);
 	return detail;
-}
-
-export function number(value: unknown, label: string): number {
-	if (typeof value !== "number" || !Number.isFinite(value)) throw new DurableTaskRuntimeError(`${label} is invalid.`);
-	return value;
 }
 
 function boolean(value: unknown, label: string): boolean {
@@ -268,14 +262,6 @@ export function admittedTurnOriginFromValue(value: unknown, label: string): Turn
 	const origin = parseTurnOriginRecord(value);
 	if (!origin?.thirdParty) throw new DurableTaskRuntimeError(`${label} is invalid.`);
 	return origin;
-}
-
-export function dispatchIdentifier(value: unknown, label: string): string {
-	const identifier = string(value, label);
-	if (identifier.length > MAX_ORCHESTRATION_IDENTIFIER_LENGTH) {
-		throw new DurableTaskRuntimeError(`${label} exceeds its durable size bound.`);
-	}
-	return identifier;
 }
 
 function isoDate(value: unknown, label: string): string {
@@ -1314,6 +1300,7 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 		"nextAction",
 		"usage",
 		"receipts",
+		"budgetRefusal",
 		"ownerUpdate",
 		"conditionMet",
 		"progress",
@@ -1453,6 +1440,9 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 		},
 		createdAt: isoDate(result.createdAt, `${label}.createdAt`),
 		...(receipts ? { receipts } : {}),
+		...(result.budgetRefusal === undefined
+			? {}
+			: { budgetRefusal: budgetRefusalFromValue(result.budgetRefusal, `${label}.budgetRefusal`) }),
 		...(result.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
 		...(result.conditionMet === true ? { conditionMet: true as const } : {}),
 		...(progress === undefined ? {} : { progress }),

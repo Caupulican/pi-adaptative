@@ -83,7 +83,7 @@ export const RULE_HOOKS: readonly RuleHookSource[] = [
 		// The director role says that plan exists; this says when a plan beats single assignments and how to shape one.
 		requiresTool: PLAN_TOOL_NAME,
 		body: `- Use plan when the goal has three or more parts or any part can run beside another; use assign for one task.
-- Give each step its files; steps that change the same files wait for each other. End with a join (${PLAN_OFFERED_JOIN_KINDS.join(", ")}) so you read one result, not each worker's.`,
+- Give each step its files; steps that change the same files wait for each other, unless a merge combines them (it lands each step's worktree in order). End with a join (${PLAN_OFFERED_JOIN_KINDS.join(", ")}) so you read one result, not each worker's.`,
 	},
 	{
 		topic: "noticed-items",

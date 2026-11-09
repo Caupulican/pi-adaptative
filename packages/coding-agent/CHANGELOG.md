@@ -94,7 +94,9 @@
 - Lessons from the learner are routed into the structural backlog by System One judgments when a System One engine is bound.
 - The knowledge collection's budget notice refreshes after idle passes again.
 - A plan step whose result changes what a later step must do holds that later step for re-planning, and open items always reach the next step; combined results name files and findings that conflict. The judgments are labelled in `npm run eval:plan-graph` (the owner runs the eval; the gates stay on their 0.90/0.10 cuts until then).
-- Plan votes judge each candidate on each stated criterion with a per-criterion System One score, and verify the top two candidates automatically when the judgment is not settled; a vote with two or more accepted candidates now names a winner in production (the decision-engine bridge forwarded every question as a boolean, so choice and score decisions never reached the vote).
+- Plan merge joins are available: `merge` lands each step's worktree onto the default branch in order; a conflict gets one merge step and a second failure asks to re-plan in plain words. Merge holds until `worktreeSync.gateCommand` is set while the gate is on.
+- A fresh isolated writer's write paths translate into its own worktree lane, so a plan step or delegate with write paths under the session root runs in its lane instead of falling back to the shared checkout.
+- Plan votes: a vote whose candidates changed different files names no winner and gives the lead every result, whether or not System One judged it (no automatic checks are spent on candidates that share no files).
 
 ### Removed
 

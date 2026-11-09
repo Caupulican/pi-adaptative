@@ -548,6 +548,13 @@ export interface WorkerUsageContract {
 	toolCalls: number;
 }
 
+/** A cost bound's refusal of one provider request: the aggregate it refused, by key, and the refusal code it reported. */
+export interface WorkerBudgetRefusalContract {
+	/** The refusing aggregate's key, such as `delegation:<objectiveId>` for a delegation's own budget. */
+	treeKey: string;
+	reasonCode: string;
+}
+
 export interface WorkerResultContract {
 	schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
 	resultId: string;
@@ -566,6 +573,8 @@ export interface WorkerResultContract {
 	usage: WorkerUsageContract;
 	/** Exact terminal-slice observations; missing on historical results, never reconstructed. */
 	receipts?: WorkerResultReceipts;
+	/** Set only when a cost bound refused the run's request before it was sent; absent on results written before it existed. */
+	budgetRefusal?: WorkerBudgetRefusalContract;
 	/** Host-stamped only for a clean completed claim whose host-accepted report states the owner needs no update now. */
 	ownerUpdate?: "none";
 	/** Host-stamped under the same rule: the report states the end its routine brief named was reached. Routine results only read it. */

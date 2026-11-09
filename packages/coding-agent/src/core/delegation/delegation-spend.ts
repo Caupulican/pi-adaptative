@@ -142,9 +142,9 @@ export function delegationCostBounds(
 /**
  * Why a delegation's own budget stops it, as code: `exhausted` once its metered turns reach `budgetUsd`, `unpriced` when a
  * terminal turn was refused by this delegation's own port for a model with no declared price, else undefined. A refusal
- * closes only the delegation whose port refused: the refusal names the port's aggregate (`costRefusalTokenFor`), so a
- * refusal raised under a descendant or by an ancestor's port leaves this record open. Its turns are the subtree's when
- * they are filed under its objective, else the `attributed` turns the caller read for it (an earlier build's, by time window).
+ * closes only the delegation whose port refused: the refusal's typed identity names the port's aggregate, so a refusal
+ * raised under a descendant or by an ancestor's port leaves this record open. Its turns are the subtree's when they are
+ * filed under its objective, else the `attributed` turns the caller read for it (an earlier build's, by time window).
  */
 export function delegationBudgetStop(
 	record: DelegationSpendRecord & { readonly filedByObjective: boolean },
@@ -158,19 +158,30 @@ export function delegationBudgetStop(
 		? delegationSpentUsd(snapshot, records, record.objectiveId, isMetered)
 		: sumMeteredSpendUsd(attributed, isMetered);
 	if (budget !== undefined && spent >= budget) return "exhausted";
-	const ownToken = costRefusalTokenFor(delegationBudgetTreeKey(record.objectiveId));
+	const ownTreeKey = delegationBudgetTreeKey(record.objectiveId);
 	const turns = record.filedByObjective ? delegationAttempts(snapshot, records, record.objectiveId) : attributed;
-	const refusal = turns.find((turn) => {
-		const code = turnReasonCode(turn);
-		return (
-			!ACTIVE_ATTEMPT_STATUSES.has(turn.status) &&
-			code !== undefined &&
-			DELEGATION_BUDGET_REFUSAL_CODES.has(code) &&
-			(turn.result?.summary.includes(ownToken) ?? false)
-		);
-	});
+	const refusal = turns.map((turn) => delegationRefusalCode(turn, ownTreeKey)).find((code) => code !== undefined);
 	if (refusal === undefined) return undefined;
-	return turnReasonCode(refusal) === DELEGATION_BUDGET_REFUSAL_REASONS.unpriced ? "unpriced" : "exhausted";
+	return refusal === DELEGATION_BUDGET_REFUSAL_REASONS.unpriced ? "unpriced" : "exhausted";
+}
+
+/**
+ * The refusal code a finished turn recorded against the aggregate `treeKey`, else undefined. A result that carries
+ * `budgetRefusal` is read by that field alone. A result written before results carried the field names its refusal only
+ * in its summary text, so it is recognized by the aggregate's token there. Every refusal this build records carries the
+ * field, so the text reader meets only records written before it.
+ */
+function delegationRefusalCode(turn: AttemptRuntimeState, treeKey: string): string | undefined {
+	if (ACTIVE_ATTEMPT_STATUSES.has(turn.status)) return undefined;
+	const structured = turn.result?.budgetRefusal;
+	if (structured !== undefined) {
+		const ownRefusal = structured.treeKey === treeKey && DELEGATION_BUDGET_REFUSAL_CODES.has(structured.reasonCode);
+		return ownRefusal ? structured.reasonCode : undefined;
+	}
+	// comms-legacy-decoder: a refusal recorded before results carried `budgetRefusal` names its aggregate only in its summary.
+	const code = turnReasonCode(turn);
+	if (code === undefined || !DELEGATION_BUDGET_REFUSAL_CODES.has(code)) return undefined;
+	return turn.result?.summary.includes(costRefusalTokenFor(treeKey)) ? code : undefined;
 }
 
 /**

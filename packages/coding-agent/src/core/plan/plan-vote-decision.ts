@@ -5,10 +5,10 @@
  *
  * Exits, first match wins:
  * - too_many: more candidates than VOTE_CANDIDATE_LIMIT; read all.
- * - V0_unjudged: no readings (System One absent, failed or out of bound).
  * - V1_divergent: two or more candidates, every one a writing step, whose changed files are pairwise disjoint: the vote
- *   compared different work, so the step is under-specified and the plan is held for re-planning. It follows V0 in the
- *   table's order, so without readings the vote goes to the automatic check below instead.
+ *   compared different work, so nothing is chosen and the lead reads all (nothing is held). It reads only the record's
+ *   facts, so it runs before V0 and spares the automatic checks a comparison that has no common ground.
+ * - V0_unjudged: no readings (System One absent, failed or out of bound).
  * - V2_evidence_open: a candidate's evidence sufficiency reading is not a pass.
  * - V3 (a filter): a candidate with a failed criterion is not eligible.
  * - V6_none_eligible: no eligible candidate, or an eligible candidate has an open criterion.
@@ -105,8 +105,9 @@ export function voteFacts(
 /** The first exit that fires for a vote, in the order the module header states. */
 export function decideVote(facts: VoteFacts, readings: readonly CandidateReading[] | undefined): VoteExit {
 	if (facts.candidates.length > VOTE_CANDIDATE_LIMIT) return { kind: "too_many" };
-	if (readings === undefined) return { kind: "V0_unjudged" };
+	// V1 reads only the record's facts, so it precedes V0: divergent candidates have no common ground whether or not System One ran.
 	if (divergent(facts.candidates)) return { kind: "V1_divergent" };
+	if (readings === undefined) return { kind: "V0_unjudged" };
 	const insufficient = readings
 		.filter((reading) => reading.sufficient !== "hard_pass")
 		.map((reading) => reading.memberId);
@@ -126,7 +127,7 @@ export function voteStep(input: VoteStepInput): VoteStep {
 		case "too_many":
 			return readAll(exit.kind, []);
 		case "V1_divergent":
-			return { kind: "hold", detail: "candidates changed different files; the step is under-specified" };
+			return readAll(exit.kind, []);
 		case "V4_winner":
 			return { kind: "winner", memberId: exit.memberId, exit: exit.kind };
 		case "V5_choose":

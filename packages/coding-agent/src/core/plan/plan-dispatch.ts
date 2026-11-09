@@ -26,7 +26,15 @@ import {
 	planNodeEdges,
 	planTopologicalOrder,
 } from "./plan-graph.ts";
+import { needsOwnWorktree } from "./plan-merge.ts";
 import { planNodeOutcome } from "./plan-view.ts";
+
+/**
+ * The line a step that writes in its own worktree lane is given: the lane is what lands, so its work must be committed there
+ * before the step reports (an uncommitted lane is refused by the land gate).
+ */
+const LANE_COMMIT_WORDS =
+	"Your work is in your own worktree lane, not the shared checkout. Before you report, commit every change there: worktree_sync git_add with the paths you changed, then git_commit. The land gate refuses a lane with uncommitted changes.";
 
 /** The root-context excerpt an `annotate` exit bakes into a step's brief. */
 export const PLAN_ROOT_EXCERPT_BYTES = 2 * 1024;
@@ -168,10 +176,12 @@ export function buildPlanDispatch(
 	evidence: PlanDispatchEvidence,
 ): FleetDispatch {
 	const words = joinTaskWords(node, evidence.openFindings);
+	const isolation = needsOwnWorktree(record, node.id) ? "worktree" : "shared";
 	const sections = [
 		planDispatchHeader(record.planId, node.since, node.id),
 		`Plan: ${record.title}`,
 		`Task: ${node.intent}`,
+		...(isolation === "worktree" ? [LANE_COMMIT_WORDS] : []),
 		...(words ? [words] : []),
 		...(node.brief ? [renderTaskBrief(node.brief)] : []),
 		...(node.requirementIds.length > 0 ? [`Requirements this step proves: ${node.requirementIds.join(", ")}`] : []),
@@ -195,7 +205,7 @@ export function buildPlanDispatch(
 		instructions: clipBytes(sections.join("\n\n"), MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH),
 		...(node.brief ? { brief: node.brief } : {}),
 		writeScope,
-		isolation: "shared",
+		isolation,
 		requirementIds: node.requirementIds,
 		dependsOnTaskIds: dependencyTaskIds(projection, plan, record, node),
 		thinking: node.effort === "deep" ? "raise_one" : "inherit",

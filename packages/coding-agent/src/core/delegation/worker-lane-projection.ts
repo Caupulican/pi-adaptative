@@ -19,6 +19,16 @@ export function isManagedWorkerAttempt(attempt: AttemptRuntimeState): boolean {
 	return attempt.dispatch.executionKind === "managed-process";
 }
 
+/**
+ * The reason codes that end a worker attempt by its timeout, exact only. `wall_clock_exceeded` is the code a worker's
+ * wall-clock bound reports (`autonomy/bounded-completion.ts`), which the blocker taxonomy already reads as a time stop
+ * (`worker-outcome.ts`); `timeout` is the bare word that taxonomy also names. A code that only mentions a timeout is not a
+ * worker timeout: a goal's `worker_wait_timeout`, a tool's `timeout_invalid` and a model's `health_check_timeout` never end
+ * an attempt. `remote_deadline` is deliberately absent: a placed job's deadline reads as its own blocker (`deadline_reached`),
+ * which escalation keys on, and a timeout status here would replace that blocker with `time_exhausted`.
+ */
+export const WORKER_TIMEOUT_REASON_CODES: ReadonlySet<string> = new Set(["timeout", "wall_clock_exceeded"]);
+
 function terminalStatus(attempt: AttemptRuntimeState): LaneTerminalStatus {
 	if (attempt.status === "completed") return "succeeded";
 	if (attempt.status === "cancelled") return "canceled";
@@ -29,7 +39,7 @@ function terminalStatus(attempt: AttemptRuntimeState): LaneTerminalStatus {
 	const reasonCode = attempt.result?.reasonCode ?? attempt.reasonCode ?? "";
 	if (BUDGET_EXHAUSTED_REASON_CODES.has(reasonCode)) return "budget_exhausted";
 	if (UNPRICED_BUDGET_REASON_CODES.has(reasonCode)) return "failed";
-	if (reasonCode.includes("timeout")) return "timeout";
+	if (WORKER_TIMEOUT_REASON_CODES.has(reasonCode)) return "timeout";
 	if (attempt.result?.status === "partial") return "partial";
 	if (attempt.result?.status === "blocked") return "blocked";
 	return "failed";

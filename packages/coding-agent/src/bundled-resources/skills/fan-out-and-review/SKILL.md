@@ -41,7 +41,7 @@ Parallel work and review give more evidence than one pass. Aggregate the evidenc
 
 ### Combine steps with plan joins
 
-For work with several dependent parts, the `plan` tool runs a graph of steps on workers. A step with `join` combines the steps named in its `uses`: 2 to 24 steps, or 1 to 24 for `verify`. Code decides every join from the members' recorded outcomes, never from worker prose. The offered joins are `collect`, `reduce`, `vote`, `race` and `verify`; `merge` is reserved and refused. The plan tool has no quorum field, so a `collect` waits for every member.
+For work with several dependent parts, the `plan` tool runs a graph of steps on workers. A step with `join` combines the steps named in its `uses`: 2 to 24 steps, or 1 to 24 for `verify`. Code decides every join from the members' recorded outcomes, never from worker prose. The offered joins are `collect`, `reduce`, `vote`, `race`, `verify` and `merge` (a merge lands each member's worktree onto the default branch in order, and holds until `worktreeSync.gateCommand` is set while the gate is on). The plan tool has no quorum field, so a `collect` waits for every member.
 
 - `reduce`: when every member has settled, one worker combines their results into one answer to the step's `question` and names each disagreement. The join's result is that worker's outcome.
 - `race`: settles on the first member the host sees accepted; if several are accepted by the same pass, the one listed first in `uses` wins. Members still running are cancelled. If no member is accepted, the race settles once all members have settled, with one gap per member that failed. This differs from a `delegate` race, whose winner is the accepted candidate that finished first.
@@ -95,5 +95,5 @@ Read the diff and the files of delegated work. Run the check yourself. A worker 
 
 - A group is root-only and needs the async worker wiring. You still apply the selection rule you declared and check the artifacts: the host reports coverage and cancels race losers, it does not judge quality.
 - A plan `vote` is the one join where the host judges quality, and only through a decisive System One reading; its thresholds are not yet measured against a question set. Without a decisive reading you read every accepted candidate yourself.
-- The plan tool offers no quorum and no `merge` join yet.
+- The plan tool offers no quorum.
 - Review quality depends on the models that are available.

@@ -11,7 +11,8 @@
  * - reduce and verify: run a worker task over the members (the reducer answers `criterion`, the verifier checks the
  *   subjects). A reduce join's outcome is the reducer's alone; a verify join's outcome aggregates the members with the
  *   verifier's.
- * - merge is not built yet (B45); F4 refuses it.
+ * - merge: every member settled, then the executor lands the members' lanes in order (`plan-merge.ts`); the landed join
+ *   settles with `mergeResult`, collect semantics over the settled members.
  *
  * The full result is written by the executor as a bounded artifact (`plan/<planId>/<nodeId>-j<n>.json`); this module only
  * computes it. Every join names the files two or more members changed; a reduce join also names the findings its review
@@ -71,6 +72,8 @@ export interface JoinIdentity {
 export type JoinDecision =
 	| { readonly kind: "wait" }
 	| { readonly kind: "settle"; readonly result: JoinResult; readonly cancel: readonly string[] }
+	/** merge with every member settled: the executor lands the members' lanes, then settles with `mergeResult`. */
+	| { readonly kind: "merge" }
 	/** vote with eligible candidates and no automatic check yet: the executor judges them on the rubric (S6). */
 	| {
 			readonly kind: "rubric";
@@ -235,6 +238,8 @@ export function decideCodeJoin(
 			if (first) return settle("any", [first], first.nodeId, [...pending]);
 			return pending.length === 0 ? settle("any") : { kind: "wait" };
 		}
+		case "merge":
+			return pending.length === 0 ? { kind: "merge" } : { kind: "wait" };
 		case "vote": {
 			if (pending.length > 0) return { kind: "wait" };
 			if (succeeded.length === 0) return settle("all");
@@ -289,6 +294,32 @@ export function settleVote(
 		identity,
 	);
 	return buildResult(node, eligible, { ...outcome, status: "partial" }, identity);
+}
+
+/**
+ * A merge join's result once its members' lanes landed (or none needed to): collect semantics over the settled members, so a
+ * member that did not succeed reads as a gap and its lane stays where it is.
+ */
+export function mergeResult(
+	projection: JoinProjection,
+	plan: PlanRuntimeState,
+	record: PlanRecord,
+	node: PlanNodeSpec,
+	identity: JoinIdentity,
+): JoinResult {
+	const { settled } = memberOutcomes(projection, plan, node);
+	return buildResult(
+		node,
+		settled,
+		aggregate(
+			record,
+			node,
+			settled.map((member) => member.outcome),
+			"all",
+			identity,
+		),
+		identity,
+	);
 }
 
 /**

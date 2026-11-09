@@ -29,6 +29,16 @@ import type { AgentMessage } from "./types.ts";
  * content - this is what makes the growth cheap (the alternative, appending fresh copies every turn
  * regardless of change, would cost MORE than the full resend it replaces for a large transient like
  * the path-alias legend).
+ *
+ * Index contract (`recordedTransientKinds` and reconciliation's base). An index is keyed by the
+ * history's first message and holds the last full record of each kind over the first `count`
+ * messages. Array identity is NOT trusted as evidence of unchanged contents: the history arrays are
+ * owned by the loop and the planner, which append to them and rewrite them in place. So every call
+ * checks the indexed prefix by reference, position by position, against the live array; a mismatch
+ * or a shrink discards the index and rebuilds it from the start. Only the appended tail is read and
+ * copied into the stored prefix. The cost of a call is one reference compare per indexed message
+ * plus one push per new message; the history itself is never copied. A caller receives a snapshot
+ * of the kinds (`recordedTransientKinds`), so a later extension cannot change an answer already read.
  */
 
 export const TRANSIENT_RECORD_SUPERSEDING_NOTE =
@@ -354,9 +364,10 @@ function recordedDigest(recorded: RecordedTransient, slot: TransientRecordSlot):
 /**
  * Last durable record per kind, maintained incrementally. Each request reconciles every
  * slot against history, and a kind with no record yet (a session with no failure so far, for the
- * ledger) walked the whole history backwards on every request to learn that. The index is keyed by
- * the history's first message and is valid while the history it reflects is the same objects in the
- * same order (checked by reference); a history that changed underneath is indexed from the start.
+ * ledger) walked the whole history backwards on every request to learn that. `processed` holds the
+ * references the index was built from, exactly `count` of them (`processed.length === count`); a
+ * call re-checks them against the live array before trusting `byKind` (see the module comment's
+ * index contract), and a history that changed underneath is indexed from the start.
  */
 interface TransientContentIndex {
 	count: number;
@@ -392,16 +403,16 @@ function transientContentIndex(
 		index = { count: 0, processed: [], byKind: new Map() };
 		indexes.set(first, index);
 	}
+	// Only the tail the checked prefix does not cover is read, and each read message is pushed onto the stored
+	// references: `processed` stays exactly the messages `byKind` was built from, with no copy of the history.
 	for (let position = from; position < messages.length; position++) {
 		const message = messages[position];
+		index.processed.push(message);
 		if (message.role === "custom" && !isTransientPointerRecord(message)) {
 			index.byKind.set(message.customType, recordedTransient(message));
 		}
 	}
-	if (from < messages.length) {
-		index.processed = messages.slice();
-		index.count = messages.length;
-	}
+	index.count = messages.length;
 	return index.byKind;
 }
 
@@ -411,11 +422,12 @@ function transientContentIndex(
  * content holds it for records written before digests were stored. Built on the index, so a settled kind costs no scan of
  * the history. Its index is kept apart from reconciliation's because the planning view and the durable base can share a
  * first message while differing in their middle: one shared index would be rebuilt from scratch each time the two were read.
+ * The result is a snapshot: a later call on a longer array extends the index, which never changes a map already returned.
  */
 export function recordedTransientKinds(
 	messages: readonly AgentMessage[],
 ): ReadonlyMap<string, { readonly content: string | undefined }> {
-	return transientContentIndex(messages, recordedKindIndexes);
+	return new Map(transientContentIndex(messages, recordedKindIndexes));
 }
 
 function buildTransientRecord(

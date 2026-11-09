@@ -28,6 +28,7 @@ import {
 	RUN_BUDGET_REFUSAL_REASONS,
 	WORKER_TREE_BUDGET_REASON_CODES,
 } from "./budget-reason-codes.ts";
+import { WorkerRunCostRefusal } from "./worker-run-cost-refusal.ts";
 
 export type WorkerTreeBudgetField = "maxTokens" | "maxCostUsd" | "maxToolCalls" | "maxWallClockMs" | "maxAttempts";
 
@@ -59,7 +60,7 @@ interface ReservationGrant {
 }
 
 interface TreeBudgetState {
-	/** The aggregate's key. A cost refusal names the aggregate by it (`costRefusalTokenFor`). */
+	/** The aggregate's key. A cost refusal carries it as its typed `treeKey`, and names it in its message (`costRefusalTokenFor`). */
 	treeKey: string;
 	budget: RiskBudget;
 	/** Each request is priced before it is sent, and its dollar ceiling is reserved while it runs (see `createPort`). */
@@ -199,18 +200,6 @@ function abortReason(signal: AbortSignal): unknown {
  */
 function serializesReservations(state: TreeBudgetState): boolean {
 	return state.budget.maxWallClockMs !== undefined || (state.budget.maxCostUsd !== undefined && !state.pricesRequests);
-}
-
-/**
- * A cost bound (a run's or a budgeted delegation's) refused a request before it was sent (`budget_exhausted`, terminal:
- * a retry would price the same request against the same remainder). Its message names the refusing aggregate by
- * `costRefusalTokenFor`, so a reader attributes the refusal to that aggregate and to no other.
- */
-export class WorkerRunCostRefusal extends BoundedCompletionFailureError {
-	constructor(reasonCode: string, message: string) {
-		super("budget_exhausted", reasonCode, message);
-		this.name = "WorkerRunCostRefusal";
-	}
 }
 
 /** One in-memory aggregate reconstructed from durable checkpoints whenever a tree is first used. */
@@ -431,11 +420,13 @@ export class WorkerTreeBudgetCoordinator {
 		const token = costRefusalTokenFor(state.treeKey);
 		if (!request)
 			throw new WorkerRunCostRefusal(
+				state.treeKey,
 				reasons.exhausted,
 				`The cost bound ${token} cannot price ${waiter.subject}: the request was not offered for pricing.`,
 			);
 		if (request.model.costDefaulted)
 			throw new WorkerRunCostRefusal(
+				state.treeKey,
 				reasons.unpriced,
 				`The cost bound ${token} cannot be enforced for ${request.model.provider}/${request.model.id}: the model has no declared price. A cost bound needs a priced model.`,
 			);
@@ -452,6 +443,7 @@ export class WorkerTreeBudgetCoordinator {
 		if (affordable < 1) {
 			if (state.reservations.size > 0) return undefined;
 			throw new WorkerRunCostRefusal(
+				state.treeKey,
 				reasons.exhausted,
 				`The remaining cost bound ${token} ($${remainingUsd.toFixed(4)}) cannot cover ${waiter.subject}: its input alone (about ${inputTokens} tokens) costs more.`,
 			);

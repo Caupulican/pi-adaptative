@@ -18,12 +18,7 @@ import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import type { ActiveBranchEntryStanding } from "./active-branch-probe.ts";
 import type { MemoryReadContext, MemoryReadEvidence } from "./memory-read-context.ts";
 import { type FrontierAudience, projectFrontierView, renderFrontierView } from "./transcript-frontier.ts";
-import {
-	type TranscriptForgetOutcome,
-	TranscriptMemory,
-	type TranscriptMemoryStatus,
-	type TranscriptMemoryTerminalEvent,
-} from "./transcript-memory.ts";
+import { TranscriptMemory } from "./transcript-memory.ts";
 import {
 	MEMORY_RETRIEVAL_DISABLED_REASON,
 	TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT,
@@ -32,6 +27,8 @@ import {
 	truncateUtf8,
 	utf8ByteLength,
 } from "./transcript-memory-contracts.ts";
+import type { TranscriptForgetOutcome, TranscriptMemoryTerminalEvent } from "./transcript-memory-ports.ts";
+import type { TranscriptMemoryStatus } from "./transcript-memory-status.ts";
 import {
 	reasonSentence,
 	type TranscriptNodeExpander,

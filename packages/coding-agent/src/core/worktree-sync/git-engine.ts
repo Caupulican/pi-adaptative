@@ -134,7 +134,7 @@ export function createDefaultWorktreeSyncExec(): WorktreeSyncExec {
 		});
 }
 
-function runGit(deps: WorktreeSyncEngineDeps, cwd: string, args: string[]): Promise<ExecResult> {
+export function runGit(deps: WorktreeSyncEngineDeps, cwd: string, args: string[]): Promise<ExecResult> {
 	return deps.exec("git", args, {
 		cwd,
 		timeout: GIT_TIMEOUT_MS,

@@ -46,10 +46,17 @@ export type PlanNodeKind = (typeof PLAN_NODE_KINDS)[number];
 export type PlanJoinKind = Exclude<PlanNodeKind, "work">;
 
 /** Kinds the harness settles without a worker; reduce and verify run a worker task, merge lands worktrees in code. */
-export const CODE_SETTLED_JOIN_KINDS: readonly PlanJoinKind[] = ["collect", "race", "vote"];
+export const CODE_SETTLED_JOIN_KINDS: readonly PlanJoinKind[] = ["collect", "race", "vote", "merge"];
 
-/** Join kinds a plan may use. `merge` joins the list when the executor's land path (lane H) settles them. */
-export const PLAN_OFFERED_JOIN_KINDS: readonly PlanJoinKind[] = ["collect", "reduce", "vote", "race", "verify"];
+/** Join kinds a plan may use: every kind the executor settles (`merge` lands its members' worktrees in `plan-merge.ts`). */
+export const PLAN_OFFERED_JOIN_KINDS: readonly PlanJoinKind[] = [
+	"collect",
+	"reduce",
+	"vote",
+	"race",
+	"verify",
+	"merge",
+];
 
 export function isCodeSettledJoin(kind: PlanNodeKind): boolean {
 	return (CODE_SETTLED_JOIN_KINDS as readonly PlanNodeKind[]).includes(kind);
@@ -101,6 +108,26 @@ export const PLAN_LIMITS = {
 	/** A fan-out member's task text in the plan record; the full text is kept beside the record by digest. */
 	fanoutIntentChars: 600,
 } as const;
+
+/**
+ * The land step a merge gives one member: its id is the merge's id, the member's id and the fixed `-land-` infix, bounded by
+ * the id limit. A step by this id, after the merge and reading only the member, is that land step (`landStepOf`). A merge
+ * reserves these ids: a user step may not take one (`plan-merge.ts`, `reservedLandIdProblems`).
+ */
+export function mergeLandNodeId(mergeId: string, member: string): string {
+	return `${mergeId}-land-${member}`.slice(0, PLAN_LIMITS.idChars);
+}
+
+/** Whether `node` is the land step a merge (`merge`) made for `member`: the reserved id, after the merge. */
+export function planNodeIsLandStepOf(merge: PlanNodeSpec, member: string, node: PlanNodeSpec): boolean {
+	return node.kind === "work" && node.id === mergeLandNodeId(merge.id, member) && merge.after.includes(node.id);
+}
+
+/** The land step a merge made for one member, when the plan holds it. */
+export function landStepOf(record: PlanRecord, mergeId: string, member: string): PlanNodeSpec | undefined {
+	const merge = record.nodes.find((node) => node.id === mergeId);
+	return merge ? record.nodes.find((node) => planNodeIsLandStepOf(merge, member, node)) : undefined;
+}
 
 /** The step id pattern, shared with the fan-out member ids. */
 export const PLAN_NODE_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9_.-]*$/;

@@ -1,8 +1,8 @@
 /**
  * Acceptance of one `plan` tool call (start or revise), design PG 3.3, as ordered code decisions:
  *
- * 1. code facts F1-F7 (and F10's goal-dependency edges, added first) and the step shapes refuse with every fix listed;
- *    nothing is recorded;
+ * 1. code facts F1-F7 (and F10's goal-dependency edges, added first), the step shapes and the ids a merge reserves refuse
+ *    with every fix listed; nothing is recorded;
  * 2. System One absent or failing -> recorded on code facts alone (`unjudged`);
  * 3. J2 and its paired J3 accepted (>= 0.90) for a pair -> the edge is added; the version is re-checked on code facts
  *    with the edges, and a refusal then names the edges that caused it;
@@ -34,6 +34,7 @@ import {
 	type PlanRuntimeState,
 	planRecordBytes,
 } from "./plan-graph.ts";
+import { reservedLandIdProblems } from "./plan-merge.ts";
 import {
 	briefLine,
 	defaultFinal,
@@ -165,6 +166,8 @@ export async function acceptPlanCall(input: PlanToolInput, context: PlanAcceptan
 		proposed = (input.steps ?? []).map((step) => nodeFromStep(step, version));
 		final = input.final ?? defaultFinal(proposed);
 	}
+	const reserved = reservedLandIdProblems(proposed, current, new Set((input.steps ?? []).map((step) => step.id)));
+	if (reserved.length > 0) return { ok: false, problems: reserved };
 	const goal = context.goal;
 	const goalEdges = goal ? goalDependencyEdges(proposed, goal.requirements) : [];
 	proposed = withEdges(proposed, goalEdges, "after");

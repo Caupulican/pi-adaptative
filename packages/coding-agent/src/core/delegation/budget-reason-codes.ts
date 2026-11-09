@@ -69,8 +69,9 @@ export const UNPRICED_BUDGET_REASON_CODES: ReadonlySet<string> = new Set([
 ]);
 
 /**
- * The token a cost refusal carries for the aggregate it refused: the aggregate's key in brackets. A reader names an
- * aggregate by this exact token, so a key never matches another key it prefixes.
+ * The token a cost refusal's message carries for the aggregate it refused: the aggregate's key in brackets, so a key never
+ * matches another key it prefixes. A reader classifies a refusal by its typed identity (`WorkerResultContract.budgetRefusal`);
+ * this token names the aggregate in the human-readable text, and in the text of a result written before that field existed.
  */
 export function costRefusalTokenFor(treeKey: string): string {
 	return `[${treeKey}]`;
