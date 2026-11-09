@@ -11,7 +11,13 @@ Write owner-facing explanations, analyses, reviews and summaries in ASD-STE100 s
 
 Freedom Dial: Low Freedom for exact technical content (code, commands, identifiers, paths, numbers, error text, quotes stay verbatim). High Freedom for wording.
 
-## Rules at strictness 10
+## North Star
+
+The reader understands the text on the first read, at the strictness the owner set, with every fact, caveat, number and technical name kept exact.
+
+## Core Sections
+
+### Rules at strictness 10
 
 1. One topic per sentence. Procedure sentences: 20 words or fewer. Descriptive sentences: 25 words or fewer.
 2. Paragraphs: one topic, 6 sentences or fewer, topic sentence first.
@@ -26,7 +32,7 @@ Freedom Dial: Low Freedom for exact technical content (code, commands, identifie
 11. Write numbers as digits with units. Use vertical lists for 3 or more parallel items.
 12. Repeat the exact term for a thing. Do not swap synonyms for variety.
 
-## The dial
+### The dial
 
 | Level | Rule set |
 | --- | --- |
@@ -39,15 +45,36 @@ Freedom Dial: Low Freedom for exact technical content (code, commands, identifie
 | 3 | Active voice and short sentences only. |
 | 1 | Off. |
 
-## Procedure
+### Procedure
 
 1. Settle the level: owner statement, else 9.
 2. Write the content first: facts, then order, then wording.
 3. Check the draft against the rules for that level. For a file, run `node <BASE>/scripts/ste-lint.mjs <file> --level <n>`; `<BASE>` is the skill base directory. The linter is a heuristic. It reports long sentences, likely passive voice, progressive forms, contractions and long noun clusters. A clean run does not prove style compliance. Fix flagged lines or keep them when the exact technical wording needs it.
 4. Keep terse status replies terse. This style applies to explanations, not to one-line acknowledgements.
 
-## Do not
+## Anti-Patterns
 
 - Do not simplify by removing facts, caveats or numbers.
 - Do not change code, commands, identifiers, paths or quoted text.
 - Do not claim certification or full compliance.
+
+## Examples
+
+- Strictness 9: "The cache is utilized in order to approximately halve the latency that is being experienced" becomes "The cache cuts the latency by about 50%."
+- A procedure at strictness 10: "Stop the service. Then delete the lock file." becomes two steps: "1. Stop the service. 2. Delete the lock file." A WARNING about data loss goes before step 2.
+- The owner says "80% STE": use level 8. The owner says "no STE": write without this style.
+- An error message quoted in the text stays verbatim, even when it breaks a rule.
+
+## Self-Check
+
+- Did I use the level the owner named, or 9?
+- Are every fact, caveat, number and technical name still present and exact?
+- Do sentence lengths, voice, tenses and noun clusters fit the rules for that level?
+- For a file, did I run `ste-lint.mjs` and either fix or justify each flagged line?
+- Did I avoid any claim of certification or compliance?
+
+## Known Gaps
+
+- The official ASD-STE100 specification and its controlled dictionary are not bundled. The skill cannot check approved words or meanings, so the output is STE-style and never certified.
+- `ste-lint.mjs` is a heuristic: it flags long sentences, likely passive voice, progressive and perfect forms, contractions and long noun clusters, and it skips headings, tables, quotes and fenced code. It does not check word meanings, articles, paragraph structure or procedure order, and a clean run does not prove compliance.
+- The style applies to explanations; it does not govern terse status replies or one-line acknowledgements.

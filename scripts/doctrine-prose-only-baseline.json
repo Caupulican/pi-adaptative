@@ -1,0 +1,4 @@
+{
+  "description": "Doctrine rules whose Enforced by line reads prose only (docs/doctrine.md). Shrink-only: when a rule gains a checked mechanism, lower proseOnly. Enforced by scripts/check-doctrine-enforcement.mjs.",
+  "proseOnly": 60
+}

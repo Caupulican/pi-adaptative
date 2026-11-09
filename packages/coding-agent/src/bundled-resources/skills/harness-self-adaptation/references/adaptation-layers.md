@@ -29,13 +29,30 @@ Ask these questions in order:
    semantics, authentication flow, or model capability? Change the **provider
    adapter/model metadata** rather than global core behavior.
 
-A benchmark, fixture, or telemetry counter (and a regression test only when the owner
-asked for tests) accompanies the owning layer. It is evidence, not a replacement behavior layer.
+A benchmark, fixture, or telemetry counter accompanies the owning layer. It is
+evidence, not a replacement behavior layer.
+
+## Proof chain
+
+Tests are not the proof. The harness's own proof, for every layer that changes
+repository files, is:
+
+1. **Static checks**: `npm run check:static` (what `npm run check` runs) and the
+   scripts it chains: lint, the type check, and the repository's structural
+   check scripts. They pass before every commit.
+2. **Composed journeys, run by CI**: the harness journeys CI runs on the pushed
+   revision. Read the CI result; agents do not run the journeys locally.
+3. **Live gate, run by the owner**: `npm run accept:harness-live` drives the
+   real harness with real models. Only the owner runs it, never an agent; cite
+   its verdict only when the owner ran it.
+
+Reading the changed source and its callers comes first and backs every step.
+Write or run a test only when the owner asked for tests in their own words;
+it is then extra evidence beside this chain, never a replacement for it.
 
 ## Layer matrix
 
-Proof cells that name tests apply only when the owner explicitly asked for tests; otherwise the
-proof is reading, build/check, or live evidence the owner allows.
+Each proof cell names what the layer must show inside the proof chain.
 
 | Layer | Use when | Typical artifact | Required proof | Reject when |
 | --- | --- | --- | --- | --- |
@@ -43,11 +60,11 @@ proof is reading, build/check, or live evidence the owner allows.
 | Memory | Stable fact, preference, correction, constraint, or concise pointer | User/project memory record | Overlap query plus future-decision relevance | The content is a procedure, runtime behavior, secret, log, or transient status |
 | Prompt template | User explicitly invokes a reusable one-shot transformation | `prompts/*.md` | Expansion/invocation example | Routing should be contextual or behavior automatic |
 | Skill | On-demand procedure, judgment, review doctrine, or domain constraints | `skills/<name>/SKILL.md` plus references | Discovery, trigger separation, example, self-check, overlap audit | A code defect or runtime enforcement is required |
-| Role/worker profile | Repeatable isolated role with bounded authority and validation | Agent/profile definition | Capability/UAC test and independent result validation | A simple skill suffices or authority would broaden |
-| Setting/resource profile | User policy, resource selection, route, or operating mode | Settings/profile state | Round-trip, reload, precedence, and rollback tests | It papers over incorrect implementation or changes authority silently |
-| Extension/tool | Runtime event, tool API, UI, state, automation, or enforcement | Extension/tool source | Focused behavior test, lifecycle cleanup, permission check | Static instructions can reliably solve it |
-| Core source | Cross-cutting invariant or mechanism no lower layer can enforce | Agent/AI/coding-agent/TUI source | Regression plus package validation and blast-radius review | A lower existing seam owns the behavior |
-| Provider adapter/model metadata | Provider-specific protocol, usage, auth, stream, or capability semantics | Provider source, fixtures, generated metadata source | Captured/first-party evidence and provider regression fixture | Evidence comes from only a different provider or serving stack |
+| Role/worker profile | Repeatable isolated role with bounded authority and validation | Agent/profile definition | Capability/UAC ceiling shown in a CI journey leg, static checks, and independent result validation | A simple skill suffices or authority would broaden |
+| Setting/resource profile | User policy, resource selection, route, or operating mode | Settings/profile state | Round-trip, reload, precedence, and rollback shown by reading the settings path and a CI journey leg; static checks | It papers over incorrect implementation or changes authority silently |
+| Extension/tool | Runtime event, tool API, UI, state, automation, or enforcement | Extension/tool source | Static checks, the behavior in a CI journey leg (the owner's live gate when it is live-only), lifecycle cleanup, permission check | Static instructions can reliably solve it |
+| Core source | Cross-cutting invariant or mechanism no lower layer can enforce | Agent/AI/coding-agent/TUI source | Static checks, CI journeys on the pushed revision, blast-radius review, and the owner's live gate when live behavior changes | A lower existing seam owns the behavior |
+| Provider adapter/model metadata | Provider-specific protocol, usage, auth, stream, or capability semantics | Provider source, fixtures, generated metadata source | Captured/first-party evidence, static checks, and the provider regression checks CI runs | Evidence comes from only a different provider or serving stack |
 
 ## Metric selection
 
@@ -88,5 +105,6 @@ persistence, measure the whole system boundary rather than one component.
 - A provider reports nested terminal errors: fix that provider's parser and add a
   captured fixture; do not change global retry semantics first.
 - Old extension listeners survive reload: fix lifecycle ownership in extension
-  runtime/core and test teardown; a skill warning cannot enforce cleanup.
+  runtime/core and prove teardown with the static checks and a CI journey leg;
+  a skill warning cannot enforce cleanup.
 - One user prefers terse summaries: memory or no change; not a bundled default.

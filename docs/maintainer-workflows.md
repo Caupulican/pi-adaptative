@@ -64,6 +64,10 @@ What it checks, each from evidence the harness wrote (lane records, worker claim
 
 The last line is the gate: `LIVE GATE: PASS` only when nothing failed, `FAIL` when a scenario failed, and `INCONCLUSIVE` (exit 3) when a worker run ended on a provider network failure after the harness exhausted its retries, which says nothing about the harness: rerun when the network is healthy. Skipped scenarios are listed and never counted as passes. The report is written to `<git-common-dir>/pi-audits/live-validation/<timestamp>/report.json`. Options: `--model-a`, `--model-b`, `--only s3,s4`, `--keep` (leave the panes open), `--installed` (drive the installed `pi` binary instead of the source build, to validate what a user runs; s10 always runs the source). The loop for a failure: read the failing scenario's evidence in the printed sandbox and agent directory, fix the production owner, rerun until the gate passes, and release a patch only when the fix is worth shipping.
 
+## Splitting a large module
+
+`scripts/file-size-ratchet.json` lists every TypeScript source file under `packages/*/src` above 1,200 lines with its line count (generated `*.generated.ts` files are excluded: a generator owns their size), and `scripts/check-file-size.mjs` (in `check:static`) fails when a listed file grows, when a new file crosses the limit, or when a file shrank but its entry still holds the larger number. A split is the only way down: move one responsibility into a module named for it, keep the original file as the thin owner of its state, and run `node scripts/check-file-size.mjs`; the check prints the exact number to write for each file that shrank. Write that number into the json in the same change, and remove the entry when the file falls to 1,200 lines or fewer. Never raise an entry to make a change pass: a change that adds lines to a listed file goes into a module that owns the new behaviour. `packages/coding-agent/src/core/agent-session.ts` carries its own coordinator ceiling in `scripts/check-coordinator-boundaries.mjs`; its entry here only records its size.
+
 ## Changelog
 
 Location: `packages/*/CHANGELOG.md` (one per package).

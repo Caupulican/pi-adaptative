@@ -139,7 +139,10 @@ lane's end. A machine that stays silent until the deadline (ten minutes by defau
 or is revoked ends the lane the way any placed job ends, and the asking session gets the same single terminal
 notification every worker sends, with the reply as untrusted evidence. Nothing is polled. The owner's own messages typed
 in a machine's chat are not lanes: the answer arrives in that chat, which refreshes while it is open. A turn is not a
-job: the machine's session answers it with its own tools and memory, and nothing is offered or admitted there.
+job: the machine's session answers it with its own tools and memory, and nothing is offered or admitted there. An answer
+the machine sends before its turn ends (`final: false`) reaches the chat and leaves the lane open; the lane ends on the
+final answer, the deadline, the offline hold or a revoke. A hub on an older build ignores the field and ends the lane on
+the first answer, as before.
 
 ### Jobs on linked machines
 

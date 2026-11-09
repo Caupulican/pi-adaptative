@@ -25,10 +25,12 @@ self-compaction checkpoint, with no packed-to-original flip. The gate's cache re
 rewrites: bytes the provider could not serve from its prefix cache, overall and on rewrites, each
 rewrite's depth before the previous request's end, and packed stubs replaced by their original,
 because a rewrite 30 messages deep and one 300 messages deep are not the same cost.
+Enforced by: prose only
 
 **Sent bytes are never rewritten.** Deduplication and erasure act only on history the provider has
 not seen (`sentPrefixCount`); host records are opaque to path aliasing so their bytes are the same
 on the request that introduces them and every request after.
+Enforced by: prose only
 
 **Query visibility preserves prefix custody and reports its signed cost.** A relevance verdict is
 scoped to the exact query and bounded evidence revision it judged. An unsent stale result may become
@@ -38,6 +40,7 @@ GC retrieval key only after the original is readable; until then it fails open t
 Missing judgments also fail open, and a changed verdict invalidates the request plan before send.
 The context dashboard subtracts only in-place reductions, adds tail-projection tokens, and counts an
 advisory eviction only when high-confidence irrelevant evidence was actually hidden.
+Enforced by: prose only
 
 **A host record carries only what changed, and the sent prefix survives a new prompt.** Append
 once per change was not enough: measured on the owner's 0.97.25 sessions the alias legend was
@@ -64,6 +67,7 @@ stays packed while frozen. Rewrites therefore happen at most once per stride, ne
 because a run started; the long-session gate counts them against the number of crossings instead of a
 flat append share. Compaction summarizes the packed projection, and a deterministic checkpoint is
 recorded as `fallback` with its cause, never `success`.
+Enforced by: prose only
 
 **A cache break passes the custody gate, or it is a defect.** Every foreground and worker request is
 classified against its lane's previous one: an append, the lane's first request, a break the gate
@@ -79,6 +83,7 @@ a lane keeps the level it last sent against a host adjustment (host-turn and boo
 while its cache is warm; the owner's own level, a return to it, and the owner's cost ceiling always
 pass. Why: measured on the owner's sessions a reasoning-only change made a cold cache five times as
 likely (47% against a 9% baseline).
+Enforced by: prose only
 
 **Every owner message reaches the selected root model.** Greetings, substantive requests and
 toolkit names enter the root's full conversation with its tool surface. The host does not pre-route
@@ -89,6 +94,7 @@ A selected local root boots its managed runtime or fails visibly; it is not sile
 configured cloud tier. An explicitly routed local model may use the configured tier fallback when
 its runtime is unavailable. Why: automatic foreground model swaps re-send the conversation and
 override the owner's selected root.
+Enforced by: prose only
 
 **A discretionary retrieve fan-out is priced as the execution it will actually launch.** The root
 pays its learned request count against its warm prefix. The worker alternative freezes one question
@@ -97,6 +103,7 @@ brief, repeated cache reads, and generated bounded report; the combined bounded 
 once when it returns to the root. Missing prices, learned request counts, worker-prefix evidence, or
 a valid fan-out count keep work on the root. Capability-required workers and failure recovery remain
 constraints, not cost-vetoed choices.
+Enforced by: prose only
 
 **Every agent runs the conversation mechanics; only the head orchestrates.** A worker plans each
 request with root's own request-context controller (context GC on its own lane, path aliases, the
@@ -108,6 +115,7 @@ model routing, System One intake and report acceptance, spawning, goals, reflect
 self-adaptation, memory writes, extensions and the owner surface. A worker prices on its own lane's
 inputs, never on root's. A routed worker whose account runs out of quota moves to its next routing
 candidate on retry (its contract's ordered-fallback policy), and the attempt records the model it ran on.
+Enforced by: prose only
 
 **Per-request host work is bounded.** Every request-time scan resumes from the history prefix it
 already covered; the profiler's last decile of pre-request time may not exceed twice its first.
@@ -115,6 +123,7 @@ Path aliasing resumes from the message contents it already scanned (fingerprints
 `path_alias_scanned`), not from a timestamp mark: a mark skipped a message stamped in the same
 millisecond, a replaced message, and an older unscanned message reached by a branch switch or
 restart. A message sent while minting is paused is not marked scanned.
+Enforced by: prose only
 
 **A profile measures executed work, not skipped or failed synthetic actions.** Valid scripted
 actions must execute with zero tool errors and the exact expected foreground action count. Each
@@ -123,11 +132,13 @@ the succeeded state. Summary requests use their own response path; consuming for
 responses during compaction would silently remove work from the measurement. This strengthens the
 workload evidence without changing the cache or latency thresholds. Synthetic runs do not prove
 real-provider behavior or indefinite memory boundedness.
+Enforced by: prose only
 
 **Every request carries an output cap.** `maxOutputTokens` narrows the model's registry limit, the
 capability tier narrows it further, a goal budget further still; nothing widens a model's limit.
 Why: one full-class model streamed a single sentence for twenty-three minutes against a 500,000
 token limit.
+Enforced by: prose only
 
 **A turn the host starts for itself runs one rung cheaper, and the live row says where the time
 went.** The request that answers a host-delivered completion (`background-tool-completion`,
@@ -149,6 +160,7 @@ renders exactly the elapsed figure it always did. Why: on a slow-first-token pro
 token is p50 11.5 s, about 40 % of a turn's active time, and the operator could not tell "waiting
 for the provider" from "generating" while paying full reasoning effort for a turn that only had to
 quote a finished result.
+Enforced by: prose only
 
 **The agent sees its context gauge and hands itself off at a clean checkpoint.** The root reads
 its usage and three lines through `self_compact` without a note and `context_audit`: notice and
@@ -174,6 +186,7 @@ the note ends the handoff instead of looping. Host early, idle and hard compacti
 cancelled. `self_compact` is root-only: worker compaction is inline in the worker's request planning
 with no idle checkpoint, so the tool is in the worker forbidden set rather than silently inert.
 Its projected schema has a separate 140-token allowance (aggregate 5,953 = 5,813 + 140 self_compact).
+Enforced by: packages/coding-agent/src/core/compaction/self-compaction-controller.ts (only: gateToolCall refuses note siblings and, at forced, other tools); packages/coding-agent/src/core/worker-tool-ceiling.ts (isWorkerProcessToolAllowed denies self_compact)
 
 ## Tool surfaces
 
@@ -189,6 +202,7 @@ and takes `force: true` — while a plural on a singular action or two selectors
 invented `sN-<slug>` or `sN-<uuid>` task-step selector names the one step carrying that number; a
 trailing numeric fragment (`s1-2`) still refuses. When an exact `step-N` is absent and not archived, an
 ordinal position selector resolves to the open step at that 1-based index.
+Enforced by: prose only
 
 **A cited command matches its producing call on what was executed, and a miss says what to cite.**
 Tool evidence compares the citation and the call's `command` (bash, `run_process`) or `code` /
@@ -203,6 +217,7 @@ nothing; an unknown requirement keeps the evidence and the satisfies that alread
 the miss. A directory cited as file evidence is refused naming a file inside it. Why: a re-typed
 command with a collapsed run of spaces cost a rejected goal turn each time, and every verified
 evidence entry cost a second request just to satisfy its requirement.
+Enforced by: packages/coding-agent/src/core/goals/session-goal-evidence.ts (resolveSessionToolEvidence refuses a citation matching no producing call after layout normalization; the rest is prose only)
 
 **Tool output is a shorter version of the real output, never a different one; the original is one
 read away.** Every reducer only removes lines, collapses repeats or regroups what the command
@@ -216,6 +231,7 @@ bypasses every stage with `fullOutput: true`. Reduction
 is byte-stable: the same output reduces to the same bytes, so a re-sent result never re-prefills.
 Measured on live sessions (`scripts/output-reduction-census.mjs`): search results save a quarter of
 their bytes, compiler reports three quarters.
+Enforced by: prose only
 
 **A NUL never reaches a text file through `edit` or `write`.** U+0000 in a replacement or in
 written content is a transport defect, not content: an editing model has been observed sending it in
@@ -230,6 +246,7 @@ the string: guessing which character the NUL replaced is how a corrupted space b
 file. `edit` skips the check for a replacement whose own `oldText` also carries U+0000, so this guard
 never becomes the layer that refuses a NUL-bearing source; that stays the edit encoding contract's
 decision. Repair codes `nul_in_replacement` and `nul_in_content` carry the guidance.
+Enforced by: packages/coding-agent/src/core/tools/text-nul-guard.ts (assertNoNulInEditReplacements and assertNoNulInWriteContent, called by edit.ts and write.ts, refuse U+0000)
 
 **The tool list stays stable between explicit runtime or provider transitions.** It sits before
 the messages in every prompt, so ordinary turns must not churn disclosed schemas. Explicit reload
@@ -263,6 +280,7 @@ tools, including `peer`, and the measured growth of `goal` and `create_goal` ove
 ceiling stays unchanged; the peer allowance cannot subsidize unrelated tool growth. The additions address
 reproduced wrong-directory execution and safe task automation without widening worker grants or introducing
 per-turn schema churn.
+Enforced by: prose only
 
 **Deferred tool schemas remain bound to the model and surface that will execute them.** Any
 request whose final capability-filtered list has at least ten real tools may defer schemas behind
@@ -279,21 +297,25 @@ and a native surface cannot lend native search to another provider. Search resul
 the exact current request's deferred set. `/context` reports the latest accepted native disclosure
 counts, estimated hidden schema tokens, misses, and latency as historical evidence without
 subtracting them from the current request estimate.
+Enforced by: prose only
 
 **Equivalent action branches compact only at the provider boundary.** Identical `anyOf` branches
 may share an enum discriminator when every other validation constraint matches. Exclusive unions
 remain intact; local validation retains the original branches and their actionable repair text.
 This preserves the schema budgets without weakening execution validation.
+Enforced by: prose only
 
 **A tool failure record resolves after two later calls of the same tool executed without
 retrying it; one later call keeps it.** Why: one corrective call may precede the retry a record
 asks for; a record kept forever re-appended the trailing ledger on every request.
+Enforced by: prose only
 
 **A cancelled call never enters the failure ledger.** An abort (operator interrupt, send now,
 compaction, dispose) stops a call that was doing what it was asked; a tool that throws while the
 run's signal is aborted finalizes as `aborted` with the abort's name in its text, is not a kind
 mistake, and is not an active failure. Why: a 30-minute hang ended with two killed siblings charged
 to the model as mistakes with no diagnostic.
+Enforced by: prose only
 
 **A background command occupies neither the exclusive mutation barrier nor the agent's shell
 session.** `background: true` waits only for the file writes its own message emitted before it,
@@ -304,6 +326,7 @@ task; a call still queued on the barrier unwinds at once when its signal aborts.
 `svnproject` held the process-wide writer lock AND the one-command-at-a-time persistent shell for
 its whole life, every sibling bash/python parked behind it, the turn hung 30 minutes and Escape did
 nothing; the shell half was only found by a live run after the barrier half was fixed.
+Enforced by: prose only
 
 **Commands emitted together run together.** Foreground bash calls take lanes from an elastic pool
 of reusable persistent shells (three kept warm per session, more created on demand up to eight,
@@ -316,17 +339,20 @@ then reports one failure or their aggregate; a fast failed close cannot let sess
 while a slower sibling still owns a process. Why: one persistent shell plus a FIFO writer lock turned
 three commands emitted in one message into three sequential waits, and fail-fast cleanup later let a
 session terminal race a sibling shell close.
+Enforced by: prose only
 
 **A maintenance terminal covers every durable mutation it admitted.** Independent reconciliation
 mutations all start, all settle, and only then report one failure or their aggregate; `waitForIdle`
 and session shutdown cannot finish while a sibling durable write is still pending. Why: fail-fast
 process-matrix startup reconciliation let a failed prune settle the master maintenance promise while
 an interrupted-worker recovery write could still land after stop.
+Enforced by: prose only
 
 **Integrity hooks inspect snapshots; they never borrow execution state.** One point-in-time context
 snapshot is captured per hook run, and every extension receives its own detached copy. A timed-out
 hook may finish late but cannot rewrite the caller's admitted tool arguments; one extension cannot
 change the evidence a later extension evaluates. High-impact timeout remains fail-closed.
+Enforced by: prose only
 
 **The group lock belongs to the worktree; emission order belongs to the session; the per-path
 queue belongs to the process.** The barrier's holders and waiters live in a scope keyed by the
@@ -341,6 +367,7 @@ constructed in it and disposed when the last one leaves; callers that name no sc
 default scope, which is what a single-session process always had. Why: every piece of that state
 used to be a module global (a parent and its lanes shared one announcement table), and a first
 per-session cut removed the interlock along with the bug.
+Enforced by: prose only
 
 **An export on any lane is an export of the session.** Every bash lane reports its `export -p`
 listing in the command sentinel (frame v2) only when the listing changed since that lane's previous
@@ -352,6 +379,7 @@ behind the ledger replays the `declare -x` lines it lacks and `unset -v` for nam
 longer exports before its next command. Windows engine lanes share one `WindowsShellState` and need
 no ledger; the PowerShell floor stays lane-local. Why: with the lane pool, `export FOO=1` in one
 command and `$FOO` two commands later could land on different shells.
+Enforced by: prose only
 
 **A file's encoding is the harness's problem, never the model's.** Read and edit resolve it in
 this order: the `encoding` argument, the `fileEncodings` setting (glob to codec), the nearest
@@ -363,15 +391,18 @@ replacement the codec cannot represent fails before any byte is written and name
 The only encoding failure a model can see is "Python is unavailable". Why: eleven read failures in
 one live session told the model that "exact UTF-8 replacement is unsafe" and it abandoned the tool
 for shell decoding; the owner's rule is that Python is applied to do the edit safely, mandatorily.
+Enforced by: prose only
 
 **The sanitizer keeps a rejected attempt out of the agent's context.** Measured on the request
 after an omission, the server prompt cache still hit almost fully; the omission costs one request
 without the transport delta, not a re-prefill.
+Enforced by: prose only
 
 **A read miss locates; it does not invite create.** `read` file_not_found publishes
 `filesystem.file.exists` plus ancestor locate evidence. Write-create is
 `filesystem.file.missing.create` and is not loaded from that observation. A later same-path write
 is still a different tool and can re-admit the read.
+Enforced by: prose only
 
 ## Guards
 
@@ -382,6 +413,7 @@ directory, a filesystem root, or a disk, including `gh repo delete`) and `toolki
 (executing a registered dangerous toolkit script). Git, including push, tag, reset, and commit,
 package publish and install, settings edits, and every other delete run without asking. Anything
 unknown is ordinary work and runs.
+Enforced by: packages/coding-agent/src/core/agent-session-edge.ts (only: enforceSessionEdge asks or blocks); .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-1-owner-lifecycle.ts (asserts only: rm -rf .git asks, denial never runs)
 
 **System One judges every operation that can reach beyond the task; no pattern list decides it.**
 A shell command or a script says what it does in any language and any spelling, and a model blocked
@@ -406,6 +438,7 @@ call. Scoped grants retain their exact operation identity and never become blank
 Cancellation, capability envelopes, path boundaries and mandatory verification remain authoritative.
 Verdicts for ungranted work are cached for identical calls within a turn; a session without System One keeps
 the deterministic gates alone.
+Enforced by: packages/coding-agent/src/core/system-one/operation-gate.ts (OperationGate.check refuses a held operation for a worker and asks for root; the judgment itself is prose only)
 
 **System One checks a plan when it is published or changed.** After a `task_steps` set, intake or
 add, the whole current plan and the owner's request go to System One as three questions, each naming
@@ -414,6 +447,7 @@ checks the result. A defect at the noul hard-fail band (0.8) is appended to the 
 steer, so the model revises the plan before working from it; a defect above an even chance is a
 doubt shown to the operator; a failing System One is a doubt, never a block. Status updates are not
 reviewed.
+Enforced by: prose only
 
 **One classification is conditional on live state, not on the command alone.** Several pi sessions
 share one worktree, so `git reset --hard`, `git clean -f`, `git checkout -- …`, `git restore` and
@@ -461,6 +495,7 @@ execution boundaries (`session-role.ts`): no gate reads Python source or shell t
 none claims to contain arbitrary process code. The session proof of an ungranted class uses
 `npm publish` (`package.publish`). Root bash refuses a git invocation before the edge confirmer,
 so that proof is not a git command.
+Enforced by: packages/coding-agent/src/core/agent-session-edge.ts (only: resolveEdgeConditions keeps a git discard when unowned changes may exist or status is unreadable); packages/coding-agent/src/core/autonomy/edge-policy.ts (only the toolkit scope key)
 
 **A failed admission cannot erase already-executed work.** The scheduler drains dispatched siblings
 before terminating after reservation failure or cancellation. Completed tool results remain in
@@ -468,6 +503,7 @@ source order, agree with message callbacks, and precede the unsuccessful termina
 whose bodies never started are not fabricated as successful results. A cancelled batch never
 issues another provider request. This supersedes the old scheduler characterization that returned
 only one synthetic abort and discarded earlier evidence.
+Enforced by: prose only
 
 **Progress observation cannot change execution.** A listener throwing or rejecting cannot interrupt
 the tool body or erase its returned result. Admitted observations drain before finalization; late
@@ -477,6 +513,7 @@ and operation status from progress/after-hook failure tags. A generic throw leav
 an explicit operation-outcome exception is completed-negative. Foreground delivery failure stops
 after retaining results. Background persistence and notification retain request-bound execution
 facts; unavailable completion remains unknown. Tools and hooks cannot manufacture those facts.
+Enforced by: .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-1-proactivity-investigation.ts (asserts only that piToolInvocation keeps execution state and operation status apart)
 
 **Reporting dimensions keep their scope.** `ToolInvocationReport` owns receipt classification and
 replay reconciliation. A background terminal updates the original call and cycle, not a second
@@ -484,6 +521,7 @@ action. Completed-negative operations, unknown effects, rejection, postprocessin
 error results remain distinct. The workbench labels cycle calls separately from retained error
 results; their quotient is never a failure rate. Bounded retention discloses saturation as partial,
 and missing or conflicting evidence never certifies success.
+Enforced by: prose only
 
 **Verification is a typed host receipt, not a claim in prose.** Goal test evidence must resolve
 to a passing receipt on the active branch; complete user quotations resolve only to user-role
@@ -501,6 +539,7 @@ relationships. Historical receipts without that proof remain unresolved.
 The executor's receipt is captured before hooks and survives hook mutation, replacement, failure,
 and background handoff. A hook cannot turn an executed failure into a passing witness or invent
 a witness for an opaque result; ordinary content and policy overrides remain available.
+Enforced by: .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-2-orchestration.ts (asserts only that an older or other-directory pass does not clear a newer failure)
 
 **An unresolved obligation marks the run that produced it and blocks completion; it never
 errors a later answer.** The host preserves the answer of the run whose own check failed and
@@ -515,24 +554,29 @@ counts as a pass. The host does not erase prose or spend extra provider turns de
 grammar. Reflection cannot claim a cancelled submission or unsuccessful terminal turn, and it buys
 no turn while goal work is open (an active goal or an in-progress task step): the cue stays due
 until the work closes.
+Enforced by: .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-2-orchestration.ts (asserts only that an open obligation refuses goal completion, also after the workers retire)
 
 **A repair survives first failure and replay.** The adapter supplies the bounded correction;
 the shared recovery path retains it independently of optional diagnostic text. Action-dependent
 required fields reject before execution and report the missing field.
+Enforced by: prose only
 
 **Reordering unchanged results does not create progress.** A bounded history of matching
 operations and result signatures detects stagnant batches even when their order or membership
 changes. New operations and changed results reset the counter. Existing recovery admission and
 call fuses remain authoritative.
+Enforced by: prose only
 
 **Protocols are mechanisms, prose points at them.** The readmission gate and the ledger resolution
 enforce the failure protocol; the system prompt holds no copy of it and an active record
 carries the one-sentence rule itself (the constrained tier keeps the full text).
+Enforced by: prose only
 
 **A degenerate output loop ends before the cap.** The stream guard ends a response whose trailing
 window repeats the tier's number of times, classified as a runaway, never retried unchanged. The
 comparison collapses ordered-list markers, so an enumerated loop whose only change is its number
 is still a loop, while rows that differ only in their numbers are still output.
+Enforced by: packages/coding-agent/src/kernel/reliability/watchdogs.ts (outputRepetition ends the stream as an output runaway before the cap); packages/coding-agent/src/kernel/reliability/classifier.ts (runaway_output is never retried)
 
 **Caller cancellation owns outer-stream settlement.** Before provider setup completes, cancellation
 settles immediately. After setup, the provider has a bounded grace period to publish its own abort
@@ -541,12 +585,14 @@ itself. A cooperative provider terminal wins during that grace, and cancellation
 as a retryable stream stall. Why: once setup had completed, caller abort disabled both the setup
 fallback and the idle-stall fallback, so an abort-ignoring iterator could keep the harness pending
 forever.
+Enforced by: prose only
 
 **A tool-loop runaway is evidence.** A repeated tool call, a stagnant tool cycle, or the
 provider-turn limit records a runaway stop, demotes the model to the strong tier for thirty days,
 and the goal continues on a recovery path. An output runaway from the stream guard ends the
 response and leaves the goal to change approach, but does not demote on its own: the guard is
 measured against one real loop and a legitimately repetitive output must not cost a model a month.
+Enforced by: prose only
 
 **A stall budget belongs to a model class, never to every provider at once.** Local and
 pi-managed models draw on `retry.stall.local` (the legacy top-level `connectMs` / `activeIdleMs` /
@@ -558,6 +604,7 @@ are set without a `cloud` entry the settings diagnostics say so once at startup.
 local model legitimately sits silent for minutes while it loads, a hosted stream silent that long
 is dead, and one shared budget raised for the first left dead cloud streams running for fifteen
 minutes.
+Enforced by: prose only
 
 **An expired credential is never reported as a missing one.** A stored OAuth credential that is
 past its expiry and cannot be refreshed fails as `OAuthCredentialUnusableError`: the provider,
@@ -565,6 +612,7 @@ the expiry date, the redacted refresh failure and `Run pi login <provider>`; low
 sources never stand in for the credential the user chose, and only a provider with no stored
 credential at all reads `No API key`. Why: a four-day-stale token surfaced as "No API key for
 provider: xai", which points at the wrong fix.
+Enforced by: prose only
 
 ## Workers
 
@@ -622,6 +670,7 @@ Status exposes only validated permission names bound to the selected
 attempt, never permission guesses or raw resource grants. Inspection pages omit opaque provider
 replay signatures before output sizing; raw replay remains exact and both input and output are
 bounded. Unsupported status selectors refuse instead of expanding the selection.
+Enforced by: packages/coding-agent/src/core/worker-tool-ceiling.ts (only isWorkerProcessToolAllowed); packages/coding-agent/src/core/model-router/read-only-shell-policy.ts (readOnlyShellViolation); packages/coding-agent/src/core/tools/repo-read.ts (only compileRepoReadOptions)
 
 **A fresh worker captures the task directory without re-anchoring authority.** Native delegate and
 goal dispatch inherit the caller's admitted task cwd before queueing. An explicit relative worker
@@ -631,6 +680,7 @@ selection moves to a UNC share. Queued and reused workers keep their admitted cw
 foreground directories cannot block status or cancellation. Why: resolving every fresh request from
 the launch directory dispatched work into the wrong project; treating the execution directory as
 the grant anchor could silently add a new share.
+Enforced by: prose only
 
 **A fresh, unpinned worker runs on another account than the foreground when one is authenticated,
 and inherits the foreground thinking level one notch down; authored choices are never moved.**
@@ -648,6 +698,7 @@ measured on the owner's sessions of 2026-09-04..11, workers inherited `xhigh`, a
 to seven workers each spending the foreground's full reasoning budget at once was the largest
 single source of shared-account load (277 of the 334 xAI requests that overlapped another were
 workers), while the owner's own request waited behind them.
+Enforced by: prose only
 
 **A provider limit one process learns is a limit every process honours; the owner's foreground
 request never waits for capacity or the stop; workers and background lanes yield at the provider's
@@ -682,6 +733,7 @@ perf profiler, so waiting is neither a connect stall nor time to first token. Wh
 request in flight from any process cut generation from 97.7 to 62.2 tokens per second, and no
 process knew what its siblings were sending; the census did not measure the count at which a cap
 pays for itself, so the ledger records by default and a limit is the owner's choice.
+Enforced by: packages/coding-agent/src/core/provider-admission/gate.ts (only: ESTOP holds non-foreground lanes); .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-2-orchestration.ts (asserts only R25: a worker waits out a shared limit)
 
 **Queue validation cannot substitute a directory or start an attempt twice.** Fresh worker and
 verifier contracts capture native directory identity before durable dispatch. Queued and resumed
@@ -693,6 +745,7 @@ the attempt being started. Historical contracts retain explicitly admitted path-
 a diagnostic: identity never recorded cannot be reconstructed, and that limitation cannot bypass
 a saved binding. Synthetic foreground and worker response scripts are independent of scheduling
 order.
+Enforced by: prose only
 
 **A foreground call is handed off only on the model's request or the operator's clock.** A tool
 declares which calls are foreground waits (never handed off) and which ask for a background task
@@ -701,6 +754,7 @@ unless the operator configured a clock (`backgroundTool.callAfterMs`, off by def
 call by hand. The handoff stub names which of the three moved the call (`started as session task
 … (background requested)`, `exceeded Ns; running as session task`, `moved to session task … by the
 operator`).
+Enforced by: .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-1-owner-lifecycle.ts (only backgroundRequested); packages/coding-agent/test/fixtures/harness/journeys/journey-2-tool-handoff-ownership.ts (only clock and manual handoff)
 
 **The completion wake-up carries the result.** When a background task ends, its wake-up lists each
 finished record's status line followed by its bounded final output verbatim, in emission order,
@@ -723,6 +777,7 @@ durable, so a failed notifier can neither hold session disposal until its retry 
 erase the completion that the next owner must recover. Why: the completion wake-up already delivers
 the result; replaying output-derived summaries from a later list wastes context and can reintroduce
 stale failure diagnostics.
+Enforced by: .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-2-tool-handoff-ownership.ts (asserts only that the completion wake-up carries the task output)
 
 ## System One
 
@@ -734,6 +789,7 @@ rechecked at queued/recovered dispatch and after asynchronous selection; a stale
 only its own capacity leases. Manual root selection remains available, and disabling routing disables
 automatic worker profile judgment while preserving explicit manual configuration. This replaces the
 previous all-authenticated default and outside-pool pin exception.
+Enforced by: prose only
 
 **Model classification publishes only complete, bounded evaluations.** Independent lightweight
 questions carry only their targets' full facts, with stable global answer identities across batches.
@@ -743,6 +799,7 @@ and does not claim to measure provider tokens. An oversized individual or compar
 before transport and records a diagnostic. Cancellation or a failed batch publishes no partial pool;
 every actual request retains its own evaluation and usage. Structured provider rejection codes enter
 default diagnostics only through the allowlist; arbitrary provider detail values remain concealed.
+Enforced by: prose only
 
 **The host routes the loop from System One judgments; the root owns execution.** System One is the
 provider-neutral judgment contract, exposed through `systemone`; TypeSafe is a provider adapter.
@@ -781,6 +838,7 @@ coordination boundary, not an objective failure: when automatic continuation rac
 owner, `AgentBusyError` returns to the auto-continuation owner for its idle wait and retry without
 blocking the goal or advancing its system-failure streak. Why: recording the admission race as an
 objective failure made the retry find an already-blocked goal and terminate reliable autonomous work.
+Enforced by: prose only
 
 **System One has the operator's two levers over every executor.** Cancel fires immediately (the Esc
 path, a named abort). A steer is either queued for the next model turn or delivered now by
@@ -796,6 +854,7 @@ against a real step or goal, never against an empty objective. Only
 the operator's interruption stops the objective loop; System One holds no cancel over the root's own
 turn. A worker judged off the mission is redirected now, a
 stalled one at its next turn, a repeated stall rerouted. The off-step cancel proof uses `echo status`.
+Enforced by: prose only
 
 **The authority line says where a judgment may stop work** (`system-one/authority-line.ts`). Reversible
 work proceeds past a doubt or an outage with the doubt visible; an ambiguous judgment asks for
@@ -804,11 +863,13 @@ evidence at most twice per evidence revision, then reversible work proceeds. An 
 goes to the operator (root) or is refused (worker). A Noul has no confidence of its own (its
 probability is the certainty), so only Choice and Score answers are gated on confidence, and a
 low-confidence answer is a doubt routed to `gather_more`, never an exception that ends the run.
+Enforced by: packages/coding-agent/src/core/system-one/operation-gate.ts (OperationGate.check refuses a worker's held operation; the rest of the authority line is prose only)
 
 **An owner question is observable before presentation and stays open on timeout.** The host
 publishes `waiting` before it invokes the presenter, then publishes `settled` even when presentation
 fails. An unanswered deadline leaves a pending snapshot and grants no authority; an external owner
 message may later resolve it.
+Enforced by: prose only
 
 **Every answer's claims are checked against the turn's receipts** (`system-one/claim-delivery.ts`), with or
 without a live objective. System One classifies test-success claims as current success, historical-only,
@@ -819,6 +880,7 @@ turn's mechanical receipts. A claim the receipts contradict buys one correction 
 backs is an unverified-claim warning. An enforced work unit is anchored to the assistant message that
 owns its first mutating call; provider lifecycle records written between that message and tool admission
 cannot cut the call out of the receipt window.
+Enforced by: prose only
 
 **Repository outcome evidence belongs to the receiving objective and its actual task repositories.**
 The mutation observer captures the dirty working tree before the first effect in each repository,
@@ -839,12 +901,14 @@ a delta observed by that successful call; a later no-op cannot validate an earli
 repository receives terminal cleanup even when a sibling's finalization fails. Missing baseline or
 snapshot evidence is an infrastructure diagnostic that requires recovery,
 never an empty patch or a manufactured production finding.
+Enforced by: prose only
 
 **Credential redaction applies to model-facing evidence metadata as well as text.** Paths, commands,
 source locators, repository identities, and work-diff diagnostics pass through the projector's existing
 redaction owner before evaluation. Projection does not change the authoritative local evidence or
 credentials used by authorized local operations. The transport's final credential check remains in
 place.
+Enforced by: prose only
 
 **Mandatory findings remain active while the root changes its verification approach.** Repeated
 receiving-lane verification without new evidence routes to root replanning, retaining the original
@@ -857,11 +921,13 @@ explicit owner resume permit another bounded attempt; cancellation and System On
 not consume completed recovery. This bounds repeated replanning without inventing verification.
 Resolution reports identify selected receipts and uncertain proof conditions in the same judgment;
 diagnostic answers do not create an additional acceptance gate.
+Enforced by: prose only
 
 **The TUI reads unresolved items from their lifecycle owners.** Deterministic checks, mandatory peer
 findings, and advisory doubts have separate live counts. Resolving or replacing a finding updates
 the existing projection; evaluation history does not create new active rows. Peer tool completion
 and session reload refresh the view.
+Enforced by: prose only
 
 **What no agent could settle climbs a ladder, then reaches the owner** (`system-one/unsettled-ladder.ts`).
 A worker reports findings it could not confirm as `inconclusive`, never rounded up. System One judges
@@ -870,6 +936,7 @@ One judges it; each pass carries new evidence, at most two. The model finds, Sys
 open goes to the owner: asked through the parent with the owner in the loop, written to the follow-up
 document under a handoff while the run continues around it. `systemone` is authorized by
 `semantic.judge`, which read-only grants keep.
+Enforced by: .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-2-background-and-stall.ts (asserts only that an unjudged inconclusive worker item stays unsettled and is not posted to the owner)
 
 **System One catches logic that is duplicated but written differently** (`system-one/code-duplicates.ts`). Token
 clone detection finds copies; it cannot see two functions that do the same job with different names
@@ -878,6 +945,7 @@ fingerprints, with rarity measured from the index, never listed by hand; identic
 candidate but is not the same job. System One judges every (new unit, candidate) pair of an edit in one
 request and a decisive duplicate is reported in the edit's result, naming the function to reuse.
 `npm run scan:semantic-duplicates` runs the same judgment over every production unit.
+Enforced by: prose only
 
 **A noul answer is a probability with a direction, never a boolean.** Noul is P(the proposition is
 true). The decision is the pair (direction, band): `required_true` needs the high end,
@@ -892,12 +960,14 @@ carries those predicates as `unsure_semantic_predicates`. A per-question numeric
 (JEV-004's 0.75, JEV-013's 0.7) is a deliberate calibration and reads the probability directly; a
 0.5 cutoff is not a calibration and appears nowhere. The pane prints `P(yes)=0.55 · unsure`, never
 `true (p=0.55)`.
+Enforced by: packages/coding-agent/src/core/decision/evaluation.ts (BooleanDecisionResult has no value field); scripts/run-tsc.mjs (check:static type check rejects a .value read; the rest is prose only)
 
 **The Decision graph draws doubt, not just pass and fail.** An unsettled judgment is an open doubt:
 it is named in the list and in the diagram, it holds `goal satisfied?` at `not closed · N doubts`
 exactly as an unmet check does, and it blocks the `DELIVER` node. Doubts travel as prefixed reason
 lines on the evaluation record, so they reach the pane and the durable ledger by the route every
 other reason already takes. The running clock is the current visit only and restarts on resume.
+Enforced by: prose only
 
 **The decision ledger is an input, never erased.** Every stage transition, System One evaluation and route
 is appended to one SQLite database per agent directory, keyed by session id and working directory.
@@ -912,11 +982,13 @@ and the other separately-measured additions (aggregate 5,813 = 4,500 + 350 task_
 accounting), so the ledger surface cannot hide growth in the pre-existing tools. `repo_read` is a bounded git read, measured at 143 tokens, and is budgeted the same way.
 Root bash also runs git. The operator is asked only before deleting the repository, a directory
 that contains it, the home directory, a filesystem root, or a disk.
+Enforced by: packages/coding-agent/src/core/worker-tool-ceiling.ts (only: isWorkerProcessToolAllowed denies decision_ledger_read; ledger retention is prose only)
 
 ## Structure
 
-**The coordinator line ceiling provides owner-approved integration headroom while ownership ratchets remain authoritative.** `agent-session.ts` and extracted boundaries have an 8,000-line ceiling in
+**The coordinator line ceiling provides owner-approved integration headroom while ownership ratchets remain authoritative.** `agent-session.ts` has a 6,000-line ceiling and the extracted boundaries an 8,000-line ceiling in
 `scripts/check-coordinator-boundaries.mjs`; extracted-owner and forbidden reclaimed-responsibility markers remain strictly enforced.
+Enforced by: scripts/check-coordinator-boundaries.mjs (check:static: agent-session.ts at 6,000 lines, other listed boundaries at 8,000, required and forbidden markers)
 
 **One call failing identically ends the run on the ledger's own count.** The failure ledger
 counts an occurrence of a failure key once per tool batch: an occurrence is an attempt the model
@@ -932,6 +1004,7 @@ failed 28 times in 22 minutes inside batches whose other calls varied, and no gu
 the resolver can name normalizes instead of refusing: an ordinal prefix followed by uuid-like or
 parenthetical noise resolves to the one step carrying that number and the result says so; a short
 numeric fragment still refuses with the open-step list. A compacted ordinal that is no longer among current steps names archive counts and says that id's historical status is unknown; it does not redirect to another step. Goal unknown-requirement and unknown-evidence refusals name the live catalogs. `tool_task` wait/invalid-id errors classify `errorKind` so completed waits stay operation outcomes and lookup misses stay tool failures. Why (2026-09-15): a live session spent 29 tool errors retrying selector `7` after compact, citing unknown evidence, and treating vitest/biome exits as MUST ledger mistakes.
+Enforced by: packages/coding-agent/src/kernel/agent-loop.ts (ends the run as repeated_tool_call at the tier's repeat count; per-batch counting is prose only)
 
 **An alias names a path that exists, or it does not exist.** A candidate is minted only when it
 resolves to something on disk from the table's cwd; git refs, revision ranges, numeric or
@@ -941,12 +1014,14 @@ listings print absolute paths. Why: measured live, a repo-root-relative git line
 `p/Engine.cpp=(Release/Source/Engine.cpp` and three reads failed with ENOENT, a memory listing's
 root-relative names did the same, `ls` output minted 759 legend lines nothing mentioned, and a
 Python `f = p/name` was refused as an invented alias.
+Enforced by: packages/coding-agent/src/core/context/path-alias-tool-wrap.ts (assertNoUnmintedAliases refuses unminted alias ids before execution; minting rules are prose only)
 
 **A skill on disk is loadable in the session that wrote it.** A `skill` load, read or search that
 misses re-scans the skill roots once before refusing, the refusal says the roots were re-scanned,
 and search names the skills the loader could not index. Why: measured live, a skill written by
 `skillify` mid-session was refused twice, 45 minutes apart, while its SKILL.md existed the whole
 time.
+Enforced by: prose only
 
 **Credentials remain local execution data.** The host may read and use authorized credentials;
 model-facing text contains redacted values rather than credentials. The credential boundary gathers
@@ -954,6 +1029,7 @@ stored API and OAuth values, runtime overrides and configured provider values wi
 OAuth or executing credential commands merely to redact. Root and worker requests, isolated review
 and compaction, tool results and System One evidence use that boundary. Authentication headers and
 local source remain usable; redaction preserves ordinary text and unchanged request references.
+Enforced by: .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-1-owner-lifecycle.ts (asserts only credential field masking of secret-keyed and token-shaped values)
 
 **A refusal names a real ambiguity or a real risk, never a shape the harness can absorb.** The
 credential guard accepts a literal filename prefix as a narrow glob, treats the harness's own
@@ -970,6 +1046,7 @@ several files and combined flags, `head`/`tail -c` and several files, `grep -r/-
 external processes; there is no cap on the emulated surface, an unsupported construct names
 itself. Why: measured live, refusals rose to 12 to 30 per 100 turns on the new versions and 132 of
 5,049 Windows bash calls were refused for ordinary flags.
+Enforced by: prose only
 
 **The general memory holds facts true in any task; a project's facts live in its own file.**
 `<agentDir>/MEMORY.md` (1,200 chars) carries cross-project facts; each project has
@@ -982,8 +1059,10 @@ note in the memory block (move project lines, never delete), and workers cannot 
 memory. Why: on both owner machines the single global file was full of ticket and build facts,
 refused writes four times in a row, and sent every project's facts to every other project's
 sessions.
+Enforced by: packages/coding-agent/src/core/worker-tool-ceiling.ts (only: isWorkerProcessToolAllowed denies the memory tool; files and budgets are prose only)
 
 **A managed memory file can always be recovered, and only the operator adopts an external edit.** The managed state stores the committed content with its digest; an empty file against a non-empty managed revision is restored on start and before a write (nothing of anyone's is in an empty file); any other drift refuses the model's write and names `/memory accept` and `/memory restore`, which only the operator can run.
+Enforced by: packages/coding-agent/src/core/memory/providers/file-store.ts (refuses memory writes on drift until /memory accept or /memory restore)
 
 **Memory projections share the final prompt allowance.** Static memory receives only the capacity
 left after the core contract, tool surface, paths, and caller instructions. The 5,120-character
@@ -991,15 +1070,18 @@ minimal limit remains unchanged; omitted preferences arrive through the existing
 whose model budget charges its complete wire framing. Without a model budget, static and persona
 projections select the same whole preference lines. Reload retains the bounded notice identity for
 each target and kind, so an unchanged drift revision is reported once.
+Enforced by: prose only
 
 **Memory and skill admission preserve ownership.** Bounded OKF discovery visits the selected
 project first without crossing symlink boundaries. External memory edits remain protected by
 revision checks. A skill batch validates its entire requested set before one commit; an accepted
 batch cannot evict a member of that same batch.
+Enforced by: prose only
 
 **Admitted project rules are fenced by their source bytes, not their apparent size.** The live
 semantic-rule controller keys reuse by the ordered instruction paths and complete contents, so an
 AGENTS-family edit takes effect even when its byte count does not change.
+Enforced by: prose only
 
 **Goal accounting starts at ownership, and instructions scale to intent.** A goal created during
 a foreground run acquires that run's lease at creation; earlier unrelated usage stays outside it.
@@ -1018,10 +1100,12 @@ prompt resets both allowances: it resumes any system-blocked goal (`resume_goal`
 `source: "system"`) and clears the streak and the collection; automatic resumes never impersonate
 owner intent. Explicit owner pause, block, stop and `autoContinueGoal: false` are untouched.
 These contracts fit the 3,700-byte core prompt budget and the 5,120-character minimal-profile ceiling.
+Enforced by: prose only
 
 **A feature earns its tokens or is gated by tier, never removed.** `scripts/feature-ledger.mjs`
 measures each subsystem's cost and benefit from session files; a subsystem without a benefit
 measurement gains no new surface.
+Enforced by: prose only
 
 ## Changes to this file
 

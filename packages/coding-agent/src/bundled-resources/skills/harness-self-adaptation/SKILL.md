@@ -64,7 +64,10 @@ Before diagnosing the harness:
 1. Restate the requested outcome and scope.
 2. Define an **oracle** that can prove the outcome: a fixture, benchmark,
    transcript invariant, type check, rendered state, or explicit user acceptance
-   criterion. A focused test is an oracle only when the owner asked for tests.
+   criterion. The repository's standing proof is `npm run check:static` and the
+   scripts it runs, the harness journeys CI runs on the pushed revision, and the
+   live gate `npm run accept:harness-live`, which only the owner runs, never an
+   agent. A test is an oracle only when the owner asked for tests.
 3. Read the applicable `AGENTS.md`, relevant source in full before broad edits,
    existing tests, and the narrow Pi docs/examples required by the task.
 4. Search for an existing skill, prompt, setting, tool, extension, test helper,
@@ -86,7 +89,7 @@ correctness invariant and avoid claiming a measured efficiency gain.
 ### 2. Observe reusable signals
 
 Use operational evidence, never hidden chain-of-thought. Inspect bounded sources
-such as failing tests, minimal reproductions, logs, tool results, session
+such as failing checks or CI journeys, minimal reproductions, logs, tool results, session
 analytics, recovery records, benchmarks, user corrections, and source control
 history relevant to the mechanism.
 
@@ -107,7 +110,7 @@ Create this compact adaptation card:
 ```text
 Work oracle: <observable success condition>
 Signal and impact: <what hurt effectiveness, and how>
-Evidence: <reproduction, source, test, metric, or trusted recurrence>
+Evidence: <reproduction, source, check or CI journey, metric, or trusted recurrence>
 Mechanism hypothesis: <cause that predicts the signal>
 Falsifier: <result that would disprove the hypothesis>
 Primary metric: <before -> target, or invariant>
@@ -161,8 +164,9 @@ Mandatory selection rules:
   are required.
 - Use core source only for a cross-cutting invariant or capability that lower
   layers cannot reliably enforce.
-- Treat benchmarks, telemetry, and changelog entries (and tests, only when the owner
-  asked for them) as proof and durability support, not substitutes for the behavior fix.
+- Treat the repository's static checks, the CI-run journeys, the owner-run live
+  gate, benchmarks, telemetry, and changelog entries as proof and durability
+  support, not substitutes for the behavior fix.
 - Change one causal mechanism per experiment. Adjacent observability work may
   travel with it; test work travels only on an explicit owner request.
 
@@ -177,8 +181,10 @@ should move <metric/invariant> from <baseline> to <target> while preserving
 ```
 
 Inspect external API types rather than guessing. Follow project conventions and
-use existing seams. Prove the new mechanism on the real system; add or update a
-narrow regression test only when the owner asked for tests. Do not remove intentional behavior,
+use existing seams. Prove the new mechanism on the real system: the static checks
+(`npm run check:static`), the harness journeys CI runs on the pushed revision, and,
+for live behavior, the owner-run live gate (`npm run accept:harness-live`); add or
+update a test only when the owner asked for tests. Do not remove intentional behavior,
 weaken validation, suppress warnings, enlarge timeouts blindly, or lower quality
 thresholds merely to make the metric green.
 
@@ -192,7 +198,8 @@ use destructive workspace resets or cleanups.
 2. Apply the smallest intervention.
 3. Run the narrow oracle first.
 4. Run broader validation proportional to blast radius and the repository's
-   declared validation contract.
+   declared validation contract: `npm run check:static` locally, then read the
+   CI journey result for the pushed revision; the live gate is the owner's.
 5. Compare treatment with baseline under equivalent conditions. For stochastic
    behavior, use repeated trials and report the sample size and variance or
    failure count.
@@ -200,7 +207,7 @@ use destructive workspace resets or cleanups.
    read-only verifier when available, then verify its findings yourself.
 7. Repair only while evidence improves. Stop for human review after five failed
    attempts on one blocker or two consecutive cycles with no output, metric, or
-   test improvement.
+   check improvement.
 
 Self-adaptation must not interrupt or silently broaden the active task. If a
 candidate is valuable but out of scope, report a bounded proposal with evidence;
@@ -212,7 +219,9 @@ Retain the intervention only when all applicable conditions pass:
 
 - the active task oracle passes;
 - the causal reproduction is fixed or the primary metric improves materially;
-- focused regression coverage passes (when the owner asked for tests);
+- `npm run check:static` passes and the harness journeys CI runs pass on the
+  pushed revision; the owner's live gate passes when the owner ran it for a
+  live-behavior change;
 - broader checks required by project policy pass;
 - safety, quality, compatibility, cost, and latency guardrails do not regress;
 - no authority or persistent setting changed outside the active grant;
@@ -225,7 +234,7 @@ already spent. If comparison was impossible, retain only a proven correctness or
 safety fix and label the effectiveness claim unconfirmed.
 
 After retention, use `pi-harness-learning` to classify the lesson. Record only a
-concise durable rule, correction, skill refinement, test, or source finding that
+concise durable rule, correction, skill refinement, check, or source finding that
 will change a future decision. Run the skill overlap audit before creating or
 splitting a skill.
 
@@ -270,7 +279,8 @@ Harness adaptation:
 
 A model emits the same repairable argument shape in independent turns. Reproduce
 it with a provider fixture, locate the shared validation choke point, load
-`tool-call-repair`, add one guarded repair mode (and a regression fixture only if the owner asked for tests), then
+`tool-call-repair`, add one guarded repair mode, prove it with the static checks
+and the CI journeys (a regression fixture only if the owner asked for tests), then
 compare repaired execution and false-positive behavior. Do not add a tool-specific
 pre-coercion shim or teach every prompt the malformed shape.
 
@@ -292,7 +302,7 @@ record it only under the granted scope. A transient formatting correction remain
 
 Two tasks benefit from the same non-obvious review sequence. Audit existing
 skills first. If no existing owner fits, use `skill-architect` to design one and
-`skill-creator` to scaffold and validate it
+`skill-creator` to scaffold and validate it as a
 narrow skill with an oracle and known gaps; otherwise refine the existing skill.
 
 ## Self-Check
@@ -308,7 +318,9 @@ Before reporting completion, verify:
 - One primary metric and non-regression guardrails were declared.
 - The intervention changes one causal mechanism and has a targeted rollback.
 - Active authority was preserved; every hard boundary stayed human-gated.
-- Focused proof and all project-required broader checks passed.
+- `npm run check:static` and all project-required broader checks passed, the CI
+  journeys passed on the pushed revision, and any live-gate claim comes from a
+  run the owner made.
 - Before/after conditions are comparable, or the baseline gap is disclosed.
 - Nontrivial generated/delegated work received independent verification.
 - The retention gate produced `retained`, `rolled back`, `proposed`, or
@@ -319,8 +331,8 @@ Before reporting completion, verify:
 ## Known Gaps
 
 - This skill cannot observe hidden reasoning and must use operational evidence.
-- It cannot infer longitudinal recurrence unless trusted session indexes, tests,
-  logs, or user evidence are available.
+- It cannot infer longitudinal recurrence unless trusted session indexes, CI
+  journey history, logs, or user evidence are available.
 - Stochastic model/provider behavior may require costly repeated trials; without
   them, effectiveness remains unconfirmed.
 - It does not grant permission to change settings, authority, credentials,

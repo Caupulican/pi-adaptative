@@ -239,8 +239,8 @@ const jsonl = (file) =>
 				return [];
 			}
 		});
-const sessionFiles = () => {
-	const root = join(AGENT, "sessions");
+const sessionFiles = (agentDir = AGENT) => {
+	const root = join(agentDir, "sessions");
 	if (!existsSync(root)) return [];
 	return readdirSync(root).flatMap((dir) =>
 		readdirSync(join(root, dir))
@@ -248,7 +248,7 @@ const sessionFiles = () => {
 			.map((name) => join(root, dir, name)),
 	);
 };
-const entries = () => sessionFiles().flatMap(jsonl);
+const entries = (agentDir = AGENT) => sessionFiles(agentDir).flatMap(jsonl);
 const claims = () =>
 	entries()
 		.filter((e) => e.type === "custom" && e.customType === "worker_claim")
@@ -853,7 +853,38 @@ const SCENARIOS = [
 		// Negative control: job frames never become words on either side's chat or link channel.
 		for (const file of [join(AGENT, "remote", "chats", "lab.jsonl"), join(state.remoteAgent, "channels", "link.json")])
 			if (existsSync(file) && readFileSync(file, "utf8").includes(marker)) throw new Error(`the job reached a conversation: ${file.slice(RUN.length)}`);
-		return `lab ran the job once (seq ${inRecord.seq}, acknowledged), the hub applied its end once and the lane completed; no conversation carried it`;
+		// The executor's own session stays silent for the placed job: its orchestration store holds the job lane's terminal
+		// notification as delivered, and no parent input in its session names that lane.
+		const executorLane = inRecord.laneId;
+		if (!executorLane) throw new Error("the executor's record names no lane");
+		const executorLaneTerminals = () => {
+			const attemptIds = entries(state.remoteAgent)
+				.filter((e) => e.type === "custom" && e.customType === "lane_record" && e.data?.record?.laneId === executorLane)
+				.map((e) => e.data.record.attemptId)
+				.filter((id) => typeof id === "string");
+			return [...new Set(attemptIds)].map((attemptId) => `worker-terminal:${attemptId}`);
+		};
+		const storeFiles = (sub) => {
+			const root = join(state.remoteAgent, "state", "orchestration", "sessions");
+			if (!existsSync(root)) return [];
+			return readdirSync(root).flatMap((key) => {
+				const dir = join(root, key, "events", sub);
+				return existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(dir, name), "utf8"))) : [];
+			});
+		};
+		const deliveredTerminals = () => {
+			const delivered = new Set([
+				...storeFiles("snapshots").flatMap((snapshot) => Object.values(snapshot.projection?.notifications ?? {}).filter((n) => n.status === "delivered").map((n) => n.notificationId)),
+				...storeFiles("events").filter((event) => event.type === "notification.delivered").map((event) => event.payload?.notificationId),
+			]);
+			const terminals = executorLaneTerminals();
+			return terminals.length > 0 && terminals.every((id) => delivered.has(id)) ? terminals : undefined;
+		};
+		await waitFor("the executor's lane terminal delivered in its orchestration store", deliveredTerminals, 120_000, 3000);
+		await sleep(10_000);
+		const parentInputs = entries(state.remoteAgent).filter((e) => e.type === "custom_message" && e.details && typeof e.details === "object" && "parentInput" in e.details && JSON.stringify(e).includes(executorLane));
+		if (parentInputs.length > 0) throw new Error(`the executor's session took ${parentInputs.length} parent input(s) that name the job's lane`);
+		return `the job ran once (seq ${inRecord.seq}, acknowledged), the hub applied its end once and the lane completed; no conversation carried it; the executor's session stayed silent (its lane's terminal is delivered in its orchestration store and no parent input names the lane)`;
 	}),
 	scenario("s43", "ask-as-lane: the orchestrator's ask to a linked machine is one lane that ends once with the reply; owner words typed in lab's chat on the hub stay chat and make no lane", async () => {
 		if (!state.remoteAgent || !state.second) return { skipped: "s14 did not link a second machine" };

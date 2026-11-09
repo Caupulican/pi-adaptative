@@ -1,19 +1,31 @@
 ---
 name: icm-architect
-description: Design any process, idea, problem, or body of knowledge into an ICM (Interpretable Context Methodology) workspace — folder structure as agent architecture — or restructure an existing folder, repo, or vault into one. Use when the user wants to (1) turn a recurring workflow into an agent-runnable folder pipeline, (2) organize scattered notes, files, or knowledge into a library one AI agent can walk, (3) map a team or company as connected context ("context map", "second brain", "team brain", "knowledge base for AI"), (4) audit a codebase or mixed folder into a walkable edit map (objects, processes, change-impact) so later agents can change it without slurping the tree, (5) audit or restructure an existing workspace to ICM conventions, or (6) says "make this an ICM", "ICM this", "map this repo", "audit this folder", "what would a change hit", "build me a workspace", or "structure this for agents".
+description: "Design any process, idea, problem, or body of knowledge into an ICM (Interpretable Context Methodology) workspace — folder structure as agent architecture — or restructure an existing folder, repo, or vault into one. Use when the user wants to (1) turn a recurring workflow into an agent-runnable folder pipeline, (2) organize scattered notes, files, or knowledge into a library one AI agent can walk, (3) map a team or company as connected context (\"context map\", \"second brain\", \"team brain\", \"knowledge base for AI\"), (4) audit a codebase or mixed folder into a walkable edit map (objects, processes, change-impact) so later agents can change it without slurping the tree, (5) audit or restructure an existing workspace to ICM conventions, or (6) says \"make this an ICM\", \"ICM this\", \"map this repo\", \"audit this folder\", \"what would a change hit\", \"build me a workspace\", or \"structure this for agents\"."
 ---
 
 # ICM Architect
 
-Build workspaces where the folder structure does the orchestration. One agent, reading the right files at the right moment, replaces a multi-agent framework: numbered folders carry sequencing, hierarchy carries context scoping, plain markdown files carry state. A human can open any folder and see exactly what state the system is in, because state is just files.
-
-Think of the workspace as a library. The routing files are the catalog: small, stable, they point at everything and store almost nothing. The content lives on the shelves (stage folders, node files, reference material). One librarian — one model — walks the building, and the question decides which shelf gets walked to. Nobody photocopies the library into a backpack; that is what context-stuffing is. The catalog is small on purpose.
+## How to use the skill
 
 Method: Interpretable Context Methodology (Van Clief & McDermott, arXiv:2603.16021, MIT-licensed).
 
 On Pi Adaptative, L0 is `AGENTS.md` (CLAUDE.md is accepted). After a workspace exists, drive a run with the host `pipeline` tool (`start` / `increment` / `status`). Increment completes the current stage when `output/` has files, then starts the next — it is not a Review-now latch. Concurrent or branching work still uses `delegate`.
 
-## The invariants
+### Choose a mode
+
+- **Building from a described process, idea, or problem** → Build mode.
+- **An existing folder, repo, or vault that needs ICM structure** → Restructure mode.
+- **A body of work later agents must edit** (code, markdown, or mixed) → System map form. Read [references/system-map.md](references/system-map.md) after picking the form.
+
+## North Star
+
+Build workspaces where the folder structure does the orchestration. One agent, reading the right files at the right moment, replaces a multi-agent framework: numbered folders carry sequencing, hierarchy carries context scoping, plain markdown files carry state. A human can open any folder and see exactly what state the system is in, because state is just files.
+
+Think of the workspace as a library. The routing files are the catalog: small, stable, they point at everything and store almost nothing. The content lives on the shelves (stage folders, node files, reference material). One librarian — one model — walks the building, and the question decides which shelf gets walked to. Nobody photocopies the library into a backpack; that is what context-stuffing is. The catalog is small on purpose.
+
+## Core Sections
+
+### The invariants
 
 Every ICM, whatever its form, obeys these. When building or restructuring, enforce all ten:
 
@@ -28,13 +40,7 @@ Every ICM, whatever its form, obeys these. When building or restructuring, enfor
 9. **The filesystem is the state machine.** "Status" is derivable by scanning what exists in output folders. Generated indexes (file maps, logs) are rebuilt by script, never hand-edited.
 10. **Instantiate by copying.** New unit of work = copy a template folder, not a blank page. Keep templates in a `_templates/` or `_system/` folder.
 
-## Choose a mode
-
-- **Building from a described process, idea, or problem** → Build mode.
-- **An existing folder, repo, or vault that needs ICM structure** → Restructure mode.
-- **A body of work later agents must edit** (code, markdown, or mixed) → System map form. Read [references/system-map.md](references/system-map.md) after picking the form.
-
-## Build mode
+### Build mode
 
 **1. Extract the structure from dialogue.** The structure is already in how the person describes the work — don't impose a shape, surface theirs. Ask (a few at a time, not all at once):
 
@@ -63,9 +69,9 @@ Real workspaces mix forms (a record library whose records are mini knowledge bun
 
 **4. Write the contracts.** Root `CLAUDE.md` (identity + routing table), root `CONTEXT.md` (the pipeline or schema definition), one `CONTEXT.md` per stage/hub folder, `setup/questionnaire.md` if the factory needs configuring per user. Write inputs as explicit file paths, split into working (this run) and reference (every run).
 
-**5. Validate with the walk test** (below).
+**5. Validate with the walk test** (Self-Check, below).
 
-## Restructure mode
+### Restructure mode
 
 **1. Inventory before touching.** List the tree. For each area note: what it is, when last touched, what refers to it. Never delete or move in this pass.
 
@@ -84,9 +90,20 @@ Real workspaces mix forms (a record library whose records are mini knowledge bun
 
 **6. Validate with the walk test.**
 
-## The walk test
+## Anti-Patterns
 
-Validate any ICM — new or restructured — by walking it cold, as an agent with no memory:
+- **Don't over-structure.** The ladder runs: chat → saved prompt/skill → folders + one agent. Only climb when the rung below is genuinely automated and repeating. A workspace for a thing done twice is scaffolding, not architecture.
+- **Anti-patterns seen in the wild:** duplicated entry files that drift (generate one from the other, or make one a pointer); schema documents that mandate names the actual files stopped using (update the schema or the files — pick one); hand-edits to generated indexes; workshop sessions that produce slides instead of structured data (every working session should end in an artifact the structure can hold); patterns declared top-down (one team complaining is a gripe — the same shape appearing three independent times is structure).
+
+## Examples
+
+- **A recurring video script job** (Build mode, Pipeline form): the owner researches, then writes, then records. Stages become `01_research/`, `02_script/`, `03_record/`; voice rules go to `_shared/voice.md` as factory material; the `02_script/CONTEXT.md` contract names `../01_research/output/research.md` as its working input and `../../_shared/voice.md` as reference, with one human check (read the draft aloud). The full contract is in [references/core.md](references/core.md).
+- **A scattered notes folder** (Restructure mode, Knowledge bundle form): inventory the tree, classify each file as catalog, contract, factory, product or dead, present the migration map, and move nothing until the owner approves it.
+- **"What would a change hit" in a repo** (System map form): follow the audit pipeline in [references/system-map.md](references/system-map.md) to produce object cards and a change-impact index a cold agent can walk.
+
+## Self-Check
+
+Validate any ICM — new or restructured — by walking it cold, as an agent with no memory (the walk test):
 
 - Open the root. Can you answer *where am I* and *where do I go for the current task* within the entry file plus at most two more reads?
 - Pick any stage/node. Does its contract name exact input paths, the job, the output, and the human check?
@@ -98,11 +115,10 @@ Validate any ICM — new or restructured — by walking it cold, as an agent wit
 
 If a step fails, fix the structure — not by explaining more, but by moving or splitting files until the walk works.
 
-## Guardrails
+## Known Gaps
 
-- **Don't over-structure.** The ladder runs: chat → saved prompt/skill → folders + one agent. Only climb when the rung below is genuinely automated and repeating. A workspace for a thing done twice is scaffolding, not architecture.
-- **Know where ICM loses.** Real-time multi-agent collaboration, high-concurrency multi-user serving, and automated mid-pipeline branching genuinely need framework code. ICM is for sequential, human-reviewed, repeatable work — which is most knowledge work, but not all of it.
-- **Anti-patterns seen in the wild:** duplicated entry files that drift (generate one from the other, or make one a pointer); schema documents that mandate names the actual files stopped using (update the schema or the files — pick one); hand-edits to generated indexes; workshop sessions that produce slides instead of structured data (every working session should end in an artifact the structure can hold); patterns declared top-down (one team complaining is a gripe — the same shape appearing three independent times is structure).
+- **Know where ICM loses.** Real-time multi-agent collaboration, high-concurrency multi-user serving, and automated mid-pipeline branching genuinely need framework code. ICM is for sequential, human-reviewed, repeatable work — which is most knowledge work, but not all of it. Detail: "Where ICM loses" in [references/core.md](references/core.md).
+- A job that fits in one saved prompt gets no workspace; the skill says so instead of building one.
 
 ## References
 

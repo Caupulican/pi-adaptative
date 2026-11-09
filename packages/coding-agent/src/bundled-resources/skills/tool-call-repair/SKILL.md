@@ -1,9 +1,30 @@
 ---
 name: tool-call-repair
-description: Use when improving Pi's tool calling, when a model "can't do tool calls" or fails argument validation repeatedly, when adding an argument repair or coercion, or when touching validateToolArguments, prepareArguments, or provider tool-call assembly. Doctrine for making tool calling succeed with any model, especially open models with weak native tool support - validate-then-repair at one choke point, a finite failure-mode catalogue, shape-vs-relational rules, efficiency and telemetry requirements.
+description: "Use when improving Pi's tool calling, when a model \"can't do tool calls\" or fails argument validation repeatedly, when adding an argument repair or coercion, or when touching validateToolArguments, prepareArguments, or provider tool-call assembly. Doctrine for making tool calling succeed with any model, especially open models with weak native tool support - validate-then-repair at one choke point, a finite failure-mode catalogue, shape-vs-relational rules, efficiency and telemetry requirements."
 ---
 
 # Tool-call repair
+
+## How to use the skill
+
+Load this skill before changing argument validation, the repair layer under
+`packages/ai/src/utils/tool-repair/`, or provider tool-call assembly. It is
+doctrine for whoever maintains that module; the decisions below are binding,
+and the full grammars and registry live in the references.
+
+### Method for an improvement pass
+
+Measure first (telemetry, or fixture-replay of failing transcripts). Pick the
+top firing failure mode. When the owner asked for tests, write a failing fixture per affected provider; otherwise show the failure from the telemetry or transcript. Land
+the error-keyed repair at the choke point. Prove the hot path is unchanged
+(well-formed fixture bytes untouched). Record ledger + CHANGELOG entries per
+repo convention. Adjacent gaps (missing tool-call id synthesis, text tool-call
+extraction and the plain-text protocol primer + calibration handshake for
+untrained models, truncated-stream guard, name sanitization parity,
+history-replay policy) are catalogued with code anchors in the references
+file; take them as separate items, not riders.
+
+## North Star
 
 A model that "can't do tool calls" is almost always emitting one of a SMALL,
 FINITE set of shape mistakes (about 90% of cases across deepseek-flash,
@@ -15,7 +36,9 @@ mistake stops recurring. Every mechanical repair saves one full turn of
 latency and tokens; every successful teach makes the repair unnecessary. That
 compounding saving is the feature.
 
-## Decisions (non-negotiable)
+## Core Sections
+
+### Decisions (non-negotiable)
 
 1. **One choke point, and it is CODE.** All argument repair lives behind
    `validateToolArguments` (`packages/ai/src/utils/validation.ts`), which
@@ -91,7 +114,7 @@ compounding saving is the feature.
    Do not pretend otherwise; general semantic wrongness belongs to review,
    not to the repair loop.
 
-## Two grammars (the complete contract)
+### Two grammars (the complete contract)
 
 The layer is defined by two formal grammars, both in references, both encoded
 as code (not prose):
@@ -107,7 +130,7 @@ as code (not prose):
   `timeout` as string/{}), edit, read/ls/grep/find. This is what `analyzer.ts`
   classifies against.
 
-## The catalogue (summary; full table in references/failure-grammar.md)
+### The catalogue (summary; full table in references/failure-grammar.md)
 
 | # | Name | Model emits | Repair (guard-gated) |
 |---|---|---|---|
@@ -138,28 +161,56 @@ array-number, and bash rows are the increment past the original four; they cost
 the hot path nothing because they run only on already-failed calls (see decision
 2a).
 
-## Method for an improvement pass
-
-Measure first (telemetry, or fixture-replay of failing transcripts). Pick the
-top firing failure mode. Write a failing fixture per affected provider. Land
-the error-keyed repair at the choke point. Prove the hot path is unchanged
-(well-formed fixture bytes untouched). Record ledger + CHANGELOG entries per
-repo convention. Adjacent gaps (missing tool-call id synthesis, text tool-call
-extraction and the plain-text protocol primer + calibration handshake for
-untrained models, truncated-stream guard, name sanitization parity,
-history-replay policy) are catalogued with code anchors in the references
-file; take them as separate items, not riders.
-
-## Output contract
+### Output contract
 
 Code lands in `packages/ai` (validation + provider code); fixtures and tests only when the owner asked for tests.
 Per-model observations and new failure modes append to the model-notes table
 in `references/repair-catalogue.md`. Durable findings go to the AGENTS.md
 ledger. Never chat-only.
 
-## Guards
+## Anti-Patterns
 
 - Never loosen a schema or delete a test to make a call pass.
 - Repairs are pure, deterministic, bounded (~100 lines each, one re-Check).
 - A repair without evidence per provider it claims to fix (a fixture when the owner asked for tests) does not merge.
 - Do not repair relational failures; the model must decide values.
+
+## Examples
+
+- The edit tool receives `edits: "[{...}]"` (a quoted JSON string where an
+  array is expected). `jsonStringParse` parses it, the sub-check passes, the
+  call executes, and the first firing in the session carries the one-line
+  note to send a raw array (decision 7).
+- A string `'["a","b"]'` arrives where an array is expected. Parse runs before
+  wrap (decision 5), so the result is `["a","b"]`, never `['["a","b"]']`.
+- `limit: null` where `limit` is optional: `nullOptionalDrop` deletes the key
+  and the default applies. The same `null` on a required field bounces with
+  required-value feedback; nothing substitutes `0` (decision 3).
+- bash `command` arrives as `["ls", "-la"]`: `bashCommandArgvJoin` joins the
+  string values with spaces, guarded by the sub-check.
+
+## Self-Check
+
+- Do well-formed arguments still return the SAME object after one cached `Check`?
+- Is the repair keyed to a validator error at the failing path, applied on a
+  clone, and kept only when the sub-check passes?
+- Does it reshape only, with no invented value and no relational decision?
+- Is it one named registry entry that drives the repair, the teach note, the
+  telemetry tag and the docs row?
+- Is the work bounded by decision 2a, with no per-tool special case?
+- Did per-model observations go to the model-notes table and durable findings
+  to the AGENTS.md ledger?
+
+## Known Gaps
+
+- A well-formed call that does the wrong thing is invisible to this layer,
+  except for the enumerated detectable subclasses (decision 8). Missing
+  required values, validly typed wrong values, ambiguous enums and semantic
+  wrongness bounce instead of repairing; the list is in
+  [references/failure-grammar.md](references/failure-grammar.md).
+- Adjacent gaps outside the repair path (tool-call id synthesis, text tool-call
+  extraction, schema echo in bounce errors, truncated-stream guard, name
+  sanitization parity, history replay policy, escalation counter) are tracked
+  in the adjacent gap backlog of
+  [references/repair-catalogue.md](references/repair-catalogue.md), with code
+  anchors dated by their audit; check the code before treating any one as open.

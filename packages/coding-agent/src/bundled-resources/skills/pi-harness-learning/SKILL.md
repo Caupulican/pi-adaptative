@@ -1,6 +1,6 @@
 ---
 name: pi-harness-learning
-description: Use when reflecting on agent behavior, explaining why Pi did something, capturing a repeatable workflow as a skill, or improving user-level Pi skills/extensions/prompts after overcoming a challenge. Helps decide what to store in Automata Mind versus what to implement in the harness.
+description: "Use when reflecting on agent behavior, explaining why Pi did something, capturing a repeatable workflow as a skill, or improving user-level Pi skills/extensions/prompts after overcoming a challenge. Helps decide what to store in Automata Mind versus what to implement in the harness."
 ---
 
 # Pi Harness Learning

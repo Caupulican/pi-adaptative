@@ -12,7 +12,13 @@ A video is the most expensive explanation format. Use it when the owner asks for
 
 Freedom Dial: High Freedom for visual metaphors and pacing. Low Freedom for facts, credentials and external calls.
 
-## Style contract (3b1b-derived logic, own styling)
+## North Star
+
+A short video that builds one idea per scene in step with the narration, with every claim taken from the real source, every check reported as it ran, and no credential or grant exceeded.
+
+## Core Sections
+
+### Style contract (3b1b-derived logic, own styling)
 
 - One idea per scene. Build the picture piece by piece in step with the narration. Show a transformation, not a slide.
 - Intuition first, then the formal statement, then a check on a concrete example.
@@ -20,7 +26,7 @@ Freedom Dial: High Freedom for visual metaphors and pacing. Low Freedom for fact
 - Narration paces at about 150 words per minute. Pauses go after each new idea. Default length 2-5 minutes; a longer video needs a scene list the owner approved.
 - Do not copy another creator's assets, music, voice or code. Reuse the method, not the styling.
 
-## Pipeline
+### Pipeline
 
 1. Survey tools. Run `ffmpeg -version`, `ffprobe -version`, `python3 -c "import manim"`, `node --version`, and check for a local TTS (`piper`, `kokoro`, `espeak-ng`, or the OS speech tool). Report what exists. Installing anything needs owner approval; propose the exact commands and stop.
 2. Script. Write `script.md`: scenes, each with narration text and a visual note. Read the real source for every claim.
@@ -33,7 +39,7 @@ Freedom Dial: High Freedom for visual metaphors and pacing. Low Freedom for fact
 
 Renders longer than 15 seconds run as managed background runs with an event-driven terminal signal; never poll.
 
-## Narration and credentials
+### Narration and credentials
 
 This skill declares `effects` (external writes, network, external binaries, secrets), so the host offers it to the main session only. A worker never sees it: a worker reports what it found and the main session produces the video.
 
@@ -41,7 +47,29 @@ This skill declares `effects` (external writes, network, external binaries, secr
 - No key or no request for ElevenLabs: use a local TTS that is already installed. If none exists, produce the silent video with captions, say so, and propose the free local options.
 - A failed API call is a blocker with the response status. Do not substitute silently.
 
-## Do not
+## Anti-Patterns
 
 - Do not fabricate results, durations or checks. Report what ran.
 - Do not exceed the owner's grant: no installs, publishing or uploads without approval.
+
+## Examples
+
+- "Make a 3b1b-style video on how a hash map resizes": survey tools, write `script.md` with one scene per idea (buckets, load factor, resize, rehash on a concrete example), generate narration per scene with a local TTS, size each scene to its measured audio, render with Manim when installed, assemble with `ffmpeg`, and report the `ffprobe` result and the per-scene frames viewed.
+- The owner asks for ElevenLabs narration and has set `ELEVENLABS_API_KEY`: take `model_id` and `voice_id` from the account, send only the narration text, and treat a failed call as a blocker with its status.
+- No TTS is installed and no key exists: deliver the silent video with captions, say so, and propose the free local TTS options.
+
+## Self-Check
+
+- Did I stop at the first failing stage and report its real cause?
+- Does every claim in `script.md` come from the real source?
+- Did each scene length come from the measured audio?
+- Does `ffprobe` show one video and one audio stream within 2 percent of the audio total, and did I view one frame per scene?
+- Did the key stay out of conversation, tool arguments, logs, files and the script?
+- Did I install, publish or upload nothing without approval?
+
+## Known Gaps
+
+- The host offers this skill to the main session only; a worker cannot produce the video.
+- Output quality depends on the tools already installed (Manim, `ffmpeg`, a local TTS, a headless browser). The skill proposes installs and stops; it does not install.
+- Without a supplied ElevenLabs key or a local TTS, the result is a silent video with captions.
+- A video longer than the 2-5 minute default needs a scene list the owner approved.
