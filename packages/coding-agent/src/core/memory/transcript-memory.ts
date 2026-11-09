@@ -18,6 +18,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { SystemOneReceipt } from "../review/system-one-review-port.ts";
 import { assertMemoryReadActive, type MemoryReadContext, type MemoryReadEvidence } from "./memory-read-context.ts";
 import { BatchAccount, CauseSlots, type TerminalHolds } from "./transcript-batch-account.ts";
@@ -86,6 +87,8 @@ import {
 	forgetStateBlock,
 	holdReason,
 	MAX_HELD_REASON_CHARS,
+	persistenceHoldReason,
+	proofHoldReason,
 	READMISSION_WAIT_TEXT,
 	RECONCILIATION_WAITING,
 	receiptCause,
@@ -183,7 +186,6 @@ import {
 } from "./transcript-summary-node.ts";
 import { SUMMARY_SYSTEM_PROMPT, type SummaryRequest } from "./transcript-summary-prompt.ts";
 import {
-	TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS,
 	type TranscriptSummaryClaimToken,
 	type TranscriptSummaryFailure,
 	type TranscriptSummaryJob,
@@ -1910,13 +1912,15 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			const persisted = this.jobsSaved;
 			const controller = new AbortController();
 			const done = persisted
+				// A turn for the event loop between the acknowledged save and the checks: claims drained from one save never starve timers.
+				.then(() => yieldToEventLoop())
 				.then((): JobOutcome | Promise<JobOutcome> =>
 					controller.signal.aborted || !this.live(epoch)
 						? { kind: "aborted" }
 						: (this.durableAttempts.get(job.id) ?? -1) < job.attempts
-							? { kind: "held", scope: "persistence", reason: this.persistenceHoldReason() }
+							? { kind: "held", scope: "persistence", reason: persistenceHoldReason(this.saveFailure) }
 							: !scheduler.hasProof(job.id)
-								? { kind: "held", scope: "proof", reason: this.proofHoldReason() }
+								? { kind: "held", scope: "proof", reason: proofHoldReason(this.proofLedger) }
 								: // The claim itself must still be the job's authority: a merge or any other change since the
 									// claim (while its save was pending) makes it stale, whatever the acknowledged count says.
 									!scheduler.isClaimCurrent(token)
@@ -1929,21 +1933,6 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		this.maybeFinishBatch();
 		this.armTimer(epoch);
-	}
-
-	/** Why a claimed attempt was not made durable: the real cause of the failed save. */
-	private persistenceHoldReason(): string {
-		return holdReason(
-			this.saveFailure ?? "no save acknowledged the job list holding this attempt",
-			"the job list holding this attempt was not saved, so it waits for the next successful save, retried with backoff",
-		);
-	}
-
-	/** Why a claimed job could not get its terminal-proof record, from the capacity the store last reported. */
-	private proofHoldReason(): string {
-		const { recorded, hold } = this.proofLedger;
-		const since = hold ? `; ${hold.cause} hold since ${hold.since}` : "";
-		return `the terminal-proof ledger has no slot for this job (${recorded} of ${TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS} records${since}); it waits so its attempt budget can always be kept`;
 	}
 
 	/**

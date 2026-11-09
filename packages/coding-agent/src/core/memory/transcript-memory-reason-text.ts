@@ -6,8 +6,10 @@
 
 import type { TranscriptReadmissionWait } from "./transcript-memory-status.ts";
 import type { TranscriptSummaryAdmissionResult } from "./transcript-summary-admission.ts";
+import { TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS } from "./transcript-summary-scheduler.ts";
 import type {
 	TranscriptSummaryJobsSaveResult,
+	TranscriptSummaryProofStatus,
 	TranscriptSummaryRecoveryIssue,
 	TranscriptSummaryStoreState,
 } from "./transcript-summary-store.ts";
@@ -124,6 +126,21 @@ function boundedMiddle(text: string, max: number): string {
  */
 export function holdReason(cause: string, waits: string): string {
 	return `${boundedMiddle(cause, MAX_HELD_CAUSE_CHARS)}; ${waits}`;
+}
+
+/** Why a claimed attempt was not made durable: the real cause of the failed save. */
+export function persistenceHoldReason(saveFailure: string | undefined): string {
+	return holdReason(
+		saveFailure ?? "no save acknowledged the job list holding this attempt",
+		"the job list holding this attempt was not saved, so it waits for the next successful save, retried with backoff",
+	);
+}
+
+/** Why a claimed job could not get its terminal-proof record, from the capacity the store last reported. */
+export function proofHoldReason(proof: TranscriptSummaryProofStatus): string {
+	const { recorded, hold } = proof;
+	const since = hold ? `; ${hold.cause} hold since ${hold.since}` : "";
+	return `the terminal-proof ledger has no slot for this job (${recorded} of ${TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS} records${since}); it waits so its attempt budget can always be kept`;
 }
 
 /** The real cause of a judgment that did not admit, in one bounded line: the disposition, why, who judged and the confidences. */

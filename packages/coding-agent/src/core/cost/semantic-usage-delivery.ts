@@ -4,6 +4,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { Usage } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../../kernel/timer-port.ts";
 import { addUsage } from "../../kernel/usage.ts";
 import { MaintenanceUsageRetentionError, type UsageComponent } from "../../kernel/usage-components.ts";
 import { truncateWithEllipsis } from "../provider-tool-text.ts";
@@ -24,6 +25,7 @@ import { parseTypeSafeUsageReceipt } from "../review/typesafe-usage-receipt-code
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { AccountingOrigin } from "./accounting-evidence.ts";
 import { captureSessionAccountingOrigin } from "./accounting-origin.ts";
+import { pathNotice } from "./path-notice.ts";
 import {
 	errorCodeOf,
 	foreignJournalPaths,
@@ -205,26 +207,6 @@ function usageSubject(route: SystemOneUsageRoute | undefined): string {
 	if (route === "knowledge_collection") return "A knowledge collection usage report";
 	if (route === "routine_intake") return "A routine intake usage report";
 	return route === "history_summary" ? "A history summary usage report" : "A System One usage receipt";
-}
-
-/** The host bounds one warning to this many characters (AgentSession.emitHostWarning); a handoff must fit whole. */
-const HANDOFF_MESSAGE_CHARS = 500;
-
-/** A notice whose path is elided to fit the host's bound, with the text around it kept whole. */
-export function pathNotice(lead: string, path: string, tail: string): string {
-	return `${lead}${elidePath(path, HANDOFF_MESSAGE_CHARS - lead.length - tail.length)}${tail}`;
-}
-
-/**
- * A path shortened to `budget` UTF-16 units (the host's own measure) by eliding its middle behind an explicit marker. The file
- * name is kept whole, so the evidence stays identifiable; only the directories are shortened.
- */
-function elidePath(path: string, budget: number): string {
-	if (path.length <= budget) return path;
-	const marker = "…";
-	const name = basename(path);
-	if (name.length + marker.length > budget) return marker + name.slice(name.length - (budget - marker.length));
-	return `${path.slice(0, budget - name.length - marker.length)}${marker}${name}`;
 }
 
 /** Plain code-unit order: the same on every host, unlike a locale-sensitive comparison. */
@@ -498,7 +480,7 @@ class SemanticUsageLease implements MaintenanceUsageLease {
  * The single owner of one session manager's paid-usage delivery. Every paid response is retained in the session's
  * sidecar before its canonical row is appended, and its held record is released once the identical row is read back.
  * Journal writes are skipped while their operation is not ready; the ledger step never is. All state changes are
- * synchronous. Ledger listeners only schedule a microtask, and failed journal operations retry on one unref'd backoff
+ * synchronous. Ledger listeners only schedule a microtask, and failed journal operations retry on one backoff alarm of the owner's port
  * timer, which is also the only wake-up while the journal is failing.
  *
  * Bounds: the journal holds at most 1024 records on disk (refused as capacity past that). In memory the held set can reach
@@ -507,6 +489,8 @@ class SemanticUsageLease implements MaintenanceUsageLease {
 class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner {
 	private readonly capture: () => AccountingOrigin;
 	private readonly ledger: SemanticUsageLedgerPort;
+	/** The `semantic-usage` owner's port: the retry backoff waits on the session's clock, never on the global timers. */
+	readonly timers: TimerPort;
 	private readonly bound: SemanticUsageLedgerIdentity;
 	/** The bound identity's sidecar; undefined for an in-memory session or a persisted session whose id is not a safe name. */
 	private readonly boundSlot: JournalSlot | undefined;
@@ -537,7 +521,8 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	private warnSink: ((message: string) => void) | undefined;
 	private readonly bufferedWarnings: string[] = [];
 	private droppedWarnings = 0;
-	private retryTimer: ReturnType<typeof setTimeout> | undefined;
+	/** The pending retry alarm on this owner's timer port (an opaque handle of that port). */
+	private retryTimer: unknown;
 	private retryDelayMs = RETRY_MIN_MS;
 	private failedThisPass = false;
 	private reconcileQueued = false;
@@ -548,8 +533,9 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 	private deferredHandoff: ((disposition: DiscardDisposition) => void) | undefined;
 	private overflow: { usage: Usage; reports: number } | undefined;
 
-	constructor(ledger: SemanticUsageLedgerPort, capture?: () => AccountingOrigin) {
+	constructor(ledger: SemanticUsageLedgerPort, timers: TimerPort, capture?: () => AccountingOrigin) {
 		this.ledger = ledger;
+		this.timers = timers;
 		this.bound = ledger.identity();
 		this.capture = capture ?? (() => ({ sessionId: this.bound.sessionId }));
 		this.boundSlot = journalSlotOf(this.bound);
@@ -1074,7 +1060,7 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			this.isDisposed = true;
 			this.unsubscribePersisted?.();
 			this.unsubscribePersisted = undefined;
-			if (this.retryTimer !== undefined) clearTimeout(this.retryTimer);
+			if (this.retryTimer !== undefined) this.timers.clearTimeout(this.retryTimer);
 			this.retryTimer = undefined;
 			this.notifySpending();
 			this.spendingListeners.clear();
@@ -1770,17 +1756,19 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		});
 	}
 
-	/** Backoff for failed journal operations only: one unref'd timer at a time, from 1 s doubling to 60 s. */
+	/**
+	 * Backoff for failed journal operations only: one alarm at a time on the `semantic-usage` port, from 1 s doubling to 60 s.
+	 * The port's default alarm is unreferenced, so a pending retry never holds a one-shot process open.
+	 */
 	private scheduleRetry(): void {
 		this.failedThisPass = true;
 		if (this.retryTimer !== undefined || this.isDisposed) return;
 		const delay = this.retryDelayMs;
 		this.retryDelayMs = Math.min(delay * 2, RETRY_MAX_MS);
-		this.retryTimer = setTimeout(() => {
+		this.retryTimer = this.timers.setTimeout(() => {
 			this.retryTimer = undefined;
 			if (!this.isDisposed) this.runReconcile();
 		}, delay);
-		this.retryTimer.unref();
 	}
 
 	/** An unexpected failure is an unconfirmed obligation: typed, retried, and never thrown into a caller. */
@@ -1867,11 +1855,14 @@ const deliveries = new WeakMap<SessionManager, SemanticUsageDelivery>();
  * The one usage owner of a session manager. The reviewer, the admission path and the session share it, so a session
  * has one owner; a disposed owner is replaced by a fresh one that recovers the same journal.
  */
-export function sessionSemanticUsageOf(manager: SessionManager): SessionSemanticUsageDelivery {
+export function sessionSemanticUsageOf(manager: SessionManager, timers?: TimerPort): SessionSemanticUsageDelivery {
 	const existing = deliveries.get(manager);
 	if (existing && !existing.disposed) return existing;
-	const delivery = new SemanticUsageDelivery(createSessionManagerLedgerPort(manager), () =>
-		captureSessionAccountingOrigin(manager),
+	// A replacement keeps its disposed owner's clock: a caller without a port never moves the retry to the system clock.
+	const delivery = new SemanticUsageDelivery(
+		createSessionManagerLedgerPort(manager),
+		timers ?? existing?.timers ?? SYSTEM_TIMER_PORT,
+		() => captureSessionAccountingOrigin(manager),
 	);
 	deliveries.set(manager, delivery);
 	return delivery;

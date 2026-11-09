@@ -68,6 +68,20 @@ for (const name of ["lock", "lockSync", "unlock", "unlockSync", "check", "checkS
  */
 const JOURNEY_BUDGET_MS = 285_000;
 
+/**
+ * One line per finished journey mode: the heap still in use once its world has closed. When the runner exposes the collector
+ * (`--expose-gc`) the figure is taken after a full collection, so it is what the closed world and the production modules still
+ * hold; without it the figure is an upper bound. Growth from one line to the next is memory a finished world did not give back.
+ */
+function reportHeapAfterClose(label: string): void {
+	const collect = (globalThis as { gc?: () => void }).gc;
+	collect?.();
+	const megabytes = Math.round(process.memoryUsage().heapUsed / (1024 * 1024));
+	process.stderr.write(
+		`[${label}] heap in use after close: ${megabytes} MB${collect ? " (after a full collection)" : ""}\n`,
+	);
+}
+
 /** Each journey runs completely in both modes, with fresh storage and the same native owners. */
 export async function runJourney(
 	options: Omit<HarnessWorldOptions, "systemOneEnabled">,
@@ -104,6 +118,7 @@ export async function runJourney(
 		} finally {
 			// Clear only after every session and store has settled; their cleanup still needs the virtual locks.
 			lockfileFs.current = undefined;
+			reportHeapAfterClose(`${options.name} System One ${systemOneEnabled ? "on" : "off"}`);
 		}
 	}
 }
@@ -580,6 +595,27 @@ function startedAgentIdsForTrack(request: ScriptedRequest, track: string): strin
 }
 
 /** The stable agent id production assigned to the worker that runs on `track` (its effective model). */
+/**
+ * The identity one `delegate start` call answered with, read from its tool result. A start answers before its attempt reaches
+ * `running` (the lease and the worker's first request follow on later turns), so a leg takes the worker's identity from the
+ * start's own answer and never from a scan for a running attempt. The stable agent id is the agent's, or the task's lane id
+ * for a fresh worker, as the start's text states it. A call that did not start a worker fails here with what it answered.
+ */
+export function startedIdentity(session: AgentSession, toolCallId: string): { agentId: string; laneId: string } {
+	const message = session.messages.find(
+		(candidate) => candidate.role === "toolResult" && candidate.toolCallId === toolCallId,
+	);
+	if (message?.role !== "toolResult") throw new Error(`delegate call ${toolCallId} has not answered`);
+	const details = message.details as { started?: unknown; agentId?: unknown; laneId?: unknown } | undefined;
+	if (details?.started !== true || typeof details.laneId !== "string") {
+		throw new Error(`delegate call ${toolCallId} started no worker: ${JSON.stringify(message.content)}`);
+	}
+	return {
+		agentId: typeof details.agentId === "string" ? details.agentId : details.laneId,
+		laneId: details.laneId,
+	};
+}
+
 export function agentIdForTrack(request: ScriptedRequest, track: string): string {
 	const id = startedAgentIdsForTrack(request, track)[0];
 	if (id === undefined) throw new Error(`No started agent is running on track ${track} in the projected request`);

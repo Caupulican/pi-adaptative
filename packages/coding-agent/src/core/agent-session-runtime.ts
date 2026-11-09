@@ -6,11 +6,11 @@ import { SessionManager } from "../kernel/session/session-manager.ts";
 import { resolvePath } from "../utils/paths.ts";
 import type { AgentSession } from "./agent-session.ts";
 import type { AgentSessionRuntimeDiagnostic, AgentSessionServices } from "./agent-session-services.ts";
+import { pathNotice } from "./cost/path-notice.ts";
 import {
 	type DiscardDisposition,
 	disposeDiscardedSessionUsage,
 	finishDiscardedSessionUsage,
-	pathNotice,
 	releaseDiscardedSessionUsage,
 	routeDiscardedSessionUsage,
 } from "./cost/semantic-usage-delivery.ts";

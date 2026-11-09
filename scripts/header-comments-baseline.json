@@ -132,7 +132,6 @@
     "packages/coding-agent/src/core/cost/completion-response-usage.ts",
     "packages/coding-agent/src/core/cost/cost-summary.ts",
     "packages/coding-agent/src/core/cost/daily-usage.ts",
-    "packages/coding-agent/src/core/cost/missing-session-usage-recovery.ts",
     "packages/coding-agent/src/core/cost/semantic-accounting-evidence.ts",
     "packages/coding-agent/src/core/cost/semantic-usage-delivery.ts",
     "packages/coding-agent/src/core/cost/semantic-usage-journal.ts",

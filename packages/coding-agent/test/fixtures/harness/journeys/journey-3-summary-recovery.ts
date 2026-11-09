@@ -1,6 +1,9 @@
-import { join } from "node:path";
+import { join, resolve } from "node:path";
+import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { sessionSemanticUsageOf } from "../../../../src/core/cost/semantic-usage-delivery.ts";
+import { SEMANTIC_USAGE_CUSTOM_TYPE } from "../../../../src/core/cost/usage-records.ts";
 import {
 	type TranscriptSummaryManifest,
 	TranscriptSummaryStore,
@@ -23,12 +26,12 @@ export interface SummaryRecoveryContext {
 	readonly summaryCalls: () => number;
 }
 
-function hierarchyOf(session: AgentSession) {
+export function hierarchyOf(session: AgentSession) {
 	return session.getTranscriptHistoryStatus().hierarchy;
 }
 
 /** The durable store as a reader loads it: the manifest tables and the accepted model summaries. */
-async function loadSummaries(store: TranscriptSummaryStore, what: string) {
+export async function loadSummaries(store: TranscriptSummaryStore, what: string) {
 	const state = await store.load();
 	if (!("nodes" in state)) throw new Error(`${what}: summary store unavailable: ${state.reason}`);
 	if (state.manifest === undefined) throw new Error(`${what}: summary manifest missing`);
@@ -37,7 +40,7 @@ async function loadSummaries(store: TranscriptSummaryStore, what: string) {
 }
 
 /** Admission judge requests the System One transport decoded so far (each asks `summary_supported`). */
-function summaryJudgeRequests(world: HarnessWorld): number {
+export function summaryJudgeRequests(world: HarnessWorld): number {
 	return world.systemOne.decoded.filter((request) => "summary_supported" in request.questions).length;
 }
 
@@ -346,6 +349,92 @@ export async function runJourney3SummaryRetentionLeg(
 	// An expired leaf is never derived again: no summarizer request and no admission judgment after the deadline.
 	expect(summaryCalls).toBe(1);
 	expect(summaryJudgeRequests(world)).toBe(judgeRequests);
+	expect(await world.disposeSessionInBody(session)).toBeUndefined();
+	trace.mark("root", label);
+}
+
+/** Usage rows the session file holds for this session's semantic usage (the canonical ledger rows). */
+function usageRowCount(manager: SessionManager): number {
+	return manager
+		.getBranch()
+		.filter((entry) => entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE).length;
+}
+
+/**
+ * A usage receipt whose session-file read-back is refused. The row reaches the ledger and its journal copy is kept, so the
+ * receipt is owed (`ledger_unverified`) until a retry reads the row back. The retry is armed on the `semantic-usage` port
+ * (its first backoff is one second) and runs when that port advances: the row is confirmed once, never appended twice.
+ */
+export async function runJourney3OwedUsageReceiptLeg(world: HarnessWorld): Promise<void> {
+	const label = "h5-owed-usage-receipt";
+	const trace = world.trace;
+	const agentDir = `${world.agentDir}-${label}`;
+	const manager = world.createSessionManager(agentDir);
+	const created = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: manager,
+		systemOneEnabled: false,
+		settings: { memorySystem: "okf", autoLearn: { enabled: false } },
+	});
+	const session = created.session;
+	// The session file is written with its first reply; the read-back can only find the row once the file exists.
+	world.provider.enqueue("root", text(`${label}-owner-reply`, "Noted."));
+	await withDeadline(trace, `${label}: owner turn writes the session file`, session.prompt("Note the usage owner."));
+	await withDeadline(trace, `${label}: owner turn idle`, session.waitForForegroundIdle());
+	const sessionFile = manager.getSessionFile();
+	if (sessionFile === undefined || world.io.peekFile(resolve(sessionFile)) === undefined)
+		throw new Error(`${label}: the session file was not written`);
+
+	const delivery = sessionSemanticUsageOf(manager);
+	const rowsBefore = usageRowCount(manager);
+	const faultName = `${label}-session-read-refused`;
+	world.io.failNext({
+		name: faultName,
+		kind: "open",
+		code: "EIO",
+		times: 1,
+		// The read-back opens the session file read-only; the append and every other open pass.
+		matches: (operation) => operation.path === resolve(sessionFile) && operation.flags === "r",
+	});
+	const usage = createEmptyUsage();
+	usage.input = 9;
+	usage.output = 4;
+	usage.totalTokens = 13;
+	// The world shares one `semantic-usage` clock across sessions and the session buffers undelivered warnings: nothing from an
+	// earlier leg may be armed or pending, so each check below is this leg's own.
+	expect(world.timers.armedDelays("semantic-usage"), "no usage retry is armed before the refusal").toEqual([]);
+	expect(session.takeUndeliveredWarnings(), "no earlier warning is undelivered").toEqual([]);
+	const mark = world.warnings.length;
+	delivery.recordHistoryUsage(usage, {
+		reportId: `${label}-report`,
+		provider: HARNESS_PROVIDER,
+		model: "root",
+		attempt: 1,
+	});
+	const armed = await withDeadline(
+		trace,
+		`${label}: the unreadable row arms the retry`,
+		world.timers.whenArmed("semantic-usage"),
+	);
+	expect(armed, "the first retry waits the base backoff").toBe(1_000);
+	expect(world.io.consumedFaults.filter((name) => name === faultName)).toHaveLength(1);
+	expect(usageRowCount(manager), "the row reached the ledger").toBe(rowsBefore + 1);
+	expect(delivery.snapshot()).toMatchObject({ retained: 1, unretained: 0, unresolved: 0 });
+	expect([...world.warnings.splice(mark), ...session.takeUndeliveredWarnings()]).toEqual([
+		"A history summary usage report is pending, not yet in this session's usage record (the session file could not be read to confirm the row (EIO)); it is kept in its session journal until the session file can be read to confirm it.",
+	]);
+
+	expect(world.timers.advance("semantic-usage", 1_000)).toBe(1);
+	await withDeadline(
+		trace,
+		`${label}: the retry confirms the row`,
+		world.io.waitForMutation(() => {
+			const snapshot = delivery.snapshot();
+			return snapshot.retained === 0 && snapshot.unretained === 0 && snapshot.unresolved === 0;
+		}),
+	);
+	expect(usageRowCount(manager), "the retry confirms the existing row and appends nothing").toBe(rowsBefore + 1);
+	expect(world.timers.armedDelays("semantic-usage"), "a confirmed receipt arms nothing").toEqual([]);
 	expect(await world.disposeSessionInBody(session)).toBeUndefined();
 	trace.mark("root", label);
 }

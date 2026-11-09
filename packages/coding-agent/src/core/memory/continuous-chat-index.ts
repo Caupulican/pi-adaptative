@@ -350,7 +350,7 @@ async function emptyKeysSlot(
 ): Promise<number> {
 	let index = digest % capacity;
 	for (let probes = 0; probes < capacity; probes++) {
-		if (signal !== undefined) await checkpointContinuousChatRecovery(signal, probes + 1);
+		await checkpointContinuousChatRecovery(signal, probes + 1);
 		const slot = await read(index);
 		if (slot.readUIntLE(6, 6) === 0) return index;
 		index = (index + 1) % capacity;

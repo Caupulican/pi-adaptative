@@ -163,6 +163,8 @@ export function errorAfterFrames(
 export class ScriptedProvider {
 	readonly requests: ScriptedRequest[] = [];
 	readonly reached: string[] = [];
+	/** Waits on `reached`, woken by each step the provider reaches (see {@link whenReached}). */
+	private readonly reachedWaiters = new Set<{ key: string; mark: number; resolve: () => void }>();
 	readonly failures: string[] = [];
 	readonly terminals: Array<{
 		sequence: number;
@@ -348,6 +350,24 @@ export class ScriptedProvider {
 		this.registered = true;
 	}
 
+	/**
+	 * Resolves when the step `key` (`<track>:<step name>`) is reached at or after `mark`, an index into `reached`. Event-driven: a
+	 * leg that asserts a request was made waits on the request itself, never on a neighbouring state. The caller bounds the wait.
+	 */
+	whenReached(key: string, mark = 0): Promise<void> {
+		if (this.reached.indexOf(key, mark) !== -1) return Promise.resolve();
+		return new Promise((resolve) => {
+			this.reachedWaiters.add({ key, mark, resolve });
+		});
+	}
+
+	private wakeReachedWaiters(): void {
+		for (const waiter of [...this.reachedWaiters]) {
+			if (this.reached.indexOf(waiter.key, waiter.mark) === -1) continue;
+			this.reachedWaiters.delete(waiter);
+			waiter.resolve();
+		}
+	}
 	assertDrained(): void {
 		const remaining = [...this.scripts].flatMap(([trackId, track]) =>
 			track.steps.filter((step) => !step.optional).map((step) => `${trackId}:${step.name}`),
@@ -499,6 +519,7 @@ export class ScriptedProvider {
 				this.stepRequests.delete(step);
 			}
 			this.reached.push(`${trackId}:${step.name}`);
+			this.wakeReachedWaiters();
 			if (cancellation.aborted) throw cancellation.reason;
 			if (step.gate) {
 				let onAbort!: () => void;

@@ -881,6 +881,13 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 
 	// Turn A logs message 0 (an exact leaf) and message 1, whose leaf fails with no turn waiting on it.
 	const warningMark = world.warnings.length;
+	// The failure is disclosed on a later turn than the scheduler's blocked state is saved: each count is waited on by itself.
+	const failuresDisclosed = (count: number): Promise<void> =>
+		withDeadline(
+			trace,
+			`R10s failure ${count} disclosed`,
+			world.whenWarnings(warningMark, (seen) => seen.filter((line) => line === failedLine).length >= count),
+		);
 	const reachedMark = world.provider.reached.length;
 	world.provider.enqueue("worker-c", unavailable("idle-a"), unavailable("idle-b"), unavailable("idle-c"));
 	world.provider.enqueue("root", {
@@ -905,6 +912,7 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		}),
 		60_000,
 	);
+	await failuresDisclosed(1);
 	expect(
 		{
 			armed: world.timers.armedDelays("continuous-chat"),
@@ -991,6 +999,12 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 			}),
 			60_000,
 		);
+		// The claim is saved before the request is made: the request held at its gate is waited on by itself.
+		await withDeadline(
+			trace,
+			"R10s retry request reached and held",
+			world.provider.whenReached(`worker-c:${label}-arrival-a`, turnMark),
+		);
 		expect(
 			{
 				waits,
@@ -1021,6 +1035,7 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 			}),
 			60_000,
 		);
+		await failuresDisclosed(2);
 		expect(
 			{
 				armed: world.timers.armedDelays("continuous-chat"),

@@ -2891,6 +2891,12 @@ export class HarnessWorld {
 	readonly sessions: AgentSession[] = [];
 	/** Every warning any session of this world emitted, in order: journeys classify them before they close. */
 	readonly warnings: string[] = [];
+	/** Waits on `warnings`, woken by each warning the world records (see {@link whenWarnings}). */
+	private readonly warningWaiters = new Set<{
+		mark: number;
+		holds: (seen: readonly string[]) => boolean;
+		resolve: () => void;
+	}>();
 	private readonly warningAllowances: readonly RegExp[];
 	private readonly everySession: AgentSession[] = [];
 	/** Immutable disposal certificates: a disposed owner's snapshot taken at disposal, and the exact claims it keeps by design. */
@@ -3184,7 +3190,7 @@ export class HarnessWorld {
 			// supplies its own sink (`null`: none).
 			onClosingWarnings:
 				options.closingSink === undefined
-					? (warnings) => this.warnings.push(...warnings)
+					? (warnings) => this.noteWarnings(warnings)
 					: (options.closingSink ?? undefined),
 			authStorage: this.authStorage,
 			modelRegistry,
@@ -3257,7 +3263,7 @@ export class HarnessWorld {
 			this.recordIsolatedCompletion(trace.observe(runIsolatedCompletion(...args)));
 		this.warningSubscriptions.push(
 			session.subscribe((event) => {
-				if (event.type === "warning") this.warnings.push(event.message);
+				if (event.type === "warning") this.noteWarnings([event.message]);
 			}),
 		);
 		this.everySession.push(session);
@@ -3270,6 +3276,26 @@ export class HarnessWorld {
 	}
 
 	/** A file-backed session manager; its session file is written to the virtual tree on the first reply. */
+	/**
+	 * Resolves when the warnings recorded at or after `mark` (an index into `warnings`) satisfy `holds`. Event-driven: a leg that
+	 * asserts a warning waits on the warning itself, never on a neighbouring state. The caller bounds the wait.
+	 */
+	whenWarnings(mark: number, holds: (seen: readonly string[]) => boolean): Promise<void> {
+		if (holds(this.warnings.slice(mark))) return Promise.resolve();
+		return new Promise((resolve) => {
+			this.warningWaiters.add({ mark, holds, resolve });
+		});
+	}
+
+	private noteWarnings(messages: readonly string[]): void {
+		this.warnings.push(...messages);
+		for (const waiter of [...this.warningWaiters]) {
+			if (!waiter.holds(this.warnings.slice(waiter.mark))) continue;
+			this.warningWaiters.delete(waiter);
+			waiter.resolve();
+		}
+	}
+
 	createSessionManager(agentDir = this.agentDir): SessionManager {
 		return SessionManager.create(HARNESS_PROJECT_CWD, agentDir);
 	}

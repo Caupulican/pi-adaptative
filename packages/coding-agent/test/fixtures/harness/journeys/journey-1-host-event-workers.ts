@@ -17,7 +17,7 @@ import type { CiSourceStore } from "../../../../src/host/ci/ci-source-store.ts";
 import type { CiGitPaths } from "../../../../src/host/ci/ci-status-record.ts";
 import { calls, createBarrier, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
-import { latestBatchResults } from "./shared.ts";
+import { latestBatchResults, startedIdentity } from "./shared.ts";
 
 /** Real task admission, worker mailbox consumption, narrowed tools and reusable-worker isolation. */
 export async function runJourney1HostEventWorkersPhase(
@@ -140,8 +140,10 @@ export async function runJourney1HostEventWorkersPhase(
 				check: (request) => {
 					const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
 					expect(result?.isError, result?.text).toBe(false);
-					const attempt = Object.values(snapshot().attempts).find((attempt) => attempt.status === "running")!;
-					agentA = attempt.agentId;
+					// The start's own answer names the worker: its attempt reaches `running` on a later turn than the tool returns.
+					const started = startedIdentity(root.session, "event-start-a");
+					const attempt = Object.values(snapshot().attempts).find((attempt) => attempt.taskId === started.laneId)!;
+					agentA = started.agentId;
 					taskA = attempt.taskId;
 					expect(attempt.dispatch.subscriptions).toEqual([subscription]);
 				},
@@ -169,10 +171,10 @@ export async function runJourney1HostEventWorkersPhase(
 				check: (request) => {
 					const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
 					expect(result?.isError, result?.text).toBe(false);
-					const attempt = Object.values(snapshot().attempts).find(
-						(attempt) => attempt.status === "running" && attempt.agentId !== agentA,
-					)!;
-					agentB = attempt.agentId;
+					const started = startedIdentity(root.session, "event-start-b");
+					expect(started.agentId, "the second start names a second worker").not.toBe(agentA);
+					const attempt = Object.values(snapshot().attempts).find((attempt) => attempt.taskId === started.laneId)!;
+					agentB = started.agentId;
 					taskB = attempt.taskId;
 					expect(attempt.dispatch.subscriptions).toEqual([subscription]);
 					ready.release();
@@ -330,9 +332,10 @@ export async function runJourney1HostEventWorkersPhase(
 				check: (request) => {
 					const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
 					expect(result?.isError, result?.text).toBe(false);
-					const attempt = Object.values(snapshot().attempts).find(
-						(attempt) => attempt.agentId === agentA && attempt.status === "running",
-					)!;
+					// The start's own answer names the new task: its attempt reaches `running` on a later turn than the tool returns.
+					const started = startedIdentity(root.session, "event-worker-reuse");
+					expect(started.agentId, "the new task runs on the reused specialist").toBe(agentA);
+					const attempt = Object.values(snapshot().attempts).find((attempt) => attempt.taskId === started.laneId)!;
 					expect(attempt.taskId).not.toBe(taskA);
 					expect(attempt.dispatch.subscriptions ?? []).toEqual([]);
 					reuseReady.release();

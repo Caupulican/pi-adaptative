@@ -10,6 +10,7 @@
 import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { join } from "node:path";
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { isMissingFileError, writeFileAtomic } from "../util/atomic-file.ts";
 import { assertBoundedReadActive, type BoundedReadOptions, readBoundedTextFile } from "../util/bounded-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -24,6 +25,8 @@ const MAX_TREE_DEPTH = 512;
 const MAX_CACHED_PAGE_BYTES = 32 * 1024 * 1024;
 /** A structural diff compares at most this many entries of a subtree whose roots differ before it gives up. */
 const MAX_DIFF_SUBTREE_ENTRIES = 8192;
+/** Pages the reachability walk reads between two yields to the event loop. */
+const MARK_YIELD_PAGES = 256;
 
 export const TRANSCRIPT_SUMMARY_METADATA_TABLES = [
 	"sessions",
@@ -537,8 +540,16 @@ export class TranscriptSummaryMetadataPages {
 		return (await walk(before, after, 0)) ? changes : undefined;
 	}
 
+	/**
+	 * Every page the roots reach. The walk yields to the event loop every {@link MARK_YIELD_PAGES} pages, so a concurrent
+	 * writer runs between the yields; that is safe. A page is immutable and every commit that references one rewrites it
+	 * (`writePage` never skips an existing page), so a page written during the walk, or re-referenced by a newer root,
+	 * carries an mtime after the sweep's cutoff and the removal keeps it. The walk reads only pages of the roots it started
+	 * from, which no writer changes. A walk that loses a page to a concurrent sweep throws, and the commit that triggered that sweep still stands.
+	 */
 	async reachable(roots: TranscriptSummaryMetadataRoots): Promise<Set<string>> {
 		const reachable = new Set<string>();
+		let pagesRead = 0;
 		for (const table of TRANSCRIPT_SUMMARY_METADATA_TABLES) {
 			const pending = roots[table] === null ? [] : [roots[table] as string];
 			while (pending.length > 0) {
@@ -546,6 +557,7 @@ export class TranscriptSummaryMetadataPages {
 				if (reachable.has(id)) continue;
 				reachable.add(id);
 				const page = await this.readPage(id, table);
+				if (++pagesRead % MARK_YIELD_PAGES === 0) await yieldToEventLoop();
 				if (page.left !== null) pending.push(page.left);
 				if (page.right !== null) pending.push(page.right);
 			}

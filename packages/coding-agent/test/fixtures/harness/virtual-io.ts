@@ -284,6 +284,9 @@ export class VirtualFileSystem {
 	}>();
 	/** Depth of hosted worker callbacks running now: a `scope: "worker"` fault applies only inside one. */
 	private workerDepth = 0;
+	/** Promise-export settles awaiting their turn, in call order (see {@link settled}). */
+	private readonly settleQueue: Array<() => void> = [];
+	private settleScheduled = false;
 	/** Scenario conditions re-read after each modeled mutation; see {@link waitForMutation}. */
 	private readonly mutationWaiters = new Set<{
 		readonly holds: () => boolean;
@@ -382,18 +385,56 @@ export class VirtualFileSystem {
 		for (const record of [...this.holds]) this.releaseHold(record, true);
 	}
 
+	/**
+	 * Settles one promise-export operation on a later event-loop turn, as real I/O does. `run` executes at the call (or, for a
+	 * held call, at its release), so the operation's effects keep their call order; only the promise waits a turn. Settles are
+	 * queued in the order they were run and flushed together on one turn, so a later operation never settles before an
+	 * earlier one. A caller therefore never resumes inside the turn it called in, and a loop of awaits cannot starve timers.
+	 */
+	private settled<T>(run: () => T): Promise<T> {
+		type Outcome = { readonly ok: true; readonly value: T } | { readonly ok: false; readonly error: unknown };
+		let outcome: Outcome | undefined;
+		return new Promise<T>((resolveSettled, rejectSettled) => {
+			// Queued before `run`: a waiter woken by this operation's own log settles behind it, never ahead of it.
+			this.enqueueSettle(() => {
+				if (outcome === undefined) throw new Error("virtual IO settled an operation before running it");
+				if (outcome.ok) resolveSettled(outcome.value);
+				else rejectSettled(outcome.error);
+			});
+			try {
+				outcome = { ok: true, value: run() };
+			} catch (error) {
+				outcome = { ok: false, error };
+			}
+		});
+	}
+
+	private enqueueSettle(settle: () => void): void {
+		this.settleQueue.push(settle);
+		if (this.settleScheduled) return;
+		this.settleScheduled = true;
+		setImmediate(() => this.flushSettles());
+	}
+
+	private flushSettles(): void {
+		this.settleScheduled = false;
+		for (const settle of this.settleQueue.splice(0)) settle();
+		// The owner whose awaited operation just settled runs its bookkeeping before the waiters read it on the next turn.
+		this.wakeMutationWaiters();
+	}
+
 	/** A held call waits at its gate and then runs; any other call runs at once, exactly as without holds. */
-	private whenReleased<T>(kind: IoHoldKind, operation: IoOperation | undefined, run: () => Promise<T>): Promise<T> {
+	private whenReleased<T>(kind: IoHoldKind, operation: IoOperation | undefined, run: () => T): Promise<T> {
 		const record =
 			operation === undefined
 				? undefined
 				: this.holds.find(
 						(candidate) => candidate.state === "armed" && candidate.kind === kind && candidate.matches(operation),
 					);
-		if (record === undefined || operation === undefined) return run();
+		if (record === undefined || operation === undefined) return this.settled(run);
 		record.state = "reached";
 		record.reach(operation);
-		return record.gate.then(run);
+		return record.gate.then(() => this.settled(run));
 	}
 
 	/** The native path a held call names, or undefined when it names none (an unopened descriptor). */
@@ -520,7 +561,7 @@ export class VirtualFileSystem {
 		for (const waiter of [...this.operationWaiters]) {
 			if (!waiter.matches(operation)) continue;
 			this.operationWaiters.delete(waiter);
-			setImmediate(() => waiter.resolve(operation));
+			this.enqueueSettle(() => waiter.resolve(operation));
 		}
 	}
 
@@ -654,10 +695,6 @@ export class VirtualFileSystem {
 		return encoding ? node.data.toString(encoding as BufferEncoding) : Buffer.from(node.data);
 	}
 
-	async readFile(value: unknown, options?: unknown): Promise<Buffer | string> {
-		return this.readFileSync(value, options);
-	}
-
 	writeFileSync(value: unknown, data: unknown, options?: unknown): void {
 		if (typeof value === "number") {
 			this.writeDescriptor(value, bytes(data));
@@ -685,10 +722,6 @@ export class VirtualFileSystem {
 	private setMode(path: string, mode: number): void {
 		const node = this.nodes.get(path);
 		if (node?.kind === "file") node.mode = mode & 0o777;
-	}
-
-	async writeFile(value: unknown, data: unknown, options?: unknown): Promise<void> {
-		this.writeFileSync(value, data, options);
 	}
 
 	appendFileSync(value: unknown, data: unknown): void {
@@ -739,10 +772,6 @@ export class VirtualFileSystem {
 		});
 		this.note("mkdir", path);
 		return recursive ? path : undefined;
-	}
-
-	async mkdir(value: unknown, options?: unknown): Promise<string | undefined> {
-		return this.mkdirSync(value, options);
 	}
 
 	mkdtempSync(prefix: unknown): string {
@@ -864,21 +893,24 @@ export class VirtualFileSystem {
 			if (closed) throw ioError("ERR_DIR_CLOSED", path);
 			return entries[position++] ?? null;
 		};
+		const readSettled = () => this.settled(readNext);
 		const directory = {
 			path,
 			readSync: readNext,
-			read: async () => readNext(),
+			read: readSettled,
 			closeSync: () => {
 				closed = true;
 				this.directories.delete(directory);
 			},
-			close: async () => {
-				closed = true;
-				this.directories.delete(directory);
-			},
+			close: () =>
+				this.settled(() => {
+					closed = true;
+					this.directories.delete(directory);
+				}),
+			// Each entry is one promise-export read, so a drain of a directory yields to the event loop per entry.
 			[Symbol.asyncIterator]: async function* () {
 				try {
-					for (let entry = readNext(); entry !== null; entry = readNext()) yield entry;
+					for (let entry = await readSettled(); entry !== null; entry = await readSettled()) yield entry;
 				} finally {
 					await directory.close();
 				}
@@ -974,29 +1006,30 @@ export class VirtualFileSystem {
 		return fd;
 	}
 
-	async open(value: unknown, flags: unknown) {
+	open(value: unknown, flags: unknown) {
+		return this.settled(() => this.openHandle(value, flags));
+	}
+
+	private openHandle(value: unknown, flags: unknown) {
 		const descriptor = this.openSync(value, flags);
 		let closed = false;
 		return {
 			get fd() {
 				return closed ? -1 : descriptor;
 			},
-			read: async (
-				buffer: Uint8Array,
-				offset = 0,
-				length = buffer.byteLength - offset,
-				position: number | null = null,
-			) => ({
-				bytesRead: this.readDescriptor(descriptor, buffer, offset, length, position),
-				buffer,
-			}),
-			write: async (buffer: Uint8Array | string, offset = 0, length?: number, position: number | null = null) => {
-				const data = bytes(buffer);
-				const selected =
-					typeof buffer === "string" ? data : data.subarray(offset, offset + (length ?? data.length - offset));
-				return { bytesWritten: this.writeDescriptor(descriptor, selected, position), buffer };
-			},
-			readFile: async (options?: unknown) => this.readDescriptorFile(descriptor, options),
+			read: (buffer: Uint8Array, offset = 0, length = buffer.byteLength - offset, position: number | null = null) =>
+				this.settled(() => ({
+					bytesRead: this.readDescriptor(descriptor, buffer, offset, length, position),
+					buffer,
+				})),
+			write: (buffer: Uint8Array | string, offset = 0, length?: number, position: number | null = null) =>
+				this.settled(() => {
+					const data = bytes(buffer);
+					const selected =
+						typeof buffer === "string" ? data : data.subarray(offset, offset + (length ?? data.length - offset));
+					return { bytesWritten: this.writeDescriptor(descriptor, selected, position), buffer };
+				}),
+			readFile: (options?: unknown) => this.settled(() => this.readDescriptorFile(descriptor, options)),
 			createReadStream: (options?: {
 				encoding?: BufferEncoding;
 				start?: number;
@@ -1018,26 +1051,31 @@ export class VirtualFileSystem {
 				});
 				return stream;
 			},
-			writeFile: async (data: unknown) => {
-				this.writeDescriptor(descriptor, bytes(data));
-			},
-			appendFile: async (data: unknown) => {
-				this.writeDescriptor(descriptor, bytes(data), Number(this.statSync(descriptor).size));
-			},
-			stat: async (options?: unknown) => this.statSync(descriptor, options),
-			truncate: async (length = 0) => this.truncateDescriptor(descriptor, length),
-			sync: async () => {
-				this.path(descriptor);
-			},
-			datasync: async () => {
-				this.path(descriptor);
-			},
-			close: async () => {
-				if (!closed) {
-					closed = true;
-					this.closeSync(descriptor);
-				}
-			},
+			writeFile: (data: unknown) =>
+				this.settled(() => {
+					this.writeDescriptor(descriptor, bytes(data));
+				}),
+			appendFile: (data: unknown) =>
+				this.settled(() => {
+					this.writeDescriptor(descriptor, bytes(data), Number(this.statSync(descriptor).size));
+				}),
+			stat: (options?: unknown) => this.settled(() => this.statSync(descriptor, options)),
+			truncate: (length = 0) => this.settled(() => this.truncateDescriptor(descriptor, length)),
+			sync: () =>
+				this.settled(() => {
+					this.path(descriptor);
+				}),
+			datasync: () =>
+				this.settled(() => {
+					this.path(descriptor);
+				}),
+			close: () =>
+				this.settled(() => {
+					if (!closed) {
+						closed = true;
+						this.closeSync(descriptor);
+					}
+				}),
 		};
 	}
 
@@ -1048,7 +1086,8 @@ export class VirtualFileSystem {
 
 	/**
 	 * Event-driven wait for durable state: `holds` is evaluated now and then on a later turn after every modeled mutation
-	 * (write, rename, removal), never on a timer. The caller bounds the wait with its own deadline.
+	 * (write, rename, removal) and after every settle batch of the promise exports (a read can move an owner's state too),
+	 * never on a timer. The caller bounds the wait with its own deadline.
 	 */
 	waitForMutation(holds: () => boolean): Promise<void> {
 		if (holds()) return Promise.resolve();
@@ -1094,15 +1133,15 @@ export class VirtualFileSystem {
 
 	nodeFsPromisesExports(): Record<string, unknown> {
 		return {
-			mkdtemp: async (prefix: unknown) => this.mkdtempSync(prefix),
-			opendir: async (path: unknown) => this.opendirSync(path),
+			mkdtemp: (prefix: unknown) => this.settled(() => this.mkdtempSync(prefix)),
+			opendir: (path: unknown) => this.settled(() => this.opendirSync(path)),
 			open: (path: unknown, flags: unknown) => this.open(path, flags),
 			readFile: (path: unknown, options?: unknown) => {
 				const target = this.holdPath(path);
 				return this.whenReleased(
 					"readFile",
 					target === undefined ? undefined : { kind: "read", path: target },
-					() => this.readFile(path, options),
+					() => this.readFileSync(path, options),
 				);
 			},
 			writeFile: (path: unknown, data: unknown, options?: unknown) => {
@@ -1110,27 +1149,28 @@ export class VirtualFileSystem {
 				return this.whenReleased(
 					"writeFile",
 					target === undefined ? undefined : { kind: "write", path: target },
-					() => this.writeFile(path, data, options),
+					() => this.writeFileSync(path, data, options),
 				);
 			},
-			appendFile: async (path: unknown, data: unknown) => this.appendFileSync(path, data),
+			appendFile: (path: unknown, data: unknown) => this.settled(() => this.appendFileSync(path, data)),
 			mkdir: (path: unknown, options?: unknown) => {
 				const target = this.holdPath(path);
 				return this.whenReleased("mkdir", target === undefined ? undefined : { kind: "mkdir", path: target }, () =>
-					this.mkdir(path, options),
+					this.mkdirSync(path, options),
 				);
 			},
-			readdir: async (path: unknown, options?: unknown) => this.readdirSync(path, options),
-			stat: async (path: unknown, options?: unknown) => this.statSync(path, options),
-			lstat: async (path: unknown, options?: unknown) =>
-				this.statSync(path, { ...(options as { bigint?: boolean } | undefined), lstat: true }),
-			access: async (path: unknown) => {
-				this.note("access", this.realpathSync(path, "access", "access"));
-			},
-			realpath: async (path: unknown) => this.realpathSync(path),
-			unlink: async (path: unknown) => this.unlinkSync(path),
-			rm: async (path: unknown, options?: unknown) => this.rmSync(path, options),
-			rmdir: async (path: unknown) => this.rmSync(path, undefined, "rmdir"),
+			readdir: (path: unknown, options?: unknown) => this.settled(() => this.readdirSync(path, options)),
+			stat: (path: unknown, options?: unknown) => this.settled(() => this.statSync(path, options)),
+			lstat: (path: unknown, options?: unknown) =>
+				this.settled(() => this.statSync(path, { ...(options as { bigint?: boolean } | undefined), lstat: true })),
+			access: (path: unknown) =>
+				this.settled(() => {
+					this.note("access", this.realpathSync(path, "access", "access"));
+				}),
+			realpath: (path: unknown) => this.settled(() => this.realpathSync(path)),
+			unlink: (path: unknown) => this.settled(() => this.unlinkSync(path)),
+			rm: (path: unknown, options?: unknown) => this.settled(() => this.rmSync(path, options)),
+			rmdir: (path: unknown) => this.settled(() => this.rmSync(path, undefined, "rmdir")),
 			rename: (from: unknown, to: unknown) => {
 				const source = this.holdPath(from);
 				const target = this.holdPath(to);
@@ -1139,16 +1179,18 @@ export class VirtualFileSystem {
 					source === undefined || target === undefined
 						? undefined
 						: { kind: "rename", path: source, destination: target },
-					async () => this.renameSync(from, to),
+					() => this.renameSync(from, to),
 				);
 			},
-			copyFile: async (from: unknown, to: unknown, flags?: number) => this.copyFileSync(from, to, flags),
-			truncate: async (path: unknown, length = 0) => this.truncateSync(path, Number(length)),
-			chmod: async (path: unknown, mode: unknown) => {
-				const resolved = this.realpathSync(path, "chmod", "chmod");
-				if (typeof mode === "number") this.setMode(resolved, mode);
-			},
-			utimes: async (path: unknown, _atime: unknown, mtime: unknown) => this.setTimes(path, mtime),
+			copyFile: (from: unknown, to: unknown, flags?: number) =>
+				this.settled(() => this.copyFileSync(from, to, flags)),
+			truncate: (path: unknown, length = 0) => this.settled(() => this.truncateSync(path, Number(length))),
+			chmod: (path: unknown, mode: unknown) =>
+				this.settled(() => {
+					const resolved = this.realpathSync(path, "chmod", "chmod");
+					if (typeof mode === "number") this.setMode(resolved, mode);
+				}),
+			utimes: (path: unknown, _atime: unknown, mtime: unknown) => this.settled(() => this.setTimes(path, mtime)),
 		};
 	}
 

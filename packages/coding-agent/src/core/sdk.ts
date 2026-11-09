@@ -777,7 +777,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				return auth.ok ? { apiKey: auth.apiKey, credentialHeaders: auth.credentialHeaders } : undefined;
 			},
 		});
-		const semanticUsage = sessionSemanticUsageOf(sessionManager);
+		const timers = options.timers ?? SYSTEM_TIMER_SOURCE;
+		const semanticUsage = sessionSemanticUsageOf(sessionManager, timers.port("semantic-usage"));
 		let constructed: AgentSession | undefined;
 		try {
 			if (!systemOneController && systemOneEnabled) {
@@ -913,7 +914,6 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			// before anything is routed.
 			void accountModels.refresh();
 
-			const timers = options.timers ?? SYSTEM_TIMER_SOURCE;
 			// A throwing constructor can already have live resources; retain its hold until process exit.
 			bundleTransferred = true;
 			const session = new AgentSession({

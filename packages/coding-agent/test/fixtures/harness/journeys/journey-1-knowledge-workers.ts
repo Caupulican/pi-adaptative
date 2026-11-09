@@ -11,7 +11,7 @@ import { OrchestrationProfileStore } from "../../../../src/core/orchestration/pr
 import { calls, createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { runJourney1KnowledgeManagedLeg } from "./journey-1-knowledge-managed.ts";
-import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, latestBatchResults } from "./shared.ts";
+import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, latestBatchResults, startedIdentity } from "./shared.ts";
 
 /** Existing journey 1: exact task grants, current request projection, broker reads and revocation. */
 export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Promise<void> {
@@ -162,8 +162,8 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 				check: (request) => {
 					const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
 					expect(result?.isError, result?.text).toBe(false);
-					const attempts = Object.values(root.session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {});
-					agentId = attempts.find((attempt) => attempt.status === "running")?.agentId;
+					// The start's own answer names the reader: the attempt reaches `running` on a later turn than the tool returns.
+					agentId = startedIdentity(root.session, `${label}-start`).agentId;
 					expect(agentId, "the real dispatch binds the reader").toBeDefined();
 					waiting.release();
 				},
@@ -253,6 +253,12 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 		prompt = root.session.prompt(`Run the ${label} reader task.`);
 		await withDeadline(world.trace, `${label} worker reached`, reached.promise);
 		await withDeadline(world.trace, `${label} parent waits`, waiting.promise);
+		expect(
+			Object.values(root.session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).find(
+				(attempt) => attempt.status === "running",
+			)?.agentId,
+			"the running attempt is bound to the reader the start named",
+		).toBe(agentId);
 		change?.();
 		release.release();
 		await withDeadline(world.trace, `${label} parent completed`, prompt);
@@ -290,12 +296,14 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 				check: (request) => {
 					const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
 					expect(result?.isError, result?.text).toBe(false);
+					// The start answers once the blocker's turn is durably accepted and admitted; it reaches `running` on a later turn.
+					const blocker = startedIdentity(root.session, `${label}-blocker`);
 					expect(
-						Object.values(root.session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {}).some(
-							(attempt) => attempt.agentId === agentId && attempt.status === "running",
-						),
-						"the blocker occupies the only worker slot before the selected task is admitted",
-					).toBe(true);
+						Object.values(root.session.backgroundLanes.getTaskRuntimeSnapshot()?.attempts ?? {})
+							.filter((attempt) => attempt.taskId === blocker.laneId)
+							.map((attempt) => ["queued", "leased", "running"].includes(attempt.status)),
+						"the blocker's turn is durably accepted, ahead of the selected task, before that task is started",
+					).toEqual([true]);
 				},
 				reply: calls(`${label}-start`, [
 					{
