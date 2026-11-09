@@ -150,7 +150,14 @@ function harnessNoticeMessage(input: {
 			...fence,
 			"The owner sees this notice directly; mention it only if it bears on what they ask.",
 		].join("\n"),
-		details: { kind: input.kind, reason: input.reason, generation: input.generation, headline: input.headline },
+		// The headline rides in details only when evidence follows it: without evidence the content IS the headline, so a
+		// notice saved without evidence keeps the details it always had.
+		details: {
+			kind: input.kind,
+			reason: input.reason,
+			generation: input.generation,
+			...(input.evidence === undefined ? {} : { headline: input.headline }),
+		},
 	};
 }
 

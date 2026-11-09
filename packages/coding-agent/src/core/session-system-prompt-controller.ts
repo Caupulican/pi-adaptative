@@ -1,5 +1,6 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { SessionManager } from "../kernel/node.ts";
+import { unsealSystemPrompt } from "../kernel/sealed-directives.ts";
 import type { CacheCustody } from "./context/cache-custody.ts";
 import { cacheLaneKey } from "./context/cache-observation-recorder.ts";
 import {
@@ -89,7 +90,8 @@ export class SessionSystemPromptController {
 
 	/** The lineage of a sent system prompt, read from the text itself. */
 	lineageOf(systemPrompt: string): SystemPromptLineage {
-		return this.deps.builder.isMemoryWithheld(systemPrompt) ? "memory-withheld" : "owner";
+		// A request carries the sealed prompt; the builder recognizes the prompt it built, before it was sealed.
+		return this.deps.builder.isMemoryWithheld(unsealSystemPrompt(systemPrompt)) ? "memory-withheld" : "owner";
 	}
 
 	/**

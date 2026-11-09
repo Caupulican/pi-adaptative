@@ -1212,12 +1212,15 @@ export function assertCompletionRuleRefusal(
 
 /**
  * The first successful work trigger of a root's context (`create_goal`, `goal` start, `task_steps`, `delegate` start) delivers the
- * `work-lifecycle` and `delegation` rules, in catalog order, as the last two text blocks of its result, and lists their ids in the
- * result's `details.piRuleIds`. Read from the durable branch by tool call id.
+ * `work-lifecycle`, `delegation` and `plan` rules (the plan rule is delivered because the root has the `plan` tool), in catalog
+ * order, as the last three text blocks of its result, and lists their ids in the result's `details.piRuleIds`. Read from the
+ * durable branch by tool call id.
  */
 export function assertWorkRulesDelivered(sessionManager: SessionManager, toolCallId: string, label: string): void {
-	const hooks = loadRuleHooks().filter((hook) => hook.topic === "work-lifecycle" || hook.topic === "delegation");
-	if (hooks.length !== 2) throw new Error(`${label}: the catalog holds ${hooks.length} work rules, not two`);
+	const hooks = loadRuleHooks().filter(
+		(hook) => hook.topic === "work-lifecycle" || hook.topic === "delegation" || hook.topic === "plan",
+	);
+	if (hooks.length !== 3) throw new Error(`${label}: the catalog holds ${hooks.length} work rules, not three`);
 	const entry = sessionManager
 		.getBranch()
 		.find(
@@ -1238,7 +1241,7 @@ export function assertWorkRulesDelivered(sessionManager: SessionManager, toolCal
 	}
 	const markerLines = entry.message.content
 		.flatMap((block) => (block.type === "text" ? [block.text.split("\n", 1)[0]] : []))
-		.slice(-2);
+		.slice(-3);
 	const wantedLines = hooks.map((hook) => `RULE ${hook.id}`);
 	if (JSON.stringify(markerLines) !== JSON.stringify(wantedLines)) {
 		const seen = JSON.stringify(markerLines);

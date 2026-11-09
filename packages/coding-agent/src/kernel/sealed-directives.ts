@@ -54,6 +54,16 @@ export function sealedPrefix(directives: readonly SealedDirective[] = SEALED_DIR
 	return `${directives.map(sealedBlock).join("\n\n")}\n\n`;
 }
 
+/**
+ * The prompt without the sealed prefix at its front (a prompt that carries none is returned as it is). Hosts that
+ * recognize a prompt they built (the memory-withheld variant, a cached projection) compare the prompt BEFORE it was
+ * sealed, so a request's sealed prompt is unsealed first.
+ */
+export function unsealSystemPrompt(prompt: string, directives: readonly SealedDirective[] = SEALED_DIRECTIVES): string {
+	const prefix = sealedPrefix(directives);
+	return prompt.startsWith(prefix) ? prompt.slice(prefix.length) : prompt;
+}
+
 const STRAY_BLOCK_PATTERN = /<sealed-directive id="[^"\n]*">[\s\S]*?<\/sealed-directive>\s*/;
 const STRAY_BLOCK = new RegExp(STRAY_BLOCK_PATTERN.source, "g");
 
