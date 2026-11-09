@@ -110,7 +110,7 @@ export interface TransientRecordSlot {
 	record?: TransientRecordPayload;
 	/**
 	 * The record's one-line name, rendered by the slot's producer from the same fact as `content`. A pointer that
-	 * reclaims the trailing position repeats it (bounded), so only trailing slots need one; absent, the pointer
+	 * reclaims the trailing position repeats it (bounded by its producer), so only trailing slots need one; absent, the pointer
 	 * names the kind.
 	 */
 	header?: string;
@@ -120,6 +120,12 @@ export interface TransientRecordSlot {
 	 * absent, the digest of `content` itself.
 	 */
 	digest?: string;
+	/**
+	 * The digest the producer gives a stored record of its kind that predates `details.digest`: the same identity as `digest`,
+	 * computed from the record's own `details.record`. Undefined for a record it does not recognize, which falls back to the
+	 * digest of the stored content, as every producer without a narrower identity does.
+	 */
+	digestOfRecord?: (record: TransientRecordPayload) => string | undefined;
 }
 
 /** A canonical machine record in a transient record's `details.record`: a version and a kind, then its fields. */
@@ -174,12 +180,12 @@ function isCumulativeTransient(message: AgentMessage): boolean {
 }
 
 /**
- * A pointer record naming its kind by the slot's header (the producer's current one-line name, so counters that do
- * not change what the model must do still read current), bounded to 80 characters.
+ * A pointer record naming its kind by the slot's header: the producer's current one-line name, so counters that do not
+ * change what the model must do still read current. The producer bounds the header (a cut here would land mid-entry);
+ * the tool-failure ledger's header is bounded by `renderToolFailureLedgerPointerHeader`.
  */
 function buildPointerRecord(kind: string, header: string): AgentMessage {
-	const name = header.length > 80 ? `${header.slice(0, 77)}...` : header;
-	const text = `${name}; nothing to act on changed since the last full record of this kind above, which is current.`;
+	const text = `${header}; nothing to act on changed since the last full record of this kind above, which is current.`;
 	return createCustomMessage(kind, text, false, POINTER_RECORD_DETAILS, deterministicRecordTimestamp(text));
 }
 
@@ -199,12 +205,36 @@ function deterministicRecordTimestamp(content: string): string {
 }
 
 /**
+ * `details` key a context pass sets on a transient record it packed into a stub: the record keeps its kind and identity, but its
+ * content no longer carries the record in full. Written only through {@link transientRecordPackedDetails}.
+ */
+const TRANSIENT_PACKED_KEY = "transientPacked";
+
+/**
+ * The `details` a context pass writes when it replaces a transient record's content with a stub (context GC packing, the
+ * compaction summarizer's projection). Every rewrite of a record's content goes through this, so the planner reads one typed
+ * field and never the rendered text of the record.
+ */
+export function transientRecordPackedDetails(details: unknown): Record<string, unknown> {
+	return { ...(typeof details === "object" && details !== null ? details : {}), [TRANSIENT_PACKED_KEY]: true };
+}
+
+function isTransientRecordPacked(details: unknown): boolean {
+	return (
+		typeof details === "object" &&
+		details !== null &&
+		(details as { [TRANSIENT_PACKED_KEY]?: unknown })[TRANSIENT_PACKED_KEY] === true
+	);
+}
+
+/**
  * Whether a persisted custom record was written by this module (a transient record): `details.superseding`
  * marks a plain record, `details.cumulative` a cumulative one; pointer records are excluded, as
  * `transientContentIndex` excludes them. The session context builder uses this to carry the current
  * record of each kind across a compaction cut: without it every kind is re-appended on the first
  * request after compaction (measured on a live session: the skill context re-sent 75 times for 7
- * distinct contents, the legend 256 times).
+ * distinct contents, the legend 256 times). This is the only reader of the superseding note: a plain
+ * record persisted before `details.superseding` existed is recognized by the note it ends with.
  */
 export function classifyTransientRecord(
 	content: unknown,
@@ -251,36 +281,45 @@ function customMessageText(message: AgentMessage): string | undefined {
 function durableTransientContent(message: AgentMessage): string | undefined {
 	if (message.role !== "custom" || typeof message.content !== "string") return undefined;
 	const text = message.content;
-	if (isSupersedingRecordDetails(message.details)) {
-		return text.slice(0, text.length - TRANSIENT_RECORD_SUPERSEDING_NOTE.length);
-	}
-	// comms-legacy-decoder: plain records persisted before `details.superseding` existed are known only by the note.
-	return text.endsWith(TRANSIENT_RECORD_SUPERSEDING_NOTE)
-		? text.slice(0, text.length - TRANSIENT_RECORD_SUPERSEDING_NOTE.length)
-		: text;
+	const record = classifyTransientRecord(text, message.details);
+	if (!record.transient || record.cumulative) return text;
+	return text.slice(0, text.length - TRANSIENT_RECORD_SUPERSEDING_NOTE.length);
 }
 
 /** The last full (non-pointer) record of one kind in a history, as reconciliation compares against it. */
 interface RecordedTransient {
 	/** Its content without the superseding note; undefined for a record without string content. */
 	readonly content: string | undefined;
-	/** `details.digest` when the producer stored one, else the digest of `content`. */
-	readonly digest: string | undefined;
+	/** `details.digest` when the producer stored one. */
+	readonly storedDigest: string | undefined;
+	/** `details.record`, the typed fact the content renders, when the record carries one. */
+	readonly record: TransientRecordPayload | undefined;
 	/** Its timestamp: content-derived, so the planned copy of the same record carries the same one. */
 	readonly timestamp: number;
 }
 
 function recordedTransient(message: Extract<AgentMessage, { role: "custom" }>): RecordedTransient {
-	const content = durableTransientContent(message);
 	const stored =
 		typeof message.details === "object" && message.details !== null
 			? (message.details as { digest?: unknown }).digest
 			: undefined;
 	return {
-		content,
-		digest: typeof stored === "string" ? stored : content === undefined ? undefined : transientRecordDigest(content),
+		content: durableTransientContent(message),
+		storedDigest: typeof stored === "string" ? stored : undefined,
+		record: readTransientRecordPayload(message.details),
 		timestamp: message.timestamp,
 	};
+}
+
+/**
+ * The identity a recorded record is compared by, as its producer would have stored it: its `details.digest`; for a record
+ * persisted before that existed, the producer's digest of its typed record, else the digest of its content.
+ */
+function recordedDigest(recorded: RecordedTransient, slot: TransientRecordSlot): string | undefined {
+	if (recorded.storedDigest !== undefined) return recorded.storedDigest;
+	if (recorded.content === undefined) return undefined;
+	const fromRecord = recorded.record === undefined ? undefined : slot.digestOfRecord?.(recorded.record);
+	return fromRecord ?? transientRecordDigest(recorded.content);
 }
 
 /**
@@ -358,10 +397,21 @@ function buildTransientRecord(
 }
 
 /**
+ * Whether a planned message still carries a plain transient record in full: it is a record (typed, or a legacy one read
+ * by `classifyTransientRecord`) and no context pass has packed it since, which every rewrite of its content marks.
+ */
+function carriesTransientRecordInFull(message: Extract<AgentMessage, { role: "custom" }>): boolean {
+	return (
+		typeof message.content === "string" &&
+		classifyTransientRecord(message.content, message.details).transient &&
+		!isTransientRecordPacked(message.details)
+	);
+}
+
+/**
  * The kinds (of `wanted`, by the timestamp of their last durable record) whose last record the planned request still
  * carries in full: the last non-pointer record of the kind in `planned` is that same record (same content-derived
- * timestamp) and still ends with the superseding note, which packing and truncation remove and path aliasing keeps.
- * Read backward and stopped once every wanted kind is resolved.
+ * timestamp) and carries the record in full. Read backward and stopped once every wanted kind is resolved.
  */
 function visibleRecordKinds(
 	planned: readonly AgentMessage[],
@@ -375,14 +425,7 @@ function visibleRecordKinds(
 		const timestamp = remaining.get(message.customType);
 		if (timestamp === undefined) continue;
 		remaining.delete(message.customType);
-		if (
-			message.timestamp === timestamp &&
-			typeof message.content === "string" &&
-			// comms-legacy-decoder: context GC and truncation rewrite a record's content and keep its details, so the lost note is the only signal that a request no longer carries the record in full.
-			message.content.endsWith(TRANSIENT_RECORD_SUPERSEDING_NOTE)
-		) {
-			visible.add(message.customType);
-		}
+		if (message.timestamp === timestamp && carriesTransientRecordInFull(message)) visible.add(message.customType);
 	}
 	return visible;
 }
@@ -427,12 +470,15 @@ export function reconcileTransientRecords(
 	const wanted = new Map<string, number>();
 	for (const slot of slots) {
 		const last = recorded.get(slot.kind);
-		if (slot.cumulative || last?.digest === undefined || last.digest !== nextDigest(slot)) continue;
+		const lastDigest = last === undefined ? undefined : recordedDigest(last, slot);
+		if (slot.cumulative || last === undefined || lastDigest === undefined || lastDigest !== nextDigest(slot))
+			continue;
 		wanted.set(slot.kind, last.timestamp);
 	}
 	const visible = visibleRecordKinds(planned, wanted);
 	const factsFor = (slot: TransientRecordSlot, tailNeedsReclaim: boolean): TransientRecordFacts => {
-		const lastDigest = recorded.get(slot.kind)?.digest;
+		const last = recorded.get(slot.kind);
+		const lastDigest = last === undefined ? undefined : recordedDigest(last, slot);
 		return {
 			active: slot.content !== undefined,
 			hasClearedText: slot.clearedText !== undefined,

@@ -121,6 +121,8 @@ export function createReadOnlySkillToolDefinition(
 		name: "skill",
 		label: "Skill (read-only)",
 		readOnly: true,
+		// The prompt names skills to load by this tool, so its schema is in every request.
+		neverDefer: true,
 		description:
 			"Search and read eligible skill guidance; it cannot load, exclude or change skills. Report a skill that conflicts with owner instructions to the parent.",
 		promptSnippet: "Search and read skills",
@@ -221,6 +223,8 @@ export function createSkillVaultToolDefinition(
 	return {
 		name: "skill",
 		label: "Skill",
+		// The prompt names skills to load by this tool, so its schema is in every request.
+		neverDefer: true,
 		description: `${SKILL_VAULT_DESCRIPTION} When specialist help is useful and the skill is inactive, search and load it by exact name before the work; idle skills expire. Repair (inspect first for expectedVersion) rewrites a skill's source and works only when settings allow skill evolution.`,
 		promptSnippet: "Search, load and manage skills",
 		parameters: skillSchema,

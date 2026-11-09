@@ -84,6 +84,8 @@ export function hasRecalledHistoryMarker(details: unknown): boolean {
  * So are the delivered rule ids: dropping them would deliver the same rule again into a context that holds it.
  * And the failure-memory record and the engine invocation receipt: recovery gating, resume and failure
  * statistics classify a result by them, so an oversized failed result must stay a counted failure.
+ * And the proof sheets a goal completion, a worker handoff or a plan result carries: the review gauge and the owner's
+ * quiz read them back from the branch.
  */
 export const RETAINED_RECEIPT_DETAIL_KEYS = [
 	"piVerification",
@@ -92,6 +94,7 @@ export const RETAINED_RECEIPT_DETAIL_KEYS = [
 	RULE_IDS_DETAIL_KEY,
 	"piToolFailureMemory",
 	"piToolInvocation",
+	"proofSheet",
 ] as const;
 const MAX_RETAINED_RECEIPT_BYTES = 4 * 1024;
 /**
@@ -102,6 +105,9 @@ const MAX_RETAINED_RECEIPT_BYTES = 4 * 1024;
  */
 const RETAINED_RECEIPT_BYTE_BUDGETS: Readonly<Record<string, number>> = {
 	piToolFailureMemory: 16 * 1024,
+	// Proof sheets are bounded by construction: lists of at most 8 lines of 120 characters per sheet, and one text of
+	// 6 KiB, or 24 KiB shared across the up to 8 sheets of a batched worker handoff; that worst case fits this budget.
+	proofSheet: 512 * 1024,
 };
 
 /** Replace oversized details on any retained holder with a small truncation stub that keeps its receipts. */

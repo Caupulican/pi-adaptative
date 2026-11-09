@@ -20,10 +20,12 @@ import type {
 import { estimateProviderRequestTokens } from "./provider-request-estimator.ts";
 import { applyProviderRequestImageBudget } from "./provider-request-image-budget.ts";
 import { projectToolsForProvider } from "./provider-tool-projection.ts";
+import { sealSystemPrompt } from "./sealed-directives.ts";
 import {
 	renderToolFailureLedger,
-	renderToolFailureLedgerHeader,
+	renderToolFailureLedgerPointerHeader,
 	toolFailureLedgerDigest,
+	toolFailureLedgerDigestOfRecord,
 } from "./tool-failure-ledger-record.ts";
 import {
 	createToolFailureContextMemory,
@@ -470,10 +472,11 @@ async function materializeContextPlan(
 					...(sanitized.ledger
 						? {
 								record: sanitized.ledger,
-								header: renderToolFailureLedgerHeader(sanitized.ledger),
+								header: renderToolFailureLedgerPointerHeader(sanitized.ledger),
 								digest: toolFailureLedgerDigest(sanitized.ledger),
 							}
 						: {}),
+					digestOfRecord: toolFailureLedgerDigestOfRecord,
 					clearedText: TOOL_FAILURE_LEDGER_CLEARED_TEXT,
 					trailing: true,
 				},
@@ -514,7 +517,8 @@ async function materializeContextPlan(
 	signal?.throwIfAborted();
 
 	const sourceProviderContext: Context = {
-		systemPrompt: composeRequestSystemPrompt(sanitized.systemPrompt, plan.transientSystemPrompt),
+		// The one place every agent loop writes its provider request: the sealed directives are restored here if any layer above lost them.
+		systemPrompt: sealSystemPrompt(composeRequestSystemPrompt(sanitized.systemPrompt, plan.transientSystemPrompt)),
 		messages: llmMessages,
 		tools: projectToolsForProvider(sourceContext.tools),
 	};

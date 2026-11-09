@@ -59,6 +59,57 @@ export function normalizePath(input: string, options: PathInputOptions = {}): st
 	return normalized;
 }
 
+function tryCurlyQuoteVariant(filePath: string): string {
+	// macOS uses U+2019 (right single quotation mark) in screenshot names like "Capture d'écran"
+	// Users typically type U+0027 (straight apostrophe)
+	return filePath.replace(/'/g, "’");
+}
+
+/**
+ * The spellings a read of one path argument tries, in the order the read resolver tries them: the cleaned and the literal
+ * form of the argument, NFD, the curly-quote variants, and the `@`-stripped form. The read tools open the first of them that
+ * exists; the scope gates judge every one (see `toolPathSpellings`).
+ */
+export function* readPathSpellings(input: string, baseDir: string, options: PathInputOptions = {}): Generator<string> {
+	const literalOptions = { ...options, normalizeUnicodeSpaces: false, stripAtPrefix: false };
+	const candidates = new Set<string>();
+	for (const cleanup of [false, true]) {
+		const normalized = normalizePath(input, { ...options, normalizeUnicodeSpaces: cleanup, stripAtPrefix: cleanup });
+		const nfd = normalized.normalize("NFD");
+		for (const variant of [
+			normalized,
+			normalized.replace(/ (AM|PM)\./gi, " $1."),
+			nfd,
+			tryCurlyQuoteVariant(normalized),
+			tryCurlyQuoteVariant(nfd),
+		]) {
+			const candidate = resolvePath(variant, baseDir, literalOptions);
+			if (candidates.has(candidate)) continue;
+			candidates.add(candidate);
+			yield candidate;
+		}
+	}
+}
+
+/**
+ * Every absolute path a tool may open for one path argument: the read spellings above and the single resolution that write,
+ * edit and search use. A scope gate judges all of them, so it judges the path the tool opens whichever one it settles on.
+ * Undefined when the argument cannot be resolved at all (a `~` with no home directory, a NUL byte): the gate refuses it.
+ */
+export function toolPathSpellings(
+	input: string,
+	baseDir: string,
+	options: PathInputOptions = {},
+): string[] | undefined {
+	try {
+		const spellings = new Set(readPathSpellings(input, baseDir, options));
+		spellings.add(resolvePath(input, baseDir, { normalizeUnicodeSpaces: true, stripAtPrefix: true, ...options }));
+		return [...spellings];
+	} catch {
+		return undefined;
+	}
+}
+
 export function resolvePath(input: string, baseDir: string = process.cwd(), options: PathInputOptions = {}): string {
 	const normalized = normalizePath(input, options);
 	// Input cleanup is not authority to rename the supplied directory. File URLs and explicit

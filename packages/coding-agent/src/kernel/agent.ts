@@ -34,6 +34,7 @@ import type {
 } from "./loop-config.ts";
 import { advanceMessageRevision } from "./message-revision.ts";
 import { convertToLlm } from "./messages.ts";
+import { sealSystemPrompt } from "./sealed-directives.ts";
 import { createToolFailureContextMemory } from "./tool-failure-memory.ts";
 import type { AgentEvent, AgentMessage, AgentState, AgentTool, QueueMode, ToolExecutionMode } from "./types.ts";
 import { createEmptyUsage } from "./usage.ts";
@@ -735,7 +736,8 @@ export class Agent {
 	 * loop projects it per request at the provider boundary. The held prompt is never changed by it.
 	 */
 	requestSystemPrompt(): string {
-		return this.projectSystemPrompt?.(this._state.systemPrompt) ?? this._state.systemPrompt;
+		// Sealed like every provider request: a compaction summarizer built from this prompt shares the session's cached prefix.
+		return sealSystemPrompt(this.projectSystemPrompt?.(this._state.systemPrompt) ?? this._state.systemPrompt);
 	}
 
 	private createContextSnapshot(): AgentContext {

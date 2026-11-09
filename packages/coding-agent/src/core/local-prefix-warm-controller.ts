@@ -4,6 +4,7 @@ import type { Api, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
 import type { AgentLoopConfig, StreamFn } from "../kernel/index.ts";
 import { resolveProviderRequestAuthOptions } from "../kernel/provider-request-planner.ts";
 import { projectToolsForProvider } from "../kernel/provider-tool-projection.ts";
+import { sealSystemPrompt } from "../kernel/sealed-directives.ts";
 import type { AgentTool } from "../kernel/types.ts";
 import { formatModelRouterModel } from "./model-router-controller.ts";
 import { HF_TRANSFORMERS_PROVIDER, OLLAMA_PROVIDER } from "./models/local-registration.ts";
@@ -86,7 +87,7 @@ export class LocalPrefixWarmController {
 			const stream = await streamFn(
 				model,
 				{
-					systemPrompt: this.deps.getSystemPrompt(),
+					systemPrompt: sealSystemPrompt(this.deps.getSystemPrompt()),
 					tools: projectToolsForProvider(this.deps.getTools()),
 					messages: [],
 				},

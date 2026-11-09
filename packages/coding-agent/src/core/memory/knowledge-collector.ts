@@ -134,6 +134,16 @@ export interface KnowledgeCollectorDeps extends KnowledgeCollectionBinding, Know
 	captureGuard(): () => string | undefined;
 	runIsolatedCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	warn(message: string): void;
+	/**
+	 * Whether the session file is durable (a flushed session file, not a configured path). A terminal handoff is
+	 * retained as a session entry, so a pass starts only once that entry can be physically retained.
+	 */
+	durable(): boolean;
+	/**
+	 * Notifies once, when the session becomes durable; the collector then re-evaluates its schedule. It must not fire for
+	 * later persisted entries: the collector's own terminal entry is one, and would re-arm it on every pass.
+	 */
+	subscribeDurability(listener: () => void): () => void;
 }
 
 interface Configuration {
@@ -147,6 +157,10 @@ interface Configuration {
 
 /**
  * No timer or listener survives stop; asynchronous tails retain accounting, never a closed store.
+ *
+ * A pass starts only on a durable session file. Each pass ends in a terminal handoff that is retained as a session entry, and a
+ * session entry is physically retained only once its file is flushed; a fresh session flushes at its first owner input or reply.
+ * Until then the collector schedules nothing, so no handoff exists that could be left unretained at shutdown.
  *
  * Owner activity, new owner evidence and settings changes yield the pass:
  * - it starts no further request and ends at its next boundary;
@@ -194,6 +208,7 @@ export class KnowledgeCollector {
 				this.rescan = true;
 				this.schedule();
 			}),
+			this.deps.subscribeDurability(() => this.schedule()),
 			this.deps.subscribeForegroundActivity(() => {
 				if (this.deps.isForegroundBusy()) this.yieldPass();
 				else this.schedule();
@@ -328,7 +343,8 @@ export class KnowledgeCollector {
 			this.running ||
 			this.alarm !== undefined ||
 			!this.deps.isCurrent() ||
-			this.deps.isForegroundBusy()
+			this.deps.isForegroundBusy() ||
+			!this.deps.durable()
 		)
 			return;
 		try {
@@ -342,7 +358,8 @@ export class KnowledgeCollector {
 			this.alarm = this.deps.time.setTimeout(
 				() => {
 					this.alarm = undefined;
-					if (!this.active || !this.deps.isCurrent() || this.deps.isForegroundBusy()) return;
+					if (!this.active || !this.deps.isCurrent() || this.deps.isForegroundBusy() || !this.deps.durable())
+						return;
 					this.running = this.run(config).finally(() => {
 						this.running = undefined;
 						this.abort = undefined;

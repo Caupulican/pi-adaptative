@@ -2,6 +2,7 @@ import { type Stats, statSync } from "node:fs";
 import { performance } from "node:perf_hooks";
 import { minimatch } from "minimatch";
 import { composeRequestSystemPrompt } from "../kernel/provider-request-planner.ts";
+import { sealSystemPrompt } from "../kernel/sealed-directives.ts";
 import { parseFrontmatter } from "../utils/frontmatter.ts";
 import { OWNER_PRECEDENCE_POLICY } from "./provider-prompt-contracts.ts";
 import { stripResourceProfileBlocks } from "./resource-profile-blocks.ts";
@@ -65,6 +66,12 @@ interface LoadedSkill {
 type SkillSlotState =
 	| ({ state: "loaded_pending" } & LoadedSkill)
 	| ({ state: "active"; lastUsedAtMs: number; useCount: number } & LoadedSkill);
+
+/** One active skill's section as a request carries it: its name (the record identity) and its rendered section. */
+export interface SkillPromptSection {
+	readonly name: string;
+	readonly section: string;
+}
 
 export interface SkillSlotStatus {
 	state: SkillSlotState["state"];
@@ -753,14 +760,17 @@ export class SkillVaultController {
 		};
 	}
 
-	commitSystemPromptSection(): string | undefined {
+	/**
+	 * Marks the active skills used by an accepted request and returns their sections in load order: one provider record per
+	 * skill, so a request re-sends only the skills whose section changed.
+	 */
+	commitSkillSections(): readonly SkillPromptSection[] {
 		const now = this.now();
 		this.syncExclusions();
 		this.reconcile(now);
-		if (this.slots.size === 0) return undefined;
-		const sections: string[] = [];
+		const sections: SkillPromptSection[] = [];
 		for (const [name, slot] of this.slots) {
-			sections.push(slot.systemPromptSection);
+			sections.push({ name, section: slot.systemPromptSection });
 			const firstUse = slot.state === "loaded_pending";
 			const useCount = firstUse ? 1 : slot.useCount + 1;
 			this.slots.set(name, { ...slot, state: "active", lastUsedAtMs: now, useCount });
@@ -772,24 +782,23 @@ export class SkillVaultController {
 				}
 			}
 		}
-		return sections.join("\n\n");
+		return sections;
 	}
 
-	/** Model the next request's transient system cost without treating a diagnostic read as use. */
-	previewSystemPromptSection(): string | undefined {
+	/** The sections a request would carry, in load order, without treating a diagnostic read as use. */
+	previewSkillSections(): readonly SkillPromptSection[] {
 		this.syncExclusions();
 		this.reconcile(this.now());
-		if (this.slots.size === 0) return undefined;
-		return [...this.slots.values()].map((slot) => slot.systemPromptSection).join("\n\n");
+		return [...this.slots].map(([name, slot]) => ({ name, section: slot.systemPromptSection }));
 	}
 
 	/**
 	 * The exact provider system prompt for read-only diagnostics. Active skills no longer ride it:
-	 * they are a durable host record in the message stream (see `ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE`
+	 * they are one host record per skill in the message stream (see `ACTIVE_SKILL_RECORD_KIND_PREFIX`
 	 * in provider-request-context-controller.ts), so the system prompt is the base prompt alone.
 	 */
 	previewRequestSystemPrompt(base: string | undefined): string | undefined {
-		return composeRequestSystemPrompt(base, undefined);
+		return sealSystemPrompt(composeRequestSystemPrompt(base, undefined));
 	}
 
 	/** Monotonic identity for provider-visible skill projection changes. */

@@ -4,7 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { estimateTokens } from "../kernel/compaction/compaction.ts";
 import type { AgentMessage } from "../kernel/index.ts";
-import { isTransientPointerRecord, PrefixFold } from "../kernel/index.ts";
+import { isTransientPointerRecord, PrefixFold, transientRecordPackedDetails } from "../kernel/index.ts";
 import { normalizePath } from "../utils/paths.ts";
 import type { SentPrefixRewriteVerdict } from "./compaction/early-compaction-economics.ts";
 import { CONTEXT_ORIGINAL_KEY, type ContextOriginalMetadata } from "./context/artifact-retrieval.ts";
@@ -202,6 +202,7 @@ export function packSupersededHostRecords(messages: readonly AgentMessage[]): Ag
 		return {
 			...message,
 			content: `[Context GC packed superseded ${message.customType} record; a later record of this kind is current]`,
+			details: transientRecordPackedDetails(message.details),
 		};
 	});
 }
@@ -686,16 +687,17 @@ function makePackedTransientRecord(message: AgentMessage, record: ContextGcPacke
 	return {
 		...(message as unknown as Record<string, unknown>),
 		content: buildSummary(record),
-		details: gcDetails(message as { details?: unknown }, record),
+		details: transientRecordPackedDetails(gcDetails(message as { details?: unknown }, record)),
 	} as AgentMessage;
 }
 
 function makePackedSemanticMemoryMessage(message: AgentMessage, record: ContextGcPackedRecord): AgentMessage {
 	const summary = buildSummary(record);
+	const details = gcDetails(message as { details?: unknown }, record);
 	return {
 		...(message as unknown as Record<string, unknown>),
 		content: [{ type: "text", text: summary }],
-		details: gcDetails(message as { details?: unknown }, record),
+		details: message.role === "custom" ? transientRecordPackedDetails(details) : details,
 	} as AgentMessage;
 }
 

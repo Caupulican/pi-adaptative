@@ -109,6 +109,8 @@ export function createToolTaskToolDefinition(deps: ToolTaskDependencies): ToolDe
 	return {
 		name: "tool_task",
 		label: "tool_task",
+		// Host notices tell the model to call it by name (action wait), so its schema is in every request.
+		neverDefer: true,
 		description:
 			"List, wait for, cancel, or view retained images from this session's background tool calls. list shows status only; wait blocks until the task ends or timeoutMs; image returns one stored image by taskId and imageIndex, resized for display.",
 		promptSnippet: "Control background tool calls",

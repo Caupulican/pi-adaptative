@@ -213,6 +213,10 @@ export function createPythonToolDefinition(
 	return {
 		name: "python",
 		label: "python",
+		// The operating contract tells the model to script dependent or bulk work with it, so its schema is in every request.
+		neverDefer: true,
+		// A script with tools runs under this call and must not be handed to the background while it runs.
+		foregroundWait: (input) => (input.tools?.length ?? 0) > 0,
 		description: options.toolBridge ? `${PYTHON_DESCRIPTION}${PYTHON_TOOL_BRIDGE_DESCRIPTION}` : PYTHON_DESCRIPTION,
 		promptSnippet: "Run Python code or a script",
 		parameters: pythonSchema,

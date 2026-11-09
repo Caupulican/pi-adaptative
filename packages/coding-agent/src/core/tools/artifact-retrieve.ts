@@ -122,6 +122,8 @@ export function createArtifactRetrieveToolDefinition(
 		name: "artifact_retrieve",
 		label: "artifact_retrieve",
 		readOnly: true,
+		// Host stubs for packed output tell the model to call this by name, so its schema is in every request.
+		neverDefer: true,
 		description:
 			"Read a bounded slice of a stored original by id: a packed tool output ('Full output: artifact tool-output:<id>') or a context-GC packed result ('artifact_retrieve context:<key>'). Never returns the full payload in one call.",
 		promptSnippet: "Read a slice of a packed output by id",

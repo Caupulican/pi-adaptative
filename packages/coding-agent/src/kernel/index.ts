@@ -17,6 +17,7 @@ export * from "./provider-tool-projection.ts";
 export * from "./proxy.ts";
 // Reliability kernel
 export * from "./reliability/index.ts";
+export * from "./sealed-directives.ts";
 // Session message retention (pure)
 export * from "./session/message-retention.ts";
 // Provider-neutral failed tool-call context boundary
@@ -37,6 +38,7 @@ export {
 	readTransientRecordPayload,
 	TRANSIENT_RECORD_SUPERSEDING_NOTE,
 	type TransientRecordPayload,
+	transientRecordPackedDetails,
 } from "./transient-records.ts";
 // Types
 export * from "./types.ts";

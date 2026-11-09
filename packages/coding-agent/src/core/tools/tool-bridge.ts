@@ -134,9 +134,20 @@ async function removeRunDirectory(directory: string): Promise<void> {
 	}
 }
 
+/**
+ * The directory the run's socket directory is made in: the temp directory, unless a long one would push the socket path
+ * past the Unix limit (about 104 bytes), in which case the short system temp directory.
+ */
+function bridgeBaseDirectory(): string {
+	const base = tmpdir();
+	if (process.platform === "win32") return base;
+	const longest = Buffer.byteLength(join(base, "pi-tb-XXXXXX", "bridge.sock"));
+	return longest <= 100 ? base : "/tmp";
+}
+
 export async function openToolBridge(options: ToolBridgeRunOptions): Promise<ToolBridgeRun> {
 	const startedAt = Date.now();
-	const directory = await mkdtemp(join(tmpdir(), "pi-tb-"));
+	const directory = await mkdtemp(join(bridgeBaseDirectory(), "pi-tb-"));
 	const requested: ReadonlySet<string> = new Set(options.tools);
 	const runAbort = new AbortController();
 	const stopWithParent = (): void => runAbort.abort(options.signal?.reason);

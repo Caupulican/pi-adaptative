@@ -27,6 +27,7 @@ import type { Agent } from "../kernel/agent.ts";
 import { createAgentLoopContinuationState, runAgentLoop, startAgentProviderRequest } from "../kernel/agent-loop.ts";
 import type { AgentContext, AgentLoopConfig, AgentStreamOptions } from "../kernel/index.ts";
 import { resolveProviderRequestOptions, resolveRequestPreflightMaxTokens } from "../kernel/provider-request-planner.ts";
+import { sealSystemPrompt } from "../kernel/sealed-directives.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
 import { combineUsage } from "../kernel/usage.ts";
@@ -584,6 +585,16 @@ export class ReflectionController {
 					captureGuard: () => this.captureLearningContext(),
 					runIsolatedCompletion: (options) => this.runIsolatedCompletion(options),
 					warn: (message) => this.deps.warn?.(message),
+					durable: () => manager.hasDurableSessionFile(),
+					// Fires once, on the transition: a persisted entry of the collector's own terminal handoff must not re-arm it.
+					subscribeDurability: (listener) => {
+						let durable = manager.hasDurableSessionFile();
+						return manager.onEntriesPersisted(() => {
+							if (durable) return;
+							durable = manager.hasDurableSessionFile();
+							if (durable) listener();
+						});
+					},
 					onTerminal: (outcome) => {
 						let failure: unknown;
 						try {
@@ -1708,7 +1719,11 @@ export class ReflectionController {
 			if (opts.requestContext) {
 				// Sent exactly as given: the lane's own budget preflight, then one request with the lane's
 				// affinity, retention and auth, never through request planning.
-				const requestContext = opts.requestContext;
+				// Never through request planning, so the sealed directives are written here.
+				const requestContext = {
+					...opts.requestContext,
+					systemPrompt: sealSystemPrompt(opts.requestContext.systemPrompt),
+				};
 				const requestAuth = await resolveProviderRequestOptions(loopConfig, opts.signal);
 				opts.signal?.throwIfAborted();
 				const maxTokens = await resolveRequestPreflightMaxTokens({
