@@ -41,6 +41,10 @@ export interface NestedBotStart {
 	readonly forkTurns?: string;
 	/** Model, thinking, read-only and write-path authority the bot runs under; a bot that cannot write is `readOnly`. */
 	readonly authority?: WorkerDelegationAuthorityRequest;
+	/** The bot is a leader: its runtime's model follows `modelPins.leader`. */
+	readonly leaderRuntime?: boolean;
+	/** The explicit `authority.model` is the bot record's own; the default pin steps aside for it. */
+	readonly modelFromBotRecord?: boolean;
 }
 
 /** The controller's answer for one nested start: started (queued or running) with its lane, or refused with a reason. */

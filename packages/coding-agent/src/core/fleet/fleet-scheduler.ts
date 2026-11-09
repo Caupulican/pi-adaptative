@@ -587,11 +587,17 @@ export class SessionFleetScheduler implements FleetScheduler {
 		};
 	}
 
-	/** Registers the session's remote-machine backend; the returned function unregisters it when it is still the one registered. */
+	/**
+	 * Registers the session's remote-machine backend; the returned function unregisters it when it is still the one registered.
+	 * Either change can change the placement candidates, so the listeners hear it.
+	 */
 	registerRemoteBackend(port: RemoteBackendPort): () => void {
 		this.remote = port;
+		this.notifyCandidates();
 		return () => {
-			if (this.remote === port) this.remote = undefined;
+			if (this.remote !== port) return;
+			this.remote = undefined;
+			this.notifyCandidates();
 		};
 	}
 

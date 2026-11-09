@@ -439,7 +439,7 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 					throw new Error(`Invalid worker model pin policy: ${pinPolicy.diagnostics.join("; ")}`);
 				if (
 					pinPolicy.status === "active" &&
-					Object.values(pinPolicy.byRole).some(
+					[pinPolicy.leader, ...Object.values(pinPolicy.byRole)].some(
 						(pin) =>
 							pin &&
 							(!successful.includes(`${pin.binding.provider}/${pin.binding.modelId}`) ||

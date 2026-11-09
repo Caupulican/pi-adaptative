@@ -66,7 +66,7 @@ import {
 } from "../orchestration/contracts.ts";
 import { ORCHESTRATION_PROFILE_TOOL_NAMES } from "../orchestration/lane-tool-manifests.ts";
 import type { TaskProfileWriterPort } from "../orchestration/task-profile-writer.ts";
-import type { WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
+import { hasRolePins, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import type { CommsStateCode } from "../provider-prompt-contracts.ts";
 import { partitionToolsForReadOnly } from "../tool-capability-policy.ts";
 import {
@@ -1600,7 +1600,7 @@ function orchestrationProfileDescription(
 }
 
 function workerModelPinAuthorityClause(policy: WorkerModelPinPolicy | undefined): string | undefined {
-	if (!policy || policy.status === "absent") return undefined;
+	if (!policy || policy.status === "absent" || (policy.status !== "invalid" && !hasRolePins(policy))) return undefined;
 	if (policy.status === "invalid") {
 		return "Invalid owner model pins block fresh starts. Never retry; report the configuration error.";
 	}

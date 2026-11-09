@@ -452,7 +452,7 @@ export interface WorkerDelegationSettings {
 	writeEnabled?: boolean; // default: true; explicit false revokes direct write/edit tools
 	reportHandshake?: boolean; // default: true; a worker about to stop with something checkable (requirement ids, commands, changed files) is asked once for a report the host checks against its receipts; explicit false keeps the plain text path
 	haltReportDeadlineMs?: number; // default: 120000; how long an interrupted worker gets to reach a request boundary and report before it is cancelled
-	modelPins?: WorkerModelPinsSettings; // optional global/local role pins; absent preserves adaptive routing exactly
+	modelPins?: WorkerModelPinsSettings; // optional global/local default, leader and role pins; absent preserves adaptive routing exactly
 	thinking?: WorkerThinkingPolicy; // default: step_down; worker thinking relative to the foreground when no authority or profile pins it
 	account?: WorkerAccountPolicy; // default: other; fresh workers run on a provider the foreground is not using when one is authenticated
 	routeProviders?: string[]; // ordered routing candidates, `provider` or `provider/modelId`; other authenticated providers follow

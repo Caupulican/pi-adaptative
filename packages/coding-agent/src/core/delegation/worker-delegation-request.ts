@@ -281,6 +281,14 @@ export interface WorkerDelegationRequest {
 	 */
 	delegationLimits?: OrchestrationDelegationLimits;
 	/**
+	 * Host-only: the start is a leader bot's runtime; selects `modelPins.leader`. Never set by the model-facing schemas.
+	 */
+	leaderRuntime?: boolean;
+	/**
+	 * Host-only: the explicit model is the bot record's own; it outranks the default pin. Never set by the model-facing schemas.
+	 */
+	modelFromBotRecord?: boolean;
+	/**
 	 * Host-only: the compiled worker reports the routine `progress` section of `submit_report`. Set only for a routine's run
 	 * (its saved intent is captured with it); absent leaves the report without it. Never set by the model-facing schemas.
 	 */

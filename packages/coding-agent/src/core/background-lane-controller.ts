@@ -163,11 +163,7 @@ import { blockedKnowledgeHandoff, type HandoffKnowledgePort } from "./memory/kno
 import { resolveCliModel } from "./model-resolver.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
-import type {
-	OrchestrationDelegationLimits,
-	OrchestrationThinkingLevel,
-	WorkerResultContract,
-} from "./orchestration/contracts.ts";
+import type { OrchestrationDelegationLimits, WorkerResultContract } from "./orchestration/contracts.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import { OrchestrationRetentionController } from "./orchestration/retention-controller.ts";
 import type { RetentionPassDeps } from "./orchestration/retention-pass.ts";
@@ -178,6 +174,8 @@ import type {
 } from "./orchestration/task-profile-writer.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
 import { readTaskRuntimeProjection } from "./orchestration/task-runtime-reader.ts";
+import { isOrchestrationThinkingLevel } from "./orchestration/thinking-level-guard.ts";
+import { botStartModelStance } from "./orchestration/worker-model-pins.ts";
 import type { WorkerReceiptOrigin } from "./orchestration/worker-receipt-origin.ts";
 import { createSteerAwareWait, ownerSteerWake } from "./pending-input-queue-controller.ts";
 import { PlanExecutor } from "./plan/plan-executor.ts";
@@ -200,8 +198,7 @@ import {
 	type SubscriptionAllowanceReader,
 } from "./provider-admission/subscription-allowance.ts";
 import { RemoteHubController } from "./remote/hub-controller.ts";
-import { placedJobRef } from "./remote/job-protocol.ts";
-import { finishedPlacedJobReferences, placedJobFinished } from "./remote/job-store.ts";
+import { finishedPlacedJobReferences } from "./remote/job-store.ts";
 import { withLinkPolicy } from "./remote/link-policy.ts";
 import { PlacedJobTerminalAcks } from "./remote/placed-job-terminal-acks.ts";
 import { LaneModelResolver } from "./research/lane-model-resolver.ts";
@@ -589,7 +586,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			// A worker that runs a job a peer placed here reports to that peer through the job runner, never to this session's chat.
 			if (!this._jobRouteOff)
 				this._jobRouteOff = this.registerTerminalRoute("job_runner", (record) =>
-					this.placedJobRouteOwns(record.attemptId),
+					this._placedJobAcks.routeOwns(record.attemptId),
 				);
 			queueMicrotask(() => {
 				if (!this.deps.isDisposed()) leaders.start();
@@ -674,21 +671,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	acknowledgePlacedJobTerminals(references: readonly string[]): void {
 		this._placedJobAcks.acknowledge(references);
-	}
-
-	/**
-	 * Whether the job runner owns a worker terminal: the attempt's dispatch names a placed job (that origin only the runner
-	 * mints, durable from admission). When the runner has already recorded the job's outcome (it ended the job, e.g. after
-	 * a restart), the terminal is settled as it arrives, so nothing waits for a runner that will not come back for it.
-	 */
-	private placedJobRouteOwns(attemptId: string | undefined): boolean {
-		if (attemptId === undefined) return false;
-		const ref = placedJobRef(
-			this._workerLifecycle?.getTaskRuntimeSnapshot().attempts[attemptId]?.dispatch.turnOrigin,
-		);
-		if (ref === undefined) return false;
-		if (placedJobFinished(this.deps.getAgentDir(), ref)) this.acknowledgePlacedJobTerminals([ref]);
-		return true;
 	}
 
 	/** Acknowledge the captured generations only, without reselecting a task or interpreting a display name. */
@@ -971,6 +953,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Delegate the out-of-process dispatch/terminal claim to its single lifecycle owner. */
 	recordManagedLane(event: ManagedLaneEvent): LaneRecord | undefined {
 		return this._getManagedLaneController().record(event);
+	}
+
+	/** The attempt a managed lane runs under, read from the worker lifecycle once the lane has been recorded. */
+	laneAttemptId(laneId: string): string | undefined {
+		return this._getWorkerLifecycle().getManagedAttempt(laneId)?.attemptId;
 	}
 
 	/** Why the last idle research-lane evaluation skipped, for /autonomy diagnostics. */
@@ -2236,6 +2223,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const memoryCtx = store.composeBotUnifiedMemoryContext(alias);
 		const instructions =
 			memoryCtx.promptBlock.length > 0 ? `${message}${BOT_MEMORY_BLOCK_SEPARATOR}${memoryCtx.promptBlock}` : message;
+		const stance = botStartModelStance(this.deps.getSettingsManager().getWorkerModelPinPolicy(), bot);
 		const outcome = await this._getWorkerController().admitNested({
 			parentAgentId: leaderAgentId,
 			delegationObjectiveId: goal.objectiveId,
@@ -2243,14 +2231,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			...(writable ? { writePaths: [...envelope.writePaths] } : {}),
 			messageReplayKey: `leader-owned-start:${invocationId}:${alias}`,
 			bot: {
+				...stance.flags,
 				...(bot.soul ? { botSoul: bot.soul } : {}),
 				...(bot.profileId ? { profileId: bot.profileId } : {}),
 				preferredAgentId,
 				authority: {
-					...(!bot.profileId ? { model: { provider: bot.provider, modelId: bot.modelId } } : {}),
+					...(stance.ownModel ? { model: { provider: bot.provider, modelId: bot.modelId } } : {}),
 					...(bot.createdBy === "owner" ? { modelChosenBy: "owner" as const } : {}),
 					readOnly: !writable,
-					...(!bot.profileId && this.isOrchestrationThinkingLevel(bot.thinkingLevel)
+					...(stance.ownModel && isOrchestrationThinkingLevel(bot.thinkingLevel)
 						? { thinkingLevel: bot.thinkingLevel }
 						: {}),
 				},
@@ -2391,7 +2380,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			const current = this.previewWorkerModel() ?? this.deps.getModel();
 			if (!current) throw new Error("No model is selected: give the model as <provider>/<model>.");
 			const level =
-				fgThinking !== undefined && this.isOrchestrationThinkingLevel(fgThinking)
+				fgThinking !== undefined && isOrchestrationThinkingLevel(fgThinking)
 					? resolveModelThinkingLevel(current, stepDownThinkingLevel(fgThinking))
 					: fgThinking;
 			return { provider: current.provider, modelId: current.id, thinkingLevel: level };
@@ -2718,6 +2707,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _jobRouteOff: (() => void) | undefined;
 	private readonly _placedJobAcks = new PlacedJobTerminalAcks({
 		lifecycle: () => this._workerLifecycle,
+		agentDir: () => this.deps.getAgentDir(),
 		isDisposed: () => this.deps.isDisposed(),
 	});
 	private _leaderRows: LeaderRow[] | undefined;
@@ -2995,19 +2985,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	deletePersistentTeam(teamId: string): boolean {
 		return this.getBotTeamStore().deleteTeam(teamId);
-	}
-
-	private isOrchestrationThinkingLevel(value: string | undefined): value is OrchestrationThinkingLevel {
-		return (
-			value === "off" ||
-			value === "minimal" ||
-			value === "low" ||
-			value === "medium" ||
-			value === "high" ||
-			value === "xhigh" ||
-			value === "max" ||
-			value === "ultra"
-		);
 	}
 
 	private createSyntheticBotSummaryMessage(bot: PersistentBotRecord | undefined, summary: string): AssistantMessage {
@@ -3338,18 +3315,20 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		// Publish the context before execution: recovery never has to guess a group's origin from its name.
 		assertCurrentBranch();
 		this.botBindings.bind(normId, preferredAgentId, teamId, teamIncarnationId);
+		const stance = botStartModelStance(this.deps.getSettingsManager().getWorkerModelPinPolicy(), bot);
 		const started = await this.startWorkerDelegation({
+			...stance.flags,
 			instructions: fullInstructions,
 			// The soul is admitted into the worker's contract, so every turn of this worker generation carries it.
 			...(bot.soul ? { botSoul: bot.soul } : {}),
 			...(bot.profileId ? { profileId: bot.profileId } : {}),
 			authority: {
-				...(!bot.profileId ? { model: { provider: spec.provider, modelId: spec.modelId } } : {}),
+				...(stance.ownModel ? { model: { provider: spec.provider, modelId: spec.modelId } } : {}),
 				// The owner's own choice of this bot's model is honoured as given; a root's or a leader's is held to the subscription rule.
 				...(bot.createdBy === "owner" ? { modelChosenBy: "owner" as const } : {}),
 				// A chat bot answers in plain text, which only a read-only worker may do; a write-capable one reports in the claim envelope.
 				readOnly: bot.canWrite !== true,
-				...(!bot.profileId && this.isOrchestrationThinkingLevel(bot.thinkingLevel)
+				...(stance.ownModel && isOrchestrationThinkingLevel(bot.thinkingLevel)
 					? { thinkingLevel: bot.thinkingLevel }
 					: {}),
 			},

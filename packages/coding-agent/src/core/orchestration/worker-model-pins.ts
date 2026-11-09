@@ -10,14 +10,29 @@ import {
 
 export type WorkerModelPinSource = "global" | "project" | "directoryProfile";
 
+/** The entry that chose a resolved pin: the leader pin, a role entry, or the default standing in for a missing role entry. */
+export type WorkerModelPinTier = "leader" | "role" | "default";
+
 export interface WorkerModelPinsSettings {
 	default?: OrchestrationModelBinding;
+	/** The model and thinking level of every leader runtime (a bot with `leader: true`). Role and default pins never select it. */
+	leader?: OrchestrationModelBinding;
 	roles?: Partial<Record<WorkerRole, OrchestrationModelBinding>>;
 }
 
 export interface ResolvedWorkerModelPin {
 	binding: OrchestrationModelBinding;
 	source: WorkerModelPinSource;
+	tier: WorkerModelPinTier;
+}
+
+/** The facts of one start that select its pin. A `WorkerDelegationRequest` satisfies it. */
+export interface WorkerModelPinStart {
+	/** The start is a leader bot's runtime; the leader pin, when set, selects its model. */
+	readonly leaderRuntime?: boolean;
+	/** The explicit `authority.model` is the bot record's own; the default pin steps aside for it. */
+	readonly modelFromBotRecord?: boolean;
+	readonly authority?: { readonly model?: unknown };
 }
 
 export type WorkerModelPinPolicy =
@@ -25,6 +40,8 @@ export type WorkerModelPinPolicy =
 	| { status: "invalid"; diagnostics: readonly string[] }
 	| {
 			status: "active";
+			/** The leader runtime pin; absent when no layer sets `leader`. */
+			leader?: ResolvedWorkerModelPin;
 			byRole: Readonly<Partial<Record<WorkerRole, ResolvedWorkerModelPin>>>;
 			/**
 			 * Non-blocking configuration observations (e.g. role entries with no `default`, which
@@ -52,7 +69,7 @@ interface ParsedPinLayer {
 	diagnostics: string[];
 }
 
-const POLICY_KEYS = new Set(["default", "roles"]);
+const POLICY_KEYS = new Set(["default", "leader", "roles"]);
 const BINDING_KEYS = new Set(["provider", "modelId", "thinkingLevel"]);
 const WORKER_ROLE_SET: ReadonlySet<string> = new Set(WORKER_ROLES);
 const THINKING_LEVEL_SET: ReadonlySet<string> = new Set(ORCHESTRATION_THINKING_LEVELS);
@@ -136,6 +153,10 @@ function parseLayer(value: unknown, scope: WorkerModelPinSource): ParsedPinLayer
 		const binding = parseBinding(value.default, scope, "default", diagnostics);
 		if (binding) settings.default = binding;
 	}
+	if (Object.hasOwn(value, "leader")) {
+		const binding = parseBinding(value.leader, scope, "leader", diagnostics);
+		if (binding) settings.leader = binding;
+	}
 	if (Object.hasOwn(value, "roles")) {
 		if (!isPlainRecord(value.roles)) {
 			diagnostics.push(`workerDelegation.modelPins.roles in ${scope} settings must be an object`);
@@ -155,10 +176,18 @@ function parseLayer(value: unknown, scope: WorkerModelPinSource): ParsedPinLayer
 	return { present: true, settings, diagnostics };
 }
 
+function leaderPinFromLayer(layer: NormalizedPinLayer | undefined): ResolvedWorkerModelPin | undefined {
+	const binding = layer?.settings.leader;
+	return layer && binding ? { binding: cloneBinding(binding), source: layer.source, tier: "leader" } : undefined;
+}
+
 function pinFromLayer(layer: NormalizedPinLayer | undefined, role: WorkerRole): ResolvedWorkerModelPin | undefined {
 	if (!layer) return undefined;
-	const binding = layer.settings.roles?.[role] ?? layer.settings.default;
-	return binding ? { binding: cloneBinding(binding), source: layer.source } : undefined;
+	const roleBinding = layer.settings.roles?.[role];
+	const binding = roleBinding ?? layer.settings.default;
+	return binding
+		? { binding: cloneBinding(binding), source: layer.source, tier: roleBinding ? "role" : "default" }
+		: undefined;
 }
 
 function pinFromLocalLayers(
@@ -176,6 +205,7 @@ function pinFromLocalLayers(
 		return {
 			binding: cloneBinding(roleBinding),
 			source: roleLayer.source,
+			tier: "role",
 		};
 	}
 	const defaultLayer = directoryLayer?.settings.default
@@ -184,7 +214,7 @@ function pinFromLocalLayers(
 			? projectLayer
 			: undefined;
 	return defaultLayer?.settings.default
-		? { binding: cloneBinding(defaultLayer.settings.default), source: defaultLayer.source }
+		? { binding: cloneBinding(defaultLayer.settings.default), source: defaultLayer.source, tier: "default" }
 		: undefined;
 }
 
@@ -207,33 +237,95 @@ export function compileWorkerModelPinPolicy(layers: WorkerModelPinPolicyLayers):
 		const pin = pinFromLayer(globalLayer, role) ?? pinFromLocalLayers(directoryLayer, projectLayer, role);
 		if (pin) byRole[role] = pin;
 	}
-	if (Object.keys(byRole).length === 0) return { status: "absent" };
+	const leader =
+		leaderPinFromLayer(globalLayer) ?? leaderPinFromLayer(directoryLayer) ?? leaderPinFromLayer(projectLayer);
+	if (Object.keys(byRole).length === 0 && !leader) return { status: "absent" };
 
 	// A roles-only config (no `default` in any layer) leaves every unlisted role unpinned: a caller
 	// can delegate with an unlisted role plus an explicit model and admission never sees a pin to
 	// enforce. That's not a blocking error (the owner may intend it), but it must be observable.
+	// A leader-only config has no role entries, so there is nothing to leave unpinned.
 	const hasDefault = Boolean(
 		globalLayer?.settings.default ?? projectLayer?.settings.default ?? directoryLayer?.settings.default,
 	);
 	const unpinnedRoles = WORKER_ROLES.filter((role) => !(role in byRole));
 	const policyDiagnostics =
-		!hasDefault && unpinnedRoles.length > 0
+		!hasDefault && Object.keys(byRole).length > 0 && unpinnedRoles.length > 0
 			? [
 					`workerDelegation.modelPins configures role entries but no default: ${unpinnedRoles.join(", ")} remain unpinned and admit any caller-requested model. Add a default to close the gap.`,
 				]
 			: [];
 	return {
 		status: "active",
+		...(leader ? { leader } : {}),
 		byRole,
 		...(policyDiagnostics.length > 0 ? { diagnostics: policyDiagnostics } : {}),
 	};
 }
 
+function clonePin(pin: ResolvedWorkerModelPin): ResolvedWorkerModelPin {
+	return { binding: cloneBinding(pin.binding), source: pin.source, tier: pin.tier };
+}
+
+/** The leader runtime pin of an active policy, cloned; undefined when no layer sets `leader`. */
+export function resolveLeaderModelPin(policy: WorkerModelPinPolicy): ResolvedWorkerModelPin | undefined {
+	return policy.status === "active" && policy.leader ? clonePin(policy.leader) : undefined;
+}
+
+/**
+ * The pin that fixes one start's model. A leader runtime takes the leader pin when one is set. Otherwise the role's
+ * entry applies, or the default when no role entry exists. The default is the fallback for a worker that states no
+ * model, so it steps aside for the bot record's own explicit model. Role and leader pins always apply.
+ */
 export function resolveWorkerModelPin(
 	policy: WorkerModelPinPolicy,
 	role: WorkerRole,
+	start: WorkerModelPinStart = {},
 ): ResolvedWorkerModelPin | undefined {
 	if (policy.status !== "active") return undefined;
+	if (start.leaderRuntime === true && policy.leader) return clonePin(policy.leader);
 	const pin = policy.byRole[role];
-	return pin ? { binding: cloneBinding(pin.binding), source: pin.source } : undefined;
+	if (!pin) return undefined;
+	const botRecordModel = start.modelFromBotRecord === true && start.authority?.model !== undefined;
+	if (pin.tier === "default" && botRecordModel) return undefined;
+	return clonePin(pin);
+}
+
+/** True when an active policy pins at least one role or the default; a leader-only policy pins no delegate call. */
+export function hasRolePins(policy: WorkerModelPinPolicy): boolean {
+	return policy.status === "active" && Object.keys(policy.byRole).length > 0;
+}
+
+/**
+ * True when a start's explicit model runs with no pin enforcing it: a roles-only policy left its role unlisted. A
+ * default that steps aside for the bot record is not a bypass, and neither is a leader-only policy's delegate worker.
+ */
+export function isPinBypass(policy: WorkerModelPinPolicy, role: WorkerRole, start: WorkerModelPinStart): boolean {
+	return (
+		policy.status === "active" &&
+		Object.keys(policy.byRole).length > 0 &&
+		start.authority?.model !== undefined &&
+		!policy.byRole[role] &&
+		resolveWorkerModelPin(policy, role, start) === undefined
+	);
+}
+
+/**
+ * What a bot start states about its model. A profile-backed bot states none. Under a leader pin a leader runtime states
+ * none either (the pin is the only model statement). Any other bot sends its record's model, which outranks the default
+ * pin; `flags` go on the start request as they are.
+ */
+export function botStartModelStance(
+	policy: WorkerModelPinPolicy,
+	bot: { readonly leader?: boolean; readonly profileId?: string },
+): { readonly ownModel: boolean; readonly flags: { leaderRuntime?: true; modelFromBotRecord?: true } } {
+	const leaderPinned = bot.leader === true && resolveLeaderModelPin(policy) !== undefined;
+	const ownModel = !bot.profileId && !leaderPinned;
+	return {
+		ownModel,
+		flags: {
+			...(bot.leader === true ? { leaderRuntime: true as const } : {}),
+			...(ownModel ? { modelFromBotRecord: true as const } : {}),
+		},
+	};
 }

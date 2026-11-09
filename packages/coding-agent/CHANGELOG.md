@@ -33,6 +33,8 @@
 - Idle release of closed orchestration work: a closed objective, or a finished session task, older than `orchestration.retention.closedObjectiveDays` (default 14; 0 keeps everything; at least an hour old and regardless of age when the store is within 32 records of its limit) is written to the session's `archive/` folder and then stops counting toward the store's limits. Work an agent resumes from, a pending notice, approval, receipt or mailbox message, an open plan, a goal still current, a result that still needs the parent and a delegation whose outcome was not delivered are never released. The store-full refusal says how many closed objectives are kept outside the store and why. Once a session has released work, earlier pi versions cannot open that session's orchestration store.
 - Fleet: the day budget counts every metered worker run once on every session of the machine (settled under the spend file's lock, with a terminal flag), a worker waiting for a provider account window moves past candidates judged unfit, and a temporary remote refusal waits for that machine while a permanent one is released here.
 - A plan step pinned to a machine runs here when no remote backend is registered; a failed cancel of one plan lane no longer leaves the plan's other lanes live, and a plan cancel reaches successors and queued or suspended local lanes.
+- `workerDelegation.modelPins.leader`: pins the model of every leader runtime (standing, goal and nested leaders) with the same layer precedence as `default`; workers a leader starts keep the role and default pins. An older build reports the whole pin policy invalid when it reads the key.
+- Placing a job on a linked machine is wired into the fleet: a linked session offers its linked machines to the scheduler as a backend, writes the lane and the placed-job record crash-safely (a replay reuses the durable lane's attempt, never a second one), and clears the backend when the link goes. The placed-job record gains an `attemptId` (additive).
 
 ### Changed
 
@@ -67,6 +69,7 @@
 - `/estop off` resumes held work even when no stop was engaged, and each lift is announced once per process (the sentinel gains an `id`; older builds ignore it).
 - A failover no longer repeats a same-model move, and a worker whose lane directory or route was inherited is judged unbound by the fitness check, as a fresh one is.
 - `spend.json` settled records gain an optional `terminal` flag and `accounts.json` gains `workers` (both additive).
+- A bot's own model outranks `workerDelegation.modelPins.default` (the default pin is the fallback for a worker that states no model); role pins and the new leader pin still win and still refuse a conflicting model.
 
 ### Removed
 

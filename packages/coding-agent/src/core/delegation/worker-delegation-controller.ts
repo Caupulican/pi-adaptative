@@ -126,7 +126,7 @@ import {
 	createWorkerExecutionContract,
 	verifierWorkerExecutionContract,
 } from "../orchestration/worker-execution-contract.ts";
-import { resolveWorkerModelPin, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
+import { isPinBypass, resolveWorkerModelPin, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import {
 	assertWorkerReceiptAdmission,
 	inheritWorkerReceiptAdmission,
@@ -2157,19 +2157,18 @@ export class WorkerDelegationController {
 		}
 		const effectiveRole: WorkerRole =
 			authority?.role ?? baseShipment?.profile.role ?? basePreset?.profile.role ?? defaultWorkerRole(authority);
-		const modelPin = resolveWorkerModelPin(modelPinPolicy, effectiveRole);
-		// The model itself is authority?.model, not `role` — role selects which pin applies, but a
-		// roles-only policy (no `default`) leaves an unlisted role with no pin at all, so a caller
-		// can name that role plus an explicit model and admission never sees anything to enforce.
-		// Not blocked (the owner may intend adaptive roles); recorded so the evasion is observable.
-		const modelPinBypass: WorkerRole | undefined =
-			modelPinPolicy.status === "active" && !modelPin && authority?.model ? effectiveRole : undefined;
+		const modelPin = resolveWorkerModelPin(modelPinPolicy, effectiveRole, request);
+		const pinLabel = modelPin?.tier === "leader" ? "leader" : effectiveRole; // refusals name the pin that refused
+		// Not blocked: a roles-only policy can leave an unlisted role unpinned; its explicit model is recorded.
+		const modelPinBypass: WorkerRole | undefined = isPinBypass(modelPinPolicy, effectiveRole, request)
+			? effectiveRole
+			: undefined;
 		if (basePreset) {
 			const bound = this.getWorkerProfileResolver().bindPreset(basePreset, modelPin?.binding);
 			if (!bound.ok) {
 				return {
 					ok: false,
-					skipReason: modelPin ? pinnedModelSkipReason(effectiveRole, bound.reason) : bound.reason,
+					skipReason: modelPin ? pinnedModelSkipReason(pinLabel, bound.reason) : bound.reason,
 				};
 			}
 			baseShipment = bound.resolved;
@@ -2192,7 +2191,7 @@ export class WorkerDelegationController {
 				ok: false,
 				skipReason:
 					modelPin && adaptive.reason.startsWith("orchestration_model_unavailable:")
-						? pinnedModelSkipReason(effectiveRole, adaptive.reason)
+						? pinnedModelSkipReason(pinLabel, adaptive.reason)
 						: adaptive.reason,
 			};
 		}
@@ -4308,7 +4307,7 @@ export class WorkerDelegationController {
 			request.parentAgentId ||
 			request.verificationOfTaskId ||
 			settingsManager.getWorkerDelegationSettings().orchestrationProfile ||
-			(modelPinPolicy.status === "active" && resolveWorkerModelPin(modelPinPolicy, admission.shipment.profile.role))
+			resolveWorkerModelPin(modelPinPolicy, admission.shipment.profile.role, request)
 		)
 			return admission;
 		if (!this.isWorkerRouteModelAvailable(admission.shipment.model))
@@ -4579,10 +4578,7 @@ export class WorkerDelegationController {
 				current.ok &&
 				binding &&
 				!this.deps.getSettingsManager().getWorkerDelegationSettings().orchestrationProfile &&
-				!(
-					modelPinPolicy.status === "active" &&
-					resolveWorkerModelPin(modelPinPolicy, current.shipment.profile.role)
-				) &&
+				!resolveWorkerModelPin(modelPinPolicy, current.shipment.profile.role, request) &&
 				this.isWorkerRouteModelAvailable(model) &&
 				getSupportedThinkingLevels(model).includes(binding.thinkingLevel) &&
 				current.shipment.profile.modelPolicy.candidates.some(
@@ -4873,6 +4869,8 @@ export class WorkerDelegationController {
 				...(bot?.profileId !== undefined ? { profileId: bot.profileId } : {}),
 				...(bot?.preferredAgentId !== undefined ? { preferredAgentId: bot.preferredAgentId } : {}),
 				...(bot?.forkTurns !== undefined ? { forkTurns: bot.forkTurns } : {}),
+				...(bot?.leaderRuntime === true ? { leaderRuntime: true } : {}),
+				...(bot?.modelFromBotRecord === true ? { modelFromBotRecord: true } : {}),
 				...(Object.keys(authority).length > 0 ? { authority } : {}),
 				...(start.messageReplayKey ? { messageReplayKey: start.messageReplayKey } : {}),
 			},

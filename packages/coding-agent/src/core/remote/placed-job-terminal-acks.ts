@@ -1,14 +1,17 @@
 /**
  * Placed-job terminal acknowledgement: the worker terminal of a job the job runner placed is marked delivered once the runner
  * has reported that job's end to the placing machine, so the foreground never hears a placed job's worker finish. It owns the
- * deferred, once-per-reference passes that do this; the worker lifecycle they read belongs to the caller.
+ * deferred, once-per-reference passes that do this, and the route that claims a placed job's worker terminal for the job runner;
+ * the worker lifecycle they read belongs to the caller.
  */
 import type { WorkerLifecycle } from "../delegation/worker-lifecycle.ts";
 import { placedJobRef } from "./job-protocol.ts";
+import { placedJobFinished } from "./job-store.ts";
 
-/** What an acknowledgement reads from its owner: the live worker lifecycle, and whether the owner has been disposed. */
+/** What an acknowledgement reads from its owner: the live worker lifecycle, the agent directory, and whether it is disposed. */
 export interface PlacedJobAckPorts {
 	lifecycle(): WorkerLifecycle | undefined;
+	agentDir(): string;
 	isDisposed(): boolean;
 }
 
@@ -34,6 +37,21 @@ export class PlacedJobTerminalAcks {
 			if (this.ports.isDisposed()) return;
 			markPlacedJobTerminalsDelivered(this.ports.lifecycle(), fresh);
 		});
+	}
+
+	/**
+	 * Whether the job runner owns a worker terminal: the attempt's dispatch names a placed job (that origin only the runner
+	 * mints, durable from admission). When the runner has already recorded the job's outcome (it ended the job, e.g. after
+	 * a restart), the terminal is settled as it arrives, so nothing waits for a runner that will not come back for it.
+	 */
+	routeOwns(attemptId: string | undefined): boolean {
+		if (attemptId === undefined) return false;
+		const ref = placedJobRef(
+			this.ports.lifecycle()?.getTaskRuntimeSnapshot().attempts[attemptId]?.dispatch.turnOrigin,
+		);
+		if (ref === undefined) return false;
+		if (placedJobFinished(this.ports.agentDir(), ref)) this.acknowledge([ref]);
+		return true;
 	}
 }
 

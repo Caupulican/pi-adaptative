@@ -15,10 +15,18 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import { alarmAt, SYSTEM_TIMER_PORT, type WallAlarm } from "../../kernel/timer-port.ts";
 import type { ManagedLaneView } from "../delegation/managed-lane-views.ts";
 import type { PersistentBotLiveState } from "../delegation/persistent-bot-team-store.ts";
+import type { RemoteBackendPort } from "../fleet/remote-admit.ts";
 import type { PlacementCapacitySource } from "../placement/capacity-source.ts";
 import { MAX_ADVERT_MODELS, type ModelFact, WIRE_WORD } from "./capabilities.ts";
 import { type FleetMachine, FleetMachines } from "./fleet-machines.ts";
-import { type PlaceOptions, type PlaceResult, RemoteJobClient, type RemotePlacementSession } from "./job-client.ts";
+import {
+	type PlaceOptions,
+	type PlaceResult,
+	type PreparedOffer,
+	RemoteJobClient,
+	type RemotePlacementSession,
+	remoteJobTaskId,
+} from "./job-client.ts";
 import { JobRunner, type JobRunnerSession } from "./job-runner.ts";
 import { activeExecutorJobs, inDir, JobStore, outDir, type PlacerJobRecord } from "./job-store.ts";
 import { hubTurnedOn, listJoins, loadLinkSettings, type MachineIdentity } from "./registry.ts";
@@ -40,10 +48,14 @@ export interface RemoteJobPorts {
 	readonly usesSubscription: (model: Model<Api>) => boolean;
 }
 
-/** The fleet a session's remote machines' room registers with (`attachFleet`). */
+/** The fleet a session's remote machines register with (`attachFleet`): their room, and this session's placement backend. */
 export interface RemoteRoomFleet {
 	registerCapacitySource(source: PlacementCapacitySource): () => void;
+	registerRemoteBackend(port: RemoteBackendPort): () => void;
 }
+
+/** A remote task id or a remote lane id: `remote-<jobId>`, with the `:turn:1` a placed job's task adds. */
+const REMOTE_TASK_ID = /^remote-([A-Za-z0-9_-]{1,64})(?::turn:1)?$/;
 
 const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama-cpp", "llamacpp", "vllm", "local"]);
 /**
@@ -106,6 +118,10 @@ export class RemoteJobs {
 	private jobsWatch: DirectoryWatch | undefined;
 	private linkWatch: DirectoryWatch | undefined;
 	private rosterTick: WallAlarm | undefined;
+	/** This session's placement backend in the fleet, while the machine is linked: removed when the link is gone. */
+	private unregisterBackend: (() => void) | undefined;
+	/** The offers prepared for the fleet, by dispatch key: committed by its admit, released by its release. */
+	private readonly offers = new Map<string, PreparedOffer>();
 	/** The session's fleet, once its worker runtime exists; the remote room registers with it from then on. */
 	private fleet: RemoteRoomFleet | undefined;
 	private started = false;
@@ -167,6 +183,7 @@ export class RemoteJobs {
 		if (!this.started) return;
 		if (RemoteJobs.linked(this.agentDir)) this.armRunner();
 		else this.runner?.retire();
+		this.syncBackend();
 	}
 
 	/** Takes the runner role for this agent directory, or waits for the session holding it. */
@@ -194,6 +211,7 @@ export class RemoteJobs {
 		this.rosterTick = undefined;
 		for (const unregister of this.capacity.values()) unregister();
 		this.capacity.clear();
+		this.dropBackend();
 		this.client.dispose();
 		this.runner?.dispose();
 		this.runner = undefined;
@@ -229,8 +247,88 @@ export class RemoteJobs {
 	 */
 	attachFleet(fleet: RemoteRoomFleet): void {
 		if (this.fleet === fleet) return;
+		this.dropBackend();
 		this.fleet = fleet;
 		this.registerCapacity();
+		this.syncBackend();
+	}
+
+	/**
+	 * Registers this session's placement backend with the fleet while the machine is linked, so a plan step or a placed job can
+	 * be offered to a linked machine; once no link is left, the backend is removed and nothing is offered.
+	 */
+	private syncBackend(): void {
+		const fleet = this.fleet;
+		// Registration waits for `start`, the only point the link watch that removes it is running.
+		if (!fleet || !this.started) return;
+		if (!RemoteJobs.linked(this.agentDir)) this.dropBackend();
+		else this.unregisterBackend ??= fleet.registerRemoteBackend(this.backendPort());
+	}
+
+	/** Unregisters the placement backend and forgets its prepared offers: a link that is gone offers nothing. */
+	private dropBackend(): void {
+		this.unregisterBackend?.();
+		this.unregisterBackend = undefined;
+		this.offers.clear();
+	}
+
+	/**
+	 * The fleet's view of a linked machine: linked, held and online from the link's records and the machine's record; the job
+	 * offer is prepared here and committed by the fleet's admit. A remote task or lane id is cancelled here, never locally.
+	 */
+	private backendPort(): RemoteBackendPort {
+		return {
+			status: (machineId) => {
+				const machine = this.machines.get(machineId);
+				const settings = loadLinkSettings(this.agentDir);
+				return {
+					linked: machine !== undefined,
+					held: settings.peers[machineId]?.hold === true,
+					online: machine?.online === true,
+					offlineHoldMs: settings.offlineHoldMs,
+				};
+			},
+			prepare: async (dispatch, machineId, signal) => {
+				const prepared = await this.client.prepareOffer(
+					dispatch,
+					{ kind: "remote_machine", machineId },
+					{ cwd: this.ports.cwd(), ...(dispatch.brief?.goal ? { label: dispatch.brief.goal } : {}) },
+				);
+				// An abort is the caller's own stop, not a refusal: the plan executor reports nothing for it.
+				signal?.throwIfAborted();
+				if (prepared.kind === "refused") return { ok: false, code: prepared.code, detail: prepared.reason };
+				this.offers.set(dispatch.idempotencyKey, prepared);
+				return { ok: true };
+			},
+			commit: (dispatch, machineId) => {
+				const key = dispatch.idempotencyKey;
+				const prepared = this.offers.get(key);
+				// An offer is for the machine it was prepared on; a commit to another machine finds none here.
+				if (!prepared || (prepared.kind === "offer" && prepared.machine.machineId !== machineId))
+					return { kind: "not_prepared" };
+				const commit = this.client.commitOffer(prepared);
+				// The runtime's replacement keeps the offer: the next admit commits it.
+				if (commit.kind === "runtime_replacing") return commit;
+				this.offers.delete(key);
+				if (commit.kind === "attempt_unknown") return commit;
+				return {
+					kind: "placed",
+					taskId: remoteJobTaskId(commit.record.jobId),
+					attemptId: commit.attemptId,
+					laneId: commit.record.laneId,
+				};
+			},
+			release: (key) => {
+				this.offers.delete(key);
+			},
+			cancel: (id) => {
+				const jobId = REMOTE_TASK_ID.exec(id)?.[1];
+				// Only a job this machine placed is cancelled here; any other id stays with the local lanes.
+				if (jobId === undefined || !this.client.placedHere(jobId)) return false;
+				this.client.cancel(jobId, "superseded");
+				return true;
+			},
+		};
 	}
 
 	private registerCapacity(): void {
