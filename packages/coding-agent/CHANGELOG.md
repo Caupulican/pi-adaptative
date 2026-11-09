@@ -93,6 +93,7 @@
 - Coming back after 30 minutes away, the first typed message gets a brief of what finished meanwhile and what waits on the owner (drafts, questions, plan holds, follow-ups, ready act-ahead patches); `/status` counts every pending owner decision and lists the first ten.
 - Lessons from the learner are routed into the structural backlog by System One judgments when a System One engine is bound.
 - The knowledge collection's budget notice refreshes after idle passes again.
+- A plan step whose result changes what a later step must do holds that later step for re-planning, and open items always reach the next step; combined results name files and findings that conflict. The judgments are labelled in `npm run eval:plan-graph` (the owner runs the eval; the gates stay on their 0.90/0.10 cuts until then).
 
 ### Removed
 

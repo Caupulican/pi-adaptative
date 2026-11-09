@@ -11,6 +11,14 @@ import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.
 import { currentTaskOf } from "../orchestration/task-successor.ts";
 import type { Placement } from "../placement/placement-types.ts";
 import {
+	clipBytes,
+	type FindingPair,
+	openItemsLine,
+	type PacketReport,
+	PLAN_INPUT_DIGEST_BYTES,
+	planNodePacket,
+} from "./plan-evidence.ts";
+import {
 	isCodeSettledJoin,
 	type PlanNodeSpec,
 	type PlanRecord,
@@ -20,12 +28,17 @@ import {
 } from "./plan-graph.ts";
 import { planNodeOutcome } from "./plan-view.ts";
 
-/** Each predecessor's result enters a step's task as at most this many bytes. */
-export const PLAN_INPUT_DIGEST_BYTES = 2 * 1024;
 /** The root-context excerpt an `annotate` exit bakes into a step's brief. */
 export const PLAN_ROOT_EXCERPT_BYTES = 2 * 1024;
 
 type DispatchProjection = Pick<TaskRuntimeProjection, "plans" | "tasks" | "attempts">;
+
+/** What a released step's dispatch reads beyond the plan record: the claim reports and a reduce step's open findings. */
+export interface PlanDispatchEvidence {
+	readonly reportOf: PacketReport;
+	/** A reduce step's finding pairs its review left open: the step is told they may conflict. */
+	readonly openFindings: readonly FindingPair[];
+}
 
 /** The host header every plan step's task starts with, so lanes and ledgers name plan members without the plan. */
 export function planDispatchHeader(planId: string, version: number, nodeId: string): string {
@@ -35,13 +48,6 @@ export function planDispatchHeader(planId: string, version: number, nodeId: stri
 /** The fleet idempotency key of one step's spec version: one release per version. */
 export function planReleaseKey(planId: string, nodeId: string, version: number): string {
 	return `plan:${planId}:${nodeId}:v${version}`;
-}
-
-function clipBytes(text: string, maxBytes: number): string {
-	if (Buffer.byteLength(text, "utf8") <= maxBytes) return text;
-	let end = Math.min(text.length, maxBytes);
-	while (end > 0 && Buffer.byteLength(text.slice(0, end), "utf8") > maxBytes - 3) end -= 1;
-	return `${text.slice(0, end)}...`;
 }
 
 /**
@@ -99,10 +105,29 @@ function inputDigest(projection: DispatchProjection, plan: PlanRuntimeState, nod
 	);
 }
 
-function joinTaskWords(node: PlanNodeSpec): string | undefined {
+/**
+ * What a predecessor left open, as one line (its uncovered requirements and its report's open items). It is its own
+ * section, placed before the digests: the instructions are clipped from the tail, so an open item is never the part cut.
+ */
+function openItemsOf(
+	projection: DispatchProjection,
+	plan: PlanRuntimeState,
+	nodeId: string,
+	reportOf: PacketReport,
+): string[] {
+	const packet = planNodePacket(projection, plan, nodeId, reportOf);
+	const line = packet ? openItemsLine(packet) : undefined;
+	return line === undefined ? [] : [line];
+}
+
+function joinTaskWords(node: PlanNodeSpec, openFindings: readonly FindingPair[]): string | undefined {
 	const members = node.join?.members.join(", ") ?? "";
 	if (node.kind === "reduce") {
-		return `Combine the results of steps ${members} into one answer${node.join?.criterion ? ` to: ${node.join.criterion}` : ""}. Name every place the results disagree and resolve it or say why it stays open.`;
+		const possible =
+			openFindings.length > 0
+				? ` Possibly conflicting, not settled: ${clipBytes(openFindings.map((pair) => `${pair.cite}: ${pair.summaryA} / ${pair.summaryB}`).join("; "), PLAN_INPUT_DIGEST_BYTES)}.`
+				: "";
+		return `Combine the results of steps ${members} into one answer${node.join?.criterion ? ` to: ${node.join.criterion}` : ""}. Name every place the results disagree and resolve it or say why it stays open.${possible}`;
 	}
 	if (node.kind === "verify") {
 		return `Independently verify the results of steps ${members}: check each claim against the files and commands, and change no file.`;
@@ -140,14 +165,17 @@ export function buildPlanDispatch(
 	record: PlanRecord,
 	node: PlanNodeSpec,
 	criticalPath: ReadonlySet<string>,
+	evidence: PlanDispatchEvidence,
 ): FleetDispatch {
+	const words = joinTaskWords(node, evidence.openFindings);
 	const sections = [
 		planDispatchHeader(record.planId, node.since, node.id),
 		`Plan: ${record.title}`,
 		`Task: ${node.intent}`,
-		...(joinTaskWords(node) ? [joinTaskWords(node) as string] : []),
+		...(words ? [words] : []),
 		...(node.brief ? [renderTaskBrief(node.brief)] : []),
 		...(node.requirementIds.length > 0 ? [`Requirements this step proves: ${node.requirementIds.join(", ")}`] : []),
+		...planNodeEdges(node).flatMap((id) => openItemsOf(projection, plan, id, evidence.reportOf)),
 		...planNodeEdges(node).map((id) => inputDigest(projection, plan, id)),
 	];
 	const onCriticalPath = criticalPath.has(node.id);

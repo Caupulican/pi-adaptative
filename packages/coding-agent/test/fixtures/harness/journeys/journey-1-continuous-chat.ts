@@ -689,6 +689,7 @@ function frameHeadTexts(messages: readonly FrameMessage[]): string[] {
  */
 async function verifyFrameCacheLayout(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
+	const legMark = world.provider.reached.length;
 	const agentDir = `${world.agentDir}-icm-frame`;
 	const skillBody = "FRAME-PROBE-BODY";
 	world.io.seed(
@@ -735,6 +736,21 @@ async function verifyFrameCacheLayout(world: HarnessWorld): Promise<void> {
 	await icmEndForegroundQuiet(world);
 	await icmWaitForChatIdle(world, agentDir, 4);
 
+	// Message 7 completes the 8-message chat. Nodes 0+4 and 4+4 are built without a call, but the joined text of messages 0-7
+	// is over the 512-byte target, so node 0+8 needs one merge call. The reply is plain: the turn view keeps its leaf lines
+	// (it collapses only past its high-water mark), so the merged node leaves every turn request of this leg unchanged.
+	world.provider.enqueue("worker-c", {
+		name: "frame-merge-0-4-4",
+		check: (request) => {
+			if (!JSON.stringify(request.context.messages).includes("Compaction: merge lines 0+4 and 4+4")) {
+				throw new Error("worker-c did not receive the merge task for messages 0 to 7 of the frame chat");
+			}
+		},
+		reply: {
+			content: [{ type: "text", text: "pi: The frame chat loaded a probe skill and noted two path aliases." }],
+		},
+	});
+
 	// Turn A mints Y and quotes its alias: the view of turn B carries that reply, so B's legend grows by Y.
 	world.systemOne.enterPhase("frame-a", ICM_INTAKE_JUDGMENTS);
 	world.provider.enqueue(
@@ -767,6 +783,8 @@ async function verifyFrameCacheLayout(world: HarnessWorld): Promise<void> {
 		{ name: "frame-b-reply", check: capture("b2"), reply: { content: [{ type: "text", text: "Done." }] } },
 	);
 	await withDeadline(trace, "frame turn B", root.session.prompt(`Read ${pathX} again.`));
+	await icmEndForegroundQuiet(world);
+	await icmWaitForChatIdle(world, agentDir, 12);
 
 	const { a1, a2, b1, b2 } = captured;
 	const viewA = frameViewIndex(a1);
@@ -831,6 +849,10 @@ async function verifyFrameCacheLayout(world: HarnessWorld): Promise<void> {
 		"C7: turn B's request marks exactly two boundaries: the legend's last block and the view's last stable block",
 	).toEqual({ legend: [false, true], view: [false, true, false], all: 2 });
 	expect(boundariesOf(legendA!), "C7: turn A's legend is one block, marked by its boundary").toEqual([true]);
+	expect(
+		world.provider.reached.slice(legMark).filter((step) => step.startsWith("worker-c:")),
+		"the frame leg's only summary request is the merge of messages 0 to 7: turns 0, A and B make no other compaction call",
+	).toEqual(["worker-c:frame-merge-0-4-4"]);
 	expect(await world.disposeSessionInBody(root.session), "the frame-layout root disposes cleanly").toBeUndefined();
 }
 

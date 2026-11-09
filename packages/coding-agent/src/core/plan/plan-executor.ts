@@ -70,6 +70,7 @@ import { PLAN_NODE_MACHINE } from "./plan-node-machine.ts";
 import { placementFor } from "./plan-placement.ts";
 import { type PlanAction, type PlanUpdateIntent, reconcilePlans } from "./plan-reconcile.ts";
 import { planNodeOfTask } from "./plan-reducer.ts";
+import { PlanResultGates } from "./plan-result-gates.ts";
 import { placeHereNodes, resolveSince, verifyWrapNodes } from "./plan-revision.ts";
 import { planUpdateDelivery, planUpdateDeliveryId } from "./plan-update.ts";
 import { activeRootPlan, type PlanView, planNodeBrief, planView } from "./plan-view.ts";
@@ -234,6 +235,16 @@ export class PlanExecutor implements PlanExecutorPort {
 	private readonly unregisterMachine: () => void;
 	/** Which plans' inputs moved since the last observation, by reference. */
 	private readonly fingerprint = new PlanFingerprint();
+	/** The R3 gates on settled results: a dependent or reduce step waits on its review (`plan-result-gates.ts`). */
+	private readonly resultGates = new PlanResultGates({
+		engine: () => this.deps.engine(),
+		signal: this.abort.signal,
+		hold: (planId, nodeId, since, detail) => this.holdForReview(planId, nodeId, since, detail),
+		drain: () => this.requestDrain(),
+	});
+	/** A step's claim report, the source of its open items: the host's claim of that attempt. */
+	private readonly reportOf = (taskId: string, attemptId: string | undefined) =>
+		attemptId === undefined ? undefined : this.deps.workerClaim(taskId, attemptId)?.report;
 	/** The plan views at the last observed snapshot; a view that differs from the one here is a visible change. */
 	private readonly visibleViews = new Map<string, PlanView>();
 	private unsubscribeStore: (() => void) | undefined;
@@ -352,7 +363,23 @@ export class PlanExecutor implements PlanExecutorPort {
 	 */
 	private closePlan(planId: string, status: PlanCloseStatus, reason: string): void {
 		this.deps.runtime().closePlan({ planId, status, reason });
+		this.resultGates.forgetPlan(planId);
 		this.deps.fleet().cancel({ kind: "plan", planId }, "plan_closed");
+	}
+
+	/**
+	 * Holds a step whose predecessor's result changes its task. The hold lands only on the spec version the review asked
+	 * about and while the step still waits: a step revised, released or held since is left as it is.
+	 */
+	private holdForReview(planId: string, nodeId: string, since: number, detail: string): void {
+		const plan = this.deps.runtime().getSnapshot().plans[planId];
+		const runtime = plan?.nodes[nodeId];
+		if (!plan || plan.closed || !runtime || runtime.since !== since || runtime.release || runtime.held) return;
+		this.deps.runtime().holdPlanNode({ planId, nodeId, reason: "replan", detail, generation: since });
+		harnessLog.info("plan", "a plan step waits for re-planning: a result it depends on changes its task", {
+			planId,
+			nodeId,
+		});
 	}
 
 	/** Runs a drain now (parked work included) and waits for the releases it started. */
@@ -440,6 +467,7 @@ export class PlanExecutor implements PlanExecutorPort {
 			this.observe(snapshot);
 			return;
 		}
+		this.resultGates.refresh(snapshot, this.reportOf);
 		const result = reconcilePlans(snapshot, this.deps.goal());
 		const room = new Map<string, number>();
 		const waiting = new Set<string>();
@@ -551,6 +579,7 @@ export class PlanExecutor implements PlanExecutorPort {
 						action.outcome,
 						identity,
 						this.stakesOfStep(snapshot, plan, action.nodeId, action.outcome),
+						this.resultGates.findingsOf(action.planId, action.nodeId),
 					),
 				);
 				return;
@@ -793,8 +822,11 @@ export class PlanExecutor implements PlanExecutorPort {
 		const record = plan.record;
 		const node = this.nodeOf(record, action.nodeId);
 		const key = planReleaseKey(record.planId, node.id, node.since);
-		if (this.releasing.has(key)) return;
-		const dispatch = buildPlanDispatch(snapshot, plan, record, node, planCriticalPath(record));
+		if (this.releasing.has(key) || this.resultGates.waiting(record.planId, node.id)) return;
+		const dispatch = buildPlanDispatch(snapshot, plan, record, node, planCriticalPath(record), {
+			reportOf: this.reportOf,
+			openFindings: this.resultGates.openFindings(record.planId, node.id),
+		});
 		const query: RoomQuery = {
 			objectiveId: record.objectiveId,
 			weight: weightOf(dispatch.demand, dispatch.writeScope),

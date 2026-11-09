@@ -1,7 +1,8 @@
 /**
  * `npm run eval:plan-graph [-- --dump <file>]` from packages/coding-agent: runs the labelled plan graph set against the
  * REAL System One, with the credentials a session uses, and prints agreement per question (coverage J1, dependency
- * J2 with J3, brief J4). Exits non-zero while any question is below the accept cut. Each case spends a few System One
+ * J2 with J3, brief J4), then the labelled plan result set (R3: whether a result changes a dependent step, and whether two
+ * findings contradict). Exits non-zero while any question is below the accept cut. Each case spends a few System One
  * requests, so the owner runs it; the judgments keep their pending-measurement status until it has.
  */
 import { writeFileSync } from "node:fs";
@@ -15,6 +16,7 @@ import {
 	planGraphEvalPasses,
 	runPlanGraphEval,
 } from "./plan-graph-eval.ts";
+import { formatPlanResultsEval, measurePlanResults, planResultsEvalPasses } from "./plan-results-eval.ts";
 
 function percent(value: number): string {
 	return `${(value * 100).toFixed(0)}%`;
@@ -54,10 +56,12 @@ async function main(argv: string[]): Promise<number> {
 	const engine = createRetentionDecisionEngine(new TypeSafeSystemOneDecisionEngine(setup.adapter));
 	const summary = await runPlanGraphEval(engine, PLAN_GRAPH_EVAL_CASES);
 	process.stdout.write(`${formatPlanGraphEval(summary)}\n`);
+	const results = await measurePlanResults(engine);
+	process.stdout.write(`\n${formatPlanResultsEval(results)}\n`);
 	const dumpIndex = argv.indexOf("--dump");
 	if (dumpIndex >= 0)
 		writeFileSync(argv[dumpIndex + 1] ?? "plan-graph-eval.json", `${JSON.stringify(summary, null, 2)}\n`);
-	return planGraphEvalPasses(summary) ? 0 : 1;
+	return planGraphEvalPasses(summary) && planResultsEvalPasses(results) ? 0 : 1;
 }
 
 runEvalCliEntry(import.meta.url, main);

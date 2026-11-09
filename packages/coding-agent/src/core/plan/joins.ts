@@ -13,17 +13,25 @@
  * - merge is not built yet (B45); F4 refuses it.
  *
  * The full result is written by the executor as a bounded artifact (`plan/<planId>/<nodeId>-j<n>.json`); this module only
- * computes it.
+ * computes it. Every join names the files two or more members changed; a reduce join also names the findings its review
+ * read as conflicting (`plan-result-gates.ts`).
  */
 
 import { aggregateOutcomes } from "../delegation/worker-outcome.ts";
 import type { Outcome, OutcomeStatus } from "../delegation/worker-outcome-contract.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { highestStakesLevel, type ProofStakesLevel } from "../proof/stakes-levels.ts";
+import type { ConflictReading } from "../system-one/plan-result-review.ts";
+import { boundedLine } from "../util/bounded-line.ts";
+import type { FindingPair } from "./plan-evidence.ts";
 import type { PlanNodeKind, PlanNodeSpec, PlanRecord, PlanRuntimeState } from "./plan-graph.ts";
 import { planNodeOutcome } from "./plan-view.ts";
 
 export const JOIN_RESULT_MAX_BYTES = 256 * 1024;
+/** The most file conflicts one join names, in record order. */
+const MAX_FILE_CONFLICTS = 16;
+/** How much of each finding a conflict's detail quotes. */
+const CONFLICT_SUMMARY_CHARS = 80;
 
 export interface JoinMember {
 	readonly nodeId: string;
@@ -108,6 +116,34 @@ function coverageRecord(outcome: Outcome): Record<string, boolean> {
 	]);
 }
 
+export type JoinConflict = JoinResult["conflicts"][number];
+
+/** The files two or more members changed, each with the members that changed it, in record order. */
+function fileConflicts(members: readonly SettledMember[]): JoinConflict[] {
+	const changers = new Map<string, string[]>();
+	for (const member of members)
+		for (const file of new Set(member.outcome.changedFiles))
+			changers.set(file, [...(changers.get(file) ?? []), member.nodeId]);
+	return [...changers]
+		.filter(([, nodes]) => nodes.length >= 2)
+		.slice(0, MAX_FILE_CONFLICTS)
+		.map(([path, nodes]) => ({ kind: "file", between: nodes, detail: path }));
+}
+
+/** The finding pairs the review read as conflicting; an open or agreeing pair names no conflict. */
+export function findingConflicts(
+	pairs: readonly FindingPair[],
+	readings: ReadonlyMap<string, ConflictReading>,
+): JoinConflict[] {
+	return pairs
+		.filter((pair) => readings.get(pair.key) === "conflict")
+		.map((pair) => ({
+			kind: "finding",
+			between: [pair.a, pair.b],
+			detail: `${pair.cite}: ${boundedLine(pair.summaryA, CONFLICT_SUMMARY_CHARS)} / ${boundedLine(pair.summaryB, CONFLICT_SUMMARY_CHARS)}`,
+		}));
+}
+
 function buildResult(
 	node: PlanNodeSpec,
 	members: readonly SettledMember[],
@@ -115,6 +151,7 @@ function buildResult(
 	identity: JoinIdentity,
 	winner?: string,
 	ownStakes?: ProofStakesLevel,
+	findingNames: readonly JoinConflict[] = [],
 ): JoinResult {
 	const stakes = highestStakesLevel([...members.map((member) => member.stakes), ownStakes]);
 	const gaps = [
@@ -135,7 +172,7 @@ function buildResult(
 		})),
 		coverage: coverageRecord(outcome),
 		...(winner ? { winner } : {}),
-		conflicts: [],
+		conflicts: [...fileConflicts(members), ...findingNames],
 		changedFiles,
 		gaps,
 		artifact: identity.artifact,
@@ -240,7 +277,10 @@ export function settleVote(
 	return buildResult(node, eligible, { ...outcome, status: "partial" }, identity);
 }
 
-/** The result of a reduce or verify join once its worker task's outcome settled. */
+/**
+ * The result of a reduce or verify join once its worker task's outcome settled. `findings` is a reduce step's review of its
+ * members' findings; a verify join has none.
+ */
 export function workerJoinResult(
 	projection: JoinProjection,
 	plan: PlanRuntimeState,
@@ -249,6 +289,7 @@ export function workerJoinResult(
 	worker: Outcome,
 	identity: JoinIdentity,
 	workerStakes?: ProofStakesLevel,
+	findings?: { readonly pairs: readonly FindingPair[]; readonly readings: ReadonlyMap<string, ConflictReading> },
 ): JoinResult {
 	const { settled } = memberOutcomes(projection, plan, node);
 	// The reducer's answer is the join's; the verifier's verdict gates every subject.
@@ -260,6 +301,7 @@ export function workerJoinResult(
 		identity,
 		undefined,
 		workerStakes,
+		findings ? findingConflicts(findings.pairs, findings.readings) : [],
 	);
 }
 
