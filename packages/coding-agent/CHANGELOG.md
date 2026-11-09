@@ -1,5 +1,23 @@
 ## [Unreleased]
 
+### Changed
+
+- Plan `verify` steps run as read-only independent verifiers with a typed verdict. One verify step reviews every worker result under its members, including the results a join the harness settled in code counted. An accepted verdict proves the step's requirements for the goal's completion account ("independent verification accepted it") and settles a member whose only shortfall was an unverified result; a rejected verdict holds the step for re-planning with the verifier's reason codes, and the changed step is verified again after the revise; a verify step no longer reads as accepted when its verifier did not accept. The verifier is the checked step's profile in read-only verifier form (the default worker profile when the step ran on a linked machine), it reads no parent context, and nothing is written on the steps it checks.
+- A worker that reaches its wall-clock cap, or a placed job that reaches its deadline, ends its lane as `timeout` with its exact reason code (`wall_clock_exceeded`, `remote_deadline`) instead of `canceled` or `failed`. A wall-clock stop is a failed attempt, so its blocker (`time_exhausted`) and the retry ladder follow the stop instead of abandoning the work as cancelled.
+- A rerun after a worker's wall-clock stop keeps the attempt's thinking level and is placed only when the stopped attempt covered a requirement; without progress the ladder moves model, and a stop nothing else answers asks the owner to raise `workerDelegation.maxWallClockMs` or narrow the task.
+- Context scout citations: a cited file that cannot be read as text (a directory or other non-regular file, a path outside the scout's scope, a file over the size bound, a read error) is dropped as `unreadable`, apart from `missing_file`, and the scout result says how many were unreadable. A cited path is resolved to its real path and checked against the scout's scope before anything is read, and that same real path is what is read. A line such as `label:3 | text` whose token names no file and has no path shape stays summary text; a file without an extension (`Makefile:12`) is a citation.
+- Decision state digests (the steering certificate key and the decision engine's audit digest) use the strict canonical encoder: a state that is not plain JSON data fails before a paid call instead of sharing an identity with a different state. Plain JSON states keep the digests they had.
+- The background-lane controller's bot lifecycle, operator sends to bots and groups, the bot chat transcript, bounded waits on worker attempts, the routine runtime assembly and the continuous-chat terminal report live in their own modules behind typed ports. No behavior change.
+
+### Fixed
+
+- System One usage-journal retries wait on the session's `semantic-usage` timer owner instead of a global timer (unreferenced by default, as before), so a session's clock drives them.
+- Transcript-memory claim drains, the summary metadata reachability walk and continuous-chat recovery scans yield to the event loop, so timers and cancellation cannot starve behind a long drain.
+
+### Removed
+
+- The unused worker steering adapter with its mission schema, and the unused `recoverMissingSessionUsage` helper (internal; neither was reachable from the package entry).
+
 ## [0.104.47] - 2026-11-09
 
 ### Added
