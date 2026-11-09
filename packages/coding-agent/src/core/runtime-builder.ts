@@ -33,8 +33,6 @@
  * call {@link RuntimeBuilder.refreshToolRegistry} directly.
  */
 
-import { existsSync } from "node:fs";
-import { isAbsolute, join } from "node:path";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
 import type { Agent, AgentContext, AgentMessage, AgentTool, ThinkingLevel } from "../kernel/index.ts";
 import type { SessionManager } from "../kernel/node.ts";
@@ -63,7 +61,7 @@ import {
 	type EdgeOperation,
 	resolveToolkitScriptScope,
 } from "./autonomy/edge-policy.ts";
-import { isPathWithinEnvelope, wrapToolWithEnvelopeScope } from "./autonomy/envelope-enforcement.ts";
+import { wrapToolWithEnvelopeScope } from "./autonomy/envelope-enforcement.ts";
 import { projectLaneSettingsPath } from "./autonomy/lane-private-paths.ts";
 import { type SharedLaneToolOptions, WORKER_WRITE_SCOPE_GUIDANCE } from "./autonomy/lane-tool-surface.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
@@ -77,6 +75,7 @@ import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
 import type { CapabilityTierPolicy } from "./capability-tier.ts";
 import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
 import type { SelfCompactionView } from "./compaction/self-compaction-controller.ts";
+import { readScoutCitedFile } from "./context/cited-file-reader.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import type {
 	MemoryPromptInclusionReport,
@@ -252,7 +251,6 @@ import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/t
 import { wrapToolExecution } from "./tools/tool-execution-wrapper.ts";
 import { createToolTaskToolDefinition, type ToolTaskDependencies } from "./tools/tool-task.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
-import { readBoundedTextFileSync } from "./util/bounded-file.ts";
 import type { TimerPort } from "./util/timer-port.ts";
 import { type WaitStatusEvent, waitFor } from "./util/wait.ts";
 import { readWorkerExtensionToolGrants, registerWorkerExtensionToolPolicies } from "./worker-extension-grants.ts";
@@ -1012,20 +1010,13 @@ export class RuntimeBuilder {
 				},
 				streamFn: this.deps.getAgent().streamFn,
 				signal,
-				fileExists: (path) => {
-					const target = resolveCwdPath(cwd, path);
-					if (childEnvelope && !isPathWithinEnvelope(childEnvelope, target, cwd, scopeCwd)) {
-						return false;
-					}
-					return existsSync(target);
-				},
-				readCitedFile: (path) => {
-					const target = resolveCwdPath(cwd, path);
-					if (childEnvelope && !isPathWithinEnvelope(childEnvelope, target, cwd, scopeCwd)) {
-						return undefined;
-					}
-					return readCitedFileText(target);
-				},
+				readCitedFile: (path) =>
+					readScoutCitedFile(path, {
+						cwd,
+						scopeCwd,
+						envelope: childEnvelope,
+						maxBytes: SCOUT_CITED_FILE_MAX_BYTES,
+					}),
 				// Lets the scout register itself in the reload-gate quiesce registry (see
 				// reload-blockers.ts) for its own agentDir — the same key `_assertReloadQuiescent` reads.
 				getAgentDir: () => this.deps.getAgentDir(),
@@ -3017,17 +3008,5 @@ export class RuntimeBuilder {
 		const { action, name } = call.args as { action?: unknown; name?: unknown };
 		if (action !== "run" || typeof name !== "string") return false;
 		return this._taskAutomationAdapter.getController().getAutomation(name)?.danger === true;
-	}
-}
-
-function resolveCwdPath(cwd: string, path: string): string {
-	return isAbsolute(path) ? path : join(cwd, path);
-}
-
-function readCitedFileText(path: string): string | undefined {
-	try {
-		return readBoundedTextFileSync(path, SCOUT_CITED_FILE_MAX_BYTES, "Context scout citation file");
-	} catch {
-		return undefined;
 	}
 }

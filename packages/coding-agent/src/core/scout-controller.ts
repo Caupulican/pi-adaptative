@@ -2,13 +2,13 @@ import type { Api, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { Agent } from "../kernel/agent.ts";
 import type { ResolvedProviderRequestAuth, StreamFn } from "../kernel/index.ts";
 import type { AgentTool } from "../kernel/types.ts";
-import { verifyCitation } from "./context/citation-verifier.ts";
+import { type CitationDropReason, type CitedFile, verifyCitation } from "./context/citation-verifier.ts";
 import { SCOUT_SYSTEM_PROMPT } from "./provider-prompt-contracts.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
 
 export { SCOUT_SYSTEM_PROMPT };
 
-/** Largest cited file the scout reads as text; a larger file has no text to verify citations against. */
+/** Largest cited file the scout reads as text; a larger file is unreadable, so its citations cannot be verified. */
 export const SCOUT_CITED_FILE_MAX_BYTES = 1024 * 1024;
 
 export interface ScoutCitation {
@@ -16,6 +16,8 @@ export interface ScoutCitation {
 	start: number;
 	end: number;
 	valid: boolean;
+	/** Why an invalid citation was dropped. */
+	reason?: CitationDropReason;
 }
 
 export interface ScoutRunResult {
@@ -44,9 +46,8 @@ export interface ScoutControllerDeps {
 	buildReadOnlyTools(cwd: string): AgentTool<any>[];
 	streamFn?: StreamFn;
 	resolveProviderRequestAuth?(model: Model<Api>): Promise<ResolvedProviderRequestAuth>;
-	fileExists(path: string): boolean;
-	/** Text of a cited file, or undefined when it cannot be read as text within SCOUT_CITED_FILE_MAX_BYTES. */
-	readCitedFile(path: string): string | undefined;
+	/** What the cited path holds: its text, or whether it is missing or unreadable (see CitedFile). */
+	readCitedFile(path: string): CitedFile;
 	onEvent?(event: { type: "scout_turn" | "scout_end"; detail: string }): void;
 	signal?: AbortSignal;
 	/** Registers this scout's own Agent run in the reload-gate quiesce registry while it drives
@@ -159,11 +160,7 @@ export class ScoutController {
 				this.deps.signal?.removeEventListener("abort", abortScout);
 			}
 
-			const result = parseScoutAnswer(
-				lastAssistantText,
-				(path) => this.deps.fileExists(path),
-				(path) => this.deps.readCitedFile(path),
-			);
+			const result = parseScoutAnswer(lastAssistantText, (path) => this.deps.readCitedFile(path));
 			const finalResult = {
 				...result,
 				truncated: truncated || !hasFinalAnswer(lastAssistantText),
@@ -184,8 +181,7 @@ export function getScoutOutputTokenCount(message: { usage?: { output?: number } 
 
 export function parseScoutAnswer(
 	text: string,
-	fileExists: (path: string) => boolean,
-	readCitedFile: (path: string) => string | undefined,
+	readCitedFile: (path: string) => CitedFile,
 ): Omit<ScoutRunResult, "truncated" | "turnsUsed" | "failure"> {
 	const finalAnswer = /<final_answer>([\s\S]*?)<\/final_answer>/i.exec(text)?.[1] ?? text;
 	const summaryLines: string[] = [];
@@ -194,7 +190,7 @@ export function parseScoutAnswer(
 	for (const rawLine of finalAnswer.split(/\r?\n/)) {
 		const line = rawLine.trim();
 		if (!line) continue;
-		const citation = parseCitationLine(line, fileExists, readCitedFile);
+		const citation = parseCitationLine(line, readCitedFile);
 		if (citation) {
 			citations.push(citation);
 			continue;
@@ -211,20 +207,33 @@ export function parseScoutAnswer(
 	};
 }
 
-function parseCitationLine(
-	line: string,
-	fileExists: (path: string) => boolean,
-	readCitedFile: (path: string) => string | undefined,
-): ScoutCitation | undefined {
-	const match = /^(.+?):(\d+)(?:-(\d+))?(?:\s+\|\s*(.*))?$/.exec(line);
+/**
+ * A citation line is `path:START` or `path:START-END`, optionally followed by ` | <first cited line>`. The path is one
+ * whitespace-free token. Whether such a line is a citation is decided in parseCitationLine, from the file system.
+ */
+const CITATION_LINE = /^(\S+):(\d+)(?:-(\d+))?(?:\s+\|\s*(.*))?$/;
+
+/**
+ * A path-shaped token has a path separator or a letter-led extension (`v1.2:3` is not a path). A token that is not
+ * path-shaped is still a citation when it names a file (`Makefile:12`); it is a label only when nothing resolves at it.
+ */
+function isCitationPath(path: string): boolean {
+	return /[\\/]/.test(path) || /\.[A-Za-z][A-Za-z0-9]*$/.test(path);
+}
+
+function parseCitationLine(line: string, readCitedFile: (path: string) => CitedFile): ScoutCitation | undefined {
+	const match = CITATION_LINE.exec(line);
 	if (!match) return undefined;
-	const path = match[1].trim();
+	const path = match[1];
+	const file = readCitedFile(path);
+	// A token that names nothing and is not path-shaped is a label such as `step:3 | text`: summary text, not a citation.
+	if (file.status === "missing" && !isCitationPath(path)) return undefined;
 	const start = Number.parseInt(match[2], 10);
 	const end = Number.parseInt(match[3] ?? match[2], 10);
-	const text = fileExists(path) ? readCitedFile(path) : undefined;
-	const check = verifyCitation({ path, start, end, snippet: match[4] }, text);
+	const check = verifyCitation({ path, start, end, snippet: match[4] }, file);
 	if (check.status === "moved") return { path, start: check.start, end: check.end, valid: true };
-	return { path, start, end, valid: check.status === "verified" };
+	if (check.status === "dropped") return { path, start, end, valid: false, reason: check.reason };
+	return { path, start, end, valid: true };
 }
 
 function clampTurns(maxTurns: number): number {

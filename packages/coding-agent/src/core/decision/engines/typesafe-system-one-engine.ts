@@ -1,5 +1,5 @@
 import type { SystemOneReceipt } from "../../review/system-one-review-port.ts";
-import { canonicalDigest, strictCanonicalDigest } from "../../steering/canonical.ts";
+import { strictCanonicalDigest, withoutUndefinedMembers } from "../../steering/canonical.ts";
 import type { JevAdapter } from "../../system-one/adapter.ts";
 import { SYSTEM_ONE_PINNED_MODEL } from "../../system-one/catalog.ts";
 import type { DecisionEngineCapabilities } from "../capabilities.ts";
@@ -103,7 +103,7 @@ export class TypeSafeSystemOneDecisionEngine implements SemanticDecisionEngine {
 
 		// Digested before the paid call, so a state the digest cannot read fails before anything is spent.
 		const programDigest = strictCanonicalDigest(questions);
-		const stateDigest = canonicalDigest(state);
+		const stateDigest = strictCanonicalDigest(withoutUndefinedMembers(state));
 		const startTime = Date.now();
 		const response = await this.adapter.evaluate(
 			{

@@ -40,18 +40,8 @@ export {
 	type SteeringCheckpointRequest,
 	type SteeringDirective,
 	type SteeringDirectiveAction,
-	type SteeringMissionContext,
-	type SteeringMissionReference,
 	SteeringProtocolError,
 	type SteeringResult,
 	SteeringSemanticFailedError,
 	type SteeringSemanticOutcome,
-	type WorkerSteeringMission,
-	type WorkerSteeringMissionWorkClass,
 } from "./types.ts";
-export {
-	type NormalizedWorkerEvidence,
-	type WorkerDispatchPreparationInput,
-	type WorkerRawResult,
-	WorkerSteeringAdapter,
-} from "./worker-steering-adapter.ts";

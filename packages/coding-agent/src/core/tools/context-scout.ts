@@ -56,6 +56,12 @@ export function formatScoutResult(result: ScoutRunResult): string {
 	if (result.droppedCitations > 0) {
 		lines.push(``, `Dropped invalid citations: ${result.droppedCitations}`);
 	}
+	const unreadable = result.citations.filter((citation) => citation.reason === "unreadable").length;
+	if (unreadable > 0) {
+		lines.push(
+			`Unreadable cited files: ${unreadable} (not a regular file, outside the scout's envelope, over the size limit, or a read error)`,
+		);
+	}
 	if (result.unreliable) {
 		lines.push("Scout result marked unreliable: more than 50% of citations were invalid.");
 	}

@@ -160,53 +160,7 @@ export interface SteeringCertificate {
 	readonly created_at: string;
 }
 
-export type WorkerSteeringMissionWorkClass =
-	| "investigate"
-	| "implement"
-	| "verify"
-	| "review"
-	| "replan"
-	| "build_capability"
-	| "repair_capability";
-
-export interface WorkerSteeringMission {
-	readonly schema_version: "1.0";
-	readonly mission_id: string;
-	readonly objective_id: string;
-	readonly task_id: string;
-	readonly attempt_id?: string | null;
-	readonly work_class: WorkerSteeringMissionWorkClass;
-	readonly steering_certificate_ids: readonly string[];
-	readonly steering_state_digest: string;
-	readonly requirement_ids?: readonly string[];
-	readonly hypothesis_ids?: readonly string[];
-	readonly proof_obligations: readonly string[];
-	readonly capability_gap_id?: string | null;
-	readonly capability_spec_id?: string | null;
-	readonly failed_gate_ids?: readonly string[];
-	readonly forbidden_strategy_fingerprints?: readonly string[];
-	readonly verified_fact_refs?: readonly string[];
-	readonly relevant_resource_pointer_ids?: readonly string[];
-}
-
 export interface SteeringResult {
 	readonly certificate: SteeringCertificate;
 	readonly directive: SteeringDirective;
-}
-
-export interface SteeringMissionContext {
-	readonly missionId: string;
-	readonly objectiveId: string;
-	readonly taskId: string;
-	readonly workClass: WorkerSteeringMissionWorkClass;
-	readonly proofObligations: readonly string[];
-	readonly certificateRefs: readonly string[];
-	readonly stateDigest: string;
-	readonly contextSubset?: Record<string, unknown>;
-}
-
-export interface SteeringMissionReference {
-	readonly missionId: string;
-	readonly digest: string;
-	readonly steeringCertificateIds: readonly string[];
 }

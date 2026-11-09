@@ -743,12 +743,16 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 		)
 			return held("invalid_change", "never", "Invalid owner knowledge command");
 		const { store, scope } = this.deps;
-		const digest = strictCanonicalDigest(
-			withoutUndefinedMembers({
-				ownerCommand: { action: input.action, id: input.id, expectedRevision: input.expectedRevision, text },
-				scope,
-			}),
-		);
+		const digest = strictCanonicalDigest({
+			ownerCommand: {
+				action: input.action,
+				id: input.id,
+				expectedRevision: input.expectedRevision,
+				// A forget has no text: the member is absent, not undefined, so the digest needs no strip.
+				...(text !== undefined ? { text } : {}),
+			},
+			scope,
+		});
 		// The same command against the same revision is one operation: a repeat replays its receipt.
 		const operation = { id: strictCanonicalDigest(["knowledge-owner-command", digest]), digest };
 		const revision = store.revision();

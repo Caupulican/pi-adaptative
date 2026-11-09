@@ -23,7 +23,12 @@ export function canonicalJson(value: unknown): string {
 	return `{${entries.join(",")}}`;
 }
 
-/** The lenient digest of canonicalJson, kept where a caller may hold a non-plain value. Prefer strictCanonicalDigest. */
+/**
+ * The lenient digest of canonicalJson. Used only by the runner-reuse keys of routine-intake, knowledge-collector and
+ * knowledge-judgment-runner, which decide whether a runner is rebuilt, not what a decision is based on. Two
+ * configurations that canonicalJson reads alike share a key, so the cache reuses the runner built for the first.
+ * Decision states and every other identity key use strictCanonicalDigest.
+ */
 export function canonicalDigest(value: unknown): string {
 	return createHash("sha256")
 		.update(canonicalJson(value ?? null))

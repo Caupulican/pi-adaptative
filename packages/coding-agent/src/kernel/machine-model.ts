@@ -11,6 +11,7 @@
  */
 
 import type { MachineDefinition } from "./machine-spec.ts";
+import { strictCanonicalJson } from "./utils/strict-canonical-json.ts";
 
 /** One step the model can take. `apply` returns one successor, or several for a nondeterministic step. */
 export interface ModelAction<V> {
@@ -213,36 +214,13 @@ export function crash<V>(spec: ModelSpec<V>, actor: string, state: V): V {
  */
 export function encodeState(state: unknown): string {
 	if (!isPlainObject(state)) throw new Error("a model state must be a plain object");
-	return encodeAt(state, "state");
+	return strictCanonicalJson(state);
 }
 
 function isPlainObject(value: unknown): value is Record<string, unknown> {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) return false;
 	const prototype = Object.getPrototypeOf(value);
 	return prototype === Object.prototype || prototype === null;
-}
-
-function encodeAt(value: unknown, where: string): string {
-	if (value === null) return "null";
-	if (typeof value === "string" || typeof value === "boolean") return JSON.stringify(value);
-	if (typeof value === "number") {
-		if (!Number.isFinite(value)) throw new Error(`${where} is ${value}; a model state holds finite numbers only`);
-		return JSON.stringify(value);
-	}
-	if (Array.isArray(value)) {
-		const items: string[] = [];
-		for (let index = 0; index < value.length; index++) {
-			if (!(index in value)) throw new Error(`${where} is a sparse array`);
-			items.push(encodeAt(value[index], `${where}[${index}]`));
-		}
-		return `[${items.join(",")}]`;
-	}
-	if (!isPlainObject(value)) throw new Error(`${where} is not a JSON value (${typeof value})`);
-	if (Object.getOwnPropertySymbols(value).length > 0) throw new Error(`${where} has a symbol key`);
-	const members = Object.keys(value)
-		.sort()
-		.map((key) => `${JSON.stringify(key)}:${encodeAt(value[key], `${where}.${key}`)}`);
-	return `{${members.join(",")}}`;
 }
 
 /**

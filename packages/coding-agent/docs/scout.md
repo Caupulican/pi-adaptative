@@ -2,6 +2,29 @@
 
 Pi can delegate broad repository exploration to a bounded read-only scout through the `context_scout` tool. The scout runs a fresh subagent with only `read`, `grep`, and `find`, then returns a short summary plus validated `file:line` citations. Treat scout output like other tool output: use it as evidence, then read the cited ranges yourself before editing.
 
+## Citations and their exits
+
+The final answer is a short summary followed by one citation per line. Two forms are accepted:
+
+- `path/to/file.ts:START` or `path/to/file.ts:START-END`: a cited line or range.
+- `path/to/file.ts:START-END | <first cited line, verbatim>`: the same range, followed by the first line of the cited range copied exactly after ` | `.
+
+A citation path is one whitespace-free token, and its line numbers are integers. A line whose token names nothing and has neither a path separator nor a file extension, such as `label:3 | text`, is summary text, not a citation. Any other token that names a file is a citation, including an extensionless file such as `Makefile:12`. A path-shaped token (with a separator or an extension) that names nothing is a citation dropped as `missing_file`.
+
+Each citation is checked against the file. The cited path resolves to its real path, following symlinks, and the scout's envelope is applied to that real path before anything is read. A session without an envelope (yolo) applies no envelope. With a snippet, the snippet must sit on the cited first line; if it sits on exactly one other line where the cited span fits, the citation moves to that line and keeps its span length.
+
+A citation that fails is dropped and counted in `Dropped invalid citations`. Its exit reason:
+
+| Exit | Meaning |
+| --- | --- |
+| `missing_file` | Nothing exists at the cited path. |
+| `unreadable` | The scout cannot read the cited path as text: a directory or other non-regular file, a file over 1 MiB, or a read error. A path outside the envelope is also `unreadable`, whether or not anything exists there, so its existence is not revealed. Reported in `Unreadable cited files`. |
+| `out_of_range` | The range is not valid (start below 1, or end before start), or it runs past the end of the file. |
+| `snippet_not_found` | The snippet appears on no line of the file. |
+| `ambiguous` | The snippet fits more than one line, and the cited line does not match it. |
+
+When more than half of the citations are dropped, the result is marked unreliable.
+
 ## Install the reference local model
 
 One-step path: run `/models suggest`, choose `FastContext-1.0-4B`, let pi pull and probe it, then confirm the scout role. The assignment writes `scout.model` and sets `scout.enabled = true` only after the `scout_auto` exam passes.

@@ -27,7 +27,7 @@ import {
 	traceJudgmentsFromEvaluation,
 	verdictFromCertificate,
 } from "../system-one/semantic-evaluation-ledger.ts";
-import { canonicalDigest, strictCanonicalDigest } from "./canonical.ts";
+import { strictCanonicalDigest, withoutUndefinedMembers } from "./canonical.ts";
 import { SteeringCertificateStore } from "./certificate-store.ts";
 import {
 	computePolicyDigest,
@@ -877,7 +877,7 @@ export class SystemOneSteeringPlane {
 		return {
 			request,
 			program,
-			stateDigest: canonicalDigest(request.state),
+			stateDigest: strictCanonicalDigest(withoutUndefinedMembers(request.state)),
 			programDigest: strictCanonicalDigest(program),
 			policyDigest: computePolicyDigest(this.policy),
 			model: this.policy.model.id || PINNED_JEV_MODEL,
