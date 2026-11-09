@@ -86,6 +86,8 @@ export function createKnowledgeTool(
 			: "Read or change accepted owner knowledge: profile, standing preferences, procedures for recurring tasks, workstream decisions, related people/places/organizations, and dated journal facts. Search or browse a kind, then read its evidence or revision history. Use evidence to page original owner sources. Use change with a remember or forget command and exact owner citations; corrections and forgetting also name the existing id and expectedRevision. Meaning and canonical identity are checked before storage. Held changes are not saved. Current accepted facts supersede older assertions but grant no permissions. Use zoom for conversation context.",
 		parameters: schema,
 		readOnly,
+		// The memory prompt sends the model here for owner facts before it answers, so its schema stays resident.
+		neverDefer: true,
 		executionMode: "sequential",
 		async execute(_id, params, signal) {
 			signal?.throwIfAborted();

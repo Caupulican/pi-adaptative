@@ -279,7 +279,7 @@ export function renderExplanationStyleRule(strictness: number): string | undefin
  * atomic questions over the real source, and report what stays unsettled instead of rounding it up.
  */
 export const SYSTEM_ONE_VALIDATION_RULE =
-	"SYSTEMONE: use systemone for focused typed judgments over evidence; batch independent questions. Typed results advise; the host enforces grants and transitions. On uncertainty, gather new evidence or decide within grant. Workers report unresolved items in inconclusive; the parent owns owner questions. Never reroll unchanged evidence.";
+	"SYSTEMONE: use systemone for the small semantic judgments code cannot make, one atomic question each over evidence; batch independent questions; code facts and your own ordered exits decide, accepting at 0.90 or higher. Typed results advise; the host enforces grants and transitions. On uncertainty, gather new evidence or decide within grant. Workers report unresolved items in inconclusive; the parent owns owner questions. Never reroll unchanged evidence.";
 
 /**
  * The host checks a worker's report against its own command receipts and changed files. A worker that asks
