@@ -42,8 +42,23 @@ export function attemptRung(snapshot: TaskRuntimeProjection, attempt: AttemptRun
 	);
 }
 
-/** Whether the task's spent cost and active time leave room for one more attempt like the last one. */
+/**
+ * Whether the task's attempt ceiling, spent cost and active time leave room for one more attempt like the last one. The
+ * ceiling binds a non-completed task only: a completed source's rung is a successor with its own budget.
+ */
 function budgetLeft(snapshot: TaskRuntimeProjection, attempt: AttemptRuntimeState): boolean {
+	const task = snapshot.tasks[attempt.taskId];
+	const objective = task ? snapshot.objectives[task.task.objectiveId] : undefined;
+	const ceilings = [task?.task.riskBudget.maxAttempts, objective?.objective.riskBudget.maxAttempts].filter(
+		(value): value is number => value !== undefined,
+	);
+	if (
+		task &&
+		task.task.status !== "completed" &&
+		ceilings.length > 0 &&
+		task.attemptIds.length >= Math.min(...ceilings)
+	)
+		return false;
 	const budget = attempt.dispatch.executionContract?.worker.authority.budget;
 	if (!budget || (!budget.maxCostUsd && !budget.maxWallClockMs)) return true;
 	const attempts = (snapshot.tasks[attempt.taskId]?.attemptIds ?? [])
@@ -55,6 +70,16 @@ function budgetLeft(snapshot: TaskRuntimeProjection, attempt: AttemptRuntimeStat
 	const costRoom = !budget.maxCostUsd || spentUsd + (last?.costUsd ?? 0) <= budget.maxCostUsd;
 	const timeRoom = !budget.maxWallClockMs || spentMs + (last?.activeWallClockMs ?? 0) <= budget.maxWallClockMs;
 	return costRoom && timeRoom;
+}
+
+/** The linked machine a plan step was released to, when `taskId` is that step's release task (a remote-placement fact). */
+function remoteMachineOf(snapshot: TaskRuntimeProjection, taskId: string): string | undefined {
+	for (const plan of Object.values(snapshot.plans))
+		for (const node of Object.values(plan.nodes)) {
+			const placement = node.release?.placement;
+			if (node.release?.taskId === taskId && placement?.kind === "remote_machine") return placement.machineId;
+		}
+	return undefined;
 }
 
 /** The ladder's code facts for one terminal attempt's outcome, read from the durable projection. */
@@ -91,6 +116,7 @@ export function outcomeLadderFacts(args: {
 		.filter((entry) => checkable.has(entry.id) && !args.checkedIds.has(entry.id))
 		.map((entry) => entry.id);
 	const route = attempt.dispatch.modelRouteSource;
+	const remoteMachineId = remoteMachineOf(snapshot, attempt.taskId);
 	return {
 		scope: "lane",
 		nodeId: attempt.taskId,
@@ -113,6 +139,7 @@ export function outcomeLadderFacts(args: {
 		...(attempt.status === "suspended" && attempt.retry ? { retryNotBefore: attempt.retry.notBefore } : {}),
 		hostCheckable,
 		budgetLeft: budgetLeft(snapshot, attempt),
+		...(remoteMachineId !== undefined ? { remoteMachineId } : {}),
 		...(args.ownerOnly ? { ownerOnly: args.ownerOnly } : {}),
 		...(args.rungRefusal !== undefined ? { rungRefusal: args.rungRefusal } : {}),
 	};

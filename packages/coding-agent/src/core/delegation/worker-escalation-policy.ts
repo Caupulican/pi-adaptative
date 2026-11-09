@@ -15,7 +15,7 @@ import type {
  * (E0-E18 of the worker-outcome design, with the merged additions E3b, E3c, E5b, E7b, E9b, E10b); the first matching
  * exit wins and every evaluated exit is traced. System One answers enter only as probabilities of one atomic question
  * and its evidence-sufficiency pair (Q1, Q1s), combined here at 0.90 / 0.10; an absent or unsettled pair is `open` and
- * the table continues. Split (E16/E17) is not part of this table yet: work it would split asks the owner at E18.
+ * the table continues. Split is not a next action: work too large for one worker asks the owner at E18.
  */
 
 /** A judgment pair: the question's probability and its evidence-sufficiency probability. */
@@ -62,8 +62,10 @@ export interface LadderFacts {
 	readonly retryNotBefore?: string;
 	/** Uncovered ids with a host requirement check that has not run since the attempt ended. */
 	readonly hostCheckable: readonly string[];
-	/** Remaining task budget (cost and active time) exceeds a rung's projected cost. */
+	/** Remaining task budget: cost, active time and, for a non-completed task, its attempt ceiling. */
 	readonly budgetLeft: boolean;
+	/** A plan step released to a linked machine: that machine's id. Its re-placement is the plan's (`replace`). */
+	readonly remoteMachineId?: string;
 	/** A rerun the original authority could not be rebuilt into: the owner decides, the ladder does not retry it. */
 	readonly rungRefusal?: string;
 	/** Q1/Q1s for a worker-stated blocker: only the owner can supply what is missing. */
@@ -92,6 +94,9 @@ const ABANDON_BY_BLOCKER: Partial<Record<BlockerCode, AbandonReason>> = {
 };
 
 const MOVE_MODEL_BLOCKERS: ReadonlySet<BlockerCode> = new Set(["provider_quota", "provider_auth", "model_unavailable"]);
+
+/** The E10b question: the task's cost or attempt budget is spent, so no further try may start. */
+const BUDGET_SPENT_QUESTION = "another try would pass the task's budget; raise it or accept";
 
 /** The settled reading of a judgment pair; `open` covers every combination the two cuts do not settle. */
 export function judgmentPairVerdict(pair: JudgmentPair | undefined): PairedVerdict {
@@ -166,7 +171,13 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 		if (facts.retryNotBefore) return done("E5", { kind: "retry_after", notBefore: facts.retryNotBefore });
 		skip("E5", "retries_spent");
 	}
+	// A model move would propose the same refused rerun again: a refusal records no escalation, so the move's exit asks the
+	// owner first. Every other blocker keeps the owner-ask exit E14r below.
+	if (facts.rungRefusal !== undefined && (blocker === "provider_transient" || MOVE_MODEL_BLOCKERS.has(blocker)))
+		return askOwner("E14r", refusedRungQuestion(facts.rungRefusal));
 	if (blocker === "provider_transient" || MOVE_MODEL_BLOCKERS.has(blocker)) {
+		// A spent budget or attempt ceiling is the real cause of a refused move, whatever the model's state: it is asked first.
+		if (rungRoom(facts) === "budget") return askOwner("E10b", BUDGET_SPENT_QUESTION);
 		const exit = blocker === "provider_transient" ? "E5b" : "E6";
 		if (facts.modelBound)
 			return askOwner(exit, "the bound model cannot run now; restore its access or choose another");
@@ -175,9 +186,17 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 		return askOwner(exit, "no other allowed model can take the task; restore the model's access or name another");
 	}
 	// Only an action an executor performs is named. An interrupted attempt is suspended and the restart recovery resumes it
-	// (wait_capacity). A refused start is not re-placed by any executor, and no second placement exists to replace an
-	// unreachable one until remote placements are placed by the ladder; both exits go to the owner.
+	// (wait_capacity). A plan step released to a linked machine that could not take it or could not be reached is re-placed
+	// by the plan on this machine (replace); any other refused start is not re-placed by an executor, and goes to the owner.
 	if (blocker === "interrupted") return done("E7", { kind: "wait_capacity", reason: "runtime_generation" });
+	if (
+		(blocker === "capacity_unavailable" || blocker === "placement_unreachable") &&
+		facts.remoteMachineId !== undefined
+	)
+		return done(blocker === "capacity_unavailable" ? "E7" : "E7b", {
+			kind: "replace",
+			excludePlacement: `machine:${facts.remoteMachineId}`,
+		});
 	if (blocker === "capacity_unavailable")
 		return askOwner(
 			"E7",
@@ -203,15 +222,14 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 		skip("E13", verdict);
 	}
 	// A refused rerun is never retried by the ladder: the owner is asked what to do with the refused rung.
-	if (facts.rungRefusal !== undefined)
-		return askOwner("E14r", `the next try could not be started under the original authority: ${facts.rungRefusal}`);
+	if (facts.rungRefusal !== undefined) return askOwner("E14r", refusedRungQuestion(facts.rungRefusal));
 	const remaining = coverage.uncovered.map((entry) => entry.id);
 	const workRemains = remaining.length > 0 || coverage.required.length === 0;
 	if (workRemains) {
 		const room = rungRoom(facts);
 		if (room !== undefined) {
 			skip("E14", room);
-			if (room === "budget") return askOwner("E10b", "another try would pass the task's budget; raise it or accept");
+			if (room === "budget") return askOwner("E10b", BUDGET_SPENT_QUESTION);
 		} else {
 			const thinking = nextThinkingLevel(facts.thinking, facts.thinkingCeiling);
 			const rung1Used = facts.escalations.some((entry) => entry.rung === 1);
@@ -233,6 +251,11 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 		}
 	}
 	return askOwner("E18", `${remainingCount(coverage)} still not met (${blocker}); decide how to continue`);
+}
+
+/** The owner's question for a refused rung: the plain reason the next try could not be started. */
+function refusedRungQuestion(reason: string): string {
+	return `the next try could not be started because ${reason}; decide how to continue`;
 }
 
 /** Why no rung may be placed now; undefined when one may. */

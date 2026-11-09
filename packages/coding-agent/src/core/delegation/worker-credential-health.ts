@@ -6,6 +6,14 @@ import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-not
 /** Why a worker left the model it was started on: the class the root model and the owner read, never a raw error. */
 export type WorkerModelMoveReason = "login_expired" | "quota_exhausted" | "model_unavailable" | "credential_rejected";
 
+/** The move reason of a model failure: an expired login first, then the quota, an unsupported model, and otherwise a refused credential. */
+export function workerModelMoveReason(loginExpired: boolean, classifiedReason: string): WorkerModelMoveReason {
+	if (loginExpired) return "login_expired";
+	if (classifiedReason === "billing_or_quota") return "quota_exhausted";
+	if (classifiedReason === "model_unsupported") return "model_unavailable";
+	return "credential_rejected";
+}
+
 /** One move of a worker to the next model of its ordered candidates, as `provider/modelId` references. */
 export interface WorkerModelMove {
 	readonly from: string;

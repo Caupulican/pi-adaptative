@@ -346,6 +346,16 @@ The root orchestrates and its workers carry out the work. While the `delegate` t
 |---------|---------|-------------|
 | `orchestrator.delegationGate` | `false` | Opt-in strict split: refuse root calls that are task work and send them to a worker. Off by default: the root edits and runs commands itself and delegates by choice. |
 
+### Orchestration retention
+
+```json
+{ "orchestration": { "retention": { "closedObjectiveDays": 14 } } }
+```
+
+| Setting | Default | Description |
+|---|---|---|
+| `retention.closedObjectiveDays` | `14` | Days a closed objective, a finished session task, or a closed session plan (released together with every task it names) stays in the session's orchestration store before it is released at idle (0 to 3650; 0 keeps everything for the session's life). When the store is within 32 records of its objective or attempt limit, closed work with nothing in the store holding it is released regardless of age (unless the setting is 0). Released records are written to the session's `archive/` folder first, and they stop counting toward the store's limits. Work an agent resumes from, a notice or approval still pending, an open plan, a result not yet received, and a delegation whose outcome has not been delivered are never released. Once a session releases work, earlier pi versions cannot open that session's orchestration store. Not the same as `orchestrator` (the delegation gate). |
+
 ### Tool Repair
 
 | Setting | Type | Default | Description |

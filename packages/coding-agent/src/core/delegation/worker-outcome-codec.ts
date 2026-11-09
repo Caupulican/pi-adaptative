@@ -214,7 +214,6 @@ function nextActionFromValue(value: unknown, label: string): NextAction {
 			return { kind };
 		case "verify_independently":
 		case "host_check":
-		case "split":
 			exactRecord(action, label, ["kind", "requirementIds"]);
 			return { kind, requirementIds: ids() };
 		case "rerun_uncovered": {

@@ -21,6 +21,7 @@ import {
 import { assertHostEventWorkerScope } from "../events/host-event-reducer.ts";
 import type { HostEventDelivery } from "../events/host-event-state.ts";
 import type { GoalState } from "../goals/goal-state.ts";
+import { agentBasisTurnOrigin, agentTurnBasis } from "../orchestration/agent-turn-basis.ts";
 import { conversationTurnOrigin } from "../orchestration/attempt-agent-identity.ts";
 import { latestAgentAttemptsByDurableOrder } from "../orchestration/attempt-ordering.ts";
 import {
@@ -112,7 +113,7 @@ import {
 	WorkerHostEventTransport,
 	workerHostEventMessage,
 } from "./worker-host-event-transport.ts";
-import { attemptVerification, selectedWorkerAttempt } from "./worker-lane-projection.ts";
+import { attemptAwaitsParent, attemptVerification, selectedWorkerAttempt } from "./worker-lane-projection.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { isWorkerTaskPrompt } from "./worker-runner.ts";
 import { specialistReleaseSkipReason } from "./worker-specialization-match.ts";
@@ -1981,20 +1982,18 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			return mode === "any" ? statuses.some(ready) : statuses.every(ready);
 		};
 		const result = (statuses: typeof baselineStatuses, timedOut: boolean, snapshot: TaskRuntimeProjection) => {
-			const latestAttempts = this.latestAttemptsByAgent(snapshot);
 			const statusByAgentId = new Map(statuses.map(({ agentId, status }) => [agentId, status]));
-			const terminalAttempts = canonicalAgentIds.flatMap((agentId) => {
-				const attempt = latestAttempts.get(agentId);
-				return statusByAgentId.get(agentId) === "idle" && attempt && terminalAttemptStatus(attempt.status)
-					? [attempt]
-					: [];
+			// An idle agent's latest turn is reported even after retention released it: the basis stands in for the attempt.
+			const terminalTurns = canonicalAgentIds.flatMap((agentId) => {
+				const turn = agentTurnBasis(snapshot, agentId);
+				return statusByAgentId.get(agentId) === "idle" && turn && terminalAttemptStatus(turn.status) ? [turn] : [];
 			});
 			return {
 				statuses,
 				updatedAgentIds: canonicalAgentIds.filter((agentId) => updatedAgentIds.has(agentId)),
 				timedOut,
-				terminalLaneIds: terminalAttempts.map((attempt) => attempt.taskId),
-				terminalAttemptIds: terminalAttempts.map((attempt) => attempt.attemptId),
+				terminalLaneIds: terminalTurns.map((turn) => turn.taskId),
+				terminalAttemptIds: terminalTurns.map((turn) => turn.attemptId),
 			};
 		};
 		if (waitSatisfied(baselineStatuses)) return Promise.resolve(result(baselineStatuses, false, baselineSnapshot));
@@ -2875,13 +2874,14 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
 			const agent = snapshot.agents[senderAgentId];
 			const namedAttemptId = attemptId ?? agent?.activeAttemptId;
-			const attempt =
-				namedAttemptId !== undefined
-					? snapshot.attempts[namedAttemptId]
-					: agent
-						? this.latestAgentAttempt(agent)
-						: undefined;
-			origin = attempt ? conversationTurnOrigin(snapshot.attempts, attempt) : undefined;
+			if (namedAttemptId !== undefined) {
+				const attempt = snapshot.attempts[namedAttemptId];
+				origin = attempt ? conversationTurnOrigin(snapshot, attempt) : undefined;
+			} else if (agent) {
+				// The latest turn, which retention may have released: the origin its binding carries stands in for it.
+				const turn = agentTurnBasis(snapshot, agent.agentId);
+				origin = turn ? agentBasisTurnOrigin(snapshot, agent.agentId, turn) : undefined;
+			}
 		}
 		return origin?.thirdParty ? origin : undefined;
 	}
@@ -3191,8 +3191,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			// parent exactly as a blocked claim does; only an accepted one releases it.
 			...(activity === "idle" &&
 			agent.status === "registered" &&
-			(attempt?.result?.nextAction === "parent_review" ||
-				(verification !== undefined && verification.verdict !== "accepted"))
+			attempt !== undefined &&
+			attemptAwaitsParent(this.options.getLifecycle().getTaskRuntimeSnapshot(), attempt)
 				? { awaitingParent: true as const }
 				: {}),
 			...(endedTask

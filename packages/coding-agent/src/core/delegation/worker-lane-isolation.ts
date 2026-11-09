@@ -9,6 +9,10 @@
  *   and not in the shared checkout;
  * - release: when the worker's persistent identity is retired (event-driven, never polled), the lane is
  *   released if, and only if, it is landed and clean. A lane holding work is kept and the parent is told.
+ * - land: the land gate takes the lane to main and returns what is still open (`worktree-sync/lane-landing.ts`).
+ *
+ * A requested lane (`create(cwd, "worktree")`) is made whether or not worktree-sync is on by default; the caller refuses a
+ * requested start that gets none, and never runs it shared.
  *
  * Every step but release is best-effort and never fails the worker or the transition that triggered it. Release
  * returns its outcome and throws only when the lane may still be released by a retry (a git failure, an unavailable
@@ -24,7 +28,8 @@ import type { WorkerExecutionContract, WorkerProfileExecutionContract } from "..
 import { parseWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
 import { quotedSpan } from "../util/bounded-line.ts";
 import type { ReleaseOutcome } from "../util/resource-release.ts";
-import type { WorktreeSyncEngineDeps } from "../worktree-sync/git-engine.ts";
+import { landLane, type WorktreeSyncEngineDeps } from "../worktree-sync/git-engine.ts";
+import { type LaneLanding, landingOutcome } from "../worktree-sync/lane-landing.ts";
 import {
 	bindWorkerLaneByPath,
 	boundLaneRepositoryKey,
@@ -39,8 +44,10 @@ import {
 import type { ParentWriteOrigin } from "./parent-execution-context.ts";
 
 export interface WorkerLaneIsolationDeps {
-	/** Engine deps rooted at `cwd`, or undefined when worktree-sync is disabled. */
+	/** Engine deps rooted at `cwd`; undefined only when no engine can be built. */
 	engineDeps(cwd: string): WorktreeSyncEngineDeps | undefined;
+	/** Whether a fresh writing worker gets a lane when its request does not ask for one (worktree-sync is enabled). */
+	isolateByDefault(): boolean;
 	/** Tell the parent session about a lane that was kept because it holds work, as a write of the worker's attempt. */
 	notifyParent(text: string, origin?: ParentWriteOrigin): void;
 	warn(message: string): void;
@@ -69,10 +76,15 @@ export class WorkerLaneIsolation {
 	}
 
 	/**
-	 * A lane for a fresh writing worker whose task directory is `cwd`. `undefined` when worktree-sync is disabled
-	 * or the worker stays in the shared checkout; an unexpected reason (a git error, the lane ceiling) is warned.
+	 * A lane for a fresh writing worker whose task directory is `cwd`. Without a `requested` lane it is made only when
+	 * worktree-sync is on by default. `undefined` when no lane is made (the worker stays in the shared checkout, or the
+	 * lane could not be made); an unexpected reason (a git error, the lane ceiling) is warned.
 	 */
-	async create(cwd: string): Promise<Extract<WorkerLaneCreation, { kind: "isolated" }> | undefined> {
+	async create(
+		cwd: string,
+		requested?: "worktree",
+	): Promise<Extract<WorkerLaneCreation, { kind: "isolated" }> | undefined> {
+		if (requested !== "worktree" && !this.deps.isolateByDefault()) return undefined;
 		const engine = this.deps.engineDeps(cwd);
 		if (!engine) return undefined;
 		let created: WorkerLaneCreation;
@@ -108,6 +120,26 @@ export class WorkerLaneIsolation {
 		} catch (error) {
 			this.deps.warn(`Unused worker lane removal failed: ${error instanceof Error ? error.message : String(error)}`);
 		}
+	}
+
+	/**
+	 * Lands the lane at `cwd` through the land gate (its gate per the owner's settings) and returns what is still open.
+	 * `undefined` when `cwd` is no lane. Engine errors propagate to the caller.
+	 */
+	async land(
+		cwd: string,
+		gate: { readonly mode: "on" | "off"; readonly command?: string },
+	): Promise<LaneLanding | undefined> {
+		const engine = this.deps.engineDeps(cwd);
+		if (!engine || !isUnderLaneRoot(engine, cwd)) return undefined;
+		const lane = await describeWorkerLane(engine, cwd);
+		if (!lane) return undefined;
+		const result = await landLane(engine, {
+			laneKey: lane.laneKey,
+			gate: gate.mode,
+			...(gate.command ? { gateCommand: gate.command } : {}),
+		});
+		return landingOutcome(lane.laneKey, result);
 	}
 
 	/** Whether `directory` is the lane's worktree or inside it. */

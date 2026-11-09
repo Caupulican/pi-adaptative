@@ -8,9 +8,10 @@
  * 2. a task released for a spec the plan no longer runs (retired), or any released task of a closed plan, still
  *    running -> cancel it;
  * 3. a released node whose task recorded an outcome newer than its hold -> the reconciled nextAction table:
- *    accept settles; verify_in_lane, host_check, rerun_uncovered, retry_after, wait_capacity and replace wait (the
- *    worker ladder acts); verify_independently wraps a verify step (host revision); split splits the step (host
- *    revision); fix_request and abandon(dependency) hold for a revise; ask_owner holds on the owner; ask_root holds on
+ *    accept settles; verify_in_lane, host_check, rerun_uncovered, retry_after and wait_capacity wait (the worker
+ *    ladder acts); verify_independently wraps a verify step (host revision); replace restates a remotely released step
+ *    on this machine (host revision), or holds it for the owner when its must-pin names that machine;
+ *    fix_request and abandon(dependency) hold for a revise; ask_owner holds on the owner; ask_root holds on
  *    the root; abandon(cancelled/superseded) settles without acceptance. A reduce or verify worker's outcome settles
  *    its join instead;
  * 4. a code join (collect, race, vote) whose ordering edges settled and a member settled -> decide it;
@@ -78,7 +79,11 @@ export type PlanAction =
 			readonly outcome: Outcome;
 			readonly settled: boolean;
 	  })
-	| (NodeRef & { readonly kind: "split"; readonly requirementIds: readonly string[]; readonly outcome: Outcome })
+	| (NodeRef & {
+			readonly kind: "replace";
+			readonly excludePlacement: string;
+			readonly outcome: Outcome;
+	  })
 	| { readonly kind: "close"; readonly planId: string; readonly status: PlanCloseStatus; readonly reason: string }
 	| { readonly kind: "cancel_task"; readonly planId: string; readonly taskId: string; readonly reason: string };
 
@@ -102,7 +107,6 @@ const LANE_ACTIONS: ReadonlySet<string> = new Set([
 	"rerun_uncovered",
 	"retry_after",
 	"wait_capacity",
-	"replace",
 ]);
 const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
 const TERMINAL_ATTEMPT_STATUSES: ReadonlySet<string> = new Set([
@@ -160,10 +164,13 @@ function outcomeAction(ref: NodeRef, node: PlanNodeSpec, outcome: Outcome): Plan
 			return isWorkerJoin(node)
 				? settle
 				: { ...ref, kind: "verify_wrap", requirementIds: next.requirementIds, outcome, settled: false };
-		case "split":
-			return isWorkerJoin(node) || new Set(next.requirementIds).size < PLAN_LIMITS.joinMembersMin
-				? hold("replan", `step ${node.id} is too large for one worker; split it into smaller steps`)
-				: { ...ref, kind: "split", requirementIds: next.requirementIds, outcome };
+		case "replace":
+			return node.pin?.mode === "must" && typeof node.pin.target === "object" && "machineId" in node.pin.target
+				? hold(
+						"owner",
+						`step ${node.id} must run on its named machine, which could not take it; release the machine or change the step`,
+					)
+				: { ...ref, kind: "replace", excludePlacement: next.excludePlacement, outcome };
 		case "fix_request":
 			return hold("replan", next.remedy);
 		case "ask_owner":

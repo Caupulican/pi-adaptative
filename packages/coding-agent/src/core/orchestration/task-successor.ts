@@ -1,9 +1,9 @@
 /**
  * The successor relation of an escalated task, as a pure read of the runtime projection. A rung on a completed task places
  * a successor task, and the rung's escalation record names the task it supersedes (`escalations[].supersedesTaskId`); the
- * successor inherits that record. A rung on a failed or blocked task runs as a new attempt of the same task and creates no
- * successor. `currentTaskOf` follows successor links to the task that now carries the work, so a caller that held a
- * superseded task id reaches the live one. A task with no successor is its own current task.
+ * successor inherits that record. A rung on a failed or blocked task whose worker is still registered runs as a new attempt
+ * of the same task and creates no successor. `currentTaskOf` follows successor links to the task that now carries the
+ * work, so a caller that held a superseded task id reaches the live one. A task with no successor is its own current task.
  *
  * The walk visits each task at most once, so a malformed chain ends instead of looping.
  */

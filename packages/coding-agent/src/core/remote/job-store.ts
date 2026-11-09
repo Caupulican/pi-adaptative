@@ -65,6 +65,8 @@ export interface PlacerJobRecord {
 	/** The session that placed the job and applies its end. */
 	readonly ownerSession: string;
 	readonly laneId: string;
+	/** The managed lane's attempt, written at placement. Absent on a record a replayed dispatch wrote, or an older build's. */
+	readonly attemptId?: string;
 	readonly offer: JobOffer;
 	readonly offerDigest: string;
 	readonly state: PlacerJobState;
@@ -196,6 +198,7 @@ function parsePlacerRecord(value: unknown): PlacerJobRecord | undefined {
 		...(cancel ? { cancel } : {}),
 		...(value.cancelSent === true ? { cancelSent: true as const } : {}),
 		...(isCount(value.appliedAt) ? { appliedAt: value.appliedAt } : {}),
+		...(typeof value.attemptId === "string" && value.attemptId.length > 0 ? { attemptId: value.attemptId } : {}),
 	};
 }
 
@@ -309,8 +312,27 @@ export class JobStore {
 		this.in = new RecordDir(inDir(agentDir), parseExecutorRecord);
 	}
 
+	/** Placed jobs not sent yet, per machine: read once per synchronous pass, and dropped by this store's own writes to `out`. */
+	private pendingByMachine: Map<string, number> | undefined;
+
+	/** Placed jobs on `machineId` that are not sent yet: they will take that machine's room. */
+	pendingPlacedCount(machineId: string): number {
+		if (!this.pendingByMachine) {
+			const counts = new Map<string, number>();
+			for (const record of this.out.list())
+				if (record.state === "pending") counts.set(record.executorId, (counts.get(record.executorId) ?? 0) + 1);
+			this.pendingByMachine = counts;
+			// A fleet pass reads every machine's room in turn; the next pass reads the store again, since other processes write it too.
+			queueMicrotask(() => {
+				this.pendingByMachine = undefined;
+			});
+		}
+		return this.pendingByMachine.get(machineId) ?? 0;
+	}
+
 	/** Creates the placer's record unless one exists for the job id, and returns whichever record is there. */
 	createPlaced(record: PlacerJobRecord): PlacerJobRecord {
+		this.pendingByMachine = undefined;
 		return this.out.update(record.jobId, (current) => (current ? undefined : record)) ?? record;
 	}
 
@@ -318,6 +340,7 @@ export class JobStore {
 		jobId: string,
 		change: (current: PlacerJobRecord) => PlacerJobRecord | undefined,
 	): PlacerJobRecord | undefined {
+		this.pendingByMachine = undefined;
 		return this.out.update(jobId, (current) => (current ? change(current) : undefined));
 	}
 
@@ -368,6 +391,7 @@ export class JobStore {
 
 	/** Removes finished records older than the retention, so replay detection stays bounded. */
 	prune(now: number): void {
+		this.pendingByMachine = undefined;
 		for (const record of this.out.list())
 			if (record.appliedAt !== undefined && now - record.appliedAt > FINISHED_RETENTION_MS)
 				this.out.remove(record.jobId);

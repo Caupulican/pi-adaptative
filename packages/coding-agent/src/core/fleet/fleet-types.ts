@@ -10,6 +10,7 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import type { PlacementCapacitySource } from "../placement/capacity-source.ts";
 import type { Placement } from "../placement/placement-types.ts";
 import type { PlanNodeDemand } from "../plan/plan-graph.ts";
+import type { RemoteBackendPort } from "./remote-admit.ts";
 
 export type WeightClass = "probe" | "read" | "write" | "heavy";
 export type ExecutionBackend = "in_process_lane" | "child_process" | "remote";
@@ -92,7 +93,15 @@ export interface FleetDispatch {
 		previousPlacement: Placement;
 		requirementIds: string[];
 		notBefore?: string;
+		/** Completed sources only: the rerun is a successor task that supersedes the source. */
 		supersedesTaskId?: string;
+		/** A non-completed source whose agent is still registered: the rerun is a new attempt of this task. */
+		attemptOfTaskId?: string;
+		/**
+		 * The source task's acceptance criteria, carried with `attemptOfTaskId`: the rerun states the same criteria the
+		 * task was created with, so the ledger's identity check compares equal. Absent for every other rung.
+		 */
+		acceptanceCriterionIds?: readonly string[];
 		pinned: EscalationPinnedAuthority;
 	};
 	/** Brokered starts. */
@@ -193,17 +202,28 @@ export interface ShareSpec {
 
 export interface FleetScheduler {
 	/**
-	 * The asynchronous half of a local start, run before `admit`: admission resolution, the worker's directory and task
-	 * fitness, its authority and contract. Idempotent on the dispatch's key (a second call while one is prepared, or after
-	 * its task exists, answers `prepared` again). A prepared dispatch that is never admitted is released by `cancel`,
-	 * `stop` or the scheduler's disposal. Non-local placements prepare nothing and answer `prepared`.
+	 * The asynchronous half of a start, run before `admit`. A local start: admission resolution, the worker's directory and
+	 * task fitness, its authority and contract. A remote-machine start: the registered remote backend's job offer. Idempotent
+	 * on the dispatch's key (a second call while one is prepared, or after its task exists, answers `prepared` again). A
+	 * prepared dispatch that is never admitted is released by `cancel`, `releasePrepared`, `stop` or the scheduler's
+	 * disposal. Other placements prepare nothing and answer `prepared`.
 	 */
 	prepare(dispatch: FleetDispatch, placement: Placement, signal?: AbortSignal): Promise<PrepareDecision>;
 	/**
 	 * Synchronous and idempotent on the dispatch's key; queued and run mean the task and attempt are materialized. A local
-	 * dispatch must be prepared first; an unprepared one is refused with reason `preflight`.
+	 * or remote-machine dispatch must be prepared first; an unprepared local one is refused with reason `preflight`.
 	 */
 	admit(dispatch: FleetDispatch, placement: Placement): AdmitDecision;
+	/** Releases one prepared dispatch (its allocation returns); a key not prepared is ignored. */
+	releasePrepared(idempotencyKey: string): void;
+	/** Whether a remote-machine backend is registered: a must-pinned plan step waits on it, and runs here without one. */
+	hasRemoteBackend(): boolean;
+	/** Linked machines a read-only plan step may go to now: online, not held, taking jobs, a free slot. */
+	placementCandidates(): readonly { readonly machineId: string; readonly slots: number }[];
+	/** Fires when any placement capacity source changes. */
+	subscribeCandidates(onChange: () => void): () => void;
+	/** Registers the session's remote-machine backend; the returned function unregisters it when it is still registered. */
+	registerRemoteBackend(port: RemoteBackendPort): () => void;
 	cancel(scope: FleetScope, reasonCode: string): void;
 	stop(): void;
 	resume(): void;

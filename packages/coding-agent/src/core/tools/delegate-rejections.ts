@@ -312,7 +312,7 @@ export function delegateStartRejection(reason: string): CommsErrRecord {
 		return commsErr({
 			c: "E_LIMIT",
 			h: "ASK_OWNER",
-			m: "This session has used up its lifetime limit of retained worker records (finished workers count until the session ends); no worker started. Tell the owner: continuing needs a new session.",
+			m: "This session's orchestration store is full; no worker started. Closed work is released at idle after orchestration.retention.closedObjectiveDays (default 14; 0 keeps it). Tell the owner: lower that setting, or start a new session.",
 		});
 	}
 	if (reason === "worker_specialist_busy") {

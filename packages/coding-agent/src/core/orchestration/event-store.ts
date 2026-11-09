@@ -24,6 +24,7 @@ import {
 	type OrchestrationEvent,
 	toJsonObject,
 } from "./contracts.ts";
+import { boundedIdempotencyEvents, indexIdempotentEvent } from "./event-store-idempotency.ts";
 import { withSessionBundleAdmission, withSessionBundleMaintenance } from "./session-bundle-lifecycle.ts";
 
 const EVENT_FILE_PATTERN = /^(\d{16})\.json$/;
@@ -420,20 +421,6 @@ function settleListenerResult(value: unknown, onSettled: (error: unknown, failed
 	);
 }
 
-function boundedIdempotencyEvents(events: readonly OrchestrationEvent[], maxEvents: number): OrchestrationEvent[] {
-	const selectedNewestFirst: OrchestrationEvent[] = [];
-	let serializedBytes = 2;
-	for (const event of [...events].sort((left, right) => right.ordinal - left.ordinal)) {
-		if (selectedNewestFirst.length >= maxEvents) break;
-		const eventBytes = Buffer.byteLength(JSON.stringify(event), "utf8");
-		const nextBytes = serializedBytes + (selectedNewestFirst.length > 0 ? 1 : 0) + eventBytes;
-		if (nextBytes > MAX_ORCHESTRATION_SNAPSHOT_IDEMPOTENCY_BYTES) continue;
-		selectedNewestFirst.push(structuredClone(event));
-		serializedBytes = nextBytes;
-	}
-	return selectedNewestFirst.reverse();
-}
-
 function assertExactIdempotentReplay(existing: OrchestrationEvent, input: AppendOrchestrationEventInput): void {
 	const matches =
 		existing.type === input.type &&
@@ -690,7 +677,7 @@ export class OrchestrationEventStore {
 		writeFileAtomicSync(join(this.eventsDir, eventFileName(ordinal)), serializedEvent, { fs: this.fs });
 		indexes.lastOrdinal = ordinal;
 		indexes.tailBytes = nextTailBytes;
-		if (normalizedInput.idempotencyKey) indexes.idempotencyEvents.set(normalizedInput.idempotencyKey, next);
+		indexIdempotentEvent(indexes.idempotencyEvents, next);
 		// The immutable event is authoritative. The cursor is only a corruption high-water mark,
 		// so a lock-protected direct overwrite avoids another tmp-file creation and rename on the
 		// Windows scanner-sensitive path; a torn cursor is safely rebuilt from the event tail.
@@ -750,6 +737,7 @@ export class OrchestrationEventStore {
 		throughOrdinal: number,
 		projection: () => JsonObject,
 		lockOptions?: Readonly<AtomicFileLockOptions>,
+		force = false,
 	): boolean {
 		if (this.transactionActive)
 			throw new OrchestrationEventStoreError("Cannot compact inside an active orchestration transaction.");
@@ -757,6 +745,7 @@ export class OrchestrationEventStore {
 		const baselineOrdinalBeforeLock = baselineBeforeLock?.throughOrdinal ?? 0;
 		const cachedIndexes = this.synchronizedIndexes;
 		if (
+			!force &&
 			cachedIndexes?.baselineOrdinal === baselineOrdinalBeforeLock &&
 			cachedIndexes.baselineDigest === baselineBeforeLock?.digest &&
 			cachedIndexes.lastOrdinal === throughOrdinal &&
@@ -767,6 +756,7 @@ export class OrchestrationEventStore {
 		}
 		const cursorBeforeLock = this.readCursorUnlocked();
 		if (
+			!force &&
 			!cachedIndexes &&
 			cursorBeforeLock?.lastOrdinal === throughOrdinal &&
 			cursorBeforeLock.tailBytes !== undefined &&
@@ -796,17 +786,17 @@ export class OrchestrationEventStore {
 						const tailNames = this.eventFileNamesUnlocked().filter(
 							(name) => Number(EVENT_FILE_PATTERN.exec(name)?.[1] ?? 0) > baselineOrdinal,
 						);
-						if (tailNames.length < this.maxTailEvents && cursor.tailBytes < this.maxTailBytes) return false;
+						if (!force && tailNames.length < this.maxTailEvents && cursor.tailBytes < this.maxTailBytes)
+							return false;
 
+						// Snapshot events first, then the tail in ordinal order, so a retirement in the tail applies last.
 						const retainedByKey = new Map<string, OrchestrationEvent>();
 						for (const event of this.readProjectionSnapshotUnlocked()?.idempotencyEvents ?? []) {
-							if (event.idempotencyKey) retainedByKey.set(event.idempotencyKey, event);
+							indexIdempotentEvent(retainedByKey, event);
 						}
 						for (const name of tailNames) {
 							const event = this.readEventFileUnlocked(name);
-							if (event.ordinal <= throughOrdinal && event.idempotencyKey) {
-								retainedByKey.set(event.idempotencyKey, event);
-							}
+							if (event.ordinal <= throughOrdinal) indexIdempotentEvent(retainedByKey, event);
 						}
 						const idempotencyEvents = boundedIdempotencyEvents(
 							[...retainedByKey.values()],
@@ -1227,7 +1217,7 @@ export class OrchestrationEventStore {
 			if (event.ordinal !== ordinal) {
 				throw new OrchestrationEventStoreError(`Event ordinal does not match file name: ${name}`);
 			}
-			if (event.idempotencyKey) indexes.idempotencyEvents.set(event.idempotencyKey, event);
+			indexIdempotentEvent(indexes.idempotencyEvents, event);
 			indexes.tailBytes += statSync(join(this.eventsDir, name)).size;
 			indexes.lastOrdinal = ordinal;
 		}

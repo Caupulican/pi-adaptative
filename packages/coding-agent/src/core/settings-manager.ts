@@ -14,7 +14,6 @@ import { type ChannelPolicyResolution, resolveChannelPolicies } from "./channels
 import { resolveSelfCompactionSettings, type SelfCompactionSettings } from "./compaction/self-compaction.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
 import { type CostGuardSettings, DEFAULT_COST_GUARD_SETTINGS } from "./cost-guard.ts";
-import { LEADER_MAX_DEPTH_CEILING, LEADER_MAX_DEPTH_DEFAULT } from "./delegation/leader-delegation.ts";
 import type {
 	HmoeIndependence,
 	HmoePreference,
@@ -37,6 +36,7 @@ import { ProfileRegistry } from "./profile-registry.ts";
 import { normalizeSteStrictness } from "./provider-prompt-contracts.ts";
 import { mergeResourceProfileMap, mergeResourceProfileSettings } from "./resource-profile-blocks.ts";
 import { isWorkerSession } from "./session-role.ts";
+import { resolveLeaderSettings, resolveOrchestrationRetention } from "./settings/orchestration-settings.ts";
 import {
 	appendFilter,
 	clampMemoryHistoryFrontierMaxBytes,
@@ -3707,14 +3707,12 @@ export class SettingsManager {
 
 	/** Leaders as sub-orchestrators: the nesting depth, the default when unset or out of range. */
 	getLeaderSettings(): Required<LeaderSettings> {
-		return {
-			maxDepth: sanitizeIntegerSetting(
-				this.settings.leaders?.maxDepth,
-				LEADER_MAX_DEPTH_DEFAULT,
-				1,
-				LEADER_MAX_DEPTH_CEILING,
-			),
-		};
+		return resolveLeaderSettings(this.settings.leaders);
+	}
+
+	/** Retention of closed orchestration work: the days a closed unit stays before idle release (0 keeps it). */
+	getOrchestrationRetentionSettings(): { closedObjectiveDays: number } {
+		return resolveOrchestrationRetention(this.settings.orchestration);
 	}
 
 	getRoutinesSettings(): Required<Pick<RoutinesSettings, "automaticIntake" | "maxResultWakesPerDay">> {

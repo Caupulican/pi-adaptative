@@ -14,6 +14,7 @@ import { alarmAt, SYSTEM_TIMER_PORT, type TimerPort, type WallAlarm } from "../.
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { type ManagedLaneEvent, ManagedLaneRuntimeAdmissionError } from "../extensions/managed-lane-records.ts";
 import type { FleetDispatch } from "../fleet/fleet-types.ts";
+import type { RemoteRefusalCode } from "../fleet/remote-admit.ts";
 import type { Placement } from "../placement/placement-types.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { boundedLine } from "../util/bounded-line.ts";
@@ -63,6 +64,18 @@ export interface RemoteJobHandle {
 export type PlaceResult =
 	| { readonly kind: "placed"; readonly handle: RemoteJobHandle }
 	| { readonly kind: "refused"; readonly reason: string };
+
+/** A placement's preparation: the record a job id already has, or the offer a new job writes. */
+export type PreparedOffer =
+	| { readonly kind: "existing"; readonly record: PlacerJobRecord }
+	| {
+			readonly kind: "offer";
+			readonly machine: FleetMachine;
+			readonly jobId: string;
+			readonly offer: JobOffer;
+			readonly deadlineMs: number;
+			readonly goalId?: string;
+	  };
 
 export interface PlaceOptions {
 	readonly label?: string;
@@ -167,43 +180,61 @@ export class RemoteJobClient {
 	private refusal(
 		machine: FleetMachine | undefined,
 		dispatch: Pick<FleetDispatch, "instructions" | "writeScope">,
-	): string | undefined {
-		if (!machine) return "that machine is not linked with this one";
+	): { readonly code: RemoteRefusalCode; readonly reason: string } | undefined {
+		if (!machine) return { code: "unlinked", reason: "that machine is not linked with this one" };
 		if (loadLinkSettings(this.agentDir).peers[machine.machineId]?.hold)
-			return `${machine.name} is on hold (/remote release ${machine.name})`;
-		if (dispatch.writeScope.length > 0) return "jobs that change files are not placed on other machines yet";
-		if (!machine.facts) return `${machine.name} has not told this machine what it can take yet`;
-		if (!machine.facts.accepts.jobs) return `${machine.name} does not take jobs from this machine now`;
+			return { code: "held", reason: `${machine.name} is on hold (/remote release ${machine.name})` };
+		if (dispatch.writeScope.length > 0)
+			return { code: "writes", reason: "jobs that change files are not placed on other machines yet" };
+		if (!machine.facts)
+			return { code: "no_facts", reason: `${machine.name} has not told this machine what it can take yet` };
+		if (!machine.facts.accepts.jobs)
+			return { code: "jobs_disabled", reason: `${machine.name} does not take jobs from this machine now` };
 		if (Buffer.byteLength(dispatch.instructions, "utf8") > MAX_JOB_INSTRUCTIONS_BYTES)
-			return `the task is longer than ${MAX_JOB_INSTRUCTIONS_BYTES / 1024} KiB`;
+			return { code: "too_long", reason: `the task is longer than ${MAX_JOB_INSTRUCTIONS_BYTES / 1024} KiB` };
 		// No credential leaves this machine: a task that holds one is not sent at all, not sent with it masked.
 		if (redactKnownSecrets(dispatch.instructions) !== dispatch.instructions)
-			return "the task holds what looks like a secret; remove it and place the job again";
+			return {
+				code: "secret",
+				reason: "the task holds what looks like a secret; remove it and place the job again",
+			};
 		return undefined;
 	}
 
-	async place(
+	/**
+	 * The asynchronous half of a placement: the existing record a job id replays, or the offer a new job writes. Every
+	 * refusal is a code fact and nothing is written here.
+	 */
+	async prepareOffer(
 		dispatch: Pick<FleetDispatch, "idempotencyKey" | "instructions" | "writeScope">,
 		placement: Extract<Placement, { kind: "remote_machine" }>,
 		options: PlaceOptions = {},
-	): Promise<PlaceResult> {
+	): Promise<PreparedOffer | { readonly kind: "refused"; readonly code: RemoteRefusalCode; readonly reason: string }> {
 		const selfId = this.selfId();
 		const jobId = createHash("sha256")
 			.update(`${selfId}|${dispatch.idempotencyKey}`)
 			.digest("base64url")
 			.slice(0, 22);
 		const existing = this.store.out.read(jobId);
-		if (existing) return { kind: "placed", handle: this.handle(existing) };
+		if (existing) return { kind: "existing", record: existing };
 		const machine = this.machines.get(placement.machineId);
 		const refused = this.refusal(machine, dispatch);
 		if (refused || !machine)
-			return { kind: "refused", reason: refused ?? "that machine is not linked with this one" };
+			return {
+				kind: "refused",
+				code: refused?.code ?? "unlinked",
+				reason: refused?.reason ?? "that machine is not linked with this one",
+			};
 		let repo: JobOffer["repo"];
 		if (options.cwd) {
 			const identity = await resolveRepoIdentity(options.cwd);
 			if (identity) {
 				if (!machine.facts?.checkouts.some((checkout) => checkout.repoKey === identity.repoKey))
-					return { kind: "refused", reason: `${machine.name} does not offer this project` };
+					return {
+						kind: "refused",
+						code: "project_missing",
+						reason: `${machine.name} does not offer this project`,
+					};
 				repo = { repoKey: identity.repoKey, ...(identity.headSha ? { baseSha: identity.headSha } : {}) };
 			}
 		}
@@ -222,15 +253,38 @@ export class RemoteJobClient {
 			deadlineMs,
 			hops: [selfId],
 		};
-		const record = await this.open({
+		return {
+			kind: "offer",
 			machine,
 			jobId,
 			offer,
-			state: "pending",
 			deadlineMs,
 			...(options.goalId ? { goalId: options.goalId } : {}),
+		};
+	}
+
+	async place(
+		dispatch: Pick<FleetDispatch, "idempotencyKey" | "instructions" | "writeScope">,
+		placement: Extract<Placement, { kind: "remote_machine" }>,
+		options: PlaceOptions = {},
+	): Promise<PlaceResult> {
+		const prepared = await this.prepareOffer(dispatch, placement, options);
+		if (prepared.kind === "refused") return { kind: "refused", reason: prepared.reason };
+		if (prepared.kind === "existing") return { kind: "placed", handle: this.handle(prepared.record) };
+		const record = await this.open({
+			machine: prepared.machine,
+			jobId: prepared.jobId,
+			offer: prepared.offer,
+			state: "pending",
+			deadlineMs: prepared.deadlineMs,
+			...(prepared.goalId ? { goalId: prepared.goalId } : {}),
 		});
 		return { kind: "placed", handle: this.handle(record) };
+	}
+
+	/** Jobs this machine placed on `machineId` that are not sent yet: they will take that machine's room. */
+	pendingCount(machineId: string): number {
+		return this.store.pendingPlacedCount(machineId);
 	}
 
 	/**
@@ -329,7 +383,8 @@ export class RemoteJobClient {
 		const now = this.timers.now();
 		const laneId = remoteJobLaneId(jobId);
 		const holdMs = loadLinkSettings(this.agentDir).offlineHoldMs;
-		await runtimeRetry(() =>
+		// A replayed dispatch of a lane already durable returns no lane record: the placed record then has no attempt id.
+		const lane = await runtimeRetry(() =>
 			this.session.recordManagedLane({
 				laneId,
 				phase: "dispatch",
@@ -360,6 +415,7 @@ export class RemoteJobClient {
 			createdAt: now,
 			deadlineAt: now + deadlineMs + PLACER_GRACE_MS,
 			lastSeq: 0,
+			...(typeof lane?.attemptId === "string" && lane.attemptId.length > 0 ? { attemptId: lane.attemptId } : {}),
 		});
 		harnessLog.info("placement", "a job was placed on a linked machine", { jobId, peer: machine.machineId });
 		journalJob(this.agentDir, { side: "placer", jobId, peer: machine.machineId, event: state });

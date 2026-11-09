@@ -43,7 +43,8 @@ export type HarnessNoticeKind =
 	| "system-one-engine"
 	| "worker-login"
 	| "fleet-spend-brake"
-	| "review-backlog";
+	| "review-backlog"
+	| "orchestration-capacity";
 
 /**
  * One owner-actionable state: `reason` is its stable identity, `text` the one line the owner reads. `evidence` is optional

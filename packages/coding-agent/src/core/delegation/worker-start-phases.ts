@@ -101,6 +101,8 @@ export interface WorkerStartPhasePort<A> {
 	/** The record with this generation's dispatch wait reason attached. */
 	withWaitReason(record: LaneRecord): LaneRecord;
 	activeAttempt(laneId: string): AttemptRuntimeState | undefined;
+	/** A task's most recent attempt, whether or not it is still active. */
+	lastAttempt(taskId: string): AttemptRuntimeState | undefined;
 	waitState(laneId: string): WorkerDispatchWaitState | undefined;
 	warn(message: string): void;
 }
@@ -171,13 +173,18 @@ export function workerRequestForDispatch(
 		...(pinned?.botSoul !== undefined ? { botSoul: pinned.botSoul } : {}),
 		...(pinned?.turnOrigin !== undefined ? { turnOrigin: pinned.turnOrigin } : {}),
 		...(pinned?.receiptOrigin !== undefined ? { receiptOrigin: pinned.receiptOrigin } : {}),
-		...(pinned ? { isolation: "shared" as const } : {}),
+		...(pinned
+			? { isolation: "shared" as const }
+			: dispatch.isolation === "worktree"
+				? { isolation: "worktree" as const }
+				: {}),
+		...(dispatch.escalation?.attemptOfTaskId ? { attemptOf: { taskId: dispatch.escalation.attemptOfTaskId } } : {}),
 		messageReplayKey: `fleet:${dispatch.idempotencyKey}`,
 		...(Object.keys(authority).length > 0 ? { authority } : {}),
 		taskContext: {
 			requirementIds: [...(dispatch.escalation?.requirementIds ?? dispatch.requirementIds)],
 			dependsOnTaskIds: [],
-			acceptanceCriterionIds: [],
+			acceptanceCriterionIds: [...(dispatch.escalation?.acceptanceCriterionIds ?? [])],
 			resourcePointerIds: [],
 		},
 	};
@@ -216,10 +223,10 @@ export class WorkerStartPhases<A> implements FleetLocalStartPort {
 		if (this.port.closed.aborted) return Promise.resolve({ ok: false, skipReason: "session_disposed" });
 		if (this.prepared.size + this.preparing.size >= MAX_PREPARED_DISPATCHES)
 			return Promise.resolve({ ok: false, skipReason: "worker_dispatch_queue_full" });
-		const superseded = dispatch.escalation?.supersedesTaskId;
-		const supersededThinking = superseded
-			? this.port.activeAttempt(superseded)?.dispatch.executionContract?.worker.modelBinding.thinkingLevel
-			: undefined;
+		const basis = dispatch.escalation?.attemptOfTaskId ?? dispatch.escalation?.supersedesTaskId;
+		const last = basis ? this.port.lastAttempt(basis) : undefined;
+		const supersededThinking = (last?.runningModel ?? last?.dispatch.executionContract?.worker.modelBinding)
+			?.thinkingLevel;
 		const captured = this.port.capture(
 			workerRequestForDispatch(dispatch, supersededThinking, this.port.sessionCwd()),
 		);

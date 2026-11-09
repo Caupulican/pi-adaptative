@@ -99,14 +99,12 @@ export function nextActionPhrase(action: NextAction, scheduled = false): string 
 			return action.rung === 1
 				? "a rerun with more thinking, once it is placed"
 				: "a rerun on another model, once it is placed";
-		case "split":
-			return "split the remaining work into smaller tasks";
 		case "retry_after":
 			return "try again later";
 		case "wait_capacity":
 			return "waiting for room to run";
 		case "replace":
-			return "run it somewhere else";
+			return "running it again on this machine";
 		case "fix_request":
 			return "fix the request and start again";
 		case "ask_owner":

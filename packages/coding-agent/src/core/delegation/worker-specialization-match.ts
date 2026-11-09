@@ -1,13 +1,14 @@
 import { isDeepStrictEqual } from "node:util";
-import { conversationTurnOrigin } from "../orchestration/attempt-agent-identity.ts";
-import { latestAgentAttemptByDurableOrder } from "../orchestration/attempt-ordering.ts";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
+import { agentBasisTurnOrigin, agentTurnBasis, agentTurnDispatch } from "../orchestration/agent-turn-basis.ts";
 import type {
 	AgentBindingContract,
+	OrchestrationDispatchRequest,
 	ResourcePointer,
 	WorkerExecutionContract,
 	WorkerProfileExecutionContract,
 } from "../orchestration/contracts.ts";
-import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { NONTERMINAL_WORKER_ATTEMPT_STATUSES } from "./worker-lane-projection.ts";
 
 /**
@@ -152,14 +153,14 @@ export function describeWorkerSpecialization(
  * in-process specialist's. Resolving them is I/O, so the caller does it once, before deciding.
  */
 export function workerSpecializationWorkspaceRoots(
-	snapshot: Pick<TaskRuntimeProjection, "agents" | "attempts" | "tasks">,
+	snapshot: Pick<TaskRuntimeProjection, "agents" | "attempts" | "objectives" | "tasks">,
 ): string[] {
 	const roots = new Set<string>();
 	for (const agent of Object.values(snapshot.agents)) {
 		if (agent.status !== "registered") continue;
-		const attempt = latestAgentAttemptByDurableOrder(snapshot, agent.agentId);
-		const contract = attempt?.dispatch.executionContract;
-		if (!contract || attempt?.dispatch.executionKind === "managed-process") continue;
+		const dispatch = agentTurnDispatch(snapshot, agent.agentId);
+		const contract = dispatch?.executionContract;
+		if (!contract || dispatch?.executionKind === "managed-process") continue;
 		const root = workerContractWorkspaceRoot(contract.worker);
 		if (root) roots.add(root);
 	}
@@ -190,8 +191,8 @@ export interface WorkerSpecialistReuseInput {
 	/** An explicit selection narrows matching before ambiguity is evaluated. */
 	agentId?: string;
 	/** Immutable birth context and materialized resources must also match current admission. */
-	isInitializationCompatible(agent: AgentBindingContract | undefined, attempt: AttemptRuntimeState): boolean;
-	snapshot: Pick<TaskRuntimeProjection, "agents" | "attempts" | "tasks">;
+	isInitializationCompatible(agent: AgentBindingContract | undefined, dispatch: OrchestrationDispatchRequest): boolean;
+	snapshot: Pick<TaskRuntimeProjection, "agents" | "attempts" | "objectives" | "tasks">;
 	candidate: WorkerSpecializationFingerprint;
 	/** True while another start in this process is already allocating this exact specialization. */
 	freshAllocationInFlight?: boolean;
@@ -203,7 +204,7 @@ export interface WorkerSpecialistReuseInput {
 	 */
 	releaseHold?(agentId: string): { readonly kind: "retained" | "abandoned"; readonly cause: string } | undefined;
 	/** False when the specialist's durable context cannot be read; reuse then fails bounded. */
-	isContextReadable(agent: AgentBindingContract, attempt: AttemptRuntimeState): boolean;
+	isContextReadable(agent: AgentBindingContract): boolean;
 	/** Explicit, justified intent to run an independent copy beside the existing specialists. */
 	independentParallelIntent?: boolean;
 	/** Resolved workspace identity for a root the caller already asked the directory backend about. */
@@ -220,25 +221,18 @@ export interface WorkerSpecialistReuseInput {
 	): boolean;
 }
 
-function attemptSpecialization(
-	snapshot: Pick<TaskRuntimeProjection, "attempts">,
-	attempt: AttemptRuntimeState,
+/**
+ * The specialization a turn's dispatch runs, given the origin its conversation carries (`agentBasisTurnOrigin`). A worker
+ * that read a third party's words, in its dispatch or in a steer it admitted, is never reused for later work.
+ */
+function dispatchSpecialization(
+	dispatch: OrchestrationDispatchRequest,
+	taintOrigin: TurnOriginRecord | undefined,
 	namespaceKeyOf: (root: string | undefined) => string,
 ): WorkerSpecializationFingerprint | undefined {
-	const contract = attempt.dispatch.executionContract;
-	// A worker that read a third party's words, in its dispatch or in a steer it admitted, is never reused for later work.
-	if (
-		!contract ||
-		attempt.dispatch.executionKind === "managed-process" ||
-		conversationTurnOrigin(snapshot.attempts, attempt)?.thirdParty
-	)
-		return undefined;
-	return describeWorkerSpecialization(
-		contract,
-		attempt.dispatch.resourcePointerIds,
-		namespaceKeyOf,
-		attempt.dispatch.worktreeLaneKey,
-	);
+	const contract = dispatch.executionContract;
+	if (!contract || dispatch.executionKind === "managed-process" || taintOrigin?.thirdParty) return undefined;
+	return describeWorkerSpecialization(contract, dispatch.resourcePointerIds, namespaceKeyOf, dispatch.worktreeLaneKey);
 }
 
 /**
@@ -274,14 +268,18 @@ export function selectReusableWorkerSpecialist(input: WorkerSpecialistReuseInput
 		const agent = input.snapshot.agents[specialistId];
 		// Retired, suspended and resuming contexts are re-entered only by an explicit resume.
 		if (agent && agent.status !== "registered" && agent.status !== "active") continue;
-		const attempt = latestAgentAttemptByDurableOrder(input.snapshot, specialistId);
-		if (!attempt) continue;
-		const specialization = attemptSpecialization(input.snapshot, attempt, input.namespaceKeyOf);
+		const basis = agentTurnBasis(input.snapshot, specialistId);
+		if (!basis) continue;
+		const specialization = dispatchSpecialization(
+			basis.dispatch,
+			agentBasisTurnOrigin(input.snapshot, specialistId, basis),
+			input.namespaceKeyOf,
+		);
 		if (!specialization) continue;
 		const matches = input.matches ?? sameWorkerSpecialization;
 		if (!matches(specialization, input.candidate, specialistId)) continue;
-		if (!input.isInitializationCompatible(agent, attempt)) continue;
-		if (agent?.status === "active" || NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status)) {
+		if (!input.isInitializationCompatible(agent, basis.dispatch)) continue;
+		if (agent?.status === "active" || NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(basis.status)) {
 			busy += 1;
 			continue;
 		}
@@ -294,7 +292,7 @@ export function selectReusableWorkerSpecialist(input: WorkerSpecialistReuseInput
 		// Only a registered binding can take a new turn: an unbound durable lane has no resumable
 		// identity to dispatch onto.
 		if (!agent) continue;
-		if (!input.isContextReadable(agent, attempt)) {
+		if (!input.isContextReadable(agent)) {
 			unreadable += 1;
 			continue;
 		}

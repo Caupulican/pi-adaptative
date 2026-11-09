@@ -12,6 +12,8 @@ import {
 } from "../orchestration/attempt-usage-generations.ts";
 import type { AttemptUsageSnapshot, OrchestrationEvent } from "../orchestration/contracts.ts";
 import type { OrchestrationEventStore } from "../orchestration/event-store.ts";
+import { archiveIsCommitted, readRetentionArchives, retentionArchiveDir } from "../orchestration/retention-archive.ts";
+import { retentionArchiveIdsField } from "../orchestration/retention-event.ts";
 import { type WorkerReceiptOrigin, workerReceiptOriginFromValue } from "../orchestration/worker-receipt-origin.ts";
 import { hasReportableUsage } from "../spawned-usage.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -116,6 +118,39 @@ function readAttempt(value: unknown): HistoricalWorkerAttempt {
 	};
 }
 
+/**
+ * Reads the tasks and attempts of one record set: the snapshot's own, or the released slice of an archive. With
+ * `onlyAbsent`, an id the state already holds is skipped, so an archived copy never overwrites a live record.
+ */
+function readRecordSet(
+	state: HistoricalWorkerAccountingState,
+	records: { readonly tasks: unknown; readonly attempts: unknown; readonly checkpoints: unknown },
+	readTask: (raw: unknown) => void,
+	onlyAbsent: boolean,
+): void {
+	for (const [key, value] of Object.entries(record(records.tasks, "tasks"))) {
+		if (onlyAbsent && state.tasks.has(key)) continue;
+		const task = record(record(value, "task state").task, "task");
+		if (task.taskId !== key) throw new Error("Archived task key conflicts with its identity.");
+		readTask(task);
+	}
+	const checkpoints = record(records.checkpoints, "checkpoints");
+	for (const [key, value] of Object.entries(record(records.attempts, "attempts"))) {
+		if (onlyAbsent && state.attempts.has(key)) continue;
+		const attempt = readAttempt(value);
+		if (attempt.attemptId !== key) throw new Error("Archived attempt key conflicts with its identity.");
+		if (!attempt.usage) {
+			const ids = record(value, "attempt").checkpointIds;
+			if (!Array.isArray(ids)) throw new Error("Invalid archived checkpoint identities.");
+			for (const id of ids) {
+				const checkpoint = checkpoints[identity(id, "checkpoint identity")];
+				if (isPlainRecord(checkpoint) && checkpoint.usage !== undefined) attempt.usage = usage(checkpoint.usage);
+			}
+		}
+		state.attempts.set(key, attempt);
+	}
+}
+
 /** Read accounting facts only. Retired execution tools/policies are never re-admitted or revalidated. */
 export function readHistoricalWorkerAccountingState(store: OrchestrationEventStore): HistoricalWorkerAccountingState {
 	const snapshot = store.readProjectionSnapshot();
@@ -132,28 +167,27 @@ export function readHistoricalWorkerAccountingState(store: OrchestrationEventSto
 	};
 	if (snapshot) {
 		const raw = snapshot.projection;
-		for (const [key, value] of Object.entries(record(raw.tasks, "tasks"))) {
-			const task = record(record(value, "task state").task, "task");
-			if (task.taskId !== key) throw new Error("Archived task key conflicts with its identity.");
-			readTask(task);
-		}
+		readRecordSet(state, { tasks: raw.tasks, attempts: raw.attempts, checkpoints: raw.checkpoints }, readTask, false);
 		for (const [key, value] of Object.entries(record(raw.agents, "agents"))) {
 			if (record(value, "agent").agentId !== key) throw new Error("Archived agent key conflicts with its identity.");
 			readAgent(value);
 		}
-		const checkpoints = record(raw.checkpoints, "checkpoints");
-		for (const [key, value] of Object.entries(record(raw.attempts, "attempts"))) {
-			const attempt = readAttempt(value);
-			if (attempt.attemptId !== key) throw new Error("Archived attempt key conflicts with its identity.");
-			if (!attempt.usage) {
-				const ids = record(value, "attempt").checkpointIds;
-				if (!Array.isArray(ids)) throw new Error("Invalid archived checkpoint identities.");
-				for (const id of ids) {
-					const checkpoint = checkpoints[identity(id, "checkpoint identity")];
-					if (isPlainRecord(checkpoint) && checkpoint.usage !== undefined) attempt.usage = usage(checkpoint.usage);
-				}
-			}
-			state.attempts.set(key, attempt);
+		// A release removes records from the projection and leaves them in the session's archive. An archive of this session
+		// that the snapshot names as committed is folded in for the records the snapshot does not hold, before the tail events
+		// apply. An archive of another session is never this session's history.
+		const committed = new Set(retentionArchiveIdsField(raw).retentionArchiveIds ?? []);
+		for (const archive of readRetentionArchives(retentionArchiveDir(store.rootDir)).archives) {
+			if (archive.sessionId !== store.sessionId || !archiveIsCommitted(archive, committed)) continue;
+			readRecordSet(
+				state,
+				{
+					tasks: archive.records.tasks,
+					attempts: archive.records.attempts,
+					checkpoints: archive.records.checkpoints,
+				},
+				readTask,
+				true,
+			);
 		}
 	}
 	const events = snapshot ? store.readAfter(snapshot.throughOrdinal) : store.readAll();

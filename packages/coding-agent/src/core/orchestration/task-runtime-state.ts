@@ -186,6 +186,12 @@ export interface TaskRuntimeProjection extends HostEventProjection {
 	notifications: Readonly<Record<string, NotificationRuntimeState>>;
 	/** Plan graphs the plan executor runs, at most `PLAN_LIMITS.retainedPlans`; see `plan/plan-reducer.ts`. */
 	plans: Readonly<Record<string, PlanRuntimeState>>;
+	/**
+	 * The archive id of every prune that reached this projection, in commit order. It is the durable record of a committed
+	 * prune: the `retention.pruned` event that carried it is compacted away right after its commit. Omitted until the first
+	 * prune, so a session that never pruned keeps the snapshot it always had. See retention.ts.
+	 */
+	retentionArchiveIds?: readonly string[];
 }
 
 export interface OrchestrationProjectionSlotCounts {
@@ -294,6 +300,11 @@ export class DurableTaskRuntimeError extends Error {
 
 export function terminalAttemptStatus(status: AttemptStatus): boolean {
 	return ["completed", "partial", "blocked", "failed", "cancelled", "expired"].includes(status);
+}
+
+/** A queued attempt, or a suspended one with no lease: nothing runs for it, so cancelling it only settles its record. */
+export function attemptAwaitingLease(attempt: Pick<AttemptRuntimeState, "status" | "lease">): boolean {
+	return attempt.status === "queued" || (attempt.status === "suspended" && attempt.lease === undefined);
 }
 
 export function missingTrustedCriteria(result: WorkerResultContract, criterionIds: readonly string[]): string[] {

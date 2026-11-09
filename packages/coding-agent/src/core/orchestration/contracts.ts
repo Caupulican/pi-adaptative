@@ -162,6 +162,26 @@ export type WorkerResultContractStatus = (typeof WORKER_RESULT_STATUSES)[number]
 export const AGENT_BINDING_STATUSES = ["registered", "active", "suspended", "resuming", "retired"] as const;
 export type AgentBindingStatus = (typeof AGENT_BINDING_STATUSES)[number];
 
+/** What an agent's later turns read from turns retention released; written only by `retention.pruned`. */
+export interface AgentPrunedTurns {
+	/** Native turns released so far; the next turn sequence is count + live native attempts + 1. */
+	readonly count: number;
+	/** Earliest admitted turn origin among released turns. */
+	readonly conversationTurnOrigin?: TurnOriginRecord;
+	/** The latest released native attempt, carried as the basis of the agent's next turn. */
+	readonly last?: {
+		readonly attemptId: string;
+		readonly taskId: string;
+		readonly objectiveId: string;
+		readonly status: AttemptStatus;
+		/** attemptTurnOrigin of the last released attempt. */
+		readonly ownTurnOrigin?: TurnOriginRecord;
+		/** The acceptance criteria of the released task; a continuation of this basis files with them. */
+		readonly acceptanceCriterionIds: readonly string[];
+		readonly dispatch: OrchestrationDispatchRequest;
+	};
+}
+
 /** Durable logical identity. A replacement OS process resumes this same binding after interruption. */
 export interface AgentBindingContract extends AgentIdentityContract {
 	schemaVersion: typeof ORCHESTRATION_SCHEMA_VERSION;
@@ -176,6 +196,8 @@ export interface AgentBindingContract extends AgentIdentityContract {
 	role: WorkerRole;
 	status: AgentBindingStatus;
 	activeAttemptId?: string;
+	/** Turns retention released for this agent. Written only by the `retention.pruned` reducer case. */
+	prunedTurns?: AgentPrunedTurns;
 	createdAt: string;
 	updatedAt: string;
 }
@@ -643,6 +665,7 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"plan.node_held",
 	"plan.join_settled",
 	"plan.closed",
+	"retention.pruned",
 ] as const;
 
 export type OrchestrationEventType = (typeof ORCHESTRATION_EVENT_TYPES)[number];

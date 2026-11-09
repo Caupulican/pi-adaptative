@@ -1,7 +1,7 @@
 import type { LaneRecord, LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import { selectedTaskAttempt } from "../orchestration/attempt-ordering.ts";
 
-export { attemptVerification } from "../orchestration/verification-identity.ts";
+export { attemptAwaitsParent, attemptVerification } from "../orchestration/verification-identity.ts";
 
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { attemptVerification, currentTaskTerminalOverride } from "../orchestration/verification-identity.ts";

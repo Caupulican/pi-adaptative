@@ -96,14 +96,25 @@ function emptyProjectionSerializedBytes(lastOrdinal: number): number {
 	return serializedJsonBytes({ ...emptyProjection(), lastOrdinal }, "Orchestration projection");
 }
 
+/**
+ * The serialized bytes the optional committed-archive list adds to a projection: its key, its value and the separating comma.
+ * Zero while the list is absent, so a projection that never pruned measures exactly as it did before the list existed.
+ */
+export function retentionArchiveIdsSerializedBytes(
+	projection: Pick<TaskRuntimeProjection, "retentionArchiveIds">,
+): number {
+	if (projection.retentionArchiveIds === undefined) return 0;
+	return serializedJsonBytes({ retentionArchiveIds: projection.retentionArchiveIds }, "Orchestration projection") - 1;
+}
+
 /** Compute once for snapshots/external projections; reducer-produced projections carry a delta cache. */
 export function projectionSerializedBytes(projection: TaskRuntimeProjection): number {
 	const cached = projectionSerializedByteCache.get(projection);
 	if (cached !== undefined) return cached;
-	const expectedFields = new Set<string>(["lastOrdinal", ...PROJECTION_RECORD_FIELDS]);
+	const expectedFields = new Set<string>(["lastOrdinal", "retentionArchiveIds", ...PROJECTION_RECORD_FIELDS]);
 	const unsupported = Object.keys(projection).find((field) => !expectedFields.has(field));
 	if (unsupported) throw new DurableTaskRuntimeError(`Orchestration projection.${unsupported} is unsupported.`);
-	let bytes = emptyProjectionSerializedBytes(projection.lastOrdinal);
+	let bytes = emptyProjectionSerializedBytes(projection.lastOrdinal) + retentionArchiveIdsSerializedBytes(projection);
 	for (const field of PROJECTION_RECORD_FIELDS) {
 		let entryCount = 0;
 		for (const [key, value] of Object.entries(projection[field])) {
@@ -197,10 +208,13 @@ export class ProjectionByteTracker {
 		});
 	}
 
-	finish(nextOrdinal: number): number {
+	/** `next` is the projection the event produced: its committed-archive list is not tracked per record, so it is measured here. */
+	finish(nextOrdinal: number, next: TaskRuntimeProjection): number {
 		this.bytes +=
 			serializedJsonBytes(nextOrdinal, "Orchestration projection ordinal") -
-			serializedJsonBytes(this.source.lastOrdinal, "Orchestration projection ordinal");
+			serializedJsonBytes(this.source.lastOrdinal, "Orchestration projection ordinal") +
+			retentionArchiveIdsSerializedBytes(next) -
+			retentionArchiveIdsSerializedBytes(this.source);
 		if (this.bytes > MAX_ORCHESTRATION_PROJECTION_BYTES) {
 			throw new DurableTaskRuntimeError(
 				`Orchestration projection exceeds its ${MAX_ORCHESTRATION_PROJECTION_BYTES}-byte limit.`,

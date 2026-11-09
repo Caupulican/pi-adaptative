@@ -54,7 +54,9 @@ import {
 	type WorkerResultContract,
 } from "./contracts.ts";
 import type { OrchestrationEventStore } from "./event-store.ts";
-import { describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
+import { assertLifetimeHeadroom, describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
+import { assertRetentionPruneAllowed } from "./retention-eligibility.ts";
+import { RetentionPlanStaleError, type RetentionPrunedPayload, retentionPruneEventInput } from "./retention-event.ts";
 import {
 	approvalFromPayload,
 	assertAcceptanceCriteria,
@@ -167,18 +169,6 @@ export interface DurableTaskRuntimeOptions {
 	createId?: () => string;
 }
 
-/** The retained record kinds with a lifetime bound on the hot projection, in the order a shortage is reported. */
-const LIFETIME_BOUNDED_RECORDS = [
-	{ field: "agents", label: "Agent binding", noun: "agent bindings" },
-	{ field: "tasks", label: "Task", noun: "tasks" },
-	{ field: "attempts", label: "Attempt", noun: "attempts" },
-	{ field: "objectives", label: "Objective", noun: "objectives" },
-	{ field: "checkpoints", label: "Checkpoint", noun: "checkpoints" },
-	{ field: "approvals", label: "Approval", noun: "approvals" },
-	{ field: "notifications", label: "Notification", noun: "notifications" },
-	{ field: "evidence", label: "Evidence", noun: "evidence entries" },
-] as const;
-
 export class DurableTaskRuntime {
 	readonly hostEvents: HostEventRuntime;
 	private readonly store: OrchestrationEventStore;
@@ -231,17 +221,7 @@ export class DurableTaskRuntime {
 			if (slots > capacity.headroom[field])
 				throw new DurableTaskRuntimeError(`Orchestration ${field} lacks ${slots} required slots.`);
 		}
-		const requests = LIFETIME_BOUNDED_RECORDS.map((record) => ({
-			record,
-			slots: requestedProjectionSlots(required[record.field], record.label),
-		}));
-		for (const { record, slots } of requests) {
-			if (slots <= capacity.headroom[record.field]) continue;
-			// The bound is per session and lifetime: finished records stay in the projection, so only a new session frees room.
-			throw new DurableTaskRuntimeError(
-				`This session has used ${capacity.counts[record.field]} of its ${capacity.limits[record.field]} ${record.noun} (a lifetime limit; finished ones count until the session ends) and ${slots} more ${slots === 1 ? "is" : "are"} needed. Start a new session to continue.`,
-			);
-		}
+		assertLifetimeHeadroom(this.state, capacity, required);
 		return capacity;
 	}
 
@@ -1579,6 +1559,19 @@ export class DurableTaskRuntime {
 		return attempt;
 	}
 
+	/** Commits one retention prune planned at `plannedAtOrdinal`, then folds the tail into a snapshot (retention-pass.ts). */
+	commitRetentionPrune(payload: RetentionPrunedPayload, plannedAtOrdinal: number): void {
+		this.refresh();
+		if (this.state.lastOrdinal !== plannedAtOrdinal) {
+			throw new RetentionPlanStaleError(plannedAtOrdinal, this.state.lastOrdinal);
+		}
+		// The planner's rules are judged here, on the state the guard just proved current. Replay applies the logged prune
+		// with the structural checks only, so a rule added later cannot refuse a prune that was already committed.
+		assertRetentionPruneAllowed(this.state, payload, new Date(this.now()).toISOString());
+		this.commit(retentionPruneEventInput(payload));
+		this.compactCurrentProjection(undefined, true);
+	}
+
 	private refresh(lockOptions?: Readonly<AtomicFileLockOptions>): void {
 		if (this.hostTransactionActive)
 			throw new DurableTaskRuntimeError("Cannot refresh or re-enter a borrowed host event transaction.");
@@ -1614,9 +1607,9 @@ export class DurableTaskRuntime {
 		if (event.ordinal > this.state.lastOrdinal) this.state = deepFreeze(reduceOrchestrationEvent(this.state, event));
 	}
 
-	private compactCurrentProjection(lockOptions?: Readonly<AtomicFileLockOptions>): void {
+	private compactCurrentProjection(lockOptions?: Readonly<AtomicFileLockOptions>, force = false): void {
 		if (this.state.lastOrdinal > 0) {
-			this.store.compactIfNeeded(this.state.lastOrdinal, () => toJsonObject(this.state), lockOptions);
+			this.store.compactIfNeeded(this.state.lastOrdinal, () => toJsonObject(this.state), lockOptions, force);
 		}
 	}
 

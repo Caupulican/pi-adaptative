@@ -6,7 +6,8 @@
  * call. One drain runs at a time; a commit during a drain marks it dirty and the drain runs again. Work that awaits
  * (preparing a release, the vote judgment, a plan-update delivery) runs beside the drain and asks for a new drain when
  * it ends. A release or action the fleet refused, or that failed, is parked until the room, the goal or the plan
- * changes, so the executor never loops on its own refusals.
+ * changes, so the executor never loops on its own refusals. A read-only step the fleet refused on a linked machine is
+ * not parked: the machine is skipped for that release and the step runs here on the next drain.
  *
  * Restart recovery is the same reconcile: every fact it reads is durable (plan events, task outcomes, the parent-input
  * receipts of plan-updates), a release replays through the fleet's idempotency key, and a plan-update's delivery id is
@@ -62,17 +63,30 @@ import {
 	type PlanRecord,
 	type PlanRuntimeState,
 } from "./plan-graph.ts";
+import { placementFor } from "./plan-placement.ts";
 import { type PlanAction, type PlanUpdateIntent, reconcilePlans } from "./plan-reconcile.ts";
 import { planNodeOfTask } from "./plan-reducer.ts";
-import { resolveSince, splitNodes, verifyWrapNodes } from "./plan-revision.ts";
+import { placeHereNodes, resolveSince, verifyWrapNodes } from "./plan-revision.ts";
 import { planUpdateDelivery, planUpdateDeliveryId } from "./plan-update.ts";
 import { activeRootPlan, listPlanViews, planNodeBrief, planView } from "./plan-view.ts";
 
 /** Reconcile passes one drain may run before it yields to the next event. */
 const MAX_DRAIN_PASSES = 16;
 const VOTE_SUMMARY_CHARS = 600;
+const NO_MACHINES: ReadonlySet<string> = new Set();
 
-type PlanFleet = Pick<FleetScheduler, "prepare" | "admit" | "cancel" | "room" | "subscribeRoom">;
+type PlanFleet = Pick<
+	FleetScheduler,
+	| "prepare"
+	| "admit"
+	| "cancel"
+	| "room"
+	| "subscribeRoom"
+	| "releasePrepared"
+	| "placementCandidates"
+	| "hasRemoteBackend"
+	| "subscribeCandidates"
+>;
 
 export interface PlanExecutorDeps {
 	readonly runtime: () => DurableTaskRuntime;
@@ -237,6 +251,13 @@ export class PlanExecutor implements PlanExecutorPort {
 	private readonly delivering = new Set<string>();
 	private readonly roomQueries = new Map<string, RoomQuery>();
 	private readonly roomSubscriptions = new Map<string, () => void>();
+	/** The room queries the last pass found waiting on local room: a machine that becomes a candidate wakes them. */
+	private waitingRoomKeys: ReadonlySet<string> = new Set();
+	private unsubscribeCandidates: (() => void) | undefined;
+	/** Linked machines a release's remote placement was refused by, per release key: never offered again for that release. */
+	private readonly remoteRefused = new Map<string, Set<string>>();
+	/** Release keys a temporary remote refusal parked, with the machine the offer stays prepared for: retried when candidates change. */
+	private readonly remoteParked = new Map<string, string>();
 	private nodeStates = new Map<string, PlanNodeState>();
 	/** The rendered plan views at the last observed snapshot; a different rendering is a visible change. */
 	private visibleViews: string | undefined;
@@ -262,6 +283,8 @@ export class PlanExecutor implements PlanExecutorPort {
 		this.disposed = true;
 		this.abort.abort();
 		this.unsubscribeStore?.();
+		this.unsubscribeCandidates?.();
+		this.unsubscribeCandidates = undefined;
 		for (const unsubscribe of this.roomSubscriptions.values()) unsubscribe();
 		this.roomSubscriptions.clear();
 	}
@@ -413,9 +436,25 @@ export class PlanExecutor implements PlanExecutorPort {
 		}
 	}
 
+	/**
+	 * Forgets the remote refusals of releases no open plan still waits on: a revised release has a new key, a closed plan has
+	 * none left to wait on, and a started release is already forgotten at its start.
+	 */
+	private forgetRemoteReleases(snapshot: TaskRuntimeProjection): void {
+		if (this.remoteRefused.size === 0 && this.remoteParked.size === 0) return;
+		const waiting = new Set<string>();
+		for (const [planId, plan] of Object.entries(snapshot.plans))
+			if (!plan.closed)
+				for (const [nodeId, node] of Object.entries(plan.nodes))
+					if (!node.release) waiting.add(planReleaseKey(planId, nodeId, node.since));
+		for (const key of [...this.remoteRefused.keys()]) if (!waiting.has(key)) this.remoteRefused.delete(key);
+		for (const key of [...this.remoteParked.keys()]) if (!waiting.has(key)) this.remoteParked.delete(key);
+	}
+
 	private pass(): void {
 		const runtime = this.deps.runtime();
 		const snapshot = runtime.getSnapshot();
+		this.forgetRemoteReleases(snapshot);
 		if (Object.keys(snapshot.plans).length === 0) return;
 		const result = reconcilePlans(snapshot, this.deps.goal());
 		const room = new Map<string, number>();
@@ -553,9 +592,13 @@ export class PlanExecutor implements PlanExecutorPort {
 					(record, version) => verifyWrapNodes(record, action.nodeId, action.requirementIds, version),
 				);
 				return;
-			case "split":
-				this.hostRevision(action.planId, action.nodeId, action.outcome.generation, "a split", (record, version) =>
-					splitNodes(record, action.nodeId, action.requirementIds, version),
+			case "replace":
+				this.hostRevision(
+					action.planId,
+					action.nodeId,
+					action.outcome.generation,
+					"a re-placement on this machine",
+					(record, version) => placeHereNodes(record, action.nodeId, version),
 				);
 				return;
 		}
@@ -580,8 +623,8 @@ export class PlanExecutor implements PlanExecutorPort {
 	}
 
 	/**
-	 * A host revision (verify wrap, split): version+1 with the new nodes; a version the facts refuse holds the step for
-	 * the root's revise instead.
+	 * A host revision (verify wrap, re-placement): version+1 with the new nodes; a version the facts refuse holds the step
+	 * for the root's revise instead.
 	 */
 	private hostRevision(
 		planId: string,
@@ -751,7 +794,10 @@ export class PlanExecutor implements PlanExecutorPort {
 
 	// ---- releases ----
 
-	/** Rule 5: one release through the fleet, within the room's ready window. */
+	/**
+	 * Rule 5: one release through the fleet. A read-only step may go to a linked machine (`plan-placement.ts`); otherwise it
+	 * starts here, within the room's ready window.
+	 */
 	private release(
 		action: Extract<PlanAction, { kind: "release" }>,
 		snapshot: TaskRuntimeProjection,
@@ -771,18 +817,43 @@ export class PlanExecutor implements PlanExecutorPort {
 		};
 		const roomKey = queryKey(query);
 		this.roomQueries.set(roomKey, query);
-		if (!room.has(roomKey)) {
-			const inFlight = [...this.releasing.values()].filter((entry) => entry.query === roomKey).length;
-			room.set(roomKey, this.deps.fleet().room(query).readyWindowFree - inFlight);
+		const fleet = this.deps.fleet();
+		const candidates = fleet.placementCandidates();
+		const chosen = placementFor(node, decidePlacement(node), {
+			localRunnable: candidates.length > 0 ? fleet.room(query).runnableNow : 0,
+			candidates,
+			refused: this.remoteRefused.get(key) ?? NO_MACHINES,
+			remoteBackend: fleet.hasRemoteBackend(),
+		});
+		// An offer a temporary refusal left prepared is kept only for the machine it was prepared for.
+		const parkedOn = this.remoteParked.get(key);
+		if (parkedOn !== undefined) {
+			this.remoteParked.delete(key);
+			if (chosen.placement.kind !== "remote_machine" || chosen.placement.machineId !== parkedOn)
+				fleet.releasePrepared(key);
 		}
-		const free = room.get(roomKey) ?? 0;
-		if (free <= 0) {
-			waiting.add(roomKey);
-			return;
+		// A remote placement was checked against the candidates' room; only a local start waits on the ready window.
+		if (chosen.placement.kind !== "remote_machine") {
+			if (!room.has(roomKey)) {
+				const inFlight = [...this.releasing.values()].filter((entry) => entry.query === roomKey).length;
+				room.set(roomKey, fleet.room(query).readyWindowFree - inFlight);
+			}
+			const free = room.get(roomKey) ?? 0;
+			if (free <= 0) {
+				waiting.add(roomKey);
+				return;
+			}
+			room.set(roomKey, free - 1);
 		}
-		room.set(roomKey, free - 1);
-		const { placement, exit } = decidePlacement(node);
-		const run = this.admit(record.planId, node.id, node.since, dispatch, placement, exit, roomKey).finally(() => {
+		const run = this.admit(
+			record.planId,
+			node.id,
+			node.since,
+			dispatch,
+			chosen.placement,
+			chosen.exit,
+			roomKey,
+		).finally(() => {
 			this.releasing.delete(key);
 			this.requestDrain();
 		});
@@ -803,20 +874,44 @@ export class PlanExecutor implements PlanExecutorPort {
 			this.parked.set(key, roomKey);
 			harnessLog.info("plan", "a plan step release waits", { planId, nodeId, reason, detail });
 		};
+		// A temporary remote refusal (the machine's room or runtime is momentarily unavailable: the refusal carries a retry time)
+		// keeps its offer prepared and the step parked on that machine; a candidate change offers it again. A permanent one
+		// releases the offer, the machine is not offered again for this release, and the next drain releases the step here
+		// (or on another candidate).
+		const refused = (refusal: { readonly reason: string; readonly detail: string; readonly retryAt?: number }) => {
+			if (placement.kind !== "remote_machine") return park(refusal.reason, refusal.detail);
+			const machineId = placement.machineId;
+			// A must-pinned step can only be placed on its machine, so only a candidate change can help it: every refusal parks it.
+			if (exit === "pin_machine_must" || refusal.retryAt !== undefined) {
+				this.remoteParked.set(key, machineId);
+				return park(refusal.reason, refusal.detail);
+			}
+			this.deps.fleet().releasePrepared(key);
+			this.remoteRefused.set(key, new Set([...(this.remoteRefused.get(key) ?? []), machineId]));
+			harnessLog.info("plan", "a plan step's remote placement was refused; it is released here", {
+				planId,
+				nodeId,
+				machineId,
+				reason: refusal.reason,
+			});
+			this.requestDrain();
+		};
 		try {
 			const fleet = this.deps.fleet();
 			const prepared = await fleet.prepare(dispatch, placement, this.abort.signal);
 			if (this.disposed) return;
-			if (prepared.kind === "refused") return park(prepared.reason, prepared.detail);
+			if (prepared.kind === "refused") return refused(prepared);
 			const current = this.deps.runtime().getSnapshot().plans[planId];
 			const runtime = current?.nodes[nodeId];
 			if (!current || current.closed || !runtime || runtime.since !== version || runtime.release) {
 				harnessLog.info("plan", "a prepared plan step changed before it started", { planId, nodeId });
+				fleet.releasePrepared(key);
 				return;
 			}
 			const decision = fleet.admit(dispatch, placement);
-			if (decision.kind === "refused") return park(decision.reason, decision.detail);
+			if (decision.kind === "refused") return refused(decision);
 			this.deps.runtime().releasePlanNode({ planId, version, nodeId, taskId: decision.taskId, placement, exit });
+			this.remoteRefused.delete(key);
 			harnessLog.info("plan", "a plan step is released", {
 				planId,
 				nodeId,
@@ -832,6 +927,14 @@ export class PlanExecutor implements PlanExecutorPort {
 
 	/** Room subscriptions follow the queries a release waits on; a room change unparks and drains. */
 	private syncRoomSubscriptions(waiting: ReadonlySet<string>): void {
+		this.waitingRoomKeys = waiting;
+		// A candidate change re-runs the releases waiting on local room, and places again the remote placements a temporary
+		// refusal parked (subscribed once).
+		this.unsubscribeCandidates ??= this.deps.fleet().subscribeCandidates(() => {
+			let unparked = false;
+			for (const key of this.remoteParked.keys()) unparked = this.parked.delete(key) || unparked;
+			if (unparked || this.waitingRoomKeys.size > 0) this.requestDrain();
+		});
 		const wanted = new Set([
 			...waiting,
 			...[...this.parked.values()].filter((key): key is string => key !== undefined),

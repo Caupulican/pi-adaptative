@@ -112,6 +112,17 @@ export function clampMemoryHistoryRetentionDays(value: unknown): number | undefi
 	return Math.min(MEMORY_HISTORY_RETENTION_DAYS_MAX, Math.max(MEMORY_HISTORY_RETENTION_DAYS_MIN, Math.trunc(finite)));
 }
 
+export const ORCHESTRATION_RETENTION_DAYS_DEFAULT = 14;
+
+export const ORCHESTRATION_RETENTION_DAYS_MAX = 3650;
+
+/** Unset or a non-finite, non-number value reads as the default; a finite value is truncated, then clamped to [0, max]. */
+export function clampOrchestrationRetentionDays(value: unknown): number {
+	const finite = finiteNumberOrUndefined(value);
+	if (finite === undefined) return ORCHESTRATION_RETENTION_DAYS_DEFAULT;
+	return Math.min(ORCHESTRATION_RETENTION_DAYS_MAX, Math.max(0, Math.trunc(finite)));
+}
+
 export const DEFAULT_AUTONOMY_MAX_STALL_TURNS = DEFAULT_GOAL_CONTINUE_MAX_STALL_TURNS;
 
 export const DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS = DEFAULT_GOAL_CONTINUE_MAX_TURNS;

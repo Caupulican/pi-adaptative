@@ -59,6 +59,7 @@ import {
 	refusalForSkip,
 	weightOf,
 } from "./local-admit.ts";
+import { decideRemoteAdmit, REMOTE_NO_BACKEND, type RemoteBackendPort, remoteRefusal } from "./remote-admit.ts";
 
 /** First recheck of a machine or unstated-reset allowance wait with nothing running; doubles up to the cap. */
 export const FLEET_RECHECK_INITIAL_MS = 30_000;
@@ -99,6 +100,8 @@ export interface FleetLocalPort {
 	isAttemptLive(attemptId: string): boolean;
 	/** The attempt's measured cost so far, in dollars; undefined when unpriced or unknown. */
 	attemptCostUsd(attemptId: string): number | undefined;
+	/** The model the attempt runs on: its running model, else its contract's binding; undefined when unknown. */
+	attemptModel?(attemptId: string): Model<Api> | undefined;
 }
 
 export interface SessionFleetSchedulerDeps {
@@ -157,6 +160,8 @@ export class SessionFleetScheduler implements FleetScheduler {
 	private readonly accountReadings = new Map<string, AllowanceReading>();
 	private readonly lastWait = new Map<string, { key: string; reason: FleetWaitReason; retryAt?: number }>();
 	private readonly alarms = new Map<string, WallAlarm & { readonly at: number }>();
+	/** The next re-offer of the placement candidates, armed for a remote refusal that carries a retry time. */
+	private candidateWake: { readonly at: number; readonly stop: () => void } | undefined;
 	private readonly rechecks = new Map<string, Recheck>();
 	private readonly ceilingEpisodes = new Set<string>();
 	private readonly pendingWakes = new Set<string>();
@@ -165,8 +170,11 @@ export class SessionFleetScheduler implements FleetScheduler {
 	private readonly unsubscribeAllowance: (() => void) | undefined;
 	private readonly claims: FleetLocalClaims;
 	private readonly unsubscribeWindows: () => void;
-	/** Local dispatches prepared and not yet admitted, by key, so a scope cancel releases its own. */
+	/** Local and remote-machine dispatches prepared and not yet admitted, by key, so a scope cancel releases its own. */
 	private readonly prepared = new Map<string, FleetDispatch>();
+	/** The session's remote-machine backend; undefined until one registers, and then no remote placement is offered. */
+	private remote: RemoteBackendPort | undefined;
+	private readonly candidateListeners = new Set<() => void>();
 	/** The highest version of each plan node any prepare has been asked for: `planId` and `nodeId` joined by NUL. */
 	private readonly planVersions = new Map<string, number>();
 	private local: FleetLocalPort | undefined;
@@ -321,7 +329,13 @@ export class SessionFleetScheduler implements FleetScheduler {
 	/** A local attempt's run ended: its slot is free again (the controller drains on the same terminal). */
 	noteReleased(attemptId: string): void {
 		this.yields.delete(attemptId);
-		this.claims.released(attemptId, () => this.local?.attemptCostUsd(attemptId));
+		const local = this.local;
+		this.claims.released(
+			attemptId,
+			() => local?.attemptCostUsd(attemptId),
+			local?.attemptModel?.(attemptId),
+			local !== undefined && !local.isAttemptLive(attemptId),
+		);
 		const now = this.deps.timers.now();
 		if (this.lastReleaseAt !== undefined) {
 			const interval = Math.max(1, now - this.lastReleaseAt);
@@ -363,7 +377,9 @@ export class SessionFleetScheduler implements FleetScheduler {
 	// ---- FleetScheduler ----
 
 	async prepare(dispatch: FleetDispatch, placement: Placement, signal?: AbortSignal): Promise<PrepareDecision> {
-		if (placement.kind !== "local_worker" || this.decisions.has(dispatch.idempotencyKey)) return { kind: "prepared" };
+		if (this.decisions.has(dispatch.idempotencyKey)) return { kind: "prepared" };
+		if (placement.kind === "remote_machine") return this.prepareRemote(dispatch, placement.machineId, signal);
+		if (placement.kind !== "local_worker") return { kind: "prepared" };
 		const port = this.startPort;
 		if (!port) return NO_LOCAL_STARTS;
 		// A node's newer version supersedes the older prepared one: the older allocation is returned, never held until disposal.
@@ -467,9 +483,11 @@ export class SessionFleetScheduler implements FleetScheduler {
 								.filter(inScope)
 								.map((lane) => lane.laneId),
 						];
-		if (laneIds.length === 0) return;
-		harnessLog.info("fleet", "a fleet scope is cancelled", { scope: scope.kind, lanes: laneIds.length, reasonCode });
-		local.cancelLanes(laneIds, reasonCode);
+		// A remote job's id is cancelled through its backend only; the local lanes take the rest.
+		const localIds = laneIds.filter((id) => !this.remote?.cancel(id, reasonCode));
+		if (localIds.length === 0) return;
+		harnessLog.info("fleet", "a fleet scope is cancelled", { scope: scope.kind, lanes: localIds.length, reasonCode });
+		local.cancelLanes(localIds, reasonCode);
 	}
 
 	stop(): void {
@@ -556,6 +574,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 		const unsubscribe = source.subscribe(() => {
 			this.changed();
 			this.wake(`placement:${source.key}`);
+			this.notifyCandidates();
 		});
 		this.sources.set(source.key, { source, unsubscribe });
 		this.changed();
@@ -568,6 +587,42 @@ export class SessionFleetScheduler implements FleetScheduler {
 		};
 	}
 
+	/** Registers the session's remote-machine backend; the returned function unregisters it when it is still the one registered. */
+	registerRemoteBackend(port: RemoteBackendPort): () => void {
+		this.remote = port;
+		return () => {
+			if (this.remote === port) this.remote = undefined;
+		};
+	}
+
+	/** Whether a remote-machine backend is registered: a must-pinned step waits on it, and runs here without one. */
+	hasRemoteBackend(): boolean {
+		return this.remote !== undefined;
+	}
+
+	/** Linked machines a read-only plan step may go to now: online, not held, taking jobs, and a free slot; the roomiest first. */
+	placementCandidates(): readonly { readonly machineId: string; readonly slots: number }[] {
+		const remote = this.remote;
+		if (!remote) return [];
+		const candidates: { machineId: string; slots: number }[] = [];
+		for (const [key, { source }] of this.sources) {
+			if (!key.startsWith("machine:")) continue;
+			const machineId = key.slice("machine:".length);
+			const status = remote.status(machineId);
+			const slots = source.room().slots;
+			if (status.linked && !status.held && status.online && slots >= 1) candidates.push({ machineId, slots });
+		}
+		return candidates.sort((a, b) => b.slots - a.slots || (a.machineId < b.machineId ? -1 : 1));
+	}
+
+	/** Fires when any placement capacity source changes; a listener's failure never stops the others from hearing it. */
+	subscribeCandidates(onChange: () => void): () => void {
+		this.candidateListeners.add(onChange);
+		return () => {
+			this.candidateListeners.delete(onChange);
+		};
+	}
+
 	/** Writes the restart metadata and releases every alarm, subscription and registry entry. */
 	dispose(): void {
 		if (this.disposed) return;
@@ -575,6 +630,8 @@ export class SessionFleetScheduler implements FleetScheduler {
 		this.store.close();
 		for (const alarm of this.alarms.values()) alarm.stop();
 		this.alarms.clear();
+		this.candidateWake?.stop();
+		this.candidateWake = undefined;
 		for (const recheck of this.rechecks.values()) recheck.alarm?.stop();
 		this.rechecks.clear();
 		for (const { unsubscribe } of this.sources.values()) unsubscribe();
@@ -588,7 +645,9 @@ export class SessionFleetScheduler implements FleetScheduler {
 		this.claims.dispose((attemptId) => local?.attemptCostUsd(attemptId));
 		this.unregisterMachine();
 		this.roomSubscribers.clear();
+		this.candidateListeners.clear();
 		this.local = undefined;
+		this.remote = undefined;
 	}
 
 	// ---- internals ----
@@ -610,6 +669,19 @@ export class SessionFleetScheduler implements FleetScheduler {
 
 	private decideAdmit(dispatch: FleetDispatch, placement: Placement): AdmitDecision {
 		if (placement.kind === "local_worker") return this.admitLocal(dispatch);
+		if (placement.kind === "remote_machine") {
+			const decision = decideRemoteAdmit({
+				port: this.remote,
+				source: this.sources.get(`machine:${placement.machineId}`)?.source,
+				dispatch,
+				machineId: placement.machineId,
+				now: this.deps.timers.now(),
+				weight: weightOf(dispatch.demand, dispatch.writeScope),
+			});
+			if (decision.kind !== "refused") this.prepared.delete(dispatch.idempotencyKey);
+			else if (decision.retryAt !== undefined) this.armCandidateWake(decision.retryAt);
+			return decision;
+		}
 		const key = placementCapacityKey(placement);
 		if (key === undefined)
 			return {
@@ -702,9 +774,60 @@ export class SessionFleetScheduler implements FleetScheduler {
 		});
 	}
 
-	private releasePrepared(key: string): void {
+	/** Releases one prepared dispatch (its allocation returns); a key not prepared is ignored. */
+	releasePrepared(key: string): void {
 		this.prepared.delete(key);
 		this.startPort?.release(key);
+		this.remote?.release(key);
+	}
+
+	/**
+	 * A remote-machine dispatch's asynchronous half: the backend builds the job offer, which waits for `admit` to commit it.
+	 * Without a registered backend nothing is offered and the refusal routes the step elsewhere.
+	 */
+	private async prepareRemote(
+		dispatch: FleetDispatch,
+		machineId: string,
+		signal?: AbortSignal,
+	): Promise<PrepareDecision> {
+		const port = this.remote;
+		if (!port) return REMOTE_NO_BACKEND;
+		const prepared = await port.prepare(dispatch, machineId, signal);
+		if (!prepared.ok) {
+			const refusal = remoteRefusal(prepared.code, prepared.detail, this.deps.timers.now());
+			if (refusal.retryAt !== undefined) this.armCandidateWake(refusal.retryAt);
+			return refusal;
+		}
+		this.prepared.set(dispatch.idempotencyKey, dispatch);
+		return { kind: "prepared" };
+	}
+
+	/**
+	 * Re-offers the placement candidates at `at`. A remote placement refused for a moment (a machine's room, or its runtime being
+	 * replaced) is placed again then, because the candidate set need not change when that moment passes. One wake is pending.
+	 */
+	private armCandidateWake(at: number): void {
+		if (this.candidateWake && this.candidateWake.at <= at) return;
+		this.candidateWake?.stop();
+		const handle = this.deps.timers.setTimeout(
+			() => {
+				this.candidateWake = undefined;
+				this.notifyCandidates();
+			},
+			Math.max(0, at - this.deps.timers.now()),
+		);
+		this.candidateWake = { at, stop: () => this.deps.timers.clearTimeout(handle) };
+	}
+
+	/** Tells every placement listener the candidates may have changed; each listener's failure is its own. */
+	private notifyCandidates(): void {
+		for (const listener of [...this.candidateListeners]) {
+			try {
+				listener();
+			} catch {
+				// A listener's failure never stops the others from hearing the change.
+			}
+		}
 	}
 
 	/** Room per account: the allowance readings and the adaptive windows, the smaller binding where both know one. */

@@ -57,6 +57,7 @@ import {
 import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./delegation/bot-daemon-launch.ts";
 import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delegation/bot-daemon-legacy.ts";
 import type { BotMessageDirectory, BotOwnedStartOutcome } from "./delegation/bot-message-contract.ts";
+import { createBotMessageDirectory } from "./delegation/bot-message-directory.ts";
 import { displayNameFor, suggestBotId } from "./delegation/bot-naming.ts";
 import { BotRuntimeBindings, type BotRuntimeContext } from "./delegation/bot-runtime-bindings.ts";
 import { DAEMON_STALE_MS, isOlderDaemonBuild, OWN_DAEMON_BUILD } from "./delegation/bot-team-routine-helpers.ts";
@@ -93,13 +94,16 @@ import {
 	type UpsertPersistentBotInput,
 	type UpsertPersistentTeamInput,
 } from "./delegation/persistent-bot-team-store.ts";
+import {
+	openSessionOrchestrationCore,
+	type SessionOrchestrationCore,
+} from "./delegation/session-orchestration-core.ts";
 import type {
 	SessionRootReply,
 	SessionRootReplyQuery,
 	SessionRootReplyWaitOptions,
 	SessionRootReplyWaitResult,
 } from "./delegation/session-root-mailbox.ts";
-import { sessionRootAddress } from "./delegation/session-root-mailbox.ts";
 import { getWorkerClaimSnapshots, readWorkerClaimSnapshotForAttempt } from "./delegation/session-worker-claim.ts";
 import { type TerminalRoute, type TerminalRouteOwner, TerminalRouting } from "./delegation/terminal-routing.ts";
 import type {
@@ -129,7 +133,7 @@ import type { WorkerDelegationRequest } from "./delegation/worker-delegation-req
 import { deriveFanoutGroups, type FanoutGroupReport } from "./delegation/worker-fanout.ts";
 import { WorkerLaneIsolation } from "./delegation/worker-lane-isolation.ts";
 import { isManagedWorkerAttempt, projectWorkerAttemptLaneRecord } from "./delegation/worker-lane-projection.ts";
-import { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
+import type { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { contractGrantsChildren } from "./delegation/worker-nested-start.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
@@ -165,6 +169,8 @@ import type {
 	WorkerResultContract,
 } from "./orchestration/contracts.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
+import { OrchestrationRetentionController } from "./orchestration/retention-controller.ts";
+import type { RetentionPassDeps } from "./orchestration/retention-pass.ts";
 import type {
 	TaskProfileCreateInput,
 	TaskProfileCreateResult,
@@ -319,6 +325,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _workerLifecycle: WorkerLifecycle | undefined;
 	/** The lifecycle's durable event store: every attempt transition commits through it. */
 	private _orchestrationStore: OrchestrationEventStore | undefined;
+	/** The store and lifecycle as the session opens them, before (or without) the worker composition. */
+	private _orchestrationCore: SessionOrchestrationCore | undefined;
 	/** Settles each unresolved running-attempt wait when the session is disposed. */
 	private readonly _runningAttemptWaits = new Set<() => void>();
 	/** Durable usage delivery shares the lifecycle's event store, independently of terminal handoffs. */
@@ -507,49 +515,44 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._workers;
 	}
 
-	/** What the worktree lane lifecycles need from this session: engine deps, a way to tell the parent, a warning sink. */
-	private _worktreeLaneHostDeps() {
+	/** Worktree lane deps for this session; `gated` applies the sync gate to the engine deps (the managed-lane lifecycle). */
+	private _worktreeLaneHostDeps(gated = false) {
 		return {
-			engineDeps: (cwd?: string) => this._worktreeEngineDeps(cwd),
+			engineDeps: (cwd?: string) => this._worktreeEngineDeps(cwd, gated),
+			isolateByDefault: () => this.deps.getSettingsManager().getWorktreeSyncSettings().enabled,
 			notifyParent: (text: string, origin?: ParentWriteOrigin) =>
 				this.deps.notifyParentSession?.("worktree-sync-notice", text, origin),
 			warn: (message: string) => this._safeWarn(message),
 		};
 	}
 
-	/** Worktree-sync engine deps rooted at `cwd` (the session's directory when omitted); undefined when disabled. */
-	private _worktreeEngineDeps(cwd?: string): WorktreeSyncEngineDeps | undefined {
-		const settingsManager = this.deps.getSettingsManager();
-		if (!settingsManager.getWorktreeSyncSettings().enabled) return undefined;
+	/** Engine deps rooted at `cwd` (the session's directory when omitted); undefined when sync is disabled and `gated`. */
+	private _worktreeEngineDeps(cwd?: string, gated = true): WorktreeSyncEngineDeps | undefined {
+		if (gated && !this.deps.getSettingsManager().getWorktreeSyncSettings().enabled) return undefined;
 		return buildWorktreeSyncEngineDeps({
 			cwd: cwd ?? this.deps.getCwd(),
 			agentDir: this.deps.getAgentDir(),
-			settingsManager,
+			settingsManager: this.deps.getSettingsManager(),
 			sessionId: this.deps.getSessionId(),
 			integrationBranch: () => this.deps.localCommitBranch?.() || undefined,
 			ports: this.deps.getWorktreeSyncEnginePorts(),
 		});
 	}
 
+	/** The session's store and durable lifecycle, opened once; the retention pass reads it without the worker composition. */
+	private _getOrchestrationCore(): SessionOrchestrationCore {
+		this._orchestrationCore ??= openSessionOrchestrationCore({
+			agentDir: this.deps.getAgentDir(),
+			sessionId: this.deps.getSessionId(),
+			timers: this.deps.getTimers(),
+		});
+		return this._orchestrationCore;
+	}
+
 	private _getWorkerLifecycle(): WorkerLifecycle {
 		if (this._workerLifecycle) return this._workerLifecycle;
 		const parentSessionId = this.deps.getSessionId();
-		// The retry ladder persists its deadline on the orchestration clock; the runtime rechecks it on the same clock, and the
-		// store stamps every event on it too, because the reducer compares a start's event time with that deadline.
-		const timers = this.deps.getTimers();
-		const orchestrationClock = timers.port("orchestration");
-		const store = new OrchestrationEventStore({
-			agentDir: this.deps.getAgentDir(),
-			sessionId: parentSessionId,
-			now: () => new Date(orchestrationClock.now()).toISOString(),
-			sleepSync: (delayMs) => timers.sleepSync(delayMs),
-		});
-		const lifecycle = new WorkerLifecycle({
-			agentDir: this.deps.getAgentDir(),
-			sessionId: parentSessionId,
-			store,
-			now: () => orchestrationClock.now(),
-		});
+		const { store, lifecycle } = this._getOrchestrationCore();
 		this._workerLifecycle = lifecycle;
 		this._orchestrationStore = store;
 		this._unsubscribeLaneRecordStore = store.subscribe(() => this._laneRecordsChanged());
@@ -727,7 +730,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			(message) => this._safeWarn(message),
 			(attemptId, ownerEpoch) =>
 				this._getWorkerNotificationCoordinator().noteAttemptOwnerEpoch(attemptId, ownerEpoch),
-			new WorktreeLaneLifecycle(this._worktreeLaneHostDeps()),
+			new WorktreeLaneLifecycle(this._worktreeLaneHostDeps(true)),
 		);
 		return this._managedLanes;
 	}
@@ -990,6 +993,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		let workerShutdown = Promise.resolve();
 		this._runTeardownStep("dispose goal auto-continue", () => this._goalAutoContinue.dispose());
 		this._runTeardownStep("abort research lanes", () => this._research.abort());
+		this._runTeardownStep("stop retention", () => this._retention?.clearTimer());
 		this._runTeardownStep("abort proactive review", () => this._proactivity.abort());
 		this._runTeardownStep("abort model-fitness lanes", () => this._fitness.abort());
 		for (const record of this._laneTracker.getRecords()) {
@@ -1111,6 +1115,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	clearResearchLaneTimer(): void {
 		this._research.clearTimer();
 		this._proactivity.clearTimer();
+		this._retention?.clearTimer();
 	}
 
 	/**
@@ -1135,6 +1140,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	scheduleResearchLaneFromIdle(): void {
 		this._research.scheduleFromIdle();
 		this._proactivity.scheduleFromIdle();
+		this._getRetention().scheduleFromIdle();
 		// The review gauge informs only: past the owner's threshold one notice says results pile up; nothing is held.
 		observeReviewGauge({
 			observeHarnessNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read),
@@ -1864,6 +1870,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				});
 		if (!this._channelsHostedByDaemon) this.channels.start();
 		if (!this.deps.isDisposed() && !this.deps.isChildSession()) this._getActAhead().start();
+		if (!this.deps.isChildSession() && this._hasWorkerState()) this._getRetention().scheduleFromIdle();
 	}
 
 	/** The host's CI source offers its failure evidence while it runs; the returned function withdraws it. */
@@ -2206,8 +2213,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				accepted: false,
 				detail: `${leaderAlias} has no goal running, so ${alias} is not started.`,
 			};
-		const leaderContract =
-			this._getWorkerLifecycle().getLatestAgentAttempt(leaderAgentId)?.dispatch.executionContract;
+		const leaderContract = this._getWorkerLifecycle().getAgentTurnDispatch(leaderAgentId)?.executionContract;
 		if (!contractGrantsChildren(leaderContract))
 			return {
 				handled: true,
@@ -2262,167 +2268,24 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	private createBotMessageDirectory(sender: string, attemptId: string): BotMessageDirectory {
-		const manager = this.deps.getSessionManager();
-		const assertBranch = manager.captureBranchContext();
-		const context = this.botBindings.generationContext(sender);
-		const sourceAlias = context.agentId;
-		const thread = context.teamId ? `team:${context.teamId}:${context.teamIncarnationId}` : undefined;
-		const store = this.getBotTeamStore();
-		const refresh = () => {
-			if (store.reload(true)) this._botViews = undefined;
-		};
-		refresh();
-		const admittedMembers = new Set(context.teamId ? (store.getTeam(context.teamId)?.memberAgentIds ?? []) : []);
-		const requireGroup = (teamId?: string) => {
-			refresh();
-			if (teamId !== undefined && teamId !== context.teamId)
-				throw new Error("This bot conversation is not admitted to the requested group.");
-			if (!context.teamId) return undefined;
-			const team = store.getTeam(context.teamId);
-			if (
-				!team ||
-				teamIncarnation(team) !== context.teamIncarnationId ||
-				!team.memberAgentIds.includes(sourceAlias) ||
-				!admittedMembers.has(sourceAlias)
-			)
-				throw new Error("This bot's group membership was removed or replaced.");
-			return team;
-		};
-		const assertCurrent = () => {
-			if (this.deps.isDisposed() || this.deps.getSessionManager() !== manager)
-				throw new Error("Bot messaging session is no longer current.");
-			assertBranch();
-			const source = this.listWorkerAgents().find((agent) => agent.agentId === sender);
-			if (source?.attemptId !== attemptId || source.dispatch !== "running")
-				throw new Error("Bot messaging sender generation is no longer current.");
-			if (
-				sourceAlias &&
-				this.getBotTeamStore().getBot(sourceAlias) &&
-				this.botBindings.runtime(sourceAlias, context.teamId, context.teamIncarnationId) !== sender
-			)
-				throw new Error("Bot messaging sender alias has been rebound.");
-			requireGroup();
-		};
-		const leaderIds = () =>
-			store
-				.listBots()
-				.filter((bot) => bot.leader === true)
-				.map((bot) => bot.agentId);
-		const senderRecord = sourceAlias ? store.getBot(sourceAlias) : undefined;
-		const senderIsLeader = senderRecord?.leader === true && senderRecord.retired !== true;
-		// A bot a leader made asks that leader for more bots, while the leader still leads.
-		const ownLeader = () => {
-			const creator = senderRecord?.createdBy ? store.getBot(senderRecord.createdBy) : undefined;
-			return creator?.leader === true && creator.retired !== true ? creator.agentId : undefined;
-		};
-		return {
-			assertCurrent,
-			leaderIds,
-			ownLeader,
-			...(senderIsLeader && sourceAlias
-				? {
-						createBot: (request: BotCreationRequest) =>
-							this.createBotFor({ kind: "leader", agentId: sourceAlias }, request),
-						askRoot: (question: string) => this.getLeaders().askRoot(sourceAlias, question),
-						startOwnedBot: (agentId: string, message: string, invocationId: string) =>
-							this.startOwnedBotAsChild(sender, sourceAlias, agentId, message, invocationId),
-					}
-				: {}),
-			list: (teamId) => {
-				assertCurrent();
-				const group = requireGroup(teamId);
-				const teams = store.listTeams();
-				const groups = teams.filter((team) =>
-					group ? team.teamId === group.teamId : team.memberAgentIds.includes(sourceAlias),
-				);
-				const agents = new Map(this.listWorkerAgents().map((agent) => [agent.agentId, agent]));
-				const peers = store
-					.listBots({ includeRetired: true })
-					.filter(
-						(bot) =>
-							bot.agentId !== sourceAlias &&
-							(group
-								? group.memberAgentIds.includes(bot.agentId) && admittedMembers.has(bot.agentId)
-								: !teams.some((team) => team.memberAgentIds.includes(bot.agentId))),
-					)
-					.map((bot) => {
-						const agent = agents.get(
-							this.botBindings.runtime(bot.agentId, context.teamId, context.teamIncarnationId),
-						);
-						return {
-							agentId: bot.agentId,
-							displayName: bot.displayName,
-							state: bot.retired || agent?.status === "retired" ? "retired" : (agent?.activity ?? "inactive"),
-							available: !bot.retired && agent !== undefined && agent.status !== "retired",
-							...(bot.leader ? { leader: true as const } : {}),
-						};
-					});
-				return {
-					groups: groups.slice(0, 128).map(({ teamId, name }) => ({ teamId, name })),
-					totalGroups: groups.length,
-					peers: peers.slice(0, 128),
-					total: peers.length,
-				};
+		return createBotMessageDirectory(
+			{
+				getSessionManager: () => this.deps.getSessionManager(),
+				isDisposed: () => this.deps.isDisposed(),
+				botBindings: this.botBindings,
+				getBotTeamStore: () => this.getBotTeamStore(),
+				invalidateBotViews: () => {
+					this._botViews = undefined;
+				},
+				listWorkerAgents: () => this.listWorkerAgents(),
+				createBotFor: (creator, request) => this.createBotFor(creator, request),
+				getLeaders: () => this.getLeaders(),
+				startOwnedBotAsChild: (leaderAgentId, leaderAlias, alias, message, invocationId) =>
+					this.startOwnedBotAsChild(leaderAgentId, leaderAlias, alias, message, invocationId),
 			},
-			resolve: (target, teamId) => {
-				assertCurrent();
-				const group = requireGroup(teamId);
-				const alias = normalizeBotOrTeamId(target, "agentId");
-				if (
-					group
-						? !group.memberAgentIds.includes(alias) || !admittedMembers.has(alias)
-						: store
-								.listTeams()
-								.some(
-									(team) => team.memberAgentIds.includes(sourceAlias) || team.memberAgentIds.includes(alias),
-								)
-				)
-					throw new Error("Group messages require a conversation admitted to that group.");
-				const bot = store.getBot(alias);
-				if (!bot || bot.retired) throw new Error(`Bot ${alias} is missing or retired.`);
-				const runtime = this.botBindings.runtime(alias, context.teamId, context.teamIncarnationId);
-				if (runtime === sender) throw new Error("A bot cannot message itself.");
-				const recipient = this.listWorkerAgents().find((agent) => agent.agentId === runtime);
-				if (!recipient || recipient.status === "retired")
-					throw new Error(`Bot ${alias} is inactive in this parent session; ask the parent to start it.`);
-				return runtime;
-			},
-			threadId: (teamId) => {
-				assertCurrent();
-				requireGroup(teamId);
-				return thread;
-			},
-			authorizeReply: (requestThread, requester, teamId) => {
-				assertCurrent();
-				const group = requireGroup(teamId);
-				if (requester === sessionRootAddress(manager.getSessionId())) return;
-				if (requestThread !== thread || !requester) throw new Error("Reply belongs to another conversation group.");
-				const peer = this.botBindings.generationContext(requester);
-				if (
-					peer.teamId !== context.teamId ||
-					peer.teamIncarnationId !== context.teamIncarnationId ||
-					(group
-						? !group.memberAgentIds.includes(peer.agentId) || !admittedMembers.has(peer.agentId)
-						: store.listTeams().some((team) => team.memberAgentIds.includes(peer.agentId)))
-				)
-					throw new Error("Reply requester is outside this conversation group.");
-			},
-			recordSent: (messageId, target, message) => {
-				if (!context.teamId || !context.teamIncarnationId) return;
-				store.appendScopedTeamMessage(
-					{
-						messageId,
-						teamId: context.teamId,
-						sender: { kind: "bot", agentId: sourceAlias },
-						text: message,
-						timestamp: Date.now(),
-						targetAgentIds: [target],
-						deliveries: [{ agentId: target, outcome: "queued", messageId }],
-					},
-					context.teamIncarnationId,
-				);
-			},
-		};
+			sender,
+			attemptId,
+		);
 	}
 
 	/** True once this session has a worker runtime or a persisted orchestration store: only then can workers or managed lanes exist. */
@@ -2850,6 +2713,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	private _leaders: LeaderController | undefined;
+	private _retention?: OrchestrationRetentionController;
 	private _leaderRouteOff: (() => void) | undefined;
 	private _jobRouteOff: (() => void) | undefined;
 	private readonly _placedJobAcks = new PlacedJobTerminalAcks({
@@ -2909,9 +2773,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const first = live[0];
 		if (
 			!first ||
-			contractGrantsChildren(
-				this._getWorkerLifecycle().getLatestAgentAttempt(first.agentId)?.dispatch.executionContract,
-			)
+			contractGrantsChildren(this._getWorkerLifecycle().getAgentTurnDispatch(first.agentId)?.executionContract)
 		)
 			return;
 		for (const agent of live) this.retireWorkerAgent(agent.agentId, undefined);
@@ -3022,6 +2884,41 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._leaderRows = undefined;
 		});
 		return this._leaders;
+	}
+
+	/** The idle release of closed orchestration work: built once, and it reads the worker runtime only when a pass runs. */
+	private _getRetention(): OrchestrationRetentionController {
+		this._retention ??= new OrchestrationRetentionController({
+			timers: this.deps.getTimers().port("retention"),
+			isDisposed: () => this.deps.isDisposed(),
+			isChildSession: () => this.deps.isChildSession(),
+			isForegroundBusy: () => this.deps.isForegroundBusy(),
+			hasWorkerState: () => this._hasWorkerState(),
+			closedObjectiveDays: () =>
+				this.deps.getSettingsManager().getOrchestrationRetentionSettings().closedObjectiveDays,
+			capacity: () =>
+				this._hasWorkerState()
+					? this._getOrchestrationCore().lifecycle.ledger.runtime.getProjectionCapacity()
+					: undefined,
+			pass: () => this._retentionPassDeps(),
+			observeNotice: (read) => this.deps.observeHarnessNotice?.("orchestration-capacity", read),
+			warn: (message) => this._safeWarn(message),
+		});
+		return this._retention;
+	}
+
+	private _retentionPassDeps(): Omit<RetentionPassDeps, "warn"> {
+		return {
+			runtime: () => this._getOrchestrationCore().lifecycle.ledger.runtime,
+			store: () => this._getOrchestrationCore().store,
+			sessionId: this.deps.getSessionId(),
+			agentDir: this.deps.getAgentDir(),
+			closedObjectiveDays: () =>
+				this.deps.getSettingsManager().getOrchestrationRetentionSettings().closedObjectiveDays,
+			now: () => this.deps.getTimers().port("orchestration").now(),
+			hasDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
+			currentGoalId: () => this.deps.getGoalStateSnapshot()?.goalId,
+		};
 	}
 
 	retirePersistentBot(agentId: string): { retired: boolean; detail: string } {

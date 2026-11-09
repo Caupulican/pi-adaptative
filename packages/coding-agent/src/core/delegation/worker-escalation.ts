@@ -4,19 +4,26 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import {
 	type EscalationPinnedAuthority,
 	type FleetDispatch,
+	type FleetRefusal,
 	type FleetScheduler,
 	laneSubtreeId,
 } from "../fleet/fleet-types.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { runRequirementCheck } from "../goals/requirement-checks.ts";
+import { nativeAgentIdForAttempt } from "../orchestration/attempt-agent-identity.ts";
 import {
 	ORCHESTRATION_THINKING_LEVELS,
 	type OrchestrationDispatchRequest,
 	type WorkerExecutionAuthorityContract,
 	type WorkerProfileExecutionContract,
 } from "../orchestration/contracts.ts";
+import { RUNG_REFUSAL_REASONS, type RungRefusalReason } from "../orchestration/delegation-ledger.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
-import type { TaskEscalationRecord, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import type {
+	TaskEscalationRecord,
+	TaskRuntimeProjection,
+	TaskRuntimeState,
+} from "../orchestration/task-runtime-state.ts";
 import type { Placement } from "../placement/placement-types.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import { isAdaptiveProfileId } from "./worker-authority-resolver.ts";
@@ -103,6 +110,48 @@ function pinnedAuthorityOf(
 		...(origin.turnOrigin ? { turnOrigin: origin.turnOrigin } : {}),
 		...(origin.receiptOrigin ? { receiptOrigin: origin.receiptOrigin } : {}),
 	};
+}
+
+/**
+ * How a rung's source task relates to its rerun, read from the snapshot. X1: a completed source keeps a successor that
+ * supersedes it. X2: a failed or blocked source whose worker is still registered reruns as a new attempt of the same task,
+ * in the same worker conversation; its last attempt's agent must resolve, or the rerun cannot continue that conversation.
+ * X3: any other source keeps the unlinked rerun it has always had.
+ */
+function sourceRelationOf(snapshot: TaskRuntimeProjection, source: TaskRuntimeState): "X1" | "X2" | "X3" {
+	if (source.task.status === "completed") return "X1";
+	const last = snapshot.attempts[source.attemptIds.at(-1) ?? ""];
+	const agentId = last ? nativeAgentIdForAttempt(last) : undefined;
+	const agent = agentId === undefined ? undefined : snapshot.agents[agentId];
+	const rerunnable =
+		(source.task.status === "failed" || source.task.status === "blocked") &&
+		agent?.status === "registered" &&
+		last?.dispatch.birthContextForkReference !== undefined;
+	return rerunnable ? "X2" : "X3";
+}
+
+/**
+ * The plain words the owner reads for each refusal that asks the owner, one per reason. The transient reasons carry no
+ * words: a refused rung for them is logged and the next outcome pass places it again.
+ */
+const RUNG_REFUSAL_WORDS: Readonly<Record<RungRefusalReason, string | undefined>> = {
+	identity_mismatch: "the task's recorded identity no longer matches the rerun",
+	authority_digest_mismatch: "the rerun would run under different authority than the original",
+	acceptance_criteria_mismatch: "the task's acceptance criteria no longer match the rerun",
+	source_state_changed: "the task changed state after its outcome was recorded",
+	attempt_ceiling: "the task has spent its attempt budget",
+	capacity: undefined,
+	other: undefined,
+};
+
+/** The ledger's reason token at the start of a refusal detail, bare or behind the start's `worker_start_error:` prefix. */
+const RUNG_REFUSAL_TOKEN = /^(?:worker_start_error:)?rung_refused:([a-z_]+)(?::|$)/;
+
+/** The reason a refused rung carries, or undefined when the refusal is not a rung refusal the ladder knows. */
+export function rungRefusalReasonOf(refusal: FleetRefusal): RungRefusalReason | undefined {
+	if (refusal.reason === "authority_digest_mismatch") return "authority_digest_mismatch";
+	const token = RUNG_REFUSAL_TOKEN.exec(refusal.detail)?.[1];
+	return RUNG_REFUSAL_REASONS.find((reason) => reason === token);
 }
 
 export interface WorkerEscalationDeps {
@@ -202,12 +251,14 @@ export class WorkerEscalation {
 			const decision = prepared.kind === "prepared" ? this.deps.fleet.admit(dispatch, LOCAL_PLACEMENT) : prepared;
 			if (decision.kind === "refused") {
 				const refusedAttemptId = outcome.attempts.at(-1)?.attemptId;
-				if (decision.reason === "authority_digest_mismatch" && refusedAttemptId !== undefined)
-					this.deps.recordRefusal(refusedAttemptId, decision.detail);
+				const rungReason = rungRefusalReasonOf(decision);
+				const words = rungReason === undefined ? undefined : RUNG_REFUSAL_WORDS[rungReason];
+				if (words !== undefined && refusedAttemptId !== undefined) this.deps.recordRefusal(refusedAttemptId, words);
 				harnessLog.info("escalation", "the fleet refused an escalation rung", {
 					outcomeId: outcome.outcomeId,
 					rung: action.rung,
 					reason: decision.reason,
+					rungReason,
 					blocker: decision.blocker,
 					detail: boundedText(decision.detail, 200),
 				});
@@ -265,6 +316,11 @@ export class WorkerEscalation {
 		const [provider, ...rest] = action.modelRef.split("/");
 		const thinking = ORCHESTRATION_THINKING_LEVELS.find((level) => level === action.thinking);
 		if (!task || !attempt || !contract || !provider || rest.length === 0 || !thinking) return undefined;
+		const relation = sourceRelationOf(snapshot, task);
+		harnessLog.debug("escalation", "an escalation rung's source relation", {
+			exit: relation,
+			sourceTaskId: task.task.taskId,
+		});
 		const writes = contract.authority.writePaths.length > 0 && contract.profile.readOnly !== true;
 		// The rerun is rebuilt from the attempt the outcome was recorded under: its authority, scope, placement and origin.
 		const firstAttemptId = outcome.attempts[0]?.attemptId ?? attempt.attemptId;
@@ -298,7 +354,10 @@ export class WorkerEscalation {
 				previousPlacement: LOCAL_PLACEMENT,
 				requirementIds: [...action.requirementIds],
 				pinned: pinnedAuthorityOf(origin, originContract, placement, originCwd),
-				...(task.task.status === "completed" ? { supersedesTaskId: task.task.taskId } : {}),
+				...(relation === "X1" ? { supersedesTaskId: task.task.taskId } : {}),
+				...(relation === "X2"
+					? { attemptOfTaskId: task.task.taskId, acceptanceCriterionIds: [...task.task.acceptanceCriterionIds] }
+					: {}),
 			},
 		};
 	}

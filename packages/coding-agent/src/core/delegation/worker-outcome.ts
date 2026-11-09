@@ -26,6 +26,7 @@ import {
 } from "./worker-lane-projection.ts";
 import {
 	BLOCKER_ATTRIBUTION,
+	BLOCKER_CODES,
 	type BlockerAttribution,
 	type BlockerCode,
 	isOutcomeFromNewerBuild,
@@ -149,6 +150,15 @@ const EXACT_SOURCE_CODES: Readonly<Record<string, BlockerCode>> = {
 	worker_agent_parent_retired: "cancelled_by_owner",
 	superseded: "superseded",
 	objective_completed: "superseded",
+	// a placed job on a linked machine (`remote/outcome-adapter.ts`)
+	machine_offline: "placement_unreachable",
+	machine_revoked: "placement_unreachable",
+	remote_lost: "placement_unreachable",
+	machine_refused: "placement_unreachable",
+	"machine_refused:no_room": "capacity_unavailable",
+	"machine_refused:peer_budget_out": "capacity_unavailable",
+	remote_deadline: "deadline_reached",
+	owner_cancelled: "cancelled_by_owner",
 };
 
 const PREFIX_SOURCE_CODES: readonly (readonly [string, BlockerCode])[] = [
@@ -161,13 +171,23 @@ const PREFIX_SOURCE_CODES: readonly (readonly [string, BlockerCode])[] = [
 	["orchestration_tool_capability_missing:", "scope_denied"],
 	["check_", "evidence_missing"],
 	["fanout_race", "superseded"],
+	["machine_refused:", "placement_unreachable"],
 ];
+
+/** The prefix a linked machine's reported blocker carries: `remote_reported:<blocker>` names the blocker it reported. */
+const REMOTE_REPORTED = "remote_reported:";
 
 /** The blocker one host source code names; undefined when no row names it. `none` for an accepted completion. */
 export function blockerForSourceCode(code: string): BlockerCode | undefined {
 	if (code === "worker_completed" || code === "independent_verification_accepted") return "none";
 	const exact = EXACT_SOURCE_CODES[code];
 	if (exact) return exact;
+	if (code.startsWith(REMOTE_REPORTED)) {
+		const reported = code.slice(REMOTE_REPORTED.length);
+		return (BLOCKER_CODES as readonly string[]).includes(reported) && reported !== "none"
+			? (reported as BlockerCode)
+			: undefined;
+	}
 	return PREFIX_SOURCE_CODES.find(([prefix]) => code.startsWith(prefix))?.[1];
 }
 

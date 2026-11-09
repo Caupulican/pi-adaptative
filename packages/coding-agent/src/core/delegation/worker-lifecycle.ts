@@ -5,6 +5,7 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { laneSubtreeId } from "../fleet/fleet-types.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
+import { type AgentTurnBasis, agentTurnBasis, agentTurnDispatch } from "../orchestration/agent-turn-basis.ts";
 import { latestAgentAttemptByDurableOrder } from "../orchestration/attempt-ordering.ts";
 import type {
 	AgentBindingContract,
@@ -12,6 +13,7 @@ import type {
 	AttemptRetryState,
 	AttemptUsageSnapshot,
 	ExecutionGrant,
+	OrchestrationDispatchRequest,
 	OrchestrationModelBinding,
 	WorkerExecutionContract,
 	WorkerResultContract,
@@ -723,6 +725,16 @@ export class WorkerLifecycle {
 
 	getLatestAgentAttempt(agentId: string): AttemptRuntimeState | undefined {
 		return latestAgentAttemptByDurableOrder(this.ledger.runtime.getSnapshot(), agentId);
+	}
+
+	/** The dispatch an agent's next turn is built from, live or carried past retention (agent-turn-basis.ts). */
+	getAgentTurnDispatch(agentId: string): OrchestrationDispatchRequest | undefined {
+		return agentTurnDispatch(this.ledger.runtime.getSnapshot(), agentId);
+	}
+
+	/** The turn an agent's next turn is built from, live or carried past retention (agent-turn-basis.ts). */
+	getAgentTurnBasis(agentId: string): AgentTurnBasis | undefined {
+		return agentTurnBasis(this.ledger.runtime.getSnapshot(), agentId);
 	}
 
 	/** The outcome recorder's members the outcome follow-up uses: recording an outcome and installing the ladder context. */

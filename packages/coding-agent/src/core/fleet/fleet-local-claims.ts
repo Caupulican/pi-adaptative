@@ -30,7 +30,9 @@ export interface FleetLocalClaimsDeps {
 
 interface Claim {
 	readonly releaseWorker?: () => void;
+	/** The worker's work is paid per request: its cost is charged at release, whatever model it finished on. */
 	readonly metered: boolean;
+	readonly objectiveId?: string;
 }
 
 export class FleetLocalClaims {
@@ -92,23 +94,29 @@ export class FleetLocalClaims {
 			});
 		this.claims.set(attemptId, {
 			...(this.windows && accountKey !== undefined ? { releaseWorker: this.windows.acquireWorker(accountKey) } : {}),
-			metered: estimateUsd !== undefined,
+			metered: this.deps.isMetered?.(model) === true,
+			...(objectiveId ? { objectiveId } : {}),
 		});
 	}
 
-	/** A local worker's run ended: its window claim ends and its measured cost is charged. */
-	released(attemptId: string, measuredUsd: () => number | undefined): void {
+	/**
+	 * A local worker's run ended: its window claim ends and its measured cost is charged when the work is metered, on its
+	 * start model or on the model it finished on (`finalModel`, a failover to a metered candidate). `terminal` says the attempt
+	 * has ended and will not run again; the charge's record is then the first the shared file evicts.
+	 */
+	released(attemptId: string, measuredUsd: () => number | undefined, finalModel?: Model<Api>, terminal = false): void {
 		const claim = this.claims.get(attemptId);
 		if (!claim) return;
 		this.claims.delete(attemptId);
 		claim.releaseWorker?.();
-		if (claim.metered) this.spend.settle(attemptId, measuredUsd());
+		const metered = claim.metered || (finalModel !== undefined && this.deps.isMetered?.(finalModel) === true);
+		if (metered) this.spend.charge(attemptId, measuredUsd(), claim.objectiveId, terminal);
 	}
 
-	/** Settles every claim whose attempt is no longer live. */
+	/** Settles every claim whose attempt is no longer live: such an attempt has ended. */
 	prune(isLive: (attemptId: string) => boolean, measuredUsd: (attemptId: string) => number | undefined): void {
 		for (const attemptId of [...this.claims.keys()])
-			if (!isLive(attemptId)) this.released(attemptId, () => measuredUsd(attemptId));
+			if (!isLive(attemptId)) this.released(attemptId, () => measuredUsd(attemptId), undefined, true);
 	}
 
 	/** The jitter added to a reopen alarm of an account wait key; 0 for any other resource. */
@@ -138,9 +146,12 @@ export class FleetLocalClaims {
 		);
 	}
 
-	/** Releases every claim (the scheduler is disposed). */
+	/**
+	 * Releases every claim (the scheduler is disposed). Their attempts may be suspended and resumed by another process, so none
+	 * is marked terminal here.
+	 */
 	dispose(measuredUsd: (attemptId: string) => number | undefined): void {
-		this.prune(() => false, measuredUsd);
+		for (const attemptId of [...this.claims.keys()]) this.released(attemptId, () => measuredUsd(attemptId));
 		this.spend.close();
 	}
 

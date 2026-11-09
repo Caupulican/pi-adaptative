@@ -20,6 +20,7 @@ export {
  * - `orchestration`: the durable task runtime's clock and the worker retry ladder's alarms (the ladder persists its
  *   not-before deadline through that runtime, which checks it again when the retry resumes). A worker attempt's lease
  *   deadline is persisted and checked on this clock too.
+ * - `retention`: the idle delay of orchestration retention's release pass.
  * - `worker-notification`: the worker terminal handoff retry and its observation watchdog.
  * - `background-tool-task`: background tool task watchdogs, the wait bound and the wake-up delivery retry.
  * - `history`: the summary hierarchy's domain time and the timers that wake it.
@@ -65,6 +66,7 @@ export {
 export type TimerOwner =
 	| "write-reservation"
 	| "orchestration"
+	| "retention"
 	| "worker-notification"
 	| "background-tool-task"
 	| "history"

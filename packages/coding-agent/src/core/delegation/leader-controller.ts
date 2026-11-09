@@ -891,5 +891,5 @@ function spentUsd(attempts: readonly AttemptRuntimeState[]): number {
 
 /** A notice reporting work a third party's words reached opens a third-party run, as a worker handoff does. */
 function touchedByThirdParty(snapshot: TaskRuntimeProjection, attempts: readonly AttemptRuntimeState[]): boolean {
-	return attempts.some((attempt) => conversationTurnOrigin(snapshot.attempts, attempt)?.thirdParty === true);
+	return attempts.some((attempt) => conversationTurnOrigin(snapshot, attempt)?.thirdParty === true);
 }

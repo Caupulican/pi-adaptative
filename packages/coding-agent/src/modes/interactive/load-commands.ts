@@ -50,7 +50,9 @@ export async function handleEstopCommand(host: LoadHost, text: string): Promise<
 	if (action === "off") {
 		const lifted = host.setEmergencyStop(false);
 		host.showStatus(
-			lifted ? "Emergency stop lifted; held work resumes on its next check." : "Emergency stop was not engaged.",
+			lifted
+				? "Emergency stop lifted; held work resumes now."
+				: "No emergency stop was engaged; held paid starts and queued workers resume now.",
 		);
 		return;
 	}

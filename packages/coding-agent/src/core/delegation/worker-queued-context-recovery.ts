@@ -1,5 +1,5 @@
 import { isDeepStrictEqual } from "node:util";
-import { nativeAgentIdForAttempt } from "../orchestration/attempt-agent-identity.ts";
+import { agentNativeTurnCount } from "../orchestration/agent-turn-basis.ts";
 import type { AgentBindingContract } from "../orchestration/contracts.ts";
 import type { SpecialistContextOwnership } from "../orchestration/specialist-context-ownership.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
@@ -37,10 +37,8 @@ export function assertQueuedWorkerContextRecoverable(
 		attempt.agentId !== undefined ||
 		attempt.dispatch.logicalLaneId !== agent.agentId ||
 		attempt.dispatch.executionKind === "managed-process" ||
-		Object.values(snapshot.attempts).some(
-			(candidate) =>
-				candidate.attemptId !== attempt.attemptId && nativeAgentIdForAttempt(candidate) === agent.agentId,
-		)
+		// This attempt is one of the agent's native turns, so a count above one is an earlier turn, live or released.
+		agentNativeTurnCount(snapshot, agent.agentId) > 1
 	)
 		throw new Error("Worker queued context has no proof of never-started, dead-owner recovery.");
 }

@@ -161,6 +161,7 @@ export class WorkerProfileResolver {
 
 	resolveContract(
 		contract: WorkerProfileExecutionContract,
+		skipModelRefs?: ReadonlySet<string>,
 	): { ok: true; resolved: ResolvedWorkerProfile } | { ok: false; reason: string } {
 		// Admission already fixed this contract. Live host controls may revoke execution, but mutable
 		// profile files cannot retroactively redefine the model, resources, or authority snapshot.
@@ -168,10 +169,19 @@ export class WorkerProfileResolver {
 		// candidate not exhausted is where it runs, so a quota failure moves it on retry. A fixed policy
 		// runs on the admitted binding or not at all.
 		const unusableCause = (model: Model<Api>) => this.options.modelUnusableCause(model);
+		// A queued route judged unfit on some candidates resolves past them (`skipModelRefs`); the resolved profile keeps
+		// the contract's full candidate list, so only the resolution sees the remaining order.
+		const candidates = contract.profile.modelPolicy.candidates;
+		const remaining = candidates.filter((binding) => !skipModelRefs?.has(`${binding.provider}/${binding.modelId}`));
+		if (contract.profile.modelPolicy.mode === "ordered-fallback" && remaining.length === 0 && candidates.length > 0)
+			return {
+				ok: false,
+				reason: "orchestration_profile_model_unavailable:every candidate was judged unfit for this task",
+			};
 		const outcome =
 			contract.profile.modelPolicy.mode === "ordered-fallback"
 				? resolveConfiguredOrchestrationModelResolution(
-						contract.profile,
+						{ ...contract.profile, modelPolicy: { ...contract.profile.modelPolicy, candidates: remaining } },
 						this.options.getModelRegistry(),
 						unusableCause,
 					)

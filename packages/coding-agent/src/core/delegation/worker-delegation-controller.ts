@@ -52,18 +52,9 @@ import {
 	MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
 	parseHostEventSubscriptionInput,
 } from "../events/host-event-contract.ts";
-import { buildCapabilityCard, describeModelCard } from "../expert-routing/capability-card.ts";
-import {
-	chooseHostRouteProfile,
-	MAX_ROUTE_CHOICE_REQUEST_CHARACTERS,
-	type WorkerTaskFitInput,
-} from "../expert-routing/system-one-choice.ts";
+import { chooseHostRouteProfile, MAX_ROUTE_CHOICE_REQUEST_CHARACTERS } from "../expert-routing/system-one-choice.ts";
 import { exhaustedTaskFitReason, type WorkerTaskFitVerdict } from "../expert-routing/worker-task-fit-exits.ts";
-import {
-	formatWorkerTaskFitnessFailure,
-	WorkerTaskFitness,
-	type WorkerTaskFitnessFailure,
-} from "../expert-routing/worker-task-fitness.ts";
+import { formatWorkerTaskFitnessFailure } from "../expert-routing/worker-task-fitness.ts";
 import {
 	decideWorkerDispatch,
 	FOREGROUND_HOLD_WAIT,
@@ -106,15 +97,14 @@ import {
 	type AttemptUsageSnapshot,
 	type ExecutionGrant,
 	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
-	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	type OrchestrationDispatchRequest,
 	type OrchestrationModelBinding,
 	type OrchestrationProfile,
 	type ResourcePointer,
 	type WorkerExecutionContract,
-	type WorkerModelRouteSource,
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
-import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
+import { ledgerSkip, RungRefusedError, type StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
 import {
 	assertSpecialistContextClaim,
@@ -127,6 +117,8 @@ import {
 	TaskProfileWriter,
 } from "../orchestration/task-profile-writer.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { attemptAwaitingLease } from "../orchestration/task-runtime-state.ts";
+import { successorOf } from "../orchestration/task-successor.ts";
 import { isCurrentVerificationSubject } from "../orchestration/verification-identity.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import type { WorkerContextForkReference } from "../orchestration/worker-context-fork-reference.ts";
@@ -143,7 +135,7 @@ import {
 import { captureWorkerReceiptFacts } from "../orchestration/worker-result-receipts.ts";
 import { PROACTIVITY_TOOL_NAME } from "../proactivity/proactivity-tool.ts";
 import { resolveProviderAccountKey } from "../provider-admission/account-key.ts";
-import { isEmergencyStopEngaged, subscribeEmergencyStop } from "../provider-admission/emergency-stop.ts";
+import { isEmergencyStopEngaged, subscribeOwnerContinue } from "../provider-admission/emergency-stop.ts";
 import { ProviderLimitStore } from "../provider-admission/limit-state.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../provider-display-names.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
@@ -230,6 +222,7 @@ import {
 	type WorkerModelMove,
 	type WorkerModelMoveReason,
 	WorkerStartSettlement,
+	workerModelMoveReason,
 } from "./worker-credential-health.ts";
 import {
 	parseWorkerDelegationAuthorityRequest,
@@ -260,7 +253,7 @@ import {
 	raceLosersToCancel,
 	raceLostReasonCode,
 } from "./worker-fanout.ts";
-import { workerFitnessInstructions } from "./worker-fanout-header.ts";
+import { type WorkerAdmission, WorkerFitRoute, type WorkerFitRoutePort } from "./worker-fit-route.ts";
 import {
 	DEFAULT_WORKER_FLEET_LIMITS,
 	evaluateNewWorkerAdmission,
@@ -414,35 +407,6 @@ export interface WorkerDelegationControllerDeps extends ParentExecutionContext {
 	observeHarnessNotice?(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
 }
 
-type WorkerAdmission =
-	| {
-			ok: true;
-			instructions: string;
-			settings: ResolvedWorkerDelegationSettings;
-			shipment: ResolvedWorkerProfile;
-			verifierShipment?: ResolvedWorkerProfile;
-			/** Exact pointer selection persisted when this request is admitted. */
-			resourcePointerIds: readonly string[];
-			executionContract: WorkerExecutionContract;
-			executionPlan: WorkerExecutionPlan;
-			knowledgeGrant?: KnowledgeGrant;
-			knowledgeReferences: readonly KnowledgeGrantReference[];
-			subscriptions: readonly HostEventSubscriptionInput[];
-			/** Existing task identity, revalidated after asynchronous fitness admission. */
-			admittedAttemptId?: string;
-			/** Who chose the admitted model (never the router): recorded on the dispatch for the operator. */
-			modelRouteSource: WorkerModelRouteSource;
-			modelPinSource?: string;
-			/**
-			 * Set when a pin policy is active, the effective role has no pin (a roles-only config
-			 * with no `default` leaves it unpinned), and the caller requested an explicit model —
-			 * i.e. the owner's pin was evaded, not just inapplicable. Diagnostics only: admission is
-			 * never blocked on this. Value is the effective role that bypassed the policy.
-			 */
-			modelPinBypass?: WorkerRole;
-	  }
-	| { ok: false; skipReason: string };
-
 interface PreparedWorkerAttempt {
 	executionPlan: WorkerExecutionPlan;
 	lifecycle: WorkerLifecycle;
@@ -555,8 +519,20 @@ function boundedReleaseCause(cause: string): string {
 /** The most characters of a subject's original task a verifier request carries. */
 const MAX_VERIFIER_ORIGINAL_TASK_CHARS = 4_000;
 
+/** A task followed by each successor an escalation rung placed after it, in chain order; a task seen again ends the chain. */
+function taskAndSuccessors(projection: TaskRuntimeProjection, taskId: string): string[] {
+	const chain = [taskId];
+	for (
+		let next = successorOf(projection, taskId);
+		next !== undefined && !chain.includes(next);
+		next = successorOf(projection, next)
+	)
+		chain.push(next);
+	return chain;
+}
+
 export class WorkerDelegationController {
-	private readonly taskFitness = new WorkerTaskFitness();
+	private readonly fitRoute = new WorkerFitRoute(this.fitRoutePort());
 	private readonly knowledgeGrants = new WeakMap<readonly KnowledgeGrantReference[], KnowledgeGrant>();
 	private readonly schedulerPreflight = Symbol("worker scheduler preflight");
 	private readonly deps: WorkerDelegationControllerDeps;
@@ -704,10 +680,10 @@ export class WorkerDelegationController {
 			preflight: async (request, record) => {
 				const reasonCode = await this.validateWorkerDirectory(record);
 				if (reasonCode) return { action: "cancel", reasonCode };
-				const failure = await this.checkExistingWorkerTaskFitness(request, record);
+				const failure = await this.fitRoute.checkQueued(request, record);
 				return failure ? { action: "cancel", ...failure } : { action: "start" };
 			},
-			isPreflightCurrent: (request, record) => this.hasCurrentWorkerTaskFitness(request, record),
+			isPreflightCurrent: (request, record) => this.fitRoute.hasCurrent(request, record),
 			getRecord: (laneId) => this.getWorkerLifecycle().getRecord(laneId),
 			getDispatchToken: (laneId) => {
 				const attempt = this.getWorkerLifecycle().getActiveAttempt(laneId);
@@ -729,17 +705,38 @@ export class WorkerDelegationController {
 			drain: () => this.scheduler.drain(),
 			runningLanes: () => this.getWorkerLifecycle().getRunningLaneFlows(),
 			laneIdsOfPlan: (planId) => {
-				const plan = this.getWorkerLifecycle().getTaskRuntimeSnapshot().plans[planId];
+				const snapshot = this.getWorkerLifecycle().getTaskRuntimeSnapshot();
+				const plan = snapshot.plans[planId];
 				if (!plan) return [];
-				return [
+				const released = [
 					...Object.values(plan.nodes).flatMap((node) => (node.release ? [node.release.taskId] : [])),
 					...plan.retired.map((entry) => entry.taskId),
 				];
+				return [...new Set(released.flatMap((taskId) => taskAndSuccessors(snapshot, taskId)))];
 			},
 			cancelLanes: (laneIds, reasonCode) => {
+				const lifecycle = this.getWorkerLifecycle();
 				for (const laneId of laneIds) {
-					const agentId = this.getWorkerLifecycle().getActiveAttempt(laneId)?.agentId;
-					if (agentId) this.agentControl.cancelWorkerAgent(agentId, reasonCode);
+					try {
+						const attempt = lifecycle.getActiveAttempt(laneId);
+						if (!attempt) continue;
+						if (attemptAwaitingLease(attempt)) {
+							this.cancelScheduledWorker(laneId, reasonCode, attempt.attemptId);
+						} else if (
+							attempt.agentId &&
+							lifecycle.getTaskRuntimeSnapshot().agents[attempt.agentId]?.activeAttemptId === attempt.attemptId
+						) {
+							this.agentControl.cancelWorkerAgent(attempt.agentId, reasonCode);
+						} else {
+							this.cancelAndPublish(lifecycle, laneId, reasonCode);
+						}
+					} catch (error) {
+						harnessLog.warn("fleet", "a plan lane could not be cancelled; the other lanes are cancelled", {
+							laneId,
+							reasonCode,
+							error: boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error)),
+						});
+					}
 				}
 			},
 			isAttemptLive: (attemptId) =>
@@ -747,6 +744,11 @@ export class WorkerDelegationController {
 					this.getWorkerLifecycle().getTaskRuntimeSnapshot().attempts[attemptId]?.status ?? "",
 				),
 			attemptCostUsd: (attemptId) => this.lifecycle.ledger.getAttemptUsage(attemptId)?.costUsd,
+			attemptModel: (attemptId) => {
+				const attempt = this.getWorkerLifecycle().getTaskRuntimeSnapshot().attempts[attemptId];
+				const binding = attempt?.runningModel ?? attempt?.dispatch.executionContract?.worker.modelBinding;
+				return binding ? this.deps.getModelRegistry().find(binding.provider, binding.modelId) : undefined;
+			},
 		});
 		this.startPhases = new WorkerStartPhases<FreshWorkerAdmission>({
 			closed: this.workerAbort.signal,
@@ -786,6 +788,10 @@ export class WorkerDelegationController {
 			currentRecord: (laneId) => this.lifecycle.getRecord(laneId),
 			withWaitReason: (record) => this.withWaitReasons([record])[0] ?? record,
 			activeAttempt: (laneId) => this.getWorkerLifecycle().getActiveAttempt(laneId),
+			lastAttempt: (taskId) => {
+				const snapshot = this.getWorkerLifecycle().getTaskRuntimeSnapshot();
+				return snapshot.attempts[snapshot.tasks[taskId]?.attemptIds.at(-1) ?? ""];
+			},
 			waitState: (laneId) => this.scheduler.getWaitState(laneId),
 			warn: (message) => this.safeWarn(message),
 		});
@@ -939,7 +945,7 @@ export class WorkerDelegationController {
 			isSpecialistSettled: (agentId) => this.isSpecialistSettled(agentId),
 			specialistReleaseHold: (agentId) => this.specialistReleaseHold(agentId),
 			taskStartHeadroomSkipReason: (agent) => {
-				const contract = this.lifecycle.getLatestAgentAttempt(agent.agentId)?.dispatch.executionContract;
+				const contract = this.lifecycle.getAgentTurnDispatch(agent.agentId)?.executionContract;
 				return contract
 					? this.workerProjectionHeadroomSkipReason(contract)
 					: "orchestration_execution_contract_missing";
@@ -1008,20 +1014,20 @@ export class WorkerDelegationController {
 			this.agentControl.signalStateChanged();
 			if (!this.deps.isDisposed() && !this.workerAbort.signal.aborted) this.scheduler.drain(true);
 		});
-		// Admission holds every queued worker while the machine-wide emergency stop exists; lifting it in this process is
-		// the wake, since nothing else drains an idle queue.
-		this.unsubscribeEmergencyStop = subscribeEmergencyStop(this.deps.getAgentDir(), () => {
+		// Admission holds every queued worker while the machine-wide emergency stop exists; the owner's continue (a lift, or
+		// `/estop off` with no stop engaged) wakes the queue and resumes the fleet, since nothing else drains an idle queue.
+		this.unsubscribeEmergencyStop = subscribeOwnerContinue(this.deps.getAgentDir(), () => {
 			if (isEmergencyStopEngaged(this.deps.getAgentDir())) return;
 			if (this.deps.isDisposed() || this.workerAbort.signal.aborted) return;
-			harnessLog.info("delegation", "queued workers were woken by the emergency stop lift");
-			// The lift runs this synchronously inside the caller's `liftEmergencyStop`: a failed drain never fails the lift.
+			harnessLog.info("delegation", "queued workers were woken by the owner's continue");
+			// The continue runs this synchronously inside the caller's `liftEmergencyStop`: a failed drain never fails it.
 			try {
 				// The owner's continue: the fleet's resume lifts the spend brake and ramps the account windows before the drain.
 				this.fleet.resume();
 				this.scheduler.drain(true);
 			} catch (error) {
 				this.safeWarn(
-					`Worker queue wake after the emergency stop lift failed: ${error instanceof Error ? error.message : String(error)}`,
+					`Worker queue wake after the owner's continue failed: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
 		});
@@ -1736,14 +1742,14 @@ export class WorkerDelegationController {
 	 * model-level failure is marked exhausted where every routing decision reads it (the same registry root's billing
 	 * failover writes). An expired login that cannot be refreshed is the provider's and is read live from the credential
 	 * store, which already skips every model on it until the owner signs in again, so it marks nothing that would
-	 * outlive the new login and tells the owner once. Returns why the worker moved when its contract carries ordered
-	 * fallbacks and its retry now resolves to another model; undefined when it did not move.
+	 * outlive the new login and tells the owner once. Returns why the worker moved and the model it resolved to, when its
+	 * contract carries ordered fallbacks and its retry resolves to a different model; undefined when it did not move.
 	 */
 	private failOverQuotaExhaustion(
 		laneId: string,
 		outcome: { reasonCode: string; reasonDetail?: string },
 		model: Model<Api>,
-	): WorkerModelMoveReason | undefined {
+	): { readonly reason: WorkerModelMoveReason; readonly resolved: ResolvedWorkerProfile } | undefined {
 		if (outcome.reasonCode !== "completion_error" || !outcome.reasonDetail) return undefined;
 		const classified = classifyFailure({ message: outcome.reasonDetail, provider: model.provider });
 		const loginExpired = this.credentialHealth.loginExpired(model.provider);
@@ -1757,28 +1763,27 @@ export class WorkerDelegationController {
 			return undefined;
 		}
 		if (!loginExpired) this.deps.markModelExhausted?.(model, classified.retryAfterMs);
-		const contract = this.getWorkerLifecycle().getActiveAttempt(laneId)?.dispatch.executionContract;
+		// One resolution: unfit candidates are skipped, and a retry on the running model is not a move.
+		const attempt = this.getWorkerLifecycle().getActiveAttempt(laneId);
+		const contract = attempt?.dispatch.executionContract;
 		const next =
-			contract?.worker.profile.modelPolicy.mode === "ordered-fallback"
-				? this.getWorkerProfileResolver().resolveContract(contract.worker)
+			attempt && contract?.worker.profile.modelPolicy.mode === "ordered-fallback"
+				? this.getWorkerProfileResolver().resolveContract(
+						contract.worker,
+						this.fitRoute.unfitFor(attempt.attemptId),
+					)
 				: undefined;
 		const nextModel = next?.ok ? next.resolved.model : undefined;
 		const moved = nextModel !== undefined && (nextModel.provider !== model.provider || nextModel.id !== model.id);
 		if (loginExpired) this.credentialHealth.tellLoginExpired(model, moved);
-		if (!moved || !nextModel) return undefined;
-		const reason: WorkerModelMoveReason = loginExpired
-			? "login_expired"
-			: classified.reason === "billing_or_quota"
-				? "quota_exhausted"
-				: classified.reason === "model_unsupported"
-					? "model_unavailable"
-					: "credential_rejected";
+		if (!moved || !next?.ok || !nextModel) return undefined;
+		const reason = workerModelMoveReason(loginExpired, classified.reason);
 		this.safeWarn(
 			reason === "quota_exhausted"
 				? `Worker ${laneId} ran ${model.provider}/${model.id} out of quota; retrying on ${nextModel.provider}/${nextModel.id}.`
 				: `Worker ${laneId} model ${model.provider}/${model.id} unavailable (${oauthCredentialUnusable ? "auth" : classified.reason}); retrying on ${nextModel.provider}/${nextModel.id}.`,
 		);
-		return reason;
+		return { reason, resolved: next.resolved };
 	}
 
 	/** What every worker authority resolution reads from the host: cwd, models, and the owner's model policy. */
@@ -1977,11 +1982,8 @@ export class WorkerDelegationController {
 		while (current) {
 			if (visited.has(current.agentId)) return true;
 			visited.add(current.agentId);
-			const attempt = this.lifecycle.getLatestAgentAttempt(current.agentId);
-			if (
-				attempt?.dispatch.instructions.trim() === normalizedInstructions &&
-				attempt.dispatch.profileId === profileId
-			) {
+			const dispatch = this.lifecycle.getAgentTurnDispatch(current.agentId);
+			if (dispatch?.instructions.trim() === normalizedInstructions && dispatch.profileId === profileId) {
 				return true;
 			}
 			current = current.parentAgentId ? this.lifecycle.getAgent(current.parentAgentId) : undefined;
@@ -1991,12 +1993,11 @@ export class WorkerDelegationController {
 
 	/** Reject a new logical identity before creating its task, transcript, agent, or queue entry. */
 	private newWorkerFleetSkipReason(request: WorkerDelegationRequest, requiredAgentSlots = 1): string | undefined {
-		const parentAttempt = request.parentAgentId
-			? this.lifecycle.getLatestAgentAttempt(request.parentAgentId)
+		if (requiredAgentSlots < 1) return undefined; // a rung reuses its agent: no identity to judge
+		const parentDispatch = request.parentAgentId
+			? this.lifecycle.getAgentTurnDispatch(request.parentAgentId)
 			: undefined;
-		const limits = resolveWorkerFleetLimits(
-			parentAttempt?.dispatch.executionContract?.worker.profile.delegationLimits,
-		);
+		const limits = resolveWorkerFleetLimits(parentDispatch?.executionContract?.worker.profile.delegationLimits);
 		const decision = evaluateNewWorkerAdmission(
 			this.lifecycle.getTaskRuntimeSnapshot().agents,
 			request.parentAgentId,
@@ -2019,7 +2020,7 @@ export class WorkerDelegationController {
 			)
 		)
 			pendingVerifierSubjects.delete(request.verificationOfTaskId!);
-		return 1 + pendingVerifierSubjects.size + (admission.verifierShipment ? 1 : 0);
+		return (request.attemptOf ? 0 : 1) + pendingVerifierSubjects.size + (admission.verifierShipment ? 1 : 0);
 	}
 
 	/** Single admission contract shared by enqueue, scheduler revalidation, and execution. */
@@ -2092,14 +2093,15 @@ export class WorkerDelegationController {
 		if (request.parentAgentId && !parentAgent) {
 			return { ok: false, skipReason: "orchestration_parent_agent_unknown" };
 		}
-		const parentAttempt = parentAgent ? this.lifecycle.getLatestAgentAttempt(parentAgent.agentId) : undefined;
-		const parentContract = parentAttempt?.dispatch.executionContract;
+		const parentContract = parentAgent
+			? this.lifecycle.getAgentTurnDispatch(parentAgent.agentId)?.executionContract
+			: undefined;
 		// A named specialist supplies omitted defaults from its durable contract. Fresh root
 		// defaults cannot describe its existing tool surface, resources or model selection.
 		// Live policy can still refuse it; the specialization comparison never grants a changed contract.
 		const reuseContract =
 			!pinnedContract && !request.profileId && request.reuseAgentId
-				? this.lifecycle.getLatestAgentAttempt(request.reuseAgentId)?.dispatch.executionContract
+				? this.lifecycle.getAgentTurnDispatch(request.reuseAgentId)?.executionContract
 				: undefined;
 		const executionContext =
 			request.executionContext === undefined ? undefined : decodeExecutionContext(request.executionContext);
@@ -2134,7 +2136,10 @@ export class WorkerDelegationController {
 		let baseShipment: ResolvedWorkerProfile | undefined;
 		let basePreset: ResolvedWorkerProfilePreset | undefined;
 		if (pinnedContract) {
-			const pinned = this.getWorkerProfileResolver().resolveContract(pinnedContract.worker);
+			const pinned = this.getWorkerProfileResolver().resolveContract(
+				pinnedContract.worker,
+				admittedAttempt ? this.fitRoute.unfitFor(admittedAttempt.attemptId) : undefined,
+			);
 			if (!pinned.ok) return { ok: false, skipReason: pinned.reason };
 			baseShipment = pinned.resolved;
 		} else if (reuseContract) {
@@ -2409,8 +2414,8 @@ export class WorkerDelegationController {
 		summary: string;
 		artifactUris: readonly string[];
 	}): WorkerDelegationRequest {
-		const { attempts } = this.lifecycle.getTaskRuntimeSnapshot();
-		const subject = attempts[args.subjectAttemptId];
+		const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
+		const subject = snapshot.attempts[args.subjectAttemptId];
 		// Provenance: the verifier reads the task as it was dispatched and the files themselves, never only the summary.
 		const originalTask = subject?.dispatch.instructions.slice(0, MAX_VERIFIER_ORIGINAL_TASK_CHARS);
 		const prefix = [
@@ -2444,7 +2449,7 @@ export class WorkerDelegationController {
 					];
 		const receiptOrigin = subject?.dispatch.receiptOrigin;
 		// The verifier reads the subject's words and work, so it carries the subject's origin.
-		const turnOrigin = subject ? conversationTurnOrigin(attempts, subject) : undefined;
+		const turnOrigin = subject ? conversationTurnOrigin(snapshot, subject) : undefined;
 		return {
 			profileId: args.verifierProfileId,
 			...(receiptOrigin ? { receiptOrigin } : {}),
@@ -3122,13 +3127,13 @@ export class WorkerDelegationController {
 		if (!request.parentAgentId) return undefined;
 		const parent = this.lifecycle.getAgent(request.parentAgentId);
 		if (!parent) return undefined;
-		const rootAttempt = this.lifecycle.getLatestAgentAttempt(parent.rootAgentId);
-		if (!rootAttempt) return undefined;
-		const maxAttempts = rootAttempt.dispatch.executionContract?.worker.authority.budget.maxAttempts;
+		const rootTurn = this.lifecycle.getAgentTurnDispatch(parent.rootAgentId);
+		if (!rootTurn) return undefined;
+		const maxAttempts = rootTurn.executionContract?.worker.authority.budget.maxAttempts;
 		const existingAttempts = collectWorkerTreeBudgetSeeds(
 			this.lifecycle.getTaskRuntimeSnapshot(),
 			parent.rootAgentId,
-			rootAttempt.taskId,
+			rootTurn.taskId,
 		).length;
 		return workerTreeCanAdmitAttempt(existingAttempts, maxAttempts)
 			? undefined
@@ -3176,9 +3181,7 @@ export class WorkerDelegationController {
 		if (
 			request.parentAgentId &&
 			!pinnedContract &&
-			!contractGrantsChildren(
-				this.lifecycle.getLatestAgentAttempt(request.parentAgentId)?.dispatch.executionContract,
-			)
+			!contractGrantsChildren(this.lifecycle.getAgentTurnDispatch(request.parentAgentId)?.executionContract)
 		) {
 			return { ok: false, skipReason: "worker_leaf_delegation_forbidden" };
 		}
@@ -3380,7 +3383,7 @@ export class WorkerDelegationController {
 		const specialists = new Map<string, string>();
 		if (!isolation) return { candidate: undefined, specialists };
 		for (const agentId of Object.keys(this.lifecycle.getTaskRuntimeSnapshot().agents)) {
-			const cwd = this.lifecycle.getLatestAgentAttempt(agentId)?.dispatch.executionContract?.worker.authority.cwd;
+			const cwd = this.lifecycle.getAgentTurnDispatch(agentId)?.executionContract?.worker.authority.cwd;
 			if (!cwd || !isolation.isLaneDirectory(cwd)) continue;
 			const repository = await once(`lane\0${agentId}\0${cwd}`, () =>
 				isolation.boundLaneRepositoryKey(cwd, agentId),
@@ -3450,6 +3453,7 @@ export class WorkerDelegationController {
 								verificationOfAttemptId: request.verificationOfAttemptId,
 							}
 						: {}),
+					...(request.attemptOf ? { attemptOfTaskId: request.attemptOf.taskId } : {}),
 					taskContext: {
 						requirementIds: request.taskContext?.requirementIds ?? [],
 						dependsOnTaskIds: request.taskContext?.dependsOnTaskIds ?? [],
@@ -3468,6 +3472,19 @@ export class WorkerDelegationController {
 			if (ownerEpoch !== undefined) this.notifications.noteAttemptOwnerEpoch(value.attempt.attemptId, ownerEpoch);
 			return value;
 		};
+		if (request.attemptOf) {
+			// A rung is a new attempt of its source task: it reopens the source's worker conversation from the birth fork
+			// reference the source's last attempt recorded, under the same task id.
+			const snapshot = lifecycle.getTaskRuntimeSnapshot();
+			const source = snapshot.tasks[request.attemptOf.taskId];
+			const birthOfSource = snapshot.attempts[source?.attemptIds.at(-1) ?? ""]?.dispatch.birthContextForkReference;
+			if (!birthOfSource) throw new RungRefusedError("source_state_changed", "worker_rung_source_unavailable");
+			return {
+				executionPlan: admission.executionPlan,
+				lifecycle,
+				...prepare(birthOfSource, request.attemptOf.taskId),
+			};
+		}
 		if (project?.admission.kind === "claimed") {
 			const imported = project.admission;
 			const laneId = lifecycle.getNextAvailableLaneIdCandidate();
@@ -3923,9 +3940,9 @@ export class WorkerDelegationController {
 
 	/** Whether the attempt's conversation carries a third party's words: dispatched with them, or admitted while running. */
 	private carriesThirdPartyWords(attemptId: string): boolean {
-		const { attempts } = this.lifecycle.getTaskRuntimeSnapshot();
-		const attempt = attempts[attemptId];
-		return attempt !== undefined && conversationTurnOrigin(attempts, attempt)?.thirdParty === true;
+		const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
+		const attempt = snapshot.attempts[attemptId];
+		return attempt !== undefined && conversationTurnOrigin(snapshot, attempt)?.thirdParty === true;
 	}
 
 	/**
@@ -3940,8 +3957,8 @@ export class WorkerDelegationController {
 	): Promise<WorkerSpecialistReuseDecision> {
 		// Runtime-owned verifier dispatches keep their pinned contract and their independence: a
 		// verifier is never matched against implementation work or a previous verification context.
-		// A third party's words never enter a specialist's standing conversation, where later owner work would read them.
-		if (request.verificationOfTaskId || request.parentAgentId || request.turnOrigin?.thirdParty)
+		// A third party's words never enter a specialist's standing conversation, where later owner work would read them. A rung is a new attempt of its own source task, so a reuse would drop it.
+		if (request.verificationOfTaskId || request.parentAgentId || request.turnOrigin?.thirdParty || request.attemptOf)
 			return { outcome: "fresh" };
 		let independentParallelIntent: boolean;
 		try {
@@ -4023,11 +4040,11 @@ export class WorkerDelegationController {
 						snapshot,
 						candidate,
 						...(request.reuseAgentId ? { agentId: request.reuseAgentId } : {}),
-						isInitializationCompatible: (agent, attempt) => {
+						isInitializationCompatible: (agent, dispatch) => {
 							if (agent && !isDeepStrictEqual(agent.resumeContext.contextPointers, materialized.pointers))
 								return false;
 							if (forkMode.kind === "none") return true;
-							const reference = attempt.dispatch.birthContextForkReference;
+							const reference = dispatch.birthContextForkReference;
 							if (!reference) return false;
 							let birth: WorkerContextForkSnapshot;
 							try {
@@ -4039,7 +4056,7 @@ export class WorkerDelegationController {
 									: this.contextForks;
 								birth = forks.open({
 									logicalAgentId:
-										agent?.contextOrigin?.logicalAgentId ?? agent?.agentId ?? attempt.dispatch.logicalLaneId!,
+										agent?.contextOrigin?.logicalAgentId ?? agent?.agentId ?? dispatch.logicalLaneId!,
 									reference,
 								});
 							} catch {
@@ -4251,168 +4268,25 @@ export class WorkerDelegationController {
 		);
 	}
 
-	private workerTaskFitnessEnabled(): boolean {
-		return (
-			this.deps.getSettingsManager().getModelRouterSettings().enabled &&
-			this.deps.getSettingsManager().getModelRouterSettings().fitnessGate === true &&
-			(this.deps.isSystemOneEnabled?.() ?? isSystemOneEnabled(this.deps.getSettingsManager())) &&
-			this.deps.getRouteChoiceJudge?.()?.isRouteJudgmentEnabled?.() !== false
-		);
-	}
-
-	private workerTaskFitnessInput(
-		request: WorkerDelegationRequest,
-		admission: Extract<WorkerAdmission, { ok: true }>,
-		fitnessInstructions = request.instructions,
-	): WorkerTaskFitInput {
+	/** The fit route's reads and calls into this controller, each made when the route asks for it. */
+	private fitRoutePort(): WorkerFitRoutePort {
 		return {
-			instructions: workerFitnessInstructions(fitnessInstructions),
-			objective: this.goalForWorkerRequest(request)?.userGoal ?? "",
-			model: describeModelCard(
-				buildCapabilityCard(admission.shipment.model, { subscription: false, evidence: "unprobed" }),
-			),
-			thinkingLevel: admission.shipment.modelBinding.thinkingLevel,
-			role: admission.shipment.profile.role,
+			settings: () => this.deps.getSettingsManager(),
+			isSystemOneEnabled: () =>
+				this.deps.isSystemOneEnabled?.() ?? isSystemOneEnabled(this.deps.getSettingsManager()),
+			routeJudge: () => this.deps.getRouteChoiceJudge?.(),
+			sessionId: () => this.deps.getSessionId(),
+			cwd: () => this.deps.getCwd(),
+			isDisposed: () => this.deps.isDisposed(),
+			abortSignal: () => this.workerAbort.signal,
+			modelRegistry: () => this.deps.getModelRegistry(),
+			snapshot: () => this.lifecycle.getTaskRuntimeSnapshot(),
+			activeAttempt: (laneId) => this.lifecycle.getActiveAttempt(laneId),
+			goalFor: (request) => this.goalForWorkerRequest(request),
+			isRouteModelAvailable: (model) => this.isWorkerRouteModelAvailable(model),
+			resolveAdmission: (request, pinned, binding, attempt) =>
+				this.resolveWorkerAdmission(request, pinned, binding, attempt),
 		};
-	}
-
-	private existingWorkerFitnessAdmission(request: WorkerDelegationRequest, record: LaneRecord): WorkerAdmission {
-		const attempt = this.lifecycle.getActiveAttempt(record.laneId);
-		return attempt
-			? this.resolveWorkerAdmission(request, attempt.dispatch.executionContract, undefined, attempt)
-			: { ok: false, skipReason: "worker_task_fitness_binding_unavailable" };
-	}
-
-	private async checkExistingWorkerTaskFitness(
-		request: WorkerDelegationRequest,
-		record: LaneRecord,
-	): Promise<WorkerTaskFitnessFailure | undefined> {
-		const admission = this.existingWorkerFitnessAdmission(request, record);
-		if (admission.ok) return this.checkWorkerTaskFitness(request, admission);
-		// Non-fitness admission owners already return a reason followed by an optional diagnostic.
-		const separator = admission.skipReason.indexOf(":");
-		const code = separator < 0 ? admission.skipReason : admission.skipReason.slice(0, separator);
-		const validCode = code.length <= MAX_ORCHESTRATION_IDENTIFIER_LENGTH && /^[A-Za-z0-9._-]+$/.test(code);
-		const diagnostic = validCode
-			? separator < 0
-				? undefined
-				: admission.skipReason.slice(separator + 1)
-			: admission.skipReason;
-		const detail = diagnostic ? boundedRedactedDiagnosticText(diagnostic) : undefined;
-		return {
-			reasonCode: validCode ? code : "worker_task_fitness_binding_unavailable",
-			...(detail ? { detail } : {}),
-		};
-	}
-
-	/** Pure lookup while the scheduler still owns the queue, immediately before synchronous dispatch. */
-	private hasCurrentWorkerTaskFitness(request: WorkerDelegationRequest, record: LaneRecord): boolean {
-		if (!this.workerTaskFitnessEnabled()) return true;
-		try {
-			const admission = this.existingWorkerFitnessAdmission(request, record);
-			return (
-				admission.ok &&
-				this.taskFitness.hasAccepted(
-					this.deps.getRouteChoiceJudge?.(),
-					this.workerTaskFitnessInput(request, admission),
-				)
-			);
-		} catch {
-			// The owned preflight reports the actual failure through the existing cancellation path.
-			return false;
-		}
-	}
-
-	/**
-	 * The next ranked fallback candidate an unbound route has not been judged on, admitted under the route's own source.
-	 * Undefined when the profile has no ordered fallback left that resolves and is available.
-	 */
-	private nextFitCandidate(
-		request: WorkerDelegationRequest,
-		admission: Extract<WorkerAdmission, { ok: true }>,
-		judgedModelRefs: ReadonlySet<string>,
-	): Extract<WorkerAdmission, { ok: true }> | undefined {
-		const policy = admission.executionContract.worker.profile.modelPolicy;
-		if (policy.mode !== "ordered-fallback") return undefined;
-		for (const candidate of policy.candidates) {
-			if (judgedModelRefs.has(`${candidate.provider}/${candidate.modelId}`)) continue;
-			const model = this.deps.getModelRegistry().find(candidate.provider, candidate.modelId);
-			if (!this.isWorkerRouteModelAvailable(model)) continue;
-			// Admitted as route selection admits a candidate: under the directory the original start captured, on the
-			// candidate's own binding, and only when the authority is the original's (a candidate never widens the grant).
-			const compiled = this.resolveWorkerAdmission(
-				{ ...request, executionContext: admission.executionContract.worker.executionContext },
-				undefined,
-				candidate,
-			);
-			if (!compiled.ok || !isDeepStrictEqual(compiled.shipment.modelBinding, candidate)) continue;
-			if (
-				!isDeepStrictEqual(
-					compiled.executionContract.worker.authority,
-					admission.executionContract.worker.authority,
-				)
-			)
-				continue;
-			return { ...compiled, modelRouteSource: admission.modelRouteSource };
-		}
-		return undefined;
-	}
-
-	/** The same final task/model check covers explicit, inherited and fallback worker bindings. */
-	private async checkWorkerTaskFitness(
-		request: WorkerDelegationRequest,
-		admission: Extract<WorkerAdmission, { ok: true }>,
-		signal?: AbortSignal,
-		fitnessInstructions = request.instructions,
-	): Promise<WorkerTaskFitnessFailure | undefined> {
-		if (!this.workerTaskFitnessEnabled()) return;
-		const judge = this.deps.getRouteChoiceJudge?.();
-		const sessionId = this.deps.getSessionId();
-		const cwd = this.deps.getCwd();
-		const objective = this.goalForWorkerRequest(request)?.userGoal;
-		const binding = admission.shipment.modelBinding;
-		const model = structuredClone(admission.shipment.model);
-		let failure: WorkerTaskFitnessFailure | undefined;
-		try {
-			failure = await this.taskFitness.check(
-				judge,
-				this.workerTaskFitnessInput(request, admission, fitnessInstructions),
-				signal ?? this.workerAbort.signal,
-				// Only an inherited route may move: a pinned, named or profile-bound model keeps its pending question.
-				{ bound: admission.modelRouteSource !== "inherited" },
-			);
-		} catch (error) {
-			failure = {
-				reasonCode: "worker_task_fitness_unavailable",
-				detail: error instanceof Error ? error.message : String(error),
-			};
-		}
-		if (!this.workerTaskFitnessEnabled()) return;
-		const current = this.resolveWorkerAdmission(
-			{ ...request, profileId: admission.executionContract.worker.profile.profileId },
-			admission.executionContract,
-			undefined,
-			admission.admittedAttemptId
-				? this.lifecycle.getTaskRuntimeSnapshot().attempts[admission.admittedAttemptId]
-				: undefined,
-		);
-		if (
-			(admission.admittedAttemptId !== undefined &&
-				current.ok &&
-				current.admittedAttemptId !== admission.admittedAttemptId) ||
-			this.deps.isDisposed() ||
-			this.deps.getSessionId() !== sessionId ||
-			this.deps.getCwd() !== cwd ||
-			this.deps.getRouteChoiceJudge?.() !== judge ||
-			this.goalForWorkerRequest(request)?.userGoal !== objective ||
-			!current.ok ||
-			!isDeepStrictEqual(current.shipment.modelBinding, binding) ||
-			!isDeepStrictEqual(current.shipment.model, model)
-		)
-			return { reasonCode: "worker_task_fitness_stale" };
-		if (!failure?.detail) return failure;
-		const detail = boundedRedactedDiagnosticText(failure.detail);
-		return { reasonCode: failure.reasonCode, ...(detail ? { detail } : {}) };
 	}
 
 	private async selectFreshWorkerRoute(
@@ -4561,10 +4435,10 @@ export class WorkerDelegationController {
 	 */
 	private async adoptPriorLaneDirectory(
 		request: WorkerDelegationRequest,
-		prior: AttemptRuntimeState | undefined,
+		priorDispatch: OrchestrationDispatchRequest | undefined,
 		signal?: AbortSignal,
 	): Promise<void> {
-		const cwd = prior?.dispatch.executionContract?.worker.authority.cwd;
+		const cwd = priorDispatch?.executionContract?.worker.authority.cwd;
 		if (!cwd || !this.laneIsolation?.isLaneDirectory(cwd)) return;
 		try {
 			request.executionContext = await this.directories.contextForDirectory(
@@ -4593,26 +4467,36 @@ export class WorkerDelegationController {
 	 * Move a fresh writing worker into its own worktree lane. The lane becomes the worker's execution directory
 	 * (the caller's `request.executionContext` is replaced) and the directory admission is redone for it, so the
 	 * immutable execution contract pins the lane and a restarted worker resumes there. Returns `shared` unchanged
-	 * (the worker keeps the shared checkout) when isolation is off, not applicable, or cannot be completed; an
-	 * unusable lane is removed first, so a failed isolation leaves no lane behind.
+	 * (the worker keeps the shared checkout) when isolation is off or not applicable, and when the lane cannot be
+	 * completed; an unusable lane is removed first, so a failed isolation leaves no lane behind. A request for
+	 * `worktree` is never run shared: when no lane can carry it, the admission is refused with `worktree_unavailable`.
 	 */
 	private async isolateFreshWriter(
 		request: WorkerDelegationRequest,
 		shared: Extract<WorkerAdmission, { ok: true }>,
 		signal?: AbortSignal,
-	): Promise<Extract<WorkerAdmission, { ok: true }>> {
+	): Promise<WorkerAdmission> {
+		const requested = request.isolation === "worktree";
 		const isolation = this.laneIsolation;
 		const plan = shared.executionPlan;
+		const refused = (failure: string): WorkerAdmission => ({
+			ok: false,
+			skipReason: `worktree_unavailable:${failure}`,
+		});
+		if (requested && (request.verificationOfTaskId || request.reuseAgentId))
+			return refused("a reused or verifying worker keeps its checkout");
 		if (
-			!isolation ||
-			!plan.writeEnabled ||
-			request.verificationOfTaskId ||
-			request.reuseAgentId ||
-			request.isolation === "shared"
+			!requested &&
+			(!isolation ||
+				!plan.writeEnabled ||
+				request.verificationOfTaskId ||
+				request.reuseAgentId ||
+				request.isolation === "shared")
 		)
 			return shared;
-		const lane = await isolation.create(plan.cwd);
-		if (!lane) return shared;
+		if (!isolation) return refused("no lane could be created here");
+		const lane = await isolation.create(plan.cwd, requested ? "worktree" : undefined);
+		if (!lane) return requested ? refused("no lane could be created here") : shared;
 		let failure: string;
 		try {
 			const boundedSignal = AbortSignal.any([
@@ -4668,11 +4552,12 @@ export class WorkerDelegationController {
 		} catch (error) {
 			failure = error instanceof Error ? error.message : String(error);
 		}
-		this.safeWarn(
-			`Worker lane '${lane.laneKey}' could not carry this worker (${failure}); it runs in the shared checkout.`,
-		);
+		if (!requested)
+			this.safeWarn(
+				`Worker lane '${lane.laneKey}' could not carry this worker (${failure}); it runs in the shared checkout.`,
+			);
 		await isolation.discard(lane.worktreePath);
-		return shared;
+		return requested ? refused(failure) : shared;
 	}
 
 	/** One fresh/replay/reuse transition shared by both native public entrances. */
@@ -4681,13 +4566,13 @@ export class WorkerDelegationController {
 		signal?: AbortSignal,
 	): Promise<WorkerStartAdmission<FreshWorkerAdmission>> {
 		const prior = request.reuseAgentId
-			? this.lifecycle.getLatestAgentAttempt(request.reuseAgentId)
-			: this.replayedWorkerAttempt(request.messageReplayKey);
+			? this.lifecycle.getAgentTurnDispatch(request.reuseAgentId)
+			: this.replayedWorkerAttempt(request.messageReplayKey)?.dispatch;
 		await this.adoptPriorLaneDirectory(request, prior, signal);
 		let selectedBinding: OrchestrationModelBinding | undefined;
 		if (prior && !request.profileId && !request.authority?.model && request.authority?.thinkingLevel === undefined) {
 			const current = this.resolveWorkerAdmission(request);
-			const binding = prior.dispatch.executionContract?.worker.modelBinding;
+			const binding = prior.executionContract?.worker.modelBinding;
 			const model = binding ? this.deps.getModelRegistry().find(binding.provider, binding.modelId) : undefined;
 			const modelPinPolicy = this.deps.getSettingsManager().getWorkerModelPinPolicy();
 			if (
@@ -4739,7 +4624,7 @@ export class WorkerDelegationController {
 		// and refused with its own reason. Candidates run out into the blocker the judgments name, never an unconfirmed model.
 		const fitVerdicts: WorkerTaskFitVerdict[] = [];
 		const judgedModelRefs = new Set<string>();
-		let fitnessFailure = await this.checkWorkerTaskFitness(request, shared, signal);
+		let fitnessFailure = await this.fitRoute.check(request, shared, signal);
 		while (fitnessFailure) {
 			if (shared.modelRouteSource !== "inherited" || fitnessFailure.fit === undefined) {
 				if (reuse.outcome === "fresh") reuse.releaseAllocation?.();
@@ -4747,7 +4632,7 @@ export class WorkerDelegationController {
 			}
 			fitVerdicts.push(fitnessFailure.fit);
 			judgedModelRefs.add(`${shared.shipment.modelBinding.provider}/${shared.shipment.modelBinding.modelId}`);
-			const next = this.nextFitCandidate(request, shared, judgedModelRefs);
+			const next = this.fitRoute.nextCandidate(request, shared, judgedModelRefs);
 			if (!next) {
 				if (reuse.outcome === "fresh") reuse.releaseAllocation?.();
 				return { kind: "refused", skipReason: exhaustedTaskFitReason(fitVerdicts) };
@@ -4761,7 +4646,7 @@ export class WorkerDelegationController {
 			if (reuse.outcome === "unavailable") return { kind: "refused", skipReason: reuse.skipReason };
 			routeSelected = false;
 			selectedModelSnapshot = undefined;
-			fitnessFailure = await this.checkWorkerTaskFitness(request, shared, signal);
+			fitnessFailure = await this.fitRoute.check(request, shared, signal);
 		}
 		if (reuse.outcome === "reuse") {
 			const current = this.resolveWorkerAdmission(
@@ -4802,7 +4687,12 @@ export class WorkerDelegationController {
 		}
 		// A fresh writing worker works in its own worktree lane when worktree-sync is enabled and the checkout
 		// allows it, so its repository writes cannot land on the shared checkout's branch or race another worker.
-		shared = await this.isolateFreshWriter(request, shared, signal);
+		const isolated = await this.isolateFreshWriter(request, shared, signal);
+		if (!isolated.ok) {
+			reuse.releaseAllocation?.();
+			return { kind: "refused", skipReason: isolated.skipReason };
+		}
+		shared = isolated;
 		const prepared = this.admitNewWorkerRequest(
 			{ ...request, profileId: shared.executionContract.worker.profile.profileId },
 			shared.executionContract,
@@ -4877,9 +4767,7 @@ export class WorkerDelegationController {
 			const parentAttemptId = snapshot.agents[request.parentAgentId]?.activeAttemptId;
 			const parentAttempt = parentAttemptId ? snapshot.attempts[parentAttemptId] : undefined;
 			capturedRequest.receiptOrigin = parentAttempt?.dispatch.receiptOrigin;
-			capturedRequest.turnOrigin ??= parentAttempt
-				? conversationTurnOrigin(snapshot.attempts, parentAttempt)
-				: undefined;
+			capturedRequest.turnOrigin ??= parentAttempt ? conversationTurnOrigin(snapshot, parentAttempt) : undefined;
 		} else {
 			assertReceiptAdmission?.();
 			capturedRequest.receiptOrigin ??= this.deps.captureReceiptOrigin(
@@ -5123,7 +5011,7 @@ export class WorkerDelegationController {
 				this.safeWarn(
 					`Worker dispatch was not persisted: ${error instanceof Error ? error.message : String(error)}`,
 				);
-				return { started: false, skipReason: "orchestration_ledger_error" };
+				return { started: false, skipReason: ledgerSkip(error) };
 			}
 			// A contending worker waits for the foreground turn's end, and that end drains the queue (the
 			// activity listener and the end of `prompt()` are the wake). A worker queued with no foreground
@@ -5232,7 +5120,7 @@ export class WorkerDelegationController {
 		}
 		if (existingRecord && preflight !== this.schedulerPreflight) {
 			const attempt = this.lifecycle.getActiveAttempt(existingRecord.laneId);
-			const failure = await this.checkExistingWorkerTaskFitness(request, existingRecord);
+			const failure = await this.fitRoute.checkExisting(request, existingRecord);
 			if (failure) {
 				if (attempt && this.lifecycle.getActiveAttempt(existingRecord.laneId)?.attemptId === attempt.attemptId)
 					this.cancelAndPublish(this.lifecycle, existingRecord.laneId, failure.reasonCode, failure.detail);
@@ -5574,13 +5462,13 @@ export class WorkerDelegationController {
 			this.cancelAndPublish(lifecycle, prepared.record.laneId, "orchestration_agent_missing");
 			return { started: false, skipReason: "orchestration_agent_missing" };
 		}
-		const rootAttempt = lifecycle.getLatestAgentAttempt(agentBinding.rootAgentId);
-		const rootBudget = rootAttempt?.dispatch.executionContract?.worker.authority.budget ?? grant.budget;
+		const rootTurn = lifecycle.getAgentTurnDispatch(agentBinding.rootAgentId);
+		const rootBudget = rootTurn?.executionContract?.worker.authority.budget ?? grant.budget;
 		const treeTaskId = workerTreeTaskId({
 			agentId: agentBinding.agentId,
 			rootAgentId: agentBinding.rootAgentId,
 			attemptTaskId: prepared.attempt.taskId,
-			rootAttempt,
+			rootAttempt: rootTurn,
 		});
 		const treeSeeds = collectWorkerTreeBudgetSeeds(
 			lifecycle.getTaskRuntimeSnapshot(),
@@ -5895,9 +5783,9 @@ export class WorkerDelegationController {
 			sharedBudget,
 		});
 		// The attempt's tool manifest: the lane tools it holds, and why the others are not offered, as decided above.
-		const { attempts } = lifecycle.getTaskRuntimeSnapshot();
-		const startedAttempt = attempts[durableHandle.attemptId];
-		const attemptOrigin = startedAttempt ? conversationTurnOrigin(attempts, startedAttempt) : undefined;
+		const snapshot = lifecycle.getTaskRuntimeSnapshot();
+		const startedAttempt = snapshot.attempts[durableHandle.attemptId];
+		const attemptOrigin = startedAttempt ? conversationTurnOrigin(snapshot, startedAttempt) : undefined;
 		const plannedTools = new Set(executionPlan.toolManifests.map((manifest) => manifest.toolName));
 		const runManifest = this.deps.getToolManifests?.().beginWorker({
 			attemptId: durableHandle.attemptId,
@@ -6009,7 +5897,7 @@ export class WorkerDelegationController {
 				request: workerRequest,
 				assertTaskFitness: async (instructions, signal) => {
 					// Continuations change the judgment text, never the immutable dispatch being revalidated.
-					const failure = await this.checkWorkerTaskFitness(
+					const failure = await this.fitRoute.check(
 						request,
 						{ ...admission, admittedAttemptId: durableHandle.attemptId },
 						signal,
@@ -6278,21 +6166,19 @@ export class WorkerDelegationController {
 				if (!recoveredTerminal) {
 					let requestAuth = await this.deps.getModelRegistry().getApiKeyAndHeaders(model);
 					while (!requestAuth.ok) {
-						const moveReason = this.failOverQuotaExhaustion(
+						const failover = this.failOverQuotaExhaustion(
 							startedRecord.laneId,
 							{ reasonCode: "completion_error", reasonDetail: requestAuth.error },
 							model,
 						);
-						if (!moveReason) break;
-						const resolvedNext = this.getWorkerProfileResolver().resolveContract(immutableWorker);
-						if (!resolvedNext.ok) break;
+						if (!failover) break;
 						startSettlement.moves.push({
 							from: `${model.provider}/${model.id}`,
-							to: `${resolvedNext.resolved.model.provider}/${resolvedNext.resolved.model.id}`,
-							reason: moveReason,
+							to: `${failover.resolved.model.provider}/${failover.resolved.model.id}`,
+							reason: failover.reason,
 						});
-						model = resolvedNext.resolved.model;
-						modelBinding = resolvedNext.resolved.modelBinding;
+						model = failover.resolved.model;
+						modelBinding = failover.resolved.modelBinding;
 						laneCapability = this.laneCapabilityProfile(model);
 						retentionPolicy = buildRetentionPolicy(model);
 						laneMemoryCapacity = buildLaneMemoryCapacity(model);
@@ -6370,11 +6256,8 @@ export class WorkerDelegationController {
 				) {
 					const failover = this.failOverQuotaExhaustion(startedRecord.laneId, rawOutcome, model);
 					if (failover) {
-						const resolvedNext = this.getWorkerProfileResolver().resolveContract(immutableWorker);
-						if (resolvedNext.ok) {
-							model = resolvedNext.resolved.model;
-							modelBinding = resolvedNext.resolved.modelBinding;
-						}
+						model = failover.resolved.model;
+						modelBinding = failover.resolved.modelBinding;
 					}
 					const retry = this.recovery.scheduleAttemptRetry({
 						...(failover ? { failover: true } : {}),
@@ -6787,10 +6670,10 @@ export class WorkerDelegationController {
 	 */
 	releaseRetiredAgentLane(agentId: string): void {
 		const isolation = this.laneIsolation;
-		const attempt = this.lifecycle.getLatestAgentAttempt(agentId);
-		const cwd = attempt?.dispatch.executionContract?.worker.authority.cwd;
-		if (!isolation || !attempt || !cwd) return;
-		const attemptId = attempt.attemptId;
+		const turn = this.lifecycle.getAgentTurnBasis(agentId);
+		const cwd = turn?.dispatch.executionContract?.worker.authority.cwd;
+		if (!isolation || !turn || !cwd) return;
+		const attemptId = turn.attemptId;
 		// Owned, never fire-and-forget: a release that may pass later is retained, and shutdown joins every one.
 		const task = (async () => {
 			try {

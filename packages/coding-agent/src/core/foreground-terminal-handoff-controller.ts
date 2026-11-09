@@ -613,7 +613,7 @@ export class ForegroundTerminalHandoffController {
 				(attempt) =>
 					unread.some((record) =>
 						record.attemptId ? attempt.attemptId === record.attemptId : attempt.taskId === record.laneId,
-					) && conversationTurnOrigin(snapshot.attempts, attempt)?.thirdParty === true,
+					) && conversationTurnOrigin(snapshot, attempt)?.thirdParty === true,
 			);
 		return {
 			message: {

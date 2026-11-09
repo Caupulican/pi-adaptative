@@ -55,7 +55,7 @@ import {
 	WORKER_RESULT_STATUSES,
 	type WorkerResultContract,
 } from "./contracts.ts";
-import { describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
+import { applyRetentionEvent, describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
 import {
 	admittedTurnOriginFromValue,
 	agentFromPayload,
@@ -2001,10 +2001,10 @@ export function reduceOrchestrationEvent(
 			break;
 		}
 		default:
-			applyHostEvent(state, event);
+			if (!applyRetentionEvent(state, event)) applyHostEvent(state, event);
 	}
 
-	const serializedBytes = byteTracker.finish(event.ordinal);
+	const serializedBytes = byteTracker.finish(event.ordinal, state);
 	state.agents = rawAgents;
 	state.objectives = rawObjectives;
 	state.tasks = rawTasks;

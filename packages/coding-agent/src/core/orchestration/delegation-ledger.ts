@@ -12,8 +12,8 @@ import {
 import { getGoalCompletionRefusal, hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { type KnowledgeGrantReference, parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
-import { conversationTurnOrigin, nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
-import { latestAgentAttemptByDurableOrder } from "./attempt-ordering.ts";
+import { agentBasisTurnOrigin, agentNativeTurnCount, agentTurnBasis } from "./agent-turn-basis.ts";
+import { nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { projectAttemptUsage } from "./attempt-usage.ts";
 import type {
 	AttemptUsageSnapshot,
@@ -36,12 +36,48 @@ import {
 	DurableTaskRuntimeError,
 	validateTaskDependencyIds,
 } from "./task-runtime.ts";
+import { assertTaskAttemptBudgetForState } from "./task-runtime-reducer.ts";
 import { goalObjectiveId, projectGoalAcceptanceEvidence, projectGoalObjective } from "./work-state-projection.ts";
 import {
 	normalizeWorkerContextForkReference,
 	type WorkerContextForkReference,
 } from "./worker-context-fork-reference.ts";
 import { assertWorkerReceiptAdmission } from "./worker-receipt-origin.ts";
+
+/**
+ * The closed reasons a rung refusal carries. The ledger produces `identity_mismatch`, `acceptance_criteria_mismatch`,
+ * `source_state_changed` and `attempt_ceiling`; the fleet start produces `authority_digest_mismatch`; `capacity` and
+ * `other` are the transient refusals the ladder logs and retries.
+ */
+export const RUNG_REFUSAL_REASONS = [
+	"identity_mismatch",
+	"authority_digest_mismatch",
+	"acceptance_criteria_mismatch",
+	"source_state_changed",
+	"attempt_ceiling",
+	"capacity",
+	"other",
+] as const;
+export type RungRefusalReason = (typeof RUNG_REFUSAL_REASONS)[number];
+
+/**
+ * A rung the ledger refused under its source task's identity. The message begins with the closed token
+ * `rung_refused:<reason>`, which carries the reason across the start's skip-reason channel to the escalation ladder.
+ */
+export class RungRefusedError extends DurableTaskRuntimeError {
+	readonly reason: RungRefusalReason;
+
+	constructor(reason: RungRefusalReason, detail: string) {
+		super(`rung_refused:${reason}: ${detail}`);
+		this.name = "RungRefusedError";
+		this.reason = reason;
+	}
+}
+
+/** The start's skip reason for a ledger error raised while persisting a dispatch: a rung refusal keeps its own token. */
+export function ledgerSkip(error: unknown): string {
+	return error instanceof RungRefusedError ? error.message : "orchestration_ledger_error";
+}
 
 export interface DelegationLedgerOptions {
 	agentDir: string;
@@ -70,6 +106,8 @@ export interface PrepareDelegationInput {
 	delegationObjectiveId?: string;
 	verificationOfTaskId?: string;
 	verificationOfAttemptId?: string;
+	/** Set when this dispatch is a new attempt of its own task (an escalation rung): `laneId` must be that task. */
+	attemptOfTaskId?: string;
 	taskContext?: WorkerDelegationTaskContext;
 	birthContextForkReference?: WorkerContextForkReference;
 	/** Provenance of the admitted model; recorded on the dispatch, never compared as identity. */
@@ -248,6 +286,7 @@ export class DelegationOrchestrationLedger {
 						verificationOfAttemptId: input.verificationOfAttemptId,
 					}
 				: {}),
+			...(input.attemptOfTaskId !== undefined ? { attemptOfTaskId: input.attemptOfTaskId } : {}),
 			...(input.taskContext ? { taskContext: input.taskContext } : {}),
 			dispatchMetadata: {
 				...evidence,
@@ -320,19 +359,17 @@ export class DelegationOrchestrationLedger {
 		const snapshot = this.runtime.getSnapshot();
 		const agent = snapshot.agents[agentId];
 		if (!agent) throw new DurableTaskRuntimeError(`Unknown logical worker agent '${agentId}'.`);
-		const agentAttempts = Object.values(snapshot.attempts).filter(
-			(attempt) => nativeAgentIdForAttempt(attempt) === agentId,
-		);
-		const sequence = agentAttempts.length + 1;
+		const sequence = agentNativeTurnCount(snapshot, agentId) + 1;
 		const taskId = workerTurnTaskId(agentId, controlMessageId ? { controlMessageId } : { sequence });
 		const existingTask = snapshot.tasks[taskId]?.task;
-		const prior = latestAgentAttemptByDurableOrder(snapshot, agent.agentId);
-		const contract = prior?.dispatch.executionContract;
-		if (!prior || !contract) {
+		const basis = agentTurnBasis(snapshot, agent.agentId);
+		const contract = basis?.dispatch.executionContract;
+		if (!basis || !contract) {
 			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' has no immutable execution contract.`);
 		}
-		const priorTask = snapshot.tasks[prior.taskId]?.task;
-		if (!priorTask) throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' has no prior durable task.`);
+		if (basis.live && !snapshot.tasks[basis.taskId]) {
+			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' has no prior durable task.`);
+		}
 		// A delegation that has ended or paused takes no new turn: the runtime refuses one filed under it, so a turn not yet
 		// admitted runs as session work. A turn already admitted keeps the objective it was filed under.
 		const delegationObjectiveId =
@@ -347,10 +384,11 @@ export class DelegationOrchestrationLedger {
 		const declaresNewWork = input.goal !== undefined || input.goalId !== undefined || input.taskContext !== undefined;
 		// A turn that declares no delegation does not continue one: an owner's chat with a leader is session work, so
 		// the prior delegation's correlation is not inherited. A turn of a delegation declares it explicitly.
+		// A continuation of a released objective (its basis carries none) files as session work.
 		const leavesDelegation =
 			!declaresNewWork &&
 			delegationObjectiveId === undefined &&
-			isLeaderDelegationObjectiveId(priorTask.objectiveId);
+			(basis.objectiveId === undefined || isLeaderDelegationObjectiveId(basis.objectiveId));
 		const newWork = declaresNewWork || leavesDelegation || delegationObjectiveId !== undefined;
 		const goalId = input.goal?.goalId ?? input.goalId;
 		const objectiveId = delegationObjectiveId
@@ -359,18 +397,18 @@ export class DelegationOrchestrationLedger {
 				? goalId
 					? goalObjectiveId(goalId)
 					: `session:${this.sessionId}`
-				: priorTask.objectiveId;
+				: basis.objectiveId!;
 		const requirementIds = newWork
 			? (input.taskContext?.requirementIds ?? [])
-			: (prior.dispatch.requirementIds ?? []);
+			: (basis.dispatch.requirementIds ?? []);
 		const acceptanceCriterionIds = newWork
 			? (input.taskContext?.acceptanceCriterionIds ?? [])
-			: priorTask.acceptanceCriterionIds;
+			: basis.acceptanceCriterionIds;
 		const resourcePointerIds = newWork
 			? (input.taskContext?.resourcePointerIds ?? [])
-			: prior.dispatch.resourcePointerIds;
+			: basis.dispatch.resourcePointerIds;
 		const evidence = dispatchEvidence(input);
-		const priorTurnOrigin = conversationTurnOrigin(snapshot.attempts, prior);
+		const priorTurnOrigin = agentBasisTurnOrigin(snapshot, agent.agentId, basis);
 		const dependencyTaskIds = validateTaskDependencyIds(
 			snapshot.tasks,
 			existingTask?.objectiveId ?? objectiveId,
@@ -394,14 +432,14 @@ export class DelegationOrchestrationLedger {
 					`Worker control message '${controlMessageId}' has conflicting task identity.`,
 				);
 			}
-			const existingAttempts = (snapshot.tasks[taskId]?.attemptIds ?? []).map(
-				(attemptId) => snapshot.attempts[attemptId],
-			);
+			// A rung is a second attempt under its own control message id, so only this message's attempts are compared.
+			const existingAttempts = (snapshot.tasks[taskId]?.attemptIds ?? [])
+				.map((attemptId) => snapshot.attempts[attemptId])
+				.filter((attempt) => !attempt || attempt.dispatch.controlMessageId === controlMessageId);
 			for (const attempt of existingAttempts) {
 				if (
 					!attempt ||
 					attempt.dispatch.logicalLaneId !== agentId ||
-					attempt.dispatch.controlMessageId !== controlMessageId ||
 					attempt.dispatch.instructions !== instructions ||
 					attempt.dispatch.controlForkMode !== input.controlForkMode ||
 					!isDeepStrictEqual(attempt.dispatch.knowledgeReferences ?? [], evidence.knowledgeReferences ?? []) ||
@@ -421,7 +459,8 @@ export class DelegationOrchestrationLedger {
 			// this was NOT just dispatched; do not let it be reconstructed from the outside (e.g. via a
 			// before/after snapshot diff keyed on the private turn-task identity) once this
 			// method already knows the answer with certainty.
-			if (existingAttempt) return { attempt: existingAttempt, created: false };
+			if (!existingAttempt) throw new DurableTaskRuntimeError("Worker control message has no admitted attempt.");
+			return { attempt: existingAttempt, created: false };
 		}
 		if (agent.status !== "registered") {
 			throw new DurableTaskRuntimeError(`Logical worker agent '${agentId}' is not idle.`);
@@ -457,8 +496,8 @@ export class DelegationOrchestrationLedger {
 					...(controlMessageId ? { controlMessageId } : {}),
 					...(input.controlForkMode ? { controlForkMode: input.controlForkMode } : {}),
 					...(input.senderAgentId ? { senderAgentId: input.senderAgentId } : {}),
-					...(prior.dispatch.birthContextForkReference
-						? { birthContextForkReference: prior.dispatch.birthContextForkReference }
+					...(basis.dispatch.birthContextForkReference
+						? { birthContextForkReference: basis.dispatch.birthContextForkReference }
 						: {}),
 				},
 			}),
@@ -480,6 +519,7 @@ export class DelegationOrchestrationLedger {
 		delegationObjectiveId?: string;
 		verificationOfTaskId?: string;
 		verificationOfAttemptId?: string;
+		attemptOfTaskId?: string;
 		taskContext?: WorkerDelegationTaskContext;
 		executionContract?: WorkerExecutionContract;
 		dispatchMetadata?: Pick<
@@ -522,27 +562,37 @@ export class DelegationOrchestrationLedger {
 		if (input.verificationOfTaskId && !existingVerificationSubject) {
 			throw new DurableTaskRuntimeError(`Unknown verification subject '${input.verificationOfTaskId}'.`);
 		}
-		const projectedGoal = input.goal ? projectGoalObjective(input.goal) : undefined;
+		const existingTask = snapshot.tasks[input.laneId]?.task;
+		// A rung is a new attempt of its source task: it keeps that task's objective and dependencies, and restates neither
+		// the goal nor the title or description, which the narrowed rerun instructions change.
+		const rungSource = input.attemptOfTaskId === undefined ? undefined : existingTask;
+		if (input.attemptOfTaskId !== undefined && (!rungSource || input.attemptOfTaskId !== input.laneId))
+			throw new RungRefusedError(
+				rungSource ? "identity_mismatch" : "source_state_changed",
+				`Task '${input.laneId}' is not the rung's source.`,
+			);
+		// A rung refuses with a typed reason; any other start keeps the generic conflict it has always raised.
+		const identityConflict = (message: string, reason: RungRefusalReason = "identity_mismatch") =>
+			rungSource ? new RungRefusedError(reason, message) : new DurableTaskRuntimeError(message);
+		const projectedGoal = input.goal && !rungSource ? projectGoalObjective(input.goal) : undefined;
 		const objectiveId =
+			rungSource?.objectiveId ??
 			existingVerificationSubject?.task.objectiveId ??
 			projectedGoal?.objectiveId ??
 			input.delegationObjectiveId ??
 			(input.goalId ? goalObjectiveId(input.goalId) : `session:${this.sessionId}`);
-		const dependencyTaskIds = validateTaskDependencyIds(
-			snapshot.tasks,
-			objectiveId,
-			input.taskContext?.dependsOnTaskIds,
-		);
-		const existingTask = snapshot.tasks[input.laneId]?.task;
+		const dependencyTaskIds = rungSource
+			? [...rungSource.dependsOn]
+			: validateTaskDependencyIds(snapshot.tasks, objectiveId, input.taskContext?.dependsOnTaskIds);
 		if (
 			existingTask &&
 			(existingTask.objectiveId !== objectiveId ||
-				existingTask.description !== projectTaskDescription(input.instructions) ||
+				(rungSource === undefined && existingTask.description !== projectTaskDescription(input.instructions)) ||
 				existingTask.role !== input.role ||
 				existingTask.dependsOn.length !== dependencyTaskIds.length ||
 				existingTask.dependsOn.some((dependencyId, index) => dependencyId !== dependencyTaskIds[index]))
 		) {
-			throw new DurableTaskRuntimeError(`Task '${input.laneId}' has conflicting durable dispatch identity.`);
+			throw identityConflict(`Task '${input.laneId}' has conflicting durable dispatch identity.`);
 		}
 		const taskStateBeforeWrites = snapshot.tasks[input.laneId];
 		const activeAttemptBeforeWrites = taskStateBeforeWrites?.attemptIds
@@ -551,7 +601,7 @@ export class DelegationOrchestrationLedger {
 		for (const attemptId of taskStateBeforeWrites?.attemptIds ?? []) {
 			const durableReference = snapshot.attempts[attemptId]?.dispatch.birthContextForkReference;
 			if (!isDeepStrictEqual(durableReference, birthContextForkReference)) {
-				throw new DurableTaskRuntimeError(`Task '${input.laneId}' has a conflicting birth context fork reference.`);
+				throw identityConflict(`Task '${input.laneId}' has a conflicting birth context fork reference.`);
 			}
 			if (
 				!isDeepStrictEqual(
@@ -559,7 +609,7 @@ export class DelegationOrchestrationLedger {
 					input.dispatchMetadata?.subscriptions ?? [],
 				)
 			)
-				throw new DurableTaskRuntimeError(`Task '${input.laneId}' has conflicting initial event subscriptions.`);
+				throw identityConflict(`Task '${input.laneId}' has conflicting initial event subscriptions.`);
 		}
 		const projectedEvidence =
 			input.goal && objectiveId === projectedGoal?.objectiveId ? projectGoalAcceptanceEvidence(input.goal) : [];
@@ -573,7 +623,7 @@ export class DelegationOrchestrationLedger {
 		if (input.goal && objectiveId === projectedGoal?.objectiveId) {
 			this.synchronizeGoalState(input.goal);
 			snapshot = this.runtime.getSnapshot();
-		} else if (!snapshot.objectives[objectiveId]) {
+		} else if (!rungSource && !snapshot.objectives[objectiveId]) {
 			this.runtime.createObjective({
 				objectiveId,
 				title: input.goalId ? `Goal ${input.goalId}` : `Session ${this.sessionId}`,
@@ -602,6 +652,13 @@ export class DelegationOrchestrationLedger {
 					}
 				: {}),
 		} as const;
+		// A rung runs in its source agent's conversation. The source task may be a native turn whose logical lane is the agent,
+		// so the rung's attempt is bound to the agent that owns the source's last attempt; the start resumes that conversation.
+		// When that attempt has no agent, the dispatch keeps the lane it was given.
+		const sourceLastAttempt = rungSource
+			? snapshot.attempts[snapshot.tasks[input.laneId]?.attemptIds.at(-1) ?? ""]
+			: undefined;
+		const rungAgentId = sourceLastAttempt ? nativeAgentIdForAttempt(sourceLastAttempt) : undefined;
 		const dispatch = {
 			taskId: input.laneId,
 			profileId: input.profileId,
@@ -611,18 +668,27 @@ export class DelegationOrchestrationLedger {
 			requirementIds: input.taskContext?.requirementIds ?? [],
 			...(input.executionContract ? { executionContract: input.executionContract } : {}),
 			...input.dispatchMetadata,
+			...(rungAgentId !== undefined ? { logicalLaneId: rungAgentId } : {}),
 			...(birthContextForkReference ? { birthContextForkReference } : {}),
 		} as const;
 		if (
 			existingTask &&
-			(existingTask.title !== taskInput.title ||
+			((rungSource === undefined && existingTask.title !== taskInput.title) ||
 				existingTask.verificationOfTaskId !== taskInput.verificationOfTaskId ||
 				existingTask.verificationOfAttemptId !== taskInput.verificationOfAttemptId ||
 				!isDeepStrictEqual(existingTask.requiredCapabilities, [...new Set(taskInput.requiredCapabilities)]) ||
-				!isDeepStrictEqual(existingTask.acceptanceCriterionIds, [...new Set(taskInput.acceptanceCriterionIds)]) ||
 				!isDeepStrictEqual(existingTask.riskBudget, taskInput.riskBudget))
 		) {
-			throw new DurableTaskRuntimeError(`Task '${input.laneId}' has conflicting durable task identity.`);
+			throw identityConflict(`Task '${input.laneId}' has conflicting durable task identity.`);
+		}
+		if (
+			existingTask &&
+			!isDeepStrictEqual(existingTask.acceptanceCriterionIds, [...new Set(taskInput.acceptanceCriterionIds)])
+		) {
+			throw identityConflict(
+				`Task '${input.laneId}' has conflicting durable task identity.`,
+				"acceptance_criteria_mismatch",
+			);
 		}
 		// Route provenance is recorded, not identity: a replay from before it existed, or one whose
 		// provenance differs, adopts the active attempt like any other exact replay.
@@ -633,7 +699,7 @@ export class DelegationOrchestrationLedger {
 				withoutRouteProvenance(dispatch),
 			)
 		) {
-			throw new DurableTaskRuntimeError(`Task '${input.laneId}' has conflicting durable dispatch identity.`);
+			throw identityConflict(`Task '${input.laneId}' has conflicting durable dispatch identity.`);
 		}
 		if (!snapshot.tasks[input.laneId]) {
 			return this.runtime.prepareTaskAttempt(
@@ -647,7 +713,21 @@ export class DelegationOrchestrationLedger {
 		const task = snapshot.tasks[input.laneId];
 		if (!task) throw new DurableTaskRuntimeError(`Failed to create task '${input.laneId}'.`);
 		if (activeAttemptBeforeWrites) return activeAttemptBeforeWrites;
-
+		if (rungSource) {
+			// A rung runs only while its source is still failed or blocked, the state its escalation was decided under.
+			if (task.task.status !== "failed" && task.task.status !== "blocked")
+				throw new RungRefusedError(
+					"source_state_changed",
+					`Task '${input.laneId}' is ${task.task.status}, not failed or blocked.`,
+				);
+			// The attempt ceiling is the reducer's own rule; its refusal is reported as the typed reason, nothing else.
+			try {
+				assertTaskAttemptBudgetForState(task, snapshot.objectives[task.task.objectiveId]!.objective);
+			} catch (error) {
+				if (error instanceof DurableTaskRuntimeError) throw new RungRefusedError("attempt_ceiling", error.message);
+				throw error;
+			}
+		}
 		return this.runtime.queueAttempt(input.laneId, dispatch);
 	}
 

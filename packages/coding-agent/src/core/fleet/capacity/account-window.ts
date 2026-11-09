@@ -21,10 +21,11 @@
  *
  * The windows are one per agent directory per process and machine-wide through `state/fleet/accounts.json`: a write
  * merges into the file, where the record with the later decrease wins and, between equal decreases, the later update,
- * so a process that never saw a refusal cannot restore a halved window. The worker counts are this process's own.
+ * so a process that never saw a refusal cannot restore a halved window. The running counts are machine-wide too: every
+ * process writes its live workers there (`workers`), and a worker of a process that no longer runs stops counting at once.
  */
 
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { join } from "node:path";
 import { harnessLog } from "../../../kernel/harness-log.ts";
 import { describeProviderAccountKey } from "../../provider-admission/account-key.ts";
@@ -32,12 +33,17 @@ import type { ProviderRequestOutcome } from "../../provider-admission/request-ou
 import { isPlainRecord } from "../../util/value-guards.ts";
 import { FleetSharedState } from "../fleet-shared-state.ts";
 import type { RoomTerm } from "../fleet-types.ts";
+import { addLiveHolder, type HolderRecord, holderAlive } from "../shared-holder.ts";
 import { allowanceWaitKey } from "./allowance-room.ts";
 
 /** The starting window of an account never seen refusing. */
 export const ACCOUNT_WINDOW_SEED = 4;
 /** Accounts kept in the shared file; the least recently updated beyond it are dropped. */
 const MAX_ACCOUNT_RECORDS = 256;
+/** Live fleet workers kept in the shared file. */
+const MAX_WORKER_RECORDS = 4096;
+/** The longest a fleet worker is counted for its account by the other processes (a hung holder, or a reused pid). */
+const MAX_WORKER_AGE_MS = 6 * 60 * 60_000;
 /** The jitter bound of a window reopen whose length is unknown, and the cap of every reopen's jitter. */
 const REOPEN_JITTER_UNKNOWN_MS = 10_000;
 const REOPEN_JITTER_CAP_MS = 30_000;
@@ -52,9 +58,16 @@ interface WindowRecord {
 	blockedAt?: number;
 }
 
+/** A live fleet worker on an account, as a process wrote it: its claim's account and the holder that claimed it. */
+interface WorkerRecord extends HolderRecord {
+	readonly account: string;
+}
+
 interface AccountsFile {
 	readonly v: 1;
 	readonly accounts: Readonly<Record<string, WindowRecord>>;
+	/** Live fleet workers of every process on the machine, keyed by claim id. */
+	readonly workers?: Readonly<Record<string, WorkerRecord>>;
 }
 
 export interface AccountWindowSnapshot {
@@ -96,7 +109,15 @@ function parseAccountsFile(value: unknown): AccountsFile | undefined {
 			...(finiteNumber(blockedAt) ? { blockedAt } : {}),
 		};
 	}
-	return { v: 1, accounts };
+	const workers: Record<string, WorkerRecord> = {};
+	if (isPlainRecord(value.workers))
+		for (const [claimId, raw] of Object.entries(value.workers)) {
+			if (!isPlainRecord(raw)) continue;
+			const { account, holder, pid, at } = raw;
+			if (typeof account === "string" && typeof holder === "string" && finiteNumber(pid) && finiteNumber(at))
+				workers[claimId] = { account, holder, pid, at };
+		}
+	return { v: 1, accounts, workers };
 }
 
 /** The later decrease wins; between equal decreases, the later update. */
@@ -131,7 +152,14 @@ function seededFraction(accountKey: string, episode: number): number {
 export class AccountWindows {
 	private readonly file: FleetSharedState<AccountsFile>;
 	private readonly records = new Map<string, WindowRecord>();
+	/** This process's fleet workers running per account. */
 	private readonly running = new Map<string, number>();
+	/** This process's live claims by claim id: written to the shared file, so every process counts them. */
+	private readonly claims = new Map<string, { readonly account: string; readonly at: number }>();
+	/** The machine-wide worker records as the shared file last held them. */
+	private diskWorkers: Readonly<Record<string, WorkerRecord>> = {};
+	/** Identifies this instance's claims in the shared file; alive while the process runs. */
+	private readonly holder = randomUUID();
 	/** Workers a reopened window still releases before a success proves it serves again. */
 	private readonly ramps = new Map<string, number>();
 	/** Accounts last seen blocked; the first look after their block ended reopens them. */
@@ -144,6 +172,7 @@ export class AccountWindows {
 			"accounts",
 			parseAccountsFile,
 		);
+		addLiveHolder(this.holder);
 		this.adoptDisk(Date.now());
 	}
 
@@ -160,6 +189,9 @@ export class AccountWindows {
 		this.running.set(accountKey, (this.running.get(accountKey) ?? 0) + 1);
 		const ramp = this.ramps.get(accountKey);
 		if (ramp !== undefined) this.ramps.set(accountKey, Math.max(0, ramp - 1));
+		const claimId = randomUUID();
+		this.claims.set(claimId, { account: accountKey, at: Date.now() });
+		this.persistWorkers();
 		let released = false;
 		return () => {
 			if (released) return;
@@ -167,14 +199,17 @@ export class AccountWindows {
 			const left = (this.running.get(accountKey) ?? 1) - 1;
 			if (left > 0) this.running.set(accountKey, left);
 			else this.running.delete(accountKey);
+			this.claims.delete(claimId);
+			this.persistWorkers();
 		};
 	}
 
 	/** One request on the account was dispatched; the returned settle folds how it ended into the window. */
 	begin(accountKey: string, caller: AccountWindowCaller): (outcome: ProviderRequestOutcome) => void {
 		const startedAt = caller.now();
+		this.adoptDisk(startedAt);
 		const record = this.record(accountKey, caller);
-		const inUse = (this.running.get(accountKey) ?? 0) >= Math.floor(record.w) - 1;
+		const inUse = this.runningOf(accountKey) >= Math.floor(record.w) - 1;
 		return (outcome) => this.settle(accountKey, outcome, startedAt, inUse, caller);
 	}
 
@@ -199,11 +234,11 @@ export class AccountWindows {
 		}
 		if (this.blocked.delete(accountKey)) this.reopen(accountKey, record);
 		const window = Math.floor(this.cap(record.w, providerLimit, caller));
-		const running = this.running.get(accountKey) ?? 0;
-		// A reopened window's release budget never holds the account at zero with nothing running: a probe whose request
-		// ended without a verdict (aborted, transport) must not leave the account waiting for a success that cannot come.
+		const running = this.runningOf(accountKey);
+		// A reopened window's release budget never holds this process at zero with none of its own running: a probe whose
+		// request ended without a verdict (aborted, transport) must not leave it waiting for a success that cannot come.
 		const stored = this.ramps.get(accountKey);
-		const ramp = stored !== undefined && running === 0 ? Math.max(1, stored) : stored;
+		const ramp = stored !== undefined && (this.running.get(accountKey) ?? 0) === 0 ? Math.max(1, stored) : stored;
 		const room = Math.max(0, Math.min(window - running, ramp ?? Number.POSITIVE_INFINITY));
 		return {
 			reason: "provider_room",
@@ -227,14 +262,19 @@ export class AccountWindows {
 
 	/** Every account the fleet started work on, or that holds a block or a learned window. */
 	snapshot(caller: AccountWindowCaller): AccountWindowSnapshot[] {
-		const keys = new Set([...this.records.keys(), ...this.running.keys()]);
+		this.adoptDisk(caller.now());
+		const keys = new Set([
+			...this.records.keys(),
+			...this.running.keys(),
+			...this.liveOthers(Date.now()).map((worker) => worker.account),
+		]);
 		return [...keys].map((accountKey) => {
 			const record = this.record(accountKey, caller);
 			return {
 				accountKey,
 				window: Math.floor(record.w),
 				ssthresh: record.ssthresh,
-				running: this.running.get(accountKey) ?? 0,
+				running: this.runningOf(accountKey),
 				...(record.blockedUntil !== undefined ? { blockedUntil: record.blockedUntil } : {}),
 			};
 		});
@@ -244,6 +284,21 @@ export class AccountWindows {
 	rampAll(): void {
 		for (const [accountKey, record] of this.records)
 			this.ramps.set(accountKey, Math.max(1, Math.floor(record.w / 2)));
+	}
+
+	/** The fleet workers running on the account machine-wide: this process's own, and the live claims of the other processes. */
+	private runningOf(accountKey: string): number {
+		return (
+			(this.running.get(accountKey) ?? 0) +
+			this.liveOthers(Date.now()).filter((worker) => worker.account === accountKey).length
+		);
+	}
+
+	/** The worker records of the other processes that still hold: their process runs and the claim is within its age bound. */
+	private liveOthers(now: number): WorkerRecord[] {
+		return Object.values(this.diskWorkers).filter(
+			(worker) => worker.holder !== this.holder && holderAlive(worker, now, MAX_WORKER_AGE_MS),
+		);
 	}
 
 	private cap(w: number, providerLimit: number | undefined, caller: AccountWindowCaller): number {
@@ -351,18 +406,44 @@ export class AccountWindows {
 
 	private update(accountKey: string, record: WindowRecord, now: number): void {
 		this.records.set(accountKey, { ...record, updatedAt: now });
-		this.file.schedule((disk) => {
-			const merged = new Map<string, WindowRecord>(Object.entries(disk?.accounts ?? {}));
-			for (const [key, mine] of this.records) {
-				const next = mergeRecord(merged.get(key), mine, now);
-				if (next) merged.set(key, next);
-			}
-			const kept = [...merged.entries()]
-				.sort((a, b) => b[1].updatedAt - a[1].updatedAt)
-				.slice(0, MAX_ACCOUNT_RECORDS);
-			for (const [key, record] of kept) this.records.set(key, record);
-			return { v: 1, accounts: Object.fromEntries(kept) };
-		});
+		this.file.schedule((disk) => this.mergeFile(disk, now));
+	}
+
+	/**
+	 * Writes this instance's live claims. It is the same merge as a window write: the scheduler keeps one pending merge per
+	 * tick, so a claim written in the same tick as a window record must carry that record too.
+	 */
+	private persistWorkers(): void {
+		this.file.schedule((disk) => this.mergeFile(disk, Date.now()));
+	}
+
+	/** The shared file's merge under its lock: this instance's window records and live claims over what the file holds. */
+	private mergeFile(disk: AccountsFile | undefined, now: number): AccountsFile {
+		const merged = new Map<string, WindowRecord>(Object.entries(disk?.accounts ?? {}));
+		for (const [key, mine] of this.records) {
+			const next = mergeRecord(merged.get(key), mine, now);
+			if (next) merged.set(key, next);
+		}
+		const kept = [...merged.entries()].sort((a, b) => b[1].updatedAt - a[1].updatedAt).slice(0, MAX_ACCOUNT_RECORDS);
+		for (const [key, record] of kept) this.records.set(key, record);
+		const workers = disk?.workers ?? {};
+		this.diskWorkers = workers;
+		return { v: 1, accounts: Object.fromEntries(kept), workers: this.mergedWorkers(workers) };
+	}
+
+	/**
+	 * The worker records to write: this instance's live claims, then the other processes' records that still hold. Worker
+	 * liveness is the system clock (the claims' `at` and the other processes' reads use it), whatever clock the caller has.
+	 */
+	private mergedWorkers(disk: Readonly<Record<string, WorkerRecord>>): Record<string, WorkerRecord> {
+		const own: [string, WorkerRecord][] = [...this.claims].map(([claimId, claim]) => [
+			claimId,
+			{ account: claim.account, holder: this.holder, pid: process.pid, at: claim.at },
+		]);
+		const others = Object.entries(disk)
+			.filter(([, worker]) => worker.holder !== this.holder && holderAlive(worker, Date.now(), MAX_WORKER_AGE_MS))
+			.sort((a, b) => b[1].at - a[1].at);
+		return Object.fromEntries([...own, ...others].slice(0, MAX_WORKER_RECORDS));
 	}
 
 	/** Takes the shared file's newer facts when it changed since the last read. */
@@ -373,6 +454,9 @@ export class AccountWindows {
 			const next = mergeRecord(this.records.get(key), theirs, now);
 			if (next) this.records.set(key, next);
 		}
+		this.diskWorkers = disk.workers ?? {};
+		// A file another build rewrote may have dropped this process's live claims: write them again.
+		if ([...this.claims.keys()].some((claimId) => this.diskWorkers[claimId] === undefined)) this.persistWorkers();
 	}
 
 	private notify(accountKey: string): void {

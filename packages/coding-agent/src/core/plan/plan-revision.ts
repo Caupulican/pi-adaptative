@@ -1,8 +1,8 @@
 /**
  * How one plan version's nodes are built: from the `plan` tool's steps (start), from a revise's delta (steps added or
  * replaced by id, ids removed), and from the executor's own host revisions (a verify step wrapped around an outcome
- * that asks for independent verification, a step split one child per requirement). Pure code; the caller checks the
- * facts and records the version.
+ * that asks for independent verification, a step restated pinned to this machine after its linked machine could not run
+ * it). Pure code; the caller checks the facts and records the version.
  *
  * Every builder ends in `resolveSince`: a node whose spec is unchanged keeps the version that last stated it (and with
  * it its running or settled work); a changed node, a node that newly depends on a restarted one, and on a root revise a
@@ -208,51 +208,18 @@ export function verifyWrapNodes(
 }
 
 /**
- * Host revision for `split`: the step becomes a collect join of one child per requirement (each child keeps the
- * step's task, inputs, ordering and files and proves one requirement), so its dependents keep their edges. Undefined
- * when fewer than two requirements are named or the plan has no room.
+ * Host revision for `replace`: the step is restated pinned to this machine (a must), so the plan starts it afresh here
+ * (`resolveSince` gives it the new version, since its spec changed). Undefined when the step is missing or the plan has no
+ * version left.
  */
-export function splitNodes(
+export function placeHereNodes(
 	record: PlanRecord,
 	nodeId: string,
-	requirementIds: readonly string[],
 	version: number,
 ): { readonly nodes: PlanNodeSpec[]; readonly final: string } | undefined {
-	const subject = record.nodes.find((node) => node.id === nodeId);
-	const parts = [...new Set(requirementIds)];
-	if (subject?.kind !== "work") return undefined;
-	if (parts.length < PLAN_LIMITS.joinMembersMin) return undefined;
-	if (parts.length > PLAN_LIMITS.joinMembersMax || record.nodes.length + parts.length > PLAN_LIMITS.nodes)
-		return undefined;
-	if (version > PLAN_LIMITS.versions) return undefined;
-	const taken = new Set(record.nodes.map((node) => node.id));
-	const children: PlanNodeSpec[] = [];
-	for (const [index, requirementId] of parts.entries()) {
-		const id = freshId(`${nodeId}-${index + 1}`, taken);
-		if (!id) return undefined;
-		taken.add(id);
-		children.push({
-			...subject,
-			id,
-			intent: `${subject.intent}\nCover only requirement ${requirementId}.`.slice(0, PLAN_LIMITS.intentChars),
-			requirementIds: [requirementId],
-			since: version,
-		});
-	}
-	const collect: PlanNodeSpec = {
-		id: nodeId,
-		kind: "collect",
-		intent: `Collect the parts of step ${nodeId}: ${subject.intent}`.slice(0, PLAN_LIMITS.intentChars),
-		inputs: children.map((child) => child.id),
-		after: [],
-		writeScope: [],
-		requirementIds: [],
-		effort: "normal",
-		join: { members: children.map((child) => child.id) },
-		since: version,
-	};
-	const at = record.nodes.findIndex((node) => node.id === nodeId);
-	const nodes = [...record.nodes.slice(0, at), ...children, collect, ...record.nodes.slice(at + 1)];
+	if (version > PLAN_LIMITS.versions || !record.nodes.some((node) => node.id === nodeId)) return undefined;
+	const pin: PlacementPin = { target: "here", mode: "must" };
+	const nodes = record.nodes.map((node) => (node.id === nodeId ? { ...node, pin, since: version } : node));
 	return { nodes, final: record.final };
 }
 

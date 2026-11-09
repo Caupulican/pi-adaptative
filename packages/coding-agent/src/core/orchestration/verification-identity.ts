@@ -53,6 +53,16 @@ export function attemptVerification(
 		: undefined;
 }
 
+/**
+ * Whether an attempt's result still needs its parent: a result that asks for a parent review, or an independent verification
+ * that did not accept it. The idle-agent view (`awaitingParent`) and the retention hold both read this one predicate.
+ */
+export function attemptAwaitsParent(state: VerificationProjection, attempt: AttemptRuntimeState): boolean {
+	if (attempt.result?.nextAction === "parent_review") return true;
+	const verification = attemptVerification(state, attempt);
+	return verification !== undefined && verification.verdict !== "accepted";
+}
+
 export function taskAwaitsVerification(state: VerificationProjection, taskId: string): boolean {
 	const attempt = selectedTaskAttempt(state, taskId);
 	return attempt?.result?.nextAction === "independent_verification_required" && !attemptVerification(state, attempt);

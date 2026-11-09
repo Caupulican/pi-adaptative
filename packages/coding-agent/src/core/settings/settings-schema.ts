@@ -13,6 +13,7 @@ import type { FastModePreference } from "../fast-mode.ts";
 import type { WorkerModelPinsSettings } from "../orchestration/worker-model-pins.ts";
 import type { SystemOneProviderChoice } from "../system-one/access.ts";
 import type { ToolkitScript } from "../toolkit/script-registry.ts";
+import type { OrchestrationSettings } from "./orchestration-settings.ts";
 import type { WorkerOutcomeSettings } from "./worker-outcome-settings.ts";
 
 export interface CompactionSettings {
@@ -812,6 +813,7 @@ export interface Settings {
 	compaction?: CompactionSettings;
 	scout?: ScoutSettings;
 	orchestrator?: OrchestratorSettings;
+	orchestration?: OrchestrationSettings; // Retention of closed orchestration work: days a closed objective stays before idle release (0 keeps it)
 	/** TypeSafe System One configuration (direct API or OpenRouter) */
 	systemOne?: SystemOneSettings;
 	/** Proactive per-turn cost guard (#34). */

@@ -171,7 +171,7 @@ export type AbandonReason = (typeof ABANDON_REASONS)[number];
 
 /**
  * What should happen next, computed by code. `wait_capacity.reason` is a fleet wait-reason id and
- * `replace.excludePlacement` a placement capacity key; both are typed against the fleet contract when it lands.
+ * `replace.excludePlacement` a placement capacity key, `machine:<id>`, the placement the step may not return to.
  */
 export type NextAction =
 	| { readonly kind: "accept" }
@@ -185,7 +185,6 @@ export type NextAction =
 			readonly modelRef: string;
 			readonly thinking: string;
 	  }
-	| { readonly kind: "split"; readonly requirementIds: readonly string[] }
 	| { readonly kind: "retry_after"; readonly notBefore: string }
 	| { readonly kind: "wait_capacity"; readonly reason: string }
 	| { readonly kind: "replace"; readonly excludePlacement: string }
@@ -200,7 +199,6 @@ export const NEXT_ACTION_KINDS = [
 	"verify_independently",
 	"host_check",
 	"rerun_uncovered",
-	"split",
 	"retry_after",
 	"wait_capacity",
 	"replace",

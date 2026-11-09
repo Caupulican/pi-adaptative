@@ -30,6 +30,9 @@
 - The architecture map (`docs/architecture.md`) also lists `kernel/`, `modes/`, `packages/ai/src` and `packages/tui/src`, one row per kernel module, and links the vocabulary.
 - Shrink-only ratchets in `check:static`: a header comment for every core, kernel and modes module (`check-header-comments`), a 1,200-line limit on source files (`check-file-size`), an `@deprecated` line on every legacy export (`check-legacy-markers`), and an `Enforced by:` line on every doctrine rule (`check-doctrine-enforcement`).
 - `check-bundled-skills`: every bundled skill passes the skill validator, each tool name a skill tells the agent to call is a harness tool name, and the fan-out limits a skill states match the code.
+- Idle release of closed orchestration work: a closed objective, or a finished session task, older than `orchestration.retention.closedObjectiveDays` (default 14; 0 keeps everything; at least an hour old and regardless of age when the store is within 32 records of its limit) is written to the session's `archive/` folder and then stops counting toward the store's limits. Work an agent resumes from, a pending notice, approval, receipt or mailbox message, an open plan, a goal still current, a result that still needs the parent and a delegation whose outcome was not delivered are never released. The store-full refusal says how many closed objectives are kept outside the store and why. Once a session has released work, earlier pi versions cannot open that session's orchestration store.
+- Fleet: the day budget counts every metered worker run once on every session of the machine (settled under the spend file's lock, with a terminal flag), a worker waiting for a provider account window moves past candidates judged unfit, and a temporary remote refusal waits for that machine while a permanent one is released here.
+- A plan step pinned to a machine runs here when no remote backend is registered; a failed cancel of one plan lane no longer leaves the plan's other lanes live, and a plan cancel reaches successors and queued or suspended local lanes.
 
 ### Changed
 
@@ -60,6 +63,10 @@
 - Bundled skills that failed the skill validator (`explain-diagram`, `explain-html`, `explain-video`, `icm-architect`, `n-plus-2-architecture`, `pi-harness-learning`, `ste100-writing`, `tool-call-repair`) have the required sections and a quoted description; their guidance is unchanged.
 - The `fan-out-and-review` skill states the current limits (2 to 24 slices, 2 to 8 race candidates) and describes the plan tool's join kinds as they run. The `harness-self-adaptation` skill names the static checks, the CI journeys and the owner's live gate as its proof, not tests.
 - Legacy exports that remain in use carry a `@deprecated` line naming their replacement and the condition for removing them.
+- An escalation rung is a new attempt of the same task: on a failed or blocked agent turn it continues in that agent's conversation (other sources keep the unlinked rerun), it takes no extra agent slot, and a refused move because the budget is spent asks the owner.
+- `/estop off` resumes held work even when no stop was engaged, and each lift is announced once per process (the sentinel gains an `id`; older builds ignore it).
+- A failover no longer repeats a same-model move, and a worker whose lane directory or route was inherited is judged unbound by the fitness check, as a fresh one is.
+- `spend.json` settled records gain an optional `terminal` flag and `accounts.json` gains `workers` (both additive).
 
 ### Removed
 

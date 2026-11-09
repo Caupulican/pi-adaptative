@@ -287,9 +287,12 @@ export interface WorkerDelegationRequest {
 	reportsProgress?: boolean;
 	/**
 	 * Host-only: `shared` keeps the start in the checkout it runs in, so a fresh writer is not moved into a worktree lane. A
-	 * rerun of a shared original sets it; absent leaves the isolation policy in charge.
+	 * rerun of a shared original sets it. `worktree` requires a worktree lane: a start that cannot get one is refused, never
+	 * run shared. Absent leaves the isolation policy in charge.
 	 */
-	isolation?: "shared";
+	isolation?: "shared" | "worktree";
+	/** Host-only: the rerun is a new attempt of this task (an escalation rung on a non-completed source). */
+	attemptOf?: { readonly taskId: string };
 	/** Host-only durable authorization for a scheduled task; never exposed in the delegate schema. */
 	savedIntent?: WorkerSavedIntent;
 	/** Host-admitted task context for a fresh dispatch; never exposed in the model schema. */

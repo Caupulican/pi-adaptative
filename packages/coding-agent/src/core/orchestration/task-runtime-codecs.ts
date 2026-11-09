@@ -14,6 +14,7 @@ import { parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import { planRuntimeStateFromValue } from "../plan/plan-codec.ts";
 import { PLAN_LIMITS } from "../plan/plan-graph.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
+import { contextOriginFromValue, optionalPrunedTurns } from "./agent-binding-carry-codec.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
 import { assertAttemptAgentBinding } from "./attempt-agent-identity.ts";
 import { addAttemptUsage, EMPTY_ATTEMPT_USAGE, validateAttemptUsageSnapshot } from "./attempt-usage.ts";
@@ -80,6 +81,7 @@ import {
 	type WorkerResultContract,
 } from "./contracts.ts";
 import { orchestrationModelBindingFromValue } from "./profile-registry.ts";
+import { retentionArchiveIdsField } from "./retention-event.ts";
 import { validateRiskBudget } from "./risk-budget.ts";
 import {
 	assertRecordWithinLimit,
@@ -121,7 +123,7 @@ export const MAX_DATE_EPOCH_MS = 8_640_000_000_000_000;
 
 export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: number): TaskRuntimeProjection {
 	const label = "orchestration projection snapshot";
-	const raw = exactRecord(projection, label, ["lastOrdinal", ...PROJECTION_RECORD_FIELDS]);
+	const raw = exactRecord(projection, label, ["lastOrdinal", "retentionArchiveIds", ...PROJECTION_RECORD_FIELDS]);
 	// Explicit migration of the complete pre-event snapshot shape. Partially missing new maps
 	// are corruption, never a reason to silently discard event custody during recovery.
 	const eventFieldsPresent = HOST_EVENT_RECORD_FIELDS.filter((field) => Object.hasOwn(raw, field)).length;
@@ -138,9 +140,7 @@ export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: n
 		throw new DurableTaskRuntimeError("Orchestration projection snapshot ordinal does not match its baseline.");
 	}
 	const snapshotRecords = {} as Record<ProjectionRecordField, Record<string, unknown>>;
-	for (const field of PROJECTION_RECORD_FIELDS) {
-		snapshotRecords[field] = record(candidate[field], `${label}.${field}`);
-	}
+	for (const field of PROJECTION_RECORD_FIELDS) snapshotRecords[field] = record(candidate[field], `${label}.${field}`);
 	assertRecordWithinLimit(snapshotRecords.agents, MAX_ORCHESTRATION_AGENT_BINDINGS, "agent binding");
 	assertRecordWithinLimit(snapshotRecords.objectives, MAX_ORCHESTRATION_OBJECTIVES, "objective");
 	assertRecordWithinLimit(snapshotRecords.tasks, MAX_ORCHESTRATION_TASKS, "task");
@@ -162,10 +162,11 @@ export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: n
 			Object.fromEntries(HOST_EVENT_RECORD_FIELDS.map((field) => [field, candidate[field]])),
 		),
 		lastOrdinal: throughOrdinal,
+		...retentionArchiveIdsField(candidate),
 		agents: Object.fromEntries(
 			Object.entries(snapshotRecords.agents).map(([agentId, value]) => [
 				agentId,
-				normalizeAgentBinding(value, `${label}.agents.${agentId}`),
+				normalizeAgentBinding(value, `${label}.agents.${agentId}`, true),
 			]),
 		),
 		objectives: Object.fromEntries(
@@ -1463,7 +1464,13 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 	};
 }
 
-function normalizeAgentBinding(value: unknown, label: string): AgentBindingContract {
+const CARRY_READERS = {
+	identifier: dispatchIdentifier,
+	dispatch: dispatchFromValue,
+	conversationTurnOrigin: admittedTurnOriginFromValue,
+};
+
+function normalizeAgentBinding(value: unknown, label: string, carriesTurns: boolean): AgentBindingContract {
 	const agent = exactRecord(value, label, [
 		"schemaVersion",
 		"contextOrigin",
@@ -1477,21 +1484,13 @@ function normalizeAgentBinding(value: unknown, label: string): AgentBindingContr
 		"activeAttemptId",
 		"createdAt",
 		"updatedAt",
+		...(carriesTurns ? ["prunedTurns"] : []),
 	]);
 	if (agent.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION) {
 		throw new DurableTaskRuntimeError(`${label}.schemaVersion is invalid.`);
 	}
 	const agentId = dispatchIdentifier(agent.agentId, `${label}.agentId`);
-	const origin =
-		agent.contextOrigin === undefined
-			? undefined
-			: exactRecord(agent.contextOrigin, `${label}.contextOrigin`, ["parentSessionId", "logicalAgentId"]);
-	const contextOrigin = origin
-		? {
-				parentSessionId: dispatchIdentifier(origin.parentSessionId, `${label}.contextOrigin.parentSessionId`),
-				logicalAgentId: dispatchIdentifier(origin.logicalAgentId, `${label}.contextOrigin.logicalAgentId`),
-			}
-		: undefined;
+	const contextOrigin = contextOriginFromValue(agent.contextOrigin, `${label}.contextOrigin`, dispatchIdentifier);
 	const parentAgentId = optionalDispatchIdentifier(agent.parentAgentId, `${label}.parentAgentId`);
 	const rootAgentId = dispatchIdentifier(agent.rootAgentId, `${label}.rootAgentId`);
 	const depth = number(agent.depth, `${label}.depth`);
@@ -1598,13 +1597,14 @@ function normalizeAgentBinding(value: unknown, label: string): AgentBindingContr
 		...(agent.activeAttemptId === undefined
 			? {}
 			: { activeAttemptId: dispatchIdentifier(agent.activeAttemptId, `${label}.activeAttemptId`) }),
+		...(carriesTurns ? optionalPrunedTurns(agent.prunedTurns, `${label}.prunedTurns`, CARRY_READERS) : {}),
 		createdAt,
 		updatedAt,
 	};
 }
 
 export function agentFromPayload(payload: JsonObject): AgentBindingContract {
-	return normalizeAgentBinding(payload.agent, "agent");
+	return normalizeAgentBinding(payload.agent, "agent", false);
 }
 
 export function approvalFromPayload(payload: JsonObject): ApprovalRequestContract {

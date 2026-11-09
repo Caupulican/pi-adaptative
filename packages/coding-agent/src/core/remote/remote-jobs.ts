@@ -247,7 +247,10 @@ export class RemoteJobs {
 						room: () => {
 							const current = this.machines.get(machineId);
 							if (!current?.online) return { slots: 0, reason: "placement_offline" };
-							const slots = current.facts?.accepts.jobs ? current.facts.room : 0;
+							// Jobs placed here and not sent yet will take that room, so they are not offered twice.
+							const slots = current.facts?.accepts.jobs
+								? Math.max(0, current.facts.room - this.client.pendingCount(machineId))
+								: 0;
 							return slots > 0 ? { slots } : { slots: 0, reason: "placement_room" };
 						},
 						subscribe: (onChange) => this.machines.subscribe(onChange),

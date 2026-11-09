@@ -1,6 +1,11 @@
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { OrchestrationDispatchRequest } from "./contracts.ts";
-import { type AttemptRuntimeState, attemptTurnOrigin, DurableTaskRuntimeError } from "./task-runtime-state.ts";
+import {
+	type AttemptRuntimeState,
+	attemptTurnOrigin,
+	DurableTaskRuntimeError,
+	type TaskRuntimeProjection,
+} from "./task-runtime-state.ts";
 
 interface AttemptAgentIdentity {
 	readonly agentId?: string;
@@ -21,17 +26,20 @@ export function assertAttemptAgentBinding(attempt: AttemptAgentIdentity): void {
 }
 
 /**
- * The origin the attempt's conversation carries: its own (`attemptTurnOrigin`), else a third party's words another
- * attempt of the same native agent admitted, since that agent's conversation keeps every word an attempt read.
+ * The origin the attempt's conversation carries: its own (`attemptTurnOrigin`), else the third-party origin the agent's
+ * released turns left (`prunedTurns`), else a third party's words another attempt of the same native agent admitted,
+ * since that agent's conversation keeps every word an attempt read.
  */
 export function conversationTurnOrigin(
-	attempts: Readonly<Record<string, AttemptRuntimeState>>,
+	state: Pick<TaskRuntimeProjection, "attempts" | "agents">,
 	attempt: AttemptRuntimeState,
 ): TurnOriginRecord | undefined {
 	const own = attemptTurnOrigin(attempt);
 	const agentId = nativeAgentIdForAttempt(attempt);
 	if (own?.thirdParty || agentId === undefined) return own;
-	for (const candidate of Object.values(attempts)) {
+	const carried = state.agents[agentId]?.prunedTurns?.conversationTurnOrigin;
+	if (carried) return carried;
+	for (const candidate of Object.values(state.attempts)) {
 		if (candidate.admittedTurnOrigin && nativeAgentIdForAttempt(candidate) === agentId)
 			return candidate.admittedTurnOrigin;
 	}

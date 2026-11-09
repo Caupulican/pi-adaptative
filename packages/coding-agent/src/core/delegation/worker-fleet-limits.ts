@@ -1,4 +1,5 @@
-import { latestAgentAttemptByDurableOrder, selectedTaskAttempt } from "../orchestration/attempt-ordering.ts";
+import { agentTurnDispatch } from "../orchestration/agent-turn-basis.ts";
+import { selectedTaskAttempt } from "../orchestration/attempt-ordering.ts";
 import {
 	type AgentBindingContract,
 	MAX_ORCHESTRATION_AGENT_BINDINGS,
@@ -179,9 +180,9 @@ export function evaluateReusableWorkerTaskAdmission(
 	agentId: string,
 	limits: Readonly<WorkerFleetLimits> = DEFAULT_WORKER_FLEET_LIMITS,
 ): WorkerIdentityHeadroomAdmission {
-	const latestAttempt = latestAgentAttemptByDurableOrder(snapshot, agentId);
+	const dispatch = agentTurnDispatch(snapshot, agentId);
 	const requiredAgentSlots =
-		pendingVerifierSubjectTaskIds(snapshot).size + (latestAttempt?.dispatch.executionContract?.verifier ? 1 : 0);
+		pendingVerifierSubjectTaskIds(snapshot).size + (dispatch?.executionContract?.verifier ? 1 : 0);
 	return evaluateWorkerIdentityHeadroom(snapshot.agents, requiredAgentSlots, limits);
 }
 
