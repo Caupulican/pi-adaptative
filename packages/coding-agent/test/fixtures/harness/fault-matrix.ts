@@ -16,7 +16,7 @@
  * a restart cut 3 to 5 s, and real backoff waits at their asserted lower bounds. It is not a budget and nothing gates on it.
  */
 
-export type FaultMatrixJourney = 1 | 2 | 3 | 4;
+export type FaultMatrixJourney = 1 | 2 | 3 | 4 | 5;
 export type SystemOneMode = "on" | "off";
 /** The harness extensions of the fault census that open rows wait for. */
 export type HarnessExtension = "X1" | "X2" | "X3" | "X4" | "X5" | "X6" | "X7" | "X8" | "X9";

@@ -142,6 +142,8 @@ interface OpenFile {
 	position: number;
 	append: boolean;
 	writable: boolean;
+	/** Where the file was opened, kept only when `PI_HARNESS_TRACE_OPENS` is set: names the owner of a leaked handle. */
+	readonly openedAt?: string;
 }
 
 export interface VirtualWatcherSnapshot {
@@ -997,6 +999,7 @@ export class VirtualFileSystem {
 		else if (!this.nodes.has(path)) throw this.failure("open", "ENOENT", path, "open");
 		const fd = this.nextDescriptor++;
 		this.descriptors.set(fd, {
+			...(process.env.PI_HARNESS_TRACE_OPENS ? { openedAt: new Error("opened here").stack } : {}),
 			path,
 			node: this.nodes.get(path)!,
 			position: 0,
@@ -1098,8 +1101,12 @@ export class VirtualFileSystem {
 
 	assertNoOpenResources(): void {
 		if (this.descriptors.size || this.watchers.size || this.streams.size || this.directories.size) {
+			// The paths of the open files name the owner that never closed them.
+			const open = [...this.descriptors.values()]
+				.slice(0, 8)
+				.map((file) => (file.openedAt ? `${file.path} (${file.openedAt})` : file.path));
 			throw new Error(
-				`Virtual IO leaked: files=${this.descriptors.size}; watchers=${this.watchers.size}; streams=${this.streams.size}; directories=${this.directories.size}`,
+				`Virtual IO leaked: files=${this.descriptors.size}; watchers=${this.watchers.size}; streams=${this.streams.size}; directories=${this.directories.size}${open.length ? `; open=${open.join(", ")}` : ""}`,
 			);
 		}
 	}

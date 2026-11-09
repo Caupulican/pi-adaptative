@@ -12,6 +12,7 @@ import { JOURNEY_1_BUDGET_MS, runJourney1 } from "./fixtures/harness/journeys/jo
 import { runJourney2 } from "./fixtures/harness/journeys/journey-2.ts";
 import { runJourney3 } from "./fixtures/harness/journeys/journey-3.ts";
 import { runJourney4 } from "./fixtures/harness/journeys/journey-4.ts";
+import { runJourney5 } from "./fixtures/harness/journeys/journey-5.ts";
 
 describe("Adaptive harness composed journeys", () => {
 	it(
@@ -32,5 +33,9 @@ describe("Adaptive harness composed journeys", () => {
 
 	it("orchestration gate: the root orchestrates, a refused edit and build are delegated, a worker does them and its handoff wakes the root", async () => {
 		await runJourney4();
+	}, 360_000);
+
+	it("plans: a root plan runs parallel steps, joins their results, verifies, and holds on a rejected check", async () => {
+		await runJourney5();
 	}, 360_000);
 });
