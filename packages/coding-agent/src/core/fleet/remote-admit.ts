@@ -16,7 +16,14 @@ export type RemoteRefusalCode =
 	| "secret"
 	| "project_missing"
 	/** The job's durable lane was dispatched to another machine: this machine cannot take that lane (a guard; the job id names the machine). */
-	| "lane_bound_elsewhere";
+	| "lane_bound_elsewhere"
+	/** The job's lane ended while its offer was being written: nothing is recorded or sent for it here. */
+	| "lane_ended"
+	/**
+	 * The job's placed record exists but this build cannot read it: it is neither overwritten nor offered again, and the job is not
+	 * re-placed elsewhere, since the job it names may still be live.
+	 */
+	| "record_unreadable";
 
 export interface RemoteMachineStatus {
 	readonly linked: boolean;
@@ -30,7 +37,7 @@ export type RemoteCommit =
 	| { readonly kind: "not_prepared" }
 	| { readonly kind: "attempt_unknown" }
 	| { readonly kind: "runtime_replacing" }
-	/** The commit wrote nothing: the job's lane is bound elsewhere (a typed code, as at prepare). */
+	/** The commit wrote nothing: a typed refusal (the same codes as at prepare, or a lane that ended while it was written). */
 	| { readonly kind: "refused"; readonly code: RemoteRefusalCode; readonly detail: string };
 
 export interface RemoteBackendPort {
@@ -48,6 +55,11 @@ export interface RemoteBackendPort {
 	release(idempotencyKey: string): void;
 	/** True when `taskId` is a job this session placed (it is cancelled); false leaves it to the local lanes. */
 	cancel(taskId: string, reasonCode: string): boolean;
+	/**
+	 * Stops every job this session placed for the plan, whichever lane names it, including a job whose record cannot be read (its lane
+	 * carries the plan); returns how many stops were recorded.
+	 */
+	cancelPlan(planId: string, reasonCode: string): number;
 }
 
 export const REMOTE_RETRY_MS = 30_000;
@@ -66,6 +78,7 @@ export function remoteRefusal(code: RemoteRefusalCode, detail: string, now: numb
 		case "writes":
 		case "too_long":
 		case "secret":
+		case "record_unreadable":
 			return { kind: "refused", reason: "preflight", blocker: "preflight_failed", detail };
 		case "jobs_disabled":
 		case "no_facts":
@@ -81,6 +94,7 @@ export function remoteRefusal(code: RemoteRefusalCode, detail: string, now: numb
 		case "held":
 		case "project_missing":
 		case "lane_bound_elsewhere":
+		case "lane_ended":
 			return { kind: "refused", reason: "placement", blocker: "placement_unreachable", detail };
 	}
 }

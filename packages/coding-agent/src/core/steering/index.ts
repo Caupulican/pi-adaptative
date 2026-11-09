@@ -17,9 +17,7 @@ export {
 } from "./policy.ts";
 export {
 	compileDecisionProgramForCheckpoint,
-	computeQuestionPackDigest,
 	findPackForCheckpoint,
-	getQuestionPackRef,
 	type QuestionKind,
 	STEERING_QUESTION_PACKS,
 	type SteeringQuestionDef,

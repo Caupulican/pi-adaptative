@@ -6,7 +6,7 @@ import { CONTINUOUS_CHAT_MESSAGE_INDEX_ENTRY_BYTES } from "../../../../src/core/
 import { CONTINUOUS_CHAT_SYSTEM_PROMPT } from "../../../../src/core/memory/continuous-chat-prompt.ts";
 import { type KnowledgeRecord, knowledgeId } from "../../../../src/core/memory/knowledge-record.ts";
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
-import { createBarrier, fail, type ScriptedRequest, type ScriptStep, text } from "../scripted-provider.ts";
+import { calls, createBarrier, fail, type ScriptedRequest, type ScriptStep, text } from "../scripted-provider.ts";
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 
 /**
@@ -25,16 +25,26 @@ import {
 	icmReadContinuousRecords,
 	icmReadScheduler,
 	icmWaitForChatIdle,
+	legendAliasFor,
 } from "./shared.ts";
 
+/**
+ * The ICM chat view of a request: its first user message holding a text block with `icmCache`. A carried head (the skill
+ * records and the path legend) precedes the view, so the view is not necessarily the first message.
+ */
 function chatBlocks(request: ScriptedRequest) {
-	const view = request.context.messages[0];
+	const view = request.context.messages.find(
+		(message) =>
+			message.role === "user" &&
+			typeof message.content !== "string" &&
+			message.content.some((block) => "icmCache" in block),
+	);
 	if (
 		view?.role !== "user" ||
 		typeof view.content === "string" ||
 		!view.content.every((block) => block.type === "text")
 	)
-		throw new Error("The ICM provider request must start with its text-block view.");
+		throw new Error("The ICM provider request must carry its text-block view.");
 	return view.content;
 }
 
@@ -551,6 +561,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		world.faultMatrix.witness("R10", { control: false });
 		expect(await world.disposeSessionInBody(icmRoot.session), "the ICM root disposes cleanly").toBeUndefined();
 		await verifyTurnRetrySpacing(world, `${icmAgentDir}-r10s`);
+		await verifyFrameCacheLayout(world);
 
 		const r5ProviderId = "r5-oauth-401";
 		const r5AuthPath = `${icmAgentDir}-r5-auth.json`;
@@ -638,6 +649,191 @@ async function advanceIcmTransportBackoff(
  * foreground quiet window while the root turns proceed on the pending reference; it fails again and stays blocked for longer.
  * The following turns retry it once more and publish it.
  */
+type FrameMessage = ScriptedRequest["context"]["messages"][number];
+
+/** The text blocks a request message carries, with the cache boundary each one is marked with. */
+function frameTextBlocks(message: FrameMessage): Array<{ text: string; cacheBoundary?: boolean }> {
+	if (typeof message.content === "string") return [{ text: message.content }];
+	return message.content.flatMap((block) => (block.type === "text" ? [block] : []));
+}
+
+/** The index of the ICM chat view among a request's messages: the first user message holding a block with `icmCache`. */
+function frameViewIndex(messages: readonly FrameMessage[]): number {
+	return messages.findIndex(
+		(message) =>
+			message.role === "user" &&
+			typeof message.content !== "string" &&
+			message.content.some((block) => "icmCache" in block),
+	);
+}
+
+/** The path legend a request's head carries: the message before the view whose first block opens with the frame header. */
+function frameLegend(messages: readonly FrameMessage[]): FrameMessage | undefined {
+	return messages
+		.slice(0, frameViewIndex(messages))
+		.find((message) => frameTextBlocks(message)[0]?.text.startsWith("PATH ALIASES (cumulative") === true);
+}
+
+/** The text blocks of a request's head, in wire order: everything before the view. */
+function frameHeadTexts(messages: readonly FrameMessage[]): string[] {
+	return messages
+		.slice(0, frameViewIndex(messages))
+		.flatMap((message) => frameTextBlocks(message).map((block) => block.text));
+}
+
+/**
+ * The frame's cache layout (ICM stage 3). The carried head (the active skill record, then the path legend) leads the <chat>
+ * view; every request of a turn carries the head its first request noted; the head and the view each end on a cache boundary;
+ * and a legend that grows adds one text block for its new lines, so the blocks sent before stay byte-identical and the previous
+ * turn's head breakpoint still prefix-matches. No live call: the scripted provider records each request's context.
+ */
+async function verifyFrameCacheLayout(world: HarnessWorld): Promise<void> {
+	const trace = world.trace;
+	const agentDir = `${world.agentDir}-icm-frame`;
+	const skillBody = "FRAME-PROBE-BODY";
+	world.io.seed(
+		`${agentDir}/skills/frame-probe/SKILL.md`,
+		`---\nname: frame-probe\ndescription: "Use when probing the frame cache layout."\n---\n\n# Frame Probe\n\n${skillBody}\n`,
+	);
+	const pathX = projectPath("src", "features", "frame-probe", "configuration", "retry-x.ts");
+	const pathY = projectPath("src", "features", "frame-probe", "configuration", "retry-y.ts");
+	world.io.writeFileSync(pathX, "export const X = 1;\n");
+	world.io.writeFileSync(pathY, "export const Y = 2;\n");
+	const aliasOf = (request: ScriptedRequest, path: string): string => {
+		const alias = legendAliasFor(request, path);
+		if (alias === undefined) throw new Error(`${path} is not in the request-visible PATH ALIASES legend`);
+		return alias;
+	};
+	const root = await world.createRootSession("root", {
+		agentDir,
+		sessionManager: world.createSessionManager(agentDir),
+		settings: icmContinuousSettings(),
+	});
+	const captured: Record<"a1" | "a2" | "b1" | "b2", FrameMessage[]> = { a1: [], a2: [], b1: [], b2: [] };
+	const capture = (slot: keyof typeof captured) => (request: ScriptedRequest) => {
+		captured[slot] = structuredClone(request.context.messages);
+	};
+	let aliasX = "";
+	let aliasY = "";
+
+	// Turn 0 loads the skill (the carried head) and quotes the alias of X, which the view then carries.
+	world.systemOne.enterPhase("frame-0", ICM_INTAKE_JUDGMENTS);
+	world.provider.enqueue(
+		"root",
+		calls("frame-0-load", [
+			{ id: "frame-load", name: "skill", arguments: { action: "load", names: ["frame-probe"] } },
+		]),
+		{
+			name: "frame-0-reply",
+			reply: (request) => {
+				aliasX = aliasOf(request, pathX);
+				return { content: [{ type: "text", text: `Noted ${aliasX}.` }] };
+			},
+		},
+	);
+	await withDeadline(trace, "frame turn 0", root.session.prompt(`Load the probe skill and note ${pathX}.`));
+	await icmEndForegroundQuiet(world);
+	await icmWaitForChatIdle(world, agentDir, 4);
+
+	// Turn A mints Y and quotes its alias: the view of turn B carries that reply, so B's legend grows by Y.
+	world.systemOne.enterPhase("frame-a", ICM_INTAKE_JUDGMENTS);
+	world.provider.enqueue(
+		"root",
+		{
+			...calls("frame-a-read", [{ id: "frame-read-y", name: "read", arguments: { path: pathY } }]),
+			check: capture("a1"),
+		},
+		{
+			name: "frame-a-reply",
+			check: capture("a2"),
+			reply: (request) => {
+				aliasY = aliasOf(request, pathY);
+				return { content: [{ type: "text", text: `Noted ${aliasY}.` }] };
+			},
+		},
+	);
+	await withDeadline(trace, "frame turn A", root.session.prompt(`Note ${pathY} for the record.`));
+	await icmEndForegroundQuiet(world);
+	await icmWaitForChatIdle(world, agentDir, 8);
+
+	// Turn B: its first request is the one whose head and view the checks read.
+	world.systemOne.enterPhase("frame-b", ICM_INTAKE_JUDGMENTS);
+	world.provider.enqueue(
+		"root",
+		{
+			...calls("frame-b-read", [{ id: "frame-read-x", name: "read", arguments: { path: pathX } }]),
+			check: capture("b1"),
+		},
+		{ name: "frame-b-reply", check: capture("b2"), reply: { content: [{ type: "text", text: "Done." }] } },
+	);
+	await withDeadline(trace, "frame turn B", root.session.prompt(`Read ${pathX} again.`));
+
+	const { a1, a2, b1, b2 } = captured;
+	const viewA = frameViewIndex(a1);
+	const viewB = frameViewIndex(b1);
+	const legendA = frameLegend(a1);
+	const legendB = frameLegend(b1);
+	expect(
+		{ viewA: viewA >= 0, viewB: viewB >= 0, legendA: legendA !== undefined, legendB: legendB !== undefined },
+		"the requests carry the view, and turns A and B each carry a path legend",
+	).toEqual({ viewA: true, viewB: true, legendA: true, legendB: true });
+	const legendTextOf = (message: FrameMessage): string =>
+		frameTextBlocks(message)
+			.map((block) => block.text)
+			.join("");
+	const legendLinesB = legendTextOf(legendB!).split("\n");
+	expect(
+		a2.slice(0, viewA + 2),
+		"C1: turn A's second request carries the head, view and state of its first request",
+	).toEqual(a1.slice(0, viewA + 2));
+	expect(
+		b2.slice(0, viewB + 2),
+		"C1: turn B's second request carries the head, view and state of its first request",
+	).toEqual(b1.slice(0, viewB + 2));
+	expect(
+		frameHeadTexts(b1).slice(0, frameHeadTexts(a1).length),
+		"C2: the head blocks turn A sent are a prefix of turn B's head, byte for byte",
+	).toEqual(frameHeadTexts(a1));
+	expect(
+		{
+			legendAppendOnly: legendTextOf(legendB!).startsWith(legendTextOf(legendA!)),
+			listsAliasOfA: legendLinesB.some((line) => line.startsWith(`${aliasY}=`)),
+			listsAliasOfX: legendLinesB.some((line) => line.startsWith(`${aliasX}=`)),
+		},
+		"C3: turn B's legend starts with turn A's legend and lists the alias turn A minted",
+	).toEqual({ legendAppendOnly: true, listsAliasOfA: true, listsAliasOfX: true });
+	const aViewBlocks = frameTextBlocks(a1[viewA]!);
+	const bViewBlocks = frameTextBlocks(b1[viewB]!);
+	const aBoundary = aViewBlocks.findLastIndex((block) => block.cacheBoundary === true);
+	expect(aBoundary, "turn A's view has a stable block to compare").toBeGreaterThanOrEqual(0);
+	expect(
+		bViewBlocks.slice(0, aBoundary + 1).map((block) => block.text),
+		"C4: turn A's stable view blocks are a prefix of turn B's",
+	).toEqual(aViewBlocks.slice(0, aBoundary + 1).map((block) => block.text));
+	expect(
+		{
+			headHasSkill: JSON.stringify(b1.slice(0, viewB)).includes(skillBody),
+			turnHasSkill: JSON.stringify(b1.slice(viewB + 2)).includes(skillBody),
+		},
+		"C5: the skill record rides turn B's head, not its own messages",
+	).toEqual({ headHasSkill: true, turnHasSkill: false });
+	const boundariesOf = (message: FrameMessage): boolean[] =>
+		frameTextBlocks(message).map((block) => block.cacheBoundary === true);
+	expect(
+		{
+			legend: boundariesOf(legendB!),
+			view: bViewBlocks.map((block) => block.cacheBoundary === true),
+			all: b1.reduce(
+				(count, message) => count + frameTextBlocks(message).filter((block) => block.cacheBoundary === true).length,
+				0,
+			),
+		},
+		"C7: turn B's request marks exactly two boundaries: the legend's last block and the view's last stable block",
+	).toEqual({ legend: [false, true], view: [false, true, false], all: 2 });
+	expect(boundariesOf(legendA!), "C7: turn A's legend is one block, marked by its boundary").toEqual([true]);
+	expect(await world.disposeSessionInBody(root.session), "the frame-layout root disposes cleanly").toBeUndefined();
+}
+
 async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Promise<void> {
 	const trace = world.trace;
 	const label = "r10s";

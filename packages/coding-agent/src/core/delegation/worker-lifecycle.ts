@@ -13,6 +13,7 @@ import type {
 	AttemptRetryState,
 	AttemptUsageSnapshot,
 	ExecutionGrant,
+	ManagedLanePlacement,
 	OrchestrationDispatchRequest,
 	OrchestrationModelBinding,
 	WorkerExecutionContract,
@@ -37,6 +38,7 @@ import {
 	currentTaskTerminalOverride,
 	verificationSubjectAttempt,
 } from "../orchestration/verification-identity.ts";
+import { type VerifierVerdict, verdictReasonCode } from "../orchestration/verification-verdict.ts";
 import { verifierWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import {
@@ -116,6 +118,11 @@ export interface ManagedLaneBinding {
 	readonly taskId: string;
 	readonly dispatchSequence: number;
 	readonly authorizationId: string | undefined;
+	/**
+	 * The placed job's placement key the lane was dispatched with. Absent on a lane an earlier build wrote (it names no plan) and on every
+	 * lane that is not a placed job's.
+	 */
+	readonly placement?: ManagedLanePlacement;
 	readonly ended: boolean;
 }
 
@@ -238,6 +245,8 @@ export class WorkerLifecycle {
 	} {
 		const before = selectedManagedWorkerAttempt(this.ledger.runtime.getSnapshot(), input.laneId);
 		if (before?.dispatch.dispatchSequence === input.dispatchSequence) {
+			// The placement key is not compared: a placed job's key is hashed into its job id, so a replay of that job carries the same
+			// key, and a lane an earlier build wrote has none. The replay keeps the key the lane was first dispatched with.
 			if (
 				before.dispatch.provider !== "legacy" &&
 				(before.dispatch.instructions !== input.instructions ||
@@ -701,11 +710,19 @@ export class WorkerLifecycle {
 					(evidence.metadata.verdict === "accepted" || evidence.metadata.verdict === "rejected"),
 			);
 			const verdictValue = review?.metadata?.verdict;
-			const verdict = verdictValue === "accepted" || verdictValue === "rejected" ? verdictValue : "inconclusive";
 			const reasonCodesValue = review?.metadata?.reasonCodes;
 			const reasonCodes = Array.isArray(reasonCodesValue)
 				? reasonCodesValue.filter((reasonCode): reasonCode is string => typeof reasonCode === "string")
 				: [];
+			const verdict: VerifierVerdict =
+				verdictValue === "accepted"
+					? { kind: "accepted" }
+					: verdictValue === "rejected"
+						? { kind: "rejected", reasonCodes }
+						: {
+								kind: "inconclusive",
+								cause: verifierAttempt.reasonCode ?? verifierAttempt.result?.reasonCode ?? "interrupted",
+							};
 			return [
 				{
 					action: "reconcile" as const,
@@ -713,13 +730,8 @@ export class WorkerLifecycle {
 					subjectAttemptId: implementationAttempt.attemptId,
 					verifierTaskId: verifier.task.taskId,
 					verifierAttemptId: verifierAttempt.attemptId,
-					verdict,
-					reasonCode:
-						verdict === "accepted"
-							? "independent_verification_accepted"
-							: verdict === "rejected"
-								? `independent_verification_rejected:${reasonCodes.join(",") || "unspecified"}`
-								: `independent_verification_inconclusive:${verifierAttempt.reasonCode ?? verifierAttempt.result?.reasonCode ?? "interrupted"}`,
+					verdict: verdict.kind,
+					reasonCode: verdictReasonCode(verdict),
 				},
 			];
 		});
@@ -795,6 +807,7 @@ export class WorkerLifecycle {
 			taskId: attempt.taskId,
 			dispatchSequence: attempt.dispatch.dispatchSequence ?? 1,
 			authorizationId: attempt.dispatch.authorizationId,
+			...(attempt.dispatch.placement ? { placement: attempt.dispatch.placement } : {}),
 			ended: !NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status),
 		};
 	}

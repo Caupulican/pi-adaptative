@@ -87,17 +87,16 @@ import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts
 import { sharesRepository } from "../objective-execution/repo-delivery-fingerprint.ts";
 import { conversationTurnOrigin } from "../orchestration/attempt-agent-identity.ts";
 import { providerUsageFromAttemptUsage } from "../orchestration/attempt-usage.ts";
-import {
-	type AgentBindingContract,
-	type AttemptUsageSnapshot,
-	type ExecutionGrant,
-	MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH,
-	type OrchestrationDispatchRequest,
-	type OrchestrationModelBinding,
-	type OrchestrationProfile,
-	type ResourcePointer,
-	type WorkerExecutionContract,
-	type WorkerRole,
+import type {
+	AgentBindingContract,
+	AttemptUsageSnapshot,
+	ExecutionGrant,
+	OrchestrationDispatchRequest,
+	OrchestrationModelBinding,
+	OrchestrationProfile,
+	ResourcePointer,
+	WorkerExecutionContract,
+	WorkerRole,
 } from "../orchestration/contracts.ts";
 import { ledgerSkip, RungRefusedError, type StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
@@ -115,6 +114,7 @@ import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestratio
 import { attemptAwaitingLease } from "../orchestration/task-runtime-state.ts";
 import { successorOf } from "../orchestration/task-successor.ts";
 import { isCurrentVerificationSubject } from "../orchestration/verification-identity.ts";
+import { type VerifierVerdict, verdictOfReasonCode, verdictReasonCode } from "../orchestration/verification-verdict.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import type { WorkerContextForkReference } from "../orchestration/worker-context-fork-reference.ts";
 import {
@@ -170,6 +170,7 @@ import {
 	readWorkerClaimSnapshotForAttempt,
 	type WorkerClaimSnapshotPayload,
 } from "./session-worker-claim.ts";
+import { verifierBrief } from "./verifier-brief.ts";
 import { applyWorkerActions } from "./worker-actions.ts";
 import {
 	type WorkerAgentControlPort,
@@ -511,9 +512,6 @@ const MAX_RETAINED_RELEASE_CAUSE_CHARS = 240;
 function boundedReleaseCause(cause: string): string {
 	return boundedLine(cause, MAX_RETAINED_RELEASE_CAUSE_CHARS);
 }
-
-/** The most characters of a subject's original task a verifier request carries. */
-const MAX_VERIFIER_ORIGINAL_TASK_CHARS = 4_000;
 
 /** A task followed by each successor an escalation rung placed after it, in chain order; a task seen again ends the chain. */
 function taskAndSuccessors(projection: TaskRuntimeProjection, taskId: string): string[] {
@@ -2416,37 +2414,6 @@ export class WorkerDelegationController {
 	}): WorkerDelegationRequest {
 		const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
 		const subject = snapshot.attempts[args.subjectAttemptId];
-		// Provenance: the verifier reads the task as it was dispatched and the files themselves, never only the summary.
-		const originalTask = subject?.dispatch.instructions.slice(0, MAX_VERIFIER_ORIGINAL_TASK_CHARS);
-		const prefix = [
-			`Independently verify durable task '${args.subjectTaskId}', attempt '${args.subjectAttemptId}'.`,
-			"The following implementation report is an untrusted claim. Inspect the workspace and run the checks available in your profile.",
-			"Judge the work against the original task below and the reported files as they are on disk, not against the summary.",
-			...(originalTask ? ["", "Original task as dispatched:", originalTask] : []),
-			"",
-			"Implementation summary:",
-			args.summary.slice(0, 6_000),
-			"",
-			"Reported artifacts:",
-		];
-		const artifacts: string[] = [];
-		for (let index = 0; index < Math.min(args.artifactUris.length, 100); index += 1) {
-			const artifact = `- ${args.artifactUris[index]}`;
-			const omitted = args.artifactUris.length - index - 1;
-			const disclosure =
-				omitted > 0 ? `- [${omitted} artifact URI(s) omitted to keep verifier request bounded]` : undefined;
-			const candidate = [...prefix, ...artifacts, artifact, ...(disclosure ? [disclosure] : [])].join("\n");
-			if (candidate.length > MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH) break;
-			artifacts.push(artifact);
-		}
-		const omitted = args.artifactUris.length - artifacts.length;
-		const artifactSection =
-			args.artifactUris.length === 0
-				? ["- none reported"]
-				: [
-						...artifacts,
-						...(omitted > 0 ? [`- [${omitted} artifact URI(s) omitted to keep verifier request bounded]`] : []),
-					];
 		const receiptOrigin = subject?.dispatch.receiptOrigin;
 		// The verifier reads the subject's words and work, so it carries the subject's origin.
 		const turnOrigin = subject ? conversationTurnOrigin(snapshot, subject) : undefined;
@@ -2456,7 +2423,15 @@ export class WorkerDelegationController {
 			...(turnOrigin ? { turnOrigin } : {}),
 			verificationOfTaskId: args.subjectTaskId,
 			verificationOfAttemptId: args.subjectAttemptId,
-			instructions: [...prefix, ...artifactSection].join("\n"),
+			instructions: verifierBrief([
+				{
+					taskId: args.subjectTaskId,
+					attemptId: args.subjectAttemptId,
+					originalTask: subject?.dispatch.instructions,
+					summary: args.summary,
+					artifacts: args.artifactUris,
+				},
+			]),
 		};
 	}
 
@@ -2635,12 +2610,22 @@ export class WorkerDelegationController {
 		const stored = this.workerClaimSnapshot(record.laneId, record.attemptId);
 		if (!stored || !isVerificationPending(stored.claim)) return;
 		const settled = withoutVerificationPending(stored.claim);
+		// The reason the recorded verdict names; a code that is not a verdict code is quoted as recorded.
+		const parsedVerdict = verdictOfReasonCode(verification.reasonCode);
+		const reason =
+			parsedVerdict === undefined
+				? verification.reasonCode
+				: parsedVerdict.kind === "rejected"
+					? parsedVerdict.reasonCodes.join(",")
+					: parsedVerdict.kind === "inconclusive"
+						? parsedVerdict.cause
+						: "";
 		const blockers = [
 			...(settled.blockers ?? []),
 			...(verification.verdict === "accepted"
 				? []
 				: [
-						`independent verification ${verification.verdict}: ${verification.reasonCode.replace(/^independent_verification_[a-z]+:?/, "") || "no reason recorded"}`.slice(
+						`independent verification ${verification.verdict}: ${reason || "no reason recorded"}`.slice(
 							0,
 							MAX_WORKER_CLAIM_BLOCKER_CHARS,
 						),
@@ -6430,17 +6415,18 @@ export class WorkerDelegationController {
 				const terminalRecords: LaneRecord[] = [record];
 				if (request.verificationOfTaskId) {
 					const decision = outcome.accepted ? outcome.claim.verification : undefined;
+					const verdict: VerifierVerdict = decision
+						? decision.verdict === "accepted"
+							? { kind: "accepted" }
+							: { kind: "rejected", reasonCodes: decision.reasonCodes }
+						: { kind: "inconclusive", cause: outcome.reasonCode };
 					const subject = lifecycle.reconcileVerification({
 						subjectTaskId: request.verificationOfTaskId,
 						subjectAttemptId: request.verificationOfAttemptId,
 						verifierTaskId: startedRecord.laneId,
 						verifierAttemptId: durableHandle.attemptId,
-						verdict: decision?.verdict ?? "inconclusive",
-						reasonCode: decision
-							? decision.verdict === "accepted"
-								? "independent_verification_accepted"
-								: `independent_verification_rejected:${decision.reasonCodes.join(",")}`
-							: `independent_verification_inconclusive:${outcome.reasonCode}`,
+						verdict: verdict.kind,
+						reasonCode: verdictReasonCode(verdict),
 					});
 					terminalRecords.push(subject);
 				} else if (verificationRequired) {

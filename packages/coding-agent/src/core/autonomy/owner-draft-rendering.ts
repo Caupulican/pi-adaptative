@@ -7,14 +7,24 @@
 
 import { OWNER_DRAFT_RENDERING_MAX_CHARS } from "../channels/owner-channel-types.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
-import { canonicalDigest, canonicalJson } from "../steering/canonical.ts";
+import { canonicalJson, strictCanonicalDigest, withoutUndefinedMembers } from "../steering/canonical.ts";
 
 /** The version prefix of a call digest: a later canonical form gets a new prefix, so no old approval matches it. */
 const CALL_DIGEST_VERSION = "v1";
 
-/** SHA-256 over the canonical JSON (sorted keys, no whitespace) of the complete `{ toolName, arguments }`. */
-export function ownerCallDigest(toolName: string, args: unknown): string {
-	return `${CALL_DIGEST_VERSION}:${canonicalDigest({ toolName, arguments: args })}`;
+/**
+ * SHA-256 over the strict canonical JSON of the complete `{ toolName, arguments }`, undefined members stripped first.
+ * `undefined` when the call is not JSON data (a Map, a class instance, an undefined array element, a cycle): no
+ * approval can bind such a call, so the caller refuses it instead of holding a draft nothing can admit.
+ */
+export function ownerCallDigest(toolName: string, args: unknown): string | undefined {
+	try {
+		return `${CALL_DIGEST_VERSION}:${strictCanonicalDigest(withoutUndefinedMembers({ toolName, arguments: args }))}`;
+	} catch (error) {
+		// The strict encoder refuses a non-JSON value with a TypeError; any other failure is not a refusal of the call.
+		if (error instanceof TypeError) return undefined;
+		throw error;
+	}
 }
 
 const VISIBLE_SYMBOLS: Readonly<Record<string, string>> = { "\n": "\u23ce", "\r": "\u240d", "\t": "\u2409" };

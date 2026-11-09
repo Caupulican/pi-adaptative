@@ -30,7 +30,7 @@ Existing sessions are automatically migrated to the current version (v4) when lo
 ## Source Files
 
 Source on GitHub ([pi-adaptative](https://github.com/Caupulican/pi-adaptative)):
-- [`packages/coding-agent/src/kernel/session/session-manager.ts`](https://github.com/Caupulican/pi-adaptative/blob/main/packages/coding-agent/src/kernel/session/session-manager.ts) - Session entry types and SessionManager
+- [`packages/coding-agent/src/kernel/session/session-manager.ts`](https://github.com/Caupulican/pi-adaptative/blob/main/packages/coding-agent/src/kernel/session/session-manager.ts) - SessionManager (entry types are in `kernel/session/session-entries.ts`, the public record types in `session-manager-types.ts`)
 - [`packages/coding-agent/src/kernel/messages.ts`](https://github.com/Caupulican/pi-adaptative/blob/main/packages/coding-agent/src/kernel/messages.ts) - Extended message types (BashExecutionMessage, CustomMessage, etc.)
 - [`packages/ai/src/types.ts`](https://github.com/Caupulican/pi-adaptative/blob/main/packages/ai/src/types.ts) - Base message types (UserMessage, AssistantMessage, ToolResultMessage)
 - [`packages/coding-agent/src/kernel/types.ts`](https://github.com/Caupulican/pi-adaptative/blob/main/packages/coding-agent/src/kernel/types.ts) - AgentMessage union type

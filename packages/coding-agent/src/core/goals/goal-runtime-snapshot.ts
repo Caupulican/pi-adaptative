@@ -8,7 +8,7 @@ import { getWorkerClaimSnapshots } from "../delegation/session-worker-claim.ts";
 import { getLearningDecisionSnapshots } from "../learning/session-learning-decision.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { projectSessionWorkState, type SessionWorkStateProjection } from "../orchestration/work-state-projection.ts";
-import { activeRootPlan } from "../plan/plan-view.ts";
+import { activeRootPlan, planLastActivityAt } from "../plan/plan-view.ts";
 import { getLatestEvidenceBundleSnapshot } from "../research/session-evidence-bundle.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import { getLatestTaskStepsStateSnapshot } from "../tasks/session-task-state.ts";
@@ -121,6 +121,12 @@ export function buildGoalRuntimeSnapshot(args: {
 	 */
 	now?: () => string;
 	/**
+	 * Current epoch milliseconds on the orchestration clock: the clock that stamps a running plan's movements. The plan
+	 * wait's remaining time is measured on it, so the same clock that stamped the plan decides its deadline. Defaults to
+	 * the system clock.
+	 */
+	planNow?: () => number;
+	/**
 	 * Maximum milliseconds a bound in-flight requirement may wait before the continuation escalates
 	 * to `worker_wait_timeout` instead of `"waiting"` forever (see `evaluateGoalContinuation`).
 	 * Defaults to `DEFAULT_GOAL_WORKER_WAIT_MS`.
@@ -224,6 +230,15 @@ export function buildGoalRuntimeSnapshot(args: {
 		plan && goalState && plan.goalId === goalState.goalId
 			? plan.nodes.filter((node) => node.state === "admitted" || node.state === "running").length
 			: 0;
+	// The plan wait's deadline counts from the plan's last movement, so a plan that keeps settling steps keeps its wait.
+	// Its remaining time is measured on the orchestration clock that stamped that movement, never against `now`, which
+	// reads the continuation clock; the continuation turns what is left into its own resume instant.
+	const planActivityAt =
+		plan && args.taskRuntime && planStepsInFlight > 0 ? planLastActivityAt(args.taskRuntime, plan.planId) : undefined;
+	const planRemainingMs =
+		planActivityAt === undefined
+			? undefined
+			: planActivityAt + maxWorkerWaitMs - (args.planNow ?? (() => Date.now()))();
 
 	// Obligations live on the branch's own transcript, the same source the goal-completion gate reads.
 	const activeVerificationIds = new VerificationObligationTracker(
@@ -242,6 +257,7 @@ export function buildGoalRuntimeSnapshot(args: {
 		syncRequiredLaneKeys: syncRequiredLaneKeys.size > 0 ? syncRequiredLaneKeys : undefined,
 		...(inFlightToolTaskIds.size > 0 ? { inFlightToolTaskIds } : {}),
 		...(planStepsInFlight > 0 ? { planStepsInFlight } : {}),
+		...(planRemainingMs !== undefined ? { planRemainingMs } : {}),
 	});
 
 	return {

@@ -8,7 +8,7 @@ import { choiceProbability, KNOWLEDGE_FLOOR } from "../decision/thresholds.ts";
 import type { OwnerEvidenceLedger, OwnerEvidenceRecord } from "../learning/owner-evidence-ledger.ts";
 import { nextOwnerEvidenceWindow, type OwnerEvidenceWindow } from "../learning/owner-evidence-window.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
-import { canonicalDigest } from "../steering/canonical.ts";
+import { strictCanonicalDigest, withoutUndefinedMembers } from "../steering/canonical.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { KnowledgeChange } from "./knowledge-admission.ts";
 import { type CitedOwnerWords, ownerCitationRefusal } from "./knowledge-citation.ts";
@@ -178,14 +178,16 @@ export class KnowledgeGrounding {
 		return { change, target, sources: [...sources.values()] };
 	}
 	private key(candidate: Candidate, window: OwnerEvidenceWindow): string {
-		return canonicalDigest({
-			program: "knowledge.window-grounding.v1",
-			change: candidate.change,
-			target: candidate.target ?? null,
-			window: window.id,
-			context: this.deps.context,
-			engine: [this.deps.engine.id, this.deps.engine.model],
-		});
+		return strictCanonicalDigest(
+			withoutUndefinedMembers({
+				program: "knowledge.window-grounding.v1",
+				change: candidate.change,
+				target: candidate.target ?? null,
+				window: window.id,
+				context: this.deps.context,
+				engine: [this.deps.engine.id, this.deps.engine.model],
+			}),
+		);
 	}
 	private read(candidate: Candidate, window: OwnerEvidenceWindow): Verdict | undefined {
 		this.deps.assertCurrent();
@@ -256,7 +258,12 @@ export class KnowledgeGrounding {
 						this.deps.store.work.beginBatch(
 							keys.map((id, index) => ({
 								id,
-								owner: canonicalDigest({ candidate: candidates[index]!.change, context: this.deps.context }),
+								owner: strictCanonicalDigest(
+									withoutUndefinedMembers({
+										candidate: candidates[index]!.change,
+										context: this.deps.context,
+									}),
+								),
 								window: window.id,
 								kind: "grounding",
 							})),

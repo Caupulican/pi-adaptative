@@ -26,8 +26,9 @@ import {
 	type PlanSubgraphOf,
 	planNodeEdges,
 } from "./plan-graph.ts";
+import { pinnedMachineOf } from "./plan-placement.ts";
 
-type PlanProjection = Pick<TaskRuntimeProjection, "plans" | "tasks" | "attempts">;
+export type PlanProjection = Pick<TaskRuntimeProjection, "plans" | "tasks" | "attempts">;
 
 export interface PlanNodeView {
 	readonly id: string;
@@ -39,6 +40,16 @@ export interface PlanNodeView {
 	readonly held?: PlanNodeHold;
 	readonly taskId?: string;
 	readonly placement?: Placement;
+	/** The placement exit that fired when the step was released (`plan-placement.ts`), for the trace and the panel. */
+	readonly placementExit?: string;
+	/** The machine the step's pin names, whether it is a preference or a must. */
+	readonly pinnedMachine?: string;
+	/** The owner's name for the machine the step runs on; absent until a name is supplied to `listPlanViews`. */
+	readonly placementName?: string;
+	/** The owner's name for the machine the step's pin names; absent until a name is supplied to `listPlanViews`. */
+	readonly pinnedMachineName?: string;
+	/** The planner's doubts about the step: display only, never part of the step's spec. */
+	readonly doubts?: readonly string[];
 	/** The steps this one waits for: its uses and its ordering edges. */
 	readonly predecessors: number;
 	/** The attempts its current task has run (0 before the step is released). */
@@ -153,9 +164,14 @@ function nodeView(
 	plan: PlanRuntimeState,
 	record: PlanRecord,
 	node: PlanNodeSpec,
+	names: ReadonlyMap<string, string> | undefined,
 ): PlanNodeView {
 	const runtime = plan.nodes[node.id];
 	const outcome = planNodeOutcome(projection, plan, node.id);
+	const placement = runtime?.release?.placement;
+	const machineName = placement?.kind === "remote_machine" ? names?.get(placement.machineId) : undefined;
+	const pinnedMachine = pinnedMachineOf(node);
+	const pinnedMachineName = pinnedMachine === undefined ? undefined : names?.get(pinnedMachine);
 	return {
 		id: node.id,
 		kind: node.kind,
@@ -164,8 +180,16 @@ function nodeView(
 		...(outcome ? { outcomeStatus: outcome.status, nextAction: outcome.nextAction.kind } : {}),
 		...(runtime?.held ? { held: runtime.held } : {}),
 		...(runtime?.release
-			? { taskId: currentTaskOf(projection, runtime.release.taskId), placement: runtime.release.placement }
+			? {
+					taskId: currentTaskOf(projection, runtime.release.taskId),
+					placement: runtime.release.placement,
+					placementExit: runtime.release.exit,
+				}
 			: {}),
+		...(machineName !== undefined ? { placementName: machineName } : {}),
+		...(pinnedMachine !== undefined ? { pinnedMachine } : {}),
+		...(pinnedMachineName !== undefined ? { pinnedMachineName } : {}),
+		...(node.doubts && node.doubts.length > 0 ? { doubts: node.doubts } : {}),
 		predecessors: planNodeEdges(node).length,
 		attempts: runtime?.release
 			? (projection.tasks[currentTaskOf(projection, runtime.release.taskId)]?.attemptIds.length ?? 0)
@@ -198,7 +222,33 @@ export function planNodeBrief(
 	return record.nodes.find((node) => node.id === nodeId)?.brief;
 }
 
-export function planView(projection: PlanProjection, planId: string): PlanView | undefined {
+/**
+ * The latest time a plan's steps moved: a release, a settlement, a hold or a join's settlement. A plan no step has moved
+ * since its revision is dated by that revision. Undefined for a plan that is absent, from a newer build, or undated.
+ */
+export function planLastActivityAt(projection: PlanProjection, planId: string): number | undefined {
+	const plan = projection.plans[planId];
+	if (!plan || isPlanFromNewerBuild(plan.record)) return undefined;
+	const moved = Object.values(plan.nodes).flatMap((runtime) =>
+		[runtime.release?.releasedAt, runtime.settled?.settledAt, runtime.held?.heldAt, runtime.join?.settledAt].filter(
+			(stamp): stamp is string => stamp !== undefined,
+		),
+	);
+	const stamps = (moved.length > 0 ? moved : [plan.record.revisedAt])
+		.map((stamp) => Date.parse(stamp))
+		.filter((ms) => Number.isFinite(ms));
+	return stamps.length > 0 ? Math.max(...stamps) : undefined;
+}
+
+/**
+ * One plan's view. `names` maps a linked machine's id to the owner's name for it; a step on a machine the map does not
+ * name keeps no `placementName` and no `pinnedMachineName`.
+ */
+export function planView(
+	projection: PlanProjection,
+	planId: string,
+	names?: ReadonlyMap<string, string>,
+): PlanView | undefined {
 	const plan = projection.plans[planId];
 	if (!plan) return undefined;
 	const record = plan.record;
@@ -214,7 +264,7 @@ export function planView(projection: PlanProjection, planId: string): PlanView |
 			counts: planCounts([]),
 		};
 	}
-	const nodes = record.nodes.map((node) => nodeView(projection, plan, record, node));
+	const nodes = record.nodes.map((node) => nodeView(projection, plan, record, node, names));
 	return {
 		planId,
 		version: record.version,
@@ -231,10 +281,13 @@ export function planView(projection: PlanProjection, planId: string): PlanView |
 	};
 }
 
-/** Every retained plan: open plans first, then closed ones, newest first. */
-export function listPlanViews(projection: PlanProjection): readonly PlanView[] {
+/**
+ * Every retained plan: open plans first, then closed ones, newest first. `names` (optional) names the machines steps run on
+ * and the machines their pins name (`plan-views-named.ts` builds it from the fleet record, only when a step involves one).
+ */
+export function listPlanViews(projection: PlanProjection, names?: ReadonlyMap<string, string>): readonly PlanView[] {
 	const views = Object.keys(projection.plans).flatMap((planId) => {
-		const view = planView(projection, planId);
+		const view = planView(projection, planId, names);
 		return view ? [{ view, closedAt: projection.plans[planId]?.closed?.closedAt }] : [];
 	});
 	return views

@@ -743,8 +743,8 @@ function remoteOwnerTypedOnly(deps: SessionEdgeDeps, toolName: string, why: stri
  * synchronous step as the branch read, so a parallel call with the same arguments finds it claimed (`in-use`) and a
  * repeat after the call started finds it released; `released` itself is written when the call's body starts, and a
  * refusal by a later gate or a call the loop never starts frees the approval again. Arguments that cannot be tracked
- * (not an object), and a call whose execution would be held again (`holdsAgainAtExecution`, read now: the automation
- * may have changed since the hold), admit nothing: the call is held.
+ * (not an object) or bound (not JSON data), and a call whose execution would be held again (`holdsAgainAtExecution`,
+ * read now: the automation may have changed since the hold), admit nothing: the call is held or refused.
  */
 function consumeOwnerApproval(
 	deps: Pick<SessionEdgeDeps, "getBranch" | "getLiveRun" | "claimApprovedCall" | "holdsAgainAtExecution">,
@@ -754,6 +754,7 @@ function consumeOwnerApproval(
 	if (typeof call.args !== "object" || call.args === null || !deps.claimApprovedCall) return undefined;
 	if (deps.holdsAgainAtExecution?.(call) === true) return undefined;
 	const digest = ownerCallDigest(call.toolName, call.args);
+	if (digest === undefined) return undefined;
 	const liveRun = deps.getLiveRun?.();
 	const approved = outwardDraftStates(deps.getBranch(), false, liveRun ? { liveRun } : {}).filter(
 		({ record, state, approval }) =>
@@ -804,6 +805,22 @@ function holdForOwner(
 	operations: readonly EdgeOperation[],
 	call: EdgeCall | undefined,
 ): ThirdPartyRefusal {
+	// A held call is bound to its complete arguments: one that is not JSON data has no digest an approval could match,
+	// so it is refused here and no draft is kept for it.
+	if (call !== undefined && ownerCallDigest(call.toolName, call.args) === undefined) {
+		deps.noteToolRefusal?.({
+			tool: toolName,
+			code: "remote-owner-unbound-call",
+			owner: REMOTE_OWNER_GATE,
+			detail: "arguments are not JSON data",
+		});
+		return {
+			reason:
+				"Refused: the arguments of this call are not JSON data, so the owner's approval cannot be bound to it.",
+			correction:
+				"Issue the call again with JSON arguments: strings, finite numbers, booleans, null, arrays and plain objects.",
+		};
+	}
 	const ownerSender = deps.ownerChannelSender?.(origin);
 	// A call whose execution reaches the edge again with no call would be held a second time after an approval: only the
 	// terminal releases it. (That call-less hold itself has no call digest, so it is terminal-only already.)

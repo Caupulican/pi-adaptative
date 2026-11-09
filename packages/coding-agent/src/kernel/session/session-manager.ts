@@ -1,3 +1,47 @@
+import { createHash, randomUUID } from "node:crypto";
+import {
+	closeSync,
+	existsSync,
+	mkdirSync,
+	openSync,
+	readSync,
+	renameSync,
+	type Stats,
+	statSync,
+	unlinkSync,
+	writeFileSync,
+} from "node:fs";
+import { readdir } from "node:fs/promises";
+import { basename, dirname, join, resolve } from "node:path";
+import type { ImageContent, Message, TextContent, Usage } from "@caupulican/pi-ai/types";
+import {
+	type BashExecutionMessage,
+	type CustomMessage,
+	createBranchSummaryMessage,
+	createCustomMessage,
+} from "../messages.ts";
+import { ownerInputIdOf } from "../owner-input-stamp.ts";
+import { sameFileVersion } from "../storage/bounded-file.ts";
+import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
+import { createEmptyUsage, validateUsageComponents } from "../usage.ts";
+import type { UsageComponent } from "../usage-components.ts";
+import { normalizePath, resolvePath } from "../utils/paths.ts";
+import {
+	encodeSessionEntry,
+	type ForegroundToolStartInput,
+	indexSessionLifecycle,
+	inspectSessionLifecycle,
+	isSessionLifecycleEntry,
+	planSessionLifecycleRepair,
+	type SessionLifecycleIndex,
+	type SessionLifecycleInspection,
+	type SessionLifecycleRepairPlan,
+	type SessionRequestSnapshotInput,
+	sessionLifecycleToolIdentityKey,
+	validateLoadedLifecycleEntries,
+	validateSessionLifecycleEntry,
+} from "./lifecycle-ledger.ts";
+import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import {
 	assertParentInputVisible,
 	isParentNoteOwnerId,
@@ -18,98 +62,11 @@ import {
 	type ParentInputWake,
 	type ParentNoteSelection,
 	type PersistedParentInput,
-	parentInputContextIds,
 	parentInputOf,
 	parentNoteMarker,
 	parentWakeContent,
 	parentWakeMarker,
 } from "./parent-input-ledger.ts";
-import { sessionChannelHost } from "./session-bundle-lifecycle.ts";
-import { SessionEntryEvidenceIndex } from "./session-entry-evidence-index.ts";
-import { MAX_SESSION_ENTRY_VISIT_COUNT, MAX_SESSION_LINE_CHARS } from "./session-entry-limits.ts";
-import { publishSessionFileExclusive, withSessionFileMutation } from "./session-file-admission.ts";
-import { WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE } from "./worker-project-enrollment.ts";
-
-export { MAX_SESSION_ENTRY_VISIT_COUNT } from "./session-entry-limits.ts";
-
-import { readSessionHeaderFromDescriptor, readSessionHeaderResult, type SessionHeader } from "./session-header.ts";
-
-export { readSessionHeaderResult, type SessionHeader, type SessionHeaderReadResult } from "./session-header.ts";
-
-import { assertValidSessionId, MAX_SESSION_HEADER_BYTES } from "./session-identity.ts";
-
-export {
-	assertValidSessionId,
-	isSessionIdentity,
-	isValidSessionId,
-	MAX_SESSION_HEADER_BYTES,
-} from "./session-identity.ts";
-
-import { createHash, randomUUID } from "node:crypto";
-import {
-	closeSync,
-	createReadStream,
-	existsSync,
-	constants as fsConstants,
-	fstatSync,
-	mkdirSync,
-	openSync,
-	readdirSync,
-	readSync,
-	renameSync,
-	type Stats,
-	statSync,
-	unlinkSync,
-	writeFileSync,
-} from "node:fs";
-import { open, readdir, stat } from "node:fs/promises";
-import { basename, dirname, join, resolve } from "node:path";
-import { createInterface } from "node:readline";
-import { StringDecoder } from "node:string_decoder";
-import { StreamingLineDecoder } from "@caupulican/pi-ai/streaming-lines";
-import type { ImageContent, Message, TextContent, Usage } from "@caupulican/pi-ai/types";
-import { ACTIVE_TASK_SOURCE_MAX_CHARS, clampText } from "../compaction/extraction.ts";
-import { projectCurrentActiveTask } from "../compaction/verification.ts";
-import {
-	type BashExecutionMessage,
-	type CustomMessage,
-	createBranchSummaryMessage,
-	createCompactionSummaryMessage,
-	createCustomMessage,
-} from "../messages.ts";
-import { type OwnerInputId, ownerInputIdOf, stampOwnerInput } from "../owner-input-stamp.ts";
-import { currentSynchronousFileLockScope, isMissingFileError, withFileLockSync } from "../storage/atomic-file.ts";
-import { FileSnapshotChangedError, sameFileVersion } from "../storage/bounded-file.ts";
-import { classifyTransientRecord } from "../transient-records.ts";
-import {
-	parseTurnOriginRecord,
-	stampTurnOrigin,
-	type TurnOriginRecord,
-	turnOriginStampOf,
-	UNREADABLE_TURN_ORIGIN,
-} from "../turn-origin-stamp.ts";
-import type { AgentMessage, AgentMessageOrigin } from "../types.ts";
-import { createEmptyUsage, validateUsageComponents } from "../usage.ts";
-import type { UsageComponent } from "../usage-components.ts";
-import { normalizePath, resolvePath } from "../utils/paths.ts";
-import { uuidv7 } from "../uuid.ts";
-import { parseWorkerControlRecord, stampWorkerControl, workerControlOf } from "../worker-control-stamp.ts";
-import {
-	encodeSessionEntry,
-	type ForegroundToolStartInput,
-	indexSessionLifecycle,
-	inspectSessionLifecycle,
-	isSessionLifecycleEntry,
-	planSessionLifecycleRepair,
-	type SessionLifecycleIndex,
-	type SessionLifecycleInspection,
-	type SessionLifecycleRepairPlan,
-	type SessionRequestSnapshotInput,
-	sessionLifecycleToolIdentityKey,
-	validateLoadedLifecycleEntries,
-	validateSessionLifecycleEntry,
-} from "./lifecycle-ledger.ts";
-import { compactToolResultDetailsForRetention } from "./message-retention.ts";
 import {
 	captureSessionAppendIdentity,
 	captureSessionAppendWriteIdentity,
@@ -118,6 +75,16 @@ import {
 	type SessionAppendReceipt,
 	SessionAppendUncertainError,
 } from "./session-append-receipt.ts";
+import { sessionChannelHost } from "./session-bundle-lifecycle.ts";
+import {
+	buildSessionContext,
+	cloneSessionContext,
+	customMessageEntries,
+	deliveredOwnerInput,
+	deliveredTurnOrigin,
+	deliveredWorkerControl,
+	retainSynthesizedSessionContextMessage,
+} from "./session-context-builder.ts";
 import type {
 	BranchSummaryEntry,
 	CompactionEndEntry,
@@ -137,113 +104,94 @@ import type {
 	SessionMessageEntry,
 	ThinkingLevelChangeEntry,
 } from "./session-entries.ts";
+import { SessionEntryEvidenceIndex } from "./session-entry-evidence-index.ts";
+import { MAX_SESSION_ENTRY_VISIT_COUNT } from "./session-entry-limits.ts";
+import { publishSessionFileExclusive, withSessionFileMutation } from "./session-file-admission.ts";
+import {
+	assertAdoptableSessionHeader,
+	COMPACTED_PAYLOAD_RELEASE_MIN_CHARS,
+	collectParentSessionIds,
+	ENTRY_ID_PREFIX_BYTES,
+	indexSessionEntryFileLocations,
+	loadEntriesFromFile,
+	loadEntriesFromFileInternal,
+	parseSessionEntryLine,
+	readSessionHeader,
+	retainedStringChars,
+	type SessionEntryFileLocation,
+	sessionCwdMatches,
+} from "./session-file-reading.ts";
+import { appendToExistingSessionFile, withSessionFileLock, writeSessionFile } from "./session-file-writing.ts";
+import type { SessionHeader } from "./session-header.ts";
+import { assistantToolIdentityKey, createSessionId, generateId, pendingIdSpace } from "./session-id-generation.ts";
+import { assertValidSessionId } from "./session-identity.ts";
+import {
+	buildSessionInfosWithConcurrency,
+	countSessionFiles,
+	findMostRecentSessionInDirs,
+	listSessionsFromDir,
+	requiresSessionFile,
+	type SessionListProgress,
+} from "./session-listing.ts";
+import type {
+	FileEntry,
+	NewSessionOptions,
+	SessionContext,
+	SessionEntriesPersistedEvent,
+	SessionEntriesPersistedListener,
+	SessionInfo,
+	SessionMessageBatchEntry,
+	SessionObserverErrorListener,
+	SessionTreeNode,
+} from "./session-manager-types.ts";
 import { invalidSessionParentCycle, visitSessionAncestry } from "./session-tree.ts";
-import { confirmSessionFileWrite } from "./session-write-confirmation.ts";
+import {
+	CURRENT_SESSION_VERSION,
+	FIRST_SESSION_VERSION_WITH_ENTRY_IDS,
+	migrateToCurrentVersion,
+} from "./session-version-migration.ts";
+import { WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE } from "./worker-project-enrollment.ts";
 
 export * from "./lifecycle-ledger.ts";
+export {
+	buildSessionContext,
+	getLatestCompactionEntry,
+	isWholePathCompaction,
+	retainedEntryIdsBeforeCompaction,
+	type SessionContextItem,
+	sessionContextItems,
+	summarizedGapEntryIds,
+} from "./session-context-builder.ts";
+export { MAX_SESSION_ENTRY_VISIT_COUNT } from "./session-entry-limits.ts";
+export { loadEntriesFromFile, parseSessionEntries, visitSessionEntriesAsync } from "./session-file-reading.ts";
+export { readSessionHeaderResult, type SessionHeader, type SessionHeaderReadResult } from "./session-header.ts";
+export { isAutoLearnSessionId } from "./session-id-generation.ts";
+export {
+	assertValidSessionId,
+	isSessionIdentity,
+	isValidSessionId,
+	MAX_SESSION_HEADER_BYTES,
+} from "./session-identity.ts";
+export { findMostRecentSession, type SessionListProgress } from "./session-listing.ts";
+export type {
+	FileEntry,
+	NewSessionOptions,
+	SessionContext,
+	SessionEntriesPersistedEvent,
+	SessionEntriesPersistedListener,
+	SessionInfo,
+	SessionMessageBatchEntry,
+	SessionObserverErrorListener,
+	SessionTreeNode,
+} from "./session-manager-types.ts";
+export {
+	CURRENT_SESSION_VERSION,
+	FIRST_SESSION_VERSION_WITH_ENTRY_IDS,
+	migrateSessionEntries,
+} from "./session-version-migration.ts";
 
-export const CURRENT_SESSION_VERSION = 4;
-/** First session format version whose entries all carry `id`/`parentId`; earlier files get random ids when migrated. */
-export const FIRST_SESSION_VERSION_WITH_ENTRY_IDS = 2;
-/** Maximum borrowed entries one non-copying SessionManager visit may inspect. */
 /** Maximum normal message/custom-message records in one atomic append batch. */
 export const MAX_SESSION_MESSAGE_BATCH_ENTRIES = 256;
-const MAX_SESSION_LINEAGE_DEPTH = 64;
-
-/** Share the exact active transcript lock when called from its synchronous owner. */
-function withSessionFileLock<T>(filePath: string, operation: () => T): T {
-	const borrowedScope = currentSynchronousFileLockScope(filePath);
-	return withFileLockSync(filePath, operation, borrowedScope ? { borrowedScope } : undefined);
-}
-
-/** An existing history disappearing is a failed write, never permission to create a suffix-only file. */
-function appendToExistingSessionFile(
-	filePath: string,
-	content: string,
-	expected?: Stats,
-	onRecoveredWrite?: (error: unknown) => void,
-): Stats {
-	return writeSessionFile(filePath, fsConstants.O_WRONLY | fsConstants.O_APPEND, content, expected, onRecoveredWrite);
-}
-
-/** Creation and append share descriptor ownership, close handling, and exact readback after uncertain I/O. */
-function writeSessionFile(
-	filePath: string,
-	flags: "wx" | number,
-	content: string,
-	expected?: Stats,
-	onRecoveredWrite?: (error: unknown) => void,
-): Stats {
-	return withSessionFileLock(filePath, () => {
-		const fd = openSync(filePath, flags);
-		let before: Stats | undefined;
-		let written: Stats | undefined;
-		let attempted = false;
-		let failure: { error: unknown } | undefined;
-		try {
-			before = fstatSync(fd);
-			if (expected && !sameFileVersion(expected, before))
-				throw new Error("Session file changed before its tail repair; reopen it before retrying.");
-			attempted = true;
-			writeFileSync(fd, content);
-			written = fstatSync(fd);
-		} catch (error) {
-			failure = { error };
-		} finally {
-			try {
-				closeSync(fd);
-			} catch (error) {
-				failure = {
-					error: failure ? new AggregateError([failure.error, error], "Session write and close failed.") : error,
-				};
-			}
-		}
-		if (!failure) return written!;
-		if (!attempted || !before || !onRecoveredWrite) throw failure.error;
-		let confirmed: Stats;
-		try {
-			confirmed = confirmSessionFileWrite(filePath, before, content);
-		} catch (error) {
-			throw new AggregateError([failure.error, error], "Session write outcome could not be confirmed.");
-		}
-		onRecoveredWrite(failure.error);
-		return confirmed;
-	});
-}
-
-export interface NewSessionOptions {
-	id?: string;
-	parentSession?: string;
-}
-
-/** Raw file entry (includes header) */
-export type FileEntry = SessionHeader | SessionEntry;
-
-/** Tree node for getTree() - defensive copy of session structure */
-export interface SessionTreeNode {
-	entry: SessionEntry;
-	children: SessionTreeNode[];
-	/** Resolved label for this entry, if any */
-	label?: string;
-	/** Timestamp of the latest label change for this entry, if any */
-	labelTimestamp?: string;
-}
-
-export interface SessionContext {
-	messages: AgentMessage[];
-	thinkingLevel: string;
-	/**
-	 * The session's selected model: the latest `model_change` entry (session start, `/model`, a forced
-	 * switch). Never the model that happened to answer last - a routed reply is written by the routed
-	 * model, and a routed turn's model is the turn's, never the session's.
-	 */
-	model: { provider: string; modelId: string } | null;
-}
-
-/** One source-order item accepted by the atomic model-router/session append boundary. */
-export type SessionMessageBatchEntry =
-	| { kind: "message"; message: Message; origin?: AgentMessageOrigin }
-	| { kind: "custom"; message: CustomMessage };
 
 interface SessionContextCache {
 	leafId: string | null;
@@ -295,76 +243,6 @@ interface AssistantToolReference {
 	toolName: string;
 }
 
-const synthesizedSessionContextMessages = new WeakSet<AgentMessage>();
-/**
- * The custom_message entry each custom message object was persisted as or materialized from. A custom message is
- * rebuilt from its entry's fields, so unlike a message entry its object identity is not the entry's: this map is
- * the only link from the object back to its entry.
- */
-const customMessageEntries = new WeakMap<object, CustomMessageEntry>();
-
-function retainSynthesizedSessionContextMessage<T extends AgentMessage>(
-	message: T,
-	customEntry?: CustomMessageEntry,
-): T {
-	synthesizedSessionContextMessages.add(message);
-	if (customEntry !== undefined) customMessageEntries.set(message, customEntry);
-	return message;
-}
-
-function cloneSessionContext(context: SessionContext): SessionContext {
-	return {
-		messages: context.messages.map((message) => {
-			if (!synthesizedSessionContextMessages.has(message)) return message;
-			const copy = { ...message };
-			const customEntry = customMessageEntries.get(message);
-			if (customEntry !== undefined) customMessageEntries.set(copy, customEntry);
-			return copy;
-		}),
-		thinkingLevel: context.thinkingLevel,
-		model: context.model ? { ...context.model } : null,
-	};
-}
-
-export interface SessionInfo {
-	path: string;
-	id: string;
-	/** Working directory where the session was started. Empty string for old sessions. */
-	cwd: string;
-	/** User-defined display name from session_info entries. */
-	name?: string;
-	/** Path to the parent session (if this session was forked). */
-	parentSessionPath?: string;
-	created: Date;
-	modified: Date;
-	messageCount: number;
-	firstMessage: string;
-	allMessagesText: string;
-}
-
-/**
- * A batch of entries that reached durable session storage. Emitted only after the physical write
- * returned; entries buffered before the first reply are announced together with the flush that
- * persisted them. `rewritten` marks a whole-file rewrite: earlier byte offsets are no longer valid.
- */
-export interface SessionEntriesPersistedEvent {
-	readonly sessionId: string;
-	readonly sessionFile: string;
-	readonly entryIds: readonly string[];
-	readonly rewritten: boolean;
-	/**
-	 * Present only for an append whose entries each descend from the entry written just before it, the first from
-	 * the entry that ended the file: the file's last-entry lineage grew at its leaf and nothing written earlier
-	 * moved. `types` lists the entry type of each id in `entryIds`, in order.
-	 */
-	readonly leafAppend?: { readonly types: readonly SessionEntry["type"][] };
-}
-
-export type SessionEntriesPersistedListener = (event: SessionEntriesPersistedEvent) => void;
-
-/** A persistence observer threw while a committed write was announced; the write stands and the observer is not retried. */
-export type SessionObserverErrorListener = (observer: SessionEntriesPersistedListener, error: unknown) => void;
-
 interface SessionPersistenceResult {
 	readonly event: SessionEntriesPersistedEvent;
 	/** The write was confirmed by readback; its original I/O error must still reach the caller after publication. */
@@ -399,694 +277,6 @@ export type ReadonlySessionManager = Pick<
 	| "planSessionLifecycleRepair"
 >;
 
-function createSessionId(): string {
-	return uuidv7();
-}
-
-export function isAutoLearnSessionId(id: string): boolean {
-	return id.startsWith("auto-learn-");
-}
-
-/** Generate a unique short ID (8 hex chars, collision-checked) */
-/**
- * Id space for a batch being minted: the persisted ids plus the ones minted so far in this batch,
- * WITHOUT copying the persisted set. Copying `byId.keys()` into a fresh Set per batch made every
- * tool-call marker and message batch O(entries in the session) -- measured at 3% of host CPU over a
- * 1,500-turn session, and growing with it.
- */
-function pendingIdSpace(byId: ReadonlyMap<string, unknown>): { has(id: string): boolean; add(id: string): void } {
-	const pending = new Set<string>();
-	return {
-		has: (id) => byId.has(id) || pending.has(id),
-		add: (id) => {
-			pending.add(id);
-		},
-	};
-}
-
-function generateId(byId: { has(id: string): boolean }): string {
-	for (let i = 0; i < 100; i++) {
-		const id = randomUUID().slice(0, 8);
-		if (!byId.has(id)) return id;
-	}
-	// Fallback to full UUID if somehow we have collisions
-	return randomUUID();
-}
-
-function assistantToolIdentityKey(assistantMessageEntryId: string, callId: string): string {
-	return JSON.stringify([assistantMessageEntryId, callId]);
-}
-
-/** Migrate v1 → v2: add id/parentId tree structure. Mutates in place. */
-function migrateV1ToV2(entries: FileEntry[]): void {
-	const ids = new Set<string>();
-	let prevId: string | null = null;
-
-	for (const entry of entries) {
-		if (entry.type === "session") {
-			entry.version = 2;
-			continue;
-		}
-
-		entry.id = generateId(ids);
-		ids.add(entry.id);
-		entry.parentId = prevId;
-		prevId = entry.id;
-
-		// Convert firstKeptEntryIndex to firstKeptEntryId for compaction
-		if (entry.type === "compaction") {
-			const comp = entry as CompactionEntry & { firstKeptEntryIndex?: number };
-			if (typeof comp.firstKeptEntryIndex === "number") {
-				const targetEntry = entries[comp.firstKeptEntryIndex];
-				if (targetEntry && targetEntry.type !== "session") {
-					comp.firstKeptEntryId = targetEntry.id;
-				}
-				delete comp.firstKeptEntryIndex;
-			}
-		}
-	}
-}
-
-/** Migrate v2 → v3: rename hookMessage role to custom. Mutates in place. */
-function migrateV2ToV3(entries: FileEntry[]): void {
-	for (const entry of entries) {
-		if (entry.type === "session") {
-			entry.version = 3;
-			continue;
-		}
-
-		// Update message entries with hookMessage role
-		if (entry.type === "message") {
-			const msgEntry = entry as SessionMessageEntry;
-			if (msgEntry.message && (msgEntry.message as { role: string }).role === "hookMessage") {
-				(msgEntry.message as { role: string }).role = "custom";
-			}
-		}
-	}
-}
-
-/** Migrate v3 → v4: reserve the version for the typed lifecycle ledger. */
-function migrateV3ToV4(entries: FileEntry[]): void {
-	for (const entry of entries) {
-		if (entry.type === "session") entry.version = 4;
-	}
-}
-
-/**
- * Run all necessary migrations to bring entries to current version.
- * Mutates entries in place. Returns true if any migration was applied.
- */
-function migrateToCurrentVersion(entries: FileEntry[]): boolean {
-	const header = entries.find((e) => e.type === "session") as SessionHeader | undefined;
-	const version = header?.version ?? 1;
-
-	if (version >= CURRENT_SESSION_VERSION) return false;
-
-	if (version < FIRST_SESSION_VERSION_WITH_ENTRY_IDS) migrateV1ToV2(entries);
-	if (version < 3) migrateV2ToV3(entries);
-	if (version < 4) migrateV3ToV4(entries);
-
-	return true;
-}
-
-/** Exported for testing */
-export function migrateSessionEntries(entries: FileEntry[]): void {
-	migrateToCurrentVersion(entries);
-}
-
-/** Decode captured session bytes without reopening the path. Recovery callers require every row. */
-export function parseSessionEntries(
-	content: string,
-	options?: { requireComplete?: boolean; allowFragment?: boolean },
-): FileEntry[] {
-	const entries: FileEntry[] = [];
-	if (options?.requireComplete && content.length > 0 && !content.endsWith("\n"))
-		throw new Error("Session history ends with an incomplete JSONL record.");
-	const lines = content.trim().split("\n");
-
-	for (const line of lines) {
-		if (!line.trim()) continue;
-		if (options?.requireComplete) {
-			if (line.length > MAX_SESSION_LINE_CHARS) throw new Error("Session record exceeds its size limit.");
-			const entry = parseSessionEntryLine(line, true);
-			if (entry) entries.push(entry);
-			continue;
-		}
-		try {
-			const entry = JSON.parse(line) as FileEntry;
-			entries.push(entry);
-		} catch {
-			// Skip malformed lines
-		}
-	}
-	if (options?.requireComplete) {
-		const header = entries[0];
-		if (header?.type !== "session") {
-			if (!options.allowFragment) throw new Error("Session snapshot has no valid header.");
-		} else assertValidSessionId(header.id);
-		validateLoadedLifecycleEntries(entries);
-	}
-
-	return entries;
-}
-
-export function getLatestCompactionEntry(entries: SessionEntry[]): CompactionEntry | null {
-	for (let i = entries.length - 1; i >= 0; i--) {
-		if (entries[i].type === "compaction") {
-			return entries[i] as CompactionEntry;
-		}
-	}
-	return null;
-}
-
-/** Same custom type as `COMPACTION_PREPARED_CUSTOM_TYPE` in the compaction controller. The kernel cannot import that module. */
-const COMPACTION_PREPARED_ENTRY_TYPE = "compaction_prepared";
-/** Trailer `applyResult` appends to an original-user summary. The prepared record keeps the summary without it. */
-const PREPARED_SUMMARY_TRANSCRIPT_TRAILER = /^\n\nFull pre-compaction transcript: [^\n]+$/;
-
-function userMessageText(message: AgentMessage): string {
-	if (message.role !== "user") return "";
-	const content = message.content;
-	if (typeof content === "string") return content.trim();
-	const parts: string[] = [];
-	for (const block of content) {
-		if (block.type === "text") parts.push(block.text);
-	}
-	return (parts.length === 1 ? parts[0] : parts.join(" ")).trim();
-}
-
-/** Summary text of an original-user `compaction_prepared` entry that names its parent. */
-function readPreparedSummary(entry: SessionEntry): string | undefined {
-	if (entry.type !== "custom" || entry.customType !== COMPACTION_PREPARED_ENTRY_TYPE || !entry.parentId) {
-		return undefined;
-	}
-	const data = entry.data;
-	if (typeof data !== "object" || data === null || !("result" in data)) return undefined;
-	const result = data.result;
-	if (typeof result !== "object" || result === null) return undefined;
-	if (!("summary" in result) || typeof result.summary !== "string" || result.summary.trimEnd().length === 0) {
-		return undefined;
-	}
-	if (!("retention" in result) || typeof result.retention !== "object" || result.retention === null) return undefined;
-	if (!("mode" in result.retention) || result.retention.mode !== "original-user") return undefined;
-	return result.summary;
-}
-
-function appliedSummaryMatchesPrepared(applied: string, prepared: string): boolean {
-	const base = prepared.trimEnd();
-	if (applied === base) return true;
-	if (!applied.startsWith(base)) return false;
-	return PREPARED_SUMMARY_TRANSCRIPT_TRAILER.test(applied.slice(base.length));
-}
-
-/**
- * Parent of the latest prepared summary that this compaction applied. A request or another compaction
- * between them means the prepared summary is not this checkpoint, and no boundary is invented.
- */
-function recoveredCoveredEntryId(
-	path: readonly SessionEntry[],
-	compactionIdx: number,
-	appliedSummary: string,
-): string | undefined {
-	let coveredId: string | undefined;
-	for (let i = 0; i < compactionIdx; i++) {
-		const entry = path[i];
-		const prepared = readPreparedSummary(entry);
-		if (!prepared || !appliedSummaryMatchesPrepared(appliedSummary, prepared)) continue;
-		let blocked = false;
-		for (let j = i + 1; j < compactionIdx; j++) {
-			const between = path[j]?.type;
-			if (between === "request_snapshot" || between === "compaction") {
-				blocked = true;
-				break;
-			}
-		}
-		if (!blocked && entry.parentId) coveredId = entry.parentId;
-	}
-	return coveredId;
-}
-
-function latestUserText(entries: readonly SessionEntry[], anchorId: string | undefined): string {
-	let text = "";
-	for (const entry of entries) {
-		if (!entry || (anchorId !== undefined && entry.id === anchorId) || entry.type !== "message") continue;
-		const next = userMessageText(entry.message);
-		if (next) text = next;
-	}
-	return text;
-}
-
-interface OriginalUserCut {
-	compaction: CompactionEntry;
-	index: number;
-	coveredIdx: number;
-}
-
-function originalUserCuts(path: readonly SessionEntry[]): OriginalUserCut[] {
-	const cuts: OriginalUserCut[] = [];
-	for (let i = 0; i < path.length; i++) {
-		const entry = path[i];
-		if (entry?.type !== "compaction" || entry.retention?.mode !== "original-user") continue;
-		const coveredThroughEntryId = entry.coveredThroughEntryId ?? recoveredCoveredEntryId(path, i, entry.summary);
-		const coveredIdx =
-			coveredThroughEntryId === undefined
-				? -1
-				: path.findIndex((candidate) => candidate.id === coveredThroughEntryId);
-		cuts.push({ compaction: entry, index: i, coveredIdx });
-	}
-	return cuts;
-}
-
-function isProjectedGapEntry(entry: SessionEntry): boolean {
-	return (
-		entry.type === "message" ||
-		entry.type === "custom_message" ||
-		(entry.type === "branch_summary" && Boolean(entry.summary))
-	);
-}
-
-function gapEntries(path: readonly SessionEntry[], cut: OriginalUserCut): SessionEntry[] {
-	if (cut.coveredIdx < 0 || cut.coveredIdx >= cut.index) return [];
-	const anchorId = cut.compaction.retention?.userEntryId;
-	const entries: SessionEntry[] = [];
-	for (let i = cut.coveredIdx + 1; i < cut.index; i++) {
-		const entry = path[i];
-		if (!entry || entry.id === anchorId || !isProjectedGapEntry(entry)) continue;
-		entries.push(entry);
-	}
-	return entries;
-}
-
-/** A later checkpoint lists this id only when its summary was built from a projection that contained it. */
-function gapOwnedByLaterSummary(path: readonly SessionEntry[], entryId: string, cutIndex: number): boolean {
-	for (let i = cutIndex + 1; i < path.length; i++) {
-		const later = path[i];
-		if (later?.type !== "compaction" || !later.summarizedGapEntryIds?.includes(entryId)) continue;
-		return true;
-	}
-	return false;
-}
-
-/**
- * Gap entries the current projection emits. These are the messages a summary of this projection
- * contains and must record. A later checkpoint that lists an id already summarized it.
- */
-function projectedGapEntries(path: readonly SessionEntry[]): SessionEntry[] {
-	const projected: SessionEntry[] = [];
-	const seen = new Set<string>();
-	for (const cut of originalUserCuts(path)) {
-		for (const entry of gapEntries(path, cut)) {
-			if (seen.has(entry.id) || gapOwnedByLaterSummary(path, entry.id, cut.index)) continue;
-			seen.add(entry.id);
-			projected.push(entry);
-		}
-	}
-	return projected;
-}
-
-function branchPath(
-	entries: SessionEntry[],
-	leafId?: string | null,
-	byId?: Map<string, SessionEntry>,
-): SessionEntry[] | undefined {
-	if (!byId) {
-		byId = new Map<string, SessionEntry>();
-		for (const entry of entries) byId.set(entry.id, entry);
-	}
-	if (leafId === null) return undefined;
-	let leaf = leafId ? byId.get(leafId) : undefined;
-	if (!leaf) leaf = entries[entries.length - 1];
-	if (!leaf) return undefined;
-	const path: SessionEntry[] = [];
-	visitSessionAncestry(leaf, byId, (entry) => {
-		path.push(entry);
-	});
-	path.reverse();
-	return path;
-}
-
-/**
- * Entry ids of original-user gaps that `buildSessionContext` emits for this branch, from every section of the
- * rebuilt context. Session-replacement preparation stores them on the checkpoint so the next rebuild does not emit
- * messages the summary included.
- */
-export function summarizedGapEntryIds(entries: SessionEntry[], leafId?: string | null): string[] {
-	const path = branchPath(entries, leafId);
-	if (!path) return [];
-	const ids: string[] = [];
-	for (const section of compactedContextSections(path)) {
-		if (section.kind === "compacted") for (const entry of section.selection.restoredGaps) ids.push(entry.id);
-	}
-	return ids;
-}
-
-/**
- * Whether a checkpoint summarizes everything before it on this path: it is unscoped, or its scope starts at the
- * path's first entry. A checkpoint scoped to a later entry replaced only that scope, so the entries before the scope
- * are not covered by its summary and a new checkpoint of this path must read them itself.
- */
-export function isWholePathCompaction(path: readonly SessionEntry[], compaction: CompactionEntry): boolean {
-	return compaction.scopeStartEntryId === undefined || compaction.scopeStartEntryId === path[0]?.id;
-}
-
-/**
- * Where a checkpoint's scope starts on a branch path: 0 for an unscoped checkpoint, else the index of its scope
- * start entry. A scope start that is not at or before the checkpoint on the path is a broken session, never guessed.
- */
-function compactionScopeIndex(
-	path: readonly SessionEntry[],
-	compaction: CompactionEntry,
-	compactionIdx: number,
-): number {
-	if (compaction.scopeStartEntryId === undefined) return 0;
-	for (let i = compactionIdx; i >= 0; i--) {
-		if (path[i]?.id === compaction.scopeStartEntryId) return i;
-	}
-	throw new Error(
-		`Compaction ${compaction.id} is scoped to entry ${compaction.scopeStartEntryId}, which is not before it on this branch.`,
-	);
-}
-
-/** What a rebuilt context emits verbatim for one checkpoint's section `[scopeIdx, end)` of a branch path. */
-interface CompactedContextSelection {
-	/** Where the checkpoint's scope starts: the section's first entry. Entries before it belong to earlier sections. */
-	scopeIdx: number;
-	compactionIdx: number;
-	/** Where the section ends: the path's end for the latest checkpoint, else the next section's scope start. */
-	end: number;
-	/**
-	 * The entry kept verbatim before the summary, in `original-user` mode: the original user message, or for a scoped
-	 * checkpoint its scope start, whatever that entry's message role.
-	 */
-	originalUserEntry: SessionEntry | undefined;
-	/** The original-user gap entries a rebuild restores; empty in the standard mode. */
-	restoredGaps: SessionEntry[];
-	/** Transient records carried forward from before the cut, in path order. */
-	carried: SessionEntry[];
-	/** Entries before the compaction entry that stay verbatim: the kept tail, or the restored gaps. */
-	retained: SessionEntry[];
-}
-
-/**
- * The one owner of which entries before a compaction stay in the context: `buildSessionContext` emits them
- * and {@link retainedEntryIdsBeforeCompaction} reports them, so no other module restates the retention rules.
- * The selection covers the checkpoint's section `[scopeIdx, end)` only: a scoped checkpoint owns only the entries
- * from its scope start onward, so nothing before that is retained, restored or carried by it. Without a scope the
- * whole path before the checkpoint is its input, as always.
- */
-function selectCompactedContext(
-	path: readonly SessionEntry[],
-	compaction: CompactionEntry,
-	compactionIdx: number,
-	end: number,
-	pendingInputIds: ReadonlySet<string>,
-): CompactedContextSelection {
-	const scopeIdx = compactionScopeIndex(path, compaction, compactionIdx);
-	const scopedPath = scopeIdx === 0 && end === path.length ? path : path.slice(scopeIdx, end);
-	const originalUserEntry =
-		compaction.retention?.mode === "original-user"
-			? path
-					.slice(scopeIdx, compactionIdx)
-					.find(
-						(entry) =>
-							entry.id === compaction.retention?.userEntryId &&
-							(entry.type === "message" || entry.type === "custom_message"),
-					)
-			: undefined;
-
-	const restoredGaps = compaction.retention?.mode === "original-user" ? projectedGapEntries(scopedPath) : [];
-
-	// Transient records (append-on-change host and kernel records: skill context, goal context,
-	// legend deltas, failure ledger) that fell before the cut are carried forward: the last record
-	// of each kind, every record of a cumulative kind. Without them the reconciler sees no durable
-	// instance after compaction and re-appends every kind on the next request, re-sending the same
-	// content the compacted history already carried. Kinds with a record in the kept tail need none.
-	let firstKeptIdx = compactionIdx;
-	for (let i = scopeIdx; i < compactionIdx; i++) {
-		if (path[i].id === compaction.firstKeptEntryId) {
-			firstKeptIdx = i;
-			break;
-		}
-	}
-	const tailKinds = new Set<string>();
-	for (let i = firstKeptIdx; i < end; i++) {
-		const entry = path[i];
-		if (entry.type === "custom_message" && classifyTransientRecord(entry.content, entry.details).transient) {
-			tailKinds.add(entry.customType);
-		}
-	}
-	const carriedByKind = new Map<string, SessionEntry[]>();
-	for (let i = scopeIdx; i < firstKeptIdx; i++) {
-		const entry = path[i];
-		if (entry.type !== "custom_message" || tailKinds.has(entry.customType)) continue;
-		const record = classifyTransientRecord(entry.content, entry.details);
-		if (!record.transient) continue;
-		if (record.cumulative) {
-			const list = carriedByKind.get(entry.customType) ?? [];
-			list.push(entry);
-			carriedByKind.set(entry.customType, list);
-		} else carriedByKind.set(entry.customType, [entry]);
-	}
-	const retained = compaction.retention ? restoredGaps : path.slice(firstKeptIdx, compactionIdx);
-	const carried = [...carriedByKind.values()].flat();
-	const preserved = new Set([...carried, ...retained, ...restoredGaps].map((entry) => entry.id));
-	if (originalUserEntry) preserved.add(originalUserEntry.id);
-	// Accepted input remains verbatim until its wake settles, even when a summary covers its position.
-	for (let i = scopeIdx; i < compactionIdx; i++) {
-		const entry = path[i];
-		if (pendingInputIds.has(entry.id) && !preserved.has(entry.id)) {
-			carried.push(entry);
-			preserved.add(entry.id);
-		}
-	}
-	carried.sort((a, b) => path.indexOf(a) - path.indexOf(b));
-	return { scopeIdx, compactionIdx, end, originalUserEntry, restoredGaps, carried, retained };
-}
-
-/** One section of a rebuilt context: raw entries `[0, end)`, or one checkpoint's section. */
-type ContextSection =
-	| { kind: "raw"; end: number }
-	| { kind: "compacted"; compaction: CompactionEntry; selection: CompactedContextSelection };
-
-/**
- * The sections a branch path rebuilds into, earliest first. The latest checkpoint owns the path from its scope start
- * to the end. A scoped checkpoint replaced only its scope, so the entries before that scope are rebuilt exactly as the
- * shorter branch ending there would be: by its own latest checkpoint, and so on, down to a raw section or an
- * unscoped checkpoint. Each step scans backward from the previous section's start, so the whole path is read once.
- */
-function compactedContextSections(path: readonly SessionEntry[]): ContextSection[] {
-	const pendingInputIds = parentInputContextIds(path);
-	const sections: ContextSection[] = [];
-	let end = path.length;
-	while (end > 0) {
-		let compactionIdx = -1;
-		for (let i = end - 1; i >= 0; i--) {
-			if (path[i]?.type === "compaction") {
-				compactionIdx = i;
-				break;
-			}
-		}
-		if (compactionIdx < 0) {
-			sections.push({ kind: "raw", end });
-			break;
-		}
-		const compaction = path[compactionIdx] as CompactionEntry;
-		const selection = selectCompactedContext(path, compaction, compactionIdx, end, pendingInputIds);
-		sections.push({ kind: "compacted", compaction, selection });
-		end = selection.scopeIdx;
-	}
-	return sections.reverse();
-}
-
-/**
- * Ids of the entries positioned before the latest compaction of a branch path that the rebuilt context still
- * emits: the kept tail (or, in `original-user` mode, the retained user message and restored gaps) and the
- * carried-forward transient records, plus, for a scoped checkpoint, everything the sections before its scope emit
- * (their checkpoint entries included). Everything else before that compaction was compacted away. Empty when the
- * path holds no compaction.
- */
-export function retainedEntryIdsBeforeCompaction(path: readonly SessionEntry[]): ReadonlySet<string> {
-	const retained = new Set<string>();
-	const sections = compactedContextSections(path);
-	const latest = sections[sections.length - 1];
-	if (latest?.kind !== "compacted") return retained;
-	for (const section of sections) {
-		if (section.kind === "raw") {
-			for (let i = 0; i < section.end; i++) retained.add((path[i] as SessionEntry).id);
-			continue;
-		}
-		const { selection } = section;
-		if (selection.originalUserEntry) retained.add(selection.originalUserEntry.id);
-		for (const entry of selection.carried) retained.add(entry.id);
-		for (const entry of selection.retained) retained.add(entry.id);
-		if (section === latest) continue;
-		retained.add(section.compaction.id);
-		for (let i = selection.compactionIdx + 1; i < selection.end; i++) retained.add((path[i] as SessionEntry).id);
-	}
-	return retained;
-}
-
-/**
- * Build the session context from entries using tree traversal.
- * If leafId is provided, walks from that entry to root.
- * Handles compaction and branch summaries along the path.
- *
- * The latest compaction is the checkpoint. A checkpoint scoped to a later entry (a running ICM chat turn's start)
- * replaced only its scope: the entries before the scope are rebuilt first, as the branch ending there would be.
- * Its own unsummarized suffix, and any earlier
- * original-user gap that no later checkpoint recorded as part of its summary, are emitted
- * after that summary. A stored `coveredThroughEntryId` is never replaced by recovery.
- * The stored summary text is not rewritten. When a restored gap contains a user message, only the
- * provider view of Active Task names the latest of those messages. Messages after the checkpoint are
- * never read: they follow the summary in context, and rewriting the summary at the head of the
- * request on each of them would break the cached prefix every user turn.
- */
-export function buildSessionContext(
-	entries: SessionEntry[],
-	leafId?: string | null,
-	byId?: Map<string, SessionEntry>,
-): SessionContext {
-	const path = branchPath(entries, leafId, byId);
-	if (!path) {
-		return { messages: [], thinkingLevel: "off", model: null };
-	}
-
-	// Extract settings
-	let thinkingLevel = "off";
-	let model: { provider: string; modelId: string } | null = null;
-
-	for (const entry of path) {
-		if (entry.type === "thinking_level_change") {
-			thinkingLevel = entry.thinkingLevel;
-		} else if (entry.type === "model_change") {
-			model = { provider: entry.provider, modelId: entry.modelId };
-		}
-	}
-
-	return { messages: sessionContextItems(path).map((item) => item.message), thinkingLevel, model };
-}
-
-/** One message of a rebuilt session context and the entry it came from (a compaction entry for its summary). */
-export interface SessionContextItem {
-	entry: SessionEntry;
-	message: AgentMessage;
-}
-
-function sessionContextMessage(entry: SessionEntry): AgentMessage | undefined {
-	if (entry.type === "message") {
-		// A context rebuilt from persisted entries carries the identity the entry names, as a live message does.
-		if (
-			entry.workerControl !== undefined &&
-			entry.message.role === "user" &&
-			Object.isExtensible(entry.message) &&
-			workerControlOf(entry.message) === undefined
-		) {
-			const record = parseWorkerControlRecord(entry.workerControl);
-			if (record) stampWorkerControl(entry.message, record);
-		}
-		// An origin that does not parse is third-party: an unreadable record never gains the owner's authority.
-		if (
-			entry.turnOrigin !== undefined &&
-			entry.message.role === "user" &&
-			Object.isExtensible(entry.message) &&
-			turnOriginStampOf(entry.message) === undefined
-		)
-			stampTurnOrigin(entry.message, parseTurnOriginRecord(entry.turnOrigin) ?? UNREADABLE_TURN_ORIGIN);
-		// The owner input the entry delivered, so a rebuilt context (resume, fork, tree, a parent's wake) names whose words
-		// it holds as the live message did.
-		if (
-			typeof entry.ownerInputId === "string" &&
-			entry.message.role === "user" &&
-			Object.isExtensible(entry.message) &&
-			ownerInputIdOf(entry.message) === undefined
-		)
-			stampOwnerInput(entry.message, entry.ownerInputId as OwnerInputId);
-		return entry.message;
-	}
-	if (entry.type === "custom_message") {
-		return retainSynthesizedSessionContextMessage(
-			createCustomMessage(entry.customType, entry.content, entry.display, entry.details, entry.timestamp),
-			entry,
-		);
-	}
-	if (entry.type === "branch_summary" && entry.summary) {
-		return retainSynthesizedSessionContextMessage(
-			createBranchSummaryMessage(entry.summary, entry.fromId, entry.timestamp),
-		);
-	}
-	return undefined;
-}
-
-/** The typed worker-message identity a persisted user message carries, to be written before it on its entry. */
-function deliveredWorkerControl(message: AgentMessage): { workerControl?: ReturnType<typeof workerControlOf> } {
-	const record = message.role === "user" ? workerControlOf(message) : undefined;
-	return record === undefined ? {} : { workerControl: record };
-}
-
-/** The owner input a persisted user message delivers, as its entry names it; nothing for any other message. */
-function deliveredOwnerInput(message: AgentMessage): { ownerInputId?: string } {
-	const id = message.role === "user" ? ownerInputIdOf(message) : undefined;
-	return id === undefined ? {} : { ownerInputId: id };
-}
-
-/** The origin stamp a persisted user message carries, to be written on its entry. */
-function deliveredTurnOrigin(message: AgentMessage): { turnOrigin?: TurnOriginRecord } {
-	const record = message.role === "user" ? turnOriginStampOf(message) : undefined;
-	return record === undefined ? {} : { turnOrigin: record };
-}
-
-/**
- * The messages {@link buildSessionContext} rebuilds for a branch path (root to leaf), in order, each with its source
- * entry. The one owner of what a rebuilt context holds: anything that reports on the active context reads this.
- */
-export function sessionContextItems(path: readonly SessionEntry[]): SessionContextItem[] {
-	const items: SessionContextItem[] = [];
-	const appendMessage = (entry: SessionEntry) => {
-		const message = sessionContextMessage(entry);
-		if (message) items.push({ entry, message });
-	};
-
-	// Sections run earliest first: a scoped checkpoint follows the context of the entries before its scope.
-	for (const section of compactedContextSections(path)) {
-		if (section.kind === "raw") {
-			// No compaction before this point - emit all messages, handle branch summaries and custom messages
-			for (let i = 0; i < section.end; i++) appendMessage(path[i] as SessionEntry);
-			continue;
-		}
-		const { compaction, selection } = section;
-		const { compactionIdx, originalUserEntry, restoredGaps } = selection;
-		const unsummarizedTask = compaction.retention
-			? clampText(latestUserText(restoredGaps, compaction.retention.userEntryId), ACTIVE_TASK_SOURCE_MAX_CHARS)
-			: "";
-		const providerSummary = unsummarizedTask
-			? projectCurrentActiveTask(compaction.summary, unsummarizedTask)
-			: compaction.summary;
-
-		if (originalUserEntry) appendMessage(originalUserEntry);
-		items.push({
-			entry: compaction,
-			message: retainSynthesizedSessionContextMessage(
-				createCompactionSummaryMessage(
-					providerSummary,
-					compaction.tokensBefore,
-					compaction.timestamp,
-					compaction.details,
-					compaction.id,
-				),
-			),
-		});
-
-		for (const entry of selection.carried) appendMessage(entry);
-		for (const entry of selection.retained) appendMessage(entry);
-
-		// Emit messages after compaction, up to the section's end
-		for (let i = compactionIdx + 1; i < selection.end; i++) {
-			appendMessage(path[i] as SessionEntry);
-		}
-	}
-	return items;
-}
-
 /**
  * Compute the default session directory for a cwd without creating it.
  * Encodes cwd into a safe directory name under ~/.pi/agent/sessions/; persistence creates the
@@ -1119,595 +309,6 @@ export function getDefaultSessionDir(cwd: string, agentDir: string): string {
 	return getDefaultSessionDirPath(cwd, agentDir);
 }
 
-const SESSION_READ_BUFFER_SIZE = 1024 * 1024;
-
-function parseSessionEntryLine(line: string, requireComplete = false): FileEntry | null {
-	if (!line.trim()) return null;
-	let parsed: unknown;
-	try {
-		parsed = JSON.parse(line);
-	} catch (error) {
-		if (requireComplete) throw new Error("Session history contains a malformed JSONL record.", { cause: error });
-		// Ordinary history viewing may retain its readable records.
-		return null;
-	}
-	if (requireComplete && (parsed === null || typeof parsed !== "object" || Array.isArray(parsed)))
-		throw new Error("Session history contains a non-object JSONL record.");
-	return parsed as FileEntry;
-}
-
-interface SessionEntryFileLocation {
-	offset: number;
-	length: number;
-}
-
-function loadEntriesFromFileInternal(
-	filePath: string,
-	options?: { maxLineChars?: number; requireComplete?: boolean },
-	onEntry?: (entry: FileEntry, offset: number | undefined, length: number | undefined) => void,
-): { entries: FileEntry[]; indexedBytes: number; unterminatedTail?: boolean; revision?: Stats } {
-	const resolvedFilePath = normalizePath(filePath);
-	let revision: Stats;
-	try {
-		revision = statSync(resolvedFilePath);
-	} catch (error) {
-		if (isMissingFileError(error)) return { entries: [], indexedBytes: 0 };
-		throw error;
-	}
-	if (!revision.isFile()) throw new Error("Session history is not a regular file.");
-
-	// Bound every row before parsing. Ordinary viewing can skip an unusable row;
-	// canonical recovery must report it rather than infer absence from a partial view.
-	const maxLineChars = options?.maxLineChars ?? MAX_SESSION_LINE_CHARS;
-
-	const entries: FileEntry[] = [];
-	const appendLine = (line: string, offset?: number, length?: number): void => {
-		const entry = parseSessionEntryLine(line, options?.requireComplete);
-		if (!entry) return;
-		onEntry?.(entry, offset, length);
-		entries.push(entry);
-	};
-	const fd = openSync(resolvedFilePath, "r");
-	let indexedBytes = 0;
-	let lineOffset = 0;
-	let lineLength = 0;
-	let unterminatedTail = false;
-	try {
-		if (!sameFileVersion(revision, fstatSync(fd)))
-			throw new FileSnapshotChangedError("Session file changed while opening it.");
-		// The preliminary path check can observe a different file. Validate the first
-		// physical record on this descriptor before the permissive row parser runs.
-		if (revision.size > 0 && !readSessionHeaderFromDescriptor(fd, MAX_SESSION_HEADER_BYTES).ok) {
-			return { entries: [], indexedBytes: revision.size, revision };
-		}
-		const decoder = new StringDecoder("utf8");
-		const strictDecoder = options?.requireComplete
-			? new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
-			: undefined;
-		const lines = new StreamingLineDecoder(maxLineChars, {
-			overflow: options?.requireComplete ? "throw" : "skip",
-			lineEndings: "lf",
-		});
-		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
-
-		while (true) {
-			const bytesRead = readSync(fd, buffer, 0, buffer.length, null);
-			if (bytesRead === 0) break;
-			unterminatedTail = buffer[bytesRead - 1] !== 0x0a;
-			const chunkOffset = indexedBytes;
-			indexedBytes += bytesRead;
-			const offsets: number[] = [];
-			const lengths: number[] = [];
-			let segmentStart = 0;
-			while (segmentStart < bytesRead) {
-				const newlineIndex = buffer.indexOf(0x0a, segmentStart);
-				if (newlineIndex === -1 || newlineIndex >= bytesRead) break;
-				lineLength += newlineIndex - segmentStart;
-				offsets.push(lineOffset);
-				lengths.push(lineLength);
-				lineOffset = chunkOffset + newlineIndex + 1;
-				lineLength = 0;
-				segmentStart = newlineIndex + 1;
-			}
-			lineLength += bytesRead - segmentStart;
-			const bytes = buffer.subarray(0, bytesRead);
-			const decodedLines = lines.push(
-				strictDecoder ? strictDecoder.decode(bytes, { stream: true }) : decoder.write(bytes),
-			);
-			const locationsMatch = decodedLines.length === offsets.length;
-			for (let index = 0; index < decodedLines.length; index++) {
-				appendLine(
-					decodedLines[index],
-					locationsMatch ? offsets[index] : undefined,
-					locationsMatch ? lengths[index] : undefined,
-				);
-			}
-		}
-
-		for (const line of lines.push(strictDecoder ? strictDecoder.decode() : decoder.end())) appendLine(line);
-		const finalLine = lines.finish();
-		if (finalLine !== undefined) appendLine(finalLine, lineOffset, lineLength);
-		if (!sameFileVersion(revision, fstatSync(fd)) || !sameFileVersion(revision, statSync(resolvedFilePath)))
-			throw new FileSnapshotChangedError("Session file changed while reading it; reopen it before retrying.");
-		if (options?.requireComplete && unterminatedTail)
-			throw new Error("Session history ends with an incomplete JSONL record; its write remains unresolved.");
-	} finally {
-		closeSync(fd);
-	}
-
-	// Validate session header
-	if (entries.length === 0) return { entries, indexedBytes, unterminatedTail, revision };
-	const header = entries[0];
-	if (header.type !== "session" || typeof (header as { id?: unknown }).id !== "string") {
-		return { entries: [], indexedBytes, unterminatedTail, revision };
-	}
-
-	return { entries, indexedBytes, unterminatedTail, revision };
-}
-
-/** Exported for testing */
-export function loadEntriesFromFile(filePath: string, options?: { maxLineChars?: number }): FileEntry[] {
-	const entries = loadEntriesFromFileInternal(filePath, options).entries;
-	validateLoadedLifecycleEntries(entries);
-	return entries;
-}
-
-/** Read-only projection of selected rows, yielding between bounded I/O chunks. Not a recovery loader. */
-export async function visitSessionEntriesAsync(
-	filePath: string,
-	selectLine: (line: string) => boolean,
-	visit: (entry: SessionEntry) => void,
-): Promise<void> {
-	const file = await open(filePath, "r");
-	try {
-		const before = await file.stat();
-		if (!before.isFile()) throw new Error("Session history is not a regular file.");
-		if (!sameFileVersion(before, await stat(filePath)))
-			throw new FileSnapshotChangedError("Session file changed while opening it.");
-		if (!readSessionHeaderFromDescriptor(file.fd, MAX_SESSION_HEADER_BYTES).ok)
-			throw new Error("Session file header is invalid.");
-		const decoder = new StringDecoder("utf8");
-		const lines = new StreamingLineDecoder(MAX_SESSION_LINE_CHARS, { overflow: "skip", lineEndings: "lf" });
-		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
-		let position = 0;
-		const consume = (line: string): void => {
-			if (!selectLine(line)) return;
-			const entry = parseSessionEntryLine(line);
-			if (entry && entry.type !== "session") visit(entry);
-		};
-		for (;;) {
-			const { bytesRead } = await file.read(buffer, 0, buffer.length, position);
-			if (bytesRead === 0) break;
-			position += bytesRead;
-			for (const line of lines.push(decoder.write(buffer.subarray(0, bytesRead)))) consume(line);
-		}
-		for (const line of lines.push(decoder.end())) consume(line);
-		const tail = lines.finish();
-		if (tail !== undefined) consume(tail);
-		if (!sameFileVersion(before, await file.stat()) || !sameFileVersion(before, await stat(filePath)))
-			throw new FileSnapshotChangedError("Session file changed while reading it; reopen it before retrying.");
-	} finally {
-		await file.close();
-	}
-}
-
-const ENTRY_ID_PREFIX_BYTES = 64 * 1024;
-const COMPACTED_PAYLOAD_RELEASE_MIN_CHARS = 16 * 1024;
-
-function indexSessionEntryFileLocations(
-	filePath: string,
-	startOffset: number,
-	locations: Map<string, SessionEntryFileLocation>,
-	retainedIds: ReadonlySet<string>,
-	limitOffset?: number,
-): number {
-	const pendingIds = new Set<string>();
-	for (const id of retainedIds) {
-		if (!locations.has(id)) pendingIds.add(id);
-	}
-	if (pendingIds.size === 0) return startOffset;
-	const fd = openSync(filePath, "r");
-	const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
-	let position = startOffset;
-	let lineOffset = startOffset;
-	let lineLength = 0;
-	let prefixLength = 0;
-	let prefixParts: Buffer[] = [];
-
-	const finishLine = (): boolean => {
-		if (prefixLength > 0) {
-			const prefix =
-				prefixParts.length === 1
-					? prefixParts[0].toString("utf8")
-					: Buffer.concat(prefixParts, prefixLength).toString("utf8");
-			for (const match of prefix.matchAll(/"id"\s*:\s*"([A-Za-z0-9_-]+)"/g)) {
-				const id = match[1];
-				if (id && pendingIds.delete(id)) {
-					locations.set(id, { offset: lineOffset, length: lineLength });
-					break;
-				}
-			}
-		}
-		lineLength = 0;
-		prefixLength = 0;
-		prefixParts = [];
-		return pendingIds.size === 0;
-	};
-
-	try {
-		while (true) {
-			// A read budget ends the scan at `limitOffset` however far the file has grown: the bytes read are what is bounded.
-			const readLength = limitOffset === undefined ? buffer.length : Math.min(buffer.length, limitOffset - position);
-			if (readLength <= 0) break;
-			const bytesRead = readSync(fd, buffer, 0, readLength, position);
-			if (bytesRead === 0) break;
-			const chunkOffset = position;
-			position += bytesRead;
-			let segmentStart = 0;
-			while (segmentStart < bytesRead) {
-				const newlineIndex = buffer.indexOf(0x0a, segmentStart);
-				const segmentEnd = newlineIndex === -1 || newlineIndex >= bytesRead ? bytesRead : newlineIndex;
-				const segmentLength = segmentEnd - segmentStart;
-				lineLength += segmentLength;
-				const prefixRemaining = ENTRY_ID_PREFIX_BYTES - prefixLength;
-				if (prefixRemaining > 0 && segmentLength > 0) {
-					const retainedLength = Math.min(prefixRemaining, segmentLength);
-					prefixParts.push(Buffer.from(buffer.subarray(segmentStart, segmentStart + retainedLength)));
-					prefixLength += retainedLength;
-				}
-				if (newlineIndex === -1 || newlineIndex >= bytesRead) break;
-				const nextLineOffset = chunkOffset + newlineIndex + 1;
-				if (finishLine()) return nextLineOffset;
-				lineOffset = nextLineOffset;
-				segmentStart = newlineIndex + 1;
-			}
-		}
-		if (lineLength > 0) finishLine();
-		return position;
-	} finally {
-		closeSync(fd);
-	}
-}
-
-function retainedStringChars(value: unknown, stopAfter: number): number {
-	const pending: unknown[] = [value];
-	const seen = new WeakSet<object>();
-	let chars = 0;
-	while (pending.length > 0) {
-		const item = pending.pop();
-		if (typeof item === "string") {
-			chars += item.length;
-			if (chars >= stopAfter) return chars;
-			continue;
-		}
-		if (!item || typeof item !== "object" || seen.has(item)) continue;
-		seen.add(item);
-		if (Array.isArray(item)) {
-			pending.push(...item);
-		} else {
-			pending.push(...Object.values(item));
-		}
-	}
-	return chars;
-}
-
-/**
- * A session file a manager adopts must begin with a valid session header whose id is a valid session id. The id is later
- * a file name (journal sidecars, owner follow-up files), so it is judged here, before anything adopts it or touches the
- * file. The first JSONL record is authoritative: a later valid header must not launder a malformed prefix. An empty file
- * has no header to judge.
- */
-function assertAdoptableSessionHeader(filePath: string): void {
-	if (!existsSync(filePath) || statSync(filePath).size === 0) return;
-	const result = readSessionHeaderResult(filePath);
-	if (result.ok) return;
-	if (result.reason === "invalid_session_id") {
-		throw new Error(`Session file header id is not a valid session id: ${filePath}`);
-	}
-	throw new Error(`Session file does not begin with a valid session header: ${filePath}`);
-}
-
-function readSessionHeader(filePath: string): SessionHeader | null {
-	const result = readSessionHeaderResult(filePath);
-	return result.ok ? result.header : null;
-}
-
-/** Resolve the bounded parent-file chain that authoritatively defines a fork's session lineage. */
-function collectParentSessionIds(parentSession: unknown, relativeToDir: string): Set<string> {
-	const sessionIds = new Set<string>();
-	const visitedPaths = new Set<string>();
-	let nextPath =
-		typeof parentSession === "string" && parentSession.length > 0
-			? normalizePath(resolve(relativeToDir, parentSession))
-			: undefined;
-	for (let depth = 0; nextPath && depth < MAX_SESSION_LINEAGE_DEPTH; depth++) {
-		if (visitedPaths.has(nextPath)) break;
-		visitedPaths.add(nextPath);
-		const header = readSessionHeader(nextPath);
-		if (!header || header.id.length === 0) break;
-		sessionIds.add(header.id);
-		nextPath =
-			typeof header.parentSession === "string" && header.parentSession.length > 0
-				? normalizePath(resolve(dirname(nextPath), header.parentSession))
-				: undefined;
-	}
-	return sessionIds;
-}
-
-function getSessionHeaderCwd(header: SessionHeader): string | undefined {
-	const cwd = (header as { cwd?: unknown }).cwd;
-	return typeof cwd === "string" ? cwd : undefined;
-}
-
-function sessionCwdMatches(cwd: string | undefined, resolvedCwd: string): boolean {
-	return cwd !== undefined && cwd !== "" && resolvePath(cwd) === resolvedCwd;
-}
-
-/** Exported for testing */
-export function findMostRecentSession(
-	sessionDir: string,
-	cwd?: string,
-	skip?: (sessionId: string) => boolean,
-): string | null {
-	const resolvedSessionDir = normalizePath(sessionDir);
-	const resolvedCwd = cwd ? resolvePath(cwd) : undefined;
-	try {
-		const files = readdirSync(resolvedSessionDir)
-			.filter((f) => f.endsWith(".jsonl"))
-			.map((f) => join(resolvedSessionDir, f))
-			.map((path) => ({ path, header: readSessionHeader(path) }))
-			.filter(
-				(file): file is { path: string; header: SessionHeader } =>
-					file.header !== null &&
-					!isAutoLearnSessionId(file.header.id) &&
-					(!resolvedCwd || sessionCwdMatches(getSessionHeaderCwd(file.header), resolvedCwd)) &&
-					!skip?.(file.header.id),
-			)
-			.flatMap(({ path }) => {
-				try {
-					return [{ path, mtime: statSync(path).mtime }];
-				} catch {
-					return [];
-				}
-			})
-			.sort((a, b) => b.mtime.getTime() - a.mtime.getTime());
-
-		return files[0]?.path || null;
-	} catch {
-		return null;
-	}
-}
-
-function findMostRecentSessionInDirs(
-	sessionDirs: string[],
-	cwd?: string,
-	skip?: (sessionId: string) => boolean,
-): string | null {
-	let mostRecent: { path: string; mtime: number } | null = null;
-	for (const dir of sessionDirs) {
-		const sessionPath = findMostRecentSession(dir, cwd, skip);
-		if (!sessionPath) continue;
-		try {
-			const mtime = statSync(sessionPath).mtime.getTime();
-			if (!mostRecent || mtime > mostRecent.mtime) {
-				mostRecent = { path: sessionPath, mtime };
-			}
-		} catch {
-			// Ignore races/deleted files
-		}
-	}
-	return mostRecent?.path ?? null;
-}
-
-function isMessageWithContent(message: AgentMessage): message is Message {
-	return typeof (message as Message).role === "string" && "content" in message;
-}
-
-function extractTextContent(message: Message): string {
-	const content = message.content;
-	if (typeof content === "string") {
-		return content;
-	}
-	return content
-		.filter((block): block is TextContent => block.type === "text")
-		.map((block) => block.text)
-		.join(" ");
-}
-
-const MAX_SESSION_SEARCH_TEXT_CHARS = 20_000;
-
-function getMessageActivityTime(entry: SessionMessageEntry): number | undefined {
-	const message = entry.message;
-	if (!isMessageWithContent(message)) return undefined;
-	if (message.role !== "user" && message.role !== "assistant") return undefined;
-
-	const msgTimestamp = (message as { timestamp?: number }).timestamp;
-	if (typeof msgTimestamp === "number") {
-		return msgTimestamp;
-	}
-
-	const t = new Date(entry.timestamp).getTime();
-	return Number.isNaN(t) ? undefined : t;
-}
-
-async function buildSessionInfo(filePath: string): Promise<SessionInfo | null> {
-	try {
-		// The header is admitted exactly as the open path admits it: a file whose header id is not a valid session id is not
-		// listed, since opening it would be refused.
-		if (!readSessionHeaderResult(filePath).ok) return null;
-		const stats = await stat(filePath);
-		let header: SessionHeader | null = null;
-		let messageCount = 0;
-		let firstMessage = "";
-		let allMessagesText = "";
-		let name: string | undefined;
-		let lastActivityTime: number | undefined;
-
-		const appendSearchText = (text: string) => {
-			if (!text || allMessagesText.length >= MAX_SESSION_SEARCH_TEXT_CHARS) return;
-			const prefix = allMessagesText.length === 0 ? "" : " ";
-			const remaining = MAX_SESSION_SEARCH_TEXT_CHARS - allMessagesText.length - prefix.length;
-			if (remaining <= 0) return;
-			allMessagesText += `${prefix}${text.slice(0, remaining)}`;
-		};
-
-		const rl = createInterface({
-			input: createReadStream(filePath, { encoding: "utf8" }),
-			crlfDelay: Infinity,
-		});
-
-		for await (const line of rl) {
-			const entry = parseSessionEntryLine(line);
-			if (!entry) continue;
-
-			if (!header) {
-				if (entry.type !== "session") return null;
-				header = entry;
-				continue;
-			}
-
-			// Extract session name (use latest, including explicit clears)
-			if (entry.type === "session_info") {
-				name = entry.name?.trim() || undefined;
-				continue;
-			}
-
-			if (entry.type !== "message") continue;
-			messageCount++;
-
-			const activityTime = getMessageActivityTime(entry);
-			if (typeof activityTime === "number") {
-				lastActivityTime = Math.max(lastActivityTime ?? 0, activityTime);
-			}
-
-			const message = entry.message;
-			if (!isMessageWithContent(message)) continue;
-			if (message.role !== "user" && message.role !== "assistant") continue;
-
-			const textContent = extractTextContent(message);
-			if (!textContent) continue;
-
-			appendSearchText(textContent);
-			if (!firstMessage && message.role === "user") {
-				firstMessage = textContent;
-			}
-		}
-
-		if (!header || isAutoLearnSessionId(header.id)) return null;
-		const cwd = typeof header.cwd === "string" ? header.cwd : "";
-		const parentSessionPath = header.parentSession;
-		const headerTime = typeof header.timestamp === "string" ? new Date(header.timestamp).getTime() : NaN;
-		const modified =
-			typeof lastActivityTime === "number" && lastActivityTime > 0
-				? new Date(lastActivityTime)
-				: !Number.isNaN(headerTime)
-					? new Date(headerTime)
-					: stats.mtime;
-
-		return {
-			path: filePath,
-			id: header.id,
-			cwd,
-			name,
-			parentSessionPath,
-			created: new Date(header.timestamp),
-			modified,
-			messageCount,
-			firstMessage: firstMessage || "(no messages)",
-			allMessagesText,
-		};
-	} catch {
-		return null;
-	}
-}
-
-export type SessionListProgress = (loaded: number, total: number) => void;
-
-const MAX_CONCURRENT_SESSION_INFO_LOADS = 10;
-
-async function buildSessionInfosWithConcurrency(
-	files: string[],
-	onLoaded: () => void,
-): Promise<(SessionInfo | null)[]> {
-	const results: (SessionInfo | null)[] = new Array(files.length).fill(null);
-	const inFlight = new Set<Promise<void>>();
-	let nextIndex = 0;
-
-	const startNext = (): void => {
-		const index = nextIndex++;
-		const file = files[index];
-		if (!file) return;
-
-		let task: Promise<void>;
-		task = buildSessionInfo(file)
-			.then((info) => {
-				results[index] = info;
-			})
-			.catch(() => {
-				results[index] = null;
-			})
-			.finally(() => {
-				inFlight.delete(task);
-				onLoaded();
-			});
-		inFlight.add(task);
-	};
-
-	while (nextIndex < files.length || inFlight.size > 0) {
-		while (nextIndex < files.length && inFlight.size < MAX_CONCURRENT_SESSION_INFO_LOADS) {
-			startNext();
-		}
-		if (inFlight.size > 0) {
-			await Promise.race(inFlight);
-		}
-	}
-
-	return results;
-}
-
-async function countSessionFiles(dir: string): Promise<number> {
-	if (!existsSync(dir)) return 0;
-	try {
-		const dirEntries = await readdir(dir);
-		return dirEntries.filter((f) => f.endsWith(".jsonl")).length;
-	} catch {
-		return 0;
-	}
-}
-
-async function listSessionsFromDir(
-	dir: string,
-	onProgress?: SessionListProgress,
-	progressOffset = 0,
-	progressTotal?: number,
-): Promise<SessionInfo[]> {
-	const sessions: SessionInfo[] = [];
-	if (!existsSync(dir)) {
-		return sessions;
-	}
-
-	try {
-		const dirEntries = await readdir(dir);
-		const files = dirEntries.filter((f) => f.endsWith(".jsonl")).map((f) => join(dir, f));
-		const total = progressTotal ?? files.length;
-
-		let loaded = 0;
-		const results = await buildSessionInfosWithConcurrency(files, () => {
-			loaded++;
-			onProgress?.(progressOffset + loaded, total);
-		});
-		for (const info of results) {
-			if (info) {
-				sessions.push(info);
-			}
-		}
-	} catch {
-		// Return empty list on error
-	}
-
-	return sessions;
-}
-
 /**
  * Manages conversation sessions as append-only trees stored in JSONL files.
  *
@@ -1719,22 +320,6 @@ async function listSessionsFromDir(
  * Use buildSessionContext() to get the resolved message list for the LLM, which
  * handles compaction summaries and follows the path from root to current leaf.
  */
-/**
- * Entries that require physical persistence before publication. Owner input must be durable before its
- * delivery releases recovery custody, even when the session has no reply yet.
- */
-function requiresSessionFile(entry: FileEntry): boolean {
-	if (entry.type === "session") return false;
-	return (
-		(entry.type === "message" &&
-			(entry.ownerInputId !== undefined ||
-				entry.message.role === "assistant" ||
-				entry.message.role === "bashExecution")) ||
-		isSessionLifecycleEntry(entry) ||
-		(entry.type === "custom" && entry.customType === "continuous_chat_work_report")
-	);
-}
-
 export class SessionManager {
 	private sessionId: string = "";
 	private sessionFile: string | undefined;

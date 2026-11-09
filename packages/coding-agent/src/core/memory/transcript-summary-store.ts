@@ -43,10 +43,10 @@
  * temporary file and its rename leaves only that temporary file; both are swept by age when the coordinator starts.
  */
 
-import { createHash } from "node:crypto";
 import { promises as fs } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { stateFile } from "../agent-paths.ts";
+import { strictCanonicalDigest } from "../steering/canonical.ts";
 import { FileLockDeadlineError, isMissingFileError, withFileLock, writeFileAtomic } from "../util/atomic-file.ts";
 import {
 	assertBoundedReadActive,
@@ -376,26 +376,12 @@ function isForgetSessionId(value: unknown): value is string {
 	return true;
 }
 
-/** Canonical JSON: object keys sorted at every depth, so a digest never depends on insertion order. */
-function canonicalJson(value: unknown): string {
-	if (Array.isArray(value)) return `[${value.map((entry) => canonicalJson(entry)).join(",")}]`;
-	if (isPlainRecord(value)) {
-		const fields = Object.keys(value)
-			.sort()
-			.map((key) => `${JSON.stringify(key)}:${canonicalJson(value[key])}`);
-		return `{${fields.join(",")}}`;
-	}
-	return JSON.stringify(value);
-}
-
-/** SHA-256 hex of the canonical JSON of `{revision, sessions}`, where `sessions` maps each id to `{forgottenAt}`. */
+/** SHA-256 hex of the strict canonical JSON of `{revision, sessions}`, where `sessions` maps each id to `{forgottenAt}`. */
 function forgetDigest(revision: number, sessions: ReadonlyMap<string, string>): string {
 	const entries = Object.fromEntries(
 		[...sessions].map(([id, forgottenAt]): [string, { forgottenAt: string }] => [id, { forgottenAt }]),
 	);
-	return createHash("sha256")
-		.update(canonicalJson({ revision, sessions: entries }), "utf8")
-		.digest("hex");
+	return strictCanonicalDigest({ revision, sessions: entries });
 }
 
 function serializeForgetFile(revision: number, sessions: ReadonlyMap<string, string>, lostAt?: string): string {

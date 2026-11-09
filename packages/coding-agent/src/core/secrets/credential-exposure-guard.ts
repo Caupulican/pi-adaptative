@@ -4,6 +4,7 @@ import {
 	type AgentTool,
 	AgentToolExecutionError,
 	type AgentToolResult,
+	describeThrownToolError,
 	type ExecutionContext,
 	type ExecutionPathAuthority,
 	readAgentToolExecutionError,
@@ -1118,14 +1119,21 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 						classified.outputSignature,
 						classified.errorKind,
 						classified.details,
+						// A receipt holds fixed, bounded facts (no output text, no paths), so it needs no redaction.
+						classified.receipt,
 					);
 				}
-				if (error instanceof Error) throw new Error(redact(error.message));
+				// The rebuilt error keeps the facts the tool attached (its own `receipt`, bounded and free of output text).
+				const { receipt } = describeThrownToolError(error);
+				if (error instanceof Error) throw Object.assign(new Error(redact(error.message)), { receipt });
 				// A thrown non-Error is the live shape of a cancellation: `signal.throwIfAborted()` throws
 				// the abort REASON, and a named abort's reason is a plain string. Reporting only that the
 				// value was lost left the model, the failure ledger and the operator with no cause at all.
-				throw new Error(
-					`Credential-safe tool execution failed: ${describeThrownValue(error)}: ${redact(String(error))}`,
+				throw Object.assign(
+					new Error(
+						`Credential-safe tool execution failed: ${describeThrownValue(error)}: ${redact(String(error))}`,
+					),
+					{ receipt },
 				);
 			}
 		},

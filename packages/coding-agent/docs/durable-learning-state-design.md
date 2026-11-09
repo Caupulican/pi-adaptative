@@ -140,11 +140,11 @@ The same cue ID is transiently injected into every provider request in that cue'
 
 ### Successful completion
 
-The sole completion hook is the existing non-retry `agent_end` path in `AgentSession._handleAgentEvent`. It may call compare-and-swap completion only when all conditions hold:
+The sole completion hook is the existing non-retry `agent_end` path in `AgentSessionEvents.handleAgentEvent` (agent-session-events.ts). It may call compare-and-swap completion only when all conditions hold:
 
 1. the run has the exact token recorded by accepted-plan commit;
 2. reflection remains eligible and the session is root and non-disposed;
-3. `_willRetryAfterAgentEnd(event)` is false;
+3. `_willRetryAfterAgentEnd(event)` on `AgentSessionEvents` is false;
 4. the final assistant message has `stopReason === "stop"`, no `errorMessage`, and non-empty assistant text;
 5. under the file lock, the matching transition is still pending and its transition ID, claim ID, owner ID, runtime, and policy all match.
 

@@ -1,7 +1,13 @@
 import { readFile, stat } from "node:fs/promises";
 import { delimiter } from "node:path";
 import { Text } from "@caupulican/pi-tui";
-import { type AgentTool, AgentToolExecutionError } from "../../kernel/types.ts";
+import type { AgentToolFailureReceipt } from "../../kernel/tool-failure-receipt.ts";
+import {
+	type AgentTool,
+	AgentToolExecutionError,
+	describeThrownToolError,
+	readAgentToolPolicyDeniedError,
+} from "../../kernel/types.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { type PathInputOptions, resolvePath } from "../../utils/paths.ts";
 import { waitForOwnedProcessTreeWithTermination } from "../../utils/process-group-wait.ts";
@@ -203,6 +209,31 @@ function renderStreamNotice(label: string, path: string | undefined, error: stri
 	return undefined;
 }
 
+/**
+ * Carries the scan's receipt on an error a run throws after its scan, so a failed run keeps the stakes it read. The
+ * receipt goes on a new error, never on the thrown value: an abort reason is one object shared by every call on its
+ * signal, and a thrown string has no properties. The new error keeps the class and message the loop classifies by, so
+ * the failure is classified as before. An error that already carries a receipt, a policy refusal (a decision of the
+ * gate, not a failed run), and a run without a scanned script pass as thrown.
+ */
+function carryScriptReceipt(error: unknown, receipt: AgentToolFailureReceipt | undefined): unknown {
+	if (receipt === undefined || readAgentToolPolicyDeniedError(error) !== undefined) return error;
+	const described = describeThrownToolError(error);
+	if (described.receipt !== undefined) return error;
+	if (described.structured) {
+		const { structured } = described;
+		return new AgentToolExecutionError(
+			structured.message,
+			structured.failureCode,
+			structured.outputSignature,
+			structured.errorKind,
+			structured.details,
+			receipt,
+		);
+	}
+	return Object.assign(new Error(described.message, { cause: error }), { name: described.errorClass, receipt });
+}
+
 export function createPythonToolDefinition(
 	baseCwd: string,
 	options: PythonToolOptions = {},
@@ -285,271 +316,304 @@ export function createPythonToolDefinition(
 			if (scriptPath !== undefined) await inspectPythonPath(scriptPath, "scriptPath", operations, signal);
 			const scriptStakes =
 				scriptPath === undefined ? undefined : await readScriptStakes(scriptPath, baseCwd, localBackend, signal);
-			const reduceStdout = input.fullOutput !== true && reductionEnabled;
-			let reductionOptions: ReduceToolOutputOptions | undefined;
-			if (reduceStdout) {
-				const projectPath = resolvePythonToolPath(baseCwd, `.pi/${OUTPUT_RULES_FILE_NAME}`, pathOptions);
-				const projectRules = await awaitPreflight(async () => {
-					try {
-						return compileOutputRulesDocument(await operations.readOutputRules(projectPath, signal), projectPath);
-					} catch (error) {
-						if (!isMissingPathError(error)) throw error;
-						return [];
-					}
-				}, signal);
-				signal?.throwIfAborted();
-				reductionOptions = {
-					extraReducers: [
-						createRuleOutputReducer(
-							loadOutputRules({
-								projectRules,
-								agentDir: options.outputReduction?.agentDir ?? getAgentDir(),
-								extraFiles: options.outputReduction?.rulesFiles,
-								bundled: BUNDLED_OUTPUT_RULES,
-							}),
-						),
-					],
-				};
-			}
-			const runtime = await awaitPreflight(resolveRuntime, signal);
-			signal?.throwIfAborted();
-			if (runtime.status !== "ready") throw new Error(runtime.reason);
-			const backendEnvironment = await awaitPreflight(() => operations.getEnvironment(cwd, signal), signal);
-			signal?.throwIfAborted();
-			// Detach from mutable adapter state before waiting for the mutation barrier.
-			const baseEnvironment: ExecutionEnvironment = {
-				caseSensitive: backendEnvironment.caseSensitive,
-				variables: composeExecutionEnvironment(backendEnvironment, []),
-			};
-			const args = input.args ? [...input.args] : [];
-			const timeoutMs = resolvePythonTimeoutMs(input.timeoutSeconds, input.background === true);
-			const maxOutputBytes = clampInteger(
-				input.maxOutputBytes,
-				50 * 1024,
-				MIN_PYTHON_OUTPUT_BYTES,
-				MAX_PYTHON_OUTPUT_BYTES,
-			);
-			const accumulatorOptions = {
-				maxBytes: maxOutputBytes,
-				...(options.outputDirectory ? { tempDirectory: options.outputDirectory } : {}),
-			};
-			const stdout = new OutputAccumulator({ ...accumulatorOptions, tempFilePrefix: "pi-python-stdout" });
-			const stderr = new OutputAccumulator({ ...accumulatorOptions, tempFilePrefix: "pi-python-stderr" });
-			const finishStreams = () => {
-				stdout.finish();
-				stderr.finish();
-				// Reduce the complete stdout before the cap so the model sees the shorter version of the
-				// whole output, not of its head+tail; the raw stream is persisted when lines were dropped.
-				const rawStdout = reduceStdout ? stdout.snapshot({ persistIfTruncated: true }) : undefined;
-				const reduction =
-					rawStdout && !rawStdout.truncation.truncated
-						? reduceToolOutput(
-								{
-									tool: "python",
-									command: "python",
-									text: rawStdout.content,
-									exitCode: 0,
-									level: reductionLevel(),
-								},
-								reductionOptions,
-							)
-						: undefined;
-				const stdoutSnapshot = reduction
-					? stdout.snapshot({ persistIfTruncated: true, persistAlways: reduction.details.persistRaw })
-					: (rawStdout ?? stdout.snapshot({ persistIfTruncated: true }));
-				const outputReduction: OutputReductionDetails | undefined = reduction
-					? {
-							...reduction.details,
-							...(reduction.details.persistRaw && stdoutSnapshot.fullOutputPath
-								? { rawPath: stdoutSnapshot.fullOutputPath }
-								: {}),
-						}
-					: undefined;
-				// stderr carries tracebacks and compiler-style diagnostics; the same pipeline applies.
-				const rawStderr = reduceStdout ? stderr.snapshot({ persistIfTruncated: true }) : undefined;
-				const stderrReduction =
-					rawStderr && !rawStderr.truncation.truncated && rawStderr.content
-						? reduceToolOutput(
-								{
-									tool: "python",
-									command: "python",
-									text: rawStderr.content,
-									exitCode: 0,
-									level: reductionLevel(),
-								},
-								reductionOptions,
-							)
-						: undefined;
-				const stderrSnapshot = stderrReduction
-					? stderr.snapshot({ persistIfTruncated: true, persistAlways: stderrReduction.details.persistRaw })
-					: (rawStderr ?? stderr.snapshot({ persistIfTruncated: true }));
-				return {
-					stdout: reduction ? { ...stdoutSnapshot, content: reduction.text } : stdoutSnapshot,
-					stderr: stderrReduction ? { ...stderrSnapshot, content: stderrReduction.text } : stderrSnapshot,
-					outputReduction,
-					stderrReduction: stderrReduction
-						? {
-								...stderrReduction.details,
-								...(stderrReduction.details.persistRaw && stderrSnapshot.fullOutputPath
-									? { rawPath: stderrSnapshot.fullOutputPath }
-									: {}),
-							}
-						: undefined,
-				};
-			};
-			let execution: PythonExecutionResult;
-			let bridgeReport: ToolBridgeReport | undefined;
+			// The facts every failure below keeps: the stakes the host read from the file, whatever the run's outcome.
+			const receipt = scriptStakes ? { scriptStakes } : undefined;
 			try {
-				const runSnippet = async () => {
+				const reduceStdout = input.fullOutput !== true && reductionEnabled;
+				let reductionOptions: ReduceToolOutputOptions | undefined;
+				if (reduceStdout) {
+					const projectPath = resolvePythonToolPath(baseCwd, `.pi/${OUTPUT_RULES_FILE_NAME}`, pathOptions);
+					const projectRules = await awaitPreflight(async () => {
+						try {
+							return compileOutputRulesDocument(
+								await operations.readOutputRules(projectPath, signal),
+								projectPath,
+							);
+						} catch (error) {
+							if (!isMissingPathError(error)) throw error;
+							return [];
+						}
+					}, signal);
 					signal?.throwIfAborted();
-					const composed = composeExecutionEnvironment(
-						baseEnvironment,
-						[
-							options.environment?.(cwd) ?? {},
-							{
-								PI_PYTHON_TOOL: "1",
-								PYTHONDONTWRITEBYTECODE: "1",
-								PYTHONIOENCODING: "utf-8",
-								PYTHONUNBUFFERED: "1",
-								PYTHONUTF8: "1",
-							},
+					reductionOptions = {
+						extraReducers: [
+							createRuleOutputReducer(
+								loadOutputRules({
+									projectRules,
+									agentDir: options.outputReduction?.agentDir ?? getAgentDir(),
+									extraFiles: options.outputReduction?.rulesFiles,
+									bundled: BUNDLED_OUTPUT_RULES,
+								}),
+							),
 						],
-						options.omitEnvironmentVariables,
-					);
-					// The bridge lives inside this run's hold of the group lock: it opens here, and every call it carries has
-					// settled before the hold ends (see carryNestedMutation).
-					const bridge = toolBridge
-						? await openToolBridge({
-								host: toolBridge,
-								parentToolCallId: toolCallId,
-								tools: bridgeTools,
-								maxCalls: maxToolCalls,
-								signal,
-								carryMutation: (childCallId) =>
-									carryNestedMutation(toolCallId, childCallId, mutationScope, mutationAnnouncer),
-							})
-						: undefined;
-					try {
-						const composedEnvironment: ExecutionEnvironment = {
-							caseSensitive: baseEnvironment.caseSensitive,
-							variables: composed,
-						};
-						const environment = bridge
-							? composeExecutionEnvironment(composedEnvironment, [
-									bridge.environment,
-									pythonPathWith(bridge.clientDirectory, composedEnvironment),
-								])
-							: composed;
-						signal?.throwIfAborted();
-						return await operations.exec({
-							python: runtime.pythonPath,
-							args: scriptPath ? ["-B", scriptPath, ...args] : ["-B", "-", ...args],
-							cwd,
-							stdin: hasCode ? input.code : undefined,
-							timeoutMs,
-							signal,
-							env: environment,
-							onStdout: (chunk) => stdout.append(chunk),
-							onStderr: (chunk) => stderr.append(chunk),
-						});
-					} finally {
-						if (bridge) bridgeReport = await bridge.close();
-					}
-				};
-				// Python cannot statically declare which files a snippet touches, so every run takes the
-				// coarse exclusive barrier. A background call releases it the instant its own body
-				// starts: it still runs after the writes its own message emitted before it, but nothing
-				// stays parked behind a job nobody is waiting for. `holdId` also lets a later handoff
-				// drop the barrier for a run that only becomes a session task after it started.
-				execution = await withExclusiveMutationBarrier(
-					async () => {
-						if (input.background === true) releaseExclusiveHold(toolCallId, mutationScope, mutationAnnouncer);
-						return runSnippet();
-					},
-					{
-						signal,
-						holdId: toolCallId,
-						...(mutationScope !== undefined ? { scope: mutationScope } : {}),
-						...(mutationAnnouncer !== undefined ? { announcer: mutationAnnouncer } : {}),
-					},
-				);
-				const snapshots = finishStreams();
-				const sections: string[] = [];
-				if (snapshots.stdout.content) sections.push(snapshots.stdout.content.trimEnd());
-				if (snapshots.stderr.content) sections.push(`[stderr]\n${snapshots.stderr.content.trimEnd()}`);
-				const stdoutNotice = renderStreamNotice(
-					"stdout",
-					snapshots.stdout.fullOutputPath,
-					snapshots.stdout.fullOutputError,
-				);
-				const stderrNotice = renderStreamNotice(
-					"stderr",
-					snapshots.stderr.fullOutputPath,
-					snapshots.stderr.fullOutputError,
-				);
-				const reductionNotice = snapshots.outputReduction
-					? formatOutputReductionNotice(snapshots.outputReduction)
-					: undefined;
-				if (reductionNotice) sections.push(reductionNotice);
-				if (stdoutNotice && !snapshots.outputReduction?.rawPath) sections.push(stdoutNotice);
-				const stderrReductionNotice = snapshots.stderrReduction
-					? formatOutputReductionNotice(snapshots.stderrReduction)
-					: undefined;
-				if (stderrReductionNotice) sections.push(`[stderr] ${stderrReductionNotice}`);
-				if (stderrNotice && !snapshots.stderrReduction?.rawPath) sections.push(stderrNotice);
-				if (bridgeReport) sections.push(formatToolBridgeReport(bridgeReport));
-				const status = `[python exitCode=${execution.exitCode ?? "null"}${execution.signal ? `; signal=${execution.signal}` : ""}]`;
-				sections.push(status);
-				const text = sections.join("\n\n");
-				if (execution.reason !== "exited" || execution.exitCode !== 0) {
-					const outputSignature = `${stdout.getOutputSignature()}:${stderr.getOutputSignature()}`;
-					if (execution.reason === "timeout") {
-						throw new AgentToolExecutionError(
-							`${text}\n\nPython timed out after ${timeoutMs / 1000} seconds`,
-							"timeout",
-							outputSignature,
-							"operation_outcome",
-						);
-					}
-					if (execution.reason === "aborted") {
-						throw new AgentToolExecutionError(`${text}\n\nPython execution aborted`, "aborted", outputSignature);
-					}
-					const termination = execution.signal
-						? `signal ${execution.signal}`
-						: `code ${execution.exitCode ?? "unknown"}`;
+					};
+				}
+				const runtime = await awaitPreflight(resolveRuntime, signal);
+				signal?.throwIfAborted();
+				if (runtime.status !== "ready") {
 					throw new AgentToolExecutionError(
-						`${text}\n\nPython exited with ${termination}`,
-						execution.exitCode === null ? "exit_unknown" : `exit_${execution.exitCode}`,
-						outputSignature,
-						"operation_outcome",
+						runtime.reason,
+						"runtime_unavailable",
+						"",
+						"tool_failure",
+						undefined,
+						receipt,
 					);
 				}
-				return {
-					content: [{ type: "text", text }],
-					details: {
-						mode: scriptPath ? "script" : "code",
-						cwd,
-						uvPath: runtime.uvPath,
-						pythonPath: runtime.pythonPath,
-						scriptPath,
-						args,
-						exitCode: execution.exitCode,
-						signal: execution.signal,
-						timedOut: false,
-						...(snapshots.stdout.truncation.truncated ? { stdoutTruncation: snapshots.stdout.truncation } : {}),
-						...(snapshots.stderr.truncation.truncated ? { stderrTruncation: snapshots.stderr.truncation } : {}),
-						stdoutOutputPath: snapshots.stdout.fullOutputPath,
-						stderrOutputPath: snapshots.stderr.fullOutputPath,
-						...(snapshots.outputReduction ? { outputReduction: snapshots.outputReduction } : {}),
-						...(snapshots.stderrReduction ? { stderrReduction: snapshots.stderrReduction } : {}),
-						stdoutOutputError: snapshots.stdout.fullOutputError,
-						stderrOutputError: snapshots.stderr.fullOutputError,
-						...(bridgeReport ? { toolBridge: bridgeReport } : {}),
-						...(scriptStakes ? { scriptStakes } : {}),
-					},
+				const backendEnvironment = await awaitPreflight(() => operations.getEnvironment(cwd, signal), signal);
+				signal?.throwIfAborted();
+				// Detach from mutable adapter state before waiting for the mutation barrier.
+				const baseEnvironment: ExecutionEnvironment = {
+					caseSensitive: backendEnvironment.caseSensitive,
+					variables: composeExecutionEnvironment(backendEnvironment, []),
 				};
-			} finally {
-				await Promise.all([stdout.closeTempFile(), stderr.closeTempFile()]);
+				const args = input.args ? [...input.args] : [];
+				const timeoutMs = resolvePythonTimeoutMs(input.timeoutSeconds, input.background === true);
+				const maxOutputBytes = clampInteger(
+					input.maxOutputBytes,
+					50 * 1024,
+					MIN_PYTHON_OUTPUT_BYTES,
+					MAX_PYTHON_OUTPUT_BYTES,
+				);
+				const accumulatorOptions = {
+					maxBytes: maxOutputBytes,
+					...(options.outputDirectory ? { tempDirectory: options.outputDirectory } : {}),
+				};
+				const stdout = new OutputAccumulator({ ...accumulatorOptions, tempFilePrefix: "pi-python-stdout" });
+				const stderr = new OutputAccumulator({ ...accumulatorOptions, tempFilePrefix: "pi-python-stderr" });
+				const finishStreams = () => {
+					stdout.finish();
+					stderr.finish();
+					// Reduce the complete stdout before the cap so the model sees the shorter version of the
+					// whole output, not of its head+tail; the raw stream is persisted when lines were dropped.
+					const rawStdout = reduceStdout ? stdout.snapshot({ persistIfTruncated: true }) : undefined;
+					const reduction =
+						rawStdout && !rawStdout.truncation.truncated
+							? reduceToolOutput(
+									{
+										tool: "python",
+										command: "python",
+										text: rawStdout.content,
+										exitCode: 0,
+										level: reductionLevel(),
+									},
+									reductionOptions,
+								)
+							: undefined;
+					const stdoutSnapshot = reduction
+						? stdout.snapshot({ persistIfTruncated: true, persistAlways: reduction.details.persistRaw })
+						: (rawStdout ?? stdout.snapshot({ persistIfTruncated: true }));
+					const outputReduction: OutputReductionDetails | undefined = reduction
+						? {
+								...reduction.details,
+								...(reduction.details.persistRaw && stdoutSnapshot.fullOutputPath
+									? { rawPath: stdoutSnapshot.fullOutputPath }
+									: {}),
+							}
+						: undefined;
+					// stderr carries tracebacks and compiler-style diagnostics; the same pipeline applies.
+					const rawStderr = reduceStdout ? stderr.snapshot({ persistIfTruncated: true }) : undefined;
+					const stderrReduction =
+						rawStderr && !rawStderr.truncation.truncated && rawStderr.content
+							? reduceToolOutput(
+									{
+										tool: "python",
+										command: "python",
+										text: rawStderr.content,
+										exitCode: 0,
+										level: reductionLevel(),
+									},
+									reductionOptions,
+								)
+							: undefined;
+					const stderrSnapshot = stderrReduction
+						? stderr.snapshot({ persistIfTruncated: true, persistAlways: stderrReduction.details.persistRaw })
+						: (rawStderr ?? stderr.snapshot({ persistIfTruncated: true }));
+					return {
+						stdout: reduction ? { ...stdoutSnapshot, content: reduction.text } : stdoutSnapshot,
+						stderr: stderrReduction ? { ...stderrSnapshot, content: stderrReduction.text } : stderrSnapshot,
+						outputReduction,
+						stderrReduction: stderrReduction
+							? {
+									...stderrReduction.details,
+									...(stderrReduction.details.persistRaw && stderrSnapshot.fullOutputPath
+										? { rawPath: stderrSnapshot.fullOutputPath }
+										: {}),
+								}
+							: undefined,
+					};
+				};
+				let execution: PythonExecutionResult;
+				let bridgeReport: ToolBridgeReport | undefined;
+				try {
+					const runSnippet = async () => {
+						signal?.throwIfAborted();
+						const composed = composeExecutionEnvironment(
+							baseEnvironment,
+							[
+								options.environment?.(cwd) ?? {},
+								{
+									PI_PYTHON_TOOL: "1",
+									PYTHONDONTWRITEBYTECODE: "1",
+									PYTHONIOENCODING: "utf-8",
+									PYTHONUNBUFFERED: "1",
+									PYTHONUTF8: "1",
+								},
+							],
+							options.omitEnvironmentVariables,
+						);
+						// The bridge lives inside this run's hold of the group lock: it opens here, and every call it carries has
+						// settled before the hold ends (see carryNestedMutation).
+						const bridge = toolBridge
+							? await openToolBridge({
+									host: toolBridge,
+									parentToolCallId: toolCallId,
+									tools: bridgeTools,
+									maxCalls: maxToolCalls,
+									signal,
+									carryMutation: (childCallId) =>
+										carryNestedMutation(toolCallId, childCallId, mutationScope, mutationAnnouncer),
+								})
+							: undefined;
+						try {
+							const composedEnvironment: ExecutionEnvironment = {
+								caseSensitive: baseEnvironment.caseSensitive,
+								variables: composed,
+							};
+							const environment = bridge
+								? composeExecutionEnvironment(composedEnvironment, [
+										bridge.environment,
+										pythonPathWith(bridge.clientDirectory, composedEnvironment),
+									])
+								: composed;
+							signal?.throwIfAborted();
+							return await operations.exec({
+								python: runtime.pythonPath,
+								args: scriptPath ? ["-B", scriptPath, ...args] : ["-B", "-", ...args],
+								cwd,
+								stdin: hasCode ? input.code : undefined,
+								timeoutMs,
+								signal,
+								env: environment,
+								onStdout: (chunk) => stdout.append(chunk),
+								onStderr: (chunk) => stderr.append(chunk),
+							});
+						} finally {
+							if (bridge) bridgeReport = await bridge.close();
+						}
+					};
+					// Python cannot statically declare which files a snippet touches, so every run takes the
+					// coarse exclusive barrier. A background call releases it the instant its own body
+					// starts: it still runs after the writes its own message emitted before it, but nothing
+					// stays parked behind a job nobody is waiting for. `holdId` also lets a later handoff
+					// drop the barrier for a run that only becomes a session task after it started.
+					execution = await withExclusiveMutationBarrier(
+						async () => {
+							if (input.background === true) releaseExclusiveHold(toolCallId, mutationScope, mutationAnnouncer);
+							return runSnippet();
+						},
+						{
+							signal,
+							holdId: toolCallId,
+							...(mutationScope !== undefined ? { scope: mutationScope } : {}),
+							...(mutationAnnouncer !== undefined ? { announcer: mutationAnnouncer } : {}),
+						},
+					);
+					const snapshots = finishStreams();
+					const sections: string[] = [];
+					if (snapshots.stdout.content) sections.push(snapshots.stdout.content.trimEnd());
+					if (snapshots.stderr.content) sections.push(`[stderr]\n${snapshots.stderr.content.trimEnd()}`);
+					const stdoutNotice = renderStreamNotice(
+						"stdout",
+						snapshots.stdout.fullOutputPath,
+						snapshots.stdout.fullOutputError,
+					);
+					const stderrNotice = renderStreamNotice(
+						"stderr",
+						snapshots.stderr.fullOutputPath,
+						snapshots.stderr.fullOutputError,
+					);
+					const reductionNotice = snapshots.outputReduction
+						? formatOutputReductionNotice(snapshots.outputReduction)
+						: undefined;
+					if (reductionNotice) sections.push(reductionNotice);
+					if (stdoutNotice && !snapshots.outputReduction?.rawPath) sections.push(stdoutNotice);
+					const stderrReductionNotice = snapshots.stderrReduction
+						? formatOutputReductionNotice(snapshots.stderrReduction)
+						: undefined;
+					if (stderrReductionNotice) sections.push(`[stderr] ${stderrReductionNotice}`);
+					if (stderrNotice && !snapshots.stderrReduction?.rawPath) sections.push(stderrNotice);
+					if (bridgeReport) sections.push(formatToolBridgeReport(bridgeReport));
+					const status = `[python exitCode=${execution.exitCode ?? "null"}${execution.signal ? `; signal=${execution.signal}` : ""}]`;
+					sections.push(status);
+					const text = sections.join("\n\n");
+					if (execution.reason !== "exited" || execution.exitCode !== 0) {
+						const outputSignature = `${stdout.getOutputSignature()}:${stderr.getOutputSignature()}`;
+						if (execution.reason === "timeout") {
+							throw new AgentToolExecutionError(
+								`${text}\n\nPython timed out after ${timeoutMs / 1000} seconds`,
+								"timeout",
+								outputSignature,
+								"operation_outcome",
+								undefined,
+								receipt,
+							);
+						}
+						if (execution.reason === "aborted") {
+							throw new AgentToolExecutionError(
+								`${text}\n\nPython execution aborted`,
+								"aborted",
+								outputSignature,
+								"tool_failure",
+								undefined,
+								receipt,
+							);
+						}
+						const termination = execution.signal
+							? `signal ${execution.signal}`
+							: `code ${execution.exitCode ?? "unknown"}`;
+						throw new AgentToolExecutionError(
+							`${text}\n\nPython exited with ${termination}`,
+							execution.exitCode === null ? "exit_unknown" : `exit_${execution.exitCode}`,
+							outputSignature,
+							"operation_outcome",
+							undefined,
+							receipt,
+						);
+					}
+					return {
+						content: [{ type: "text", text }],
+						details: {
+							mode: scriptPath ? "script" : "code",
+							cwd,
+							uvPath: runtime.uvPath,
+							pythonPath: runtime.pythonPath,
+							scriptPath,
+							args,
+							exitCode: execution.exitCode,
+							signal: execution.signal,
+							timedOut: false,
+							...(snapshots.stdout.truncation.truncated
+								? { stdoutTruncation: snapshots.stdout.truncation }
+								: {}),
+							...(snapshots.stderr.truncation.truncated
+								? { stderrTruncation: snapshots.stderr.truncation }
+								: {}),
+							stdoutOutputPath: snapshots.stdout.fullOutputPath,
+							stderrOutputPath: snapshots.stderr.fullOutputPath,
+							...(snapshots.outputReduction ? { outputReduction: snapshots.outputReduction } : {}),
+							...(snapshots.stderrReduction ? { stderrReduction: snapshots.stderrReduction } : {}),
+							stdoutOutputError: snapshots.stdout.fullOutputError,
+							stderrOutputError: snapshots.stderr.fullOutputError,
+							...(bridgeReport ? { toolBridge: bridgeReport } : {}),
+							...(scriptStakes ? { scriptStakes } : {}),
+						},
+					};
+				} finally {
+					await Promise.all([stdout.closeTempFile(), stderr.closeTempFile()]);
+				}
+			} catch (error) {
+				throw carryScriptReceipt(error, receipt);
 			}
 		},
 		renderCall(args, theme) {

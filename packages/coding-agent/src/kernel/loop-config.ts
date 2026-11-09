@@ -401,6 +401,11 @@ export interface AgentContextWire {
 	readonly messages?: readonly AgentMessage[];
 	/** Text that may change on every request: the kernel's trailing records (the tool-failure ledger, the verification obligation). */
 	readonly texts?: readonly string[];
+	/**
+	 * A frame leads this wire, and its turn carries records in a head ahead of it. A plan then returns `carriedRecords` (see
+	 * `AgentContextPlan`) for the projection that builds the head; the kernel planner itself never reads this flag.
+	 */
+	readonly carry?: true;
 }
 
 /**
@@ -419,6 +424,12 @@ export interface AgentContextPlan {
 	 * so a record the projection no longer carries reads as absent and is appended again.
 	 */
 	transientReconciliationBase?: readonly AgentMessage[];
+	/**
+	 * The records a carried head holds for this request, in carry order, when the wire is `carry`: the active carried-kind records
+	 * and the frame's legend, each as reconciliation would append it. Host output for a projection wrapper, which places them
+	 * ahead of its frame and strips this field; the kernel planner never reads it.
+	 */
+	readonly carriedRecords?: readonly AgentMessage[];
 	/**
 	 * How many leading `messages` are a host envelope rather than history (a turn view and turn state): no compaction
 	 * can shrink them, so admission counts them as non-compactable. Absent, every planned message is compactable.

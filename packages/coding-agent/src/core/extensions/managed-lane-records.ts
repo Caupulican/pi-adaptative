@@ -1,5 +1,6 @@
 import type { Usage } from "@caupulican/pi-ai";
 import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
+import type { ManagedLanePlacement } from "../orchestration/contracts.ts";
 
 /** A report needs new host preparation after replacement settles; its producer must retain the report. */
 export class ManagedLaneRuntimeAdmissionError extends Error {
@@ -55,6 +56,11 @@ export interface ManagedLaneDispatch {
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	/** Lease duration for this externally supervised turn. */
 	leaseTtlMs: number;
+	/**
+	 * The placement key of a placed job this lane runs for, set by the placer that wrote the job. Host-written by the placer, never
+	 * a claim of a third-party process; absent on every other lane. It names the plan a stop of that job belongs to.
+	 */
+	placement?: ManagedLanePlacement;
 }
 
 export const MAX_MANAGED_LANE_SUMMARY_BYTES = 8 * 1024;

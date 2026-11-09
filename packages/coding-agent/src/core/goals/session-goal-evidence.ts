@@ -70,7 +70,8 @@ export function producingCommand(call: ToolCall): string | undefined {
 
 /**
  * The language of a python call's recorded command: `python` for source the call ran (`code`), `python-file` for a file it ran
- * (`scriptPath`), whose source the host never reads, so the stakes reader takes no code fact from it. Undefined for any other call.
+ * (`scriptPath`), whose source the host reads for its stakes when the call runs (`details.scriptStakes`); those stakes, never
+ * the path, are its facts. Undefined for any other call.
  */
 export function pythonCallLanguage(call: ToolCall): "python" | "python-file" | undefined {
 	if (call.name !== "python") return undefined;

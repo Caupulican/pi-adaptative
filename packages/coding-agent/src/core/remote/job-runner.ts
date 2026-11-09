@@ -35,6 +35,7 @@ import {
 	placedJobTurnOrigin,
 } from "./job-protocol.ts";
 import {
+	type CancelMark,
 	type ExecutorJobRecord,
 	executorRecordName,
 	inDir,
@@ -97,6 +98,7 @@ const CANCEL_BLOCKER: Readonly<Record<JobCancelReason, BlockerCode>> = {
 	plan_step_superseded: "superseded",
 	plan_step_removed: "superseded",
 	plan_step_cancelled: "cancelled_by_owner",
+	marker_unreadable: "unclassified",
 };
 
 function isSelf(owner: ProcessOwner | undefined, self: ProcessOwner): boolean {
@@ -136,6 +138,14 @@ export class JobRunner {
 	private stopLaneRecords: (() => void) | undefined;
 	private readonly tracked = new Map<string, Tracked>();
 	private readonly starting = new Set<string>();
+	/**
+	 * Outcomes that the record could not take because it was unreadable when they were written: held here, with the workspace to
+	 * remove, until a scan records them. Keyed by the record's name.
+	 */
+	private readonly unsettled = new Map<
+		string,
+		{ readonly record: ExecutorJobRecord; readonly outcome: JobOutcome; readonly workspace: string | undefined }
+	>();
 	private published = "";
 	private disposed = false;
 	private retiring = false;
@@ -215,7 +225,8 @@ export class JobRunner {
 	}
 
 	private maybeRetire(): void {
-		if (this.retiring && this.tracked.size === 0 && this.starting.size === 0) this.dispose();
+		if (this.retiring && this.tracked.size === 0 && this.starting.size === 0 && this.unsettled.size === 0)
+			this.dispose();
 	}
 
 	/** Takes the runner role, or waits for the session holding it to let go. Idempotent. */
@@ -286,6 +297,8 @@ export class JobRunner {
 	private scan(): void {
 		if (this.disposed || !this.lock?.stillHeld()) return;
 		this.publish();
+		// Markers first, so the records read below already carry the stops they apply.
+		this.honorCancelMarks(this.store.in.scan().marks);
 		for (const record of this.store.in.list()) {
 			const name = executorRecordName(record.placerId, record.jobId);
 			if (record.state === "admitted") {
@@ -307,7 +320,21 @@ export class JobRunner {
 		this.session.acknowledgePlacedJobTerminals(
 			this.store.prunable(this.timers.now()).map((record) => placedJobReference(record.placerId, record.jobId)),
 		);
+		this.retryUnsettled();
 		this.store.prune(this.timers.now());
+	}
+
+	/**
+	 * Retries what an unreadable record held back: outcomes already computed, and lanes that ended while their record could not be read
+	 * (their outcome is read from the record once it reads again). Runs at the end of a scan, after the scan has read every record.
+	 */
+	private retryUnsettled(): void {
+		for (const pending of [...this.unsettled.values()])
+			this.finish(pending.record, pending.outcome, pending.workspace);
+		const ended = [...this.tracked.values()].flatMap((tracked) =>
+			tracked.record && isLaneTerminalStatus(tracked.record.status) ? [tracked.record] : [],
+		);
+		if (ended.length > 0) this.observe(ended);
 	}
 
 	private async claim(admitted: ExecutorJobRecord): Promise<void> {
@@ -323,8 +350,13 @@ export class JobRunner {
 		// runner that dies later leaves a record that names it: the next runner removes it. A runner that dies between making
 		// the directory and recording it leaves one no record names: the next runner's sweep removes it (`sweepOrphanWorkspaces`).
 		const workspace = record.checkout ?? mkdtempSync(join(tmpdir(), `${JOB_DIRECTORY_PREFIX}${process.pid}-`));
-		if (record.checkout === undefined)
-			this.store.updateExecuted(record.placerId, record.jobId, (current) => ({ ...current, workspace }));
+		// Only an answer-only job's own directory is this runner's to remove: an offered checkout never is.
+		const ownWorkspace = record.checkout === undefined ? workspace : undefined;
+		if (ownWorkspace !== undefined)
+			this.store.updateExecuted(record.placerId, record.jobId, (current) => ({
+				...current,
+				workspace: ownWorkspace,
+			}));
 		this.starting.add(name);
 		journalJob(this.agentDir, { side: "executor", jobId: record.jobId, peer: record.placerId, event: "running" });
 		this.store.appendOutbox(record.placerId, record.jobId, (seq) => ({
@@ -348,11 +380,15 @@ export class JobRunner {
 				},
 			});
 			if (!started.started) {
-				this.finish(record, {
-					status: "failed",
-					blockerCode: "preflight_failed",
-					summary: boundedUtf8Text(redactKnownSecrets(started.skipReason), MAX_JOB_SUMMARY_BYTES),
-				});
+				this.finish(
+					record,
+					{
+						status: "failed",
+						blockerCode: "preflight_failed",
+						summary: boundedUtf8Text(redactKnownSecrets(started.skipReason), MAX_JOB_SUMMARY_BYTES),
+					},
+					ownWorkspace,
+				);
 				return;
 			}
 			const laneId = started.record.laneId;
@@ -372,10 +408,27 @@ export class JobRunner {
 				jobId: record.jobId,
 				reason: error instanceof Error ? error.name : "unknown",
 			});
-			this.finish(record, { status: "failed", blockerCode: "preflight_failed", summary: "" });
+			this.finish(record, { status: "failed", blockerCode: "preflight_failed", summary: "" }, ownWorkspace);
 		} finally {
 			this.starting.delete(name);
 			this.maybeRetire();
+		}
+	}
+
+	/**
+	 * Honors the cancel markers of the store: a readable record takes the stop (`cancelExecuted` spends the marker); a record this build
+	 * cannot read is not written, so a job this runner tracks is stopped here instead; a marker whose record is gone is removed.
+	 */
+	private honorCancelMarks(marks: readonly CancelMark[]): void {
+		for (const mark of marks) {
+			const name = executorRecordName(mark.machineId, mark.jobId);
+			const state = this.store.in.inspect(name);
+			if (state.kind === "valid") this.store.cancelExecuted(mark.machineId, mark.jobId, mark.reason);
+			else if (state.kind === "absent") this.store.in.clearCancelMark(name);
+			else
+				for (const tracked of this.tracked.values())
+					if (tracked.placerId === mark.machineId && tracked.jobId === mark.jobId && !tracked.cancelled)
+						this.cancelWorker(tracked, mark.reason);
 		}
 	}
 
@@ -405,10 +458,18 @@ export class JobRunner {
 			if (!tracked) continue;
 			tracked.record = lane;
 			if (!isLaneTerminalStatus(lane.status)) continue;
-			const record = this.store.in.read(executorRecordName(tracked.placerId, tracked.jobId));
-			this.tracked.delete(lane.laneId);
+			const name = executorRecordName(tracked.placerId, tracked.jobId);
+			const state = this.store.in.inspect(name);
 			tracked.alarm?.stop();
-			if (record) this.finish(record, this.outcomeOf(record, lane, lane.status));
+			// A record this build cannot read is not an absent one: the lane stays tracked, and its outcome is taken from the record
+			// once it reads again (each scan retries it). A job the placer stopped by a marker has no outcome to wait for: its end is
+			// the placer's own, so it is released here.
+			if (state.kind === "unreadable") {
+				if (this.store.in.cancelMarkOf(name) !== undefined) this.tracked.delete(lane.laneId);
+				continue;
+			}
+			this.tracked.delete(lane.laneId);
+			if (state.kind === "valid") this.finish(state.record, this.outcomeOf(state.record, lane, lane.status));
 		}
 		this.maybeRetire();
 	}
@@ -452,15 +513,27 @@ export class JobRunner {
 
 	/**
 	 * Appends the job's one outcome and closes it; a job already closed is left as it is. The worker's own terminal is then
-	 * settled here: the outcome is the job's end, and the placing machine receives it from the outbox.
+	 * settled here: the outcome is the job's end, and the placing machine receives it from the outbox. `workspace` is the empty
+	 * directory an answer-only job ran in (the record's own when not given). A record this build cannot read took no outcome:
+	 * the outcome and the workspace are held (`unsettled`), and nothing is acknowledged or removed until the outcome is recorded.
 	 */
-	private finish(record: ExecutorJobRecord, outcome: JobOutcome): void {
+	private finish(
+		record: ExecutorJobRecord,
+		outcome: JobOutcome,
+		workspace: string | undefined = record.workspace,
+	): void {
+		const name = executorRecordName(record.placerId, record.jobId);
 		const closed = this.store.appendOutbox(
 			record.placerId,
 			record.jobId,
 			(seq) => ({ t: "job.outcome", jobId: record.jobId, seq, outcome }),
 			"terminal",
 		);
+		if (this.store.in.inspect(name).kind === "unreadable") {
+			this.unsettled.set(name, { record, outcome, workspace });
+			return;
+		}
+		this.unsettled.delete(name);
 		if (closed?.state === "terminal" && closed.outbox.some((entry) => entry.frame.t === "job.outcome"))
 			journalJob(this.agentDir, {
 				side: "executor",
@@ -470,8 +543,7 @@ export class JobRunner {
 				code: outcome.blockerCode ?? outcome.status,
 			});
 		this.session.acknowledgePlacedJobTerminals([placedJobReference(record.placerId, record.jobId)]);
-		// The empty directory of an answer-only job goes with the job; the record names it, so a restarted runner finds it.
-		const workspace = this.store.in.read(executorRecordName(record.placerId, record.jobId))?.workspace;
+		// The empty directory of an answer-only job goes with the job, once its outcome is recorded.
 		if (workspace !== undefined) rmSync(workspace, { recursive: true, force: true });
 	}
 }

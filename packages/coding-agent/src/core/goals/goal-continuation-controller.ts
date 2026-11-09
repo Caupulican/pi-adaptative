@@ -1,5 +1,4 @@
 import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
-import { DEFAULT_PLAN_WAIT_RESUME_MS } from "./goal-continuation-defaults.ts";
 import { isSystemBlockedGoal } from "./goal-lifecycle.ts";
 import type { GoalState, Requirement } from "./goal-state.ts";
 
@@ -40,6 +39,28 @@ function workerWaitTiming(
 	return recoveryAtMs <= nowMs
 		? { timedOut: true }
 		: { timedOut: false, resumeAt: new Date(recoveryAtMs).toISOString() };
+}
+
+/**
+ * A plan wait from what is left of it. `remainingMs` is measured on the orchestration clock that stamped the plan's last
+ * movement, so the timeout is decided there and needs no reading of `now`. The resume instant is `now` plus what is left,
+ * on the continuation clock that arms the wake. A wait with nothing left has timed out; without a remaining time it has no
+ * deadline, as a worker wait does without a clock.
+ */
+function planWaitTiming(
+	remainingMs: number | undefined,
+	now: string | undefined,
+): { timedOut: boolean; resumeAt?: string } {
+	if (remainingMs === undefined) return { timedOut: false };
+	if (remainingMs <= 0) return { timedOut: true };
+	const nowMs = now === undefined ? Number.NaN : Date.parse(now);
+	if (!Number.isFinite(nowMs)) return { timedOut: false };
+	return { timedOut: false, resumeAt: new Date(nowMs + remainingMs).toISOString() };
+}
+
+function planWaitTimeoutMessage(steps: number, maxWaitMs: number): string {
+	const hours = Math.round((maxWaitMs / 3_600_000) * 10) / 10;
+	return `The plan's ${steps} running step(s) have shown no progress for ${hours} h; continue the goal with what is known and re-plan what is stuck.`;
 }
 
 export type GoalContinuationAction = "continue" | "ask-user" | "finalize" | "stop" | "waiting";
@@ -180,6 +201,12 @@ export function evaluateGoalContinuation(args: {
 	 * loop, so a plan the fleet refuses never parks the goal.
 	 */
 	planStepsInFlight?: number;
+	/**
+	 * What is left of the running plan's wait, in milliseconds, measured on the orchestration clock that stamped the plan's
+	 * last movement (a release, a settlement, a hold or a join): the snapshot computes it as that movement plus
+	 * `maxWorkerWaitMs`, minus the orchestration clock's reading now. Its deadline is therefore fixed while the plan is quiet.
+	 */
+	planRemainingMs?: number;
 	/**
 	 * Verification obligations still failed on the branch. Once nothing else stands between the
 	 * goal and completion, they are the operator's call — rerun the check or `/verify dismiss` —
@@ -441,14 +468,23 @@ export function evaluateGoalContinuation(args: {
 	if (workerContinuation) return workerContinuation;
 
 	if (args.planStepsInFlight && args.planStepsInFlight > 0) {
-		// The plan's own wake is the primary one; the deadline recovers a lost wake through the same timer a worker wait uses.
-		const nowMs = args.now === undefined ? Number.NaN : Date.parse(args.now);
+		// The plan's own wake is the primary one; the stable deadline (the plan's last movement plus the worker wait limit)
+		// recovers a lost wake and ends a plan that has stopped moving, as a worker wait ends.
+		const planWait = planWaitTiming(args.planRemainingMs, args.now);
+		if (planWait.timedOut && args.maxWorkerWaitMs !== undefined) {
+			return {
+				...baseDecision,
+				action: "continue",
+				reasonCode: "worker_wait_timeout",
+				message: planWaitTimeoutMessage(args.planStepsInFlight, args.maxWorkerWaitMs),
+			};
+		}
 		return {
 			...baseDecision,
 			action: "waiting",
 			reasonCode: "plan_in_flight",
 			message: `${args.planStepsInFlight} step(s) of the running plan are in flight; the plan wakes you with each combined result and when a step needs you.`,
-			...(Number.isFinite(nowMs) ? { resumeAt: new Date(nowMs + DEFAULT_PLAN_WAIT_RESUME_MS).toISOString() } : {}),
+			...(planWait.resumeAt ? { resumeAt: planWait.resumeAt } : {}),
 		};
 	}
 

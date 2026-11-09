@@ -202,7 +202,7 @@ export function packSupersededHostRecords(messages: readonly AgentMessage[]): Ag
 		return {
 			...message,
 			content: `[Context GC packed superseded ${message.customType} record; a later record of this kind is current]`,
-			details: transientRecordPackedDetails(message.details),
+			details: transientRecordPackedDetails(message.details, "compaction_projection"),
 		};
 	});
 }
@@ -687,7 +687,7 @@ function makePackedTransientRecord(message: AgentMessage, record: ContextGcPacke
 	return {
 		...(message as unknown as Record<string, unknown>),
 		content: buildSummary(record),
-		details: transientRecordPackedDetails(gcDetails(message as { details?: unknown }, record)),
+		details: transientRecordPackedDetails(gcDetails(message as { details?: unknown }, record), "context_gc"),
 	} as AgentMessage;
 }
 
@@ -697,7 +697,7 @@ function makePackedSemanticMemoryMessage(message: AgentMessage, record: ContextG
 	return {
 		...(message as unknown as Record<string, unknown>),
 		content: [{ type: "text", text: summary }],
-		details: message.role === "custom" ? transientRecordPackedDetails(details) : details,
+		details: message.role === "custom" ? transientRecordPackedDetails(details, "context_gc") : details,
 	} as AgentMessage;
 }
 

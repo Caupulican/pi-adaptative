@@ -12,7 +12,7 @@ import { evaluateLearningDecision } from "../learning/learning-gate.ts";
 import type { OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import type { ResolvedLearningPolicySettings } from "../settings/settings-schema.ts";
-import { canonicalDigest } from "../steering/canonical.ts";
+import { strictCanonicalDigest, withoutUndefinedMembers } from "../steering/canonical.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { type CitedOwnerWords, ownerCitationRefusal } from "./knowledge-citation.ts";
 import { KnowledgeGrounding } from "./knowledge-grounding.ts";
@@ -490,7 +490,10 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 		}
 		const { store, engine } = this.deps;
 		const operation = execution
-			? { id: execution.operationId, digest: canonicalDigest({ change: input, scope: this.deps.scope }) }
+			? {
+					id: execution.operationId,
+					digest: strictCanonicalDigest(withoutUndefinedMembers({ change: input, scope: this.deps.scope })),
+				}
 			: undefined;
 		if (operation && operation.digest !== execution?.expectedDigest)
 			throw new Error("Knowledge candidate does not match its claimed operation");
@@ -740,12 +743,14 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 		)
 			return held("invalid_change", "never", "Invalid owner knowledge command");
 		const { store, scope } = this.deps;
-		const digest = canonicalDigest({
-			ownerCommand: { action: input.action, id: input.id, expectedRevision: input.expectedRevision, text },
-			scope,
-		});
+		const digest = strictCanonicalDigest(
+			withoutUndefinedMembers({
+				ownerCommand: { action: input.action, id: input.id, expectedRevision: input.expectedRevision, text },
+				scope,
+			}),
+		);
 		// The same command against the same revision is one operation: a repeat replays its receipt.
-		const operation = { id: canonicalDigest(["knowledge-owner-command", digest]), digest };
+		const operation = { id: strictCanonicalDigest(["knowledge-owner-command", digest]), digest };
 		const revision = store.revision();
 		const assertCurrent = () => {
 			signal?.throwIfAborted();
@@ -804,12 +809,14 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 			occupancy: "background" as const,
 		};
 		if (!engine.capabilities().requestLifecycle) return judgmentOf(await engine.evaluate(program, state, options));
-		const key = canonicalDigest({
-			program,
-			state,
-			engine: [engine.id, engine.model],
-			format: KNOWLEDGE_JUDGMENT_FORMAT,
-		});
+		const key = strictCanonicalDigest(
+			withoutUndefinedMembers({
+				program,
+				state,
+				engine: [engine.id, engine.model],
+				format: KNOWLEDGE_JUDGMENT_FORMAT,
+			}),
+		);
 		const retained = store.work.read(key);
 		if (retained !== undefined) return retainedJudgment(retained);
 		let begun = false;
@@ -820,7 +827,14 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 				onRequestAdmitted: (requestId) => {
 					if (begun) return;
 					store.work.beginBatch(
-						[{ id: key, owner: canonicalDigest(state), window: canonicalDigest(program), kind: "grounding" }],
+						[
+							{
+								id: key,
+								owner: strictCanonicalDigest(withoutUndefinedMembers(state)),
+								window: strictCanonicalDigest(program),
+								kind: "grounding",
+							},
+						],
 						requestId,
 					);
 					begun = true;

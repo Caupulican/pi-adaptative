@@ -18,7 +18,7 @@
 
 import type { Api, Model } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { defineMachine, observeMachine, registerMachine } from "../../kernel/machine-spec.ts";
+import { observeMachine, registerMachine } from "../../kernel/machine-spec.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "../../kernel/timer-port.ts";
 import type { PlacementCapacitySource } from "../placement/capacity-source.ts";
 import { type Placement, placementCapacityKey } from "../placement/placement-types.ts";
@@ -33,6 +33,7 @@ import {
 	readMachineFacts,
 } from "./capacity/machine-room.ts";
 import { bindingTerm, ceilingTerm, decideRoom } from "./capacity/room.ts";
+import { FLEET_STOP_MACHINE } from "./fleet-admission-machine.ts";
 import { FleetLocalClaims, type SpendBrakeState } from "./fleet-local-claims.ts";
 import { FleetQueue } from "./fleet-queue.ts";
 import { type FleetQueueMetadataEntry, FleetQueueStore, fleetQueueMetadataPath } from "./fleet-queue-store.ts";
@@ -73,14 +74,6 @@ const NO_LOCAL_STARTS: FleetRefusal = {
 	blocker: "placement_unreachable",
 	detail: "no worker controller is bound to start local work",
 };
-
-const FLEET_STOP_MACHINE = defineMachine<"running" | "stopped", "stop" | "resume">({
-	name: "fleet-admission",
-	states: ["running", "stopped"],
-	initial: "running",
-	transitions: { running: { stop: "stopped" }, stopped: { resume: "running" } },
-	describe: { running: "admitting workers as room allows", stopped: "stopped: nothing new starts until resumed" },
-});
 
 /** What the fleet reads from, and asks of, the worker controller that runs this session's local lanes. */
 export interface FleetLocalPort {
@@ -192,7 +185,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 		this.deps = deps;
 		this.store = new FleetQueueStore(fleetQueueMetadataPath(deps.agentDir, deps.sessionId));
 		this.baseline = deps.readMachine ? machineBaseline(deps.readMachine()) : processMachineBaseline();
-		this.unregisterMachine = registerMachine(this.observer);
+		this.unregisterMachine = registerMachine(this.observer, deps.sessionId);
 		this.claims = new FleetLocalClaims({
 			agentDir: deps.agentDir,
 			now: () => deps.timers.now(),
@@ -468,6 +461,8 @@ export class SessionFleetScheduler implements FleetScheduler {
 		for (const [key, dispatch] of this.prepared)
 			if (inScope(dispatch.demand) || (scope.kind === "plan" && dispatch.plan?.planId === scope.planId))
 				this.releasePrepared(key);
+		// A plan's placed jobs are found by their placement key, so a job whose lane the plan no longer names is stopped too.
+		if (scope.kind === "plan") this.remote?.cancelPlan(scope.planId, reasonCode);
 		const local = this.local;
 		if (!local) return;
 		const queued = this.queue;
@@ -621,9 +616,13 @@ export class SessionFleetScheduler implements FleetScheduler {
 		return candidates.sort((a, b) => b.slots - a.slots || (a.machineId < b.machineId ? -1 : 1));
 	}
 
-	/** The linked machine a placed job for `idempotencyKey` already exists on, if any: a replay returns to that machine. */
+	/**
+	 * The machine a placed job for `idempotencyKey` already exists on, while it is still linked: a replay returns to that
+	 * machine. An unlinked machine is not offered; remote jobs are read-only, so a replay placed elsewhere is harmless.
+	 */
 	boundMachine(idempotencyKey: string): string | undefined {
-		return this.remote?.boundMachine(idempotencyKey);
+		const machineId = this.remote?.boundMachine(idempotencyKey);
+		return machineId !== undefined && this.remote?.status(machineId).linked ? machineId : undefined;
 	}
 
 	/** Fires when any placement capacity source changes; a listener's failure never stops the others from hearing it. */

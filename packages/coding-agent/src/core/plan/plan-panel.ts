@@ -9,6 +9,7 @@ import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.
 import type { Placement } from "../placement/placement-types.ts";
 import type { OrchestrationPanelRow, OrchestrationRowStatus } from "../tools/orchestration-panel.ts";
 import { PLAN_LIMITS, type PlanHoldReason, type PlanNodeKind, type PlanNodeState } from "./plan-graph.ts";
+import { PIN_MUST_LOCAL } from "./plan-placement.ts";
 import type { PlanCounts, PlanNodeView, PlanView } from "./plan-view.ts";
 
 /** Characters a step intent, a plan title and a held step's detail keep on screen. */
@@ -98,6 +99,37 @@ function stateWord(node: PlanNodeView): string {
 	return STATE_WORDS[node.state];
 }
 
+/** Where a released step runs, in plain words: a must-pinned step that ran here says so, and a machine is named when known. */
+function placementWord(node: PlanNodeView): string | undefined {
+	if (!node.placement) return undefined;
+	if (node.placementExit === PIN_MUST_LOCAL) return "pinned machine unavailable: runs here";
+	if (node.placement.kind === "remote_machine" && node.placementName !== undefined)
+		return `machine ${node.placementName}`;
+	return PLACEMENT_WORDS[node.placement.kind];
+}
+
+/** The machine a must-pinned step waits for, in plain words: its name when the fleet names it, else that it is not linked. */
+function pinnedMachineWords(node: PlanNodeView): string {
+	return node.pinnedMachineName !== undefined
+		? `machine ${node.pinnedMachineName}`
+		: "a machine this one is not linked to";
+}
+
+/**
+ * The lines a step carries beyond its state: a must-pinned step that ran here, then each of the planner's doubts. Shared by
+ * the work-panel rows and the `/plan` text so both read the same.
+ */
+function stepDetailLines(node: PlanNodeView): string[] {
+	const pinned =
+		node.placementExit === PIN_MUST_LOCAL && node.pinnedMachine !== undefined
+			? [`pinned to ${pinnedMachineWords(node)}, no linked machine can take it now`]
+			: [];
+	return [
+		...pinned.map((line) => clip(line, PLAN_PANEL_LIMITS.detailChars)),
+		...(node.doubts ?? []).map((doubt) => clip(`doubt: ${doubt}`, PLAN_PANEL_LIMITS.detailChars)),
+	];
+}
+
 function rowStatus(node: PlanNodeView): OrchestrationRowStatus {
 	switch (node.state) {
 		case "held":
@@ -130,7 +162,7 @@ function nodeWords(node: PlanNodeView): string[] {
 		waiting && node.predecessors > 0 ? `after ${steps(node.predecessors)}` : undefined,
 		KIND_WORDS[node.kind],
 		node.effort === "deep" ? "hard step, deep thinking" : undefined,
-		node.placement ? PLACEMENT_WORDS[node.placement.kind] : undefined,
+		placementWord(node),
 		node.attempts > 1 ? `attempt ${node.attempts}` : undefined,
 		outcome,
 		next,
@@ -163,7 +195,10 @@ export function planNodePanelRow(view: PlanView, node: PlanNodeView): Orchestrat
 		label: clip(node.intent, PLAN_PANEL_LIMITS.intentChars),
 		section: planSectionHeading(view),
 		meta: nodeWords(node),
-		details: node.held ? [clip(node.held.detail, PLAN_PANEL_LIMITS.detailChars)] : [],
+		details: [
+			...(node.held ? [clip(node.held.detail, PLAN_PANEL_LIMITS.detailChars)] : []),
+			...stepDetailLines(node),
+		],
 	};
 }
 
@@ -232,9 +267,12 @@ function inspectOpenPlan(view: PlanView, options: PlanInspectionOptions): string
 	return [
 		`Plan "${clip(view.title, PLAN_LIMITS.titleChars)}" (version ${view.version}, ${PLAN_STATUS_WORDS[view.status]}): ${planCountWords(view.counts).join(", ")}`,
 		...(view.unjudged ? ["  Checked without System One: it was unavailable when the plan was recorded."] : []),
-		...shown.map((node, index) => {
+		...shown.flatMap((node, index) => {
 			const detail = node.held ? `: ${clip(node.held.detail, PLAN_PANEL_LIMITS.detailChars)}` : "";
-			return `  ${index + 1}. ${clip(node.intent, PLAN_PANEL_LIMITS.intentChars)} (${nodeWords(node).join(", ")})${detail}`;
+			return [
+				`  ${index + 1}. ${clip(node.intent, PLAN_PANEL_LIMITS.intentChars)} (${nodeWords(node).join(", ")})${detail}`,
+				...stepDetailLines(node).map((line) => `     ${line}`),
+			];
 		}),
 		...(view.nodes.length > shown.length ? [`  … ${steps(view.nodes.length - shown.length)} more`] : []),
 		...(view.rootOwned.length > 0

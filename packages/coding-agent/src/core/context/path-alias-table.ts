@@ -452,39 +452,6 @@ export function extendPathAliasTable(
 	};
 }
 
-export function buildPathAliasTable(
-	cwd: string,
-	texts: readonly string[],
-	isIdTaken?: (aliasId: string) => boolean,
-	options?: { readonly minAliasSaving?: number },
-): PathAliasTable {
-	const minSaving = options?.minAliasSaving ?? DEFAULT_MIN_ALIAS_SAVING;
-	const byKey = new Map<string, string>();
-	const uniquePaths: string[] = [];
-	const reservations = new Set<string>();
-	for (const text of texts) {
-		for (const match of text.matchAll(STANDALONE_TOKEN_RE)) addReservation(reservations, match[0]);
-		for (const candidate of extractPathCandidates(text)) {
-			const path = displayPath(candidate, cwd);
-			if (path.startsWith("p/")) {
-				addReservation(reservations, path);
-				continue;
-			}
-			const key = dedupeKey(path);
-			if (byKey.has(key)) continue;
-			if (!aliasWorthwhile(path, minSaving)) continue;
-			byKey.set(key, path);
-			uniquePaths.push(path);
-		}
-	}
-	const ids = shortestUniqueSuffixes(uniquePaths, reservations, isIdTaken);
-	return {
-		cwd,
-		entries: uniquePaths.map((path) => ({ id: ids.get(path) ?? `p/${path}`, path })),
-		reservedIds: [...reservations],
-	};
-}
-
 /** The alias ids standing alone at a shared boundary in `texts` — the ones a reader can hit. */
 export function collectActiveAliasIds(texts: readonly string[]): Set<string> {
 	const ids = new Set<string>();
@@ -494,19 +461,6 @@ export function collectActiveAliasIds(texts: readonly string[]): Set<string> {
 		}
 	}
 	return ids;
-}
-
-/**
- * Render the legend for an explicit id set, in table (mint) order. Entries only ever append
- * to a table, so a caller that passes a MONOTONE id set gets a legend that can only grow by
- * appended lines — which is what keeps it cheap to re-send (see {@link PathAliasRuntime}).
- */
-export function formatPathAliasLegendForIds(table: PathAliasTable, ids: ReadonlySet<string>): string | undefined {
-	if (table.entries.length === 0) return undefined;
-	const activeEntries = table.entries.filter((entry) => ids.has(entry.id));
-	if (activeEntries.length === 0) return undefined;
-	const lines = ["PATH ALIASES", ...activeEntries.map((entry) => `${entry.id}=${entry.path}`)];
-	return lines.join("\n");
 }
 
 /**
@@ -530,14 +484,6 @@ export function buildPathAliasLegendDelta(
 		paused: options?.paused === true,
 		entries: pending.map((entry) => ({ id: entry.id, path: entry.path })),
 	};
-}
-
-export function formatPathAliasLegend(table: PathAliasTable, activeTexts?: string[]): string | undefined {
-	if (table.entries.length === 0) return undefined;
-	if (!activeTexts) {
-		return ["PATH ALIASES", ...table.entries.map((entry) => `${entry.id}=${entry.path}`)].join("\n");
-	}
-	return formatPathAliasLegendForIds(table, collectActiveAliasIds(activeTexts));
 }
 
 interface CompiledRewriter {
@@ -933,16 +879,16 @@ export interface MessageRewriteHooks {
 	thinkingText?: TextRewriter;
 }
 
-/**
- * Structure-preserving message rewrite through caller-supplied hooks. The runtime uses it to render
- * each text span through a FROZEN spelling (see {@link PathAliasRuntime}), and display expansion
- * uses it to turn aliases back into real paths; `rewriteAgentMessages` is the pure whole-table form.
- * One walk, so message shape is handled in exactly one place. A message whose spans all come back
- * unchanged is returned by identity, so an unchanged history costs no allocation.
- */
 /** The custom message kind that carries the alias legend; its own text is never alias-rewritten. */
 export const PATH_ALIAS_LEGEND_CUSTOM_TYPE = "path_alias_legend";
 
+/**
+ * Structure-preserving message rewrite through caller-supplied hooks. The runtime uses it to render
+ * each text span through a FROZEN spelling (see {@link PathAliasRuntime}), and display expansion
+ * uses it to turn aliases back into real paths. One walk, so message shape is handled in exactly one
+ * place. A message whose spans all come back unchanged is returned by identity, so an unchanged
+ * history costs no allocation.
+ */
 export function rewriteAgentMessagesWith(
 	messages: readonly AgentMessage[],
 	rewriter: TextRewriter | MessageRewriteHooks,
@@ -966,22 +912,4 @@ export function rewriteAgentMessagesWith(
 		}
 		return message;
 	});
-}
-
-export function rewriteAgentMessages(messages: readonly AgentMessage[], table: PathAliasTable): AgentMessage[] {
-	if (table.entries.length === 0) return [...messages];
-	return rewriteAgentMessagesWith(messages, (text) => rewriteText(table, text));
-}
-
-export function applyPathAliases(
-	cwd: string,
-	messages: readonly AgentMessage[],
-): { table: PathAliasTable; messages: AgentMessage[]; legend: string | undefined } {
-	const table = buildPathAliasTable(cwd, collectMessageTexts(messages));
-	const rewritten = rewriteAgentMessages(messages, table);
-	return {
-		table,
-		messages: rewritten,
-		legend: formatPathAliasLegend(table, collectMessageTexts(rewritten)),
-	};
 }

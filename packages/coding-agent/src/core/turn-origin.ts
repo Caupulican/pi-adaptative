@@ -83,6 +83,7 @@ import { MEMORY_EVIDENCE_CUSTOM_TYPE } from "./memory-controller.ts";
 import { MODEL_POOL_POLICY_CUSTOM_TYPE } from "./model-router/owner-model-policy.ts";
 import { SIDE_TRIP_CONTEXT_CUSTOM_TYPE } from "./model-router/side-trip-brief.ts";
 import { SESSION_TASK_PROFILE_CUSTOM_TYPE } from "./orchestration/session-task-profile-store.ts";
+import { OWNER_RETURN_BRIEF_CUSTOM_TYPE } from "./owner-decisions/return-brief.ts";
 import { isHostInputId, isOwnerChannelInputId, isOwnerSpokenInputId } from "./owner-input-ledger.ts";
 import { PIPELINE_RUN_CUSTOM_TYPE } from "./pipelines/types.ts";
 import { ACT_AHEAD_CUSTOM_TYPE } from "./proactivity/act-ahead-record.ts";
@@ -359,6 +360,7 @@ function hostReservedCustomTypes(): ReadonlySet<string> {
 		SIDE_TRIP_CONTEXT_CUSTOM_TYPE,
 		PATH_ALIAS_LEGEND_CUSTOM_TYPE,
 		CONTEXT_VISIBILITY_PROJECTION_CUSTOM_TYPE,
+		OWNER_RETURN_BRIEF_CUSTOM_TYPE,
 	]);
 	return hostReservedTypes;
 }
@@ -377,7 +379,7 @@ export function assertExtensionCustomType(customType: string): void {
  * Whether the host reserves a custom type: one of the listed types, or one of a family the host names by prefix (each loaded
  * skill's record is its own type, `active_skill_context:<name>`).
  */
-function isHostReservedCustomType(customType: string): boolean {
+export function isHostReservedCustomType(customType: string): boolean {
 	return hostReservedCustomTypes().has(customType) || customType.startsWith(ACTIVE_SKILL_RECORD_KIND_PREFIX);
 }
 

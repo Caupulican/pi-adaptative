@@ -15,7 +15,7 @@ import type {
 	AutonomySettings,
 	ResolvedLearningPolicySettings,
 } from "../settings/settings-schema.ts";
-import { canonicalDigest } from "../steering/canonical.ts";
+import { canonicalDigest, strictCanonicalDigest } from "../steering/canonical.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { type KnowledgeAdmissionPort, type KnowledgeChange, parseKnowledgeChange } from "./knowledge-admission.ts";
 import { type KnowledgeCollectionClaim, knowledgeCollectionSourceIdentity } from "./knowledge-collection-journal.ts";
@@ -76,6 +76,8 @@ export interface KnowledgeCollectionRuntime {
 	maxEstimatedUsd(): number | undefined;
 	/** Persist the bounded handoff and notify the parent, even after cancellation. */
 	onTerminal(outcome: KnowledgeCollectionOutcome, handoff?: KnowledgeCollectionHandoff): void;
+	/** Called after an idle pass that claimed nothing: it writes no terminal, so this is its only signal. Nothing persists. */
+	onIdlePass?(): void;
 }
 
 /** Why automatic collection starts no requests; explicit owner changes through the knowledge tool stay available. */
@@ -100,6 +102,8 @@ export interface KnowledgeCollectionStatus {
 	readonly spentUsd?: number;
 	readonly sessionMaxUsd?: number;
 	readonly last?: KnowledgeCollectionOutcome;
+	/** The latest pass, when it completed without a new source. A later pass that ends clears it, so it is newer than `last`. */
+	readonly lastIdlePass?: { readonly id: string; readonly at: number };
 }
 
 export interface KnowledgeCollectionHost {
@@ -141,7 +145,7 @@ export interface KnowledgeCollectorDeps extends KnowledgeCollectionBinding, Know
 	durable(): boolean;
 	/**
 	 * Notifies once, when the session becomes durable; the collector then re-evaluates its schedule. It must not fire for
-	 * later persisted entries: the collector's own terminal entry is one, and would re-arm it on every pass.
+	 * later persisted entries: the collector's own terminal entry is one, and would re-arm it on every pass that writes one.
 	 */
 	subscribeDurability(listener: () => void): () => void;
 }
@@ -158,8 +162,10 @@ interface Configuration {
 /**
  * No timer or listener survives stop; asynchronous tails retain accounting, never a closed store.
  *
- * A pass starts only on a durable session file. Each pass ends in a terminal handoff that is retained as a session entry, and a
- * session entry is physically retained only once its file is flushed; a fresh session flushes at its first owner input or reply.
+ * A pass starts only on a durable session file. A pass that claims a source, is held, yields, is cancelled or fails ends in a
+ * terminal handoff retained as a session entry; a pass that completes without a new source writes none and is kept in memory as
+ * the last idle pass. A session entry is physically retained only once its file is flushed; a fresh session flushes at its first
+ * owner input or reply.
  * Until then the collector schedules nothing, so no handoff exists that could be left unretained at shutdown.
  *
  * Owner activity, new owner evidence and settings changes yield the pass:
@@ -186,6 +192,7 @@ export class KnowledgeCollector {
 	private retryAt: number | undefined;
 	private pendingTerminal: KnowledgeCollectionOutcome | undefined;
 	private lastTerminal: KnowledgeCollectionOutcome | undefined;
+	private lastIdlePass: { readonly id: string; readonly at: number } | undefined;
 	private accountingDirty = false;
 	private beganWithUnresolvedAccounting = false;
 
@@ -231,6 +238,11 @@ export class KnowledgeCollector {
 		});
 	}
 
+	/** Resolves when no pass is running. The running pass's own promise is the barrier: no timer and no poll. */
+	settled(): Promise<void> {
+		return this.running ?? Promise.resolve();
+	}
+
 	/** Reads configuration and the session spending projection only; never starts or schedules work. */
 	status(): KnowledgeCollectionStatus {
 		let config: Configuration;
@@ -242,6 +254,7 @@ export class KnowledgeCollector {
 				state: "inactive",
 				reason: "configuration_unreadable",
 				...(this.lastTerminal ? { last: this.lastTerminal } : {}),
+				...(this.lastIdlePass ? { lastIdlePass: this.lastIdlePass } : {}),
 			};
 		}
 		const engine = config.engine
@@ -274,6 +287,7 @@ export class KnowledgeCollector {
 			spentUsd: spending.totalUsd,
 			sessionMaxUsd: config.settings.knowledgeSessionMaxUsd,
 			...(this.lastTerminal ? { last: this.lastTerminal } : {}),
+			...(this.lastIdlePass ? { lastIdlePass: this.lastIdlePass } : {}),
 		};
 	}
 
@@ -479,8 +493,17 @@ export class KnowledgeCollector {
 			}
 		} finally {
 			this.deps.time.clearTimeout(deadline);
-			this.pendingTerminal = { ...outcome, status };
-			this.flushTerminal();
+			const terminal = { ...outcome, status };
+			// A pass that completes without claiming a source changes nothing the owner sees, so it writes no session entry and
+			// no event. The status keeps it as the last idle pass; any other pass ends that state.
+			if (status === "completed" && outcome.sources === 0) {
+				this.lastIdlePass = { id: terminal.id, at: this.deps.time.now() };
+				this.deps.onIdlePass?.();
+			} else {
+				this.lastIdlePass = undefined;
+				this.pendingTerminal = terminal;
+				this.flushTerminal();
+			}
 		}
 	}
 
@@ -515,7 +538,7 @@ export class KnowledgeCollector {
 	 * fence); configuration holds wait for the configuration, and accounting holds for the spending evidence.
 	 */
 	private dependency(configKey: string, code?: string): string {
-		return canonicalDigest({
+		return strictCanonicalDigest({
 			configKey,
 			...(code === "accounting:unresolved"
 				? {
@@ -603,7 +626,7 @@ export class KnowledgeCollector {
 				}
 				let plan = journal.read(claim);
 				if (!plan) {
-					const workId = canonicalDigest({
+					const workId = strictCanonicalDigest({
 						extractor: EXTRACTOR_VERSION,
 						window: window.id,
 						scope: claim.source.scope,

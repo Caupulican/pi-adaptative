@@ -3,33 +3,20 @@ import { existsSync, type FSWatcher, mkdirSync, readFileSync, watch, writeFileSy
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getAgentDir } from "../../config.ts";
-import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import type { WorkerControlRecord } from "../../kernel/worker-control-stamp.ts";
 import { checkSoulText } from "../agent-identity.ts";
 import { botTeamStoreFile } from "../agent-paths.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
-import { isCiAttemptEvent } from "../events/host-event-contract.ts";
 import { HOST_EVENT_LISTENER_LIMITS } from "../events/host-event-kinds.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import {
-	countCalendarSlots,
-	latestCalendarSlotAtOrBefore,
-	MAX_CALENDAR_MISSED_COUNT,
-} from "../routines/calendar-schedule.ts";
-import {
 	type AwayEventDecisionInput,
 	type AwayEventDecisionResult,
-	decideRoutineEvents,
-	decideWatchObservation,
 	elideDeliveredRoutineEventBodies,
 	initialRoutineCursor,
-	MAX_ROUTINE_COMMAND_ID_CHARS,
-	MAX_ROUTINE_EVENT_MISSED_COUNT,
-	MAX_ROUTINE_INTAKE_ANSWERED,
 	MAX_ROUTINE_INTAKE_ORIGINS,
 	MAX_ROUTINE_INTAKE_SESSIONS,
-	MAX_ROUTINE_INTAKE_UNANNOUNCED,
 	MAX_ROUTINE_OCCURRENCES,
 	MAX_ROUTINE_PROMPT_CHARS,
 	MAX_ROUTINE_REPLAY_TOMBSTONES,
@@ -42,29 +29,17 @@ import {
 	parseRoutineDefinitionView,
 	parseRoutineExecutionSnapshot,
 	parseRoutineIntakeConsumptions,
-	parseRoutineIntakeOrigin,
 	parseRoutineIntakeSessions,
 	parseRoutineOccurrence,
 	parseRoutineScheduleInput,
 	parseRoutineTarget,
-	ROUTINE_AWAY_HELD_REASON,
-	ROUTINE_AWAY_SPEND_REFUSAL,
-	ROUTINE_FAILURE_PAUSE_THRESHOLD,
-	ROUTINE_INTAKE_CAP_WINDOW_MS,
-	ROUTINE_INTAKE_LIVE_CAP,
-	ROUTINE_INTAKE_WINDOW_CAP,
-	ROUTINE_JOURNAL_SHARE,
 	ROUTINE_NO_NEXT_RUN_AT,
 	type RoutineClaimResult,
 	type RoutineCursor,
 	type RoutineDefinitionView,
 	type RoutineDelivery,
-	type RoutineHostEventFact,
-	type RoutineHostEventFeed,
 	type RoutineIntakeChange,
 	type RoutineIntakeConsumption,
-	type RoutineIntakeOrigin,
-	RoutineIntakeRefusal,
 	type RoutineIntakeSession,
 	type RoutineOccurrence,
 	type RoutineOccurrenceClaimInput,
@@ -74,37 +49,13 @@ import {
 	type RoutineTerminalOutcome,
 	type RoutineWatchObservationInput,
 	type RoutineWatchOutcome,
-	rebasedRoutineCursor,
-	routineAwayHeld,
-	routineAwaySpendRoom,
-	routineCursorAfter,
-	routineEnded,
-	routineEventKey,
-	routineJournalRemovable,
-	routineJournalShare,
-	routineOccurrenceId,
-	routineOccurrenceReplayKeys,
-	routineOccurrencesSettled,
-	routineOpensAt,
-	routinePreviousSlot,
 	routineResultDigest,
 	routineScheduleInputOf,
 	routineSlotRule,
-	routineStartDeadline,
-	routineStartWindow,
-	routineTriggerAt,
 	routineZoneUnsupported,
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
-import { routineTurnOrigin } from "../routines/routine-parent-input.ts";
-import {
-	applyRoutineRunProgress,
-	NO_SUMMARY_TEXT,
-	parseRoutineProgress,
-	type RoutineRunFacts,
-	renderRoutineProgressBrief,
-	withRoutineOwnerNote,
-} from "../routines/routine-progress.ts";
+import { parseRoutineProgress, type RoutineRunFacts, withRoutineOwnerNote } from "../routines/routine-progress.ts";
 import { parseWatchCondition } from "../routines/watch-contract.ts";
 import { cleanRedactBound } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -130,6 +81,29 @@ import {
 	releaseLegacyTokenDaemonLeaseFile,
 	renewDaemonLeaseFile,
 } from "./bot-team-routine-helpers.ts";
+import {
+	claimDueRoutineOccurrences,
+	clearRoutineAwayRefusals,
+	decideAwayEventRoutines,
+	recordRoutineAwayRefusals,
+	releaseLapsedAwayClaims,
+} from "./routine-claim-admission.ts";
+import {
+	admitRoutineIntake,
+	consumeRoutineIntake,
+	recordRoutineIntake,
+	recordRoutineToolAnswers,
+} from "./routine-intake-state.ts";
+import type { RoutineStoreState } from "./routine-occurrence-journal.ts";
+import {
+	cancelUndispatchedRoutineOccurrences,
+	recordRoutineConditionMet,
+	recordRoutineFailureStreak,
+	recordRoutineProgress,
+	withResult,
+} from "./routine-result-writes.ts";
+import { awaySettlement, resultSummaryText } from "./routine-run-state.ts";
+import { claimManualRoutineOccurrence, observeWatch, retireEndedRoutines } from "./routine-trigger-writes.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
 
 export {
@@ -712,64 +686,6 @@ function appendBoundedFile(filePath: string, line: string, maxLines = 80): void 
 	);
 }
 
-/**
- * The routine's run-state cache for one claimed occurrence: running until its result, then that result's outcome and
- * summary. Only run state changes; the definition, revision and updatedAt stay the admitted revision's.
- */
-function withRoutineRunState(routine: RoutineDefinitionView, occurrence: RoutineOccurrence): RoutineDefinitionView {
-	// A claim admits the routine again, so an earlier away refusal no longer describes it.
-	const { lastSummary: _previousSummary, awayRefusal: _refusal, ...rest } = routine;
-	const result = occurrence.result;
-	return {
-		...rest,
-		lastRunAt: routineTriggerAt(occurrence.trigger),
-		lastStatus: result?.outcome ?? "running",
-		...(result ? { lastSummary: result.summary } : {}),
-	};
-}
-
-/** A dispatched run away's end, recorded in the write that makes it terminal; nothing for any other run. */
-function awaySettlement(
-	occurrence: RoutineOccurrence,
-	nowMs: number,
-	costUsd: number | undefined,
-): Pick<RoutineOccurrence, "awaySettlement"> {
-	if (occurrence.executor !== "away" || !occurrence.dispatchKey) return {};
-	return { awaySettlement: { at: nowMs, ...(costUsd === undefined ? {} : { costUsd }) } };
-}
-
-/**
- * What a run reads from its routine's progress record when it is claimed to run: the brief, and whether that brief
- * carries a third party's words (`progressUntrusted`). Both are frozen with the run. Only a session run of a clock,
- * manual, event or watch trigger reads a brief; an expiry or condition notice runs no worker. The record is the routine's
- * current one, but the run's target and the report instruction come from the occurrence's own frozen definition, the one
- * its worker schema was compiled from.
- */
-function admittedProgressFields(
-	routine: RoutineDefinitionView,
-	occurrence: Pick<RoutineOccurrence, "definition" | "target" | "trigger">,
-): Pick<RoutineOccurrence, "progressBrief" | "progressUntrusted"> {
-	if (
-		occurrence.target.kind !== "session" ||
-		occurrence.trigger.kind === "expiry" ||
-		occurrence.trigger.kind === "condition"
-	)
-		return {};
-	const reportsProgress =
-		occurrence.definition.executionSnapshot?.savedIntent.executionContract.worker.profile.reportsProgress === true;
-	const progressBrief = renderRoutineProgressBrief(routine.routineId, routine.progress, reportsProgress);
-	if (progressBrief === undefined) return {};
-	return {
-		progressBrief,
-		...(routine.progress?.untrusted === true ? { progressUntrusted: true as const } : {}),
-	};
-}
-
-/** A result's summary as the store keeps it: cleaned, redacted and bounded before it is cut, or the no-summary text. */
-function resultSummaryText(raw: string): string {
-	return cleanRedactBound(raw, MAX_ROUTINE_SUMMARY_CHARS, { lines: true }) || NO_SUMMARY_TEXT;
-}
-
 export class PersistentBotTeamStore {
 	private readonly agentDir: string;
 	private readonly filePath: string;
@@ -783,6 +699,14 @@ export class PersistentBotTeamStore {
 	private readonly routineIntakeOrigins = new Map<string, RoutineIntakeConsumption>();
 	/** Per-session intake state by parent session, least recently written first. */
 	private readonly routineIntakeSessions = new Map<string, RoutineIntakeSession>();
+	/** The routine state the routine modules read and write: the maps above, shared by reference (reload clears them, never replaces them). */
+	private readonly routineState: RoutineStoreState = {
+		routines: this.routines,
+		occurrences: this.routineOccurrences,
+		replayTombstones: this.routineReplayTombstones,
+		intakeOrigins: this.routineIntakeOrigins,
+		intakeSessions: this.routineIntakeSessions,
+	};
 	private routineRevisionCounter = 0;
 	private readonly listeners = new Set<() => void>();
 	private mutationChanged = false;
@@ -895,86 +819,6 @@ export class PersistentBotTeamStore {
 		};
 	}
 
-	private latestDueTrigger(
-		routine: RoutineDefinitionView,
-		firstDueAt: number,
-		nowMs: number,
-	): Extract<RoutineOccurrence["trigger"], { kind: "schedule" }> {
-		if (routine.schedule.kind === "event") throw new Error("Event routines have no clock slot.");
-		if (routine.schedule.kind === "once") return { kind: "schedule", scheduledAt: firstDueAt, missedCount: 0 };
-		if (routine.schedule.kind === "calendar") {
-			const scheduledAt = latestCalendarSlotAtOrBefore(routine.schedule, nowMs, firstDueAt);
-			return {
-				kind: "schedule",
-				scheduledAt,
-				missedCount: Math.min(
-					MAX_CALENDAR_MISSED_COUNT,
-					(routine.cursor.kind === "calendar" ? (routine.cursor.skipped ?? 0) : 0) +
-						countCalendarSlots(routine.schedule, firstDueAt, scheduledAt, MAX_CALENDAR_MISSED_COUNT),
-				),
-			};
-		}
-		const lastIndex = Math.floor((nowMs - routine.schedule.anchorAt) / routine.schedule.intervalMs);
-		const scheduledAt = routine.schedule.anchorAt + routine.schedule.intervalMs * lastIndex;
-		const firstIndex = routine.cursor.kind === "interval" ? routine.cursor.nextIndex : 1;
-		return { kind: "schedule", scheduledAt, missedCount: Math.max(0, lastIndex - firstIndex) };
-	}
-
-	private createClaimedOccurrence(
-		definition: RoutineDefinitionView,
-		occurrenceId: string,
-		trigger: RoutineOccurrence["trigger"],
-		owner: string,
-		leaseMs: number,
-		nowMs: number,
-		parentOrigin: WorkerReceiptOrigin,
-	): RoutineOccurrence {
-		return {
-			...this.createPendingOccurrence(definition, occurrenceId, trigger, nowMs, parentOrigin),
-			phase: "claimed",
-			claim: { token: randomUUID(), owner, leaseUntil: nowMs + leaseMs },
-		};
-	}
-
-	/** An accepted occurrence no host has claimed yet: whichever host may run it claims it through recovery. */
-	private createPendingOccurrence(
-		definition: RoutineDefinitionView,
-		occurrenceId: string,
-		trigger: RoutineOccurrence["trigger"],
-		nowMs: number,
-		parentOrigin: WorkerReceiptOrigin,
-	): RoutineOccurrence {
-		if (!this.routineJournalHasRoom(nowMs))
-			throw new Error("Routine occurrence journal is full of active, uncertain or undelivered entries.");
-		const definitionSnapshot: PersistentRoutineDefinition = {
-			routineId: definition.routineId,
-			incarnationId: definition.incarnationId,
-			revision: definition.revision,
-			target: definition.target,
-			prompt: definition.prompt,
-			schedule: definition.schedule,
-			enabled: definition.enabled,
-			...(definition.executionSnapshot ? { executionSnapshot: definition.executionSnapshot } : {}),
-			...(definition.origin ? { origin: definition.origin } : {}),
-			createdAt: definition.createdAt,
-			updatedAt: definition.updatedAt,
-		};
-		return {
-			occurrenceId,
-			routineId: definition.routineId,
-			routineRevision: definition.revision,
-			definition: definitionSnapshot,
-			parentOrigin,
-			target: definition.target,
-			trigger,
-			phase: "pending",
-			createdAt: nowMs,
-			updatedAt: nowMs,
-			// A queued run's brief is refreshed when it is claimed to run (`reclaimed`), before its dispatch identity is fixed.
-			...admittedProgressFields(definition, { definition: definitionSnapshot, target: definition.target, trigger }),
-		};
-	}
-
 	private updateClaimedOccurrence(
 		input: { occurrenceId: string; claimToken: string; nowMs: number },
 		update: (occurrence: RoutineOccurrence) => RoutineOccurrence,
@@ -1043,98 +887,6 @@ export class PersistentBotTeamStore {
 		});
 	}
 
-	private withResult(
-		occurrence: RoutineOccurrence,
-		outcome: RoutineTerminalOutcome,
-		summaryRaw: string,
-		recipient: string,
-		ownerUpdate?: "none",
-		conditionMet?: true,
-		facts?: RoutineRunFacts,
-	): RoutineOccurrence {
-		const summary = resultSummaryText(summaryRaw);
-		if (recipient !== occurrence.parentOrigin.sessionId)
-			throw new Error("Routine result recipient does not match its admitted parent.");
-		if ((ownerUpdate !== undefined || conditionMet !== undefined) && outcome !== "succeeded")
-			throw new Error("Only a succeeded routine run can skip the owner update or report its stated end met.");
-		const digest = routineResultDigest(outcome, summary, recipient, ownerUpdate === "none", conditionMet === true);
-		const finished: RoutineOccurrence = {
-			...occurrence,
-			result: {
-				outcome,
-				summary,
-				digest,
-				delivery: "pending",
-				recipient,
-				...(ownerUpdate ? { ownerUpdate } : {}),
-				...(conditionMet ? { conditionMet } : {}),
-			},
-		};
-		// The routine's last run state follows the result of its most recently claimed occurrence only.
-		const routine = this.routines.get(occurrence.routineId);
-		if (
-			routine?.incarnationId === occurrence.definition.incarnationId &&
-			routine.lastRunAt === routineTriggerAt(occurrence.trigger)
-		)
-			this.routines.set(routine.routineId, withRoutineRunState(routine, finished));
-		this.recordRoutineFailureStreak(finished, outcome, summary);
-		this.recordRoutineProgress(finished, outcome, summary, facts);
-		if (conditionMet) this.recordRoutineConditionMet(finished);
-		return finished;
-	}
-
-	/**
-	 * Updates the routine's progress record in the write that records a result, for the incarnation the run belongs to
-	 * only (`applyRoutineRunProgress`): snags from code facts, the run's own report, clean runs resolving snags, and the
-	 * position of a run that sent no report. Only a worker session's run writes: a bot or team run has no brief to read it
-	 * back, so its results record nothing (its failure streak and pause still apply). A cancelled result counts nothing;
-	 * it leaves the stopped position only when the occurrence was dispatched. An expiry or condition notice (which ran no
-	 * worker) records nothing. Keyed by the run, so a replayed result changes nothing; never moves the revision. A record
-	 * the codec refuses is not kept: the previous record stands, so a progress record can never fail the result write.
-	 */
-	private recordRoutineProgress(
-		occurrence: RoutineOccurrence,
-		outcome: RoutineTerminalOutcome,
-		summary: string,
-		facts: RoutineRunFacts | undefined,
-	): void {
-		if (
-			occurrence.target.kind !== "session" ||
-			occurrence.trigger.kind === "expiry" ||
-			occurrence.trigger.kind === "condition"
-		)
-			return;
-		const routine = this.routines.get(occurrence.routineId);
-		if (routine?.incarnationId !== occurrence.definition.incarnationId) return;
-		const progress = applyRoutineRunProgress(routine.progress, {
-			routineId: routine.routineId,
-			occurrenceId: occurrence.occurrenceId,
-			outcome,
-			reasonCode: facts?.reasonCode ?? outcome,
-			...(facts?.step === undefined ? {} : { step: facts.step }),
-			summary,
-			...(facts?.report === undefined ? {} : { report: facts.report }),
-			untrusted: routineTurnOrigin(occurrence)?.thirdParty === true,
-			latest: routine.lastRunAt === routineTriggerAt(occurrence.trigger),
-			dispatched: occurrence.dispatchKey !== undefined,
-			nowMs: occurrence.updatedAt,
-		});
-		if (progress === routine.progress) return;
-		if (progress !== undefined) {
-			try {
-				parseRoutineProgress(progress);
-			} catch {
-				harnessLog.warn("routines", "a run's progress record was not kept: it failed its own codec", {
-					routineId: routine.routineId,
-					occurrenceId: occurrence.occurrenceId,
-				});
-				return;
-			}
-		}
-		const { progress: _previous, ...rest } = routine;
-		this.routines.set(routine.routineId, progress ? { ...rest, progress } : rest);
-	}
-
 	/** The owner's note on where a routine's task stands; run state, so the revision does not move. */
 	noteRoutineProgress(input: { routineId: string; text: string; nowMs: number }): RoutineDefinitionView {
 		return this.mutate(() => {
@@ -1165,107 +917,6 @@ export class PersistentBotTeamStore {
 	}
 
 	/**
-	 * Marks the routine ended in the write that records a result reporting its stated end met, for the incarnation the
-	 * run belongs to only, and cancels its undispatched runs. The first report stands; the revision does not move. The
-	 * routine is removed, with its one notice, once its runs are settled (`retireEndedRoutines`).
-	 */
-	private recordRoutineConditionMet(occurrence: RoutineOccurrence): void {
-		const routine = this.routines.get(occurrence.routineId);
-		if (
-			routine?.incarnationId !== occurrence.definition.incarnationId ||
-			routine.origin?.endCondition === undefined ||
-			routine.conditionMet
-		)
-			return;
-		this.routines.set(routine.routineId, {
-			...routine,
-			conditionMet: { at: occurrence.updatedAt, occurrenceId: occurrence.occurrenceId },
-		});
-		this.cancelUndispatchedRoutineOccurrences(
-			routine.routineId,
-			occurrence.updatedAt,
-			"Another run of this routine reported its stated end met before this one was dispatched.",
-		);
-	}
-
-	/**
-	 * Counts failed results in a row on the routine, inside the write that records the result: a succeeded result clears
-	 * the count, a cancelled or uncertain one leaves it. The failed result that reaches the threshold pauses an enabled
-	 * routine in that same write, with the reason recorded and its undispatched runs cancelled, without moving the
-	 * revision the owner resumes against. A result is recorded exactly once, so the pause is written exactly once.
-	 */
-	private recordRoutineFailureStreak(
-		occurrence: RoutineOccurrence,
-		outcome: RoutineTerminalOutcome,
-		summary: string,
-	): void {
-		if (outcome !== "failed" && outcome !== "succeeded") return;
-		const routine = this.routines.get(occurrence.routineId);
-		if (routine?.incarnationId !== occurrence.definition.incarnationId) return;
-		const { failureStreak: previous, ...rest } = routine;
-		const streak = outcome === "failed" ? (previous ?? 0) + 1 : 0;
-		if (streak < ROUTINE_FAILURE_PAUSE_THRESHOLD || !routine.enabled) {
-			// An owner-paused routine keeps counting below the threshold; its resume starts the count again.
-			const kept = Math.min(streak, ROUTINE_FAILURE_PAUSE_THRESHOLD - 1);
-			this.routines.set(routine.routineId, kept > 0 ? { ...rest, failureStreak: kept } : rest);
-			return;
-		}
-		this.routines.set(routine.routineId, {
-			...rest,
-			enabled: false,
-			failurePause: {
-				after: streak,
-				at: occurrence.updatedAt,
-				occurrenceId: occurrence.occurrenceId,
-				// The summary was cleaned, redacted and bounded when the result was written (`resultSummaryText`).
-				lastError: summary,
-			},
-		});
-		this.cancelUndispatchedRoutineOccurrences(
-			routine.routineId,
-			occurrence.updatedAt,
-			"The routine was paused after repeated failures before this run was dispatched.",
-		);
-	}
-
-	/** Whether a routine may admit one more run: it holds fewer than its journal share of unsettled entries. */
-	private routineHasJournalShare(routineId: string, nowMs: number): boolean {
-		return routineJournalShare(this.routineOccurrences.values(), routineId, nowMs).fits;
-	}
-
-	/**
-	 * Prunes settled history when the journal is at capacity, oldest first; whether one more occurrence then fits. A run
-	 * away the away spend bound still charges is kept until its charge ends.
-	 */
-	private routineJournalHasRoom(nowMs: number): boolean {
-		if (this.routineOccurrences.size < MAX_ROUTINE_OCCURRENCES) return true;
-		const removable = Array.from(this.routineOccurrences.values())
-			.filter((item) => routineJournalRemovable(item, nowMs))
-			.sort((a, b) => a.updatedAt - b.updatedAt);
-		while (this.routineOccurrences.size >= MAX_ROUTINE_OCCURRENCES && removable.length > 0) {
-			const item = removable.shift();
-			if (!item) continue;
-			// Slot occurrences cannot recur behind their cursor, nor an end notice after its routine is removed; manual
-			// commands and host events can be re-presented. A GitHub run tombstones every occurrence it carried, or none.
-			if (item.trigger.kind === "manual" || item.trigger.kind === "event") {
-				const keys = routineOccurrenceReplayKeys(item).filter((key) => !this.routineReplayTombstones.has(key));
-				if (this.routineReplayTombstones.size + keys.length > MAX_ROUTINE_REPLAY_TOMBSTONES) continue;
-				for (const key of keys) this.routineReplayTombstones.add(key);
-			}
-			this.routineOccurrences.delete(item.occurrenceId);
-		}
-		return this.routineOccurrences.size < MAX_ROUTINE_OCCURRENCES;
-	}
-
-	/** Records why a due routine was not run away; the same reason is recorded once, and any claim clears it. */
-	private recordAwayRefusal(routineId: string, reason: string, nowMs: number): boolean {
-		const routine = this.routines.get(routineId);
-		if (!routine || routine.awayRefusal?.reason === reason) return false;
-		this.routines.set(routineId, { ...routine, awayRefusal: { reason, at: nowMs } });
-		return true;
-	}
-
-	/**
 	 * Records why routines a host running away cannot run (no pinned origin, an origin off the branch, an unreadable
 	 * parent, a CI source the away host cannot follow); only a routine already due is recorded, and the same reason only
 	 * once. An event routine has no due time: it is due whenever its source delivers, so it is recorded while enabled.
@@ -1274,36 +925,12 @@ export class PersistentBotTeamStore {
 		refusals: readonly { readonly routineId: string; readonly reason: string }[];
 		nowMs: number;
 	}): void {
-		this.mutate(() => {
-			let changed = false;
-			for (const { routineId, reason } of input.refusals) {
-				const routine = this.routines.get(routineId);
-				if (
-					!routine?.enabled ||
-					(routine.schedule.kind !== "event" &&
-						routineOpensAt(routine, this.routineOccurrences.values()) > input.nowMs)
-				)
-					continue;
-				const bounded = reason.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "This routine cannot run away.";
-				if (this.recordAwayRefusal(routineId, bounded, input.nowMs)) changed = true;
-			}
-			if (changed) this.save();
-		});
+		this.mutate(() => recordRoutineAwayRefusals(this.routineState, input, () => this.save()));
 	}
 
 	/** Clears the recorded away refusals whose cause ended (a CI source followed again); another reason is kept. */
 	clearRoutineAwayRefusals(input: { routineIds: readonly string[]; reasonPrefix: string }): void {
-		this.mutate(() => {
-			let changed = false;
-			for (const routineId of input.routineIds) {
-				const routine = this.routines.get(routineId);
-				if (!routine?.awayRefusal?.reason.startsWith(input.reasonPrefix)) continue;
-				const { awayRefusal: _refusal, ...cleared } = routine;
-				this.routines.set(routineId, cleared);
-				changed = true;
-			}
-			if (changed) this.save();
-		});
+		this.mutate(() => clearRoutineAwayRefusals(this.routineState, input, () => this.save()));
 	}
 
 	/**
@@ -1312,43 +939,7 @@ export class PersistentBotTeamStore {
 	 * parent to reconcile exactly. Whether any was released.
 	 */
 	releaseLapsedAwayClaims(input: { parentSessionId: string; nowMs: number }): boolean {
-		return this.mutate(() => {
-			let changed = false;
-			for (const item of this.routineOccurrences.values()) {
-				if (
-					item.executor !== "away" ||
-					item.parentOrigin.sessionId !== input.parentSessionId ||
-					(item.phase !== "pending" && (item.phase !== "claimed" || item.claim!.leaseUntil > input.nowMs))
-				)
-					continue;
-				const { claim: _claim, executor: _executor, ...pending } = item;
-				this.routineOccurrences.set(item.occurrenceId, {
-					...pending,
-					phase: "pending",
-					updatedAt: Math.max(item.updatedAt, input.nowMs),
-				});
-				changed = true;
-			}
-			if (changed) this.save();
-			return changed;
-		});
-	}
-
-	private cancelUndispatchedRoutineOccurrences(
-		routineId: string,
-		nowMs: number,
-		summary = "Routine was paused or deleted before dispatch.",
-	): void {
-		for (const item of this.routineOccurrences.values()) {
-			if (item.routineId !== routineId || (item.phase !== "pending" && item.phase !== "claimed")) continue;
-			const cancelled = this.withResult(
-				{ ...item, phase: "terminal", updatedAt: nowMs },
-				"cancelled",
-				summary,
-				item.parentOrigin.sessionId,
-			);
-			this.routineOccurrences.set(item.occurrenceId, cancelled);
-		}
+		return this.mutate(() => releaseLapsedAwayClaims(this.routineState, input, () => this.save()));
 	}
 
 	private highestRoutineRevision(): number {
@@ -1788,7 +1379,7 @@ export class PersistentBotTeamStore {
 
 			for (const [routineId, routine] of this.routines.entries()) {
 				if (routine.target.kind === "bot" && routine.target.agentId === normalizedId) {
-					this.cancelUndispatchedRoutineOccurrences(routineId, Date.now());
+					cancelUndispatchedRoutineOccurrences(this.routineState, routineId, Date.now());
 					this.routines.delete(routineId);
 				}
 			}
@@ -1919,7 +1510,7 @@ export class PersistentBotTeamStore {
 			this.teamMessages.delete(normalizedId);
 			for (const [routineId, routine] of this.routines.entries()) {
 				if (routine.target.kind === "team" && routine.target.teamId === normalizedId) {
-					this.cancelUndispatchedRoutineOccurrences(routineId, Date.now());
+					cancelUndispatchedRoutineOccurrences(this.routineState, routineId, Date.now());
 					this.routines.delete(routineId);
 				}
 			}
@@ -1944,7 +1535,7 @@ export class PersistentBotTeamStore {
 			if (input.expectedRevision !== undefined && existing?.revision !== input.expectedRevision)
 				throw new Error("Routine revision changed; read current state before retrying.");
 			// Checked before `createOnly`: a replay of a consumed origin meets its own deterministic routine id.
-			const intake = input.intakeOrigin ? this.admitRoutineIntake(input) : undefined;
+			const intake = input.intakeOrigin ? admitRoutineIntake(this.routineState, input) : undefined;
 			if (input.createOnly && existing) throw new Error("Routine already exists.");
 			const stored = existing ? routineScheduleInputOf(existing.schedule) : undefined;
 			// The stored schedule resubmitted unchanged (a pause, resume or prompt edit) is kept as saved, so a routine whose
@@ -2126,46 +1717,19 @@ export class PersistentBotTeamStore {
 			};
 			if (!parseRoutineDefinitionView(view)) throw new Error("Routine definition is invalid for durable storage.");
 			this.routines.set(normalizedId, view);
-			if (intake) this.consumeRoutineIntake(intake, normalizedId, input.nowMs ?? Date.now());
+			if (intake) consumeRoutineIntake(this.routineState, intake, normalizedId, input.nowMs ?? Date.now());
 			if (input.toolAnsweredSources !== undefined)
-				this.recordRoutineToolAnswers(definition.target, input.toolAnsweredSources, input.nowMs ?? Date.now());
-			if (!view.enabled) this.cancelUndispatchedRoutineOccurrences(normalizedId, input.nowMs ?? Date.now());
+				recordRoutineToolAnswers(
+					this.routineState,
+					definition.target,
+					input.toolAnsweredSources,
+					input.nowMs ?? Date.now(),
+				);
+			if (!view.enabled)
+				cancelUndispatchedRoutineOccurrences(this.routineState, normalizedId, input.nowMs ?? Date.now());
 			this.save();
 			return structuredClone(view);
 		});
-	}
-
-	/**
-	 * Admits one host intake creation under the store lock: create-only and session-targeted, refused when its
-	 * origin is consumed, when the session created {@link ROUTINE_INTAKE_WINDOW_CAP} routines within the cap
-	 * window, or when it holds {@link ROUTINE_INTAKE_LIVE_CAP} live intake routines.
-	 */
-	private admitRoutineIntake(input: UpsertPersistentRoutineInput): RoutineIntakeOrigin & { parentSessionId: string } {
-		// The owner's branch is checked first, under the lock: a request navigated away from writes nothing.
-		input.intakeGuard?.();
-		const origin = parseRoutineIntakeOrigin(input.intakeOrigin);
-		if (input.target.kind !== "session" || !input.createOnly || input.expectedRevision !== undefined)
-			throw new Error("A routine intake creation is a create-only session routine.");
-		const parentSessionId = input.target.parentSessionId;
-		if (this.routineIntakeOrigins.has(origin.key))
-			throw new RoutineIntakeRefusal("consumed", "This owner request was already turned into a routine.");
-		const nowMs = input.nowMs ?? Date.now();
-		let recent = 0;
-		for (const consumption of this.routineIntakeOrigins.values())
-			if (consumption.parentSessionId === parentSessionId && consumption.at > nowMs - ROUTINE_INTAKE_CAP_WINDOW_MS)
-				recent++;
-		if (recent >= ROUTINE_INTAKE_WINDOW_CAP)
-			throw new RoutineIntakeRefusal(
-				"window_cap",
-				"The daily limit of automatic routines for this session is reached.",
-			);
-		let live = 0;
-		for (const routine of this.routines.values())
-			if (routine.origin && routine.target.kind === "session" && routine.target.parentSessionId === parentSessionId)
-				live++;
-		if (live >= ROUTINE_INTAKE_LIVE_CAP)
-			throw new RoutineIntakeRefusal("live_cap", "This session already holds its limit of automatic routines.");
-		return { ...origin, parentSessionId };
 	}
 
 	getRoutineIntakeSession(parentSessionId: string): RoutineIntakeSession | undefined {
@@ -2183,92 +1747,7 @@ export class PersistentBotTeamStore {
 	 * the pass in flight (`null` ends it), notices kept until accepted and notices the transcript accepted.
 	 */
 	recordRoutineIntake(parentSessionId: string, nowMs: number, change: RoutineIntakeChange): void {
-		this.mutate(() => {
-			const { batch, through } = change;
-			const announced = new Set(change.announced ?? []);
-			this.writeRoutineIntakeSession(parentSessionId, nowMs, (current) => {
-				const records = [...(current?.unannounced ?? [])];
-				const kept = new Set(records.map((record) => record.key));
-				for (const record of change.announce ?? []) {
-					if (kept.has(record.key)) continue;
-					kept.add(record.key);
-					records.push(record);
-				}
-				const unannounced = records
-					.filter((record) => !announced.has(record.key))
-					.slice(-MAX_ROUTINE_INTAKE_UNANNOUNCED);
-				return {
-					...(through !== undefined && (current?.through === undefined || through > current.through)
-						? { through }
-						: {}),
-					...(batch === undefined ? {} : { batch: batch ?? undefined }),
-					unannounced: unannounced.length > 0 ? unannounced : undefined,
-				};
-			});
-			this.save();
-		});
-	}
-
-	/**
-	 * Applies one change to a session's intake state inside the caller's mutation and moves it to the newest
-	 * position. Once the bound is reached the least recently written session with no pass in flight and no notice
-	 * owed leaves first, so another session's progress never displaces work this one still owes its owner.
-	 */
-	private writeRoutineIntakeSession(
-		parentSessionId: string,
-		nowMs: number,
-		change: (current: RoutineIntakeSession | undefined) => Partial<Omit<RoutineIntakeSession, "parentSessionId">>,
-	): void {
-		const current = this.routineIntakeSessions.get(parentSessionId);
-		// Parsed as the next load reads it: a write never persists state that load would refuse.
-		const [next] = parseRoutineIntakeSessions([
-			JSON.parse(JSON.stringify({ ...current, ...change(current), parentSessionId, updatedAt: nowMs })),
-		]);
-		this.routineIntakeSessions.delete(parentSessionId);
-		this.routineIntakeSessions.set(parentSessionId, next!);
-		while (this.routineIntakeSessions.size > MAX_ROUTINE_INTAKE_SESSIONS) {
-			let evicted: string | undefined;
-			for (const [id, session] of this.routineIntakeSessions)
-				if (id !== parentSessionId && !session.batch && !session.unannounced) {
-					evicted = id;
-					break;
-				}
-			this.routineIntakeSessions.delete(evicted ?? this.routineIntakeSessions.keys().next().value!);
-		}
-	}
-
-	/**
-	 * Records a consumed origin and its request's decision in the creating write, so the creation and its outcome are
-	 * one durable fact; the oldest origin leaves first once the journal is full.
-	 */
-	private consumeRoutineIntake(
-		intake: RoutineIntakeOrigin & { parentSessionId: string },
-		routineId: string,
-		at: number,
-	): void {
-		this.routineIntakeOrigins.set(intake.key, { key: intake.key, parentSessionId: intake.parentSessionId, at });
-		for (const oldest of this.routineIntakeOrigins.keys()) {
-			if (this.routineIntakeOrigins.size <= MAX_ROUTINE_INTAKE_ORIGINS) break;
-			this.routineIntakeOrigins.delete(oldest);
-		}
-		const batch = this.routineIntakeSessions.get(intake.parentSessionId)?.batch;
-		if (!batch?.requests?.some((request) => request.key === intake.key)) return;
-		const requests = batch.requests.map((request) =>
-			request.key === intake.key ? { ...request, outcome: { kind: "created" as const, routineId } } : request,
-		);
-		this.writeRoutineIntakeSession(intake.parentSessionId, at, () => ({ batch: { ...batch, requests } }));
-	}
-
-	/** A routine tool save of a session marks the owner sources in its model's context as answered, in the same write. */
-	private recordRoutineToolAnswers(target: PersistentRoutineTarget, sourceIds: readonly string[], at: number): void {
-		if (target.kind !== "session") throw new Error("Only a session routine records the owner sources it answered.");
-		this.writeRoutineIntakeSession(target.parentSessionId, at, (current) => {
-			const fresh = new Set(sourceIds);
-			const answered = [...(current?.answered ?? []).filter((sourceId) => !fresh.has(sourceId)), ...fresh].slice(
-				-MAX_ROUTINE_INTAKE_ANSWERED,
-			);
-			return answered.length > 0 ? { answered } : {};
-		});
+		this.mutate(() => recordRoutineIntake(this.routineState, parentSessionId, nowMs, change, () => this.save()));
 	}
 
 	deleteRoutine(routineId: string, expectedRevision?: number, nowMs = Date.now()): boolean {
@@ -2278,7 +1757,7 @@ export class PersistentBotTeamStore {
 			if (!existing) return false;
 			if (expectedRevision !== undefined && existing.revision !== expectedRevision)
 				throw new Error("Routine revision changed; read current state before retrying.");
-			this.cancelUndispatchedRoutineOccurrences(normalizedId, nowMs);
+			cancelUndispatchedRoutineOccurrences(this.routineState, normalizedId, nowMs);
 			this.routines.delete(normalizedId);
 			this.save();
 			return true;
@@ -2296,225 +1775,11 @@ export class PersistentBotTeamStore {
 		readonly retired: readonly string[];
 		readonly journalFull: boolean;
 	} {
-		return this.mutate(() => {
-			const retired: string[] = [];
-			let journalFull = false;
-			for (const routineId of new Set(input.routineIds)) {
-				const routine = this.routines.get(routineId);
-				if (!routine || input.nowMs < Date.parse(routine.updatedAt)) continue;
-				if (routine.target.kind === "session" && routine.target.parentSessionId !== input.parentSessionId) continue;
-				const ended = routineEnded(routine, input.nowMs);
-				if (!ended || !routineOccurrencesSettled(this.routineOccurrences.values(), routine)) continue;
-				const met = ended === "condition" ? routine.conditionMet : undefined;
-				if (met && input.nowMs < met.at) continue;
-				const trigger: RoutineOccurrence["trigger"] | undefined = met
-					? { kind: "condition", occurrenceId: met.occurrenceId, metAt: met.at }
-					: ended === "expired" && routine.schedule.kind !== "once" && routine.schedule.expiresAt !== undefined
-						? { kind: "expiry", expiresAt: routine.schedule.expiresAt }
-						: undefined;
-				if (trigger) {
-					const parentOrigin =
-						routine.target.kind === "session"
-							? routine.executionSnapshot?.savedIntent.receiptOrigin
-							: input.receiptOrigin;
-					if (!parentOrigin || parentOrigin.sessionId !== input.parentSessionId) continue;
-					if (!this.routineJournalHasRoom(input.nowMs)) {
-						journalFull = true;
-						continue;
-					}
-					const notice = this.createClaimedOccurrence(
-						routine,
-						routineOccurrenceId(routine, trigger),
-						trigger,
-						input.owner,
-						input.leaseMs,
-						input.nowMs,
-						parentOrigin,
-					);
-					this.routineOccurrences.set(
-						notice.occurrenceId,
-						this.withResult(
-							{ ...notice, phase: "terminal" },
-							"cancelled",
-							trigger.kind === "condition"
-								? "A run reported the end the owner stated as met; the routine was removed."
-								: "The routine reached its end time and was removed.",
-							parentOrigin.sessionId,
-						),
-					);
-				}
-				this.routines.delete(routineId);
-				retired.push(routineId);
-			}
-			if (retired.length > 0) this.save();
-			return { retired, journalFull };
-		});
+		return this.mutate(() => retireEndedRoutines(this.routineState, input, () => this.save()));
 	}
 
 	claimDueRoutineOccurrences(input: RoutineOccurrenceClaimInput): RoutineClaimResult {
-		return this.mutate(() => {
-			if (
-				!Number.isSafeInteger(input.nowMs) ||
-				input.nowMs < 0 ||
-				!Number.isSafeInteger(input.leaseMs) ||
-				input.leaseMs <= 0 ||
-				!Number.isSafeInteger(input.nowMs + input.leaseMs) ||
-				!Number.isFinite(new Date(input.nowMs + input.leaseMs).getTime()) ||
-				!Number.isSafeInteger(input.limit) ||
-				input.limit < 1 ||
-				!input.owner ||
-				input.owner.trim() !== input.owner ||
-				input.owner.length > 256 ||
-				input.owner.includes("\0")
-			)
-				throw new Error("Routine claim requires a valid owner, bounded count and positive lease.");
-			const output: RoutineOccurrence[] = [];
-			let changed = false;
-			const limit = Math.min(input.limit, MAX_ROUTINE_OCCURRENCES);
-			const eligible = input.eligibleRoutineIds ? new Set(input.eligibleRoutineIds) : undefined;
-			const eligibleOccurrences = input.eligibleOccurrenceIds ? new Set(input.eligibleOccurrenceIds) : undefined;
-			// An away claim admits a run only while its full per-run bound still fits the rolling day's bound; a refused
-			// run claims nothing and stays due for its parent.
-			const away = input.away;
-			const awayRoom = away ? routineAwaySpendRoom(this.routineOccurrences.values(), away, input.nowMs) : undefined;
-			let awayAdmitted = 0;
-			const awayRefused: string[] = [];
-			const awayHeld: string[] = [];
-			const admitAway = (): boolean => {
-				if (!awayRoom) return true;
-				if (!awayRoom.fits(awayAdmitted)) return false;
-				awayAdmitted++;
-				return true;
-			};
-			const refuseAway = (routineId: string, reason: string, into: string[]): void => {
-				if (!into.includes(routineId)) into.push(routineId);
-				if (this.recordAwayRefusal(routineId, reason, input.nowMs)) changed = true;
-			};
-			// Accepted work owns its original definition independently of the schedule cursor.
-			// Recover it first, including consumed one-offs and manual occurrences.
-			for (const [occurrenceId, occurrence] of this.routineOccurrences) {
-				if (output.length >= limit) break;
-				if (occurrence.phase !== "pending" && occurrence.phase !== "claimed") continue;
-				if (input.nowMs < occurrence.updatedAt) continue;
-				if (occurrence.claim && occurrence.claim.leaseUntil > input.nowMs) continue;
-				if (input.routineId && occurrence.routineId !== input.routineId) continue;
-				if (
-					eligibleOccurrences
-						? !eligibleOccurrences.has(occurrenceId)
-						: eligible && !eligible.has(occurrence.routineId)
-				)
-					continue;
-				if (occurrence.target.kind === "session" && occurrence.target.parentSessionId !== input.parentSessionId)
-					continue;
-				if (input.parentSessionId && occurrence.parentOrigin.sessionId !== input.parentSessionId) continue;
-				const definition = this.routines.get(occurrence.routineId);
-				if (
-					!definition ||
-					definition.incarnationId !== occurrence.definition.incarnationId ||
-					(!definition.enabled && occurrence.trigger.kind !== "manual")
-				)
-					continue;
-				if (occurrence.dispatchKey || occurrence.executionRef || occurrence.result)
-					throw new Error("An undispatched routine occurrence contains execution state.");
-				const deadline =
-					occurrence.trigger.kind === "schedule"
-						? routineStartDeadline(occurrence.definition.schedule, occurrence.trigger.scheduledAt)
-						: undefined;
-				if (deadline !== undefined && input.nowMs > deadline) {
-					this.routineOccurrences.set(
-						occurrenceId,
-						this.withResult(
-							{ ...occurrence, phase: "terminal", updatedAt: input.nowMs },
-							"cancelled",
-							"Routine start window closed before dispatch; it was not run.",
-							occurrence.parentOrigin.sessionId,
-						),
-					);
-					changed = true;
-					continue;
-				}
-				// An away run reclaimed is already charged; any other one is admitted under the bound.
-				if (occurrence.executor !== "away" && !admitAway()) {
-					refuseAway(occurrence.routineId, ROUTINE_AWAY_SPEND_REFUSAL, awayRefused);
-					continue;
-				}
-				// A queued run reads its routine's record as it stands now: its brief is fixed before its dispatch identity.
-				const {
-					executor: _executor,
-					progressBrief: _brief,
-					progressUntrusted: _tainted,
-					...undispatched
-				} = occurrence;
-				const reclaimed: RoutineOccurrence = {
-					...undispatched,
-					...admittedProgressFields(definition, occurrence),
-					...(away ? { executor: "away" as const } : {}),
-					phase: "claimed",
-					updatedAt: input.nowMs,
-					claim: { token: randomUUID(), owner: input.owner, leaseUntil: input.nowMs + input.leaseMs },
-				};
-				this.routineOccurrences.set(occurrenceId, reclaimed);
-				output.push(reclaimed);
-				// The claim admits the routine again, as a new slot's claim does.
-				const owning = this.routines.get(occurrence.routineId);
-				if (owning?.awayRefusal) {
-					const { awayRefusal: _refusal, ...admitted } = owning;
-					this.routines.set(owning.routineId, admitted);
-				}
-			}
-			let journalFull = false;
-			const journalShareFull: string[] = [];
-			const unschedulable: { routineId: string; reason: string }[] = [];
-			for (const [id, stored] of this.routines) {
-				if (output.length >= limit) break;
-				if (!stored.enabled || (input.routineId && input.routineId !== id)) continue;
-				if (eligible && !eligible.has(id)) continue;
-				// An ended routine starts nothing more; `retireEndedRoutines` removes it once its runs are delivered.
-				if (routineEnded(stored, input.nowMs)) continue;
-				if (stored.target.kind === "session" && stored.target.parentSessionId !== input.parentSessionId) continue;
-				// An occurrence is never older than its definition: with the clock behind the last edit, wait for it.
-				if (input.nowMs < Date.parse(stored.updatedAt)) continue;
-				// A watch is decided by the monitor's observations (`observeWatch`), never by the host-event ledger.
-				if (stored.schedule.kind === "event" && stored.schedule.source === "watch") continue;
-				if (stored.schedule.kind === "event") {
-					const decided = input.hostEvents
-						? this.decideEventRoutine(stored, input, input.hostEvents, output, {
-								owner: input.owner,
-								leaseMs: input.leaseMs,
-							})
-						: "unchanged";
-					if (decided === "changed") changed = true;
-					else if (decided === "journal-full") journalFull = true;
-					else if (decided === "share-full") journalShareFull.push(id);
-					continue;
-				}
-				// One routine whose slots cannot be computed here is skipped and reported; the others are still claimed.
-				try {
-					const admitted = this.admitClockRoutine(id, stored, input, output, admitAway);
-					if (admitted.changed) changed = true;
-					if (admitted.journalFull) journalFull = true;
-					if (admitted.refused) refuseAway(id, ROUTINE_AWAY_SPEND_REFUSAL, awayRefused);
-					if (admitted.held) refuseAway(id, ROUTINE_AWAY_HELD_REASON, awayHeld);
-					if (admitted.shareFull) journalShareFull.push(id);
-				} catch (error) {
-					unschedulable.push({ routineId: id, reason: error instanceof Error ? error.message : String(error) });
-				}
-			}
-			if (output.length || changed) this.save();
-			const awayRetryAt =
-				awayRefused.length > 0 && away
-					? routineAwaySpendRoom(this.routineOccurrences.values(), away, input.nowMs).exit
-					: undefined;
-			return {
-				claimed: output.map((item) => structuredClone(item)),
-				journalFull,
-				journalShareFull,
-				unschedulable,
-				awayRefused,
-				...(awayRetryAt === undefined ? {} : { awayRetryAt }),
-				awayHeld,
-			};
-		});
+		return this.mutate(() => claimDueRoutineOccurrences(this.routineState, input, () => this.save()));
 	}
 
 	/**
@@ -2524,308 +1789,7 @@ export class PersistentBotTeamStore {
 	 * earlier run away is not yet delivered is held: its attempts stay undecided for the session.
 	 */
 	decideAwayEventRoutines(input: AwayEventDecisionInput): AwayEventDecisionResult {
-		return this.mutate(() => {
-			const output: RoutineOccurrence[] = [];
-			const held: string[] = [];
-			const shareFull: string[] = [];
-			let journalFull = false;
-			let changed = false;
-			for (const routineId of input.routineIds) {
-				const stored = this.routines.get(routineId);
-				if (
-					!stored?.enabled ||
-					stored.schedule.kind !== "event" ||
-					stored.schedule.source === "watch" ||
-					stored.target.kind !== "session" ||
-					stored.target.parentSessionId !== input.parentSessionId ||
-					routineEnded(stored, input.nowMs) ||
-					input.nowMs < Date.parse(stored.updatedAt)
-				)
-					continue;
-				if (routineAwayHeld(this.routineOccurrences.values(), stored, input.nowMs)) {
-					held.push(routineId);
-					continue;
-				}
-				const decided = this.decideEventRoutine(stored, input, input.hostEvents, output, undefined);
-				if (decided === "changed") changed = true;
-				else if (decided === "journal-full") journalFull = true;
-				else if (decided === "share-full") shareFull.push(routineId);
-			}
-			if (changed) this.save();
-			return { decided: output.map((item) => item.occurrenceId), held, journalFull, shareFull };
-		});
-	}
-
-	/**
-	 * Admits the due slot of one clock routine: the slot's occurrence is claimed and appended to `output`, or, when the
-	 * slot was not run, recorded as a cancelled notice; the cursor moves past it. `journalFull`: the due slot stays due
-	 * because the journal has no room for its occurrence or notice. `refused`: the due slot stays due because `admitRun`
-	 * (the away spend bound) did not admit its run; slots that are only reported are not charged. `held`: away, the due
-	 * slot stays due because an earlier run away of the routine is not yet delivered ({@link routineAwayHeld}).
-	 */
-	private admitClockRoutine(
-		id: string,
-		stored: RoutineDefinitionView,
-		input: RoutineOccurrenceClaimInput,
-		output: RoutineOccurrence[],
-		admitRun: () => boolean,
-	): {
-		readonly changed: boolean;
-		readonly journalFull: boolean;
-		readonly refused?: true;
-		readonly held?: true;
-		readonly shareFull?: true;
-	} {
-		const schedule = stored.schedule;
-		const unchanged = { changed: false, journalFull: false };
-		if (schedule.kind === "event") return unchanged;
-		const parentOrigin =
-			stored.target.kind === "session" ? stored.executionSnapshot?.savedIntent.receiptOrigin : input.receiptOrigin;
-		if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId))
-			return unchanged;
-		const unsupported = routineZoneUnsupported(schedule);
-		if (unsupported !== undefined) {
-			// No slot can be placed here. The first due slot is reported once (its notice sets lastRunAt to it), and the
-			// cursor waits for a runtime with the zone or an update to a supported zone.
-			const slot = stored.cursor.kind === "calendar" ? stored.cursor.nextAt : null;
-			if (slot === null || slot > input.nowMs || (stored.lastRunAt ?? Number.NEGATIVE_INFINITY) >= slot)
-				return unchanged;
-			const trigger = { kind: "schedule" as const, scheduledAt: slot, missedCount: 0 };
-			const occurrenceId = routineOccurrenceId(stored, trigger);
-			if (this.routineOccurrences.has(occurrenceId)) return unchanged;
-			if (!this.routineJournalHasRoom(input.nowMs)) return { changed: false, journalFull: true };
-			this.recordRoutineNotice(
-				stored,
-				occurrenceId,
-				trigger,
-				input,
-				parentOrigin,
-				`${unsupported} It was not run, and later slots are not reported separately; the routine runs again on a runtime that supports the zone or after an update to a supported zone.`,
-			);
-			return { changed: true, journalFull: false };
-		}
-		let routine = stored;
-		let changed = false;
-		const rebased = rebasedRoutineCursor(
-			schedule,
-			stored.cursor,
-			input.nowMs,
-			routinePreviousSlot(schedule, stored.cursor),
-		);
-		if (rebased) {
-			routine = {
-				...stored,
-				cursor: rebased,
-				nextRunAt: nextRoutineAt(schedule, rebased) ?? ROUTINE_NO_NEXT_RUN_AT,
-			};
-			this.routines.set(id, routine);
-			changed = true;
-		}
-		const dueAt = nextRoutineAt(schedule, routine.cursor);
-		if (dueAt === undefined) return { changed, journalFull: false };
-		// A `readyBy` window may open before the slot; the run still belongs to the slot (its identity and deadline).
-		const early = dueAt > input.nowMs;
-		if (
-			early &&
-			(routineStartWindow(routine, routine.cursor, this.routineOccurrences.values())?.opensAt ?? dueAt) > input.nowMs
-		)
-			return { changed, journalFull: false };
-		const trigger = this.latestDueTrigger(routine, dueAt, Math.max(input.nowMs, dueAt));
-		const occurrenceId = routineOccurrenceId(routine, trigger);
-		const after = routineCursorAfter(schedule, trigger.scheduledAt);
-		// A slot consumed before its time records when, so the clock restart does not read it as a clock fault.
-		const cursorAfter: RoutineCursor =
-			early && (after.kind === "interval" || after.kind === "calendar")
-				? { ...after, consumedAt: input.nowMs }
-				: after;
-		const advance = (from: RoutineDefinitionView, cursor: RoutineCursor): { changed: true; journalFull: false } => {
-			this.routines.set(id, {
-				...from,
-				cursor,
-				nextRunAt: nextRoutineAt(schedule, cursor) ?? ROUTINE_NO_NEXT_RUN_AT,
-			});
-			return { changed: true, journalFull: false };
-		};
-		// A restarted cursor reached a slot that already has its occurrence: that slot is consumed, never repeated.
-		if (this.routineOccurrences.has(occurrenceId)) return advance(routine, cursorAfter);
-		const deadline = routineStartDeadline(schedule, trigger.scheduledAt);
-		const late = deadline !== undefined && input.nowMs > deadline;
-		if (late && schedule.kind === "calendar" && routine.cursor.kind === "calendar") {
-			// A slot past its lateness bound is passed over and counted in the next run's missed count. The first one of a
-			// streak (no earlier skip pending) is reported once; later ones in the streak are only counted.
-			const cursor: RoutineCursor = {
-				kind: "calendar",
-				nextAt: cursorAfter.kind === "calendar" ? cursorAfter.nextAt : null,
-				skipped: Math.min(MAX_CALENDAR_MISSED_COUNT, trigger.missedCount + 1),
-			};
-			if (routine.cursor.skipped !== undefined) return advance(routine, cursor);
-			if (!this.routineJournalHasRoom(input.nowMs)) return { changed, journalFull: true };
-			const earlier = trigger.missedCount;
-			const covered =
-				earlier > 0
-					? ` and ${earlier >= MAX_CALENDAR_MISSED_COUNT ? "at least " : ""}${earlier} earlier ${earlier === 1 ? "slot" : "slots"}`
-					: "";
-			this.recordRoutineNotice(
-				routine,
-				occurrenceId,
-				trigger,
-				input,
-				parentOrigin,
-				`This routine slot${covered} could not start within the schedule's maxLatenessMs and did not run. Later slots that also miss it are not reported separately: the next run's missed count includes them and these.`,
-			);
-			return advance(this.routines.get(id) ?? routine, cursor);
-		}
-		// Nothing is consumed without its occurrence: a full journal leaves the slot due until results are delivered.
-		if (!this.routineJournalHasRoom(input.nowMs)) return { changed, journalFull: true };
-		if (late) {
-			// A one-off whose start window closed is reported once instead of run late.
-			this.recordRoutineNotice(
-				routine,
-				occurrenceId,
-				trigger,
-				input,
-				parentOrigin,
-				"Routine start window closed before it could start; it was not run.",
-			);
-			return advance(this.routines.get(id) ?? routine, cursorAfter);
-		}
-		// A routine holding its whole journal share starts no run: the slot stays due, as for a full journal.
-		if (!this.routineHasJournalShare(id, input.nowMs)) return { changed, journalFull: false, shareFull: true };
-		// Away, one run per routine waits for its session at a time: later slots stay due and fold into its missed count.
-		if (input.away && routineAwayHeld(this.routineOccurrences.values(), routine, input.nowMs))
-			return { changed, journalFull: false, held: true };
-		if (!admitRun()) return { changed, journalFull: false, refused: true };
-		const created = this.createClaimedOccurrence(
-			routine,
-			occurrenceId,
-			trigger,
-			input.owner,
-			input.leaseMs,
-			input.nowMs,
-			parentOrigin,
-		);
-		const claimed: RoutineOccurrence = input.away ? { ...created, executor: "away" } : created;
-		this.routineOccurrences.set(occurrenceId, claimed);
-		output.push(claimed);
-		return advance(withRoutineRunState(routine, claimed), cursorAfter);
-	}
-
-	/**
-	 * Records a slot that was not run as a terminal cancelled occurrence, which is delivered to the parent once, and makes
-	 * it the routine's last run.
-	 */
-	private recordRoutineNotice(
-		routine: RoutineDefinitionView,
-		occurrenceId: string,
-		trigger: Extract<RoutineOccurrence["trigger"], { kind: "schedule" }>,
-		input: RoutineOccurrenceClaimInput,
-		parentOrigin: WorkerReceiptOrigin,
-		summary: string,
-	): void {
-		const claimed = this.createClaimedOccurrence(
-			routine,
-			occurrenceId,
-			trigger,
-			input.owner,
-			input.leaseMs,
-			input.nowMs,
-			parentOrigin,
-		);
-		this.routines.set(routine.routineId, withRoutineRunState(routine, claimed));
-		this.routineOccurrences.set(
-			occurrenceId,
-			this.withResult({ ...claimed, phase: "terminal" }, "cancelled", summary, parentOrigin.sessionId),
-		);
-	}
-
-	/**
-	 * Decides one event routine against its session's retained host events. At most one undispatched run exists per
-	 * routine: the latest new attempt runs, older new attempts and superseded ones become its missed count. Returns
-	 * whether the cursor or the journal changed, or that a new attempt stays undecided because the journal is full; a
-	 * new occurrence is appended to `output`, claimed under `claim`, or pending without it.
-	 */
-	private decideEventRoutine(
-		routine: RoutineDefinitionView,
-		input: { readonly nowMs: number; readonly parentSessionId?: string },
-		feed: RoutineHostEventFeed,
-		output: RoutineOccurrence[],
-		claim: { readonly owner: string; readonly leaseMs: number } | undefined,
-	): "changed" | "unchanged" | "journal-full" | "share-full" {
-		if (routine.schedule.kind !== "event" || routine.schedule.source === "watch" || routine.cursor.kind !== "event")
-			return "unchanged";
-		for (const occurrence of this.routineOccurrences.values())
-			if (
-				occurrence.routineId === routine.routineId &&
-				(occurrence.phase === "pending" || occurrence.phase === "claimed")
-			)
-				return "unchanged";
-		const decision = decideRoutineEvents(routine.schedule, routine.cursor, feed);
-		// A run carries its deciding event last; a GitHub run also carries the earlier fresh occurrences, oldest first.
-		const eventTrigger = (
-			carried: readonly RoutineHostEventFact[],
-			missedCount: number,
-		): RoutineOccurrence["trigger"] => {
-			const latest = carried.at(-1)!;
-			const base = {
-				kind: "event" as const,
-				triggeredAt: input.nowMs,
-				acceptedOrdinal: latest.acceptedOrdinal,
-				missedCount,
-				...(decision.cursor.historyGap ? { historyGap: true as const } : {}),
-			};
-			if (isCiAttemptEvent(latest.event)) return { ...base, event: latest.event };
-			const earlier = carried.slice(0, -1).flatMap((fact) => (isCiAttemptEvent(fact.event) ? [] : [fact.event]));
-			return { ...base, event: latest.event, ...(earlier.length ? { earlier } : {}) };
-		};
-		// The same event is the same work: an event a journaled run carries or a tombstone records never runs again.
-		const known = new Set([...this.routineOccurrences.values()].flatMap(routineOccurrenceReplayKeys));
-		const fresh = decision.candidates.filter((fact) => {
-			const key = routineEventKey(routine, fact.event);
-			return !known.has(key) && !this.routineReplayTombstones.has(key);
-		});
-		const carried = fresh.slice(routine.schedule.source === "github" ? -HOST_EVENT_LISTENER_LIMITS.maxBatch : -1);
-		const latest = carried.at(-1);
-		if (latest) {
-			const parentOrigin = routine.executionSnapshot?.savedIntent.receiptOrigin;
-			if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId))
-				return "unchanged";
-			// Without journal room, or with the routine's share held, the attempt stays undecided until results settle.
-			if (!this.routineJournalHasRoom(input.nowMs)) return "journal-full";
-			if (!this.routineHasJournalShare(routine.routineId, input.nowMs)) return "share-full";
-			const coalesced = fresh
-				.slice(0, fresh.length - carried.length)
-				.filter((fact) => fact.acceptedOrdinal <= decision.cursor.throughOrdinal).length;
-			const trigger = eventTrigger(
-				carried,
-				Math.min(MAX_ROUTINE_EVENT_MISSED_COUNT, (decision.cursor.skipped ?? 0) + coalesced),
-			);
-			const occurrenceId = routineOccurrenceId(routine, trigger);
-			const occurrence = claim
-				? this.createClaimedOccurrence(
-						routine,
-						occurrenceId,
-						trigger,
-						claim.owner,
-						claim.leaseMs,
-						input.nowMs,
-						parentOrigin,
-					)
-				: this.createPendingOccurrence(routine, occurrenceId, trigger, input.nowMs, parentOrigin);
-			this.routineOccurrences.set(occurrenceId, occurrence);
-			const cursor: RoutineCursor = {
-				kind: "event",
-				throughOrdinal: decision.cursor.throughOrdinal,
-				replayGaps: decision.cursor.replayGaps,
-				// A one-run routine is spent in the write that records its run, so no second attempt can start it.
-				...(routine.schedule.stopAfterFirstRun ? { spent: true as const } : {}),
-			};
-			this.routines.set(routine.routineId, { ...withRoutineRunState(routine, occurrence), cursor });
-			output.push(occurrence);
-			return "changed";
-		}
-		if (isDeepStrictEqual(decision.cursor, routine.cursor)) return "unchanged";
-		this.routines.set(routine.routineId, { ...routine, cursor: decision.cursor });
-		return "changed";
+		return this.mutate(() => decideAwayEventRoutines(this.routineState, input, () => this.save()));
 	}
 
 	/**
@@ -2836,55 +1800,7 @@ export class PersistentBotTeamStore {
 	 * nothing, so the monitor offers the same edge again on the next store change.
 	 */
 	observeWatch(input: RoutineWatchObservationInput): RoutineWatchOutcome {
-		return this.mutate(() => {
-			const routine = this.routines.get(input.routineId);
-			if (
-				!routine?.enabled ||
-				routine.incarnationId !== input.incarnationId ||
-				routine.schedule.kind !== "event" ||
-				routine.schedule.source !== "watch" ||
-				routine.cursor.kind !== "watch" ||
-				routine.target.kind !== "session" ||
-				routine.target.parentSessionId !== input.parentSessionId ||
-				routineEnded(routine, input.nowMs) ||
-				input.nowMs < Date.parse(routine.updatedAt)
-			)
-				return "stale";
-			const decision = decideWatchObservation(routine.cursor, input.observation);
-			if (!decision.fire) {
-				if (isDeepStrictEqual(decision.cursor, routine.cursor)) return "unchanged";
-				this.routines.set(routine.routineId, { ...routine, cursor: decision.cursor });
-				this.save();
-				return "recorded";
-			}
-			for (const occurrence of this.routineOccurrences.values())
-				if (
-					occurrence.routineId === routine.routineId &&
-					(occurrence.phase === "pending" || occurrence.phase === "claimed")
-				)
-					return "held";
-			const parentOrigin = routine.executionSnapshot?.savedIntent.receiptOrigin;
-			if (!parentOrigin || parentOrigin.sessionId !== input.parentSessionId) return "stale";
-			if (!this.routineJournalHasRoom(input.nowMs) || !this.routineHasJournalShare(routine.routineId, input.nowMs))
-				return "held";
-			const sequence = routine.cursor.fires + 1;
-			const trigger = { kind: "watch" as const, triggeredAt: input.nowMs, sequence, event: input.event };
-			const occurrenceId = routineOccurrenceId(routine, trigger);
-			// A replay of a firing already journaled advances the cursor past it without a second occurrence.
-			const occurrence =
-				this.routineOccurrences.get(occurrenceId) ??
-				this.createPendingOccurrence(routine, occurrenceId, trigger, input.nowMs, parentOrigin);
-			this.routineOccurrences.set(occurrenceId, occurrence);
-			const cursor: RoutineCursor = {
-				...decision.cursor,
-				fires: sequence,
-				// A one-run routine is spent in the write that records its run, so no second edge can start it.
-				...(routine.schedule.stopAfterFirstRun ? { spent: true as const } : {}),
-			};
-			this.routines.set(routine.routineId, { ...withRoutineRunState(routine, occurrence), cursor });
-			this.save();
-			return "fired";
-		});
+		return this.mutate(() => observeWatch(this.routineState, input, () => this.save()));
 	}
 
 	claimManualRoutineOccurrence(input: {
@@ -2897,70 +1813,7 @@ export class PersistentBotTeamStore {
 		owner: string;
 		leaseMs: number;
 	}): RoutineOccurrence {
-		return this.mutate(() => {
-			if (
-				!Number.isSafeInteger(input.nowMs) ||
-				input.nowMs < 0 ||
-				input.nowMs > 8_640_000_000_000_000 ||
-				!Number.isSafeInteger(input.leaseMs) ||
-				input.leaseMs <= 0 ||
-				!Number.isSafeInteger(input.nowMs + input.leaseMs) ||
-				input.nowMs + input.leaseMs > 8_640_000_000_000_000 ||
-				!input.owner ||
-				input.owner.trim() !== input.owner ||
-				input.owner.length > 256 ||
-				input.owner.includes("\0")
-			)
-				throw new Error("Routine manual claim requires a valid owner, clock and lease.");
-			const routine = this.routines.get(input.routineId);
-			if (!routine) throw new Error("Routine does not exist.");
-			if (input.expectedRevision !== undefined && input.expectedRevision !== routine.revision)
-				throw new Error("Routine revision changed; read current state before retrying.");
-			if (routine.target.kind === "session" && routine.target.parentSessionId !== input.parentSessionId)
-				throw new Error("Routine belongs to another parent session.");
-			if (input.nowMs < Date.parse(routine.updatedAt))
-				throw new Error(
-					`This host's clock reads earlier than the routine's last edit (${routine.updatedAt}); run it once the clock has passed that time.`,
-				);
-			if (
-				!input.commandId ||
-				input.commandId.length > MAX_ROUTINE_COMMAND_ID_CHARS ||
-				input.commandId.trim() !== input.commandId ||
-				input.commandId.includes("\0")
-			)
-				throw new Error("Routine manual command identity is invalid.");
-			const trigger = { kind: "manual" as const, commandId: input.commandId, requestedAt: input.nowMs };
-			const id = routineOccurrenceId(routine, trigger);
-			const existing = this.routineOccurrences.get(id);
-			if (existing) return structuredClone(existing);
-			if (this.routineReplayTombstones.has(id))
-				throw new Error(
-					"This manual request was already consumed and has expired from the bounded replay journal.",
-				);
-			const origin =
-				routine.target.kind === "session"
-					? routine.executionSnapshot?.savedIntent.receiptOrigin
-					: input.receiptOrigin;
-			if (!origin || (input.parentSessionId && origin.sessionId !== input.parentSessionId))
-				throw new Error("Routine parent receipt origin is unavailable.");
-			if (!this.routineHasJournalShare(routine.routineId, input.nowMs))
-				throw new Error(
-					`Routine ${routine.routineId} already holds ${ROUTINE_JOURNAL_SHARE} unfinished, uncertain or undelivered runs; run it again once its results are delivered.`,
-				);
-			const occurrence = this.createClaimedOccurrence(
-				routine,
-				id,
-				trigger,
-				input.owner,
-				input.leaseMs,
-				input.nowMs,
-				origin,
-			);
-			this.routineOccurrences.set(id, occurrence);
-			this.routines.set(routine.routineId, withRoutineRunState(routine, occurrence));
-			this.save();
-			return structuredClone(occurrence);
-		});
+		return this.mutate(() => claimManualRoutineOccurrence(this.routineState, input, () => this.save()));
 	}
 
 	listRoutineOccurrences(filter: RoutineOccurrenceListFilter = {}): RoutineOccurrence[] {
@@ -3005,7 +1858,8 @@ export class PersistentBotTeamStore {
 				definition.incarnationId !== item.definition.incarnationId ||
 				(!definition.enabled && item.definition.enabled)
 			)
-				return this.withResult(
+				return withResult(
+					this.routineState,
 					{ ...pending, phase: "terminal", updatedAt: input.nowMs },
 					"cancelled",
 					"Routine was paused or deleted before dispatch.",
@@ -3044,7 +1898,8 @@ export class PersistentBotTeamStore {
 		const reason = cleanRedactBound(input.reason, MAX_ROUTINE_SUMMARY_CHARS, { lines: true });
 		if (!reason) throw new Error("Routine uncertainty requires a bounded reason.");
 		this.updateClaimedOccurrence(input, (item) =>
-			this.withResult(
+			withResult(
+				this.routineState,
 				{ ...item, phase: "uncertain", uncertainty: reason, updatedAt: input.nowMs },
 				"uncertain",
 				reason,
@@ -3070,7 +1925,8 @@ export class PersistentBotTeamStore {
 	}): void {
 		const summary = resultSummaryText(input.summary);
 		this.updateClaimedOccurrence(input, (item) => {
-			const finished = this.withResult(
+			const finished = withResult(
+				this.routineState,
 				{
 					...item,
 					phase: input.outcome === "uncertain" ? "uncertain" : "terminal",
@@ -3186,9 +2042,9 @@ export class PersistentBotTeamStore {
 				throw new Error("Routine uncertainty resolution would produce invalid durable state.");
 			this.routineOccurrences.set(next.occurrenceId, next);
 			// The run's known outcome counts toward the failure streak now; its uncertainty did not.
-			this.recordRoutineFailureStreak(next, input.outcome, summary);
-			this.recordRoutineProgress(next, input.outcome, summary, input.facts);
-			if (input.conditionMet) this.recordRoutineConditionMet(next);
+			recordRoutineFailureStreak(this.routineState, next, input.outcome, summary);
+			recordRoutineProgress(this.routineState, next, input.outcome, summary, input.facts);
+			if (input.conditionMet) recordRoutineConditionMet(this.routineState, next);
 			this.save();
 		});
 	}

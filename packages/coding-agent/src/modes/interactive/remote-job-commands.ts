@@ -36,16 +36,33 @@ function jobWords(record: PlacerJobRecord): string {
 		: (record.progress?.phase ?? "taken");
 }
 
+/**
+ * The placed records this build cannot read, per machine, in plain words. They are kept as they are and count as open jobs; a
+ * `/remote cancel <name>` records a stop for each of that machine's. Undefined when there are none.
+ */
+function unreadableLine(jobs: RemoteJobs): string | undefined {
+	const { byMachine, unnamed } = jobs.client.unreadablePlaced();
+	const parts = [...byMachine].map(
+		([machineId, jobIds]) =>
+			`${jobs.machines.get(machineId)?.name ?? "a machine no longer linked"}: ${jobIds.length}`,
+	);
+	if (unnamed > 0) parts.push(`${unnamed} with no machine named`);
+	if (parts.length === 0) return undefined;
+	return `Job records this build cannot read, kept as they are and counted as open: ${parts.join(", ")}.`;
+}
+
 function jobsText(jobs: RemoteJobs): string {
 	const placed = jobs.client.list();
 	const lines = placed
 		.slice(0, SHOWN_JOBS)
 		.map((record) => `- ${record.offer.label} on ${record.executorName}: ${jobWords(record)}`);
 	const here = jobs.runningHere();
+	const unreadable = unreadableLine(jobs);
 	return [
 		placed.length > 0 ? `Jobs placed from here (${placed.length}):` : "No jobs placed from here.",
 		...lines,
 		...(placed.length > SHOWN_JOBS ? [`and ${placed.length - SHOWN_JOBS} older.`] : []),
+		...(unreadable ? [unreadable] : []),
 		here > 0 ? `Running here for other machines: ${here}.` : "Nothing running here for other machines.",
 	].join("\n");
 }
@@ -93,9 +110,17 @@ export async function runJobCommand(
 		case "cancel": {
 			const open = jobs.client.list().filter((record) => record.executorId === machine.machineId);
 			const stopped = open.filter((record) => jobs.client.cancel(record.jobId)).length;
-			return host.showStatus(
-				stopped > 0 ? `Stopped ${stopped} job(s) on ${machine.name}.` : `No open job on ${machine.name}.`,
-			);
+			// A record this build cannot read is named by its file alone: its stop is kept beside it as a marker, never written into it.
+			const unreadable = jobs.client.unreadablePlaced().byMachine.get(machine.machineId) ?? [];
+			const recorded = unreadable.filter((jobId) => jobs.client.cancelOn(machine.machineId, jobId, "owner")).length;
+			if (stopped === 0 && recorded === 0) return host.showStatus(`No open job on ${machine.name}.`);
+			const words = [
+				stopped > 0 ? `Stopped ${stopped} job(s) on ${machine.name}.` : undefined,
+				recorded > 0
+					? `Recorded a stop for ${recorded} job record(s) on ${machine.name} that this build cannot read. The records stay as they are; the placing session ends each job's lane when it next reconciles, and the stop is sent to ${machine.name} when it is connected.`
+					: undefined,
+			];
+			return host.showStatus(words.filter((word) => word !== undefined).join(" "));
 		}
 		case "hold":
 		case "release":

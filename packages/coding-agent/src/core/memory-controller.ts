@@ -73,6 +73,7 @@ import {
 	transcriptSummaryBody,
 } from "./context/transcript-memory-provider.ts";
 import type { DecisionOptions } from "./decision/engine.ts";
+import { bindExtensionContextProjection } from "./extensions/extension-context-projection.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
 import type { MemoryProvider } from "./extensions/types.ts";
 import type { GoalState } from "./goals/goal-state.ts";
@@ -631,6 +632,7 @@ export class LaneMemorySnapshotStaleError extends Error {
 export type MemoryOperatorPort = Pick<
 	MemoryController,
 	| "getKnowledgeCollectionStatus"
+	| "knowledgeCollectionSettled"
 	| "getKnowledgeOwnerControls"
 	| "memoryDriftReport"
 	| "memoryAcceptDrift"
@@ -923,19 +925,10 @@ export class MemoryController {
 
 	/** Bind extension projection to one memory generation; never mutate durable history. */
 	createContextProjection(getRunner: () => ExtensionRunner) {
-		return async (messages: AgentMessage[]) => {
-			const runner = getRunner();
-			const generation = this._memoryGeneration;
-			const filtered = this.filterProviderContext(messages);
-			const projection = runner.hasHandlers("context")
-				? await runner.emitContext(filtered)
-				: { messages: filtered, transientMessages: [] };
-			return {
-				messages: this.filterProviderContext(projection.messages),
-				transientMessages: this.filterProviderContext(projection.transientMessages),
-				isCurrent: () => getRunner() === runner && this._memoryGeneration === generation,
-			};
-		};
+		return bindExtensionContextProjection(getRunner, {
+			generation: () => this._memoryGeneration,
+			filter: (messages) => this.filterProviderContext(messages),
+		});
 	}
 
 	/** Omit inactive generated context from provider requests, never from durable history. */
@@ -1786,6 +1779,11 @@ export class MemoryController {
 					}
 				: undefined,
 		};
+	}
+
+	/** Resolves when no knowledge collection pass is in flight; the running pass's own promise is the barrier, never a timer. */
+	knowledgeCollectionSettled(): Promise<void> {
+		return this._knowledgeCollector?.settled() ?? Promise.resolve();
 	}
 
 	/** Automatic collection as the owner sees it: active, or the reason it starts no requests. */

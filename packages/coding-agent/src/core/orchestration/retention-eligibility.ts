@@ -13,7 +13,7 @@
  */
 
 import { isPlanFromNewerBuild, type PlanRuntimeState } from "../plan/plan-graph.ts";
-import { canonicalDigest } from "../steering/canonical.ts";
+import { strictCanonicalDigest } from "../steering/canonical.ts";
 import { nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { latestAgentAttemptByDurableOrder, latestAgentAttemptsByDurableOrder } from "./attempt-ordering.ts";
 import type { AgentPrunedTurns } from "./contracts.ts";
@@ -655,7 +655,7 @@ export function deriveDependents(
  * The planner and the reducer both call this, so the two sides cannot hash differently.
  */
 export function retentionDependentsDigest(dependents: RetentionDependents): string {
-	return canonicalDigest(dependents);
+	return strictCanonicalDigest(dependents);
 }
 
 /**

@@ -4,7 +4,8 @@
  * Implements S1A-161..S1A-176, WorkerExecutionContract boundaries, and start_only orchestrator reviews.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { strictCanonicalDigest, withoutUndefinedMembers } from "./canonical.ts";
 import type {
 	SteeringMissionContext,
 	SteeringMissionReference,
@@ -49,10 +50,9 @@ export interface NormalizedWorkerEvidence {
 export class WorkerSteeringAdapter {
 	private readonly missions = new Map<string, WorkerSteeringMission>();
 
+	/** Identity of a mission record or an artifact: the strict canonical JSON, so key order never changes it. */
 	computeDigest(data: unknown): string {
-		return createHash("sha256")
-			.update(JSON.stringify(data ?? null))
-			.digest("hex");
+		return strictCanonicalDigest(withoutUndefinedMembers(data));
 	}
 
 	/**

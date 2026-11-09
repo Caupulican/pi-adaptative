@@ -2,10 +2,14 @@ import type { Api, Model, SimpleStreamOptions } from "@caupulican/pi-ai";
 import { Agent } from "../kernel/agent.ts";
 import type { ResolvedProviderRequestAuth, StreamFn } from "../kernel/index.ts";
 import type { AgentTool } from "../kernel/types.ts";
+import { verifyCitation } from "./context/citation-verifier.ts";
 import { SCOUT_SYSTEM_PROMPT } from "./provider-prompt-contracts.ts";
 import { registerInFlightWork } from "./reload-blockers.ts";
 
 export { SCOUT_SYSTEM_PROMPT };
+
+/** Largest cited file the scout reads as text; a larger file has no text to verify citations against. */
+export const SCOUT_CITED_FILE_MAX_BYTES = 1024 * 1024;
 
 export interface ScoutCitation {
 	path: string;
@@ -41,7 +45,8 @@ export interface ScoutControllerDeps {
 	streamFn?: StreamFn;
 	resolveProviderRequestAuth?(model: Model<Api>): Promise<ResolvedProviderRequestAuth>;
 	fileExists(path: string): boolean;
-	countLines(path: string): number | undefined;
+	/** Text of a cited file, or undefined when it cannot be read as text within SCOUT_CITED_FILE_MAX_BYTES. */
+	readCitedFile(path: string): string | undefined;
 	onEvent?(event: { type: "scout_turn" | "scout_end"; detail: string }): void;
 	signal?: AbortSignal;
 	/** Registers this scout's own Agent run in the reload-gate quiesce registry while it drives
@@ -157,7 +162,7 @@ export class ScoutController {
 			const result = parseScoutAnswer(
 				lastAssistantText,
 				(path) => this.deps.fileExists(path),
-				(path) => this.deps.countLines(path),
+				(path) => this.deps.readCitedFile(path),
 			);
 			const finalResult = {
 				...result,
@@ -180,7 +185,7 @@ export function getScoutOutputTokenCount(message: { usage?: { output?: number } 
 export function parseScoutAnswer(
 	text: string,
 	fileExists: (path: string) => boolean,
-	countLines: (path: string) => number | undefined,
+	readCitedFile: (path: string) => string | undefined,
 ): Omit<ScoutRunResult, "truncated" | "turnsUsed" | "failure"> {
 	const finalAnswer = /<final_answer>([\s\S]*?)<\/final_answer>/i.exec(text)?.[1] ?? text;
 	const summaryLines: string[] = [];
@@ -189,7 +194,7 @@ export function parseScoutAnswer(
 	for (const rawLine of finalAnswer.split(/\r?\n/)) {
 		const line = rawLine.trim();
 		if (!line) continue;
-		const citation = parseCitationLine(line, fileExists, countLines);
+		const citation = parseCitationLine(line, fileExists, readCitedFile);
 		if (citation) {
 			citations.push(citation);
 			continue;
@@ -209,22 +214,17 @@ export function parseScoutAnswer(
 function parseCitationLine(
 	line: string,
 	fileExists: (path: string) => boolean,
-	countLines: (path: string) => number | undefined,
+	readCitedFile: (path: string) => string | undefined,
 ): ScoutCitation | undefined {
-	const match = /^(.+?):(\d+)(?:-(\d+))?$/.exec(line);
+	const match = /^(.+?):(\d+)(?:-(\d+))?(?:\s+\|\s*(.*))?$/.exec(line);
 	if (!match) return undefined;
 	const path = match[1].trim();
 	const start = Number.parseInt(match[2], 10);
 	const end = Number.parseInt(match[3] ?? match[2], 10);
-	const lineCount = countLines(path);
-	const valid =
-		fileExists(path) &&
-		Number.isFinite(start) &&
-		Number.isFinite(end) &&
-		start >= 1 &&
-		end >= start &&
-		(lineCount === undefined || end <= lineCount);
-	return { path, start, end, valid };
+	const text = fileExists(path) ? readCitedFile(path) : undefined;
+	const check = verifyCitation({ path, start, end, snippet: match[4] }, text);
+	if (check.status === "moved") return { path, start: check.start, end: check.end, valid: true };
+	return { path, start, end, valid: check.status === "verified" };
 }
 
 function clampTurns(maxTurns: number): number {

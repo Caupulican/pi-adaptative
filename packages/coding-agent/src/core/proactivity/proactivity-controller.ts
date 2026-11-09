@@ -18,7 +18,7 @@ import { clampLaneMaxUsd, type LaneModelResolver } from "../research/lane-model-
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { ResolvedProactivityFeedbackSettings, ResolvedProactivitySettings } from "../settings/settings-schema.ts";
-import { canonicalDigest } from "../steering/canonical.ts";
+import { strictCanonicalDigest } from "../steering/canonical.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import {
 	decideNoteFeedback,
@@ -559,10 +559,10 @@ export class ProactivityController {
 			};
 			const mode: ParentInputMode =
 				settings.delivery === "turn" && deliveryHold === undefined ? "turn" : "next-owner-turn";
-			const payloadDigest = canonicalDigest({ message, mode });
+			const payloadDigest = strictCanonicalDigest({ message, mode });
 			await this.deps.deliverNotes(
 				{
-					deliveryId: `proactivity:${canonicalDigest({ origin, mode, payloadDigest })}`,
+					deliveryId: `proactivity:${strictCanonicalDigest({ origin, mode, payloadDigest })}`,
 					payloadDigest,
 					message,
 					origin,

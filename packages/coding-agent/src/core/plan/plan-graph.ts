@@ -9,6 +9,9 @@
 import { createHash } from "node:crypto";
 import type { TaskBrief } from "../comms/comms-records.ts";
 import type { StoredOutcome } from "../delegation/worker-outcome-contract.ts";
+import type { HostEventSubscriptionInput } from "../events/host-event-contract.ts";
+import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
+import type { OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
 import type { Placement, PlacementPin } from "../placement/placement-types.ts";
 import type { ProofStakesLevel } from "../proof/stakes-levels.ts";
 
@@ -27,7 +30,14 @@ export interface PlanNodeDemand {
 	readonly routeHint?: string;
 }
 
-export const PLAN_RECORD_VERSION = 1 as const;
+/**
+ * The record version this build writes. Version 2 adds optional fields (step doubts, authority and text digest, join
+ * criteria, the fan-out marker); an older build reads a version-2 record as unsupported, never as a malformed one.
+ */
+export const PLAN_RECORD_VERSION = 2 as const;
+
+/** Record versions this build decodes field by field: v1 records decode unchanged; v2 adds optional fields. */
+export const PLAN_DECODABLE_VERSIONS = [1, 2] as const;
 
 export const PLAN_NODE_KINDS = ["work", "collect", "reduce", "merge", "vote", "race", "verify"] as const;
 export type PlanNodeKind = (typeof PLAN_NODE_KINDS)[number];
@@ -35,10 +45,10 @@ export type PlanNodeKind = (typeof PLAN_NODE_KINDS)[number];
 /** Kinds that combine the results of the nodes in their `join.members`; every kind except `work`. */
 export type PlanJoinKind = Exclude<PlanNodeKind, "work">;
 
-/** Kinds the harness settles without a worker; reduce and verify run a worker task, merge is not built yet. */
+/** Kinds the harness settles without a worker; reduce and verify run a worker task, merge lands worktrees in code. */
 export const CODE_SETTLED_JOIN_KINDS: readonly PlanJoinKind[] = ["collect", "race", "vote"];
 
-/** Join kinds a plan may use now: `merge` is reserved and refused by F4 until it is built. */
+/** Join kinds a plan may use. `merge` joins the list when the executor's land path (lane H) settles them. */
 export const PLAN_OFFERED_JOIN_KINDS: readonly PlanJoinKind[] = ["collect", "reduce", "vote", "race", "verify"];
 
 export function isCodeSettledJoin(kind: PlanNodeKind): boolean {
@@ -68,6 +78,8 @@ export const PLAN_LIMITS = {
 	titleChars: 120,
 	intentChars: 2_000,
 	criterionChars: 1_000,
+	/** Vote criteria per vote join. */
+	criteria: 6,
 	writeScopeEntries: 32,
 	/** One write-scope path, as F5 checks it. */
 	scopeChars: 300,
@@ -79,6 +91,15 @@ export const PLAN_LIMITS = {
 	judgments: 64,
 	retiredTasks: 256,
 	artifactChars: 256,
+	/** Doubts shown per step, and the length of one. */
+	nodeDoubts: 3,
+	doubtChars: 240,
+	/** A step's `proof`: `check:<command>` carries the command, so its length bounds the brief note. */
+	proofChars: 1_000,
+	/** Closed fan-out groups kept (their own class; open groups are bounded by their members). */
+	retainedFanoutPlans: 24,
+	/** A fan-out member's task text in the plan record; the full text is kept beside the record by digest. */
+	fanoutIntentChars: 600,
 } as const;
 
 /** The step id pattern, shared with the fan-out member ids. */
@@ -91,6 +112,36 @@ export interface PlanJoinSpec {
 	readonly criterion?: string;
 	/** collect/reduce: members that must be accepted before the join settles; default all. */
 	readonly quorum?: number;
+	/** vote: the rubric every candidate is judged on, one criterion each (`PLAN_LIMITS.criteria` at most). */
+	readonly criteria?: readonly string[];
+}
+
+/**
+ * A fan-out member's per-worker authority, typed as the `delegate` start schema types each field (`tools/delegate.ts`
+ * and `tools/delegate-events.ts`), so a member starts with exactly the grant its arm was given.
+ */
+export interface PlanNodeAuthority {
+	readonly model?: { readonly provider: string; readonly modelId: string };
+	readonly thinkingLevel?: OrchestrationThinkingLevel;
+	readonly toolNames?: readonly string[];
+	readonly readOnly?: boolean;
+	readonly path?: string;
+	readonly writePaths?: readonly string[];
+	readonly profileId?: string;
+	readonly knowledge?: readonly KnowledgeGrantReference[];
+	readonly subscriptions?: readonly HostEventSubscriptionInput[];
+	/** The start call's `forkTurns`: `none`, `all` or a recent-turn count. */
+	readonly forkTurns?: string;
+	/** The `parallelWork.independentOf` lanes a fan-out member declares. */
+	readonly independentOf?: readonly string[];
+}
+
+/** The fan-out marker of a plan record written by `delegate` slices or race (one layer, no planner). */
+export interface PlanFanout {
+	/** "fo-" plus 8 hex digits: the group id the `delegate` tool result and its status report name. */
+	readonly groupId: string;
+	readonly kind: "slices" | "race";
+	readonly toolCallId: string;
 }
 
 export interface PlanNodeSpec {
@@ -116,6 +167,12 @@ export interface PlanNodeSpec {
 	 * its running work.
 	 */
 	readonly since: number;
+	/** Display only: the planner's doubts about this step. Never part of the spec, so a doubt never restarts a step. */
+	readonly doubts?: readonly string[];
+	/** Fan-out members only: the per-worker authority the member starts with. */
+	readonly authority?: PlanNodeAuthority;
+	/** Fan-out members only: sha256 hex of the member's full task text, kept beside the record by this digest. */
+	readonly textDigest?: string;
 }
 
 export interface PlanJudgmentRef {
@@ -152,6 +209,8 @@ export interface PlanRecord {
 	readonly judgments: readonly PlanJudgmentRef[];
 	readonly createdAt: string;
 	readonly revisedAt: string;
+	/** Set only on a fan-out group (`delegate` slices or race); its retention class is separate from the plans'. */
+	readonly fanout?: PlanFanout;
 }
 
 /** A record written by a newer build: kept by identity, never refused, never executed by this build. */
@@ -330,7 +389,21 @@ export function normalizePlanWriteScope(scope: string, maxChars: number): string
 	return segments.join("/");
 }
 
-export type PlanFact = "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7";
+/**
+ * The first path two write scopes share, or undefined when they share none: equal paths, or one folder holding the
+ * other. The path returned is the more specific of the two, the file or folder both steps may change.
+ */
+export function writeScopesOverlap(a: readonly string[], b: readonly string[]): string | undefined {
+	for (const left of a) {
+		for (const right of b) {
+			if (left === right || left.startsWith(`${right}/`)) return left;
+			if (right.startsWith(`${left}/`)) return right;
+		}
+	}
+	return undefined;
+}
+
+export type PlanFact = "F1" | "F2" | "F3" | "F4" | "F5" | "F6" | "F7" | "F8" | "F9";
 
 export interface PlanFactProblem {
 	readonly fact: PlanFact;
@@ -393,20 +466,21 @@ function checkNodeBounds(node: PlanNodeSpec, problems: PlanFactProblem[]): void 
 	if (node.after.length > PLAN_LIMITS.edgeEntries) over("after", PLAN_LIMITS.edgeEntries);
 	if (node.requirementIds.length > PLAN_LIMITS.requirementEntries) over("req", PLAN_LIMITS.requirementEntries);
 	if ((node.join?.criterion?.length ?? 0) > PLAN_LIMITS.criterionChars) over("question", PLAN_LIMITS.criterionChars);
+	const criteria = node.join?.criteria ?? [];
+	if (criteria.length > PLAN_LIMITS.criteria) over("criteria", PLAN_LIMITS.criteria);
+	if (criteria.some((criterion) => criterion.trim().length === 0 || criterion.length > PLAN_LIMITS.criterionChars)) {
+		problems.push({
+			fact: "F3",
+			nodeId: node.id,
+			fix: `step "${node.id}": give each criterion as 1 to ${PLAN_LIMITS.criterionChars} characters`,
+		});
+	}
 }
 
-function checkJoinShape(node: PlanNodeSpec, problems: PlanFactProblem[]): void {
+function checkJoinShape(node: PlanNodeSpec, nodes: readonly PlanNodeSpec[], problems: PlanFactProblem[]): void {
 	const join = node.join;
 	if (node.kind === "work") {
 		if (join) problems.push({ fact: "F4", nodeId: node.id, fix: `step "${node.id}" is plain work; drop its join` });
-		return;
-	}
-	if (node.kind === "merge") {
-		problems.push({
-			fact: "F4",
-			nodeId: node.id,
-			fix: `step "${node.id}": merge joins are not available yet; use collect`,
-		});
 		return;
 	}
 	if (!join) {
@@ -440,12 +514,32 @@ function checkJoinShape(node: PlanNodeSpec, problems: PlanFactProblem[]): void {
 	if (join.quorum !== undefined && (!Number.isSafeInteger(join.quorum) || join.quorum < 1 || join.quorum > count)) {
 		problems.push({ fact: "F4", nodeId: node.id, fix: `step "${node.id}": quorum must be between 1 and ${count}` });
 	}
-	if (node.kind === "vote" && !join.criterion) {
+	const criteria = join.criteria ?? [];
+	if (node.kind === "vote" && !join.criterion && criteria.length === 0) {
 		problems.push({
 			fact: "F4",
 			nodeId: node.id,
-			fix: `step "${node.id}": a vote needs the question the winner must meet`,
+			fix: `step "${node.id}": a vote needs the question the winner must meet, or the criteria it is judged on`,
 		});
+	}
+	if (node.kind !== "vote" && criteria.length > 0) {
+		problems.push({
+			fact: "F4",
+			nodeId: node.id,
+			fix: `step "${node.id}" (${node.kind}) takes no criteria; criteria belong to a vote step`,
+		});
+	}
+	if (node.kind === "merge") {
+		for (const member of join.members) {
+			const spec = nodes.find((candidate) => candidate.id === member);
+			if (spec && (spec.kind !== "work" || spec.writeScope.length === 0)) {
+				problems.push({
+					fact: "F4",
+					nodeId: node.id,
+					fix: `merge needs every member to be a work step that changes files; ${member} is not`,
+				});
+			}
+		}
 	}
 }
 
@@ -488,7 +582,7 @@ export function checkPlanFacts(
 	}
 	for (const node of nodes) {
 		checkNodeBounds(node, problems);
-		checkJoinShape(node, problems);
+		checkJoinShape(node, nodes, problems);
 		checkScopes(node, context.maxScopeChars, problems);
 	}
 	const order = planTopologicalOrder(nodes);

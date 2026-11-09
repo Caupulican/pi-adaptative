@@ -15,6 +15,7 @@ import {
 	MAX_TASK_OUT_OF_SCOPE,
 	MAX_TASK_OUT_OF_SCOPE_CHARS,
 	type TaskBrief,
+	taskBriefVersionFor,
 } from "../comms/comms-records.ts";
 import type { PlacementPin } from "../placement/placement-types.ts";
 import type { PlanToolInput, PlanToolStep } from "./plan-executor-port.ts";
@@ -27,6 +28,7 @@ import {
 	type PlanRuntimeState,
 	planNodeEdges,
 	planTopologicalOrder,
+	writeScopesOverlap,
 } from "./plan-graph.ts";
 
 /** A step's `by`: `machine:<id>` names a machine, `here` this machine, anything else a bot; always a preference. */
@@ -43,17 +45,54 @@ export function briefLine(text: string, max: number): string {
 	return line.length <= max ? line : `${line.slice(0, max - 3)}...`;
 }
 
-/** The step's acceptance fields as a brief whose goal is the step's intent, or undefined when the step states neither. */
+/**
+ * A step's `proof` as the brief fields it sets: `cite`, `cmd` or `diff` name the evidence; `check:<command>` names a
+ * command whose exit code 0 proves the step. Undefined for a value the grammar does not allow.
+ */
+export function proofFields(
+	proof: string,
+): { readonly evid: "cite" | "cmd" | "diff"; readonly note?: string } | undefined {
+	const value = proof.trim();
+	if (value === "cite" || value === "cmd" || value === "diff") return { evid: value };
+	if (!value.startsWith("check:")) return undefined;
+	const command = value.slice("check:".length).trim();
+	if (command.length === 0 || /[\r\n]/.test(command)) return undefined;
+	return { evid: "cmd", note: `Proof: run ${command}; exit code 0 proves the step.` };
+}
+
+/**
+ * The refusals a step's own fields earn before it is built: a proof outside the grammar (it would otherwise be dropped),
+ * and a join-only field on a plain step (`question`, `criteria`), which nothing would read.
+ */
+export function stepShapeProblems(steps: readonly PlanToolStep[]): string[] {
+	return steps.flatMap((step) => {
+		const problems: string[] = [];
+		if (step.proof !== undefined && proofFields(step.proof) === undefined) {
+			problems.push(
+				`step "${step.id}": proof is cite, cmd, diff, or check:<command> (a command whose exit code 0 proves the step)`,
+			);
+		}
+		if (step.join === undefined && (step.question !== undefined || step.criteria !== undefined)) {
+			problems.push(`step "${step.id}" is plain work; question and criteria belong to a join step`);
+		}
+		return problems;
+	});
+}
+
+/** The step's acceptance fields and proof as a brief whose goal is the step's intent, or undefined when it states neither. */
 function stepBrief(step: PlanToolStep): TaskBrief | undefined {
 	const done = step.doneWhen ? briefLine(step.doneWhen, MAX_TASK_DONE_CHARS) : "";
 	const outOfScope = (step.outOfScope ?? [])
 		.map((item) => briefLine(item, MAX_TASK_OUT_OF_SCOPE_CHARS))
 		.filter((item) => item.length > 0)
 		.slice(0, MAX_TASK_OUT_OF_SCOPE);
-	if (!done && outOfScope.length === 0) return undefined;
+	const proof = step.proof === undefined ? undefined : proofFields(step.proof);
+	if (!done && outOfScope.length === 0 && !proof) return undefined;
 	return {
-		v: 3,
+		v: taskBriefVersionFor({ ...(done ? { done } : {}), ...(outOfScope.length > 0 ? { outOfScope } : {}) }),
 		goal: briefLine(step.do, MAX_TASK_GOAL_CHARS),
+		...(proof ? { evid: proof.evid } : {}),
+		...(proof?.note ? { note: proof.note } : {}),
 		...(done ? { done } : {}),
 		...(outOfScope.length > 0 ? { outOfScope } : {}),
 	};
@@ -64,6 +103,7 @@ export function nodeFromStep(step: PlanToolStep, version: number): PlanNodeSpec 
 	const kind = step.join ?? "work";
 	const inputs = [...new Set(step.uses ?? [])];
 	const brief = stepBrief(step);
+	const criteria = (step.criteria ?? []).map((criterion) => criterion.trim());
 	return {
 		id: step.id,
 		kind,
@@ -76,7 +116,13 @@ export function nodeFromStep(step: PlanToolStep, version: number): PlanNodeSpec 
 		...(step.by ? { pin: pinFromBy(step.by) } : {}),
 		effort: step.deep ? "deep" : "normal",
 		...(kind !== "work"
-			? { join: { members: inputs, ...(step.question ? { criterion: step.question.trim() } : {}) } }
+			? {
+					join: {
+						members: inputs,
+						...(step.question ? { criterion: step.question.trim() } : {}),
+						...(criteria.length > 0 ? { criteria } : {}),
+					},
+				}
 			: {}),
 		since: version,
 	};
@@ -87,8 +133,9 @@ export function defaultFinal(nodes: readonly Pick<PlanNodeSpec, "id" | "kind">[]
 	return [...nodes].reverse().find((node) => node.kind !== "work")?.id ?? nodes[nodes.length - 1]?.id;
 }
 
+/** The node's spec as a restart compares it: doubts are display data, so a doubt never restarts a step. */
 function specKey(node: PlanNodeSpec): string {
-	const { since: _since, ...spec } = node;
+	const { since: _since, doubts: _doubts, ...spec } = node;
 	return JSON.stringify(spec);
 }
 
@@ -226,20 +273,14 @@ export function placeHereNodes(
 /** Steps whose text is this short are asked whether they stand alone (J4). */
 const THIN_INTENT_CHARS = 160;
 
-function scopesOverlap(a: readonly string[], b: readonly string[]): boolean {
-	return a.some((left) =>
-		b.some((right) => left === right || left.startsWith(`${right}/`) || right.startsWith(`${left}/`)),
-	);
-}
-
 function mentions(node: PlanNodeSpec, other: PlanNodeSpec): boolean {
 	return node.intent.includes(other.id) || other.writeScope.some((path) => node.intent.includes(path));
 }
 
 /**
- * F9: pairs of plain steps that run at the same time and might depend on each other, strongest first. A pair counts
- * when their files overlap, one names the other or a file it changes, or the earlier one changes files. `focus`
- * keeps only pairs touching those ids (a revise asks only about what it changed).
+ * Dependency candidates (not a refusal): pairs of plain steps that run at the same time and might depend on each other,
+ * strongest first. A pair counts when their files overlap, one names the other or a file it changes, or the earlier one
+ * changes files. `focus` keeps only pairs touching those ids (a revise asks only about what it changed).
  */
 export function dependencyCandidates(
 	nodes: readonly PlanNodeSpec[],
@@ -249,7 +290,7 @@ export function dependencyCandidates(
 	const work = nodes.filter((node) => node.kind === "work");
 	for (const [a, b] of concurrentPlanPairs(work)) {
 		if (focus && !focus.has(a.id) && !focus.has(b.id)) continue;
-		const overlap = scopesOverlap(a.writeScope, b.writeScope) ? 3 : 0;
+		const overlap = writeScopesOverlap(a.writeScope, b.writeScope) !== undefined ? 3 : 0;
 		const forward = overlap + (mentions(b, a) ? 2 : 0) + (a.writeScope.length > 0 ? 1 : 0);
 		const backward = overlap + (mentions(a, b) ? 2 : 0) + (b.writeScope.length > 0 ? 1 : 0);
 		if (Math.max(forward, backward) === 0) continue;

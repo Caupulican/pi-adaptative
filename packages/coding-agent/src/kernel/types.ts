@@ -12,6 +12,7 @@ import type {
 } from "@caupulican/pi-ai";
 import type { Static, TSchema } from "typebox";
 import type { ExecutionContext, ExecutionPathAuthority } from "./execution-context.ts";
+import { type AgentToolFailureReceipt, readAgentToolFailureReceipt } from "./tool-failure-receipt.ts";
 
 export type { ExecutionPathAuthority } from "./execution-context.ts";
 
@@ -219,12 +220,16 @@ export function readAgentToolPolicyDeniedError(error: unknown): AgentToolPolicyD
  * that has not classified itself is never mistaken for a completed operation. `details` are the tool's
  * machine-readable facts about the outcome (an exit status); a completed-operation failure carries them into
  * the persisted result in place of the empty details a thrown error would otherwise leave.
+ *
+ * `receipt` is the bounded facts the tool attaches to the failed result, beside `details` (see
+ * {@link "./tool-failure-receipt.ts"}). It carries no output text and no paths, and the kernel copies it strictly.
  */
 export class AgentToolExecutionError extends Error {
 	readonly failureCode: string;
 	readonly outputSignature: string;
 	readonly errorKind: AgentToolErrorKind;
 	readonly details: AgentToolOutcomeDetails | undefined;
+	readonly receipt: AgentToolFailureReceipt | undefined;
 
 	constructor(
 		message: string,
@@ -232,6 +237,7 @@ export class AgentToolExecutionError extends Error {
 		outputSignature: string,
 		errorKind: AgentToolErrorKind = "tool_failure",
 		details?: AgentToolOutcomeDetails,
+		receipt?: AgentToolFailureReceipt,
 	) {
 		super(message);
 		this.name = "AgentToolExecutionError";
@@ -239,6 +245,7 @@ export class AgentToolExecutionError extends Error {
 		this.outputSignature = outputSignature;
 		this.errorKind = errorKind;
 		this.details = details;
+		this.receipt = receipt;
 	}
 }
 
@@ -266,6 +273,17 @@ function readAgentToolOutcomeDetails(value: unknown): AgentToolOutcomeDetails | 
 	return Object.freeze(copy);
 }
 
+/** The receipt a thrown error carries as its own data, read strictly: no getter runs, and a Proxy trap cannot throw out. */
+function readThrownToolReceipt(error: unknown): AgentToolFailureReceipt | undefined {
+	if (error === null || (typeof error !== "object" && typeof error !== "function")) return undefined;
+	try {
+		const descriptor = Object.getOwnPropertyDescriptor(error, "receipt");
+		return descriptor && "value" in descriptor ? readAgentToolFailureReceipt(descriptor.value) : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
 /**
  * Recover a structured execution error without `instanceof`.
  * Runtime copies (jiti transforms, duplicate packages) can break class identity while keeping
@@ -287,6 +305,7 @@ export function readAgentToolExecutionError(error: unknown): AgentToolExecutionE
 			outputSignature,
 			errorKind,
 			readAgentToolOutcomeDetails(Reflect.get(identity.error, "details")),
+			readThrownToolReceipt(identity.error),
 		);
 	} catch {
 		return undefined;
@@ -334,18 +353,23 @@ export function safeErrorMessage(error: unknown, fallback = ""): string {
 	return describeUnknownError(error, fallback).message;
 }
 
-/** Snapshot a thrown tool error without unguarded property or prototype inspection. */
+/**
+ * Snapshot a thrown tool error without unguarded property or prototype inspection. `receipt` is the bounded facts the
+ * error carries as its own `receipt` data, from any thrown error; a failed call keeps them in its persisted result.
+ */
 export function describeThrownToolError(error: unknown): {
 	structured: AgentToolExecutionError | undefined;
 	message: string;
 	errorClass: string;
+	receipt: AgentToolFailureReceipt | undefined;
 } {
 	const structured = readAgentToolExecutionError(error);
+	const receipt = readThrownToolReceipt(error);
 	if (structured) {
-		return { structured, message: structured.message, errorClass: structured.name };
+		return { structured, message: structured.message, errorClass: structured.name, receipt };
 	}
 	const fallback = describeUnknownError(error, "Tool execution failed.");
-	return { structured: undefined, ...fallback };
+	return { structured: undefined, ...fallback, receipt };
 }
 
 /** Final or partial result produced by a tool. */

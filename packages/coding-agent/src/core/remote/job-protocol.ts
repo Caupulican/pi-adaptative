@@ -27,6 +27,7 @@ import {
 	REPO_KEY,
 	WIRE_WORD,
 } from "./capabilities.ts";
+import { WIRE_ID } from "./protocol.ts";
 
 export const CAP_FEATURE = "cap/1";
 export const JOBS_FEATURE = "jobs/1";
@@ -94,8 +95,6 @@ export const MIN_JOB_DEADLINE_MS = 60_000;
 export const MAX_JOB_DEADLINE_MS = 24 * 60 * 60_000;
 const MAX_SEQ = 1_000_000;
 
-const ID = /^[A-Za-z0-9_-]{1,128}$/;
-
 export const JOB_REFUSALS = [
 	"no_room",
 	"jobs_disabled",
@@ -117,6 +116,7 @@ export type JobRefusal = (typeof JOB_REFUSALS)[number];
 /**
  * Why a placed job is cancelled. The plan reasons are the fleet's own scope and step ends (`plan-executor.ts`: a plan's close,
  * a join that settled without the job, a step retired by a revision), so the executor records the real reason.
+ * `marker_unreadable` is the reason of a stop whose cancel marker is damaged: the stop is kept, its reason is not known.
  */
 export const JOB_CANCEL_REASONS = [
 	"owner",
@@ -128,6 +128,7 @@ export const JOB_CANCEL_REASONS = [
 	"plan_step_superseded",
 	"plan_step_removed",
 	"plan_step_cancelled",
+	"marker_unreadable",
 ] as const;
 export type JobCancelReason = (typeof JOB_CANCEL_REASONS)[number];
 
@@ -176,7 +177,13 @@ export type JobFrame =
 	| { readonly t: "cap"; readonly facts: CapabilityFacts }
 	| { readonly t: "job.offer"; readonly offer: JobOffer }
 	| { readonly t: "job.accept"; readonly jobId: string }
-	| { readonly t: "job.refuse"; readonly jobId: string; readonly reason: JobRefusal }
+	| {
+			readonly t: "job.refuse";
+			readonly jobId: string;
+			readonly reason: JobRefusal;
+			/** The stop the sender holds for a job it refuses to answer for (its record's cancel reason); absent when it holds none. */
+			readonly cancel?: JobCancelReason;
+	  }
 	| {
 			readonly t: "job.progress";
 			readonly jobId: string;
@@ -227,7 +234,7 @@ function isSeq(value: unknown): value is number {
 }
 
 function isId(value: unknown): value is string {
-	return typeof value === "string" && ID.test(value);
+	return typeof value === "string" && WIRE_ID.test(value);
 }
 
 function parseOffer(value: unknown): JobOffer | undefined {
@@ -339,10 +346,17 @@ export function parseJobFrame(value: unknown): JobFrame | undefined {
 		}
 		case "job.accept":
 			return isId(value.jobId) ? { t: "job.accept", jobId: value.jobId } : undefined;
-		case "job.refuse":
-			return isId(value.jobId) && isOneOf(JOB_REFUSALS, value.reason)
-				? { t: "job.refuse", jobId: value.jobId, reason: value.reason }
-				: undefined;
+		case "job.refuse": {
+			if (!isId(value.jobId) || !isOneOf(JOB_REFUSALS, value.reason)) return undefined;
+			// The stop is optional, and a reason outside the closed set is no reason: the refusal itself still parses.
+			const cancel = isOneOf(JOB_CANCEL_REASONS, value.cancel) ? value.cancel : undefined;
+			return {
+				t: "job.refuse",
+				jobId: value.jobId,
+				reason: value.reason,
+				...(cancel ? { cancel } : {}),
+			};
+		}
 		case "job.progress":
 			if (!isId(value.jobId) || !isSeq(value.seq) || !isOneOf(JOB_PHASES, value.phase)) return undefined;
 			if (value.line !== undefined && !utf8Within(value.line, MAX_PROGRESS_LINE_CHARS * 4)) return undefined;

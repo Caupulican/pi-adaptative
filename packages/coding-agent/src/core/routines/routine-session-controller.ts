@@ -3,7 +3,7 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
-import { canonicalDigest } from "../steering/canonical.ts";
+import { strictCanonicalDigest } from "../steering/canonical.ts";
 import { hostTimeZone } from "./calendar-schedule.ts";
 import {
 	nextRoutineAt,
@@ -192,7 +192,7 @@ export class RoutineSessionController implements RoutineToolPort {
 		// A manual occurrence spends a worker run and its result can open another parent turn: only the owner's words start one.
 		this.requireOwnerTurn();
 		this.require(routineId, expectedRevision);
-		const commandId = canonicalDigest({
+		const commandId = strictCanonicalDigest({
 			parentSessionId: this.deps.parentSessionId,
 			invocation: this.deps.invocationKey(invocationId),
 		});

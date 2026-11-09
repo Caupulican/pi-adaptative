@@ -58,6 +58,11 @@ import type {
 	SessionRootReplyWaitOptions,
 	SessionRootReplyWaitResult,
 } from "./session-root-mailbox.ts";
+import type {
+	SessionRootWorkerAgentMessageOptions,
+	WorkerAgentBroadcastOptions,
+	WorkerAgentMessageOptions,
+} from "./worker-agent-message-options.ts";
 import { WorkerConversationStore } from "./worker-conversation-store.ts";
 import type { WorkerDispositionAdvice, WorkerHostVerdictView } from "./worker-disposition.ts";
 import type { FanoutGroupReport } from "./worker-fanout.ts";
@@ -68,6 +73,12 @@ import {
 	writeWorkerMailboxRecord,
 } from "./worker-mailbox-record.ts";
 import type { WorkerTaskSessionView } from "./worker-task-view.ts";
+
+export type {
+	SessionRootWorkerAgentMessageOptions,
+	WorkerAgentBroadcastOptions,
+	WorkerAgentMessageOptions,
+} from "./worker-agent-message-options.ts";
 
 const MAX_MAILBOX_MESSAGES = 64;
 const MAX_MAILBOX_MESSAGE_CHARS = 4_096;
@@ -367,35 +378,6 @@ export interface WorkerAgentTranscriptPage {
 	nextCursor?: number;
 	omittedMessages: number;
 	serializedBytes: number;
-}
-
-export interface WorkerAgentMessageOptions {
-	senderAgentId?: string;
-	threadId?: string;
-	expectReply?: boolean;
-	/** Host-derived replay identity scoped to the caller, session, tool invocation, and action. */
-	idempotencyKey?: string;
-	/** Host-only, from the root path (see `SessionRootWorkerAgentMessageOptions`); never a model-facing field. */
-	delegationObjectiveId?: string;
-}
-
-export interface WorkerAgentBroadcastOptions {
-	senderAgentId?: string;
-	threadId?: string;
-	expectReply?: boolean;
-	/** Call-level replay identity; the coordinator derives one stable identity per canonical target. */
-	idempotencyKey: string;
-}
-
-export interface SessionRootWorkerAgentMessageOptions {
-	threadId?: string;
-	expectReply?: boolean;
-	idempotencyKey?: string;
-	/**
-	 * Host-only: the orchestrator's words are for this delegation (its brief, update, resume or answer to the leader).
-	 * A model-facing tool never sets it; an owner's chat leaves it out, so that turn is session work.
-	 */
-	delegationObjectiveId?: string;
 }
 
 export type WorkerAgentReplyResult =

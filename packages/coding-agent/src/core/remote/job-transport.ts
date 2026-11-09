@@ -6,7 +6,8 @@
  * (the non-host queue: any session writes a pending record, the process holding the link sends it), outbox frames the
  * runner appended, cancels. Waiting work is found by watching the store directories, never by polling.
  *
- * The placer's side is here: a frame from the executor is persisted before it is acknowledged, a second outcome with
+ * The placer's side is here: a frame from the executor is persisted before it is acknowledged, or acknowledged without being kept
+ * when the placer holds no record of its job (nothing can use it, and the executor's outbox must drain); a second outcome with
  * another digest is kept out as a conflict, and only the executor a job was placed on can speak for it.
  */
 
@@ -33,10 +34,14 @@ import {
 	journalJob,
 	outDir,
 	type PlacerJobRecord,
+	type RecordRead,
 	readRunner,
 } from "./job-store.ts";
 import { loadLinkSettings } from "./registry.ts";
 import { DirectoryWatch } from "./store-watch.ts";
+
+/** What a frame about a placed job found: the record applied to, no record of this peer's, or a record this build cannot use. */
+type PlacedFrame = "applied" | "absent" | "unreadable";
 
 export class JobTransport implements LinkPeerListener {
 	private readonly agentDir: string;
@@ -45,6 +50,8 @@ export class JobTransport implements LinkPeerListener {
 	private readonly peers = new Map<string, LinkPeer>();
 	/** Per connection: the pending offers already written to it. */
 	private readonly offered = new Set<string>();
+	/** Per connection: the cancels sent from a cancel marker (an unreadable record takes no `cancelSent` of its own). */
+	private readonly markSent = new Set<string>();
 	private readonly lastAdvert = new Map<string, string>();
 	private capRev = Date.now();
 	private readonly watch: DirectoryWatch;
@@ -73,6 +80,7 @@ export class JobTransport implements LinkPeerListener {
 		this.peers.set(peer.machineId, peer);
 		this.host.reset(peer.machineId);
 		for (const key of [...this.offered]) if (key.startsWith(`${peer.machineId}:`)) this.offered.delete(key);
+		for (const key of [...this.markSent]) if (key.startsWith(`${peer.machineId}:`)) this.markSent.delete(key);
 		this.lastAdvert.delete(peer.machineId);
 		recordPeerUp(this.agentDir, peer);
 		this.onFleetChange();
@@ -139,17 +147,19 @@ export class JobTransport implements LinkPeerListener {
 				}
 				return;
 			case "job.refuse":
-				// Either side may refuse: an executor refuses an offer, a placer a job it no longer knows.
-				if (!this.placerFrame(peer, frame.jobId, (record) => this.refused(record, frame.reason)))
-					this.host.cancel(peer, frame.jobId, "owner");
+				// Either side may refuse: an executor refuses an offer, a placer a job it no longer knows. A record this build
+				// cannot read is neither, so nothing is cancelled for it. The stop a placer names with its refusal is the one the
+				// executor records; a refusal that names none is the owner's.
+				if (this.placerFrame(peer, frame.jobId, (record) => this.refused(record, frame.reason)) === "absent")
+					this.host.cancel(peer, frame.jobId, frame.cancel ?? "owner");
 				return;
 			case "job.accept":
 				this.placerFrame(peer, frame.jobId, (record) =>
 					record.state === "pending" ? { ...record, state: "accepted" } : undefined,
 				);
 				return;
-			case "job.progress":
-				this.placerFrame(peer, frame.jobId, (record) =>
+			case "job.progress": {
+				const placed = this.placerFrame(peer, frame.jobId, (record) =>
 					frame.seq <= record.lastSeq || record.state === "terminal" || record.state === "ended"
 						? undefined
 						: {
@@ -159,11 +169,13 @@ export class JobTransport implements LinkPeerListener {
 								progress: { seq: frame.seq, phase: frame.phase, ...(frame.line ? { line: frame.line } : {}) },
 							},
 				);
-				peer.send({ t: "job.ack", jobId: frame.jobId, seq: frame.seq });
+				// An unreadable record is not an absent one: its frame is neither applied nor acknowledged, so the executor keeps it.
+				if (placed !== "unreadable") peer.send({ t: "job.ack", jobId: frame.jobId, seq: frame.seq });
 				return;
+			}
 			case "job.outcome": {
 				const digest = digestOutcome(frame.outcome);
-				const known = this.placerFrame(peer, frame.jobId, (record) => {
+				const placed = this.placerFrame(peer, frame.jobId, (record) => {
 					if (!record.outcome)
 						return {
 							...record,
@@ -180,8 +192,16 @@ export class JobTransport implements LinkPeerListener {
 					journalJob(this.agentDir, { side: "placer", jobId: frame.jobId, peer: machineId, event: "conflict" });
 					return { ...record, conflict: true };
 				});
-				// Persisted first, acknowledged after: an outcome the placer did not keep is resent.
-				if (known) peer.send({ t: "job.ack", jobId: frame.jobId, seq: frame.seq });
+				// Persisted first, acknowledged after: an outcome the placer did not keep is resent. An outcome for a job this placer holds
+				// no record of is acknowledged without being kept, since nothing here can use it (the executor's outbox would otherwise
+				// never drain). An unreadable record is neither kept nor acknowledged: the executor keeps the outcome and resends it.
+				if (placed === "unreadable") return;
+				if (placed === "absent")
+					harnessLog.info("link", "an outcome for a job with no placed record was acknowledged, not kept", {
+						peer: machineId,
+						jobId: frame.jobId,
+					});
+				peer.send({ t: "job.ack", jobId: frame.jobId, seq: frame.seq });
 				return;
 			}
 		}
@@ -197,18 +217,34 @@ export class JobTransport implements LinkPeerListener {
 	}
 
 	/**
-	 * Applies a frame about a job this machine placed on `peer`; false when there is no such job (a peer can speak only
-	 * for jobs placed on it).
+	 * The placer's record of `jobId` as a job placed on `peer`. A record that names another machine is not trusted, so it reads as
+	 * unreadable (and is warned about), the same as a file this build cannot parse.
+	 */
+	private placedOn(peer: LinkPeer, jobId: string): RecordRead<PlacerJobRecord> {
+		const state = this.store.placedState(peer.machineId, jobId);
+		if (state.kind !== "valid" || state.record.executorId === peer.machineId) return state;
+		harnessLog.warn("link", "a placed job's record names another machine; it was not used", {
+			peer: peer.machineId,
+			jobId,
+		});
+		return { kind: "unreadable" };
+	}
+
+	/**
+	 * Applies a frame about a job this machine placed on `peer`. `absent`: no record names the job on this peer (a peer can speak
+	 * only for jobs placed on it). `unreadable`: the record is there but this build cannot use it; nothing is applied, and the caller
+	 * neither refuses, cancels nor acknowledges for it.
 	 */
 	private placerFrame(
 		peer: LinkPeer,
 		jobId: string,
 		change: (record: PlacerJobRecord) => PlacerJobRecord | undefined,
-	): boolean {
-		const current = this.store.out.read(jobId);
-		if (!current || current.executorId !== peer.machineId) return false;
-		const before = current.state;
-		const next = this.store.updatePlaced(jobId, change);
+	): PlacedFrame {
+		const state = this.placedOn(peer, jobId);
+		if (state.kind === "absent") return "absent";
+		if (state.kind === "unreadable") return "unreadable";
+		const before = state.record.state;
+		const next = this.store.updatePlaced(peer.machineId, jobId, change);
 		if (next && next.state !== before)
 			journalJob(this.agentDir, {
 				side: "placer",
@@ -217,7 +253,7 @@ export class JobTransport implements LinkPeerListener {
 				event: next.state,
 				code: next.refusal,
 			});
-		return true;
+		return "applied";
 	}
 
 	private refused(record: PlacerJobRecord, reason: PlacerJobRecord["refusal"]): PlacerJobRecord | undefined {
@@ -228,18 +264,25 @@ export class JobTransport implements LinkPeerListener {
 		return undefined;
 	}
 
-	/** The executor's resume names a job placed from here: one this machine no longer runs is refused, so it stops there. */
+	/**
+	 * The executor's resume names a job placed from here: one this machine no longer runs is refused, so it stops there. An unreadable
+	 * record is not an absent one: nothing is refused or acknowledged for it.
+	 */
 	private resumePlaced(peer: LinkPeer, entry: JobResumeEntry): void {
-		const record = this.store.out.read(entry.jobId);
-		if (
-			!record ||
-			record.executorId !== peer.machineId ||
-			record.appliedAt !== undefined ||
-			record.state === "ended"
-		) {
-			if (record?.executorId === peer.machineId && record.outcome)
+		const state = this.placedOn(peer, entry.jobId);
+		if (state.kind === "unreadable") return;
+		const record = state.kind === "valid" ? state.record : undefined;
+		if (!record || record.appliedAt !== undefined || record.state === "ended") {
+			if (record?.outcome)
 				peer.send({ t: "job.ack", jobId: entry.jobId, seq: Math.max(record.lastSeq, entry.lastAckedSeq, 1) });
-			else peer.send({ t: "job.refuse", jobId: entry.jobId, reason: "bad_offer" });
+			// The refusal carries the stop this record holds, so the executor records that reason rather than the owner's.
+			else
+				peer.send({
+					t: "job.refuse",
+					jobId: entry.jobId,
+					reason: "bad_offer",
+					...(record?.cancel ? { cancel: record.cancel } : {}),
+				});
 		}
 	}
 
@@ -261,8 +304,18 @@ export class JobTransport implements LinkPeerListener {
 			// A conversation turn is no job on the executor: there is nothing there to stop.
 			if (record.cancel && !record.cancelSent && record.state !== "refused" && record.offer.kind !== "ask") {
 				if (peer.send({ t: "job.cancel", jobId: record.jobId, reason: record.cancel }))
-					this.store.updatePlaced(record.jobId, (current) => ({ ...current, cancelSent: true }));
+					this.store.updatePlaced(record.executorId, record.jobId, (current) => ({
+						...current,
+						cancelSent: true,
+					}));
 			}
+		}
+		// A stop kept beside a record this build cannot read is sent from its marker, once per connection: that record cannot take `cancelSent`.
+		for (const mark of this.store.placedCancelMarks()) {
+			const key = `${mark.machineId}:${mark.jobId}`;
+			if (mark.machineId !== peer.machineId || this.markSent.has(key)) continue;
+			if (this.store.placedState(mark.machineId, mark.jobId).kind !== "unreadable") continue;
+			if (peer.send({ t: "job.cancel", jobId: mark.jobId, reason: mark.reason })) this.markSent.add(key);
 		}
 		this.host.pump(peer);
 	}

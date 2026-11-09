@@ -154,7 +154,7 @@ import {
 	type RuntimeWorkLease,
 	runtimeGenerationAdmission,
 } from "./runtime-generation-admission.ts";
-import { ScoutController } from "./scout-controller.ts";
+import { SCOUT_CITED_FILE_MAX_BYTES, ScoutController } from "./scout-controller.ts";
 import { resolveScoutModel } from "./scout-model-admission.ts";
 import { BitwardenCredentialStorageRouter } from "./secrets/bitwarden-credential-storage-router.ts";
 import {
@@ -252,7 +252,7 @@ import { createToolDefinitionFromAgentTool, wrapToolDefinition } from "./tools/t
 import { wrapToolExecution } from "./tools/tool-execution-wrapper.ts";
 import { createToolTaskToolDefinition, type ToolTaskDependencies } from "./tools/tool-task.ts";
 import { createWorktreeSyncToolDefinition } from "./tools/worktree-sync.ts";
-import { countFileLinesSync } from "./util/bounded-file.ts";
+import { readBoundedTextFileSync } from "./util/bounded-file.ts";
 import type { TimerPort } from "./util/timer-port.ts";
 import { type WaitStatusEvent, waitFor } from "./util/wait.ts";
 import { readWorkerExtensionToolGrants, registerWorkerExtensionToolPolicies } from "./worker-extension-grants.ts";
@@ -1019,12 +1019,12 @@ export class RuntimeBuilder {
 					}
 					return existsSync(target);
 				},
-				countLines: (path) => {
+				readCitedFile: (path) => {
 					const target = resolveCwdPath(cwd, path);
 					if (childEnvelope && !isPathWithinEnvelope(childEnvelope, target, cwd, scopeCwd)) {
 						return undefined;
 					}
-					return countFileLines(target);
+					return readCitedFileText(target);
 				},
 				// Lets the scout register itself in the reload-gate quiesce registry (see
 				// reload-blockers.ts) for its own agentDir — the same key `_assertReloadQuiescent` reads.
@@ -3024,9 +3024,9 @@ function resolveCwdPath(cwd: string, path: string): string {
 	return isAbsolute(path) ? path : join(cwd, path);
 }
 
-function countFileLines(path: string): number | undefined {
+function readCitedFileText(path: string): string | undefined {
 	try {
-		return countFileLinesSync(path, "Context scout citation file");
+		return readBoundedTextFileSync(path, SCOUT_CITED_FILE_MAX_BYTES, "Context scout citation file");
 	} catch {
 		return undefined;
 	}

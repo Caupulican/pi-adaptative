@@ -27,7 +27,7 @@ import {
 	traceJudgmentsFromEvaluation,
 	verdictFromCertificate,
 } from "../system-one/semantic-evaluation-ledger.ts";
-import { canonicalDigest } from "./canonical.ts";
+import { canonicalDigest, strictCanonicalDigest } from "./canonical.ts";
 import { SteeringCertificateStore } from "./certificate-store.ts";
 import {
 	computePolicyDigest,
@@ -153,10 +153,6 @@ export class SystemOneSteeringPlane {
 			const model = this.policy.model.id || PINNED_JEV_MODEL;
 			this.decisionEngine = new TypeSafeSystemOneDecisionEngine(deps.adapter, model, this.bands);
 		}
-	}
-
-	computeDigest(data: unknown): string {
-		return canonicalDigest(data);
 	}
 
 	/**
@@ -882,7 +878,7 @@ export class SystemOneSteeringPlane {
 			request,
 			program,
 			stateDigest: canonicalDigest(request.state),
-			programDigest: canonicalDigest(program),
+			programDigest: strictCanonicalDigest(program),
 			policyDigest: computePolicyDigest(this.policy),
 			model: this.policy.model.id || PINNED_JEV_MODEL,
 			provider: this.policy.model.provider || "typesafe",

@@ -209,22 +209,34 @@ function deterministicRecordTimestamp(content: string): string {
  * content no longer carries the record in full. Written only through {@link transientRecordPackedDetails}.
  */
 const TRANSIENT_PACKED_KEY = "transientPacked";
+const TRANSIENT_PACKED_VERSION = 1;
+
+/** The context passes that pack a transient record's content into a stub: the only writers of the packed marker. */
+const TRANSIENT_PACKERS = ["context_gc", "compaction_projection"] as const;
+export type TransientPacker = (typeof TRANSIENT_PACKERS)[number];
 
 /**
  * The `details` a context pass writes when it replaces a transient record's content with a stub (context GC packing, the
  * compaction summarizer's projection). Every rewrite of a record's content goes through this, so the planner reads one typed
- * field and never the rendered text of the record.
+ * field and never the rendered text of the record. The marker names the pass that wrote it.
  */
-export function transientRecordPackedDetails(details: unknown): Record<string, unknown> {
-	return { ...(typeof details === "object" && details !== null ? details : {}), [TRANSIENT_PACKED_KEY]: true };
+export function transientRecordPackedDetails(details: unknown, by: TransientPacker): Record<string, unknown> {
+	return {
+		...(typeof details === "object" && details !== null ? details : {}),
+		[TRANSIENT_PACKED_KEY]: { v: TRANSIENT_PACKED_VERSION, by },
+	};
 }
 
-function isTransientRecordPacked(details: unknown): boolean {
-	return (
-		typeof details === "object" &&
-		details !== null &&
-		(details as { [TRANSIENT_PACKED_KEY]?: unknown })[TRANSIENT_PACKED_KEY] === true
-	);
+/**
+ * Whether a record's `details` carry a packed marker written by a known packer. A bare boolean is not a marker: if an extension
+ * handler's `transientPacked: true` counted, every request would treat the record it touched as packed and re-append it.
+ */
+export function isTransientRecordPacked(details: unknown): boolean {
+	if (typeof details !== "object" || details === null) return false;
+	const marker: unknown = (details as { [TRANSIENT_PACKED_KEY]?: unknown })[TRANSIENT_PACKED_KEY];
+	if (typeof marker !== "object" || marker === null) return false;
+	const { v, by } = marker as { v?: unknown; by?: unknown };
+	return v === TRANSIENT_PACKED_VERSION && TRANSIENT_PACKERS.some((packer) => packer === by);
 }
 
 /**
@@ -261,6 +273,22 @@ function customMessageText(message: AgentMessage): string | undefined {
 }
 
 /**
+ * The text a custom record carries: its string content, or the text blocks a projection re-sent it as, joined in order with no
+ * separator (a carried frame adds a cache boundary to the last block of its last record, and a frame legend is sent as one block
+ * per append batch). Undefined when any block is not text, or when there are no blocks. The same record reads the same
+ * whichever form it is in.
+ */
+function customRecordText(message: Extract<AgentMessage, { role: "custom" }>): string | undefined {
+	if (typeof message.content === "string") return message.content;
+	let text = "";
+	for (const part of message.content) {
+		if (part.type !== "text") return undefined;
+		text += part.text;
+	}
+	return message.content.length > 0 ? text : undefined;
+}
+
+/**
  * Most recent durably-recorded content for `kind`, or undefined if no instance has ever been
  * appended. Transient records are appended-only (never rewritten, moved, or removed by this module),
  * so the last one found scanning backward is always the current one by construction.
@@ -279,8 +307,9 @@ function customMessageText(message: AgentMessage): string | undefined {
  * custom message (a cumulative record, a host page this module did not write) is returned as-is.
  */
 function durableTransientContent(message: AgentMessage): string | undefined {
-	if (message.role !== "custom" || typeof message.content !== "string") return undefined;
-	const text = message.content;
+	if (message.role !== "custom") return undefined;
+	const text = customRecordText(message);
+	if (text === undefined) return undefined;
 	const record = classifyTransientRecord(text, message.details);
 	if (!record.transient || record.cumulative) return text;
 	return text.slice(0, text.length - TRANSIENT_RECORD_SUPERSEDING_NOTE.length);
@@ -334,12 +363,18 @@ interface TransientContentIndex {
 	processed: AgentMessage[];
 	byKind: Map<string, RecordedTransient>;
 }
+/** Reconciliation's index, over the durable base it commits into. */
 const transientContentIndexes = new WeakMap<AgentMessage, TransientContentIndex>();
+/** The planning view's index (see {@link recordedTransientKinds}), kept apart from reconciliation's. */
+const recordedKindIndexes = new WeakMap<AgentMessage, TransientContentIndex>();
 
-function transientContentIndex(messages: readonly AgentMessage[]): ReadonlyMap<string, RecordedTransient> {
+function transientContentIndex(
+	messages: readonly AgentMessage[],
+	indexes: WeakMap<AgentMessage, TransientContentIndex>,
+): ReadonlyMap<string, RecordedTransient> {
 	const first = messages[0];
 	if (!first) return new Map();
-	let index = transientContentIndexes.get(first);
+	let index = indexes.get(first);
 	let from = 0;
 	if (index && index.count <= messages.length) {
 		from = index.count;
@@ -355,7 +390,7 @@ function transientContentIndex(messages: readonly AgentMessage[]): ReadonlyMap<s
 	}
 	if (!index) {
 		index = { count: 0, processed: [], byKind: new Map() };
-		transientContentIndexes.set(first, index);
+		indexes.set(first, index);
 	}
 	for (let position = from; position < messages.length; position++) {
 		const message = messages[position];
@@ -368,6 +403,19 @@ function transientContentIndex(messages: readonly AgentMessage[]): ReadonlyMap<s
 		index.count = messages.length;
 	}
 	return index.byKind;
+}
+
+/**
+ * The last full (non-pointer) record of each kind on `messages`, by kind. A producer compares a record's content with the
+ * text it would clear the kind to: reconciliation's `lastIsCleared` reads the same fact through the stored digest, and the
+ * content holds it for records written before digests were stored. Built on the index, so a settled kind costs no scan of
+ * the history. Its index is kept apart from reconciliation's because the planning view and the durable base can share a
+ * first message while differing in their middle: one shared index would be rebuilt from scratch each time the two were read.
+ */
+export function recordedTransientKinds(
+	messages: readonly AgentMessage[],
+): ReadonlyMap<string, { readonly content: string | undefined }> {
+	return transientContentIndex(messages, recordedKindIndexes);
 }
 
 function buildTransientRecord(
@@ -401,9 +449,10 @@ function buildTransientRecord(
  * by `classifyTransientRecord`) and no context pass has packed it since, which every rewrite of its content marks.
  */
 function carriesTransientRecordInFull(message: Extract<AgentMessage, { role: "custom" }>): boolean {
+	const text = customRecordText(message);
 	return (
-		typeof message.content === "string" &&
-		classifyTransientRecord(message.content, message.details).transient &&
+		text !== undefined &&
+		classifyTransientRecord(text, message.details).transient &&
 		!isTransientRecordPacked(message.details)
 	);
 }
@@ -464,7 +513,7 @@ export function reconcileTransientRecords(
 	slots: readonly TransientRecordSlot[],
 	planned: readonly AgentMessage[],
 ): TransientRecordReconciliation {
-	const recorded = transientContentIndex(durableMessages);
+	const recorded = transientContentIndex(durableMessages, transientContentIndexes);
 	const nextDigest = (slot: TransientRecordSlot): string | undefined =>
 		slot.content === undefined ? undefined : (slot.digest ?? transientRecordDigest(slot.content));
 	const wanted = new Map<string, number>();
@@ -650,4 +699,23 @@ export function adaptHostTransients(transientMessages: readonly AgentMessage[]):
 		}
 	}
 	return { slots, passThrough };
+}
+
+/**
+ * The record reconciliation would append for one host transient, exactly as it would be appended: the superseding note, its
+ * details, its digest and its content-derived timestamp. A cumulative transient carries no digest, as reconciliation gives it
+ * none. Undefined for a cleared transient, or one that is request-only, since neither becomes a record. A projection that
+ * carries a frame's records with the frame uses this, so reconciliation reads each carried record as already visible.
+ */
+export function transientRecordMessageOf(hostTransient: AgentMessage): AgentMessage | undefined {
+	const slot = adaptHostTransients([hostTransient]).slots[0];
+	if (slot?.content === undefined) return undefined;
+	if (slot.cumulative) return buildTransientRecord(slot.kind, slot.content, true, slot.record);
+	return buildTransientRecord(
+		slot.kind,
+		slot.content,
+		false,
+		slot.record,
+		slot.digest ?? transientRecordDigest(slot.content),
+	);
 }

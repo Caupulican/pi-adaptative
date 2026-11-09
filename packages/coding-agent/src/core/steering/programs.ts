@@ -8,8 +8,6 @@ import { createDecisionProgram, type DecisionProgram } from "../decision/program
 import { type ChoiceActReading, type ChoiceRisk, choiceAct } from "../decision/thresholds.ts";
 import { getQuestionPack } from "../system-one/catalog.ts";
 import type { ValidationStage } from "../system-one/types.ts";
-import { canonicalDigest } from "./canonical.ts";
-import type { SteeringCertificateQuestionPackRef } from "./types.ts";
 
 export type QuestionKind = "boolean" | "choice" | "score";
 
@@ -120,10 +118,6 @@ export function readAdaptationTier(
 		return { tier: "strategy", chosen: typeof chosen === "string" ? chosen : undefined, reading: "not_this" };
 	const reading = choiceAct(answer, chosen, ADAPTATION_TIER_RISK[chosen as AdaptationTier]);
 	return { tier: reading === "act" ? (chosen as AdaptationTier) : "strategy", chosen, reading };
-}
-
-export function computeQuestionPackDigest(pack: SteeringQuestionPack | DecisionProgram): string {
-	return canonicalDigest(pack);
 }
 
 function compileCandidateFitChoices(
@@ -1042,15 +1036,5 @@ export function findPackForCheckpoint(checkpointId: string): SteeringQuestionPac
 		version: "1.0",
 		checkpointIds: [checkpointId],
 		questions: [{ id: "approved", kind: "boolean", description: `Approval for checkpoint ${checkpointId}` }],
-	};
-}
-
-export function getQuestionPackRef(
-	packOrProgram: SteeringQuestionPack | DecisionProgram,
-): SteeringCertificateQuestionPackRef {
-	return {
-		id: packOrProgram.id,
-		version: packOrProgram.version,
-		digest: canonicalDigest(packOrProgram),
 	};
 }

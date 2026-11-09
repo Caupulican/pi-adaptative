@@ -5,8 +5,9 @@
  * Implements S1A-090..S1A-095, JEV-009..JEV-016, and PH-080..PH-085.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type { RuntimeUpdateController } from "../runtime-update-controller.ts";
+import { strictCanonicalDigest, withoutUndefinedMembers } from "../steering/canonical.ts";
 import type { SystemOneSteeringPlane } from "../steering/system-one-steering-plane.ts";
 import type { CapabilitySpec } from "./types.ts";
 
@@ -123,10 +124,9 @@ export class RuntimeAdaptationCoordinator {
 		}
 	}
 
+	/** Identity of the spec or candidate diff: the strict canonical JSON, so key order never changes it. */
 	private computeDigest(data: unknown): string {
-		return createHash("sha256")
-			.update(JSON.stringify(data ?? null))
-			.digest("hex");
+		return strictCanonicalDigest(withoutUndefinedMembers(data));
 	}
 
 	getTransaction(transactionId: string): RuntimeAdaptationTransaction | undefined {
@@ -158,12 +158,12 @@ export class RuntimeAdaptationCoordinator {
 		}
 
 		const evidenceRevision = input.evidenceRevision ?? 1;
+		// Digested before the transaction is registered, so a spec that is not JSON data fails before anything is active.
+		const specDigest = this.computeDigest(input.spec);
+		const candidateRevision = this.computeDigest(input.diff);
 		const transactionId = `tx_adapt_${Date.now()}_${randomUUID().slice(0, 8)}`;
 		this.activeTransactionId = transactionId;
 		const certRefs: string[] = [];
-
-		const specDigest = this.computeDigest(input.spec);
-		const candidateRevision = this.computeDigest(input.diff);
 
 		const recordTransaction = (
 			state: RuntimeAdaptationTransaction["state"],

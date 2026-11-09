@@ -240,27 +240,58 @@ export interface PathAliasLegendEntry {
 	readonly path: string;
 }
 
-/** One cumulative legend delta: the alias lines it adds; every earlier legend record stays valid. */
+/**
+ * One legend record: the alias lines it lists. A delta record (`legendFor`) lists the aliases new to its request and carries
+ * the pause state. A frame record (`PathAliasSyncResult.frameLegend`) lists every alias its frame references and carries no
+ * pause state, so `paused` is absent on it (see {@link renderPathAliasLegendFrame}).
+ */
 export interface PathAliasLegendRecord {
 	readonly v: CommsRecordVersion;
 	readonly k: "path_alias_legend";
-	/** Alias minting is paused because the legend costs more than the aliases save. */
-	readonly paused: boolean;
+	/** Alias minting is paused because the legend costs more than the aliases save. Absent on a frame record. */
+	readonly paused?: boolean;
+	/**
+	 * Alias minting resumed while a pause note is on the wire: this record clears that note, and lists the aliases pending on
+	 * its request (none, when there are none). Absent otherwise.
+	 */
+	readonly resumed?: boolean;
 	readonly entries: readonly PathAliasLegendEntry[];
 }
 
 export const PATH_ALIAS_LEGEND_PAUSED_LINE = "(alias minting paused: the legend costs more than the aliases save)";
+export const PATH_ALIAS_LEGEND_RESUMED_LINE = "(alias minting resumed: new paths get aliases again)";
+
+/** The line one alias contributes to a legend text. Paths stay bare: they are what the model types back. */
+function renderPathAliasLegendLine(entry: PathAliasLegendEntry): string {
+	return `${entry.id}=${entry.path}`;
+}
 
 /**
  * The model view of a legend delta: a header naming how many lines it adds, then one `<id>=<path>` line per
  * alias. Paths stay bare: they are what the model types back, and the alias rewrite already reads them as text.
  */
 export function renderPathAliasLegend(record: PathAliasLegendRecord): string {
+	// A clearing record that lists no alias is the resumed note alone: a header adding no lines would only repeat the pause's.
+	if (record.resumed === true && record.entries.length === 0) return PATH_ALIAS_LEGEND_RESUMED_LINE;
 	return [
 		`PATH ALIASES +${record.entries.length} (adds to every earlier PATH ALIASES list; earlier lines stay valid)`,
-		...(record.paused ? [PATH_ALIAS_LEGEND_PAUSED_LINE] : []),
-		...record.entries.map((entry) => `${entry.id}=${entry.path}`),
+		...(record.paused === true ? [PATH_ALIAS_LEGEND_PAUSED_LINE] : []),
+		...(record.resumed === true ? [PATH_ALIAS_LEGEND_RESUMED_LINE] : []),
+		...record.entries.map(renderPathAliasLegendLine),
 	].join("\n");
+}
+
+const PATH_ALIAS_LEGEND_FRAME_HEADER = "PATH ALIASES (cumulative: every line stays valid, new lines are added below)";
+
+/**
+ * The model view of a carried frame legend: one fixed header line, then one `<id>=<path>` line per listed alias, in the order
+ * the aliases were listed. The text is append-only, so a frame that lists more aliases starts with the text of one that listed
+ * fewer, byte for byte: the header names no count, each line is the delta's line for that entry, and a new alias is one more
+ * line at the end. The frame carries no pause state. A pause line at its tail would have to be removed when minting resumes, and
+ * one line listed after it would have to sit where it stood, so the pause travels only in the delta record.
+ */
+export function renderPathAliasLegendFrame(entries: readonly PathAliasLegendEntry[]): string {
+	return [PATH_ALIAS_LEGEND_FRAME_HEADER, ...entries.map(renderPathAliasLegendLine)].join("\n");
 }
 
 /** The legend record a transient record's `details.record` carries, if it is one this version reads. */
@@ -268,7 +299,9 @@ export function readPathAliasLegendRecord(record: unknown): PathAliasLegendRecor
 	if (typeof record !== "object" || record === null) return undefined;
 	const candidate = record as Partial<Record<keyof PathAliasLegendRecord, unknown>>;
 	if (candidate.v !== COMMS_RECORD_VERSION || candidate.k !== "path_alias_legend") return undefined;
-	if (typeof candidate.paused !== "boolean" || !Array.isArray(candidate.entries)) return undefined;
+	if (candidate.paused !== undefined && typeof candidate.paused !== "boolean") return undefined;
+	if (candidate.resumed !== undefined && typeof candidate.resumed !== "boolean") return undefined;
+	if (!Array.isArray(candidate.entries)) return undefined;
 	const entries: PathAliasLegendEntry[] = [];
 	for (const entry of candidate.entries as unknown[]) {
 		if (typeof entry !== "object" || entry === null) return undefined;
@@ -276,5 +309,11 @@ export function readPathAliasLegendRecord(record: unknown): PathAliasLegendRecor
 		if (typeof id !== "string" || typeof path !== "string") return undefined;
 		entries.push({ id, path });
 	}
-	return { v: COMMS_RECORD_VERSION, k: "path_alias_legend", paused: candidate.paused, entries };
+	return {
+		v: COMMS_RECORD_VERSION,
+		k: "path_alias_legend",
+		...(typeof candidate.paused === "boolean" ? { paused: candidate.paused } : {}),
+		...(typeof candidate.resumed === "boolean" ? { resumed: candidate.resumed } : {}),
+		entries,
+	};
 }

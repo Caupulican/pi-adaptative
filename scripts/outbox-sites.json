@@ -1,0 +1,67 @@
+{
+	"sites": [
+		{
+			"file": "packages/coding-agent/src/core/channels/session-channels.ts",
+			"transport": "this.sendParts(",
+			"enclosing": ["settleDraft"],
+			"count": 1,
+			"effectCount": 1
+		},
+		{
+			"file": "packages/coding-agent/src/core/channels/session-channels.ts",
+			"transport": "this.sendParts(",
+			"enclosing": ["deliverReply"],
+			"count": 1,
+			"reason": "live reply: settleBatch marks the batch replied before the send, and a failed send keeps the answer as a draft"
+		},
+		{
+			"file": "packages/coding-agent/src/core/routines/routine-intake.ts",
+			"transport": "deps.deliver(",
+			"enclosing": ["announce"],
+			"count": 1,
+			"effectCount": 1
+		},
+		{
+			"file": "packages/coding-agent/src/core/session-edge-intent-controller.ts",
+			"transport": "appendOutwardDraftReleased(",
+			"enclosing": ["settleApprovedCall"],
+			"count": 1,
+			"reason": "owner approval: the release is recorded durably at the start of the approved body, and a release that cannot be written stops the body"
+		},
+		{
+			"file": "packages/coding-agent/src/core/agent-session-edge.ts",
+			"transport": "appendOutwardDraftReleased(",
+			"enclosing": ["releaseOutwardDrafts"],
+			"count": 1,
+			"reason": "owner's own run: the release is recorded in the before-tool gate, before the tool body runs"
+		},
+		{
+			"file": "packages/coding-agent/src/core/delegation/worker-notification-coordinator.ts",
+			"transport": "options.notify(",
+			"enclosing": ["flush"],
+			"count": 1,
+			"reason": "worker handoff: the batch has durable custody before notify, a failed batch is re-queued, and the terminal settle is idempotent in the event store"
+		},
+		{
+			"file": "packages/coding-agent/src/core/harness-notice.ts",
+			"transport": "deps.deliver(",
+			"enclosing": ["save"],
+			"count": 1,
+			"reason": "owner-session notice: the delivery id is the idempotency key, and a notice the transcript already holds is dropped, not sent again"
+		},
+		{
+			"file": "packages/coding-agent/src/core/delegation/leader-controller.ts",
+			"transport": "deps.deliver(",
+			"enclosing": ["deliverOnce"],
+			"count": 1,
+			"reason": "orchestrator notice: a failed delivery is retried by the next pass, and the durable record already holds the message"
+		},
+		{
+			"file": "packages/coding-agent/src/core/delegation/worker-usage-receipt-delivery.ts",
+			"transport": "deps.deliver(",
+			"enclosing": ["flush"],
+			"count": 1,
+			"reason": "usage receipt keyed by reportId: only a pending receipt is retried, by the next pass"
+		}
+	]
+}

@@ -30,9 +30,12 @@ export function isToolBridgeMutation(name: string): boolean {
 
 /** The module a bridged script imports. */
 export const TOOL_BRIDGE_CLIENT_MODULE = "pi_tools";
-/** Environment of a bridged run: the channel address and the run's secret. */
+/**
+ * Environment of a bridged run: the channel address, and the path of the file holding the run's secret. The secret
+ * itself is never in the environment, where every child process of the script would inherit it.
+ */
 export const TOOL_BRIDGE_ADDRESS_ENV = "PI_TOOL_BRIDGE";
-export const TOOL_BRIDGE_TOKEN_ENV = "PI_TOOL_BRIDGE_TOKEN";
+export const TOOL_BRIDGE_TOKEN_FILE_ENV = "PI_TOOL_BRIDGE_TOKEN_FILE";
 
 export const DEFAULT_TOOL_BRIDGE_MAX_CALLS = 50;
 export const MAX_TOOL_BRIDGE_CALLS = 200;

@@ -11,6 +11,7 @@ import type {
 import type { ArtifactContract } from "../orchestration/contracts.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { attemptVerification } from "../orchestration/verification-identity.ts";
+import { type VerifierVerdict, verdictOfReasonCode } from "../orchestration/verification-verdict.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import {
 	attemptRung,
@@ -163,8 +164,6 @@ const EXACT_SOURCE_CODES: Readonly<Record<string, BlockerCode>> = {
 };
 
 const PREFIX_SOURCE_CODES: readonly (readonly [string, BlockerCode])[] = [
-	["independent_verification_rejected:", "verification_failed"],
-	["independent_verification_inconclusive:", "unverified_result"],
 	["worker_task_model_inadequate", "model_unfit"],
 	["orchestration_model_unavailable:", "model_unavailable"],
 	["worker_model_not_allowed:", "model_unavailable"],
@@ -178,9 +177,18 @@ const PREFIX_SOURCE_CODES: readonly (readonly [string, BlockerCode])[] = [
 /** The prefix a linked machine's reported blocker carries: `remote_reported:<blocker>` names the blocker it reported. */
 const REMOTE_REPORTED = "remote_reported:";
 
+/** The blocker each verifier verdict settles to: an accepted one clears it, a rejection is a failed check, an inconclusive one is unverified. */
+const VERDICT_BLOCKERS: Record<VerifierVerdict["kind"], BlockerCode> = {
+	accepted: "none",
+	rejected: "verification_failed",
+	inconclusive: "unverified_result",
+};
+
 /** The blocker one host source code names; undefined when no row names it. `none` for an accepted completion. */
 export function blockerForSourceCode(code: string): BlockerCode | undefined {
-	if (code === "worker_completed" || code === "independent_verification_accepted") return "none";
+	if (code === "worker_completed") return "none";
+	const verdict = verdictOfReasonCode(code);
+	if (verdict) return VERDICT_BLOCKERS[verdict.kind];
 	const exact = EXACT_SOURCE_CODES[code];
 	if (exact) return exact;
 	if (code.startsWith(REMOTE_REPORTED)) {

@@ -76,10 +76,16 @@ export class JobHost {
 	async offer(peer: LinkPeer, offer: JobOffer, now = Date.now()): Promise<void> {
 		const name = executorRecordName(peer.machineId, offer.jobId);
 		const digest = digestOffer(offer);
-		const existing = this.store.in.read(name);
-		if (existing) {
+		const existing = this.store.in.inspect(name);
+		// A record this build cannot read is neither absent nor a conflict it can judge: nothing is answered and nothing is written over it.
+		if (existing.kind === "unreadable") return;
+		if (existing.kind === "valid") {
 			// A resend after a lost link: answer as before. Another offer under the same id changes nothing.
-			if (existing.offerDigest !== digest) return this.refuse(peer, offer.jobId, "duplicate_conflict");
+			if (existing.record.offerDigest !== digest) return this.refuse(peer, offer.jobId, "duplicate_conflict");
+			// A finished job whose outcome the placer acknowledged holds nothing to send: an accept would leave the placer waiting for an
+			// outcome that will never come, so the offer is refused. A job still holding its outcome answers accept and resends it.
+			if (existing.record.state === "terminal" && existing.record.outbox.length === 0)
+				return this.refuse(peer, offer.jobId, "duplicate_conflict");
 			peer.send({ t: "job.accept", jobId: offer.jobId });
 			this.pump(peer);
 			return;
@@ -102,6 +108,8 @@ export class JobHost {
 			outbox: [],
 			ackedSeq: 0,
 		});
+		// Written by another build meanwhile: nothing is answered for it, as above.
+		if (admitted.kind === "unreadable") return;
 		if (admitted.kind === "conflict") return this.refuse(peer, offer.jobId, "duplicate_conflict");
 		if (admitted.kind === "admitted")
 			journalJob(this.store.agentDir, {
@@ -142,22 +150,20 @@ export class JobHost {
 			journalJob(this.store.agentDir, { side: "executor", jobId, peer: peer.machineId, event: "delivered" });
 	}
 
-	/** The placer stops the job; the runner ends it as cancelled. A job already finished is left as it is. */
+	/**
+	 * The placer stops the job; the runner ends it as cancelled. A job already finished is left as it is. A record this build cannot
+	 * read takes a cancel marker beside it (the runner honors it), never a write.
+	 */
 	cancel(peer: LinkPeer, jobId: string, reason: JobCancelReason): void {
-		let marked = false;
-		this.store.updateExecuted(peer.machineId, jobId, (current) => {
-			if (current.state === "terminal" || current.cancel) return undefined;
-			marked = true;
-			return { ...current, cancel: reason };
+		const outcome = this.store.cancelExecuted(peer.machineId, jobId, reason);
+		if (outcome === "unchanged") return;
+		journalJob(this.store.agentDir, {
+			side: "executor",
+			jobId,
+			peer: peer.machineId,
+			event: outcome === "marked" ? "cancel_marked" : "cancel",
+			code: reason,
 		});
-		if (marked)
-			journalJob(this.store.agentDir, {
-				side: "executor",
-				jobId,
-				peer: peer.machineId,
-				event: "cancel",
-				code: reason,
-			});
 	}
 
 	/** Every job from `peer` whose frames are not all acknowledged, for this side's resume. */
@@ -173,7 +179,10 @@ export class JobHost {
 
 	/** The placer's resume names a job it placed here: unknown is refused (it ends as lost there), known is resent. */
 	resume(peer: LinkPeer, entry: JobResumeEntry): void {
-		if (!this.store.in.read(executorRecordName(peer.machineId, entry.jobId))) {
+		const state = this.store.in.inspect(executorRecordName(peer.machineId, entry.jobId));
+		// An unreadable record is not an absent one: nothing is refused for it, so the placer keeps its job until the record reads again.
+		if (state.kind === "unreadable") return;
+		if (state.kind === "absent") {
 			peer.send({ t: "job.refuse", jobId: entry.jobId, reason: "bad_offer" });
 			return;
 		}

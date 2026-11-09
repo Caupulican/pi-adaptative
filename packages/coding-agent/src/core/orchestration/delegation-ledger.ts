@@ -18,6 +18,7 @@ import { projectAttemptUsage } from "./attempt-usage.ts";
 import type {
 	AttemptUsageSnapshot,
 	HarnessCapability,
+	ManagedLanePlacement,
 	OrchestrationDispatchRequest,
 	RiskBudget,
 	WorkerExecutionContract,
@@ -128,6 +129,8 @@ export interface PrepareManagedDelegationInput {
 	goalId?: string;
 	worktreeLaneKey?: string;
 	worktreeLanePath?: string;
+	/** The placed job's placement key, when a placer placed this lane's job. */
+	placement?: ManagedLanePlacement;
 	/** Exact granted knowledge versions of this turn's task; never their values. */
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	/** A third party's words the run that dispatched this turn carried; an earlier tainted turn of the lane taints it too. */
@@ -312,7 +315,10 @@ export class DelegationOrchestrationLedger {
 			: Object.values(this.runtime.getSnapshot().attempts).find(
 					(attempt) =>
 						attempt.dispatch.executionKind === "managed-process" &&
-						attempt.dispatch.logicalLaneId === input.laneId &&
+						// A re-placed remote turn is a new lane for the same step: the step's idempotency key joins them.
+						(attempt.dispatch.logicalLaneId === input.laneId ||
+							(input.placement !== undefined &&
+								attempt.dispatch.placement?.idempotencyKey === input.placement.idempotencyKey)) &&
 						attempt.dispatch.turnOrigin?.thirdParty,
 				)?.dispatch.turnOrigin;
 		return this.prepareNormalized({
@@ -332,6 +338,7 @@ export class DelegationOrchestrationLedger {
 				authorizationId: input.authorizationId,
 				...(input.worktreeLaneKey ? { worktreeLaneKey: input.worktreeLaneKey } : {}),
 				...(input.worktreeLanePath ? { worktreeLanePath: input.worktreeLanePath } : {}),
+				...(input.placement ? { placement: input.placement } : {}),
 				...dispatchEvidence({ knowledgeReferences: input.knowledgeReferences, turnOrigin }),
 			},
 		});
@@ -536,6 +543,7 @@ export class DelegationOrchestrationLedger {
 			| "authorizationId"
 			| "worktreeLaneKey"
 			| "worktreeLanePath"
+			| "placement"
 			| "birthContextForkReference"
 			| "modelRouteSource"
 			| "modelPinSource"

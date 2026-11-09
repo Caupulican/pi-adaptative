@@ -1110,7 +1110,7 @@ const rows: readonly FaultMatrixRow[] = [
 	},
 	{
 		id: "R56",
-		owner: "core/delegation/persistent-bot-team-store.ts",
+		owner: "core/delegation/routine-claim-admission.ts",
 		journey: 1,
 		phase: "routines away admission",
 		fault: "two closed parents have due runs away while the day bound has room for one",

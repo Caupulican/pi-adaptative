@@ -1105,7 +1105,7 @@ function buildParams(
 			toolNameMap,
 			toolDisclosure,
 			compat.supportsEagerToolInputStreaming,
-			compat.supportsCacheControlOnTools ? cacheControl : undefined,
+			compat.supportsCacheControlOnTools && !isOAuthToken && !context.systemPrompt ? cacheControl : undefined,
 			options?.toolChoice && typeof options.toolChoice !== "string" ? options.toolChoice.name : undefined,
 		);
 	}
@@ -1177,8 +1177,8 @@ interface AnthropicParamsBuild {
 }
 
 /**
- * Cache-boundary blocks take the breakpoints the system, tool and last-message markers leave, newest first. The
- * returned coordinate names the newest semantic boundary that was actually placed on the serialized request.
+ * Cache-boundary blocks take the breakpoints the system and last-message markers leave, newest first (the tools marker
+ * is off when the system block carries one: tools precede system in the prefix). The coordinate names the newest placed.
  */
 function placeCacheBoundaryMarkers(
 	params: MessageCreateParamsStreaming,

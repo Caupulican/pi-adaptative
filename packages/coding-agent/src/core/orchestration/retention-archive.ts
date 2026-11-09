@@ -9,7 +9,7 @@
 import { mkdirSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { dirname, join } from "node:path";
 import type { JsonObject } from "../../kernel/utils/json-types.ts";
-import { canonicalDigest, canonicalJson } from "../steering/canonical.ts";
+import { strictCanonicalDigest, strictCanonicalJson } from "../steering/canonical.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { toJsonObject } from "./contracts.ts";
@@ -96,7 +96,7 @@ export function buildRetentionArchive(args: {
 		},
 		agentCarry: toJsonObject(Object.fromEntries(selection.carry)),
 	};
-	return { ...content, digest: canonicalDigest(content) };
+	return { ...content, digest: strictCanonicalDigest(content) };
 }
 
 function archiveNames(dir: string): string[] {
@@ -135,7 +135,7 @@ function statIfPresent(path: string) {
 export function writeRetentionArchive(dir: string, file: RetentionArchiveFile): string {
 	mkdirSync(dir, { recursive: true });
 	const path = join(dir, `${retentionArchiveId(file.digest)}.json`);
-	const bytes = canonicalJson(file);
+	const bytes = strictCanonicalJson(file);
 	const existing = readTextIfPresent(path);
 	if (existing === undefined) writeFileAtomicSync(path, bytes);
 	else if (existing !== bytes) {
@@ -155,7 +155,7 @@ function verifyRetentionArchive(text: string): RetentionArchiveFile | undefined 
 	if (!isPlainRecord(parsed) || parsed.version !== 1 || typeof parsed.digest !== "string") return undefined;
 	const { digest, ...content } = parsed;
 	// A matching digest proves the file holds the content the prune wrote; the decoders that read its records check their shape.
-	return canonicalDigest(content) === digest ? (parsed as unknown as RetentionArchiveFile) : undefined;
+	return strictCanonicalDigest(content) === digest ? (parsed as unknown as RetentionArchiveFile) : undefined;
 }
 
 export interface RetentionArchiveRead {

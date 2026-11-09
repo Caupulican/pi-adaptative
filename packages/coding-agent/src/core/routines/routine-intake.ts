@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { claimThenEffect } from "../../kernel/outbox.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { RequestSpendBudget } from "../cost/request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
@@ -28,7 +29,7 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { logProviderLanePark, providerAdmissionRefusalOf } from "../provider-admission/refusal.ts";
 import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
-import { canonicalDigest } from "../steering/canonical.ts";
+import { canonicalDigest, strictCanonicalDigest } from "../steering/canonical.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { countCalendarSlots, hostTimeZone, nextCalendarSlotAfter } from "./calendar-schedule.ts";
 import {
@@ -723,7 +724,7 @@ export class RoutineIntake {
 					prompt.includes("\0")
 				)
 					continue;
-				const key = canonicalDigest({
+				const key = strictCanonicalDigest({
 					parentSessionId: this.deps.parentSessionId,
 					sourceId: source.sourceId,
 					digest: source.digest,
@@ -887,10 +888,18 @@ export class RoutineIntake {
 				this.deps.store.reload();
 				record = this.state()?.unannounced?.[0];
 				if (!record) return;
+				const notice = record;
 				guard = this.deps.captureBranchGuard();
-				if (!this.deps.isDelivered(routineIntakeNoticeId(record)))
-					await this.deps.deliver(routineIntakeNotice(record, this.deps.captureOrigin()), signal);
-				this.record({ announced: [record.key] });
+				if (this.deps.isDelivered(routineIntakeNoticeId(notice))) this.record({ announced: [notice.key] });
+				else {
+					const run = await claimThenEffect({
+						claim: () => notice,
+						effect: () => this.deps.deliver(routineIntakeNotice(notice, this.deps.captureOrigin()), signal),
+						settle: (claimed) => this.record({ announced: [claimed.key] }),
+					});
+					// A record that failed after the delivery re-enters the catch below, which applies the retry and block rules.
+					if (run.kind === "settle_unrecorded") throw run.error;
+				}
 				this.announceFailure = undefined;
 				attempts = 0;
 			} catch (error) {

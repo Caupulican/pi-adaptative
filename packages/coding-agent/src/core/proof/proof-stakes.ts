@@ -313,7 +313,8 @@ function opensForWriting(code: string): boolean {
 /**
  * The closed scan of one python source. It reads the code text for the operations listed above and nothing else: it
  * never lexes the code as shell, so an unterminated quote or a backtick in python is no fact of its own. A python call
- * run from a file (`scriptPath`) never reaches this scan: its path is not code, so that call yields no fact.
+ * run from a file (`scriptPath`) reaches this scan through the file's source, which the host reads when the call runs
+ * (see {@link scriptStakesOf}); the path itself is no fact.
  */
 export function pythonCodeFacts(code: string): PythonCodeFacts {
 	const operations = PYTHON_OPERATION_FACTS.filter(({ pattern }) => pattern.test(code)).map(({ fact }) => fact);

@@ -8,7 +8,17 @@
  */
 
 import { createHash } from "node:crypto";
-import { appendFileSync, existsSync, mkdirSync, readFileSync, statSync } from "node:fs";
+import {
+	appendFileSync,
+	closeSync,
+	existsSync,
+	fstatSync,
+	mkdirSync,
+	openSync,
+	readFileSync,
+	readSync,
+	statSync,
+} from "node:fs";
 import { dirname, join } from "node:path";
 import { ownerFollowUpsDir } from "../agent-paths.ts";
 import { isDecisivelyFalse, isDecisivelyTrue } from "../decision/noul.ts";
@@ -144,6 +154,124 @@ export function ownerFollowUpBytes(path: string): number {
 	} catch (error) {
 		if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") return 0;
 		throw error;
+	}
+}
+
+/** One question the owner's follow-up document holds: the decision, its reason, and where it was asked. */
+export interface OwnerFollowUpEntry {
+	/** A 16-hex digest of the question. The document holds each question once, so the digest names the entry. */
+	readonly id: string;
+	readonly question: string;
+	readonly why?: string;
+	/** The request marker of the block the question sits under. */
+	readonly requestId?: string;
+	/** The block heading's stamp as written. Every question under one heading shares it: the time of the block's first question. */
+	readonly at?: string;
+}
+
+/** The newest entries `readOwnerFollowUps` returns. */
+export const OWNER_FOLLOW_UP_READ_MAX_ENTRIES = 64;
+const OWNER_FOLLOW_UP_READ_MAX_BYTES = 256 * 1024;
+const FOLLOW_UP_REQUEST_HEADING = /^## Request \((.*)\)$/;
+const FOLLOW_UP_REQUEST_MARKER = /^<!-- request:([0-9a-f]{16}) -->$/;
+const FOLLOW_UP_QUESTION = "**Question:** ";
+const FOLLOW_UP_WHY = "**Why it needs you:** ";
+
+/**
+ * The newest questions in the follow-up document, oldest first. Only the document's last 256 KiB is read, cut back to a
+ * request heading when the document is longer. A question or its reason may span lines; each field ends at the next field,
+ * heading or question. Field and heading lines are matched at their start, so the quoted request text (`> ` lines) never
+ * matches. An absent document holds no questions.
+ */
+export function readOwnerFollowUps(path: string): readonly OwnerFollowUpEntry[] {
+	const text = readFollowUpTail(path);
+	return text === undefined ? [] : parseOwnerFollowUps(text).slice(-OWNER_FOLLOW_UP_READ_MAX_ENTRIES);
+}
+
+interface FollowUpDraft {
+	readonly at?: string;
+	readonly requestId?: string;
+	readonly question: string[];
+	readonly why: string[];
+	inWhy: boolean;
+}
+
+function parseOwnerFollowUps(text: string): OwnerFollowUpEntry[] {
+	const drafts: FollowUpDraft[] = [];
+	let at: string | undefined;
+	let requestId: string | undefined;
+	let expectMarker = false;
+	let open: FollowUpDraft | undefined;
+	for (const line of text.split("\n")) {
+		const heading = FOLLOW_UP_REQUEST_HEADING.exec(line);
+		if (heading) {
+			at = heading[1];
+			requestId = undefined;
+			expectMarker = true;
+			open = undefined;
+			continue;
+		}
+		if (expectMarker) {
+			expectMarker = false;
+			const marker = FOLLOW_UP_REQUEST_MARKER.exec(line);
+			if (marker) {
+				requestId = marker[1];
+				continue;
+			}
+		}
+		if (line.startsWith(FOLLOW_UP_QUESTION)) {
+			open = { at, requestId, question: [line.slice(FOLLOW_UP_QUESTION.length)], why: [], inWhy: false };
+			drafts.push(open);
+			continue;
+		}
+		if (open === undefined) continue;
+		if (!open.inWhy && line.startsWith(FOLLOW_UP_WHY)) {
+			open.inWhy = true;
+			open.why.push(line.slice(FOLLOW_UP_WHY.length));
+			continue;
+		}
+		(open.inWhy ? open.why : open.question).push(line);
+	}
+	return drafts.map((draft) => {
+		const question = draft.question.join("\n").trim();
+		const why = draft.why.join("\n").trim();
+		return {
+			id: createHash("sha256").update(question).digest("hex").slice(0, 16),
+			question,
+			...(why === "" ? {} : { why }),
+			...(draft.requestId === undefined ? {} : { requestId: draft.requestId }),
+			...(draft.at === undefined ? {} : { at: draft.at }),
+		};
+	});
+}
+
+/** The document's text: its last 256 KiB, starting at a request heading when it is longer; undefined when absent. */
+function readFollowUpTail(path: string): string | undefined {
+	let descriptor: number;
+	try {
+		descriptor = openSync(path, "r");
+	} catch (error) {
+		if (error !== null && typeof error === "object" && "code" in error && error.code === "ENOENT") return undefined;
+		throw error;
+	}
+	try {
+		const size = fstatSync(descriptor).size;
+		const start = Math.max(0, size - OWNER_FOLLOW_UP_READ_MAX_BYTES);
+		const buffer = Buffer.alloc(size - start);
+		let filled = 0;
+		while (filled < buffer.length) {
+			const read = readSync(descriptor, buffer, filled, buffer.length - filled, start + filled);
+			if (read === 0) break;
+			filled += read;
+		}
+		const text = buffer.subarray(0, filled).toString("utf8");
+		if (start === 0) return text;
+		const heading = text.indexOf("\n## Request (");
+		if (heading !== -1) return text.slice(heading + 1);
+		const lineEnd = text.indexOf("\n");
+		return lineEnd === -1 ? "" : text.slice(lineEnd + 1);
+	} finally {
+		closeSync(descriptor);
 	}
 }
 

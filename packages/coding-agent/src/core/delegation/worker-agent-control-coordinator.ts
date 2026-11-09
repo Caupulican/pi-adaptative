@@ -1,13 +1,10 @@
-import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { UserMessage } from "@caupulican/pi-ai";
 import type { AgentHaltRequest } from "../../kernel/index.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
-import { stampWorkerControl, workerControlOf } from "../../kernel/worker-control-stamp.ts";
+import { workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
-import type { WorkerHostVerdict } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
-import { renderCommsStateLine } from "../comms/comms-records.ts";
 import { HostEventError } from "../events/host-event-contract.ts";
 import {
 	type HostEventControlScope,
@@ -26,22 +23,18 @@ import { conversationTurnOrigin } from "../orchestration/attempt-agent-identity.
 import { latestAgentAttemptsByDurableOrder } from "../orchestration/attempt-ordering.ts";
 import {
 	type AgentBindingContract,
-	type ArtifactContract,
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
-	objectiveIsPaused,
 	type WorkerResultContract,
 } from "../orchestration/contracts.ts";
 import { isLeaderDelegationObjectiveId } from "../orchestration/delegation-ledger.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
-import { terminalAttemptStatus } from "../orchestration/task-runtime-state.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { assertWorkerReceiptAdmission } from "../orchestration/worker-receipt-origin.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
-import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS } from "../settings/settings-rules.ts";
-import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
+import type { TimerPort } from "../util/timer-port.ts";
 import { recordDiscardedObligations } from "./obligation-ledger.ts";
 import {
 	SessionRootMailbox,
@@ -50,7 +43,6 @@ import {
 	type SessionRootReplyWaitOptions,
 	type SessionRootReplyWaitResult,
 	sessionRootAddress,
-	sessionRootReplyMessageId,
 } from "./session-root-mailbox.ts";
 import type { WorkerClaimSnapshotPayload } from "./session-worker-claim.ts";
 import {
@@ -76,18 +68,17 @@ import {
 	type WorkerAgentTranscriptOptions,
 	type WorkerAgentView,
 	type WorkerAgentWaitMode,
-	WorkerControlDeadLetteredError,
 	WorkerControlIdentityConflictError,
 	workerAgentBroadcastTargetIdempotencyKey,
 	workerAgentMessageId,
 } from "./worker-agent-control.ts";
+import { rejectGenericReplyOptions } from "./worker-agent-message-options.ts";
+import { WORKER_WAIT_DEFAULT_MS, WorkerAgentWaiter } from "./worker-agent-wait.ts";
 import {
-	fenceWorkerClaimValues,
-	handoffClaimLine,
-	handoffClaimValue,
-	handoffReasonCode,
-	workerClaimSettlementLines,
-} from "./worker-claim.ts";
+	type MandatoryTranscriptControlInput,
+	mailboxMessage,
+	WorkerControlTranscript,
+} from "./worker-control-transcript.ts";
 import {
 	MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES,
 	type WorkerConversation,
@@ -98,27 +89,24 @@ import { formatWorkerDispatchWait, type WorkerDispatchScheduler } from "./worker
 import {
 	deriveClaimOnlyWorkerDisposition,
 	deriveWorkerDispositionFromProjections,
-	describeWorkerDisposition,
-	describeWorkerHostVerdict,
-	WORKER_DISPOSITION_ADVICE_NOTE,
 	type WorkerDispositionAdvice,
-	workerDispositionGuidance,
 	workerHostVerdictView,
-	workerLaneStateCodes,
 } from "./worker-disposition.ts";
 import { evaluateReusableWorkerTaskAdmission } from "./worker-fleet-limits.ts";
 import { normalizeWorkerHaltReason, WorkerLaneHalts } from "./worker-halt.ts";
-import {
-	type HostEventConsumingExecution,
-	WorkerHostEventTransport,
-	workerHostEventMessage,
-} from "./worker-host-event-transport.ts";
+import { type HostEventConsumingExecution, WorkerHostEventTransport } from "./worker-host-event-transport.ts";
 import { attemptAwaitsParent, attemptVerification, selectedWorkerAttempt } from "./worker-lane-projection.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
+import { type QueuedPeerMessage, WorkerReplyRouting } from "./worker-reply-routing.ts";
 import { isWorkerTaskPrompt } from "./worker-runner.ts";
 import { specialistReleaseSkipReason } from "./worker-specialization-match.ts";
+import { type TaskBearingReconciliation, WorkerTaskReconciler } from "./worker-task-reconciliation.ts";
 import { projectWorkerTaskSessionView } from "./worker-task-view.ts";
+import { buildWorkerTerminalHandoffContent } from "./worker-terminal-handoff-content.ts";
 import { workerTerminalOutputArtifact } from "./worker-terminal-output-artifact.ts";
+
+export { boundWorkerWaitTimeoutMs } from "./worker-agent-wait.ts";
+export { buildWorkerTerminalHandoffContent };
 
 export interface WorkerAgentControlCoordinatorOptions {
 	agentDir: string;
@@ -201,8 +189,6 @@ export interface WorkerAgentControlCoordinatorOptions {
 	haltReportDeadlineMs?(): number;
 }
 
-type QueuedPeerMessage = ReturnType<WorkerAgentMailbox["enqueueWithReceipt"]>;
-
 export interface WorkerAgentControlResourceSnapshot {
 	readonly stateListenerCount: number;
 	readonly reconcilingTaskBearingCount: number;
@@ -214,125 +200,6 @@ const MAX_BROADCAST_ERROR_CHARS = 512;
 
 /** Attempt statuses whose task has not reached a terminal outcome. */
 const LIVE_ATTEMPT_STATUSES: ReadonlySet<string> = new Set(["queued", "leased", "running", "suspended"]);
-
-/**
- * Independent bound on how long a blocked restore may wait for a reservation-availability event,
- * deliberately NOT derived from the caller's own (possibly very short, e.g. test-only 1ms) wait
- * timeoutMs: the original wait already finished (satisfied or timed out) by the time restoration
- * starts. This is a watchdog, not a poll — retries are driven by subscribeReservationAvailability.
- * Mirrors the documented 300s absolute ceiling used elsewhere in this method.
- */
-const WORKER_WAIT_RESTORE_MAX_MS = 300_000;
-
-const WORKER_WAIT_DEFAULT_MS = 30_000;
-
-/** The bounded duration of one worker wait: whole milliseconds in [1, 300s]; non-finite input waits the default. */
-export function boundWorkerWaitTimeoutMs(timeoutMs: number): number {
-	return Number.isFinite(timeoutMs) ? Math.max(1, Math.min(Math.floor(timeoutMs), 300_000)) : WORKER_WAIT_DEFAULT_MS;
-}
-
-export function buildWorkerTerminalHandoffContent(args: {
-	childAgentId: string;
-	record: Pick<LaneRecord, "laneId" | "status" | "reasonCode" | "reasonDetail">;
-	outputArtifact?: ArtifactContract;
-	claim?: {
-		summary?: string;
-		status?: string;
-		changedFiles?: readonly string[];
-		blockers?: readonly string[];
-		inconclusive?: readonly string[];
-		systemOneSettled?: readonly string[];
-		ownerFollowUp?: string;
-		parentReviewRequired?: boolean;
-	};
-	/** The host's judgment of the claim against the receipts; absent on a legacy claim. */
-	hostVerdict?: WorkerHostVerdict;
-	/** Advice for the receiving agent; the root decides. */
-	recommendedDisposition?: WorkerDispositionAdvice;
-}): string {
-	// This content is stored and replayed against a durable mailbox record, so the fence nonce is fixed per
-	// child and lane rather than random. A literal nonce inside worker text is still neutralized.
-	const source = `worker-claim:${args.record.laneId}`;
-	const nonce = createHash("sha256")
-		.update(`worker-terminal-handoff\0${args.childAgentId}\0${args.record.laneId}`)
-		.digest("hex")
-		.slice(0, 32);
-	const fence = (values: readonly string[], path = false): string =>
-		fenceWorkerClaimValues(values, handoffClaimValue, source, nonce, path);
-	const laneCodes = workerLaneStateCodes(args.record, {
-		...(args.hostVerdict ? { hostVerdict: args.hostVerdict } : {}),
-		...(args.claim?.parentReviewRequired ? { parentReviewRequired: true } : {}),
-	});
-	const readsWholeTranscript = laneCodes.includes("READ_ALL");
-	const stateLine = renderCommsStateLine(["DELIVERED", ...laneCodes]);
-	return [
-		"Worker terminal handoff",
-		`childAgentId=${args.childAgentId}`,
-		`laneId=${args.record.laneId}`,
-		`status=${args.record.status}`,
-		...(args.record.reasonCode ? [`reasonCode=${handoffReasonCode(args.record.reasonCode)}`] : []),
-		...(args.record.reasonDetail
-			? [`diagnostic (untrusted):\n${wrapUntrustedText(args.record.reasonDetail, source, { nonce })}`]
-			: []),
-		...(args.outputArtifact
-			? [
-					`fullOutput=${args.outputArtifact.uri}${args.outputArtifact.sizeBytes === undefined ? "" : ` (${args.outputArtifact.sizeBytes} bytes)`}`,
-				]
-			: []),
-		...(args.claim?.summary ? [`claimStatus=${args.claim.status || args.record.status}`] : []),
-		...(args.claim?.summary
-			? [
-					`claimSummary (untrusted worker evidence):\n${fenceWorkerClaimValues([args.claim.summary], handoffClaimLine, source, nonce)}`,
-				]
-			: []),
-		...(args.claim?.changedFiles && args.claim.changedFiles.length > 0
-			? [`changedFiles (untrusted worker evidence):\n${fence(args.claim.changedFiles, true)}`]
-			: []),
-		...(args.claim?.blockers && args.claim.blockers.length > 0
-			? [`blockers (untrusted worker evidence):\n${fence(args.claim.blockers)}`]
-			: []),
-		...(args.claim ? workerClaimSettlementLines(args.claim, handoffClaimValue, source, nonce) : []),
-		...(args.hostVerdict ? [describeWorkerHostVerdict(args.hostVerdict)] : []),
-		...(args.recommendedDisposition
-			? [
-					describeWorkerDisposition(args.recommendedDisposition),
-					`${WORKER_DISPOSITION_ADVICE_NOTE} Next step: ${workerDispositionGuidance(args.recommendedDisposition, args.hostVerdict)}.`,
-				]
-			: []),
-		...(stateLine ? [stateLine] : []),
-		...(readsWholeTranscript
-			? [
-					`Start with delegate action="transcript" agentId="${args.childAgentId}" cursor=0.`,
-					"Entries complete only after pagination ends. omittedMessages means whole entries were left out of that page. While nextCursor exists, call transcript again with cursor=nextCursor. Stop only when nextCursor is absent.",
-				]
-			: []),
-		...(args.record.reasonCode === "worker_blocked"
-			? [
-					`The worker is idle and waiting on you: answer its blocker or redirect it with delegate action="follow_up" agentId="${args.childAgentId}"; it keeps its transcript. list marks it awaitingParent until a newer task starts.`,
-				]
-			: []),
-		...(args.record.reasonCode === "worker_interrupted"
-			? [
-					"worker_interrupted means you stopped this worker and the claim above is its own report. Its state and transcript are retained: continue it with delegate follow_up on the same agentId, or retire it.",
-				]
-			: []),
-	].join("\n");
-}
-
-type TaskBearingReconciliation = {
-	started: boolean;
-	record?: LaneRecord;
-	skipReason?: string;
-};
-
-type MandatoryTranscriptControlInput = {
-	idempotencyKey: string;
-	content: string;
-	senderAgentId: string;
-	threadId?: string;
-	replyToMessageId?: string;
-	task: WorkerAgentTaskMetadata;
-};
 
 /** Mailbox identity and user content are kept separate from their transcript presentation. */
 export interface WorkerMailboxConversationMessage {
@@ -364,6 +231,10 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	private readonly hostEventTransport: WorkerHostEventTransport;
 	private readonly runtimeWaiters = new Map<string, () => void>();
 	private disposed = false;
+	private readonly transcript: WorkerControlTranscript;
+	private readonly replyRouting: WorkerReplyRouting;
+	private readonly taskReconciler: WorkerTaskReconciler;
+	private readonly agentWaiter: WorkerAgentWaiter;
 
 	constructor(options: WorkerAgentControlCoordinatorOptions) {
 		this.options = options;
@@ -390,6 +261,57 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					// Diagnostics are observers; the unsettled binding and its physical copy remain the retry source.
 				}
 			},
+		});
+
+		this.transcript = new WorkerControlTranscript({
+			options: this.options,
+			conversations: this.conversations,
+			activityForAgent: (agent) => this.activityForAgent(agent),
+		});
+		this.replyRouting = new WorkerReplyRouting({
+			options: this.options,
+			sessionRootAddress: this.sessionRootAddress,
+			sessionRootMailbox: this.sessionRootMailbox,
+			sessionRootReconciliationFailures: this.sessionRootReconciliationFailures,
+			workerReplyReconciliationFailures: this.workerReplyReconciliationFailures,
+			transcript: this.transcript,
+			getMailbox: (agentId) => this.getMailbox(agentId),
+			requireKnownAgent: (agentId) => this.requireKnownAgent(agentId),
+			activityForAgent: (agent) => this.activityForAgent(agent),
+			senderTurnOrigin: (senderAgentId, attemptId) => this.senderTurnOrigin(senderAgentId, attemptId),
+			assertIdempotencyTarget: (targetAgentId, idempotencyKey) =>
+				this.assertIdempotencyTarget(targetAgentId, idempotencyKey),
+			notifyStateChangedBestEffort: () => this.notifyStateChangedBestEffort(),
+			reconcileTaskBearingMailbox: (agentId, expectedMessageId) =>
+				this.reconcileTaskBearingMailbox(agentId, expectedMessageId),
+			replyReconciliationAgents: () => this.replyReconciliationAgents(),
+		});
+		this.taskReconciler = new WorkerTaskReconciler({
+			options: this.options,
+			sessionRootAddress: this.sessionRootAddress,
+			conversations: this.conversations,
+			transcript: this.transcript,
+			reconcilingTaskBearingAgentIds: this.reconcilingTaskBearingAgentIds,
+			taskBearingContinuationAgentIds: this.taskBearingContinuationAgentIds,
+			runtimeWaiters: this.runtimeWaiters,
+			isDisposed: () => this.disposed,
+			getMailbox: (agentId) => this.getMailbox(agentId),
+			activityForAgent: (agent) => this.activityForAgent(agent),
+			senderTurnOrigin: (senderAgentId, attemptId) => this.senderTurnOrigin(senderAgentId, attemptId),
+			notifyStateChangedBestEffort: () => this.notifyStateChangedBestEffort(),
+			acknowledgeDeliveredMailboxMessage: (agentId, messageId) =>
+				this.acknowledgeDeliveredMailboxMessage(agentId, messageId),
+			beginWorkerReplyAcknowledgement: (target, reply) =>
+				this.replyRouting.beginWorkerReplyAcknowledgement(target, reply),
+			controlMessageAttempt: (agentId, message) => this.controlMessageAttempt(agentId, message),
+			cleanupPendingSkipReason: (agentId) => this.cleanupPendingSkipReason(agentId),
+			reusableTaskAdmissionSkipReason: (agentId) => this.reusableTaskAdmissionSkipReason(agentId),
+		});
+		this.agentWaiter = new WorkerAgentWaiter({
+			options: this.options,
+			subscribeStateChanges: (listener) => this.subscribeStateChanges(listener),
+			projectAgentActivity: (agent, attempt) => this.projectAgentActivity(agent, attempt),
+			latestAttemptsByAgent: (snapshot) => this.latestAttemptsByAgent(snapshot),
 		});
 	}
 
@@ -568,7 +490,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		options: WorkerAgentMessageOptions = {},
 	): { messageId: string; queued: true } {
 		this.requireControl();
-		this.rejectGenericReplyOptions(options);
+		rejectGenericReplyOptions(options);
 		const agent = this.requireSessionPeer(agentId, { callerAgentId: options.senderAgentId });
 		this.assertAgentAcceptsNewMessages(agent, options.idempotencyKey);
 		const queued = this.enqueuePeerMessage(agent, "follow_up", message, options);
@@ -703,7 +625,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				return { destination: "session_root", messageId: completedReply.replyMessageId };
 			}
 			const completedTarget = this.requireKnownAgent(completedReply.requestSenderId);
-			this.reconcileCompletedWorkerReplyAcknowledgement(
+			this.replyRouting.reconcileCompletedWorkerReplyAcknowledgement(
 				sourceMailbox,
 				replyToMessageId,
 				completedTarget.agentId,
@@ -722,13 +644,13 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		}
 		if (!request.senderAgentId) throw new Error("Worker reply request has no routable requester.");
 		if (request.senderAgentId === this.sessionRootAddress) {
-			return this.routeWorkerReplyToSessionRoot(source, sourceMailbox, request, message);
+			return this.replyRouting.routeWorkerReplyToSessionRoot(source, sourceMailbox, request, message);
 		}
 		const target = this.requireKnownAgent(request.senderAgentId);
 		if (target.status === "retired" && activeAcknowledgementId === undefined) {
 			throw new Error(`Logical worker agent '${target.agentId}' is retired.`);
 		}
-		return this.routeWorkerReplyToAgent(target, source.agentId, request, message);
+		return this.replyRouting.routeWorkerReplyToAgent(target, source.agentId, request, message);
 	}
 
 	listSessionRootReplies(query: SessionRootReplyQuery = {}): SessionRootReply[] {
@@ -748,7 +670,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		this.reconcileSessionRootSurface();
 		const acknowledged = this.sessionRootMailbox.acknowledge(messageId, ackToken);
 		if (acknowledged) {
-			this.reconcileWorkerReplyOutboxesBestEffort();
+			this.replyRouting.reconcileWorkerReplyOutboxesBestEffort();
 			this.notifyStateChangedBestEffort();
 		}
 		return acknowledged;
@@ -756,7 +678,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 
 	private reconcileSessionRootSurface(): void {
 		this.reconcileSessionRootReplies();
-		this.reconcileWorkerReplyOutboxesBestEffort();
+		this.replyRouting.reconcileWorkerReplyOutboxesBestEffort();
 	}
 
 	private followUpAcceptedAgent(
@@ -764,7 +686,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		message: string,
 		options: WorkerAgentMessageOptions,
 	): { started: boolean; steering: boolean; messageId: string; record?: LaneRecord; skipReason?: string } {
-		this.rejectGenericReplyOptions(options);
+		rejectGenericReplyOptions(options);
 		if (this.activityForAgent(agent) === "active") {
 			// A delegation's words wait for a turn of their own, filed under that delegation: a steer would be absorbed into
 			// the live turn, which was filed under whatever started it.
@@ -1171,8 +1093,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	}
 
 	private sessionRootMessageOptions(options: SessionRootWorkerAgentMessageOptions): WorkerAgentMessageOptions {
+		const leader = options.fromLeader === undefined ? undefined : this.requireKnownAgent(options.fromLeader).agentId;
 		return {
-			senderAgentId: this.sessionRootAddress,
+			senderAgentId: leader ?? this.sessionRootAddress,
+			// A leader's words are written by the root session's host, so they are admitted under the root's live origin.
+			...(leader === undefined ? {} : { receiptOrigin: this.options.captureReceiptOrigin?.() }),
 			...(options.threadId !== undefined ? { threadId: options.threadId } : {}),
 			...(options.expectReply === true ? { expectReply: true } : {}),
 			...(options.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
@@ -1180,12 +1105,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				? { delegationObjectiveId: options.delegationObjectiveId }
 				: {}),
 		};
-	}
-
-	private rejectGenericReplyOptions(options: WorkerAgentMessageOptions): void {
-		if ("replyToMessageId" in options) {
-			throw new Error("Worker replies must use the dedicated inferred-destination reply control.");
-		}
 	}
 
 	private assertAgentAcceptsNewMessages(agent: AgentBindingContract, idempotencyKey?: string): void {
@@ -1198,422 +1117,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		throw new Error(`Logical worker agent '${agent.agentId}' is retired.`);
 	}
 
-	private routeWorkerReplyToAgent(
-		target: AgentBindingContract,
-		sourceAgentId: string,
-		request: WorkerAgentMessage,
-		message: string,
-	): WorkerAgentReplyResult {
-		const activity = this.activityForAgent(target);
-		const idempotencyKey = `peer-reply:${sourceAgentId}:${request.messageId}`;
-		this.assertIdempotencyTarget(target.agentId, idempotencyKey);
-		const replyMessageId = workerAgentMessageId(this.options.parentSessionId, idempotencyKey);
-		const sourceMailbox = this.getMailbox(sourceAgentId);
-		const reservationAlreadyActive = sourceMailbox.getReplyAcknowledgementId(request.messageId) === replyMessageId;
-		if (!sourceMailbox.beginReplyAcknowledgement(request.messageId, replyMessageId, message)) {
-			throw new Error("Worker reply source acknowledgement could not be acquired.");
-		}
-		const transcriptInput: MandatoryTranscriptControlInput = {
-			idempotencyKey,
-			content: message,
-			senderAgentId: sourceAgentId,
-			replyToMessageId: request.messageId,
-			...(request.threadId ? { threadId: request.threadId } : {}),
-			task: { kind: "agent_turn" },
-		};
-		const transcriptReplay = this.reconcileMandatoryControlTranscript(target, transcriptInput, false);
-		if (transcriptReplay.delivered) {
-			if (
-				!sourceMailbox.commitReplyAcknowledgement(request.messageId, replyMessageId) &&
-				sourceMailbox.getReplyAcknowledgementId(request.messageId) !== undefined
-			) {
-				throw new Error("Worker reply source acknowledgement did not commit after transcript replay.");
-			}
-			this.notifyStateChangedBestEffort();
-			return {
-				destination: "worker",
-				messageId: replyMessageId,
-				started: false,
-				steering: false,
-				skipReason: "worker_reply_already_accepted",
-			};
-		}
-		if (target.status === "retired") {
-			this.deliverMandatoryControlToRetiredTranscript(target, transcriptInput);
-			if (
-				!sourceMailbox.commitReplyAcknowledgement(request.messageId, replyMessageId) &&
-				sourceMailbox.getReplyAcknowledgementId(request.messageId) !== undefined
-			) {
-				throw new Error("Worker reply source acknowledgement did not commit after retired-target delivery.");
-			}
-			this.notifyStateChangedBestEffort();
-			return {
-				destination: "worker",
-				messageId: replyMessageId,
-				started: false,
-				steering: false,
-				skipReason: "worker_reply_retired_target_transcript_delivery",
-			};
-		}
-		const targetMailbox = this.getMailbox(target.agentId);
-		const turnOrigin = this.senderTurnOrigin(sourceAgentId);
-		let queued: QueuedPeerMessage;
-		try {
-			queued = targetMailbox.enqueueWithReceipt({
-				kind: activity === "active" ? "steer" : "follow_up",
-				content: message,
-				senderAgentId: sourceAgentId,
-				replyToMessageId: request.messageId,
-				...(request.receiptOrigin ? { receiptOrigin: request.receiptOrigin } : {}),
-				...(turnOrigin ? { turnOrigin } : {}),
-				...(request.threadId ? { threadId: request.threadId } : {}),
-				idempotencyKey,
-				task: { kind: "agent_turn" },
-			});
-		} catch (error) {
-			if (!reservationAlreadyActive) {
-				this.rollbackReplyReservationAfterTargetRejection(sourceMailbox, request.messageId, replyMessageId, error);
-			}
-			throw error;
-		}
-		if (queued.messageId !== replyMessageId) {
-			throw new Error("Worker reply target returned a divergent deterministic message identity.");
-		}
-		if (
-			queued.status === "retained" &&
-			queued.message.failedAt !== undefined &&
-			queued.message.deliveredAt === undefined
-		) {
-			this.abandonDeadLetteredReply(
-				sourceAgentId,
-				sourceMailbox,
-				request,
-				replyMessageId,
-				new WorkerControlDeadLetteredError(queued.messageId, queued.message.failureReason),
-			);
-		}
-		if (queued.status === "completed_replay") {
-			if (!targetMailbox.hasDeliveredControlReceipt(queued.messageId)) {
-				throw new Error("Worker reply target replay has no durable delivery evidence.");
-			}
-			if (
-				!sourceMailbox.commitReplyAcknowledgement(request.messageId, queued.messageId) &&
-				sourceMailbox.getReplyAcknowledgementId(request.messageId) !== undefined
-			) {
-				throw new Error("Worker reply source acknowledgement did not commit after target replay.");
-			}
-			this.notifyStateChangedBestEffort();
-			return {
-				destination: "worker",
-				messageId: queued.messageId,
-				started: false,
-				steering: false,
-				skipReason: "worker_reply_already_accepted",
-			};
-		}
-		this.beginWorkerReplyAcknowledgement(target, queued.message);
-		if (queued.message.deliveredAt !== undefined) {
-			if (
-				!this.reconcileCompletedWorkerReplyAcknowledgement(
-					sourceMailbox,
-					request.messageId,
-					target.agentId,
-					queued.messageId,
-				) &&
-				sourceMailbox.getReplyAcknowledgementId(request.messageId) !== undefined
-			) {
-				throw new Error("Worker reply source acknowledgement did not commit after target delivery.");
-			}
-			this.notifyStateChangedBestEffort();
-			return {
-				destination: "worker",
-				messageId: queued.messageId,
-				started: false,
-				steering: false,
-				skipReason: "worker_reply_already_accepted",
-			};
-		}
-		if (activity === "active") {
-			this.notifyStateChangedBestEffort();
-			if (!queued.created) {
-				return {
-					destination: "worker",
-					messageId: queued.messageId,
-					started: false,
-					steering: false,
-					skipReason: "worker_reply_already_accepted",
-				};
-			}
-			return {
-				destination: "worker",
-				messageId: queued.messageId,
-				started: false,
-				steering: true,
-			};
-		}
-		const reconciliation = this.reconcileTaskBearingMailbox(target.agentId, queued.messageId);
-		this.notifyStateChangedBestEffort();
-		return {
-			destination: "worker",
-			messageId: queued.messageId,
-			started: reconciliation.started,
-			steering: false,
-			...(reconciliation.record ? { record: reconciliation.record } : {}),
-			...(reconciliation.skipReason ? { skipReason: reconciliation.skipReason } : {}),
-		};
-	}
-
-	private routeWorkerReplyToSessionRoot(
-		source: AgentBindingContract,
-		sourceMailbox: WorkerAgentMailbox,
-		request: WorkerAgentMessage,
-		message: string,
-	): WorkerAgentReplyResult {
-		const replyMessageId = sessionRootReplyMessageId(this.options.parentSessionId, source.agentId, request.messageId);
-		const reservationAlreadyActive = sourceMailbox.getReplyAcknowledgementId(request.messageId) === replyMessageId;
-		const replyInput = {
-			sourceAgentId: source.agentId,
-			requestMessageId: request.messageId,
-			...(request.threadId ? { threadId: request.threadId } : {}),
-			content: message,
-		};
-		try {
-			this.sessionRootMailbox.assertReplyInput(replyInput);
-		} catch (error) {
-			if (reservationAlreadyActive) {
-				this.rollbackReplyReservationAfterTargetRejection(sourceMailbox, request.messageId, replyMessageId, error);
-			}
-			throw error;
-		}
-		if (!sourceMailbox.beginReplyAcknowledgement(request.messageId, replyMessageId, message)) {
-			throw new Error("Session root reply source acknowledgement could not be acquired.");
-		}
-		let accepted: ReturnType<SessionRootMailbox["enqueueReply"]>;
-		try {
-			accepted = this.sessionRootMailbox.enqueueSourceOwnedReply(replyInput);
-		} catch (error) {
-			if (!reservationAlreadyActive) {
-				this.rollbackReplyReservationAfterTargetRejection(sourceMailbox, request.messageId, replyMessageId, error);
-			}
-			throw error;
-		}
-		if (accepted.messageId !== replyMessageId) {
-			throw new Error("Session root reply target returned a divergent deterministic message identity.");
-		}
-		if (accepted.status === "completed_replay") {
-			if (
-				!sourceMailbox.commitReplyAcknowledgement(request.messageId, accepted.messageId) &&
-				sourceMailbox.getReplyAcknowledgementId(request.messageId) !== undefined
-			) {
-				throw new Error("Session root reply source acknowledgement did not commit after target replay.");
-			}
-			this.releaseSessionRootSourceReceiptBestEffort(accepted.messageId);
-		} else {
-			this.reconcileSessionRootReply(accepted.reply);
-		}
-		this.notifyStateChangedBestEffort();
-		return { destination: "session_root", messageId: accepted.messageId };
-	}
-
-	private rollbackReplyReservationAfterTargetRejection(
-		sourceMailbox: WorkerAgentMailbox,
-		requestMessageId: string,
-		replyMessageId: string,
-		targetError: unknown,
-	): never {
-		try {
-			if (
-				!sourceMailbox.rollbackReplyAcknowledgement(requestMessageId, replyMessageId) &&
-				sourceMailbox.getReplyAcknowledgementId(requestMessageId) === replyMessageId
-			) {
-				throw new Error("Worker reply source reservation did not roll back after target rejection.");
-			}
-		} catch (rollbackError) {
-			throw new AggregateError(
-				[targetError, rollbackError],
-				"Worker reply target rejected after its source reservation could not be rolled back.",
-			);
-		}
-		throw targetError;
-	}
-
-	private deliverMandatoryControlToRetiredTranscript(
-		target: AgentBindingContract,
-		input: MandatoryTranscriptControlInput,
-	): string {
-		if (target.status !== "retired" || this.activityForAgent(target) === "active") {
-			throw new Error("Mandatory transcript fallback requires a terminal logical worker target.");
-		}
-		const delivery = this.reconcileMandatoryControlTranscript(target, input, true);
-		return delivery.messageId;
-	}
-
-	private reconcileMandatoryControlTranscript(
-		target: AgentBindingContract,
-		input: MandatoryTranscriptControlInput,
-		appendIfMissing: boolean,
-	): { messageId: string; delivered: boolean } {
-		const messageId = workerAgentMessageId(this.options.parentSessionId, input.idempotencyKey);
-		return this.reconcileControlTranscript(
-			target,
-			{
-				messageId,
-				kind: "follow_up",
-				content: input.content,
-				senderAgentId: input.senderAgentId,
-				...(input.threadId ? { threadId: input.threadId } : {}),
-				...(input.replyToMessageId ? { replyToMessageId: input.replyToMessageId } : {}),
-				task: input.task,
-				createdAt: new Date().toISOString(),
-			},
-			appendIfMissing,
-		);
-	}
-
-	private reconcileControlTranscript(
-		target: AgentBindingContract,
-		message: WorkerAgentMessage,
-		appendIfMissing: boolean,
-	): { messageId: string; delivered: boolean } {
-		const messageId = message.messageId;
-		if (!target.resumeContext.sessionFile) {
-			if (appendIfMissing) {
-				throw new Error("Mandatory transcript fallback target has no durable session transcript.");
-			}
-			return { messageId, delivered: false };
-		}
-		const projected = this.mailboxMessage(message);
-		const conversation = this.conversations.open({
-			agentDir: this.options.agentDir,
-			resumeContext: target.resumeContext,
-			expectedLogicalAgentId: target.contextOrigin?.logicalAgentId ?? target.agentId,
-			...(appendIfMissing ? { projectClaim: this.options.getConversationClaim?.(target) } : {}),
-		});
-		if (typeof projected.content !== "string") {
-			throw new Error("Worker control transcript projection is not textual.");
-		}
-		const reconciliation = conversation.reconcileWorkerControlMessage(
-			{ messageId, content: projected.content },
-			projected,
-			appendIfMissing,
-		);
-		return { messageId, delivered: reconciliation.delivered };
-	}
-
 	reconcileSessionRootReplies(): void {
-		let replies: SessionRootReply[];
-		try {
-			replies = this.sessionRootMailbox.retainedReplies();
-			this.sessionRootReconciliationFailures.delete("session-root-mailbox");
-		} catch (error) {
-			this.recordSessionRootReconciliationFailure(
-				"session-root-mailbox",
-				error instanceof Error ? error.message : String(error),
-			);
-			return;
-		}
-		for (const reply of replies) {
-			if (this.options.runsControlMessage?.(reply.requestMessageId) === false) continue;
-			this.reconcileSessionRootReply(reply);
-		}
-	}
-
-	private reconcileSessionRootReply(reply: SessionRootReply): void {
-		try {
-			const source = this.options.getLifecycle().getAgent(reply.sourceAgentId);
-			if (!source) {
-				if (reply.sourceReconciledAt) {
-					this.sessionRootReconciliationFailures.delete(reply.messageId);
-					return;
-				}
-				throw new Error(`Unknown logical worker agent '${reply.sourceAgentId}'.`);
-			}
-			const sourceMailbox = this.getMailbox(source.agentId);
-			const request = sourceMailbox.getMessage(reply.requestMessageId);
-			if (!request) {
-				if (reply.sourceReconciledAt) {
-					this.releaseSessionRootSourceReceiptBestEffort(reply.messageId);
-					this.sessionRootReconciliationFailures.delete(reply.messageId);
-					return;
-				}
-				throw new Error("Session root reply source request is missing before reconciliation.");
-			}
-			if (
-				request.deliveredAt === undefined ||
-				request.expectReply !== true ||
-				request.senderAgentId !== this.sessionRootAddress ||
-				request.threadId !== reply.threadId
-			) {
-				throw new Error("Session root reply source request conflicts with its durable target.");
-			}
-			let acknowledgementId = sourceMailbox.getReplyAcknowledgementId(request.messageId);
-			if (acknowledgementId && acknowledgementId !== reply.messageId) {
-				throw new Error("Session root reply source request has a divergent acknowledgement marker.");
-			}
-			if (request.repliedAt !== undefined && acknowledgementId === undefined) {
-				if (!reply.sourceReconciledAt) {
-					throw new Error(
-						"Session root reply source was marked replied without its exact acknowledgement marker.",
-					);
-				}
-				this.releaseSessionRootSourceReceiptBestEffort(reply.messageId);
-				this.sessionRootReconciliationFailures.delete(reply.messageId);
-				return;
-			}
-			if (request.repliedAt === undefined) {
-				if (!sourceMailbox.beginReplyAcknowledgement(request.messageId, reply.messageId, reply.content)) {
-					throw new Error("Session root reply source acknowledgement could not be acquired.");
-				}
-				acknowledgementId = reply.messageId;
-			}
-			if (!this.sessionRootMailbox.markSourceReconciled(reply.messageId)) {
-				throw new Error("Session root reply disappeared during source reconciliation.");
-			}
-			if (acknowledgementId === reply.messageId) {
-				if (!sourceMailbox.commitReplyAcknowledgement(request.messageId, reply.messageId)) {
-					const remaining = sourceMailbox.getReplyAcknowledgementId(request.messageId);
-					if (remaining !== undefined) {
-						throw new Error("Session root reply source acknowledgement did not commit.");
-					}
-				}
-			}
-			this.releaseSessionRootSourceReceiptBestEffort(reply.messageId);
-			this.sessionRootReconciliationFailures.delete(reply.messageId);
-		} catch (error) {
-			this.recordSessionRootReconciliationFailure(
-				reply.messageId,
-				error instanceof Error ? error.message : String(error),
-			);
-		}
-	}
-
-	private recordSessionRootReconciliationFailure(messageId: string, reason: string): void {
-		if (this.sessionRootReconciliationFailures.get(messageId) === reason) return;
-		if (
-			!this.sessionRootReconciliationFailures.has(messageId) &&
-			this.sessionRootReconciliationFailures.size >= 128
-		) {
-			const oldest = this.sessionRootReconciliationFailures.keys().next().value;
-			if (oldest) this.sessionRootReconciliationFailures.delete(oldest);
-		}
-		this.sessionRootReconciliationFailures.set(messageId, reason);
-		try {
-			this.options.warn?.(`Session root reply reconciliation failed for ${messageId}: ${reason}`);
-		} catch {
-			// Diagnostics are bounded observers; durable mailboxes remain authoritative.
-		}
-	}
-
-	private releaseSessionRootSourceReceiptBestEffort(messageId: string): void {
-		try {
-			this.sessionRootMailbox.releaseSourceReplayReceipt(messageId);
-			this.sessionRootReconciliationFailures.delete(`receipt:${messageId}`);
-		} catch (error) {
-			this.recordSessionRootReconciliationFailure(
-				`receipt:${messageId}`,
-				error instanceof Error ? error.message : String(error),
-			);
-		}
+		this.replyRouting.reconcileSessionRootReplies();
 	}
 
 	private notifyStateChangedBestEffort(): void {
@@ -1795,7 +1300,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		for (const message of mailbox.pendingTaskBearing()) {
 			if (isCurrent && !isCurrent()) return;
 			if (message.kind !== "steer") continue;
-			if (this.reconcileTaskBearingTranscriptDelivery(agent, message)) continue;
+			if (this.taskReconciler.reconcileTaskBearingTranscriptDelivery(agent, message)) continue;
 			if (isCurrent && !isCurrent()) return;
 			mailbox.deadLetterOrdinaryTask(
 				message.messageId,
@@ -1865,7 +1370,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			this.reconcileTaskBearingMailbox(target.agentId);
 			target = this.requireControllableAgent(target.agentId, scope);
 		}
-		this.reconcileWorkerReplyOutboxesBestEffort();
+		this.replyRouting.reconcileWorkerReplyOutboxesBestEffort();
 		const pendingMessages = mailbox.pending();
 		if (pendingMessages.length > 0) {
 			if (!options.discardPending) {
@@ -1905,7 +1410,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		}
 		// Replies other workers sent to this one were just dead-lettered; their sources' open acknowledgements
 		// are settled now, after the mailbox lock scope ended, instead of waiting for a later event.
-		if (pendingMessages.length > 0) this.reconcileWorkerReplyOutboxesBestEffort();
+		if (pendingMessages.length > 0) this.replyRouting.reconcileWorkerReplyOutboxesBestEffort();
 		const unresolvedReplyCount = mailbox.awaitingReplies().length + mailbox.listReplyAcknowledgements().length;
 		if (unresolvedReplyCount > 0) {
 			throw new Error(
@@ -1944,211 +1449,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		this.requireControl();
 		if (mode !== "any" && mode !== "all") throw new TypeError("Worker wait mode must be 'any' or 'all'.");
 		const canonicalAgentIds = this.canonicalAgentIdSet(agentIds, "Worker wait");
-		const baselineSnapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
-		let callerAgentId: string | undefined;
-		if (scope.callerAgentId) {
-			callerAgentId = scope.callerAgentId.trim();
-			if (!callerAgentId || !baselineSnapshot.agents[callerAgentId]) {
-				throw new Error(`Unknown logical worker agent '${callerAgentId}'.`);
-			}
-		}
-		const boundedTimeoutMs = boundWorkerWaitTimeoutMs(timeoutMs);
-		const statusesFromSnapshot = (snapshot: TaskRuntimeProjection) => {
-			const latestAttempts = this.latestAttemptsByAgent(snapshot);
-			return canonicalAgentIds.map((agentId) => {
-				const agent = snapshot.agents[agentId];
-				return {
-					agentId,
-					status: agent
-						? this.projectAgentActivity(agent, latestAttempts.get(agent.agentId))
-						: ("unknown" as const),
-				};
-			});
-		};
-		const currentSnapshot = () => this.options.getLifecycle().getTaskRuntimeSnapshot();
-		const baselineStatuses = statusesFromSnapshot(baselineSnapshot);
-		const baselineByAgentId = new Map(baselineStatuses.map(({ agentId, status }) => [agentId, status]));
-		const updatedAgentIds = new Set<string>();
-		const recordUpdates = (statuses: typeof baselineStatuses) => {
-			for (const { agentId, status } of statuses) {
-				if (baselineByAgentId.get(agentId) !== status) updatedAgentIds.add(agentId);
-			}
-		};
-		const waitSatisfied = (statuses: typeof baselineStatuses) => {
-			// Durable idleness can precede tool-surface disposal. The same resource owner that
-			// gates reuse must release the specialist before an idle wait can report readiness.
-			const ready = ({ agentId, status }: (typeof statuses)[number]) =>
-				status !== "active" && (status !== "idle" || this.options.isSpecialistSettled?.(agentId) !== false);
-			return mode === "any" ? statuses.some(ready) : statuses.every(ready);
-		};
-		const result = (statuses: typeof baselineStatuses, timedOut: boolean, snapshot: TaskRuntimeProjection) => {
-			const statusByAgentId = new Map(statuses.map(({ agentId, status }) => [agentId, status]));
-			// An idle agent's latest turn is reported even after retention released it: the basis stands in for the attempt.
-			const terminalTurns = canonicalAgentIds.flatMap((agentId) => {
-				const turn = agentTurnBasis(snapshot, agentId);
-				return statusByAgentId.get(agentId) === "idle" && turn && terminalAttemptStatus(turn.status) ? [turn] : [];
-			});
-			return {
-				statuses,
-				updatedAgentIds: canonicalAgentIds.filter((agentId) => updatedAgentIds.has(agentId)),
-				timedOut,
-				terminalLaneIds: terminalTurns.map((turn) => turn.taskId),
-				terminalAttemptIds: terminalTurns.map((turn) => turn.attemptId),
-			};
-		};
-		if (waitSatisfied(baselineStatuses)) return Promise.resolve(result(baselineStatuses, false, baselineSnapshot));
-		if (callerAgentId) {
-			const activeAgentIds = new Set(
-				baselineStatuses.filter(({ status }) => status === "active").map(({ agentId }) => agentId),
-			);
-			if (activeAgentIds.has(callerAgentId)) {
-				throw new Error(
-					`Worker wait would deadlock: logical worker '${callerAgentId}' cannot wait for itself. Finish the caller task instead.`,
-				);
-			}
-		}
-		if (signal?.aborted) return Promise.resolve(result(baselineStatuses, false, baselineSnapshot));
-		// A root wait on a worker the scheduler holds for the foreground turn can never be satisfied inside
-		// this turn: the hold lifts only when the turn ends, and a model waiting through it burns its own
-		// turn. Return at once and say so. Workers waiting on a sibling keep the ordinary wait.
-		if (callerAgentId === undefined && scope.returnWhenForegroundHeld === true) {
-			const latestAttempts = this.latestAttemptsByAgent(baselineSnapshot);
-			const activeIds = baselineStatuses.filter(({ status }) => status === "active").map(({ agentId }) => agentId);
-			const heldIds = activeIds.filter((agentId) => {
-				const attempt = latestAttempts.get(agentId);
-				return (
-					attempt !== undefined && this.options.scheduler.getWaitState?.(attempt.taskId)?.reason === "foreground"
-				);
-			});
-			if (heldIds.length > 0 && (mode === "all" || heldIds.length === activeIds.length)) {
-				return Promise.resolve({
-					...result(baselineStatuses, false, baselineSnapshot),
-					foregroundHeldAgentIds: heldIds,
-				});
-			}
-		}
-		return new Promise((resolve, reject) => {
-			let settled = false;
-			let completionTimedOut: boolean | undefined;
-			let abortedBySignal = false;
-			let failure: unknown;
-			let hasFailure = false;
-			let yieldInitialized = callerAgentId === undefined;
-			let restoreYield: (() => boolean | undefined) | undefined;
-			let unsubscribeState = (): void => undefined;
-			const timers = this.options.timers ?? SYSTEM_TIMER_PORT;
-			let timeout: unknown;
-			// A blocked restore (another lane still holds the caller's write reservation) is a
-			// live-lock, not a terminal failure or success. subscribeStateChanges is not that
-			// wakeup — reservation release is. subscribeReservationAvailability is the event;
-			// restoreDeadlineTimer is only the watchdog if that event never arrives.
-			let unsubscribeReservation = (): void => undefined;
-			let restoreDeadlineTimer: unknown;
-			let restoreRetryDeadline: number | undefined;
-			const onSignalAbort = () => {
-				if (settled) return;
-				abortedBySignal = true;
-				if (completionTimedOut === undefined) completionTimedOut = false;
-				settle();
-			};
-			const cleanup = () => {
-				unsubscribeState();
-				unsubscribeReservation();
-				signal?.removeEventListener("abort", onSignalAbort);
-				if (timeout !== undefined) timers.clearTimeout(timeout);
-				if (restoreDeadlineTimer !== undefined) timers.clearTimeout(restoreDeadlineTimer);
-			};
-			const restoreCaller = (): boolean => {
-				if (!restoreYield) return true;
-				const restored = restoreYield();
-				if (restored === false) return false;
-				restoreYield = undefined;
-				return true;
-			};
-			const settle = () => {
-				if (settled || !yieldInitialized) return;
-				const snapshot = currentSnapshot();
-				const statuses = statusesFromSnapshot(snapshot);
-				recordUpdates(statuses);
-				if (!hasFailure && completionTimedOut === undefined && !abortedBySignal) {
-					if (!waitSatisfied(statuses)) return;
-					completionTimedOut = false;
-					if (timeout !== undefined) {
-						timers.clearTimeout(timeout);
-						timeout = undefined;
-					}
-				}
-				try {
-					if (!restoreCaller()) {
-						restoreRetryDeadline ??= timers.now() + WORKER_WAIT_RESTORE_MAX_MS;
-						const remainingMs = restoreRetryDeadline - timers.now();
-						if (remainingMs <= 0) {
-							failure = new Error(
-								"Worker wait completed but could not restore the caller's write reservation within the retry bound; another lane continues to hold it.",
-							);
-							hasFailure = true;
-						} else {
-							restoreDeadlineTimer ??= timers.setTimeout(settle, remainingMs);
-							return;
-						}
-					}
-				} catch (error) {
-					failure = error;
-					hasFailure = true;
-				}
-				settled = true;
-				cleanup();
-				if (hasFailure) reject(failure);
-				else resolve(result(statuses, completionTimedOut ?? false, snapshot));
-			};
-			unsubscribeState = this.subscribeStateChanges(settle);
-			if (this.options.subscribeReservationAvailability) {
-				unsubscribeReservation = this.options.subscribeReservationAvailability(settle);
-			}
-			if (signal?.aborted) {
-				abortedBySignal = true;
-				completionTimedOut = false;
-			} else {
-				signal?.addEventListener("abort", onSignalAbort, { once: true });
-			}
-			timeout = timers.setTimeout(() => {
-				if (settled) return;
-				timeout = undefined;
-				if (completionTimedOut === undefined) completionTimedOut = true;
-				settle();
-			}, boundedTimeoutMs);
-			try {
-				let yielded = false;
-				if (callerAgentId && this.options.yieldCallerForWait) {
-					restoreYield = this.options.yieldCallerForWait(callerAgentId);
-					yielded = restoreYield !== undefined;
-				}
-				if (!yielded && callerAgentId) {
-					const statuses = statusesFromSnapshot(currentSnapshot());
-					const activeAgentIds = new Set(
-						statuses.filter(({ status }) => status === "active").map(({ agentId }) => agentId),
-					);
-					const blockedAgentIdSet = new Set(
-						this.options.waitBlockedByCaller?.(callerAgentId, canonicalAgentIds) ?? [],
-					);
-					const blockedAgentIds = canonicalAgentIds.filter(
-						(agentId) => activeAgentIds.has(agentId) && blockedAgentIdSet.has(agentId),
-					);
-					if (blockedAgentIds.length > 0) {
-						hasFailure = true;
-						failure = new Error(
-							`Worker wait would deadlock: ${blockedAgentIds.join(", ")} ${blockedAgentIds.length === 1 ? "is" : "are"} blocked by the caller's write reservation.`,
-						);
-					}
-				}
-				yieldInitialized = true;
-			} catch (error) {
-				yieldInitialized = true;
-				hasFailure = true;
-				failure = error;
-			}
-			settle();
-		});
+		return this.agentWaiter.waitForAgents(canonicalAgentIds, mode, timeoutMs, scope, signal);
 	}
 
 	/** Read mailbox items at a safe boundary and reconcile the narrow append-before-ack crash window. */
@@ -2168,7 +1469,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			pending
 				.filter((message) => message.task?.kind !== "host_event")
 				.map((message) => {
-					const projected = this.mailboxMessage(message);
+					const projected = mailboxMessage(message);
 					if (typeof projected.content !== "string") {
 						throw new Error("Worker control transcript projection is not textual.");
 					}
@@ -2183,7 +1484,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			.map((message) => ({
 				messageId: message.messageId,
 				instructions: message.content,
-				message: this.mailboxMessage(message),
+				message: mailboxMessage(message),
 				...(message.turnOrigin ? { turnOrigin: message.turnOrigin } : {}),
 			}));
 	}
@@ -2216,7 +1517,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	/** Restart/idle boundary: adopt or schedule every oldest pending executable mailbox intent. */
 	reconcileTaskBearingMailboxTurns(): void {
 		const agents = this.replyReconciliationAgents();
-		this.reconcileWorkerReplyOutboxes(agents);
+		this.replyRouting.reconcileWorkerReplyOutboxes(agents);
 		for (const agent of agents) {
 			if (this.options.runsAgent?.(agent.agentId) !== false) this.reconcileInactiveHostEvents(agent);
 			this.reconcileTaskBearingMailbox(agent.agentId);
@@ -2241,126 +1542,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return Object.values(this.options.getLifecycle().getTaskRuntimeSnapshot().agents).sort(
 			(left, right) => left.createdAt.localeCompare(right.createdAt) || left.agentId.localeCompare(right.agentId),
 		);
-	}
-
-	private reconcileWorkerReplyOutboxes(agents: readonly AgentBindingContract[]): void {
-		for (const agent of agents) this.reconcileWorkerReplyAcknowledgements(agent);
-	}
-
-	private reconcileWorkerReplyOutboxesBestEffort(): void {
-		try {
-			this.reconcileWorkerReplyOutboxes(this.replyReconciliationAgents());
-			this.workerReplyReconciliationFailures.delete("worker-reply-outbox-snapshot");
-		} catch (error) {
-			this.recordWorkerReplyReconciliationFailure(
-				"worker-reply-outbox-snapshot",
-				error instanceof Error ? error.message : String(error),
-			);
-		}
-	}
-
-	private reconcileWorkerReplyAcknowledgements(source: AgentBindingContract): void {
-		const sourceMailbox = this.getMailbox(source.agentId);
-		let acknowledgements: ReturnType<WorkerAgentMailbox["listReplyAcknowledgements"]>;
-		try {
-			acknowledgements = sourceMailbox.listReplyAcknowledgements();
-			this.workerReplyReconciliationFailures.delete(`source:${source.agentId}`);
-		} catch (error) {
-			this.recordWorkerReplyReconciliationFailure(
-				`source:${source.agentId}`,
-				error instanceof Error ? error.message : String(error),
-			);
-			return;
-		}
-		for (const acknowledgement of acknowledgements) {
-			if (this.options.runsControlMessage?.(acknowledgement.messageId) === false) continue;
-			const failureKey = `reply:${source.agentId}:${acknowledgement.messageId}`;
-			try {
-				const request = sourceMailbox.getMessage(acknowledgement.messageId);
-				if (!request?.senderAgentId) {
-					throw new Error("Worker reply acknowledgement source request is missing routing metadata.");
-				}
-				if (request.senderAgentId === this.sessionRootAddress) {
-					this.routeWorkerReplyToSessionRoot(source, sourceMailbox, request, acknowledgement.replyContent);
-					this.workerReplyReconciliationFailures.delete(failureKey);
-					continue;
-				}
-				const target = this.requireKnownAgent(request.senderAgentId);
-				this.routeWorkerReplyToAgent(target, source.agentId, request, acknowledgement.replyContent);
-				this.workerReplyReconciliationFailures.delete(failureKey);
-			} catch (error) {
-				if (error instanceof WorkerControlDeadLetteredError) {
-					// Already settled at the routing step; the obligation is closed, not a recurring failure.
-					this.workerReplyReconciliationFailures.delete(failureKey);
-					continue;
-				}
-				this.recordWorkerReplyReconciliationFailure(
-					failureKey,
-					error instanceof Error ? error.message : String(error),
-				);
-			}
-		}
-	}
-
-	/**
-	 * A reply whose target copy was dead-lettered can never be delivered, and answering the request again
-	 * would hit the same failed identity. Settle the source request as failed (`reply_dead_lettered`),
-	 * terminal and attributed in the obligation ledger, never replied or acknowledged, then report it to
-	 * the replier. An unwritable ledger never keeps the obligation open: the discard proceeds with a warning.
-	 */
-	private abandonDeadLetteredReply(
-		sourceAgentId: string,
-		sourceMailbox: WorkerAgentMailbox,
-		request: WorkerAgentMessage,
-		replyMessageId: string,
-		cause: WorkerControlDeadLetteredError,
-	): never {
-		sourceMailbox.abandonReplyAcknowledgement(request.messageId, replyMessageId, "reply_dead_lettered", (settled) => {
-			try {
-				recordDiscardedObligations({
-					agentDir: this.options.agentDir,
-					parentSessionId: this.options.parentSessionId,
-					kind: "reply_dead_lettered",
-					agentId: sourceAgentId,
-					reason: "reply_dead_lettered",
-					settled: [settled],
-				});
-			} catch (error) {
-				this.options.warn?.(
-					`Reply ${replyMessageId} from ${sourceAgentId} was dead-lettered at its target; the obligation ledger could not be written: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-		});
-		this.notifyStateChangedBestEffort();
-		throw cause;
-	}
-
-	private recordWorkerReplyReconciliationFailure(failureKey: string, reason: string): void {
-		if (this.workerReplyReconciliationFailures.get(failureKey) === reason) return;
-		if (
-			!this.workerReplyReconciliationFailures.has(failureKey) &&
-			this.workerReplyReconciliationFailures.size >= 128
-		) {
-			const oldest = this.workerReplyReconciliationFailures.keys().next().value;
-			if (oldest) this.workerReplyReconciliationFailures.delete(oldest);
-		}
-		this.workerReplyReconciliationFailures.set(failureKey, reason);
-		try {
-			this.options.warn?.(`Worker reply acknowledgement recovery failed for ${failureKey}: ${reason}`);
-		} catch {
-			// Diagnostics are bounded observers; durable acknowledgement evidence remains authoritative.
-		}
-	}
-
-	private reconcileCompletedWorkerReplyAcknowledgement(
-		sourceMailbox: WorkerAgentMailbox,
-		requestMessageId: string,
-		targetAgentId: string,
-		replyMessageId: string,
-	): boolean {
-		if (sourceMailbox.getReplyAcknowledgementId(requestMessageId) !== replyMessageId) return false;
-		if (!this.getMailbox(targetAgentId).hasDeliveredControlReceipt(replyMessageId)) return false;
-		return sourceMailbox.commitReplyAcknowledgement(requestMessageId, replyMessageId);
 	}
 
 	private notifyStateListeners(): void {
@@ -2413,13 +1594,13 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			task: { kind: "terminal_handoff", sourceAttemptId: args.terminalAttemptId },
 		};
 		this.assertIdempotencyTarget(parent.agentId, idempotencyKey);
-		const transcriptReplay = this.reconcileMandatoryControlTranscript(parent, transcriptInput, false);
+		const transcriptReplay = this.transcript.reconcileMandatoryControlTranscript(parent, transcriptInput, false);
 		if (transcriptReplay.delivered) {
 			this.notifyStateChangedBestEffort();
 			return { messageId: transcriptReplay.messageId, started: false, accepted: true };
 		}
 		if (parent.status === "retired") {
-			const messageId = this.deliverMandatoryControlToRetiredTranscript(parent, transcriptInput);
+			const messageId = this.transcript.deliverMandatoryControlToRetiredTranscript(parent, transcriptInput);
 			this.notifyStateChangedBestEffort();
 			return {
 				messageId,
@@ -2467,198 +1648,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		expectedMessageId?: string,
 		runtimeLease?: RuntimeWorkLease,
 	): TaskBearingReconciliation {
-		if (this.reconcilingTaskBearingAgentIds.has(agentId)) {
-			return { started: false, skipReason: "worker_task_reconciliation_in_progress" };
-		}
-		this.reconcilingTaskBearingAgentIds.add(agentId);
-		try {
-			const agent = this.options.getLifecycle().getAgent(agentId);
-			if (!agent) return { started: false, skipReason: "unknown_agent" };
-			const mailbox = this.getMailbox(agentId);
-			for (let settlement = 0; settlement < 64; settlement++) {
-				const pending = mailbox.pendingTaskBearing();
-				// The caller's own message is held while its delegation is paused; the messages behind it are not its concern.
-				const expected =
-					expectedMessageId === undefined ? undefined : pending.find((m) => m.messageId === expectedMessageId);
-				if (expected && this.heldByPausedDelegation(expected))
-					return { started: false, skipReason: "delegation_paused" };
-				// A message filed under a paused delegation waits in place; the first message that is not held runs, so only the
-				// order within one delegation is kept.
-				const message = pending.find((candidate) => !this.heldByPausedDelegation(candidate));
-				if (!message) return { started: false };
-				if (this.options.runsControlMessage?.(message.messageId) === false)
-					return { started: false, skipReason: "worker_agent_runs_in_parent" };
-				if (this.reconcileTaskBearingTranscriptDelivery(agent, message)) {
-					if (expectedMessageId === message.messageId) {
-						return { started: false, skipReason: "worker_control_transcript_delivery_reconciled" };
-					}
-					continue;
-				}
-				this.beginWorkerReplyAcknowledgement(agent, message);
-				const correlated = this.controlMessageAttempt(agent.agentId, message);
-				if (correlated) {
-					const scheduled = this.scheduleCorrelatedTaskBearingAttempt(correlated);
-					if (scheduled.skipReason?.startsWith("worker_task_terminal_")) {
-						const settled = this.settleTerminalTaskBearingMessage(
-							agent,
-							mailbox,
-							message,
-							scheduled,
-							expectedMessageId,
-						);
-						if (settled) return settled;
-						continue;
-					}
-					if (expectedMessageId && message.messageId !== expectedMessageId) {
-						return { started: false, skipReason: "worker_task_waiting_for_older_message" };
-					}
-					return scheduled;
-				}
-				if (expectedMessageId && message.messageId !== expectedMessageId) {
-					return { started: false, skipReason: "worker_task_waiting_for_older_message" };
-				}
-				const activity = this.activityForAgent(agent);
-				if (activity !== "idle") return { started: false, skipReason: `worker_${activity}` };
-				if (this.options.isSpecialistSettled?.(agent.agentId) === false) {
-					// The pending turn stays pending: reconciliation runs again when the execution that
-					// still owns this context signals its state change after disposal.
-					return { started: false, skipReason: this.cleanupPendingSkipReason(agent.agentId) };
-				}
-				if (agent.status !== "registered") {
-					const settled = this.settleTerminalTaskBearingMessage(
-						agent,
-						mailbox,
-						message,
-						{ started: false, skipReason: `agent_${agent.status}` },
-						expectedMessageId,
-					);
-					if (settled) return settled;
-					continue;
-				}
-				if (this.disposed) return { started: false, skipReason: "worker_control_disposed" };
-				const reader =
-					runtimeLease ??
-					runtimeGenerationAdmission(this.options.agentDir).tryAdmitWork({
-						kind: "worker-control",
-						label: agentId,
-					});
-				if (!reader) {
-					this.waitForRuntimeGeneration(agentId);
-					return { started: false, skipReason: "runtime_generation_replacement" };
-				}
-				try {
-					reader.assertCurrent();
-					const reuseSkipReason =
-						this.options.taskStartHeadroomSkipReason?.(agent) ??
-						this.reusableTaskAdmissionSkipReason(agent.agentId);
-					if (reuseSkipReason) {
-						this.reconcileControlTranscript(agent, message, true);
-						this.acknowledgeDeliveredMailboxMessage(agent.agentId, message.messageId);
-						const settlement = {
-							started: false,
-							skipReason: `${reuseSkipReason}:transcript_fallback_delivered`,
-						};
-						if (expectedMessageId === message.messageId) return settlement;
-						continue;
-					}
-					try {
-						this.enableAttemptAccountingForNextTask(agent);
-						const newTask = message.task?.kind === "agent_turn" ? message.task.newTask : undefined;
-						// A sender that carried a third party's words passes them on in what it sends: the message names them
-						// since it was written; one written before it did is read from the worker sender's latest attempt.
-						const sender =
-							message.senderAgentId && message.senderAgentId !== this.sessionRootAddress
-								? this.options.getLifecycle().getAgent(message.senderAgentId)
-								: undefined;
-						const senderOrigin =
-							message.turnOrigin ?? (sender ? this.senderTurnOrigin(sender.agentId) : undefined);
-						const prepared = this.options.getLifecycle().prepareAgentTurn({
-							agentId: agent.agentId,
-							instructions: message.content,
-							controlMessageId: message.messageId,
-							...(message.receiptOrigin ? { receiptOrigin: message.receiptOrigin } : {}),
-							...(senderOrigin?.thirdParty ? { turnOrigin: senderOrigin } : {}),
-							// Who started the turn, and the delegation its words belong to: both are read back from the mailbox.
-							...(message.senderAgentId && message.senderAgentId !== this.sessionRootAddress
-								? { senderAgentId: message.senderAgentId }
-								: {}),
-							...(message.delegationObjectiveId ? { delegationObjectiveId: message.delegationObjectiveId } : {}),
-							...(message.task?.kind === "agent_turn" && message.task.dependsOnTaskIds
-								? { dependsOnTaskIds: message.task.dependsOnTaskIds }
-								: {}),
-							// The persisted declaration of new work, read back from the mailbox: the process that
-							// enqueued it may be long gone, and no caller repeats it after a restart.
-							...(newTask
-								? {
-										...(newTask.goalId ? { goalId: newTask.goalId } : {}),
-										...(newTask.controlForkMode ? { controlForkMode: newTask.controlForkMode } : {}),
-										...(newTask.knowledgeReferences
-											? { knowledgeReferences: newTask.knowledgeReferences }
-											: {}),
-										...(newTask.subscriptions ? { subscriptions: newTask.subscriptions } : {}),
-										taskContext: {
-											...(newTask.requirementIds ? { requirementIds: newTask.requirementIds } : {}),
-											...(newTask.acceptanceCriterionIds
-												? { acceptanceCriterionIds: newTask.acceptanceCriterionIds }
-												: {}),
-											...(newTask.resourcePointerIds
-												? { resourcePointerIds: newTask.resourcePointerIds }
-												: {}),
-										},
-									}
-								: {}),
-						});
-						// `created` is the ledger's own decision, not a reconstruction of it -- a replayed
-						// control message (e.g. a mailbox message redelivered after a resume) returns an
-						// attempt that may predate the current process, and must never be re-stamped with
-						// this process's epoch.
-						if (prepared.created) {
-							const ownerEpoch = this.options.getCurrentSubmissionEpoch?.();
-							if (ownerEpoch !== undefined)
-								this.options.noteAttemptOwnerEpoch?.(prepared.attempt.attemptId, ownerEpoch);
-						}
-						return this.scheduleTaskBearingAttempt(prepared.record, prepared.attempt);
-					} catch (error) {
-						const recovered = this.controlMessageAttempt(agent.agentId, message);
-						if (recovered) {
-							const scheduled = this.scheduleCorrelatedTaskBearingAttempt(recovered);
-							if (scheduled.skipReason?.startsWith("worker_task_terminal_")) {
-								const settled = this.settleTerminalTaskBearingMessage(
-									agent,
-									mailbox,
-									message,
-									scheduled,
-									expectedMessageId,
-								);
-								if (settled) return settled;
-								continue;
-							}
-							return {
-								...scheduled,
-								...(scheduled.skipReason
-									? {}
-									: { skipReason: "worker_task_recovered_after_prepare_interruption" }),
-							};
-						}
-						return { started: false, skipReason: error instanceof Error ? error.message : String(error) };
-					}
-				} finally {
-					if (!runtimeLease) reader.release();
-				}
-			}
-			this.scheduleTaskBearingReconciliationContinuation(agentId);
-			return { started: false, skipReason: "worker_task_reconciliation_bound_reached" };
-		} catch (error) {
-			const reason = error instanceof Error ? error.message : String(error);
-			try {
-				this.options.warn?.(`Worker task-bearing mailbox reconciliation failed for ${agentId}: ${reason}`);
-			} catch {
-				// Diagnostics are observers; the pending mailbox remains the recovery source of truth.
-			}
-			return { started: false, skipReason: reason };
-		} finally {
-			this.reconcilingTaskBearingAgentIds.delete(agentId);
-		}
+		return this.taskReconciler.reconcileTaskBearingMailbox(agentId, expectedMessageId, runtimeLease);
 	}
 
 	/** Stop deferred admissions; durable mailbox intent remains available to the next session owner. */
@@ -2666,62 +1656,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		this.disposed = true;
 		for (const unsubscribe of this.runtimeWaiters.values()) unsubscribe();
 		this.runtimeWaiters.clear();
-	}
-
-	private waitForRuntimeGeneration(agentId: string): void {
-		if (this.disposed || this.runtimeWaiters.has(agentId)) return;
-		const admission = runtimeGenerationAdmission(this.options.agentDir);
-		const unsubscribe = admission.subscribeAvailability(() => {
-			if (admission.isReplacing || this.disposed) return;
-			unsubscribe();
-			this.runtimeWaiters.delete(agentId);
-			this.reconcileTaskBearingMailbox(agentId);
-			this.notifyStateChangedBestEffort();
-		});
-		this.runtimeWaiters.set(agentId, unsubscribe);
-	}
-
-	private scheduleTaskBearingReconciliationContinuation(agentId: string): void {
-		if (this.taskBearingContinuationAgentIds.has(agentId)) return;
-		this.taskBearingContinuationAgentIds.add(agentId);
-		queueMicrotask(() => {
-			this.taskBearingContinuationAgentIds.delete(agentId);
-			this.reconcileTaskBearingMailbox(agentId);
-		});
-	}
-
-	private reconcileTaskBearingTranscriptDelivery(target: AgentBindingContract, message: WorkerAgentMessage): boolean {
-		if (!this.reconcileControlTranscript(target, message, false).delivered) return false;
-		this.acknowledgeDeliveredMailboxMessage(target.agentId, message.messageId);
-		return true;
-	}
-
-	private settleTerminalTaskBearingMessage(
-		agent: AgentBindingContract,
-		mailbox: WorkerAgentMailbox,
-		message: WorkerAgentMessage,
-		scheduled: TaskBearingReconciliation,
-		expectedMessageId?: string,
-	): TaskBearingReconciliation | undefined {
-		const returnSettlement = expectedMessageId === message.messageId;
-		if (scheduled.skipReason && mailbox.deadLetterOrdinaryTask(message.messageId, scheduled.skipReason)) {
-			return returnSettlement ? scheduled : undefined;
-		}
-		const retained = mailbox.getMessage(message.messageId);
-		if (!retained || retained.deliveredAt !== undefined || retained.failedAt !== undefined) {
-			return returnSettlement ? scheduled : undefined;
-		}
-		const activity = this.activityForAgent(agent);
-		if (activity !== "idle") {
-			return { ...scheduled, skipReason: `worker_${activity}:transcript_fallback_waiting` };
-		}
-		this.reconcileControlTranscript(agent, retained, true);
-		this.acknowledgeDeliveredMailboxMessage(agent.agentId, retained.messageId);
-		const settlement = {
-			...scheduled,
-			skipReason: `${scheduled.skipReason ?? "worker_task_terminal"}:transcript_fallback_delivered`,
-		};
-		return returnSettlement ? settlement : undefined;
 	}
 
 	private controlMessageAttempt(agentId: string, message: WorkerAgentMessage): AttemptRuntimeState | undefined {
@@ -2754,50 +1688,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			throw new Error(`Worker control message '${messageId}' owns multiple durable attempts.`);
 		}
 		return matches[0];
-	}
-
-	private scheduleCorrelatedTaskBearingAttempt(attempt: AttemptRuntimeState): TaskBearingReconciliation {
-		const record = this.options.getLifecycle().getRecord(attempt.taskId);
-		if (!record) return { started: false, skipReason: "orchestration_projection_missing" };
-		if (attempt.status === "queued") return this.scheduleTaskBearingAttempt(record, attempt);
-		if (attempt.status === "leased" || attempt.status === "running" || attempt.status === "suspended") {
-			return { started: true, record };
-		}
-		return { started: false, record, skipReason: `worker_task_terminal_${attempt.status}` };
-	}
-
-	private scheduleTaskBearingAttempt(record: LaneRecord, attempt: AttemptRuntimeState): TaskBearingReconciliation {
-		try {
-			this.options.scheduler.enqueue(record, this.options.recoveredRequest(attempt));
-		} catch (error) {
-			return {
-				started: false,
-				record,
-				skipReason: error instanceof Error ? error.message : String(error),
-			};
-		}
-		try {
-			this.options.scheduler.drain();
-			return { started: true, record };
-		} catch (error) {
-			return {
-				started: true,
-				record,
-				skipReason: `worker_task_recovery_pending:${error instanceof Error ? error.message : String(error)}`,
-			};
-		}
-	}
-
-	private enableAttemptAccountingForNextTask(agent: AgentBindingContract): void {
-		if (!agent.resumeContext.sessionFile) return;
-		this.conversations
-			.open({
-				agentDir: this.options.agentDir,
-				resumeContext: agent.resumeContext,
-				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
-				projectClaim: this.options.getConversationClaim?.(agent),
-			})
-			.enableAttemptUsageBoundaries();
 	}
 
 	private requireControl(): void {
@@ -3014,13 +1904,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		);
 	}
 
-	/** Whether a message is held: filed under a delegation that is paused, so it runs only once that delegation resumes. */
-	private heldByPausedDelegation(message: WorkerAgentMessage): boolean {
-		if (message.delegationObjectiveId === undefined) return false;
-		const objective = this.options.getLifecycle().getTaskRuntimeSnapshot().objectives[message.delegationObjectiveId];
-		return objectiveIsPaused(objective?.objective);
-	}
-
 	/** Worker execution and physical-release events; subscribers own their lifetime. */
 	subscribeStateChanges(listener: () => void): () => void {
 		this.stateListeners.add(listener);
@@ -3032,7 +1915,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const controlMessage = mailbox.getMessage(messageId);
 		if (controlMessage) {
 			const target = this.requireKnownAgent(agentId);
-			const sourceMailbox = this.beginWorkerReplyAcknowledgement(target, controlMessage, true);
+			const sourceMailbox = this.replyRouting.beginWorkerReplyAcknowledgement(target, controlMessage, true);
 			mailbox.acknowledgeDelivered(messageId);
 			if (
 				sourceMailbox &&
@@ -3045,39 +1928,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			return;
 		}
 		mailbox.acknowledgeDelivered(messageId);
-	}
-
-	private beginWorkerReplyAcknowledgement(
-		target: AgentBindingContract,
-		reply: WorkerAgentMessage,
-		allowCommittedSource = false,
-	): WorkerAgentMailbox | undefined {
-		if (reply.replyToMessageId === undefined) return undefined;
-		if (!reply.senderAgentId) throw new Error("Worker reply routing metadata is incomplete.");
-		const source = this.requireKnownAgent(reply.senderAgentId);
-		const sourceMailbox = this.getMailbox(source.agentId);
-		const request = sourceMailbox.getMessage(reply.replyToMessageId);
-		if (request?.expectReply !== true || request.deliveredAt === undefined) {
-			throw new Error("Worker reply does not reference a delivered reply-expected message.");
-		}
-		if (request.senderAgentId !== target.agentId) {
-			throw new Error("Worker reply target does not match the original requester.");
-		}
-		if (request.threadId !== reply.threadId) {
-			throw new Error("Worker reply thread conflicts with the original request.");
-		}
-		const activeAcknowledgementId = sourceMailbox.getReplyAcknowledgementId(request.messageId);
-		if (activeAcknowledgementId && activeAcknowledgementId !== reply.messageId) {
-			throw new Error("Worker reply acknowledgement identity conflicts with an active transaction.");
-		}
-		if (request.repliedAt !== undefined && activeAcknowledgementId === undefined) {
-			if (allowCommittedSource || reply.deliveredAt !== undefined) return sourceMailbox;
-			throw new Error("Worker reply source was marked replied without its exact acknowledgement marker.");
-		}
-		if (!sourceMailbox.beginReplyAcknowledgement(request.messageId, reply.messageId, reply.content)) {
-			throw new Error("Worker reply source acknowledgement could not be acquired.");
-		}
-		return sourceMailbox;
 	}
 
 	private enqueuePeerMessage(
@@ -3106,9 +1956,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
 		const activeSender =
 			sender && sender !== this.sessionRootAddress ? snapshot.agents[sender]?.activeAttemptId : undefined;
+		const { delegationObjectiveId: requestedDelegation, receiptOrigin: hostOrigin, ...peerOptions } = options;
 		const receiptOrigin = replay
 			? undefined
 			: (admittedOrigin ??
+				hostOrigin ??
 				(sender && sender !== this.sessionRootAddress
 					? activeSender
 						? snapshot.attempts[activeSender]?.dispatch.receiptOrigin
@@ -3118,7 +1970,6 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const turnOrigin = replay ? undefined : this.senderTurnOrigin(sender);
 		// The delegation the words belong to: the root's host-only tag, else the delegation the sender's own turn is filed
 		// under, so a leader's bots' turns stay that delegation's. A replay keeps the stored message's.
-		const { delegationObjectiveId: requestedDelegation, ...peerOptions } = options;
 		const delegationObjectiveId = replay
 			? undefined
 			: (requestedDelegation ?? this.senderDelegationObjectiveId(sender));
@@ -3235,33 +2086,5 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				);
 			}
 		}
-	}
-
-	private mailboxMessage(message: WorkerAgentMessage): UserMessage {
-		if (message.task?.kind === "host_event") return workerHostEventMessage(message.task.binding, message.content);
-		const metadata = [
-			message.senderAgentId ? `from=${message.senderAgentId}` : undefined,
-			message.threadId ? `thread=${message.threadId}` : undefined,
-			message.replyToMessageId ? `replyTo=${message.replyToMessageId}` : undefined,
-			message.expectReply ? "replyExpected=true" : undefined,
-		].filter((value): value is string => value !== undefined);
-		const header = `[Worker control ${message.messageId}${metadata.length > 0 ? ` ${metadata.join(" ")}` : ""}]\n`;
-		const projected: UserMessage = {
-			role: "user",
-			content: `${header}${message.content}`,
-			timestamp: Date.now(),
-		};
-		// The rendered text is for the model; everything that must recognize this message reads its typed identity.
-		stampWorkerControl(projected, {
-			v: 1,
-			k: message.kind,
-			id: message.messageId,
-			...(message.senderAgentId ? { from: message.senderAgentId } : {}),
-			...(message.threadId ? { th: message.threadId } : {}),
-			...(message.replyToMessageId ? { to: message.replyToMessageId } : {}),
-			...(message.expectReply ? { reply: true as const } : {}),
-			body: { from: header.length, to: header.length + message.content.length },
-		});
-		return projected;
 	}
 }

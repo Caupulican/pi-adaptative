@@ -14,15 +14,19 @@ import {
 	TOOL_BRIDGE_ADDRESS_ENV,
 	TOOL_BRIDGE_CALL_TIMEOUT_MS,
 	TOOL_BRIDGE_CLIENT_MODULE,
-	TOOL_BRIDGE_TOKEN_ENV,
+	TOOL_BRIDGE_TOKEN_FILE_ENV,
 	type ToolBridgeToolName,
 } from "./tool-bridge-policy.ts";
 import {
 	openToolBridgeListener,
 	type ToolBridgeFailureKind,
+	type ToolBridgeListener,
 	type ToolBridgeReply,
 	type ToolBridgeRequest,
 } from "./tool-bridge-server.ts";
+
+/** The run's secret is written here, in the run's private directory, and the client removes it once it has read it. */
+const SECRET_FILE_NAME = "secret";
 
 /**
  * One bridged script run: the tool calls a `python` script makes through `pi_tools` while the run lasts.
@@ -80,7 +84,7 @@ export interface ToolBridgeRunOptions {
 }
 
 export interface ToolBridgeRun {
-	/** The channel address and the run's secret, for the script's process only. */
+	/** The channel address and the path of the run's secret file, for the script's process only. */
 	readonly environment: Readonly<Record<string, string>>;
 	/** Holds the generated client module; goes on the script's import path. */
 	readonly clientDirectory: string;
@@ -221,6 +225,7 @@ export async function openToolBridge(options: ToolBridgeRunOptions): Promise<Too
 		return settled;
 	};
 
+	let listener: ToolBridgeListener | undefined;
 	try {
 		const clientTools = options.tools.map((name) => {
 			const parameters = options.host.resolveTool(name)?.parameters;
@@ -230,14 +235,17 @@ export async function openToolBridge(options: ToolBridgeRunOptions): Promise<Too
 			encoding: "utf8",
 			mode: 0o600,
 		});
-		const listener = await openToolBridgeListener({ directory, handle });
+		const opened = await openToolBridgeListener({ directory, handle });
+		listener = opened;
+		const secretFile = join(directory, SECRET_FILE_NAME);
+		await writeFile(secretFile, opened.token, { encoding: "utf8", mode: 0o600 });
 		return {
-			environment: { [TOOL_BRIDGE_ADDRESS_ENV]: listener.address, [TOOL_BRIDGE_TOKEN_ENV]: listener.token },
+			environment: { [TOOL_BRIDGE_ADDRESS_ENV]: opened.address, [TOOL_BRIDGE_TOKEN_FILE_ENV]: secretFile },
 			clientDirectory: directory,
 			close: async () => {
 				runAbort.abort(new Error("the script run ended"));
 				options.signal?.removeEventListener("abort", stopWithParent);
-				await listener.close();
+				await opened.close();
 				await Promise.allSettled([...inflight]);
 				await removeRunDirectory(directory);
 				const report: ToolBridgeReport = {
@@ -245,7 +253,7 @@ export async function openToolBridge(options: ToolBridgeRunOptions): Promise<Too
 					calls,
 					byTool,
 					outcomes,
-					authFailures: listener.authFailures,
+					authFailures: opened.authFailures,
 					ms: Date.now() - startedAt,
 					trace,
 				};
@@ -253,12 +261,12 @@ export async function openToolBridge(options: ToolBridgeRunOptions): Promise<Too
 					calls,
 					byTool,
 					...outcomes,
-					authFailures: listener.authFailures,
+					authFailures: opened.authFailures,
 					ms: report.ms,
 				}));
-				if (listener.authFailures > 0) {
+				if (opened.authFailures > 0) {
 					harnessLog.warn("tools", "a connection to a script's tool channel did not prove the run's secret", {
-						connections: listener.authFailures,
+						connections: opened.authFailures,
 					});
 				}
 				return report;
@@ -266,6 +274,7 @@ export async function openToolBridge(options: ToolBridgeRunOptions): Promise<Too
 		};
 	} catch (error) {
 		options.signal?.removeEventListener("abort", stopWithParent);
+		await listener?.close();
 		await removeRunDirectory(directory);
 		throw error;
 	}

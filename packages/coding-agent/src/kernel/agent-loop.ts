@@ -53,6 +53,7 @@ import {
 	type ToolFailureMemoryTracker,
 	toolFailureCorrection,
 } from "./tool-failure-memory.ts";
+import { createErrorToolResult } from "./tool-failure-receipt.ts";
 import {
 	ToolFailureRecoveryGate,
 	type ToolFailureRecoveryGateEffect,
@@ -77,7 +78,6 @@ import type {
 	AgentTool,
 	AgentToolCall,
 	AgentToolErrorKind,
-	AgentToolOutcomeDetails,
 	AgentToolResult,
 	ToolCallRepairInfo,
 } from "./types.ts";
@@ -2690,7 +2690,7 @@ async function executePreparedToolCall(
 		} else if (cancelled) {
 			const cancellationText = abortedToolCallText(signal?.reason, message);
 			executed = {
-				result: createErrorToolResult(cancellationText),
+				result: createErrorToolResult(cancellationText, undefined, described.receipt),
 				operationCompleted: false,
 				isError: true,
 				errorClass: described.errorClass,
@@ -2700,7 +2700,7 @@ async function executePreparedToolCall(
 			};
 		} else {
 			executed = {
-				result: createErrorToolResult(message, toolFailure?.details),
+				result: createErrorToolResult(message, toolFailure?.details, described.receipt),
 				operationCompleted: toolFailure?.errorKind === "operation_outcome",
 				isError: true,
 				errorClass: described.errorClass,
@@ -3007,13 +3007,6 @@ function detailsWithoutVerification(details: unknown): unknown {
 	const descriptors: PropertyDescriptorMap = Object.getOwnPropertyDescriptors(details);
 	delete descriptors.piVerification;
 	return Object.defineProperties({}, descriptors);
-}
-
-function createErrorToolResult(message: string, details?: AgentToolOutcomeDetails): AgentToolResult<any> {
-	return {
-		content: [{ type: "text", text: message }],
-		details: details ? { ...details } : {},
-	};
 }
 
 async function emitToolExecutionStart(toolCall: AgentToolCall, emit: AgentEventSink): Promise<void> {

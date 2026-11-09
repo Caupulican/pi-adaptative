@@ -17,15 +17,10 @@ import type { ManagedLaneView } from "../delegation/managed-lane-views.ts";
 import type { PersistentBotLiveState } from "../delegation/persistent-bot-team-store.ts";
 import type { RemoteBackendPort } from "../fleet/remote-admit.ts";
 import type { PlacementCapacitySource } from "../placement/capacity-source.ts";
+import type { RemotePlacementSession } from "./abandoned-placements.ts";
 import { isOneOf, MAX_ADVERT_MODELS, type ModelFact, WIRE_WORD } from "./capabilities.ts";
 import { type FleetMachine, FleetMachines } from "./fleet-machines.ts";
-import {
-	type PlaceOptions,
-	type PlaceResult,
-	type PreparedOffer,
-	RemoteJobClient,
-	type RemotePlacementSession,
-} from "./job-client.ts";
+import { type PlaceOptions, type PlaceResult, type PreparedOffer, RemoteJobClient } from "./job-client.ts";
 import { JOB_CANCEL_REASONS, type JobCancelReason } from "./job-protocol.ts";
 import { JobRunner, type JobRunnerSession } from "./job-runner.ts";
 import { activeExecutorJobs, inDir, JobStore, outDir, type PlacerJobRecord } from "./job-store.ts";
@@ -346,6 +341,7 @@ export class RemoteJobs {
 				this.client.cancel(jobId, jobCancelReasonOf(reasonCode));
 				return true;
 			},
+			cancelPlan: (planId, reasonCode) => this.client.cancelPlan(planId, jobCancelReasonOf(reasonCode)),
 		};
 	}
 
@@ -381,28 +377,46 @@ export class RemoteJobs {
 		}
 	}
 
-	/** Jobs this machine placed on `machineId` that have not ended. */
-	private openJobsOn(machineId: string): PlacerJobRecord[] {
-		return this.store.out
-			.list()
-			.filter((record) => record.executorId === machineId && record.appliedAt === undefined && !record.ending);
+	/**
+	 * Jobs this machine placed on `machineId` that have not ended: the readable records, and the unreadable records its file names
+	 * for it. An unreadable record may be open, so it is counted; its words and creation time are unknown.
+	 */
+	private openJobsOn(machineId: string): {
+		readonly records: readonly PlacerJobRecord[];
+		readonly unreadable: number;
+	} {
+		const pass = this.store.placedScan();
+		return {
+			records: [...pass.valid.values()].filter(
+				(record) => record.executorId === machineId && record.appliedAt === undefined && !record.ending,
+			),
+			unreadable: pass.unreadable.filter((entry) => entry.machineId === machineId).length,
+		};
 	}
 
 	/** The roster row of the machine named `name`, from its facts and the jobs placed there. */
 	rosterWords(name: string, connected: boolean): RemoteRosterWords {
 		const machine = this.machines.byName(name);
-		const open = machine ? this.openJobsOn(machine.machineId) : [];
+		const open: { readonly records: readonly PlacerJobRecord[]; readonly unreadable: number } = machine
+			? this.openJobsOn(machine.machineId)
+			: { records: [], unreadable: 0 };
+		const count = open.records.length + open.unreadable;
 		if (!connected)
 			return {
 				state: "offline",
-				...(open.length > 0 ? { currentSummary: `offline, ${plural(open.length, "job")} waiting` } : {}),
+				...(count > 0 ? { currentSummary: `offline, ${plural(count, "job")} waiting` } : {}),
 			};
-		if (open.length > 0) {
+		if (count > 0) {
 			this.scheduleRosterTick();
-			const since = Math.min(...open.map((record) => record.createdAt));
+			// The duration is the oldest readable job's; with only unreadable records there is none to measure.
+			const since =
+				open.records.length > 0 ? Math.min(...open.records.map((record) => record.createdAt)) : undefined;
 			return {
 				state: "running",
-				currentSummary: `working on ${plural(open.length, "job")} for ${runningFor(since)}`,
+				currentSummary:
+					since === undefined
+						? `working on ${plural(count, "job")}`
+						: `working on ${plural(count, "job")} for ${runningFor(since)}`,
 			};
 		}
 		const facts = machine?.facts;

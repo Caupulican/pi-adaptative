@@ -2,9 +2,18 @@ import { createHash } from "node:crypto";
 import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readTransientRecordPayload } from "../../kernel/index.ts";
+import { createCustomMessage } from "../../kernel/messages.ts";
+import { transientRecordMessageOf } from "../../kernel/transient-records.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { resolvePath } from "../../utils/paths.ts";
-import { type PathAliasLegendRecord, readPathAliasLegendRecord } from "../comms/host-injection-records.ts";
+import { COMMS_RECORD_VERSION } from "../comms/comms-records.ts";
+import {
+	PATH_ALIAS_LEGEND_PAUSED_LINE,
+	PATH_ALIAS_LEGEND_RESUMED_LINE,
+	type PathAliasLegendRecord,
+	readPathAliasLegendRecord,
+	renderPathAliasLegendFrame,
+} from "../comms/host-injection-records.ts";
 import {
 	buildPathAliasLegendDelta,
 	collectActiveAliasIds,
@@ -70,14 +79,42 @@ const LEGEND_BUDGET_MARGIN = 1;
 export interface PathAliasSyncResult {
 	messages: AgentMessage[];
 	/**
-	 * The cumulative delta legend record for one request, or undefined when every visible alias already has a line:
-	 * the aliases the model can see on the wire (these rendered messages, plus the request's other `visibleMessages`
-	 * and `visibleTexts`) that no legend record in the synced history lists.
+	 * The cumulative delta legend record for one request: the aliases the model can see on the wire (these rendered messages,
+	 * plus the request's other `visibleMessages` and `visibleTexts`) that no legend record in the synced history, or on the
+	 * wire, lists. While alias minting is paused, the first request of the pause carries a pause-only record (no lines); a
+	 * request whose history already shows the pause carries nothing more for it, and a delta that lists aliases carries the
+	 * pause line itself. When minting resumes while a pause note is on the wire, the record clears it (`resumed`) and lists the
+	 * aliases pending on that request. Undefined when every visible alias already has a line and no pause note needs a change.
 	 */
-	legendFor(
+	legendFor?(
 		visibleMessages: readonly AgentMessage[],
 		visibleTexts: readonly string[],
 	): PathAliasLegendRecord | undefined;
+	/**
+	 * The cumulative legend of a carried frame: every alias the frame's texts reference, in the order they were first listed
+	 * in this runtime. Its text is append-only (`renderPathAliasLegendFrame`): a frame that lists more aliases starts with the
+	 * text of one that listed fewer, so the carried copy stays a byte prefix of every later one. It carries no pause state;
+	 * the delta legend does.
+	 */
+	frameLegend?(frameTexts: readonly string[]): AgentMessage | undefined;
+}
+
+/** Digest identifying one legend content, for the frame legends and the cost count that a re-sent frame legend must not repeat. */
+function legendDigest(text: string): string {
+	return createHash("sha256").update(text).digest("hex");
+}
+
+/** The text of a legend record: its string content, or the text blocks a carried frame re-sent it as. */
+function legendText(message: Extract<AgentMessage, { role: "custom" }>): string {
+	if (typeof message.content === "string") return message.content;
+	return message.content.map((part) => (part.type === "text" ? part.text : "")).join("");
+}
+
+/** One durable legend record's reading: the aliases it lists, and the pause state it sets (`paused`) or clears (`resumed`). */
+interface LegendRecordState {
+	readonly ids: readonly string[];
+	readonly paused: boolean;
+	readonly resumed: boolean;
 }
 
 /**
@@ -86,9 +123,23 @@ export interface PathAliasSyncResult {
  */
 function legacyLegendIds(content: unknown): readonly string[] {
 	if (typeof content !== "string") return [];
+	const ids: string[] = [];
 	// comms-legacy-decoder: legend records persisted before the typed record list their ids only as text lines.
-	const lines = content.split("\n");
-	return lines.map((line) => line.slice(0, line.indexOf("="))).filter((id) => id.length > 0);
+	for (const line of content.split("\n")) {
+		const separator = line.indexOf("=");
+		// The header and the pause and resume notes name no alias; only an `<id>=<path>` line lists one.
+		if (separator > 0) ids.push(line.slice(0, separator));
+	}
+	return ids;
+}
+
+/** The characters a legend record's pause or resume line takes up in its text (each with the newline that joins it): state, not charged. */
+function legendStateChars(record: PathAliasLegendRecord | undefined): number {
+	if (record === undefined) return 0;
+	return (
+		(record.paused === true ? PATH_ALIAS_LEGEND_PAUSED_LINE.length + 1 : 0) +
+		(record.resumed === true ? PATH_ALIAS_LEGEND_RESUMED_LINE.length + 1 : 0)
+	);
 }
 
 export class PathAliasRuntime {
@@ -113,13 +164,27 @@ export class PathAliasRuntime {
 	/**
 	 * Characters of every distinct legend record seen in a synced history: the legend budget's cost side. A record is
 	 * one object per conversation it was sent in, so a line re-sent to another conversation, or again after a
-	 * compaction or in a continuous-chat turn, is paid again.
+	 * compaction or in a continuous-chat turn, is paid again. A record that lists no alias is not charged, and neither
+	 * is the pause or resume line of one that does: those notes describe minting, and a note charged to the budget that
+	 * pauses minting would keep minting paused.
 	 */
 	private emittedLegendChars = 0;
+	/**
+	 * The aliases a carried frame legend lists, in the order they were first listed. Append-only: an id leaves it only when it
+	 * leaves the table. A restarted runtime rebuilds it from the first reference in the frame's text.
+	 */
+	private frameLegendOrder: string[] = [];
+	/** Digests of every frame legend content this runtime made, so a legend record is recognized as a frame's. */
+	private readonly frameLegendDigests = new Set<string>();
+	/**
+	 * The characters of the frame legend the cost count holds. The frame text is append-only, so its longest version is every
+	 * character the frame has ever sent once: a version that only extends it adds its new suffix, and a re-sent one adds nothing.
+	 */
+	private countedFrameLegendChars = 0;
 	/** The alias ids each wire message references, read once per message object. */
 	private readonly referencedIds = new WeakMap<AgentMessage, ReadonlySet<string>>();
-	/** The alias ids each durable legend record lists, read once per record object. */
-	private readonly legendRecordIds = new WeakMap<object, readonly string[]>();
+	/** What each durable legend record says, read once per record object (see {@link LegendRecordState}). */
+	private readonly legendRecordStates = new WeakMap<object, LegendRecordState>();
 	/** Mentions per alias id in rendered text, the savings side of the legend budget. */
 	private readonly mentionsById = new Map<string, number>();
 	private mintingPaused = false;
@@ -315,7 +380,7 @@ export class PathAliasRuntime {
 		// the model can actually see: the legend records in this history. Read from the history, not
 		// remembered by the process, so a restarted process does not re-send lines already there, and a
 		// compaction that summarized a record away re-sends the lines its still-visible aliases need.
-		const committed = this.durableLegendIds(messages);
+		const { listed: committed, pauseVisible } = this.legendHistory(messages);
 		const visible = new Set<string>();
 		for (const message of rewritten) for (const id of this.referencedAliasIds(message)) visible.add(id);
 		const table = this.table;
@@ -326,8 +391,28 @@ export class PathAliasRuntime {
 				const ids = new Set(visible);
 				for (const message of visibleMessages) for (const id of this.referencedAliasIds(message)) ids.add(id);
 				for (const id of collectReferencedAliasIds(visibleTexts)) ids.add(id);
-				return buildPathAliasLegendDelta(table, ids, committed, { paused });
+				// A legend record on the wire (a carried frame legend) lists its lines as the history's own records do.
+				const onWire = this.legendHistory(visibleMessages).listed;
+				const listed = onWire.size === 0 ? committed : new Set([...committed, ...onWire]);
+				const delta = buildPathAliasLegendDelta(table, ids, listed, { paused });
+				if (paused) {
+					if (delta !== undefined) return delta;
+					// A pause note already in the history stands for the rest of its turn; only a new pause gets one.
+					return pauseVisible
+						? undefined
+						: { v: COMMS_RECORD_VERSION, k: "path_alias_legend", paused: true, entries: [] };
+				}
+				if (!pauseVisible) return delta;
+				// Minting resumed while the pause note is on the wire: this record clears it, with the aliases pending on this request.
+				return {
+					v: COMMS_RECORD_VERSION,
+					k: "path_alias_legend",
+					paused: false,
+					resumed: true,
+					entries: delta?.entries ?? [],
+				};
 			},
+			frameLegend: (frameTexts) => this.frameLegendMessage(frameTexts, table),
 		};
 		this.lastSync = {
 			cwd: this.table.cwd,
@@ -347,21 +432,95 @@ export class PathAliasRuntime {
 		return ids;
 	}
 
-	/** The alias ids listed by the durable legend records in `messages`, read from each record's `details.record`. */
-	private durableLegendIds(messages: readonly AgentMessage[]): Set<string> {
-		const ids = new Set<string>();
+	/**
+	 * What the legend records in `messages` list, and whether alias minting is paused in them: a pause note (a record with
+	 * `paused`) stays on the wire until a clearing record (`resumed`) follows it. A frame record and a plain delta say nothing
+	 * about the pause, so they leave it as it was. Read from `details.record`, once per record object.
+	 */
+	private legendHistory(messages: readonly AgentMessage[]): { listed: Set<string>; pauseVisible: boolean } {
+		const listed = new Set<string>();
+		let pauseVisible = false;
 		for (const message of messages) {
 			if (message.role !== "custom" || message.customType !== PATH_ALIAS_LEGEND_CUSTOM_TYPE) continue;
-			let listed = this.legendRecordIds.get(message);
-			if (!listed) {
-				const record = readPathAliasLegendRecord(readTransientRecordPayload(message.details));
-				listed = record ? record.entries.map((entry) => entry.id) : legacyLegendIds(message.content);
-				this.legendRecordIds.set(message, listed);
-				this.emittedLegendChars += typeof message.content === "string" ? message.content.length : 0;
-			}
-			for (const id of listed) ids.add(id);
+			const state = this.legendRecordState(message);
+			for (const id of state.ids) listed.add(id);
+			if (state.resumed) pauseVisible = false;
+			else if (state.paused) pauseVisible = true;
 		}
-		return ids;
+		return { listed, pauseVisible };
+	}
+
+	/** One legend record's reading, made once per record object, and charged to the cost side the first time it is read. */
+	private legendRecordState(message: Extract<AgentMessage, { role: "custom" }>): LegendRecordState {
+		let state = this.legendRecordStates.get(message);
+		if (!state) {
+			const record = readPathAliasLegendRecord(readTransientRecordPayload(message.details));
+			state = {
+				ids: record ? record.entries.map((entry) => entry.id) : legacyLegendIds(message.content),
+				paused: record?.paused === true,
+				resumed: record?.resumed === true,
+			};
+			this.legendRecordStates.set(message, state);
+			// A record that lists no alias is a note on minting, and is not charged to the budget that pauses it.
+			if (state.ids.length > 0) this.countLegendChars(message, record);
+		}
+		return state;
+	}
+
+	/**
+	 * Counts a legend record's characters into the cost side, once per record object, except that a frame legend counts only the
+	 * characters it adds to the frame: its bytes are paid once from the cached head, and a head that grows by a line pays for that
+	 * line alone. Every other legend record counts per object, as a re-appended delta is paid each time it is sent, less the pause
+	 * or resume line it carries (see {@link legendStateChars}). Until a frame legend exists, no digest is taken.
+	 */
+	private countLegendChars(
+		message: Extract<AgentMessage, { role: "custom" }>,
+		record: PathAliasLegendRecord | undefined,
+	): void {
+		const text = legendText(message);
+		if (this.frameLegendDigests.size > 0 && this.frameLegendDigests.has(legendDigest(text))) {
+			if (text.length > this.countedFrameLegendChars) {
+				this.emittedLegendChars += text.length - this.countedFrameLegendChars;
+				this.countedFrameLegendChars = text.length;
+			}
+			return;
+		}
+		this.emittedLegendChars += text.length - legendStateChars(record);
+	}
+
+	/**
+	 * The cumulative legend of the frame that leads the wire: every alias `frameTexts` reference, listed in the order this runtime
+	 * first listed them. The aliases one call adds follow in mint order, and the list only grows at the end, so the frame text is
+	 * append-only (`renderPathAliasLegendFrame`). Returned as the record reconciliation would append for it (see
+	 * `transientRecordMessageOf`), so the carried copy and any later reconciled copy are byte-identical.
+	 */
+	private frameLegendMessage(frameTexts: readonly string[], table: PathAliasTable): AgentMessage | undefined {
+		const paths = new Map(table.entries.map((entry) => [entry.id, entry.path] as const));
+		const referenced = collectReferencedAliasIds(frameTexts);
+		// An id leaves the order only when it leaves the table. `Set.add` keeps an id already listed where it stands.
+		const listed = new Set(this.frameLegendOrder.filter((id) => paths.has(id)));
+		for (const entry of table.entries) {
+			if (referenced.has(entry.id)) listed.add(entry.id);
+		}
+		this.frameLegendOrder = [...listed];
+		if (this.frameLegendOrder.length === 0) return undefined;
+		const entries = this.frameLegendOrder.flatMap((id) => {
+			const path = paths.get(id);
+			return path === undefined ? [] : [{ id, path }];
+		});
+		const record: PathAliasLegendRecord = { v: COMMS_RECORD_VERSION, k: "path_alias_legend", entries };
+		const content = renderPathAliasLegendFrame(entries);
+		// The host transient's timestamp is not part of the record: `transientRecordMessageOf` derives it from the content.
+		const hostTransient = createCustomMessage(
+			PATH_ALIAS_LEGEND_CUSTOM_TYPE,
+			content,
+			false,
+			{ cumulative: true, record },
+			new Date(0).toISOString(),
+		);
+		const carried = transientRecordMessageOf(hostTransient);
+		if (carried !== undefined) this.frameLegendDigests.add(legendDigest(content));
+		return carried;
 	}
 
 	/** The legend budget: the legend characters actually sent against the characters the aliases saved. */

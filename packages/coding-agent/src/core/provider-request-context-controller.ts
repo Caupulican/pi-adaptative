@@ -1,8 +1,9 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { AgentContextPlan, AgentContextWire } from "../kernel/index.ts";
-import { HOST_TRANSIENT_CLEARED_DETAILS, readTransientRecordPayload } from "../kernel/index.ts";
+import { HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
 import { createCustomMessage } from "../kernel/messages.ts";
+import { recordedTransientKinds, transientRecordMessageOf } from "../kernel/transient-records.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import {
 	TASK_AUTOMATION_CONTEXT_CLEARED,
@@ -24,7 +25,8 @@ import type { EnforcePromptPolicyResult } from "./context/context-prompt-enforce
 import type { PromptPolicyShadowReport } from "./context/context-prompt-policy.ts";
 import type { MemoryPromptPlan } from "./context/memory-prompt-plan.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
-import { PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "./context/path-alias-table.ts";
+import type { PathAliasSyncResult } from "./context/path-alias-session.ts";
+import { collectWireTexts, PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "./context/path-alias-table.ts";
 import { frozenPrefixLength } from "./context/prefix-stability.ts";
 import type { ContextGcReport, ContextGcResult } from "./context-gc.ts";
 import {
@@ -33,6 +35,11 @@ import {
 	type RoutedGoalContext,
 } from "./goals/compact-goal-context.ts";
 import type { GoalState } from "./goals/goal-state.ts";
+import {
+	OWNER_RETURN_BRIEF_CUSTOM_TYPE,
+	RETURN_BRIEF_CLEARED_TEXT,
+	type ReturnBriefPlan,
+} from "./owner-decisions/return-brief.ts";
 import type { CurrentTurnReflectionCuePlan } from "./reflection-controller.ts";
 import type { SkillPromptSection, SkillVaultController } from "./skill-vault.ts";
 import {
@@ -86,6 +93,8 @@ export interface ProviderRequestContextControllerDeps {
 	previewReflectionCue?(): CurrentTurnReflectionCuePlan | undefined;
 	previewTaskDirectoryContext?(): TaskDirectoryContextPlan;
 	previewTaskAutomationContext?(): TaskAutomationContextPlan;
+	/** The return brief of the owner turn in progress, when the owner came back after an idle gap (see the controller). */
+	previewReturnBrief?(): Promise<ReturnBriefPlan>;
 	previewSelfCompactionGuidance?(): { readonly content: string | undefined; readonly cleared: string };
 	getGoalState?(): GoalState | undefined;
 	getRoutedGoalContext?(): RoutedGoalContext | undefined;
@@ -100,14 +109,8 @@ export interface ProviderRequestContextControllerDeps {
 	 * outside a run and on a full-authority phone run, fewer on a fenced or guarded phone run); projected after compaction or whenever active.
 	 */
 	getEdgeGrants?(): readonly EdgeGrantView[];
-	applyPathAliases(messages: AgentMessage[]): {
-		messages: AgentMessage[];
-		/** The legend delta for the aliases visible on this request's wire, given what it carries besides `messages`. */
-		legendFor?(
-			visibleMessages: readonly AgentMessage[],
-			visibleTexts: readonly string[],
-		): PathAliasLegendRecord | undefined;
-	};
+	/** The request's aliased messages, with the legend the request's wire needs (see {@link PathAliasSyncResult}). */
+	applyPathAliases(messages: AgentMessage[]): PathAliasSyncResult;
 }
 
 export { PATH_ALIAS_LEGEND_CUSTOM_TYPE };
@@ -163,42 +166,29 @@ const ACTIVE_SKILL_LEGACY_CLEARED_TEXT =
 	"ACTIVE SKILL CONTEXT: superseded by one record per active skill; the skill records above are the current ones.";
 const ACTIVE_SKILL_EXCLUSIONS_CLEARED_TEXT = "EXCLUDED SKILLS: none. The exclusion record above is no longer current.";
 
-/** What a session's history says about the skill records it already holds. */
-interface SkillHistoryState {
-	/** Names of the skills with a per-skill record on record (typed by `details.record`), loaded now or not. */
-	readonly skillNames: ReadonlySet<string>;
-	/** The combined kind is on record. */
-	readonly legacyRecord: boolean;
-	/** The exclusion reminder kind is on record. */
-	readonly exclusionRecord: boolean;
-}
-
-function skillHistoryState(...histories: readonly (readonly AgentMessage[])[]): SkillHistoryState {
-	const skillNames = new Set<string>();
-	let legacyRecord = false;
-	let exclusionRecord = false;
-	for (const history of histories) {
-		for (const message of history) {
-			if (message.role !== "custom") continue;
-			if (message.customType === ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE) legacyRecord = true;
-			else if (message.customType === ACTIVE_SKILL_EXCLUSIONS_CUSTOM_TYPE) exclusionRecord = true;
-			const payload = readTransientRecordPayload(message.details);
-			if (payload?.k !== ACTIVE_SKILL_RECORD_KIND) continue;
-			const name = (payload as { name?: unknown }).name;
-			if (typeof name === "string") skillNames.add(name);
-		}
-	}
-	return { skillNames, legacyRecord, exclusionRecord };
+/**
+ * Whether a kind on record still needs its cleared record: the kind is on record and its last record is not the cleared text
+ * already. A kind never recorded has nothing to clear; a kind already cleared has nothing to append.
+ */
+function clearedRecordNeeded(
+	recorded: ReturnType<typeof recordedTransientKinds>,
+	kind: string,
+	clearedText: string,
+): boolean {
+	const last = recorded.get(kind);
+	return last !== undefined && last.content !== clearedText;
 }
 
 /**
  * The skill records a request offers, appended once per change by `reconcileTransientRecords`: one record per active skill (its
  * section), a cleared record for each skill on record that is no longer active, the exclusion reminder, and one cleared record
  * for the retired combined kind where a session holds it. An unchanged skill offers the same content, so it is not re-sent.
+ * `recorded` is the last record of each kind on the request's records (its history and carried head), so a request reads the
+ * skill records it needs in place of rescanning the history and re-deciding every skill ever loaded.
  */
 function skillTransientMessages(
 	sections: readonly SkillPromptSection[],
-	history: SkillHistoryState,
+	recorded: ReturnType<typeof recordedTransientKinds>,
 	exclusionReminder: string | undefined,
 ): AgentMessage[] {
 	const active = new Set(sections.map((entry) => entry.name));
@@ -211,12 +201,14 @@ function skillTransientMessages(
 			deterministicTransientTimestamp(entry.section),
 		),
 	);
-	for (const name of history.skillNames) {
-		if (active.has(name)) continue;
+	for (const kind of recorded.keys()) {
+		if (!kind.startsWith(ACTIVE_SKILL_RECORD_KIND_PREFIX)) continue;
+		const name = kind.slice(ACTIVE_SKILL_RECORD_KIND_PREFIX.length);
 		const cleared = activeSkillClearedText(name);
+		if (active.has(name) || !clearedRecordNeeded(recorded, kind, cleared)) continue;
 		messages.push(
 			createCustomMessage(
-				activeSkillRecordKind(name),
+				kind,
 				cleared,
 				false,
 				HOST_TRANSIENT_CLEARED_DETAILS,
@@ -224,7 +216,7 @@ function skillTransientMessages(
 			),
 		);
 	}
-	if (history.legacyRecord) {
+	if (clearedRecordNeeded(recorded, ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE, ACTIVE_SKILL_LEGACY_CLEARED_TEXT)) {
 		messages.push(
 			createCustomMessage(
 				ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
@@ -245,7 +237,9 @@ function skillTransientMessages(
 				deterministicTransientTimestamp(exclusionReminder),
 			),
 		);
-	} else if (history.exclusionRecord) {
+	} else if (
+		clearedRecordNeeded(recorded, ACTIVE_SKILL_EXCLUSIONS_CUSTOM_TYPE, ACTIVE_SKILL_EXCLUSIONS_CLEARED_TEXT)
+	) {
 		messages.push(
 			createCustomMessage(
 				ACTIVE_SKILL_EXCLUSIONS_CUSTOM_TYPE,
@@ -317,9 +311,15 @@ export function hasConversationSummaryMarker(
 	return messages.some(isSummary) || (extensionMessages?.some(isSummary) ?? false);
 }
 
-/** The authority record this request carries: the active grants, the cleared record (no grant), or none. */
+/**
+ * The authority record this request carries: the active grants, the cleared record (no grant), or none. `recorded` is the last
+ * record of each kind on the request's records (the history and its carried head): an authority record the request ever carried
+ * is current until it is cleared. The extension view is not consulted for it: a view is the history minus what a projection
+ * drops, and no extension may write this host-reserved kind, so the view holds no authority record the history lacks.
+ */
 function resolveAuthorityContext(
 	getEdgeGrants: (() => readonly EdgeGrantView[]) | undefined,
+	recorded: ReturnType<typeof recordedTransientKinds>,
 	messages: readonly AgentMessage[],
 	extensionMessages: readonly AgentMessage[],
 ): AuthorityContextRecord | undefined {
@@ -327,23 +327,71 @@ function resolveAuthorityContext(
 	if (grants && grants.length > 0) {
 		return buildAuthorityContextRecord(grants);
 	}
-	const hasAuthorityRecordInHistory =
-		messages.some((message) => message.role === "custom" && message.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE) ||
-		extensionMessages.some(
-			(message) => message.role === "custom" && message.customType === AUTHORITY_CONTEXT_CUSTOM_TYPE,
-		);
-	if (hasAuthorityRecordInHistory || hasConversationSummaryMarker(messages, extensionMessages)) {
+	if (recorded.has(AUTHORITY_CONTEXT_CUSTOM_TYPE) || hasConversationSummaryMarker(messages, extensionMessages)) {
 		return buildAuthorityContextRecord([]);
 	}
 	return undefined;
 }
 
+/**
+ * The record kinds a carried head holds for the whole turn: each loaded skill's record, the authority context and the task
+ * directory. Every other record stays turn-scoped, since its content changes without an owner or agent action.
+ */
+export function isCarriedRecordKind(kind: string): boolean {
+	return (
+		kind.startsWith(ACTIVE_SKILL_RECORD_KIND_PREFIX) ||
+		kind === AUTHORITY_CONTEXT_CUSTOM_TYPE ||
+		kind === TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE
+	);
+}
+
+function isCarriedRecordMessage(message: AgentMessage): message is Extract<AgentMessage, { role: "custom" }> {
+	return message.role === "custom" && isCarriedRecordKind(message.customType);
+}
+
+/** Whether a history holds a custom record of one kind. A scan: `recordedTransientKinds` answers the same question from its index. */
+function holdsRecordOfKind(messages: readonly AgentMessage[], kind: string): boolean {
+	return messages.some((message) => message.role === "custom" && message.customType === kind);
+}
+
+/** The texts a frame's messages carry, for the frame legend to name: every frame message except the carried records. */
+function frameTextsOf(frame: readonly AgentMessage[]): string[] {
+	return frame.filter((message) => !isCarriedRecordMessage(message)).flatMap(collectWireTexts);
+}
+
 /** Coordinates replay-safe request context planning and accepted-plan lifecycle commit. */
 export class ProviderRequestContextController {
 	private readonly deps: ProviderRequestContextControllerDeps;
+	/**
+	 * The carried kinds in the order each was first carried, append-only for the session: a head lists its records in this order,
+	 * so a kind that leaves the head does not move the others, and a kind that joins it lands after those already carried.
+	 */
+	private readonly carryOrder: string[] = [];
 
 	constructor(deps: ProviderRequestContextControllerDeps) {
 		this.deps = deps;
+	}
+
+	/**
+	 * The records a carried head holds, as reconciliation would append each: the active carried-kind records of this request in
+	 * carry order, then the frame legend when one was made.
+	 */
+	private carriedHeadRecords(
+		transientMessages: readonly AgentMessage[],
+		frameLegend: AgentMessage | undefined,
+	): AgentMessage[] {
+		const active = transientMessages.filter(isCarriedRecordMessage);
+		for (const message of active) {
+			if (!this.carryOrder.includes(message.customType)) this.carryOrder.push(message.customType);
+		}
+		const rank = (kind: string): number => this.carryOrder.indexOf(kind);
+		const heads = [...active].sort((left, right) => rank(left.customType) - rank(right.customType));
+		const records: AgentMessage[] = [];
+		for (const message of heads) {
+			const record = transientRecordMessageOf(message);
+			if (record !== undefined) records.push(record);
+		}
+		return frameLegend === undefined ? records : [...records, frameLegend];
 	}
 
 	/**
@@ -368,35 +416,40 @@ export class ProviderRequestContextController {
 			goalAutoContinueNote,
 		);
 		const reflectionCuePlan = this.deps.previewReflectionCue?.();
+		// The request's records by kind: the history, with the carried head ahead of it when a frame carries one. Each kind's
+		// last record answers the presence checks below. The extension view is not scanned for these kinds: they are host-reserved
+		// (no extension can write one), and the side-trip brief is a suffix of the history, so the view holds none the history lacks.
+		const carriedSubset = (wire.messages ?? []).filter(isCarriedRecordMessage);
+		const requestRecords: readonly AgentMessage[] =
+			carriedSubset.length === 0 ? messages : [...carriedSubset, ...messages];
+		const recorded = recordedTransientKinds(requestRecords);
 		const directoryPlan = this.deps.previewTaskDirectoryContext?.();
+		// The directory is judged on the request's view and on its carried head: a view a side trip narrows still reads its own.
+		const directoryRecorded =
+			holdsRecordOfKind(extensionPlan.messages, TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE) ||
+			holdsRecordOfKind(carriedSubset, TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE);
 		const directoryContent =
-			directoryPlan?.content ??
-			(directoryPlan &&
-			extensionPlan.messages.some(
-				(message) => message.role === "custom" && message.customType === TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE,
-			)
-				? TASK_DIRECTORY_CONTEXT_CLEARED
-				: undefined);
+			directoryPlan?.content ?? (directoryPlan && directoryRecorded ? TASK_DIRECTORY_CONTEXT_CLEARED : undefined);
 		const automationPlan = this.deps.previewTaskAutomationContext?.();
 		const rawAutomationContent = automationPlan?.isCurrent() ? automationPlan.content : undefined;
-		const hasPriorAutomationContext =
-			messages.some(
-				(message) => message.role === "custom" && message.customType === TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE,
-			) ||
-			extensionPlan.messages.some(
-				(message) => message.role === "custom" && message.customType === TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE,
-			);
+		const hasPriorAutomationContext = recorded.has(TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE);
 		const automationContent =
 			rawAutomationContent ??
 			(hasPriorAutomationContext && automationPlan?.isCurrent() ? TASK_AUTOMATION_CONTEXT_CLEARED : undefined);
+		// A brief is current for its one owner turn. Once that turn is past, the last record of its kind clears it, once:
+		// a cleared record reads back as the cleared text, so a later request does not repeat it.
+		const returnBriefPlan = await this.deps.previewReturnBrief?.();
+		const rawReturnBrief = returnBriefPlan?.content;
+		const priorReturnBrief = recorded.get(OWNER_RETURN_BRIEF_CUSTOM_TYPE)?.content;
+		const returnBriefContent =
+			rawReturnBrief ??
+			(priorReturnBrief !== undefined && priorReturnBrief !== RETURN_BRIEF_CLEARED_TEXT
+				? RETURN_BRIEF_CLEARED_TEXT
+				: undefined);
 		const selfCompaction = this.deps.previewSelfCompactionGuidance?.();
-		const isGuidanceRecord = (message: AgentMessage) =>
-			message.role === "custom" && message.customType === SELF_COMPACTION_GUIDANCE_CUSTOM_TYPE;
 		const selfCompactionText =
 			selfCompaction?.content ??
-			(selfCompaction && (messages.some(isGuidanceRecord) || extensionPlan.messages.some(isGuidanceRecord))
-				? selfCompaction.cleared
-				: undefined);
+			(selfCompaction && recorded.has(SELF_COMPACTION_GUIDANCE_CUSTOM_TYPE) ? selfCompaction.cleared : undefined);
 		const providerTransients = [
 			...extensionPlan.transientMessages,
 			...(reflectionCuePlan ? [reflectionCuePlan.message] : []),
@@ -432,6 +485,17 @@ export class ProviderRequestContextController {
 							false,
 							undefined,
 							deterministicTransientTimestamp(automationContent),
+						),
+					]
+				: []),
+			...(returnBriefContent
+				? [
+						createCustomMessage(
+							OWNER_RETURN_BRIEF_CUSTOM_TYPE,
+							returnBriefContent,
+							false,
+							rawReturnBrief === undefined ? HOST_TRANSIENT_CLEARED_DETAILS : undefined,
+							deterministicTransientTimestamp(returnBriefContent),
 						),
 					]
 				: []),
@@ -488,18 +552,31 @@ export class ProviderRequestContextController {
 		const skillSections = skillVault?.previewSkillSections() ?? [];
 		const skillRevision = skillVault?.getContextRevision() ?? 0;
 		const exclusionReminder = skillVault?.previewExclusionReminder?.();
-		const skillRecords = skillVault
-			? skillTransientMessages(skillSections, skillHistoryState(messages, extensionPlan.messages), exclusionReminder)
-			: [];
+		const skillRecords = skillVault ? skillTransientMessages(skillSections, recorded, exclusionReminder) : [];
 
-		const authorityContext = resolveAuthorityContext(this.deps.getEdgeGrants, messages, extensionPlan.messages);
+		const authorityContext = resolveAuthorityContext(
+			this.deps.getEdgeGrants,
+			recorded,
+			messages,
+			extensionPlan.messages,
+		);
 
 		const withAuthority = appendAuthorityContext(beforeSkill.slice(compactableMessages.length), authorityContext);
 		const beforeLegend = [...withAuthority, ...skillRecords];
+		// A carried frame's legend is made on the turn's first request, while its wire carries none yet; later requests read the
+		// one the head carries. `carry` marks a projection that places the records of a carried head ahead of its frame.
+		const frameLegend =
+			wire.carry === true && !holdsRecordOfKind(wire.messages ?? [], PATH_ALIAS_LEGEND_CUSTOM_TYPE)
+				? pathAliasPlan.frameLegend?.(frameTextsOf(wire.messages ?? []))
+				: undefined;
 		// The legend names every alias the model can see on this request's wire: the planned messages, the transients
 		// before it, and what the kernel and a host projection carry around them. Committed lines are never retracted.
-		const legend = pathAliasPlan.legendFor?.([...(wire.messages ?? []), ...beforeLegend], wire.texts ?? []);
+		const legend = pathAliasPlan.legendFor?.(
+			[...(wire.messages ?? []), ...beforeLegend, ...(frameLegend === undefined ? [] : [frameLegend])],
+			wire.texts ?? [],
+		);
 		const transientMessages = appendPathAliasLegend(beforeLegend, legend);
+		const carriedRecords = wire.carry === true ? this.carriedHeadRecords(transientMessages, frameLegend) : undefined;
 		const contextProjection = this.deps.previewContextProjection?.([...compactableMessages, ...transientMessages]);
 
 		const dependenciesCurrent = () =>
@@ -510,13 +587,19 @@ export class ProviderRequestContextController {
 			reflectionCuePlan?.isCurrent() !== false &&
 			directoryPlan?.isCurrent() !== false &&
 			automationPlan?.isCurrent() !== false &&
+			(returnBriefPlan?.content === undefined || returnBriefPlan.isCurrent()) &&
 			(skillVault?.getContextRevision() ?? 0) === skillRevision &&
 			// The goal snapshot is one shared frozen value per journal position (session-goal-state.ts).
 			this.deps.getGoalState?.() === goalState &&
 			this.deps.getRoutedGoalContext?.() === routedGoalContext &&
 			this.deps.getGoalAutoContinueNote?.() === goalAutoContinueNote &&
 			isDeepStrictEqual(
-				resolveAuthorityContext(this.deps.getEdgeGrants, messages, extensionPlan.messages),
+				resolveAuthorityContext(
+					this.deps.getEdgeGrants,
+					recordedTransientKinds(requestRecords),
+					messages,
+					extensionPlan.messages,
+				),
 				authorityContext,
 			);
 		// One projection serves preview, currency check and commit. The plan is a pure function of the
@@ -534,6 +617,7 @@ export class ProviderRequestContextController {
 		return {
 			messages: compactableMessages,
 			transientMessages,
+			...(carriedRecords === undefined ? {} : { carriedRecords }),
 			isCurrent: dependenciesCurrent,
 			prepareCommit: () => planCurrent(),
 			commit: () => {

@@ -8,7 +8,9 @@
  * repository. Every verdict is read from evidence the harness itself wrote (lane records, worker claims, the bot and
  * group store, files on disk, the screen), never from what a model says about itself. The last line is the gate:
  * `LIVE GATE: PASS` only when no scenario failed; a skipped scenario is listed with its reason and is never counted as
- * a pass.
+ * a pass. s9 also fails on any undeclared state transition the harness logged during the run. The report stamps the
+ * commit it tested (`commit`, `dirty`, `installed`, `binary`) with its `verdict`; `scripts/live-gate-staleness.mjs` reads
+ * it.
  *
  * Needs: HERDR_ENV=1 (run inside herdr), the owner's provider logins, network. Spends subscription quota; CI never runs
  * it. Slack and Telegram are out of scope. Usage:
@@ -48,14 +50,36 @@ const ONLY = flag("only", "")
 	.filter(Boolean);
 const KEEP = args.includes("--keep");
 // `--installed` drives the installed `pi` binary instead of the source build, to validate what a user runs.
-const PI_COMMAND = args.includes("--installed") ? "pi" : join(REPO, "pi-test.sh");
+const INSTALLED = args.includes("--installed");
+const PI_COMMAND = INSTALLED ? "pi" : join(REPO, "pi-test.sh");
 
 if (process.env.HERDR_ENV !== "1") {
 	console.error("accept-harness-live: run this inside herdr (HERDR_ENV=1).");
 	process.exit(2);
 }
 
-const stamp = new Date().toISOString().replace(/[:.]/g, "-");
+// s9 reads the harness log, so the gate pins the level and categories it reads under: this process, every script it
+// spawns (`process.env`) and every pane (`launch`). The owner's shell cannot then narrow the log the verdict depends on.
+const HARNESS_LOG_PIN = { PI_LOG_LEVEL: "warn", PI_LOG_CATEGORIES: "" };
+Object.assign(process.env, HARNESS_LOG_PIN);
+const PANE_ENV = Object.entries(HARNESS_LOG_PIN)
+	.map(([key, value]) => `${key}=${value}`)
+	.join(" ");
+// The report stamps the binary an `--installed` run drove: the first line of its `--version`. A binary that cannot say
+// its version stops the run before any scenario, because the stamp would then name nothing.
+const installedVersion = () => {
+	const probe = spawnSync("pi", ["--version"], { encoding: "utf8", timeout: 30_000 });
+	const line = (probe.stdout ?? "").split("\n")[0].trim();
+	if (probe.status !== 0 || line === "") {
+		console.error("accept-harness-live: --installed needs `pi --version` to print a version; the report stamps it.");
+		process.exit(2);
+	}
+	return line;
+};
+const BINARY = INSTALLED ? installedVersion() : null;
+
+const RUN_STARTED_MS = Date.now();
+const stamp = new Date(RUN_STARTED_MS).toISOString().replace(/[:.]/g, "-");
 // A run keeps a snapshot of the runtime (hundreds of MB) in its agent directory, and /tmp is often memory-backed: earlier
 // runs of this script (recognized by their marker file) are removed before a new one starts, and a passing run removes
 // itself. A failing run stays for its evidence until the next run.
@@ -76,9 +100,22 @@ const RUN = mkdtempSync(join(tmpdir(), "pi-live-gate-"));
 writeFileSync(join(RUN, MARKER), `${stamp}\n`);
 const SANDBOX = join(RUN, "work");
 const AGENT = join(RUN, "agent");
+const QUOTA_PERCENTS = [95, 0.01];
+// Every agent directory the run creates: the orchestrator's, the linked machine's, the default setup's and each quota
+// run's. s9 reads their harness logs; the hand-back at the end reads their logins.
+const AGENT_DIRS = [
+	AGENT,
+	join(RUN, "remote-agent"),
+	join(RUN, "default-agent"),
+	...QUOTA_PERCENTS.map((percent) => join(RUN, `quota-${percent}`, "agent")),
+];
 const COMMON_DIR = execFileSync("git", ["rev-parse", "--git-common-dir"], { cwd: REPO, encoding: "utf8" }).trim();
 const REPORT_DIR = join(resolve(REPO, COMMON_DIR), "pi-audits", "live-validation", stamp);
 mkdirSync(REPORT_DIR, { recursive: true });
+// The commit and the dirty flag are read when the run starts: the scenarios test the tree as it was then, and the shared
+// tree may move on while a run takes its time.
+const COMMIT = execFileSync("git", ["rev-parse", "HEAD"], { cwd: REPO, encoding: "utf8" }).trim();
+const DIRTY = execFileSync("git", ["status", "--porcelain"], { cwd: REPO, encoding: "utf8" }).trim() !== "";
 
 // ---------------------------------------------------------------------------------------------------------------
 // Fixtures: synthetic, no private data.
@@ -191,7 +228,7 @@ const launch = (pane, cwd, extra = "", agentDir = AGENT) =>
 		"pane",
 		"run",
 		pane,
-		`clear; cd ${cwd} && PI_ADAPTATIVE_CODING_AGENT_DIR=${agentDir} ${PI_COMMAND} --provider ${MODEL_A.split("/")[0]} --model ${MODEL_A.split("/").slice(1).join("/")} ${extra}`,
+		`clear; cd ${cwd} && PI_ADAPTATIVE_CODING_AGENT_DIR=${agentDir} ${PANE_ENV} ${PI_COMMAND} --provider ${MODEL_A.split("/")[0]} --model ${MODEL_A.split("/").slice(1).join("/")} ${extra}`,
 	);
 const type = async (pane, text) => {
 	herdr("pane", "send-text", pane, text);
@@ -249,6 +286,28 @@ const sessionFiles = (agentDir = AGENT) => {
 	);
 };
 const entries = (agentDir = AGENT) => sessionFiles(agentDir).flatMap(jsonl);
+/** The day's harness log and its rotated copy: `harness-log.ts` renames a full file to `<name>.1` and writes on. */
+const HARNESS_LOG_FILE = /^harness-.*\.jsonl(\.1)?$/;
+/**
+ * Undeclared state transitions (`kernel/machine-spec.ts`: category `machine`, level warn) logged at or after this run
+ * started, in every agent directory the run created.
+ */
+const undeclaredTransitions = () =>
+	AGENT_DIRS.flatMap((dir) => {
+		const logs = join(dir, "logs", "harness");
+		if (!existsSync(logs)) return [];
+		return readdirSync(logs)
+			.filter((name) => HARNESS_LOG_FILE.test(name))
+			.flatMap((name) => jsonl(join(logs, name)));
+	}).filter((line) => line.level === "warn" && line.cat === "machine" && Date.parse(line.ts) >= RUN_STARTED_MS);
+const describeTransition = (line) => `${line.data?.machine} ${line.data?.from}->${line.data?.to} ${line.data?.reason}`;
+/** The problem text for the transitions logged so far in this run, or undefined when there are none. */
+const undeclaredProblem = () => {
+	const found = undeclaredTransitions();
+	return found.length > 0
+		? `${found.length} undeclared state transition(s): ${found.slice(0, 3).map(describeTransition).join("; ")}`
+		: undefined;
+};
 const claims = () =>
 	entries()
 		.filter((e) => e.type === "custom" && e.customType === "worker_claim")
@@ -453,7 +512,7 @@ const SCENARIOS = [
 				["--conditions=pi-source", join(REPO, "scripts", "accept-owner-quota-live.mjs"), "--quota-percent", String(percent), "--model", MODEL_A, "--dir", join(RUN, `quota-${percent}`)],
 				{ cwd: REPO, encoding: "utf8", timeout: 480_000 },
 			);
-		const outcomes = [95, 0.01].map((percent) => ({ percent, result: run(percent) }));
+		const outcomes = QUOTA_PERCENTS.map((percent) => ({ percent, result: run(percent) }));
 		const failed = outcomes.find(({ result }) => result.status !== 0 && result.status !== 3);
 		if (failed) throw new Error(`at ${failed.percent}%: ${failed.result.stdout.trim().split("\n").at(-1)}`);
 		const unsure = outcomes.find(({ result }) => result.status === 3);
@@ -941,6 +1000,8 @@ const SCENARIOS = [
 		const routineArgs = entries().filter((e) => e.message?.role === "toolResult" && e.message?.toolName === "routine" && (e.message?.details?.piToolFailureDirective || e.message?.details?.piToolFailureMemory)).length;
 		if (routineArgs > 0) problems.push(`${routineArgs} routine call(s) bounced for invalid arguments`);
 		if (fixtureDigest() !== FIXTURES_AT_START) problems.push("a fixture (mailbox or Trello export) was modified during the run");
+		const undeclared = undeclaredProblem();
+		if (undeclared) problems.push(undeclared);
 		for (const pane of [state.main, state.repo].filter(Boolean)) {
 			const leak = agentFacingLeak(screen(pane, 600));
 			if (leak) problems.push(`the owner's screen shows machine text: ${leak.slice(0, 220)}`);
@@ -951,7 +1012,7 @@ const SCENARIOS = [
 		if (stuck.length + stuckBots.length > 0) problems.push("a worker lane is still awaiting its parent after everything finished");
 		if (problems.length > 0) throw new Error(problems.join("; "));
 		if (network.length > 0) throw inconclusive(`${network.length} worker run(s) ended on a provider network failure, which says nothing about the harness`);
-		return "no failed run, no receipt rejection, no bounced routine call, no stuck lane";
+		return "no failed run, no receipt rejection, no bounced routine call, no stuck lane, no undeclared state transition";
 	}),
 	// Last on purpose: both ends restart, which replaces this session's transcript for any scenario that reads it.
 	scenario("s44", "the join holds across a restart of both ends: hub and joiner each come back linked from the records they kept", async () => {
@@ -973,6 +1034,9 @@ const SCENARIOS = [
 			4000,
 		);
 		if (!existsSync(join(state.remoteAgent, "remote", "joins.json"))) throw new Error("the machine kept no join record across the restart");
+		// s9 runs before this restart, so the restarted processes' transitions are checked here.
+		const undeclared = undeclaredProblem();
+		if (undeclared) throw new Error(`after the restart, ${undeclared}`);
 		return "the hub and the machine restarted and the join held from their own records, with no new token";
 	}),
 ];
@@ -1003,15 +1067,22 @@ for (const s of SCENARIOS) {
 const failed = results.filter((r) => r.status === "FAIL");
 const unsure = results.filter((r) => r.status === "INCONCLUSIVE");
 const skipped = results.filter((r) => r.status === "skipped");
-writeFileSync(join(REPORT_DIR, "report.json"), JSON.stringify({ at: stamp, modelA: MODEL_A, modelB: MODEL_B, sandbox: SANDBOX, agentDir: AGENT, results }, null, 1));
+const verdict = failed.length > 0 ? "FAIL" : unsure.length > 0 ? "INCONCLUSIVE" : "PASS";
+// The stamp: the commit this run tested, with its verdict. Written for every verdict, so a stale or failing run is visible too.
+writeFileSync(
+	join(REPORT_DIR, "report.json"),
+	JSON.stringify({ at: stamp, commit: COMMIT, dirty: DIRTY, installed: INSTALLED, binary: BINARY, verdict, modelA: MODEL_A, modelB: MODEL_B, sandbox: SANDBOX, agentDir: AGENT, results }, null, 1),
+);
 if (!KEEP) for (const pane of panes) spawnSync("herdr", ["pane", "close", pane]);
-for (const authFile of [join(AGENT, "auth.json"), join(RUN, "remote-agent", "auth.json"), join(RUN, "default-agent", "auth.json"), join(RUN, "quota-95", "agent", "auth.json"), join(RUN, "quota-0.01", "agent", "auth.json")])
+for (const dir of AGENT_DIRS) {
+	const authFile = join(dir, "auth.json");
 	if (existsSync(authFile)) handBackLogins(authFile);
+}
 if (!KEEP && failed.length === 0 && unsure.length === 0) rmSync(RUN, { recursive: true, force: true });
 console.log(`\nreport: ${join(REPORT_DIR, "report.json")}`);
 if (!KEEP && (failed.length > 0 || unsure.length > 0)) console.log(`evidence kept: ${RUN} (removed by the next run)`);
 console.log(skipped.length > 0 ? `skipped (not counted as passes): ${skipped.map((r) => r.id).join(", ")}` : "skipped: none");
-if (failed.length > 0) console.log(`LIVE GATE: FAIL (${failed.map((r) => r.id).join(", ")})`);
-else if (unsure.length > 0) console.log(`LIVE GATE: INCONCLUSIVE (${unsure.map((r) => r.id).join(", ")}: provider network failure; rerun when the network is healthy)`);
+if (verdict === "FAIL") console.log(`LIVE GATE: FAIL (${failed.map((r) => r.id).join(", ")})`);
+else if (verdict === "INCONCLUSIVE") console.log(`LIVE GATE: INCONCLUSIVE (${unsure.map((r) => r.id).join(", ")}: provider network failure; rerun when the network is healthy)`);
 else console.log("LIVE GATE: PASS");
 process.exit(failed.length > 0 ? 1 : unsure.length > 0 ? 3 : 0);

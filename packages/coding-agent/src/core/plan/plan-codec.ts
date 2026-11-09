@@ -7,13 +7,27 @@
 
 import { parseTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
 import { storedOutcomeFromValue } from "../delegation/worker-outcome-codec.ts";
-import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "../orchestration/contracts.ts";
+import {
+	type HostEventSubscriptionInput,
+	MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+	parseHostEventSubscriptionInput,
+} from "../events/host-event-contract.ts";
+import { MAX_KNOWLEDGE_GRANT_REFERENCES } from "../memory/knowledge-grant.ts";
+import {
+	MAX_ORCHESTRATION_COLLECTION_LENGTH,
+	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
+	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
+	MAX_WORKER_AUTHORITY_PATH_LENGTH,
+	ORCHESTRATION_THINKING_LEVELS,
+} from "../orchestration/contracts.ts";
 import { exactRecord, record } from "../orchestration/task-runtime-projection.ts";
 import { DurableTaskRuntimeError } from "../orchestration/task-runtime-state.ts";
 import type { Placement, PlacementPin } from "../placement/placement-types.ts";
 import { PROOF_STAKES_LEVELS, type ProofStakesLevel } from "../proof/stakes-levels.ts";
 import {
 	PLAN_CLOSE_STATUSES,
+	PLAN_DECODABLE_VERSIONS,
 	PLAN_HOLD_REASONS,
 	PLAN_LIMITS,
 	PLAN_NODE_ID_PATTERN,
@@ -21,10 +35,12 @@ import {
 	PLAN_RECORD_VERSION,
 	PLAN_STATUSES,
 	type PlanClosure,
+	type PlanFanout,
 	type PlanFromNewerBuild,
 	type PlanJoinSettlement,
 	type PlanJoinSpec,
 	type PlanJudgmentRef,
+	type PlanNodeAuthority,
 	type PlanNodeHold,
 	type PlanNodeRelease,
 	type PlanNodeRuntime,
@@ -124,14 +140,140 @@ function pinFromValue(value: unknown, label: string): PlacementPin {
 	return { target: { botId: text(target.botId, PLAN_LIMITS.pinChars, `${label}.target.botId`) }, mode };
 }
 
-function joinFromValue(value: unknown, label: string): PlanJoinSpec {
-	const input = exactRecord(value, label, ["members", "criterion", "quorum"]);
+/** A boolean field; anything else is refused by name. */
+function flag(value: unknown, label: string): boolean {
+	return typeof value === "boolean" ? value : fail(label, "must be true or false");
+}
+
+/** A sha256 hex digest, as the fan-out member texts are named. */
+function digest(value: unknown, label: string): string {
+	const decoded = text(value, 64, label);
+	return /^[0-9a-f]{64}$/.test(decoded) ? decoded : fail(label, "is not a sha256 digest");
+}
+
+/** A record of version 1 carries the first field list; version 2 adds the optional fields below. */
+const JOIN_FIELDS = ["members", "criterion", "quorum"] as const;
+const JOIN_FIELDS_V2 = [...JOIN_FIELDS, "criteria"] as const;
+
+function joinFromValue(value: unknown, label: string, version: number): PlanJoinSpec {
+	const input = exactRecord(value, label, version === 1 ? JOIN_FIELDS : JOIN_FIELDS_V2);
 	const criterion = optionalText(input.criterion, PLAN_LIMITS.criterionChars, `${label}.criterion`);
+	const criteria =
+		input.criteria === undefined
+			? undefined
+			: entries(input.criteria, PLAN_LIMITS.criteria, `${label}.criteria`, (entry, at) =>
+					text(entry, PLAN_LIMITS.criterionChars, at),
+				);
 	return {
 		members: entries(input.members, PLAN_LIMITS.joinMembersMax, `${label}.members`, nodeId),
 		...(criterion !== undefined ? { criterion } : {}),
 		...(input.quorum !== undefined
 			? { quorum: positive(input.quorum, `${label}.quorum`, PLAN_LIMITS.joinMembersMax) }
+			: {}),
+		...(criteria !== undefined ? { criteria } : {}),
+	};
+}
+
+function modelFromValue(value: unknown, label: string): { readonly provider: string; readonly modelId: string } {
+	const input = exactRecord(value, label, ["provider", "modelId"]);
+	return {
+		provider: text(input.provider, MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH, `${label}.provider`),
+		modelId: text(input.modelId, MAX_ORCHESTRATION_MODEL_ID_LENGTH, `${label}.modelId`),
+	};
+}
+
+function knowledgeReferenceFromValue(
+	value: unknown,
+	label: string,
+): { readonly id: string; readonly revision: number } {
+	const input = exactRecord(value, label, ["id", "revision"]);
+	const referenceId = text(input.id, 64, `${label}.id`);
+	if (!/^[a-f0-9]{64}$/.test(referenceId)) fail(`${label}.id`, "is not a knowledge id");
+	return { id: referenceId, revision: positive(input.revision, `${label}.revision`) };
+}
+
+function subscriptionFromValue(value: unknown, label: string): HostEventSubscriptionInput {
+	try {
+		return parseHostEventSubscriptionInput(value);
+	} catch (error) {
+		return fail(label, error instanceof Error ? error.message : "is invalid");
+	}
+}
+
+const AUTHORITY_FIELDS = [
+	"model",
+	"thinkingLevel",
+	"toolNames",
+	"readOnly",
+	"path",
+	"writePaths",
+	"profileId",
+	"knowledge",
+	"subscriptions",
+	"forkTurns",
+	"independentOf",
+] as const;
+
+/** A fan-out member's authority, bounded as the `delegate` start schema bounds the same fields. */
+function authorityFromValue(value: unknown, label: string): PlanNodeAuthority {
+	const input = exactRecord(value, label, AUTHORITY_FIELDS);
+	return {
+		...(input.model !== undefined ? { model: modelFromValue(input.model, `${label}.model`) } : {}),
+		...(input.thinkingLevel !== undefined
+			? { thinkingLevel: oneOf(input.thinkingLevel, ORCHESTRATION_THINKING_LEVELS, `${label}.thinkingLevel`) }
+			: {}),
+		...(input.toolNames !== undefined
+			? {
+					toolNames: entries(
+						input.toolNames,
+						MAX_ORCHESTRATION_COLLECTION_LENGTH,
+						`${label}.toolNames`,
+						(entry, at) => id(entry, at),
+					),
+				}
+			: {}),
+		...(input.readOnly !== undefined ? { readOnly: flag(input.readOnly, `${label}.readOnly`) } : {}),
+		...(input.path !== undefined
+			? { path: text(input.path, MAX_WORKER_AUTHORITY_PATH_LENGTH, `${label}.path`) }
+			: {}),
+		...(input.writePaths !== undefined
+			? {
+					writePaths: entries(input.writePaths, 16, `${label}.writePaths`, (entry, at) =>
+						text(entry, MAX_WORKER_AUTHORITY_PATH_LENGTH, at),
+					),
+				}
+			: {}),
+		...(input.profileId !== undefined ? { profileId: id(input.profileId, `${label}.profileId`) } : {}),
+		...(input.knowledge !== undefined
+			? {
+					knowledge: entries(
+						input.knowledge,
+						MAX_KNOWLEDGE_GRANT_REFERENCES,
+						`${label}.knowledge`,
+						knowledgeReferenceFromValue,
+					),
+				}
+			: {}),
+		...(input.subscriptions !== undefined
+			? {
+					subscriptions: entries(
+						input.subscriptions,
+						MAX_HOST_EVENT_SUBSCRIPTIONS_PER_TASK,
+						`${label}.subscriptions`,
+						subscriptionFromValue,
+					),
+				}
+			: {}),
+		...(input.forkTurns !== undefined ? { forkTurns: text(input.forkTurns, 16, `${label}.forkTurns`) } : {}),
+		...(input.independentOf !== undefined
+			? {
+					independentOf: entries(
+						input.independentOf,
+						MAX_ORCHESTRATION_COLLECTION_LENGTH,
+						`${label}.independentOf`,
+						id,
+					),
+				}
 			: {}),
 	};
 }
@@ -150,9 +292,10 @@ const NODE_FIELDS = [
 	"join",
 	"since",
 ] as const;
+const NODE_FIELDS_V2 = [...NODE_FIELDS, "doubts", "authority", "textDigest"] as const;
 
-function nodeFromValue(value: unknown, label: string): PlanNodeSpec {
-	const input = exactRecord(value, label, NODE_FIELDS);
+function nodeFromValue(value: unknown, label: string, version: number): PlanNodeSpec {
+	const input = exactRecord(value, label, version === 1 ? NODE_FIELDS : NODE_FIELDS_V2);
 	return {
 		id: nodeId(input.id, `${label}.id`),
 		kind: oneOf(input.kind, PLAN_NODE_KINDS, `${label}.kind`),
@@ -166,8 +309,19 @@ function nodeFromValue(value: unknown, label: string): PlanNodeSpec {
 		requirementIds: entries(input.requirementIds, PLAN_LIMITS.requirementEntries, `${label}.requirementIds`, id),
 		...(input.pin !== undefined ? { pin: pinFromValue(input.pin, `${label}.pin`) } : {}),
 		effort: oneOf(input.effort, ["normal", "deep"] as const, `${label}.effort`),
-		...(input.join !== undefined ? { join: joinFromValue(input.join, `${label}.join`) } : {}),
+		...(input.join !== undefined ? { join: joinFromValue(input.join, `${label}.join`, version) } : {}),
 		since: positive(input.since, `${label}.since`, PLAN_LIMITS.versions),
+		...(input.doubts !== undefined
+			? {
+					doubts: entries(input.doubts, PLAN_LIMITS.nodeDoubts, `${label}.doubts`, (entry, at) =>
+						text(entry, PLAN_LIMITS.doubtChars, at),
+					),
+				}
+			: {}),
+		...(input.authority !== undefined
+			? { authority: authorityFromValue(input.authority, `${label}.authority`) }
+			: {}),
+		...(input.textDigest !== undefined ? { textDigest: digest(input.textDigest, `${label}.textDigest`) } : {}),
 	};
 }
 
@@ -206,6 +360,18 @@ const RECORD_FIELDS = [
 	"createdAt",
 	"revisedAt",
 ] as const;
+const RECORD_FIELDS_V2 = [...RECORD_FIELDS, "fanout"] as const;
+
+function fanoutFromValue(value: unknown, label: string): PlanFanout {
+	const input = exactRecord(value, label, ["groupId", "kind", "toolCallId"]);
+	const groupId = text(input.groupId, 11, `${label}.groupId`);
+	if (!/^fo-[0-9a-f]{8}$/.test(groupId)) fail(`${label}.groupId`, "is not a fan-out group id");
+	return {
+		groupId,
+		kind: oneOf(input.kind, ["slices", "race"] as const, `${label}.kind`),
+		toolCallId: id(input.toolCallId, `${label}.toolCallId`),
+	};
+}
 
 function newerPlan(input: Record<string, unknown>, version: number): PlanFromNewerBuild {
 	const planId =
@@ -215,13 +381,16 @@ function newerPlan(input: Record<string, unknown>, version: number): PlanFromNew
 	return { v: version, planId, version: planVersion, unsupported: true };
 }
 
-/** Decodes a stored plan record; see the module comment for the newer-build rule. */
+/**
+ * Decodes a stored plan record; see the module comment for the newer-build rule. A version this build decodes is read
+ * against that version's field list, and the decoded record always carries the version this build writes.
+ */
 export function planRecordFromValue(value: unknown, label: string): StoredPlanRecord {
 	const input = record(value, label);
 	const v = input.v;
 	if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) return fail(`${label}.v`, "is invalid");
-	if (v > PLAN_RECORD_VERSION) return newerPlan(input, v);
-	exactRecord(input, label, RECORD_FIELDS);
+	if (!(PLAN_DECODABLE_VERSIONS as readonly number[]).includes(v)) return newerPlan(input, v);
+	exactRecord(input, label, v === 1 ? RECORD_FIELDS : RECORD_FIELDS_V2);
 	const planId = text(input.planId, 11, `${label}.planId`);
 	if (!/^pl-[0-9a-f]{8}$/.test(planId)) fail(`${label}.planId`, "is not a plan id");
 	if (typeof input.unjudged !== "boolean") fail(`${label}.unjudged`, "must be true or false");
@@ -236,7 +405,7 @@ export function planRecordFromValue(value: unknown, label: string): StoredPlanRe
 			? { subgraphOf: subgraphFromValue(input.subgraphOf, `${label}.subgraphOf`) }
 			: {}),
 		title: text(input.title, PLAN_LIMITS.titleChars, `${label}.title`),
-		nodes: entries(input.nodes, PLAN_LIMITS.nodes, `${label}.nodes`, nodeFromValue),
+		nodes: entries(input.nodes, PLAN_LIMITS.nodes, `${label}.nodes`, (entry, at) => nodeFromValue(entry, at, v)),
 		rootOwned: entries(input.rootOwned, PLAN_LIMITS.requirementEntries * PLAN_LIMITS.nodes, `${label}.rootOwned`, id),
 		final: nodeId(input.final, `${label}.final`),
 		status: oneOf(input.status, PLAN_STATUSES, `${label}.status`),
@@ -244,6 +413,7 @@ export function planRecordFromValue(value: unknown, label: string): StoredPlanRe
 		judgments: entries(input.judgments, PLAN_LIMITS.judgments, `${label}.judgments`, judgmentFromValue),
 		createdAt: id(input.createdAt, `${label}.createdAt`),
 		revisedAt: id(input.revisedAt, `${label}.revisedAt`),
+		...(input.fanout !== undefined ? { fanout: fanoutFromValue(input.fanout, `${label}.fanout`) } : {}),
 	};
 	if (decoded.nodes.some((node) => node.since > decoded.version)) fail(`${label}.nodes`, "name a later version");
 	if (!decoded.nodes.some((node) => node.id === decoded.final)) fail(`${label}.final`, "names no step of the plan");

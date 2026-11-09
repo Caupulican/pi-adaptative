@@ -127,19 +127,51 @@ export function appendSessionSkillExclusion(
 	return { payload, record };
 }
 
+/** An edit of the body of a skill that already exists, with the names of the skills this session has loaded. */
+export interface SkillBodyEdit {
+	name: string;
+	loadedSkillNames: readonly string[];
+}
+
+/**
+ * `ineligible`: the autonomy mode or autoLearn settings forbid skill evolution.
+ * `proposal`: evolution is permitted, but the edit targets a skill this session never loaded; it stays a proposal.
+ */
+export type SkillEvolutionEligibility =
+	| { eligible: true; reason: string }
+	| { eligible: false; disposition: "ineligible" | "proposal"; reason: string };
+
+/**
+ * The skill-evolution rule. The autonomy mode and autoLearn settings decide whether skills may change at all. Editing
+ * the body of an existing skill (`existingSkill`) also requires that this session loaded that skill: a membership
+ * fact, so an edit of a skill the session did not load is a proposal, never a write. Creating a skill passes no
+ * `existingSkill`; the create path refuses an existing file on its own.
+ */
 export function checkSkillEvolutionEligibility(
 	autonomyMode: AutonomyMode,
 	autoLearnSettings?: AutoLearnSettings,
-): { eligible: boolean; reason: string } {
+	existingSkill?: SkillBodyEdit,
+): SkillEvolutionEligibility {
 	if (autonomyMode === "off") {
-		return { eligible: false, reason: "autonomy mode is off; skill evolution requires owner approval" };
+		return {
+			eligible: false,
+			disposition: "ineligible",
+			reason: "autonomy mode is off; skill evolution requires owner approval",
+		};
 	}
 	const resolved = resolveAutoLearnSettings(autonomyMode, autoLearnSettings);
 	if (!resolved.enabled) {
-		return { eligible: false, reason: "autoLearn is disabled in settings" };
+		return { eligible: false, disposition: "ineligible", reason: "autoLearn is disabled in settings" };
 	}
 	if (!resolved.applyHighConfidence) {
-		return { eligible: false, reason: "applyHighConfidence is disabled in settings" };
+		return { eligible: false, disposition: "ineligible", reason: "applyHighConfidence is disabled in settings" };
+	}
+	if (existingSkill && !existingSkill.loadedSkillNames.includes(existingSkill.name)) {
+		return {
+			eligible: false,
+			disposition: "proposal",
+			reason: `skill "${existingSkill.name}" was not loaded in this session, so its body was not edited; the update is kept as a proposal for the owner`,
+		};
 	}
 	return { eligible: true, reason: `permitted by autonomy mode ${autonomyMode} and autoLearn settings` };
 }

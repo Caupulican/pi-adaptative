@@ -29,13 +29,18 @@ import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { BackgroundLaneController } from "./background-lane-controller.ts";
 import type { BashExecutionController } from "./bash-execution-controller.ts";
 import type { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
+import type { SelfCompactionController } from "./compaction/self-compaction-controller.ts";
 import type { CurationTelemetrySnapshot } from "./context/brain-curator.ts";
 import { buildContextCompositionReport, type ContextCompositionReport } from "./context/context-composition.ts";
 import type { PromptEnforcementReport } from "./context/context-prompt-enforcement.ts";
 import { CONTEXT_VISIBILITY_LONG_CHARS, CONTEXT_VISIBILITY_SHORT_CHARS } from "./context/context-query-visibility.ts";
 import type { MemoryPromptInclusionReport } from "./context/memory-diagnostics.ts";
 import type { ContextGcResult } from "./context-gc.ts";
+import type { ContextPipeline } from "./context-pipeline.ts";
 import type { SpawnedUsageTotals } from "./cost/usage-records.ts";
+import type { SemanticDecisionEngine } from "./decision/engine.ts";
+import { noulProbability } from "./decision/noul.ts";
+import { createDecisionProgram } from "./decision/program.ts";
 import type { ExpertSelectionService } from "./expert-routing/service.ts";
 import type { ContextUsage } from "./extensions/index.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
@@ -45,7 +50,11 @@ import type { GoalState } from "./goals/goal-state.ts";
 import { proveRequirementChecks } from "./goals/prove-requirement-checks.ts";
 import { runRequirementCheck } from "./goals/requirement-checks.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
+import type { AutoLearnApplyPorts } from "./learning/auto-learn-proposals.ts";
+import { ObservationStore, observationKey } from "./learning/observation-store.ts";
+import { type LessonCandidate, type LessonJudge, routeLesson } from "./learning/structural-backlog.ts";
 import { type ContinuousChatRequestSource, splitContinuousChatRequest } from "./memory/continuous-chat-projection.ts";
+import type { MemoryController } from "./memory-controller.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
 import { assertCurrentGoalObjective } from "./objective-execution/current-objective-execution.ts";
 import { createRepoGitDelivery } from "./objective-execution/delivery-proof.ts";
@@ -66,6 +75,8 @@ import {
 } from "./operator-projection/session-operator-projection.ts";
 import type { AdaptationProjection } from "./operator-projection/types.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime-state.ts";
+import { ReturnBriefController } from "./owner-decisions/return-brief-controller.ts";
+import type { OwnerInputLedger } from "./owner-input-ledger.ts";
 import type { ProfileFilterController } from "./profile-filter-controller.ts";
 import type { DurableOwnerRuleStore } from "./project-rules/durable-owner-rules.ts";
 import {
@@ -73,8 +84,11 @@ import {
 	SessionProjectRules,
 	type TrustedRuleSource,
 } from "./project-rules/session-project-rules.ts";
+import { ProviderRequestContextController } from "./provider-request-context-controller.ts";
+import type { ReflectionController } from "./reflection-controller.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import type { RuntimeBuilder } from "./runtime-builder.ts";
+import type { SessionEdgeIntentController } from "./session-edge-intent-controller.ts";
 import type { SessionSemanticPlaneController } from "./session-semantic-plane-controller.ts";
 import type { SessionWorkState } from "./session-work-state.ts";
 import type { SettingsManager } from "./settings-manager.ts";
@@ -85,6 +99,8 @@ import { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-c
 import { sameLaneVerificationDirective } from "./system-one/control-directive.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import type { SystemOneWorkerControl } from "./system-one/worker-control.ts";
+import { captureSessionTaskDirectoryContext } from "./tasks/task-directory-context.ts";
+import type { LiveRunOrigin } from "./turn-origin.ts";
 
 export interface SessionOperatorProjectionWiringDeps {
 	readonly sessionManager: SessionManager;
@@ -745,4 +761,147 @@ export async function runToolkitHit(
 		deps.emit({ type: "message_start", message: recorded });
 		deps.emit({ type: "message_end", message: recorded });
 	}
+}
+
+/**
+ * The owners the request context is planned from. A member the session assigns after it builds the controller (the
+ * model router, the reflection controller, the runtime builder, the extension runner) is passed as a getter, so the
+ * closures read the member as it stands when a request is planned.
+ */
+export interface SessionProviderRequestContextOwners {
+	readonly sessionManager: SessionManager;
+	readonly memory: MemoryController;
+	readonly pipeline: ContextPipeline;
+	readonly selfCompaction: Pick<SelfCompactionController, "guidance" | "guidanceClearedText">;
+	readonly skillVault: SkillVaultController;
+	readonly goals: Pick<GoalSessionController, "getRoutedGoalContext" | "autoContinueNote">;
+	readonly edgeIntent: Pick<SessionEdgeIntentController, "getRunEdgeGrants">;
+	readonly ownerInputs: Pick<OwnerInputLedger, "onDelivered">;
+	readonly modelRouter: () => Pick<ModelRouterController, "projectTurnContext">;
+	readonly reflection: () => Pick<ReflectionController, "previewCurrentTurnCue">;
+	readonly runtimeBuilder: () => Pick<RuntimeBuilder, "previewTaskAutomationContext">;
+	readonly extensionRunner: Parameters<MemoryController["createContextProjection"]>[0];
+	readonly getGoalState: () => GoalState | undefined;
+	readonly agentDir: () => string;
+	readonly cwd: () => string;
+	readonly taskProjection: () => TaskRuntimeProjection | undefined;
+	readonly currentSubmissionEpoch: () => number | undefined;
+	readonly liveRun: () => LiveRunOrigin | undefined;
+	readonly warn: (message: string) => void;
+}
+
+export interface SessionProviderRequestContext {
+	readonly controller: ProviderRequestContextController;
+	/** The owner's return brief: built and carried by the controller, merged into the `/status` view. */
+	readonly returnBrief: ReturnBriefController;
+}
+
+/**
+ * Builds the provider request context controller for a session and the return brief controller it carries. Each step of
+ * the request plan is the pipeline's own call, in the order the plan runs them.
+ */
+export function createSessionProviderRequestContext(
+	owners: SessionProviderRequestContextOwners,
+): SessionProviderRequestContext {
+	const { pipeline, memory, selfCompaction, goals, edgeIntent, skillVault } = owners;
+	const returnBrief = new ReturnBriefController({
+		getSessionId: () => owners.sessionManager.getSessionId(),
+		getAgentDir: owners.agentDir,
+		getCwd: owners.cwd,
+		now: () => Date.now(),
+		ownerInputs: owners.ownerInputs,
+		sessionManager: owners.sessionManager,
+		taskProjection: owners.taskProjection,
+		currentSubmissionEpoch: owners.currentSubmissionEpoch,
+		liveRun: owners.liveRun,
+		warn: owners.warn,
+	});
+	const controller = new ProviderRequestContextController({
+		// A side trip reads its small brief, never the transcript (see ModelRouterController.projectTurnContext).
+		transformBase: async (messages) => owners.modelRouter().projectTurnContext(messages),
+		transformExtensions: memory.createContextProjection(owners.extensionRunner),
+		runContextAudit: (messages) => pipeline.runContextAudit(messages),
+		runPromptPolicyPlanning: (report) => pipeline.runPromptPolicyPlanning(report),
+		previewContextProjection: (messages) => pipeline.previewContextProjection(messages),
+		commitContextProjection: (projection) => pipeline.commitContextProjection(projection),
+		runMemoryRetrieval: (messages) => memory.runMemoryRetrieval(messages),
+		applyContextGc: (messages, writePayloads, frozenBelow) =>
+			pipeline.applyContextGc(messages, writePayloads, frozenBelow),
+		correlatePromptPolicyWithContextGc: (report) => pipeline.correlatePromptPolicyWithContextGc(report),
+		runPromptEnforcement: (messages, report, sourceMessages, frozenBelow, gcReport) =>
+			pipeline.runPromptEnforcement(messages, report, undefined, { sourceMessages, frozenBelow, gcReport }),
+		enqueueRelevanceCuration: (messages, report) => pipeline.enqueueRelevanceCuration(messages, report),
+		maybeDrainBrainCuration: () =>
+			pipeline.maybeDrainBrainCuration((type, data) => owners.sessionManager.appendCustomEntry(type, data)),
+		appendMemoryEvidence: (messages, report, wire) => memory.appendPromptMemory(messages, report, wire),
+		previewReflectionCue: () => owners.reflection().previewCurrentTurnCue(),
+		previewTaskDirectoryContext: () => captureSessionTaskDirectoryContext(owners.sessionManager),
+		previewTaskAutomationContext: () => owners.runtimeBuilder().previewTaskAutomationContext(),
+		previewReturnBrief: () => returnBrief.previewReturnBrief(),
+		previewSelfCompactionGuidance: () => ({
+			content: selfCompaction.guidance(),
+			cleared: selfCompaction.guidanceClearedText(),
+		}),
+		getGoalState: owners.getGoalState,
+		skillVault,
+		getRoutedGoalContext: () => goals.getRoutedGoalContext(),
+		getGoalAutoContinueNote: () => goals.autoContinueNote(),
+		getEdgeGrants: () => edgeIntent.getRunEdgeGrants(),
+		applyPathAliases: (messages) => pipeline.applyPathAliases(messages),
+	});
+	return { controller, returnBrief };
+}
+
+/** The observation count a lesson carries. Skill updates are never observation-counted, so they count 0. */
+function observedCountOf(agentDir: string, lesson: LessonCandidate): number {
+	if (lesson.layer === "skill") return 0;
+	return ObservationStore.forAgentDir(agentDir, { readOnly: true }).get(observationKey(lesson.layer, lesson.summary));
+}
+
+/**
+ * The lesson router of one apply batch (`applyAutoLearnProposals`). Each lesson is routed by System One's atomic judgments,
+ * one boolean question per call, and a judgment System One cannot answer is `open`. Undefined where no System One engine is
+ * bound, and then nothing is routed.
+ */
+export function createLessonRoutePort(owners: {
+	readonly agentDir: () => string;
+	readonly engine: () => SemanticDecisionEngine | undefined;
+}): AutoLearnApplyPorts["routeLesson"] {
+	const engine = owners.engine();
+	if (engine === undefined) return undefined;
+	const judge: LessonJudge = {
+		async noul(question, context, signal) {
+			try {
+				const program = createDecisionProgram({
+					id: "auto-learn-lesson-route",
+					decisions: [{ kind: "boolean", id: "judgment", instruction: question }],
+				});
+				const evaluation = await engine.evaluate(
+					program,
+					{ lesson: context },
+					{ signal, consequence: "low", occupancy: "background" },
+				);
+				const probability = noulProbability((evaluation.results as Readonly<Record<string, unknown>>).judgment);
+				return probability === undefined
+					? { error: "System One returned no probability for the lesson judgment" }
+					: { probability };
+			} catch (error) {
+				signal?.throwIfAborted();
+				return { error: error instanceof Error ? error.message : String(error) };
+			}
+		},
+	};
+	return (lesson, facts) => {
+		const agentDir = owners.agentDir();
+		return routeLesson({
+			agentDir,
+			candidate: lesson,
+			facts: {
+				observedCount: observedCountOf(agentDir, lesson),
+				skillLoadedThisSession: facts.skillLoadedThisSession,
+			},
+			judge,
+			now: Date.now(),
+		});
+	};
 }

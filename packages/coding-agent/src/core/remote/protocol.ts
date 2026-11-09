@@ -93,7 +93,12 @@ export const REFUSAL_TEXT: Readonly<Record<LinkRefusal, string>> = {
 	protocol: "the hub speaks another version of the link, or requires a sealed link this machine did not offer",
 };
 
-const ID = /^[A-Za-z0-9_-]{1,128}$/;
+/**
+ * A wire id: a hub, machine, message or job id. Capped at 64 characters because a job record's file is named by its machine id
+ * (hex-encoded, so twice as long) and its job id: at 64 the longest record or cancel-marker name, with its temporary suffix, stays
+ * under the 255-byte file-name limit. Real ids are 22 to 36 characters.
+ */
+export const WIRE_ID = /^[A-Za-z0-9_-]{1,64}$/;
 const NAME = /^[a-z0-9][a-z0-9-]{0,62}$/;
 
 export function isMachineName(value: unknown): value is string {
@@ -132,7 +137,7 @@ export function parseFrame(line: string): LinkFrame | undefined {
 				offered !== null &&
 				text(value.nonce, 128) &&
 				typeof value.hubId === "string" &&
-				ID.test(value.hubId) &&
+				WIRE_ID.test(value.hubId) &&
 				isMachineName(value.hubName)
 				? {
 						t: "challenge",
@@ -150,13 +155,13 @@ export function parseFrame(line: string): LinkFrame | undefined {
 			if (
 				offered === null ||
 				typeof value.machineId !== "string" ||
-				!ID.test(value.machineId) ||
+				!WIRE_ID.test(value.machineId) ||
 				!isMachineName(value.name) ||
 				!text(value.nonce, 128) ||
 				!text(value.proof, 128) ||
 				!subtree ||
 				subtree.length > MAX_SUBTREE ||
-				!subtree.every((id) => typeof id === "string" && ID.test(id)) ||
+				!subtree.every((id) => typeof id === "string" && WIRE_ID.test(id)) ||
 				typeof value.depth !== "number" ||
 				!Number.isInteger(value.depth) ||
 				value.depth < 0 ||
@@ -185,13 +190,13 @@ export function parseFrame(line: string): LinkFrame | undefined {
 				? { t: "refuse", reason: value.reason as LinkRefusal }
 				: undefined;
 		case "msg":
-			return typeof value.id === "string" && ID.test(value.id) && text(value.text, MAX_MESSAGE_CHARS)
+			return typeof value.id === "string" && WIRE_ID.test(value.id) && text(value.text, MAX_MESSAGE_CHARS)
 				? { t: "msg", id: value.id, text: value.text }
 				: undefined;
 		case "reply": {
 			// A present `final` must be a boolean; an absent one is left absent (a final reply), so the parsed frame says what was sent.
 			if (value.final !== undefined && typeof value.final !== "boolean") return undefined;
-			return typeof value.id === "string" && ID.test(value.id) && text(value.text, MAX_MESSAGE_CHARS)
+			return typeof value.id === "string" && WIRE_ID.test(value.id) && text(value.text, MAX_MESSAGE_CHARS)
 				? {
 						t: "reply",
 						id: value.id,

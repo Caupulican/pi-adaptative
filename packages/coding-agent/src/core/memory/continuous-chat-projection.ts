@@ -7,6 +7,7 @@ import type { TextContent } from "@caupulican/pi-ai";
 import type { AgentContextPlanFn } from "../../kernel/loop-config.ts";
 import { createCustomMessage } from "../../kernel/messages.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
+import { PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "../context/path-alias-table.ts";
 import type { ContinuousChatAudit } from "../extensions/builtin.ts";
 import type { ContinuousChatCacheTextContent, ContinuousChatViewCache } from "./continuous-chat-cache.ts";
 import type { IcmTurnCoordinator, IcmTurnHandle } from "./continuous-chat-turn-coordinator.ts";
@@ -133,7 +134,7 @@ export function splitContinuousChatRequest(
 	if (turn !== undefined) {
 		const resolved = resolveContinuousChatTurnStart(turn, messages);
 		return {
-			frame: continuousChatFrameMessages(turn, renderContinuousChatTurnState(turn)),
+			frame: turnFrame(turn),
 			own: "error" in resolved ? [] : messages.slice(resolved.index),
 		};
 	}
@@ -202,6 +203,16 @@ export function resolveContinuousChatTurnStart(
 }
 
 /**
+ * The frame a turn's requests carry: the carried head and view the turn's first request noted, else the view and state alone
+ * (before that request). One source for the dashboard and the context audit, so both show what the wire carries.
+ */
+function turnFrame(turn: IcmTurnHandle): AgentMessage[] {
+	return turn.frame === undefined
+		? continuousChatFrameMessages(turn, renderContinuousChatTurnState(turn))
+		: [...turn.frame];
+}
+
+/**
  * The running turn as the context audit shows it: its frame, and the session entry its own messages begin at in `messages`
  * (`getEntryId` reads a persisted message's entry), or why that entry is not known.
  */
@@ -210,7 +221,7 @@ export function continuousChatTurnAudit(
 	messages: readonly AgentMessage[],
 	getEntryId: (message: AgentMessage) => string | undefined,
 ): NonNullable<ContinuousChatAudit["turn"]> {
-	const frame = continuousChatFrameMessages(turn, renderContinuousChatTurnState(turn));
+	const frame = turnFrame(turn);
 	const resolved = resolveContinuousChatTurnStart(turn, messages);
 	if ("error" in resolved) return { turnId: turn.turnId, frame, start: { unresolved: resolved.error } };
 	const first = messages[resolved.index];
@@ -241,12 +252,53 @@ function turnStartIndex(handle: IcmTurnHandle, messages: readonly AgentMessage[]
 	return resolved.index;
 }
 
+/** A turn's carried head: the records its first request carried (what reconciliation holds) and their wire form. */
+interface CarriedTurnHead {
+	readonly handle: IcmTurnHandle;
+	readonly records: readonly AgentMessage[];
+	readonly wire: readonly AgentMessage[];
+}
+
+/** Whether a record is the path-alias legend, the record a carried head ends with when a frame legend exists. */
+function isFrameLegend(message: AgentMessage): boolean {
+	return message.role === "custom" && message.customType === PATH_ALIAS_LEGEND_CUSTOM_TYPE;
+}
+
+/**
+ * The frame legend's text as the blocks already sent. Text that extends them adds one block holding its new suffix; any other
+ * text starts over. The frame text is append-only, so a turn that grows the legend leaves every block sent before byte-identical.
+ */
+function legendBatches(sent: readonly string[], text: string): string[] {
+	const joined = sent.join("");
+	if (text === joined) return [...sent];
+	return text.startsWith(joined) ? [...sent, text.slice(joined.length)] : [text];
+}
+
+/**
+ * The wire form of a carried head. Every record but the last is sent as reconciliation holds it. The last one carries the cache
+ * boundary on its last block: a frame legend is sent as `legendBlocks` (one text block per append batch, so a block sent before
+ * stays byte-identical as the legend grows, and the previous turn's breakpoint still prefix-matches), any other record as one block.
+ */
+function carriedHeadWire(records: readonly AgentMessage[], legendBlocks: readonly string[]): AgentMessage[] {
+	const last = records.at(-1);
+	if (last === undefined) return [];
+	if (last.role !== "custom") throw new TypeError("A carried record is a custom record.");
+	const texts = isFrameLegend(last) ? legendBlocks : [carriedText(last)];
+	const blocks: TextContent[] = texts.map((text, index) =>
+		index === texts.length - 1 ? { type: "text", text, cacheBoundary: true } : { type: "text", text },
+	);
+	return [...records.slice(0, -1), { ...last, content: blocks }];
+}
+
 /**
  * Projects the installed plan onto the running turn. The base planner receives only the running turn's
  * messages (with `sentPrefixCount` shifted to the turn start) so context GC, path aliasing, prompt
  * enforcement, and transient decisions never inspect or mutate pre-turn durable history that `<chat>`
  * replaced; the wire carries the turn view and state followed by the planned turn messages. The view and
  * state lead the plan as its non-compactable head: compaction can only shrink the turn's own messages.
+ * The carried head (skill, authority and task-directory records, then the frame legend) leads the view and is
+ * memoized per turn: its records are the ones the first request of the turn carried, so a turn re-derives it
+ * only when the next turn starts. Reconciliation reads the carried records as the wire's history.
  * Throws rather than send durable history when no turn is running, the turn start is missing from the
  * request, a compaction summary in the turn is not one this turn applied, or the planned history contains
  * messages outside the running turn.
@@ -260,6 +312,22 @@ export function createContinuousChatPlanWrapper(
 		if (frame?.handle === handle && frame.stateText === stateText) return frame.messages;
 		frame = { handle, stateText, messages: continuousChatFrameMessages(handle, stateText) };
 		return frame.messages;
+	};
+	// The frame legend's text as the blocks sent so far, across turns (see `legendBatches`).
+	let legendSent: readonly string[] = [];
+	// The running turn's carried head, memoized on its first request.
+	let carried: CarriedTurnHead | undefined;
+	const carryHead = (
+		handle: IcmTurnHandle,
+		records: readonly AgentMessage[],
+		frameMessages: readonly AgentMessage[],
+	): CarriedTurnHead => {
+		const legend = records.at(-1);
+		legendSent = legend !== undefined && isFrameLegend(legend) ? legendBatches(legendSent, carriedText(legend)) : [];
+		const head: CarriedTurnHead = { handle, records, wire: carriedHeadWire(records, legendSent) };
+		carried = head;
+		handle.noteFrame([...records, ...frameMessages]);
+		return head;
 	};
 	return (base) => async (request, signal) => {
 		const current = source.current();
@@ -286,18 +354,24 @@ export function createContinuousChatPlanWrapper(
 		}
 		const sentPrefixCount = Math.max(0, request.sentPrefixCount - startIndex);
 		// The frame leads the wire: the base plan reads it to learn what the model sees (the legend names every alias the
-		// turn view or state mentions), never to rewrite it. The same frame objects ride every request of the turn and
-		// state, so what a reader derives from them is computed once.
+		// turn view, state or carried head mentions), never to rewrite it. The same frame objects ride every request of the
+		// turn and state, so what a reader derives from them is computed once.
 		const frameMessages = frameFor(handle, stateText);
+		const memoized = carried?.handle === handle ? carried : undefined;
 		const plan = await base(
 			{
 				...request,
 				messages: turnMessages,
 				sentPrefixCount,
-				wire: { ...request.wire, messages: [...frameMessages, ...(request.wire?.messages ?? [])] },
+				wire: {
+					...request.wire,
+					messages: [...(memoized?.wire ?? []), ...frameMessages, ...(request.wire?.messages ?? [])],
+					carry: true,
+				},
 			},
 			signal,
 		);
+		const head = memoized ?? carryHead(handle, plan.carriedRecords ?? [], frameMessages);
 		const turnTimestamps = new Set(turnMessages.map((message) => message.timestamp));
 		if (plan.messages.some((message) => !turnTimestamps.has(message.timestamp))) {
 			throw new Error("Continuous-chat planned history does not end with the running turn.");
@@ -306,13 +380,22 @@ export function createContinuousChatPlanWrapper(
 			const now = source.current();
 			return now?.handle === handle && now.stateText === stateText;
 		};
+		const { carriedRecords: _carriedRecords, ...planWithoutHead } = plan;
 		return {
-			...plan,
-			messages: [...frameMessages, ...plan.messages],
-			nonCompactableHead: frameMessages.length + (plan.nonCompactableHead ?? 0),
-			transientReconciliationBase: turnMessages,
+			...planWithoutHead,
+			messages: [...head.wire, ...frameMessages, ...plan.messages],
+			nonCompactableHead: head.wire.length + frameMessages.length + (plan.nonCompactableHead ?? 0),
+			transientReconciliationBase: [...head.records, ...turnMessages],
 			isCurrent: () => isTurnCurrent() && plan.isCurrent?.() !== false,
 			prepareCommit: () => isTurnCurrent() && plan.prepareCommit?.() !== false,
 		};
 	};
+}
+
+/** The text a carried record holds: its string content (`transientRecordMessageOf` builds it so). */
+function carriedText(message: AgentMessage): string {
+	if (message.role !== "custom" || typeof message.content !== "string") {
+		throw new TypeError("A carried record holds its text as string content.");
+	}
+	return message.content;
 }

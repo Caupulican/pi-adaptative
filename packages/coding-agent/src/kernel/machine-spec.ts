@@ -3,7 +3,8 @@
  * state to which; it is pure data plus two lookups. `observeMachine` is the shadow of a machine that still owns its own
  * transitions elsewhere: the owner reports each change with `record`, which checks it against the table, logs an
  * undeclared one at warn (category `machine`), counts it and keeps the last few for a status view. It never throws and
- * never changes what the owner does. A machine becomes the owner of its transitions only after its shadow ran clean.
+ * never changes what the owner does. A machine becomes the owner of its transitions only after its shadow ran clean. A
+ * registered observer is listed in its session's status view (`listMachines(sessionId)`) under `<name>#<n>`.
  */
 
 import { harnessLog } from "./harness-log.ts";
@@ -56,6 +57,8 @@ export interface MachineSnapshot<State extends string = string> {
 	readonly since: number;
 	readonly illegalCount: number;
 	readonly recent: readonly MachineTransition<State>[];
+	/** True when one observer follows many entities (attempts, plan steps), so `state` is the last recorded entity's. */
+	readonly entities: boolean;
 }
 
 export interface MachineObserver<State extends string = string> {
@@ -68,6 +71,8 @@ export interface MachineObserverOptions<State extends string> {
 	readonly onIllegal?: (transition: MachineTransition<State>) => void;
 	readonly log?: { warn(category: string, message: string, fields?: () => Record<string, unknown>): void };
 	readonly clock?: () => number;
+	/** Set when the owner reports many entities through this one observer; see `MachineSnapshot.entities`. */
+	readonly entities?: boolean;
 }
 
 const RECENT_LIMIT = 16;
@@ -78,6 +83,7 @@ export function observeMachine<State extends string, Event extends string>(
 ): MachineObserver<State> {
 	const log = options.log ?? harnessLog;
 	const clock = options.clock ?? Date.now;
+	const entities = options.entities === true;
 	let state = spec.initial;
 	let since = clock();
 	let illegalCount = 0;
@@ -100,20 +106,45 @@ export function observeMachine<State extends string, Event extends string>(
 				// An observer never changes what the machine it watches does.
 			}
 		},
-		snapshot: () => ({ name: spec.name, state, plain: spec.plain(state), since, illegalCount, recent: [...recent] }),
+		snapshot: () => ({
+			name: spec.name,
+			state,
+			plain: spec.plain(state),
+			since,
+			illegalCount,
+			recent: [...recent],
+			entities,
+		}),
 	};
 }
 
-const registry = new Set<MachineObserver>();
+interface Registration {
+	readonly sessionId: string;
+	readonly label: string;
+	readonly observer: MachineObserver;
+}
 
-/** Lists an adopted machine's observer for status views; the returned function removes it (a session's end). */
-export function registerMachine(observer: MachineObserver): () => void {
-	registry.add(observer);
+const registry = new Set<Registration>();
+const instanceCounts = new Map<string, number>();
+
+/**
+ * Lists an adopted machine's observer in its session's status view, labelled `<name>#<n>` (`n` counts this process's
+ * observers of that machine). The returned function removes it; the owner calls it when its session ends.
+ */
+export function registerMachine(observer: MachineObserver, sessionId: string): () => void {
+	const name = observer.snapshot().name;
+	const instance = (instanceCounts.get(name) ?? 0) + 1;
+	instanceCounts.set(name, instance);
+	const registration: Registration = { sessionId, label: `${name}#${instance}`, observer };
+	registry.add(registration);
 	return () => {
-		registry.delete(observer);
+		registry.delete(registration);
 	};
 }
 
-export function listMachines(): MachineSnapshot[] {
-	return [...registry].map((observer) => observer.snapshot());
+/** One session's registered machines, in registration order. */
+export function listMachines(sessionId: string): MachineSnapshot[] {
+	return [...registry]
+		.filter((registration) => registration.sessionId === sessionId)
+		.map((registration) => ({ ...registration.observer.snapshot(), name: registration.label }));
 }

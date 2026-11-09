@@ -755,7 +755,7 @@ evidence the last one did not have:
 3. What stays open remains in the worker claim for parent investigation or a worker follow-up.
    At the turn boundary, the host separately classifies whether an item requires an owner-reserved
    decision. Only a decisive owner-reserved judgment creates an owner question; under a handoff it
-   is written to `<agentDir>/follow-ups/<sessionId>.md`. Technical unknowns and unavailable or
+   is written to `<agentDir>/state/follow-ups/<sessionId>.md`. Technical unknowns and unavailable or
    uncertain classifications remain parent-owned. None closes an objective or authorizes an
    irreversible action.
 

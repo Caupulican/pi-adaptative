@@ -24,24 +24,18 @@ import {
 } from "../objective-execution/current-objective-execution.ts";
 import type { ExecutionLoopMode, ObjectiveExecutionController } from "../objective-execution/index.ts";
 import type { ObjectiveExecutionControllerDeps } from "../objective-execution/objective-execution-controller.ts";
-import type { ObjectiveTerminalResult } from "../objective-execution/objective-route.ts";
 import { budgetedTokens } from "../orchestration/capability-gateway.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
-import type { TimerPort } from "../util/timer-port.ts";
+import type { TimerSource } from "../util/timer-port.ts";
 import { openWorkUnit } from "../work-units.ts";
 import type { RoutedGoalContext } from "./compact-goal-context.ts";
-import {
-	getGoalCompletionRefusal,
-	getUnprovenGoalRequirementIds,
-	reopenUnsupportedGoalCompletion,
-} from "./goal-acceptance.ts";
+import { getGoalCompletionRefusal, reopenUnsupportedGoalCompletion } from "./goal-acceptance.ts";
 import {
 	type GoalAutoContinueHold,
 	type GoalAutoContinueState,
 	goalAutoContinueModelNote,
 } from "./goal-auto-continue-state.ts";
-import { recordObjectiveClarification } from "./goal-clarification-log.ts";
 import type { GoalCompletionOwnerDecision } from "./goal-completion-owner-decision.ts";
 import { buildObjectiveRoutePrompt, GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goal-continuation-prompt.ts";
 import {
@@ -58,6 +52,7 @@ import {
 	resumeGoal,
 	stopGoalFromSystem,
 } from "./goal-lifecycle.ts";
+import { type ObjectiveTerminalPort, settleObjectiveTerminal } from "./goal-objective-terminal.ts";
 import {
 	buildGoalRuntimeSnapshot,
 	type GoalRuntimeSnapshot,
@@ -70,7 +65,7 @@ import {
 	isGoalUnfinishedStatus,
 	MAX_CONSUMED_RUNAWAY_SIGNATURES,
 } from "./goal-state.ts";
-import { applyGoalAction, completeGoalManually } from "./goal-tool-core.ts";
+import { applyGoalAction } from "./goal-tool-core.ts";
 import {
 	type ExplicitChatGoal,
 	type ExplicitGoalStartAuthority,
@@ -86,11 +81,12 @@ import {
 export interface GoalSessionControllerDeps {
 	getSessionManager(): SessionManager;
 	/**
-	 * The `goal-continuation` port: the runtime snapshot's `now` reads its clock, so a bound worker's never-hang deadline
-	 * is decided on the clock the goal tool stamped that worker's `boundAt` on and the wake is armed on. This controller's
-	 * own event stamps and the lease's wall-clock accounting stay on the system clock. Absent, the system clock.
+	 * The session's timer registry. The runtime snapshot reads two clocks from it: `goal-continuation`, whose reading is the
+	 * snapshot's `now` (a bound worker's never-hang deadline is decided on the clock the goal tool stamped it on, and the
+	 * wake is armed on that clock), and `orchestration`, which measures a plan wait (the plan stamps its movements on it).
+	 * This controller's own event stamps and the lease's wall-clock accounting stay on the system clock.
 	 */
-	clock?: TimerPort;
+	timers: TimerSource;
 	getModelProvider(): string | undefined;
 	getLaneRecords(): readonly LaneRecord[];
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined;
@@ -194,27 +190,6 @@ const PROVIDER_FAILURE_REASONS: ReadonlySet<string> = new Set([
 	"auth",
 	"billing_or_quota",
 ]);
-
-const TRANSITION_CHECKS: Readonly<Record<string, string>> = {
-	jev_024: "completion plausibility",
-	jev_025: "primary completion",
-	jev_026: "cold adversarial challenge",
-	jev_027: "delivery truth",
-	jev_028: "release readiness",
-};
-
-/**
- * The owner question for a completion System One could not settle: the authority line sends an
- * objective transition whose ambiguity outlived its gather-more budget to the owner, never to a close.
- */
-function ambiguousCompletionQuestion(reasonCodes: readonly string[]): string {
-	const held = reasonCodes.find((code) => /^jev_02[4-8]_ambiguous$/.test(code));
-	const check = held ? (TRANSITION_CHECKS[held.slice(0, 7)] ?? held) : "completion";
-	const doubts = reasonCodes.filter(
-		(code) => code !== "system_one_ambiguous" && !/^jev_02[4-8]_ambiguous$/.test(code),
-	);
-	return `System One could not settle the objective's ${check} check${doubts.length > 0 ? ` (${doubts.join(", ")})` : ""}, so the goal is held open: say whether to accept it as complete, or what is still missing.`;
-}
 
 export class GoalSessionController {
 	private readonly deps: GoalSessionControllerDeps;
@@ -1014,11 +989,13 @@ export class GoalSessionController {
 	}
 
 	getRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot {
-		const clock = this.deps.clock;
+		const continuationClock = this.deps.timers.port("goal-continuation");
+		const planClock = this.deps.timers.port("orchestration");
 		const snapshot = buildGoalRuntimeSnapshot({
 			sessionManager: this.deps.getSessionManager(),
 			settings,
-			...(clock ? { now: () => new Date(clock.now()).toISOString() } : {}),
+			now: () => new Date(continuationClock.now()).toISOString(),
+			planNow: () => planClock.now(),
 			laneRecords: this.deps.getLaneRecords(),
 			taskRuntime: this.deps.getTaskRuntimeSnapshot(),
 			backgroundToolTasks: this.deps.getBackgroundToolTasks(),
@@ -1094,93 +1071,18 @@ export class GoalSessionController {
 		return controller;
 	}
 
-	/**
-	 * The objective reached a terminal: the goal follows it, and says so when they disagree. A terminal
-	 * belongs to the goal whose objective ran the cycle; a goal that replaced it meanwhile is not moved.
-	 */
-	private async applyObjectiveTerminal(terminal: ObjectiveTerminalResult, goalId: string): Promise<boolean> {
-		const state = this.getState();
-		if (!state || state.goalId !== goalId || !isGoalExecutionActive(state.status)) return false;
-		const now = new Date().toISOString();
-		const reasons = terminal.reasonCodes.join(", ");
-		switch (terminal.status) {
-			case "complete": {
-				// Automatic completion is never an owner override, and it persists only once every requirement has
-				// trusted evidence. A judged completion the evidence does not support is not completed and does not stop
-				// the goal: it stays active and continues to gather the missing evidence. The objective's route stall
-				// guard turns a repeated completion route into a replan turn, so repeats are followed by work.
-				const unproven = getUnprovenGoalRequirementIds(state);
-				if (unproven.length > 0) {
-					this.deps.emitWarning(
-						`System One judged the objective complete (${reasons}) but requirements ${unproven.join(", ")} lack trusted evidence; the goal stays active to gather it.`,
-					);
-					this.deps.scheduleGoalAutoContinueFromIdle();
-					return true;
-				}
-				this.saveState(
-					applyGoalEvent(state, { type: "complete_goal", acceptanceOverride: false, now }),
-					getGoalStateRevision(state),
-				);
-				return false;
-			}
-			case "cancelled":
-				this.saveState(applyGoalEvent(state, { type: "cancel_goal", now }), getGoalStateRevision(state));
-				return false;
-			case "budget_exhausted":
-				this.stopActiveGoal("budget_limited", reasons || "objective budget exhausted");
-				return false;
-			case "incomplete":
-				this.deps.scheduleGoalAutoContinueFromIdle();
-				return true;
-			default: {
-				if (
-					terminal.status === "semantic_gate_unavailable" &&
-					terminal.reasonCodes.includes("system_one_ambiguous")
-				) {
-					const decision = await this.deps.resolveCompletionRejection?.({
-						toolCallId: `objective-completion:${state.goalId}:${state.revision ?? 0}`,
-						goalId: state.goalId,
-						userGoal: state.userGoal,
-						reasons: [ambiguousCompletionQuestion(terminal.reasonCodes)],
-					});
-					// The owner's reply lands in the goal's clarification ledger, where the next route and every
-					// continuation read it; the goal may have moved on during the wait, so nothing below reuses
-					// the state read before it.
-					const port = {
-						getGoalState: () => this.getState(),
-						saveGoalState: (next: GoalState, expected?: GoalStateRevision) => {
-							this.saveState(next, expected);
-						},
-					};
-					for (const event of decision && decision.decision !== "deferred" ? decision.clarification : []) {
-						if (!recordObjectiveClarification(port, goalId, event)) {
-							this.deps.emitWarning(
-								`The owner's completion decision for goal '${goalId}' was not recorded: that goal is no longer the active goal.`,
-							);
-							return false;
-						}
-					}
-					const settled = this.getState();
-					if (!settled || settled.goalId !== goalId || !isGoalExecutionActive(settled.status)) return false;
-					if (decision?.decision === "accept_complete") {
-						const completed = completeGoalManually(settled, new Date().toISOString());
-						if (!completed.ok) {
-							this.deps.emitWarning(`The owner's completion override could not be applied: ${completed.error}`);
-							return false;
-						}
-						this.saveState(completed.state, getGoalStateRevision(settled));
-						return false;
-					}
-					if (!decision) {
-						this.deps.emitWarning("The completion decision router is unavailable; keeping the goal active.");
-					}
-					this.deps.scheduleGoalAutoContinueFromIdle();
-					return true;
-				}
-				this.stopActiveGoal("blocked", `${terminal.status}: ${reasons}`);
-				return false;
-			}
-		}
+	/** What an objective terminal settles the goal through: this session's state and stop path, and its owner and scheduler hooks. */
+	private terminalPort(): ObjectiveTerminalPort {
+		return {
+			getState: () => this.getState(),
+			saveState: (state, expected) => {
+				this.saveState(state, expected);
+			},
+			stopActiveGoal: (status, reason) => this.stopActiveGoal(status, reason),
+			emitWarning: (message) => this.deps.emitWarning(message),
+			scheduleGoalAutoContinueFromIdle: () => this.deps.scheduleGoalAutoContinueFromIdle(),
+			resolveCompletionRejection: (input) => this.deps.resolveCompletionRejection?.(input),
+		};
 	}
 
 	/**
@@ -1306,7 +1208,7 @@ export class GoalSessionController {
 				recordSubmittedTurn(turnOutcome);
 			}
 			const continuationRestartScheduled = terminal
-				? await this.applyObjectiveTerminal(terminal, beforeGoal.goalId)
+				? await settleObjectiveTerminal(this.terminalPort(), terminal, beforeGoal.goalId)
 				: false;
 			return {
 				submitted,

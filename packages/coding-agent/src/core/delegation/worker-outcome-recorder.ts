@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { defineMachine, type MachineObserver, observeMachine, registerMachine } from "../../kernel/machine-spec.ts";
+import { type MachineObserver, observeMachine, registerMachine } from "../../kernel/machine-spec.ts";
 import { workerOutcomeDigestFile } from "../agent-paths.ts";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneStatus } from "../autonomy/lane-tracker.ts";
@@ -15,61 +15,34 @@ import { boundedText } from "../util/bounded-line.ts";
 import type { OutcomeLadderContext } from "./worker-escalation-facts.ts";
 import {
 	OUTCOME_LIMITS,
-	OUTCOME_STATUSES,
 	type Outcome,
 	type OutcomeDigest,
-	type OutcomeStatus,
 	type ProjectOutcomeInput,
 	projectOutcome,
 	publishOutcome,
 	sameOutcomeAttempt,
 	sameOutcomeContent,
 } from "./worker-outcome.ts";
-
-type OutcomeMachineState = "none" | OutcomeStatus;
-
-const EVERY_STATUS: Partial<Record<OutcomeStatus, OutcomeMachineState>> = Object.fromEntries(
-	OUTCOME_STATUSES.map((status) => [status, status]),
-);
-
-/**
- * The outcome of one attempt. A first outcome may be any status; partial, blocked and failed may be re-decided (a
- * verification settles, a later fact arrives); succeeded and cancelled are final for that attempt.
- */
-export const WORKER_OUTCOME_MACHINE = defineMachine<OutcomeMachineState, OutcomeStatus>({
-	name: "worker-outcome",
-	states: ["none", ...OUTCOME_STATUSES],
-	initial: "none",
-	transitions: {
-		none: EVERY_STATUS,
-		partial: EVERY_STATUS,
-		blocked: EVERY_STATUS,
-		failed: EVERY_STATUS,
-		succeeded: {},
-		cancelled: {},
-	},
-	describe: {
-		none: "no outcome yet",
-		succeeded: "done",
-		partial: "partly done",
-		blocked: "blocked",
-		failed: "failed",
-		cancelled: "stopped",
-	},
-});
+import { type OutcomeMachineState, WORKER_OUTCOME_MACHINE } from "./worker-outcome-machine.ts";
 
 /** Room the nonce fence and its attributes take around one fenced value. */
 const DIGEST_FENCE_CHARS = 320;
 
-let outcomeObserver: MachineObserver<OutcomeMachineState> | undefined;
+/**
+ * One outcome observer per session, listed in that session's status view. A session's lifecycles are built often and
+ * transiently (setup reads, placement checks), so the observer belongs to the session, not to a lifecycle: a lifecycle
+ * that never records an outcome leaves no entry, and the entries stay bounded by the sessions of this process.
+ */
+const sessionObservers = new Map<string, MachineObserver<OutcomeMachineState>>();
 
-/** One process-wide observer: outcomes of every session's workers share the one machine definition. */
-function observer(): MachineObserver<OutcomeMachineState> {
-	if (!outcomeObserver) {
-		outcomeObserver = observeMachine(WORKER_OUTCOME_MACHINE);
-		registerMachine(outcomeObserver);
+function sessionObserver(sessionId: string): MachineObserver<OutcomeMachineState> {
+	let observer = sessionObservers.get(sessionId);
+	if (!observer) {
+		observer = observeMachine(WORKER_OUTCOME_MACHINE, { entities: true });
+		sessionObservers.set(sessionId, observer);
+		registerMachine(observer, sessionId);
 	}
-	return outcomeObserver;
+	return observer;
 }
 
 /**
@@ -131,7 +104,7 @@ export class WorkerOutcomeRecorder {
 			return digestRef ? { ...projected, digestRef } : projected;
 		});
 		if (!recorded) return undefined;
-		observer().record(from, recorded.status, recorded.blocker);
+		sessionObserver(this.sessionId).record(from, recorded.status, recorded.blocker);
 		publishOutcome(recorded);
 		return recorded;
 	}

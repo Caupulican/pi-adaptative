@@ -12,6 +12,7 @@
  */
 
 import { createHash } from "node:crypto";
+import { strictCanonicalDigest, withoutUndefinedMembers } from "../steering/canonical.ts";
 
 export const REJECTION_WINDOW_MS = 10 * 60_000;
 export const MAX_TRACKED_REJECTIONS = 16;
@@ -25,21 +26,10 @@ export interface RejectionSignatureInput {
 	readonly input: unknown;
 }
 
-/** JSON with object keys in a fixed order and absent members dropped, so key order never changes a digest. */
-function canonicalJson(value: unknown): string {
-	if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
-	if (value && typeof value === "object") {
-		const entries = Object.entries(value as Record<string, unknown>)
-			.filter(([, member]) => member !== undefined)
-			.sort(([left], [right]) => (left < right ? -1 : left > right ? 1 : 0));
-		return `{${entries.map(([key, member]) => `${JSON.stringify(key)}:${canonicalJson(member)}`).join(",")}}`;
-	}
-	return JSON.stringify(value) ?? "null";
-}
-
 /** 16 hex characters of sha256 over the action, skip code, field and argument digest. */
 export function rejectionSignature(rejection: RejectionSignatureInput): string {
-	const digest = createHash("sha256").update(canonicalJson(rejection.input)).digest("hex");
+	// The arguments are the call's JSON data; key order never changes the digest.
+	const digest = strictCanonicalDigest(withoutUndefinedMembers(rejection.input));
 	return createHash("sha256")
 		.update(JSON.stringify([rejection.action, rejection.skipReason, rejection.field ?? "", digest]))
 		.digest("hex")

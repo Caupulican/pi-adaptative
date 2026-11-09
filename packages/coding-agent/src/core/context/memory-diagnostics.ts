@@ -725,5 +725,7 @@ export function formatKnowledgeCollectionLine(status: KnowledgeCollectionStatus)
 		parts.push(
 			`last pass ${status.last.status}: ${status.last.sources} source(s), ${status.last.applied} applied, ${status.last.rejected} rejected, ${status.last.held} held`,
 		);
+	if (status.lastIdlePass)
+		parts.push(`last idle pass ${new Date(status.lastIdlePass.at).toISOString()} found no new sources`);
 	return `Knowledge collection: ${parts.join("; ")}`;
 }

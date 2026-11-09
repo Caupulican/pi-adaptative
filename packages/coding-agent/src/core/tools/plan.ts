@@ -45,7 +45,7 @@ const step = Type.Object(
 			Type.Union(
 				PLAN_OFFERED_JOIN_KINDS.map((kind) => Type.Literal(kind)),
 				{
-					description: `Makes this step combine the steps in uses (${JOIN_KIND_LIST}): collect results, reduce findings to one answer, vote for the best, race for the first accepted, or verify independently.`,
+					description: `Makes this step combine the steps in uses (${JOIN_KIND_LIST}): collect results, reduce findings to one answer, vote for the best, race for the first accepted, verify independently, or merge the files each step changed (each in its own worktree, landed in order).`,
 				},
 			),
 		),
@@ -53,6 +53,21 @@ const step = Type.Object(
 			Type.String({
 				maxLength: PLAN_LIMITS.criterionChars,
 				description: "reduce: the question the combined answer answers; vote: what the winner must meet.",
+			}),
+		),
+		criteria: Type.Optional(
+			Type.Array(Type.String({ minLength: 1, maxLength: PLAN_LIMITS.criterionChars }), {
+				minItems: 1,
+				maxItems: PLAN_LIMITS.criteria,
+				description: "vote only: the criteria every candidate is judged on, one per line.",
+			}),
+		),
+		proof: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: PLAN_LIMITS.proofChars,
+				description:
+					"How this step's result is proven: cite, cmd, diff, or check:<command> (a command whose exit code 0 proves it).",
 			}),
 		),
 		by: Type.Optional(
@@ -136,7 +151,7 @@ export function createPlanToolDefinition(getPort: () => PlanExecutorPort | undef
 		label: "Plan",
 		// The root director role names this tool for multi-part work, so its schema is in every request.
 		neverDefer: true,
-		description: `Run work with several parts as one plan: plan {action:start, title, steps:[{id, do, files?, uses?, after?, req?, deep?, join?, question?, by?, doneWhen?, outOfScope?}], final?}. The harness checks the plan, starts every ready step in parallel on workers, passes each step the results of the steps in its uses, retries, combines results in join steps (${JOIN_KIND_LIST}) and wakes you once per combined result. revise {steps, remove?, reason} adds or replaces steps (same id replaces) and keeps running work that did not change; cancel {reason} stops the plan. Use assign for a single task.`,
+		description: `Run work with several parts as one plan: plan {action:start, title, steps:[{id, do, files?, uses?, after?, req?, deep?, join?, question?, criteria?, by?, doneWhen?, outOfScope?, proof?}], final?}. The harness checks the plan, starts every ready step in parallel on workers, passes each step the results of the steps in its uses, retries, combines results in join steps (${JOIN_KIND_LIST}) and wakes you once per combined result. revise {steps, remove?, reason} adds or replaces steps (same id replaces) and keeps running work that did not change; cancel {reason} stops the plan. Use assign for a single task.`,
 		promptSnippet: "Run a multi-step plan on workers (steps, files, uses, joins)",
 		parameters: schema,
 		// As for assign: a refusal lists every fix, and that view reaches the model as the failure record's evidence.

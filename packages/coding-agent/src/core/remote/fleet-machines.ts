@@ -15,7 +15,9 @@ import {
 	ownProcessOwner,
 	type ProcessOwner,
 } from "../../kernel/reliability/owner-identity.ts";
+import { closeWatcher, FS_WATCH_RETRY_DELAY_MS } from "../../utils/fs-watch.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { type CapabilityFacts, parseCapabilityFacts } from "./capabilities.ts";
 import { isMachineName } from "./protocol.ts";
@@ -130,17 +132,28 @@ export function recordPeerDown(agentDir: string, machineId: string, now = Date.n
 	);
 }
 
-/** The roster's machines from facts: read on demand, and watched only while someone subscribes. */
+/**
+ * The roster's machines from facts: read on demand, and watched only while someone subscribes. A lost watch tells the
+ * listeners to re-read and is re-armed on a bounded retry, and also on the next read or subscribe.
+ */
 export class FleetMachines {
 	private readonly agentDir: string;
+	private readonly timers: TimerPort;
 	private readonly listeners = new Set<() => void>();
 	private watcher: FSWatcher | undefined;
+	/** The watch is lost or could not be armed; cleared when a watch arms again. Keeps one warning per streak of failures. */
+	private watchDown = false;
+	/** The pending bounded re-arm of a lost watch, while anyone listens. */
+	private retry: unknown;
 
-	constructor(agentDir: string) {
+	constructor(agentDir: string, timers: TimerPort = SYSTEM_TIMER_PORT) {
 		this.agentDir = agentDir;
+		this.timers = timers;
 	}
 
 	list(): FleetMachine[] {
+		// Armed before the read, so a change made between the two is seen by the watch rather than missed.
+		this.watch();
 		return [...readStored(this.agentDir).values()].map(({ reporter, seenAt, ...machine }) =>
 			machine.online && judgeOwner(reporter) === "dead"
 				? { ...machine, online: false, offlineSince: seenAt }
@@ -163,8 +176,10 @@ export class FleetMachines {
 		return () => {
 			this.listeners.delete(onChange);
 			if (this.listeners.size === 0) {
-				this.watcher?.close();
+				this.cancelRetry();
+				closeWatcher(this.watcher);
 				this.watcher = undefined;
+				this.watchDown = false;
 			}
 		};
 	}
@@ -174,26 +189,61 @@ export class FleetMachines {
 		for (const listener of [...this.listeners]) listener();
 	}
 
+	/** Arms the watch while someone listens; a no-op while it is armed or nobody does. */
 	private watch(): void {
-		if (this.watcher) return;
+		if (this.watcher || this.listeners.size === 0) return;
 		const dir = join(this.agentDir, "remote");
 		try {
 			mkdirSync(dir, { recursive: true });
-			this.watcher = watch(dir, { persistent: false }, (_event, filename) => {
-				if (filename === null || filename.toString() === FILE) this.notify();
+			const watcher = watch(dir, { persistent: false }, (_event, filename) => {
+				if (this.watcher === watcher && (filename === null || filename.toString() === FILE)) this.notify();
 			});
-			this.watcher.on("error", () => {
-				this.watcher?.close();
+			watcher.on("error", (error) => {
+				// A late error from a watcher already replaced is not this watch's loss.
+				if (this.watcher !== watcher) return;
+				closeWatcher(watcher);
 				this.watcher = undefined;
+				this.unarmed(error);
+				// A change may have landed while nothing watched: the listeners re-read now; the bounded retry re-arms the watch.
+				this.notify();
 			});
+			this.watcher = watcher;
+			this.cancelRetry();
+			// A watch back after a loss: changes made while it was down reach the listeners as one re-read.
+			if (this.watchDown) {
+				this.watchDown = false;
+				this.notify();
+			}
 		} catch (error) {
-			harnessLog.warn(
-				"link",
-				"the fleet record cannot be watched; the roster refreshes on this session's own changes",
-				{
-					reason: error instanceof Error ? error.name : "unknown",
-				},
-			);
+			this.unarmed(error);
 		}
+	}
+
+	/**
+	 * The watch is not armed: one warning per streak of failures, and a bounded retry re-arms it while anyone listens. A read
+	 * or subscribe arms it sooner.
+	 */
+	private unarmed(error: unknown): void {
+		if (!this.watchDown) {
+			harnessLog.warn("link", "the fleet record cannot be watched; it is re-armed on a bounded retry", {
+				reason: error instanceof Error ? error.name : "unknown",
+			});
+		}
+		this.watchDown = true;
+		this.scheduleRetry();
+	}
+
+	private scheduleRetry(): void {
+		if (this.retry !== undefined) return;
+		this.retry = this.timers.setTimeout(() => {
+			this.retry = undefined;
+			this.watch();
+		}, FS_WATCH_RETRY_DELAY_MS);
+	}
+
+	private cancelRetry(): void {
+		if (this.retry === undefined) return;
+		this.timers.clearTimeout(this.retry);
+		this.retry = undefined;
 	}
 }

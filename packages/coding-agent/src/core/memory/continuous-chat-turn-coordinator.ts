@@ -42,6 +42,13 @@ export interface IcmTurnHandle {
 	readonly latestCompaction: IcmTurnCompaction | undefined;
 	/** Every compaction entry id this turn applied: the only summaries its wire may carry. */
 	readonly notedCompactions: ReadonlySet<string>;
+	/**
+	 * The frame the turn's requests carry, as the projection noted it on the turn's first request: its carried head, then the
+	 * turn view and state. Absent until that request, when the frame is the view and state alone.
+	 */
+	readonly frame: readonly AgentMessage[] | undefined;
+	/** Records the frame the projection sends for this turn. A projection re-created mid-turn notes the frame it sends. */
+	noteFrame(frame: readonly AgentMessage[]): void;
 }
 
 class IcmTurn implements IcmTurnHandle {
@@ -51,6 +58,7 @@ class IcmTurn implements IcmTurnHandle {
 	private started: AgentMessage | undefined;
 	private latest: IcmTurnCompaction | undefined;
 	private readonly noted = new Set<string>();
+	private sentFrame: readonly AgentMessage[] | undefined;
 
 	constructor(turnId: number, boundary: ContinuousChatTurnBoundary, startedAt: number) {
 		this.turnId = turnId;
@@ -60,6 +68,14 @@ class IcmTurn implements IcmTurnHandle {
 
 	get startMessage(): AgentMessage | undefined {
 		return this.started;
+	}
+
+	get frame(): readonly AgentMessage[] | undefined {
+		return this.sentFrame;
+	}
+
+	noteFrame(frame: readonly AgentMessage[]): void {
+		this.sentFrame = frame;
 	}
 
 	/**

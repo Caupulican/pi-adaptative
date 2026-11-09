@@ -92,6 +92,10 @@ jobs:
         if: runner.os == 'Linux'
         run: npm run check
 
+      - name: Machine models
+        if: runner.os == 'Linux'
+        run: node scripts/check-machine-models.mjs --explore
+
       - name: Harness journeys
         run: npm run check:harness-journeys
 

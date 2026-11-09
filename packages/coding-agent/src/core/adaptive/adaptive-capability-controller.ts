@@ -431,12 +431,6 @@ export class AdaptiveCapabilityController {
 		});
 	}
 
-	computeDigest(data: unknown): string {
-		return createHash("sha256")
-			.update(JSON.stringify(data ?? null))
-			.digest("hex");
-	}
-
 	async resolveOrBuild(input: ResolveOrBuildInput): Promise<EstablishedCapability> {
 		try {
 			return await this.resolveOrBuildUnreported(input);

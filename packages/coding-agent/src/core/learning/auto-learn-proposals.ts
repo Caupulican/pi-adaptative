@@ -19,6 +19,13 @@ import { utf8PrefixByBytes } from "../util/bounded-value.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { LearningApplicationGuard } from "./learning-write-journal.ts";
 import { MAX_REFLECTION_WRITES } from "./reflection-engine.ts";
+import {
+	type BacklogRow,
+	type LessonCandidate,
+	type LessonFacts,
+	lessonCandidateOfSkillUpdate,
+	lessonCandidateOfWrite,
+} from "./structural-backlog.ts";
 
 export const AUTO_LEARN_PROPOSAL_TAG = "auto_learn_proposals";
 /** Largest tail of the learner's output searched for the proposal block. */
@@ -246,6 +253,8 @@ export interface AutoLearnReportEntry {
 	detail?: string;
 	/** Learning-audit proposal id (`auto-learn-<runId>-wN`) when the shared gate recorded the entry. */
 	proposalId?: string;
+	/** A skill update kept as a suggestion instead of applied: the learner's proposed text, bounded by the block parser. */
+	suggestion?: { description?: string; body: string };
 }
 
 export interface AutoLearnApplyPorts {
@@ -260,6 +269,8 @@ export interface AutoLearnApplyPorts {
 	skillVault: {
 		inspect(name: string): { ok: true; version: string } | { ok: false; message: string };
 		repairSkill(input: SkillRepairInput): SkillRepairResult;
+		/** Names of the skills this session has loaded: the only skills a learner may edit. */
+		getLoadedSkillNames(): readonly string[];
 	};
 	applyWrites(
 		rawWrites: readonly unknown[],
@@ -269,6 +280,11 @@ export interface AutoLearnApplyPorts {
 		| { applied: true; entries: Array<{ index: number; outcome?: GatedWriteOutcome }> }
 		| { applied: false; reason: string }
 	>;
+	/**
+	 * Records one memory or skill lesson in the structural backlog. Optional: absent where no System One port is bound,
+	 * and then nothing is routed. A thrown error fails the batch (`apply_failed`), so nothing is dropped silently.
+	 */
+	routeLesson?(lesson: LessonCandidate, facts: Pick<LessonFacts, "skillLoadedThisSession">): Promise<BacklogRow>;
 }
 
 function validateSettingValue(key: TunableAutoLearnSettingKey, value: unknown): string | undefined {
@@ -301,7 +317,8 @@ function writeSubject(raw: unknown): string | undefined {
 }
 
 /**
- * Decide and apply one parsed proposal set. Skills follow `checkSkillEvolutionEligibility`; memory and
+ * Decide and apply one parsed proposal set. Skills follow `checkSkillEvolutionEligibility` (an edit also needs the skill
+ * loaded this session; an edit that fails only that is kept as a proposal); memory and
  * OKF writes follow the learning gate inside `applyWrites`; settings are applied only in full autonomy
  * and only for the tunable allowlist. Every entry yields exactly one report row.
  */
@@ -326,6 +343,27 @@ export async function applyAutoLearnProposals(
 			reasonCode: "malformed_proposal",
 			detail: entry.reason,
 		});
+	}
+
+	// Every memory and skill proposal is routed before any check or write: routing awaits System One, and the context and
+	// eligibility checks below run after it. A route is recorded, never applied. A write the shared parser rejects has no
+	// lesson and is reported by applyWrites.
+	if (ports.routeLesson) {
+		// The fact is membership in this session's load record. A skill update asks about its own skill; a memory or OKF
+		// lesson names no skill, so it asks whether any skill was loaded (the route's `skill` exit).
+		for (const write of set.writes) {
+			const lesson = lessonCandidateOfWrite(write.raw);
+			if (lesson) {
+				await ports.routeLesson(lesson, {
+					skillLoadedThisSession: ports.skillVault.getLoadedSkillNames().length > 0,
+				});
+			}
+		}
+		for (const update of set.skillUpdates) {
+			await ports.routeLesson(lessonCandidateOfSkillUpdate(update), {
+				skillLoadedThisSession: ports.skillVault.getLoadedSkillNames().includes(update.name),
+			});
+		}
 	}
 
 	const eligibleWrites: Array<{ index: number; raw: unknown }> = [];
@@ -380,17 +418,29 @@ export async function applyAutoLearnProposals(
 	for (const update of set.skillUpdates) {
 		const base = { index: update.index, kind: "skill_update", subject: update.name };
 		if (recordIfContextChanged(base.index, base.kind, base.subject)) continue;
-		// A preceding memory write can await I/O while the owner revokes automatic skill changes.
+		// A preceding memory write can await I/O while the owner revokes automatic skill changes, and the session can load
+		// a skill meanwhile, so both facts are read here, at the decision.
 		const skillEvolution = checkSkillEvolutionEligibility(
 			ports.settingsManager.getAutonomySettings().mode,
 			ports.settingsManager.getAutoLearnSettings(),
+			{ name: update.name, loadedSkillNames: ports.skillVault.getLoadedSkillNames() },
 		);
 		if (!skillEvolution.eligible) {
+			// An update the session did not load is kept as a proposal with its full text; authority refusals stay ineligible.
+			const proposal = skillEvolution.disposition === "proposal";
 			report.push({
 				...base,
-				outcome: "ineligible",
-				reasonCode: "skill_evolution_ineligible",
+				outcome: proposal ? "proposed" : "ineligible",
+				reasonCode: proposal ? "skill_not_loaded_this_session" : "skill_evolution_ineligible",
 				detail: skillEvolution.reason,
+				...(proposal
+					? {
+							suggestion: {
+								...(update.description ? { description: update.description } : {}),
+								body: update.body,
+							},
+						}
+					: {}),
 			});
 			continue;
 		}

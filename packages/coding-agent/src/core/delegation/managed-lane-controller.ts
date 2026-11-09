@@ -21,7 +21,10 @@ import type { GoalState } from "../goals/goal-state.ts";
 import { parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import { validateProviderUsage } from "../orchestration/attempt-usage.ts";
 import type { ExecutionGrant } from "../orchestration/contracts.ts";
+import { type AttemptRuntimeState, attemptAwaitingLease } from "../orchestration/task-runtime-state.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
+import { endAbandonedPlacements } from "../remote/abandoned-placements.ts";
+import { JobStore } from "../remote/job-store.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
@@ -149,6 +152,14 @@ export class ManagedLaneController {
 		let pending = true;
 		try {
 			pending = this.adoptLegacyLanes();
+			// Runs once per controller, before this process dispatches anything: placer orphans in this lane book end here.
+			endAbandonedPlacements(
+				{
+					recordManagedLane: (event) => this.record(event),
+					managedLaneBindings: () => this.lifecycle.getManagedBindings(),
+				},
+				new JobStore(this.deps.getAgentDir()),
+			);
 		} finally {
 			if (pending) this.hydrated = false;
 			for (const record of this.lifecycle.getManagedRecords()) {
@@ -246,6 +257,7 @@ export class ManagedLaneController {
 							: {}),
 						...(knowledgeReferences.length ? { knowledgeReferences } : {}),
 						...(runOrigin?.thirdParty ? { turnOrigin: runOrigin } : {}),
+						...(event.dispatch.placement ? { placement: event.dispatch.placement } : {}),
 					},
 					() => {
 						const runtime = runtimeGenerationAdmission(this.deps.getAgentDir());
@@ -333,9 +345,12 @@ export class ManagedLaneController {
 
 		const attempt = this.lifecycle.getManagedAttempt(event.laneId);
 		const handle = this.lifecycle.getManagedHandle(event.laneId);
-		if (!attempt || !handle) throw new Error(`Unknown managed worker '${event.laneId}'.`);
+		if (!attempt) throw new Error(`Unknown managed worker '${event.laneId}'.`);
 		if (event.dispatchSequence !== undefined && event.dispatchSequence !== attempt.dispatch.dispatchSequence)
 			throw new Error(`Managed worker '${event.laneId}' terminal sequence does not match its current dispatch.`);
+		if (!handle && attemptAwaitingLease(attempt) && resolveManagedLaneTerminalStatus(event.status) === "canceled")
+			return this.endUnleased(event, attempt);
+		if (!handle) throw new Error(`Unknown managed worker '${event.laneId}'.`);
 		if (attempt.status !== "leased" && attempt.status !== "running") return undefined;
 		let usage: Usage | undefined;
 		const resolvedStatus = resolveManagedLaneTerminalStatus(event.status);
@@ -447,6 +462,33 @@ export class ManagedLaneController {
 				this.protectedPathWatches.delete(event.laneId);
 			}
 		}
+		return record;
+	}
+
+	/**
+	 * Ends a queued managed attempt that never leased: nothing runs for it, so cancelling it settles the record and publishes
+	 * the terminal the way a leased end does. Undefined when the cancel found the attempt no longer unleased; that attempt is
+	 * then leased or ended, and takes nothing more here.
+	 */
+	private endUnleased(
+		event: Extract<ManagedLaneEvent, { phase: "terminal" }>,
+		attempt: AttemptRuntimeState,
+	): LaneRecord | undefined {
+		// The lifecycle takes the attempt's task here: a managed turn's task is `<lane>:turn:<n>`, not the lane id.
+		const outcome = this.lifecycle.cancelUnleased(
+			attempt.taskId,
+			normalizeWorkerClaimReasonCode(event.reasonCode, "managed_lane_ended"),
+			attempt.attemptId,
+			typeof event.summary === "string" ? event.summary : undefined,
+		);
+		if (!outcome.cancelled) return undefined;
+		const record = this.lifecycle.getManagedRecord(event.laneId);
+		if (!record) throw new Error(`Managed worker '${event.laneId}' was not projected after cancellation.`);
+		const notification = this.lifecycle.getTerminalNotification(event.laneId);
+		if (notification) this.recordTerminal(record, notification.notificationId);
+		appendLaneRecordSnapshot(this.deps.getSessionManager(), record);
+		this.releaseRegistration(event.laneId);
+		this.protectedPathWatches.delete(event.laneId);
 		return record;
 	}
 

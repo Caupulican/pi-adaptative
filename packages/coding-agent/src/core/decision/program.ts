@@ -21,7 +21,8 @@ export function createDecisionProgram(input: {
 		id: input.id,
 		version: input.version ?? "1.0.0",
 		decisions: input.decisions,
-		applicabilityRules: input.applicabilityRules,
+		// An absent rule set is an absent key: a program is JSON data, so no undefined member reaches its digests.
+		...(input.applicabilityRules !== undefined ? { applicabilityRules: input.applicabilityRules } : {}),
 		stateSchemaVersion: input.stateSchemaVersion ?? "1.0",
 	};
 }

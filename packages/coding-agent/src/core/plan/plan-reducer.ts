@@ -28,6 +28,7 @@ import {
 	type PlanRetiredTask,
 	type PlanRuntimeState,
 	planTopologicalOrder,
+	type StoredPlanRecord,
 } from "./plan-graph.ts";
 
 export const PLAN_EVENT_TYPES = [
@@ -74,15 +75,48 @@ function retire(retired: PlanRetiredTask[], entry: PlanRetiredTask): void {
 	retired.push(entry);
 }
 
-/** Drops the oldest closed plan when a new plan would exceed the retained bound; an open plan is never dropped. */
-function makeRoom(plans: Record<string, PlanRuntimeState>): void {
-	if (Object.keys(plans).length < PLAN_LIMITS.retainedPlans) return;
-	const closed = Object.entries(plans)
-		.filter(([, plan]) => plan.closed !== undefined)
+/** The retention class of a stored record: a fan-out group is bounded apart from the session's plans. */
+type RetentionClass = "plan" | "fanout";
+
+function retentionClassOf(record: StoredPlanRecord): RetentionClass {
+	return !isPlanFromNewerBuild(record) && record.fanout !== undefined ? "fanout" : "plan";
+}
+
+/** Closed plans of one class, oldest first. */
+function closedOldestFirst(
+	plans: Record<string, PlanRuntimeState>,
+	retention: RetentionClass,
+): [string, PlanRuntimeState][] {
+	return Object.entries(plans)
+		.filter(([, plan]) => plan.closed !== undefined && retentionClassOf(plan.record) === retention)
 		.sort(([, a], [, b]) => (a.closed?.closedAt ?? "").localeCompare(b.closed?.closedAt ?? ""));
-	const oldest = closed[0];
+}
+
+/**
+ * Makes room for a new plan of `incoming` class. Plans: drops the oldest closed plan when a new plan would exceed the
+ * retained bound, never an open one, and fan-out groups do not count. Fan-out groups: never refused, see below.
+ */
+function makeRoom(plans: Record<string, PlanRuntimeState>, incoming: RetentionClass): void {
+	if (incoming === "fanout") {
+		pruneClosedFanouts(plans);
+		return;
+	}
+	const plansOfClass = Object.entries(plans).filter(([, plan]) => retentionClassOf(plan.record) === "plan");
+	if (plansOfClass.length < PLAN_LIMITS.retainedPlans) return;
+	const oldest = closedOldestFirst(plans, "plan")[0];
 	if (!oldest) refuse(`A session keeps at most ${PLAN_LIMITS.retainedPlans} plans and none of them is closed.`);
 	else delete plans[oldest[0]];
+}
+
+/**
+ * Closed fan-out groups beyond `retainedFanoutPlans` are dropped, oldest first. Open groups are never dropped or refused:
+ * their members bound them.
+ */
+function pruneClosedFanouts(plans: Record<string, PlanRuntimeState>): void {
+	const closed = closedOldestFirst(plans, "fanout");
+	for (const [planId] of closed.slice(0, Math.max(0, closed.length - PLAN_LIMITS.retainedFanoutPlans))) {
+		delete plans[planId];
+	}
 }
 
 function recordPlan(plans: Record<string, PlanRuntimeState>, event: OrchestrationEvent): void {
@@ -90,7 +124,7 @@ function recordPlan(plans: Record<string, PlanRuntimeState>, event: Orchestratio
 	if (event.aggregateId !== record.planId) refuse("plan.recorded aggregate does not match its plan id.");
 	const previous = plans[record.planId];
 	if (isPlanFromNewerBuild(record)) {
-		if (!previous) makeRoom(plans);
+		if (!previous) makeRoom(plans, "plan");
 		plans[record.planId] = { record, nodes: previous?.nodes ?? {}, retired: previous?.retired ?? [] };
 		return;
 	}
@@ -102,7 +136,7 @@ function recordPlan(plans: Record<string, PlanRuntimeState>, event: Orchestratio
 		refuse(`Plan '${record.planId}' version ${record.version} does not follow ${expected - 1}.`);
 	if (!planTopologicalOrder(record.nodes).acyclic)
 		refuse(`Plan '${record.planId}' version ${record.version} has a cycle.`);
-	if (!previous) makeRoom(plans);
+	if (!previous) makeRoom(plans, retentionClassOf(record));
 	const retired = [...(previous?.retired ?? [])];
 	const nodes: Record<string, PlanNodeRuntime> = {};
 	for (const spec of record.nodes) {
@@ -214,6 +248,8 @@ export function reducePlanEvent(
 				...plan,
 				closed: { status: payload.status, reason: payload.reason, closedAt: at },
 			};
+			// A closing fan-out group can take the closed count past its bound; the bound holds at every close.
+			pruneClosedFanouts(plans);
 			return;
 		}
 		default:

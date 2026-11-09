@@ -59,6 +59,7 @@ import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delega
 import type { BotMessageDirectory, BotOwnedStartOutcome } from "./delegation/bot-message-contract.ts";
 import { createBotMessageDirectory } from "./delegation/bot-message-directory.ts";
 import { displayNameFor, suggestBotId } from "./delegation/bot-naming.ts";
+import type { BotOperatorMessageOptions } from "./delegation/bot-operator-message-options.ts";
 import { BotRuntimeBindings, type BotRuntimeContext, keyedBotRuntimeId } from "./delegation/bot-runtime-bindings.ts";
 import { DAEMON_STALE_MS, isOlderDaemonBuild, OWN_DAEMON_BUILD } from "./delegation/bot-team-routine-helpers.ts";
 import {
@@ -253,25 +254,6 @@ function awayChannelsKey(settings: Parameters<typeof awayChannels>[0]): string {
 	return awayChannels(settings)
 		.map((channel) => `${channel.name}:${channel.cwd}`)
 		.join(",");
-}
-
-/** How the orchestrator's or a leader's words reach a bot: the kind of turn, who asked, and the delegation it is filed under. */
-interface BotOperatorMessageOptions {
-	mode?: "follow_up" | "queue" | "start";
-	/** The orchestrator asked: the bot's answer is for the orchestrator, not an owner-direct chat. */
-	fromRoot?: boolean;
-	/**
-	 * The owner sent it from the orchestrator's own conversation: a joined machine's answer comes into that
-	 * conversation, since nobody has the machine's chat open to see it arrive.
-	 */
-	answerInSession?: boolean;
-	/**
-	 * The orchestrator's words are for this delegation to a leader (its brief, update, resume or answer). Set only by the
-	 * leader controller and the orchestrator's `bot ask`; an owner's chat leaves it out, so that turn is session work.
-	 */
-	delegationObjectiveId?: string;
-	/** The replay identity of this send: a repeated send with the same key is one message (the Outcome of a nested goal). */
-	idempotencyKey?: string;
 }
 
 export class BackgroundLaneController implements WorkerAgentControlPort {
@@ -757,9 +739,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	subscribeLaneRecords(listener: (records: readonly LaneRecord[]) => void): () => void {
 		this._laneRecordListeners.add(listener);
-		return () => {
-			this._laneRecordListeners.delete(listener);
-		};
+		return () => void this._laneRecordListeners.delete(listener);
 	}
 
 	private _cachedLaneRecords?: LaneRecord[];
@@ -2651,9 +2631,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Fires when a plan's visible state changes, so the owner's panel and status redraw while the root is idle. */
 	subscribePlanChanges(listener: () => void): () => void {
 		this._planChangeListeners.add(listener);
-		return () => {
-			this._planChangeListeners.delete(listener);
-		};
+		return () => void this._planChangeListeners.delete(listener);
 	}
 
 	/**
@@ -2710,8 +2688,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			acknowledge: (notificationIds) => lifecycle.markNotificationsDelivered(notificationIds),
 			planChanged: () => {
 				for (const listener of this._planChangeListeners) listener();
+				this._goalAutoContinue.wakePlanWait();
 			},
-			now: () => this.deps.getTimers().port("orchestration").now(),
+			timers: () => this.deps.getTimers().port("orchestration"),
+			lanes: () => this._worktreeLaneHostDeps(),
+			landGate: () => this.deps.getSettingsManager().getWorktreeSyncSettings(),
 		});
 		this._planExecutor = executor;
 		this._planRouteOff = this.registerTerminalRoute("plan_executor", (record) => executor.ownsTask(record.laneId));
@@ -2868,6 +2849,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					fromRoot: true,
 					delegationObjectiveId,
 					idempotencyKey: options?.idempotencyKey,
+					fromLeader: options?.fromLeader,
 				});
 			},
 			stop: (alias) => void this.stopPersistentBot(alias),
@@ -3264,6 +3246,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			...(teamId ? { threadId: `team:${teamId}:${teamIncarnationId}` } : {}),
 			...(options?.delegationObjectiveId ? { delegationObjectiveId: options.delegationObjectiveId } : {}),
 			...(options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
+			...(options?.fromLeader ? { fromLeader: this.botBindings.runtime(options.fromLeader) } : {}),
 		};
 
 		if (existingAgent && (requestedMode === "follow_up" || requestedMode === "queue")) {

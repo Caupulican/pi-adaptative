@@ -40,7 +40,6 @@ import type { AgentMessage } from "../kernel/types.ts";
 import { addUsage, createEmptyUsage } from "../kernel/usage.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session-contracts.ts";
 import type { EdgeGrantView } from "./autonomy/edge-policy.ts";
-import type { PathAliasLegendRecord } from "./comms/host-injection-records.ts";
 import {
 	priceSentPrefixRewrite,
 	resolveEffectiveModelPricing,
@@ -96,7 +95,7 @@ import {
 } from "./context/context-store-retention.ts";
 import { getToolResultText } from "./context/context-tool-result.ts";
 import { latestUserPromptText } from "./context/message-text.ts";
-import { PathAliasRuntime } from "./context/path-alias-session.ts";
+import { PathAliasRuntime, type PathAliasSyncResult } from "./context/path-alias-session.ts";
 import type { PathAliasTable } from "./context/path-alias-table.ts";
 import { PACKED_TOOL_OUTPUT_TOOLS } from "./context/tool-output-packer.ts";
 import {
@@ -440,13 +439,7 @@ export class ContextPipeline {
 		return getContextStoreDir(this._contextStoreRoot(), "index", this.deps.getSessionManager().getSessionId());
 	}
 
-	applyPathAliases(messages: AgentMessage[]): {
-		messages: AgentMessage[];
-		legendFor?(
-			visibleMessages: readonly AgentMessage[],
-			visibleTexts: readonly string[],
-		): PathAliasLegendRecord | undefined;
-	} {
+	applyPathAliases(messages: AgentMessage[]): PathAliasSyncResult {
 		// A request projection already in flight may arrive after session cleanup closed the index.
 		// It must not reacquire storage or a retention lease for a disposed owner.
 		if (this.deps.isDisposed()) return { messages };

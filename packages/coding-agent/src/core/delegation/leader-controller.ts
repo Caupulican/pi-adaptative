@@ -23,14 +23,12 @@
 
 import { randomUUID } from "node:crypto";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import type { TimerPort } from "../../kernel/timer-port.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
-import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
-import { canonicalDigest } from "../steering/canonical.ts";
-import type { BotCreationRequest, CreatedBotView } from "./bot-creation.ts";
+import { strictCanonicalDigest, withoutUndefinedMembers } from "../steering/canonical.ts";
 import type { BotAskRootResult } from "./bot-message-contract.ts";
 import { ACTIVE_ATTEMPT_STATUSES, delegationBudgetLeftUsd, delegationBudgetStop } from "./delegation-spend.ts";
+import type { LeaderAppointer, LeaderControllerDeps } from "./leader-controller-ports.ts";
 import {
 	admitChain,
 	briefBotsOwnedBy,
@@ -59,14 +57,12 @@ import {
 	type DelegationRecord,
 	earliestDeadlineMs,
 	LeaderDelegationLedger,
-	type LeaderLedgerRuntime,
 	openDescendantsDeepestFirst,
 	readDelegations,
 	splitTurnsByLeader,
 	turnBelongsToDelegation,
 } from "./leader-delegation-ledger.ts";
 import { currentDelegationFor } from "./leader-view.ts";
-import type { WorkerAgentView } from "./worker-agent-control.ts";
 import type { WorkerTerminalHandoffRecord } from "./worker-notification-coordinator.ts";
 import { type Outcome, sameOutcomeAttempt } from "./worker-outcome.ts";
 
@@ -75,68 +71,6 @@ export const LEADER_QUESTION_CUSTOM_TYPE = "leader-question";
 
 /** The longest single timer the platform keeps; a later deadline re-arms when this one fires. */
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
-
-/** Who appoints a goal leader: the orchestrator, or the leader whose goal hands a part on. */
-export type LeaderAppointer = { readonly kind: "root" } | { readonly kind: "leader"; readonly agentId: string };
-
-export interface LeaderControllerDeps {
-	/** The root session's durable task runtime: the one store the delegation record lives in. */
-	runtime(): LeaderLedgerRuntime;
-	snapshot(): TaskRuntimeProjection;
-	/** Fires after every orchestration store commit. */
-	subscribe(listener: () => void): () => void;
-	/** Every bot, retired ones included. */
-	bots(): readonly LeaderBotView[];
-	/** Creates a goal leader for one goal, appointed by the orchestrator or by the leader whose goal hands a part on. */
-	createGoalLeader(request: BotCreationRequest, appointer?: LeaderAppointer): CreatedBotView;
-	/** The bot a runtime is a direct (not group) generation of; undefined for any other worker. */
-	directBotOf(runtimeAgentId: string): string | undefined;
-	/** Every runtime a bot has had, its current one included. */
-	runtimesOf(alias: string): readonly string[];
-	workers(): readonly WorkerAgentView[];
-	/**
-	 * Sends words for a delegation to a bot; the turn they start is filed under that delegation. `idempotencyKey` makes a
-	 * repeated send one message (the Outcome of a nested goal, sent to its parent leader, is one).
-	 */
-	send(
-		alias: string,
-		text: string,
-		delegationObjectiveId: string,
-		options?: { readonly idempotencyKey?: string },
-	): Promise<void>;
-	/** Stops a bot's running turn and those of the bots it owns. */
-	stop(alias: string): void;
-	retire(alias: string): { retired: boolean; detail: string };
-	acknowledge(notificationIds: readonly string[]): void;
-	deliver(input: ParentInputDelivery): Promise<unknown>;
-	origin(): WorkerReceiptOrigin;
-	hasDelivered(deliveryId: string): boolean;
-	maxDepth(): number;
-	/**
-	 * Retires a leader's idle runtime when its contract grants it no children (a runtime started before the leader could
-	 * lead bots); its next start is granted the leader limits. A busy runtime is left alone.
-	 */
-	restartLeaderRuntimeIfLeaf(leader: string): void;
-	/**
-	 * The fleet subtree of a leader: its children are charged to it, so its share is opened while a goal runs and
-	 * released when the goal is over. A nested leader's share sits under its parent leader's.
-	 */
-	openSubtree(leader: string, parentLeader?: string): void;
-	closeSubtree(leader: string, reasonCode: string): void;
-	/**
-	 * Whether a subscription login the given bots run on has no allowance left in its usage window. Subscription turns are
-	 * not metered, so this is the bound a delegation has beyond its metered `budgetUsd`.
-	 */
-	subscriptionExhausted(aliases: readonly string[]): boolean;
-	isMeteredAttempt(attempt: AttemptRuntimeState): boolean;
-	/** Whether a message filed under this delegation still waits in some bot's mailbox (unfinished work of the goal). */
-	hasPendingDelegatedMessage(delegationObjectiveId: string): boolean;
-	/** Starts the messages the goal filed while it was paused, now that it runs again. */
-	reconcileDelegatedMessages(delegationObjectiveId: string): void;
-	/** The orchestration clock: the one attempts are stamped on. */
-	now(): number;
-	timers: TimerPort;
-}
 
 function isOpen(record: DelegationRecord): boolean {
 	return record.state !== "closed";
@@ -378,7 +312,8 @@ export class LeaderController {
 		this.ledger.recordUpdate(record.objectiveId, text);
 		if (record.state === "running") {
 			const source = fromLeader === undefined ? "the orchestrator" : this.displayName(fromLeader);
-			await this.deps.send(leader, `Update from ${source} for your goal:\n${text}`, record.objectiveId);
+			const content = `Update from ${source} for your goal:\n${text}`;
+			await this.deps.send(leader, content, record.objectiveId, { fromLeader });
 		}
 	}
 
@@ -402,7 +337,9 @@ export class LeaderController {
 		if (parent) {
 			if (parent.state !== "running")
 				throw new Error("The leader that handed this goal on is paused; ask again later.");
-			if (!(await this.sendToParent(parent, leaderAskNotice({ ...notice, to: "parent_leader" }), deliveryId)))
+			if (
+				!(await this.sendToParent(parent, leaderAskNotice({ ...notice, to: "parent_leader" }), deliveryId, leader))
+			)
 				throw new Error("The leader that handed this goal on did not receive the question yet; ask again.");
 			return { askId };
 		}
@@ -570,12 +507,18 @@ export class LeaderController {
 	}
 
 	/**
-	 * Sends a notice to the parent leader of a nested goal, filed under that parent's goal. The key makes a repeated send
-	 * one message, so a restart that sends again delivers nothing twice. A send that did not land returns false and is retried.
+	 * Sends a notice from a nested leader (`fromLeader`) to the parent leader of its goal, filed under that parent's goal. The
+	 * key makes a repeated send one message, so a restart that sends again delivers nothing twice. A send that did not land
+	 * returns false and is retried.
 	 */
-	private async sendToParent(parent: DelegationRecord, content: string, idempotencyKey: string): Promise<boolean> {
+	private async sendToParent(
+		parent: DelegationRecord,
+		content: string,
+		idempotencyKey: string,
+		fromLeader: string,
+	): Promise<boolean> {
 		try {
-			await this.deps.send(parent.charter.leader, content, parent.objectiveId, { idempotencyKey });
+			await this.deps.send(parent.charter.leader, content, parent.objectiveId, { idempotencyKey, fromLeader });
 			return true;
 		} catch (error) {
 			harnessLog.warn("leaders", "a nested leader's notice could not reach the parent leader yet", () => ({
@@ -770,16 +713,16 @@ export class LeaderController {
 			outcome,
 			report: record.closeReason === "settled" ? last?.result?.summary?.trim() : undefined,
 		};
+		const deliveryId = `leader-outcome:${record.objectiveId}`;
 		const parent = this.parentOf(record);
 		if (parent) {
 			// A paused parent takes the Outcome when it resumes: the next pass retries it.
 			if (parent.state !== "running") return false;
 			const content = leaderOutcomeNotice({ ...notice, to: "parent_leader" });
-			if (!(await this.sendToParent(parent, content, `leader-outcome:${record.objectiveId}`))) return false;
+			if (!(await this.sendToParent(parent, content, deliveryId, record.charter.leader))) return false;
 			this.ledger.recordChildOutcomeDelivered(record.objectiveId);
 			return true;
 		}
-		const deliveryId = `leader-outcome:${record.objectiveId}`;
 		if (this.delivered.has(deliveryId) || this.deps.hasDelivered(deliveryId)) return true;
 		return this.deliverOnce(deliveryId, {
 			customType: LEADER_OUTCOME_CUSTOM_TYPE,
@@ -823,7 +766,7 @@ export class LeaderController {
 		if (parent) {
 			if (parent.state !== "running") return;
 			const content = leaderQuestionNotice({ ...notice, to: "parent_leader" });
-			if (await this.sendToParent(parent, content, deliveryId)) this.delivered.add(deliveryId);
+			if (await this.sendToParent(parent, content, deliveryId, leader.agentId)) this.delivered.add(deliveryId);
 			return;
 		}
 		await this.deliverOnce(deliveryId, {
@@ -843,7 +786,7 @@ export class LeaderController {
 		try {
 			await this.deps.deliver({
 				deliveryId,
-				payloadDigest: canonicalDigest({ message }),
+				payloadDigest: strictCanonicalDigest(withoutUndefinedMembers({ message })),
 				message,
 				origin: this.deps.origin(),
 			});

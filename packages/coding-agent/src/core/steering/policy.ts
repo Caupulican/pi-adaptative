@@ -5,7 +5,7 @@
 
 import type { Consequence } from "../decision/primitives.ts";
 import { CONSEQUENCE_MIN_CONFIDENCE } from "../decision/thresholds.ts";
-import { canonicalDigest } from "./canonical.ts";
+import { strictCanonicalDigest } from "./canonical.ts";
 import type { SteeringCertificatePolicyRef } from "./types.ts";
 
 export const STEERING_POLICY_VERSION = "1.2" as const;
@@ -117,7 +117,7 @@ export const DEFAULT_STEERING_POLICY: SteeringPolicyConfig = {
 };
 
 export function computePolicyDigest(policy: SteeringPolicyConfig = DEFAULT_STEERING_POLICY): string {
-	return canonicalDigest(policy);
+	return strictCanonicalDigest(policy);
 }
 
 export function getPolicyRef(policy: SteeringPolicyConfig = DEFAULT_STEERING_POLICY): SteeringCertificatePolicyRef {

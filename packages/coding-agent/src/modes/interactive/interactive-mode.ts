@@ -68,7 +68,7 @@ import type { FitnessRole } from "../../core/models/fitness-role.ts";
 import type { PrismLlamaCppRuntime } from "../../core/models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
 import { planStepByAttempt } from "../../core/plan/plan-panel.ts";
-import { listPlanViews } from "../../core/plan/plan-view.ts";
+import { namedPlanViews } from "../../core/plan/plan-views-named.ts";
 import { recordLessonCandidate } from "../../core/proof/lesson-candidates.ts";
 import { latestProofSheet } from "../../core/proof/review-gauge.ts";
 import { AccountUsageMonitor } from "../../core/provider-admission/account-usage-monitor.ts";
@@ -1104,7 +1104,7 @@ export class InteractiveMode {
 		const peerFindings = this.session.getSemanticVerificationObligations();
 		const edge = this.session.getEdgeGrants();
 		const ledger = this.session.backgroundLanes.getTaskRuntimeSnapshot();
-		const plans = ledger ? listPlanViews(ledger) : [];
+		const plans = namedPlanViews(ledger, this.runtimeHost.services.agentDir);
 		return {
 			goalState: this.session.getGoalStateSnapshot(),
 			taskState: this.session.getTaskStepsStateSnapshot(),
@@ -1701,7 +1701,7 @@ export class InteractiveMode {
 				const ledger = this.session.backgroundLanes.getTaskRuntimeSnapshot();
 				handlePlanCommand(
 					{
-						listPlans: () => (ledger ? listPlanViews(ledger) : []),
+						listPlans: () => namedPlanViews(ledger, this.runtimeHost.services.agentDir),
 						getGoalStateSnapshot: () => this.session.getGoalStateSnapshot(),
 						...this.operatorCommandOutput(),
 					},

@@ -17,10 +17,12 @@
 import { mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { defineMachine, type MachineObserver, observeMachine, registerMachine } from "../../kernel/machine-spec.ts";
+import { observeMachine, registerMachine } from "../../kernel/machine-spec.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../../kernel/timer-port.ts";
 import { orchestrationSessionDir } from "../agent-paths.ts";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import { renderCommsStateLine } from "../comms/comms-records.ts";
+import type { WorkerLaneIsolationDeps } from "../delegation/worker-lane-isolation.ts";
 import type { Outcome } from "../delegation/worker-outcome-contract.ts";
 import { describeOutcomeForHandoff } from "../delegation/worker-outcome-words.ts";
 import type { FleetDispatch, FleetScheduler, RoomQuery } from "../fleet/fleet-types.ts";
@@ -52,6 +54,7 @@ import {
 import { acceptPlanCall } from "./plan-acceptance.ts";
 import { buildPlanDispatch, decidePlacement, planCriticalPath, planReleaseKey } from "./plan-dispatch.ts";
 import type { PlanCallContext, PlanExecutorPort, PlanToolInput, PlanToolResult } from "./plan-executor-port.ts";
+import { PlanFingerprint, sameVisibleView } from "./plan-fingerprint.ts";
 import {
 	checkPlanFacts,
 	derivePlanId,
@@ -63,12 +66,13 @@ import {
 	type PlanRecord,
 	type PlanRuntimeState,
 } from "./plan-graph.ts";
+import { PLAN_NODE_MACHINE } from "./plan-node-machine.ts";
 import { placementFor } from "./plan-placement.ts";
 import { type PlanAction, type PlanUpdateIntent, reconcilePlans } from "./plan-reconcile.ts";
 import { planNodeOfTask } from "./plan-reducer.ts";
 import { placeHereNodes, resolveSince, verifyWrapNodes } from "./plan-revision.ts";
 import { planUpdateDelivery, planUpdateDeliveryId } from "./plan-update.ts";
-import { activeRootPlan, listPlanViews, planNodeBrief, planView } from "./plan-view.ts";
+import { activeRootPlan, type PlanView, planNodeBrief, planView } from "./plan-view.ts";
 
 /** Reconcile passes one drain may run before it yields to the next event. */
 const MAX_DRAIN_PASSES = 16;
@@ -112,59 +116,9 @@ export interface PlanExecutorDeps {
 	readonly acknowledge: (notificationIds: readonly string[]) => void;
 	/** Fires when a plan's visible state changes (a step starts, settles or is held, a plan opens or closes). */
 	readonly planChanged: () => void;
-	readonly now?: () => number;
-}
-
-const NODE_STATES: readonly PlanNodeState[] = [
-	"planned",
-	"ready",
-	"admitted",
-	"running",
-	"settled",
-	"held",
-	"superseded",
-	"cancelled",
-];
-
-function onward(...states: PlanNodeState[]): Partial<Record<PlanNodeState, PlanNodeState>> {
-	return Object.fromEntries(states.map((state) => [state, state]));
-}
-
-/** One plan step's life; a revise may restart a settled or held step, and a retry may queue a running one again. */
-export const PLAN_NODE_MACHINE = defineMachine<PlanNodeState, PlanNodeState>({
-	name: "plan-node",
-	states: NODE_STATES,
-	initial: "planned",
-	transitions: {
-		planned: onward("ready", "admitted", "settled", "held", "superseded", "cancelled"),
-		ready: onward("planned", "admitted", "running", "settled", "superseded", "cancelled"),
-		admitted: onward("planned", "running", "settled", "held", "superseded", "cancelled"),
-		running: onward("planned", "admitted", "settled", "held", "superseded", "cancelled"),
-		held: onward("planned", "ready", "settled", "superseded", "cancelled"),
-		settled: onward("planned", "ready", "held", "superseded", "cancelled"),
-		superseded: {},
-		cancelled: {},
-	},
-	describe: {
-		planned: "waiting for earlier steps",
-		ready: "ready to start",
-		admitted: "starting",
-		running: "running",
-		settled: "done",
-		held: "held",
-		superseded: "replaced",
-		cancelled: "stopped",
-	},
-});
-
-let nodeObserver: MachineObserver<PlanNodeState> | undefined;
-
-function machineObserver(): MachineObserver<PlanNodeState> {
-	if (!nodeObserver) {
-		nodeObserver = observeMachine(PLAN_NODE_MACHINE);
-		registerMachine(nodeObserver);
-	}
-	return nodeObserver;
+	readonly timers?: () => TimerPort;
+	readonly lanes?: () => WorkerLaneIsolationDeps;
+	readonly landGate?: () => { readonly gate: "on" | "off"; readonly gateCommand?: string };
 }
 
 function errorText(error: unknown): string {
@@ -178,6 +132,16 @@ function optionalStakes(stakes: ProofStakesLevel | undefined): { stakes?: ProofS
 
 function queryKey(query: RoomQuery): string {
 	return `${query.objectiveId}|${query.weight}`;
+}
+
+/** The release keys of every step that still waits for its release in an open plan of the snapshot. */
+function waitingReleaseKeys(snapshot: TaskRuntimeProjection): ReadonlySet<string> {
+	const waiting = new Set<string>();
+	for (const [planId, plan] of Object.entries(snapshot.plans))
+		if (!plan.closed)
+			for (const [nodeId, node] of Object.entries(plan.nodes))
+				if (!node.release) waiting.add(planReleaseKey(planId, nodeId, node.since));
+	return waiting;
 }
 
 /** A join result file the executor wrote; anything else, a partial record included, reads as absent. */
@@ -259,9 +223,19 @@ export class PlanExecutor implements PlanExecutorPort {
 	private readonly remoteRefused = new Map<string, Set<string>>();
 	/** Release keys a temporary remote refusal parked, with the machine the offer stays prepared for: retried when candidates change. */
 	private readonly remoteParked = new Map<string, string>();
-	private nodeStates = new Map<string, PlanNodeState>();
-	/** The rendered plan views at the last observed snapshot; a different rendering is a visible change. */
-	private visibleViews: string | undefined;
+	/**
+	 * Release keys whose refused or failed start may still hold the offer it prepared (a local allocation or a remote offer).
+	 * `parked` cannot hold them: the drain clears it, so a revision would lose them before the release sweep. Kept until the
+	 * step is released or stops waiting, when `releaseStale` gives the offer back.
+	 */
+	private readonly offerKeys = new Set<string>();
+	/** This executor's shadow of every plan step's state; listed in the session's status view while the executor lives. */
+	private readonly nodeMachine = observeMachine(PLAN_NODE_MACHINE, { entities: true });
+	private readonly unregisterMachine: () => void;
+	/** Which plans' inputs moved since the last observation, by reference. */
+	private readonly fingerprint = new PlanFingerprint();
+	/** The plan views at the last observed snapshot; a view that differs from the one here is a visible change. */
+	private readonly visibleViews = new Map<string, PlanView>();
 	private unsubscribeStore: (() => void) | undefined;
 	private lastSnapshot: TaskRuntimeProjection | undefined;
 	private draining = false;
@@ -270,6 +244,7 @@ export class PlanExecutor implements PlanExecutorPort {
 
 	constructor(deps: PlanExecutorDeps) {
 		this.deps = deps;
+		this.unregisterMachine = registerMachine(this.nodeMachine, deps.sessionId());
 	}
 
 	/** Subscribes to the store and runs the startup reconcile (restart recovery). */
@@ -288,6 +263,7 @@ export class PlanExecutor implements PlanExecutorPort {
 		this.unsubscribeCandidates = undefined;
 		for (const unsubscribe of this.roomSubscriptions.values()) unsubscribe();
 		this.roomSubscriptions.clear();
+		this.unregisterMachine();
 	}
 
 	/** The goal changed: parked work may be allowed now, and the goal's requirements are re-read. */
@@ -367,7 +343,7 @@ export class PlanExecutor implements PlanExecutorPort {
 	}
 
 	private now(): number {
-		return this.deps.now?.() ?? Date.now();
+		return (this.deps.timers?.() ?? SYSTEM_TIMER_PORT).now();
 	}
 
 	/**
@@ -438,25 +414,32 @@ export class PlanExecutor implements PlanExecutorPort {
 	}
 
 	/**
-	 * Forgets the remote refusals of releases no open plan still waits on: a revised release has a new key, a closed plan has
-	 * none left to wait on, and a started release is already forgotten at its start.
+	 * Gives back the prepared offer of each release key that no longer waits: a revised or removed step, a closed plan, or a
+	 * step released since its refusal. A key that stops waiting is forgotten with its offer. `waiting` holds the keys the
+	 * pass's snapshot still waits on; releasing an offer that was already consumed is a no-op.
 	 */
-	private forgetRemoteReleases(snapshot: TaskRuntimeProjection): void {
-		if (this.remoteRefused.size === 0 && this.remoteParked.size === 0) return;
-		const waiting = new Set<string>();
-		for (const [planId, plan] of Object.entries(snapshot.plans))
-			if (!plan.closed)
-				for (const [nodeId, node] of Object.entries(plan.nodes))
-					if (!node.release) waiting.add(planReleaseKey(planId, nodeId, node.since));
-		for (const key of [...this.remoteRefused.keys()]) if (!waiting.has(key)) this.remoteRefused.delete(key);
-		for (const key of [...this.remoteParked.keys()]) if (!waiting.has(key)) this.remoteParked.delete(key);
+	private releaseStale(waiting: ReadonlySet<string>): void {
+		const fleet = this.deps.fleet();
+		const held = new Set([...this.offerKeys, ...this.remoteParked.keys(), ...this.remoteRefused.keys()]);
+		for (const key of held) {
+			if (waiting.has(key)) continue;
+			fleet.releasePrepared(key);
+			this.offerKeys.delete(key);
+			this.remoteParked.delete(key);
+			this.remoteRefused.delete(key);
+		}
 	}
 
 	private pass(): void {
 		const runtime = this.deps.runtime();
 		const snapshot = runtime.getSnapshot();
-		this.forgetRemoteReleases(snapshot);
-		if (Object.keys(snapshot.plans).length === 0) return;
+		if (this.offerKeys.size + this.remoteParked.size + this.remoteRefused.size > 0)
+			this.releaseStale(waitingReleaseKeys(snapshot));
+		if (Object.keys(snapshot.plans).length === 0) {
+			// A plan the snapshot dropped must still leave the panel, even when no plan is left to reconcile.
+			this.observe(snapshot);
+			return;
+		}
 		const result = reconcilePlans(snapshot, this.deps.goal());
 		const room = new Map<string, number>();
 		const waiting = new Set<string>();
@@ -874,6 +857,7 @@ export class PlanExecutor implements PlanExecutorPort {
 		const key = dispatch.idempotencyKey;
 		const park = (reason: string, detail: string) => {
 			this.parked.set(key, roomKey);
+			this.offerKeys.add(key);
 			harnessLog.info("plan", "a plan step release waits", { planId, nodeId, reason, detail });
 		};
 		// A temporary remote refusal (the machine's room or runtime is momentarily unavailable: the refusal carries a retry time)
@@ -913,6 +897,7 @@ export class PlanExecutor implements PlanExecutorPort {
 			const decision = fleet.admit(dispatch, placement);
 			if (decision.kind === "refused") return refused(decision);
 			this.deps.runtime().releasePlanNode({ planId, version, nodeId, taskId: decision.taskId, placement, exit });
+			this.offerKeys.delete(key);
 			this.remoteRefused.delete(key);
 			harnessLog.info("plan", "a plan step is released", {
 				planId,
@@ -1009,24 +994,39 @@ export class PlanExecutor implements PlanExecutorPort {
 	private observe(snapshot: TaskRuntimeProjection): void {
 		if (snapshot === this.lastSnapshot) return;
 		this.lastSnapshot = snapshot;
-		const observer = machineObserver();
-		const seen = new Map<string, PlanNodeState>();
-		const views = listPlanViews(snapshot);
-		for (const view of views) {
-			for (const node of view.nodes) {
-				const key = `${view.planId}/${node.id}`;
-				const before = this.nodeStates.get(key);
-				if (before !== undefined && before !== node.state) observer.record(before, node.state, `plan step ${key}`);
-				seen.set(key, node.state);
-			}
+		let visibleChange = false;
+		// A plan the snapshot no longer holds leaves the panel, and its fingerprint goes with it.
+		for (const planId of [...this.visibleViews.keys()]) {
+			if (snapshot.plans[planId] !== undefined) continue;
+			this.visibleViews.delete(planId);
+			this.fingerprint.forget(planId);
+			visibleChange = true;
 		}
-		this.nodeStates = seen;
+		// Only a plan whose inputs moved is rebuilt: its steps' state moves go to the machine shadow, and its view is compared
+		// with the one the panel last saw.
+		for (const planId of this.fingerprint.changed(snapshot)) {
+			// planView is undefined only for an id the snapshot lacks; `changed` reads the snapshot's own plans.
+			const view = planView(snapshot, planId);
+			if (view === undefined) continue;
+			const before = this.visibleViews.get(planId);
+			if (before === undefined || !sameVisibleView(before, view)) visibleChange = true;
+			this.recordStepMoves(before, view);
+			this.visibleViews.set(planId, view);
+		}
 		// The panel is a function of these views; the store commits of other work leave them as they were, so the owner's
-		// screen redraws only when a plan's visible state moves (a step starts, settles or is held, a plan opens or closes).
-		const visible = JSON.stringify(views);
-		if (visible !== this.visibleViews) {
-			this.visibleViews = visible;
-			this.deps.planChanged();
+		// screen redraws only when a plan's visible state moves (a step starts, settles or is held, a plan opens or closes,
+		// or its text changes).
+		if (visibleChange) this.deps.planChanged();
+	}
+
+	/** Records each step of a plan whose state moved since the last observation; a step new to the plan moves nothing. */
+	private recordStepMoves(before: PlanView | undefined, view: PlanView): void {
+		if (before === undefined) return;
+		const states = new Map<string, PlanNodeState>(before.nodes.map((node) => [node.id, node.state] as const));
+		for (const node of view.nodes) {
+			const was = states.get(node.id);
+			if (was !== undefined && was !== node.state)
+				this.nodeMachine.record(was, node.state, `plan step ${view.planId}/${node.id}`);
 		}
 	}
 }

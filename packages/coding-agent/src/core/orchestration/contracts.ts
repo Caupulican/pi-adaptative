@@ -365,6 +365,15 @@ export interface WorkerExecutionContract {
 export const WORKER_MODEL_ROUTE_SOURCES = ["contract", "inherited", "model_pin", "profile", "authority"] as const;
 export type WorkerModelRouteSource = (typeof WORKER_MODEL_ROUTE_SOURCES)[number];
 
+/**
+ * The key a placed job's managed lane was placed under: the placement's idempotency key and, for a plan step, the step it names.
+ * It is the placer's own fact, carried on the lane so a plan's stop can find the job even when its record cannot be read.
+ */
+export interface ManagedLanePlacement {
+	readonly idempotencyKey: string;
+	readonly plan?: { readonly planId: string; readonly nodeId: string; readonly version: number };
+}
+
 export interface OrchestrationDispatchRequest {
 	taskId: string;
 	/** Owner-selected exact canonical references, scoped to this task rather than the persistent worker. */
@@ -421,6 +430,8 @@ export interface OrchestrationDispatchRequest {
 	 * Provenance only, never dispatch identity: a leader reads it to claim the turns its own messages started.
 	 */
 	senderAgentId?: string;
+	/** The placed job this managed-process lane runs for, when a placer placed it: its placement key. Absent on every other dispatch. */
+	placement?: ManagedLanePlacement;
 }
 
 export type CapabilityEnforcementKind =

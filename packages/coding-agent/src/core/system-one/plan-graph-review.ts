@@ -133,6 +133,8 @@ export interface PlanGraphReview {
 	readonly annotate: readonly string[];
 	/** What System One could not settle, in plain words. */
 	readonly doubts: readonly string[];
+	/** The same doubts keyed by the step they belong to: a pair doubt under `later`, a brief doubt under its step. */
+	readonly nodeDoubts: Readonly<Record<string, readonly string[]>>;
 	/** One reference per asked question whose evaluation has a ledger row. */
 	readonly judgments: readonly PlanJudgmentRef[];
 	readonly exit: "accept" | "accept_unjudged" | "accept_with_gap";
@@ -162,6 +164,7 @@ const UNJUDGED_REVIEW = {
 	open: [],
 	gap: false,
 	annotate: [],
+	nodeDoubts: {},
 	judgments: [],
 	exit: "accept_unjudged",
 } as const;
@@ -329,6 +332,12 @@ export async function reviewPlanGraph(
 		}
 	};
 	const doubts: string[] = [];
+	const nodeDoubts: Record<string, string[]> = {};
+	/** A doubt about one step: it reads in the review's flat list and under the step. */
+	const stepDoubt = (id: string, line: string) => {
+		doubts.push(line);
+		nodeDoubts[id] = [...(nodeDoubts[id] ?? []), line];
+	};
 	if (expired > 0)
 		doubts.push(`System One did not answer ${expired} of its checks in time; those steps stand on the code facts`);
 
@@ -353,7 +362,7 @@ export async function reviewPlanGraph(
 				...ref,
 				why: why ?? "ordering it after that step would make the steps wait on each other in a loop",
 			});
-			doubts.push(`whether "${ref.later}" needs the result of "${ref.earlier}"`);
+			stepDoubt(ref.later, `whether "${ref.later}" needs the result of "${ref.earlier}"`);
 			settle(answer, pairKey(ref), cycle ? "open_cycle" : "open");
 		} else if (needs === "hard_fail") {
 			settle(answer, pairKey(ref), "independent");
@@ -372,7 +381,8 @@ export async function reviewPlanGraph(
 		const answer = thinGroups[index] as AnsweredGroup;
 		const reading = read(answer, "brief_self_contained");
 		if (reading === "hard_fail") annotate.push(node.id);
-		else if (reading !== "hard_pass") doubts.push(`whether step "${node.id}" can be done from its brief alone`);
+		else if (reading !== "hard_pass")
+			stepDoubt(node.id, `whether step "${node.id}" can be done from its brief alone`);
 		settle(
 			answer,
 			node.id,
@@ -387,6 +397,7 @@ export async function reviewPlanGraph(
 		gap,
 		annotate,
 		doubts: [...doubts, ...unasked],
+		nodeDoubts,
 		judgments,
 		exit: gap ? "accept_with_gap" : "accept",
 	};

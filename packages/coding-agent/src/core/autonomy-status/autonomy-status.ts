@@ -8,6 +8,7 @@
  */
 
 import { existsSync } from "node:fs";
+import { listMachines, type MachineSnapshot } from "../../kernel/machine-spec.ts";
 import type { SessionEntry, SessionManager } from "../../kernel/node.ts";
 import { parentInputOriginalDetails } from "../../kernel/session/parent-input-ledger.ts";
 import { outwardDraftStates } from "../agent-session-edge.ts";
@@ -25,6 +26,7 @@ import { HARNESS_NOTICE_CUSTOM_TYPE, type HarnessNoticeController, type HarnessN
 import type { KnowledgeCollectionStatus } from "../memory/knowledge-collector.ts";
 import type { MemoryController } from "../memory-controller.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import type { OwnerDecisionItem } from "../owner-decisions/owner-decision-queue.ts";
 import { isOpenPlanView, listPlanViews, type PlanCounts } from "../plan/plan-view.ts";
 import { type ActAheadPhase, actAheadRecordOf } from "../proactivity/act-ahead-record.ts";
 import {
@@ -55,6 +57,8 @@ import type { RunToolManifest } from "./tool-manifest.ts";
 
 /** Items each list keeps; the rest are counted in its `omitted`. */
 export const AUTONOMY_STATUS_LIST_LIMIT = 16;
+/** The waiting calls the owner-decision section lists; the rest are counted. */
+export const OWNER_DECISIONS_LIST_LIMIT = 10;
 
 export type StatusSection<T> =
 	| { readonly status: "available"; readonly value: T }
@@ -246,6 +250,20 @@ export interface SystemOneStatus {
 	readonly state: "on" | "no-engine" | "off";
 }
 
+/**
+ * One declared state machine registered for this session (`kernel/machine-spec.ts`). `state` is the observer's current
+ * state; when `entities` is set, the observer follows many entities and `state` is the last recorded one.
+ */
+export interface MachineStatusView {
+	readonly name: string;
+	readonly state: string;
+	readonly plain: string;
+	readonly entities: boolean;
+	readonly illegalCount: number;
+	/** The most recent transition the observer recorded, if any. */
+	readonly last?: { readonly from: string; readonly to: string; readonly reason: string };
+}
+
 /** Why the active goal's automatic continuation is running, waiting or stopped (`core/goals/goal-auto-continue-state.ts`). */
 export interface GoalContinuationStatus {
 	readonly state: GoalAutoContinueState;
@@ -282,6 +300,12 @@ export interface SessionSaveStatus {
 	readonly fenced: boolean;
 }
 
+/** The calls waiting on the owner now (`owner-decisions/owner-decision-queue.ts`), most urgent first. */
+export interface OwnerDecisionsStatus {
+	readonly waiting: number;
+	readonly items: BoundedList<OwnerDecisionItem>;
+}
+
 export interface SessionAutonomyStatus {
 	readonly v: 1;
 	readonly at: string;
@@ -301,8 +325,15 @@ export interface SessionAutonomyStatus {
 	readonly knowledgeCollection: StatusSection<KnowledgeCollectionStatus>;
 	readonly authority: StatusSection<AuthorityStatus>;
 	readonly systemOne: StatusSection<SystemOneStatus>;
+	/** The declared state machines of this session, bounded like every list (`kernel/machine-spec.ts`). */
+	readonly machines: StatusSection<BoundedList<MachineStatusView>>;
 	/** The recent runs' tool manifests, newest first (`tool-manifest.ts`). */
 	readonly runs: StatusSection<readonly RunToolManifest[]>;
+	/**
+	 * The calls waiting on the owner. The session's owner-decision controller composes it, since the queue reads stores this
+	 * reader does not hold; a status this reader builds alone leaves it out.
+	 */
+	readonly ownerDecisions?: StatusSection<OwnerDecisionsStatus>;
 }
 
 type UsageWindow = Pick<
@@ -370,6 +401,11 @@ export interface AutonomyStatusSources {
 	readonly systemOne: Pick<SessionSemanticPlaneController, "recordingSemanticEngine" | "configured">;
 }
 
+/** The `ownerDecisions` section: the calls waiting on the owner now, the first ones listed. */
+export function ownerDecisionsSection(queue: readonly OwnerDecisionItem[]): StatusSection<OwnerDecisionsStatus> {
+	return available({ waiting: queue.length, items: bounded(queue, OWNER_DECISIONS_LIST_LIMIT) });
+}
+
 function bounded<T>(items: readonly T[], limit = AUTONOMY_STATUS_LIST_LIMIT): BoundedList<T> {
 	return items.length > limit
 		? { items: items.slice(0, limit), omitted: items.length - limit }
@@ -435,6 +471,19 @@ function routineItem(
 				}
 			: {}),
 		...(progress ? { progress } : {}),
+	};
+}
+
+/** A machine's snapshot in the status view: its last transition only, with the reason read through the bounded text. */
+function machineStatusView(snapshot: MachineSnapshot): MachineStatusView {
+	const last = snapshot.recent[snapshot.recent.length - 1];
+	return {
+		name: snapshot.name,
+		state: snapshot.state,
+		plain: snapshot.plain,
+		entities: snapshot.entities,
+		illegalCount: snapshot.illegalCount,
+		...(last ? { last: { from: last.from, to: last.to, reason: text(last.reason) ?? "" } } : {}),
 	};
 }
 
@@ -725,6 +774,9 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 			state: sources.systemOne.recordingSemanticEngine() ? "on" : sources.systemOne.configured ? "no-engine" : "off",
 		}),
 	);
+	const machines = await section<BoundedList<MachineStatusView>>(() =>
+		available(bounded(listMachines(sources.sessionId).map(machineStatusView))),
+	);
 
 	return {
 		v: 1,
@@ -745,6 +797,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 		knowledgeCollection,
 		authority,
 		systemOne,
+		machines,
 		runs,
 	};
 }

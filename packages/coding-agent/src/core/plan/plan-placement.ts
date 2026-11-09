@@ -16,25 +16,36 @@ export interface PlacementFacts {
 	readonly boundMachine?: string;
 }
 
+/** The exit of a must-pinned step that runs here because no remote backend can take it. */
+export const PIN_MUST_LOCAL = "pin_machine_must_local";
+
 type Chosen = { readonly placement: Placement; readonly exit: string };
 
 function remote(machineId: string, exit: string): Chosen {
 	return { placement: { kind: "remote_machine", machineId }, exit };
 }
 
+/** The machine a step's pin names (prefer or must), or undefined for a pin on a bot, a leader or here, or no pin. */
+export function pinnedMachineOf(node: PlanNodeSpec): string | undefined {
+	const target = node.pin?.target;
+	return typeof target === "object" && "machineId" in target ? target.machineId : undefined;
+}
+
 /**
  * The placement a released step takes. P1 a non-local base is kept; P2 a must-pin to a machine is honoured when a remote
- * backend is registered, and otherwise the step runs here; P3-P7 a step that is not a read-only plain step, has inputs or
- * refs, or is pinned here keeps the base; a release whose placed job already exists on a machine returns to that machine
- * (its job holds the room, so no candidate is picked and local room does not divert it); P8 a prefer-pin to a free candidate;
- * P9 local room keeps the base; P10 the first candidate not refused; P11 the base.
+ * backend is registered, and otherwise the step runs here with exit `pin_machine_must_local`; P3-P7 a step that is not a
+ * read-only plain step, has inputs or refs, or is pinned here keeps the base; a release whose placed job already exists on a
+ * machine returns to that machine (its job holds the room, so no candidate is picked and local room does not divert it);
+ * P8 a prefer-pin to a free candidate; P9 local room keeps the base; P10 the first candidate not refused; P11 the base.
  */
 export function placementFor(node: PlanNodeSpec, base: Chosen, facts: PlacementFacts): Chosen {
 	if (base.placement.kind !== "local_worker") return base;
 	const target = node.pin?.target;
-	const pinnedMachine = typeof target === "object" && "machineId" in target ? target.machineId : undefined;
-	if (node.pin?.mode === "must" && pinnedMachine !== undefined && facts.remoteBackend)
-		return remote(pinnedMachine, "pin_machine_must");
+	const pinnedMachine = pinnedMachineOf(node);
+	if (node.pin?.mode === "must" && pinnedMachine !== undefined)
+		return facts.remoteBackend
+			? remote(pinnedMachine, "pin_machine_must")
+			: { placement: base.placement, exit: PIN_MUST_LOCAL };
 	if (node.kind !== "work") return base;
 	if (node.writeScope.length > 0) return base;
 	if (node.inputs.length > 0) return base;

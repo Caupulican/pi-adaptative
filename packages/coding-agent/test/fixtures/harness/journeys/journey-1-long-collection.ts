@@ -11,10 +11,15 @@ import type { KnowledgeCollectionOutcome } from "../../../../src/core/memory/kno
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
 import { KNOWLEDGE_COLLECTION_CUSTOM_TYPE } from "../../../../src/core/reflection-controller.ts";
 import { runAsyncReleaseSteps } from "../../../../src/core/util/resource-release.ts";
+import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { isPlainRecord } from "../../../../src/kernel/utils/value-guards.ts";
 import { createBarrier, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { icmContinuousSettings, icmWaitForChatIdle } from "./shared.ts";
+
+/** Custom entries of one type in the session log; an idle collection pass adds none. */
+const countCustom = (sessionManager: SessionManager, customType: string): number =>
+	sessionManager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === customType).length;
 
 /** Each auxiliary store has exactly the original owner message and its acknowledgement. */
 function registerCompactionTracks(world: HarnessWorld, prefix: string): string[] {
@@ -475,13 +480,22 @@ async function runCompletedLongCollection(world: HarnessWorld): Promise<void> {
 		disposal = undefined;
 		world.systemOne.enterPhase("long-complete-reopen", {});
 		await withDeadline(world.trace, "complete long reopened armed", world.timers.whenArmed("knowledge-collection"));
-		const replay = ended(root.session);
-		world.timers.advance("knowledge-collection", 1_000);
-		expect(await withDeadline(world.trace, "complete long reopened", replay)).toMatchObject({
-			status: "completed",
-			sources: 0,
-			handoff: { retained: true },
-		});
+		const entriesBefore = countCustom(root.sessionManager, KNOWLEDGE_COLLECTION_CUSTOM_TYPE);
+		expect(world.timers.advance("knowledge-collection", 1_000)).toBe(1);
+		// The pass promise is the barrier: an idle pass emits no event, so the terminal event is not awaited here.
+		await withDeadline(
+			world.trace,
+			"complete long reopened",
+			root.session.memoryOperator.knowledgeCollectionSettled(),
+		);
+		expect(
+			root.session.memoryOperator.getKnowledgeCollectionStatus().lastIdlePass,
+			"the replay found no new source",
+		).toBeDefined();
+		expect(
+			countCustom(root.sessionManager, KNOWLEDGE_COLLECTION_CUSTOM_TYPE),
+			"an idle pass writes no terminal entry",
+		).toBe(entriesBefore);
 		expect(world.provider.requests.length).toBe(before);
 		world.trace.mark("root", "knowledge.long-source-complete");
 	} catch (error) {

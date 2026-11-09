@@ -19,6 +19,7 @@
 
 import { type FSWatcher, watch } from "node:fs";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { claimThenEffect } from "../../kernel/outbox.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { channelsDir } from "../agent-paths.ts";
 import type { SendUserMessageOptions } from "../extensions/types.ts";
@@ -2484,8 +2485,8 @@ export class SessionChannels {
 				throw new Error(`The draft cannot be sent: it is ${formatted.reason.replaceAll("_", " ")}.`);
 			send = { provider, parts: formatted.parts };
 		}
-		const claim = this.claimDraft(name, id, action);
 		if (!send) {
+			const claim = this.claimDraft(name, id, action);
 			harnessLog.info("channels", "a draft was dismissed", {
 				channel: name,
 				draft: id,
@@ -2494,36 +2495,59 @@ export class SessionChannels {
 			this.scheduleWork();
 			return `Dismissed draft ${id}.`;
 		}
-		harnessLog.info("channels", "a draft send was claimed", {
-			channel: name,
-			draft: id,
-			repeatsInterrupted: claim.interrupted,
+		const { provider, parts } = send;
+		const run = await claimThenEffect({
+			claim: () => {
+				const claim = this.claimDraft(name, id, "send");
+				harnessLog.info("channels", "a draft send was claimed", {
+					channel: name,
+					draft: id,
+					repeatsInterrupted: claim.interrupted,
+				});
+				return claim;
+			},
+			effect: (claim) =>
+				this.sendParts(
+					provider,
+					{ conversationKey: claim.draft.conversationKey, address: claim.draft.address, id: claim.draft.batchId },
+					parts,
+				),
+			release: (claim) => {
+				harnessLog.warn("channels", "a draft send failed; the draft is kept", { channel: name, draft: id });
+				this.journal(name).update(this.now(), (state) => {
+					const entry = state.drafts.find((candidate) => candidate.id === id);
+					// Only this settle's own claim is given back.
+					if (entry?.state !== "sending" || entry.sendingBy?.at !== claim.draft.sendingBy?.at) return;
+					if (claim.previous) entry.sendingBy = claim.previous;
+					else {
+						entry.state = "pending";
+						delete entry.sendingBy;
+					}
+				});
+			},
+			onReleaseFailed: (error) => {
+				this.deps.warn(
+					`Channel ${name}: draft ${id} could not be released after a failed send (${error instanceof Error ? error.message : String(error)}); it shows as an unknown outcome.`,
+				);
+			},
+			settle: () => {
+				this.journal(name).update(this.now(), (state) => {
+					const entry = state.drafts.find((candidate) => candidate.id === id);
+					if (entry?.state !== "sending") return;
+					entry.state = "sent";
+					entry.settledAt = this.now();
+					delete entry.sendingBy;
+				});
+			},
 		});
-		try {
-			await this.sendParts(
-				send.provider,
-				{ conversationKey: claim.draft.conversationKey, address: claim.draft.address, id: claim.draft.batchId },
-				send.parts,
-			);
-		} catch (error) {
-			this.releaseDraftClaim(name, id, claim);
-			harnessLog.warn("channels", "a draft send failed; the draft is kept", { channel: name, draft: id });
-			throw error;
-		}
-		try {
-			this.journal(name).update(this.now(), (state) => {
-				const entry = state.drafts.find((candidate) => candidate.id === id);
-				if (entry?.state !== "sending") return;
-				entry.state = "sent";
-				entry.settledAt = this.now();
-				delete entry.sendingBy;
-			});
-		} catch (error) {
+		// claimDraft refuses by throwing and the claim above always returns a claim, so no skip can reach this point.
+		if (run.kind === "skipped") throw new Error(`Draft ${id} was not claimed for sending.`);
+		if (run.kind === "settle_unrecorded") {
 			// Sent, but the journal kept the claim: it will read as an unknown outcome until the owner settles it.
 			harnessLog.warn("channels", "a draft was sent but its outcome was not recorded", { channel: name, draft: id });
-			return `Sent draft ${id} to its conversation on ${name}, but the journal could not record it (${error instanceof Error ? error.message : String(error)}); the draft will show as an unknown outcome. Dismiss it after checking the conversation.`;
+			return `Sent draft ${id} to its conversation on ${name}, but the journal could not record it (${run.error instanceof Error ? run.error.message : String(run.error)}); the draft will show as an unknown outcome. Dismiss it after checking the conversation.`;
 		}
-		harnessLog.info("channels", "a draft was sent", { channel: name, draft: id, parts: send.parts.length });
+		harnessLog.info("channels", "a draft was sent", { channel: name, draft: id, parts: parts.length });
 		this.scheduleWork();
 		return `Sent draft ${id} to its conversation on ${name}.`;
 	}
@@ -2559,29 +2583,5 @@ export class SessionChannels {
 		if (claimed === "busy")
 			throw new Error(`Draft ${id} is being sent right now; its outcome is recorded when that send ends.`);
 		return claimed;
-	}
-
-	/** Give a claim back after a failed send: the draft waits again, or shows the earlier interrupted claim it replaced. */
-	private releaseDraftClaim(
-		name: string,
-		id: string,
-		claim: { draft: ChannelDraftRecord; previous: ChannelDraftRecord["sendingBy"] },
-	): void {
-		try {
-			this.journal(name).update(this.now(), (state) => {
-				const entry = state.drafts.find((candidate) => candidate.id === id);
-				// Only this settle's own claim is given back.
-				if (entry?.state !== "sending" || entry.sendingBy?.at !== claim.draft.sendingBy?.at) return;
-				if (claim.previous) entry.sendingBy = claim.previous;
-				else {
-					entry.state = "pending";
-					delete entry.sendingBy;
-				}
-			});
-		} catch (error) {
-			this.deps.warn(
-				`Channel ${name}: draft ${id} could not be released after a failed send (${error instanceof Error ? error.message : String(error)}); it shows as an unknown outcome.`,
-			);
-		}
 	}
 }

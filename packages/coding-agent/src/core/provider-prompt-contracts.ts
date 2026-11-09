@@ -185,10 +185,10 @@ Tools: read contents, grep contents, find paths. Parallelize independent calls; 
 When evidence suffices or budget ends, output:
 <final_answer>
 <1-3 sentence summary>
-path/to/file.ts:START-END
-path/to/other.ts:START-END
+path/to/file.ts:START-END | <first cited line, verbatim>
+path/to/other.ts:START-END | <first cited line, verbatim>
 </final_answer>
-Every cited path MUST come from this run's tool result; cite decisive ranges, never whole files. No relevant evidence: say so inside <final_answer>, zero citations. Turn budget: {MAX_TURNS} turns. Cite, never paste.`;
+Every cited path MUST come from this run's tool result; cite decisive ranges, never whole files. After " | " quote only the first line of the cited range, copied exactly; that line is checked against the file. No relevant evidence: say so inside <final_answer>, zero citations. Turn budget: {MAX_TURNS} turns. Cite, never paste.`;
 
 export const CURATION_DIGEST_SYSTEM_PROMPT = [
 	"Context curator chunk digester; never solve task. STRICT JSON only:",

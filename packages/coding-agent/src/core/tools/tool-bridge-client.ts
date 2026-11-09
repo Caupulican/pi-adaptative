@@ -2,7 +2,7 @@ import type { TSchema } from "typebox";
 import {
 	TOOL_BRIDGE_ADDRESS_ENV,
 	TOOL_BRIDGE_CLIENT_MODULE,
-	TOOL_BRIDGE_TOKEN_ENV,
+	TOOL_BRIDGE_TOKEN_FILE_ENV,
 	type ToolBridgeToolName,
 } from "./tool-bridge-policy.ts";
 
@@ -136,6 +136,25 @@ _KINDS = {"refused": ToolRefused, "error": ToolFailed, "limit": ToolLimit, "canc
 _lock = _threading.Lock()
 _channel = None
 _next_id = 0
+_NO_CHANNEL = "no Pi tool channel in this process; run it through the python tool with tools"
+
+
+def _take_secret():
+    # The host writes the run's secret to a private file and names it in the environment. The module takes it at
+    # import and removes the file, so the secret lives only in this process.
+    path = _os.environ.get("${TOOL_BRIDGE_TOKEN_FILE_ENV}")
+    if not path:
+        return None, None
+    try:
+        with open(path, "rb") as handle:
+            secret = handle.read().decode("utf-8")
+        _os.remove(path)
+    except (OSError, ValueError) as error:
+        return None, f"the run's tool-channel secret could not be read and removed ({type(error).__name__})"
+    return secret, None
+
+
+_secret, _secret_problem = _take_secret()
 
 
 def _given(fields):
@@ -177,10 +196,9 @@ def _call(tool, args):
     with _lock:
         if _channel is None:
             address = _os.environ.get("${TOOL_BRIDGE_ADDRESS_ENV}")
-            token = _os.environ.get("${TOOL_BRIDGE_TOKEN_ENV}")
-            if not address or not token:
-                raise ToolRefused(tool, "refused", "no Pi tool channel in this process; run it through the python tool with tools")
-            _channel = _Channel(address, token)
+            if not address or _secret is None:
+                raise ToolRefused(tool, "refused", _secret_problem or _NO_CHANNEL)
+            _channel = _Channel(address, _secret)
         _next_id += 1
         _channel.send({"t": "call", "id": _next_id, "tool": tool, "args": args})
         reply = _channel.receive()

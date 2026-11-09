@@ -16,6 +16,7 @@ import {
 } from "../autonomy/evidence-finding-projection.ts";
 import type { LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import type { WorkerRole } from "../orchestration/contracts.ts";
+import { isVerdictReasonCodeList } from "../orchestration/verification-verdict.ts";
 import {
 	buildVerifierSystemPrompt,
 	buildWorkerSystemPrompt,
@@ -276,11 +277,7 @@ function extractMalformedWorkerRecord(text: string): Record<string, unknown> | u
 		if (typeof record.summary !== "string" || record.summary.trim().length === 0) return false;
 		if (!isWorkerStatus(record.status)) return true;
 		if (record.verdict !== undefined && record.verdict !== "accepted" && record.verdict !== "rejected") return true;
-		return (
-			record.reasonCodes !== undefined &&
-			(!Array.isArray(record.reasonCodes) ||
-				record.reasonCodes.some((reasonCode) => typeof reasonCode !== "string" || reasonCode.trim().length === 0))
-		);
+		return record.reasonCodes !== undefined && !isVerdictReasonCodeList(record.reasonCodes);
 	});
 }
 
@@ -309,13 +306,7 @@ export function parseWorkerOutput(text: string): ParsedWorkerOutput | undefined 
 		if (typeof summary !== "string" || summary.trim().length === 0) continue;
 		if (!isWorkerStatus(record.status)) continue;
 		if (record.verdict !== undefined && record.verdict !== "accepted" && record.verdict !== "rejected") continue;
-		if (
-			record.reasonCodes !== undefined &&
-			(!Array.isArray(record.reasonCodes) ||
-				record.reasonCodes.some((reasonCode) => typeof reasonCode !== "string" || reasonCode.trim().length === 0))
-		) {
-			continue;
-		}
+		if (record.reasonCodes !== undefined && !isVerdictReasonCodeList(record.reasonCodes)) continue;
 
 		const status = record.status;
 		const blockers = boundedReportStrings(record.blockers);

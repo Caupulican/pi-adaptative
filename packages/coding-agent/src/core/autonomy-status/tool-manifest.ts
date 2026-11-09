@@ -42,7 +42,9 @@ export type ToolDecisionCode =
 	/** The remote-owner gate kept the call as a draft for the owner's approval of exactly that call. */
 	| "remote-owner-held"
 	/** The owner's approval of this exact call is held by an identical call admitted earlier whose outcome is not known yet. */
-	| "remote-owner-approval-in-use";
+	| "remote-owner-approval-in-use"
+	/** A call of a run opened from an owner channel whose arguments are not JSON data: no approval can bind it, so it is refused, not held. */
+	| "remote-owner-unbound-call";
 
 export interface ToolDecision {
 	readonly tool: string;

@@ -308,7 +308,7 @@ test("incremental line decoding has one package-level implementation owner", () 
 	const publicApi = readFileSync(join(repositoryRoot, "packages/ai/src/index.ts"), "utf8");
 	assert.match(publicApi, /export \* from "\.\/utils\/streaming-lines\.ts"/);
 	for (const consumer of [
-		"packages/coding-agent/src/kernel/session/session-manager.ts",
+		"packages/coding-agent/src/kernel/session/session-file-reading.ts",
 		"packages/coding-agent/src/core/tools/read.ts",
 		"packages/coding-agent/src/core/models/local-runtime.ts",
 		"packages/coding-agent/src/modes/rpc/jsonl.ts",

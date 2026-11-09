@@ -1,7 +1,8 @@
 /**
  * Acceptance of one `plan` tool call (start or revise), design PG 3.3, as ordered code decisions:
  *
- * 1. code facts F1-F7 (and F10's goal-dependency edges, added first) refuse with every fix listed; nothing is recorded;
+ * 1. code facts F1-F7 (and F10's goal-dependency edges, added first) and the step shapes refuse with every fix listed;
+ *    nothing is recorded;
  * 2. System One absent or failing -> recorded on code facts alone (`unjudged`);
  * 3. J2 and its paired J3 accepted (>= 0.90) for a pair -> the edge is added; the version is re-checked on code facts
  *    with the edges, and a refusal then names the edges that caused it;
@@ -9,7 +10,9 @@
  * 5. any other pair reading -> the pair runs as proposed and is reported as open;
  * 6. J1 accepted -> recorded, and the gap is reported to the root;
  * 7. J4 absent for a short step -> the root's last two plain turns (at most 2 KiB) are baked into that step's brief;
- * 8. otherwise -> recorded as proposed.
+ * 8. F8/F9 (write facts, `plan-write-facts.ts`) refuse a changed step that names no proof, or two unordered steps that
+ *    may change the same files; a step no verify step follows gets a doubt;
+ * 9. otherwise -> recorded as proposed.
  *
  * The judgments themselves live in `system-one/plan-graph-review.ts`; this module only combines them with the facts.
  */
@@ -38,11 +41,17 @@ import {
 	nodeFromStep,
 	resolveSince,
 	revisedNodes,
+	stepShapeProblems,
 	thinSteps,
 	withEdges,
 } from "./plan-revision.ts";
+import { checkWriteFacts, unverifiedWriteSteps } from "./plan-write-facts.ts";
 
 const REQUEST_MAX_BYTES = 4 * 1024;
+/** The planner's recent conversation, baked into a step's note at acceptance; the header lets a later pass see it. */
+const CONTEXT_NOTE_HEADER = "Context from the planner's conversation:";
+/** The doubt a step gets when no verify step follows its file changes. */
+const NO_VERIFY_DOUBT = "no step verifies this change";
 
 export interface PlanAcceptanceContext {
 	readonly planId: string;
@@ -77,7 +86,10 @@ function requestText(goal: GoalState | undefined, entries: readonly unknown[], t
 	return [goal.userGoal, ...(requirements.length > 0 ? ["Requirements:", ...requirements] : [])].join("\n");
 }
 
-/** Exit 7: the root's recent context, baked into a step's brief at acceptance so a restart releases the same task. */
+/**
+ * Exit 7: the root's recent context, baked into a step's brief at acceptance so a restart releases the same task. A
+ * step's own note (its proof line) stays first; the context follows it within the note's bound, once per step.
+ */
 function annotated(
 	nodes: readonly PlanNodeSpec[],
 	ids: readonly string[],
@@ -85,18 +97,38 @@ function annotated(
 ): PlanNodeSpec[] {
 	const excerpt = rootTurnsExcerpt(entries);
 	if (!excerpt || ids.length === 0) return [...nodes];
-	const note = `Context from the planner's conversation:\n${excerpt}`.slice(0, MAX_TASK_NOTE_CHARS).trim();
-	// A step whose brief already states its acceptance lines keeps them and gains the note.
-	return nodes.map((node) =>
-		ids.includes(node.id) && !node.brief?.note
-			? {
-					...node,
-					brief: node.brief
-						? { ...node.brief, note }
-						: { v: 2, goal: briefLine(node.intent, MAX_TASK_GOAL_CHARS), note },
-				}
-			: node,
-	);
+	const context = `${CONTEXT_NOTE_HEADER}\n${excerpt}`;
+	return nodes.map((node) => {
+		if (!ids.includes(node.id) || node.brief?.note?.includes(CONTEXT_NOTE_HEADER)) return node;
+		const own = node.brief?.note;
+		const note = own
+			? `${own}\n${context.slice(0, MAX_TASK_NOTE_CHARS - own.length - 1)}`.trim()
+			: context.slice(0, MAX_TASK_NOTE_CHARS).trim();
+		return {
+			...node,
+			brief: node.brief
+				? { ...node.brief, note }
+				: { v: 2, goal: briefLine(node.intent, MAX_TASK_GOAL_CHARS), note },
+		};
+	});
+}
+
+/**
+ * Sets each step's doubts from this version's review and write facts: the first `nodeDoubts` of its review doubts and
+ * the no-verify doubt. A step with none carries no `doubts` field, so a doubt from an earlier version never lingers.
+ */
+function withDoubts(
+	nodes: readonly PlanNodeSpec[],
+	review: PlanGraphReview,
+	unverified: ReadonlySet<string>,
+): PlanNodeSpec[] {
+	return nodes.map((node) => {
+		const { doubts: _previous, ...spec } = node;
+		const lines = [...(review.nodeDoubts[node.id] ?? []), ...(unverified.has(node.id) ? [NO_VERIFY_DOUBT] : [])]
+			.slice(0, PLAN_LIMITS.nodeDoubts)
+			.map((line) => briefLine(line, PLAN_LIMITS.doubtChars));
+		return lines.length > 0 ? { ...spec, doubts: lines } : spec;
+	});
 }
 
 function reviewNotes(review: PlanGraphReview, goalEdges: readonly { earlier: string; later: string }[]): string[] {
@@ -117,6 +149,8 @@ function reviewNotes(review: PlanGraphReview, goalEdges: readonly { earlier: str
 
 /** Checks, judges and builds one plan version; the caller records it. */
 export async function acceptPlanCall(input: PlanToolInput, context: PlanAcceptanceContext): Promise<PlanAcceptance> {
+	const shape = stepShapeProblems(input.steps ?? []);
+	if (shape.length > 0) return { ok: false, problems: shape };
 	const current = context.current?.record;
 	const version = (current?.version ?? 0) + 1;
 	const title = input.title?.trim() || current?.title || "";
@@ -176,10 +210,14 @@ export async function acceptPlanCall(input: PlanToolInput, context: PlanAcceptan
 			problems: [`System One found: ${added.join("; ")}. With that order:`, ...problemLines(recheck.problems)],
 		};
 	}
+	// F8 and F9 read the order the review's edges give, so they run after it.
+	const writeRefusals = checkWriteFacts(recheck.nodes, changed);
+	if (writeRefusals.length > 0) return { ok: false, problems: writeRefusals.map((refusal) => refusal.fix) };
+	const unverified = new Set(unverifiedWriteSteps(recheck.nodes));
 	const nodes = resolveSince(
 		current,
 		context.current?.runtime,
-		annotated(recheck.nodes, review.annotate, context.entries),
+		withDoubts(annotated(recheck.nodes, review.annotate, context.entries), review, unverified),
 		version,
 		true,
 	);

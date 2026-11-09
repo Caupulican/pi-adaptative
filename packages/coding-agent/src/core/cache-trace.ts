@@ -60,7 +60,7 @@ interface RequestFingerprint {
 	system: SegmentFingerprint;
 	/** The system prompt text, kept only to show where it changed; never written to the trace file. */
 	systemText: string;
-	/** The ICM chat view the request opens with, kept only to compare it across turns; never written to the trace file. */
+	/** The ICM chat view the request carries, kept only to compare it across turns; never written to the trace file. */
 	viewText: string | undefined;
 	/** Text blocks through the last explicit cache marker; their boundaries are part of the prefix. */
 	viewCacheBlocks: readonly string[] | undefined;
@@ -79,11 +79,23 @@ const CHAT_VIEW_CLOSING = "</chat>";
 /** A change in the last tenth of the previous view (a pending line becoming its summary) loses little; earlier ones are reported. */
 const CHAT_VIEW_TAIL_FRACTION = 0.1;
 
-/** The text of the ICM chat view when the request's first message is that view; undefined otherwise. */
+/**
+ * The ICM chat view of a request: the first user message holding a text block with `icmCache`, the provenance only the view
+ * carries. A carried head (skills, authority, task directory, path legend) precedes it, so the view is not always message 0.
+ */
+function chatViewIndex(messages: readonly Message[]): number {
+	return messages.findIndex(
+		(message) =>
+			message.role === "user" &&
+			typeof message.content !== "string" &&
+			message.content.some((block) => block.type === "text" && "icmCache" in block),
+	);
+}
+
+/** The text of the ICM chat view when the request's view is that user message; undefined otherwise. */
 function chatView(
-	messages: readonly Message[],
+	first: Message | undefined,
 ): { text: string; cacheBlocks?: readonly string[]; cache?: ContinuousChatCacheFingerprint } | undefined {
-	const first = messages[0];
 	if (first?.role !== "user" || typeof first.content === "string") return undefined;
 	const text = first.content.map((block) => (block.type === "text" ? block.text : "")).join("");
 	if (!text.startsWith(CHAT_VIEW_OPENING)) return undefined;
@@ -122,8 +134,22 @@ function harnessDeferredCatalog(context: Context): ReadonlySet<string> | undefin
 	return search ? harnessDeferredToolNames(search) : undefined;
 }
 
+/**
+ * The segment label of one request message. Under an ICM frame the head precedes the view, which is followed by the turn's state
+ * and the turn's own messages, so the trace names each part of the frame; any other request keeps its position and role.
+ */
+function segmentLabel(messages: readonly Message[], viewIndex: number, index: number): string {
+	const role = messages[index]?.role;
+	if (viewIndex < 0) return `${index}:${role}`;
+	if (index < viewIndex) return `frame:head:${index}`;
+	if (index === viewIndex) return "frame:view";
+	if (index === viewIndex + 1) return "frame:state";
+	return `turn:${index - viewIndex - 2}:${role}`;
+}
+
 function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerprint {
-	const view = chatView(context.messages);
+	const viewIndex = chatViewIndex(context.messages);
+	const view = chatView(context.messages[viewIndex]);
 	return {
 		model: `${model.provider}/${model.id}`,
 		system: segment("system", context.systemPrompt ?? ""),
@@ -134,7 +160,7 @@ function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerp
 		tools: (context.tools ?? []).map((tool) => segment(tool.name, tool)),
 		harnessDeferred: harnessDeferredCatalog(context),
 		messages: context.messages.map((message, index) =>
-			segment(`${index}:${message.role}`, { role: message.role, content: message.content }),
+			segment(segmentLabel(context.messages, viewIndex, index), { role: message.role, content: message.content }),
 		),
 	};
 }

@@ -316,6 +316,11 @@ export class SkillVaultController {
 	private lastReplayedIndex = 0;
 	private exclusions = new Map<string, SkillExclusionRecord>();
 	private slots = new Map<string, SkillSlotState>();
+	/**
+	 * Names of the skills this session loaded (a load, never a read). Unload and idle expiry do not forget a name: this
+	 * is the session's history of loads, and it is cleared only when the session changes.
+	 */
+	private loadedSkillNames = new Set<string>();
 	/** Recent working-tree file paths (cwd-relative, `/` separators), oldest first; ranks path-scoped skills. */
 	private workPaths = new Set<string>();
 	private unloadReason: SkillVaultUnloadReason | undefined;
@@ -346,6 +351,7 @@ export class SkillVaultController {
 			const hadPriorState = this.slots.size > 0 || this.exclusions.size > 0;
 			this.slots.clear();
 			this.exclusions.clear();
+			this.loadedSkillNames.clear();
 			this.cachedSessionId = currentSessionId;
 			this.lastReplayedIndex = 0;
 			if (!isInitialBind || hadPriorState) {
@@ -418,6 +424,12 @@ export class SkillVaultController {
 	getExclusions(): readonly SkillExclusionRecord[] {
 		this.syncExclusions();
 		return [...this.exclusions.values()];
+	}
+
+	/** Names of the skills this session has loaded, in first-load order. A read does not count as a load. */
+	getLoadedSkillNames(): readonly string[] {
+		this.syncExclusions();
+		return [...this.loadedSkillNames];
 	}
 
 	previewExclusionReminder(): string | undefined {
@@ -719,6 +731,7 @@ export class SkillVaultController {
 			next.delete(victim);
 			evicted.push(victim);
 		}
+		for (const slot of prepared.values()) this.loadedSkillNames.add(slot.skill.name);
 		this.replaceState(next);
 		return {
 			ok: true,

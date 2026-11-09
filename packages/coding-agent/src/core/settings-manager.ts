@@ -1,19 +1,14 @@
-import { existsSync, mkdirSync, readFileSync, realpathSync, rmdirSync, rmSync, writeFileSync } from "fs";
+import { existsSync, mkdirSync, readFileSync, realpathSync, rmSync, writeFileSync } from "fs";
 import { homedir } from "os";
 import { dirname, join, resolve } from "path";
-import { CONFIG_DIR_NAME, getAgentDir, getProfilesDir } from "../config.ts";
+import { getAgentDir } from "../config.ts";
 import { DEFAULT_COMPACTION_SETTINGS } from "../kernel/compaction/compaction.ts";
-import { harnessLog, isLogLevel, type LogLevel } from "../kernel/harness-log.ts";
-import { withHostFileWrite } from "../utils/host-write-transition.ts";
-import { normalizePath, resolvePath } from "../utils/paths.ts";
+import { harnessLog, type LogLevel } from "../kernel/harness-log.ts";
+import { normalizePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
-import { configFile, hostTransitionsFile } from "./agent-paths.ts";
-import { EDGE_CLASSES, isEdgeClass } from "./autonomy/edge-policy.ts";
-import { DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS } from "./background-tool-task-controller.ts";
 import { type ChannelPolicyResolution, resolveChannelPolicies } from "./channels/channel-policy.ts";
 import { resolveSelfCompactionSettings, type SelfCompactionSettings } from "./compaction/self-compaction.ts";
-import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
-import { type CostGuardSettings, DEFAULT_COST_GUARD_SETTINGS } from "./cost-guard.ts";
+import type { CostGuardSettings } from "./cost-guard.ts";
 import type {
 	HmoeIndependence,
 	HmoePreference,
@@ -21,14 +16,7 @@ import type {
 	HmoeTeamStrategy,
 	HmoeWeights,
 } from "./expert-routing/vocabulary.ts";
-
 import type { FastModePreference } from "./fast-mode.ts";
-import {
-	MAX_GOAL_AUTO_CONTINUE_DELAY_MS,
-	MAX_GOAL_CONTINUE_MAX_STALL_TURNS,
-	MAX_GOAL_CONTINUE_MAX_TURNS,
-	MAX_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
-} from "./goals/goal-continuation-defaults.ts";
 import { DEFAULT_HTTP_IDLE_TIMEOUT_MS } from "./http-dispatcher.ts";
 import { compileWorkerModelPinPolicy, type WorkerModelPinPolicy } from "./orchestration/worker-model-pins.ts";
 import { resolveActAheadSettings, resolveProactivityFeedbackSettings } from "./proactivity/proactivity-settings.ts";
@@ -36,145 +24,90 @@ import { ProfileRegistry } from "./profile-registry.ts";
 import { normalizeSteStrictness } from "./provider-prompt-contracts.ts";
 import { mergeResourceProfileMap, mergeResourceProfileSettings } from "./resource-profile-blocks.ts";
 import { isWorkerSession } from "./session-role.ts";
+import {
+	resolveAutonomySettings,
+	resolveEdgeSettings,
+	resolveLearningPolicySettings,
+} from "./settings/autonomy-edge-settings.ts";
+import {
+	normalizeMemoryHistorySettings,
+	normalizeMemoryRetrievalSettings,
+	resolveContextCurationSettings,
+	resolveContextGcSettings,
+	resolveContextPromptEnforcementSettings,
+	resolveMemoryHistorySettings,
+	resolveMemoryRetrievalSettings,
+} from "./settings/context-memory-settings.ts";
+import {
+	resolveFleetSettings,
+	resolveProcessMatrixSettings,
+	resolveProviderAdmissionSettings,
+	resolveWorktreeSyncSettings,
+} from "./settings/fleet-capacity-settings.ts";
+import {
+	normalizeModelRouterSettings,
+	resolveAdvisorSettings,
+	resolveBedrockScopeSettings,
+	resolveModelCapabilitySettings,
+	resolveModelFavorites,
+	resolveModelFavoritesIncluding,
+	resolveModelRouterSettings,
+	resolveSystemOneSettings,
+} from "./settings/model-routing-settings.ts";
 import { resolveLeaderSettings, resolveOrchestrationRetention } from "./settings/orchestration-settings.ts";
 import {
+	resolveProactivitySettings,
+	resolveResearchLaneSettings,
+	resolveRoutineAwaySettings,
+	resolveRoutinesSettings,
+} from "./settings/proactivity-lane-settings.ts";
+import {
+	encodeStoredProfileDefinition,
+	mergeProfileDefinition,
+	normalizeProfileName,
+	normalizeProfileSelection,
+	renameStoredProfileDefinition,
+	rewriteActiveProfileReference,
+	sanitizeProfileResources,
+	setActiveProfileInSettings,
+	updateStoredProfileDefinition,
+} from "./settings/profile-definition-rules.ts";
+import {
+	normalizeCostGuardSettings,
+	resolveCostGuardSettings,
+	resolveCuratorSettings,
+	resolveLoggingSettings,
+	resolveProviderRetrySettings,
+	resolveSelfModificationSettings,
+	resolveStreamStallSettings,
+	resolveWorkbenchSettings,
+} from "./settings/session-runtime-settings.ts";
+import { migrateSettings } from "./settings/settings-migration.ts";
+import {
 	appendFilter,
-	clampMemoryHistoryFrontierMaxBytes,
-	clampMemoryHistoryMaxConcurrentSummaries,
-	clampMemoryHistoryRetentionDays,
-	clampMemoryRetrievalMaxResults,
 	collectLegacyDisabledFilterFromSettings,
-	DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE,
-	DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS,
-	DEFAULT_AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
-	DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS,
-	DEFAULT_AUTONOMY_MAX_STALL_TURNS,
-	DEFAULT_FLEET_BRAKE_MIN_USD,
-	DEFAULT_FLEET_CEILING_RUNNING,
-	DEFAULT_FLEET_CEILING_TREE,
-	DEFAULT_FLEET_CEILING_WRITERS,
-	DEFAULT_FLEET_METERED_USD_PER_DAY,
-	DEFAULT_FLEET_METERED_USD_PER_GOAL,
-	DEFAULT_FLEET_QUEUE_HORIZON_MS,
-	DEFAULT_FLEET_RESERVE_MEMORY_PERCENT,
-	DEFAULT_LEARNING_POLICY_ALLOWED_AUTO_APPLY_LAYERS,
-	DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED,
-	DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS,
-	DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD,
-	DEFAULT_LEARNING_POLICY_ENABLED,
-	DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS,
-	DEFAULT_LEARNING_POLICY_REFLECTION_SOURCE_CONFIDENCE,
 	DEFAULT_MAX_OUTPUT_TOKENS,
-	DEFAULT_MODEL_CAPABILITY_MODE,
-	DEFAULT_MODEL_ROUTER_POOL_PREFERENCE,
-	DEFAULT_MODEL_ROUTER_SELECTION_MODE,
-	DEFAULT_PROACTIVITY_DELIVERY,
-	DEFAULT_PROACTIVITY_ENABLED,
-	DEFAULT_PROACTIVITY_IDLE_DELAY_MS,
-	DEFAULT_PROACTIVITY_MAX_NOTES,
-	DEFAULT_PROACTIVITY_MAX_RUNS_PER_SESSION,
-	DEFAULT_PROACTIVITY_MAX_TURN_WAKES_PER_DAY,
-	DEFAULT_PROACTIVITY_MAX_USD,
-	DEFAULT_PROACTIVITY_MAX_USD_PER_DAY,
-	DEFAULT_PROACTIVITY_MIN_OWNER_TURNS,
-	DEFAULT_PROCESS_MATRIX_ADOPTION_GRACE_MS,
-	DEFAULT_PROCESS_MATRIX_HEARTBEAT_MS,
-	DEFAULT_PROCESS_MATRIX_WATCHER_POLL_MS,
-	DEFAULT_PROVIDER_ADMISSION_ENABLED,
-	DEFAULT_PROVIDER_ADMISSION_FOREGROUND_LIMIT_WAIT_MS,
-	DEFAULT_PROVIDER_ADMISSION_LIMITS,
-	DEFAULT_PROVIDER_ADMISSION_MAX_WAIT_MS,
-	DEFAULT_RESEARCH_LANE_ENABLED,
-	DEFAULT_RESEARCH_LANE_IDLE_DELAY_MS,
-	DEFAULT_RESEARCH_LANE_MAX_FINDINGS,
-	DEFAULT_RESEARCH_LANE_MAX_RUNS_PER_SESSION,
-	DEFAULT_RESEARCH_LANE_MAX_SOURCES,
-	DEFAULT_RESEARCH_LANE_MAX_USD,
-	DEFAULT_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
 	DEFAULT_REVIEW_WAITING_NOTICE_AT,
-	DEFAULT_ROUTINE_AWAY_ENABLED,
-	DEFAULT_ROUTINE_AWAY_MAX_PARENT_HOSTS,
-	DEFAULT_ROUTINE_AWAY_MAX_USD_PER_DAY,
-	DEFAULT_ROUTINE_AWAY_MAX_USD_PER_RUN,
-	DEFAULT_ROUTINE_MAX_RESULT_WAKES_PER_DAY,
-	DEFAULT_TOOL_EXECUTION_CONCURRENCY,
-	DEFAULT_WORKBENCH_SETTINGS,
-	DEFAULT_WORKER_DELEGATION_ACCOUNT,
-	DEFAULT_WORKER_DELEGATION_ENABLED,
-	DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
-	DEFAULT_WORKER_DELEGATION_MAX_USD,
-	DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
-	DEFAULT_WORKER_DELEGATION_REPORT_HANDSHAKE,
-	DEFAULT_WORKER_DELEGATION_THINKING,
-	DEFAULT_WORKER_DELEGATION_WRITE_ENABLED,
-	DEFAULT_WORKTREE_SYNC_GATE_TIMEOUT_MS,
-	DEFAULT_WORKTREE_SYNC_MAX_LANES,
-	DEFAULT_WORKTREE_SYNC_POLICY,
 	deepMergeSettings,
-	getDirectoryResourceProfileInfo,
 	hasExplicitActiveResourceProfileSelection,
 	hasExplicitEmptyActiveResourceProfileSelection,
 	hasLegacyStreamStallBounds,
-	isHmoeIndependence,
-	isHmoePreference,
-	isHmoePreset,
-	isHmoeTeamStrategy,
-	isModelRouterPoolPreference,
-	isModelRouterSelectionMode,
 	isResourceDisabledByTopLevelOverrides,
 	isThinkingLevel,
 	isValidMemorySystem,
-	isWorkbenchGraphView,
-	MAX_BACKGROUND_TOOL_CALL_AFTER_MS,
-	MAX_GRAPH_FRACTION,
-	MAX_PROACTIVITY_IDLE_DELAY_MS,
-	MAX_PROACTIVITY_MAX_NOTES,
-	MAX_PROACTIVITY_MAX_RUNS_PER_SESSION,
-	MAX_PROACTIVITY_MAX_TURN_WAKES_PER_DAY,
-	MAX_PROACTIVITY_MAX_USD,
-	MAX_PROACTIVITY_MAX_USD_PER_DAY,
-	MAX_PROACTIVITY_MIN_OWNER_TURNS,
-	MAX_PROACTIVITY_PREFERENCES_CHARS,
-	MAX_PROVIDER_ADMISSION_LIMIT,
-	MAX_PROVIDER_ADMISSION_MAX_WAIT_MS,
-	MAX_RESEARCH_LANE_IDLE_DELAY_MS,
-	MAX_RESEARCH_LANE_MAX_FINDINGS,
-	MAX_RESEARCH_LANE_MAX_RUNS_PER_SESSION,
-	MAX_RESEARCH_LANE_MAX_SOURCES,
-	MAX_RESEARCH_LANE_MAX_USD,
-	MAX_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
 	MAX_REVIEW_WAITING_NOTICE_AT,
-	MAX_ROUTINE_AWAY_MAX_PARENT_HOSTS,
-	MAX_ROUTINE_AWAY_MAX_USD_PER_DAY,
-	MAX_ROUTINE_AWAY_MAX_USD_PER_RUN,
-	MAX_ROUTINE_MAX_RESULT_WAKES_PER_DAY,
-	MAX_TOOL_EXECUTION_CONCURRENCY,
-	MAX_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
-	MAX_WORKER_DELEGATION_MAX_USD,
-	MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
-	MEMORY_HISTORY_FRONTIER_MAX_BYTES_DEFAULT,
-	MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_DEFAULT,
-	MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT,
-	MIN_BACKGROUND_TOOL_CALL_AFTER_MS,
-	MIN_GRAPH_FRACTION,
-	MIN_ROUTINE_AWAY_MAX_USD_PER_RUN,
-	MIN_TOOL_EXECUTION_CONCURRENCY,
 	matchesResourceProfilePattern,
 	mergeResourceProfileFilters,
 	mergeWorkerDelegationLayers,
 	normalizeActiveResourceProfiles,
 	normalizeBedrockScopeSettings,
-	normalizeHmoeWeights,
 	normalizeResourceProfileNames,
 	normalizeWorkerDelegationLayer,
 	parseProfileFileDefinition,
-	parseStallBoundMs,
 	parseTimeoutSetting,
 	RETIRED_WORKER_DELEGATION_KEYS,
 	resolveMemorySystem,
-	sanitizeGnuToolsDirSetting,
 	sanitizeIntegerSetting,
-	sanitizeNumberSetting,
 } from "./settings/settings-rules.ts";
 import type {
 	AdvisorSettings,
@@ -188,13 +121,11 @@ import type {
 	FleetSettings,
 	GlobalResourceProfileConfiguration,
 	LeaderSettings,
-	LearningPolicyLayer,
 	LearningPolicySettings,
 	LocalRuntimesSettings,
 	MemoryHistorySettings,
 	MemoryRetrievalSettings,
 	MemorySystem,
-	ModelCapabilityMode,
 	ModelCapabilitySettings,
 	ModelFavorite,
 	ModelRouterPoolPreference,
@@ -204,7 +135,6 @@ import type {
 	ProactivitySettings,
 	ProfileDefinitionInput,
 	ProfilePersistenceScope,
-	ReasoningSettings,
 	ResearchLaneSettings,
 	ResolvedActAheadSettings,
 	ResolvedBackgroundToolSettings,
@@ -234,7 +164,6 @@ import type {
 	SettingsErrorScope,
 	SettingsReloadSnapshot,
 	SettingsScope,
-	StreamStallBudgetSettings,
 	StreamStallModelClass,
 	StreamStallSettings,
 	SystemOneSettings,
@@ -248,15 +177,27 @@ import type {
 	WorkerDelegationSettings,
 	WorkerThinkingPolicy,
 } from "./settings/settings-schema.ts";
+import { FileSettingsStorage, InMemorySettingsStorage, type SettingsStorage } from "./settings/settings-storage.ts";
+import {
+	resolveBackgroundToolSettings,
+	resolveFileEncodingRules,
+	resolveToolExecutionSettings,
+	resolveToolkitScripts,
+	resolveToolOutputSettings,
+	resolveWindowsShellSettings,
+} from "./settings/tool-runtime-settings.ts";
+import {
+	resolveWorkerAccountRouting,
+	resolveWorkerDelegationSettings,
+	resolveWorkerThinkingPolicy,
+} from "./settings/worker-delegation-settings.ts";
 import {
 	type ResolvedWorkerOutcomeSettings,
 	resolveWorkerOutcomeSettings,
 } from "./settings/worker-outcome-settings.ts";
-import { validateSkillName } from "./skills.ts";
 import { isSystemOneEnabled, type SystemOneProviderChoice } from "./system-one/access.ts";
 import type { ToolkitScript } from "./toolkit/script-registry.ts";
 import type { FileEncodingRule } from "./tools/file-encoding-metadata.ts";
-import { acquireFileLockSync, LOW_LATENCY_FILE_LOCK_OPTIONS, writeFileAtomicSync } from "./util/atomic-file.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
 
 /** The retired worker concurrency keys are reported once per process, however many settings layers or reloads carry them. */
@@ -266,191 +207,12 @@ export interface SettingsManagerCreateOptions {
 	projectTrusted?: boolean;
 }
 
-export interface SettingsSnapshot {
-	global?: string;
-	project?: string;
-	directoryProfile?: string;
-}
-
-export interface SettingsStorage {
-	/** Hold all settings scopes while validating and replacing the global generation. */
-	updateGlobalSnapshot?(fn: (snapshot: SettingsSnapshot) => string): void;
-	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void;
-	getProfilesDir?(): string;
-	/** Base directory used to resolve explicit ./ or ../ profile references. */
-	getProfileResolutionBaseDir?(): string;
-}
-
-export class FileSettingsStorage implements SettingsStorage {
-	private profileResolutionBaseDir: string;
-	private globalSettingsPath: string;
-	private projectSettingsPath: string;
-	/** The journal every session on this agent directory explains its settings writes from (`host-transitions.jsonl`). */
-	private readonly hostTransitions: string;
-	private directoryProfileInfo: DirectoryResourceProfileInfo;
-	private legacyDirectoryProfilePath: string;
-	private profilesDir: string;
-
-	constructor(cwd: string, agentDir: string) {
-		const resolvedCwd = resolvePath(cwd);
-		const resolvedAgentDir = resolvePath(agentDir);
-		this.profileResolutionBaseDir = resolvedCwd;
-		this.globalSettingsPath = configFile(resolvedAgentDir, "settings.json");
-		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
-		this.hostTransitions = hostTransitionsFile(resolvedAgentDir);
-		this.directoryProfileInfo = getDirectoryResourceProfileInfo(resolvedCwd, resolvedAgentDir);
-		this.legacyDirectoryProfilePath = join(
-			resolvedAgentDir,
-			"resource-profiles",
-			this.directoryProfileInfo.hash,
-			"settings.json",
-		);
-		this.profilesDir = getProfilesDir(resolvedAgentDir);
-	}
-
-	getDirectoryResourceProfileInfo(): DirectoryResourceProfileInfo {
-		return { ...this.directoryProfileInfo };
-	}
-
-	getProfilesDir(): string {
-		return this.profilesDir;
-	}
-
-	getProfileResolutionBaseDir(): string {
-		return this.profileResolutionBaseDir;
-	}
-
-	readDirectoryResourceProfile(): string | undefined {
-		const path = this.directoryProfileInfo.path;
-		if (existsSync(path)) return readFileSync(path, "utf-8");
-		return existsSync(this.legacyDirectoryProfilePath)
-			? readFileSync(this.legacyDirectoryProfilePath, "utf-8")
-			: undefined;
-	}
-
-	private removeMigratedDirectoryProfile(): void {
-		if (!existsSync(this.legacyDirectoryProfilePath)) return;
-		try {
-			rmSync(this.legacyDirectoryProfilePath, { force: true });
-		} catch {
-			return;
-		}
-		for (const directory of [
-			dirname(this.legacyDirectoryProfilePath),
-			dirname(dirname(this.legacyDirectoryProfilePath)),
-		]) {
-			try {
-				rmdirSync(directory);
-			} catch {}
-		}
-	}
-
-	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
-		const path =
-			scope === "global"
-				? this.globalSettingsPath
-				: scope === "project"
-					? this.projectSettingsPath
-					: this.directoryProfileInfo.path;
-		const dir = dirname(path);
-		const legacyPath = scope === "directoryProfile" ? this.legacyDirectoryProfilePath : undefined;
-
-		const releases: Array<() => void> = [];
-		let migratedLegacy = false;
-		try {
-			const legacyExists = legacyPath !== undefined && existsSync(legacyPath);
-			const canonicalExists = existsSync(path);
-			let currentPath = canonicalExists ? path : legacyExists ? (legacyPath ?? path) : path;
-			const fileExists = canonicalExists || legacyExists;
-
-			// Directory-profile locks always follow legacy -> canonical order, including a partial migration
-			// where both files exist. This keeps old and new SDK clients from deadlocking each other.
-			if (legacyPath && legacyExists) {
-				releases.push(acquireFileLockSync(legacyPath, LOW_LATENCY_FILE_LOCK_OPTIONS));
-			}
-			if (canonicalExists) releases.push(acquireFileLockSync(path, LOW_LATENCY_FILE_LOCK_OPTIONS));
-
-			// A legacy directory overlay can race another process that already knows the canonical path.
-			// Hold the legacy lock, then bind to the canonical lock before deriving the update.
-			if (legacyExists && !canonicalExists) {
-				if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
-				releases.push(acquireFileLockSync(path, LOW_LATENCY_FILE_LOCK_OPTIONS));
-				if (existsSync(path)) currentPath = path;
-			}
-
-			const current = fileExists ? readFileSync(currentPath, "utf-8") : undefined;
-			const next = fn(current);
-			if (next !== undefined) {
-				// Only create directory when we actually need to write
-				if (!existsSync(dir)) {
-					mkdirSync(dir, { recursive: true });
-				}
-				if (releases.length === 0) {
-					releases.push(acquireFileLockSync(path, LOW_LATENCY_FILE_LOCK_OPTIONS));
-				}
-				withHostFileWrite(path, next, () => writeFileAtomicSync(path, next), this.hostTransitions);
-				migratedLegacy = legacyExists;
-			}
-		} finally {
-			for (const release of releases.reverse()) release();
-			if (migratedLegacy) this.removeMigratedDirectoryProfile();
-		}
-	}
-	updateGlobalSnapshot(fn: (snapshot: SettingsSnapshot) => string): void {
-		const releases: Array<() => void> = [];
-		try {
-			for (const path of [
-				this.globalSettingsPath,
-				this.projectSettingsPath,
-				this.legacyDirectoryProfilePath,
-				this.directoryProfileInfo.path,
-			]) {
-				releases.push(acquireFileLockSync(path, LOW_LATENCY_FILE_LOCK_OPTIONS));
-			}
-			const read = (path: string) => (existsSync(path) ? readFileSync(path, "utf-8") : undefined);
-			const snapshot = {
-				global: read(this.globalSettingsPath),
-				project: read(this.projectSettingsPath),
-				directoryProfile: read(this.directoryProfileInfo.path) ?? read(this.legacyDirectoryProfilePath),
-			};
-			const next = fn(snapshot);
-			withHostFileWrite(
-				this.globalSettingsPath,
-				next,
-				() => writeFileAtomicSync(this.globalSettingsPath, next),
-				this.hostTransitions,
-			);
-		} finally {
-			for (const release of releases.reverse()) release();
-		}
-	}
-}
-
-export class InMemorySettingsStorage implements SettingsStorage {
-	private global: string | undefined;
-	private project: string | undefined;
-	private directoryProfile: string | undefined;
-
-	withLock(scope: SettingsScope, fn: (current: string | undefined) => string | undefined): void {
-		const current = scope === "global" ? this.global : scope === "project" ? this.project : this.directoryProfile;
-		const next = fn(current);
-		if (next === undefined) {
-			return;
-		}
-		if (scope === "global") {
-			this.global = next;
-			return;
-		}
-		if (scope === "project") {
-			this.project = next;
-			return;
-		}
-		this.directoryProfile = next;
-	}
-	updateGlobalSnapshot(fn: (snapshot: SettingsSnapshot) => string): void {
-		this.global = fn({ global: this.global, project: this.project, directoryProfile: this.directoryProfile });
-	}
-}
+export {
+	FileSettingsStorage,
+	InMemorySettingsStorage,
+	type SettingsSnapshot,
+	type SettingsStorage,
+} from "./settings/settings-storage.ts";
 
 export class SettingsManager {
 	private storage: SettingsStorage;
@@ -742,7 +504,7 @@ export class SettingsManager {
 	/** Create an in-memory SettingsManager (no file I/O) */
 	static inMemory(settings: Partial<Settings> = {}): SettingsManager {
 		const storage = new InMemorySettingsStorage();
-		const initialSettings = SettingsManager.migrateSettings(structuredClone(settings) as Record<string, unknown>);
+		const initialSettings = migrateSettings(structuredClone(settings) as Record<string, unknown>);
 		storage.withLock("global", () => JSON.stringify(initialSettings, null, 2));
 		return SettingsManager.fromStorage(storage);
 	}
@@ -762,7 +524,7 @@ export class SettingsManager {
 			return {};
 		}
 		const settings = JSON.parse(stripBom(content));
-		return SettingsManager.migrateSettings(settings);
+		return migrateSettings(settings);
 	}
 
 	private static tryLoadFromStorage(
@@ -795,72 +557,10 @@ export class SettingsManager {
 			}
 			if (!content) return { settings: {}, error: null, info };
 			const settings = JSON.parse(stripBom(content));
-			return { settings: SettingsManager.migrateSettings(settings), error: null, info };
+			return { settings: migrateSettings(settings), error: null, info };
 		} catch (error) {
 			return { settings: {}, error: error as Error, info };
 		}
-	}
-
-	/** Migrate old settings format to new format */
-	private static migrateSettings(settings: Record<string, unknown>): Settings {
-		// Migrate queueMode -> steeringMode
-		if ("queueMode" in settings && !("steeringMode" in settings)) {
-			settings.steeringMode = settings.queueMode;
-			delete settings.queueMode;
-		}
-
-		// Migrate legacy websockets boolean -> transport enum
-		if (!("transport" in settings) && typeof settings.websockets === "boolean") {
-			settings.transport = settings.websockets ? "websocket" : "sse";
-			delete settings.websockets;
-		}
-
-		// Migrate old skills object format to new array format
-		if (
-			"skills" in settings &&
-			typeof settings.skills === "object" &&
-			settings.skills !== null &&
-			!Array.isArray(settings.skills)
-		) {
-			const skillsSettings = settings.skills as {
-				enableSkillCommands?: boolean;
-				customDirectories?: unknown;
-			};
-			if (skillsSettings.enableSkillCommands !== undefined && settings.enableSkillCommands === undefined) {
-				settings.enableSkillCommands = skillsSettings.enableSkillCommands;
-			}
-			if (Array.isArray(skillsSettings.customDirectories) && skillsSettings.customDirectories.length > 0) {
-				settings.skills = skillsSettings.customDirectories;
-			} else {
-				delete settings.skills;
-			}
-		}
-
-		// Migrate retry.maxDelayMs -> retry.provider.maxRetryDelayMs
-		if (
-			"retry" in settings &&
-			typeof settings.retry === "object" &&
-			settings.retry !== null &&
-			!Array.isArray(settings.retry)
-		) {
-			const retrySettings = settings.retry as Record<string, unknown>;
-			const providerSettings =
-				typeof retrySettings.provider === "object" && retrySettings.provider !== null
-					? (retrySettings.provider as Record<string, unknown>)
-					: undefined;
-			if (
-				typeof retrySettings.maxDelayMs === "number" &&
-				(providerSettings?.maxRetryDelayMs === undefined || providerSettings?.maxRetryDelayMs === null)
-			) {
-				retrySettings.provider = {
-					...(providerSettings ?? {}),
-					maxRetryDelayMs: retrySettings.maxDelayMs,
-				};
-			}
-			delete retrySettings.maxDelayMs;
-		}
-
-		return settings as Settings;
 	}
 
 	getGlobalSettings(): Settings {
@@ -1201,7 +901,7 @@ export class SettingsManager {
 				? (input as ProfileDefinitionInput)
 				: { resources: input as ResourceProfileSettings };
 			const resources = mergeResourceProfileSettings(existing?.resources, definition.resources);
-			next[name] = this.mergeProfileDefinition(name, definition, resources, existing);
+			next[name] = mergeProfileDefinition(name, definition, resources, existing);
 		}
 		this.inlineResourceProfileDefinitions = next;
 		this.refreshProfileRegistry();
@@ -1222,151 +922,6 @@ export class SettingsManager {
 		this.refreshProfileRegistry();
 	}
 
-	private normalizeProfileName(profileName: string): string {
-		const trimmed = profileName.trim();
-		if (!trimmed) {
-			throw new Error("Profile name is required");
-		}
-		const errors = validateSkillName(trimmed);
-		if (errors.length > 0) {
-			throw new Error(`Invalid profile name "${trimmed}": ${errors.join(", ")}`);
-		}
-		return trimmed;
-	}
-
-	private normalizeProfileSelection(profileName: string): string {
-		const trimmed = profileName.trim();
-		if (trimmed.startsWith("./") || trimmed.startsWith("../")) {
-			return trimmed;
-		}
-		return this.normalizeProfileName(trimmed);
-	}
-
-	private sanitizeProfileResources(resources: ResourceProfileSettings): ResourceProfileSettings {
-		const result: ResourceProfileSettings = {};
-		for (const kind of ["extensions", "skills", "prompts", "themes", "agents", "tools"] as const) {
-			const filter = resources[kind];
-			if (!filter) {
-				continue;
-			}
-			result[kind] = {
-				allow: filter.allow ? [...filter.allow] : undefined,
-				block: filter.block ? [...filter.block] : undefined,
-			};
-		}
-		return result;
-	}
-
-	private decodeStoredProfileDefinition(
-		name: string,
-		stored: ResourceProfileSettings | ProfileDefinitionInput | undefined,
-	): ProfileDefinitionInput {
-		if (stored && Object.hasOwn(stored, "resources")) {
-			const definition = stored as ProfileDefinitionInput;
-			return { ...definition, name, resources: this.sanitizeProfileResources(definition.resources) };
-		}
-		return {
-			name,
-			resources: this.sanitizeProfileResources((stored as ResourceProfileSettings | undefined) ?? {}),
-		};
-	}
-
-	private mergeProfileDefinition(
-		name: string,
-		definition: ProfileDefinitionInput,
-		resources: ResourceProfileSettings,
-		existing?: ResourceProfileSettings | ProfileDefinitionInput,
-	): ProfileDefinitionInput {
-		const previous = this.decodeStoredProfileDefinition(name, existing);
-		return {
-			...previous,
-			name,
-			resources,
-			description: definition.description ?? previous.description,
-			model: Object.hasOwn(definition, "model") ? definition.model : previous.model,
-			thinking: definition.thinking ?? previous.thinking,
-			modelRouter: definition.modelRouter ?? previous.modelRouter,
-			soul: definition.soul ?? previous.soul,
-		};
-	}
-
-	private encodeStoredProfileDefinition(
-		definition: ProfileDefinitionInput,
-	): ResourceProfileSettings | ProfileDefinitionInput | undefined {
-		const hasMetadata = Boolean(
-			definition.description || definition.model || definition.thinking || definition.modelRouter || definition.soul,
-		);
-		if (hasMetadata) return definition;
-		return Object.keys(definition.resources).length > 0 ? definition.resources : undefined;
-	}
-
-	private updateStoredProfileDefinition(
-		settings: Settings,
-		name: string,
-		definition: ProfileDefinitionInput,
-		resources: ResourceProfileSettings,
-	): void {
-		const definitions = { ...(settings.resourceProfiles ?? {}) };
-		const stored = this.encodeStoredProfileDefinition(
-			this.mergeProfileDefinition(name, definition, resources, definitions[name]),
-		);
-		if (stored) definitions[name] = stored;
-		else delete definitions[name];
-		if (Object.keys(definitions).length > 0) settings.resourceProfiles = definitions;
-		else delete settings.resourceProfiles;
-	}
-
-	private renameStoredProfileDefinition(settings: Settings, oldName: string, newName: string): void {
-		const definitions = { ...(settings.resourceProfiles ?? {}) };
-		if (!definitions[oldName]) throw new Error(`Profile not found: ${oldName}`);
-		if (definitions[newName]) throw new Error(`Profile already exists: ${newName}`);
-		definitions[newName] = definitions[oldName];
-		delete definitions[oldName];
-		settings.resourceProfiles = definitions;
-		if (settings.activeResourceProfile === oldName) settings.activeResourceProfile = newName;
-		if (settings.activeResourceProfiles) {
-			settings.activeResourceProfiles = settings.activeResourceProfiles.map((name) =>
-				name === oldName ? newName : name,
-			);
-		}
-	}
-
-	private setActiveProfileInSettings(settings: Settings, profileName: string | undefined): void {
-		if (profileName) {
-			settings.activeResourceProfile = profileName;
-			settings.activeResourceProfiles = [profileName];
-			return;
-		}
-		settings.activeResourceProfiles = [];
-		delete settings.activeResourceProfile;
-	}
-
-	private rewriteActiveProfileReference(settings: Settings, oldName: string, newName: string | undefined): boolean {
-		let changed = false;
-		const rewrite = (values: string[]): string[] => {
-			const next = values.flatMap((value) => {
-				if (value !== oldName) return [value];
-				changed = true;
-				return newName ? [newName] : [];
-			});
-			return [...new Set(next)];
-		};
-
-		if (settings.activeResourceProfiles !== undefined) {
-			const next = rewrite(normalizeResourceProfileNames(settings.activeResourceProfiles));
-			if (next.length > 0) settings.activeResourceProfiles = next;
-			else delete settings.activeResourceProfiles;
-		}
-		if (settings.activeResourceProfile !== undefined) {
-			const next = rewrite(normalizeResourceProfileNames(settings.activeResourceProfile));
-			if (next.length === 0) delete settings.activeResourceProfile;
-			else
-				settings.activeResourceProfile =
-					Array.isArray(settings.activeResourceProfile) || next.length > 1 ? next : next[0];
-		}
-		return changed;
-	}
-
 	private rewriteReusableProfileSelections(oldName: string, newName: string | undefined): void {
 		if (this.runtimeResourceProfiles?.includes(oldName)) {
 			this.runtimeResourceProfiles = [
@@ -1378,20 +933,20 @@ export class SettingsManager {
 			];
 		}
 
-		if (this.rewriteActiveProfileReference(this.globalSettings, oldName, newName)) {
+		if (rewriteActiveProfileReference(this.globalSettings, oldName, newName)) {
 			this.markModified("activeResourceProfile");
 			this.markModified("activeResourceProfiles");
 			this.save();
 		}
 
 		const projectSettings = structuredClone(this.projectSettings);
-		if (this.rewriteActiveProfileReference(projectSettings, oldName, newName)) {
+		if (rewriteActiveProfileReference(projectSettings, oldName, newName)) {
 			this.markProjectModified("activeResourceProfile");
 			this.markProjectModified("activeResourceProfiles");
 			this.saveProjectSettings(projectSettings);
 		}
 
-		if (this.rewriteActiveProfileReference(this.directoryProfileSettings, oldName, newName)) {
+		if (rewriteActiveProfileReference(this.directoryProfileSettings, oldName, newName)) {
 			this.persistDirectoryProfiles(() => {});
 		}
 		this.recomputeSettings();
@@ -1406,7 +961,7 @@ export class SettingsManager {
 		this.enqueueWrite("directoryProfile", () => {
 			this.storage.withLock("directoryProfile", (current) => {
 				const currentSettings = current
-					? SettingsManager.migrateSettings(JSON.parse(stripBom(current)) as Record<string, unknown>)
+					? migrateSettings(JSON.parse(stripBom(current)) as Record<string, unknown>)
 					: {};
 				const merged: Settings = {
 					...currentSettings,
@@ -1428,7 +983,7 @@ export class SettingsManager {
 	}
 
 	private getProfileFilePath(profileName: string): string {
-		const normalized = this.normalizeProfileName(profileName);
+		const normalized = normalizeProfileName(profileName);
 		const profilesDir = this.storage.getProfilesDir?.();
 		if (!profilesDir) {
 			throw new Error("Profiles directory is not configured");
@@ -1440,13 +995,13 @@ export class SettingsManager {
 	 * Create or update a profile definition in the selected persistence scope.
 	 */
 	setProfileDefinition(profileName: string, definition: ProfileDefinitionInput, scope: ProfilePersistenceScope): void {
-		const name = this.normalizeProfileName(profileName);
-		const resources = this.sanitizeProfileResources(definition.resources);
+		const name = normalizeProfileName(profileName);
+		const resources = sanitizeProfileResources(definition.resources);
 
 		if (scope === "session") {
 			const next = { ...this.inlineResourceProfileDefinitions };
-			const payload = this.mergeProfileDefinition(name, definition, resources, next[name]);
-			if (this.encodeStoredProfileDefinition(payload)) {
+			const payload = mergeProfileDefinition(name, definition, resources, next[name]);
+			if (encodeStoredProfileDefinition(payload)) {
 				next[name] = payload;
 			} else {
 				delete next[name];
@@ -1458,7 +1013,7 @@ export class SettingsManager {
 
 		if (scope === "global") {
 			const next = structuredClone(this.globalSettings);
-			this.updateStoredProfileDefinition(next, name, definition, resources);
+			updateStoredProfileDefinition(next, name, definition, resources);
 			this.globalSettings = next;
 			this.markModified("resourceProfiles");
 			this.save();
@@ -1467,14 +1022,14 @@ export class SettingsManager {
 
 		if (scope === "project") {
 			this.updateProjectSettings("resourceProfiles", (settings) => {
-				this.updateStoredProfileDefinition(settings, name, definition, resources);
+				updateStoredProfileDefinition(settings, name, definition, resources);
 			});
 			return;
 		}
 
 		if (scope === "directory") {
 			this.persistDirectoryProfiles((current) => {
-				this.updateStoredProfileDefinition(current, name, definition, resources);
+				updateStoredProfileDefinition(current, name, definition, resources);
 			});
 			return;
 		}
@@ -1483,7 +1038,7 @@ export class SettingsManager {
 		const existing = existsSync(path)
 			? parseProfileFileDefinition(readFileSync(path, "utf-8"), name)
 			: { name, resources: {} };
-		const payload = this.mergeProfileDefinition(name, definition, resources, existing);
+		const payload = mergeProfileDefinition(name, definition, resources, existing);
 		this.mutateProfileFiles(() => {
 			mkdirSync(dirname(path), { recursive: true });
 			writeFileSync(path, JSON.stringify(payload, null, 2), "utf-8");
@@ -1494,7 +1049,7 @@ export class SettingsManager {
 	 * Delete a profile from the selected scope.
 	 */
 	deleteProfile(profileName: string, scope: ProfilePersistenceScope): void {
-		const name = this.normalizeProfileName(profileName);
+		const name = normalizeProfileName(profileName);
 
 		if (scope === "session") {
 			const next = { ...this.inlineResourceProfileDefinitions };
@@ -1584,8 +1139,8 @@ export class SettingsManager {
 	}
 
 	renameProfile(profileName: string, newProfileName: string, scope: ProfilePersistenceScope): void {
-		const oldName = this.normalizeProfileName(profileName);
-		const newName = this.normalizeProfileName(newProfileName);
+		const oldName = normalizeProfileName(profileName);
+		const newName = normalizeProfileName(newProfileName);
 		if (oldName === newName) {
 			return;
 		}
@@ -1609,7 +1164,7 @@ export class SettingsManager {
 
 		if (scope === "global") {
 			const next = structuredClone(this.globalSettings);
-			this.renameStoredProfileDefinition(next, oldName, newName);
+			renameStoredProfileDefinition(next, oldName, newName);
 			this.globalSettings = next;
 			this.markModified("resourceProfiles");
 			this.markModified("activeResourceProfile");
@@ -1620,14 +1175,14 @@ export class SettingsManager {
 
 		if (scope === "project") {
 			this.updateProjectSettings("resourceProfiles", (settings) => {
-				this.renameStoredProfileDefinition(settings, oldName, newName);
+				renameStoredProfileDefinition(settings, oldName, newName);
 			});
 			return;
 		}
 
 		if (scope === "directory") {
 			this.persistDirectoryProfiles((current) => {
-				this.renameStoredProfileDefinition(current, oldName, newName);
+				renameStoredProfileDefinition(current, oldName, newName);
 			});
 			return;
 		}
@@ -1653,7 +1208,7 @@ export class SettingsManager {
 	 * Set active profile selection in the selected scope.
 	 */
 	setActiveProfile(profileName: string | undefined, scope: Exclude<ProfilePersistenceScope, "reusable-file">): void {
-		const name = profileName ? this.normalizeProfileSelection(profileName) : undefined;
+		const name = profileName ? normalizeProfileSelection(profileName) : undefined;
 		if (scope === "session") {
 			if (name) {
 				this.setRuntimeResourceProfiles([name]);
@@ -1679,13 +1234,13 @@ export class SettingsManager {
 
 		if (scope === "project") {
 			this.updateProjectSettings("activeResourceProfile", (settings) => {
-				this.setActiveProfileInSettings(settings, name);
+				setActiveProfileInSettings(settings, name);
 			});
 			return;
 		}
 
 		this.persistDirectoryProfiles((current) => {
-			this.setActiveProfileInSettings(current, name);
+			setActiveProfileInSettings(current, name);
 		});
 	}
 
@@ -1716,7 +1271,7 @@ export class SettingsManager {
 		scope: Exclude<ProfilePersistenceScope, "reusable-file">,
 		snapshot: SettingsReloadSnapshot,
 	): void {
-		const name = this.normalizeProfileName(profileName);
+		const name = normalizeProfileName(profileName);
 		if (scope === "session") {
 			const previous = snapshot.inlineResourceProfileDefinitions[name];
 			if (previous) this.inlineResourceProfileDefinitions[name] = structuredClone(previous);
@@ -1840,7 +1395,7 @@ export class SettingsManager {
 	): void {
 		this.storage.withLock(scope, (current) => {
 			const currentFileSettings = current
-				? SettingsManager.migrateSettings(JSON.parse(stripBom(current)) as Record<string, unknown>)
+				? migrateSettings(JSON.parse(stripBom(current)) as Record<string, unknown>)
 				: {};
 			const mergedSettings: Settings = { ...currentFileSettings };
 			for (const field of modifiedFields) {
@@ -2212,10 +1767,7 @@ export class SettingsManager {
 	 * announced, promoted-only). Set `autoArchive: false` to make it propose-only (`/curate`).
 	 */
 	getCuratorSettings(): { autoArchive: boolean; staleDays: number } {
-		return {
-			autoArchive: this.settings.curator?.autoArchive ?? true,
-			staleDays: this.settings.curator?.staleDays ?? 30,
-		};
+		return resolveCuratorSettings(this.settings);
 	}
 
 	/**
@@ -2223,28 +1775,11 @@ export class SettingsManager {
 	 * thresholds written by older releases dormant instead of silently restoring a spend guard.
 	 */
 	getCostGuardSettings(): CostGuardSettings {
-		const configuredMaxTurnUsd = this.settings.costGuard?.maxTurnUsd;
-		return {
-			enabled: this.settings.costGuard?.enabled === true,
-			maxTurnUsd:
-				typeof configuredMaxTurnUsd === "number" &&
-				Number.isFinite(configuredMaxTurnUsd) &&
-				configuredMaxTurnUsd >= 0
-					? configuredMaxTurnUsd
-					: DEFAULT_COST_GUARD_SETTINGS.maxTurnUsd,
-			action: this.settings.costGuard?.action === "downgrade" ? "downgrade" : DEFAULT_COST_GUARD_SETTINGS.action,
-		};
+		return resolveCostGuardSettings(this.settings);
 	}
 
 	setCostGuardSettings(settings: CostGuardSettings, scope: SettingsScope = "global"): void {
-		const normalized: CostGuardSettings = {
-			enabled: settings.enabled === true,
-			maxTurnUsd:
-				Number.isFinite(settings.maxTurnUsd) && settings.maxTurnUsd >= 0
-					? settings.maxTurnUsd
-					: DEFAULT_COST_GUARD_SETTINGS.maxTurnUsd,
-			action: settings.action === "downgrade" ? "downgrade" : "warn",
-		};
+		const normalized = normalizeCostGuardSettings(settings);
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);
 			projectSettings.costGuard = normalized;
@@ -2364,86 +1899,15 @@ export class SettingsManager {
 		hmoePreference?: HmoePreference;
 		hmoeWeights?: HmoeWeights;
 	} {
-		const profileSettings = this.getProfileModelRouterSettings();
-		const settings = {
-			enabled: this.settings.modelRouter?.enabled ?? this.modelRouterDefaultEnabled,
-			selectionMode: isModelRouterSelectionMode(this.settings.modelRouter?.selectionMode)
-				? this.settings.modelRouter.selectionMode
-				: DEFAULT_MODEL_ROUTER_SELECTION_MODE,
-			poolPreference: isModelRouterPoolPreference(this.settings.modelRouter?.poolPreference)
-				? this.settings.modelRouter.poolPreference
-				: DEFAULT_MODEL_ROUTER_POOL_PREFERENCE,
-			cheapModel: this.settings.modelRouter?.cheapModel?.trim() || undefined,
-			mediumModel: this.settings.modelRouter?.mediumModel?.trim() || undefined,
-			expensiveModel: this.settings.modelRouter?.expensiveModel?.trim() || undefined,
-			learningModel: this.settings.modelRouter?.learningModel?.trim() || undefined,
-			fitnessGate: this.settings.modelRouter?.fitnessGate ?? false,
-			executorModel: this.settings.modelRouter?.executorModel?.trim() || undefined,
-			cheapThinking: isThinkingLevel(this.settings.modelRouter?.cheapThinking)
-				? this.settings.modelRouter?.cheapThinking
-				: undefined,
-			mediumThinking: isThinkingLevel(this.settings.modelRouter?.mediumThinking)
-				? this.settings.modelRouter?.mediumThinking
-				: undefined,
-			expensiveThinking: isThinkingLevel(this.settings.modelRouter?.expensiveThinking)
-				? this.settings.modelRouter?.expensiveThinking
-				: undefined,
-			executorThinking: isThinkingLevel(this.settings.modelRouter?.executorThinking)
-				? this.settings.modelRouter?.executorThinking
-				: undefined,
-			hmoePreset: this.settings.modelRouter?.hmoePreset,
-			hmoeTeamStrategy: this.settings.modelRouter?.hmoeTeamStrategy,
-			hmoeIndependence: this.settings.modelRouter?.hmoeIndependence,
-			hmoePreference: this.settings.modelRouter?.hmoePreference,
-			hmoeWeights: this.settings.modelRouter?.hmoeWeights,
-		};
-		return {
-			enabled: profileSettings?.enabled ?? settings.enabled,
-			selectionMode: profileSettings?.selectionMode ?? settings.selectionMode,
-			poolPreference: profileSettings?.poolPreference ?? settings.poolPreference,
-			cheapModel: profileSettings?.cheapModel?.trim() || settings.cheapModel,
-			mediumModel: profileSettings?.mediumModel?.trim() || settings.mediumModel,
-			expensiveModel: profileSettings?.expensiveModel?.trim() || settings.expensiveModel,
-			learningModel: profileSettings?.learningModel?.trim() || settings.learningModel,
-			fitnessGate: profileSettings?.fitnessGate ?? settings.fitnessGate,
-			executorModel: profileSettings?.executorModel?.trim() || settings.executorModel,
-			cheapThinking: profileSettings?.cheapThinking ?? settings.cheapThinking,
-			mediumThinking: profileSettings?.mediumThinking ?? settings.mediumThinking,
-			expensiveThinking: profileSettings?.expensiveThinking ?? settings.expensiveThinking,
-			executorThinking: profileSettings?.executorThinking ?? settings.executorThinking,
-			hmoePreset: profileSettings?.hmoePreset ?? settings.hmoePreset,
-			hmoeTeamStrategy: profileSettings?.hmoeTeamStrategy ?? settings.hmoeTeamStrategy,
-			hmoeIndependence: profileSettings?.hmoeIndependence ?? settings.hmoeIndependence,
-			hmoePreference: profileSettings?.hmoePreference ?? settings.hmoePreference,
-			hmoeWeights: profileSettings?.hmoeWeights ?? settings.hmoeWeights,
-		};
+		return resolveModelRouterSettings(
+			this.settings,
+			this.getProfileModelRouterSettings(),
+			this.modelRouterDefaultEnabled,
+		);
 	}
 
 	setModelRouterSettings(settings: ModelRouterSettings, scope: SettingsScope = "global"): void {
-		const normalized: ModelRouterSettings = {
-			enabled: settings.enabled ?? false,
-			selectionMode: isModelRouterSelectionMode(settings.selectionMode)
-				? settings.selectionMode
-				: DEFAULT_MODEL_ROUTER_SELECTION_MODE,
-			poolPreference: isModelRouterPoolPreference(settings.poolPreference)
-				? settings.poolPreference
-				: DEFAULT_MODEL_ROUTER_POOL_PREFERENCE,
-			cheapModel: settings.cheapModel?.trim() || undefined,
-			mediumModel: settings.mediumModel?.trim() || undefined,
-			expensiveModel: settings.expensiveModel?.trim() || undefined,
-			learningModel: settings.learningModel?.trim() || undefined,
-			fitnessGate: settings.fitnessGate ?? false,
-			executorModel: settings.executorModel?.trim() || undefined,
-			cheapThinking: isThinkingLevel(settings.cheapThinking) ? settings.cheapThinking : undefined,
-			mediumThinking: isThinkingLevel(settings.mediumThinking) ? settings.mediumThinking : undefined,
-			expensiveThinking: isThinkingLevel(settings.expensiveThinking) ? settings.expensiveThinking : undefined,
-			executorThinking: isThinkingLevel(settings.executorThinking) ? settings.executorThinking : undefined,
-			hmoePreset: isHmoePreset(settings.hmoePreset) ? settings.hmoePreset : undefined,
-			hmoeTeamStrategy: isHmoeTeamStrategy(settings.hmoeTeamStrategy) ? settings.hmoeTeamStrategy : undefined,
-			hmoeIndependence: isHmoeIndependence(settings.hmoeIndependence) ? settings.hmoeIndependence : undefined,
-			hmoePreference: isHmoePreference(settings.hmoePreference) ? settings.hmoePreference : undefined,
-			hmoeWeights: normalizeHmoeWeights(settings.hmoeWeights),
-		};
+		const normalized = normalizeModelRouterSettings(settings);
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);
 			projectSettings.modelRouter = normalized;
@@ -2514,21 +1978,7 @@ export class SettingsManager {
 	}
 
 	getLoggingSettings(): { level?: LogLevel; categories?: string[]; maxFileMb?: number; retainDays?: number } {
-		const logging = this.settings.logging;
-		if (!logging || typeof logging !== "object") return {};
-		const categories = Array.isArray(logging.categories)
-			? logging.categories.filter((entry): entry is string => typeof entry === "string" && entry.trim().length > 0)
-			: undefined;
-		return {
-			...(isLogLevel(logging.level) ? { level: logging.level } : {}),
-			...(categories && categories.length > 0 ? { categories } : {}),
-			...(typeof logging.maxFileMb === "number" && logging.maxFileMb > 0 && logging.maxFileMb <= 1024
-				? { maxFileMb: logging.maxFileMb }
-				: {}),
-			...(typeof logging.retainDays === "number" && logging.retainDays > 0 && logging.retainDays <= 365
-				? { retainDays: logging.retainDays }
-				: {}),
-		};
+		return resolveLoggingSettings(this.settings);
 	}
 
 	getOrchestratorSettings(): { delegationGate: boolean } {
@@ -2561,26 +2011,7 @@ export class SettingsManager {
 		loopMode?: SystemOneSettings["loopMode"];
 		completionProfile?: SystemOneSettings["completionProfile"];
 	} {
-		const raw = this.settings.systemOne;
-		const loopMode =
-			raw?.loopMode === "legacy_goal" ||
-			raw?.loopMode === "objective_shadow" ||
-			raw?.loopMode === "objective_primary"
-				? raw.loopMode
-				: undefined;
-		const completionProfile =
-			raw?.completionProfile === "mechanical" ||
-			raw?.completionProfile === "mechanical_plus_reviewer" ||
-			raw?.completionProfile === "semantic_enhanced" ||
-			raw?.completionProfile === "system_one_required"
-				? raw.completionProfile
-				: undefined;
-		return {
-			enabled: raw?.enabled ?? true,
-			provider: raw?.provider === "typesafe" || raw?.provider === "openrouter" ? raw.provider : "auto",
-			...(loopMode ? { loopMode } : {}),
-			...(completionProfile ? { completionProfile } : {}),
-		};
+		return resolveSystemOneSettings(this.settings);
 	}
 
 	/** Switches System One's provider; every evaluation resolves it anew, so the next one uses it. */
@@ -2616,58 +2047,15 @@ export class SettingsManager {
 			markers: string[];
 		};
 	} {
-		// Per-field fallback throughout (never a whole-object `??`) so an explicit partial override --
-		// e.g. only `contextGc.minToolResultChars`, or only `semanticMemory.enabled` -- still gets the
-		// canonical default for every field it didn't set. Every fallback DERIVES from context-gc.ts's
-		// exported DEFAULT_CONTEXT_GC_SETTINGS (the same object applyContextGc's own normalizer falls
-		// back to) instead of a hand-kept copy, so this method and context-gc.ts's defaults can never
-		// drift again -- hand-copied fallbacks here previously (a) missed a marker context-gc.ts's own
-		// default carried, silently disabling GC packing for that page under default settings, and (b) diverged on the `tools` list (missing
-		// "run_toolkit_script", present only here) -- both classes of drift are now structurally
-		// impossible since there is exactly one place these defaults are written down.
-		return {
-			enabled: this.settings.contextGc?.enabled ?? DEFAULT_CONTEXT_GC_SETTINGS.enabled,
-			preserveRecentMessages:
-				this.settings.contextGc?.preserveRecentMessages ?? DEFAULT_CONTEXT_GC_SETTINGS.preserveRecentMessages,
-			packStrideMessages:
-				this.settings.contextGc?.packStrideMessages ?? DEFAULT_CONTEXT_GC_SETTINGS.packStrideMessages,
-			minToolResultChars:
-				this.settings.contextGc?.minToolResultChars ?? DEFAULT_CONTEXT_GC_SETTINGS.minToolResultChars,
-			tools: this.settings.contextGc?.tools ?? DEFAULT_CONTEXT_GC_SETTINGS.tools,
-			semanticMemory: {
-				enabled:
-					this.settings.contextGc?.semanticMemory?.enabled ?? DEFAULT_CONTEXT_GC_SETTINGS.semanticMemory.enabled,
-				preserveRecentPages:
-					this.settings.contextGc?.semanticMemory?.preserveRecentPages ??
-					DEFAULT_CONTEXT_GC_SETTINGS.semanticMemory.preserveRecentPages,
-				minChars:
-					this.settings.contextGc?.semanticMemory?.minChars ?? DEFAULT_CONTEXT_GC_SETTINGS.semanticMemory.minChars,
-				markers:
-					this.settings.contextGc?.semanticMemory?.markers ?? DEFAULT_CONTEXT_GC_SETTINGS.semanticMemory.markers,
-			},
-		};
+		return resolveContextGcSettings(this.settings);
 	}
 
 	getContextPromptEnforcementSettings(): { enabled: boolean; preserveRecentMessages: number; minChars: number } {
-		// Enforcement's own default MIRRORS the live context-gc settings (not a second hardcoded
-		// literal) so tuning contextGc.preserveRecentMessages/minToolResultChars moves this default
-		// with it instead of silently drifting. An explicitly configured enforcement value always
-		// wins over the mirror -- see the ContextPromptEnforcementSettings doc comment.
-		const gcSettings = this.getContextGcSettings();
-		return {
-			enabled: this.settings.contextPolicy?.enforcement?.enabled ?? false,
-			preserveRecentMessages:
-				this.settings.contextPolicy?.enforcement?.preserveRecentMessages ?? gcSettings.preserveRecentMessages,
-			minChars: this.settings.contextPolicy?.enforcement?.minChars ?? gcSettings.minToolResultChars,
-		};
+		return resolveContextPromptEnforcementSettings(this.settings, this.getContextGcSettings());
 	}
 
 	getContextCurationSettings(): { enabled: boolean; model?: string; maxJobsPerTurn: number } {
-		return {
-			enabled: this.settings.contextPolicy?.curation?.enabled ?? false,
-			model: this.settings.contextPolicy?.curation?.model?.trim() || undefined,
-			maxJobsPerTurn: sanitizeIntegerSetting(this.settings.contextPolicy?.curation?.maxJobsPerTurn, 4, 1, 16),
-		};
+		return resolveContextCurationSettings(this.settings);
 	}
 
 	setContextCurationSettings(settings: ContextCurationSettings, scope: SettingsScope = "global"): void {
@@ -2706,24 +2094,11 @@ export class SettingsManager {
 		includeInPrompt: boolean;
 		allowExternalEgress: boolean;
 	} {
-		return {
-			enabled: this.settings.contextPolicy?.memory?.enabled ?? true,
-			maxResults: clampMemoryRetrievalMaxResults(
-				this.settings.contextPolicy?.memory?.maxResults ?? MEMORY_RETRIEVAL_MAX_RESULTS_DEFAULT,
-			),
-			includeInPrompt: this.settings.contextPolicy?.memory?.includeInPrompt ?? true,
-			allowExternalEgress: this.settings.contextPolicy?.memory?.allowExternalEgress === true,
-		};
+		return resolveMemoryRetrievalSettings(this.settings);
 	}
 
 	setMemoryRetrievalSettings(settings: MemoryRetrievalSettings, scope: SettingsScope = "global"): void {
-		const normalized: MemoryRetrievalSettings = {
-			enabled: settings.enabled,
-			maxResults:
-				settings.maxResults === undefined ? undefined : clampMemoryRetrievalMaxResults(settings.maxResults),
-			includeInPrompt: settings.includeInPrompt,
-			allowExternalEgress: settings.allowExternalEgress,
-		};
+		const normalized = normalizeMemoryRetrievalSettings(settings);
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);
 			const history = projectSettings.contextPolicy?.memory?.history;
@@ -2756,53 +2131,11 @@ export class SettingsManager {
 		frontierMaxBytes: number;
 		retentionDays: number | undefined;
 	} {
-		const history = this.settings.contextPolicy?.memory?.history;
-		return {
-			// Stored settings are unvalidated JSON: only the boolean true opts in (as the egress flags below), and only a
-			// string names a model, so a hand-edited "false" or a number never starts or breaks history construction.
-			hierarchy: history?.hierarchy === true,
-			summaryModel: typeof history?.summaryModel === "string" ? history.summaryModel.trim() || undefined : undefined,
-			compactionThinkingLevel: ["minimal", "low", "medium", "high", "xhigh"].includes(
-				String(history?.compactionThinkingLevel),
-			)
-				? history?.compactionThinkingLevel
-				: undefined,
-			compactionMaxUsdPerDay:
-				typeof history?.compactionMaxUsdPerDay === "number" &&
-				Number.isFinite(history.compactionMaxUsdPerDay) &&
-				history.compactionMaxUsdPerDay >= 0
-					? history.compactionMaxUsdPerDay
-					: undefined,
-			allowExternalSummaryEgress: history?.allowExternalSummaryEgress === true,
-			allowExternalAdmissionEgress: history?.allowExternalAdmissionEgress === true,
-			maxConcurrentSummaries: clampMemoryHistoryMaxConcurrentSummaries(
-				history?.maxConcurrentSummaries ?? MEMORY_HISTORY_MAX_CONCURRENT_SUMMARIES_DEFAULT,
-			),
-			frontierMaxBytes: clampMemoryHistoryFrontierMaxBytes(
-				history?.frontierMaxBytes ?? MEMORY_HISTORY_FRONTIER_MAX_BYTES_DEFAULT,
-			),
-			retentionDays: clampMemoryHistoryRetentionDays(history?.retentionDays),
-		};
+		return resolveMemoryHistorySettings(this.settings);
 	}
 
 	setMemoryHistorySettings(settings: MemoryHistorySettings, scope: SettingsScope = "global"): void {
-		const normalized: MemoryHistorySettings = {
-			hierarchy: settings.hierarchy,
-			summaryModel: settings.summaryModel?.trim() || undefined,
-			compactionThinkingLevel: settings.compactionThinkingLevel,
-			compactionMaxUsdPerDay: settings.compactionMaxUsdPerDay,
-			allowExternalSummaryEgress: settings.allowExternalSummaryEgress,
-			allowExternalAdmissionEgress: settings.allowExternalAdmissionEgress,
-			maxConcurrentSummaries:
-				settings.maxConcurrentSummaries === undefined
-					? undefined
-					: clampMemoryHistoryMaxConcurrentSummaries(settings.maxConcurrentSummaries),
-			frontierMaxBytes:
-				settings.frontierMaxBytes === undefined
-					? undefined
-					: clampMemoryHistoryFrontierMaxBytes(settings.frontierMaxBytes),
-			retentionDays: clampMemoryHistoryRetentionDays(settings.retentionDays),
-		};
+		const normalized = normalizeMemoryHistorySettings(settings);
 		if (scope === "project") {
 			const projectSettings = structuredClone(this.projectSettings);
 			projectSettings.contextPolicy = {
@@ -2864,20 +2197,7 @@ export class SettingsManager {
 	 */
 	getStreamStallSettings(modelClass: StreamStallModelClass): StreamStallSettings {
 		this.reportLegacyStreamStallScopeDiagnostic();
-		const stall = this.settings.retry?.stall;
-		const named = modelClass === "local" ? stall?.local : stall?.cloud;
-		const read = (field: keyof StreamStallSettings): number | undefined => {
-			if (named?.[field] !== undefined) {
-				return parseStallBoundMs(named[field], `retry.stall.${modelClass}.${field}`);
-			}
-			// Only the local budget inherits the pre-split keys; a cloud stream never did.
-			return modelClass === "local" ? parseStallBoundMs(stall?.[field], `retry.stall.${field}`) : undefined;
-		};
-		return {
-			connectMs: read("connectMs"),
-			activeIdleMs: read("activeIdleMs"),
-			quietIdleMs: read("quietIdleMs"),
-		};
+		return resolveStreamStallSettings(this.settings, modelClass);
 	}
 
 	getHttpIdleTimeoutMs(): number {
@@ -2894,11 +2214,7 @@ export class SettingsManager {
 	}
 
 	getProviderRetrySettings(): { timeoutMs?: number; maxRetries?: number; maxRetryDelayMs: number } {
-		return {
-			timeoutMs: this.settings.retry?.provider?.timeoutMs,
-			maxRetries: this.settings.retry?.provider?.maxRetries,
-			maxRetryDelayMs: this.settings.retry?.provider?.maxRetryDelayMs ?? 60000,
-		};
+		return resolveProviderRetrySettings(this.settings);
 	}
 
 	/**
@@ -3329,39 +2645,12 @@ export class SettingsManager {
 	}
 
 	getModelFavorites(): ModelFavorite[] {
-		const favorites = this.settings.modelFavorites;
-		if (!Array.isArray(favorites)) return [];
-		const seen = new Set<string>();
-		const result: ModelFavorite[] = [];
-		for (const favorite of favorites) {
-			if (!favorite || typeof favorite.provider !== "string" || typeof favorite.modelId !== "string") continue;
-			const provider = favorite.provider.trim();
-			const modelId = favorite.modelId.trim();
-			if (!provider || !modelId) continue;
-			const key = `${provider}\u0000${modelId}`;
-			if (seen.has(key)) continue;
-			seen.add(key);
-			result.push({ provider, modelId });
-		}
-		return result;
+		return resolveModelFavorites(this.settings);
 	}
 
 	/** Return the current canonical favorites unioned with provider/model references, without persisting. */
 	getModelFavoritesIncluding(refs: readonly string[]): ModelFavorite[] {
-		const favorites = this.getModelFavorites();
-		const seen = new Set(favorites.map((entry) => `${entry.provider}\u0000${entry.modelId}`));
-		for (const ref of refs) {
-			const slash = ref.indexOf("/");
-			const provider = ref.slice(0, slash).trim();
-			const modelId = ref.slice(slash + 1).trim();
-			if (slash <= 0 || !provider || !modelId) throw new Error(`Invalid model favorite reference: ${ref}`);
-			const key = `${provider}\u0000${modelId}`;
-			if (!seen.has(key)) {
-				favorites.push({ provider, modelId });
-				seen.add(key);
-			}
-		}
-		return favorites;
+		return resolveModelFavoritesIncluding(this.settings, refs);
 	}
 
 	isModelFavorite(provider: string, modelId: string): boolean {
@@ -3381,39 +2670,7 @@ export class SettingsManager {
 	}
 
 	getWorkbenchSettings(): Required<WorkbenchSettings> {
-		const stored = this.settings.workbench ?? {};
-		const rows = typeof stored.rows === "number" && Number.isFinite(stored.rows) ? stored.rows : undefined;
-		return {
-			mouse: stored.mouse ?? DEFAULT_WORKBENCH_SETTINGS.mouse,
-			rows: rows === undefined ? "auto" : Math.max(2, Math.min(60, Math.floor(rows))),
-			collapsed: stored.collapsed ?? DEFAULT_WORKBENCH_SETTINGS.collapsed,
-			inspector: stored.inspector ?? DEFAULT_WORKBENCH_SETTINGS.inspector,
-			executionMaximized: stored.executionMaximized ?? DEFAULT_WORKBENCH_SETTINGS.executionMaximized,
-			inspectorFraction: sanitizeNumberSetting(
-				stored.inspectorFraction,
-				DEFAULT_WORKBENCH_SETTINGS.inspectorFraction,
-				0.2,
-				0.45,
-			),
-			layout: stored.layout === "columns" ? "columns" : DEFAULT_WORKBENCH_SETTINGS.layout,
-			conversationFraction: sanitizeNumberSetting(
-				stored.conversationFraction,
-				DEFAULT_WORKBENCH_SETTINGS.conversationFraction,
-				0.3,
-				0.7,
-			),
-			previews: sanitizeIntegerSetting(stored.previews, DEFAULT_WORKBENCH_SETTINGS.previews, 4, 200),
-			// The left pane has its own flag: a stored `graph: "hidden"` hides only the graph, never the Chats list.
-			leftPane: stored.leftPane === "hidden" ? "hidden" : DEFAULT_WORKBENCH_SETTINGS.leftPane,
-			graph: stored.graph === "hidden" ? "hidden" : DEFAULT_WORKBENCH_SETTINGS.graph,
-			graphFraction: sanitizeNumberSetting(
-				stored.graphFraction,
-				DEFAULT_WORKBENCH_SETTINGS.graphFraction,
-				MIN_GRAPH_FRACTION,
-				MAX_GRAPH_FRACTION,
-			),
-			graphView: isWorkbenchGraphView(stored.graphView) ? stored.graphView : DEFAULT_WORKBENCH_SETTINGS.graphView,
-		};
+		return resolveWorkbenchSettings(this.settings);
 	}
 
 	setWorkbenchSetting<K extends keyof WorkbenchSettings>(key: K, value: Required<WorkbenchSettings>[K]): void {
@@ -3502,11 +2759,7 @@ export class SettingsManager {
 	}
 
 	getSelfModificationSettings(): { enabled: boolean; sourcePath?: string; sourcePaths?: string[] } {
-		return {
-			enabled: this.settings.selfModification?.enabled ?? false,
-			sourcePath: this.settings.selfModification?.sourcePath,
-			sourcePaths: this.settings.selfModification?.sourcePaths,
-		};
+		return resolveSelfModificationSettings(this.settings);
 	}
 
 	setSelfModificationSettings(settings: SelfModificationSettings, scope: SettingsScope = "global"): void {
@@ -3534,49 +2787,7 @@ export class SettingsManager {
 	}
 
 	getAutonomySettings(): Required<AutonomySettings> {
-		const mode = this.settings.autonomy?.mode;
-		const configuredMaxStallTurns = this.settings.autonomy?.maxStallTurns;
-		const configuredGoalContinueTurns = this.settings.autonomy?.goalContinueTurns;
-		const configuredGoalContinueMaxWallClockMinutes = this.settings.autonomy?.goalContinueMaxWallClockMinutes;
-		const configuredGoalAutoContinue = this.settings.autonomy?.goalAutoContinue;
-		const configuredGoalAutoContinueDelayMs = this.settings.autonomy?.goalAutoContinueDelayMs;
-
-		const maxStallTurns = sanitizeIntegerSetting(
-			configuredMaxStallTurns,
-			DEFAULT_AUTONOMY_MAX_STALL_TURNS,
-			0,
-			MAX_GOAL_CONTINUE_MAX_STALL_TURNS,
-		);
-		const goalContinueTurns = sanitizeIntegerSetting(
-			configuredGoalContinueTurns,
-			DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS,
-			0,
-			MAX_GOAL_CONTINUE_MAX_TURNS,
-		);
-		const goalContinueMaxWallClockMinutes = sanitizeIntegerSetting(
-			configuredGoalContinueMaxWallClockMinutes,
-			DEFAULT_AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
-			0,
-			MAX_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
-		);
-		const goalAutoContinueDelayMs = sanitizeIntegerSetting(
-			configuredGoalAutoContinueDelayMs,
-			DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS,
-			0,
-			MAX_GOAL_AUTO_CONTINUE_DELAY_MS,
-		);
-
-		return {
-			mode: mode === "safe" || mode === "balanced" || mode === "full" ? mode : "off",
-			maxStallTurns,
-			goalContinueTurns,
-			goalContinueMaxWallClockMinutes,
-			goalAutoContinue:
-				typeof configuredGoalAutoContinue === "boolean"
-					? configuredGoalAutoContinue
-					: DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE,
-			goalAutoContinueDelayMs,
-		};
+		return resolveAutonomySettings(this.settings);
 	}
 
 	setAutonomySettings(settings: AutonomySettings, scope: SettingsScope = "global"): void {
@@ -3604,60 +2815,7 @@ export class SettingsManager {
 	}
 
 	getProactivitySettings(): ResolvedProactivitySettings {
-		const configured = this.settings.proactivity ?? {};
-		const resolved: ResolvedProactivitySettings = {
-			enabled: typeof configured.enabled === "boolean" ? configured.enabled : DEFAULT_PROACTIVITY_ENABLED,
-			idleDelayMs: sanitizeIntegerSetting(
-				configured.idleDelayMs,
-				DEFAULT_PROACTIVITY_IDLE_DELAY_MS,
-				0,
-				MAX_PROACTIVITY_IDLE_DELAY_MS,
-			),
-			minOwnerTurnsBetweenRuns: sanitizeIntegerSetting(
-				configured.minOwnerTurnsBetweenRuns,
-				DEFAULT_PROACTIVITY_MIN_OWNER_TURNS,
-				1,
-				MAX_PROACTIVITY_MIN_OWNER_TURNS,
-			),
-			maxRunsPerSession: sanitizeIntegerSetting(
-				configured.maxRunsPerSession,
-				DEFAULT_PROACTIVITY_MAX_RUNS_PER_SESSION,
-				0,
-				MAX_PROACTIVITY_MAX_RUNS_PER_SESSION,
-			),
-			maxUsd: sanitizeNumberSetting(configured.maxUsd, DEFAULT_PROACTIVITY_MAX_USD, 0, MAX_PROACTIVITY_MAX_USD),
-			maxUsdPerDay: sanitizeNumberSetting(
-				configured.maxUsdPerDay,
-				DEFAULT_PROACTIVITY_MAX_USD_PER_DAY,
-				0,
-				MAX_PROACTIVITY_MAX_USD_PER_DAY,
-			),
-			maxTurnWakesPerDay: sanitizeIntegerSetting(
-				configured.maxTurnWakesPerDay,
-				DEFAULT_PROACTIVITY_MAX_TURN_WAKES_PER_DAY,
-				0,
-				MAX_PROACTIVITY_MAX_TURN_WAKES_PER_DAY,
-			),
-			maxNotesPerRun: sanitizeIntegerSetting(
-				configured.maxNotesPerRun,
-				DEFAULT_PROACTIVITY_MAX_NOTES,
-				1,
-				MAX_PROACTIVITY_MAX_NOTES,
-			),
-			delivery:
-				configured.delivery === "note" || configured.delivery === "turn"
-					? configured.delivery
-					: DEFAULT_PROACTIVITY_DELIVERY,
-			preferences:
-				typeof configured.preferences === "string"
-					? configured.preferences.trim().slice(0, MAX_PROACTIVITY_PREFERENCES_CHARS)
-					: "",
-			ciEvents: typeof configured.ciEvents === "boolean" ? configured.ciEvents : true,
-		};
-		if (typeof configured.model === "string" && configured.model.trim().length > 0) {
-			resolved.model = configured.model;
-		}
-		return resolved;
+		return resolveProactivitySettings(this.settings);
 	}
 
 	/**
@@ -3716,42 +2874,12 @@ export class SettingsManager {
 	}
 
 	getRoutinesSettings(): Required<Pick<RoutinesSettings, "automaticIntake" | "maxResultWakesPerDay">> {
-		const configured = this.settings.routines ?? {};
-		return {
-			automaticIntake: typeof configured.automaticIntake === "boolean" ? configured.automaticIntake : true,
-			maxResultWakesPerDay: sanitizeIntegerSetting(
-				configured.maxResultWakesPerDay,
-				DEFAULT_ROUTINE_MAX_RESULT_WAKES_PER_DAY,
-				0,
-				MAX_ROUTINE_MAX_RESULT_WAKES_PER_DAY,
-			),
-		};
+		return resolveRoutinesSettings(this.settings);
 	}
 
 	/** Bounds of routines run away; the daemon reads them for the whole agent dir. */
 	getRoutineAwaySettings(): ResolvedRoutineAwaySettings {
-		const configured = this.settings.routines?.away ?? {};
-		return {
-			enabled: typeof configured.enabled === "boolean" ? configured.enabled : DEFAULT_ROUTINE_AWAY_ENABLED,
-			maxUsdPerRun: sanitizeNumberSetting(
-				configured.maxUsdPerRun,
-				DEFAULT_ROUTINE_AWAY_MAX_USD_PER_RUN,
-				MIN_ROUTINE_AWAY_MAX_USD_PER_RUN,
-				MAX_ROUTINE_AWAY_MAX_USD_PER_RUN,
-			),
-			maxUsdPerDay: sanitizeNumberSetting(
-				configured.maxUsdPerDay,
-				DEFAULT_ROUTINE_AWAY_MAX_USD_PER_DAY,
-				0,
-				MAX_ROUTINE_AWAY_MAX_USD_PER_DAY,
-			),
-			maxParentHosts: sanitizeIntegerSetting(
-				configured.maxParentHosts,
-				DEFAULT_ROUTINE_AWAY_MAX_PARENT_HOSTS,
-				1,
-				MAX_ROUTINE_AWAY_MAX_PARENT_HOSTS,
-			),
-		};
+		return resolveRoutineAwaySettings(this.settings);
 	}
 
 	/**
@@ -3770,52 +2898,7 @@ export class SettingsManager {
 	}
 
 	getResearchLaneSettings(): ResolvedResearchLaneSettings {
-		const configured = this.settings.researchLane ?? {};
-
-		const resolved: ResolvedResearchLaneSettings = {
-			enabled: typeof configured.enabled === "boolean" ? configured.enabled : DEFAULT_RESEARCH_LANE_ENABLED,
-			maxUsd: sanitizeNumberSetting(configured.maxUsd, DEFAULT_RESEARCH_LANE_MAX_USD, 0, MAX_RESEARCH_LANE_MAX_USD),
-			maxSources: sanitizeIntegerSetting(
-				configured.maxSources,
-				DEFAULT_RESEARCH_LANE_MAX_SOURCES,
-				1,
-				MAX_RESEARCH_LANE_MAX_SOURCES,
-			),
-			maxFindings: sanitizeIntegerSetting(
-				configured.maxFindings,
-				DEFAULT_RESEARCH_LANE_MAX_FINDINGS,
-				1,
-				MAX_RESEARCH_LANE_MAX_FINDINGS,
-			),
-			maxWallClockMs: sanitizeIntegerSetting(
-				configured.maxWallClockMs,
-				DEFAULT_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
-				0,
-				MAX_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
-			),
-			idleDelayMs: sanitizeIntegerSetting(
-				configured.idleDelayMs,
-				DEFAULT_RESEARCH_LANE_IDLE_DELAY_MS,
-				0,
-				MAX_RESEARCH_LANE_IDLE_DELAY_MS,
-			),
-			maxRunsPerSession: sanitizeIntegerSetting(
-				configured.maxRunsPerSession,
-				DEFAULT_RESEARCH_LANE_MAX_RUNS_PER_SESSION,
-				0,
-				MAX_RESEARCH_LANE_MAX_RUNS_PER_SESSION,
-			),
-		};
-		if (typeof configured.model === "string" && configured.model.trim().length > 0) {
-			resolved.model = configured.model;
-		}
-		if (typeof configured.profile === "string" && configured.profile.trim().length > 0) {
-			resolved.profile = configured.profile;
-		}
-		if (typeof configured.systemPrompt === "string" && configured.systemPrompt.trim().length > 0) {
-			resolved.systemPrompt = configured.systemPrompt;
-		}
-		return resolved;
+		return resolveResearchLaneSettings(this.settings);
 	}
 
 	setResearchLaneSettings(settings: ResearchLaneSettings, scope: SettingsScope = "global"): void {
@@ -3833,52 +2916,11 @@ export class SettingsManager {
 	}
 
 	getToolOutputSettings(): ResolvedToolOutputSettings {
-		const configured = this.settings.toolOutput ?? {};
-		const resolved: ResolvedToolOutputSettings = {
-			reduction: configured.reduction === "off" ? "off" : "on",
-			level:
-				configured.level === "standard" || configured.level === "compact" || configured.level === "auto"
-					? configured.level
-					: "auto",
-		};
-		if (typeof configured.rulesFile === "string" && configured.rulesFile.trim().length > 0) {
-			resolved.rulesFile = configured.rulesFile.trim();
-		}
-		return resolved;
+		return resolveToolOutputSettings(this.settings);
 	}
 
 	getFleetSettings(): ResolvedFleetSettings {
-		const configured = this.settings.fleet ?? {};
-		const ceiling = (value: unknown, fallback: number) =>
-			sanitizeIntegerSetting(value, fallback, 1, Number.MAX_SAFE_INTEGER);
-		const dollars = (value: unknown, fallback: number) =>
-			sanitizeNumberSetting(value, fallback, 0, Number.MAX_SAFE_INTEGER);
-		return {
-			ceiling: {
-				running: ceiling(configured.ceiling?.running, DEFAULT_FLEET_CEILING_RUNNING),
-				writers: ceiling(configured.ceiling?.writers, DEFAULT_FLEET_CEILING_WRITERS),
-				tree: ceiling(configured.ceiling?.tree, DEFAULT_FLEET_CEILING_TREE),
-			},
-			reserve: {
-				memoryPercent: sanitizeNumberSetting(
-					configured.reserve?.memoryPercent,
-					DEFAULT_FLEET_RESERVE_MEMORY_PERCENT,
-					0,
-					90,
-				),
-			},
-			budgets: {
-				meteredUsdPerDay: dollars(configured.budgets?.meteredUsdPerDay, DEFAULT_FLEET_METERED_USD_PER_DAY),
-				meteredUsdPerGoal: dollars(configured.budgets?.meteredUsdPerGoal, DEFAULT_FLEET_METERED_USD_PER_GOAL),
-			},
-			brake: { minUsd: dollars(configured.brake?.minUsd, DEFAULT_FLEET_BRAKE_MIN_USD) },
-			queueHorizonMs: sanitizeIntegerSetting(
-				configured.queueHorizonMs,
-				DEFAULT_FLEET_QUEUE_HORIZON_MS,
-				0,
-				Number.MAX_SAFE_INTEGER,
-			),
-		};
+		return resolveFleetSettings(this.settings);
 	}
 
 	setFleetSettings(settings: FleetSettings): void {
@@ -3888,119 +2930,23 @@ export class SettingsManager {
 	}
 
 	getWorktreeSyncSettings(): ResolvedWorktreeSyncSettings {
-		const configured = this.settings.worktreeSync ?? {};
-		const resolved: ResolvedWorktreeSyncSettings = {
-			enabled: configured.enabled !== false,
-			syncPolicy:
-				configured.syncPolicy === "overlap_mandatory" || configured.syncPolicy === "land_time_only"
-					? configured.syncPolicy
-					: DEFAULT_WORKTREE_SYNC_POLICY,
-			gate: configured.gate === "off" ? "off" : "on",
-			gateTimeoutMs: sanitizeIntegerSetting(
-				configured.gateTimeoutMs,
-				DEFAULT_WORKTREE_SYNC_GATE_TIMEOUT_MS,
-				1000,
-				3_600_000,
-			),
-			maxLanes: sanitizeIntegerSetting(
-				configured.maxLanes,
-				DEFAULT_WORKTREE_SYNC_MAX_LANES,
-				1,
-				Number.MAX_SAFE_INTEGER,
-			),
-			workerLand: configured.workerLand === "allow" ? "allow" : "deny",
-		};
-		if (typeof configured.mainBranch === "string" && configured.mainBranch.trim().length > 0) {
-			resolved.mainBranch = configured.mainBranch.trim();
-		}
-		if (typeof configured.gateCommand === "string" && configured.gateCommand.trim().length > 0) {
-			resolved.gateCommand = configured.gateCommand.trim();
-		}
-		if (typeof configured.worktreesRoot === "string" && configured.worktreesRoot.trim().length > 0) {
-			resolved.worktreesRoot = configured.worktreesRoot.trim();
-		}
-		return resolved;
+		return resolveWorktreeSyncSettings(this.settings);
 	}
 
 	getProcessMatrixSettings(): ResolvedProcessMatrixSettings {
-		const configured = this.settings.processMatrix ?? {};
-		return {
-			enabled: configured.enabled !== false,
-			heartbeatMs: sanitizeIntegerSetting(
-				configured.heartbeatMs,
-				DEFAULT_PROCESS_MATRIX_HEARTBEAT_MS,
-				1000,
-				600_000,
-			),
-			adoptionGraceMs: sanitizeIntegerSetting(
-				configured.adoptionGraceMs,
-				DEFAULT_PROCESS_MATRIX_ADOPTION_GRACE_MS,
-				5000,
-				3_600_000,
-			),
-			watcherPollMs: sanitizeIntegerSetting(
-				configured.watcherPollMs,
-				DEFAULT_PROCESS_MATRIX_WATCHER_POLL_MS,
-				1000,
-				600_000,
-			),
-		};
+		return resolveProcessMatrixSettings(this.settings);
 	}
 
 	getWindowsShellSettings(): ResolvedWindowsShellSettings {
-		const configured = this.settings.windowsShell ?? {};
-		return {
-			pythonEngine: configured.pythonEngine !== false,
-			gnuToolsDir: sanitizeGnuToolsDirSetting(configured.gnuToolsDir),
-		};
+		return resolveWindowsShellSettings(this.settings);
 	}
 
 	getProviderAdmissionSettings(): ResolvedProviderAdmissionSettings {
-		const configured = isPlainRecord(this.settings.providerAdmission) ? this.settings.providerAdmission : {};
-		const limits: Record<string, number> = { ...DEFAULT_PROVIDER_ADMISSION_LIMITS };
-		if (isPlainRecord(configured.limits)) {
-			for (const [provider, value] of Object.entries(configured.limits)) {
-				if (!provider.trim()) continue;
-				if (
-					typeof value !== "number" ||
-					!Number.isSafeInteger(value) ||
-					value < 0 ||
-					value > MAX_PROVIDER_ADMISSION_LIMIT
-				) {
-					continue;
-				}
-				if (value === 0) delete limits[provider];
-				else limits[provider] = value;
-			}
-		}
-		return {
-			enabled: typeof configured.enabled === "boolean" ? configured.enabled : DEFAULT_PROVIDER_ADMISSION_ENABLED,
-			limits,
-			maxWaitMs: sanitizeIntegerSetting(
-				configured.maxWaitMs,
-				DEFAULT_PROVIDER_ADMISSION_MAX_WAIT_MS,
-				0,
-				MAX_PROVIDER_ADMISSION_MAX_WAIT_MS,
-			),
-			foregroundLimitWaitMs: sanitizeIntegerSetting(
-				configured.foregroundLimitWaitMs,
-				DEFAULT_PROVIDER_ADMISSION_FOREGROUND_LIMIT_WAIT_MS,
-				0,
-				MAX_PROVIDER_ADMISSION_MAX_WAIT_MS,
-			),
-		};
+		return resolveProviderAdmissionSettings(this.settings);
 	}
 
 	getToolExecutionSettings(): ResolvedToolExecutionSettings {
-		const configured = this.settings.toolExecution ?? {};
-		return {
-			concurrency: sanitizeIntegerSetting(
-				configured.concurrency,
-				DEFAULT_TOOL_EXECUTION_CONCURRENCY,
-				MIN_TOOL_EXECUTION_CONCURRENCY,
-				MAX_TOOL_EXECUTION_CONCURRENCY,
-			),
-		};
+		return resolveToolExecutionSettings(this.settings);
 	}
 
 	/**
@@ -4009,71 +2955,20 @@ export class SettingsManager {
 	 * own — merging two maps keeps the global declaration order — so the layers are read directly.
 	 */
 	getFileEncodings(): FileEncodingRule[] {
-		const rules: FileEncodingRule[] = [];
-		const claimed = new Set<string>();
-		for (const layer of [this.directoryProfileSettings, this.projectSettings, this.globalSettings]) {
-			const configured = layer.fileEncodings;
-			if (!configured || typeof configured !== "object" || Array.isArray(configured)) continue;
-			for (const [pattern, value] of Object.entries(configured)) {
-				const glob = typeof pattern === "string" ? pattern.trim() : "";
-				const encoding = typeof value === "string" ? value.trim() : "";
-				if (glob.length === 0 || encoding.length === 0 || claimed.has(glob)) continue;
-				claimed.add(glob);
-				rules.push({ glob, encoding });
-			}
-		}
-		return rules;
+		return resolveFileEncodingRules([this.directoryProfileSettings, this.projectSettings, this.globalSettings]);
 	}
 
 	getBackgroundToolSettings(): ResolvedBackgroundToolSettings {
-		const configured = this.settings.backgroundTool ?? {};
-		return {
-			callAfterMs: sanitizeIntegerSetting(
-				configured.callAfterMs,
-				DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS,
-				MIN_BACKGROUND_TOOL_CALL_AFTER_MS,
-				MAX_BACKGROUND_TOOL_CALL_AFTER_MS,
-			),
-		};
+		return resolveBackgroundToolSettings(this.settings);
 	}
 
 	getEdgeSettings(): ResolvedEdgeSettings {
 		const loadError =
 			this.globalSettingsLoadError ?? this.projectSettingsLoadError ?? this.directoryProfileSettingsLoadError;
-		// Load diagnostics already report the file error. Withhold standing grants, but keep
-		// provider planning and ordinary tools available so the session can diagnose and repair it.
-		if (loadError || (this.settings.edge !== undefined && !isPlainRecord(this.settings.edge)))
-			return { mode: "guarded", allow: [], thirdPartyAllow: [], deny: [] };
-		const configured = this.settings.edge?.allow;
-		// Resolve once here: foreground, worker inheritance and provider authority context all
-		// consume these grants. Autonomy/learning presets never narrow execution authority.
-		const allow =
-			configured === undefined ? EDGE_CLASSES : Array.isArray(configured) ? configured.filter(isEdgeClass) : [];
-		// What a run carrying a third party's words may do is its own key, never `allow` (which grants the owner's own
-		// runs). A repository's own settings file never writes it: a project without a trust decision loads it trusted by
-		// default (`getProjectTrustDefault`), so only the global and directory-profile layers under the agent directory
-		// count, the directory profile first. It never exceeds what the owner's own runs may do (`allow`).
-		const thirdPartyWritten = [this.directoryProfileSettings.edge, this.globalSettings.edge]
-			.map((layer) => (isPlainRecord(layer) ? layer.thirdPartyAllow : undefined))
-			.find((list) => list !== undefined);
-		const thirdPartyAllow = Array.isArray(thirdPartyWritten)
-			? [...new Set(allow)].filter((edgeClass) => thirdPartyWritten.includes(edgeClass))
-			: [];
-		const configuredDeny = this.settings.edge?.deny;
-		// A deny list that cannot be read cannot be enforced, so YOLO waits until it is corrected. The
-		// standing grants do not depend on it and stay as configured.
-		if (
-			configuredDeny !== undefined &&
-			(!Array.isArray(configuredDeny) || configuredDeny.some((value) => typeof value !== "string" || !value.trim()))
-		) {
-			return { mode: "guarded", allow: [...new Set(allow)], thirdPartyAllow, deny: [] };
-		}
-		return {
-			mode: this.settings.edge?.mode === "yolo" ? "yolo" : "guarded",
-			allow: [...new Set(allow)],
-			thirdPartyAllow,
-			deny: [...new Set((configuredDeny ?? []).map((value) => value.trim()))],
-		};
+		return resolveEdgeSettings(this.settings, loadError, [
+			this.directoryProfileSettings.edge,
+			this.globalSettings.edge,
+		]);
 	}
 
 	/**
@@ -4097,41 +2992,7 @@ export class SettingsManager {
 	}
 
 	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings {
-		const configured = normalizeWorkerDelegationLayer(this.settings.workerDelegation) ?? {};
-
-		const resolved: ResolvedWorkerDelegationSettings = {
-			enabled: typeof configured.enabled === "boolean" ? configured.enabled : DEFAULT_WORKER_DELEGATION_ENABLED,
-			maxUsd: sanitizeNumberSetting(
-				configured.maxUsd,
-				DEFAULT_WORKER_DELEGATION_MAX_USD,
-				0,
-				MAX_WORKER_DELEGATION_MAX_USD,
-			),
-			maxWallClockMs: sanitizeIntegerSetting(
-				configured.maxWallClockMs,
-				DEFAULT_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
-				0,
-				MAX_WORKER_DELEGATION_MAX_WALL_CLOCK_MS,
-			),
-			writeEnabled:
-				typeof configured.writeEnabled === "boolean"
-					? configured.writeEnabled
-					: DEFAULT_WORKER_DELEGATION_WRITE_ENABLED,
-			reportHandshake:
-				typeof configured.reportHandshake === "boolean"
-					? configured.reportHandshake
-					: DEFAULT_WORKER_DELEGATION_REPORT_HANDSHAKE,
-			haltReportDeadlineMs: sanitizeIntegerSetting(
-				configured.haltReportDeadlineMs,
-				DEFAULT_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
-				1,
-				MAX_WORKER_DELEGATION_HALT_REPORT_DEADLINE_MS,
-			),
-		};
-		if (typeof configured.orchestrationProfile === "string" && configured.orchestrationProfile.trim().length > 0) {
-			resolved.orchestrationProfile = configured.orchestrationProfile.trim();
-		}
-		return resolved;
+		return resolveWorkerDelegationSettings(this.settings);
 	}
 
 	/** The escalation ladder and outcome ledger settings: hands-off defaults with the owner's overrides on top. */
@@ -4141,18 +3002,12 @@ export class SettingsManager {
 
 	/** Worker thinking relative to the foreground when neither authority nor profile pins it. */
 	getWorkerThinkingPolicy(): WorkerThinkingPolicy {
-		const configured = normalizeWorkerDelegationLayer(this.settings.workerDelegation) ?? {};
-		return configured.thinking ?? DEFAULT_WORKER_DELEGATION_THINKING;
+		return resolveWorkerThinkingPolicy(this.settings);
 	}
 
 	/** Which account fresh workers run on and the ordered routing candidates. */
 	getWorkerAccountRouting(): WorkerAccountRouting {
-		const configured = normalizeWorkerDelegationLayer(this.settings.workerDelegation) ?? {};
-		return {
-			account: configured.account ?? DEFAULT_WORKER_DELEGATION_ACCOUNT,
-			routeProviders: configured.routeProviders ?? [],
-			...(configured.routeProvidersByRole ? { routeProvidersByRole: configured.routeProvidersByRole } : {}),
-		};
+		return resolveWorkerAccountRouting(this.settings);
 	}
 
 	getWorkerModelPinPolicy(): WorkerModelPinPolicy {
@@ -4195,62 +3050,11 @@ export class SettingsManager {
 	}
 
 	getLearningPolicySettings(): ResolvedLearningPolicySettings {
-		const configured = this.settings.learningPolicy ?? {};
-
-		const allowedLayers = Array.isArray(configured.allowedAutoApplyLayers)
-			? configured.allowedAutoApplyLayers.filter(
-					(layer): layer is LearningPolicyLayer =>
-						typeof layer === "string" &&
-						["memory", "skill", "prompt", "extension", "tool", "script", "settings", "source"].includes(layer),
-				)
-			: [...DEFAULT_LEARNING_POLICY_ALLOWED_AUTO_APPLY_LAYERS];
-
-		return {
-			enabled: typeof configured.enabled === "boolean" ? configured.enabled : DEFAULT_LEARNING_POLICY_ENABLED,
-			autoApplyEnabled:
-				typeof configured.autoApplyEnabled === "boolean"
-					? configured.autoApplyEnabled
-					: DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED,
-			confidenceThreshold: sanitizeIntegerSetting(
-				configured.confidenceThreshold,
-				DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD,
-				0,
-				100,
-			),
-			minObservations: sanitizeIntegerSetting(
-				configured.minObservations,
-				DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS,
-				0,
-				100,
-			),
-			allowedAutoApplyLayers: allowedLayers,
-			requireRollbackPlan:
-				typeof configured.requireRollbackPlan === "boolean" ? configured.requireRollbackPlan : true,
-			reflectionSourceConfidence: sanitizeIntegerSetting(
-				configured.reflectionSourceConfidence,
-				DEFAULT_LEARNING_POLICY_REFLECTION_SOURCE_CONFIDENCE,
-				0,
-				100,
-			),
-			autoApplySupersessions:
-				typeof configured.autoApplySupersessions === "boolean"
-					? configured.autoApplySupersessions
-					: DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS,
-		};
+		return resolveLearningPolicySettings(this.settings);
 	}
 
 	getToolkitScripts(): ToolkitScript[] {
-		const configured = this.settings.toolkit?.scripts;
-		if (!Array.isArray(configured)) return [];
-		return configured.filter(
-			(script): script is ToolkitScript =>
-				Boolean(script) &&
-				typeof script.name === "string" &&
-				script.name.length > 0 &&
-				typeof script.description === "string" &&
-				typeof script.path === "string" &&
-				(script.runner === "uv" || script.runner === "powershell" || script.runner === "bash"),
-		);
+		return resolveToolkitScripts(this.settings);
 	}
 
 	setToolkitSettings(settings: ToolkitSettings, scope: SettingsScope = "global"): void {
@@ -4268,20 +3072,7 @@ export class SettingsManager {
 	}
 
 	getAdvisorSettings(): AdvisorSettings & { enabled: boolean; error?: string } {
-		const configured = this.settings.advisor;
-		if (configured === undefined) return { enabled: true };
-		if (!configured || typeof configured !== "object" || Array.isArray(configured))
-			return { enabled: false, error: "Peer settings must be an object." };
-		if (configured.enabled !== undefined && typeof configured.enabled !== "boolean")
-			return { enabled: false, error: "Peer enabled must be a boolean." };
-		if (
-			configured.model !== undefined &&
-			(typeof configured.model !== "string" || !configured.model.trim() || !configured.model.includes("/"))
-		)
-			return { enabled: false, error: "Peer model must be an exact nonempty provider/model reference." };
-		if (configured.thinkingLevel !== undefined && !isThinkingLevel(configured.thinkingLevel))
-			return { enabled: false, error: "Peer thinkingLevel is unsupported." };
-		return { enabled: configured.enabled ?? true, model: configured.model, thinkingLevel: configured.thinkingLevel };
+		return resolveAdvisorSettings(this.settings);
 	}
 
 	getAdvisorSettingsScope(): SettingsScope | undefined {
@@ -4319,17 +3110,7 @@ export class SettingsManager {
 	}
 
 	getModelCapabilitySettings(): Required<ModelCapabilitySettings> {
-		const configured = this.settings.modelCapability?.mode;
-		const mode: ModelCapabilityMode =
-			configured === "auto" ||
-			configured === "off" ||
-			configured === "full" ||
-			configured === "lean" ||
-			configured === "minimal" ||
-			configured === "chat"
-				? configured
-				: DEFAULT_MODEL_CAPABILITY_MODE;
-		return { mode };
+		return resolveModelCapabilitySettings(this.settings);
 	}
 
 	setModelCapabilitySettings(settings: ModelCapabilitySettings, scope: SettingsScope = "global"): void {
@@ -4347,13 +3128,7 @@ export class SettingsManager {
 	}
 
 	getBedrockScopeSettings(): BedrockScopeSettings | undefined {
-		const scope = normalizeBedrockScopeSettings(this.globalSettings.bedrock);
-		return scope
-			? {
-					...scope,
-					modelIds: [...scope.modelIds],
-				}
-			: undefined;
+		return resolveBedrockScopeSettings(this.globalSettings.bedrock);
 	}
 
 	setBedrockScopeSettings(scope: BedrockScopeSettings): void {

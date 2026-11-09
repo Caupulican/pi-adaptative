@@ -21,6 +21,10 @@ export interface PlanToolStep {
 	readonly doneWhen?: string;
 	/** What the step must not touch or decide, one line each; carried like `doneWhen`. */
 	readonly outOfScope?: readonly string[];
+	/** How the step's result is proven: cite, cmd, diff, or check:<command> (a command whose exit code 0 proves it). */
+	readonly proof?: string;
+	/** A vote step: the criteria every candidate is judged on, one each. */
+	readonly criteria?: readonly string[];
 }
 
 export interface PlanToolInput {

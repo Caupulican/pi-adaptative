@@ -3,7 +3,7 @@ import { randomUUID } from "node:crypto";
 import { Value } from "typebox/value";
 import { type SqliteDatabase, withSqliteTransaction } from "../context/sqlite-database.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
-import { canonicalDigest } from "../steering/canonical.ts";
+import { strictCanonicalDigest, withoutUndefinedMembers } from "../steering/canonical.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import {
 	type KnowledgeAdmissionOperation,
@@ -87,7 +87,7 @@ function sourceIdentity(source: KnowledgeCollectionSource): string {
 		throw new TypeError("Invalid collection source");
 	// Extraction versions may revisit a source, but exact candidate effects retain the same identity.
 	requireDigest(source.digest);
-	return canonicalDigest(source);
+	return strictCanonicalDigest(source);
 }
 
 function timestamp(value: unknown): number {
@@ -98,7 +98,7 @@ function timestamp(value: unknown): number {
 
 /** Shared by extraction versions, so revisiting a source cannot rebind an operation to another job. */
 export function knowledgeCollectionSourceIdentity(source: KnowledgeCollectionSource): string {
-	return canonicalDigest({ source: source.sourceId, original: source.digest, scope: source.scope });
+	return strictCanonicalDigest({ source: source.sourceId, original: source.digest, scope: source.scope });
 }
 
 /** One submission contract for the extractor's tool boundary and the durable plan, so a retained answer can install. */
@@ -236,7 +236,7 @@ export class KnowledgeCollectionJournal {
 			ids.length > MAX_COLLECTION_CANDIDATES ||
 			new Set(ids).size !== ids.length ||
 			!ids.every((id): id is string => typeof id === "string" && /^[a-f0-9]{64}$/.test(id)) ||
-			canonicalDigest(ids) !== row.manifest_digest
+			strictCanonicalDigest(ids) !== row.manifest_digest
 		)
 			throw new Error("Collection manifest integrity failed");
 		const candidates: KnowledgeCollectionCandidate[] = [];
@@ -263,7 +263,7 @@ export class KnowledgeCollectionJournal {
 			const change: unknown = JSON.parse(candidate.body);
 			if (
 				!Value.Check(knowledgeChangeSchema, change) ||
-				canonicalDigest({ change, scope: claim.source.scope }) !== candidate.digest
+				strictCanonicalDigest({ change, scope: claim.source.scope }) !== candidate.digest
 			)
 				throw new Error("Collection candidate integrity failed");
 			candidates.push({ operationId: id, expectedDigest: candidate.digest, outcome: "pending", change });
@@ -293,8 +293,10 @@ export class KnowledgeCollectionJournal {
 					barrier === null ||
 					(claim.source.createdAt > barrier &&
 						change.evidence.every((citation) => citation.source === claim.source.sourceId));
-				const expectedDigest = canonicalDigest({ change, scope: claim.source.scope });
-				const operationId = canonicalDigest({
+				const expectedDigest = strictCanonicalDigest(
+					withoutUndefinedMembers({ change, scope: claim.source.scope }),
+				);
+				const operationId = strictCanonicalDigest({
 					source: knowledgeCollectionSourceIdentity(claim.source),
 					candidate: expectedDigest,
 				});
@@ -320,7 +322,7 @@ export class KnowledgeCollectionJournal {
 			});
 			const ids = candidates.map((candidate) => candidate.operationId);
 			if (new Set(ids).size !== ids.length) throw new Error("Duplicate collection candidate");
-			const digest = canonicalDigest(ids);
+			const digest = strictCanonicalDigest(ids);
 			this.db
 				.prepare("UPDATE collection_sources SET manifest=?,manifest_digest=? WHERE id=?")
 				.run(JSON.stringify(ids), digest, claim.id);
@@ -345,7 +347,7 @@ export class KnowledgeCollectionJournal {
 			if (
 				stored?.digest !== candidate.expectedDigest ||
 				current?.manifest_digest !== plan.digest ||
-				canonicalDigest(plan.candidates.map((item) => item.operationId)) !== plan.digest
+				strictCanonicalDigest(plan.candidates.map((item) => item.operationId)) !== plan.digest
 			)
 				throw new Error("Collection plan changed during admission");
 		};

@@ -11,7 +11,7 @@
  */
 import { type SqliteDatabase, withSqliteTransaction } from "../context/sqlite-database.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
-import { canonicalDigest } from "../steering/canonical.ts";
+import { strictCanonicalDigest } from "../steering/canonical.ts";
 
 export const KNOWLEDGE_WORK_SCHEMA = `CREATE TABLE knowledge_work (
  id TEXT PRIMARY KEY, request_id TEXT NOT NULL, owner TEXT NOT NULL, window TEXT NOT NULL,
@@ -83,7 +83,8 @@ export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 			);
 		if (typeof row.result !== "string") throw new Error("Knowledge work result is missing");
 		const result: unknown = JSON.parse(row.result);
-		if (canonicalDigest(result) !== row.result_digest) throw new Error("Knowledge work result integrity failed");
+		if (strictCanonicalDigest(result) !== row.result_digest)
+			throw new Error("Knowledge work result integrity failed");
 		return result;
 	}
 	/** All identities begin together or none does; only retired identities may begin again. */
@@ -136,7 +137,7 @@ export class KnowledgeWorkJournal implements KnowledgeWorkCache {
 					.prepare(
 						"UPDATE knowledge_work SET state='complete',result=?,result_digest=?,outcome=? WHERE id=? AND state='started'",
 					)
-					.run(text, canonicalDigest(result), outcome, id);
+					.run(text, strictCanonicalDigest(JSON.parse(text)), outcome, id);
 				// The started row was read in this transaction, so the update retained this result.
 				this.retained++;
 			},

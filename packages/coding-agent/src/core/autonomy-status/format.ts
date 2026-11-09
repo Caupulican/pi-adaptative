@@ -10,6 +10,7 @@ import { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../system-one/semantic-plane-health.
 import type {
 	BoundedList,
 	DayCount,
+	MachineStatusView,
 	RoutineStatusItem,
 	SessionAutonomyStatus,
 	StatusSection,
@@ -22,6 +23,19 @@ export const SESSION_SAVE_PAUSED_WORDS =
 
 function decisionLine(decision: ToolDecision): string {
 	return `${decision.tool}: ${decision.code} (${decision.owner}${decision.detail ? `: ${decision.detail}` : ""})`;
+}
+
+/**
+ * One machine: its name, its state in plain words, and its undeclared count. A multi-entity observer's state is the last
+ * recorded entity's, so it reads so, and reads as no transition at all until the first one is recorded.
+ */
+function machineLine(machine: MachineStatusView): string {
+	const state =
+		machine.entities && !machine.last
+			? "no transition recorded yet"
+			: `${machine.entities ? "last recorded " : ""}${machine.plain}`;
+	const last = machine.last ? `, last ${machine.last.from}->${machine.last.to} ${machine.last.reason}` : "";
+	return `${machine.name}: ${state}, ${machine.illegalCount} undeclared transition(s)${last}`;
 }
 
 function block<T>(title: string, section: StatusSection<T>, lines: (value: T) => string[]): string[] {
@@ -68,6 +82,19 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 			...(value.state === "no_goal" ? [] : [describeGoalAutoContinue(value.state)]),
 		]),
 		...block("Plans", status.plans, (value) => list(value.plans, planStatusLine)),
+		...(status.ownerDecisions === undefined
+			? []
+			: block("Owner decisions", status.ownerDecisions, (value) =>
+					value.waiting === 0
+						? []
+						: [
+								`${value.waiting} waiting on you`,
+								...list(
+									value.items,
+									(item) => `${item.what}${item.since === undefined ? "" : `, since ${at(item.since)}`}`,
+								),
+							],
+				)),
 		...block("Review", status.review, (value) => [
 			reviewGaugeStatusLine(value.waiting) ?? "No finished result is waiting for your review.",
 			value.noticeAt > 0
@@ -164,6 +191,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 		...block("System One", status.systemOne, (value) => [
 			value.state === "no-engine" ? `no engine: ${SYSTEM_ONE_NO_ENGINE_CAUSE}` : value.state,
 		]),
+		...block("Machines", status.machines, (machines) => list(machines, machineLine)),
 		...block("Recent runs", status.runs, (runs) =>
 			runs.flatMap((run) => [
 				`${run.runId} ${run.authority}${run.authorityChanged ? " (changed)" : ""}${run.endedAt === undefined ? " running" : ""}: ${run.offered.length + (run.offeredOmitted ?? 0)} tools offered, ${run.omitted.length} omitted, ${run.refused.length + (run.refusedOmitted ?? 0)} refused`,

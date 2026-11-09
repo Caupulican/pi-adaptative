@@ -19,8 +19,8 @@ import {
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goal-runtime-snapshot.ts";
 
 /**
- * A wait whose decision carries a deadline the timer re-decides at: a dispatched worker's, or the admitted plan steps'
- * timed fallback. Either wait ends by re-deciding, so a lost wake cannot hold the goal.
+ * A wait whose decision carries a deadline the timer re-decides at: a dispatched worker's, or the admitted plan steps' stable
+ * deadline. Either wait ends by re-deciding, so a lost wake cannot hold the goal.
  */
 function isDeadlineWait(continuation: GoalRuntimeSnapshot["continuation"]): boolean {
 	return (
@@ -49,9 +49,9 @@ export interface GoalAutoContinueControllerDeps {
 	emit(event: AgentSessionEvent): void;
 	onContinuationActivity?(): void;
 	/**
-	 * The `goal-continuation` port the wake is armed on (the continuation delay, a worker-deadline resume, the
+	 * The `goal-continuation` port the wake is armed on (the continuation delay, a worker- or plan-deadline resume, the
 	 * scheduled-failure retry) and whose clock measures what is left of a worker deadline. It must be the clock the goal
-	 * runtime snapshot reads. Defaults to the system timers.
+	 * runtime snapshot reads as `now`. Defaults to the system timers.
 	 */
 	timers?: TimerPort;
 }
@@ -67,7 +67,7 @@ type GoalAutoContinueScheduleSettings = Pick<
  */
 type GoalAutoContinueTimerPlan =
 	| { action: "clear" }
-	| { action: "arm"; delayMs: number; wake: "workerDeadline" | "continuation" };
+	| { action: "arm"; delayMs: number; wake: "workerDeadline" | "continuation"; planWait: boolean };
 
 const INITIAL_SCHEDULED_FAILURE_RETRY_MS = 1_000;
 const MAX_SCHEDULED_FAILURE_RETRY_MS = 60_000;
@@ -98,6 +98,8 @@ export class GoalAutoContinueController {
 	private _waitingForForeground = false;
 	/** A failed continuation has its retry armed. */
 	private _retryingAfterFailure = false;
+	/** The armed timer is a plan wait's deadline: a plan step changing re-decides it at once (`wakePlanWait`). */
+	private _armedPlanWait = false;
 	private _schedulerSettings: GoalAutoContinueScheduleSettings | undefined;
 	private _unsubscribeSettingsChanges: (() => void) | undefined;
 	private readonly deps: GoalAutoContinueControllerDeps;
@@ -184,7 +186,21 @@ export class GoalAutoContinueController {
 		if (wakes === "workerDeadline" && plan.wake !== "workerDeadline") return;
 		this._scheduledFailureRetryMs = INITIAL_SCHEDULED_FAILURE_RETRY_MS;
 		this._retryingAfterFailure = false;
-		this.armTimer(plan.delayMs);
+		this.armTimer(plan.delayMs, true, plan.planWait);
+	}
+
+	/**
+	 * A plan step changed: an armed plan wait re-decides now instead of at its deadline, through the one scheduler. A pass
+	 * still running takes the re-decision at its end. An owner interrupt still wins.
+	 */
+	wakePlanWait(): void {
+		if (!this._armedPlanWait || this._interruptedByOwner) return;
+		this._armedPlanWait = false;
+		try {
+			this.scheduleFromIdle();
+		} catch (error) {
+			this.handleScheduledFailure(error);
+		}
 	}
 
 	/**
@@ -269,15 +285,23 @@ export class GoalAutoContinueController {
 		// The worker deadline is stamped (the goal tool's `boundAt`) and decided (the runtime snapshot's `now`) on the goal
 		// state's clock, which is this port's: the session hands the same `goal-continuation` port to all three. Its
 		// remaining delay is measured on that clock too, so a host that advances the port by the delay fires the wake
-		// at the deadline the snapshot then decides as timed out. An alarm that fires before it (a clock correction)
+		// at the deadline the snapshot then decides as timed out. A plan wait is different: what is left of it is measured
+		// on the orchestration clock that stamped the plan, and only that clock can time it out. This port arms the wake for
+		// that duration; a host that advances only this port fires the wake, the snapshot re-decides on the orchestration
+		// clock, and the wake re-arms for what is then left. An alarm that fires before its deadline (a clock correction)
 		// only re-plans: `runScheduled` arms the wake again for what is left.
 		const timers = this.deps.timers ?? SYSTEM_TIMER_PORT;
 		return waitingForWorkerDeadline
-			? { action: "arm", delayMs: Math.max(0, resumeAtMs - timers.now()), wake: "workerDeadline" }
-			: { action: "arm", delayMs: goalAutoContinueDelayMs, wake: "continuation" };
+			? {
+					action: "arm",
+					delayMs: Math.max(0, resumeAtMs - timers.now()),
+					wake: "workerDeadline",
+					planWait: continuation.reasonCode === "plan_in_flight",
+				}
+			: { action: "arm", delayMs: goalAutoContinueDelayMs, wake: "continuation", planWait: false };
 	}
 
-	private armTimer(delayMs: number, notify = true): void {
+	private armTimer(delayMs: number, notify = true, planWait = false): void {
 		// Acquire the replacement before releasing the last valid timer. Planning or allocation
 		// failure therefore cannot erase the only event that owns future goal progress.
 		// The port's alarms never hold the process open: an armed continuation is not work a run waits behind.
@@ -285,6 +309,7 @@ export class GoalAutoContinueController {
 		const timer = timers.setTimeout(() => {
 			if (this._timer !== timer) return;
 			this._timer = undefined;
+			this._armedPlanWait = false;
 			void this.runScheduled()
 				.then(() => {
 					this._scheduledFailureRetryMs = INITIAL_SCHEDULED_FAILURE_RETRY_MS;
@@ -295,6 +320,7 @@ export class GoalAutoContinueController {
 		}, delayMs);
 		const previous = this._timer;
 		this._timer = timer;
+		this._armedPlanWait = planWait;
 		if (previous !== undefined) timers.clearTimeout(previous);
 		if (notify) this.deps.onContinuationActivity?.();
 	}
@@ -422,6 +448,7 @@ export class GoalAutoContinueController {
 
 	private cancelTimer(notify: boolean): boolean {
 		this._retryingAfterFailure = false;
+		this._armedPlanWait = false;
 		if (this._timer === undefined) return false;
 		(this.deps.timers ?? SYSTEM_TIMER_PORT).clearTimeout(this._timer);
 		this._timer = undefined;

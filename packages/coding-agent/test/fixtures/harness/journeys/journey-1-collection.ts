@@ -8,7 +8,9 @@ import {
 } from "../../../../src/core/learning/owner-evidence-ledger.ts";
 import type { KnowledgeCollectionOutcome } from "../../../../src/core/memory/knowledge-collector.ts";
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
+import { KNOWLEDGE_COLLECTION_CUSTOM_TYPE } from "../../../../src/core/reflection-controller.ts";
 import { parentInputOf, parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
+import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { createBarrier, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { runJourney1LongCollection } from "./journey-1-long-collection.ts";
@@ -41,6 +43,9 @@ const CARRIED_NOTICE_RECORDS = 1;
 /** Owner and pasted turns, then the yielded turn that carries the capped pass's notice, then the busy turn. */
 const YIELD_TURN_RECORDS = 3 * TURN_RECORDS + CARRIED_NOTICE_RECORDS;
 const COLLECTION_RECORDS = YIELD_TURN_RECORDS + TURN_RECORDS;
+/** Custom entries of one type in the session log; an idle collection pass adds none. */
+const countCustom = (sessionManager: SessionManager, customType: string): number =>
+	sessionManager.getEntries().filter((entry) => entry.type === "custom" && entry.customType === customType).length;
 
 /**
  * Journey 1 follows automatic collection through the real root, idle lane, admission and restart. With System One
@@ -525,14 +530,22 @@ export async function runJourney1CollectionPhase(world: HarnessWorld): Promise<v
 			sessionManager: world.openSessionManager(file, agentDir),
 		});
 		await withDeadline(world.trace, "reopened collection armed", world.timers.whenArmed("knowledge-collection"));
-		const replayEnded = terminal(reopened.session);
+		const entriesBefore = countCustom(reopened.sessionManager, KNOWLEDGE_COLLECTION_CUSTOM_TYPE);
 		expect(world.timers.advance("knowledge-collection", 1_000)).toBe(1);
-		expect(await withDeadline(world.trace, "reopened collection replay", replayEnded)).toMatchObject({
-			handoff: { retained: true },
-			status: "completed",
-			sources: 0,
-			applied: 0,
-		});
+		// The pass promise is the barrier: an idle pass emits no event, so the terminal event is not awaited here.
+		await withDeadline(
+			world.trace,
+			"reopened collection replay",
+			reopened.session.memoryOperator.knowledgeCollectionSettled(),
+		);
+		expect(
+			reopened.session.memoryOperator.getKnowledgeCollectionStatus().lastIdlePass,
+			"the replay found no new source",
+		).toBeDefined();
+		expect(
+			countCustom(reopened.sessionManager, KNOWLEDGE_COLLECTION_CUSTOM_TYPE),
+			"an idle pass writes no terminal entry",
+		).toBe(entriesBefore);
 		// The reopened session reads the same configuration, so a source held on it is not judged again either.
 		expect(world.provider.requests.length, "processed original sources are not extracted again on restart").toBe(
 			beforeReopen,

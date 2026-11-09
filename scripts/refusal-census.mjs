@@ -15,9 +15,8 @@
  * Prints one summary row per session and a total. `--list` also prints every refusal with its
  * tool, arguments, and diagnostic, which is the slip corpus.
  */
-import { readFileSync } from "node:fs";
-
-import { listSessionFiles, messageText, toolFailureOf } from "./session-stats-common.mjs";
+import { classifySessionResults } from "./lib/refusal-keys.mjs";
+import { listSessionFiles } from "./session-stats-common.mjs";
 
 const args = process.argv.slice(2);
 const list = args.includes("--list");
@@ -27,58 +26,24 @@ if (dirs.length === 0) {
 	process.exit(2);
 }
 
-const SHELL_CONTRACT_RE =
-	/[a-z]+: unsupported flag|not supported by the Windows shell contract|Heredocs \('<<'\) are not supported|Nesting another shell/;
-
 function census(file) {
-	const calls = new Map();
-	let turns = 0;
-	const refusals = [];
-	let outcomes = 0;
-	const shellContract = [];
-	for (const line of readFileSync(file, "utf8").split("\n")) {
-		if (!line.trim()) continue;
-		let entry;
-		try {
-			entry = JSON.parse(line);
-		} catch {
-			continue;
-		}
-		if (entry.type !== "message") continue;
-		const message = entry.message;
-		if (message.role === "assistant") {
-			turns += 1;
-			for (const part of Array.isArray(message.content) ? message.content : []) {
-				if (part && part.type === "toolCall") calls.set(part.id, { turn: turns, call: part });
-			}
-			continue;
-		}
-		if (message.role !== "toolResult") continue;
-		const text = messageText(message.content, " ");
-		const known = calls.get(message.toolCallId);
-		if ((known?.call.name ?? message.toolName) === "bash" && SHELL_CONTRACT_RE.test(text)) {
-			shellContract.push({
-				turn: known?.turn ?? turns,
-				command: String(known?.call.arguments?.command ?? "").replace(/\s+/g, " "),
-				message: (text.match(SHELL_CONTRACT_RE) ?? [""])[0],
-			});
-		}
-		const failure = toolFailureOf(message);
-		if (!failure) continue;
-		// A tool reporting that its own operation ended badly (a timeout, a non-zero exit) is an
-		// outcome the model must act on, not a harness refusal; it is counted apart.
-		if (message.errorKind === "operation_outcome") {
-			outcomes += 1;
-			continue;
-		}
-		const diagnostic = failure.diagnostic ?? failure.nextAction ?? text.slice(0, 200);
-		refusals.push({
-			turn: known?.turn ?? turns,
-			tool: known?.call.name ?? message.toolName ?? "?",
-			args: JSON.stringify(known?.call.arguments ?? {}),
-			diagnostic: String(diagnostic).replace(/\s+/g, " "),
-		});
-	}
+	const { turns, results } = classifySessionResults(file);
+	const refusals = results
+		.filter((result) => result.kind === "refusal")
+		.map((result) => ({
+			turn: result.turn,
+			tool: result.tool,
+			args: JSON.stringify(result.args),
+			diagnostic: String(result.diagnostic).replace(/\s+/g, " "),
+		}));
+	const shellContract = results
+		.filter((result) => result.shellRule !== undefined)
+		.map((result) => ({
+			turn: result.turn,
+			command: result.command.replace(/\s+/g, " "),
+			message: result.matched,
+		}));
+	const outcomes = results.filter((result) => result.kind === "outcome").length;
 	return { file, turns, refusals, outcomes, shellContract };
 }
 

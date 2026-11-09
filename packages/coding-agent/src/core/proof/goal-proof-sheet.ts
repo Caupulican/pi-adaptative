@@ -128,8 +128,9 @@ export function buildGoalProofSheet(input: GoalProofSheetInput): { text: string;
 			),
 		...claimed,
 	];
-	// A python-file call's script was read by the host when it ran, and its recorded scan is taken as it stands. A call that
-	// recorded none (a failed run, or a record from before the scan) is unread: never read as a clean script.
+	// A python-file call's script was read by the host when it ran, whatever the run's outcome, and its recorded scan is taken
+	// as it stands. A call that recorded none (a record from before the scan, or a failure the tool raised without its
+	// receipt) is unread: never read as a clean script.
 	const scriptFiles = lifetimeCommands.filter((command) => command.language === "python-file");
 	const scriptScans = scriptFiles.flatMap((command) =>
 		command.scriptStakes?.status === "read" ? [command.scriptStakes] : [],

@@ -61,6 +61,7 @@ import {
 	MAX_WORKER_RESOURCE_PATH_LENGTH,
 	MAX_WORKER_RESOURCE_POINTERS,
 	type ManagedLaneLifetime,
+	type ManagedLanePlacement,
 	OBJECTIVE_STATUSES,
 	type ObjectiveContract,
 	type ObjectiveStatus,
@@ -80,6 +81,7 @@ import {
 	type WorkerModelRouteSource,
 	type WorkerResultContract,
 } from "./contracts.ts";
+import { DISPATCH_FIELDS } from "./dispatch-request-fields.ts";
 import { orchestrationModelBindingFromValue } from "./profile-registry.ts";
 import { retentionArchiveIdsField } from "./retention-event.ts";
 import { validateRiskBudget } from "./risk-budget.ts";
@@ -367,33 +369,23 @@ export function validateTaskDependencyIds(
 	return dependencyIds;
 }
 
-const DISPATCH_FIELDS = new Set([
-	"knowledgeReferences",
-	"subscriptions",
-	"receiptOrigin",
-	"turnOrigin",
-	"taskId",
-	"profileId",
-	"instructions",
-	"brief",
-	"resourcePointerIds",
-	"parentAgentId",
-	"requirementIds",
-	"executionKind",
-	"logicalLaneId",
-	"dispatchSequence",
-	"controlMessageId",
-	"controlForkMode",
-	"provider",
-	"authorizationId",
-	"worktreeLaneKey",
-	"worktreeLanePath",
-	"birthContextForkReference",
-	"executionContract",
-	"modelRouteSource",
-	"modelPinSource",
-	"senderAgentId",
-]);
+/** A placed job's key on its lane's dispatch: bounded identifiers, and the plan step when a plan named it. */
+function dispatchPlacement(value: unknown, label: string): ManagedLanePlacement {
+	const placement = record(value, label);
+	const idempotencyKey = dispatchIdentifier(placement.idempotencyKey, `${label}.idempotencyKey`);
+	if (placement.plan === undefined) return { idempotencyKey };
+	const plan = record(placement.plan, `${label}.plan`);
+	if (!Number.isSafeInteger(plan.version) || Number(plan.version) < 1)
+		throw new DurableTaskRuntimeError(`${label}.plan.version is invalid.`);
+	return {
+		idempotencyKey,
+		plan: {
+			planId: dispatchIdentifier(plan.planId, `${label}.plan.planId`),
+			nodeId: dispatchIdentifier(plan.nodeId, `${label}.plan.nodeId`),
+			version: Number(plan.version),
+		},
+	};
+}
 
 export function dispatchFromValue(value: unknown, label: string): OrchestrationDispatchRequest {
 	const dispatch = record(value, label);
@@ -502,6 +494,9 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 		...(authorizationId ? { authorizationId } : {}),
 		...(worktreeLaneKey ? { worktreeLaneKey } : {}),
 		...(worktreeLanePath ? { worktreeLanePath } : {}),
+		...(dispatch.placement === undefined
+			? {}
+			: { placement: dispatchPlacement(dispatch.placement, `${label}.placement`) }),
 		...(birthContextForkReference ? { birthContextForkReference } : {}),
 		...(executionContract ? { executionContract } : {}),
 		...(modelRouteSource ? { modelRouteSource: modelRouteSource as WorkerModelRouteSource } : {}),

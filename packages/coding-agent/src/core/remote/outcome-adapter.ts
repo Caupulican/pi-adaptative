@@ -37,6 +37,10 @@ const ENDINGS: Readonly<Record<PlacerEnding, { status: string; words: (machine: 
 		status: "cancelled",
 		words: (machine) => `The plan no longer needed the job on ${machine}; it was stopped.`,
 	},
+	stop_unreadable: {
+		status: "cancelled",
+		words: (machine) => `A stop of the job on ${machine} could not be read, so the job was stopped.`,
+	},
 };
 
 const OUTCOME_LANE_STATUS: Readonly<Record<OutcomeStatus, string>> = {

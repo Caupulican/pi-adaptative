@@ -1,6 +1,6 @@
 /** Deterministic source-bound views. Windows never create new owner observations. */
 import { createHash } from "node:crypto";
-import { canonicalDigest } from "../steering/canonical.ts";
+import { strictCanonicalDigest } from "../steering/canonical.ts";
 import type { OwnerEvidenceRecord } from "./owner-evidence-ledger.ts";
 
 export const OWNER_EVIDENCE_CORE_CHARS = 8_000;
@@ -62,7 +62,7 @@ export function ownerEvidenceWindow(source: OwnerEvidenceRecord, start: number, 
 	};
 	return {
 		...identity,
-		id: canonicalDigest({ version: 1, ...identity }),
+		id: strictCanonicalDigest({ version: 1, ...identity }),
 		text: source.text.slice(shownStart, shownEnd),
 	};
 }

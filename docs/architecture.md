@@ -50,10 +50,14 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/host-event-stamp.ts` | (no header comment) |
 | `kernel/index.ts` | (no header comment) |
 | `kernel/loop-config.ts` | (no header comment) |
+| `kernel/machine-model-explore.ts` | Bounded, exhaustive exploration of a model. |
+| `kernel/machine-model-liveness.ts` | Liveness over an explored model graph, for the kernel model checker. |
+| `kernel/machine-model.ts` | The vocabulary of the kernel model checker. |
 | `kernel/machine-spec.ts` | A declared state machine and an observer of it. |
 | `kernel/message-revision.ts` | (no header comment) |
 | `kernel/messages.ts` | Custom message types and transformers for the agent kernel. |
 | `kernel/node.ts` | (no header comment) |
+| `kernel/outbox.ts` | Record-before-effect: a durable claim, then the effect, then a durable settle. |
 | `kernel/owner-input-stamp.ts` | Stamps an agent message with the identity of the owner input it carries as a non-enumerable symbol property, and reads that identity back. |
 | `kernel/prefix-fold.ts` | A left fold over an array of immutable items that resumes where it stopped when the next array still starts with the same objects, and starts over otherwise. |
 | `kernel/provider-request-estimator.ts` | (no header comment) |
@@ -83,14 +87,21 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/session/session-append-receipt.ts` | (no header comment) |
 | `kernel/session/session-bundle-lifecycle.ts` | (no header comment) |
 | `kernel/session/session-bundle-paths.ts` | (no header comment) |
+| `kernel/session/session-context-builder.ts` | Model-facing session context: compaction-aware selection of retained entries, the context messages and their delivered metadata, and the branch views built from them. |
 | `kernel/session/session-entries.ts` | (no header comment) |
 | `kernel/session/session-entry-evidence-index.ts` | (no header comment) |
 | `kernel/session/session-entry-limits.ts` | Maximum entries visited by a single bounded session traversal. |
 | `kernel/session/session-file-admission.ts` | (no header comment) |
+| `kernel/session/session-file-reading.ts` | Session transcript file reading: entry line parsing, streamed and offset-indexed entry loading, and session header reads with parent lineage checks. |
+| `kernel/session/session-file-writing.ts` | Transcript file writes under the session file lock: the lock wrapper that shares an active synchronous scope, the append to an existing history, and the full-file write. |
 | `kernel/session/session-header.ts` | (no header comment) |
+| `kernel/session/session-id-generation.ts` | Session and entry id generation: fresh session ids, the auto-learn session id test, and the entry id space that keeps generated ids unique within one transcript. |
 | `kernel/session/session-identity.ts` | Defines the one session id rule and the validators that admit a session id read from a record or a session file header. |
+| `kernel/session/session-listing.ts` | Session discovery and listing: the most recent session lookup, bounded-concurrency session info loading, and the per-directory session file listing. |
+| `kernel/session/session-manager-types.ts` | Public record types of the session transcript: the header and entry file union, the context and tree views, session info, and persisted-entry events and listeners. |
 | `kernel/session/session-manager.ts` | (no header comment) |
 | `kernel/session/session-tree.ts` | Walks session entry ancestry from a leaf to the root with parent-cycle detection and collects the active branch ending at a leaf. |
+| `kernel/session/session-version-migration.ts` | Session transcript format versions: the current version constants and the ordered migrations that upgrade entries from older formats to the current one. |
 | `kernel/session/session-write-confirmation.ts` | Confirms, under the original file lock, that an attempted suffix was fully written to a session file by checking file identity, size and suffix SHA-256. |
 | `kernel/session/specialist-context-ownership.ts` | (no header comment) |
 | `kernel/session/worker-context-fork-reference.ts` | (no header comment) |
@@ -109,6 +120,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/tool-failure-code.ts` | (no header comment) |
 | `kernel/tool-failure-ledger-record.ts` | (no header comment) |
 | `kernel/tool-failure-memory.ts` | (no header comment) |
+| `kernel/tool-failure-receipt.ts` | Bounded structured facts a tool attaches to a failed call's persisted result, beside the flat outcome details. |
 | `kernel/tool-failure-recovery-gate.ts` | (no header comment) |
 | `kernel/tool-failure-recovery-protocol.ts` | (no header comment) |
 | `kernel/tool-failure-timeout.ts` | (no header comment) |
@@ -130,6 +142,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/utils/paths.ts` | Normalizes user and tool path input (tilde, @ prefix, unicode spaces) against a base directory and re-exports the execution path primitives. |
 | `kernel/utils/shell-output.ts` | Sanitize binary output for display/storage. |
 | `kernel/utils/streaming-content.ts` | Append-only text storage that materializes immutable chunks only when a consumer requests a string. |
+| `kernel/utils/strict-canonical-json.ts` | Strict canonical JSON: the one encoder behind identity, signature and dedupe keys built from JSON data. |
 | `kernel/utils/truncate.ts` | Shared truncation utilities for tool outputs. |
 | `kernel/utils/value-guards.ts` | Provides type guards for untrusted values: object and plain records, allowed-key checks, string arrays and non-negative safe integers. |
 | `kernel/uuid.ts` | (no header comment) |
@@ -137,19 +150,25 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/wire-record.ts` | Exact data-only wire shape. |
 | `kernel/worker-control-stamp.ts` | The typed identity of a message the host wrote into a worker's transcript: a mailbox control message (`steer`, `follow_up`) or the attempt's task prompt (`task`). |
 
-103 kernel modules, 44 with a header comment.
+116 kernel modules, 57 with a header comment.
 
 ## Controller and session modules (packages/coding-agent/src/core)
 
 | Module | Own test | What it owns |
 |---|---|---|
+| `agent-session-agent-hooks.ts` | no | Hooks the session installs on its agent once, at construction: the provider request options (the text tool-call protocol and its temperature), the request reasoning resolver (lane custody, host turn reasoning and the cost ceiling), and the tool-argument validation observer. |
 | `agent-session-background-tasks.ts` | no | Construction of the session's background tool-task controller, extracted from the session coordinator (decomposition ratchet: the coordinator only wires, its line ceiling only moves down). |
 | `agent-session-composition.ts` | no | Factory builders for the session coordinator's operator projection, worker supervision, project rules, adaptive-runtime attachment, context-composition dashboard report, and toolkit execution. |
 | `agent-session-contracts.ts` | no | (no header comment) |
 | `agent-session-edge.ts` | no | The edge, bound to one session: grants live on the branch, the confirmation handler belongs to the interactive host, and a child session never asks. |
+| `agent-session-events.ts` | no | Agent-event routing for the session coordinator: the handler every agent event reaches (extension delivery, persistence, the routed-turn flush, reflection and goal hooks, and the end-of-run cleanups), the bridge that fires each event into the extension runner, and the warning emitter the coordinator's observers share. |
 | `agent-session-guards.ts` | no | Guard handlers the agent loop fires into the session: a runaway stop (a bounded harness guard ended a run) and a tool-validation escalation (repeated identical validation failures). |
+| `agent-session-message-delivery.ts` | no | Delivery of custom and user messages into the session coordinator: a message is steered into a running turn, queued for the next turn, run as a turn of its own, or appended to the transcript, decided under the runtime admission lease. |
+| `agent-session-model-access.ts` | no | Model access for the session coordinator: a model the owner's account refuses or does not offer is replaced for the session or for the routed turn it refused, the request auth a provider call needs is resolved here, and the conversation's talker (the model the owner's messages run on) is adopted, moved and recorded her |
 | `agent-session-runtime.ts` | no | (no header comment) |
 | `agent-session-services.ts` | no | (no header comment) |
+| `agent-session-tool-activation.ts` | no | Active tool set for the session coordinator: the names a caller requests are reduced to what the model's capability admits, resolved to registered tools (with the artifact and path-alias wrappers), and the base system prompt is rebuilt for the set that remains. |
+| `agent-session-work-state.ts` | no | Work state of the session coordinator: derives whether the session is busy, blocked, done or faulted in liveness from its foreground, worker, tool, evaluation and goal owners, runs the watchdog that recovers or blocks an orphaned objective, and holds the wait on running workers. |
 | `agent-session.ts` | no | (no header comment) |
 | `background-lane-controller.ts` | no | Execution-plane coordinator for goal continuation, research, managed lanes, worker delegation, and model fitness. |
 | `background-tool-task-controller.ts` | no | (no header comment) |
@@ -188,5 +207,5 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `tool-gate-controller.ts` | no | Agent tool-call gate: model-router escalation, autonomy gating, extension tool hooks, and the untrusted-content output boundary. |
 | `tool-protocol-controller.ts` | no | (no header comment) |
 
-44 modules, 0 with a test file of the same name.
+50 modules, 0 with a test file of the same name.
 
