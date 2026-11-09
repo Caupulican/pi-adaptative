@@ -10,10 +10,12 @@ import {
 	normalizeSteStrictness,
 	ORIENTATION_SURVEY_RULE,
 	OWNER_AUTHORIZATION_RULE,
-	ROOT_DIRECTOR_ROLE_PROMPT,
 	renderExplanationStyleRule,
+	rootDirectorRolePrompt,
 } from "./provider-prompt-contracts.ts";
 import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
+import { PLAN_TOOL_NAME } from "./tools/plan-tool-name.ts";
+import { TOOL_BRIDGE_CLIENT_MODULE } from "./tools/tool-bridge-policy.ts";
 import { workspaceSnapshotLine } from "./workspace-snapshot.ts";
 
 export { OWNER_AUTHORIZATION_RULE };
@@ -78,6 +80,7 @@ REFERENCE POINTS
 D decisions. O options. F findings. R risks. Q questions. A actions. Invent letters only for missing sections; keep codes; do not code short answers.`;
 
 const LOOKUP_BATCH_RULE = `Use \`${LOOKUP_TOOL_NAME}\` for 2 or more independent reads, searches or listings: one call, one round.`;
+const SCRIPT_TOOLS_RULE = `For 3 or more dependent or bulk tool calls (search, read the matches, edit them), run one \`python\` script with \`tools\` that calls them through \`${TOOL_BRIDGE_CLIENT_MODULE}\` and prints only what you need.`;
 
 const DEFERRED_CONTEXT_PATH_BUDGET_CHARS = 512;
 const EXTENSION_DESCRIPTION_BUDGET_CHARS = 180;
@@ -260,7 +263,9 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 	// Told only where the tool is active: the host rejects a call to a tool that is not.
 	const lookupRule =
 		capabilityClass !== "chat" && activeTools.includes(LOOKUP_TOOL_NAME) ? `\n- ${LOOKUP_BATCH_RULE}` : "";
-	const operatingContract = `${coreSection}${lookupRule}${scopeContract}${styleContract}`;
+	const scriptToolsRule =
+		capabilityClass !== "chat" && activeTools.includes("python") ? `\n- ${SCRIPT_TOOLS_RULE}` : "";
+	const operatingContract = `${coreSection}${lookupRule}${scriptToolsRule}${scopeContract}${styleContract}`;
 
 	if (customPrompt) {
 		let prompt = customPrompt;
@@ -320,7 +325,11 @@ export function buildSystemPrompt(options: BuildSystemPromptOptions): string {
 			: capabilityClass === "minimal"
 				? "Pi-Adaptative focused coding executor. Complete one scoped task; report verified results."
 				: "Pi-Adaptative concise chat assistant. No execution tools active.";
-	const directorRole = fullPrompt && options.directorRole === true ? `\n\n${ROOT_DIRECTOR_ROLE_PROMPT}` : "";
+	// The plan lines are told only where the tool is active, like the lookup rule.
+	const directorRole =
+		fullPrompt && options.directorRole === true
+			? `\n\n${rootDirectorRolePrompt({ plan: activeTools.includes(PLAN_TOOL_NAME) })}`
+			: "";
 	// The host rejects calls to tools that are not active, so only the constrained classes are told.
 	const toolSurfaceRule = fullPrompt
 		? ""

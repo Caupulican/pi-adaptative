@@ -497,6 +497,12 @@ export interface ToolDefinition<TParams extends TSchema = TSchema, TDetails = un
 	 * declaration; a tool that declares nothing is judged by its name and treated as mutating when unknown.
 	 */
 	readOnly?: boolean;
+	/**
+	 * Keep this tool's schema resident when schemas are deferred behind `tool_search`: declare it when the harness
+	 * expects the tool on a first call (its prompt or an injected context names it), so a discovery round would be
+	 * wasted. Undeclared tools stay resident only while the resident schema budget has room.
+	 */
+	neverDefer?: boolean;
 	executionMode?: ToolExecutionMode;
 
 	/**

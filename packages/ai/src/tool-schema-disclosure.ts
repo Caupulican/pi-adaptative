@@ -1,15 +1,19 @@
-import type { Message, Tool } from "./types.ts";
+import type { Context, Message, Tool, ToolResultMessage } from "./types.ts";
+import { isRecord } from "./utils/value-guards.ts";
 
 export const TOOL_SCHEMA_SEARCH_NAME = "tool_search";
 export const TOOL_SCHEMA_SEARCH_DETAILS_KIND = "deferred_tool_schema_search";
 export const TOOL_SCHEMA_DISCLOSURE_BETA = "tool-search-tool-2025-10-19";
 
 export const MIN_TOOL_SCHEMA_DISCLOSURE_SEARCHABLE_TOOLS = 10;
+/**
+ * Estimated tokens of the resident schemas, the search tool excluded. A tool that declares `neverDefer` stays resident
+ * past it; the remaining room goes to the other tools in list order.
+ */
+export const DEFAULT_RESIDENT_TOOL_SCHEMA_TOKENS = 4_096;
 const MAX_SEARCH_RESULTS = 10;
 const MAX_SEARCHABLE_SCHEMA_CHARS = 32_768;
-/** Resident schemas, the search tool included. */
-const EAGER_TOOL_COUNT = 5;
-const EAGER_TOOL_PRIORITY = ["read", "bash", "edit", "write", "grep", "find", "delegate"] as const;
+const CATALOG_LINE_CHARS = 96;
 
 export interface ToolSchemaSearchDetails {
 	kind: typeof TOOL_SCHEMA_SEARCH_DETAILS_KIND;
@@ -17,7 +21,19 @@ export interface ToolSchemaSearchDetails {
 	maxResults: number;
 }
 
+/**
+ * Who serves the deferred schemas of one tool list.
+ * - `native`: the provider's own tool search (the adapter sends the deferred schemas marked deferred).
+ * - `harness`: a provider without one; {@link discloseToolSchemas} lists the deferred tools in the search tool and
+ *   answers searches itself.
+ * - `disclosed`: a list the harness already disclosed upstream; it is sent as it is.
+ * - `eager`: nothing is deferred and the search tool is left out.
+ */
+export type ToolSchemaDisclosureMode = "native" | "harness" | "disclosed" | "eager";
+
 export interface ToolSchemaDisclosurePlan {
+	mode: ToolSchemaDisclosureMode;
+	/** This plan defers schemas: `native` or `harness`. */
 	enabled: boolean;
 	tools: readonly Tool[];
 	eagerToolNames: ReadonlySet<string>;
@@ -40,6 +56,12 @@ export interface ToolSchemaDisclosureRequestMetrics extends ToolSchemaDisclosure
 	searchMissCount: number;
 	referencedToolCount: number;
 	searchResolutionMs: number | null;
+}
+
+/** One request's disclosure: the plan, and the deferred tools its own history activated (in activation order). */
+export interface ToolSchemaDisclosureDecision {
+	plan: ToolSchemaDisclosurePlan;
+	activatedToolNames: readonly string[];
 }
 
 interface ToolSchemaDisclosureModel {
@@ -71,6 +93,25 @@ function supportsToolReferences(modelId: string): boolean {
 	return family === "haiku" && minor >= 5;
 }
 
+/** Characters of a tool as a provider renders it: name, description and parameters. Memoized by tool identity. */
+const schemaCharactersByTool = new WeakMap<Tool, number>();
+
+function schemaCharacters(tool: Tool): number {
+	const cached = schemaCharactersByTool.get(tool);
+	if (cached !== undefined) return cached;
+	const characters = JSON.stringify({
+		name: tool.name,
+		description: tool.description,
+		parameters: tool.parameters,
+	}).length;
+	schemaCharactersByTool.set(tool, characters);
+	return characters;
+}
+
+function estimatedTokens(characters: number): number {
+	return Math.ceil(characters / 4);
+}
+
 function disclosureMetrics(
 	tools: readonly Tool[],
 	eagerToolNames: ReadonlySet<string>,
@@ -79,7 +120,7 @@ function disclosureMetrics(
 	let eagerSchemaCharacters = 0;
 	let deferredSchemaCharacters = 0;
 	for (const tool of tools) {
-		const characters = searchableText(tool).length;
+		const characters = schemaCharacters(tool);
 		if (deferredToolNames.has(tool.name)) deferredSchemaCharacters += characters;
 		else eagerSchemaCharacters += characters;
 	}
@@ -89,21 +130,21 @@ function disclosureMetrics(
 		deferredToolCount: deferredToolNames.size,
 		eagerSchemaCharacters,
 		deferredSchemaCharacters,
-		estimatedEagerSchemaTokens: Math.ceil(eagerSchemaCharacters / 4),
-		estimatedDeferredSchemaTokens: Math.ceil(deferredSchemaCharacters / 4),
+		estimatedEagerSchemaTokens: estimatedTokens(eagerSchemaCharacters),
+		estimatedDeferredSchemaTokens: estimatedTokens(deferredSchemaCharacters),
 	};
 }
 
 /**
  * ChatGPT Codex serves client-executed `tool_search` (verified against `gpt-6.1-sol`): the request carries only the
  * resident tools plus the search spec, a search answers with a `tool_search_output` item that holds the loaded
- * definitions, and the request's tool list never changes. GPT-6 models are the ones verified; others stay on full schemas.
+ * definitions, and the request's tool list never changes. GPT-6 models are the ones verified; others use the harness.
  */
 function supportsCodexToolSearch(model: ToolSchemaDisclosureModel): boolean {
 	return model.provider === "openai-codex" && /^gpt-[6-9](?:[.-]|$)/u.test(model.id);
 }
 
-/** Capability gate shared by activation and the provider adapters. Unknown endpoints fail open. */
+/** Native capability gate shared by planning and the provider adapters. Unknown endpoints use the harness. */
 export function supportsToolSchemaDisclosure(model: ToolSchemaDisclosureModel): boolean {
 	if (model.api !== "anthropic-messages" && model.api !== "openai-codex-responses") return false;
 	const override = (model.compat as { supportsToolSearch?: boolean } | undefined)?.supportsToolSearch;
@@ -114,48 +155,86 @@ export function supportsToolSchemaDisclosure(model: ToolSchemaDisclosureModel): 
 	);
 }
 
-/** Stable eager/deferred split. The search tool plus the frequent tools in `EAGER_TOOL_PRIORITY` remain resident. */
+/**
+ * The search tool of a list the harness disclosed, with the deferred names its catalog lists. Identity marks a
+ * disclosed list, so a second materialization or a provider adapter carries it as it is.
+ */
+const harnessSearchToolCatalogs = new WeakMap<Tool, ReadonlySet<string>>();
+
+/** The deferred tool names a harness-disclosed search tool lists, or undefined for any other tool. */
+export function harnessDeferredToolNames(tool: Tool): ReadonlySet<string> | undefined {
+	return harnessSearchToolCatalogs.get(tool);
+}
+
+function eagerPlan(tools: readonly Tool[], mode: "disclosed" | "eager"): ToolSchemaDisclosurePlan {
+	const eagerToolNames = new Set(tools.map((tool) => tool.name));
+	const deferredToolNames = new Set<string>();
+	return {
+		mode,
+		enabled: false,
+		tools,
+		eagerToolNames,
+		deferredToolNames,
+		metrics: disclosureMetrics(tools, eagerToolNames, deferredToolNames),
+	};
+}
+
+/**
+ * Resident tools: every tool that declares `neverDefer`, then the others in list order while the estimated schema
+ * tokens of all residents stay within the budget. The search tool is not part of the list and spends no budget.
+ */
+function residentToolNames(searchableTools: readonly Tool[]): Set<string> {
+	const resident = new Set<string>();
+	let tokens = 0;
+	for (const tool of searchableTools) {
+		if (tool.neverDefer !== true) continue;
+		resident.add(tool.name);
+		tokens += estimatedTokens(schemaCharacters(tool));
+	}
+	for (const tool of searchableTools) {
+		if (resident.has(tool.name)) continue;
+		const cost = estimatedTokens(schemaCharacters(tool));
+		if (tokens + cost > DEFAULT_RESIDENT_TOOL_SCHEMA_TOKENS) continue;
+		resident.add(tool.name);
+		tokens += cost;
+	}
+	return resident;
+}
+
+/**
+ * Stable eager/deferred split of one tool list. Disclosure needs the search tool and at least
+ * {@link MIN_TOOL_SCHEMA_DISCLOSURE_SEARCHABLE_TOOLS} other tools, and leaves something deferred; otherwise every schema
+ * is eager. The mode names who serves the deferred schemas: the provider when it searches natively, else the harness.
+ */
 export function planToolSchemaDisclosure(
 	model: ToolSchemaDisclosureModel,
 	tools: readonly Tool[],
 ): ToolSchemaDisclosurePlan {
 	const searchTool = tools.find((tool) => tool.name === TOOL_SCHEMA_SEARCH_NAME);
+	if (searchTool && harnessSearchToolCatalogs.has(searchTool)) return eagerPlan(tools, "disclosed");
 	const searchableTools = tools.filter((tool) => tool !== searchTool);
-	if (
-		!supportsToolSchemaDisclosure(model) ||
-		!searchTool ||
-		searchableTools.length < MIN_TOOL_SCHEMA_DISCLOSURE_SEARCHABLE_TOOLS
-	) {
-		const eagerToolNames = new Set(tools.map((tool) => tool.name));
-		const deferredToolNames = new Set<string>();
-		return {
-			enabled: false,
-			tools,
-			eagerToolNames,
-			deferredToolNames,
-			metrics: disclosureMetrics(tools, eagerToolNames, deferredToolNames),
-		};
+	if (!searchTool || searchableTools.length < MIN_TOOL_SCHEMA_DISCLOSURE_SEARCHABLE_TOOLS) {
+		return eagerPlan(tools, "eager");
 	}
-
-	const eagerToolNames = new Set<string>([TOOL_SCHEMA_SEARCH_NAME]);
-	for (const name of EAGER_TOOL_PRIORITY) {
-		if (eagerToolNames.size >= EAGER_TOOL_COUNT) break;
-		if (searchableTools.some((tool) => tool.name === name)) eagerToolNames.add(name);
-	}
-	for (const tool of searchableTools) {
-		if (eagerToolNames.size >= EAGER_TOOL_COUNT) break;
-		eagerToolNames.add(tool.name);
-	}
+	const eagerToolNames = residentToolNames(searchableTools);
 	const deferredToolNames = new Set(
 		searchableTools.filter((tool) => !eagerToolNames.has(tool.name)).map((tool) => tool.name),
 	);
+	if (deferredToolNames.size === 0) return eagerPlan(tools, "eager");
+	eagerToolNames.add(TOOL_SCHEMA_SEARCH_NAME);
 	return {
+		mode: supportsToolSchemaDisclosure(model) ? "native" : "harness",
 		enabled: true,
 		tools,
 		eagerToolNames,
 		deferredToolNames,
 		metrics: disclosureMetrics(tools, eagerToolNames, deferredToolNames),
 	};
+}
+
+/** Whether a provider adapter sends the search tool: its own native search serves it, or the harness disclosed the list. */
+export function providerSendsToolSchemaSearch(plan: ToolSchemaDisclosurePlan): boolean {
+	return plan.mode === "native" || plan.mode === "disclosed";
 }
 
 export function isToolSchemaSearchDetails(value: unknown): value is ToolSchemaSearchDetails {
@@ -254,6 +333,14 @@ export function searchDeferredToolSchemas(plan: ToolSchemaDisclosurePlan, query:
 		.map((candidate) => candidate.tool);
 }
 
+/** The deferred tools one search result loads, resolved against `plan`; none for another tool or a failed search. */
+function searchResultTools(plan: ToolSchemaDisclosurePlan, message: ToolResultMessage): Tool[] | undefined {
+	if (message.toolName !== TOOL_SCHEMA_SEARCH_NAME || message.isError || !isToolSchemaSearchDetails(message.details)) {
+		return undefined;
+	}
+	return searchDeferredToolSchemas(plan, message.details.query, message.details.maxResults);
+}
+
 /** Bounded request telemetry. Only trailing search results belong to this provider round trip. */
 export function measureToolSchemaDisclosureRequest(
 	plan: ToolSchemaDisclosurePlan,
@@ -270,12 +357,7 @@ export function measureToolSchemaDisclosureRequest(
 			if (message?.role !== "toolResult") break;
 			if (message.toolName !== TOOL_SCHEMA_SEARCH_NAME) continue;
 			searchCount++;
-			const matches = message.isError
-				? []
-				: (message.toolSearch?.tools ??
-					(isToolSchemaSearchDetails(message.details)
-						? searchDeferredToolSchemas(plan, message.details.query, message.details.maxResults)
-						: []));
+			const matches = message.isError ? [] : (message.toolSearch?.tools ?? searchResultTools(plan, message) ?? []);
 			if (matches.length === 0) searchMissCount++;
 			referencedToolCount += matches.length;
 			if (Number.isFinite(now) && Number.isFinite(message.timestamp)) {
@@ -291,4 +373,132 @@ export function measureToolSchemaDisclosureRequest(
 		referencedToolCount,
 		searchResolutionMs,
 	};
+}
+
+/** The first line and sentence of a description, cut at a word within {@link CATALOG_LINE_CHARS}. */
+function catalogLine(tool: Tool): string {
+	const firstLine = tool.description.split("\n", 1)[0]?.trim() ?? "";
+	const sentenceEnd = firstLine.search(/[.!?](?:\s|$)/u);
+	const sentence = sentenceEnd >= 0 ? firstLine.slice(0, sentenceEnd) : firstLine;
+	if (sentence.length <= CATALOG_LINE_CHARS) return sentence;
+	const cut = sentence.slice(0, CATALOG_LINE_CHARS);
+	const wordEnd = cut.lastIndexOf(" ");
+	return `${wordEnd > 0 ? cut.slice(0, wordEnd) : cut}...`;
+}
+
+/** Harness search tools by source search tool, keyed by their catalog text, so an unchanged plan reuses one object. */
+const harnessSearchTools = new WeakMap<Tool, { catalog: string; tool: Tool }>();
+
+/** The search tool a harness-disclosed request sends: its own description, then the plan's deferred catalog. */
+function harnessSearchTool(plan: ToolSchemaDisclosurePlan, searchTool: Tool): Tool {
+	const catalog = plan.tools
+		.filter((tool) => plan.deferredToolNames.has(tool.name))
+		.map((tool) => `${tool.name}: ${catalogLine(tool)}`)
+		.join("; ");
+	const cached = harnessSearchTools.get(searchTool);
+	if (cached?.catalog === catalog) return cached.tool;
+	const tool: Tool = {
+		...searchTool,
+		description: `${searchTool.description}\nDeferred tools (load them with select:name1,name2 before calling): ${catalog}.`,
+	};
+	harnessSearchTools.set(searchTool, { catalog, tool });
+	harnessSearchToolCatalogs.set(tool, plan.deferredToolNames);
+	return tool;
+}
+
+function renderSearchResult(matches: readonly Tool[]): string {
+	if (matches.length === 0) return "No matching deferred tools found.";
+	return [
+		`Loaded ${matches.length} deferred tool schema(s); they are callable from the next step:`,
+		...matches.map((tool) =>
+			JSON.stringify({ name: tool.name, description: tool.description, parameters: tool.parameters }),
+		),
+	].join("\n");
+}
+
+/** Rewritten search results by source message, with the tools they were resolved to. */
+const rewrittenSearchResults = new WeakMap<Message, { matches: readonly Tool[]; message: ToolResultMessage }>();
+
+function sameTools(left: readonly Tool[], right: readonly Tool[]): boolean {
+	return left.length === right.length && left.every((tool, index) => tool === right[index]);
+}
+
+/**
+ * Harness disclosure of one request, for a provider without native tool search. Pure in its inputs, so every request
+ * of one history renders the same bytes:
+ * - the resident tools keep their list order, and the search tool carries the plan's catalog (names and one line each);
+ * - each search result is answered with the full schemas of what it loaded, resolved against the plan's deferred set;
+ * - a deferred tool a search loaded, the history already called, or `options.forcedToolName` names is appended after
+ *   the resident tools in first-activation order, so activation extends the tool list and never reorders it;
+ * - with `options.appendActivated` false (a text tool protocol, whose primer sits in the system prompt) activated tools
+ *   are not appended: the search result already carries their schemas, and the reply parser accepts every granted tool.
+ * A list with nothing to defer is sent eager without the search tool; a native or already disclosed list is unchanged.
+ */
+export function discloseToolSchemas(
+	model: ToolSchemaDisclosureModel,
+	context: Context,
+	options: { forcedToolName?: string; appendActivated: boolean },
+): { context: Context; decision: ToolSchemaDisclosureDecision } {
+	const tools = context.tools ?? [];
+	const plan = planToolSchemaDisclosure(model, tools);
+	if (plan.mode === "native" || plan.mode === "disclosed")
+		return { context, decision: { plan, activatedToolNames: [] } };
+	if (plan.mode === "eager") {
+		const sent = tools.filter((tool) => tool.name !== TOOL_SCHEMA_SEARCH_NAME);
+		return {
+			context: sent.length === tools.length ? context : { ...context, tools: sent },
+			decision: { plan, activatedToolNames: [] },
+		};
+	}
+	const activated = new Set<string>();
+	const activate = (name: string): void => {
+		if (plan.deferredToolNames.has(name)) activated.add(name);
+	};
+	let messages: Message[] | undefined;
+	for (const [index, message] of context.messages.entries()) {
+		if (message.role === "assistant") {
+			for (const block of message.content) if (block.type === "toolCall") activate(block.name);
+			continue;
+		}
+		if (message.role !== "toolResult") continue;
+		const matches = searchResultTools(plan, message);
+		if (matches === undefined) continue;
+		for (const tool of matches) activate(tool.name);
+		const cached = rewrittenSearchResults.get(message);
+		const rewritten: ToolResultMessage =
+			cached && sameTools(cached.matches, matches)
+				? cached.message
+				: { ...message, content: [{ type: "text", text: renderSearchResult(matches) }] };
+		if (rewritten !== cached?.message) rewrittenSearchResults.set(message, { matches, message: rewritten });
+		messages ??= context.messages.slice();
+		messages[index] = rewritten;
+	}
+	if (options.forcedToolName !== undefined) activate(options.forcedToolName);
+	const byName = new Map(tools.map((tool) => [tool.name, tool]));
+	const sentTools: Tool[] = [];
+	for (const tool of tools) {
+		if (!plan.eagerToolNames.has(tool.name)) continue;
+		sentTools.push(tool.name === TOOL_SCHEMA_SEARCH_NAME ? harnessSearchTool(plan, tool) : tool);
+	}
+	if (options.appendActivated) {
+		for (const name of activated) {
+			const tool = byName.get(name);
+			if (tool) sentTools.push(tool);
+		}
+	}
+	return {
+		context: { ...context, ...(messages ? { messages } : {}), tools: sentTools },
+		decision: { plan, activatedToolNames: [...activated] },
+	};
+}
+
+/**
+ * The tool a provider option forces, in the shapes the adapters accept (`{ name }`, `{ function: { name } }`), so a
+ * forced tool is never left deferred.
+ */
+export function forcedToolChoiceName(toolChoice: unknown): string | undefined {
+	if (!isRecord(toolChoice)) return undefined;
+	if (typeof toolChoice.name === "string") return toolChoice.name;
+	const fn = toolChoice.function;
+	return isRecord(fn) && typeof fn.name === "string" ? fn.name : undefined;
 }

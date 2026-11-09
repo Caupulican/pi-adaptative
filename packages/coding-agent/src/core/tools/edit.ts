@@ -480,6 +480,7 @@ function buildEditToolDefinition(
 		description:
 			"Replace exact text in an existing file, preserving its bytes, line endings and encoding (detected by the harness). Send all of a file's edits in one call and merge overlapping edits. Do not reread the file after a successful edit.",
 		promptSnippet: "Replace exact text in a file",
+		neverDefer: true,
 		parameters: editSchema,
 		mutationTarget: resolveMutationPathTarget,
 		renderShell: "self",

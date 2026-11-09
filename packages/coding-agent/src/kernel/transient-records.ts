@@ -1,5 +1,13 @@
 import type { AgentContext } from "./loop-config.ts";
 import { createCustomMessage } from "./messages.ts";
+import {
+	decideTransientRecord,
+	fnv1aHash32,
+	type TransientRecordDecision,
+	type TransientRecordFacts,
+	type TransientRecordVerdict,
+	transientRecordDigest,
+} from "./transient-record-decision.ts";
 import type { AgentMessage } from "./types.ts";
 
 /**
@@ -83,8 +91,9 @@ export interface TransientRecordSlot {
 	 * permanently. The resolution is re-append, not reposition: whenever the trailing group's records
 	 * are not the exact contiguous tail they need to be (something else was appended after them, this
 	 * turn or several turns ago), every currently-active trailing slot gets a fresh instance appended,
-	 * in precedence order, reclaiming the position. The superseding note already on every record is
-	 * what makes the stranded older copy safe to leave in place rather than needing removal.
+	 * in precedence order, reclaiming the position: its full record when its own content changed, else a
+	 * pointer naming the full record above. The superseding note already on every record is what makes
+	 * the stranded older copy safe to leave in place rather than needing removal.
 	 */
 	trailing?: boolean;
 	/**
@@ -105,6 +114,12 @@ export interface TransientRecordSlot {
 	 * names the kind.
 	 */
 	header?: string;
+	/**
+	 * The content's identity for change detection, when the producer knows a narrower one than the text (the failure
+	 * ledger: its active set and required actions, not its counters). Stored as the full record's `details.digest`;
+	 * absent, the digest of `content` itself.
+	 */
+	digest?: string;
 }
 
 /** A canonical machine record in a transient record's `details.record`: a version and a kind, then its fields. */
@@ -136,7 +151,11 @@ function isSupersedingRecordDetails(details: unknown): boolean {
 	);
 }
 
-function isPointerRecord(message: AgentMessage): boolean {
+/**
+ * A pointer record ("unchanged, see the last full record above"). A pointer never supersedes the full record it names:
+ * context GC must keep that record as the kind's current one, or the pointer would point at a packed stub.
+ */
+export function isTransientPointerRecord(message: AgentMessage): boolean {
 	return (
 		message.role === "custom" &&
 		typeof message.details === "object" &&
@@ -154,31 +173,14 @@ function isCumulativeTransient(message: AgentMessage): boolean {
 	);
 }
 
-/** A pointer record naming its kind by the slot's header, bounded to 80 characters. */
+/**
+ * A pointer record naming its kind by the slot's header (the producer's current one-line name, so counters that do
+ * not change what the model must do still read current), bounded to 80 characters.
+ */
 function buildPointerRecord(kind: string, header: string): AgentMessage {
 	const name = header.length > 80 ? `${header.slice(0, 77)}...` : header;
-	const text = `${name} unchanged; the last full record of this kind above is current.`;
+	const text = `${name}; nothing to act on changed since the last full record of this kind above, which is current.`;
 	return createCustomMessage(kind, text, false, POINTER_RECORD_DETAILS, deterministicRecordTimestamp(text));
-}
-
-/**
- * Fast, non-cryptographic 32-bit string hash (a standard multiplicative/xor-fold shape, the same
- * technique `packages/ai/src/utils/hash.ts`'s `shortHash` uses - not imported from there because that
- * function is internal to packages/ai, never exported at its package boundary, and adding one for a
- * single caller was not worth a cross-package edit under release pressure). Deliberately NOT a
- * cryptographic hash (no sha256/node:crypto): this module sits on the provider-request path, which
- * `check:browser-smoke` bundles for a browser target, and `node:crypto` does not resolve there. The
- * property this needs is only "same content in, same value out" - collision resistance against
- * adversarial input is not being bought here and never was. Do not "upgrade" this back to sha256; it
- * will re-break the browser build.
- */
-function fnv1aHash32(str: string): number {
-	let hash = 0x811c9dc5;
-	for (let i = 0; i < str.length; i++) {
-		hash ^= str.charCodeAt(i);
-		hash = Math.imul(hash, 0x01000193);
-	}
-	return hash >>> 0;
 }
 
 /**
@@ -196,8 +198,6 @@ function deterministicRecordTimestamp(content: string): string {
 	return new Date(fnv1aHash32(content)).toISOString();
 }
 
-/** Text of a `CustomMessage`, or undefined for the array-content shape this module never produces
- * itself but may encounter when scanning durable history for a prior instance. */
 /**
  * Whether a persisted custom record was written by this module (a transient record): `details.superseding`
  * marks a plain record, `details.cumulative` a cumulative one; pointer records are excluded, as
@@ -224,6 +224,7 @@ export function classifyTransientRecord(
 	};
 }
 
+/** Text of a `CustomMessage`, or undefined for the array-content shape this module never produces itself. */
 function customMessageText(message: AgentMessage): string | undefined {
 	if (message.role !== "custom") return undefined;
 	return typeof message.content === "string" ? message.content : undefined;
@@ -236,9 +237,9 @@ function customMessageText(message: AgentMessage): string | undefined {
  *
  * Strips `TRANSIENT_RECORD_SUPERSEDING_NOTE` back off before returning: `buildTransientRecord` is the
  * only writer of a record this function can find (every durable instance of a given `kind` was built
- * by it), and it always appends that suffix to the caller's raw content before persisting. Every
- * caller of THIS function - `resolveSlotContent` - compares the result directly against a slot's raw
- * `content`/`clearedText`, which never carries the suffix. Returning the suffixed text here made that
+ * by it), and it always appends that suffix to the caller's raw content before persisting. Its digest
+ * (`recordedTransient`) is compared directly against a slot's raw `content`/`clearedText`, which never
+ * carries the suffix. Returning the suffixed text here made that
  * comparison compare a suffixed string against a bare one, which can never be equal - so the "content
  * unchanged, skip" path (both here and in the trailing tail-intact check) never actually fired for any
  * slot that had ever been durably written, for either the non-trailing or the trailing case: a fresh
@@ -259,8 +260,31 @@ function durableTransientContent(message: AgentMessage): string | undefined {
 		: text;
 }
 
+/** The last full (non-pointer) record of one kind in a history, as reconciliation compares against it. */
+interface RecordedTransient {
+	/** Its content without the superseding note; undefined for a record without string content. */
+	readonly content: string | undefined;
+	/** `details.digest` when the producer stored one, else the digest of `content`. */
+	readonly digest: string | undefined;
+	/** Its timestamp: content-derived, so the planned copy of the same record carries the same one. */
+	readonly timestamp: number;
+}
+
+function recordedTransient(message: Extract<AgentMessage, { role: "custom" }>): RecordedTransient {
+	const content = durableTransientContent(message);
+	const stored =
+		typeof message.details === "object" && message.details !== null
+			? (message.details as { digest?: unknown }).digest
+			: undefined;
+	return {
+		content,
+		digest: typeof stored === "string" ? stored : content === undefined ? undefined : transientRecordDigest(content),
+		timestamp: message.timestamp,
+	};
+}
+
 /**
- * Last durable content per record kind, maintained incrementally. Each request reconciles every
+ * Last durable record per kind, maintained incrementally. Each request reconciles every
  * slot against history, and a kind with no record yet (a session with no failure so far, for the
  * ledger) walked the whole history backwards on every request to learn that. The index is keyed by
  * the history's first message and is valid while the history it reflects is the same objects in the
@@ -269,11 +293,11 @@ function durableTransientContent(message: AgentMessage): string | undefined {
 interface TransientContentIndex {
 	count: number;
 	processed: AgentMessage[];
-	byKind: Map<string, string | undefined>;
+	byKind: Map<string, RecordedTransient>;
 }
 const transientContentIndexes = new WeakMap<AgentMessage, TransientContentIndex>();
 
-function transientContentIndex(messages: readonly AgentMessage[]): ReadonlyMap<string, string | undefined> {
+function transientContentIndex(messages: readonly AgentMessage[]): ReadonlyMap<string, RecordedTransient> {
 	const first = messages[0];
 	if (!first) return new Map();
 	let index = transientContentIndexes.get(first);
@@ -296,8 +320,8 @@ function transientContentIndex(messages: readonly AgentMessage[]): ReadonlyMap<s
 	}
 	for (let position = from; position < messages.length; position++) {
 		const message = messages[position];
-		if (message.role === "custom" && !isPointerRecord(message)) {
-			index.byKind.set(message.customType, durableTransientContent(message));
+		if (message.role === "custom" && !isTransientPointerRecord(message)) {
+			index.byKind.set(message.customType, recordedTransient(message));
 		}
 	}
 	if (from < messages.length) {
@@ -307,15 +331,12 @@ function transientContentIndex(messages: readonly AgentMessage[]): ReadonlyMap<s
 	return index.byKind;
 }
 
-function lastDurableTransientContent(messages: readonly AgentMessage[], kind: string): string | undefined {
-	return transientContentIndex(messages).get(kind);
-}
-
 function buildTransientRecord(
 	kind: string,
 	content: string,
 	cumulative = false,
 	record?: TransientRecordPayload,
+	digest?: string,
 ): AgentMessage {
 	if (cumulative) {
 		return createCustomMessage(
@@ -331,110 +352,169 @@ function buildTransientRecord(
 		kind,
 		text,
 		false,
-		{ superseding: true, ...(record ? { record } : {}) },
+		{ superseding: true, ...(record ? { record } : {}), ...(digest ? { digest } : {}) },
 		deterministicRecordTimestamp(text),
 	);
 }
 
-/** This turn's true content for a slot: the slot's own current content, or - only on the transition
- * from active to inactive - its configured cleared text. `undefined` means genuinely nothing to say,
- * now or ever so far. */
-function resolveSlotContent(
-	durableMessages: readonly AgentMessage[],
-	slot: TransientRecordSlot,
-): { lastContent: string | undefined; nextContent: string | undefined; nextRecord?: TransientRecordPayload } {
-	const lastContent = lastDurableTransientContent(durableMessages, slot.kind);
-	const nextContent = slot.content ?? (lastContent !== undefined ? slot.clearedText : undefined);
-	// The record describes `content`; a cleared record carries only its cleared text.
-	return {
-		lastContent,
-		nextContent,
-		...(slot.content !== undefined && slot.record ? { nextRecord: slot.record } : {}),
-	};
+/**
+ * The kinds (of `wanted`, by the timestamp of their last durable record) whose last record the planned request still
+ * carries in full: the last non-pointer record of the kind in `planned` is that same record (same content-derived
+ * timestamp) and still ends with the superseding note, which packing and truncation remove and path aliasing keeps.
+ * Read backward and stopped once every wanted kind is resolved.
+ */
+function visibleRecordKinds(
+	planned: readonly AgentMessage[],
+	wanted: ReadonlyMap<string, number>,
+): ReadonlySet<string> {
+	const visible = new Set<string>();
+	const remaining = new Map(wanted);
+	for (let position = planned.length - 1; position >= 0 && remaining.size > 0; position--) {
+		const message = planned[position];
+		if (message?.role !== "custom" || isTransientPointerRecord(message)) continue;
+		const timestamp = remaining.get(message.customType);
+		if (timestamp === undefined) continue;
+		remaining.delete(message.customType);
+		if (
+			message.timestamp === timestamp &&
+			typeof message.content === "string" &&
+			// comms-legacy-decoder: context GC and truncation rewrite a record's content and keep its details, so the lost note is the only signal that a request no longer carries the record in full.
+			message.content.endsWith(TRANSIENT_RECORD_SUPERSEDING_NOTE)
+		) {
+			visible.add(message.customType);
+		}
+	}
+	return visible;
+}
+
+/** What one reconciliation appends, and the decision behind every non-cumulative slot. */
+export interface TransientRecordReconciliation {
+	readonly records: AgentMessage[];
+	readonly decisions: TransientRecordDecision[];
 }
 
 /**
- * Diffs each slot's current content against the last durably-recorded instance of the same kind and
- * returns ONLY the new records that need appending this turn. Callers are responsible for actually
- * committing the result into durable history (see `provider-request-planner.ts`'s accepted-request
- * commit step) - this function only decides WHAT would need to change, it never mutates
- * `durableMessages`.
+ * Decides, per slot, what this request appends (see `decideTransientRecord` for the ordered rules) and returns ONLY
+ * the new records. Callers are responsible for actually committing the result into durable history (see
+ * `provider-request-planner.ts`'s accepted-request commit step) - this function never mutates `durableMessages`.
  *
- * Non-trailing (informational) slots: append only when content changed - typically empty, since most
- * turns change no informational transient's content (measured: e.g. a host reflection cue that changes
- * every other turn appends on roughly half of turns, zero on the rest).
+ * `durableMessages` is the history the request's wire is built from (the durable form records were committed in);
+ * `planned` is the request's planned messages after context GC, enforcement and any projection. A record the plan
+ * no longer carries in full reads as not visible and is sent again in full: the one fact that covers a compaction,
+ * a GC pack and a projection that dropped it.
  *
- * Trailing (MUST-protocol) slots are NOT typically empty while any are active: append when content
- * changed, OR when the trailing group is not already the exact contiguous tail its active members
- * require - see `TransientRecordSlot.trailing`'s doc comment for why re-appending, not reordering, is
- * the only way to hold that invariant under append-only growth. Measured over a 15-turn run with one
- * failure/resolution cycle and ordinary tool-call growth in between (no host transients involved at
- * all): every one of the 14 turns the ledger/obligation were active fired a trailing re-append; 12 of
- * those 14 had genuinely unchanged content and fired ONLY because ordinary turn growth (the assistant
- * reply and tool result from the previous turn) had been appended after them. This is not a host-
- * transient-volatility effect - it reproduced identically with zero host transients present.
+ * Non-trailing (informational) slots append only when their content digest changed or the last record is not
+ * visible; unchanged and visible appends nothing, which is cheaper than any pointer.
+ *
+ * Trailing (MUST-protocol) slots must stay the exact contiguous tail while active - see
+ * `TransientRecordSlot.trailing`'s doc comment for why re-appending, not reordering, is the only way to hold that
+ * invariant under append-only growth. Whenever the group lost the tail (ordinary turn growth, an informational
+ * append, or one trailing member appending a full record), every member re-appends: a member whose own content
+ * changed (or is not visible) appends its full record, every other member a pointer. An unchanged member is never
+ * re-sent in full because a sibling changed.
+ *
+ * Cumulative slots (each record adds to the earlier ones) append whenever the host offers content that differs from
+ * the last record; the host already offers only what the wire lacks.
  */
 export function reconcileTransientRecords(
 	durableMessages: readonly AgentMessage[],
 	slots: readonly TransientRecordSlot[],
-): AgentMessage[] {
-	const newRecords: AgentMessage[] = [];
+	planned: readonly AgentMessage[],
+): TransientRecordReconciliation {
+	const recorded = transientContentIndex(durableMessages);
+	const nextDigest = (slot: TransientRecordSlot): string | undefined =>
+		slot.content === undefined ? undefined : (slot.digest ?? transientRecordDigest(slot.content));
+	const wanted = new Map<string, number>();
+	for (const slot of slots) {
+		const last = recorded.get(slot.kind);
+		if (slot.cumulative || last?.digest === undefined || last.digest !== nextDigest(slot)) continue;
+		wanted.set(slot.kind, last.timestamp);
+	}
+	const visible = visibleRecordKinds(planned, wanted);
+	const factsFor = (slot: TransientRecordSlot, tailNeedsReclaim: boolean): TransientRecordFacts => {
+		const lastDigest = recorded.get(slot.kind)?.digest;
+		return {
+			active: slot.content !== undefined,
+			hasClearedText: slot.clearedText !== undefined,
+			lastDigest,
+			lastIsCleared: slot.clearedText !== undefined && lastDigest === transientRecordDigest(slot.clearedText),
+			nextDigest: nextDigest(slot),
+			lastVisible: visible.has(slot.kind),
+			trailing: slot.trailing === true,
+			tailNeedsReclaim,
+		};
+	};
+	const records: AgentMessage[] = [];
+	const decisions: TransientRecordDecision[] = [];
+	const apply = (slot: TransientRecordSlot, verdict: TransientRecordVerdict): void => {
+		let record: AgentMessage | undefined;
+		let digest = nextDigest(slot);
+		if (verdict.action === "full" && slot.content !== undefined) {
+			record = buildTransientRecord(slot.kind, slot.content, false, slot.record, digest);
+		} else if (verdict.action === "cleared" && slot.clearedText !== undefined) {
+			digest = transientRecordDigest(slot.clearedText);
+			record = buildTransientRecord(slot.kind, slot.clearedText, false, undefined, digest);
+		} else if (verdict.action === "pointer") {
+			record = buildPointerRecord(slot.kind, slot.header ?? slot.kind);
+		}
+		if (record) records.push(record);
+		decisions.push({
+			kind: slot.kind,
+			...verdict,
+			digest: verdict.action === "none" ? undefined : digest,
+			chars: record ? (customMessageText(record)?.length ?? 0) : 0,
+			trailing: slot.trailing === true,
+		});
+	};
+
 	for (const slot of slots) {
 		if (slot.trailing) continue;
-		const { lastContent, nextContent, nextRecord } = resolveSlotContent(durableMessages, slot);
-		if (nextContent === undefined || nextContent === lastContent) continue;
-		newRecords.push(buildTransientRecord(slot.kind, nextContent, slot.cumulative === true, nextRecord));
+		if (slot.cumulative) {
+			if (slot.content !== undefined && slot.content !== recorded.get(slot.kind)?.content) {
+				records.push(buildTransientRecord(slot.kind, slot.content, true, slot.record));
+			}
+			continue;
+		}
+		apply(slot, decideTransientRecord(factsFor(slot, false)));
 	}
 
-	const trailingSlots = slots.filter((slot) => slot.trailing);
-	const trailingState = trailingSlots.map((slot) => ({ slot, ...resolveSlotContent(durableMessages, slot) }));
-	// A cleared slot is a fixed point of `resolveSlotContent`: once `lastContent` durably equals
-	// `slot.clearedText`, an inactive slot (`slot.content === undefined`) resolves `nextContent` to
-	// that SAME `clearedText` forever after - so `nextContent !== undefined` alone would keep a slot
-	// that cleared once eligible for trailing reclaim for the rest of the conversation. What actually
-	// needs the trailing position protected is narrower: the slot is presently live (`slot.content`
-	// defined), OR this is the one turn where it is transitioning to cleared (`nextContent !==
-	// lastContent`, true only on that turn, false at the fixed point). A slot that is fully settled
-	// into "cleared" drops out here and stops being reclaimed, exactly like the non-trailing path's
-	// `nextContent === lastContent` skip above.
-	const active = trailingState.filter(
-		(entry): entry is typeof entry & { nextContent: string } =>
-			entry.nextContent !== undefined &&
-			(entry.slot.content !== undefined || entry.nextContent !== entry.lastContent),
+	const trailing = slots
+		.filter((slot) => slot.trailing)
+		.map((slot) => ({ slot, verdict: decideTransientRecord(factsFor(slot, false)) }));
+	// The members that must hold the tail: every active member, and one transitioning to its cleared record on the
+	// request it does so. A member settled into "cleared" (or never recorded) holds nothing and drops out.
+	const holders = trailing.filter(
+		(entry) => entry.verdict.action !== "none" && entry.verdict.rule !== "inactive_settled",
 	);
-	if (active.length > 0) {
-		// Informational appends above (`newRecords` so far) are also "something appended after" from
-		// the trailing group's point of view, so they must count as part of the array being checked.
-		// The tail of history-plus-new-records, read in place: copying the whole history to slice
-		// its last few entries was an O(history) allocation on nearly every request.
-		const provisionalLength = durableMessages.length + newRecords.length;
+	if (holders.length > 0) {
+		// Informational appends above are also "something appended after" from the trailing group's point of view.
+		// The tail of history-plus-new-records, read in place: copying the whole history to slice its last few
+		// entries was an O(history) allocation on nearly every request.
+		const provisionalLength = durableMessages.length + records.length;
 		const actualTailKinds: Array<string | undefined> = [];
-		for (let position = Math.max(0, provisionalLength - active.length); position < provisionalLength; position++) {
+		for (let position = Math.max(0, provisionalLength - holders.length); position < provisionalLength; position++) {
 			const message =
-				position < durableMessages.length
-					? durableMessages[position]
-					: newRecords[position - durableMessages.length];
+				position < durableMessages.length ? durableMessages[position] : records[position - durableMessages.length];
 			actualTailKinds.push(message?.role === "custom" ? message.customType : undefined);
 		}
-		const expectedTailKinds = active.map((entry) => entry.slot.kind);
 		const tailIntact =
-			actualTailKinds.length === expectedTailKinds.length &&
-			expectedTailKinds.every((kind, index) => kind === actualTailKinds[index]);
-		const anyContentChanged = active.some((entry) => entry.nextContent !== entry.lastContent);
-		if (anyContentChanged) {
-			for (const entry of active) {
-				newRecords.push(buildTransientRecord(entry.slot.kind, entry.nextContent, false, entry.nextRecord));
-			}
-		} else if (!tailIntact) {
-			// Only the position changed: a pointer reclaims the tail without re-sending the full
-			// content (measured live: 119 ledger records for 19 distinct contents in one session).
-			for (const entry of active) {
-				newRecords.push(buildPointerRecord(entry.slot.kind, entry.slot.header ?? entry.slot.kind));
-			}
+			actualTailKinds.length === holders.length &&
+			holders.every((entry, index) => entry.slot.kind === actualTailKinds[index]);
+		const tailNeedsReclaim =
+			!tailIntact || holders.some((entry) => entry.verdict.action === "full" || entry.verdict.action === "cleared");
+		for (const entry of trailing) {
+			apply(
+				entry.slot,
+				tailNeedsReclaim && holders.includes(entry)
+					? decideTransientRecord(factsFor(entry.slot, true))
+					: entry.verdict,
+			);
 		}
+	} else {
+		for (const entry of trailing) apply(entry.slot, entry.verdict);
 	}
 
-	return newRecords;
+	return { records, decisions };
 }
 
 /**

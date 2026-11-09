@@ -41,6 +41,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [FastContext scout](scout.md) - read-only repository scout setup and 10 GB local profile.
 - [Tool repair](tool-repair.md) - repaired tool-call arguments, health diagnostics, kill switches, and replay workflow.
 - [Task steps](task-steps.md) - native session checklist, slash commands, persistence, and delegation migration.
+- [Plans](plans.md) - the root's whole decomposition of a goal as steps and joins, run by the harness, shown in the work panel, `/status` and `/plan`.
 - [Task directories](task-directories.md) - multiple projects, persistent task pins, status pages, and explicit reattachment.
 - [Work lifecycle](work-lifecycle.md) - canonical five-phase Survey-to-delivery contract, adaptive solo/team routing, verification, and checkpoint boundaries.
 - [Native Python](python.md) - uv-managed bounded Python execution, provisioning, output limits, and cross-platform file guidance.

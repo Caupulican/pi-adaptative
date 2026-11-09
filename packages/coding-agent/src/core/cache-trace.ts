@@ -1,6 +1,13 @@
 import { createHash } from "node:crypto";
 import { appendFileSync } from "node:fs";
-import type { Api, Context, Message, Model } from "@caupulican/pi-ai";
+import {
+	type Api,
+	type Context,
+	harnessDeferredToolNames,
+	type Message,
+	type Model,
+	TOOL_SCHEMA_SEARCH_NAME,
+} from "@caupulican/pi-ai";
 import {
 	type ContinuousChatCacheComparison,
 	type ContinuousChatCacheFingerprint,
@@ -59,6 +66,11 @@ interface RequestFingerprint {
 	viewCacheBlocks: readonly string[] | undefined;
 	viewCache: ContinuousChatCacheFingerprint | undefined;
 	tools: SegmentFingerprint[];
+	/**
+	 * The deferred tools a harness-disclosed request's search tool lists, kept only to recognize activation; never
+	 * written to the trace file. Activation appends those tools after the resident ones, a priced, sanctioned change.
+	 */
+	harnessDeferred: ReadonlySet<string> | undefined;
 	messages: SegmentFingerprint[];
 }
 
@@ -105,6 +117,11 @@ function chatViewChange(before: string, after: string): string | undefined {
 	return `chat view changed at char ${index} of ${before.length} (line ${line}): ${snippet(before, index)} became ${snippet(after, index)}`;
 }
 
+function harnessDeferredCatalog(context: Context): ReadonlySet<string> | undefined {
+	const search = context.tools?.find((tool) => tool.name === TOOL_SCHEMA_SEARCH_NAME);
+	return search ? harnessDeferredToolNames(search) : undefined;
+}
+
 function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerprint {
 	const view = chatView(context.messages);
 	return {
@@ -115,6 +132,7 @@ function fingerprintRequest(model: Model<Api>, context: Context): RequestFingerp
 		viewCacheBlocks: view?.cacheBlocks,
 		viewCache: view?.cache,
 		tools: (context.tools ?? []).map((tool) => segment(tool.name, tool)),
+		harnessDeferred: harnessDeferredCatalog(context),
 		messages: context.messages.map((message, index) =>
 			segment(`${index}:${message.role}`, { role: message.role, content: message.content }),
 		),
@@ -149,16 +167,20 @@ function prefixChange(
 	if (system && system.model === current.model && system.system[1] !== current.system[1]) {
 		return `system prompt changed (${system.system[2]} to ${current.system[2]} chars) ${describeTextChange(system.systemText, current.systemText)}`;
 	}
-	const previousNames = previous.tools.map(([name]) => name);
-	const currentNames = current.tools.map(([name]) => name);
+	// A deferred tool the harness activated (or dropped with the search that loaded it) is not prefix churn.
+	const deferred = current.harnessDeferred ?? previous.harnessDeferred;
+	const previousTools = deferred ? previous.tools.filter(([name]) => !deferred.has(name)) : previous.tools;
+	const currentTools = deferred ? current.tools.filter(([name]) => !deferred.has(name)) : current.tools;
+	const previousNames = previousTools.map(([name]) => name);
+	const currentNames = currentTools.map(([name]) => name);
 	const added = currentNames.filter((name) => !previousNames.includes(name));
 	const removed = previousNames.filter((name) => !currentNames.includes(name));
 	if (added.length > 0 || removed.length > 0) {
 		return `tool set changed (${[...added.map((name) => `+${name}`), ...removed.map((name) => `-${name}`)].join(", ")})`;
 	}
-	for (let index = 0; index < previous.tools.length; index++) {
-		const before = previous.tools[index];
-		const after = current.tools[index];
+	for (let index = 0; index < previousTools.length; index++) {
+		const before = previousTools[index];
+		const after = currentTools[index];
 		if (before === undefined || after === undefined) break;
 		if (before[0] !== after[0]) return `tool order changed (${before[0]} became ${after[0]} at position ${index})`;
 		if (before[1] !== after[1]) return `tool ${before[0]} changed (${before[2]} to ${after[2]} chars)`;
@@ -256,6 +278,7 @@ export class PromptPrefixMonitor {
 			viewText: _viewText,
 			viewCacheBlocks: _viewCacheBlocks,
 			viewCache: _viewCache,
+			harnessDeferred: _harnessDeferred,
 			...traced
 		} = fingerprint;
 		appendFileSync(

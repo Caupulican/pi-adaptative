@@ -14,6 +14,7 @@ import {
 	planToolSchemaDisclosure,
 } from "@caupulican/pi-ai";
 import type { Agent } from "../kernel/agent.ts";
+import { projectToolsForProvider } from "../kernel/provider-tool-projection.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { ExternalCapabilityAcquisitionGate } from "./acquisition/external-capability-acquisition-gate.ts";
@@ -646,7 +647,7 @@ export function buildSessionContextCompositionReport(deps: SessionContextComposi
 		)
 		.reduce((sum, item) => sum + projectionTokens(item), 0);
 	const deferredToolNames = deps.model
-		? planToolSchemaDisclosure(deps.model, deps.agent.state.tools).deferredToolNames
+		? planToolSchemaDisclosure(deps.model, projectToolsForProvider(deps.agent.state.tools)).deferredToolNames
 		: undefined;
 	return buildContextCompositionReport({
 		systemPrompt: requestSystemPrompt ?? "",

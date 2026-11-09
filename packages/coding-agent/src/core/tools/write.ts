@@ -277,6 +277,7 @@ function buildWriteToolDefinition(
 		description:
 			"Create a new file; it never overwrites, so use edit for existing files. Pass content, or contentRef to copy bytes already written or edited in this session.",
 		promptSnippet: "Create new files",
+		neverDefer: true,
 		parameters: writeSchema,
 		mutationTarget: resolveMutationPathTarget,
 		failureRecovery: {

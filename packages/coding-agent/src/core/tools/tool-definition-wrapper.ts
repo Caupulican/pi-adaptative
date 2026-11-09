@@ -19,6 +19,7 @@ export function wrapToolDefinition<TParameters extends TSchema, TDetails = unkno
 		bindInvocation: definition.bindInvocation?.bind(definition),
 		executionMode: definition.executionMode,
 		...(definition.readOnly !== undefined ? { readOnly: definition.readOnly } : {}),
+		...(definition.neverDefer === true ? { neverDefer: true } : {}),
 		mutationTarget: definition.mutationTarget?.bind(definition),
 		execute: (toolCallId, params, signal, onUpdate) =>
 			definition.execute(toolCallId, params, signal, onUpdate, ctxFactory?.() as ExtensionContext),
@@ -54,6 +55,7 @@ export function createToolDefinitionFromAgentTool<TParameters extends TSchema, T
 		bindInvocation: tool.bindInvocation?.bind(tool),
 		executionMode: tool.executionMode,
 		...(tool.readOnly !== undefined ? { readOnly: tool.readOnly } : {}),
+		...(tool.neverDefer === true ? { neverDefer: true } : {}),
 		mutationTarget: tool.mutationTarget?.bind(tool),
 		execute: async (toolCallId, params, signal, onUpdate) => tool.execute(toolCallId, params, signal, onUpdate),
 	};

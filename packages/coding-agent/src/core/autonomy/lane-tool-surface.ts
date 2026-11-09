@@ -52,9 +52,10 @@ import { FileMutationIntentController } from "../tools/file-mutation-intent.ts";
 import { mutationScopeForWorktree } from "../tools/file-mutation-queue.ts";
 import { createFindTool, type FindToolOptions } from "../tools/find.ts";
 import { createGrepTool, type GrepToolOptions } from "../tools/grep.ts";
-import { createLookupToolDefinition, type LookupHost } from "../tools/lookup.ts";
+import { createLookupToolDefinition } from "../tools/lookup.ts";
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import { createLsTool, type LsToolOptions } from "../tools/ls.ts";
+import type { NestedCallHost } from "../tools/nested-tool-call.ts";
 import { createPythonTool, type PythonToolOptions } from "../tools/python.ts";
 import { createReadTool, type ReadToolOptions } from "../tools/read.ts";
 import { createRepoReadTool, type RepoReadToolOptions } from "../tools/repo-read.ts";
@@ -296,7 +297,7 @@ function createLaneTools(
 	workerToolAdapters?: WorkerToolAdapterRegistry,
 	bindTool?: (tool: AgentTool) => AgentTool,
 	shared: SharedLaneToolOptions = {},
-	lookupHost?: LookupHost,
+	nestedHost?: NestedCallHost,
 ): AgentTool[] {
 	const packing =
 		shared.artifactStore && names.includes("artifact_retrieve") ? { artifactStore: shared.artifactStore } : {};
@@ -325,8 +326,8 @@ function createLaneTools(
 		["find", () => createFindTool(cwd, { ...shared.find, ...packing })],
 		["ls", () => createLsTool(cwd, shared.ls)],
 		["repo_read", () => createRepoReadTool(cwd, shared.repoRead)],
-		...(lookupHost
-			? [[LOOKUP_TOOL_NAME, () => wrapToolDefinition(createLookupToolDefinition(lookupHost))] as const]
+		...(nestedHost
+			? [[LOOKUP_TOOL_NAME, () => wrapToolDefinition(createLookupToolDefinition(nestedHost))] as const]
 			: []),
 		["write", () => createWriteTool(cwd, { intentController: fileMutationIntents })],
 		["edit", () => createEditTool(cwd, { ...shared.edit, intentController: fileMutationIntents })],
@@ -338,6 +339,7 @@ function createLaneTools(
 					...shared.python,
 					mutationScope,
 					...(shellSessionKey ? { mutationAnnouncer: shellSessionKey } : {}),
+					...(nestedHost ? { toolBridge: nestedHost } : {}),
 				}),
 		],
 	]);
@@ -374,6 +376,7 @@ function createLaneTools(
 			name: WORKER_MEMORY_READ_TOOL_NAME,
 			label: "Read Memory",
 			readOnly: true,
+			neverDefer: true,
 			description:
 				"Read-only, bounded, source-labeled memory for this delegated task: past-conversation evidence and, where the session keeps it, standing memory. A query searches; a cited tx:... handle as ref opens that source's exact text (cursor pages it), a txn:... handle expands that summary one level.",
 			parameters: laneMemorySchema,
@@ -718,10 +721,11 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				find: { ...processToolOptions?.find, ...installedToolsOnly },
 			}
 		: processToolOptions;
-	// A lookup request runs through the lane's final tools (path aliases, credential guard, task binding and the
-	// execution admission above all inside their `execute`), resolved late because the lookup tool is one of them.
+	// A lookup request or a script's tool call runs through the lane's final tools (path aliases, credential guard, task
+	// binding and the execution admission above all inside their `execute`), resolved late because the lookup and
+	// python tools are among them. A tool the lane did not materialize does not resolve, so it is refused.
 	let laneToolsByName: ReadonlyMap<string, AgentTool> = new Map();
-	const lookupHost: LookupHost = {
+	const nestedHost: NestedCallHost = {
 		resolveTool: (name) => laneToolsByName.get(name),
 		admit: async (_parentToolCallId, call) => {
 			const refused = admission.check(call.toolName, call.args);
@@ -749,7 +753,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		options.workerToolAdapters,
 		options.bindTool,
 		sharedToolOptions,
-		lookupHost,
+		nestedHost,
 	);
 	const getPathAliasTable = options.getPathAliasTable;
 	const wrappedTools = new WeakSet<AgentTool>();

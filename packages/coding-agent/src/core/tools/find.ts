@@ -344,6 +344,7 @@ function buildFindToolDefinition(
 		readOnly: true,
 		description: `Search for files by glob pattern; returns paths relative to the search directory. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} results (limit) or ${DEFAULT_MAX_BYTES / 1024}KB.${options?.readOperation ? " This bounded review reads only project .gitignore, .ignore and .fdignore rules; global ignore files are excluded. Partial results do not prove absence." : ""}`,
 		promptSnippet: "Find files by glob",
+		neverDefer: true,
 		parameters: findSchema,
 		async execute(
 			toolCallId,

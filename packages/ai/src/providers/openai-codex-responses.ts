@@ -425,6 +425,7 @@ export const streamOpenAICodexResponses: StreamFunction<"openai-codex-responses"
 					name: tool.name,
 					description: tool.description,
 					parameters: structuredClone(tool.parameters),
+					...(tool.neverDefer === true ? { neverDefer: true } : {}),
 				})),
 			};
 			const apiKey = options?.apiKey;
@@ -780,14 +781,17 @@ export const streamSimpleOpenAICodexResponses: StreamFunction<"openai-codex-resp
 // Request Building
 // ============================================================================
 
-/** The deferred-schema plan when this model serves client-executed tool search and enough tools are active. */
+/**
+ * The deferred-schema plan when this model serves client-executed tool search and enough tools are active. Any other
+ * plan reaches this adapter already disclosed by the harness (its search tool is an ordinary function) or eager.
+ */
 function planCodexToolSearch(
 	model: Model<"openai-codex-responses">,
 	context: Pick<Context, "tools">,
 ): ToolSchemaDisclosurePlan | undefined {
 	if (!context.tools || context.tools.length === 0) return undefined;
 	const plan = planToolSchemaDisclosure(model, context.tools);
-	return plan.enabled ? plan : undefined;
+	return plan.mode === "native" ? plan : undefined;
 }
 
 /**

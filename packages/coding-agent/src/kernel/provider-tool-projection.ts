@@ -386,10 +386,13 @@ function projectToolForProvider(tool: Tool): Tool {
 			? tool.providerDescription
 			: tool.description,
 	);
+	// The argument guidance sits on its own line, so the description's first line stays the tool's own summary (the
+	// line a deferred-schema catalog lists). `neverDefer` is not wire data: the schema-disclosure planner reads it.
 	const projected: Tool = {
 		name: tool.name,
-		description: root.guidance ? `${description} ${root.guidance}` : description,
+		description: root.guidance ? `${description}\n${root.guidance}` : description,
 		parameters: root.schema as TSchema,
+		...(tool.neverDefer === true ? { neverDefer: true } : {}),
 	};
 	projectedTools.set(tool, projected);
 	return projected;

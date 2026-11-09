@@ -119,7 +119,7 @@ An optional early-cost trigger gets at most one normal summary pass. A hard boun
 
 Planning is replay-safe. Extension/resource, active-skill, and goal revisions can invalidate a plan before commit; stale retries have their own bound and do not consume the compaction-replan allowance. Previewed context-GC and skill usage effects are committed only for the accepted plan.
 
-An active skill remains host state during in-process compaction and is re-injected on every replan. Its body is absent from durable history and summaries. Process or session replacement starts a new skill-vault lifecycle, so a skill must be loaded again after a process restart, `/new`, `/resume`, or `/fork`. `/reload` retains an unchanged eligible skill and invalidates it if the resource changed or became unavailable.
+An active skill remains host state during in-process compaction. Its record is a durable host record that a compaction carries past the cut (the last record of each kind), never folded into a summary; the replanned request sends it again only if its content changed or the request no longer shows it. Process or session replacement starts a new skill-vault lifecycle, so a skill must be loaded again after a process restart, `/new`, `/resume`, or `/fork`. `/reload` retains an unchanged eligible skill and invalidates it if the resource changed or became unavailable.
 
 ### Split Turns
 

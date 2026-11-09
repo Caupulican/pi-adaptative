@@ -1,6 +1,8 @@
+import type { ToolSchemaDisclosureDecision } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import { materializeProviderRequest, startMaterializedProviderStream, streamSimple } from "@caupulican/pi-ai/stream";
-import type { Context, Message } from "@caupulican/pi-ai/types";
+import type { Api, Context, Message, Model } from "@caupulican/pi-ai/types";
+import { harnessLog } from "./harness-log.ts";
 import type {
 	AgentContext,
 	AgentContextPlan,
@@ -18,13 +20,18 @@ import type {
 import { estimateProviderRequestTokens } from "./provider-request-estimator.ts";
 import { applyProviderRequestImageBudget } from "./provider-request-image-budget.ts";
 import { projectToolsForProvider } from "./provider-tool-projection.ts";
-import { renderToolFailureLedger, renderToolFailureLedgerHeader } from "./tool-failure-ledger-record.ts";
+import {
+	renderToolFailureLedger,
+	renderToolFailureLedgerHeader,
+	toolFailureLedgerDigest,
+} from "./tool-failure-ledger-record.ts";
 import {
 	createToolFailureContextMemory,
 	sanitizeToolFailureContext,
 	TOOL_FAILURE_LEDGER_CLEARED_TEXT,
 	TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
 } from "./tool-failure-memory.ts";
+import { logTransientRecordDecisions } from "./transient-record-decision.ts";
 import {
 	adaptHostTransients,
 	commitTransientRecords,
@@ -117,6 +124,33 @@ function lowerPrefixMarksToSharedPrefix(
 		const state = config.providerRequestPrefixState;
 		if (state) state.sanitizerMemory = createToolFailureContextMemory();
 	}
+}
+
+/** The disclosure last logged per session prefix state: a decision is logged when it changes, not per request. */
+const loggedToolSchemaDisclosures = new WeakMap<object, string>();
+
+/** One `tools` line for an accepted request whose tool-schema disclosure differs from the last one logged. */
+function logToolSchemaDisclosure(
+	key: object,
+	model: Model<Api>,
+	decision: ToolSchemaDisclosureDecision | undefined,
+): void {
+	if (!decision || !harnessLog.enabled("info", "tools")) return;
+	const { plan, activatedToolNames } = decision;
+	const fields = {
+		mode: plan.mode,
+		residentCount: plan.eagerToolNames.size,
+		deferredCount: plan.deferredToolNames.size,
+		activatedCount: activatedToolNames.length,
+		residentSchemaTokens: plan.metrics.estimatedEagerSchemaTokens,
+		deferredSchemaTokens: plan.metrics.estimatedDeferredSchemaTokens,
+		deferred: [...plan.deferredToolNames],
+		activated: [...activatedToolNames],
+	};
+	const fingerprint = JSON.stringify(fields);
+	if (loggedToolSchemaDisclosures.get(key) === fingerprint) return;
+	loggedToolSchemaDisclosures.set(key, fingerprint);
+	harnessLog.info("tools", "tool schema disclosure", { model: `${model.provider}/${model.id}`, ...fields });
 }
 
 const MAX_STALE_PROVIDER_REQUEST_PLANS = 3;
@@ -434,19 +468,26 @@ async function materializeContextPlan(
 					kind: TOOL_FAILURE_LEDGER_TRANSIENT_KIND,
 					content: ledgerView,
 					...(sanitized.ledger
-						? { record: sanitized.ledger, header: renderToolFailureLedgerHeader(sanitized.ledger) }
+						? {
+								record: sanitized.ledger,
+								header: renderToolFailureLedgerHeader(sanitized.ledger),
+								digest: toolFailureLedgerDigest(sanitized.ledger),
+							}
 						: {}),
 					clearedText: TOOL_FAILURE_LEDGER_CLEARED_TEXT,
 					trailing: true,
 				},
 			];
 	// A projected plan reconciles against the messages its wire carries, not the whole durable history: a record
-	// the projection no longer carries reads as absent and is appended again.
+	// the projection no longer carries reads as absent and is appended again. The planned messages say whether the
+	// last record of a kind is still on the wire in full; one packed or dropped since is sent again.
 	const reconcileBase = plan.transientReconciliationBase ?? sourceContext.messages;
-	const pendingTransientRecords = reconcileTransientRecords(reconcileBase, [
-		...hostTransients.slots,
-		...trailingSlots,
-	]);
+	const reconciliation = reconcileTransientRecords(
+		reconcileBase,
+		[...hostTransients.slots, ...trailingSlots],
+		plan.messages,
+	);
+	const pendingTransientRecords = reconciliation.records;
 	const compactableMessages = await config.convertToLlm(plan.messages);
 	const nonCompactableHead = plan.nonCompactableHead ?? 0;
 	if (!Number.isInteger(nonCompactableHead) || nonCompactableHead < 0 || nonCompactableHead > plan.messages.length) {
@@ -477,7 +518,7 @@ async function materializeContextPlan(
 		messages: llmMessages,
 		tools: projectToolsForProvider(sourceContext.tools),
 	};
-	const protocolMaterialized = materializeProviderRequest(sourceProviderContext, config);
+	const protocolMaterialized = materializeProviderRequest(sourceProviderContext, config, config.model);
 	const budgeted = applyProviderRequestImageBudget(protocolMaterialized.context, config.model);
 	const materialized =
 		budgeted.context === protocolMaterialized.context
@@ -489,7 +530,12 @@ async function materializeContextPlan(
 		materialized.usesTextToolProtocol,
 		headWireCount,
 	);
-	return { materialized, nonCompactableContext, pendingTransientRecords };
+	return {
+		materialized,
+		nonCompactableContext,
+		pendingTransientRecords,
+		transientDecisions: reconciliation.decisions,
+	};
 }
 
 /**
@@ -593,14 +639,8 @@ export async function startPlannedAgentProviderRequestWithId(
 				continue;
 			}
 
-			const { materialized, nonCompactableContext, pendingTransientRecords } = await materializeContextPlan(
-				sourceContext,
-				sanitized,
-				ledgerView,
-				plan,
-				config,
-				signal,
-			);
+			const { materialized, nonCompactableContext, pendingTransientRecords, transientDecisions } =
+				await materializeContextPlan(sourceContext, sanitized, ledgerView, plan, config, signal);
 
 			if (plan.isCurrent?.() === false) {
 				stalePlanCount = nextStalePlanCount(stalePlanCount);
@@ -682,6 +722,9 @@ export async function startPlannedAgentProviderRequestWithId(
 				pendingTransientRecords,
 				config.onTransientRecordsCommitted,
 			);
+			// Logged here, once per accepted request: a measured, stale or replanned candidate decided nothing.
+			logTransientRecordDecisions(transientDecisions);
+			logToolSchemaDisclosure(prefixState, config.model, materialized.toolDisclosure);
 			// Under a projected plan (`transientReconciliationBase`) these marks still index the durable array: they
 			// over-approximate what the wire carried and only freeze durable messages the wire never held.
 			// Everything in this accepted request is now bytes the provider has seen; later turns may

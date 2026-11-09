@@ -537,6 +537,11 @@ export interface Tool<TParameters extends TSchema = TSchema> {
 	name: string;
 	description: string;
 	parameters: TParameters;
+	/**
+	 * Keep this schema resident when tool schemas are deferred behind tool search: the harness expects the tool on a
+	 * first call, so a discovery round before it would be wasted. Never sent to a provider.
+	 */
+	neverDefer?: boolean;
 }
 
 export interface Context {

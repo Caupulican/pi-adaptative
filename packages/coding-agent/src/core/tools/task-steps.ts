@@ -456,6 +456,7 @@ export function createTaskStepsToolDefinition(deps: TaskStepsToolDependencies): 
 		description:
 			"Track the session's ordered multi-step checklist with status, notes, and evidence. Keep one step in_progress while runnable work remains and leave blocked steps blocked until their condition changes. Completing the active step auto-starts the next pending one (advance does the same). Resolve or defer open steps before the final answer.",
 		promptSnippet: "Session step checklist",
+		neverDefer: true,
 		parameters: taskStepsSchema,
 		// INVESTIGATED, not assumed (turn-economics remediation, TASK 6): this tool previously
 		// declared `executionMode: "sequential"`, which gives a tool call its own barrier group and

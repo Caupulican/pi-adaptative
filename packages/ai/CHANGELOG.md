@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- `Tool.neverDefer`: a tool that sets it stays resident when schemas are deferred; it is never sent to a provider.
+- Harness tool schema disclosure for providers without native tool search: when a request carries `tool_search` and enough tools, the search tool lists each deferred tool by name and one line, a search result returns the full schemas of what it loaded, and a loaded, called or forced tool is appended after the resident tools from the next request on. It runs in `materializeProviderRequest`, so `stream()`, `streamSimple()` and callers that materialize requests themselves get it, and it derives everything from the history, so every request of one history renders the same bytes.
+
+### Changed
+
+- Resident tools are chosen by an estimated schema-token budget (`DEFAULT_RESIDENT_TOOL_SCHEMA_TOKENS`) after the tools that declare `neverDefer`, instead of a fixed count and a fixed name list; `tool_search` does not count against it. `ToolSchemaDisclosurePlan` gains `mode` (`native`, `harness`, `disclosed`, `eager`), and the Anthropic and Codex adapters send their native search forms only in `native` mode.
+
 ## [0.104.46] - 2026-11-08
 
 ## [0.104.45] - 2026-11-08

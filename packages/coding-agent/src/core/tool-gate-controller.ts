@@ -34,8 +34,8 @@ import type { SoulController } from "./soul/soul-controller.ts";
 import type { SystemOneController } from "./system-one/index.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import { retireToolCall } from "./tools/file-mutation-queue.ts";
-import type { NestedCall, NestedCallAdmitter } from "./tools/lookup.ts";
 import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
+import type { NestedCall, NestedCallAdmitter } from "./tools/nested-tool-call.ts";
 
 export const CONTROL_PLANE_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"task_steps",
@@ -51,8 +51,11 @@ export const CONTROL_PLANE_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"ask_question",
 ]);
 
-/** Tools that run sub-calls of other tools; the gate keeps the admitted call's context for them (see `admitNested`). */
-const NESTED_ADMISSION_TOOL_NAMES: ReadonlySet<string> = new Set([LOOKUP_TOOL_NAME]);
+/**
+ * Tools that run sub-calls of other tools (a `lookup`'s requests, a `python` script's `pi_tools` calls); the gate keeps
+ * the admitted call's context for them (see `admitNested`).
+ */
+const NESTED_ADMISSION_TOOL_NAMES: ReadonlySet<string> = new Set([LOOKUP_TOOL_NAME, "python"]);
 
 /** What an admitted parent call's sub-calls are admitted under: the real context of that parent. */
 interface NestedParentContext {
@@ -657,7 +660,7 @@ export class ToolGateController {
 	};
 
 	/**
-	 * Admission of one sub-call of an admitted parent call (the lookup tool's requests). The sub-call is a call like any
+	 * Admission of one sub-call of an admitted parent call (a lookup's requests, a script's tool calls). The sub-call is a call like any
 	 * other: it goes through `beforeToolCall` with its own tool name, arguments and binding, under the parent's real
 	 * request, so the envelope, path authority, router, extension hooks, edge, operation, delegation, soul and
 	 * System One checks all apply to it as they would to a standalone call; an admitted one is closed through
@@ -668,7 +671,7 @@ export class ToolGateController {
 		const parent = this.nestedParents.get(parentToolCallId);
 		if (!parent) return { kind: "refused", reason: "the call that asked for this was not admitted for sub-requests" };
 		if (NESTED_ADMISSION_TOOL_NAMES.has(child.toolName)) {
-			return { kind: "refused", reason: `${child.toolName} cannot be run from inside another batch` };
+			return { kind: "refused", reason: `${child.toolName} cannot run as a sub-call of another tool call` };
 		}
 		const toolCall: AgentToolCall = {
 			type: "toolCall",

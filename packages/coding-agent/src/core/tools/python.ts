@@ -1,4 +1,5 @@
 import { readFile, stat } from "node:fs/promises";
+import { delimiter } from "node:path";
 import { Text } from "@caupulican/pi-tui";
 import { type AgentTool, AgentToolExecutionError } from "../../kernel/types.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
@@ -15,7 +16,8 @@ import {
 	type FileFailureRecoveryAuthority,
 	selectFileFailureRecoveryAuthority,
 } from "./file-failure-recovery.ts";
-import { releaseExclusiveHold, withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
+import { carryNestedMutation, releaseExclusiveHold, withExclusiveMutationBarrier } from "./file-mutation-queue.ts";
+import type { NestedCallHost } from "./nested-tool-call.ts";
 import { OutputAccumulator } from "./output-accumulator.ts";
 import {
 	formatOutputReductionNotice,
@@ -43,6 +45,17 @@ import {
 	type PythonToolDetails,
 	pythonSchema,
 } from "./schemas/python.ts";
+import {
+	formatToolBridgeReport,
+	openToolBridge,
+	summarizeToolBridgeReport,
+	type ToolBridgeReport,
+} from "./tool-bridge.ts";
+import {
+	DEFAULT_TOOL_BRIDGE_MAX_CALLS,
+	MAX_TOOL_BRIDGE_CALLS,
+	TOOL_BRIDGE_CLIENT_MODULE,
+} from "./tool-bridge-policy.ts";
 import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 const MIN_PYTHON_OUTPUT_BYTES = 1_000;
@@ -70,6 +83,23 @@ export interface PythonToolOptions {
 	mutationScope?: string;
 	/** Session owner within a shared worktree scope; provider call ids are only unique for this owner. */
 	mutationAnnouncer?: string;
+	/**
+	 * The surface a script's `pi_tools` calls are admitted through (tool-bridge.ts): its own executors and its
+	 * nested-call admission. Absent, a run that names `tools` is refused.
+	 */
+	toolBridge?: NestedCallHost;
+}
+
+const PYTHON_DESCRIPTION =
+	"Run a Python snippet or script without a shell, through Pi's uv runtime. Stdout/stderr are bounded; truncated full output spills to a work directory outside the repository (a worker's own scratch directory). Edit source with read/edit/write; Python file transforms must preserve encoding and newlines, write atomically and verify the diff.";
+const PYTHON_TOOL_BRIDGE_DESCRIPTION = ` With \`tools\` the script calls Pi tools through \`import ${TOOL_BRIDGE_CLIENT_MODULE}\` in this one call: use it for 3 or more dependent or bulk calls (search, read the matches, edit them) and print only what you need.`;
+
+/** The script's import path starts with the bridge client's directory; an inherited one follows it. */
+function pythonPathWith(entry: string, environment: ExecutionEnvironment): Record<string, string> {
+	const existing = Object.entries(environment.variables).find(([name]) =>
+		environment.caseSensitive ? name === "PYTHONPATH" : name.toUpperCase() === "PYTHONPATH",
+	)?.[1];
+	return { PYTHONPATH: existing ? `${entry}${delimiter}${existing}` : entry };
 }
 
 export function resolvePythonToolPath(
@@ -183,11 +213,11 @@ export function createPythonToolDefinition(
 	return {
 		name: "python",
 		label: "python",
-		description:
-			"Run a Python snippet or script without a shell, through Pi's uv runtime. Stdout/stderr are bounded; truncated full output spills to a work directory outside the repository (a worker's own scratch directory). Edit source with read/edit/write; Python file transforms must preserve encoding and newlines, write atomically and verify the diff.",
+		description: options.toolBridge ? `${PYTHON_DESCRIPTION}${PYTHON_TOOL_BRIDGE_DESCRIPTION}` : PYTHON_DESCRIPTION,
 		promptSnippet: "Run Python code or a script",
 		parameters: pythonSchema,
-		backgroundRequested: (input) => input.background === true,
+		// A script with tools never becomes a session task: execute refuses that combination at once.
+		backgroundRequested: (input) => input.background === true && !input.tools?.length,
 		failureRecovery: {
 			getTimeoutMs: ({ timeoutSeconds, background }) => resolvePythonTimeoutMs(timeoutSeconds, background === true),
 			actions: recoveryAuthority
@@ -207,6 +237,17 @@ export function createPythonToolDefinition(
 			const hasCode = typeof input.code === "string";
 			const hasScript = typeof input.scriptPath === "string" && input.scriptPath.length > 0;
 			if (hasCode === hasScript) throw new Error("Provide exactly one of code or scriptPath.");
+			const bridgeTools = input.tools ?? [];
+			const toolBridge = bridgeTools.length > 0 ? options.toolBridge : undefined;
+			if (bridgeTools.length > 0) {
+				// Its tool calls are admitted under this call, which a background run outlives.
+				if (input.background === true)
+					throw new Error("A script with tools runs in the foreground; drop background.");
+				if (!toolBridge) throw new Error("This session admits no tool calls from scripts; run it without tools.");
+				// The channel is local to this host; a custom backend runs Python somewhere it cannot reach.
+				if (options.operations) throw new Error("Tool calls from a script need the local Python runtime.");
+			}
+			const maxToolCalls = clampInteger(input.maxToolCalls, DEFAULT_TOOL_BRIDGE_MAX_CALLS, 1, MAX_TOOL_BRIDGE_CALLS);
 			const cwd = resolvePythonToolPath(baseCwd, input.cwd ?? ".", pathOptions);
 			await inspectPythonPath(cwd, "cwd", operations, signal);
 			const scriptPath = hasScript ? resolvePythonToolPath(cwd, input.scriptPath as string, pathOptions) : undefined;
@@ -324,10 +365,11 @@ export function createPythonToolDefinition(
 				};
 			};
 			let execution: PythonExecutionResult;
+			let bridgeReport: ToolBridgeReport | undefined;
 			try {
-				const runSnippet = () => {
+				const runSnippet = async () => {
 					signal?.throwIfAborted();
-					const environment = composeExecutionEnvironment(
+					const composed = composeExecutionEnvironment(
 						baseEnvironment,
 						[
 							options.environment?.(cwd) ?? {},
@@ -341,18 +383,45 @@ export function createPythonToolDefinition(
 						],
 						options.omitEnvironmentVariables,
 					);
-					signal?.throwIfAborted();
-					return operations.exec({
-						python: runtime.pythonPath,
-						args: scriptPath ? ["-B", scriptPath, ...args] : ["-B", "-", ...args],
-						cwd,
-						stdin: hasCode ? input.code : undefined,
-						timeoutMs,
-						signal,
-						env: environment,
-						onStdout: (chunk) => stdout.append(chunk),
-						onStderr: (chunk) => stderr.append(chunk),
-					});
+					// The bridge lives inside this run's hold of the group lock: it opens here, and every call it carries has
+					// settled before the hold ends (see carryNestedMutation).
+					const bridge = toolBridge
+						? await openToolBridge({
+								host: toolBridge,
+								parentToolCallId: toolCallId,
+								tools: bridgeTools,
+								maxCalls: maxToolCalls,
+								signal,
+								carryMutation: (childCallId) =>
+									carryNestedMutation(toolCallId, childCallId, mutationScope, mutationAnnouncer),
+							})
+						: undefined;
+					try {
+						const composedEnvironment: ExecutionEnvironment = {
+							caseSensitive: baseEnvironment.caseSensitive,
+							variables: composed,
+						};
+						const environment = bridge
+							? composeExecutionEnvironment(composedEnvironment, [
+									bridge.environment,
+									pythonPathWith(bridge.clientDirectory, composedEnvironment),
+								])
+							: composed;
+						signal?.throwIfAborted();
+						return await operations.exec({
+							python: runtime.pythonPath,
+							args: scriptPath ? ["-B", scriptPath, ...args] : ["-B", "-", ...args],
+							cwd,
+							stdin: hasCode ? input.code : undefined,
+							timeoutMs,
+							signal,
+							env: environment,
+							onStdout: (chunk) => stdout.append(chunk),
+							onStderr: (chunk) => stderr.append(chunk),
+						});
+					} finally {
+						if (bridge) bridgeReport = await bridge.close();
+					}
 				};
 				// Python cannot statically declare which files a snippet touches, so every run takes the
 				// coarse exclusive barrier. A background call releases it the instant its own body
@@ -395,6 +464,7 @@ export function createPythonToolDefinition(
 					: undefined;
 				if (stderrReductionNotice) sections.push(`[stderr] ${stderrReductionNotice}`);
 				if (stderrNotice && !snapshots.stderrReduction?.rawPath) sections.push(stderrNotice);
+				if (bridgeReport) sections.push(formatToolBridgeReport(bridgeReport));
 				const status = `[python exitCode=${execution.exitCode ?? "null"}${execution.signal ? `; signal=${execution.signal}` : ""}]`;
 				sections.push(status);
 				const text = sections.join("\n\n");
@@ -441,6 +511,7 @@ export function createPythonToolDefinition(
 						...(snapshots.stderrReduction ? { stderrReduction: snapshots.stderrReduction } : {}),
 						stdoutOutputError: snapshots.stdout.fullOutputError,
 						stderrOutputError: snapshots.stderr.fullOutputError,
+						...(bridgeReport ? { toolBridge: bridgeReport } : {}),
 					},
 				};
 			} finally {
@@ -457,7 +528,8 @@ export function createPythonToolDefinition(
 			if (!details) return new Text(theme.fg("dim", "python done"), 0, 0);
 			const status =
 				details.exitCode === 0 && !details.timedOut ? "python ok" : `python exit ${details.exitCode ?? "unknown"}`;
-			let text = theme.fg(details.exitCode === 0 ? "success" : "warning", status);
+			const bridged = details.toolBridge ? ` · ${summarizeToolBridgeReport(details.toolBridge)}` : "";
+			let text = theme.fg(details.exitCode === 0 ? "success" : "warning", `${status}${bridged}`);
 			if (expanded) {
 				const content = result.content[0];
 				if (content?.type === "text") {

@@ -165,6 +165,8 @@ export class MutationLockScope {
 	users = 0;
 	/** Live named command runs, keyed by the exact announcing-session and tool-call-id tuple. */
 	private readonly exclusiveHolds = new Map<string, ExclusiveHold>();
+	/** Sub-calls a named command run carries (see {@link carryCall}): the sub-call's identity to the run's hold identity. */
+	private readonly carriedCalls = new Map<string, string>();
 	/** A disposed scope leaves the registry only once nothing in it is still live. */
 	private disposeRequested = false;
 
@@ -180,7 +182,8 @@ export class MutationLockScope {
 			this.drainWaiters.size === 0 &&
 			this.announcements.size === 0 &&
 			this.earlierCallWaiters.size === 0 &&
-			this.exclusiveHolds.size === 0
+			this.exclusiveHolds.size === 0 &&
+			this.carriedCalls.size === 0
 		);
 	}
 
@@ -464,6 +467,31 @@ export class MutationLockScope {
 		return true;
 	}
 
+	/**
+	 * Let the file mutation of `childCallId` run inside the place the named command run `holdId` holds in the lock: a
+	 * script's own tool call is part of that run, and joining the mutation group (or the per-file queue, where a writer
+	 * waiting for this lock may stand first) would wait for the very run that is waiting for it. The run orders its own
+	 * carried mutations and keeps its hold until every one has settled; the returned release ends the carry.
+	 */
+	carryCall(holdId: string, childCallId: string, announcer: string | undefined): () => void {
+		const child = ownedCallId(childCallId, announcer);
+		const hold = ownedCallId(holdId, announcer);
+		this.carriedCalls.set(child, hold);
+		return () => {
+			if (this.carriedCalls.get(child) !== hold) return;
+			this.carriedCalls.delete(child);
+			this.settle();
+		};
+	}
+
+	/** Whether `callId` is carried by a named command run that holds its place in the lock right now. */
+	carriesCall(callId: string | undefined, announcer: string | undefined): boolean {
+		if (callId === undefined) return false;
+		const holdIdentity = this.carriedCalls.get(ownedCallId(callId, announcer));
+		const hold = holdIdentity === undefined ? undefined : this.exclusiveHolds.get(holdIdentity);
+		return hold !== undefined && !hold.done && hold.release !== undefined;
+	}
+
 	/** Join the mutation group and mark this call's announcement covered by the holders. */
 	async joinMutationGroup(
 		callId: string | undefined,
@@ -561,6 +589,16 @@ export function retireToolCall(callId: string, scope?: string, announcer?: strin
 	getMutationLockScope(scope).retire(callId, announcer);
 }
 
+/** See {@link MutationLockScope.carryCall}: a sub-call of the named run `holdId` mutates inside that run's hold. */
+export function carryNestedMutation(
+	holdId: string,
+	childCallId: string,
+	scope?: string,
+	announcer?: string,
+): () => void {
+	return getMutationLockScope(scope).carryCall(holdId, childCallId, announcer);
+}
+
 /** Wait until no mutation announced EARLIER than `callId` is still pending. */
 export function waitForAnnouncedMutations(
 	callId: string | undefined,
@@ -631,6 +669,13 @@ export async function withFileMutationQueue<T>(
 	backend: FileMutationQueueBackend = localFileMutationQueueBackend,
 	options?: { signal?: AbortSignal; callId?: string; scope?: string; announcer?: string },
 ): Promise<T> {
+	// A mutation a holding command run carries (a script's own tool call) is part of that run. The run holds its
+	// scope's lock, so no other mutation of the scope is running or can start, and the run orders its own mutations
+	// (tool-bridge.ts). Queuing it behind a writer that waits for that lock would wait for the very run waiting for it.
+	if (getMutationLockScope(options?.scope).carriesCall(options?.callId, options?.announcer)) {
+		if (options?.signal?.aborted) throw options.signal.reason;
+		return fn();
+	}
 	let state = backendQueues.get(backend);
 	if (!state) {
 		state = { queues: new Map(), registration: Promise.resolve() };

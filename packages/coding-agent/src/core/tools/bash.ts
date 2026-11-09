@@ -768,6 +768,7 @@ function createShellToolDefinition(
 		label: toolName,
 		description: `${contractDescription} Returns stdout and stderr as a head+tail preview within ${DEFAULT_MAX_LINES} lines or ${DEFAULT_MAX_BYTES / 1024}KB; recognized test runners and large search, compiler and JSON output are reduced to a bounded projection.`,
 		promptSnippet: "Run shell commands",
+		neverDefer: true,
 		parameters: bashSchema,
 		backgroundRequested: (input) => input.background === true,
 		failureRecovery: {

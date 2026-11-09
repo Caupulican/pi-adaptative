@@ -21,6 +21,7 @@ import { ROUTINE_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { ASSIGN_TOOL_NAME } from "./tools/assign-tool-name.ts";
 import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
+import { PLAN_TOOL_NAME } from "./tools/plan-tool-name.ts";
 
 export const STABLE_SHELL_TOOL_NAME = "bash" as const;
 
@@ -54,6 +55,7 @@ export function getDefaultActiveToolNames(_platform: NodeJS.Platform = process.p
 		KNOWLEDGE_TOOL_NAME,
 		"delegate",
 		ASSIGN_TOOL_NAME,
+		PLAN_TOOL_NAME,
 		"tool_task",
 		"run_toolkit_script",
 		"improvement_loop",

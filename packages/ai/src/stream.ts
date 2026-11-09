@@ -1,6 +1,11 @@
 import { getApiProvider } from "./api-registry.ts";
 import { getEnvApiKey, getEnvAuthHeaders } from "./env-api-keys.ts";
 import { dispatchGuardedProviderRequest } from "./provider-request-guard.ts";
+import {
+	discloseToolSchemas,
+	forcedToolChoiceName,
+	type ToolSchemaDisclosureDecision,
+} from "./tool-schema-disclosure.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -97,23 +102,35 @@ export interface MaterializedProviderRequest {
 	context: Context;
 	sourceContext: Context;
 	usesTextToolProtocol: boolean;
+	/** The tool-schema disclosure applied, when the request had a model to plan it for. */
+	toolDisclosure?: ToolSchemaDisclosureDecision;
 }
 
 /**
- * Resolve provider-visible context once, including the text-only tool primer and synthetic guard
- * message. Callers may budget/admit `result.context`, then send that same object through
- * {@link startMaterializedProviderStream} without re-rendering it.
+ * Resolve provider-visible context once: the tool-schema disclosure for `model` (harness-served when the provider has no
+ * native tool search), then the text-only tool primer and synthetic guard message over the tools that remain. Callers
+ * may budget/admit `result.context`, then send that same object through {@link startMaterializedProviderStream} without
+ * re-rendering it. Without a model every schema stays as given.
  */
 export function materializeProviderRequest(
 	context: Context,
 	options: StreamOptions | undefined,
+	model?: Model<Api>,
 ): MaterializedProviderRequest {
 	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
-	const usesTextToolProtocol = protocolOptions !== undefined && Boolean(context.tools?.length);
+	const disclosed = model
+		? discloseToolSchemas(model, context, {
+				forcedToolName: forcedToolChoiceName((options as { toolChoice?: unknown } | undefined)?.toolChoice),
+				appendActivated: protocolOptions === undefined,
+			})
+		: undefined;
+	const visible = disclosed?.context ?? context;
+	const usesTextToolProtocol = protocolOptions !== undefined && Boolean(visible.tools?.length);
 	return {
-		context: usesTextToolProtocol ? withTextToolProtocolContext(context, options) : context,
+		context: usesTextToolProtocol ? withTextToolProtocolContext(visible, options) : visible,
 		sourceContext: context,
 		usesTextToolProtocol,
+		...(disclosed ? { toolDisclosure: disclosed.decision } : {}),
 	};
 }
 
@@ -430,7 +447,7 @@ function startTextToolProtocolStream<TOptions extends StreamOptions>(
 		providerOptions: TOptions | undefined,
 	) => AssistantMessageEventStream,
 ): AssistantMessageEventStream {
-	const request = materializeProviderRequest(context, options);
+	const request = materializeProviderRequest(context, options, model);
 	const dispatch = (providerOptions: TOptions | undefined) =>
 		dispatchGuardedProviderRequest(model, providerOptions, (guardedOptions) =>
 			startProviderStream(request.context, guardedOptions),

@@ -118,7 +118,20 @@ Admitted dynamic scripts are integrated into the toolkit registry for discovery 
 
 ---
 
-## 8. End-to-End Workflow Example
+## 8. Scripted Tool Calls
+
+For three or more dependent or bulk calls of the native tools (search, read the matches, edit them), one `python` call with `tools` runs a script that calls them through `import pi_tools` and returns one bounded result. This is item 1 of the decision hierarchy done in one turn, not an automation script: nothing is registered, validated or reused.
+
+- **Reachable tools**: `read`, `grep`, `find`, `ls`, `repo_read`, `edit`, `write`, limited to the ones the call names in `tools`. No `bash`, no delegation or other control-plane tools. On the root, `edit` and `write` are reachable only while they are active for the model.
+- **Same gates**: each `pi_tools` call is admitted exactly like a direct call of that tool (schema, invocation binding, envelope and path authority, credential guard, extension hooks, edge, operation and System One checks). A refusal raises `pi_tools.ToolRefused`, a failure `ToolFailed`, the call limit `ToolLimit`, the run ending `ToolCancelled` (all `ToolError`). Relative paths resolve as in direct calls, not against the script's `cwd`.
+- **Bounds**: `maxToolCalls` (default 50, at most 200), one admission at a time, at most 4 tool bodies at once and the run's file mutations one at a time, 4 MiB per request, 1 MiB of tool text per answer, 2 minutes per call, and the python tool's own timeout and output bound for the run.
+- **Result**: only what the script prints, followed by a compact trace: counts per tool and outcome, then one line per call (tool, outcome, milliseconds, a short reason when it did not succeed), never a tool's output. The `tools` harness log records counts only.
+- **Failure**: a script error returns its bounded traceback with the trace; each tool call settles on its own, so the calls that settled before an error or an abort stand and nothing else is applied. Aborting the python call cancels the calls in flight.
+- **Limits**: foreground only (`background` with `tools` is refused) and local Python only. The channel is a per-run Unix socket or Windows named pipe guarded by a per-run secret; it exists only while the script runs.
+
+---
+
+## 9. End-to-End Workflow Example
 
 Here is a complete end-to-end example demonstrating `spec` -> `validate` -> `bind` -> `run`:
 

@@ -4,7 +4,7 @@ import { isAbsolute, resolve } from "node:path";
 import type { ToolResultMessage } from "@caupulican/pi-ai";
 import { estimateTokens } from "../kernel/compaction/compaction.ts";
 import type { AgentMessage } from "../kernel/index.ts";
-import { PrefixFold } from "../kernel/index.ts";
+import { isTransientPointerRecord, PrefixFold } from "../kernel/index.ts";
 import { normalizePath } from "../utils/paths.ts";
 import type { SentPrefixRewriteVerdict } from "./compaction/early-compaction-economics.ts";
 import { CONTEXT_ORIGINAL_KEY, type ContextOriginalMetadata } from "./context/artifact-retrieval.ts";
@@ -170,6 +170,20 @@ function isCumulativeRecord(message: AgentMessage): boolean {
 }
 
 /**
+ * A record that makes every earlier record of its kind stale: a string-content custom record that is neither
+ * cumulative nor a pointer. A pointer says the last full record above is still current, so it supersedes nothing;
+ * counting it packed the very record it names, and the model saw a packed stub behind "the last full record is current".
+ */
+function supersedesEarlierRecords(message: AgentMessage): boolean {
+	return (
+		message.role === "custom" &&
+		typeof message.content === "string" &&
+		!isCumulativeRecord(message) &&
+		!isTransientPointerRecord(message)
+	);
+}
+
+/**
  * Pure projection for the compaction summarizer: every superseded host record (a custom record
  * with a later record of the same kind) becomes its one-line packed form. No storage, no memo:
  * the summarizer must not read stale copies the live request already packs (measured live: the
@@ -178,9 +192,8 @@ function isCumulativeRecord(message: AgentMessage): boolean {
 export function packSupersededHostRecords(messages: readonly AgentMessage[]): AgentMessage[] {
 	const lastIndexByKind = new Map<string, number>();
 	messages.forEach((message, index) => {
-		if (message.role === "custom" && typeof message.content === "string" && !isCumulativeRecord(message)) {
+		if (message.role === "custom" && supersedesEarlierRecords(message))
 			lastIndexByKind.set(message.customType, index);
-		}
 	});
 	return messages.map((message, index) => {
 		if (message.role !== "custom" || typeof message.content !== "string" || isCumulativeRecord(message))
@@ -451,7 +464,7 @@ function createGcPlanFold(cwd: string, semanticSettings: Required<SemanticMemory
 	const fold = new PrefixFold<AgentMessage, ContextGcPlan>(
 		() => ({ calls: new Map(), latestReadByPath: new Map(), semanticIndexes: [], lastRecordIndexByKind: new Map() }),
 		(plan, message, messageIndex) => {
-			if (message.role === "custom" && typeof message.content === "string" && !isCumulativeRecord(message)) {
+			if (message.role === "custom" && supersedesEarlierRecords(message)) {
 				plan.lastRecordIndexByKind.set(message.customType, messageIndex);
 			}
 			if (message.role === "assistant") {

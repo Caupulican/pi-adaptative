@@ -180,6 +180,7 @@ function navigationTool(
 		promptSnippet,
 		parameters,
 		readOnly: true,
+		neverDefer: true,
 		execute: async (toolCallId, params: unknown, signal) => execute(name, params, signal, toolCallId),
 	};
 }

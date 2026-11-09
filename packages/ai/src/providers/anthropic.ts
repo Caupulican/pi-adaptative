@@ -13,6 +13,7 @@ import {
 	isToolSchemaSearchDetails,
 	measureToolSchemaDisclosureRequest,
 	planToolSchemaDisclosure,
+	providerSendsToolSchemaSearch,
 	searchDeferredToolSchemas,
 	TOOL_SCHEMA_DISCLOSURE_BETA,
 	TOOL_SCHEMA_SEARCH_NAME,
@@ -565,7 +566,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 					key,
 					options?.interleavedThinking ?? true,
 					shouldUseFineGrainedToolStreamingBeta(model, context),
-					toolDisclosure.enabled,
+					toolDisclosure.mode === "native",
 					() => (compatibility ??= awaitAuthorizationInput(resolveAnthropicCompatibility, options?.signal)),
 					options?.headers,
 					copilotDynamicHeaders,
@@ -800,7 +801,7 @@ export const streamAnthropic: StreamFunction<"anthropic-messages", AnthropicOpti
 				}
 			}
 
-			if (toolDisclosure.enabled) {
+			if (toolDisclosure.mode === "native") {
 				appendAssistantMessageDiagnostic(output, {
 					type: "tool_schema_disclosure",
 					timestamp: Date.now(),
@@ -1037,11 +1038,12 @@ function buildParams(
 	const { cacheControl } = getCacheControl(model, options?.cacheRetention);
 	const cacheBoundaries = new Set<TextBlockParam>();
 	const compat = getAnthropicCompat(model);
-	const requestTools = toolDisclosure.enabled
+	const sendsSearch = providerSendsToolSchemaSearch(toolDisclosure);
+	const requestTools = sendsSearch
 		? context.tools
 		: context.tools?.filter((tool) => tool.name !== TOOL_SCHEMA_SEARCH_NAME);
 	if (
-		!toolDisclosure.enabled &&
+		!sendsSearch &&
 		options?.toolChoice &&
 		typeof options.toolChoice !== "string" &&
 		options.toolChoice.name === TOOL_SCHEMA_SEARCH_NAME
@@ -1433,7 +1435,7 @@ function convertToolResultContent(
 	if (
 		message.toolName === TOOL_SCHEMA_SEARCH_NAME &&
 		isToolSchemaSearchDetails(message.details) &&
-		toolDisclosure.enabled
+		toolDisclosure.mode === "native"
 	) {
 		const matches = searchDeferredToolSchemas(toolDisclosure, message.details.query, message.details.maxResults);
 		if (matches.length > 0) {
@@ -1456,13 +1458,13 @@ function convertTools(
 	forcedToolName?: string,
 ): Anthropic.Messages.Tool[] {
 	if (!tools) return [];
-	const deferredToolNames = new Set(toolDisclosure.deferredToolNames);
+	const deferredToolNames = new Set(toolDisclosure.mode === "native" ? toolDisclosure.deferredToolNames : []);
 	if (forcedToolName) deferredToolNames.delete(forcedToolName);
 	const cacheControlIndex = cacheControl ? tools.findLastIndex((tool) => !deferredToolNames.has(tool.name)) : -1;
 
 	return tools.map((tool, index) => {
 		const schema = tool.parameters as { properties?: unknown; required?: string[] };
-		const deferred = toolDisclosure.enabled && deferredToolNames.has(tool.name);
+		const deferred = deferredToolNames.has(tool.name);
 
 		return {
 			name: toolNameMap.toProviderName(tool.name),

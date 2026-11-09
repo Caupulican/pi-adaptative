@@ -228,13 +228,15 @@ import { createFindTool } from "./tools/find.ts";
 import { createGoalLifecycleToolDefinitions, createGoalToolDefinition, type GoalToolInput } from "./tools/goal.ts";
 import { createGrepTool } from "./tools/grep.ts";
 import { createImageGenerateToolDefinition } from "./tools/image-generate.ts";
-import { createLookupToolDefinition, type NestedCallAdmitter } from "./tools/lookup.ts";
-import { LOOKUP_SUB_TOOL_NAMES, LOOKUP_TOOL_NAME, type LookupSubToolName } from "./tools/lookup-tool-name.ts";
+import { createLookupToolDefinition } from "./tools/lookup.ts";
+import { LOOKUP_SUB_TOOL_NAMES, LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
 import { createModelFitnessToolDefinition } from "./tools/model-fitness.ts";
+import type { NestedCallAdmitter, NestedCallHost } from "./tools/nested-tool-call.ts";
 import type { OutputReductionToolOptions } from "./tools/output-reduction.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
 import { createPeerReviewToolDefinition } from "./tools/peer-review.ts";
 import { createPipelineToolDefinition } from "./tools/pipeline.ts";
+import { PLAN_TOOL_NAME } from "./tools/plan-tool-name.ts";
 import { createReadTool } from "./tools/read.ts";
 import { createRunProcessToolDefinition } from "./tools/run-process.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
@@ -245,6 +247,7 @@ import { createSkillVaultToolDefinition, createWorkerSkillVaultToolDefinition } 
 import { createSystemOneToolDefinition } from "./tools/systemone.ts";
 import { createTaskDirectoryToolDefinition } from "./tools/task-directory.ts";
 import { createTaskStepsToolDefinition } from "./tools/task-steps.ts";
+import { isToolBridgeMutation } from "./tools/tool-bridge-policy.ts";
 import {
 	allToolNames,
 	createToolDefinitionWithRuntime,
@@ -464,8 +467,8 @@ export interface RuntimeBuilderDeps {
 	/** Session-owned slow-tool registry. Optional only for narrow RuntimeBuilder test/embedding seams. */
 	getToolTaskDependencies?(): ToolTaskDependencies;
 	/**
-	 * Admission of a sub-call of an admitted `lookup` call, through the session's own tool gate. Absent, the
-	 * lookup tool is not registered: a tool that would refuse everything is not offered.
+	 * Admission of a sub-call of an admitted `lookup` or `python` call, through the session's own tool gate. Absent,
+	 * the lookup tool is not registered (a tool that would refuse everything is not offered) and scripts get no tools.
 	 */
 	admitNestedToolCall?: NestedCallAdmitter;
 	getRuntimeUpdateTool?(): ToolDefinition | undefined;
@@ -473,6 +476,8 @@ export interface RuntimeBuilderDeps {
 	getProactivityTool?(): ToolDefinition | undefined;
 	getRoutineTool?(): ToolDefinition | undefined;
 	getBotTool?(): ToolDefinition | undefined;
+	/** The root's `plan` tool; undefined in a child session (the worker tool ceiling forbids it as well). */
+	getPlanTool?(): ToolDefinition | undefined;
 	/** The owner's release of channel reply drafts; undefined while no channel has an explicit policy. */
 	getChannelReplyTool?(): ToolDefinition | undefined;
 	/** Lazily resolve durable image storage only for a persisted/configured session. */
@@ -1490,6 +1495,23 @@ export class RuntimeBuilder {
 		this.deps.getContextUsage();
 	}
 
+	/**
+	 * The surface a `python` script's `pi_tools` calls are admitted through: the registry's own executors and the
+	 * session gate's nested admission. A file mutation resolves only while that tool is active for the model itself,
+	 * so a script never reaches a mutation the model could not call directly; reads resolve as `lookup` requests do.
+	 */
+	private _scriptToolBridge(): NestedCallHost | undefined {
+		const admit = this.deps.admitNestedToolCall;
+		if (!admit) return undefined;
+		return {
+			resolveTool: (name) =>
+				isToolBridgeMutation(name) && !this.deps.getActiveToolNames().includes(name)
+					? undefined
+					: this._toolRegistry.get(name),
+			admit,
+		};
+	}
+
 	/** Bind native factories before decorators, so reload snapshots and guards own the same executor. */
 	private bindNativeDefinition(create: (cwd: string, shellKey?: string) => ToolDef): ToolDef {
 		const definition = create(this.deps.getCwd());
@@ -1550,6 +1572,7 @@ export class RuntimeBuilder {
 			agentDir: this.deps.getAgentDir(),
 		};
 		const shellOperations = this.deps.getShellOperations();
+		const scriptToolBridge = this._scriptToolBridge();
 		const toolOptions: ToolDefinitionOptions = {
 			read: { autoResizeImages, fileEncodings },
 			bash: {
@@ -1583,6 +1606,7 @@ export class RuntimeBuilder {
 				omitEnvironmentVariables: ["BW_SESSION"],
 				mutationScope: mutationScopeForWorktree(this.deps.getCwd()),
 				mutationAnnouncer: this.deps.getShellSessionKey(),
+				...(scriptToolBridge ? { toolBridge: scriptToolBridge } : {}),
 			},
 			write: { intentController: this._fileMutationIntents },
 			edit: { intentController: this._fileMutationIntents, fileEncodings },
@@ -1819,6 +1843,10 @@ export class RuntimeBuilder {
 			}
 			if (toolAccess.allows(BOT_TOOL_NAME)) {
 				const definition = this.deps.getBotTool?.();
+				if (definition) this._baseToolDefinitions.set(definition.name, definition);
+			}
+			if (toolAccess.allows(PLAN_TOOL_NAME)) {
+				const definition = this.deps.getPlanTool?.();
 				if (definition) this._baseToolDefinitions.set(definition.name, definition);
 			}
 			if (toolAccess.allows(CHANNEL_REPLY_TOOL_NAME)) {
@@ -2082,7 +2110,7 @@ export class RuntimeBuilder {
 				LOOKUP_SUB_TOOL_NAMES.filter((name) => toolAccess.allows(name)).length > 0
 			) {
 				const lookupToolDefinition: ToolDef = createLookupToolDefinition({
-					resolveTool: (name: LookupSubToolName) => this._toolRegistry.get(name),
+					resolveTool: (name) => this._toolRegistry.get(name),
 					admit: admitNestedToolCall,
 				});
 				this._baseToolDefinitions.set(LOOKUP_TOOL_NAME, lookupToolDefinition);

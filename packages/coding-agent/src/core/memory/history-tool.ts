@@ -216,6 +216,7 @@ export function createHistoryMemoryTool(backends: HistoryToolBackends): ToolDefi
 		label: "History Recall",
 		description: `${HISTORY_TOOL_DESCRIPTION} Nothing from past conversations is loaded automatically.`,
 		promptSnippet: "Recall past conversations",
+		neverDefer: true,
 		parameters: historyOnlySchema,
 		readOnly: true,
 		execute: async (_toolCallId, params: HistoryToolParams) => executeHistoryAction(backends, params),

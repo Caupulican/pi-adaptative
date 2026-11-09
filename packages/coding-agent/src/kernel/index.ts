@@ -33,6 +33,7 @@ export * from "./tool-protocol-residue.ts";
 // Host contract for append-on-change transient records (the module itself stays kernel-internal)
 export {
 	HOST_TRANSIENT_CLEARED_DETAILS,
+	isTransientPointerRecord,
 	readTransientRecordPayload,
 	TRANSIENT_RECORD_SUPERSEDING_NOTE,
 	type TransientRecordPayload,

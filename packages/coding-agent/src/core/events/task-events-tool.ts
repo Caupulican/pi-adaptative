@@ -28,6 +28,7 @@ export function createTaskEventsTool(options: {
 	return {
 		name: TASK_EVENTS_TOOL_NAME,
 		label: "Task events",
+		neverDefer: true,
 		description:
 			"Read this task's retained CI evidence or subscriptions. events with eventView=sources lists exact watched subjects; current=false means historical. subscriptions reads the revision, or narrows the existing set with expectedRevision and subscriptions ([] revokes). Cannot add subjects or widen wake policy. Notifications arrive automatically; do not poll.",
 		parameters,

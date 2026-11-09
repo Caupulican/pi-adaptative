@@ -1946,6 +1946,7 @@ export class FileStoreProvider implements MemoryProvider {
 				label: "Persistent Memory Manager",
 				description: `Add, replace, remove or list durable facts and preferences. Use target 'okf' for durable project decisions, architecture, rules, debugging findings and references. A repeatable procedure is not a fact: draft it as a skill with skillify. ${HISTORY_TOOL_DESCRIPTION}`,
 				promptSnippet: "Persistent memory and history recall",
+				neverDefer: true,
 				parameters: memorySchema,
 				execute: async (_toolCallId, params: MemoryParams, signal, _onUpdate, _execCtx) => {
 					const {

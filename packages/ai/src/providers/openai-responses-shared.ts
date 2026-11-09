@@ -355,7 +355,8 @@ export function convertResponsesMessages<TApi extends Api>(
 
 					if (
 						model.api === "openai-codex-responses" &&
-						(toolCall.toolSearch || (options?.toolSearch?.enabled && toolCall.name === TOOL_SCHEMA_SEARCH_NAME))
+						(toolCall.toolSearch ||
+							(options?.toolSearch?.mode === "native" && toolCall.name === TOOL_SCHEMA_SEARCH_NAME))
 					) {
 						nativeSearchCalls.set(callId, toolCall.toolSearch);
 						output.push({

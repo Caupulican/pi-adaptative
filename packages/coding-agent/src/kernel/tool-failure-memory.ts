@@ -42,9 +42,7 @@ export {
  * active, unchanged since it was last sent".
  */
 export const TOOL_FAILURE_LEDGER_CLEARED_TEXT =
-	"MANDATORY TOOL FAILURE RECOVERY\nEvery tool failure that was active earlier in this conversation " +
-	"has since cleared (superseded by a matching success or resolved). No ledger entry is currently " +
-	"active; no recovery protocol constraint from this ledger currently applies.";
+	"TOOL FAILURES active=0: every failure listed earlier is resolved; no recovery protocol constraint applies now.";
 const TOOL_FAILURE_MEMORY_VERSION = 1;
 const TOOL_FAILURE_DIRECTIVE_VERSION = 1;
 const TOOL_FAILURE_REPLAY_VERSION = 1;

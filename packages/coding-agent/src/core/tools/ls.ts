@@ -107,6 +107,7 @@ function buildLsToolDefinition(
 		readOnly: true,
 		description: `List a directory: entries sorted alphabetically, '/' suffix for directories, dotfiles included. Output is truncated to ${DEFAULT_LIMIT} entries (limit) or ${DEFAULT_MAX_BYTES / 1024}KB.`,
 		promptSnippet: "List a directory",
+		neverDefer: true,
 		parameters: lsSchema,
 		failureRecovery: {
 			actions: failureRecoveryAuthority

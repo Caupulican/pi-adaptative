@@ -1,6 +1,13 @@
 import { type Static, Type } from "typebox";
 import type { TruncationResult } from "../../../kernel/node.ts";
 import type { ExecutionEnvironment } from "../../execution-environment.ts";
+import type { ToolBridgeReport } from "../tool-bridge.ts";
+import {
+	DEFAULT_TOOL_BRIDGE_MAX_CALLS,
+	MAX_TOOL_BRIDGE_CALLS,
+	TOOL_BRIDGE_CLIENT_MODULE,
+	TOOL_BRIDGE_TOOL_NAMES,
+} from "../tool-bridge-policy.ts";
 
 export const DEFAULT_PYTHON_TIMEOUT_SECONDS = 30;
 export const MAX_PYTHON_TIMEOUT_SECONDS = 300;
@@ -54,6 +61,19 @@ export const pythonSchema = Type.Object(
 				description: `Maximum returned bytes per stream before output spills to a work artifact (limit ${MAX_PYTHON_OUTPUT_BYTES}).`,
 			}),
 		),
+		tools: Type.Optional(
+			Type.Array(Type.Union(TOOL_BRIDGE_TOOL_NAMES.map((name) => Type.Literal(name))), {
+				minItems: 1,
+				maxItems: TOOL_BRIDGE_TOOL_NAMES.length,
+				uniqueItems: true,
+				description: `Pi tools the script may call: \`import ${TOOL_BRIDGE_CLIENT_MODULE}\`, then \`${TOOL_BRIDGE_CLIENT_MODULE}.read(path=...)\`, \`.grep(pattern=..., path=...)\`, \`.edit(path=..., edits=[...])\` etc. with that tool's own argument names. Each call is admitted like a direct call and returns the tool's text, or raises ${TOOL_BRIDGE_CLIENT_MODULE}.ToolError (ToolRefused, ToolFailed, ToolLimit); relative paths resolve as in your direct calls, not against the script's cwd; only what the script prints comes back. Foreground runs only.`,
+			}),
+		),
+		maxToolCalls: Type.Optional(
+			Type.Number({
+				description: `Most tool calls this run may make (default ${DEFAULT_TOOL_BRIDGE_MAX_CALLS}, limit ${MAX_TOOL_BRIDGE_CALLS}).`,
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -76,6 +96,8 @@ export interface PythonToolDetails {
 	stderrOutputPath?: string;
 	stdoutOutputError?: string;
 	stderrOutputError?: string;
+	/** The calls the script made through `pi_tools`, when it named `tools`. */
+	toolBridge?: ToolBridgeReport;
 }
 
 export interface PythonExecutionRequest {

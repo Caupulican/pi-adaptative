@@ -264,15 +264,21 @@ ceiling stays unchanged; the peer allowance cannot subsidize unrelated tool grow
 reproduced wrong-directory execution and safe task automation without widening worker grants or introducing
 per-turn schema churn.
 
-**Deferred tool schemas remain bound to the model and surface that will execute them.** A verified
-Anthropic model and endpoint may expose the stateless, zero-authority `tool_search` only when the
-final capability-filtered request has at least ten real tools; every other request omits the
-synthetic tool and sends every real schema eagerly. Fresh worker routing and durable quota fallback
-re-evaluate that rule against the selected worker model, so an inherited Claude surface cannot
-lend search to another provider. Search results reference only the exact current request's deferred
-set. `/context` reports the latest accepted disclosure counts, estimated hidden schema tokens,
-misses, and latency as historical evidence without subtracting them from the current request
-estimate.
+**Deferred tool schemas remain bound to the model and surface that will execute them.** Any
+request whose final capability-filtered list has at least ten real tools may defer schemas behind
+the stateless, zero-authority `tool_search`; smaller lists omit the synthetic tool and send every
+real schema eagerly. A tool whose definition declares `neverDefer` is always resident; the other
+tools fill a resident schema-token budget in list order, and the search tool never counts against
+it. A verified native surface (Anthropic `defer_loading`, Codex client tool search) discloses
+through the provider; every other provider gets harness disclosure at the shared request boundary:
+the search tool lists each deferred tool by name and one line, a search result carries the full
+schemas, and a loaded, called or forced tool is appended after the resident tools in first-use
+order, so activation extends the tool list and never reorders it. Disclosure is recomputed per
+request against the model that will execute it, so worker routing and quota fallback re-plan it
+and a native surface cannot lend native search to another provider. Search results reference only
+the exact current request's deferred set. `/context` reports the latest accepted native disclosure
+counts, estimated hidden schema tokens, misses, and latency as historical evidence without
+subtracting them from the current request estimate.
 
 **Equivalent action branches compact only at the provider boundary.** Identical `anyOf` branches
 may share an enum discriminator when every other validation constraint matches. Exclusive unions
@@ -1108,3 +1114,4 @@ measurement gains no new surface.
 | 2026-11-05 | A `readOnly` worker's shell creates files only inside its own scratch directory (no new file elsewhere), reaches no network without `network.http`, and reads no private harness or credential path through operands, `cd`, globs or recursive searches; listed readers whose options or program text run programs or write files (`sort -o`, `rg --pre`, awk `system()`, sed `w`) are refused for every caller of the read/write line. |
 | 2026-11-05 | The read-only shell line is one walk over one tokenizer for the router, System One's observational line, requirement checks and worker lanes: line continuations, comments, expansions and PowerShell blocks are structural, assignments follow an allowlist, paths are judged lexically and physically, `tsc` leaves the read-only list, and a worker's project search runs without a glob while storage roots and dotenv descents are refused. |
 | 2026-11-05 | The worker report gains `conditionMet` (`WorkerSubmittedReport`, `WorkerResultContract`), stamped under the same clean host-accepted completion rule as `ownerUpdate` and read only by the routine result path: a routine with a stated end that a run reports met runs no more and is removed with one host notice once its results are delivered; any other routine ignores it with a diagnostic. |
+| 2026-11-08 | Tool schema deferral covers every provider: tools that declare `neverDefer` stay resident, the rest fill a resident schema-token budget instead of a fixed count, native surfaces disclose through the provider, and other providers get harness disclosure (catalog in the search tool, schemas in the search result, activated tools appended after the residents). |

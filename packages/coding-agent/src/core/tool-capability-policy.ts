@@ -19,6 +19,7 @@ import { ROUTINE_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { ASSIGN_TOOL_NAME } from "./tools/assign-tool-name.ts";
 import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
+import { PLAN_TOOL_NAME } from "./tools/plan-tool-name.ts";
 
 export interface ToolCapabilityPolicy {
 	/** AND across clauses; OR across the capability alternatives inside one clause. */
@@ -113,6 +114,7 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	[ROUTINE_TOOL_NAME, policy([["workflow.plan"]], "control-plane")],
 	[BOT_TOOL_NAME, policy([["workflow.delegate"]], "control-plane")],
 	[ASSIGN_TOOL_NAME, policy([["workflow.delegate"]], "control-plane")],
+	[PLAN_TOOL_NAME, policy([["workflow.delegate"]], "control-plane")],
 	[CHANNEL_REPLY_TOOL_NAME, policy([["workflow.message"]], "control-plane")],
 	["artifact_retrieve", policy([["filesystem.read"]], "path-scope")],
 	["decision_ledger_read", policy([["memory.query"]], "memory-broker")],

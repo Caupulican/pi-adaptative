@@ -414,6 +414,7 @@ function buildGrepToolDefinition(
 		readOnly: true,
 		description: `Search file contents for a regex or literal pattern; returns matching lines with file paths and line numbers. Respects .gitignore. Output is truncated to ${DEFAULT_LIMIT} matches (limit) or ${DEFAULT_MAX_BYTES / 1024}KB, and long lines to ${GREP_MAX_LINE_LENGTH} chars.${options?.readOperation ? " This bounded review reads only project .gitignore and .ignore rules; global ignore files are excluded. Partial results do not prove absence." : ""}`,
 		promptSnippet: "Search file contents",
+		neverDefer: true,
 		parameters: grepSchema,
 		async execute(
 			toolCallId,

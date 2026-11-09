@@ -1,6 +1,7 @@
 import type { ToolFailurePhase } from "@caupulican/pi-ai/tool-repair-registry";
 import { quoted, tag } from "./tagged-view.ts";
 import { MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT } from "./tool-failure-recovery-protocol.ts";
+import { transientRecordDigest } from "./transient-record-decision.ts";
 
 /**
  * The tool-failure ledger as one canonical record and its tagged model view.
@@ -9,7 +10,10 @@ import { MANDATORY_TOOL_FAILURE_RECOVERY_PROTOCOL_PROMPT } from "./tool-failure-
  * trailing ledger transient and carries the record in the durable record's `details.record`. Nothing reads the
  * rendering back. The view is a header line of tags, the protocol, one inert-data line, then one line per active
  * failure or directive: identifiers as bare tags, every free-text field JSON-encoded and escaped so no field can
- * forge a line or a tag. The rendering is a total function of the record (append-on-change compares text).
+ * forge a line or a tag. The rendering is a total function of the record; append-on-change compares
+ * `toolFailureLedgerDigest` (what the model must do), so a counter-only change sends no full record. Counters move
+ * only with a new tool result, which displaces the trailing group, so the pointer that reclaims the tail names the
+ * ledger by its current header (cut at 80 characters).
  */
 
 /** The one-sentence rule a short-mode ledger carries instead of the full protocol text; the prompt holds no copy of it. */
@@ -89,7 +93,6 @@ function renderDirective(directive: ToolFailureLedgerDirective): string {
 	].join(" ");
 }
 
-/** The model view of a ledger record. The header comes first so a pointer record names the ledger by it. */
 /** The ledger view's first line: the counts, which also name the record in a pointer that reclaims the tail. */
 export function renderToolFailureLedgerHeader(record: ToolFailureLedgerRecord): string {
 	return [
@@ -101,6 +104,41 @@ export function renderToolFailureLedgerHeader(record: ToolFailureLedgerRecord): 
 	].join(" ");
 }
 
+/**
+ * The ledger's identity for change detection: the protocol, then per active failure and directive every field that
+ * says what failed and what the model must do. Pure counters (occurrence, kind mistakes, the per-kind mistake totals,
+ * the omitted count) are left out: a counter alone changes nothing the model must do, and the pointer that reclaims
+ * the tail repeats the current counts in its header. An escalation changes a hashed field (a refused repeat is
+ * `repeated_failed_operation` with its own note), so it is sent in full.
+ */
+export function toolFailureLedgerDigest(record: ToolFailureLedgerRecord): string {
+	return transientRecordDigest(
+		JSON.stringify([
+			record.protocol,
+			record.failures.map((failure) => [
+				failure.failureKey,
+				failure.state,
+				failure.phase,
+				failure.tool,
+				failure.mistakeKind,
+				failure.operation,
+				failure.failureCode,
+				failure.diagnostic ?? null,
+				failure.note ?? null,
+				failure.guidance,
+				failure.correction,
+				failure.attemptMemoryDiscarded === true,
+			]),
+			record.directives.map((directive) => [
+				directive.failureCode,
+				directive.diagnostic ?? null,
+				directive.nextAction,
+			]),
+		]),
+	);
+}
+
+/** The model view of a ledger record. The header comes first so a pointer record names the ledger by it. */
 export function renderToolFailureLedger(record: ToolFailureLedgerRecord): string {
 	return [
 		renderToolFailureLedgerHeader(record),

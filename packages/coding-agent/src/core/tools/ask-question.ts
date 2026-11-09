@@ -910,6 +910,7 @@ export function createAskQuestionToolDefinition(options: AskQuestionToolOptions 
 		description:
 			"Ask the owner when a missing choice changes the result, authority, risk or acceptance; otherwise proceed on a stated safe assumption. When AGENTS.md or a standing user rule differs from the user's request, ask which holds; the user outranks AGENTS.md once they choose. Never ask for decisions fixed by owner profile or policy. A skipped or cancelled answer is owner intent: do not repeat it immediately; proceed safely or report the unresolved boundary.",
 		promptSnippet: "Ask the owner a multiple-choice question",
+		neverDefer: true,
 		parameters: askQuestionSchema,
 		executionMode: "sequential",
 		renderShell: "self",

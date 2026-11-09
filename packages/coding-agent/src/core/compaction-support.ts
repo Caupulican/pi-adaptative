@@ -126,7 +126,8 @@ export function sessionLaneSummarizerRequest(input: {
 }): StructuredCompactionRequest | undefined {
 	if (!sameCacheLane(input.compactionModel, input.sessionModel)) return undefined;
 	const materialize = (context: Context) =>
-		materializeProviderRequest(context, { textToolCallProtocol: input.textToolCallProtocol }).context;
+		materializeProviderRequest(context, { textToolCallProtocol: input.textToolCallProtocol }, input.compactionModel)
+			.context;
 	const context = materialize({
 		systemPrompt: input.systemPrompt,
 		messages: convertToLlm([...input.messagesToSummarize]),

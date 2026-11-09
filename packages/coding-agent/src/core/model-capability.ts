@@ -13,7 +13,6 @@ import {
 	type Api,
 	MIN_TOOL_SCHEMA_DISCLOSURE_SEARCHABLE_TOOLS,
 	type Model,
-	supportsToolSchemaDisclosure,
 	TOOL_SCHEMA_SEARCH_NAME,
 } from "@caupulican/pi-ai";
 import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
@@ -223,10 +222,6 @@ export function deriveModelCapabilityProfile(args: {
 
 interface CapabilityToolModel {
 	provider: string;
-	api?: string;
-	id?: string;
-	baseUrl?: string;
-	compat?: unknown;
 }
 
 /** Apply the profile's allow/block lists to a requested tool-name list, preserving order. */
@@ -268,22 +263,12 @@ export function partitionToolNamesForCapability(
 			keep(name, !blocked.has(name), `blocked for the ${profile.class} capability class`),
 		);
 	}
+	// Every model can defer schemas: natively where its provider searches tools, otherwise through the harness at the
+	// request boundary. Search needs enough other tools to defer; the per-request plan drops it when nothing is deferred.
 	const toolSearchSupported =
-		filtered.filter((name) => name !== TOOL_SCHEMA_SEARCH_NAME).length >=
-			MIN_TOOL_SCHEMA_DISCLOSURE_SEARCHABLE_TOOLS &&
-		model?.api !== undefined &&
-		model.id !== undefined &&
-		model.baseUrl !== undefined
-			? supportsToolSchemaDisclosure({
-					api: model.api,
-					id: model.id,
-					baseUrl: model.baseUrl,
-					provider: model.provider,
-					compat: model.compat,
-				})
-			: false;
+		filtered.filter((name) => name !== TOOL_SCHEMA_SEARCH_NAME).length >= MIN_TOOL_SCHEMA_DISCLOSURE_SEARCHABLE_TOOLS;
 	filtered = filtered.filter((name) =>
-		keep(name, name !== TOOL_SCHEMA_SEARCH_NAME || toolSearchSupported, "the model does not support tool search"),
+		keep(name, name !== TOOL_SCHEMA_SEARCH_NAME || toolSearchSupported, "too few other tools to defer behind search"),
 	);
 	return { kept: filtered, withheld };
 }

@@ -17,6 +17,7 @@ import { hasCataloguedToolCapabilityPolicy } from "./tool-capability-policy.ts";
 import { ASSIGN_TOOL_NAME } from "./tools/assign-tool-name.ts";
 import { DECISION_LEDGER_READ_TOOL_NAME } from "./tools/decision-ledger-read.ts";
 import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
+import { PLAN_TOOL_NAME } from "./tools/plan-tool-name.ts";
 
 /**
  * Tools forbidden on EVERY worker surface (in-process leaf lanes and worker processes): agent
@@ -50,8 +51,9 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	ROUTINE_TOOL_NAME,
 	// Bots are created by the orchestrator and by leaders (through bot_message), never by a worker's own tool.
 	BOT_TOOL_NAME,
-	// Workers never launch workers: `assign` starts one, as `delegate` does.
+	// Workers never launch workers: `assign` starts one, as `delegate` does, and `plan` starts many.
 	ASSIGN_TOOL_NAME,
+	PLAN_TOOL_NAME,
 	CHANNEL_REPLY_TOOL_NAME,
 ]);
 

@@ -897,6 +897,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 		description:
 			"Durable goal record: requirements and their checks, evidence, worker dispatch, progress, completion, owner grants and amendments. create_goal, get_goal and update_goal cover start, get and status changes. Record the delivery contract (work-lifecycle rule) as requirements. increment satisfies the current open requirement from unused evidence, or completes when none remain. block_requirement only at the bar update_goal sets for blocked; otherwise keep working.",
 		promptSnippet: "Manage the durable goal record",
+		neverDefer: true,
 		parameters: goalSchema,
 		failureRecovery: {
 			getFailureEvidence: (params) => {
@@ -1432,6 +1433,7 @@ export function createGoalLifecycleToolDefinitions(
 		description:
 			"Start a durable goal when persistent autonomous continuation materially benefits the work, or when the user/system explicitly asks; skip routine short tasks. Pass every known requirement in `requirements` so the goal is set up in one call, then record the plan with one task_steps set.",
 		promptSnippet: "Start a durable goal",
+		neverDefer: true,
 		parameters: createGoalSchema,
 		async execute(toolCallId, input: Static<typeof createGoalSchema>, signal, onUpdate, context) {
 			// All or nothing: a check the goal could never run refuses the whole call before the goal
@@ -1482,6 +1484,7 @@ export function createGoalLifecycleToolDefinitions(
 		label: GOAL_LIFECYCLE_TOOL_NAMES[1],
 		description: "Read the current goal: status, budget, requirements, evidence, progress.",
 		promptSnippet: "Read the durable goal",
+		neverDefer: true,
 		parameters: getGoalSchema,
 		execute(toolCallId, _input, signal, onUpdate, context) {
 			return goalTool.execute(toolCallId, { action: "get" }, signal, onUpdate, context);
@@ -1494,6 +1497,7 @@ export function createGoalLifecycleToolDefinitions(
 		description:
 			"Update the goal's status. active records progress after verifiable progress in the current turn; it never resumes a stopped goal. complete needs current evidence that proves the full objective, with no required work remaining. blocked needs the same verified owner/approval boundary or capability impossibility for three consecutive no-progress goal turns despite distinct recovery approaches, and no meaningful progress possible without owner input or external change; put the evidence and attempted approaches in reason; never use it because work is hard, slow, uncertain or would benefit from clarification. paused only when the owner explicitly asks to stop or pause this goal; then stop goal work (only the owner resumes it, with /goal resume).",
 		promptSnippet: "Update goal status",
+		neverDefer: true,
 		parameters: updateGoalSchema,
 		execute(toolCallId, input: Static<typeof updateGoalSchema>, signal, onUpdate, context) {
 			const requestedGoalStatus: GoalStatus = input.status === "complete" ? "completed" : input.status;
