@@ -225,6 +225,7 @@ import {
 import {
 	parseWorkerDelegationAuthorityRequest,
 	parseWorkerParallelWorkIntent,
+	startsOwnWorker,
 	type WorkerDelegationRequest,
 } from "./worker-delegation-request.ts";
 import { WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS, WorkerDirectoryAdmission } from "./worker-directory-admission.ts";
@@ -3872,17 +3873,8 @@ export class WorkerDelegationController {
 		admission: Extract<WorkerAdmission, { ok: true }>,
 		signal?: AbortSignal,
 	): Promise<WorkerSpecialistReuseDecision> {
-		// Runtime-owned verifier dispatches keep their pinned contract and their independence: a
-		// verifier is never matched against implementation work or a previous verification context.
-		// A third party's words never enter a specialist's standing conversation, where later owner work would read them. A rung is a new attempt of its own source task, so a reuse would drop it.
-		if (
-			request.verificationOfTaskId ||
-			request.reviewOf ||
-			request.parentAgentId ||
-			request.turnOrigin?.thirdParty ||
-			request.attemptOf
-		)
-			return { outcome: "fresh" };
+		// A verifier, a review run, a child, a third party's turn, a rung and a plan step never join a specialist's conversation.
+		if (startsOwnWorker(request)) return { outcome: "fresh" };
 		let independentParallelIntent: boolean;
 		try {
 			independentParallelIntent = this.independentParallelIntent(request);

@@ -26,6 +26,8 @@ interface HistoryState {
 /** Durable append events own refresh admission; redraws only read the cached projection. */
 export class SessionAccountingHistory {
 	private state: HistoryState | undefined;
+	/** Background loads in flight, joined by `close`. */
+	private readonly loads = new Set<Promise<void>>();
 	private readonly deps: {
 		getSession(): SessionManager;
 		getAgentDir(): string;
@@ -41,6 +43,15 @@ export class SessionAccountingHistory {
 	reset(): void {
 		this.state?.unsubscribe?.();
 		this.state = undefined;
+	}
+
+	/**
+	 * The owner is closing: stop observing, and resolve once every load in flight has finished. A load reads the session file
+	 * through an open handle, so a session that closed without joining it would still hold its own file open.
+	 */
+	close(): Promise<void> {
+		this.reset();
+		return Promise.allSettled([...this.loads]).then(() => undefined);
 	}
 
 	hasProjection(): boolean {
@@ -136,7 +147,7 @@ export class SessionAccountingHistory {
 		const file = state.file;
 		const revision = state.revision;
 		let updated = false;
-		void (async () => {
+		const load = (async () => {
 			const projection =
 				(!state.loaded ? await readAccountingProjection(file) : undefined) ??
 				(await reconcileSessionAccounting(this.deps.getAgentDir(), file));
@@ -170,5 +181,7 @@ export class SessionAccountingHistory {
 				if (this.isCurrent(state) && state.needsRefresh) this.schedule(state);
 				if (this.isCurrent(state) && updated) this.deps.onUpdated();
 			});
+		this.loads.add(load);
+		void load.finally(() => this.loads.delete(load));
 	}
 }

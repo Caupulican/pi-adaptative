@@ -188,6 +188,7 @@ export function workerRequestForDispatch(
 					},
 				}
 			: {}),
+		...(dispatch.plan ? { planStep: { planId: dispatch.plan.planId, nodeId: dispatch.plan.nodeId } } : {}),
 		...(pinned?.parentAgentId !== undefined ? { parentAgentId: pinned.parentAgentId } : {}),
 		...(pinned?.botSoul !== undefined ? { botSoul: pinned.botSoul } : {}),
 		...(pinned?.turnOrigin !== undefined ? { turnOrigin: pinned.turnOrigin } : {}),

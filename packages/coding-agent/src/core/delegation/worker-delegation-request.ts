@@ -331,6 +331,8 @@ export interface WorkerDelegationRequest {
 	 * evidence name it; the run reconciles nothing. Never model-settable.
 	 */
 	reviewOf?: { readonly taskId: string; readonly attemptId: string };
+	/** Host-only: the plan step this request runs (set from its fleet dispatch). Never model-settable. */
+	planStep?: { readonly planId: string; readonly nodeId: string };
 	/** Runtime-owned durable task correlation; the delegate tool schema intentionally omits this. */
 	taskContext?: WorkerDelegationTaskContext;
 	/**
@@ -361,4 +363,22 @@ export interface WorkerDelegationRequest {
 	 * of them before this member starts, so a group does not start half of its members and then hit a cap.
 	 */
 	fanoutRemaining?: number;
+}
+
+/**
+ * Whether a request always starts its own worker and is never matched to a specialist's standing conversation. A verifier or a
+ * review run keeps its independence. A child belongs to its parent agent. A third party's words never enter a conversation that
+ * later owner work would read. A rung is a new attempt of its own source task. A plan step runs from its own self-contained
+ * brief beside its sibling steps: matched to a specialist that a sibling keeps busy, it would wait for that sibling to finish
+ * instead of running in parallel.
+ */
+export function startsOwnWorker(request: WorkerDelegationRequest): boolean {
+	return Boolean(
+		request.verificationOfTaskId ||
+			request.reviewOf ||
+			request.parentAgentId ||
+			request.turnOrigin?.thirdParty ||
+			request.attemptOf ||
+			request.planStep,
+	);
 }

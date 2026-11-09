@@ -215,8 +215,9 @@ export class SessionAnalytics {
 		return this.accountingHistory.entries();
 	}
 
-	dispose(): void {
-		this.accountingHistory.reset();
+	/** Resolves once the accounting history's load in flight, if any, has finished and released the session file. */
+	dispose(): Promise<void> {
+		return this.accountingHistory.close();
 	}
 
 	getSessionStats(): SessionStats {

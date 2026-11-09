@@ -3549,7 +3549,7 @@ export class AgentSession {
 		void this._disposeCompletion.catch(() => undefined);
 		this._disposed = true;
 		this._ownerReturnBrief.dispose();
-		this._analytics.dispose();
+		trackRequired(() => this._analytics.dispose());
 		const humanInputPreparation = this._humanInput.invalidate("session dispose");
 		this._runtimeBuilder.closeMutationAdmission();
 		this._runtimeAdmission.close();
