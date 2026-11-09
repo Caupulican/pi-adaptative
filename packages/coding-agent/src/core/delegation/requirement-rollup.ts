@@ -1,4 +1,5 @@
 import type { WorkerClaim } from "../autonomy/contracts.ts";
+import { reviewRunVerdict } from "../orchestration/review-verdict.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { attemptVerification, isManagedWorkerAttempt } from "./worker-lane-projection.ts";
 
@@ -149,7 +150,9 @@ export function rollupAttemptsFromSnapshot(
 				attemptId: attempt.attemptId,
 				requirementIds,
 				...(claim ? { claim } : {}),
-				verificationAccepted: attemptVerification(snapshot, attempt)?.verdict === "accepted",
+				verificationAccepted:
+					attemptVerification(snapshot, attempt)?.verdict === "accepted" ||
+					reviewRunVerdict(snapshot, attempt)?.kind === "accepted",
 			});
 		}
 	}

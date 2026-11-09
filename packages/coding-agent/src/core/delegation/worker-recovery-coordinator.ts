@@ -8,6 +8,8 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { reconcileAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { AttemptUsageSnapshot, ExecutionGrant, ResourcePointer, RiskBudget } from "../orchestration/contracts.ts";
+import { planReviewAnchorOfTask } from "../orchestration/plan-review-subjects.ts";
+import { isReviewRun } from "../orchestration/review-verdict.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
 import { isGoalObjectiveId } from "../orchestration/work-state-projection.ts";
 import type { TimerPort } from "../util/timer-port.ts";
@@ -593,6 +595,13 @@ export class WorkerRecoveryCoordinator {
 	recoveredRequest(attempt: AttemptRuntimeState, verificationOfTaskId?: string): WorkerDelegationRequest {
 		const task = this.options.lifecycle.getTask(attempt.taskId)?.task;
 		const durableVerificationOfTaskId = verificationOfTaskId ?? task?.verificationOfTaskId;
+		// A plan review run is re-admitted under its anchor and the verifier preset its durable contract admitted: its derived
+		// profile id is not in the profile store, so the store is not consulted for it.
+		const reviewOf =
+			task && isReviewRun(task)
+				? planReviewAnchorOfTask(this.options.lifecycle.getTaskRuntimeSnapshot(), attempt.taskId)
+				: undefined;
+		const reviewContract = reviewOf ? attempt.dispatch.executionContract?.worker : undefined;
 		return {
 			instructions: attempt.dispatch.instructions,
 			objectiveId: task && isGoalObjectiveId(task.objectiveId) ? task.objectiveId : null,
@@ -604,6 +613,16 @@ export class WorkerRecoveryCoordinator {
 			...(attempt.dispatch.parentAgentId ? { parentAgentId: attempt.dispatch.parentAgentId } : {}),
 			...(durableVerificationOfTaskId ? { verificationOfTaskId: durableVerificationOfTaskId } : {}),
 			...(task?.verificationOfAttemptId ? { verificationOfAttemptId: task.verificationOfAttemptId } : {}),
+			...(reviewOf ? { reviewOf } : {}),
+			...(reviewContract
+				? {
+						verifierPreset: {
+							profile: reviewContract.profile,
+							resourcePointers: reviewContract.resourcePointers,
+							...(reviewContract.soul ? { soul: reviewContract.soul } : {}),
+						},
+					}
+				: {}),
 			...(task
 				? {
 						taskContext: {

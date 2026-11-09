@@ -2,7 +2,6 @@ import { createHash, randomUUID } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
-import { assessCompactionNeed, hardCompactionTriggerTokens } from "../../kernel/compaction/compaction.ts";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import {
 	type AgentContextWire,
@@ -158,7 +157,7 @@ import { createBotMessageBroker } from "./bot-message-directory.ts";
 import { importRecordedParentWrites } from "./foreground-parent-writes.ts";
 import { unmetGoalDependencyReason } from "./goal-dependency-gate.ts";
 import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
-import type { ParentExecutionContext, ParentExecutionSettingsSource } from "./parent-execution-context.ts";
+import type { ParentExecutionContext } from "./parent-execution-context.ts";
 import { RequestCostBounds } from "./request-cost-bounds.ts";
 import {
 	type SanitizedContextForkMessage,
@@ -211,10 +210,10 @@ import {
 } from "./worker-context-fork-store.ts";
 import { resolveWorkerContextInheritanceMode } from "./worker-context-inheritance-policy.ts";
 import {
-	type WorkerConversation,
-	type WorkerConversationRetentionPolicy,
-	WorkerConversationStore,
-} from "./worker-conversation-store.ts";
+	laneCompactionReserveTokens,
+	workerConversationRetentionPolicy,
+} from "./worker-conversation-compaction-policy.ts";
+import { type WorkerConversation, WorkerConversationStore } from "./worker-conversation-store.ts";
 import {
 	isOAuthCredentialUnusableText,
 	WorkerCredentialHealth,
@@ -332,52 +331,6 @@ import {
 /** An owner pin that cannot run keeps the refusal causes its resolver reported: `...:<role>:<causes>`. */
 function pinnedModelSkipReason(role: string, refusal: string): string {
 	return `worker_model_pin_unavailable:${role}:${refusal.slice(refusal.indexOf(":") + 1)}`;
-}
-
-/** Root's compaction reserve on the worker's own window: never more than a quarter of it. */
-function laneCompactionReserveTokens(contextWindow: number, reserveTokens: number): number {
-	return Math.min(reserveTokens, Math.floor(contextWindow * 0.25));
-}
-
-function workerConversationRetentionPolicy(
-	model: Model<Api>,
-	settingsManager: ParentExecutionSettingsSource,
-	admitEarly?: (contextTokens: number, messages: readonly AgentMessage[]) => boolean,
-): WorkerConversationRetentionPolicy | undefined {
-	const settings = settingsManager.getCompactionSettings();
-	const contextWindow = Math.floor(model.contextWindow ?? 0);
-	if (!settings.enabled || contextWindow < 4) return undefined;
-	// Root's boundaries on the worker's own window: the hard limit always compacts; the fractional
-	// trigger is the early band, where a compaction runs only when its price admits it.
-	const laneSettings = {
-		...settings,
-		reserveTokens: laneCompactionReserveTokens(contextWindow, settings.reserveTokens),
-	};
-	const modelTrigger =
-		model.autoCompactionTriggerTokens && model.autoCompactionTriggerTokens > 0
-			? Math.floor(model.autoCompactionTriggerTokens)
-			: undefined;
-	const maxContextTokens = hardCompactionTriggerTokens(contextWindow, laneSettings, modelTrigger);
-	if (maxContextTokens < 2) return undefined;
-	const keepRecentTokens = Math.max(
-		1,
-		Math.min(settings.keepRecentTokens, Math.floor(contextWindow * 0.5), maxContextTokens - 1),
-	);
-	return {
-		maxContextTokens,
-		keepRecentTokens,
-		...(admitEarly
-			? {
-					admitEarlyCompaction: (contextTokens: number, messages: readonly AgentMessage[]) =>
-						assessCompactionNeed(
-							contextTokens,
-							contextWindow,
-							{ ...laneSettings, keepRecentTokens },
-							modelTrigger,
-						) === "early" && admitEarly(contextTokens, messages),
-				}
-			: {}),
-	};
 }
 
 /** The owner's own authority a worker whose words came from a third party is not given at a tool call (see the resolver's `thirdParty`). */
@@ -760,6 +713,12 @@ export class WorkerDelegationController {
 				}
 			},
 			prepare: (request, signal) => this.admitWorkerStart(request, signal),
+			planVerifierPreset: (subject) =>
+				this.getWorkerProfileResolver().resolvePlanVerifierPreset(
+					this.lifecycle.getTaskRuntimeSnapshot().attempts[subject.subjectAttemptId]?.dispatch.executionContract
+						?.worker,
+					this.deps.getSettingsManager().getWorkerDelegationSettings().orchestrationProfile,
+				),
 			materialize: (request, admission) => this.startInternal(request, undefined, admission),
 			admissionModel: (admission) => admission.shipment.model,
 			admittedAuthority: (admission) => admission.executionContract.worker.authority,
@@ -2202,10 +2161,11 @@ export class WorkerDelegationController {
 		) {
 			return { ok: false, skipReason: "recursive_delegation_cycle" };
 		}
-		if (request.verificationOfTaskId && shipment.profile.role !== "verifier") {
+		const verifierSubject = request.verificationOfTaskId !== undefined || request.reviewOf !== undefined;
+		if (verifierSubject && shipment.profile.role !== "verifier") {
 			return { ok: false, skipReason: "verification_profile_role_mismatch" };
 		}
-		if (!request.verificationOfTaskId && shipment.profile.role === "verifier") {
+		if (!verifierSubject && shipment.profile.role === "verifier") {
 			return { ok: false, skipReason: "verifier_profile_requires_runtime_dispatch" };
 		}
 		let verifierShipment: ResolvedWorkerProfile | undefined;
@@ -3042,7 +3002,8 @@ export class WorkerDelegationController {
 	): { view: boolean; messages: SanitizedContextForkMessage[] } {
 		const forked =
 			mode.kind === "none" ? [] : selectSanitizedContextFork(this.workerContextForkSource(request).messages, mode);
-		const chat = request.verificationOfTaskId ? undefined : this.deps.getContinuousChatBirthView?.();
+		const chat =
+			request.verificationOfTaskId || request.reviewOf ? undefined : this.deps.getContinuousChatBirthView?.();
 		return chat
 			? { view: true, messages: [{ role: "user", content: chat.view, timestamp: chat.timestamp }, ...forked] }
 			: { view: false, messages: forked };
@@ -3067,7 +3028,7 @@ export class WorkerDelegationController {
 		request: WorkerDelegationRequest,
 		contract: WorkerExecutionContract,
 	): ReturnType<typeof resolveWorkerContextInheritanceMode> {
-		if (request.verificationOfTaskId) return { kind: "none" };
+		if (request.verificationOfTaskId || request.reviewOf) return { kind: "none" };
 		const mode = request.forkTurns ?? "none";
 		return resolveWorkerContextInheritanceMode({
 			parent: this.workerContextParentModel(request),
@@ -3914,7 +3875,13 @@ export class WorkerDelegationController {
 		// Runtime-owned verifier dispatches keep their pinned contract and their independence: a
 		// verifier is never matched against implementation work or a previous verification context.
 		// A third party's words never enter a specialist's standing conversation, where later owner work would read them. A rung is a new attempt of its own source task, so a reuse would drop it.
-		if (request.verificationOfTaskId || request.parentAgentId || request.turnOrigin?.thirdParty || request.attemptOf)
+		if (
+			request.verificationOfTaskId ||
+			request.reviewOf ||
+			request.parentAgentId ||
+			request.turnOrigin?.thirdParty ||
+			request.attemptOf
+		)
 			return { outcome: "fresh" };
 		let independentParallelIntent: boolean;
 		try {
@@ -5841,7 +5808,9 @@ export class WorkerDelegationController {
 						: this.deps.getHandoffPersonaGuidance?.();
 					return personaGuidance ? { personaGuidance } : {};
 				})(),
-				...(request.verificationOfTaskId ? { verificationSubjectTaskId: request.verificationOfTaskId } : {}),
+				...((request.verificationOfTaskId ?? request.reviewOf?.taskId)
+					? { verificationSubjectTaskId: request.verificationOfTaskId ?? request.reviewOf?.taskId }
+					: {}),
 				...(recoveredTerminal ? { recoveredTerminal } : {}),
 				...(retentionPolicy ? { retentionPolicy } : {}),
 				signal: workerSignal,
@@ -6359,6 +6328,7 @@ export class WorkerDelegationController {
 				const finalUsage = executionResult.usage;
 				const reportedUsage = providerUsageFromAttemptUsage(finalUsage);
 				let record = finalizeWorkerClaim(lifecycle, {
+					reviewOf: request.reviewOf,
 					handle: durableHandle,
 					claim: outcome.claim,
 					...workerRunTerminalFields(outcome),

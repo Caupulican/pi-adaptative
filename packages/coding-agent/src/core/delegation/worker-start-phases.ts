@@ -39,6 +39,7 @@ import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS } from "./worker-directory-admission.ts";
 import type { WorkerDispatchWaitState } from "./worker-dispatch-scheduler.ts";
 import { authorityDigest, type RerunPlacement } from "./worker-escalation.ts";
+import type { ResolvedWorkerProfilePreset } from "./worker-profile-resolver.ts";
 
 /** Prepared fleet dispatches held at once; a dispatch prepared past it is refused until one is admitted or released. */
 export const MAX_PREPARED_DISPATCHES = 256;
@@ -92,6 +93,11 @@ export interface WorkerStartPhasePort<A> {
 	admittedAuthority(admission: A): WorkerExecutionAuthorityContract;
 	/** Where a fresh admission runs and in which isolation: compared with an escalation's recorded placement. */
 	admittedPlacement(admission: A): RerunPlacement;
+	/** The verifier a plan verify step runs as, derived from its subject attempt's admitted contract. */
+	planVerifierPreset(subject: {
+		readonly subjectTaskId: string;
+		readonly subjectAttemptId: string;
+	}): { ok: true; resolved: ResolvedWorkerProfilePreset } | { ok: false; reason: string };
 	/** The fresh lane directory a start that never ran leaves behind, removed by `discardLaneDirectory`. */
 	laneDirectory(admission: A): string;
 	discardLaneDirectory(cwd: string): Promise<void> | undefined;
@@ -134,6 +140,7 @@ export function workerRequestForDispatch(
 	dispatch: FleetDispatch,
 	supersededThinking: OrchestrationThinkingLevel | undefined,
 	sessionCwd: string,
+	verifier?: ResolvedWorkerProfilePreset,
 ): WorkerDelegationRequest {
 	const thinkingLevel =
 		dispatch.thinking === "inherit"
@@ -169,6 +176,18 @@ export function workerRequestForDispatch(
 		...(dispatch.delegation ? { delegationObjectiveId: dispatch.delegation.objectiveId } : {}),
 		// A rerun is admitted as the original was: its registered profile, parent, bot soul, origins and checkout.
 		...(pinned?.profileId !== undefined ? { profileId: pinned.profileId } : {}),
+		// A plan verify step runs its derived read-only review run, anchored on the first result it checks. It is not a verification
+		// of that result: the anchor names the review's subject and the review reconciles nothing.
+		...(dispatch.verification && verifier
+			? {
+					profileId: verifier.profile.profileId,
+					verifierPreset: verifier,
+					reviewOf: {
+						taskId: dispatch.verification.subjectTaskId,
+						attemptId: dispatch.verification.subjectAttemptId,
+					},
+				}
+			: {}),
 		...(pinned?.parentAgentId !== undefined ? { parentAgentId: pinned.parentAgentId } : {}),
 		...(pinned?.botSoul !== undefined ? { botSoul: pinned.botSoul } : {}),
 		...(pinned?.turnOrigin !== undefined ? { turnOrigin: pinned.turnOrigin } : {}),
@@ -227,8 +246,15 @@ export class WorkerStartPhases<A> implements FleetLocalStartPort {
 		const last = basis ? this.port.lastAttempt(basis) : undefined;
 		const supersededThinking = (last?.runningModel ?? last?.dispatch.executionContract?.worker.modelBinding)
 			?.thinkingLevel;
+		const verifier = dispatch.verification ? this.port.planVerifierPreset(dispatch.verification) : undefined;
+		if (verifier && !verifier.ok) return Promise.resolve({ ok: false, skipReason: verifier.reason });
 		const captured = this.port.capture(
-			workerRequestForDispatch(dispatch, supersededThinking, this.port.sessionCwd()),
+			workerRequestForDispatch(
+				dispatch,
+				supersededThinking,
+				this.port.sessionCwd(),
+				verifier?.ok ? verifier.resolved : undefined,
+			),
 		);
 		const preparation = this.port
 			.admitted(

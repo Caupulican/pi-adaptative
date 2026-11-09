@@ -68,6 +68,8 @@ export interface LadderFacts {
 	readonly remoteMachineId?: string;
 	/** A rerun the original authority could not be rebuilt into: the owner decides, the ladder does not retry it. */
 	readonly rungRefusal?: string;
+	/** A review run whose verdict rejected the result: the reason codes it named, bounded. Set only for such a run. */
+	readonly reviewRejection?: string;
 	/** Q1/Q1s for a worker-stated blocker: only the owner can supply what is missing. */
 	readonly ownerOnly?: JudgmentPair;
 }
@@ -97,6 +99,10 @@ const MOVE_MODEL_BLOCKERS: ReadonlySet<BlockerCode> = new Set(["provider_quota",
 
 /** The E10b question: the task's cost or attempt budget is spent, so no further try may start. */
 const BUDGET_SPENT_QUESTION = "another try would pass the task's budget; raise it or accept";
+
+/** The E18 question for a time stop the ladder could not answer: the wall-clock cap is the owner's setting to raise. */
+const TIME_STOP_QUESTION =
+	"the task ran out of time before its requirements were met (cap: workerDelegation.maxWallClockMs); raise the cap or narrow the task";
 
 /** The settled reading of a judgment pair; `open` covers every combination the two cuts do not settle. */
 export function judgmentPairVerdict(pair: JudgmentPair | undefined): PairedVerdict {
@@ -152,6 +158,12 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 	if (facts.status === "cancelled")
 		return done("E1", { kind: "abandon", reason: ABANDON_BY_BLOCKER[blocker] ?? "cancelled" });
 	const remedy = FIX_REQUEST_REMEDIES[blocker];
+	// A rejected review names the step to change; the ladder never reruns a verifier because it rejected.
+	if (facts.reviewRejection !== undefined)
+		return done("E2r", {
+			kind: "fix_request",
+			remedy: `independent verification rejected the result (${facts.reviewRejection}); change the step it checked, then it is verified again`,
+		});
 	if (remedy) return done("E2", { kind: "fix_request", remedy });
 	if (blocker === "owner_authority_required" || blocker === "needs_owner_decision")
 		return askOwner("E3", "the worker needs an authority or a decision only you can give");
@@ -231,10 +243,16 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 			skip("E14", room);
 			if (room === "budget") return askOwner("E10b", BUDGET_SPENT_QUESTION);
 		} else {
-			const thinking = nextThinkingLevel(facts.thinking, facts.thinkingCeiling);
+			// A time stop is never answered with more thinking: its rerun keeps the attempt's level (the fallback the model
+			// move uses), and it is placed only when the stopped attempt covered something, so the rest is a narrower task.
+			const timeStop = blocker === "time_exhausted";
+			const thinking = timeStop
+				? (facts.thinking ?? "off")
+				: nextThinkingLevel(facts.thinking, facts.thinkingCeiling);
 			const rung1Used = facts.escalations.some((entry) => entry.rung === 1);
 			const signature = thinking ? escalationSignature(facts.nodeId, remaining, facts.modelRef, thinking) : "";
-			if (rung1Used) skip("E14", "rung1_used");
+			if (timeStop && coverage.covered.length === 0) skip("E14", "time_stop_no_progress");
+			else if (rung1Used) skip("E14", "rung1_used");
 			else if (!thinking) skip("E14", "thinking_ceiling");
 			else if (facts.escalations.some((entry) => entry.signature === signature)) skip("E14", "signature_placed");
 			else
@@ -250,6 +268,8 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 			}
 		}
 	}
+	// Open work after a time stop is the cap's to raise or the task's to narrow. A stop that covered every requirement is not.
+	if (blocker === "time_exhausted" && workRemains) return askOwner("E18", TIME_STOP_QUESTION);
 	return askOwner("E18", `${remainingCount(coverage)} still not met (${blocker}); decide how to continue`);
 }
 

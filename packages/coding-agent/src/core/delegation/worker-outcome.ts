@@ -9,9 +9,10 @@ import type {
 	WorkerReportRequirementStatus,
 } from "../autonomy/contracts.ts";
 import type { ArtifactContract } from "../orchestration/contracts.ts";
+import { reviewRunVerdict } from "../orchestration/review-verdict.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { attemptVerification } from "../orchestration/verification-identity.ts";
-import { type VerifierVerdict, verdictOfReasonCode } from "../orchestration/verification-verdict.ts";
+import { type VerifierVerdict, verdictOfReasonCode, verdictReasonCode } from "../orchestration/verification-verdict.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import {
 	attemptRung,
@@ -22,8 +23,10 @@ import {
 import { decideNextAction, type JudgmentPair } from "./worker-escalation-policy.ts";
 import {
 	attemptAwaitsVerification,
+	isWorkerTimeoutReasonCode,
 	NONTERMINAL_WORKER_ATTEMPT_STATUSES,
 	projectWorkerAttemptLaneRecord,
+	WORKER_TIMEOUT_BLOCKERS,
 } from "./worker-lane-projection.ts";
 import {
 	BLOCKER_ATTRIBUTION,
@@ -54,6 +57,8 @@ export * from "./worker-outcome-words.ts";
 // ---------------------------------------------------------------------------------------------------------------------
 
 const EXACT_SOURCE_CODES: Readonly<Record<string, BlockerCode>> = {
+	// timeout ends: the one table of timeout codes and their blockers lives with the lane projection that reads them
+	...WORKER_TIMEOUT_BLOCKERS,
 	// work quality
 	requirement_partial: "requirement_uncovered",
 	requirement_not_met: "requirement_uncovered",
@@ -76,8 +81,6 @@ const EXACT_SOURCE_CODES: Readonly<Record<string, BlockerCode>> = {
 	invalid_worker_claim: "output_malformed",
 	context_overflow: "context_exhausted",
 	token_budget_below_floor: "context_exhausted",
-	timeout: "time_exhausted",
-	wall_clock_exceeded: "time_exhausted",
 	stall_limit_reached: "time_exhausted",
 	// verification
 	independent_verification_required: "verification_pending",
@@ -159,7 +162,6 @@ const EXACT_SOURCE_CODES: Readonly<Record<string, BlockerCode>> = {
 	machine_refused: "placement_unreachable",
 	"machine_refused:no_room": "capacity_unavailable",
 	"machine_refused:peer_budget_out": "capacity_unavailable",
-	remote_deadline: "deadline_reached",
 	owner_cancelled: "cancelled_by_owner",
 };
 
@@ -336,21 +338,24 @@ export function projectOutcome(input: ProjectOutcomeInput): Outcome | undefined 
 			? carriedClaimFacts(sameAttemptPrevious)
 			: undefined;
 	const verification = attemptVerification(snapshot, attempt);
+	// A review run's verdict enters the ledger where a subject's verification does: one verdict for coverage, blocker, status and assurance.
+	const review = verification ? undefined : reviewRunVerdict(snapshot, attempt);
+	const verdict = verification?.verdict ?? review?.kind;
 	const required = (attempt.dispatch.requirementIds ?? []).slice(0, OUTCOME_LIMITS.maxRequirementIds);
 	const checks = settledChecks(input, sameAttemptPrevious);
-	const coverage = projectCoverage(required, facts, checks, verification?.verdict, awaitingVerification, laneStatus);
-	const sourceCodes = collectSourceCodes(attempt, lane.reasonCode, facts);
+	const coverage = projectCoverage(required, facts, checks, verdict, awaitingVerification, laneStatus);
+	const sourceCodes = collectSourceCodes(attempt, lane.reasonCode, facts, review);
 	const choice = selectBlocker({
 		laneStatus,
 		awaitingVerification,
-		verificationVerdict: verification?.verdict,
+		verificationVerdict: verdict,
 		resultAccepted: attempt.result?.status === "completed",
 		coverage,
 		facts,
 		reasonCode: lane.reasonCode,
 		attempt,
 	});
-	let status = selectStatus(laneStatus, choice.blocker, coverage, verification?.verdict);
+	let status = selectStatus(laneStatus, choice.blocker, coverage, verdict);
 	let blocker = status === "succeeded" ? "none" : choice.blocker;
 	if (status !== "succeeded" && blocker === "none") {
 		blocker = "unclassified";
@@ -398,7 +403,7 @@ export function projectOutcome(input: ProjectOutcomeInput): Outcome | undefined 
 		attribution: blocker === "none" ? "none" : BLOCKER_ATTRIBUTION[blocker],
 		sourceCodes,
 		coverage,
-		assurance: assuranceFor(status, required, facts, coverage, verification?.verdict),
+		assurance: assuranceFor(status, required, facts, coverage, verdict),
 		artifacts: outcomeArtifacts(attempt.result?.artifacts ?? []),
 		changedFiles: (facts?.changedFiles ?? changedFilesFromArtifacts(attempt.result?.artifacts ?? [])).slice(
 			0,
@@ -469,11 +474,13 @@ function collectSourceCodes(
 	attempt: AttemptRuntimeState,
 	laneReasonCode: string | undefined,
 	facts: ClaimFacts | undefined,
+	review: VerifierVerdict | undefined,
 ): string[] {
 	const codes = [
 		laneReasonCode,
 		attempt.result?.reasonCode,
 		attempt.reasonCode,
+		...(review?.kind === "rejected" ? [verdictReasonCode(review)] : []),
 		...(facts?.verdictReasonCodes ?? []),
 		...(facts?.findingCodes ?? []).map((code) => `host_finding:${code}`),
 		...(facts?.declared ? [`worker_declared:${facts.declared}`] : []),
@@ -518,7 +525,8 @@ function selectBlocker(args: {
 		return { blocker: facts.verdict === "rejected" ? "evidence_contradicts_claim" : "evidence_missing" };
 	}
 	if (facts?.verdict === "blocked") return { blocker: "worker_reported_blocker" };
-	if (args.laneStatus === "timeout") return { blocker: "time_exhausted", source: reasonCode };
+	// A timeout end is classified by its exact code. Host facts above it (declared, finding, verdict) still decide first.
+	if (args.laneStatus === "timeout") return timeoutBlocker(reasonCode);
 	if (args.laneStatus === "budget_exhausted") return { blocker: "budget_exhausted", source: reasonCode };
 	if (reasonCode === "completion_error") return classifiedCompletionError(args.attempt);
 	const mapped = mappedBlocker(reasonCode);
@@ -539,6 +547,12 @@ function selectBlocker(args: {
 function mappedBlocker(code: string | undefined): BlockerChoice {
 	if (code === undefined) return { blocker: "unclassified" };
 	return { blocker: blockerForSourceCode(code) ?? "unclassified", source: code };
+}
+
+/** The blocker a timeout end names by its exact reason code; a code outside the timeout set is not a timeout end. */
+function timeoutBlocker(code: string | undefined): BlockerChoice {
+	if (code === undefined || !isWorkerTimeoutReasonCode(code)) return { blocker: "unclassified" };
+	return { blocker: WORKER_TIMEOUT_BLOCKERS[code], source: code };
 }
 
 /** A completion error is classified through its host diagnostic when one was retained. */

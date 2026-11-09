@@ -532,7 +532,9 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		const budgetRefusal = captured.refusal?.reasonCode === bounded.failure.reasonCode ? captured.refusal : undefined;
 		const failureLaneStatus =
 			bounded.failure.status === "budget_exhausted" && !isBudgetExhausted ? "failed" : bounded.failure.status;
-		const cancelled = bounded.failure.status === "canceled" || bounded.failure.status === "timeout";
+		// Only an external cancellation is a cancelled attempt. A wall-clock stop is a failed attempt that carries its exact
+		// timeout code, which the lane projection records as a timeout end; as a cancelled attempt it would read `canceled`.
+		const cancelled = bounded.failure.status === "canceled";
 		const blockers = [
 			...(liveChangedFilesReport.overflowed
 				? ["worker changed-file report exceeded the durable claim bound; parent review is required"]

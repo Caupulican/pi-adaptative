@@ -8,9 +8,9 @@
  * - vote: every member settled; no eligible (succeeded) candidate settles the vote as partial. Otherwise the executor judges
  *   the candidates on the vote's rubric and acts on the exit it reads (`plan-vote-decision.ts`). A vote whose automatic
  *   checks settled is decided by their verdicts here, in code.
- * - reduce and verify: run a worker task over the members (the reducer answers `criterion`, the verifier checks the
- *   subjects). A reduce join's outcome is the reducer's alone; a verify join's outcome aggregates the members with the
- *   verifier's.
+ * - reduce and verify: run a worker task over the members (the reducer answers `criterion`, the verifier reviews the
+ *   results the members ran). A reduce join's outcome is the reducer's alone; a verify join settles through its verifier
+ *   alone (`verifyJoinResult`): the members only ever lift an accepted review, never a failed one.
  * - merge: every member settled, then the executor lands the members' lanes in order (`plan-merge.ts`); the landed join
  *   settles with `mergeResult`, collect semantics over the settled members.
  *
@@ -20,7 +20,7 @@
  */
 
 import { aggregateOutcomes } from "../delegation/worker-outcome.ts";
-import type { Outcome, OutcomeStatus } from "../delegation/worker-outcome-contract.ts";
+import { BLOCKER_ATTRIBUTION, type Outcome, type OutcomeStatus } from "../delegation/worker-outcome-contract.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { highestStakesLevel, type ProofStakesLevel } from "../proof/stakes-levels.ts";
 import type { ConflictReading } from "../system-one/plan-result-review.ts";
@@ -337,6 +337,16 @@ export function workerJoinResult(
 	findings?: { readonly pairs: readonly FindingPair[]; readonly readings: ReadonlyMap<string, ConflictReading> },
 ): JoinResult {
 	const { settled } = memberOutcomes(projection, plan, node);
+	if (node.kind === "verify")
+		return verifyJoinResult(
+			record,
+			node,
+			settled,
+			worker,
+			identity,
+			findings ? findingConflicts(findings.pairs, findings.readings) : [],
+			workerStakes,
+		);
 	// The reducer's answer is the join's; the verifier's verdict gates every subject.
 	const children = node.kind === "reduce" ? [worker] : [...settled.map((member) => member.outcome), worker];
 	return buildResult(
@@ -348,6 +358,67 @@ export function workerJoinResult(
 		workerStakes,
 		findings ? findingConflicts(findings.pairs, findings.readings) : [],
 	);
+}
+
+/**
+ * A verify join settles through its verifier (R6). A verifier that did not succeed fails the step with its blocker and next action,
+ * whatever its members did. An independently verified verifier counts each member whose only shortfall is an unverified result as
+ * verified, the way an accepted verification settles a subject: succeeded, every required requirement covered by the verification.
+ */
+function verifyJoinResult(
+	record: PlanRecord,
+	node: PlanNodeSpec,
+	settled: readonly SettledMember[],
+	worker: Outcome,
+	identity: JoinIdentity,
+	conflicts: readonly JoinConflict[],
+	workerStakes?: ProofStakesLevel,
+): JoinResult {
+	// Only an accepted review (independently verified) settles the step. A review that finished with no verdict leaves it unverified.
+	if (worker.status !== "succeeded" || worker.assurance !== "independently_verified") {
+		const aggregated = aggregate(record, node, [...settled.map((member) => member.outcome), worker], "all", identity);
+		const unverified = worker.status === "succeeded";
+		const blocker = unverified ? "unverified_result" : worker.blocker;
+		const failed: Outcome = {
+			...aggregated,
+			status: "failed",
+			blocker,
+			attribution: BLOCKER_ATTRIBUTION[blocker],
+			nextAction: unverified
+				? { kind: "ask_root", question: "The verifier finished without a verdict; the step is not verified." }
+				: worker.nextAction,
+		};
+		return buildResult(node, settled, failed, identity, undefined, workerStakes, conflicts);
+	}
+	const counted = settled.map((member) =>
+		member.outcome.status !== "succeeded" && member.outcome.blocker === "unverified_result"
+			? { ...member, outcome: verifiedOutcome(member.outcome) }
+			: member,
+	);
+	const children = [...counted.map((member) => member.outcome), worker];
+	return buildResult(
+		node,
+		counted,
+		aggregate(record, node, children, "all", identity),
+		identity,
+		undefined,
+		workerStakes,
+		conflicts,
+	);
+}
+
+/** A member's outcome once an accepted independent verification covers its requirements (the verification is its evidence). */
+function verifiedOutcome(outcome: Outcome): Outcome {
+	const required = outcome.coverage.required;
+	return {
+		...outcome,
+		status: "succeeded",
+		blocker: "none",
+		attribution: "none",
+		assurance: "independently_verified",
+		coverage: { required, covered: required.map((id) => ({ id, by: "verification" as const })), uncovered: [] },
+		nextAction: { kind: "accept" },
+	};
 }
 
 /** Whether a join's result lets the root read the report alone: accepted, every cited requirement met, nothing open. */

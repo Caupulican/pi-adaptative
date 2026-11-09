@@ -37,6 +37,7 @@ import {
 	reviewManagedLaneChangedFiles,
 } from "./worker-claim.ts";
 import { compileManagedProcessExecutionGrant } from "./worker-execution-policy.ts";
+import { isWorkerTimeoutReasonCode } from "./worker-lane-projection.ts";
 import { ManagedLaneLifetimeInputError, type WorkerLifecycle } from "./worker-lifecycle.ts";
 import { finalizeWorkerClaim } from "./worker-terminal-finalizer.ts";
 
@@ -72,9 +73,27 @@ export function mapManagedLaneTerminalStatus(status: LaneTerminalStatus): Worker
 		case "canceled":
 			return "cancelled";
 		case "failed":
+		// A claim has no timeout status: a timeout stays `failed` and is carried by its exact reason code (see below).
 		case "timeout":
 			return "failed";
 	}
+}
+
+/**
+ * The reason code a managed terminal report ends its attempt with. A timeout is carried by an exact timeout code, which the
+ * lane projection reads: a reported timeout code is kept, any other reported code (or none) makes it the bare `timeout`, and
+ * a parent-review hold never replaces it (the review is still named in the claim summary).
+ */
+function managedTerminalReasonCode(args: {
+	status: LaneTerminalStatus;
+	reportedCode: string | undefined;
+	reviewCode: string | undefined;
+}): string {
+	if (args.status === "timeout") {
+		const code = normalizeWorkerClaimReasonCode(args.reportedCode, "timeout");
+		return isWorkerTimeoutReasonCode(code) ? code : "timeout";
+	}
+	return normalizeWorkerClaimReasonCode(args.reviewCode ?? args.reportedCode, `managed_worker_${args.status}`);
 }
 
 export interface ManagedLaneControllerDeps {
@@ -437,10 +456,11 @@ export class ManagedLaneController {
 					: {}),
 				wallClockMs: Math.max(0, Date.now() - Date.parse(attempt.createdAt)),
 				toolCalls: 0,
-				reasonCode: normalizeWorkerClaimReasonCode(
-					review.reviewRequired ? `parent_review_required:${review.reasonCode}` : event.reasonCode,
-					`managed_worker_${resolvedStatus}`,
-				),
+				reasonCode: managedTerminalReasonCode({
+					status: resolvedStatus,
+					reportedCode: event.reasonCode,
+					reviewCode: review.reviewRequired ? `parent_review_required:${review.reasonCode}` : undefined,
+				}),
 			});
 			record = terminal.record;
 			finalized = true;

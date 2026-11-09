@@ -1,4 +1,5 @@
 import { ORCHESTRATION_THINKING_LEVELS, type OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
+import { reviewRunVerdict } from "../orchestration/review-verdict.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { DEFAULT_WORKER_OUTCOME_SETTINGS } from "../settings/worker-outcome-settings.ts";
 import type { JudgmentPair, LadderCandidate, LadderFacts } from "./worker-escalation-policy.ts";
@@ -82,6 +83,9 @@ function remoteMachineOf(snapshot: TaskRuntimeProjection, taskId: string): strin
 	return undefined;
 }
 
+/** The most characters of a rejected review's reason codes a remedy quotes. */
+const REVIEW_REASON_CHARS = 240;
+
 /** The ladder's code facts for one terminal attempt's outcome, read from the durable projection. */
 export function outcomeLadderFacts(args: {
 	readonly snapshot: TaskRuntimeProjection;
@@ -117,6 +121,7 @@ export function outcomeLadderFacts(args: {
 		.map((entry) => entry.id);
 	const route = attempt.dispatch.modelRouteSource;
 	const remoteMachineId = remoteMachineOf(snapshot, attempt.taskId);
+	const review = reviewRunVerdict(snapshot, attempt);
 	return {
 		scope: "lane",
 		nodeId: attempt.taskId,
@@ -142,5 +147,11 @@ export function outcomeLadderFacts(args: {
 		...(remoteMachineId !== undefined ? { remoteMachineId } : {}),
 		...(args.ownerOnly ? { ownerOnly: args.ownerOnly } : {}),
 		...(args.rungRefusal !== undefined ? { rungRefusal: args.rungRefusal } : {}),
+		...(review?.kind === "rejected" ? { reviewRejection: boundedReasonCodes(review.reasonCodes) } : {}),
 	};
+}
+
+/** The reason codes a rejected review named, as one bounded line for the remedy. */
+function boundedReasonCodes(codes: readonly string[]): string {
+	return (codes.join(", ") || "no reason given").slice(0, REVIEW_REASON_CHARS);
 }

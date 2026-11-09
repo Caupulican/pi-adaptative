@@ -4,12 +4,8 @@
  * the screen and the executor never disagree about a step.
  */
 
-import {
-	isOutcomeFromNewerBuild,
-	type NextAction,
-	type Outcome,
-	type OutcomeStatus,
-} from "../delegation/worker-outcome-contract.ts";
+import type { NextAction, Outcome, OutcomeStatus } from "../delegation/worker-outcome-contract.ts";
+import { planStepSettledOutcome } from "../orchestration/plan-review-subjects.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { currentTaskOf } from "../orchestration/task-successor.ts";
 import type { Placement } from "../placement/placement-types.ts";
@@ -87,13 +83,7 @@ export function planNodeOutcome(
 	plan: PlanRuntimeState,
 	nodeId: string,
 ): Outcome | undefined {
-	const runtime = plan.nodes[nodeId];
-	if (!runtime) return undefined;
-	const joined = runtime.join?.outcome;
-	if (joined && !isOutcomeFromNewerBuild(joined)) return joined;
-	if (!runtime.settled || !runtime.release) return undefined;
-	const outcome = projection.tasks[currentTaskOf(projection, runtime.release.taskId)]?.outcome;
-	return outcome && !isOutcomeFromNewerBuild(outcome) ? outcome : undefined;
+	return planStepSettledOutcome(projection, plan.nodes[nodeId]);
 }
 
 /** A node is accepted when the outcome that settles it asks for no further action. */

@@ -24,6 +24,7 @@ import type { WorkerClaim } from "../autonomy/contracts.ts";
 import { renderCommsStateLine } from "../comms/comms-records.ts";
 import type { WorkerLaneIsolationDeps } from "../delegation/worker-lane-isolation.ts";
 import type { Outcome } from "../delegation/worker-outcome-contract.ts";
+import { PLAN_VERIFIER_UNAVAILABLE } from "../delegation/worker-profile-resolver.ts";
 import type { FleetDispatch, FleetScheduler, RoomQuery } from "../fleet/fleet-types.ts";
 import { weightOf } from "../fleet/local-admit.ts";
 import type { GoalState } from "../goals/goal-state.ts";
@@ -877,6 +878,10 @@ export class PlanExecutor implements PlanExecutorPort {
 			reportOf: this.reportOf,
 			openFindings: this.resultGates.openFindings(record.planId, node.id),
 		});
+		if (node.kind === "verify" && dispatch.verification === undefined) {
+			this.holdStep(record.planId, node.id, node.since, "this verify step has no finished step to check");
+			return;
+		}
 		const query: RoomQuery = {
 			objectiveId: record.objectiveId,
 			weight: weightOf(dispatch.demand, dispatch.writeScope),
@@ -947,6 +952,8 @@ export class PlanExecutor implements PlanExecutorPort {
 		// releases the offer, the machine is not offered again for this release, and the next drain releases the step here
 		// (or on another candidate).
 		const refused = (refusal: { readonly reason: string; readonly detail: string; readonly retryAt?: number }) => {
+			if (refusal.detail.startsWith(`${PLAN_VERIFIER_UNAVAILABLE}:`))
+				return this.holdStep(planId, nodeId, version, `the verifier cannot run: ${refusal.detail}`);
 			if (refusal.detail.startsWith(WORKTREE_UNAVAILABLE))
 				return this.holdStep(planId, nodeId, version, "this step needs its own worktree and none can be made here");
 			if (placement.kind !== "remote_machine") return park(refusal.reason, refusal.detail);

@@ -106,6 +106,11 @@ export interface FleetDispatch {
 	};
 	/** Brokered starts. */
 	delegation?: { objectiveId: string; leaderAttemptId: string };
+	/**
+	 * A plan verify step: the review run's anchor, the first worker result the step checks (`orchestration/plan-review-subjects.ts`).
+	 * Absent for every other dispatch.
+	 */
+	verification?: { readonly subjectTaskId: string; readonly subjectAttemptId: string };
 }
 
 /**

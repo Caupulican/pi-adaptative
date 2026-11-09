@@ -76,6 +76,11 @@ export function placedJobTerminal(record: PlacerJobRecord): PlacedJobTerminal | 
 	}
 	if (record.state === "terminal" && record.outcome) {
 		const { status, blockerCode, summary } = record.outcome;
+		// A linked machine's wall-clock stop is a failed outcome whose blocker is the time it ran out of. The lane ends `timeout`
+		// with the bare timeout code that blocker reads as: the job protocol does not carry the machine's exact code.
+		if (status === "failed" && blockerCode === "time_exhausted") {
+			return { status: "timeout", reasonCode: "timeout", summary };
+		}
 		return {
 			status: OUTCOME_LANE_STATUS[status],
 			...(blockerCode && blockerCode !== "none" ? { reasonCode: `remote_reported:${blockerCode}` } : {}),

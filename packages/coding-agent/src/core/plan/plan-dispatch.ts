@@ -4,9 +4,11 @@
  */
 
 import { renderTaskBrief } from "../comms/comms-records.ts";
+import { type VerifierSubject, verifierBrief } from "../delegation/verifier-brief.ts";
 import { describeOutcomeForHandoff } from "../delegation/worker-outcome-words.ts";
 import { type FleetDispatch, type FleetPriority, laneSubtreeId } from "../fleet/fleet-types.ts";
 import { MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH } from "../orchestration/contracts.ts";
+import { planReviewSubjects, type ReviewSubject } from "../orchestration/plan-review-subjects.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { currentTaskOf } from "../orchestration/task-successor.ts";
 import type { Placement } from "../placement/placement-types.ts";
@@ -137,10 +139,28 @@ function joinTaskWords(node: PlanNodeSpec, openFindings: readonly FindingPair[])
 				: "";
 		return `Combine the results of steps ${members} into one answer${node.join?.criterion ? ` to: ${node.join.criterion}` : ""}. Name every place the results disagree and resolve it or say why it stays open.${possible}`;
 	}
-	if (node.kind === "verify") {
-		return `Independently verify the results of steps ${members}: check each claim against the files and commands, and change no file.`;
-	}
 	return undefined;
+}
+
+/**
+ * The verifier's blocks of a verify step's subjects, in record order: each subject's task as dispatched, its report and the files it
+ * changed. The subjects are the step's worker results (`planReviewSubjects`).
+ */
+function reviewSubjectBlocks(
+	projection: DispatchProjection,
+	plan: PlanRuntimeState,
+	subjects: readonly ReviewSubject[],
+): VerifierSubject[] {
+	return subjects.map((subject) => {
+		const outcome = planNodeOutcome(projection, plan, subject.nodeId);
+		return {
+			taskId: subject.taskId,
+			attemptId: subject.attemptId,
+			originalTask: projection.attempts[subject.attemptId]?.dispatch.instructions,
+			summary: outcome ? describeOutcomeForHandoff(outcome) : "No result was recorded for this step.",
+			artifacts: outcome?.changedFiles ?? [],
+		};
+	});
 }
 
 /** Task ids of the predecessors' accepted work, a display mirror only (the plan record stays the authority). */
@@ -175,9 +195,13 @@ export function buildPlanDispatch(
 	criticalPath: ReadonlySet<string>,
 	evidence: PlanDispatchEvidence,
 ): FleetDispatch {
+	const subjects = node.kind === "verify" ? planReviewSubjects(projection, plan, record, node) : [];
+	const anchor = subjects[0];
 	const words = joinTaskWords(node, evidence.openFindings);
 	const isolation = needsOwnWorktree(record, node.id) ? "worktree" : "shared";
-	const sections = [
+	// Every released step carries the same head in the same order. The tail is the review's brief (every subject, its report
+	// and files, so the predecessors' input digests stay out of it) or, for any other step, the predecessors' input digests.
+	const head = [
 		planDispatchHeader(record.planId, node.since, node.id),
 		`Plan: ${record.title}`,
 		`Task: ${node.intent}`,
@@ -186,8 +210,16 @@ export function buildPlanDispatch(
 		...(node.brief ? [renderTaskBrief(node.brief)] : []),
 		...(node.requirementIds.length > 0 ? [`Requirements this step proves: ${node.requirementIds.join(", ")}`] : []),
 		...planNodeEdges(node).flatMap((id) => openItemsOf(projection, plan, id, evidence.reportOf)),
-		...planNodeEdges(node).map((id) => inputDigest(projection, plan, id)),
 	];
+	const tail = anchor
+		? [
+				verifierBrief(
+					reviewSubjectBlocks(projection, plan, subjects),
+					node.join?.criterion ? [node.join.criterion] : undefined,
+				),
+			]
+		: planNodeEdges(node).map((id) => inputDigest(projection, plan, id));
+	const sections = [...head, ...tail];
 	const onCriticalPath = criticalPath.has(node.id);
 	const priority: FleetPriority = node.kind === "verify" ? 3 : onCriticalPath ? 2 : 1;
 	const writeScope = node.kind === "verify" ? [] : node.writeScope;
@@ -210,6 +242,7 @@ export function buildPlanDispatch(
 		dependsOnTaskIds: dependencyTaskIds(projection, plan, record, node),
 		thinking: node.effort === "deep" ? "raise_one" : "inherit",
 		plan: { planId: record.planId, version: node.since, nodeId: node.id },
+		...(anchor ? { verification: { subjectTaskId: anchor.taskId, subjectAttemptId: anchor.attemptId } } : {}),
 	};
 }
 

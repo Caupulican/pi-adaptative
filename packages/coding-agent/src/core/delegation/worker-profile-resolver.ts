@@ -43,6 +43,33 @@ export interface ResolvedWorkerProfilePreset {
 	soul?: string;
 }
 
+/**
+ * The skip-reason prefix of a plan verify step whose verifier cannot be set up. The plan executor reads it to hold the
+ * step with words instead of parking it.
+ */
+export const PLAN_VERIFIER_UNAVAILABLE = "independent_verifier_unavailable";
+
+/**
+ * The read-only verifier form of a preset: the verifier role, no configured verifier, no dispatch, and the derived id
+ * `<id>~verifier`, which the profile store never holds. Its write scope is empty, so it edits nothing.
+ */
+function readOnlyVerifierPreset(preset: ResolvedWorkerProfilePreset): ResolvedWorkerProfilePreset {
+	const { verificationProfileId: _configured, ...profile } = preset.profile;
+	return {
+		profile: {
+			...profile,
+			profileId: `${profile.profileId}~verifier`,
+			role: "verifier",
+			readOnly: true,
+			writePaths: [],
+			dispatchProfileIds: [],
+			requireIndependentVerification: false,
+		},
+		resourcePointers: preset.resourcePointers,
+		...(preset.soul ? { soul: preset.soul } : {}),
+	};
+}
+
 export interface WorkerProfileResolverOptions {
 	agentDir: string;
 	cwd: string;
@@ -92,14 +119,29 @@ export class WorkerProfileResolver {
 		// Profiles are routing presets, not authority cages. Any loaded preset may be selected; the
 		// execution controller independently intersects its materialized plan with inherited authority.
 		const profileId = requestedProfileId || defaultProfileId;
+		// A plan review's derived verifier exists only on its request: it is never stored, so it is not looked up.
+		const derived = request.verifierPreset && request.reviewOf ? request.verifierPreset : undefined;
+		const verifierSubject = request.verificationOfTaskId !== undefined || request.reviewOf !== undefined;
+		return this.presetWithRoles(profileId, verifierSubject, derived);
+	}
+
+	/**
+	 * The preset a profile id names (or a derived verifier given in its place), with the role rules a request of its kind must meet.
+	 * A request's own resolution and a plan verify step's fallback to the default profile both pass through here.
+	 */
+	private presetWithRoles(
+		profileId: string | undefined,
+		verifierSubject: boolean,
+		derived?: ResolvedWorkerProfilePreset,
+	): { ok: true; resolved: ResolvedWorkerProfilePreset } | { ok: false; reason: string } {
 		if (!profileId) return { ok: false, reason: "orchestration_profile_required" };
-		const selected = this.resolveProfilePresetId(profileId);
+		const selected = derived ? { ok: true as const, resolved: derived } : this.resolveProfilePresetId(profileId);
 		if (!selected.ok) return selected;
-		const profile = selected.resolved.profile;
-		if (request.verificationOfTaskId && profile.role !== "verifier") {
+		const role = selected.resolved.profile.role;
+		if (verifierSubject && role !== "verifier") {
 			return { ok: false, reason: "verification_profile_role_mismatch" };
 		}
-		if (!request.verificationOfTaskId && profile.role === "verifier") {
+		if (!verifierSubject && role === "verifier") {
 			return { ok: false, reason: "verifier_profile_requires_runtime_dispatch" };
 		}
 		return selected;
@@ -124,6 +166,29 @@ export class WorkerProfileResolver {
 			return { ok: false, reason: "verification_profile_role_mismatch" };
 		}
 		return selected;
+	}
+
+	/**
+	 * The verifier a plan verify step runs as: the read-only verifier form of the subject's admitted profile. A subject with no local
+	 * contract (it ran on a linked machine or in a managed lane) gets the form of the profile a plan step runs under by default, the
+	 * default-profile path of `resolvePreset`. A configured verifier may be write-capable, so it is never used for a plan step.
+	 */
+	resolvePlanVerifierPreset(
+		subject: WorkerProfileExecutionContract | undefined,
+		defaultProfileId: string | undefined,
+	): { ok: true; resolved: ResolvedWorkerProfilePreset } | { ok: false; reason: string } {
+		if (subject)
+			return {
+				ok: true,
+				resolved: readOnlyVerifierPreset({
+					profile: subject.profile,
+					resourcePointers: subject.resourcePointers,
+					...(subject.soul ? { soul: subject.soul } : {}),
+				}),
+			};
+		const base = this.presetWithRoles(defaultProfileId, false);
+		if (!base.ok) return { ok: false, reason: `${PLAN_VERIFIER_UNAVAILABLE}:${base.reason}` };
+		return { ok: true, resolved: readOnlyVerifierPreset(base.resolved) };
 	}
 
 	bindPreset(

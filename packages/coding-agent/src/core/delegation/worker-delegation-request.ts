@@ -21,6 +21,7 @@ import {
 import { parseRiskBudget } from "../orchestration/risk-budget.ts";
 import type { WorkerReceiptAnchor, WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
+import type { ResolvedWorkerProfilePreset } from "./worker-profile-resolver.ts";
 import type { WorkerSavedIntent } from "./worker-saved-intent.ts";
 
 /** Upper bound on extra write roots one delegation may name. */
@@ -320,6 +321,16 @@ export interface WorkerDelegationRequest {
 	/** Runtime-owned correlation for an automatically dispatched verifier; never model-settable. */
 	verificationOfTaskId?: string;
 	verificationOfAttemptId?: string;
+	/**
+	 * Host-only: the verifier preset a plan review runs as, derived from its subject (`resolvePlanVerifierPreset`). Used only with
+	 * `reviewOf`, in place of a profile-store lookup of `profileId`. Never model-settable.
+	 */
+	verifierPreset?: ResolvedWorkerProfilePreset;
+	/**
+	 * Host-only: the review run's anchor, the first worker result a plan verify step checks. The review's prompt, claim and trusted
+	 * evidence name it; the run reconciles nothing. Never model-settable.
+	 */
+	reviewOf?: { readonly taskId: string; readonly attemptId: string };
 	/** Runtime-owned durable task correlation; the delegate tool schema intentionally omits this. */
 	taskContext?: WorkerDelegationTaskContext;
 	/**

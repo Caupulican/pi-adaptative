@@ -15,6 +15,8 @@ import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 export interface FinalizeWorkerClaimInput extends CreateWorkerResultContractInput {
 	/** Verification dispatch owns the next terminal signal until it reconciles the subject. */
 	notify?: boolean;
+	/** A review run's anchor: the worker result its review evidence names, when the run is not a verification of a subject. */
+	reviewOf?: { readonly taskId: string; readonly attemptId: string };
 }
 
 export interface FinalizedWorkerClaim {
@@ -24,12 +26,12 @@ export interface FinalizedWorkerClaim {
 }
 
 export function finalizeWorkerClaim(lifecycle: WorkerLifecycle, input: FinalizeWorkerClaimInput): FinalizedWorkerClaim {
-	const { notify, ...resultInput } = input;
+	const { notify, reviewOf, ...resultInput } = input;
 	// Direct abort/error paths also pass here, so this boundary cannot rely on worker-runner
 	// normalization. Reject before lifecycle mutation, filesystem observation, or notification.
 	const snapshot = lifecycle.getTaskRuntimeSnapshot();
 	const task = snapshot.tasks[input.handle.taskId]?.task;
-	const subject = task ? verificationSubjectAttempt(snapshot, task) : undefined;
+	const subject = (task ? verificationSubjectAttempt(snapshot, task) : undefined) ?? reviewOf;
 	const claim = normalizeWorkerClaimForHost(resultInput.claim);
 	const result = createWorkerResultContract({
 		...resultInput,
