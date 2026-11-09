@@ -607,7 +607,13 @@ export class VirtualSqlite {
 		const failures: unknown[] = [];
 		for (const database of this.databases) {
 			try {
-				if (database.isOpen) database.close();
+				if (database.isOpen) {
+					// The authorizer closes over this world. A statement object production still holds keeps its database object
+					// alive natively, where the collector cannot follow: with the authorizer left on, that database would keep
+					// the whole closed world reachable for the life of the process.
+					database.setAuthorizer(null);
+					database.close();
+				}
 			} catch (error) {
 				failures.push(error);
 			}

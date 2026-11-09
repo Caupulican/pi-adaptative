@@ -1,7 +1,8 @@
 import "../builtin-install.ts";
 import { createRequire } from "node:module";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import { isDeepStrictEqual } from "node:util";
+import { writeHeapSnapshot } from "node:v8";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import type { CheckOptions, LockOptions, UnlockOptions } from "proper-lockfile";
 import { expect } from "vitest";
@@ -69,17 +70,25 @@ for (const name of ["lock", "lockSync", "unlock", "unlockSync", "check", "checkS
 const JOURNEY_BUDGET_MS = 285_000;
 
 /**
- * One line per finished journey mode: the heap still in use once its world has closed. When the runner exposes the collector
- * (`--expose-gc`) the figure is taken after a full collection, so it is what the closed world and the production modules still
- * hold; without it the figure is an upper bound. Growth from one line to the next is memory a finished world did not give back.
+ * One line per finished journey mode: the heap still in use once its world has closed and the event loop has turned (so the
+ * world's last settles have run). When the runner exposes the collector (`--expose-gc`) the figure is taken after a full
+ * collection, so it is what the closed world and the production modules still hold; without it the figure is an upper bound.
+ * Growth from one line to the next is memory a finished world did not give back. For a retention hunt,
+ * `PI_JOURNEY_HEAP_SNAPSHOTS` names a directory that receives a heap snapshot of this moment, for the modes whose label
+ * contains `PI_JOURNEY_HEAP_SNAPSHOT_MATCH` (every mode when it is unset).
  */
-function reportHeapAfterClose(label: string): void {
+async function reportHeapAfterClose(label: string): Promise<void> {
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	const collect = (globalThis as { gc?: () => void }).gc;
 	collect?.();
 	const megabytes = Math.round(process.memoryUsage().heapUsed / (1024 * 1024));
 	process.stderr.write(
 		`[${label}] heap in use after close: ${megabytes} MB${collect ? " (after a full collection)" : ""}\n`,
 	);
+	const snapshots = process.env.PI_JOURNEY_HEAP_SNAPSHOTS;
+	if (snapshots && label.includes(process.env.PI_JOURNEY_HEAP_SNAPSHOT_MATCH ?? "")) {
+		writeHeapSnapshot(join(snapshots, `${label.replace(/[^A-Za-z0-9-]+/g, "-")}.heapsnapshot`));
+	}
 }
 
 /** Each journey runs completely in both modes, with fresh storage and the same native owners. */
@@ -118,7 +127,7 @@ export async function runJourney(
 		} finally {
 			// Clear only after every session and store has settled; their cleanup still needs the virtual locks.
 			lockfileFs.current = undefined;
-			reportHeapAfterClose(`${options.name} System One ${systemOneEnabled ? "on" : "off"}`);
+			await reportHeapAfterClose(`${options.name} System One ${systemOneEnabled ? "on" : "off"}`);
 		}
 	}
 }
@@ -595,6 +604,27 @@ function startedAgentIdsForTrack(request: ScriptedRequest, track: string): strin
 }
 
 /** The stable agent id production assigned to the worker that runs on `track` (its effective model). */
+/**
+ * What a promise rejects with, as plain data (its message and its `code`), or undefined when it resolves. A leg asserts on this
+ * instead of handing the promise to `expect(...).rejects`: the test runner keeps every promise it is given until the whole test
+ * ends, and a rejected Error keeps the frames it was thrown through reachable for as long, so one such assertion holds a closed
+ * session and its world in memory through every later phase.
+ */
+export async function rejectionOf(
+	work: Promise<unknown>,
+): Promise<{ readonly message: string; readonly code?: unknown } | undefined> {
+	return work.then(
+		() => undefined,
+		(error: unknown) => {
+			const code = typeof error === "object" && error !== null && "code" in error ? error.code : undefined;
+			return {
+				message: error instanceof Error ? error.message : String(error),
+				...(code !== undefined ? { code } : {}),
+			};
+		},
+	);
+}
+
 /**
  * The identity one `delegate start` call answered with, read from its tool result. A start answers before its attempt reaches
  * `running` (the lease and the worker's first request follow on later turns), so a leg takes the worker's identity from the

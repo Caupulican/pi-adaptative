@@ -16,6 +16,7 @@ import { type HarnessWorld, type ScriptedJudgment, withDeadline } from "../sessi
 import { runJourney1ProactivityDurability } from "./journey-1-proactivity-durability.ts";
 import { runJourney1ProactivityInvestigation } from "./journey-1-proactivity-investigation.ts";
 import { runJourney1ProactivityMemory } from "./journey-1-proactivity-memory.ts";
+import { rejectionOf } from "./shared.ts";
 
 const NOTE_TEXT = "The changelog entry you asked for is still not written.";
 const NOTE_MARKER = "[proactive note]";
@@ -452,9 +453,10 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 		},
 	});
 	const requestsAtBudget = world.provider.requests.length;
-	await expect(
-		withDeadline(trace, "budget review", budget.session.backgroundLanes.runProactiveReviewOnce()),
-	).rejects.toThrow();
+	expect(
+		await rejectionOf(withDeadline(trace, "budget review", budget.session.backgroundLanes.runProactiveReviewOnce())),
+		"the review with an exhausted allowance fails",
+	).toBeDefined();
 	expect(world.provider.requests.length - requestsAtBudget, "exhausted allowance prevents another transport").toBe(1);
 	expect(
 		budget.sessionManager
@@ -493,9 +495,13 @@ export async function runJourney1ProactivityPhase(world: HarnessWorld): Promise<
 	const unsubscribeUnknown = unknown.session.subscribe((event) => {
 		if (event.type === "proactive_review") unknownOutcomes.push(event.outcome);
 	});
-	await expect(
-		withDeadline(trace, "unknown price review", unknown.session.backgroundLanes.runProactiveReviewOnce()),
-	).rejects.toThrow("no declared price");
+	expect(
+		(
+			await rejectionOf(
+				withDeadline(trace, "unknown price review", unknown.session.backgroundLanes.runProactiveReviewOnce()),
+			)
+		)?.message,
+	).toContain("no declared price");
 	unsubscribeUnknown();
 	expect(unknownOutcomes, "the attempted review reaches its terminal without a provider request").toEqual(["failed"]);
 	expect(world.provider.requests.length, "unknown pricing never reaches the review transport").toBe(beforeUnknown);

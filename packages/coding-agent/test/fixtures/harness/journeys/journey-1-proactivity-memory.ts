@@ -5,6 +5,7 @@ import { configFile } from "../../../../src/core/agent-paths.ts";
 import { isTranscriptRecallWorkerRequest } from "../../../../src/core/memory/providers/transcript-recall-worker-protocol.ts";
 import { calls, type ScriptStep, text } from "../scripted-provider.ts";
 import { type HarnessWorld, settlementState, withDeadline } from "../session-fixture.ts";
+import { rejectionOf } from "./shared.ts";
 
 const MEMORY_TEXT = "The release checklist still requires the migration note.\n";
 const NOTE_TEXT = "The migration note recorded in memory is still unfinished.";
@@ -187,13 +188,17 @@ export async function runJourney1ProactivityMemory(world: HarnessWorld): Promise
 			world.io.writeFileSync(stale.memoryPath, "The migration note has now been completed.\n");
 		}),
 	);
-	await expect(
-		withDeadline(
-			trace,
-			"rewritten managed memory cannot support adoption",
-			stale.session.backgroundLanes.runProactiveReviewOnce(),
-		),
-	).rejects.toThrow("Proactive source authority changed");
+	expect(
+		(
+			await rejectionOf(
+				withDeadline(
+					trace,
+					"rewritten managed memory cannot support adoption",
+					stale.session.backgroundLanes.runProactiveReviewOnce(),
+				),
+			)
+		)?.message,
+	).toContain("Proactive source authority changed");
 	expect(stale.outcomes).toEqual(["failed"]);
 	expect(notes(stale)).toEqual([]);
 	await stale.close();

@@ -58,6 +58,7 @@ import {
 	matchedSubmitReceiptIn,
 	persistedGenerationText,
 	receiptsOf,
+	rejectionOf,
 	requestTexts,
 	settlementFacts,
 	toolOutcomes,
@@ -74,9 +75,9 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	let orchestrationRoot: AgentSession | undefined;
 	// The same captured reference, in a second world: its own file resolves, and the first world's file does not.
 	await expect(CAPTURED_ACCESS(LIMITS_PATH, constants.R_OK)).resolves.toBeUndefined();
-	await expect(CAPTURED_ACCESS(projectPath("src", "copy-source.ts"), constants.R_OK)).rejects.toThrow(
-		"virtual filesystem",
-	);
+	expect(
+		(await rejectionOf(CAPTURED_ACCESS(projectPath("src", "copy-source.ts"), constants.R_OK)))?.message,
+	).toContain("virtual filesystem");
 
 	world.provider.enqueue(
 		"root",

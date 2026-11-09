@@ -7,6 +7,7 @@ import { createLaneToolSurface } from "../../../../src/core/autonomy/lane-tool-s
 import { retainedToolInvocation } from "../../../../src/kernel/tool-invocation-receipt.ts";
 import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
+import { rejectionOf } from "./shared.ts";
 
 const SOURCE_DIRECTORY = projectPath("proactivity-evidence");
 const SOURCE_PATH = projectPath("proactivity-evidence", "current.txt");
@@ -357,13 +358,17 @@ export async function runJourney1ProactivityInvestigation(world: HarnessWorld): 
 			world.io.writeFileSync(SOURCE_PATH, "The release checklist is now complete.\n");
 		}),
 	);
-	await expect(
-		withDeadline(
-			trace,
-			"changed source cannot support delivery",
-			stale.session.backgroundLanes.runProactiveReviewOnce(),
-		),
-	).rejects.toThrow("changed before delivery");
+	expect(
+		(
+			await rejectionOf(
+				withDeadline(
+					trace,
+					"changed source cannot support delivery",
+					stale.session.backgroundLanes.runProactiveReviewOnce(),
+				),
+			)
+		)?.message,
+	).toContain("changed before delivery");
 	expect(stale.outcomes).toEqual(["failed"]);
 	expect(notes(stale)).toEqual([]);
 	await stale.close();

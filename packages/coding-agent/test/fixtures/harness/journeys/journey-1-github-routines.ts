@@ -32,7 +32,7 @@ import {
 	NATIVE_PLATFORM_SHELL_BY_DEFAULT,
 	withDeadline,
 } from "../session-fixture.ts";
-import { latestBatchResults } from "./shared.ts";
+import { latestBatchResults, rejectionOf } from "./shared.ts";
 
 const ROUTINE_ID = "github-own-pr-discussion";
 const ROUTINE_PROMPT = "Read the new discussion on my own pull requests and report what the reviewers ask for.";
@@ -140,14 +140,18 @@ export async function runJourney1GithubRoutinesPhase(
 	let prompt: Promise<void> | undefined;
 	try {
 		// A high-volume kind with no narrowing scope is refused at save, with the kind table's reason.
-		await expect(
-			lanes.createRoutine({
-				routineId: "github-every-review-comment",
-				prompt: ROUTINE_PROMPT,
-				schedule: { kind: "event", source: "github", kinds: ["review-comment"] },
-				profileId: profile.profileId,
-			}),
-		).rejects.toThrow(
+		expect(
+			(
+				await rejectionOf(
+					lanes.createRoutine({
+						routineId: "github-every-review-comment",
+						prompt: ROUTINE_PROMPT,
+						schedule: { kind: "event", source: "github", kinds: ["review-comment"] },
+						profileId: profile.profileId,
+					}),
+				)
+			)?.message,
+		).toContain(
 			"Routine GitHub filter listens to every review-comment of the repository; name pullRequest, branch, ownPullRequests, authors to narrow it.",
 		);
 		// Control: the same kind of listener narrowed to the signed-in login's own pull requests is saved.

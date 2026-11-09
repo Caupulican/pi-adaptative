@@ -8,7 +8,7 @@ import { goalObjectiveId } from "../../../../src/core/orchestration/work-state-p
 import { estimateProviderRequestTokens } from "../../../../src/kernel/provider-request-estimator.ts";
 import { calls, createBarrier, HARNESS_API, HARNESS_PROVIDER, type ScriptStep } from "../scripted-provider.ts";
 import { type HarnessWorld, SCRIPTED_TRACKS, type ScriptedJudgment, withDeadline } from "../session-fixture.ts";
-import { LIMITS_PATH, latestBatchResults } from "./shared.ts";
+import { LIMITS_PATH, latestBatchResults, rejectionOf } from "./shared.ts";
 
 interface RetrievalJudgments {
 	bootstrap: Readonly<Record<string, ScriptedJudgment>>;
@@ -199,9 +199,10 @@ export async function verifyGoalRetrievalReplacement(
 			.getLaneRecords()
 			.find((record) => record.status === "running" && record.goalId === a.goalId);
 		expect(running, `${label}: original A minion has a real running lane`).toBeDefined();
-		await expect(session.reload(), `${label}: writer truthfully refuses retained worker readers`).rejects.toThrow(
-			`Cannot reload while background work is in flight: lane:worker:${running?.laneId}`,
-		);
+		expect(
+			(await rejectionOf(session.reload()))?.message,
+			`${label}: writer truthfully refuses retained worker readers`,
+		).toContain(`Cannot reload while background work is in flight: lane:worker:${running?.laneId}`);
 		expect(reloads, `${label}: refused writer never enters replacement lifecycle`).toBe(0);
 		const replacement = replaceGoal(
 			{ goalId: `${label}-b`, userGoal: bWords, tokenBudget: 1_000_000 },

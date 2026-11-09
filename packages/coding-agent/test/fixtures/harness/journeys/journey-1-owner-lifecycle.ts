@@ -62,6 +62,7 @@ import {
 	ownerInputCapture,
 	REFLECTION_CHECKPOINT_MARKER,
 	readPathAliases,
+	rejectionOf,
 	requestCarriesMarker,
 	TASK_REQUEST,
 	toolOutcomes,
@@ -77,16 +78,16 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	let mainSession: AgentSession | undefined;
 	// The operation table captured at module evaluation must reach the virtual tree, not the host.
 	await expect(localFileMutationIntentOperations.access(LIMITS_PATH, constants.R_OK)).resolves.toBeUndefined();
-	await expect(localFileMutationIntentOperations.access(projectPath("missing.ts"), constants.R_OK)).rejects.toThrow(
-		"virtual filesystem",
-	);
+	expect(
+		(await rejectionOf(localFileMutationIntentOperations.access(projectPath("missing.ts"), constants.R_OK)))?.message,
+	).toContain("virtual filesystem");
 	// Exclusive copy, as the production edit and write paths issue it: an existing destination is refused and
 	// keeps its bytes; an absent destination is created in the virtual tree.
 	const copySource = projectPath("src", "copy-source.ts");
 	world.io.seed(copySource, "export const COPIED = true;\n");
-	await expect(localFileMutationIntentOperations.copyFileExclusive(copySource, LIMITS_PATH)).rejects.toMatchObject({
-		code: "EEXIST",
-	});
+	expect(
+		await rejectionOf(localFileMutationIntentOperations.copyFileExclusive(copySource, LIMITS_PATH)),
+	).toMatchObject({ code: "EEXIST" });
 	expect(world.io.readFileSync(LIMITS_PATH, "utf8")).toBe(ORIGINAL_LIMITS);
 	const copyTarget = projectPath("src", "copy-target.ts");
 	await expect(localFileMutationIntentOperations.copyFileExclusive(copySource, copyTarget)).resolves.toBeUndefined();
