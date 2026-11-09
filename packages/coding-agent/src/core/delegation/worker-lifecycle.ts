@@ -528,6 +528,11 @@ export class WorkerLifecycle {
 		this.ledger.runtime.bindAttemptGrant(attemptId, grant);
 	}
 
+	/** The session is closing: what its lifecycles share for the session (the outcome observer) is released. */
+	closeSession(): void {
+		this.outcomes.releaseObserver();
+	}
+
 	/** `claim` is the host-normalized claim the result was built from; the outcome reads its host verdict and findings. */
 	finish(result: WorkerResultContract, options: { notify?: boolean; claim?: WorkerClaim } = {}): LaneRecord {
 		this.ledger.runtime.finishAttempt(result);

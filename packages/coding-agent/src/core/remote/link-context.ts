@@ -149,8 +149,17 @@ export function hubMachinesFor(agentDir: string): Readonly<Record<string, HubMac
 	return readLinks(agentDir).machines;
 }
 
-export function provideLinkContext(agentDir: string, context: LinkContext): void {
+/**
+ * Registers the hub controller's view for its agent directory and returns the withdrawal that controller calls when its
+ * session closes. The registration lives exactly as long as its provider: left in place, the closures would keep a closed
+ * session reachable for the life of the process. The withdrawal removes only its own registration, so a later session's
+ * context for the same directory stays.
+ */
+export function provideLinkContext(agentDir: string, context: LinkContext): () => void {
 	contexts.set(agentDir, context);
+	return () => {
+		if (contexts.get(agentDir) === context) contexts.delete(agentDir);
+	};
 }
 
 export function linkContextFor(agentDir: string): LinkContext {

@@ -1077,9 +1077,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		});
 		// Disposal completes only after the routine and intake passes and their deliveries joined, not merely after they
 		// were told to stop: intake awaits every notice it starts, and stopping aborts a notice still waiting to be saved.
-		return Promise.all([workerShutdown, routineShutdown, intakeShutdown, actAheadShutdown, awayServiceShutdown]).then(
-			() => undefined,
-		);
+		return Promise.all([workerShutdown, routineShutdown, intakeShutdown, actAheadShutdown, awayServiceShutdown])
+			.finally(() => this._workerLifecycle?.closeSession())
+			.then(() => undefined);
 	}
 
 	private _runTeardownStep(label: string, step: () => void): void {

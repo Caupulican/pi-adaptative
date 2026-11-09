@@ -31,18 +31,32 @@ const DIGEST_FENCE_CHARS = 320;
 /**
  * One outcome observer per session, listed in that session's status view. A session's lifecycles are built often and
  * transiently (setup reads, placement checks), so the observer belongs to the session, not to a lifecycle: a lifecycle
- * that never records an outcome leaves no entry, and the entries stay bounded by the sessions of this process.
+ * that never records an outcome leaves no entry, and a session's entry is released when the session closes.
  */
-const sessionObservers = new Map<string, MachineObserver<OutcomeMachineState>>();
+const sessionObservers = new Map<
+	string,
+	{ readonly observer: MachineObserver<OutcomeMachineState>; readonly unregister: () => void }
+>();
 
 function sessionObserver(sessionId: string): MachineObserver<OutcomeMachineState> {
-	let observer = sessionObservers.get(sessionId);
-	if (!observer) {
-		observer = observeMachine(WORKER_OUTCOME_MACHINE, { entities: true });
-		sessionObservers.set(sessionId, observer);
-		registerMachine(observer, sessionId);
+	let entry = sessionObservers.get(sessionId);
+	if (!entry) {
+		const observer = observeMachine(WORKER_OUTCOME_MACHINE, { entities: true });
+		entry = { observer, unregister: registerMachine(observer, sessionId) };
+		sessionObservers.set(sessionId, entry);
 	}
-	return observer;
+	return entry.observer;
+}
+
+/**
+ * A closing session gives up its outcome observer: the entry here and its registration in the machine registry. Left in
+ * place, both would keep every task state the session recorded for the life of the process.
+ */
+function releaseSessionOutcomeObserver(sessionId: string): void {
+	const entry = sessionObservers.get(sessionId);
+	if (!entry) return;
+	sessionObservers.delete(sessionId);
+	entry.unregister();
 }
 
 /**
@@ -62,6 +76,11 @@ export class WorkerOutcomeRecorder {
 		this.agentDir = options.agentDir;
 		this.sessionId = options.sessionId;
 		this.now = options.now ?? Date.now;
+	}
+
+	/** The session is closing: its outcome observer is released (a later record would start a fresh one). */
+	releaseObserver(): void {
+		releaseSessionOutcomeObserver(this.sessionId);
 	}
 
 	/** The facts the escalation ladder reads beyond the journal; returns the release that restores the defaults. */

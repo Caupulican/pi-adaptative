@@ -64,6 +64,8 @@ export class RemoteHubController {
 	private hostLock: HostLock | undefined;
 	private stopWatchingHost: (() => void) | undefined;
 	private transport: JobTransport | undefined;
+	/** Withdraws this controller's link context when the session closes (see `provideLinkContext`). */
+	private readonly withdrawLinkContext: () => void;
 	/** The session's remote work placement, when it has worker ports. */
 	readonly jobs: RemoteJobs | undefined;
 
@@ -82,7 +84,7 @@ export class RemoteHubController {
 					},
 				)
 			: undefined;
-		provideLinkContext(deps.agentDir, {
+		this.withdrawLinkContext = provideLinkContext(deps.agentDir, {
 			subtree: () => this.reachableIds(),
 			depth: () => this.chainDepth(),
 		});
@@ -127,6 +129,7 @@ export class RemoteHubController {
 	async stop(): Promise<void> {
 		const closing = this.closeListening();
 		this.jobs?.dispose();
+		this.withdrawLinkContext();
 		await closing;
 	}
 
