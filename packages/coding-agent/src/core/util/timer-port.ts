@@ -89,7 +89,8 @@ export type TimerOwner =
 	| "system-prompt"
 	| "channel-poll"
 	| "channel-expiry"
-	| "fleet";
+	| "fleet"
+	| "leaders";
 
 /** The one timer source a session is built with: the port each owner arms its alarms on. */
 export interface TimerSource {

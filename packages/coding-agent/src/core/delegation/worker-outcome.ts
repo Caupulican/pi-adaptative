@@ -12,19 +12,23 @@ import type { ArtifactContract } from "../orchestration/contracts.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { attemptVerification } from "../orchestration/verification-identity.ts";
 import { boundedText } from "../util/bounded-line.ts";
-import { deriveWorkerNextStep } from "./worker-disposition.ts";
+import {
+	attemptRung,
+	type HostRequirementCheck,
+	type OutcomeLadderContext,
+	outcomeLadderFacts,
+} from "./worker-escalation-facts.ts";
+import { decideNextAction, type JudgmentPair } from "./worker-escalation-policy.ts";
 import {
 	attemptAwaitsVerification,
 	NONTERMINAL_WORKER_ATTEMPT_STATUSES,
 	projectWorkerAttemptLaneRecord,
 } from "./worker-lane-projection.ts";
 import {
-	type AbandonReason,
 	BLOCKER_ATTRIBUTION,
 	type BlockerAttribution,
 	type BlockerCode,
 	isOutcomeFromNewerBuild,
-	type NextAction,
 	OUTCOME_LIMITS,
 	OUTCOME_VERSION,
 	type Outcome,
@@ -131,6 +135,8 @@ const EXACT_SOURCE_CODES: Readonly<Record<string, BlockerCode>> = {
 	worker_task_fitness_unavailable: "preflight_failed",
 	worker_task_fitness_stale: "preflight_failed",
 	worker_task_fitness_binding_unavailable: "preflight_failed",
+	worker_task_model_unconfirmed: "model_fit_open",
+	worker_task_model_fit_open: "model_fit_open",
 	worker_delegation_error: "preflight_failed",
 	// cancellation
 	user_cancelled: "cancelled_by_owner",
@@ -180,7 +186,6 @@ interface ClaimFacts {
 	readonly declared?: WorkerDeclarableBlocker;
 	readonly requirementStatus: ReadonlyMap<string, WorkerReportRequirementStatus>;
 	readonly changedFiles?: readonly string[];
-	readonly claim?: WorkerClaim;
 }
 
 function isWorkerDeclarableBlocker(value: unknown): value is WorkerDeclarableBlocker {
@@ -203,7 +208,6 @@ function claimFacts(claim: WorkerClaim): ClaimFacts {
 			: {}),
 		requirementStatus: new Map((claim.report?.requirements ?? []).map((entry) => [entry.id, entry.status])),
 		changedFiles: claim.changedFiles,
-		claim,
 	};
 }
 
@@ -232,6 +236,33 @@ export interface ProjectOutcomeInput {
 	/** The task's latest stored outcome. */
 	readonly previous?: StoredOutcome;
 	readonly recordedAt: string;
+	/** What the escalation ladder reads beyond the journal; absent runs its hands-off defaults. */
+	readonly ladder?: OutcomeLadderContext;
+	/** Host requirement checks run after this attempt ended; later projections carry them from the stored outcome. */
+	readonly requirementChecks?: readonly HostRequirementCheck[];
+	/** System One's answer pair for a worker-stated blocker (Q1 owner-only, Q1s sufficient); absent is open. */
+	readonly ownerOnly?: JudgmentPair;
+}
+
+/**
+ * Which requirement ids a host check settled for this attempt: the checks just run, else the ones the same attempt's
+ * stored outcome recorded (a pass is covered by `requirement_check`, a failure is `evidence_failed` on a checkable id).
+ */
+function settledChecks(
+	input: ProjectOutcomeInput,
+	sameAttemptPrevious: Outcome | undefined,
+): ReadonlyMap<string, boolean> {
+	if (input.requirementChecks) return new Map(input.requirementChecks.map((check) => [check.id, check.passed]));
+	if (!sameAttemptPrevious) return new Map();
+	const checkable = input.ladder?.requirementCheckIds?.() ?? new Set<string>();
+	return new Map([
+		...sameAttemptPrevious.coverage.covered
+			.filter((entry) => entry.by === "requirement_check")
+			.map((entry) => [entry.id, true] as const),
+		...sameAttemptPrevious.coverage.uncovered
+			.filter((entry) => entry.reason === "evidence_failed" && checkable.has(entry.id))
+			.map((entry) => [entry.id, false] as const),
+	]);
 }
 
 interface BlockerChoice {
@@ -271,7 +302,8 @@ export function projectOutcome(input: ProjectOutcomeInput): Outcome | undefined 
 			: undefined;
 	const verification = attemptVerification(snapshot, attempt);
 	const required = (attempt.dispatch.requirementIds ?? []).slice(0, OUTCOME_LIMITS.maxRequirementIds);
-	const coverage = projectCoverage(required, facts, verification?.verdict, awaitingVerification, laneStatus);
+	const checks = settledChecks(input, sameAttemptPrevious);
+	const coverage = projectCoverage(required, facts, checks, verification?.verdict, awaitingVerification, laneStatus);
 	const sourceCodes = collectSourceCodes(attempt, lane.reasonCode, facts);
 	const choice = selectBlocker({
 		laneStatus,
@@ -297,7 +329,26 @@ export function projectOutcome(input: ProjectOutcomeInput): Outcome | undefined 
 			sourceCodes,
 		}));
 	}
-	const step = nextStepFor(status, blocker, facts, required, coverage);
+	const step = decideNextAction(
+		outcomeLadderFacts({
+			snapshot,
+			attempt,
+			lane,
+			status,
+			blocker,
+			coverage,
+			previous,
+			checkedIds: new Set(checks.keys()),
+			context: input.ladder,
+			...(input.ownerOnly ? { ownerOnly: input.ownerOnly } : {}),
+		}),
+	);
+	harnessLog.debug("outcomes", "the escalation ladder decided a next action", () => ({
+		taskId: attempt.taskId,
+		attemptId: attempt.attemptId,
+		exit: step.exit,
+		trace: step.trace.join(","),
+	}));
 	const outcome: Outcome = {
 		v: OUTCOME_VERSION,
 		outcomeId: input.outcomeId,
@@ -311,7 +362,7 @@ export function projectOutcome(input: ProjectOutcomeInput): Outcome | undefined 
 		attribution: blocker === "none" ? "none" : BLOCKER_ATTRIBUTION[blocker],
 		sourceCodes,
 		coverage,
-		assurance: assuranceFor(status, required, facts, verification?.verdict),
+		assurance: assuranceFor(status, required, facts, coverage, verification?.verdict),
 		artifacts: outcomeArtifacts(attempt.result?.artifacts ?? []),
 		changedFiles: (facts?.changedFiles ?? changedFilesFromArtifacts(attempt.result?.artifacts ?? [])).slice(
 			0,
@@ -322,9 +373,9 @@ export function projectOutcome(input: ProjectOutcomeInput): Outcome | undefined 
 			0,
 			Math.round(attempt.result?.usage.wallClockMs ?? attempt.usageAccounting?.total.activeWallClockMs ?? 0),
 		),
-		attempts: outcomeAttempts(previous, attempt, lane, laneStatus),
+		attempts: outcomeAttempts(previous, attempt, lane, laneStatus, attemptRung(snapshot, attempt)),
 		nextAction: step.nextAction,
-		ladder: { rung: 0, exit: step.exit },
+		ladder: { rung: step.rung, exit: step.exit },
 		recordedAt: input.recordedAt,
 	};
 	return withinSerializedBound(outcome);
@@ -333,6 +384,7 @@ export function projectOutcome(input: ProjectOutcomeInput): Outcome | undefined 
 function projectCoverage(
 	required: readonly string[],
 	facts: ClaimFacts | undefined,
+	checks: ReadonlyMap<string, boolean>,
 	verificationVerdict: "accepted" | "rejected" | "inconclusive" | undefined,
 	awaitingVerification: boolean,
 	laneStatus: ProjectionLaneStatus | "running",
@@ -341,10 +393,18 @@ function projectCoverage(
 		return { required, covered: required.map((id) => ({ id, by: "verification" as const })), uncovered: [] };
 	}
 	const coveredIds = new Set(facts?.coveredIds ?? []);
-	const covered = required.filter((id) => coveredIds.has(id)).map((id) => ({ id, by: "host_verdict" as const }));
+	const covered = required
+		.filter((id) => coveredIds.has(id) || checks.get(id) === true)
+		.map((id) => ({ id, by: coveredIds.has(id) ? ("host_verdict" as const) : ("requirement_check" as const) }));
 	const uncovered = required
-		.filter((id) => !coveredIds.has(id))
-		.map((id) => ({ id, reason: uncoveredReason(id, facts, verificationVerdict, awaitingVerification, laneStatus) }));
+		.filter((id) => !coveredIds.has(id) && checks.get(id) !== true)
+		.map((id) => ({
+			id,
+			reason:
+				checks.get(id) === false
+					? ("evidence_failed" as const)
+					: uncoveredReason(id, facts, verificationVerdict, awaitingVerification, laneStatus),
+		}));
 	return { required, covered, uncovered };
 }
 
@@ -463,7 +523,7 @@ function attemptProvider(attempt: AttemptRuntimeState): string {
 
 const CLAIM_STATUS_BLOCKS: ReadonlySet<BlockerAttribution> = new Set(["owner", "harness", "task"]);
 
-/** S1-S9 of the outcome table, first match wins; S4 (host requirement check) arrives with the ladder. */
+/** S1-S9 of the outcome table, first match wins. */
 function selectStatus(
 	laneStatus: ProjectionLaneStatus | "running",
 	blocker: BlockerCode,
@@ -473,6 +533,14 @@ function selectStatus(
 	if (laneStatus === "canceled") return "cancelled";
 	if (verificationVerdict === "accepted") return "succeeded";
 	if (blocker === "none" && laneStatus === "succeeded" && coverage.uncovered.length === 0) return "succeeded";
+	// S4: every required id is covered and the host's own requirement checks proved at least one of them.
+	if (
+		verificationVerdict !== "rejected" &&
+		coverage.required.length > 0 &&
+		coverage.uncovered.length === 0 &&
+		coverage.covered.some((entry) => entry.by === "requirement_check")
+	)
+		return "succeeded";
 	if (coverage.covered.length > 0 && coverage.uncovered.length > 0) return "partial";
 	if (CLAIM_STATUS_BLOCKS.has(BLOCKER_ATTRIBUTION[blocker]) || laneStatus === "blocked") return "blocked";
 	// An honest partial, or host-accepted work that stands unverified, is partial with a classified blocker.
@@ -485,53 +553,15 @@ function assuranceFor(
 	status: OutcomeStatus,
 	required: readonly string[],
 	facts: ClaimFacts | undefined,
+	coverage: RequirementCoverage,
 	verificationVerdict: "accepted" | "rejected" | "inconclusive" | undefined,
 ): OutcomeAssurance {
 	if (status !== "succeeded") return "unverified";
 	if (verificationVerdict === "accepted") return "independently_verified";
+	if (coverage.covered.some((entry) => entry.by === "requirement_check")) return "host_check";
 	// Host evidence is a code-judged accepted verdict; a success without it stays unverified.
 	if (facts?.verdict === "accepted" && facts.judgedByCode) return "host_verified";
 	return required.length === 0 ? "unverified" : "host_verified";
-}
-
-const ABANDON_BY_BLOCKER: Partial<Record<BlockerCode, AbandonReason>> = {
-	dependency_failed: "dependency",
-	superseded: "superseded",
-};
-
-/**
- * Phase-one next action: the existing disposition rules, read from the claim alone (live host facts are unknown at
- * record time, so a clean claim stays reusable). Without a claim, a cancelled task is abandoned and anything else is
- * checked before anyone relies on it.
- */
-function nextStepFor(
-	status: OutcomeStatus,
-	blocker: BlockerCode,
-	facts: ClaimFacts | undefined,
-	required: readonly string[],
-	coverage: RequirementCoverage,
-): { nextAction: NextAction; exit: string } {
-	if (facts?.claim) {
-		const step = deriveWorkerNextStep({ claim: { ...facts.claim, parentReviewRequired: false } });
-		return { nextAction: step.nextAction, exit: step.exit };
-	}
-	if (status === "cancelled") {
-		return {
-			nextAction: { kind: "abandon", reason: ABANDON_BY_BLOCKER[blocker] ?? "cancelled" },
-			exit: "outcome_cancelled",
-		};
-	}
-	if (status === "succeeded") return { nextAction: { kind: "accept" }, exit: "outcome_succeeded" };
-	// The disposition rule for a rejected independent verification: follow up in the same lane.
-	if (blocker === "verification_failed")
-		return { nextAction: { kind: "verify_in_lane" }, exit: "outcome_verification_rejected" };
-	return {
-		nextAction: {
-			kind: "verify_independently",
-			requirementIds: coverage.uncovered.length > 0 ? coverage.uncovered.map((entry) => entry.id) : required,
-		},
-		exit: "outcome_without_claim",
-	};
 }
 
 const ARTIFACT_KINDS: Readonly<Record<ArtifactContract["kind"], OutcomeArtifactKind>> = {
@@ -577,13 +607,14 @@ function outcomeAttempts(
 	attempt: AttemptRuntimeState,
 	lane: { modelRef?: string; thinkingLevel?: string; completedAt?: string },
 	laneStatus: string,
+	rung: number,
 ): OutcomeAttempt[] {
 	const current: OutcomeAttempt = {
 		attemptId: attempt.attemptId,
 		...(attempt.result ? { resultId: attempt.result.resultId } : {}),
 		modelRef: lane.modelRef ?? "unknown",
 		thinking: lane.thinkingLevel ?? "default",
-		rung: 0,
+		rung,
 		laneStatus,
 		startedAt: attempt.executionStartedAt ?? attempt.createdAt,
 		...(lane.completedAt ? { endedAt: lane.completedAt } : {}),

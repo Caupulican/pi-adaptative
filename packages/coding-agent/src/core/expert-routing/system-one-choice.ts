@@ -21,7 +21,12 @@ import type { ModelCapabilityCard } from "./capability-card.ts";
 
 export interface RouteChoiceJudge {
 	isRouteJudgmentEnabled?(): boolean;
-	evaluateWorkerTaskFit?(input: WorkerTaskFitInput, signal?: AbortSignal): Promise<Record<string, unknown>>;
+	/** The adequacy Noul and its evidence-sufficiency Noul (`worker-task-fit-exits.ts`); `bound` decides whether an open answer is a doubt. */
+	evaluateWorkerTaskFit?(
+		input: WorkerTaskFitInput,
+		signal?: AbortSignal,
+		options?: { readonly bound?: boolean },
+	): Promise<Record<string, unknown>>;
 	getWorkerTaskFitDecision?(evaluationId: string, question: string): SemanticDoubtDecision | undefined;
 	getWorkerTaskFitSessionIdentity?(): string | undefined;
 	evaluateRouteChoice(

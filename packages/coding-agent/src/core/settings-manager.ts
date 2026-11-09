@@ -14,6 +14,7 @@ import { type ChannelPolicyResolution, resolveChannelPolicies } from "./channels
 import { resolveSelfCompactionSettings, type SelfCompactionSettings } from "./compaction/self-compaction.ts";
 import { DEFAULT_CONTEXT_GC_SETTINGS } from "./context-gc.ts";
 import { type CostGuardSettings, DEFAULT_COST_GUARD_SETTINGS } from "./cost-guard.ts";
+import { LEADER_MAX_DEPTH_CEILING, LEADER_MAX_DEPTH_DEFAULT } from "./delegation/leader-delegation.ts";
 import type {
 	HmoeIndependence,
 	HmoePreference,
@@ -48,9 +49,13 @@ import {
 	DEFAULT_AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTES,
 	DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS,
 	DEFAULT_AUTONOMY_MAX_STALL_TURNS,
+	DEFAULT_FLEET_BRAKE_MIN_USD,
 	DEFAULT_FLEET_CEILING_RUNNING,
 	DEFAULT_FLEET_CEILING_TREE,
 	DEFAULT_FLEET_CEILING_WRITERS,
+	DEFAULT_FLEET_METERED_USD_PER_DAY,
+	DEFAULT_FLEET_METERED_USD_PER_GOAL,
+	DEFAULT_FLEET_QUEUE_HORIZON_MS,
 	DEFAULT_FLEET_RESERVE_MEMORY_PERCENT,
 	DEFAULT_LEARNING_POLICY_ALLOWED_AUTO_APPLY_LAYERS,
 	DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED,
@@ -180,6 +185,7 @@ import type {
 	FailoverSettings,
 	FleetSettings,
 	GlobalResourceProfileConfiguration,
+	LeaderSettings,
 	LearningPolicyLayer,
 	LearningPolicySettings,
 	LocalRuntimesSettings,
@@ -240,6 +246,10 @@ import type {
 	WorkerDelegationSettings,
 	WorkerThinkingPolicy,
 } from "./settings/settings-schema.ts";
+import {
+	type ResolvedWorkerOutcomeSettings,
+	resolveWorkerOutcomeSettings,
+} from "./settings/worker-outcome-settings.ts";
 import { validateSkillName } from "./skills.ts";
 import { isSystemOneEnabled, type SystemOneProviderChoice } from "./system-one/access.ts";
 import type { ToolkitScript } from "./toolkit/script-registry.ts";
@@ -3675,6 +3685,18 @@ export class SettingsManager {
 		this.save();
 	}
 
+	/** Leaders as sub-orchestrators: the nesting depth, the default when unset or out of range. */
+	getLeaderSettings(): Required<LeaderSettings> {
+		return {
+			maxDepth: sanitizeIntegerSetting(
+				this.settings.leaders?.maxDepth,
+				LEADER_MAX_DEPTH_DEFAULT,
+				1,
+				LEADER_MAX_DEPTH_CEILING,
+			),
+		};
+	}
+
 	getRoutinesSettings(): Required<Pick<RoutinesSettings, "automaticIntake" | "maxResultWakesPerDay">> {
 		const configured = this.settings.routines ?? {};
 		return {
@@ -3811,6 +3833,8 @@ export class SettingsManager {
 		const configured = this.settings.fleet ?? {};
 		const ceiling = (value: unknown, fallback: number) =>
 			sanitizeIntegerSetting(value, fallback, 1, Number.MAX_SAFE_INTEGER);
+		const dollars = (value: unknown, fallback: number) =>
+			sanitizeNumberSetting(value, fallback, 0, Number.MAX_SAFE_INTEGER);
 		return {
 			ceiling: {
 				running: ceiling(configured.ceiling?.running, DEFAULT_FLEET_CEILING_RUNNING),
@@ -3825,6 +3849,17 @@ export class SettingsManager {
 					90,
 				),
 			},
+			budgets: {
+				meteredUsdPerDay: dollars(configured.budgets?.meteredUsdPerDay, DEFAULT_FLEET_METERED_USD_PER_DAY),
+				meteredUsdPerGoal: dollars(configured.budgets?.meteredUsdPerGoal, DEFAULT_FLEET_METERED_USD_PER_GOAL),
+			},
+			brake: { minUsd: dollars(configured.brake?.minUsd, DEFAULT_FLEET_BRAKE_MIN_USD) },
+			queueHorizonMs: sanitizeIntegerSetting(
+				configured.queueHorizonMs,
+				DEFAULT_FLEET_QUEUE_HORIZON_MS,
+				0,
+				Number.MAX_SAFE_INTEGER,
+			),
 		};
 	}
 
@@ -4079,6 +4114,11 @@ export class SettingsManager {
 			resolved.orchestrationProfile = configured.orchestrationProfile.trim();
 		}
 		return resolved;
+	}
+
+	/** The escalation ladder and outcome ledger settings: hands-off defaults with the owner's overrides on top. */
+	getWorkerOutcomeSettings(): ResolvedWorkerOutcomeSettings {
+		return resolveWorkerOutcomeSettings(normalizeWorkerDelegationLayer(this.settings.workerDelegation)?.outcomes);
 	}
 
 	/** Worker thinking relative to the foreground when neither authority nor profile pins it. */

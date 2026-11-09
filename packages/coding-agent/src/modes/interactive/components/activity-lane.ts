@@ -2,6 +2,8 @@ import type { Component } from "@caupulican/pi-tui";
 import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
 import { type GoalState, isGoalExecutionActive, isGoalUnfinishedStatus } from "../../../core/goals/goal-state.ts";
+import type { PlanView } from "../../../core/plan/plan-view.ts";
+import { runningRootPlan } from "../../../core/plan/plan-view.ts";
 import type { TaskStep, TaskStepsState } from "../../../core/tasks/task-state.ts";
 import type { Theme, ThemeColor } from "../../../presentation/theme-model.ts";
 import {
@@ -53,6 +55,8 @@ export interface ActivityLaneItem {
 export interface ActivityLaneCanonicalSnapshot {
 	goalState?: GoalState;
 	taskState?: TaskStepsState;
+	/** Retained plans in `listPlanViews` order; the running root plan takes the plan slot before task steps. */
+	plans?: readonly PlanView[];
 	laneRecords: readonly LaneRecord[];
 }
 
@@ -161,6 +165,26 @@ function projectTaskState(state: TaskStepsState | undefined): ActivityLaneProjec
 	return { active, terminal };
 }
 
+/** The running root plan's step counts in the plan slot; it waits on the owner while a step needs them. */
+function projectPlanState(plans: readonly PlanView[] | undefined): ActivityLaneProjection {
+	const plan = runningRootPlan(plans ?? []);
+	if (!plan) return { active: [], terminal: [] };
+	const needsOwner = plan.counts.heldOnOwner > 0;
+	return {
+		active: [
+			{
+				id: `plan:${plan.planId}`,
+				kind: "task",
+				label: boundedLabel(
+					`${needsOwner ? "Needs you" : "Plan"} ${plan.counts.settled}/${plan.counts.total} · ${plan.title}`,
+				),
+				status: needsOwner ? "waiting" : "active",
+			},
+		],
+		terminal: [],
+	};
+}
+
 function projectGoalState(state: GoalState | undefined): ActivityLaneProjection {
 	if (!state) return { active: [], terminal: [] };
 	const rounds = state.continuationTurnsUsed ?? 0;
@@ -230,11 +254,12 @@ function projectLaneRecords(records: readonly LaneRecord[]): ActivityLaneProject
 }
 
 export function projectActivityLane(snapshot: ActivityLaneCanonicalSnapshot): ActivityLaneProjection {
+	const plan = projectPlanState(snapshot.plans);
 	const task = projectTaskState(snapshot.taskState);
 	const lanes = projectLaneRecords(snapshot.laneRecords);
 	const goal = projectGoalState(snapshot.goalState);
 	return {
-		active: [...task.active, ...lanes.active, ...goal.active],
+		active: [...plan.active, ...task.active, ...lanes.active, ...goal.active],
 		terminal: [...task.terminal, ...lanes.terminal, ...goal.terminal],
 	};
 }

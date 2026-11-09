@@ -54,6 +54,27 @@ export type WorkbenchHeaderButtonAction = "latest" | "layout" | "showLeftPane" |
 export type WorkbenchLeftPaneMode = "chats" | "graph";
 
 /** The live facts behind the Chats & Teams roster: the active target, the Brain's state, every bot and team. */
+/**
+ * The roster's bot order: each bot a listed leader owns follows that leader, marked owned; every other bot keeps its
+ * place. A bot whose leader is not listed stands on its own.
+ */
+export function rosterBotOrder(
+	bots: readonly PersistentBotView[],
+): { readonly bot: PersistentBotView; readonly owned: boolean }[] {
+	const leaders = new Set(bots.filter((bot) => bot.leader === true).map((bot) => bot.agentId));
+	const isOwned = (bot: PersistentBotView) =>
+		bot.createdBy !== undefined && bot.createdBy !== bot.agentId && leaders.has(bot.createdBy);
+	const order: { bot: PersistentBotView; owned: boolean }[] = [];
+	for (const bot of bots) {
+		if (isOwned(bot)) continue;
+		order.push({ bot, owned: false });
+		if (bot.leader === true)
+			for (const child of bots)
+				if (isOwned(child) && child.createdBy === bot.agentId) order.push({ bot: child, owned: true });
+	}
+	return order;
+}
+
 export interface WorkbenchChatRosterSnapshot {
 	readonly activeTarget: ActiveChatTarget;
 	readonly rootModelLabel: string;
@@ -1242,8 +1263,11 @@ export class WorkbenchComponent extends Container {
 			add(`    ${theme.fg("muted", team.description || team.memberAgentIds.join(", ") || "no members")}`, target);
 		}
 		add(theme.fg("muted", roster.bots.length === 0 ? " BOTS · /bot new <id>" : ` BOTS (${roster.bots.length})`));
-		for (const bot of roster.bots) {
+		for (const { bot, owned } of rosterBotOrder(roster.bots)) {
 			const isSelected = active.kind === "bot" && active.agentId === bot.agentId;
+			// A bot a leader owns sits under that leader; its detail line keeps the same indent.
+			const pad = owned ? `  ${theme.fg("dim", "└")} ` : "";
+			const detailPad = owned ? "      " : "    ";
 			const target: ActiveChatTarget = { kind: "bot", agentId: bot.agentId };
 			const name = bot.displayName || bot.agentId;
 			const glyph = botStateGlyph(bot.state);
@@ -1251,7 +1275,7 @@ export class WorkbenchComponent extends Container {
 			const scheduleBadge = (bot.routineCount ?? 0) > 0 ? ` ${theme.fg("accent", `⏱${bot.routineCount}`)}` : "";
 			const leaderBadge = `${bot.leader ? ` ${theme.fg("warning", "leader")}` : ""}${bot.remote ? ` ${theme.fg("accent", `${REMOTE_MARK} remote`)}` : ""}`;
 			add(
-				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)}${leaderBadge}${unreadBadge}${scheduleBadge}`,
+				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${pad}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)}${leaderBadge}${unreadBadge}${scheduleBadge}`,
 				target,
 			);
 			// The row is the bot's name. Its model is a hint on the line below, shown only for the selected bot; the idle state is
@@ -1265,7 +1289,7 @@ export class WorkbenchComponent extends Container {
 			]
 				.filter(Boolean)
 				.join(" · ");
-			if (detail) add(`    ${theme.fg("muted", detail)}`, target);
+			if (detail) add(`${detailPad}${theme.fg("muted", detail)}`, target);
 		}
 		if (roster.lanes.length > 0) {
 			const running = roster.lanes.filter((lane) => lane.state === "running").length;

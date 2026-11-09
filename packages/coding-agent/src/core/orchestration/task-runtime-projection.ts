@@ -1,5 +1,6 @@
 import { HOST_EVENT_RECORD_LIMITS, hostEventCapacity } from "../events/host-event-capacity.ts";
 import { emptyHostEventProjection, HOST_EVENT_RECORD_FIELDS } from "../events/host-event-state.ts";
+import { PLAN_LIMITS } from "../plan/plan-graph.ts";
 import {
 	MAX_ORCHESTRATION_AGENT_BINDINGS,
 	MAX_ORCHESTRATION_APPROVALS,
@@ -34,6 +35,7 @@ export function emptyProjection(): TaskRuntimeProjection {
 		checkpoints: {},
 		approvals: {},
 		notifications: {},
+		plans: {},
 	};
 }
 
@@ -46,6 +48,7 @@ export const PROJECTION_RECORD_FIELDS = [
 	"checkpoints",
 	"approvals",
 	"notifications",
+	"plans",
 ] as const;
 
 export type ProjectionRecordField = (typeof PROJECTION_RECORD_FIELDS)[number];
@@ -90,20 +93,7 @@ function retainedRecordKeyBytes(key: string, label: string): number {
 }
 
 function emptyProjectionSerializedBytes(lastOrdinal: number): number {
-	return serializedJsonBytes(
-		{
-			...emptyHostEventProjection(),
-			lastOrdinal,
-			agents: {},
-			objectives: {},
-			tasks: {},
-			attempts: {},
-			checkpoints: {},
-			approvals: {},
-			notifications: {},
-		},
-		"Orchestration projection",
-	);
+	return serializedJsonBytes({ ...emptyProjection(), lastOrdinal }, "Orchestration projection");
 }
 
 /** Compute once for snapshots/external projections; reducer-produced projections carry a delta cache. */
@@ -386,6 +376,7 @@ export function assertProjectionWithinLimits(projection: TaskRuntimeProjection):
 	assertRecordWithinLimit(projection.checkpoints, MAX_ORCHESTRATION_CHECKPOINTS, "checkpoint");
 	assertRecordWithinLimit(projection.approvals, MAX_ORCHESTRATION_APPROVALS, "approval");
 	assertRecordWithinLimit(projection.notifications, MAX_ORCHESTRATION_NOTIFICATIONS, "notification");
+	assertRecordWithinLimit(projection.plans, PLAN_LIMITS.retainedPlans, "plan");
 	assertRetainedProjectionNestedCollections(
 		projection.objectives,
 		projection.tasks,

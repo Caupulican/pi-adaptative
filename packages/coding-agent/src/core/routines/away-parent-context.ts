@@ -110,6 +110,7 @@ function awaySettingsSource(settings: SettingsManager, maxUsdPerRun: () => numbe
 		getCompactionSettings: () => settings.getCompactionSettings(),
 		getEdgeSettings: () => settings.getEdgeSettings(),
 		getFleetSettings: () => settings.getFleetSettings(),
+		getProviderAdmissionSettings: () => settings.getProviderAdmissionSettings(),
 		getMemoryRetrievalSettings: () => ({ ...settings.getMemoryRetrievalSettings(), enabled: false }),
 		getModelCapabilitySettings: () => settings.getModelCapabilitySettings(),
 		getModelFavorites: () => settings.getModelFavorites(),

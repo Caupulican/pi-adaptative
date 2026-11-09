@@ -8,6 +8,7 @@ import { KeyedSignal } from "../util/keyed-signal.ts";
 import { repeatEvery, SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { splitProviderAccountKey } from "./account-key.ts";
+import { retainDirectoryWatch } from "./admission-watch.ts";
 import type { ProviderRequestLane } from "./lane-context.ts";
 import { readProviderAdmissionRecord } from "./record-storage.ts";
 
@@ -68,7 +69,7 @@ const ENTRY_SUFFIX = ".json";
 const LOCK_FILE = "admission.lock";
 const LANES: readonly ProviderRequestLane[] = ["foreground", "worker", "background"];
 
-/** A hold released by any ledger of this process, keyed by the ledger directory. */
+/** A hold released, keyed by the ledger directory: by any ledger of this process, or seen gone by the directory watch. */
 const releasedHolds = new KeyedSignal();
 
 export function providerAdmissionDir(agentDir: string): string {
@@ -163,11 +164,37 @@ export class ProviderAdmissionLedger {
 	}
 
 	/**
-	 * Calls `onRelease` whenever a hold under this ledger's directory is released in this process, by any ledger. A hold
-	 * another process releases is seen only by counting again.
+	 * Calls `onRelease` whenever a hold under this ledger's directory is released: in this process by any ledger at once,
+	 * and in another process through a watch of the directory held while anyone listens (an entry that disappeared; a
+	 * heartbeat rewrite changes no entry name and wakes no one). A holder that died without releasing produces no event:
+	 * its entry is pruned by the next count once its pid is gone or its heartbeat is older than the staleness bound.
 	 */
 	subscribeRelease(onRelease: () => void): () => void {
-		return releasedHolds.subscribe(this.dir, onRelease);
+		const dir = this.dir;
+		const unsubscribe = releasedHolds.subscribe(dir, onRelease);
+		const release = retainDirectoryWatch(`holds:${dir}`, () => ({
+			dir,
+			relevant: (name) => name.endsWith(ENTRY_SUFFIX),
+			read: () => {
+				try {
+					return new Map(
+						readdirSync(dir).flatMap((name): [string, string][] =>
+							name.endsWith(ENTRY_SUFFIX) ? [[name, ""]] : [],
+						),
+					);
+				} catch (error) {
+					if (isMissingFileError(error)) return new Map();
+					throw error;
+				}
+			},
+			changed: (_names, removed) => {
+				if (removed.length > 0) releasedHolds.notify(dir);
+			},
+		}));
+		return () => {
+			unsubscribe();
+			release();
+		};
 	}
 
 	/** Release every hold this ledger still owns (session disposal). */

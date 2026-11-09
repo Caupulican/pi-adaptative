@@ -1,9 +1,10 @@
 import type { WorkerClaim, WorkerHostVerdict } from "../autonomy/contracts.ts";
 import type { GoalState } from "../goals/goal-state.ts";
-import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { CommsStateCode } from "../provider-prompt-contracts.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import type { NextAction } from "./worker-outcome-contract.ts";
+import { sameOutcomeAttempt } from "./worker-outcome-words.ts";
 
 /**
  * What the host recommends the root do with a worker whose task ended. It is advice printed for the
@@ -209,6 +210,20 @@ export function deriveClaimOnlyWorkerDisposition(claim: WorkerDispositionClaim |
 
 const TERMINAL_TASK_STATUSES: ReadonlySet<string> = new Set(["completed", "failed", "cancelled"]);
 
+/** The attempt a lane's disposition describes: the named one, else the lane's latest. */
+function dispositionAttempt(args: {
+	snapshot: TaskRuntimeProjection | undefined;
+	laneId: string;
+	attemptId?: string;
+}): AttemptRuntimeState | undefined {
+	const { snapshot, laneId } = args;
+	if (!snapshot) return undefined;
+	if (args.attemptId !== undefined) return snapshot.attempts[args.attemptId];
+	return Object.values(snapshot.attempts)
+		.filter((candidate) => candidate.taskId === laneId || candidate.dispatch.logicalLaneId === laneId)
+		.at(-1);
+}
+
 /**
  * Derive the host facts from the orchestration snapshot and the goal state. Either source may be
  * absent; the matching fact is then left undefined (unknown), never zero.
@@ -220,13 +235,7 @@ export function deriveWorkerDispositionFacts(args: {
 	attemptId?: string;
 }): WorkerDispositionFacts & { profileId?: string } {
 	const { snapshot, goal, laneId } = args;
-	const attempt = snapshot
-		? args.attemptId !== undefined
-			? snapshot.attempts[args.attemptId]
-			: Object.values(snapshot.attempts)
-					.filter((candidate) => candidate.taskId === laneId || candidate.dispatch.logicalLaneId === laneId)
-					.at(-1)
-		: undefined;
+	const attempt = dispositionAttempt(args);
 	const profileId = attempt?.dispatch.profileId;
 	const taskState = attempt ? snapshot?.tasks[attempt.taskId] : undefined;
 
@@ -300,7 +309,11 @@ export function deriveWorkerDispositionForClaim(args: {
 	return workerDispositionAdviceFromStep(deriveWorkerNextStepForClaim(args));
 }
 
-/** The next step for one claim from the host's projections; absent sources degrade to unknown facts. */
+/**
+ * The next step for one claim from the host's projections; absent sources degrade to unknown facts. When the attempt has
+ * a recorded outcome, its action and ladder exit are the step (the ladder is the one producer of next actions); the
+ * claim rules still supply the reason and whether an accepted worker stays reusable.
+ */
 export function deriveWorkerNextStepFromProjections(args: {
 	claim: WorkerDispositionClaim | undefined;
 	snapshot: TaskRuntimeProjection | undefined;
@@ -308,7 +321,14 @@ export function deriveWorkerNextStepFromProjections(args: {
 	laneId: string;
 	attemptId?: string;
 }): WorkerNextStep {
-	return deriveWorkerNextStepForClaim({ claim: args.claim, facts: deriveWorkerDispositionFacts(args) });
+	const claimStep = deriveWorkerNextStepForClaim({ claim: args.claim, facts: deriveWorkerDispositionFacts(args) });
+	const attempt = dispositionAttempt(args);
+	const outcome = attempt
+		? sameOutcomeAttempt(args.snapshot?.tasks[attempt.taskId]?.outcome, attempt.attemptId)
+		: undefined;
+	return outcome
+		? { ...claimStep, nextAction: outcome.nextAction, exit: outcome.ladder?.exit ?? claimStep.exit }
+		: claimStep;
 }
 
 /** Derive advice for one claim from the host's projections; absent sources degrade to unknown facts. */

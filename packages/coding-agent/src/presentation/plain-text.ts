@@ -8,6 +8,8 @@ const PLAIN_LABELS: Readonly<Record<string, string>> = {
 	background_tool_task_delivery: "Background task result",
 	"background-tool-completion": "Background task finished",
 	"background-worker-completion": "Agent finished",
+	"leader-outcome": "Leader finished",
+	"leader-question": "Leader question",
 	"bot-lane-status": "Bot status",
 	"team-message": "Group message",
 	"routine-intake": "Routine",

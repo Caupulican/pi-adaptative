@@ -39,7 +39,9 @@ export type FleetRefusalCode =
 	| "placement"
 	| "ceiling"
 	| "authority_digest_mismatch"
-	| "projection_capacity";
+	| "projection_capacity"
+	/** The worker's own start preparation refused it (directory, task fitness, authority, a replay conflict). */
+	| "preflight";
 
 /**
  * The blocker codes a fleet refusal carries. The full `BlockerCode` union belongs to `delegation/worker-outcome.ts`; this is
@@ -51,7 +53,8 @@ export type FleetBlockerCode =
 	| "budget_exhausted"
 	| "placement_unreachable"
 	| "capacity_unavailable"
-	| "owner_authority_required";
+	| "owner_authority_required"
+	| "preflight_failed";
 
 /** What a plan node demands of the fleet. Owned by `plan/plan-graph.ts` once that module exists; mirrored here until then. */
 export interface PlanNodeDemand {
@@ -119,15 +122,22 @@ export type AdmitDecision =
 			reason: FleetWaitReason;
 			detail: string;
 			etaMs?: number;
-	  }
-	| {
-			kind: "refused";
-			reason: FleetRefusalCode;
-			blocker: FleetBlockerCode;
+			/** When the room term holding it reopens, when known (a recorded reset, a budget period, a spend window). */
 			retryAt?: number;
-			retryAtBasis?: "recorded_reset" | "budget_period" | "backoff";
-			detail: string;
-	  };
+	  }
+	| FleetRefusal;
+
+export interface FleetRefusal {
+	readonly kind: "refused";
+	readonly reason: FleetRefusalCode;
+	readonly blocker: FleetBlockerCode;
+	readonly retryAt?: number;
+	readonly retryAtBasis?: "recorded_reset" | "budget_period" | "backoff";
+	readonly detail: string;
+}
+
+/** The answer of `prepare`: the dispatch is prepared and `admit` materializes it synchronously, or it is refused. */
+export type PrepareDecision = { readonly kind: "prepared" } | FleetRefusal;
 
 export type FleetScope =
 	| { kind: "lane"; laneId: string }
@@ -161,7 +171,17 @@ export interface ShareSpec {
 }
 
 export interface FleetScheduler {
-	/** Synchronous and idempotent on the dispatch's key; queued and run mean the task and attempt are materialized. */
+	/**
+	 * The asynchronous half of a local start, run before `admit`: admission resolution, the worker's directory and task
+	 * fitness, its authority and contract. Idempotent on the dispatch's key (a second call while one is prepared, or after
+	 * its task exists, answers `prepared` again). A prepared dispatch that is never admitted is released by `cancel`,
+	 * `stop` or the scheduler's disposal. Non-local placements prepare nothing and answer `prepared`.
+	 */
+	prepare(dispatch: FleetDispatch, placement: Placement, signal?: AbortSignal): Promise<PrepareDecision>;
+	/**
+	 * Synchronous and idempotent on the dispatch's key; queued and run mean the task and attempt are materialized. A local
+	 * dispatch must be prepared first; an unprepared one is refused with reason `preflight`.
+	 */
 	admit(dispatch: FleetDispatch, placement: Placement): AdmitDecision;
 	cancel(scope: FleetScope, reasonCode: string): void;
 	stop(): void;

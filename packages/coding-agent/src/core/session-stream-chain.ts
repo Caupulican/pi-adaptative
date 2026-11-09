@@ -6,6 +6,7 @@ import type { StreamFn } from "../kernel/index.ts";
 import { type StreamIdleOptions, withStreamIdleWatchdog } from "../kernel/reliability/index.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AuthCredential } from "./auth-storage.ts";
+import { accountWindowsFor } from "./fleet/capacity/account-window.ts";
 import { constrainStreamIdleToHttpTimeout } from "./http-dispatcher.ts";
 import { isWarmableLocalModel } from "./local-prefix-warm-controller.ts";
 import { formatModelRouterModel } from "./model-router-controller.ts";
@@ -36,6 +37,7 @@ import { CredentialContentProjectionError, redactCredentialContent } from "./sec
 import { createProviderRequestSecretPolicy } from "./secrets/provider-request-secrets.ts";
 import { redactTokenShapes } from "./security/secret-text.ts";
 import type {
+	ResolvedFleetSettings,
 	ResolvedProviderAdmissionSettings,
 	StreamStallModelClass,
 	StreamStallSettings,
@@ -45,6 +47,7 @@ import { resolveStreamStallBudget } from "./stream-stall-budget.ts";
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface SessionStreamChainSettingsSource {
 	getHttpIdleTimeoutMs(): number;
+	getFleetSettings(): ResolvedFleetSettings;
 	getProviderAdmissionSettings(): ResolvedProviderAdmissionSettings;
 	getStreamStallSettings(modelClass: StreamStallModelClass): StreamStallSettings;
 }
@@ -370,6 +373,13 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 		getAccountKey: (provider, apiKey) => resolveProviderAccountKey(input.authStorage, provider, apiKey),
 		...(input.onWait ? { onWait: input.onWait } : {}),
 		getPolicy: () => settingsManager.getProviderAdmissionSettings(),
+		// Every settled request teaches its account's adaptive fleet window (the foreground's too).
+		observeRequest: (accountKey) =>
+			accountWindowsFor({
+				agentDir: input.agentDir,
+				now: () => providerAdmissionLedger.timers.now(),
+				ceiling: () => settingsManager.getFleetSettings().ceiling.running,
+			}).begin(accountKey),
 		record: (record) => {
 			try {
 				sessionManager.appendCustomEntry(PROVIDER_ADMISSION_CUSTOM_TYPE, record);

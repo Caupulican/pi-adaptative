@@ -49,6 +49,7 @@ import type {
 	WorktreeSyncPolicySetting,
 } from "./settings-schema.ts";
 import { WORKBENCH_GRAPH_VIEWS } from "./settings-schema.ts";
+import { mergeWorkerOutcomeSettings, normalizeWorkerOutcomeSettings } from "./worker-outcome-settings.ts";
 
 /** Single owner of the non-finite check: NaN, ±Infinity, and non-number input are "no usable number". Callers choose the fallback. */
 export function finiteNumberOrUndefined(value: unknown): number | undefined {
@@ -318,6 +319,13 @@ export const DEFAULT_FLEET_CEILING_WRITERS = 64;
 export const DEFAULT_FLEET_CEILING_TREE = 1024;
 /** Share of total memory the fleet keeps free for the rest of the machine (never under 1 GiB). */
 export const DEFAULT_FLEET_RESERVE_MEMORY_PERCENT = 10;
+/** Paid (API-key) worker budgets per local day and per goal; 0 is unbounded (hands-off by default). */
+export const DEFAULT_FLEET_METERED_USD_PER_DAY = 0;
+export const DEFAULT_FLEET_METERED_USD_PER_GOAL = 0;
+/** The 15-minute paid spend under which the spend-rate brake never trips. */
+export const DEFAULT_FLEET_BRAKE_MIN_USD = 1;
+/** A known reopen within this waits queued; one beyond it is refused with its reopen time. */
+export const DEFAULT_FLEET_QUEUE_HORIZON_MS = 900_000;
 
 export const DEFAULT_WORKER_DELEGATION_WRITE_ENABLED = true;
 export const DEFAULT_WORKER_DELEGATION_REPORT_HANDSHAKE = true;
@@ -886,6 +894,8 @@ export function normalizeWorkerDelegationLayer(
 			);
 		}
 	}
+	const outcomes = normalizeWorkerOutcomeSettings(value.outcomes, reportDiagnostic);
+	if (outcomes) normalized.outcomes = outcomes;
 	return normalized;
 }
 
@@ -894,7 +904,8 @@ export function mergeWorkerDelegationLayers(...layers: unknown[]): WorkerDelegat
 	for (const layer of layers) {
 		const normalized = normalizeWorkerDelegationLayer(layer);
 		if (!normalized) continue;
-		merged = { ...(merged ?? {}), ...normalized };
+		const outcomes = mergeWorkerOutcomeSettings(merged?.outcomes, normalized.outcomes);
+		merged = { ...(merged ?? {}), ...normalized, ...(outcomes ? { outcomes } : {}) };
 	}
 	return merged;
 }

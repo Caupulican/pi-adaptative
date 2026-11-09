@@ -28,6 +28,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		duringWork: "local",
 	},
 	{
+		name: "plan",
+		description: "The session's plans: each open plan step by step, closed ones in one line",
+		duringWork: "local",
+	},
+	{
 		name: "proactivity",
 		description: "Idle review that raises notes: /proactivity [status|on|off|review|prefs <text>]",
 	},
@@ -102,6 +107,12 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		duringWork: "local",
 		description:
 			"Manage and message persistent bots directly (/bot [list|new <id> [--write] [model] [soul]|soul <id>|open <id>|msg <id> <text>|stop <id>|retire <id>])",
+	},
+	{
+		name: "lead",
+		duringWork: "local",
+		description:
+			"See the goals handed to leaders, and cancel, pause or resume one (/lead [list|show <leader>|cancel <leader>|pause <leader>|resume <leader>])",
 	},
 	{
 		name: "remote",

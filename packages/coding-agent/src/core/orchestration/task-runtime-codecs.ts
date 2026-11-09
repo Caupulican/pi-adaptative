@@ -1,7 +1,7 @@
 import { parseTurnOriginRecord, type TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import { parseTaskBrief, renderTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
-import { storedOutcomeFromValue } from "../delegation/worker-outcome-codec.ts";
+import { storedOutcomeFromValue, taskEscalationsFromValue } from "../delegation/worker-outcome-codec.ts";
 import { parseHostEventProjection, validateHostEventGraph } from "../events/host-event-codecs.ts";
 import {
 	hostEventArray,
@@ -10,6 +10,8 @@ import {
 } from "../events/host-event-contract.ts";
 import { emptyHostEventProjection, HOST_EVENT_RECORD_FIELDS } from "../events/host-event-state.ts";
 import { parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
+import { planRuntimeStateFromValue } from "../plan/plan-codec.ts";
+import { PLAN_LIMITS } from "../plan/plan-graph.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
 import { assertAttemptAgentBinding } from "./attempt-agent-identity.ts";
@@ -124,7 +126,9 @@ export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: n
 	const eventFieldsPresent = HOST_EVENT_RECORD_FIELDS.filter((field) => Object.hasOwn(raw, field)).length;
 	if (eventFieldsPresent !== 0 && eventFieldsPresent !== HOST_EVENT_RECORD_FIELDS.length)
 		throw new DurableTaskRuntimeError("Orchestration snapshot contains a partial host event projection.");
-	const candidate = eventFieldsPresent === 0 ? { ...raw, ...emptyHostEventProjection() } : raw;
+	const migrated = eventFieldsPresent === 0 ? { ...raw, ...emptyHostEventProjection() } : raw;
+	// A snapshot written before plans existed carries no plan map; it migrates to an empty one.
+	const candidate = Object.hasOwn(migrated, "plans") ? migrated : { ...migrated, plans: {} };
 	if (
 		!Number.isSafeInteger(candidate.lastOrdinal) ||
 		Number(candidate.lastOrdinal) < 0 ||
@@ -143,6 +147,7 @@ export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: n
 	assertRecordWithinLimit(snapshotRecords.checkpoints, MAX_ORCHESTRATION_CHECKPOINTS, "checkpoint");
 	assertRecordWithinLimit(snapshotRecords.approvals, MAX_ORCHESTRATION_APPROVALS, "approval");
 	assertRecordWithinLimit(snapshotRecords.notifications, MAX_ORCHESTRATION_NOTIFICATIONS, "notification");
+	assertRecordWithinLimit(snapshotRecords.plans, PLAN_LIMITS.retainedPlans, "plan");
 	assertRetainedProjectionNestedCollections(
 		snapshotRecords.objectives,
 		snapshotRecords.tasks,
@@ -196,6 +201,12 @@ export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: n
 			Object.entries(snapshotRecords.notifications).map(([notificationId, value]) => [
 				notificationId,
 				notificationRuntimeStateFromValue(value, `${label}.notifications.${notificationId}`),
+			]),
+		),
+		plans: Object.fromEntries(
+			Object.entries(snapshotRecords.plans).map(([planId, value]) => [
+				planId,
+				planRuntimeStateFromValue(value, `${label}.plans.${planId}`),
 			]),
 		),
 	};
@@ -757,7 +768,7 @@ function verificationFromValue(value: unknown, label: string): VerificationRecor
 }
 
 function taskRuntimeStateFromValue(value: unknown, label: string): TaskRuntimeState {
-	const state = exactRecord(value, label, ["task", "attemptIds", "verification", "outcome"]);
+	const state = exactRecord(value, label, ["task", "attemptIds", "verification", "outcome", "escalations"]);
 	return {
 		task: taskFromValue(state.task, `${label}.task`),
 		attemptIds: retainedIdentifierArray(state.attemptIds, MAX_ORCHESTRATION_ATTEMPTS, `${label}.attemptIds`),
@@ -765,6 +776,9 @@ function taskRuntimeStateFromValue(value: unknown, label: string): TaskRuntimeSt
 			? {}
 			: { verification: verificationFromValue(state.verification, `${label}.verification`) }),
 		...(state.outcome === undefined ? {} : { outcome: storedOutcomeFromValue(state.outcome, `${label}.outcome`) }),
+		...(state.escalations === undefined
+			? {}
+			: { escalations: taskEscalationsFromValue(state.escalations, `${label}.escalations`) }),
 	};
 }
 

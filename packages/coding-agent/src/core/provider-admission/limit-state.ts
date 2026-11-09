@@ -7,6 +7,7 @@ import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { KeyedSignal } from "../util/keyed-signal.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";
+import { retainDirectoryWatch } from "./admission-watch.ts";
 import { providerAdmissionDir, safeSegment } from "./ledger.ts";
 import { readProviderAdmissionRecord } from "./record-storage.ts";
 import { type ProviderAdmissionRefusal, ProviderAdmissionRefusedError } from "./refusal.ts";
@@ -126,8 +127,28 @@ export class ProviderLimitedError extends ProviderAdmissionRefusedError {
 	}
 }
 
-/** A limit recorded or cleared by any store of this process, keyed by the limit file. */
+/** A limit recorded or cleared, keyed by the limit file: by any store of this process, or seen by the directory watch. */
 const changedLimits = new KeyedSignal();
+
+/** Every limit file's raw text; a rewrite with the same text is no change. */
+function readLimitDigests(limitsDir: string): Map<string, string> {
+	const digests = new Map<string, string>();
+	let names: string[];
+	try {
+		names = readdirSync(limitsDir);
+	} catch {
+		return digests;
+	}
+	for (const name of names) {
+		if (!name.endsWith(".json")) continue;
+		try {
+			digests.set(name, readFileSync(join(limitsDir, name), "utf-8"));
+		} catch {
+			// Removed between the listing and the read: absent.
+		}
+	}
+	return digests;
+}
 
 export class ProviderLimitStore {
 	private readonly limitsDir: string;
@@ -186,11 +207,24 @@ export class ProviderLimitStore {
 	}
 
 	/**
-	 * Calls `onChange` whenever this process records or clears the limit of `provider`, through any store on this agent
-	 * directory. A change another process makes is seen only by reading again.
+	 * Calls `onChange` whenever the limit of `provider` is recorded or cleared: by any store of this process at once, and
+	 * by another process through a watch of the limits directory held while anyone listens.
 	 */
 	subscribe(provider: string, onChange: () => void): () => void {
-		return changedLimits.subscribe(this.limitPath(provider), onChange);
+		const unsubscribe = changedLimits.subscribe(this.limitPath(provider), onChange);
+		const limitsDir = this.limitsDir;
+		const release = retainDirectoryWatch(`limits:${limitsDir}`, () => ({
+			dir: limitsDir,
+			relevant: (name) => name.endsWith(".json"),
+			read: () => readLimitDigests(limitsDir),
+			changed: (names, removed) => {
+				for (const name of [...names, ...removed]) changedLimits.notify(join(limitsDir, name));
+			},
+		}));
+		return () => {
+			unsubscribe();
+			release();
+		};
 	}
 
 	/**

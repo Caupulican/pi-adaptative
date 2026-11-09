@@ -303,6 +303,12 @@ Direct `write`/`edit` calls use review-after-apply semantics. The compiled grant
 | `workerDelegation.account` | `"other"` \| `"same"` | `"other"` | Which account a fresh, unpinned worker runs on: another authenticated provider (a separate subscription or key, so a worker wave never competes with the owner's turn for one account) or the foreground model. A candidate whose account has a live machine-wide limit (see Provider Admission) is skipped for that dispatch. Falls back to the foreground when no alternative is authenticated |
 | `workerDelegation.routeProviders` | string[] | `[]` | Ordered routing candidates, each `provider` (its default model) or `provider/modelId`; every other authenticated provider follows in catalog order. Example: `["openrouter/inclusionai/ling-3.0-flash-fin:free", "openai-codex"]` |
 | `workerDelegation.routeProvidersByRole` | object | - | Per worker role (`explorer`, `implementer`, `verifier`, ...), an ordered candidate list that replaces `routeProviders` for that role, so a verifier can run on a stronger account than an explorer |
+| `workerDelegation.outcomes.escalation.enabled` | boolean | `true` | After a worker outcome leaves requirements uncovered, the host reruns them itself (rung 1: same model, one thinking step higher; rung 2: the next ranked model, unbound lanes only) and runs host requirement checks. `false` leaves every such outcome with the owner or the parent. Takes effect once worker delegation installs the outcome follow-up; until then no rerun or host check is offered |
+| `workerDelegation.outcomes.escalation.maxRungs` | integer 0-8 | `3` | The most escalation reruns one task's outcomes may schedule; budget limits and an already placed identical rerun also stop it |
+| `workerDelegation.outcomes.learning.enabled` | boolean | `true` | Record worker outcomes in the host outcome ledger (model ids, task classes and counts only) and order routed worker models by that evidence inside the subscription-filtered list. `false` keeps the configured order. Takes effect once worker delegation installs the outcome follow-up; until then nothing is recorded and the order is unchanged |
+| `workerDelegation.outcomes.learning.halfLifeDays` | number 1-365 | `14` | Days after which a recorded observation counts half |
+| `workerDelegation.outcomes.learning.restHours` | number 1-720 | `24` | Hours a demoted model rests before it is tried again; doubles per repeated demotion |
+| `workerDelegation.outcomes.learning.maxRestDays` | number 1-90 | `7` | The longest rest |
 | `workerDelegation.thinking` | `"step_down"` \| `"inherit"` | `"step_down"` | How a worker derives its thinking level when no authority, profile or pin sets one: one notch below the foreground level (`xhigh` -> `high`, floor `minimal`, `off` stays off) or an exact copy |
 
 The former `workerDelegation.maxConcurrent` and `workerDelegation.maxConcurrentBurst` are retired: a settings file that still contains them loads, the keys are ignored, and the harness log records one `settings` info line naming them.
@@ -314,10 +320,12 @@ The fleet decides how many workers run at once from facts, not from a fixed coun
 1. the fleet is stopped;
 2. the running ceiling (`fleet.ceiling.running`), and for a worker that writes files the writer ceiling;
 3. the subscription allowance of the account the worker's own model runs on: while the provider flags a limit or any usage window is at or past 95% (the default owner quota line, fixed for the fleet), nothing more starts on that account until the latest of those windows resets; a reading below it, or one that is missing, stale or not a subscription, leaves the term open;
-4. free machine memory above the reserve (`fleet.reserve.memoryPercent` of total memory, at least 1 GiB), after the expected cost of workers that started but have not grown yet;
-5. the shared heap of in-process workers, kept under 70% of its limit (open under Bun, which reports no V8 old-space limit).
+4. the account's adaptive window: how many workers one provider account serves at once is learned from the provider's answers. It starts at 4, halves on a 429, 529 or rate-limit refusal (once per congestion episode, never below 1), grows by one per success while the window is in use until the last refusal's level and slowly above it, and stays within the running ceiling and `providerAdmission.limits[provider]`. A used-up usage window blocks the account until its stated reset without shrinking the window. When a blocked window reopens, and after a resume or a restart that restores queued work, at most half the window starts until the first success, and the wake is spread by up to a tenth of the block (at most 30 s). Windows are shared by every pi process on the agent directory (`<agentDir>/state/fleet/accounts.json`);
+5. the metered cost room, for paid (API-key) work on a priced model only (a subscription login and a local model never count): each bounded budget (`fleet.budgets.meteredUsdPerDay`, `fleet.budgets.meteredUsdPerGoal`) leaves room for its remainder divided by the worker's expected cost. A worker reserves its expected cost when it starts and is charged its measured cost when its run ends. The spend-rate brake pauses new paid starts while the current 15-minute window's spend is above the larger of `fleet.brake.minUsd` and 3 times the trailing week's 95th-percentile window; the owner is told in plain words, subscription work continues, nothing running stops, and paid starts resume at the next window or when the workers are resumed. Settled spend is shared by every pi process on the agent directory (`<agentDir>/state/fleet/spend.json`);
+6. free machine memory above the reserve (`fleet.reserve.memoryPercent` of total memory, at least 1 GiB), after the expected cost of workers that started but have not grown yet;
+7. the shared heap of in-process workers, kept under 70% of its limit (open under Bun, which reports no V8 old-space limit).
 
-A waiting worker starts when the resource it waits on changes (a worker ends, an allowance reading changes, an allowance window's reset time arrives); nothing polls. The queue is fair across objectives and their subtrees, ages waiting work, and keeps mandatory verifiers first. Queued ordering metadata (first enqueue time, last wait reason, reopen time, the stop flag) is kept at `<agentDir>/state/fleet/queue/<sessionId>.json` so a restarted session restores it; the queued work itself is recovered from the durable task ledger. The queue admits at most its ready window: the running ceiling plus the larger of 8 and a quarter of it, with the last slot reserved for a mandatory verifier.
+A waiting worker starts when the resource it waits on changes (a worker ends, an allowance reading changes, an allowance window's reset time arrives, an account window grows or reopens, a budget period ends); nothing polls. A planned dispatch whose binding term reopens later than `fleet.queueHorizonMs` from now (or whose day or goal budget is used up) is refused with the reopen time instead of queued, so its owner can plan around it. The queue is fair across objectives and their subtrees, ages waiting work, and keeps mandatory verifiers first. Queued ordering metadata (first enqueue time, last wait reason, reopen time, the stop flag) is kept at `<agentDir>/state/fleet/queue/<sessionId>.json` so a restarted session restores it; the queued work itself is recovered from the durable task ledger. The queue admits at most its ready window: the running ceiling plus the larger of 8 and a quarter of it, with the last slot reserved for a mandatory verifier.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
@@ -325,6 +333,10 @@ A waiting worker starts when the resource it waits on changes (a worker ends, an
 | `fleet.ceiling.writers` | number | `64` | Ceiling on running workers that hold write authority |
 | `fleet.ceiling.tree` | number | `1024` | Ceiling on the nodes of one work tree; read by plan and leader owners, which do not exist yet, so nothing enforces it today |
 | `fleet.reserve.memoryPercent` | number | `10` | Percent of total memory kept free for the rest of the machine (at least 1 GiB); clamped to 0-90 |
+| `fleet.budgets.meteredUsdPerDay` | number | `0` | Paid (API-key) worker spend allowed per local calendar day, in dollars, across every pi process on the agent directory; `0` means unbounded |
+| `fleet.budgets.meteredUsdPerGoal` | number | `0` | Paid (API-key) worker spend allowed per goal, in dollars; `0` means unbounded |
+| `fleet.brake.minUsd` | number | `1` | The spend-rate brake never engages below this 15-minute paid spend, in dollars |
+| `fleet.queueHorizonMs` | number | `900000` | A planned dispatch waits queued for a known reopen up to this far ahead; a later one is refused with its reopen time |
 
 ### Orchestrator
 
@@ -515,6 +527,16 @@ A bounded idle review that raises notes the owner did not ask for. It is on by d
 | `away.autostart` | `"notify"` | Always-on: a user service of the operating system that starts the daemon at login, so routines of closed sessions keep running after a reboot (see [Always-on](proactivity.md#scheduled-work)). `"notify"` installs nothing and tells the owner once per agent directory how to turn it on; `"on"` installs it at the next session start or routine save while an enabled routine exists; `"off"` does neither. Read from the global settings and the directory overlay under the agent directory only; a settings file that cannot be read gives `"notify"`, and any other value reads as `"notify"`. |
 
 A value outside its range is replaced by the default. The daemon reads `routines.away` from the global settings file only, and applies a change from its next renewal (every 10 seconds).
+
+### Leaders
+
+```json
+{ "leaders": { "maxDepth": 1 } }
+```
+
+| Setting | Default | Description |
+|---------|---------|-------------|
+| `maxDepth` | `1` | How many leader levels a goal handed over with `bot lead` may nest (1 to 2; a value outside the range reads as 1). See [Leaders lead goals](bots-and-groups.md#leaders-lead-goals). |
 
 ### Channels
 
@@ -1032,7 +1054,7 @@ Project settings (`.pi/settings.json`) override global settings. Nested objects 
 
 ### Logging
 
-The harness writes a log of what it decided and why, so it can be improved from evidence: one JSON line per entry in `<agent dir>/logs/harness/harness-<date>.jsonl`, with a level, a category (`delegation`, `link`, `bots`, `tools`, `readiness`, `channels`, `memory`, `provider`, `router`, `cost`, `edge`, `routines`, `goals`, `workers`, `fleet`, `settings`, ...), the process id and role. A line never carries a prompt, a message, a credential or a file's contents; the host redacts secrets before anything is written.
+The harness writes a log of what it decided and why, so it can be improved from evidence: one JSON line per entry in `<agent dir>/logs/harness/harness-<date>.jsonl`, with a level, a category (`delegation`, `link`, `bots`, `tools`, `readiness`, `channels`, `memory`, `provider`, `router`, `cost`, `edge`, `routines`, `goals`, `workers`, `fleet`, `plan`, `leaders`, `settings`, ...), the process id and role. A line never carries a prompt, a message, a credential or a file's contents; the host redacts secrets before anything is written.
 
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|

@@ -357,6 +357,12 @@ export function teamIncarnation(team: PersistentTeamRecord): string {
 	);
 }
 
+/**
+ * The creator words `createdBy` stores besides a leader's id. A bot never takes one as its id, so "made by root" can never
+ * read as "made by the bot named root".
+ */
+export const RESERVED_BOT_CREATOR_IDS: ReadonlySet<string> = new Set(["root", "owner"]);
+
 export function normalizeBotOrTeamId(raw: string, label = "identifier"): string {
 	const trimmed = raw.trim();
 	if (!BOT_OR_TEAM_ID_REGEX.test(trimmed)) {
@@ -1533,6 +1539,8 @@ export class PersistentBotTeamStore {
 	private writeBot(input: UpsertPersistentBotInput, nowIso?: string): PersistentBotRecord {
 		const agentId = normalizeBotOrTeamId(input.agentId, "agentId");
 		const existing = this.bots.get(agentId);
+		if (!existing && RESERVED_BOT_CREATOR_IDS.has(agentId.toLowerCase()))
+			throw new Error(`"${agentId}" names who created a bot, so no bot can take it; choose another name.`);
 		const provider = (input.provider !== undefined ? input.provider.trim() : existing?.provider) || "anthropic";
 		const modelId = (input.modelId !== undefined ? input.modelId.trim() : existing?.modelId) || "claude-haiku-5-5";
 

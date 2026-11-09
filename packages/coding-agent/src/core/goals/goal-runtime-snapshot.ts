@@ -8,6 +8,7 @@ import { getWorkerClaimSnapshots } from "../delegation/session-worker-claim.ts";
 import { getLearningDecisionSnapshots } from "../learning/session-learning-decision.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { projectSessionWorkState, type SessionWorkStateProjection } from "../orchestration/work-state-projection.ts";
+import { activeRootPlan } from "../plan/plan-view.ts";
 import { getLatestEvidenceBundleSnapshot } from "../research/session-evidence-bundle.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import { getLatestTaskStepsStateSnapshot } from "../tasks/session-task-state.ts";
@@ -218,6 +219,11 @@ export function buildGoalRuntimeSnapshot(args: {
 	const now = (args.now ?? (() => new Date().toISOString()))();
 	const maxWorkerWaitMs = args.maxWorkerWaitMs ?? DEFAULT_GOAL_WORKER_WAIT_MS;
 	const inFlightToolTaskIds = new Set(workState.runningToolTaskIds);
+	const plan = args.taskRuntime ? activeRootPlan(args.taskRuntime) : undefined;
+	const planStepsInFlight =
+		plan && goalState && plan.goalId === goalState.goalId
+			? plan.nodes.filter((node) => node.state === "admitted" || node.state === "running").length
+			: 0;
 
 	// Obligations live on the branch's own transcript, the same source the goal-completion gate reads.
 	const activeVerificationIds = new VerificationObligationTracker(
@@ -235,6 +241,7 @@ export function buildGoalRuntimeSnapshot(args: {
 		laneSyncConflictLaneKeys: laneSyncConflictLaneKeys.size > 0 ? laneSyncConflictLaneKeys : undefined,
 		syncRequiredLaneKeys: syncRequiredLaneKeys.size > 0 ? syncRequiredLaneKeys : undefined,
 		...(inFlightToolTaskIds.size > 0 ? { inFlightToolTaskIds } : {}),
+		...(planStepsInFlight > 0 ? { planStepsInFlight } : {}),
 	});
 
 	return {

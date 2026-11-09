@@ -3,6 +3,7 @@ import type { JsonObject } from "../autonomy/contracts.ts";
 import type { StoredOutcome } from "../delegation/worker-outcome-contract.ts";
 import type { HostEventSubscriptionInput } from "../events/host-event-contract.ts";
 import type { HostEventProjection } from "../events/host-event-state.ts";
+import type { PlanRuntimeState } from "../plan/plan-graph.ts";
 import type { AttemptUsageAccounting } from "./attempt-usage-generations.ts";
 import type {
 	AcceptanceCriterion,
@@ -42,7 +43,30 @@ export interface TaskRuntimeState {
 	verification?: VerificationRecord;
 	/** The latest host-computed outcome of this task; a newer build's record keeps only its identity. */
 	outcome?: StoredOutcome;
+	/** Escalation rungs scheduled for this task's outcome chain, oldest first (a successor task inherits the list). */
+	escalations?: readonly TaskEscalationRecord[];
 }
+
+/** One `task.escalation_scheduled` fact: which outcome placed which rung where. Ids and codes only. */
+export interface TaskEscalationRecord {
+	outcomeId: string;
+	rung: 1 | 2;
+	/** The no-repeat key: node, sorted remaining requirement ids, model and thinking. */
+	signature: string;
+	/** The task the rung runs as: the same task, or a successor that supersedes it. */
+	taskId: string;
+	attemptId: string;
+	/** `local` or the placement's capacity key. */
+	placement: string;
+	modelRef: string;
+	thinking: string;
+	nodeId?: string;
+	supersedesTaskId?: string;
+	scheduledAt: string;
+}
+
+/** The most escalation records one task keeps. */
+export const MAX_TASK_ESCALATIONS = 8;
 
 export interface VerificationRecord {
 	verifierTaskId: string;
@@ -160,6 +184,8 @@ export interface TaskRuntimeProjection extends HostEventProjection {
 	checkpoints: Readonly<Record<string, AttemptCheckpoint>>;
 	approvals: Readonly<Record<string, ApprovalRuntimeState>>;
 	notifications: Readonly<Record<string, NotificationRuntimeState>>;
+	/** Plan graphs the plan executor runs, at most `PLAN_LIMITS.retainedPlans`; see `plan/plan-reducer.ts`. */
+	plans: Readonly<Record<string, PlanRuntimeState>>;
 }
 
 export interface OrchestrationProjectionSlotCounts {

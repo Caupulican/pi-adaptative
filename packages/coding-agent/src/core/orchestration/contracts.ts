@@ -578,7 +578,6 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"objective.cancelled",
 	"task.created",
 	"task.attempt_prepared",
-	"task.ready",
 	"task.failed",
 	"task.verification_finished",
 	"agent.registered",
@@ -611,6 +610,14 @@ export const ORCHESTRATION_EVENT_TYPES = [
 	"notification.enqueued",
 	"notification.delivered",
 	"task.outcome_recorded",
+	"task.escalation_scheduled",
+	"task.cancelled",
+	"plan.recorded",
+	"plan.node_released",
+	"plan.node_settled",
+	"plan.node_held",
+	"plan.join_settled",
+	"plan.closed",
 ] as const;
 
 export type OrchestrationEventType = (typeof ORCHESTRATION_EVENT_TYPES)[number];

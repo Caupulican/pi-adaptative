@@ -574,7 +574,7 @@ export class InteractiveEventController {
 				const details = event.result.details;
 				const carriesVerification =
 					!!details && typeof details === "object" && "piVerification" in (details as Record<string, unknown>);
-				if (["task_steps", "goal", "delegate", "peer"].includes(event.toolName) || carriesVerification) {
+				if (["task_steps", "goal", "delegate", "plan", "peer"].includes(event.toolName) || carriesVerification) {
 					this.port.refreshActivityLane();
 				}
 				const workbench = this.port.getWorkbench();

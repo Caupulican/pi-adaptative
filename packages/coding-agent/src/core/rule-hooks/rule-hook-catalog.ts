@@ -49,6 +49,8 @@ export interface RuleHookSource {
 	readonly trigger: RuleHookTrigger;
 	/** Delivered to the root session only; a worker session never receives it. */
 	readonly rootOnly?: boolean;
+	/** Delivered only while this tool is active: a rule about a tool is never sent to a session that lacks it. */
+	readonly requiresTool?: string;
 	/**
 	 * The rule text. A function renders it from the delivery context; the id is derived from the text it renders
 	 * for {@link TEMPLATE_CONTEXT}, so it stays stable while the context varies.
@@ -83,7 +85,7 @@ function normalizeBody(topic: string, text: string): string {
 
 /** Validates one rule; an invalid constant is a programming error and fails the first delivery loudly. */
 export function buildRuleHook(source: RuleHookSource): RuleHook {
-	const { topic, trigger, rootOnly } = source;
+	const { topic, trigger, rootOnly, requiresTool } = source;
 	if (!TOPIC_PATTERN.test(topic)) throw new Error(`Rule hook topic ${topic} must be kebab-case.`);
 	if (trigger.kind === "tool-call") {
 		const { tools } = trigger;
@@ -94,6 +96,9 @@ export function buildRuleHook(source: RuleHookSource): RuleHook {
 			throw new Error(`Rule hook ${topic} lists a trigger tool more than once.`);
 		}
 	}
+	if (requiresTool !== undefined && !TOOL_PATTERN.test(requiresTool)) {
+		throw new Error(`Rule hook ${topic} requires an invalid tool name.`);
+	}
 	const body = source.body;
 	const template = normalizeBody(topic, typeof body === "string" ? body : body(TEMPLATE_CONTEXT));
 	return {
@@ -103,6 +108,7 @@ export function buildRuleHook(source: RuleHookSource): RuleHook {
 		template,
 		render: (context) => normalizeBody(topic, typeof body === "string" ? body : body(context)),
 		...(rootOnly ? { rootOnly } : {}),
+		...(requiresTool !== undefined ? { requiresTool } : {}),
 	};
 }
 

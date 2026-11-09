@@ -12,12 +12,14 @@ import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestratio
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import { boundedText } from "../util/bounded-line.ts";
+import type { OutcomeLadderContext } from "./worker-escalation-facts.ts";
 import {
 	OUTCOME_LIMITS,
 	OUTCOME_STATUSES,
 	type Outcome,
 	type OutcomeDigest,
 	type OutcomeStatus,
+	type ProjectOutcomeInput,
 	projectOutcome,
 	publishOutcome,
 	sameOutcomeAttempt,
@@ -80,6 +82,7 @@ export class WorkerOutcomeRecorder {
 	private readonly agentDir: string;
 	private readonly sessionId: string;
 	private readonly now: () => number;
+	private ladder: OutcomeLadderContext | undefined;
 
 	constructor(options: { runtime: DurableTaskRuntime; agentDir: string; sessionId: string; now?: () => number }) {
 		this.runtime = options.runtime;
@@ -88,8 +91,23 @@ export class WorkerOutcomeRecorder {
 		this.now = options.now ?? Date.now;
 	}
 
-	/** Record the outcome of one terminal attempt; `claim` is the host-normalized claim when the terminal path holds it. */
-	record(attemptId: string, claim?: WorkerClaim): Outcome | undefined {
+	/** The facts the escalation ladder reads beyond the journal; returns the release that restores the defaults. */
+	useLadderContext(context: OutcomeLadderContext): () => void {
+		this.ladder = context;
+		return () => {
+			if (this.ladder === context) this.ladder = undefined;
+		};
+	}
+
+	/**
+	 * Record the outcome of one terminal attempt; `claim` is the host-normalized claim when the terminal path holds it.
+	 * `facts` carries what the host learned after the attempt ended (requirement checks, a judgment pair).
+	 */
+	record(
+		attemptId: string,
+		claim?: WorkerClaim,
+		facts?: Pick<ProjectOutcomeInput, "requirementChecks" | "ownerOnly">,
+	): Outcome | undefined {
 		const taskId = this.runtime.getSnapshot().attempts[attemptId]?.taskId;
 		if (taskId === undefined) return undefined;
 		let from: OutcomeMachineState = "none";
@@ -102,6 +120,8 @@ export class WorkerOutcomeRecorder {
 				outcomeId,
 				...(previous ? { previous } : {}),
 				recordedAt: new Date(this.now()).toISOString(),
+				...(this.ladder ? { ladder: this.ladder } : {}),
+				...facts,
 			});
 			if (!projected) return undefined;
 			const prior = sameOutcomeAttempt(previous, attemptId);

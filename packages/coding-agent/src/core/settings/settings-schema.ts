@@ -13,6 +13,7 @@ import type { FastModePreference } from "../fast-mode.ts";
 import type { WorkerModelPinsSettings } from "../orchestration/worker-model-pins.ts";
 import type { SystemOneProviderChoice } from "../system-one/access.ts";
 import type { ToolkitScript } from "../toolkit/script-registry.ts";
+import type { WorkerOutcomeSettings } from "./worker-outcome-settings.ts";
 
 export interface CompactionSettings {
 	enabled?: boolean; // default: true
@@ -388,6 +389,10 @@ export interface RoutinesSettings {
 	away?: RoutineAwaySettings; // Routines of sessions that are not open, run away by the daemon (on by default)
 }
 
+export interface LeaderSettings {
+	maxDepth?: number; // default: 1 (ceiling 2) — how many leader levels may nest under the orchestrator; 1 lets a leader lead but not appoint another leader
+}
+
 export interface ResearchLaneSettings {
 	enabled?: boolean; // default: false — autonomous background research is opt-in
 	model?: string; // model pattern; unset inherits the session model the lane was shipped from
@@ -442,12 +447,19 @@ export interface WorkerDelegationSettings {
 	account?: WorkerAccountPolicy; // default: other; fresh workers run on a provider the foreground is not using when one is authenticated
 	routeProviders?: string[]; // ordered routing candidates, `provider` or `provider/modelId`; other authenticated providers follow
 	routeProvidersByRole?: Record<string, string[]>; // per role (explorer, implementer, verifier, ...): candidates that replace routeProviders for that role
+	outcomes?: WorkerOutcomeSettings; // escalation ladder and outcome ledger overrides; absent runs the hands-off defaults
 }
 
 export type ResolvedWorkerDelegationSettings = Required<
 	Omit<
 		WorkerDelegationSettings,
-		"orchestrationProfile" | "modelPins" | "thinking" | "account" | "routeProviders" | "routeProvidersByRole"
+		| "orchestrationProfile"
+		| "modelPins"
+		| "thinking"
+		| "account"
+		| "routeProviders"
+		| "routeProvidersByRole"
+		| "outcomes"
 	>
 > &
 	Pick<WorkerDelegationSettings, "orchestrationProfile">;
@@ -483,11 +495,22 @@ export interface FleetSettings {
 	reserve?: {
 		memoryPercent?: number; // default: 10; share of total memory kept free (at least 1 GiB)
 	};
+	budgets?: {
+		meteredUsdPerDay?: number; // default: 0 (unbounded); paid (API-key) worker spend per local day, machine-wide
+		meteredUsdPerGoal?: number; // default: 0 (unbounded); paid (API-key) worker spend per goal
+	};
+	brake?: {
+		minUsd?: number; // default: 1; the spend-rate brake never trips under this 15-minute paid spend
+	};
+	queueHorizonMs?: number; // default: 900000; a known reopen within this waits queued, a later one is refused
 }
 
 export interface ResolvedFleetSettings {
 	ceiling: { running: number; writers: number; tree: number };
 	reserve: { memoryPercent: number };
+	budgets: { meteredUsdPerDay: number; meteredUsdPerGoal: number };
+	brake: { minUsd: number };
+	queueHorizonMs: number;
 }
 
 export interface WorktreeSyncSettings {
@@ -842,6 +865,7 @@ export interface Settings {
 	proactivity?: ProactivitySettings; // Idle review that raises notes the owner would want to hear (on by default)
 	logging?: LoggingSettings; // The harness log under <agent dir>/logs/harness: level, subsystems, size and retention
 	routines?: RoutinesSettings; // Automatic routine intake from the owner's own words, and routines run away (both on by default)
+	leaders?: LeaderSettings; // Leaders as sub-orchestrators (`bot lead`): how deep leaders may nest
 	channels?: Record<string, ChannelPolicySettings>; // Admission per registered channel provider (core/channels); global or directory profile only
 	workerDelegation?: WorkerDelegationSettings; // Autonomous persistent leaf-worker scheduling; enabled by default on capable models
 	fleet?: FleetSettings; // Worker fleet safety ceilings and machine reserve (core/fleet); running width itself is computed room

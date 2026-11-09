@@ -1,5 +1,5 @@
 /**
- * The session's automatic work at one instant, read from each owner's own accessors: routines, the away daemon,
+ * The session's automatic work at one instant, read from each owner's own accessors: open plans, routines, the away daemon,
  * host-event sources, acting ahead, proactive review, channels, outward drafts, harness notices, knowledge collection,
  * standing grants with the run's authority, System One's configuration, and the recent runs' tool manifests. It is a
  * projection, never a source of truth: it builds no owner, writes nothing, takes nothing a model reported, and decides
@@ -18,12 +18,14 @@ import type { DailyUsageTotals } from "../cost/daily-usage.ts";
 import { OWN_DAEMON_BUILD } from "../delegation/bot-team-routine-helpers.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import type { HostEventConnectionView } from "../events/host-event-contract.ts";
-import type { HostEventProjection } from "../events/host-event-state.ts";
 import type { ForegroundRecoveryController } from "../foreground-recovery-controller.ts";
 import type { GoalAutoContinueState } from "../goals/goal-auto-continue-state.ts";
+import type { GoalState, GoalStatus } from "../goals/goal-state.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE, type HarnessNoticeController, type HarnessNoticeKind } from "../harness-notice.ts";
 import type { KnowledgeCollectionStatus } from "../memory/knowledge-collector.ts";
 import type { MemoryController } from "../memory-controller.ts";
+import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import { isOpenPlanView, listPlanViews, type PlanCounts } from "../plan/plan-view.ts";
 import { type ActAheadPhase, actAheadRecordOf } from "../proactivity/act-ahead-record.ts";
 import {
 	type ProactivityDailyState,
@@ -243,6 +245,23 @@ export interface SystemOneStatus {
 /** Why the active goal's automatic continuation is running, waiting or stopped (`core/goals/goal-auto-continue-state.ts`). */
 export interface GoalContinuationStatus {
 	readonly state: GoalAutoContinueState;
+	/** The session's latest goal: its words, status and how many of its requirements are met. */
+	readonly goal?: {
+		readonly text: string;
+		readonly status: GoalStatus;
+		readonly met: number;
+		readonly total: number;
+	};
+}
+
+/** The session's open plans (running or paused), in `listPlanViews` order; closed plans are `/plan`'s. */
+export interface PlansStatus {
+	readonly plans: BoundedList<{
+		readonly title: string;
+		readonly version: number;
+		readonly status: "active" | "paused";
+		readonly counts: PlanCounts;
+	}>;
 }
 
 /** Whether the session file accepts new writes: it does not after a write failed in a way that left the file's state unknown. */
@@ -255,6 +274,7 @@ export interface SessionAutonomyStatus {
 	readonly at: string;
 	readonly sessionId: string;
 	readonly goalContinuation: StatusSection<GoalContinuationStatus>;
+	readonly plans: StatusSection<PlansStatus>;
 	readonly sessionSave: StatusSection<SessionSaveStatus>;
 	readonly routines: StatusSection<RoutinesStatus>;
 	readonly awayDaemon: StatusSection<AwayDaemonStatusView>;
@@ -305,12 +325,14 @@ export interface AutonomyStatusSources {
 		| Pick<PersistentBotTeamStore, "listRoutines" | "listRoutineOccurrences" | "getDaemonStatus">
 		| undefined;
 	readonly routineIntake: RoutineIntakeStatus | undefined;
-	/** The worker ledger's projection; undefined while the ledger is not loaded. */
-	readonly hostEventLedger: HostEventProjection | undefined;
+	/** The worker ledger's projection (host events and plans); undefined while the ledger is not loaded. */
+	readonly hostEventLedger: TaskRuntimeProjection | undefined;
 	/** The running host event sources' connections (`HostEventSessionController.connections`). */
 	hostEventConnections(): readonly HostEventConnectionView[];
 	/** Why the goal's automatic continuation is running, waiting or stopped, from the scheduler's own facts. */
 	goalContinuation(): GoalAutoContinueState;
+	/** The session's latest goal state; undefined when no goal was ever created. */
+	goalState(): GoalState | undefined;
 	readonly proactivity: {
 		readonly daily: ProactivityDailyState;
 		readonly lastSkipReason?: string;
@@ -645,9 +667,35 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 		}),
 		section<readonly RunToolManifest[]>(() => available(run.toolManifests.list())),
 	]);
-	const goalContinuation = await section<GoalContinuationStatus>(() =>
-		available({ state: sources.goalContinuation() }),
-	);
+	const goalContinuation = await section<GoalContinuationStatus>(() => {
+		const goal = sources.goalState();
+		return available({
+			state: sources.goalContinuation(),
+			...(goal
+				? {
+						goal: {
+							text: text(goal.userGoal.replace(/\s+/g, " ").trim()) ?? "",
+							status: goal.status,
+							met: goal.requirements.filter((requirement) => requirement.status === "satisfied").length,
+							total: goal.requirements.length,
+						},
+					}
+				: {}),
+		});
+	});
+	const plans = await section<PlansStatus>(() => {
+		const ledger = sources.hostEventLedger;
+		if (!ledger) return unavailable("the worker ledger is not loaded in this session");
+		return available({
+			plans: bounded(
+				listPlanViews(ledger).flatMap((view) =>
+					isOpenPlanView(view)
+						? [{ title: text(view.title) ?? "", version: view.version, status: view.status, counts: view.counts }]
+						: [],
+				),
+			),
+		});
+	});
 	const sessionSave = await section<SessionSaveStatus>(() =>
 		available({ fenced: sessionManager.isPersistenceStateUncertain() }),
 	);
@@ -662,6 +710,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 		at: new Date(nowMs).toISOString(),
 		sessionId: sources.sessionId,
 		goalContinuation,
+		plans,
 		sessionSave,
 		routines,
 		awayDaemon,

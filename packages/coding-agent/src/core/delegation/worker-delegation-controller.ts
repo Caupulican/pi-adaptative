@@ -218,7 +218,6 @@ import {
 	WorkerConversationStore,
 } from "./worker-conversation-store.ts";
 import {
-	awaitWorkerStartSettlement,
 	isOAuthCredentialUnusableText,
 	WorkerCredentialHealth,
 	type WorkerModelMove,
@@ -236,6 +235,7 @@ import {
 	type WorkerDispatchResourceSnapshot,
 	WorkerDispatchScheduler,
 } from "./worker-dispatch-scheduler.ts";
+import { escalationAuthorityDigest } from "./worker-escalation.ts";
 import {
 	buildWorkerExecutionPlan,
 	compileWorkerExecutionGrant,
@@ -294,6 +294,11 @@ import {
 	workerContractWorkspaceRoot,
 	workerSpecializationWorkspaceRoots,
 } from "./worker-specialization-match.ts";
+import {
+	type QueuedWorkerAttemptOutcome,
+	type WorkerStartAdmission,
+	WorkerStartPhases,
+} from "./worker-start-phases.ts";
 import { findSimilarActiveWorkerLanes } from "./worker-task-similarity.ts";
 import { finalizeWorkerClaim } from "./worker-terminal-finalizer.ts";
 import {
@@ -427,10 +432,7 @@ interface PreparedWorkerAttempt {
 	attempt?: AttemptRuntimeState;
 }
 
-type WorkerStartAdmission =
-	| { kind: "refused"; skipReason: string }
-	| { kind: "existing"; record: LaneRecord; replayed: boolean }
-	| { kind: "fresh"; admission: Extract<WorkerAdmission, { ok: true }>; releaseAllocation?: () => void };
+type FreshWorkerAdmission = Extract<WorkerAdmission, { ok: true }>;
 
 interface PreparedWorkerAgent {
 	conversation: WorkerConversation;
@@ -442,18 +444,6 @@ interface ProjectSelection {
 	admission: Exclude<WorkerProjectAdmission, { kind: "unavailable" }>;
 	consumed: boolean;
 }
-
-type QueuedWorkerAttemptOutcome =
-	| { started: false; skipReason: string }
-	| {
-			started: true;
-			record: LaneRecord;
-			modelPinBypass?: WorkerRole;
-			/** Active lanes whose instructions resemble this one; the parent decides whether one is a copy. */
-			similarLaneIds?: string[];
-			/** Moves the worker already made off its admitted model while its start credentials settled. */
-			modelMoves?: readonly WorkerModelMove[];
-	  };
 
 type PreparedWorkerRun = QueuedWorkerAttemptOutcome & {
 	completion?: Promise<WorkerDelegationRunOutcome>;
@@ -618,6 +608,8 @@ export class WorkerDelegationController {
 	}>;
 	/** The session's fleet: room, the queue's order and capacity yields; this controller materializes and runs its lanes. */
 	private readonly fleet: SessionFleetScheduler;
+	/** The worker start in its asynchronous preparation and synchronous materialization, shared with the fleet's admit. */
+	private readonly startPhases: WorkerStartPhases<FreshWorkerAdmission>;
 	private readonly yieldedWriteReservations = new Map<string, WorkerWriteReservationWaitYield>();
 	private readonly conversations = new WorkerConversationStore();
 	private readonly projectDirectory: WorkerProjectDirectory;
@@ -662,6 +654,15 @@ export class WorkerDelegationController {
 			timers: this.deps.getTimers().port("fleet"),
 			settings: () => this.deps.getSettingsManager().getFleetSettings(),
 			...(this.deps.fleetAllowance ? { allowance: this.deps.fleetAllowance } : {}),
+			escalationAuthorityDigest: (outcomeId) =>
+				escalationAuthorityDigest(this.getWorkerLifecycle().getTaskRuntimeSnapshot(), outcomeId),
+			accountKey: (provider) => resolveProviderAccountKey(this.deps.getModelRegistry().authStorage, provider),
+			providerLimit: (provider) => this.deps.getSettingsManager().getProviderAdmissionSettings().limits[provider],
+			isMetered: (model) => !this.deps.getModelRegistry().isUsingSubscription(model),
+			onSpendBrake: (state) =>
+				this.deps.observeHarnessNotice?.("fleet-spend-brake", () =>
+					state.engaged ? { reason: "spend-rate", text: state.text } : "clear",
+				),
 		});
 		const dispatchAdmission = this.dispatchAdmissionPort();
 		this.scheduler = new WorkerDispatchScheduler({
@@ -712,7 +713,48 @@ export class WorkerDelegationController {
 					if (agentId) this.agentControl.cancelWorkerAgent(agentId, reasonCode);
 				}
 			},
+			isAttemptLive: (attemptId) =>
+				NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(
+					this.getWorkerLifecycle().getTaskRuntimeSnapshot().attempts[attemptId]?.status ?? "",
+				),
+			attemptCostUsd: (attemptId) => this.lifecycle.ledger.getAttemptUsage(attemptId)?.costUsd,
 		});
+		this.startPhases = new WorkerStartPhases<FreshWorkerAdmission>({
+			closed: this.workerAbort.signal,
+			capture: (request) => this.captureWorkerRequest(request),
+			admitted: (run, aborted, signal) => this.runAdmittedWorker(run, aborted, signal),
+			admittedNow: (run) => {
+				const lease = runtimeGenerationAdmission(this.deps.getAgentDir()).tryAdmitWork({
+					kind: "lane",
+					label: "worker admission",
+				});
+				// Acquired in this synchronous step, the lease is current: no generation change can intervene before `run`.
+				if (!lease) return undefined;
+				try {
+					return run();
+				} finally {
+					lease.release();
+				}
+			},
+			prepare: (request, signal) => this.admitWorkerStart(request, signal),
+			materialize: (request, admission) => this.startInternal(request, undefined, admission),
+			admissionModel: (admission) => admission.shipment.model,
+			laneDirectory: (admission) => admission.executionPlan.cwd,
+			discardLaneDirectory: (cwd) => this.laneIsolation?.discard(cwd),
+			fanoutHeadroomSkipReason: (request, remaining) => this.fanoutHeadroomSkipReason(request, remaining),
+			similarLaneIds: (request) =>
+				request.verificationOfTaskId || this.independentParallelIntent(request)
+					? []
+					: findSimilarActiveWorkerLanes(this.lifecycle.getTaskRuntimeSnapshot(), request.instructions).map(
+							(lane) => lane.laneId,
+						),
+			currentRecord: (laneId) => this.lifecycle.getRecord(laneId),
+			withWaitReason: (record) => this.withWaitReasons([record])[0] ?? record,
+			activeAttempt: (laneId) => this.getWorkerLifecycle().getActiveAttempt(laneId),
+			waitState: (laneId) => this.scheduler.getWaitState(laneId),
+			warn: (message) => this.safeWarn(message),
+		});
+		this.fleet.bindStartPhases(this.startPhases);
 		this.recovery = new WorkerRecoveryCoordinator({
 			timers: this.deps.getTimers().port("orchestration"),
 			lifecycle: this.lifecycle,
@@ -4503,7 +4545,7 @@ export class WorkerDelegationController {
 	private async admitWorkerStart(
 		request: WorkerDelegationRequest,
 		signal?: AbortSignal,
-	): Promise<WorkerStartAdmission> {
+	): Promise<WorkerStartAdmission<FreshWorkerAdmission>> {
 		const prior = request.reuseAgentId
 			? this.lifecycle.getLatestAgentAttempt(request.reuseAgentId)
 			: this.replayedWorkerAttempt(request.messageReplayKey);
@@ -4764,68 +4806,7 @@ export class WorkerDelegationController {
 	}
 
 	start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
-		if (this.workerAbort.signal.aborted) return Promise.resolve({ started: false, skipReason: "session_disposed" });
-		const capturedRequest = this.captureWorkerRequest(request);
-		return this.runAdmittedWorker(
-			() => this.startWorker(capturedRequest, signal),
-			() => ({
-				started: false,
-				skipReason: this.workerAbort.signal.aborted ? "session_disposed" : "worker_start_aborted",
-			}),
-			signal,
-		);
-	}
-
-	private async startWorker(
-		request: WorkerDelegationRequest,
-		signal?: AbortSignal,
-	): Promise<QueuedWorkerAttemptOutcome> {
-		const capturedRequest = request;
-		if (capturedRequest.fanoutRemaining !== undefined && capturedRequest.fanoutRemaining > 1) {
-			const headroomSkipReason = this.fanoutHeadroomSkipReason(capturedRequest, capturedRequest.fanoutRemaining);
-			if (headroomSkipReason) return { started: false, skipReason: headroomSkipReason };
-		}
-		const selected = await this.admitWorkerStart(capturedRequest, signal);
-		if (selected.kind === "refused") return { started: false, skipReason: selected.skipReason };
-		// A reused specialist's turn or a replayed start can be queued too: its record says why, like a fresh lane's.
-		if (selected.kind === "existing")
-			return { started: true, record: this.withWaitReasons([selected.record])[0] ?? selected.record };
-		const similar =
-			capturedRequest.verificationOfTaskId || this.independentParallelIntent(capturedRequest)
-				? []
-				: findSimilarActiveWorkerLanes(this.lifecycle.getTaskRuntimeSnapshot(), capturedRequest.instructions);
-		let outcome: ReturnType<WorkerDelegationController["startInternal"]>;
-		try {
-			outcome = this.startInternal(capturedRequest, undefined, selected.admission);
-		} finally {
-			selected.releaseAllocation?.();
-		}
-		if (!outcome.started) {
-			// A start that never ran leaves its fresh worktree lane unused: remove it.
-			await this.laneIsolation?.discard(selected.admission.executionPlan.cwd);
-			return outcome;
-		}
-		const { startSettled, ...started } = outcome;
-		// A running worker's result names the model it settled on, and the moves on the way, so the parent never probes
-		// credentials or names a model to work around a login the harness already routed past. Bounded: past it, the
-		// admitted model is reported and the lane's status shows any later move.
-		const modelMoves = startSettled
-			? await awaitWorkerStartSettlement(
-					startSettled,
-					AbortSignal.any([
-						this.workerAbort.signal,
-						AbortSignal.timeout(WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS),
-						...(signal ? [signal] : []),
-					]),
-				)
-			: undefined;
-		const record = (modelMoves ? this.lifecycle.getRecord(started.record.laneId) : undefined) ?? started.record;
-		return {
-			...started,
-			record: this.withWaitReasons([record])[0] ?? record,
-			...(similar.length > 0 ? { similarLaneIds: similar.map((lane) => lane.laneId) } : {}),
-			...(modelMoves && modelMoves.length > 0 ? { modelMoves } : {}),
-		};
+		return this.startPhases.start(request, signal);
 	}
 
 	private async admitWorkerDirectory(
@@ -5210,7 +5191,12 @@ export class WorkerDelegationController {
 		const { lifecycle } = prepared;
 		if (!prepared.attempt) return { started: false, skipReason: "orchestration_attempt_missing" };
 		// Every start passes here, queued or direct: the fleet's room subscribers see the slot taken.
-		this.fleet.noteAdmitted(prepared.record.laneId);
+		this.fleet.noteAdmitted(
+			prepared.record.laneId,
+			prepared.attempt.attemptId,
+			model,
+			request.objectiveId ?? undefined,
+		);
 		// A worker serving a third party's words reads none of the owner's memory, as a third-party run of the parent
 		// reads none: an attempt that starts tainted is planned, granted and offered no memory tool. One granted the
 		// broker before a steer tainted it keeps that grant's plan when it is recovered (a durable grant is never
@@ -5453,6 +5439,7 @@ export class WorkerDelegationController {
 					);
 				},
 				leaderIds: () => directory.leaderIds(),
+				ownLeader: () => directory.ownLeader(),
 				...(directory.createBot
 					? {
 							create: (request) => {

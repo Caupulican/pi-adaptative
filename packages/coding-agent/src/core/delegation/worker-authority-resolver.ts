@@ -15,6 +15,7 @@ import {
 } from "../memory/worker-memory-tools.ts";
 import { deriveModelCapabilityProfile, filterToolNamesForCapability } from "../model-capability.ts";
 import { defaultModelPerProvider } from "../model-resolver.ts";
+import type { OutcomeRankQuery } from "../models/outcome-ledger-store.ts";
 import {
 	type HarnessCapability,
 	MAX_WORKER_SOUL_LENGTH,
@@ -133,6 +134,11 @@ export interface WorkerAuthorityResolutionInput {
 	isModelAllowed?(model: Model<Api>): boolean;
 	/** The best model the policy allows, for a worker whose own binding it disallows. */
 	allocateAllowedModel?(): Model<Api> | undefined;
+	/**
+	 * Orders the routed candidates by outcome evidence (see `models/outcome-ledger-store.ts`). Applies only to a fresh
+	 * worker nothing has bound; it must return exactly the candidates it was given.
+	 */
+	rankRoutedModels?(models: readonly Model<Api>[], query: OutcomeRankQuery): Model<Api>[];
 }
 
 export type WorkerAuthorityResolution =
@@ -377,6 +383,7 @@ function selectModelBinding(
 	isModelExhausted: (model: Model<Api>) => boolean,
 	isModelLimited: ((model: Model<Api>) => boolean) | undefined,
 	routeChoice: OrchestrationModelBinding | undefined,
+	rankRoutedModels: WorkerAuthorityResolutionInput["rankRoutedModels"],
 ):
 	| {
 			binding: OrchestrationModelBinding;
@@ -406,14 +413,19 @@ function selectModelBinding(
 	// Routing applies only to a fresh worker nothing has bound: no pin, no authority model, no
 	// profile binding. An authored choice is never moved to another account.
 	if (!authority?.model && !base && foregroundModel) {
-		const routed = routedWorkerModels({
+		const role = defaultWorkerRole(authority, base);
+		const eligible = routedWorkerModels({
 			foregroundModel,
 			routing: accountRouting,
-			role: defaultWorkerRole(authority, base),
+			role,
 			modelRegistry,
 			isModelExhausted,
 			isModelLimited,
 		});
+		// Evidence orders the subscription-filtered list; it never adds or removes a candidate.
+		const routed = rankRoutedModels
+			? rankRoutedModels(eligible, { role, write: authority?.readOnly !== true })
+			: eligible;
 		if (routed.length > 0) {
 			const explicitThinking = authority?.thinkingLevel;
 			const inherited = foregroundThinkingLevel ?? resolveModelThinkingLevel(foregroundModel, undefined);
@@ -560,6 +572,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		isModelExhausted,
 		input.isModelLimited,
 		input.routeChoice,
+		input.rankRoutedModels,
 	);
 	if (!selected) {
 		harnessLog.warn("delegation", "no model could be chosen for a worker", () => ({

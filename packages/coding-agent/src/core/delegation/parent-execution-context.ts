@@ -62,6 +62,7 @@ import type {
 	ModelRouterSelectionMode,
 	ResolvedEdgeSettings,
 	ResolvedFleetSettings,
+	ResolvedProviderAdmissionSettings,
 	ResolvedWorkerDelegationSettings,
 	SystemOneSettings,
 	ThinkingLevel,
@@ -88,6 +89,8 @@ export interface ParentExecutionSettingsSource {
 	};
 	getEdgeSettings(): ResolvedEdgeSettings;
 	getFleetSettings(): ResolvedFleetSettings;
+	/** The provider gate's policy; the fleet reads its per-provider limits to clamp an account's window. */
+	getProviderAdmissionSettings(): ResolvedProviderAdmissionSettings;
 	getMemoryRetrievalSettings(): {
 		enabled: boolean;
 		maxResults: number;

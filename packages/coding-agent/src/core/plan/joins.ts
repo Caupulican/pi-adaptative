@@ -1,0 +1,249 @@
+/**
+ * Joins: how a plan combines the outcomes of the nodes in `join.members` into one result (design PG 6.2, reconciled
+ * section 2.4). Every decision here is code over member outcomes, never worker prose:
+ *
+ * - collect: `aggregateOutcomes(members, quorum ? {quorum} : "all")`; settles when the quorum succeeded or every
+ *   member settled.
+ * - race: settles on the first succeeded member (`any`); the other members still running are cancelled.
+ * - vote: every member settled; no eligible (succeeded) candidate is a gap, one is the winner, two or more ask System
+ *   One one Choice (the executor runs it and passes the winner back here).
+ * - reduce and verify: run a worker task over the members (the reducer answers `criterion`, the verifier checks the
+ *   subjects); the join's outcome aggregates the members with that worker's outcome.
+ * - merge is not built yet (B45); F4 refuses it.
+ *
+ * The full result is written by the executor as a bounded artifact (`plan/<planId>/<nodeId>-j<n>.json`); this module only
+ * computes it.
+ */
+
+import { aggregateOutcomes } from "../delegation/worker-outcome.ts";
+import type { Outcome, OutcomeStatus } from "../delegation/worker-outcome-contract.ts";
+import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import type { PlanNodeKind, PlanNodeSpec, PlanRecord, PlanRuntimeState } from "./plan-graph.ts";
+import { planNodeOutcome } from "./plan-view.ts";
+
+export const JOIN_RESULT_MAX_BYTES = 256 * 1024;
+
+export interface JoinMember {
+	readonly nodeId: string;
+	readonly status: OutcomeStatus;
+	readonly outcomeId: string;
+}
+
+export interface JoinResult {
+	readonly v: 1;
+	readonly kind: PlanNodeKind;
+	readonly outcome: Outcome;
+	readonly members: readonly JoinMember[];
+	readonly coverage: Readonly<Record<string, boolean>>;
+	readonly winner?: string;
+	readonly conflicts: readonly {
+		readonly kind: "finding" | "file";
+		readonly between: readonly string[];
+		readonly detail: string;
+	}[];
+	readonly changedFiles: readonly string[];
+	readonly gaps: readonly string[];
+	readonly artifact: string;
+}
+
+export interface JoinIdentity {
+	readonly outcomeId: string;
+	readonly generation: number;
+	readonly recordedAt: string;
+	readonly artifact: string;
+}
+
+export type JoinDecision =
+	| { readonly kind: "wait" }
+	| { readonly kind: "settle"; readonly result: JoinResult; readonly cancel: readonly string[] }
+	/** vote with two or more eligible candidates: the executor asks System One which best meets the criterion. */
+	| {
+			readonly kind: "choose";
+			readonly candidates: readonly { readonly nodeId: string; readonly outcome: Outcome }[];
+	  };
+
+type JoinProjection = Pick<TaskRuntimeProjection, "plans" | "tasks" | "attempts">;
+
+/** `plan/<planId>/<nodeId>-j<n>.json`: where settlement `n` of a join is stored, relative to the session bundle. */
+export function joinArtifactPath(planId: string, nodeId: string, n: number): string {
+	return `plan/${planId}/${nodeId}-j${n}.json`;
+}
+
+/** The join outcome id: unique per plan, node and settlement sequence. */
+export function joinOutcomeId(planId: string, nodeId: string, n: number): string {
+	return `outcome-${planId}-${nodeId}-j${n}`;
+}
+
+function memberOutcomes(
+	projection: JoinProjection,
+	plan: PlanRuntimeState,
+	node: PlanNodeSpec,
+): { settled: { nodeId: string; outcome: Outcome }[]; pending: string[] } {
+	const settled: { nodeId: string; outcome: Outcome }[] = [];
+	const pending: string[] = [];
+	for (const member of node.join?.members ?? []) {
+		const runtime = plan.nodes[member];
+		const outcome = runtime?.held ? undefined : planNodeOutcome(projection, plan, member);
+		if (outcome) settled.push({ nodeId: member, outcome });
+		else pending.push(member);
+	}
+	return { settled, pending };
+}
+
+function coverageRecord(outcome: Outcome): Record<string, boolean> {
+	return Object.fromEntries([
+		...outcome.coverage.covered.map((entry) => [entry.id, true] as const),
+		...outcome.coverage.uncovered.map((entry) => [entry.id, false] as const),
+	]);
+}
+
+function buildResult(
+	node: PlanNodeSpec,
+	members: readonly { nodeId: string; outcome: Outcome }[],
+	outcome: Outcome,
+	identity: JoinIdentity,
+	winner?: string,
+): JoinResult {
+	const gaps = [
+		...members
+			.filter((member) => member.outcome.status !== "succeeded")
+			.map((member) => `step ${member.nodeId} ended ${member.outcome.status}`),
+		...outcome.coverage.uncovered.map((entry) => `requirement ${entry.id} not met (${entry.reason})`),
+	];
+	const changedFiles = [...new Set(members.flatMap((member) => member.outcome.changedFiles))];
+	return {
+		v: 1,
+		kind: node.kind,
+		outcome: { ...outcome, artifacts: [...outcome.artifacts, { kind: "join_result", ref: identity.artifact }] },
+		members: members.map((member) => ({
+			nodeId: member.nodeId,
+			status: member.outcome.status,
+			outcomeId: member.outcome.outcomeId,
+		})),
+		coverage: coverageRecord(outcome),
+		...(winner ? { winner } : {}),
+		conflicts: [],
+		changedFiles,
+		gaps,
+		artifact: identity.artifact,
+	};
+}
+
+function aggregate(
+	record: PlanRecord,
+	node: PlanNodeSpec,
+	children: readonly Outcome[],
+	policy: "all" | "any" | { quorum: number },
+	identity: JoinIdentity,
+): Outcome {
+	return aggregateOutcomes(children, policy, "join", {
+		outcomeId: identity.outcomeId,
+		nodeId: node.id,
+		objectiveId: record.objectiveId,
+		generation: identity.generation,
+		recordedAt: identity.recordedAt,
+	});
+}
+
+/** The decision of a join the harness settles in code (collect, race, vote). */
+export function decideCodeJoin(
+	projection: JoinProjection,
+	plan: PlanRuntimeState,
+	record: PlanRecord,
+	node: PlanNodeSpec,
+	identity: JoinIdentity,
+): JoinDecision {
+	const { settled, pending } = memberOutcomes(projection, plan, node);
+	const succeeded = settled.filter((member) => member.outcome.status === "succeeded");
+	const settle = (
+		policy: "all" | "any" | { quorum: number },
+		members = settled,
+		winner?: string,
+		cancel: string[] = [],
+	) => {
+		const outcome = aggregate(
+			record,
+			node,
+			members.map((member) => member.outcome),
+			policy,
+			identity,
+		);
+		return { kind: "settle" as const, result: buildResult(node, members, outcome, identity, winner), cancel };
+	};
+	switch (node.kind) {
+		case "collect": {
+			const quorum = node.join?.quorum;
+			if (quorum !== undefined && succeeded.length >= quorum) return settle({ quorum }, settled, undefined, pending);
+			return pending.length === 0 ? settle(quorum !== undefined ? { quorum } : "all") : { kind: "wait" };
+		}
+		case "race": {
+			const first = succeeded[0];
+			if (first) return settle("any", [first], first.nodeId, [...pending]);
+			return pending.length === 0 ? settle("any") : { kind: "wait" };
+		}
+		case "vote": {
+			if (pending.length > 0) return { kind: "wait" };
+			if (succeeded.length === 0) return settle("all");
+			const only = succeeded.length === 1 ? succeeded[0] : undefined;
+			if (only) return settle("any", [only], only.nodeId);
+			return { kind: "choose", candidates: succeeded };
+		}
+		default:
+			return { kind: "wait" };
+	}
+}
+
+/**
+ * Settles a vote after System One's Choice: a decisive winner settles on that candidate; without one (`undefined`)
+ * the join settles on every eligible candidate as partial, so the root reads them all (READ_ALL).
+ */
+export function settleVote(
+	projection: JoinProjection,
+	plan: PlanRuntimeState,
+	record: PlanRecord,
+	node: PlanNodeSpec,
+	identity: JoinIdentity,
+	winner: string | undefined,
+): JoinResult {
+	const { settled } = memberOutcomes(projection, plan, node);
+	const chosen = winner ? settled.find((member) => member.nodeId === winner) : undefined;
+	if (chosen)
+		return buildResult(
+			node,
+			[chosen],
+			aggregate(record, node, [chosen.outcome], "any", identity),
+			identity,
+			chosen.nodeId,
+		);
+	const eligible = settled.filter((member) => member.outcome.status === "succeeded");
+	const outcome = aggregate(
+		record,
+		node,
+		eligible.map((member) => member.outcome),
+		"all",
+		identity,
+	);
+	return buildResult(node, eligible, { ...outcome, status: "partial" }, identity);
+}
+
+/** The result of a reduce or verify join once its worker task's outcome settled. */
+export function workerJoinResult(
+	projection: JoinProjection,
+	plan: PlanRuntimeState,
+	record: PlanRecord,
+	node: PlanNodeSpec,
+	worker: Outcome,
+	identity: JoinIdentity,
+): JoinResult {
+	const { settled } = memberOutcomes(projection, plan, node);
+	// The reducer's answer is the join's; the verifier's verdict gates every subject.
+	const children = node.kind === "reduce" ? [worker] : [...settled.map((member) => member.outcome), worker];
+	return buildResult(node, settled, aggregate(record, node, children, "all", identity), identity);
+}
+
+/** Whether a join's result lets the root read the report alone: accepted, every cited requirement met, nothing open. */
+export function joinReadsAsReport(result: JoinResult): boolean {
+	return (
+		result.outcome.status === "succeeded" && Object.values(result.coverage).every(Boolean) && result.gaps.length === 0
+	);
+}

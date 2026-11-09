@@ -32,7 +32,45 @@ Bots are created on the fly, for whatever purpose you have:
 Every other bot cannot create bots. It asks a leader (leaders are marked in its `bot_message` peer list) or its parent in its
 report. Bounds that always hold: a leader cannot make a leader, grants `canWrite` only when it can write itself, and keeps at
 most 12 bots it created; a bot name that exists, retired or not, is refused. The store records who created each bot
-(`owner`, `root` or the leader's id).
+(`owner`, `root` or the leader's id). A bot a leader made is told to ask that leader, by name, for any bot it needs.
+
+## Leaders lead goals
+
+The orchestrator can hand a whole goal to a leader instead of running every part itself. A leader is a bot that works the
+goal with the bots it owns; it is never a second orchestrator, and its authority is the orchestrator's, narrowed.
+
+- The orchestrator calls its `bot` tool with `action lead`: `goal`, and optionally `requirements` (`{id, text}` each),
+  `constraints`, `files` (project-relative paths the goal may change), `budgetUsd`, `minutes` and `context`. With
+  `agentId` it names a leader you made; without it, it appoints a **goal leader**: a read-only leader made for this one goal
+  and retired once the goal ends and it is idle.
+
+  ```json
+  { "action": "lead", "goal": "Find why the nightly export is slow and propose a fix",
+    "requirements": [{ "id": "cause", "text": "The cause is named with evidence" }],
+    "constraints": ["Do not change the schema"], "minutes": 60, "budgetUsd": 2 }
+  ```
+
+- What the leader may do is clipped, never refused: a path outside the project, files for a leader that cannot write (a
+  goal leader never writes), a budget or deadline past the orchestrator's own. Each clipped item is in the answer, in the
+  leader's brief under "Held back", and in `/lead show`.
+- One goal at a time per leader: a second goal for a busy leader waits, oldest first, until the first ends and the leader
+  is idle.
+- The orchestrator hears back once, when the goal ends, with one outcome: the outcomes of the leader's last turn and of
+  each of its bots' last turns, combined as they are, never judged again. A leader's turns during the goal do not wake the
+  orchestrator; the turns of the leader's bots still reach it as ordinary bot results for now, because a bot turn does not
+  yet record which bot's message started it. The one exception is a leader turn that ends asking for an answer: that question reaches the orchestrator,
+  the goal stays open, and the orchestrator answers with `bot` `action ask`.
+- The goal ends early when its time runs out, its metered budget is spent, you cancel it, or its leader is gone; the
+  leader and its bots are stopped and the outcome says why.
+- Stopping a leader stops the bots it owns. A leader leading an open goal cannot be retired; cancel the goal first.
+- The goal lives in this session's orchestration store, so a restart resumes every open goal where it stood.
+- `leaders.maxDepth` (default 1, at most 2) bounds how deep leaders may nest. Today only the orchestrator hands goals to
+  leaders; a leader handing part of its goal to another leader is not available yet.
+
+The Orchestration panel lists the goals under **Leaders**: the leader's name, the goal, and where it stands (Waiting to
+start, Working, Paused, or how it ended). In the Chats roster a leader's bots sit under it. `/lead` is for looking and
+overriding only: `/lead` lists the goals, `/lead show <leader>` shows one in full, and `/lead cancel|pause|resume <leader>`
+acts on the leader's current goal.
 
 ## Machines as bots
 
@@ -76,6 +114,63 @@ How it holds together:
   machine's chat log, the host lock, and where each link stands (`links.json`: `joins` by hub address with the hub's id
   and the active features, `machines` by install id with the name and the active features). Secrets are stored for the
   owner only: mode 0600 on POSIX, and on Windows an access list that names only the current account.
+
+### Asking a linked machine
+
+A message from the orchestrator to a joined machine (the `bot` tool's `ask`, or the owner typing `/bot msg` in the
+orchestrator's conversation) is a conversation turn placed as a lane. It goes as an ordinary chat message under the
+lane's id, so a machine of any build answers it with its own session, and the machine's reply under that id is the
+lane's end. A machine that stays silent until the deadline (ten minutes by default), stays offline past the offline hold,
+or is revoked ends the lane the way any placed job ends, and the asking session gets the same single terminal
+notification every worker sends, with the reply as untrusted evidence. Nothing is polled. The owner's own messages typed
+in a machine's chat are not lanes: the answer arrives in that chat, which refreshes while it is open. A turn is not a
+job: the machine's session answers it with its own tools and memory, and nothing is offered or admitted there.
+
+### Jobs on linked machines
+
+Two current builds on a sealed link also tell each other what they can take (`cap/1`) and can run each other's jobs
+(`jobs/1`). Both ride inside the sealed frames only; an older peer, or an unsealed link, keeps chatting as before and is
+never offered a job. Job frames never become a turn on either side: they move work, not words.
+
+- **Adverts.** Each side sends its facts when the link comes up and when they change: operating system, shell, which
+  projects it offers (by project identity, never by path), the tools on its PATH (read from the file system; nothing is
+  spawned), the model providers it can use and by which access (`api`, `subscription`, `local`; never an account or a
+  key), its free room, and whether it takes jobs. They land in `<agent dir>/remote/fleet.json`, and the machine's
+  roster row reads from them: `ready, 2 free`, `full`, `takes no jobs now`, `working on 1 job`, `offline, 1 job
+  waiting`.
+- **Project identity.** A checkout is named by a hash of its root commits and its normalized `origin` URL, so two clones
+  of the same project match on any machine and under any path. A machine offers only the checkouts the owner listed
+  under `repos` in `remote/settings.json` (absolute paths, `ready` once set up).
+- **Read-only first.** A placed job runs on the other machine as a native read-only worker through that session's own
+  worker path, in the offered checkout when the job names one. Jobs that change files are not placed yet. The worker's
+  reads are a local read-only worker's: the offered checkout is where it starts, not a fence. It can read other files
+  on that machine the read-only rules allow (the machine credential stores and secret files stay denied), so link only
+  machines whose files the other side may read.
+- **Exactly once.** The placer gives each job an id derived from its own install id and the dispatch's idempotency key.
+  The executor admits a job id at most once (`remote/jobs/in/`); an offer sent again is answered the same way, a
+  different offer under the same id is refused. The outcome waits in the executor's outbox until the placer persists it
+  and acknowledges it, so a link that drops mid-job resumes on reconnect (`job.resume`) and the outcome arrives once.
+  The placer records the job as a managed worker lane at once, so it shows in Orchestration as `<task> · on <machine>`,
+  and reports its end to the session that placed it, once.
+- **Ends the placer decides.** A job past its deadline is stopped there and ends as a timeout; a machine that stays
+  offline past the offline hold (`offlineHoldMs`, ten minutes by default) has its jobs end as blocked; `/remote revoke`
+  ends that machine's jobs at once; a refusal ends the lane as blocked with the reason in plain words. Only one session
+  per agent directory runs other machines' jobs (`remote/jobs/runner.lock`); a job its runner was running when that
+  session died ends as interrupted.
+- **What a peer may do here.** A joined machine runs jobs from the hub it joined by default; a hub runs jobs from a
+  joined machine only once the owner allows it. Per machine, `remote/settings.json` holds `acceptsJobs`, `trust`
+  (`answers`: no job that names a project; `reads` and `changes`: jobs in an offered checkout, read-only until jobs
+  that change files ship) and `hold`; `jobRoom` caps how many placed jobs run here
+  at once (2 by default). A task that holds what looks like a secret is not sent at all.
+- **Commands** (inspection and override; placement itself needs none): `/remote jobs` lists the jobs placed from here
+  and how many run here for other machines; `/remote run <name> <task>` gives a named machine a read-only job (in its
+  checkout of this project when it offers it); `/remote cancel <name>` stops the jobs on it; `/remote hold <name>` and
+  `/remote release <name>` stop and resume new jobs going there; `/remote trust <name> answers|reads|changes` and
+  `/remote accept <name> on|off` set what it may do here; `/remote rotate <name>` gives a joined machine a new secret and
+  disconnects it, keeping its jobs.
+- State: `remote/jobs/out/` (jobs placed from here), `remote/jobs/in/` (jobs admitted here), `remote/jobs/runner.json`,
+  and `remote/jobs/journal.jsonl`, one line per job transition with ids and codes only. Finished jobs are kept seven
+  days.
 
 ## Create and use a group
 

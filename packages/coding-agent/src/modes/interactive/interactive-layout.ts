@@ -517,6 +517,7 @@ export class InteractiveLayout {
 			onSelectChatTarget: (target) => port.onSelectChatTarget?.(target),
 			persistentTeams: () => port.getSession().listPersistentTeams(),
 			persistentBots: () => port.getPersistentBots?.() ?? [],
+			leaders: () => port.getSession().backgroundLanes.listLeaderRows(),
 			taskMetrics: () => port.getSession().getTaskAndModelMetrics().currentTask,
 			semanticEvaluations: () => port.getSession().getSemanticEvaluations(),
 			activeForegroundCount: () => {

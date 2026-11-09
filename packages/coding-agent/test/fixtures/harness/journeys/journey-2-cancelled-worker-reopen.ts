@@ -142,7 +142,7 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 		},
 		{
 			expect: (request) => {
-				admittingOwnerClassification = !("worker_task_fit" in request.questions);
+				admittingOwnerClassification = !("worker_task_fit_adequate" in request.questions);
 				if (!admittingOwnerClassification) {
 					expect(request.state).toMatchObject({ instructions, objective: "Inspect the first limits boundary." });
 					return;

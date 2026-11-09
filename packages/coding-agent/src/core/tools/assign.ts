@@ -93,6 +93,7 @@ export function createAssignToolDefinition(delegate: ToolDefinition): ToolDefini
 		description:
 			"Hand a task to a worker: assign {task, files?, deep?}. The harness picks the worker's model (the owner's worker profile), tools, write scope (the files you name) and queue slot, and its result arrives as an event, so carry on with other work. Use deep only for a hard problem. Starting several independent tasks in one turn runs them in parallel. Use delegate only to follow up on, wait for or inspect workers.",
 		promptSnippet: "Hand work to a worker (task, files, deep)",
+		neverDefer: true,
 		parameters: schema,
 		// As for delegate: the refusal view reaches the model as the failure record's evidence.
 		failureRecovery: { getFailureEvidence: (_params, failure) => failure.message },

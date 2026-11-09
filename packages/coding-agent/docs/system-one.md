@@ -338,8 +338,7 @@ How an answer is read:
   so a question that was not answered is never read as a default probability.
 - **Choice** readers (`choiceProbability`, `choiceAct`, `choiceGate`) read the probability of the option code
   acts on, never `confidence`, which for a Choice is only a transform of the top probability. These Choice
-  reads use them: the step route, the action policy, model pools, route choice and its narrowed pass, worker
-  task fitness, peer strength (0.95), tool intent, claim provenance (`consequential`, 0.9), verification resolution proof and
+  reads use them: the step route, the action policy, model pools, route choice and its narrowed pass, peer strength (0.95), tool intent, claim provenance (`consequential`, 0.9), verification resolution proof and
   evidence-gap closure, the LFM3 media judgment, and knowledge admission and grounding (at the knowledge floor,
   0.9). The structured model engine, used when System One is not bound, reports one verbal confidence per
   answer instead of a distribution; it reads as P(selected), with the rest of the mass spread evenly over the
@@ -475,13 +474,21 @@ reasoning or strict JSON tasks. This policy applies across providers.
 Only a supplied profile with a valid Choice answer and confidence at least 0.90 can replace the
 host default. The optional profile-selection preview retains that default when its answer is
 unavailable or the request exceeds its 4,000-character budget. A separate mandatory admission
-judgment then checks the complete task, parent objective, exact model and effort. It accepts only
-an `adequate` answer at confidence at least 0.90; uncertainty or an unavailable evaluator cannot
-authorize the worker. Exact accepted inputs are cached within a bounded session owner.
+judgment then checks the complete task, parent objective, exact model and effort as two yes/no
+questions in one request: whether the model at that effort can perform the slice, and whether the
+inputs state the slice and the model clearly enough to judge. Both read in the `orchestration`
+family. Ordered exits in code: both at 0.90 or above admit; adequacy at 0.10 or below with
+sufficient evidence is inadequate; anything else is open, which is uncertainty, not a rejection. An
+unavailable evaluator cannot authorize the worker. Exact accepted inputs are cached within a bounded
+session owner.
 
 Authored model and effort, model pins and configured profiles select the binding but do not bypass
 task fitness. Reused attempts and parent continuations use the same check. An inadequate explicit
-binding returns guidance to select a stronger model or narrow the task; it is never silently replaced.
+binding returns guidance to select a stronger model or narrow the task; it is never silently replaced,
+and an open answer on it stays a question the root may settle. For an unbound lane the check
+reports inadequate or open as a move to the next ranked candidate, with `model_unfit` (every answer
+inadequate) or `model_fit_open` when none is left; worker admission does not iterate candidates yet,
+so every check currently runs as bound.
 Admission rechecks session identity, objective and model after the judgment. Model selection never
 widens tools, paths, permissions or budgets. Worker concurrency and independent-work requirements
 remain governed by their existing host admission policy.

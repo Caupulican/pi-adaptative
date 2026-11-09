@@ -4,7 +4,7 @@
  * A record is built by the code that owns the fact and carried in `details`; the tagged line in the message
  * content is a rendering of it. Nothing in the harness reads a rendering back: a model-facing line is for the
  * model, and a decision reads the record. The meaning of every code is stated once, in the root prompt
- * (`COMMS_GLOSSARY_PROMPT`), so a result carries the code and not the explanation.
+ * (`rootDirectorRolePrompt`), so a result carries the code and not the explanation.
  */
 
 import type { CommsErrCode, CommsHintCode, CommsStateCode } from "../provider-prompt-contracts.ts";

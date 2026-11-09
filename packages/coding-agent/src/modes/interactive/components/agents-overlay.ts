@@ -3,6 +3,8 @@ import type { EdgeGrantView } from "../../../core/autonomy/edge-policy.ts";
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
 import type { GoalState } from "../../../core/goals/goal-state.ts";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
+import { panelPlans, planPanelRows } from "../../../core/plan/plan-panel.ts";
+import { type PlanView, planIsMoving, planNeedsAttention } from "../../../core/plan/plan-view.ts";
 import type { SemanticVerificationObligationView } from "../../../core/system-one/verification-obligations.ts";
 import type { TaskStepsState } from "../../../core/tasks/task-state.ts";
 import {
@@ -28,6 +30,10 @@ import { type ActivityLaneItem, isBackgroundToolActivityItem } from "./activity-
 export interface AgentsOverlaySnapshot {
 	goalState?: GoalState;
 	taskState?: TaskStepsState;
+	/** Retained plans in `listPlanViews` order, derived from the orchestration projection. */
+	plans?: readonly PlanView[];
+	/** A plan member's step task by attempt id (`planStepByAttempt`): its worker row reads as the step. */
+	planStepByAttempt?: ReadonlyMap<string, string>;
 	laneRecords: readonly LaneRecord[];
 	items: readonly ActivityLaneItem[];
 	/** Failed verifications still open on the branch; shown so the operator never learns of them from an error. */
@@ -90,7 +96,7 @@ function keepIdsInLog(key: string, ids: Readonly<Record<string, string | undefin
 	harnessLog.debug("ui", "agents overlay ids kept in the log, not on screen", () => ({ key, ...ids }));
 }
 
-function workerRow(record: LaneRecord, nowMs: number): OrchestrationPanelRow {
+function workerRow(record: LaneRecord, nowMs: number, planStep: string | undefined): OrchestrationPanelRow {
 	keepIdsInLog(record.laneId, {
 		lane: record.laneId,
 		goal: record.goalId,
@@ -115,7 +121,7 @@ function workerRow(record: LaneRecord, nowMs: number): OrchestrationPanelRow {
 	].filter((value): value is string => value !== undefined);
 	return {
 		status: record.status,
-		label: record.label ?? "Unnamed task",
+		label: planStep ?? record.label ?? "Unnamed task",
 		section: "Workers",
 		meta,
 		details,
@@ -211,15 +217,17 @@ function projectWorkActivity(snapshot: AgentsOverlaySnapshot, nowMs: number): Wo
 	);
 	const running = activeWorkers.filter((record) => record.status === "running").length;
 	const queued = activeWorkers.length - running;
+	const row = (record: LaneRecord) =>
+		workerRow(
+			record,
+			nowMs,
+			record.attemptId === undefined ? undefined : snapshot.planStepByAttempt?.get(record.attemptId),
+		);
 	return {
 		specialists,
 		currentLanes,
 		activeWorkers,
-		rows: [
-			...activeWorkers.map((record) => workerRow(record, nowMs)),
-			...finishedWorkers.map((record) => workerRow(record, nowMs)),
-			...backgroundTools.map(backgroundToolRow),
-		],
+		rows: [...activeWorkers.map(row), ...finishedWorkers.map(row), ...backgroundTools.map(backgroundToolRow)],
 		summary: [
 			running > 0 ? `${running} running` : undefined,
 			queued > 0 ? `${queued} queued` : undefined,
@@ -252,10 +260,13 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 	const activity = projectWorkActivity(snapshot, nowMs);
 	const peerFindings = snapshot.peerFindings ?? [];
 	const satisfied = goal?.requirements.filter((requirement) => requirement.status === "satisfied").length ?? 0;
+	const shownPlans = panelPlans(snapshot.plans ?? []);
+	const planRows = planPanelRows(shownPlans);
 	const rows: OrchestrationPanelRow[] = [
 		...(goal?.requirements.map(goalRequirementPanelRow) ?? []),
 		...(goal?.evidence.map(goalEvidencePanelRow) ?? []),
-		...(task?.steps.map((step) => ({ ...taskStepPanelRow(step), section: "Plan" })) ?? []),
+		...planRows,
+		...(task?.steps.map((step) => ({ ...taskStepPanelRow(step), section: "Task steps" })) ?? []),
 		...peerFindings.slice(0, 3).map((finding) => {
 			keepIdsInLog(finding.id, {
 				finding: finding.id,
@@ -288,7 +299,8 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 	const summary = [
 		goal ? `goal ${goal.status.replace(/_/g, " ")}` : undefined,
 		goal ? `${satisfied}/${goal.requirements.length} requirements` : undefined,
-		task ? `${task.steps.length + task.archive.completed + task.archive.cancelled} plan steps` : undefined,
+		shownPlans.length > 0 ? `${shownPlans.length} plan${shownPlans.length === 1 ? "" : "s"}` : undefined,
+		task ? `${task.steps.length + task.archive.completed + task.archive.cancelled} task steps` : undefined,
 		`${peerFindings.length} peer finding${peerFindings.length === 1 ? "" : "s"}`,
 		...activity.summary,
 	].filter((value): value is string => value !== undefined);
@@ -297,9 +309,12 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 		status:
 			goal?.status === "blocked" ||
 			goal?.status === "paused" ||
-			activity.currentLanes.some((record) => record.status === "failed")
+			activity.currentLanes.some((record) => record.status === "failed") ||
+			shownPlans.some(planNeedsAttention)
 				? "warning"
-				: activity.activeWorkers.length > 0 || task?.steps.some((step) => step.status === "in_progress")
+				: activity.activeWorkers.length > 0 ||
+						task?.steps.some((step) => step.status === "in_progress") ||
+						shownPlans.some(planIsMoving)
 					? "running"
 					: "info",
 		summary,

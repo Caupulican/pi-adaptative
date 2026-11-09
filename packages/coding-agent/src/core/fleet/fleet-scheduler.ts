@@ -9,8 +9,11 @@
  * resource fact, never polling for work completion.
  *
  * Local lanes are materialized and started by the worker controller; its dispatch queue is a `FleetQueue` created here,
- * so ordering, restart metadata and the room snapshot share one owner. Stop and resume are session-scoped and survive a
- * restart through `FleetQueueStore`; the stop machine is observed in the kernel's machine registry.
+ * so ordering, restart metadata and the room snapshot share one owner. A planned local dispatch is prepared through the
+ * controller's start phases (`prepare`) and materialized synchronously by `admit` (`local-admit.ts`). Each local worker
+ * claims its account's adaptive window and its metered cost while it runs (`fleet-local-claims.ts`). Stop and resume are
+ * session-scoped and survive a restart through `FleetQueueStore`; the stop machine is observed in the kernel's machine
+ * registry.
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
@@ -30,26 +33,45 @@ import {
 	readMachineFacts,
 } from "./capacity/machine-room.ts";
 import { bindingTerm, ceilingTerm, decideRoom } from "./capacity/room.ts";
+import { FleetLocalClaims, type SpendBrakeState } from "./fleet-local-claims.ts";
 import { FleetQueue } from "./fleet-queue.ts";
 import { type FleetQueueMetadataEntry, FleetQueueStore, fleetQueueMetadataPath } from "./fleet-queue-store.ts";
 import type {
 	AdmitDecision,
 	FleetDispatch,
+	FleetRefusal,
 	FleetRoomDecision,
 	FleetScheduler,
 	FleetScope,
+	FleetWaitReason,
+	PrepareDecision,
 	RoomQuery,
 	RoomSnapshot,
 	RoomTerm,
 	ShareSpec,
 } from "./fleet-types.ts";
 import { FleetWaitSets } from "./fleet-wait-sets.ts";
+import {
+	decisionForStart,
+	type FleetLocalStartPort,
+	horizonRefusal,
+	LOCAL_START_RUNTIME_REPLACING,
+	refusalForSkip,
+	weightOf,
+} from "./local-admit.ts";
 
 /** First recheck of a machine or unstated-reset allowance wait with nothing running; doubles up to the cap. */
 export const FLEET_RECHECK_INITIAL_MS = 30_000;
 export const FLEET_RECHECK_MAX_MS = 5 * 60_000;
 /** Idempotent admit decisions kept per session. */
 const ADMIT_DECISION_LIMIT = 1024;
+
+const NO_LOCAL_STARTS: FleetRefusal = {
+	kind: "refused",
+	reason: "placement",
+	blocker: "placement_unreachable",
+	detail: "no worker controller is bound to start local work",
+};
 
 const FLEET_STOP_MACHINE = defineMachine<"running" | "stopped", "stop" | "resume">({
 	name: "fleet-admission",
@@ -71,6 +93,10 @@ export interface FleetLocalPort {
 	runningLanes(): readonly { laneId: string; objectiveId: string; subtreeId: string }[];
 	/** Cancels queued or running lanes through the controller's durable cancel path. */
 	cancelLanes(laneIds: readonly string[], reasonCode: string): void;
+	/** The attempt has not reached a terminal state. */
+	isAttemptLive(attemptId: string): boolean;
+	/** The attempt's measured cost so far, in dollars; undefined when unpriced or unknown. */
+	attemptCostUsd(attemptId: string): number | undefined;
 }
 
 export interface SessionFleetSchedulerDeps {
@@ -82,13 +108,25 @@ export interface SessionFleetSchedulerDeps {
 	readMachine?(): MachineFacts;
 	/** The authority digest of an escalation's original attempt; undefined when unknown. */
 	escalationAuthorityDigest?(outcomeId: string): string | undefined;
+	/** The provider account a model's requests are charged to (the provider gate's keying); absent leaves windows out. */
+	accountKey?(provider: string): string;
+	/** The owner's concurrency limit for a provider (`providerAdmission.limits`), when set. */
+	providerLimit?(provider: string): number | undefined;
+	/** True when a model's work is paid per request (an API key), not a subscription login; absent means none is. */
+	isMetered?(model: Model<Api>): boolean;
+	/** The spend-rate brake engaged (with the owner's plain words) or lifted. */
+	onSpendBrake?(state: SpendBrakeState): void;
 }
 
-/** One local dispatch's room question: the model whose account it runs on, and whether it writes. */
+/** One local dispatch's room question: the model whose account it runs on, whether it writes, and its goal. */
 export interface LocalRoomInput {
 	readonly laneId?: string;
 	readonly model?: Model<Api>;
 	readonly writes: boolean;
+	/** The goal whose metered budget the dispatch spends; the queued lane's goal when absent. */
+	readonly objectiveId?: string;
+	/** The planner's token estimate, which prices the metered cost term when stated. */
+	readonly estimatedTokens?: number;
 }
 
 interface FactsPass {
@@ -117,7 +155,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 		last: number;
 	}>();
 	private readonly accountReadings = new Map<string, AllowanceReading>();
-	private readonly lastWait = new Map<string, { key: string; retryAt?: number }>();
+	private readonly lastWait = new Map<string, { key: string; reason: FleetWaitReason; retryAt?: number }>();
 	private readonly alarms = new Map<string, WallAlarm & { readonly at: number }>();
 	private readonly rechecks = new Map<string, Recheck>();
 	private readonly ceilingEpisodes = new Set<string>();
@@ -125,7 +163,12 @@ export class SessionFleetScheduler implements FleetScheduler {
 	private readonly observer = observeMachine(FLEET_STOP_MACHINE);
 	private readonly unregisterMachine: () => void;
 	private readonly unsubscribeAllowance: (() => void) | undefined;
+	private readonly claims: FleetLocalClaims;
+	private readonly unsubscribeWindows: () => void;
+	/** Local dispatches prepared and not yet admitted, by key, so a scope cancel releases its own. */
+	private readonly prepared = new Map<string, FleetDispatch>();
 	private local: FleetLocalPort | undefined;
+	private startPort: FleetLocalStartPort | undefined;
 	private queue: FleetQueue<unknown> | undefined;
 	private pass: FactsPass | undefined;
 	private stopped = false;
@@ -140,6 +183,15 @@ export class SessionFleetScheduler implements FleetScheduler {
 		this.store = new FleetQueueStore(fleetQueueMetadataPath(deps.agentDir, deps.sessionId));
 		this.baseline = deps.readMachine ? machineBaseline(deps.readMachine()) : processMachineBaseline();
 		this.unregisterMachine = registerMachine(this.observer);
+		this.claims = new FleetLocalClaims({
+			agentDir: deps.agentDir,
+			now: () => deps.timers.now(),
+			settings: () => deps.settings(),
+			...(deps.accountKey ? { accountKey: deps.accountKey } : {}),
+			...(deps.providerLimit ? { providerLimit: deps.providerLimit } : {}),
+			...(deps.isMetered ? { isMetered: deps.isMetered } : {}),
+			...(deps.onSpendBrake ? { onBrake: deps.onSpendBrake } : {}),
+		});
 		const metadata = this.store.load();
 		if (metadata) {
 			for (const entry of metadata.entries) this.restored.set(entry.id, entry);
@@ -147,6 +199,8 @@ export class SessionFleetScheduler implements FleetScheduler {
 				this.stopped = true;
 				this.observer.record("running", "stopped", "restored");
 			}
+			// A restarted fleet releases half of each account window until its first success, as after a resume.
+			this.claims.rampAll();
 			const now = deps.timers.now();
 			for (const entry of metadata.entries)
 				if (entry.retryAt !== undefined && entry.retryAt > now && entry.lastReason)
@@ -162,6 +216,11 @@ export class SessionFleetScheduler implements FleetScheduler {
 			this.changed();
 			this.wake(`account:${accountKey}`);
 		});
+		this.unsubscribeWindows = this.claims.subscribe((waitKey) => {
+			this.pass = undefined;
+			this.changed();
+			this.wake(waitKey);
+		});
 	}
 
 	/** Binds the worker controller that runs local lanes; the returned function unbinds it. */
@@ -169,6 +228,17 @@ export class SessionFleetScheduler implements FleetScheduler {
 		this.local = port;
 		return () => {
 			if (this.local === port) this.local = undefined;
+		};
+	}
+
+	/** Binds the worker controller's start phases, through which a local dispatch is prepared and materialized. */
+	bindStartPhases(port: FleetLocalStartPort): () => void {
+		this.startPort = port;
+		return () => {
+			if (this.startPort !== port) return;
+			port.release();
+			this.prepared.clear();
+			this.startPort = undefined;
 		};
 	}
 
@@ -206,10 +276,14 @@ export class SessionFleetScheduler implements FleetScheduler {
 		const running = this.local?.runningCount() ?? 0;
 		const writers = input.writes ? (this.local?.runningWriterCount() ?? 0) : 0;
 		const pass = this.factsPass();
-		const memoKey = `${running}|${writers}|${input.writes}|${input.model ? `${input.model.provider}/${input.model.id}` : ""}`;
+		const objectiveId =
+			input.objectiveId ||
+			(input.laneId !== undefined ? this.queue?.entry(input.laneId)?.objectiveId : undefined) ||
+			"";
+		const memoKey = `${running}|${writers}|${input.writes}|${input.model ? `${input.model.provider}/${input.model.id}` : ""}|${objectiveId}`;
 		let decision = pass.decisions.get(memoKey);
 		if (!decision) {
-			decision = decideRoom(this.localTerms(input, running, writers));
+			decision = decideRoom(this.localTerms({ ...input, objectiveId }, running, writers));
 			pass.decisions.set(memoKey, decision);
 		}
 		if (input.laneId !== undefined) this.recordLocalDecision(input.laneId, decision, running);
@@ -227,10 +301,14 @@ export class SessionFleetScheduler implements FleetScheduler {
 		return running + Math.max(8, Math.floor(running / 4));
 	}
 
-	/** A local lane starts now (every start, queued or direct, reports here once its attempt is prepared). */
-	noteAdmitted(laneId: string): void {
+	/**
+	 * A local lane starts now (every start, queued or direct, reports here once its attempt is prepared): it occupies its
+	 * account's window and reserves its metered estimate against the goal's and the day's budgets until it is released.
+	 */
+	noteAdmitted(laneId: string, attemptId: string, model: Model<Api>, objectiveId: string | undefined): void {
 		this.waits.release(laneId);
 		this.lastWait.delete(laneId);
+		this.claims.admitted(attemptId, model, objectiveId);
 		harnessLog.debug("fleet", "a node is admitted", () => ({
 			laneId,
 			running: this.local?.runningCount() ?? 0,
@@ -241,6 +319,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 	/** A local attempt's run ended: its slot is free again (the controller drains on the same terminal). */
 	noteReleased(attemptId: string): void {
 		this.yields.delete(attemptId);
+		this.claims.released(attemptId, () => this.local?.attemptCostUsd(attemptId));
 		const now = this.deps.timers.now();
 		if (this.lastReleaseAt !== undefined) {
 			const interval = Math.max(1, now - this.lastReleaseAt);
@@ -281,6 +360,25 @@ export class SessionFleetScheduler implements FleetScheduler {
 
 	// ---- FleetScheduler ----
 
+	async prepare(dispatch: FleetDispatch, placement: Placement, signal?: AbortSignal): Promise<PrepareDecision> {
+		const mismatch = this.escalationRefusal(dispatch);
+		if (mismatch) return mismatch;
+		if (placement.kind !== "local_worker" || this.decisions.has(dispatch.idempotencyKey)) return { kind: "prepared" };
+		const port = this.startPort;
+		if (!port) return NO_LOCAL_STARTS;
+		const prepared = await port.prepare(dispatch, signal);
+		if (!prepared.ok) {
+			harnessLog.info("fleet", "a dispatch is refused at preparation", {
+				key: dispatch.idempotencyKey,
+				reason: prepared.skipReason.split(":")[0] ?? "",
+			});
+			return refusalForSkip(prepared.skipReason);
+		}
+		if (this.startPort === port) this.prepared.set(dispatch.idempotencyKey, dispatch);
+		else port.release(dispatch.idempotencyKey);
+		return { kind: "prepared" };
+	}
+
 	admit(dispatch: FleetDispatch, placement: Placement): AdmitDecision {
 		const cached = this.decisions.get(dispatch.idempotencyKey);
 		if (cached) return cached;
@@ -293,6 +391,9 @@ export class SessionFleetScheduler implements FleetScheduler {
 			});
 			return decision;
 		}
+		if (decision.kind === "run")
+			harnessLog.debug("fleet", "a dispatch runs", { key: dispatch.idempotencyKey, laneId: decision.laneId });
+		else harnessLog.debug("fleet", "a dispatch is queued", { key: dispatch.idempotencyKey, reason: decision.reason });
 		this.decisions.set(dispatch.idempotencyKey, decision);
 		if (this.decisions.size > ADMIT_DECISION_LIMIT) {
 			const oldest = this.decisions.keys().next().value;
@@ -309,6 +410,9 @@ export class SessionFleetScheduler implements FleetScheduler {
 			scope.kind === "all" ||
 			(scope.kind === "objective" && lane.objectiveId === scope.objectiveId) ||
 			(scope.kind === "subtree" && lane.subtreeId === scope.subtreeId);
+		for (const [key, dispatch] of this.prepared)
+			if (inScope(dispatch.demand) || (scope.kind === "plan" && dispatch.plan?.planId === scope.planId))
+				this.releasePrepared(key);
 		const laneIds =
 			scope.kind === "lane"
 				? [scope.laneId]
@@ -340,9 +444,13 @@ export class SessionFleetScheduler implements FleetScheduler {
 		this.stopped = false;
 		this.observer.record("stopped", "running", "resume");
 		harnessLog.info("fleet", "the fleet is resumed", { queued: this.queue?.size ?? 0 });
+		// A resume releases half of each account window until its first success, and lifts the spend-rate brake.
+		this.claims.rampAll();
+		this.claims.liftBrake();
 		this.pass = undefined;
 		this.changed();
 		this.wake("fleet:stop");
+		this.wake("budget:brake");
 	}
 
 	isStopped(): boolean {
@@ -372,14 +480,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 			etaMs: (additional) =>
 				throughputPerMin > 0 ? ((queued + additional) / throughputPerMin) * 60_000 : Number.POSITIVE_INFINITY,
 			...(limitedBy ? { limitedBy } : {}),
-			perAccount: [...this.accountReadings.values()].map((reading) => {
-				const term = allowanceRoomTerm(reading);
-				return {
-					accountKey: reading.accountKey,
-					room: term.room,
-					...(term.retryAt !== undefined ? { retryAt: term.retryAt } : {}),
-				};
-			}),
+			perAccount: this.perAccount(),
 			revision: this.revision,
 		};
 	}
@@ -432,6 +533,12 @@ export class SessionFleetScheduler implements FleetScheduler {
 		for (const { unsubscribe } of this.sources.values()) unsubscribe();
 		this.sources.clear();
 		this.unsubscribeAllowance?.();
+		this.unsubscribeWindows();
+		this.startPort?.release();
+		this.prepared.clear();
+		this.startPort = undefined;
+		const local = this.local;
+		this.claims.dispose((attemptId) => local?.attemptCostUsd(attemptId));
 		this.unregisterMachine();
 		this.roomSubscribers.clear();
 		this.local = undefined;
@@ -439,24 +546,30 @@ export class SessionFleetScheduler implements FleetScheduler {
 
 	// ---- internals ----
 
-	private decideAdmit(dispatch: FleetDispatch, placement: Placement): AdmitDecision {
-		if (dispatch.escalation) {
-			const original = this.deps.escalationAuthorityDigest?.(dispatch.escalation.outcomeId);
-			if (original !== dispatch.escalation.authorityDigest)
-				return {
+	private escalationRefusal(dispatch: FleetDispatch): FleetRefusal | undefined {
+		if (!dispatch.escalation) return undefined;
+		const original = this.deps.escalationAuthorityDigest?.(dispatch.escalation.outcomeId);
+		return original === dispatch.escalation.authorityDigest
+			? undefined
+			: {
 					kind: "refused",
 					reason: "authority_digest_mismatch",
 					blocker: "owner_authority_required",
 					detail: "the escalation's authority differs from its original attempt's",
 				};
-		}
+	}
+
+	private decideAdmit(dispatch: FleetDispatch, placement: Placement): AdmitDecision {
+		const mismatch = this.escalationRefusal(dispatch);
+		if (mismatch) return mismatch;
+		if (placement.kind === "local_worker") return this.admitLocal(dispatch);
 		const key = placementCapacityKey(placement);
 		if (key === undefined)
 			return {
 				kind: "refused",
 				reason: "placement",
 				blocker: "placement_unreachable",
-				detail: "a local placement starts through the worker controller's own start path",
+				detail: `a ${placement.kind} placement names no machine or bot`,
 			};
 		const source = this.sources.get(key)?.source;
 		if (!source)
@@ -483,6 +596,88 @@ export class SessionFleetScheduler implements FleetScheduler {
 		};
 	}
 
+	/**
+	 * A prepared local dispatch, materialized: the horizon exits first (`local-admit.ts`), on the account and cost terms
+	 * of the model its preparation chose, then the controller's own synchronous start decides run or queued.
+	 */
+	private admitLocal(dispatch: FleetDispatch): AdmitDecision {
+		const port = this.startPort;
+		if (!port) return NO_LOCAL_STARTS;
+		const key = dispatch.idempotencyKey;
+		const model = port.preparedModel(key);
+		let binding: RoomTerm | undefined;
+		if (model) {
+			const writes = dispatch.writeScope.length > 0;
+			const running = this.local?.runningCount() ?? 0;
+			const writers = writes ? (this.local?.runningWriterCount() ?? 0) : 0;
+			const terms = this.localTerms(
+				{
+					model,
+					writes,
+					objectiveId: dispatch.demand.objectiveId,
+					...(dispatch.demand.estimatedTokens !== undefined
+						? { estimatedTokens: dispatch.demand.estimatedTokens }
+						: {}),
+				},
+				running,
+				writers,
+			);
+			// The dispatch starts only once every term has room: any closed term that reopens past the horizon refuses it.
+			const now = this.deps.timers.now();
+			const horizonMs = this.deps.settings().queueHorizonMs;
+			for (const term of terms) {
+				const refusal = term.room < 1 ? horizonRefusal(term, now, horizonMs) : undefined;
+				if (!refusal) continue;
+				this.releasePrepared(key);
+				return refusal;
+			}
+			const room = decideRoom(terms);
+			if (!room.ok) binding = room.term;
+		}
+		const start = port.materialize(dispatch);
+		if (start?.started !== false || start.skipReason !== LOCAL_START_RUNTIME_REPLACING) this.prepared.delete(key);
+		if (!start)
+			return {
+				kind: "refused",
+				reason: "preflight",
+				blocker: "preflight_failed",
+				detail: "this local dispatch was not prepared, or its preparation was released",
+			};
+		return decisionForStart(start, {
+			weight: weightOf(dispatch.demand, dispatch.writeScope),
+			accountKey: (provider) => this.deps.accountKey?.(provider) ?? provider,
+			waitReason: (laneId) => this.lastWait.get(laneId)?.reason,
+			...(binding ? { binding } : {}),
+			etaMs: () => {
+				const snapshot = this.room({ objectiveId: dispatch.demand.objectiveId, weight: "read" });
+				return snapshot.etaMs(0);
+			},
+		});
+	}
+
+	private releasePrepared(key: string): void {
+		this.prepared.delete(key);
+		this.startPort?.release(key);
+	}
+
+	/** Room per account: the allowance readings and the adaptive windows, the smaller binding where both know one. */
+	private perAccount(): RoomSnapshot["perAccount"] {
+		const accounts = new Map<string, { accountKey: string; room: number; retryAt?: number }>();
+		for (const reading of this.accountReadings.values()) {
+			const term = allowanceRoomTerm(reading);
+			accounts.set(reading.accountKey, {
+				accountKey: reading.accountKey,
+				room: term.room,
+				...(term.retryAt !== undefined ? { retryAt: term.retryAt } : {}),
+			});
+		}
+		for (const window of this.claims.perAccount()) {
+			const known = accounts.get(window.accountKey);
+			if (!known || window.room < known.room) accounts.set(window.accountKey, window);
+		}
+		return [...accounts.values()];
+	}
+
 	private localTerms(input: LocalRoomInput, running: number, writers: number): RoomTerm[] {
 		const settings = this.deps.settings();
 		const terms: RoomTerm[] = [];
@@ -491,6 +686,8 @@ export class SessionFleetScheduler implements FleetScheduler {
 		terms.push(ceilingTerm("running", running, settings.ceiling.running));
 		if (input.writes) terms.push(ceilingTerm("writers", writers, settings.ceiling.writers));
 		if (input.model && this.deps.allowance) terms.push(allowanceRoomTerm(this.readAllowance(input.model)));
+		if (input.model)
+			terms.push(...this.claims.terms(input.model, input.objectiveId || undefined, input.estimatedTokens));
 		const pass = this.factsPass();
 		pass.machine ??= this.readMachine();
 		terms.push(...machineRoomTerms(pass.machine, this.baseline, running, settings.reserve.memoryPercent));
@@ -525,6 +722,12 @@ export class SessionFleetScheduler implements FleetScheduler {
 		if (this.pass) return this.pass;
 		const pass: FactsPass = { allowance: new Map(), decisions: new Map() };
 		this.pass = pass;
+		const local = this.local;
+		if (local)
+			this.claims.prune(
+				(attemptId) => local.isAttemptLive(attemptId),
+				(attemptId) => local.attemptCostUsd(attemptId),
+			);
 		queueMicrotask(() => {
 			if (this.pass === pass) this.pass = undefined;
 		});
@@ -542,6 +745,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 		if (previous?.key !== term.waitKey || previous.retryAt !== term.retryAt) {
 			this.lastWait.set(laneId, {
 				key: term.waitKey,
+				reason: term.reason,
 				...(term.retryAt !== undefined ? { retryAt: term.retryAt } : {}),
 			});
 			harnessLog.debug("fleet", "a node waits for room", { laneId, reason: term.reason, key: term.waitKey });
@@ -557,7 +761,12 @@ export class SessionFleetScheduler implements FleetScheduler {
 			this.armRecheck(term.waitKey);
 	}
 
-	private armAlarm(key: string, at: number): void {
+	/**
+	 * Wakes the waiters on `key` at `at`. A reopening account's wake is jittered per process and account, so the workers
+	 * of many sessions and machines never return to one account in the same instant (thundering herd).
+	 */
+	private armAlarm(key: string, reopenAt: number): void {
+		const at = reopenAt + this.claims.reopenJitterMs(key, reopenAt);
 		const existing = this.alarms.get(key);
 		if (existing && existing.at <= at) return;
 		existing?.stop();

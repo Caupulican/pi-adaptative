@@ -33,6 +33,7 @@ const COMMS_STATE_CLASS_LEAD = {
 	settled: "Settled",
 	ended: "Ended",
 	review: "Review",
+	plan: "Plan (the harness runs, retries and combines the steps, never poll)",
 } as const;
 
 type CommsStateClass = keyof typeof COMMS_STATE_CLASS_LEAD;
@@ -56,6 +57,12 @@ export const COMMS_STATE_GLOSSARY = {
 	FAILED: ["ended", "the run failed, read reasonDetail, not a harness defect"],
 	READ_REPORT: ["review", "receipts cover every required id, read a transcript range only for a doubted claim"],
 	READ_ALL: ["review", "not accepted or review pending, read every page (nextCursor)"],
+	PLAN_STARTED: ["plan", "recorded, ready steps run and the rest wait for their inputs"],
+	PLAN_UPDATE: ["plan", "a plan wake, read the lines that follow"],
+	JOIN_DONE: ["plan", "a join combined its steps, read its one result"],
+	REPLAN: ["plan", "steps are held, answer with plan revise"],
+	PLAN_DONE: ["plan", "the final step settled, its result is the plan's answer"],
+	OWNER_NEEDED: ["plan", "only the owner can unblock a step, ask them"],
 } as const satisfies Record<string, readonly [CommsStateClass, string]>;
 
 export type CommsStateCode = keyof typeof COMMS_STATE_GLOSSARY;
@@ -86,36 +93,57 @@ export const COMMS_ERR_GLOSSARY = {
 
 export type CommsErrCode = keyof typeof COMMS_ERR_GLOSSARY;
 
-/** One prompt line per state class, in the order the classes are declared. */
-const COMMS_STATE_LINES = (Object.keys(COMMS_STATE_CLASS_LEAD) as CommsStateClass[]).map((stateClass) => {
+/** The prompt line of one state class. */
+function commsStateLine(stateClass: CommsStateClass): string {
 	const entries = Object.entries(COMMS_STATE_GLOSSARY).filter(([, [codeClass]]) => codeClass === stateClass);
 	return `- ${COMMS_STATE_CLASS_LEAD[stateClass]}: ${entries.map(([code, [, text]]) => `${code} ${text}`).join("; ")}.`;
-});
-
-/** The one glossary the root prompt carries; rule hooks cannot reach handoff wake messages, so it lives in the prefix. */
-export const COMMS_GLOSSARY_PROMPT = [
-	"COMMS: results and handoffs state host facts as codes: `h CODE,...` states, and a refused call is `err c=<class> f=<field> h=<hint> x=<value>` plus `m <reason>` (nothing ran).",
-	...COMMS_STATE_LINES,
-	`- Err classes: ${Object.entries(COMMS_ERR_GLOSSARY)
-		.map(([code, text]) => `${code} ${text}`)
-		.join("; ")}.`,
-	`- Hints: ${COMMS_HINT_CODES.join(", ")}.`,
-].join("\n");
+}
 
 /**
- * The root's role in every root prompt that can delegate (full class, worker delegation on, `delegate` active).
- * It states how the root directs; the work-lifecycle rule hook carries only the delegation detail this does not.
+ * The one glossary the root prompt carries; rule hooks cannot reach handoff wake messages, so it lives in the prefix.
+ * One line per state class in declaration order; the plan codes only while the `plan` tool is active.
  */
-export const ROOT_DIRECTOR_ROLE_PROMPT = [
-	"ROLE: root, the director of a team of workers",
-	"- You direct; workers execute. Plan the outcome, split it into bounded independent tasks, delegate them, review what comes back, integrate and deliver.",
+function commsGlossaryPrompt(plan: boolean): string {
+	const classes = (Object.keys(COMMS_STATE_CLASS_LEAD) as CommsStateClass[]).filter(
+		(stateClass) => plan || stateClass !== "plan",
+	);
+	return [
+		"COMMS: results and handoffs state host facts as codes: `h CODE,...` states, and a refused call is `err c=<class> f=<field> h=<hint> x=<value>` plus `m <reason>` (nothing ran).",
+		...classes.map(commsStateLine),
+		`- Err classes: ${Object.entries(COMMS_ERR_GLOSSARY)
+			.map(([code, text]) => `${code} ${text}`)
+			.join("; ")}.`,
+		`- Hints: ${COMMS_HINT_CODES.join(", ")}.`,
+	].join("\n");
+}
+
+/** The director's standing duties, after how it splits work. */
+const ROOT_DIRECTOR_DUTIES = [
 	"- You orchestrate; you do not execute. Reading, searching, planning, reviewing, and writing agent definitions and instruction files are yours. Building, testing, changing project files and running programs are the workers': start or reuse a suitable worker, and never duplicate running work.",
 	"- Brief each worker with scope, the evidence you expect and the files it may write. For a long brief, write the instructions to a file and tell the worker to read and follow it.",
 	"- Keep working while workers run; wait only at a true dependency.",
 	"- Treat reports as evidence: verify the claims that matter, reconcile conflicts, send back what is not done, accept only against the success criteria.",
 	"- You own integration, verification, security, approvals and every message to the owner.",
-	COMMS_GLOSSARY_PROMPT,
-].join("\n");
+] as const;
+
+/**
+ * The root's role in every root prompt that can delegate (full class, worker delegation on, `delegate` active).
+ * It states how the root directs; the work-lifecycle rule hook carries only the delegation detail this does not.
+ * `plan`: the `plan` tool is active, so the role says when to use it and the glossary carries its codes.
+ */
+export function rootDirectorRolePrompt(options: { readonly plan: boolean }): string {
+	return [
+		"ROLE: root, the director of a team of workers",
+		"- You direct; workers execute. Plan the outcome, split it into bounded independent tasks, delegate them, review what comes back, integrate and deliver.",
+		...(options.plan
+			? [
+					"- For work with several parts, call plan once with every step, its files and what it uses; the harness runs ready steps in parallel, retries, combines results and wakes you once per combined result.",
+				]
+			: []),
+		...ROOT_DIRECTOR_DUTIES,
+		commsGlossaryPrompt(options.plan),
+	].join("\n");
+}
 
 /** The sentences of the worker execution discipline; the collaboration turn prompt renders them as one line. */
 const WORKER_EXECUTION_DISCIPLINE_SENTENCES = [

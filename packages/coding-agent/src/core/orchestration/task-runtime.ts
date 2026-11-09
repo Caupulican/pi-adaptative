@@ -7,6 +7,15 @@ import { taskOutcomeId } from "../delegation/worker-outcome-codec.ts";
 import type { Outcome, StoredOutcome } from "../delegation/worker-outcome-contract.ts";
 import { HostEventRuntime, type HostEventRuntimeTransaction } from "../events/host-event-runtime.ts";
 import { HOST_EVENT_RECORD_FIELDS } from "../events/host-event-state.ts";
+import type {
+	PlanClosedPayload,
+	PlanJoinSettledPayload,
+	PlanNodeHeldPayload,
+	PlanNodeReleasedPayload,
+	PlanNodeSettledPayload,
+} from "../plan/plan-codec.ts";
+import type { PlanRecord } from "../plan/plan-graph.ts";
+import type { PlanEventType } from "../plan/plan-reducer.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { AtomicFileLockOptions } from "../util/atomic-file.ts";
 import { deepFreeze } from "../util/deep-freeze.ts";
@@ -113,6 +122,7 @@ import {
 	type OrchestrationProjectionHeadroomRequest,
 	type PreparedTaskAttempt,
 	type RegisterAgentInput,
+	type TaskEscalationRecord,
 	type TaskRuntimeProjection,
 	type TaskRuntimeState,
 	terminalAttemptStatus,
@@ -952,6 +962,84 @@ export class DurableTaskRuntime {
 			payload: toJsonObject({ outcome }),
 		});
 		return outcome;
+	}
+
+	/**
+	 * Record that an escalation rung of `sourceTaskId`'s outcome was placed. Keyed `escalation:<outcomeId>:r<rung>`, so a
+	 * replay or a second call for the same rung writes nothing and the work is never placed twice from one record.
+	 */
+	recordEscalationScheduled(sourceTaskId: string, record: TaskEscalationRecord): TaskRuntimeState {
+		this.refresh();
+		if (!this.state.tasks[sourceTaskId]) throw new DurableTaskRuntimeError(`Unknown task '${sourceTaskId}'.`);
+		this.commit({
+			type: "task.escalation_scheduled",
+			aggregateId: sourceTaskId,
+			actor: "runtime",
+			idempotencyKey: `escalation:${record.outcomeId}:r${record.rung}`,
+			payload: toJsonObject({ record }),
+		});
+		return structuredClone(this.state.tasks[sourceTaskId]!);
+	}
+
+	/** Records one plan version; replaying the same version is inert. */
+	recordPlan(record: PlanRecord): void {
+		this.commitPlanEvent("plan.recorded", record.planId, `plan:${record.planId}:v${record.version}`, { record });
+	}
+
+	/** Binds a step's spec version to the task that runs it; one release per spec version. */
+	releasePlanNode(payload: PlanNodeReleasedPayload): void {
+		const key = `plan:${payload.planId}:${payload.nodeId}:v${payload.version}`;
+		this.commitPlanEvent("plan.node_released", payload.planId, key, payload);
+	}
+
+	settlePlanNode(payload: PlanNodeSettledPayload): void {
+		const key = `plan:${payload.planId}:${payload.nodeId}:settled:${payload.generation}`;
+		this.commitPlanEvent("plan.node_settled", payload.planId, key, payload);
+	}
+
+	holdPlanNode(payload: PlanNodeHeldPayload): void {
+		const key = `plan:${payload.planId}:${payload.nodeId}:held:${payload.reason}:${payload.generation}`;
+		this.commitPlanEvent("plan.node_held", payload.planId, key, payload);
+	}
+
+	/** Settles a join; its sequence number is the join's next settlement, so a re-settled join after a revise is new. */
+	settlePlanJoin(payload: PlanJoinSettledPayload): void {
+		this.refresh();
+		const n = (this.state.plans[payload.planId]?.nodes[payload.nodeId]?.join?.n ?? 0) + 1;
+		this.commitPlanEvent(
+			"plan.join_settled",
+			payload.planId,
+			`plan:${payload.planId}:${payload.nodeId}:join:${n}`,
+			payload,
+		);
+	}
+
+	closePlan(payload: PlanClosedPayload): void {
+		this.commitPlanEvent("plan.closed", payload.planId, `plan:${payload.planId}:closed`, payload);
+	}
+
+	/**
+	 * Cancels a task no attempt is running (a superseded or cancelled plan step that was created but never leased).
+	 * Returns false when the task is already terminal; a task with an active attempt is cancelled through its attempt.
+	 */
+	cancelTask(taskId: string, reasonCode: string): boolean {
+		this.refresh();
+		const task = this.state.tasks[taskId];
+		if (!task) throw new DurableTaskRuntimeError(`Unknown task '${taskId}'.`);
+		if (["completed", "failed", "cancelled"].includes(task.task.status)) return false;
+		this.commit({
+			type: "task.cancelled",
+			aggregateId: taskId,
+			actor: "runtime",
+			idempotencyKey: `task:${taskId}:cancelled`,
+			payload: toJsonObject({ taskId, reasonCode: dispatchIdentifier(reasonCode.trim(), "reasonCode") }),
+		});
+		return true;
+	}
+
+	private commitPlanEvent(type: PlanEventType, planId: string, idempotencyKey: string, payload: object): void {
+		this.refresh();
+		this.commit({ type, aggregateId: planId, actor: "runtime", idempotencyKey, payload: toJsonObject(payload) });
 	}
 
 	/**

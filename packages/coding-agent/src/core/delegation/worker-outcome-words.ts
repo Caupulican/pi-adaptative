@@ -3,6 +3,7 @@
  * handoff line (codes and requirement ids, no worker words). A leaf beside the contract so the lane projection reads it
  * without importing the outcome projection.
  */
+import type { TaskEscalationRecord } from "../orchestration/task-runtime-state.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import {
 	type BlockerCode,
@@ -69,8 +70,20 @@ const BLOCKER_WORDS: Readonly<Record<BlockerCode, string>> = {
 	unclassified: "the cause is not known",
 };
 
-/** The plain next step of one action, without ids. */
-export function nextActionPhrase(action: NextAction): string {
+/** Whether the outcome's rerun is placed: a `task.escalation_scheduled` record exists for its outcome and rung. */
+export function rerunScheduled(outcome: Outcome, escalations: readonly TaskEscalationRecord[] | undefined): boolean {
+	const action = outcome.nextAction;
+	return (
+		action.kind === "rerun_uncovered" &&
+		(escalations ?? []).some((entry) => entry.outcomeId === outcome.outcomeId && entry.rung === action.rung)
+	);
+}
+
+/**
+ * The plain next step of one action, without ids. A rerun reads as running only once it is placed (`scheduled`);
+ * until then it is the decided next step, which the fleet may still refuse.
+ */
+export function nextActionPhrase(action: NextAction, scheduled = false): string {
 	switch (action.kind) {
 		case "accept":
 			return "use the result";
@@ -81,7 +94,11 @@ export function nextActionPhrase(action: NextAction): string {
 		case "host_check":
 			return "run the requirement checks";
 		case "rerun_uncovered":
-			return action.rung === 1 ? "trying again with more thinking" : "trying again on another model";
+			if (scheduled)
+				return action.rung === 1 ? "running again with more thinking" : "running again on another model";
+			return action.rung === 1
+				? "a rerun with more thinking, once it is placed"
+				: "a rerun on another model, once it is placed";
 		case "split":
 			return "split the remaining work into smaller tasks";
 		case "retry_after":
@@ -103,15 +120,18 @@ export function nextActionPhrase(action: NextAction): string {
 	}
 }
 
-/** One plain line for a lane or node row: what happened and what comes next, at most 280 characters. */
-export function describeNextAction(outcome: Outcome): string {
+/**
+ * One plain line for a lane or node row: what happened and what comes next, at most 280 characters. `escalations` are the
+ * task's scheduled escalation records; without them a rerun never reads as running.
+ */
+export function describeNextAction(outcome: Outcome, escalations?: readonly TaskEscalationRecord[]): string {
 	const blocker = BLOCKER_WORDS[outcome.blocker];
 	const required = outcome.coverage.required.length;
 	const coverage =
 		required > 0 && outcome.status !== "cancelled"
 			? `; ${outcome.coverage.covered.length} of ${required} requirement${required === 1 ? "" : "s"} met`
 			: "";
-	const line = `${STATUS_WORDS[outcome.status]}${blocker ? `: ${blocker}` : ""}${coverage}. Next: ${nextActionPhrase(outcome.nextAction)}.`;
+	const line = `${STATUS_WORDS[outcome.status]}${blocker ? `: ${blocker}` : ""}${coverage}. Next: ${nextActionPhrase(outcome.nextAction, rerunScheduled(outcome, escalations))}.`;
 	return boundedText(line, OUTCOME_LIMITS.describeChars);
 }
 

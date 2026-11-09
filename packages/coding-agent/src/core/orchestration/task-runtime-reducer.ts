@@ -1,6 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../autonomy/contracts.ts";
-import { storedOutcomeFromValue, taskOutcomeId } from "../delegation/worker-outcome-codec.ts";
+import {
+	storedOutcomeFromValue,
+	taskEscalationRecordFromValue,
+	taskOutcomeId,
+} from "../delegation/worker-outcome-codec.ts";
 import { isOutcomeFromNewerBuild } from "../delegation/worker-outcome-contract.ts";
 import {
 	hostEventArray,
@@ -14,6 +18,8 @@ import type {
 	HostEventSourceState,
 	HostEventSubscription,
 } from "../events/host-event-state.ts";
+import type { PlanRuntimeState } from "../plan/plan-graph.ts";
+import { reducePlanEvent } from "../plan/plan-reducer.ts";
 import { assertAttemptAgentBinding, nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { selectedTaskAttempt } from "./attempt-ordering.ts";
 import { attemptUsageIncrease, EMPTY_ATTEMPT_USAGE } from "./attempt-usage.ts";
@@ -91,6 +97,7 @@ import {
 	type AttemptParentWrite,
 	type AttemptRuntimeState,
 	DurableTaskRuntimeError,
+	MAX_TASK_ESCALATIONS,
 	missingTrustedCriteria,
 	type NotificationRuntimeState,
 	type ObjectiveRuntimeState,
@@ -1153,6 +1160,7 @@ export function reduceOrchestrationEvent(
 		checkpoints: { ...projection.checkpoints },
 		approvals: { ...projection.approvals },
 		notifications: { ...projection.notifications },
+		plans: { ...projection.plans },
 		eventSources: { ...projection.eventSources },
 		hostEvents: { ...projection.hostEvents },
 		threadSubscriptions: { ...projection.threadSubscriptions },
@@ -1166,6 +1174,7 @@ export function reduceOrchestrationEvent(
 	const rawCheckpoints = state.checkpoints as Record<string, AttemptCheckpoint>;
 	const rawApprovals = state.approvals as Record<string, ApprovalRuntimeState>;
 	const rawNotifications = state.notifications as Record<string, NotificationRuntimeState>;
+	const rawPlans = state.plans as Record<string, PlanRuntimeState>;
 	const agents = byteTracker.track("agents", rawAgents);
 	const objectives = byteTracker.track("objectives", rawObjectives);
 	const tasks = byteTracker.track("tasks", rawTasks);
@@ -1173,6 +1182,7 @@ export function reduceOrchestrationEvent(
 	const checkpoints = byteTracker.track("checkpoints", rawCheckpoints);
 	const approvals = byteTracker.track("approvals", rawApprovals);
 	const notifications = byteTracker.track("notifications", rawNotifications);
+	const plans = byteTracker.track("plans", rawPlans);
 	state.agents = agents;
 	state.objectives = objectives;
 	state.tasks = tasks;
@@ -1180,6 +1190,7 @@ export function reduceOrchestrationEvent(
 	state.checkpoints = checkpoints;
 	state.approvals = approvals;
 	state.notifications = notifications;
+	state.plans = plans;
 	const rawEventSources = state.eventSources as Record<string, HostEventSourceState>;
 	const rawHostEvents = state.hostEvents as Record<string, AcceptedHostEvent>;
 	const rawSubscriptions = state.threadSubscriptions as Record<string, HostEventSubscription>;
@@ -1262,20 +1273,33 @@ export function reduceOrchestrationEvent(
 			applyAttemptQueued(state, event.payload, event.occurredAt);
 			break;
 		}
-		case "task.ready": {
-			const taskId = string(event.payload.taskId, "task.ready.taskId");
-			assertEventAggregateId(event, taskId, "Ready task");
+		case "task.cancelled": {
+			// Closes a task no attempt is running, so a superseded or cancelled plan step is not recorded as a failure.
+			exactRecord(event.payload, "task.cancelled", ["taskId", "reasonCode"]);
+			const taskId = string(event.payload.taskId, "task.cancelled.taskId");
+			assertEventAggregateId(event, taskId, "Cancelled task");
 			const current = tasks[taskId];
 			if (!current) throw new DurableTaskRuntimeError(`Unknown task '${taskId}'.`);
-			if (current.task.status !== "pending") {
-				throw new DurableTaskRuntimeError(`Task '${taskId}' cannot become ready from '${current.task.status}'.`);
+			if (["completed", "failed", "cancelled"].includes(current.task.status)) {
+				throw new DurableTaskRuntimeError(`Task '${taskId}' is already '${current.task.status}'.`);
 			}
-			if (taskDependencyReadiness(state, current).state !== "ready") {
-				throw new DurableTaskRuntimeError(`Task '${taskId}' dependencies are incomplete.`);
+			if (
+				current.attemptIds.some((attemptId) => !terminalAttemptStatus(attempts[attemptId]?.status ?? "cancelled"))
+			) {
+				throw new DurableTaskRuntimeError(`Task '${taskId}' has an active attempt; cancel the attempt instead.`);
 			}
-			tasks[taskId] = { ...current, task: { ...current.task, status: "ready", updatedAt: event.occurredAt } };
+			dispatchIdentifier(string(event.payload.reasonCode, "task.cancelled.reasonCode"), "task.cancelled.reasonCode");
+			tasks[taskId] = { ...current, task: { ...current.task, status: "cancelled", updatedAt: event.occurredAt } };
 			break;
 		}
+		case "plan.recorded":
+		case "plan.node_released":
+		case "plan.node_settled":
+		case "plan.node_held":
+		case "plan.join_settled":
+		case "plan.closed":
+			reducePlanEvent(plans, tasks, event);
+			break;
 		case "task.failed": {
 			const taskId = string(event.payload.taskId, "task.failed.taskId");
 			const reasonCode = string(event.payload.reasonCode, "task.failed.reasonCode");
@@ -1304,6 +1328,24 @@ export function reduceOrchestrationEvent(
 				throw new DurableTaskRuntimeError(`Outcome '${outcome.outcomeId}' does not follow task '${taskId}'.`);
 			}
 			tasks[taskId] = { ...current, outcome };
+			break;
+		}
+		case "task.escalation_scheduled": {
+			const source = tasks[event.aggregateId];
+			if (!source)
+				throw new DurableTaskRuntimeError(`Escalation scheduled for unknown task '${event.aggregateId}'.`);
+			exactRecord(event.payload, "task.escalation_scheduled", ["record"]);
+			const escalation = taskEscalationRecordFromValue(event.payload.record, "task.escalation_scheduled.record");
+			const prior = source.escalations ?? [];
+			if (prior.some((entry) => entry.outcomeId === escalation.outcomeId && entry.rung === escalation.rung)) break;
+			if (prior.length >= MAX_TASK_ESCALATIONS) {
+				throw new DurableTaskRuntimeError(`Task '${event.aggregateId}' retains no more escalations.`);
+			}
+			const escalations = [...prior, escalation];
+			tasks[event.aggregateId] = { ...source, escalations };
+			const placed = escalation.taskId !== event.aggregateId ? tasks[escalation.taskId] : undefined;
+			// A successor task carries the chain's rungs, so its own outcomes count them toward the same budget.
+			if (placed) tasks[escalation.taskId] = { ...placed, escalations };
 			break;
 		}
 		case "task.verification_finished": {
@@ -1967,6 +2009,7 @@ export function reduceOrchestrationEvent(
 	state.checkpoints = rawCheckpoints;
 	state.approvals = rawApprovals;
 	state.notifications = rawNotifications;
+	state.plans = rawPlans;
 	state.eventSources = rawEventSources;
 	state.hostEvents = rawHostEvents;
 	state.threadSubscriptions = rawSubscriptions;

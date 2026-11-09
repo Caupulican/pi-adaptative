@@ -2,6 +2,7 @@
 
 import { describeDaemonBuild } from "../delegation/bot-team-routine-helpers.ts";
 import { describeGoalAutoContinue } from "../goals/goal-auto-continue-state.ts";
+import { planStatusLine } from "../plan/plan-panel.ts";
 import { describeAwayServiceInspection } from "../routines/away-service.ts";
 import { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../system-one/semantic-plane-health.ts";
 import type { BoundedList, DayCount, SessionAutonomyStatus, StatusSection } from "./autonomy-status.ts";
@@ -36,9 +37,15 @@ function at(ms: number | undefined): string {
 export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): string {
 	return [
 		`Autonomy status at ${status.at}`,
-		...block("Goal", status.goalContinuation, (value) =>
-			value.state === "no_goal" ? [] : [describeGoalAutoContinue(value.state)],
-		),
+		...block("Goal", status.goalContinuation, (value) => [
+			...(value.goal
+				? [
+						`Goal "${value.goal.text}": ${value.goal.met} of ${value.goal.total} requirements met, ${value.goal.status.replace(/_/g, " ")}.`,
+					]
+				: []),
+			...(value.state === "no_goal" ? [] : [describeGoalAutoContinue(value.state)]),
+		]),
+		...block("Plans", status.plans, (value) => list(value.plans, planStatusLine)),
 		...block("Session file", status.sessionSave, (value) => [
 			value.fenced ? SESSION_SAVE_PAUSED_WORDS : "Saving normally.",
 		]),

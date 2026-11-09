@@ -57,6 +57,7 @@ export type GoalContinuationReasonCode =
 	| "missing_goal_state"
 	| "worker_in_flight"
 	| "tool_task_in_flight"
+	| "plan_in_flight"
 	| "worker_wait_timeout"
 	| "lane_sync_conflict"
 	| "lane_sync_required"
@@ -171,6 +172,13 @@ export function evaluateGoalContinuation(args: {
 	 * a bound worker — a handoff stub is not completion.
 	 */
 	inFlightToolTaskIds?: ReadonlySet<string>;
+	/**
+	 * Steps of this goal's running plan that the fleet admitted (queued or running). The plan executor wakes the root
+	 * with each combined result and whenever a step needs it, so while any is in flight the loop waits as it does for a
+	 * bound worker. A step that is only ready (the fleet has not admitted it), held or unable to move does not hold the
+	 * loop, so a plan the fleet refuses never parks the goal.
+	 */
+	planStepsInFlight?: number;
 	/**
 	 * Verification obligations still failed on the branch. Once nothing else stands between the
 	 * goal and completion, they are the operator's call — rerun the check or `/verify dismiss` —
@@ -430,6 +438,15 @@ export function evaluateGoalContinuation(args: {
 		waitingMessage: "A worker is dispatched against an open requirement; waiting for it to finish before continuing.",
 	});
 	if (workerContinuation) return workerContinuation;
+
+	if (args.planStepsInFlight && args.planStepsInFlight > 0) {
+		return {
+			...baseDecision,
+			action: "waiting",
+			reasonCode: "plan_in_flight",
+			message: `${args.planStepsInFlight} step(s) of the running plan are in flight; the plan wakes you with each combined result and when a step needs you.`,
+		};
+	}
 
 	if (args.inFlightToolTaskIds && args.inFlightToolTaskIds.size > 0) {
 		return {

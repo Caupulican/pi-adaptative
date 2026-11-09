@@ -4,7 +4,7 @@ import { getReadmePath } from "../../config.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
 import { RULE_IDS_DETAIL_KEY } from "../../kernel/session/message-retention.ts";
 import { isRecordObject, isStringArray } from "../util/value-guards.ts";
-import { formatRuleHook, loadRuleHooks, RULE_MARKER_PREFIX } from "./rule-hook-catalog.ts";
+import { formatRuleHook, loadRuleHooks, RULE_MARKER_PREFIX, type RuleHook } from "./rule-hook-catalog.ts";
 
 export interface RuleHookDeliveryDeps {
 	/**
@@ -15,6 +15,8 @@ export interface RuleHookDeliveryDeps {
 	getMessages(): readonly AgentMessage[];
 	/** A worker session receives only the rules that are not `rootOnly`. */
 	isRootSession(): boolean;
+	/** Whether a tool is active now; a rule that `requiresTool` is delivered only when this says so. */
+	isToolActive?(toolName: string): boolean;
 	/** The harness package directory; defaults to the directory of the installed README. */
 	packageRoot?: string;
 }
@@ -99,7 +101,7 @@ export class RuleHookDelivery {
 			(hook) =>
 				hook.trigger.kind === "tool-call" &&
 				hook.trigger.tools.includes(call.toolName) &&
-				(!hook.rootOnly || this.deps.isRootSession()) &&
+				this.deliversTo(hook) &&
 				(hook.trigger.matches?.({ ...call, packageRoot: this.packageRoot }) ?? true),
 		);
 		if (triggered.length === 0) return [];
@@ -129,7 +131,7 @@ export class RuleHookDelivery {
 			(candidate) => candidate.topic === topic && candidate.trigger.kind === "preflight",
 		);
 		if (!hook) throw new Error(`Rule hook ${topic} is not a preflight rule.`);
-		if (hook.rootOnly && !this.deps.isRootSession()) return undefined;
+		if (!this.deliversTo(hook)) return undefined;
 		const messages = this.deps.getMessages();
 		this.forgetEndedBatches(messages);
 		if (deliveredRuleIds(messages).has(hook.id)) return undefined;
@@ -147,6 +149,12 @@ export class RuleHookDelivery {
 			this.pending.set(hook.id, { toolCallId, assistantTimestamp: last.timestamp });
 		}
 		return { text: formatRuleHook(hook, { packageRoot: this.packageRoot }), ruleIds: [hook.id] };
+	}
+
+	/** Whether this session may receive the rule: its role, and the tool the rule is about. */
+	private deliversTo(hook: RuleHook): boolean {
+		if (hook.rootOnly && !this.deps.isRootSession()) return false;
+		return hook.requiresTool === undefined || this.deps.isToolActive?.(hook.requiresTool) === true;
 	}
 
 	/** Drops pending deliveries whose batch is no longer the one the last assistant message requested. */

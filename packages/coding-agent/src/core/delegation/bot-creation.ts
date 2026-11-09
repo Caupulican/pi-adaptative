@@ -1,7 +1,10 @@
 /**
  * Who may create a persistent bot. The orchestrator (the root session) and the bots the owner made leaders create bots on
- * the fly; every other bot cannot, and asks a leader or its parent. Only the owner makes a leader.
+ * the fly; every other bot cannot, and asks a leader or its parent. Only the owner makes a standing leader; the
+ * orchestrator may appoint a goal leader for one goal (`bot lead` without agentId).
  */
+
+import type { LeadRequest, LeadResult } from "./leader-delegation.ts";
 
 /** The root session's tool for creating and listing bots. */
 export const BOT_TOOL_NAME = "bot";
@@ -57,11 +60,18 @@ export interface BotToolPort {
 	/** Sends a message to a bot and returns at once; the bot's answer reaches the orchestrator as an event. */
 	ask(agentId: string, message: string): Promise<void>;
 	create(request: BotCreationRequest): CreatedBotView;
+	/** Hands a goal to a leader; its one Outcome reaches the orchestrator as an event when the goal ends. */
+	lead(request: LeadRequest): LeadResult;
 	list(): readonly { agentId: string; modelRef: string; leader: boolean; retired: boolean; createdBy?: string }[];
 }
 
-/** The text a bot that cannot create bots gets when it tries: where to ask instead. */
-export function mayNotCreateBotsText(leaderIds: readonly string[]): string {
+/**
+ * The text a bot that cannot create bots gets when it tries: where to ask instead. A bot a leader made asks that leader
+ * first; any other bot asks one of the leaders, or its parent.
+ */
+export function mayNotCreateBotsText(leaderIds: readonly string[], ownLeader?: string): string {
+	if (ownLeader)
+		return `Only the orchestrator and leaders create bots. Ask your leader (${ownLeader}) with bot_message for the bot you need.`;
 	return leaderIds.length > 0
 		? `Only the orchestrator and leaders create bots. Ask a leader (${leaderIds.join(", ")}) with bot_message, or ask your parent in your report.`
 		: "Only the orchestrator and leaders create bots, and no leader is set. Ask your parent in your report for the bot you need.";

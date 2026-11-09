@@ -1,4 +1,6 @@
 import { getCwdRelativePath, resolvePath } from "../../utils/paths.ts";
+import { PLAN_OFFERED_JOIN_KINDS } from "../plan/plan-graph.ts";
+import { PLAN_TOOL_NAME } from "../tools/plan-tool-name.ts";
 import type { RuleHookCall, RuleHookSource, RuleHookTrigger } from "./rule-hook-catalog.ts";
 
 /** The `action` of a tool call's arguments, when it names one. */
@@ -19,13 +21,18 @@ function callTouchesPackageRoot(call: RuleHookCall): boolean {
  * core/tools/goal.ts (createGoalSchema). goal: `action` start (goalSchema).
  * task_steps: every action of taskStepsSchema (core/tools/task-steps.ts). delegate: `action` is an optional string
  * that defaults to start (core/tools/delegate.ts); only dispatching or steering a worker is routing, so start,
- * follow_up and an absent action trigger. Each rule is delivered once per context under its own id.
+ * follow_up and an absent action trigger. plan: `action` start or revise (core/tools/plan.ts); cancel ends work. Each
+ * rule is delivered once per context under its own id.
  */
 const ROOT_WORK_TRIGGER: RuleHookTrigger = {
 	kind: "tool-call",
-	tools: ["create_goal", "goal", "task_steps", "delegate"],
+	tools: ["create_goal", "goal", "task_steps", "delegate", PLAN_TOOL_NAME],
 	matches: (call) => {
 		if (call.toolName === "goal") return callAction(call.args) === "start";
+		if (call.toolName === PLAN_TOOL_NAME) {
+			const action = callAction(call.args);
+			return action === "start" || action === "revise";
+		}
 		if (call.toolName === "delegate") {
 			const action = callAction(call.args);
 			return action === undefined || action === "start" || action === "follow_up";
@@ -68,6 +75,15 @@ export const RULE_HOOKS: readonly RuleHookSource[] = [
 - Cost: do not spawn for work smaller than its coordination; batch related questions to one worker. Respect explicit user restrictions and granted authority. On an admission failure use the reported reason and continue locally or report the blocker; never change settings to force a worker.
 - Worker memory is read-only (memory_read broker; root memory owns mutation).
 - Integrate: merge results, resolve overlaps, run the final checks, then deliver.`,
+	},
+	{
+		topic: "plan",
+		trigger: ROOT_WORK_TRIGGER,
+		rootOnly: true,
+		// The director role says that plan exists; this says when a plan beats single assignments and how to shape one.
+		requiresTool: PLAN_TOOL_NAME,
+		body: `- Use plan when the goal has three or more parts or any part can run beside another; use assign for one task.
+- Give each step its files; steps that change the same files wait for each other. End with a join (${PLAN_OFFERED_JOIN_KINDS.join(", ")}) so you read one result, not each worker's.`,
 	},
 	{
 		topic: "noticed-items",

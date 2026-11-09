@@ -4,7 +4,7 @@ import type { TimerPort, TimerSource } from "../util/timer-port.ts";
 import { type WaitEndReason, type WaitEndReport, type WakeSource, waitEndReport, waitFor } from "../util/wait.ts";
 import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";
 import { currentProviderLane, noteProviderRefusal, type ProviderRequestLane } from "./lane-context.ts";
-import { type ProviderAdmissionHold, ProviderAdmissionLedger } from "./ledger.ts";
+import { PROVIDER_ADMISSION_STALE_MS, type ProviderAdmissionHold, ProviderAdmissionLedger } from "./ledger.ts";
 import {
 	observeProviderResult,
 	ProviderLimitedError,
@@ -17,6 +17,7 @@ import {
 	type ProviderRefusalReason,
 	ProviderRefusalWindows,
 } from "./refusal.ts";
+import { messageOutcome, type ProviderRequestOutcome, thrownOutcome } from "./request-outcome.ts";
 
 /**
  * Durable record of one admission wait: a request that found the provider limited machine-wide,
@@ -89,7 +90,7 @@ export interface ProviderAdmissionGateDeps {
 	modelExhaustion(modelRef: string): ModelExhaustion | undefined;
 	/** Machine-wide emergency stop; omitted means never engaged. */
 	isEmergencyStopEngaged?(): boolean;
-	/** In-process engage/lift notifications of that stop; a lift elsewhere is read by the stop's poll. */
+	/** Engage/lift notifications of that stop, this process's and (through its directory watch) every other's. */
 	subscribeEmergencyStop?(onChange: () => void): () => void;
 	/** Provider account key for `provider` (see account-key.ts); omitted keys on the bare provider id. */
 	getAccountKey?(provider: string, apiKey?: string): string;
@@ -100,18 +101,52 @@ export interface ProviderAdmissionGateDeps {
 	 * attempts it refuses; omitted, every refusal is recorded. {@link withProviderAdmission} supplies one.
 	 */
 	refusals?: ProviderRefusalWindows;
+	/**
+	 * Observes one dispatched request on `accountKey` until it settles (the fleet's adaptive account windows learn from
+	 * it): called when the request is dispatched, the returned settle is called once with how it ended. A throwing
+	 * observer never affects the request.
+	 */
+	observeRequest?(accountKey: string): ((outcome: ProviderRequestOutcome) => void) | undefined;
+}
+
+function observeRequestSafely(
+	deps: ProviderAdmissionGateDeps,
+	accountKey: string,
+): (outcome: () => ProviderRequestOutcome) => void {
+	let settle: ((outcome: ProviderRequestOutcome) => void) | undefined;
+	try {
+		settle = deps.observeRequest?.(accountKey);
+	} catch {
+		settle = undefined;
+	}
+	return (outcome) => {
+		const observed = settle;
+		settle = undefined;
+		if (!observed) return;
+		try {
+			observed(outcome());
+		} catch {
+			harnessLog.warn("provider", "a provider request outcome could not be observed", () => ({
+				account: describeProviderAccountKey(accountKey),
+			}));
+		}
+	};
 }
 
 /**
- * The cross-process re-read of a capacity wait: a hold released in this process wakes the wait at once (`ledger.release`),
- * one released by another process is read by this poll, its interval doubling from the first to the last.
+ * The one safety recheck of an emergency-stop wait. A lift anywhere on the machine wakes the wait at once (in this process
+ * through the stop's signal, in another through its directory watch); this alarm only bounds a lift a failed watch missed.
  */
-const FIRST_POLL_MS = 250;
-const MAX_POLL_MS = 2_000;
-/** The cross-process re-read of an emergency stop: a lift in this process wakes the wait at once. */
-const EMERGENCY_STOP_POLL_MS = 2_000;
+const EMERGENCY_STOP_SAFETY_RECHECK_MS = 60_000;
+/**
+ * A capacity wait is woken at once by a hold released anywhere on the machine (`ledger.release`, which carries other
+ * processes' releases through the ledger directory's watch). A holder that died without releasing produces no event:
+ * its entry is pruned once its pid is gone or its heartbeat passed the staleness bound, so the wait's one recheck is
+ * armed at that bound.
+ */
+const CAPACITY_SAFETY_RECHECK_MS = PROVIDER_ADMISSION_STALE_MS;
 /** The least a refusal with no stated reset asks its caller to wait, so a lane with a zero wait budget never retries in a spin. */
-const OPEN_REFUSAL_MIN_RETRY_MS = EMERGENCY_STOP_POLL_MS;
+const OPEN_REFUSAL_MIN_RETRY_MS = 2_000;
 
 /**
  * Why an owner steer never ends an admission pause: the pause is the admission of the provider request the run is
@@ -173,8 +208,8 @@ interface AdmissionChange {
 
 /**
  * One admission pause on the gate's port. It ends `satisfied` by `alarm.id` once `alarm.ms` passed (the reset it waits
- * for, or the re-read that sees what another process changed), `satisfied` by `change.id` as soon as this process
- * changes what it waits for, `timed_out` when the lane budget left (`boundMs`) passed, or `aborted` by the request's
+ * for, or its one safety recheck), `satisfied` by `change.id` as soon as any process on the machine changes what it
+ * waits for, `timed_out` when the lane budget left (`boundMs`) passed, or `aborted` by the request's
  * signal. The caller reads the state again after every end. The alarm holds the process open: a one-shot run is behind
  * the request. The owner steer never ends it (`ADMISSION_STEER_EXEMPTION`).
  */
@@ -237,17 +272,17 @@ function thrownWaitEnd(error: unknown, signal: AbortSignal | undefined): WaitEnd
  *  0. Model quota (worker and background lanes): a model with a recorded quota reset is waited out within the lane budget
  *     (`maxWaitMs`), and otherwise refused with {@link ModelQuotaExhaustedError}. Runs ahead of the enabled switch.
  *  1. Emergency stop: worker and background lanes wait while it is engaged, then refuse after
- *     `maxWaitMs`; the foreground is never held by it. A lift in this process ends the wait at once,
- *     one elsewhere within the stop's poll.
+ *     `maxWaitMs`; the foreground is never held by it. A lift anywhere ends the wait at once (this
+ *     process's signal, or another's through the stop's directory watch).
  *  2. Recorded machine-wide limit: every lane waits for the recorded reset while it fits its
  *     budget (`foregroundLimitWaitMs` for the foreground, `maxWaitMs` otherwise) and otherwise
  *     refuses with {@link ProviderLimitedError}, whose message the reliability classifier reads as
  *     a rate limit with the remaining delay, so the retry ladder sleeps until the reset without
  *     sending a request that would be refused and billed. A limit this process records or clears
- *     meanwhile is read at once.
+ *     meanwhile, here or in another process (the limits directory's watch), is read at once.
  *  3. In-flight limit: the foreground is registered and admitted at once; a worker or background
  *     request waits while the provider's machine-wide in-flight count is at its limit, woken by a
- *     release in this process and re-reading with a doubling poll for one elsewhere, and is admitted
+ *     release anywhere on the machine and rechecked once at the staleness bound of a dead holder, and is admitted
  *     regardless once `maxWaitMs` has passed (recorded as `timedOut`) so a wedged sibling can never
  *     starve it.
  *
@@ -424,8 +459,8 @@ export async function admitProviderRequest(
 					throw new EmergencyStopError(waitedMs, refusal);
 				}
 				const budgetLeftMs = Math.max(1, policy.maxWaitMs - waitedMs);
-				const pollMs = Math.min(EMERGENCY_STOP_POLL_MS, budgetLeftMs);
-				await pauseAdmission(timers, { id: "emergency_stop.poll", ms: pollMs }, budgetLeftMs, signal, lift);
+				const recheckMs = Math.min(EMERGENCY_STOP_SAFETY_RECHECK_MS, budgetLeftMs);
+				await pauseAdmission(timers, { id: "emergency_stop.recheck", ms: recheckMs }, budgetLeftMs, signal, lift);
 				signal?.throwIfAborted();
 			}
 			deps.record?.({
@@ -487,7 +522,6 @@ export async function admitProviderRequest(
 		subscribe: (onRelease) => deps.ledger.subscribeRelease(onRelease),
 	};
 	let inflightAtStart: number | undefined;
-	let pollMs = FIRST_POLL_MS;
 	let waiting = false;
 	const endWait = (end: WaitEndReason): void => {
 		if (!waiting) return;
@@ -553,12 +587,11 @@ export async function admitProviderRequest(
 			const budgetLeftMs = Math.max(1, policy.maxWaitMs - waitedMs);
 			await pauseAdmission(
 				timers,
-				{ id: "ledger.poll", ms: Math.min(pollMs, budgetLeftMs) },
+				{ id: "ledger.recheck", ms: Math.min(CAPACITY_SAFETY_RECHECK_MS, budgetLeftMs) },
 				budgetLeftMs,
 				signal,
 				release,
 			);
-			pollMs = Math.min(MAX_POLL_MS, pollMs * 2);
 		}
 	} catch (error) {
 		endWait(thrownWaitEnd(error, signal));
@@ -642,8 +675,10 @@ export function withProviderAdmission(streamFn: StreamFn, gateDeps: ProviderAdmi
 						if (released) throw new Error("Provider admission ended before dispatch.");
 						const parent = options?.providerResponseObserver?.begin(requestModel, signal);
 						dispatched = true;
+						const settleObserved = observeRequestSafely(deps, key);
 						return {
 							complete: (message) => {
+								settleObserved(() => messageOutcome(message, now()));
 								try {
 									parent?.complete(message);
 								} catch (error) {
@@ -667,6 +702,7 @@ export function withProviderAdmission(streamFn: StreamFn, gateDeps: ProviderAdmi
 								}
 							},
 							failed: (error) => {
+								settleObserved(() => thrownOutcome(model.provider, error, now(), signal));
 								try {
 									parent?.failed(error);
 								} finally {

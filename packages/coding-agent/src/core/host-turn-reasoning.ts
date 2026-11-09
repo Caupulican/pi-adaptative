@@ -21,7 +21,13 @@ import type { ThinkingLevel } from "./settings/settings-schema.ts";
  * The completion messages the host delivers on its own initiative. Both carry a finished result the
  * next request only has to read; neither is a question the operator asked.
  */
-export const HOST_TURN_CUSTOM_TYPES = ["background-tool-completion", "background-worker-completion"] as const;
+/** Host turns that report delegated work: a leader's question and its goal's end are worker results too. */
+export const HOST_TURN_CUSTOM_TYPES = [
+	"background-tool-completion",
+	"background-worker-completion",
+	"leader-question",
+	"leader-outcome",
+] as const;
 
 export type HostTurnCustomType = (typeof HOST_TURN_CUSTOM_TYPES)[number];
 

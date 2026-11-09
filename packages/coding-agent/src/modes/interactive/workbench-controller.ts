@@ -8,10 +8,12 @@ import {
 import type { LaneRecord } from "../../core/autonomy/lane-tracker.ts";
 import { backgroundToolInvocationObservations } from "../../core/background-tool-task-controller.ts";
 import type { TaskExecutionMetrics } from "../../core/cost/cost-summary.ts";
+import type { LeaderRow } from "../../core/delegation/leader-view.ts";
 import type { ActiveChatTarget, PersistentBotView } from "../../core/delegation/persistent-bot-team-store.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
 import type { ForegroundRouteSnapshot } from "../../core/model-router-controller.ts";
 import type { OperatorProjection } from "../../core/operator-projection/types.ts";
+import { runningRootPlan } from "../../core/plan/plan-view.ts";
 import { formatRouteValue, shortModelName } from "../../core/route-text.ts";
 import { DEFAULT_GRAPH_FRACTION } from "../../core/settings/settings-rules.ts";
 import {
@@ -95,6 +97,8 @@ interface WorkbenchPorts {
 	persistentTeams?: () => readonly WorkbenchPersistentTeam[];
 	/** Persistent bots listed under the inspector's Bots group: the same list the Chats roster draws. */
 	persistentBots?: () => readonly PersistentBotView[];
+	/** The goals handed to leaders, in plain words: the Team's Leaders group. */
+	leaders?: () => readonly LeaderRow[];
 }
 
 /** What the Team section lists of a persistent team. */
@@ -114,6 +118,8 @@ export interface WorkbenchSectionSources {
 	rosterShown?: () => boolean;
 	persistentTeams?: () => readonly WorkbenchPersistentTeam[];
 	persistentBots?: () => readonly PersistentBotView[];
+	/** The goals handed to leaders; the Leaders group lists them while any is open or recently ended. */
+	leaders?: () => readonly LeaderRow[];
 	taskMetrics?: () => TaskExecutionMetrics | undefined;
 }
 
@@ -487,6 +493,7 @@ export class WorkbenchController {
 				rosterShown: () => this.view.chatsShown,
 				persistentTeams: this.ports.persistentTeams,
 				persistentBots: this.ports.persistentBots,
+				leaders: this.ports.leaders,
 				taskMetrics: this.ports.taskMetrics,
 			}),
 		);
@@ -788,6 +795,23 @@ function renderRootRow(facts: WorkbenchTeamFacts): string {
 	return `  ${glyph} ${theme.fg("muted", "brain")} ${theme.fg(running ? "accent" : "text", model)}${task}`;
 }
 
+const LEADER_TONE: Readonly<Record<LeaderRow["tone"], "accent" | "muted" | "warning" | "success">> = {
+	working: "accent",
+	waiting: "muted",
+	paused: "warning",
+	done: "success",
+	attention: "warning",
+};
+
+/** The Leaders group: who leads which goal and where it stands, in plain words; no ids. */
+export function renderLeaderRows(rows: readonly LeaderRow[]): string[] {
+	return rows.map((row) => {
+		const tone = LEADER_TONE[row.tone];
+		const glyph = row.tone === "working" ? "●" : row.tone === "done" ? "✓" : row.open ? "○" : "!";
+		return `  ${theme.fg(tone, glyph)} ${theme.fg(row.open ? "text" : "muted", row.name)} ${theme.fg("dim", "·")} ${theme.fg("muted", row.goal)} ${theme.fg("dim", "·")} ${theme.fg(tone, row.state)}`;
+	});
+}
+
 /** Routed choices that are live: who chose which model for whom, in the operator's words. */
 export function renderRoutingRows(facts: WorkbenchTeamFacts): string[] {
 	const rows: string[] = [];
@@ -814,7 +838,7 @@ export function buildWorkbenchSections(
 	nowMs: number,
 	sources: WorkbenchSectionSources = {},
 ): WorkbenchSection[] {
-	const { team, graphShown, taskMetrics } = sources;
+	const { team, graphShown, taskMetrics, leaders } = sources;
 	const model = buildWorkPanelModel(snapshot, nowMs);
 	const rows = model.rows ?? [];
 	const planRows = rows.filter((row) => !TEAM_SECTIONS.has(row.section ?? ""));
@@ -835,11 +859,15 @@ export function buildWorkbenchSections(
 			metrics && (metrics.rounds > 0 || metrics.activeMs > 0)
 				? ` · ${metrics.timingEstimated ? "~" : ""}${formatCompactDuration(metrics.activeMs)} · ${metrics.rounds}r`
 				: "";
-		const baseMeta = task
-			? `${doneSteps} / ${totalSteps}`
-			: goal
-				? `${satisfied} / ${goal.requirements.length} requirements`
-				: "";
+		// The running plan is the root's decomposition of the work; task steps are its own checklist beside it.
+		const openPlan = runningRootPlan(snapshot.plans ?? []);
+		const baseMeta = openPlan
+			? `${openPlan.counts.settled} / ${openPlan.counts.total}`
+			: task
+				? `${doneSteps} / ${totalSteps}`
+				: goal
+					? `${satisfied} / ${goal.requirements.length} requirements`
+					: "";
 		const meta = `${baseMeta}${metricsMeta}`;
 		const singleSection = new Set(shown.map((row) => row.section)).size <= 1;
 		const doneSummary = [
@@ -916,10 +944,17 @@ export function buildWorkbenchSections(
 		}
 		// The body asks at render time whether the graph is drawn, so a pane hidden or shown since this build draws the
 		// right rows (the workers alone beside the graph, the whole panel without it).
+		const leaderLines = (): string[] => {
+			const rows = renderLeaderRows(leaders?.() ?? []);
+			return rows.length ? [group("Leaders"), ...rows] : [];
+		};
 		const body: Component = {
 			render: (width) => {
 				if (graphShown?.() === true)
-					return clampLines(hasSpecialists ? [group("Workers"), ...executorRows(width)] : [], width);
+					return clampLines(
+						[...leaderLines(), ...(hasSpecialists ? [group("Workers"), ...executorRows(width)] : [])],
+						width,
+					);
 				const facts = team();
 				const routing = renderRoutingRows(facts);
 				return clampLines(
@@ -928,6 +963,7 @@ export function buildWorkbenchSections(
 						renderRootRow(facts),
 						group("Decider"),
 						...renderDeciderRows(facts, Date.now()),
+						...leaderLines(),
 						group("Workers"),
 						...(hasSpecialists ? executorRows(width) : idle),
 						...(routing.length ? [group("Routing"), ...routing] : []),
@@ -937,8 +973,9 @@ export function buildWorkbenchSections(
 			},
 			invalidate() {},
 		};
-		if (graphShown?.() === true && !hasSpecialists) return sections;
-		sections.push({ title: TEAM_SECTION, meta: executors, body, quiet: !hasSpecialists });
+		const hasLeaders = (leaders?.().length ?? 0) > 0;
+		if (graphShown?.() === true && !hasSpecialists && !hasLeaders) return sections;
+		sections.push({ title: TEAM_SECTION, meta: executors, body, quiet: !hasSpecialists && !hasLeaders });
 	}
 	return sections;
 }

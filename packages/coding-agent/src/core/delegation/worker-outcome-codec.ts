@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "../orchestration/contracts.ts";
 import { exactRecord, record } from "../orchestration/task-runtime-projection.ts";
-import { DurableTaskRuntimeError } from "../orchestration/task-runtime-state.ts";
+import {
+	DurableTaskRuntimeError,
+	MAX_TASK_ESCALATIONS,
+	type TaskEscalationRecord,
+} from "../orchestration/task-runtime-state.ts";
 import {
 	ABANDON_REASONS,
 	BLOCKER_ATTRIBUTIONS,
@@ -247,6 +251,46 @@ function nextActionFromValue(value: unknown, label: string): NextAction {
 			exactRecord(action, label, ["kind", "reason"]);
 			return { kind, reason: member(action.reason, ABANDON_REASONS, `${label}.reason`) };
 	}
+}
+
+const ESCALATION_FIELDS = [
+	"outcomeId",
+	"rung",
+	"signature",
+	"taskId",
+	"attemptId",
+	"placement",
+	"modelRef",
+	"thinking",
+	"nodeId",
+	"supersedesTaskId",
+	"scheduledAt",
+] as const;
+
+/** One escalation record, shared by the `task.escalation_scheduled` reducer and the projection snapshot codec. */
+export function taskEscalationRecordFromValue(value: unknown, label: string): TaskEscalationRecord {
+	const input = exactRecord(value, label, ESCALATION_FIELDS);
+	const rung = input.rung;
+	if (rung !== 1 && rung !== 2) throw new DurableTaskRuntimeError(`${label}.rung is invalid.`);
+	const optional = (field: "nodeId" | "supersedesTaskId") =>
+		input[field] === undefined ? {} : { [field]: identifier(input[field], `${label}.${field}`) };
+	return {
+		outcomeId: identifier(input.outcomeId, `${label}.outcomeId`),
+		rung,
+		signature: identifier(input.signature, `${label}.signature`),
+		taskId: identifier(input.taskId, `${label}.taskId`),
+		attemptId: identifier(input.attemptId, `${label}.attemptId`),
+		placement: identifier(input.placement, `${label}.placement`),
+		modelRef: identifier(input.modelRef, `${label}.modelRef`),
+		thinking: identifier(input.thinking, `${label}.thinking`),
+		...optional("nodeId"),
+		...optional("supersedesTaskId"),
+		scheduledAt: identifier(input.scheduledAt, `${label}.scheduledAt`),
+	};
+}
+
+export function taskEscalationsFromValue(value: unknown, label: string): readonly TaskEscalationRecord[] {
+	return list(value, MAX_TASK_ESCALATIONS, label, taskEscalationRecordFromValue);
 }
 
 function member<T extends string>(value: unknown, allowed: readonly T[], label: string): T {

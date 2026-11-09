@@ -67,6 +67,8 @@ import type { ForegroundRouteSnapshot } from "../../core/model-router-controller
 import type { FitnessRole } from "../../core/models/fitness-role.ts";
 import type { PrismLlamaCppRuntime } from "../../core/models/llamacpp-runtime.ts";
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
+import { planStepByAttempt } from "../../core/plan/plan-panel.ts";
+import { listPlanViews } from "../../core/plan/plan-view.ts";
 import { AccountUsageMonitor } from "../../core/provider-admission/account-usage-monitor.ts";
 import { REPLY_ROUTE_CUSTOM_TYPE, type ReplyRouteRecord } from "../../core/reply-route.ts";
 import { formatMissingSessionCwdPrompt, type MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -140,6 +142,7 @@ import { InteractiveEventController } from "./interactive-event-controller.ts";
 import { InteractiveLayout } from "./interactive-layout.ts";
 import * as keyHandlers from "./key-handlers.ts";
 import { handleKnowledgeCommand } from "./knowledge-commands.ts";
+import { handleLeadCommand } from "./leader-commands.ts";
 import { handleEstopCommand, handleLoadCommand } from "./load-commands.ts";
 import { type LoadedResourcesViewOptions, renderLoadedResources } from "./loaded-resources-view.ts";
 import * as localModelCommands from "./local-model-commands.ts";
@@ -147,6 +150,7 @@ import { handleMemoryCommand } from "./memory-commands.ts";
 import { type MisalignmentBlock, offerMisalignmentContinuation } from "./misalignment-continuation.ts";
 import * as modelRouterSetupCommands from "./model-router-setup-commands.ts";
 import { bindPersistenceFenceIndicator } from "./persistence-fence-indicator.ts";
+import { handlePlanCommand } from "./plan-commands.ts";
 import * as proactivityCommands from "./proactivity-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
 import { promptHarnessReadiness } from "./readiness-prompt.ts";
@@ -1095,9 +1099,12 @@ export class InteractiveMode {
 		const verification = this.session.getVerificationObligations();
 		const peerFindings = this.session.getSemanticVerificationObligations();
 		const edge = this.session.getEdgeGrants();
+		const ledger = this.session.backgroundLanes.getTaskRuntimeSnapshot();
+		const plans = ledger ? listPlanViews(ledger) : [];
 		return {
 			goalState: this.session.getGoalStateSnapshot(),
 			taskState: this.session.getTaskStepsStateSnapshot(),
+			...(ledger ? { plans, planStepByAttempt: planStepByAttempt(ledger, plans) } : {}),
 			laneRecords: this.session.getLaneRecords(),
 			...(verification.length ? { verification } : {}),
 			...(peerFindings.length ? { peerFindings } : {}),
@@ -1683,6 +1690,19 @@ export class InteractiveMode {
 				await handleVerifyCommand(this.verifyHost(), text);
 				return;
 			}
+			if (text === "/plan" || text.startsWith("/plan ")) {
+				this.editor.setText("");
+				const ledger = this.session.backgroundLanes.getTaskRuntimeSnapshot();
+				handlePlanCommand(
+					{
+						listPlans: () => (ledger ? listPlanViews(ledger) : []),
+						getGoalStateSnapshot: () => this.session.getGoalStateSnapshot(),
+						...this.operatorCommandOutput(),
+					},
+					text,
+				);
+				return;
+			}
 			if (text === "/memory" || text.startsWith("/memory ")) {
 				this.editor.setText("");
 				await handleMemoryCommand(this.memoryCommandHost(), text);
@@ -1814,6 +1834,18 @@ export class InteractiveMode {
 			if (text === "/autonomy" || text.startsWith("/autonomy ")) {
 				this.handleAutonomyCommand(text);
 				this.editor.setText("");
+				return;
+			}
+			if (text === "/lead" || text.startsWith("/lead ")) {
+				this.editor.setText("");
+				await handleLeadCommand(
+					{
+						session: this.session,
+						showStatus: (message) => this.showStatus(message),
+						showError: (message) => this.showError(message),
+					},
+					text,
+				);
 				return;
 			}
 			if (text === "/proactivity" || text.startsWith("/proactivity ")) {

@@ -66,6 +66,8 @@ import {
 	type ForegroundTranscriptWrites,
 	importRecordedParentWrites,
 } from "./delegation/foreground-parent-writes.ts";
+import { LeaderController } from "./delegation/leader-controller.ts";
+import { type LeaderRow, leaderRows } from "./delegation/leader-view.ts";
 import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
 import { type ManagedLaneView, projectManagedLaneViews } from "./delegation/managed-lane-views.ts";
 import type { ParentExecutionContext, ParentWriteOrigin } from "./delegation/parent-execution-context.ts";
@@ -84,6 +86,7 @@ import {
 	type PersistentTeamMemberDelivery,
 	type PersistentTeamMessage,
 	type PersistentTeamRecord,
+	RESERVED_BOT_CREATOR_IDS,
 	type TeamOperatorMessageDispatchResult,
 	teamIncarnation,
 	type UpsertPersistentBotInput,
@@ -168,6 +171,8 @@ import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
 import type { WorkerReceiptOrigin } from "./orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery, ParentInputReceipt } from "./parent-input-delivery.ts";
 import { createSteerAwareWait, ownerSteerWake } from "./pending-input-queue-controller.ts";
+import { PlanExecutor } from "./plan/plan-executor.ts";
+import type { PlanExecutorPort } from "./plan/plan-executor-port.ts";
 import { ActAheadController } from "./proactivity/act-ahead-controller.ts";
 import type { CiFailureEvidenceReader } from "./proactivity/act-ahead-record.ts";
 import {
@@ -218,6 +223,7 @@ import type { SessionSemanticPlaneController } from "./session-semantic-plane-co
 import { getActiveSessionBranchEntries, isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import { createBotToolDefinition } from "./tools/bot.ts";
+import { createPlanToolDefinition } from "./tools/plan.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
 import { alarmAt, type WallAlarm } from "./util/timer-port.ts";
 import { type SteerDecision, type WaitStatusEvent, type WakeSource, waitFor } from "./util/wait.ts";
@@ -279,7 +285,10 @@ export interface BackgroundLaneControllerDeps
 	 * The session's semantic plane: its bound engine, if any (routine intake judges with it before the session model),
 	 * and whether System One is configured without one (`/status`).
 	 */
-	readonly systemOne: Pick<SessionSemanticPlaneController, "recordingSemanticEngine" | "configured">;
+	readonly systemOne: Pick<
+		SessionSemanticPlaneController,
+		"recordingSemanticEngine" | "semanticDecisionEngine" | "configured"
+	>;
 	canRunRoutines?(): boolean;
 	getToolInvocationKey(callId: string, toolName: string): string;
 	deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt>;
@@ -633,6 +642,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			warn: (message) => this._safeWarn(message),
 		});
 		this._parentWriteHolds = this._importParentWrites(lifecycle);
+		// A delegation's leader turns are its own input: the claim must stand before the outbox replays, and the controller
+		// adopts every open delegation the last process left once the replay is done.
+		if (!this.deps.isChildSession()) {
+			this._composePlanExecutor(lifecycle, store);
+			const leaders = this._getLeaders();
+			this._leaderRouteOff ??= this.registerTerminalRoute("leader_controller", (record) =>
+				leaders.claimsTerminal(record),
+			);
+			queueMicrotask(() => {
+				if (!this.deps.isDisposed()) leaders.start();
+			});
+		}
 		this._replayPendingTerminals(lifecycle, () => true);
 		return lifecycle;
 	}
@@ -781,6 +802,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._botViews = undefined;
 		this._managedLaneViews = undefined;
 		this._cachedLaneRecords = undefined;
+		this._leaderRows = undefined;
 		if (this._laneRecordListeners.size === 0 || this._laneRecordsNotifyQueued) return;
 		this._laneRecordsNotifyQueued = true;
 		queueMicrotask(() => {
@@ -959,6 +981,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Reconcile only when delegation has already been materialized; UAC omission stays zero-load. */
 	synchronizeGoalState(goal: GoalState): void {
 		this._workers?.synchronizeGoalState(goal);
+		this._planExecutor?.noteGoalChanged();
 	}
 
 	/**
@@ -1035,6 +1058,16 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._runTeardownStep("dispose worker usage delivery", () => this._workerUsage?.dispose());
 		this._runTeardownStep("dispose worker receipt delivery", () => this._workerReceipts?.dispose());
 		this._runTeardownStep("dispose worker notifications", () => this._workerNotifications?.dispose());
+		this._runTeardownStep("dispose the plan executor", () => {
+			this._planRouteOff?.();
+			this._planRouteOff = undefined;
+			this._planExecutor?.dispose();
+		});
+		this._runTeardownStep("dispose the leader controller", () => {
+			this._leaderRouteOff?.();
+			this._leaderRouteOff = undefined;
+			this._leaders?.dispose();
+		});
 		this._runTeardownStep("stop routine watches", () => this._routines?.watches.dispose());
 		let routineShutdown = Promise.resolve();
 		this._runTeardownStep("stop routine scheduler", () => {
@@ -2108,6 +2141,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 						maxStallTurns: this.deps.getSettingsManager().getAutonomySettings().maxStallTurns,
 					}),
 				),
+			goalState: () => this.deps.getGoalStateSnapshot(),
 			proactivity: {
 				daily: this.getProactivityDailyState(),
 				lastSkipReason: this.getLastProactivitySkipReason(),
@@ -2215,9 +2249,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				.map((bot) => bot.agentId);
 		const senderRecord = sourceAlias ? store.getBot(sourceAlias) : undefined;
 		const senderIsLeader = senderRecord?.leader === true && senderRecord.retired !== true;
+		// A bot a leader made asks that leader for more bots, while the leader still leads.
+		const ownLeader = () => {
+			const creator = senderRecord?.createdBy ? store.getBot(senderRecord.createdBy) : undefined;
+			return creator?.leader === true && creator.retired !== true ? creator.agentId : undefined;
+		};
 		return {
 			assertCurrent,
 			leaderIds,
+			ownLeader,
 			...(senderIsLeader && sourceAlias
 				? {
 						createBot: (request: BotCreationRequest) =>
@@ -2382,11 +2422,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			defaultModelRef,
 			teamId === undefined,
 		);
-		// A machine joined over the link is idle while connected and offline while not; a local bot's state comes from its lanes.
+		// A machine joined over the link speaks from facts (connected, its jobs, its room); a local bot's state comes from its lanes.
 		const views = projected.map((view) =>
-			view.remote && view.state !== "retired"
-				? { ...view, state: this.getRemoteHub().isOnline(view.agentId) ? ("idle" as const) : ("offline" as const) }
-				: view,
+			view.remote && view.state !== "retired" ? { ...view, ...this.getRemoteHub().rosterWords(view.agentId) } : view,
 		);
 		if (!teamId) this._botViews = { defaultModelRef, delegateActive, bindings, views };
 		return teamId ? views.filter((view) => team?.memberAgentIds.includes(view.agentId)) : [...views];
@@ -2397,7 +2435,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * they are not bots and have no chat. Served until a lane record changes.
 	 */
 	listManagedLanes(): ManagedLaneView[] {
-		this._managedLaneViews ??= projectManagedLaneViews(this._rosterLaneRecords());
+		this._managedLaneViews ??= projectManagedLaneViews(this._rosterLaneRecords()).map(
+			(view) => this._remoteHub?.describeLane(view) ?? view,
+		);
 		return [...this._managedLaneViews];
 	}
 
@@ -2544,19 +2584,26 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/**
 	 * Creates a bot on the authority of the orchestrator or of a leader (the owner's `/bot new` is the third way). A leader
-	 * cannot make a leader, grants write access only when it can write itself, and has a bound on the bots it keeps.
+	 * cannot make a leader, grants write access only when it can write itself, and has a bound on the bots it keeps. Only
+	 * the orchestrator's goal leader (`bot lead` without agentId) is created a leader, for its one goal.
 	 */
 	createBotFor(
 		creator: { readonly kind: "root" } | { readonly kind: "leader"; readonly agentId: string },
 		request: BotCreationRequest,
+		options?: { readonly goalLeader?: boolean },
 	): CreatedBotView {
+		if (options?.goalLeader === true && creator.kind !== "root")
+			throw new Error("Only the orchestrator appoints a goal leader.");
 		const store = this.getBotTeamStore();
 		store.reload();
 		const agentId = normalizeBotOrTeamId(
 			request.agentId ??
 				suggestBotId(
 					request.description ?? request.soul,
-					new Set(store.listBots({ includeRetired: true }).map((bot) => bot.agentId)),
+					new Set([
+						...RESERVED_BOT_CREATOR_IDS,
+						...store.listBots({ includeRetired: true }).map((bot) => bot.agentId),
+					]),
 				),
 			"agentId",
 		);
@@ -2591,7 +2638,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				...(soul ? { soul } : {}),
 				...(request.description ? { description: request.description } : {}),
 				canWrite: request.canWrite === true,
-				leader: false,
+				leader: options?.goalLeader === true,
 				createdBy,
 			},
 			creator.kind === "leader" ? { createdBy, max: MAX_BOTS_PER_LEADER } : undefined,
@@ -2601,6 +2648,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			by: createdBy,
 			model: `${bot.provider}/${bot.modelId}`,
 			canWrite: bot.canWrite === true,
+			goalLeader: bot.leader === true,
 		}));
 		return {
 			agentId: bot.agentId,
@@ -2619,6 +2667,16 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			getStore: () => this.getBotTeamStore(),
 			// A machine arriving or leaving touches its bot, so the roster follows the same way it follows any bot save.
 			changed: (machine) => this.getBotTeamStore().upsertBot({ agentId: machine }),
+			// Remote work placement runs a placed job through this session's own worker start path and records the jobs
+			// it places as managed lanes; nothing here is read until the owner linked this machine.
+			jobs: {
+				session: this,
+				sessionId: () => this.deps.getSessionId(),
+				cwd: () => this.deps.getCwd(),
+				models: () => this.deps.getModelRegistry().getAvailable(),
+				usesSubscription: (model) => this.deps.getModelRegistry().isUsingOAuth(model),
+				fleet: () => this._getWorkerController().getFleet(),
+			},
 		});
 		return this._remoteHub;
 	}
@@ -2630,6 +2688,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				await this.sendOperatorMessageToBot(agentId, message, { fromRoot: true });
 			},
 			create: (request) => this.createBotFor({ kind: "root" }, request),
+			lead: (request) => this.getLeaders().delegate(request),
 			list: () =>
 				this.getBotTeamStore()
 					.listBots({ includeRetired: true })
@@ -2643,9 +2702,126 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		});
 	}
 
+	/** The plan executor the root's `plan` tool reaches; composed with the worker runtime of a root session. */
+	private _planExecutor: PlanExecutor | undefined;
+	private _planRouteOff: (() => void) | undefined;
+
+	createPlanToolDefinition(): ToolDefinition {
+		return createPlanToolDefinition(() => this._getPlanExecutor());
+	}
+
+	/** The root's plan executor; reaching it builds the worker runtime that composes it. */
+	private _getPlanExecutor(): PlanExecutorPort | undefined {
+		if (this.deps.isChildSession() || this.deps.isDisposed()) return undefined;
+		this._getWorkerLifecycle();
+		return this._planExecutor;
+	}
+
+	/**
+	 * Composes the plan executor over the worker runtime. Its terminal claim stands before the outbox replays (plan-step
+	 * terminals are the executor's input), and its first drain is the restart recovery of every open plan.
+	 */
+	private _composePlanExecutor(lifecycle: WorkerLifecycle, store: OrchestrationEventStore): void {
+		if (this._planExecutor) return;
+		const executor = new PlanExecutor({
+			runtime: () => lifecycle.ledger.runtime,
+			subscribeStore: (listener) => store.subscribe(listener),
+			fleet: () => this._getWorkerController().getFleet(),
+			engine: () => this.deps.systemOne.semanticDecisionEngine(),
+			goal: () => this.deps.getGoalStateSnapshot(),
+			sessionId: () => this.deps.getSessionId(),
+			agentDir: () => this.deps.getAgentDir(),
+			rootEntries: () => this.deps.getSessionManager().getBranch(),
+			captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
+			deliver: (delivery, signal) => this.deps.deliverNotes(delivery, { signal }),
+			isDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
+			acknowledge: (notificationIds) => lifecycle.markNotificationsDelivered(notificationIds),
+			now: () => this.deps.getTimers().port("orchestration").now(),
+		});
+		this._planExecutor = executor;
+		this._planRouteOff = this.registerTerminalRoute("plan_executor", (record) => executor.ownsTask(record.laneId));
+		queueMicrotask(() => {
+			if (!this.deps.isDisposed()) executor.start();
+		});
+	}
+
+	private _leaders: LeaderController | undefined;
+	private _leaderRouteOff: (() => void) | undefined;
+	private _leaderRows: LeaderRow[] | undefined;
+
+	/** The root's delegations to leaders; building it builds the worker runtime, which registers its terminal claim. */
+	getLeaders(): LeaderController {
+		if (this.deps.isChildSession()) throw new Error("Only the orchestrator hands goals to leaders.");
+		this._getWorkerLifecycle();
+		return this._getLeaders();
+	}
+
+	/**
+	 * The Leaders rows of the Orchestration panel. Served until an orchestration commit drops them; a session that never
+	 * built its worker runtime has no delegation, and reading the rows never builds it.
+	 */
+	listLeaderRows(): LeaderRow[] {
+		if (!this._leaders) return [];
+		this._leaderRows ??= leaderRows(this._leaders.snapshot(), (alias) => {
+			const bot = this.getBotTeamStore().getBot(alias);
+			return bot?.displayName ?? displayNameFor(alias);
+		});
+		return [...this._leaderRows];
+	}
+
+	private _getLeaders(): LeaderController {
+		if (this._leaders) return this._leaders;
+		const store = () => this.getBotTeamStore();
+		const timers = this.deps.getTimers();
+		this._leaders = new LeaderController({
+			runtime: () => this._getWorkerLifecycle().ledger.runtime,
+			snapshot: () => this._getWorkerLifecycle().getTaskRuntimeSnapshot(),
+			subscribe: (listener) => this.subscribeOrchestrationStore(listener),
+			bots: () =>
+				store()
+					.listBots({ includeRetired: true })
+					.map((bot) => ({
+						agentId: bot.agentId,
+						displayName: bot.displayName,
+						leader: bot.leader === true,
+						canWrite: bot.canWrite === true,
+						retired: bot.retired === true,
+						remote: bot.remote === true,
+						...(bot.createdBy ? { createdBy: bot.createdBy } : {}),
+						...(bot.description ? { description: bot.description } : {}),
+					})),
+			createGoalLeader: (request) => this.createBotFor({ kind: "root" }, request, { goalLeader: true }),
+			directBotOf: (runtime) => {
+				const context = this.botBindings.generationContext(runtime);
+				return context.teamId === undefined && store().getBot(context.agentId) ? context.agentId : undefined;
+			},
+			runtimesOf: (alias) => this.botBindings.runtimes(alias),
+			workers: () => this.listWorkerAgents(),
+			send: async (alias, text) => {
+				await this.sendOperatorMessageToBot(alias, text, { fromRoot: true });
+			},
+			stop: (alias) => void this.stopPersistentBot(alias),
+			retire: (alias) => this.retirePersistentBot(alias),
+			acknowledge: (notificationIds) => this._getWorkerLifecycle().markNotificationsDelivered(notificationIds),
+			deliver: (input) => this.deps.deliverParentInput(input),
+			origin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
+			hasDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
+			maxDepth: () => this.deps.getSettingsManager().getLeaderSettings().maxDepth,
+			now: () => timers.port("orchestration").now(),
+			timers: timers.port("leaders"),
+		});
+		this._leaders.subscribe(() => {
+			this._leaderRows = undefined;
+		});
+		return this._leaders;
+	}
+
 	retirePersistentBot(agentId: string): { retired: boolean; detail: string } {
 		try {
 			agentId = normalizeBotOrTeamId(agentId, "agentId");
+			// Retiring a leader mid-goal would orphan its goal and its bots: the goal is cancelled first.
+			if (this._hasWorkerState() && !this.deps.isChildSession() && this.getLeaders().leadsOpenDelegation(agentId))
+				throw new Error(`Bot ${agentId} leads an open goal; cancel it first (/lead cancel ${agentId}).`);
 			this.assertBotDispatchIdle(agentId);
 			const runtimes = new Set(this.botBindings.runtimes(agentId));
 			const workers = this._hasWorkerState()
@@ -2669,15 +2845,32 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		try {
 			agentId = normalizeBotOrTeamId(agentId, "agentId");
 			const runtimes = new Set(this.botBindings.runtimes(agentId));
-			const results = this.listWorkerAgents()
+			// Stopping a leader stops the bots it owns: their work was its work.
+			const ownedRuntimes = new Set(
+				this.getBotTeamStore()
+					.listBots()
+					.filter((bot) => bot.createdBy === agentId)
+					.flatMap((bot) => this.botBindings.runtimes(bot.agentId)),
+			);
+			const agents = this.listWorkerAgents();
+			const results = agents
 				.filter((agent) => runtimes.has(agent.agentId))
 				.map((agent) => this.interruptWorkerAgent(agent.agentId, undefined, { force: false }));
+			const owned = agents
+				.filter(
+					(agent) => ownedRuntimes.has(agent.agentId) && agent.status !== "retired" && agent.activity !== "idle",
+				)
+				.map((agent) => this.interruptWorkerAgent(agent.agentId, undefined, { force: false }))
+				.filter((result) => result.interrupted).length;
 			const res = results.find((result) => result.interrupted) ?? results[0] ?? { interrupted: false };
+			const ownedText = owned > 0 ? ` and ${owned} of its bots` : "";
 			return {
-				stopped: res.interrupted,
+				stopped: res.interrupted || owned > 0,
 				detail: res.interrupted
-					? `Stopped ${agentId} (${res.mode ?? "halt"}).`
-					: (res.reason ?? `${agentId} is not running.`),
+					? `Stopped ${agentId}${ownedText} (${res.mode ?? "halt"}).`
+					: owned > 0
+						? `Stopped ${owned} of ${agentId}'s bots; ${agentId} itself was not running.`
+						: (res.reason ?? `${agentId} is not running.`),
 			};
 		} catch (error) {
 			return {
@@ -2884,6 +3077,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			teamIncarnationId?: string;
 			/** The orchestrator asked: the bot's answer is for the orchestrator, not an owner-direct chat. */
 			fromRoot?: boolean;
+			/**
+			 * The owner sent it from the orchestrator's own conversation: a joined machine's answer comes into that
+			 * conversation, since nobody has the machine's chat open to see it arrive.
+			 */
+			answerInSession?: boolean;
 		},
 	): Promise<BotOperatorMessageDispatchResult> {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
@@ -2939,7 +3137,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private async dispatchOperatorMessageToBot(
 		context: BotRuntimeContext,
 		message: string,
-		options: { mode?: "follow_up" | "queue" | "start"; fromRoot?: boolean } | undefined,
+		options: { mode?: "follow_up" | "queue" | "start"; fromRoot?: boolean; answerInSession?: boolean } | undefined,
 		assertCurrentBranch: () => void,
 	): Promise<BotOperatorMessageDispatchResult> {
 		const { agentId: normId, teamId, teamIncarnationId } = context;
@@ -2952,7 +3150,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		}
 		if (store.getBot(normId)?.remote) {
 			// A machine joined over the link answers on its own; nothing here starts a worker for it.
-			const messageId = this.getRemoteHub().send(normId, message);
+			const hub = this.getRemoteHub();
+			// The orchestrator's turn is a lane, so its end notifies the asker; the owner's own words stay chat.
+			const messageId =
+				options?.fromRoot || options?.answerInSession ? await hub.ask(normId, message) : hub.send(normId, message);
 			return { agentId: normId, mode: "queued", messageId, modelRef: "link/remote" };
 		}
 		const runtime = this.botBindings.runtime(normId, teamId, teamIncarnationId);

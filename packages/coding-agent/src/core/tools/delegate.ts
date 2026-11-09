@@ -2048,6 +2048,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 			...(isAsyncWiring ? [ASYNC_DELEGATE_DESCRIPTION_SUFFIX] : []),
 		].join(" "),
 		promptSnippet: "Persistent leaf workers",
+		neverDefer: true,
 		parameters: createDelegateSchema(availableActions),
 		// The flat wire schema exposes profile_create's `task` (3,500-char cap) beside start's
 		// `instructions` (16k cap). `sanitizeExactActionInput` already folds a start that only

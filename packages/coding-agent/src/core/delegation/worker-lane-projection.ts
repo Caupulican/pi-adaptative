@@ -139,7 +139,7 @@ export function projectWorkerAttemptLaneRecord(
 		...(attempt.dispatch.worktreeLaneKey ? { worktreeLaneKey: attempt.dispatch.worktreeLaneKey } : {}),
 		...(attempt.dispatch.modelRouteSource ? { routeSource: attempt.dispatch.modelRouteSource } : {}),
 		...(attempt.dispatch.modelPinSource ? { routePinSource: attempt.dispatch.modelPinSource } : {}),
-		...(outcome ? { outcomeText: describeNextAction(outcome) } : {}),
+		...(outcome ? { outcomeText: describeNextAction(outcome, task.escalations) } : {}),
 	};
 }
 

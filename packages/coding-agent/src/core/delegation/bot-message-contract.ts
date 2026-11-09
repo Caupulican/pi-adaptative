@@ -29,6 +29,8 @@ export interface BotMessageDirectory {
 	createBot?(request: BotCreationRequest): CreatedBotView;
 	/** Ids of the leaders, for the answer a bot gets when it may not create one. */
 	leaderIds(): readonly string[];
+	/** The live leader that created the sender, when one did: the one it asks first. */
+	ownLeader(): string | undefined;
 }
 
 /** No lifecycle controls or caller-selected sender identities cross this port. */
@@ -45,4 +47,5 @@ export interface BotMessageBroker {
 	/** Present only for a leader. */
 	create?(request: BotCreationRequest): CreatedBotView;
 	leaderIds(): readonly string[];
+	ownLeader(): string | undefined;
 }

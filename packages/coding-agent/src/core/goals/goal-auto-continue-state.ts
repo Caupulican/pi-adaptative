@@ -53,6 +53,7 @@ const DECIDED_BY_GOAL: Readonly<Record<GoalContinuationReasonCode, GoalAutoConti
 	goal_usage_limited: "usage_limit",
 	goal_blocked: "owner_answer_needed",
 	worker_in_flight: "waiting_for_worker",
+	plan_in_flight: "waiting_for_worker",
 	tool_task_in_flight: "waiting_for_background_task",
 	goal_active: undefined,
 	goal_completion_required: undefined,
