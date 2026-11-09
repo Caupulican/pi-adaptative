@@ -1,8 +1,53 @@
 import { Type } from "typebox";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { BOT_TOOL_NAME, type BotToolPort, botCreationRequestFrom } from "../delegation/bot-creation.ts";
-import { LEAD_LIMITS, leadRequestFrom } from "../delegation/leader-delegation.ts";
+import { LEAD_FIELDS, LEAD_LIMITS, leadRequestFrom } from "../delegation/leader-delegation.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+
+/** The `lead` fields of the bot tool; the bot_message tool's `lead` action takes the same fields. */
+export const LEAD_PROPERTIES = {
+	goal: Type.Optional(
+		Type.String({ minLength: 1, maxLength: LEAD_LIMITS.goalChars, description: "For lead: the goal, whole." }),
+	),
+	requirements: Type.Optional(
+		Type.Array(
+			Type.Object(
+				{
+					id: Type.String({ minLength: 1, maxLength: LEAD_LIMITS.requirementIdChars }),
+					text: Type.String({ minLength: 1, maxLength: LEAD_LIMITS.requirementTextChars }),
+				},
+				{ additionalProperties: false },
+			),
+			{ maxItems: LEAD_LIMITS.requirements, description: "For lead: what must be true when the goal is done." },
+		),
+	),
+	constraints: Type.Optional(
+		Type.Array(Type.String({ minLength: 1, maxLength: LEAD_LIMITS.constraintChars }), {
+			maxItems: LEAD_LIMITS.constraints,
+			description: "For lead: rules the leader and its bots keep.",
+		}),
+	),
+	files: Type.Optional(
+		Type.Array(Type.String({ minLength: 1, maxLength: LEAD_LIMITS.fileChars }), {
+			maxItems: LEAD_LIMITS.files,
+			description:
+				"For lead: project-relative paths the goal may change; leave it out for a read-only goal. Only a standing leader that can write changes files.",
+		}),
+	),
+	budgetUsd: Type.Optional(
+		Type.Number({ exclusiveMinimum: 0, description: "For lead: metered spending bound for the whole goal." }),
+	),
+	minutes: Type.Optional(
+		Type.Number({ exclusiveMinimum: 0, description: "For lead: the goal is stopped after this many minutes." }),
+	),
+	context: Type.Optional(
+		Type.String({
+			minLength: 1,
+			maxLength: LEAD_LIMITS.contextChars,
+			description: "For lead: background the leader needs.",
+		}),
+	),
+};
 
 const schema = Type.Object(
 	{
@@ -25,52 +70,11 @@ const schema = Type.Object(
 		thinkingLevel: Type.Optional(Type.String({ minLength: 1, maxLength: 32 })),
 		canWrite: Type.Optional(Type.Boolean({ description: "Let the bot edit files; read-only when omitted." })),
 		message: Type.Optional(Type.String({ minLength: 1, description: "For ask: what to tell the bot." })),
-		goal: Type.Optional(
-			Type.String({ minLength: 1, maxLength: LEAD_LIMITS.goalChars, description: "For lead: the goal, whole." }),
-		),
-		requirements: Type.Optional(
-			Type.Array(
-				Type.Object(
-					{
-						id: Type.String({ minLength: 1, maxLength: LEAD_LIMITS.requirementIdChars }),
-						text: Type.String({ minLength: 1, maxLength: LEAD_LIMITS.requirementTextChars }),
-					},
-					{ additionalProperties: false },
-				),
-				{ maxItems: LEAD_LIMITS.requirements, description: "For lead: what must be true when the goal is done." },
-			),
-		),
-		constraints: Type.Optional(
-			Type.Array(Type.String({ minLength: 1, maxLength: LEAD_LIMITS.constraintChars }), {
-				maxItems: LEAD_LIMITS.constraints,
-				description: "For lead: rules the leader and its bots keep.",
-			}),
-		),
-		files: Type.Optional(
-			Type.Array(Type.String({ minLength: 1, maxLength: LEAD_LIMITS.fileChars }), {
-				maxItems: LEAD_LIMITS.files,
-				description:
-					"For lead: project-relative paths the goal may change; leave it out for a read-only goal. Only a standing leader that can write changes files.",
-			}),
-		),
-		budgetUsd: Type.Optional(
-			Type.Number({ exclusiveMinimum: 0, description: "For lead: metered spending bound for the whole goal." }),
-		),
-		minutes: Type.Optional(
-			Type.Number({ exclusiveMinimum: 0, description: "For lead: the goal is stopped after this many minutes." }),
-		),
-		context: Type.Optional(
-			Type.String({
-				minLength: 1,
-				maxLength: LEAD_LIMITS.contextChars,
-				description: "For lead: background the leader needs.",
-			}),
-		),
+		...LEAD_PROPERTIES,
 	},
 	{ additionalProperties: false },
 );
 
-const LEAD_FIELDS = ["goal", "requirements", "constraints", "files", "budgetUsd", "minutes", "context"] as const;
 const CREATE_FIELDS = ["soul", "description", "model", "thinkingLevel", "canWrite"] as const;
 
 /** The orchestrator's tool for persistent bots on the fly, and for handing a whole goal to a leader. */

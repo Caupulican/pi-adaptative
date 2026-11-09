@@ -14,7 +14,7 @@ import { type LeaderCharter, readDelegations } from "./leader-delegation-ledger.
 /** The delegation facts this module reads: a delegation record satisfies it, and so does one that names a parent. */
 export interface DelegationSpendRecord {
 	readonly objectiveId: string;
-	readonly charter: Pick<LeaderCharter, "envelope"> & { readonly parentObjectiveId?: string };
+	readonly charter: Pick<LeaderCharter, "envelope" | "parentObjectiveId">;
 }
 
 /** A walk visits its start record and at most `LEADER_MAX_DEPTH_CEILING` parents: no chain can be deeper than that. */
@@ -69,6 +69,19 @@ export function attemptDelegationObjectiveId(
 ): string | undefined {
 	const objectiveId = snapshot.tasks[attempt.taskId]?.task.objectiveId;
 	return objectiveId !== undefined && isLeaderDelegationObjectiveId(objectiveId) ? objectiveId : undefined;
+}
+
+/** The money a delegation's budget has left: its `budgetUsd` less the metered spend of its subtree; undefined without a budget. */
+export function delegationBudgetLeftUsd(
+	snapshot: TaskRuntimeProjection,
+	records: readonly DelegationSpendRecord[],
+	record: DelegationSpendRecord,
+	isMetered: (attempt: AttemptRuntimeState) => boolean,
+): number | undefined {
+	const budget = record.charter.envelope.budgetUsd;
+	return budget === undefined
+		? undefined
+		: Math.max(0, budget - delegationSpentUsd(snapshot, records, record.objectiveId, isMetered));
 }
 
 /** The cost an attempt recorded: its usage accounting, else its result's usage. A figure that is not a positive number counts nothing. */

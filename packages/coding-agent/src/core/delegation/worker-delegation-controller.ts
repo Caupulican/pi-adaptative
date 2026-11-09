@@ -154,6 +154,7 @@ import {
 	releaseFailureCause,
 } from "../util/resource-release.ts";
 import { BOT_MESSAGE_TOOL_NAME, type BotMessageDirectory } from "./bot-message-contract.ts";
+import { createBotMessageBroker } from "./bot-message-directory.ts";
 import { importRecordedParentWrites } from "./foreground-parent-writes.ts";
 import { unmetGoalDependencyReason } from "./goal-dependency-gate.ts";
 import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
@@ -5476,54 +5477,11 @@ export class WorkerDelegationController {
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === BOT_MESSAGE_TOOL_NAME)) {
 			const directory = this.deps.createBotMessageDirectory?.(agentId, durableHandle.attemptId);
 			if (!directory) throw new Error("Bot message directory is unavailable.");
-			adapterSources.botMessages = {
-				list: (teamId) => directory.list(teamId),
-				send: (target, message, expectReply, invocationId, teamId) => {
-					const runtime = directory.resolve(target, teamId);
-					const outcome = this.agentControl.messageWorkerPeer(runtime, message, {
-						senderAgentId: agentId,
-						expectReply,
-						threadId: directory.threadId(teamId),
-						idempotencyKey: conversation.toolInvocationIdentity(invocationId, BOT_MESSAGE_TOOL_NAME),
-					});
-					if (!outcome.messageId)
-						throw new Error(`Bot message was not accepted: ${outcome.skipReason ?? "unknown reason"}`);
-					directory.recordSent(outcome.messageId, target, message);
-					return outcome;
-				},
-				reply: (messageId, message, teamId) => {
-					directory.assertCurrent();
-					return this.agentControl.replyToWorkerAgentMessage(agentId, message, messageId, (request) =>
-						directory.authorizeReply(request.threadId, request.senderAgentId, teamId),
-					);
-				},
-				leaderIds: () => directory.leaderIds(),
-				ownLeader: () => directory.ownLeader(),
-				...(directory.createBot
-					? {
-							create: (request) => {
-								directory.assertCurrent();
-								return directory.createBot!(request);
-							},
-						}
-					: {}),
-				...(directory.askRoot
-					? {
-							askRoot: (question) => {
-								directory.assertCurrent();
-								return directory.askRoot!(question);
-							},
-						}
-					: {}),
-				...(directory.startOwnedBot
-					? {
-							startOwnedBot: (agentId, message, invocationId) => {
-								directory.assertCurrent();
-								return directory.startOwnedBot!(agentId, message, invocationId);
-							},
-						}
-					: {}),
-			};
+			adapterSources.botMessages = createBotMessageBroker(directory, {
+				senderAgentId: agentId,
+				control: this.agentControl,
+				idempotencyKey: (invocationId) => conversation.toolInvocationIdentity(invocationId, BOT_MESSAGE_TOOL_NAME),
+			});
 		}
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === SYSTEM_ONE_TOOL_NAME)) {
 			const credentialBoundary = this.deps.getCredentialExposureBoundary?.();

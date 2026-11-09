@@ -97,12 +97,26 @@ function externalHolds(state: TaskRuntimeProjection, deps: RetentionPassDeps): E
 	if (currentGoal !== undefined) hold(`goal:${currentGoal}`, "current_goal");
 	const attempts = new Set<string>();
 	let delegatedPending: ((objectiveId: string) => boolean) | undefined;
-	for (const record of readDelegations(state)) {
+	const delegations = readDelegations(state);
+	const openObjectives = new Set(delegations.filter(isOpenDelegation).map((record) => record.objectiveId));
+	const openFollowed = new Set(
+		delegations
+			.filter(isOpenDelegation)
+			.map((record) => record.charter.parentObjectiveId)
+			.filter((parentId): parentId is string => parentId !== undefined),
+	);
+	for (const record of delegations) {
 		if (!isOpenDelegation(record)) {
-			// Only an outcome the parent has not received holds the objective: a closed delegation with no outcome has nothing to deliver.
-			if (record.outcome !== undefined && !deps.hasDelivered(`leader-outcome:${record.objectiveId}`)) {
-				hold(record.objectiveId, "outcome_undelivered");
+			// A nested goal waits while the goal that handed it on is open.
+			if (record.charter.parentObjectiveId !== undefined && openObjectives.has(record.charter.parentObjectiveId)) {
+				hold(record.objectiveId, "delegation_open_parent");
 			}
+			// Only an outcome that has not reached its recipient holds the objective: the parent leader's for a nested goal (once
+			// it was delivered there, or the parent has since closed and the root heard it), else the orchestrator's. A closed
+			// delegation with no outcome has nothing to deliver.
+			const delivered = record.outcomeDeliveredToParent || deps.hasDelivered(`leader-outcome:${record.objectiveId}`);
+			if (record.outcome !== undefined && !delivered) hold(record.objectiveId, "outcome_undelivered");
+			if (openFollowed.has(record.objectiveId)) hold(record.objectiveId, "follower_open");
 			delegatedPending ??= delegatedMessagesPending(deps.agentDir, deps.sessionId, state, deps.warn);
 			if (delegatedPending(record.objectiveId)) hold(record.objectiveId, "delegated_message_pending");
 		} else if (!record.filedByObjective && record.dispatchedAt !== undefined) {

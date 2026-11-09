@@ -59,7 +59,7 @@ import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delega
 import type { BotMessageDirectory, BotOwnedStartOutcome } from "./delegation/bot-message-contract.ts";
 import { createBotMessageDirectory } from "./delegation/bot-message-directory.ts";
 import { displayNameFor, suggestBotId } from "./delegation/bot-naming.ts";
-import { BotRuntimeBindings, type BotRuntimeContext } from "./delegation/bot-runtime-bindings.ts";
+import { BotRuntimeBindings, type BotRuntimeContext, keyedBotRuntimeId } from "./delegation/bot-runtime-bindings.ts";
 import { DAEMON_STALE_MS, isOlderDaemonBuild, OWN_DAEMON_BUILD } from "./delegation/bot-team-routine-helpers.ts";
 import {
 	createForegroundTranscriptWrites,
@@ -68,6 +68,7 @@ import {
 	importRecordedParentWrites,
 } from "./delegation/foreground-parent-writes.ts";
 import { LeaderController } from "./delegation/leader-controller.ts";
+import { leaderBotViewOf } from "./delegation/leader-delegation.ts";
 import { type DelegationRecord, readDelegations } from "./delegation/leader-delegation-ledger.ts";
 import { type LeaderRow, leaderRows } from "./delegation/leader-view.ts";
 import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
@@ -252,6 +253,25 @@ function awayChannelsKey(settings: Parameters<typeof awayChannels>[0]): string {
 	return awayChannels(settings)
 		.map((channel) => `${channel.name}:${channel.cwd}`)
 		.join(",");
+}
+
+/** How the orchestrator's or a leader's words reach a bot: the kind of turn, who asked, and the delegation it is filed under. */
+interface BotOperatorMessageOptions {
+	mode?: "follow_up" | "queue" | "start";
+	/** The orchestrator asked: the bot's answer is for the orchestrator, not an owner-direct chat. */
+	fromRoot?: boolean;
+	/**
+	 * The owner sent it from the orchestrator's own conversation: a joined machine's answer comes into that
+	 * conversation, since nobody has the machine's chat open to see it arrive.
+	 */
+	answerInSession?: boolean;
+	/**
+	 * The orchestrator's words are for this delegation to a leader (its brief, update, resume or answer). Set only by the
+	 * leader controller and the orchestrator's `bot ask`; an owner's chat leaves it out, so that turn is session work.
+	 */
+	delegationObjectiveId?: string;
+	/** The replay identity of this send: a repeated send with the same key is one message (the Outcome of a nested goal). */
+	idempotencyKey?: string;
 }
 
 export class BackgroundLaneController implements WorkerAgentControlPort {
@@ -2269,6 +2289,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				listWorkerAgents: () => this.listWorkerAgents(),
 				createBotFor: (creator, request) => this.createBotFor(creator, request),
 				getLeaders: () => this.getLeaders(),
+				leaderDelegations: () => this.leaderDelegations(),
 				startOwnedBotAsChild: (leaderAgentId, leaderAlias, alias, message, invocationId) =>
 					this.startOwnedBotAsChild(leaderAgentId, leaderAlias, alias, message, invocationId),
 			},
@@ -2499,16 +2520,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/**
 	 * Creates a bot on the authority of the orchestrator or of a leader (the owner's `/bot new` is the third way). A leader
-	 * cannot make a leader, grants write access only when it can write itself, and has a bound on the bots it keeps. Only
-	 * the orchestrator's goal leader (`bot lead` without agentId) is created a leader, for its one goal.
+	 * cannot make a standing leader, grants write access only when it can write itself, and has a bound on the bots it keeps.
+	 * A goal leader (`bot lead` without agentId, appointed by the orchestrator or by a leader) is created a leader, for its one goal.
 	 */
 	createBotFor(
 		creator: { readonly kind: "root" } | { readonly kind: "leader"; readonly agentId: string },
 		request: BotCreationRequest,
 		options?: { readonly goalLeader?: boolean },
 	): CreatedBotView {
-		if (options?.goalLeader === true && creator.kind !== "root")
-			throw new Error("Only the orchestrator appoints a goal leader.");
 		const store = this.getBotTeamStore();
 		store.reload();
 		const agentId = normalizeBotOrTeamId(
@@ -2740,13 +2759,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/**
-	 * A leader's fleet subtree is keyed on its runtime's agent id, the `parentAgentId` its children are admitted under; a
-	 * leader is a top-level worker, so its share sits in the root subtree (`""`).
+	 * A leader's fleet subtree is keyed on its runtime's agent id, the `parentAgentId` its children are admitted under. A
+	 * standing or orchestrator-appointed leader is top-level, so its share sits in the root subtree (`""`); a leader a leader
+	 * handed a goal to sits under that leader's share.
 	 */
-	private openLeaderSubtree(alias: string): void {
+	private openLeaderSubtree(alias: string, parentAlias?: string): void {
 		this._getWorkerController()
 			.getFleet()
-			.openShare({ subtreeId: this.botBindings.runtime(alias), parentSubtreeId: "", weight: 1 });
+			.openShare({
+				subtreeId: this.botBindings.runtime(alias),
+				parentSubtreeId: parentAlias === undefined ? "" : this.botBindings.runtime(parentAlias),
+				weight: 1,
+			});
 	}
 
 	/**
@@ -2830,28 +2854,21 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			runtime: () => this._getWorkerLifecycle().ledger.runtime,
 			snapshot: () => this._getWorkerLifecycle().getTaskRuntimeSnapshot(),
 			subscribe: (listener) => this.subscribeOrchestrationStore(listener),
-			bots: () =>
-				store()
-					.listBots({ includeRetired: true })
-					.map((bot) => ({
-						agentId: bot.agentId,
-						displayName: bot.displayName,
-						leader: bot.leader === true,
-						canWrite: bot.canWrite === true,
-						retired: bot.retired === true,
-						remote: bot.remote === true,
-						...(bot.createdBy ? { createdBy: bot.createdBy } : {}),
-						...(bot.description ? { description: bot.description } : {}),
-					})),
-			createGoalLeader: (request) => this.createBotFor({ kind: "root" }, request, { goalLeader: true }),
+			bots: () => store().listBots({ includeRetired: true }).map(leaderBotViewOf),
+			createGoalLeader: (request, appointer) =>
+				this.createBotFor(appointer ?? { kind: "root" }, request, { goalLeader: true }),
 			directBotOf: (runtime) => {
 				const context = this.botBindings.generationContext(runtime);
 				return context.teamId === undefined && store().getBot(context.agentId) ? context.agentId : undefined;
 			},
 			runtimesOf: (alias) => this.botBindings.runtimes(alias),
 			workers: () => this.listWorkerAgents(),
-			send: async (alias, text, delegationObjectiveId) => {
-				await this.sendOperatorMessageToBot(alias, text, { fromRoot: true, delegationObjectiveId });
+			send: async (alias, text, delegationObjectiveId, options) => {
+				await this.sendOperatorMessageToBot(alias, text, {
+					fromRoot: true,
+					delegationObjectiveId,
+					idempotencyKey: options?.idempotencyKey,
+				});
 			},
 			stop: (alias) => void this.stopPersistentBot(alias),
 			retire: (alias) => this.retirePersistentBot(alias),
@@ -2863,7 +2880,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			subscriptionExhausted: (aliases) => this.subscriptionExhaustedFor(aliases),
 			isMeteredAttempt: (attempt) => this._workers?.attemptIsMetered(attempt) ?? true,
 			hasPendingDelegatedMessage: (objectiveId) => this.hasPendingDelegatedMessage(objectiveId),
-			openSubtree: (alias) => this.openLeaderSubtree(alias),
+			openSubtree: (alias, parentAlias) => this.openLeaderSubtree(alias, parentAlias),
 			restartLeaderRuntimeIfLeaf: (alias) => this.restartLeaderRuntimeIfLeaf(alias),
 			closeSubtree: (alias, reasonCode) => this.closeLeaderSubtree(alias, reasonCode),
 			reconcileDelegatedMessages: (objectiveId) => this.reconcileDelegatedMessages(objectiveId),
@@ -3153,23 +3170,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	async sendOperatorMessageToBot(
 		agentId: string,
 		message: string,
-		options?: {
-			mode?: "follow_up" | "queue" | "start";
-			teamId?: string;
-			teamIncarnationId?: string;
-			/** The orchestrator asked: the bot's answer is for the orchestrator, not an owner-direct chat. */
-			fromRoot?: boolean;
-			/**
-			 * The owner sent it from the orchestrator's own conversation: a joined machine's answer comes into that
-			 * conversation, since nobody has the machine's chat open to see it arrive.
-			 */
-			answerInSession?: boolean;
-			/**
-			 * The orchestrator's words are for this delegation to a leader (its brief, update, resume or answer). Set only by the
-			 * leader controller and the orchestrator's `bot ask`; an owner's chat leaves it out, so that turn is session work.
-			 */
-			delegationObjectiveId?: string;
-		},
+		options?: BotOperatorMessageOptions & { teamId?: string; teamIncarnationId?: string },
 	): Promise<BotOperatorMessageDispatchResult> {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
 		const manager = this.deps.getSessionManager();
@@ -3224,14 +3225,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private async dispatchOperatorMessageToBot(
 		context: BotRuntimeContext,
 		message: string,
-		options:
-			| {
-					mode?: "follow_up" | "queue" | "start";
-					fromRoot?: boolean;
-					answerInSession?: boolean;
-					delegationObjectiveId?: string;
-			  }
-			| undefined,
+		options: BotOperatorMessageOptions | undefined,
 		assertCurrentBranch: () => void,
 	): Promise<BotOperatorMessageDispatchResult> {
 		const { agentId: normId, teamId, teamIncarnationId } = context;
@@ -3269,6 +3263,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const messageOptions = {
 			...(teamId ? { threadId: `team:${teamId}:${teamIncarnationId}` } : {}),
 			...(options?.delegationObjectiveId ? { delegationObjectiveId: options.delegationObjectiveId } : {}),
+			...(options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
 		};
 
 		if (existingAgent && (requestedMode === "follow_up" || requestedMode === "queue")) {
@@ -3311,7 +3306,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			),
 		);
 
-		const preferredAgentId = `bot-${randomUUID()}`;
+		const preferredAgentId =
+			options?.idempotencyKey === undefined
+				? `bot-${randomUUID()}`
+				: keyedBotRuntimeId(normId, options.idempotencyKey);
 		// Publish the context before execution: recovery never has to guess a group's origin from its name.
 		assertCurrentBranch();
 		this.botBindings.bind(normId, preferredAgentId, teamId, teamIncarnationId);
@@ -3335,6 +3333,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			preferredAgentId,
 			// A leader's brief to a bot that has no live worker starts it under the delegation, not the foreground goal.
 			...(options?.delegationObjectiveId ? { delegationObjectiveId: options.delegationObjectiveId } : {}),
+			...(options?.idempotencyKey ? { messageReplayKey: options.idempotencyKey } : {}),
 			// A standing leader's runtime is granted the children it may start (`admitNested`); any other bot is a leaf.
 			...(bot.leader === true ? { delegationLimits: this.leaderDelegationLimits() } : {}),
 			...(activeIds.length > 0

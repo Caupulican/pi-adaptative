@@ -11,6 +11,11 @@ export function isBotId(id: string): boolean {
 	return ID.test(id);
 }
 
+/** The runtime a keyed send to a bot starts: named by its replay key, so a repeated send names the same runtime. */
+export function keyedBotRuntimeId(alias: string, replayKey: string): string {
+	return `bot-${createHash("sha256").update(`operator-message\0${alias}\0${replayKey}`).digest("hex").slice(0, 32)}`;
+}
+
 export interface BotRuntimeContext {
 	agentId: string;
 	teamId?: string;

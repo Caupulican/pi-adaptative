@@ -35,6 +35,7 @@
 - A plan step pinned to a machine runs here when no remote backend is registered; a failed cancel of one plan lane no longer leaves the plan's other lanes live, and a plan cancel reaches successors and queued or suspended local lanes.
 - `workerDelegation.modelPins.leader`: pins the model of every leader runtime (standing, goal and nested leaders) with the same layer precedence as `default`; workers a leader starts keep the role and default pins. An older build reports the whole pin policy invalid when it reads the key.
 - Placing a job on a linked machine is wired into the fleet: a linked session offers its linked machines to the scheduler as a backend, writes the lane and the placed-job record crash-safely (a replay reuses the durable lane's attempt, never a second one), and clears the backend when the link goes. The placed-job record gains an `attemptId` (additive).
+- Nested leaders: with `leaders.maxDepth` 2 a running leader whose delegation allows `delegate` gets a `lead` action on `bot_message` (and can message the sub-leaders it appointed); the child's envelope narrows from its parent's record (never wider, budget capped at the parent's remainder), its outcome and questions go to the parent leader, a parent settles only when every child is closed and delivered, and a parent's close or cancel closes its children first. With the default depth of 1 nothing changes. Closed work under an open parent delegation, or with an open child, is held from the idle release.
 
 ### Changed
 

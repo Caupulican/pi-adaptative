@@ -30,9 +30,11 @@ Bots are created on the fly, for whatever purpose you have:
   `/bot lead <id>` and `/bot unlead <id>` (they take effect from the bot's next worker start; `/bot list` marks a leader).
 
 Every other bot cannot create bots. It asks a leader (leaders are marked in its `bot_message` peer list) or its parent in its
-report. Bounds that always hold: a leader cannot make a leader, grants `canWrite` only when it can write itself, and keeps at
-most 12 bots it created; a bot name that exists, retired or not, is refused. The store records who created each bot
-(`owner`, `root` or the leader's id). A bot a leader made is told to ask that leader, by name, for any bot it needs.
+report. Bounds that always hold: a leader cannot make a standing leader, grants `canWrite` only when it can write itself, and keeps
+at most 12 bots it created; a bot name that exists, retired or not, is refused. The store records who created each bot
+(`owner`, `root` or the leader's id). A bot a leader made is told to ask that leader, by name, for any bot it needs. With
+`leaders.maxDepth` set to 2, a leader that works a goal may hand a part of it to a leader of its own (`bot_message` `action lead`);
+that part's outcome goes back to the leader that handed it on, and the goal ends only after its parts have.
 
 ## Leaders lead goals
 

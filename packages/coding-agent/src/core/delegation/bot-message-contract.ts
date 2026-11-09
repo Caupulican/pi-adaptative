@@ -1,4 +1,5 @@
 import type { BotCreationRequest, CreatedBotView } from "./bot-creation.ts";
+import type { LeadRequest, LeadResult } from "./leader-delegation.ts";
 import type { WorkerAgentControlPort, WorkerAgentReplyResult } from "./worker-agent-control.ts";
 
 export const BOT_MESSAGE_TOOL_NAME = "bot_message";
@@ -44,6 +45,10 @@ export interface BotMessageDirectory {
 	askRoot?(question: string): Promise<BotAskRootResult>;
 	/** Present only for a leader: starts one of its own bots with no live runtime as the leader's child. */
 	startOwnedBot?(agentId: string, message: string, invocationId: string): Promise<BotOwnedStartOutcome>;
+	/** Present only for a leader whose goal may hand a part on: the leader handed a nested goal to a leader of its own. */
+	lead?(request: LeadRequest): LeadResult;
+	/** Present only for a leader: sends to a leader it handed a goal to, as an update to that goal. False when that leader is not one of its goals. */
+	sendToSubLeader?(agentId: string, message: string): Promise<boolean>;
 	/** Ids of the leaders, for the answer a bot gets when it may not create one. */
 	leaderIds(): readonly string[];
 	/** The live leader that created the sender, when one did: the one it asks first. */
@@ -67,6 +72,10 @@ export interface BotMessageBroker {
 	askRoot?(question: string): Promise<BotAskRootResult>;
 	/** Present only for a leader: starts one of its own bots with no live runtime as the leader's child. */
 	startOwnedBot?(agentId: string, message: string, invocationId: string): Promise<BotOwnedStartOutcome>;
+	/** Present only for a leader whose goal may hand a part on: the leader handed a nested goal to a leader of its own. */
+	lead?(request: LeadRequest): LeadResult;
+	/** Present only for a leader: sends to a leader it handed a goal to, as an update to that goal. False when that leader is not one of its goals. */
+	sendToSubLeader?(agentId: string, message: string): Promise<boolean>;
 	leaderIds(): readonly string[];
 	ownLeader(): string | undefined;
 }

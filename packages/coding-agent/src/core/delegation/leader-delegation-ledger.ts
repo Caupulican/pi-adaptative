@@ -8,13 +8,17 @@
 import { randomUUID } from "node:crypto";
 import type { JsonObject } from "../../kernel/utils/json-types.ts";
 import { MAX_ORCHESTRATION_DESCRIPTION_LENGTH, type ObjectiveStatus } from "../orchestration/contracts.ts";
-import { LEADER_DELEGATION_OBJECTIVE_PREFIX } from "../orchestration/delegation-ledger.ts";
-import type { DurableTaskRuntime, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import {
+	isLeaderDelegationObjectiveId,
+	LEADER_DELEGATION_OBJECTIVE_PREFIX,
+} from "../orchestration/delegation-ledger.ts";
+import type { AttemptRuntimeState, DurableTaskRuntime, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import {
 	type DelegationHop,
 	LEADER_CAPABILITIES,
+	LEADER_MAX_DEPTH_CEILING,
 	type LeaderCapability,
 	type LeaderEnvelope,
 	type LeadRequest,
@@ -29,6 +33,8 @@ const DISPATCH_EVIDENCE = "delegation-dispatch";
 /** The dispatch mark of a delegation whose turns are filed under its objective (absent on one an earlier build dispatched). */
 const DISPATCH_FILING_BY_OBJECTIVE = "objective";
 const OUTCOME_EVIDENCE = "delegation-outcome";
+/** Written on a nested delegation once its Outcome reached the parent leader; a restart reads it instead of resending. */
+const DELIVERED_TO_PARENT_EVIDENCE = "delegation-outcome-delivered";
 const UPDATE_EVIDENCE_PREFIX = "delegation-update-";
 /** The most updates one delegation keeps; a leader needing more is better given a new goal. */
 export const MAX_DELEGATION_UPDATES = 32;
@@ -48,12 +54,14 @@ export type DelegationCloseReason = (typeof DELEGATION_CLOSE_REASONS)[number];
 export interface LeaderCharter {
 	readonly v: 1;
 	readonly leader: string;
-	/** `owner`: a standing leader the owner made; `root`: a goal leader the orchestrator appointed for this goal. */
+	/** `owner`: a standing leader the owner made; `root`: a goal leader appointed for this goal (by the orchestrator or a leader). */
 	readonly appointedBy: "owner" | "root";
 	readonly lead: LeadRequest;
 	readonly envelope: LeaderEnvelope;
 	readonly clipped: readonly string[];
 	readonly createdAt: string;
+	/** The delegation whose leader handed this goal on; absent for a goal the orchestrator delegated. */
+	readonly parentObjectiveId?: string;
 }
 
 export type DelegationState = "queued" | "running" | "paused" | "closed";
@@ -72,6 +80,8 @@ export interface DelegationRecord {
 	readonly filedByObjective: boolean;
 	readonly updates: readonly string[];
 	readonly outcome?: Outcome;
+	/** Whether a nested delegation's Outcome reached its parent leader (always false for a delegation with no parent). */
+	readonly outcomeDeliveredToParent: boolean;
 	readonly closeReason?: DelegationCloseReason;
 	readonly closedAt?: string;
 }
@@ -158,6 +168,7 @@ function charterFrom(value: unknown): LeaderCharter | undefined {
 	} catch {
 		return undefined;
 	}
+	const parent = typeof value.parentObjectiveId === "string" && isLeaderDelegationObjectiveId(value.parentObjectiveId);
 	return {
 		v: 1,
 		leader: value.leader,
@@ -166,6 +177,7 @@ function charterFrom(value: unknown): LeaderCharter | undefined {
 		envelope,
 		clipped,
 		createdAt: value.createdAt,
+		...(parent ? { parentObjectiveId: value.parentObjectiveId as string } : {}),
 	};
 }
 
@@ -217,11 +229,91 @@ export function readDelegations(snapshot: TaskRuntimeProjection): DelegationReco
 			filedByObjective: dispatch?.filing === DISPATCH_FILING_BY_OBJECTIVE,
 			updates,
 			...(outcome ? { outcome } : {}),
+			outcomeDeliveredToParent: evidence.has(DELIVERED_TO_PARENT_EVIDENCE),
 			...(closeReason ? { closeReason } : {}),
 			...(closing ? { closedAt: closing.createdAt } : {}),
 		});
 	}
 	return records.sort((left, right) => left.charter.createdAt.localeCompare(right.charter.createdAt));
+}
+
+/**
+ * The open delegations nested under one delegation, deepest level first and oldest first within a level. The walk runs at
+ * most as many levels as a chain may nest, so it ends even on a damaged parent link. The delegation itself is not included.
+ */
+export function openDescendantsDeepestFirst(
+	records: readonly DelegationRecord[],
+	objectiveId: string,
+): DelegationRecord[] {
+	const levels: DelegationRecord[][] = [];
+	let frontier = new Set([objectiveId]);
+	for (let level = 0; level < LEADER_MAX_DEPTH_CEILING; level++) {
+		const next = records.filter(
+			(record) =>
+				record.state !== "closed" &&
+				record.charter.parentObjectiveId !== undefined &&
+				frontier.has(record.charter.parentObjectiveId),
+		);
+		if (next.length === 0) break;
+		levels.push(next);
+		frontier = new Set(next.map((record) => record.objectiveId));
+	}
+	return levels.reverse().flat();
+}
+
+/** The objective a turn's work is filed under: the delegation's own when the turn was started under it. */
+function filedObjectiveOf(snapshot: TaskRuntimeProjection, attempt: AttemptRuntimeState): string | undefined {
+	return snapshot.tasks[attempt.taskId]?.task.objectiveId;
+}
+
+/**
+ * Whether a turn belongs to a delegation. A delegation dispatched by this build owns the turns filed under its objective:
+ * what a turn was started as, never when it ran, so an owner's chat with the leader is not counted. A delegation an
+ * earlier build dispatched has no filing mark: its turns are attributed by time window (from its dispatch until its close)
+ * and only when the attempt's bot is the leader or a bot the leader created, so an unrelated worker in the window is not
+ * the goal's.
+ */
+export function turnBelongsToDelegation(input: {
+	readonly snapshot: TaskRuntimeProjection;
+	readonly record: DelegationRecord;
+	readonly attempt: AttemptRuntimeState;
+	readonly directBotOf: (agentId: string) => string | undefined;
+	readonly bots: () => readonly { readonly agentId: string; readonly createdBy?: string }[];
+}): boolean {
+	const { record, attempt } = input;
+	if (attempt.agentId === undefined) return false;
+	if (record.filedByObjective) return filedObjectiveOf(input.snapshot, attempt) === record.objectiveId;
+	if (!record.dispatchedAt || attempt.createdAt < record.dispatchedAt) return false;
+	if (record.closedAt !== undefined && attempt.createdAt > record.closedAt) return false;
+	const alias = input.directBotOf(attempt.agentId);
+	if (alias === undefined) return false;
+	if (alias === record.charter.leader) return true;
+	return input.bots().some((bot) => bot.agentId === alias && bot.createdBy === record.charter.leader);
+}
+
+/** A delegation's turns split between its leader and the bots that ran under it: its own leader's, and every other bot's. */
+export function splitTurnsByLeader(
+	turns: readonly AttemptRuntimeState[],
+	aliasOf: (agentId: string) => string | undefined,
+	leader: string,
+): { readonly leaderTurns: AttemptRuntimeState[]; readonly ownedTurns: AttemptRuntimeState[] } {
+	const aliasOfTurn = (turn: AttemptRuntimeState) => (turn.agentId === undefined ? undefined : aliasOf(turn.agentId));
+	return {
+		leaderTurns: turns.filter((turn) => aliasOfTurn(turn) === leader),
+		ownedTurns: turns.filter((turn) => {
+			const alias = aliasOfTurn(turn);
+			return alias !== undefined && alias !== leader;
+		}),
+	};
+}
+
+/** The earliest deadline among the running delegations, in epoch milliseconds; undefined when none has one. */
+export function earliestDeadlineMs(records: readonly DelegationRecord[]): number | undefined {
+	return records
+		.filter((record) => record.state === "running" && record.charter.envelope.deadlineAt !== undefined)
+		.map((record) => Date.parse(record.charter.envelope.deadlineAt as string))
+		.filter((at) => Number.isFinite(at))
+		.sort((left, right) => left - right)[0];
 }
 
 function goalTitle(goal: string): string {
@@ -309,6 +401,27 @@ export class LeaderDelegationLedger {
 
 	resume(objectiveId: string): void {
 		this.runtime().resumeObjective(objectiveId);
+	}
+
+	/**
+	 * Written once the nested delegation's Outcome reached its parent leader: the restart reads it instead of sending again.
+	 * A second call is a no-op.
+	 */
+	recordChildOutcomeDelivered(objectiveId: string): void {
+		const runtime = this.runtime();
+		const recorded = runtime
+			.getSnapshot()
+			.objectives[objectiveId]?.evidence.some((entry) => entry.evidenceId === DELIVERED_TO_PARENT_EVIDENCE);
+		if (recorded) return;
+		runtime.recordObjectiveEvidence(objectiveId, {
+			evidenceId: DELIVERED_TO_PARENT_EVIDENCE,
+			kind: "observation",
+			summary: "The outcome was delivered to the parent leader.",
+			artifactIds: [],
+			trusted: true,
+			createdAt: new Date(this.now()).toISOString(),
+			metadata: { delivered: true },
+		});
 	}
 
 	/**
