@@ -312,7 +312,11 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 			{
 				name: `${name}-answer`,
 				check: (request) => {
-					check(JSON.stringify(request.context.messages.slice(-count)));
+					// The tool results of the turn: everything after the assistant message that made the calls. A host record
+					// the request carries after them (the path legend, when it is not already on the wire) is not a result.
+					const messages = request.context.messages;
+					const lastAssistant = messages.findLastIndex((message) => message.role === "assistant");
+					check(JSON.stringify(messages.slice(lastAssistant + 1)));
 					answered.release();
 				},
 				reply: { content: [{ type: "text", text: "Reported the push." }] },
