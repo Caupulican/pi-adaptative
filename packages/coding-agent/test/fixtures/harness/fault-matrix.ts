@@ -1029,7 +1029,7 @@ const rows: readonly FaultMatrixRow[] = [
 	},
 	{
 		id: "R52",
-		owner: "core/background-lane-controller.ts",
+		owner: "core/routines/routine-runtime-assembly.ts",
 		journey: 1,
 		phase: "routines parent-write import",
 		fault: "a routine run away finished while its parent was closed: its result is pending while its claim waits in the attempt's outbox",

@@ -14,13 +14,12 @@
  * controller never touches `prompt()`, the last-assistant-message, retry, or streaming state.
  */
 
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
-import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
+import type { Api, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import { harnessLog } from "../kernel/harness-log.ts";
 import type { AgentMessage } from "../kernel/types.ts";
-import { workerControlOf } from "../kernel/worker-control-stamp.ts";
 import { orchestrationEventStoreDir } from "./agent-paths.ts";
 import type {
 	GoalContinuationLoopOptions,
@@ -46,21 +45,17 @@ import {
 import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "./channels/channel-policy.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
 import { SessionChannels } from "./channels/session-channels.ts";
-import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
-import {
-	type BotCreationRequest,
-	type CreatedBotView,
-	MAX_BOTS_PER_LEADER,
-	mayNotCreateBotsText,
-} from "./delegation/bot-creation.ts";
+import { BotChatTranscript } from "./delegation/bot-chat-transcript.ts";
+import { type BotCreationRequest, type CreatedBotView, MAX_BOTS_PER_LEADER } from "./delegation/bot-creation.ts";
 import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./delegation/bot-daemon-launch.ts";
 import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delegation/bot-daemon-legacy.ts";
-import type { BotMessageDirectory, BotOwnedStartOutcome } from "./delegation/bot-message-contract.ts";
-import { createBotMessageDirectory } from "./delegation/bot-message-directory.ts";
-import { displayNameFor, suggestBotId } from "./delegation/bot-naming.ts";
+import { BotLifecycleController } from "./delegation/bot-lifecycle-controller.ts";
+import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
+import { displayNameFor } from "./delegation/bot-naming.ts";
+import { BotOperatorDispatch } from "./delegation/bot-operator-dispatch.ts";
 import type { BotOperatorMessageOptions } from "./delegation/bot-operator-message-options.ts";
-import { BotRuntimeBindings, type BotRuntimeContext, keyedBotRuntimeId } from "./delegation/bot-runtime-bindings.ts";
+import { BotRuntimeBindings } from "./delegation/bot-runtime-bindings.ts";
 import { DAEMON_STALE_MS, isOlderDaemonBuild, OWN_DAEMON_BUILD } from "./delegation/bot-team-routine-helpers.ts";
 import {
 	createForegroundTranscriptWrites,
@@ -76,21 +71,13 @@ import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
 import { type ManagedLaneView, projectManagedLaneViews } from "./delegation/managed-lane-views.ts";
 import type { ParentWriteOrigin } from "./delegation/parent-execution-context.ts";
 import {
-	BOT_MEMORY_BLOCK_SEPARATOR,
 	type BotOperatorMessageDispatchResult,
 	type BotTeamChange,
-	botChatOperatorText,
-	botReplyText,
-	normalizeBotOrTeamId,
-	normalizeBotSoul,
 	type PersistentBotDaemonStatus,
 	type PersistentBotRecord,
 	PersistentBotTeamStore,
 	type PersistentBotView,
-	type PersistentTeamMemberDelivery,
-	type PersistentTeamMessage,
 	type PersistentTeamRecord,
-	RESERVED_BOT_CREATOR_IDS,
 	type TeamOperatorMessageDispatchResult,
 	teamIncarnation,
 	type UpsertPersistentBotInput,
@@ -106,7 +93,7 @@ import type {
 	SessionRootReplyWaitOptions,
 	SessionRootReplyWaitResult,
 } from "./delegation/session-root-mailbox.ts";
-import { getWorkerClaimSnapshots, readWorkerClaimSnapshotForAttempt } from "./delegation/session-worker-claim.ts";
+import { readWorkerClaimSnapshotForAttempt } from "./delegation/session-worker-claim.ts";
 import { type TerminalRoute, type TerminalRouteOwner, TerminalRouting } from "./delegation/terminal-routing.ts";
 import type {
 	SessionRootWorkerAgentMessageOptions,
@@ -127,20 +114,20 @@ import type {
 	WorkerAgentWaitResult,
 	WorkerGrantSummary,
 } from "./delegation/worker-agent-control.ts";
-import { boundWorkerWaitTimeoutMs } from "./delegation/worker-agent-control-coordinator.ts";
+import { WorkerAttemptWaits } from "./delegation/worker-attempt-waits.ts";
 import { stepDownThinkingLevel } from "./delegation/worker-authority-resolver.ts";
 import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
 import { WorkerDelegationController } from "./delegation/worker-delegation-controller.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { deriveFanoutGroups, type FanoutGroupReport } from "./delegation/worker-fanout.ts";
 import { WorkerLaneIsolation } from "./delegation/worker-lane-isolation.ts";
-import { isManagedWorkerAttempt, projectWorkerAttemptLaneRecord } from "./delegation/worker-lane-projection.ts";
+import { isManagedWorkerAttempt } from "./delegation/worker-lane-projection.ts";
 import type { ManagedLaneBinding, WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { contractGrantsChildren } from "./delegation/worker-nested-start.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
 import { captureWorkerReceiptOrigin } from "./delegation/worker-receipt-origin.ts";
-import { SUBMIT_REPORT_TOOL_NAME, workerReportClaimText } from "./delegation/worker-report.ts";
+import { WorkerTerminalReport } from "./delegation/worker-terminal-report.ts";
 import { WorkerUsageReceiptDelivery } from "./delegation/worker-usage-receipt-delivery.ts";
 import type { HostEventConnectionView } from "./events/host-event-contract.ts";
 import type {
@@ -157,10 +144,6 @@ import { GoalAutoContinueController } from "./goals/goal-auto-continue-controlle
 import type { GoalAutoContinueHold, GoalAutoContinueState } from "./goals/goal-auto-continue-state.ts";
 import type { GoalRuntimeSnapshot } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
-import {
-	CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE,
-	type ContinuousChatWorkReportEntry,
-} from "./memory/continuous-chat-ingest.ts";
 import { blockedKnowledgeHandoff, type HandoffKnowledgePort } from "./memory/knowledge-projection.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
@@ -177,9 +160,7 @@ import type {
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
 import { readTaskRuntimeProjection } from "./orchestration/task-runtime-reader.ts";
 import { isOrchestrationThinkingLevel } from "./orchestration/thinking-level-guard.ts";
-import { botStartModelStance } from "./orchestration/worker-model-pins.ts";
-import type { WorkerReceiptOrigin } from "./orchestration/worker-receipt-origin.ts";
-import { createSteerAwareWait, ownerSteerWake } from "./pending-input-queue-controller.ts";
+import { ownerSteerWake } from "./pending-input-queue-controller.ts";
 import { PlanExecutor } from "./plan/plan-executor.ts";
 import type { PlanExecutorPort } from "./plan/plan-executor-port.ts";
 import { ActAheadController } from "./proactivity/act-ahead-controller.ts";
@@ -208,34 +189,23 @@ import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController } from "./research/research-lane-controller.ts";
 import { AwayService } from "./routines/away-service.ts";
-import { RoutineIntake, type RoutineIntakeStatus } from "./routines/routine-intake.ts";
+import type { RoutineIntake, RoutineIntakeStatus } from "./routines/routine-intake.ts";
+import { RoutineRuntimeAssembly } from "./routines/routine-runtime-assembly.ts";
 import {
-	isCarriedRoutineCompletion,
-	ROUTINE_RESULT_WAKES_HOLD,
-	routineParentInput,
-} from "./routines/routine-parent-input.ts";
-import {
-	RoutineSchedulerController,
-	routineCiWorkflowPaths,
-	routineEventAnchor,
+	type RoutineSchedulerController,
 	routineGithubInterests,
 	routineHostEventFeed,
-	routineWorkerRequest,
 } from "./routines/routine-scheduler-controller.ts";
-import { RoutineSessionController } from "./routines/routine-session-controller.ts";
+import type { RoutineSessionController } from "./routines/routine-session-controller.ts";
 import { parseRoutineToolInput, type RoutineToolView } from "./routines/routine-tool.ts";
-import { RoutineWatchMonitor } from "./routines/routine-watch-monitor.ts";
-import { RoutineWorkerExecutor } from "./routines/routine-worker-executor.ts";
-import { WatchAdmission } from "./routines/watch-admission.ts";
-import { WatchSampler } from "./routines/watch-evaluators.ts";
-import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
+import type { RoutineWatchMonitor } from "./routines/routine-watch-monitor.ts";
 import { getSessionRole } from "./session-role.ts";
-import { getActiveSessionBranchEntries, isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
+import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { createBotToolDefinition } from "./tools/bot.ts";
 import { createPlanToolDefinition } from "./tools/plan.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
 import { alarmAt, type WallAlarm } from "./util/timer-port.ts";
-import { type SteerDecision, type WaitStatusEvent, type WakeSource, waitFor } from "./util/wait.ts";
+import type { WaitStatusEvent } from "./util/wait.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
 import { buildWorktreeSyncEngineDeps } from "./worktree-sync/runtime.ts";
@@ -316,8 +286,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _unsubscribeAwayChannelSettings: (() => void) | undefined;
 	private _awayService: AwayService | undefined;
 	private readonly botBindings: BotRuntimeBindings;
-	/** Includes queued callers: configuration cannot pass a start that has not published its runtime yet. */
-	private readonly botDispatches = new Map<string, Promise<void>>();
 	/** Lazily materialized so a UAC surface without `delegate` allocates no worker runtime state. */
 	private _workers: WorkerDelegationController | undefined;
 	/** One durable lifecycle shared by every worker execution adapter. */
@@ -326,8 +294,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _orchestrationStore: OrchestrationEventStore | undefined;
 	/** The store and lifecycle as the session opens them, before (or without) the worker composition. */
 	private _orchestrationCore: SessionOrchestrationCore | undefined;
-	/** Settles each unresolved running-attempt wait when the session is disposed. */
-	private readonly _runningAttemptWaits = new Set<() => void>();
 	/** Durable usage delivery shares the lifecycle's event store, independently of terminal handoffs. */
 	private _workerUsage: WorkerUsageReceiptDelivery | undefined;
 	private _workerReceipts: WorkerReceiptDelivery | undefined;
@@ -338,6 +304,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _workerNotifications: WorkerNotificationCoordinator | undefined;
 	private readonly _continuationListeners = new IndependentObserverSet<() => void>();
 	private readonly deps: BackgroundLaneControllerDeps;
+	/** The delegated owners of the bot chat, the operator dispatch, the bot lifecycle, the attempt waits and the routine runtime. */
+	private readonly _botChat: BotChatTranscript;
+	private readonly _botDispatch: BotOperatorDispatch;
+	private readonly _botLifecycle: BotLifecycleController;
+	private readonly _attemptWaits: WorkerAttemptWaits;
+	private readonly _routineAssembly: RoutineRuntimeAssembly;
+	private readonly _terminalReports: WorkerTerminalReport;
 
 	/** Emit a warning without ever throwing — used from disposal-adjacent persistence where a
 	 * listener failure (or a bare test double missing `emit`) must never block or crash cleanup. */
@@ -375,6 +348,73 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			wakeTimers: deps.getTimers().port("channel-expiry"),
 		});
 		this.botBindings = new BotRuntimeBindings(() => deps.getSessionManager());
+		this._botChat = new BotChatTranscript(this.botBindings, {
+			getBotTeamStore: () => this.getBotTeamStore(),
+			getRemoteHub: () => this.getRemoteHub(),
+			openWorkerTranscript: (agentId) => this.openWorkerTranscript(agentId),
+			getLaneRecords: () => this.getLaneRecords(),
+		});
+		this._botDispatch = new BotOperatorDispatch(deps, this.botBindings, {
+			getBotTeamStore: () => this.getBotTeamStore(),
+			getRemoteHub: () => this.getRemoteHub(),
+			invalidateBotViews: () => {
+				this._botViews = undefined;
+			},
+			listWorkerAgents: () => this.listWorkerAgents(),
+			resolveModelSpec: (rawModel) => this.resolveModelSpec(rawModel),
+			getLaneRecords: () => this.getLaneRecords(),
+			sendSessionRootWorkerAgentMessage: (agentId, message, options) =>
+				this.sendSessionRootWorkerAgentMessage(agentId, message, options),
+			followUpSessionRootWorkerAgent: (agentId, message, options) =>
+				this.followUpSessionRootWorkerAgent(agentId, message, options),
+			noteOwnerDirectAttempt: (attemptId) =>
+				this._getWorkerNotificationCoordinator().noteOwnerDirectAttempt(attemptId),
+			startWorkerDelegation: (request, signal) => this.startWorkerDelegation(request, signal),
+			leaderDelegationLimits: () => this.leaderDelegationLimits(),
+			getWorkerAttemptResult: (attemptId) => this.getWorkerAttemptResult(attemptId),
+			cancelWorkerAgent: (agentId, reasonCode, scope) => this.cancelWorkerAgent(agentId, reasonCode, scope),
+		});
+		this._botLifecycle = new BotLifecycleController(deps, this.botBindings, {
+			getBotTeamStore: () => this.getBotTeamStore(),
+			invalidateBotViews: () => {
+				this._botViews = undefined;
+			},
+			hasWorkerState: () => this._hasWorkerState(),
+			listWorkerAgents: () => this.listWorkerAgents(),
+			interruptWorkerAgent: (agentId, scope, options) => this.interruptWorkerAgent(agentId, scope, options),
+			retireWorkerAgent: (agentId, scope, options) => this.retireWorkerAgent(agentId, scope, options),
+			assertBotDispatchIdle: (agentId) => this.assertBotDispatchIdle(agentId),
+			resolveModelSpec: (rawModel) => this.resolveModelSpec(rawModel),
+			getLeaders: () => this.getLeaders(),
+			leaderDelegations: () => this.leaderDelegations(),
+			workerLifecycle: () => this._getWorkerLifecycle(),
+			workerController: () => this._getWorkerController(),
+		});
+		this._attemptWaits = new WorkerAttemptWaits(deps, {
+			workerController: () => this._getWorkerController(),
+			loadedWorkerLifecycle: () => this._workerLifecycle,
+			loadedOrchestrationStore: () => this._orchestrationStore,
+			observeWorkerAttemptTerminals: (attemptIds) => this.observeWorkerAttemptTerminals(attemptIds),
+			observeWorkerTerminalRecords: (records) => this.observeWorkerTerminalRecords(records),
+			warn: (message) => this._safeWarn(message),
+		});
+		this._routineAssembly = new RoutineRuntimeAssembly(deps, {
+			workerController: () => this._getWorkerController(),
+			workerLifecycle: () => this._getWorkerLifecycle(),
+			parentWriteHolds: () => this._parentWriteHolds,
+			landRecordedParentWrites: (lifecycle) => this._landRecordedParentWrites(lifecycle),
+			hostEventFeed: () => this._hostEventFeed(),
+			subscribeStateChanges: (listener) => this.subscribeStateChanges(listener),
+			subscribeOrchestrationStore: (listener) => this.subscribeOrchestrationStore(listener),
+			sendOperatorMessageToBot: (agentId, message) => this.sendOperatorMessageToBot(agentId, message),
+			sendOperatorMessageToTeam: (teamId, message) => this.sendOperatorMessageToTeam(teamId, message),
+			resolveLaneModel: (configuredPattern) => this.resolveLaneModel(configuredPattern),
+			warn: (message) => this._safeWarn(message),
+		});
+		this._terminalReports = new WorkerTerminalReport(deps, this.botBindings, {
+			getBotTeamStore: () => this.getBotTeamStore(),
+			workerTranscriptReference: (record) => this.workerTranscriptReference(record),
+		});
 		this._laneModels = new LaneModelResolver(deps);
 		this._research = new ResearchLaneController(
 			{ ...deps, onContinuationActivity: () => this._notifyContinuationActivity() },
@@ -678,7 +718,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Acknowledge the captured generations only, without reselecting a task or interpreting a display name. */
 	observeWorkerAttemptTerminals(attemptIds: readonly string[]): void {
 		const snapshot = this._workerLifecycle?.getTaskRuntimeSnapshot();
-		if (snapshot) this._observeExactAttemptTerminals(snapshot, [...new Set(attemptIds)]);
+		if (snapshot) this._attemptWaits.observeExactAttemptTerminals(snapshot, [...new Set(attemptIds)]);
 	}
 
 	observeWorkerTerminalRecords(records: readonly LaneRecord[]): void {
@@ -819,20 +859,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	changeHostEventSubscriptions(input: HostEventSubscriptionChange, scope?: HostEventControlScope) {
 		return this._getHostEventControl().changeHostEventSubscriptions(input, scope);
-	}
-
-	/**
-	 * A guard captured now that throws `message` once the session's branch moved, the session was replaced or disposed, or
-	 * `stillValid` no longer holds: what a routine origin or an intake decision is checked against before it is saved.
-	 */
-	private sessionBranchGuard(message: string, stillValid: () => boolean = () => true): () => void {
-		const manager = this.deps.getSessionManager();
-		const assertBranch = manager.captureBranchContext();
-		return () => {
-			assertBranch();
-			if (this.deps.isDisposed() || this.deps.getSessionManager() !== manager || !stillValid())
-				throw new Error(message);
-		};
 	}
 
 	private _getHostEventControl(): HostEventControlPort {
@@ -1001,9 +1027,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		}
 		this._runTeardownStep("close the remote hub", () => void this._remoteHub?.stop());
 		this._runTeardownStep("release managed lanes", () => this._managedLanes?.release());
-		this._runTeardownStep("settle running-attempt waits", () => {
-			for (const settle of [...this._runningAttemptWaits]) settle();
-		});
+		this._runTeardownStep("settle running-attempt waits", () => this._attemptWaits.settleAll());
 		this._runTeardownStep("abort worker delegation", () => {
 			workerShutdown = this._workers?.abort() ?? Promise.resolve();
 		});
@@ -1382,50 +1406,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._getWorkerController().getAgentControl().readWorkerAgentLastText?.(agentId, laneId, scope);
 	}
 
-	/**
-	 * The root's wait signal: an owner steer aborts it, and `finalize` returns that steer's admission decision. A worker
-	 * caller has no owner steer (only the session root reads the owner's queue), so its wait passes its signal through.
-	 */
-	private _createWorkerWaitSignal(
-		scope: WorkerAgentControlScope | undefined,
-		signal: AbortSignal | undefined,
-	): { readonly signal: AbortSignal | undefined; readonly finalize: () => Promise<SteerDecision | undefined> } {
-		if (scope?.callerAgentId) {
-			return { signal, finalize: () => Promise.resolve(undefined) };
-		}
-		const report = (event: WaitStatusEvent) => this.deps.emit(event);
-		return createSteerAwareWait(this.deps.getSessionManager().getSessionId(), signal, report);
-	}
-
-	private async _withWorkerWait<T extends { terminalAttemptIds?: readonly string[]; steered?: SteerDecision }>(
-		scope: WorkerAgentControlScope | undefined,
-		signal: AbortSignal | undefined,
-		run: (control: WorkerAgentControlPort, waitSignal: AbortSignal | undefined) => Promise<T>,
-	): Promise<T> {
-		if (!this.deps.isDelegateToolActive())
-			throw new Error("Worker delegation control is unavailable in this UAC surface.");
-		const control = this._getWorkerController().getAgentControl();
-		const waitSignal = this._createWorkerWaitSignal(scope, signal);
-		let result: T;
-		try {
-			result = await run(control, waitSignal.signal);
-			this.observeWorkerAttemptTerminals(result.terminalAttemptIds ?? []);
-		} catch (error) {
-			await waitSignal.finalize();
-			throw error;
-		}
-		// A steer ended the wait: the result says so, so it never reads as a wait that simply returned.
-		const steered = await waitSignal.finalize();
-		return steered === undefined ? result : { ...result, steered };
-	}
-
 	async waitForWorkerAgent(
 		agentId: string,
 		timeoutMs?: number,
 		scope?: WorkerAgentControlScope,
 		signal?: AbortSignal,
 	): ReturnType<WorkerAgentControlPort["waitForWorkerAgent"]> {
-		return this._withWorkerWait(scope, signal, (control, waitSignal) =>
+		return this._attemptWaits.withWorkerWait(scope, signal, (control, waitSignal) =>
 			control.waitForWorkerAgent(agentId, timeoutMs, scope, waitSignal),
 		);
 	}
@@ -1437,97 +1424,16 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		scope?: WorkerAgentControlScope,
 		signal?: AbortSignal,
 	): Promise<WorkerAgentWaitResult> {
-		return this._withWorkerWait(scope, signal, (control, waitSignal) =>
+		return this._attemptWaits.withWorkerWait(scope, signal, (control, waitSignal) =>
 			control.waitForWorkerAgents(agentIds, mode, timeoutMs, scope, waitSignal),
 		);
 	}
 
-	/**
-	 * Event-driven wait on exact attempts, of in-process and managed workers alike: it settles as soon
-	 * as any captured attempt leaves "running", woken by the durable orchestration store's commit
-	 * events. A captured attempt missing from the runtime is an error, never completion. An abort rejects
-	 * with the signal's reason; the bound and session disposal settle without observing anything.
-	 */
-	async waitForRunningAttempts(
+	waitForRunningAttempts(
 		attemptIds: readonly string[],
 		options: { readonly timeoutMs: number; readonly signal?: AbortSignal },
 	): Promise<RunningAttemptWaitOutcome> {
-		const { signal } = options;
-		if (signal?.aborted) throw signal.reason;
-		const captured = [...new Set(attemptIds)];
-		if (captured.length === 0) throw new Error("A running-attempt wait needs at least one attempt.");
-		if (this.deps.isDisposed()) return { kind: "disposed" };
-		const lifecycle = this._workerLifecycle;
-		const store = this._orchestrationStore;
-		if (!lifecycle || !store) {
-			throw new Error(`Running attempts ${captured.join(", ")} are unknown: this session has no worker runtime.`);
-		}
-		const terminal: WakeSource<{ readonly snapshot: TaskRuntimeProjection; readonly changed: string[] }> = {
-			id: "attempt.terminal",
-			// A commit notifies before the runtime adopts it: read the projection after the commit returns.
-			subscribe: (onWake) => {
-				let queued = false;
-				return store.subscribe(() => {
-					if (queued) return;
-					queued = true;
-					queueMicrotask(() => {
-						queued = false;
-						onWake();
-					});
-				});
-			},
-			check: () => {
-				const snapshot = lifecycle.getTaskRuntimeSnapshot();
-				const missing = captured.filter((attemptId) => !snapshot.attempts[attemptId]);
-				if (missing.length > 0) {
-					throw new Error(`Running attempts ${missing.join(", ")} are not in the task runtime.`);
-				}
-				const changed = captured.filter((attemptId) => snapshot.attempts[attemptId]?.status !== "running");
-				return changed.length > 0 ? { kind: "satisfied", value: { snapshot, changed } } : undefined;
-			},
-		};
-		const { end, value } = await waitFor({
-			id: "objective.running_attempts",
-			wake: [terminal],
-			signal,
-			steer: {
-				mode: "exempt",
-				reason: "the objective loop holds no foreground lease while it waits, so owner input runs its own turn",
-			},
-			bound: { kind: "deadline", ms: boundWorkerWaitTimeoutMs(options.timeoutMs) },
-			disposed: {
-				isDisposed: () => this.deps.isDisposed(),
-				subscribe: (onDispose) => {
-					this._runningAttemptWaits.add(onDispose);
-					return () => this._runningAttemptWaits.delete(onDispose);
-				},
-			},
-			report: (event) => this.deps.emit(event),
-		});
-		if (end.kind === "satisfied" && value) {
-			this._observeExactAttemptTerminals(value.snapshot, value.changed);
-			return { kind: "changed", attemptIds: value.changed };
-		}
-		if (end.kind === "timed_out") return { kind: "timed_out" };
-		if (end.kind === "disposed") return { kind: "disposed" };
-		if (end.kind === "aborted") throw signal?.reason;
-		throw new Error(`The running-attempt wait ended ${end.kind}.`);
-	}
-
-	/** Observe terminals of exactly these attempts, never a newer generation of the same lane. */
-	private _observeExactAttemptTerminals(snapshot: TaskRuntimeProjection, attemptIds: readonly string[]): void {
-		try {
-			this.observeWorkerTerminalRecords(
-				attemptIds.flatMap((attemptId) => {
-					const record = projectWorkerAttemptLaneRecord(snapshot, attemptId);
-					return record ? [record] : [];
-				}),
-			);
-		} catch (error) {
-			this._safeWarn(
-				`Worker terminal observation failed after a running-attempt wait: ${error instanceof Error ? error.message : String(error)}`,
-			);
-		}
+		return this._attemptWaits.waitForRunningAttempts(attemptIds, options);
 	}
 
 	broadcastWorkerAgentMessage(
@@ -1632,206 +1538,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._botTeamStore;
 	}
 
-	/** The parent input still carrying an earlier result of this routine, quiet or held, to the owner's next turn. */
-	private findCarriedRoutineResult(routineId: string, cause: "quiet" | "held"): { entryId: string } | undefined {
-		const manager = this.deps.getSessionManager();
-		const carried = manager
-			.getPendingParentInputs("next-owner-turn")
-			.find((input) => isCarriedRoutineCompletion(manager.getEntry(input.entryId), routineId, cause));
-		return carried ? { entryId: carried.entryId } : undefined;
-	}
-
 	private _ensureRoutineScheduler(): void {
 		if (this._routines || !this._botTeamStore || this.deps.isDisposed() || this.deps.canRunRoutines?.() === false)
 			return;
-		const store = this._botTeamStore;
-		const parentSessionId = this.deps.getSessionId();
-		const canUseOrigin = (origin: WorkerReceiptOrigin): boolean => {
-			const manager = this.deps.getSessionManager();
-			return (
-				origin.sessionId === manager.getSessionId() &&
-				(origin.sessionFile === undefined || origin.sessionFile === manager.getSessionFile()) &&
-				isSessionAppendAnchorCurrent(manager, origin) &&
-				manager.isEntryPersisted(origin.leafId)
-			);
-		};
-		const worker = new RoutineWorkerExecutor({
-			getSnapshot: () => {
-				this._getWorkerController();
-				return this._getWorkerLifecycle().getTaskRuntimeSnapshot();
-			},
-			start: (input, signal) => this._getWorkerController().startSavedIntent(input, signal),
-		});
-		const scheduler = new RoutineSchedulerController({
-			store,
-			worker,
-			parentSessionId,
-			owner: randomUUID(),
-			timers: this.deps.getTimers().port("routines"),
-			isDisposed: () => this.deps.isDisposed(),
-			canDispatch: () => this.deps.isDelegateToolActive(),
-			getReceiptOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
-			canUseOrigin,
-			captureOriginGuard: (origin) =>
-				this.sessionBranchGuard("Routine origin is not on the current durable parent branch.", () =>
-					canUseOrigin(origin),
-				),
-			subscribeContext: (listener) => this.deps.subscribeForegroundActivity(listener),
-			subscribeExecution: (listener) => this.subscribeOrchestrationStore(listener),
-			hostEvents: this._hostEventFeed(),
-			subscribeCapacity: (listener) => this.subscribeStateChanges(listener),
-			delivery: {
-				deliver: async (delivery) => {
-					const { occurrence } = delivery;
-					const intent = occurrence.definition.executionSnapshot?.savedIntent;
-					// A run away recorded its claims for this parent; they explain its result, so they land first, and the
-					// result waits while one cannot land yet. A run of this session wrote its claims itself.
-					if (occurrence.executor === "away" && occurrence.dispatchKey && intent) {
-						const attemptIds = worker.notificationAttemptIds(
-							routineWorkerRequest(occurrence, intent, occurrence.dispatchKey),
-						);
-						this._landRecordedParentWrites(this._getWorkerLifecycle());
-						for (const attemptId of attemptIds)
-							if (this._parentWriteHolds.has(attemptId))
-								throw new Error("Routine result is waiting for the claims its run recorded away to land.");
-					}
-					const input = routineParentInput(delivery);
-					// Quiet results and expiry notices already ride with the owner's next turn and never count as wakes.
-					if (input.mode === "next-owner-turn") return this.deps.deliverParentInput(input);
-					const manager = this.deps.getSessionManager();
-					// A replay repeats the saved mode, so a saved delivery is never measured again.
-					const saved = manager.getParentInput(input.deliveryId);
-					let held = saved !== undefined && saved.metadata.mode === "next-owner-turn";
-					if (!saved) {
-						const day = await this.deps.aggregateUsageWindow(rollingDayWindow(Date.now()));
-						const bound = this.deps.getSettingsManager().getRoutinesSettings().maxResultWakesPerDay;
-						held = day.routineResultTurnWakes >= bound;
-						if (held) {
-							this.deps.observeHarnessNotice?.("routine-result-wakes", () => ({
-								reason: ROUTINE_RESULT_WAKES_HOLD,
-								text: `Routine results started ${bound} parent turns in the last 24 hours, the routines.maxResultWakesPerDay bound; later results wait for the owner's next turn until the day has room. Raising the setting lets more start turns.`,
-							}));
-							// One held result of a routine is carried at a time; later ones are recorded against it.
-							const carried = this.findCarriedRoutineResult(delivery.occurrence.routineId, "held");
-							if (carried) return carried;
-						} else this.deps.observeHarnessNotice?.("routine-result-wakes", () => "clear");
-					}
-					return this.deps.deliverParentInput(held ? routineParentInput(delivery, true) : input);
-				},
-				findCarriedQuietResult: (routineId) => this.findCarriedRoutineResult(routineId, "quiet"),
-				acknowledgeWorkerNotification: (occurrence) => {
-					if (occurrence.target.kind !== "session" || !occurrence.dispatchKey) return;
-					const intent = occurrence.definition.executionSnapshot?.savedIntent;
-					if (!intent) return;
-					const attemptIds = worker.notificationAttemptIds(
-						routineWorkerRequest(occurrence, intent, occurrence.dispatchKey),
-					);
-					const lifecycle = this._getWorkerLifecycle();
-					const ids: string[] = [];
-					for (const attemptId of attemptIds) {
-						const notification = lifecycle.getAttemptTerminalNotification(attemptId);
-						if (!notification) throw new Error("Routine completion is waiting for its native terminal receipt.");
-						if (notification.status === "pending") ids.push(notification.notificationId);
-					}
-					lifecycle.markNotificationsDelivered(ids);
-				},
-				noticeRoutineState: (kind, routineId, notice) =>
-					this.deps.observeHarnessNotice?.(kind, () => ({ scope: routineId, state: notice ?? "clear" })),
-			},
-			dispatchMessage: async (occurrence) => {
-				if (occurrence.target.kind === "bot") {
-					const result = await this.sendOperatorMessageToBot(
-						occurrence.target.agentId,
-						occurrence.definition.prompt,
-					);
-					return `Prompt accepted by bot ${occurrence.target.agentId} (${result.mode}); worker completion is tracked separately.`;
-				}
-				if (occurrence.target.kind === "team") {
-					const result = await this.sendOperatorMessageToTeam(
-						occurrence.target.teamId,
-						occurrence.definition.prompt,
-					);
-					return `Prompt accepted for ${result.deliveries.length} team deliveries; worker completion is tracked separately.`;
-				}
-				throw new Error("Session routines require the native worker executor.");
-			},
-			warn: (message) => this._safeWarn(message),
-		});
-		// One admission serves a watch when it is saved and at every evaluation, so a saved watch never runs with more
-		// authority than the session has now.
-		const watchAdmission = new WatchAdmission({
-			getCwd: () => this.deps.getCwd(),
-			getAgentDir: () => this.deps.getAgentDir(),
-			getCapabilityEnvelope: () => this.deps.getCapabilityEnvelope(),
-			getCredentialExposureBoundary: () => this.deps.getCredentialExposureBoundary?.(),
-			getEdgeGrants: () => this.deps.getEdgeGrants?.() ?? [],
-			getEdgeMode: () => this.deps.getSettingsManager().getEdgeSettings().mode,
-			getDenyCommands: () => this.deps.getSettingsManager().getEdgeSettings().deny,
-		});
-		const routineTimers = this.deps.getTimers().port("routines");
-		const watches = new RoutineWatchMonitor({
-			store,
-			sampler: new WatchSampler({
-				admission: watchAdmission,
-				agentDir: () => this.deps.getAgentDir(),
-				now: () => routineTimers.now(),
-			}),
-			parentSessionId,
-			timers: routineTimers,
-			agentDir: () => this.deps.getAgentDir(),
-			isDisposed: () => this.deps.isDisposed(),
-			warn: (message) => this._safeWarn(message),
-		});
-		const session = new RoutineSessionController({
-			store,
-			scheduler,
-			parentSessionId,
-			admitWatch: (condition) => watchAdmission.admit(condition),
-			capture: (request, signal) => this._getWorkerController().captureSavedIntent(request, signal),
-			invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
-			eventAnchor: () => routineEventAnchor(this._getWorkerLifecycle().getTaskRuntimeSnapshot()),
-			ownerTurnSources: () => this.deps.getOwnerEvidence().currentTurnSources(),
-			now: () => this.deps.getTimers().port("routines").now(),
-			isDisposed: () => this.deps.isDisposed(),
-		});
-		const intake = new RoutineIntake({
-			parentSessionId,
-			store,
-			routines: session,
-			evidence: this.deps.getOwnerEvidence(),
-			time: this.deps.getTimers().port("routine-intake"),
-			hostInactiveReason: () => {
-				const manager = this.deps.getSessionManager();
-				if (!manager.isPersisted() || !manager.getSessionFile()) return "ephemeral_session";
-				return this.deps.getSettingsManager().getRoutinesSettings().automaticIntake ? undefined : "disabled";
-			},
-			model: () => this._laneModels.resolveModel(undefined),
-			systemOne: () => this.deps.systemOne.recordingSemanticEngine(),
-			usageOwner: () => sessionSemanticUsageOf(this.deps.getSessionManager()),
-			maxEstimatedUsd: () => this.deps.getCapabilityEnvelope()?.maxEstimatedUsd,
-			isForegroundBusy: () => this.deps.isForegroundBusy(),
-			subscribeActivity: (listener) => this.deps.subscribeForegroundActivity(listener),
-			captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
-			captureBranchGuard: () =>
-				this.sessionBranchGuard("Routine intake session changed before its decision was saved."),
-			deliver: (notice, signal) => this.deps.deliverNotes(notice, { signal }),
-			isDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
-			observeHarnessNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read),
-			runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
-			ciWorkflowPaths: () => {
-				const lifecycle = this._getWorkerLifecycle();
-				const events = lifecycle.ledger.runtime.hostEvents;
-				return routineCiWorkflowPaths(lifecycle.getTaskRuntimeSnapshot(), (sourceId) =>
-					events.isSourceReady(sourceId),
-				);
-			},
-			warn: (message) => this._safeWarn(message),
-		});
-		this._routines = { scheduler, session, intake, watches };
+		const routines = this._routineAssembly.assemble(this._botTeamStore);
+		this._routines = routines;
 		if (this.routinesStarted) {
-			scheduler.start();
-			intake.start();
-			watches.start();
+			routines.scheduler.start();
+			routines.intake.start();
+			routines.watches.start();
 		}
 	}
 
@@ -2175,107 +1890,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return { stopped: legacyStopped, detail: legacy ? `${current} ${legacy}` : current };
 	}
 
-	/**
-	 * A leader's send to one of its own bots that has no live runtime: the bot starts as the leader's child under the goal
-	 * running now, and is held to that goal's envelope (its providers; its write paths only when the goal grants them). A
-	 * live bot, or a bot the leader did not make, is left to the ordinary mailbox send.
-	 */
-	private async startOwnedBotAsChild(
-		leaderAgentId: string,
-		leaderAlias: string,
-		alias: string,
-		message: string,
-		invocationId: string,
-	): Promise<BotOwnedStartOutcome> {
-		const store = this.getBotTeamStore();
-		const bot = store.getBot(alias);
-		if (!bot || bot.retired || bot.remote === true || bot.createdBy !== leaderAlias) return { handled: false };
-		const runtime = this.botBindings.runtime(alias);
-		if (this.listWorkerAgents().some((agent) => agent.agentId === runtime && agent.status !== "retired"))
-			return { handled: false };
-		const goal = this.getLeaders().currentFor(leaderAlias);
-		if (goal?.state !== "running")
-			return {
-				handled: true,
-				accepted: false,
-				detail: `${leaderAlias} has no goal running, so ${alias} is not started.`,
-			};
-		const leaderContract = this._getWorkerLifecycle().getAgentTurnDispatch(leaderAgentId)?.executionContract;
-		if (!contractGrantsChildren(leaderContract))
-			return {
-				handled: true,
-				accepted: false,
-				detail: `${leaderAlias} cannot start bots yet: its running worker was started before it could lead, and it restarts once its goal ends and nothing is waiting for it.`,
-			};
-		const envelope = goal.charter.envelope;
-		if (envelope.models.providers !== undefined && !envelope.models.providers.includes(bot.provider))
-			return {
-				handled: true,
-				accepted: false,
-				detail: `${alias} runs on ${bot.provider}, which this goal may not use.`,
-			};
-		const writable = bot.canWrite === true && envelope.leaderMayWrite && envelope.writePaths.length > 0;
-		// Named by the invocation: a repeated call names the same runtime, and the admission's replay key starts nothing new.
-		const preferredAgentId = `bot-${createHash("sha256")
-			.update(`leader-owned-start\0${invocationId}\0${alias}`)
-			.digest("hex")
-			.slice(0, 32)}`;
-		const memoryCtx = store.composeBotUnifiedMemoryContext(alias);
-		const instructions =
-			memoryCtx.promptBlock.length > 0 ? `${message}${BOT_MEMORY_BLOCK_SEPARATOR}${memoryCtx.promptBlock}` : message;
-		const stance = botStartModelStance(this.deps.getSettingsManager().getWorkerModelPinPolicy(), bot);
-		const outcome = await this._getWorkerController().admitNested({
-			parentAgentId: leaderAgentId,
-			delegationObjectiveId: goal.objectiveId,
-			instructions,
-			...(writable ? { writePaths: [...envelope.writePaths] } : {}),
-			messageReplayKey: `leader-owned-start:${invocationId}:${alias}`,
-			bot: {
-				...stance.flags,
-				...(bot.soul ? { botSoul: bot.soul } : {}),
-				...(bot.profileId ? { profileId: bot.profileId } : {}),
-				preferredAgentId,
-				authority: {
-					...(stance.ownModel ? { model: { provider: bot.provider, modelId: bot.modelId } } : {}),
-					...(bot.createdBy === "owner" ? { modelChosenBy: "owner" as const } : {}),
-					readOnly: !writable,
-					...(stance.ownModel && isOrchestrationThinkingLevel(bot.thinkingLevel)
-						? { thinkingLevel: bot.thinkingLevel }
-						: {}),
-				},
-			},
-		});
-		if (!outcome.started)
-			return { handled: true, accepted: false, detail: `${alias} was not started: ${outcome.skipReason}.` };
-		// The alias is bound to the runtime only once that runtime exists, so a refused start leaves no binding behind.
-		this.botBindings.bind(alias, preferredAgentId);
-		return {
-			handled: true,
-			accepted: true,
-			detail: `${alias} started under ${leaderAlias}; its answer reaches your next turn.`,
-		};
-	}
-
 	private createBotMessageDirectory(sender: string, attemptId: string): BotMessageDirectory {
-		return createBotMessageDirectory(
-			{
-				getSessionManager: () => this.deps.getSessionManager(),
-				isDisposed: () => this.deps.isDisposed(),
-				botBindings: this.botBindings,
-				getBotTeamStore: () => this.getBotTeamStore(),
-				invalidateBotViews: () => {
-					this._botViews = undefined;
-				},
-				listWorkerAgents: () => this.listWorkerAgents(),
-				createBotFor: (creator, request) => this.createBotFor(creator, request),
-				getLeaders: () => this.getLeaders(),
-				leaderDelegations: () => this.leaderDelegations(),
-				startOwnedBotAsChild: (leaderAgentId, leaderAlias, alias, message, invocationId) =>
-					this.startOwnedBotAsChild(leaderAgentId, leaderAlias, alias, message, invocationId),
-			},
-			sender,
-			attemptId,
-		);
+		return this._botLifecycle.createBotMessageDirectory(sender, attemptId);
 	}
 
 	/** True once this session has a worker runtime or a persisted orchestration store: only then can workers or managed lanes exist. */
@@ -2456,120 +2072,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	upsertPersistentBot(rawInput: UpsertPersistentBotInput): PersistentBotRecord {
-		const store = this.getBotTeamStore();
-		const agentId = normalizeBotOrTeamId(rawInput.agentId, "agentId");
-		// Judge the soul before the grant guard: an invalid soul is the error to show, whatever the bot is doing.
-		const input = rawInput.soul === undefined ? rawInput : { ...rawInput, soul: normalizeBotSoul(rawInput.soul) };
-		this.assertBotDispatchIdle(agentId);
-		store.reload();
-		const existing = store.getBot(agentId);
-		const bindingFields = [
-			"provider",
-			"modelId",
-			"thinkingLevel",
-			"profileId",
-			"canWrite",
-			"soul",
-			"leader",
-		] as const;
-		const bindingChanged =
-			existing &&
-			bindingFields.some((field) => {
-				const value = input[field];
-				if (value === undefined) return false;
-				const previous = existing[field];
-				const next = typeof value === "string" ? value.trim() || undefined : value;
-				return next !== (typeof previous === "string" ? previous.trim() || undefined : previous);
-			});
-		if (
-			bindingChanged &&
-			this._hasWorkerState() &&
-			this.listWorkerAgents().some(
-				(agent) => this.botBindings.runtimes(agentId).includes(agent.agentId) && agent.status !== "retired",
-			)
-		)
-			throw new Error(
-				`Retire bot ${input.agentId} (/bot retire ${input.agentId}) before changing its model, profile, permissions, soul or leadership: its live worker keeps the grant and soul it started with, and only a new worker generation gets the new ones.`,
-			);
-		if (input.leader !== undefined)
-			harnessLog.info("bots", input.leader ? "a bot was made a leader" : "a bot stopped being a leader", {
-				agentId,
-			});
-		return store.upsertBot({ ...input, agentId });
+		return this._botLifecycle.upsertPersistentBot(rawInput);
 	}
 
-	/**
-	 * Creates a bot on the authority of the orchestrator or of a leader (the owner's `/bot new` is the third way). A leader
-	 * cannot make a standing leader, grants write access only when it can write itself, and has a bound on the bots it keeps.
-	 * A goal leader (`bot lead` without agentId, appointed by the orchestrator or by a leader) is created a leader, for its one goal.
-	 */
 	createBotFor(
 		creator: { readonly kind: "root" } | { readonly kind: "leader"; readonly agentId: string },
 		request: BotCreationRequest,
 		options?: { readonly goalLeader?: boolean },
 	): CreatedBotView {
-		const store = this.getBotTeamStore();
-		store.reload();
-		const agentId = normalizeBotOrTeamId(
-			request.agentId ??
-				suggestBotId(
-					request.description ?? request.soul,
-					new Set([
-						...RESERVED_BOT_CREATOR_IDS,
-						...store.listBots({ includeRetired: true }).map((bot) => bot.agentId),
-					]),
-				),
-			"agentId",
-		);
-		let createdBy = "root";
-		let mayWrite = true;
-		if (creator.kind === "leader") {
-			const leader = store.getBot(creator.agentId);
-			if (leader?.leader !== true || leader.retired === true)
-				throw new Error(
-					mayNotCreateBotsText(
-						store
-							.listBots()
-							.filter((bot) => bot.leader === true)
-							.map((bot) => bot.agentId),
-					),
-				);
-			createdBy = leader.agentId;
-			mayWrite = leader.canWrite === true;
-		}
-		if (request.canWrite === true && !mayWrite)
-			throw new Error(`${createdBy} cannot give a bot write access: it has none itself.`);
-		const soul = request.soul === undefined ? undefined : normalizeBotSoul(request.soul);
-		const spec = this.resolveModelSpec(request.model);
-		const thinkingLevel = request.thinkingLevel ?? spec.thinkingLevel;
-		const bot = store.createBotIfAbsent(
-			{
-				agentId,
-				displayName: displayNameFor(agentId),
-				provider: spec.provider,
-				modelId: spec.modelId,
-				...(thinkingLevel ? { thinkingLevel } : {}),
-				...(soul ? { soul } : {}),
-				...(request.description ? { description: request.description } : {}),
-				canWrite: request.canWrite === true,
-				leader: options?.goalLeader === true,
-				createdBy,
-			},
-			creator.kind === "leader" ? { createdBy, max: MAX_BOTS_PER_LEADER } : undefined,
-		);
-		harnessLog.info("bots", "a bot was created", () => ({
-			agentId: bot.agentId,
-			by: createdBy,
-			model: `${bot.provider}/${bot.modelId}`,
-			canWrite: bot.canWrite === true,
-			goalLeader: bot.leader === true,
-		}));
-		return {
-			agentId: bot.agentId,
-			modelRef: `${bot.provider}/${bot.modelId}`,
-			canWrite: bot.canWrite === true,
-			createdBy,
-		};
+		return this._botLifecycle.createBotFor(creator, request, options);
 	}
 
 	private _remoteHub: RemoteHubController | undefined;
@@ -2911,67 +2422,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	retirePersistentBot(agentId: string): { retired: boolean; detail: string } {
-		try {
-			agentId = normalizeBotOrTeamId(agentId, "agentId");
-			// Retiring a leader mid-goal would orphan its goal and its bots: the goal is cancelled first.
-			if (this._hasWorkerState() && !this.deps.isChildSession() && this.getLeaders().leadsOpenDelegation(agentId))
-				throw new Error(`Bot ${agentId} leads an open goal; cancel it first (/lead cancel ${agentId}).`);
-			this.assertBotDispatchIdle(agentId);
-			const runtimes = new Set(this.botBindings.runtimes(agentId));
-			const workers = this._hasWorkerState()
-				? this.listWorkerAgents().filter((agent) => runtimes.has(agent.agentId))
-				: [];
-			if (workers.some((agent) => agent.status !== "retired" && agent.activity !== "idle"))
-				throw new Error(`Bot ${agentId} still has active group or direct work.`);
-			for (const worker of workers) this.retireWorkerAgent(worker.agentId, undefined, { discardPending: true });
-			const hasWorker = workers.length > 0;
-			const bot = this.getBotTeamStore().retireBot(agentId);
-			return {
-				retired: hasWorker || bot !== undefined,
-				detail: hasWorker || bot ? `Bot ${agentId} retired.` : `Bot ${agentId} does not exist.`,
-			};
-		} catch (error) {
-			return { retired: false, detail: error instanceof Error ? error.message : String(error) };
-		}
+		return this._botLifecycle.retirePersistentBot(agentId);
 	}
 
 	stopPersistentBot(agentId: string): { stopped: boolean; detail: string } {
-		try {
-			agentId = normalizeBotOrTeamId(agentId, "agentId");
-			const runtimes = new Set(this.botBindings.runtimes(agentId));
-			// Stopping a leader stops the bots it owns: their work was its work.
-			const ownedRuntimes = new Set(
-				this.getBotTeamStore()
-					.listBots()
-					.filter((bot) => bot.createdBy === agentId)
-					.flatMap((bot) => this.botBindings.runtimes(bot.agentId)),
-			);
-			const agents = this.listWorkerAgents();
-			const results = agents
-				.filter((agent) => runtimes.has(agent.agentId))
-				.map((agent) => this.interruptWorkerAgent(agent.agentId, undefined, { force: false }));
-			const owned = agents
-				.filter(
-					(agent) => ownedRuntimes.has(agent.agentId) && agent.status !== "retired" && agent.activity !== "idle",
-				)
-				.map((agent) => this.interruptWorkerAgent(agent.agentId, undefined, { force: false }))
-				.filter((result) => result.interrupted).length;
-			const res = results.find((result) => result.interrupted) ?? results[0] ?? { interrupted: false };
-			const ownedText = owned > 0 ? ` and ${owned} of its bots` : "";
-			return {
-				stopped: res.interrupted || owned > 0,
-				detail: res.interrupted
-					? `Stopped ${agentId}${ownedText} (${res.mode ?? "halt"}).`
-					: owned > 0
-						? `Stopped ${owned} of ${agentId}'s bots; ${agentId} itself was not running.`
-						: (res.reason ?? `${agentId} is not running.`),
-			};
-		} catch (error) {
-			return {
-				stopped: false,
-				detail: error instanceof Error ? error.message : `${agentId} is not running.`,
-			};
-		}
+		return this._botLifecycle.stopPersistentBot(agentId);
 	}
 
 	upsertPersistentTeam(input: UpsertPersistentTeamInput): PersistentTeamRecord {
@@ -2986,160 +2441,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this.getBotTeamStore().deleteTeam(teamId);
 	}
 
-	private createSyntheticBotSummaryMessage(bot: PersistentBotRecord | undefined, summary: string): AssistantMessage {
-		return {
-			role: "assistant",
-			content: [{ type: "text", text: `[Prior turn summary]: ${summary}` }],
-			api: "anthropic-messages",
-			provider: bot?.provider ?? "anthropic",
-			model: bot?.modelId ?? "claude-haiku-5-5",
-			usage: {
-				totalTokens: 0,
-				input: 0,
-				output: 0,
-				cacheRead: 0,
-				cacheWrite: 0,
-				cost: { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
-			},
-			stopReason: "stop",
-			timestamp: bot?.lastMessageAt ?? Date.now(),
-		};
-	}
-
 	readBotChatMessages(agentId: string, teamId?: string): AgentMessage[] {
-		const normId = normalizeBotOrTeamId(agentId, "agentId");
-		if (this.getBotTeamStore().getBot(normId)?.remote) return this.getRemoteHub().chat(normId);
-		const team = teamId ? this.getBotTeamStore().getTeam(teamId) : undefined;
-		const runtime = this.botBindings.runtime(normId, teamId, team ? teamIncarnation(team) : undefined);
-		let conv = this.openWorkerTranscript(runtime);
-		const bot = this.getBotTeamStore().getBot(normId);
-		if (!teamId && !conv && bot?.lastTranscriptRef) {
-			conv = this.openWorkerTranscript(bot.lastTranscriptRef);
-		}
-		if (conv) {
-			const msgs = conv.getProviderContext().messages;
-			const filtered = msgs.filter((msg) => {
-				if (msg.role !== "user") return true;
-				let text = "";
-				if (typeof msg.content === "string") {
-					text = msg.content;
-				} else if (Array.isArray(msg.content)) {
-					text = msg.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
-				}
-				const trimmed = text.trimStart();
-				const isSyntheticBirth =
-					(trimmed.startsWith("<chat>\n") || trimmed.startsWith("<chat>")) &&
-					(trimmed.includes("The view") || trimmed.includes("id+n|"));
-				return !isSyntheticBirth;
-			});
-			if (filtered.length > 0) {
-				const shown: AgentMessage[] = [];
-				for (const msg of filtered) {
-					if (msg.role === "assistant") {
-						// A bot that answers through `submit_report` said its summary: the chat shows those words, not the call.
-						shown.push({
-							...msg,
-							content: msg.content.map((part) => {
-								if (part.type === "text") return { ...part, text: botReplyText(part.text) };
-								if (part.type === "toolCall" && part.name === SUBMIT_REPORT_TOOL_NAME) {
-									const summary: unknown = part.arguments.summary;
-									return { type: "text" as const, text: typeof summary === "string" ? summary : "" };
-								}
-								return part;
-							}),
-						});
-						continue;
-					}
-					if (msg.role === "toolResult" && msg.toolName === SUBMIT_REPORT_TOOL_NAME) continue;
-					if (msg.role !== "user") {
-						shown.push(msg);
-						continue;
-					}
-					const text = botChatOperatorText(msg, workerControlOf(msg));
-					// A follow-up reaches the bot twice, as its wake task and as its mailbox message: one line in the chat.
-					const previous = shown.at(-1);
-					if (previous?.role === "user" && previous.timestamp !== undefined && msg.timestamp !== undefined) {
-						const previousText =
-							typeof previous.content === "string"
-								? previous.content
-								: previous.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
-						if (previousText === text) continue;
-					}
-					shown.push({ ...msg, content: [{ type: "text", text }] });
-				}
-				return shown;
-			}
-		}
-
-		const store = this.getBotTeamStore();
-		const memberTeamIds = teamId ? [teamId] : [];
-		const relevantTeamMessages = memberTeamIds.flatMap((tId) =>
-			store.listTeamMessages(tId).filter((m) => m.targetAgentIds.includes(normId)),
-		);
-		const laneRecords = this.getLaneRecords().filter((r) => r.agentId === runtime || r.laneId === runtime);
-
-		if (relevantTeamMessages.length === 0 && laneRecords.length === 0) {
-			return !teamId && bot?.lastSummary ? [this.createSyntheticBotSummaryMessage(bot, bot.lastSummary)] : [];
-		}
-
-		const fallbackMessages: AgentMessage[] = [];
-		for (const record of laneRecords) {
-			const label = record.label;
-			if (label) {
-				fallbackMessages.push({
-					role: "user",
-					content: [{ type: "text", text: label }],
-					timestamp: record.startedAt ? new Date(record.startedAt).getTime() : Date.now(),
-				});
-			}
-			if (record.status !== "running" && record.status !== "queued") {
-				fallbackMessages.push({
-					role: "custom",
-					customType: "bot-lane-status",
-					content: `[${normId}] ${record.reasonCode ?? `Task ${record.status}`}`,
-					display: true,
-					timestamp: record.completedAt ? new Date(record.completedAt).getTime() : Date.now(),
-				});
-			}
-		}
-		for (const tm of relevantTeamMessages) {
-			fallbackMessages.push({
-				role: "user",
-				content: [{ type: "text", text: `[Team ${tm.teamId}] ${tm.text}` }],
-				timestamp: tm.timestamp,
-			});
-		}
-		if (!teamId && fallbackMessages.length === 0 && bot?.lastSummary) {
-			fallbackMessages.push(this.createSyntheticBotSummaryMessage(bot, bot.lastSummary));
-		}
-		fallbackMessages.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
-		return fallbackMessages;
+		return this._botChat.readBotChatMessages(agentId, teamId);
 	}
 
 	readTeamChatMessages(teamId: string): AgentMessage[] {
-		const store = this.getBotTeamStore();
-		const teamMessages = store.listTeamMessages(teamId);
-		const result: AgentMessage[] = [];
-
-		for (const msg of teamMessages) {
-			// One shape for every speaker: the text as written, and who spoke to whom as fields the chat view draws.
-			result.push({
-				role: "custom",
-				customType: "team-message",
-				content: msg.text,
-				display: true,
-				details: {
-					teamId,
-					from:
-						msg.sender.kind === "bot" ? { kind: "bot", agentId: msg.sender.agentId } : { kind: msg.sender.kind },
-					to: [...msg.targetAgentIds],
-				},
-				timestamp: msg.timestamp,
-			});
-		}
-
-		result.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
-		return result;
+		return this._botChat.readTeamChatMessages(teamId);
 	}
 
 	subscribeOrchestrationStore(listener: () => void): () => void {
@@ -3149,318 +2456,20 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this.subscribeLaneRecords(() => listener());
 	}
 
-	async sendOperatorMessageToBot(
+	sendOperatorMessageToBot(
 		agentId: string,
 		message: string,
 		options?: BotOperatorMessageOptions & { teamId?: string; teamIncarnationId?: string },
 	): Promise<BotOperatorMessageDispatchResult> {
-		const normId = normalizeBotOrTeamId(agentId, "agentId");
-		const manager = this.deps.getSessionManager();
-		const teamId = options?.teamId ? normalizeBotOrTeamId(options.teamId, "teamId") : undefined;
-		const team = teamId ? this.getBotTeamStore().getTeam(teamId) : undefined;
-		if (
-			teamId &&
-			(!team?.memberAgentIds.includes(normId) ||
-				(options?.teamIncarnationId && options.teamIncarnationId !== teamIncarnation(team)))
-		)
-			throw new Error("Bot is not a member of the selected group generation.");
-		const context: BotRuntimeContext = {
-			agentId: normId,
-			...(team ? { teamId: team.teamId, teamIncarnationId: teamIncarnation(team) } : {}),
-		};
-		const assertBranchContext = manager.captureBranchContext();
-		const assertBranch = () => {
-			if (this.deps.isDisposed()) throw new Error("Cannot dispatch a bot message after session disposal.");
-			if (this.deps.getSessionManager() !== manager) throw new Error("Bot message belongs to a previous session.");
-			assertBranchContext();
-		};
-		const key = JSON.stringify([manager.getSessionId(), normId, context.teamId, context.teamIncarnationId]);
-		const previous = this.botDispatches.get(key) ?? Promise.resolve();
-		const result = previous.then(() => {
-			assertBranch();
-			return this.dispatchOperatorMessageToBot(context, message, options, assertBranch);
-		});
-		const settled = result.then(
-			() => undefined,
-			() => undefined,
-		);
-		this.botDispatches.set(key, settled);
-		void settled.then(() => {
-			if (this.botDispatches.get(key) === settled) this.botDispatches.delete(key);
-		});
-		return result;
+		return this._botDispatch.sendOperatorMessageToBot(agentId, message, options);
 	}
 
 	private assertBotDispatchIdle(agentId: string): void {
-		const sessionId = this.deps.getSessionManager().getSessionId();
-		if (
-			[...this.botDispatches.keys()].some((key) => {
-				const [parent, alias] = JSON.parse(key);
-				return parent === sessionId && alias === agentId;
-			})
-		)
-			throw new Error(
-				`Bot ${agentId} has a pending message dispatch; wait for it before editing or retiring the bot.`,
-			);
+		this._botDispatch.assertBotDispatchIdle(agentId);
 	}
 
-	private async dispatchOperatorMessageToBot(
-		context: BotRuntimeContext,
-		message: string,
-		options: BotOperatorMessageOptions | undefined,
-		assertCurrentBranch: () => void,
-	): Promise<BotOperatorMessageDispatchResult> {
-		const { agentId: normId, teamId, teamIncarnationId } = context;
-		const store = this.getBotTeamStore();
-		if (teamId) {
-			if (store.reload(true)) this._botViews = undefined;
-			const team = store.getTeam(teamId);
-			if (!team || teamIncarnation(team) !== teamIncarnationId || !team.memberAgentIds.includes(normId))
-				throw new Error("Bot membership or selected group changed before dispatch.");
-		}
-		if (store.getBot(normId)?.remote) {
-			// A machine joined over the link answers on its own; nothing here starts a worker for it.
-			const hub = this.getRemoteHub();
-			// The orchestrator's turn is a lane, so its end notifies the asker; the owner's own words stay chat.
-			const messageId =
-				options?.fromRoot || options?.answerInSession ? await hub.ask(normId, message) : hub.send(normId, message);
-			return { agentId: normId, mode: "queued", messageId, modelRef: "link/remote" };
-		}
-		const runtime = this.botBindings.runtime(normId, teamId, teamIncarnationId);
-		let liveAgents: WorkerAgentView[] = [];
-		try {
-			liveAgents = this.listWorkerAgents();
-		} catch {
-			liveAgents = [];
-		}
-		let bot = store.ensureBotForDispatch(normId, () =>
-			this.resolveModelSpec(liveAgents.find((agent) => agent.agentId === runtime)?.modelRef),
-		);
-
-		const requestedMode = options?.mode ?? "follow_up";
-
-		const existingAgent = liveAgents.find((a) => a.agentId === runtime && a.status !== "retired");
-
-		const memoryCtx = store.composeBotUnifiedMemoryContext(normId, teamId, teamIncarnationId);
-		const messageOptions = {
-			...(teamId ? { threadId: `team:${teamId}:${teamIncarnationId}` } : {}),
-			...(options?.delegationObjectiveId ? { delegationObjectiveId: options.delegationObjectiveId } : {}),
-			...(options?.idempotencyKey ? { idempotencyKey: options.idempotencyKey } : {}),
-			...(options?.fromLeader ? { fromLeader: this.botBindings.runtime(options.fromLeader) } : {}),
-		};
-
-		if (existingAgent && (requestedMode === "follow_up" || requestedMode === "queue")) {
-			// The bot received its memory block when it started and edits its blackboards directly; repeating the
-			// block in every operator message would bloat its transcript and the chat the operator reads.
-			const modelRef = existingAgent.modelRef ?? `${bot.provider}/${bot.modelId}`;
-			if (requestedMode === "queue") {
-				const res = this.sendSessionRootWorkerAgentMessage(runtime, message, messageOptions);
-				return { agentId: normId, mode: "queued", messageId: res.messageId, modelRef };
-			}
-			const res = this.followUpSessionRootWorkerAgent(runtime, message, messageOptions);
-			if (res.record?.attemptId && !options?.fromRoot)
-				this._getWorkerNotificationCoordinator().noteOwnerDirectAttempt(res.record.attemptId);
-			return {
-				agentId: normId,
-				mode: res.steering ? "steered" : res.started ? "followed_up" : "queued",
-				messageId: res.messageId,
-				laneId: res.record?.laneId,
-				modelRef,
-			};
-		}
-
-		if (bot.retired) {
-			bot = store.upsertBot({ agentId: normId, retired: false });
-		}
-		// Use the current record returned by the locked mutation, including another parent's edits.
-		const spec = { provider: bot.provider, modelId: bot.modelId };
-
-		// Fresh worker start with preferredAgentId so lane and worker identity match the persistent bot
-		// The memory block follows the task: the lane label, the roster line and the chat open on what the operator sent.
-		const fullInstructions =
-			memoryCtx.promptBlock.length > 0 ? `${message}${BOT_MEMORY_BLOCK_SEPARATOR}${memoryCtx.promptBlock}` : message;
-
-		const activeIds = Array.from(
-			new Set(
-				this.getLaneRecords()
-					.filter((r) => r.status === "running" || r.status === "queued")
-					.map((r) => r.agentId ?? r.laneId)
-					.filter((id): id is string => typeof id === "string" && id.length > 0 && id !== normId),
-			),
-		);
-
-		const preferredAgentId =
-			options?.idempotencyKey === undefined
-				? `bot-${randomUUID()}`
-				: keyedBotRuntimeId(normId, options.idempotencyKey);
-		// Publish the context before execution: recovery never has to guess a group's origin from its name.
-		assertCurrentBranch();
-		this.botBindings.bind(normId, preferredAgentId, teamId, teamIncarnationId);
-		const stance = botStartModelStance(this.deps.getSettingsManager().getWorkerModelPinPolicy(), bot);
-		const started = await this.startWorkerDelegation({
-			...stance.flags,
-			instructions: fullInstructions,
-			// The soul is admitted into the worker's contract, so every turn of this worker generation carries it.
-			...(bot.soul ? { botSoul: bot.soul } : {}),
-			...(bot.profileId ? { profileId: bot.profileId } : {}),
-			authority: {
-				...(stance.ownModel ? { model: { provider: spec.provider, modelId: spec.modelId } } : {}),
-				// The owner's own choice of this bot's model is honoured as given; a root's or a leader's is held to the subscription rule.
-				...(bot.createdBy === "owner" ? { modelChosenBy: "owner" as const } : {}),
-				// A chat bot answers in plain text, which only a read-only worker may do; a write-capable one reports in the claim envelope.
-				readOnly: bot.canWrite !== true,
-				...(stance.ownModel && isOrchestrationThinkingLevel(bot.thinkingLevel)
-					? { thinkingLevel: bot.thinkingLevel }
-					: {}),
-			},
-			preferredAgentId,
-			// A leader's brief to a bot that has no live worker starts it under the delegation, not the foreground goal.
-			...(options?.delegationObjectiveId ? { delegationObjectiveId: options.delegationObjectiveId } : {}),
-			...(options?.idempotencyKey ? { messageReplayKey: options.idempotencyKey } : {}),
-			// A standing leader's runtime is granted the children it may start (`admitNested`); any other bot is a leaf.
-			...(bot.leader === true ? { delegationLimits: this.leaderDelegationLimits() } : {}),
-			...(activeIds.length > 0
-				? {
-						parallelWork: {
-							independentOf: activeIds,
-							justification: `Direct operator chat with persistent bot ${normId}`,
-						},
-					}
-				: {}),
-		});
-
-		if (!started.started) {
-			throw new Error(`Failed to start persistent bot agent "${normId}": ${started.skipReason ?? "unknown error"}`);
-		}
-		const startedAgentId = started.record.agentId ?? started.record.laneId;
-		if (started.record.attemptId && !options?.fromRoot)
-			this._getWorkerNotificationCoordinator().noteOwnerDirectAttempt(started.record.attemptId);
-		try {
-			assertCurrentBranch();
-			if (startedAgentId !== preferredAgentId) throw new Error("Bot start returned a different runtime identity.");
-			if (teamId) {
-				if (store.reload(true)) this._botViews = undefined;
-				const current = store.getTeam(teamId);
-				if (!current || teamIncarnation(current) !== teamIncarnationId || !current.memberAgentIds.includes(normId))
-					throw new Error("Bot membership or selected group changed while starting.");
-			}
-		} catch (bindingError) {
-			try {
-				const current = this.listWorkerAgents().find((agent) => agent.agentId === startedAgentId);
-				if (!started.record.attemptId || current?.attemptId !== started.record.attemptId)
-					throw new Error("The started attempt is no longer current; later work was not cancelled.");
-				if (!this.getWorkerAttemptResult(started.record.attemptId)) {
-					const cancelled = this.cancelWorkerAgent(startedAgentId, "bot_binding_publication_failed");
-					if (cancelled?.attemptId !== started.record.attemptId)
-						throw new Error("Cancellation did not confirm the exact started attempt.");
-				}
-			} catch (cleanupError) {
-				throw new AggregateError(
-					[bindingError, cleanupError],
-					`Bot ${normId} binding failed for ${startedAgentId}/${started.record.attemptId ?? "unknown"}; cleanup failed: ${cleanupError instanceof Error ? cleanupError.message : String(cleanupError)}`,
-				);
-			}
-			throw new Error(
-				`Bot ${normId} binding failed for ${startedAgentId}/${started.record.attemptId}; its started work was cancelled or already terminal: ${bindingError instanceof Error ? bindingError.message : String(bindingError)}`,
-				{ cause: bindingError },
-			);
-		}
-		this._botViews = undefined;
-
-		return {
-			mode: "started",
-			agentId: normId,
-			laneId: started.record.laneId,
-			modelRef: started.record.modelRef ?? `${spec.provider}/${spec.modelId}`,
-			messageId: `bot-msg-${Date.now()}`,
-		};
-	}
-
-	async sendOperatorMessageToTeam(teamIdRaw: string, message: string): Promise<TeamOperatorMessageDispatchResult> {
-		const manager = this.deps.getSessionManager();
-		const assertBranch = manager.captureBranchContext();
-		const assertContext = () => {
-			if (this.deps.isDisposed() || this.deps.getSessionManager() !== manager)
-				throw new Error("Group message belongs to a previous session.");
-			assertBranch();
-		};
-		assertContext();
-		const teamId = normalizeBotOrTeamId(teamIdRaw, "teamId");
-		const store = this.getBotTeamStore();
-		const team = store.getTeam(teamId);
-		if (!team) {
-			throw new Error(`Cannot send message to nonexistent team "${teamId}". Create the team first.`);
-		}
-
-		const members = team.memberAgentIds;
-		if (members.length === 0) {
-			throw new Error(`Team "${teamId}" has no members to receive messages.`);
-		}
-
-		store.ensureTeamMemoryFile(teamId);
-		const timestamp = Date.now();
-		const messageId = `team-msg-${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
-		const deliveries: PersistentTeamMemberDelivery[] = [];
-
-		const trimmedMessage = message.trim();
-		let targetAgentIds: string[] = [];
-		let contentForBots = trimmedMessage;
-
-		if (trimmedMessage.startsWith("@")) {
-			const spaceIdx = trimmedMessage.indexOf(" ");
-			const targetRaw = (spaceIdx === -1 ? trimmedMessage.slice(1) : trimmedMessage.slice(1, spaceIdx)).replace(
-				/[:,;]+$/,
-				"",
-			);
-			const matched = members.find((m) => m.toLowerCase() === targetRaw.toLowerCase());
-			if (matched) {
-				targetAgentIds = [matched];
-				contentForBots = spaceIdx === -1 ? "" : trimmedMessage.slice(spaceIdx + 1).trim();
-			} else throw new Error(`Bot ${targetRaw} is not a member of group ${teamId}.`);
-		}
-
-		const targets = targetAgentIds.length > 0 ? targetAgentIds : members;
-
-		for (const memberId of targets) {
-			assertContext();
-			try {
-				const botResult = await this.sendOperatorMessageToBot(memberId, contentForBots, {
-					teamId,
-					teamIncarnationId: teamIncarnation(team),
-				});
-				assertContext();
-				deliveries.push({
-					agentId: memberId,
-					outcome: botResult.mode === "started" ? "started" : botResult.mode === "queued" ? "queued" : "steering",
-					messageId: botResult.messageId,
-				});
-			} catch (err) {
-				assertContext();
-				deliveries.push({
-					agentId: memberId,
-					outcome: "failed",
-					detail: err instanceof Error ? err.message : String(err),
-				});
-			}
-		}
-
-		const teamMsg: PersistentTeamMessage = {
-			messageId,
-			teamId,
-			sender: { kind: "operator" },
-			text: message,
-			timestamp,
-			targetAgentIds: [...targets],
-			deliveries,
-		};
-		assertContext();
-		store.appendScopedTeamMessage(teamMsg, teamIncarnation(team));
-
-		return {
-			teamId,
-			message: teamMsg,
-			deliveries,
-		};
+	sendOperatorMessageToTeam(teamIdRaw: string, message: string): Promise<TeamOperatorMessageDispatchResult> {
+		return this._botDispatch.sendOperatorMessageToTeam(teamIdRaw, message);
 	}
 
 	persistWorkerTerminalReport(
@@ -3474,49 +2483,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			reasonDetail?: string;
 		},
 	): void {
-		const entries = this.deps.getSessionManager().getEntries();
-		const claim =
-			terminal.attemptId === undefined
-				? undefined
-				: getWorkerClaimSnapshots(entries).find((candidate) => candidate.terminalAttemptId === terminal.attemptId);
-		const claimId = terminal.attemptId ?? `lane:${terminal.laneId}:${terminal.completedAt ?? ""}:${terminal.status}`;
-		if (
-			entries.some(
-				(entry) =>
-					entry.type === "custom" &&
-					entry.customType === CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE &&
-					(entry.data as { claimId?: unknown } | undefined)?.claimId === claimId,
-			)
-		) {
-			return;
-		}
-		const reason = terminal.reasonCode ? ` (${terminal.reasonCode})` : "";
-		const detail = terminal.reasonDetail ? boundedRedactedDiagnosticText(terminal.reasonDetail) : undefined;
-		const transcriptReference = this.workerTranscriptReference(terminal);
-		const report: ContinuousChatWorkReportEntry = {
-			version: 1,
-			name,
-			claimId,
-			text: claim
-				? workerReportClaimText(claim)
-				: `Terminal status ${terminal.status}${reason}.${detail ? ` Diagnostic: ${detail}` : ""}`,
-			timestamp: Date.now(),
-			...(transcriptReference ? { transcriptReference } : {}),
-		};
-		this.deps.getSessionManager().appendCustomEntry(CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE, report);
-		try {
-			const context = this.botBindings.generationContext(name);
-			const alias = context.agentId;
-			if (!context.teamId && !this.botBindings.alias(name)) return;
-			this.getBotTeamStore().recordBotTurnOutcome({
-				agentId: alias,
-				...(context.teamId ? { teamId: context.teamId, teamIncarnationId: context.teamIncarnationId } : {}),
-				summary: report.text,
-				transcriptRef: transcriptReference,
-				timestamp: report.timestamp,
-			});
-		} catch {
-			// Outcome recording is advisory; must not fail terminal report persistence
-		}
+		this._terminalReports.persist(name, terminal);
 	}
 }

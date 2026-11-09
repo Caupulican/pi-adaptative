@@ -1,0 +1,197 @@
+/**
+ * The chat an operator reads for a bot or a group: the bot's durable worker conversation shaped into the messages the chat
+ * view draws, with the remote hub's chat for a machine joined over the link, the lane and group records as the fallback
+ * when no conversation exists, and a group's own message log. It reads through the ports the coordinator gives it and never
+ * builds a worker, a store or a hub itself.
+ */
+import type { AssistantMessage } from "@caupulican/pi-ai";
+import type { AgentMessage } from "../../kernel/types.ts";
+import { workerControlOf } from "../../kernel/worker-control-stamp.ts";
+import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { RemoteHubController } from "../remote/hub-controller.ts";
+import type { BotRuntimeBindings } from "./bot-runtime-bindings.ts";
+import {
+	botChatOperatorText,
+	botReplyText,
+	normalizeBotOrTeamId,
+	type PersistentBotRecord,
+	type PersistentBotTeamStore,
+	teamIncarnation,
+} from "./persistent-bot-team-store.ts";
+import type { WorkerConversation } from "./worker-conversation-store.ts";
+import { SUBMIT_REPORT_TOOL_NAME } from "./worker-report.ts";
+
+/** What the chat reads from the coordinator: the roster store, the hub's chat, the worker transcript and the lane records. */
+export interface BotChatHost {
+	getBotTeamStore(): PersistentBotTeamStore;
+	getRemoteHub(): Pick<RemoteHubController, "chat">;
+	openWorkerTranscript(agentId: string): WorkerConversation | undefined;
+	getLaneRecords(): LaneRecord[];
+}
+
+/** Reads the chat of a bot (its own generation, or a group's) and the message log of a group. */
+export class BotChatTranscript {
+	private readonly botBindings: Pick<BotRuntimeBindings, "runtime">;
+	private readonly host: BotChatHost;
+
+	constructor(botBindings: Pick<BotRuntimeBindings, "runtime">, host: BotChatHost) {
+		this.botBindings = botBindings;
+		this.host = host;
+	}
+
+	private createSyntheticBotSummaryMessage(bot: PersistentBotRecord | undefined, summary: string): AssistantMessage {
+		return {
+			role: "assistant",
+			content: [{ type: "text", text: `[Prior turn summary]: ${summary}` }],
+			api: "anthropic-messages",
+			provider: bot?.provider ?? "anthropic",
+			model: bot?.modelId ?? "claude-haiku-5-5",
+			usage: {
+				totalTokens: 0,
+				input: 0,
+				output: 0,
+				cacheRead: 0,
+				cacheWrite: 0,
+				cost: { total: 0, input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
+			},
+			stopReason: "stop",
+			timestamp: bot?.lastMessageAt ?? Date.now(),
+		};
+	}
+
+	readBotChatMessages(agentId: string, teamId?: string): AgentMessage[] {
+		const normId = normalizeBotOrTeamId(agentId, "agentId");
+		if (this.host.getBotTeamStore().getBot(normId)?.remote) return this.host.getRemoteHub().chat(normId);
+		const team = teamId ? this.host.getBotTeamStore().getTeam(teamId) : undefined;
+		const runtime = this.botBindings.runtime(normId, teamId, team ? teamIncarnation(team) : undefined);
+		let conv = this.host.openWorkerTranscript(runtime);
+		const bot = this.host.getBotTeamStore().getBot(normId);
+		if (!teamId && !conv && bot?.lastTranscriptRef) {
+			conv = this.host.openWorkerTranscript(bot.lastTranscriptRef);
+		}
+		if (conv) {
+			const msgs = conv.getProviderContext().messages;
+			const filtered = msgs.filter((msg) => {
+				if (msg.role !== "user") return true;
+				let text = "";
+				if (typeof msg.content === "string") {
+					text = msg.content;
+				} else if (Array.isArray(msg.content)) {
+					text = msg.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+				}
+				const trimmed = text.trimStart();
+				const isSyntheticBirth =
+					(trimmed.startsWith("<chat>\n") || trimmed.startsWith("<chat>")) &&
+					(trimmed.includes("The view") || trimmed.includes("id+n|"));
+				return !isSyntheticBirth;
+			});
+			if (filtered.length > 0) {
+				const shown: AgentMessage[] = [];
+				for (const msg of filtered) {
+					if (msg.role === "assistant") {
+						// A bot that answers through `submit_report` said its summary: the chat shows those words, not the call.
+						shown.push({
+							...msg,
+							content: msg.content.map((part) => {
+								if (part.type === "text") return { ...part, text: botReplyText(part.text) };
+								if (part.type === "toolCall" && part.name === SUBMIT_REPORT_TOOL_NAME) {
+									const summary: unknown = part.arguments.summary;
+									return { type: "text" as const, text: typeof summary === "string" ? summary : "" };
+								}
+								return part;
+							}),
+						});
+						continue;
+					}
+					if (msg.role === "toolResult" && msg.toolName === SUBMIT_REPORT_TOOL_NAME) continue;
+					if (msg.role !== "user") {
+						shown.push(msg);
+						continue;
+					}
+					const text = botChatOperatorText(msg, workerControlOf(msg));
+					// A follow-up reaches the bot twice, as its wake task and as its mailbox message: one line in the chat.
+					const previous = shown.at(-1);
+					if (previous?.role === "user" && previous.timestamp !== undefined && msg.timestamp !== undefined) {
+						const previousText =
+							typeof previous.content === "string"
+								? previous.content
+								: previous.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+						if (previousText === text) continue;
+					}
+					shown.push({ ...msg, content: [{ type: "text", text }] });
+				}
+				return shown;
+			}
+		}
+
+		const store = this.host.getBotTeamStore();
+		const memberTeamIds = teamId ? [teamId] : [];
+		const relevantTeamMessages = memberTeamIds.flatMap((tId) =>
+			store.listTeamMessages(tId).filter((m) => m.targetAgentIds.includes(normId)),
+		);
+		const laneRecords = this.host.getLaneRecords().filter((r) => r.agentId === runtime || r.laneId === runtime);
+
+		if (relevantTeamMessages.length === 0 && laneRecords.length === 0) {
+			return !teamId && bot?.lastSummary ? [this.createSyntheticBotSummaryMessage(bot, bot.lastSummary)] : [];
+		}
+
+		const fallbackMessages: AgentMessage[] = [];
+		for (const record of laneRecords) {
+			const label = record.label;
+			if (label) {
+				fallbackMessages.push({
+					role: "user",
+					content: [{ type: "text", text: label }],
+					timestamp: record.startedAt ? new Date(record.startedAt).getTime() : Date.now(),
+				});
+			}
+			if (record.status !== "running" && record.status !== "queued") {
+				fallbackMessages.push({
+					role: "custom",
+					customType: "bot-lane-status",
+					content: `[${normId}] ${record.reasonCode ?? `Task ${record.status}`}`,
+					display: true,
+					timestamp: record.completedAt ? new Date(record.completedAt).getTime() : Date.now(),
+				});
+			}
+		}
+		for (const tm of relevantTeamMessages) {
+			fallbackMessages.push({
+				role: "user",
+				content: [{ type: "text", text: `[Team ${tm.teamId}] ${tm.text}` }],
+				timestamp: tm.timestamp,
+			});
+		}
+		if (!teamId && fallbackMessages.length === 0 && bot?.lastSummary) {
+			fallbackMessages.push(this.createSyntheticBotSummaryMessage(bot, bot.lastSummary));
+		}
+		fallbackMessages.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+		return fallbackMessages;
+	}
+
+	readTeamChatMessages(teamId: string): AgentMessage[] {
+		const store = this.host.getBotTeamStore();
+		const teamMessages = store.listTeamMessages(teamId);
+		const result: AgentMessage[] = [];
+
+		for (const msg of teamMessages) {
+			// One shape for every speaker: the text as written, and who spoke to whom as fields the chat view draws.
+			result.push({
+				role: "custom",
+				customType: "team-message",
+				content: msg.text,
+				display: true,
+				details: {
+					teamId,
+					from:
+						msg.sender.kind === "bot" ? { kind: "bot", agentId: msg.sender.agentId } : { kind: msg.sender.kind },
+					to: [...msg.targetAgentIds],
+				},
+				timestamp: msg.timestamp,
+			});
+		}
+
+		result.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
+		return result;
+	}
+}

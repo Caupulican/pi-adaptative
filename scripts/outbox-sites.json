@@ -99,9 +99,9 @@
 			"reason": "port adapter of the host-event session: its root delivery is guarded and receipted by the session controller, and the delivery id is the parent ledger's idempotency key"
 		},
 		{
-			"file": "packages/coding-agent/src/core/background-lane-controller.ts",
+			"file": "packages/coding-agent/src/core/routines/routine-runtime-assembly.ts",
 			"transport": "this.deps.deliverNotes(",
-			"enclosing": ["_ensureRoutineScheduler"],
+			"enclosing": ["assemble"],
 			"count": 1,
 			"reason": "port adapter of routine intake: announce claims the notice (claimThenEffect) before it calls deliver, and isDelivered reads the same delivery id"
 		},
