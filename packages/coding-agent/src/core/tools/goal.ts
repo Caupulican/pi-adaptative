@@ -39,12 +39,14 @@ import { requirementCoverageProbe } from "../goals/requirement-dependencies.ts";
 import { laneWorkerRefusalSkipRemedy, WORKER_CAPABILITY_INSUFFICIENT_SKIP_REASON } from "../model-capability.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { awaitPreflight } from "../preflight.ts";
+import { PROOF_SHEET_DETAILS_KEY, type ProofSheetRecord, proofSheetUnavailableLine } from "../proof/proof-sheet.ts";
 import { TYPESAFE_API_CREDENTIAL } from "../review/typesafe-contract.ts";
 import type { RuleHookRefusal } from "../rule-hooks/rule-hook-delivery.ts";
 import { requestsBugFix } from "../system-one/bug-fix.ts";
 import {
 	COMPLETION_ACCOUNT_GUIDANCE,
 	COMPLETION_ACCOUNT_SHAPE,
+	type CompletionAccount,
 	completionAccountInputSchema,
 	parseCompletionAccount,
 } from "../system-one/completion-account.ts";
@@ -266,6 +268,8 @@ export interface GoalToolDetails {
 	 * A receipt key, so it survives the retention stub that replaces the (large) goal state.
 	 */
 	piReceipts?: { requirementChecks: GoalCheckRuns };
+	/** Set on the call that completed the goal: the code-rendered proof sheet shown before the model's summary. */
+	[PROOF_SHEET_DETAILS_KEY]?: ProofSheetRecord;
 	/** Set on a completion refused with the noticed-items rule: the ids of the rules the refusal text delivers. */
 	[RULE_IDS_DETAIL_KEY]?: readonly string[];
 }
@@ -284,6 +288,15 @@ export type GoalUserEvidenceResolution =
 	| { verified: false; reason: string };
 
 export interface GoalToolDependencies {
+	/**
+	 * The proof sheet of the goal this call completed, from the goal record, the account and the changed files the
+	 * completion read. Absent, the completion carries no sheet; a sheet never decides whether the goal completes.
+	 */
+	buildCompletionProofSheet?: (input: {
+		state: GoalState;
+		account?: CompletionAccount;
+		changedFiles?: readonly string[];
+	}) => { text: string; record: ProofSheetRecord };
 	/** Full rejected judgment retained by the existing System One evidence paging owner. */
 	retainCompletionEvidence?: (toolCallId: string, decision: FinalCompletionVerdict) => GoalCompletionEvidence;
 	/** Read the latest persisted goal state for the active session. */
@@ -1127,6 +1140,9 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			// so the runs are a mechanical receipt the end-of-turn claim check can read.
 			let checkRuns: GoalCheckRuns | undefined;
 			let completionAdvisories: FinalCompletionVerdict["advisories"];
+			// What the proof sheet of a completion this call makes reads: the account and the files the completion saw.
+			let completionAccount: CompletionAccount | undefined;
+			let completionChangedFiles: readonly string[] | undefined;
 			const withCheckRuns = <T extends { details: GoalToolDetails }>(result: T): T =>
 				checkRuns
 					? { ...result, details: { ...result.details, piReceipts: { requirementChecks: checkRuns } } }
@@ -1273,8 +1289,10 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 									),
 								);
 							systemOne.noteCompletionAccount?.(parsed.account);
+							completionAccount = parsed.account;
 						}
 						const completionView = await systemOne.completionView(signal);
+						completionChangedFiles = completionView.changedFiles;
 						const completionDecision = await systemOne.executeCompletionTransaction(
 							requestsBugFix(result.state.goalId, result.state.userGoal),
 							{ persistTerminal: false, signal },
@@ -1395,7 +1413,35 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					? `Progress recorded; lifecycle unchanged (${nextState.status}).${nextState.status === "blocked" ? " Only the owner can resume it with /goal resume." : ""}`
 					: `goal ${input.action} recorded.`;
 			const advice = completionAdvisories?.map((item) => `Completion advice: ${item.reason}`).join("\n");
-			const text = [receipt, evidenceNote, satisfyNote, summary, dispatchNote, advice]
+			// The proof sheet leads the result of the call that completed the goal, so the owner reads what was proven
+			// and what was not before the model's own summary. It is built after the completion is saved and decides nothing.
+			let proofSheet: { text: string; record: ProofSheetRecord } | undefined;
+			let proofSheetFailure: string | undefined;
+			if (nextState.status === "completed" && latest?.status !== "completed" && deps.buildCompletionProofSheet) {
+				if (!completionAccount && input.account) {
+					const parsed = parseCompletionAccount(input.account);
+					if (!("errors" in parsed)) completionAccount = parsed.account;
+				}
+				try {
+					proofSheet = deps.buildCompletionProofSheet({
+						state: nextState,
+						...(completionAccount ? { account: completionAccount } : {}),
+						...(completionChangedFiles ? { changedFiles: completionChangedFiles } : {}),
+					});
+				} catch (error) {
+					proofSheetFailure = proofSheetUnavailableLine(error);
+				}
+			}
+			const text = [
+				proofSheet?.text,
+				proofSheetFailure,
+				receipt,
+				evidenceNote,
+				satisfyNote,
+				summary,
+				dispatchNote,
+				advice,
+			]
 				.filter((line): line is string => Boolean(line))
 				.join("\n");
 			return withCheckRuns({
@@ -1404,6 +1450,7 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 					action: input.action,
 					applied: true,
 					state: nextState,
+					...(proofSheet ? { [PROOF_SHEET_DETAILS_KEY]: proofSheet.record } : {}),
 					...(completionAdvisories?.length ? { completionAdvisories } : {}),
 					...(action.action === "dispatch_worker" && action.laneId ? { dispatchedLaneId: action.laneId } : {}),
 					...(action.action === "dispatch_worker" && !action.laneId ? { dispatchSkipReason } : {}),

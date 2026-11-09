@@ -88,6 +88,8 @@ Modifier combinations: `ctrl+shift+x`, `alt+ctrl+x`, `ctrl+shift+alt+x`, `ctrl+1
 | `app.suspend` | `ctrl+z` (none on Windows) | Suspend to background |
 | `app.agents.open` | `ctrl+q` | Inspect the full goal, requirements, evidence, task plan, agents, and background work |
 | `app.agents.close` | `escape` | Close the work inspector |
+| `app.agents.switchChat` | `c`, `enter` | Switch live chat from the work inspector |
+| `app.chat.switch` | `alt+a` | Switch live chat between Brain, persistent bots, and teams |
 | `app.editor.external` | `ctrl+g` | Open in external editor (`$VISUAL` or `$EDITOR`) |
 | `app.clipboard.pasteImage` | `ctrl+v` (Unix/macOS), `alt+v` (Windows), both (WSL) | Paste image or clipboard text |
 

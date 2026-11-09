@@ -5,7 +5,7 @@
  * When enabled, only read-only tools are available.
  *
  * Features:
- * - /plan command or Ctrl+Alt+P to toggle
+ * - /plan-mode command or Ctrl+Alt+P to toggle
  * - Bash restricted to allowlisted read-only commands
  * - Extracts numbered plan steps from "Plan:" sections
  * - [DONE:n] markers to complete steps during execution
@@ -96,7 +96,8 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		});
 	}
 
-	pi.registerCommand("plan", {
+	// Named apart from the built-in `/plan` (the root's plan graph), which this example must not shadow.
+	pi.registerCommand("plan-mode", {
 		description: "Toggle plan mode (read-only exploration)",
 		handler: async (_args, ctx) => togglePlanMode(ctx),
 	});
@@ -105,7 +106,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		description: "Show current plan todo list",
 		handler: async (_args, ctx) => {
 			if (todoItems.length === 0) {
-				ctx.ui.notify("No todos. Create a plan first with /plan", "info");
+				ctx.ui.notify("No todos. Create a plan first with /plan-mode", "info");
 				return;
 			}
 			const list = todoItems.map((item, i) => `${i + 1}. ${item.completed ? "✓" : "○"} ${item.text}`).join("\n");
@@ -126,7 +127,7 @@ export default function planModeExtension(pi: ExtensionAPI): void {
 		if (!isSafeCommand(command)) {
 			return {
 				block: true,
-				reason: `Plan mode: command blocked (not allowlisted). Use /plan to disable plan mode first.\nCommand: ${command}`,
+				reason: `Plan mode: command blocked (not allowlisted). Use /plan-mode to disable plan mode first.\nCommand: ${command}`,
 			};
 		}
 	});

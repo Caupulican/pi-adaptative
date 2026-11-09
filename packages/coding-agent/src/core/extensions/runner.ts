@@ -13,7 +13,9 @@ import { type Theme, theme } from "../../presentation/theme-model.ts";
 import type { ResourceDiagnostic } from "../diagnostics.ts";
 import type { KeybindingsConfig } from "../keybindings.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import { assertToolResultProofUnchanged } from "../proof/proof-sheet.ts";
 import { runRuntimeCandidateHandler } from "../runtime-generation-admission.ts";
+import { assertExtensionCustomType, isUnchangedCustomMessage } from "../turn-origin.ts";
 import { DEFAULT_STALE_EXTENSION_CONTEXT_MESSAGE } from "./stale-context.ts";
 import { createToolOnlyExtensionContext } from "./tool-only-api.ts";
 import { snapshotToolResultData } from "./tool-result-snapshot.ts";
@@ -1000,6 +1002,15 @@ export class ExtensionRunner {
 					const currentEvent: MessageEndEvent = { ...event, message: currentMessage };
 					const handlerResult = (await handler(currentEvent, ctx)) as MessageEndEventResult | undefined;
 					if (!handlerResult?.message) continue;
+					// A replacement that names a host-reserved custom type is refused (the catch reports it), unless it returns the host's
+					// own message unchanged. A host tool result's proof sheet is host-written: a replacement may not change it.
+					if (
+						handlerResult.message.role === "custom" &&
+						!isUnchangedCustomMessage(currentMessage, handlerResult.message)
+					)
+						assertExtensionCustomType(handlerResult.message.customType);
+					if (handlerResult.message.role === "toolResult" && currentMessage.role === "toolResult")
+						assertToolResultProofUnchanged(currentMessage, handlerResult.message);
 
 					if (handlerResult.message.role !== currentMessage.role) {
 						this.emitError({
@@ -1049,6 +1060,12 @@ export class ExtensionRunner {
 						usage: handlerResult.usage,
 						terminate: handlerResult.terminate,
 					});
+					// A host tool result's proof sheet is host-written: a patch that would change it is refused before anything is published.
+					if (details !== undefined)
+						assertToolResultProofUnchanged(
+							{ toolName: currentEvent.toolName, details: currentEvent.details },
+							{ toolName: currentEvent.toolName, details },
+						);
 					if (content !== undefined) {
 						currentEvent.content = content;
 						modified = true;
@@ -1242,6 +1259,7 @@ export class ExtensionRunner {
 					if (handlerResult) {
 						const result = handlerResult as BeforeAgentStartEventResult;
 						if (result.message) {
+							assertExtensionCustomType(result.message.customType);
 							messages.push(result.message);
 						}
 						if (result.systemPrompt !== undefined) {

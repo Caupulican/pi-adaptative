@@ -778,6 +778,14 @@ export interface GoalCommandHost extends GoalResumeHost {
 		}) => ReturnType<AgentSession["getGoalRuntimeSnapshot"]>;
 	};
 	promptForGoalEdit?(currentObjective: string): Promise<string | undefined>;
+	/** Keeps an owner correction of finished or given-up work as a candidate lesson; never holds the command. */
+	recordLessonCandidate?(entry: {
+		signal: "completed-goal-edited" | "blocked-requirement-reopened";
+		goalId: string;
+		goal: string;
+		ownerWords?: string;
+		hostGaps?: readonly string[];
+	}): void;
 	getMaxStallTurns?(): number;
 	showStatus(message: string): void;
 	showError(message: string): void;
@@ -899,6 +907,15 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			host.showError(edited.error);
 			return;
 		}
+		// Rewriting a goal the work called complete is the owner correcting finished work.
+		if (current?.status === "completed") {
+			host.recordLessonCandidate?.({
+				signal: "completed-goal-edited",
+				goalId: current.goalId,
+				goal: current.userGoal,
+				ownerWords: objective,
+			});
+		}
 		if (isGoalExecutionActive(edited.state.status)) host.session.restoreGoalRuntimeAfterResume();
 		host.showStatus("Goal updated.");
 		host.refreshAutonomyFooterStatus();
@@ -973,6 +990,13 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			return;
 		}
 		host.session.saveGoalStateSnapshot(reopened.state, getGoalStateRevision(current));
+		// Reopening a requirement the work gave up on is the owner correcting that call.
+		host.recordLessonCandidate?.({
+			signal: "blocked-requirement-reopened",
+			goalId: current.goalId,
+			goal: current.userGoal,
+			hostGaps: [`${requirement.id} blocked: ${requirement.blockedReason ?? "no reason recorded"}`],
+		});
 		if (isGoalExecutionActive(reopened.state.status)) host.session.restoreGoalRuntimeAfterResume();
 		host.showStatus(
 			`Requirement '${requirementId}' reopened${current.status === "blocked" ? " and goal resumed" : ""}.`,

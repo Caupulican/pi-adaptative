@@ -19,6 +19,7 @@ import {
 import type { GoalState } from "./goals/goal-state.ts";
 import type { ModelRouterController } from "./model-router-controller.ts";
 import { decodeWorkerReceiptPublication } from "./orchestration/worker-receipt-publication.ts";
+import { recordLessonCandidate } from "./proof/lesson-candidates.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
 import { isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
 import {
@@ -281,6 +282,16 @@ export class SessionUnsettledLadderController {
 						...entry,
 						at: new Date().toISOString(),
 					}),
+				recordLessonCandidate: (entry) =>
+					recordLessonCandidate(
+						this.deps.getAgentDir(),
+						{
+							...entry,
+							signal: "completion-continued",
+							sessionId: sessionManager.getSessionId(),
+						},
+						(message) => this.deps.emitWarning(message),
+					),
 				artifactStore: this.deps.getToolArtifactStore(),
 				getImageStore: () => this.deps.getSessionImageStore(),
 			},

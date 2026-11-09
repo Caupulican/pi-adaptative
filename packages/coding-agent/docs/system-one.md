@@ -311,7 +311,7 @@ there; the rest are starting points kept until an evaluation on this harness's o
 | yes/no | `operation_request` | asks at 0.8, clearly does not at 0.2 | |
 | yes/no | `plan_review` | defect steers at 0.8, sound at or below 0.5 | probed live on planted plan defects; absence looser than 0.10 by written reason (below) |
 | yes/no | `completion` | outcome holds at 0.7, defect absent at or below 0.5, claim supported at 0.5 | measured on the completion eval set, 2026-09-25 |
-| yes/no | `orchestration` | accept 0.9, absence at or below 0.1 | no soft band: between is `open`; plan graphs, briefs, pair sufficiency, routing doubts; unmeasured |
+| yes/no | `orchestration` | accept 0.9, absence at or below 0.1 | no soft band: between is `open`; plan graphs, briefs, pair sufficiency, routing doubts; measurement pending the owner's run of `npm run eval:plan-graph` (24 labelled plan graphs in English, Portuguese, Spanish and Chinese, `evals/plan-graph-eval.ts`) |
 | yes/no | knowledge | 0.9 | admission and grounding |
 | Choice | `reversible` | P(option) 0.7 | |
 | Choice | `route` | P(option) 0.88, lead 0.15 | preflight and postflight route |

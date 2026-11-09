@@ -26,7 +26,9 @@ import { isModelReference } from "../../core/model-resolver.ts";
 import type { RemoteHubController } from "../../core/remote/hub-controller.ts";
 import { type AwayService, describeAwayServiceInspection } from "../../core/routines/away-service.ts";
 import { nextRoutineAt, type RoutineDefinitionView } from "../../core/routines/routine-contract.ts";
+import { describeRoutineProgress } from "../../core/routines/routine-progress.ts";
 import { describeWatchCondition } from "../../core/routines/watch-contract.ts";
+import { boundedLine } from "../../core/util/bounded-line.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import { REMOTE_MARK } from "./components/bot-state-mark.ts";
@@ -490,7 +492,7 @@ export class BotTeamChatController {
 					return;
 				default:
 					this.host.showWarning(
-						"Usage: /bot [list] | /bot new <id> [--write] [model] [soul...] | /bot soul <id> | /bot rename <id> <name...> | /bot lead|unlead <id> | /bot spawner | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick|service] | /bot stop <id> | /bot retire <id>",
+						"Usage: /bot [list] | /bot new <id> [--write] [model] [soul...] | /bot soul <id> | /bot rename <id> <name...> | /bot lead|unlead <id> (a standing leader; its goals are /lead) | /bot spawner | /bot open <id> | /bot msg|send|steer|queue <id> <text...> | /bot inbox [id] | /bot ack [id|all] | /bot schedule [list|add|rm|run] ... | /bot daemon [status|start|stop|tick|service] | /bot stop <id> | /bot retire <id>",
 					);
 			}
 		} catch (error) {
@@ -868,8 +870,8 @@ export class BotTeamChatController {
 		port.upsertPersistentBot({ agentId: bot.agentId, leader });
 		this.host.showStatus(
 			leader
-				? `${bot.agentId} is now a leader: it can create bots, and other bots ask it or the orchestrator for one. It takes effect from the bot's next worker start.`
-				: `${bot.agentId} is no longer a leader. It takes effect from the bot's next worker start.`,
+				? `${bot.agentId} is now a standing leader: it can create bots, and other bots ask it or the orchestrator for one. It takes effect from the bot's next worker start. Its goals, handed to it by the orchestrator, are shown and overridden with /lead, not here.`
+				: `${bot.agentId} is no longer a standing leader. It takes effect from the bot's next worker start. A goal it already leads keeps running: /lead shows it, and /lead cancel ${bot.agentId} stops it.`,
 		);
 	}
 
@@ -1106,13 +1108,15 @@ export class BotTeamChatController {
 				const next = nextRoutineAt(r.schedule, r.cursor);
 				const outcome = r.lastSummary ? `: ${r.lastSummary.replace(/\r?\n+/g, " ").slice(0, 100)}` : "";
 				const status = r.lastStatus ? ` · last=${r.lastStatus}${outcome}` : "";
+				const progress = describeRoutineProgress(r.progress);
+				const stood = progress ? ` · where it stood: ${boundedLine(progress, 160)}` : "";
 				const nextLabel =
 					next !== undefined
 						? new Date(next).toISOString()
 						: r.schedule.kind === "event"
 							? "on event"
 							: "complete";
-				return `${r.routineId} → ${targetLabel} · ${routineScheduleLabel(r)} · next=${nextLabel}${status} · "${r.prompt}"`;
+				return `${r.routineId} → ${targetLabel} · ${routineScheduleLabel(r)} · next=${nextLabel}${status}${stood} · "${r.prompt}"`;
 			})
 			.join("\n");
 	}

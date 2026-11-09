@@ -21,7 +21,7 @@ Whatever the judge, the host refuses before any judgment: evidence older than an
 
 The `disabled` switch (`autoLearn.enabled: false`) stops automatic collection only; explicit requests are still judged. A model with no declared price is never used: collection reports `model_unpriced` and starts no request.
 
-The collector stops when the foreground becomes busy and rejects stale work after branch, settings or memory changes. Claims, candidate receipts and processed sources survive reopening, so a completed source does not buy another extraction on restart. A pending source is not reported as processed after a timeout, incomplete submission or unavailable evidence. Each pass emits a `knowledge_collection` event with actual applied/rejected/held counts and retains a bounded terminal handoff; failed handoff persistence suspends further passes.
+The collector stops when the foreground becomes busy and rejects stale work after branch, settings or memory changes. Claims, candidate receipts and processed sources survive reopening, so a completed source does not buy another extraction on restart. A pending source is not reported as processed after a timeout, incomplete submission or unavailable evidence. Each pass emits a `knowledge_collection` event with actual applied/rejected/held counts and retains a bounded terminal handoff; failed handoff persistence suspends further passes. A pass starts only once the session file is durable (a fresh session's first owner input or reply); until then nothing is scheduled, so quitting a fresh session never waits on a handoff.
 
 Collection settings live under `autoLearn`:
 

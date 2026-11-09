@@ -40,6 +40,13 @@ export interface GoalCompletionOwnerDecisionDeps {
 	isHandoff: boolean;
 	requestText?: string;
 	recordOwnerFollowUp?(entry: { question: string; reason: string; request: string }): string | undefined;
+	/** Keeps an owner's "continue working" on a completion as a candidate lesson; never holds the decision. */
+	recordLessonCandidate?(entry: {
+		goalId: string;
+		goal: string;
+		ownerWords?: string;
+		hostGaps: readonly string[];
+	}): void;
 	artifactStore?: ArtifactStore;
 	getImageStore?: () => Pick<SessionImageStore, "retainContent"> | undefined;
 	timeoutMs?: number;
@@ -139,5 +146,15 @@ export async function resolveGoalCompletionOwnerDecision(
 	});
 	if (answer?.selected.includes(ACCEPT_COMPLETE)) return { decision: "accept_complete", clarification };
 	const answerText = answer?.custom?.trim() || answer?.selected.join(", ") || undefined;
+	// The owner sent a completion back to work: a candidate lesson, with the owner's own words when they typed any.
+	if (resolved.snapshot.status === "answered") {
+		const ownerWords = answer?.custom?.trim();
+		deps.recordLessonCandidate?.({
+			goalId: input.goalId,
+			goal: input.userGoal,
+			...(ownerWords ? { ownerWords } : {}),
+			hostGaps: input.reasons,
+		});
+	}
 	return { decision: "continue", ...(answerText ? { answer: answerText } : {}), clarification };
 }

@@ -120,6 +120,7 @@ Type `/` in the editor to open command completion. Extensions can register custo
 | `/toolrule-remove <model> <mode>` | Remove one learned tool repair standing rule |
 | `/goal [status\|resume\|complete\|close\|reopen <requirement-id>\|override <text>]` | Inspect or control the durable session goal |
 | `/goal-continue [maxTurns] [maxStallTurns] [maxMinutes]` | Continue the active goal within explicit bounds |
+| `/quiz` | A few multiple-choice questions on the newest finished result, built and scored from its proof sheet; it informs only |
 | `/task`, `/steps` | Manage the native session checklist; see [Task steps](task-steps.md) |
 | `/quit` | Quit pi |
 

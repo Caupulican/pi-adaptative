@@ -8,6 +8,7 @@
  * a check is untouched: it is judged on evidence by System One.
  */
 import { createHash } from "node:crypto";
+import { redactKnownSecrets, redactTokenShapes } from "../security/secret-text.ts";
 import { type GoalStateRevision, getGoalStateRevision } from "./goal-lifecycle.ts";
 import { applyGoalEvent, type GoalState, type RequirementCheck } from "./goal-state.ts";
 import { applyGoalAction, type GoalAction } from "./goal-tool-core.ts";
@@ -54,7 +55,8 @@ export async function proveRequirementChecks(input: {
 	for (const requirement of checked) {
 		input.signal?.throwIfAborted();
 		const result = await input.runCheck(requirement.check as RequirementCheck, input.signal);
-		const output = result.output.trim();
+		// Redacted before the tail is cut: a secret the cut splits would no longer match the redaction pattern.
+		const output = redactTokenShapes(redactKnownSecrets(result.output.trim()));
 		const summary = `${result.reason}${output ? ` Output: ${output.slice(-MAX_CHECK_OUTPUT_IN_EVIDENCE)}` : ""}`;
 		const at = input.now();
 		const evidenceId = `ev-${createHash("sha256")

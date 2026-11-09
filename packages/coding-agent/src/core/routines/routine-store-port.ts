@@ -16,6 +16,7 @@ import type {
 	RoutineWatchOutcome,
 	UpsertPersistentRoutineInput,
 } from "./routine-contract.ts";
+import type { RoutineRunFacts } from "./routine-progress.ts";
 
 /** The existing persistent store implements this boundary; scheduling owns no second registry. */
 export interface RoutineStorePort {
@@ -81,6 +82,8 @@ export interface RoutineStorePort {
 		reason: string;
 		recipient: string;
 		nowMs: number;
+		/** The run's code facts for its progress record (`routine-progress.ts`); absent, its outcome is its code. */
+		facts?: RoutineRunFacts;
 	}): void;
 	finishRoutineOccurrence(input: {
 		occurrenceId: string;
@@ -95,6 +98,8 @@ export interface RoutineStorePort {
 		conditionMet?: true;
 		/** A run away's settled spend, read from its attempts' ledger usage; absent when unread. */
 		awaySpentUsd?: number;
+		/** The run's code facts and own report for its progress record; absent, its outcome is its code. */
+		facts?: RoutineRunFacts;
 	}): void;
 	resolveUncertainRoutineOccurrence(input: {
 		occurrenceId: string;
@@ -108,7 +113,12 @@ export interface RoutineStorePort {
 		conditionMet?: true;
 		/** A run away's settled spend, read from its attempts' ledger usage; absent when unread. */
 		awaySpentUsd?: number;
+		facts?: RoutineRunFacts;
 	}): void;
+	/** The owner's note on where a routine's task stands, kept in its progress record; never moves the revision. */
+	noteRoutineProgress(input: { routineId: string; text: string; nowMs: number }): RoutineDefinitionView;
+	/** Drops a routine's progress record: its next run starts from scratch. Never moves the revision. */
+	resetRoutineProgress(input: { routineId: string }): RoutineDefinitionView;
 	listPendingRoutineDeliveries(parentSessionId: string, limit: number): readonly RoutineDelivery[];
 	acknowledgeRoutineDelivery(input: {
 		occurrenceId: string;

@@ -1,9 +1,10 @@
 import type { ToolCall } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/node.ts";
-import { parseTurnOriginRecord, UNREADABLE_TURN_ORIGIN } from "../../kernel/turn-origin-stamp.ts";
 import { isPassingTestVerification, retainedVerificationDetails } from "../../kernel/verification-obligations.ts";
 import { type BackgroundToolTaskRecord, findBackgroundToolTask } from "../background-tool-task-controller.ts";
 import type { GoalToolEvidenceResolution, GoalUserEvidenceResolution } from "../tools/goal.ts";
+import { shellWord } from "../tools/shell-command-parser.ts";
+import { ownerOriginKind, stampedHistoryStart } from "../turn-origin.ts";
 
 type EvidenceTask = Pick<BackgroundToolTaskRecord, "taskId" | "toolCallId" | "goalId" | "status" | "piVerification">;
 
@@ -24,16 +25,15 @@ export function resolveSessionUserEvidence(
 	if (locator && !entryId) return { verified: false, reason: "the user-message locator is missing its entry id" };
 	if (!quote) return { verified: false, reason: "quote the complete user statement" };
 	const branch = sessionManager.getBranch();
+	const stampedStart = stampedHistoryStart(branch);
 	for (let index = branch.length - 1; index >= 0; index--) {
 		const entry = branch[index];
 		if (entryId && entry.id !== entryId) continue;
 		if (entry.type !== "message" || entry.message.role !== "user") continue;
-		// A third party's words an extension delivered are not the owner's statement, nor are words of unreadable origin.
-		if (
-			entry.turnOrigin !== undefined &&
-			(parseTurnOriginRecord(entry.turnOrigin) ?? UNREADABLE_TURN_ORIGIN).thirdParty
-		)
-			continue;
+		// Only the owner's own words are evidence: typed at the terminal or sent from a verified owner channel (or typed before
+		// inputs carried an identity, in the branch's legacy prefix). A harness, routine, extension or third-party entry, and an
+		// entry whose origin names nobody after that prefix, is not the owner's statement (see `ownerOriginKind`).
+		if (ownerOriginKind(entry, index, stampedStart) === undefined) continue;
 		const content = entry.message.content;
 		const text =
 			typeof content === "string"
@@ -48,16 +48,33 @@ export function resolveSessionUserEvidence(
 }
 
 /** The command a bash/python/run_process call actually ran, or undefined for any other call. */
-function producingCommand(call: ToolCall): string | undefined {
-	if (call.name === "bash" || call.name === "run_process") {
+export function producingCommand(call: ToolCall): string | undefined {
+	if (call.name === "bash") {
 		const command = call.arguments?.command;
 		return typeof command === "string" ? command : undefined;
+	}
+	if (call.name === "run_process") {
+		// The tool runs its argv without a shell (`executable` and `args`): the same program written as one command line.
+		const executable = call.arguments?.executable;
+		if (typeof executable !== "string" || executable.trim() === "") return undefined;
+		const args: unknown = call.arguments?.args;
+		const words = Array.isArray(args) ? args.filter((arg): arg is string => typeof arg === "string") : [];
+		return [shellWord(executable.trim()), ...words.map(shellWord)].join(" ");
 	}
 	if (call.name === "python") {
 		const code = call.arguments?.code ?? call.arguments?.scriptPath;
 		return typeof code === "string" ? code : undefined;
 	}
 	return undefined;
+}
+
+/**
+ * The language of a python call's recorded command: `python` for source the call ran (`code`), `python-file` for a file it ran
+ * (`scriptPath`), whose source the host never reads, so the stakes reader takes no code fact from it. Undefined for any other call.
+ */
+export function pythonCallLanguage(call: ToolCall): "python" | "python-file" | undefined {
+	if (call.name !== "python") return undefined;
+	return typeof call.arguments?.code === "string" ? "python" : "python-file";
 }
 
 /**

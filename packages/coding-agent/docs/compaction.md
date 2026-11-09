@@ -103,7 +103,7 @@ durable history
 The context plan separates two classes of input:
 
 - **Compactable:** durable conversation history, including an accepted compaction summary and retained recent messages.
-- **Non-compactable:** system prompt, provider-visible tool schemas, text-only tool primer and guard, extension `transientMessages`, memory evidence, the active goal projection, and the active skill body.
+- **Non-compactable:** system prompt, provider-visible tool schemas, text-only tool primer and guard, and the transient records a request has not yet committed. A transient record is committed on its first send and is then ordinary durable history: a compaction carries the last record of each kind past the cut, and an active skill is one such record per skill, so its body is not part of the envelope.
 
 Compaction can replace only the durable class. After a compaction entry is accepted, Pi replans from the reloaded session history and adopts that history in the running agent loop before transport. The exact admitted `Context` object then enters the provider adapter; the planner does not rebuild it or append context after admission.
 
@@ -119,7 +119,7 @@ An optional early-cost trigger gets at most one normal summary pass. A hard boun
 
 Planning is replay-safe. Extension/resource, active-skill, and goal revisions can invalidate a plan before commit; stale retries have their own bound and do not consume the compaction-replan allowance. Previewed context-GC and skill usage effects are committed only for the accepted plan.
 
-An active skill remains host state during in-process compaction. Its record is a durable host record that a compaction carries past the cut (the last record of each kind), never folded into a summary; the replanned request sends it again only if its content changed or the request no longer shows it. Process or session replacement starts a new skill-vault lifecycle, so a skill must be loaded again after a process restart, `/new`, `/resume`, or `/fork`. `/reload` retains an unchanged eligible skill and invalidates it if the resource changed or became unavailable.
+An active skill remains host state during in-process compaction. Its record is one durable host record per skill (its kind is the skill's name), carried past the cut (the last record of each kind), never folded into a summary; the replanned request sends a skill again only if its own content changed or the request no longer shows it, so a change to one skill never re-sends the others. Process or session replacement starts a new skill-vault lifecycle, so a skill must be loaded again after a process restart, `/new`, `/resume`, or `/fork`. `/reload` retains an unchanged eligible skill and invalidates it if the resource changed or became unavailable.
 
 ### Split Turns
 

@@ -120,6 +120,7 @@ function awaySettingsSource(settings: SettingsManager, maxUsdPerRun: () => numbe
 		getSystemOneSettings: () => ({ ...settings.getSystemOneSettings(), enabled: false }),
 		getToolkitScripts: () => settings.getToolkitScripts(),
 		getWorkerAccountRouting: () => settings.getWorkerAccountRouting(),
+		getWorkerOutcomeSettings: () => settings.getWorkerOutcomeSettings(),
 		getWorkerDelegationSettings: () => {
 			const configured = settings.getWorkerDelegationSettings();
 			const perRun = maxUsdPerRun();

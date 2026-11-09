@@ -16,6 +16,8 @@ import {
 	createBackgroundActivitySummaryContract,
 	isBackgroundActivitySummaryContract,
 } from "../../../core/foreground-terminal-handoff-controller.ts";
+import { harnessNoticeHeadline } from "../../../core/harness-notice.ts";
+import { readProofSheetFailures, readProofSheetRecords } from "../../../core/proof/proof-sheet.ts";
 import { isPlainRecord } from "../../../core/util/value-guards.ts";
 import type { CustomMessage } from "../../../kernel/index.ts";
 import { isModelFacingText, MODEL_FACING_PLACEHOLDER, plainLabel } from "../../../presentation/plain-text.ts";
@@ -116,9 +118,21 @@ export class CustomMessageComponent extends Container {
 		this.box.addChild(new Text(renderTitleBadge(theme, { label: plainLabel(this.message.customType) }), 0, 0));
 		this.box.addChild(new Spacer(1));
 
-		// Extract text content
+		// A delivery that carries host proof sheets (a plan result) shows them ahead of its own text.
+		for (const sheet of readProofSheetRecords(this.message.details, {
+			kind: "custom-message",
+			customType: this.message.customType,
+		})) {
+			this.box.addChild(new Text(theme.fg("customMessageText", sheet.text), 0, 0));
+			this.box.addChild(new Spacer(1));
+		}
+
+		// Extract text content. A harness notice shows its headline; its model text (any fenced evidence) stays in the transcript.
 		let text: string;
-		if (typeof this.message.content === "string") {
+		const headline = harnessNoticeHeadline(this.message);
+		if (headline !== undefined) {
+			text = headline;
+		} else if (typeof this.message.content === "string") {
 			text = this.message.content;
 		} else {
 			text = this.message.content
@@ -205,6 +219,8 @@ function boundedIds(ids: readonly string[], totalCount: number): string {
 interface BackgroundActivitySummary {
 	text: string;
 	status: "success" | "warning" | "error";
+	/** Host proof sheets the delivery carries, shown in full under the one-line summary. */
+	proofSheets?: readonly string[];
 }
 
 class BackgroundActivitySummaryComponent implements Component {
@@ -216,7 +232,10 @@ class BackgroundActivitySummaryComponent implements Component {
 
 	render(width: number): string[] {
 		const line = `${theme.fg(this.summary.status, "•")} ${theme.fg("muted", this.summary.text)}`;
-		return [truncateToWidth(line, Math.max(1, width), "…")];
+		const sheets = (this.summary.proofSheets ?? []).flatMap((sheet) =>
+			new Text(theme.fg("text", sheet), 2, 0).render(width),
+		);
+		return [truncateToWidth(line, Math.max(1, width), "…"), ...sheets];
 	}
 
 	invalidate(): void {}
@@ -412,8 +431,14 @@ function formatBackgroundActivitySummary(message: CustomMessage<unknown>): Backg
 		.filter((part): part is string => part !== undefined)
 		.join(" | ");
 	const detail = kind === "agent" ? agentDetailSuffix(records) : undefined;
+	const carrier = { kind: "custom-message", customType: message.customType } as const;
+	const proofSheets = [
+		...readProofSheetRecords(message.details, carrier).map((sheet) => sheet.text),
+		...readProofSheetFailures(message.details, carrier),
+	];
 	return {
 		text: detail ? `${text} · ${detail}` : text,
+		...(proofSheets.length > 0 ? { proofSheets } : {}),
 		status:
 			summary.failedCount > 0 ? "error" : summary.attentionCount + summary.canceledCount > 0 ? "warning" : "success",
 	};

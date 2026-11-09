@@ -391,7 +391,8 @@ export class AgentsOverlay implements Component {
 	handleInput(data: string): void {
 		if (
 			this.options.onSwitchChat &&
-			(this.options.keybindings.matches(data, "app.chat.switch") || data === "c" || data === "\r")
+			(this.options.keybindings.matches(data, "app.chat.switch") ||
+				this.options.keybindings.matches(data, "app.agents.switchChat"))
 		) {
 			this.dispose();
 			this.options.onClose();
@@ -439,7 +440,8 @@ export class AgentsOverlay implements Component {
 		const visible = body.slice(this.scrollTop, this.scrollTop + pageRows);
 		const position =
 			this.lastMaxScroll > 0 ? ` · ${this.scrollTop + 1}-${this.scrollTop + visible.length}/${body.length}` : "";
-		const footer = ` ${key("app.transcript.scrollUp")}/${key("app.transcript.scrollDown")} scroll · ${key("app.transcript.pageUp")}/${key("app.transcript.pageDown")} page · ${key("app.transcript.top")}/${key("app.transcript.bottom")} jump ${this.options.onSwitchChat ? " · Enter/c switch chat" : ""} · ${key("app.agents.close")} close${position}`;
+		const switchChat = this.options.onSwitchChat ? ` · ${key("app.agents.switchChat")} switch chat` : "";
+		const footer = ` ${key("app.transcript.scrollUp")}/${key("app.transcript.scrollDown")} scroll · ${key("app.transcript.pageUp")}/${key("app.transcript.pageDown")} page · ${key("app.transcript.top")}/${key("app.transcript.bottom")} jump${switchChat} · ${key("app.agents.close")} close${position}`;
 		return [surface(""), ...visible.map((line) => surface(` ${line}`)), surface(theme.fg("muted", footer))];
 	}
 

@@ -102,15 +102,27 @@ export const MAX_TASK_GOAL_CHARS = 400;
 export const MAX_TASK_NOTE_CHARS = 1_500;
 export const MAX_TASK_REFS = 16;
 export const MAX_TASK_REF_CHARS = 256;
+/** Budgets of the brief's acceptance fields: one "done when" line and a short out-of-scope list. */
+export const MAX_TASK_DONE_CHARS = 400;
+export const MAX_TASK_OUT_OF_SCOPE = 8;
+export const MAX_TASK_OUT_OF_SCOPE_CHARS = 256;
 
 /**
  * Version of a stored brief, and the selector of the renderer that turned it into the worker's task text. A renderer
  * is frozen once a record carries its version, so a later layout never changes how an older record reads or
- * verifies. Version 1 is the first layout (not injective: a goal with a line break could pass for a note); new
- * briefs are written at the current version.
+ * verifies. Version 1 is the first layout (not injective: a goal with a line break could pass for a note); version 3
+ * adds the acceptance lines. A new brief is written at the lowest version that holds its fields
+ * ({@link taskBriefVersionFor}), so a brief without acceptance lines stays readable by a build that knows only version 2.
  */
-export type TaskBriefVersion = 1 | 2;
-export const TASK_BRIEF_CURRENT_VERSION = 2 as const;
+export type TaskBriefVersion = 1 | 2 | 3;
+
+/** The version a new brief is written at: 3 when it states acceptance lines, 2 otherwise. */
+export function taskBriefVersionFor(fields: {
+	readonly done?: string;
+	readonly outOfScope?: readonly string[];
+}): 2 | 3 {
+	return fields.done !== undefined || (fields.outOfScope?.length ?? 0) > 0 ? 3 : 2;
+}
 
 /**
  * A task as the root stated it, in fields. The worker's `TASK` text is rendered from this record at admission and
@@ -127,6 +139,10 @@ export interface TaskBrief {
 	readonly out?: TaskOutputKind;
 	/** Paths and ids to read, one line each; references, never pasted content. */
 	readonly refs?: readonly string[];
+	/** What makes the task done, one line (version 3). The proof sheet of the result repeats it. */
+	readonly done?: string;
+	/** What the task must not touch or decide, one line each (version 3). The proof sheet of the result repeats it. */
+	readonly outOfScope?: readonly string[];
 }
 
 /** The one `Evidence:`/`Output:` line both layouts share, or none when the brief states neither. */
@@ -162,9 +178,26 @@ function renderTaskBriefV2(brief: TaskBrief): string {
 	].join("\n");
 }
 
+/**
+ * Layout of version 3: version 2 with the acceptance lines after the refs, one `Done when:` line and one `Out of scope:`
+ * line per item. Every line still opens with its own label in a fixed order and the note stays last, so the layout stays
+ * injective; a version 3 brief without the new fields renders exactly as version 2.
+ */
+function renderTaskBriefV3(brief: TaskBrief): string {
+	return [
+		brief.goal,
+		...(brief.refs ?? []).map((ref) => `Ref: ${ref}`),
+		...(brief.done ? [`Done when: ${brief.done}`] : []),
+		...(brief.outOfScope ?? []).map((item) => `Out of scope: ${item}`),
+		...taskBriefExpectationLines(brief),
+		...(brief.note ? [`Note: ${brief.note}`] : []),
+	].join("\n");
+}
+
 const TASK_BRIEF_RENDERERS: Readonly<Record<TaskBriefVersion, (brief: TaskBrief) => string>> = {
 	1: renderTaskBriefV1,
 	2: renderTaskBriefV2,
+	3: renderTaskBriefV3,
 };
 
 /** The worker's task text for a brief: a pure function of the record, selected by its version. */
@@ -174,7 +207,7 @@ export function renderTaskBrief(brief: TaskBrief): string {
 
 /** Why a brief cannot be stored: the field, and whether a bound or the shape is at fault. */
 export interface TaskBriefProblem {
-	readonly field: "goal" | "note" | "refs";
+	readonly field: "goal" | "note" | "refs" | "done" | "outOfScope";
 	readonly kind: "limit" | "invalid";
 }
 
@@ -183,8 +216,9 @@ function isOneCanonicalLine(value: string): boolean {
 }
 
 /**
- * The shape a version 2 brief must have for its rendering to be unambiguous: a canonical one-line goal, canonical
- * one-line refs, a trimmed note, each inside its budget. Version 1 records are read as they were written.
+ * The shape a version 2 or 3 brief must have for its rendering to be unambiguous: a canonical one-line goal, canonical
+ * one-line refs, a trimmed note, and (version 3 only, since the version 2 renderer drops them) a canonical done line and
+ * out-of-scope items, each inside its budget. Version 1 records are read as they were written.
  */
 export function taskBriefProblem(brief: TaskBrief): TaskBriefProblem | undefined {
 	if (brief.goal.length > MAX_TASK_GOAL_CHARS) return { field: "goal", kind: "limit" };
@@ -196,6 +230,19 @@ export function taskBriefProblem(brief: TaskBrief): TaskBriefProblem | undefined
 		return { field: "note", kind: "invalid" };
 	}
 	if ((brief.refs ?? []).some((ref) => !isOneCanonicalLine(ref))) return { field: "refs", kind: "invalid" };
+	if (brief.done !== undefined) {
+		if (brief.v < 3) return { field: "done", kind: "invalid" };
+		if (brief.done.length > MAX_TASK_DONE_CHARS) return { field: "done", kind: "limit" };
+		if (!isOneCanonicalLine(brief.done)) return { field: "done", kind: "invalid" };
+	}
+	if (brief.outOfScope !== undefined) {
+		if (brief.v < 3) return { field: "outOfScope", kind: "invalid" };
+		if (brief.outOfScope.length > MAX_TASK_OUT_OF_SCOPE) return { field: "outOfScope", kind: "limit" };
+		if (brief.outOfScope.some((item) => item.length > MAX_TASK_OUT_OF_SCOPE_CHARS))
+			return { field: "outOfScope", kind: "limit" };
+		if (brief.outOfScope.length === 0 || brief.outOfScope.some((item) => !isOneCanonicalLine(item)))
+			return { field: "outOfScope", kind: "invalid" };
+	}
 	return undefined;
 }
 
@@ -208,19 +255,26 @@ export function sameTaskBrief(left: TaskBrief | undefined, right: TaskBrief | un
 		left.note === right.note &&
 		left.evid === right.evid &&
 		left.out === right.out &&
-		(left.refs?.length ?? 0) === (right.refs?.length ?? 0) &&
-		(left.refs ?? []).every((ref, index) => ref === right.refs?.[index])
+		left.done === right.done &&
+		sameList(left.refs, right.refs) &&
+		sameList(left.outOfScope, right.outOfScope)
 	);
+}
+
+function sameList(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
+	return (left?.length ?? 0) === (right?.length ?? 0) && (left ?? []).every((item, index) => item === right?.[index]);
 }
 
 /** Reads a stored brief back, rejecting anything outside the record's shape and budgets. */
 export function parseTaskBrief(value: unknown): TaskBrief {
 	if (typeof value !== "object" || value === null || Array.isArray(value)) throw new Error("brief must be an object.");
 	const record = value as Record<string, unknown>;
-	const unknownField = Object.keys(record).find((key) => !["v", "goal", "note", "evid", "out", "refs"].includes(key));
+	const unknownField = Object.keys(record).find(
+		(key) => !["v", "goal", "note", "evid", "out", "refs", "done", "outOfScope"].includes(key),
+	);
 	if (unknownField) throw new Error(`brief.${unknownField} is unsupported.`);
-	const { v, goal, note, evid, out, refs } = record;
-	if (v !== 1 && v !== 2) throw new Error("brief.v is unsupported.");
+	const { v, goal, note, evid, out, refs, done, outOfScope } = record;
+	if (v !== 1 && v !== 2 && v !== 3) throw new Error("brief.v is unsupported.");
 	if (typeof goal !== "string" || !goal.trim()) throw new Error("brief.goal must be a non-empty string.");
 	if (note !== undefined && (typeof note !== "string" || !note.trim())) {
 		throw new Error("brief.note must be a non-empty string.");
@@ -234,6 +288,13 @@ export function parseTaskBrief(value: unknown): TaskBrief {
 	if (refs !== undefined && (!Array.isArray(refs) || refs.some((ref) => typeof ref !== "string" || !ref.trim()))) {
 		throw new Error("brief.refs must be a list of non-empty strings.");
 	}
+	if (done !== undefined && typeof done !== "string") throw new Error("brief.done must be a string.");
+	if (
+		outOfScope !== undefined &&
+		(!Array.isArray(outOfScope) || outOfScope.some((item) => typeof item !== "string"))
+	) {
+		throw new Error("brief.outOfScope must be a list of strings.");
+	}
 	const brief: TaskBrief = {
 		v,
 		goal,
@@ -241,9 +302,16 @@ export function parseTaskBrief(value: unknown): TaskBrief {
 		...(evid !== undefined ? { evid: evid as TaskEvidenceKind } : {}),
 		...(out !== undefined ? { out: out as TaskOutputKind } : {}),
 		...(refs !== undefined ? { refs: [...(refs as string[])] } : {}),
+		...(done !== undefined ? { done: done as string } : {}),
+		...(outOfScope !== undefined ? { outOfScope: [...(outOfScope as string[])] } : {}),
 	};
-	// Version 1 was stored with its own bounds only; version 2 must also be canonical so its text is unambiguous.
-	const problem = v === 2 ? taskBriefProblem(brief) : undefined;
+	// Version 1 was stored with its own bounds only; later versions must also be canonical so their text is unambiguous.
+	const problem: TaskBriefProblem | undefined =
+		v !== 1
+			? taskBriefProblem(brief)
+			: done !== undefined || outOfScope !== undefined
+				? { field: done !== undefined ? "done" : "outOfScope", kind: "invalid" }
+				: undefined;
 	if (problem)
 		throw new Error(`brief.${problem.field} is ${problem.kind === "limit" ? "over its budget" : "not canonical"}.`);
 	return brief;

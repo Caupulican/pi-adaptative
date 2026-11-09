@@ -624,6 +624,14 @@ The host's task_steps checklist page is packed the same way and is recognized by
 }
 ```
 
+### Proof sheets
+
+When a goal completes, a worker's result arrives or a plan's combined result settles, the host shows a proof sheet before the model's words: the commands that ran, which check covered which requirement, the changed files no check touched, assumptions, the brief's done line and out-of-scope items, and the stakes. `/status` counts the results with a proof sheet that arrived since your last message.
+
+| Setting | Type | Default | Description |
+|---------|------|---------|-------------|
+| `proofSheets.reviewWaitingNoticeAt` | number | `5` | Give one notice when this many results wait since your last message (at most 100; `0` turns the notice off). It never holds work. |
+
 ### Explanation style
 
 `steStrictness` sets the standing ASD-STE100 writing strictness for explanations, analyses, reviews and summaries: an integer from 1 to 10, default 9, where 0 turns the style off. The value is rendered in the system prompt for every model class and takes effect when the prompt rebuilds (new session or `/reload`). The bundled `ste100-writing` skill holds the full rule set and the per-level dial; an explicit strictness in a message overrides the setting for that message.

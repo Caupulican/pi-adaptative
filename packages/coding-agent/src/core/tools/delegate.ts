@@ -5,20 +5,23 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import {
 	COMMS_RECORD_VERSION,
 	type CommsResultEnvelope,
+	MAX_TASK_DONE_CHARS,
 	MAX_TASK_GOAL_CHARS,
 	MAX_TASK_NOTE_CHARS,
+	MAX_TASK_OUT_OF_SCOPE,
+	MAX_TASK_OUT_OF_SCOPE_CHARS,
 	MAX_TASK_REF_CHARS,
 	MAX_TASK_REFS,
 	renderCommsErrView,
 	renderCommsStateLine,
 	renderTaskBrief,
-	TASK_BRIEF_CURRENT_VERSION,
 	TASK_EVIDENCE_KINDS,
 	TASK_OUTPUT_KINDS,
 	type TaskBrief,
 	type TaskEvidenceKind,
 	type TaskOutputKind,
 	taskBriefProblem,
+	taskBriefVersionFor,
 } from "../comms/comms-records.ts";
 import type { SessionRootReply } from "../delegation/session-root-mailbox.ts";
 import {
@@ -259,6 +262,17 @@ function createDelegateSchema(actions: readonly DelegateAction[]) {
 				Type.Array(Type.String({ minLength: 1 }), {
 					maxItems: MAX_TASK_REFS,
 					description: `With goal: paths and ids to read, never pasted content (each at most ${MAX_TASK_REF_CHARS} characters).`,
+				}),
+			),
+			doneWhen: Type.Optional(
+				Type.String({
+					description: `With goal: what makes the task done, one line (at most ${MAX_TASK_DONE_CHARS} characters); the result's proof sheet repeats it.`,
+				}),
+			),
+			outOfScope: Type.Optional(
+				Type.Array(Type.String({ minLength: 1 }), {
+					maxItems: MAX_TASK_OUT_OF_SCOPE,
+					description: `With goal: what the worker must not touch or decide, one line each (each at most ${MAX_TASK_OUT_OF_SCOPE_CHARS} characters).`,
 				}),
 			),
 			evid: Type.Optional(
@@ -521,6 +535,8 @@ const EXACT_ACTION_ALLOWED_FIELDS = {
 		"goal",
 		"note",
 		"refs",
+		"doneWhen",
+		"outOfScope",
 		"evid",
 		"out",
 		"agentId",
@@ -673,9 +689,22 @@ function correctExactActionInput(input: DelegateToolInput, action: DelegateActio
 	return undefined;
 }
 
-/** The brief as plain instructions: the goal, the instructions and the detail fields (note, refs, evid, out), in that order. */
+/** A brief field as one line: line breaks, tabs and control characters become single spaces, so the field is layout, not a refusal. */
+function briefLine(text: string): string {
+	return text.replace(/[\p{Cc}\s]+/gu, " ").trim();
+}
+
+/** An over-long brief line cut to its bound with an ellipsis, so the list keeps every item it had. */
+function capBriefLine(text: string, max: number): string {
+	return text.length <= max ? text : `${text.slice(0, max - 3).trimEnd()}...`;
+}
+
+/**
+ * The brief as plain instructions: the goal, the instructions and the detail fields (note, refs, done when, out of scope,
+ * evid, out), in that order.
+ */
 function foldedBriefInput(input: DelegateToolInput): DelegateToolInput {
-	const { goal, note, refs, evid, out, instructions, ...rest } = input as DelegateToolInput & {
+	const { goal, note, refs, doneWhen, outOfScope, evid, out, instructions, ...rest } = input as DelegateToolInput & {
 		evid?: unknown;
 		out?: unknown;
 	};
@@ -684,6 +713,10 @@ function foldedBriefInput(input: DelegateToolInput): DelegateToolInput {
 		instructions?.trim(),
 		note?.trim() ? `Note: ${note.trim()}` : undefined,
 		refs && refs.length > 0 ? `References:\n${refs.map((ref) => `- ${ref}`).join("\n")}` : undefined,
+		doneWhen?.trim() ? `Done when: ${doneWhen.trim()}` : undefined,
+		outOfScope && outOfScope.length > 0
+			? `Out of scope:\n${outOfScope.map((item) => `- ${item}`).join("\n")}`
+			: undefined,
 		evid ? `Evidence: ${JSON.stringify(evid)}` : undefined,
 		out ? `Report: ${JSON.stringify(out)}` : undefined,
 	].filter((part): part is string => part !== undefined && part.length > 0);
@@ -700,34 +733,53 @@ function resolveTaskBrief(
 	action: DelegateAction,
 ): { input: DelegateToolInput; brief?: TaskBrief; violation?: ActionViolation } {
 	if (action !== "start") return { input };
-	const companion = (["note", "refs", "evid", "out"] as const).find((field) => input[field] !== undefined);
+	const companion = (["note", "refs", "doneWhen", "outOfScope", "evid", "out"] as const).find(
+		(field) => input[field] !== undefined,
+	);
 	// Detail fields without a goal, and a goal that is not one clean line or that comes with instructions, are one brief in
 	// plain words: nothing is rejected for how the model split its own text (the record form stays for a one-line goal).
 	if (input.goal === undefined) return companion === undefined ? { input } : { input: foldedBriefInput(input) };
-	if (input.instructions !== undefined || /[\r\n\u0000-\u001f]/.test(input.goal.trim()))
+	// The C1 and DEL controls cannot sit in a brief's one line: they are stripped before the goal is routed and checked.
+	const goal = input.goal.replace(/[\u007f-\u009f]/gu, "");
+	if (input.instructions !== undefined || /[\r\n\u0000-\u001f]/.test(goal.trim()))
 		return { input: foldedBriefInput(input) };
 	const note = input.note?.trim();
-	const refs = input.refs?.map((ref) => ref.trim()).filter(Boolean);
+	const refs = input.refs?.map((ref) => briefLine(ref)).filter(Boolean);
+	const done = input.doneWhen === undefined ? undefined : briefLine(input.doneWhen);
+	const outOfScope = input.outOfScope
+		?.map((item) => capBriefLine(briefLine(item), MAX_TASK_OUT_OF_SCOPE_CHARS))
+		.filter(Boolean);
 	const brief: TaskBrief = {
-		v: TASK_BRIEF_CURRENT_VERSION,
-		goal: input.goal.trim(),
+		v: taskBriefVersionFor({ done: done || undefined, outOfScope }),
+		goal: goal.trim(),
 		...(note ? { note } : {}),
 		...(input.evid ? { evid: input.evid } : {}),
 		...(input.out ? { out: input.out } : {}),
 		...(refs && refs.length > 0 ? { refs } : {}),
+		...(done ? { done } : {}),
+		...(outOfScope && outOfScope.length > 0 ? { outOfScope } : {}),
 	};
 	const problem = taskBriefProblem(brief);
 	if (problem) {
-		const maxima = { goal: MAX_TASK_GOAL_CHARS, note: MAX_TASK_NOTE_CHARS, refs: MAX_TASK_REF_CHARS } as const;
+		const listField = problem.field === "refs" || problem.field === "outOfScope";
+		const fieldName = problem.field === "done" ? "doneWhen" : problem.field;
+		const maxima = {
+			goal: `${MAX_TASK_GOAL_CHARS}`,
+			note: `${MAX_TASK_NOTE_CHARS}`,
+			refs: `${MAX_TASK_REF_CHARS}`,
+			done: `${MAX_TASK_DONE_CHARS}`,
+			outOfScope: `${MAX_TASK_OUT_OF_SCOPE_CHARS}`,
+		} as const;
+		const maxItems = problem.field === "refs" ? MAX_TASK_REFS : MAX_TASK_OUT_OF_SCOPE;
 		return {
 			input,
 			violation: {
 				message:
 					problem.kind === "limit"
-						? `delegate start ${problem.field === "refs" ? `refs (at most ${MAX_TASK_REFS}, each` : problem.field} may not exceed ${maxima[problem.field]} characters${problem.field === "refs" ? ")" : ""}.`
+						? `delegate start ${listField ? `${fieldName} (at most ${maxItems}, each` : fieldName} may not exceed ${maxima[problem.field]} characters${listField ? ")" : ""}.`
 						: problem.field === "goal"
 							? "delegate start goal must be one non-empty line without line breaks or control characters; put detail in note."
-							: `delegate start ${problem.field} is not usable: each ref is one non-empty line without control characters.`,
+							: `delegate start ${fieldName} is not usable: each value is one non-empty line without control characters.`,
 				skipReason: `${problem.field}_${problem.kind === "limit" ? "too_long" : "invalid"}`,
 			},
 		};

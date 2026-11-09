@@ -33,6 +33,11 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		duringWork: "local",
 	},
 	{
+		name: "quiz",
+		description: "A short quiz, built from its proof sheet, on the newest finished result",
+		duringWork: "local",
+	},
+	{
 		name: "proactivity",
 		description: "Idle review that raises notes: /proactivity [status|on|off|review|prefs <text>]",
 	},

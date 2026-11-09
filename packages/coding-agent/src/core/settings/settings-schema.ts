@@ -295,6 +295,15 @@ export interface ModelRouterSettings {
 	hmoeWeights?: HmoeWeights;
 }
 
+/** The host proof sheet shown with every finished result (a goal completion, a worker result, a plan result). */
+export interface ProofSheetSettings {
+	/**
+	 * Results waiting for the owner's review (delivered since the owner's last own message) at which one notice says new
+	 * work is piling up faster than it is reviewed. Informational only: nothing is held. 0 turns the notice off. Default 5.
+	 */
+	reviewWaitingNoticeAt?: number;
+}
+
 export interface ProactivitySettings {
 	enabled?: boolean; // default: true — a bounded idle review that raises notes; false turns it off
 	model?: string; // model pattern for the review; unset inherits the session model
@@ -863,6 +872,7 @@ export interface Settings {
 	autonomy?: AutonomySettings; // Low-config autonomy preset controlling background learning/reflection defaults
 	researchLane?: ResearchLaneSettings; // Opt-in autonomous read-only research lane producing evidence bundles
 	proactivity?: ProactivitySettings; // Idle review that raises notes the owner would want to hear (on by default)
+	proofSheets?: ProofSheetSettings; // The proof sheet shown with each finished result: the review-backlog notice threshold
 	logging?: LoggingSettings; // The harness log under <agent dir>/logs/harness: level, subsystems, size and retention
 	routines?: RoutinesSettings; // Automatic routine intake from the owner's own words, and routines run away (both on by default)
 	leaders?: LeaderSettings; // Leaders as sub-orchestrators (`bot lead`): how deep leaders may nest

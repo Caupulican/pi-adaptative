@@ -458,6 +458,10 @@ export const DEFAULT_GRAPH_FRACTION = 0.32;
 export const MIN_GRAPH_FRACTION = 0.25;
 export const MAX_GRAPH_FRACTION = 0.5;
 
+/** Results waiting for the owner's review at which the one review-backlog notice is raised (0 turns it off). */
+export const DEFAULT_REVIEW_WAITING_NOTICE_AT = 5;
+export const MAX_REVIEW_WAITING_NOTICE_AT = 100;
+
 export const DEFAULT_WORKBENCH_SETTINGS: Readonly<Required<WorkbenchSettings>> = Object.freeze({
 	mouse: "on",
 	rows: "auto",

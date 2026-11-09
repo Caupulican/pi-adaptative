@@ -291,7 +291,7 @@ export const WORKER_NO_SELF_REVIEW_RULE =
 
 /** The fields a report carries, as the report tool and the text envelope both name them. */
 const WORKER_REPORT_FIELDS_RULE =
-	"Finish by calling submit_report: status completed or blocked, summary (a few sentences), blockers, findings, inconclusive, and, when the task lists requirement ids, one entry per id with the evidence you rely on; list each check you ran and each file you changed. Calling it ends your task. A plain text answer is accepted but the host cannot check it.";
+	"Finish by calling submit_report: status completed or blocked, summary (a few sentences), blockers, findings, inconclusive, and, when the task lists requirement ids, one entry per id with the evidence you rely on; an unsettled item that belongs to one requirement goes in inconclusiveRequirements with that requirement's id, and only the others in inconclusive; list each check you ran and each file you changed. Calling it ends your task. A plain text answer is accepted but the host cannot check it.";
 
 /** The only way a write-capable worker without usable write/edit tools can change a file: actions in a text answer. */
 const WORKER_REPORT_ACTIONS_FALLBACK_RULE =

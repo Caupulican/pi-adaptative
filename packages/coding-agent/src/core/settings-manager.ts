@@ -7,7 +7,7 @@ import { harnessLog, isLogLevel, type LogLevel } from "../kernel/harness-log.ts"
 import { withHostFileWrite } from "../utils/host-write-transition.ts";
 import { normalizePath, resolvePath } from "../utils/paths.ts";
 import { stripBom } from "../utils/text.ts";
-import { configFile } from "./agent-paths.ts";
+import { configFile, hostTransitionsFile } from "./agent-paths.ts";
 import { EDGE_CLASSES, isEdgeClass } from "./autonomy/edge-policy.ts";
 import { DEFAULT_BACKGROUND_TOOL_CALL_AFTER_MS } from "./background-tool-task-controller.ts";
 import { type ChannelPolicyResolution, resolveChannelPolicies } from "./channels/channel-policy.ts";
@@ -91,6 +91,7 @@ import {
 	DEFAULT_RESEARCH_LANE_MAX_SOURCES,
 	DEFAULT_RESEARCH_LANE_MAX_USD,
 	DEFAULT_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
+	DEFAULT_REVIEW_WAITING_NOTICE_AT,
 	DEFAULT_ROUTINE_AWAY_ENABLED,
 	DEFAULT_ROUTINE_AWAY_MAX_PARENT_HOSTS,
 	DEFAULT_ROUTINE_AWAY_MAX_USD_PER_DAY,
@@ -142,6 +143,7 @@ import {
 	MAX_RESEARCH_LANE_MAX_SOURCES,
 	MAX_RESEARCH_LANE_MAX_USD,
 	MAX_RESEARCH_LANE_MAX_WALL_CLOCK_MS,
+	MAX_REVIEW_WAITING_NOTICE_AT,
 	MAX_ROUTINE_AWAY_MAX_PARENT_HOSTS,
 	MAX_ROUTINE_AWAY_MAX_USD_PER_DAY,
 	MAX_ROUTINE_AWAY_MAX_USD_PER_RUN,
@@ -283,6 +285,8 @@ export class FileSettingsStorage implements SettingsStorage {
 	private profileResolutionBaseDir: string;
 	private globalSettingsPath: string;
 	private projectSettingsPath: string;
+	/** The journal every session on this agent directory explains its settings writes from (`host-transitions.jsonl`). */
+	private readonly hostTransitions: string;
 	private directoryProfileInfo: DirectoryResourceProfileInfo;
 	private legacyDirectoryProfilePath: string;
 	private profilesDir: string;
@@ -293,6 +297,7 @@ export class FileSettingsStorage implements SettingsStorage {
 		this.profileResolutionBaseDir = resolvedCwd;
 		this.globalSettingsPath = configFile(resolvedAgentDir, "settings.json");
 		this.projectSettingsPath = join(resolvedCwd, CONFIG_DIR_NAME, "settings.json");
+		this.hostTransitions = hostTransitionsFile(resolvedAgentDir);
 		this.directoryProfileInfo = getDirectoryResourceProfileInfo(resolvedCwd, resolvedAgentDir);
 		this.legacyDirectoryProfilePath = join(
 			resolvedAgentDir,
@@ -383,7 +388,7 @@ export class FileSettingsStorage implements SettingsStorage {
 				if (releases.length === 0) {
 					releases.push(acquireFileLockSync(path, LOW_LATENCY_FILE_LOCK_OPTIONS));
 				}
-				withHostFileWrite(path, next, () => writeFileAtomicSync(path, next));
+				withHostFileWrite(path, next, () => writeFileAtomicSync(path, next), this.hostTransitions);
 				migratedLegacy = legacyExists;
 			}
 		} finally {
@@ -409,7 +414,12 @@ export class FileSettingsStorage implements SettingsStorage {
 				directoryProfile: read(this.directoryProfileInfo.path) ?? read(this.legacyDirectoryProfilePath),
 			};
 			const next = fn(snapshot);
-			withHostFileWrite(this.globalSettingsPath, next, () => writeFileAtomicSync(this.globalSettingsPath, next));
+			withHostFileWrite(
+				this.globalSettingsPath,
+				next,
+				() => writeFileAtomicSync(this.globalSettingsPath, next),
+				this.hostTransitions,
+			);
 		} finally {
 			for (const release of releases.reverse()) release();
 		}
@@ -3581,6 +3591,16 @@ export class SettingsManager {
 		this.globalSettings.autonomy = { ...settings };
 		this.markModified("autonomy");
 		this.save();
+	}
+
+	/** Results waiting for the owner's review at which the one review-backlog notice is raised; 0 means never. */
+	getReviewWaitingNoticeAt(): number {
+		return sanitizeIntegerSetting(
+			this.settings.proofSheets?.reviewWaitingNoticeAt,
+			DEFAULT_REVIEW_WAITING_NOTICE_AT,
+			0,
+			MAX_REVIEW_WAITING_NOTICE_AT,
+		);
 	}
 
 	getProactivitySettings(): ResolvedProactivitySettings {

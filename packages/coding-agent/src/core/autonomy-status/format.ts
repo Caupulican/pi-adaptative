@@ -3,9 +3,17 @@
 import { describeDaemonBuild } from "../delegation/bot-team-routine-helpers.ts";
 import { describeGoalAutoContinue } from "../goals/goal-auto-continue-state.ts";
 import { planStatusLine } from "../plan/plan-panel.ts";
+import { reviewGaugeStatusLine } from "../proof/review-gauge.ts";
 import { describeAwayServiceInspection } from "../routines/away-service.ts";
+import { describeRoutineFailureReason } from "../routines/routine-progress.ts";
 import { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../system-one/semantic-plane-health.ts";
-import type { BoundedList, DayCount, SessionAutonomyStatus, StatusSection } from "./autonomy-status.ts";
+import type {
+	BoundedList,
+	DayCount,
+	RoutineStatusItem,
+	SessionAutonomyStatus,
+	StatusSection,
+} from "./autonomy-status.ts";
 import type { ToolDecision } from "./tool-manifest.ts";
 
 /** What the owner is told while the session file refuses new writes: why, what is safe, and the way out. */
@@ -34,6 +42,20 @@ function at(ms: number | undefined): string {
 	return ms === undefined ? "-" : new Date(ms).toISOString();
 }
 
+/** A routine's state in the owner's words; the data value keeps its identifier. */
+const ROUTINE_STATE_WORDS: Readonly<Record<RoutineStatusItem["state"], string>> = {
+	enabled: "enabled",
+	paused: "paused",
+	"paused-after-failures": "paused after repeated failures",
+	ended: "ended",
+};
+
+/** A routine the host paused after failed runs: how many, and the last failure's reason when one is known. */
+function pausedAfterFailures(pause: { readonly after: number; readonly lastError?: string }): string {
+	const reason = pause.lastError === undefined ? undefined : describeRoutineFailureReason(pause.lastError);
+	return `; paused after ${pause.after} failed runs${reason ? `: ${reason}` : ""}`;
+}
+
 export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): string {
 	return [
 		`Autonomy status at ${status.at}`,
@@ -46,6 +68,12 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 			...(value.state === "no_goal" ? [] : [describeGoalAutoContinue(value.state)]),
 		]),
 		...block("Plans", status.plans, (value) => list(value.plans, planStatusLine)),
+		...block("Review", status.review, (value) => [
+			reviewGaugeStatusLine(value.waiting) ?? "No finished result is waiting for your review.",
+			value.noticeAt > 0
+				? `One notice at ${value.noticeAt} waiting; nothing is ever held.`
+				: "The waiting-results notice is off; nothing is ever held.",
+		]),
 		...block("Session file", status.sessionSave, (value) => [
 			value.fenced ? SESSION_SAVE_PAUSED_WORDS : "Saving normally.",
 		]),
@@ -57,7 +85,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 			...list(
 				value.routines,
 				(routine) =>
-					`${routine.routineId}: ${routine.state}${routine.ended ? ` (${routine.ended})` : ""}, ${routine.watching ?? routine.schedule}, next ${at(routine.nextRunAt)}${routine.startsFrom !== undefined ? ` (starts from ${at(routine.startsFrom)})` : ""}, last ${routine.lastStatus ?? "-"}${routine.awayRefusal ? `, away refused: ${routine.awayRefusal.reason}` : ""}`,
+					`${routine.routineId}: ${ROUTINE_STATE_WORDS[routine.state]}${routine.ended ? ` (${routine.ended})` : ""}, ${routine.watching ?? routine.schedule}, next ${at(routine.nextRunAt)}${routine.startsFrom !== undefined ? ` (starts from ${at(routine.startsFrom)})` : ""}, last ${routine.lastStatus ?? "-"}${routine.awayRefusal ? `, away refused: ${routine.awayRefusal.reason}` : ""}${routine.failurePause ? pausedAfterFailures(routine.failurePause) : ""}${routine.progress ? `; where it stood: ${routine.progress}` : ""}`,
 			),
 		]),
 		...block("Away daemon", status.awayDaemon, (value) => [

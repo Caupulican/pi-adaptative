@@ -11,6 +11,7 @@ import {
 	truncateToWidth,
 } from "@caupulican/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
+import { readProofSheetRecord } from "../../../core/proof/proof-sheet.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import {
 	formatCollapsedToolOutputHint,
@@ -219,7 +220,10 @@ function orchestrationConversationText(
 	}
 	if (toolName === "goal" && result && !result.isError) {
 		if (input.action === "complete") {
-			return `${theme.fg("success", "✓")} ${theme.fg("accent", "Brain")} ${theme.fg("success", "→ goal completed")}`;
+			const chip = `${theme.fg("success", "✓")} ${theme.fg("accent", "Brain")} ${theme.fg("success", "→ goal completed")}`;
+			// The host proof sheet is shown under the chip, ahead of the model's own summary of the work.
+			const sheet = readProofSheetRecord(details, { kind: "tool-result", toolName });
+			return sheet ? `${chip}\n${theme.fg("text", sheet.text)}` : chip;
 		}
 		if (input.action === "satisfy_requirement" || input.action === "increment") {
 			const requirement = typeof input.requirementId === "string" ? ` (${input.requirementId})` : "";

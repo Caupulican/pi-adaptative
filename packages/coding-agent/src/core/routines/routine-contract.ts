@@ -38,6 +38,7 @@ import {
 	MAX_CALENDAR_TIME_ZONE_CHARS,
 	nextCalendarSlotAfter,
 } from "./calendar-schedule.ts";
+import { MAX_ROUTINE_PROGRESS_BRIEF_CHARS, parseRoutineProgress, type RoutineProgress } from "./routine-progress.ts";
 import {
 	parseWatchCondition,
 	parseWatchFiredEvent,
@@ -763,6 +764,17 @@ export interface RoutineOccurrence {
 	 * (absent when unread: the run is charged its full per-run bound). Written by whichever host finished it.
 	 */
 	readonly awaySettlement?: { readonly at: number; readonly costUsd?: number };
+	/**
+	 * The routine's progress brief as it stood when this run was claimed to run (`renderRoutineProgressBrief`), appended
+	 * to its instructions. Frozen before the dispatch identity is fixed, so that identity never changes; absent for a
+	 * first run with nothing to tell, a notice and a bot or team run.
+	 */
+	readonly progressBrief?: string;
+	/**
+	 * Set with a brief whose record a third party's run wrote: the run reads those words, so it carries their origin
+	 * (`routineTurnOrigin`). Frozen with the brief.
+	 */
+	readonly progressUntrusted?: true;
 }
 
 /** The rolling window of the away spend bound. */
@@ -999,6 +1011,11 @@ export interface RoutineDefinitionView extends PersistentRoutineDefinition {
 	 * derive. Run state: it never moves the revision.
 	 */
 	readonly runDurations?: readonly number[];
+	/**
+	 * Where the routine's task stood after its runs (`routine-progress.ts`): run state written by results and the owner's
+	 * note, never moving the revision; an owner write keeps it, only a reset or deletion drops it.
+	 */
+	readonly progress?: RoutineProgress;
 }
 
 export interface RoutineConditionMet {
@@ -1881,6 +1898,7 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 		failurePause: rawFailurePause,
 		conditionMet: rawConditionMet,
 		runDurations,
+		progress: rawProgress,
 		...rawDefinition
 	} = value;
 	const definition = parseRoutineDefinition(rawDefinition);
@@ -1981,6 +1999,7 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 				),
 			};
 		}
+		const progress = rawProgress === undefined ? undefined : parseRoutineProgress(rawProgress);
 		return {
 			...definition,
 			cursor,
@@ -1993,6 +2012,7 @@ export function parseRoutineDefinitionView(value: unknown): RoutineDefinitionVie
 			...(failurePause ? { failurePause } : {}),
 			...(conditionMet ? { conditionMet } : {}),
 			...(runDurations === undefined ? {} : { runDurations: [...(runDurations as number[])] }),
+			...(progress === undefined ? {} : { progress }),
 		};
 	} catch {
 		return undefined;
@@ -2021,6 +2041,8 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			"uncertainty",
 			"executor",
 			"awaySettlement",
+			"progressBrief",
+			"progressUntrusted",
 		]) ||
 		(value.executor !== undefined && value.executor !== "away")
 	)
@@ -2308,6 +2330,23 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 				priorUncertaintyResult.digest === result.digest)
 		)
 			return undefined;
+		// Only a run that reaches a worker reads a brief: a session run of a clock, manual, event or watch trigger.
+		if (
+			value.progressBrief !== undefined &&
+			(typeof value.progressBrief !== "string" ||
+				!value.progressBrief ||
+				value.progressBrief.length > MAX_ROUTINE_PROGRESS_BRIEF_CHARS ||
+				target.kind !== "session" ||
+				trigger.kind === "expiry" ||
+				trigger.kind === "condition")
+		)
+			return undefined;
+		// The taint only travels with a brief the run reads: it is absent alone, and only `true` is stored.
+		if (
+			value.progressUntrusted !== undefined &&
+			(value.progressUntrusted !== true || typeof value.progressBrief !== "string")
+		)
+			return undefined;
 		return {
 			occurrenceId: value.occurrenceId,
 			routineId: value.routineId,
@@ -2327,6 +2366,8 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			...(uncertainty === undefined ? {} : { uncertainty }),
 			...(value.executor === "away" ? { executor: "away" as const } : {}),
 			...(awaySettlement ? { awaySettlement } : {}),
+			...(typeof value.progressBrief === "string" ? { progressBrief: value.progressBrief } : {}),
+			...(value.progressUntrusted === true ? { progressUntrusted: true as const } : {}),
 		};
 	} catch {
 		return undefined;

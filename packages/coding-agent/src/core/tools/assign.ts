@@ -1,7 +1,12 @@
 import { Type } from "typebox";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentToolResult } from "../../kernel/types.ts";
-import { renderCommsErrView } from "../comms/comms-records.ts";
+import {
+	MAX_TASK_DONE_CHARS,
+	MAX_TASK_GOAL_CHARS,
+	MAX_TASK_OUT_OF_SCOPE,
+	renderCommsErrView,
+} from "../comms/comms-records.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { ASSIGN_TOOL_NAME } from "./assign-tool-name.ts";
 import { type DelegateErrRecord, type DelegateRemedy, renderDelegateRemedyLines } from "./delegate-rejections.ts";
@@ -22,6 +27,19 @@ const schema = Type.Object(
 		deep: Type.Optional(
 			Type.Boolean({ description: "A hard problem that needs more thinking. Leave out for ordinary work." }),
 		),
+		doneWhen: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: MAX_TASK_DONE_CHARS,
+				description: "What makes the task done, in one line. The result's proof sheet repeats it.",
+			}),
+		),
+		outOfScope: Type.Optional(
+			Type.Array(Type.String({ minLength: 1 }), {
+				maxItems: MAX_TASK_OUT_OF_SCOPE,
+				description: "What the worker must not touch or decide, one line each.",
+			}),
+		),
 	},
 	{ additionalProperties: false },
 );
@@ -29,12 +47,25 @@ const schema = Type.Object(
 /** The `delegate start` field each assign field becomes; a refusal of one is reported on the assign field. */
 const ASSIGN_FIELD_OF: Readonly<Record<string, string>> = {
 	instructions: "task",
+	goal: "task",
+	doneWhen: "doneWhen",
+	outOfScope: "outOfScope",
 	writePaths: "files",
 	readOnly: "files",
 	thinkingLevel: "deep",
 };
 
-const ASSIGN_SCHEMA_FRAGMENT = `${ASSIGN_TOOL_NAME} required: task; optional: files, deep; minimal call {"task":"<task>"}`;
+const ASSIGN_SCHEMA_FRAGMENT = `${ASSIGN_TOOL_NAME} required: task; optional: files, deep, doneWhen, outOfScope; minimal call {"task":"<task>"}`;
+
+/** The task's goal line: its C1 and DEL control characters removed (they cannot sit in a brief's one line), trimmed. */
+function goalLineOf(task: string): string {
+	return task.replace(/[\u007f-\u009f]/gu, "").trim();
+}
+
+/** A task that is one clean line inside the goal budget travels as a structured brief; any other task is free text. */
+function isBriefGoal(goal: string): boolean {
+	return goal.length > 0 && goal.length <= MAX_TASK_GOAL_CHARS && !/[\r\n\u0000-\u001f]/.test(goal);
+}
 
 function assignField(field: string): string {
 	return ASSIGN_FIELD_OF[field] ?? field;
@@ -91,14 +122,15 @@ export function createAssignToolDefinition(delegate: ToolDefinition): ToolDefini
 		name: ASSIGN_TOOL_NAME,
 		label: "Assign",
 		description:
-			"Hand a task to a worker: assign {task, files?, deep?}. The harness picks the worker's model (the owner's worker profile), tools, write scope (the files you name) and queue slot, and its result arrives as an event, so carry on with other work. Use deep only for a hard problem. Starting several independent tasks in one turn runs them in parallel. Use delegate only to follow up on, wait for or inspect workers.",
-		promptSnippet: "Hand work to a worker (task, files, deep)",
+			"Hand a task to a worker: assign {task, files?, deep?, doneWhen?, outOfScope?}. The harness picks the worker's model (the owner's worker profile), tools, write scope (the files you name) and queue slot, and its result arrives as an event, so carry on with other work. Use deep only for a hard problem. Starting several independent tasks in one turn runs them in parallel. Use delegate only to follow up on, wait for or inspect workers.",
+		promptSnippet: "Hand work to a worker (task, files, deep, doneWhen, outOfScope)",
 		neverDefer: true,
 		parameters: schema,
 		// As for delegate: the refusal view reaches the model as the failure record's evidence.
 		failureRecovery: { getFailureEvidence: (_params, failure) => failure.message },
 		async execute(toolCallId, input, signal, onUpdate, ctx) {
 			const files = input.files?.filter((file) => file.trim().length > 0);
+			const goal = goalLineOf(input.task);
 			harnessLog.info("delegation", "work was assigned", {
 				taskChars: input.task.length,
 				files: files?.length ?? 0,
@@ -108,7 +140,11 @@ export function createAssignToolDefinition(delegate: ToolDefinition): ToolDefini
 				toolCallId,
 				{
 					action: "start",
-					instructions: input.task,
+					// A one-line task is the brief's goal, so the done-when and out-of-scope lines travel as record fields
+					// the worker reads and the result's proof sheet repeats; a longer task is folded into plain words.
+					...(isBriefGoal(goal) ? { goal } : { instructions: input.task }),
+					...(input.doneWhen ? { doneWhen: input.doneWhen } : {}),
+					...(input.outOfScope && input.outOfScope.length > 0 ? { outOfScope: input.outOfScope } : {}),
 					...(files && files.length > 0 ? { writePaths: files } : { readOnly: true }),
 					...(input.deep === true ? { thinkingLevel: "high" } : {}),
 				},

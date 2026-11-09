@@ -1,4 +1,5 @@
 import { getUnprovenGoalRequirementIds } from "./goal-acceptance.ts";
+import { DEFAULT_PLAN_WAIT_RESUME_MS } from "./goal-continuation-defaults.ts";
 import { isSystemBlockedGoal } from "./goal-lifecycle.ts";
 import type { GoalState, Requirement } from "./goal-state.ts";
 
@@ -440,11 +441,14 @@ export function evaluateGoalContinuation(args: {
 	if (workerContinuation) return workerContinuation;
 
 	if (args.planStepsInFlight && args.planStepsInFlight > 0) {
+		// The plan's own wake is the primary one; the deadline recovers a lost wake through the same timer a worker wait uses.
+		const nowMs = args.now === undefined ? Number.NaN : Date.parse(args.now);
 		return {
 			...baseDecision,
 			action: "waiting",
 			reasonCode: "plan_in_flight",
 			message: `${args.planStepsInFlight} step(s) of the running plan are in flight; the plan wakes you with each combined result and when a step needs you.`,
+			...(Number.isFinite(nowMs) ? { resumeAt: new Date(nowMs + DEFAULT_PLAN_WAIT_RESUME_MS).toISOString() } : {}),
 		};
 	}
 

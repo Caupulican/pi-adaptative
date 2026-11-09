@@ -8,8 +8,18 @@
  * where the message is created and persisted on its entry (`kernel/turn-origin-stamp.ts`).
  */
 
+import { isDeepStrictEqual } from "node:util";
 import { ownerInputIdOf } from "../kernel/owner-input-stamp.ts";
+import {
+	PARENT_INPUT_CONSUMED_CUSTOM_TYPE,
+	PARENT_INPUT_SETTLED_CUSTOM_TYPE,
+	PARENT_INPUT_SKIPPED_CUSTOM_TYPE,
+	PARENT_INPUT_WAKE_CUSTOM_TYPE,
+	PARENT_INPUT_WAKE_REQUEST_CUSTOM_TYPE,
+	PARENT_NOTE_REQUEST_CUSTOM_TYPE,
+} from "../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
+import { WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE } from "../kernel/session/worker-project-enrollment.ts";
 import type { TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
 import {
 	MAX_TURN_ORIGIN_REF_CHARS,
@@ -19,19 +29,60 @@ import {
 	UNREADABLE_TURN_ORIGIN,
 } from "../kernel/turn-origin-stamp.ts";
 import type { AgentMessage } from "../kernel/types.ts";
+import { VERIFICATION_DISMISSAL_CUSTOM_TYPE } from "../kernel/verification-obligations.ts";
 import { parseWorkerControlRecord, type WorkerControlRecord, workerControlOf } from "../kernel/worker-control-stamp.ts";
+import { OUTWARD_DRAFT_CUSTOM_TYPE, OUTWARD_DRAFT_STATE_CUSTOM_TYPE } from "./agent-session-edge.ts";
+import { EDGE_GRANT_CUSTOM_TYPE, EDGE_REVOKE_CUSTOM_TYPE } from "./autonomy/edge-policy.ts";
+import { LANE_RECORD_CUSTOM_TYPE } from "./autonomy/session-lane-record.ts";
+import {
+	BACKGROUND_TOOL_TASK_CUSTOM_TYPE,
+	BACKGROUND_TOOL_TASK_DELIVERY_CUSTOM_TYPE,
+} from "./background-tool-task-controller.ts";
 import type { OwnerChannelOrigin } from "./channels/owner-channel-types.ts";
 import { CHAT_EXTENSION_NAME } from "./chat/constants.ts";
+import { SEMANTIC_USAGE_CUSTOM_TYPE, SPAWNED_USAGE_CUSTOM_TYPE } from "./cost/usage-records.ts";
+import { BOT_RUNTIME_BINDINGS_CUSTOM_TYPE } from "./delegation/bot-runtime-bindings.ts";
+import { LEADER_OUTCOME_CUSTOM_TYPE, LEADER_QUESTION_CUSTOM_TYPE } from "./delegation/leader-controller.ts";
+import { WORKER_CLAIM_CUSTOM_TYPE } from "./delegation/session-worker-claim.ts";
+import {
+	WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE,
+	WORKER_CHANGED_FILE_CUSTOM_TYPE,
+} from "./delegation/worker-conversation-store.ts";
+import { WORKER_RECEIPT_ORIGIN_CUSTOM_TYPE } from "./delegation/worker-receipt-origin.ts";
 import { HOST_EVENT_CUSTOM_TYPE } from "./events/host-event-delivery.ts";
 import type { SendUserMessageOrigin } from "./extensions/types.ts";
 import { GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goals/goal-continuation-prompt.ts";
+import { GOAL_STATE_CUSTOM_TYPE } from "./goals/session-goal-state.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "./harness-notice.ts";
 import { HOST_TURN_CUSTOM_TYPES } from "./host-turn-reasoning.ts";
-import { HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE } from "./human-input.ts";
+import { HUMAN_INPUT_CUSTOM_TYPE, HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE } from "./human-input.ts";
+import { OWNER_EVIDENCE_CUSTOM_TYPE } from "./learning/owner-evidence-ledger.ts";
+import { CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE } from "./memory/continuous-chat-ingest.ts";
+import { MODEL_POOL_POLICY_CUSTOM_TYPE } from "./model-router/owner-model-policy.ts";
+import { SESSION_TASK_PROFILE_CUSTOM_TYPE } from "./orchestration/session-task-profile-store.ts";
 import { isOwnerChannelInputId, isOwnerSpokenInputId } from "./owner-input-ledger.ts";
+import { PIPELINE_RUN_CUSTOM_TYPE } from "./pipelines/types.ts";
+import { ACT_AHEAD_CUSTOM_TYPE } from "./proactivity/act-ahead-record.ts";
+import { PROACTIVITY_FEEDBACK_CUSTOM_TYPE } from "./proactivity/proactivity-feedback.ts";
 import { PROACTIVE_NOTE_CUSTOM_TYPE } from "./proactivity/proactivity-review.ts";
+import {
+	BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE,
+	PLAN_UPDATE_CUSTOM_TYPE,
+	PROOF_SHEET_TOOL_NAMES,
+} from "./proof/proof-sheet.ts";
+import { AUTHORITY_CONTEXT_CUSTOM_TYPE } from "./provider-request-context-controller.ts";
+import { QUEUED_INPUT_CUSTOM_TYPE } from "./queued-input-record.ts";
+import { CONVERSATION_TALKER_CUSTOM_TYPE, REPLY_ROUTE_CUSTOM_TYPE } from "./reply-route.ts";
 import { ROUTINE_COMPLETION_TYPE, ROUTINE_INTAKE_NOTICE_TYPE } from "./routines/routine-parent-input.ts";
+import { SESSION_SKILL_POLICY_CUSTOM_TYPE } from "./session-skill-policy.ts";
+import { SESSION_SYSTEM_PROMPT_CUSTOM_TYPE } from "./session-system-prompt-override.ts";
+import { WORK_EVIDENCE_CUSTOM_TYPE } from "./system-one/session-work-diff.ts";
+import { VERIFICATION_OBLIGATIONS_CUSTOM_TYPE } from "./system-one/verification-obligations.ts";
+import { TASK_DIRECTORY_STATE_CUSTOM_TYPE } from "./tasks/session-task-directory-store.ts";
+import { TASK_STEPS_STATE_CUSTOM_TYPE } from "./tasks/session-task-state.ts";
+import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "./tool-applicability-gate.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
+import { WORK_UNIT_CUSTOM_TYPE, WORKER_RECEIPTS_CUSTOM_TYPE } from "./work-units.ts";
 
 export type { TurnOriginKind, TurnOriginRecord } from "../kernel/turn-origin-stamp.ts";
 
@@ -181,6 +232,157 @@ export function entryTurnOrigin(entry: SessionEntry): TurnOriginRecord | undefin
 		entry.workerControl === undefined ? undefined : parseWorkerControlRecord(entry.workerControl),
 		entry.ownerInputId,
 	);
+}
+
+let hostReservedTypes: ReadonlySet<string> | undefined;
+
+/**
+ * The custom types the host writes itself and a reader trusts for a decision: authority and owner decisions (edge grants and
+ * revokes, owner evidence, model and skill policies, outward drafts, reply routes, bot bindings, verification dismissals and
+ * obligations, worker enrollment), goal, worker, lane, task and leader state and receipts, parent inputs and wakes, spend, the
+ * human-input exchange, and the proof sheets with their carriers. Not reserved: display, telemetry, analytics and model-context
+ * records, learning audit and memory projection records, and the types a built-in extension writes (`pi-chat`,
+ * `collaboration-control-failure`). Built from the constants their producers export, never retyped, and on first use, so the
+ * import order of those producers cannot leave one unset.
+ */
+function hostReservedCustomTypes(): ReadonlySet<string> {
+	hostReservedTypes ??= new Set<string>([
+		...HOST_TURN_CUSTOM_TYPES,
+		BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE,
+		PLAN_UPDATE_CUSTOM_TYPE,
+		HOST_EVENT_CUSTOM_TYPE,
+		HARNESS_NOTICE_CUSTOM_TYPE,
+		PROACTIVE_NOTE_CUSTOM_TYPE,
+		PROACTIVITY_FEEDBACK_CUSTOM_TYPE,
+		ACT_AHEAD_CUSTOM_TYPE,
+		GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE,
+		HUMAN_INPUT_CUSTOM_TYPE,
+		HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE,
+		ROUTINE_COMPLETION_TYPE,
+		ROUTINE_INTAKE_NOTICE_TYPE,
+		OPTIONAL_TOOL_INTENT_CUSTOM_TYPE,
+		QUEUED_INPUT_CUSTOM_TYPE,
+		VERIFICATION_OBLIGATIONS_CUSTOM_TYPE,
+		VERIFICATION_DISMISSAL_CUSTOM_TYPE,
+		OWNER_EVIDENCE_CUSTOM_TYPE,
+		EDGE_GRANT_CUSTOM_TYPE,
+		EDGE_REVOKE_CUSTOM_TYPE,
+		OUTWARD_DRAFT_CUSTOM_TYPE,
+		OUTWARD_DRAFT_STATE_CUSTOM_TYPE,
+		REPLY_ROUTE_CUSTOM_TYPE,
+		CONVERSATION_TALKER_CUSTOM_TYPE,
+		BOT_RUNTIME_BINDINGS_CUSTOM_TYPE,
+		MODEL_POOL_POLICY_CUSTOM_TYPE,
+		SESSION_SKILL_POLICY_CUSTOM_TYPE,
+		SESSION_SYSTEM_PROMPT_CUSTOM_TYPE,
+		AUTHORITY_CONTEXT_CUSTOM_TYPE,
+		WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE,
+		PARENT_INPUT_SETTLED_CUSTOM_TYPE,
+		PARENT_INPUT_CONSUMED_CUSTOM_TYPE,
+		PARENT_INPUT_WAKE_CUSTOM_TYPE,
+		PARENT_INPUT_WAKE_REQUEST_CUSTOM_TYPE,
+		PARENT_INPUT_SKIPPED_CUSTOM_TYPE,
+		PARENT_NOTE_REQUEST_CUSTOM_TYPE,
+		GOAL_STATE_CUSTOM_TYPE,
+		WORKER_RECEIPTS_CUSTOM_TYPE,
+		WORKER_RECEIPT_ORIGIN_CUSTOM_TYPE,
+		WORKER_CHANGED_FILE_CUSTOM_TYPE,
+		WORKER_CLAIM_CUSTOM_TYPE,
+		WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE,
+		WORK_UNIT_CUSTOM_TYPE,
+		WORK_EVIDENCE_CUSTOM_TYPE,
+		LANE_RECORD_CUSTOM_TYPE,
+		LEADER_OUTCOME_CUSTOM_TYPE,
+		LEADER_QUESTION_CUSTOM_TYPE,
+		BACKGROUND_TOOL_TASK_CUSTOM_TYPE,
+		BACKGROUND_TOOL_TASK_DELIVERY_CUSTOM_TYPE,
+		CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE,
+		TASK_STEPS_STATE_CUSTOM_TYPE,
+		TASK_DIRECTORY_STATE_CUSTOM_TYPE,
+		SESSION_TASK_PROFILE_CUSTOM_TYPE,
+		PIPELINE_RUN_CUSTOM_TYPE,
+		SPAWNED_USAGE_CUSTOM_TYPE,
+		SEMANTIC_USAGE_CUSTOM_TYPE,
+	]);
+	return hostReservedTypes;
+}
+
+/**
+ * Refuses an extension's record under a host-reserved custom type with a plain error that names the type. Nothing is written
+ * when it throws. The extension API's write paths call it (`sendMessage`, `appendEntry`, a handler's replacement message); a
+ * session manager an extension receives directly (the `setup` of its `newSession`) is not checked here.
+ */
+export function assertExtensionCustomType(customType: string): void {
+	if (hostReservedCustomTypes().has(customType))
+		throw new Error(`Custom type "${customType}" is reserved by the host; an extension cannot send or record it.`);
+}
+
+/**
+ * The refusal of an extension's tool under a host proof tool's name (the goal tools), or undefined when the name is free. The
+ * proof sheet a tool result carries is read by its tool name, so the name is the host's; the same refusal covers a registered
+ * tool and a manifest's lazy tool, since each takes the registry slot of the name it carries.
+ */
+export function extensionToolNameError(name: string): string | undefined {
+	return PROOF_SHEET_TOOL_NAMES.has(name)
+		? `Tool name "${name}" is reserved by the host; an extension cannot register a tool under it.`
+		: undefined;
+}
+
+/** Refuses an extension's tool under a host-reserved name with the plain error of {@link extensionToolNameError}. */
+export function assertExtensionToolName(name: string): void {
+	const error = extensionToolNameError(name);
+	if (error !== undefined) throw new Error(error);
+}
+
+/**
+ * Whether a handler's replacement returns a custom message unchanged: the same custom type, content, display and details. A host
+ * message returned that way is still the host's; any other change to a reserved message is refused.
+ */
+export function isUnchangedCustomMessage(original: AgentMessage, replacement: AgentMessage): boolean {
+	return (
+		original.role === "custom" &&
+		replacement.role === "custom" &&
+		original.customType === replacement.customType &&
+		original.display === replacement.display &&
+		isDeepStrictEqual(original.content, replacement.content) &&
+		isDeepStrictEqual(original.details, replacement.details)
+	);
+}
+
+/**
+ * Where the stamped part of a branch begins: the index of its first entry that carries an owner input id, an origin stamp or a
+ * worker-control stamp, or the branch length when none does. An entry before it was written before inputs carried identities.
+ */
+export function stampedHistoryStart(branch: readonly SessionEntry[]): number {
+	const index = branch.findIndex(
+		(entry) =>
+			entry.type === "message" &&
+			(entry.ownerInputId !== undefined || entry.turnOrigin !== undefined || entry.workerControl !== undefined),
+	);
+	return index < 0 ? branch.length : index;
+}
+
+/**
+ * The owner's own words at `index` of a branch whose stamped part starts at `stampedStart` (see {@link stampedHistoryStart}): a
+ * user message whose origin is owner-typed or owner-channel. A user message that carries no identity at all counts as the owner's
+ * typed words only in the legacy prefix, before the stamped part, where the owner typed it before inputs carried an identity; after
+ * that point it is no one's words. Every other entry yields undefined. Shared by every reader of owner evidence on a branch.
+ */
+export function ownerOriginKind(
+	entry: SessionEntry,
+	index: number,
+	stampedStart: number,
+): "owner-typed" | "owner-channel" | undefined {
+	if (entry.type !== "message" || entry.message.role !== "user") return undefined;
+	const origin = entryTurnOrigin(entry);
+	if (origin === undefined) return index < stampedStart ? "owner-typed" : undefined;
+	return origin.k === "owner-typed" || origin.k === "owner-channel" ? origin.k : undefined;
+}
+
+/** The extension's message once its custom type is checked (see {@link assertExtensionCustomType}). */
+export function checkedExtensionMessage<T extends { readonly customType: string }>(message: T): T {
+	assertExtensionCustomType(message.customType);
+	return message;
 }
 
 export function isThirdPartyOrigin(origin: TurnOriginRecord | undefined): boolean {

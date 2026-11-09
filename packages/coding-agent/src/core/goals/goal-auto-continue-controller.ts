@@ -18,6 +18,18 @@ import {
 } from "./goal-auto-continue-state.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goal-runtime-snapshot.ts";
 
+/**
+ * A wait whose decision carries a deadline the timer re-decides at: a dispatched worker's, or the admitted plan steps'
+ * timed fallback. Either wait ends by re-deciding, so a lost wake cannot hold the goal.
+ */
+function isDeadlineWait(continuation: GoalRuntimeSnapshot["continuation"]): boolean {
+	return (
+		continuation.action === "waiting" &&
+		(continuation.reasonCode === "worker_in_flight" || continuation.reasonCode === "plan_in_flight") &&
+		continuation.resumeAt !== undefined
+	);
+}
+
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface GoalAutoContinueControllerSettingsSource {
 	getAutonomySettings(): Required<AutonomySettings>;
@@ -243,10 +255,7 @@ export class GoalAutoContinueController {
 		const snapshot = this.deps.getGoalRuntimeSnapshot({ maxStallTurns });
 		const continuation = snapshot.continuation;
 		const resumeAtMs = continuation.resumeAt === undefined ? Number.NaN : Date.parse(continuation.resumeAt);
-		const waitingForWorkerDeadline =
-			continuation.action === "waiting" &&
-			continuation.reasonCode === "worker_in_flight" &&
-			Number.isFinite(resumeAtMs);
+		const waitingForWorkerDeadline = isDeadlineWait(continuation) && Number.isFinite(resumeAtMs);
 		if (continuation.action !== "continue" && !waitingForWorkerDeadline) return { action: "clear" };
 		const activeGoalId = snapshot.goalState?.goalId;
 		if (
@@ -354,13 +363,7 @@ export class GoalAutoContinueController {
 			// The deadline may move while this timer is armed (a fresher bound worker, clock correction,
 			// or an early host wake). Re-evaluate through the single scheduler instead of dropping the
 			// only event that can make the never-hang recovery branch reachable.
-			if (
-				snapshot.continuation.action === "waiting" &&
-				snapshot.continuation.reasonCode === "worker_in_flight" &&
-				snapshot.continuation.resumeAt !== undefined
-			) {
-				this.scheduleFromIdle();
-			}
+			if (isDeadlineWait(snapshot.continuation)) this.scheduleFromIdle();
 			return;
 		}
 		let interrupted = false;

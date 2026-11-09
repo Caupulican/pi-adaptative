@@ -20,8 +20,9 @@ export interface CompactionEconomicsInput {
 	/** Context the next request would carry (P). */
 	readonly prefixTokens: number;
 	/**
-	 * Non-compactable request envelope (system prompt, tool schemas, active skills) that remains present
-	 * after compaction and cannot be compressed by `afterRatio`.
+	 * Non-compactable request envelope (system prompt and provider-visible tool schemas) that remains present
+	 * after compaction and cannot be compressed by `afterRatio`. Active skills are not in it: each is a durable
+	 * host record (one per skill) that a compaction carries past the cut, so it counts toward `compactedTokens`.
 	 */
 	readonly nonCompactableTokens?: number;
 	/** Expected context after compacting (P'), from learned compaction outcomes. */

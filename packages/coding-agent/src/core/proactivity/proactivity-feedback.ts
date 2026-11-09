@@ -9,8 +9,9 @@ import { ownerPasteRestorer } from "../learning/owner-evidence-ledger.ts";
 import { isOwnerSpokenInputId } from "../owner-input-ledger.ts";
 import { ownerTypedText } from "../security/owner-paste-boundary.ts";
 import type { ResolvedProactivityFeedbackSettings } from "../settings/settings-schema.ts";
+import { messageContentText } from "../util/message-content-text.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
-import { messageText, PROACTIVE_NOTE_CUSTOM_TYPE, type ProactiveNote } from "./proactivity-review.ts";
+import { PROACTIVE_NOTE_CUSTOM_TYPE, type ProactiveNote } from "./proactivity-review.ts";
 
 /**
  * What the owner did with delivered proactive notes, and the topics set aside for it. System One judges one thing per
@@ -306,7 +307,7 @@ function consumedNotes(entries: readonly SessionEntry[], decided: ReadonlySet<st
 			!isOwnerSpokenInputId(entry.ownerInputId)
 		)
 			continue;
-		const text = messageText(entry.message.content);
+		const text = messageContentText(entry.message.content);
 		const pasted = restorePasted(entry.id, text);
 		const reply = { at: Date.parse(entry.timestamp), typed: ownerTypedText({ text, ...(pasted ? { pasted } : {}) }) };
 		for (const waiting of consumed) waiting.reply ??= reply;

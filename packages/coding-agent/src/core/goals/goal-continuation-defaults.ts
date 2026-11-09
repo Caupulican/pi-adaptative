@@ -23,3 +23,10 @@ export const MAX_GOAL_AUTO_CONTINUE_DELAY_MS = 60_000;
  * detection that runs on top of it) before the goal loop requires inspection and a different approach.
  */
 export const DEFAULT_GOAL_WORKER_WAIT_MS = 3_600_000; // 60 minutes
+
+/**
+ * Timed fallback for a goal that waits on admitted plan steps (`evaluateGoalContinuation`'s `plan_in_flight`). The plan
+ * wakes the root with each combined result, so this interval only recovers a lost wake: the wait re-decides at each
+ * deadline and continues as soon as no step is in flight.
+ */
+export const DEFAULT_PLAN_WAIT_RESUME_MS = 60_000;

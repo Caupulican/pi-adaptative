@@ -14,9 +14,8 @@ import { hostEventIsCurrent } from "../events/host-event-reducer.ts";
 import type { HarnessNotice } from "../harness-notice.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
-import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
+import { boundedRedactedDiagnosticText, cleanRedactBound } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
-import { boundedText } from "../util/bounded-line.ts";
 import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { AWAY_OFF_BRANCH_REASON, AWAY_UNPINNED_REASON } from "./away-routine-admission.ts";
 import {
@@ -48,6 +47,7 @@ import {
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
 import { routineTurnOrigin } from "./routine-parent-input.ts";
+import { PROMOTED_SNAG_RUNS, promotedRoutineSnags, type RoutineRunFacts } from "./routine-progress.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import type { RoutineWorkerExecutor, RoutineWorkerRequest, RoutineWorkerState } from "./routine-worker-executor.ts";
 
@@ -63,10 +63,6 @@ function errorText(error: unknown): string {
 const ROUTINE_UNATTENDED_LINE =
 	'This run is unattended and nobody is waiting on it. If it finds nothing new or nothing the owner needs, report ownerUpdate "none".';
 
-/**
- * The exact brief an occurrence's worker receives; its dispatch and notification identity compare this text, so it
- * is derived only from the stored occurrence. An event run appends the deciding attempt as fenced data.
- */
 /** The one shape of a routine run's dispatch identity, also read back to find its attempts. */
 export function routineWorkerRequest(
 	occurrence: RoutineOccurrence,
@@ -82,7 +78,31 @@ export function routineWorkerRequest(
 	};
 }
 
+/**
+ * What a finished worker run tells its routine's progress record beyond outcome and summary: code facts only (the
+ * result's reason code and its first error's code, never their text) and the run's own report.
+ */
+function routineRunFacts(execution: RoutineWorkerState): RoutineRunFacts {
+	const step = execution.result?.errors[0]?.code;
+	const report = execution.result?.progress;
+	return {
+		reasonCode: execution.result?.reasonCode ?? execution.record.reasonCode ?? execution.record.status,
+		...(step ? { step } : {}),
+		...(report ? { report } : {}),
+	};
+}
+
+/**
+ * The exact brief an occurrence's worker receives; its dispatch and notification identity compare this text, so it
+ * is derived only from the stored occurrence. An event run appends the deciding attempt as fenced data; every kind
+ * appends where the task stood after the last run, frozen on the occurrence when its run was claimed (`progressBrief`).
+ */
 export function routineInstructions(occurrence: RoutineOccurrence): string {
+	const base = routineTriggerInstructions(occurrence);
+	return occurrence.progressBrief === undefined ? base : `${base}\n\n${occurrence.progressBrief}`;
+}
+
+function routineTriggerInstructions(occurrence: RoutineOccurrence): string {
 	const trigger = occurrence.trigger;
 	const end = occurrence.definition.origin?.endCondition;
 	// The host cannot watch an end the owner stated in words; each run is told it and reports whether it is reached.
@@ -323,12 +343,13 @@ export interface RoutineResultDelivery {
 	/** Consume the native notification only after its parent input is physically durable. */
 	acknowledgeWorkerNotification(occurrence: RoutineOccurrence): void;
 	/**
-	 * Tells the owner once, with their next turn, that one of this session's routines is paused after failed runs or
-	 * cannot be scheduled here; `undefined` observes that the state ended.
+	 * Tells the owner once, with their next turn, that one of this session's routines is paused after failed runs,
+	 * cannot be scheduled here, or keeps stumbling on the same snag; `undefined` observes that the state ended. `scope`
+	 * is the subject holding the state on its own: the routine id, or one snag of it.
 	 */
 	noticeRoutineState(
-		kind: "routine-paused" | "routine-unschedulable",
-		routineId: string,
+		kind: "routine-paused" | "routine-unschedulable" | "routine-snag",
+		scope: string,
 		notice: HarnessNotice | undefined,
 	): void;
 }
@@ -407,6 +428,8 @@ export class RoutineSchedulerController {
 	private previousSlots = new Map<string, number | undefined>();
 	/** Pauses already logged by this process, keyed by routine and the occurrence whose failure paused it. */
 	private readonly announcedPauses = new Set<string>();
+	/** Snag scopes this runtime observed as promoted, so one that stops being promoted is observed clear. */
+	private readonly noticedSnags = new Set<string>();
 
 	constructor(deps: RoutineSchedulerDeps) {
 		this.deps = deps;
@@ -621,10 +644,12 @@ export class RoutineSchedulerController {
 	}
 
 	/**
-	 * Observes, for each routine of this session, the two kept states the owner acts on: a pause after failed runs (from
-	 * its durable record, so a restart finds the notice already saved) and a time zone this runtime cannot place.
+	 * Observes, for each routine of this session, the kept states the owner acts on: a pause after failed runs (from its
+	 * durable record, so a restart finds the notice already saved), a time zone this runtime cannot place, and each snag
+	 * its progress record counts at least {@link PROMOTED_SNAG_RUNS} times while unresolved (one notice per snag episode).
 	 */
 	private observeRoutineStates(parent: RoutineResultDelivery): void {
+		const promoted = new Set<string>();
 		for (const routine of this.deps.store.listRoutines()) {
 			if (routine.target.kind !== "session" || routine.target.parentSessionId !== this.deps.parentSessionId)
 				continue;
@@ -644,7 +669,9 @@ export class RoutineSchedulerController {
 				routine.routineId,
 				pause && {
 					reason: `${routine.routineId}:${pause.occurrenceId}`,
-					text: `Routine ${routine.routineId} was paused after ${pause.after} failed runs in a row and stays paused until the owner resumes it. The last run reported: ${JSON.stringify(pause.lastError)}`,
+					text: `Routine ${routine.routineId} was paused after ${pause.after} failed runs in a row and stays paused until the owner resumes it.`,
+					// The failed run's own words: the model reads them fenced as data, the owner's line does not carry them.
+					evidence: `The last run reported:\n${pause.lastError}`,
 				},
 			);
 			const schedule = routine.schedule;
@@ -658,6 +685,39 @@ export class RoutineSchedulerController {
 						}
 					: undefined,
 			);
+			for (const snag of promotedRoutineSnags(routine.progress)) {
+				const scope = `${routine.routineId}:snag:${snag.signature}`;
+				promoted.add(scope);
+				this.noticedSnags.add(scope);
+				// A paused or off routine runs nothing: the headline says so first, and its
+				// reason changes with that state, so the notice is told again when the state changes.
+				const held =
+					routine.failurePause !== undefined
+						? "paused until the owner resumes it"
+						: !routine.enabled
+							? "off until the owner enables it"
+							: undefined;
+				const stumbling = `keeps stumbling on the same thing (${snag.seenCount} runs so far).`;
+				// The snag's own words, as the run wrote them: fenced for the model, never part of the owner's line.
+				const evidence = [
+					`Where the run stumbled: ${snag.what}`,
+					...(snag.remedy ? [`The last remedy tried: ${snag.remedy}`] : []),
+				].join("\n");
+				parent.noticeRoutineState("routine-snag", scope, {
+					reason: `${routine.routineId}:${snag.signature}:${snag.firstSeenAt}:${held === undefined ? "active" : "held"}`,
+					text:
+						held === undefined
+							? `Routine ${routine.routineId} ${stumbling} A note through the routine tool reaches its next run.`
+							: `Routine ${routine.routineId} is ${held}; a note through the routine tool reaches its first run after that. It ${stumbling}`,
+					evidence,
+				});
+			}
+		}
+		// A snag that resolved, was reset or left with its routine ends its notice.
+		for (const scope of this.noticedSnags) {
+			if (promoted.has(scope)) continue;
+			this.noticedSnags.delete(scope);
+			parent.noticeRoutineState("routine-snag", scope, undefined);
 		}
 	}
 
@@ -876,6 +936,7 @@ export class RoutineSchedulerController {
 					"Dispatch was interrupted and no exact durable execution could be established; it was not repeated.",
 				recipient: this.deps.parentSessionId,
 				nowMs: this.deps.timers.now(),
+				facts: { reasonCode: "dispatch_interrupted" },
 			});
 		}
 	}
@@ -904,19 +965,20 @@ export class RoutineSchedulerController {
 					: execution.record.status === "canceled"
 						? ("cancelled" as const)
 						: ("failed" as const),
-			summary: boundedText(
+			// Passed whole: the store cleans, redacts and bounds every summary before it cuts it (`resultSummaryText`).
+			summary:
 				execution.result?.summary ??
-					execution.record.reasonDetail ??
-					execution.record.reasonCode ??
-					execution.record.status,
-				MAX_ROUTINE_SUMMARY_CHARS,
-			),
+				execution.record.reasonDetail ??
+				execution.record.reasonCode ??
+				execution.record.status,
 			recipient: this.deps.parentSessionId,
 			nowMs: this.deps.timers.now(),
 			// A run away settles its spend in the write that ends it, whichever host ends it.
 			...(occurrence.executor === "away"
 				? { awaySpentUsd: this.deps.worker.spentUsd(this.request(occurrence)) }
 				: {}),
+			// Where the task stands: code facts of the result (its reason code and failing step) and the run's own report.
+			facts: routineRunFacts(execution),
 		};
 		// Only a routine whose brief named an end the owner stated acts on a run reporting it met; for any other the
 		// report is dropped and the drop reported once.
@@ -1064,11 +1126,12 @@ export class RoutineSchedulerController {
 						occurrenceId: occurrence.occurrenceId,
 						claimToken,
 						outcome: "failed",
-						summary: boundedText(outcome.skipReason, MAX_ROUTINE_SUMMARY_CHARS),
+						summary: outcome.skipReason,
 						recipient: this.deps.parentSessionId,
 						nowMs: this.deps.timers.now(),
 						// Nothing started, so nothing was spent.
 						...(occurrence.executor === "away" ? { awaySpentUsd: 0 } : {}),
+						facts: { reasonCode: outcome.skipReason, step: "start" },
 					});
 					harnessLog.warn("routines", "a routine run did not start", {
 						routineId: occurrence.routineId,
@@ -1099,9 +1162,10 @@ export class RoutineSchedulerController {
 					occurrenceId: occurrence.occurrenceId,
 					claimToken,
 					outcome: "succeeded",
-					summary: boundedText(summary, MAX_ROUTINE_SUMMARY_CHARS),
+					summary,
 					recipient: this.deps.parentSessionId,
 					nowMs: this.deps.timers.now(),
+					facts: { reasonCode: "delivered" },
 				});
 			}
 			result.dispatched.push(occurrence.routineId);
@@ -1113,17 +1177,16 @@ export class RoutineSchedulerController {
 				this.settleRefused(occurrence, claimToken, guarded.refused)
 			)
 				return;
-			const detail = boundedText(
-				boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error)) ??
-					"Routine dispatch failed.",
-				MAX_ROUTINE_SUMMARY_CHARS,
-			);
+			const detail =
+				cleanRedactBound(error instanceof Error ? error.message : String(error), MAX_ROUTINE_SUMMARY_CHARS) ||
+				"Routine dispatch failed.";
 			this.deps.store.markRoutineUncertain({
 				occurrenceId: occurrence.occurrenceId,
 				claimToken,
 				reason: detail,
 				recipient: this.deps.parentSessionId,
 				nowMs: this.deps.timers.now(),
+				facts: { reasonCode: "dispatch_failed", step: "dispatch" },
 			});
 			harnessLog.warn("routines", "a routine run's dispatch failed; its outcome is unknown", {
 				routineId: occurrence.routineId,

@@ -1,3 +1,5 @@
+import { boundedLine, boundedText } from "../util/bounded-line.ts";
+
 /** High-confidence credential shapes shared by outbound-query gates and diagnostic redaction. */
 /** Provider-issued token and key formats that are unambiguous in any text, source code included. */
 const TOKEN_SHAPE_PATTERNS: readonly RegExp[] = [
@@ -76,6 +78,23 @@ export function hasMaskableSecretText(text: string): boolean {
 
 export function redactKnownSecrets(text: string): string {
 	return replaceAllMatches(text, SECRET_MASK_PATTERNS, "[REDACTED]");
+}
+
+/**
+ * Text a record or a notice keeps: cleaned, then redacted, then bounded, in that order, so a cut never leaves the prefix of
+ * a masked token and a token split by a character is matched whole. Invisible control and format characters and lone
+ * surrogates are deleted (a space would split the token); a line break or tab is one space, or with `lines` a break is kept
+ * and a carriage return becomes a line feed. Idempotent: clean text comes back unchanged. Empty when nothing is left.
+ */
+export function cleanRedactBound(text: string, maxChars: number, options?: { readonly lines?: boolean }): string {
+	const cleaned = options?.lines
+		? text
+				.replace(/\r\n?/gu, "\n")
+				.replace(/[\t\v\f]/gu, " ")
+				.replace(/(?!\n)[\p{Cc}\p{Cf}\p{Cs}]/gu, "")
+		: text.replace(/[\t\n\v\f\r]/gu, " ").replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, "");
+	const redacted = redactKnownSecrets(redactTokenShapes(cleaned));
+	return options?.lines ? boundedText(redacted.trim(), maxChars) : boundedLine(redacted, maxChars);
 }
 
 /**

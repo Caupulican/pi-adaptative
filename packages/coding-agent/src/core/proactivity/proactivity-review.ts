@@ -4,6 +4,7 @@ import type { AgentTool } from "../../kernel/index.ts";
 import { parentInputOf } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { isOwnerSpokenInputId } from "../owner-input-ledger.ts";
+import { messageContentText } from "../util/message-content-text.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 /** The custom message type a raised note is delivered under. */
@@ -161,29 +162,13 @@ interface EntryText {
 	readonly text: string;
 }
 
-/** The text parts of a message's content, joined by newlines. */
-export function messageText(content: unknown): string {
-	if (typeof content === "string") return content;
-	if (!Array.isArray(content)) return "";
-	return content
-		.flatMap((part: unknown) =>
-			typeof part === "object" &&
-			part !== null &&
-			(part as { type?: unknown }).type === "text" &&
-			typeof (part as { text?: unknown }).text === "string"
-				? [(part as { text: string }).text]
-				: [],
-		)
-		.join("\n");
-}
-
 function conversationEntries(entries: readonly SessionEntry[]): EntryText[] {
 	const texts: EntryText[] = [];
 	for (const entry of entries) {
 		if (entry.type !== "message") continue;
 		const { role } = entry.message;
 		if (role !== "user" && role !== "assistant") continue;
-		const text = messageText(entry.message.content).trim();
+		const text = messageContentText(entry.message.content).trim();
 		if (text.length > 0)
 			texts.push({
 				role:

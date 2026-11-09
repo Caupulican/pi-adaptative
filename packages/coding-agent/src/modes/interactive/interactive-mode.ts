@@ -69,6 +69,8 @@ import type { PrismLlamaCppRuntime } from "../../core/models/llamacpp-runtime.ts
 import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local-runtime.ts";
 import { planStepByAttempt } from "../../core/plan/plan-panel.ts";
 import { listPlanViews } from "../../core/plan/plan-view.ts";
+import { recordLessonCandidate } from "../../core/proof/lesson-candidates.ts";
+import { latestProofSheet } from "../../core/proof/review-gauge.ts";
 import { AccountUsageMonitor } from "../../core/provider-admission/account-usage-monitor.ts";
 import { REPLY_ROUTE_CUSTOM_TYPE, type ReplyRouteRecord } from "../../core/reply-route.ts";
 import { formatMissingSessionCwdPrompt, type MissingSessionCwdError } from "../../core/session-cwd.ts";
@@ -153,6 +155,7 @@ import { bindPersistenceFenceIndicator } from "./persistence-fence-indicator.ts"
 import { handlePlanCommand } from "./plan-commands.ts";
 import * as proactivityCommands from "./proactivity-commands.ts";
 import { ProfileMenuController } from "./profile-menu-controller.ts";
+import { handleQuizCommand } from "./quiz-commands.ts";
 import { promptHarnessReadiness } from "./readiness-prompt.ts";
 import * as reportCommands from "./report-commands.ts";
 import * as resourceShellCommands from "./resource-shell-commands.ts";
@@ -313,6 +316,7 @@ export class InteractiveMode {
 	// Agent subscription unsubscribe function
 	private unsubscribe?: () => void;
 	private unsubscribeForegroundActivity?: () => void;
+	private unsubscribePlanChanges?: () => void;
 	private unsubscribeHumanInputActivity?: () => void;
 	private unsubscribePersistenceFence?: () => void;
 	private subscriptionGeneration = 0;
@@ -1348,6 +1352,8 @@ export class InteractiveMode {
 		this.unsubscribe = undefined;
 		this.unsubscribeForegroundActivity?.();
 		this.unsubscribeForegroundActivity = undefined;
+		this.unsubscribePlanChanges?.();
+		this.unsubscribePlanChanges = undefined;
 		this.clipboardQueue.pendingClipboardImages = [];
 		this.clipboardQueue.clipboardImageCounter = 0;
 		const clipboardImageDirectory = this.settingsManager.getClipboardImageDirectory();
@@ -1697,6 +1703,23 @@ export class InteractiveMode {
 					{
 						listPlans: () => (ledger ? listPlanViews(ledger) : []),
 						getGoalStateSnapshot: () => this.session.getGoalStateSnapshot(),
+						...this.operatorCommandOutput(),
+					},
+					text,
+				);
+				return;
+			}
+			if (text === "/quiz" || text.startsWith("/quiz ")) {
+				this.editor.setText("");
+				await handleQuizCommand(
+					{
+						latestProofSheet: () => latestProofSheet(this.sessionManager.getBranch()),
+						...(this.hasHumanAudience
+							? {
+									askQuestions: (request) =>
+										this.extensionUiHost.createExtensionUIContext().askQuestions(request),
+								}
+							: {}),
 						...this.operatorCommandOutput(),
 					},
 					text,
@@ -2193,6 +2216,12 @@ export class InteractiveMode {
 			this.syncForegroundActivity();
 		});
 		this.syncForegroundActivity();
+		this.unsubscribePlanChanges?.();
+		this.unsubscribePlanChanges = session.backgroundLanes.subscribePlanChanges(() => {
+			if (generation !== this.subscriptionGeneration || session !== this.session) return;
+			this.refreshActivityLane();
+			this.ui.requestRender();
+		});
 		this.unsubscribePersistenceFence?.();
 		this.unsubscribePersistenceFence = bindPersistenceFenceIndicator({
 			sessionManager: this.sessionManager,
@@ -4210,6 +4239,12 @@ export class InteractiveMode {
 				session: this.session,
 				promptForGoalEdit: (currentObjective) =>
 					this.extensionUiHost.showExtensionEditor("Edit goal objective", currentObjective),
+				recordLessonCandidate: (entry) =>
+					recordLessonCandidate(
+						this.runtimeHost.services.agentDir,
+						{ ...entry, sessionId: this.sessionManager.getSessionId() },
+						(message) => this.showWarning(message),
+					),
 				getMaxStallTurns: () => this.settingsManager?.getAutonomySettings().maxStallTurns ?? 20,
 				showStatus: (message) => {
 					statusMessage = message;
@@ -4615,6 +4650,8 @@ export class InteractiveMode {
 		attempt(() => this.footerDataProvider.dispose());
 		attempt(() => this.unsubscribeForegroundActivity?.());
 		this.unsubscribeForegroundActivity = undefined;
+		attempt(() => this.unsubscribePlanChanges?.());
+		this.unsubscribePlanChanges = undefined;
 		attempt(() => this.unsubscribe?.());
 		attempt(() => this.unsubscribeExtensionsChanged?.());
 		try {

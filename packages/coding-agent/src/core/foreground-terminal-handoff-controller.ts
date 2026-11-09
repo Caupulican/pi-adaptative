@@ -44,6 +44,16 @@ import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import { conversationTurnOrigin } from "./orchestration/attempt-agent-identity.ts";
 import type { ArtifactContract, WorkerResultContract } from "./orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime-state.ts";
+import {
+	BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE,
+	PROOF_SHEET_BATCH_MAX_BYTES,
+	PROOF_SHEET_DETAILS_KEY,
+	PROOF_SHEET_FAILURES_DETAILS_KEY,
+	PROOF_SHEET_MAX_BYTES,
+	type ProofSheetRecord,
+	proofSheetUnavailableLine,
+} from "./proof/proof-sheet.ts";
+import { buildWorkerProofSheet } from "./proof/worker-proof-sheet.ts";
 import type { CommsStateCode } from "./provider-prompt-contracts.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { boundedUtf8Text } from "./util/bounded-line.ts";
@@ -577,6 +587,26 @@ export class ForegroundTerminalHandoffController {
 		const wake = this.resolveWake(unread);
 		// A report of work a third party's words reached opens a third-party run (`customTurnOrigin`).
 		const snapshot = this.deps.getTaskRuntimeSnapshot?.();
+		const sheetBytes = Math.min(
+			PROOF_SHEET_MAX_BYTES,
+			Math.floor(PROOF_SHEET_BATCH_MAX_BYTES / Math.max(1, included.length)),
+		);
+		// Each result's sheet is built on its own: a sheet that cannot be built leaves its result delivered without one, with a plain line.
+		const proofSheets: ProofSheetRecord[] = [];
+		const proofSheetFailures: string[] = [];
+		for (const record of included) {
+			try {
+				proofSheets.push(this.workerProofSheet(record, snapshot, sheetBytes));
+			} catch (error) {
+				harnessLog.warn("proof", "a worker result's proof sheet could not be built; it is delivered without one", {
+					laneId: record.laneId,
+					...(record.attemptId !== undefined ? { attemptId: record.attemptId } : {}),
+				});
+				const attempt = record.attemptId !== undefined ? snapshot?.attempts[record.attemptId] : undefined;
+				const title = attempt ? snapshot?.tasks[attempt.taskId]?.task?.title : undefined;
+				proofSheetFailures.push(proofSheetUnavailableLine(error, title));
+			}
+		}
 		const thirdParty =
 			snapshot !== undefined &&
 			Object.values(snapshot.attempts).some(
@@ -587,7 +617,7 @@ export class ForegroundTerminalHandoffController {
 			);
 		return {
 			message: {
-				customType: "background-worker-completion",
+				customType: BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE,
 				content: buildForegroundWorkerTerminalHandoffContent(included, {
 					wakeParent: wake.wakeParent,
 					totalCount: unread.length,
@@ -601,10 +631,39 @@ export class ForegroundTerminalHandoffController {
 						prepared.map((entry) => entry.summaryItem),
 					),
 					...(thirdParty ? { thirdParty: true } : {}),
+					// Owner-facing only: the sheets quote worker-written strings, so they stay out of the model's content.
+					...(proofSheets.length > 0 ? { [PROOF_SHEET_DETAILS_KEY]: proofSheets } : {}),
+					...(proofSheetFailures.length > 0 ? { [PROOF_SHEET_FAILURES_DETAILS_KEY]: proofSheetFailures } : {}),
 				},
 			},
 			...wake,
 		};
+	}
+
+	/** The proof sheet of one included worker result, from its claim, outcome and dispatch. */
+	private workerProofSheet(
+		record: {
+			laneId: string;
+			attemptId?: string;
+			outcome?: Outcome;
+			outputArtifact?: ArtifactContract;
+		},
+		snapshot: TaskRuntimeProjection | undefined,
+		maxTextBytes: number,
+	): ProofSheetRecord {
+		const claim = this.deps.getWorkerClaimSnapshot?.(record.laneId, record.attemptId)?.claim;
+		const attempt = record.attemptId !== undefined ? snapshot?.attempts[record.attemptId] : undefined;
+		const task = attempt ? snapshot?.tasks[attempt.taskId]?.task : undefined;
+		return buildWorkerProofSheet({
+			laneId: record.laneId,
+			title: task?.title ?? record.laneId,
+			...(claim ? { claim } : {}),
+			...(record.outcome ? { outcome: record.outcome } : {}),
+			...(attempt?.dispatch.brief ? { brief: attempt.dispatch.brief } : {}),
+			...(attempt?.dispatch.requirementIds ? { requirementIds: attempt.dispatch.requirementIds } : {}),
+			...(record.outputArtifact ? { outputUri: record.outputArtifact.uri } : {}),
+			maxTextBytes,
+		}).record;
 	}
 
 	/**

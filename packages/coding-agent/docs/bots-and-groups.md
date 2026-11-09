@@ -56,13 +56,21 @@ goal with the bots it owns; it is never a second orchestrator, and its authority
 - One goal at a time per leader: a second goal for a busy leader waits, oldest first, until the first ends and the leader
   is idle.
 - The orchestrator hears back once, when the goal ends, with one outcome: the outcomes of the leader's last turn and of
-  each of its bots' last turns, combined as they are, never judged again. A leader's turns during the goal do not wake the
-  orchestrator; the turns of the leader's bots still reach it as ordinary bot results for now, because a bot turn does not
-  yet record which bot's message started it. The one exception is a leader turn that ends asking for an answer: that question reaches the orchestrator,
-  the goal stays open, and the orchestrator answers with `bot` `action ask`.
-- The goal ends early when its time runs out, its metered budget is spent, you cancel it, or its leader is gone; the
-  leader and its bots are stopped and the outcome says why.
+  each of its bots' last turns, combined as they are, never judged again. A turn belongs to the goal when the goal started
+  it: the leader's turns, the orchestrator's brief, updates and answers, and the turns the leader's own messages start on
+  its bots. None of them wakes the orchestrator. Your chat with the leader or its bots during the goal is yours, not the
+  goal's, and it reaches the orchestrator as any other bot turn does. The one exception is a leader turn that ends asking for
+  an answer: that question reaches the orchestrator, the goal stays open, and the orchestrator answers with `bot` `action ask`.
+- The goal ends early when its time runs out, its metered budget is spent, a subscription it uses has no allowance left in
+  its usage window, you cancel it, or its leader is gone; the leader and its bots are stopped and the outcome says why.
+- Budgets: `budgetUsd` counts metered spending only. A subscription turn is not metered, so the budget does not count it;
+  the subscription window is the bound for those turns. `/lead show` and the leader's brief say so.
+- A bot the leader made that is not running is started by the leader's own message to it, as the leader's child under
+  the goal; the goal's envelope applies to it (its providers, and write access only when the goal grants it). A bot that is
+  already running keeps the start it was given.
 - Stopping a leader stops the bots it owns. A leader leading an open goal cannot be retired; cancel the goal first.
+- A paused goal holds the messages it filed to its bots, in order, and starts them again when it resumes. The goal closes
+  only once none of its messages is still waiting.
 - The goal lives in this session's orchestration store, so a restart resumes every open goal where it stood.
 - `leaders.maxDepth` (default 1, at most 2) bounds how deep leaders may nest. Today only the orchestrator hands goals to
   leaders; a leader handing part of its goal to another leader is not available yet.
@@ -70,7 +78,13 @@ goal with the bots it owns; it is never a second orchestrator, and its authority
 The Orchestration panel lists the goals under **Leaders**: the leader's name, the goal, and where it stands (Waiting to
 start, Working, Paused, or how it ended). In the Chats roster a leader's bots sit under it. `/lead` is for looking and
 overriding only: `/lead` lists the goals, `/lead show <leader>` shows one in full, and `/lead cancel|pause|resume <leader>`
-acts on the leader's current goal.
+acts on the leader's current goal. Reading the goals never starts the worker runtime. `/bot lead <id>` is the other command:
+it makes a bot a standing leader (only you do that), and `/lead` never does.
+
+The goal's turns are filed under its delegation in the orchestration store (`delegation-<id>`), and the store records which
+bot's message started each turn. Those are the facts the leader's outcome and the orchestrator's wake-ups are read from.
+Leaders on another machine are not available yet: `bot lead` refuses a machine that is joined over the link and says why.
+The remote job protocol reserves a `leader` job kind for that work; no executor exists for it yet.
 
 ## Machines as bots
 
@@ -79,7 +93,8 @@ as a bot with a computer mark (💻 remote) and the machine's name. You message 
 chat, a group), and its answers come back into its chat.
 
 On the hub: `/remote listen [port] [host]` turns the hub on (loopback by default), `/remote add <name>` lets a machine join
-as a bot named `<name>` and prints a join token once, `/remote revoke <name>` cuts it off and retires its bot, and
+as a bot named `<name>` and prints a join token once. `root` and `owner` cannot be a new machine's name: they name who creates a
+bot, so `/remote add` refuses them and suggests another name. A machine already named so keeps working: `@root` still addresses the orchestrator, so message that machine with `/bot msg root <text>`. `/remote revoke <name>` cuts it off and retires its bot, and
 `/remote status` lists the machines and their links. On the joining machine: `/remote join <host:port> <token>` (and
 `/remote leave <host:port>`). `/remote name <name>` renames this machine.
 
@@ -162,12 +177,16 @@ never offered a job. Job frames never become a turn on either side: they move wo
   (`answers`: no job that names a project; `reads` and `changes`: jobs in an offered checkout, read-only until jobs
   that change files ship) and `hold`; `jobRoom` caps how many placed jobs run here
   at once (2 by default). A task that holds what looks like a secret is not sent at all.
+  A placed job's worker reads only the checkout the job names, through its read tools and its read-only shell; a job that
+  names no checkout reads nothing from disk. The credential and harness stores stay denied in every mode, YOLO included.
+  The read-only shell is a command-text gate, not an operating-system sandbox: it judges the paths a command names and the
+  paths its arguments reach, not the files a program opens on its own.
 - **Commands** (inspection and override; placement itself needs none): `/remote jobs` lists the jobs placed from here
   and how many run here for other machines; `/remote run <name> <task>` gives a named machine a read-only job (in its
   checkout of this project when it offers it); `/remote cancel <name>` stops the jobs on it; `/remote hold <name>` and
   `/remote release <name>` stop and resume new jobs going there; `/remote trust <name> answers|reads|changes` and
   `/remote accept <name> on|off` set what it may do here; `/remote rotate <name>` gives a joined machine a new secret and
-  disconnects it, keeping its jobs.
+  disconnects it from any session, keeping its jobs.
 - State: `remote/jobs/out/` (jobs placed from here), `remote/jobs/in/` (jobs admitted here), `remote/jobs/runner.json`,
   and `remote/jobs/journal.jsonl`, one line per job transition with ids and codes only. Finished jobs are kept seven
   days.

@@ -13,13 +13,13 @@ Read-only exploration mode for safe code analysis.
 
 ## Commands
 
-- `/plan` - Toggle plan mode
+- `/plan-mode` - Toggle plan mode
 - `/todos` - Show current plan progress
 - `Ctrl+Alt+P` - Toggle plan mode (shortcut)
 
 ## Usage
 
-1. Enable plan mode with `/plan` or `--plan` flag
+1. Enable plan mode with `/plan-mode` or `--plan` flag
 2. Ask the agent to analyze code and create a plan
 3. The agent should output a numbered plan under a `Plan:` header:
 

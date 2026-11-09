@@ -40,6 +40,14 @@ interface TokenizeOptions {
 export type ShellCommandDialect = "posix" | "powershell";
 
 /**
+ * One word as POSIX shell text: bare when it is made only of letters, digits and `_ @ % + = : , . / -`, otherwise single-quoted
+ * with each embedded single quote closed, escaped and reopened. Every word a host writes into a command line goes through it.
+ */
+export function shellWord(word: string): string {
+	return /^[A-Za-z0-9_@%+=:,./-]+$/u.test(word) ? word : `'${word.replace(/'/gu, "'\\''")}'`;
+}
+
+/**
  * How many directories a command line may leave its shell in before a gate that follows `cd` stops tracking them.
  * One bound for the read-only line and the credential guard, so both judge the same command lines.
  */

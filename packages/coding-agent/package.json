@@ -82,7 +82,8 @@
 		"test": "vitest --run --bail=1",
 		"postinstall": "node scripts/postinstall-python-runtime.mjs",
 		"eval:completion": "node --conditions=pi-source src/core/system-one/evals/completion-eval-cli.ts",
-		"eval:autonomy": "node --conditions=pi-source src/core/system-one/evals/autonomy-benchmark-cli.ts"
+		"eval:autonomy": "node --conditions=pi-source src/core/system-one/evals/autonomy-benchmark-cli.ts",
+		"eval:plan-graph": "node --conditions=pi-source src/core/system-one/evals/plan-graph-eval-cli.ts"
 	},
 	"dependencies": {
 		"@caupulican/pi-ai": "^0.104.46",

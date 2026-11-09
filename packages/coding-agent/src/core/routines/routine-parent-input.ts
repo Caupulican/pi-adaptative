@@ -34,10 +34,14 @@ export const ROUTINE_INTAKE_NOTICE_TYPE = "routine-intake";
 
 /**
  * Who wrote the words a routine run carries, when not the owner: an event trigger carrying any occurrence of a
- * third-party-authored kind. It travels with the run, in its worker dispatch and in its result, and derives from the
- * occurrence alone, so a replay and a redelivery carry the same origin.
+ * third-party-authored kind, or a progress brief a third party's run wrote (`progressUntrusted`). It travels with the run,
+ * in its worker dispatch and in its result, and derives from the occurrence alone, so a replay and a redelivery carry
+ * the same origin.
  */
-export function routineTurnOrigin(occurrence: Pick<RoutineOccurrence, "trigger">): TurnOriginRecord | undefined {
+export function routineTurnOrigin(
+	occurrence: Pick<RoutineOccurrence, "trigger" | "progressUntrusted">,
+): TurnOriginRecord | undefined {
+	if (occurrence.progressUntrusted === true) return { v: 1, k: "host-event", thirdParty: true };
 	const trigger = occurrence.trigger;
 	// A watch firing's excerpt (a command's output, a page's words) is untrusted data: the run that reads it is not the owner's.
 	if (trigger.kind === "watch")

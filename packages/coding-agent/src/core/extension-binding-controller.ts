@@ -46,7 +46,6 @@ import type { MemoryProvider } from "./extensions/types.ts";
 import { blockedKnowledgeHandoff, type HandoffKnowledgePort } from "./memory/knowledge-projection.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { PromptTemplate } from "./prompt-templates.ts";
-import { QUEUED_INPUT_CUSTOM_TYPE } from "./queued-input-record.ts";
 import type { ResourceExtensionPaths, ResourceLoader } from "./resource-loader.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "./runtime-generation-admission.ts";
 import type {
@@ -55,8 +54,7 @@ import type {
 	ResourceProfileSettings,
 } from "./settings/settings-schema.ts";
 import type { SlashCommandInfo } from "./slash-commands.ts";
-import { VERIFICATION_OBLIGATIONS_CUSTOM_TYPE } from "./system-one/verification-obligations.ts";
-import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "./tool-applicability-gate.ts";
+import { assertExtensionCustomType } from "./turn-origin.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface ExtensionBindingControllerSettingsSource {
@@ -290,6 +288,7 @@ export class ExtensionBindingController {
 		runner.bindCore(
 			{
 				sendMessage: (message, options) => {
+					assertExtensionCustomType(message.customType);
 					sendInSettledGeneration((lease) => this.deps.sendCustomMessage(message, options, lease)).catch((err) => {
 						this.deps.getExtensionRunner().emitError({
 							extensionPath: "<runtime>",
@@ -324,12 +323,7 @@ export class ExtensionBindingController {
 				},
 				appendEntry: (customType, data) => {
 					assertResourceMutation();
-					if (customType === VERIFICATION_OBLIGATIONS_CUSTOM_TYPE)
-						throw new Error("Mandatory verification is a host-owned evidence checkpoint");
-					if (customType === OPTIONAL_TOOL_INTENT_CUSTOM_TYPE)
-						throw new Error("Optional integration intent is a host-owned classification checkpoint");
-					if (customType === QUEUED_INPUT_CUSTOM_TYPE)
-						throw new Error("Queued input is a host-owned restart record");
+					assertExtensionCustomType(customType);
 					this.deps.getSessionManager().appendCustomEntry(customType, data);
 				},
 				setSessionName: (name) => {

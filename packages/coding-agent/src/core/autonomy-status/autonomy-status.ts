@@ -32,6 +32,7 @@ import {
 	type ProactivityFeedbackView,
 	parentTurnWakes,
 } from "../proactivity/proactivity-controller.ts";
+import { proofSheetsAwaitingReview } from "../proof/review-gauge.ts";
 import type { AwayServiceInspection } from "../routines/away-service.ts";
 import {
 	ROUTINE_NO_NEXT_RUN_AT,
@@ -43,6 +44,7 @@ import {
 	routineOpensAt,
 } from "../routines/routine-contract.ts";
 import type { RoutineIntakeStatus } from "../routines/routine-intake.ts";
+import { describeRoutineProgress } from "../routines/routine-progress.ts";
 import { routineGithubInterests } from "../routines/routine-scheduler-controller.ts";
 import { describeWatchCondition } from "../routines/watch-contract.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
@@ -85,6 +87,8 @@ export interface RoutineStatusItem {
 	readonly lastStatus?: RoutineDefinitionView["lastStatus"];
 	readonly awayRefusal?: { readonly reason: string; readonly at: number };
 	readonly failurePause?: { readonly after: number; readonly at: number; readonly lastError?: string };
+	/** Where its task stood after the last run, in plain words (position, next step, owner's note, recurring snags). */
+	readonly progress?: string;
 }
 
 export interface RoutinesStatus {
@@ -264,6 +268,15 @@ export interface PlansStatus {
 	}>;
 }
 
+/**
+ * The review gauge: finished results (each carrying a proof sheet) delivered since the owner's last own message, and the
+ * owner's notice threshold (0 = no notice). Whether the owner read a result cannot be known, so delivery state is counted.
+ */
+export interface ReviewStatus {
+	readonly waiting: number;
+	readonly noticeAt: number;
+}
+
 /** Whether the session file accepts new writes: it does not after a write failed in a way that left the file's state unknown. */
 export interface SessionSaveStatus {
 	readonly fenced: boolean;
@@ -275,6 +288,7 @@ export interface SessionAutonomyStatus {
 	readonly sessionId: string;
 	readonly goalContinuation: StatusSection<GoalContinuationStatus>;
 	readonly plans: StatusSection<PlansStatus>;
+	readonly review: StatusSection<ReviewStatus>;
 	readonly sessionSave: StatusSection<SessionSaveStatus>;
 	readonly routines: StatusSection<RoutinesStatus>;
 	readonly awayDaemon: StatusSection<AwayDaemonStatusView>;
@@ -317,6 +331,7 @@ export interface AutonomyStatusSources {
 		| "getActAheadSettings"
 		| "getProactivitySettings"
 		| "getEdgeSettings"
+		| "getReviewWaitingNoticeAt"
 	>;
 	/** The gates' rolling-24-hour usage across the owner's sessions. */
 	usageWindow(): Promise<UsageWindow>;
@@ -395,6 +410,8 @@ function routineItem(
 	const opensAt = routineOpensAt(routine, occurrences);
 	const lastError = routine.failurePause ? text(routine.failurePause.lastError) : undefined;
 	const awayReason = routine.awayRefusal ? text(routine.awayRefusal.reason) : undefined;
+	// Only a worker session's run records where its task stood; a bot or team routine shows none.
+	const progress = routine.target.kind === "session" ? text(describeRoutineProgress(routine.progress)) : undefined;
 	return {
 		routineId: routine.routineId,
 		state: ended ? "ended" : routine.enabled ? "enabled" : routine.failurePause ? "paused-after-failures" : "paused",
@@ -417,6 +434,7 @@ function routineItem(
 					},
 				}
 			: {}),
+		...(progress ? { progress } : {}),
 	};
 }
 
@@ -696,6 +714,9 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 			),
 		});
 	});
+	const review = await section<ReviewStatus>(() =>
+		available({ waiting: proofSheetsAwaitingReview(branch).length, noticeAt: settings.getReviewWaitingNoticeAt() }),
+	);
 	const sessionSave = await section<SessionSaveStatus>(() =>
 		available({ fenced: sessionManager.isPersistenceStateUncertain() }),
 	);
@@ -711,6 +732,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 		sessionId: sources.sessionId,
 		goalContinuation,
 		plans,
+		review,
 		sessionSave,
 		routines,
 		awayDaemon,

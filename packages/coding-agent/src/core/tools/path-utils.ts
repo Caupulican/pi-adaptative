@@ -1,14 +1,8 @@
 import { accessSync, constants, type Dir, opendirSync } from "node:fs";
 import { access } from "node:fs/promises";
 import { dirname } from "node:path";
-import { normalizePath, type PathInputOptions, resolvePath } from "../../utils/paths.ts";
+import { normalizePath, type PathInputOptions, readPathSpellings, resolvePath } from "../../kernel/utils/paths.ts";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
-
-function tryCurlyQuoteVariant(filePath: string): string {
-	// macOS uses U+2019 (right single quotation mark) in screenshot names like "Capture d'écran"
-	// Users typically type U+0027 (straight apostrophe)
-	return filePath.replace(/'/g, "\u2019");
-}
 
 export async function pathExists(filePath: string): Promise<boolean> {
 	try {
@@ -31,30 +25,8 @@ export function resolveToCwd(filePath: string, cwd: string, options?: PathInputO
 	return resolvePath(filePath, cwd, { normalizeUnicodeSpaces: true, stripAtPrefix: true, ...options });
 }
 
-/** One bounded spelling policy for CLI and backend reads. Never transforms the supplied cwd. */
-function* readPathCandidates(filePath: string, cwd: string, options: PathInputOptions = {}): Generator<string> {
-	const literalOptions = { ...options, normalizeUnicodeSpaces: false, stripAtPrefix: false };
-	const candidates = new Set<string>();
-	for (const cleanup of [false, true]) {
-		const input = normalizePath(filePath, { ...options, normalizeUnicodeSpaces: cleanup, stripAtPrefix: cleanup });
-		const nfd = input.normalize("NFD");
-		for (const variant of [
-			input,
-			input.replace(/ (AM|PM)\./gi, "\u202F$1."),
-			nfd,
-			tryCurlyQuoteVariant(input),
-			tryCurlyQuoteVariant(nfd),
-		]) {
-			const candidate = resolvePath(variant, cwd, literalOptions);
-			if (candidates.has(candidate)) continue;
-			candidates.add(candidate);
-			yield candidate;
-		}
-	}
-}
-
 export function resolveReadPath(filePath: string, cwd: string): string {
-	for (const candidate of readPathCandidates(filePath, cwd)) {
+	for (const candidate of readPathSpellings(filePath, cwd)) {
 		try {
 			accessSync(candidate, constants.F_OK);
 			return candidate;
@@ -74,7 +46,7 @@ export async function resolveReadPathAsync(
 	signal?: AbortSignal,
 ): Promise<string> {
 	let firstMissing: unknown;
-	for (const candidate of readPathCandidates(filePath, cwd, options)) {
+	for (const candidate of readPathSpellings(filePath, cwd, options)) {
 		signal?.throwIfAborted();
 		try {
 			await accessPath(candidate);

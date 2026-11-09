@@ -19,6 +19,7 @@ import {
 	routineStartWindow,
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
+import { describeRoutineProgress } from "./routine-progress.ts";
 import type { RoutineSchedulerController } from "./routine-scheduler-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import {
@@ -97,12 +98,16 @@ function summary(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs:
 }
 
 function view(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: number): RoutineToolView {
+	const progress = describeRoutineProgress(routine.progress);
 	return {
 		...summary(routine, store, nowMs),
 		prompt: routine.prompt,
 		...(routine.lastSummary === undefined
 			? {}
 			: { lastSummary: wrapUntrustedText(routine.lastSummary, `routine-last-summary:${routine.routineId}`) }),
+		...(progress === undefined
+			? {}
+			: { progress: wrapUntrustedText(progress, `routine-progress:${routine.routineId}`) }),
 		...(routine.executionSnapshot?.profileId === undefined ? {} : { profileId: routine.executionSnapshot.profileId }),
 		knowledge: routine.executionSnapshot?.savedIntent.knowledgeReferences ?? [],
 	};
@@ -194,6 +199,25 @@ export class RoutineSessionController implements RoutineToolPort {
 		return { occurrenceId: this.deps.scheduler.run(routineId, expectedRevision, commandId) };
 	}
 
+	async note(routineId: string, text: string, signal?: AbortSignal): Promise<RoutineToolView> {
+		this.check(signal);
+		// Every later run reads the note: only the owner's words write it, never a turn a run's own result opened.
+		this.requireOwnerTurn();
+		this.requireOwned(routineId);
+		const saved = this.deps.store.noteRoutineProgress({ routineId, text, nowMs: this.deps.now() });
+		harnessLog.info("routines", "the owner noted where a routine's task stands", { routineId });
+		return view(saved, this.deps.store, this.deps.now());
+	}
+
+	async resetProgress(routineId: string, signal?: AbortSignal): Promise<RoutineToolView> {
+		this.check(signal);
+		this.requireOwnerTurn();
+		this.requireOwned(routineId);
+		const saved = this.deps.store.resetRoutineProgress({ routineId });
+		harnessLog.info("routines", "a routine's progress was reset", { routineId });
+		return view(saved, this.deps.store, this.deps.now());
+	}
+
 	/**
 	 * Creates a routine the host derived from the owner's own words: the same parent check, zone default, event
 	 * anchor and store write as a tool save, with read-only worker authority and the origin consumed in that write.
@@ -211,7 +235,13 @@ export class RoutineSessionController implements RoutineToolPort {
 		let savedIntent: WorkerSavedIntent;
 		try {
 			savedIntent = await this.deps.capture(
-				{ instructions: spec.prompt, knowledge: [], objectiveId: null, authority: { readOnly: true } },
+				{
+					instructions: spec.prompt,
+					knowledge: [],
+					objectiveId: null,
+					authority: { readOnly: true },
+					reportsProgress: true,
+				},
 				signal,
 			);
 		} catch (error) {
@@ -249,7 +279,9 @@ export class RoutineSessionController implements RoutineToolPort {
 			prior?.executionSnapshot &&
 			prior.prompt === input.prompt &&
 			prior.executionSnapshot.profileId === input.profileId &&
-			isDeepStrictEqual(prior.executionSnapshot.savedIntent.knowledgeReferences, input.knowledge ?? []);
+			isDeepStrictEqual(prior.executionSnapshot.savedIntent.knowledgeReferences, input.knowledge ?? []) &&
+			// An intent captured before routine runs reported progress is captured again, so its runs keep the section.
+			prior.executionSnapshot.savedIntent.executionContract.worker.profile.reportsProgress === true;
 		const savedIntent = sameIntent
 			? prior.executionSnapshot!.savedIntent
 			: await this.deps.capture(
@@ -258,6 +290,7 @@ export class RoutineSessionController implements RoutineToolPort {
 						profileId: input.profileId,
 						knowledge: input.knowledge ?? [],
 						objectiveId: null,
+						reportsProgress: true,
 					},
 					signal,
 				);
@@ -342,7 +375,7 @@ export class RoutineSessionController implements RoutineToolPort {
 		if (sources.length === 0) {
 			harnessLog.warn("routines", "a routine change was refused: the owner has not spoken in this turn");
 			throw new Error(
-				"The owner has not spoken in this turn (a routine result, CI event or host input started it): create, update, resume and run wait for the owner's request; pause and delete still work. Tell the owner what to change.",
+				"The owner has not spoken in this turn (a routine result, CI event or host input started it): create, update, resume, run, note and reset_progress wait for the owner's request; pause and delete still work. Tell the owner what to change.",
 			);
 		}
 		return sources;
@@ -353,9 +386,14 @@ export class RoutineSessionController implements RoutineToolPort {
 	}
 
 	private require(routineId: string, revision: number): RoutineDefinitionView {
+		const routine = this.requireOwned(routineId);
+		if (routine.revision !== revision) throw new Error("Routine revision changed; read it before editing.");
+		return routine;
+	}
+
+	private requireOwned(routineId: string): RoutineDefinitionView {
 		const routine = this.deps.store.getRoutine(routineId);
 		if (!routine || !this.owns(routine)) throw new Error("Routine is absent from this session.");
-		if (routine.revision !== revision) throw new Error("Routine revision changed; read it before editing.");
 		return routine;
 	}
 

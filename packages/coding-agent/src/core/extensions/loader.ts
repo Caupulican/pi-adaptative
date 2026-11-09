@@ -12,6 +12,7 @@ import { CONFIG_DIR_NAME, getAgentDir, isBunBinary } from "../../config.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { cacheFile } from "../agent-paths.ts";
 import { createEventBus, type EventBus } from "../event-bus.ts";
+import { extensionToolNameError } from "../turn-origin.ts";
 import { resolveExtensionIndexEntry } from "./entry-resolution.ts";
 import {
 	createExtension,
@@ -433,6 +434,14 @@ export async function loadExtensions(
 		// interactive reloads can repaint/status-update instead of freezing the TUI
 		// for the whole extension set. Lazy tool manifests skip import entirely here.
 		await yieldToEventLoop();
+		// A lazy manifest tool takes the registry slot of its name, so a host-reserved name refuses the whole file, as a registration does.
+		const refusedTool = (lazyTools ?? [])
+			.map((tool) => extensionToolNameError(String(tool.name).trim()))
+			.find((error) => error !== undefined);
+		if (refusedTool !== undefined) {
+			errors.push({ path: extPath, error: refusedTool });
+			continue;
+		}
 		if (lazyTools?.length) {
 			extensions.push(
 				createLazyExtension(
