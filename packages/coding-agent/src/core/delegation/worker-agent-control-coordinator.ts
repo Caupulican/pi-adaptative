@@ -28,8 +28,10 @@ import {
 	type ArtifactContract,
 	MAX_ORCHESTRATION_COLLECTION_LENGTH,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
+	objectiveIsPaused,
 	type WorkerResultContract,
 } from "../orchestration/contracts.ts";
+import { isLeaderDelegationObjectiveId } from "../orchestration/delegation-ledger.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { terminalAttemptStatus } from "../orchestration/task-runtime-state.ts";
@@ -763,7 +765,14 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	): { started: boolean; steering: boolean; messageId: string; record?: LaneRecord; skipReason?: string } {
 		this.rejectGenericReplyOptions(options);
 		if (this.activityForAgent(agent) === "active") {
-			const queued = this.enqueuePeerMessage(agent, "steer", message, options, { kind: "agent_turn" });
+			// A delegation's words wait for a turn of their own, filed under that delegation: a steer would be absorbed into
+			// the live turn, which was filed under whatever started it.
+			const delegated =
+				options.delegationObjectiveId !== undefined ||
+				this.senderDelegationObjectiveId(options.senderAgentId) !== undefined;
+			const queued = this.enqueuePeerMessage(agent, delegated ? "follow_up" : "steer", message, options, {
+				kind: "agent_turn",
+			});
 			this.notifyStateChangedBestEffort();
 			if (
 				queued.status === "completed_replay" ||
@@ -777,7 +786,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					skipReason: "worker_message_already_finalized",
 				};
 			}
-			return { started: false, steering: true, messageId: queued.messageId };
+			return { started: false, steering: !delegated, messageId: queued.messageId };
 		}
 		if (agent.status !== "registered") {
 			return { started: false, steering: false, messageId: "", skipReason: `agent_${agent.status}` };
@@ -1138,12 +1147,37 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		}
 	}
 
+	/**
+	 * The delegation a bot's words belong to: the delegation its own running turn is filed under, when a delegation started
+	 * that turn. The session root and an idle or unknown sender have none.
+	 */
+	private senderDelegationObjectiveId(senderAgentId: string | undefined): string | undefined {
+		if (!senderAgentId || senderAgentId === this.sessionRootAddress) return undefined;
+		const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
+		const activeAttemptId = snapshot.agents[senderAgentId]?.activeAttemptId;
+		const attempt = activeAttemptId === undefined ? undefined : snapshot.attempts[activeAttemptId];
+		const objectiveId = attempt ? snapshot.tasks[attempt.taskId]?.task.objectiveId : undefined;
+		return objectiveId !== undefined && isLeaderDelegationObjectiveId(objectiveId) ? objectiveId : undefined;
+	}
+
+	/** The delegation a finished attempt was filed under, when a delegation started it; undefined for session work. */
+	private delegationOfAttempt(attemptId: string | undefined): string | undefined {
+		if (attemptId === undefined) return undefined;
+		const snapshot = this.options.getLifecycle().getTaskRuntimeSnapshot();
+		const attempt = snapshot.attempts[attemptId];
+		const objectiveId = attempt ? snapshot.tasks[attempt.taskId]?.task.objectiveId : undefined;
+		return objectiveId !== undefined && isLeaderDelegationObjectiveId(objectiveId) ? objectiveId : undefined;
+	}
+
 	private sessionRootMessageOptions(options: SessionRootWorkerAgentMessageOptions): WorkerAgentMessageOptions {
 		return {
 			senderAgentId: this.sessionRootAddress,
 			...(options.threadId !== undefined ? { threadId: options.threadId } : {}),
 			...(options.expectReply === true ? { expectReply: true } : {}),
 			...(options.idempotencyKey !== undefined ? { idempotencyKey: options.idempotencyKey } : {}),
+			...(options.delegationObjectiveId !== undefined
+				? { delegationObjectiveId: options.delegationObjectiveId }
+				: {}),
 		};
 	}
 
@@ -2398,14 +2432,18 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		const receiptOrigin = this.options.getLifecycle().getTaskRuntimeSnapshot().attempts[args.terminalAttemptId]
 			?.dispatch.receiptOrigin;
 		const turnOrigin = this.senderTurnOrigin(args.childAgentId, args.terminalAttemptId);
+		// A nested child's handoff belongs to the goal it ran for: the leader's turn that reports it is that goal's turn, not
+		// the session's, and a steer would be absorbed into a turn that may not be the goal's.
+		const delegationObjectiveId = this.delegationOfAttempt(args.terminalAttemptId);
 		const queued = this.getMailbox(parent.agentId).enqueueWithReceipt({
-			kind: active ? "steer" : "follow_up",
+			kind: active && delegationObjectiveId === undefined ? "steer" : "follow_up",
 			content,
 			senderAgentId: args.childAgentId,
 			idempotencyKey,
 			task: { kind: "terminal_handoff", sourceAttemptId: args.terminalAttemptId },
 			...(receiptOrigin ? { receiptOrigin } : {}),
 			...(turnOrigin ? { turnOrigin } : {}),
+			...(delegationObjectiveId ? { delegationObjectiveId } : {}),
 		});
 		if (queued.status === "completed_replay") {
 			this.notifyStateChangedBestEffort();
@@ -2439,7 +2477,15 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			if (!agent) return { started: false, skipReason: "unknown_agent" };
 			const mailbox = this.getMailbox(agentId);
 			for (let settlement = 0; settlement < 64; settlement++) {
-				const message = mailbox.pendingTaskBearing()[0];
+				const pending = mailbox.pendingTaskBearing();
+				// The caller's own message is held while its delegation is paused; the messages behind it are not its concern.
+				const expected =
+					expectedMessageId === undefined ? undefined : pending.find((m) => m.messageId === expectedMessageId);
+				if (expected && this.heldByPausedDelegation(expected))
+					return { started: false, skipReason: "delegation_paused" };
+				// A message filed under a paused delegation waits in place; the first message that is not held runs, so only the
+				// order within one delegation is kept.
+				const message = pending.find((candidate) => !this.heldByPausedDelegation(candidate));
 				if (!message) return { started: false };
 				if (this.options.runsControlMessage?.(message.messageId) === false)
 					return { started: false, skipReason: "worker_agent_runs_in_parent" };
@@ -2533,6 +2579,11 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 							controlMessageId: message.messageId,
 							...(message.receiptOrigin ? { receiptOrigin: message.receiptOrigin } : {}),
 							...(senderOrigin?.thirdParty ? { turnOrigin: senderOrigin } : {}),
+							// Who started the turn, and the delegation its words belong to: both are read back from the mailbox.
+							...(message.senderAgentId && message.senderAgentId !== this.sessionRootAddress
+								? { senderAgentId: message.senderAgentId }
+								: {}),
+							...(message.delegationObjectiveId ? { delegationObjectiveId: message.delegationObjectiveId } : {}),
 							...(message.task?.kind === "agent_turn" && message.task.dependsOnTaskIds
 								? { dependsOnTaskIds: message.task.dependsOnTaskIds }
 								: {}),
@@ -2938,6 +2989,38 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		return admission.ok ? undefined : admission.reasonCode;
 	}
 
+	hasPendingControlMessages(agentId: string): boolean {
+		this.requireControl();
+		return this.getMailbox(agentId).pending().length > 0;
+	}
+
+	hasPendingDelegatedMessage(delegationObjectiveId: string): boolean {
+		this.requireControl();
+		return this.agentIdsWithPendingDelegatedMessage(delegationObjectiveId).length > 0;
+	}
+
+	/** Starts, now the delegation runs again, the messages it filed while it was paused. */
+	reconcileDelegatedMessages(delegationObjectiveId: string): void {
+		this.requireControl();
+		for (const agentId of this.agentIdsWithPendingDelegatedMessage(delegationObjectiveId))
+			this.reconcileTaskBearingMailbox(agentId);
+	}
+
+	private agentIdsWithPendingDelegatedMessage(delegationObjectiveId: string): string[] {
+		return Object.keys(this.options.getLifecycle().getTaskRuntimeSnapshot().agents).filter((agentId) =>
+			this.getMailbox(agentId)
+				.pending()
+				.some((message) => message.delegationObjectiveId === delegationObjectiveId),
+		);
+	}
+
+	/** Whether a message is held: filed under a delegation that is paused, so it runs only once that delegation resumes. */
+	private heldByPausedDelegation(message: WorkerAgentMessage): boolean {
+		if (message.delegationObjectiveId === undefined) return false;
+		const objective = this.options.getLifecycle().getTaskRuntimeSnapshot().objectives[message.delegationObjectiveId];
+		return objectiveIsPaused(objective?.objective);
+	}
+
 	/** Worker execution and physical-release events; subscribers own their lifetime. */
 	subscribeStateChanges(listener: () => void): () => void {
 		this.stateListeners.add(listener);
@@ -3033,15 +3116,22 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					: this.options.captureReceiptOrigin?.()));
 		// The sender's third party's words travel with what it writes; a replay keeps the stored message's.
 		const turnOrigin = replay ? undefined : this.senderTurnOrigin(sender);
+		// The delegation the words belong to: the root's host-only tag, else the delegation the sender's own turn is filed
+		// under, so a leader's bots' turns stay that delegation's. A replay keeps the stored message's.
+		const { delegationObjectiveId: requestedDelegation, ...peerOptions } = options;
+		const delegationObjectiveId = replay
+			? undefined
+			: (requestedDelegation ?? this.senderDelegationObjectiveId(sender));
 		const enqueue = () => {
 			assertWorkerReceiptAdmission(receiptOrigin);
 			// Resolved inside admission: the mailbox mutation must carry the claim admission just acquired.
 			return this.getMailbox(target.agentId).enqueueWithReceipt({
 				kind,
 				content,
-				...options,
+				...peerOptions,
 				...(receiptOrigin ? { receiptOrigin } : {}),
 				...(turnOrigin ? { turnOrigin } : {}),
+				...(delegationObjectiveId ? { delegationObjectiveId } : {}),
 				...(task ? { task } : {}),
 				...(onAdmitted ? { onAdmitted } : {}),
 			});

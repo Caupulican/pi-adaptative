@@ -1,7 +1,8 @@
 import { parseTurnOriginRecord, type TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
-import type { JsonObject } from "../autonomy/contracts.ts";
+import type { JsonObject, WorkerReportProgress } from "../autonomy/contracts.ts";
 import { parseTaskBrief, renderTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
 import { storedOutcomeFromValue, taskEscalationsFromValue } from "../delegation/worker-outcome-codec.ts";
+import { parseWorkerReportProgress } from "../delegation/worker-report-progress.ts";
 import { parseHostEventProjection, validateHostEventGraph } from "../events/host-event-codecs.ts";
 import {
 	hostEventArray,
@@ -390,6 +391,7 @@ const DISPATCH_FIELDS = new Set([
 	"executionContract",
 	"modelRouteSource",
 	"modelPinSource",
+	"senderAgentId",
 ]);
 
 export function dispatchFromValue(value: unknown, label: string): OrchestrationDispatchRequest {
@@ -424,6 +426,7 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 		throw new DurableTaskRuntimeError(`${label}.modelRouteSource is invalid.`);
 	}
 	const modelPinSource = optionalDispatchIdentifier(dispatch.modelPinSource, `${label}.modelPinSource`);
+	const senderAgentId = optionalDispatchIdentifier(dispatch.senderAgentId, `${label}.senderAgentId`);
 	if (
 		dispatch.dispatchSequence !== undefined &&
 		(!Number.isSafeInteger(dispatch.dispatchSequence) || Number(dispatch.dispatchSequence) < 1)
@@ -502,6 +505,7 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 		...(executionContract ? { executionContract } : {}),
 		...(modelRouteSource ? { modelRouteSource: modelRouteSource as WorkerModelRouteSource } : {}),
 		...(modelPinSource ? { modelPinSource } : {}),
+		...(senderAgentId ? { senderAgentId } : {}),
 	};
 }
 
@@ -1316,6 +1320,7 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 		"receipts",
 		"ownerUpdate",
 		"conditionMet",
+		"progress",
 		"createdAt",
 	]);
 	if (result.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION) {
@@ -1417,6 +1422,14 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 	if (result.conditionMet !== undefined && (result.conditionMet !== true || status !== "completed")) {
 		throw new DurableTaskRuntimeError(`${label}.conditionMet is invalid.`);
 	}
+	let progress: WorkerReportProgress | undefined;
+	if (result.progress !== undefined) {
+		try {
+			progress = parseWorkerReportProgress(result.progress, `${label}.progress`);
+		} catch (error) {
+			throw new DurableTaskRuntimeError(error instanceof Error ? error.message : String(error));
+		}
+	}
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		resultId: dispatchIdentifier(result.resultId, `${label}.resultId`),
@@ -1446,6 +1459,7 @@ function resultFromValue(value: unknown, label: string): WorkerResultContract {
 		...(receipts ? { receipts } : {}),
 		...(result.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
 		...(result.conditionMet === true ? { conditionMet: true as const } : {}),
+		...(progress === undefined ? {} : { progress }),
 	};
 }
 

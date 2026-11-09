@@ -7,7 +7,9 @@
  *
  * Decisions, all code facts:
  * - a delegation is dispatched when its leader is idle and has no earlier open delegation (one at a time, oldest first);
- * - a leader turn inside a delegation's window is the delegation's: its terminal notice never wakes the root;
+ * - a turn filed under a delegation's objective is the delegation's: the leader's own, and those its work started (the
+ *   sender's turn carries the objective into each message it writes); its terminal notice never wakes the root;
+ * - the orchestrator's words to a leader for a goal are filed under that goal, an owner's chat with the leader is not;
  * - the delegation is final when the leader's latest turn ended, no leader turn or owned-bot turn is still running, and
  *   that turn did not ask the orchestrator; then the Outcome (the children's aggregate, never re-judged) is recorded,
  *   the objective settles and the root is woken once;
@@ -15,6 +17,7 @@
  * - the deadline, the metered budget, cancellation and a lost leader close it early, stopping the leader and its bots.
  */
 
+import { randomUUID } from "node:crypto";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { TimerPort } from "../../kernel/timer-port.ts";
 import { conversationTurnOrigin } from "../orchestration/attempt-agent-identity.ts";
@@ -25,6 +28,7 @@ import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { canonicalDigest } from "../steering/canonical.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import type { BotCreationRequest, CreatedBotView } from "./bot-creation.ts";
+import type { BotAskRootResult } from "./bot-message-contract.ts";
 import {
 	admitChain,
 	type LeadRequest,
@@ -41,6 +45,7 @@ import {
 	type LeaderLedgerRuntime,
 	readDelegations,
 } from "./leader-delegation-ledger.ts";
+import { currentDelegationFor } from "./leader-view.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
 import type { WorkerTerminalHandoffRecord } from "./worker-notification-coordinator.ts";
 import {
@@ -94,8 +99,8 @@ export interface LeaderControllerDeps {
 	/** Every runtime a bot has had, its current one included. */
 	runtimesOf(alias: string): readonly string[];
 	workers(): readonly WorkerAgentView[];
-	/** Sends the root's words to a bot; a new turn starts when it is idle. */
-	send(alias: string, text: string): Promise<void>;
+	/** Sends the orchestrator's words for a delegation to a bot; the turn they start is filed under that delegation. */
+	send(alias: string, text: string, delegationObjectiveId: string): Promise<void>;
 	/** Stops a bot's running turn and those of the bots it owns. */
 	stop(alias: string): void;
 	retire(alias: string): { retired: boolean; detail: string };
@@ -104,6 +109,26 @@ export interface LeaderControllerDeps {
 	origin(): WorkerReceiptOrigin;
 	hasDelivered(deliveryId: string): boolean;
 	maxDepth(): number;
+	/**
+	 * Retires a leader's idle runtime when its contract grants it no children (a runtime started before the leader could
+	 * lead bots); its next start is granted the leader limits. A busy runtime is left alone.
+	 */
+	restartLeaderRuntimeIfLeaf(leader: string): void;
+	/**
+	 * The fleet subtree of a leader: its children are charged to it, so its share is opened while a goal runs and
+	 * released when the goal is over.
+	 */
+	openSubtree(leader: string): void;
+	closeSubtree(leader: string, reasonCode: string): void;
+	/**
+	 * Whether a subscription login the given bots run on has no allowance left in its usage window. Subscription turns are
+	 * not metered, so this is the bound a delegation has beyond its metered `budgetUsd`.
+	 */
+	subscriptionExhausted(aliases: readonly string[]): boolean;
+	/** Whether a message filed under this delegation still waits in some bot's mailbox (unfinished work of the goal). */
+	hasPendingDelegatedMessage(delegationObjectiveId: string): boolean;
+	/** Starts the messages the goal filed while it was paused, now that it runs again. */
+	reconcileDelegatedMessages(delegationObjectiveId: string): void;
 	/** The orchestration clock: the one attempts are stamped on. */
 	now(): number;
 	timers: TimerPort;
@@ -128,6 +153,8 @@ export class LeaderController {
 	private readonly delivered = new Set<string>();
 	/** Closed delegations whose delivery and goal-leader retirement are settled in this process. */
 	private readonly settled = new Set<string>();
+	/** Leaders whose fleet subtree is open in this process; a restart re-opens the subtree of each running goal. */
+	private readonly openSubtrees = new Set<string>();
 	private readonly listeners = new Set<() => void>();
 	private disposed = false;
 
@@ -165,10 +192,61 @@ export class LeaderController {
 		return () => this.listeners.delete(listener);
 	}
 
+	/**
+	 * Whether a turn belongs to a delegation. A delegation dispatched by this build owns the turns filed under its objective:
+	 * what a turn was started as, never when it ran, so an owner's chat with the leader is not counted. A delegation an
+	 * earlier build dispatched has no filing mark: its turns are attributed by time window (from its dispatch until its close)
+	 * and only when the attempt's bot is the leader or a bot the leader created, so an unrelated worker in the window is not
+	 * the goal's.
+	 */
+	private turnBelongsTo(
+		snapshot: TaskRuntimeProjection,
+		record: DelegationRecord,
+		attempt: AttemptRuntimeState,
+	): boolean {
+		if (attempt.agentId === undefined) return false;
+		if (record.filedByObjective) return filedObjectiveOf(snapshot, attempt) === record.objectiveId;
+		if (!record.dispatchedAt || attempt.createdAt < record.dispatchedAt) return false;
+		if (record.closedAt !== undefined && attempt.createdAt > record.closedAt) return false;
+		return this.leaderOrOwnedBot(record, attempt.agentId);
+	}
+
+	/** Whether the bot a runtime belongs to is the delegation's leader or a bot that leader created. */
+	private leaderOrOwnedBot(record: DelegationRecord, agentId: string): boolean {
+		const alias = this.deps.directBotOf(agentId);
+		if (alias === undefined) return false;
+		if (alias === record.charter.leader) return true;
+		return this.deps.bots().some((bot) => bot.agentId === alias && bot.createdBy === record.charter.leader);
+	}
+
+	/** Every turn that belongs to a delegation, oldest first. */
+	private attemptsOf(snapshot: TaskRuntimeProjection, record: DelegationRecord): AttemptRuntimeState[] {
+		return Object.values(snapshot.attempts)
+			.filter((attempt) => this.turnBelongsTo(snapshot, record, attempt))
+			.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+	}
+
+	/** Opens a leader's fleet subtree once; a goal still running keeps it open. */
+	private ensureSubtree(leader: string): void {
+		if (this.openSubtrees.has(leader)) return;
+		this.deps.openSubtree(leader);
+		this.openSubtrees.add(leader);
+	}
+
+	/**
+	 * Releases a leader's fleet subtree when its goal is over. A leader with another goal running keeps it: that goal is
+	 * the subtree's work now.
+	 */
+	private releaseSubtree(leader: string, reasonCode: string): void {
+		const current = this.currentFor(leader);
+		if (current?.state === "running" || current?.state === "paused") return;
+		if (!this.openSubtrees.delete(leader)) return;
+		this.deps.closeSubtree(leader, reasonCode);
+	}
+
 	/** The open delegation a leader is working, else the oldest one waiting for it. */
 	currentFor(leader: string): DelegationRecord | undefined {
-		const open = this.ledger.list().filter((record) => isOpen(record) && record.charter.leader === leader);
-		return open.find((record) => record.state !== "queued") ?? open[0];
+		return currentDelegationFor(this.ledger.list(), leader);
 	}
 
 	/** True while a bot leads an open delegation: retiring it then would orphan the goal. */
@@ -184,12 +262,8 @@ export class LeaderController {
 		if (!record.attemptId) return false;
 		const snapshot = this.deps.snapshot();
 		const attempt = snapshot.attempts[record.attemptId];
-		if (!attempt?.agentId) return false;
-		const alias = this.deps.directBotOf(attempt.agentId);
-		if (!alias) return false;
-		const claimed = readDelegations(snapshot).some(
-			(delegation) => delegation.charter.leader === alias && inWindow(delegation, attempt),
-		);
+		if (!attempt) return false;
+		const claimed = readDelegations(snapshot).some((delegation) => this.turnBelongsTo(snapshot, delegation, attempt));
 		if (claimed) queueMicrotask(() => this.trigger());
 		return claimed;
 	}
@@ -208,7 +282,7 @@ export class LeaderController {
 				);
 			if (!named.leader)
 				throw new Error(
-					`${named.displayName} is not a leader, and only the owner makes one. Name a leader, or leave agentId out to appoint a goal leader.`,
+					`${named.displayName} is not a standing leader. Only the owner makes one, with /bot lead ${named.agentId} (not /lead, which shows goals). Name a leader, or leave agentId out to appoint a goal leader.`,
 				);
 			if (named.remote)
 				throw new Error(
@@ -284,12 +358,36 @@ export class LeaderController {
 		const record = this.requireCurrent(leader);
 		this.ledger.recordUpdate(record.objectiveId, text);
 		if (record.state === "running")
-			await this.deps.send(leader, `Update from the orchestrator for your goal:\n${text}`);
+			await this.deps.send(leader, `Update from the orchestrator for your goal:\n${text}`, record.objectiveId);
 	}
 
 	async cancel(leader: string): Promise<DelegationRecord> {
 		const record = this.requireCurrent(leader);
 		return this.forceClose(record, "cancelled");
+	}
+
+	/**
+	 * A leader's question to the orchestrator in the middle of its goal: delivered now, the goal stays open, and the
+	 * orchestrator's answer (`bot` action ask) is the leader's next turn. A question that did not land is refused, so the
+	 * leader knows to ask again.
+	 */
+	async askRoot(leader: string, question: string): Promise<BotAskRootResult> {
+		const record = this.currentFor(leader);
+		if (record?.state !== "running") throw new Error(`${leader} has no goal running to ask about.`);
+		const askId = `${record.objectiveId}:ask:${randomUUID().replace(/-/g, "").slice(0, 16)}`;
+		const content = [
+			`Leader ${this.displayName(leader)} asks you about the goal "${record.title.replace(/^Lead: /, "")}" while it keeps working.`,
+			`Question (untrusted worker words):\n${wrapUntrustedText(boundedText(question, MAX_REPORT_CHARS), `leader-ask:${askId}`)}`,
+			`Answer with bot action ask (agentId ${leader}); the goal goes on with that turn.`,
+		].join("\n");
+		const delivered = await this.deliverOnce(`leader-ask:${askId}`, {
+			customType: LEADER_QUESTION_CUSTOM_TYPE,
+			display: true,
+			content,
+			details: { objectiveId: record.objectiveId, leader, askId },
+		});
+		if (!delivered) throw new Error("The orchestrator did not receive the question yet; ask again.");
+		return { askId };
 	}
 
 	pause(leader: string): DelegationRecord {
@@ -305,7 +403,9 @@ export class LeaderController {
 		const record = this.requireCurrent(leader);
 		if (record.state !== "paused") throw new Error(`${leader}'s goal is not paused.`);
 		this.ledger.resume(record.objectiveId);
-		await this.deps.send(leader, "Continue your goal from where you stopped.");
+		// The goal's messages held while it was paused start first, in the order they were filed.
+		this.deps.reconcileDelegatedMessages(record.objectiveId);
+		await this.deps.send(leader, "Continue your goal from where you stopped.", record.objectiveId);
 		return this.ledger.get(record.objectiveId) ?? record;
 	}
 
@@ -350,7 +450,7 @@ export class LeaderController {
 			if (!aliases.has(agentId)) aliases.set(agentId, this.deps.directBotOf(agentId));
 			return aliases.get(agentId);
 		};
-		this.acknowledgeClaimed(snapshot, records, aliasOf);
+		this.acknowledgeClaimed(snapshot, records);
 		const bots = new Map(this.deps.bots().map((bot) => [bot.agentId, bot]));
 		const nowMs = this.deps.now();
 		let changed = false;
@@ -366,30 +466,47 @@ export class LeaderController {
 				changed = true;
 				continue;
 			}
+			this.ensureSubtree(leader.agentId);
 			const deadline = record.charter.envelope.deadlineAt;
 			if (deadline !== undefined && Date.parse(deadline) <= nowMs) {
 				await this.forceClose(record, "deadline");
 				changed = true;
 				continue;
 			}
-			const leaderAttempts = windowAttempts(snapshot, record, (agentId) => aliasOf(agentId) === leader.agentId);
-			const owned = new Set(
-				[...bots.values()].filter((bot) => bot.createdBy === leader.agentId).map((b) => b.agentId),
-			);
-			const ownedAttempts = windowAttempts(snapshot, record, (agentId) => {
-				const alias = aliasOf(agentId);
-				return alias !== undefined && owned.has(alias);
+			// Every turn filed under this delegation: the leader's own and those its work started, nothing else.
+			const delegated = this.attemptsOf(snapshot, record);
+			const aliasOfAttempt = (attempt: AttemptRuntimeState) =>
+				attempt.agentId === undefined ? undefined : aliasOf(attempt.agentId);
+			const leaderAttempts = delegated.filter((attempt) => aliasOfAttempt(attempt) === leader.agentId);
+			const ownedAttempts = delegated.filter((attempt) => {
+				const alias = aliasOfAttempt(attempt);
+				return alias !== undefined && alias !== leader.agentId;
 			});
 			const budget = record.charter.envelope.budgetUsd;
-			if (budget !== undefined && spentUsd([...leaderAttempts, ...ownedAttempts]) >= budget) {
+			if (budget !== undefined && spentUsd(delegated) >= budget) {
 				await this.forceClose(record, "budget");
+				changed = true;
+				continue;
+			}
+			const ranAliases = [
+				...new Set([
+					leader.agentId,
+					...delegated.flatMap((attempt) => {
+						const alias = aliasOfAttempt(attempt);
+						return alias === undefined ? [] : [alias];
+					}),
+				]),
+			];
+			if (this.deps.subscriptionExhausted(ranAliases)) {
+				await this.forceClose(record, "allowance");
 				changed = true;
 				continue;
 			}
 			const last = leaderAttempts.at(-1);
 			if (!last || ACTIVE_ATTEMPT_STATUSES.has(last.status)) continue;
 			if (ownedAttempts.some((attempt) => ACTIVE_ATTEMPT_STATUSES.has(attempt.status))) continue;
-			if (this.ownedBotsBusy(owned)) continue;
+			// A message filed under this goal still waiting in a bot's mailbox is the goal's unfinished work; an owner's chat is not.
+			if (this.deps.hasPendingDelegatedMessage(record.objectiveId)) continue;
 			const lastOutcome = sameOutcomeAttempt(snapshot.tasks[last.taskId]?.outcome, last.attemptId);
 			if (
 				lastOutcome &&
@@ -414,29 +531,16 @@ export class LeaderController {
 	}
 
 	/** Every pending terminal notice of a delegation's leader turn is consumed here; the store already says what it means. */
-	private acknowledgeClaimed(
-		snapshot: TaskRuntimeProjection,
-		records: readonly DelegationRecord[],
-		aliasOf: (agentId: string) => string | undefined,
-	): void {
+	private acknowledgeClaimed(snapshot: TaskRuntimeProjection, records: readonly DelegationRecord[]): void {
 		const ids: string[] = [];
 		for (const notification of Object.values(snapshot.notifications)) {
 			if (notification.status !== "pending" || !notification.attemptId) continue;
 			const attempt = snapshot.attempts[notification.attemptId];
-			if (!attempt?.agentId || ACTIVE_ATTEMPT_STATUSES.has(attempt.status)) continue;
-			const alias = aliasOf(attempt.agentId);
-			if (alias && records.some((record) => record.charter.leader === alias && inWindow(record, attempt)))
+			if (!attempt || ACTIVE_ATTEMPT_STATUSES.has(attempt.status)) continue;
+			if (records.some((record) => this.turnBelongsTo(snapshot, record, attempt)))
 				ids.push(notification.notificationId);
 		}
 		if (ids.length > 0) this.deps.acknowledge(ids);
-	}
-
-	private ownedBotsBusy(owned: ReadonlySet<string>): boolean {
-		if (owned.size === 0) return false;
-		const runtimes = new Set([...owned].flatMap((alias) => this.deps.runtimesOf(alias)));
-		return this.deps
-			.workers()
-			.some((worker) => runtimes.has(worker.agentId) && worker.status !== "retired" && worker.activity !== "idle");
 	}
 
 	private leaderIdle(alias: string): boolean {
@@ -463,6 +567,8 @@ export class LeaderController {
 				continue;
 			}
 			if (!this.leaderIdle(leader.agentId)) continue;
+			// A standing leader's idle runtime from before it could lead bots is restarted, so the goal's start is granted its children.
+			this.deps.restartLeaderRuntimeIfLeaf(leader.agentId);
 			const ownedBots = [...bots.values()]
 				.filter((bot) => bot.createdBy === leader.agentId && !bot.retired)
 				.map((bot) => ({ agentId: bot.agentId, ...(bot.description ? { description: bot.description } : {}) }));
@@ -475,7 +581,7 @@ export class LeaderController {
 			this.ledger.markDispatched(record.objectiveId);
 			changed = true;
 			try {
-				await this.deps.send(leader.agentId, brief);
+				await this.deps.send(leader.agentId, brief, record.objectiveId);
 			} catch (error) {
 				harnessLog.warn("leaders", "a leader could not be started for its goal", () => ({
 					leader: leader.agentId,
@@ -493,17 +599,13 @@ export class LeaderController {
 		if (record.state === "running" || record.state === "paused") this.deps.stop(record.charter.leader);
 		const snapshot = this.deps.snapshot();
 		const bots = new Map(this.deps.bots().map((bot) => [bot.agentId, bot]));
-		const owned = new Set(
-			[...bots.values()].filter((bot) => bot.createdBy === record.charter.leader).map((bot) => bot.agentId),
-		);
-		const leaderAttempts = windowAttempts(
-			snapshot,
-			record,
-			(agentId) => this.deps.directBotOf(agentId) === record.charter.leader,
-		);
-		const ownedAttempts = windowAttempts(snapshot, record, (agentId) => {
-			const alias = this.deps.directBotOf(agentId);
-			return alias !== undefined && owned.has(alias);
+		const delegated = this.attemptsOf(snapshot, record);
+		const aliasOfAttempt = (attempt: AttemptRuntimeState) =>
+			attempt.agentId === undefined ? undefined : this.deps.directBotOf(attempt.agentId);
+		const leaderAttempts = delegated.filter((attempt) => aliasOfAttempt(attempt) === record.charter.leader);
+		const ownedAttempts = delegated.filter((attempt) => {
+			const alias = aliasOfAttempt(attempt);
+			return alias !== undefined && alias !== record.charter.leader;
 		});
 		const outcome = this.composeOutcome(record, snapshot, leaderAttempts, ownedAttempts, reason);
 		const closed = this.ledger.close(record.objectiveId, outcome, reason);
@@ -561,6 +663,9 @@ export class LeaderController {
 		bots: ReadonlyMap<string, LeaderBotView>,
 		aliasOf: (agentId: string) => string | undefined,
 	): Promise<void> {
+		this.releaseSubtree(record.charter.leader, `delegation_${record.closeReason ?? "settled"}`);
+		// Every close releases what the goal's messages held while it was paused, including a close from paused (a cancel).
+		this.deps.reconcileDelegatedMessages(record.objectiveId);
 		if (!record.outcome) {
 			// The objective was settled outside this controller; the Outcome still has to be recorded and told.
 			if (record.objectiveStatus === "completed" || record.objectiveStatus === "cancelled") {
@@ -575,6 +680,9 @@ export class LeaderController {
 			record = this.ledger.settle(record.objectiveId);
 		const delivered = await this.deliverOutcome(record, snapshot, aliasOf);
 		const leader = bots.get(record.charter.leader);
+		// A standing leader whose goal has ended restarts an idle runtime that predates leading bots (see the restart below).
+		if (leader && !leader.retired && record.charter.appointedBy === "owner" && this.leaderIdle(leader.agentId))
+			this.deps.restartLeaderRuntimeIfLeaf(leader.agentId);
 		const retireDue =
 			record.charter.appointedBy === "root" &&
 			leader !== undefined &&
@@ -601,7 +709,9 @@ export class LeaderController {
 		if (!outcome) return false;
 		const deliveryId = `leader-outcome:${record.objectiveId}`;
 		if (this.delivered.has(deliveryId) || this.deps.hasDelivered(deliveryId)) return true;
-		const leaderAttempts = windowAttempts(snapshot, record, (agentId) => aliasOf(agentId) === record.charter.leader);
+		const leaderAttempts = this.attemptsOf(snapshot, record).filter(
+			(attempt) => attempt.agentId !== undefined && aliasOf(attempt.agentId) === record.charter.leader,
+		);
 		const last = leaderAttempts.at(-1);
 		const report = record.closeReason === "settled" ? last?.result?.summary?.trim() : undefined;
 		const leaderName = this.displayName(record.charter.leader);
@@ -754,6 +864,11 @@ const EARLY_CLOSE: Readonly<
 		blocker: "budget_exhausted",
 		nextAction: { kind: "fix_request", remedy: "Lead it again with a larger budget or a smaller goal." },
 	},
+	allowance: {
+		status: "blocked",
+		blocker: "budget_exhausted",
+		nextAction: { kind: "fix_request", remedy: "Lead it again once the subscription's usage window reopens." },
+	},
 	leader_unavailable: {
 		status: "failed",
 		blocker: "request_rejected",
@@ -761,20 +876,9 @@ const EARLY_CLOSE: Readonly<
 	},
 };
 
-/** A leader turn belongs to a delegation from its dispatch until its close. */
-function inWindow(record: DelegationRecord, attempt: AttemptRuntimeState): boolean {
-	if (!record.dispatchedAt || attempt.createdAt < record.dispatchedAt) return false;
-	return record.closedAt === undefined || attempt.createdAt <= record.closedAt;
-}
-
-function windowAttempts(
-	snapshot: TaskRuntimeProjection,
-	record: DelegationRecord,
-	belongs: (agentId: string) => boolean,
-): AttemptRuntimeState[] {
-	return Object.values(snapshot.attempts)
-		.filter((attempt) => attempt.agentId !== undefined && inWindow(record, attempt) && belongs(attempt.agentId))
-		.sort((left, right) => left.createdAt.localeCompare(right.createdAt));
+/** The objective a turn's work is filed under: the delegation's own when the turn was started under it. */
+function filedObjectiveOf(snapshot: TaskRuntimeProjection, attempt: AttemptRuntimeState): string | undefined {
+	return snapshot.tasks[attempt.taskId]?.task.objectiveId;
 }
 
 /** The cost the harness recorded for these turns, the figure the worker tree budget reads too. */

@@ -9,10 +9,23 @@
 import { createHash } from "node:crypto";
 import type { TaskBrief } from "../comms/comms-records.ts";
 import type { StoredOutcome } from "../delegation/worker-outcome-contract.ts";
-import type { PlanNodeDemand } from "../fleet/fleet-types.ts";
 import type { Placement, PlacementPin } from "../placement/placement-types.ts";
+import type { ProofStakesLevel } from "../proof/stakes-levels.ts";
 
-export type { PlanNodeDemand };
+/** What a plan node demands of the fleet. The fleet reads it (`fleet/fleet-types.ts` re-exports it); its priority is the fleet's 0-3 scale. */
+export interface PlanNodeDemand {
+	readonly nodeId: string;
+	readonly objectiveId: string;
+	readonly subtreeId: string;
+	/** 0 (background) to 3 (verifier, critical). */
+	readonly priority: 0 | 1 | 2 | 3;
+	readonly onCriticalPath: boolean;
+	readonly writes: boolean;
+	readonly heavy: boolean;
+	readonly estimatedTokens?: number;
+	readonly prefixFingerprint?: string;
+	readonly routeHint?: string;
+}
 
 export const PLAN_RECORD_VERSION = 1 as const;
 
@@ -169,6 +182,8 @@ export interface PlanNodeSettlement {
 	readonly outcomeId: string;
 	readonly generation: number;
 	readonly settledAt: string;
+	/** The stakes the step's own worker result read at its settlement; absent in a record written before stakes were kept. */
+	readonly stakes?: ProofStakesLevel;
 }
 
 export interface PlanNodeHold {
@@ -184,6 +199,8 @@ export interface PlanJoinSettlement {
 	readonly artifact: string;
 	readonly n: number;
 	readonly settledAt: string;
+	/** The highest stakes its members (and a reduce or verify step's own worker) recorded; absent in a record written before. */
+	readonly stakes?: ProofStakesLevel;
 }
 
 /** Durable per-node facts the runtime cannot express on its own; the node's state is derived from them. */

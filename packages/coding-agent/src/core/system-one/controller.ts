@@ -1340,7 +1340,10 @@ export class SystemOneController {
 	 * What every completion judgment reads: the cold completion projection (outcome evidence per
 	 * criterion; the repository diff only when the goal changed the repository) and whether it did.
 	 */
-	async completionView(signal?: AbortSignal): Promise<{ view: Record<string, unknown>; repositoryOutcome: boolean }> {
+	/** `changedFiles` is every path of the work diff read for this view; absent when no diff source is bound. */
+	async completionView(
+		signal?: AbortSignal,
+	): Promise<{ view: Record<string, unknown>; repositoryOutcome: boolean; changedFiles?: readonly string[] }> {
 		const scope = this.captureStageExecution("completion");
 		this.syncCanonicalTruth();
 		this.assertStageCurrent(scope);
@@ -1350,6 +1353,7 @@ export class SystemOneController {
 		return {
 			view: this.projector.completion(snapshot, work),
 			repositoryOutcome: hasRepositoryOutcome(work, snapshot.changes.length),
+			...(this.workDiffSource ? { changedFiles: work?.files ?? [] } : {}),
 		};
 	}
 

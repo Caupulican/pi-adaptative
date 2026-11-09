@@ -4,7 +4,8 @@
  *
  * 1. a node released under a plan header belongs to the plan executor;
  * 2. a node run for a delegation belongs to its leader controller;
- * 3. otherwise the terminal goes to the foreground's handoff, as before.
+ * 3. a worker that runs a job another machine placed belongs to the job runner, which reports it to that machine;
+ * 4. otherwise the terminal goes to the foreground's handoff, as before.
  *
  * Owners register their predicate when they exist; with none registered every terminal reaches the foreground. A
  * claimed terminal stays pending in the durable outbox until its owner acknowledges it, and every claim is logged so a
@@ -15,9 +16,9 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerTerminalHandoffRecord } from "./worker-notification-coordinator.ts";
 
 /** The structured owners a terminal can route to, in chain order. */
-export type TerminalRouteOwner = "plan_executor" | "leader_controller";
+export type TerminalRouteOwner = "plan_executor" | "leader_controller" | "job_runner";
 
-const ROUTE_ORDER: readonly TerminalRouteOwner[] = ["plan_executor", "leader_controller"];
+const ROUTE_ORDER: readonly TerminalRouteOwner[] = ["plan_executor", "leader_controller", "job_runner"];
 
 /** One owner's claim: true when the terminal belongs to it. A predicate that throws leaves the terminal unresolved. */
 export type TerminalRoute = (record: WorkerTerminalHandoffRecord) => boolean;

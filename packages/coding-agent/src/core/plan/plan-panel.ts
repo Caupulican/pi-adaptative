@@ -118,14 +118,21 @@ function rowStatus(node: PlanNodeView): OrchestrationRowStatus {
 	}
 }
 
-/** The state, kind, placement and outcome of one step in plain words, in that order. */
+/**
+ * The state, dependency, kind, effort, placement, attempt and outcome of one step in plain words, in that order. The
+ * dependency is shown only while the step still waits; a finished step's count is history.
+ */
 function nodeWords(node: PlanNodeView): string[] {
+	const waiting = node.state === "planned" || node.state === "ready";
 	const outcome = node.state === "settled" && node.outcomeStatus ? OUTCOME_WORDS[node.outcomeStatus] : undefined;
 	const next = node.state === "settled" && node.nextAction ? NEXT_ACTION_WORDS[node.nextAction] : undefined;
 	return [
 		stateWord(node),
+		waiting && node.predecessors > 0 ? `after ${steps(node.predecessors)}` : undefined,
 		KIND_WORDS[node.kind],
+		node.effort === "deep" ? "hard step, deep thinking" : undefined,
 		node.placement ? PLACEMENT_WORDS[node.placement.kind] : undefined,
+		node.attempts > 1 ? `attempt ${node.attempts}` : undefined,
 		outcome,
 		next,
 	].filter((word): word is string => word !== undefined);

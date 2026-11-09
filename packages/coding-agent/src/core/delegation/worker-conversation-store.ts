@@ -134,9 +134,9 @@ import {
 import { projectWorkerTranscriptForInspection } from "./worker-transcript-projection.ts";
 import { encodeWorkerTranscriptReference, parseWorkerTranscriptReference } from "./worker-transcript-reference.ts";
 
-const WORKER_CHANGED_FILE_CUSTOM_TYPE = "worker-changed-file";
+export const WORKER_CHANGED_FILE_CUSTOM_TYPE = "worker-changed-file";
 const EXISTING_WORKER_FILE_LOCK_OPTIONS = Object.freeze({ createParentDirectories: false });
-const WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE = "worker-attempt-usage-boundary";
+export const WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE = "worker-attempt-usage-boundary";
 const MAX_PERSISTED_WORKER_DIAGNOSTICS = 8;
 const MAX_WORKER_CONTROL_ENTRY_PREFIX_BYTES = 16 * 1024;
 export const MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES = 64;

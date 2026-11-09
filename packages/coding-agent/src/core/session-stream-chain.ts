@@ -375,11 +375,10 @@ export function buildSessionStreamFn(input: SessionStreamChainInput): StreamFn {
 		getPolicy: () => settingsManager.getProviderAdmissionSettings(),
 		// Every settled request teaches its account's adaptive fleet window (the foreground's too).
 		observeRequest: (accountKey) =>
-			accountWindowsFor({
-				agentDir: input.agentDir,
+			accountWindowsFor(input.agentDir).begin(accountKey, {
 				now: () => providerAdmissionLedger.timers.now(),
 				ceiling: () => settingsManager.getFleetSettings().ceiling.running,
-			}).begin(accountKey),
+			}),
 		record: (record) => {
 			try {
 				sessionManager.appendCustomEntry(PROVIDER_ADMISSION_CUSTOM_TYPE, record);

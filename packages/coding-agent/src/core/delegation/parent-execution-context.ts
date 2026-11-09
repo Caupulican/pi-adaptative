@@ -69,6 +69,7 @@ import type {
 	WorkerAccountRouting,
 	WorkerThinkingPolicy,
 } from "../settings/settings-schema.ts";
+import type { ResolvedWorkerOutcomeSettings } from "../settings/worker-outcome-settings.ts";
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import type { SystemOneProviderChoice } from "../system-one/access.ts";
 import type { ToolkitScript } from "../toolkit/script-registry.ts";
@@ -130,6 +131,8 @@ export interface ParentExecutionSettingsSource {
 	getToolkitScripts(): ToolkitScript[];
 	getWorkerAccountRouting(): WorkerAccountRouting;
 	getWorkerDelegationSettings(): ResolvedWorkerDelegationSettings;
+	/** The owner's outcome ladder, learning and host-check settings (`workerDelegation.outcomes`). */
+	getWorkerOutcomeSettings(): ResolvedWorkerOutcomeSettings;
 	getWorkerModelPinPolicy(): WorkerModelPinPolicy;
 	getWorkerThinkingPolicy(): WorkerThinkingPolicy;
 	isProjectTrusted(): boolean;

@@ -29,6 +29,7 @@ import { createHash } from "node:crypto";
 import { isOutcomeFromNewerBuild, type Outcome, type StoredOutcome } from "../delegation/worker-outcome-contract.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import { currentTaskOf } from "../orchestration/task-successor.ts";
 import { planCriticalPath } from "./plan-dispatch.ts";
 import {
 	isCodeSettledJoin,
@@ -57,7 +58,12 @@ interface NodeRef {
 
 export type PlanAction =
 	| (NodeRef & { readonly kind: "release"; readonly priority: number; readonly order: number })
-	| (NodeRef & { readonly kind: "settle"; readonly outcomeId: string; readonly generation: number })
+	| (NodeRef & {
+			readonly kind: "settle";
+			readonly outcomeId: string;
+			readonly generation: number;
+			readonly outcome: Outcome;
+	  })
 	| (NodeRef & {
 			readonly kind: "hold";
 			readonly reason: PlanHoldReason;
@@ -144,7 +150,7 @@ function outcomeAction(ref: NodeRef, node: PlanNodeSpec, outcome: Outcome): Plan
 	});
 	const settle: PlanAction = isWorkerJoin(node)
 		? { ...ref, kind: "worker_join", outcome }
-		: { ...ref, kind: "settle", outcomeId: outcome.outcomeId, generation: outcome.generation };
+		: { ...ref, kind: "settle", outcomeId: outcome.outcomeId, generation: outcome.generation, outcome };
 	const next = outcome.nextAction;
 	if (LANE_ACTIONS.has(next.kind)) return undefined;
 	switch (next.kind) {
@@ -186,11 +192,12 @@ function tasksToCancel(projection: ReconcileProjection, plan: PlanRuntimeState, 
 		return status !== undefined && !TERMINAL_TASK_STATUSES.has(status);
 	};
 	const actions: PlanAction[] = plan.retired
-		.filter((entry) => live(entry.taskId))
-		.map((entry) => ({ kind: "cancel_task", planId, taskId: entry.taskId, reason: `plan_step_${entry.reason}` }));
+		.map((entry) => ({ entry, taskId: currentTaskOf(projection, entry.taskId) }))
+		.filter(({ taskId }) => live(taskId))
+		.map(({ entry, taskId }) => ({ kind: "cancel_task", planId, taskId, reason: `plan_step_${entry.reason}` }));
 	if (plan.closed) {
 		for (const runtime of Object.values(plan.nodes)) {
-			const taskId = runtime.release?.taskId;
+			const taskId = runtime.release ? currentTaskOf(projection, runtime.release.taskId) : undefined;
 			if (taskId && !runtime.settled && live(taskId))
 				actions.push({ kind: "cancel_task", planId, taskId, reason: "plan_closed" });
 		}
@@ -217,7 +224,10 @@ function budgetHeld(projection: ReconcileProjection): boolean {
 			!plan.closed &&
 			Object.values(plan.nodes).some((runtime) => {
 				if (runtime.held?.reason !== "owner" || !runtime.release) return false;
-				return currentOutcome(projection, runtime.release.taskId)?.blocker === "budget_exhausted";
+				return (
+					currentOutcome(projection, currentTaskOf(projection, runtime.release.taskId))?.blocker ===
+					"budget_exhausted"
+				);
 			}),
 	);
 }
@@ -239,7 +249,7 @@ function nodeActions(
 		const ref = { planId: record.planId, nodeId: node.id };
 		if (!runtime || runtime.join) return;
 		if (runtime.release) {
-			const outcome = currentOutcome(projection, runtime.release.taskId);
+			const outcome = currentOutcome(projection, currentTaskOf(projection, runtime.release.taskId));
 			if (runtime.settled) {
 				const unwrapped = !wrapped.has(node.id) && !runtime.held && node.kind === "work";
 				if (outcome?.nextAction.kind === "verify_independently" && unwrapped)
@@ -258,7 +268,7 @@ function nodeActions(
 			} else if (
 				!outcome &&
 				!runtime.held &&
-				projection.tasks[runtime.release.taskId]?.task.status === "cancelled"
+				projection.tasks[currentTaskOf(projection, runtime.release.taskId)]?.task.status === "cancelled"
 			) {
 				actions.push({
 					...ref,
@@ -352,7 +362,7 @@ function isStuck(projection: ReconcileProjection, plan: PlanRuntimeState, record
 		const runtime = plan.nodes[node.id];
 		if (!runtime || runtime.join || runtime.settled) return true;
 		if (runtime.held) return false;
-		if (runtime.release) return endedWithoutOutcome(projection, runtime.release.taskId);
+		if (runtime.release) return endedWithoutOutcome(projection, currentTaskOf(projection, runtime.release.taskId));
 		return !planNodeReleasable(projection, plan, record, node);
 	});
 }
@@ -364,7 +374,7 @@ function consumedTerminals(projection: ReconcileProjection): string[] {
 		if (notification.status !== "pending" || !notification.attemptId) continue;
 		const attempt = projection.attempts[notification.attemptId];
 		if (!attempt || !TERMINAL_ATTEMPT_STATUSES.has(attempt.status)) continue;
-		const owner = planNodeOfTask(projection.plans, attempt.taskId);
+		const owner = planNodeOfTask(projection, attempt.taskId);
 		if (!owner) continue;
 		const outcome = projection.tasks[attempt.taskId]?.outcome;
 		const consumed =

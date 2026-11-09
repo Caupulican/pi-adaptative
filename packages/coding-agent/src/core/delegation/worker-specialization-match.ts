@@ -55,6 +55,8 @@ export interface WorkerSpecializationFingerprint {
 	namespaceKey: string;
 	/** The verifier this specialization is required to run with, described the same way. */
 	verifier?: Omit<WorkerSpecializationFingerprint, "verifier">;
+	/** The report offers a routine's `progress` section: a different report contract is different work. Absent otherwise. */
+	reportsProgress?: true;
 }
 
 function canonicalSet(values: readonly string[]): readonly string[] {
@@ -109,6 +111,7 @@ function describeProfileContract(
 		worktreeLaneKey: worktreeLaneKey ?? "",
 		resources: contract.resourcePointers.filter((pointer) => selected.has(pointer.id)).map(describeResourcePointer),
 		namespaceKey,
+		...(contract.profile.reportsProgress === true ? { reportsProgress: true as const } : {}),
 	};
 }
 

@@ -9,6 +9,13 @@
  * held node, are stated at the new version and start afresh.
  */
 
+import {
+	MAX_TASK_DONE_CHARS,
+	MAX_TASK_GOAL_CHARS,
+	MAX_TASK_OUT_OF_SCOPE,
+	MAX_TASK_OUT_OF_SCOPE_CHARS,
+	type TaskBrief,
+} from "../comms/comms-records.ts";
 import type { PlacementPin } from "../placement/placement-types.ts";
 import type { PlanToolInput, PlanToolStep } from "./plan-executor-port.ts";
 import {
@@ -30,14 +37,38 @@ export function pinFromBy(by: string): PlacementPin {
 	return { target: { botId: value }, mode: "prefer" };
 }
 
+/** Text as one canonical brief line inside `max` characters: whitespace runs collapse, an overlong line is cut. */
+export function briefLine(text: string, max: number): string {
+	const line = text.replace(/\s+/g, " ").trim();
+	return line.length <= max ? line : `${line.slice(0, max - 3)}...`;
+}
+
+/** The step's acceptance fields as a brief whose goal is the step's intent, or undefined when the step states neither. */
+function stepBrief(step: PlanToolStep): TaskBrief | undefined {
+	const done = step.doneWhen ? briefLine(step.doneWhen, MAX_TASK_DONE_CHARS) : "";
+	const outOfScope = (step.outOfScope ?? [])
+		.map((item) => briefLine(item, MAX_TASK_OUT_OF_SCOPE_CHARS))
+		.filter((item) => item.length > 0)
+		.slice(0, MAX_TASK_OUT_OF_SCOPE);
+	if (!done && outOfScope.length === 0) return undefined;
+	return {
+		v: 3,
+		goal: briefLine(step.do, MAX_TASK_GOAL_CHARS),
+		...(done ? { done } : {}),
+		...(outOfScope.length > 0 ? { outOfScope } : {}),
+	};
+}
+
 /** One tool step as a node spec stated at `version`. A path that normalizes is kept normalized; F5 refuses the rest. */
 export function nodeFromStep(step: PlanToolStep, version: number): PlanNodeSpec {
 	const kind = step.join ?? "work";
 	const inputs = [...new Set(step.uses ?? [])];
+	const brief = stepBrief(step);
 	return {
 		id: step.id,
 		kind,
 		intent: step.do.trim(),
+		...(brief ? { brief } : {}),
 		inputs,
 		after: [...new Set(step.after ?? [])].filter((id) => !inputs.includes(id)),
 		writeScope: (step.files ?? []).map((path) => normalizePlanWriteScope(path, PLAN_LIMITS.scopeChars) ?? path),

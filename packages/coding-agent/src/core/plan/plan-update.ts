@@ -6,14 +6,24 @@
  */
 
 import { createHash } from "node:crypto";
-import { renderCommsStateLine } from "../comms/comms-records.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
+import { renderCommsStateLine, type TaskBrief } from "../comms/comms-records.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
+import { buildPlanProofSheet } from "../proof/plan-proof-sheet.ts";
+import {
+	PLAN_UPDATE_CUSTOM_TYPE,
+	PROOF_SHEET_DETAILS_KEY,
+	type ProofSheetRecord,
+	proofSheetUnavailableLine,
+} from "../proof/proof-sheet.ts";
+import type { ProofStakesLevel } from "../proof/stakes-levels.ts";
 import type { CommsStateCode } from "../provider-prompt-contracts.ts";
 import type { JoinResult } from "./joins.ts";
 import { joinReadsAsReport } from "./joins.ts";
 import type { PlanNodeView, PlanView } from "./plan-view.ts";
 
-export const PLAN_UPDATE_CUSTOM_TYPE = "plan-update";
+/** The customType of a plan update; defined with the proof-sheet carriers, re-exported here for its producers. */
+export { PLAN_UPDATE_CUSTOM_TYPE };
 export const PLAN_UPDATE_MAX_BYTES = 4 * 1024;
 const MAX_NODE_LINES = 8;
 const MAX_LINE_CHARS = 240;
@@ -29,6 +39,10 @@ export interface PlanUpdateInput {
 	readonly detail?: string;
 	/** Distinguishes two updates of the same kind about the same step (join sequence, hold generation). */
 	readonly sequence: number;
+	/** The brief of the step the update is about; a result's proof sheet repeats its done-when and out-of-scope lines. */
+	readonly brief?: Pick<TaskBrief, "done" | "outOfScope">;
+	/** The stakes the join recorded when it settled (its steps' highest level); the result's proof sheet reads it. */
+	readonly stakes?: ProofStakesLevel;
 }
 
 const KIND_CODE: Readonly<Record<PlanUpdateKind, CommsStateCode>> = {
@@ -111,6 +125,32 @@ export function planUpdateDelivery(
 	const reads = result && joinReadsAsReport(result) ? "READ_REPORT" : "READ_ALL";
 	const codes = renderCommsStateLine(["PLAN_UPDATE", KIND_CODE[input.kind], reads]);
 	const coverage = result ? Object.entries(result.coverage) : [];
+	// A combined result carries its proof sheet for the owner (shown ahead of the update); the root reads the update lines.
+	// A sheet that cannot be built leaves the update delivered without it, with a plain line in the update's place.
+	let proofSheet: ProofSheetRecord | undefined;
+	let sheetFailure: string | undefined;
+	if (result && (input.kind === "join" || input.kind === "settled")) {
+		try {
+			proofSheet = buildPlanProofSheet({
+				planId: view.planId,
+				title: view.title,
+				...(input.nodeId ? { nodeId: input.nodeId } : {}),
+				result,
+				...(input.brief ? { brief: input.brief } : {}),
+				...(input.stakes ? { stakes: input.stakes } : {}),
+			}).record;
+		} catch (error) {
+			harnessLog.warn(
+				"proof",
+				"a plan result's proof sheet could not be built; the update is delivered without it",
+				{
+					planId: view.planId,
+					...(input.nodeId ? { nodeId: input.nodeId } : {}),
+				},
+			);
+			sheetFailure = proofSheetUnavailableLine(error);
+		}
+	}
 	const lines = [
 		...(codes ? [codes] : []),
 		clip(`Plan "${view.title}" (version ${view.version}): ${KIND_WORDS[input.kind]}.`),
@@ -133,6 +173,7 @@ export function planUpdateDelivery(
 					`Full result: ${result.artifact}`,
 				]
 			: []),
+		...(sheetFailure ? [sheetFailure] : []),
 		...(view.rootOwned.length > 0 ? [clip(`Requirements no step covers (yours): ${view.rootOwned.join(", ")}`)] : []),
 		"Steps:",
 		...pickNodes(view, input.nodeId).map(nodeLine),
@@ -146,6 +187,7 @@ export function planUpdateDelivery(
 			version: view.version,
 			kind: input.kind,
 			...(input.nodeId ? { nodeId: input.nodeId } : {}),
+			...(proofSheet ? { [PROOF_SHEET_DETAILS_KEY]: proofSheet } : {}),
 		},
 	};
 	return {

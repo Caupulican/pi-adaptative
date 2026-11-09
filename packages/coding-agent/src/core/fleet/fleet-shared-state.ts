@@ -16,6 +16,8 @@ export class FleetSharedState<T> {
 	private lastMtimeMs: number | undefined;
 	private checkedThisTick = false;
 	private pending: ((disk: T | undefined) => T) | undefined;
+	/** Commit callbacks of the pending merges: each runs once its merge reached the file, never when the write failed. */
+	private committed: (() => void)[] = [];
 
 	constructor(path: string, label: string, parse: (value: unknown) => T | undefined) {
 		this.path = path;
@@ -45,19 +47,23 @@ export class FleetSharedState<T> {
 	/**
 	 * Merges this process's state into the file once the current synchronous work ends: `merge` receives what the file
 	 * holds under its lock and returns what is written. Repeated calls in one microtask write once, with the last merge.
+	 * `committed` runs only after that write succeeded; a failed write leaves the caller's state pending for the next one.
 	 */
-	schedule(merge: (disk: T | undefined) => T): void {
+	schedule(merge: (disk: T | undefined) => T, committed?: () => void): void {
 		const first = this.pending === undefined;
 		this.pending = merge;
+		if (committed) this.committed.push(committed);
 		if (!first) return;
 		queueMicrotask(() => {
 			const write = this.pending;
+			const commits = this.committed;
 			this.pending = undefined;
-			if (write) this.writeNow(write);
+			this.committed = [];
+			if (write) this.writeNow(write, commits);
 		});
 	}
 
-	private writeNow(merge: (disk: T | undefined) => T): void {
+	private writeNow(merge: (disk: T | undefined) => T, commits: readonly (() => void)[]): void {
 		try {
 			withFileLockSync(this.path, () => {
 				const merged = merge(this.readUnlocked());
@@ -66,7 +72,9 @@ export class FleetSharedState<T> {
 			});
 		} catch (error) {
 			this.warn(error);
+			return;
 		}
+		for (const commit of commits) commit();
 	}
 
 	private readUnlocked(): T | undefined {

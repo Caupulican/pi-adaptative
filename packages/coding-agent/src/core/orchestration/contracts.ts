@@ -18,7 +18,7 @@ export {
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { ExecutionContext } from "../../kernel/utils/paths.ts";
 import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
-import type { JsonObject, JsonValue } from "../autonomy/contracts.ts";
+import type { JsonObject, JsonValue, WorkerReportProgress } from "../autonomy/contracts.ts";
 import { HARNESS_CAPABILITIES, type HarnessCapability } from "../capability-contract.ts";
 import type { TaskBrief } from "../comms/comms-records.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -128,6 +128,16 @@ export interface OrchestrationDelegationLimits {
 
 export const OBJECTIVE_STATUSES = ["active", "paused", "completed", "cancelled"] as const;
 export type ObjectiveStatus = (typeof OBJECTIVE_STATUSES)[number];
+
+/** Whether an objective takes new tasks and attempts: only an active one does; paused, completed and cancelled refuse them. */
+export function objectiveTakesNewWork(objective: { readonly status: ObjectiveStatus } | undefined): boolean {
+	return objective?.status === "active";
+}
+
+/** Whether an objective is paused: its held work waits until it is resumed (or closed, which releases it). */
+export function objectiveIsPaused(objective: { readonly status: ObjectiveStatus } | undefined): boolean {
+	return objective?.status === "paused";
+}
 
 export const TASK_STATUSES = ["pending", "ready", "running", "blocked", "completed", "failed", "cancelled"] as const;
 export type OrchestrationTaskStatus = (typeof TASK_STATUSES)[number];
@@ -263,12 +273,20 @@ export interface OrchestrationProfile {
 	 * every other root is a grant the root names (delegate `writePaths`, or this field). Reads are unaffected.
 	 */
 	writePaths?: readonly string[];
+	/**
+	 * The worker's read scope, absolute roots. Present means the worker reads only inside these roots: its read tools,
+	 * `repo_read`, `lookup` and a read-only shell (its own scratch directory aside), in every mode. An empty list reads
+	 * nothing from disk. Absent means the machine scope, or the cwd when `workspacePath` focuses the worker.
+	 */
+	readPaths?: readonly string[];
 	resourceProfileNames: readonly string[];
 	/** Optional preset-routing metadata retained for authored profiles; never an admission allowlist. */
 	dispatchProfileIds: readonly string[];
 	executionPolicy?: OrchestrationExecutionPolicy;
 	/** Newly compiled native profiles carry the mandatory zero-child leaf limit. */
 	delegationLimits?: OrchestrationDelegationLimits;
+	/** The compiled worker's report carries the routine `progress` section. Absent for every other worker. */
+	reportsProgress?: boolean;
 	budget: RiskBudget;
 	/** Authored scheduling hint retained in the snapshot; the global scheduler owns actual concurrency. */
 	maxConcurrent: number;
@@ -376,6 +394,11 @@ export interface OrchestrationDispatchRequest {
 	modelRouteSource?: WorkerModelRouteSource;
 	/** The pin policy layer that supplied the model when `modelRouteSource` is `model_pin`. */
 	modelPinSource?: string;
+	/**
+	 * The runtime agent that wrote the mailbox message this turn runs, when a bot wrote it (the session root has none).
+	 * Provenance only, never dispatch identity: a leader reads it to claim the turns its own messages started.
+	 */
+	senderAgentId?: string;
 }
 
 export type CapabilityEnforcementKind =
@@ -514,6 +537,8 @@ export interface WorkerResultContract {
 	ownerUpdate?: "none";
 	/** Host-stamped under the same rule: the report states the end its routine brief named was reached. Routine results only read it. */
 	conditionMet?: true;
+	/** The report's own account of where its routine's task stands, on any outcome; only the routine progress record reads it. */
+	progress?: WorkerReportProgress;
 	createdAt: string;
 }
 

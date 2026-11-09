@@ -3,6 +3,7 @@ import { existsSync, type FSWatcher, mkdirSync, readFileSync, watch, writeFileSy
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getAgentDir } from "../../config.ts";
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import type { WorkerControlRecord } from "../../kernel/worker-control-stamp.ts";
 import { checkSoulText } from "../agent-identity.ts";
@@ -95,8 +96,17 @@ import {
 	routineZoneUnsupported,
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
+import { routineTurnOrigin } from "../routines/routine-parent-input.ts";
+import {
+	applyRoutineRunProgress,
+	NO_SUMMARY_TEXT,
+	parseRoutineProgress,
+	type RoutineRunFacts,
+	renderRoutineProgressBrief,
+	withRoutineOwnerNote,
+} from "../routines/routine-progress.ts";
 import { parseWatchCondition } from "../routines/watch-contract.ts";
-import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
+import { cleanRedactBound } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import {
@@ -728,6 +738,38 @@ function awaySettlement(
 	return { awaySettlement: { at: nowMs, ...(costUsd === undefined ? {} : { costUsd }) } };
 }
 
+/**
+ * What a run reads from its routine's progress record when it is claimed to run: the brief, and whether that brief
+ * carries a third party's words (`progressUntrusted`). Both are frozen with the run. Only a session run of a clock,
+ * manual, event or watch trigger reads a brief; an expiry or condition notice runs no worker. The record is the routine's
+ * current one, but the run's target and the report instruction come from the occurrence's own frozen definition, the one
+ * its worker schema was compiled from.
+ */
+function admittedProgressFields(
+	routine: RoutineDefinitionView,
+	occurrence: Pick<RoutineOccurrence, "definition" | "target" | "trigger">,
+): Pick<RoutineOccurrence, "progressBrief" | "progressUntrusted"> {
+	if (
+		occurrence.target.kind !== "session" ||
+		occurrence.trigger.kind === "expiry" ||
+		occurrence.trigger.kind === "condition"
+	)
+		return {};
+	const reportsProgress =
+		occurrence.definition.executionSnapshot?.savedIntent.executionContract.worker.profile.reportsProgress === true;
+	const progressBrief = renderRoutineProgressBrief(routine.routineId, routine.progress, reportsProgress);
+	if (progressBrief === undefined) return {};
+	return {
+		progressBrief,
+		...(routine.progress?.untrusted === true ? { progressUntrusted: true as const } : {}),
+	};
+}
+
+/** A result's summary as the store keeps it: cleaned, redacted and bounded before it is cut, or the no-summary text. */
+function resultSummaryText(raw: string): string {
+	return cleanRedactBound(raw, MAX_ROUTINE_SUMMARY_CHARS, { lines: true }) || NO_SUMMARY_TEXT;
+}
+
 export class PersistentBotTeamStore {
 	private readonly agentDir: string;
 	private readonly filePath: string;
@@ -928,6 +970,8 @@ export class PersistentBotTeamStore {
 			phase: "pending",
 			createdAt: nowMs,
 			updatedAt: nowMs,
+			// A queued run's brief is refreshed when it is claimed to run (`reclaimed`), before its dispatch identity is fixed.
+			...admittedProgressFields(definition, { definition: definitionSnapshot, target: definition.target, trigger }),
 		};
 	}
 
@@ -968,8 +1012,22 @@ export class PersistentBotTeamStore {
 				next.routineRevision !== current.routineRevision ||
 				next.createdAt !== current.createdAt ||
 				next.updatedAt !== input.nowMs ||
-				JSON.stringify([next.definition, next.parentOrigin, next.target, next.trigger]) !==
-					JSON.stringify([current.definition, current.parentOrigin, current.target, current.trigger]) ||
+				JSON.stringify([
+					next.definition,
+					next.parentOrigin,
+					next.target,
+					next.trigger,
+					next.progressBrief,
+					next.progressUntrusted,
+				]) !==
+					JSON.stringify([
+						current.definition,
+						current.parentOrigin,
+						current.target,
+						current.trigger,
+						current.progressBrief,
+						current.progressUntrusted,
+					]) ||
 				(!deferred && JSON.stringify(next.claim) !== JSON.stringify(current.claim)) ||
 				// The executor is fixed once claimed; only a released claim belongs to none.
 				(!deferred && next.executor !== current.executor) ||
@@ -992,8 +1050,9 @@ export class PersistentBotTeamStore {
 		recipient: string,
 		ownerUpdate?: "none",
 		conditionMet?: true,
+		facts?: RoutineRunFacts,
 	): RoutineOccurrence {
-		const summary = summaryRaw.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "No summary was provided.";
+		const summary = resultSummaryText(summaryRaw);
 		if (recipient !== occurrence.parentOrigin.sessionId)
 			throw new Error("Routine result recipient does not match its admitted parent.");
 		if ((ownerUpdate !== undefined || conditionMet !== undefined) && outcome !== "succeeded")
@@ -1019,8 +1078,90 @@ export class PersistentBotTeamStore {
 		)
 			this.routines.set(routine.routineId, withRoutineRunState(routine, finished));
 		this.recordRoutineFailureStreak(finished, outcome, summary);
+		this.recordRoutineProgress(finished, outcome, summary, facts);
 		if (conditionMet) this.recordRoutineConditionMet(finished);
 		return finished;
+	}
+
+	/**
+	 * Updates the routine's progress record in the write that records a result, for the incarnation the run belongs to
+	 * only (`applyRoutineRunProgress`): snags from code facts, the run's own report, clean runs resolving snags, and the
+	 * position of a run that sent no report. Only a worker session's run writes: a bot or team run has no brief to read it
+	 * back, so its results record nothing (its failure streak and pause still apply). A cancelled result counts nothing;
+	 * it leaves the stopped position only when the occurrence was dispatched. An expiry or condition notice (which ran no
+	 * worker) records nothing. Keyed by the run, so a replayed result changes nothing; never moves the revision. A record
+	 * the codec refuses is not kept: the previous record stands, so a progress record can never fail the result write.
+	 */
+	private recordRoutineProgress(
+		occurrence: RoutineOccurrence,
+		outcome: RoutineTerminalOutcome,
+		summary: string,
+		facts: RoutineRunFacts | undefined,
+	): void {
+		if (
+			occurrence.target.kind !== "session" ||
+			occurrence.trigger.kind === "expiry" ||
+			occurrence.trigger.kind === "condition"
+		)
+			return;
+		const routine = this.routines.get(occurrence.routineId);
+		if (routine?.incarnationId !== occurrence.definition.incarnationId) return;
+		const progress = applyRoutineRunProgress(routine.progress, {
+			routineId: routine.routineId,
+			occurrenceId: occurrence.occurrenceId,
+			outcome,
+			reasonCode: facts?.reasonCode ?? outcome,
+			...(facts?.step === undefined ? {} : { step: facts.step }),
+			summary,
+			...(facts?.report === undefined ? {} : { report: facts.report }),
+			untrusted: routineTurnOrigin(occurrence)?.thirdParty === true,
+			latest: routine.lastRunAt === routineTriggerAt(occurrence.trigger),
+			dispatched: occurrence.dispatchKey !== undefined,
+			nowMs: occurrence.updatedAt,
+		});
+		if (progress === routine.progress) return;
+		if (progress !== undefined) {
+			try {
+				parseRoutineProgress(progress);
+			} catch {
+				harnessLog.warn("routines", "a run's progress record was not kept: it failed its own codec", {
+					routineId: routine.routineId,
+					occurrenceId: occurrence.occurrenceId,
+				});
+				return;
+			}
+		}
+		const { progress: _previous, ...rest } = routine;
+		this.routines.set(routine.routineId, progress ? { ...rest, progress } : rest);
+	}
+
+	/** The owner's note on where a routine's task stands; run state, so the revision does not move. */
+	noteRoutineProgress(input: { routineId: string; text: string; nowMs: number }): RoutineDefinitionView {
+		return this.mutate(() => {
+			const routine = this.routines.get(input.routineId);
+			if (!routine) throw new Error("Routine is absent.");
+			const progress = withRoutineOwnerNote(routine.progress, input.text, input.nowMs);
+			// The codec checks the record the note makes before it is kept, as a result's record is checked when it is written.
+			parseRoutineProgress(progress);
+			const updated = { ...routine, progress };
+			this.routines.set(routine.routineId, updated);
+			this.save();
+			return structuredClone(updated);
+		});
+	}
+
+	/** Drops a routine's progress record; run state, so the revision does not move. */
+	resetRoutineProgress(input: { routineId: string }): RoutineDefinitionView {
+		return this.mutate(() => {
+			const routine = this.routines.get(input.routineId);
+			if (!routine) throw new Error("Routine is absent.");
+			const { progress: _dropped, ...rest } = routine;
+			if (routine.progress) {
+				this.routines.set(routine.routineId, rest);
+				this.save();
+			}
+			return structuredClone(rest);
+		});
 	}
 
 	/**
@@ -1040,7 +1181,11 @@ export class PersistentBotTeamStore {
 			...routine,
 			conditionMet: { at: occurrence.updatedAt, occurrenceId: occurrence.occurrenceId },
 		});
-		this.cancelUndispatchedRoutineOccurrences(routine.routineId, occurrence.updatedAt);
+		this.cancelUndispatchedRoutineOccurrences(
+			routine.routineId,
+			occurrence.updatedAt,
+			"Another run of this routine reported its stated end met before this one was dispatched.",
+		);
 	}
 
 	/**
@@ -1072,13 +1217,14 @@ export class PersistentBotTeamStore {
 				after: streak,
 				at: occurrence.updatedAt,
 				occurrenceId: occurrence.occurrenceId,
-				lastError: boundedRedactedDiagnosticText(summary) ?? "No summary was provided.",
+				// The summary was cleaned, redacted and bounded when the result was written (`resultSummaryText`).
+				lastError: summary,
 			},
 		});
 		this.cancelUndispatchedRoutineOccurrences(
 			routine.routineId,
 			occurrence.updatedAt,
-			"Another run of this routine reported its stated end met before this one was dispatched.",
+			"The routine was paused after repeated failures before this run was dispatched.",
 		);
 	}
 
@@ -1244,7 +1390,8 @@ export class PersistentBotTeamStore {
 		if (!Number.isSafeInteger(this.routineRevisionCounter) || this.routineRevisionCounter < highestRoutineRevision)
 			throw new Error("Refusing to persist a stale routine revision counter.");
 		const data = {
-			version: 3,
+			// Version 4 holds progress, which a build that predates it refuses; a store without progress stays version 3.
+			version: this.storesRoutineProgress() ? 4 : 3,
 			routineRevisionCounter: this.routineRevisionCounter,
 			bots: Array.from(this.bots.values()),
 			teams: Array.from(this.teams.values()),
@@ -1266,6 +1413,14 @@ export class PersistentBotTeamStore {
 		writeFileAtomicSync(this.filePath, JSON.stringify(data, null, 2));
 		this._cachedTeamList = undefined;
 		this.mutationChanged = true;
+	}
+
+	/** Whether the store holds a progress field (a routine's record or an occurrence's brief); only then is version 4 written. */
+	private storesRoutineProgress(): boolean {
+		for (const routine of this.routines.values()) if (routine.progress !== undefined) return true;
+		for (const occurrence of this.routineOccurrences.values())
+			if (occurrence.progressBrief !== undefined || occurrence.progressUntrusted !== undefined) return true;
+		return false;
 	}
 
 	private mutate<T>(action: () => T): T {
@@ -1310,7 +1465,7 @@ export class PersistentBotTeamStore {
 			if (!isRecordObject(parsed)) throw new Error("Bot and team store is not an object.");
 			if (
 				typeof parsed.version !== "number" ||
-				![1, 2, 3].includes(parsed.version) ||
+				![1, 2, 3, 4].includes(parsed.version) ||
 				!Array.isArray(parsed.bots) ||
 				!Array.isArray(parsed.teams) ||
 				!isRecordObject(parsed.teamMessages)
@@ -1318,6 +1473,8 @@ export class PersistentBotTeamStore {
 				throw new Error("Bot and team store has an invalid envelope.");
 			storeVersion = parsed.version;
 		}
+		// Versions 3 and 4 share the current shape (a revision counter, no legacy routine key); 4 adds progress fields.
+		const currentStoreFormat = storeVersion !== undefined && storeVersion >= 3;
 		const previousState = {
 			bots: new Map(this.bots),
 			teams: new Map(this.teams),
@@ -1392,7 +1549,7 @@ export class PersistentBotTeamStore {
 							? this.migrateLegacyRoutineView(rawRoutine)
 							: undefined);
 					if (!routine) {
-						if (storeVersion === 3)
+						if (currentStoreFormat)
 							throw new Error(
 								"Routine definition or cursor is malformed; refusing to drop durable schedule state.",
 							);
@@ -1402,7 +1559,7 @@ export class PersistentBotTeamStore {
 						throw new Error("Routine store contains duplicate routine identities.");
 					this.routines.set(routine.routineId, routine);
 				}
-			} else if (storeVersion === 3 && parsed.routineSchedules !== undefined) {
+			} else if (currentStoreFormat && parsed.routineSchedules !== undefined) {
 				throw new Error("Routine schedule registry is malformed.");
 			}
 			if (parsed.routineOccurrences !== undefined) {
@@ -1443,7 +1600,7 @@ export class PersistentBotTeamStore {
 			}
 			const highestRoutineRevision = this.highestRoutineRevision();
 			const storedRevisionCounter = parsed.routineRevisionCounter;
-			if (storeVersion === 3 && storedRevisionCounter === undefined)
+			if (currentStoreFormat && storedRevisionCounter === undefined)
 				throw new Error("Routine revision counter is required in the current store format.");
 			if (
 				storedRevisionCounter !== undefined &&
@@ -1962,6 +2119,10 @@ export class PersistentBotTeamStore {
 				...(existing?.runDurations && schedule.kind !== "event" && schedule.readyBy && !schedule.readyLeadMs
 					? { runDurations: existing.runDurations }
 					: {}),
+				// Where the task stood is run state of this incarnation: an owner write keeps it; only a reset drops it.
+				...(existing?.progress && existing.incarnationId === definition.incarnationId
+					? { progress: existing.progress }
+					: {}),
 			};
 			if (!parseRoutineDefinitionView(view)) throw new Error("Routine definition is invalid for durable storage.");
 			this.routines.set(normalizedId, view);
@@ -2277,9 +2438,16 @@ export class PersistentBotTeamStore {
 					refuseAway(occurrence.routineId, ROUTINE_AWAY_SPEND_REFUSAL, awayRefused);
 					continue;
 				}
-				const { executor: _executor, ...undispatched } = occurrence;
+				// A queued run reads its routine's record as it stands now: its brief is fixed before its dispatch identity.
+				const {
+					executor: _executor,
+					progressBrief: _brief,
+					progressUntrusted: _tainted,
+					...undispatched
+				} = occurrence;
 				const reclaimed: RoutineOccurrence = {
 					...undispatched,
+					...admittedProgressFields(definition, occurrence),
 					...(away ? { executor: "away" as const } : {}),
 					phase: "claimed",
 					updatedAt: input.nowMs,
@@ -2871,8 +3039,9 @@ export class PersistentBotTeamStore {
 		reason: string;
 		recipient: string;
 		nowMs: number;
+		facts?: RoutineRunFacts;
 	}): void {
-		const reason = input.reason.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS);
+		const reason = cleanRedactBound(input.reason, MAX_ROUTINE_SUMMARY_CHARS, { lines: true });
 		if (!reason) throw new Error("Routine uncertainty requires a bounded reason.");
 		this.updateClaimedOccurrence(input, (item) =>
 			this.withResult(
@@ -2880,6 +3049,9 @@ export class PersistentBotTeamStore {
 				"uncertain",
 				reason,
 				input.recipient,
+				undefined,
+				undefined,
+				input.facts,
 			),
 		);
 	}
@@ -2894,8 +3066,9 @@ export class PersistentBotTeamStore {
 		conditionMet?: true;
 		/** A run away's settled spend, read from its attempts' ledger usage; absent when unread. */
 		awaySpentUsd?: number;
+		facts?: RoutineRunFacts;
 	}): void {
-		const summary = input.summary.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "No summary was provided.";
+		const summary = resultSummaryText(input.summary);
 		this.updateClaimedOccurrence(input, (item) => {
 			const finished = this.withResult(
 				{
@@ -2910,6 +3083,7 @@ export class PersistentBotTeamStore {
 				input.recipient,
 				input.ownerUpdate,
 				input.conditionMet,
+				input.facts,
 			);
 			// Its run time is the span from its claim to its result: the lead must cover everything between starting the run
 			// and having its result, so a wait for a worker and a retried attempt count (a new attempt moves `updatedAt`).
@@ -2952,10 +3126,11 @@ export class PersistentBotTeamStore {
 		conditionMet?: true;
 		/** A run away's settled spend, read from its attempts' ledger usage; absent when unread. */
 		awaySpentUsd?: number;
+		facts?: RoutineRunFacts;
 	}): void {
 		this.mutate(() => {
 			const current = this.routineOccurrences.get(input.occurrenceId);
-			const summary = input.summary.trim().slice(0, MAX_ROUTINE_SUMMARY_CHARS) || "No summary was provided.";
+			const summary = resultSummaryText(input.summary);
 			if (input.conditionMet && input.outcome !== "succeeded")
 				throw new Error("Only a succeeded routine run can report its stated end met.");
 			const resolutionDigest = routineResultDigest(
@@ -3012,6 +3187,7 @@ export class PersistentBotTeamStore {
 			this.routineOccurrences.set(next.occurrenceId, next);
 			// The run's known outcome counts toward the failure streak now; its uncertainty did not.
 			this.recordRoutineFailureStreak(next, input.outcome, summary);
+			this.recordRoutineProgress(next, input.outcome, summary, input.facts);
 			if (input.conditionMet) this.recordRoutineConditionMet(next);
 			this.save();
 		});

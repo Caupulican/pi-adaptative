@@ -24,6 +24,8 @@ export interface WorkerOutcomeFollowUpDeps {
 	cwd(): string;
 	/** Aborting it detaches the follow-up: no subscription, ladder context or placement outlives the controller. */
 	readonly signal: AbortSignal;
+	/** Whether a directory is a worktree lane (a rerun of its original cannot be placed back into it yet). */
+	isLaneDirectory(directory: string): boolean;
 }
 
 /**
@@ -36,6 +38,9 @@ export class WorkerOutcomeFollowUp {
 	private readonly deps: WorkerOutcomeFollowUpDeps;
 	private readonly learning: WorkerOutcomeLearning;
 	private readonly escalation: WorkerEscalation;
+	private readonly releaseLadder: () => void;
+	private readonly unsubscribe: () => void;
+	private closed = false;
 
 	constructor(deps: WorkerOutcomeFollowUpDeps) {
 		this.deps = deps;
@@ -49,29 +54,34 @@ export class WorkerOutcomeFollowUp {
 			fleet: deps.fleet,
 			goalState: deps.goalState,
 			cwd: deps.cwd,
+			isLaneDirectory: (directory) => deps.isLaneDirectory(directory),
 			recordChecks: (attemptId, checks) => {
 				deps.recorder.record(attemptId, undefined, { requirementChecks: checks });
 			},
+			recordRefusal: (attemptId, detail) => {
+				deps.recorder.record(attemptId, undefined, { rungRefusal: detail });
+			},
 			signal: deps.signal,
 		});
-		const releaseLadder = deps.recorder.useLadderContext({
+		this.releaseLadder = deps.recorder.useLadderContext({
 			settings: () => deps.settings().escalation,
 			thinkingCeiling: (modelRef) => this.thinkingCeiling(modelRef),
 			requirementCheckIds: () =>
 				new Set((deps.goalState()?.requirements ?? []).filter((entry) => entry.check).map((entry) => entry.id)),
 		});
-		const unsubscribe = subscribeOutcomes((outcome) => {
+		this.unsubscribe = subscribeOutcomes((outcome) => {
 			// Outcomes are published inside the recorder's write; acting on them waits for that write to return.
 			queueMicrotask(() => this.follow(outcome));
 		});
-		deps.signal.addEventListener(
-			"abort",
-			() => {
-				unsubscribe();
-				releaseLadder();
-			},
-			{ once: true },
-		);
+		deps.signal.addEventListener("abort", () => this.close(), { once: true });
+	}
+
+	/** Detaches the follow-up: no subscription, ladder context or placement follows after this. Idempotent. */
+	close(): void {
+		if (this.closed) return;
+		this.closed = true;
+		this.unsubscribe();
+		this.releaseLadder();
 	}
 
 	/** The resolver's ranking port (see `WorkerAuthorityResolutionInput.rankRoutedModels`). */
@@ -87,7 +97,7 @@ export class WorkerOutcomeFollowUp {
 	}
 
 	private follow(outcome: Outcome): void {
-		if (this.deps.signal.aborted || !outcome.taskId) return;
+		if (this.closed || this.deps.signal.aborted || !outcome.taskId) return;
 		const snapshot = this.deps.runtime.getSnapshot();
 		// Subscribers are process-wide: act only on this runtime's current outcome of the task.
 		if (snapshot.tasks[outcome.taskId]?.outcome?.outcomeId !== outcome.outcomeId) return;

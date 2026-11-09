@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import { laneSubtreeId } from "../fleet/fleet-types.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { sameAgentResumeIdentity } from "../orchestration/agent-resume.ts";
 import { latestAgentAttemptByDurableOrder } from "../orchestration/attempt-ordering.ts";
@@ -65,7 +66,7 @@ function laneFlow(laneId: string, objectiveId: string, attempt: AttemptRuntimeSt
 	return {
 		laneId,
 		objectiveId,
-		subtreeId: attempt.dispatch.parentAgentId ?? "",
+		subtreeId: laneSubtreeId(attempt.dispatch.parentAgentId),
 		writes: (attempt.dispatch.executionContract?.worker.authority.writePaths.length ?? 0) > 0,
 	};
 }
@@ -722,6 +723,11 @@ export class WorkerLifecycle {
 
 	getLatestAgentAttempt(agentId: string): AttemptRuntimeState | undefined {
 		return latestAgentAttemptByDurableOrder(this.ledger.runtime.getSnapshot(), agentId);
+	}
+
+	/** The outcome recorder's members the outcome follow-up uses: recording an outcome and installing the ladder context. */
+	outcomeRecorder(): Pick<WorkerOutcomeRecorder, "record" | "useLadderContext"> {
+		return this.outcomes;
 	}
 
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection {

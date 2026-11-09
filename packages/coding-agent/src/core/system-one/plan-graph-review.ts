@@ -14,7 +14,9 @@
  * isolation costs one request per group; System One answers each request's questions in parallel.
  *
  * Every answer is read on the `orchestration` family (accept at 0.90, require absence at 0.10, no soft band); a
- * reading between the cuts, or an unanswered question, is `open` and becomes a doubt, never an action. Exits, first
+ * reading between the cuts, or an unanswered question, is `open` and becomes a doubt, never an action. A request that
+ * does not answer within its bound (`PLAN_REQUEST_TIMEOUT_MS` each, `PLAN_GRAPH_REVIEW_TIMEOUT_MS` for the review) is
+ * unanswered: its exits fall to the code facts and the plan records a doubt. Exits, first
  * match wins (exit 1, refusal on code facts, happens before this module is called):
  * 2. System One absent, or any request fails -> `accept_unjudged` on code facts alone.
  * 3. J3 and J2 accepted -> add the edge earlier -> later, when it keeps the graph acyclic (re-checked in code over
@@ -34,10 +36,12 @@
  * `evals/corpus/`), run by its own `eval:` package script like `eval:completion`.
  */
 
+import { SYSTEM_TIMER_PORT } from "../../kernel/timer-port.ts";
 import { type NoulDirection, type NoulReading, readNoul } from "../decision/noul.ts";
 import { type PlanJudgmentRef, type PlanNodeSpec, planPathExists } from "../plan/plan-graph.ts";
 import { programOverOwnerWords } from "../security/owner-paste-boundary.ts";
 import type { OperationEffectEngine, OperationEvaluation } from "./operation-classifier.ts";
+import { withinPlanRequestBound } from "./plan-request-bound.ts";
 import { PLAN_REVIEW_PROGRAM } from "./plan-review.ts";
 import { noteDecisionTrace } from "./semantic-evaluation-ledger.ts";
 
@@ -96,6 +100,9 @@ const REQUEST_QUESTIONS: ReadonlySet<string> = new Set(["misses_request_part"]);
 /** Bounds on the candidates the caller ranks (design PG 3.3): pairs for J2/J3, thin steps for J4. */
 export const PLAN_GRAPH_REVIEW_LIMITS = Object.freeze({ pairs: 12, selfContained: 8 });
 
+/** The most one whole review waits: its requests are asked together, so this bounds every wait of the review. */
+export const PLAN_GRAPH_REVIEW_TIMEOUT_MS = 120_000;
+
 export interface PlanGraphReviewInput {
 	/** The goal text and its requirement texts. */
 	readonly request: string;
@@ -145,6 +152,9 @@ interface AnsweredGroup {
 	readonly group: ReviewGroup;
 	readonly evaluation: OperationEvaluation;
 }
+
+/** A request that expired within its bound: no answers, so every question it asked reads as unasked. */
+const UNANSWERED: OperationEvaluation = {};
 
 const UNJUDGED_REVIEW = {
 	unjudged: true,
@@ -261,13 +271,28 @@ export async function reviewPlanGraph(
 	// Exit 2: without System One the plan's facts are all there is.
 	if (!engine) return { ...UNJUDGED_REVIEW, doubts: ["the plan was checked without System One", ...unasked] };
 	const groups = reviewGroups(input, pairs, thin);
-	const settled = await Promise.allSettled(groups.map((group) => ask(engine, group, input.signal)));
+	// The whole review is bounded too: its requests are asked together, so this is the most the review waits.
+	const review = new AbortController();
+	const reviewTimer = SYSTEM_TIMER_PORT.setTimeout(() => review.abort(), PLAN_GRAPH_REVIEW_TIMEOUT_MS);
+	let settled: PromiseSettledResult<OperationEvaluation | undefined>[];
+	try {
+		settled = await Promise.allSettled(
+			groups.map((group) =>
+				withinPlanRequestBound((signal) => ask(engine, group, signal), {
+					caller: input.signal,
+					deadline: review.signal,
+				}),
+			),
+		);
+	} finally {
+		SYSTEM_TIMER_PORT.clearTimeout(reviewTimer);
+	}
 	const failure = settled.find((result) => result.status === "rejected");
 	if (failure) {
 		input.signal?.throwIfAborted();
 		// Exit 2 decides for the requests that did answer too: their ledger rows say the plan went unjudged.
 		for (const result of settled) {
-			if (result.status === "fulfilled")
+			if (result.status === "fulfilled" && result.value)
 				noteDecisionTrace(engine, result.value, {
 					decision: "plan graph review: unjudged",
 					exit: "accept_unjudged",
@@ -276,10 +301,12 @@ export async function reviewPlanGraph(
 		const reason = failure.reason instanceof Error ? failure.reason.message : String(failure.reason);
 		return { ...UNJUDGED_REVIEW, doubts: [`the plan was checked without System One (${reason})`, ...unasked] };
 	}
+	// An expired request has no answer: every question it asked reads as unasked, so its exits fall to the code facts.
 	const answered = settled.map((result, index) => ({
 		group: groups[index] as ReviewGroup,
-		evaluation: (result as PromiseFulfilledResult<OperationEvaluation>).value,
+		evaluation: (result as PromiseFulfilledResult<OperationEvaluation | undefined>).value ?? UNANSWERED,
 	}));
+	const expired = settled.filter((result) => result.status === "fulfilled" && result.value === undefined).length;
 	const [requestGroup, ...rest] = answered as [AnsweredGroup, ...AnsweredGroup[]];
 	const pairGroups = rest.slice(0, pairs.length);
 	const thinGroups = rest.slice(pairs.length);
@@ -302,6 +329,8 @@ export async function reviewPlanGraph(
 		}
 	};
 	const doubts: string[] = [];
+	if (expired > 0)
+		doubts.push(`System One did not answer ${expired} of its checks in time; those steps stand on the code facts`);
 
 	// Exit 6, read first so its doubt leads.
 	const coverage = read(requestGroup, "misses_request_part");

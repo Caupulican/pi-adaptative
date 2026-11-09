@@ -314,6 +314,7 @@ export function renderLeaderBrief(input: {
 		...(envelope.budgetUsd !== undefined
 			? [`Metered spending for the whole goal stops at $${envelope.budgetUsd}.`]
 			: []),
+		"Subscription turns cost nothing in metered terms, so the budget does not count them; the goal also stops when a subscription it uses has no allowance left.",
 		...(input.clipped.length > 0 ? ["", "Held back:", ...input.clipped.map((text) => `- ${text}`)] : []),
 		"",
 		"How to lead: split the goal into parts, give each part to a bot with bot_message (create one with action create when none of yours fits), collect their replies, and end with one report of what was done, what is proven and what is left. Ask the orchestrator in your report only when you cannot go on without its answer; it answers you with a new message.",

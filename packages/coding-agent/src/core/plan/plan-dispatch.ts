@@ -5,9 +5,10 @@
 
 import { renderTaskBrief } from "../comms/comms-records.ts";
 import { describeOutcomeForHandoff } from "../delegation/worker-outcome-words.ts";
-import type { FleetDispatch, FleetPriority } from "../fleet/fleet-types.ts";
+import { type FleetDispatch, type FleetPriority, laneSubtreeId } from "../fleet/fleet-types.ts";
 import { MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH } from "../orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import { currentTaskOf } from "../orchestration/task-successor.ts";
 import type { Placement } from "../placement/placement-types.ts";
 import {
 	isCodeSettledJoin,
@@ -76,13 +77,23 @@ export function planCriticalPath(record: PlanRecord): ReadonlySet<string> {
 	return path;
 }
 
+/** The most changed-file references one predecessor's input line names. */
+const PLAN_INPUT_FILES = 8;
+
 function inputDigest(projection: DispatchProjection, plan: PlanRuntimeState, nodeId: string): string {
 	const outcome = planNodeOutcome(projection, plan, nodeId);
 	if (!outcome) return `Input from step ${nodeId}: no result recorded.`;
 	const report = outcome.digestRef ? ` Report: ${outcome.digestRef}` : "";
 	const joined = plan.nodes[nodeId]?.join ? ` Combined result: ${plan.nodes[nodeId]?.join?.artifact}` : "";
+	// The originals travel as references: a receiving step reads the files and the report, not a retold summary.
+	const shownFiles = outcome.changedFiles.slice(0, PLAN_INPUT_FILES);
+	const moreFiles = outcome.changedFiles.length - shownFiles.length;
+	const files =
+		shownFiles.length > 0
+			? ` Files it changed: ${shownFiles.join(", ")}${moreFiles > 0 ? `, +${moreFiles} more` : ""}.`
+			: "";
 	return clipBytes(
-		`Input from step ${nodeId}: ${describeOutcomeForHandoff(outcome)}.${report}${joined}`,
+		`Input from step ${nodeId}: ${describeOutcomeForHandoff(outcome)}.${report}${joined}${files}`,
 		PLAN_INPUT_DIGEST_BYTES,
 	);
 }
@@ -99,20 +110,29 @@ function joinTaskWords(node: PlanNodeSpec): string | undefined {
 }
 
 /** Task ids of the predecessors' accepted work, a display mirror only (the plan record stays the authority). */
-function dependencyTaskIds(plan: PlanRuntimeState, record: PlanRecord, node: PlanNodeSpec): string[] {
+function dependencyTaskIds(
+	projection: DispatchProjection,
+	plan: PlanRuntimeState,
+	record: PlanRecord,
+	node: PlanNodeSpec,
+): string[] {
 	const byId = new Map(record.nodes.map((entry) => [entry.id, entry]));
 	const taskOf = (id: string): string[] => {
 		const predecessor = byId.get(id);
 		if (predecessor && isCodeSettledJoin(predecessor.kind)) {
 			return (predecessor.join?.members ?? []).flatMap(taskOf);
 		}
-		const taskId = plan.nodes[id]?.release?.taskId;
-		return taskId ? [taskId] : [];
+		const release = plan.nodes[id]?.release;
+		return release ? [currentTaskOf(projection, release.taskId)] : [];
 	};
 	return [...new Set(planNodeEdges(node).flatMap(taskOf))];
 }
 
-/** The dispatch of one released step. */
+/**
+ * The dispatch of one released step. Its demand's subtree is the one the fleet queues the lane in
+ * (`laneSubtreeId`): a plan step's lane carries no parent agent, so it is charged to the session root's subtree. A
+ * prepared dispatch and its queued lane must agree, or a subtree-scoped cancel reaches one and misses the other.
+ */
 export function buildPlanDispatch(
 	projection: DispatchProjection,
 	plan: PlanRuntimeState,
@@ -137,7 +157,7 @@ export function buildPlanDispatch(
 		demand: {
 			nodeId: node.id,
 			objectiveId: record.objectiveId,
-			subtreeId: record.subgraphOf?.delegationObjectiveId ?? "root",
+			subtreeId: laneSubtreeId(undefined),
 			priority,
 			onCriticalPath,
 			writes: writeScope.length > 0,
@@ -148,7 +168,7 @@ export function buildPlanDispatch(
 		writeScope,
 		isolation: "shared",
 		requirementIds: node.requirementIds,
-		dependsOnTaskIds: dependencyTaskIds(plan, record, node),
+		dependsOnTaskIds: dependencyTaskIds(projection, plan, record, node),
 		thinking: node.effort === "deep" ? "raise_one" : "inherit",
 		plan: { planId: record.planId, version: node.since, nodeId: node.id },
 	};

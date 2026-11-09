@@ -22,6 +22,15 @@ export interface LeaderRow {
 /** How many ended goals the panel keeps beside the open ones. */
 export const LEADER_ROWS_RECENT_CLOSED = 3;
 
+/** The open delegation a leader is working, else the oldest open one waiting for it. */
+export function currentDelegationFor(
+	records: readonly DelegationRecord[],
+	leader: string,
+): DelegationRecord | undefined {
+	const open = records.filter((record) => record.state !== "closed" && record.charter.leader === leader);
+	return open.find((record) => record.state !== "queued") ?? open[0];
+}
+
 function goalWords(record: DelegationRecord): string {
 	return boundedText(record.title.replace(/^Lead: /, ""), 80);
 }

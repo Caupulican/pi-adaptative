@@ -14,7 +14,7 @@
  * controller never touches `prompt()`, the last-assistant-message, retry, or streaming state.
  */
 
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { lstatSync } from "node:fs";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
@@ -43,6 +43,7 @@ import {
 	readAwayChannelCharges,
 	readAwayChannelStatus,
 } from "./channels/away-channels.ts";
+import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "./channels/channel-policy.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
 import type { OwnerChannelControl, OwnerChannelDelivery } from "./channels/owner-channel-types.ts";
 import { SessionChannels } from "./channels/session-channels.ts";
@@ -56,7 +57,7 @@ import {
 } from "./delegation/bot-creation.ts";
 import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./delegation/bot-daemon-launch.ts";
 import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delegation/bot-daemon-legacy.ts";
-import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
+import type { BotMessageDirectory, BotOwnedStartOutcome } from "./delegation/bot-message-contract.ts";
 import { displayNameFor, suggestBotId } from "./delegation/bot-naming.ts";
 import { BotRuntimeBindings, type BotRuntimeContext } from "./delegation/bot-runtime-bindings.ts";
 import { DAEMON_STALE_MS, isOlderDaemonBuild, OWN_DAEMON_BUILD } from "./delegation/bot-team-routine-helpers.ts";
@@ -67,6 +68,7 @@ import {
 	importRecordedParentWrites,
 } from "./delegation/foreground-parent-writes.ts";
 import { LeaderController } from "./delegation/leader-controller.ts";
+import { type DelegationRecord, readDelegations } from "./delegation/leader-delegation-ledger.ts";
 import { type LeaderRow, leaderRows } from "./delegation/leader-view.ts";
 import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
 import { type ManagedLaneView, projectManagedLaneViews } from "./delegation/managed-lane-views.ts";
@@ -99,7 +101,7 @@ import type {
 	SessionRootReplyWaitResult,
 } from "./delegation/session-root-mailbox.ts";
 import { sessionRootAddress } from "./delegation/session-root-mailbox.ts";
-import { getWorkerClaimSnapshots } from "./delegation/session-worker-claim.ts";
+import { getWorkerClaimSnapshots, readWorkerClaimSnapshotForAttempt } from "./delegation/session-worker-claim.ts";
 import { type TerminalRoute, type TerminalRouteOwner, TerminalRouting } from "./delegation/terminal-routing.ts";
 import type {
 	SessionRootWorkerAgentMessageOptions,
@@ -129,6 +131,7 @@ import { deriveFanoutGroups, type FanoutGroupReport } from "./delegation/worker-
 import { WorkerLaneIsolation } from "./delegation/worker-lane-isolation.ts";
 import { isManagedWorkerAttempt, projectWorkerAttemptLaneRecord } from "./delegation/worker-lane-projection.ts";
 import { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
+import { contractGrantsChildren } from "./delegation/worker-nested-start.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
 import { captureWorkerReceiptOrigin } from "./delegation/worker-receipt-origin.ts";
@@ -160,7 +163,11 @@ import type { ModelCapabilityProfile } from "./model-capability.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
-import type { OrchestrationThinkingLevel, WorkerResultContract } from "./orchestration/contracts.ts";
+import type {
+	OrchestrationDelegationLimits,
+	OrchestrationThinkingLevel,
+	WorkerResultContract,
+} from "./orchestration/contracts.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import type {
 	TaskProfileCreateInput,
@@ -168,6 +175,7 @@ import type {
 	TaskProfileInspection,
 } from "./orchestration/task-profile-writer.ts";
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
+import { readTaskRuntimeProjection } from "./orchestration/task-runtime-reader.ts";
 import type { WorkerReceiptOrigin } from "./orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery, ParentInputReceipt } from "./parent-input-delivery.ts";
 import { createSteerAwareWait, ownerSteerWake } from "./pending-input-queue-controller.ts";
@@ -185,12 +193,15 @@ import {
 	parentTurnWakes,
 	rollingDayWindow,
 } from "./proactivity/proactivity-controller.ts";
+import { observeReviewGauge } from "./proof/review-gauge.ts";
 import { isEmergencyStopEngaged, subscribeEmergencyStop } from "./provider-admission/emergency-stop.ts";
 import {
 	createSubscriptionAllowanceReader,
 	type SubscriptionAllowanceReader,
 } from "./provider-admission/subscription-allowance.ts";
 import { RemoteHubController } from "./remote/hub-controller.ts";
+import { placedJobRef } from "./remote/job-protocol.ts";
+import { finishedPlacedJobReferences, placedJobFinished } from "./remote/job-store.ts";
 import { withLinkPolicy } from "./remote/link-policy.ts";
 import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
@@ -553,7 +564,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	private _getWorkerController(): WorkerDelegationController {
-		this._workers ??= new WorkerDelegationController(
+		if (this._workers) return this._workers;
+		this._workers = new WorkerDelegationController(
 			{
 				...this.deps,
 				...this._getTranscriptWrites(),
@@ -571,6 +583,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._getWorkerLifecycle(),
 			new WorkerLaneIsolation(this._worktreeLaneHostDeps()),
 		);
+		// The fleet exists now: a joined machine's room reaches it, so a plan node or a placed job can name that machine.
+		this._remoteHub?.jobs?.attachFleet(this._workers.getFleet());
 		return this._workers;
 	}
 
@@ -650,6 +664,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._leaderRouteOff ??= this.registerTerminalRoute("leader_controller", (record) =>
 				leaders.claimsTerminal(record),
 			);
+			// A worker that runs a job a peer placed here reports to that peer through the job runner, never to this session's chat.
+			if (!this._jobRouteOff)
+				this._jobRouteOff = this.registerTerminalRoute("job_runner", (record) =>
+					this.placedJobRouteOwns(record.attemptId),
+				);
 			queueMicrotask(() => {
 				if (!this.deps.isDisposed()) leaders.start();
 			});
@@ -725,6 +744,39 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	workerAgentIdForRecord(record: Pick<LaneRecord, "laneId" | "attemptId">): string {
 		const attempt = this.nativeWorkerForRecord(record)?.attempt;
 		return attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? record.laneId;
+	}
+
+	/**
+	 * Acknowledges the terminal of these worker lanes once the job runner has reported their end to the placing machine, so
+	 * the foreground never hears a placed job's worker finish. A lane with no terminal yet is left as it is.
+	 */
+	acknowledgePlacedJobTerminals(references: readonly string[]): void {
+		const lifecycle = this._workerLifecycle;
+		if (!lifecycle || references.length === 0) return;
+		const wanted = new Set(references);
+		const notificationIds = Object.values(lifecycle.getTaskRuntimeSnapshot().attempts).flatMap((attempt) => {
+			const ref = placedJobRef(attempt.dispatch.turnOrigin);
+			if (ref === undefined || !wanted.has(ref)) return [];
+			const terminal = lifecycle.getAttemptTerminalNotification(attempt.attemptId);
+			return terminal ? [terminal.notificationId] : [];
+		});
+		lifecycle.markNotificationsDelivered(notificationIds);
+	}
+
+	/**
+	 * Whether the job runner owns a worker terminal: the attempt's dispatch names a placed job (that origin only the runner
+	 * mints, durable from admission). When the runner has already recorded the job's outcome (it ended the job, e.g. after
+	 * a restart), the terminal is settled as it arrives, so nothing waits for a runner that will not come back for it.
+	 */
+	private placedJobRouteOwns(attemptId: string | undefined): boolean {
+		if (attemptId === undefined) return false;
+		const ref = placedJobRef(
+			this._workerLifecycle?.getTaskRuntimeSnapshot().attempts[attemptId]?.dispatch.turnOrigin,
+		);
+		if (ref === undefined) return false;
+		if (placedJobFinished(this.deps.getAgentDir(), ref))
+			queueMicrotask(() => this.acknowledgePlacedJobTerminals([ref]));
+		return true;
 	}
 
 	/** Acknowledge the captured generations only, without reselecting a task or interpreting a display name. */
@@ -1174,6 +1226,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	scheduleResearchLaneFromIdle(): void {
 		this._research.scheduleFromIdle();
 		this._proactivity.scheduleFromIdle();
+		// The review gauge informs only: past the owner's threshold one notice says results pile up; nothing is held.
+		observeReviewGauge({
+			observeHarnessNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read),
+			getBranch: () => this.deps.getSessionManager().getBranch(),
+			getNoticeAt: () => this.deps.getSettingsManager().getReviewWaitingNoticeAt(),
+		});
 	}
 
 	/** One proactive review now, past the idle timer; every other gate still applies. */
@@ -1240,6 +1298,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Durable logical-worker controls. Each checks UAC before materializing worker state. */
 	subscribeStateChanges(listener: () => void): () => void {
 		return this._getWorkerController().getAgentControl().subscribeStateChanges(listener);
+	}
+
+	hasPendingDelegatedMessage(delegationObjectiveId: string): boolean {
+		return this._getWorkerController().getAgentControl().hasPendingDelegatedMessage(delegationObjectiveId);
+	}
+
+	hasPendingControlMessages(agentId: string): boolean {
+		return this._getWorkerController().getAgentControl().hasPendingControlMessages(agentId);
+	}
+
+	reconcileDelegatedMessages(delegationObjectiveId: string): void {
+		this._getWorkerController().getAgentControl().reconcileDelegatedMessages(delegationObjectiveId);
 	}
 
 	listWorkerAgents(scope?: WorkerAgentControlScope): ReturnType<WorkerAgentControlPort["listWorkerAgents"]> {
@@ -1637,6 +1707,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._botTeamStore = new PersistentBotTeamStore(this.deps.getAgentDir(), (message) => this._safeWarn(message));
 			this._botTeamStore.subscribe(() => {
 				this._botViews = undefined;
+				// A leader's row names it by its display name: a rename or a retirement changes the rows, not the delegation.
+				this._leaderRows = undefined;
 				// A routine saved by this session or any other process brings the daemon up if nothing runs it.
 				if (this.routinesStarted && this._botTeamStore?.getRoutineRevision() !== this._daemonRevision)
 					this._ensureBotDaemon();
@@ -1947,7 +2019,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/** The owner's release of channel reply drafts; offered only while a channel has an explicit policy and this session serves its channels. */
-	createChannelReplyToolDefinition(): ToolDefinition | undefined {
+	private createChannelReplyToolDefinition(): ToolDefinition | undefined {
 		return !this.deps.isChildSession() && !this._channelsHostedByDaemon && this.channels.hasExplicitPolicy()
 			? createChannelReplyToolDefinition(this.channels)
 			: undefined;
@@ -2081,7 +2153,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._routines?.intake.status();
 	}
 
-	createRoutineToolDefinition(): ToolDefinition | undefined {
+	private createRoutineToolDefinition(): ToolDefinition | undefined {
 		this.getBotTeamStore();
 		return this._routines?.session.tool;
 	}
@@ -2200,6 +2272,86 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return { stopped: legacyStopped, detail: legacy ? `${current} ${legacy}` : current };
 	}
 
+	/**
+	 * A leader's send to one of its own bots that has no live runtime: the bot starts as the leader's child under the goal
+	 * running now, and is held to that goal's envelope (its providers; its write paths only when the goal grants them). A
+	 * live bot, or a bot the leader did not make, is left to the ordinary mailbox send.
+	 */
+	private async startOwnedBotAsChild(
+		leaderAgentId: string,
+		leaderAlias: string,
+		alias: string,
+		message: string,
+		invocationId: string,
+	): Promise<BotOwnedStartOutcome> {
+		const store = this.getBotTeamStore();
+		const bot = store.getBot(alias);
+		if (!bot || bot.retired || bot.remote === true || bot.createdBy !== leaderAlias) return { handled: false };
+		const runtime = this.botBindings.runtime(alias);
+		if (this.listWorkerAgents().some((agent) => agent.agentId === runtime && agent.status !== "retired"))
+			return { handled: false };
+		const goal = this.getLeaders().currentFor(leaderAlias);
+		if (goal?.state !== "running")
+			return {
+				handled: true,
+				accepted: false,
+				detail: `${leaderAlias} has no goal running, so ${alias} is not started.`,
+			};
+		const leaderContract =
+			this._getWorkerLifecycle().getLatestAgentAttempt(leaderAgentId)?.dispatch.executionContract;
+		if (!contractGrantsChildren(leaderContract))
+			return {
+				handled: true,
+				accepted: false,
+				detail: `${leaderAlias} cannot start bots yet: its running worker was started before it could lead, and it restarts once its goal ends and nothing is waiting for it.`,
+			};
+		const envelope = goal.charter.envelope;
+		if (envelope.models.providers !== undefined && !envelope.models.providers.includes(bot.provider))
+			return {
+				handled: true,
+				accepted: false,
+				detail: `${alias} runs on ${bot.provider}, which this goal may not use.`,
+			};
+		const writable = bot.canWrite === true && envelope.leaderMayWrite && envelope.writePaths.length > 0;
+		// Named by the invocation: a repeated call names the same runtime, and the admission's replay key starts nothing new.
+		const preferredAgentId = `bot-${createHash("sha256")
+			.update(`leader-owned-start\0${invocationId}\0${alias}`)
+			.digest("hex")
+			.slice(0, 32)}`;
+		const memoryCtx = store.composeBotUnifiedMemoryContext(alias);
+		const instructions =
+			memoryCtx.promptBlock.length > 0 ? `${message}${BOT_MEMORY_BLOCK_SEPARATOR}${memoryCtx.promptBlock}` : message;
+		const outcome = await this._getWorkerController().admitNested({
+			parentAgentId: leaderAgentId,
+			delegationObjectiveId: goal.objectiveId,
+			instructions,
+			...(writable ? { writePaths: [...envelope.writePaths] } : {}),
+			messageReplayKey: `leader-owned-start:${invocationId}:${alias}`,
+			bot: {
+				...(bot.soul ? { botSoul: bot.soul } : {}),
+				...(bot.profileId ? { profileId: bot.profileId } : {}),
+				preferredAgentId,
+				authority: {
+					...(!bot.profileId ? { model: { provider: bot.provider, modelId: bot.modelId } } : {}),
+					...(bot.createdBy === "owner" ? { modelChosenBy: "owner" as const } : {}),
+					readOnly: !writable,
+					...(!bot.profileId && this.isOrchestrationThinkingLevel(bot.thinkingLevel)
+						? { thinkingLevel: bot.thinkingLevel }
+						: {}),
+				},
+			},
+		});
+		if (!outcome.started)
+			return { handled: true, accepted: false, detail: `${alias} was not started: ${outcome.skipReason}.` };
+		// The alias is bound to the runtime only once that runtime exists, so a refused start leaves no binding behind.
+		this.botBindings.bind(alias, preferredAgentId);
+		return {
+			handled: true,
+			accepted: true,
+			detail: `${alias} started under ${leaderAlias}; its answer reaches your next turn.`,
+		};
+	}
+
 	private createBotMessageDirectory(sender: string, attemptId: string): BotMessageDirectory {
 		const manager = this.deps.getSessionManager();
 		const assertBranch = manager.captureBranchContext();
@@ -2262,6 +2414,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				? {
 						createBot: (request: BotCreationRequest) =>
 							this.createBotFor({ kind: "leader", agentId: sourceAlias }, request),
+						askRoot: (question: string) => this.getLeaders().askRoot(sourceAlias, question),
+						startOwnedBot: (agentId: string, message: string, invocationId: string) =>
+							this.startOwnedBotAsChild(sender, sourceAlias, agentId, message, invocationId),
 					}
 				: {}),
 			list: (teamId) => {
@@ -2435,10 +2590,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * they are not bots and have no chat. Served until a lane record changes.
 	 */
 	listManagedLanes(): ManagedLaneView[] {
-		this._managedLaneViews ??= projectManagedLaneViews(this._rosterLaneRecords()).map(
-			(view) => this._remoteHub?.describeLane(view) ?? view,
-		);
-		return [...this._managedLaneViews];
+		this._managedLaneViews ??= projectManagedLaneViews(this._rosterLaneRecords());
+		// A placed job's words come from the job store and the fleet, which change without a lane record: described per call.
+		return this._managedLaneViews.map((view) => this._remoteHub?.describeLane(view) ?? view);
 	}
 
 	/** The lane records the roster projections read; reading them never constructs the worker runtime. */
@@ -2675,17 +2829,24 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				cwd: () => this.deps.getCwd(),
 				models: () => this.deps.getModelRegistry().getAvailable(),
 				usesSubscription: (model) => this.deps.getModelRegistry().isUsingOAuth(model),
-				fleet: () => this._getWorkerController().getFleet(),
+				// A job another process ended is settled here too: each session holds its own worker terminals.
+				onJobsChanged: () =>
+					this.acknowledgePlacedJobTerminals(finishedPlacedJobReferences(this.deps.getAgentDir())),
 			},
 		});
+		// A hub made after the fleet exists gives it the room at once; one made before gets it when the fleet is built.
+		if (this._workers) this._remoteHub.jobs?.attachFleet(this._workers.getFleet());
 		return this._remoteHub;
 	}
 
 	/** The orchestrator's tool for bots on the fly. */
-	createBotToolDefinition(): ToolDefinition {
+	private createBotToolDefinition(): ToolDefinition {
 		return createBotToolDefinition({
 			ask: async (agentId, message) => {
-				await this.sendOperatorMessageToBot(agentId, message, { fromRoot: true });
+				await this.sendOperatorMessageToBot(agentId, message, {
+					fromRoot: true,
+					delegationObjectiveId: this.runningDelegationOf(agentId),
+				});
 			},
 			create: (request) => this.createBotFor({ kind: "root" }, request),
 			lead: (request) => this.getLeaders().delegate(request),
@@ -2705,8 +2866,31 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** The plan executor the root's `plan` tool reaches; composed with the worker runtime of a root session. */
 	private _planExecutor: PlanExecutor | undefined;
 	private _planRouteOff: (() => void) | undefined;
+	private readonly _planChangeListeners = new Set<() => void>();
 
-	createPlanToolDefinition(): ToolDefinition {
+	/** Fires when a plan's visible state changes, so the owner's panel and status redraw while the root is idle. */
+	subscribePlanChanges(listener: () => void): () => void {
+		this._planChangeListeners.add(listener);
+		return () => {
+			this._planChangeListeners.delete(listener);
+		};
+	}
+
+	/**
+	 * Every root-only lane tool, the one list the runtime builder offers: routine, bot, channel reply and plan. A child
+	 * session gets none, and a lane whose tool is not open (no routine store, no channel policy) is left out.
+	 */
+	createBackgroundLaneTools(): ToolDefinition[] {
+		if (this.deps.isChildSession()) return [];
+		return [
+			this.createRoutineToolDefinition(),
+			this.createBotToolDefinition(),
+			this.createChannelReplyToolDefinition(),
+			this.createPlanToolDefinition(),
+		].filter((definition): definition is ToolDefinition => definition !== undefined);
+	}
+
+	private createPlanToolDefinition(): ToolDefinition {
 		return createPlanToolDefinition(() => this._getPlanExecutor());
 	}
 
@@ -2732,10 +2916,21 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			sessionId: () => this.deps.getSessionId(),
 			agentDir: () => this.deps.getAgentDir(),
 			rootEntries: () => this.deps.getSessionManager().getBranch(),
+			// The claim an attempt holds: its outbox write while it is pending, else the transcript's saved claim.
+			workerClaim: (taskId, attemptId) =>
+				readWorkerClaimSnapshotForAttempt(
+					this.deps.getSessionManager().getBranch(),
+					lifecycle.ledger.runtime.getSnapshot().attempts[attemptId]?.parentWrites,
+					taskId,
+					attemptId,
+				)?.claim,
 			captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
 			deliver: (delivery, signal) => this.deps.deliverNotes(delivery, { signal }),
 			isDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
 			acknowledge: (notificationIds) => lifecycle.markNotificationsDelivered(notificationIds),
+			planChanged: () => {
+				for (const listener of this._planChangeListeners) listener();
+			},
 			now: () => this.deps.getTimers().port("orchestration").now(),
 		});
 		this._planExecutor = executor;
@@ -2747,6 +2942,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	private _leaders: LeaderController | undefined;
 	private _leaderRouteOff: (() => void) | undefined;
+	private _jobRouteOff: (() => void) | undefined;
 	private _leaderRows: LeaderRow[] | undefined;
 
 	/** The root's delegations to leaders; building it builds the worker runtime, which registers its terminal claim. */
@@ -2757,12 +2953,105 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/**
-	 * The Leaders rows of the Orchestration panel. Served until an orchestration commit drops them; a session that never
-	 * built its worker runtime has no delegation, and reading the rows never builds it.
+	 * Every delegation to a leader, read without building the worker runtime: a session that never had orchestration
+	 * state has none, and a session with state reads its store. Actions go through `getLeaders()`, which builds the runtime.
+	 */
+	leaderDelegations(): DelegationRecord[] {
+		if (this._leaders) return this._leaders.snapshot();
+		if (this.deps.isChildSession()) return [];
+		const snapshot =
+			this._workerLifecycle?.getTaskRuntimeSnapshot() ??
+			(this._hasWorkerState()
+				? readTaskRuntimeProjection(
+						new OrchestrationEventStore({
+							agentDir: this.deps.getAgentDir(),
+							sessionId: this.deps.getSessionId(),
+						}),
+					)
+				: undefined);
+		return snapshot ? readDelegations(snapshot) : [];
+	}
+
+	/**
+	 * A leader's fleet subtree is keyed on its runtime's agent id, the `parentAgentId` its children are admitted under; a
+	 * leader is a top-level worker, so its share sits in the root subtree (`""`).
+	 */
+	private openLeaderSubtree(alias: string): void {
+		this._getWorkerController()
+			.getFleet()
+			.openShare({ subtreeId: this.botBindings.runtime(alias), parentSubtreeId: "", weight: 1 });
+	}
+
+	/**
+	 * A standing leader's runtime started before the bot could lead has a leaf contract, which is fixed for that runtime's
+	 * life. When it is idle it is retired here, so its next start is granted the leader limits. It is left alone while busy,
+	 * and while any message waits for it: retiring would discard that message, so the restart waits for the next idle moment.
+	 */
+	private restartLeaderRuntimeIfLeaf(alias: string): void {
+		const runtimes = new Set(this.botBindings.runtimes(alias));
+		const live = this.listWorkerAgents().filter((agent) => runtimes.has(agent.agentId) && agent.status !== "retired");
+		if (live.length === 0 || live.some((agent) => agent.activity !== "idle")) return;
+		const control = this._getWorkerController().getAgentControl();
+		if (live.some((agent) => control.hasPendingControlMessages(agent.agentId))) return;
+		const first = live[0];
+		if (
+			!first ||
+			contractGrantsChildren(
+				this._getWorkerLifecycle().getLatestAgentAttempt(first.agentId)?.dispatch.executionContract,
+			)
+		)
+			return;
+		for (const agent of live) this.retireWorkerAgent(agent.agentId, undefined);
+	}
+
+	private closeLeaderSubtree(alias: string, reasonCode: string): void {
+		this._getWorkerController().getFleet().closeShare(this.botBindings.runtime(alias), reasonCode);
+	}
+
+	/**
+	 * The delegation limits a standing leader's runtime is granted: its children are its owned bots, nested up to
+	 * `leaders.maxDepth` levels, and the host ceilings still apply where the runtime is started.
+	 */
+	private leaderDelegationLimits(): OrchestrationDelegationLimits {
+		const maxDepth = this.deps.getSettingsManager().getLeaderSettings().maxDepth;
+		return {
+			maxDepth,
+			maxChildrenPerAgent: MAX_BOTS_PER_LEADER,
+			maxNestedAgentsPerSession: MAX_BOTS_PER_LEADER * maxDepth,
+		};
+	}
+
+	/**
+	 * Whether a subscription login one of these bots runs on has no allowance left in its usage window: the same reading the
+	 * owner channel and the cost guard use, taken on each bot's own model.
+	 */
+	private subscriptionExhaustedFor(aliases: readonly string[]): boolean {
+		const registry = this.deps.getModelRegistry();
+		this._allowance ??= createSubscriptionAllowanceReader({
+			getRegistry: () => this.deps.getModelRegistry(),
+			getModel: () => this.deps.getModel(),
+		});
+		const reader = this._allowance;
+		return aliases.some((alias) => {
+			const bot = this.getBotTeamStore().getBot(alias);
+			const model = bot ? registry.find(bot.provider, bot.modelId) : undefined;
+			return model !== undefined && reader.read(DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT, model).kind === "exhausted";
+		});
+	}
+
+	/** The delegation a leader is running right now: the orchestrator's words to that leader are that goal's input. */
+	private runningDelegationOf(alias: string): string | undefined {
+		if (this.deps.isChildSession()) return undefined;
+		const record = this.getLeaders().currentFor(alias);
+		return record?.state === "running" ? record.objectiveId : undefined;
+	}
+
+	/**
+	 * The Leaders rows of the Orchestration panel. Served until an orchestration commit or a bot-store change drops them;
+	 * reading the rows never builds the worker runtime.
 	 */
 	listLeaderRows(): LeaderRow[] {
-		if (!this._leaders) return [];
-		this._leaderRows ??= leaderRows(this._leaders.snapshot(), (alias) => {
+		this._leaderRows ??= leaderRows(this.leaderDelegations(), (alias) => {
 			const bot = this.getBotTeamStore().getBot(alias);
 			return bot?.displayName ?? displayNameFor(alias);
 		});
@@ -2797,8 +3086,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			runtimesOf: (alias) => this.botBindings.runtimes(alias),
 			workers: () => this.listWorkerAgents(),
-			send: async (alias, text) => {
-				await this.sendOperatorMessageToBot(alias, text, { fromRoot: true });
+			send: async (alias, text, delegationObjectiveId) => {
+				await this.sendOperatorMessageToBot(alias, text, { fromRoot: true, delegationObjectiveId });
 			},
 			stop: (alias) => void this.stopPersistentBot(alias),
 			retire: (alias) => this.retirePersistentBot(alias),
@@ -2807,6 +3096,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			origin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
 			hasDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
 			maxDepth: () => this.deps.getSettingsManager().getLeaderSettings().maxDepth,
+			subscriptionExhausted: (aliases) => this.subscriptionExhaustedFor(aliases),
+			hasPendingDelegatedMessage: (objectiveId) => this.hasPendingDelegatedMessage(objectiveId),
+			openSubtree: (alias) => this.openLeaderSubtree(alias),
+			restartLeaderRuntimeIfLeaf: (alias) => this.restartLeaderRuntimeIfLeaf(alias),
+			closeSubtree: (alias, reasonCode) => this.closeLeaderSubtree(alias, reasonCode),
+			reconcileDelegatedMessages: (objectiveId) => this.reconcileDelegatedMessages(objectiveId),
 			now: () => timers.port("orchestration").now(),
 			timers: timers.port("leaders"),
 		});
@@ -3082,6 +3377,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			 * conversation, since nobody has the machine's chat open to see it arrive.
 			 */
 			answerInSession?: boolean;
+			/**
+			 * The orchestrator's words are for this delegation to a leader (its brief, update, resume or answer). Set only by the
+			 * leader controller and the orchestrator's `bot ask`; an owner's chat leaves it out, so that turn is session work.
+			 */
+			delegationObjectiveId?: string;
 		},
 	): Promise<BotOperatorMessageDispatchResult> {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
@@ -3137,7 +3437,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private async dispatchOperatorMessageToBot(
 		context: BotRuntimeContext,
 		message: string,
-		options: { mode?: "follow_up" | "queue" | "start"; fromRoot?: boolean; answerInSession?: boolean } | undefined,
+		options:
+			| {
+					mode?: "follow_up" | "queue" | "start";
+					fromRoot?: boolean;
+					answerInSession?: boolean;
+					delegationObjectiveId?: string;
+			  }
+			| undefined,
 		assertCurrentBranch: () => void,
 	): Promise<BotOperatorMessageDispatchResult> {
 		const { agentId: normId, teamId, teamIncarnationId } = context;
@@ -3172,7 +3479,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const existingAgent = liveAgents.find((a) => a.agentId === runtime && a.status !== "retired");
 
 		const memoryCtx = store.composeBotUnifiedMemoryContext(normId, teamId, teamIncarnationId);
-		const messageOptions = teamId ? { threadId: `team:${teamId}:${teamIncarnationId}` } : undefined;
+		const messageOptions = {
+			...(teamId ? { threadId: `team:${teamId}:${teamIncarnationId}` } : {}),
+			...(options?.delegationObjectiveId ? { delegationObjectiveId: options.delegationObjectiveId } : {}),
+		};
 
 		if (existingAgent && (requestedMode === "follow_up" || requestedMode === "queue")) {
 			// The bot received its memory block when it started and edits its blackboards directly; repeating the
@@ -3234,6 +3544,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					: {}),
 			},
 			preferredAgentId,
+			// A leader's brief to a bot that has no live worker starts it under the delegation, not the foreground goal.
+			...(options?.delegationObjectiveId ? { delegationObjectiveId: options.delegationObjectiveId } : {}),
+			// A standing leader's runtime is granted the children it may start (`admitNested`); any other bot is a leaf.
+			...(bot.leader === true ? { delegationLimits: this.leaderDelegationLimits() } : {}),
 			...(activeIds.length > 0
 				? {
 						parallelWork: {

@@ -185,6 +185,8 @@ interface ClaimFacts {
 	readonly findingCodes: readonly WorkerHostFindingCode[];
 	readonly declared?: WorkerDeclarableBlocker;
 	readonly requirementStatus: ReadonlyMap<string, WorkerReportRequirementStatus>;
+	/** Requirements the worker named as unsettled: uncovered with reason `inconclusive` until a host fact settles them. */
+	readonly inconclusiveIds: ReadonlySet<string>;
 	readonly changedFiles?: readonly string[];
 }
 
@@ -207,6 +209,7 @@ function claimFacts(claim: WorkerClaim): ClaimFacts {
 			? { declared }
 			: {}),
 		requirementStatus: new Map((claim.report?.requirements ?? []).map((entry) => [entry.id, entry.status])),
+		inconclusiveIds: new Set((claim.report?.inconclusiveRequirements ?? []).map((entry) => entry.requirementId)),
 		changedFiles: claim.changedFiles,
 	};
 }
@@ -218,6 +221,7 @@ function carriedClaimFacts(previous: Outcome): ClaimFacts {
 		verdictReasonCodes: [],
 		findingCodes: [],
 		requirementStatus: new Map(),
+		inconclusiveIds: new Set(),
 		changedFiles: previous.changedFiles,
 	};
 }
@@ -240,6 +244,8 @@ export interface ProjectOutcomeInput {
 	readonly ladder?: OutcomeLadderContext;
 	/** Host requirement checks run after this attempt ended; later projections carry them from the stored outcome. */
 	readonly requirementChecks?: readonly HostRequirementCheck[];
+	/** A rerun the escalation could not start under the original authority (recorded by the rung executor). */
+	readonly rungRefusal?: string;
 	/** System One's answer pair for a worker-stated blocker (Q1 owner-only, Q1s sufficient); absent is open. */
 	readonly ownerOnly?: JudgmentPair;
 }
@@ -341,6 +347,7 @@ export function projectOutcome(input: ProjectOutcomeInput): Outcome | undefined 
 			checkedIds: new Set(checks.keys()),
 			context: input.ladder,
 			...(input.ownerOnly ? { ownerOnly: input.ownerOnly } : {}),
+			...(input.rungRefusal !== undefined ? { rungRefusal: input.rungRefusal } : {}),
 		}),
 	);
 	harnessLog.debug("outcomes", "the escalation ladder decided a next action", () => ({
@@ -421,6 +428,7 @@ function uncoveredReason(
 	const reported = facts?.requirementStatus.get(id);
 	if (reported === "partial") return "partial";
 	if (reported === "not_met") return "not_met";
+	if (facts?.inconclusiveIds.has(id)) return "inconclusive";
 	if (facts?.verdict === "needs_more") return "no_evidence";
 	if (facts?.verdict === "rejected") return "evidence_failed";
 	if (facts?.verdict === "unverified") return "unverified";

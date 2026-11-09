@@ -10,6 +10,7 @@
 import { type NoulDirection, readNoul } from "../decision/noul.ts";
 import { programOverOwnerWords } from "../security/owner-paste-boundary.ts";
 import type { OperationEffectEngine, OperationEvaluation } from "./operation-classifier.ts";
+import { withinPlanRequestBound } from "./plan-request-bound.ts";
 import { noteDecisionTrace, type SemanticTraceReading } from "./semantic-evaluation-ledger.ts";
 
 /**
@@ -107,13 +108,17 @@ export async function reviewPlan(
 	if (input.steps.length === 0) return {};
 	// A session without System One has no judge to consult; its plans are the model's own.
 	if (!engine) return {};
-	let evaluation: OperationEvaluation;
+	let evaluation: OperationEvaluation | undefined;
 	try {
-		evaluation = await engine.evaluate(
-			// A pasted directive is not a part of the request a plan must cover; a plan over unpasted words is asked as probed.
-			programOverOwnerWords(PLAN_REVIEW_PROGRAM, PLAN_REQUEST_QUESTIONS, input.request, ...input.steps),
-			{ request: input.request || "(no request recorded)", steps: input.steps },
-			{ consequence: "medium", signal: input.signal },
+		evaluation = await withinPlanRequestBound(
+			(signal) =>
+				engine.evaluate(
+					// A pasted directive is not a part of the request a plan must cover; a plan over unpasted words is asked as probed.
+					programOverOwnerWords(PLAN_REVIEW_PROGRAM, PLAN_REQUEST_QUESTIONS, input.request, ...input.steps),
+					{ request: input.request || "(no request recorded)", steps: input.steps },
+					{ consequence: "medium", signal },
+				),
+			{ caller: input.signal },
 		);
 	} catch (error) {
 		input.signal?.throwIfAborted();
@@ -121,6 +126,8 @@ export async function reviewPlan(
 			doubt: `System One could not check the plan (${error instanceof Error ? error.message : String(error)})`,
 		};
 	}
+	// An expired request is unjudged: the plan stands on its code facts, and the operator reads the doubt.
+	if (!evaluation) return { doubt: "System One did not check the plan in time" };
 	const answers = evaluation.answers ?? {};
 	const steers: string[] = [];
 	const doubts: string[] = [];

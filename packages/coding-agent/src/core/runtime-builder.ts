@@ -75,7 +75,6 @@ import {
 } from "./autonomy/worker-session-private-scope.ts";
 import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
 import type { CapabilityTierPolicy } from "./capability-tier.ts";
-import { CHANNEL_REPLY_TOOL_NAME } from "./channels/channel-tool-names.ts";
 import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
 import type { SelfCompactionView } from "./compaction/self-compaction-controller.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
@@ -87,7 +86,6 @@ import type {
 import type { ContextGcReport } from "./context-gc.ts";
 import { captureSessionAccountingOrigin } from "./cost/accounting-origin.ts";
 import { DEFAULT_ACTIVE_TOOL_NAMES, mapToolNamesForPlatform } from "./default-tool-surface.ts";
-import { BOT_TOOL_NAME } from "./delegation/bot-creation.ts";
 import type { WorkerClaimSnapshotPayload } from "./delegation/session-worker-claim.ts";
 import { acknowledgeWorkerClaimReview } from "./delegation/session-worker-claim.ts";
 import type { WorkerAgentControlPort, WorkerGrantSummary } from "./delegation/worker-agent-control.ts";
@@ -143,6 +141,8 @@ import { resolveCurrentProjectPipelineRun } from "./pipelines/run-state.ts";
 import { isPipelineRunActive, type PipelineRun } from "./pipelines/types.ts";
 import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
 import type { ProfileFilterReloadSnapshot } from "./profile-filter-controller.ts";
+import { buildGoalProofSheet } from "./proof/goal-proof-sheet.ts";
+import { proofSheetsAwaitingReview } from "./proof/review-gauge.ts";
 import { assertReloadQuiescent } from "./reload-blockers.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
@@ -150,7 +150,6 @@ import type { SystemOneUsageSink } from "./review/system-one-review-port.ts";
 import { TypeSafeEvidenceMaterializer } from "./review/typesafe-evidence-materializer.ts";
 import { TypeSafeEvidenceStore } from "./review/typesafe-evidence-store.ts";
 import { SystemOneReviewer } from "./review/typesafe-reviewer.ts";
-import { ROUTINE_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import type { RuleHookRefusal } from "./rule-hooks/rule-hook-delivery.ts";
 import {
 	type RuntimeCandidateAttempt,
@@ -236,7 +235,6 @@ import type { OutputReductionToolOptions } from "./tools/output-reduction.ts";
 import { resolveToCwd } from "./tools/path-utils.ts";
 import { createPeerReviewToolDefinition } from "./tools/peer-review.ts";
 import { createPipelineToolDefinition } from "./tools/pipeline.ts";
-import { PLAN_TOOL_NAME } from "./tools/plan-tool-name.ts";
 import { createReadTool } from "./tools/read.ts";
 import { createRunProcessToolDefinition } from "./tools/run-process.ts";
 import { createRunToolkitScriptToolDefinition } from "./tools/run-toolkit-script.ts";
@@ -349,6 +347,7 @@ interface ReloadRuntimeSnapshot {
 	profileFilter: ProfileFilterReloadSnapshot;
 	unboundToolGrantWarnings: string[];
 	baseToolDefinitions: Map<string, ToolDefinition>;
+	backgroundLaneToolNames: ReadonlySet<string>;
 	toolRegistry: Map<string, AgentTool>;
 	toolDefinitions: Map<string, ToolDefinitionEntry>;
 	toolPromptSnippets: Map<string, string>;
@@ -474,12 +473,11 @@ export interface RuntimeBuilderDeps {
 	getRuntimeUpdateTool?(): ToolDefinition | undefined;
 	getSelfCompactTool?(): ToolDefinition | undefined;
 	getProactivityTool?(): ToolDefinition | undefined;
-	getRoutineTool?(): ToolDefinition | undefined;
-	getBotTool?(): ToolDefinition | undefined;
-	/** The root's `plan` tool; undefined in a child session (the worker tool ceiling forbids it as well). */
-	getPlanTool?(): ToolDefinition | undefined;
-	/** The owner's release of channel reply drafts; undefined while no channel has an explicit policy. */
-	getChannelReplyTool?(): ToolDefinition | undefined;
+	/**
+	 * The root-only lane tools (routine, bot, channel reply, plan): none in a child session, and a lane whose tool is not
+	 * open is absent. The builder offers each one the access policy allows, under the tool's own name.
+	 */
+	getBackgroundLaneTools?(): readonly ToolDefinition[];
 	/** Lazily resolve durable image storage only for a persisted/configured session. */
 	getSessionImageStore(): Pick<SessionImageStore, "retainContent"> | undefined;
 
@@ -685,6 +683,8 @@ export class RuntimeBuilder {
 	private _toolPromptSnippets: Map<string, string> = new Map();
 	private _toolPromptGuidelines: Map<string, string[]> = new Map();
 	private _baseToolDefinitions: Map<string, ToolDefinition> = new Map();
+	/** The lane tool names the last application offered; one no longer offered is dropped from the base set. */
+	private _backgroundLaneToolNames: ReadonlySet<string> = new Set();
 	private _peerReviewController: PeerReviewController | undefined;
 	/** Root's tool mechanics as the last build resolved them, shared with every worker lane. */
 	private _sharedLaneToolOptions: SharedLaneToolOptions = {};
@@ -1164,6 +1164,22 @@ export class RuntimeBuilder {
 			throw new RuntimeGenerationAdmissionError("Cannot replace runtime resources after session disposal began.");
 	}
 
+	/**
+	 * Offers the root-only lane tools the access policy allows. A lane tool the previous application offered and this one
+	 * does not is dropped, so a channel policy removed at runtime takes its reply tool away with it.
+	 */
+	private _applyBackgroundLaneTools(toolAccess: RuntimeToolAccessPolicy): void {
+		const offered = (this.deps.getBackgroundLaneTools?.() ?? []).filter((definition) =>
+			toolAccess.allows(definition.name),
+		);
+		const offeredNames = new Set(offered.map((definition) => definition.name));
+		for (const name of this._backgroundLaneToolNames) {
+			if (!offeredNames.has(name)) this._baseToolDefinitions.delete(name);
+		}
+		for (const definition of offered) this._baseToolDefinitions.set(definition.name, definition);
+		this._backgroundLaneToolNames = offeredNames;
+	}
+
 	refreshToolRegistry(options?: {
 		activeToolNames?: string[];
 		includeAllExtensionTools?: boolean;
@@ -1184,12 +1200,8 @@ export class RuntimeBuilder {
 		const toolAccess = this._createToolAccessPolicy();
 		const { allowedToolNames, toolProfileFilter } = toolAccess;
 		const isAllowedTool = toolAccess.allows;
-		// The channel release tool exists only while a channel has an explicit policy, which settings change at runtime.
-		if (!this.deps.getBaseToolsOverride()) {
-			const channelReply = isAllowedTool(CHANNEL_REPLY_TOOL_NAME) ? this.deps.getChannelReplyTool?.() : undefined;
-			if (channelReply) this._baseToolDefinitions.set(channelReply.name, channelReply);
-			else this._baseToolDefinitions.delete(CHANNEL_REPLY_TOOL_NAME);
-		}
+		// Lane tools follow their lanes, which change at runtime (a channel policy is added or removed).
+		if (!this.deps.getBaseToolsOverride()) this._applyBackgroundLaneTools(toolAccess);
 
 		const registeredTools = this.deps.getExtensionRunner().getAllRegisteredTools();
 		const allCustomTools = [
@@ -1420,6 +1432,7 @@ export class RuntimeBuilder {
 			profileFilter: this.deps.createProfileFilterReloadSnapshot(),
 			unboundToolGrantWarnings: [...this.deps.getUnboundToolGrantWarnings()],
 			baseToolDefinitions: this._baseToolDefinitions,
+			backgroundLaneToolNames: this._backgroundLaneToolNames,
 			toolRegistry: this._toolRegistry,
 			toolDefinitions: this._toolDefinitions,
 			toolPromptSnippets: this._toolPromptSnippets,
@@ -1449,6 +1462,7 @@ export class RuntimeBuilder {
 		// ref between the two writes, so folding them is unobservable.
 		this.deps.setExtensionRunner(snapshot.extensionRunner);
 		this._baseToolDefinitions = snapshot.baseToolDefinitions;
+		this._backgroundLaneToolNames = snapshot.backgroundLaneToolNames;
 		this._toolRegistry = snapshot.toolRegistry;
 		this._toolDefinitions = snapshot.toolDefinitions;
 		this._toolPromptSnippets = snapshot.toolPromptSnippets;
@@ -1837,22 +1851,7 @@ export class RuntimeBuilder {
 				const definition = this.deps.getProactivityTool?.();
 				if (definition) this._baseToolDefinitions.set(definition.name, definition);
 			}
-			if (toolAccess.allows(ROUTINE_TOOL_NAME)) {
-				const definition = this.deps.getRoutineTool?.();
-				if (definition) this._baseToolDefinitions.set(definition.name, definition);
-			}
-			if (toolAccess.allows(BOT_TOOL_NAME)) {
-				const definition = this.deps.getBotTool?.();
-				if (definition) this._baseToolDefinitions.set(definition.name, definition);
-			}
-			if (toolAccess.allows(PLAN_TOOL_NAME)) {
-				const definition = this.deps.getPlanTool?.();
-				if (definition) this._baseToolDefinitions.set(definition.name, definition);
-			}
-			if (toolAccess.allows(CHANNEL_REPLY_TOOL_NAME)) {
-				const definition = this.deps.getChannelReplyTool?.();
-				if (definition) this._baseToolDefinitions.set(definition.name, definition);
-			}
+			this._applyBackgroundLaneTools(toolAccess);
 			if (toolAccess.allows("skill")) {
 				const skillOptions = { getSettingsManager: () => this.deps.getSettingsManager() };
 				// Skill sources are the owner's: a worker session's tool schema carries no `repair`.
@@ -1936,6 +1935,17 @@ export class RuntimeBuilder {
 							}
 						: {}),
 					getCwd: () => this._taskDirectories.cwd,
+					buildCompletionProofSheet: (input) => {
+						const sessionManager = this.deps.getSessionManager();
+						return buildGoalProofSheet({
+							...input,
+							sessionManager,
+							cwd: this._taskDirectories.cwd,
+							agentDir: this.deps.getAgentDir(),
+							// The sheet being built is the newest result waiting for the owner, so it counts too.
+							reviewWaiting: proofSheetsAwaitingReview(sessionManager.getBranch()).length + 1,
+						});
+					},
 					runRequirementCheck: (check, signal) =>
 						runRequirementCheck(check, { cwd: this._taskDirectories.cwd, ...(signal ? { signal } : {}) }),
 					grantEdge: this.deps.grantEdgeFromInstructions

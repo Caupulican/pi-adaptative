@@ -360,6 +360,7 @@ import {
 import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
+import { checkedExtensionMessage } from "./turn-origin.ts";
 import type { TimerPort } from "./util/timer-port.ts";
 import type { WaitStatusEvent } from "./util/wait.ts";
 import { currentWorkUnit, openWorkUnit } from "./work-units.ts";
@@ -444,6 +445,7 @@ export class AgentSession {
 	private readonly _ruleHooks = new RuleHookDelivery({
 		getMessages: () => this._memory.requestHistory(this.agent.state.messages),
 		isRootSession: () => !this._isChildSession,
+		isToolActive: (name) => this.getActiveToolNames().includes(name),
 	});
 	private readonly _mutationLedger = new ObjectiveMutationLedger();
 	private readonly _repositoryObserver = new RepositoryMutationObserver(this._mutationLedger);
@@ -1956,9 +1958,7 @@ export class AgentSession {
 				this._isChildSession ? undefined : createSelfCompactToolDefinition(() => this._selfCompaction),
 			getProactivityTool: () =>
 				this._isChildSession ? undefined : createProactivityToolDefinition(() => this.settingsManager),
-			getRoutineTool: () => (this._isChildSession ? undefined : this._backgroundLanes.createRoutineToolDefinition()),
-			getBotTool: () => (this._isChildSession ? undefined : this._backgroundLanes.createBotToolDefinition()),
-			getChannelReplyTool: () => this._backgroundLanes.createChannelReplyToolDefinition(),
+			getBackgroundLaneTools: () => this._backgroundLanes.createBackgroundLaneTools(),
 			getBaseToolsOverride: () => this._baseToolsOverride,
 			getShellOperations: () => this._shellOperations,
 			getWorktreeSyncEnginePorts: () => this._worktreeSyncEnginePorts,
@@ -5892,7 +5892,7 @@ export class AgentSession {
 			{},
 			Object.getOwnPropertyDescriptors(this._extensionRunner.createCommandContext()),
 		) as ReplacedSessionContext;
-		context.sendMessage = (message, options) => this.sendCustomMessage(message, options);
+		context.sendMessage = (message, options) => this.sendCustomMessage(checkedExtensionMessage(message), options);
 		context.sendUserMessage = (content, options) => this.sendUserMessage(content, options);
 		return context;
 	}

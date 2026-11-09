@@ -91,6 +91,8 @@ export interface FleetLocalPort {
 	drain(): void;
 	/** Running local lanes with their flow, for a scope cancel. */
 	runningLanes(): readonly { laneId: string; objectiveId: string; subtreeId: string }[];
+	/** The lanes a plan's nodes were released to, live or retired, from the durable plan projection. */
+	laneIdsOfPlan(planId: string): readonly string[];
 	/** Cancels queued or running lanes through the controller's durable cancel path. */
 	cancelLanes(laneIds: readonly string[], reasonCode: string): void;
 	/** The attempt has not reached a terminal state. */
@@ -106,8 +108,6 @@ export interface SessionFleetSchedulerDeps {
 	settings(): ResolvedFleetSettings;
 	readonly allowance?: FleetAllowancePort;
 	readMachine?(): MachineFacts;
-	/** The authority digest of an escalation's original attempt; undefined when unknown. */
-	escalationAuthorityDigest?(outcomeId: string): string | undefined;
 	/** The provider account a model's requests are charged to (the provider gate's keying); absent leaves windows out. */
 	accountKey?(provider: string): string;
 	/** The owner's concurrency limit for a provider (`providerAdmission.limits`), when set. */
@@ -167,6 +167,8 @@ export class SessionFleetScheduler implements FleetScheduler {
 	private readonly unsubscribeWindows: () => void;
 	/** Local dispatches prepared and not yet admitted, by key, so a scope cancel releases its own. */
 	private readonly prepared = new Map<string, FleetDispatch>();
+	/** The highest version of each plan node any prepare has been asked for: `planId` and `nodeId` joined by NUL. */
+	private readonly planVersions = new Map<string, number>();
 	private local: FleetLocalPort | undefined;
 	private startPort: FleetLocalStartPort | undefined;
 	private queue: FleetQueue<unknown> | undefined;
@@ -361,12 +363,47 @@ export class SessionFleetScheduler implements FleetScheduler {
 	// ---- FleetScheduler ----
 
 	async prepare(dispatch: FleetDispatch, placement: Placement, signal?: AbortSignal): Promise<PrepareDecision> {
-		const mismatch = this.escalationRefusal(dispatch);
-		if (mismatch) return mismatch;
 		if (placement.kind !== "local_worker" || this.decisions.has(dispatch.idempotencyKey)) return { kind: "prepared" };
 		const port = this.startPort;
 		if (!port) return NO_LOCAL_STARTS;
+		// A node's newer version supersedes the older prepared one: the older allocation is returned, never held until disposal.
+		const nodeKey = dispatch.plan ? `${dispatch.plan.planId}\0${dispatch.plan.nodeId}` : undefined;
+		if (dispatch.plan && nodeKey !== undefined) {
+			// A version below the highest the node has asked for is stale: it is refused before anything is released.
+			const highest = this.planVersions.get(nodeKey) ?? 0;
+			if (dispatch.plan.version < highest)
+				return {
+					kind: "refused",
+					reason: "preflight",
+					blocker: "preflight_failed",
+					detail: "a newer version of this plan step is already prepared",
+				};
+			this.rememberPlanVersion(nodeKey, dispatch.plan.version);
+			// Only the older versions this one supersedes are released; a newer prepared version is never touched.
+			for (const [key, held] of this.prepared)
+				if (
+					held.plan?.planId === dispatch.plan.planId &&
+					held.plan.nodeId === dispatch.plan.nodeId &&
+					held.plan.version < dispatch.plan.version
+				)
+					this.releasePrepared(key);
+		}
 		const prepared = await port.prepare(dispatch, signal);
+		// The await may have let a newer version of this node start preparing: this older one is released, not held.
+		if (
+			prepared.ok &&
+			dispatch.plan &&
+			nodeKey !== undefined &&
+			(this.planVersions.get(nodeKey) ?? 0) > dispatch.plan.version
+		) {
+			port.release(dispatch.idempotencyKey);
+			return {
+				kind: "refused",
+				reason: "preflight",
+				blocker: "preflight_failed",
+				detail: "a newer version of this plan step superseded it while it was being prepared",
+			};
+		}
 		if (!prepared.ok) {
 			harnessLog.info("fleet", "a dispatch is refused at preparation", {
 				key: dispatch.idempotencyKey,
@@ -402,10 +439,12 @@ export class SessionFleetScheduler implements FleetScheduler {
 		return decision;
 	}
 
+	/**
+	 * Cancels a scope: its prepared dispatches are released (returning their allocations), and its queued and running lanes
+	 * are cancelled through the controller's durable cancel. A plan scope names its lanes from the plan's own projection.
+	 */
 	cancel(scope: FleetScope, reasonCode: string): void {
-		const local = this.local;
-		if (!local) return;
-		const queued = this.queue;
+		if (scope.kind === "plan") this.forgetPlanVersions(scope.planId);
 		const inScope = (lane: { objectiveId: string; subtreeId: string }): boolean =>
 			scope.kind === "all" ||
 			(scope.kind === "objective" && lane.objectiveId === scope.objectiveId) ||
@@ -413,11 +452,14 @@ export class SessionFleetScheduler implements FleetScheduler {
 		for (const [key, dispatch] of this.prepared)
 			if (inScope(dispatch.demand) || (scope.kind === "plan" && dispatch.plan?.planId === scope.planId))
 				this.releasePrepared(key);
+		const local = this.local;
+		if (!local) return;
+		const queued = this.queue;
 		const laneIds =
 			scope.kind === "lane"
 				? [scope.laneId]
 				: scope.kind === "plan"
-					? []
+					? [...local.laneIdsOfPlan(scope.planId)]
 					: [
 							...(queued?.matching(inScope) ?? []),
 							...local
@@ -439,14 +481,19 @@ export class SessionFleetScheduler implements FleetScheduler {
 		this.changed();
 	}
 
+	/**
+	 * The owner's resume: lifts the spend-rate brake and releases half of each account window until its first success
+	 * (thundering herd), and clears a stop when the fleet itself was stopped. Called when the owner lifts the machine-wide
+	 * emergency stop, so it applies whether or not this fleet had been stopped.
+	 */
 	resume(): void {
-		if (!this.stopped) return;
-		this.stopped = false;
-		this.observer.record("stopped", "running", "resume");
-		harnessLog.info("fleet", "the fleet is resumed", { queued: this.queue?.size ?? 0 });
-		// A resume releases half of each account window until its first success, and lifts the spend-rate brake.
 		this.claims.rampAll();
 		this.claims.liftBrake();
+		if (this.stopped) {
+			this.stopped = false;
+			this.observer.record("stopped", "running", "resume");
+			harnessLog.info("fleet", "the fleet is resumed", { queued: this.queue?.size ?? 0 });
+		}
 		this.pass = undefined;
 		this.changed();
 		this.wake("fleet:stop");
@@ -546,22 +593,22 @@ export class SessionFleetScheduler implements FleetScheduler {
 
 	// ---- internals ----
 
-	private escalationRefusal(dispatch: FleetDispatch): FleetRefusal | undefined {
-		if (!dispatch.escalation) return undefined;
-		const original = this.deps.escalationAuthorityDigest?.(dispatch.escalation.outcomeId);
-		return original === dispatch.escalation.authorityDigest
-			? undefined
-			: {
-					kind: "refused",
-					reason: "authority_digest_mismatch",
-					blocker: "owner_authority_required",
-					detail: "the escalation's authority differs from its original attempt's",
-				};
+	/** Records the version a node was asked to prepare; the map is bounded, and the oldest node drops first. */
+	private rememberPlanVersion(nodeKey: string, version: number): void {
+		this.planVersions.delete(nodeKey);
+		this.planVersions.set(nodeKey, Math.max(version, this.planVersions.get(nodeKey) ?? 0));
+		if (this.planVersions.size > ADMIT_DECISION_LIMIT) {
+			const oldest = this.planVersions.keys().next().value;
+			if (oldest !== undefined) this.planVersions.delete(oldest);
+		}
+	}
+
+	/** A plan that closed has no node left to supersede: its versions are forgotten. */
+	private forgetPlanVersions(planId: string): void {
+		for (const key of [...this.planVersions.keys()]) if (key.startsWith(`${planId}\0`)) this.planVersions.delete(key);
 	}
 
 	private decideAdmit(dispatch: FleetDispatch, placement: Placement): AdmitDecision {
-		const mismatch = this.escalationRefusal(dispatch);
-		if (mismatch) return mismatch;
 		if (placement.kind === "local_worker") return this.admitLocal(dispatch);
 		const key = placementCapacityKey(placement);
 		if (key === undefined)

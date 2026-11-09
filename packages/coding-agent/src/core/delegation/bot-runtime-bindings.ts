@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
-const BINDING_TYPE = "pi_bot_runtime_bindings";
+export const BOT_RUNTIME_BINDINGS_CUSTOM_TYPE = "pi_bot_runtime_bindings";
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const MAX_BINDINGS = 1024;
 
@@ -59,7 +59,7 @@ export class BotRuntimeBindings {
 	private read(): Map<string, string> {
 		const manager = this.manager();
 		const session = manager.getSessionId();
-		const entry = manager.getLatestCustomEntryOnBranch(BINDING_TYPE);
+		const entry = manager.getLatestCustomEntryOnBranch(BOT_RUNTIME_BINDINGS_CUSTOM_TYPE);
 		if (entry === this.cachedEntry && session === this.cachedSession) return this.current;
 		const bindings = entry ? this.decode(entry.data) : new Map<string, string>();
 		this.current = bindings;
@@ -128,7 +128,7 @@ export class BotRuntimeBindings {
 		const branch = this.manager().getBranch();
 		for (let index = branch.length - 1; index >= 0; index--) {
 			const entry = branch[index]!;
-			if (entry.type !== "custom" || entry.customType !== BINDING_TYPE) continue;
+			if (entry.type !== "custom" || entry.customType !== BOT_RUNTIME_BINDINGS_CUSTOM_TYPE) continue;
 			for (const [alias, previous] of this.decode(entry.data)) {
 				if (previous !== runtime) continue;
 				const context = decodeContext(alias);
@@ -150,7 +150,7 @@ export class BotRuntimeBindings {
 	runtimes(alias: string): string[] {
 		const result = new Set([alias]);
 		for (const entry of this.manager().getBranch()) {
-			if (entry.type !== "custom" || entry.customType !== BINDING_TYPE) continue;
+			if (entry.type !== "custom" || entry.customType !== BOT_RUNTIME_BINDINGS_CUSTOM_TYPE) continue;
 			for (const [key, runtime] of this.decode(entry.data))
 				if (decodeContext(key).agentId === alias) result.add(runtime);
 		}
@@ -172,7 +172,7 @@ export class BotRuntimeBindings {
 		for (const [other, current] of bindings)
 			if (other !== key && current === runtime) throw new Error("Worker already belongs to another bot.");
 		bindings.set(key, runtime);
-		this.manager().appendCustomEntry(BINDING_TYPE, {
+		this.manager().appendCustomEntry(BOT_RUNTIME_BINDINGS_CUSTOM_TYPE, {
 			version: 1,
 			sessionId: this.manager().getSessionId(),
 			bindings: Object.fromEntries(bindings),

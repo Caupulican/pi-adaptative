@@ -388,5 +388,7 @@ export function createWorkerResultContract(args: CreateWorkerResultContractInput
 		// host-accepted completion; only the routine result path reads them.
 		...(cleanAccepted && claim.report?.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
 		...(cleanAccepted && claim.report?.conditionMet === true ? { conditionMet: true as const } : {}),
+		// Where the task stands counts on every outcome: a failed or blocked run's position is what the next run needs most.
+		...(claim.report?.progress ? { progress: structuredClone(claim.report.progress) } : {}),
 	};
 }

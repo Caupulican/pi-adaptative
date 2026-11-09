@@ -69,6 +69,8 @@ export function outcomeLadderFacts(args: {
 	readonly checkedIds: ReadonlySet<string>;
 	readonly context: OutcomeLadderContext | undefined;
 	readonly ownerOnly?: JudgmentPair;
+	/** A rerun the original authority could not be rebuilt into: the owner decides, the ladder does not retry it. */
+	readonly rungRefusal?: string;
 }): LadderFacts {
 	const { snapshot, attempt, context } = args;
 	const task = snapshot.tasks[attempt.taskId];
@@ -112,5 +114,6 @@ export function outcomeLadderFacts(args: {
 		hostCheckable,
 		budgetLeft: budgetLeft(snapshot, attempt),
 		...(args.ownerOnly ? { ownerOnly: args.ownerOnly } : {}),
+		...(args.rungRefusal !== undefined ? { rungRefusal: args.rungRefusal } : {}),
 	};
 }

@@ -6,7 +6,12 @@
 
 import { isOutcomeFromNewerBuild } from "../delegation/worker-outcome-contract.ts";
 import type { OrchestrationEvent } from "../orchestration/contracts.ts";
-import { DurableTaskRuntimeError, type TaskRuntimeState } from "../orchestration/task-runtime-state.ts";
+import {
+	DurableTaskRuntimeError,
+	type TaskRuntimeProjection,
+	type TaskRuntimeState,
+} from "../orchestration/task-runtime-state.ts";
+import { currentTaskOf, successorOf } from "../orchestration/task-successor.ts";
 import {
 	planClosedFromValue,
 	planJoinSettledFromValue,
@@ -152,7 +157,7 @@ export function reducePlanEvent(
 			const found = activePlan(plans, payload.planId, event);
 			if (!found) return;
 			const { runtime } = nodeOf(found.plan, found.record, payload.nodeId, event.type);
-			const outcome = runtime.release ? tasks[runtime.release.taskId]?.outcome : undefined;
+			const outcome = runtime.release ? tasks[currentTaskOf({ tasks }, runtime.release.taskId)]?.outcome : undefined;
 			if (!outcome)
 				throw new DurableTaskRuntimeError(`Step '${payload.nodeId}' settled without a recorded outcome.`);
 			if (!isOutcomeFromNewerBuild(outcome) && outcome.generation < payload.generation) {
@@ -161,7 +166,12 @@ export function reducePlanEvent(
 			const { held: _held, ...rest } = runtime;
 			plans[payload.planId] = withNode(found.plan, payload.nodeId, {
 				...rest,
-				settled: { outcomeId: payload.outcomeId, generation: payload.generation, settledAt: at },
+				settled: {
+					outcomeId: payload.outcomeId,
+					generation: payload.generation,
+					settledAt: at,
+					...(payload.stakes !== undefined ? { stakes: payload.stakes } : {}),
+				},
 			});
 			return;
 		}
@@ -190,6 +200,7 @@ export function reducePlanEvent(
 					artifact: payload.artifact,
 					n: (runtime.join?.n ?? 0) + 1,
 					settledAt: at,
+					...(payload.stakes !== undefined ? { stakes: payload.stakes } : {}),
 				},
 			});
 			return;
@@ -210,17 +221,35 @@ export function reducePlanEvent(
 	}
 }
 
-/** The released node, current or retired, that a task belongs to; the terminal route's code fact. */
+/**
+ * The released node, current or retired, that a task belongs to; the terminal route's code fact. A step whose task an
+ * escalation superseded belongs to every task of that successor chain, so the successor's terminal reaches the plan.
+ */
 export function planNodeOfTask(
-	plans: Readonly<Record<string, PlanRuntimeState>>,
+	projection: Pick<TaskRuntimeProjection, "plans" | "tasks">,
 	taskId: string,
 ): { planId: string; nodeId: string; retired: boolean } | undefined {
-	for (const [planId, plan] of Object.entries(plans)) {
+	for (const [planId, plan] of Object.entries(projection.plans)) {
 		for (const [nodeId, runtime] of Object.entries(plan.nodes)) {
-			if (runtime.release?.taskId === taskId) return { planId, nodeId, retired: false };
+			if (runtime.release && taskChainHas(projection, runtime.release.taskId, taskId))
+				return { planId, nodeId, retired: false };
 		}
-		const retired = plan.retired.find((entry) => entry.taskId === taskId);
+		const retired = plan.retired.find((entry) => taskChainHas(projection, entry.taskId, taskId));
 		if (retired) return { planId, nodeId: retired.nodeId, retired: true };
 	}
 	return undefined;
+}
+
+/** Whether `taskId` is `origin` or a successor an escalation placed after it (a malformed chain ends, never loops). */
+function taskChainHas(projection: Pick<TaskRuntimeProjection, "tasks">, origin: string, taskId: string): boolean {
+	const visited = new Set<string>();
+	for (
+		let current: string | undefined = origin;
+		current !== undefined && !visited.has(current);
+		current = successorOf(projection, current)
+	) {
+		if (current === taskId) return true;
+		visited.add(current);
+	}
+	return false;
 }

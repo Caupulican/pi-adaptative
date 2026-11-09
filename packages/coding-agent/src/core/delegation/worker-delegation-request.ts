@@ -1,3 +1,4 @@
+import { isAbsolute, win32 } from "node:path";
 import type { ExecutionContext } from "../../kernel/index.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { TaskBrief } from "../comms/comms-records.ts";
@@ -11,6 +12,7 @@ import {
 	MAX_ORCHESTRATION_MODEL_PROVIDER_LENGTH,
 	MAX_WORKER_AUTHORITY_PATH_LENGTH,
 	ORCHESTRATION_THINKING_LEVELS,
+	type OrchestrationDelegationLimits,
 	type OrchestrationThinkingLevel,
 	type RiskBudget,
 	WORKER_ROLES,
@@ -23,6 +25,8 @@ import type { WorkerSavedIntent } from "./worker-saved-intent.ts";
 
 /** Upper bound on extra write roots one delegation may name. */
 const MAX_WORKER_AUTHORITY_WRITE_PATHS = 16;
+/** Upper bound on read roots one delegation may name. */
+const MAX_WORKER_AUTHORITY_READ_PATHS = 16;
 
 /** Runtime-owned task correlation retained with a durable worker dispatch. Never model-settable. */
 export interface WorkerDelegationTaskContext {
@@ -71,6 +75,13 @@ export interface WorkerDelegationAuthorityRequest {
 	 * writes only inside its cwd unless the caller names more here; reads are unaffected.
 	 */
 	writePaths?: readonly string[];
+	/**
+	 * Host-only: the roots the worker may read, absolute. The worker's read tools, `repo_read`, `lookup` and its read-only
+	 * shell read nothing outside them (the shell's own scratch directory aside), in every mode; credential and harness
+	 * stores stay denied. An empty list reads nothing from disk. Absent keeps today's read scope. The model-facing
+	 * `delegate` adapter never sets it.
+	 */
+	readPaths?: readonly string[];
 	budget?: RiskBudget;
 }
 
@@ -106,6 +117,7 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 			"shellReadOnly",
 			"path",
 			"writePaths",
+			"readPaths",
 			"budget",
 		])
 	) {
@@ -177,6 +189,16 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 	if (writePaths?.some((entry) => entry.includes("\0"))) {
 		throw new WorkerDelegationRequestError("Delegation authority writePaths must be bounded, non-empty strings.");
 	}
+	const readPaths =
+		value.readPaths === undefined
+			? undefined
+			: uniqueStringArray(value.readPaths, "Delegation authority readPaths", {
+					maxEntries: MAX_WORKER_AUTHORITY_READ_PATHS,
+					maxLength: MAX_WORKER_AUTHORITY_PATH_LENGTH,
+				});
+	if (readPaths?.some((entry) => entry.includes("\0") || (!isAbsolute(entry) && !win32.isAbsolute(entry)))) {
+		throw new WorkerDelegationRequestError("Delegation authority readPaths must be absolute paths.");
+	}
 	let budget: RiskBudget | undefined;
 	try {
 		budget = value.budget === undefined ? undefined : parseRiskBudget(value.budget, "Delegation authority budget");
@@ -194,6 +216,8 @@ export function parseWorkerDelegationAuthorityRequest(value: unknown): WorkerDel
 		...(value.shellReadOnly === true ? { shellReadOnly: true } : {}),
 		...(workspacePath ? { path: workspacePath } : {}),
 		...(writePaths && writePaths.length > 0 ? { writePaths } : {}),
+		// An empty read scope is a scope (it reads nothing): only an absent field is left out.
+		...(readPaths !== undefined ? { readPaths } : {}),
 		...(budget ? { budget } : {}),
 	};
 }
@@ -246,6 +270,26 @@ export interface WorkerDelegationRequest {
 	receiptOriginAnchor?: WorkerReceiptAnchor;
 	/** Host-owned objective; null explicitly detaches recovered work from a later foreground goal. */
 	objectiveId?: string | null;
+	/**
+	 * Host-only delegation objective the start belongs to (a leader's brokered bot). The task takes it instead of the
+	 * foreground goal, so the start carries no goal; never set by the model-facing delegate or assign schemas.
+	 */
+	delegationObjectiveId?: string;
+	/**
+	 * Host-only delegation limits this start's compiled runtime is granted: a leader's runtime declares the children and
+	 * depth it may start (ceilings still apply). Absent leaves the runtime a leaf. Never set by the model-facing schemas.
+	 */
+	delegationLimits?: OrchestrationDelegationLimits;
+	/**
+	 * Host-only: the compiled worker reports the routine `progress` section of `submit_report`. Set only for a routine's run
+	 * (its saved intent is captured with it); absent leaves the report without it. Never set by the model-facing schemas.
+	 */
+	reportsProgress?: boolean;
+	/**
+	 * Host-only: `shared` keeps the start in the checkout it runs in, so a fresh writer is not moved into a worktree lane. A
+	 * rerun of a shared original sets it; absent leaves the isolation policy in charge.
+	 */
+	isolation?: "shared";
 	/** Host-only durable authorization for a scheduled task; never exposed in the delegate schema. */
 	savedIntent?: WorkerSavedIntent;
 	/** Host-admitted task context for a fresh dispatch; never exposed in the model schema. */

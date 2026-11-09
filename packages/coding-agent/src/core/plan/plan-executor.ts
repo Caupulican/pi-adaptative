@@ -18,20 +18,26 @@ import { dirname, join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { defineMachine, type MachineObserver, observeMachine, registerMachine } from "../../kernel/machine-spec.ts";
 import { orchestrationSessionDir } from "../agent-paths.ts";
+import type { WorkerClaim } from "../autonomy/contracts.ts";
 import { renderCommsStateLine } from "../comms/comms-records.ts";
+import type { Outcome } from "../delegation/worker-outcome-contract.ts";
 import { describeOutcomeForHandoff } from "../delegation/worker-outcome-words.ts";
 import type { FleetDispatch, FleetScheduler, RoomQuery } from "../fleet/fleet-types.ts";
 import { weightOf } from "../fleet/local-admit.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { withSessionBundleAdmission } from "../orchestration/session-bundle-lifecycle.ts";
 import type { DurableTaskRuntime, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { currentTaskOf } from "../orchestration/task-successor.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import type { Placement } from "../placement/placement-types.ts";
+import type { ProofStakesLevel } from "../proof/stakes-levels.ts";
+import { workerResultStakes } from "../proof/worker-proof-sheet.ts";
 import type { OperationEffectEngine } from "../system-one/operation-classifier.ts";
 import { chooseVoteWinner } from "../system-one/plan-vote.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import {
 	decideCodeJoin,
 	JOIN_RESULT_MAX_BYTES,
@@ -50,6 +56,7 @@ import {
 	derivePlanId,
 	isPlanFromNewerBuild,
 	PLAN_LIMITS,
+	type PlanCloseStatus,
 	type PlanNodeSpec,
 	type PlanNodeState,
 	type PlanRecord,
@@ -59,7 +66,7 @@ import { type PlanAction, type PlanUpdateIntent, reconcilePlans } from "./plan-r
 import { planNodeOfTask } from "./plan-reducer.ts";
 import { resolveSince, splitNodes, verifyWrapNodes } from "./plan-revision.ts";
 import { planUpdateDelivery, planUpdateDeliveryId } from "./plan-update.ts";
-import { activeRootPlan, listPlanViews, planView } from "./plan-view.ts";
+import { activeRootPlan, listPlanViews, planNodeBrief, planView } from "./plan-view.ts";
 
 /** Reconcile passes one drain may run before it yields to the next event. */
 const MAX_DRAIN_PASSES = 16;
@@ -79,10 +86,17 @@ export interface PlanExecutorDeps {
 	/** The root's session branch, root to leaf (the J4 excerpt and the request a plan answers). */
 	readonly rootEntries: () => readonly unknown[];
 	readonly captureOrigin: () => WorkerReceiptOrigin;
+	/**
+	 * The host's claim of one worker attempt (its receipts, changed files and findings), as the session holds it when the
+	 * step settles. Undefined when the attempt left no claim; the step's stakes then read from its outcome alone.
+	 */
+	readonly workerClaim: (taskId: string, attemptId: string) => WorkerClaim | undefined;
 	readonly deliver: (delivery: ParentInputDelivery, signal: AbortSignal) => Promise<unknown>;
 	readonly isDelivered: (deliveryId: string) => boolean;
 	/** Acknowledges routed terminal notifications the plan consumed. */
 	readonly acknowledge: (notificationIds: readonly string[]) => void;
+	/** Fires when a plan's visible state changes (a step starts, settles or is held, a plan opens or closes). */
+	readonly planChanged: () => void;
 	readonly now?: () => number;
 }
 
@@ -142,18 +156,64 @@ function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
+/** The `stakes` field of a settlement record, present only when a level was read for the step. */
+function optionalStakes(stakes: ProofStakesLevel | undefined): { stakes?: ProofStakesLevel } {
+	return stakes !== undefined ? { stakes } : {};
+}
+
 function queryKey(query: RoomQuery): string {
 	return `${query.objectiveId}|${query.weight}`;
 }
 
-/** A join result file the executor wrote; anything else reads as absent. */
+/** A join result file the executor wrote; anything else, a partial record included, reads as absent. */
 function readJoinResult(path: string): JoinResult | undefined {
 	try {
-		const value = JSON.parse(readFileSync(path, "utf8")) as Partial<JoinResult>;
-		return value?.v === 1 && value.outcome && Array.isArray(value.members) ? (value as JoinResult) : undefined;
+		const value: unknown = JSON.parse(readFileSync(path, "utf8"));
+		return isJoinResult(value) ? value : undefined;
 	} catch {
 		return undefined;
 	}
+}
+
+function isStringArray(value: unknown): value is string[] {
+	return Array.isArray(value) && value.every((item) => typeof item === "string");
+}
+
+/** Every field the combined update and its proof sheet read: a record missing one of them is not a join result. */
+function isJoinResult(value: unknown): value is JoinResult {
+	if (!isPlainRecord(value) || value.v !== 1) return false;
+	if (typeof value.kind !== "string" || typeof value.artifact !== "string") return false;
+	if (value.winner !== undefined && typeof value.winner !== "string") return false;
+	const outcome = value.outcome;
+	if (!isPlainRecord(outcome) || typeof outcome.status !== "string") return false;
+	if (!isPlainRecord(outcome.cost) || typeof outcome.cost.usd !== "number") return false;
+	const members = value.members;
+	if (
+		!Array.isArray(members) ||
+		!members.every(
+			(member: unknown) =>
+				isPlainRecord(member) &&
+				typeof member.nodeId === "string" &&
+				typeof member.status === "string" &&
+				typeof member.outcomeId === "string",
+		)
+	)
+		return false;
+	const coverage = value.coverage;
+	if (!isPlainRecord(coverage) || !Object.values(coverage).every((met) => typeof met === "boolean")) return false;
+	const conflicts = value.conflicts;
+	if (
+		!Array.isArray(conflicts) ||
+		!conflicts.every(
+			(conflict: unknown) =>
+				isPlainRecord(conflict) &&
+				(conflict.kind === "finding" || conflict.kind === "file") &&
+				isStringArray(conflict.between) &&
+				typeof conflict.detail === "string",
+		)
+	)
+		return false;
+	return isStringArray(value.changedFiles) && isStringArray(value.gaps);
 }
 
 const STATE_WORDS: Readonly<Record<PlanNodeState, string>> = {
@@ -178,6 +238,8 @@ export class PlanExecutor implements PlanExecutorPort {
 	private readonly roomQueries = new Map<string, RoomQuery>();
 	private readonly roomSubscriptions = new Map<string, () => void>();
 	private nodeStates = new Map<string, PlanNodeState>();
+	/** The rendered plan views at the last observed snapshot; a different rendering is a visible change. */
+	private visibleViews: string | undefined;
 	private unsubscribeStore: (() => void) | undefined;
 	private lastSnapshot: TaskRuntimeProjection | undefined;
 	private draining = false;
@@ -212,7 +274,7 @@ export class PlanExecutor implements PlanExecutorPort {
 
 	/** The terminal route's predicate: the task runs (or ran) a step of a retained plan. */
 	ownsTask(taskId: string): boolean {
-		return planNodeOfTask(this.deps.runtime().getSnapshot().plans, taskId) !== undefined;
+		return planNodeOfTask(this.deps.runtime().getSnapshot(), taskId) !== undefined;
 	}
 
 	async applyToolCall(input: PlanToolInput, context: PlanCallContext): Promise<PlanToolResult> {
@@ -223,11 +285,11 @@ export class PlanExecutor implements PlanExecutorPort {
 		const nowIso = new Date(this.now()).toISOString();
 		if (input.action === "cancel") {
 			if (!active) return { ok: false, text: "No plan is running." };
-			runtime.closePlan({
-				planId: active.planId,
-				status: "cancelled",
-				reason: input.reason?.trim().slice(0, PLAN_LIMITS.reasonChars) || "cancelled by the planner",
-			});
+			this.closePlan(
+				active.planId,
+				"cancelled",
+				input.reason?.trim().slice(0, PLAN_LIMITS.reasonChars) || "cancelled by the planner",
+			);
 			harnessLog.info("plan", "a plan is cancelled", { planId: active.planId });
 			await this.releaseNow();
 			return this.result(active.planId, ["PLAN_UPDATE"], ["The plan is cancelled; its running steps are stopped."]);
@@ -282,6 +344,15 @@ export class PlanExecutor implements PlanExecutorPort {
 
 	private now(): number {
 		return this.deps.now?.() ?? Date.now();
+	}
+
+	/**
+	 * Closes a plan. Its running steps stop through their own cancels (the reconcile); a prepared step that was never
+	 * admitted is released here, by the plan's scope, since nothing else would release it.
+	 */
+	private closePlan(planId: string, status: PlanCloseStatus, reason: string): void {
+		this.deps.runtime().closePlan({ planId, status, reason });
+		this.deps.fleet().cancel({ kind: "plan", planId }, "plan_closed");
 	}
 
 	/** Runs a drain now (parked work included) and waits for the releases it started. */
@@ -402,15 +473,18 @@ export class PlanExecutor implements PlanExecutorPort {
 	private apply(action: Exclude<PlanAction, { kind: "release" }>): void {
 		const runtime = this.deps.runtime();
 		switch (action.kind) {
-			case "settle":
+			case "settle": {
+				const { snapshot, plan } = this.planOf(action.planId);
 				runtime.settlePlanNode({
 					planId: action.planId,
 					nodeId: action.nodeId,
 					outcomeId: action.outcomeId,
 					generation: action.generation,
+					...optionalStakes(this.stakesOfStep(snapshot, plan, action.nodeId, action.outcome)),
 				});
 				harnessLog.info("plan", "a plan step is settled", { planId: action.planId, nodeId: action.nodeId });
 				return;
+			}
 			case "hold":
 				runtime.holdPlanNode({
 					planId: action.planId,
@@ -426,7 +500,7 @@ export class PlanExecutor implements PlanExecutorPort {
 				});
 				return;
 			case "close":
-				runtime.closePlan({ planId: action.planId, status: action.status, reason: action.reason });
+				this.closePlan(action.planId, action.status, action.reason);
 				harnessLog.info("plan", "a plan is closed", {
 					planId: action.planId,
 					status: action.status,
@@ -446,14 +520,30 @@ export class PlanExecutor implements PlanExecutorPort {
 				this.settleJoin(
 					action.planId,
 					action.nodeId,
-					workerJoinResult(snapshot, plan, record, node, action.outcome, identity),
+					workerJoinResult(
+						snapshot,
+						plan,
+						record,
+						node,
+						action.outcome,
+						identity,
+						this.stakesOfStep(snapshot, plan, action.nodeId, action.outcome),
+					),
 				);
 				return;
 			}
 			case "verify_wrap":
 				if (!action.settled) {
+					const { snapshot, plan } = this.planOf(action.planId);
 					const { outcomeId, generation } = action.outcome;
-					runtime.settlePlanNode({ planId: action.planId, nodeId: action.nodeId, outcomeId, generation });
+					const stakes = this.stakesOfStep(snapshot, plan, action.nodeId, action.outcome);
+					runtime.settlePlanNode({
+						planId: action.planId,
+						nodeId: action.nodeId,
+						outcomeId,
+						generation,
+						...optionalStakes(stakes),
+					});
 				}
 				this.hostRevision(
 					action.planId,
@@ -555,7 +645,8 @@ export class PlanExecutor implements PlanExecutorPort {
 		if (decision.kind === "settle") {
 			this.settleJoin(planId, nodeId, decision.result);
 			for (const member of decision.cancel) {
-				const taskId = plan.nodes[member]?.release?.taskId;
+				const release = plan.nodes[member]?.release;
+				const taskId = release ? currentTaskOf(snapshot, release.taskId) : undefined;
 				if (taskId && !plan.nodes[member]?.settled) this.cancelTask(taskId, "plan_join_settled");
 			}
 			return;
@@ -597,6 +688,34 @@ export class PlanExecutor implements PlanExecutorPort {
 			});
 	}
 
+	/**
+	 * The stakes a released step's settled outcome reads: the host's claim of that attempt (receipts, changed files, findings)
+	 * and the outcome. Read here, when the step settles, and recorded on the step, so the plan's sheet never reads the branch.
+	 * A reading that fails is logged and the step settles without a level, as a proof sheet that cannot be built does: stakes
+	 * inform and never hold a step.
+	 */
+	private stakesOfStep(
+		snapshot: TaskRuntimeProjection,
+		plan: PlanRuntimeState,
+		nodeId: string,
+		outcome: Outcome,
+	): ProofStakesLevel | undefined {
+		try {
+			const release = plan.nodes[nodeId]?.release;
+			const taskId = release ? currentTaskOf(snapshot, release.taskId) : undefined;
+			const attemptId = outcome.attempts.at(-1)?.attemptId;
+			const claim =
+				taskId !== undefined && attemptId !== undefined ? this.deps.workerClaim(taskId, attemptId) : undefined;
+			return workerResultStakes({ claim, outcome }).level;
+		} catch (error) {
+			harnessLog.warn("proof", "a plan step's stakes could not be read; the step settles without a level", {
+				nodeId,
+				error: errorText(error),
+			});
+			return undefined;
+		}
+	}
+
 	/** Writes the join's full result, then records the settlement. A failed write is logged; the plan still moves. */
 	private settleJoin(planId: string, nodeId: string, result: JoinResult): void {
 		const bounded = (value: JoinResult): string => JSON.stringify(value);
@@ -615,7 +734,13 @@ export class PlanExecutor implements PlanExecutorPort {
 				harnessLog.warn("plan", "a join result could not be written", { planId, nodeId, error: errorText(error) });
 			}
 		}
-		this.deps.runtime().settlePlanJoin({ planId, nodeId, outcome: result.outcome, artifact: path });
+		this.deps.runtime().settlePlanJoin({
+			planId,
+			nodeId,
+			outcome: result.outcome,
+			artifact: path,
+			...(result.stakes !== undefined ? { stakes: result.stakes } : {}),
+		});
 		harnessLog.info("plan", "a plan join is settled", {
 			planId,
 			nodeId,
@@ -740,9 +865,20 @@ export class PlanExecutor implements PlanExecutorPort {
 			const view = planView(snapshot, intent.planId);
 			if (!view) continue;
 			const result = intent.artifact ? readJoinResult(intent.artifact) : undefined;
+			const brief = planNodeBrief(snapshot, intent.planId, intent.input.nodeId);
+			// The join's recorded level: the highest its steps settled at, read from the durable record, not the artifact.
+			const joinStakes =
+				intent.input.nodeId !== undefined
+					? snapshot.plans[intent.planId]?.nodes[intent.input.nodeId]?.join?.stakes
+					: undefined;
 			const delivery = planUpdateDelivery(
 				view,
-				{ ...intent.input, ...(result ? { result } : {}) },
+				{
+					...intent.input,
+					...(result ? { result } : {}),
+					...(brief ? { brief } : {}),
+					...(joinStakes ? { stakes: joinStakes } : {}),
+				},
 				this.deps.captureOrigin(),
 			);
 			this.delivering.add(deliveryId);
@@ -770,7 +906,8 @@ export class PlanExecutor implements PlanExecutorPort {
 		this.lastSnapshot = snapshot;
 		const observer = machineObserver();
 		const seen = new Map<string, PlanNodeState>();
-		for (const view of listPlanViews(snapshot)) {
+		const views = listPlanViews(snapshot);
+		for (const view of views) {
 			for (const node of view.nodes) {
 				const key = `${view.planId}/${node.id}`;
 				const before = this.nodeStates.get(key);
@@ -779,5 +916,12 @@ export class PlanExecutor implements PlanExecutorPort {
 			}
 		}
 		this.nodeStates = seen;
+		// The panel is a function of these views; the store commits of other work leave them as they were, so the owner's
+		// screen redraws only when a plan's visible state moves (a step starts, settles or is held, a plan opens or closes).
+		const visible = JSON.stringify(views);
+		if (visible !== this.visibleViews) {
+			this.visibleViews = visible;
+			this.deps.planChanged();
+		}
 	}
 }

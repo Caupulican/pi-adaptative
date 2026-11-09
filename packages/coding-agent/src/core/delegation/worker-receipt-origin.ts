@@ -7,6 +7,9 @@ import {
 } from "../orchestration/worker-receipt-origin.ts";
 import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 
+/** The custom type a worker receipt's origin anchor is written under (a host entry; an extension may not record it). */
+export const WORKER_RECEIPT_ORIGIN_CUSTOM_TYPE = "worker_receipt_origin";
+
 /** Capture the command's original lineage without writing during a possible replay. */
 export function captureWorkerReceiptAnchor(manager: SessionManager): WorkerReceiptAnchor {
 	return { sessionId: manager.getSessionId(), sessionFile: manager.getSessionFile(), leafId: manager.getLeafId() };
@@ -25,7 +28,7 @@ export function captureWorkerReceiptOrigin(
 	if (manager.getSessionFile() !== sessionFile || !isSessionAppendAnchorCurrent(manager, anchor)) {
 		throw new Error("Worker receipt origin changed before capture.");
 	}
-	const leafId = anchor.leafId ?? manager.appendCustomEntry("worker_receipt_origin", { version: 1 });
+	const leafId = anchor.leafId ?? manager.appendCustomEntry(WORKER_RECEIPT_ORIGIN_CUSTOM_TYPE, { version: 1 });
 	manager.flushBufferedEntries();
 	assertCurrent();
 	const origin = Object.freeze(workerReceiptOriginFromValue({ sessionId, sessionFile, leafId }));

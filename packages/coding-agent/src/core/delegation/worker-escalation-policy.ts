@@ -64,10 +64,10 @@ export interface LadderFacts {
 	readonly hostCheckable: readonly string[];
 	/** Remaining task budget (cost and active time) exceeds a rung's projected cost. */
 	readonly budgetLeft: boolean;
+	/** A rerun the original authority could not be rebuilt into: the owner decides, the ladder does not retry it. */
+	readonly rungRefusal?: string;
 	/** Q1/Q1s for a worker-stated blocker: only the owner can supply what is missing. */
 	readonly ownerOnly?: JudgmentPair;
-	/** Capacity key of the placement that could not be reached. */
-	readonly placementKey?: string;
 }
 
 export interface LadderDecision {
@@ -174,18 +174,25 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 		if (move) return done(exit, move, 2);
 		return askOwner(exit, "no other allowed model can take the task; restore the model's access or name another");
 	}
-	if (blocker === "capacity_unavailable") return done("E7", { kind: "wait_capacity", reason: "placement_room" });
+	// Only an action an executor performs is named. An interrupted attempt is suspended and the restart recovery resumes it
+	// (wait_capacity). A refused start is not re-placed by any executor, and no second placement exists to replace an
+	// unreachable one until remote placements are placed by the ladder; both exits go to the owner.
 	if (blocker === "interrupted") return done("E7", { kind: "wait_capacity", reason: "runtime_generation" });
+	if (blocker === "capacity_unavailable")
+		return askOwner(
+			"E7",
+			"the work was refused for capacity and no automatic retry places it; start it again when room is free",
+		);
 	if (blocker === "placement_unreachable")
-		return done("E7b", { kind: "replace", excludePlacement: facts.placementKey ?? "local" });
+		return askOwner("E7b", "the placement could not be reached and no other placement can take the work");
 	if (blocker === "dependency_failed") return done("E8", { kind: "abandon", reason: "dependency" });
 	if (blocker === "verification_pending") return done("E9", { kind: "verify_in_lane" });
+	// No executor places an independent verifier from the ladder yet, so the unverified result goes to the owner.
 	if (blocker === "unverified_result")
-		return done("E9b", {
-			kind: "verify_independently",
-			requirementIds:
-				coverage.uncovered.length > 0 ? coverage.uncovered.map((entry) => entry.id) : coverage.required,
-		});
+		return askOwner(
+			"E9b",
+			"the result is unverified and no independent verifier is placed automatically; verify it or accept it",
+		);
 	if (blocker === "budget_exhausted")
 		return askOwner("E10", "the task's budget is spent; raise it or accept the partial result");
 	if (coverage.uncovered.some((entry) => entry.reason === "inconclusive")) skip("E11", "inconclusive_uncovered");
@@ -195,6 +202,9 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 		if (verdict === "yes") return askOwner("E13", "the worker needs information or a decision only you hold");
 		skip("E13", verdict);
 	}
+	// A refused rerun is never retried by the ladder: the owner is asked what to do with the refused rung.
+	if (facts.rungRefusal !== undefined)
+		return askOwner("E14r", `the next try could not be started under the original authority: ${facts.rungRefusal}`);
 	const remaining = coverage.uncovered.map((entry) => entry.id);
 	const workRemains = remaining.length > 0 || coverage.required.length === 0;
 	if (workRemains) {

@@ -74,3 +74,13 @@ export function exhaustedTaskFitBlocker(verdicts: readonly WorkerTaskFitVerdict[
 		? "model_unfit"
 		: "model_fit_open";
 }
+
+/**
+ * The refusal reason code an unpinned lane carries when its candidates ran out: the code the outcome ledger maps to that
+ * blocker (`worker-outcome.ts`), so the refusal reaches the owner as the blocker the judgments named.
+ */
+export function exhaustedTaskFitReason(verdicts: readonly WorkerTaskFitVerdict[]): string {
+	return exhaustedTaskFitBlocker(verdicts) === "model_unfit"
+		? "worker_task_model_inadequate"
+		: "worker_task_model_fit_open";
+}

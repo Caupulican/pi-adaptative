@@ -1,14 +1,25 @@
 import { createHash } from "node:crypto";
 import { isAbsolute, relative } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import type { FleetDispatch, FleetScheduler } from "../fleet/fleet-types.ts";
+import {
+	type EscalationPinnedAuthority,
+	type FleetDispatch,
+	type FleetScheduler,
+	laneSubtreeId,
+} from "../fleet/fleet-types.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import { runRequirementCheck } from "../goals/requirement-checks.ts";
-import { ORCHESTRATION_THINKING_LEVELS, type WorkerExecutionAuthorityContract } from "../orchestration/contracts.ts";
+import {
+	ORCHESTRATION_THINKING_LEVELS,
+	type OrchestrationDispatchRequest,
+	type WorkerExecutionAuthorityContract,
+	type WorkerProfileExecutionContract,
+} from "../orchestration/contracts.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import type { TaskEscalationRecord, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { Placement } from "../placement/placement-types.ts";
 import { boundedText } from "../util/bounded-line.ts";
+import { isAdaptiveProfileId } from "./worker-authority-resolver.ts";
 import type { HostRequirementCheck } from "./worker-escalation-facts.ts";
 import { escalationSignature } from "./worker-escalation-policy.ts";
 import type { NextAction, Outcome } from "./worker-outcome-contract.ts";
@@ -18,43 +29,93 @@ const MAX_DISPATCH_INSTRUCTIONS_CHARS = 16 * 1024;
 const MAX_LISTED_REQUIREMENT_CHARS = 400;
 const LOCAL_PLACEMENT: Placement = { kind: "local_worker" };
 
-/** A stable digest of the authority a worker was admitted with; an escalation must carry its original's. */
-export function authorityDigest(authority: WorkerExecutionAuthorityContract): string {
-	const sorted = (values: readonly string[]) => [...values].sort();
+/**
+ * Where a worker's writes land: its cwd relative to the session cwd ("." for the session root, or an absolute path outside
+ * it), and the isolation it runs under. A worktree lane is not a location a rerun can be placed into, so it is `lane`.
+ */
+export interface RerunPlacement {
+	readonly location: string;
+	readonly isolation: "shared" | "worktree";
+}
+
+/** The placement of a worker's cwd: a lane directory is `lane` under `worktree`; any other cwd is `shared` where it sits. */
+export function placementOf(cwd: string, sessionCwd: string, isLaneDirectory: boolean): RerunPlacement {
+	if (isLaneDirectory) return { location: "lane", isolation: "worktree" };
+	const inside = relative(sessionCwd, cwd);
+	if (inside === "") return { location: ".", isolation: "shared" };
+	return { location: inside.startsWith("..") || isAbsolute(inside) ? cwd : inside, isolation: "shared" };
+}
+
+/**
+ * A stable digest of the authority a worker was admitted with and the placement it runs at. Scopes are compared relative to
+ * the worker's cwd, so a path under it reads the same wherever the cwd sits; the placement itself is part of the digest, so a
+ * rerun that lands elsewhere, or in another isolation, digests differently.
+ */
+export function authorityDigest(authority: WorkerExecutionAuthorityContract, placement: RerunPlacement): string {
+	const cwd = authority.cwd;
+	const location = (path: string): string => {
+		if (cwd === undefined || !isAbsolute(path)) return path;
+		const inside = relative(cwd, path);
+		if (inside === "") return ".";
+		return inside.startsWith("..") || isAbsolute(inside) ? path : inside;
+	};
+	const sorted = (values: readonly string[]) => values.map(location).sort();
 	const material = JSON.stringify({
-		capabilities: sorted(authority.capabilities),
-		toolNames: sorted(authority.toolNames),
+		placement: { location: placement.location, isolation: placement.isolation },
+		capabilities: [...authority.capabilities].sort(),
+		toolNames: [...authority.toolNames].sort(),
 		readPaths: sorted(authority.readPaths),
 		writePaths: sorted(authority.writePaths),
 		deniedPaths: sorted(authority.deniedPaths),
 		budget: Object.entries(authority.budget).sort(([left], [right]) => left.localeCompare(right)),
-		cwd: authority.cwd ?? null,
 	});
 	return createHash("sha256").update(material).digest("hex").slice(0, 32);
 }
 
-/**
- * The authority digest of the first attempt behind `outcomeId`: the fleet's `escalationAuthorityDigest` dependency.
- * Undefined when no task of the projection holds that outcome.
- */
-export function escalationAuthorityDigest(snapshot: TaskRuntimeProjection, outcomeId: string): string | undefined {
-	const task = Object.values(snapshot.tasks).find((candidate) => candidate.outcome?.outcomeId === outcomeId);
-	const outcome = task?.outcome;
-	if (!task || !outcome || "unsupported" in outcome) return undefined;
-	const firstAttemptId = outcome.attempts[0]?.attemptId ?? task.attemptIds[0];
-	const authority = firstAttemptId
-		? snapshot.attempts[firstAttemptId]?.dispatch.executionContract?.worker.authority
-		: undefined;
-	return authority ? authorityDigest(authority) : undefined;
+/** Paths relative to a directory, the directory itself as "."; a path outside it stays absolute. */
+function relativeToDirectory(directory: string, paths: readonly string[]): string[] {
+	return paths.map((path) => {
+		const inside = relative(directory, path);
+		if (inside === "") return ".";
+		return inside.startsWith("..") || isAbsolute(inside) ? path : inside;
+	});
+}
+
+/** The pinned authority of an original attempt: what the rerun's request must restate to compile the same authority. */
+function pinnedAuthorityOf(
+	origin: OrchestrationDispatchRequest,
+	contract: WorkerProfileExecutionContract,
+	placement: RerunPlacement,
+	originCwd: string,
+): EscalationPinnedAuthority {
+	const profileId = contract.profile.profileId;
+	const readPaths = contract.profile.readPaths;
+	return {
+		...(isAdaptiveProfileId(profileId) ? {} : { profileId }),
+		...(origin.parentAgentId ? { parentAgentId: origin.parentAgentId } : {}),
+		...(contract.soul !== undefined ? { botSoul: contract.soul } : {}),
+		readOnly: contract.profile.readOnly === true,
+		...(contract.profile.shellReadOnly === true ? { shellReadOnly: true } : {}),
+		location: placement.location,
+		...(readPaths !== undefined ? { readScope: relativeToDirectory(originCwd, readPaths) } : {}),
+		budget: { ...contract.profile.budget },
+		// The rerun keeps who wrote its words and where its results go: a third party's taint is never laundered by a rerun.
+		...(origin.turnOrigin ? { turnOrigin: origin.turnOrigin } : {}),
+		...(origin.receiptOrigin ? { receiptOrigin: origin.receiptOrigin } : {}),
+	};
 }
 
 export interface WorkerEscalationDeps {
+	/** Whether a directory is a worktree lane: a rerun of a lane's original cannot be placed back into that lane yet. */
+	isLaneDirectory(directory: string): boolean;
 	readonly runtime: DurableTaskRuntime;
 	readonly fleet: Pick<FleetScheduler, "prepare" | "admit">;
 	goalState(): GoalState | undefined;
 	cwd(): string;
 	/** Re-record the attempt's outcome with the host checks just run. */
 	recordChecks(attemptId: string, checks: readonly HostRequirementCheck[]): void;
+	/** Record that a rung could not start under the original authority: the ladder then asks the owner. */
+	recordRefusal(attemptId: string, detail: string): void;
 	readonly signal: AbortSignal;
 	now?(): number;
 }
@@ -113,6 +174,19 @@ export class WorkerEscalation {
 		if (!task || this.inFlight.has(key)) return;
 		if (task.escalations?.some((entry) => entry.outcomeId === outcome.outcomeId && entry.rung === action.rung))
 			return;
+		const firstAttemptId = outcome.attempts[0]?.attemptId;
+		const originCwd = firstAttemptId
+			? snapshot.attempts[firstAttemptId]?.dispatch.executionContract?.worker.authority.cwd
+			: undefined;
+		if (originCwd !== undefined && this.deps.isLaneDirectory(originCwd)) {
+			const refusedAttemptId = outcome.attempts.at(-1)?.attemptId;
+			if (refusedAttemptId !== undefined)
+				this.deps.recordRefusal(
+					refusedAttemptId,
+					"the original ran in its own worktree lane, and a rerun cannot be placed back into that lane yet",
+				);
+			return;
+		}
 		const dispatch = this.dispatchFor(snapshot, outcome, action, key);
 		if (!dispatch) {
 			harnessLog.info("escalation", "an escalation rung has no admitted contract to repeat", {
@@ -127,6 +201,9 @@ export class WorkerEscalation {
 			if (this.deps.signal.aborted) return;
 			const decision = prepared.kind === "prepared" ? this.deps.fleet.admit(dispatch, LOCAL_PLACEMENT) : prepared;
 			if (decision.kind === "refused") {
+				const refusedAttemptId = outcome.attempts.at(-1)?.attemptId;
+				if (decision.reason === "authority_digest_mismatch" && refusedAttemptId !== undefined)
+					this.deps.recordRefusal(refusedAttemptId, decision.detail);
 				harnessLog.info("escalation", "the fleet refused an escalation rung", {
 					outcomeId: outcome.outcomeId,
 					rung: action.rung,
@@ -188,16 +265,19 @@ export class WorkerEscalation {
 		const [provider, ...rest] = action.modelRef.split("/");
 		const thinking = ORCHESTRATION_THINKING_LEVELS.find((level) => level === action.thinking);
 		if (!task || !attempt || !contract || !provider || rest.length === 0 || !thinking) return undefined;
-		const cwd = this.deps.cwd();
 		const writes = contract.authority.writePaths.length > 0 && contract.profile.readOnly !== true;
+		// The rerun is rebuilt from the attempt the outcome was recorded under: its authority, scope, placement and origin.
 		const firstAttemptId = outcome.attempts[0]?.attemptId ?? attempt.attemptId;
-		const original = snapshot.attempts[firstAttemptId]?.dispatch.executionContract?.worker.authority;
+		const origin = snapshot.attempts[firstAttemptId]?.dispatch ?? attempt.dispatch;
+		const originContract = origin.executionContract?.worker ?? contract;
+		const originCwd = originContract.authority.cwd ?? this.deps.cwd();
+		const placement = placementOf(originCwd, this.deps.cwd(), this.deps.isLaneDirectory(originCwd));
 		return {
 			idempotencyKey,
 			demand: {
 				nodeId: outcome.nodeId,
 				objectiveId: outcome.objectiveId,
-				subtreeId: outcome.objectiveId,
+				subtreeId: laneSubtreeId(origin.parentAgentId),
 				priority: 1,
 				onCriticalPath: false,
 				writes,
@@ -205,10 +285,7 @@ export class WorkerEscalation {
 			},
 			instructions: this.narrowedInstructions(outcome, action, attempt.dispatch.instructions),
 			...(attempt.dispatch.brief ? { brief: attempt.dispatch.brief } : {}),
-			writeScope: contract.authority.writePaths.map((path) => {
-				const inside = relative(cwd, path);
-				return inside && !inside.startsWith("..") && !isAbsolute(inside) ? inside : path;
-			}),
+			writeScope: relativeToDirectory(originCwd, originContract.authority.writePaths),
 			isolation: "shared",
 			requirementIds: action.requirementIds,
 			dependsOnTaskIds: [],
@@ -217,9 +294,10 @@ export class WorkerEscalation {
 			escalation: {
 				outcomeId: outcome.outcomeId,
 				rung: action.rung,
-				authorityDigest: authorityDigest(original ?? contract.authority),
+				authorityDigest: authorityDigest(originContract.authority, placement),
 				previousPlacement: LOCAL_PLACEMENT,
 				requirementIds: [...action.requirementIds],
+				pinned: pinnedAuthorityOf(origin, originContract, placement, originCwd),
 				...(task.task.status === "completed" ? { supersedesTaskId: task.task.taskId } : {}),
 			},
 		};

@@ -106,7 +106,7 @@ export class WorkerOutcomeRecorder {
 	record(
 		attemptId: string,
 		claim?: WorkerClaim,
-		facts?: Pick<ProjectOutcomeInput, "requirementChecks" | "ownerOnly">,
+		facts?: Pick<ProjectOutcomeInput, "requirementChecks" | "ownerOnly" | "rungRefusal">,
 	): Outcome | undefined {
 		const taskId = this.runtime.getSnapshot().attempts[attemptId]?.taskId;
 		if (taskId === undefined) return undefined;

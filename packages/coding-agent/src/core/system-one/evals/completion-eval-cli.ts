@@ -7,21 +7,13 @@
  * It spends System One evaluations (two per attempt), so the default is 5 repeats per case.
  */
 import { writeFileSync } from "node:fs";
-import { pathToFileURL } from "node:url";
-import { AuthStorage } from "../../auth-storage.ts";
-import { ModelRegistry } from "../../model-registry.ts";
-import { SystemOneReviewer } from "../../review/typesafe-reviewer.ts";
-import { createCredentialTextRedactor, redactCredentialValues } from "../../secrets/credential-manager.ts";
-import { SettingsManager } from "../../settings-manager.ts";
-import { systemOneAccessFromSession } from "../access.ts";
-import { SystemOneJevAdapter } from "../adapter.ts";
-import { createSystemOneConfig } from "../config.ts";
 import {
 	COMPLETION_EVAL_CASES,
 	COMPLETION_EVAL_HELDOUT_CASES,
 	type CompletionEvalSummary,
 	runCompletionEval,
 } from "./completion-eval.ts";
+import { resolveSystemOneEvalAdapter, runEvalCliEntry } from "./eval-cli.ts";
 
 /** Completed work proceeds; planted gaps must refuse completion. */
 export const COMPLETION_EVAL_THRESHOLDS = Object.freeze({ doneAccepted: 0.95, incompleteRejected: 1 });
@@ -67,31 +59,12 @@ async function main(argv: string[]): Promise<number> {
 					(testCase) => testCase.id === argv[caseIndex + 1],
 				)
 			: pool;
-	const settings = SettingsManager.create(process.cwd());
-	const authStorage = AuthStorage.create();
-	const modelRegistry = ModelRegistry.create(authStorage);
-	const credentialBoundary = {
-		getSensitiveValues: async () => modelRegistry.getKnownCredentialValues(),
-		createSensitiveTextRedactor: (additionalValues: readonly string[] = []) =>
-			createCredentialTextRedactor([...modelRegistry.getKnownCredentialValues(), ...additionalValues]),
-		redactSensitiveText: (text: string, additionalValues: readonly string[] = []) =>
-			redactCredentialValues(text, [...modelRegistry.getKnownCredentialValues(), ...additionalValues]),
-	};
-	const access = systemOneAccessFromSession(settings, authStorage);
-	const outcome = await access.resolve();
-	if (outcome.kind !== "ready") {
-		process.stderr.write(`System One is not configured for this user; ${outcome.setup}.\n`);
+	const setup = await resolveSystemOneEvalAdapter();
+	if (setup.kind !== "ready") {
+		process.stderr.write(`System One is not configured for this user; ${setup.setup}.\n`);
 		return 2;
 	}
-	const adapter = new SystemOneJevAdapter(
-		new SystemOneReviewer({ access, credentialBoundary }),
-		createSystemOneConfig({ enabled: true }),
-		{
-			access,
-			getUserKeys: () => access.keys(),
-		},
-	);
-	const summary = await runCompletionEval(adapter, {
+	const summary = await runCompletionEval(setup.adapter, {
 		repeats,
 		cases,
 		onRun: (run) => process.stderr.write(`${run.caseId}: ${run.verdicts.join(", ")}\n`),
@@ -106,12 +79,4 @@ async function main(argv: string[]): Promise<number> {
 	return passed ? 0 : 1;
 }
 
-if (process.argv[1] && import.meta.url === pathToFileURL(process.argv[1]).href) {
-	main(process.argv.slice(2)).then(
-		(code) => process.exit(code),
-		(error) => {
-			process.stderr.write(`${error instanceof Error ? (error.stack ?? error.message) : String(error)}\n`);
-			process.exit(2);
-		},
-	);
-}
+runEvalCliEntry(import.meta.url, main);

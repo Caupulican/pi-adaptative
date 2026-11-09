@@ -55,11 +55,24 @@ export interface FleetLocalStartPort {
 /** The skip reason of a prepared start a runtime replacement held back; the dispatch stays prepared. */
 export const LOCAL_START_RUNTIME_REPLACING = "runtime_generation_replacing";
 
+/**
+ * The skip reason of a prepared escalation whose admitted authority differs from the authority its outcome was recorded
+ * under (`delegation/worker-start-phases.ts` decides it at preparation, before anything is materialized).
+ */
+export const ESCALATION_AUTHORITY_MISMATCH = "escalation_authority_mismatch";
+
 /** Skip reasons that mean the fleet's own bounds held the start, not the worker's preparation. */
 const CEILING_SKIP_REASONS =
 	/^(worker_dispatch_queue_full|worker_delegation_already_running|worker_fleet_|worker_identity_|runtime_generation_)/;
 
 export function refusalForSkip(skipReason: string): FleetRefusal {
+	if (skipReason === ESCALATION_AUTHORITY_MISMATCH)
+		return {
+			kind: "refused",
+			reason: "authority_digest_mismatch",
+			blocker: "owner_authority_required",
+			detail: "the escalation's admitted authority differs from the authority its outcome was recorded under",
+		};
 	return CEILING_SKIP_REASONS.test(skipReason)
 		? { kind: "refused", reason: "ceiling", blocker: "capacity_unavailable", detail: skipReason }
 		: { kind: "refused", reason: "preflight", blocker: "preflight_failed", detail: skipReason };

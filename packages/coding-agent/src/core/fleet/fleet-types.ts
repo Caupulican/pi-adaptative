@@ -3,10 +3,13 @@
  * room it reports back. Every term here is a code fact; the scheduler never asks a model whether there is room.
  */
 
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { TaskBrief } from "../comms/comms-records.ts";
-import type { OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
+import type { OrchestrationThinkingLevel, RiskBudget } from "../orchestration/contracts.ts";
+import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { PlacementCapacitySource } from "../placement/capacity-source.ts";
 import type { Placement } from "../placement/placement-types.ts";
+import type { PlanNodeDemand } from "../plan/plan-graph.ts";
 
 export type WeightClass = "probe" | "read" | "write" | "heavy";
 export type ExecutionBackend = "in_process_lane" | "child_process" | "remote";
@@ -56,20 +59,8 @@ export type FleetBlockerCode =
 	| "owner_authority_required"
 	| "preflight_failed";
 
-/** What a plan node demands of the fleet. Owned by `plan/plan-graph.ts` once that module exists; mirrored here until then. */
-export interface PlanNodeDemand {
-	readonly nodeId: string;
-	readonly objectiveId: string;
-	readonly subtreeId: string;
-	/** 0 (background) to 3 (verifier, critical). */
-	readonly priority: FleetPriority;
-	readonly onCriticalPath: boolean;
-	readonly writes: boolean;
-	readonly heavy: boolean;
-	readonly estimatedTokens?: number;
-	readonly prefixFingerprint?: string;
-	readonly routeHint?: string;
-}
+/** What a plan node demands of the fleet: defined once in `plan/plan-graph.ts`, re-exported for the fleet's readers. */
+export type { PlanNodeDemand };
 
 export type FleetPriority = 0 | 1 | 2 | 3;
 
@@ -90,6 +81,10 @@ export interface FleetDispatch {
 	/** Explicit or pinned; otherwise a route set is computed. */
 	model?: { provider: string; modelId: string };
 	plan?: { planId: string; version: number; nodeId: string };
+	/**
+	 * An escalation rung's rerun. `writeScope` and `pinned` are relative to the original attempt's own cwd (the cwd entry
+	 * itself is ".") and are rebuilt against the session cwd when the rerun is requested.
+	 */
 	escalation?: {
 		outcomeId: string;
 		rung: 1 | 2;
@@ -98,9 +93,35 @@ export interface FleetDispatch {
 		requirementIds: string[];
 		notBefore?: string;
 		supersedesTaskId?: string;
+		pinned: EscalationPinnedAuthority;
 	};
 	/** Brokered starts. */
 	delegation?: { objectiveId: string; leaderAttemptId: string };
+}
+
+/**
+ * The authority an escalation's original attempt was admitted with, rebuilt into the rerun's request. What the outcome was
+ * recorded under is this set plus the write and read scope; an admission that rebuilds to another authority is refused.
+ */
+export interface EscalationPinnedAuthority {
+	/** The registered profile the original ran under; absent when it was compiled from an adaptive profile. */
+	readonly profileId?: string;
+	readonly parentAgentId?: string;
+	readonly botSoul?: string;
+	readonly readOnly: boolean;
+	readonly shellReadOnly?: boolean;
+	/**
+	 * Where the original's cwd sat: relative to the session cwd ("." for the session root) or an absolute path outside it.
+	 * The rerun is admitted with it as its workspace, so its scopes resolve where the original's did.
+	 */
+	readonly location: string;
+	/** Read roots relative to the original's cwd; absent keeps the default read scope. */
+	readonly readScope?: readonly string[];
+	readonly budget: RiskBudget;
+	/** Who wrote the original's words (a third party's taint): carried so a rerun never launders it. */
+	readonly turnOrigin?: TurnOriginRecord;
+	/** Where the original's result is delivered: carried so a rerun answers the same parent. */
+	readonly receiptOrigin?: WorkerReceiptOrigin;
 }
 
 export type AdmitDecision =
@@ -197,6 +218,15 @@ export interface FleetScheduler {
 }
 
 /** DRR cost of one dispatch of a class: a heavy node spends eight probes' worth of its flow's quantum. */
+/**
+ * The fleet subtree a worker lane is charged to: its parent agent's id, or the session root subtree "" when it has no
+ * parent. The one derivation the queue's lane flow and a plan step's demand both read, so a prepared dispatch and its
+ * queued lane always carry the same subtree.
+ */
+export function laneSubtreeId(parentAgentId: string | undefined): string {
+	return parentAgentId ?? "";
+}
+
 export const WEIGHT_CLASS_COST: Readonly<Record<WeightClass, number>> = { probe: 1, read: 2, write: 4, heavy: 8 };
 
 /** One term of the room formula: how many more nodes it admits, the wait key that wakes it, and when it reopens. */

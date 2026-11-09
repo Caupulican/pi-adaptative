@@ -55,6 +55,7 @@ import {
 	WORKER_RESULT_STATUSES,
 	type WorkerResultContract,
 } from "./contracts.ts";
+import { describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
 import {
 	admittedTurnOriginFromValue,
 	agentFromPayload,
@@ -546,7 +547,7 @@ function applyAttemptQueued(state: TaskRuntimeProjection, payload: JsonObject, o
 	const task = tasks[taskId];
 	if (!task) throw new DurableTaskRuntimeError(`Attempt '${attemptId}' references an unknown task.`);
 	if (attempts[attemptId]) throw new DurableTaskRuntimeError(`Attempt '${attemptId}' was queued more than once.`);
-	assertRecordHasCapacity(attempts, MAX_ORCHESTRATION_ATTEMPTS, "attempt");
+	assertRecordHasCapacity(attempts, MAX_ORCHESTRATION_ATTEMPTS, "attempt", () => describeAttemptLimit(state));
 	assertIdentifierListHasCapacity(task.attemptIds, MAX_ORCHESTRATION_ATTEMPTS, "task attempt list");
 	const active = activeTaskAttempt(state, task);
 	if (active) {
@@ -1210,7 +1211,9 @@ export function reduceOrchestrationEvent(
 			if (objectives[objective.objectiveId]) {
 				throw new DurableTaskRuntimeError(`Objective '${objective.objectiveId}' was created more than once.`);
 			}
-			assertRecordHasCapacity(objectives, MAX_ORCHESTRATION_OBJECTIVES, "objective");
+			assertRecordHasCapacity(objectives, MAX_ORCHESTRATION_OBJECTIVES, "objective", () =>
+				describeObjectiveLimit(state),
+			);
 			objectives[objective.objectiveId] = { objective, taskIds: [], evidence: [] };
 			break;
 		}

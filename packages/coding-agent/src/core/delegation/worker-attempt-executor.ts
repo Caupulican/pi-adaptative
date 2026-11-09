@@ -66,6 +66,7 @@ import {
 	reportWorthRequesting,
 	SUBMIT_REPORT_TOOL_NAME,
 	type SubmittedWorkerReport,
+	type WorkerReportCapabilities,
 	type WorkerReportCapture,
 	type WorkerReportContext,
 	worthAFollowUpTurn,
@@ -245,6 +246,8 @@ export interface WorkerAttemptExecutorOptions {
 	requirementIds?: readonly string[];
 	/** Ask a worker that declares itself done for a checkable report (see worker-report.ts). Off keeps today's text path. */
 	reportHandshake?: boolean;
+	/** What the worker's submit_report may declare, from its durable contract (one source for the tool and the recovery check). */
+	reportCapabilities: WorkerReportCapabilities;
 	recoveredTerminal?: RecoveredWorkerTerminalCompletion;
 	retentionPolicy?: WorkerConversationRetentionPolicy;
 	signal?: AbortSignal;
@@ -536,13 +539,16 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 		writeCapable: options.executionPlan.writeEnabled,
 		verifier: options.verificationSubjectTaskId !== undefined,
 	};
-	const submitReportTool = wrapToolExecution(createSubmitReportTool(reportCapture), (executor) => ({
-		...executor,
-		execute: (...args) => {
-			options.toolSurface.assertHealthy();
-			return executor.execute(...args);
-		},
-	}));
+	const submitReportTool = wrapToolExecution(
+		createSubmitReportTool(reportCapture, options.reportCapabilities),
+		(executor) => ({
+			...executor,
+			execute: (...args) => {
+				options.toolSurface.assertHealthy();
+				return executor.execute(...args);
+			},
+		}),
+	);
 	const withEventControl = <T>(operation: () => T): T => {
 		options.signal?.throwIfAborted();
 		options.toolSurface.assertHealthy();

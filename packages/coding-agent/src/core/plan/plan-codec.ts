@@ -11,6 +11,7 @@ import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "../orchestration/contracts.
 import { exactRecord, record } from "../orchestration/task-runtime-projection.ts";
 import { DurableTaskRuntimeError } from "../orchestration/task-runtime-state.ts";
 import type { Placement, PlacementPin } from "../placement/placement-types.ts";
+import { PROOF_STAKES_LEVELS, type ProofStakesLevel } from "../proof/stakes-levels.ts";
 import {
 	PLAN_CLOSE_STATUSES,
 	PLAN_HOLD_REASONS,
@@ -51,6 +52,11 @@ function optionalText(value: unknown, maxChars: number, label: string): string |
 
 function id(value: unknown, label: string): string {
 	return text(value, MAX_ORCHESTRATION_IDENTIFIER_LENGTH, label);
+}
+
+/** A recorded stakes level; absent in a record written before stakes were kept. */
+function optionalStakes(value: unknown, label: string): ProofStakesLevel | undefined {
+	return value === undefined ? undefined : oneOf(value, PROOF_STAKES_LEVELS, label);
 }
 
 function nodeId(value: unknown, label: string): string {
@@ -272,15 +278,19 @@ export interface PlanNodeSettledPayload {
 	readonly nodeId: string;
 	readonly outcomeId: string;
 	readonly generation: number;
+	/** The stakes the step's worker result read when it settled (see {@link PlanNodeSettlement}). */
+	readonly stakes?: ProofStakesLevel;
 }
 
 export function planNodeSettledFromValue(value: unknown, label: string): PlanNodeSettledPayload {
-	const input = exactRecord(value, label, ["planId", "nodeId", "outcomeId", "generation"]);
+	const input = exactRecord(value, label, ["planId", "nodeId", "outcomeId", "generation", "stakes"]);
+	const stakes = optionalStakes(input.stakes, `${label}.stakes`);
 	return {
 		planId: id(input.planId, `${label}.planId`),
 		nodeId: nodeId(input.nodeId, `${label}.nodeId`),
 		outcomeId: id(input.outcomeId, `${label}.outcomeId`),
 		generation: positive(input.generation, `${label}.generation`),
+		...(stakes !== undefined ? { stakes } : {}),
 	};
 }
 
@@ -310,15 +320,19 @@ export interface PlanJoinSettledPayload {
 	readonly nodeId: string;
 	readonly outcome: PlanJoinSettlement["outcome"];
 	readonly artifact: string;
+	/** The highest stakes the join's members (and its own worker) recorded (see {@link PlanJoinSettlement}). */
+	readonly stakes?: ProofStakesLevel;
 }
 
 export function planJoinSettledFromValue(value: unknown, label: string): PlanJoinSettledPayload {
-	const input = exactRecord(value, label, ["planId", "nodeId", "outcome", "artifact"]);
+	const input = exactRecord(value, label, ["planId", "nodeId", "outcome", "artifact", "stakes"]);
+	const stakes = optionalStakes(input.stakes, `${label}.stakes`);
 	return {
 		planId: id(input.planId, `${label}.planId`),
 		nodeId: nodeId(input.nodeId, `${label}.nodeId`),
 		outcome: storedOutcomeFromValue(input.outcome, `${label}.outcome`),
 		artifact: text(input.artifact, PLAN_LIMITS.artifactChars, `${label}.artifact`),
+		...(stakes !== undefined ? { stakes } : {}),
 	};
 }
 
@@ -350,11 +364,13 @@ function releaseFromValue(value: unknown, label: string): PlanNodeRelease {
 }
 
 function settlementFromValue(value: unknown, label: string): PlanNodeSettlement {
-	const input = exactRecord(value, label, ["outcomeId", "generation", "settledAt"]);
+	const input = exactRecord(value, label, ["outcomeId", "generation", "settledAt", "stakes"]);
+	const stakes = optionalStakes(input.stakes, `${label}.stakes`);
 	return {
 		outcomeId: id(input.outcomeId, `${label}.outcomeId`),
 		generation: positive(input.generation, `${label}.generation`),
 		settledAt: id(input.settledAt, `${label}.settledAt`),
+		...(stakes !== undefined ? { stakes } : {}),
 	};
 }
 
@@ -369,12 +385,14 @@ function holdFromValue(value: unknown, label: string): PlanNodeHold {
 }
 
 function joinSettlementFromValue(value: unknown, label: string): PlanJoinSettlement {
-	const input = exactRecord(value, label, ["outcome", "artifact", "n", "settledAt"]);
+	const input = exactRecord(value, label, ["outcome", "artifact", "n", "settledAt", "stakes"]);
+	const stakes = optionalStakes(input.stakes, `${label}.stakes`);
 	return {
 		outcome: storedOutcomeFromValue(input.outcome, `${label}.outcome`),
 		artifact: text(input.artifact, PLAN_LIMITS.artifactChars, `${label}.artifact`),
 		n: positive(input.n, `${label}.n`),
 		settledAt: id(input.settledAt, `${label}.settledAt`),
+		...(stakes !== undefined ? { stakes } : {}),
 	};
 }
 

@@ -25,6 +25,7 @@ import type {
 	WorkerReportRequirementStatus,
 	WorkerSubmittedReport,
 } from "../autonomy/contracts.ts";
+import type { OrchestrationDelegationLimits } from "../orchestration/contracts.ts";
 import { boundedText, quotedSpan } from "../util/bounded-line.ts";
 import {
 	MAX_WORKER_CLAIM_BLOCKER_CHARS,
@@ -37,8 +38,14 @@ import {
 	MAX_WORKER_REPORT_REFS,
 	MAX_WORKER_REPORT_TEXT_CHARS,
 } from "./worker-claim.ts";
-import { LEAF_WORKER_DECLARABLE_BLOCKERS } from "./worker-outcome-contract.ts";
+import { delegationLimitsGrantChildren } from "./worker-nested-start.ts";
+import {
+	LEAF_WORKER_DECLARABLE_BLOCKERS,
+	WORKER_DECLARABLE_BLOCKERS,
+	type WorkerDeclarableBlocker,
+} from "./worker-outcome-contract.ts";
 import { workerCommandEvidence, workerCommandOutcome } from "./worker-receipts.ts";
+import { boundWorkerReportProgress, workerReportProgressSchema } from "./worker-report-progress.ts";
 
 export const SUBMIT_REPORT_TOOL_NAME = "submit_report";
 
@@ -61,118 +68,189 @@ const requirementStatus = Type.Union([
 	Type.Literal("not_applicable"),
 ]);
 
-export const submitReportParameters = Type.Object(
-	{
-		status: Type.Union([Type.Literal("completed"), Type.Literal("blocked")], {
-			description: "completed when the task is done; blocked when something outside your grant stops it.",
-		}),
-		summary: Type.String({ minLength: 1, description: "What you did or concluded, in a few sentences." }),
-		requirements: Type.Optional(
-			Type.Array(
-				Type.Object(
-					{
-						id: Type.String({ description: "A task requirement id, exactly as listed in the report request." }),
-						status: requirementStatus,
-						evidence: Type.Optional(
-							Type.Array(Type.String(), {
-								description:
-									"What shows it: stable receipt names (c-...) of commands you ran, changed file paths, or finding ids.",
+function submitReportSchema(blockerCodes: readonly WorkerDeclarableBlocker[]) {
+	return Type.Object(
+		{
+			status: Type.Union([Type.Literal("completed"), Type.Literal("blocked")], {
+				description: "completed when the task is done; blocked when something outside your grant stops it.",
+			}),
+			summary: Type.String({ minLength: 1, description: "What you did or concluded, in a few sentences." }),
+			requirements: Type.Optional(
+				Type.Array(
+					Type.Object(
+						{
+							id: Type.String({
+								description: "A task requirement id, exactly as listed in the report request.",
 							}),
-						),
-						note: Type.Optional(Type.String()),
-					},
-					{ additionalProperties: false },
+							status: requirementStatus,
+							evidence: Type.Optional(
+								Type.Array(Type.String(), {
+									description:
+										"What shows it: stable receipt names (c-...) of commands you ran, changed file paths, or finding ids.",
+								}),
+							),
+							note: Type.Optional(Type.String()),
+						},
+						{ additionalProperties: false },
+					),
+					{ description: "One entry per task requirement id." },
 				),
-				{ description: "One entry per task requirement id." },
 			),
-		),
-		checks: Type.Optional(
-			Type.Array(
-				Type.Object(
-					{
-						command: Type.String({
-							description:
-								"Exact command or code, preserving whitespace; for run_process use executable/args JSON.",
-						}),
-						receiptId: Type.Optional(
-							Type.String({
+			checks: Type.Optional(
+				Type.Array(
+					Type.Object(
+						{
+							command: Type.String({
 								description:
-									"The stable host receipt name (c-...) of that command, when you were shown one. Omit it otherwise: the host matches the exact command to its own record.",
+									"Exact command or code, preserving whitespace; for run_process use executable/args JSON.",
 							}),
-						),
-						result: Type.Union([Type.Literal("passed"), Type.Literal("failed"), Type.Literal("not_run")]),
-						note: Type.Optional(Type.String()),
-					},
-					{ additionalProperties: false },
-				),
-				{
-					description:
-						"The shell commands (bash, run_process) you ran or chose not to run, with what each showed. Reading files with read, grep, find or ls is not a check: say it in the summary.",
-				},
-			),
-		),
-		changes: Type.Optional(
-			Type.Array(
-				Type.Object(
+							receiptId: Type.Optional(
+								Type.String({
+									description:
+										"The stable host receipt name (c-...) of that command, when you were shown one. Omit it otherwise: the host matches the exact command to its own record.",
+								}),
+							),
+							result: Type.Union([Type.Literal("passed"), Type.Literal("failed"), Type.Literal("not_run")]),
+							note: Type.Optional(Type.String()),
+						},
+						{ additionalProperties: false },
+					),
 					{
-						file: Type.String(),
-						what: Type.String(),
-						serves: Type.Optional(
-							Type.Array(Type.String(), { description: "Requirement ids this change serves." }),
-						),
+						description:
+							"The shell commands (bash, run_process) you ran or chose not to run, with what each showed. Reading files with read, grep, find or ls is not a check: say it in the summary.",
 					},
-					{ additionalProperties: false },
 				),
-				{ description: "Each file you changed and what the change does." },
 			),
-		),
-		assumptions: Type.Optional(Type.Array(Type.String())),
-		regressions: Type.Optional(Type.Array(Type.String(), { description: "Behavior this change could break." })),
-		remaining: Type.Optional(Type.Array(Type.String(), { description: "What is not done yet." })),
-		blockers: Type.Optional(Type.Array(Type.String())),
-		blockerCode: Type.Optional(
-			Type.Union(
-				LEAF_WORKER_DECLARABLE_BLOCKERS.map((code) => Type.Literal(code)),
-				{
+			changes: Type.Optional(
+				Type.Array(
+					Type.Object(
+						{
+							file: Type.String(),
+							what: Type.String(),
+							serves: Type.Optional(
+								Type.Array(Type.String(), { description: "Requirement ids this change serves." }),
+							),
+						},
+						{ additionalProperties: false },
+					),
+					{ description: "Each file you changed and what the change does." },
+				),
+			),
+			assumptions: Type.Optional(Type.Array(Type.String())),
+			regressions: Type.Optional(Type.Array(Type.String(), { description: "Behavior this change could break." })),
+			remaining: Type.Optional(Type.Array(Type.String(), { description: "What is not done yet." })),
+			blockers: Type.Optional(Type.Array(Type.String())),
+			blockerCode: Type.Optional(
+				Type.Union(
+					blockerCodes.map((code) => Type.Literal(code)),
+					{
+						description:
+							"With a blocker only: missing_input (an input you need was not given), dependency_wrong (something the task depends on is wrong), needs_owner_decision (only the owner can choose), scope_denied (the work needs files or tools outside your grant), owner_authority_required (the owner must permit it), external_unavailable (an outside service is down).",
+					},
+				),
+			),
+			inconclusive: Type.Optional(
+				Type.Array(Type.String(), { description: "Findings you could not settle: what is missing." }),
+			),
+			inconclusiveRequirements: Type.Optional(
+				Type.Array(
+					Type.Object(
+						{
+							requirementId: Type.String({
+								description:
+									"The requirement id this unsettled item belongs to, exactly as listed in the report request.",
+							}),
+							item: Type.String({ description: "What is still unsettled for it and what is missing." }),
+						},
+						{ additionalProperties: false },
+					),
+					{
+						description:
+							"Unsettled items that belong to one requirement. Each names that requirement, so the host keeps it open instead of asking the owner.",
+					},
+				),
+			),
+			findings: Type.Optional(
+				Type.Array(
+					Type.Object(
+						{ summary: Type.String(), confidence: Type.Optional(Type.Number()) },
+						{ additionalProperties: false },
+					),
+				),
+			),
+			verdict: Type.Optional(
+				Type.Union([Type.Literal("accepted"), Type.Literal("rejected")], {
+					description: "Verifier workers only: whether the subject's evidence proves it.",
+				}),
+			),
+			reasonCodes: Type.Optional(Type.Array(Type.String())),
+			ownerUpdate: Type.Optional(
+				Type.Union([Type.Literal("needed"), Type.Literal("none")], {
 					description:
-						"With a blocker only: missing_input (an input you need was not given), dependency_wrong (something the task depends on is wrong), needs_owner_decision (only the owner can choose), scope_denied (the work needs files or tools outside your grant), owner_authority_required (the owner must permit it), external_unavailable (an outside service is down).",
-				},
+						"none when the result needs no attention from the owner now: nothing failed, changed or needs a decision (for example a scheduled check that found nothing new). needed otherwise; omit when unsure.",
+				}),
 			),
-		),
-		inconclusive: Type.Optional(
-			Type.Array(Type.String(), { description: "Findings you could not settle: what is missing." }),
-		),
-		findings: Type.Optional(
-			Type.Array(
-				Type.Object(
-					{ summary: Type.String(), confidence: Type.Optional(Type.Number()) },
-					{ additionalProperties: false },
-				),
+			conditionMet: Type.Optional(
+				Type.Boolean({
+					description:
+						"Only for a routine run whose brief names the end the owner stated: true when this run found that end reached (the host then removes the routine), false when not. Omit otherwise.",
+				}),
 			),
-		),
-		verdict: Type.Optional(
-			Type.Union([Type.Literal("accepted"), Type.Literal("rejected")], {
-				description: "Verifier workers only: whether the subject's evidence proves it.",
-			}),
-		),
-		reasonCodes: Type.Optional(Type.Array(Type.String())),
-		ownerUpdate: Type.Optional(
-			Type.Union([Type.Literal("needed"), Type.Literal("none")], {
-				description:
-					"none when the result needs no attention from the owner now: nothing failed, changed or needs a decision (for example a scheduled check that found nothing new). needed otherwise; omit when unsure.",
-			}),
-		),
-		conditionMet: Type.Optional(
-			Type.Boolean({
-				description:
-					"Only for a routine run whose brief names the end the owner stated: true when this run found that end reached (the host then removes the routine), false when not. Omit otherwise.",
-			}),
-		),
-	},
-	{ additionalProperties: false },
-);
+		},
+		{ additionalProperties: false },
+	);
+}
 
-export type SubmitReportArguments = Static<typeof submitReportParameters>;
+/** The same report with the bounded `progress` section: only a routine's run is offered it (see `reportCapabilitiesOf`). */
+function submitReportSchemaWithProgress(blockerCodes: readonly WorkerDeclarableBlocker[]) {
+	const base = submitReportSchema(blockerCodes);
+	return Type.Object(
+		{ ...base.properties, progress: Type.Optional(workerReportProgressSchema) },
+		{ additionalProperties: false },
+	);
+}
+
+/**
+ * The typed flags a worker's report schema depends on, read from its durable contract: a delegation runtime (granted
+ * children) may declare `needs_root_answer`, a leaf may not; a routine's run may send the `progress` section, no other
+ * worker may. The live tool, the recovery check and the tool factory all take their schema from `submitReportParametersFor`,
+ * so the three cannot disagree.
+ */
+export interface WorkerReportCapabilities {
+	readonly rootAnswer: boolean;
+	readonly progress: boolean;
+}
+
+/** The report capabilities of a compiled worker contract, as the nested-start rule and the routine progress rule read them. */
+export function reportCapabilitiesOf(
+	worker: { profile: { delegationLimits?: OrchestrationDelegationLimits; reportsProgress?: boolean } } | undefined,
+): WorkerReportCapabilities {
+	return {
+		rootAnswer: delegationLimitsGrantChildren(worker?.profile.delegationLimits),
+		progress: worker?.profile.reportsProgress === true,
+	};
+}
+
+const LEAF_SUBMIT_REPORT_PARAMETERS = submitReportSchema(LEAF_WORKER_DECLARABLE_BLOCKERS);
+const LEAF_PROGRESS_SUBMIT_REPORT_PARAMETERS = submitReportSchemaWithProgress(LEAF_WORKER_DECLARABLE_BLOCKERS);
+const RUNTIME_SUBMIT_REPORT_PARAMETERS = submitReportSchema(WORKER_DECLARABLE_BLOCKERS);
+const RUNTIME_PROGRESS_SUBMIT_REPORT_PARAMETERS = submitReportSchemaWithProgress(WORKER_DECLARABLE_BLOCKERS);
+export type SubmitReportParameters =
+	| typeof LEAF_SUBMIT_REPORT_PARAMETERS
+	| typeof LEAF_PROGRESS_SUBMIT_REPORT_PARAMETERS
+	| typeof RUNTIME_SUBMIT_REPORT_PARAMETERS
+	| typeof RUNTIME_PROGRESS_SUBMIT_REPORT_PARAMETERS;
+
+/** The submit_report schema a worker with these capabilities may send. */
+export function submitReportParametersFor(capabilities: WorkerReportCapabilities): SubmitReportParameters {
+	if (capabilities.rootAnswer) {
+		return capabilities.progress ? RUNTIME_PROGRESS_SUBMIT_REPORT_PARAMETERS : RUNTIME_SUBMIT_REPORT_PARAMETERS;
+	}
+	return capabilities.progress ? LEAF_PROGRESS_SUBMIT_REPORT_PARAMETERS : LEAF_SUBMIT_REPORT_PARAMETERS;
+}
+
+/** The widest argument shape: every variant's arguments are assignable to it, and `progress` is read as optional. */
+export type SubmitReportArguments = Static<typeof RUNTIME_PROGRESS_SUBMIT_REPORT_PARAMETERS>;
 
 /** The report as the host keeps it: the envelope every claim carries plus the structured sections. */
 export interface SubmittedWorkerReport {
@@ -214,18 +292,38 @@ function clipped(values: readonly string[] | undefined, maximumCount: number, ma
 }
 
 /** Bound what a worker submitted so it fits the claim's limits; nothing is rejected for length. */
-export function submittedReportFromArguments(args: SubmitReportArguments): SubmittedWorkerReport {
+export function submittedReportFromArguments(
+	args: SubmitReportArguments,
+	capabilities: WorkerReportCapabilities,
+): SubmittedWorkerReport {
+	// The one place submitted arguments become a report (the live tool and the recovery check both call it): a worker whose
+	// compiled contract does not grant `progress` is refused here, whatever schema the call was checked against.
+	if (args.progress !== undefined && !capabilities.progress)
+		throw new Error("submit_report.progress is not granted to this worker; send the report without it.");
 	const text = (value: string | undefined): string | undefined => {
 		const trimmed = value?.trim();
 		return trimmed ? boundedText(trimmed, MAX_WORKER_REPORT_TEXT_CHARS) : undefined;
 	};
+	// A requirement-bound item keeps its id; its text also joins the free list the parent reads, so nothing is hidden.
+	const inconclusiveRequirements = (args.inconclusiveRequirements ?? [])
+		.slice(0, MAX_WORKER_REPORT_ENTRIES)
+		.flatMap((entry) => {
+			const requirementId = entry.requirementId.trim().slice(0, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS);
+			const item = text(entry.item);
+			return requirementId && item ? [{ requirementId, item }] : [];
+		});
 	const refs = (values: readonly string[] | undefined) =>
 		clipped(values, MAX_WORKER_REPORT_REFS, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS);
+	const progress = args.progress ? boundWorkerReportProgress(args.progress) : undefined;
 	return {
 		status: args.status,
 		summary: boundedText(args.summary.trim(), MAX_WORKER_REPORT_TEXT_CHARS * 4),
 		blockers: clipped(args.blockers, MAX_WORKER_CLAIM_BLOCKERS, MAX_WORKER_CLAIM_BLOCKER_CHARS),
-		inconclusive: clipped(args.inconclusive, MAX_WORKER_CLAIM_BLOCKERS, MAX_WORKER_CLAIM_BLOCKER_CHARS),
+		inconclusive: clipped(
+			[...(args.inconclusive ?? []), ...inconclusiveRequirements.map((entry) => entry.item)],
+			MAX_WORKER_CLAIM_BLOCKERS,
+			MAX_WORKER_CLAIM_BLOCKER_CHARS,
+		),
 		findings: (args.findings ?? []).slice(0, MAX_WORKER_REPORT_ENTRIES).flatMap((finding) => {
 			const summary = text(finding.summary);
 			if (!summary) return [];
@@ -238,6 +336,7 @@ export function submittedReportFromArguments(args: SubmitReportArguments): Submi
 		...(args.verdict ? { verdict: args.verdict } : {}),
 		reasonCodes: clipped(args.reasonCodes, MAX_WORKER_CLAIM_REASON_CODES, MAX_WORKER_CLAIM_REASON_CODE_CHARS),
 		report: {
+			...(inconclusiveRequirements.length > 0 ? { inconclusiveRequirements } : {}),
 			requirements: (args.requirements ?? []).slice(0, MAX_WORKER_REPORT_ENTRIES).flatMap((entry) => {
 				const id = entry.id.trim().slice(0, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS);
 				if (!id) return [];
@@ -277,6 +376,7 @@ export function submittedReportFromArguments(args: SubmitReportArguments): Submi
 			...(args.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
 			...(args.conditionMet === true ? { conditionMet: true as const } : {}),
 			...(args.blockerCode ? { blockerCode: args.blockerCode } : {}),
+			...(progress ? { progress } : {}),
 		},
 	};
 }
@@ -286,15 +386,18 @@ export function submittedReportFromArguments(args: SubmitReportArguments): Submi
  * after its result; it is not part of the worker's granted tool surface, so the grant, the gateway and
  * the operation gate never see it, and the executor admits it by name.
  */
-export function createSubmitReportTool(capture: WorkerReportCapture): AgentTool<typeof submitReportParameters> {
+export function createSubmitReportTool(
+	capture: WorkerReportCapture,
+	capabilities: WorkerReportCapabilities,
+): AgentTool<SubmitReportParameters> {
 	return {
 		name: SUBMIT_REPORT_TOOL_NAME,
 		label: "Submit report",
 		description:
 			"Submit your final report: what you did, the status of each task requirement with its evidence, the checks you ran (cite the host's receipt ids), the files you changed, what remains. Calling it ends your task. A plain text answer is also accepted, but it cannot be checked against the host's records.",
-		parameters: submitReportParameters,
+		parameters: submitReportParametersFor(capabilities),
 		execute: async (_toolCallId, params) => {
-			capture.submitted = submittedReportFromArguments(params);
+			capture.submitted = submittedReportFromArguments(params, capabilities);
 			return {
 				content: [{ type: "text", text: "Report received." }],
 				details: { requirements: capture.submitted.report.requirements.length },
@@ -362,6 +465,19 @@ function resolveCheckEvidence(
 	if (receipt.commandDigest !== check.commandDigest) return { kind: "mismatch" };
 	const outcome = workerCommandOutcome(receipt);
 	return outcome ? { kind: "resolved", receipt, outcome } : { kind: "incomplete" };
+}
+
+/**
+ * The host's own reading of one reported check: the finished receipt it resolves to (the receipt the check names, or the latest
+ * receipt of the same command when it names none) and that receipt's outcome. Undefined when no finished host receipt matches
+ * the check. Proof sheets read checks through this, so they judge a check exactly as the host's delivery verdict does.
+ */
+export function resolvedCheckReceipt(
+	check: WorkerReportCheck,
+	receipts: readonly WorkerCommandReceipt[],
+): { readonly receipt: WorkerCommandReceipt; readonly outcome: "passed" | "failed" } | undefined {
+	const evidence = resolveCheckEvidence(citedByCommand(check, receipts), receiptIndex(receipts));
+	return evidence.kind === "resolved" ? { receipt: evidence.receipt, outcome: evidence.outcome } : undefined;
 }
 
 function receiptLine(receipt: WorkerCommandReceipt): string {

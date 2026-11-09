@@ -32,6 +32,7 @@ import {
 	planRecordBytes,
 } from "./plan-graph.ts";
 import {
+	briefLine,
 	defaultFinal,
 	dependencyCandidates,
 	nodeFromStep,
@@ -76,11 +77,6 @@ function requestText(goal: GoalState | undefined, entries: readonly unknown[], t
 	return [goal.userGoal, ...(requirements.length > 0 ? ["Requirements:", ...requirements] : [])].join("\n");
 }
 
-function oneLine(text: string, max: number): string {
-	const line = text.replace(/\s+/g, " ").trim();
-	return line.length <= max ? line : `${line.slice(0, max - 3)}...`;
-}
-
 /** Exit 7: the root's recent context, baked into a step's brief at acceptance so a restart releases the same task. */
 function annotated(
 	nodes: readonly PlanNodeSpec[],
@@ -90,9 +86,15 @@ function annotated(
 	const excerpt = rootTurnsExcerpt(entries);
 	if (!excerpt || ids.length === 0) return [...nodes];
 	const note = `Context from the planner's conversation:\n${excerpt}`.slice(0, MAX_TASK_NOTE_CHARS).trim();
+	// A step whose brief already states its acceptance lines keeps them and gains the note.
 	return nodes.map((node) =>
-		ids.includes(node.id) && !node.brief
-			? { ...node, brief: { v: 2, goal: oneLine(node.intent, MAX_TASK_GOAL_CHARS), note } }
+		ids.includes(node.id) && !node.brief?.note
+			? {
+					...node,
+					brief: node.brief
+						? { ...node.brief, note }
+						: { v: 2, goal: briefLine(node.intent, MAX_TASK_GOAL_CHARS), note },
+				}
 			: node,
 	);
 }

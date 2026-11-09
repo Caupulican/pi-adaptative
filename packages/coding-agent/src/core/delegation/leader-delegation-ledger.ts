@@ -8,6 +8,7 @@
 import { randomUUID } from "node:crypto";
 import type { JsonObject } from "../../kernel/utils/json-types.ts";
 import { MAX_ORCHESTRATION_DESCRIPTION_LENGTH, type ObjectiveStatus } from "../orchestration/contracts.ts";
+import { LEADER_DELEGATION_OBJECTIVE_PREFIX } from "../orchestration/delegation-ledger.ts";
 import type { DurableTaskRuntime, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -22,9 +23,11 @@ import {
 import { storedOutcomeFromValue } from "./worker-outcome-codec.ts";
 import { isOutcomeFromNewerBuild, type Outcome } from "./worker-outcome-contract.ts";
 
-export const DELEGATION_OBJECTIVE_PREFIX = "delegation-";
+export const DELEGATION_OBJECTIVE_PREFIX = LEADER_DELEGATION_OBJECTIVE_PREFIX;
 const CHARTER_EVIDENCE = "delegation-charter";
 const DISPATCH_EVIDENCE = "delegation-dispatch";
+/** The dispatch mark of a delegation whose turns are filed under its objective (absent on one an earlier build dispatched). */
+const DISPATCH_FILING_BY_OBJECTIVE = "objective";
 const OUTCOME_EVIDENCE = "delegation-outcome";
 const UPDATE_EVIDENCE_PREFIX = "delegation-update-";
 /** The most updates one delegation keeps; a leader needing more is better given a new goal. */
@@ -32,7 +35,14 @@ export const MAX_DELEGATION_UPDATES = 32;
 export const MAX_DELEGATION_UPDATE_CHARS = 2000;
 
 /** Why a delegation closed; the Outcome says how it ended, this says who or what ended it. */
-export const DELEGATION_CLOSE_REASONS = ["settled", "cancelled", "deadline", "budget", "leader_unavailable"] as const;
+export const DELEGATION_CLOSE_REASONS = [
+	"settled",
+	"cancelled",
+	"deadline",
+	"budget",
+	"allowance",
+	"leader_unavailable",
+] as const;
 export type DelegationCloseReason = (typeof DELEGATION_CLOSE_REASONS)[number];
 
 export interface LeaderCharter {
@@ -55,6 +65,11 @@ export interface DelegationRecord {
 	readonly state: DelegationState;
 	readonly charter: LeaderCharter;
 	readonly dispatchedAt?: string;
+	/**
+	 * Whether this delegation's turns are filed under its objective. False on one an earlier build dispatched: those turns
+	 * were attributed by time window, and the controller keeps that attribution for them.
+	 */
+	readonly filedByObjective: boolean;
 	readonly updates: readonly string[];
 	readonly outcome?: Outcome;
 	readonly closeReason?: DelegationCloseReason;
@@ -199,6 +214,7 @@ export function readDelegations(snapshot: TaskRuntimeProjection): DelegationReco
 							: "queued",
 			charter,
 			...(typeof dispatch?.dispatchedAt === "string" ? { dispatchedAt: dispatch.dispatchedAt } : {}),
+			filedByObjective: dispatch?.filing === DISPATCH_FILING_BY_OBJECTIVE,
 			updates,
 			...(outcome ? { outcome } : {}),
 			...(closeReason ? { closeReason } : {}),
@@ -265,7 +281,8 @@ export class LeaderDelegationLedger {
 			artifactIds: [],
 			trusted: true,
 			createdAt: dispatchedAt,
-			metadata: { dispatchedAt },
+			// `filing` marks a delegation whose turns are filed under its objective; an earlier build's dispatch has none.
+			metadata: { dispatchedAt, filing: DISPATCH_FILING_BY_OBJECTIVE },
 		});
 		return dispatchedAt;
 	}

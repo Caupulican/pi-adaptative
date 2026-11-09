@@ -21,6 +21,7 @@ import {
 	MAX_WORKER_SOUL_LENGTH,
 	ORCHESTRATION_SCHEMA_VERSION,
 	ORCHESTRATION_THINKING_LEVELS,
+	type OrchestrationDelegationLimits,
 	type OrchestrationModelBinding,
 	type OrchestrationProfile,
 	type OrchestrationThinkingLevel,
@@ -48,6 +49,7 @@ import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-reque
 import { YOLO_WORKER_CAPABILITIES } from "./worker-execution-policy.ts";
 import { LEAF_WORKER_DELEGATION_LIMITS } from "./worker-fleet-limits.ts";
 import { resolveWorkerWorkspacePath } from "./worker-machine-scope.ts";
+import { workerDelegationLimitsOf } from "./worker-nested-start.ts";
 import type { ResolvedWorkerProfile } from "./worker-profile-resolver.ts";
 
 /** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
@@ -122,6 +124,11 @@ export interface WorkerAuthorityResolutionInput {
 	/** Host materializable adapters, independent of the active parent tool list in YOLO. */
 	workerToolAdapterNames?: readonly string[];
 	foregroundEnvelope?: CapabilityEnvelope;
+	/**
+	 * The worker's dispatch carries a third party's words (its turn origin). Such a worker is not granted what only the owner's
+	 * own words may use: the owner's settings view and bot messaging. Memory is already withheld from a tainted start.
+	 */
+	thirdParty?: boolean;
 	cwd?: string;
 	/** Caller task cwd for explicit relative path intent; preset paths remain anchored to cwd. */
 	executionCwd?: string;
@@ -139,6 +146,16 @@ export interface WorkerAuthorityResolutionInput {
 	 * worker nothing has bound; it must return exactly the candidates it was given.
 	 */
 	rankRoutedModels?(models: readonly Model<Api>[], query: OutcomeRankQuery): Model<Api>[];
+	/**
+	 * The delegation limits the compiled runtime is granted (host-only, from a leader's start). Absent, the runtime is a leaf.
+	 * The ceilings in `worker-fleet-limits.ts` still bound what is granted.
+	 */
+	delegationLimits?: OrchestrationDelegationLimits;
+	/**
+	 * Host-only: the compiled worker reports the routine `progress` section (a routine's run). Absent, it does not. Only a
+	 * present flag enters the descriptor, so every other worker keeps its profile id.
+	 */
+	reportsProgress?: boolean;
 }
 
 export type WorkerAuthorityResolution =
@@ -504,8 +521,15 @@ export function defaultWorkerRole(
 	return authority?.role ?? base?.profile.role ?? (authority?.readOnly ? "explorer" : "implementer");
 }
 
+const ADAPTIVE_PROFILE_PREFIX = "adaptive-";
+
 function adaptiveProfileId(value: object): string {
-	return `adaptive-${createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 32)}`;
+	return `${ADAPTIVE_PROFILE_PREFIX}${createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 32)}`;
+}
+
+/** Whether a profile id was compiled from admission rather than registered: the one place that prefix is read. */
+export function isAdaptiveProfileId(profileId: string): boolean {
+	return profileId.startsWith(ADAPTIVE_PROFILE_PREFIX);
 }
 
 function tokenBudgetFloorFailure(maxTokens: number | undefined): string | undefined {
@@ -757,6 +781,11 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 			capabilities.add(capability);
 		}
 	}
+	// A third party's words never reach the owner's settings or the owner's bots: YOLO and the default grant do not add them back.
+	if (input.thirdParty === true) {
+		capabilities.delete("settings.read");
+		capabilities.delete("workflow.message");
+	}
 	// A parent that may run processes can already read its repository through git; the read grain
 	// of that authority is lent alongside. An explicit capability list or a base profile stays exact.
 	if (
@@ -769,9 +798,15 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	// readOnly is the caller's promise that this worker edits nothing. It is not a permission check,
 	// so YOLO keeps it: the parent may be relying on it to run workers side by side.
 	const readOnly = input.authority?.readOnly === true || input.base?.profile.readOnly === true;
+	// The read scope is a host-owned confinement: a worker confined to roots reads them through a read-only shell, so the
+	// shell's commands cannot reach past the roots the file tools cannot reach either.
+	const readPaths = input.authority?.readPaths ?? input.base?.profile.readPaths;
 	// A read-only shell beside the write tools: the shell keeps `readOnly`'s rules, the file tools stay.
 	const shellReadOnly =
-		!readOnly && (input.authority?.shellReadOnly === true || input.base?.profile.shellReadOnly === true);
+		!readOnly &&
+		(input.authority?.shellReadOnly === true ||
+			input.base?.profile.shellReadOnly === true ||
+			readPaths !== undefined);
 	if (readOnly) {
 		for (const capability of capabilities) {
 			if (!capabilitySurvivesReadOnly(capability)) capabilities.delete(capability);
@@ -807,7 +842,10 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 	const floorFailure = tokenBudgetFloorFailure(budget.maxTokens);
 	if (floorFailure) return { ok: false, reason: floorFailure };
 	const role = defaultWorkerRole(input.authority, input.base);
-	const delegationLimits = structuredClone(LEAF_WORKER_DELEGATION_LIMITS);
+	const delegationLimits = input.delegationLimits
+		? workerDelegationLimitsOf(input.delegationLimits)
+		: structuredClone(LEAF_WORKER_DELEGATION_LIMITS);
+	const reportsProgress = input.reportsProgress === true;
 	const requestedWorkspacePath = input.authority?.path ?? input.base?.profile.workspacePath;
 	const workspacePath = requestedWorkspacePath
 		? resolveWorkerWorkspacePath(
@@ -836,8 +874,10 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		toolNames,
 		budget,
 		delegationLimits: delegationLimits ?? null,
+		...(reportsProgress ? { reportsProgress } : {}),
 		workspacePath: workspacePath ?? null,
 		...(writePaths.length > 0 ? { writePaths } : {}),
+		...(readPaths !== undefined ? { readPaths } : {}),
 		resourceProfileNames: input.base?.profile.resourceProfileNames ?? [],
 		dispatchProfileIds: input.base?.profile.dispatchProfileIds ?? [],
 		executionPolicy: input.base?.profile.executionPolicy ?? null,
@@ -862,10 +902,12 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		...(shellReadOnly ? { shellReadOnly: true } : {}),
 		...(workspacePath ? { workspacePath } : {}),
 		...(writePaths.length > 0 ? { writePaths } : {}),
+		...(readPaths !== undefined ? { readPaths: [...readPaths] } : {}),
 		resourceProfileNames: [...(input.base?.profile.resourceProfileNames ?? [])],
 		dispatchProfileIds: [...(input.base?.profile.dispatchProfileIds ?? [])],
 		...(input.base?.profile.executionPolicy ? { executionPolicy: input.base.profile.executionPolicy } : {}),
 		delegationLimits,
+		...(reportsProgress ? { reportsProgress } : {}),
 		budget,
 		maxConcurrent: input.base?.profile.maxConcurrent ?? Number.MAX_SAFE_INTEGER,
 		leaseTtlMs: Math.max(input.base?.profile.leaseTtlMs ?? 0, wallClockLeaseTtlMs, 90_000),

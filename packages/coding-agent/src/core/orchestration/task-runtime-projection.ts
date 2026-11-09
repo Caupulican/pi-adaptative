@@ -235,13 +235,24 @@ export function assertRecordWithinLimit(values: Readonly<Record<string, unknown>
 	}
 }
 
-export function assertRecordHasCapacity(values: Readonly<Record<string, unknown>>, limit: number, label: string): void {
+/**
+ * Refuses a new record once `limit` records are live. `explain` says in plain words why no record can be released; it is
+ * read only on the refusal path.
+ */
+export function assertRecordHasCapacity(
+	values: Readonly<Record<string, unknown>>,
+	limit: number,
+	label: string,
+	explain?: () => string,
+): void {
 	let count = 0;
 	for (const key in values) {
 		if (!Object.hasOwn(values, key)) continue;
 		count += 1;
 		if (count >= limit) {
-			throw new DurableTaskRuntimeError(`Orchestration ${label} limit (${limit}) reached.`);
+			throw new DurableTaskRuntimeError(
+				`Orchestration ${label} limit (${limit}) reached. ${explain ? explain() : ""}`.trimEnd(),
+			);
 		}
 	}
 }

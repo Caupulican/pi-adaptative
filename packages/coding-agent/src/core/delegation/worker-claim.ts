@@ -9,6 +9,7 @@ import type {
 	WorkerHostFinding,
 	WorkerHostFindingCode,
 	WorkerHostVerdict,
+	WorkerReportProgress,
 	WorkerReportRequirementStatus,
 	WorkerRequest,
 	WorkerSubmittedReport,
@@ -21,6 +22,7 @@ import { boundedText } from "../util/bounded-line.ts";
 import { utf8PrefixByBytes } from "../util/bounded-value.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { WORKER_DECLARABLE_BLOCKERS } from "./worker-outcome-contract.ts";
+import { parseWorkerReportProgress } from "./worker-report-progress.ts";
 
 export const MAX_WORKER_CLAIM_SUMMARY_CHARS = DEFAULT_MAX_BYTES;
 export const MAX_WORKER_CLAIM_SUMMARY_BYTES = DEFAULT_MAX_BYTES;
@@ -380,6 +382,32 @@ function normalizeSubmittedReport(value: unknown): WorkerSubmittedReport {
 	const blockerCode = WORKER_DECLARABLE_BLOCKERS.find((code) => code === report.blockerCode);
 	if (report.blockerCode !== undefined && blockerCode === undefined)
 		invalidWorkerClaim("claim.report.blockerCode is invalid.");
+	let progress: WorkerReportProgress | undefined;
+	if (report.progress !== undefined) {
+		try {
+			progress = parseWorkerReportProgress(report.progress, "claim.report.progress");
+		} catch (error) {
+			invalidWorkerClaim(error instanceof Error ? error.message : String(error));
+		}
+	}
+	// The bounds `submittedReportFromArguments` keeps: a requirement id, and the open item it names.
+	const inconclusiveRequirements = workerClaimRecordArray(
+		report.inconclusiveRequirements ?? [],
+		"claim.report.inconclusiveRequirements",
+		MAX_WORKER_REPORT_ENTRIES,
+	).map((entry, index) => {
+		const label = `claim.report.inconclusiveRequirements[${index}]`;
+		if (Object.keys(entry).some((key) => key !== "requirementId" && key !== "item"))
+			invalidWorkerClaim(`${label} must be a closed object.`);
+		return {
+			requirementId: requiredWorkerClaimString(
+				entry.requirementId,
+				`${label}.requirementId`,
+				MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS,
+			),
+			item: requiredWorkerClaimString(entry.item, `${label}.item`, MAX_WORKER_REPORT_TEXT_CHARS),
+		};
+	});
 	return {
 		requirements: workerClaimRecordArray(
 			report.requirements ?? [],
@@ -433,6 +461,8 @@ function normalizeSubmittedReport(value: unknown): WorkerSubmittedReport {
 		...(report.ownerUpdate === "none" ? { ownerUpdate: "none" as const } : {}),
 		...(report.conditionMet === true ? { conditionMet: true as const } : {}),
 		...(blockerCode !== undefined ? { blockerCode } : {}),
+		...(inconclusiveRequirements.length > 0 ? { inconclusiveRequirements } : {}),
+		...(progress !== undefined ? { progress } : {}),
 	};
 }
 

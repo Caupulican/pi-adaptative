@@ -2,17 +2,21 @@ import { createHash } from "node:crypto";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { captureWorkerReceiptOrigin } from "./delegation/worker-receipt-origin.ts";
 import type { ParentInputDelivery, ParentInputReceipt } from "./parent-input-delivery.ts";
-import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
+import { boundedRedactedDiagnosticText, cleanRedactBound } from "./security/secret-text.ts";
+import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { reportSessionObserverFailures } from "./session-observer-failures.ts";
+import { isPlainRecord } from "./util/value-guards.ts";
 
 export const HARNESS_NOTICE_CUSTOM_TYPE = "harness-notice";
 
 /** Episodes of one state a session can be told about; past it the state is still visible in its status command. */
 const MAX_NOTICE_GENERATIONS = 32;
-/** Observed notices one runtime keeps until they are saved; each holds one bounded line. */
+/** Observed notices one runtime keeps until they are saved; each holds one bounded headline and its evidence. */
 const MAX_PENDING_NOTICES = 32;
 /** Failed saves of one notice before it is dropped; the capability's next signal of the state starts a new one. */
 const MAX_NOTICE_SAVE_ATTEMPTS = 3;
+/** The worker-written detail one notice carries for the model: fenced, and never shown on the owner's surface. */
+const MAX_NOTICE_EVIDENCE_CHARS = 1_200;
 
 /**
  * The automatic capabilities whose owner-actionable inactive states the harness reports by itself. A kind is part of
@@ -25,6 +29,7 @@ export type HarnessNoticeKind =
 	| "routine-result-wakes"
 	| "routine-paused"
 	| "routine-unschedulable"
+	| "routine-snag"
 	| "routine-away-service"
 	| "host-event-gap"
 	| "host-event-source"
@@ -37,12 +42,17 @@ export type HarnessNoticeKind =
 	| "soul-review"
 	| "system-one-engine"
 	| "worker-login"
-	| "fleet-spend-brake";
+	| "fleet-spend-brake"
+	| "review-backlog";
 
-/** One owner-actionable state: `reason` is its stable identity, `text` the one line the owner reads. */
+/**
+ * One owner-actionable state: `reason` is its stable identity, `text` the one line the owner reads. `evidence` is optional
+ * worker-written detail the model reads fenced as data; the owner's surface never shows it, and it is not part of `reason`.
+ */
 export interface HarnessNotice {
 	readonly reason: string;
 	readonly text: string;
+	readonly evidence?: string;
 }
 
 /**
@@ -99,6 +109,65 @@ export function harnessNoticeDeliveryId(
 	return `${HARNESS_NOTICE_CUSTOM_TYPE}:${createHash("sha256")
 		.update(JSON.stringify([sessionId, kind, reason, generation]))
 		.digest("hex")}`;
+}
+
+/**
+ * The evidence a notice keeps for the model: cleaned, redacted and bounded to at most {@link MAX_NOTICE_EVIDENCE_CHARS}
+ * characters in that order (`cleanRedactBound`, line breaks kept), so a token split by a character or cut by the bound is
+ * never left unmasked. Nothing left means no evidence.
+ */
+function boundedRedactedNoticeEvidence(evidence: string): string | undefined {
+	return cleanRedactBound(evidence, MAX_NOTICE_EVIDENCE_CHARS, { lines: true }) || undefined;
+}
+
+/**
+ * The message a notice saves. `content` is what the model reads: the headline, then the evidence fenced as data. `details`
+ * keeps the headline for the owner's surface, which never shows the model text. The fence nonce comes from the delivery id,
+ * so a runtime that saves the same notice again writes the same bytes; the fence neutralizes that nonce wherever the
+ * evidence holds it.
+ */
+function harnessNoticeMessage(input: {
+	readonly kind: HarnessNoticeKind;
+	readonly deliveryId: string;
+	readonly reason: string;
+	readonly generation: number;
+	readonly headline: string;
+	readonly evidence: string | undefined;
+}): ParentInputDelivery["message"] {
+	const fence =
+		input.evidence === undefined
+			? []
+			: [
+					wrapUntrustedText(input.evidence, `harness-notice:${input.kind}`, {
+						nonce: createHash("sha256").update(input.deliveryId).digest("hex").slice(0, 32),
+					}),
+				];
+	return {
+		customType: HARNESS_NOTICE_CUSTOM_TYPE,
+		display: true,
+		content: [
+			`Harness notice: ${input.headline}`,
+			...fence,
+			"The owner sees this notice directly; mention it only if it bears on what they ask.",
+		].join("\n"),
+		details: { kind: input.kind, reason: input.reason, generation: input.generation, headline: input.headline },
+	};
+}
+
+/**
+ * The owner's line of a harness notice, read from the details its saved or delivered message keeps (a delivered input keeps
+ * them under the ledger's wrapper). Undefined for any other message, and for a notice saved before headlines were kept.
+ */
+export function harnessNoticeHeadline(message: {
+	readonly customType: string;
+	readonly details?: unknown;
+}): string | undefined {
+	if (message.customType !== HARNESS_NOTICE_CUSTOM_TYPE) return undefined;
+	const details =
+		isPlainRecord(message.details) && "parentInput" in message.details
+			? message.details.originalDetails
+			: message.details;
+	return isPlainRecord(details) && typeof details.headline === "string" ? details.headline : undefined;
 }
 
 /**
@@ -275,12 +344,15 @@ export class HarnessNoticeController {
 		state.covered = reason;
 		let notice = this.pending.get(key);
 		if (notice?.deliveryId !== deliveryId) {
-			const message = {
-				customType: HARNESS_NOTICE_CUSTOM_TYPE,
-				display: true,
-				content: `Harness notice: ${text}\nThe owner sees this notice directly; mention it only if it bears on what they ask.`,
-				details: { kind, reason, generation },
-			};
+			const message = harnessNoticeMessage({
+				kind,
+				deliveryId,
+				reason,
+				generation,
+				headline: text,
+				evidence:
+					observation.evidence === undefined ? undefined : boundedRedactedNoticeEvidence(observation.evidence),
+			});
 			const payloadDigest = createHash("sha256").update(JSON.stringify(message)).digest("hex");
 			notice = { sessionId, kind, key, reason, deliveryId, payloadDigest, message, failures: 0, lost: [] };
 			this.keep(notice);

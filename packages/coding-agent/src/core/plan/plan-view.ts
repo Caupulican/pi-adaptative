@@ -11,6 +11,7 @@ import {
 	type OutcomeStatus,
 } from "../delegation/worker-outcome-contract.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import { currentTaskOf } from "../orchestration/task-successor.ts";
 import type { Placement } from "../placement/placement-types.ts";
 import {
 	effectivePlanStatus,
@@ -38,6 +39,11 @@ export interface PlanNodeView {
 	readonly held?: PlanNodeHold;
 	readonly taskId?: string;
 	readonly placement?: Placement;
+	/** The steps this one waits for: its uses and its ordering edges. */
+	readonly predecessors: number;
+	/** The attempts its current task has run (0 before the step is released). */
+	readonly attempts: number;
+	readonly effort: PlanNodeSpec["effort"];
 }
 
 export interface PlanCounts {
@@ -75,7 +81,7 @@ export function planNodeOutcome(
 	const joined = runtime.join?.outcome;
 	if (joined && !isOutcomeFromNewerBuild(joined)) return joined;
 	if (!runtime.settled || !runtime.release) return undefined;
-	const outcome = projection.tasks[runtime.release.taskId]?.outcome;
+	const outcome = projection.tasks[currentTaskOf(projection, runtime.release.taskId)]?.outcome;
 	return outcome && !isOutcomeFromNewerBuild(outcome) ? outcome : undefined;
 }
 
@@ -108,7 +114,7 @@ function nodeState(
 	if (runtime.held) return "held";
 	if (runtime.join || runtime.settled) return "settled";
 	if (plan.closed) return "cancelled";
-	if (runtime.release) return releasedState(projection, runtime.release.taskId);
+	if (runtime.release) return releasedState(projection, currentTaskOf(projection, runtime.release.taskId));
 	return planNodeReleasable(projection, plan, record, node) ? "ready" : "planned";
 }
 
@@ -157,7 +163,14 @@ function nodeView(
 		state: nodeState(projection, plan, record, node),
 		...(outcome ? { outcomeStatus: outcome.status, nextAction: outcome.nextAction.kind } : {}),
 		...(runtime?.held ? { held: runtime.held } : {}),
-		...(runtime?.release ? { taskId: runtime.release.taskId, placement: runtime.release.placement } : {}),
+		...(runtime?.release
+			? { taskId: currentTaskOf(projection, runtime.release.taskId), placement: runtime.release.placement }
+			: {}),
+		predecessors: planNodeEdges(node).length,
+		attempts: runtime?.release
+			? (projection.tasks[currentTaskOf(projection, runtime.release.taskId)]?.attemptIds.length ?? 0)
+			: 0,
+		effort: node.effort,
 	};
 }
 
@@ -171,6 +184,18 @@ export function planCounts(nodes: readonly PlanNodeView[]): PlanCounts {
 		held: count(["held"]),
 		heldOnOwner: nodes.filter((node) => node.held?.reason === "owner").length,
 	};
+}
+
+/** The brief a plan step was stated with, or undefined (no step named, no brief, a record from a newer build). */
+export function planNodeBrief(
+	projection: Pick<PlanProjection, "plans">,
+	planId: string,
+	nodeId: string | undefined,
+): PlanNodeSpec["brief"] {
+	if (nodeId === undefined) return undefined;
+	const record = projection.plans[planId]?.record;
+	if (!record || isPlanFromNewerBuild(record)) return undefined;
+	return record.nodes.find((node) => node.id === nodeId)?.brief;
 }
 
 export function planView(projection: PlanProjection, planId: string): PlanView | undefined {

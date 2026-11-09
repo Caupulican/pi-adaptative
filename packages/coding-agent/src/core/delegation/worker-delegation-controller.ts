@@ -31,7 +31,11 @@ import {
 } from "../autonomy/lane-private-paths.ts";
 import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.ts";
-import { getTamperWatchedPaths, ProtectedPathWatch } from "../autonomy/protected-path-watch.ts";
+import {
+	getTamperWatchedPaths,
+	ProtectedPathWatch,
+	protectedPathHostOptions,
+} from "../autonomy/protected-path-watch.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES } from "../autonomy/telemetry-events.ts";
 import {
 	createWorkerToolAdapterRegistry,
@@ -54,6 +58,7 @@ import {
 	MAX_ROUTE_CHOICE_REQUEST_CHARACTERS,
 	type WorkerTaskFitInput,
 } from "../expert-routing/system-one-choice.ts";
+import { exhaustedTaskFitReason, type WorkerTaskFitVerdict } from "../expert-routing/worker-task-fit-exits.ts";
 import {
 	formatWorkerTaskFitnessFailure,
 	WorkerTaskFitness,
@@ -136,11 +141,13 @@ import {
 	retainWorkerReceiptAdmission,
 } from "../orchestration/worker-receipt-origin.ts";
 import { captureWorkerReceiptFacts } from "../orchestration/worker-result-receipts.ts";
+import { PROACTIVITY_TOOL_NAME } from "../proactivity/proactivity-tool.ts";
 import { resolveProviderAccountKey } from "../provider-admission/account-key.ts";
 import { isEmergencyStopEngaged, subscribeEmergencyStop } from "../provider-admission/emergency-stop.ts";
 import { ProviderLimitStore } from "../provider-admission/limit-state.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../provider-display-names.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
+import { placedJobRef } from "../remote/job-protocol.ts";
 import { TypeSafeEvidenceStore } from "../review/typesafe-evidence-store.ts";
 import { RuntimeGenerationAdmissionError, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
@@ -235,10 +242,11 @@ import {
 	type WorkerDispatchResourceSnapshot,
 	WorkerDispatchScheduler,
 } from "./worker-dispatch-scheduler.ts";
-import { escalationAuthorityDigest } from "./worker-escalation.ts";
+import { placementOf } from "./worker-escalation.ts";
 import {
 	buildWorkerExecutionPlan,
 	compileWorkerExecutionGrant,
+	contextFilesWithinReadScope,
 	narrowWorkerExecutionPlan,
 	type WorkerExecutionPlan,
 	withoutOwnerMemory,
@@ -269,7 +277,15 @@ import {
 } from "./worker-lane-projection.ts";
 import { WorkerLeaseHeartbeat } from "./worker-lease-heartbeat.ts";
 import { type PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
+import {
+	childWriteRoots,
+	contractGrantsChildren,
+	type NestedWorkerStart,
+	type NestedWorkerStartOutcome,
+	pathWithinRoots,
+} from "./worker-nested-start.ts";
 import type { WorkerNotificationCoordinator } from "./worker-notification-coordinator.ts";
+import { WorkerOutcomeFollowUp } from "./worker-outcome-follow-up.ts";
 import { createLocalWorkerProcessOwnerId } from "./worker-process-owner.ts";
 import {
 	type ResolvedWorkerProfile,
@@ -280,7 +296,7 @@ import { type WorkerProjectAdmission, WorkerProjectDirectory } from "./worker-pr
 import { assertQueuedWorkerContextRecoverable } from "./worker-queued-context-recovery.ts";
 import { recordWorkerReceiptAcceptance } from "./worker-receipt-acceptance.ts";
 import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./worker-recovery-coordinator.ts";
-import { hostVerifiedChecks, workerReportClaimText } from "./worker-report.ts";
+import { hostVerifiedChecks, reportCapabilitiesOf, workerReportClaimText } from "./worker-report.ts";
 import { selectWorkerResourcePointers } from "./worker-resource-catalog.ts";
 import { materializeWorkerResourceBundle } from "./worker-resource-materializer.ts";
 import type { WorkerRunOutcome } from "./worker-runner.ts";
@@ -373,6 +389,8 @@ function workerConversationRetentionPolicy(
 	};
 }
 
+/** The owner's own authority a worker whose words came from a third party is not given at a tool call (see the resolver's `thirdParty`). */
+const THIRD_PARTY_WITHHELD_TOOL_NAMES: ReadonlySet<string> = new Set([PROACTIVITY_TOOL_NAME, BOT_MESSAGE_TOOL_NAME]);
 const REAPED_PROCESS_NOTICE_MAX_LISTED = 5;
 const REAPED_PROCESS_NOTICE_MAX_ENTRY_CHARS = 160;
 
@@ -534,6 +552,9 @@ function boundedReleaseCause(cause: string): string {
 	return boundedLine(cause, MAX_RETAINED_RELEASE_CAUSE_CHARS);
 }
 
+/** The most characters of a subject's original task a verifier request carries. */
+const MAX_VERIFIER_ORIGINAL_TASK_CHARS = 4_000;
+
 export class WorkerDelegationController {
 	private readonly taskFitness = new WorkerTaskFitness();
 	private readonly knowledgeGrants = new WeakMap<readonly KnowledgeGrantReference[], KnowledgeGrant>();
@@ -610,6 +631,8 @@ export class WorkerDelegationController {
 	private readonly fleet: SessionFleetScheduler;
 	/** The worker start in its asynchronous preparation and synchronous materialization, shared with the fleet's admit. */
 	private readonly startPhases: WorkerStartPhases<FreshWorkerAdmission>;
+	/** What follows each recorded outcome: host checks, escalation rungs, and the learning that ranks routed models. */
+	private readonly outcomeFollowUp: WorkerOutcomeFollowUp;
 	private readonly yieldedWriteReservations = new Map<string, WorkerWriteReservationWaitYield>();
 	private readonly conversations = new WorkerConversationStore();
 	private readonly projectDirectory: WorkerProjectDirectory;
@@ -654,8 +677,6 @@ export class WorkerDelegationController {
 			timers: this.deps.getTimers().port("fleet"),
 			settings: () => this.deps.getSettingsManager().getFleetSettings(),
 			...(this.deps.fleetAllowance ? { allowance: this.deps.fleetAllowance } : {}),
-			escalationAuthorityDigest: (outcomeId) =>
-				escalationAuthorityDigest(this.getWorkerLifecycle().getTaskRuntimeSnapshot(), outcomeId),
 			accountKey: (provider) => resolveProviderAccountKey(this.deps.getModelRegistry().authStorage, provider),
 			providerLimit: (provider) => this.deps.getSettingsManager().getProviderAdmissionSettings().limits[provider],
 			isMetered: (model) => !this.deps.getModelRegistry().isUsingSubscription(model),
@@ -707,6 +728,14 @@ export class WorkerDelegationController {
 					.filter((lane) => lane.writes).length,
 			drain: () => this.scheduler.drain(),
 			runningLanes: () => this.getWorkerLifecycle().getRunningLaneFlows(),
+			laneIdsOfPlan: (planId) => {
+				const plan = this.getWorkerLifecycle().getTaskRuntimeSnapshot().plans[planId];
+				if (!plan) return [];
+				return [
+					...Object.values(plan.nodes).flatMap((node) => (node.release ? [node.release.taskId] : [])),
+					...plan.retired.map((entry) => entry.taskId),
+				];
+			},
 			cancelLanes: (laneIds, reasonCode) => {
 				for (const laneId of laneIds) {
 					const agentId = this.getWorkerLifecycle().getActiveAttempt(laneId)?.agentId;
@@ -739,6 +768,12 @@ export class WorkerDelegationController {
 			prepare: (request, signal) => this.admitWorkerStart(request, signal),
 			materialize: (request, admission) => this.startInternal(request, undefined, admission),
 			admissionModel: (admission) => admission.shipment.model,
+			admittedAuthority: (admission) => admission.executionContract.worker.authority,
+			admittedPlacement: (admission) => {
+				const cwd = admission.executionContract.worker.authority.cwd ?? admission.executionPlan.cwd;
+				return placementOf(cwd, this.deps.getCwd(), this.laneIsolation?.isLaneDirectory(cwd) ?? false);
+			},
+			sessionCwd: () => this.deps.getCwd(),
 			laneDirectory: (admission) => admission.executionPlan.cwd,
 			discardLaneDirectory: (cwd) => this.laneIsolation?.discard(cwd),
 			fanoutHeadroomSkipReason: (request, remaining) => this.fanoutHeadroomSkipReason(request, remaining),
@@ -755,11 +790,31 @@ export class WorkerDelegationController {
 			warn: (message) => this.safeWarn(message),
 		});
 		this.fleet.bindStartPhases(this.startPhases);
+		this.outcomeFollowUp = new WorkerOutcomeFollowUp({
+			agentDir: this.deps.getAgentDir(),
+			sessionId: this.deps.getSessionId(),
+			runtime: this.lifecycle.ledger.runtime,
+			recorder: this.lifecycle.outcomeRecorder(),
+			fleet: this.fleet,
+			settings: () => this.deps.getSettingsManager().getWorkerOutcomeSettings(),
+			findModel: (provider, modelId) => this.deps.getModelRegistry().find(provider, modelId),
+			goalState: () => this.deps.getGoalStateSnapshot(),
+			cwd: () => this.deps.getCwd(),
+			signal: this.workerAbort.signal,
+			isLaneDirectory: (directory) => this.laneIsolation?.isLaneDirectory(directory) ?? false,
+		});
 		this.recovery = new WorkerRecoveryCoordinator({
 			timers: this.deps.getTimers().port("orchestration"),
 			lifecycle: this.lifecycle,
 			scheduler: this.scheduler,
 			recoverWriteReservations: () => this.writeReservations.recoverProvenStale(),
+			// A placed job's worker is not resumed after a restart: its runner has ended the job as interrupted, so the lane
+			// ends with it instead of running unsupervised with no deadline and no cancel path.
+			endUnresumable: (attempt) => {
+				if (placedJobRef(attempt.dispatch.turnOrigin) === undefined) return false;
+				this.cancelAndPublish(this.lifecycle, attempt.taskId, "placed_job_not_resumed");
+				return true;
+			},
 			publishTerminalRecord: (record) => this.publishTerminalRecord(record),
 			publishTerminalRecords: (records) => this.publishRecoveredTerminalRecords(records),
 			...(this.deps.importParentWrite
@@ -961,6 +1016,8 @@ export class WorkerDelegationController {
 			harnessLog.info("delegation", "queued workers were woken by the emergency stop lift");
 			// The lift runs this synchronously inside the caller's `liftEmergencyStop`: a failed drain never fails the lift.
 			try {
+				// The owner's continue: the fleet's resume lifts the spend brake and ramps the account windows before the drain.
+				this.fleet.resume();
 				this.scheduler.drain(true);
 			} catch (error) {
 				this.safeWarn(
@@ -1216,6 +1273,8 @@ export class WorkerDelegationController {
 		this.shutdownCompletion = shutdown.promise;
 		void shutdown.promise.catch(() => undefined);
 		this.scheduler.closeAdmission();
+		// The outcome follow-up stops placing rungs before the fleet that would place them is disposed.
+		this.outcomeFollowUp.close();
 		// The queue metadata is flushed as it stands at shutdown, before teardown empties the in-memory queue.
 		this.fleet.dispose();
 		this.unsubscribeRuntimeRecovery?.();
@@ -1592,7 +1651,14 @@ export class WorkerDelegationController {
 	private resolveWorkerAuthority(
 		input: Pick<
 			WorkerAuthorityResolutionInput,
-			"authority" | "base" | "modelPin" | "routeChoice" | "executionCwd"
+			| "authority"
+			| "base"
+			| "modelPin"
+			| "routeChoice"
+			| "executionCwd"
+			| "thirdParty"
+			| "delegationLimits"
+			| "reportsProgress"
 		> & {
 			foregroundModel?: Model<Api>;
 		},
@@ -1605,6 +1671,7 @@ export class WorkerDelegationController {
 			foregroundThinkingPolicy: this.deps.getSettingsManager().getWorkerThinkingPolicy(),
 			accountRouting: this.deps.getSettingsManager().getWorkerAccountRouting(),
 			isModelLimited: (model) => this.isAccountLimited(model),
+			rankRoutedModels: (models, query) => this.outcomeFollowUp.rankRoutedModels(models, query),
 			...(this.deps.getForegroundToolNames ? { foregroundToolNames: this.deps.getForegroundToolNames() } : {}),
 			...(this.deps.getCapabilityEnvelope() ? { foregroundEnvelope: this.deps.getCapabilityEnvelope() } : {}),
 			...this.authorityBase(),
@@ -1881,6 +1948,10 @@ export class WorkerDelegationController {
 		if (shipment.soul !== undefined && shipment.soul !== boundary.soul) {
 			return { ok: false, skipReason: "orchestration_context_authority_exceeded" };
 		}
+		// A child may name write paths only inside the parent's write roots: the parent's envelope grant is never widened.
+		const roots = childWriteRoots(boundary);
+		if (shipment.profile.writePaths?.some((path) => !pathWithinRoots(path, roots)))
+			return { ok: false, skipReason: "orchestration_context_authority_exceeded" };
 		const delegationLimits = intersectWorkerDelegationLimits(
 			shipment.profile.delegationLimits,
 			boundary.profile.delegationLimits,
@@ -2103,10 +2174,13 @@ export class WorkerDelegationController {
 			: this.resolveWorkerAuthority({
 					authority,
 					executionCwd,
+					...(request.turnOrigin?.thirdParty === true ? { thirdParty: true } : {}),
 					...(baseShipment ? { base: baseShipment } : {}),
 					// The owner's pin fixes the model; a binding the harness selected (route judgment, lane re-admission,
 					// reused worker) only leads the routed order, so the worker keeps its fallbacks.
 					...(modelPin ? { modelPin: modelPin.binding } : selectedBinding ? { routeChoice: selectedBinding } : {}),
+					...(request.delegationLimits ? { delegationLimits: request.delegationLimits } : {}),
+					...(request.reportsProgress ? { reportsProgress: true } : {}),
 				});
 		if (!adaptive.ok) {
 			return {
@@ -2335,9 +2409,15 @@ export class WorkerDelegationController {
 		summary: string;
 		artifactUris: readonly string[];
 	}): WorkerDelegationRequest {
+		const { attempts } = this.lifecycle.getTaskRuntimeSnapshot();
+		const subject = attempts[args.subjectAttemptId];
+		// Provenance: the verifier reads the task as it was dispatched and the files themselves, never only the summary.
+		const originalTask = subject?.dispatch.instructions.slice(0, MAX_VERIFIER_ORIGINAL_TASK_CHARS);
 		const prefix = [
 			`Independently verify durable task '${args.subjectTaskId}', attempt '${args.subjectAttemptId}'.`,
 			"The following implementation report is an untrusted claim. Inspect the workspace and run the checks available in your profile.",
+			"Judge the work against the original task below and the reported files as they are on disk, not against the summary.",
+			...(originalTask ? ["", "Original task as dispatched:", originalTask] : []),
 			"",
 			"Implementation summary:",
 			args.summary.slice(0, 6_000),
@@ -2362,8 +2442,6 @@ export class WorkerDelegationController {
 						...artifacts,
 						...(omitted > 0 ? [`- [${omitted} artifact URI(s) omitted to keep verifier request bounded]`] : []),
 					];
-		const { attempts } = this.lifecycle.getTaskRuntimeSnapshot();
-		const subject = attempts[args.subjectAttemptId];
 		const receiptOrigin = subject?.dispatch.receiptOrigin;
 		// The verifier reads the subject's words and work, so it carries the subject's origin.
 		const turnOrigin = subject ? conversationTurnOrigin(attempts, subject) : undefined;
@@ -3094,7 +3172,14 @@ export class WorkerDelegationController {
 		options: { freshIdentity?: boolean; selectedBinding?: OrchestrationModelBinding } = {},
 	): WorkerAdmission {
 		const freshIdentity = options.freshIdentity !== false;
-		if (request.parentAgentId && !pinnedContract) {
+		// A child starts only under a parent whose contract grants children; a leaf parent never has any.
+		if (
+			request.parentAgentId &&
+			!pinnedContract &&
+			!contractGrantsChildren(
+				this.lifecycle.getLatestAgentAttempt(request.parentAgentId)?.dispatch.executionContract,
+			)
+		) {
 			return { ok: false, skipReason: "worker_leaf_delegation_forbidden" };
 		}
 		const goalDependencySkipReason = this.workerGoalDependencySkipReason(request);
@@ -3345,6 +3430,9 @@ export class WorkerDelegationController {
 					instructions: admission.instructions,
 					knowledgeReferences: admission.knowledgeReferences,
 					subscriptions: admission.subscriptions,
+					...(request.delegationObjectiveId !== undefined
+						? { delegationObjectiveId: request.delegationObjectiveId }
+						: {}),
 					...(request.brief ? { brief: request.brief } : {}),
 					...(request.receiptOrigin ? { receiptOrigin: request.receiptOrigin } : {}),
 					...(request.turnOrigin ? { turnOrigin: request.turnOrigin } : {}),
@@ -4142,6 +4230,8 @@ export class WorkerDelegationController {
 
 	/** Fresh route work keeps its original goal across awaited directory and specialist admission. */
 	private goalForWorkerRequest(request: WorkerDelegationRequest): GoalState | undefined {
+		// A delegation objective owns the start: the foreground goal neither names it nor gates it.
+		if (request.delegationObjectiveId !== undefined) return undefined;
 		const goal = this.deps.getGoalStateSnapshot();
 		if (request.objectiveId === null) return undefined;
 		if (request.savedIntent)
@@ -4233,6 +4323,41 @@ export class WorkerDelegationController {
 		}
 	}
 
+	/**
+	 * The next ranked fallback candidate an unbound route has not been judged on, admitted under the route's own source.
+	 * Undefined when the profile has no ordered fallback left that resolves and is available.
+	 */
+	private nextFitCandidate(
+		request: WorkerDelegationRequest,
+		admission: Extract<WorkerAdmission, { ok: true }>,
+		judgedModelRefs: ReadonlySet<string>,
+	): Extract<WorkerAdmission, { ok: true }> | undefined {
+		const policy = admission.executionContract.worker.profile.modelPolicy;
+		if (policy.mode !== "ordered-fallback") return undefined;
+		for (const candidate of policy.candidates) {
+			if (judgedModelRefs.has(`${candidate.provider}/${candidate.modelId}`)) continue;
+			const model = this.deps.getModelRegistry().find(candidate.provider, candidate.modelId);
+			if (!this.isWorkerRouteModelAvailable(model)) continue;
+			// Admitted as route selection admits a candidate: under the directory the original start captured, on the
+			// candidate's own binding, and only when the authority is the original's (a candidate never widens the grant).
+			const compiled = this.resolveWorkerAdmission(
+				{ ...request, executionContext: admission.executionContract.worker.executionContext },
+				undefined,
+				candidate,
+			);
+			if (!compiled.ok || !isDeepStrictEqual(compiled.shipment.modelBinding, candidate)) continue;
+			if (
+				!isDeepStrictEqual(
+					compiled.executionContract.worker.authority,
+					admission.executionContract.worker.authority,
+				)
+			)
+				continue;
+			return { ...compiled, modelRouteSource: admission.modelRouteSource };
+		}
+		return undefined;
+	}
+
 	/** The same final task/model check covers explicit, inherited and fallback worker bindings. */
 	private async checkWorkerTaskFitness(
 		request: WorkerDelegationRequest,
@@ -4253,6 +4378,8 @@ export class WorkerDelegationController {
 				judge,
 				this.workerTaskFitnessInput(request, admission, fitnessInstructions),
 				signal ?? this.workerAbort.signal,
+				// Only an inherited route may move: a pinned, named or profile-bound model keeps its pending question.
+				{ bound: admission.modelRouteSource !== "inherited" },
 			);
 		} catch (error) {
 			failure = {
@@ -4476,7 +4603,14 @@ export class WorkerDelegationController {
 	): Promise<Extract<WorkerAdmission, { ok: true }>> {
 		const isolation = this.laneIsolation;
 		const plan = shared.executionPlan;
-		if (!isolation || !plan.writeEnabled || request.verificationOfTaskId || request.reuseAgentId) return shared;
+		if (
+			!isolation ||
+			!plan.writeEnabled ||
+			request.verificationOfTaskId ||
+			request.reuseAgentId ||
+			request.isolation === "shared"
+		)
+			return shared;
 		const lane = await isolation.create(plan.cwd);
 		if (!lane) return shared;
 		let failure: string;
@@ -4601,10 +4735,33 @@ export class WorkerDelegationController {
 			}
 		}
 		if (reuse.outcome === "unavailable") return { kind: "refused", skipReason: reuse.skipReason };
-		const fitnessFailure = await this.checkWorkerTaskFitness(request, shared, signal);
-		if (fitnessFailure) {
+		// An unbound route moves to its next ranked candidate on an inadequate or open judgment; a pinned route is judged once
+		// and refused with its own reason. Candidates run out into the blocker the judgments name, never an unconfirmed model.
+		const fitVerdicts: WorkerTaskFitVerdict[] = [];
+		const judgedModelRefs = new Set<string>();
+		let fitnessFailure = await this.checkWorkerTaskFitness(request, shared, signal);
+		while (fitnessFailure) {
+			if (shared.modelRouteSource !== "inherited" || fitnessFailure.fit === undefined) {
+				if (reuse.outcome === "fresh") reuse.releaseAllocation?.();
+				return { kind: "refused", skipReason: formatWorkerTaskFitnessFailure(fitnessFailure) };
+			}
+			fitVerdicts.push(fitnessFailure.fit);
+			judgedModelRefs.add(`${shared.shipment.modelBinding.provider}/${shared.shipment.modelBinding.modelId}`);
+			const next = this.nextFitCandidate(request, shared, judgedModelRefs);
+			if (!next) {
+				if (reuse.outcome === "fresh") reuse.releaseAllocation?.();
+				return { kind: "refused", skipReason: exhaustedTaskFitReason(fitVerdicts) };
+			}
+			// The loop moved to a new candidate: its specialist reuse is judged again and the route-selected flags, which
+			// described the previous candidate, no longer apply.
 			if (reuse.outcome === "fresh") reuse.releaseAllocation?.();
-			return { kind: "refused", skipReason: formatWorkerTaskFitnessFailure(fitnessFailure) };
+			this.projectSelections.delete(request);
+			shared = next;
+			reuse = await this.resolveSpecialistReuse(request, shared, signal);
+			if (reuse.outcome === "unavailable") return { kind: "refused", skipReason: reuse.skipReason };
+			routeSelected = false;
+			selectedModelSnapshot = undefined;
+			fitnessFailure = await this.checkWorkerTaskFitness(request, shared, signal);
 		}
 		if (reuse.outcome === "reuse") {
 			const current = this.resolveWorkerAdmission(
@@ -4807,6 +4964,37 @@ export class WorkerDelegationController {
 
 	start(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<QueuedWorkerAttemptOutcome> {
 		return this.startPhases.start(request, signal);
+	}
+
+	/**
+	 * A delegation runtime's child start (a leader's brokered bot): admitted through the same start every worker takes, under
+	 * the leader's contract. Refused when the leader is unknown or grants no children; the child's limits are intersected
+	 * with the leader's and its write paths must lie inside the leader's write roots.
+	 */
+	admitNested(start: NestedWorkerStart, signal?: AbortSignal): Promise<NestedWorkerStartOutcome> {
+		const parent = this.lifecycle.getAgent(start.parentAgentId);
+		if (!parent) return Promise.resolve({ started: false, skipReason: "orchestration_parent_agent_unknown" });
+		const bot = start.bot;
+		const authority = { ...bot?.authority, ...(start.writePaths ? { writePaths: [...start.writePaths] } : {}) };
+		return this.start(
+			{
+				instructions: start.instructions,
+				parentAgentId: parent.agentId,
+				delegationObjectiveId: start.delegationObjectiveId,
+				...(bot?.botSoul !== undefined ? { botSoul: bot.botSoul } : {}),
+				...(bot?.profileId !== undefined ? { profileId: bot.profileId } : {}),
+				...(bot?.preferredAgentId !== undefined ? { preferredAgentId: bot.preferredAgentId } : {}),
+				...(bot?.forkTurns !== undefined ? { forkTurns: bot.forkTurns } : {}),
+				...(Object.keys(authority).length > 0 ? { authority } : {}),
+				...(start.messageReplayKey ? { messageReplayKey: start.messageReplayKey } : {}),
+			},
+			signal,
+		).then(
+			(outcome): NestedWorkerStartOutcome =>
+				outcome.started
+					? { started: true, laneId: outcome.record.laneId, queued: outcome.record.status === "queued" }
+					: { started: false, skipReason: outcome.skipReason },
+		);
 	}
 
 	private async admitWorkerDirectory(
@@ -5190,13 +5378,6 @@ export class WorkerDelegationController {
 		onPrepared(prepared.record);
 		const { lifecycle } = prepared;
 		if (!prepared.attempt) return { started: false, skipReason: "orchestration_attempt_missing" };
-		// Every start passes here, queued or direct: the fleet's room subscribers see the slot taken.
-		this.fleet.noteAdmitted(
-			prepared.record.laneId,
-			prepared.attempt.attemptId,
-			model,
-			request.objectiveId ?? undefined,
-		);
 		// A worker serving a third party's words reads none of the owner's memory, as a third-party run of the parent
 		// reads none: an attempt that starts tainted is planned, granted and offered no memory tool. One granted the
 		// broker before a steer tainted it keeps that grant's plan when it is recovered (a durable grant is never
@@ -5235,10 +5416,11 @@ export class WorkerDelegationController {
 		if (!immutableWorker) return { started: false, skipReason: "orchestration_execution_contract_missing" };
 		let grant: ExecutionGrant;
 		const workerResourceSystemPrompt = preparedAgent.resourceSystemPrompt;
-		const workerContextFiles = this.deps
-			.getResourceLoader()
-			.getAgentsFiles()
-			.agentsFiles.map((file) => ({ ...file }));
+		// The owner's project files reach a confined worker only where its read scope lets it read them (see the policy).
+		const workerContextFiles = contextFilesWithinReadScope(
+			this.deps.getResourceLoader().getAgentsFiles().agentsFiles,
+			executionPlan,
+		).map((file) => ({ ...file }));
 		if (prepared.attempt.grant) {
 			if (
 				!this.recovery.durableGrantIsStillPermitted(prepared.attempt.grant, executionPlan, preparedAgent.resources)
@@ -5341,6 +5523,14 @@ export class WorkerDelegationController {
 			this.safeWarn(`Worker start failed: ${error instanceof Error ? error.message : String(error)}`);
 			return { started: false, skipReason: "worker_start_unavailable" };
 		}
+		// The account window and metered reservation are taken when the attempt is leased, never while it only queues:
+		// a queued lane counting its own claim against the window it waits on could never be admitted.
+		this.fleet.noteAdmitted(
+			prepared.record.laneId,
+			prepared.attempt.attemptId,
+			model,
+			request.objectiveId ?? undefined,
+		);
 		// A routed contract whose first binding is exhausted runs on its next candidate: record where.
 		const contractBinding = prepared.attempt.dispatch.executionContract?.worker.modelBinding;
 		if (
@@ -5448,6 +5638,22 @@ export class WorkerDelegationController {
 							},
 						}
 					: {}),
+				...(directory.askRoot
+					? {
+							askRoot: (question) => {
+								directory.assertCurrent();
+								return directory.askRoot!(question);
+							},
+						}
+					: {}),
+				...(directory.startOwnedBot
+					? {
+							startOwnedBot: (agentId, message, invocationId) => {
+								directory.assertCurrent();
+								return directory.startOwnedBot!(agentId, message, invocationId);
+							},
+						}
+					: {}),
 			};
 		}
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === SYSTEM_ONE_TOOL_NAME)) {
@@ -5534,6 +5740,7 @@ export class WorkerDelegationController {
 			? new ProtectedPathWatch({
 					workerId: startedRecord.laneId,
 					paths: getTamperWatchedPaths(executionPlan.cwd, this.deps.getAgentDir()),
+					...protectedPathHostOptions(executionPlan.cwd, this.deps.getAgentDir()),
 				})
 			: undefined;
 		// The run-wide baseline is the state at the worker's start, not at its first command.
@@ -5574,7 +5781,7 @@ export class WorkerDelegationController {
 			denyCommands: this.deps.getSettingsManager().getEdgeSettings().deny,
 			readOnly: executionPlan.readOnly,
 			shellReadOnly: executionPlan.shellReadOnly,
-			...(this.deps.workerReadRoot ? { shellReadRoots: executionPlan.readPaths } : {}),
+			...(executionPlan.readConfined ? { readScopeRoots: executionPlan.readPaths } : {}),
 			cwd: executionPlan.cwd,
 			...(sharedToolOptions ? { sharedToolOptions } : {}),
 			...(this.deps.getPathAliasTable ? { getPathAliasTable: this.deps.getPathAliasTable } : {}),
@@ -5590,7 +5797,14 @@ export class WorkerDelegationController {
 			onWorkerProcessesReaped: (processes) => {
 				const message = describeReapedWorkerProcesses(startedRecord.laneId, processes);
 				this.safeWarn(message);
-				// The UI warning is not enough: the parent model also needs to know a worker's process was stopped.
+				// The UI warning is not enough: the parent model also needs to know a worker's process was stopped. A placed
+				// job's worker is the job runner's: its end reaches the placing machine, and this session is not steered by it.
+				if (
+					placedJobRef(
+						this.lifecycle.getTaskRuntimeSnapshot().attempts[durableHandle.attemptId]?.dispatch.turnOrigin,
+					)
+				)
+					return;
 				try {
 					this.deps.notifyParentSession?.("process-matrix-notice", message, {
 						attemptId: durableHandle.attemptId,
@@ -5627,6 +5841,20 @@ export class WorkerDelegationController {
 						return {
 							block: true,
 							reason: `${toolName} is refused: this worker carries a third party's words, and the owner's memory is not read for them.`,
+						};
+					}
+					// The owner's settings view and bot messaging stay withheld once a third party's words reach the attempt, as at admission.
+					if (THIRD_PARTY_WITHHELD_TOOL_NAMES.has(toolName)) {
+						runManifest?.refuse({
+							tool: toolName,
+							code: "third-party-owner-only",
+							owner: "worker authority policy",
+							detail:
+								"a third party's words reached the attempt; the owner's settings and bots are not reached for them",
+						});
+						return {
+							block: true,
+							reason: `${toolName} is refused: this worker carries a third party's words, and the owner's settings and bots are not reached for them.`,
 						};
 					}
 					const standing = this.deps.getEdgeGrants?.(true) ?? [];
@@ -5772,6 +6000,7 @@ export class WorkerDelegationController {
 		);
 		const buildExecutor = () =>
 			createWorkerAttemptExecutor({
+				reportCapabilities: reportCapabilitiesOf(prepared.attempt!.dispatch.executionContract?.worker),
 				...(prepared.attempt!.dispatch.controlMessageId
 					? { controlMessageId: prepared.attempt!.dispatch.controlMessageId }
 					: {}),
@@ -6169,11 +6398,17 @@ export class WorkerDelegationController {
 				// An honest "could not settle this" climbs the ladder before anyone relies on it; what stays
 				// open reaches the owner as it happens, not only the parent.
 				const inconclusive = rawOutcome.claim.inconclusive ?? [];
+				// A requirement-bound item stays open on its requirement (the coverage projection reads it as inconclusive); only
+				// the free items go to the settlement ladder and, from there, to the owner.
+				const requirementBound = new Set(
+					(rawOutcome.claim.report?.inconclusiveRequirements ?? []).map((entry) => entry.item),
+				);
+				const freeInconclusive = inconclusive.filter((item) => !requirementBound.has(item));
 				const ladder =
-					inconclusive.length > 0 && this.deps.settleInconclusive
+					freeInconclusive.length > 0 && this.deps.settleInconclusive
 						? await this.deps
 								.settleInconclusive({
-									items: inconclusive,
+									items: freeInconclusive,
 									messages: reviewMessages,
 									signal: workerSignal,
 									attemptId: durableHandle.attemptId,
@@ -6183,7 +6418,7 @@ export class WorkerDelegationController {
 										error: unknown,
 									): { settled: readonly string[]; unsettled: readonly string[]; ownerFollowUp?: string } => ({
 										settled: [],
-										unsettled: inconclusive.map(
+										unsettled: freeInconclusive.map(
 											(item) =>
 												`${item} (ladder failed: ${error instanceof Error ? error.message : String(error)})`,
 										),

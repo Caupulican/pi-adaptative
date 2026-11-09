@@ -54,6 +54,7 @@ import {
 	type WorkerResultContract,
 } from "./contracts.ts";
 import type { OrchestrationEventStore } from "./event-store.ts";
+import { describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
 import {
 	approvalFromPayload,
 	assertAcceptanceCriteria,
@@ -438,7 +439,9 @@ export class DurableTaskRuntime {
 		if (this.state.objectives[objective.objectiveId]) {
 			throw new DurableTaskRuntimeError(`Objective '${objective.objectiveId}' already exists.`);
 		}
-		assertRecordHasCapacity(this.state.objectives, MAX_ORCHESTRATION_OBJECTIVES, "objective");
+		assertRecordHasCapacity(this.state.objectives, MAX_ORCHESTRATION_OBJECTIVES, "objective", () =>
+			describeObjectiveLimit(this.state),
+		);
 		this.commit({
 			type: "objective.created",
 			aggregateId: objective.objectiveId,
@@ -551,7 +554,9 @@ export class DurableTaskRuntime {
 		this.assertTaskAttemptBudget(taskState, objectiveState.objective);
 		assertRecordHasCapacity(this.state.tasks, MAX_ORCHESTRATION_TASKS, "task");
 		assertIdentifierListHasCapacity(objectiveState.taskIds, MAX_ORCHESTRATION_TASKS, "objective task list");
-		assertRecordHasCapacity(this.state.attempts, MAX_ORCHESTRATION_ATTEMPTS, "attempt");
+		assertRecordHasCapacity(this.state.attempts, MAX_ORCHESTRATION_ATTEMPTS, "attempt", () =>
+			describeAttemptLimit(this.state),
+		);
 		const attemptId = `attempt-${this.createId()}`;
 		this.commit(
 			{
@@ -588,7 +593,9 @@ export class DurableTaskRuntime {
 		}
 		const normalizedDispatch = this.normalizeDispatchForTask(task, dispatch);
 		this.assertTaskAttemptBudget(task, this.state.objectives[task.task.objectiveId]!.objective);
-		assertRecordHasCapacity(this.state.attempts, MAX_ORCHESTRATION_ATTEMPTS, "attempt");
+		assertRecordHasCapacity(this.state.attempts, MAX_ORCHESTRATION_ATTEMPTS, "attempt", () =>
+			describeAttemptLimit(this.state),
+		);
 		assertIdentifierListHasCapacity(task.attemptIds, MAX_ORCHESTRATION_ATTEMPTS, "task attempt list");
 		const attemptId = `attempt-${this.createId()}`;
 		this.commit(

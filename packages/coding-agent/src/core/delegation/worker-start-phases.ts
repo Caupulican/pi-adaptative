@@ -16,10 +16,18 @@
  * worker by any other path.
  */
 
+import { isAbsolute, resolve } from "node:path";
+
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { FleetDispatch } from "../fleet/fleet-types.ts";
-import { type FleetLocalStart, type FleetLocalStartPort, LOCAL_START_RUNTIME_REPLACING } from "../fleet/local-admit.ts";
+import {
+	ESCALATION_AUTHORITY_MISMATCH,
+	type FleetLocalStart,
+	type FleetLocalStartPort,
+	LOCAL_START_RUNTIME_REPLACING,
+} from "../fleet/local-admit.ts";
+import type { WorkerExecutionAuthorityContract } from "../orchestration/contracts.ts";
 import {
 	ORCHESTRATION_THINKING_LEVELS,
 	type OrchestrationThinkingLevel,
@@ -30,6 +38,7 @@ import { awaitWorkerStartSettlement, type WorkerModelMove } from "./worker-crede
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import { WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS } from "./worker-directory-admission.ts";
 import type { WorkerDispatchWaitState } from "./worker-dispatch-scheduler.ts";
+import { authorityDigest, type RerunPlacement } from "./worker-escalation.ts";
 
 /** Prepared fleet dispatches held at once; a dispatch prepared past it is refused until one is admitted or released. */
 export const MAX_PREPARED_DISPATCHES = 256;
@@ -75,8 +84,14 @@ export interface WorkerStartPhasePort<A> {
 	admittedNow<T>(run: () => T): T | undefined;
 	prepare(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<WorkerStartAdmission<A>>;
 	materialize(request: WorkerDelegationRequest, admission: A): WorkerStartMaterialized;
+	/** The session's working directory: the base the request's relative write and read scopes resolve against. */
+	sessionCwd(): string;
 	/** The model a fresh admission runs on. */
 	admissionModel(admission: A): Model<Api>;
+	/** The authority a fresh admission runs under: what an escalation's rerun must keep. */
+	admittedAuthority(admission: A): WorkerExecutionAuthorityContract;
+	/** Where a fresh admission runs and in which isolation: compared with an escalation's recorded placement. */
+	admittedPlacement(admission: A): RerunPlacement;
 	/** The fresh lane directory a start that never ran leaves behind, removed by `discardLaneDirectory`. */
 	laneDirectory(admission: A): string;
 	discardLaneDirectory(cwd: string): Promise<void> | undefined;
@@ -101,6 +116,12 @@ function raisedThinking(level: OrchestrationThinkingLevel | undefined): Orchestr
 	return ORCHESTRATION_THINKING_LEVELS[Math.min(ORCHESTRATION_THINKING_LEVELS.length - 1, index + 1)] ?? "off";
 }
 
+/** The directory a rerun's pinned location names: the session root, an absolute path, or a path under the session root. */
+function locationBase(location: string, sessionCwd: string): string {
+	if (location === ".") return sessionCwd;
+	return isAbsolute(location) ? location : resolve(sessionCwd, location);
+}
+
 /**
  * The worker request a fleet dispatch stands for. Deterministic in the dispatch alone (plus the superseded attempt's
  * thinking for a raised escalation), so a dispatch prepared again after a restart replays its durable start through
@@ -110,6 +131,7 @@ function raisedThinking(level: OrchestrationThinkingLevel | undefined): Orchestr
 export function workerRequestForDispatch(
 	dispatch: FleetDispatch,
 	supersededThinking: OrchestrationThinkingLevel | undefined,
+	sessionCwd: string,
 ): WorkerDelegationRequest {
 	const thinkingLevel =
 		dispatch.thinking === "inherit"
@@ -117,15 +139,39 @@ export function workerRequestForDispatch(
 			: dispatch.thinking === "raise_one"
 				? raisedThinking(supersededThinking)
 				: dispatch.thinking;
+	const pinned = dispatch.escalation?.pinned;
+	// A rerun's scopes are relative to where its original's cwd sat; a plan step's are relative to the session cwd.
+	const base = pinned ? locationBase(pinned.location, sessionCwd) : sessionCwd;
+	const fromBase = (path: string): string => (isAbsolute(path) ? path : resolve(base, path));
+	const writePaths = dispatch.writeScope.map(fromBase);
 	const authority = {
 		...(dispatch.model ? { model: { provider: dispatch.model.provider, modelId: dispatch.model.modelId } } : {}),
 		...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
-		...(dispatch.writeScope.length > 0 ? { writePaths: [...dispatch.writeScope] } : {}),
+		...(writePaths.length > 0 ? { writePaths } : {}),
+		...(pinned
+			? {
+					readOnly: pinned.readOnly,
+					...(pinned.shellReadOnly ? { shellReadOnly: true } : {}),
+					...(pinned.readScope !== undefined ? { readPaths: pinned.readScope.map(fromBase) } : {}),
+					budget: { ...pinned.budget },
+					// The original's workspace: the rerun's cwd is the directory the original's cwd was, not the session root.
+					...(pinned.location !== "." ? { path: pinned.location } : {}),
+				}
+			: {}),
 	};
 	return {
 		instructions: dispatch.instructions,
 		...(dispatch.brief ? { brief: dispatch.brief } : {}),
-		objectiveId: dispatch.delegation?.objectiveId ?? dispatch.demand.objectiveId,
+		objectiveId: dispatch.demand.objectiveId,
+		// A brokered start belongs to its leader's delegation objective, never to the foreground goal.
+		...(dispatch.delegation ? { delegationObjectiveId: dispatch.delegation.objectiveId } : {}),
+		// A rerun is admitted as the original was: its registered profile, parent, bot soul, origins and checkout.
+		...(pinned?.profileId !== undefined ? { profileId: pinned.profileId } : {}),
+		...(pinned?.parentAgentId !== undefined ? { parentAgentId: pinned.parentAgentId } : {}),
+		...(pinned?.botSoul !== undefined ? { botSoul: pinned.botSoul } : {}),
+		...(pinned?.turnOrigin !== undefined ? { turnOrigin: pinned.turnOrigin } : {}),
+		...(pinned?.receiptOrigin !== undefined ? { receiptOrigin: pinned.receiptOrigin } : {}),
+		...(pinned ? { isolation: "shared" as const } : {}),
 		messageReplayKey: `fleet:${dispatch.idempotencyKey}`,
 		...(Object.keys(authority).length > 0 ? { authority } : {}),
 		taskContext: {
@@ -174,12 +220,28 @@ export class WorkerStartPhases<A> implements FleetLocalStartPort {
 		const supersededThinking = superseded
 			? this.port.activeAttempt(superseded)?.dispatch.executionContract?.worker.modelBinding.thinkingLevel
 			: undefined;
-		const captured = this.port.capture(workerRequestForDispatch(dispatch, supersededThinking));
+		const captured = this.port.capture(
+			workerRequestForDispatch(dispatch, supersededThinking, this.port.sessionCwd()),
+		);
 		const preparation = this.port
 			.admitted(
 				async (): Promise<{ ok: true } | { ok: false; skipReason: string }> => {
 					const selected = await this.port.prepare(captured, signal);
 					if (selected.kind === "refused") return { ok: false, skipReason: selected.skipReason };
+					// An escalation reruns under the authority its outcome was recorded under. Only the admission made here
+					// knows what the rerun would run under, so the comparison happens before anything is materialized.
+					if (
+						selected.kind === "fresh" &&
+						dispatch.escalation &&
+						authorityDigest(
+							this.port.admittedAuthority(selected.admission),
+							this.port.admittedPlacement(selected.admission),
+						) !== dispatch.escalation.authorityDigest
+					) {
+						selected.releaseAllocation?.();
+						this.discard(this.port.laneDirectory(selected.admission));
+						return { ok: false, skipReason: ESCALATION_AUTHORITY_MISMATCH };
+					}
 					this.prepared.set(key, { request: captured, selected });
 					return { ok: true };
 				},

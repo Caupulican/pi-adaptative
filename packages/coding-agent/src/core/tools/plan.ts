@@ -1,6 +1,7 @@
 import { Type } from "typebox";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentToolResult } from "../../kernel/types.ts";
+import { MAX_TASK_DONE_CHARS, MAX_TASK_OUT_OF_SCOPE, MAX_TASK_OUT_OF_SCOPE_CHARS } from "../comms/comms-records.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import type { PlanExecutorPort } from "../plan/plan-executor-port.ts";
 import { PLAN_LIMITS, PLAN_NODE_ID_PATTERN, PLAN_OFFERED_JOIN_KINDS } from "../plan/plan-graph.ts";
@@ -59,6 +60,19 @@ const step = Type.Object(
 				minLength: 1,
 				maxLength: PLAN_LIMITS.pinChars,
 				description: "Optional: prefer this bot, leader or machine to run this step. Leave out for a worker.",
+			}),
+		),
+		doneWhen: Type.Optional(
+			Type.String({
+				minLength: 1,
+				maxLength: MAX_TASK_DONE_CHARS,
+				description: "What makes this step done, in one line. Its result's proof sheet repeats it.",
+			}),
+		),
+		outOfScope: Type.Optional(
+			Type.Array(Type.String({ minLength: 1, maxLength: MAX_TASK_OUT_OF_SCOPE_CHARS }), {
+				maxItems: MAX_TASK_OUT_OF_SCOPE,
+				description: "What this step must not touch or decide, one line each.",
 			}),
 		),
 	},
@@ -120,7 +134,9 @@ export function createPlanToolDefinition(getPort: () => PlanExecutorPort | undef
 	return {
 		name: PLAN_TOOL_NAME,
 		label: "Plan",
-		description: `Run work with several parts as one plan: plan {action:start, title, steps:[{id, do, files?, uses?, after?, req?, deep?, join?, question?, by?}], final?}. The harness checks the plan, starts every ready step in parallel on workers, passes each step the results of the steps in its uses, retries, combines results in join steps (${JOIN_KIND_LIST}) and wakes you once per combined result. revise {steps, remove?, reason} adds or replaces steps (same id replaces) and keeps running work that did not change; cancel {reason} stops the plan. Use assign for a single task.`,
+		// The root director role names this tool for multi-part work, so its schema is in every request.
+		neverDefer: true,
+		description: `Run work with several parts as one plan: plan {action:start, title, steps:[{id, do, files?, uses?, after?, req?, deep?, join?, question?, by?, doneWhen?, outOfScope?}], final?}. The harness checks the plan, starts every ready step in parallel on workers, passes each step the results of the steps in its uses, retries, combines results in join steps (${JOIN_KIND_LIST}) and wakes you once per combined result. revise {steps, remove?, reason} adds or replaces steps (same id replaces) and keeps running work that did not change; cancel {reason} stops the plan. Use assign for a single task.`,
 		promptSnippet: "Run a multi-step plan on workers (steps, files, uses, joins)",
 		parameters: schema,
 		// As for assign: a refusal lists every fix, and that view reaches the model as the failure record's evidence.

@@ -65,8 +65,11 @@ export interface AccountWindowSnapshot {
 	readonly blockedUntil?: number;
 }
 
-export interface AccountWindowsOptions {
-	readonly agentDir: string;
+/**
+ * The clock and running ceiling of the caller that asks. The windows hold no caller's closure: a fleet passes its own
+ * settings and timers into each read, and each observed request passes its own into its settlement.
+ */
+export interface AccountWindowCaller {
 	now(): number;
 	/** The running ceiling: the most any window grows to. */
 	ceiling(): number;
@@ -126,7 +129,6 @@ function seededFraction(accountKey: string, episode: number): number {
 }
 
 export class AccountWindows {
-	private readonly options: AccountWindowsOptions;
 	private readonly file: FleetSharedState<AccountsFile>;
 	private readonly records = new Map<string, WindowRecord>();
 	private readonly running = new Map<string, number>();
@@ -136,14 +138,13 @@ export class AccountWindows {
 	private readonly blocked = new Set<string>();
 	private readonly listeners = new Set<(accountKey: string) => void>();
 
-	constructor(options: AccountWindowsOptions) {
-		this.options = options;
+	constructor(agentDir: string) {
 		this.file = new FleetSharedState(
-			join(options.agentDir, "state", "fleet", "accounts.json"),
+			join(agentDir, "state", "fleet", "accounts.json"),
 			"accounts",
 			parseAccountsFile,
 		);
-		this.adoptDisk();
+		this.adoptDisk(Date.now());
 	}
 
 	/** Calls `listener` with the account whose window grew or reopened, so waiters on it can be woken. */
@@ -170,21 +171,21 @@ export class AccountWindows {
 	}
 
 	/** One request on the account was dispatched; the returned settle folds how it ended into the window. */
-	begin(accountKey: string): (outcome: ProviderRequestOutcome) => void {
-		const startedAt = this.options.now();
-		const record = this.record(accountKey);
+	begin(accountKey: string, caller: AccountWindowCaller): (outcome: ProviderRequestOutcome) => void {
+		const startedAt = caller.now();
+		const record = this.record(accountKey, caller);
 		const inUse = (this.running.get(accountKey) ?? 0) >= Math.floor(record.w) - 1;
-		return (outcome) => this.settle(accountKey, outcome, startedAt, inUse);
+		return (outcome) => this.settle(accountKey, outcome, startedAt, inUse, caller);
 	}
 
 	/**
 	 * The account term of the room formula: 0 while a stated reset blocks the account (with `retryAt`), otherwise the
 	 * window less the fleet workers running on the account, capped by a reopened window's release budget.
 	 */
-	term(accountKey: string, providerLimit: number | undefined): RoomTerm {
-		this.adoptDisk();
-		const record = this.record(accountKey);
-		const now = this.options.now();
+	term(accountKey: string, providerLimit: number | undefined, caller: AccountWindowCaller): RoomTerm {
+		this.adoptDisk(caller.now());
+		const record = this.record(accountKey, caller);
+		const now = caller.now();
 		const waitKey = allowanceWaitKey(accountKey);
 		if (record.blockedUntil !== undefined && record.blockedUntil > now) {
 			this.blocked.add(accountKey);
@@ -197,7 +198,7 @@ export class AccountWindows {
 			};
 		}
 		if (this.blocked.delete(accountKey)) this.reopen(accountKey, record);
-		const window = Math.floor(this.cap(record.w, providerLimit));
+		const window = Math.floor(this.cap(record.w, providerLimit, caller));
 		const running = this.running.get(accountKey) ?? 0;
 		// A reopened window's release budget never holds the account at zero with nothing running: a probe whose request
 		// ended without a verdict (aborted, transport) must not leave the account waiting for a success that cannot come.
@@ -225,10 +226,10 @@ export class AccountWindows {
 	}
 
 	/** Every account the fleet started work on, or that holds a block or a learned window. */
-	snapshot(): AccountWindowSnapshot[] {
+	snapshot(caller: AccountWindowCaller): AccountWindowSnapshot[] {
 		const keys = new Set([...this.records.keys(), ...this.running.keys()]);
 		return [...keys].map((accountKey) => {
-			const record = this.record(accountKey);
+			const record = this.record(accountKey, caller);
 			return {
 				accountKey,
 				window: Math.floor(record.w),
@@ -245,19 +246,19 @@ export class AccountWindows {
 			this.ramps.set(accountKey, Math.max(1, Math.floor(record.w / 2)));
 	}
 
-	private cap(w: number, providerLimit: number | undefined): number {
-		const ceiling = Math.max(1, this.options.ceiling());
+	private cap(w: number, providerLimit: number | undefined, caller: AccountWindowCaller): number {
+		const ceiling = Math.max(1, caller.ceiling());
 		return Math.max(
 			1,
 			Math.min(w, ceiling, providerLimit !== undefined && providerLimit > 0 ? providerLimit : ceiling),
 		);
 	}
 
-	private record(accountKey: string): WindowRecord {
+	private record(accountKey: string, caller: AccountWindowCaller): WindowRecord {
 		return (
 			this.records.get(accountKey) ?? {
 				w: ACCOUNT_WINDOW_SEED,
-				ssthresh: Math.max(1, this.options.ceiling()),
+				ssthresh: Math.max(1, caller.ceiling()),
 				lastDecreaseAt: 0,
 				updatedAt: 0,
 			}
@@ -275,9 +276,15 @@ export class AccountWindows {
 		this.notify(accountKey);
 	}
 
-	private settle(accountKey: string, outcome: ProviderRequestOutcome, startedAt: number, inUse: boolean): void {
-		const now = this.options.now();
-		const record = this.record(accountKey);
+	private settle(
+		accountKey: string,
+		outcome: ProviderRequestOutcome,
+		startedAt: number,
+		inUse: boolean,
+		caller: AccountWindowCaller,
+	): void {
+		const now = caller.now();
+		const record = this.record(accountKey, caller);
 		switch (outcome.kind) {
 			case "aborted":
 			case "transport":
@@ -285,11 +292,15 @@ export class AccountWindows {
 				return;
 			case "usage_window":
 				if (outcome.resetAt === undefined || outcome.resetAt <= now) return;
-				this.update(accountKey, {
-					...record,
-					blockedUntil: Math.max(record.blockedUntil ?? 0, outcome.resetAt),
-					blockedAt: now,
-				});
+				this.update(
+					accountKey,
+					{
+						...record,
+						blockedUntil: Math.max(record.blockedUntil ?? 0, outcome.resetAt),
+						blockedAt: now,
+					},
+					now,
+				);
 				harnessLog.info("fleet", "an account is blocked until its usage window resets", () => ({
 					account: describeProviderAccountKey(accountKey),
 					retryAfterMs: (outcome.resetAt ?? now) - now,
@@ -302,7 +313,7 @@ export class AccountWindows {
 					outcome.resetAt !== undefined && outcome.resetAt > now
 						? { blockedUntil: Math.max(record.blockedUntil ?? 0, outcome.resetAt), blockedAt: now }
 						: {};
-				this.update(accountKey, { ...record, w: halved, ssthresh: halved, lastDecreaseAt: now, ...blocked });
+				this.update(accountKey, { ...record, w: halved, ssthresh: halved, lastDecreaseAt: now, ...blocked }, now);
 				this.ramps.delete(accountKey);
 				harnessLog.info("fleet", "an account's window halved after a provider refusal", () => ({
 					account: describeProviderAccountKey(accountKey),
@@ -316,13 +327,13 @@ export class AccountWindows {
 					if (reopened) this.notify(accountKey);
 					return;
 				}
-				const ceiling = Math.max(1, this.options.ceiling());
+				const ceiling = Math.max(1, caller.ceiling());
 				const w = Math.min(ceiling, record.w < record.ssthresh ? record.w + 1 : record.w + 1 / record.w);
 				if (w === record.w) {
 					if (reopened) this.notify(accountKey);
 					return;
 				}
-				this.update(accountKey, { ...record, w });
+				this.update(accountKey, { ...record, w }, now);
 				const before = Math.floor(record.w);
 				const after = Math.floor(w);
 				if (after > before) {
@@ -338,12 +349,12 @@ export class AccountWindows {
 		}
 	}
 
-	private update(accountKey: string, record: WindowRecord): void {
-		this.records.set(accountKey, { ...record, updatedAt: this.options.now() });
+	private update(accountKey: string, record: WindowRecord, now: number): void {
+		this.records.set(accountKey, { ...record, updatedAt: now });
 		this.file.schedule((disk) => {
 			const merged = new Map<string, WindowRecord>(Object.entries(disk?.accounts ?? {}));
 			for (const [key, mine] of this.records) {
-				const next = mergeRecord(merged.get(key), mine, this.options.now());
+				const next = mergeRecord(merged.get(key), mine, now);
 				if (next) merged.set(key, next);
 			}
 			const kept = [...merged.entries()]
@@ -355,11 +366,11 @@ export class AccountWindows {
 	}
 
 	/** Takes the shared file's newer facts when it changed since the last read. */
-	private adoptDisk(): void {
+	private adoptDisk(now: number): void {
 		const disk = this.file.readIfChanged();
 		if (!disk) return;
 		for (const [key, theirs] of Object.entries(disk.accounts)) {
-			const next = mergeRecord(this.records.get(key), theirs, this.options.now());
+			const next = mergeRecord(this.records.get(key), theirs, now);
 			if (next) this.records.set(key, next);
 		}
 	}
@@ -377,12 +388,16 @@ export class AccountWindows {
 
 const windowsByAgentDir = new Map<string, AccountWindows>();
 
-/** The process's account windows of `agentDir`; the first caller's clock and ceiling serve every later one. */
-export function accountWindowsFor(options: AccountWindowsOptions): AccountWindows {
-	let windows = windowsByAgentDir.get(options.agentDir);
+/**
+ * The process's account windows of `agentDir`. One object per agent directory, so every session on it shares the learned
+ * windows and their reopen state; each lookup rebinds the clock and ceiling to the caller's, so a later session never
+ * reads the closures of a session that was created before it.
+ */
+export function accountWindowsFor(agentDir: string): AccountWindows {
+	let windows = windowsByAgentDir.get(agentDir);
 	if (!windows) {
-		windows = new AccountWindows(options);
-		windowsByAgentDir.set(options.agentDir, windows);
+		windows = new AccountWindows(agentDir);
+		windowsByAgentDir.set(agentDir, windows);
 	}
 	return windows;
 }

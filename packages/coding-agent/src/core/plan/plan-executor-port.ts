@@ -17,6 +17,10 @@ export interface PlanToolStep {
 	readonly join?: PlanJoinKind;
 	readonly question?: string;
 	readonly by?: string;
+	/** What makes the step done, one line; carried into the step's brief and its result's proof sheet. */
+	readonly doneWhen?: string;
+	/** What the step must not touch or decide, one line each; carried like `doneWhen`. */
+	readonly outOfScope?: readonly string[];
 }
 
 export interface PlanToolInput {

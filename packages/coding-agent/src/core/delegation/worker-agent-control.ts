@@ -36,6 +36,7 @@ import {
 	MAX_WORKER_AUTHORITY_PATH_LENGTH,
 	type WorkerRole,
 } from "../orchestration/contracts.ts";
+import { isLeaderDelegationObjectiveId } from "../orchestration/delegation-ledger.ts";
 import {
 	type SessionBundleDeletionReservation,
 	withSessionBundleAdmission,
@@ -139,6 +140,7 @@ const MAX_ENCODED_MANDATORY_MESSAGE_BYTES =
 				thirdParty: true,
 				ref: "\0".repeat(MAX_TURN_ORIGIN_REF_CHARS),
 			},
+			delegationObjectiveId: "\0".repeat(MAX_MAILBOX_IDENTITY_CHARS),
 			createdAt: MAX_MAILBOX_TRANSITION_TIMESTAMP,
 			deliveredAt: MAX_MAILBOX_TRANSITION_TIMESTAMP,
 		}),
@@ -188,6 +190,19 @@ export interface WorkerAgentNewTaskCorrelation {
 	resourcePointerIds?: readonly string[];
 }
 
+/** A delegation objective id read back from a mailbox message: absent, or a bounded leader-delegation id. */
+function parseDelegationObjectiveId(value: unknown): string | undefined {
+	if (value === undefined) return undefined;
+	if (
+		typeof value !== "string" ||
+		value.length === 0 ||
+		value.length > MAX_MAILBOX_IDENTITY_CHARS ||
+		!isLeaderDelegationObjectiveId(value)
+	)
+		throw new Error("Worker agent mailbox message carries an invalid delegation.");
+	return value;
+}
+
 export type WorkerAgentTaskMetadata =
 	| { kind: "agent_turn"; dependsOnTaskIds?: readonly string[]; newTask?: WorkerAgentNewTaskCorrelation }
 	| { kind: "terminal_handoff"; sourceAttemptId: string }
@@ -201,6 +216,11 @@ export interface WorkerAgentMessage {
 	 * `receiptOrigin` and excluded from replay intent. The attempt that admits the message carries it from then on.
 	 */
 	turnOrigin?: TurnOriginRecord;
+	/**
+	 * The delegation objective (`delegation-…`) the words belong to: the orchestrator's brief, update or answer to a leader,
+	 * or a turn a leader's own work started. Captured at acceptance like `turnOrigin`; the turn it starts is filed under it.
+	 */
+	delegationObjectiveId?: string;
 	messageId: string;
 	kind: WorkerAgentMessageKind;
 	/** Present on a message written by a build that knows envelopes; absent on a legacy message. */
@@ -355,6 +375,8 @@ export interface WorkerAgentMessageOptions {
 	expectReply?: boolean;
 	/** Host-derived replay identity scoped to the caller, session, tool invocation, and action. */
 	idempotencyKey?: string;
+	/** Host-only, from the root path (see `SessionRootWorkerAgentMessageOptions`); never a model-facing field. */
+	delegationObjectiveId?: string;
 }
 
 export interface WorkerAgentBroadcastOptions {
@@ -369,6 +391,11 @@ export interface SessionRootWorkerAgentMessageOptions {
 	threadId?: string;
 	expectReply?: boolean;
 	idempotencyKey?: string;
+	/**
+	 * Host-only: the orchestrator's words are for this delegation (its brief, update, resume or answer to the leader).
+	 * A model-facing tool never sets it; an owner's chat leaves it out, so that turn is session work.
+	 */
+	delegationObjectiveId?: string;
 }
 
 export type WorkerAgentReplyResult =
@@ -539,6 +566,15 @@ export interface WorkerAgentControlPort extends Partial<HostEventControlPort> {
 	reconcileHostEventDelivery?(delivery: HostEventDelivery): void;
 	/** Lifecycle and physical-release notifications; the subscriber owns detaching its listener. */
 	subscribeStateChanges(listener: () => void): () => void;
+	/**
+	 * Whether a message filed under this delegation objective still waits in some bot's mailbox. A delegation's work is
+	 * not done while one does; a message filed under any other objective is not counted.
+	 */
+	hasPendingDelegatedMessage(delegationObjectiveId: string): boolean;
+	/** Whether any message waits in this agent's mailbox (retiring the agent would discard it). */
+	hasPendingControlMessages(agentId: string): boolean;
+	/** Starts the messages a delegation filed while it was paused, once it runs again. */
+	reconcileDelegatedMessages(delegationObjectiveId: string): void;
 	/** Session-root read receipt for exact terminal generations; distinct from mutation review. */
 	observeWorkerTerminalRecords?(records: readonly LaneRecord[]): void;
 	/** Observe only the exact attempts retained in a bounded model-facing control result. */
@@ -970,6 +1006,7 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 		if (message.turnOrigin !== undefined && !turnOrigin?.thirdParty) {
 			throw new Error("Worker agent mailbox message carries an invalid turn origin.");
 		}
+		const delegationObjectiveId = parseDelegationObjectiveId(message.delegationObjectiveId);
 		const createdAt = requiredMailboxTimestamp(message.createdAt, "creation timestamp");
 		const deliveredAt =
 			message.deliveredAt === undefined
@@ -1012,6 +1049,7 @@ function parseState(raw: string, parentSessionId: string, agentId: string): Work
 			...(env ? { env } : {}),
 			...(receiptOrigin ? { receiptOrigin } : {}),
 			...(turnOrigin ? { turnOrigin } : {}),
+			...(delegationObjectiveId ? { delegationObjectiveId } : {}),
 			createdAt,
 			...(deliveredAt ? { deliveredAt } : {}),
 			...(repliedAt ? { repliedAt } : {}),
@@ -1671,6 +1709,7 @@ export class WorkerAgentMailbox {
 		task?: WorkerAgentTaskMetadata;
 		receiptOrigin?: WorkerReceiptOrigin;
 		turnOrigin?: TurnOriginRecord;
+		delegationObjectiveId?: string;
 		idempotencyKey?: string;
 		onAdmitted?: () => void;
 	}): WorkerAgentEnqueueReceipt {
@@ -1729,6 +1768,7 @@ export class WorkerAgentMailbox {
 		if (input.turnOrigin !== undefined && !turnOrigin?.thirdParty) {
 			throw new TypeError("A worker control message carries only a third-party turn origin.");
 		}
+		const delegationObjectiveId = parseDelegationObjectiveId(input.delegationObjectiveId);
 		const message: WorkerAgentMessage = {
 			messageId:
 				hostEvent?.binding.messageId ??
@@ -1745,6 +1785,7 @@ export class WorkerAgentMailbox {
 			...(task ? { task } : {}),
 			...(input.receiptOrigin ? { receiptOrigin: workerReceiptOriginFromValue(input.receiptOrigin) } : {}),
 			...(turnOrigin ? { turnOrigin } : {}),
+			...(delegationObjectiveId ? { delegationObjectiveId } : {}),
 			createdAt: new Date().toISOString(),
 		};
 		// A keyed message written now carries version 2; a replay of an older identity is judged under the version its

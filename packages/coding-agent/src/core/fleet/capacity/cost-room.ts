@@ -11,12 +11,13 @@
  *   count until one settles.
  * - Spend-rate brake: new metered starts pause while the current 15-minute window's metered spend exceeds
  *   max(`fleet.brake.minUsd`, 3 x the trailing 7-day 95th percentile of 15-minute windows). It lifts when the next window
- *   begins under the line, or on the owner's resume. Subscription work continues and nothing running is stopped.
+ *   begins under the line, or when the owner lifts an emergency stop. Subscription work continues and nothing running is stopped.
  *
  * Settled spend is machine-wide (`state/fleet/spend.json`, merged additively under its lock): a day budget bounds the
  * day's fleet spend across every pi process on the agent directory. Reservations are this process's own.
  */
 
+import { randomUUID } from "node:crypto";
 import { join } from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { harnessLog } from "../../../kernel/harness-log.ts";
@@ -45,6 +46,33 @@ export interface MeteredBudgetSettings {
 	readonly brakeMinUsd: number;
 }
 
+/** A metered reservation held machine-wide: the estimate, the goal it counts against, and the instance that holds it. */
+interface ReservationRecord {
+	readonly usd: number;
+	readonly objectiveId?: string;
+	/** The random id of the MeteredSpend instance that made it; a live instance of this process owns the record. */
+	readonly holder: string;
+	/** The process that made it, which decides liveness for a holder outside this process. */
+	readonly pid: number;
+	readonly at: number;
+}
+
+/** The longest a metered worker may hold a reservation; an older record is void whoever holds it (a hung or reused-pid holder). */
+const MAX_RESERVATION_AGE_MS = 6 * 60 * 60_000;
+
+/** The holder ids of every MeteredSpend alive in this process. */
+const liveHolders = new Set<string>();
+
+/** Whether another process is still running on this machine (a crashed holder's reservation is void). */
+function processAlive(pid: number): boolean {
+	try {
+		process.kill(pid, 0);
+		return true;
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "EPERM";
+	}
+}
+
 interface SpendFile {
 	readonly v: 1;
 	readonly day: string;
@@ -52,6 +80,8 @@ interface SpendFile {
 	readonly goals: Readonly<Record<string, { readonly usd: number; readonly updatedAt: number }>>;
 	/** [window start, usd], newest last, at most seven days. */
 	readonly windows: readonly (readonly [number, number])[];
+	/** Reservations held by every live process on the machine, keyed by attempt. */
+	readonly reservations: Readonly<Record<string, ReservationRecord>>;
 }
 
 interface Reservation {
@@ -105,7 +135,24 @@ function parseSpendFile(value: unknown): SpendFile | undefined {
 				Array.isArray(raw) && typeof raw[0] === "number" && typeof raw[1] === "number" ? [[raw[0], raw[1]]] : [],
 			)
 		: [];
-	return { v: 1, day: value.day, dayUsd: value.dayUsd, goals, windows };
+	const reservations: Record<string, ReservationRecord> = {};
+	if (isPlainRecord(value.reservations))
+		for (const [attemptId, raw] of Object.entries(value.reservations))
+			if (
+				isPlainRecord(raw) &&
+				typeof raw.usd === "number" &&
+				typeof raw.holder === "string" &&
+				typeof raw.pid === "number" &&
+				typeof raw.at === "number"
+			)
+				reservations[attemptId] = {
+					usd: raw.usd,
+					holder: raw.holder,
+					pid: raw.pid,
+					at: raw.at,
+					...(typeof raw.objectiveId === "string" ? { objectiveId: raw.objectiveId } : {}),
+				};
+	return { v: 1, day: value.day, dayUsd: value.dayUsd, goals, windows, reservations };
 }
 
 export class MeteredSpend {
@@ -114,15 +161,24 @@ export class MeteredSpend {
 	private state: SpendFile;
 	/** Settled spend not yet merged into the shared file. */
 	private pending: { dayUsd: number; day: string; goals: Map<string, number>; windows: Map<number, number> };
+	/** This process's live reservations; the shared file holds every process's, and this map is their own copy. */
 	private readonly reservations = new Map<string, Reservation>();
+	/** Reservations this instance made that the shared file does not hold yet, and attempts it released. */
+	private readonly pendingReservations = new Map<string, ReservationRecord>();
+	private readonly pendingReleases = new Set<string>();
+	/** The merge the shared file was last asked to hold: it becomes this instance's state only once the write succeeds. */
+	private candidate: SpendFile | undefined;
+	/** Identifies this instance's reservations in the shared file; alive while the instance is not closed. */
+	private readonly holder = randomUUID();
 	private readonly averages = new Map<string, number>();
 	private brakeWindow: number | undefined;
 
 	constructor(options: MeteredSpendOptions) {
 		this.options = options;
+		liveHolders.add(this.holder);
 		this.file = new FleetSharedState(join(options.agentDir, "state", "fleet", "spend.json"), "spend", parseSpendFile);
 		const day = localDay(options.now());
-		this.state = { v: 1, day, dayUsd: 0, goals: {}, windows: [] };
+		this.state = { v: 1, day, dayUsd: 0, goals: {}, windows: [], reservations: {} };
 		this.pending = { dayUsd: 0, day, goals: new Map(), windows: new Map() };
 		this.adoptDisk();
 	}
@@ -186,6 +242,20 @@ export class MeteredSpend {
 	/** A metered worker started: its estimate is held against the budgets until it settles. */
 	reserve(attemptId: string, reservation: Reservation): void {
 		this.reservations.set(attemptId, reservation);
+		this.pendingReleases.delete(attemptId);
+		this.pendingReservations.set(attemptId, {
+			usd: reservation.usd,
+			...(reservation.objectiveId ? { objectiveId: reservation.objectiveId } : {}),
+			holder: this.holder,
+			pid: process.pid,
+			at: this.options.now(),
+		});
+		this.persist();
+	}
+
+	/** Ends this instance: its reservations are released by the claims that held them; it is no longer a live holder. */
+	close(): void {
+		liveHolders.delete(this.holder);
 	}
 
 	/** A metered worker's run ended: its reservation is released and its measured cost charged. */
@@ -193,6 +263,9 @@ export class MeteredSpend {
 		const reservation = this.reservations.get(attemptId);
 		if (!reservation) return;
 		this.reservations.delete(attemptId);
+		this.pendingReservations.delete(attemptId);
+		this.pendingReleases.add(attemptId);
+		this.persist();
 		const spent = measuredUsd !== undefined && Number.isFinite(measuredUsd) && measuredUsd > 0 ? measuredUsd : 0;
 		const previous = this.averages.get(reservation.modelRef);
 		this.averages.set(
@@ -211,7 +284,7 @@ export class MeteredSpend {
 			);
 		const start = windowStart(now);
 		this.pending.windows.set(start, (this.pending.windows.get(start) ?? 0) + spent);
-		this.file.schedule((disk) => this.merge(disk));
+		this.persist();
 		harnessLog.debug("fleet", "a metered worker's spend is settled", () => ({ attemptId, usd: spent }));
 		this.updateBrake(now, this.options.settings());
 	}
@@ -238,15 +311,60 @@ export class MeteredSpend {
 		return (this.state.goals[objectiveId]?.usd ?? 0) + (this.pending.goals.get(objectiveId) ?? 0);
 	}
 
+	/** Every live reservation on the machine: other processes' from the shared file, this instance's own. */
+	private liveReservations(): Map<string, ReservationRecord> {
+		const now = this.options.now();
+		const live = new Map<string, ReservationRecord>();
+		for (const [attemptId, record] of Object.entries(this.state.reservations))
+			if (this.holds(attemptId, record, now)) live.set(attemptId, record);
+		for (const [attemptId, reservation] of this.reservations)
+			live.set(attemptId, {
+				usd: reservation.usd,
+				...(reservation.objectiveId ? { objectiveId: reservation.objectiveId } : {}),
+				holder: this.holder,
+				pid: process.pid,
+				at: now,
+			});
+		return live;
+	}
+
+	/**
+	 * Whether a shared record still holds its budget. Released attempts never do; a record older than the worker lifetime
+	 * never does. A record of an instance alive in this process holds while that instance still reserves the attempt; a
+	 * record of another process holds only while that process runs. An unknown holder of this process is void.
+	 */
+	private holds(attemptId: string, record: ReservationRecord, now: number): boolean {
+		if (this.pendingReleases.has(attemptId) || now - record.at > MAX_RESERVATION_AGE_MS) return false;
+		if (liveHolders.has(record.holder)) return record.holder !== this.holder || this.reservations.has(attemptId);
+		return record.pid !== process.pid && processAlive(record.pid);
+	}
+
+	/** Schedules this instance's merge; the pending state is dropped only once the shared file holds it. */
+	private persist(): void {
+		this.file.schedule(
+			(disk) => this.merge(disk),
+			() => this.committed(),
+		);
+	}
+
+	/** Runs once a merge reached the shared file: what it carried is no longer pending. */
+	private committed(): void {
+		if (this.candidate) this.state = this.candidate;
+		this.candidate = undefined;
+		this.pendingReservations.clear();
+		this.pendingReleases.clear();
+		this.pending = { dayUsd: 0, day: this.pending.day, goals: new Map(), windows: new Map() };
+	}
+
 	private reservedTotal(): number {
 		let total = 0;
-		for (const reservation of this.reservations.values()) total += reservation.usd;
+		for (const reservation of this.liveReservations().values()) total += reservation.usd;
 		return total;
 	}
 
 	private reservedFor(objectiveId: string): number {
 		let total = 0;
-		for (const reservation of this.reservations.values())
+		for (const reservation of this.liveReservations().values())
 			if (reservation.objectiveId === objectiveId) total += reservation.usd;
 		return total;
 	}
@@ -285,7 +403,7 @@ export class MeteredSpend {
 		}));
 		this.options.onBrake?.({
 			engaged: true,
-			text: `Workers paused new paid (API-key) starts: ${usd(spent)} was spent in the last 15 minutes, above the ${usd(line)} safety line. Subscription work continues and running workers finish. Paid starts resume when the next 15-minute window begins, or when the workers are resumed.`,
+			text: `Workers paused new paid (API-key) starts: ${usd(spent)} was spent in the last 15 minutes, above the ${usd(line)} safety line. Subscription work continues and running workers finish. Paid starts resume when the next 15-minute window begins, or when an emergency stop on this machine is lifted with /estop off.`,
 		});
 	}
 
@@ -300,7 +418,12 @@ export class MeteredSpend {
 		const windows = new Map(base.windows.map(([at, spent]) => [at, spent] as const));
 		for (const [at, spent] of this.pending.windows) windows.set(at, (windows.get(at) ?? 0) + spent);
 		const since = windowStart(now) - SPEND_HISTORY_WINDOWS * SPEND_WINDOW_MS;
+		const reservations: Record<string, ReservationRecord> = {};
+		for (const [attemptId, record] of Object.entries(base.reservations ?? {}))
+			if (this.holds(attemptId, record, now)) reservations[attemptId] = record;
+		for (const [attemptId, record] of this.pendingReservations) reservations[attemptId] = record;
 		const merged: SpendFile = {
+			reservations,
 			v: 1,
 			day,
 			dayUsd: (sameDay ? base.dayUsd : 0) + this.pending.dayUsd,
@@ -309,8 +432,7 @@ export class MeteredSpend {
 			),
 			windows: [...windows.entries()].filter(([at]) => at >= since).sort((a, b) => a[0] - b[0]),
 		};
-		this.state = merged;
-		this.pending = { dayUsd: 0, day, goals: new Map(), windows: new Map() };
+		this.candidate = merged;
 		return merged;
 	}
 

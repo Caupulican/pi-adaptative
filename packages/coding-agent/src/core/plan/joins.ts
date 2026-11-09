@@ -18,6 +18,7 @@
 import { aggregateOutcomes } from "../delegation/worker-outcome.ts";
 import type { Outcome, OutcomeStatus } from "../delegation/worker-outcome-contract.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import { highestStakesLevel, type ProofStakesLevel } from "../proof/stakes-levels.ts";
 import type { PlanNodeKind, PlanNodeSpec, PlanRecord, PlanRuntimeState } from "./plan-graph.ts";
 import { planNodeOutcome } from "./plan-view.ts";
 
@@ -44,6 +45,8 @@ export interface JoinResult {
 	readonly changedFiles: readonly string[];
 	readonly gaps: readonly string[];
 	readonly artifact: string;
+	/** The highest stakes the members recorded at their settlement, and a reduce or verify step's own worker result. */
+	readonly stakes?: ProofStakesLevel;
 }
 
 export interface JoinIdentity {
@@ -74,17 +77,24 @@ export function joinOutcomeId(planId: string, nodeId: string, n: number): string
 	return `outcome-${planId}-${nodeId}-j${n}`;
 }
 
+/** A settled member: its outcome and the stakes it recorded when it settled (a join records its own). */
+interface SettledMember {
+	readonly nodeId: string;
+	readonly outcome: Outcome;
+	readonly stakes?: ProofStakesLevel;
+}
+
 function memberOutcomes(
 	projection: JoinProjection,
 	plan: PlanRuntimeState,
 	node: PlanNodeSpec,
-): { settled: { nodeId: string; outcome: Outcome }[]; pending: string[] } {
-	const settled: { nodeId: string; outcome: Outcome }[] = [];
+): { settled: SettledMember[]; pending: string[] } {
+	const settled: SettledMember[] = [];
 	const pending: string[] = [];
 	for (const member of node.join?.members ?? []) {
 		const runtime = plan.nodes[member];
 		const outcome = runtime?.held ? undefined : planNodeOutcome(projection, plan, member);
-		if (outcome) settled.push({ nodeId: member, outcome });
+		if (outcome) settled.push({ nodeId: member, outcome, stakes: runtime?.settled?.stakes ?? runtime?.join?.stakes });
 		else pending.push(member);
 	}
 	return { settled, pending };
@@ -99,11 +109,13 @@ function coverageRecord(outcome: Outcome): Record<string, boolean> {
 
 function buildResult(
 	node: PlanNodeSpec,
-	members: readonly { nodeId: string; outcome: Outcome }[],
+	members: readonly SettledMember[],
 	outcome: Outcome,
 	identity: JoinIdentity,
 	winner?: string,
+	ownStakes?: ProofStakesLevel,
 ): JoinResult {
+	const stakes = highestStakesLevel([...members.map((member) => member.stakes), ownStakes]);
 	const gaps = [
 		...members
 			.filter((member) => member.outcome.status !== "succeeded")
@@ -126,6 +138,7 @@ function buildResult(
 		changedFiles,
 		gaps,
 		artifact: identity.artifact,
+		...(stakes !== undefined ? { stakes } : {}),
 	};
 }
 
@@ -234,11 +247,19 @@ export function workerJoinResult(
 	node: PlanNodeSpec,
 	worker: Outcome,
 	identity: JoinIdentity,
+	workerStakes?: ProofStakesLevel,
 ): JoinResult {
 	const { settled } = memberOutcomes(projection, plan, node);
 	// The reducer's answer is the join's; the verifier's verdict gates every subject.
 	const children = node.kind === "reduce" ? [worker] : [...settled.map((member) => member.outcome), worker];
-	return buildResult(node, settled, aggregate(record, node, children, "all", identity), identity);
+	return buildResult(
+		node,
+		settled,
+		aggregate(record, node, children, "all", identity),
+		identity,
+		undefined,
+		workerStakes,
+	);
 }
 
 /** Whether a join's result lets the root read the report alone: accepted, every cited requirement met, nothing open. */

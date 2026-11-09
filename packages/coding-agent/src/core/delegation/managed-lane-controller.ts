@@ -5,7 +5,11 @@ import type { CapabilityEnvelope, WorkerClaim, WorkerClaimStatus, WorkerRequest 
 import { hostFindingBlockerLine } from "../autonomy/host-findings.ts";
 import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
 import { isLaneTerminalStatus, type LaneRecord, type LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
-import { getTamperWatchedPaths, ProtectedPathWatch } from "../autonomy/protected-path-watch.ts";
+import {
+	getTamperWatchedPaths,
+	ProtectedPathWatch,
+	protectedPathHostOptions,
+} from "../autonomy/protected-path-watch.ts";
 import { appendLaneRecordSnapshot, getLatestLaneRecordSnapshots } from "../autonomy/session-lane-record.ts";
 import {
 	MAX_MANAGED_LANE_SUMMARY_BYTES,
@@ -449,10 +453,12 @@ export class ManagedLaneController {
 	/** Take the dispatch-time fingerprint for one managed worker. Detection only: it can never fail a dispatch. */
 	private watchProtectedPaths(laneId: string, worktreeLanePath?: string): void {
 		try {
+			const watchCwd = worktreeLanePath ?? this.deps.getCwd();
 			const watch = new ProtectedPathWatch({
 				workerId: laneId,
 				// A lane's repository is the one whose hooks and config its worker could change.
-				paths: getTamperWatchedPaths(worktreeLanePath ?? this.deps.getCwd(), this.deps.getAgentDir()),
+				paths: getTamperWatchedPaths(watchCwd, this.deps.getAgentDir()),
+				...protectedPathHostOptions(watchCwd, this.deps.getAgentDir()),
 			});
 			watch.start();
 			this.protectedPathWatches.set(laneId, watch);

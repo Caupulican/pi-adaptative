@@ -161,15 +161,19 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 	) {
 		throw new OrchestrationProfileError(`Profile '${profile.profileId}' workspacePath must be an absolute path.`);
 	}
-	if (
-		profile.writePaths?.some(
-			(entry) =>
-				!entry.trim() ||
-				entry.length > MAX_WORKER_AUTHORITY_PATH_LENGTH ||
-				(!path.isAbsolute(entry) && !path.win32.isAbsolute(entry)),
+	for (const [label, roots] of [
+		["writePaths", profile.writePaths],
+		["readPaths", profile.readPaths],
+	] as const) {
+		if (
+			roots?.some(
+				(entry) =>
+					!entry.trim() ||
+					entry.length > MAX_WORKER_AUTHORITY_PATH_LENGTH ||
+					(!path.isAbsolute(entry) && !path.win32.isAbsolute(entry)),
+			)
 		)
-	) {
-		throw new OrchestrationProfileError(`Profile '${profile.profileId}' writePaths must be absolute paths.`);
+			throw new OrchestrationProfileError(`Profile '${profile.profileId}' ${label} must be absolute paths.`);
 	}
 	for (const [label, values] of [
 		["capabilityCeiling", profile.capabilityCeiling],
@@ -246,6 +250,9 @@ export function validateOrchestrationProfile(profile: OrchestrationProfile): voi
 					profile.delegationLimits.maxNestedAgentsPerSession > MAX_ORCHESTRATION_AGENT_BINDINGS)))
 	) {
 		throw new OrchestrationProfileError(`Profile '${profile.profileId}' delegationLimits are invalid.`);
+	}
+	if (profile.reportsProgress !== undefined && typeof profile.reportsProgress !== "boolean") {
+		throw new OrchestrationProfileError(`Profile '${profile.profileId}' reportsProgress is invalid.`);
 	}
 	try {
 		validateRiskBudget(profile.budget, `Profile '${profile.profileId}' budget`);
@@ -336,10 +343,12 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 			"shellReadOnly",
 			"workspacePath",
 			"writePaths",
+			"readPaths",
 			"resourceProfileNames",
 			"dispatchProfileIds",
 			"executionPolicy",
 			"delegationLimits",
+			"reportsProgress",
 			"budget",
 			"maxConcurrent",
 			"leaseTtlMs",
@@ -413,6 +422,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 		) ||
 		!isStringArray(value.toolNames) ||
 		(value.readOnly !== undefined && typeof value.readOnly !== "boolean") ||
+		(value.reportsProgress !== undefined && typeof value.reportsProgress !== "boolean") ||
 		(value.shellReadOnly !== undefined && typeof value.shellReadOnly !== "boolean") ||
 		(value.workspacePath !== undefined &&
 			(typeof value.workspacePath !== "string" ||
@@ -423,6 +433,15 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 			(!isStringArray(value.writePaths) ||
 				value.writePaths.length > MAX_ORCHESTRATION_COLLECTION_LENGTH ||
 				!value.writePaths.every(
+					(entry) =>
+						entry.trim().length > 0 &&
+						entry.length <= MAX_WORKER_AUTHORITY_PATH_LENGTH &&
+						(path.isAbsolute(entry) || path.win32.isAbsolute(entry)),
+				))) ||
+		(value.readPaths !== undefined &&
+			(!isStringArray(value.readPaths) ||
+				value.readPaths.length > MAX_ORCHESTRATION_COLLECTION_LENGTH ||
+				!value.readPaths.every(
 					(entry) =>
 						entry.trim().length > 0 &&
 						entry.length <= MAX_WORKER_AUTHORITY_PATH_LENGTH &&
@@ -458,6 +477,8 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 		...(value.shellReadOnly === true ? { shellReadOnly: true } : {}),
 		...(typeof value.workspacePath === "string" ? { workspacePath: value.workspacePath } : {}),
 		...(Array.isArray(value.writePaths) && value.writePaths.length > 0 ? { writePaths: value.writePaths } : {}),
+		// An empty read scope is a scope (it reads nothing), so only an absent field is left out.
+		...(Array.isArray(value.readPaths) ? { readPaths: value.readPaths } : {}),
 		resourceProfileNames: value.resourceProfileNames,
 		dispatchProfileIds: value.dispatchProfileIds,
 		...(executionPolicy
@@ -481,6 +502,7 @@ export function parseOrchestrationProfile(value: unknown, sourcePath?: string): 
 				}
 			: {}),
 		budget,
+		...(value.reportsProgress === true ? { reportsProgress: true } : {}),
 		maxConcurrent: Number(value.maxConcurrent),
 		leaseTtlMs: Number(value.leaseTtlMs),
 		requireIndependentVerification: value.requireIndependentVerification,

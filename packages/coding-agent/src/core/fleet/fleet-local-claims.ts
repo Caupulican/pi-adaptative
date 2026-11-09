@@ -8,7 +8,7 @@
 
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { ResolvedFleetSettings } from "../settings/settings-schema.ts";
-import { type AccountWindows, accountWindowsFor } from "./capacity/account-window.ts";
+import { type AccountWindowCaller, type AccountWindows, accountWindowsFor } from "./capacity/account-window.ts";
 import { allowanceWaitKey } from "./capacity/allowance-room.ts";
 import { MeteredSpend } from "./capacity/cost-room.ts";
 import type { RoomTerm } from "./fleet-types.ts";
@@ -36,18 +36,15 @@ interface Claim {
 export class FleetLocalClaims {
 	private readonly deps: FleetLocalClaimsDeps;
 	private readonly windows: AccountWindows | undefined;
+	/** This fleet's own clock and ceiling, passed into every window read it makes. */
+	private readonly caller: AccountWindowCaller;
 	private readonly spend: MeteredSpend;
 	private readonly claims = new Map<string, Claim>();
 
 	constructor(deps: FleetLocalClaimsDeps) {
 		this.deps = deps;
-		this.windows = deps.accountKey
-			? accountWindowsFor({
-					agentDir: deps.agentDir,
-					now: deps.now,
-					ceiling: () => deps.settings().ceiling.running,
-				})
-			: undefined;
+		this.windows = deps.accountKey ? accountWindowsFor(deps.agentDir) : undefined;
+		this.caller = { now: deps.now, ceiling: () => deps.settings().ceiling.running };
 		this.spend = new MeteredSpend({
 			agentDir: deps.agentDir,
 			now: deps.now,
@@ -73,7 +70,7 @@ export class FleetLocalClaims {
 		const terms: RoomTerm[] = [];
 		const accountKey = this.deps.accountKey?.(model.provider);
 		if (this.windows && accountKey !== undefined)
-			terms.push(this.windows.term(accountKey, this.deps.providerLimit?.(model.provider)));
+			terms.push(this.windows.term(accountKey, this.deps.providerLimit?.(model.provider), this.caller));
 		const estimateUsd = this.meteredEstimate(model, estimatedTokens);
 		if (estimateUsd !== undefined) {
 			const cost = this.spend.term({ estimateUsd, ...(objectiveId ? { objectiveId } : {}) });
@@ -134,7 +131,7 @@ export class FleetLocalClaims {
 	/** The accounts' windows as room per account, for the room snapshot. */
 	perAccount(): { accountKey: string; room: number; retryAt?: number }[] {
 		const now = this.deps.now();
-		return (this.windows?.snapshot() ?? []).map((account) =>
+		return (this.windows?.snapshot(this.caller) ?? []).map((account) =>
 			account.blockedUntil !== undefined && account.blockedUntil > now
 				? { accountKey: account.accountKey, room: 0, retryAt: account.blockedUntil }
 				: { accountKey: account.accountKey, room: Math.max(0, account.window - account.running) },
@@ -144,6 +141,7 @@ export class FleetLocalClaims {
 	/** Releases every claim (the scheduler is disposed). */
 	dispose(measuredUsd: (attemptId: string) => number | undefined): void {
 		this.prune(() => false, measuredUsd);
+		this.spend.close();
 	}
 
 	private meteredEstimate(model: Model<Api>, estimatedTokens: number | undefined): number | undefined {

@@ -8,6 +8,7 @@
 
 import { choiceAct } from "../decision/thresholds.ts";
 import type { OperationEffectEngine, OperationEvaluation } from "./operation-classifier.ts";
+import { withinPlanRequestBound } from "./plan-request-bound.ts";
 import { noteDecisionTrace } from "./semantic-evaluation-ledger.ts";
 
 const VOTE_LEAD = 0.15;
@@ -44,17 +45,23 @@ export async function chooseVoteWinner(
 			},
 		],
 	};
-	let evaluation: OperationEvaluation;
+	let evaluation: OperationEvaluation | undefined;
 	try {
-		evaluation = await engine.evaluate(
-			program,
-			{ criterion: input.criterion, candidates: input.candidates.map((candidate) => candidate.summary) },
-			{ consequence: "medium", signal: input.signal },
+		evaluation = await withinPlanRequestBound(
+			(signal) =>
+				engine.evaluate(
+					program,
+					{ criterion: input.criterion, candidates: input.candidates.map((candidate) => candidate.summary) },
+					{ consequence: "medium", signal },
+				),
+			{ caller: input.signal },
 		);
 	} catch {
 		input.signal?.throwIfAborted();
 		return undefined;
 	}
+	// An expired request is unjudged: no winner, and the join settles on every eligible candidate.
+	if (!evaluation) return undefined;
 	const answer = evaluation.answers?.best_candidate;
 	const reading = choiceAct(answer, undefined, "consequential", { minMargin: VOTE_LEAD });
 	const selected =
