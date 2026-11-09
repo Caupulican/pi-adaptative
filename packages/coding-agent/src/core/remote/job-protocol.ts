@@ -114,7 +114,21 @@ export const JOB_REFUSALS = [
 ] as const;
 export type JobRefusal = (typeof JOB_REFUSALS)[number];
 
-export const JOB_CANCEL_REASONS = ["owner", "superseded", "deadline", "revoked"] as const;
+/**
+ * Why a placed job is cancelled. The plan reasons are the fleet's own scope and step ends (`plan-executor.ts`: a plan's close,
+ * a join that settled without the job, a step retired by a revision), so the executor records the real reason.
+ */
+export const JOB_CANCEL_REASONS = [
+	"owner",
+	"superseded",
+	"deadline",
+	"revoked",
+	"plan_closed",
+	"plan_join_settled",
+	"plan_step_superseded",
+	"plan_step_removed",
+	"plan_step_cancelled",
+] as const;
 export type JobCancelReason = (typeof JOB_CANCEL_REASONS)[number];
 
 export const JOB_PHASES = ["queued", "preparing", "running", "finishing"] as const;

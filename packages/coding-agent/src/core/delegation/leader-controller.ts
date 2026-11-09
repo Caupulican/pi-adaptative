@@ -29,6 +29,7 @@ import { canonicalDigest } from "../steering/canonical.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import type { BotCreationRequest, CreatedBotView } from "./bot-creation.ts";
 import type { BotAskRootResult } from "./bot-message-contract.ts";
+import { ACTIVE_ATTEMPT_STATUSES, delegationBudgetStop } from "./delegation-spend.ts";
 import {
 	admitChain,
 	type LeadRequest,
@@ -67,7 +68,6 @@ export const LEADER_QUESTION_CUSTOM_TYPE = "leader-question";
 export const GOAL_LEADER_SOUL =
 	"You lead one goal for the orchestrator and nothing else. Split it into parts, give each part to a bot with bot_message (create the bots you need with action create), collect their replies, and end with one report of what was done, what is proven and what is left. You and your bots never change files. Ask the orchestrator in your report only when you cannot go on without its answer.";
 
-const ACTIVE_ATTEMPT_STATUSES = new Set<AttemptRuntimeState["status"]>(["queued", "leased", "running", "suspended"]);
 const MAX_REPORT_CHARS = 2000;
 /** The longest single timer the platform keeps; a later deadline re-arms when this one fires. */
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
@@ -125,6 +125,7 @@ export interface LeaderControllerDeps {
 	 * not metered, so this is the bound a delegation has beyond its metered `budgetUsd`.
 	 */
 	subscriptionExhausted(aliases: readonly string[]): boolean;
+	isMeteredAttempt(attempt: AttemptRuntimeState): boolean;
 	/** Whether a message filed under this delegation still waits in some bot's mailbox (unfinished work of the goal). */
 	hasPendingDelegatedMessage(delegationObjectiveId: string): boolean;
 	/** Starts the messages the goal filed while it was paused, now that it runs again. */
@@ -482,9 +483,9 @@ export class LeaderController {
 				const alias = aliasOfAttempt(attempt);
 				return alias !== undefined && alias !== leader.agentId;
 			});
-			const budget = record.charter.envelope.budgetUsd;
-			if (budget !== undefined && spentUsd(delegated) >= budget) {
-				await this.forceClose(record, "budget");
+			const stop = delegationBudgetStop(record, snapshot, records, delegated, this.deps.isMeteredAttempt);
+			if (stop !== undefined) {
+				await this.forceClose(record, "budget", stop === "unpriced" ? UNPRICED_BUDGET_REMEDY : undefined);
 				changed = true;
 				continue;
 			}
@@ -595,7 +596,11 @@ export class LeaderController {
 	}
 
 	/** Ends a delegation before its leader did: stop the leader and its bots, record the Outcome, wake the root. */
-	private async forceClose(record: DelegationRecord, reason: DelegationCloseReason): Promise<DelegationRecord> {
+	private async forceClose(
+		record: DelegationRecord,
+		reason: DelegationCloseReason,
+		remedy?: string,
+	): Promise<DelegationRecord> {
 		if (record.state === "running" || record.state === "paused") this.deps.stop(record.charter.leader);
 		const snapshot = this.deps.snapshot();
 		const bots = new Map(this.deps.bots().map((bot) => [bot.agentId, bot]));
@@ -607,7 +612,7 @@ export class LeaderController {
 			const alias = aliasOfAttempt(attempt);
 			return alias !== undefined && alias !== record.charter.leader;
 		});
-		const outcome = this.composeOutcome(record, snapshot, leaderAttempts, ownedAttempts, reason);
+		const outcome = this.composeOutcome(record, snapshot, leaderAttempts, ownedAttempts, reason, remedy);
 		const closed = this.ledger.close(record.objectiveId, outcome, reason);
 		harnessLog.info("leaders", "a delegated goal was closed early", () => ({
 			leader: record.charter.leader,
@@ -628,6 +633,7 @@ export class LeaderController {
 		leaderAttempts: readonly AttemptRuntimeState[],
 		ownedAttempts: readonly AttemptRuntimeState[],
 		reason: DelegationCloseReason,
+		remedy?: string,
 	): Outcome {
 		const latestByAgent = new Map<string, AttemptRuntimeState>();
 		for (const attempt of ownedAttempts) if (attempt.agentId) latestByAgent.set(attempt.agentId, attempt);
@@ -651,7 +657,7 @@ export class LeaderController {
 			attribution: BLOCKER_ATTRIBUTION[early.blocker],
 			sourceCodes: [`delegation_${reason}`, ...aggregate.sourceCodes].slice(0, 8),
 			assurance: "unverified",
-			nextAction: early.nextAction,
+			nextAction: remedy === undefined ? early.nextAction : { kind: "fix_request", remedy },
 			ladder: { rung: 0, exit: `delegation_${reason}` },
 		};
 	}
@@ -846,6 +852,8 @@ export class LeaderController {
 	}
 }
 
+const UNPRICED_BUDGET_REMEDY = "Lead it again without a budget, or pin a priced leader or worker model.";
+
 const EARLY_CLOSE: Readonly<
 	Partial<Record<DelegationCloseReason, { status: OutcomeStatus; blocker: BlockerCode; nextAction: NextAction }>>
 > = {
@@ -879,14 +887,6 @@ const EARLY_CLOSE: Readonly<
 /** The objective a turn's work is filed under: the delegation's own when the turn was started under it. */
 function filedObjectiveOf(snapshot: TaskRuntimeProjection, attempt: AttemptRuntimeState): string | undefined {
 	return snapshot.tasks[attempt.taskId]?.task.objectiveId;
-}
-
-/** The cost the harness recorded for these turns, the figure the worker tree budget reads too. */
-function spentUsd(attempts: readonly AttemptRuntimeState[]): number {
-	return attempts.reduce((sum, attempt) => {
-		const usd = attempt.usageAccounting?.total.costUsd ?? attempt.result?.usage.costUsd ?? 0;
-		return sum + (Number.isFinite(usd) && usd > 0 ? usd : 0);
-	}, 0);
 }
 
 /** A notice reporting work a third party's words reached opens a third-party run, as a worker handoff does. */

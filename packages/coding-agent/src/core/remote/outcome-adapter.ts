@@ -33,6 +33,10 @@ const ENDINGS: Readonly<Record<PlacerEnding, { status: string; words: (machine: 
 	remote_lost: { status: "blocked", words: (machine) => `${machine} no longer had the job after the link came back.` },
 	remote_deadline: { status: "timeout", words: (machine) => `The job on ${machine} reached its deadline.` },
 	owner_cancelled: { status: "cancelled", words: (machine) => `The owner stopped the job on ${machine}.` },
+	plan_stopped: {
+		status: "cancelled",
+		words: (machine) => `The plan no longer needed the job on ${machine}; it was stopped.`,
+	},
 };
 
 const OUTCOME_LANE_STATUS: Readonly<Record<OutcomeStatus, string>> = {
@@ -53,7 +57,9 @@ export interface PlacedJobTerminal {
 export function placedJobTerminal(record: PlacerJobRecord): PlacedJobTerminal | undefined {
 	if (record.ending) {
 		const ending = ENDINGS[record.ending];
-		return { status: ending.status, reasonCode: record.ending, summary: ending.words(record.executorName) };
+		// A plan's stop names the plan's own reason, as a local lane's terminal does; every other ending names itself.
+		const reasonCode = record.ending === "plan_stopped" && record.cancel ? record.cancel : record.ending;
+		return { status: ending.status, reasonCode, summary: ending.words(record.executorName) };
 	}
 	if (record.state === "refused") {
 		const words = record.refusal ? REFUSAL_WORDS[record.refusal] : "it refused the job";

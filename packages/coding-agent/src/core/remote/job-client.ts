@@ -12,6 +12,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { alarmAt, SYSTEM_TIMER_PORT, type TimerPort, type WallAlarm } from "../../kernel/timer-port.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { ManagedLaneBinding } from "../delegation/worker-lifecycle.ts";
 import { type ManagedLaneEvent, ManagedLaneRuntimeAdmissionError } from "../extensions/managed-lane-records.ts";
 import type { FleetDispatch } from "../fleet/fleet-types.ts";
 import type { RemoteRefusalCode } from "../fleet/remote-admit.ts";
@@ -48,8 +49,11 @@ const PLACER_GRACE_MS = 60_000;
 
 export interface RemotePlacementSession {
 	recordManagedLane(event: ManagedLaneEvent): LaneRecord | undefined;
-	/** The attempt a managed lane runs under: a replayed dispatch whose lane is already durable reads it back here. */
-	laneAttemptId(laneId: string): string | undefined;
+	/**
+	 * The durable attempts of the managed lanes, by lane id: a replayed dispatch of a durable lane reads its attempt back here, and
+	 * a restart finds the placer-side lanes a predecessor left open.
+	 */
+	managedLaneBindings(): ReadonlyMap<string, ManagedLaneBinding>;
 }
 
 export type RemoteJobEvent =
@@ -79,11 +83,12 @@ export type PreparedOffer =
 			readonly goalId?: string;
 	  };
 
-/** A committed offer: the job's record and the attempt its managed lane runs under, or why it is not placed here. */
+/** A committed offer: the job's record, the attempt and task its managed lane runs under, or why it is not placed here. */
 export type PlacementCommit =
-	| { readonly kind: "placed"; readonly record: PlacerJobRecord; readonly attemptId: string }
+	| { readonly kind: "placed"; readonly record: PlacerJobRecord; readonly attemptId: string; readonly taskId: string }
 	| { readonly kind: "attempt_unknown" }
-	| { readonly kind: "runtime_replacing" };
+	| { readonly kind: "runtime_replacing" }
+	| { readonly kind: "refused"; readonly code: RemoteRefusalCode; readonly reason: string };
 
 /** What writing a job's lane and record takes: the job, its offer, and the state the record starts in. */
 interface OfferWrite {
@@ -108,9 +113,34 @@ export interface AskOptions {
 	readonly goalId?: string;
 }
 
-export const remoteJobLaneId = (jobId: string): string => `remote-${jobId}`;
-/** The task a placed job runs as: its managed lane's first turn, as the delegation ledger names a lane's turn. */
-export const remoteJobTaskId = (jobId: string): string => `${remoteJobLaneId(jobId)}:turn:1`;
+/** The prefix of a placed job's lane id: `remote-<jobId>`. */
+const REMOTE_LANE_PREFIX = "remote-";
+/** The prefix of a placed job's authorization: `remote-job:<machineId>`, naming the machine that runs the job. */
+const REMOTE_JOB_AUTHORIZATION_PREFIX = "remote-job:";
+/** The end a lane takes when its placement was never recorded: the job was never offered to its machine. */
+const PLACEMENT_ABANDONED = "placement_abandoned";
+
+export const remoteJobLaneId = (jobId: string): string => `${REMOTE_LANE_PREFIX}${jobId}`;
+/** The authorization a placed job's managed lane is dispatched under: the machine that runs it (a lane is bound to one). */
+const remoteJobAuthorization = (machineId: string): string => `${REMOTE_JOB_AUTHORIZATION_PREFIX}${machineId}`;
+
+/**
+ * A placed job's id: a hash of this machine, the target machine and the placement's idempotency key. Each target machine gets its
+ * own job and lane for a step; a replay on the same machine derives the same id and finds the same record and lane.
+ */
+const placedJobId = (selfId: string, machineId: string, idempotencyKey: string): string =>
+	createHash("sha256")
+		.update(JSON.stringify([selfId, machineId, idempotencyKey]))
+		.digest("base64url")
+		.slice(0, 22);
+
+/** The placer's ending for a cancel: the owner's stop, the deadline, a revoke, or else the plan's own stop. */
+function endingOfCancel(reason: JobCancelReason): PlacerEnding {
+	if (reason === "owner") return "owner_cancelled";
+	if (reason === "deadline") return "remote_deadline";
+	if (reason === "revoked") return "machine_revoked";
+	return "plan_stopped";
+}
 
 /**
  * A machine's reply as the ask lane's summary: the whole reply when it fits the summary bound, else the part that fits with
@@ -191,6 +221,7 @@ export class RemoteJobClient {
 		this.started = true;
 		this.watch.start();
 		this.stopFleet = this.machines.subscribe(() => this.reconcile());
+		this.endAbandonedLanes();
 		this.reconcile();
 	}
 
@@ -234,6 +265,20 @@ export class RemoteJobClient {
 	}
 
 	/**
+	 * Why the job's durable lane cannot take a placement on `machineId`.The job id names the target machine, so a lane bound to
+	 * another machine is not reachable from a placement here: the check is a guard against a broken invariant. Undefined otherwise.
+	 */
+	private laneRefusal(
+		machineId: string,
+		jobId: string,
+	): { readonly code: RemoteRefusalCode; readonly reason: string } | undefined {
+		const binding = this.session.managedLaneBindings().get(remoteJobLaneId(jobId));
+		if (binding && binding.authorizationId !== remoteJobAuthorization(machineId))
+			return { code: "lane_bound_elsewhere", reason: "the job's lane is bound to another machine" };
+		return undefined;
+	}
+
+	/**
 	 * The asynchronous half of a placement: the existing record a job id replays, or the offer a new job writes. Every
 	 * refusal is a code fact and nothing is written here.
 	 */
@@ -243,10 +288,7 @@ export class RemoteJobClient {
 		options: PlaceOptions = {},
 	): Promise<PreparedOffer | { readonly kind: "refused"; readonly code: RemoteRefusalCode; readonly reason: string }> {
 		const selfId = this.selfId();
-		const jobId = createHash("sha256")
-			.update(`${selfId}|${dispatch.idempotencyKey}`)
-			.digest("base64url")
-			.slice(0, 22);
+		const jobId = placedJobId(selfId, placement.machineId, dispatch.idempotencyKey);
 		const existing = this.store.out.read(jobId);
 		if (existing) return { kind: "existing", record: existing };
 		const machine = this.machines.get(placement.machineId);
@@ -257,6 +299,8 @@ export class RemoteJobClient {
 				code: refused?.code ?? "unlinked",
 				reason: refused?.reason ?? "that machine is not linked with this one",
 			};
+		const lane = this.laneRefusal(machine.machineId, jobId);
+		if (lane) return { kind: "refused", code: lane.code, reason: lane.reason };
 		let repo: JobOffer["repo"];
 		if (options.cwd) {
 			const identity = await resolveRepoIdentity(options.cwd);
@@ -299,16 +343,21 @@ export class RemoteJobClient {
 	 * The synchronous half of a placement, run by the fleet's admit: the record an existing job id already has, or the job's
 	 * managed lane and pending record written now. A replay of a job whose lane a crash left durable reads that lane's attempt
 	 * back, so no second attempt starts and the record is written once. A runtime being replaced answers `runtime_replacing`
-	 * before anything is written, so the offer stays prepared for the next try.
+	 * before anything is written, so the offer stays prepared for the next try. A lane that ended with no record was never
+	 * offered: its job starts again as the lane's next turn.
 	 */
 	commitOffer(prepared: PreparedOffer): PlacementCommit {
-		if (prepared.kind === "existing")
-			return prepared.record.attemptId
-				? { kind: "placed", record: prepared.record, attemptId: prepared.record.attemptId }
+		if (prepared.kind === "existing") {
+			const binding = this.session.managedLaneBindings().get(prepared.record.laneId);
+			return prepared.record.attemptId && binding
+				? { kind: "placed", record: prepared.record, attemptId: prepared.record.attemptId, taskId: binding.taskId }
 				: { kind: "attempt_unknown" };
+		}
+		const lane = this.laneRefusal(prepared.machine.machineId, prepared.jobId);
+		if (lane) return { kind: "refused", code: lane.code, reason: lane.reason };
 		try {
-			const { record, attemptId } = this.writeLaneAndRecord(offerWrite(prepared));
-			return { kind: "placed", record, attemptId };
+			const { record, attemptId, taskId } = this.writeLaneAndRecord(offerWrite(prepared));
+			return { kind: "placed", record, attemptId, taskId };
 		} catch (error) {
 			if (error instanceof ManagedLaneRuntimeAdmissionError) return { kind: "runtime_replacing" };
 			throw error;
@@ -431,55 +480,116 @@ export class RemoteJobClient {
 	 * (a dispatch always prepares an attempt) and throws before the record is written. The runtime's admission error is thrown
 	 * before anything is written.
 	 */
-	private writeLaneAndRecord(input: OfferWrite): { readonly record: PlacerJobRecord; readonly attemptId: string } {
+	private writeLaneAndRecord(input: OfferWrite): {
+		readonly record: PlacerJobRecord;
+		readonly attemptId: string;
+		readonly taskId: string;
+	} {
 		const { machine, jobId, offer, state, deadlineMs } = input;
 		const now = this.timers.now();
 		const laneId = remoteJobLaneId(jobId);
 		const holdMs = loadLinkSettings(this.agentDir).offlineHoldMs;
-		// `undefined` answers a dispatch whose lane is already durable; its attempt is read back below.
-		const lane = this.session.recordManagedLane({
+		// The lane's turn: a live lane replays its own turn (the managed controller answers with the attempt it has); a lane that
+		// ended without a record was never offered, so the job runs again as the lane's next turn.
+		const bound = this.session.managedLaneBindings().get(laneId);
+		const sequence = bound === undefined ? 1 : bound.ended ? bound.dispatchSequence + 1 : bound.dispatchSequence;
+		this.session.recordManagedLane({
 			laneId,
 			phase: "dispatch",
 			...(input.goalId ? { goalId: input.goalId } : {}),
 			dispatch: {
-				sequence: 1,
+				sequence,
 				instructions: offer.instructions,
 				profileId: "remote-job",
 				provider: "link",
-				authorizationId: `remote-job:${machine.machineId}`,
+				authorizationId: remoteJobAuthorization(machine.machineId),
 				authorizationKind: "profile-derived",
 				allowedTools: REMOTE_JOB_LANE_TOOLS,
 				writePaths: [],
 				leaseTtlMs: deadlineMs + PLACER_GRACE_MS + holdMs + PLACER_GRACE_MS,
 			},
 		});
-		const attemptId = lane?.attemptId || this.session.laneAttemptId(laneId);
-		if (!attemptId) throw new Error("remote_job_lane_unrecorded");
-		const record = this.store.createPlaced({
-			v: 1,
-			jobId,
-			executorId: machine.machineId,
-			executorName: machine.name,
-			ownerSession: this.sessionId(),
-			laneId,
-			offer,
-			offerDigest: digestOffer(offer),
-			state,
-			createdAt: now,
-			deadlineAt: now + deadlineMs + PLACER_GRACE_MS,
-			lastSeq: 0,
-			attemptId,
-		});
+		const written = this.session.managedLaneBindings().get(laneId);
+		if (!written) throw new Error("remote_job_lane_unrecorded");
+		let record: PlacerJobRecord;
+		try {
+			record = this.store.createPlaced({
+				v: 1,
+				jobId,
+				executorId: machine.machineId,
+				executorName: machine.name,
+				ownerSession: this.sessionId(),
+				laneId,
+				offer,
+				offerDigest: digestOffer(offer),
+				state,
+				createdAt: now,
+				deadlineAt: now + deadlineMs + PLACER_GRACE_MS,
+				lastSeq: 0,
+				attemptId: written.attemptId,
+			});
+		} catch (error) {
+			// The lane is durable and its record is not: no offer can follow, so the lane ends here instead of at its lease.
+			this.endAbandonedLane(laneId, written.dispatchSequence);
+			throw error;
+		}
 		harnessLog.info("placement", "a job was placed on a linked machine", { jobId, peer: machine.machineId });
 		journalJob(this.agentDir, { side: "placer", jobId, peer: machine.machineId, event: state });
 		this.start();
 		this.reconcile();
-		return { record, attemptId };
+		return { record, attemptId: written.attemptId, taskId: written.taskId };
+	}
+
+	/**
+	 * The machine a placement for this idempotency key is already bound to: the machine of its placed job, the most recent when
+	 * there are several. Undefined when no placed job exists for the key. Read-only.
+	 */
+	boundMachine(idempotencyKey: string): string | undefined {
+		const selfId = this.selfId();
+		let bound: PlacerJobRecord | undefined;
+		for (const machine of this.machines.list()) {
+			const record = this.store.out.read(placedJobId(selfId, machine.machineId, idempotencyKey));
+			if (record && (bound === undefined || record.createdAt > bound.createdAt)) bound = record;
+		}
+		return bound?.executorId;
+	}
+
+	/**
+	 * Ends the placer-side lanes a predecessor left open between writing a lane and writing its placed record. A lane with no record
+	 * was never offered to its machine, so it ends as `placement_abandoned`; its evidence stays in the lane. Runs once per start,
+	 * before this session places or admits anything.
+	 */
+	private endAbandonedLanes(): void {
+		for (const [laneId, binding] of this.session.managedLaneBindings()) {
+			if (binding.ended || !laneId.startsWith(REMOTE_LANE_PREFIX)) continue;
+			if (!binding.authorizationId?.startsWith(REMOTE_JOB_AUTHORIZATION_PREFIX)) continue;
+			if (this.store.out.read(laneId.slice(REMOTE_LANE_PREFIX.length)) !== undefined) continue;
+			this.endAbandonedLane(laneId, binding.dispatchSequence);
+		}
+	}
+
+	/** Ends one abandoned placement lane; a failure is logged and the lane stays as it was (the next start tries again). */
+	private endAbandonedLane(laneId: string, dispatchSequence: number): void {
+		try {
+			this.session.recordManagedLane({
+				laneId,
+				phase: "terminal",
+				dispatchSequence,
+				status: "canceled",
+				reasonCode: PLACEMENT_ABANDONED,
+				summary: "The placement was not recorded, so the job was never offered to its machine.",
+			});
+		} catch (error) {
+			harnessLog.warn("placement", "an abandoned placement lane could not be ended", {
+				laneId,
+				reason: error instanceof Error ? error.name : "unknown",
+			});
+		}
 	}
 
 	/** The owner stops a job; it ends here at once and the executor is told to stop. */
 	cancel(jobId: string, reason: JobCancelReason = "owner"): boolean {
-		return this.end(jobId, reason === "deadline" ? "remote_deadline" : "owner_cancelled", reason);
+		return this.end(jobId, endingOfCancel(reason), reason);
 	}
 
 	/**
@@ -611,11 +721,12 @@ export class RemoteJobClient {
 		this.applying.add(record.jobId);
 		this.disarm(record.jobId);
 		let failed = false;
+		const dispatchSequence = this.session.managedLaneBindings().get(record.laneId)?.dispatchSequence;
 		void runtimeRetry(() =>
 			this.session.recordManagedLane({
 				laneId: record.laneId,
 				phase: "terminal",
-				dispatchSequence: 1,
+				...(dispatchSequence !== undefined ? { dispatchSequence } : {}),
 				status: terminal.status,
 				summary: terminal.summary,
 				...(terminal.reasonCode ? { reasonCode: terminal.reasonCode } : {}),

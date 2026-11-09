@@ -84,6 +84,7 @@ type PlanFleet = Pick<
 	| "subscribeRoom"
 	| "releasePrepared"
 	| "placementCandidates"
+	| "boundMachine"
 	| "hasRemoteBackend"
 	| "subscribeCandidates"
 >;
@@ -824,6 +825,7 @@ export class PlanExecutor implements PlanExecutorPort {
 			candidates,
 			refused: this.remoteRefused.get(key) ?? NO_MACHINES,
 			remoteBackend: fleet.hasRemoteBackend(),
+			boundMachine: fleet.boundMachine(dispatch.idempotencyKey),
 		});
 		// An offer a temporary refusal left prepared is kept only for the machine it was prepared for.
 		const parkedOn = this.remoteParked.get(key);

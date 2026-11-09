@@ -17,7 +17,7 @@ import type { ManagedLaneView } from "../delegation/managed-lane-views.ts";
 import type { PersistentBotLiveState } from "../delegation/persistent-bot-team-store.ts";
 import type { RemoteBackendPort } from "../fleet/remote-admit.ts";
 import type { PlacementCapacitySource } from "../placement/capacity-source.ts";
-import { MAX_ADVERT_MODELS, type ModelFact, WIRE_WORD } from "./capabilities.ts";
+import { isOneOf, MAX_ADVERT_MODELS, type ModelFact, WIRE_WORD } from "./capabilities.ts";
 import { type FleetMachine, FleetMachines } from "./fleet-machines.ts";
 import {
 	type PlaceOptions,
@@ -25,8 +25,8 @@ import {
 	type PreparedOffer,
 	RemoteJobClient,
 	type RemotePlacementSession,
-	remoteJobTaskId,
 } from "./job-client.ts";
+import { JOB_CANCEL_REASONS, type JobCancelReason } from "./job-protocol.ts";
 import { JobRunner, type JobRunnerSession } from "./job-runner.ts";
 import { activeExecutorJobs, inDir, JobStore, outDir, type PlacerJobRecord } from "./job-store.ts";
 import { hubTurnedOn, listJoins, loadLinkSettings, type MachineIdentity } from "./registry.ts";
@@ -54,8 +54,20 @@ export interface RemoteRoomFleet {
 	registerRemoteBackend(port: RemoteBackendPort): () => void;
 }
 
-/** A remote task id or a remote lane id: `remote-<jobId>`, with the `:turn:1` a placed job's task adds. */
-const REMOTE_TASK_ID = /^remote-([A-Za-z0-9_-]{1,64})(?::turn:1)?$/;
+/** A remote task id or a remote lane id: `remote-<jobId>`, with the `:turn:<n>` a placed job's task adds. */
+const REMOTE_TASK_ID = /^remote-([A-Za-z0-9_-]{1,64})(?::turn:\d+)?$/;
+
+/**
+ * The job protocol's reason for a fleet cancel: the fleet's own reason (a plan's close, join or step end) when the protocol
+ * names it. A reason it does not name ends the job as `superseded`, and the rename is logged rather than silent.
+ */
+function jobCancelReasonOf(reasonCode: string): JobCancelReason {
+	if (isOneOf(JOB_CANCEL_REASONS, reasonCode)) return reasonCode;
+	harnessLog.warn("placement", "a placed job was cancelled for a reason the job protocol does not name", {
+		reasonCode,
+	});
+	return "superseded";
+}
 
 const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama-cpp", "llamacpp", "vllm", "local"]);
 /**
@@ -296,7 +308,11 @@ export class RemoteJobs {
 				);
 				// An abort is the caller's own stop, not a refusal: the plan executor reports nothing for it.
 				signal?.throwIfAborted();
-				if (prepared.kind === "refused") return { ok: false, code: prepared.code, detail: prepared.reason };
+				// A refusal drops any offer this key still holds: nothing prepared under it outlives the refusal.
+				if (prepared.kind === "refused") {
+					this.offers.delete(dispatch.idempotencyKey);
+					return { ok: false, code: prepared.code, detail: prepared.reason };
+				}
 				this.offers.set(dispatch.idempotencyKey, prepared);
 				return { ok: true };
 			},
@@ -311,21 +327,23 @@ export class RemoteJobs {
 				if (commit.kind === "runtime_replacing") return commit;
 				this.offers.delete(key);
 				if (commit.kind === "attempt_unknown") return commit;
+				if (commit.kind === "refused") return { kind: "refused", code: commit.code, detail: commit.reason };
 				return {
 					kind: "placed",
-					taskId: remoteJobTaskId(commit.record.jobId),
+					taskId: commit.taskId,
 					attemptId: commit.attemptId,
 					laneId: commit.record.laneId,
 				};
 			},
+			boundMachine: (idempotencyKey) => this.client.boundMachine(idempotencyKey),
 			release: (key) => {
 				this.offers.delete(key);
 			},
-			cancel: (id) => {
+			cancel: (id, reasonCode) => {
 				const jobId = REMOTE_TASK_ID.exec(id)?.[1];
 				// Only a job this machine placed is cancelled here; any other id stays with the local lanes.
 				if (jobId === undefined || !this.client.placedHere(jobId)) return false;
-				this.client.cancel(jobId, "superseded");
+				this.client.cancel(jobId, jobCancelReasonOf(reasonCode));
 				return true;
 			},
 		};

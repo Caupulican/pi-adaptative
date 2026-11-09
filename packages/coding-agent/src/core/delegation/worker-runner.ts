@@ -24,6 +24,7 @@ import {
 	WORKER_WRITE_LANE_SYSTEM_PROMPT,
 } from "../provider-prompt-contracts.ts";
 import { createEvidenceBundle } from "../research/evidence-bundle.ts";
+import { BUDGET_EXHAUSTED_REASON_CODES } from "./budget-reason-codes.ts";
 import {
 	type AppliedActionsReport,
 	parseWorkerActions,
@@ -508,10 +509,11 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		: [];
 
 	if (bounded.failure) {
-		const isBudgetExhausted =
-			bounded.failure.status === "budget_exhausted" ||
-			bounded.failure.reasonCode.includes("budget_exhausted") ||
-			bounded.failure.reasonCode.includes("cost_budget_exceeded");
+		// A budget stop is named by its exact code, as the lane projection reads it. An unpriced model is refused by a cost
+		// bound too, with the same status, but it never ran and spent nothing: it is a failure, not a paused budget.
+		const isBudgetExhausted = BUDGET_EXHAUSTED_REASON_CODES.has(bounded.failure.reasonCode);
+		const failureLaneStatus =
+			bounded.failure.status === "budget_exhausted" && !isBudgetExhausted ? "failed" : bounded.failure.status;
 		const cancelled = bounded.failure.status === "canceled" || bounded.failure.status === "timeout";
 		const blockers = [
 			...(liveChangedFilesReport.overflowed
@@ -549,7 +551,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				...(blockers.length > 0 ? { blockers } : {}),
 				...(failureEvidence ? { evidence: failureEvidence } : {}),
 			},
-			laneStatus: bounded.failure.status,
+			laneStatus: failureLaneStatus,
 			reasonCode: bounded.failure.reasonCode,
 			...(bounded.failure.detail ? { reasonDetail: bounded.failure.detail } : {}),
 			costUsd,

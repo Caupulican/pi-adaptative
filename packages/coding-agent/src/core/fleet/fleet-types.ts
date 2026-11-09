@@ -220,6 +220,8 @@ export interface FleetScheduler {
 	hasRemoteBackend(): boolean;
 	/** Linked machines a read-only plan step may go to now: online, not held, taking jobs, a free slot. */
 	placementCandidates(): readonly { readonly machineId: string; readonly slots: number }[];
+	/** The linked machine a placed job for this idempotency key already exists on, if any: a replay returns to it. */
+	boundMachine(idempotencyKey: string): string | undefined;
 	/** Fires when any placement capacity source changes. */
 	subscribeCandidates(onChange: () => void): () => void;
 	/** Registers the session's remote-machine backend; the returned function unregisters it when it is still registered. */

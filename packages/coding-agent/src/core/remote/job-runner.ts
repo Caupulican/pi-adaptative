@@ -92,6 +92,11 @@ const CANCEL_BLOCKER: Readonly<Record<JobCancelReason, BlockerCode>> = {
 	superseded: "superseded",
 	deadline: "deadline_reached",
 	revoked: "cancelled_by_owner",
+	plan_closed: "superseded",
+	plan_join_settled: "superseded",
+	plan_step_superseded: "superseded",
+	plan_step_removed: "superseded",
+	plan_step_cancelled: "cancelled_by_owner",
 };
 
 function isSelf(owner: ProcessOwner | undefined, self: ProcessOwner): boolean {

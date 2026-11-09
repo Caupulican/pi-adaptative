@@ -45,11 +45,12 @@ function clipBytes(text: string, maxBytes: number): string {
 }
 
 /**
- * Placement decision at release (X-18). Remote and bot placement are not wired yet, so every step runs as a local
- * worker; a pin (`by`, always "prefer") is recorded in the exit so the trace shows it was not honored.
+ * The base placement of a released step (X-18): local by default. `placementFor` (`plan-placement.ts`) chooses a linked
+ * machine for a read-only step (a must-pin, a pin to a free candidate, or local room at zero) and replaces this base with
+ * its own exit. A pinned step that stays local is recorded as `pin_kept_local`, so the trace shows the pin was considered.
  */
 export function decidePlacement(node: PlanNodeSpec): { readonly placement: Placement; readonly exit: string } {
-	return { placement: { kind: "local_worker" }, exit: node.pin ? "pin_not_wired_local" : "local_default" };
+	return { placement: { kind: "local_worker" }, exit: node.pin ? "pin_kept_local" : "local_default" };
 }
 
 /** Nodes on a longest path of the plan: they are released first. */

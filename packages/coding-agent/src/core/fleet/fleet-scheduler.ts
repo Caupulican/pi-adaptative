@@ -621,6 +621,11 @@ export class SessionFleetScheduler implements FleetScheduler {
 		return candidates.sort((a, b) => b.slots - a.slots || (a.machineId < b.machineId ? -1 : 1));
 	}
 
+	/** The linked machine a placed job for `idempotencyKey` already exists on, if any: a replay returns to that machine. */
+	boundMachine(idempotencyKey: string): string | undefined {
+		return this.remote?.boundMachine(idempotencyKey);
+	}
+
 	/** Fires when any placement capacity source changes; a listener's failure never stops the others from hearing it. */
 	subscribeCandidates(onChange: () => void): () => void {
 		this.candidateListeners.add(onChange);
@@ -686,6 +691,8 @@ export class SessionFleetScheduler implements FleetScheduler {
 			});
 			if (decision.kind !== "refused") this.prepared.delete(dispatch.idempotencyKey);
 			else if (decision.retryAt !== undefined) this.armCandidateWake(decision.retryAt);
+			// A permanent refusal releases what is prepared under its key here, so nothing outlives the refusal.
+			else this.releasePrepared(dispatch.idempotencyKey);
 			return decision;
 		}
 		const key = placementCapacityKey(placement);
@@ -800,6 +807,8 @@ export class SessionFleetScheduler implements FleetScheduler {
 		if (!port) return REMOTE_NO_BACKEND;
 		const prepared = await port.prepare(dispatch, machineId, signal);
 		if (!prepared.ok) {
+			// A refused prepare leaves nothing prepared under the key, here or in the backend.
+			this.releasePrepared(dispatch.idempotencyKey);
 			const refusal = remoteRefusal(prepared.code, prepared.detail, this.deps.timers.now());
 			if (refusal.retryAt !== undefined) this.armCandidateWake(refusal.retryAt);
 			return refusal;

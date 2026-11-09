@@ -109,6 +109,16 @@ export class ManagedLaneLifetimeInputError extends Error {
 	}
 }
 
+/** A managed lane's durable attempt as a placement reads it back: its ids, turn, dispatch authorization and whether it has ended. */
+export interface ManagedLaneBinding {
+	readonly attemptId: string;
+	/** The task the attempt runs as: the lane's id and its dispatch turn. */
+	readonly taskId: string;
+	readonly dispatchSequence: number;
+	readonly authorizationId: string | undefined;
+	readonly ended: boolean;
+}
+
 export class WorkerLifecycle {
 	readonly ledger: DelegationOrchestrationLedger;
 	private readonly outcomes: WorkerOutcomeRecorder;
@@ -774,6 +784,29 @@ export class WorkerLifecycle {
 
 	getManagedAttempt(laneId: string): AttemptRuntimeState | undefined {
 		return selectedManagedWorkerAttempt(this.ledger.runtime.getSnapshot(), laneId);
+	}
+
+	/** The durable attempt a managed lane runs under, read back by a replayed placement. */
+	getManagedBinding(laneId: string): ManagedLaneBinding | undefined {
+		const attempt = this.getManagedAttempt(laneId);
+		if (!attempt) return undefined;
+		return {
+			attemptId: attempt.attemptId,
+			taskId: attempt.taskId,
+			dispatchSequence: attempt.dispatch.dispatchSequence ?? 1,
+			authorizationId: attempt.dispatch.authorizationId,
+			ended: !NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(attempt.status),
+		};
+	}
+
+	/** Every managed lane's durable binding, by lane id: a restart reads the placer-side lanes a predecessor left open. */
+	getManagedBindings(): ReadonlyMap<string, ManagedLaneBinding> {
+		const bindings = new Map<string, ManagedLaneBinding>();
+		for (const record of this.getManagedRecords()) {
+			const binding = this.getManagedBinding(record.laneId);
+			if (binding) bindings.set(record.laneId, binding);
+		}
+		return bindings;
 	}
 
 	getManagedHandle(laneId: string): StartedDelegationAttempt | undefined {

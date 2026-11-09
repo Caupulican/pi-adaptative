@@ -5,6 +5,7 @@ export { attemptAwaitsParent, attemptVerification } from "../orchestration/verif
 
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { attemptVerification, currentTaskTerminalOverride } from "../orchestration/verification-identity.ts";
+import { BUDGET_EXHAUSTED_REASON_CODES, UNPRICED_BUDGET_REASON_CODES } from "./budget-reason-codes.ts";
 import { describeNextAction, sameOutcomeAttempt } from "./worker-outcome-words.ts";
 import { deriveWorkerTaskLabel } from "./worker-task-label.ts";
 
@@ -23,9 +24,11 @@ function terminalStatus(attempt: AttemptRuntimeState): LaneTerminalStatus {
 	if (attempt.status === "cancelled") return "canceled";
 	// Budget/timeout reasonCodes take priority over the claim-level result.status: a worker can
 	// finish its claim as "partial" (or "blocked") on the same attempt where it also blew the cost
-	// or wall-clock budget, and that resource-exhaustion signal must not be shadowed.
+	// or wall-clock budget, and that resource-exhaustion signal must not be shadowed. A budget is
+	// named by its exact code, so an unpriced refusal (a model with no price, which never ran) is a failure.
 	const reasonCode = attempt.result?.reasonCode ?? attempt.reasonCode ?? "";
-	if (reasonCode.includes("budget")) return "budget_exhausted";
+	if (BUDGET_EXHAUSTED_REASON_CODES.has(reasonCode)) return "budget_exhausted";
+	if (UNPRICED_BUDGET_REASON_CODES.has(reasonCode)) return "failed";
 	if (reasonCode.includes("timeout")) return "timeout";
 	if (attempt.result?.status === "partial") return "partial";
 	if (attempt.result?.status === "blocked") return "blocked";

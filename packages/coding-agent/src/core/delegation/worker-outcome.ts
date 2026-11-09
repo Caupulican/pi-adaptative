@@ -92,6 +92,7 @@ const EXACT_SOURCE_CODES: Readonly<Record<string, BlockerCode>> = {
 	worker_model_disallowed: "model_unavailable",
 	model_unsupported: "model_unavailable",
 	worker_run_model_unpriced: "model_unavailable",
+	worker_delegation_model_unpriced: "model_unavailable",
 	overloaded: "provider_transient",
 	rate_limit: "provider_transient",
 	server_error: "provider_transient",

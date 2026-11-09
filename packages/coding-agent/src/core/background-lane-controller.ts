@@ -133,7 +133,7 @@ import type { WorkerDelegationRequest } from "./delegation/worker-delegation-req
 import { deriveFanoutGroups, type FanoutGroupReport } from "./delegation/worker-fanout.ts";
 import { WorkerLaneIsolation } from "./delegation/worker-lane-isolation.ts";
 import { isManagedWorkerAttempt, projectWorkerAttemptLaneRecord } from "./delegation/worker-lane-projection.ts";
-import type { WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
+import type { ManagedLaneBinding, WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { contractGrantsChildren } from "./delegation/worker-nested-start.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
 import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
@@ -955,9 +955,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._getManagedLaneController().record(event);
 	}
 
-	/** The attempt a managed lane runs under, read from the worker lifecycle once the lane has been recorded. */
-	laneAttemptId(laneId: string): string | undefined {
-		return this._getWorkerLifecycle().getManagedAttempt(laneId)?.attemptId;
+	/** The durable attempts of every managed lane, by lane id: id, turn, dispatch authorization and whether each has ended. */
+	managedLaneBindings(): ReadonlyMap<string, ManagedLaneBinding> {
+		return this._getWorkerLifecycle().getManagedBindings();
 	}
 
 	/** Why the last idle research-lane evaluation skipped, for /autonomy diagnostics. */
@@ -2826,7 +2826,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _getLeaders(): LeaderController {
 		if (this._leaders) return this._leaders;
 		const store = () => this.getBotTeamStore();
-		const timers = this.deps.getTimers();
 		this._leaders = new LeaderController({
 			runtime: () => this._getWorkerLifecycle().ledger.runtime,
 			snapshot: () => this._getWorkerLifecycle().getTaskRuntimeSnapshot(),
@@ -2862,13 +2861,14 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			hasDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
 			maxDepth: () => this.deps.getSettingsManager().getLeaderSettings().maxDepth,
 			subscriptionExhausted: (aliases) => this.subscriptionExhaustedFor(aliases),
+			isMeteredAttempt: (attempt) => this._workers?.attemptIsMetered(attempt) ?? true,
 			hasPendingDelegatedMessage: (objectiveId) => this.hasPendingDelegatedMessage(objectiveId),
 			openSubtree: (alias) => this.openLeaderSubtree(alias),
 			restartLeaderRuntimeIfLeaf: (alias) => this.restartLeaderRuntimeIfLeaf(alias),
 			closeSubtree: (alias, reasonCode) => this.closeLeaderSubtree(alias, reasonCode),
 			reconcileDelegatedMessages: (objectiveId) => this.reconcileDelegatedMessages(objectiveId),
-			now: () => timers.port("orchestration").now(),
-			timers: timers.port("leaders"),
+			now: () => this.deps.getTimers().port("orchestration").now(),
+			timers: this.deps.getTimers().port("leaders"),
 		});
 		this._leaders.subscribe(() => {
 			this._leaderRows = undefined;

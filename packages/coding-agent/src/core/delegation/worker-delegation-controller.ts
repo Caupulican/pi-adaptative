@@ -86,12 +86,7 @@ import {
 import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts";
 import { sharesRepository } from "../objective-execution/repo-delivery-fingerprint.ts";
 import { conversationTurnOrigin } from "../orchestration/attempt-agent-identity.ts";
-import {
-	EMPTY_ATTEMPT_USAGE,
-	projectAttemptUsage,
-	providerUsageFromAttemptUsage,
-} from "../orchestration/attempt-usage.ts";
-import type { SharedCapabilityBudget } from "../orchestration/capability-gateway.ts";
+import { providerUsageFromAttemptUsage } from "../orchestration/attempt-usage.ts";
 import {
 	type AgentBindingContract,
 	type AttemptUsageSnapshot,
@@ -163,6 +158,7 @@ import { importRecordedParentWrites } from "./foreground-parent-writes.ts";
 import { unmetGoalDependencyReason } from "./goal-dependency-gate.ts";
 import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
 import type { ParentExecutionContext, ParentExecutionSettingsSource } from "./parent-execution-context.ts";
+import { RequestCostBounds } from "./request-cost-bounds.ts";
 import {
 	type SanitizedContextForkMessage,
 	type SanitizedContextForkMode,
@@ -317,7 +313,6 @@ import {
 } from "./worker-terminal-handoff-coordinator.ts";
 import { WORKER_TRANSCRIPT_REFERENCE_PREFIX } from "./worker-transcript-reference.ts";
 import {
-	boundedByRunBudget,
 	collectWorkerTreeBudgetSeeds,
 	WorkerTreeBudgetCoordinator,
 	workerTreeBudgetKey,
@@ -618,8 +613,8 @@ export class WorkerDelegationController {
 	private readonly contextForks: WorkerContextForkStore;
 	private readonly terminalHandoffs: WorkerTerminalHandoffCoordinator;
 	private readonly treeBudgets = new WorkerTreeBudgetCoordinator();
-	/** Budgets shared by every attempt of one bounded run (`runCostBound`), keyed by run. */
-	private readonly runBudgets = new WorkerTreeBudgetCoordinator();
+	/** The cost bounds each attempt's provider requests are priced against: its run's and its budgeted delegations'. */
+	private readonly costBounds: RequestCostBounds;
 	private readonly writeReservations: WorkerWriteReservationCoordinator;
 	private readonly inFlightLedgers = new Map<string, InFlightWorkerLedger>();
 	/** Attributes files two concurrently running workers both changed (never blocks either). */
@@ -639,6 +634,11 @@ export class WorkerDelegationController {
 		laneIsolation?: WorkerLaneIsolation,
 	) {
 		this.deps = deps;
+		this.costBounds = new RequestCostBounds({
+			runCostBound: deps.runCostBound,
+			isSubscription: (model) => this.deps.getModelRegistry().isUsingSubscription(model),
+			findModel: (binding) => this.deps.getModelRegistry().find(binding.provider, binding.modelId),
+		});
 		this.notifications = notifications;
 		this.lifecycle = lifecycle;
 		this.laneIsolation = laneIsolation;
@@ -2555,31 +2555,9 @@ export class WorkerDelegationController {
 		return this.deps.runsAttempt?.(attempt, this.lifecycle.getTaskRuntimeSnapshot()) ?? true;
 	}
 
-	/**
-	 * The budget the attempt's run shares with its other attempts (`runCostBound`), seeded from every durable attempt of
-	 * that run; undefined when the host bounds no run.
-	 */
-	private runBudgetPort(attemptId: string, initialUsage: AttemptUsageSnapshot): SharedCapabilityBudget | undefined {
-		const runCostBound = this.deps.runCostBound;
-		if (!runCostBound) return undefined;
-		const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
-		const attempt = snapshot.attempts[attemptId];
-		const bound = attempt ? runCostBound(attempt, snapshot) : undefined;
-		if (!bound) return undefined;
-		const seeds = Object.values(snapshot.attempts)
-			.filter((candidate) => runCostBound(candidate, snapshot)?.runId === bound.runId)
-			.map((candidate) => ({
-				attemptId: candidate.attemptId,
-				usage: projectAttemptUsage(candidate, snapshot.checkpoints) ?? EMPTY_ATTEMPT_USAGE,
-			}));
-		return this.runBudgets.createPort({
-			treeKey: bound.runId,
-			attemptId,
-			budget: { maxCostUsd: bound.maxCostUsd },
-			pricesRequests: true,
-			seeds,
-			initialUsage,
-		});
+	/** Whether the attempt's spend is metered, the spend the delegation budgets bound (a subscription turn is not money). */
+	attemptIsMetered(attempt: AttemptRuntimeState): boolean {
+		return this.costBounds.isMeteredAttempt(attempt);
 	}
 
 	/** Whether this parent still has to import writes another host recorded for the attempt. */
@@ -5485,8 +5463,13 @@ export class WorkerDelegationController {
 			seeds: treeSeeds,
 			initialUsage,
 		});
-		const runBudget = this.runBudgetPort(durableHandle.attemptId, initialUsage);
-		const sharedBudget = runBudget ? boundedByRunBudget(treeBudget, runBudget) : treeBudget;
+		const sharedBudget = this.costBounds.compose(
+			durableHandle.attemptId,
+			initialUsage,
+			lifecycle.getTaskRuntimeSnapshot(),
+			model,
+			treeBudget,
+		);
 		const shellGranted = executionPlan.toolManifests.some((manifest) => manifest.toolName === STABLE_SHELL_TOOL_NAME);
 		const shellSessionKey = shellGranted ? `worker:${this.deps.getSessionId()}:${agentId}` : undefined;
 		const adapterSources: WorkerToolAdapterSources = {};

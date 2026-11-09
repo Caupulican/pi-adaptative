@@ -12,6 +12,8 @@ export interface PlacementFacts {
 	readonly refused: ReadonlySet<string>;
 	/** A remote-machine backend is registered: without one no machine can take a step, so a must-pin runs here. */
 	readonly remoteBackend: boolean;
+	/** The linked machine a placed job for this release already exists on: a replay returns to it, picking no candidate. */
+	readonly boundMachine?: string;
 }
 
 type Chosen = { readonly placement: Placement; readonly exit: string };
@@ -23,8 +25,9 @@ function remote(machineId: string, exit: string): Chosen {
 /**
  * The placement a released step takes. P1 a non-local base is kept; P2 a must-pin to a machine is honoured when a remote
  * backend is registered, and otherwise the step runs here; P3-P7 a step that is not a read-only plain step, has inputs or
- * refs, or is pinned here keeps the base; P8 a prefer-pin to a free candidate; P9 local room keeps the base; P10 the first
- * candidate not refused; P11 the base.
+ * refs, or is pinned here keeps the base; a release whose placed job already exists on a machine returns to that machine
+ * (its job holds the room, so no candidate is picked and local room does not divert it); P8 a prefer-pin to a free candidate;
+ * P9 local room keeps the base; P10 the first candidate not refused; P11 the base.
  */
 export function placementFor(node: PlanNodeSpec, base: Chosen, facts: PlacementFacts): Chosen {
 	if (base.placement.kind !== "local_worker") return base;
@@ -37,6 +40,9 @@ export function placementFor(node: PlanNodeSpec, base: Chosen, facts: PlacementF
 	if (node.inputs.length > 0) return base;
 	if ((node.brief?.refs?.length ?? 0) > 0) return base;
 	if (target === "here") return base;
+	// A permanently refused machine is not returned to; the step then takes the ordinary exits below.
+	if (facts.boundMachine !== undefined && facts.remoteBackend && !facts.refused.has(facts.boundMachine))
+		return remote(facts.boundMachine, "bound_machine");
 	const open = (machineId: string): boolean =>
 		facts.candidates.some((candidate) => candidate.machineId === machineId) && !facts.refused.has(machineId);
 	if (pinnedMachine !== undefined && open(pinnedMachine)) return remote(pinnedMachine, "pin_machine_remote");

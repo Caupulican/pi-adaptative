@@ -14,7 +14,9 @@ export type RemoteRefusalCode =
 	| "jobs_disabled"
 	| "too_long"
 	| "secret"
-	| "project_missing";
+	| "project_missing"
+	/** The job's durable lane was dispatched to another machine: this machine cannot take that lane (a guard; the job id names the machine). */
+	| "lane_bound_elsewhere";
 
 export interface RemoteMachineStatus {
 	readonly linked: boolean;
@@ -27,7 +29,9 @@ export type RemoteCommit =
 	| { readonly kind: "placed"; readonly taskId: string; readonly attemptId: string; readonly laneId: string }
 	| { readonly kind: "not_prepared" }
 	| { readonly kind: "attempt_unknown" }
-	| { readonly kind: "runtime_replacing" };
+	| { readonly kind: "runtime_replacing" }
+	/** The commit wrote nothing: the job's lane is bound elsewhere (a typed code, as at prepare). */
+	| { readonly kind: "refused"; readonly code: RemoteRefusalCode; readonly detail: string };
 
 export interface RemoteBackendPort {
 	status(machineId: string): RemoteMachineStatus;
@@ -39,6 +43,8 @@ export interface RemoteBackendPort {
 		{ readonly ok: true } | { readonly ok: false; readonly code: RemoteRefusalCode; readonly detail: string }
 	>;
 	commit(dispatch: FleetDispatch, machineId: string): RemoteCommit;
+	/** The machine a placed job for this idempotency key already exists on, if any: a replay returns to it, and its job holds the room there. */
+	boundMachine(idempotencyKey: string): string | undefined;
 	release(idempotencyKey: string): void;
 	/** True when `taskId` is a job this session placed (it is cancelled); false leaves it to the local lanes. */
 	cancel(taskId: string, reasonCode: string): boolean;
@@ -74,13 +80,15 @@ export function remoteRefusal(code: RemoteRefusalCode, detail: string, now: numb
 		case "unlinked":
 		case "held":
 		case "project_missing":
+		case "lane_bound_elsewhere":
 			return { kind: "refused", reason: "placement", blocker: "placement_unreachable", detail };
 	}
 }
 
 /**
  * The admit decision for a job placed on a linked machine. Exits, in order: no backend; not linked; on hold; online with no
- * free slot; the placement's commit (not prepared, an older build's job, the runtime replacing); then placed, online (run)
+ * free slot (a job the machine already holds for the key is exempt); the placement's commit (not prepared, an older build's
+ * job, the runtime replacing); then placed, online (run)
  * or offline (queued within the offline hold).
  */
 export function decideRemoteAdmit(input: {
@@ -96,7 +104,9 @@ export function decideRemoteAdmit(input: {
 	const status = port.status(machineId);
 	if (!status.linked) return remoteRefusal("unlinked", "that machine is not linked with this one", now);
 	if (status.held) return remoteRefusal("held", "the machine is on hold; /remote release lifts it", now);
-	if (status.online && (source?.room().slots ?? 0) < 1)
+	// A job this machine already holds for the key occupies its room: a replay of it asks for no new slot.
+	const holdsJob = port.boundMachine(dispatch.idempotencyKey) === machineId;
+	if (status.online && !holdsJob && (source?.room().slots ?? 0) < 1)
 		return {
 			kind: "refused",
 			reason: "placement",
@@ -120,6 +130,7 @@ export function decideRemoteAdmit(input: {
 			blocker: "preflight_failed",
 			detail: "this job was placed by an older build; its attempt is unknown here",
 		};
+	if (commit.kind === "refused") return remoteRefusal(commit.code, commit.detail, now);
 	if (commit.kind === "runtime_replacing")
 		return {
 			kind: "refused",

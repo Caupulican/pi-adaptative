@@ -70,6 +70,8 @@
 - A failover no longer repeats a same-model move, and a worker whose lane directory or route was inherited is judged unbound by the fitness check, as a fresh one is.
 - `spend.json` settled records gain an optional `terminal` flag and `accounts.json` gains `workers` (both additive).
 - A bot's own model outranks `workerDelegation.modelPins.default` (the default pin is the fallback for a worker that states no model); role pins and the new leader pin still win and still refuse a conflicting model.
+- A placed job's id includes the target machine, so a step re-placed on another machine gets its own job and lane; a lane a crash left without a placed record is ended at the next start (`placement_abandoned`) and its job starts again; a replay returns to the machine that already holds the job; a placed job refused because its lane is bound to another machine is refused with `lane_bound_elsewhere`; a plan's cancel reaches a placed job with the plan's own reason (`plan_stopped` ending; the job protocol gains the `plan_closed`, `plan_join_settled` and `plan_step_*` cancel reasons).
+- A leader delegation's `budgetUsd` bounds spend per request, not only after the fact: each metered request under the delegation (and its parents) is priced against the remaining budget and granted only the output it can afford, concurrent requests sum their reserved ceilings instead of waiting for one another, and a refusal closes only the delegation whose budget refused. Subscription turns no longer count toward dollar budgets. An unpriced model refused by a cost bound reads as failed, not as a spent budget.
 
 ### Removed
 

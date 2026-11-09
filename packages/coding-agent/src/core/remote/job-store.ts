@@ -44,13 +44,17 @@ import {
 	placedJobReference,
 } from "./job-protocol.ts";
 
-/** How a placed job ended on the placer's side without an outcome from the executor. */
+/**
+ * How a placed job ended on the placer's side without an outcome from the executor. `plan_stopped` is a fleet stop that is
+ * not the owner's (a plan closed, a join settled without the job, a step retired); the record's cancel reason names which.
+ */
 export const PLACER_ENDINGS = [
 	"machine_offline",
 	"machine_revoked",
 	"remote_lost",
 	"remote_deadline",
 	"owner_cancelled",
+	"plan_stopped",
 ] as const;
 export type PlacerEnding = (typeof PLACER_ENDINGS)[number];
 
