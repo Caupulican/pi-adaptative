@@ -817,10 +817,15 @@ export const remoteJobDeliveryModel: ModelSpec<DeliveryState> = buildDeliveryMod
  * that passes a pending decision finds no record: the job then runs without its stop, and the placer, which marked the stop sent, never
  * sends it again, so `stop-overtakes-offer` also leaves a stopped job unstopped. Without
  * the turn in the id, a re-placed turn keeps the offered mark its connection already holds for that id, so it is never offered on that
- * connection and no run starts for it: the placer waits with nothing in flight.
+ * connection and no run starts for it: the placer waits with nothing in flight. The stop property names a handled stop and a live
+ * job without a stop under it, for one turn; two variants break the guards that keep a turn's job from being replaced while it
+ * runs: `apply-on-accepted` lets the placer count the job applied (and so prune and re-place it) while it still runs, and
+ * `record-volatile` loses the placer's record and turn at a crash, so the same turn is placed again after its stop was handled; a
+ * job admitted then runs under a stop that was handled for its predecessor.
  */
 export const DELIVERY_CASCADES: Readonly<Record<string, readonly string[]>> = {
-	"record-volatile": ["delivery-applies"],
+	"record-volatile": ["delivery-applies", "stop-after-offer-reaches-job"],
+	"apply-on-accepted": ["stop-after-offer-reaches-job"],
 	"ask-places-offer": ["stop-reaches-executor"],
 	"resume-skips-unacked": ["outcome-acked"],
 	"turn-not-in-id": ["delivery-applies"],
