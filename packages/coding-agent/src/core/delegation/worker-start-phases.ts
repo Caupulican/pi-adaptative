@@ -157,6 +157,9 @@ export function workerRequestForDispatch(
 		...(dispatch.model ? { model: { provider: dispatch.model.provider, modelId: dispatch.model.modelId } } : {}),
 		...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
 		...(writePaths.length > 0 ? { writePaths } : {}),
+		// A plan step that names no files is read-only work, as an assigned task that names none is: the plan runs such steps
+		// side by side in the shared checkout on that promise. A rerun keeps what its original was admitted with.
+		...(dispatch.plan && !pinned && writePaths.length === 0 ? { readOnly: true } : {}),
 		...(pinned
 			? {
 					readOnly: pinned.readOnly,

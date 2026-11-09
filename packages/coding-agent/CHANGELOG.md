@@ -16,6 +16,7 @@
 - A closed session is released from memory: its hub controller withdraws the link context it registered for the agent directory, and its worker outcome observer leaves the machine registry when the session closes. Both registrations used to keep the closed session reachable for the life of the process.
 - Plan steps that are ready together start together: each plan step runs on its own worker. A second step whose profile matched a worker already busy on another step used to be refused as `worker_specialist_busy` and wait for that step to finish, so independent steps ran one after another.
 - A closing session waits for the usage history read it started: a session closed right after it opened no longer leaves that read holding the session file open.
+- A plan step that names no files runs read-only, as the `plan` tool says: its worker holds no write path and no edit tool. Such a step used to start with write access to the whole project while the plan ran it beside other steps as read-only work.
 
 ### Removed
 
