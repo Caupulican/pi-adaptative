@@ -172,6 +172,23 @@ export function channelsDir(agentDir: string): string {
 	return join(agentDir, "channels");
 }
 
+/**
+ * `<agentDir>/state/host-transitions.jsonl` -- the harness's own writes to the files the protected-path watch explains
+ * (settings, the remote link's files): every process appends to it and every process reads it, so a write one session
+ * made is the host's to every other session watching the same files.
+ */
+export function hostTransitionsFile(agentDir: string): string {
+	return join(stateDir(agentDir), "host-transitions.jsonl");
+}
+
+/**
+ * `<agentDir>/remote` -- the remote link: this machine's identity, the hub's config, every joined machine's secret, joins,
+ * the chats with machines, the placed-job stores and the host lock. Private to the harness, not to any lane.
+ */
+export function remoteDir(agentDir: string): string {
+	return join(agentDir, "remote");
+}
+
 /** `<agentDir>/okf-memory` -- user-authored durable OKF memory documents. */
 export function okfMemoryDir(agentDir: string): string {
 	return join(agentDir, "okf-memory");
@@ -228,6 +245,11 @@ export function ownerFollowUpsDir(agentDir: string): string {
 /** `<agentDir>/state/owner-rules` -- durable owner rules, one file per project. */
 export function ownerRulesDir(agentDir: string): string {
 	return stateFile(agentDir, "owner-rules");
+}
+
+/** `<agentDir>/state/lesson-candidates.jsonl` -- owner rejections and corrections kept as candidate lessons (bounded). */
+export function lessonCandidatesFile(agentDir: string): string {
+	return stateFile(agentDir, "lesson-candidates.jsonl");
 }
 
 /** `<agentDir>/state/runtime/capabilities/<sessionId>` -- per-session capability artifacts. */

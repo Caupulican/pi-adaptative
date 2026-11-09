@@ -1,7 +1,12 @@
 import { existsSync } from "node:fs";
 import * as os from "node:os";
 import type { ExecutionPathAuthority } from "../../kernel/index.ts";
-import { type ExecutionPathFlavor, executionPathApi, resolveExecutionPath } from "../../kernel/utils/paths.ts";
+import {
+	type ExecutionPathFlavor,
+	executionPathApi,
+	resolveExecutionPath,
+	toolPathSpellings,
+} from "../../kernel/utils/paths.ts";
 import { awaitPreflight, requireSynchronousPreflight } from "../preflight.ts";
 import { isGrantedExtensionToolName, resolveToolCallPathAccess } from "../tool-capability-policy.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
@@ -317,12 +322,62 @@ function* assessEnvelopeScope(
 	return { allowed: false, reasonCode: "path_outside_allowed_roots", target };
 }
 
+/** What an argument that resolves to no path is: refused, as a path outside every root. */
+const UNRESOLVED_PATH: PathEnvelopeAssessment = { allowed: false, reasonCode: "path_outside_allowed_roots" };
+
+/**
+ * The spellings the envelope judges for a raw path: every one a tool may open for it (see `toolPathSpellings`), so the
+ * judgment is of the path the tool opens. Undefined when the argument resolves to nothing.
+ */
+function envelopeSpellings(rawPath: string, options: AssessPathEnvelopeOptions): string[] | undefined {
+	// A foreign backend resolves `~` in its own home: the authority names it, so the gate resolves the argument as the tool does.
+	const pathOptions = options.pathAuthority
+		? {
+				flavor: inferFlavor(options.cwd, options.pathAuthority),
+				...(options.pathAuthority.homeDir !== undefined ? { homeDir: options.pathAuthority.homeDir } : {}),
+			}
+		: {};
+	return toolPathSpellings(rawPath, options.cwd, pathOptions);
+}
+
+/** Judges a raw path by every spelling it may open; the first spelling outside the envelope decides. */
 export function assessPathWithinEnvelopeSync(
 	envelope: CapabilityEnvelope,
 	rawPath: string,
 	options: AssessPathEnvelopeOptions,
 ): PathEnvelopeAssessment {
-	const context = initEnvelopeContext(envelope, rawPath, options);
+	const spellings = envelopeSpellings(rawPath, options);
+	if (spellings === undefined) return UNRESOLVED_PATH;
+	let assessment: PathEnvelopeAssessment = UNRESOLVED_PATH;
+	for (const spelled of spellings) {
+		assessment = assessSpelledPathSync(envelope, spelled, options);
+		if (!assessment.allowed) return assessment;
+	}
+	return assessment;
+}
+
+/** The asynchronous form of `assessPathWithinEnvelopeSync`: every spelling, the first outside the envelope decides. */
+export async function assessPathWithinEnvelopeAsync(
+	envelope: CapabilityEnvelope,
+	rawPath: string,
+	options: AssessPathEnvelopeOptions,
+): Promise<PathEnvelopeAssessment> {
+	const spellings = envelopeSpellings(rawPath, options);
+	if (spellings === undefined) return UNRESOLVED_PATH;
+	let assessment: PathEnvelopeAssessment = UNRESOLVED_PATH;
+	for (const spelled of spellings) {
+		assessment = await assessSpelledPathAsync(envelope, spelled, options);
+		if (!assessment.allowed) return assessment;
+	}
+	return assessment;
+}
+
+function assessSpelledPathSync(
+	envelope: CapabilityEnvelope,
+	spelled: string,
+	options: AssessPathEnvelopeOptions,
+): PathEnvelopeAssessment {
+	const context = initEnvelopeContext(envelope, spelled, options);
 	const assessment = assessEnvelopeScope(context);
 	let step = assessment.next();
 	while (!step.done) {
@@ -337,12 +392,12 @@ export function assessPathWithinEnvelopeSync(
 	return step.value;
 }
 
-export async function assessPathWithinEnvelopeAsync(
+async function assessSpelledPathAsync(
 	envelope: CapabilityEnvelope,
-	rawPath: string,
+	spelled: string,
 	options: AssessPathEnvelopeOptions,
 ): Promise<PathEnvelopeAssessment> {
-	const context = initEnvelopeContext(envelope, rawPath, options);
+	const context = initEnvelopeContext(envelope, spelled, options);
 	const policy = assessEnvelopeScope(context);
 	let request = policy.next();
 	while (!request.done) {

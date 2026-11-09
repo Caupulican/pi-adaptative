@@ -19,9 +19,10 @@ import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import type { PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
 import { appendCommandReceipt, commandReceiptFor } from "./worker-receipts.ts";
 import {
+	reportCapabilitiesOf,
 	SUBMIT_REPORT_TOOL_NAME,
 	type SubmittedWorkerReport,
-	submitReportParameters,
+	submitReportParametersFor,
 	submittedReportFromArguments,
 } from "./worker-report.ts";
 import { evaluateWorkerRetry } from "./worker-retry-policy.ts";
@@ -74,6 +75,11 @@ export interface WorkerRecoveryCoordinatorOptions {
 	 * verification work of attempts it admits is resumed here; the rest stays durable for the parent.
 	 */
 	runsAttempt?(attempt: AttemptRuntimeState): boolean;
+	/**
+	 * Ends a suspended attempt that must not be resumed after a restart (a placed job's worker: its runner ended the job as
+	 * interrupted, so nothing supervises the worker). Returns true when it ended the attempt, which is then not requeued.
+	 */
+	endUnresumable?(attempt: AttemptRuntimeState): boolean;
 	/** Wake the scheduler and UI after a retained retry deadline becomes eligible. */
 	retryReady?(): void;
 	/**
@@ -87,6 +93,17 @@ export interface WorkerRecoveryCoordinatorOptions {
 		detail?: string;
 	}): void;
 	warn(message: string): void;
+}
+
+/**
+ * A suspension recorded because the attempt's owner process is gone (proven dead, or an explicit shutdown). A suspension this
+ * process made itself (a retry it scheduled) is never one: that attempt is live and is requeued as before.
+ */
+function ownerLostSuspension(attempt: AttemptRuntimeState): boolean {
+	return (
+		attempt.reasonCode === "agent_process_recovered_after_owner_exit" ||
+		attempt.reasonCode === "agent_process_interrupted"
+	);
 }
 
 function restartResumableSuspension(
@@ -170,6 +187,7 @@ export class WorkerRecoveryCoordinator {
 				for (const { attempt, record, verificationOfTaskId } of queued) {
 					if (this.disposed) return;
 					if (this.options.runsAttempt?.(attempt) === false) continue;
+					if (ownerLostSuspension(attempt) && this.options.endUnresumable?.(attempt)) continue;
 					let retained: boolean;
 					try {
 						retained = this.enqueueOrDeferRetry(
@@ -641,6 +659,8 @@ export class WorkerRecoveryCoordinator {
 		if (last.content.some((content) => content.type === "toolCall")) return undefined;
 		const attempt = this.options.lifecycle.getTaskRuntimeSnapshot().attempts[attemptId];
 		if (!attempt) return undefined;
+		const reportCapabilities = reportCapabilitiesOf(attempt.dispatch.executionContract?.worker);
+		const reportSchema = submitReportParametersFor(reportCapabilities);
 		const context = attempt.dispatch.executionContract?.worker.executionContext;
 		const scope = context
 			? executionContextScope({
@@ -685,8 +705,8 @@ export class WorkerRecoveryCoordinator {
 				results.add(key);
 				if (call.name === SUBMIT_REPORT_TOOL_NAME) {
 					if (invocation.operationStatus !== "success") return undefined;
-					if (!Value.Check(submitReportParameters, call.arguments)) return undefined;
-					submittedReport = submittedReportFromArguments(call.arguments);
+					if (!Value.Check(reportSchema, call.arguments)) return undefined;
+					submittedReport = submittedReportFromArguments(call.arguments, reportCapabilities);
 				}
 				const receipt = commandReceiptFor({
 					requestId: invocation.requestId,

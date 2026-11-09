@@ -10,12 +10,14 @@
  */
 
 import { createHash } from "node:crypto";
+import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import {
 	BLOCKER_CODES,
 	type BlockerCode,
 	OUTCOME_STATUSES,
 	type OutcomeStatus,
 } from "../delegation/worker-outcome-contract.ts";
+import { boundedUtf8Text } from "../util/bounded-line.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import {
 	type CapabilityFacts,
@@ -33,6 +35,56 @@ export const JOBS_FEATURE = "jobs/1";
 export const MAX_JOB_INSTRUCTIONS_BYTES = 16 * 1024;
 /** The longest outcome summary, in UTF-8 bytes (the managed lane's terminal bound). */
 export const MAX_JOB_SUMMARY_BYTES = 8 * 1024;
+
+/** The channel a placed job's worker turn names: its origin is the runner's own record, never a channel's message. */
+const PLACED_JOB_CHANNEL = "link";
+
+/**
+ * A placed job's identity: the placing machine's id and the job id together, the key the job store records it under (a
+ * placer may choose any job id, so the job id alone names no job).
+ */
+export function placedJobReference(placerId: string, jobId: string): string {
+	return `${placerId}/${jobId}`;
+}
+
+/** The placer id and job id a reference names; undefined for a string that is not one. */
+export function parsePlacedJobReference(reference: string): { placerId: string; jobId: string } | undefined {
+	const separator = reference.lastIndexOf("/");
+	return separator <= 0 || separator === reference.length - 1
+		? undefined
+		: { placerId: reference.slice(0, separator), jobId: reference.slice(separator + 1) };
+}
+
+/**
+ * The turn origin a placed job's worker is dispatched with: a third party's words (the placing machine's), named by the
+ * job's reference. Durable on the attempt's dispatch, so the worker is recognised after a restart with no other record.
+ */
+export function placedJobTurnOrigin(placerId: string, jobId: string): TurnOriginRecord {
+	return {
+		v: 1,
+		k: "peer-agent",
+		channel: PLACED_JOB_CHANNEL,
+		verified: true,
+		thirdParty: true,
+		ref: placedJobReference(placerId, jobId),
+	};
+}
+
+/** The placed job's reference a turn origin names when it is a placed job's, else undefined. Only the job runner mints it. */
+export function placedJobRef(origin: TurnOriginRecord | undefined): string | undefined {
+	return origin?.k === "peer-agent" && origin.channel === PLACED_JOB_CHANNEL && origin.thirdParty === true
+		? origin.ref
+		: undefined;
+}
+
+/**
+ * A job's summary text within the summary bound. Text the bound cuts gets `note` after the part that fits, so the placer
+ * sees that it was cut and where the whole text is kept; the cut is decided by bytes, and the note counts inside the bound.
+ */
+export function boundedJobSummary(text: string, note: string): string {
+	if (Buffer.byteLength(text, "utf8") <= MAX_JOB_SUMMARY_BYTES) return text;
+	return boundedUtf8Text(text, MAX_JOB_SUMMARY_BYTES - Buffer.byteLength(note, "utf8")) + note;
+}
 export const MAX_JOB_LABEL_CHARS = 120;
 export const MAX_PROGRESS_LINE_CHARS = 200;
 /** A job placed by a machine that was itself running a placed job counts one hop; past this the offer is refused. */

@@ -3,10 +3,16 @@
  * remote room, composed once per session and owned by its hub controller. Nothing here starts until the owner linked
  * this machine (a hub turned on, a hub joined, or a peer allowed to place jobs); then it starts watchers and a lock
  * only, never a child process. The session's worker ports reach it from the background lane controller.
+ *
+ * The roster's words come from facts that change under this session: the fleet's machine records, the job stores and
+ * the link's settings. Each change reaches the roster through a watch (`DirectoryWatch`, `FleetMachines`), never by a
+ * poll; a running job's duration is re-read on a one-minute alarm while a job runs.
  */
 
+import { join } from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { alarmAt, SYSTEM_TIMER_PORT, type WallAlarm } from "../../kernel/timer-port.ts";
 import type { ManagedLaneView } from "../delegation/managed-lane-views.ts";
 import type { PersistentBotLiveState } from "../delegation/persistent-bot-team-store.ts";
 import type { PlacementCapacitySource } from "../placement/capacity-source.ts";
@@ -14,14 +20,17 @@ import { MAX_ADVERT_MODELS, type ModelFact, WIRE_WORD } from "./capabilities.ts"
 import { type FleetMachine, FleetMachines } from "./fleet-machines.ts";
 import { type PlaceOptions, type PlaceResult, RemoteJobClient, type RemotePlacementSession } from "./job-client.ts";
 import { JobRunner, type JobRunnerSession } from "./job-runner.ts";
-import { activeExecutorJobs, JobStore, type PlacerJobRecord } from "./job-store.ts";
-import { listJoins, loadLinkSettings, type MachineIdentity } from "./registry.ts";
+import { activeExecutorJobs, inDir, JobStore, outDir, type PlacerJobRecord } from "./job-store.ts";
+import { hubTurnedOn, listJoins, loadLinkSettings, type MachineIdentity } from "./registry.ts";
 import { resolveRepoIdentity } from "./repo-identity.ts";
+import { DirectoryWatch } from "./store-watch.ts";
 
 /** The session's worker surface, structurally the background lane controller's own methods. */
 export type RemoteJobSession = JobRunnerSession & RemotePlacementSession;
 
 export interface RemoteJobPorts {
+	/** Told on every change of the job stores, from any process: a session settles the terminals it still holds. */
+	readonly onJobsChanged?: () => void;
 	readonly session: RemoteJobSession;
 	readonly sessionId: () => string;
 	/** The session's directory: a job placed without one names this project, when the peer has it checked out. */
@@ -29,11 +38,18 @@ export interface RemoteJobPorts {
 	/** The models this session can run, for the advert's provider classes (never an account or a key). */
 	readonly models: () => readonly Model<Api>[];
 	readonly usesSubscription: (model: Model<Api>) => boolean;
-	/** The fleet the remote room registers with; materialized only once a peer has advertised. */
-	readonly fleet?: () => { registerCapacitySource(source: PlacementCapacitySource): () => void };
+}
+
+/** The fleet a session's remote machines' room registers with (`attachFleet`). */
+export interface RemoteRoomFleet {
+	registerCapacitySource(source: PlacementCapacitySource): () => void;
 }
 
 const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama-cpp", "llamacpp", "vllm", "local"]);
+/** The mark of a job another machine runs, the same computer the bot rows of remote machines carry. */
+export const REMOTE_WORKER_MARK = "💻";
+/** How often a roster with a running job re-reads its duration. */
+const ROSTER_TICK_MS = 60_000;
 
 /** The advert's model facts: provider and model class words, the access kind, and no headroom claim this build cannot read. */
 export function modelFacts(
@@ -65,6 +81,15 @@ function plural(count: number, word: string): string {
 	return `${count} ${word}${count === 1 ? "" : "s"}`;
 }
 
+/** How long a job has been running, in plain words: seconds, minutes, then hours and minutes. */
+export function runningFor(since: number, now = Date.now()): string {
+	const seconds = Math.max(0, Math.floor((now - since) / 1000));
+	if (seconds < 60) return `${seconds} s`;
+	const minutes = Math.floor(seconds / 60);
+	if (minutes < 60) return `${minutes} min`;
+	return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
 export class RemoteJobs {
 	private readonly agentDir: string;
 	private readonly ports: RemoteJobPorts;
@@ -75,6 +100,11 @@ export class RemoteJobs {
 	private readonly capacity = new Map<string, () => void>();
 	private readonly onRosterChange: () => void;
 	private stopFleet: (() => void) | undefined;
+	private jobsWatch: DirectoryWatch | undefined;
+	private linkWatch: DirectoryWatch | undefined;
+	private rosterTick: WallAlarm | undefined;
+	/** The session's fleet, once its worker runtime exists; the remote room registers with it from then on. */
+	private fleet: RemoteRoomFleet | undefined;
 	private started = false;
 
 	constructor(agentDir: string, identity: () => MachineIdentity, ports: RemoteJobPorts, onRosterChange: () => void) {
@@ -92,15 +122,19 @@ export class RemoteJobs {
 		this.onRosterChange = onRosterChange;
 	}
 
-	/** Whether the owner linked this machine at all: a hub joined, or a peer allowed to place jobs here. */
+	/** Whether the owner linked this machine at all: a hub on, a hub joined, or a peer allowed to place jobs here. */
 	static linked(agentDir: string): boolean {
 		const settings = loadLinkSettings(agentDir);
-		return listJoins(agentDir).length > 0 || Object.values(settings.peers).some((peer) => peer.acceptsJobs === true);
+		return (
+			hubTurnedOn(agentDir) ||
+			listJoins(agentDir).length > 0 ||
+			Object.values(settings.peers).some((peer) => peer.acceptsJobs === true)
+		);
 	}
 
 	/**
-	 * Starts placement and the roster's facts once, and the runner whenever the machine is linked by now: a hub joined or
-	 * a peer allowed mid-session arms it at the next call. Idempotent.
+	 * Starts placement, the roster's watches and the link's runner state once; the runner follows the link from then on
+	 * (`refreshLink`). Idempotent. Nothing here reaches the fleet or builds the worker runtime.
 	 */
 	start(): void {
 		if (!this.started) {
@@ -110,19 +144,38 @@ export class RemoteJobs {
 				this.registerCapacity();
 				this.onRosterChange();
 			});
-			this.registerCapacity();
+			// A job's end or a placed job's change is written by a process that may not be this one: the stores are watched.
+			this.jobsWatch = new DirectoryWatch([outDir(this.agentDir), inDir(this.agentDir)], () => {
+				this.onRosterChange();
+				this.ports.onJobsChanged?.();
+			});
+			this.jobsWatch.start();
+			this.linkWatch = new DirectoryWatch([join(this.agentDir, "remote")], () => this.refreshLink());
+			this.linkWatch.start();
 		}
+		this.refreshLink();
+	}
+
+	/**
+	 * Arms the runner while the machine is linked, and lets it go once nothing links it: at once when no job runs, else when
+	 * the last running job ends. Called on start and on every change to the link's records.
+	 */
+	refreshLink(): void {
+		if (!this.started) return;
 		if (RemoteJobs.linked(this.agentDir)) this.armRunner();
+		else this.runner?.retire();
 	}
 
 	/** Takes the runner role for this agent directory, or waits for the session holding it. */
 	armRunner(): void {
-		this.runner ??= new JobRunner({
-			agentDir: this.agentDir,
-			session: this.ports.session,
-			models: () => modelFacts(this.ports.models(), this.ports.usesSubscription),
-			room: () => loadLinkSettings(this.agentDir).jobRoom,
-		});
+		if (!this.runner || this.runner.retired) {
+			this.runner = new JobRunner({
+				agentDir: this.agentDir,
+				session: this.ports.session,
+				models: () => modelFacts(this.ports.models(), this.ports.usesSubscription),
+				room: () => loadLinkSettings(this.agentDir).jobRoom,
+			});
+		}
 		this.runner.arm();
 	}
 
@@ -130,6 +183,12 @@ export class RemoteJobs {
 		this.started = false;
 		this.stopFleet?.();
 		this.stopFleet = undefined;
+		this.jobsWatch?.stop();
+		this.jobsWatch = undefined;
+		this.linkWatch?.stop();
+		this.linkWatch = undefined;
+		this.rosterTick?.stop();
+		this.rosterTick = undefined;
 		for (const unregister of this.capacity.values()) unregister();
 		this.capacity.clear();
 		this.client.dispose();
@@ -161,9 +220,18 @@ export class RemoteJobs {
 		return activeExecutorJobs(this.store);
 	}
 
-	/** Registers each advertised machine's room with the fleet once, so the scheduler sees remote room. */
+	/**
+	 * Gives the session's fleet the room of every advertised machine, once each, so the scheduler sees remote room for a
+	 * plan node or a placed job. Called when the fleet is first reached (`attachFleet`) and on every change of the machines.
+	 */
+	attachFleet(fleet: RemoteRoomFleet): void {
+		if (this.fleet === fleet) return;
+		this.fleet = fleet;
+		this.registerCapacity();
+	}
+
 	private registerCapacity(): void {
-		const fleet = this.ports.fleet;
+		const fleet = this.fleet;
 		if (!fleet) return;
 		for (const machine of this.machines.list()) {
 			if (!machine.facts || this.capacity.has(machine.machineId)) continue;
@@ -171,7 +239,7 @@ export class RemoteJobs {
 			try {
 				this.capacity.set(
 					machineId,
-					fleet().registerCapacitySource({
+					fleet.registerCapacitySource({
 						key: `machine:${machineId}`,
 						room: () => {
 							const current = this.machines.get(machineId);
@@ -201,20 +269,39 @@ export class RemoteJobs {
 	/** The roster row of the machine named `name`, from its facts and the jobs placed there. */
 	rosterWords(name: string, connected: boolean): RemoteRosterWords {
 		const machine = this.machines.byName(name);
-		const open = machine ? this.openJobsOn(machine.machineId).length : 0;
+		const open = machine ? this.openJobsOn(machine.machineId) : [];
 		if (!connected)
 			return {
 				state: "offline",
-				...(open > 0 ? { currentSummary: `offline, ${plural(open, "job")} waiting` } : {}),
+				...(open.length > 0 ? { currentSummary: `offline, ${plural(open.length, "job")} waiting` } : {}),
 			};
-		if (open > 0) return { state: "running", currentSummary: `working on ${plural(open, "job")}` };
+		if (open.length > 0) {
+			this.scheduleRosterTick();
+			const since = Math.min(...open.map((record) => record.createdAt));
+			return {
+				state: "running",
+				currentSummary: `working on ${plural(open.length, "job")} for ${runningFor(since)}`,
+			};
+		}
 		const facts = machine?.facts;
 		if (!facts) return { state: "idle" };
 		if (!facts.accepts.jobs) return { state: "idle", currentSummary: "takes no jobs now" };
+		// A machine whose projects are none of them set up refuses a project job until the owner readies one.
+		if (facts.checkouts.length > 0 && !facts.checkouts.some((checkout) => checkout.ready))
+			return { state: "idle", currentSummary: "needs setup before it takes a project" };
 		return { state: "idle", currentSummary: facts.room > 0 ? `ready, ${facts.room} free` : "full" };
 	}
 
-	/** A placed job's worker row: the job's own words and where it runs, never an id. */
+	/** A running job's duration is re-read once a minute, through the roster's own change path. */
+	private scheduleRosterTick(): void {
+		if (this.rosterTick) return;
+		this.rosterTick = alarmAt(SYSTEM_TIMER_PORT, Date.now() + ROSTER_TICK_MS, () => {
+			this.rosterTick = undefined;
+			this.onRosterChange();
+		});
+	}
+
+	/** A placed job's worker row: the job's own words, where it runs and for how long; never an id. */
 	describeLane(view: ManagedLaneView): ManagedLaneView {
 		if (!view.laneId.startsWith("remote-")) return view;
 		const record = this.store.out.list().find((entry) => entry.laneId === view.laneId);
@@ -225,7 +312,7 @@ export class RemoteJobs {
 				? `waiting for ${record.executorName} to come back`
 				: record.state === "pending"
 					? `waiting for ${record.executorName} to take it`
-					: `on ${record.executorName}`;
-		return { ...view, label: `${record.offer.label} · ${where}` };
+					: `on ${record.executorName} for ${runningFor(record.createdAt)}`;
+		return { ...view, label: `${REMOTE_WORKER_MARK} ${record.offer.label} · ${where}` };
 	}
 }

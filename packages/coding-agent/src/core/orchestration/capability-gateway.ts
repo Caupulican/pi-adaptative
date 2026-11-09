@@ -1,5 +1,6 @@
 import { resolve } from "node:path";
 import type { RequestPreflightContext } from "../../kernel/loop-config.ts";
+import { toolPathSpellings } from "../../kernel/utils/paths.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
 import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
 import { isPathWithinScope, safeRealpathSync } from "../autonomy/path-scope.ts";
@@ -545,24 +546,27 @@ export class CapabilityGateway {
 		return this.lastWallClockMs;
 	}
 
+	/** Every spelling the tool may open for `rawPath` must lie inside a grant root and outside every denied path. */
 	private pathAllowed(rawPath: string, allowedPaths: readonly string[]): boolean {
 		if (allowedPaths.length === 0) return false;
-		const lexicalTarget = resolve(this.cwd, rawPath);
+		const spellings = toolPathSpellings(rawPath, this.cwd);
+		if (spellings === undefined) return false;
 		const allowedRoots = allowedPaths.flatMap((allowed) => {
 			const lexicalRoot = resolve(this.cwd, allowed);
 			const realRoot = resolveRealPath(this.cwd, allowed);
 			return realRoot ? [lexicalRoot, realRoot] : [lexicalRoot];
 		});
-		if (!allowedRoots.some((root) => isPathWithinScope(lexicalTarget, root))) {
-			return false;
-		}
-		const target = resolveRealPath(this.cwd, rawPath);
-		if (!target) return false;
-		for (const denied of this.grant.deniedPaths) {
+		const deniedRoots = this.grant.deniedPaths.flatMap((denied) => {
 			const root = resolveRealPath(this.cwd, denied);
-			if (root && isPathWithinScope(target, root)) return false;
-		}
-		return allowedRoots.some((root) => isPathWithinScope(target, root));
+			return root ? [root] : [];
+		});
+		return spellings.every((spelled) => {
+			if (!allowedRoots.some((root) => isPathWithinScope(spelled, root))) return false;
+			const target = resolveRealPath(this.cwd, spelled);
+			if (!target) return false;
+			if (deniedRoots.some((root) => isPathWithinScope(target, root))) return false;
+			return allowedRoots.some((root) => isPathWithinScope(target, root));
+		});
 	}
 
 	private deny(toolName: string, reasonCode: GatewayDecisionCode, message: string): never {

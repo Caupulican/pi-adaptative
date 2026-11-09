@@ -13,8 +13,10 @@ import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
 import { warmHostIdentity } from "../../kernel/reliability/host-identity.ts";
+import { withHostFileWrite } from "../../utils/host-write-transition.ts";
+import { hostTransitionsFile } from "../agent-paths.ts";
 import type { ManagedLaneView } from "../delegation/managed-lane-views.ts";
-import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import { type PersistentBotTeamStore, RESERVED_BOT_CREATOR_IDS } from "../delegation/persistent-bot-team-store.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { type HostLock, type LinkHostOwner, linkHostOwner, takeHostLock, watchHostLockRelease } from "./host-lock.ts";
 import { RemoteHub } from "./hub.ts";
@@ -121,7 +123,18 @@ export class RemoteHubController {
 		}
 	}
 
+	/** Ends the session's hub and its job layer (the session is closing). */
 	async stop(): Promise<void> {
+		const closing = this.closeListening();
+		this.jobs?.dispose();
+		await closing;
+	}
+
+	/**
+	 * Stops hosting the hub and lets the host go. The job layer stays: a machine still joined to a hub keeps its running jobs
+	 * until they end, and its runner follows the link (`refreshLink`).
+	 */
+	private closeListening(): Promise<void> {
 		this.stopWatchingHost?.();
 		this.stopWatchingHost = undefined;
 		// The hub stops accepting as soon as its close starts, so the host is let go then: a session closing fast
@@ -129,8 +142,7 @@ export class RemoteHubController {
 		const closing = this.closeHub();
 		this.hostLock?.release();
 		this.hostLock = undefined;
-		this.jobs?.dispose();
-		await closing;
+		return closing;
 	}
 
 	private async closeHub(): Promise<void> {
@@ -245,7 +257,9 @@ export class RemoteHubController {
 		// Turned off before the host is let go, so a session watching for the hub does not take it back up.
 		const config = this.readConfig();
 		if (config) this.writeConfig({ ...config, enabled: false });
-		await this.stop();
+		await this.closeListening();
+		// Turning the hub off unlinks the machine only when nothing else links it; a running job keeps the runner until it ends.
+		this.jobs?.refreshLink();
 	}
 
 	status(): {
@@ -299,6 +313,11 @@ export class RemoteHubController {
 
 	/** Lets a machine join as a bot named `name`; the token goes to the owner once, to carry to that machine. */
 	add(name: string): { token: string; address: string } {
+		// Refused before anything is written: a machine record without its bot would be a machine that can never join.
+		if (RESERVED_BOT_CREATOR_IDS.has(name.toLowerCase()))
+			throw new Error(
+				`"${name}" is reserved: it names who creates a bot (the orchestrator or the owner), so no machine can take it. Use another name, for example ${name}-box: /remote add ${name}-box`,
+			);
 		const { record } = addHubMachine(this.deps.agentDir, name);
 		this.deps.getStore().upsertBot({
 			agentId: name,
@@ -428,7 +447,9 @@ export class RemoteHubController {
 
 	private writeConfig(config: HubConfig): void {
 		mkdirSync(join(this.deps.agentDir, "remote"), { recursive: true });
-		writeFileSync(join(this.deps.agentDir, "remote", "hub.json"), `${JSON.stringify(config, null, 1)}\n`);
+		const path = join(this.deps.agentDir, "remote", "hub.json");
+		const content = `${JSON.stringify(config, null, 1)}\n`;
+		withHostFileWrite(path, content, () => writeFileSync(path, content), hostTransitionsFile(this.deps.agentDir));
 	}
 }
 

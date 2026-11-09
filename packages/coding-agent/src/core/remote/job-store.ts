@@ -40,6 +40,8 @@ import {
 	type JobPhase,
 	type JobRefusal,
 	parseJobFrame,
+	parsePlacedJobReference,
+	placedJobReference,
 } from "./job-protocol.ts";
 
 /** How a placed job ended on the placer's side without an outcome from the executor. */
@@ -107,6 +109,8 @@ export interface ExecutorJobRecord {
 	readonly checkout?: string;
 	/** The session running the job; a dead runner's job ends as interrupted. */
 	readonly runner?: ProcessOwner;
+	/** The empty directory an answer-only job starts in, recorded so a restarted runner removes it. */
+	readonly workspace?: string;
 	readonly laneId?: string;
 	/** The last frame number assigned. */
 	readonly seq: number;
@@ -226,6 +230,7 @@ function parseExecutorRecord(value: unknown): ExecutorJobRecord | undefined {
 		deadlineAt: value.deadlineAt,
 		...(typeof value.checkout === "string" ? { checkout: value.checkout } : {}),
 		...(isProcessOwnerRecord(value.runner) ? { runner: value.runner } : {}),
+		...(typeof value.workspace === "string" ? { workspace: value.workspace } : {}),
 		...(typeof value.laneId === "string" ? { laneId: value.laneId } : {}),
 		seq: value.seq,
 		outbox: outbox as OutboxEntry[],
@@ -366,13 +371,19 @@ export class JobStore {
 		for (const record of this.out.list())
 			if (record.appliedAt !== undefined && now - record.appliedAt > FINISHED_RETENTION_MS)
 				this.out.remove(record.jobId);
-		for (const record of this.in.list())
-			if (
-				record.state === "terminal" &&
-				record.outbox.length === 0 &&
-				now - record.admittedAt > FINISHED_RETENTION_MS
-			)
-				this.in.remove(executorRecordName(record.placerId, record.jobId));
+		for (const record of this.prunable(now)) this.in.remove(executorRecordName(record.placerId, record.jobId));
+	}
+
+	/** The executor records `prune` removes at `now`: finished, outcome acknowledged by the placer, past retention. */
+	prunable(now: number): ExecutorJobRecord[] {
+		return this.in
+			.list()
+			.filter(
+				(record) =>
+					record.state === "terminal" &&
+					record.outbox.length === 0 &&
+					now - record.admittedAt > FINISHED_RETENTION_MS,
+			);
 	}
 }
 
@@ -424,4 +435,25 @@ export function readRunner(agentDir: string): RunnerAdvert | undefined {
 /** Jobs admitted here from every placer and not finished yet: what an advert's room is reduced by. */
 export function activeExecutorJobs(store: JobStore): number {
 	return store.in.list().filter((record) => record.state !== "terminal").length;
+}
+
+/** The references of every placed job this agent directory's store records as ended (outcome recorded). */
+export function finishedPlacedJobReferences(agentDir: string): string[] {
+	if (!existsSync(inDir(agentDir))) return [];
+	return new JobStore(agentDir).in
+		.list()
+		.filter((record) => record.state === "terminal")
+		.map((record) => placedJobReference(record.placerId, record.jobId));
+}
+
+/**
+ * Whether this agent directory's job store records the placed job named by `reference` as ended (its outcome is in the
+ * outbox, or delivered). The store is keyed by placer and job id together, so both must match.
+ */
+export function placedJobFinished(agentDir: string, reference: string): boolean {
+	const key = parsePlacedJobReference(reference);
+	if (key === undefined || !existsSync(inDir(agentDir))) return false;
+	return new JobStore(agentDir).in
+		.list()
+		.some((record) => record.placerId === key.placerId && record.jobId === key.jobId && record.state === "terminal");
 }

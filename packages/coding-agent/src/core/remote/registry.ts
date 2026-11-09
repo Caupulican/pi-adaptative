@@ -10,6 +10,8 @@ import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, r
 import { hostname } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { withHostFileWrite } from "../../utils/host-write-transition.ts";
+import { hostTransitionsFile } from "../agent-paths.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { restrictWindowsToCurrentUser } from "../util/windows-user-acl.ts";
@@ -102,11 +104,21 @@ function protectLinkDir(dir: string): void {
 	}
 }
 
-function writeSecretFile(path: string, value: unknown): void {
+/**
+ * One of the link's files, written owner-only as a host write: the journal records it, so the protected-path watch of every
+ * session on this agent directory explains the change rather than blaming a worker that was running.
+ */
+function writeLinkFile(agentDir: string, name: string, value: unknown): void {
+	const path = join(dirOf(agentDir), name);
+	const content = `${JSON.stringify(value, null, 1)}\n`;
+	withHostFileWrite(path, content, () => writeSecretFileContent(path, content), hostTransitionsFile(agentDir));
+}
+
+function writeSecretFileContent(path: string, content: string): void {
 	mkdirSync(dirname(path), { recursive: true });
 	protectLinkDir(dirname(path));
 	const temp = `${path}.${process.pid}.tmp`;
-	writeFileSync(temp, `${JSON.stringify(value, null, 1)}\n`, { mode: 0o600 });
+	writeFileSync(temp, content, { mode: 0o600 });
 	renameSync(temp, path);
 	if (!WIN32) {
 		chmodSync(path, 0o600);
@@ -191,7 +203,8 @@ export function updateLinkPeerSettings(
 		const next = { ...(readPeerSettings(peers[machineId]) ?? {}), ...change };
 		peers[machineId] = next;
 		record.peers = peers;
-		writeFileAtomicSync(path, `${JSON.stringify(record, null, 1)}\n`);
+		const content = `${JSON.stringify(record, null, 1)}\n`;
+		withHostFileWrite(path, content, () => writeFileAtomicSync(path, content), hostTransitionsFile(agentDir));
 		return next;
 	});
 }
@@ -243,13 +256,25 @@ export function loadIdentity(agentDir: string): MachineIdentity {
 export function renameIdentity(agentDir: string, name: string): MachineIdentity {
 	if (!isMachineName(name)) throw new Error("A machine name is lowercase letters, digits and dashes (up to 63).");
 	const identity = { ...loadIdentity(agentDir), name };
-	writeSecretFile(join(dirOf(agentDir), "identity.json"), identity);
+	writeLinkFile(agentDir, "identity.json", identity);
 	return identity;
 }
 
-export function listHubMachines(agentDir: string): HubMachineRecord[] {
-	const stored = readJson(join(dirOf(agentDir), "machines.json"));
-	if (!Array.isArray(stored)) return [];
+/**
+ * The hub's machine records. A missing file holds none; a file that exists but cannot be read or parsed is unknown, so the
+ * result is undefined: a reader that acts on the records (a connection cut) must skip the change, not read it as empty.
+ */
+export function readHubMachines(agentDir: string): HubMachineRecord[] | undefined {
+	const path = join(dirOf(agentDir), "machines.json");
+	if (!existsSync(path)) return [];
+	protectLinkDir(dirname(path));
+	let stored: unknown;
+	try {
+		stored = JSON.parse(readFileSync(path, "utf8"));
+	} catch {
+		return undefined;
+	}
+	if (!Array.isArray(stored)) return undefined;
 	return stored.flatMap((entry): HubMachineRecord[] =>
 		isPlainRecord(entry) &&
 		isMachineName(entry.name) &&
@@ -268,8 +293,13 @@ export function listHubMachines(agentDir: string): HubMachineRecord[] {
 	);
 }
 
+/** The hub's machine records; an unreadable file reads as none (see `readHubMachines` for the case that must be told apart). */
+export function listHubMachines(agentDir: string): HubMachineRecord[] {
+	return readHubMachines(agentDir) ?? [];
+}
+
 function saveHubMachines(agentDir: string, machines: readonly HubMachineRecord[]): void {
-	writeSecretFile(join(dirOf(agentDir), "machines.json"), machines);
+	writeLinkFile(agentDir, "machines.json", machines);
 }
 
 /** The other name already bound to `machineId` (not revoked), when an install would join this hub under a second name. */
@@ -315,6 +345,12 @@ export function rotateHubMachine(agentDir: string, name: string): HubMachineReco
 	return updateHubMachine(agentDir, name, { secret: newSecret() });
 }
 
+/** Whether the owner turned this machine's hub on (`hub.json`): a machine with a hub on is linked, joined or not. */
+export function hubTurnedOn(agentDir: string): boolean {
+	const stored = readJson(join(dirOf(agentDir), "hub.json"), false);
+	return isPlainRecord(stored) && stored.enabled === true;
+}
+
 export function listJoins(agentDir: string): JoinRecord[] {
 	const stored = readJson(join(dirOf(agentDir), "joins.json"));
 	if (!Array.isArray(stored)) return [];
@@ -331,14 +367,14 @@ export function listJoins(agentDir: string): JoinRecord[] {
 
 export function saveJoin(agentDir: string, join_: JoinRecord): void {
 	const joins = listJoins(agentDir).filter((entry) => !(entry.address === join_.address && entry.name === join_.name));
-	writeSecretFile(join(dirOf(agentDir), "joins.json"), [...joins, join_]);
+	writeLinkFile(agentDir, "joins.json", [...joins, join_]);
 }
 
 export function removeJoin(agentDir: string, address: string): boolean {
 	const joins = listJoins(agentDir);
 	const kept = joins.filter((entry) => entry.address !== address);
 	if (kept.length === joins.length) return false;
-	writeSecretFile(join(dirOf(agentDir), "joins.json"), kept);
+	writeLinkFile(agentDir, "joins.json", kept);
 	return true;
 }
 

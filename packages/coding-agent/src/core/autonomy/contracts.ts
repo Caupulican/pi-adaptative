@@ -194,6 +194,8 @@ export interface WorkerReportChange {
 /** The structured sections of a submitted report beyond the envelope fields every claim already carries. */
 export interface WorkerSubmittedReport {
 	readonly requirements: readonly WorkerReportRequirement[];
+	/** Unsettled items that belong to one requirement: the requirement stays open for the host, not the owner. */
+	readonly inconclusiveRequirements?: readonly { readonly requirementId: string; readonly item: string }[];
 	readonly checks: readonly WorkerReportCheck[];
 	readonly changes: readonly WorkerReportChange[];
 	readonly assumptions: readonly string[];
@@ -205,6 +207,19 @@ export interface WorkerSubmittedReport {
 	readonly conditionMet?: true;
 	/** The closed cause the worker declared with a blocker; host facts override it. */
 	readonly blockerCode?: WorkerDeclarableBlocker;
+	/** A routine run's own account of where its task stands; only the routine progress record reads it, as data. */
+	readonly progress?: WorkerReportProgress;
+}
+
+/**
+ * Where a routine run left its task, in the worker's own bounded words (`worker-report-progress.ts` owns the bounds).
+ * `snag.ref` names a snag the run's brief listed, by the short reference shown there.
+ */
+export interface WorkerReportProgress {
+	readonly position?: string;
+	readonly done?: readonly string[];
+	readonly next?: string;
+	readonly snag?: { readonly what: string; readonly remedy?: string; readonly ref?: string };
 }
 
 /**

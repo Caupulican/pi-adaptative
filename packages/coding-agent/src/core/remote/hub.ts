@@ -29,7 +29,14 @@ import {
 	parseFrame,
 	proofsMatch,
 } from "./protocol.ts";
-import { listHubMachines, loadLinkSettings, type MachineIdentity, nameBoundTo, updateHubMachine } from "./registry.ts";
+import {
+	listHubMachines,
+	loadLinkSettings,
+	type MachineIdentity,
+	nameBoundTo,
+	readHubMachines,
+	updateHubMachine,
+} from "./registry.ts";
 import { LINK_FEATURES, LinkFraming, negotiateFeatures, SEALED_FEATURE, SealedLink } from "./session-keys.ts";
 
 const HANDSHAKE_MS = 10_000;
@@ -49,6 +56,8 @@ interface Live {
 	readonly machineId: string;
 	/** The name the owner gave the machine here: its bot's id and its label. */
 	readonly name: string;
+	/** The secret the connection proved at its hello; a rotated record no longer admits this connection. */
+	readonly secret: string;
 	readonly subtree: readonly string[];
 	readonly depth: number;
 	readonly features: readonly string[];
@@ -170,23 +179,32 @@ export class RemoteHub {
 	}
 
 	/**
-	 * Cuts a joined machine whose record was revoked, removed or bound to another install, whichever session changed
-	 * `machines.json`: the hosting session holds the connections, the owner may revoke from any session.
+	 * Cuts every joined machine whose record no longer admits its connection: removed, revoked, bound to another install,
+	 * or given a new secret (a rotate). The hosting session holds the connections, and the owner may change the record from
+	 * any session, so this runs on every change to `machines.json` and on each tick (the backstop for a watch that could
+	 * not start).
 	 */
+	private cutUnadmitted(): void {
+		// An unreadable records file is unknown, not empty: the connections stay until it can be read.
+		const records = readHubMachines(this.agentDir);
+		if (records === undefined) return;
+		for (const entry of [...this.live.values()]) {
+			const record = records.find((machine) => machine.name === entry.name);
+			if (
+				!record ||
+				record.revoked ||
+				record.secret !== entry.secret ||
+				(record.machineId !== undefined && record.machineId !== entry.machineId)
+			)
+				entry.socket.destroy();
+		}
+	}
+
 	private watchRecords(): void {
 		try {
 			this.recordsWatcher = watch(join(this.agentDir, "remote"), { persistent: false }, (_event, filename) => {
 				if (filename !== null && filename.toString() !== "machines.json") return;
-				const records = listHubMachines(this.agentDir);
-				for (const entry of this.live.values()) {
-					const record = records.find((machine) => machine.name === entry.name);
-					if (
-						!record ||
-						record.revoked ||
-						(record.machineId !== undefined && record.machineId !== entry.machineId)
-					)
-						entry.socket.destroy();
-				}
+				this.cutUnadmitted();
 			});
 			this.recordsWatcher.on("error", () => {
 				this.recordsWatcher?.close();
@@ -221,6 +239,7 @@ export class RemoteHub {
 
 	private tick(): void {
 		const now = Date.now();
+		this.cutUnadmitted();
 		for (const entry of this.live.values()) {
 			if (now - entry.lastSeen > SILENCE_MS) entry.socket.destroy();
 			else this.write(entry, { t: "ping" });
@@ -347,6 +366,7 @@ export class RemoteHub {
 			socket,
 			machineId: hello.machineId,
 			name: record.name,
+			secret: record.secret,
 			subtree: hello.subtree,
 			depth: hello.depth,
 			features: active,

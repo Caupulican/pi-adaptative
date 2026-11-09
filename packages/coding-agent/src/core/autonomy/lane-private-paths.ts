@@ -1,4 +1,3 @@
-import { existsSync, readFileSync, statSync } from "node:fs";
 import { homedir } from "node:os";
 import path from "node:path";
 import {
@@ -9,11 +8,13 @@ import {
 	getWorkRoot,
 	okfMemoryDir,
 	projectMemoryRoot,
+	remoteDir,
 	sessionsDir,
 	stateDir,
 } from "../agent-paths.ts";
 import { getMachineCredentialBootstrapFiles } from "../secrets/credential-machine-session.ts";
 import type { ProtectedWritePaths } from "./edge-policy.ts";
+import { findRepositoryGitPaths } from "./path-scope.ts";
 
 /** The project's own harness settings file: denied to a lane's file tools, but a file of the project, not harness storage. */
 export function projectLaneSettingsPath(cwd: string): string {
@@ -66,37 +67,13 @@ export function getPrivateLaneDeniedPaths(cwd: string, agentDir: string): string
 		configFile(agentDir, "models.json"),
 		// Channel tokens and journals (the senders' words and the drafts answered to them).
 		channelsDir(agentDir),
+		// The link's secrets (every joined machine's), its joins, chats, job stores and host lock.
+		remoteDir(agentDir),
 		sessionsDir(agentDir),
 		stateDir(agentDir),
 		getWorkRoot(agentDir),
 		projectLaneSettingsPath(cwd),
 	];
-}
-
-/** Nearest enclosing repository of `cwd`: its root plus the worktree git dir and the shared common git dir. */
-function findRepositoryGitPaths(cwd: string): { root: string; gitDirs: string[] } | undefined {
-	let dir = path.resolve(cwd);
-	while (true) {
-		const marker = path.join(dir, ".git");
-		if (existsSync(marker)) {
-			try {
-				if (statSync(marker).isDirectory()) return { root: dir, gitDirs: [marker] };
-				const pointer = readFileSync(marker, "utf8").match(/^gitdir:\s*(.+?)\s*$/im)?.[1];
-				if (!pointer) return { root: dir, gitDirs: [] };
-				const gitDir = path.resolve(dir, pointer);
-				const commonFile = path.join(gitDir, "commondir");
-				const commonDir = existsSync(commonFile)
-					? path.resolve(gitDir, readFileSync(commonFile, "utf8").trim())
-					: gitDir;
-				return { root: dir, gitDirs: [...new Set([gitDir, commonDir])] };
-			} catch {
-				return { root: dir, gitDirs: [] };
-			}
-		}
-		const parent = path.dirname(dir);
-		if (parent === dir) return undefined;
-		dir = parent;
-	}
 }
 
 /**
@@ -106,6 +83,13 @@ function findRepositoryGitPaths(cwd: string): { root: string; gitDirs: string[] 
  * project files that execute or configure the harness or git on the next run. Write-only on purpose:
  * skills stay readable, and the lists the read boundary uses (private lane denials) are untouched.
  */
+/** Repository files that hold the sealed directives and their pin (`kernel/sealed-directives.ts`, `scripts/check-sealed-directives.mjs`). */
+const SEALED_DIRECTIVE_SOURCE_PATHS: readonly string[] = [
+	"packages/coding-agent/src/kernel/sealed-directives.ts",
+	"scripts/sealed-directives.sha256",
+	"scripts/check-sealed-directives.mjs",
+];
+
 export function getHarnessWriteProtectedPaths(cwd: string, agentDir: string): string[] {
 	const protectedPaths = [
 		...AGENT_ROOT_FILE_NAMES.map((name) => configFile(agentDir, name)),
@@ -117,6 +101,8 @@ export function getHarnessWriteProtectedPaths(cwd: string, agentDir: string): st
 	const repository = findRepositoryGitPaths(cwd);
 	if (repository) {
 		protectedPaths.push(path.join(repository.root, ".husky"));
+		// The owner's sealed directives and their pinned digest: a worker never rewrites the rules it works under.
+		for (const sealed of SEALED_DIRECTIVE_SOURCE_PATHS) protectedPaths.push(path.join(repository.root, sealed));
 		for (const gitDir of repository.gitDirs) {
 			protectedPaths.push(path.join(gitDir, "config"), path.join(gitDir, "hooks"));
 		}

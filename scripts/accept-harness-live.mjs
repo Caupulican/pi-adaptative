@@ -855,6 +855,49 @@ const SCENARIOS = [
 			if (existsSync(file) && readFileSync(file, "utf8").includes(marker)) throw new Error(`the job reached a conversation: ${file.slice(RUN.length)}`);
 		return `lab ran the job once (seq ${inRecord.seq}, acknowledged), the hub applied its end once and the lane completed; no conversation carried it`;
 	}),
+	scenario("s43", "ask-as-lane: the orchestrator's ask to a linked machine is one lane that ends once with the reply; owner words typed in lab's chat on the hub stay chat and make no lane", async () => {
+		if (!state.remoteAgent || !state.second) return { skipped: "s14 did not link a second machine" };
+		const jobRecords = (agentDir, side) => {
+			const dir = join(agentDir, "remote", "jobs", side);
+			return existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(dir, name), "utf8"))) : [];
+		};
+		const marker = `live-ask-${stamp}`;
+		const asks = () => jobRecords(AGENT, "out").filter((record) => record.offer?.kind === "ask" && record.offer?.instructions?.includes(marker));
+		// 1. The orchestrator asks lab through its bot tool: one ask, placed as one lane.
+		await type(state.main, "/chat root");
+		await sleep(1500);
+		await type(state.main, `Use your bot tool with action ask to ask lab this question, and wait for its answer: "What is 9 times 9? Answer with the number only. (ref ${marker})"`);
+		await waitFor("the ask placed as a lane", () => asks()[0], 120_000, 3000, () => screen(state.main, 20));
+		// 2. The lane ends once with lab's answer; the placer applies the end once.
+		const ended = await waitFor("lab's answer applied", () => asks().find((record) => record.appliedAt), 300_000, 4000, () => screen(state.main, 20));
+		if (asks().length !== 1) throw new Error(`the ask made ${asks().length} lanes`);
+		if (ended.conflict) throw new Error("the placer saw two different ends for one ask");
+		if (ended.state !== "terminal" || ended.outcome?.status !== "succeeded") throw new Error(`the ask did not succeed: ${JSON.stringify({ state: ended.state, outcome: ended.outcome, refusal: ended.refusal })}`);
+		if (!/81/.test(ended.outcome.summary)) throw new Error(`the answer is not in the lane's end: ${String(ended.outcome.summary).slice(0, 160)}`);
+		// 3. The reply reaches the orchestrator as the lane's one terminal notification, and the lane completes.
+		await waitFor(
+			"the reply as the lane's terminal notification",
+			() => /81/.test(screen(state.main, 200)) && lanes().some((lane) => lane.laneId === ended.laneId && /^(completed|succeeded)$/.test(String(lane.status))),
+			120_000,
+			3000,
+			() => screen(state.main, 30),
+		);
+		// 4. Negative control: owner words typed in lab's chat on this hub stay chat: the chat log holds them, and no job or lane record appears.
+		const laneRecordCount = () => jobRecords(AGENT, "out").length + jobRecords(AGENT, "in").length + jobRecords(state.remoteAgent, "out").length + jobRecords(state.remoteAgent, "in").length;
+		const chatLog = join(AGENT, "remote", "chats", "lab.jsonl");
+		const chatEntries = () => (existsSync(chatLog) ? readFileSync(chatLog, "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) : []);
+		const before = laneRecordCount();
+		const ownerWords = `Plain owner words in lab's chat ${marker}.`;
+		await type(state.main, "/chat lab");
+		await sleep(1500);
+		await type(state.main, ownerWords);
+		await waitFor("the owner's words in lab's chat", () => chatEntries().find((entry) => entry.from === "hub" && entry.text === ownerWords), 60_000, 2000, () => screen(state.main, 20));
+		await sleep(10_000);
+		if (laneRecordCount() !== before) throw new Error("owner words typed in lab's chat created a job or lane record");
+		if (asks().length !== 1) throw new Error("owner words in lab's chat changed the orchestrator's ask");
+		await type(state.main, "/chat root");
+		return `the ask ended once with the answer (lane ${ended.laneId}) and reached the orchestrator as its terminal notification; owner words in lab's chat stayed chat and made no lane`;
+	}),
 	scenario("s9", "harness health across everything that ran", async () => {
 		await sleep(20_000);
 		const problems = [];
@@ -878,6 +921,28 @@ const SCENARIOS = [
 		if (problems.length > 0) throw new Error(problems.join("; "));
 		if (network.length > 0) throw inconclusive(`${network.length} worker run(s) ended on a provider network failure, which says nothing about the harness`);
 		return "no failed run, no receipt rejection, no bounced routine call, no stuck lane";
+	}),
+	// Last on purpose: both ends restart, which replaces this session's transcript for any scenario that reads it.
+	scenario("s44", "the join holds across a restart of both ends: hub and joiner each come back linked from the records they kept", async () => {
+		if (!state.remoteAgent || !state.second) return { skipped: "s14 did not link a second machine" };
+		await type(state.second, "/quit");
+		await type(state.main, "/quit");
+		await sleep(8000);
+		launch(state.main, SANDBOX);
+		await waitFor("the orchestrator's prompt after restart", () => /Ask anything/.test(screen(state.main, 60)), 90_000, 2000, () => screen(state.main, 20));
+		launch(state.second, SANDBOX, "", state.remoteAgent);
+		await waitFor("the machine's prompt after restart", () => /Ask anything/.test(screen(state.second, 60)), 90_000, 2000, () => screen(state.second, 20));
+		await waitFor(
+			"lab connected again after both restarts",
+			async () => {
+				await type(state.main, "/remote status");
+				return /lab connected/.test(screen(state.main, 60));
+			},
+			120_000,
+			4000,
+		);
+		if (!existsSync(join(state.remoteAgent, "remote", "joins.json"))) throw new Error("the machine kept no join record across the restart");
+		return "the hub and the machine restarted and the join held from their own records, with no new token";
 	}),
 ];
 

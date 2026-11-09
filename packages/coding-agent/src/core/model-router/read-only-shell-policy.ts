@@ -1,7 +1,12 @@
 import { type Dirent, existsSync, readdirSync, statSync } from "node:fs";
 import * as nodePath from "node:path";
 import { globIterateSync } from "glob";
-import { isPathWithinScope, physicalPathSync, safeRealpathSync } from "../autonomy/path-scope.ts";
+import {
+	findRepositoryGitPaths,
+	isPathWithinScope,
+	physicalPathSync,
+	safeRealpathSync,
+} from "../autonomy/path-scope.ts";
 import {
 	MAX_TRACKED_DIRECTORIES,
 	parseShellCompound,
@@ -167,6 +172,33 @@ const READ_ONLY_SYSTEMCTL_SUBCOMMANDS = new Set([
 ]);
 const READ_ONLY_NPM_SUBCOMMANDS = new Set(["info", "list", "ls", "outdated", "view", "whoami"]);
 
+/**
+ * Programs that read the machine's own state (services, logs, processes, sockets, filesystem and host figures) rather than
+ * the files a command names. A confined lane's shell does not run them.
+ */
+const MACHINE_STATE_READERS = new Set([
+	"df",
+	"free",
+	"hostname",
+	"id",
+	"journalctl",
+	"lsof",
+	"netstat",
+	"nproc",
+	"pgrep",
+	"ps",
+	"ss",
+	"systemctl",
+	"uname",
+	"uptime",
+	"whoami",
+]);
+/**
+ * The npm family. Its read subcommands contact the registry (refused for a lane without network) or read the machine's global
+ * configuration (`npm list -g`, `npm root -g`); a confined lane runs none of them, only the version query.
+ */
+const NPM_FAMILY_COMMANDS = new Set(["npm", "pnpm", "yarn"]);
+
 /** Node runs arbitrary code; only printing its version and syntax-checking a file read nothing else. */
 const NODE_READ_ONLY_RE = /^(?:-v|--version|-c|--check)$/u;
 
@@ -197,6 +229,9 @@ const TSC_CHECK_EFFECT_RE = /^(?:--init|--build|-b|--watch|-w|--generateTrace|--
 
 const MAX_NESTED_SHELL_DEPTH = 2;
 
+/** Programs that list the directory they run in when they are given no path operand (`ls`, `find -name x`). */
+const IMPLICIT_CWD_LISTING_PROGRAMS = new Set(["ls", "find", "fd", "tree", "du"]);
+
 export function executableName(token: string): string {
 	return (token.replace(/\\/gu, "/").split("/").at(-1) ?? token).toLowerCase().replace(/\.exe$/u, "");
 }
@@ -221,6 +256,12 @@ export interface ReadOnlyShellLaneScope {
 	readonly cdPath: readonly string[];
 	/** Absolute harness storage paths (credentials, memory, sessions, state) no recursive search may descend into. */
 	readonly harnessStoragePaths: readonly string[];
+	/**
+	 * The lane's reads are confined to a read scope (a named scope or the host's read root). A confined lane's shell reads
+	 * named files only: not the machine's own state (services, logs, processes, sockets), not the machine-wide git or npm
+	 * configuration.
+	 */
+	readonly confined: boolean;
 	/**
 	 * The credential guard's path policy over the lane's denied paths (canonical paths, case rules, dotenv names), plus
 	 * everything outside the lane's read scope when its host confines reads.
@@ -697,11 +738,38 @@ function psOptionTakesNextWord(word: string): boolean {
  * Shared by every caller of the read/write line, so `sort -o`, `rg --pre` or awk's `system()` never
  * passes as a read.
  */
+/** Checksum tools' `-c`/`--check` open every file each line of the checksum list names. */
+const CHECKSUM_CHECK_OPTION_RE = /^(?:--check|-[a-zA-Z]*c[a-zA-Z]*)$/u;
+
+/**
+ * The options by which a reader takes the names of files, paths or patterns from a file or from stdin, and then opens or
+ * prints what they name. The names are data the gate cannot judge (`printf '/x' | sort --files0-from=-` opens `/x`), so the
+ * read-only line refuses each option in any spelling rather than judging a value it cannot see.
+ */
+const NAME_LIST_OPTIONS: ReadonlyMap<string, RegExp> = new Map<string, RegExp>([
+	["sort", /^--files0-from(?:=|$)/u],
+	["wc", /^--files0-from(?:=|$)/u],
+	["du", /^--files0-from(?:=|$)/u],
+	["find", /^-files0-from$/u],
+	["tree", /^--fromfile(?:=|$)/u],
+	["file", /^(?:-[a-zA-Z]*f|--files-from)/u],
+	["md5sum", CHECKSUM_CHECK_OPTION_RE],
+	["sha1sum", CHECKSUM_CHECK_OPTION_RE],
+	["sha256sum", CHECKSUM_CHECK_OPTION_RE],
+	["date", /^(?:-f|--file(?:=|$))/u],
+	["diff", /^--(?:from|to)-file(?:=|$)/u],
+	["grep", /^--exclude-from(?:=|$)/u],
+	["rg", /^--ignore-file(?:=|$)/u],
+]);
 function invocationEffect(commandArgs: readonly string[]): string | undefined {
 	const name = executableName(commandArgs[0] ?? "");
 	const rest = commandArgs.slice(1);
 	const found = (test: (arg: string) => boolean): string | undefined => rest.find(test);
 	let effect: string | undefined;
+	const nameList = NAME_LIST_OPTIONS.get(name);
+	const listOption = nameList === undefined ? undefined : rest.find((arg) => nameList.test(arg));
+	if (listOption !== undefined)
+		return `${name} ${listOption} reads the names it opens from a file or stdin, which the gate cannot judge`;
 	switch (name) {
 		case "sort":
 			effect = found(
@@ -713,7 +781,11 @@ function invocationEffect(commandArgs: readonly string[]): string | undefined {
 			break;
 		case "git":
 			effect = found(
-				(arg) => /^-O/u.test(arg) || /^--(?:output|ext-diff|textconv|open-files-in-pager)(?:=|$)/u.test(arg),
+				(arg) =>
+					/^-O/u.test(arg) ||
+					/^--(?:output|ext-diff|textconv|open-files-in-pager|pathspec-from-file|pathspec-file-nul)(?:=|$)/u.test(
+						arg,
+					),
 			);
 			break;
 		case "date":
@@ -1063,6 +1135,12 @@ function optionParts(name: string, arg: string): { key: string; whole: string; a
 	return { key: arg.slice(0, 2), whole: arg, ...(arg.length > 2 ? { attached: arg.slice(2) } : {}) };
 }
 
+/** The words a find global option takes before its starting points: -H, -L, -P, -Olevel, and -D with its debug option. */
+function findGlobalOptionWidth(arg: string): number {
+	if (arg === "-H" || arg === "-L" || arg === "-P" || /^-O\d+$/u.test(arg)) return 1;
+	return arg === "-D" ? 2 : 0;
+}
+
 /** The words of one invocation the program opens, and its positional program text. */
 function pathOperandsWithProgram(name: string, args: readonly string[]): ParsedOperands {
 	const syntax = OPERAND_SYNTAX.get(name) ?? PLAIN_OPERAND_SYNTAX;
@@ -1082,6 +1160,11 @@ function pathOperandsWithProgram(name: string, args: readonly string[]): ParsedO
 	let endOfOptions = false;
 	for (let index = 1; index < args.length; index++) {
 		const arg = args[index]!;
+		// find's global options (-H, -L, -P, -Olevel, -D debugopts) come before its starting points and open nothing.
+		if (syntax.pathsBeforePredicates && paths.length === 0 && findGlobalOptionWidth(arg) > 0) {
+			index += findGlobalOptionWidth(arg) - 1;
+			continue;
+		}
 		if (syntax.pathsBeforePredicates && /^[-(!]/u.test(arg)) break;
 		if (!endOfOptions && arg === "--") {
 			endOfOptions = true;
@@ -1141,7 +1224,13 @@ function searchesRecursively(name: string, args: readonly string[]): boolean {
 	const rest = args.slice(1);
 	switch (name) {
 		case "rg":
+		case "find":
+		case "fd":
+		case "tree":
+		case "du":
 			return true;
+		case "ls":
+			return rest.some((arg) => /^-[A-Za-z]*R/u.test(arg) || arg === "--recursive");
 		case "grep":
 			return rest.some(
 				(arg, index) =>
@@ -1170,6 +1259,17 @@ function followsLinks(name: string, args: readonly string[]): boolean {
 	switch (name) {
 		case "rg":
 			return rest.some((arg) => /^-[A-Za-z]*L/u.test(arg) || arg === "--follow");
+		case "find":
+			return rest.some((arg) => arg === "-L" || arg === "-follow");
+		case "fd":
+			return rest.some((arg) => /^-[A-Za-z]*L/u.test(arg) || arg === "--follow");
+		case "tree":
+			return rest.some((arg) => /^-[A-Za-z]*l/u.test(arg));
+		case "du":
+			return rest.some((arg) => /^-[A-Za-z]*L/u.test(arg));
+		// Only a recursive listing reaches this (`followLinks` is recursive and this), so -L alone walks nothing.
+		case "ls":
+			return rest.some((arg) => /^-[A-Za-z]*L/u.test(arg) || arg === "--dereference");
 		case "grep":
 			return rest.some((arg) => /^-[A-Za-z]*R/u.test(arg) || arg === "--dereference-recursive");
 		case "diff":
@@ -2013,6 +2113,11 @@ function gitViolation(args: readonly string[], cwds: WorkingDirectories, context
 	const violation = gitSubcommandViolation(subcommand, rest) ?? invocationEffect(["git", ...rest]);
 	if (violation) return violation;
 	const lane = context.lane;
+	// A confined lane reads the repository's own configuration only: --global and --system settings are the machine's.
+	if (lane?.confined && subcommand === "config" && !rest.includes("--local"))
+		return "git config without --local reads the machine's global and system configuration, which a confined worker does not read";
+	if (lane?.confined && subcommand === "config" && rest.includes("--includes"))
+		return "git config --includes follows include.path files, which can lie outside the scope a confined worker reads";
 	if (!lane) return undefined;
 	if (subcommand === "grep" && rest.includes("--no-exclude-standard"))
 		return "git grep --no-exclude-standard searches ignored files, where private files such as .env live";
@@ -2069,10 +2174,15 @@ function gitViolation(args: readonly string[], cwds: WorkingDirectories, context
 				return `it reads ${target}, a private harness or credential path or one outside its read scope`;
 		}
 	}
-	// git reads its whole repository, wherever in it the command runs.
+	// git reads its whole repository, wherever in it the command runs: its working tree and its git directories, which for a
+	// linked worktree include the shared common directory outside the checkout.
 	for (const cwd of gitCwds.list) {
 		const refusal = deniedPathViolation(repositoryRoot(cwd) ?? cwd, true, lane);
 		if (refusal) return refusal;
+		for (const gitDir of findRepositoryGitPaths(cwd)?.gitDirs ?? []) {
+			const gitRefusal = deniedPathViolation(gitDir, true, lane);
+			if (gitRefusal) return gitRefusal;
+		}
 	}
 	return undefined;
 }
@@ -2105,11 +2215,12 @@ function laneOperandViolation(
 		const violation = lanePathViolation(root, cwds.list, true, context, lane);
 		if (violation) return violation;
 	}
-	// A recursive search without a path operand searches where it runs.
-	if (recursive && operands.paths.length === 0) {
+	// With no path operand a reader works where it runs: a recursive one searches the cwd (and the links below it), and a
+	// listing lists the cwd's names. Either way the cwd is judged, so no reader hides a directory behind a missing operand.
+	if (operands.paths.length === 0 && (recursive || IMPLICIT_CWD_LISTING_PROGRAMS.has(name))) {
 		for (const cwd of cwds.list) {
 			const violation =
-				deniedPathViolation(cwd, true, lane) ?? (followLinks ? followedLinkViolation(cwd, lane) : undefined);
+				deniedPathViolation(cwd, recursive, lane) ?? (followLinks ? followedLinkViolation(cwd, lane) : undefined);
 			if (violation) return violation;
 		}
 	}
@@ -2130,6 +2241,12 @@ function leafViolation(args: readonly string[], cwds: WorkingDirectories, contex
 	}
 	const rest = args.slice(1);
 	const subcommand = rest.find((arg) => !arg.startsWith("-"))?.toLowerCase();
+	if (lane?.confined) {
+		if (MACHINE_STATE_READERS.has(name))
+			return `${name} reads the machine's own state, which a confined worker does not read`;
+		if (NPM_FAMILY_COMMANDS.has(name) && !(rest.length === 1 && /^(?:-v|--version)$/u.test(rest[0]!)))
+			return `${name} contacts the registry or reads the machine's global configuration, which a confined worker does not do`;
+	}
 	switch (name) {
 		case "git":
 			return gitViolation(args, cwds, context);

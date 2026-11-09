@@ -1,17 +1,52 @@
 import type { BeforeToolCallResult } from "../../kernel/index.ts";
+import { toolPathSpellings } from "../../kernel/utils/paths.ts";
 import { type ReadOnlyShellLaneScope, readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
 import { type CapabilityGateway, CapabilityGatewayDeniedError } from "../orchestration/capability-gateway.ts";
-import type { ToolCapabilityManifest } from "../orchestration/contracts.ts";
-import { READ_ONLY_SHELL_TOOL_NAMES } from "../tool-capability-policy.ts";
+import type { HarnessCapability, ToolCapabilityManifest } from "../orchestration/contracts.ts";
+import {
+	READ_ONLY_SHELL_TOOL_NAMES,
+	requiredEnvelopeCapabilities,
+	resolveToolCallPathAccess,
+} from "../tool-capability-policy.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { classifyYoloBoundary } from "./edge-policy.ts";
+import { extractToolPathArguments } from "./envelope-enforcement.ts";
 import { evaluateToolGate } from "./gates.ts";
+import { findRepositoryGitPaths } from "./path-scope.ts";
+import { readScopeRefusal, type SessionReadScope } from "./session-read-scope.ts";
 
 /** The same scope guidance accompanies every lane write refusal. */
 export const WORKER_WRITE_SCOPE_GUIDANCE =
 	"A worker writes only inside its working directory plus the roots its dispatcher granted with writePaths. Do not route around this: finish what is in scope and report to the parent the absolute path you need to write and why, so it can start a new worker with writePaths for it (a worker's own write scope cannot be widened).";
 
 const WRITE_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
+
+/**
+ * The first path a read tool opens outside the lane's read scope, with why; undefined when every path it opens lies inside.
+ * The paths are the tool's own path arguments (a search with none opens `.`), so a read the tool would make is judged.
+ */
+function readScopeViolation(
+	toolName: string,
+	args: unknown,
+	capabilities: readonly HarnessCapability[],
+	scope: SessionReadScope,
+): string | undefined {
+	if (resolveToolCallPathAccess(capabilities, toolName, args) !== "read") return undefined;
+	for (const target of extractToolPathArguments(toolName, args)) {
+		const refusal = readScopeRefusal(scope, target);
+		if (refusal)
+			return `${target} is ${refusal === "denied" ? "a private path" : "outside this worker's read scope"}`;
+		// git reads the whole repository it runs in, including a linked worktree's shared common directory.
+		if (toolName !== "repo_read") continue;
+		for (const spelled of toolPathSpellings(target, scope.cwd) ?? []) {
+			for (const gitDir of findRepositoryGitPaths(spelled)?.gitDirs ?? []) {
+				const gitRefusal = readScopeRefusal(scope, gitDir);
+				if (gitRefusal) return `the repository's git directory ${gitDir} is outside this worker's read scope`;
+			}
+		}
+	}
+	return undefined;
+}
 
 export interface LaneToolAdmissionEvent {
 	readonly toolCallId: string;
@@ -30,6 +65,11 @@ interface LaneToolAdmissionOptions {
 	 * network grant, scratch directory and private paths (`readOnlyShellViolation`).
 	 */
 	readonly readOnlyShell?: ReadOnlyShellLaneScope;
+	/**
+	 * Present for a confined lane (its read scope comes from the admitted plan): every path a read tool opens must lie inside
+	 * it, in every mode. The gateway checks the same paths only outside YOLO, so this is the check YOLO keeps.
+	 */
+	readonly readScope?: SessionReadScope;
 	readonly denyCommands?: readonly string[];
 	readonly readEnvelope: CapabilityEnvelope;
 	readonly writeEnvelope: CapabilityEnvelope;
@@ -91,6 +131,20 @@ export class LaneToolAdmission {
 					reason: `Read-only worker: ${violation}. Read, search and inspect freely; write scratch output only under $TMPDIR (this worker's own scratch directory, removed when it ends); report any change, network access or private file that is needed to the parent instead of reaching it.`,
 				};
 		}
+		if (options.readScope) {
+			const violation = readScopeViolation(
+				toolName,
+				args,
+				// A tool without a compiled manifest (a YOLO lane keeps every read tool on its surface) is judged by its own policy.
+				options.manifests.get(toolName)?.capabilities ?? requiredEnvelopeCapabilities(toolName, args),
+				options.readScope,
+			);
+			if (violation)
+				return {
+					block: true,
+					reason: `Read scope: ${violation}. This worker reads only the directories it was given; report the path to the parent instead of reading it.`,
+				};
+		}
 		if (options.writeProtectionEnvelope && WRITE_TOOLS.has(toolName)) {
 			const protection = evaluateToolGate({
 				toolName,
@@ -149,40 +203,70 @@ export class LaneToolAdmission {
 		return undefined;
 	}
 
+	/**
+	 * The checks every call faces before it runs, attributing nothing: the structural policy, the grant's eligibility and
+	 * budget, the edge check, and the grant's path authorization. Undefined admits the call.
+	 */
+	private async authorize(
+		toolName: string,
+		args: unknown,
+		signal?: AbortSignal,
+	): Promise<BeforeToolCallResult | undefined> {
+		signal?.throwIfAborted();
+		const structural = this.check(toolName, args);
+		if (structural?.block) return structural;
+		const { gateway, manifests, yolo, checkEdge, cwd } = this.options;
+		const manifest = gateway && !yolo ? manifests.get(toolName) : undefined;
+		if (gateway && !yolo) {
+			if (!manifest) return { block: true, reason: `Lane tool '${toolName}' has no compiled capability manifest.` };
+			gateway.checkToolCallEligibility(manifest, toolName, args);
+			gateway.assertBudgetAvailable(toolName);
+		}
+		const edge = await checkEdge?.(toolName, args, cwd);
+		signal?.throwIfAborted();
+		this.assertHealthy();
+		this.options.assertOpen();
+		if (edge?.block) return edge;
+		if (gateway && manifest) gateway.authorizeToolCall(manifest, toolName, args);
+		return undefined;
+	}
+
+	/** A standalone call: the checks of `authorize`, then its attribution to the executor. */
 	async admit(event: LaneToolAdmissionEvent, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
 		try {
-			signal?.throwIfAborted();
-			const structural = this.check(event.toolName, event.args);
-			if (structural?.block) return structural;
-			const { gateway, manifests, yolo, checkEdge, cwd } = this.options;
 			const observer = this.observer;
 			if (this.hadObserver && !observer) throw new Error("Lane tool execution attribution is closed.");
-			const manifest = gateway && !yolo ? manifests.get(event.toolName) : undefined;
-			if (gateway && !yolo) {
-				if (!manifest)
-					return { block: true, reason: `Lane tool '${event.toolName}' has no compiled capability manifest.` };
-				gateway.checkToolCallEligibility(manifest, event.toolName, event.args);
-				gateway.assertBudgetAvailable(event.toolName);
-			}
-			const edge = await checkEdge?.(event.toolName, event.args, cwd);
-			signal?.throwIfAborted();
-			this.assertHealthy();
-			this.options.assertOpen();
+			const refused = await this.authorize(event.toolName, event.args, signal);
+			if (refused) return refused;
 			if (this.observer !== observer) throw new Error("Lane tool execution attribution changed before dispatch.");
-			if (edge?.block) return edge;
-			if (gateway && manifest) gateway.authorizeToolCall(manifest, event.toolName, event.args);
 			observer?.(event);
 			return undefined;
 		} catch (error) {
-			if (error instanceof CapabilityGatewayDeniedError && error.status !== "budget_exhausted")
-				return {
-					block: true,
-					reason: `Lane tool blocked (${error.reasonCode}): ${error.message}${error.reasonCode === "scope_denied" ? ` ${WORKER_WRITE_SCOPE_GUIDANCE}` : ""}`,
-				};
-			// The kernel projects thrown tool errors. Retain fatal admission failures independently
-			// so a later report cannot turn exhausted authority or failed accounting into success.
-			if (!signal?.aborted) this.failure ??= { error };
-			throw error;
+			return this.projectFailure(error, signal);
 		}
+	}
+
+	/**
+	 * A sub-call the lane admitted makes (a `lookup` request, a python tool call): the checks of a standalone call, with no
+	 * attribution of its own. Nested calls run every grant and edge check their tool would face on its own.
+	 */
+	async admitNested(toolName: string, args: unknown, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
+		try {
+			return await this.authorize(toolName, args, signal);
+		} catch (error) {
+			return this.projectFailure(error, signal);
+		}
+	}
+
+	private projectFailure(error: unknown, signal?: AbortSignal): BeforeToolCallResult {
+		if (error instanceof CapabilityGatewayDeniedError && error.status !== "budget_exhausted")
+			return {
+				block: true,
+				reason: `Lane tool blocked (${error.reasonCode}): ${error.message}${error.reasonCode === "scope_denied" ? ` ${WORKER_WRITE_SCOPE_GUIDANCE}` : ""}`,
+			};
+		// The kernel projects thrown tool errors. Retain fatal admission failures independently
+		// so a later report cannot turn exhausted authority or failed accounting into success.
+		if (!signal?.aborted) this.failure ??= { error };
+		throw error;
 	}
 }

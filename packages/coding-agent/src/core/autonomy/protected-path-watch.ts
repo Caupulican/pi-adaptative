@@ -21,11 +21,29 @@ import { lstatSync, readdirSync } from "node:fs";
 import path from "node:path";
 import { hostExplainsFileChange, hostFileIdentity } from "../../utils/host-write-transition.ts";
 import { hostWroteDuring } from "../../utils/host-write-window.ts";
-import { AGENT_ROOT_DIRECTORY_NAMES, AGENT_ROOT_FILE_NAMES } from "../agent-paths.ts";
+import {
+	AGENT_ROOT_DIRECTORY_NAMES,
+	AGENT_ROOT_FILE_NAMES,
+	configFile,
+	hostTransitionsFile,
+	remoteDir,
+} from "../agent-paths.ts";
 import { quotedSpan } from "../util/bounded-line.ts";
 import type { WorkerHostFinding } from "./contracts.ts";
 import { hostFinding } from "./host-findings.ts";
-import { getHarnessWriteProtectedPaths } from "./lane-private-paths.ts";
+import { getHarnessWriteProtectedPaths, projectLaneSettingsPath } from "./lane-private-paths.ts";
+
+/**
+ * The link's files a process tool could silently rewrite: this machine's identity, the hub's config, every joined
+ * machine's secret, the joins and the link settings. Fingerprinted by name, so the churn inside `remote/` is not.
+ */
+const WATCHED_REMOTE_FILE_NAMES: readonly string[] = [
+	"identity.json",
+	"machines.json",
+	"joins.json",
+	"settings.json",
+	"hub.json",
+];
 
 /** Agent-root entries the host writes during normal operation; fingerprinting them would only produce noise. */
 const HOST_WRITTEN_AGENT_ROOT_ENTRIES: ReadonlySet<string> = new Set<string>([
@@ -41,7 +59,8 @@ const HOST_WRITTEN_AGENT_ROOT_ENTRIES: ReadonlySet<string> = new Set<string>([
 	"git",
 	"worktrees",
 	"channels",
-	// The link's identity, joins, chats, job records and host lock: the hub and the job runner write them while any lane runs.
+	// The link's directory is watched file by file (see WATCHED_REMOTE_FILE_NAMES): its job stores, chats, host lock and
+	// link state churn while any lane runs.
 	"remote",
 	"auth.json",
 	"MEMORY.md",
@@ -63,7 +82,8 @@ export function getTamperWatchedPaths(cwd: string, agentDir: string): string[] {
 			.filter((name) => HOST_WRITTEN_AGENT_ROOT_ENTRIES.has(name))
 			.map((name) => path.join(agentDir, name)),
 	);
-	return getHarnessWriteProtectedPaths(cwd, agentDir).filter((entry) => !excluded.has(entry));
+	const linkFiles = WATCHED_REMOTE_FILE_NAMES.map((name) => path.join(remoteDir(agentDir), name));
+	return [...getHarnessWriteProtectedPaths(cwd, agentDir).filter((entry) => !excluded.has(entry)), ...linkFiles];
 }
 
 export interface ProtectedPathFinding {
@@ -83,12 +103,33 @@ export interface ProtectedPathWatchOptions {
 	maxEntries?: number;
 	maxDepth?: number;
 	maxFindings?: number;
+	/**
+	 * Files the host writes and explains through its journal (`hostJournal`): their fingerprint is the exact identity of the
+	 * content, and a change is the host's when the journal holds the chain of host writes that produced it.
+	 */
+	hostExplained?: readonly string[];
+	hostJournal?: string;
+}
+
+/** The host-explained files and the journal for a session's watch: settings, and the remote link's files. */
+export function protectedPathHostOptions(
+	cwd: string,
+	agentDir: string,
+): { hostExplained: readonly string[]; hostJournal: string } {
+	return {
+		hostExplained: [
+			configFile(agentDir, "settings.json"),
+			projectLaneSettingsPath(cwd),
+			...WATCHED_REMOTE_FILE_NAMES.map((name) => path.join(remoteDir(agentDir), name)),
+		],
+		hostJournal: hostTransitionsFile(agentDir),
+	};
 }
 
 type Fingerprints = Map<string, string>;
 
-function fingerprintOf(target: string): string {
-	if (path.basename(target) === "settings.json") {
+function fingerprintOf(target: string, explained: ReadonlySet<string>): string {
+	if (explained.has(path.resolve(target))) {
 		const exact = hostFileIdentity(target);
 		if (exact !== undefined) return exact;
 	}
@@ -108,6 +149,7 @@ function fingerprint(
 	roots: readonly string[],
 	maxEntries: number,
 	maxDepth: number,
+	explained: ReadonlySet<string>,
 ): { entries: Fingerprints; truncated: boolean } {
 	const entries: Fingerprints = new Map();
 	let truncated = false;
@@ -116,7 +158,7 @@ function fingerprint(
 			truncated = true;
 			return;
 		}
-		const print = fingerprintOf(target);
+		const print = fingerprintOf(target, explained);
 		entries.set(target, print);
 		if (!print.startsWith("dir:")) return;
 		if (depth >= maxDepth) {
@@ -148,8 +190,11 @@ function changesBetween(before: Fingerprints, after: Fingerprints): { path: stri
 }
 
 export class ProtectedPathWatch {
-	private readonly options: Required<Omit<ProtectedPathWatchOptions, "workerId" | "paths">> &
-		Pick<ProtectedPathWatchOptions, "workerId" | "paths">;
+	private readonly options: Required<
+		Omit<ProtectedPathWatchOptions, "workerId" | "paths" | "hostExplained" | "hostJournal">
+	> &
+		Pick<ProtectedPathWatchOptions, "workerId" | "paths" | "hostJournal">;
+	private readonly explained: ReadonlySet<string>;
 	private readonly recorded: ProtectedPathFinding[] = [];
 	private readonly seen = new Set<string>();
 	private omitted = 0;
@@ -164,11 +209,18 @@ export class ProtectedPathWatch {
 			maxEntries: options.maxEntries ?? DEFAULT_MAX_ENTRIES,
 			maxDepth: options.maxDepth ?? DEFAULT_MAX_DEPTH,
 			maxFindings: options.maxFindings ?? DEFAULT_MAX_FINDINGS,
+			hostJournal: options.hostJournal,
 		};
+		this.explained = new Set((options.hostExplained ?? []).map((entry) => path.resolve(entry)));
 	}
 
 	private snapshot(): Fingerprints {
-		const { entries, truncated } = fingerprint(this.options.paths, this.options.maxEntries, this.options.maxDepth);
+		const { entries, truncated } = fingerprint(
+			this.options.paths,
+			this.options.maxEntries,
+			this.options.maxDepth,
+			this.explained,
+		);
 		if (truncated) this.truncatedWatch = true;
 		return entries;
 	}
@@ -242,9 +294,10 @@ export class ProtectedPathWatch {
 		return this.recorded;
 	}
 
+	/** A change to an explained file is the host's when the journal holds its chain; anything else by the host window. */
 	private hostExplains(change: { path: string; before: string; after: string }, from: number, to: number): boolean {
-		return path.basename(change.path) === "settings.json"
-			? hostExplainsFileChange(change.path, change.before, change.after, from, to)
+		return this.explained.has(path.resolve(change.path))
+			? hostExplainsFileChange(change.path, change.before, change.after, from, to, this.options.hostJournal)
 			: hostWroteDuring(change.path, from, to);
 	}
 

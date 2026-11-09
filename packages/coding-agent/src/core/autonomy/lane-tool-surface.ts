@@ -71,7 +71,7 @@ import { LaneToolAdmission, type LaneToolAdmissionEvent } from "./lane-tool-admi
 import { LaneToolUsage } from "./lane-tool-usage.ts";
 import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
 import type { ProtectedPathWatch } from "./protected-path-watch.ts";
-import { privatePathBoundary } from "./session-read-scope.ts";
+import { privatePathBoundary, type SessionReadScope } from "./session-read-scope.ts";
 import { createWorkerRunEnvironment } from "./worker-run-environment.ts";
 import type { WorkerToolAdapterRegistry } from "./worker-tool-adapter-registry.ts";
 
@@ -188,10 +188,12 @@ export interface LaneToolSurfaceOptions {
 	 */
 	shellReadOnly?: boolean;
 	/**
-	 * A host that confines its workers' reads (a parent opened away): a read-only shell reads nothing outside these
-	 * directories and its own scratch directory. Absent, it reads anything but a denied path.
+	 * The directories a confined lane may read (its read scope, from the admitted plan: a named read scope, the host's read
+	 * root or a workspace focus). Its read tools and `repo_read` read nothing outside them, in every mode, and a read-only
+	 * shell reads nothing outside them; its own scratch directory is always readable. Absent, the lane reads the machine
+	 * scope and only the grant's and the denied paths apply.
 	 */
-	shellReadRoots?: readonly string[];
+	readScopeRoots?: readonly string[];
 	cwd: string;
 	profile?: NormalizedProfile;
 	/** Private harness state that generic file tools must never traverse. */
@@ -645,25 +647,33 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				{ offline, readOnly: options.readOnly === true },
 			)
 		: undefined;
-	const shellReadRoots = options.shellReadRoots?.flatMap((entry) => {
+	const readScopeRoots = options.readScopeRoots?.flatMap((entry) => {
 		const root = path.resolve(entry);
 		return [...new Set([root, safeRealpathSync(root)])];
 	});
+	const scratchRoots = runEnvironment
+		? [...new Set([runEnvironment.scratchDirectory, safeRealpathSync(runEnvironment.scratchDirectory)])]
+		: [];
 	const readOnlyShell: ReadOnlyShellLaneScope | undefined = options.shellReadOnly
 		? {
 				network: networkGranted,
-				scratchRoots: runEnvironment
-					? [...new Set([runEnvironment.scratchDirectory, safeRealpathSync(runEnvironment.scratchDirectory)])]
-					: [],
+				scratchRoots,
 				homeDir: homedir(),
 				cdPath: (process.env.CDPATH ?? "").split(path.delimiter).filter((entry) => entry.length > 0),
 				harnessStoragePaths: (deniedPaths ?? []).filter((entry) => entry !== projectSettingsPath),
+				confined: readScopeRoots !== undefined,
 				// Scratch is admitted before this is asked; a confined lane reads nothing outside its roots.
 				isDeniedPath: (target) =>
 					isProtectedCredentialPath(target, options.cwd, laneBoundary) ||
-					(shellReadRoots !== undefined && !insideReadRoots(target, shellReadRoots)),
+					(readScopeRoots !== undefined && !insideReadRoots(target, readScopeRoots)),
 			}
 		: undefined;
+	// A confined lane's read tools read the roots its shell reads, its scratch directory included (the shell's own
+	// output lives there). Checked in every mode: YOLO removes prompts, not the read scope.
+	const readScope: SessionReadScope | undefined =
+		readScopeRoots === undefined
+			? undefined
+			: { cwd: options.cwd, readRoots: [...readScopeRoots, ...scratchRoots], deniedPaths: deniedPaths ?? [] };
 
 	const admission = new LaneToolAdmission({
 		cwd: options.cwd,
@@ -672,6 +682,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		gateway,
 		yolo: options.yolo,
 		readOnlyShell,
+		readScope,
 		denyCommands: options.denyCommands,
 		readEnvelope,
 		writeEnvelope,
@@ -727,8 +738,9 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	let laneToolsByName: ReadonlyMap<string, AgentTool> = new Map();
 	const nestedHost: NestedCallHost = {
 		resolveTool: (name) => laneToolsByName.get(name),
-		admit: async (_parentToolCallId, call) => {
-			const refused = admission.check(call.toolName, call.args);
+		admit: async (_parentToolCallId, call, signal) => {
+			// The same checks a standalone call faces (grant, budget, edge, path), with no attribution of the sub-call of its own.
+			const refused = await admission.admitNested(call.toolName, call.args, signal);
 			if (refused?.block) return { kind: "refused", reason: refused.reason ?? "refused by this lane's tool policy" };
 			return {
 				kind: "admitted",

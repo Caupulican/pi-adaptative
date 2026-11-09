@@ -1,4 +1,5 @@
 import { resolve } from "node:path";
+import { toolPathSpellings } from "../../kernel/utils/paths.ts";
 import { workerMachinePathRoots } from "../delegation/worker-machine-scope.ts";
 import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
@@ -43,13 +44,18 @@ export function readScopeRefusal(
 	path: string,
 	subtree = false,
 ): "outside" | "denied" | undefined {
-	const lexical = resolve(scope.cwd, path);
+	// Every spelling a tool may open for this argument is judged (the same policy the tools resolve with); an argument
+	// that resolves to nothing is outside.
+	const spellings = toolPathSpellings(path, scope.cwd);
+	if (spellings === undefined) return "outside";
 	const allowed = scope.readRoots.flatMap((root) => [resolve(scope.cwd, root), safeRealpathSync(root)]);
-	for (const target of [lexical, safeRealpathSync(lexical)]) {
-		if (!allowed.some((root) => isPathWithinScope(target, root))) return "outside";
-		for (const denied of scope.deniedPaths)
-			for (const root of [resolve(scope.cwd, denied), safeRealpathSync(denied)])
-				if (subtree ? pathScopesOverlap(target, root) : isPathWithinScope(target, root)) return "denied";
+	for (const spelled of spellings) {
+		for (const target of [spelled, safeRealpathSync(spelled)]) {
+			if (!allowed.some((root) => isPathWithinScope(target, root))) return "outside";
+			for (const denied of scope.deniedPaths)
+				for (const root of [resolve(scope.cwd, denied), safeRealpathSync(denied)])
+					if (subtree ? pathScopesOverlap(target, root) : isPathWithinScope(target, root)) return "denied";
+		}
 	}
 	return undefined;
 }

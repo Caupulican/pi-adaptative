@@ -95,7 +95,13 @@ export async function runRemoteCommand(
 				const name = rest[0] ?? "";
 				if (!isMachineName(name))
 					return host.showWarning(`Usage: /remote add <name> (lowercase letters, digits, dashes). ${USAGE}`);
-				const { token, address } = hub.add(name);
+				let added: { token: string; address: string };
+				try {
+					added = hub.add(name);
+				} catch (error) {
+					return host.showWarning(error instanceof Error ? error.message : String(error));
+				}
+				const { token, address } = added;
 				host.showStatus(
 					`${name} can join now, as a bot named ${name}. On that machine run:\n/remote join ${address} ${token}\nThe token is shown once; keep it private.${
 						hub.status().listening ? "" : "\nThis hub is not listening yet: run /remote listen."

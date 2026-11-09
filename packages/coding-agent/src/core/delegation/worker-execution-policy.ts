@@ -1,6 +1,7 @@
 import { join } from "node:path";
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
+import { readScopeRefusal } from "../autonomy/session-read-scope.ts";
 import { HARNESS_CAPABILITIES } from "../capability-contract.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import {
@@ -35,6 +36,8 @@ import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-mac
 const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 const REPO_READ_TOOL_NAME = "repo_read";
 const WRITE_TOOL_NAMES = ["write", "edit"] as const;
+/** Adapter tools that read the owner's stored content by name: skill texts, skill audits and packed tool outputs. */
+const READ_BY_NAME_ADAPTER_TOOLS: ReadonlySet<string> = new Set(["skill", "skill_audit", "artifact_retrieve"]);
 
 /** The YOLO lane still excludes root-only control-plane capabilities. */
 export const YOLO_WORKER_CAPABILITIES = HARNESS_CAPABILITIES.filter(
@@ -61,6 +64,13 @@ export interface WorkerExecutionPlan {
 	toolManifests: readonly ToolCapabilityManifest[];
 	requiredCapabilities: readonly HarnessCapability[];
 	readPaths: readonly string[];
+	/**
+	 * Whether `readPaths` confines the worker (a named read scope or the host's read root) rather than being the machine
+	 * scope or a workspace focus. A confined lane's read-only shell and read tools both stay inside `readPaths`.
+	 */
+	readConfined: boolean;
+	/** Whether `readPaths` is the profile's named read scope (`readPaths`), the only scope the project context files follow. */
+	readScopeNamed: boolean;
 	writePaths: readonly string[];
 	/**
 	 * The subset of `writePaths` that fences other lanes. Absent means all of `writePaths`. The default
@@ -91,6 +101,19 @@ function intersectPathScopes(admittedPaths: readonly string[], currentPaths: rea
 		}),
 	);
 	return [...new Set(intersections.map((entry) => resolveWorkerWorkspacePath(entry, entry)))];
+}
+
+/**
+ * The project context files a worker's prompt may carry. A confined worker is given only those inside its read scope: its
+ * prompt is a read the worker makes, so the owner's files outside its scope are not put in front of it. Unconfined, all of them.
+ */
+export function contextFilesWithinReadScope<T extends { readonly path: string }>(
+	files: readonly T[],
+	plan: Pick<WorkerExecutionPlan, "cwd" | "readScopeNamed" | "readPaths" | "deniedPaths">,
+): T[] {
+	if (!plan.readScopeNamed) return [...files];
+	const scope = { cwd: plan.cwd, readRoots: plan.readPaths, deniedPaths: plan.deniedPaths };
+	return files.filter((file) => readScopeRefusal(scope, file.path) === undefined);
 }
 
 /** A knowledge grant needs a worker that may read memory: the memory read tool under a `memory.query` capability. */
@@ -174,6 +197,8 @@ export function narrowWorkerExecutionPlan(
 			grantedTools.has("run_process") ||
 			grantedTools.has(STABLE_SHELL_TOOL_NAME) ||
 			grantedTools.has("run_toolkit_script"),
+		readConfined: current.readConfined,
+		readScopeNamed: current.readScopeNamed,
 		readOnly: current.readOnly,
 		shellReadOnly: current.shellReadOnly,
 		budget: intersectRiskBudgets(admitted.budget, current.budget),
@@ -202,12 +227,25 @@ export function buildWorkerExecutionPlan(args: {
 	// too: YOLO removes permission prompts, never the host's scope). Writes never default to the machine: a worker
 	// writes inside its own cwd, plus only the extra roots the root's grant names. A confined worker still reads its own
 	// cwd when its profile's workspace lies elsewhere.
+	// A named read scope (`readPaths`) is the whole read scope in every mode, YOLO included, and within the host's root
+	// when the host confines reads. It is not widened by the cwd: an empty one reads nothing.
+	const hostReadRoot = args.readRoot === undefined ? undefined : resolveWorkerWorkspacePath(parentCwd, args.readRoot);
+	const namedReadScope = args.profile.readPaths?.map((entry) => resolveWorkerWorkspacePath(cwd, entry));
 	const readScopes =
-		args.readRoot !== undefined
-			? [...new Set([resolveWorkerWorkspacePath(parentCwd, args.readRoot), cwd])]
-			: args.yolo || !args.profile.workspacePath
-				? workerMachinePathRoots(parentCwd)
-				: [cwd];
+		namedReadScope !== undefined
+			? hostReadRoot === undefined
+				? [...new Set(namedReadScope)]
+				: intersectPathScopes(namedReadScope, [hostReadRoot])
+			: hostReadRoot !== undefined
+				? [...new Set([hostReadRoot, cwd])]
+				: args.yolo || !args.profile.workspacePath
+					? workerMachinePathRoots(parentCwd)
+					: [cwd];
+	// The read scope is confined by a named scope or by the host's read root. A workspace focus keeps its reads as they were:
+	// the read tools follow the focus through the gateway, and the shell reads the machine scope.
+	const readConfined = namedReadScope !== undefined || hostReadRoot !== undefined;
+	// A confined scope with no root reads nothing: its read tools and `repo_read` are not granted at all.
+	const readScopeNone = readConfined && readScopes.length === 0;
 	const grantedWriteRoots = (args.profile.writePaths ?? []).map((entry) => resolveWorkerWorkspacePath(cwd, entry));
 	const writeScopes = [...new Set([cwd, ...grantedWriteRoots])];
 	// Only an explicit workspace or granted root fences other lanes; the bare cwd default does not.
@@ -229,10 +267,11 @@ export function buildWorkerExecutionPlan(args: {
 		])
 			profileToolNames.add(name);
 	const grantsRead =
-		args.yolo ||
-		args.profile.capabilityCeiling.includes("filesystem.read") ||
-		args.profile.capabilityCeiling.includes("worktree.read");
-	const grantsRepoRead = args.yolo || args.profile.capabilityCeiling.includes("repo.read");
+		!readScopeNone &&
+		(args.yolo ||
+			args.profile.capabilityCeiling.includes("filesystem.read") ||
+			args.profile.capabilityCeiling.includes("worktree.read"));
+	const grantsRepoRead = !readScopeNone && (args.yolo || args.profile.capabilityCeiling.includes("repo.read"));
 	const writeEligible = args.yolo
 		? !readOnly
 		: args.settings.writeEnabled && args.profile.capabilityCeiling.some(isWriteCapability);
@@ -251,8 +290,13 @@ export function buildWorkerExecutionPlan(args: {
 				...(profileToolNames.has(STABLE_SHELL_TOOL_NAME) ? [STABLE_SHELL_TOOL_NAME] : []),
 			].filter((name) => !readOnly || toolSurvivesReadOnly(name))
 		: [];
+	// A confined worker is not given the tools that read the owner's stored content by name (skills, skill audits, packed
+	// outputs), in YOLO too: its reads are the named scope, and those stores are not in it.
 	const enabledAdapterToolNames = (args.workerToolAdapterNames ?? []).filter(
-		(name) => (args.yolo || profileToolNames.has(name)) && (!readOnly || toolSurvivesReadOnly(name)),
+		(name) =>
+			(args.yolo || profileToolNames.has(name)) &&
+			(!readOnly || toolSurvivesReadOnly(name)) &&
+			!(readConfined && READ_BY_NAME_ADAPTER_TOOLS.has(name)),
 	);
 	const enabledZeroAuthorityToolNames = profileToolNames.has(TOOL_SCHEMA_SEARCH_NAME) ? [TOOL_SCHEMA_SEARCH_NAME] : [];
 	// The batch lookup holds no authority of its own; it is enabled beside the read tools it runs requests through, and
@@ -298,6 +342,8 @@ export function buildWorkerExecutionPlan(args: {
 		toolManifests,
 		requiredCapabilities: [...new Set(toolManifests.flatMap((manifest) => manifest.capabilities))],
 		readPaths: readEnabled ? readScopes : [],
+		readConfined,
+		readScopeNamed: namedReadScope !== undefined,
 		writePaths: writeEnabled ? writeScopes : [],
 		writeReservationPaths: writeEnabled ? writeReservationScopes : [],
 		// Private harness state (credentials, sessions) stays denied in YOLO; only the project settings

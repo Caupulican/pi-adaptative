@@ -66,6 +66,8 @@ export class JobHost {
 			const repoKey = offer.repo.repoKey;
 			checkout = (await offeredCheckouts(settings)).find((entry) => entry.fact.repoKey === repoKey);
 			if (!checkout) return { refusal: "unknown_repo" };
+			// A checkout the owner has not readied (its dependencies are not installed) is not a place to run a job.
+			if (!checkout.fact.ready) return { refusal: "needs_setup" };
 		}
 		if (activeExecutorJobs(this.store) >= Math.min(runner.room, settings.jobRoom)) return { refusal: "no_room" };
 		return checkout ? { checkout } : {};

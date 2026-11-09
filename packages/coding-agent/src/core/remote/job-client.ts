@@ -16,9 +16,10 @@ import { type ManagedLaneEvent, ManagedLaneRuntimeAdmissionError } from "../exte
 import type { FleetDispatch } from "../fleet/fleet-types.ts";
 import type { Placement } from "../placement/placement-types.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
-import { boundedLine, boundedUtf8Text } from "../util/bounded-line.ts";
+import { boundedLine } from "../util/bounded-line.ts";
 import type { FleetMachine, FleetMachines } from "./fleet-machines.ts";
 import {
+	boundedJobSummary,
 	digestOffer,
 	digestOutcome,
 	type JobCancelReason,
@@ -28,7 +29,6 @@ import {
 	MAX_JOB_DEADLINE_MS,
 	MAX_JOB_INSTRUCTIONS_BYTES,
 	MAX_JOB_LABEL_CHARS,
-	MAX_JOB_SUMMARY_BYTES,
 	MIN_JOB_DEADLINE_MS,
 } from "./job-protocol.ts";
 import { JobStore, journalJob, outDir, type PlacerEnding, type PlacerJobRecord } from "./job-store.ts";
@@ -78,6 +78,17 @@ export interface AskOptions {
 }
 
 export const remoteJobLaneId = (jobId: string): string => `remote-${jobId}`;
+
+/**
+ * A machine's reply as the ask lane's summary: the whole reply when it fits the summary bound, else the part that fits with
+ * a plain note that the reply was cut and where the full reply is (the machine's chat). The cut is decided by bytes.
+ */
+export function boundedReplySummary(reply: string, machineName: string): string {
+	return boundedJobSummary(
+		reply,
+		`\n\nThe reply was cut here: it is longer than this summary. The full reply is in the chat with ${machineName}.`,
+	);
+}
 
 function runtimeRetry<T>(run: () => T): Promise<T> {
 	try {
@@ -289,7 +300,7 @@ export class RemoteJobClient {
 		if (known?.offer.kind !== "ask" || known.executorId !== machineId) return false;
 		const outcome: JobOutcome = {
 			status: "succeeded",
-			summary: boundedUtf8Text(redactKnownSecrets(text), MAX_JOB_SUMMARY_BYTES),
+			summary: boundedReplySummary(redactKnownSecrets(text), this.machines.get(machineId)?.name ?? "the machine"),
 		};
 		this.store.updatePlaced(jobId, (current) =>
 			current.appliedAt !== undefined || current.ending || current.state === "terminal" || current.state === "ended"
