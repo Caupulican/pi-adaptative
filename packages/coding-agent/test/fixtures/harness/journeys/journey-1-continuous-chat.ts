@@ -697,8 +697,8 @@ async function verifyFrameCacheLayout(world: HarnessWorld): Promise<void> {
 	);
 	const pathX = projectPath("src", "features", "frame-probe", "configuration", "retry-x.ts");
 	const pathY = projectPath("src", "features", "frame-probe", "configuration", "retry-y.ts");
-	world.io.writeFileSync(pathX, "export const X = 1;\n");
-	world.io.writeFileSync(pathY, "export const Y = 2;\n");
+	world.io.seed(pathX, "export const X = 1;\n");
+	world.io.seed(pathY, "export const Y = 2;\n");
 	const aliasOf = (request: ScriptedRequest, path: string): string => {
 		const alias = legendAliasFor(request, path);
 		if (alias === undefined) throw new Error(`${path} is not in the request-visible PATH ALIASES legend`);

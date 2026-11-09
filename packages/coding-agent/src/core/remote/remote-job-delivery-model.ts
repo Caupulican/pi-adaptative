@@ -685,7 +685,7 @@ export function buildDeliveryModel(
 			(s.e === "none" || s.e === "terminal") &&
 			!s.unacked &&
 			!s.leftover,
-		bounds: { maxStates: 250000, maxCrashes: 2, maxDrops: 2 },
+		bounds: { maxStates: 900000, maxCrashes: 2, maxDrops: 2 },
 		covers: [
 			{
 				path: "core/remote/job-store.ts",
