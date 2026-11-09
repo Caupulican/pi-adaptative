@@ -16,9 +16,17 @@ export { type OwnerInputId, ownerInputIdOf, stampOwnerInput } from "../kernel/ow
 
 /**
  * Where an input was accepted. An extension's message (a peer's, say) is accepted on its untrusted path; the owner's words
- * from a verified owner channel (a phone) as `channel`: the owner's, though not typed at the terminal.
+ * from a verified owner channel (a phone) as `channel`: the owner's, though not typed at the terminal. A queued turn the host
+ * runs for itself (a goal continuation, a reflection, a host steer) is `host-steer` or `host-followUp`: no one's input.
  */
-export type OwnerInputSource = "prompt" | "steer" | "followUp" | "channel" | "extension";
+export type OwnerInputSource =
+	| "prompt"
+	| "steer"
+	| "followUp"
+	| "channel"
+	| "extension"
+	| "host-steer"
+	| "host-followUp";
 
 /**
  * The one state of an accepted input. `judged`: its words received their judgment. `pending`: admitted, waiting for its
@@ -96,13 +104,28 @@ interface InputRecord {
 	readonly onUndelivered: Array<(end: OwnerInputEnd) => void>;
 }
 
+/** The sources whose words are the owner's: typed at the terminal, or queued as the owner's own steer or follow-up. */
+const OWNER_SPOKEN_SOURCES: readonly OwnerInputSource[] = ["prompt", "steer", "followUp", "channel"];
+/** The sources the host runs for itself: no owner words, and no owner authority. */
+const HOST_INPUT_SOURCES: readonly OwnerInputSource[] = ["host-steer", "host-followUp"];
+
 /**
- * Whether the owner spoke the input an id names: every source but an extension's message (a peer's, say), the owner's
- * words from an owner channel included. The id format is minted by `accept` as `<source>:<uuid>`, and only this module
- * reads the source back.
+ * Whether the owner spoke the input an id names: the owner's typed words and the owner's words from an owner channel. An
+ * extension's message (a peer's, say) and a host-run turn name no owner. The id format is minted by `accept` as
+ * `<source>:<uuid>`, and only this module and {@link isHostInputId} read the source back: a new source is classified here.
  */
 export function isOwnerSpokenInputId(id: string): boolean {
-	return !id.startsWith("extension:");
+	return OWNER_SPOKEN_SOURCES.some((source) => id.startsWith(`${source}:`));
+}
+
+/** Whether the input an id names is a turn the host runs for itself (`host-steer`, `host-followUp`): never owner input. */
+export function isHostInputId(id: string): boolean {
+	return HOST_INPUT_SOURCES.some((source) => id.startsWith(`${source}:`));
+}
+
+/** The source of a queued turn the host runs for itself (a steer or a follow-up with no submission behind it). */
+export function hostInputSource(kind: "steer" | "followUp"): OwnerInputSource {
+	return kind === "steer" ? "host-steer" : "host-followUp";
 }
 
 /**

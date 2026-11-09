@@ -146,7 +146,7 @@ export const ACTIVE_SKILL_RECORD_KIND_PREFIX = "active_skill_context:";
 /** The combined kind the skill context used before it split per skill. Nothing produces it now; a session holding it gets one cleared record. */
 export const ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE = "active_skill_context";
 /** Kind of the session-wide exclusion reminder, which rides beside the per-skill records. */
-const ACTIVE_SKILL_EXCLUSIONS_CUSTOM_TYPE = "active_skill_exclusions";
+export const ACTIVE_SKILL_EXCLUSIONS_CUSTOM_TYPE = "active_skill_exclusions";
 /** Typed identity a per-skill record carries in `details.record`: the record kind and the skill name. */
 const ACTIVE_SKILL_RECORD_KIND = "active_skill";
 const ACTIVE_SKILL_RECORD_VERSION = 1;

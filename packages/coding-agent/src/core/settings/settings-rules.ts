@@ -661,6 +661,9 @@ export function appendFilter(target: ResourceProfileFilterSettings, source?: Res
 	if (Array.isArray(source.block)) target.block = [...(target.block ?? []), ...source.block];
 }
 
+/**
+ * @deprecated Reads the earlier disabledResources key as a block filter; replaced by the resource profile filters. Remove when no settings file holds disabledResources.
+ */
 export function collectLegacyDisabledFilterFromSettings(
 	settings: Settings,
 	kind: ResourceProfileKind,
@@ -700,7 +703,11 @@ export function parseTimeoutSetting(value: unknown, settingName: string): number
 	return undefined;
 }
 
-/** True when a stall block still carries the pre-split, class-less bounds. */
+/**
+ * True when a stall block still carries the pre-split, class-less bounds.
+ *
+ * @deprecated Detects the pre-split, class-less stall bounds still present in settings; remove when the settings warning for them is retired.
+ */
 export function hasLegacyStreamStallBounds(stall: StreamStallBudgetSettings | undefined): boolean {
 	return stall?.connectMs !== undefined || stall?.activeIdleMs !== undefined || stall?.quietIdleMs !== undefined;
 }

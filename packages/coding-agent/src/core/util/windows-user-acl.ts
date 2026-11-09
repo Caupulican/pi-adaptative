@@ -1,10 +1,13 @@
+/**
+ * Checks and applies current-user-only Windows access control on private paths by parsing icacls output into ACL entries.
+ */
 import { spawnSync } from "node:child_process";
 import { userInfo } from "node:os";
 import { join } from "node:path";
 
 /**
  * Windows access control for private files: a path is private when every ACL entry names the current user. icacls
- * prints principal names in the system language (its own output above is Portuguese), but the rights codes such as
+ * prints principal names in the system language, but the rights codes such as
  * (F), (OI) and (I) are language-neutral, and the path is echoed verbatim. The current user is matched by account
  * name and by DOMAIN\name, so a localized system never changes which entries count as the user's.
  */

@@ -1,3 +1,6 @@
+/**
+ * Holds the session's learned view of provider caches from the decision ledger: lane survival curves, lineage lifetime and expected compaction outcomes.
+ */
 import type {
 	CacheObservationRow,
 	CompactionOutcomeRow,

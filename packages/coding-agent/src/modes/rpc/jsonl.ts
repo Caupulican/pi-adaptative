@@ -1,3 +1,6 @@
+/**
+ * Serializes strict LF-framed JSONL records and attaches an LF-only line reader with a bounded line length to a stream.
+ */
 import type { Readable } from "node:stream";
 import { StringDecoder } from "node:string_decoder";
 import { StreamingLineDecoder } from "@caupulican/pi-ai";

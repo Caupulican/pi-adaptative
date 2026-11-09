@@ -1,3 +1,6 @@
+/**
+ * Probes a llama.cpp server's health and served model ids and reports whether it is down, serving the expected model alias, or in conflict.
+ */
 export type PrismLlamaCppServerProbe =
 	| { status: "down"; servedModelIds: [] }
 	| { status: "matching" | "conflict"; servedModelIds: string[] };

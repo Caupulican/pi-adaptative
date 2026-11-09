@@ -1,3 +1,6 @@
+/**
+ * Projects bounded text out of message content blocks and out of the latest user prompt and assistant response without rebuilding history.
+ */
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/index.ts";
 

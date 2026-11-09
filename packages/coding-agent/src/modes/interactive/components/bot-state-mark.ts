@@ -2,8 +2,8 @@
 import type { PersistentBotView } from "../../../core/delegation/persistent-bot-team-store.ts";
 import type { ThemeColor } from "../../../presentation/theme-model.ts";
 
-/** The mark of a bot that lives on another machine, joined over the link: a computer, readable at a glance. */
-export const REMOTE_MARK = "💻";
+/** The one definition of the remote mark lives in core/remote; the bot views read it from here. */
+export { REMOTE_MARK } from "../../../core/remote/remote-jobs.ts";
 
 export interface BotStateMark {
 	readonly glyph: string;

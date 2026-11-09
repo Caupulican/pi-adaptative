@@ -229,7 +229,7 @@ export class RemoteHubController {
 			upSubtree: () => this.upSubtree(),
 			peers: transport,
 			events: {
-				reply: (machine, id, text) => this.received(machine, id, text),
+				reply: (machine, id, text, final) => this.received(machine, id, text, final),
 				presence: (machine) => this.deps.changed(machine),
 			},
 		});
@@ -423,11 +423,15 @@ export class RemoteHubController {
 		});
 	}
 
-	private received(machine: string, id: string, text: string): void {
-		harnessLog.debug("link", "a machine answered", { machine, chars: text.length });
+	/**
+	 * A machine's answer: always chat. Only a final answer to a conversation turn the orchestrator placed ends that lane;
+	 * an interim one (`final` false) leaves it open for the answer that follows.
+	 */
+	private received(machine: string, id: string, text: string, final: boolean | undefined): void {
+		harnessLog.debug("link", "a machine answered", { machine, chars: text.length, interim: final === false });
 		this.chats.append(machine, { at: Date.now(), from: "machine", text, id });
 		this.deps.getStore().upsertBot({ agentId: machine, lastSummary: text, lastMessageAt: Date.now() });
-		// A reply to a conversation turn the orchestrator placed is that lane's end.
+		if (final === false) return;
 		const machineId = this.jobs?.machines.byName(machine)?.machineId;
 		if (machineId) this.jobs?.client.completeAsk(machineId, id, text);
 	}

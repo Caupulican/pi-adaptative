@@ -1,3 +1,6 @@
+/**
+ * Normalizes user and tool path input (tilde, @ prefix, unicode spaces) against a base directory and re-exports the execution path primitives.
+ */
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { type ExecutionPathFlavor, executionPathApi, resolveExecutionPath } from "../execution-paths.ts";

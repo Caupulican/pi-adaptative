@@ -1,12 +1,13 @@
 import * as path from "node:path";
 import type { KeyId } from "@caupulican/pi-tui";
 import { getAgentDir } from "../../config.ts";
+import type { SessionManager } from "../../kernel/node.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import type { EventBus } from "../event-bus.ts";
 import type { ExecOptions } from "../exec.ts";
 import { execCommand } from "../exec.ts";
 import { createSyntheticSourceInfo } from "../source-info.ts";
-import { assertExtensionToolName } from "../turn-origin.ts";
+import { assertExtensionCustomType, assertExtensionToolName } from "../turn-origin.ts";
 import { assertSessionIdentityDeclaration } from "./extension-session-scope.ts";
 import { disposeExtensionEventSubscriptions, isExtensionGenerationInactive } from "./lifecycle.ts";
 import { DEFAULT_STALE_EXTENSION_CONTEXT_MESSAGE } from "./stale-context.ts";
@@ -444,6 +445,81 @@ export function restoreExtensionLoadRuntime(
 	for (const [name, command] of snapshot.commands) extension.commands.set(name, command);
 	extension.markdownTransformers.length = 0;
 	extension.markdownTransformers.push(...snapshot.markdownTransformers);
+}
+
+/** The session manager writers that name the custom type they write (a custom entry, a custom message, a batch's custom item). */
+const CUSTOM_TYPE_WRITERS: ReadonlySet<string> = new Set([
+	"appendCustomEntry",
+	"appendCustomMessageEntry",
+	"appendMessage",
+	"appendMessageBatch",
+	"appendParentInput",
+]);
+
+/** The custom types one call of a custom-type writer writes, read from the argument shape that writer takes. */
+function customTypesWritten(writer: string, args: readonly unknown[]): string[] {
+	const first: unknown = args[0];
+	if (writer === "appendCustomEntry" || writer === "appendCustomMessageEntry")
+		return typeof first === "string" ? [first] : [];
+	if (writer === "appendMessageBatch") {
+		if (!Array.isArray(first)) return [];
+		return first.flatMap((item: { kind?: unknown; message?: { customType?: unknown } } | undefined) =>
+			item?.kind === "custom" && typeof item.message?.customType === "string" ? [item.message.customType] : [],
+		);
+	}
+	const message = first as { role?: unknown; customType?: unknown } | undefined;
+	const isCustom = writer === "appendParentInput" || message?.role === "custom";
+	return isCustom && typeof message?.customType === "string" ? [message.customType] : [];
+}
+
+/**
+ * The session manager writers only the host runs. Each records an entry a host reader trusts for a decision (a compaction, a
+ * request or tool record, a parent-input wake or note, a branch summary) under a type that is not a custom one, or under one
+ * the writer picks itself, so the custom-type check cannot cover it: a setup is refused them outright.
+ */
+const HOST_ONLY_WRITERS: ReadonlySet<string> = new Set([
+	"appendCompaction",
+	"appendCompactionStart",
+	"appendCompactionEnd",
+	"appendRequestSnapshot",
+	"appendProviderRequestTerminal",
+	"appendForegroundToolStarts",
+	"appendForegroundToolStart",
+	"appendForegroundToolTerminal",
+	"skipPendingParentInput",
+	"recordParentNoteRequest",
+	"beginParentInputWake",
+	"recordParentInputWakeRequest",
+	"settleParentInputWake",
+	"branchWithSummary",
+]);
+
+/**
+ * The session manager an extension's `newSession` setup receives. A write that names a custom type is refused first when the
+ * host reserves that type (`assertExtensionCustomType`); a host-only writer (`HOST_ONLY_WRITERS`) is refused outright; every
+ * other member reaches the manager unchanged, its methods bound to it, so reads and the host's own writes behave as before.
+ */
+export function extensionSetupSessionManager(sessionManager: SessionManager): SessionManager {
+	return new Proxy(sessionManager, {
+		get(target, property) {
+			const value: unknown = Reflect.get(target, property, target);
+			if (typeof value !== "function") return value;
+			const method = value as (...args: unknown[]) => unknown;
+			const name = typeof property === "string" ? property : undefined;
+			if (name !== undefined && HOST_ONLY_WRITERS.has(name))
+				return () => {
+					throw new Error(
+						`Session manager method "${name}" is reserved by the host; an extension cannot call it.`,
+					);
+				};
+			const customWriter = name !== undefined && CUSTOM_TYPE_WRITERS.has(name) ? name : undefined;
+			return (...args: unknown[]) => {
+				if (customWriter !== undefined)
+					for (const customType of customTypesWritten(customWriter, args)) assertExtensionCustomType(customType);
+				return method.apply(target, args);
+			};
+		},
+	});
 }
 
 export async function loadExtensionFromFactory(

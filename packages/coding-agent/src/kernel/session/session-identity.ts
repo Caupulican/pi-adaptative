@@ -1,3 +1,6 @@
+/**
+ * Defines the one session id rule and the validators that admit a session id read from a record or a session file header.
+ */
 export const MAX_SESSION_HEADER_BYTES = 64 * 1024;
 
 /**

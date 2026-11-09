@@ -1,6 +1,5 @@
 import type { SessionManager } from "../../kernel/node.ts";
 import {
-	appendSessionSnapshot,
 	decodeSessionSnapshotPayload,
 	type SessionSnapshotCodec,
 	type SessionSnapshotPayload,
@@ -154,7 +153,11 @@ export function appendGoalClearedSnapshot(
 	return entryId;
 }
 
-/** Legacy payload decode retained for imports and focused codec tests. */
+/**
+ * Legacy payload decode retained for imports and focused codec tests.
+ *
+ * @deprecated Decodes the legacy goal snapshot format written before the v2 goal journal; remove when no session file holds a legacy snapshot.
+ */
 export function decodeGoalStateSnapshotPayload(data: unknown): GoalState | undefined {
 	return decodeSessionSnapshotPayload(data, GOAL_STATE_SNAPSHOT_CODEC);
 }
@@ -244,12 +247,4 @@ export function getLatestGoalStateSnapshot(sessionManager: GoalStateSource): Goa
 		if (!previousEntry) return cacheGoalState(sessionManager, latestEntryId, undefined);
 		entry = previousEntry;
 	}
-}
-
-/** Explicit legacy writer for migration tests only. */
-export function appendLegacyGoalStateSnapshot(
-	sessionManager: Pick<SessionManager, "appendCustomEntry">,
-	state: GoalState,
-): string {
-	return appendSessionSnapshot(sessionManager, GOAL_STATE_SNAPSHOT_CODEC, state);
 }

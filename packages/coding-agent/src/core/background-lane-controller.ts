@@ -19,7 +19,6 @@ import { lstatSync } from "node:fs";
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import { harnessLog } from "../kernel/harness-log.ts";
-import type { SessionManager } from "../kernel/node.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import { workerControlOf } from "../kernel/worker-control-stamp.ts";
 import { orchestrationEventStoreDir } from "./agent-paths.ts";
@@ -37,6 +36,7 @@ import {
 	readSessionAutonomyStatus,
 	type SessionAutonomyStatus,
 } from "./autonomy-status/autonomy-status.ts";
+import type { BackgroundLaneControllerDeps, RunningAttemptWaitOutcome } from "./background-lane-deps.ts";
 import {
 	type AwayChannelStatus,
 	awayChannels,
@@ -45,7 +45,6 @@ import {
 } from "./channels/away-channels.ts";
 import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "./channels/channel-policy.ts";
 import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.ts";
-import type { OwnerChannelControl, OwnerChannelDelivery } from "./channels/owner-channel-types.ts";
 import { SessionChannels } from "./channels/session-channels.ts";
 import { sessionSemanticUsageOf } from "./cost/semantic-usage-delivery.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
@@ -72,7 +71,7 @@ import { type DelegationRecord, readDelegations } from "./delegation/leader-dele
 import { type LeaderRow, leaderRows } from "./delegation/leader-view.ts";
 import { ManagedLaneController } from "./delegation/managed-lane-controller.ts";
 import { type ManagedLaneView, projectManagedLaneViews } from "./delegation/managed-lane-views.ts";
-import type { ParentExecutionContext, ParentWriteOrigin } from "./delegation/parent-execution-context.ts";
+import type { ParentWriteOrigin } from "./delegation/parent-execution-context.ts";
 import {
 	BOT_MEMORY_BLOCK_SEPARATOR,
 	type BotOperatorMessageDispatchResult,
@@ -146,20 +145,17 @@ import type {
 } from "./events/host-event-control.ts";
 import { HostEventSessionController } from "./events/host-event-session-controller.ts";
 import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
-import type { SendUserMessageOptions, ToolDefinition } from "./extensions/types.ts";
+import type { ToolDefinition } from "./extensions/types.ts";
 import { subscriptionAllowancePort } from "./fleet/capacity/allowance-room.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
 import type { GoalAutoContinueHold, GoalAutoContinueState } from "./goals/goal-auto-continue-state.ts";
-import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
+import type { GoalRuntimeSnapshot } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
-import type { HarnessNoticeKind, HarnessNoticeObservation } from "./harness-notice.ts";
-import type { OwnerEvidenceLedger } from "./learning/owner-evidence-ledger.ts";
 import {
 	CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE,
 	type ContinuousChatWorkReportEntry,
 } from "./memory/continuous-chat-ingest.ts";
 import { blockedKnowledgeHandoff, type HandoffKnowledgePort } from "./memory/knowledge-projection.ts";
-import type { ModelCapabilityProfile } from "./model-capability.ts";
 import { resolveCliModel } from "./model-resolver.ts";
 import type { StoredFitnessReport } from "./models/fitness-store.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
@@ -177,7 +173,6 @@ import type {
 import type { TaskRuntimeProjection } from "./orchestration/task-runtime.ts";
 import { readTaskRuntimeProjection } from "./orchestration/task-runtime-reader.ts";
 import type { WorkerReceiptOrigin } from "./orchestration/worker-receipt-origin.ts";
-import type { ParentInputDelivery, ParentInputReceipt } from "./parent-input-delivery.ts";
 import { createSteerAwareWait, ownerSteerWake } from "./pending-input-queue-controller.ts";
 import { PlanExecutor } from "./plan/plan-executor.ts";
 import type { PlanExecutorPort } from "./plan/plan-executor-port.ts";
@@ -187,7 +182,6 @@ import {
 	MAX_TURN_WAKES_HOLD,
 	type ParentWakeDelivery,
 	ProactivityController,
-	type ProactivityControllerDeps,
 	type ProactivityDailyState,
 	type ProactivityFeedbackView,
 	parentTurnWakes,
@@ -203,10 +197,11 @@ import { RemoteHubController } from "./remote/hub-controller.ts";
 import { placedJobRef } from "./remote/job-protocol.ts";
 import { finishedPlacedJobReferences, placedJobFinished } from "./remote/job-store.ts";
 import { withLinkPolicy } from "./remote/link-policy.ts";
-import { LaneModelResolver, type LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
+import { PlacedJobTerminalAcks } from "./remote/placed-job-terminal-acks.ts";
+import { LaneModelResolver } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessReport } from "./research/model-fitness.ts";
-import { ModelFitnessController, type ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
-import { ResearchLaneController, type ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
+import { ModelFitnessController } from "./research/model-fitness-controller.ts";
+import { ResearchLaneController } from "./research/research-lane-controller.ts";
 import { AwayService } from "./routines/away-service.ts";
 import { RoutineIntake, type RoutineIntakeStatus } from "./routines/routine-intake.ts";
 import {
@@ -230,9 +225,7 @@ import { WatchAdmission } from "./routines/watch-admission.ts";
 import { WatchSampler } from "./routines/watch-evaluators.ts";
 import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
 import { getSessionRole } from "./session-role.ts";
-import type { SessionSemanticPlaneController } from "./session-semantic-plane-controller.ts";
 import { getActiveSessionBranchEntries, isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
-import type { SettingsManager } from "./settings-manager.ts";
 import { createBotToolDefinition } from "./tools/bot.ts";
 import { createPlanToolDefinition } from "./tools/plan.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
@@ -240,7 +233,7 @@ import { alarmAt, type WallAlarm } from "./util/timer-port.ts";
 import { type SteerDecision, type WaitStatusEvent, type WakeSource, waitFor } from "./util/wait.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
-import { buildWorktreeSyncEngineDeps, type WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
+import { buildWorktreeSyncEngineDeps } from "./worktree-sync/runtime.ts";
 
 /** Slack after a lease's last renewal is due, so a daemon renewing right at the limit is not mistaken for a dead one. */
 const DAEMON_RECHECK_MARGIN_MS = 2_000;
@@ -250,80 +243,6 @@ const DAEMON_RECHECK_MAX_BACKOFF_MS = 600_000;
 
 export type { SessionChannelsView } from "./channels/session-channels.ts";
 export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
-
-/** The parent execution context serves worker execution; the other members serve the remaining lanes and routines. */
-export interface BackgroundLaneControllerDeps
-	extends Omit<ParentExecutionContext, keyof ForegroundTranscriptWrites | "getSessionManager">,
-		Pick<ForegroundTranscriptWriteDeps, "reportWorkerTerminal">,
-		ResearchLaneControllerDeps,
-		ModelFitnessControllerDeps,
-		LaneModelResolverDeps,
-		Pick<
-			ProactivityControllerDeps,
-			"deliverNotes" | "captureReviewContext" | "subscribeForegroundActivity" | "aggregateUsageWindow"
-		> {
-	/**
-	 * Observe a capability's kept state; true when the owner is told of it (the session can keep the notice). `onLost`
-	 * hears once that a notice reported kept was dropped unsaved.
-	 */
-	observeHarnessNotice?(
-		kind: HarnessNoticeKind,
-		read: () => HarnessNoticeObservation | undefined,
-		onLost?: () => void,
-	): boolean;
-	/** The session's transcript writer; worker execution receives only its reader and the transcript writes derived here. */
-	getSessionManager(): SessionManager;
-	/** The full settings manager: this coordinator hands it to every lane, each of which reads only its own port. */
-	getSettingsManager(): SettingsManager;
-	/** Host-supplied worktree-sync engine ports, forwarded into every engine-deps build. */
-	getWorktreeSyncEnginePorts(): WorktreeSyncEnginePorts | undefined;
-	/** True iff the active surface can terminalize a goal through `goal` or `update_goal`.
-	 * Explicit tool/profile exclusion and the worker-role ceiling still disable continuation. */
-	isGoalToolActive(): boolean;
-	/** Capability profile of the SESSION model (gates background lanes, scales continuation budgets). */
-	getModelCapabilityProfile(): ModelCapabilityProfile;
-	/** Continuation gate + goal state for the idle autosteer scheduler. */
-	getGoalRuntimeSnapshot(settings: GoalRuntimeSnapshotSettings): GoalRuntimeSnapshot;
-	/** Drive-loop boundary: the session's bounded goal-continuation loop (owns `prompt()`, not us). */
-	continueGoalLoop(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult>;
-	/** True while the session owns a foreground prompt/retry/follow-up run. */
-	isForegroundBusy(): boolean;
-	/** Resolve only after the complete foreground retry/follow-up run releases the session. */
-	waitForForegroundIdle(): Promise<void>;
-	/** Persist an explicit stopped state when the selected surface cannot drive the active goal. */
-	markGoalToolUnavailable(): void;
-	/**
-	 * The session's semantic plane: its bound engine, if any (routine intake judges with it before the session model),
-	 * and whether System One is configured without one (`/status`).
-	 */
-	readonly systemOne: Pick<
-		SessionSemanticPlaneController,
-		"recordingSemanticEngine" | "semanticDecisionEngine" | "configured"
-	>;
-	canRunRoutines?(): boolean;
-	getToolInvocationKey(callId: string, toolName: string): string;
-	deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt>;
-	/** The session's `sendUserMessage`: a channel batch enters as a third party's words under its origin. */
-	sendUserMessage(text: string, options: SendUserMessageOptions): Promise<void>;
-	/** The session's owner channel: an owner batch enters as the owner's words through it (`OwnerChannelSession`). */
-	readonly ownerChannel?: OwnerChannelDelivery & { control(): OwnerChannelControl | undefined };
-	/** Rebuild the session's tool registry: the channel release tool follows the channel policies. */
-	refreshToolRegistry(): void;
-	/** The session's genuine owner input: routine tool saves read the current run's owner source, routine intake its words. */
-	getOwnerEvidence(): Pick<
-		OwnerEvidenceLedger,
-		"subscribe" | "readSources" | "findSource" | "listOwnerEvidence" | "currentTurnSources"
-	>;
-}
-
-/** How one bounded wait on exact running attempts ended. */
-export type RunningAttemptWaitOutcome =
-	/** These captured attempts left "running"; the terminal ones were observed. */
-	| { readonly kind: "changed"; readonly attemptIds: readonly string[] }
-	/** The bound elapsed with every captured attempt still running; nothing was observed. */
-	| { readonly kind: "timed_out" }
-	/** The session was disposed first; nothing about the attempts is implied or observed. */
-	| { readonly kind: "disposed" };
 
 /** The channels served away, by name and directory: what the daemon's start depends on besides the routines. */
 function awayChannelsKey(settings: Parameters<typeof awayChannels>[0]): string {
@@ -751,16 +670,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * the foreground never hears a placed job's worker finish. A lane with no terminal yet is left as it is.
 	 */
 	acknowledgePlacedJobTerminals(references: readonly string[]): void {
-		const lifecycle = this._workerLifecycle;
-		if (!lifecycle || references.length === 0) return;
-		const wanted = new Set(references);
-		const notificationIds = Object.values(lifecycle.getTaskRuntimeSnapshot().attempts).flatMap((attempt) => {
-			const ref = placedJobRef(attempt.dispatch.turnOrigin);
-			if (ref === undefined || !wanted.has(ref)) return [];
-			const terminal = lifecycle.getAttemptTerminalNotification(attempt.attemptId);
-			return terminal ? [terminal.notificationId] : [];
-		});
-		lifecycle.markNotificationsDelivered(notificationIds);
+		this._placedJobAcks.acknowledge(references);
 	}
 
 	/**
@@ -774,8 +684,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._workerLifecycle?.getTaskRuntimeSnapshot().attempts[attemptId]?.dispatch.turnOrigin,
 		);
 		if (ref === undefined) return false;
-		if (placedJobFinished(this.deps.getAgentDir(), ref))
-			queueMicrotask(() => this.acknowledgePlacedJobTerminals([ref]));
+		if (placedJobFinished(this.deps.getAgentDir(), ref)) this.acknowledgePlacedJobTerminals([ref]);
 		return true;
 	}
 
@@ -2943,6 +2852,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _leaders: LeaderController | undefined;
 	private _leaderRouteOff: (() => void) | undefined;
 	private _jobRouteOff: (() => void) | undefined;
+	private readonly _placedJobAcks = new PlacedJobTerminalAcks({
+		lifecycle: () => this._workerLifecycle,
+		isDisposed: () => this.deps.isDisposed(),
+	});
 	private _leaderRows: LeaderRow[] | undefined;
 
 	/** The root's delegations to leaders; building it builds the worker runtime, which registers its terminal claim. */

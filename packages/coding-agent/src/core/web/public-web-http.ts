@@ -1,3 +1,6 @@
+/**
+ * Implements the public-web request port over a scoped HTTP client that pins one connection to a pre-resolved address, ignores environment proxies and decodes compressed bodies.
+ */
 import { createBrotliDecompress, createGunzip, createInflate } from "node:zlib";
 import * as HttpClient from "@effect/platform/HttpClient";
 import * as NodeHttpClient from "@effect/platform-node/NodeHttpClient";

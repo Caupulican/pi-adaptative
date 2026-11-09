@@ -52,6 +52,8 @@ export function computeGoalStateDigest(state: GoalState): string {
  * Migrates a legacy GoalState into DurableTaskRuntime and SystemOneController.
  * Supports dry-run, preserves backup, preserves budgets, requirements, evidence, and blockers.
  * Strictly idempotent (Rule 54).
+ *
+ * @deprecated Migrates a legacy GoalState into the durable task runtime; remove when no legacy GoalState can be read.
  */
 export async function migrateGoalState(
 	legacyState: GoalState,

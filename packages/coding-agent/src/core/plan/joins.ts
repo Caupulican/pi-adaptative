@@ -8,7 +8,8 @@
  * - vote: every member settled; no eligible (succeeded) candidate is a gap, one is the winner, two or more ask System
  *   One one Choice (the executor runs it and passes the winner back here).
  * - reduce and verify: run a worker task over the members (the reducer answers `criterion`, the verifier checks the
- *   subjects); the join's outcome aggregates the members with that worker's outcome.
+ *   subjects). A reduce join's outcome is the reducer's alone; a verify join's outcome aggregates the members with the
+ *   verifier's.
  * - merge is not built yet (B45); F4 refuses it.
  *
  * The full result is written by the executor as a bounded artifact (`plan/<planId>/<nodeId>-j<n>.json`); this module only

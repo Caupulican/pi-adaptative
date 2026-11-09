@@ -98,15 +98,20 @@ export function cleanRedactBound(text: string, maxChars: number, options?: { rea
 }
 
 /**
- * Retain one redacted diagnostic line. The whole first line is redacted before anything is retained: a secret that
- * begins inside the retained prefix but ends past any scan cut would otherwise survive as its unmatched prefix.
- * Only the redacted text is truncated, so a cut can never reveal a secret.
+ * Retain one redacted diagnostic line: the first line only, cleaned (the control and format characters that split a
+ * secret are deleted, so the redaction matches it whole), then redacted, then bounded, in that order. The rest of the text
+ * after the first line is never retained. Undefined when nothing is left. The masks are the diagnostic ones
+ * (`redactKnownSecrets` holds every token shape), and a long line keeps its head.
  */
 export function boundedRedactedDiagnosticText(text: string): string | undefined {
 	const lineEnd = text.search(/[\r\n]/);
-	const firstLine = (lineEnd === -1 ? text : text.slice(0, lineEnd)).trim();
-	if (!firstLine) return undefined;
-	const redacted = redactKnownSecrets(firstLine);
+	const firstLine = lineEnd === -1 ? text : text.slice(0, lineEnd);
+	const cleaned = firstLine
+		.replace(/[\t\v\f]/gu, " ")
+		.replace(/[\p{Cc}\p{Cf}\p{Cs}]/gu, "")
+		.trim();
+	if (!cleaned) return undefined;
+	const redacted = redactKnownSecrets(cleaned);
 	if (redacted.length <= MAX_RETAINED_DIAGNOSTIC_CHARS) return redacted;
 	return `${redacted.slice(0, MAX_RETAINED_DIAGNOSTIC_CHARS - 1)}…`;
 }

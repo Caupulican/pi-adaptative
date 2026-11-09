@@ -44,6 +44,9 @@ export function currentHostFingerprint(): HostFingerprint {
 /** An id of the earlier shape, `<cpu>-<cores>c-<gb>g`, that names `host`'s machine but not its current id. */
 const LEGACY_HOST_ID_PATTERN = /^(.*)-(\d+)c-(\d+)g$/;
 
+/**
+ * @deprecated Matches a host id of the earlier shape; remove when no host-state file keeps an id of that shape (the next locked write rewrites it).
+ */
 export function isLegacyHostIdOf(host: HostFingerprint, candidateId: string): boolean {
 	if (candidateId === host.id) return false;
 	const match = LEGACY_HOST_ID_PATTERN.exec(candidateId);

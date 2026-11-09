@@ -1,3 +1,6 @@
+/**
+ * Captures an actual provider response's usage as an independent usage component and defines the error for a host usage-retention failure.
+ */
 import type { AssistantMessage, Usage } from "@caupulican/pi-ai/types";
 import { uuidv7 } from "@caupulican/pi-ai/uuid";
 

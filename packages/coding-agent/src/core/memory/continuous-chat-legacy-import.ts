@@ -10,12 +10,19 @@ import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { continuousChatDay } from "./continuous-chat-contracts.ts";
 import type { ContinuousChatIngestor } from "./continuous-chat-ingest.ts";
 
-/** One pinned source revision; callers close it after iteration and all reference resolution. */
+/**
+ * One pinned source revision; callers close it after iteration and all reference resolution.
+ *
+ * @deprecated An open revision of an earlier-layout continuous-chat session, read by recovery and parent reconciliation; replaced by the continuous-chat store. Remove when no host can hold a session file in an earlier layout.
+ */
 export interface ContinuousChatLegacyEntrySource extends ParentInputConsumptionSource {
 	readonly entries: AsyncIterable<SessionEntry>;
 	close(): Promise<void>;
 }
 
+/**
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export interface ContinuousChatLegacySession {
 	sessionId: string;
 	/** The session's start time: the first import order key. */
@@ -32,12 +39,19 @@ export interface ContinuousChatLegacySession {
 	openEntries(signal?: AbortSignal): Promise<ContinuousChatLegacyEntrySource>;
 }
 
+/**
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export interface ContinuousChatLegacySkip {
 	sessionId: string;
 	reason: string;
 }
 
-/** Historical listing failures identify a filename, since no usable session identity was read. */
+/**
+ * Historical listing failures identify a filename, since no usable session identity was read.
+ *
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export const CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS = {
 	inspection: "the file cannot be inspected:",
 	read: "the file cannot be read:",
@@ -45,11 +59,19 @@ export const CONTINUOUS_CHAT_LEGACY_FILE_FAILURE_REASONS = {
 	header: "the first line is not a session header",
 } as const;
 
-/** A copy of a session already listed from another file. It is recorded once and never retried. */
+/**
+ * A copy of a session already listed from another file. It is recorded once and never retried.
+ *
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export const CONTINUOUS_CHAT_LEGACY_DUPLICATE_REASON =
 	"the same session id is already listed from another session file";
 
-/** A session file line that is not one session entry: a permanent fault of the file's content, never of reading it. */
+/**
+ * A session file line that is not one session entry: a permanent fault of the file's content, never of reading it.
+ *
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export class ContinuousChatLegacyContentError extends Error {
 	/** The fault as the import records it: the file name, the line number and what is wrong with the line. */
 	readonly reason: string;
@@ -61,6 +83,9 @@ export class ContinuousChatLegacyContentError extends Error {
 	}
 }
 
+/**
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export interface ContinuousChatLegacyListing {
 	/** Readable sessions in import order, intact or repaired. Each one's entries keep their file order. */
 	readonly sessions: readonly ContinuousChatLegacySession[];
@@ -70,7 +95,11 @@ export interface ContinuousChatLegacyListing {
 	readonly invalid: readonly ContinuousChatLegacySkip[];
 }
 
-/** The durable record that the one-time import completed: what it imported, and what it skipped with the real reason. */
+/**
+ * The durable record that the one-time import completed: what it imported, and what it skipped with the real reason.
+ *
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export interface ContinuousChatLegacyImportState {
 	version: 1;
 	completedAt: string;
@@ -78,18 +107,29 @@ export interface ContinuousChatLegacyImportState {
 	skipped: ContinuousChatLegacySkip[];
 }
 
-/** The import's marker. The migration ledger (`migration.json`) implements it; no other marker exists. */
+/**
+ * The import's marker. The migration ledger (`migration.json`) implements it; no other marker exists.
+ *
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export interface ContinuousChatLegacyImportMarker {
 	read(signal?: AbortSignal): Promise<ContinuousChatLegacyImportState | undefined>;
 	write(state: ContinuousChatLegacyImportState, signal?: AbortSignal): Promise<void>;
 }
 
-/** Where the earlier sessions come from, and which of them were forgotten. */
+/**
+ * Where the earlier sessions come from, and which of them were forgotten.
+ *
+ * @deprecated The earlier-layout sessions a host reads for recovery and parent reconciliation; replaced by the continuous-chat store. Remove when no host can hold a session file in an earlier layout.
+ */
 export interface ContinuousChatLegacySource {
 	sessions(signal?: AbortSignal): Promise<ContinuousChatLegacyListing>;
 	isForgotten(sessionId: string, signal?: AbortSignal): Promise<boolean>;
 }
 
+/**
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export interface ContinuousChatLegacyImportOptions {
 	source: ContinuousChatLegacySource;
 	marker: ContinuousChatLegacyImportMarker;
@@ -148,6 +188,8 @@ function skipKey(entry: ContinuousChatLegacySkip): string {
  * before anything of it is imported, leaving its place to an older one. Repaired and malformed sources are reported
  * through `note` once, when the marker first records them. The marker is written only after every queued note has
  * settled; source keys make interrupted retries safe.
+ *
+ * @deprecated Runs the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove when no host can hold a session file in an earlier layout, together with its marker in migration.json.
  */
 export async function importContinuousChatLegacyHistory(options: ContinuousChatLegacyImportOptions): Promise<void> {
 	const signal = options.signal;

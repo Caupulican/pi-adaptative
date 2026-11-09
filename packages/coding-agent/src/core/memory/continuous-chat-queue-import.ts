@@ -10,6 +10,9 @@ type QueueArray = "readyLeaves" | "readyParents" | "running" | "blocked" | "half
 const ARRAYS: readonly string[] = ["readyLeaves", "readyParents", "running", "blocked", "halfBuilt"];
 const SCALARS = ["schemaVersion", "revision", "generation", "totalMessages", "nextLeaf", "leafStreak"] as const;
 
+/**
+ * @deprecated Header of the queue file of the earlier continuous-chat layout; remove with importLegacyQueue.
+ */
 export interface LegacyQueueHeader {
 	origin: "fresh" | "legacy-replay-v1";
 	revision: number;
@@ -18,6 +21,9 @@ export interface LegacyQueueHeader {
 	nextLeaf: number;
 }
 
+/**
+ * @deprecated Entry of the queue file of the earlier continuous-chat layout; remove with importLegacyQueue.
+ */
 export interface LegacyQueueEntry {
 	list: QueueArray;
 	item: ContinuousChatWorkItem;
@@ -154,7 +160,11 @@ function parseEntry(path: string, list: QueueArray, value: unknown): LegacyQueue
 	return { list, item };
 }
 
-/** Calls consume in source order; the consumer commits bounded batches to an unpublished migration store. */
+/**
+ * Calls consume in source order; the consumer commits bounded batches to an unpublished migration store.
+ *
+ * @deprecated Imports the queue file of the earlier continuous-chat layout into the scheduler store; remove when no host holds that file.
+ */
 export async function importLegacyQueue(
 	path: string,
 	consume: (entry: LegacyQueueEntry) => void | Promise<void>,

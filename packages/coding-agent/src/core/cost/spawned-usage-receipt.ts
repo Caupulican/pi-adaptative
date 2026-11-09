@@ -1,3 +1,6 @@
+/**
+ * Delivers a spawned worker's usage receipt to its parent session and classifies it as persisted, pending or belonging to a foreign session.
+ */
 import { isDeepStrictEqual } from "node:util";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";

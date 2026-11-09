@@ -1,3 +1,6 @@
+/**
+ * Stamps an agent message with the identity of the owner input it carries as a non-enumerable symbol property, and reads that identity back.
+ */
 import type { AgentMessage } from "./types.ts";
 
 /**

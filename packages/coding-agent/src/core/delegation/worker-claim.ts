@@ -39,6 +39,8 @@ export const MAX_WORKER_CLAIM_REASON_CODES = 32;
 export const MAX_WORKER_CLAIM_REASON_CODE_CHARS = 128;
 export const MAX_WORKER_CLAIM_COMMAND_RECEIPTS = 64;
 export const MAX_WORKER_CLAIM_COMMAND_CHARS = 240;
+/** The stakes facts one command receipt carries, scanned from its full text when the receipt is built. */
+export const MAX_WORKER_CLAIM_STAKES_FACTS = 16;
 export const MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS = 512;
 export const MAX_WORKER_REPORT_ENTRIES = 64;
 export const MAX_WORKER_REPORT_TEXT_CHARS = 2_000;
@@ -356,6 +358,18 @@ function normalizeCommandReceipts(value: unknown): WorkerCommandReceipt[] {
 			const exitCode = optionalWorkerClaimInteger(entry.exitCode, `${label}.exitCode`);
 			const durationMs = optionalWorkerClaimInteger(entry.durationMs, `${label}.durationMs`);
 			const commandDigest = optionalCommandDigest(entry.commandDigest, `${label}.commandDigest`);
+			// The stakes fields are additive and forward-only: a receipt written before the scan has none, and its stakes read its head.
+			const stakesFacts =
+				entry.stakesFacts === undefined
+					? undefined
+					: workerClaimStringArray(
+							entry.stakesFacts,
+							`${label}.stakesFacts`,
+							MAX_WORKER_CLAIM_STAKES_FACTS,
+							MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS,
+						);
+			const stakesFileWrites = optionalWorkerClaimInteger(entry.stakesFileWrites, `${label}.stakesFileWrites`);
+			const stakesUnread = optionalWorkerClaimInteger(entry.stakesUnread, `${label}.stakesUnread`);
 			return {
 				id: requiredWorkerClaimString(entry.id, `${label}.id`, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS),
 				tool: requiredWorkerClaimString(entry.tool, `${label}.tool`, MAX_WORKER_CLAIM_RECEIPT_FIELD_CHARS),
@@ -364,6 +378,9 @@ function normalizeCommandReceipts(value: unknown): WorkerCommandReceipt[] {
 				isError: entry.isError,
 				...(exitCode !== undefined ? { exitCode } : {}),
 				...(durationMs !== undefined ? { durationMs } : {}),
+				...(stakesFacts !== undefined ? { stakesFacts } : {}),
+				...(stakesFileWrites !== undefined ? { stakesFileWrites } : {}),
+				...(stakesUnread !== undefined ? { stakesUnread } : {}),
 			};
 		},
 	);

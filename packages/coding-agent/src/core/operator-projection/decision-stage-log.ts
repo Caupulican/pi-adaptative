@@ -124,6 +124,8 @@ export function isIdleProjection(projection: OperatorProjection): boolean {
  * A row the placeholder projection wrote before idle sessions were excluded: `understand` opened at
  * session start with no objective. The ledger is append-only, so the rows stay; reads leave them out
  * so timers and replays do not carry a clock that measured nothing.
+ *
+ * @deprecated Read filter for rows the placeholder projection wrote before idle sessions were excluded; remove once no such row can be read from the append-only ledger.
  */
 export function isLegacyIdleStageRow(row: { stage: string; reasonCode?: string }): boolean {
 	return row.stage === "understand" && row.reasonCode === "no_objective";

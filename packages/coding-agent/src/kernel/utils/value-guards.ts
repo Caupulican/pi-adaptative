@@ -1,3 +1,6 @@
+/**
+ * Provides type guards for untrusted values: object and plain records, allowed-key checks, string arrays and non-negative safe integers.
+ */
 import { isRecord as isRecordObject } from "@caupulican/pi-ai";
 
 /** Accepts non-null object records while excluding arrays; custom prototypes remain valid (owned by pi-ai). */

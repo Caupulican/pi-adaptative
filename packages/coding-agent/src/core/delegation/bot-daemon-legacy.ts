@@ -118,6 +118,9 @@ function isProvenLegacyDaemon(pid: number, script: string, uid: number): boolean
 	return readStartTime(pid) === startTime;
 }
 
+/**
+ * @deprecated Serves earlier-build bot daemons; replaced by the current daemon lease. Remove with retireLegacyBotDaemons once no host can still run a daemon from an earlier build.
+ */
 export interface LegacyDaemonSweep {
 	/** Whether this host can prove a legacy daemon's identity at all (Linux with a readable procfs). */
 	readonly provable: boolean;
@@ -156,6 +159,9 @@ function terminateProvenLegacyDaemons(storeFile: string): LegacyDaemonSweep {
 	return { provable: true, signalled, unsignalled };
 }
 
+/**
+ * @deprecated Serves earlier-build bot daemons; replaced by the current daemon lease. Remove with retireLegacyBotDaemons once no host can still run a daemon from an earlier build.
+ */
 export interface LegacyDaemonRetirement {
 	/** The store was rewritten without the `routines` key an inline-script daemon acts on. */
 	readonly sealed: boolean;
@@ -169,6 +175,8 @@ export interface LegacyDaemonRetirement {
 /**
  * Resolves every earlier-generation daemon claim on `store`: seal the store first (the guarantee on every platform),
  * release a first-generation token lease, then terminate the inline-script daemons this host can prove.
+ *
+ * @deprecated Serves earlier-build bot daemons; replaced by the current daemon lease. Remove with retireLegacyBotDaemons once no host can still run a daemon from an earlier build.
  */
 export function retireLegacyBotDaemons(store: PersistentBotTeamStore): LegacyDaemonRetirement {
 	const sealed = store.sealRoutinesAgainstLegacyWriters();
@@ -190,7 +198,11 @@ export function retireLegacyBotDaemons(store: PersistentBotTeamStore): LegacyDae
 	};
 }
 
-/** One sentence per earlier-generation outcome worth telling the operator; empty when there was none. */
+/**
+ * One sentence per earlier-generation outcome worth telling the operator; empty when there was none.
+ *
+ * @deprecated Operator wording for retireLegacyBotDaemons; remove with it.
+ */
 export function describeLegacyDaemonRetirement(retirement: LegacyDaemonRetirement): string {
 	const parts: string[] = [];
 	if (retirement.releasedTokenDaemon?.held)

@@ -12,7 +12,11 @@ export type ContinuousChatWorkAbandonment =
 	| { readonly kind: "release" }
 	| { readonly kind: "fail"; readonly reason: string; readonly recoveryOnly?: boolean; readonly recoveryKey?: string };
 
-/** Legacy migration value; current failure records live in the indexed scheduler. */
+/**
+ * Legacy migration value; current failure records live in the indexed scheduler.
+ *
+ * @deprecated Migration value of the earlier blocked-work records; remove with the one-time continuous-chat import.
+ */
 export interface ContinuousChatBlockedWork {
 	item: ContinuousChatWorkItem;
 	retryAfterGeneration: number;

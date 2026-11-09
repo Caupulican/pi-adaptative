@@ -1,3 +1,6 @@
+/**
+ * Reads a session file's auto-learn session id and aggregates whole-session usage from its entries, counting each spawned or semantic report once.
+ */
 import * as fs from "node:fs";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";

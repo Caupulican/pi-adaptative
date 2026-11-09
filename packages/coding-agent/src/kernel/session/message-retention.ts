@@ -85,7 +85,8 @@ export function hasRecalledHistoryMarker(details: unknown): boolean {
  * And the failure-memory record and the engine invocation receipt: recovery gating, resume and failure
  * statistics classify a result by them, so an oversized failed result must stay a counted failure.
  * And the proof sheets a goal completion, a worker handoff or a plan result carries: the review gauge and the owner's
- * quiz read them back from the branch.
+ * quiz read them back from the branch. And the stakes the host read from a python script: the proof sheet of its call
+ * reads them, and a stub without them would rate the script unread.
  */
 export const RETAINED_RECEIPT_DETAIL_KEYS = [
 	"piVerification",
@@ -95,6 +96,7 @@ export const RETAINED_RECEIPT_DETAIL_KEYS = [
 	"piToolFailureMemory",
 	"piToolInvocation",
 	"proofSheet",
+	"scriptStakes",
 ] as const;
 const MAX_RETAINED_RECEIPT_BYTES = 4 * 1024;
 /**

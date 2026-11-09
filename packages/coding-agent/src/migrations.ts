@@ -48,6 +48,8 @@ const EXTENSIONS_DOC_URL =
  * Migrate legacy oauth.json and settings.json apiKeys to auth.json.
  *
  * @returns Array of provider names that were migrated
+ *
+ * @deprecated Moves credentials from the legacy oauth.json and settings.json apiKeys into auth.json; remove when runMigrations drops the oldest supported install layout.
  */
 export function migrateAuthToAuthJson(): string[] {
 	const agentDir = getAgentDir();

@@ -20,14 +20,12 @@
 import { type FSWatcher, watch } from "node:fs";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
-import type { AgentMessage } from "../../kernel/types.ts";
 import { channelsDir } from "../agent-paths.ts";
 import type { SendUserMessageOptions } from "../extensions/types.ts";
 import {
 	type ChannelMessage,
 	type ChannelProvider,
 	type ChannelProviderStatus,
-	type ChannelSenderIds,
 	GatewayRegistry,
 	type JobSchedulerProvider,
 	type LifecycleOutcome,
@@ -39,9 +37,9 @@ import {
 	hasMaskableSecretText,
 	MAX_RETAINED_DIAGNOSTIC_CHARS,
 } from "../security/secret-text.ts";
-import { entryTurnOrigin, isDecisiveOrigin } from "../turn-origin.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { type ChannelServedBy, channelServedBy } from "./away-channels.ts";
+import { type BatchOutcome, readBatchOutcome } from "./batch-outcome.ts";
 import { createBuiltInChannelProvider, isBuiltInChannel, isShippedChannelProvider } from "./built-in-providers.ts";
 import {
 	type ChannelAwayUntold,
@@ -104,44 +102,13 @@ import {
 	MAX_STATUS_DRAFTS,
 	parseOwnerControl,
 } from "./owner-control.ts";
+import { nameableSenderId, quotaStatusLine, senderNoticeText } from "./owner-notice-text.ts";
 import { OwnerPush } from "./owner-push.ts";
 
 /** The daemon's drafts one summary of what it left names by id and reason; the rest are counted. */
 const MAX_NAMED_AWAY_DRAFTS = 3;
 /** Pending drafts per channel; past it the channel delivers nothing new until the owner sends or dismisses some. */
 const MAX_PENDING_DRAFTS = 32;
-/**
- * A sender id the owner is told verbatim: one the platform assigned (`ChannelSenderIds`), plain and short, never prose
- * (a notice enters the owner's turn unfenced). It is named only when the whole notice fits its one bounded line.
- */
-const PLAIN_SENDER_ID = /^[A-Za-z0-9._@+-]{1,64}$/;
-
-/**
- * The one line that tells the owner of a held sender and the key to add them to: with the id only when the notice may
- * name it; any other id is read through `channel_reply` `list`, fenced as data. Without an id the line fits
- * `MAX_RETAINED_DIAGNOSTIC_CHARS` for the longest channel name, so it is never cut.
- */
-/** The status line for the subscription allowance (none when the model is no subscription login): whether the dollar bounds apply now, and why. */
-function quotaStatusLine(name: string, policy: ResolvedChannelPolicy, quota: OwnerQuotaAllowance): string | undefined {
-	const key = `channels.${name}.ownerQuotaMaxUsedPercent`;
-	if (quota.kind === "room")
-		return `Subscription usage: ${Math.round(quota.usedPercent)}% of ${policy.ownerQuotaMaxUsedPercent}% (${key}); the dollar bounds do not apply.`;
-	if (quota.kind === "exhausted")
-		return `Subscription usage: ${quota.reason} (${key} ${policy.ownerQuotaMaxUsedPercent}%); the dollar bounds apply.`;
-	return quota.subscription ? `Subscription usage: ${quota.reason}; the dollar bounds apply.` : undefined;
-}
-
-function senderNoticeText(name: string, namedId: string | undefined): string {
-	return namedId !== undefined
-		? `Channel ${name} held a message from sender ${namedId}, who is not in channels.${name}.allowedSenders. To let them start turns, add "${namedId}" to that list.`
-		: `Channel ${name} held a verified sender not in channels.${name}.allowedSenders; the channel_reply list action shows its id.`;
-}
-
-/** The id a held-sender notice names: a plain platform-assigned id whose notice fits its line, else none. */
-function nameableSenderId(name: string, senderId: string, senderIds: ChannelSenderIds | undefined): string | undefined {
-	if (senderIds?.assignedBy !== "platform" || !PLAIN_SENDER_ID.test(senderId)) return undefined;
-	return senderNoticeText(name, senderId).length <= MAX_RETAINED_DIAGNOSTIC_CHARS ? senderId : undefined;
-}
 /** New senders per channel the owner is told about in 24 hours, each once. */
 const MAX_SENDER_NOTICES_PER_DAY = 3;
 
@@ -339,21 +306,6 @@ interface ChannelRuntime {
 	/** The daemon's host yielded the channel to an open session and still routes the batches it accepted. */
 	draining?: boolean;
 }
-
-function messageText(message: AgentMessage): string | undefined {
-	if (message.role !== "user" && message.role !== "assistant") return undefined;
-	const content = message.content;
-	if (typeof content === "string") return content;
-	const texts: string[] = [];
-	for (const part of content) if (part.type === "text" && part.text.length > 0) texts.push(part.text);
-	return texts.join("\n");
-}
-
-/** How a delivered batch's turn ended, read from the session branch. */
-type BatchOutcome =
-	| { readonly kind: "waiting"; readonly usd: number }
-	| { readonly kind: "answered"; readonly text: string; readonly usd: number }
-	| { readonly kind: "unanswered"; readonly reason: string; readonly usd: number };
 
 export class SessionChannels {
 	private readonly deps: SessionChannelsDeps;
@@ -646,7 +598,7 @@ export class SessionChannels {
 		try {
 			for (const batch of this.journal(name).read().result.batches) {
 				if (batch.state !== "accepted" || batch.sessionId !== sessionId) continue;
-				const outcome = this.batchOutcome(name, batch, now);
+				const outcome = readBatchOutcome(this.deps, name, batch, now);
 				if (outcome.kind === "answered")
 					this.keepDraft(name, batch, outcome.text, "the daemon stopped serving the channel", outcome.usd);
 				else this.settleBatch(name, batch.id, "unanswered", outcome.usd, undefined);
@@ -1901,65 +1853,6 @@ export class SessionChannels {
 	}
 
 	/**
-	 * How a batch's turn ended, with what its assistant messages cost so far. Its user entry is the one whose origin
-	 * record names this channel and the batch's id (`ref`). The answer is the first completed assistant answer after it;
-	 * a decisive entry before that (the owner's words, or another third party's, a host event someone else wrote
-	 * included) means this batch got none.
-	 */
-	private batchOutcome(name: string, batch: ChannelBatchRecord, now: number): BatchOutcome {
-		const owner = batch.owner === true ? this.deps.getOwnerSessionManager?.() : undefined;
-		const branch = (owner ?? this.deps.getSessionManager()).getBranch();
-		let index = -1;
-		for (let i = branch.length - 1; i >= 0; i--) {
-			const entry = branch[i];
-			const origin = entry === undefined ? undefined : entryTurnOrigin(entry);
-			// An owner batch's turn is stamped `owner-channel`, a third party's `inbound-channel`; both carry the batch id.
-			if (
-				(origin?.k === "inbound-channel" || origin?.k === "owner-channel") &&
-				origin.channel === name &&
-				origin.ref === batch.id
-			) {
-				index = i;
-				break;
-			}
-		}
-		if (index < 0)
-			return now - batch.acceptedAt >= DAY_MS
-				? { kind: "unanswered", reason: "not_delivered", usd: 0 }
-				: { kind: "waiting", usd: 0 };
-		let usd = 0;
-		for (let i = index + 1; i < branch.length; i++) {
-			const entry = branch[i];
-			if (entry === undefined) continue;
-			const origin = entryTurnOrigin(entry);
-			if (origin && isDecisiveOrigin(origin))
-				return {
-					kind: "unanswered",
-					reason:
-						origin.k === "owner-typed"
-							? "owner_steered"
-							: batch.owner === true && origin.k === "owner-channel" && origin.channel === name
-								? "owner_channel_joined"
-								: "mixed",
-					usd,
-				};
-			if (entry.type !== "message") continue;
-			const message = entry.message;
-			if (message.role !== "assistant") continue;
-			usd += message.usage?.cost?.total ?? 0;
-			// An aborted turn answers nothing; left waiting it would hold the channel's next turn for a day.
-			if (message.stopReason === "aborted") return { kind: "unanswered", reason: "aborted", usd };
-			if (message.stopReason === "stop" || message.stopReason === "length") {
-				const text = messageText(message)?.trim() ?? "";
-				return text ? { kind: "answered", text, usd } : { kind: "unanswered", reason: "empty_answer", usd };
-			}
-		}
-		return now - batch.acceptedAt >= DAY_MS
-			? { kind: "unanswered", reason: "no_answer", usd }
-			: { kind: "waiting", usd };
-	}
-
-	/**
 	 * Settle this session's delivered batches whose turn ended; resolves whether any still waits for its turn. Reads the
 	 * journal without its lock: only a settlement writes. With no policy (it went mid-turn) an answer becomes a draft.
 	 */
@@ -1971,7 +1864,7 @@ export class SessionChannels {
 			.result.batches.filter((batch) => batch.state === "accepted" && batch.sessionId === sessionId);
 		let waiting = false;
 		for (const batch of batches) {
-			const outcome = this.batchOutcome(name, batch, now);
+			const outcome = readBatchOutcome(this.deps, name, batch, now);
 			if (outcome.kind === "waiting") {
 				waiting = true;
 				continue;
@@ -2110,6 +2003,10 @@ export class SessionChannels {
 			);
 	}
 
+	/**
+	 * Sends a turn's answer (the turn-end reply, or a released draft) in its parts. Only the last part is final: an ask's
+	 * lane on a link address ends on the answer's end, never on its first part.
+	 */
 	private async sendParts(
 		provider: ChannelProvider,
 		target: { conversationKey: string; address: string; id: string },
@@ -2122,6 +2019,7 @@ export class SessionChannels {
 				text,
 				kind: "message",
 				eventId: `reply:${target.id}:${index + 1}/${parts.length}`,
+				final: index === parts.length - 1,
 			});
 		}
 	}
@@ -2279,7 +2177,7 @@ export class SessionChannels {
 		const policy = this.started ? this.policy(name) : undefined;
 		const provider = this.registry.getChannel(name);
 		if (!policy || !provider) return;
-		const reply = (text: string, key: string) => this.sendControlReply(name, provider, event, key, text);
+		const reply = (text: string, key: string) => this.sendControlReply(name, provider, event, key, text, true);
 		try {
 			if (control.kind === "status") {
 				const status = this.ownerStatus(name, policy, event.conversationKey, senderDigest);
@@ -2453,13 +2351,14 @@ export class SessionChannels {
 		return stopped > 0 ? "Stopped the running turn." : "No turn is running.";
 	}
 
-	/** A control reply: Pi's own words, bounded, to the chat the control came from; never one that looks like a secret. */
+	/** A control reply: Pi's own words, bounded, to the chat it came from, never a secret; `final` ends a hub's ask. */
 	private async sendControlReply(
 		name: string,
 		provider: ChannelProvider,
 		event: InboundChannelEvent,
 		key: string,
 		text: string,
+		final = false,
 	): Promise<void> {
 		if (!text || hasMaskableSecretText(text)) return;
 		const bounded = text.length > MAX_CONTROL_REPLY_CHARS ? `${text.slice(0, MAX_CONTROL_REPLY_CHARS - 1)}…` : text;
@@ -2470,6 +2369,7 @@ export class SessionChannels {
 				text: bounded,
 				kind: "message",
 				eventId: `control:${digest(key).slice(0, 16)}`,
+				...(final ? { final: true } : {}),
 			});
 		} catch (error) {
 			const said = isShippedChannelProvider(provider)

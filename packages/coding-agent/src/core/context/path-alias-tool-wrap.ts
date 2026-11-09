@@ -1,3 +1,6 @@
+/**
+ * Wraps an agent tool so harness path-alias tokens in its arguments are expanded, and alias ids the harness never minted are rejected before execution.
+ */
 import { existsSync } from "node:fs";
 import { resolve } from "node:path";
 import type { AgentTool } from "../../kernel/index.ts";

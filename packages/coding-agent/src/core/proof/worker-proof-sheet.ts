@@ -87,7 +87,8 @@ function reviewWorkerClaim(claim: WorkerClaimInput): { checks: ProofCheck[]; inc
 
 /**
  * The facts a worker result's stakes read: its changed files, protected-path findings, shell and python receipts, spend and
- * open items. Python receipts go to the code scan, never to the shell reader.
+ * open items. A receipt scanned when it was built carries its facts, read from the full command; an older receipt is read
+ * from its head: shell lines to the shell reader, python sources to the code scan.
  */
 function workerStakesFacts(
 	input: Pick<WorkerProofSheetInput, "claim" | "outcome">,
@@ -96,13 +97,18 @@ function workerStakesFacts(
 ): ProofStakesFacts {
 	const { claim, outcome } = input;
 	const receipts = claim?.commandReceipts ?? [];
+	const scanned = receipts.filter((receipt) => receipt.stakesFacts !== undefined);
+	const unscanned = receipts.filter((receipt) => receipt.stakesFacts === undefined);
 	return {
 		changedFiles: outcome?.changedFiles ?? claim?.changedFiles ?? [],
 		protectedFiles: (claim?.hostFindings ?? [])
 			.filter((finding) => finding.code === "protected_path")
 			.map((finding) => finding.text),
-		commands: receipts.filter((receipt) => receipt.tool !== "python").map((receipt) => receipt.command),
-		scripts: receipts.filter((receipt) => receipt.tool === "python").map((receipt) => receipt.command),
+		commands: unscanned.filter((receipt) => receipt.tool !== "python").map((receipt) => receipt.command),
+		scripts: unscanned.filter((receipt) => receipt.tool === "python").map((receipt) => receipt.command),
+		scannedFacts: scanned.flatMap((receipt) => receipt.stakesFacts ?? []),
+		scannedFileWrites: scanned.reduce((total, receipt) => total + (receipt.stakesFileWrites ?? 0), 0),
+		unreadScripts: scanned.reduce((total, receipt) => total + (receipt.stakesUnread ?? 0), 0),
 		...(outcome ? { spendUsd: outcome.cost.usd } : {}),
 		failedChecks: checks.filter((check) => !check.passed).length,
 		inconclusive: inconclusive.length,

@@ -39,7 +39,11 @@ export interface ParentProjectionReconciliationPort {
 	): Promise<{ readonly unresolvedGroups: number; readonly unresolvedSources: number }>;
 }
 
-/** Old keys are exact source-derived namespaces; new consumption keys include both session and entry. */
+/**
+ * Old keys are exact source-derived namespaces; new consumption keys include both session and entry.
+ *
+ * @deprecated Recognizes parent-projection keys written before session and entry joined the consumption key; remove when no such key can remain in a session file.
+ */
 export function legacyParentProjectionFamily(record: ContinuousChatRecord): "canonical" | "legacy" | undefined {
 	const source = record.source;
 	if (!source) return undefined;
@@ -48,7 +52,11 @@ export function legacyParentProjectionFamily(record: ContinuousChatRecord): "can
 	return undefined;
 }
 
-/** A legacy envelope is a lookup candidate only; canonical source evidence decides its final state. */
+/**
+ * A legacy envelope is a lookup candidate only; canonical source evidence decides its final state.
+ *
+ * @deprecated Recognizes a parent-projection envelope written before session and entry joined the consumption key; remove with legacyParentProjectionFamily.
+ */
 export function isLegacyParentProjectionCandidate(record: ContinuousChatRecord): boolean {
 	const family = legacyParentProjectionFamily(record);
 	if (family === "canonical") return true;

@@ -1,3 +1,6 @@
+/**
+ * Reads and writes exact byte ranges of a file handle at a position, never treating a short transfer as complete and honoring abort signals and deadlines.
+ */
 import type { FileHandle } from "node:fs/promises";
 import { assertBoundedReadActive } from "./bounded-file.ts";
 

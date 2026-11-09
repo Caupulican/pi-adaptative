@@ -1,3 +1,6 @@
+/**
+ * Defines the accounting evidence shapes (origin, source revision, observed usage component, evidence group) and the projection file path derived from a session file.
+ */
 import type { Usage } from "@caupulican/pi-ai";
 
 export function accountingProjectionPath(sessionFile: string): string {

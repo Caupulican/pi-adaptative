@@ -123,10 +123,11 @@ export class LinkClient {
 
 	/**
 	 * Answers a hub message; false when the connection is gone or its hub has not proven the secret (the answer is lost,
-	 * never queued: an answer must not reach whoever answers at the address before that proof). Throws when the answer
-	 * is too long for the link once encoded.
+	 * never queued: an answer must not reach whoever answers at the address before that proof). `final` false sends an
+	 * interim answer, which the hub keeps in the chat without ending the ask's lane. Throws when the answer is too long
+	 * for the link once encoded.
 	 */
-	reply(id: string, text: string): boolean {
+	reply(id: string, text: string, final = true): boolean {
 		const socket = this.socket;
 		if (!socket || socket.destroyed) return false;
 		if (!this.hub || !this.framing) {
@@ -135,7 +136,8 @@ export class LinkClient {
 			});
 			return false;
 		}
-		const line = this.framing.encode({ t: "reply", id, text });
+		// A final answer omits the field, so its frame is the same as any build has always sent; only an interim one carries `false`.
+		const line = this.framing.encode({ t: "reply", id, text, ...(final ? {} : { final: false }) });
 		if (line === undefined) throw new Error("the answer is too long for the link once encoded");
 		socket.write(line);
 		return true;

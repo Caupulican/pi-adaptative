@@ -1,3 +1,6 @@
+/**
+ * Waits for a managed Ollama child process to announce on its output a listener that matches the expected base URL.
+ */
 import type { Socket } from "node:net";
 import type { ManagedRuntimeChild } from "./runtime-process.ts";
 

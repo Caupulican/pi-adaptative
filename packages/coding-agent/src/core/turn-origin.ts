@@ -32,6 +32,7 @@ import type { AgentMessage } from "../kernel/types.ts";
 import { VERIFICATION_DISMISSAL_CUSTOM_TYPE } from "../kernel/verification-obligations.ts";
 import { parseWorkerControlRecord, type WorkerControlRecord, workerControlOf } from "../kernel/worker-control-stamp.ts";
 import { OUTWARD_DRAFT_CUSTOM_TYPE, OUTWARD_DRAFT_STATE_CUSTOM_TYPE } from "./agent-session-edge.ts";
+import { TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE } from "./automation/task-automation-runtime-adapter.ts";
 import { EDGE_GRANT_CUSTOM_TYPE, EDGE_REVOKE_CUSTOM_TYPE } from "./autonomy/edge-policy.ts";
 import { LANE_RECORD_CUSTOM_TYPE } from "./autonomy/session-lane-record.ts";
 import {
@@ -40,6 +41,18 @@ import {
 } from "./background-tool-task-controller.ts";
 import type { OwnerChannelOrigin } from "./channels/owner-channel-types.ts";
 import { CHAT_EXTENSION_NAME } from "./chat/constants.ts";
+import { RETENTION_AUDIT_CUSTOM_TYPE } from "./compaction/evidence-retention-projection.ts";
+import {
+	SELF_COMPACTION_ABANDONED_CUSTOM_TYPE,
+	SELF_COMPACTION_GUIDANCE_CUSTOM_TYPE,
+	SELF_COMPACTION_HANDOFF_CUSTOM_TYPE,
+	SELF_COMPACTION_OWNER_REQUEST_CUSTOM_TYPE,
+	SELF_COMPACTION_RELEASED_CUSTOM_TYPE,
+	SELF_COMPACTION_REQUEST_CUSTOM_TYPE,
+} from "./compaction/self-compaction.ts";
+import { COMPACTION_PREPARED_CUSTOM_TYPE } from "./compaction-controller.ts";
+import { CONTEXT_VISIBILITY_PROJECTION_CUSTOM_TYPE } from "./context/context-prompt-enforcement.ts";
+import { PATH_ALIAS_LEGEND_CUSTOM_TYPE } from "./context/path-alias-table.ts";
 import { SEMANTIC_USAGE_CUSTOM_TYPE, SPAWNED_USAGE_CUSTOM_TYPE } from "./cost/usage-records.ts";
 import { BOT_RUNTIME_BINDINGS_CUSTOM_TYPE } from "./delegation/bot-runtime-bindings.ts";
 import { LEADER_OUTCOME_CUSTOM_TYPE, LEADER_QUESTION_CUSTOM_TYPE } from "./delegation/leader-controller.ts";
@@ -51,16 +64,26 @@ import {
 import { WORKER_RECEIPT_ORIGIN_CUSTOM_TYPE } from "./delegation/worker-receipt-origin.ts";
 import { HOST_EVENT_CUSTOM_TYPE } from "./events/host-event-delivery.ts";
 import type { SendUserMessageOrigin } from "./extensions/types.ts";
+import { ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE } from "./goals/compact-goal-context.ts";
 import { GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE } from "./goals/goal-continuation-prompt.ts";
 import { GOAL_STATE_CUSTOM_TYPE } from "./goals/session-goal-state.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE } from "./harness-notice.ts";
 import { HOST_TURN_CUSTOM_TYPES } from "./host-turn-reasoning.ts";
 import { HUMAN_INPUT_CUSTOM_TYPE, HUMAN_INPUT_WORKER_RESPONSE_CUSTOM_TYPE } from "./human-input.ts";
+import { LEARNING_AUDIT_CUSTOM_TYPE } from "./learning/learning-audit.ts";
 import { OWNER_EVIDENCE_CUSTOM_TYPE } from "./learning/owner-evidence-ledger.ts";
 import { CONTINUOUS_CHAT_WORK_REPORT_CUSTOM_TYPE } from "./memory/continuous-chat-ingest.ts";
+import {
+	CONTINUOUS_CHAT_STATE_CUSTOM_TYPE,
+	CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE,
+} from "./memory/continuous-chat-projection.ts";
+import { KNOWLEDGE_CONTEXT_CUSTOM_TYPE } from "./memory/knowledge-projection.ts";
+import { TRANSCRIPT_FRONTIER_CUSTOM_TYPE } from "./memory/transcript-memory-contracts.ts";
+import { MEMORY_EVIDENCE_CUSTOM_TYPE } from "./memory-controller.ts";
 import { MODEL_POOL_POLICY_CUSTOM_TYPE } from "./model-router/owner-model-policy.ts";
+import { SIDE_TRIP_CONTEXT_CUSTOM_TYPE } from "./model-router/side-trip-brief.ts";
 import { SESSION_TASK_PROFILE_CUSTOM_TYPE } from "./orchestration/session-task-profile-store.ts";
-import { isOwnerChannelInputId, isOwnerSpokenInputId } from "./owner-input-ledger.ts";
+import { isHostInputId, isOwnerChannelInputId, isOwnerSpokenInputId } from "./owner-input-ledger.ts";
 import { PIPELINE_RUN_CUSTOM_TYPE } from "./pipelines/types.ts";
 import { ACT_AHEAD_CUSTOM_TYPE } from "./proactivity/act-ahead-record.ts";
 import { PROACTIVITY_FEEDBACK_CUSTOM_TYPE } from "./proactivity/proactivity-feedback.ts";
@@ -70,7 +93,12 @@ import {
 	PLAN_UPDATE_CUSTOM_TYPE,
 	PROOF_SHEET_TOOL_NAMES,
 } from "./proof/proof-sheet.ts";
-import { AUTHORITY_CONTEXT_CUSTOM_TYPE } from "./provider-request-context-controller.ts";
+import {
+	ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
+	ACTIVE_SKILL_EXCLUSIONS_CUSTOM_TYPE,
+	ACTIVE_SKILL_RECORD_KIND_PREFIX,
+	AUTHORITY_CONTEXT_CUSTOM_TYPE,
+} from "./provider-request-context-controller.ts";
 import { QUEUED_INPUT_CUSTOM_TYPE } from "./queued-input-record.ts";
 import { CONVERSATION_TALKER_CUSTOM_TYPE, REPLY_ROUTE_CUSTOM_TYPE } from "./reply-route.ts";
 import { ROUTINE_COMPLETION_TYPE, ROUTINE_INTAKE_NOTICE_TYPE } from "./routines/routine-parent-input.ts";
@@ -80,6 +108,7 @@ import { WORK_EVIDENCE_CUSTOM_TYPE } from "./system-one/session-work-diff.ts";
 import { VERIFICATION_OBLIGATIONS_CUSTOM_TYPE } from "./system-one/verification-obligations.ts";
 import { TASK_DIRECTORY_STATE_CUSTOM_TYPE } from "./tasks/session-task-directory-store.ts";
 import { TASK_STEPS_STATE_CUSTOM_TYPE } from "./tasks/session-task-state.ts";
+import { TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE } from "./tasks/task-directory-context.ts";
 import { OPTIONAL_TOOL_INTENT_CUSTOM_TYPE } from "./tool-applicability-gate.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
 import { WORK_UNIT_CUSTOM_TYPE, WORKER_RECEIPTS_CUSTOM_TYPE } from "./work-units.ts";
@@ -208,6 +237,8 @@ function userTurnOrigin(
 	if (inputId === undefined) return undefined;
 	// Owner-channel words carry their verified origin's stamp; without it their authority is unreadable, never the owner's.
 	if (isOwnerChannelInputId(inputId)) return UNREADABLE_TURN_ORIGIN;
+	// A turn the host runs for itself (a queued internal steer) is the harness's, never the owner's words.
+	if (isHostInputId(inputId)) return { v: 1, k: "harness" };
 	return { v: 1, k: isOwnerSpokenInputId(inputId) ? "owner-typed" : "extension-message" };
 }
 
@@ -240,10 +271,13 @@ let hostReservedTypes: ReadonlySet<string> | undefined;
  * The custom types the host writes itself and a reader trusts for a decision: authority and owner decisions (edge grants and
  * revokes, owner evidence, model and skill policies, outward drafts, reply routes, bot bindings, verification dismissals and
  * obligations, worker enrollment), goal, worker, lane, task and leader state and receipts, parent inputs and wakes, spend, the
- * human-input exchange, and the proof sheets with their carriers. Not reserved: display, telemetry, analytics and model-context
- * records, learning audit and memory projection records, and the types a built-in extension writes (`pi-chat`,
- * `collaboration-control-failure`). Built from the constants their producers export, never retyped, and on first use, so the
- * import order of those producers cannot leave one unset.
+ * human-input exchange, the proof sheets with their carriers, the compaction records (prepared, self-compaction and its
+ * handoffs, retention audit), the learning audit, the memory projections (knowledge context, continuous-chat view and state,
+ * transcript frontier, memory evidence) and the context records a model request carries (active skill records, one type per skill, and their exclusions; active goal context; task
+ * directory and automation context, side-trip brief, path alias legend, context visibility projection). Not reserved: display,
+ * telemetry and analytics records, and the types a built-in extension writes (`pi-chat`, `collaboration-control-failure`).
+ * Built from the constants their producers export, never retyped, and on first use, so the import order of those producers
+ * cannot leave one unset.
  */
 function hostReservedCustomTypes(): ReadonlySet<string> {
 	hostReservedTypes ??= new Set<string>([
@@ -303,18 +337,48 @@ function hostReservedCustomTypes(): ReadonlySet<string> {
 		PIPELINE_RUN_CUSTOM_TYPE,
 		SPAWNED_USAGE_CUSTOM_TYPE,
 		SEMANTIC_USAGE_CUSTOM_TYPE,
+		COMPACTION_PREPARED_CUSTOM_TYPE,
+		RETENTION_AUDIT_CUSTOM_TYPE,
+		SELF_COMPACTION_GUIDANCE_CUSTOM_TYPE,
+		SELF_COMPACTION_REQUEST_CUSTOM_TYPE,
+		SELF_COMPACTION_HANDOFF_CUSTOM_TYPE,
+		SELF_COMPACTION_ABANDONED_CUSTOM_TYPE,
+		SELF_COMPACTION_OWNER_REQUEST_CUSTOM_TYPE,
+		SELF_COMPACTION_RELEASED_CUSTOM_TYPE,
+		LEARNING_AUDIT_CUSTOM_TYPE,
+		KNOWLEDGE_CONTEXT_CUSTOM_TYPE,
+		CONTINUOUS_CHAT_VIEW_CUSTOM_TYPE,
+		CONTINUOUS_CHAT_STATE_CUSTOM_TYPE,
+		TRANSCRIPT_FRONTIER_CUSTOM_TYPE,
+		MEMORY_EVIDENCE_CUSTOM_TYPE,
+		ACTIVE_SKILL_CONTEXT_CUSTOM_TYPE,
+		ACTIVE_SKILL_EXCLUSIONS_CUSTOM_TYPE,
+		ACTIVE_GOAL_CONTEXT_CUSTOM_TYPE,
+		TASK_DIRECTORY_CONTEXT_CUSTOM_TYPE,
+		TASK_AUTOMATION_CONTEXT_CUSTOM_TYPE,
+		SIDE_TRIP_CONTEXT_CUSTOM_TYPE,
+		PATH_ALIAS_LEGEND_CUSTOM_TYPE,
+		CONTEXT_VISIBILITY_PROJECTION_CUSTOM_TYPE,
 	]);
 	return hostReservedTypes;
 }
 
 /**
  * Refuses an extension's record under a host-reserved custom type with a plain error that names the type. Nothing is written
- * when it throws. The extension API's write paths call it (`sendMessage`, `appendEntry`, a handler's replacement message); a
- * session manager an extension receives directly (the `setup` of its `newSession`) is not checked here.
+ * when it throws. The extension API's write paths call it (`sendMessage`, `appendEntry`, a handler's replacement message), and so
+ * does the session manager an extension's `newSession` setup receives (`extensionSetupSessionManager`).
  */
 export function assertExtensionCustomType(customType: string): void {
-	if (hostReservedCustomTypes().has(customType))
+	if (isHostReservedCustomType(customType))
 		throw new Error(`Custom type "${customType}" is reserved by the host; an extension cannot send or record it.`);
+}
+
+/**
+ * Whether the host reserves a custom type: one of the listed types, or one of a family the host names by prefix (each loaded
+ * skill's record is its own type, `active_skill_context:<name>`).
+ */
+function isHostReservedCustomType(customType: string): boolean {
+	return hostReservedCustomTypes().has(customType) || customType.startsWith(ACTIVE_SKILL_RECORD_KIND_PREFIX);
 }
 
 /**

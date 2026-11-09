@@ -10,6 +10,7 @@ import { shellExecutions } from "../model-router/read-only-shell-policy.ts";
 import { lexShellCommand } from "../objective-execution/git-shell-lexer.ts";
 import { parseShellCommandSequence, type ShellCommandSequence, shellWord } from "../tools/shell-command-parser.ts";
 import { classifyShellVerificationCommand } from "../tools/shell-test-command.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import { PROOF_STAKES_LEVEL_RANK, type ProofStakesLevel } from "./stakes-levels.ts";
 
 export { highestStakesLevel, PROOF_STAKES_LEVELS, type ProofStakesLevel } from "./stakes-levels.ts";
@@ -29,6 +30,12 @@ export interface ProofStakesFacts {
 	readonly commands: readonly string[];
 	/** Python source the result ran, as recorded by the host: the script text, never a path it was run from. */
 	readonly scripts?: readonly string[];
+	/** Facts a caller already scanned from the full text (a worker receipt's `stakesFacts`): read as they are, never re-scanned. */
+	readonly scannedFacts?: readonly string[];
+	/** The `pi_tools` file writes those scans counted, added to the changed-file count as {@link PythonCodeFacts.fileWrites} is. */
+	readonly scannedFileWrites?: number;
+	/** Python files the host did not read for their stakes: outside the read scope, over the cap, or not scanned when they ran. */
+	readonly unreadScripts?: number;
 	/** Spend recorded against the result, in USD; absent when not metered. */
 	readonly spendUsd?: number;
 	/** Messages or actions sent to people outside the session for the result. */
@@ -64,6 +71,7 @@ const GH_RELEASE_WRITES: ReadonlyMap<string, string> = new Map([
 	["upload", "release assets were uploaded"],
 	["edit", "a release was edited"],
 	["delete", "a release was deleted"],
+	["delete-asset", "a release asset was deleted"],
 ]);
 /** `git tag` flags that list tags (or filter the listing) instead of creating or deleting one. */
 const GIT_TAG_LISTING =
@@ -206,6 +214,7 @@ const PYTHON_OPERATION_FACTS: readonly { readonly pattern: RegExp; readonly fact
 		fact: "a python script deleted files or directories (os.remove, os.unlink or os.rmdir)",
 	},
 	{ pattern: /\bshutil\.rmtree\s*\(/u, fact: "a python script deleted a directory tree (shutil.rmtree)" },
+	// Any call is high by design: a move can overwrite the file it names, and the closed scan reads no arguments to tell them apart.
 	{ pattern: /\bshutil\.move\s*\(/u, fact: "a python script moved files or directories (shutil.move)" },
 	{
 		pattern: /\bsubprocess\b|\bos\.(?:system|popen)\s*\(/u,
@@ -222,10 +231,15 @@ const PYTHON_OPERATION_FACTS: readonly { readonly pattern: RegExp; readonly fact
 	{ pattern: /\bsmtplib\b/u, fact: "a python script sent email (smtplib)" },
 	{ pattern: /\bpip3?\s+install\b|-m\s+pip\s+install\b/u, fact: "a python script installed packages (pip install)" },
 ];
-/** Where an `open(` call starts; its arguments follow the parenthesis (see {@link callArguments}). */
-const OPEN_CALL_START = /\bopen\s*\(/gu;
-/** A quoted literal made only of mode letters: `'w'`, `"ab"`, `'r+'`. */
-const MODE_LITERAL = /(['"])([rwaxbt+]+)\1/gu;
+/**
+ * Where an `open(` call starts; its arguments follow the parenthesis (see {@link callArguments}). `os.open` is not one: its
+ * second argument is integer flags, not a mode string.
+ */
+const OPEN_CALL_START = /(?<!\bos\.)\bopen\s*\(/gu;
+/** A whole quoted string literal (`'w'`, `"rb"`): the only form of a mode argument the host reads. */
+const MODE_STRING_LITERAL = /^(?:"[^"]*"|'[^']*')$/u;
+/** The `mode=` keyword and its equals sign, in front of a keyword mode argument. */
+const MODE_KEYWORD_PREFIX = /^mode\s*=\s*/u;
 /** A keyword argument (`encoding="utf-8"`), as opposed to a positional one. */
 const KEYWORD_ARGUMENT = /^[A-Za-z_]\w*\s*=(?!=)/u;
 /** The `mode=` keyword argument of an `open(` call. */
@@ -275,8 +289,10 @@ function callArguments(code: string, start: number): string[] {
 }
 
 /**
- * Whether an `open(` call names a write, append or create mode: its positional mode argument (the second), or a `mode=`
- * keyword anywhere in the call. Mode literals in other arguments (an `encoding=` value) are not the mode.
+ * Whether an `open(` call may write: its mode argument (the second positional, or a `mode=` keyword anywhere in the call) is a
+ * write, append or create literal, or it is not a string literal at all (a variable or an expression). The host cannot read
+ * a mode it does not see as a literal, so such a call is a write-capable fact, rated high. A call with no mode argument or a
+ * read literal is no fact. Other arguments (an `encoding=` value) are not the mode.
  */
 function opensForWriting(code: string): boolean {
 	for (const call of code.matchAll(OPEN_CALL_START)) {
@@ -284,12 +300,11 @@ function opensForWriting(code: string): boolean {
 		const second = args[1];
 		const modes = [
 			...(second !== undefined && !KEYWORD_ARGUMENT.test(second) ? [second] : []),
-			...args.filter((arg) => MODE_KEYWORD_ARGUMENT.test(arg)),
+			...args.filter((arg) => MODE_KEYWORD_ARGUMENT.test(arg)).map((arg) => arg.replace(MODE_KEYWORD_PREFIX, "")),
 		];
 		for (const mode of modes) {
-			for (const literal of mode.matchAll(MODE_LITERAL)) {
-				if (/[wax+]/u.test(literal[2] ?? "")) return true;
-			}
+			if (!MODE_STRING_LITERAL.test(mode)) return true;
+			if (/[wax+]/u.test(mode.slice(1, -1))) return true;
 		}
 	}
 	return false;
@@ -310,13 +325,43 @@ export function pythonCodeFacts(code: string): PythonCodeFacts {
 }
 
 /**
- * The publish, destructive and unreadable facts of a result's shell command lines (see {@link proofCommandEdge}) and of
- * its python sources (see {@link pythonCodeFacts}), each named once.
+ * The stakes the host read from one python file a call ran (`details.scriptStakes`): the closed scan of its source when the
+ * host could read it, or the plain reason it could not (outside the read scope, over {@link MAX_SCRIPT_STAKES_FILE_BYTES}).
+ */
+export type ScriptStakes =
+	| { readonly status: "read"; readonly operations: readonly string[]; readonly fileWrites: number }
+	| { readonly status: "unread"; readonly reason: string };
+
+/** The largest python file the host reads for its stakes; a larger file is unread, never scanned in part. */
+export const MAX_SCRIPT_STAKES_FILE_BYTES = 256 * 1024;
+
+/** The stakes of one python source the host read: the closed scan of its code, in the shape a call's details keep. */
+export function scriptStakesOf(source: string): ScriptStakes {
+	const facts = pythonCodeFacts(source);
+	return { status: "read", operations: facts.operations, fileWrites: facts.fileWrites };
+}
+
+/** The script stakes a result's details keep, read back from the session record; undefined for any other value. */
+export function scriptStakesFromDetail(value: unknown): ScriptStakes | undefined {
+	if (!isPlainRecord(value)) return undefined;
+	if (value.status === "read" && Array.isArray(value.operations) && typeof value.fileWrites === "number") {
+		const operations = value.operations.filter((operation): operation is string => typeof operation === "string");
+		return operations.length === value.operations.length
+			? { status: "read", operations, fileWrites: value.fileWrites }
+			: undefined;
+	}
+	if (value.status === "unread" && typeof value.reason === "string") return { status: "unread", reason: value.reason };
+	return undefined;
+}
+
+/**
+ * The publish, destructive and unreadable facts of a result's shell command lines (see {@link proofCommandEdge}), of its
+ * python sources (see {@link pythonCodeFacts}) and of the facts a caller already scanned, each named once.
  */
 function commandEdges(facts: ProofStakesFacts): string[] {
 	const shell = facts.commands.map(proofCommandEdge).filter((edge): edge is string => edge !== undefined);
 	const scripts = (facts.scripts ?? []).flatMap((code) => pythonCodeFacts(code).operations);
-	return [...new Set([...shell, ...scripts])];
+	return [...new Set([...shell, ...scripts, ...(facts.scannedFacts ?? [])])];
 }
 
 /** The stakes of one result: low with no fact, elevated with one elevated fact, high with any high fact or two elevated. */
@@ -331,11 +376,12 @@ export function readProofStakes(facts: ProofStakesFacts): ProofStakes {
 	if ((facts.outboundActions ?? 0) > 0)
 		high.push(`${facts.outboundActions} message(s) or action(s) reached people outside the session`);
 	const scriptWrites = (facts.scripts ?? []).reduce((total, code) => total + pythonCodeFacts(code).fileWrites, 0);
-	const changed = facts.changedFiles.length + scriptWrites;
+	const changed = facts.changedFiles.length + scriptWrites + (facts.scannedFileWrites ?? 0);
 	if (changed > PROOF_STAKES_WIDE_CHANGE_FILES) elevated.push(`${changed} files changed`);
 	if ((facts.spendUsd ?? 0) >= PROOF_STAKES_SPEND_USD) elevated.push(`$${(facts.spendUsd ?? 0).toFixed(2)} spent`);
 	if (facts.failedChecks > 0) elevated.push(`${facts.failedChecks} check(s) failed`);
 	if (facts.inconclusive > 0) elevated.push(`${facts.inconclusive} item(s) left inconclusive`);
+	if ((facts.unreadScripts ?? 0) > 0) elevated.push(`${facts.unreadScripts} python script(s) the host did not read`);
 	const level: ProofStakesLevel =
 		high.length > 0 || elevated.length >= 2 ? "high" : elevated.length === 1 ? "elevated" : "low";
 	return { level, facts: [...high, ...elevated] };

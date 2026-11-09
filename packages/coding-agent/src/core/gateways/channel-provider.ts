@@ -36,6 +36,12 @@ export interface ChannelMessage {
 	address?: string;
 	/** Defaults to `message`. */
 	kind?: ChannelMessageKind;
+	/**
+	 * Outbound: this message is the turn's answer on its address (the turn-end reply or a released draft, its last part).
+	 * A link address whose message is an ask's lane ends on that answer. Unset or false is an in-turn message: it reaches
+	 * the conversation and leaves the lane open.
+	 */
+	final?: boolean;
 	/** When the provider received the event, epoch milliseconds; defaults to admission time. */
 	receivedAt?: number;
 	/**

@@ -39,6 +39,8 @@ export interface PersistentBotInboxEntry {
 /**
  * A daemon of an earlier build still renewing the old `bot-daemon-lease.json`. `inline-script`: a `<runtime> -e
  * <script>` daemon (tokenless heartbeat with its own pid); `token-daemon`: a first-generation `pi --bot-daemon`.
+ *
+ * @deprecated A claim held by a daemon of an earlier build; remove with retireLegacyBotDaemons.
  */
 export interface LegacyBotDaemonClaim {
 	readonly kind: "inline-script" | "token-daemon";
@@ -592,6 +594,8 @@ export function releaseDaemonLeaseFile(
  * Releases a first-generation `pi --bot-daemon` lease in the old lease file, under the lock that build renews it
  * with; that daemon exits once it observes the release. An inline-script heartbeat (no token) is left alone: the
  * process rewrites it regardless, and it stays the evidence of that daemon.
+ *
+ * @deprecated Releases a first-generation pi --bot-daemon lease; remove with retireLegacyBotDaemons once no such daemon can exist.
  */
 export function releaseLegacyTokenDaemonLeaseFile(storeFilePath: string, nowMs = Date.now()): DaemonLeaseRelease {
 	const leasePath = legacyDaemonLeasePath(storeFilePath);

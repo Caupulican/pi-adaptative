@@ -1,3 +1,6 @@
+/**
+ * Walks session entry ancestry from a leaf to the root with parent-cycle detection and collects the active branch ending at a leaf.
+ */
 export interface SessionTreeEntryLike {
 	id: string;
 	parentId: string | null;

@@ -45,8 +45,11 @@ const SILENCE_MS = 60_000;
 const MAX_QUEUED_BYTES = 1024 * 1024;
 
 export interface RemoteHubEvents {
-	/** A machine's answer to a message this hub sent; `machine` is its name, `id` the message's id. */
-	reply(machine: string, id: string, text: string): void;
+	/**
+	 * A machine's answer to a message this hub sent; `machine` is its name, `id` the message's id. `final` is false for an
+	 * interim answer; absent is final (a machine on a build without the field).
+	 */
+	reply(machine: string, id: string, text: string, final?: boolean): void;
 	/** A machine arrived (true) or left (false), by name. */
 	presence(machine: string, connected: boolean): void;
 }
@@ -310,7 +313,7 @@ export class RemoteHub {
 				}
 				entry.lastSeen = Date.now();
 				if (!isChatFrame(inner)) this.peers?.receive(entry.machineId, inner);
-				else if (inner.t === "reply") this.events.reply(entry.name, inner.id, inner.text);
+				else if (inner.t === "reply") this.events.reply(entry.name, inner.id, inner.text, inner.final);
 				else if (inner.t === "ping") this.write(entry, { t: "pong" });
 			}
 		});

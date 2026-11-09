@@ -1,3 +1,6 @@
+/**
+ * Runs a Bitwarden credential CLI command with an injected auth environment under timeout, abort and output-size bounds.
+ */
 import type { ChildProcess } from "node:child_process";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
 import { composeExecutionEnvironment } from "../execution-environment.ts";

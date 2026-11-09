@@ -12,6 +12,7 @@ import { producingCommand, pythonCallLanguage } from "../goals/session-goal-evid
 import { redactKnownSecrets, redactTokenShapes } from "../security/secret-text.ts";
 import { messageContentText } from "../util/message-content-text.ts";
 import type { ProofCommand } from "./proof-sheet.ts";
+import { type ScriptStakes, scriptStakesFromDetail } from "./proof-stakes.ts";
 
 const MAX_TAIL_CHARS = 400;
 
@@ -35,7 +36,10 @@ export function readSessionCommandReceipts(
 	const selected = (id: string, timestamp: string): boolean =>
 		"toolCallIds" in selection ? selection.toolCallIds.has(id) : timestamp >= selection.since;
 	const calls = new Map<string, { command: string; language?: "python" | "python-file" }>();
-	const results = new Map<string, { isError: boolean; exitCode?: number; outputTail?: string }>();
+	const results = new Map<
+		string,
+		{ isError: boolean; exitCode?: number; outputTail?: string; scriptStakes?: ScriptStakes }
+	>();
 	for (const entry of sessionManager.getBranch()) {
 		if (entry.type !== "message") continue;
 		const message = entry.message;
@@ -47,13 +51,15 @@ export function readSessionCommandReceipts(
 				if (command !== undefined) calls.set(part.id, { command, ...(language ? { language } : {}) });
 			}
 		} else if (message.role === "toolResult" && calls.has(message.toolCallId)) {
-			const details = message.details as { exitCode?: unknown } | undefined;
+			const details = message.details as { exitCode?: unknown; scriptStakes?: unknown } | undefined;
 			const exitCode = typeof details?.exitCode === "number" ? details.exitCode : undefined;
+			const scriptStakes = scriptStakesFromDetail(details?.scriptStakes);
 			const tail = redactedOutputTail(messageContentText(message.content));
 			results.set(message.toolCallId, {
 				isError: message.isError === true,
 				...(exitCode !== undefined ? { exitCode } : {}),
 				...(tail ? { outputTail: tail } : {}),
+				...(scriptStakes ? { scriptStakes } : {}),
 			});
 		}
 	}
@@ -67,6 +73,7 @@ export function readSessionCommandReceipts(
 			...(result?.outputTail ? { outputTail: result.outputTail } : {}),
 			ref: id,
 			...(call.language ? { language: call.language } : {}),
+			...(call.language === "python-file" && result?.scriptStakes ? { scriptStakes: result.scriptStakes } : {}),
 		});
 	}
 	return receipts;

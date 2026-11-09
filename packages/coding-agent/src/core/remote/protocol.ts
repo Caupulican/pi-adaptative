@@ -48,7 +48,11 @@ export type LinkFrame =
 	| { readonly t: "welcome"; readonly proof: string; readonly features?: readonly string[] }
 	| { readonly t: "refuse"; readonly reason: LinkRefusal }
 	| { readonly t: "msg"; readonly id: string; readonly text: string }
-	| { readonly t: "reply"; readonly id: string; readonly text: string }
+	/**
+	 * `final: false` is an interim answer under the id: it reaches the chat and leaves an ask's lane open. Absent is final,
+	 * so a build that never sends the field ends a lane on its first reply, as it always did.
+	 */
+	| { readonly t: "reply"; readonly id: string; readonly text: string; readonly final?: boolean }
 	| { readonly t: "ping" }
 	| { readonly t: "pong" }
 	/** A frame after the welcome on a sealed link: `s` counts this direction's frames from 1, `c` is the sealed inner frame. */
@@ -181,10 +185,21 @@ export function parseFrame(line: string): LinkFrame | undefined {
 				? { t: "refuse", reason: value.reason as LinkRefusal }
 				: undefined;
 		case "msg":
-		case "reply":
 			return typeof value.id === "string" && ID.test(value.id) && text(value.text, MAX_MESSAGE_CHARS)
-				? { t: value.t, id: value.id, text: value.text }
+				? { t: "msg", id: value.id, text: value.text }
 				: undefined;
+		case "reply": {
+			// A present `final` must be a boolean; an absent one is left absent (a final reply), so the parsed frame says what was sent.
+			if (value.final !== undefined && typeof value.final !== "boolean") return undefined;
+			return typeof value.id === "string" && ID.test(value.id) && text(value.text, MAX_MESSAGE_CHARS)
+				? {
+						t: "reply",
+						id: value.id,
+						text: value.text,
+						...(typeof value.final === "boolean" ? { final: value.final } : {}),
+					}
+				: undefined;
+		}
 		case "ping":
 			return { t: "ping" };
 		case "pong":

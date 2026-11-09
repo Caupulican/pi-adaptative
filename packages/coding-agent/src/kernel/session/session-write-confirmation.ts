@@ -1,3 +1,6 @@
+/**
+ * Confirms, under the original file lock, that an attempted suffix was fully written to a session file by checking file identity, size and suffix SHA-256.
+ */
 import { createHash } from "node:crypto";
 import { readSync, type Stats } from "node:fs";
 import { currentSynchronousFileLockScope } from "../storage/atomic-file.ts";

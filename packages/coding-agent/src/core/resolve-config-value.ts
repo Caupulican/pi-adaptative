@@ -136,6 +136,9 @@ export function isConfigValueConfigured(config: string): boolean {
 	return getMissingConfigValueEnvVarNames(config).length === 0;
 }
 
+/**
+ * @deprecated Recognizes a bare environment-variable name in a config value, replaced by the $NAME form; remove when migrations.ts has rewritten every stored bare name and model-registry no longer accepts one.
+ */
 export function isLegacyEnvVarNameConfigValue(config: string): boolean {
 	return LEGACY_ENV_VAR_NAME_RE.test(config);
 }

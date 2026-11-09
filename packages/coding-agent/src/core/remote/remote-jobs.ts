@@ -46,8 +46,11 @@ export interface RemoteRoomFleet {
 }
 
 const LOCAL_PROVIDERS = new Set(["ollama", "lmstudio", "llama-cpp", "llamacpp", "vllm", "local"]);
-/** The mark of a job another machine runs, the same computer the bot rows of remote machines carry. */
-export const REMOTE_WORKER_MARK = "💻";
+/**
+ * The mark of a bot that lives on another machine (a joined machine's bot rows) and of a job another machine runs: a
+ * computer, readable at a glance. The one definition; the interactive bot views re-export it.
+ */
+export const REMOTE_MARK = "💻";
 /** How often a roster with a running job re-reads its duration. */
 const ROSTER_TICK_MS = 60_000;
 
@@ -313,6 +316,6 @@ export class RemoteJobs {
 				: record.state === "pending"
 					? `waiting for ${record.executorName} to take it`
 					: `on ${record.executorName} for ${runningFor(record.createdAt)}`;
-		return { ...view, label: `${REMOTE_WORKER_MARK} ${record.offer.label} · ${where}` };
+		return { ...view, label: `${REMOTE_MARK} ${record.offer.label} · ${where}` };
 	}
 }

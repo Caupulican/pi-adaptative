@@ -8,17 +8,26 @@ import type { GoalEvidenceKind, GoalEvidenceOutcome } from "../goals/goal-state.
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import type { SystemOneController } from "../system-one/controller.ts";
 
+/**
+ * @deprecated Shape of the legacy goal action API; replaced by the objective-execution types. Remove with GoalCompatibilityAdapter when no caller sends legacy goal actions.
+ */
 export interface LegacyGoalStart {
 	goalId: string;
 	userGoal: string;
 	tokenBudget?: number;
 }
 
+/**
+ * @deprecated Shape of the legacy goal action API; replaced by the objective-execution types. Remove with GoalCompatibilityAdapter when no caller sends legacy goal actions.
+ */
 export interface LegacyRequirement {
 	id: string;
 	description: string;
 }
 
+/**
+ * @deprecated Shape of the legacy goal action API; replaced by the objective-execution types. Remove with GoalCompatibilityAdapter when no caller sends legacy goal actions.
+ */
 export interface LegacyEvidence {
 	id: string;
 	kind: GoalEvidenceKind;
@@ -27,6 +36,9 @@ export interface LegacyEvidence {
 	outcome?: GoalEvidenceOutcome;
 }
 
+/**
+ * @deprecated Shape of the legacy goal action API; replaced by the objective-execution types. Remove with GoalCompatibilityAdapter when no caller sends legacy goal actions.
+ */
 export interface LegacySatisfyRequirement {
 	requirementId: string;
 	evidenceIds: readonly string[];

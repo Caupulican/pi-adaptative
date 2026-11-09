@@ -18,6 +18,9 @@ import {
 	type ContinuousChatLegacyEntrySource,
 } from "./continuous-chat-legacy-import.ts";
 
+/**
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export type LegacySourceIdentity =
 	| { kind: "header"; header: SessionHeader }
 	| { kind: "headerless"; revision: Stats; sessionId: string };
@@ -101,7 +104,11 @@ async function* readLines(file: FileHandle, size: number, signal?: AbortSignal) 
 	if (length > 0) yield finish();
 }
 
-/** Opens one revision for iteration and exact-ID lookup. No lookup reopens the path or rescans the source. */
+/**
+ * Opens one revision for iteration and exact-ID lookup. No lookup reopens the path or rescans the source.
+ *
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export async function openLegacySessionEntries(
 	path: string,
 	identity: LegacySourceIdentity,
@@ -237,6 +244,9 @@ export async function openLegacySessionEntries(
 	}
 }
 
+/**
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export async function* streamLegacySessionEntries(path: string, identity: LegacySourceIdentity, signal?: AbortSignal) {
 	const source = await openLegacySessionEntries(path, identity, signal);
 	try {

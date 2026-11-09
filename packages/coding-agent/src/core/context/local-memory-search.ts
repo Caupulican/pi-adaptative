@@ -1,3 +1,6 @@
+/**
+ * Owns the tokenizing, overlap scoring, request filtering and ranked search that local memory providers run over in-memory items.
+ */
 import type { MemoryItem, MemoryRef, MemorySearchRequest, MemorySearchResult } from "./memory-provider-contract.ts";
 
 export interface LocalMemorySearchStrategy {

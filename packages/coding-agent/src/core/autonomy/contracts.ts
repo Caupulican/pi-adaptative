@@ -161,6 +161,15 @@ export interface WorkerCommandReceipt {
 	/** Absent when the tool reported none (killed, or a tool that does not run a process). */
 	readonly exitCode?: number;
 	readonly durationMs?: number;
+	/**
+	 * The stakes facts of the full command or code, scanned when the receipt was built (the head above is bounded, so a scan of
+	 * it misses what lies past it). Absent on a receipt written before the scan: its stakes are read from the head then.
+	 */
+	readonly stakesFacts?: readonly string[];
+	/** The `pi_tools` file writes the scanned python counted, each a changed-file fact (on a python receipt that was scanned). */
+	readonly stakesFileWrites?: number;
+	/** Python files of this call the host did not read for their stakes: a `scriptPath` run whose scan was not recorded. */
+	readonly stakesUnread?: number;
 	// No output path: a worker's saved full output lives in its scratch directory, removed when the worker ends.
 }
 

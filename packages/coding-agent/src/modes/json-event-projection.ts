@@ -1,3 +1,6 @@
+/**
+ * Projects session events onto the bounded JSON streaming wire contract, capping assistant stream deltas by bytes.
+ */
 import type { AssistantMessageEvent } from "@caupulican/pi-ai";
 import type { AgentSessionEvent } from "../core/agent-session-contracts.ts";
 

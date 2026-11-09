@@ -1,3 +1,6 @@
+/**
+ * Derives a local model's context length and KV-cache type from host memory and model shape, and names the derived Ollama model refs and Modelfile.
+ */
 const CONTEXT_RUNGS = [4_096, 8_192, 16_384, 32_768] as const;
 const DEFAULT_HEADROOM_FRACTION = 0.8;
 const F16_BYTES = 2;

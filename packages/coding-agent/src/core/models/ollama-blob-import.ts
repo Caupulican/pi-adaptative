@@ -1,3 +1,6 @@
+/**
+ * Verifies a model blob file's size and SHA-256 in bounded memory and imports it into Ollama through a private staged copy, upload and cache verification.
+ */
 import { createHash } from "node:crypto";
 import type { FileHandle } from "node:fs/promises";
 import { lstat, mkdtemp, open, realpath, rm } from "node:fs/promises";

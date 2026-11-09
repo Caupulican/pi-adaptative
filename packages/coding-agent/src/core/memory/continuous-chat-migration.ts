@@ -55,7 +55,11 @@ export class ContinuousChatMigrationCorruptError extends Error {
 	}
 }
 
-/** The legacy forget state is unknown or unavailable, so no legacy session can be decided and nothing is imported. */
+/**
+ * The legacy forget state is unknown or unavailable, so no legacy session can be decided and nothing is imported.
+ *
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export class ContinuousChatMigrationBlockedError extends Error {
 	constructor(reason: string) {
 		super(`Legacy memory import is blocked and nothing was imported: ${reason}`);
@@ -106,6 +110,8 @@ async function readLegacyForgets(
  * The real forget predicate of the legacy import. The legacy store's forget state is read once, when the predicate is
  * made. An unknown or unavailable state throws `ContinuousChatMigrationBlockedError` here, before any session is
  * decided, so no import rests on evidence that cannot be proven.
+ *
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
  */
 export async function createContinuousChatLegacyForgetPredicate(
 	legacy: Pick<TranscriptSummaryStore, "root" | "readForgottenSessions">,
@@ -182,6 +188,8 @@ async function readMarkerState(
  * The legacy-import marker over `migration.json` in the chat's root directory, the only durable record of the import.
  * `read` is undefined until the import writes its state. `write` replaces the file atomically with the normalized state
  * and refuses a state that does not match the schema.
+ *
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
  */
 export function createContinuousChatLegacyImportMarker(
 	store: ContinuousChatMetadataStore,
@@ -312,12 +320,19 @@ export function createContinuousChatSessionLedger(store: ContinuousChatMetadataS
 	};
 }
 
-/** The project whose legacy sessions are listed: the same scope the transcript index reads. */
+/**
+ * The project whose legacy sessions are listed: the same scope the transcript index reads.
+ *
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export interface ContinuousChatLegacySessionScope {
 	readonly cwd: string;
 	readonly agentDir: string;
 }
 
+/**
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export interface ContinuousChatLegacySessionSkip {
 	/** The session id from the header, or the file name when the header gives no usable id. */
 	readonly sessionId: string;
@@ -325,6 +340,9 @@ export interface ContinuousChatLegacySessionSkip {
 	readonly reason: string;
 }
 
+/**
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export interface ContinuousChatLegacySessionListing {
 	/** Readable sessions, intact or repaired, by start time then file name. Each one's entries keep their file order. */
 	readonly sessions: ContinuousChatLegacySession[];
@@ -334,14 +352,22 @@ export interface ContinuousChatLegacySessionListing {
 	readonly invalid: ContinuousChatLegacySessionSkip[];
 }
 
-/** One session file as the legacy import reads it: a session, a transient failure, a permanent fault, or nothing. */
+/**
+ * One session file as the legacy import reads it: a session, a transient failure, a permanent fault, or nothing.
+ *
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export type ContinuousChatLegacySessionReading =
 	| { kind: "session"; session: ContinuousChatLegacySession }
 	| { kind: "blocked"; sessionId: string; reason: string }
 	| { kind: "invalid"; sessionId: string; reason: string }
 	| { kind: "empty" };
 
-/** The repair of a file that holds a session's body without its header line. The file itself is never rewritten. */
+/**
+ * The repair of a file that holds a session's body without its header line. The file itself is never rewritten.
+ *
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
+ */
 export const CONTINUOUS_CHAT_LEGACY_HEADER_REPAIR = "session header reconstructed from the file name";
 
 /** The kernel's session file name: `<start time with ':' and '.' as '-'>_<session id>.jsonl`. */
@@ -451,6 +477,8 @@ async function readHeaderlessSessionFile(
  * blocked: the failure is transient and retried. A file whose header id is not a valid session id, whose header time
  * is not a time, or whose first line is not a session header and that cannot be repaired from its file name is invalid:
  * the fault is in the content and permanent. A zero-byte file holds no session and is not listed.
+ *
+ * @deprecated Reads a session file in the earlier layout for the legacy import, parent reconciliation and ICM recovery; remove when no host can hold a file in that layout.
  */
 export async function readContinuousChatLegacySessionFile(
 	path: string,
@@ -518,6 +546,8 @@ function compareLegacySessions(left: ContinuousChatLegacySession, right: Continu
  * already-selected session are deduplicated, preserving first-directory precedence, except that an intact file always
  * wins over a header reconstructed from a file name; a repaired copy left out is listed as invalid, so its file stays
  * accounted for. The current session is not excluded here: the caller excludes it, because it is logged live.
+ *
+ * @deprecated Part of the one-time import of earlier continuous-chat session files; replaced by the continuous-chat store. Remove with importContinuousChatLegacyHistory once no host can hold a session file in an earlier layout.
  */
 export async function listContinuousChatLegacySessions(
 	scope: ContinuousChatLegacySessionScope,

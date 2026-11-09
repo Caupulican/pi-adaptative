@@ -1,6 +1,7 @@
 import { type Static, Type } from "typebox";
 import type { TruncationResult } from "../../../kernel/node.ts";
 import type { ExecutionEnvironment } from "../../execution-environment.ts";
+import type { ScriptStakes } from "../../proof/proof-stakes.ts";
 import type { ToolBridgeReport } from "../tool-bridge.ts";
 import {
 	DEFAULT_TOOL_BRIDGE_MAX_CALLS,
@@ -98,6 +99,8 @@ export interface PythonToolDetails {
 	stderrOutputError?: string;
 	/** The calls the script made through `pi_tools`, when it named `tools`. */
 	toolBridge?: ToolBridgeReport;
+	/** For `scriptPath`: the stakes the host read from the script before it ran (the scan, or why it was not read). */
+	scriptStakes?: ScriptStakes;
 }
 
 export interface PythonExecutionRequest {

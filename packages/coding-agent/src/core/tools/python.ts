@@ -5,10 +5,12 @@ import { type AgentTool, AgentToolExecutionError } from "../../kernel/types.ts";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { type PathInputOptions, resolvePath } from "../../utils/paths.ts";
 import { waitForOwnedProcessTreeWithTermination } from "../../utils/process-group-wait.ts";
+import { readScopeRefusal, sessionReadScope } from "../autonomy/session-read-scope.ts";
 import { composeExecutionEnvironment, type ExecutionEnvironment } from "../execution-environment.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { withoutHarnessLaunchEnv } from "../harness-environment.ts";
 import { awaitPreflight } from "../preflight.ts";
+import { MAX_SCRIPT_STAKES_FILE_BYTES, type ScriptStakes, scriptStakesOf } from "../proof/proof-stakes.ts";
 import { ensurePythonRuntime, type PythonRuntimeOutcome } from "../python-runtime.ts";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
 import {
@@ -172,6 +174,29 @@ function createLocalPythonOperations(): PythonOperations {
 	};
 }
 
+/**
+ * The stakes the host reads from a python file before its call runs, so the file's facts are recorded whether or not the run
+ * succeeds. A file outside the read scope, over the cap, unreadable, or held by a custom backend the host cannot read is
+ * unread, with its plain reason; the stakes reader rates an unread file as an elevated fact.
+ */
+async function readScriptStakes(
+	scriptPath: string,
+	cwd: string,
+	localBackend: boolean,
+	signal?: AbortSignal,
+): Promise<ScriptStakes> {
+	if (!localBackend) return { status: "unread", reason: "a custom execution backend holds the script" };
+	if (readScopeRefusal(sessionReadScope({ cwd, agentDir: getAgentDir() }), scriptPath) !== undefined)
+		return { status: "unread", reason: "outside the read scope" };
+	try {
+		const { size } = await stat(scriptPath);
+		if (size > MAX_SCRIPT_STAKES_FILE_BYTES) return { status: "unread", reason: "larger than the read cap" };
+		return scriptStakesOf(await readFile(scriptPath, { encoding: "utf8", signal }));
+	} catch {
+		return { status: "unread", reason: "unreadable" };
+	}
+}
+
 function renderStreamNotice(label: string, path: string | undefined, error: string | undefined): string | undefined {
 	if (path) return `[${label} truncated; full output: ${path}]`;
 	if (error) return `[${label} truncated; full-output artifact failed: ${error}]`;
@@ -200,6 +225,8 @@ export function createPythonToolDefinition(
 		stripAtPrefix: options.operations === undefined,
 	});
 	const resolveRuntime = options.resolveRuntime ?? (() => ensurePythonRuntime({ silent: true }));
+	// A custom backend runs Python where its files are, so the host reads a script's stakes only under the local backend.
+	const localBackend = options.operations === undefined;
 	const operations = options.operations ?? createLocalPythonOperations();
 	const mutationScope = options.mutationScope;
 	const mutationAnnouncer = options.mutationAnnouncer;
@@ -256,6 +283,8 @@ export function createPythonToolDefinition(
 			await inspectPythonPath(cwd, "cwd", operations, signal);
 			const scriptPath = hasScript ? resolvePythonToolPath(cwd, input.scriptPath as string, pathOptions) : undefined;
 			if (scriptPath !== undefined) await inspectPythonPath(scriptPath, "scriptPath", operations, signal);
+			const scriptStakes =
+				scriptPath === undefined ? undefined : await readScriptStakes(scriptPath, baseCwd, localBackend, signal);
 			const reduceStdout = input.fullOutput !== true && reductionEnabled;
 			let reductionOptions: ReduceToolOutputOptions | undefined;
 			if (reduceStdout) {
@@ -516,6 +545,7 @@ export function createPythonToolDefinition(
 						stdoutOutputError: snapshots.stdout.fullOutputError,
 						stderrOutputError: snapshots.stderr.fullOutputError,
 						...(bridgeReport ? { toolBridge: bridgeReport } : {}),
+						...(scriptStakes ? { scriptStakes } : {}),
 					},
 				};
 			} finally {

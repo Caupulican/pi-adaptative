@@ -1,3 +1,6 @@
+/**
+ * Binds a tool invocation to its host execution context and derives the one scope identity shared by admission, handoff and recovery.
+ */
 import type { Static, TSchema } from "typebox";
 import { captureExecutionContext, type ExecutionContext } from "./execution-context.ts";
 import type { ExecutionPathAuthority } from "./execution-paths.ts";

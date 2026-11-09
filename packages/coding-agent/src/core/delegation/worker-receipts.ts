@@ -6,9 +6,15 @@
 
 import { createHash } from "node:crypto";
 import type { WorkerCommandReceipt } from "../autonomy/contracts.ts";
+import { proofCommandEdge, pythonCodeFacts, scriptStakesFromDetail } from "../proof/proof-stakes.ts";
 import { containsCredential } from "../system-one/projector.ts";
+import { shellWord } from "../tools/shell-command-parser.ts";
 import { boundedText } from "../util/bounded-line.ts";
-import { MAX_WORKER_CLAIM_COMMAND_CHARS, MAX_WORKER_CLAIM_COMMAND_RECEIPTS } from "./worker-claim.ts";
+import {
+	MAX_WORKER_CLAIM_COMMAND_CHARS,
+	MAX_WORKER_CLAIM_COMMAND_RECEIPTS,
+	MAX_WORKER_CLAIM_STAKES_FACTS,
+} from "./worker-claim.ts";
 
 /** Tools that run a command the worker can later claim a result for. */
 const COMMAND_TOOLS: ReadonlySet<string> = new Set(["bash", "run_process", "python"]);
@@ -19,7 +25,11 @@ function commandOf(toolName: string, args: unknown): string | undefined {
 	if (!args || typeof args !== "object" || Array.isArray(args)) return undefined;
 	const record = args as Record<string, unknown>;
 	if (toolName === "bash") return typeof record.command === "string" ? record.command : undefined;
-	if (toolName === "python") return typeof record.code === "string" ? record.code : undefined;
+	// A script run by path is recorded by its path; the stakes of the script come from what the host read when the call ran.
+	if (toolName === "python") {
+		if (typeof record.code === "string") return record.code;
+		return typeof record.scriptPath === "string" && record.scriptPath.length > 0 ? record.scriptPath : undefined;
+	}
 	if (typeof record.executable !== "string") return undefined;
 	if (record.args !== undefined && (!Array.isArray(record.args) || record.args.some((arg) => typeof arg !== "string")))
 		return undefined;
@@ -98,9 +108,46 @@ export function isReceiptTool(toolName: string): boolean {
 	return COMMAND_TOOLS.has(toolName);
 }
 
+/** A run_process call as the one shell line it runs: its program and its arguments, each one shell word. */
+function processLine(record: Record<string, unknown>): string | undefined {
+	if (typeof record.executable !== "string") return undefined;
+	const args = Array.isArray(record.args) ? record.args.filter((arg): arg is string => typeof arg === "string") : [];
+	return [record.executable, ...args].map(shellWord).join(" ");
+}
+
+/**
+ * The stakes facts of one finished call, scanned from its full command or code (never from the bounded head). A python
+ * script run by path carries the facts the host read from it when it ran; a run whose read is not recorded counts as unread.
+ */
+function callStakes(
+	toolName: string,
+	args: unknown,
+	details: unknown,
+): Pick<WorkerCommandReceipt, "stakesFacts" | "stakesFileWrites" | "stakesUnread"> {
+	const record = (args ?? {}) as Record<string, unknown>;
+	if (toolName === "python") {
+		if (typeof record.code === "string") {
+			const scan = pythonCodeFacts(record.code);
+			return { stakesFacts: capStakesFacts(scan.operations), stakesFileWrites: scan.fileWrites };
+		}
+		const detailRecord = (details ?? {}) as Record<string, unknown>;
+		const script = scriptStakesFromDetail(detailRecord.scriptStakes);
+		return script?.status === "read"
+			? { stakesFacts: capStakesFacts(script.operations), stakesFileWrites: script.fileWrites }
+			: { stakesFacts: [], stakesUnread: 1 };
+	}
+	const line = toolName === "bash" ? record.command : processLine(record);
+	const edge = typeof line === "string" ? proofCommandEdge(line) : undefined;
+	return { stakesFacts: edge === undefined ? [] : [edge] };
+}
+
+function capStakesFacts(facts: readonly string[]): string[] {
+	return [...new Set(facts)].slice(0, MAX_WORKER_CLAIM_STAKES_FACTS);
+}
+
 /**
  * The receipt for one finished tool call, or undefined when the tool is not one that runs a command.
- * The command is bounded and withheld entirely when it carries a credential.
+ * The command is bounded and withheld entirely when it carries a credential; its stakes are scanned before the bound.
  */
 export function commandReceiptFor(input: {
 	requestId: string;
@@ -119,6 +166,7 @@ export function commandReceiptFor(input: {
 		id: workerCommandReceiptId(input.requestId, input.toolCallId),
 		tool: input.toolName,
 		...workerCommandEvidence(command),
+		...callStakes(input.toolName, input.args, input.result.details),
 		isError: input.isError,
 		...(exitCode !== undefined ? { exitCode } : {}),
 		...(durationMs !== undefined ? { durationMs } : {}),

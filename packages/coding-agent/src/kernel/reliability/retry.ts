@@ -1,3 +1,6 @@
+/**
+ * Defines the retry backoff policy, computes retry delays from provider retry-after and jitter, and sleeps abortably on an injected timer port.
+ */
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../timer-port.ts";
 
 /** Retry backoff policy. jitterRatio 0 reproduces legacy fixed 2s/4s/8s behavior. */

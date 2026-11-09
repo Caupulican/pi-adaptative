@@ -1,3 +1,6 @@
+/**
+ * Converts fetched web content to Markdown, text or HTML, degrading Markdown to a linear text extract when the conversion work budget is exceeded.
+ */
 import { Parser } from "htmlparser2";
 import TurndownService from "turndown";
 

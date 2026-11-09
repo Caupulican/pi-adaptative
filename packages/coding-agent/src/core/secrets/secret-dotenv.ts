@@ -1,3 +1,6 @@
+/**
+ * Validates, parses and formats dotenv documents of secret variables under limits on name, value, document size and variable count.
+ */
 const ENV_NAME_RE = /^[A-Za-z_][A-Za-z0-9_]*$/;
 
 export const SECRET_VARIABLE_NAME_MAX_CHARS = 128;

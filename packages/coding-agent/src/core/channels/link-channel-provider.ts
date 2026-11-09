@@ -87,7 +87,8 @@ export class LinkChannelProvider implements ChannelProvider {
 		const [address, id] = (message.address ?? "").split("|");
 		const client = address === undefined ? undefined : this.clients.get(address);
 		if (!client || !id) throw new Error("the answer has no hub to go to");
-		if (!client.reply(id, message.text)) throw new Error("the hub is not connected");
+		// An unset `final` is an in-turn message: it goes to the hub as an interim answer, so the ask's lane stays open.
+		if (!client.reply(id, message.text, message.final === true)) throw new Error("the hub is not connected");
 	}
 
 	stop(): void {

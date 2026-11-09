@@ -126,12 +126,17 @@ function unmatchedCommandReason(branch: ReturnType<SessionManager["getBranch"]>)
  * outcome decides trust. Exact command citations select the newest attempt, including failures and
  * unanswered calls, so they cannot fall back to an earlier pass. Arbitrary argument substrings and
  * model-written summaries never establish either identity or a passing test outcome.
+ *
+ * A verification receipt (`details.piVerification`) is trusted only when the producing call names a tool the host's registry
+ * holds as its builtin definition (`isBuiltinTool`). A tool an extension registers, under any name or over a builtin's name,
+ * can return the same details, so its receipt never proves a test.
  */
 export function resolveSessionToolEvidence(
 	sessionManager: Pick<SessionManager, "getBranch">,
 	backgroundTasks: readonly EvidenceTask[],
 	uri: string,
 	kind: "tool" | "test",
+	isBuiltinTool: (toolName: string) => boolean,
 ): GoalToolEvidenceResolution {
 	const locator = uri.trim();
 	if (!locator) return { verified: false, reason: "cite a producing toolCallId or its exact command" };
@@ -161,13 +166,15 @@ export function resolveSessionToolEvidence(
 		if (call) break;
 	}
 	if (!call) return { verified: false, reason: unmatchedCommandReason(branch) };
+	// Only the host's builtin definition of the producing tool may prove a verification (see the function's note).
+	const builtinProducer = isBuiltinTool(call.name);
 
 	const background = task ?? findBackgroundToolTask(backgroundTasks, call.id);
 	if (background) {
 		if (background.status === "running") {
 			return { verified: false, reason: `the producing background task is ${background.status}` };
 		}
-		const verification = retainedVerificationDetails(background)?.piVerification;
+		const verification = builtinProducer ? retainedVerificationDetails(background)?.piVerification : undefined;
 		if (
 			kind === "test" &&
 			(background.status !== "completed" ||
@@ -195,7 +202,7 @@ export function resolveSessionToolEvidence(
 		if (result.details && typeof result.details === "object" && "taskId" in result.details) {
 			return { verified: false, reason: "the background task's authoritative outcome is unavailable" };
 		}
-		const verification = retainedVerificationDetails(result.details)?.piVerification;
+		const verification = builtinProducer ? retainedVerificationDetails(result.details)?.piVerification : undefined;
 		if (
 			kind === "test" &&
 			(result.isError || !isPassingTestVerification(verification) || verification.originTaskId !== undefined)

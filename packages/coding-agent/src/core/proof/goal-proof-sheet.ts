@@ -128,11 +128,20 @@ export function buildGoalProofSheet(input: GoalProofSheetInput): { text: string;
 			),
 		...claimed,
 	];
+	// A python-file call's script was read by the host when it ran, and its recorded scan is taken as it stands. A call that
+	// recorded none (a failed run, or a record from before the scan) is unread: never read as a clean script.
+	const scriptFiles = lifetimeCommands.filter((command) => command.language === "python-file");
+	const scriptScans = scriptFiles.flatMap((command) =>
+		command.scriptStakes?.status === "read" ? [command.scriptStakes] : [],
+	);
 	const ownStakes = readProofStakes({
 		changedFiles: changedFiles ?? [],
 		protectedFiles: protectedChangedFiles(changedFiles ?? [], input.cwd, input.agentDir),
 		commands: lifetimeCommands.filter((command) => command.language === undefined).map((command) => command.command),
 		scripts: lifetimeCommands.filter((command) => command.language === "python").map((command) => command.command),
+		scannedFacts: scriptScans.flatMap((scan) => scan.operations),
+		scannedFileWrites: scriptScans.reduce((total, scan) => total + scan.fileWrites, 0),
+		unreadScripts: scriptFiles.length - scriptScans.length,
 		spendUsd: (state.continuationSpendUsd ?? 0) + (state.continuationWorkerSpendUsd ?? 0),
 		failedChecks: checks.filter((check) => !check.passed).length,
 		inconclusive: inconclusive.length,

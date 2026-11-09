@@ -1,3 +1,8 @@
+/**
+ * Tool names of the goal surface: the lifecycle tools the model calls, and the legacy `goal` tool name that a continuation still recognizes.
+ */
+
+/** The combined `goal` tool: still in the default tool surface (the only tool with add_evidence and add_requirement) next to the lifecycle tools. */
 export const LEGACY_GOAL_TOOL_NAME = "goal" as const;
 
 /** Compact provider-neutral lifecycle surface mirrored from Codex's durable goal contract. */

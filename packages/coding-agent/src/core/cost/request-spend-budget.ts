@@ -1,3 +1,6 @@
+/**
+ * Owns the spend budget shared by a sequence of model requests, with projected admission, measured settlement and the refusal error for a controlled spending hold.
+ */
 import { harnessLog } from "../../kernel/harness-log.ts";
 
 /** Controlled spending hold; callers must not retry it as a provider outage. */

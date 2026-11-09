@@ -148,6 +148,8 @@ function migrateLegacySessionStore(agentDir: string, sessionId: string, store: L
 /**
  * Move recognized context payloads from both historical layouts into the single leased session
  * namespace. Unknown files, symlinks, active runs, and conflicting destinations are left untouched.
+ *
+ * @deprecated Moves context payloads from the two historical store layouts into the current leased session namespace. Remove with its two callers (migrations.ts and context-pipeline.ts) once every host has run it.
  */
 export function migrateLegacyContextStores(agentDir: string, onlySessionId?: string): void {
 	for (const store of legacyContextStores(agentDir)) {

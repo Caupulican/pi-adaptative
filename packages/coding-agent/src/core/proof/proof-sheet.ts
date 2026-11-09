@@ -12,7 +12,7 @@ import { stripAnsi } from "../../utils/ansi.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "../goals/goal-tool-names.ts";
 import { redactKnownSecrets, redactTokenShapes } from "../security/secret-text.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
-import { isCheckCommand, type ProofStakes } from "./proof-stakes.ts";
+import { isCheckCommand, type ProofStakes, type ScriptStakes } from "./proof-stakes.ts";
 
 export const PROOF_SHEET_CUSTOM_TYPE = "proof-sheet";
 export const PROOF_SHEET_MAX_BYTES = 6 * 1024;
@@ -50,9 +50,12 @@ export interface ProofCommand {
 	readonly ref?: string;
 	/**
 	 * Set for a `python` tool call. `python`: the text is the python source the call ran. `python-file`: the text is the path
-	 * of a file it ran, whose source the host did not read; neither reader takes a shell or code fact from it.
+	 * of a file it ran; the host reads that file's stakes when the call runs (`details.scriptStakes`), and the stakes reader
+	 * takes its facts from `scriptStakes` alone, never from the path.
 	 */
 	readonly language?: "python" | "python-file";
+	/** The stakes the host read from a `python-file` call's script when it ran; absent when the call recorded none. */
+	readonly scriptStakes?: ScriptStakes;
 }
 
 /** A check that ran: what it covers by requirement id and which changed paths it names. */

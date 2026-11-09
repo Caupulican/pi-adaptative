@@ -9,7 +9,7 @@
  * owner never linked starts nothing for it. Released once no link remains and its last job has ended (`retire`).
  */
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { lstatSync, mkdtempSync, readdirSync, rmdirSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
@@ -20,6 +20,7 @@ import type { WorkerDelegationRequest } from "../delegation/worker-delegation-re
 import { blockerForSourceCode } from "../delegation/worker-outcome.ts";
 import type { BlockerCode, OutcomeStatus } from "../delegation/worker-outcome-contract.ts";
 import type { WorkerResultContract } from "../orchestration/contracts.ts";
+import { isProcessAlive } from "../process-liveness.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { boundedUtf8Text } from "../util/bounded-line.ts";
@@ -97,6 +98,13 @@ function isSelf(owner: ProcessOwner | undefined, self: ProcessOwner): boolean {
 	return owner !== undefined && owner.pid === self.pid && owner.startTime === self.startTime;
 }
 
+/**
+ * An answer-only job's empty directory is `pi-job-<pid>-<random>` (mkdtemp adds six characters): the runner's pid is in
+ * the name, so a runner that died before recording the directory leaves one that a later runner can judge.
+ */
+const JOB_DIRECTORY_PREFIX = "pi-job-";
+const JOB_DIRECTORY = /^pi-job-(\d+)-[A-Za-z0-9]{6}$/;
+
 /** The task the worker receives: host words around the placer machine's request, which stays fenced as theirs. */
 function jobInstructions(record: ExecutorJobRecord): string {
 	const reach = record.checkout
@@ -161,6 +169,46 @@ export class JobRunner {
 		this.maybeRetire();
 	}
 
+	/**
+	 * Removes the empty directories a runner left when it died between making one and recording it: a `pi-job-<pid>-*`
+	 * directory of this user whose process is gone and that no executor record names. Liveness decides, not the lock. A
+	 * live owner, a name a record holds, another user's entry, a link and a name that does not parse are left alone.
+	 */
+	private sweepOrphanWorkspaces(): void {
+		const named = new Set(
+			this.store.in.list().flatMap((record) => (record.workspace === undefined ? [] : [record.workspace])),
+		);
+		const base = tmpdir();
+		const owner = process.getuid?.();
+		let names: string[];
+		try {
+			names = readdirSync(base);
+		} catch (error) {
+			// An unreadable temp directory skips the sweep; it never stops the runner from arming.
+			harnessLog.warn("link", "the temp directory could not be listed for the job directory sweep", {
+				reason: error instanceof Error ? error.name : "unknown",
+			});
+			return;
+		}
+		for (const name of names) {
+			const match = JOB_DIRECTORY.exec(name);
+			if (!match) continue;
+			const path = join(base, name);
+			const stat = lstatSync(path, { throwIfNoEntry: false });
+			if (!stat?.isDirectory() || (owner !== undefined && stat.uid !== owner)) continue;
+			if (named.has(path) || isProcessAlive(Number(match[1]))) continue;
+			try {
+				// Only an EMPTY directory goes: a runner of another agent directory sharing this temp base may still use one.
+				rmdirSync(path);
+			} catch (error) {
+				if ((error as NodeJS.ErrnoException).code === "ENOTEMPTY") continue;
+				harnessLog.warn("link", "a leftover job directory could not be removed", {
+					reason: error instanceof Error ? error.name : "unknown",
+				});
+			}
+		}
+	}
+
 	private maybeRetire(): void {
 		if (this.retiring && this.tracked.size === 0 && this.starting.size === 0) this.dispose();
 	}
@@ -194,6 +242,7 @@ export class JobRunner {
 			if (record.state !== "terminal") continue;
 			if (record.workspace !== undefined) rmSync(record.workspace, { recursive: true, force: true });
 		}
+		this.sweepOrphanWorkspaces();
 		this.session.acknowledgePlacedJobTerminals(
 			this.store.in
 				.list()
@@ -248,7 +297,8 @@ export class JobRunner {
 				}
 			}
 		}
-		// A record leaves the store only once its outcome is acknowledged by the placer; its terminal is settled first.
+		// A record leaves the store only once its outcome is acknowledged by the placer; its terminal is queued for settlement first
+		// (the session settles it in the next microtask, which reads no record of this store).
 		this.session.acknowledgePlacedJobTerminals(
 			this.store.prunable(this.timers.now()).map((record) => placedJobReference(record.placerId, record.jobId)),
 		);
@@ -265,8 +315,9 @@ export class JobRunner {
 		});
 		if (!claimed || !record) return;
 		// An answer-only job starts in an empty directory of its own. The directory is recorded before the worker starts, so a
-		// runner that dies meanwhile leaves a record that names it: the next runner removes it.
-		const workspace = record.checkout ?? mkdtempSync(join(tmpdir(), "pi-job-"));
+		// runner that dies later leaves a record that names it: the next runner removes it. A runner that dies between making
+		// the directory and recording it leaves one no record names: the next runner's sweep removes it (`sweepOrphanWorkspaces`).
+		const workspace = record.checkout ?? mkdtempSync(join(tmpdir(), `${JOB_DIRECTORY_PREFIX}${process.pid}-`));
 		if (record.checkout === undefined)
 			this.store.updateExecuted(record.placerId, record.jobId, (current) => ({ ...current, workspace }));
 		this.starting.add(name);

@@ -26,9 +26,16 @@
 - Review gauge: `/status` shows how many finished results with a proof sheet arrived since the owner's last typed or owner-channel message (harness and routine messages do not reset it), and the host gives one plain notice when the count reaches `proofSheets.reviewWaitingNoticeAt` (default 5, 0 turns it off). It never holds work.
 - A plan step's input digest lists the files each finished input step changed, and an independent verifier of a worker reads the task as it was dispatched, not only the worker's summary.
 - Candidate lessons: a completion the owner sends back to work, a completed goal the owner rewrites and a blocked requirement the owner reopens are kept, with the owner's words and the host's open gaps, in a private bounded store (`state/lesson-candidates.jsonl` in the agent directory, last 200, redacted), appended under a file lock. Nothing reads the store yet.
+- `docs/vocabulary.md` defines one term per concept (owner, worker, lane, attempt, task, objective, goal, plan, machine, peer, hub, join, routine, notice, fleet and the rest), with the preferred term, the words not to use, and a generated column naming the file that defines each type (`scripts/vocabulary-map.mjs --check`, in `check:static`).
+- The architecture map (`docs/architecture.md`) also lists `kernel/`, `modes/`, `packages/ai/src` and `packages/tui/src`, one row per kernel module, and links the vocabulary.
+- Shrink-only ratchets in `check:static`: a header comment for every core, kernel and modes module (`check-header-comments`), a 1,200-line limit on source files (`check-file-size`), an `@deprecated` line on every legacy export (`check-legacy-markers`), and an `Enforced by:` line on every doctrine rule (`check-doctrine-enforcement`).
+- `check-bundled-skills`: every bundled skill passes the skill validator, each tool name a skill tells the agent to call is a harness tool name, and the fan-out limits a skill states match the code.
 
 ### Changed
 
+- Compaction, learning-audit, memory-projection and model-context records (compaction prepared and self-compaction, retention audit, learning audit, knowledge context, continuous-chat view and state, transcript frontier, memory evidence, active skill records (one type per skill) and their exclusions, active goal context, task directory and automation context, side-trip brief, path alias legend, context visibility projection) are host-reserved custom types: an extension's write under one is refused.
+- An extension's `newSession` setup receives a session manager that refuses host-reserved custom-type writes, as `sendMessage` and `appendEntry` already do, and refuses its host-only writers (compaction, request and tool records, parent-input wakes and notes); reads are unchanged.
+- Worker command receipts scan the full command or python code for stakes, not the 240-character head, and carry the facts as `stakesFacts` (forward-only: receipts written earlier read their head).
 - Plan rows name what a waiting step waits for, a hard step's effort, and its attempt, in plain words.
 - The work details overlay switches chat with the rebindable `app.agents.switchChat` action (`c` and Enter by default); its footer names the keys the action has.
 - `/status` shows why a routine paused after failed runs: the number of failed runs and the last failure's first line, in plain words, on the routine's line.
@@ -49,9 +56,22 @@
 - An extension cannot register a tool named `goal`, `create_goal`, `get_goal` or `update_goal` (refused at registration, and from a manifest's lazy tool), and its `tool_result` or `message_end` replacement cannot change a host tool result's proof sheet.
 
 - The `progress` section of `submit_report` is offered only to a routine's run (a compiled `reportsProgress` capability, set when the routine's intent is captured); every other worker's report schema is smaller, a `progress` argument from it is refused, and a routine's brief asks for progress only from a run that is offered it.
+- An answer a linked machine sends before its turn ends is interim (`final: false`): it reaches the chat for that machine and leaves the ask's lane open. The lane still ends on the turn's final answer, the deadline, the offline hold or a revoke. A hub on an older build ignores the field and ends the lane on the first answer, as it did before.
+- Bundled skills that failed the skill validator (`explain-diagram`, `explain-html`, `explain-video`, `icm-architect`, `n-plus-2-architecture`, `pi-harness-learning`, `ste100-writing`, `tool-call-repair`) have the required sections and a quoted description; their guidance is unchanged.
+- The `fan-out-and-review` skill states the current limits (2 to 24 slices, 2 to 8 race candidates) and describes the plan tool's join kinds as they run. The `harness-self-adaptation` skill names the static checks, the CI journeys and the owner's live gate as its proof, not tests.
+- Legacy exports that remain in use carry a `@deprecated` line naming their replacement and the condition for removing them.
+
+### Removed
+
+- The unused `appendLegacyGoalStateSnapshot` writer (goal session state) and the `clearDeprecationWarningsForTests` helper, which had no caller.
 
 ### Fixed
 
+- A diagnostic's first line is cleaned (invisible and control characters removed), then redacted, then bounded, so a secret split by such a character stays masked in notices and scheduler warnings.
+- A goal's test is proven by a test-runner verification only from the host's builtin tool of that name; an extension tool, including one named like a builtin, can no longer prove it.
+- Queued host turns (goal continuations, reflections, host steers) carry a host identity (`host-steer:`, `host-followUp:`) and never count as the owner's words; owner-typed steers keep `steer:`. Records written earlier keep their identity (forward-only).
+- Python stakes: `gh release delete-asset` counts as a release write; an `open()` whose mode is not a string literal rates high; a `scriptPath` script is read for its stakes when it runs (within the read scope, up to 256 KiB), and an unread script rates elevated.
+- A `scriptPath` python run leaves a worker command receipt, and a `run_process` receipt's stakes read the command as the program runs it.
 - A plan update's proof sheet reaches the owner's view, the review gauge and `/quiz`: it is read under the parent-input wrapper that holds its details, where it was never found before.
 - A worker check the host matches to a finished receipt by its command is no longer listed as passed without a host receipt, and a requirement-bound inconclusive item is listed once.
 - Without a read diff, a goal's proof sheet lists the completion account's paths as claimed by the work, not as observed changed files; a blocked reason is shown as what the work says.
@@ -113,6 +133,8 @@
 - The goal tool's proof-sheet failure line is redacted like every other sheet line.
 - Goal user evidence counts only the owner's typed or owner-channel words, as the review gauge does: a harness, routine, extension or third-party message, or one whose origin names nobody, no longer proves a user statement; an unstamped user message proves one only in a branch's legacy prefix (see Changed).
 - A command segment behind a `cd` runs a check through a package launcher (`cd pkg && npx vitest`) and is recognized as a check, as the launcher's first-word form already was.
+- A placed job's terminal acknowledgement runs as one queued pass per job, not inside the lane-record listener that found the terminal.
+- A job runner that died between creating an answer-only job's temp directory and recording it no longer leaves that directory behind: the next runner removes an orphaned `pi-job-*` directory of this user whose process is gone and that no record names.
 
 ## [0.104.46] - 2026-11-08
 

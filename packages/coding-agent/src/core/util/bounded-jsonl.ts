@@ -1,3 +1,6 @@
+/**
+ * Appends JSON records to a JSONL file under byte and record limits, rotating to the newest tail under an exclusive lock.
+ */
 import { appendFileSync, promises as fsPromises, type Stats, statSync } from "node:fs";
 import { withFileLock, withFileLockSync, writeFileAtomic, writeFileAtomicSync } from "./atomic-file.ts";
 import { readBoundedTextFile, readBoundedTextFileSync, sameFileVersion } from "./bounded-file.ts";
