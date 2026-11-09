@@ -2,14 +2,14 @@
 	"sites": [
 		{
 			"file": "packages/coding-agent/src/core/channels/session-channels.ts",
-			"transport": "this.sendParts(",
+			"transport": "sendReplyParts(",
 			"enclosing": ["settleDraft"],
 			"count": 1,
 			"effectCount": 1
 		},
 		{
 			"file": "packages/coding-agent/src/core/channels/session-channels.ts",
-			"transport": "this.sendParts(",
+			"transport": "sendReplyParts(",
 			"enclosing": ["deliverReply"],
 			"count": 1,
 			"reason": "live reply: settleBatch marks the batch replied before the send, and a failed send keeps the answer as a draft"
@@ -62,6 +62,55 @@
 			"enclosing": ["flush"],
 			"count": 1,
 			"reason": "usage receipt keyed by reportId: only a pending receipt is retried, by the next pass"
+		},
+		{
+			"file": "packages/coding-agent/src/core/channels/owner-push.ts",
+			"transport": "provider.send(",
+			"enclosing": ["send"],
+			"count": 1,
+			"reason": "owner push: the push's key is written to the channel journal before the send (a crash loses a push rather than sending it twice), and a failed send is warned, not retried"
+		},
+		{
+			"file": "packages/coding-agent/src/core/channels/reply-parts.ts",
+			"transport": "provider.send(",
+			"enclosing": ["sendReplyParts"],
+			"count": 1,
+			"reason": "the part transport: its callers record the reply first (settleDraft claims the draft through claimThenEffect; deliverReply marks the batch replied before it sends); a draft send journals each accepted part before the next, and a live reply keeps the accepted parts with the draft it leaves on failure"
+		},
+		{
+			"file": "packages/coding-agent/src/core/channels/session-channels.ts",
+			"transport": "provider.send(",
+			"enclosing": ["sendControlReply"],
+			"count": 1,
+			"reason": "control reply: Pi's best-effort answer to an owner control word, sent after the control word is handled; it has no record of its own, and a failed send is warned, not retried"
+		},
+		{
+			"file": "packages/coding-agent/src/core/proactivity/proactivity-controller.ts",
+			"transport": "this.deps.deliverNotes(",
+			"enclosing": ["runOnce"],
+			"count": 1,
+			"reason": "owner-session note: the delivery id is the parent ledger's idempotency key, and the ledger accepts the note canonically before it is consumed, so an accepted note is not delivered again"
+		},
+		{
+			"file": "packages/coding-agent/src/core/background-lane-controller.ts",
+			"transport": "this.deps.deliverNotes(",
+			"enclosing": ["openHostEventSession"],
+			"count": 1,
+			"reason": "port adapter of the host-event session: its root delivery is guarded and receipted by the session controller, and the delivery id is the parent ledger's idempotency key"
+		},
+		{
+			"file": "packages/coding-agent/src/core/background-lane-controller.ts",
+			"transport": "this.deps.deliverNotes(",
+			"enclosing": ["_ensureRoutineScheduler"],
+			"count": 1,
+			"reason": "port adapter of routine intake: announce claims the notice (claimThenEffect) before it calls deliver, and isDelivered reads the same delivery id"
+		},
+		{
+			"file": "packages/coding-agent/src/core/background-lane-controller.ts",
+			"transport": "this.deps.deliverNotes(",
+			"enclosing": ["_composePlanExecutor"],
+			"count": 1,
+			"reason": "port adapter of the plan executor: it skips a delivery the parent ledger holds (isDelivered) and a delivery in flight in this process (delivering); the delivery id is the parent ledger's idempotency key"
 		}
 	]
 }

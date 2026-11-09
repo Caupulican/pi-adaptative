@@ -28,7 +28,7 @@ import {
 export async function readmitSummaryNode(
 	host: Pick<
 		CoordinatorHost,
-		"ports" | "catalog" | "nodeDenied" | "modelWorkBlock" | "readmissionRequest" | "setReadmission" | "judge"
+		"ports" | "catalog" | "nodeDenied" | "modelWorkBlock" | "readmissionRequest" | "holds" | "judge"
 	>,
 	job: TranscriptSummaryJob,
 	token: TranscriptSummaryClaimToken,
@@ -46,7 +46,7 @@ export async function readmitSummaryNode(
 	const prepared = await host.readmissionRequest(node, signal);
 	if (prepared === undefined || signal.aborted) return { kind: "aborted" };
 	if ("wait" in prepared) {
-		host.setReadmission(node.id, "waiting", prepared.wait);
+		host.holds.setReadmission(node.id, "waiting", prepared.wait);
 		switch (prepared.wait) {
 			case "child_not_approved":
 				return { kind: "held", scope: "children", reason: "a child summary is not approved yet" };
@@ -91,11 +91,11 @@ export async function readmitSummaryNode(
 export function enqueueReadmissionJobs(
 	host: Pick<
 		CoordinatorHost,
-		"scheduler" | "ports" | "writer" | "modelWorkBlock" | "readmissionCandidates" | "noteEnqueued" | "markJobsDirty"
+		"run" | "ports" | "modelWorkBlock" | "readmissionCandidates" | "batch" | "markJobsDirty"
 	>,
 ): void {
-	const scheduler = host.scheduler;
-	if (!scheduler || !host.ports.admission || !host.writer || host.modelWorkBlock() !== undefined) return;
+	const scheduler = host.run.scheduler;
+	if (!scheduler || !host.ports.admission || !host.run.writer || host.modelWorkBlock() !== undefined) return;
 	for (const node of host.readmissionCandidates()) {
 		const result = scheduler.enqueueReadmission(
 			{
@@ -111,7 +111,7 @@ export function enqueueReadmissionJobs(
 			host.ports.now(),
 		);
 		if (result.status === "created") {
-			host.noteEnqueued();
+			host.batch.noteEnqueued();
 			host.markJobsDirty();
 		} else if (result.status !== "exists") break;
 	}
@@ -128,14 +128,14 @@ export function readmissionCandidatesOf(
 }
 
 export function unapprovedWaitOf(
-	host: Pick<CoordinatorHost, "catalog" | "readmissionState" | "readmissionFailed">,
+	host: Pick<CoordinatorHost, "catalog" | "holds" | "readmissionFailed">,
 	node: TranscriptSummaryNode,
 ): TranscriptReadmissionWait | undefined {
 	const approval = host.catalog.approval(node);
 	if (approval.approved) return undefined;
 	if (approval.reason === "child_not_approved") return "child_not_approved";
 	if (approval.reason === "text_changed") return "admission_mismatch";
-	const hold = host.readmissionState.get(node.id);
+	const hold = host.holds.readmission.get(node.id);
 	if (hold?.state === "rejected") return "judged_rejected";
 	if (hold?.state === "uncertain") return "judged_uncertain";
 	// An outage is a wait only while its job still retries: a job that ended failed has spent its identity for good.
@@ -149,14 +149,14 @@ export function unapprovedWaitOf(
  * Whether this node's re-admission job ended failed. Read from the scheduler, not from the hold, so it holds after a
  * restart (the holds are per run) and for an outage that exhausted the job's attempts.
  */
-export function readmissionFailedOf(host: Pick<CoordinatorHost, "scheduler">, node: TranscriptSummaryNode): boolean {
+export function readmissionFailedOf(host: Pick<CoordinatorHost, "run">, node: TranscriptSummaryNode): boolean {
 	const identity = readmissionJobKey(
 		node.id,
 		TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
 		summaryTextDigest(node.text),
 		node.recipeVersion,
 	);
-	return host.scheduler?.get(identity)?.state === "failed";
+	return host.run.scheduler?.get(identity)?.state === "failed";
 }
 
 export function readmissionSourceWaitOf(
@@ -173,7 +173,7 @@ export function readmissionSourceWaitOf(
 }
 
 export function readmissionWaitOf(
-	host: Pick<CoordinatorHost, "noteInternalCause" | "noteBenignEvent">,
+	host: Pick<CoordinatorHost, "causes">,
 	node: TranscriptSummaryNode,
 	wait: TranscriptReadmissionWait,
 	cause: string,
@@ -181,13 +181,13 @@ export function readmissionWaitOf(
 	// A wait is a normal state of the judgment, not a fault: it is an event, and never overwrites the active fault cause.
 	// A permanent refusal of a source read is a fault.
 	const record = `re-admission of ${node.id.slice(0, 16)}: ${cause}`;
-	if (wait === "source_read_refused") host.noteInternalCause(record);
-	else host.noteBenignEvent(record);
+	if (wait === "source_read_refused") host.causes.noteInternal(record);
+	else host.causes.noteBenign(record);
 	return wait;
 }
 
 export function readmissionWriteFailure(
-	host: Pick<CoordinatorHost, "readmissionWait" | "live" | "catalog" | "setReadmission">,
+	host: Pick<CoordinatorHost, "readmissionWait" | "live" | "catalog" | "holds">,
 	node: TranscriptSummaryNode,
 	epoch: number,
 	cause: string,
@@ -195,5 +195,5 @@ export function readmissionWriteFailure(
 ): void {
 	const wait = host.readmissionWait(node, transient ? "store_unavailable" : "judgment_discarded", cause);
 	if (!host.live(epoch) || host.catalog.get(node.id) !== node) return;
-	host.setReadmission(node.id, "waiting", wait);
+	host.holds.setReadmission(node.id, "waiting", wait);
 }

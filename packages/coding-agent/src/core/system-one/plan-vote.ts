@@ -6,7 +6,9 @@
  * read in full. The question is unmeasured: it ships without a measured question set.
  */
 
+import { harnessLog } from "../../kernel/harness-log.ts";
 import { choiceAct } from "../decision/thresholds.ts";
+import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { OperationEffectEngine, OperationEvaluation } from "./operation-classifier.ts";
 import { withinPlanRequestBound } from "./plan-request-bound.ts";
 import { noteDecisionTrace } from "./semantic-evaluation-ledger.ts";
@@ -20,8 +22,10 @@ export interface PlanVoteCandidate {
 }
 
 /**
- * The winning node id, or undefined when System One is absent, fails or is not decisive. The Choice is offered over the
- * `eligible` candidates only (the vote's exit V5 names the ones that met every criterion); fewer than two offers no Choice.
+ * The winning node id, or undefined when System One is absent, expired, fails or is not decisive. A failure is logged at
+ * warn with its error class and a bounded, redacted message; the caller reads undefined as no winner. The Choice is offered
+ * over the `eligible` candidates only (the vote's exit V5 names the ones that met every criterion); fewer than two offers
+ * no Choice.
  */
 export async function chooseVoteWinner(
 	engine: OperationEffectEngine | undefined,
@@ -61,8 +65,13 @@ export async function chooseVoteWinner(
 				),
 			{ caller: input.signal },
 		);
-	} catch {
+	} catch (error) {
 		input.signal?.throwIfAborted();
+		// A failed judgment is not an expired one: it is reported, and the vote reads every eligible candidate all the same.
+		harnessLog.warn("plan", "system one could not judge a plan vote; the vote reads every candidate", () => ({
+			error: error instanceof Error ? error.name : typeof error,
+			message: boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error)),
+		}));
 		return undefined;
 	}
 	// An expired request is unjudged: no winner, and the join settles on every eligible candidate.

@@ -32,7 +32,7 @@ import type {
 	ToolCallPreflightRejectionContext,
 	ToolCallStartHook,
 } from "./loop-config.ts";
-import { advanceMessageRevision } from "./message-revision.ts";
+import { advanceMessageContentRevision, advanceMessageRevision } from "./message-revision.ts";
 import { convertToLlm } from "./messages.ts";
 import { sealSystemPrompt } from "./sealed-directives.ts";
 import { createToolFailureContextMemory } from "./tool-failure-memory.ts";
@@ -468,6 +468,7 @@ export class Agent {
 		const record = target as unknown as Record<string, unknown>;
 		for (const key of Object.keys(record)) delete record[key];
 		Object.assign(record, replacement);
+		advanceMessageContentRevision(target);
 		advanceMessageRevision(this._state.messages);
 	}
 
@@ -740,7 +741,8 @@ export class Agent {
 		return sealSystemPrompt(this.projectSystemPrompt?.(this._state.systemPrompt) ?? this._state.systemPrompt);
 	}
 
-	private createContextSnapshot(): AgentContext {
+	/** The system prompt, messages and tools the next request reads, copied out of the state so a caller cannot mutate it. */
+	createContextSnapshot(): AgentContext {
 		return {
 			systemPrompt: this._state.systemPrompt,
 			messages: this._state.messages.slice(),

@@ -640,15 +640,6 @@ async function advanceIcmTransportBackoff(
 	expect(world.timers.advance("continuous-chat", 1), `${label}: exactly one transport retry becomes due`).toBe(1);
 }
 
-/**
- * R10s: after transport recovery is exhausted, a failed leaf is retried by later arrivals, never by an alarm and never by making
- * a root turn wait, on a fresh chat whose only model-generated leaf is message 1. Each scheduler attempt permits three worker-c
- * requests with 2s/4s transport backoffs. The control: after exhaustion, no later arrival means the leaf stays blocked and arms nothing.
- * A failed leaf is eligible again only after several arrivals (messages and turn starts), and twice as many after each further
- * failure, so one follow-up turn does not retry it. Once enough turns have passed, the retry runs in the background after the
- * foreground quiet window while the root turns proceed on the pending reference; it fails again and stays blocked for longer.
- * The following turns retry it once more and publish it.
- */
 type FrameMessage = ScriptedRequest["context"]["messages"][number];
 
 /** The text blocks a request message carries, with the cache boundary each one is marked with. */
@@ -856,6 +847,15 @@ async function verifyFrameCacheLayout(world: HarnessWorld): Promise<void> {
 	expect(await world.disposeSessionInBody(root.session), "the frame-layout root disposes cleanly").toBeUndefined();
 }
 
+/**
+ * R10s: after transport recovery is exhausted, a failed leaf is retried by later arrivals, never by an alarm and never by making
+ * a root turn wait, on a fresh chat whose only model-generated leaf is message 1. Each scheduler attempt permits three worker-c
+ * requests with 2s/4s transport backoffs. The control: after exhaustion, no later arrival means the leaf stays blocked and arms nothing.
+ * A failed leaf is eligible again only after several arrivals (messages and turn starts), and twice as many after each further
+ * failure, so one follow-up turn does not retry it. Once enough turns have passed, the retry runs in the background after the
+ * foreground quiet window while the root turns proceed on the pending reference; it fails again and stays blocked for longer.
+ * The following turns retry it once more and publish it.
+ */
 async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Promise<void> {
 	const trace = world.trace;
 	const label = "r10s";

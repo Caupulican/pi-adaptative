@@ -31,6 +31,14 @@ export class JobHost {
 	private readonly selfId: string;
 	/** Per connection: the highest outbox number already written to it, by record name. */
 	private readonly sent = new Map<string, number>();
+	/**
+	 * Stops a record could not take (a failed write), by peer and job: a placer marks its stop sent once it is written, so nothing else
+	 * resends it on the connection. They are applied again at the next flush of their peer.
+	 */
+	private readonly heldStops = new Map<
+		string,
+		{ readonly peer: string; readonly jobId: string; readonly reason: JobCancelReason }
+	>();
 
 	constructor(store: JobStore, selfId: string) {
 		this.store = store;
@@ -69,7 +77,6 @@ export class JobHost {
 			// A checkout the owner has not readied (its dependencies are not installed) is not a place to run a job.
 			if (!checkout.fact.ready) return { refusal: "needs_setup" };
 		}
-		if (activeExecutorJobs(this.store) >= Math.min(runner.room, settings.jobRoom)) return { refusal: "no_room" };
 		return checkout ? { checkout } : {};
 	}
 
@@ -93,6 +100,13 @@ export class JobHost {
 		const settings = loadLinkSettings(this.store.agentDir);
 		const decision = await this.decide(peer, offer, settings);
 		if ("refusal" in decision) return this.refuse(peer, offer.jobId, decision.refusal);
+		// The room is read and the job admitted in one synchronous step: no offer from any peer is admitted between the two.
+		const runner = readRunner(this.store.agentDir);
+		if (
+			!runner ||
+			activeExecutorJobs(this.store, now, settings.offlineHoldMs) >= Math.min(runner.room, settings.jobRoom)
+		)
+			return this.refuse(peer, offer.jobId, "no_room");
 		const admitted = this.store.admit({
 			v: 1,
 			placerId: peer.machineId,
@@ -120,6 +134,17 @@ export class JobHost {
 			});
 		peer.send({ t: "job.accept", jobId: offer.jobId });
 		this.pump(peer);
+	}
+
+	/**
+	 * An offer whose handling threw (`JobTransport` catches it). The placer is answered at once, not at its deadline: an offer whose job has
+	 * a record is answered as a resend would be (the record holds what was admitted), and an offer that admitted nothing is refused as
+	 * `offer_failed`. A record this build cannot read takes no answer, as in `offer`.
+	 */
+	async offerFailed(peer: LinkPeer, offer: JobOffer): Promise<void> {
+		if (this.store.in.inspect(executorRecordName(peer.machineId, offer.jobId)).kind !== "absent")
+			return this.offer(peer, offer);
+		this.refuse(peer, offer.jobId, "offer_failed");
 	}
 
 	private refuse(peer: LinkPeer, jobId: string, reason: JobRefusal): void {
@@ -155,7 +180,24 @@ export class JobHost {
 	 * read takes a cancel marker beside it (the runner honors it), never a write.
 	 */
 	cancel(peer: LinkPeer, jobId: string, reason: JobCancelReason): void {
-		const outcome = this.store.cancelExecuted(peer.machineId, jobId, reason);
+		const key = `${peer.machineId}:${jobId}`;
+		let outcome: ReturnType<JobStore["cancelExecuted"]>;
+		try {
+			outcome = this.store.cancelExecuted(peer.machineId, jobId, reason);
+		} catch (error) {
+			this.heldStops.set(key, { peer: peer.machineId, jobId, reason });
+			harnessLog.warn(
+				"link",
+				"a placed job's stop could not be recorded; it is held and applied again at the next flush",
+				{
+					peer: peer.machineId,
+					jobId,
+					reason: error instanceof Error ? error.name : "unknown",
+				},
+			);
+			return;
+		}
+		this.heldStops.delete(key);
 		if (outcome === "unchanged") return;
 		journalJob(this.store.agentDir, {
 			side: "executor",
@@ -190,8 +232,10 @@ export class JobHost {
 		this.pump(peer);
 	}
 
-	/** Writes every outbox frame of `peer`'s jobs not yet written on this connection. */
+	/** Writes every outbox frame of `peer`'s jobs not yet written on this connection, after the stops held for it are applied again. */
 	pump(peer: LinkPeer): void {
+		for (const held of [...this.heldStops.values()])
+			if (held.peer === peer.machineId) this.cancel(peer, held.jobId, held.reason);
 		for (const record of this.store.in.list()) {
 			if (record.placerId !== peer.machineId) continue;
 			const name = executorRecordName(record.placerId, record.jobId);

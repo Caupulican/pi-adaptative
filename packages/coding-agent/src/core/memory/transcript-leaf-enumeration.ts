@@ -28,33 +28,34 @@ export const ENUMERATION_PAGE_SPANS = 256;
 export async function enumerateSummaryLeaves(
 	host: Pick<
 		CoordinatorHost,
-		| "scheduler"
+		| "run"
 		| "retentionCutoff"
 		| "proofLedger"
 		| "sessionTimestamp"
 		| "live"
 		| "ports"
-		| "noteInternalCause"
+		| "causes"
 		| "lineageMoved"
 		| "spanTime"
 		| "anchorRefs"
 		| "deferStoreWork"
-		| "parked"
+		| "holds"
+		| "sessions"
 		| "catalog"
 		| "revokeDeadCoverage"
 		| "isExpired"
 		| "markJobsDirty"
-		| "noteEnqueued"
+		| "batch"
 	>,
 	sessionId: string,
 	runtime: SessionRuntime,
 	epoch: number,
 	stamp: string | undefined,
 ): Promise<string | undefined> {
-	const scheduler = host.scheduler;
+	const scheduler = host.run.scheduler;
 	if (!scheduler) return;
 	const cutoff = host.retentionCutoff();
-	runtime.backpressured = false;
+	host.sessions.backpressure(runtime, false);
 	// Under a possibly-lost-proof hold the scheduler admits only sessions known to have started after it: learn
 	// this session's start first (an unavailable listing leaves it held until its next index event).
 	if (host.proofLedger.hold?.cause === "possibly_lost_proof") await host.sessionTimestamp(sessionId);
@@ -66,7 +67,7 @@ export async function enumerateSummaryLeaves(
 		});
 		if (!host.live(epoch)) return;
 		if (page.status !== "ok") {
-			host.noteInternalCause(`enumerating ${sessionId}: ${page.status}: ${page.reason}`);
+			host.causes.noteInternal(`enumerating ${sessionId}: ${page.status}: ${page.reason}`);
 			return `enumerating the lineage: ${page.status}: ${page.reason}`;
 		}
 		// Groups and positions from another lineage than the probe's are never enqueued.
@@ -104,9 +105,9 @@ export async function enumerateSummaryLeaves(
 			// A recovered leaf held for reconciliation: this read of its coverage gives its version 1 key, so its budget
 			// is adopted now (whatever this group leads to below) and the hold released.
 			const jobId = leafJobKey({ sessionId, sourceRefs: refs });
-			if (host.parked.get(jobId)?.scope === "reconciliation") {
+			if (host.holds.parked.get(jobId)?.scope === "reconciliation") {
 				scheduler.reconcileLegacy(jobId, legacyKey);
-				host.parked.delete(jobId);
+				host.holds.unpark(jobId);
 			}
 			const existing = host.catalog.leafAt(sessionId, group.fromIndex);
 			if (existing) {
@@ -130,10 +131,10 @@ export async function enumerateSummaryLeaves(
 						legacyKey,
 					},
 					host.ports.now(),
-					host.parked,
+					host.holds.parked,
 				);
 				if (result.status === "backpressure") {
-					runtime.backpressured = true;
+					host.sessions.backpressure(runtime, true);
 					return;
 				}
 				// Before this run's first acknowledged save: the cursor stays, discovery reconciles every session after it.
@@ -143,14 +144,14 @@ export async function enumerateSummaryLeaves(
 				// session's next index event.
 				if (result.status === "held") {
 					if (result.cause === "capacity") {
-						runtime.backpressured = true;
+						host.sessions.backpressure(runtime, true);
 						host.markJobsDirty();
 					}
 					return;
 				}
-				if (result.status === "created") host.noteEnqueued();
+				if (result.status === "created") host.batch.noteEnqueued();
 			}
-			runtime.next = { fromIndex: group.toIndexExclusive, ordinal: runtime.next.ordinal + 1 };
+			host.sessions.advance(runtime, { fromIndex: group.toIndexExclusive, ordinal: runtime.next.ordinal + 1 });
 		}
 		if (!truncated) return;
 	}

@@ -135,7 +135,8 @@ function isHandoffRecord(value: unknown): value is AutoLearnHandoffRecord {
 				typeof entry.reasonCode === "string" &&
 				optionalString(entry.subject) &&
 				optionalString(entry.detail) &&
-				optionalString(entry.proposalId),
+				optionalString(entry.proposalId) &&
+				optionalString(entry.routeFailure),
 		) &&
 		value.forwarded.every(
 			(entry) =>

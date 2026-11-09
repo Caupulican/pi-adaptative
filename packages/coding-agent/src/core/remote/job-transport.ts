@@ -2,9 +2,15 @@
  * The one router of capability and job frames, attached to whichever link end this process holds: the hub (its joined
  * machines) or a join (the hub). Both ends speak the same frames; which side of a job this machine is follows from
  * the job's stores, never from the link role. On every proven connection it sends this machine's advert (`cap/1`) and
- * a resume of the jobs in flight with that peer (`jobs/1`), then whatever is waiting: offers the owning session queued
- * (the non-host queue: any session writes a pending record, the process holding the link sends it), outbox frames the
- * runner appended, cancels. Waiting work is found by watching the store directories, never by polling.
+ * a resume of the jobs in flight with that peer (`jobs/1`), written once the frames already queued from that peer are handled. Whatever
+ * is waiting is sent too: offers the owning session queued (the non-host queue: any session writes a pending record, the process holding
+ * the link sends it), outbox frames the runner appended, cancels. A store watch may send these before the resume; the receiving side
+ * takes every frame in any order the stores allow, so the order is not load-bearing. Waiting work is found by watching the store
+ * directories, never by polling.
+ *
+ * Every frame from one peer is handled in arrival order, one at a time, through that peer's chain (`receive`). An offer is
+ * decided (admitted or refused) before the frames behind it, so a stop that follows an offer finds the job it stops, and a
+ * resume that follows it sees the record. A frame whose handling throws is logged and the chain goes on.
  *
  * The placer's side is here: a frame from the executor is persisted before it is acknowledged, or acknowledged without being kept
  * when the placer holds no record of its job (nothing can use it, and the executor's outbox must drain); a second outcome with
@@ -55,8 +61,8 @@ export class JobTransport implements LinkPeerListener {
 	private readonly lastAdvert = new Map<string, string>();
 	private capRev = Date.now();
 	private readonly watch: DirectoryWatch;
-	/** Offers are decided one at a time per peer, in arrival order. */
-	private readonly offerChains = new Map<string, Promise<void>>();
+	/** Every frame from a peer is handled after the previous one from that peer has been handled, in arrival order. */
+	private readonly inbound = new Map<string, Promise<void>>();
 	private readonly onFleetChange: () => void;
 
 	constructor(options: { agentDir: string; selfId: string; onFleetChange?: () => void }) {
@@ -91,15 +97,21 @@ export class JobTransport implements LinkPeerListener {
 		});
 		if (peer.features.includes(CAP_FEATURE)) void this.advertise(peer);
 		if (!peer.features.includes(JOBS_FEATURE)) return;
-		const active: JobResumeEntry[] = [
-			...this.host.resumeEntries(peer),
-			...this.placedWith(peer)
-				// A conversation turn is a chat message, not a job the executor holds: it has nothing to resume.
-				.filter((record) => record.state === "accepted" && record.offer.kind !== "ask")
-				.map((record) => ({ jobId: record.jobId, role: "placer" as const, lastAckedSeq: record.lastSeq })),
-		].slice(0, MAX_RESUME_ENTRIES);
-		peer.send({ t: "job.resume", active });
-		this.flush(peer);
+		// The resume names what this machine holds, so it is written after the frames already queued from this peer: an offer decided
+		// after this connection came up still admits its job first, and the resume then names that job.
+		const queued = this.inbound.get(peer.machineId) ?? Promise.resolve();
+		void queued.then(() => {
+			if (this.peers.get(peer.machineId) !== peer) return;
+			const active: JobResumeEntry[] = [
+				...this.host.resumeEntries(peer),
+				...this.placedWith(peer)
+					// A conversation turn is a chat message, not a job the executor holds: it has nothing to resume.
+					.filter((record) => record.state === "accepted" && record.offer.kind !== "ask")
+					.map((record) => ({ jobId: record.jobId, role: "placer" as const, lastAckedSeq: record.lastSeq })),
+			].slice(0, MAX_RESUME_ENTRIES);
+			peer.send({ t: "job.resume", active });
+			this.flush(peer);
+		});
 		this.watch.start();
 	}
 
@@ -113,25 +125,37 @@ export class JobTransport implements LinkPeerListener {
 	receive(machineId: string, frame: JobFrame): void {
 		const peer = this.peers.get(machineId);
 		if (!peer) return;
+		const previous = this.inbound.get(machineId) ?? Promise.resolve();
+		const next = previous
+			.then(() => this.handle(peer, frame))
+			.catch((error: unknown) => {
+				// The chain goes on: a frame that threw is not applied, and the peer's own resend or resume brings it again.
+				harnessLog.warn("link", "a job frame could not be handled", {
+					peer: machineId,
+					frame: frame.t,
+					reason: error instanceof Error ? error.name : "unknown",
+				});
+			});
+		this.inbound.set(machineId, next);
+		if (frame.t === "job.offer") void next.then(() => this.scheduleAdvert());
+	}
+
+	private handle(peer: LinkPeer, frame: JobFrame): void | Promise<void> {
 		switch (frame.t) {
 			case "cap":
-				recordPeerFacts(this.agentDir, machineId, frame.facts);
+				recordPeerFacts(this.agentDir, peer.machineId, frame.facts);
 				this.onFleetChange();
 				return;
 			case "job.offer": {
-				const previous = this.offerChains.get(machineId) ?? Promise.resolve();
-				const next = previous
-					.then(() => this.host.offer(peer, frame.offer))
-					.catch((error: unknown) => {
-						harnessLog.warn("link", "a placed job could not be admitted", {
-							peer: machineId,
-							jobId: frame.offer.jobId,
-							reason: error instanceof Error ? error.name : "unknown",
-						});
+				const offer = frame.offer;
+				return this.host.offer(peer, offer).catch((error: unknown) => {
+					harnessLog.warn("link", "a placed job's offer could not be handled; the placer is answered", {
+						peer: peer.machineId,
+						jobId: offer.jobId,
+						reason: error instanceof Error ? error.name : "unknown",
 					});
-				this.offerChains.set(machineId, next);
-				void next.then(() => this.scheduleAdvert());
-				return;
+					return this.host.offerFailed(peer, offer);
+				});
 			}
 			case "job.ack":
 				this.host.ack(peer, frame.jobId, frame.seq);
@@ -186,10 +210,15 @@ export class JobTransport implements LinkPeerListener {
 						};
 					if (record.outcomeDigest === digest || record.conflict) return undefined;
 					harnessLog.warn("link", "a second, different outcome for a placed job was kept out", {
-						peer: machineId,
+						peer: peer.machineId,
 						jobId: frame.jobId,
 					});
-					journalJob(this.agentDir, { side: "placer", jobId: frame.jobId, peer: machineId, event: "conflict" });
+					journalJob(this.agentDir, {
+						side: "placer",
+						jobId: frame.jobId,
+						peer: peer.machineId,
+						event: "conflict",
+					});
 					return { ...record, conflict: true };
 				});
 				// Persisted first, acknowledged after: an outcome the placer did not keep is resent. An outcome for a job this placer holds
@@ -198,7 +227,7 @@ export class JobTransport implements LinkPeerListener {
 				if (placed === "unreadable") return;
 				if (placed === "absent")
 					harnessLog.info("link", "an outcome for a job with no placed record was acknowledged, not kept", {
-						peer: machineId,
+						peer: peer.machineId,
 						jobId: frame.jobId,
 					});
 				peer.send({ t: "job.ack", jobId: frame.jobId, seq: frame.seq });
@@ -334,10 +363,11 @@ export class JobTransport implements LinkPeerListener {
 		try {
 			const settings = loadLinkSettings(this.agentDir);
 			const checkouts = await offeredCheckouts(settings);
+			const now = Date.now();
 			const facts = localFacts({
 				checkouts: checkouts.map((entry) => entry.fact),
 				runner: readRunner(this.agentDir),
-				activeJobs: activeExecutorJobs(this.store),
+				activeJobs: activeExecutorJobs(this.store, now, settings.offlineHoldMs),
 				acceptsJobs: acceptsJobsFrom(peer, settings),
 			});
 			const key = JSON.stringify(facts);

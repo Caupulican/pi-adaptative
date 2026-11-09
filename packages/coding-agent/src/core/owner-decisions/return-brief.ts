@@ -17,10 +17,20 @@ export const OWNER_RETURN_BRIEF_CUSTOM_TYPE = "owner_return_brief";
 /** What replaces a brief once the turn it was made for is past; the earlier record stays in a classic history. */
 export const RETURN_BRIEF_CLEARED_TEXT = "The return brief above is past; /status has the current state.";
 
-/** The brief a request carries for the owner turn it was made for. `content` is undefined while no brief is current. */
+/**
+ * The brief a request carries for the owner turn it was made for. `content` is undefined while no brief is current.
+ * `commit` runs when the request that carries the brief is committed: only then has the owner been shown its items.
+ */
 export interface ReturnBriefPlan {
 	readonly content: string | undefined;
 	isCurrent(): boolean;
+	commit?(): void;
+}
+
+/** The commits read since the away span, newest first. `capped`: the read stopped at its limit, so the count is at least `shown`. */
+export interface ReturnBriefCommits {
+	readonly shown: readonly { readonly sha: string; readonly subject: string }[];
+	readonly capped: boolean;
 }
 
 const RETURN_BRIEF_SOURCE = "owner-return-brief";
@@ -43,7 +53,7 @@ export interface ReturnBriefFacts {
 	/** Worker outcome status to count, for example `succeeded`. */
 	readonly workerOutcomes: Readonly<Record<string, number>>;
 	/** Undefined when the commit log could not be read: the brief says so and never reports zero commits. */
-	readonly commits: readonly { readonly sha: string; readonly subject: string }[] | undefined;
+	readonly commits: ReturnBriefCommits | undefined;
 	readonly ci?: { readonly conclusion: string; readonly at: number };
 	readonly queue: readonly OwnerDecisionItem[];
 	/** Queue keys the owner has not been shown before. */
@@ -71,20 +81,24 @@ function activityLines(facts: ReturnBriefFacts): { readonly lines: string[]; rea
 	if (workers.length > 0)
 		lines.push(plain(`- Workers: ${workers.map(([status, count]) => `${count} ${status}`).join(", ")}`));
 	if (facts.commits === undefined) lines.push("- Commits: not read");
-	else if (facts.commits.length === 0) lines.push("- Commits: none");
+	else if (facts.commits.shown.length === 0) lines.push("- Commits: none");
 	else {
-		lines.push(`- Commits: ${facts.commits.length}`);
+		const { shown, capped } = facts.commits;
+		const qualifier = capped ? "at least " : "";
+		lines.push(`- Commits: ${qualifier}${shown.length}`);
 		lines.push(
-			...facts.commits
+			...shown
 				.slice(0, COMMITS_SHOWN)
 				.map((commit) => plain(`- ${commit.sha} ${commit.subject}`, COMMIT_LINE_MAX_CHARS)),
 		);
-		if (facts.commits.length > COMMITS_SHOWN)
-			lines.push(`- and ${facts.commits.length - COMMITS_SHOWN} more commits`);
+		if (shown.length > COMMITS_SHOWN) lines.push(`- and ${qualifier}${shown.length - COMMITS_SHOWN} more commits`);
 	}
 	if (facts.ci !== undefined) lines.push(plain(`- CI: ${facts.ci.conclusion}, ${isoOf(facts.ci.at)}`));
 	const happened =
-		facts.plansSettled.length > 0 || workers.length > 0 || (facts.commits?.length ?? 0) > 0 || facts.ci !== undefined;
+		facts.plansSettled.length > 0 ||
+		workers.length > 0 ||
+		(facts.commits?.shown.length ?? 0) > 0 ||
+		facts.ci !== undefined;
 	if (!happened) lines.unshift("- Nothing finished.");
 	const fitted = fitLines(lines, ACTIVITY_MAX_CHARS);
 	if (fitted.hidden > 0) fitted.kept.push(`- and ${fitted.hidden} more lines in /status`);

@@ -1,3 +1,21 @@
+/**
+ * The run-scoped channel a `python` script reaches Pi's tools through (`pi_tools`), and the secret that proves a connection
+ * is the run's own.
+ *
+ * Secret file lifecycle. `openToolBridge` writes the run's secret (32 random bytes, hex) into the run's private `mkdtemp`
+ * directory, with mode `0600`, and names its path in `PI_TOOL_BRIDGE_TOKEN_FILE`. The generated client reads the file and
+ * removes it the first time `pi_tools` is imported, so the secret lives only in that process after the import. What this
+ * leaves, by design:
+ * - A script that never imports `pi_tools` leaves the file readable for the whole run. The directory is removed when the run closes.
+ * - The variable and the `PYTHONPATH` entry are inherited by the script's children. A child that imports `pi_tools` before
+ *   any other process takes the secret. A child that imports it again (a `multiprocessing` worker under the spawn start
+ *   method, the default on Windows and macOS) finds no file, is refused with `ToolRefused` ("could not be read and
+ *   removed"), and has no tool access.
+ * - On Windows `mode: 0o600` has no effect: the directory is protected by its inherited `%TEMP%` ACL, which is the basis
+ *   of the file's protection there. A host crash leaves `pi-tb-*` directories behind, and nothing sweeps them. Each holds a
+ *   secret that grants nothing once its channel is gone.
+ */
+
 import { mkdtemp, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";

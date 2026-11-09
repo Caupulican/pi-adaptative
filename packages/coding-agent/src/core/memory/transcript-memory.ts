@@ -20,8 +20,8 @@
 import { createHash } from "node:crypto";
 import type { SystemOneReceipt } from "../review/system-one-review-port.ts";
 import { assertMemoryReadActive, type MemoryReadContext, type MemoryReadEvidence } from "./memory-read-context.ts";
+import { BatchAccount, CauseSlots, type TerminalHolds } from "./transcript-batch-account.ts";
 import type { CoordinatorHost } from "./transcript-coordinator-host.ts";
-import { type BatchState, emptyStoreRetry, type ReadmissionHoldState } from "./transcript-coordinator-state.ts";
 import {
 	applyRevocationOf,
 	dropFrontierSelections,
@@ -32,6 +32,7 @@ import {
 	sessionsOfNodes,
 	staleJobsOf,
 } from "./transcript-coverage-revocation.ts";
+import { ForgetProgress } from "./transcript-forget-progress.ts";
 import type {
 	TranscriptFrontierGap,
 	TranscriptFrontierResult,
@@ -45,11 +46,10 @@ import {
 	frontierSnapshotOf,
 	isNodeDenied,
 } from "./transcript-frontier-reads.ts";
+import { HoldLedger } from "./transcript-hold-ledger.ts";
 import type {
 	DependencyVerdict,
-	HoldScope,
 	JobOutcome,
-	ParkedHold,
 	PublishedRevocation,
 	SourceReadFailure,
 } from "./transcript-job-outcome.ts";
@@ -71,7 +71,6 @@ import type {
 	TranscriptMemoryPorts,
 	TranscriptMemorySettings,
 	TranscriptMemoryStartResult,
-	TranscriptMemoryTerminalEvent,
 	TranscriptSummarizerPort,
 } from "./transcript-memory-ports.ts";
 import {
@@ -92,9 +91,6 @@ import {
 	receiptCause,
 } from "./transcript-memory-reason-text.ts";
 import type {
-	TranscriptMemoryAdmissionStatus,
-	TranscriptMemoryFailureRecord,
-	TranscriptMemoryInternalCause,
 	TranscriptMemoryModelWorkBlock,
 	TranscriptMemoryRevocationRecord,
 	TranscriptMemoryStatus,
@@ -120,6 +116,8 @@ import {
 	spansExpired,
 	spanTimeOf,
 } from "./transcript-retention-policy.ts";
+import { ReceiptRetryState, RetryBackoff, StoreRetryState } from "./transcript-retry-backoff.ts";
+import { TranscriptRunState } from "./transcript-run-lifecycle.ts";
 import {
 	abortDeniedJobInputs,
 	abortSessionJobs,
@@ -134,6 +132,7 @@ import {
 	type CoverageVerdict,
 	lineageStamp,
 	type SessionRuntime,
+	SessionRuntimes,
 	UNVERIFIED_LINEAGE_DIGEST,
 	type VerifiedLineage,
 	vouchesFor,
@@ -145,14 +144,7 @@ import type {
 	TranscriptSummaryLookupResult,
 	TranscriptSummaryReadOptions,
 } from "./transcript-source-tools.ts";
-import {
-	admissionStatusSnapshot,
-	firstHoldOf,
-	heldCountsOf,
-	MAX_STATUS_BATCHES,
-	modelWorkBlockOf,
-	statusSnapshot,
-} from "./transcript-status-snapshot.ts";
+import { admissionStatusSnapshot, modelWorkBlockOf, statusSnapshot } from "./transcript-status-snapshot.ts";
 import {
 	admissionRecordFromResult,
 	needsReadmission,
@@ -221,7 +213,6 @@ import {
 	storeUnavailable,
 	type TranscriptAnchorRequest,
 	type TranscriptSummaryAnnotateResult,
-	type TranscriptSummaryHeldByKind,
 	type TranscriptSummaryJobsSaveResult,
 	type TranscriptSummaryProofStatus,
 	type TranscriptSummaryPublishResult,
@@ -241,12 +232,6 @@ export { TRANSCRIPT_MEMORY_CONTEXT_BYTES, TRANSCRIPT_MEMORY_CONTEXT_SPANS } from
 
 /** `setTimeout` runs a longer delay immediately; a farther deadline is reached by re-arming. */
 const MAX_TIMER_DELAY_MS = 2 ** 31 - 1;
-/** Bounded backoff for retrying a job save that failed (I/O, overflow): 1 s doubling to at most one minute. */
-const JOB_SAVE_RETRY_BASE_MS = 1_000;
-const JOB_SAVE_RETRY_MAX_MS = 60_000;
-const MAX_RECENT_FAILURES = 20;
-const MAX_TERMINAL_CAUSES = 5;
-const MAX_CAUSE_MESSAGE_CHARS = 300;
 const MAX_STATUS_ISSUES = 20;
 
 // ---------------------------------------------------------------------------------------------
@@ -255,11 +240,7 @@ const MAX_STATUS_ISSUES = 20;
 
 export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSummaryLookup {
 	private readonly ports: TranscriptMemoryPorts;
-	private started = false;
-	private epoch = 0;
-	private disabledReason: string | undefined;
-	private writer: TranscriptSummaryWriter | undefined;
-	private scheduler: TranscriptSummaryScheduler | undefined;
+	private readonly run = new TranscriptRunState();
 	private tail: Promise<void> = Promise.resolve();
 	private readonly unsubscribers: (() => void)[] = [];
 	private timer: unknown;
@@ -277,45 +258,23 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * kept only so the identical identity is republished without paying again. Never in the catalog, never read.
 	 */
 	private readonly dormant = new Map<string, TranscriptSummaryNode>();
-	private starting = false;
 	/** The terminal handoff of a stop, awaited by `stop()` before the writer is released. */
 	private stopHandoff: Promise<void> | undefined;
-	private persistedBatches: TranscriptMemoryTerminalEvent[] = [];
 	private readonly cursors = new Map<string, TranscriptSummarySessionCursor>();
 	private readonly frontiers = new Map<string, TranscriptFrontierSelection>();
 	private readonly frontierBytes = new Map<string, { bytes: number; gap?: TranscriptFrontierGap }>();
 	private readonly forgottenSessions = new Set<string>();
 	/** The revision of the permanent forget state this mirror reflects (0 before any forget). */
 	private forgetRevision = 0;
-	/** Ready jobs dropped when a forget stopped the session's work, counted by the removal that follows. */
-	private earlyDroppedReady = 0;
-	/** A refresh of the permanent forget state is already queued on the mailbox. */
-	private forgetRefreshQueued = false;
+	private readonly forgets = new ForgetProgress();
 	/** The forget revision the manifest records as fully applied (a forget file below it is unknown: rollback). */
 	private forgetAppliedRevision = 0;
-	/** When owed usage receipts are tried again (one lifecycle timer), on a bounded backoff. */
-	private receiptRetryAt: number | undefined;
-	private receiptRetryFailures = 0;
-	/** Re-admission jobs whose own judgment is being applied: their node's revocation is their result, not their end. */
-	private readonly settlingReadmissions = new Set<string>();
-	private readonly runtime = new Map<string, SessionRuntime>();
-	/**
-	 * Sessions the index reported invalidated whose coverage has not been judged since. Their next answered read
-	 * revokes dead coverage whatever the digests say: the event is the index's own evidence that earlier spans
-	 * changed, independent of the digest bookkeeping (a verification records its probe's digest, while its pages may
-	 * have been read on a later lineage). Kept across a mirror reload (which drops every runtime), dropped with the
-	 * session.
-	 */
-	private readonly revocationDue = new Set<string>();
+	/** Owed usage receipts: when they are tried again, and the claims whose provider call was paid. */
+	private readonly receipts = new ReceiptRetryState(() => this.ports.now());
+	private readonly sessions = new SessionRuntimes();
 	/** The terminal-proof capacity the store last reported (load, save, session-record drop); status only. */
 	private proofLedger: TranscriptSummaryProofStatus = { recorded: 0, reserved: 0 };
-	/** Sources the anchor ceiling refused, so work depending on them is held. */
-	private readonly heldForAnchor = new Set<string>();
-	/** Canonical session timestamps; `null` records a session that has none. */
-	private readonly sessionTimestamps = new Map<string, string | null>();
 	private lastRevocation: TranscriptMemoryRevocationRecord | undefined;
-	/** Accepted nodes that still need anchors for their undated sources (a session listing was unavailable). */
-	private undatedNodesPending = false;
 	/** The save of the latest job list: a started attempt is durable before its provider call. */
 	private jobsSaved: Promise<void> = Promise.resolve();
 	/**
@@ -339,68 +298,39 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				selection: TranscriptFrontierSelection;
 		  }
 		| undefined;
-	/**
-	 * Start-up order: `convert` (the first save turns stale version 1 jobs into durable carried budgets), then
-	 * `reconcile` (every recovered job adopts its version 1 budget), then `reconciled` (the save of that), then `open`:
-	 * only that save's acknowledgement opens admission, dispatch and discovery.
-	 */
-	private startPhase: "convert" | "reconcile" | "reconciled" | "open" = "convert";
-	/** Discovery reached before admission opened; opening starts it. */
-	private discoveryHeld = false;
 	/** The real cause of the latest failed job save, until a save succeeds. */
 	private saveFailure: string | undefined;
-	private saveFailures = 0;
-	/** When the failed job save is tried again (through the one lifecycle timer). */
-	private saveRetryAt: number | undefined;
-	/** Store work an unavailable write left undone; see {@link deferStoreWork}. */
-	private storeRetry = emptyStoreRetry();
-	/** When that work is tried again (through the one lifecycle timer), on a backoff that grows while writes keep failing. */
-	private storeRetryAt: number | undefined;
-	private storeRetryFailures = 0;
-	/** Claims that reached the summarizer provider, until their outcome settles: only these spent their attempt on a call. */
-	private readonly paidClaims = new Set<number>();
-	/** Jobs held before any provider call, by the scope of the condition that releases them. */
-	private readonly parked = new Map<string, ParkedHold>();
-	private modelWorkBlocked = false;
-	private readonly judgments = { accepted: 0, rejected: 0, uncertain: 0, unavailable: 0 };
-	/** Kept acceptances published again without a new judgment ({@link TranscriptMemoryAdmissionStatus.reused}). */
-	private reusedAdmissions = 0;
-	/**
-	 * What re-admission found for accepted model summaries without a current admission, this run. `waiting`
-	 * carries the wait code that says why the judgment has not happened (or was discarded).
-	 */
-	private readonly readmissionState = new Map<
-		string,
-		{ state: ReadmissionHoldState; wait?: TranscriptReadmissionWait }
-	>();
-
-	private batch: BatchState | undefined;
-	private batchCounter = 0;
+	/** The bounded backoff of failed job saves, tried again through the one lifecycle timer. */
+	private readonly saveBackoff = new RetryBackoff(() => this.ports.now());
+	/** Store work an unavailable write left undone, and the backoff that paces it; see {@link deferStoreWork}. */
+	private readonly storeRetry = new StoreRetryState(() => this.ports.now());
+	private readonly holds = new HoldLedger();
+	private readonly batch: BatchAccount;
+	private readonly causes: CauseSlots;
 	private jobsDirty = false;
 	/** The released-receipt queue version last made durable in `owed-receipts.json`. */
 	private owedReceiptsSavedVersion = 0;
 	/** Keys (owner session + report id) of the entries in the last owed queue made durable, for the stop's count of newer ones. */
 	private owedSavedKeys = new Set<string>();
-	private recoveryIssues: string[] = [];
-	private readonly recentFailures: TranscriptMemoryFailureRecord[] = [];
-	/** Written only by {@link noteInternalCause}. */
-	private lastInternalError: TranscriptMemoryInternalCause | undefined;
-	private activeCause: TranscriptMemoryInternalCause | undefined;
 
 	private readonly host: CoordinatorHost;
 
 	constructor(ports: TranscriptMemoryPorts) {
 		this.ports = ports;
+		this.batch = new BatchAccount(() => this.ports.now());
+		this.causes = new CauseSlots(() => this.ports.now());
 		// Reads of a forgotten session's text are refused at the catalog's one read gate from the moment it is recorded,
 		// while the nodes stay indexed for the removal that follows.
 		this.catalog.setDenial((node) => this.nodeDenied(node));
 		const owner = this;
 		this.host = {
+			batch: this.batch,
+			holds: this.holds,
+			run: this.run,
+			sessions: this.sessions,
+			causes: this.causes,
 			abortDeniedInputs: (...args) => abortDeniedJobInputs(this.host, ...args),
 			abortSession: (...args) => abortSessionJobs(this.host, ...args),
-			get activeCause() {
-				return owner.activeCause;
-			},
 			admissionStatus: (...args) => admissionStatusSnapshot(this.host, ...args),
 			afterRevocation: (...args) => this.afterRevocation(...args),
 			anchorRefs: (...args) => this.anchorRefs(...args),
@@ -410,12 +340,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			buildParent: (...args) => buildParentNode(this.host, ...args),
 			catalog: this.catalog,
 			certifyCursor: (...args) => this.certifyCursor(...args),
-			countTerminal: (...args) => this.countTerminal(...args),
 			cursors: this.cursors,
 			deferStoreWork: (...args) => this.deferStoreWork(...args),
-			get disabledReason() {
-				return owner.disabledReason;
-			},
 			dormant: this.dormant,
 			dormantRetentionTime: (...args) => dormantRetentionTimeOf(this.host, ...args),
 			dropFrontiers: (...args) => dropFrontierSelections(this.host, ...args),
@@ -424,12 +350,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			egressBlocked: (...args) => this.egressBlocked(...args),
 			enqueue: (...args) => this.enqueue(...args),
 			enumerateLeaves: (...args) => enumerateSummaryLeaves(this.host, ...args),
-			get epoch() {
-				return owner.epoch;
-			},
 			failureFor: (...args) => failureFor(...args),
 			fatal: (...args) => this.fatal(...args),
-			firstHold: (...args) => firstHoldOf(this.host, ...args),
 			forgetDenial: (...args) => forgetDenialOf(this.host, ...args),
 			get forgetRevision() {
 				return owner.forgetRevision;
@@ -442,17 +364,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				return owner.frontierRead;
 			},
 			frontiers: this.frontiers,
-			heldForAnchor: this.heldForAnchor,
-			holdCounts: (...args) => heldCountsOf(this.host, ...args),
 			inFlight: this.inFlight,
 			invalidateSession: (...args) => this.invalidateSession(...args),
 			isExpired: (...args) => spansExpired(this.host, ...args),
 			isOutsideRetention: (...args) => isOutsideRetentionWindow(this.host, ...args),
 			judge: (...args) => this.judge(...args),
-			judgments: this.judgments,
-			get lastInternalError() {
-				return owner.lastInternalError;
-			},
 			get lastRevocation() {
 				return owner.lastRevocation;
 			},
@@ -465,18 +381,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			modelWorkBlock: (...args) => modelWorkBlockOf(this.host, ...args),
 			nextRetentionAt: (...args) => nextRetentionDeadline(this.host, ...args),
 			nodeDenied: (...args) => isNodeDenied(this.host, ...args),
-			noteBenignEvent: (...args) => this.noteBenignEvent(...args),
-			noteEnqueued: (...args) => this.noteEnqueued(...args),
-			noteInternalCause: (...args) => this.noteInternalCause(...args),
-			parked: this.parked,
-			get persistedBatches() {
-				return owner.persistedBatches;
-			},
 			ports: this.ports,
 			get proofLedger() {
 				return owner.proofLedger;
 			},
-			pruneParked: (...args) => this.pruneParked(...args),
 			pump: (...args) => this.pump(...args),
 			queueForgetRefresh: (...args) => this.queueForgetRefresh(...args),
 			readContext: (...args) => readSummaryContext(this.host, ...args),
@@ -485,52 +393,26 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			readmissionFailed: (...args) => readmissionFailedOf(this.host, ...args),
 			readmissionRequest: (...args) => readmissionRequestFor(this.host, ...args),
 			readmissionSourceWait: (...args) => readmissionSourceWaitOf(this.host, ...args),
-			readmissionState: this.readmissionState,
 			readmissionWait: (...args) => readmissionWaitOf(this.host, ...args),
 			readmitNode: (...args) => readmitSummaryNode(this.host, ...args),
 			readText: (...args) => readSourceText(this.host, ...args),
-			recentFailures: this.recentFailures,
 			reconcileHeldSessions: (...args) => reconcileHeldSessionsOf(this.host, ...args),
 			reconcileSession: (...args) => reconcileSessionOf(this.host, ...args),
 			reconcileSessionRead: (...args) => reconcileSessionReadOf(this.host, ...args),
-			recordFailure: (...args) => this.recordFailure(...args),
-			get recoveryIssues() {
-				return owner.recoveryIssues;
-			},
 			republishFrontiers: (...args) => this.republishFrontiers(...args),
 			restartDiscovery: (...args) => restartDiscoveryOf(this.host, ...args),
 			resumeDeferredEnumeration: (...args) => this.resumeDeferredEnumeration(...args),
 			retentionCutoff: (...args) => retentionCutoffAt(this.host, ...args),
 			returnsClaim: (...args) => returnsClaimOf(this.host, ...args),
 			reusableDormant: (...args) => reusableDormantNode(this.host, ...args),
-			get reusedAdmissions() {
-				return owner.reusedAdmissions;
-			},
-			revocationDue: this.revocationDue,
 			revokeDeadCoverage: (...args) => this.revokeDeadCoverage(...args),
-			runtime: this.runtime,
-			get scheduler() {
-				return owner.scheduler;
-			},
 			sessionsOf: (...args) => sessionsOfNodes(this.host, ...args),
 			sessionTimestamp: (...args) => sessionTimestampOf(this.host, ...args),
-			sessionTimestamps: this.sessionTimestamps,
-			setReadmission: (...args) => this.setReadmission(...args),
 			settleAborted: (...args) => settleAbortedJob(this.host, ...args),
 			settleFailure: (...args) => settleJobFailure(this.host, ...args),
-			settlingReadmissions: this.settlingReadmissions,
 			spanTime: (...args) => spanTimeOf(this.host, ...args),
-			get started() {
-				return owner.started;
-			},
-			get starting() {
-				return owner.starting;
-			},
 			summarizeChecked: (...args) => this.summarizeChecked(...args),
 			unapprovedWait: (...args) => unapprovedWaitOf(this.host, ...args),
-			get writer() {
-				return owner.writer;
-			},
 		};
 	}
 
@@ -542,21 +424,21 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	// ---- lifecycle ----------------------------------------------------------------------------
 
 	async start(): Promise<TranscriptMemoryStartResult> {
-		if (this.started) return { enabled: true, recoveryIssues: [] };
+		if (this.run.started) return { enabled: true, recoveryIssues: [] };
 		const settings = this.ports.settings();
 		if (!settings.hierarchy) return this.disable("the summary hierarchy is off");
 		if (!this.ports.summarizer) return this.disable("no summarizer is configured");
-		this.disabledReason = undefined;
-		this.starting = true;
+		this.run.setDisabledReason(undefined);
+		this.run.setStarting(true);
 		try {
 			return await this.startUp(settings);
 		} finally {
-			this.starting = false;
+			this.run.setStarting(false);
 		}
 	}
 
 	private async startUp(settings: TranscriptMemorySettings): Promise<TranscriptMemoryStartResult> {
-		const epoch = ++this.epoch;
+		const epoch = this.run.nextEpoch();
 		const { store } = this.ports;
 
 		const loaded = await store.load();
@@ -607,11 +489,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		} catch (error) {
 			const unavailable = storeUnavailable("sweeping unreferenced summary files", error);
 			if (!unavailable) throw error;
-			this.noteInternalCause(unavailable.reason);
+			this.causes.noteInternal(unavailable.reason);
 		}
-		this.recoveryIssues = issues.map(describeIssue).slice(0, MAX_STATUS_ISSUES);
+		this.run.setRecoveryIssues(issues.map(describeIssue).slice(0, MAX_STATUS_ISSUES));
 
-		this.writer = writer;
+		this.run.setWriter(writer);
 		const scheduler = new TranscriptSummaryScheduler({
 			...this.ports.scheduler,
 			// Opened by this run's first acknowledged save, which converts version 1 budgets durably first.
@@ -619,24 +501,21 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			concurrency: Math.max(1, settings.maxConcurrentSummaries),
 			// Under a possibly-lost-proof hold, only a session known to have started after it admits new identities.
 			sessionStartedAt: (sessionId) => {
-				const stamp = this.sessionTimestamps.get(sessionId);
+				const stamp = this.sessions.stampOf(sessionId);
 				const at = stamp ? Date.parse(stamp) : Number.NaN;
 				return Number.isNaN(at) ? undefined : at;
 			},
 		});
-		this.scheduler = scheduler;
-		this.runtime.clear();
-		this.revocationDue.clear();
+		this.run.setScheduler(scheduler);
+		this.sessions.clear();
+		this.sessions.clearDue();
 		this.proofLedger = state.proof.status;
-		this.heldForAnchor.clear();
-		this.sessionTimestamps.clear();
+		this.sessions.clearAnchors();
+		this.sessions.clearStamps();
 		this.lastRevocation = undefined;
-		this.undatedNodesPending = false;
-		this.parked.clear();
-		this.modelWorkBlocked = false;
-		this.judgments.accepted = this.judgments.rejected = this.judgments.uncertain = this.judgments.unavailable = 0;
-		this.reusedAdmissions = 0;
-		this.readmissionState.clear();
+		this.sessions.setUndatedPending(false);
+		this.holds.reset();
+		this.batch.resetAdmissionCounts();
 		this.durableAttempts.clear();
 		this.durableReplies.clear();
 		this.manifestReads = new TranscriptBoundedRead<{ manifest: ManifestRead; forgotten: ForgetStateRead }>(
@@ -648,16 +527,15 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				return { manifest, forgotten };
 			},
 		);
-		this.startPhase = "convert";
-		this.discoveryHeld = false;
+		this.run.setPhase("convert");
+		this.run.clearDiscoveryHold();
 		this.saveFailure = undefined;
-		this.saveFailures = 0;
-		this.saveRetryAt = undefined;
+		this.saveBackoff.reset();
 		this.resetRetryState();
 		// Before recovery, so every recovered job keeps the durable reservation it already holds.
 		scheduler.noteProof(state.proof.records);
 		scheduler.setProofHold(state.proof.status.hold);
-		this.persistedBatches = [...state.terminals];
+		this.batch.restoreTerminals(state.terminals);
 		this.loadMirror(state);
 		const now = this.ports.now();
 		// The accepted nodes are the completion evidence: a job that published before a stop settles `ready` from its node.
@@ -666,7 +544,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		for (const entry of state.owedReceipts) {
 			const receipt = parseSemanticReceipt(entry.receipt);
 			if (receipt === undefined)
-				this.noteInternalCause("a persisted owed usage receipt was malformed and could not be restored");
+				this.causes.noteInternal("a persisted owed usage receipt was malformed and could not be restored");
 			else owed.push({ ownerSessionId: entry.ownerSessionId, receipt });
 		}
 		scheduler.returnReleasedReceipts(owed);
@@ -681,17 +559,17 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		for (const node of this.catalog.values()) if (isCurrentCaptureNode(node)) scheduler.onNodeReady(node, now);
 
-		this.started = true;
+		this.run.markStarted();
 		// The first save reserves recovered live jobs and persists a converted ledger before anything is discovered.
 		this.markJobsDirty();
 		this.unsubscribers.push(
 			this.ports.reader.onIndexChanged((event) => {
-				const scheduled = this.epoch;
+				const scheduled = this.run.epoch;
 				void this.enqueue(async () => {
 					if (!this.live(scheduled)) return;
-					if (this.undatedNodesPending) await this.anchorUndatedNodes(scheduled);
+					if (this.sessions.undatedPending) await this.anchorUndatedNodes(scheduled);
 					// An invalidated session is revoked by its one read below, never read a second time here.
-					for (const sessionId of event.invalidatedSessionIds) this.revocationDue.add(sessionId);
+					for (const sessionId of event.invalidatedSessionIds) this.sessions.markDue(sessionId);
 					const touched = new Set([...event.sessionIds, ...event.invalidatedSessionIds]);
 					for (const sessionId of touched) await this.reconcileSession(sessionId, scheduled);
 					// The index changed: held recovered leaves of sessions it did not name are tried again.
@@ -700,7 +578,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				});
 			}),
 			this.ports.onBackgroundAvailable(() => {
-				const scheduled = this.epoch;
+				const scheduled = this.run.epoch;
 				void this.enqueue(async () => this.pump(scheduled));
 			}),
 		);
@@ -711,8 +589,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// Derived data of sessions forgotten while no coordinator ran (or by another root) is removed before anything
 			// is discovered; their jobs end and their reservations release at the first acknowledged save.
 			await this.applyPendingForgets(epoch);
-			if (this.startPhase !== "open") {
-				this.discoveryHeld = true;
+			if (this.run.phase !== "open") {
+				this.run.holdDiscovery();
 				return;
 			}
 			await this.discover(epoch);
@@ -730,13 +608,13 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * gone leaves the hold through the stale or invalidation transition that ends it. Nothing is skipped.
 	 */
 	private reconcileRecovered(epoch: number): void {
-		const scheduler = this.scheduler;
+		const scheduler = this.run.scheduler;
 		if (!scheduler || !this.live(epoch)) return;
 		const now = this.ports.now();
 		for (const job of scheduler.snapshot()) {
 			if (job.state === "ready" || isTerminalSummaryJobState(job.state)) continue;
 			if (job.kind === "leaf") {
-				this.parked.set(job.id, { scope: "reconciliation", reason: RECONCILIATION_WAITING });
+				this.holds.park(job.id, { scope: "reconciliation", reason: RECONCILIATION_WAITING });
 				continue;
 			}
 			// A re-admission names an accepted node, not source coverage: nothing to reconcile.
@@ -745,12 +623,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			const right = job.children ? this.catalog.get(job.children[1]) : undefined;
 			if (!left || !right) {
 				scheduler.markStale(job.id, now);
-				this.recordFailure(job, "stale", "a child node is no longer accepted");
+				this.batch.recordFailure(job, "stale", "a child node is no longer accepted");
 				continue;
 			}
 			if (left.legacyIdentity === undefined || right.legacyIdentity === undefined) {
 				scheduler.markStale(job.id, now);
-				this.recordFailure(job, "stale", "a child node is of an older capture version and is being retired");
+				this.batch.recordFailure(job, "stale", "a child node is of an older capture version and is being retired");
 				continue;
 			}
 			scheduler.reconcileLegacy(
@@ -762,7 +640,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				}),
 			);
 		}
-		this.startPhase = "reconciled";
+		this.run.setPhase("reconciled");
 		this.markJobsDirty();
 	}
 
@@ -823,11 +701,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 */
 	private async reloadMirror(epoch: number): Promise<"reloaded" | "stopped" | TranscriptSummaryStoreUnavailable> {
 		const state = await this.ports.store.load();
-		const scheduler = this.scheduler;
+		const scheduler = this.run.scheduler;
 		if (!this.live(epoch) || !scheduler) return "stopped";
 		if ("status" in state) {
 			// Not adopted: the mirror keeps its own revision, so reads are refused until a reload succeeds.
-			this.noteInternalCause(`reloading the summary mirror: ${state.reason}`);
+			this.causes.noteInternal(`reloading the summary mirror: ${state.reason}`);
 			return state;
 		}
 		if (!state.manifest || state.issues.length > 0) {
@@ -845,7 +723,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		// Read before the mirror is replaced: the sessions of the nodes that are gone.
 		const goneSessions = this.sessionsOf(gone);
 		this.loadMirror(state);
-		this.runtime.clear();
+		this.sessions.clear();
 		const now = this.ports.now();
 		scheduler.revokeNodes(gone, now, { readmit: false });
 		this.endRevokedReadmissions(goneSessions, new Set(gone));
@@ -862,7 +740,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * True when discovery may go on.
 	 */
 	private async retireLegacyCapture(epoch: number): Promise<boolean> {
-		const writer = this.writer;
+		const writer = this.run.writer;
 		if (!writer || !this.live(epoch)) return false;
 		const accepted = new Set(
 			[...this.catalog.values()].filter((node) => !isCurrentCaptureNode(node)).map((node) => node.id),
@@ -894,21 +772,21 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/** Cancel the timer and subscriptions, abort in-flight work, requeue it for the next start, save the jobs. */
 	async stop(): Promise<void> {
-		if (!this.started && !this.scheduler) return;
+		if (!this.run.started && !this.run.scheduler) return;
 		const running = this.haltBackground();
 		await this.readsStopped;
 		// Settled, never thrown past: the stop must reach its terminal signal. An unexpected rejection keeps its cause.
 		const settled = await Promise.allSettled([...running.map((entry) => entry.done)]);
 		for (const result of settled) {
 			if (result.status === "rejected") {
-				this.noteInternalCause(
+				this.causes.noteInternal(
 					`background work failed at stop: ${result.reason instanceof Error ? result.reason.message : String(result.reason)}`,
 				);
 			}
 		}
 		await this.tail;
-		const scheduler = this.scheduler;
-		const writer = this.writer;
+		const scheduler = this.run.scheduler;
+		const writer = this.run.writer;
 		let interrupted = 0;
 		if (scheduler) {
 			const now = this.ports.now();
@@ -920,7 +798,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (scheduler && writer) {
 			// The stop always reaches its terminal signal; a save that failed keeps its real cause for the status.
 			try {
-				const saved = await this.saveJobsInOrder(scheduler, writer, this.epoch, scheduler.snapshot());
+				const saved = await this.saveJobsInOrder(scheduler, writer, this.run.epoch, scheduler.snapshot());
 				// An unsaved queue update ends this run: its terminal event names it (the host keeps it as the status cause; the warning itself is not shown on the dispose path, where the session's listeners are already cleared). Older copies
 				// of a receipt (the last saved queue, the job record) are kept by a failed queue write, so only the entries newer
 				// than the last saved queue are counted. An entry only this run held (carried by an aborted call, or whose job had
@@ -929,12 +807,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 					const newer = scheduler
 						.releasedReceiptsState()
 						.entries.filter((entry) => !this.owedSavedKeys.has(owedKey(entry))).length;
-					stopReason = `the owed-receipt queue update was not saved (${newer} ${newer === 1 ? "entry" : "entries"} newer than the last saved queue; one that no older queue or job record holds is lost); cause: ${this.lastInternalError?.cause ?? "the owed usage receipts could not be saved"}`;
+					stopReason = `the owed-receipt queue update was not saved (${newer} ${newer === 1 ? "entry" : "entries"} newer than the last saved queue; one that no older queue or job record holds is lost); cause: ${this.causes.last?.cause ?? "the owed usage receipts could not be saved"}`;
 				} else if (saved.status !== "saved") {
-					this.noteInternalCause(`saving jobs at stop: ${describeSaveRefusal(saved)}`);
+					this.causes.noteInternal(`saving jobs at stop: ${describeSaveRefusal(saved)}`);
 				}
 			} catch (error) {
-				this.noteInternalCause(
+				this.causes.noteInternal(
 					`saving jobs at stop failed: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
@@ -946,8 +824,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// Released however the owner's terminal callback ended; its own failure still reaches the caller.
 			this.stopHandoff = undefined;
 			this.inFlight.clear();
-			this.writer = undefined;
-			this.scheduler = undefined;
+			this.run.release();
 			this.manifestReads = undefined;
 		}
 	}
@@ -961,10 +838,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * untouched. `refused` (with the real cause) means nothing was recorded.
 	 */
 	async forgetSession(sessionId: string): Promise<TranscriptForgetOutcome> {
-		const scheduled = this.epoch;
+		const scheduled = this.run.epoch;
 		let outcome: TranscriptForgetOutcome | undefined;
 		await this.enqueue(async () => {
-			if (!this.live(scheduled) || !this.writer || !this.scheduler) {
+			if (!this.live(scheduled) || !this.run.writer || !this.run.scheduler) {
 				outcome = {
 					status: "refused",
 					reason:
@@ -988,7 +865,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 					};
 					return;
 				}
-				if (!this.live(scheduled) || !this.writer) {
+				if (!this.live(scheduled) || !this.run.writer) {
 					outcome = {
 						status: "refused",
 						reason:
@@ -1001,7 +878,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			const recorded = await this.ports.store.recordForget(sessionId);
 			const refusal = forgetRefusalCause(recorded);
 			if (refusal !== undefined || (recorded.status !== "recorded" && recorded.status !== "already")) {
-				this.noteInternalCause(refusal ?? "the forget command was not recorded");
+				this.causes.noteInternal(refusal ?? "the forget command was not recorded");
 				outcome = {
 					status: "refused",
 					reason: `forgetting ${sessionId} could not be recorded: ${refusal ?? "unknown cause"}`,
@@ -1013,12 +890,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			this.forgottenSessions.add(sessionId);
 			// Whatever the state read and the removal do next, the session's own model work stops now.
 			this.abortSession(sessionId);
-			this.earlyDroppedReady += this.endSessionJobs(sessionId, "cancelled");
+			this.forgets.addEarlyDropped(this.endSessionJobs(sessionId, "cancelled"));
 			let pending: string | undefined;
 			try {
 				pending = await this.refreshForgetState(scheduled);
 			} finally {
-				this.earlyDroppedReady = 0;
+				this.forgets.clearEarlyDropped();
 			}
 			outcome = pending === undefined ? { status: "forgotten" } : { status: "forgotten", cleanupPending: pending };
 			this.pump(scheduled);
@@ -1027,7 +904,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		return (
 			outcome ?? {
 				status: "refused",
-				reason: this.activeCause?.cause ?? this.lastInternalError?.cause ?? "forgetting did not complete",
+				reason: this.causes.active?.cause ?? this.causes.last?.cause ?? "forgetting did not complete",
 			}
 		);
 	}
@@ -1040,11 +917,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * store backoff, and the marker keeps denying the session meanwhile), undefined when complete.
 	 */
 	private async applyForgottenSession(sessionId: string, epoch: number): Promise<string | undefined> {
-		const writer = this.writer;
-		if (!writer || !this.scheduler || !this.live(epoch))
+		const writer = this.run.writer;
+		if (!writer || !this.run.scheduler || !this.live(epoch))
 			return "the memory generation changed before the removal ran";
 		this.abortSession(sessionId);
-		const droppedReady = this.takeEarlyDroppedReady() + this.endSessionJobs(sessionId, "cancelled");
+		const droppedReady = this.forgets.takeEarlyDropped() + this.endSessionJobs(sessionId, "cancelled");
 		const dormantDenied = this.deniedDormantIds();
 		const result = await writer.revokeNodes(
 			(_id, entry) =>
@@ -1070,11 +947,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		await this.applyRevocation(result, epoch, { reason: "forgotten", dropSession: sessionId, droppedReady });
 		// A forgotten session is never summarized again: its anchors and spent budgets can no longer matter.
 		// The session's finished jobs leave the list first: a later job save would write their carried budgets again.
-		this.scheduler?.dropTerminalJobsOfSession(sessionId);
+		this.run.scheduler?.dropTerminalJobsOfSession(sessionId);
 		const dropped = await this.dropSessionRecords(new Set([sessionId]));
 		if (dropped === true) return undefined;
 		if (dropped === false)
-			return `dropping the retention records of ${sessionId} was refused: ${this.disabledReason ?? "the summary hierarchy stopped"}`;
+			return `dropping the retention records of ${sessionId} was refused: ${this.run.disabledReason ?? "the summary hierarchy stopped"}`;
 		this.deferStoreWork(dropped.reason, { forgets: [sessionId] }, epoch);
 		return `dropping the retention records of ${sessionId} could not be written: ${dropped.reason}`;
 	}
@@ -1090,12 +967,6 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		return new Set([...denied].filter((id) => this.dormant.has(id)));
 	}
 
-	private takeEarlyDroppedReady(): number {
-		const dropped = this.earlyDroppedReady;
-		this.earlyDroppedReady = 0;
-		return dropped;
-	}
-
 	/** Remove the derived data of every forgotten session that still has any (start-up, a reload, another root's forget). */
 	private async applyPendingForgets(epoch: number): Promise<string | undefined> {
 		let first: string | undefined;
@@ -1104,7 +975,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			if (!this.holdsSessionData(sessionId)) continue;
 			const pending = await this.applyForgottenSession(sessionId, epoch);
 			if (pending !== undefined) {
-				this.noteInternalCause(pending);
+				this.causes.noteInternal(pending);
 				first ??= pending;
 			}
 		}
@@ -1118,7 +989,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * write leaves the manifest revision unchanged, so the mirror needs no reload.
 	 */
 	private async recordForgetApplied(epoch: number): Promise<void> {
-		const writer = this.writer;
+		const writer = this.run.writer;
 		if (!writer || !this.live(epoch) || this.forgetRevision < 1 || this.forgetRevision <= this.forgetAppliedRevision)
 			return;
 		if ([...this.forgottenSessions].some((sessionId) => this.holdsSessionData(sessionId))) return;
@@ -1127,16 +998,15 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		else if (recorded.status === "fenced" || recorded.status === "manifest_corrupt") {
 			this.fatal(`recording the applied forget revision was refused: ${recorded.status}`);
 		} else {
-			this.noteInternalCause(`recording the applied forget revision: ${recorded.reason}`);
+			this.causes.noteInternal(`recording the applied forget revision: ${recorded.reason}`);
 		}
 	}
 
 	/** Ask the mailbox to adopt the permanent forget state once: requests that arrive while one is queued share it. */
 	private queueForgetRefresh(epoch: number): void {
-		if (this.forgetRefreshQueued) return;
-		this.forgetRefreshQueued = true;
+		if (!this.forgets.queueRefresh()) return;
 		void this.enqueue(async () => {
-			this.forgetRefreshQueued = false;
+			this.forgets.refreshStarted();
 			await this.refreshForgetState(epoch);
 		});
 	}
@@ -1148,7 +1018,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (read.status !== "ok") {
 			// An unknown state is never read as "nothing forgotten": the coordinator stops with the cause.
 			if (read.status === "unknown") this.fatal(`the permanent forget state became unknown: ${read.reason}`);
-			else this.noteInternalCause(`reading the permanent forget state: ${read.reason}`);
+			else this.causes.noteInternal(`reading the permanent forget state: ${read.reason}`);
 			return `reading the permanent forget state: ${read.reason}`;
 		}
 		for (const sessionId of read.sessions) this.forgottenSessions.add(sessionId);
@@ -1176,7 +1046,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			this.catalog.anchoredSessionIds().includes(sessionId) ||
 			// Finished jobs count too: applying the forget drops them, so they cannot keep it pending, and a forget skipped
 			// while they remain would let their carried budgets come back with the next job save.
-			(this.scheduler?.holdsSession(sessionId) ?? false)
+			(this.run.scheduler?.holdsSession(sessionId) ?? false)
 		);
 	}
 
@@ -1188,21 +1058,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/** True between a successful start and a stop or a fatal condition. */
 	isRunning(): boolean {
-		return this.started;
+		return this.run.started;
 	}
 
 	// ---- admission ----------------------------------------------------------------------------
 
 	/** How many jobs each kind of hold holds, so no claim made for the first hold is read as true of all of them. */
-	private holdCounts(): TranscriptSummaryHeldByKind {
-		return heldCountsOf(this.host);
-	}
-
-	/** The first held job's hold: its kind and the cause recorded when it was set (never a job's earlier error). */
-	private firstHold(): ParkedHold | undefined {
-		return firstHoldOf(this.host);
-	}
-
 	/**
 	 * Why model summary work cannot run now, or undefined when it can. Exact copies never depend on it. Checked
 	 * before any provider call so a summary that admission could not follow is not paid for.
@@ -1217,20 +1078,6 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	}
 
 	/** Parked jobs that are no longer queued (finished, stale, revoked) have nothing left to release. */
-	private pruneParked(): void {
-		const scheduler = this.scheduler;
-		for (const id of [...this.parked.keys()]) {
-			const state = scheduler?.get(id)?.state;
-			// A job waiting for its retry is still held: it would otherwise come back unheld when it is due.
-			if (state !== "queued" && state !== "retry_wait") this.parked.delete(id);
-		}
-	}
-
-	/** Release parked jobs whose condition (`scope`) cleared; they are claimed again on the next pump. */
-	private releaseParked(scope: HoldScope): void {
-		for (const [id, hold] of this.parked) if (hold.scope === scope) this.parked.delete(id);
-	}
-
 	/** The persisted selection and its accepted nodes for one lineage, for the prompt projection to render. */
 	frontierSnapshot(lineageKey: string):
 		| {
@@ -1308,7 +1155,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		context: MemoryReadContext,
 	): Promise<TranscriptSummaryReadFence | TranscriptReadUnavailable> {
 		const reads = this.manifestReads;
-		const epoch = this.epoch;
+		const epoch = this.run.epoch;
 		// The bounded reads exist exactly while a run is started (created by its start, dropped by its stop).
 		if (!reads)
 			return this.readUnavailable() ?? { status: "unavailable", reason: "the summary hierarchy is not running" };
@@ -1321,7 +1168,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const unavailable = this.readUnavailable();
 		if (unavailable) return unavailable;
 		// The coordinator was replaced while the read was out: nothing from the earlier run is adopted.
-		if (epoch !== this.epoch) {
+		if (epoch !== this.run.epoch) {
 			return { status: "stale_snapshot", reason: `The summary store ${TRANSCRIPT_SUMMARY_CHANGED_IN_FLIGHT}.` };
 		}
 		if (read.status === "corrupt") {
@@ -1333,7 +1180,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (
 			read.status === "missing" ||
 			read.manifest.revision !== this.manifestRevision ||
-			read.manifest.writerFence !== this.writer?.fence
+			read.manifest.writerFence !== this.run.writer?.fence
 		) {
 			return {
 				status: "stale_snapshot",
@@ -1364,7 +1211,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			revision: `${writerFence}:${revision}:${forgetRevision}`,
 			isCurrent: () =>
 				this.live(epoch) &&
-				this.writer?.fence === writerFence &&
+				this.run.writer?.fence === writerFence &&
 				this.manifestRevision === revision &&
 				this.forgetRevision === forgetRevision,
 		};
@@ -1372,17 +1219,13 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/** Why node reads cannot be served now: `pending` while the store loads, `unavailable` while off or stopped. */
 	private readUnavailable(): TranscriptReadUnavailable | undefined {
-		if (this.started) return undefined;
-		return this.starting
+		if (this.run.started) return undefined;
+		return this.run.starting
 			? { status: "pending", reason: "the summary hierarchy is still loading" }
-			: { status: "unavailable", reason: this.disabledReason ?? "the summary hierarchy is not running" };
+			: { status: "unavailable", reason: this.run.disabledReason ?? "the summary hierarchy is not running" };
 	}
 
 	/** Record what re-admission found for a node; `wait` says why a judgment has not happened or was discarded. */
-	private setReadmission(nodeId: string, state: ReadmissionHoldState, wait?: TranscriptReadmissionWait): void {
-		this.readmissionState.set(nodeId, wait === undefined ? { state } : { state, wait });
-	}
-
 	/** Why an accepted node is not approved, or undefined when it is approved. Pure apart from the re-admission record. */
 	private unapprovedWait(node: TranscriptSummaryNode): TranscriptReadmissionWait | undefined {
 		return unapprovedWaitOf(this.host, node);
@@ -1436,49 +1279,33 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/** An owner outside the coordinator (the prompt planner) records a cause on the same diagnostics slot. */
 	recordExternalCause(cause: string): void {
-		this.noteInternalCause(cause);
-	}
-
-	/** Record `cause` as the latest internal cause, timed by the coordinator's clock: the one writer of that slot. */
-	private noteInternalCause(cause: string): void {
-		this.activeCause = { cause, at: new Date(this.ports.now()).toISOString() };
-		this.lastInternalError = this.activeCause;
-	}
-
-	/** Record a benign event (no fault): the newest-event slot shows it, the active fault cause is left as it was. */
-	private noteBenignEvent(event: string): void {
-		this.lastInternalError = { cause: event, at: new Date(this.ports.now()).toISOString() };
+		this.causes.noteInternal(cause);
 	}
 
 	// ---- mailbox ------------------------------------------------------------------------------
 
 	private enqueue(task: () => Promise<void>): Promise<void> {
 		const run = this.tail.then(task).catch((error: unknown) => {
-			this.noteInternalCause(error instanceof Error ? error.message : String(error));
+			this.causes.noteInternal(error instanceof Error ? error.message : String(error));
 		});
 		this.tail = run;
 		return run;
 	}
 
 	private live(epoch: number): boolean {
-		return this.started && epoch === this.epoch && this.ports.isCurrent();
+		return this.run.started && epoch === this.run.epoch && this.ports.isCurrent();
 	}
 
 	private disable(reason: string): { enabled: false; reason: string } {
-		this.disabledReason = reason;
+		this.run.setDisabledReason(reason);
 		return { enabled: false, reason };
 	}
 
 	/** Everything one run keeps in memory to retry or reuse later (store work, receipt retry timing, paid-claim marks): a start and a halt both drop it. Kept paid verdicts live on the jobs, durably. */
 	private resetRetryState(): void {
-		this.earlyDroppedReady = 0;
-		this.forgetRefreshQueued = false;
-		this.storeRetry = emptyStoreRetry();
-		this.storeRetryAt = undefined;
-		this.storeRetryFailures = 0;
-		this.receiptRetryAt = undefined;
-		this.receiptRetryFailures = 0;
-		this.paidClaims.clear();
+		this.forgets.reset();
+		this.storeRetry.reset();
+		this.receipts.reset();
 	}
 
 	/**
@@ -1487,8 +1314,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * wait for them to settle.
 	 */
 	private haltBackground(): { controller: AbortController; done: Promise<void> }[] {
-		this.started = false;
-		this.epoch += 1;
+		this.run.halt();
 		this.frontierRead = undefined;
 		this.readsStopped = this.manifestReads?.close() ?? this.readsStopped;
 		if (this.timer !== undefined) this.ports.clearTimer(this.timer);
@@ -1505,10 +1331,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/** An unrecoverable condition (superseded writer, corrupt manifest): stop doing background work and say why. */
 	private fatal(reason: string): void {
-		this.disabledReason = reason;
+		this.run.setDisabledReason(reason);
 		this.haltBackground();
 		// A coordinator that stops itself still emits its terminal signal, with the real cause.
-		this.finishBatch("stopped", this.scheduler?.counts().running ?? 0, reason);
+		this.finishBatch("stopped", this.run.scheduler?.counts().running ?? 0, reason);
 	}
 
 	// ---- indexing helpers ---------------------------------------------------------------------
@@ -1534,10 +1360,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		for (const sessionId of droppedCursors) this.cursors.delete(sessionId);
 		// Only an invalidation can be derived again: a retention or forgetting revocation is permanent, so its
 		// identity is never re-admitted (re-deriving it could only be refused at publication).
-		const reconciled = this.scheduler?.revokeNodes(revoked, this.ports.now(), {
+		const reconciled = this.run.scheduler?.revokeNodes(revoked, this.ports.now(), {
 			readmit: reason === "invalidated" || reason === "admission_rejected" || reason === "admission_uncertain",
 		});
-		if (reconciled && reconciled.readmitted.length > 0) this.noteEnqueued();
+		if (reconciled && reconciled.readmitted.length > 0) this.batch.noteEnqueued();
 		this.lastRevocation = {
 			at: this.ports.now(),
 			reason,
@@ -1595,7 +1421,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	private async dropSessionRecords(
 		sessionIds: ReadonlySet<string>,
 	): Promise<boolean | TranscriptSummaryStoreUnavailable> {
-		const result = await this.writer?.dropSessionRecords(sessionIds);
+		const result = await this.run.writer?.dropSessionRecords(sessionIds);
 		if (!result) return false;
 		if (result.status === "unavailable") return result;
 		if (result.status !== "saved") {
@@ -1605,11 +1431,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		this.manifestRevision = result.revision;
 		this.catalog.dropSessionAnchors(sessionIds);
 		for (const id of result.dormant) this.dormant.delete(id);
-		this.scheduler?.forgetSpentOf(sessionIds);
-		this.scheduler?.setProofHold(result.ledger.hold);
+		this.run.scheduler?.forgetSpentOf(sessionIds);
+		this.run.scheduler?.setProofHold(result.ledger.hold);
 		this.proofLedger = result.ledger;
 		// The only reclaim of spent budgets: a freed slot gives held work another chance (never a lost-proof scope).
-		if (result.spent > 0 && this.live(this.epoch)) this.releaseProofHolds(this.epoch);
+		if (result.spent > 0 && this.live(this.run.epoch)) this.releaseProofHolds(this.run.epoch);
 		return true;
 	}
 
@@ -1629,7 +1455,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * rediscovers the session after a revocation, or an enumeration page; undefined otherwise. It never projects:
 	 * the wrapper whose read started it does. Dead coverage is revoked when the runtime does not vouch for the probe's
 	 * lineage ({@link vouchesFor}: neither the verified digest nor, after a pure append, the verified stamp) or when
-	 * the index invalidated the session ({@link revocationDue}); a due revocation is taken only by a read that
+	 * the index invalidated the session ({@link SessionRuntimes.isDue}); a due revocation is taken only by a read that
 	 * answers, and stays due when its verification does not. Every page the verification and the enumeration read
 	 * must carry the probe's {@link lineageStamp}: one that does not means the lineage moved during verification,
 	 * nothing is recorded and the revocation is due again. A read that enumerated certifies the cursor when the
@@ -1659,12 +1485,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * without its mirror (C6).
 	 */
 	private async certifyCursor(sessionId: string, runtime: SessionRuntime, epoch: number): Promise<void> {
-		const { writer } = this;
+		const { writer } = this.run;
 		const cursor = this.cursors.get(sessionId);
 		const digest = runtime.verifiedDigest;
-		if (!writer || !this.live(epoch) || this.runtime.get(sessionId) !== runtime) return;
-		if (this.revocationDue.has(sessionId) || !cursor || digest === undefined || cursor.lineageDigest === digest)
-			return;
+		if (!writer || !this.live(epoch) || this.sessions.get(sessionId) !== runtime) return;
+		if (this.sessions.isDue(sessionId) || !cursor || digest === undefined || cursor.lineageDigest === digest) return;
 		const certified: TranscriptSummarySessionCursor = { ...cursor, lineageDigest: digest };
 		const result = await writer.publish({
 			expectedRevision: this.manifestRevision,
@@ -1709,7 +1534,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		epoch: number,
 		stamp: string | undefined,
 	): Promise<CoverageVerdict> {
-		const { writer, scheduler } = this;
+		const { writer, scheduler } = this.run;
 		if (!this.live(epoch) || !writer || !scheduler) return { kind: "unreadable", cause: COORDINATOR_NOT_RUNNING };
 		const checks: { from: number; refs: readonly TranscriptSourceRef[]; nodeId?: string; jobId?: string }[] = [];
 		const deadLeaves = new Set<string>();
@@ -1743,7 +1568,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 					return { kind: "changed" };
 				}
 				if (read.status !== "ok") {
-					this.noteInternalCause(`verifying ${sessionId} after a lineage change: ${read.status}: ${read.reason}`);
+					this.causes.noteInternal(
+						`verifying ${sessionId} after a lineage change: ${read.status}: ${read.reason}`,
+					);
 					return {
 						kind: "unreadable",
 						cause: `verifying the lineage after a change: ${read.status}: ${read.reason}`,
@@ -1767,7 +1594,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const verified: VerifiedLineage | undefined = page ? { digest: page.lineageDigest, stamp } : undefined;
 		if (deadLeaves.size === 0) {
 			this.staleJobs(deadJobs);
-			const runtime = this.runtime.get(sessionId);
+			const runtime = this.sessions.get(sessionId);
 			if (runtime) this.restartDiscovery(sessionId, runtime, verified);
 			this.markJobsDirty();
 			const unread = await this.reconcileSessionRead(sessionId, epoch);
@@ -1826,7 +1653,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/** The session is gone: everything derived from it is revoked and its cursor dropped. */
 	private async invalidateSession(sessionId: string, epoch: number): Promise<void> {
-		const { writer, scheduler } = this;
+		const { writer, scheduler } = this.run;
 		if (!this.live(epoch) || !writer || !scheduler) return;
 		this.abortSession(sessionId);
 		const droppedReady = this.endSessionJobs(sessionId, "stale");
@@ -1914,7 +1741,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		sources: readonly { ref: TranscriptSourceRef; legacyHandle?: string }[],
 		epoch: number,
 	): Promise<boolean | TranscriptSummaryStoreUnavailable> {
-		const writer = this.writer;
+		const writer = this.run.writer;
 		if (!writer || !this.live(epoch)) return false;
 		const requests: TranscriptAnchorRequest[] = [];
 		const seen = new Set<string>();
@@ -1943,8 +1770,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		// Durable already: the mirror takes the anchors with their revision whether or not this run continues (C6).
 		this.manifestRevision = result.revision;
 		const refused = new Set(result.status === "capacity" ? result.refused : []);
-		for (const handle of refused) this.heldForAnchor.add(handle);
-		for (const { handle } of result.recorded) this.heldForAnchor.delete(handle);
+		for (const handle of refused) this.sessions.holdAnchor(handle);
+		for (const { handle } of result.recorded) this.sessions.releaseAnchor(handle);
 		// The anchors as the store holds them now: a moved one leaves its version 1 handle and carries its age.
 		this.catalog.forgetAnchors(result.moved);
 		this.catalog.recordAnchors(result.recorded);
@@ -1968,7 +1795,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		// A listing that was unavailable leaves the rest pending; the next index event tries again. A write that could
 		// not be served is tried again after the store backoff.
 		const anchored = refs.length > 0 ? await this.anchorRefs(refs, epoch) : true;
-		this.undatedNodesPending = anchored !== true;
+		this.sessions.setUndatedPending(anchored !== true);
 		if (anchored !== true && anchored !== false) this.deferStoreWork(anchored.reason, { anchors: true }, epoch);
 	}
 
@@ -1989,7 +1816,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/** Recompute and publish frontiers for sessions whose nodes changed outside a normal completion. */
 	private async republishFrontiers(sessionIds: readonly string[], epoch: number): Promise<void> {
-		const writer = this.writer;
+		const writer = this.run.writer;
 		if (!writer || !this.live(epoch)) return;
 		const frontiers: Record<string, TranscriptFrontierSelection> = {};
 		const removeFrontiers: string[] = [];
@@ -2031,31 +1858,25 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	// ---- running jobs -------------------------------------------------------------------------
 
 	private pump(epoch: number): void {
-		const scheduler = this.scheduler;
+		const scheduler = this.run.scheduler;
 		const summarizer = this.ports.summarizer;
 		if (!this.live(epoch) || !scheduler || !summarizer) return;
 		// Model work becoming possible again releases the jobs held for it and gives re-admission its turn.
 		const blocked = this.modelWorkBlock() !== undefined;
-		if (this.modelWorkBlocked && !blocked) {
-			this.releaseParked("model_work");
-			for (const [id, hold] of this.readmissionState) {
-				if (hold.state === "unavailable" || hold.state === "waiting") this.readmissionState.delete(id);
-			}
-		}
-		this.modelWorkBlocked = blocked;
-		if (this.receiptRetryAt === undefined && scheduler.hasReleasedReceipts(this.ports.ownerSessionId())) {
+		this.holds.modelWork(blocked);
+		if (this.receipts.at === undefined && scheduler.hasReleasedReceipts(this.ports.ownerSessionId())) {
 			this.retryReleasedReceipts();
 		}
 		this.enqueueReadmissions();
-		this.pruneParked();
+		this.holds.prune((id) => this.run.scheduler?.get(id)?.state);
 		// Parents held at the live-job cap come back once live work fell below it.
-		if (scheduler.admitBelowLiveBound(this.ports.now()).length > 0) this.noteEnqueued();
+		if (scheduler.admitBelowLiveBound(this.ports.now()).length > 0) this.batch.noteEnqueued();
 		// Nothing is claimed before admission opens: recovered work has not adopted its version 1 budgets yet.
-		while (this.startPhase === "open" && this.ports.canRunBackground()) {
+		while (this.run.phase === "open" && this.ports.canRunBackground()) {
 			// Dispatch is the one place the attempt budget is enforced: an exhausted job never reaches a provider.
 			// Held jobs wait for their condition; claiming them again would only hold them again.
 			const claim = scheduler.claimNext(this.ports.now(), (candidate) => {
-				if (this.parked.has(candidate.id)) return true;
+				if (this.holds.parked.has(candidate.id)) return true;
 				// A kept paid verdict (current admission contract) whose receipt is owed to ANOTHER session can only be recorded by a
 				// coordinator of that session, which also owns any replacement of that verdict (changed input or text: the owner claims
 				// the job, judges again and setPendingVerdict hands the replaced receipt to the owed queue). A claim here would only save
@@ -2069,7 +1890,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 					verdict.ownerSessionId !== this.ports.ownerSessionId() &&
 					verdict.receipts.some((receipt) => receipt.status === "unrecorded")
 				) {
-					this.parked.set(candidate.id, {
+					this.holds.park(candidate.id, {
 						scope: "usage_receipt",
 						reason: `the paid answer's usage receipt belongs to session ${verdict.ownerSessionId}, which is not this session; it is recorded when a coordinator starts in it`,
 					});
@@ -2080,7 +1901,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			for (const spent of claim.exhausted) this.settleExhausted(spent, epoch);
 			if (!claim.claimed) break;
 			const { job, token } = claim.claimed;
-			this.noteEnqueued();
+			this.batch.noteEnqueued();
 			this.markJobsDirty();
 			// The started attempt is durable before its provider call, so a crash cannot grant another one: the save that
 			// includes this claim must ACKNOWLEDGE its attempt count (a failed save only leaves the barrier settled). That
@@ -2130,11 +1951,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * get another chance, and enumeration stopped at the bound resumes. What still does not fit is held again.
 	 */
 	private releaseProofHolds(epoch: number): void {
-		const scheduler = this.scheduler;
+		const scheduler = this.run.scheduler;
 		if (!scheduler) return;
-		this.releaseParked("proof");
-		if (scheduler.retryProofHolds(this.ports.now()).length > 0) this.noteEnqueued();
-		for (const [sessionId, runtime] of this.runtime) {
+		this.holds.release("proof");
+		if (scheduler.retryProofHolds(this.ports.now()).length > 0) this.batch.noteEnqueued();
+		for (const [sessionId, runtime] of this.sessions.entries()) {
 			if (runtime.backpressured) this.resumeDeferredEnumeration(sessionId, epoch);
 		}
 		this.pump(epoch);
@@ -2143,9 +1964,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	/** A queued job whose attempts were all spent: terminal `failed` / `attempts_exhausted`, reported like any failure. */
 	private settleExhausted(job: TranscriptSummaryJob, epoch: number): void {
 		const message = job.lastError?.message ?? "the attempt budget was spent before the job completed";
-		this.noteEnqueued();
-		this.recordFailure(job, "attempts_exhausted", message);
-		this.countTerminal("failed", job, "attempts_exhausted", message);
+		this.batch.noteEnqueued();
+		this.batch.recordFailure(job, "attempts_exhausted", message);
+		this.batch.countTerminal("failed", job, "attempts_exhausted", message);
 		this.markJobsDirty();
 		this.resumeDeferredEnumeration(job.sessionId, epoch);
 	}
@@ -2161,12 +1982,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		this.timer = undefined;
 		if (!this.live(epoch)) return;
 		const candidates = [
-			this.scheduler?.nextWakeAt(),
+			this.run.scheduler?.nextWakeAt(),
 			// Deferred retention waits for the store retry, so a due deadline cannot re-arm the timer at once.
-			this.storeRetry.retention ? undefined : this.nextRetentionAt(),
-			this.saveRetryAt,
-			this.storeRetryAt,
-			this.receiptRetryAt,
+			this.storeRetry.work.retention ? undefined : this.nextRetentionAt(),
+			this.saveBackoff.at,
+			this.storeRetry.at,
+			this.receipts.at,
 		].filter((value): value is number => value !== undefined);
 		if (candidates.length === 0) return;
 		const at = Math.min(...candidates);
@@ -2174,20 +1995,21 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			() => {
 				this.timer = undefined;
 				void this.enqueue(async () => {
-					if (!this.live(epoch) || !this.scheduler) return;
-					this.scheduler.promoteDue(this.ports.now());
+					if (!this.live(epoch) || !this.run.scheduler) return;
+					this.run.scheduler.promoteDue(this.ports.now());
 					// A failed job save that is due is tried again by this save.
-					if (this.saveRetryAt !== undefined && this.saveRetryAt <= this.ports.now()) this.saveRetryAt = undefined;
+					if (this.saveBackoff.at !== undefined && this.saveBackoff.at <= this.ports.now())
+						this.saveBackoff.disarm();
 					// Owed usage receipts are tried again: the held jobs are released and claim the kept verdict, not the provider.
-					if (this.receiptRetryAt !== undefined && this.receiptRetryAt <= this.ports.now()) {
-						this.receiptRetryAt = undefined;
-						this.releaseParked("usage_receipt");
+					if (this.receipts.at !== undefined && this.receipts.at <= this.ports.now()) {
+						this.receipts.disarm();
+						this.holds.release("usage_receipt");
 						this.retryReleasedReceipts();
 					}
 					this.markJobsDirty();
 					try {
 						const due = this.nextRetentionAt();
-						if (!this.storeRetry.retention && due !== undefined && due <= this.ports.now()) {
+						if (!this.storeRetry.work.retention && due !== undefined && due <= this.ports.now()) {
 							try {
 								await this.applyRetention(epoch);
 							} catch (error) {
@@ -2201,18 +2023,18 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 							}
 						}
 						// A lifecycle wake also retries held recovered leaves whose sessions could not be read before.
-						if (this.startPhase === "open") {
+						if (this.run.phase === "open") {
 							try {
 								await this.reconcileHeldSessions(new Set(), epoch);
 							} catch (error) {
 								// Its cause is recorded and the next wake reads those sessions again; the store retry below still runs,
 								// so a due backoff is never left to re-arm the timer at once.
-								this.noteInternalCause(
+								this.causes.noteInternal(
 									`reading held sessions: ${error instanceof Error ? error.message : String(error)}`,
 								);
 							}
 						}
-						if (this.storeRetryAt !== undefined && this.storeRetryAt <= this.ports.now())
+						if (this.storeRetry.at !== undefined && this.storeRetry.at <= this.ports.now())
 							await this.retryStoreWork(epoch);
 					} finally {
 						// The one wake path: pump claims what is due and re-arms the timer, so a step that threw (the mailbox
@@ -2282,11 +2104,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			reply = { text: kept.text, model: kept.model };
 		} else {
 			// The provider boundary: checked synchronously, with nothing awaited between this check and the call.
-			if (!this.scheduler?.isClaimCurrent(token)) {
+			if (!this.run.scheduler?.isClaimCurrent(token)) {
 				return { outcome: { kind: "abandoned", reason: CLAIM_SUPERSEDED_BEFORE_SUMMARY } };
 			}
 			paid = true;
-			this.paidClaims.add(token.claimId);
+			this.receipts.markPaid(token.claimId);
 			try {
 				reply = await summarizer.summarize(
 					{ system: SUMMARY_SYSTEM_PROMPT, prompt, maxOutputBytes: TRANSCRIPT_SUMMARY_MAX_BYTES },
@@ -2321,7 +2143,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		// The second paid call, checked the same way. A claim superseded after its summarizer call has spent that
 		// attempt: the round ends with the paid reply kept, the increment is not returned.
-		if (!this.scheduler?.isClaimCurrent(token)) {
+		if (!this.run.scheduler?.isClaimCurrent(token)) {
 			return {
 				outcome: paid
 					? { kind: "superseded", reason: CLAIM_SUPERSEDED_AFTER_SUMMARY }
@@ -2341,14 +2163,14 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			keptAdmission.record.contractVersion === TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION &&
 			keptAdmission.record.textDigest === summaryTextDigest(reply.text)
 		) {
-			this.reusedAdmissions += 1;
+			this.batch.countReuse();
 			return { ...reply, admission: keptAdmission.record };
 		}
 		const judged = await this.judge(job, token, port, { ...request, candidate: reply.text }, inputDigest, signal);
 		if ("outcome" in judged) return { outcome: judged.outcome };
 		const result = judged.result;
 		if (result.disposition === "accepted") {
-			this.countJudgment(result.disposition, judged.reused);
+			this.batch.countJudgment(result.disposition, judged.reused);
 			const admission = admissionRecordFromResult(result, reply.text, new Date(this.ports.now()).toISOString());
 			// A broken invariant, not a provider failure: it ends the job with its own class instead of reaching
 			// `runJob`'s provider classification.
@@ -2371,7 +2193,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (result.disposition === "unavailable" && result.cause === "invalid_output") {
 			// A paid answer that failed the evaluator contract is evidence of nothing: never reused, never approved, and not an
 			// outage to retry. The job ends with that cause.
-			this.countJudgment("unavailable", judged.reused);
+			this.batch.countJudgment("unavailable", judged.reused);
 			return {
 				outcome: {
 					kind: "fail",
@@ -2385,13 +2207,13 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			result.cause !== "request_refused"
 		) {
 			// Temporary: the validated reply stays on the job for the retry.
-			this.countJudgment("unavailable", judged.reused);
+			this.batch.countJudgment("unavailable", judged.reused);
 			return {
 				outcome: { kind: "fail", failure: { kind: "transient", reason: "admission_unavailable", message: detail } },
 			};
 		}
 		if (result.disposition === "unavailable") {
-			this.countJudgment("unavailable", judged.reused);
+			this.batch.countJudgment("unavailable", judged.reused);
 			return {
 				outcome: {
 					kind: "fail",
@@ -2399,19 +2221,13 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				},
 			};
 		}
-		this.countJudgment(result.disposition, judged.reused);
+		this.batch.countJudgment(result.disposition, judged.reused);
 		return {
 			outcome: {
 				kind: "fail",
 				failure: { kind: "malformed", reason: `admission_${result.disposition}`, message: detail },
 			},
 		};
-	}
-
-	/** A fresh verdict is a judgment; a kept verdict applied again is a reuse event (only an acceptance counts as one), never a judgment. */
-	private countJudgment(disposition: keyof TranscriptMemoryAdmissionStatus["judgments"], replayed: boolean): void {
-		if (!replayed) this.judgments[disposition] += 1;
-		else if (disposition === "accepted") this.reusedAdmissions += 1;
 	}
 
 	/**
@@ -2428,7 +2244,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		inputDigest: string,
 		signal: AbortSignal,
 	): Promise<{ result: TranscriptSummaryAdmissionResult; reused: boolean } | { outcome: JobOutcome }> {
-		const scheduler = this.scheduler;
+		const scheduler = this.run.scheduler;
 		const textDigest = summaryTextDigest(request.candidate);
 		const verdictKey = { inputDigest, textDigest, contractVersion: TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION };
 		// A paid answer whose usage receipt was owed (the write failed) is kept on the job: the receipt is recorded again
@@ -2446,11 +2262,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			const result = resultFromVerdict(owed, settled);
 			scheduler?.setPendingVerdict(job.id, undefined);
 			this.markJobsDirty();
-			this.receiptRetryFailures = 0;
+			this.receipts.clearFailures();
 			return { result, reused: true };
 		}
 		// The evaluator call is paid work of this claim too: its attempt is not given back by a later failure.
-		this.paidClaims.add(token.claimId);
+		this.receipts.markPaid(token.claimId);
 		let result: Awaited<ReturnType<TranscriptSummaryAdmissionPort["admit"]>>;
 		try {
 			result = await port.admit(request, signal);
@@ -2493,7 +2309,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 */
 	private settleCarriedReceipts(port: TranscriptSummaryAdmissionPort, error: unknown, jobId: string): void {
 		const carried = receiptsOf(error);
-		const scheduler = this.scheduler;
+		const scheduler = this.run.scheduler;
 		if (carried.length === 0 || !scheduler) return;
 		const owner = this.ports.ownerSessionId();
 		const settled = this.settleReceipts(port, carried, owner);
@@ -2541,7 +2357,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	private receiptHold(receipts: readonly SystemOneReceipt[], foreignOwner = false): JobOutcome {
 		const owed = receipts.find((receipt) => receipt.status === "unrecorded");
 		const cause = owed?.cause ?? "the usage receipt was not recorded";
-		this.noteInternalCause(`a paid evaluator answer is held for its usage receipt: ${cause}`);
+		this.causes.noteInternal(`a paid evaluator answer is held for its usage receipt: ${cause}`);
 		return {
 			kind: "held",
 			scope: "usage_receipt",
@@ -2562,7 +2378,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	): Promise<boolean> {
 		let kept = false;
 		await this.enqueue(async () => {
-			const scheduler = this.scheduler;
+			const scheduler = this.run.scheduler;
 			if (scheduler?.ownsClaim(token)) {
 				scheduler.setPendingVerdict(token.jobId, verdict);
 				kept = true;
@@ -2585,12 +2401,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	/** Arm the bounded retry of owed usage receipts (1 s doubling to one minute while writes keep failing). */
 	private armReceiptRetry(): void {
 		// One failed round, not one failed job: several held jobs advance the backoff once.
-		if (this.receiptRetryAt === undefined) {
-			this.receiptRetryFailures += 1;
-			const delay = Math.min(JOB_SAVE_RETRY_MAX_MS, JOB_SAVE_RETRY_BASE_MS * 2 ** (this.receiptRetryFailures - 1));
-			this.receiptRetryAt = this.ports.now() + delay;
-		}
-		this.armTimer(this.epoch);
+		this.receipts.arm();
+		this.armTimer(this.run.epoch);
 	}
 
 	/**
@@ -2599,7 +2411,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * to the queue and the bounded receipt backoff applies once for the round; one owed to another session waits for it.
 	 */
 	private retryReleasedReceipts(): void {
-		const scheduler = this.scheduler;
+		const scheduler = this.run.scheduler;
 		const port = this.ports.admission;
 		if (!scheduler || !port) return;
 		const owed = scheduler.takeReleasedReceipts();
@@ -2610,13 +2422,13 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			if (settled?.status === "unrecorded") still.push({ ownerSessionId: entry.ownerSessionId, receipt: settled });
 		}
 		if (still.length === 0) {
-			this.receiptRetryFailures = 0;
+			this.receipts.clearFailures();
 			this.markJobsDirty();
 			return;
 		}
 		scheduler.returnReleasedReceipts(still);
 		this.markJobsDirty();
-		this.noteInternalCause(
+		this.causes.noteInternal(
 			`${still.length} usage receipt(s) of ended jobs are still owed: ${still[0]?.receipt.cause ?? "not recorded"}`,
 		);
 		if (still.some((entry) => entry.ownerSessionId === this.ports.ownerSessionId())) this.armReceiptRetry();
@@ -2632,7 +2444,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		const { jobId } = token;
 		// Only while this claim still owns the job: a late claim never attaches to (or takes from) a replacement.
 		await this.enqueue(async () => {
-			const scheduler = this.scheduler;
+			const scheduler = this.run.scheduler;
 			if (!scheduler?.ownsClaim(token)) return;
 			scheduler.setPendingReply(jobId, reply);
 			this.markJobsDirty();
@@ -2640,11 +2452,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		await this.jobsSaved;
 		if (this.durableReplies.get(jobId) === reply.textDigest) return;
 		await this.enqueue(async () => {
-			const scheduler = this.scheduler;
+			const scheduler = this.run.scheduler;
 			if (!scheduler?.ownsClaim(token)) return;
 			if (scheduler.get(jobId)?.pendingReply?.textDigest === reply.textDigest)
 				scheduler.setPendingReply(jobId, undefined);
-			this.noteInternalCause(
+			this.causes.noteInternal(
 				`the summary reply of job ${jobId.slice(0, 16)} was not kept: ${this.saveFailure ?? "the save holding it was not acknowledged"}`,
 			);
 		});
@@ -2661,7 +2473,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		admission: TranscriptSummaryKeptAdmission,
 	): Promise<void> {
 		await this.enqueue(async () => {
-			const scheduler = this.scheduler;
+			const scheduler = this.run.scheduler;
 			if (!scheduler?.ownsClaim(token)) return;
 			const pending = scheduler.get(token.jobId)?.pendingReply;
 			if (pending?.textDigest !== admission.record.textDigest) return;
@@ -2684,16 +2496,16 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		outcome: JobOutcome,
 		epoch: number,
 	): Promise<void> {
-		const { scheduler, writer } = this;
+		const { scheduler, writer } = this.run;
 		// Taken once, whatever the outcome: the claim is over.
-		const paidCall = this.paidClaims.delete(token.claimId);
+		const paidCall = this.receipts.takePaid(token.claimId);
 		if (!scheduler || !writer) return;
 		const now = this.ports.now();
 		// Settled only by the claim that owns the job: a late callback of an older claim (the job was replaced and
 		// claimed again under the same id) mutates and records nothing.
 		if (!scheduler.ownsClaim(token)) return;
 		if (outcome.kind === "aborted" || !this.live(epoch)) {
-			if (this.started && epoch === this.epoch) scheduler.interrupt(job.id, now);
+			if (this.run.started && epoch === this.run.epoch) scheduler.interrupt(job.id, now);
 			return;
 		}
 		if (outcome.kind === "readmitted") {
@@ -2719,7 +2531,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// A claim that made the paid call keeps its attempt; a retry claim that only re-recorded the receipt returns its own.
 			if (paidCall) scheduler.interrupt(job.id, now);
 			else scheduler.abandonClaim(token, { message: outcome.reason, reason: "usage_receipt_pending" }, now);
-			this.parked.set(job.id, { scope: "usage_receipt", reason: outcome.reason });
+			this.holds.park(job.id, { scope: "usage_receipt", reason: outcome.reason });
 			// A receipt owed to THIS session is retried on the bounded backoff. One owed to another session cannot be recorded
 			// here, ever (a coordinator's session never changes): it waits for the event that can settle it, the start of a
 			// coordinator in the owning session, where the persisted job and its kept verdict are claimed and recorded.
@@ -2739,9 +2551,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 							? "persistence_unacknowledged"
 							: "admission_held";
 			if (scheduler.abandonClaim(token, { message: outcome.reason, reason }, now)) {
-				this.parked.set(job.id, { scope: outcome.scope, reason: outcome.reason });
+				this.holds.park(job.id, { scope: outcome.scope, reason: outcome.reason });
 				// A failed save is retried on its backoff, not at once; that save carries this returned attempt too.
-				if (outcome.scope !== "persistence" || this.saveRetryAt === undefined) this.markJobsDirty();
+				if (outcome.scope !== "persistence" || this.saveBackoff.at === undefined) this.markJobsDirty();
 			}
 			this.pump(epoch);
 			return;
@@ -2758,7 +2570,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (outcome.kind === "superseded") {
 			// The summarizer was paid under this claim: the attempt stays counted and the kept reply is judged next time.
 			scheduler.interrupt(job.id, now);
-			this.noteInternalCause(outcome.reason);
+			this.causes.noteInternal(outcome.reason);
 			this.markJobsDirty();
 			this.pump(epoch);
 			return;
@@ -2806,7 +2618,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		epoch: number,
 		paidCall: boolean,
 	): Promise<void> {
-		const { scheduler, writer } = this;
+		const { scheduler, writer } = this.run;
 		if (!scheduler || !writer) return;
 		const now = this.ports.now();
 		// The summarized sources and their context must still be the live ones at the moment of publication, by one
@@ -2842,13 +2654,13 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				{ kind: "malformed", reason: "admission_missing", message: reason },
 				now,
 			);
-			this.recordFailure(job, "admission_missing", reason);
-			if (failed) this.countTerminal("failed", job, "admission_missing", reason);
+			this.batch.recordFailure(job, "admission_missing", reason);
+			if (failed) this.batch.countTerminal("failed", job, "admission_missing", reason);
 			return;
 		}
 		if (this.forgottenSessions.has(job.sessionId)) {
 			scheduler.markStale(job.id, now);
-			this.countTerminal("stale");
+			this.batch.countTerminal("stale");
 			return;
 		}
 		// A result that depends on a source past the retention window is never published, however late it arrives.
@@ -2857,8 +2669,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			const reason =
 				"the summary depends on a source past the retention window (retentionDays); it is not published";
 			const failed = scheduler.failJob(job.id, { kind: "policy", message: reason }, now);
-			this.recordFailure(job, "retention_expired", reason);
-			if (failed) this.countTerminal("failed", job, failed.lastError?.reason ?? "policy", reason);
+			this.batch.recordFailure(job, "retention_expired", reason);
+			if (failed) this.batch.countTerminal("failed", job, failed.lastError?.reason ?? "policy", reason);
 			return;
 		}
 
@@ -2903,7 +2715,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				);
 			}
 			if (result.status === "unavailable") {
-				this.noteInternalCause(result.reason);
+				this.causes.noteInternal(result.reason);
 				return this.settlePublicationFailure(job, token, epoch, paidCall, {
 					kind: "transient",
 					reason: "store_unavailable",
@@ -2948,19 +2760,19 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				this.catalog.index(node);
 				// A parent held for an unapproved child may be able to run now (a rebuilt child keeps its identity, so the
 				// scheduler would not admit the parent again). Released jobs re-check on claim and hold again if still blocked.
-				this.releaseParked("children");
+				this.holds.release("children");
 				if (cursorUpdate) {
 					this.cursors.set(node.sessionId, cursorUpdate);
 					// Certified: the runtime vouched for the leaf's lineage ({@link advanceCursor}) and now names it, as the
 					// cursor does; its stamp still names the same positions. Otherwise the rest of the session was not
 					// verified on the lineage this leaf was: the runtime no longer vouches for the whole coverage, and its next
 					// read verifies it.
-					const runtime = this.runtime.get(node.sessionId);
+					const runtime = this.sessions.get(node.sessionId);
 					if (runtime && cursorUpdate.lineageDigest !== UNVERIFIED_LINEAGE_DIGEST)
-						runtime.verifiedDigest = cursorUpdate.lineageDigest;
+						this.sessions.setDigest(runtime, cursorUpdate.lineageDigest);
 					else if (runtime) {
-						runtime.verifiedDigest = undefined;
-						runtime.verifiedStamp = undefined;
+						this.sessions.setDigest(runtime, undefined);
+						this.sessions.setStamp(runtime, undefined);
 					}
 				}
 				this.frontierBytes.set(node.sessionId, {
@@ -2973,7 +2785,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				}
 				if (owned) {
 					scheduler.completeJob(job.id, node, this.ports.now());
-					this.countTerminal("succeeded");
+					this.batch.countTerminal("succeeded");
 				}
 				// The listener is told last, once the job settled: whatever it does, the job is already done.
 				if (frontierPublished) {
@@ -3003,8 +2815,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// Forgotten by retention: the identity is permanently refused, so the job ends `failed` and is not rebuilt.
 			const reason = "the node was forgotten by retention; it is not republished";
 			const failed = scheduler.failJob(job.id, { kind: "policy", message: reason }, this.ports.now());
-			this.recordFailure(job, "revoked", reason);
-			if (failed) this.countTerminal("failed", job, failed.lastError?.reason ?? "policy", reason);
+			this.batch.recordFailure(job, "revoked", reason);
+			if (failed) this.batch.countTerminal("failed", job, failed.lastError?.reason ?? "policy", reason);
 			return;
 		}
 		const reason = result.status === "invalid" ? result.reason : `the revision moved twice (${result.status})`;
@@ -3017,8 +2829,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			{ returnClaim: this.returnsClaim(job, paidCall) },
 		);
 		if (failed?.state === "failed") {
-			this.recordFailure(job, failed.lastError?.reason ?? "publish", reason);
-			this.countTerminal("failed", job, failed.lastError?.reason ?? "publish", reason);
+			this.batch.recordFailure(job, failed.lastError?.reason ?? "publish", reason);
+			this.batch.countTerminal("failed", job, failed.lastError?.reason ?? "publish", reason);
 		}
 	}
 
@@ -3107,10 +2919,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		leafRead: Extract<TranscriptLineageSpansResult, { status: "ok" }>,
 	): TranscriptSummarySessionCursor {
 		const current = this.cursors.get(leaf.sessionId);
-		const runtime = this.runtime.get(leaf.sessionId);
+		const runtime = this.sessions.get(leaf.sessionId);
 		const leafDigest = leafRead.lineageDigest;
 		const verifiedThere =
-			!this.revocationDue.has(leaf.sessionId) &&
+			!this.sessions.isDue(leaf.sessionId) &&
 			(runtime ? vouchesFor(runtime, leafRead) : current?.lineageDigest === leafDigest);
 		const lineageDigest = verifiedThere ? leafDigest : UNVERIFIED_LINEAGE_DIGEST;
 		let covered = current?.coveredSpanCount ?? 0;
@@ -3131,12 +2943,12 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 
 	/** A finished job frees room: enumeration that stopped at the active-job ceiling resumes. */
 	private resumeDeferredEnumeration(sessionId: string, epoch: number): void {
-		if (!this.runtime.get(sessionId)?.backpressured) return;
+		if (!this.sessions.get(sessionId)?.backpressured) return;
 		void this.enqueue(async () => {
 			if (!this.live(epoch)) return;
 			// Through the one wrapper: an enumeration page that does not answer is projected onto the session's
 			// held leaves like any other read.
-			if (this.runtime.has(sessionId)) await this.reconcileSession(sessionId, epoch);
+			if (this.sessions.has(sessionId)) await this.reconcileSession(sessionId, epoch);
 			this.pump(epoch);
 		});
 	}
@@ -3153,10 +2965,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	private markJobsDirty(): void {
 		if (this.jobsDirty) return;
 		this.jobsDirty = true;
-		const epoch = this.epoch;
+		const epoch = this.run.epoch;
 		this.jobsSaved = this.enqueue(async () => {
 			this.jobsDirty = false;
-			const { scheduler, writer } = this;
+			const { scheduler, writer } = this.run;
 			if (!scheduler || !writer) return;
 			// The acknowledgement covers exactly this snapshot: a claim made after it waits for the next save.
 			const snapshot = scheduler.snapshot();
@@ -3185,7 +2997,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 					void this.enqueue(async () => this.recordForgetApplied(epoch));
 				}
 				// A refused job needs nothing here: its pre-call check finds no record and holds it before any call.
-				if (freed && this.live(this.epoch)) this.releaseProofHolds(this.epoch);
+				if (freed && this.live(this.run.epoch)) this.releaseProofHolds(this.run.epoch);
 				if (this.live(epoch)) this.acknowledgeSave(snapshot, scheduler, epoch);
 			} else if (saved.status === "fenced" || saved.status === "manifest_corrupt") {
 				this.fatal(`saving jobs was refused: ${describeSaveRefusal(saved)}`);
@@ -3230,7 +3042,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				return true;
 			}
 			// The real cause is kept whether or not this run is still live (a stop reports through it).
-			this.noteInternalCause(
+			this.causes.noteInternal(
 				`saving the owed usage receipts: ${saved.status === "unavailable" ? saved.reason : saved.status}`,
 			);
 			if (!this.live(epoch)) return false;
@@ -3270,26 +3082,24 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			if (job.pendingReply) this.durableReplies.set(job.id, job.pendingReply.textDigest);
 		}
 		this.saveFailure = undefined;
-		this.saveFailures = 0;
-		this.saveRetryAt = undefined;
-		if (this.startPhase === "convert") {
+		this.saveBackoff.reset();
+		if (this.run.phase === "convert") {
 			// Version 1 budgets are durable carried records now: recovered parents adopt theirs and recovered leaves are
 			// held until enumeration adopts theirs, before anything runs.
-			this.startPhase = "reconcile";
+			this.run.setPhase("reconcile");
 			void this.enqueue(async () => {
 				this.reconcileRecovered(epoch);
 			});
-		} else if (this.startPhase === "reconciled") {
-			this.startPhase = "open";
-			if (scheduler.openAdmission(this.ports.now()).length > 0) this.noteEnqueued();
-			if (this.discoveryHeld) {
-				this.discoveryHeld = false;
+		} else if (this.run.phase === "reconciled") {
+			this.run.setPhase("open");
+			if (scheduler.openAdmission(this.ports.now()).length > 0) this.batch.noteEnqueued();
+			if (this.run.takeHeldDiscovery()) {
 				void this.enqueue(async () => {
 					if (this.live(epoch)) await this.discover(epoch);
 				});
 			}
 		}
-		this.releaseParked("persistence");
+		this.holds.release("persistence");
 		this.pump(epoch);
 	}
 
@@ -3311,21 +3121,9 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		},
 		epoch: number,
 	): void {
-		this.noteInternalCause(cause);
+		this.causes.noteInternal(cause);
 		if (!this.live(epoch)) return;
-		const pending = this.storeRetry;
-		if (work.discover) pending.discover = true;
-		if (work.retention) pending.retention = true;
-		if (work.anchors) pending.anchors = true;
-		for (const sessionId of work.sessions ?? []) pending.sessions.add(sessionId);
-		for (const sessionId of work.frontiers ?? []) pending.frontiers.add(sessionId);
-		for (const sessionId of work.forgets ?? []) pending.forgets.add(sessionId);
-		// A failed round, not a failed item: one pass that defers many sessions advances the backoff once.
-		if (this.storeRetryAt === undefined) {
-			this.storeRetryFailures += 1;
-			const delay = Math.min(JOB_SAVE_RETRY_MAX_MS, JOB_SAVE_RETRY_BASE_MS * 2 ** (this.storeRetryFailures - 1));
-			this.storeRetryAt = this.ports.now() + delay;
-		}
+		this.storeRetry.defer(work);
 		this.armTimer(epoch);
 	}
 
@@ -3334,10 +3132,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 	 * timer). What fails again is deferred again with a longer backoff; a pass that defers nothing resets it.
 	 */
 	private async retryStoreWork(epoch: number): Promise<void> {
-		const work = this.storeRetry;
-		this.storeRetry = emptyStoreRetry();
-		this.storeRetryAt = undefined;
-		const failures = this.storeRetryFailures;
+		const work = this.storeRetry.take();
+		const failures = this.storeRetry.failures;
 		const remaining = {
 			...work,
 			sessions: new Set(work.sessions),
@@ -3349,7 +3145,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				await this.discover(epoch);
 				remaining.discover = false;
 			} else {
-				if (work.anchors && this.undatedNodesPending) await this.anchorUndatedNodes(epoch);
+				if (work.anchors && this.sessions.undatedPending) await this.anchorUndatedNodes(epoch);
 				remaining.anchors = false;
 				if (work.retention) await this.applyRetention(epoch);
 				remaining.retention = false;
@@ -3372,17 +3168,15 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			this.deferStoreWork(error instanceof Error ? error.message : String(error), remaining, epoch);
 			throw error;
 		}
-		if (this.storeRetryFailures === failures) this.storeRetryFailures = 0;
+		if (this.storeRetry.failures === failures) this.storeRetry.clearFailures();
 	}
 
 	/** A job save of this run failed: record the real cause and try again on the bounded backoff. */
 	private jobSaveFailed(cause: string, epoch: number): void {
-		this.noteInternalCause(cause);
+		this.causes.noteInternal(cause);
 		if (!this.live(epoch)) return;
 		this.saveFailure = cause;
-		this.saveFailures += 1;
-		const delay = Math.min(JOB_SAVE_RETRY_MAX_MS, JOB_SAVE_RETRY_BASE_MS * 2 ** (this.saveFailures - 1));
-		this.saveRetryAt = this.ports.now() + delay;
+		this.saveBackoff.fail();
 		this.armTimer(epoch);
 	}
 
@@ -3416,22 +3210,21 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		outcome: Extract<JobOutcome, { kind: "readmitted" }>,
 		epoch: number,
 	): Promise<void> {
-		const scheduler = this.scheduler;
+		const scheduler = this.run.scheduler;
 		if (!scheduler) return;
 		const { node, result, reused, inputDigest } = outcome;
 		// A kept verdict applied again is a reuse event, never a new judgment; a fresh one is counted once. Only an acceptance
 		// is reused as one (status.reused): a kept rejection or outage is replayed without a judgment and counts nowhere.
-		if (!reused) this.judgments[result.disposition] += 1;
-		else if (result.disposition === "accepted") this.reusedAdmissions += 1;
-		this.settlingReadmissions.add(job.id);
+		this.batch.countJudgment(result.disposition, reused);
+		this.holds.beginSettling(job.id);
 		try {
 			await this.applyReadmission(node, result, epoch);
 		} finally {
-			this.settlingReadmissions.delete(job.id);
+			this.holds.endSettling(job.id);
 		}
 		if (!this.live(epoch) || !scheduler.ownsClaim(token)) return;
 		const now = this.ports.now();
-		const state = this.readmissionState.get(node.id);
+		const state = this.holds.readmission.get(node.id);
 		if (state?.state === "admitted" || state?.state === "rejected" || state?.state === "uncertain") {
 			scheduler.completeReadmission(job.id, now, { reused });
 			return;
@@ -3450,7 +3243,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		if (state?.state === "unavailable" && result.disposition === "unavailable") {
 			if (result.cause === "not_bound" || result.cause === "not_calibrated") {
 				scheduler.abandonClaim(token, { message: result.reason, reason: result.cause }, now);
-				this.parked.set(job.id, { scope: "model_work", reason: result.reason });
+				this.holds.park(job.id, { scope: "model_work", reason: result.reason });
 			} else if (result.cause === "evaluator_error") {
 				// A replayed outage made no paid call, so its claim's attempt is returned; a fresh one keeps it (its call was paid).
 				this.settleFailure(
@@ -3489,7 +3282,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 					scheduler.abandonClaim(token, { message: "a child summary is not approved yet", reason: wait }, now);
 				else scheduler.interrupt(job.id, now);
 			} else scheduler.abandonClaim(token, { message: "a child summary is not approved yet", reason: wait }, now);
-			this.parked.set(job.id, { scope: "children", reason: "a child summary is not approved yet" });
+			this.holds.park(job.id, { scope: "children", reason: "a child summary is not approved yet" });
 		} else if (state?.state === "waiting" && (wait === "source_unreadable" || wait === "store_unavailable")) {
 			keepJudgment();
 			this.settleFailure(
@@ -3508,7 +3301,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		} else if (state?.state === "waiting" && wait === "judgment_discarded" && this.modelWorkBlock() !== undefined) {
 			keepJudgment();
 			scheduler.interrupt(job.id, now);
-			this.parked.set(job.id, { scope: "model_work", reason: "the judgment waits for the policy fence" });
+			this.holds.park(job.id, { scope: "model_work", reason: "the judgment waits for the policy fence" });
 		} else if (state === undefined) {
 			// The apply ended without a state (a run that is ending): the judgment stays for the next claim.
 			keepJudgment();
@@ -3576,14 +3369,14 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		result: TranscriptSummaryAdmissionResult,
 		epoch: number,
 	): Promise<void> {
-		const { writer } = this;
+		const { writer } = this.run;
 		// The outcome this judgment records is its own: a hold an earlier attempt left on the node is never read as its result.
-		this.readmissionState.delete(node.id);
+		this.holds.clearReadmission(node.id);
 		if (!writer || !this.live(epoch) || this.catalog.get(node.id) !== node) return;
 		// Source and policy fences, read again after the asynchronous judgment.
 		const block = this.modelWorkBlock();
 		if (block !== undefined) {
-			this.setReadmission(
+			this.holds.setReadmission(
 				node.id,
 				"waiting",
 				this.readmissionWait(node, "judgment_discarded", `judgment discarded by the policy fence: ${block.reason}`),
@@ -3592,7 +3385,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		}
 		if (node.children) {
 			if (node.children.some((id) => !this.catalog.isApproved(this.catalog.get(id)))) {
-				this.setReadmission(node.id, "waiting", "child_not_approved");
+				this.holds.setReadmission(node.id, "waiting", "child_not_approved");
 				return;
 			}
 		} else {
@@ -3602,11 +3395,11 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				// Nothing is known about the sources: the judgment is not recorded, and the node is judged again later. The
 				// verdict itself was paid for and says nothing about the read, so it is kept with the text it judged and applied
 				// again after the backoff (behind these same fences), never asked of the evaluator again.
-				this.setReadmission(node.id, "waiting", this.readmissionSourceWait(node, verdict.outcome));
+				this.holds.setReadmission(node.id, "waiting", this.readmissionSourceWait(node, verdict.outcome));
 				return;
 			}
 			if (verdict.kind === "not_covered") {
-				this.setReadmission(
+				this.holds.setReadmission(
 					node.id,
 					"waiting",
 					this.readmissionSourceWait(node, { kind: "stale", reason: verdict.reason }),
@@ -3615,21 +3408,10 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			}
 		}
 		const subject = { id: `readmit:${node.id.slice(0, 16)}`, level: node.level, sessionId: node.sessionId };
-		const note = (reason: string, message: string) => {
-			this.recentFailures.push({
-				jobId: subject.id,
-				sessionId: node.sessionId,
-				level: node.level,
-				reason,
-				message: bounded(message, MAX_CAUSE_MESSAGE_CHARS),
-				at: this.ports.now(),
-			});
-			if (this.recentFailures.length > MAX_RECENT_FAILURES) this.recentFailures.shift();
-		};
 		if (result.disposition === "accepted") {
 			const admission = admissionRecordFromResult(result, node.text, new Date(this.ports.now()).toISOString());
 			if (!admission) {
-				this.setReadmission(
+				this.holds.setReadmission(
 					node.id,
 					"waiting",
 					this.readmissionWait(node, "judgment_discarded", "an accepted re-admission produced no record"),
@@ -3660,16 +3442,20 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 				return;
 			}
 			if (annotated.status !== "annotated") {
-				this.setReadmission(node.id, "waiting", "store_refused");
-				note("readmission_refused", `the store refused the admission: ${annotated.status}`);
+				this.holds.setReadmission(node.id, "waiting", "store_refused");
+				this.batch.recordFailure(
+					subject,
+					"readmission_refused",
+					`the store refused the admission: ${annotated.status}`,
+				);
 				return;
 			}
-			this.setReadmission(node.id, "admitted");
-			this.countTerminal("succeeded");
+			this.holds.setReadmission(node.id, "admitted");
+			this.batch.countTerminal("succeeded");
 			// Approval changed: parents that waited on this child may be judged, parked parent jobs may run, and the
 			// frontier may now include the summary.
-			for (const [id, hold] of this.readmissionState) if (hold.state === "waiting") this.readmissionState.delete(id);
-			this.releaseParked("children");
+			this.holds.clearWaiting();
+			this.holds.release("children");
 			await this.republishFrontiers([node.sessionId], epoch);
 			return;
 		}
@@ -3680,8 +3466,8 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			// once and a second failure ends that job with its spent budget on record. Re-judging the same text on every
 			// start would only pay the evaluator again for the same answer.
 			const reason = result.disposition === "rejected" ? "admission_rejected" : "admission_uncertain";
-			this.setReadmission(node.id, result.disposition);
-			note(reason, detail);
+			this.holds.setReadmission(node.id, result.disposition);
+			this.batch.recordFailure(subject, reason, detail);
 			let revoked: TranscriptSummaryRevokeResult;
 			try {
 				revoked = await writer.revokeNodes((id) => id === node.id, "recovery");
@@ -3696,7 +3482,7 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			if (revoked.status === "unavailable") return this.readmissionWriteFailed(node, epoch, revoked.reason, true);
 			// Counted once, here: the verdict is final for this text once its revocation is durable. An outage, a refused or a
 			// failed store write is counted when its job ends, and a replay of the same verdict is not counted again.
-			if (revoked.status === "published") this.countTerminal("failed", subject, reason, detail);
+			if (revoked.status === "published") this.batch.countTerminal("failed", subject, reason, detail);
 			if (!this.live(epoch)) {
 				// Durable already: the mirror takes it with its revision even though this run will not continue (C6).
 				if (revoked.status === "published") this.mirrorRevocation(revoked, reason, undefined, 0);
@@ -3709,104 +3495,34 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 			await this.applyRevocation(revoked, epoch, { reason });
 			return;
 		}
-		this.setReadmission(node.id, "unavailable");
-		note("admission_unavailable", detail);
+		this.holds.setReadmission(node.id, "unavailable");
+		this.batch.recordFailure(subject, "admission_unavailable", detail);
 	}
 
 	// ---- batch accounting ---------------------------------------------------------------------
 
-	private noteEnqueued(): void {
-		if (this.batch) return;
-		this.batch = {
-			id: ++this.batchCounter,
-			startedAt: this.ports.now(),
-			succeeded: 0,
-			failed: 0,
-			cancelled: 0,
-			stale: 0,
-			causes: [],
-		};
-	}
-
-	private countTerminal(
-		kind: "succeeded" | "failed" | "cancelled" | "stale",
-		job?: Pick<TranscriptSummaryJob, "id" | "level" | "sessionId">,
-		reason?: string,
-		message?: string,
-	): void {
-		const batch = this.batch;
-		if (!batch) return;
-		batch[kind] += 1;
-		if (kind === "failed" && job && batch.causes.length < MAX_TERMINAL_CAUSES) {
-			batch.causes.push({
-				jobId: job.id,
-				level: job.level,
-				sessionId: job.sessionId,
-				reason: reason ?? "failed",
-				message: bounded(message ?? "", MAX_CAUSE_MESSAGE_CHARS),
-			});
-		}
-	}
-
 	private maybeFinishBatch(): void {
-		const counts = this.scheduler?.counts();
-		if (!counts || !this.batch) return;
+		const counts = this.run.scheduler?.counts();
+		if (!counts || !this.batch.isOpen()) return;
 		// Held jobs wait for a condition outside the batch; they do not keep it open, and its handoff names them.
-		this.pruneParked();
-		if (counts.queued - this.parked.size + counts.running + counts.retry_wait > 0) return;
+		this.holds.prune((id) => this.run.scheduler?.get(id)?.state);
+		if (counts.queued - this.holds.parked.size + counts.running + counts.retry_wait > 0) return;
 		this.finishBatch("completed", 0);
 	}
 
 	private finishBatch(outcome: "completed" | "stopped", interrupted: number, stopReason?: string): void {
-		const batch =
-			this.batch ??
-			(stopReason === undefined
-				? undefined
-				: {
-						id: ++this.batchCounter,
-						startedAt: this.ports.now(),
-						succeeded: 0,
-						failed: 0,
-						cancelled: 0,
-						stale: 0,
-						causes: [],
-					});
-		if (!batch) return;
-		this.batch = undefined;
-		const held = this.firstHold();
-		const event: TranscriptMemoryTerminalEvent = {
-			batchId: batch.id,
-			outcome,
-			succeeded: batch.succeeded,
-			failed: batch.failed,
-			cancelled: batch.cancelled,
-			stale: batch.stale,
-			interrupted,
-			startedAt: batch.startedAt,
-			endedAt: this.ports.now(),
-			causes: batch.causes,
-			...(held
-				? {
-						held: this.parked.size,
-						heldKind: held.scope,
-						heldReason: bounded(held.reason, MAX_HELD_REASON_CHARS),
-						heldByKind: this.holdCounts(),
-					}
-				: {}),
-			...(stopReason !== undefined ? { stopReason: bounded(stopReason, MAX_CAUSE_MESSAGE_CHARS) } : {}),
-		};
-		this.persistedBatches.push(event);
-		if (this.persistedBatches.length > MAX_STATUS_BATCHES) this.persistedBatches.shift();
-		const writer = this.writer;
+		const event = this.batch.close(outcome, interrupted, stopReason, () => this.terminalHolds());
+		if (!event) return;
+		const writer = this.run.writer;
 		const handoff = async (): Promise<void> => {
 			// The record is persisted under the writer fence first; the owner is told either way, with the
 			// persistence failure stated in the diagnostics rather than hidden.
 			try {
 				if (writer && !(await writer.recordTerminal(event))) {
-					this.noteInternalCause("terminal handoff was not persisted: the writer was superseded");
+					this.causes.noteInternal("terminal handoff was not persisted: the writer was superseded");
 				}
 			} catch (error) {
-				this.noteInternalCause(
+				this.causes.noteInternal(
 					`terminal handoff was not persisted: ${error instanceof Error ? error.message : String(error)}`,
 				);
 			}
@@ -3816,15 +3532,15 @@ export class TranscriptMemory implements TranscriptNodeExpander, TranscriptSumma
 		else void this.enqueue(handoff);
 	}
 
-	private recordFailure(job: TranscriptSummaryJob, reason: string, message: string): void {
-		this.recentFailures.push({
-			jobId: job.id,
-			sessionId: job.sessionId,
-			level: job.level,
-			reason,
-			message: bounded(message, MAX_CAUSE_MESSAGE_CHARS),
-			at: this.ports.now(),
-		});
-		if (this.recentFailures.length > MAX_RECENT_FAILURES) this.recentFailures.shift();
+	/** The hold summary a closing batch's terminal event carries: read at the close, from the parked holds only. */
+	private terminalHolds(): TerminalHolds | undefined {
+		const held = this.holds.first();
+		if (!held) return undefined;
+		return {
+			held: this.holds.parked.size,
+			heldKind: held.scope,
+			heldReason: bounded(held.reason, MAX_HELD_REASON_CHARS),
+			heldByKind: this.holds.counts(),
+		};
 	}
 }

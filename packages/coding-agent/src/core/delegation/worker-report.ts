@@ -26,6 +26,7 @@ import type {
 	WorkerSubmittedReport,
 } from "../autonomy/contracts.ts";
 import type { OrchestrationDelegationLimits } from "../orchestration/contracts.ts";
+import { isVerdictReasonCodeList, REASON_CODE_LIST_CORRECTION } from "../orchestration/verification-verdict.ts";
 import { boundedText, quotedSpan } from "../util/bounded-line.ts";
 import {
 	MAX_WORKER_CLAIM_BLOCKER_CHARS,
@@ -291,6 +292,16 @@ function clipped(values: readonly string[] | undefined, maximumCount: number, ma
 	return result;
 }
 
+/**
+ * The refusal a report's reason codes meet, or undefined when they are a valid list. The one rule for the live tool and the
+ * recovery check: a refused call is a tool error, and a persisted call that meets it is not a recovered report.
+ */
+export function reasonCodesRefusal(reasonCodes: readonly string[] | undefined): string | undefined {
+	return reasonCodes === undefined || isVerdictReasonCodeList(reasonCodes)
+		? undefined
+		: `submit_report.reasonCodes: ${REASON_CODE_LIST_CORRECTION}`;
+}
+
 /** Bound what a worker submitted so it fits the claim's limits; nothing is rejected for length. */
 export function submittedReportFromArguments(
 	args: SubmitReportArguments,
@@ -300,6 +311,8 @@ export function submittedReportFromArguments(
 	// compiled contract does not grant `progress` is refused here, whatever schema the call was checked against.
 	if (args.progress !== undefined && !capabilities.progress)
 		throw new Error("submit_report.progress is not granted to this worker; send the report without it.");
+	const reasonCodeRefusal = reasonCodesRefusal(args.reasonCodes);
+	if (reasonCodeRefusal) throw new Error(reasonCodeRefusal);
 	const text = (value: string | undefined): string | undefined => {
 		const trimmed = value?.trim();
 		return trimmed ? boundedText(trimmed, MAX_WORKER_REPORT_TEXT_CHARS) : undefined;

@@ -39,8 +39,14 @@ import {
 	type OwnerDecisionSeenState,
 	type OwnerWorkerQuestionPort,
 	ownerDecisionQueue,
+	ownerMessageAnswers,
 } from "./owner-decision-queue.ts";
-import { type ReturnBriefFacts, type ReturnBriefPlan, renderReturnBrief } from "./return-brief.ts";
+import {
+	type ReturnBriefCommits,
+	type ReturnBriefFacts,
+	type ReturnBriefPlan,
+	renderReturnBrief,
+} from "./return-brief.ts";
 
 /** An owner who returns after this long without a typed message gets the brief. A constant: no setting. */
 export const RETURN_BRIEF_IDLE_GAP_MS = 30 * 60_000;
@@ -50,20 +56,23 @@ const WORDS = /[\p{L}\p{N}]/u;
 
 const execFileAsync = promisify(execFile);
 
-interface Commit {
-	readonly sha: string;
-	readonly subject: string;
-}
-
 /** The brief one owner turn was armed for. Its commit read starts at arming, so a plan rarely waits for it. */
 interface ArmedBrief {
 	readonly awaySince: number;
 	readonly armedAt: number;
-	readonly commits: Promise<readonly Commit[] | undefined>;
+	/** The time of the owner message that armed the brief: the message a worker question must precede to be answered by it. */
+	readonly messageAt: number;
+	readonly commits: Promise<ReturnBriefCommits | undefined>;
 	/** The submission the brief belongs to: the first one that plans a request after arming. */
 	epoch?: number;
 	/** The render, made once and shared by every request of the turn. */
-	rendering?: Promise<string | undefined>;
+	rendering?: Promise<RenderedBrief | undefined>;
+}
+
+/** A rendered brief and the queue items it showed, which the seen state records once a request carrying it is committed. */
+interface RenderedBrief {
+	readonly text: string;
+	readonly shown: readonly OwnerDecisionItem[];
 }
 
 export interface ReturnBriefControllerDeps {
@@ -97,7 +106,7 @@ export class ReturnBriefController {
 
 	/**
 	 * The brief for the request being planned. `content` is set only while the owner turn it was made for is the one in
-	 * progress, and it is rendered and written once per turn.
+	 * progress, and it is rendered once per turn. Its seen state is written by `commit`, when the request carrying it is.
 	 */
 	async previewReturnBrief(): Promise<ReturnBriefPlan> {
 		const armed = this.armed;
@@ -111,13 +120,16 @@ export class ReturnBriefController {
 			this.deps.warn(`The return brief was not built: ${error instanceof Error ? error.message : String(error)}`);
 			return undefined;
 		});
-		const content = await armed.rendering;
-		return isCurrent() ? { content, isCurrent } : NO_BRIEF;
+		const rendered = await armed.rendering;
+		if (!isCurrent()) return NO_BRIEF;
+		if (rendered === undefined) return { content: undefined, isCurrent };
+		return { content: rendered.text, isCurrent, commit: () => this.markShown(rendered.shown) };
 	}
 
 	/** The calls waiting on the owner now, most urgent first. The `/status` section reads it; nothing is written. */
 	queue(): readonly OwnerDecisionItem[] {
-		return ownerDecisionQueue(this.readQueueInputs(this.deps.sessionManager.getBranch()));
+		const branch = this.deps.sessionManager.getBranch();
+		return ownerDecisionQueue(this.readQueueInputs(branch, this.liveOwnerMessageAt(branch)));
 	}
 
 	/** The status with its `ownerDecisions` section: the queue as it stands, read from the same stores the brief reads. */
@@ -152,47 +164,87 @@ export class ReturnBriefController {
 			const armedAt = this.deps.now();
 			const awaySince = previousTypedOwnerAt(branch, delivery.id, restore);
 			if (awaySince === undefined || armedAt - awaySince < RETURN_BRIEF_IDLE_GAP_MS) return;
-			this.armed = { awaySince, armedAt, commits: readCommitsSince(this.deps.getCwd(), awaySince) };
+			const delivered = branch.find((entry) => entry.id === delivery.entryId);
+			const messageAt = Date.parse(delivered?.timestamp ?? "");
+			if (!Number.isFinite(messageAt))
+				throw new Error("the owner message is not on the session branch with a readable time");
+			this.armed = {
+				awaySince,
+				armedAt,
+				messageAt,
+				commits: readCommitsSince(this.deps.getCwd(), awaySince),
+			};
 		} catch (error) {
 			this.deps.warn(`The return brief was not armed: ${error instanceof Error ? error.message : String(error)}`);
 		}
 	}
 
-	private async render(armed: ArmedBrief): Promise<string | undefined> {
+	private async render(armed: ArmedBrief): Promise<RenderedBrief | undefined> {
 		const commits = await armed.commits;
 		const branch = this.deps.sessionManager.getBranch();
 		const ledger = this.deps.taskProjection();
-		const queue = ownerDecisionQueue(this.readQueueInputs(branch));
+		const queue = ownerDecisionQueue(this.readQueueInputs(branch, armed.messageAt));
 		const ci = ciSince(branch, armed.awaySince);
-		const file = seenStateFile(this.deps.getAgentDir(), this.deps.getSessionId());
-		return withFileLockSync(file, () => {
-			const now = this.deps.now();
-			const { state, newKeys } = advanceOwnerDecisionSeen(readSeenState(file), queue, now);
-			const facts: ReturnBriefFacts = {
-				awaySince: armed.awaySince,
-				now: armed.armedAt,
-				plansSettled: ledger === undefined ? [] : plansClosedSince(ledger, armed.awaySince),
-				workerOutcomes: ledger === undefined ? {} : workerOutcomesSince(ledger, armed.awaySince),
-				commits,
-				...(ci === undefined ? {} : { ci }),
-				queue,
-				newKeys,
-			};
-			const text = renderReturnBrief(facts);
-			// The seen state moves only when the owner is shown something: a brief with no text shows nothing new.
-			if (text !== undefined) writeFileAtomicSync(file, `${JSON.stringify(state)}\n`);
-			return text;
-		});
+		const { newKeys } = advanceOwnerDecisionSeen(
+			readSeenState(seenStateFile(this.deps.getAgentDir(), this.deps.getSessionId())),
+			queue,
+			this.deps.now(),
+		);
+		const facts: ReturnBriefFacts = {
+			awaySince: armed.awaySince,
+			now: armed.armedAt,
+			plansSettled: ledger === undefined ? [] : plansClosedSince(ledger, armed.awaySince),
+			workerOutcomes: ledger === undefined ? {} : workerOutcomesSince(ledger, armed.awaySince),
+			commits,
+			...(ci === undefined ? {} : { ci }),
+			queue,
+			newKeys,
+		};
+		const text = renderReturnBrief(facts);
+		return text === undefined ? undefined : { text, shown: queue };
 	}
 
-	private readQueueInputs(branch: readonly SessionEntry[]): OwnerDecisionInputs {
+	/**
+	 * Marks the items a committed request showed as seen. The items keep their first-seen time; a request whose brief was
+	 * not committed marks nothing, so its items show as new on the next return. A write that fails is reported: the request
+	 * already carries the brief, and only the `[new]` marks are affected.
+	 */
+	private markShown(shown: readonly OwnerDecisionItem[]): void {
+		const file = seenStateFile(this.deps.getAgentDir(), this.deps.getSessionId());
+		try {
+			withFileLockSync(file, () => {
+				const { state } = advanceOwnerDecisionSeen(readSeenState(file), shown, this.deps.now());
+				writeFileAtomicSync(file, `${JSON.stringify(state)}\n`);
+			});
+		} catch (error) {
+			this.deps.warn(
+				`The return brief's seen state was not saved (${error instanceof Error ? error.message : String(error)}); its items may show as new again.`,
+			);
+		}
+	}
+
+	/**
+	 * The owner message the live run is processing, when the owner's own words started or steered it: the newest owner
+	 * message on the branch. Undefined when no run is live, or when the run only inherits an owner's authority from the branch.
+	 */
+	private liveOwnerMessageAt(branch: readonly SessionEntry[]): number | undefined {
+		const live = this.deps.liveRun();
+		if (live === undefined || !live.decidedInRun) return undefined;
+		if (live.origin.k !== "owner-typed" && live.origin.k !== "owner-channel") return undefined;
+		let newest: number | undefined;
+		for (const at of ownerSpokenTimes(branch)) newest = newest === undefined || at > newest ? at : newest;
+		return newest;
+	}
+
+	private readQueueInputs(branch: readonly SessionEntry[], processingAt: number | undefined): OwnerDecisionInputs {
 		const humanInput = getResumableHumanInputSnapshot(this.deps.sessionManager);
 		const ledger = this.deps.taskProjection();
 		const liveRun = this.deps.liveRun();
 		return {
 			drafts: outwardDraftStates(branch, liveRun?.origin.k === "owner-typed", liveRun ? { liveRun } : {}),
 			...(humanInput === undefined ? {} : { humanInput }),
-			workerQuestions: ledger === undefined ? [] : openWorkerQuestions(ledger, ownerSpokenTimes(branch)),
+			workerQuestions:
+				ledger === undefined ? [] : openWorkerQuestions(ledger, ownerSpokenTimes(branch), processingAt),
 			plans: ledger === undefined ? [] : listPlanViews(ledger),
 			followUps: readOwnerFollowUps(ownerFollowUpPath(this.deps.getAgentDir(), this.deps.getSessionId())),
 			actAhead: latestActAhead(branch),
@@ -243,17 +295,21 @@ function ownerSpokenTimes(branch: readonly SessionEntry[]): number[] {
 }
 
 /**
- * A worker question is open while its outcome is the latest one its task recorded and no owner message came after it.
- * The outcome's own recording time is the reference: an outcome carries no answered flag.
+ * A worker question is open while its outcome is the latest one its task recorded and no owner message answers it (see
+ * `ownerMessageAnswers`). The outcome's own recording time is the reference: an outcome carries no answered flag.
  */
-function openWorkerQuestions(ledger: TaskRuntimeProjection, ownerTimes: readonly number[]): OwnerWorkerQuestionPort[] {
+function openWorkerQuestions(
+	ledger: TaskRuntimeProjection,
+	ownerTimes: readonly number[],
+	processingAt: number | undefined,
+): OwnerWorkerQuestionPort[] {
 	const questions: OwnerWorkerQuestionPort[] = [];
 	for (const task of Object.values(ledger.tasks)) {
 		const outcome = task.outcome;
 		if (outcome === undefined || isOutcomeFromNewerBuild(outcome) || outcome.nextAction.kind !== "ask_owner")
 			continue;
 		const recorded = Date.parse(outcome.recordedAt);
-		if (ownerTimes.some((at) => at > recorded)) continue;
+		if (ownerTimes.some((at) => ownerMessageAnswers(recorded, at, processingAt))) continue;
 		questions.push({
 			outcomeId: outcome.outcomeId,
 			question: outcome.nextAction.question,
@@ -320,21 +376,25 @@ function workerOutcomesSince(ledger: TaskRuntimeProjection, awaySince: number): 
 	return counts;
 }
 
-/** The repository's commits since the instant, newest first. Undefined when the log cannot be read: never zero. */
-async function readCommitsSince(cwd: string, sinceMs: number): Promise<readonly Commit[] | undefined> {
+/**
+ * The repository's commits since the instant, newest first, read up to `COMMITS_MAX`. Undefined when the log cannot be
+ * read: never zero.
+ */
+async function readCommitsSince(cwd: string, sinceMs: number): Promise<ReturnBriefCommits | undefined> {
 	try {
 		const { stdout } = await execFileAsync(
 			"git",
 			["log", `--since=@${Math.floor(sinceMs / 1000)}`, "-n", String(COMMITS_MAX), "--format=%h%x09%s"],
 			{ cwd, timeout: GIT_TIMEOUT_MS, windowsHide: true },
 		);
-		return stdout
+		const shown = stdout
 			.split("\n")
 			.filter((line) => line.length > 0)
 			.map((line) => {
 				const [sha = "", ...subject] = line.split("\t");
 				return { sha, subject: subject.join("\t") };
 			});
+		return { shown, capped: shown.length >= COMMITS_MAX };
 	} catch {
 		return undefined;
 	}

@@ -9,26 +9,26 @@ import type { TranscriptMemoryRevocationRecord } from "./transcript-memory-statu
 import type { VerifiedLineage } from "./transcript-session-runtime.ts";
 
 export function lineageMovedDuring(
-	host: Pick<CoordinatorHost, "revocationDue" | "noteBenignEvent">,
+	host: Pick<CoordinatorHost, "sessions" | "causes">,
 	sessionId: string,
 	during: string,
 ): string {
-	host.revocationDue.add(sessionId);
+	host.sessions.markDue(sessionId);
 	const cause = `${during}: the lineage moved during verification`;
-	host.noteBenignEvent(`${cause} (${sessionId})`);
+	host.causes.noteBenign(`${cause} (${sessionId})`);
 	return cause;
 }
 
 export function staleJobsOf(
-	host: Pick<CoordinatorHost, "scheduler" | "ports" | "inFlight" | "countTerminal" | "maybeFinishBatch">,
+	host: Pick<CoordinatorHost, "run" | "ports" | "inFlight" | "batch" | "maybeFinishBatch">,
 	jobIds: readonly string[],
 ): void {
-	const scheduler = host.scheduler;
+	const scheduler = host.run.scheduler;
 	if (!scheduler) return;
 	const now = host.ports.now();
 	const ids = new Set(jobIds);
 	for (const entry of host.inFlight.values()) if (ids.has(entry.jobId)) entry.controller.abort();
-	for (const id of jobIds) if (scheduler.markStale(id, now)) host.countTerminal("stale");
+	for (const id of jobIds) if (scheduler.markStale(id, now)) host.batch.countTerminal("stale");
 	host.maybeFinishBatch();
 }
 
@@ -38,10 +38,9 @@ export async function applyRevocationOf(
 		| "sessionsOf"
 		| "mirrorRevocation"
 		| "dropFrontiers"
-		| "runtime"
-		| "revocationDue"
+		| "sessions"
 		| "ports"
-		| "noteInternalCause"
+		| "causes"
 		| "cursors"
 		| "restartDiscovery"
 		| "republishFrontiers"
@@ -62,8 +61,8 @@ export async function applyRevocationOf(
 	host.mirrorRevocation(result, options.reason, dropSession, options.droppedReady ?? 0);
 	host.dropFrontiers([...(dropSession !== undefined ? [dropSession] : []), ...result.removedFrontiers]);
 	if (dropSession !== undefined) {
-		host.runtime.delete(dropSession);
-		host.revocationDue.delete(dropSession);
+		host.sessions.drop(dropSession);
+		host.sessions.unmarkDue(dropSession);
 		affected.delete(dropSession);
 	}
 	// The store pulled the cursors of sessions that lost leaves back; discovery resumes from them.
@@ -71,7 +70,7 @@ export async function applyRevocationOf(
 	// A manifest that cannot be read leaves those cursors unknown: discovery restarts them from the start of the
 	// lineage, where every accepted leaf is recognized again.
 	if (read !== undefined && read.status !== "ok") {
-		host.noteInternalCause(
+		host.causes.noteInternal(
 			`reading cursors after a revocation: ${read.status === "unavailable" ? read.reason : read.status}`,
 		);
 	}
@@ -80,9 +79,9 @@ export async function applyRevocationOf(
 		const cursor = manifest?.sessions[sessionId];
 		if (cursor) host.cursors.set(sessionId, cursor);
 		else host.cursors.delete(sessionId);
-		const runtime = host.runtime.get(sessionId);
+		const runtime = host.sessions.get(sessionId);
 		if (runtime && sessionId === reread?.sessionId) host.restartDiscovery(sessionId, runtime, reread.verified);
-		else host.runtime.delete(sessionId);
+		else host.sessions.drop(sessionId);
 	}
 	await host.republishFrontiers([...affected], epoch);
 	host.markJobsDirty();
@@ -132,31 +131,31 @@ export function sessionsOfNodes(host: Pick<CoordinatorHost, "catalog">, nodeIds:
 }
 
 export function endSessionJobsOf(
-	host: Pick<CoordinatorHost, "scheduler" | "ports" | "countTerminal" | "maybeFinishBatch">,
+	host: Pick<CoordinatorHost, "run" | "ports" | "batch" | "maybeFinishBatch">,
 	sessionId: string,
 	to: "cancelled" | "stale",
 ): number {
-	const ended = host.scheduler?.endSession(sessionId, to, host.ports.now());
-	for (const _job of ended?.ended ?? []) host.countTerminal(to);
+	const ended = host.run.scheduler?.endSession(sessionId, to, host.ports.now());
+	for (const _job of ended?.ended ?? []) host.batch.countTerminal(to);
 	host.maybeFinishBatch();
 	return ended?.droppedReady.length ?? 0;
 }
 
 export function endRevokedReadmissionsOf(
-	host: Pick<CoordinatorHost, "scheduler" | "ports" | "settlingReadmissions" | "inFlight" | "countTerminal">,
+	host: Pick<CoordinatorHost, "run" | "ports" | "holds" | "inFlight" | "batch">,
 	sessionIds: Iterable<string>,
 	revoked: ReadonlySet<string>,
 ): void {
 	for (const sessionId of sessionIds) {
-		for (const ended of host.scheduler?.endReadmissions(
+		for (const ended of host.run.scheduler?.endReadmissions(
 			sessionId,
 			revoked,
 			host.ports.now(),
-			host.settlingReadmissions,
+			host.holds.settling,
 		) ?? []) {
 			for (const entry of host.inFlight.values()) if (entry.jobId === ended.id) entry.controller.abort();
 			// A job that had already finished (ready) was counted when it did; only a job ended here is stale.
-			if (ended.state !== "ready") host.countTerminal("stale");
+			if (ended.state !== "ready") host.batch.countTerminal("stale");
 		}
 	}
 }

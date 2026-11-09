@@ -110,6 +110,8 @@ export const JOB_REFUSALS = [
 	"bad_offer",
 	"duplicate_conflict",
 	"leader_unsupported",
+	/** The executor could not decide or record the offer, and admitted nothing for it: the placer is told at once, not at its deadline. */
+	"offer_failed",
 ] as const;
 export type JobRefusal = (typeof JOB_REFUSALS)[number];
 

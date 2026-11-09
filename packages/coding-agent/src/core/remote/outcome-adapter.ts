@@ -25,6 +25,7 @@ export const REFUSAL_WORDS: Readonly<Record<JobRefusal, string>> = {
 	bad_offer: "it could not read the job",
 	duplicate_conflict: "it already holds another job under the same id",
 	leader_unsupported: "it does not lead work for other machines",
+	offer_failed: "it could not record the job, so nothing was started",
 };
 
 const ENDINGS: Readonly<Record<PlacerEnding, { status: string; words: (machine: string) => string }>> = {

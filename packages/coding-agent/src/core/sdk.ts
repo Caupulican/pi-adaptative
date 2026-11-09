@@ -48,6 +48,7 @@ import { DEFAULT_ACTIVE_TOOL_NAMES } from "./default-tool-surface.ts";
 import { PeerReviewJournal } from "./expert-routing/peer-review-journal.ts";
 import type { ExtensionRunner, LoadExtensionsResult, SessionStartEvent, ToolDefinition } from "./extensions/index.ts";
 import { resolveFastModeServiceTier } from "./fast-mode.ts";
+import type { MachineFacts } from "./fleet/capacity/machine-room.ts";
 import type { WorkerTerminalDeliveryInterposer } from "./foreground-terminal-handoff-controller.ts";
 import { ObjectivePrimaryBindingError } from "./goals/goal-session-controller.ts";
 import type { IntegrityExtension } from "./hooks/index.ts";
@@ -74,6 +75,7 @@ import { DurableTaskRuntime } from "./orchestration/task-runtime.ts";
 import { createWorkerExecutionContract } from "./orchestration/worker-execution-contract.ts";
 import { currentProviderLane } from "./provider-admission/lane-context.ts";
 import type { SubscriptionAllowancePort } from "./provider-admission/subscription-allowance.ts";
+import { getAttributionHeaders } from "./provider-attribution-headers.ts";
 import { materializeRequestAuth } from "./request-auth.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
@@ -220,6 +222,8 @@ export interface CreateAgentSessionOptions {
 	 * asks to keep the process alive (`TimerOptions.keepAlive`).
 	 */
 	timers?: TimerSource;
+	/** The machine facts the fleet's room reads (memory and heap); default: the real machine. */
+	machineFacts?: () => MachineFacts;
 	/**
 	 * What the running model's subscription allows now, read for the owner channel's dollar bounds and the cost guard; default:
 	 * the provider's own usage endpoint through the session's account usage monitor. An embedder with its own usage source
@@ -319,36 +323,6 @@ export {
 
 function getDefaultAgentDir(): string {
 	return getAgentDir();
-}
-
-function getAttributionHeaders(model: Model<Api>, sessionId?: string): Record<string, string> | undefined {
-	if (
-		sessionId &&
-		(model.provider === "opencode" || model.provider === "opencode-go" || model.baseUrl.includes("opencode.ai"))
-	) {
-		return { "x-opencode-session": sessionId, "x-opencode-client": "pi" };
-	}
-
-	if (model.provider === "openrouter" || model.baseUrl.includes("openrouter.ai")) {
-		return {
-			"HTTP-Referer": "https://github.com/Caupulican/pi-adaptative",
-			"X-OpenRouter-Title": "pi",
-			"X-OpenRouter-Categories": "cli-agent",
-		};
-	}
-
-	if (
-		model.provider === "cloudflare-workers-ai" ||
-		model.provider === "cloudflare-ai-gateway" ||
-		model.baseUrl.includes("api.cloudflare.com") ||
-		model.baseUrl.includes("gateway.ai.cloudflare.com")
-	) {
-		return {
-			"User-Agent": "pi-coding-agent",
-		};
-	}
-
-	return undefined;
 }
 
 /**
@@ -976,6 +950,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				systemOneController,
 				systemOneEnabled,
 				timers,
+				machineFacts: options.machineFacts,
 				...(options.subscriptionAllowance ? { subscriptionAllowance: options.subscriptionAllowance } : {}),
 				maxRetainedTerminalTasks: options.maxRetainedTerminalTasks,
 				accountModels,

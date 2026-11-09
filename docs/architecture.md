@@ -59,7 +59,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/node.ts` | (no header comment) |
 | `kernel/outbox.ts` | Record-before-effect: a durable claim, then the effect, then a durable settle. |
 | `kernel/owner-input-stamp.ts` | Stamps an agent message with the identity of the owner input it carries as a non-enumerable symbol property, and reads that identity back. |
-| `kernel/prefix-fold.ts` | A left fold over an array of immutable items that resumes where it stopped when the next array still starts with the same objects, and starts over otherwise. |
+| `kernel/prefix-fold.ts` | Folds over conversation arrays that resume where they stopped. |
 | `kernel/provider-request-estimator.ts` | (no header comment) |
 | `kernel/provider-request-image-budget.ts` | (no header comment) |
 | `kernel/provider-request-planner.ts` | (no header comment) |

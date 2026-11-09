@@ -1083,7 +1083,7 @@ function buildParams(
 			});
 		}
 	} else if (context.systemPrompt) {
-		// Add cache control to system prompt for non-OAuth tokens
+		// System-block marker: tools and system stay cached across per-turn head changes; a system change re-writes the tools too.
 		params.system = [
 			{
 				type: "text",

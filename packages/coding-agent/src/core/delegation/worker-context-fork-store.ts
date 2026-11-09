@@ -172,6 +172,16 @@ interface TextBlockCounter {
 	maximum: number;
 }
 
+/** The provider and model a parent's resume reference names, as `provider/model`; a missing or malformed reference throws. */
+export function workerContextModelIdentity(modelRef: string | undefined): { provider: string; model: string } {
+	if (!modelRef) throw new Error("Worker parent resume model is missing.");
+	const separator = modelRef.indexOf("/");
+	if (separator <= 0 || separator === modelRef.length - 1) {
+		throw new Error("Worker parent resume model is invalid.");
+	}
+	return { provider: modelRef.slice(0, separator), model: modelRef.slice(separator + 1) };
+}
+
 function exactObject(
 	value: unknown,
 	keys: readonly string[],

@@ -1,6 +1,6 @@
 import { projectMessagesForModelImageSupport } from "@caupulican/pi-ai";
 import type { Api, Context, ImageContent, Message, Model, TextContent } from "@caupulican/pi-ai/types";
-import { PrefixFoldByFirstItem } from "./prefix-fold.ts";
+import { PrefixFirstMatchByFirstItem } from "./prefix-fold.ts";
 import { measureJsonUtf8Bytes } from "./provider-request-estimator.ts";
 
 export const USER_IMAGE_BUDGET_PLACEHOLDER =
@@ -150,17 +150,17 @@ function hasInlineImage(message: Message): boolean {
 	return message.role === "toolResult" && message.content.some((block) => block.type === "image");
 }
 
-/** Whether any message carries an inline image, scanned once per appended message. */
-const inlineImageScans = new PrefixFoldByFirstItem<Message, { found: boolean }>(
-	() => ({ found: false }),
-	(state, message) => {
-		if (!state.found && hasInlineImage(message)) state.found = true;
-	},
-);
+/**
+ * Whether a wire carries an inline image. The scan resumes past the prefix it already answered for, which holds across requests
+ * because converted messages keep their objects (see `convertToLlm`); the tail, rebuilt for each request, is read again. The
+ * wire and its projection are read side by side, so each has its own scan (see {@link PrefixFirstMatchByFirstItem}).
+ */
+const inlineImageScans = new PrefixFirstMatchByFirstItem<Message>(hasInlineImage);
+const projectedInlineImageScans = new PrefixFirstMatchByFirstItem<Message>(hasInlineImage);
 
-/** Exported for its equivalence test; the scan resumes past the prefix it already answered for. */
+/** Exported for its equivalence test. */
 export function hasInlineImages(messages: readonly Message[]): boolean {
-	return inlineImageScans.fold(messages).found;
+	return inlineImageScans.find(messages) >= 0;
 }
 
 /**
@@ -177,7 +177,7 @@ export function applyProviderRequestImageBudget(
 	const projectedMessages = projectMessagesForModelImageSupport(context.messages, model);
 	const projectedContext =
 		projectedMessages === context.messages ? context : { ...context, messages: projectedMessages };
-	if (!hasInlineImages(projectedMessages)) return { context: projectedContext };
+	if (projectedInlineImageScans.find(projectedMessages) < 0) return { context: projectedContext };
 	const measurement = measureContextImages(projectedContext);
 
 	const needsImageCompaction = measurement.bodyBytes >= policy.triggerBytes;

@@ -36,6 +36,7 @@ import { OWN_DAEMON_BUILD } from "../../../src/core/delegation/bot-team-routine-
 import type { WorkerWriteReservationLease } from "../../../src/core/delegation/worker-write-reservation.ts";
 import type { ExecResult } from "../../../src/core/exec.ts";
 import type { ExtensionFactory } from "../../../src/core/extensions/types.ts";
+import type { MachineFacts } from "../../../src/core/fleet/capacity/machine-room.ts";
 import { isGoalExecutionActive } from "../../../src/core/goals/goal-state.ts";
 import { getResumableHumanInputSnapshot } from "../../../src/core/human-input.ts";
 import { type MemoryLifecycleDiagnostic, MemoryManager } from "../../../src/core/memory/memory-manager.ts";
@@ -116,6 +117,25 @@ export function harnessPath(...segments: string[]): string {
 }
 
 export const HARNESS_PROJECT_CWD = harnessPath("project");
+
+const MIB = 1024 * 1024;
+const GIB = 1024 * MIB;
+/**
+ * The machine every harness fleet reads: fixed, so room never depends on the host's memory or on the heap an earlier
+ * journey left in this process. Half the memory is free, the resident set and heap are small constants, and there is
+ * no heap ceiling (the heap term is unbounded). The same object answers every call.
+ */
+const HARNESS_MACHINE_FACTS: MachineFacts = Object.freeze({
+	availableMemory: 8 * GIB,
+	totalMemory: 16 * GIB,
+	rss: 200 * MIB,
+	usedHeap: 100 * MIB,
+	heapLimit: undefined,
+});
+
+function readHarnessMachineFacts(): MachineFacts {
+	return HARNESS_MACHINE_FACTS;
+}
 
 /**
  * Whether a session runs the platform's own shell engine by default: on win32 the world's POSIX shell is not the platform
@@ -2541,6 +2561,7 @@ export class HarnessProcesses {
 			agentDir,
 			token,
 			timers: this.timers,
+			machineFacts: readHarnessMachineFacts,
 			owner: ownProcessOwner(),
 			build: waiter.options.build ?? OWN_DAEMON_BUILD,
 			...this.credentials(),
@@ -3195,6 +3216,7 @@ export class HarnessWorld {
 			},
 			systemOneFetch: this.systemOne.fetch,
 			timers: this.timers,
+			machineFacts: readHarnessMachineFacts,
 			systemOneEnabled,
 			...(omitShellOperations ? {} : { shellOperations: this.shell }),
 			customTools: options.customTools,

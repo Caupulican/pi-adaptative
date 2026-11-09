@@ -36,6 +36,7 @@ import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { channelsDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { AuthStorage } from "../auth-storage.ts";
+import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import type { ChannelProvider } from "../gateways/channel-provider.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { readSessionLeaseHolders, SessionHeldError } from "../orchestration/session-bundle-lifecycle.ts";
@@ -96,6 +97,8 @@ export interface AwayChannelHostsInput {
 	/** The daemon's global-only settings, reloaded by its tick: the channel policies and the away bounds. */
 	readonly settings: SettingsManager;
 	readonly timers: TimerSource;
+	/** The machine facts the channel sessions' fleets read (memory and heap); absent reads the real machine. */
+	readonly machineFacts?: () => MachineFacts;
 	readonly providers: AwayChannelProviderFactory;
 	/** The routine runs away charged on the same bound. */
 	routineOccurrences(): Iterable<RoutineOccurrence>;
@@ -336,6 +339,7 @@ export class AwayChannelHosts {
 			resourceLoader,
 			sessionManager,
 			timers: this.input.timers,
+			machineFacts: this.input.machineFacts,
 			onClosingWarnings: (warnings) => {
 				for (const warning of warnings) this.input.report(`${warningPrefix}: ${warning}`);
 			},

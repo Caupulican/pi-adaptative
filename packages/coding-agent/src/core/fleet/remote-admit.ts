@@ -20,8 +20,9 @@ export type RemoteRefusalCode =
 	/** The job's lane ended while its offer was being written: nothing is recorded or sent for it here. */
 	| "lane_ended"
 	/**
-	 * The job's placed record exists but this build cannot read it: it is neither overwritten nor offered again, and the job is not
-	 * re-placed elsewhere, since the job it names may still be live.
+	 * The job's placed record exists but this build cannot read it: the record is neither overwritten nor offered again from here.
+	 * The step is not held: remote jobs are read-only, so the job it names, if still running, is not harmed by a second run of the
+	 * step elsewhere, and the refusal diverts the step like any other permanent refusal.
 	 */
 	| "record_unreadable";
 

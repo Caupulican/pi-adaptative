@@ -24,6 +24,7 @@ import { readSessionLeaseHolders } from "../../kernel/session/session-bundle-lif
 import { configFile } from "../agent-paths.ts";
 import type { AuthStorage } from "../auth-storage.ts";
 import { AwayParentWriteRefusal } from "../delegation/away-parent-writes.ts";
+import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
@@ -66,6 +67,8 @@ export interface AwayRoutineSupervisorDeps {
 	readonly store: RoutineStorePort;
 	readonly agentDir: string;
 	readonly timers: TimerSource;
+	/** The machine facts each closed parent's fleet reads (memory and heap); absent reads the real machine. */
+	readonly machineFacts?: () => MachineFacts;
 	settings(): ResolvedRoutineAwaySettings;
 	/** Diagnostics: each refusal, open failure and host warning, once per cause. */
 	report(message: string): void;
@@ -153,6 +156,7 @@ async function openAwayRoutineHost(args: {
 		parentSessionId,
 		sessionFile: args.sessionFile,
 		timers: deps.timers,
+		machineFacts: deps.machineFacts,
 		maxUsdPerRun: () => deps.settings().maxUsdPerRun,
 		awayDispatchKeys,
 		report: args.report,

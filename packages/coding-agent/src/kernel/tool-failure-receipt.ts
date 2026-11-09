@@ -28,7 +28,10 @@ const MAX_RECEIPT_JSON_CHARS = 8 * 1024;
 
 /**
  * A strict copy of a receipt read from a runtime copy of an error or a result, or undefined when the value is not a
- * receipt of the bounded shape. Own data properties only: no getter runs, and the copy is frozen.
+ * receipt of the bounded shape. Own data properties only: no getter runs, and the copy is frozen. Every member must be a
+ * JSON value within the bounds, and one member that is not (a symbol, a function, an undefined) refuses the whole receipt.
+ * That is how an unrelated `receipt` is kept out: `SessionAppendCommittedError.receipt` carries a symbol `attempt`, so no
+ * session append receipt can become a failure receipt through a thrown error.
  */
 export function readAgentToolFailureReceipt(value: unknown): AgentToolFailureReceipt | undefined {
 	if (value === null || typeof value !== "object" || Array.isArray(value)) return undefined;

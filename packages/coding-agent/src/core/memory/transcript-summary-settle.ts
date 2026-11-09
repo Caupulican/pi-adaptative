@@ -27,39 +27,39 @@ export class SummarizerCallError extends Error {
 }
 
 export function settleJobFailure(
-	host: Pick<CoordinatorHost, "scheduler" | "recordFailure" | "countTerminal">,
+	host: Pick<CoordinatorHost, "run" | "batch">,
 	job: TranscriptSummaryJob,
 	outcome: Extract<JobOutcome, { kind: "stale" | "fail" }>,
 	now: number,
 	returnClaim = false,
 ): void {
-	const scheduler = host.scheduler;
+	const scheduler = host.run.scheduler;
 	if (!scheduler) return;
 	if (outcome.kind === "stale") {
 		scheduler.markStale(job.id, now);
-		host.recordFailure(job, "stale", outcome.reason);
-		host.countTerminal("stale");
+		host.batch.recordFailure(job, "stale", outcome.reason);
+		host.batch.countTerminal("stale");
 		return;
 	}
 	const next = scheduler.failJob(job.id, outcome.failure, now, { returnClaim });
 	if (next?.state === "failed") {
-		host.recordFailure(job, next.lastError?.reason ?? outcome.failure.kind, outcome.failure.message);
-		host.countTerminal("failed", job, next.lastError?.reason ?? outcome.failure.kind, outcome.failure.message);
+		host.batch.recordFailure(job, next.lastError?.reason ?? outcome.failure.kind, outcome.failure.message);
+		host.batch.countTerminal("failed", job, next.lastError?.reason ?? outcome.failure.kind, outcome.failure.message);
 	}
 }
 
 export function settleAbortedJob(
-	host: Pick<CoordinatorHost, "started" | "epoch" | "scheduler" | "ports">,
+	host: Pick<CoordinatorHost, "run" | "ports">,
 	token: TranscriptSummaryClaimToken,
 	epoch: number,
 ): void {
-	if (host.started && epoch === host.epoch && host.scheduler?.ownsClaim(token)) {
-		host.scheduler.interrupt(token.jobId, host.ports.now());
+	if (host.run.started && epoch === host.run.epoch && host.run.scheduler?.ownsClaim(token)) {
+		host.run.scheduler.interrupt(token.jobId, host.ports.now());
 	}
 }
 
 export function thrownPublicationFailureOf(
-	host: Pick<CoordinatorHost, "noteInternalCause">,
+	host: Pick<CoordinatorHost, "causes">,
 	what: string,
 	error: unknown,
 ): TranscriptSummaryFailure {
@@ -71,12 +71,12 @@ export function thrownPublicationFailureOf(
 				reason: "internal_error",
 				message: `${what} failed: ${error instanceof Error ? error.message : String(error)}`,
 			};
-	host.noteInternalCause(failure.message);
+	host.causes.noteInternal(failure.message);
 	return failure;
 }
 
 export function settlePublicationFailureOf(
-	host: Pick<CoordinatorHost, "live" | "settleAborted" | "scheduler" | "settleFailure" | "ports" | "returnsClaim">,
+	host: Pick<CoordinatorHost, "live" | "settleAborted" | "run" | "settleFailure" | "ports" | "returnsClaim">,
 	job: TranscriptSummaryJob,
 	token: TranscriptSummaryClaimToken,
 	epoch: number,
@@ -87,7 +87,7 @@ export function settlePublicationFailureOf(
 		host.settleAborted(token, epoch);
 		return;
 	}
-	if (!host.scheduler?.ownsClaim(token)) return;
+	if (!host.run.scheduler?.ownsClaim(token)) return;
 	host.settleFailure(job, { kind: "fail", failure }, host.ports.now(), host.returnsClaim(job, paidCall));
 }
 
@@ -115,7 +115,7 @@ export async function readLiveDependencyOf(
 export async function readPublishedDependencyOf(
 	host: Pick<
 		CoordinatorHost,
-		"readLiveDependency" | "live" | "settleAborted" | "scheduler" | "settleFailure" | "ports" | "returnsClaim"
+		"readLiveDependency" | "live" | "settleAborted" | "run" | "settleFailure" | "ports" | "returnsClaim"
 	>,
 	job: TranscriptSummaryJob,
 	token: TranscriptSummaryClaimToken,
@@ -128,7 +128,7 @@ export async function readPublishedDependencyOf(
 		host.settleAborted(token, epoch);
 		return undefined;
 	}
-	if (!host.scheduler?.ownsClaim(token)) return undefined;
+	if (!host.run.scheduler?.ownsClaim(token)) return undefined;
 	if (verdict.kind === "covered") return verdict.live;
 	host.settleFailure(
 		job,
@@ -140,11 +140,11 @@ export async function readPublishedDependencyOf(
 }
 
 export function returnsClaimOf(
-	host: Pick<CoordinatorHost, "scheduler">,
+	host: Pick<CoordinatorHost, "run">,
 	job: TranscriptSummaryJob,
 	paidCall: boolean,
 ): boolean {
-	return !paidCall && host.scheduler?.get(job.id)?.pendingReply !== undefined;
+	return !paidCall && host.run.scheduler?.get(job.id)?.pendingReply !== undefined;
 }
 
 export function afterTerminalOf(

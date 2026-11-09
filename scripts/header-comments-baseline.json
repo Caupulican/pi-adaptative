@@ -729,7 +729,6 @@
     "packages/coding-agent/src/core/tools/test-verification-types.ts",
     "packages/coding-agent/src/core/tools/tool-bridge-client.ts",
     "packages/coding-agent/src/core/tools/tool-bridge-server.ts",
-    "packages/coding-agent/src/core/tools/tool-bridge.ts",
     "packages/coding-agent/src/core/tools/tool-definition-factory.ts",
     "packages/coding-agent/src/core/tools/tool-definition-wrapper.ts",
     "packages/coding-agent/src/core/tools/tool-execution-wrapper.ts",

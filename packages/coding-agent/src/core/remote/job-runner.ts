@@ -302,7 +302,9 @@ export class JobRunner {
 		for (const record of this.store.in.list()) {
 			const name = executorRecordName(record.placerId, record.jobId);
 			if (record.state === "admitted") {
-				if (record.cancel) this.finish(record, this.cancelledOutcome(record.cancel, ""));
+				// A job whose deadline passed while it waited for a runner is finished here, not started only to be cancelled.
+				const reason = record.cancel ?? (this.timers.now() >= record.deadlineAt ? "deadline" : undefined);
+				if (reason !== undefined) this.finish(record, this.cancelledOutcome(reason, ""));
 				else void this.claim(record);
 			} else if (record.state === "running") {
 				if (isSelf(record.runner, this.self)) {

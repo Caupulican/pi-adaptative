@@ -89,14 +89,14 @@ export function frontierEvidenceOf(
 }
 
 export function computeFrontierSelection(
-	host: Pick<CoordinatorHost, "catalog" | "runtime" | "ports" | "frontiers">,
+	host: Pick<CoordinatorHost, "catalog" | "sessions" | "ports" | "frontiers">,
 	sessionId: string,
 	extra?: TranscriptSummaryNode,
 ) {
 	// The catalog owns the approved ordered index. A not-yet-published candidate is a read-only overlay and cannot
 	// change the live index if persistence refuses the transaction.
 	const hasUnapproved = host.catalog.hasUnapproved(sessionId);
-	const total = host.runtime.get(sessionId)?.total;
+	const total = host.sessions.get(sessionId)?.total;
 	return selectFrontier({
 		sessionId,
 		index: host.catalog.frontierIndex(sessionId, extra),

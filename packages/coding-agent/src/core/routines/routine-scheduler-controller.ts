@@ -1232,8 +1232,8 @@ export class RoutineSchedulerController {
 			},
 			(error) => {
 				this.deliveries.delete(occurrence.occurrenceId);
-				this.fail(unit, error);
-				// A pass in flight arms the retry when it settles; otherwise nothing else would.
+				// A failure while closing is no fault. A pass in flight arms the retry when it settles; arm() stops when inactive.
+				if (this.active) this.fail(unit, error);
 				if (!this.pass) this.arm(this.deps.timers.now() + RETRY_DELAY_MS);
 			},
 		);

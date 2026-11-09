@@ -1,15 +1,18 @@
 /**
- * The seam the moved coordinator bodies read through: one typed view of the coordinator's own members (readonly
- * references, reads of mutable state, and method calls). The coordinator builds it once; each moved body receives
- * only the members it uses, and each member is read or called at the point where the body used to reach it.
+ * The seam the moved coordinator bodies read through: one typed view of the coordinator's members. The run, the batch,
+ * the causes, the holds and the session runtimes are reached through their owner objects (`run`, `batch`, `causes`,
+ * `holds`, `sessions`), and those objects' commands are the only writers of that state. The mirror is not owned yet:
+ * `cursors`, `dormant`, `frontiers`, `frontierBytes` and `forgottenSessions` are written directly by the moved
+ * modules that own those effects, and `catalog` is a shared object mutated through its methods, until the mirror object
+ * lands. `inFlight` and the other members are readonly references or calls, each made where the body used to reach it.
  */
 
-import type { ReadmissionHoldState } from "./transcript-coordinator-state.ts";
+import type { BatchAccount, CauseSlots } from "./transcript-batch-account.ts";
 import type { TranscriptFrontierGap, TranscriptFrontierSelection } from "./transcript-frontier.ts";
+import type { HoldLedger } from "./transcript-hold-ledger.ts";
 import type {
 	DependencyVerdict,
 	JobOutcome,
-	ParkedHold,
 	PublishedRevocation,
 	SourceReadFailure,
 } from "./transcript-job-outcome.ts";
@@ -20,20 +23,20 @@ import type {
 	TranscriptSourceRef,
 	TranscriptSourceSpan,
 } from "./transcript-memory-contracts.ts";
-import type {
-	TranscriptMemoryPorts,
-	TranscriptMemoryTerminalEvent,
-	TranscriptSummarizerPort,
-} from "./transcript-memory-ports.ts";
+import type { TranscriptMemoryPorts, TranscriptSummarizerPort } from "./transcript-memory-ports.ts";
 import type {
 	TranscriptMemoryAdmissionStatus,
-	TranscriptMemoryFailureRecord,
-	TranscriptMemoryInternalCause,
 	TranscriptMemoryModelWorkBlock,
 	TranscriptMemoryRevocationRecord,
 	TranscriptReadmissionWait,
 } from "./transcript-memory-status.ts";
-import type { CoverageVerdict, SessionRuntime, VerifiedLineage } from "./transcript-session-runtime.ts";
+import type { TranscriptRunState } from "./transcript-run-lifecycle.ts";
+import type {
+	CoverageVerdict,
+	SessionRuntime,
+	SessionRuntimes,
+	VerifiedLineage,
+} from "./transcript-session-runtime.ts";
 import type {
 	TranscriptSummaryAdmissionPort,
 	TranscriptSummaryAdmissionRecord,
@@ -47,23 +50,19 @@ import type {
 } from "./transcript-summary-catalog.ts";
 import type { TranscriptCaptureText, TranscriptSummaryNode } from "./transcript-summary-node.ts";
 import type { SummaryRequest } from "./transcript-summary-prompt.ts";
+import type { TranscriptSummaryClaimToken, TranscriptSummaryJob } from "./transcript-summary-scheduler.ts";
 import type {
-	TranscriptSummaryClaimToken,
-	TranscriptSummaryJob,
-	TranscriptSummaryScheduler,
-} from "./transcript-summary-scheduler.ts";
-import type {
-	TranscriptSummaryHeldByKind,
 	TranscriptSummaryProofStatus,
 	TranscriptSummarySessionCursor,
 	TranscriptSummaryStoreUnavailable,
-	TranscriptSummaryWriter,
 } from "./transcript-summary-store.ts";
 
 export interface CoordinatorHost {
 	abortDeniedInputs(): void;
 	abortSession(sessionId: string): void;
-	readonly activeCause: TranscriptMemoryInternalCause | undefined;
+	readonly batch: BatchAccount;
+	readonly causes: CauseSlots;
+	readonly holds: HoldLedger;
 	admissionStatus(): TranscriptMemoryAdmissionStatus;
 	afterRevocation(
 		revoked: readonly string[],
@@ -101,12 +100,6 @@ export interface CoordinatorHost {
 	): Promise<JobOutcome>;
 	readonly catalog: TranscriptSummaryCatalog;
 	certifyCursor(sessionId: string, runtime: SessionRuntime, epoch: number): Promise<void>;
-	countTerminal(
-		kind: "succeeded" | "failed" | "cancelled" | "stale",
-		job?: Pick<TranscriptSummaryJob, "id" | "level" | "sessionId">,
-		reason?: string,
-		message?: string,
-	): void;
 	readonly cursors: Map<string, TranscriptSummarySessionCursor>;
 	deferStoreWork(
 		cause: string,
@@ -120,7 +113,6 @@ export interface CoordinatorHost {
 		},
 		epoch: number,
 	): void;
-	readonly disabledReason: string | undefined;
 	readonly dormant: Map<string, TranscriptSummaryNode>;
 	dormantRetentionTime(node: TranscriptSummaryNode): number | undefined;
 	dropFrontiers(names: readonly string[]): void;
@@ -134,10 +126,8 @@ export interface CoordinatorHost {
 		epoch: number,
 		stamp: string | undefined,
 	): Promise<string | undefined>;
-	readonly epoch: number;
 	failureFor(unavailable: TranscriptReadUnavailable): SourceReadFailure;
 	fatal(reason: string): void;
-	firstHold(): ParkedHold | undefined;
 	forgetDenial(sessionId: string, epoch: number): Promise<JobOutcome | undefined>;
 	readonly forgetRevision: number;
 	readonly forgottenSessions: Set<string>;
@@ -153,8 +143,6 @@ export interface CoordinatorHost {
 		  }
 		| undefined;
 	readonly frontiers: Map<string, TranscriptFrontierSelection>;
-	readonly heldForAnchor: Set<string>;
-	holdCounts(): TranscriptSummaryHeldByKind;
 	readonly inFlight: Map<number, { jobId: string; controller: AbortController; done: Promise<void> }>;
 	invalidateSession(sessionId: string, epoch: number): Promise<void>;
 	isExpired(spans: readonly TranscriptSourceSpan[], cutoff: number | undefined): boolean;
@@ -167,8 +155,6 @@ export interface CoordinatorHost {
 		inputDigest: string,
 		signal: AbortSignal,
 	): Promise<{ result: TranscriptSummaryAdmissionResult; reused: boolean } | { outcome: JobOutcome }>;
-	readonly judgments: { accepted: number; rejected: number; uncertain: number; unavailable: number };
-	readonly lastInternalError: TranscriptMemoryInternalCause | undefined;
 	readonly lastRevocation: TranscriptMemoryRevocationRecord | undefined;
 	lineageMoved(sessionId: string, during: string): string;
 	live(epoch: number): boolean;
@@ -204,14 +190,8 @@ export interface CoordinatorHost {
 	modelWorkBlock(): TranscriptMemoryModelWorkBlock | undefined;
 	nextRetentionAt(): number | undefined;
 	nodeDenied(node: TranscriptSummaryNode, seen?: Set<string>): boolean;
-	noteBenignEvent(event: string): void;
-	noteEnqueued(): void;
-	noteInternalCause(cause: string): void;
-	readonly parked: Map<string, ParkedHold>;
-	readonly persistedBatches: TranscriptMemoryTerminalEvent[];
 	readonly ports: TranscriptMemoryPorts;
 	readonly proofLedger: TranscriptSummaryProofStatus;
-	pruneParked(): void;
 	pump(epoch: number): void;
 	queueForgetRefresh(epoch: number): void;
 	readContext(
@@ -227,7 +207,6 @@ export interface CoordinatorHost {
 		signal: AbortSignal,
 	): Promise<{ request: TranscriptSummaryAdmissionRequest } | { wait: TranscriptReadmissionWait } | undefined>;
 	readmissionSourceWait(node: TranscriptSummaryNode, outcome: SourceReadFailure): TranscriptReadmissionWait;
-	readonly readmissionState: Map<string, { state: ReadmissionHoldState; wait?: TranscriptReadmissionWait }>;
 	readmissionWait(
 		node: TranscriptSummaryNode,
 		wait: TranscriptReadmissionWait,
@@ -235,27 +214,20 @@ export interface CoordinatorHost {
 	): TranscriptReadmissionWait;
 	readmitNode(job: TranscriptSummaryJob, token: TranscriptSummaryClaimToken, signal: AbortSignal): Promise<JobOutcome>;
 	readText(span: TranscriptSourceSpan): Promise<{ text: string } | { outcome: SourceReadFailure }>;
-	readonly recentFailures: TranscriptMemoryFailureRecord[];
 	reconcileHeldSessions(visited: ReadonlySet<string>, epoch: number): Promise<void>;
 	reconcileSession(sessionId: string, epoch: number): Promise<void>;
 	reconcileSessionRead(sessionId: string, epoch: number): Promise<string | undefined>;
-	recordFailure(job: TranscriptSummaryJob, reason: string, message: string): void;
-	readonly recoveryIssues: string[];
 	republishFrontiers(sessionIds: readonly string[], epoch: number): Promise<void>;
 	restartDiscovery(sessionId: string, runtime: SessionRuntime, verified: VerifiedLineage | undefined): void;
 	resumeDeferredEnumeration(sessionId: string, epoch: number): void;
 	retentionCutoff(): number | undefined;
 	returnsClaim(job: TranscriptSummaryJob, paidCall: boolean): boolean;
 	reusableDormant(id: string, job: TranscriptSummaryJob): TranscriptSummaryNode | undefined;
-	readonly reusedAdmissions: number;
-	readonly revocationDue: Set<string>;
 	revokeDeadCoverage(sessionId: string, epoch: number, stamp: string | undefined): Promise<CoverageVerdict>;
-	readonly runtime: Map<string, SessionRuntime>;
-	readonly scheduler: TranscriptSummaryScheduler | undefined;
+	readonly sessions: SessionRuntimes;
+	readonly run: TranscriptRunState;
 	sessionsOf(nodeIds: readonly string[]): Set<string>;
 	sessionTimestamp(sessionId: string): Promise<string | null | undefined>;
-	readonly sessionTimestamps: Map<string, string | null>;
-	setReadmission(nodeId: string, state: ReadmissionHoldState, wait?: TranscriptReadmissionWait): void;
 	settleAborted(token: TranscriptSummaryClaimToken, epoch: number): void;
 	settleFailure(
 		job: TranscriptSummaryJob,
@@ -263,10 +235,7 @@ export interface CoordinatorHost {
 		now: number,
 		returnClaim?: boolean,
 	): void;
-	readonly settlingReadmissions: Set<string>;
 	spanTime(span: TranscriptSourceSpan): number | undefined;
-	readonly started: boolean;
-	readonly starting: boolean;
 	summarizeChecked(
 		job: TranscriptSummaryJob,
 		token: TranscriptSummaryClaimToken,
@@ -278,5 +247,4 @@ export interface CoordinatorHost {
 		admissionInput: Pick<TranscriptSummaryAdmissionRequest, "level" | "target" | "context">,
 	): Promise<{ text: string; model: string; admission: TranscriptSummaryAdmissionRecord } | { outcome: JobOutcome }>;
 	unapprovedWait(node: TranscriptSummaryNode): TranscriptReadmissionWait | undefined;
-	readonly writer: TranscriptSummaryWriter | undefined;
 }

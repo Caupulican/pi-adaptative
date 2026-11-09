@@ -4,7 +4,8 @@
  * `placement_abandoned` (`endAbandonedPlacements`); that turn is then spent, and the step's next placement is the next turn of the job
  * (`placementTurn` in `job-client.ts`), never the same job id. A lane whose record exists but cannot be read by this build ends from the record's
  * cancel marker when one stands beside it (`endMarkedPlacement`), and is left open otherwise, since its job may be live. The job
- * client's start, its reconcile and the managed-lane controller's first hydration run these over the session's own lane book.
+ * client's start and the managed-lane controller's first hydration run `endAbandonedPlacements` over the session's own lane book; the
+ * job client's reconcile runs `endMarkedPlacement` for each cancel marker (through `honorCancelMark`).
  *
  * A placed job's plan is never read from its record here or in `RemoteJobClient.cancelPlan`: the record is the one thing that may be
  * unreadable. It is read from the lane's dispatch, which carries the placement key (`ManagedLaneBinding.placement`). A lane an earlier

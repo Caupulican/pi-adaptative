@@ -223,8 +223,9 @@ export function planNodeBrief(
 }
 
 /**
- * The latest time a plan's steps moved: a release, a settlement, a hold or a join's settlement. A plan no step has moved
- * since its revision is dated by that revision. Undefined for a plan that is absent, from a newer build, or undated.
+ * The latest time a plan moved: a step's release, settlement, hold or join settlement, or the plan's revision. A revision is
+ * movement like the others, so a revise after the steps moved still extends the plan's last activity. Undefined for a plan
+ * that is absent, from a newer build, or undated.
  */
 export function planLastActivityAt(projection: PlanProjection, planId: string): number | undefined {
 	const plan = projection.plans[planId];
@@ -234,7 +235,7 @@ export function planLastActivityAt(projection: PlanProjection, planId: string): 
 			(stamp): stamp is string => stamp !== undefined,
 		),
 	);
-	const stamps = (moved.length > 0 ? moved : [plan.record.revisedAt])
+	const stamps = [...moved, plan.record.revisedAt]
 		.map((stamp) => Date.parse(stamp))
 		.filter((ms) => Number.isFinite(ms));
 	return stamps.length > 0 ? Math.max(...stamps) : undefined;

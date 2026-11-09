@@ -5,6 +5,7 @@ import { getDirectoryResourceProfileInfo } from "../../../../src/core/settings/s
 import { isRecordObject } from "../../../../src/core/util/value-guards.ts";
 import { createBarrier, HARNESS_PROVIDER, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { runJourney3SummaryRecoveryLegs, runJourney3SummaryRetentionLeg } from "./journey-3-summary-recovery.ts";
 import { requestTexts } from "./shared.ts";
 
 /** Journey 3's opt-in OKF history hierarchy, background admission, and foreground input overlap. */
@@ -211,6 +212,13 @@ export async function runJourney3SummaryAdmissionPhase(world: HarnessWorld): Pro
 					})),
 			).toEqual([{ text: summaryText, admission: "accepted", judged: ["support", "constraints"] }]);
 			expect(hierarchyCalls).toBe(1);
+			await runJourney3SummaryRecoveryLegs(world, {
+				label,
+				session,
+				manager,
+				store,
+				summaryCalls: () => hierarchyCalls,
+			});
 		} else {
 			expect(hierarchyCalls).toBe(0);
 			expect(
@@ -240,4 +248,6 @@ export async function runJourney3SummaryAdmissionPhase(world: HarnessWorld): Pro
 		expect(world.warnings.splice(warningIndex, 1)).toEqual([expectedWarning]);
 	}
 	world.trace.mark("root", label);
+	// Off runs make no transport request, so no summary is admitted to age out.
+	if (world.systemOne.enabled) await runJourney3SummaryRetentionLeg(world, intakeJudgments);
 }

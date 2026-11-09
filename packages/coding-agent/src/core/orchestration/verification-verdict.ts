@@ -40,6 +40,13 @@ export function verdictOfReasonCode(code: string): VerifierVerdict | undefined {
 	return undefined;
 }
 
+/**
+ * The plain correction a refused reason-code list reads as, in both transports: a verifier's submit_report refuses the call with
+ * it, and its text envelope fails the lane with it as the blocker.
+ */
+export const REASON_CODE_LIST_CORRECTION =
+	"Each reason code must be a non-empty string without a comma, which separates codes in a verdict; send one reason code per entry.";
+
 /** True for a verifier's reason-code list: every entry a non-empty string without a comma, which is the codec's separator. */
 export function isVerdictReasonCodeList(value: unknown): value is readonly string[] {
 	return (

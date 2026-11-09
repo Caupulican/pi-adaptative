@@ -35,6 +35,7 @@ import { configFile } from "../agent-paths.ts";
 import { AuthStorage } from "../auth-storage.ts";
 import { AwayChannelHosts, type AwayChannelProviderFactory } from "../channels/away-channel-host.ts";
 import { readAwayChannelCharges } from "../channels/away-channels.ts";
+import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import { ModelRegistry } from "../model-registry.ts";
 import type { AwayEventSourceFactory } from "../routines/away-event-feed.ts";
 import { AwayRoutineSupervisor } from "../routines/away-routine-host.ts";
@@ -83,6 +84,8 @@ export interface BotDaemonInput {
 	readonly token: string;
 	/** The daemon's clock and alarms: the lease renewal and the away supervisor run on the `routines` port. */
 	readonly timers: TimerSource;
+	/** The machine facts the away hosts' fleets read (memory and heap); absent reads the real machine. */
+	readonly machineFacts?: () => MachineFacts;
 	/** The identity each renewal records. */
 	readonly owner: ProcessOwner;
 	/** The build each renewal records (this process's package version); a newer build's start replaces the daemon. */
@@ -147,6 +150,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 		store: routineStore,
 		agentDir,
 		timers,
+		...(input.machineFacts ? { machineFacts: input.machineFacts } : {}),
 		settings: () => settings.getRoutineAwaySettings(),
 		report,
 		...(input.authStorage ? { authStorage: input.authStorage } : {}),
@@ -162,6 +166,7 @@ export function startBotDaemon(input: BotDaemonInput): BotDaemonRun {
 				agentDir,
 				settings,
 				timers,
+				...(input.machineFacts ? { machineFacts: input.machineFacts } : {}),
 				providers: channelProviders,
 				routineOccurrences: () => routineStore.listRoutineOccurrences(),
 				report,

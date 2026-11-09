@@ -129,6 +129,11 @@ export interface ChannelDraftRecord {
 	readonly away?: true;
 	/** An open session holding the channel told the owner of this away draft; no session tells it again. */
 	told?: true;
+	/**
+	 * The digests, in order, of the leading parts of the reply the transport accepted (`sendReplyParts`). A send of the
+	 * draft does not send those parts again, so a reply that failed part-way resumes where it stopped.
+	 */
+	deliveredParts?: string[];
 }
 
 export interface ChannelGapRecord {
@@ -295,6 +300,8 @@ function isDraft(value: unknown): value is ChannelDraftRecord {
 				isString(value.sendingBy.sessionId) &&
 				isCount(value.sendingBy.pid) &&
 				isTime(value.sendingBy.at))) &&
+		(value.deliveredParts === undefined ||
+			(Array.isArray(value.deliveredParts) && value.deliveredParts.every(isString))) &&
 		(value.away === undefined || value.away === true) &&
 		(value.told === undefined || value.told === true)
 	);

@@ -33,6 +33,7 @@ import type {
 	ShutdownHandler,
 	ToolDefinition,
 } from "./extensions/index.ts";
+import type { MachineFacts } from "./fleet/capacity/machine-room.ts";
 import type { WorkerTerminalDeliveryInterposer } from "./foreground-terminal-handoff-controller.ts";
 import type { GoalContinuationPrompt } from "./goals/goal-continuation-prompt.ts";
 import type { GoalRuntimeSnapshot } from "./goals/goal-runtime-snapshot.ts";
@@ -201,6 +202,8 @@ export interface AgentSessionConfig {
 	systemOneEnabled?: boolean;
 	/** The one timer source of the session's recovery, retry and watchdog alarms and of the clocks they are due on. */
 	timers: TimerSource;
+	/** The machine facts the fleet's room reads; absent reads the real machine (a harness world supplies fixed facts). */
+	machineFacts?: () => MachineFacts;
 	/** The subscription usage source of the owner channel's dollar bounds and the cost guard; absent reads the provider's usage endpoint. */
 	subscriptionAllowance?: SubscriptionAllowancePort;
 	/** Bound of the background tool-task terminal cache; absent keeps the controller default. */

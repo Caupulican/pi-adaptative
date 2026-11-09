@@ -1,5 +1,6 @@
 import type { AgentContext } from "./loop-config.ts";
 import { createCustomMessage } from "./messages.ts";
+import { PrefixFoldByFirstItem } from "./prefix-fold.ts";
 import {
 	decideTransientRecord,
 	fnv1aHash32,
@@ -252,7 +253,7 @@ export function isTransientRecordPacked(details: unknown): boolean {
 /**
  * Whether a persisted custom record was written by this module (a transient record): `details.superseding`
  * marks a plain record, `details.cumulative` a cumulative one; pointer records are excluded, as
- * `transientContentIndex` excludes them. The session context builder uses this to carry the current
+ * the kind index (`recordedTransientKinds`) excludes them. The session context builder uses this to carry the current
  * record of each kind across a compaction cut: without it every kind is re-appended on the first
  * request after compaction (measured on a live session: the skill context re-sent 75 times for 7
  * distinct contents, the legend 256 times). This is the only reader of the superseding note: a plain
@@ -362,59 +363,28 @@ function recordedDigest(recorded: RecordedTransient, slot: TransientRecordSlot):
 }
 
 /**
- * Last durable record per kind, maintained incrementally. Each request reconciles every
- * slot against history, and a kind with no record yet (a session with no failure so far, for the
- * ledger) walked the whole history backwards on every request to learn that. `processed` holds the
- * references the index was built from, exactly `count` of them (`processed.length === count`); a
- * call re-checks them against the live array before trusting `byKind` (see the module comment's
- * index contract), and a history that changed underneath is indexed from the start.
+ * Last durable record per kind, folded incrementally. Each request reconciles every slot against history, and a kind with no
+ * record yet (a session with no failure so far, for the ledger) walked the whole history backwards on every request to learn
+ * that. The fold resumes past the history it already read (see `PrefixFoldByFirstItem`), so a call reads only what was appended.
  */
-interface TransientContentIndex {
-	count: number;
-	processed: AgentMessage[];
-	byKind: Map<string, RecordedTransient>;
-}
-/** Reconciliation's index, over the durable base it commits into. */
-const transientContentIndexes = new WeakMap<AgentMessage, TransientContentIndex>();
-/** The planning view's index (see {@link recordedTransientKinds}), kept apart from reconciliation's. */
-const recordedKindIndexes = new WeakMap<AgentMessage, TransientContentIndex>();
+type RecordedKinds = Map<string, RecordedTransient>;
 
-function transientContentIndex(
-	messages: readonly AgentMessage[],
-	indexes: WeakMap<AgentMessage, TransientContentIndex>,
-): ReadonlyMap<string, RecordedTransient> {
-	const first = messages[0];
-	if (!first) return new Map();
-	let index = indexes.get(first);
-	let from = 0;
-	if (index && index.count <= messages.length) {
-		from = index.count;
-		for (let position = 0; position < from; position++) {
-			if (index.processed[position] !== messages[position]) {
-				index = undefined;
-				from = 0;
-				break;
-			}
-		}
-	} else {
-		index = undefined;
+function recordTransientKind(byKind: RecordedKinds, message: AgentMessage): void {
+	if (message.role === "custom" && !isTransientPointerRecord(message)) {
+		byKind.set(message.customType, recordedTransient(message));
 	}
-	if (!index) {
-		index = { count: 0, processed: [], byKind: new Map() };
-		indexes.set(first, index);
-	}
-	// Only the tail the checked prefix does not cover is read, and each read message is pushed onto the stored
-	// references: `processed` stays exactly the messages `byKind` was built from, with no copy of the history.
-	for (let position = from; position < messages.length; position++) {
-		const message = messages[position];
-		index.processed.push(message);
-		if (message.role === "custom" && !isTransientPointerRecord(message)) {
-			index.byKind.set(message.customType, recordedTransient(message));
-		}
-	}
-	index.count = messages.length;
-	return index.byKind;
 }
+
+/** Reconciliation's fold, over the durable base it commits into. */
+const transientContentIndexes = new PrefixFoldByFirstItem<AgentMessage, RecordedKinds>(
+	() => new Map(),
+	recordTransientKind,
+);
+/** The planning view's fold (see {@link recordedTransientKinds}), kept apart from reconciliation's: the two can share a first message. */
+const recordedKindIndexes = new PrefixFoldByFirstItem<AgentMessage, RecordedKinds>(
+	() => new Map(),
+	recordTransientKind,
+);
 
 /**
  * The last full (non-pointer) record of each kind on `messages`, by kind. A producer compares a record's content with the
@@ -427,7 +397,7 @@ function transientContentIndex(
 export function recordedTransientKinds(
 	messages: readonly AgentMessage[],
 ): ReadonlyMap<string, { readonly content: string | undefined }> {
-	return new Map(transientContentIndex(messages, recordedKindIndexes));
+	return new Map(recordedKindIndexes.fold(messages));
 }
 
 function buildTransientRecord(
@@ -525,7 +495,7 @@ export function reconcileTransientRecords(
 	slots: readonly TransientRecordSlot[],
 	planned: readonly AgentMessage[],
 ): TransientRecordReconciliation {
-	const recorded = transientContentIndex(durableMessages, transientContentIndexes);
+	const recorded = transientContentIndexes.fold(durableMessages);
 	const nextDigest = (slot: TransientRecordSlot): string | undefined =>
 		slot.content === undefined ? undefined : (slot.digest ?? transientRecordDigest(slot.content));
 	const wanted = new Map<string, number>();

@@ -8,7 +8,9 @@
  * records everything else as a finding. Nothing an entry could not apply is reported as success.
  */
 
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { GatedWriteOutcome } from "../reflection-controller.ts";
+import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { checkSkillEvolutionEligibility, isValidSkillName } from "../session-skill-policy.ts";
 import type { AutoLearnSettings, AutonomyMode } from "../settings/settings-schema.ts";
@@ -255,6 +257,8 @@ export interface AutoLearnReportEntry {
 	proposalId?: string;
 	/** A skill update kept as a suggestion instead of applied: the learner's proposed text, bounded by the block parser. */
 	suggestion?: { description?: string; body: string };
+	/** The lesson's route could not be recorded in the structural backlog (bounded, redacted). The write is decided regardless. */
+	routeFailure?: string;
 }
 
 export interface AutoLearnApplyPorts {
@@ -282,7 +286,8 @@ export interface AutoLearnApplyPorts {
 	>;
 	/**
 	 * Records one memory or skill lesson in the structural backlog. Optional: absent where no System One port is bound,
-	 * and then nothing is routed. A thrown error fails the batch (`apply_failed`), so nothing is dropped silently.
+	 * and then nothing is routed. A thrown error is reported on the lesson's entry (`routeFailure`); it never fails the batch,
+	 * because the route never gates the write.
 	 */
 	routeLesson?(lesson: LessonCandidate, facts: Pick<LessonFacts, "skillLoadedThisSession">): Promise<BacklogRow>;
 }
@@ -346,23 +351,40 @@ export async function applyAutoLearnProposals(
 	}
 
 	// Every memory and skill proposal is routed before any check or write: routing awaits System One, and the context and
-	// eligibility checks below run after it. A route is recorded, never applied. A write the shared parser rejects has no
-	// lesson and is reported by applyWrites.
+	// eligibility checks below run after it. A route is recorded, never applied, and a route that cannot be recorded is
+	// reported on its own lesson's entry: the batch goes on. A write the shared parser rejects has no lesson and is reported by
+	// applyWrites.
+	const routeFailures = new Map<number, string>();
+	const routeReported = async (index: number, lesson: LessonCandidate, skillLoadedThisSession: boolean) => {
+		try {
+			await ports.routeLesson?.(lesson, { skillLoadedThisSession });
+		} catch (error) {
+			const message = boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error)) ?? "";
+			routeFailures.set(index, message);
+			harnessLog.warn(
+				"learning",
+				"a lesson was not recorded in the structural backlog; its write is decided under its gates",
+				() => ({
+					index,
+					error: error instanceof Error ? error.name : typeof error,
+					message,
+				}),
+			);
+		}
+	};
 	if (ports.routeLesson) {
 		// The fact is membership in this session's load record. A skill update asks about its own skill; a memory or OKF
 		// lesson names no skill, so it asks whether any skill was loaded (the route's `skill` exit).
 		for (const write of set.writes) {
 			const lesson = lessonCandidateOfWrite(write.raw);
-			if (lesson) {
-				await ports.routeLesson(lesson, {
-					skillLoadedThisSession: ports.skillVault.getLoadedSkillNames().length > 0,
-				});
-			}
+			if (lesson) await routeReported(write.index, lesson, ports.skillVault.getLoadedSkillNames().length > 0);
 		}
 		for (const update of set.skillUpdates) {
-			await ports.routeLesson(lessonCandidateOfSkillUpdate(update), {
-				skillLoadedThisSession: ports.skillVault.getLoadedSkillNames().includes(update.name),
-			});
+			await routeReported(
+				update.index,
+				lessonCandidateOfSkillUpdate(update),
+				ports.skillVault.getLoadedSkillNames().includes(update.name),
+			);
 		}
 	}
 
@@ -507,7 +529,12 @@ export async function applyAutoLearnProposals(
 			detail: "No host write path: the orchestrator evaluates this and acts under owner authority.",
 		});
 	}
-	return report.sort((a, b) => a.index - b.index);
+	return report
+		.map((entry) => {
+			const routeFailure = routeFailures.get(entry.index);
+			return routeFailure === undefined ? entry : { ...entry, routeFailure };
+		})
+		.sort((a, b) => a.index - b.index);
 }
 
 export interface AutoLearnHandoffRecord {
@@ -559,10 +586,11 @@ export function formatAutoLearnHandoffNote(record: AutoLearnHandoffRecord): stri
 		`Entries: ${counts || "none"}. Applied entries were decided by the main session under its autonomy-mode and autoLearn eligibility; the learner itself wrote nothing.`,
 	];
 	if (record.detail) lines.push(`Detail: ${record.detail}`);
-	const unresolved = record.entries.filter((e) => e.outcome !== "applied");
+	// An entry whose lesson was not recorded in the structural backlog is listed even when its write applied.
+	const unresolved = record.entries.filter((e) => e.outcome !== "applied" || e.routeFailure !== undefined);
 	for (const entry of unresolved.slice(0, MAX_AUTO_LEARN_NOTE_ENTRIES)) {
 		lines.push(
-			`- #${entry.index} ${entry.kind}${entry.subject ? ` "${entry.subject.replace(/[\r\n]+/g, " ")}"` : ""}: ${entry.outcome} (${entry.reasonCode})${entry.proposalId ? ` audit=${entry.proposalId}` : ""}`,
+			`- #${entry.index} ${entry.kind}${entry.subject ? ` "${entry.subject.replace(/[\r\n]+/g, " ")}"` : ""}: ${entry.outcome} (${entry.reasonCode})${entry.proposalId ? ` audit=${entry.proposalId}` : ""}${entry.routeFailure !== undefined ? ` lesson not recorded in the structural backlog: ${entry.routeFailure}` : ""}`,
 		);
 	}
 	if (unresolved.length > MAX_AUTO_LEARN_NOTE_ENTRIES) {

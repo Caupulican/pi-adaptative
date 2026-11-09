@@ -76,7 +76,7 @@ export async function applyRetentionPass(
 	host: Pick<
 		CoordinatorHost,
 		| "retentionCutoff"
-		| "writer"
+		| "run"
 		| "live"
 		| "catalog"
 		| "dormant"
@@ -91,7 +91,7 @@ export async function applyRetentionPass(
 	epoch: number,
 ): Promise<void> {
 	const cutoff = host.retentionCutoff();
-	const writer = host.writer;
+	const writer = host.run.writer;
 	if (cutoff === undefined || !writer || !host.live(epoch)) return;
 	const due: { id: string; at: number }[] = [];
 	for (const node of host.catalog.values()) {
@@ -133,18 +133,18 @@ export async function applyRetentionPass(
 }
 
 export async function sessionTimestampOf(
-	host: Pick<CoordinatorHost, "sessionTimestamps" | "ports" | "noteInternalCause">,
+	host: Pick<CoordinatorHost, "sessions" | "ports" | "causes">,
 	sessionId: string,
 ): Promise<string | null | undefined> {
-	if (!host.sessionTimestamps.has(sessionId)) {
+	if (!host.sessions.hasStamp(sessionId)) {
 		const sessions = await host.ports.reader.listSessions();
 		if (sessions.status !== "ok") {
-			host.noteInternalCause(`listing sessions for retention anchors: ${sessions.status}: ${sessions.reason}`);
+			host.causes.noteInternal(`listing sessions for retention anchors: ${sessions.status}: ${sessions.reason}`);
 			return undefined;
 		}
-		for (const session of sessions.sessions) host.sessionTimestamps.set(session.sessionId, session.timestamp ?? null);
-		if (!host.sessionTimestamps.has(sessionId)) host.sessionTimestamps.set(sessionId, null);
+		for (const session of sessions.sessions) host.sessions.recordStamp(session.sessionId, session.timestamp ?? null);
+		if (!host.sessions.hasStamp(sessionId)) host.sessions.recordStamp(sessionId, null);
 	}
-	const stamp = host.sessionTimestamps.get(sessionId) ?? null;
+	const stamp = host.sessions.stampOf(sessionId) ?? null;
 	return stamp !== null && Number.isNaN(Date.parse(stamp)) ? null : stamp;
 }

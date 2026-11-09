@@ -207,6 +207,7 @@ import {
 	type WorkerContextForkSnapshot,
 	WorkerContextForkStore,
 	WorkerContextForkStoreError,
+	workerContextModelIdentity,
 } from "./worker-context-fork-store.ts";
 import { resolveWorkerContextInheritanceMode } from "./worker-context-inheritance-policy.ts";
 import {
@@ -435,15 +436,6 @@ interface WorkerContextForkSource {
 	messages: readonly AgentMessage[];
 }
 
-function workerContextModelIdentity(modelRef: string | undefined): { provider: string; model: string } {
-	if (!modelRef) throw new Error("Worker parent resume model is missing.");
-	const separator = modelRef.indexOf("/");
-	if (separator <= 0 || separator === modelRef.length - 1) {
-		throw new Error("Worker parent resume model is invalid.");
-	}
-	return { provider: modelRef.slice(0, separator), model: modelRef.slice(separator + 1) };
-}
-
 /** What the host knows about a running worker without asking the worker. */
 type InFlightWorkerLedger = {
 	changedFiles: Set<string>;
@@ -652,6 +644,7 @@ export class WorkerDelegationController {
 			timers: this.deps.getTimers().port("fleet"),
 			settings: () => this.deps.getSettingsManager().getFleetSettings(),
 			...(this.deps.fleetAllowance ? { allowance: this.deps.fleetAllowance } : {}),
+			...(this.deps.readMachine ? { readMachine: this.deps.readMachine } : {}),
 			accountKey: (provider) => resolveProviderAccountKey(this.deps.getModelRegistry().authStorage, provider),
 			providerLimit: (provider) => this.deps.getSettingsManager().getProviderAdmissionSettings().limits[provider],
 			isMetered: (model) => !this.deps.getModelRegistry().isUsingSubscription(model),

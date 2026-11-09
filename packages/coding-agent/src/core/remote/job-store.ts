@@ -8,6 +8,9 @@
  * - `in/`: a job a peer placed here (the executor's record), keyed `<placerId>.<jobId>`. Created at most once per placer and
  *   job id, with the digest of the offer it admitted: the same offer again is a replay, a different one a conflict. Its
  *   outbox keeps every progress and outcome frame until the placer acknowledges it.
+ * - `turns/`: one small file per placement key and machine, the highest placement turn ever raised for it (`readPlacementTurn`).
+ *   It is never released by retention: a turn whose record and lane are both gone is still spent, so the next placement of the
+ *   key is the next turn, never a job id an earlier turn already used.
  * - `journal.jsonl`: one line per transition (ids, codes and counts only), bounded by rotation.
  * - `runner.json`: the session that runs placed jobs here, with its model access and room.
  *
@@ -19,10 +22,15 @@
  * until the record reads again (the cancel is then applied to the record and the marker removed) or the record is removed. A marker that is
  * damaged is still that stop, with the reason `marker_unreadable`: damage never drops a stop.
  *
+ * An unreadable record file holds a machine's room only while it may still name a live job: past its last write plus the longest
+ * job deadline, the offline hold and a grace, it no longer counts (`unreadableHoldingRoom`), and it is named once in a warning. It is
+ * left in place, since a newer build may own it.
+ *
  * File-name budget: ids are at most 64 characters (`WIRE_ID`), so the longest name is 128 hex + 1 + 64 + `.cancel` (7) = 200
  * bytes, and the longest temporary name (`<file>.<pid>.<uuid>.tmp`, a pid of up to seven digits) adds 49, for 249 bytes.
  */
 
+import { createHash } from "node:crypto";
 import {
 	appendFileSync,
 	existsSync,
@@ -36,6 +44,7 @@ import {
 import { basename, join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { isProcessOwnerRecord, ownProcessOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
+import { retryTransientWin32Sync } from "../../kernel/storage/win32-transient-fs.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -50,6 +59,7 @@ import {
 	type JobOutcome,
 	type JobPhase,
 	type JobRefusal,
+	MAX_JOB_DEADLINE_MS,
 	parseJobFrame,
 	parsePlacedJobReference,
 	placedJobReference,
@@ -166,6 +176,12 @@ const FINISHED_RETENTION_MS = 7 * 24 * 60 * 60_000;
 export const jobsDir = (agentDir: string): string => join(agentDir, "remote", "jobs");
 export const outDir = (agentDir: string): string => join(jobsDir(agentDir), "out");
 export const inDir = (agentDir: string): string => join(jobsDir(agentDir), "in");
+const turnsDir = (agentDir: string): string => join(jobsDir(agentDir), "turns");
+
+/** A turn ledger's file: the machine id as lowercase hex, then the placement key's SHA-256 (a key is bounded, its file name is not). */
+function turnFileName(machineId: string, idempotencyKey: string): string {
+	return `${Buffer.from(machineId, "utf8").toString("hex")}.${createHash("sha256").update(idempotencyKey).digest("hex")}.json`;
+}
 
 function isCount(value: unknown): value is number {
 	return typeof value === "number" && Number.isSafeInteger(value) && value >= 0;
@@ -321,6 +337,10 @@ export type RecordCreate<T> = { readonly kind: "valid"; readonly record: T } | {
 export interface UnreadableRecord {
 	readonly machineId: string | undefined;
 	readonly jobId: string | undefined;
+	/** The record file, for the warning that names it. */
+	readonly path: string;
+	/** The file's last write, epoch milliseconds: the bound of whether the record may still name a live job. */
+	readonly mtimeMs: number;
 }
 
 /**
@@ -389,19 +409,68 @@ function parseNamedFile(
 /** Record files this build cannot read, already reported by path: each is reported once, until its file reads again. */
 const reportedUnreadable = new Set<string>();
 
-function reportUnreadable(path: string, side: "placer" | "executor", record: UnreadableRecord): void {
+/**
+ * The grace past an unreadable record's bound before it stops holding room: a writer may still be finishing the file, and the
+ * placer's own deadline grace is one minute.
+ */
+const UNREADABLE_GRACE_MS = 10 * 60_000;
+
+/**
+ * Reads a record file's text. A transient Windows error (a rename or a lock of a concurrent writer) is retried as the writers retry it;
+ * any other error, and a missing file, throw to the caller.
+ */
+function readRecordText(path: string): string {
+	let text = "";
+	retryTransientWin32Sync(() => {
+		text = readFileSync(path, "utf8");
+	});
+	return text;
+}
+
+/** The last write of a file, epoch milliseconds; 0 when the file is gone (it then holds no room). */
+function mtimeOf(path: string): number {
+	return statSync(path, { throwIfNoEntry: false })?.mtimeMs ?? 0;
+}
+
+function reportUnreadable(
+	path: string,
+	side: "placer" | "executor",
+	record: Pick<UnreadableRecord, "machineId" | "jobId">,
+): void {
 	if (reportedUnreadable.has(path)) return;
 	reportedUnreadable.add(path);
-	harnessLog.warn(
-		"link",
-		"a job record cannot be read by this build; it is left as it is and counted as an open job",
-		{
-			side,
-			peer: record.machineId ?? "unknown",
-			jobId: record.jobId ?? "unknown",
-			file: basename(path),
-		},
-	);
+	harnessLog.warn("link", "a job record cannot be read by this build; it is left as it is", {
+		side,
+		peer: record.machineId ?? "unknown",
+		jobId: record.jobId ?? "unknown",
+		file: basename(path),
+	});
+}
+
+/**
+ * The unreadable records that still hold a machine's room at `now`. One past its bound is left in place: it names no job that can still
+ * be live, so it holds no room, and it is named once in a warning. `holdMs` is the link's offline hold, which the bound includes.
+ */
+export function unreadableHoldingRoom(
+	entries: readonly UnreadableRecord[],
+	now: number,
+	holdMs: number,
+	side: "placer" | "executor",
+): UnreadableRecord[] {
+	const bound = MAX_JOB_DEADLINE_MS + holdMs + UNREADABLE_GRACE_MS;
+	return entries.filter((entry) => {
+		if (now - entry.mtimeMs <= bound) return true;
+		const key = `stale:${entry.path}`;
+		if (!reportedUnreadable.has(key)) {
+			reportedUnreadable.add(key);
+			harnessLog.warn(
+				"link",
+				"a job record this build cannot read is older than any job it can name; it no longer holds a machine's room and is left in place",
+				{ side, file: basename(entry.path) },
+			);
+		}
+		return false;
+	});
 }
 
 /** The reason of a stop whose marker is damaged: the stop is kept, and its reason is not known. */
@@ -450,10 +519,14 @@ class RecordDir<T> {
 		return state;
 	}
 
+	/**
+	 * The record a file holds. A missing file is absent. A file that cannot be read (an I/O error that outlives the transient retry) and a
+	 * file this build does not parse are both unreadable: neither is taken for an absent record.
+	 */
 	private parseFile(path: string): RecordRead<T> {
 		let text: string;
 		try {
-			text = readFileSync(path, "utf8");
+			text = readRecordText(path);
 		} catch (error) {
 			return isMissingPathError(error) ? { kind: "absent" } : { kind: "unreadable" };
 		}
@@ -540,10 +613,11 @@ class RecordDir<T> {
 			}
 			if (state.kind === "absent") return "unchanged";
 			const next = change(state.record);
+			// The stop is in the record before its marker goes: a crash or a failed write between the two keeps the marker, which the
+			// next scan applies again (the change then finds the stop already held and writes nothing).
+			if (next !== undefined) writeFileAtomicSync(path, `${JSON.stringify(next)}\n`, { mode: 0o600 });
 			this.clearCancelMark(name);
-			if (next === undefined) return "unchanged";
-			writeFileAtomicSync(path, `${JSON.stringify(next)}\n`, { mode: 0o600 });
-			return "changed";
+			return next === undefined ? "unchanged" : "changed";
 		});
 	}
 
@@ -560,8 +634,9 @@ class RecordDir<T> {
 			const parsed = parseNamedFile(file);
 			if (parsed === undefined) {
 				if (!file.endsWith(`.${RECORD_EXTENSION}`)) continue;
-				const entry = { machineId: undefined, jobId: undefined };
-				reportUnreadable(join(this.dir, file), this.side, entry);
+				const path = join(this.dir, file);
+				const entry = { machineId: undefined, jobId: undefined, path, mtimeMs: mtimeOf(path) };
+				reportUnreadable(path, this.side, entry);
 				unreadable.push(entry);
 				continue;
 			}
@@ -572,7 +647,10 @@ class RecordDir<T> {
 			}
 			const state = this.inspect(parsed.name);
 			if (state.kind === "valid") valid.set(parsed.name, state.record);
-			else if (state.kind === "unreadable") unreadable.push({ machineId: parsed.machineId, jobId: parsed.jobId });
+			else if (state.kind === "unreadable") {
+				const path = this.path(parsed.name);
+				unreadable.push({ machineId: parsed.machineId, jobId: parsed.jobId, path, mtimeMs: mtimeOf(path) });
+			}
 		}
 		return { valid, unreadable, marks };
 	}
@@ -662,17 +740,68 @@ export class JobStore {
 	}
 
 	/**
-	 * Placed jobs on `machineId` that are not sent yet: they will take that machine's room. An unreadable record may be one of them,
-	 * so it counts for its machine; one whose name holds no machine counts for every machine, so no room is offered twice.
+	 * Placed jobs on `machineId` that are not sent yet: they will take that machine's room. A pending record past its deadline is ended by
+	 * whichever session reads it (`RemoteJobClient.reconcile`), so it takes no room. An unreadable record may be one of them, so it counts
+	 * for its machine while it may still be live (`unreadableHoldingRoom`); one whose name holds no machine counts for every machine, so no
+	 * room is offered twice.
 	 */
-	pendingPlacedCount(machineId: string): number {
+	pendingPlacedCount(machineId: string, now: number, holdMs: number): number {
 		const pass = this.placedScan();
 		let pending = 0;
 		for (const record of pass.valid.values())
-			if (record.state === "pending" && record.executorId === machineId) pending += 1;
-		for (const entry of pass.unreadable)
+			if (record.state === "pending" && record.executorId === machineId && record.deadlineAt > now) pending += 1;
+		for (const entry of unreadableHoldingRoom(pass.unreadable, now, holdMs, "placer"))
 			if (entry.machineId === undefined || entry.machineId === machineId) pending += 1;
 		return pending;
+	}
+
+	/**
+	 * The turn ledger of a placement key on `machineId`: the highest turn ever raised for it. `absent` when no turn was raised yet; `unreadable`
+	 * when the ledger file cannot be read, so no turn can be told spent or fresh and nothing is placed under the key.
+	 */
+	readPlacementTurn(
+		machineId: string,
+		idempotencyKey: string,
+	):
+		| { readonly kind: "absent" }
+		| { readonly kind: "unreadable" }
+		| { readonly kind: "valid"; readonly turn: number } {
+		const path = this.turnPath(machineId, idempotencyKey);
+		let text: string;
+		try {
+			text = readRecordText(path);
+		} catch (error) {
+			return isMissingPathError(error) ? { kind: "absent" } : { kind: "unreadable" };
+		}
+		try {
+			const value: unknown = JSON.parse(text);
+			if (isPlainRecord(value) && value.v === 1 && isCount(value.turn) && value.turn >= 1)
+				return { kind: "valid", turn: value.turn };
+		} catch {
+			// Handled below: a file that does not parse is unreadable.
+		}
+		return { kind: "unreadable" };
+	}
+
+	/**
+	 * Raises the turn ledger of a placement key to `turn`, under the ledger's lock; a lower or equal turn changes nothing. Returns false, and
+	 * writes nothing, when the ledger cannot be read (it is never overwritten). Called before the turn's lane is dispatched, so a turn is
+	 * on record before anything of it exists.
+	 */
+	raisePlacementTurn(machineId: string, idempotencyKey: string, turn: number): boolean {
+		mkdirSync(turnsDir(this.agentDir), { recursive: true });
+		const path = this.turnPath(machineId, idempotencyKey);
+		return withFileLockSync(path, () => {
+			const current = this.readPlacementTurn(machineId, idempotencyKey);
+			if (current.kind === "unreadable") return false;
+			if (current.kind === "valid" && current.turn >= turn) return true;
+			writeFileAtomicSync(path, `${JSON.stringify({ v: 1, turn })}\n`, { mode: 0o600 });
+			return true;
+		});
+	}
+
+	private turnPath(machineId: string, idempotencyKey: string): string {
+		return join(turnsDir(this.agentDir), turnFileName(machineId, idempotencyKey));
 	}
 
 	/** What the placer's record of the job `jobId` placed on `machineId` holds now. */
@@ -864,11 +993,12 @@ export function readRunner(agentDir: string): RunnerAdvert | undefined {
 
 /**
  * Jobs admitted here from every placer and not finished yet, the unreadable records included: what an advert's room is reduced by.
- * An unreadable record may be a live job, so it counts; a room is never advertised over what this machine may still be running.
+ * An unreadable record may be a live job, so it counts while it may still be one (`unreadableHoldingRoom`); a room is never advertised
+ * over what this machine may still be running.
  */
-export function activeExecutorJobs(store: JobStore): number {
+export function activeExecutorJobs(store: JobStore, now: number, holdMs: number): number {
 	const scan = store.in.scan();
-	let active = scan.unreadable.length;
+	let active = unreadableHoldingRoom(scan.unreadable, now, holdMs, "executor").length;
 	for (const record of scan.valid.values()) if (record.state !== "terminal") active += 1;
 	return active;
 }

@@ -105,6 +105,7 @@ import {
 } from "./owner-control.ts";
 import { nameableSenderId, quotaStatusLine, senderNoticeText } from "./owner-notice-text.ts";
 import { OwnerPush } from "./owner-push.ts";
+import { sendReplyParts } from "./reply-parts.ts";
 
 /** The daemon's drafts one summary of what it left names by id and reason; the rest are counted. */
 const MAX_NAMED_AWAY_DRAFTS = 3;
@@ -1931,8 +1932,11 @@ export class SessionChannels {
 		}
 		// Recorded before sending: a crash mid-send loses the reply rather than sending it twice.
 		if (!this.settleBatch(name, batch.id, "replied", usd, undefined)) return false;
+		let accepted: readonly string[] = [];
 		try {
-			await this.sendParts(provider, batch, formatted.parts);
+			await sendReplyParts(provider, batch, formatted.parts, [], (digests) => {
+				accepted = digests;
+			});
 			harnessLog.info("channels", "a reply was sent", {
 				channel: name,
 				batch: batch.id,
@@ -1944,7 +1948,7 @@ export class SessionChannels {
 			const said = isShippedChannelProvider(provider)
 				? boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error))
 				: undefined;
-			this.keepDraft(name, batch, text, said ? `sending failed: ${said}` : "sending failed", 0, "replied");
+			this.keepDraft(name, batch, text, said ? `sending failed: ${said}` : "sending failed", 0, "replied", accepted);
 		}
 		return false;
 	}
@@ -2005,27 +2009,6 @@ export class SessionChannels {
 	}
 
 	/**
-	 * Sends a turn's answer (the turn-end reply, or a released draft) in its parts. Only the last part is final: an ask's
-	 * lane on a link address ends on the answer's end, never on its first part.
-	 */
-	private async sendParts(
-		provider: ChannelProvider,
-		target: { conversationKey: string; address: string; id: string },
-		parts: readonly string[],
-	): Promise<void> {
-		for (const [index, text] of parts.entries()) {
-			await provider.send({
-				conversationKey: target.conversationKey,
-				address: target.address,
-				text,
-				kind: "message",
-				eventId: `reply:${target.id}:${index + 1}/${parts.length}`,
-				final: index === parts.length - 1,
-			});
-		}
-	}
-
-	/**
 	 * Move one batch from `from` (accepted, or replied for a send that failed) to `state`, adding what its turn spent and
 	 * its draft; whether it moved. A batch another pass already settled is left as it is, so nothing is settled twice. A
 	 * conversation the daemon's host leaves unanswered is also a gap, for the owner's next session to be told.
@@ -2064,6 +2047,7 @@ export class SessionChannels {
 		reason: string,
 		usd: number,
 		from: ChannelBatchRecord["state"] = "accepted",
+		accepted: readonly string[] = [],
 	): void {
 		const draft: ChannelDraftRecord = {
 			id: digest(`draft:${name}:${batch.id}`).slice(0, 10),
@@ -2075,6 +2059,7 @@ export class SessionChannels {
 			createdAt: this.now(),
 			state: "pending",
 			...(this.deps.away ? { away: true as const } : {}),
+			...(accepted.length > 0 ? { deliveredParts: [...accepted] } : {}),
 		};
 		if (!this.settleBatch(name, batch.id, "drafted", usd, draft, from)) return;
 		const fields = { channel: name, draft: draft.id, reason };
@@ -2507,10 +2492,17 @@ export class SessionChannels {
 				return claim;
 			},
 			effect: (claim) =>
-				this.sendParts(
+				sendReplyParts(
 					provider,
 					{ conversationKey: claim.draft.conversationKey, address: claim.draft.address, id: claim.draft.batchId },
 					parts,
+					claim.draft.deliveredParts,
+					(digests) =>
+						this.journal(name).update(this.now(), (state) => {
+							const entry = state.drafts.find((candidate) => candidate.id === id);
+							if (entry?.state === "sending" && entry.sendingBy?.at === claim.draft.sendingBy?.at)
+								entry.deliveredParts = [...digests];
+						}),
 				),
 			release: (claim) => {
 				harnessLog.warn("channels", "a draft send failed; the draft is kept", { channel: name, draft: id });

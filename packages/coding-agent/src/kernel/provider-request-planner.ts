@@ -17,6 +17,7 @@ import type {
 	SentPrefixDisturbanceInfo,
 	StreamFn,
 } from "./loop-config.ts";
+import { recordPrefixFoldWork } from "./prefix-fold.ts";
 import { estimateProviderRequestTokens } from "./provider-request-estimator.ts";
 import { applyProviderRequestImageBudget } from "./provider-request-image-budget.ts";
 import { projectToolsForProvider } from "./provider-tool-projection.ts";
@@ -743,6 +744,7 @@ export async function startPlannedAgentProviderRequestWithId(
 			);
 			requestAuth.requestGuard?.(config.model, signal);
 			plan.commit?.();
+			recordPrefixFoldWork(sourceContext.messages.length, plan.messages.length);
 			adoptReplannedMessages(initialContext, sourceContext);
 			keepPlan = true;
 			await config.onProviderRequestSnapshot?.(

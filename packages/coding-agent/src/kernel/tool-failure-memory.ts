@@ -6,6 +6,7 @@ import {
 } from "@caupulican/pi-ai/tool-repair-registry";
 import type { AssistantMessage, ToolResultMessage } from "@caupulican/pi-ai/types";
 import { harnessLog } from "./harness-log.ts";
+import { PrefixFold } from "./prefix-fold.ts";
 import { boundedFailureCode } from "./tool-failure-code.ts";
 import {
 	TOOL_FAILURE_LEDGER_RECORD_VERSION,
@@ -1278,30 +1279,34 @@ function createFailureFoldState(): FailureFoldState {
  *   found the call un-erasable and put it back -- inserting a message inside the prefix the
  *   provider had already cached, one request after every deduplication. Recording the decision is
  *   what makes "never rewrite already-sent bytes" hold across requests, not just within one.
- * - `state` is the fold's bookkeeping after the last processed prefix. Messages are immutable and
- *   keep their identity, so when the next request's history starts with the same objects the fold
- *   resumes from `processedCount` and touches only what was appended; a history that changed
+ * - `fold` is the fold's bookkeeping over the processed prefix. Messages keep their identity, so when the next request's
+ *   history starts with the same objects the fold resumes and touches only what was appended; a history that changed
  *   underneath (compaction, a branch) is folded from the start again, with the erasure record kept.
  */
 export class ToolFailureContextMemory {
 	/** @internal */
 	readonly omittedCallIds = new Set<string>();
-	/** @internal */
-	state = createFailureFoldState();
-	/** @internal The exact message objects `state` reflects, for the resume check. */
-	processed: AgentMessage[] = [];
+	/** @internal The sent mark of the request being folded: read by each step, set by `resumeFailureFold` before a fold. */
+	sentPrefixCount = 0;
+	/** @internal Each message is folded once, as the fold reaches it; the sent mark is the request's own. */
+	readonly fold: PrefixFold<AgentMessage, FailureFoldState> = new PrefixFold(
+		createFailureFoldState,
+		(state, _message, index, messages) =>
+			foldToolFailureContext(state, this.omittedCallIds, messages, index, index + 1, this.sentPrefixCount),
+	);
 }
 
 export function createToolFailureContextMemory(): ToolFailureContextMemory {
 	return new ToolFailureContextMemory();
 }
 
-/** Advance the fold over `messages[from..)`. Erasures land in `omittedCallIds`, which persists. */
+/** Advance the fold over `messages[from..to)`. Erasures land in `omittedCallIds`, which persists. */
 function foldToolFailureContext(
 	fold: FailureFoldState,
 	omittedCallIds: Set<string>,
-	messages: AgentMessage[],
+	messages: readonly AgentMessage[],
 	from: number,
+	to: number,
 	sentPrefixCount: number,
 ): void {
 	/**
@@ -1329,7 +1334,7 @@ function foldToolFailureContext(
 		latestSuccessfulByPayloadKey,
 	} = fold;
 
-	for (let index = from; index < messages.length; index++) {
+	for (let index = from; index < to; index++) {
 		const message = messages[index];
 		if (message.role === "assistant") {
 			activeDirectives.clear();
@@ -1507,7 +1512,7 @@ function foldToolFailureContext(
 			}
 		}
 	}
-	fold.processedCount = messages.length;
+	fold.processedCount = to;
 }
 
 const MAX_RESOLVED_OCCURRENCES = 64;
@@ -1670,21 +1675,11 @@ function resumeFailureFold(
 	if (!memory) {
 		const state = createFailureFoldState();
 		const omittedCallIds = new Set<string>();
-		foldToolFailureContext(state, omittedCallIds, messages, 0, sentPrefixCount);
+		foldToolFailureContext(state, omittedCallIds, messages, 0, messages.length, sentPrefixCount);
 		return { state, omittedCallIds };
 	}
-	let from = memory.processed.length;
-	let resumable = from <= messages.length;
-	for (let index = 0; resumable && index < from; index++) {
-		if (memory.processed[index] !== messages[index]) resumable = false;
-	}
-	if (!resumable) {
-		memory.state = createFailureFoldState();
-		from = 0;
-	}
-	foldToolFailureContext(memory.state, memory.omittedCallIds, messages, from, sentPrefixCount);
-	memory.processed = messages.slice();
-	return { state: memory.state, omittedCallIds: memory.omittedCallIds };
+	memory.sentPrefixCount = sentPrefixCount;
+	return { state: memory.fold.fold(messages), omittedCallIds: memory.omittedCallIds };
 }
 
 function analyzeToolFailureContext(

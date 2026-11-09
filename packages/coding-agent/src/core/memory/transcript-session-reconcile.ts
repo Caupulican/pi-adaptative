@@ -18,9 +18,9 @@ export async function reconcileAllSessions(
 	host: Pick<
 		CoordinatorHost,
 		| "ports"
-		| "noteInternalCause"
+		| "causes"
 		| "reconcileHeldSessions"
-		| "sessionTimestamps"
+		| "sessions"
 		| "dropOrphanedSessionRecords"
 		| "live"
 		| "reconcileSession"
@@ -29,12 +29,12 @@ export async function reconcileAllSessions(
 ): Promise<void> {
 	const sessions = await host.ports.reader.listSessions();
 	if (sessions.status !== "ok") {
-		host.noteInternalCause(`listing sessions: ${sessions.status}: ${sessions.reason}`);
+		host.causes.noteInternal(`listing sessions: ${sessions.status}: ${sessions.reason}`);
 		// A failed listing still reaches the recovered leaves held for reconciliation, by their own sessions.
 		await host.reconcileHeldSessions(new Set(), epoch);
 		return;
 	}
-	for (const session of sessions.sessions) host.sessionTimestamps.set(session.sessionId, session.timestamp ?? null);
+	for (const session of sessions.sessions) host.sessions.recordStamp(session.sessionId, session.timestamp ?? null);
 	// False only when the writer is gone or the drop was refused (the coordinator stopped).
 	const listed = new Set(sessions.sessions.map((s) => s.sessionId));
 	if (!(await host.dropOrphanedSessionRecords(listed, sessions.coverage))) return;
@@ -48,14 +48,14 @@ export async function reconcileAllSessions(
 }
 
 export async function reconcileHeldSessionsOf(
-	host: Pick<CoordinatorHost, "scheduler" | "parked" | "live" | "reconcileSession">,
+	host: Pick<CoordinatorHost, "run" | "holds" | "live" | "reconcileSession">,
 	visited: ReadonlySet<string>,
 	epoch: number,
 ): Promise<void> {
-	const scheduler = host.scheduler;
+	const scheduler = host.run.scheduler;
 	if (!scheduler) return;
 	const sessions = new Set<string>();
-	for (const [id, hold] of host.parked) {
+	for (const [id, hold] of host.holds.parked) {
 		if (hold.scope !== "reconciliation") continue;
 		const sessionId = scheduler.get(id)?.sessionId;
 		if (sessionId !== undefined && !visited.has(sessionId)) sessions.add(sessionId);
@@ -67,12 +67,12 @@ export async function reconcileHeldSessionsOf(
 }
 
 export async function reconcileSessionOf(
-	host: Pick<CoordinatorHost, "reconcileSessionRead" | "scheduler" | "live" | "parked">,
+	host: Pick<CoordinatorHost, "reconcileSessionRead" | "run" | "live" | "holds">,
 	sessionId: string,
 	epoch: number,
 ): Promise<void> {
 	const unread = await host.reconcileSessionRead(sessionId, epoch);
-	const scheduler = host.scheduler;
+	const scheduler = host.run.scheduler;
 	if (!host.live(epoch) || !scheduler) return;
 	const reason =
 		unread === undefined
@@ -81,24 +81,23 @@ export async function reconcileSessionOf(
 					unread,
 					"a recovered summary job waits for its session to be read again, so the budget it had under capture version 1 is adopted first",
 				);
-	for (const [id, hold] of host.parked) {
+	for (const [id, hold] of host.holds.parked) {
 		if (hold.scope !== "reconciliation" || scheduler.get(id)?.sessionId !== sessionId) continue;
-		host.parked.set(id, { scope: "reconciliation", reason });
+		host.holds.park(id, { scope: "reconciliation", reason });
 	}
 }
 
 export async function reconcileSessionReadOf(
 	host: Pick<
 		CoordinatorHost,
-		| "scheduler"
+		| "run"
 		| "live"
 		| "forgottenSessions"
 		| "ports"
 		| "invalidateSession"
-		| "noteInternalCause"
-		| "runtime"
+		| "causes"
+		| "sessions"
 		| "cursors"
-		| "revocationDue"
 		| "revokeDeadCoverage"
 		| "restartDiscovery"
 		| "enumerateLeaves"
@@ -107,7 +106,7 @@ export async function reconcileSessionReadOf(
 	sessionId: string,
 	epoch: number,
 ): Promise<string | undefined> {
-	const scheduler = host.scheduler;
+	const scheduler = host.run.scheduler;
 	if (!host.live(epoch) || !scheduler || host.forgottenSessions.has(sessionId)) return;
 	const probe = await host.ports.reader.listLineageSpans({ sessionId, fromIndex: 0, maxSpans: 1 });
 	if (!host.live(epoch)) return;
@@ -116,10 +115,10 @@ export async function reconcileSessionReadOf(
 		return;
 	}
 	if (probe.status !== "ok") {
-		host.noteInternalCause(`reading ${sessionId}: ${probe.status}: ${probe.reason}`);
+		host.causes.noteInternal(`reading ${sessionId}: ${probe.status}: ${probe.reason}`);
 		return `${probe.status}: ${probe.reason}`;
 	}
-	let runtime = host.runtime.get(sessionId);
+	let runtime = host.sessions.get(sessionId);
 	if (!runtime) {
 		const cursor = host.cursors.get(sessionId);
 		runtime = {
@@ -129,14 +128,14 @@ export async function reconcileSessionReadOf(
 			verifiedStamp: undefined,
 			backpressured: false,
 		};
-		host.runtime.set(sessionId, runtime);
+		host.sessions.put(sessionId, runtime);
 	}
-	runtime.total = probe.total;
+	host.sessions.setTotal(runtime, probe.total);
 	const stamp = lineageStamp(probe);
 	// Taken before the revocation, so the read that rediscovers the session after a change is not forced again: it
 	// starts from the verification this read made ({@link restartDiscovery}) and verifies again only if the
 	// lineage moved since.
-	const due = host.revocationDue.delete(sessionId);
+	const due = host.sessions.unmarkDue(sessionId);
 	if (due || !vouchesFor(runtime, probe)) {
 		// The lineage moved (a branch switch, a rewrite): keep what is still live, revoke the rest. A change
 		// rediscovers the session itself and answers that read's cause here; an unreadable lineage is not judged
@@ -147,11 +146,11 @@ export async function reconcileSessionReadOf(
 		} catch (error) {
 			// A store write that threw left the judgment unmade, as an unreadable verification does: the revocation
 			// stays due for the next read (the mailbox keeps the error as the internal cause).
-			if (due) host.revocationDue.add(sessionId);
+			if (due) host.sessions.markDue(sessionId);
 			throw error;
 		}
 		if (dead.kind === "unreadable") {
-			if (due) host.revocationDue.add(sessionId);
+			if (due) host.sessions.markDue(sessionId);
 			return dead.cause;
 		}
 		if (dead.kind === "changed") return;
@@ -162,7 +161,7 @@ export async function reconcileSessionReadOf(
 	} else if (runtime.verifiedDigest === probe.lineageDigest) {
 		// The probe saw exactly the verified lineage, so its stamp names that lineage from now on: a pure append
 		// keeps the stamp and needs no verification.
-		runtime.verifiedStamp = stamp;
+		host.sessions.setStamp(runtime, stamp);
 	}
 	const unread = await host.enumerateLeaves(sessionId, runtime, epoch, stamp);
 	await host.certifyCursor(sessionId, runtime, epoch);
@@ -179,7 +178,7 @@ export async function reconcileSessionReadOf(
  * the catalog `indexed` was listed from, never a later snapshot that may describe another one.
  */
 export async function dropOrphanedRecordsOf(
-	host: Pick<CoordinatorHost, "catalog" | "scheduler" | "dormant" | "dropSessionRecords" | "deferStoreWork" | "epoch">,
+	host: Pick<CoordinatorHost, "catalog" | "run" | "dormant" | "dropSessionRecords" | "deferStoreWork">,
 	indexed: ReadonlySet<string>,
 	coverage: TranscriptCoverage,
 ): Promise<boolean> {
@@ -200,35 +199,35 @@ export async function dropOrphanedRecordsOf(
 	}
 	const held = new Set<string>([
 		...host.catalog.anchoredSessionIds(),
-		...(host.scheduler?.spentSessionIds() ?? []),
+		...(host.run.scheduler?.spentSessionIds() ?? []),
 		...[...host.dormant.values()].map((node) => node.sessionId),
 	]);
 	const orphans = new Set([...held].filter((sessionId) => !indexed.has(sessionId) && !referenced.has(sessionId)));
 	if (orphans.size === 0) return true;
 	const dropped = await host.dropSessionRecords(orphans);
 	// A drop the store could not write goes to the next discovery after the store backoff; this one goes on.
-	if (dropped !== true && dropped !== false) host.deferStoreWork(dropped.reason, { discover: true }, host.epoch);
+	if (dropped !== true && dropped !== false) host.deferStoreWork(dropped.reason, { discover: true }, host.run.epoch);
 	return dropped !== false;
 }
 
 export function restartDiscoveryOf(
-	host: Pick<CoordinatorHost, "cursors">,
+	host: Pick<CoordinatorHost, "cursors" | "sessions">,
 	sessionId: string,
 	runtime: SessionRuntime,
 	verified: VerifiedLineage | undefined,
 ): void {
 	const cursor = host.cursors.get(sessionId);
-	runtime.next = { fromIndex: cursor?.coveredSpanCount ?? 0, ordinal: cursor?.nextOrdinal ?? 0 };
-	runtime.backpressured = false;
-	runtime.verifiedDigest = verified ? verified.digest : cursor?.lineageDigest;
-	runtime.verifiedStamp = verified?.stamp;
+	host.sessions.advance(runtime, { fromIndex: cursor?.coveredSpanCount ?? 0, ordinal: cursor?.nextOrdinal ?? 0 });
+	host.sessions.backpressure(runtime, false);
+	host.sessions.setDigest(runtime, verified ? verified.digest : cursor?.lineageDigest);
+	host.sessions.setStamp(runtime, verified?.stamp);
 }
 
 export function abortSessionJobs(
-	host: Pick<CoordinatorHost, "scheduler" | "inFlight" | "abortDeniedInputs">,
+	host: Pick<CoordinatorHost, "run" | "inFlight" | "abortDeniedInputs">,
 	sessionId: string,
 ): void {
-	const scheduler = host.scheduler;
+	const scheduler = host.run.scheduler;
 	if (!scheduler) return;
 	const ids = new Set(scheduler.snapshot().flatMap((job) => (job.sessionId === sessionId ? [job.id] : [])));
 	for (const entry of host.inFlight.values()) if (ids.has(entry.jobId)) entry.controller.abort();
@@ -239,10 +238,8 @@ export function abortSessionJobs(
  * Abort running work of OTHER sessions that is built on denied nodes (a parent over a child that consulted a forgotten
  * session, a re-admission of such a node): its inputs are denied now, so it must not reach a model again.
  */
-export function abortDeniedJobInputs(
-	host: Pick<CoordinatorHost, "scheduler" | "inFlight" | "catalog" | "nodeDenied">,
-): void {
-	const scheduler = host.scheduler;
+export function abortDeniedJobInputs(host: Pick<CoordinatorHost, "run" | "inFlight" | "catalog" | "nodeDenied">): void {
+	const scheduler = host.run.scheduler;
 	if (!scheduler) return;
 	for (const entry of host.inFlight.values()) {
 		const job = scheduler.get(entry.jobId);

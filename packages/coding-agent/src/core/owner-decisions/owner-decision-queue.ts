@@ -126,6 +126,17 @@ export function ownerDecisionQueue(inputs: OwnerDecisionInputs): readonly OwnerD
 	return items.sort(compareItems);
 }
 
+/**
+ * Whether one owner message answers a worker question recorded at `askedAt`: the message must be recorded after the question
+ * and, when a message is being processed (`processingAt`), before it. The return brief passes its arming message, so the
+ * message that brought the owner back never answers the questions the brief reports; `/status` passes the owner message of
+ * the live turn, so the message being processed does not answer either. With no message being processed, every later owner
+ * message answers.
+ */
+export function ownerMessageAnswers(askedAt: number, messageAt: number, processingAt: number | undefined): boolean {
+	return messageAt > askedAt && (processingAt === undefined || messageAt < processingAt);
+}
+
 /** The seen state: the first time each waiting call was shown to the owner, bounded to the keys still waiting. */
 export interface OwnerDecisionSeenState {
 	readonly v: 1;

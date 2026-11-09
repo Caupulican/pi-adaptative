@@ -111,11 +111,12 @@ export class PlanResultGates {
 
 	/**
 	 * Starts the reviews the open plans' current facts call for and drops the gates they no longer name. Runs at the start
-	 * of each drain pass, so a settled result is reviewed once it settles and a restart re-asks what still gates a step.
+	 * of each drain pass, so a settled result is reviewed once it settles and a restart re-asks what still gates a step. With
+	 * no System One bound nothing is asked, but the gates still run their pruning: a gate whose facts moved (a revised step,
+	 * a new outcome) never gates a step, whether or not System One answers.
 	 */
 	refresh(snapshot: TaskRuntimeProjection, reportOf: PacketReport): void {
 		const engine = this.deps.engine();
-		if (!engine) return;
 		for (const [planId, plan] of Object.entries(snapshot.plans)) {
 			if (plan.closed || isPlanFromNewerBuild(plan.record)) continue;
 			const record = plan.record;
@@ -162,7 +163,7 @@ export class PlanResultGates {
 			for (const key of [...memo.keys()]) if (key.startsWith(`${planId}|`)) memo.delete(key);
 	}
 
-	private refreshDependents(engine: OperationEffectEngine, scope: PlanScope, predecessorId: string): void {
+	private refreshDependents(engine: OperationEffectEngine | undefined, scope: PlanScope, predecessorId: string): void {
 		const { snapshot, plan, record, planId, live } = scope;
 		const runtime = plan.nodes[predecessorId];
 		if (!runtime?.settled || runtime.held) return;
@@ -188,6 +189,11 @@ export class PlanResultGates {
 			if (gates.get(key)?.basis !== basis) group.push({ node, key, basis });
 		}
 		if (group.length === 0) return;
+		// Without System One nothing is asked: a gate whose basis moved is dropped, so no superseded answer gates the step.
+		if (engine === undefined) {
+			for (const { key } of group) gates.delete(key);
+			return;
+		}
 		const capped = dependents.length - reviewed.length;
 		const facts =
 			capped > 0 ? [`review_cap: ${capped} more dependents of step ${predecessorId} released without review`] : [];
@@ -234,7 +240,7 @@ export class PlanResultGates {
 		this.deps.drain();
 	}
 
-	private refreshFindings(engine: OperationEffectEngine, scope: PlanScope, node: PlanNodeSpec): void {
+	private refreshFindings(engine: OperationEffectEngine | undefined, scope: PlanScope, node: PlanNodeSpec): void {
 		const { snapshot, plan, record, planId, live } = scope;
 		const runtime = plan.nodes[node.id];
 		if (runtime?.settled || runtime?.held) return;
@@ -254,6 +260,10 @@ export class PlanResultGates {
 		const basis = `${memberIds.join(",")}@${node.since}`;
 		live.add(node.id);
 		if (gates.get(node.id)?.basis === basis) return;
+		if (engine === undefined) {
+			gates.delete(node.id);
+			return;
+		}
 		const pairs = this.pairsOf(scope, node, basis);
 		if (pairs.length === 0) {
 			gates.delete(node.id);

@@ -6,7 +6,6 @@ import { cleanupSessionResources } from "@caupulican/pi-ai/session-resources";
 import { getAgentDir, VERSION, VERSION_SOURCE_AVAILABLE } from "../config.ts";
 import type { Agent } from "../kernel/agent.ts";
 import type { CompactionResult, CompactionSettings } from "../kernel/compaction/compaction.ts";
-import type { AgentContext } from "../kernel/index.ts";
 import { messageRevision } from "../kernel/message-revision.ts";
 import type { CustomMessage } from "../kernel/messages.ts";
 import { classifyFailure } from "../kernel/reliability/index.ts";
@@ -1205,6 +1204,7 @@ export class AgentSession {
 			getSettingsManager: () => this.settingsManager,
 			getWorktreeSyncEnginePorts: () => this._worktreeSyncEnginePorts,
 			getTimers: () => config.timers,
+			readMachine: config.machineFacts,
 			getResourceLoader: () => this._resourceLoader,
 			getActiveOrchestrationProfile: () => config.orchestrationProfile,
 			getModelRegistry: () => this._modelRegistry,
@@ -2147,7 +2147,7 @@ export class AgentSession {
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			getLaneWorkerRefusal: (selection) => this.getLaunchedWorkerLaneRefusal(selection),
-			createAgentContextSnapshot: () => this._createAgentContextSnapshot(),
+			createAgentContextSnapshot: () => this.agent.createContextSnapshot(),
 			getContextUsage: () => this.getContextUsage(),
 			isStreaming: () => this.isStreaming,
 			isCompacting: () => this.isCompacting,
@@ -2542,7 +2542,7 @@ export class AgentSession {
 		this._installAgentToolHooks();
 		this._providerRequestRuntime.install();
 		this._providerRequestRuntime.installTurnRefresh(
-			() => this._createAgentContextSnapshot(),
+			() => this.agent.createContextSnapshot(),
 			() => this._terminalHandoffs.flushProviderBoundary(),
 		);
 
@@ -2968,14 +2968,6 @@ export class AgentSession {
 		const restored = this._skillCurator.restoreSkill(name);
 		if (restored) this._resourceLoader.refreshSkills?.();
 		return restored;
-	}
-
-	private _createAgentContextSnapshot(): AgentContext {
-		return {
-			systemPrompt: this.agent.state.systemPrompt,
-			messages: this.agent.state.messages.slice(),
-			tools: this.agent.state.tools.slice(),
-		};
 	}
 
 	/** Reconstruct trusted active verification IDs at the goal-execution boundary. */

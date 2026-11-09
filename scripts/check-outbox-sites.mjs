@@ -1,7 +1,9 @@
 #!/usr/bin/env node
 /**
- * Outbox call-site ratchet: every call of an outward transport in the coding-agent source is declared in
- * scripts/outbox-sites.json by its file, transport token and enclosing function. An undeclared call fails, and a declared
+ * Outbox call-site ratchet: every call of a pinned outward transport in the coding-agent source is declared in
+ * scripts/outbox-sites.json by its file, transport token and enclosing function. The pinned set is TRANSPORT_TOKENS, each
+ * matched in its direct call form and its optional form (`name?.(`); a call reached through another name (a destructured
+ * alias) is outside the set, so a new transport joins the set by adding its token. An undeclared call fails, and a declared
  * function that no longer makes the call fails too, so the list pins the present set. Each entry also pins how many calls
  * its function may make (`count`). A declared site without a `reason` is an adopter of kernel/outbox.ts: its function must
  * run `claimThenEffect(` with a literal object whose `effect:` callback holds every one of those calls (`effectCount`
@@ -21,8 +23,21 @@ const scopeDirectory = join(root, "packages/coding-agent/src");
 const sitesPath = join(root, "scripts/outbox-sites.json");
 const adopterCall = "claimThenEffect(";
 
-/** The transport tokens. `function appendOutwardDraftReleased(` is a declaration, not a call, and is skipped. */
-const TRANSPORT_TOKENS = ["this.sendParts(", "deps.deliver(", "appendOutwardDraftReleased(", "options.notify("];
+/**
+ * The transport tokens: each is a call. `function appendOutwardDraftReleased(` is a declaration, not a call, and is skipped.
+ * `provider.send(` is the channel transport every owner push, control reply and reply part goes through; `deliverNotes(`
+ * is the parent-input port a note or a host event is delivered through.
+ */
+const TRANSPORT_TOKENS = [
+	"sendReplyParts(",
+	"deps.deliver(",
+	"appendOutwardDraftReleased(",
+	"options.notify(",
+	"provider.send(",
+	"this.deps.deliverNotes(",
+];
+/** The forms a transport token is matched in: the direct call and the optional call `name?.(`. */
+const callForms = (transport) => [transport, transport.replace(/\($/, "?.(")];
 
 /** A class method (at most one tab of indent) or a top-level function: `name(` opens the line. */
 const FUNCTION_LINE =
@@ -227,19 +242,21 @@ for (const path of filesScanned) {
 	lines.forEach((line, index) => {
 		if (isCommentLine(line)) return;
 		for (const transport of TRANSPORT_TOKENS) {
-			for (let at = line.indexOf(transport); at !== -1; at = line.indexOf(transport, at + transport.length)) {
-				if (/\bfunction\s+$/.test(line.slice(0, at))) continue;
-				const declarationIndex = enclosingDeclaration(lines, index);
-				const enclosing = declarationIndex === -1 ? "<module>" : declaredName(lines[declarationIndex]);
-				resolved.push({
-					file,
-					line: index + 1,
-					transport,
-					enclosing,
-					source,
-					declarationIndex,
-					offset: source.lineStarts[index] + at,
-				});
+			for (const form of callForms(transport)) {
+				for (let at = line.indexOf(form); at !== -1; at = line.indexOf(form, at + form.length)) {
+					if (/\bfunction\s+$/.test(line.slice(0, at))) continue;
+					const declarationIndex = enclosingDeclaration(lines, index);
+					const enclosing = declarationIndex === -1 ? "<module>" : declaredName(lines[declarationIndex]);
+					resolved.push({
+						file,
+						line: index + 1,
+						transport,
+						enclosing,
+						source,
+						declarationIndex,
+						offset: source.lineStarts[index] + at,
+					});
+				}
 			}
 		}
 	});

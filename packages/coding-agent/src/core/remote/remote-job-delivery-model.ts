@@ -11,9 +11,15 @@
  *
  * Turns: a placed job's id holds its turn (`placedJobId`), so each turn is a job of its own with its own record and executor record.
  * The placer prunes an applied record after its retention; a placement made again after that is the next turn (`replace`), with a new
- * id, a new record and a fresh executor admission. The executor's record of the spent turn keeps its outbox until the placer
- * acknowledges it: its undrained outcome is a leftover (`leftover`), sent under its own turn, and the placer acknowledges it as absent
- * (`leftover.deliver`) without applying it to the new turn.
+ * id, a new record and a fresh executor admission. The turn is durable: the placer's turn ledger (`JobStore.raisePlacementTurn`) holds
+ * it after the record and the lane binding are released, so `replace` is the only way the turn moves. The executor's record of the spent
+ * turn keeps its outbox until the placer acknowledges it: its undrained outcome is a leftover (`leftover`), sent under its own turn, and
+ * the placer acknowledges it as absent (`leftover.deliver`) without applying it to the new turn.
+ *
+ * Ordering: the executor handles every frame of one peer in arrival order, one at a time (`JobTransport.receive`). An offer is first
+ * received (`offer.deliver`, the job is then being decided) and decided (`offer.decide`: admitted, replayed or refused); the frames
+ * behind it, a stop, an ack or a resume, wait until the decision is made. A stop therefore always finds the job an earlier offer
+ * admitted. The variant `stop-overtakes-offer` lets a stop pass a pending decision, and then the stop is handled against no record.
  *
  * Simplifications, stated so the result is read at its real strength: progress frames are not modelled (they carry no outcome);
  * the link keeps order within each direction and loses everything in flight on a drop; a refusal is one token, whatever its
@@ -22,6 +28,18 @@
  * end and for the link to be quiet, since the retention outlasts both (time itself is not modelled). Turns are bounded to two (one
  * re-placement). A resume names the current turn's record only: a leftover's resume is refused as absent by the placer, which changes
  * nothing on a terminal record, so it is not modelled.
+ *
+ * Connections: the model's `link.up` waits for a pending decision (`!s.deciding`), so the resume names the job that decision admitted. The
+code writes the resume after the peer's queued frames (`JobTransport.up`) and lets a placer frame of the new connection queue behind the
+decision; the model does not explore that frame's interleaving with the decision, only the resume's. A placer refusal names its turn
+(`refuse:<turn>`), a correction the model needed: a refusal of a spent turn names the spent job id, so it is inert for the current turn.
+
+Not modelled (the code has them; the checker sees none of them): the cancel markers beside a record this build cannot read
+ * (`RecordDir.cancel`, `honorCancelMark`, `endMarkedPlacement`); unreadable record files and their room bounds
+ * (`unreadableHoldingRoom`); the lane book's release of ended lanes (retention) and the lane-end retry alarm (`retryApply`), whose
+ * fairness is the `reconcile.apply` action; a stop whose write failed and is applied again at the next flush (`JobHost.heldStops`);
+ * a placement's abandoned lanes (`endAbandonedPlacements`); the executor's deadline claim (`scan`, time is not modelled); the
+ * placer's pending room held by other sessions (`pendingPlacedCount`); the ledger's growth (one small file per placement key).
  */
 
 import type { ModelAction, ModelSpec } from "../../kernel/machine-model.ts";
@@ -38,7 +56,7 @@ const MAX_GENERATION = 2;
 /**
  * One placed job. Durable: what a process keeps across a crash. Volatile: what a crash of either side loses with the connection.
  * `toExec` and `toPlacer` are the frames in flight in each direction, oldest first. Tokens: placer to executor `offer`, `cancel`,
- * `ack` (the current turn), `ack:old` (a spent turn's leftover), `refuse`, `resume:entry` or `resume:empty`; executor to placer `accept`,
+ * `ack` (the current turn), `ack:old` (a spent turn's leftover), `refuse:<turn>`, `resume:entry` or `resume:empty`; executor to placer `accept`,
  * `refuse`, `refuse:lost`, `outcome:<A|B>:<turn>`, `resume:entry` or `resume:empty`. An outcome frame names the turn of the record that
  * sent it.
  */
@@ -75,6 +93,13 @@ export interface DeliveryState {
 	/** An outcome was written after the placer had acknowledged one: the send step ran without `unacked`. */
 	readonly sentAfterAck: boolean;
 	readonly ecancel: boolean;
+	/**
+	 * The executor received an offer and has not decided it yet (`JobHost.offer` awaits its checkouts). The frames behind it wait, unless
+	 * the variant lets a stop pass. A crash of the executor loses the decision; a link drop does not.
+	 */
+	readonly deciding: boolean;
+	/** A stop frame was handled for the current turn (`cancel.deliver`, `refuse.stop`): the history the stop invariant reads. */
+	readonly stopHandled: boolean;
 	/** The running job was claimed by a runner process that is gone: a later runner's scan interrupts it. */
 	readonly stale: boolean;
 	/**
@@ -115,6 +140,8 @@ export interface DeliveryFlags {
 	 * and an outcome is matched by id alone (no turn check on the frame).
 	 */
 	readonly turnNotInId: boolean;
+	/** A stop frame is handled while an offer is still being decided: the stop reaches no record, and the decision admits the job anyway. */
+	readonly stopsOvertake: boolean;
 }
 
 const BASE: DeliveryFlags = {
@@ -131,6 +158,7 @@ const BASE: DeliveryFlags = {
 	resumeIgnoresEnded: false,
 	absentSilent: false,
 	turnNotInId: false,
+	stopsOvertake: false,
 };
 
 const settled = (p: PlacerEntry): boolean => p === "terminal" || p === "ended" || p === "refused";
@@ -141,6 +169,10 @@ const isResume = (token: string): boolean => token.startsWith("resume");
 const outcomeOf = (token: string): Outcome => (token.split(":")[1] === "A" ? "A" : "B");
 /** The turn an outcome frame was written for. */
 const turnOf = (token: string): number => Number(token.split(":")[2]);
+/** A placer's refusal that stops the executor's job: `refuse:<turn>`, the turn of the record it refuses. */
+const isStopRefusal = (token: string | undefined): boolean => token?.startsWith("refuse:") ?? false;
+/** The turn a placer refusal names. A refusal of a spent turn is inert for the current one: its job id is the spent turn's. */
+const turnOfRefusal = (token: string): number => Number(token.split(":")[1]);
 
 /** The state a job starts in: nothing placed, no link, a live runner. The kind is fixed for the life of the job. */
 function initialState(kind: "job" | "ask"): DeliveryState {
@@ -162,6 +194,8 @@ function initialState(kind: "job" | "ask"): DeliveryState {
 		unacked: false,
 		sentAfterAck: false,
 		ecancel: false,
+		deciding: false,
+		stopHandled: false,
 		stale: false,
 		leftover: false,
 		loSent: false,
@@ -218,6 +252,7 @@ function deliveryActions(flags: DeliveryFlags): ModelAction<DeliveryState>[] {
 					pOutcome: "-",
 					pOutcomeGen: 0,
 					firstOutcome: "-",
+					stopHandled: false,
 				};
 				if (flags.turnNotInId) return fresh;
 				const spent = s.e === "terminal" && s.unacked;
@@ -253,29 +288,19 @@ function deliveryActions(flags: DeliveryFlags): ModelAction<DeliveryState>[] {
 			apply: (s) => ({ ...s, offered: true, toExec: [...s.toExec, "offer"] }),
 		},
 		{
-			// `offer.deliver`: `JobHost.offer`. A new offer is admitted or refused. An offer for a record the executor holds is answered
-			// `accept` (a running or admitted job, or a finished one whose outcome is still held, is resent by the pump); a finished job whose
-			// outcome the placer acknowledged is refused, so the placer never waits for an outcome that will not come.
+			// `offer.deliver`: `JobTransport.receive` takes the offer off the link in arrival order and starts deciding it. The frames behind it
+			// wait until `offer.decide` has run.
 			name: "offer.deliver",
 			actor: "executor",
-			guard: (s) => s.up && s.toExec[0] === "offer",
-			apply: (s) => {
-				const rest = { ...s, toExec: s.toExec.slice(1) };
-				if (s.e !== "none") {
-					if (s.e === "terminal" && !s.unacked) return { ...rest, toPlacer: [...s.toPlacer, "refuse"] };
-					return {
-						...rest,
-						admits: flags.replayAdmits ? s.admits + 1 : s.admits,
-						toPlacer: [...s.toPlacer, "accept"],
-					};
-				}
-				const refusal = { ...rest, toPlacer: [...s.toPlacer, "refuse"] };
-				if (s.kind === "ask" && !flags.askAdmits) return refusal;
-				return [
-					{ ...rest, e: "admitted", eGen: s.gen, admits: s.admits + 1, toPlacer: [...s.toPlacer, "accept"] },
-					refusal,
-				];
-			},
+			guard: (s) => s.up && !s.deciding && s.toExec[0] === "offer",
+			apply: (s) => ({ ...s, deciding: true, toExec: s.toExec.slice(1) }),
+		},
+		{
+			// `offer.decide`: `JobHost.offer` once the offer's checkouts are read: admitted, replayed or refused (`decideOffer`).
+			name: "offer.decide",
+			actor: "executor",
+			guard: (s) => s.deciding,
+			apply: (s) => decideOffer(s, flags),
 		},
 		{
 			// `accept.deliver`: `job.accept` moves a pending record to accepted (`JobTransport.receive`).
@@ -336,7 +361,7 @@ function deliveryActions(flags: DeliveryFlags): ModelAction<DeliveryState>[] {
 			// `ack.deliver`: `job.ack` trims the executor's outbox up to the acknowledged frame (`JobHost.ack`); `ack:old` trims a leftover.
 			name: "ack.deliver",
 			actor: "executor",
-			guard: (s) => s.up && (s.toExec[0] === "ack" || s.toExec[0] === "ack:old"),
+			guard: (s) => s.up && !s.deciding && (s.toExec[0] === "ack" || s.toExec[0] === "ack:old"),
 			apply: (s) => {
 				const rest = { ...s, toExec: s.toExec.slice(1) };
 				if (s.toExec[0] === "ack:old") return { ...rest, leftover: false, loSent: false };
@@ -347,21 +372,29 @@ function deliveryActions(flags: DeliveryFlags): ModelAction<DeliveryState>[] {
 			// `cancel.deliver`: `job.cancel` stops an admitted or running job (`JobHost.cancel`, `cancelExecuted`).
 			name: "cancel.deliver",
 			actor: "executor",
-			guard: (s) => s.up && s.toExec[0] === "cancel",
-			apply: (s) => ({ ...s, ecancel: s.ecancel || live(s.e), toExec: s.toExec.slice(1) }),
+			guard: (s) => s.up && s.toExec[0] === "cancel" && (!s.deciding || flags.stopsOvertake),
+			apply: (s) => ({ ...s, ecancel: s.ecancel || live(s.e), stopHandled: true, toExec: s.toExec.slice(1) }),
 		},
 		{
 			// `refuse.stop`: a placer refusal stops the job here: the transport's `job.refuse` path with no placed record names it.
 			name: "refuse.stop",
 			actor: "executor",
-			guard: (s) => s.up && s.toExec[0] === "refuse",
-			apply: (s) => ({ ...s, ecancel: s.ecancel || live(s.e), toExec: s.toExec.slice(1) }),
+			guard: (s) => s.up && isStopRefusal(s.toExec[0]) && (!s.deciding || flags.stopsOvertake),
+			apply: (s) => {
+				const current = turnOfRefusal(s.toExec[0]) === s.gen;
+				return {
+					...s,
+					ecancel: current ? s.ecancel || live(s.e) : s.ecancel,
+					stopHandled: current || s.stopHandled,
+					toExec: s.toExec.slice(1),
+				};
+			},
 		},
 		{
 			// `resume.deliver`: the placer's resume reaches the executor; an entry for a job it does not hold is refused as lost.
 			name: "resume.deliver",
 			actor: "executor",
-			guard: (s) => s.up && s.toExec[0] !== undefined && isResume(s.toExec[0]),
+			guard: (s) => s.up && !s.deciding && s.toExec[0] !== undefined && isResume(s.toExec[0]),
 			apply: (s) => {
 				const entry = s.toExec[0] === "resume:entry";
 				return {
@@ -381,10 +414,10 @@ function deliveryActions(flags: DeliveryFlags): ModelAction<DeliveryState>[] {
 			apply: (s) => {
 				const rest = { ...s, toPlacer: s.toPlacer.slice(1) };
 				if (s.toPlacer[0] !== "resume:entry") return rest;
-				if (s.p === "none" || s.pruned) return { ...rest, toExec: [...rest.toExec, "refuse"] };
+				if (s.p === "none" || s.pruned) return { ...rest, toExec: [...rest.toExec, `refuse:${s.gen}`] };
 				if (s.applied === 0 && s.p !== "ended") return rest;
 				if (s.pOutcome !== "-") return { ...rest, toExec: [...rest.toExec, "ack"] };
-				return flags.resumeIgnoresEnded ? rest : { ...rest, toExec: [...rest.toExec, "refuse"] };
+				return flags.resumeIgnoresEnded ? rest : { ...rest, toExec: [...rest.toExec, `refuse:${s.gen}`] };
 			},
 		},
 		{
@@ -471,7 +504,13 @@ function deliveryActions(flags: DeliveryFlags): ModelAction<DeliveryState>[] {
 			// so the prune waits for the executor's job to end (the outbox may still hold its outcome) and for the link to be quiet.
 			name: "prune.applied",
 			actor: "placer",
-			guard: (s) => s.applied >= 1 && !s.pruned && !live(s.e) && s.toExec.length === 0 && s.toPlacer.length === 0,
+			guard: (s) =>
+				s.applied >= 1 &&
+				!s.pruned &&
+				!live(s.e) &&
+				!s.deciding &&
+				s.toExec.length === 0 &&
+				s.toPlacer.length === 0,
 			apply: (s) => ({ ...s, pruned: true }),
 		},
 		{
@@ -487,7 +526,9 @@ function deliveryActions(flags: DeliveryFlags): ModelAction<DeliveryState>[] {
 			// (`JobTransport.up`). The placer's entry is its accepted job; the executor's is a job it still holds or has unacknowledged.
 			name: "link.up",
 			actor: "link",
-			guard: (s) => !s.up,
+			// The connection's resume is computed after the frames queued from the peer (`JobTransport.up`): a decision still pending from the
+			// last connection admits its job first, so the resume names it and a stop that was lost with that connection is sent again.
+			guard: (s) => !s.up && !s.deciding,
 			apply: (s) => ({
 				...s,
 				up: true,
@@ -502,6 +543,24 @@ function deliveryActions(flags: DeliveryFlags): ModelAction<DeliveryState>[] {
 	if (flags.secondFinish) actions.push(secondFinishAction());
 	if (!flags.turnNotInId) actions.push(leftoverSendAction(), leftoverDeliverAction(flags));
 	return actions;
+}
+
+/**
+ * `offer.decide`: `JobHost.offer` once the offer is received and its checkouts are read. A record the executor holds answers the offer as a
+ * resend would: `accept` for a running or admitted job, or a finished one whose outcome is still held (the pump resends it); a finished job
+ * whose outcome the placer acknowledged is refused, so the placer never waits for an outcome that will not come. A new offer is admitted or
+ * refused (an ask is never admitted). The reply leaves only while the connection is up; the admission does not depend on it.
+ */
+function decideOffer(s: DeliveryState, flags: DeliveryFlags): DeliveryState | readonly DeliveryState[] {
+	const decided: DeliveryState = { ...s, deciding: false };
+	const reply = (token: string): string[] => (s.up ? [...s.toPlacer, token] : [...s.toPlacer]);
+	if (s.e !== "none") {
+		if (s.e === "terminal" && !s.unacked) return { ...decided, toPlacer: reply("refuse") };
+		return { ...decided, admits: flags.replayAdmits ? s.admits + 1 : s.admits, toPlacer: reply("accept") };
+	}
+	const refusal: DeliveryState = { ...decided, toPlacer: reply("refuse") };
+	if (s.kind === "ask" && !flags.askAdmits) return refusal;
+	return [{ ...decided, e: "admitted", eGen: s.gen, admits: s.admits + 1, toPlacer: reply("accept") }, refusal];
 }
 
 /** A placed job the placer can still end: nothing applied yet, and not already ended, refused or settled. */
@@ -548,7 +607,10 @@ function leftoverDeliverAction(flags: DeliveryFlags): ModelAction<DeliveryState>
 /** The crash of either side: what the process held is lost with the connection; a runner's crash ends its runner role. */
 const CRASHES = [
 	{ actor: "placer", volatile: { up: false, offered: false, toExec: [], toPlacer: [] } },
-	{ actor: "executor", volatile: { up: false, runner: false, sent: false, loSent: false, toExec: [], toPlacer: [] } },
+	{
+		actor: "executor",
+		volatile: { up: false, runner: false, sent: false, loSent: false, deciding: false, toExec: [], toPlacer: [] },
+	},
 ] as const;
 
 function durableKeys(flags: DeliveryFlags): (keyof DeliveryState)[] {
@@ -563,6 +625,7 @@ function durableKeys(flags: DeliveryFlags): (keyof DeliveryState)[] {
 		"unacked",
 		"sentAfterAck",
 		"ecancel",
+		"stopHandled",
 		"stale",
 		"leftover",
 		...placer,
@@ -600,6 +663,7 @@ export function buildDeliveryModel(
 				sent: false,
 				offered: false,
 				loSent: false,
+				deciding: false,
 				toExec: [],
 				toPlacer: [],
 				...(flags.recordVolatile ? { ...placerVolatile } : {}),
@@ -638,6 +702,12 @@ export function buildDeliveryModel(
 				brokenVariant: "record-volatile",
 			},
 			{ name: "ack-never-resent", holds: (s) => !s.sentAfterAck, brokenVariant: "resend-after-ack" },
+			{
+				// A stop handled for a turn reaches the job it stops: no job admitted under the turn runs on without it.
+				name: "stop-after-offer-reaches-job",
+				holds: (s) => !(s.stopHandled && live(s.e) && !s.ecancel),
+				brokenVariant: "stop-overtakes-offer",
+			},
 		],
 		liveness: [
 			{
@@ -654,6 +724,7 @@ export function buildDeliveryModel(
 					"resumePlaced",
 					"link.up",
 					"reconcile.apply",
+					"offer.decide",
 					"claim",
 					"finish",
 					"scan.interrupt",
@@ -667,14 +738,14 @@ export function buildDeliveryModel(
 				// placer, also after the placer pruned its record (the outcome then meets an absent record, which acknowledges it).
 				name: "outcome-acked",
 				goal: (s) => !(s.e === "terminal" && s.unacked) && !s.leftover,
-				fair: ["*.deliver", "*.send", "refuse.stop", "resumePlaced", "link.up"],
+				fair: ["*.deliver", "*.send", "refuse.stop", "resumePlaced", "link.up", "offer.decide"],
 				brokenVariant: "absent-unacked",
 			},
 			{
 				// The runner's own completion is not forced here: a stop must reach the executor by itself, not through the job's end.
 				name: "stop-reaches-executor",
 				goal: (s) => !(s.cancel && !s.ecancel && live(s.e)),
-				fair: ["*.deliver", "*.send", "refuse.stop", "resumePlaced", "link.up"],
+				fair: ["*.deliver", "*.send", "refuse.stop", "resumePlaced", "link.up", "offer.decide"],
 				brokenVariant: "resume-ignores-ended",
 			},
 		],
@@ -691,8 +762,14 @@ export function buildDeliveryModel(
 				path: "core/remote/job-store.ts",
 				symbols: ["admit", "appendOutbox", "createPlaced", "updatePlaced", "cancelExecuted", "prune"],
 			},
-			{ path: "core/remote/job-host.ts", symbols: ["offer", "decide", "resumeEntries", "pump"] },
-			{ path: "core/remote/job-transport.ts", symbols: ["placerFrame", "resumePlaced", "flush", "refused"] },
+			{
+				path: "core/remote/job-host.ts",
+				symbols: ["offer", "decide", "offerFailed", "cancel", "resumeEntries", "pump"],
+			},
+			{
+				path: "core/remote/job-transport.ts",
+				symbols: ["receive", "handle", "placerFrame", "resumePlaced", "flush", "refused"],
+			},
 			{ path: "core/remote/job-runner.ts", symbols: ["claim", "finish", "scan", "arm", "observe"] },
 			{
 				path: "core/remote/job-client.ts",
@@ -726,6 +803,7 @@ export const deliveryVariants: ModelSpec<DeliveryState>["variants"] = {
 	"resume-ignores-ended": () => buildDeliveryModel({ ...BASE, resumeIgnoresEnded: true }, deliveryVariants),
 	"absent-unacked": () => buildDeliveryModel({ ...BASE, absentSilent: true }, deliveryVariants),
 	"turn-not-in-id": () => buildDeliveryModel({ ...BASE, turnNotInId: true }, deliveryVariants),
+	"stop-overtakes-offer": () => buildDeliveryModel({ ...BASE, stopsOvertake: true }, deliveryVariants),
 };
 
 /** The model the checker explores and the journal's chart projects. */
@@ -735,7 +813,9 @@ export const remoteJobDeliveryModel: ModelSpec<DeliveryState> = buildDeliveryMod
  * The properties a variant may break beyond the one that names it, each with its reason. A record lost to a crash cannot apply the
  * job's end; its outcome then meets an absent record and is acknowledged, so the outbox still drains. An offered ask is never stopped
  * on the live connection: the stop is written only for jobs (`cancel.send`), so the ask variant also breaks the stop property. A
- * dropped outcome that was sent is never resent when the resume keeps `sent`, so that variant also leaves the outbox undrained. Without
+ * dropped outcome that was sent is never resent when the resume keeps `sent`, so that variant also leaves the outbox undrained. A stop
+ * that passes a pending decision finds no record: the job then runs without its stop, and the placer, which marked the stop sent, never
+ * sends it again, so `stop-overtakes-offer` also leaves a stopped job unstopped. Without
  * the turn in the id, a re-placed turn keeps the offered mark its connection already holds for that id, so it is never offered on that
  * connection and no run starts for it: the placer waits with nothing in flight.
  */
@@ -744,4 +824,5 @@ export const DELIVERY_CASCADES: Readonly<Record<string, readonly string[]>> = {
 	"ask-places-offer": ["stop-reaches-executor"],
 	"resume-skips-unacked": ["outcome-acked"],
 	"turn-not-in-id": ["delivery-applies"],
+	"stop-overtakes-offer": ["stop-reaches-executor"],
 };

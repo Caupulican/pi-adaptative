@@ -23,7 +23,14 @@ import { type FleetMachine, FleetMachines } from "./fleet-machines.ts";
 import { type PlaceOptions, type PlaceResult, type PreparedOffer, RemoteJobClient } from "./job-client.ts";
 import { JOB_CANCEL_REASONS, type JobCancelReason } from "./job-protocol.ts";
 import { JobRunner, type JobRunnerSession } from "./job-runner.ts";
-import { activeExecutorJobs, inDir, JobStore, outDir, type PlacerJobRecord } from "./job-store.ts";
+import {
+	activeExecutorJobs,
+	inDir,
+	JobStore,
+	outDir,
+	type PlacerJobRecord,
+	unreadableHoldingRoom,
+} from "./job-store.ts";
 import { hubTurnedOn, listJoins, loadLinkSettings, type MachineIdentity } from "./registry.ts";
 import { resolveRepoIdentity } from "./repo-identity.ts";
 import { DirectoryWatch } from "./store-watch.ts";
@@ -245,7 +252,7 @@ export class RemoteJobs {
 
 	/** Jobs other machines placed here that have not finished. */
 	runningHere(): number {
-		return activeExecutorJobs(this.store);
+		return activeExecutorJobs(this.store, Date.now(), loadLinkSettings(this.agentDir).offlineHoldMs);
 	}
 
 	/**
@@ -386,11 +393,14 @@ export class RemoteJobs {
 		readonly unreadable: number;
 	} {
 		const pass = this.store.placedScan();
+		const holdMs = loadLinkSettings(this.agentDir).offlineHoldMs;
 		return {
 			records: [...pass.valid.values()].filter(
 				(record) => record.executorId === machineId && record.appliedAt === undefined && !record.ending,
 			),
-			unreadable: pass.unreadable.filter((entry) => entry.machineId === machineId).length,
+			unreadable: unreadableHoldingRoom(pass.unreadable, Date.now(), holdMs, "placer").filter(
+				(entry) => entry.machineId === machineId,
+			).length,
 		};
 	}
 

@@ -46,7 +46,8 @@ function definitionOf(question: RetentionQuestion & { id: string; instruction: s
 			...(question.criteria ? { criteria: question.criteria } : {}),
 			...(question.direction ? { direction: question.direction } : {}),
 		};
-	// The engine reads the options, levels or members the consumer's definition carries, and rejects a malformed one.
+	// The definition passes through as the consumer wrote it: the engine reads the options, levels or members it carries and
+	// does not validate them, so a malformed one fails the evaluation and the caller's handling of a failed evaluation applies.
 	return question as DecisionDefinition;
 }
 

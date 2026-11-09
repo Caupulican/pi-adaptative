@@ -3,6 +3,7 @@ import { isDeepStrictEqual } from "node:util";
 import type { AgentContextPlan, AgentContextWire } from "../kernel/index.ts";
 import { HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
 import { createCustomMessage } from "../kernel/messages.ts";
+import { PrefixFirstMatchByFirstItem } from "../kernel/prefix-fold.ts";
 import { recordedTransientKinds, transientRecordMessageOf } from "../kernel/transient-records.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import {
@@ -310,13 +311,24 @@ function isConversationSummaryMessage(message: AgentMessage): boolean {
 	return message.role === "compactionSummary" || message.role === "branchSummary";
 }
 
-/** Whether the history or the extension view holds a conversation summary. A fresh read: no cached scan is consulted. */
+/**
+ * The summary scans of the history and of the extension view, one per array lineage: the two can share a first message while
+ * differing after it, so they never reset each other.
+ */
+const historySummaryScans = new PrefixFirstMatchByFirstItem<AgentMessage>(isConversationSummaryMessage);
+const viewSummaryScans = new PrefixFirstMatchByFirstItem<AgentMessage>(isConversationSummaryMessage);
+
+/**
+ * Whether the history or the extension view holds a conversation summary. Read on every call: each scan validates the array
+ * it resumes from by identity and content epoch, so an entry that appeared in place still flips the answer.
+ */
 export function hasConversationSummaryMarker(
 	messages: readonly AgentMessage[],
 	extensionMessages?: readonly AgentMessage[],
 ): boolean {
 	return (
-		messages.some(isConversationSummaryMessage) || (extensionMessages?.some(isConversationSummaryMessage) ?? false)
+		historySummaryScans.find(messages) >= 0 ||
+		(extensionMessages !== undefined && viewSummaryScans.find(extensionMessages) >= 0)
 	);
 }
 
@@ -599,7 +611,7 @@ export class ProviderRequestContextController {
 			() => recorded.has(AUTHORITY_CONTEXT_CUSTOM_TYPE),
 			() =>
 				scanView().summaryMarker ||
-				(messages !== extensionPlan.messages && messages.some(isConversationSummaryMessage)),
+				(messages !== extensionPlan.messages && historySummaryScans.find(messages) >= 0),
 		);
 
 		const withAuthority = appendAuthorityContext(beforeSkill.slice(compactableMessages.length), authorityContext);
@@ -676,6 +688,8 @@ export class ProviderRequestContextController {
 				reflectionCuePlan?.commit();
 				// Published only now: a discarded plan leaves memory diagnostics and recall accounting untouched.
 				memoryPlan?.commit();
+				// The owner is shown the brief only by a request that is sent, so its items are marked seen here.
+				returnBriefPlan?.commit?.();
 				if (contextProjection) this.deps.commitContextProjection?.(contextProjection);
 			},
 		};

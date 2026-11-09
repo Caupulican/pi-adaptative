@@ -41,6 +41,7 @@ import { WorkerDelegationController } from "../delegation/worker-delegation-cont
 import { createWorkerEdgePolicy } from "../delegation/worker-edge-policy.ts";
 import { WorkerLifecycle } from "../delegation/worker-lifecycle.ts";
 import { WorkerNotificationCoordinator } from "../delegation/worker-notification-coordinator.ts";
+import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import { ModelRegistry } from "../model-registry.ts";
 import { resolveModelScopeWithDiagnostics } from "../model-resolver.ts";
 import {
@@ -66,6 +67,8 @@ export interface AwayParentContextInput {
 	/** The parent's persisted transcript, from its routines' pinned origin. */
 	readonly sessionFile: string;
 	readonly timers: TimerSource;
+	/** The machine facts this host's fleet reads (memory and heap); absent reads the real machine. */
+	readonly machineFacts?: () => MachineFacts;
 	/** The spend bound of one run away; every worker budget of this host is narrowed to it. */
 	maxUsdPerRun(): number;
 	/** The parent's routine runs this host may run: the dispatch keys of its away occurrences. */
@@ -227,6 +230,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 				noTools: "all",
 				...(parentModel ? { model: parentModel } : {}),
 				timers: input.timers,
+				machineFacts: input.machineFacts,
 				onClosingWarnings: (warnings) => {
 					for (const warning of warnings) input.report(warning);
 				},
@@ -347,6 +351,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 				getResourceLoader: () => resourceLoader,
 				getModelRegistry: () => modelRegistry,
 				getTimers: () => input.timers,
+				readMachine: input.machineFacts,
 				modelUnusableCause: (model) =>
 					exhausted.isExhausted(`${model.provider}/${model.id}`) ? "model_quota_exhausted" : undefined,
 				markModelExhausted: (model, retryAfterMs) =>

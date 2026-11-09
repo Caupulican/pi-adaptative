@@ -3,8 +3,8 @@
  * counts, frontiers, retention, admission and held work), and the admission and hold views it includes.
  */
 
+import { MAX_STATUS_BATCHES } from "./transcript-batch-account.ts";
 import type { CoordinatorHost } from "./transcript-coordinator-host.ts";
-import type { ParkedHold } from "./transcript-job-outcome.ts";
 import { isTerminalSummaryJobState } from "./transcript-memory-contracts.ts";
 import { bounded, MAX_HELD_REASON_CHARS } from "./transcript-memory-reason-text.ts";
 import type {
@@ -19,36 +19,27 @@ import {
 	TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
 } from "./transcript-summary-admission.ts";
 import { TRANSCRIPT_SUMMARY_MAX_SPENT_ATTEMPTS } from "./transcript-summary-scheduler.ts";
-import type { TranscriptSummaryHeldByKind } from "./transcript-summary-store.ts";
-
-export const MAX_STATUS_BATCHES = 5;
 
 const MAX_STATUS_FRONTIERS = 20;
 
 export function statusSnapshot(
 	host: Pick<
 		CoordinatorHost,
-		| "scheduler"
+		| "run"
 		| "frontiers"
 		| "frontierBytes"
 		| "catalog"
 		| "ports"
 		| "nextRetentionAt"
-		| "started"
-		| "starting"
-		| "disabledReason"
-		| "recentFailures"
-		| "recoveryIssues"
+		| "batch"
 		| "admissionStatus"
-		| "heldForAnchor"
+		| "sessions"
 		| "proofLedger"
 		| "lastRevocation"
-		| "persistedBatches"
-		| "lastInternalError"
-		| "activeCause"
+		| "causes"
 	>,
 ): TranscriptMemoryStatus {
-	const counts = host.scheduler?.counts() ?? {
+	const counts = host.run.scheduler?.counts() ?? {
 		queued: 0,
 		running: 0,
 		ready: 0,
@@ -58,7 +49,7 @@ export function statusSnapshot(
 		stale: 0,
 	};
 	let oldest: number | undefined;
-	for (const job of host.scheduler?.snapshot() ?? []) {
+	for (const job of host.run.scheduler?.snapshot() ?? []) {
 		if (isTerminalSummaryJobState(job.state)) continue;
 		if (oldest === undefined || job.createdAt < oldest) oldest = job.createdAt;
 	}
@@ -82,23 +73,23 @@ export function statusSnapshot(
 	const retentionDays = host.ports.settings().retentionDays;
 	const nextDeadlineAt = host.nextRetentionAt();
 	let pendingParents = 0;
-	for (const job of host.scheduler?.snapshot() ?? []) {
+	for (const job of host.run.scheduler?.snapshot() ?? []) {
 		if (job.kind === "parent" && !isTerminalSummaryJobState(job.state)) pendingParents += 1;
 	}
 	return {
-		enabled: host.started,
-		phase: host.starting
+		enabled: host.run.started,
+		phase: host.run.starting
 			? "starting"
-			: host.started
+			: host.run.started
 				? "running"
-				: host.scheduler || host.disabledReason
+				: host.run.scheduler || host.run.disabledReason
 					? "stopped"
 					: "off",
-		...(host.disabledReason ? { disabledReason: host.disabledReason } : {}),
+		...(host.run.disabledReason ? { disabledReason: host.run.disabledReason } : {}),
 		counts,
 		...(oldest !== undefined ? { oldestBacklogAgeMs: Math.max(0, host.ports.now() - oldest) } : {}),
-		recentFailures: [...host.recentFailures],
-		recoveryIssues: [...host.recoveryIssues],
+		recentFailures: [...host.batch.recentFailures],
+		recoveryIssues: [...host.run.recoveryIssues],
 		acceptedNodes: host.catalog.size,
 		catalogBytes: [...host.catalog.values()].reduce((total, node) => total + node.bytes, 0),
 		nodesAgedByAnchor: aged,
@@ -109,7 +100,7 @@ export function statusSnapshot(
 			...(nextDeadlineAt !== undefined ? { nextDeadlineAt } : {}),
 			eventTimeUnknownSources: anchored.firstCapture,
 			sessionTimestampSources: anchored.sessionTimestamp,
-			heldForAnchor: host.heldForAnchor.size,
+			heldForAnchor: host.sessions.anchorHeldCount,
 		},
 		pendingParentRederivations: pendingParents,
 		spentAttempts: {
@@ -121,29 +112,16 @@ export function statusSnapshot(
 		...(host.lastRevocation ? { lastRevocation: { ...host.lastRevocation } } : {}),
 		frontierCount: host.frontiers.size,
 		frontiers,
-		recentBatches: host.persistedBatches.slice(-MAX_STATUS_BATCHES),
-		...(host.lastInternalError ? { lastInternalError: { ...host.lastInternalError } } : {}),
-		...(host.activeCause ? { activeCause: { ...host.activeCause } } : {}),
+		recentBatches: host.batch.persistedBatches.slice(-MAX_STATUS_BATCHES),
+		...(host.causes.last ? { lastInternalError: { ...host.causes.last } } : {}),
+		...(host.causes.active ? { activeCause: { ...host.causes.active } } : {}),
 	};
 }
 
 export function admissionStatusSnapshot(
-	host: Pick<
-		CoordinatorHost,
-		| "pruneParked"
-		| "modelWorkBlock"
-		| "catalog"
-		| "unapprovedWait"
-		| "readmissionState"
-		| "firstHold"
-		| "parked"
-		| "holdCounts"
-		| "judgments"
-		| "reusedAdmissions"
-		| "scheduler"
-	>,
+	host: Pick<CoordinatorHost, "holds" | "modelWorkBlock" | "catalog" | "unapprovedWait" | "batch" | "run">,
 ): TranscriptMemoryAdmissionStatus {
-	host.pruneParked();
+	host.holds.prune((id) => host.run.scheduler?.get(id)?.state);
 	const blocked = host.modelWorkBlock();
 	let unapproved = 0;
 	const waitingFor: Partial<Record<TranscriptReadmissionWait, number>> = {};
@@ -154,23 +132,23 @@ export function admissionStatusSnapshot(
 		waitingFor[wait] = (waitingFor[wait] ?? 0) + 1;
 	}
 	const readmission = { admitted: 0, rejected: 0, uncertain: 0, unavailable: 0 };
-	for (const { state } of host.readmissionState.values()) if (state !== "waiting") readmission[state] += 1;
-	const held = host.firstHold();
+	for (const { state } of host.holds.readmission.values()) if (state !== "waiting") readmission[state] += 1;
+	const held = host.holds.first();
 	return {
 		contractVersion: TRANSCRIPT_SUMMARY_ADMISSION_CONTRACT_VERSION,
 		...(blocked ? { blocked } : {}),
-		heldJobs: host.parked.size,
+		heldJobs: host.holds.parked.size,
 		...(held
 			? {
 					heldKind: held.scope,
 					heldReason: bounded(held.reason, MAX_HELD_REASON_CHARS),
-					heldByKind: host.holdCounts(),
+					heldByKind: host.holds.counts(),
 				}
 			: {}),
-		judgments: { ...host.judgments },
-		reused: host.reusedAdmissions,
+		judgments: { ...host.batch.judgments },
+		reused: host.batch.reusedAdmissions,
 		unapprovedNodes: unapproved,
-		work: host.scheduler?.workCounts() ?? {
+		work: host.run.scheduler?.workCounts() ?? {
 			logicalAttempts: 0,
 			semanticRequests: 0,
 			transportAttempts: 0,
@@ -181,17 +159,6 @@ export function admissionStatusSnapshot(
 		},
 		readmission: { ...readmission, waitingFor },
 	};
-}
-
-export function heldCountsOf(host: Pick<CoordinatorHost, "parked">): TranscriptSummaryHeldByKind {
-	const counts: TranscriptSummaryHeldByKind = {};
-	for (const { scope } of host.parked.values()) counts[scope] = (counts[scope] ?? 0) + 1;
-	return counts;
-}
-
-export function firstHoldOf(host: Pick<CoordinatorHost, "parked">): ParkedHold | undefined {
-	for (const hold of host.parked.values()) return hold;
-	return undefined;
 }
 
 export function modelWorkBlockOf(

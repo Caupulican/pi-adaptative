@@ -5,6 +5,7 @@
  * through zoom while the background work queue catches up.
  */
 
+import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { safeErrorMessage } from "../../kernel/types.ts";
 import { AsyncRetainedReleases, type ReleaseOutcome, releaseFailureCause } from "../util/resource-release.ts";
@@ -595,6 +596,11 @@ export class ContinuousChatRuntime {
 				return;
 			}
 			this.startJob(item);
+			// Each claim ends a macrotask turn, whatever its awaits cost: a backlog whose store and model reads resolve in
+			// microtasks would otherwise hold timers and other I/O for its whole length. The loop condition re-checks dispatch,
+			// close and stop, so the yield is also their check point. A counter here would not fire: each pass claims one job,
+			// since completions re-enter through `requestPump`.
+			await yieldToEventLoop();
 		}
 	}
 

@@ -77,3 +77,126 @@ export function vouchesFor(
 		(runtime.verifiedStamp !== undefined && runtime.verifiedStamp === lineageStamp(read))
 	);
 }
+
+/**
+ * The session-keyed state of the transcript memory coordinator: the runtime of each session, the sessions whose
+ * coverage is due a revocation check, the session timestamps, the sources held for an anchor ceiling, and whether
+ * undated nodes await their anchors. Field writes of a runtime take the runtime object the flow holds: after an await a
+ * flow may hold a runtime the map no longer names, and its writes must land on that object as they always did.
+ */
+export class SessionRuntimes {
+	private readonly runtimes = new Map<string, SessionRuntime>();
+	/**
+	 * Sessions the index reported invalidated whose coverage has not been judged since. Their next answered read revokes
+	 * dead coverage whatever the digests say: the event is the index's own evidence that earlier spans changed.
+	 */
+	private readonly due = new Set<string>();
+	/** Canonical session timestamps; `null` records a session that has none. */
+	private readonly stamps = new Map<string, string | null>();
+	/** Sources the anchor ceiling refused, so work depending on them is held. */
+	private readonly anchorHeld = new Set<string>();
+	/** Accepted nodes that still need anchors for their undated sources (a session listing was unavailable). */
+	private undated = false;
+
+	get(sessionId: string): SessionRuntime | undefined {
+		return this.runtimes.get(sessionId);
+	}
+
+	has(sessionId: string): boolean {
+		return this.runtimes.has(sessionId);
+	}
+
+	entries(): IterableIterator<[string, SessionRuntime]> {
+		return this.runtimes.entries();
+	}
+
+	put(sessionId: string, runtime: SessionRuntime): void {
+		this.runtimes.set(sessionId, runtime);
+	}
+
+	drop(sessionId: string): void {
+		this.runtimes.delete(sessionId);
+	}
+
+	clear(): void {
+		this.runtimes.clear();
+	}
+
+	/** The enumeration position of a runtime: where the next group starts. */
+	advance(runtime: SessionRuntime, next: SessionRuntime["next"]): void {
+		runtime.next = next;
+	}
+
+	setTotal(runtime: SessionRuntime, total: number): void {
+		runtime.total = total;
+	}
+
+	backpressure(runtime: SessionRuntime, on: boolean): void {
+		runtime.backpressured = on;
+	}
+
+	setDigest(runtime: SessionRuntime, digest: string | undefined): void {
+		runtime.verifiedDigest = digest;
+	}
+
+	setStamp(runtime: SessionRuntime, stamp: string | undefined): void {
+		runtime.verifiedStamp = stamp;
+	}
+
+	markDue(sessionId: string): void {
+		this.due.add(sessionId);
+	}
+
+	/** The due mark is taken by the check that answers it; true when the session was due. */
+	unmarkDue(sessionId: string): boolean {
+		return this.due.delete(sessionId);
+	}
+
+	isDue(sessionId: string): boolean {
+		return this.due.has(sessionId);
+	}
+
+	clearDue(): void {
+		this.due.clear();
+	}
+
+	stampOf(sessionId: string): string | null | undefined {
+		return this.stamps.get(sessionId);
+	}
+
+	hasStamp(sessionId: string): boolean {
+		return this.stamps.has(sessionId);
+	}
+
+	recordStamp(sessionId: string, stamp: string | null): void {
+		this.stamps.set(sessionId, stamp);
+	}
+
+	clearStamps(): void {
+		this.stamps.clear();
+	}
+
+	holdAnchor(handle: string): void {
+		this.anchorHeld.add(handle);
+	}
+
+	releaseAnchor(handle: string): void {
+		this.anchorHeld.delete(handle);
+	}
+
+	get anchorHeldCount(): number {
+		return this.anchorHeld.size;
+	}
+
+	clearAnchors(): void {
+		this.anchorHeld.clear();
+	}
+
+	get undatedPending(): boolean {
+		return this.undated;
+	}
+
+	setUndatedPending(on: boolean): void {
+		this.undated = on;
+	}
+}

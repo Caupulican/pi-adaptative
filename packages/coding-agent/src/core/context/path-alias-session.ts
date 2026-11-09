@@ -3,6 +3,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { readTransientRecordPayload } from "../../kernel/index.ts";
 import { createCustomMessage } from "../../kernel/messages.ts";
+import { PrefixFold, PrefixFoldByFirstItem } from "../../kernel/prefix-fold.ts";
 import { transientRecordMessageOf } from "../../kernel/transient-records.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { resolvePath } from "../../utils/paths.ts";
@@ -110,6 +111,18 @@ function legendText(message: Extract<AgentMessage, { role: "custom" }>): string 
 	return message.content.map((part) => (part.type === "text" ? part.text : "")).join("");
 }
 
+/** The render fold's state: the output aligned with the messages it covered, and the spellings they froze. */
+interface RenderState {
+	live: Map<string, string>;
+	rendered: AgentMessage[];
+}
+
+/** The legend fold's state over one history: the lines its records list, and whether a pause note is still on the wire. */
+interface LegendHistoryState {
+	listed: Set<string>;
+	pauseVisible: boolean;
+}
+
 /** One durable legend record's reading: the aliases it lists, and the pause state it sets (`paused`) or clears (`resumed`). */
 interface LegendRecordState {
 	readonly ids: readonly string[];
@@ -171,7 +184,8 @@ export class PathAliasRuntime {
 	private emittedLegendChars = 0;
 	/**
 	 * The aliases a carried frame legend lists, in the order they were first listed. Append-only: an id leaves it only when it
-	 * leaves the table. A restarted runtime rebuilds it from the first reference in the frame's text.
+	 * leaves the table. A restarted runtime rebuilds it from the referenced aliases in table order, so its line order can differ
+	 * from the live runtime's: at most one head cache miss.
 	 */
 	private frameLegendOrder: string[] = [];
 	/** Digests of every frame legend content this runtime made, so a legend record is recognized as a frame's. */
@@ -195,13 +209,28 @@ export class PathAliasRuntime {
 	 */
 	private frozenSpellings = new Map<string, string>();
 	/**
-	 * The last render: the messages it covered, what they rendered to, and the live spellings after
-	 * them. A request whose history extends that prefix renders only the appended messages; rebuilding
-	 * the live map from every message's spellings on every request walked the whole transcript.
+	 * The render fold: what the messages it covered rendered to, and the live spellings after them. A request whose history
+	 * extends that prefix renders only the appended messages; rebuilding the live map from every message's spellings on every
+	 * request walked the whole transcript. A diverged history starts the fold over, and the spellings the last render froze
+	 * (`frozenSpellings`, which the fresh render reads) keep their bytes.
 	 */
-	private renderRun:
-		| { processed: readonly AgentMessage[]; rendered: AgentMessage[]; live: Map<string, string> }
-		| undefined;
+	private renderFold: PrefixFold<AgentMessage, RenderState> = this.createRenderFold();
+	/** The legend records of the history, and of the wire a legend is made for: each lineage has its own fold. */
+	private readonly historyLegendFolds = new PrefixFoldByFirstItem<AgentMessage, LegendHistoryState>(
+		() => ({ listed: new Set(), pauseVisible: false }),
+		(state, message) => this.foldLegendRecord(state, message),
+	);
+	private readonly wireLegendFolds = new PrefixFoldByFirstItem<AgentMessage, LegendHistoryState>(
+		() => ({ listed: new Set(), pauseVisible: false }),
+		(state, message) => this.foldLegendRecord(state, message),
+	);
+	/** The alias ids the rendered messages reference, folded over the render's output. */
+	private readonly visibleAliasFold = new PrefixFoldByFirstItem<AgentMessage, Set<string>>(
+		() => new Set(),
+		(ids, message) => {
+			for (const id of this.referencedAliasIds(message)) ids.add(id);
+		},
+	);
 	/**
 	 * Result of the most recent {@link sync} call, keyed by the exact message-list identity it saw.
 	 * `sync` is called twice per provider request (preview, then commit — see
@@ -380,9 +409,8 @@ export class PathAliasRuntime {
 		// the model can actually see: the legend records in this history. Read from the history, not
 		// remembered by the process, so a restarted process does not re-send lines already there, and a
 		// compaction that summarized a record away re-sends the lines its still-visible aliases need.
-		const { listed: committed, pauseVisible } = this.legendHistory(messages);
-		const visible = new Set<string>();
-		for (const message of rewritten) for (const id of this.referencedAliasIds(message)) visible.add(id);
+		const { listed: committed, pauseVisible } = this.legendHistory(messages, this.historyLegendFolds);
+		const visible = new Set(this.visibleAliasFold.fold(rewritten));
 		const table = this.table;
 		const paused = this.mintingPaused;
 		const result: PathAliasSyncResult = {
@@ -392,7 +420,7 @@ export class PathAliasRuntime {
 				for (const message of visibleMessages) for (const id of this.referencedAliasIds(message)) ids.add(id);
 				for (const id of collectReferencedAliasIds(visibleTexts)) ids.add(id);
 				// A legend record on the wire (a carried frame legend) lists its lines as the history's own records do.
-				const onWire = this.legendHistory(visibleMessages).listed;
+				const onWire = this.legendHistory(visibleMessages, this.wireLegendFolds).listed;
 				const listed = onWire.size === 0 ? committed : new Set([...committed, ...onWire]);
 				const delta = buildPathAliasLegendDelta(table, ids, listed, { paused });
 				if (paused) {
@@ -437,17 +465,21 @@ export class PathAliasRuntime {
 	 * `paused`) stays on the wire until a clearing record (`resumed`) follows it. A frame record and a plain delta say nothing
 	 * about the pause, so they leave it as it was. Read from `details.record`, once per record object.
 	 */
-	private legendHistory(messages: readonly AgentMessage[]): { listed: Set<string>; pauseVisible: boolean } {
-		const listed = new Set<string>();
-		let pauseVisible = false;
-		for (const message of messages) {
-			if (message.role !== "custom" || message.customType !== PATH_ALIAS_LEGEND_CUSTOM_TYPE) continue;
-			const state = this.legendRecordState(message);
-			for (const id of state.ids) listed.add(id);
-			if (state.resumed) pauseVisible = false;
-			else if (state.paused) pauseVisible = true;
-		}
-		return { listed, pauseVisible };
+	private legendHistory(
+		messages: readonly AgentMessage[],
+		folds: PrefixFoldByFirstItem<AgentMessage, LegendHistoryState>,
+	): { listed: Set<string>; pauseVisible: boolean } {
+		const state = folds.fold(messages);
+		return { listed: new Set(state.listed), pauseVisible: state.pauseVisible };
+	}
+
+	/** One step of the legend fold: a legend record's lines join the listed set, and its pause reading moves the state. */
+	private foldLegendRecord(state: LegendHistoryState, message: AgentMessage): void {
+		if (message.role !== "custom" || message.customType !== PATH_ALIAS_LEGEND_CUSTOM_TYPE) return;
+		const record = this.legendRecordState(message);
+		for (const id of record.ids) state.listed.add(id);
+		if (record.resumed) state.pauseVisible = false;
+		else if (record.paused) state.pauseVisible = true;
 	}
 
 	/** One legend record's reading, made once per record object, and charged to the cost side the first time it is read. */
@@ -551,64 +583,58 @@ export class PathAliasRuntime {
 	 * Called several times per provider request (preview, projection, commit) and must return the
 	 * same bytes each time; it does, because the freeze is resolved before the fresh rewrite.
 	 */
+	private createRenderFold(): PrefixFold<AgentMessage, RenderState> {
+		return new PrefixFold<AgentMessage, RenderState>(
+			() => ({ live: new Map(), rendered: [] }),
+			(state, message) => this.renderMessage(state, message),
+		);
+	}
+
+	/**
+	 * One step of the render fold. A fresh fold reads the frozen spellings of the last render, so a diverged history keeps the
+	 * bytes it already sent; the spellings of this render become the frozen ones once it returns.
+	 */
+	private renderMessage(state: RenderState, message: AgentMessage): void {
+		// Host records pass through untouched. The legend defines the aliases: rewriting its own
+		// text turned every alias display back into an alias. Every other host record (memory
+		// evidence, goal context, skill context, the failure ledger) is sent raw as a fresh
+		// transient before any alias pass and becomes durable afterwards; rendering it then changed
+		// the bytes of an already-sent message (a skill record's base path, measured live), which
+		// broke the cached prefix and disengaged the delta path on the very next request.
+		if (message.role === "custom") {
+			state.rendered.push(message);
+			return;
+		}
+		const memo = this.rendered.get(message);
+		if (memo) {
+			// Its spellings stay live for any later message that repeats one of its spans.
+			for (const [key, spelling] of memo.spellings) state.live.set(key, spelling);
+			state.rendered.push(memo.message);
+			return;
+		}
+		const spellings: Array<readonly [string, string]> = [];
+		const [output] = rewriteAgentMessagesWith([message], (text) => {
+			const key = createHash("sha256").update(text).digest("hex");
+			const frozen = state.live.get(key) ?? this.frozenSpellings.get(key);
+			const spelling = frozen ?? rewriteText(this.table, text);
+			state.live.set(key, spelling);
+			spellings.push([key, spelling]);
+			return spelling;
+		});
+		const aliasIds = [...collectActiveAliasIds(collectMessageTexts([output!]))];
+		for (const id of aliasIds) {
+			this.legendIds.add(id);
+			this.mentionsById.set(id, (this.mentionsById.get(id) ?? 0) + 1);
+		}
+		this.rendered.set(message, { message: output!, spellings, aliasIds });
+		state.rendered.push(output!);
+	}
+
 	private renderFrozen(messages: readonly AgentMessage[]): AgentMessage[] {
-		const run = this.renderRun;
-		let from = run ? run.processed.length : -1;
-		if (from > messages.length) from = -1;
-		for (let index = 0; run && from > 0 && index < from; index++) {
-			if (run.processed[index] !== messages[index]) from = -1;
-		}
-		let live: Map<string, string>;
-		let rendered: AgentMessage[];
-		if (run && from >= 0) {
-			live = run.live;
-			rendered = run.rendered.slice();
-		} else {
-			// A diverged history renders from the start; what the last render froze stays frozen.
-			if (run) this.frozenSpellings = run.live;
-			live = new Map();
-			rendered = [];
-			from = 0;
-		}
-		for (let index = from; index < messages.length; index++) {
-			const message = messages[index]!;
-			// Host records pass through untouched. The legend defines the aliases: rewriting its own
-			// text turned every alias display back into an alias. Every other host record (memory
-			// evidence, goal context, skill context, the failure ledger) is sent raw as a fresh
-			// transient before any alias pass and becomes durable afterwards; rendering it then changed
-			// the bytes of an already-sent message (a skill record's base path, measured live), which
-			// broke the cached prefix and disengaged the delta path on the very next request.
-			if (message.role === "custom") {
-				rendered.push(message);
-				continue;
-			}
-			const memo = this.rendered.get(message);
-			if (memo) {
-				// Its spellings stay live for any later message that repeats one of its spans.
-				for (const [key, spelling] of memo.spellings) live.set(key, spelling);
-				rendered.push(memo.message);
-				continue;
-			}
-			const spellings: Array<readonly [string, string]> = [];
-			const [output] = rewriteAgentMessagesWith([message], (text) => {
-				const key = createHash("sha256").update(text).digest("hex");
-				const frozen = live.get(key) ?? this.frozenSpellings.get(key);
-				const spelling = frozen ?? rewriteText(this.table, text);
-				live.set(key, spelling);
-				spellings.push([key, spelling]);
-				return spelling;
-			});
-			const aliasIds = [...collectActiveAliasIds(collectMessageTexts([output!]))];
-			for (const id of aliasIds) {
-				this.legendIds.add(id);
-				this.mentionsById.set(id, (this.mentionsById.get(id) ?? 0) + 1);
-			}
-			this.rendered.set(message, { message: output!, spellings, aliasIds });
-			rendered.push(output!);
-		}
-		this.renderRun = { processed: messages.slice(), rendered, live };
-		this.frozenSpellings = live;
-		return rendered;
+		const state = this.renderFold.fold(messages);
+		this.frozenSpellings = state.live;
+		// The caller keeps the array it is handed (the sync result), so the fold's own output is never shared out.
+		return state.rendered.slice();
 	}
 
 	private persistScanned(): void {
@@ -635,7 +661,7 @@ export class PathAliasRuntime {
 		this.records = [];
 		this.loaded = false;
 		this.rendered = new WeakMap();
-		this.renderRun = undefined;
+		this.renderFold = this.createRenderFold();
 		this.reservationHistoryScanned = false;
 		this.scanned = new Set();
 		this.pendingScanned = [];
@@ -648,7 +674,7 @@ export class PathAliasRuntime {
 			if (this.table.cwd !== cwd) {
 				this.table = this.buildTableForCwd(cwd);
 				this.rendered = new WeakMap();
-				this.renderRun = undefined;
+				this.renderFold = this.createRenderFold();
 			}
 			return;
 		}

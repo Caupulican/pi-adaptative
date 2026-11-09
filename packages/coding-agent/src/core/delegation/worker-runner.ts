@@ -16,7 +16,7 @@ import {
 } from "../autonomy/evidence-finding-projection.ts";
 import type { LaneTerminalStatus } from "../autonomy/lane-tracker.ts";
 import type { WorkerBudgetRefusalContract, WorkerRole } from "../orchestration/contracts.ts";
-import { isVerdictReasonCodeList } from "../orchestration/verification-verdict.ts";
+import { isVerdictReasonCodeList, REASON_CODE_LIST_CORRECTION } from "../orchestration/verification-verdict.ts";
 import {
 	buildVerifierSystemPrompt,
 	buildWorkerSystemPrompt,
@@ -658,6 +658,8 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 				typeof malformedRecord.summary === "string" && malformedRecord.summary.trim().length > 0
 					? malformedRecord.summary
 					: undefined;
+			const malformedReasonCodes =
+				malformedRecord.reasonCodes !== undefined && !isVerdictReasonCodeList(malformedRecord.reasonCodes);
 			const malformedEvidence = buildWorkerEvidenceBundle({
 				request: options.request,
 				rawText: completion.text,
@@ -671,6 +673,7 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 					...completionBaseClaim,
 					status: "failed",
 					summary: "Worker output used a malformed structured claim envelope.",
+					...(malformedReasonCodes ? { blockers: [REASON_CODE_LIST_CORRECTION] } : {}),
 					...(malformedEvidence ? { evidence: malformedEvidence } : {}),
 				},
 				laneStatus: "failed",

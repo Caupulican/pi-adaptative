@@ -6,6 +6,7 @@
  */
 
 import type { ImageContent, Message, TextContent } from "@caupulican/pi-ai";
+import { messageContentRevision } from "./message-revision.ts";
 import type { AgentMessage } from "./types.ts";
 
 export const COMPACTION_SUMMARY_PREFIX = `The conversation history before this point was compacted into the following summary:
@@ -154,52 +155,79 @@ export function createCustomMessage(
  * - Custom extensions and tools
  */
 export function convertToLlm(messages: AgentMessage[]): Message[] {
-	return messages
-		.map((m): Message | undefined => {
-			switch (m.role) {
-				case "bashExecution":
-					// Skip messages excluded from context (!! prefix)
-					if (m.excludeFromContext) {
-						return undefined;
-					}
-					return {
-						role: "user",
-						content: [{ type: "text", text: bashExecutionToText(m) }],
-						timestamp: m.timestamp,
-					};
-				case "custom": {
-					const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
-					return {
-						role: "user",
-						content,
-						timestamp: m.timestamp,
-					};
-				}
-				case "branchSummary":
-					return {
-						role: "user",
-						content: [{ type: "text" as const, text: BRANCH_SUMMARY_PREFIX + m.summary + BRANCH_SUMMARY_SUFFIX }],
-						timestamp: m.timestamp,
-					};
-				case "compactionSummary":
-					return {
-						role: "user",
-						content: [
-							{ type: "text" as const, text: COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX },
-						],
-						timestamp: m.timestamp,
-					};
-				case "user":
-				case "assistant":
-				case "toolResult":
-					return m;
-				default:
-					// biome-ignore lint/correctness/noSwitchDeclarations: fine
-					const _exhaustiveCheck: never = m;
-					return undefined;
-			}
-		})
-		.filter((m) => m !== undefined);
+	return messages.map(convertMessage).filter((m) => m !== undefined);
+}
+
+/**
+ * The converted object of each message that conversion builds anew (custom, bash execution and summary messages), keyed by the
+ * source object and tagged with the source's content revision. The conversion reads only the source's content, so a converted
+ * object stays valid until an in-place content edit (`replaceMessageContents`) moves that revision. A converted object that is
+ * the same object on every request lets the folds over the wire resume past it, instead of starting over each request.
+ */
+const convertedMessages = new WeakMap<AgentMessage, { revision: number; converted: Message | undefined }>();
+
+function convertMessage(m: AgentMessage): Message | undefined {
+	switch (m.role) {
+		case "user":
+		case "assistant":
+		case "toolResult":
+			return m;
+		case "bashExecution":
+			// Messages excluded from context (the !! prefix) convert to nothing, so there is no object to keep.
+			return m.excludeFromContext ? undefined : convertCachedMessage(m);
+		case "custom":
+		case "branchSummary":
+		case "compactionSummary":
+			return convertCachedMessage(m);
+		default: {
+			const _exhaustiveCheck: never = m;
+			return undefined;
+		}
+	}
+}
+
+function convertCachedMessage(m: AgentMessage): Message | undefined {
+	const revision = messageContentRevision(m);
+	const cached = convertedMessages.get(m);
+	if (cached && cached.revision === revision) return cached.converted;
+	const converted = buildConvertedMessage(m);
+	convertedMessages.set(m, { revision, converted });
+	return converted;
+}
+
+function buildConvertedMessage(m: AgentMessage): Message | undefined {
+	switch (m.role) {
+		case "bashExecution":
+			return {
+				role: "user",
+				content: [{ type: "text", text: bashExecutionToText(m) }],
+				timestamp: m.timestamp,
+			};
+		case "custom": {
+			const content = typeof m.content === "string" ? [{ type: "text" as const, text: m.content }] : m.content;
+			return {
+				role: "user",
+				content,
+				timestamp: m.timestamp,
+			};
+		}
+		case "branchSummary":
+			return {
+				role: "user",
+				content: [{ type: "text" as const, text: BRANCH_SUMMARY_PREFIX + m.summary + BRANCH_SUMMARY_SUFFIX }],
+				timestamp: m.timestamp,
+			};
+		case "compactionSummary":
+			return {
+				role: "user",
+				content: [
+					{ type: "text" as const, text: COMPACTION_SUMMARY_PREFIX + m.summary + COMPACTION_SUMMARY_SUFFIX },
+				],
+				timestamp: m.timestamp,
+			};
+		default:
+			return undefined;
+	}
 }
 
 /**

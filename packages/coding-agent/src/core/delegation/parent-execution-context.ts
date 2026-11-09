@@ -37,6 +37,7 @@ import type {
 	HmoeTeamStrategy,
 	HmoeWeights,
 } from "../expert-routing/vocabulary.ts";
+import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type { KnowledgeGrant, KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
 import type { LaneMemoryCapacitySource, WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
@@ -152,6 +153,8 @@ export interface ParentExecutionEnvironment {
 	getModelRegistry(): ModelRegistry;
 	/** The session's timer source: the write-reservation release backoff and the worker retry ladder arm their alarms on its ports. */
 	getTimers(): TimerSource;
+	/** The machine facts the fleet's machine room reads (memory and heap); absent reads the real machine. */
+	readMachine?(): MachineFacts;
 	/** Parent session's canonical credential source; worker evidence and reviewer calls share it. */
 	getCredentialExposureBoundary?(): CredentialExposureBoundary;
 	/** Root's tool mechanics (output reduction, encodings, shell engine, packing), shared with every lane. */

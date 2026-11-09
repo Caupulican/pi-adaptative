@@ -1,7 +1,8 @@
 /**
  * Record-before-effect: a durable claim, then the effect, then a durable settle. A claim whose effect may have happened is
- * never repeated by code; a failed effect gives its claim back only through the caller's own give-back. Every outward
- * transport runs this one choreography, so the release-on-failure and unknown-outcome rules cannot diverge between them.
+ * never repeated by code; a failed effect gives its claim back only through the caller's own give-back. The call sites that
+ * use this choreography are the adopters in scripts/outbox-sites.json (no `reason`). The other pinned transports declare why
+ * their record comes before their effect, so the release-on-failure and unknown-outcome rules are stated here once.
  */
 
 /** The durable steps of one outward effect. `claim` runs first and refuses by throwing. */

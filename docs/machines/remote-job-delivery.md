@@ -32,6 +32,7 @@ ended --> ended : arm
 ended --> pending : replace
 ended --> ended : cancel.deliver
 ended --> ended : offer.deliver
+ended --> ended : offer.decide
 ended --> ended : claim
 ended --> ended : accept.deliver
 ended --> ended : finish
@@ -59,6 +60,7 @@ pending --> pending : resumePlaced
 pending --> pending : link.drop
 pending --> pending : arm
 pending --> pending : offer.deliver
+pending --> pending : offer.decide
 pending --> pending : claim
 pending --> accepted : accept.deliver
 pending --> pending : finish
@@ -93,6 +95,7 @@ terminal --> terminal : outcome.send
 terminal --> pending : replace
 terminal --> terminal : offer.deliver
 terminal --> terminal : outcome.deliver
+terminal --> terminal : offer.decide
 terminal --> terminal : accept.deliver
 terminal --> terminal : refuse.stop
 terminal --> terminal : leftover.send
