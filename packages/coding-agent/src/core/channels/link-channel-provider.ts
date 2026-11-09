@@ -4,6 +4,8 @@
  * answer goes back to that hub. The owner adds a hub with `/remote join`; nothing here names a machine or a path.
  * A conversation is keyed by the hub's install id, proven at the welcome, so two hubs that share a name (a WSL
  * instance and its Windows host) never share a conversation; the hub's name stays the sender label the policy reads.
+ * Job and capability frames never become a turn: they go to the job layer (`job-transport.ts`), which runs a placed
+ * job as a worker and keeps its own stores.
  */
 
 import type {
@@ -14,6 +16,7 @@ import type {
 	ChannelSenderIds,
 	ChannelStatusReporter,
 } from "../gateways/channel-provider.ts";
+import { JobTransport } from "../remote/job-transport.ts";
 import { LinkClient, type LinkState } from "../remote/link-client.ts";
 import { linkContextFor, reportJoinState } from "../remote/link-context.ts";
 import { MAX_MESSAGE_CHARS } from "../remote/protocol.ts";
@@ -29,6 +32,7 @@ export class LinkChannelProvider implements ChannelProvider {
 	private readonly clients = new Map<string, LinkClient>();
 	private readonly states = new Map<string, LinkState>();
 	private report: ChannelStatusReporter | undefined;
+	private transport: JobTransport | undefined;
 
 	constructor(options: { agentDir: string }) {
 		this.agentDir = options.agentDir;
@@ -40,6 +44,8 @@ export class LinkChannelProvider implements ChannelProvider {
 		const context = linkContextFor(this.agentDir);
 		const joins = listJoins(this.agentDir);
 		if (joins.length === 0) throw new Error("no hub is joined: use /remote join <host:port> <token>");
+		const transport = new JobTransport({ agentDir: this.agentDir, selfId: identity.machineId });
+		this.transport = transport;
 		for (const join of joins) {
 			const client = new LinkClient({
 				join,
@@ -47,6 +53,7 @@ export class LinkChannelProvider implements ChannelProvider {
 				subtree: context.subtree,
 				depth: context.depth,
 				requireSealed: () => loadLinkSettings(this.agentDir).requireSealed,
+				peers: transport,
 				events: {
 					state: (state) => {
 						this.states.set(join.address, state);
@@ -87,6 +94,8 @@ export class LinkChannelProvider implements ChannelProvider {
 		for (const client of this.clients.values()) client.stop();
 		this.clients.clear();
 		this.states.clear();
+		this.transport?.dispose();
+		this.transport = undefined;
 	}
 
 	/** Connected while any hub is; otherwise suspended, saying why in this provider's own words. */

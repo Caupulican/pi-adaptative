@@ -3,12 +3,13 @@
  * root sessions on the same directory do not bind the port; they read the hosting session's records. A lock is
  * replaced only when its owner is proven gone on this host ({@link judgeOwner} `dead`): a live owner, an owner on
  * another host and an owner that cannot be judged all keep it. Nothing polls: a session that does not host watches the
- * directory and tries again when the lock file goes away.
+ * directory and tries again when the lock file goes away. The same mechanism names the one session that runs the jobs
+ * peers place here (`remote/jobs/runner.lock`, {@link RUNNER_LOCK}).
  */
 
 import { randomBytes } from "node:crypto";
 import { existsSync, type FSWatcher, mkdirSync, readFileSync, rmSync, watch } from "node:fs";
-import { join } from "node:path";
+import { basename, dirname, join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import {
 	isProcessOwnerRecord,
@@ -21,6 +22,8 @@ import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 
 const LOCK_FILE = "host.lock";
+/** The lock of the session that runs placed jobs, relative to `remote/`. */
+export const RUNNER_LOCK = "jobs/runner.lock";
 
 /** The hosting session's process (its `machineId` is the OS machine digest, not the link's install id) and its token. */
 interface HostLockRecord extends ProcessOwner {
@@ -38,7 +41,7 @@ export type HostLockResult =
 	| { readonly held: true; readonly lock: HostLock }
 	| { readonly held: false; readonly owner: LinkHostOwner };
 
-const lockPath = (agentDir: string): string => join(agentDir, "remote", LOCK_FILE);
+const lockPath = (agentDir: string, name: string): string => join(agentDir, "remote", name);
 
 function readRecord(path: string): HostLockRecord | undefined {
 	if (!existsSync(path)) return undefined;
@@ -91,9 +94,9 @@ export class HostLock {
  * atomic replace under the file's lock), so a lock file that names no readable owner was never a session's hold and
  * is replaced.
  */
-export function takeHostLock(agentDir: string): HostLockResult {
-	const path = lockPath(agentDir);
-	mkdirSync(join(agentDir, "remote"), { recursive: true });
+export function takeHostLock(agentDir: string, name = LOCK_FILE): HostLockResult {
+	const path = lockPath(agentDir, name);
+	mkdirSync(dirname(path), { recursive: true });
 	return withFileLockSync(path, (): HostLockResult => {
 		const current = readRecord(path);
 		if (current) {
@@ -112,8 +115,8 @@ export function takeHostLock(agentDir: string): HostLockResult {
 }
 
 /** The session hosting the link here, when one other than this process holds the lock. */
-export function linkHostOwner(agentDir: string): LinkHostOwner | undefined {
-	const record = readRecord(lockPath(agentDir));
+export function linkHostOwner(agentDir: string, name = LOCK_FILE): LinkHostOwner | undefined {
+	const record = readRecord(lockPath(agentDir, name));
 	if (!record || record.pid === process.pid) return undefined;
 	const standing = judgeOwner(record);
 	return standing === "dead" ? undefined : { pid: record.pid, standing };
@@ -123,14 +126,15 @@ export function linkHostOwner(agentDir: string): LinkHostOwner | undefined {
  * Calls `onReleased` each time the lock file disappears (the hosting session stopped or closed), until the returned
  * function is called. A host that ends without removing its lock fires nothing; the next session to start judges it.
  */
-export function watchHostLockRelease(agentDir: string, onReleased: () => void): () => void {
-	const dir = join(agentDir, "remote");
-	const path = lockPath(agentDir);
+export function watchHostLockRelease(agentDir: string, onReleased: () => void, name = LOCK_FILE): () => void {
+	const path = lockPath(agentDir, name);
+	const dir = dirname(path);
+	const file = basename(path);
 	mkdirSync(dir, { recursive: true });
 	let watcher: FSWatcher | undefined;
 	try {
 		watcher = watch(dir, { persistent: false }, (_event, filename) => {
-			if ((filename === null || filename.toString() === LOCK_FILE) && !existsSync(path)) onReleased();
+			if ((filename === null || filename.toString() === file) && !existsSync(path)) onReleased();
 		});
 		watcher.on("error", () => {
 			watcher?.close();

@@ -15,9 +15,9 @@ import {
 	saveJoin,
 } from "../../core/remote/registry.ts";
 import { SEALED_FEATURE } from "../../core/remote/session-keys.ts";
+import { isJobCommand, JOB_USAGE, runJobCommand } from "./remote-job-commands.ts";
 
-const USAGE =
-	"Usage: /remote [status] | /remote listen [port] [host] | /remote stop | /remote add <name> | /remote revoke <name> | /remote join <host:port> <token> | /remote leave <host:port> | /remote name <name>";
+const USAGE = `Usage: /remote [status] | /remote listen [port] [host] | /remote stop | /remote add <name> | /remote revoke <name> | /remote join <host:port> <token> | /remote leave <host:port> | /remote name <name> | ${JOB_USAGE}`;
 
 export interface RemoteCommandPort {
 	readonly hub: RemoteHubController;
@@ -116,6 +116,8 @@ export async function runRemoteCommand(
 				if (!parseAddress(address) || !token) return host.showWarning("Usage: /remote join <host:port> <token>");
 				saveJoin(hub.agentDir, { address, name: token.name, hubName: token.hubName, secret: token.secret });
 				port.reloadChannels();
+				// A joined machine runs the hub's jobs by default: placement and the runner start now, not at the next start.
+				hub.jobs?.start();
 				host.showStatus(
 					`Joined ${token.hubName} at ${address} as ${token.name}. Its messages reach this session as a peer's words, never as yours.`,
 				);
@@ -133,6 +135,7 @@ export async function runRemoteCommand(
 				return;
 			}
 			default:
+				if (isJobCommand(sub)) return await runJobCommand(sub, rest, hub, host);
 				host.showWarning(`Unknown /remote command. ${USAGE}`);
 		}
 	} catch (error) {

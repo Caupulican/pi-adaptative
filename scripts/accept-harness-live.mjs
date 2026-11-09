@@ -605,6 +605,7 @@ const SCENARIOS = [
 		);
 		await type(state.main, `/remote join 127.0.0.1:${secondPort} ${secondToken}`);
 		await waitFor("the loop refused", () => /loop of hubs/.test(JSON.stringify(readJson("links.json") ?? {})), 90_000, 3000);
+		Object.assign(state, { second, remoteAgent });
 		return `lab joined over the link, shows as a remote bot and answered: ${String(reply.text).slice(0, 60)}; a loop of hubs was refused`;
 	}),
 	scenario("s15", "a default setup does a plain edit in few steps and starts a worker without a fight", async () => {
@@ -776,6 +777,83 @@ const SCENARIOS = [
 		} finally {
 			listener?.kill();
 		}
+	}),
+	scenario("s41", "a linked machine advertises what it can take, and the roster says it in plain words", async () => {
+		// Runs on s14's link: this session is the hub, lab joined it. lab offers one synthetic project by identity.
+		if (!state.remoteAgent || !state.second) return { skipped: "s14 did not link a second machine" };
+		const project = join(SANDBOX, "linked-project");
+		mkdirSync(project, { recursive: true });
+		writeFileSync(join(project, "README.md"), "A synthetic project both machines check out.\n");
+		const git = (...a) => execFileSync("git", ["-c", "user.name=live-gate", "-c", "user.email=live-gate@example.invalid", ...a], { cwd: project, encoding: "utf8" }).trim();
+		if (!existsSync(join(project, ".git"))) {
+			git("init", "-q");
+			git("add", ".");
+			git("commit", "-q", "-m", "initial");
+			git("remote", "add", "origin", "https://example.invalid/acme/linked-project.git");
+		}
+		// The project identity the advert must carry: root commits and the normalized origin, never the path.
+		const repoKey = createHash("sha256").update(`repo/1|${git("rev-list", "--max-parents=0", "HEAD").split("\n").sort().join(",")}|example.invalid/acme/linked-project`).digest("hex");
+		const settingsFile = join(state.remoteAgent, "remote", "settings.json");
+		const settings = existsSync(settingsFile) ? JSON.parse(readFileSync(settingsFile, "utf8")) : {};
+		writeFileSync(settingsFile, `${JSON.stringify({ ...settings, repos: [{ path: project, ready: true }] }, null, 1)}\n`);
+		const fleetFile = join(AGENT, "remote", "fleet.json");
+		const lab = () => Object.values((existsSync(fleetFile) ? JSON.parse(readFileSync(fleetFile, "utf8")) : {}).machines ?? {}).find((machine) => machine.name === "lab");
+		const advert = await waitFor("lab's advert with the project in the hub's fleet", () => (lab()?.facts?.checkouts ?? []).some((checkout) => checkout.repoKey === repoKey) && lab(), 120_000, 3000);
+		const facts = advert.facts;
+		if (!advert.online) throw new Error("the hub records lab as offline while it is linked");
+		if (!["linux", "darwin", "win32", "other"].includes(facts.os)) throw new Error(`the advert names no operating system: ${JSON.stringify(facts.os)}`);
+		if (!facts.accepts?.jobs || !(facts.room >= 1)) throw new Error(`lab does not offer room for jobs: ${JSON.stringify({ accepts: facts.accepts, room: facts.room })}`);
+		if (facts.accepts.writes) throw new Error("lab advertises jobs that change files, which this build does not place");
+		// Nothing that names a place on lab's disk or an account crosses the link.
+		const sent = JSON.stringify(advert);
+		if (sent.includes(project) || sent.includes(state.remoteAgent)) throw new Error("the advert carries a path");
+		const modelFields = new Set(["provider", "modelClass", "access", "headroom"]);
+		if ((facts.models ?? []).some((model) => Object.keys(model).some((field) => !modelFields.has(field)))) throw new Error("the advert's model facts carry more than provider, class, access and headroom");
+		await type(state.main, "/chat root");
+		await waitFor("lab's roster row in plain words", () => /ready, \d+ free/.test(screen(state.main, 200)), 60_000, 3000, () => screen(state.main, 20));
+		return `lab advertises ${facts.os}, the project by identity and ${facts.room} free; its roster row says it`;
+	}),
+	scenario("s42", "a read-only job placed on a linked machine runs there once and its end comes back once", async () => {
+		if (!state.remoteAgent || !state.second) return { skipped: "s14 did not link a second machine" };
+		const marker = `live-job-${stamp}`;
+		const task = `What is 6 times 7? Answer with the number only. (ref ${marker})`;
+		await type(state.main, "/chat root");
+		await sleep(1500);
+		await type(state.main, `/remote run lab ${task}`);
+		const readRecords = (dir) => (existsSync(dir) ? readdirSync(dir).filter((name) => name.endsWith(".json")).map((name) => JSON.parse(readFileSync(join(dir, name), "utf8"))) : []);
+		const placed = () => readRecords(join(AGENT, "remote", "jobs", "out")).find((record) => record.offer?.instructions?.includes(marker));
+		const executed = () => readRecords(join(state.remoteAgent, "remote", "jobs", "in")).find((record) => record.offer?.instructions?.includes(marker));
+		const out = await waitFor("the placed job applied on the hub", () => (placed()?.appliedAt ? placed() : undefined), 300_000, 4000, () => screen(state.main, 20));
+		if (out.state !== "terminal" || out.outcome?.status !== "succeeded") throw new Error(`the job did not succeed: ${JSON.stringify({ state: out.state, outcome: out.outcome, refusal: out.refusal, ending: out.ending })}`);
+		if (out.conflict) throw new Error("the placer saw two different outcomes for one job");
+		if (!/42/.test(out.outcome.summary)) throw new Error(`the outcome does not carry the answer: ${String(out.outcome.summary).slice(0, 160)}`);
+		if (out.offer.envelope?.writes !== false) throw new Error("the job was placed with writes allowed");
+		// The executor admitted it once, finished it, and its outbox emptied on the placer's acknowledgement.
+		const inRecord = await waitFor("the executor's record acknowledged", () => {
+			const record = executed();
+			return record?.state === "terminal" && record.ackedSeq === record.seq && record.outbox.length === 0 ? record : undefined;
+		}, 60_000, 2000);
+		const admitted = readRecords(join(state.remoteAgent, "remote", "jobs", "in")).filter((record) => record.jobId === out.jobId).length;
+		if (admitted !== 1) throw new Error(`the executor holds ${admitted} records for one job`);
+		// The placer's managed lane reached its terminal from the outcome, once.
+		const laneEnds = lanes().filter((lane) => lane.laneId === out.laneId && /^(completed|succeeded)$/.test(String(lane.status)));
+		if (laneEnds.length === 0) throw new Error("the placer's lane for the job did not end as completed");
+		// The journals on both ends record the transitions, ids and codes only.
+		const journal = (agentDir) => {
+			const file = join(agentDir, "remote", "jobs", "journal.jsonl");
+			return existsSync(file) ? jsonl(file).filter((line) => line.jobId === out.jobId) : [];
+		};
+		const placerEvents = journal(AGENT).map((line) => line.event);
+		const executorEvents = journal(state.remoteAgent).map((line) => line.event);
+		for (const event of ["pending", "offered", "applied"]) if (!placerEvents.includes(event)) throw new Error(`the placer's journal has no ${event}: ${placerEvents.join(", ")}`);
+		for (const event of ["admitted", "finished", "delivered"]) if (!executorEvents.includes(event)) throw new Error(`the executor's journal has no ${event}: ${executorEvents.join(", ")}`);
+		if (placerEvents.filter((event) => event === "applied").length !== 1) throw new Error("the placer applied the job's end more than once");
+		const journals = JSON.stringify([journal(AGENT), journal(state.remoteAgent)]);
+		if (journals.includes(marker)) throw new Error("a journal carries the job's words");
+		// Negative control: job frames never become words on either side's chat or link channel.
+		for (const file of [join(AGENT, "remote", "chats", "lab.jsonl"), join(state.remoteAgent, "channels", "link.json")])
+			if (existsSync(file) && readFileSync(file, "utf8").includes(marker)) throw new Error(`the job reached a conversation: ${file.slice(RUN.length)}`);
+		return `lab ran the job once (seq ${inRecord.seq}, acknowledged), the hub applied its end once and the lane completed; no conversation carried it`;
 	}),
 	scenario("s9", "harness health across everything that ran", async () => {
 		await sleep(20_000);

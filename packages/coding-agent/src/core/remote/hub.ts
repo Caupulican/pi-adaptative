@@ -10,12 +10,13 @@ import { type FSWatcher, watch } from "node:fs";
 import { createServer, type Server, type Socket } from "node:net";
 import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import type { JobFrame, LinkPeerListener } from "./job-protocol.ts";
 import { type HubMachineLinkState, reportHubMachines } from "./link-context.ts";
 import {
-	commonFeatures,
 	encodeFrame,
 	hubFeatureProof,
 	hubProof,
+	isChatFrame,
 	joinProof,
 	LINK_PROTOCOL_VERSION,
 	LineBuffer,
@@ -29,7 +30,7 @@ import {
 	proofsMatch,
 } from "./protocol.ts";
 import { listHubMachines, loadLinkSettings, type MachineIdentity, nameBoundTo, updateHubMachine } from "./registry.ts";
-import { LINK_FEATURES, LinkFraming, SEALED_FEATURE, SealedLink } from "./session-keys.ts";
+import { LINK_FEATURES, LinkFraming, negotiateFeatures, SEALED_FEATURE, SealedLink } from "./session-keys.ts";
 
 const HANDSHAKE_MS = 10_000;
 const PING_EVERY_MS = 20_000;
@@ -60,6 +61,7 @@ export class RemoteHub {
 	private readonly identity: MachineIdentity;
 	private readonly events: RemoteHubEvents;
 	private readonly onUp: () => readonly string[];
+	private readonly peers: LinkPeerListener | undefined;
 	private server: Server | undefined;
 	/** Joined machines by install id. */
 	private readonly live = new Map<string, Live>();
@@ -72,11 +74,14 @@ export class RemoteHub {
 		identity: MachineIdentity;
 		events: RemoteHubEvents;
 		upSubtree?: () => readonly string[];
+		/** The job layer: told of every joined machine and handed its capability and job frames. */
+		peers?: LinkPeerListener;
 	}) {
 		this.agentDir = options.agentDir;
 		this.identity = options.identity;
 		this.events = options.events;
 		this.onUp = options.upSubtree ?? (() => []);
+		this.peers = options.peers;
 	}
 
 	listen(host: string, port: number): Promise<number> {
@@ -105,6 +110,7 @@ export class RemoteHub {
 		for (const [machineId, entry] of this.live) {
 			entry.socket.destroy();
 			this.live.delete(machineId);
+			this.peers?.down(machineId);
 		}
 		const server = this.server;
 		this.server = undefined;
@@ -142,15 +148,17 @@ export class RemoteHub {
 		return this.live.size === 0 ? 0 : 1 + Math.max(...[...this.live.values()].map((entry) => entry.depth));
 	}
 
-	/** Sends one message to a joined machine and returns its id; throws when the machine is not here. */
-	send(name: string, text: string): string {
+	/**
+	 * Sends one message to a joined machine and returns its id; throws when the machine is not here. `id` names the
+	 * message when the caller keeps a record under it, so the machine's reply carries the same id back.
+	 */
+	send(name: string, text: string, id: string = randomUUID()): string {
 		const entry = this.byName(name);
 		if (!entry) throw new Error(`${name} is not connected.`);
 		if (text.length === 0 || text.length > MAX_MESSAGE_CHARS)
 			throw new Error(`A message to ${name} is 1 to ${MAX_MESSAGE_CHARS} characters.`);
 		if (entry.socket.writableLength > MAX_QUEUED_BYTES)
 			throw new Error(`${name} is not keeping up; try again later.`);
-		const id = randomUUID();
 		if (!this.write(entry, { t: "msg", id, text }))
 			throw new Error(`The message to ${name} is too long for the link once encoded; send it in parts.`);
 		return id;
@@ -203,6 +211,14 @@ export class RemoteHub {
 		return true;
 	}
 
+	/** Writes a capability or job frame to the joined machine with this install id; false when it is not here or not carried. */
+	private sendJobFrame(machineId: string, socket: Socket, frame: JobFrame): boolean {
+		const entry = this.live.get(machineId);
+		if (!entry || entry.socket !== socket || socket.destroyed || socket.writableLength > MAX_QUEUED_BYTES)
+			return false;
+		return this.write(entry, frame);
+	}
+
 	private tick(): void {
 		const now = Date.now();
 		for (const entry of this.live.values()) {
@@ -231,6 +247,7 @@ export class RemoteHub {
 				this.live.delete(entry.machineId);
 				this.report();
 				this.events.presence(entry.name, false);
+				this.peers?.down(entry.machineId);
 			}
 		});
 		socket.write(
@@ -273,7 +290,8 @@ export class RemoteHub {
 					return;
 				}
 				entry.lastSeen = Date.now();
-				if (inner.t === "reply") this.events.reply(entry.name, inner.id, inner.text);
+				if (!isChatFrame(inner)) this.peers?.receive(entry.machineId, inner);
+				else if (inner.t === "reply") this.events.reply(entry.name, inner.id, inner.text);
 				else if (inner.t === "ping") this.write(entry, { t: "pong" });
 			}
 		});
@@ -292,7 +310,7 @@ export class RemoteHub {
 		if (hello.machineId === this.identity.machineId || hello.subtree.includes(this.identity.machineId))
 			return "would_loop";
 		if (hello.depth + 1 > MAX_LINK_DEPTH) return "too_deep";
-		const active = hello.features ? commonFeatures(LINK_FEATURES, hello.features) : [];
+		const active = hello.features ? negotiateFeatures(LINK_FEATURES, hello.features) : [];
 		const sealed = active.includes(SEALED_FEATURE);
 		// "protocol" is a refusal every build can read, so a machine on an older build still says why.
 		if (!sealed && loadLinkSettings(this.agentDir).requireSealed) return "protocol";
@@ -323,6 +341,7 @@ export class RemoteHub {
 						"hub",
 					)
 				: undefined,
+			active,
 		);
 		return {
 			socket,
@@ -342,10 +361,20 @@ export class RemoteHub {
 			depth: entry.depth,
 			sealed: entry.framing.isSealed,
 		});
-		this.live.get(entry.machineId)?.socket.destroy();
+		const previous = this.live.get(entry.machineId);
 		this.live.set(entry.machineId, entry);
+		previous?.socket.destroy();
+		if (previous) this.peers?.down(entry.machineId);
 		this.report();
 		this.events.presence(entry.name, true);
+		const { machineId, socket } = entry;
+		this.peers?.up({
+			machineId,
+			name: entry.name,
+			role: "joiner",
+			features: entry.features,
+			send: (frame) => this.sendJobFrame(machineId, socket, frame),
+		});
 	}
 
 	/** Writes the joined machines, by install id, where the owner's status and other sessions read them. */

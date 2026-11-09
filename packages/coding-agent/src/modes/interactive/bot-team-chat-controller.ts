@@ -37,7 +37,7 @@ import { runRemoteCommand } from "./remote-commands.ts";
 
 /** What the owner is told after a message went to a bot, in plain words (no mode names, no link labels). */
 function sentToBotText(agentId: string, result: BotOperatorMessageDispatchResult): string {
-	if (result.modelRef === "link/remote") return `Sent to ${agentId}; its answer will appear in its chat.`;
+	if (result.modelRef === "link/remote") return `Sent to ${agentId}; its answer comes back here.`;
 	const how: Record<BotOperatorMessageDispatchResult["mode"], string> = {
 		started: "it started on it",
 		followed_up: "added to its conversation",
@@ -60,7 +60,7 @@ export interface BotTeamChatSessionPort {
 	sendOperatorMessageToBot(
 		agentId: string,
 		message: string,
-		options?: { mode?: "follow_up" | "queue" | "start" },
+		options?: { mode?: "follow_up" | "queue" | "start"; answerInSession?: boolean },
 	): Promise<BotOperatorMessageDispatchResult>;
 	sendOperatorMessageToTeam(teamId: string, message: string): Promise<TeamOperatorMessageDispatchResult>;
 	readBotChatMessages(agentId: string, teamId?: string): AgentMessage[];
@@ -727,7 +727,9 @@ export class BotTeamChatController {
 		options: { refreshOnly?: boolean } = {},
 	): Promise<boolean> {
 		try {
-			const result = await this.host.getSessionPort().sendOperatorMessageToBot(agentId, body);
+			const result = await this.host.getSessionPort().sendOperatorMessageToBot(agentId, body, {
+				answerInSession: this.isRootChatActive(),
+			});
 			if (options.refreshOnly || !this.isRootChatActive()) {
 				await this.refreshActiveChatView();
 			}
@@ -905,7 +907,10 @@ export class BotTeamChatController {
 			this.host.showWarning("Usage: /bot msg|send|steer|queue <id> <text...>");
 			return;
 		}
-		const result = await port.sendOperatorMessageToBot(agentId, body, mode ? { mode } : undefined);
+		const result = await port.sendOperatorMessageToBot(agentId, body, {
+			...(mode ? { mode } : {}),
+			answerInSession: this.isRootChatActive(),
+		});
 		if (!this.isRootChatActive()) {
 			await this.refreshActiveChatView();
 		}

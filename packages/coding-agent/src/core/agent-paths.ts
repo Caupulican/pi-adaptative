@@ -120,6 +120,8 @@ export const AGENT_ROOT_DIRECTORY_NAMES = [
 	"worktrees",
 	// Channel tokens and per-channel journals (`channels/<name>.json`).
 	"channels",
+	// The remote link: this machine's identity, the hub's config and joined machines' secrets, joins, chats and the host lock.
+	"remote",
 ] as const;
 
 const AGENT_ROOT_ENTRY_NAMES = new Set<string>([...AGENT_ROOT_FILE_NAMES, ...AGENT_ROOT_DIRECTORY_NAMES]);

@@ -2,21 +2,25 @@
  * A session's hub: the machines the owner let join, shown as bots with a remote mark. It owns what survives a restart (where it
  * listens, who may join, each machine's chat log) and nothing about how a message is answered: the machine does that.
  * One root session per agent directory hosts it (`host-lock.ts`); the others do not bind the port, read the hosting
- * session's records for status, and take the hub over when that session lets it go.
+ * session's records for status, and take the hub over when that session lets it go. It also owns the session's remote
+ * work placement (`remote-jobs.ts`): the hosting session's hub carries the job frames of its joined machines.
  */
 
-import { appendFileSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { AssistantMessage, UserMessage } from "@caupulican/pi-ai";
 import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
 import { warmHostIdentity } from "../../kernel/reliability/host-identity.ts";
+import type { ManagedLaneView } from "../delegation/managed-lane-views.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { type HostLock, type LinkHostOwner, linkHostOwner, takeHostLock, watchHostLockRelease } from "./host-lock.ts";
 import { RemoteHub } from "./hub.ts";
+import { JobTransport } from "./job-transport.ts";
 import { type HubMachineLinkState, hubMachinesFor, provideLinkContext } from "./link-context.ts";
+import { MachineChatLog } from "./machine-chat-log.ts";
 import {
 	addHubMachine,
 	formatJoinToken,
@@ -24,11 +28,12 @@ import {
 	listHubMachines,
 	loadIdentity,
 	type MachineIdentity,
+	rotateHubMachine,
 	updateHubMachine,
 } from "./registry.ts";
+import { type RemoteJobPorts, RemoteJobs, type RemoteRosterWords } from "./remote-jobs.ts";
 import { SEALED_FEATURE } from "./session-keys.ts";
 
-const MAX_LOGGED = 200;
 const DEFAULT_PORT = 7788;
 const DEFAULT_HOST = "127.0.0.1";
 
@@ -38,17 +43,13 @@ interface HubConfig {
 	readonly enabled: boolean;
 }
 
-interface LoggedMessage {
-	readonly at: number;
-	readonly from: "hub" | "machine";
-	readonly text: string;
-}
-
 export interface RemoteHubControllerDeps {
 	readonly agentDir: string;
 	readonly getStore: () => PersistentBotTeamStore;
 	/** A machine arrived or left: its bot is touched so the roster follows. */
 	readonly changed: (machine: string) => void;
+	/** The session's worker ports for remote work placement; absent, this session neither places nor runs jobs. */
+	readonly jobs?: RemoteJobPorts;
 }
 
 export class RemoteHubController {
@@ -56,13 +57,29 @@ export class RemoteHubController {
 	private hub: RemoteHub | undefined;
 	private listeningOn: { host: string; port: number } | undefined;
 	private readonly identity: MachineIdentity;
+	private readonly chats: MachineChatLog;
 	private upSubtree: () => readonly string[] = () => [];
 	private hostLock: HostLock | undefined;
 	private stopWatchingHost: (() => void) | undefined;
+	private transport: JobTransport | undefined;
+	/** The session's remote work placement, when it has worker ports. */
+	readonly jobs: RemoteJobs | undefined;
 
 	constructor(deps: RemoteHubControllerDeps) {
 		this.deps = deps;
 		this.identity = loadIdentity(deps.agentDir);
+		this.chats = new MachineChatLog(deps.agentDir);
+		this.jobs = deps.jobs
+			? new RemoteJobs(
+					deps.agentDir,
+					() => this.identity,
+					deps.jobs,
+					() => {
+						for (const machine of listHubMachines(deps.agentDir))
+							if (!machine.revoked) deps.changed(machine.name);
+					},
+				)
+			: undefined;
 		provideLinkContext(deps.agentDir, {
 			subtree: () => this.reachableIds(),
 			depth: () => this.chainDepth(),
@@ -84,6 +101,8 @@ export class RemoteHubController {
 	 */
 	async start(): Promise<string | undefined> {
 		const config = this.readConfig();
+		// Placement and the job runner start only on a machine the owner linked (a hub on, a hub joined).
+		if (config?.enabled || RemoteJobs.linked(this.deps.agentDir)) this.jobs?.start();
 		// A hub the owner never turned on has nothing to host and nothing to wait for: no lock, no watch, no OS lookup.
 		if (!config?.enabled) return undefined;
 		try {
@@ -110,6 +129,7 @@ export class RemoteHubController {
 		const closing = this.closeHub();
 		this.hostLock?.release();
 		this.hostLock = undefined;
+		this.jobs?.dispose();
 		await closing;
 	}
 
@@ -117,6 +137,8 @@ export class RemoteHubController {
 		await this.hub?.close();
 		this.hub = undefined;
 		this.listeningOn = undefined;
+		this.transport?.dispose();
+		this.transport = undefined;
 	}
 
 	/** Holds the link host for this agent directory (keeping a hold this session already has); false when another does. */
@@ -182,12 +204,20 @@ export class RemoteHubController {
 		await this.closeHub();
 		await warmHostIdentity();
 		if (!this.takeHost()) throw new Error(hostedElsewhereText(linkHostOwner(this.deps.agentDir), "listen there"));
+		this.jobs?.start();
+		const transport = new JobTransport({
+			agentDir: this.deps.agentDir,
+			selfId: this.identity.machineId,
+			onFleetChange: () => this.jobs?.machines.notify(),
+		});
+		this.transport = transport;
 		const hub = new RemoteHub({
 			agentDir: this.deps.agentDir,
 			identity: this.identity,
 			upSubtree: () => this.upSubtree(),
+			peers: transport,
 			events: {
-				reply: (machine, _id, text) => this.received(machine, text),
+				reply: (machine, id, text) => this.received(machine, id, text),
 				presence: (machine) => this.deps.changed(machine),
 			},
 		});
@@ -198,6 +228,8 @@ export class RemoteHubController {
 			// A hub that cannot bind hosts nothing: the next session to start may host it.
 			this.hostLock?.release();
 			this.hostLock = undefined;
+			transport.dispose();
+			this.transport = undefined;
 			throw error;
 		}
 		harnessLog.info("link", "the hub is listening", { host, port: bound });
@@ -254,6 +286,17 @@ export class RemoteHubController {
 		return this.hub ? this.hub.isConnected(agentId) : this.hostedMachines().has(agentId);
 	}
 
+	/** A joined machine's roster row from facts: connected or not, the jobs placed there, its room. */
+	rosterWords(agentId: string): RemoteRosterWords {
+		const online = this.isOnline(agentId);
+		return this.jobs?.rosterWords(agentId, online) ?? { state: online ? "idle" : "offline" };
+	}
+
+	/** A worker row of a job placed on another machine, in plain words; any other row as it is. */
+	describeLane(view: ManagedLaneView): ManagedLaneView {
+		return this.jobs?.describeLane(view) ?? view;
+	}
+
 	/** Lets a machine join as a bot named `name`; the token goes to the owner once, to carry to that machine. */
 	add(name: string): { token: string; address: string } {
 		const { record } = addHubMachine(this.deps.agentDir, name);
@@ -282,28 +325,63 @@ export class RemoteHubController {
 		if (!record) return false;
 		this.hub?.disconnect(name);
 		this.deps.getStore().retireBot(name);
+		// A revoke is not a lost link: the machine's jobs end now instead of waiting out the offline hold.
+		if (record.machineId) this.jobs?.client.revokeMachine(record.machineId);
 		return true;
 	}
 
-	/** Sends the owner's (or the orchestrator's) words to a joined machine; its answer arrives into the machine's chat. */
+	/**
+	 * Gives a joined machine a new secret and cuts its connection; it joins again with the new token. Its install id is
+	 * kept, so its jobs survive. The token goes to the owner once.
+	 */
+	rotate(name: string): { token: string } | undefined {
+		const record = rotateHubMachine(this.deps.agentDir, name);
+		if (!record) return undefined;
+		this.hub?.disconnect(name);
+		harnessLog.info("link", "a joined machine's secret was rotated", { machine: name });
+		return { token: formatJoinToken(this.identity.name, name, record.secret) };
+	}
+
+	private requireHub(name: string): RemoteHub {
+		if (this.hub) return this.hub;
+		const elsewhere = this.hostedElsewhere();
+		throw new Error(
+			elsewhere
+				? hostedElsewhereText(elsewhere, `message ${name} from there`)
+				: "This session is not a hub: turn it on with /remote listen.",
+		);
+	}
+
+	/** Sends the owner's own words to a joined machine; its answer arrives into the machine's chat, live where it is open. */
 	send(name: string, text: string): string {
-		if (!this.hub) {
-			const elsewhere = this.hostedElsewhere();
-			throw new Error(
-				elsewhere
-					? hostedElsewhereText(elsewhere, `message ${name} from there`)
-					: "This session is not a hub: turn it on with /remote listen.",
-			);
-		}
-		const id = this.hub.send(name, text);
+		const id = this.requireHub(name).send(name, text);
 		harnessLog.debug("link", "a message was sent to a machine", { machine: name, chars: text.length });
-		this.log(name, { at: Date.now(), from: "hub", text });
+		this.chats.append(name, { at: Date.now(), from: "hub", text, id });
 		return id;
+	}
+
+	/**
+	 * Asks a joined machine on behalf of the orchestrator: a conversation turn that is a lane (`RemoteJobClient.ask`), so
+	 * the answer, or the machine going silent, offline or revoked, ends the lane and reaches the asking session through
+	 * the one terminal notification every worker uses. Returns the turn's id; throws with the reason when it is refused.
+	 */
+	async ask(name: string, text: string): Promise<string> {
+		const hub = this.requireHub(name);
+		const machine = this.jobs?.machines.byName(name);
+		// A session without worker ports places no lanes: the words still go, and the answer is chat only.
+		if (!this.jobs || !machine) return this.send(name, text);
+		const placed = await this.jobs.client.ask(machine, text, {}, (id) => {
+			hub.send(name, text, id);
+		});
+		if (placed.kind === "refused") throw new Error(placed.reason);
+		harnessLog.debug("link", "a conversation turn was placed on a machine", { machine: name, chars: text.length });
+		this.chats.append(name, { at: Date.now(), from: "hub", text, id: placed.handle.jobId });
+		return placed.handle.jobId;
 	}
 
 	/** The machine's chat, as the bot chat shows any bot's: the owner's words as user messages, the machine's as replies. */
 	chat(name: string): AgentMessage[] {
-		return this.readLog(name).map((entry): AgentMessage => {
+		return this.chats.read(name).map((entry): AgentMessage => {
 			if (entry.from === "hub") {
 				const message: UserMessage = {
 					role: "user",
@@ -326,41 +404,13 @@ export class RemoteHubController {
 		});
 	}
 
-	private received(machine: string, text: string): void {
+	private received(machine: string, id: string, text: string): void {
 		harnessLog.debug("link", "a machine answered", { machine, chars: text.length });
-		this.log(machine, { at: Date.now(), from: "machine", text });
+		this.chats.append(machine, { at: Date.now(), from: "machine", text, id });
 		this.deps.getStore().upsertBot({ agentId: machine, lastSummary: text, lastMessageAt: Date.now() });
-	}
-
-	private logPath(name: string): string {
-		return join(this.deps.agentDir, "remote", "chats", `${name}.jsonl`);
-	}
-
-	private log(name: string, entry: LoggedMessage): void {
-		const path = this.logPath(name);
-		mkdirSync(join(this.deps.agentDir, "remote", "chats"), { recursive: true });
-		appendFileSync(path, `${JSON.stringify(entry)}\n`, { mode: 0o600 });
-	}
-
-	private readLog(name: string): LoggedMessage[] {
-		const path = this.logPath(name);
-		if (!existsSync(path)) return [];
-		return readFileSync(path, "utf8")
-			.split("\n")
-			.flatMap((line): LoggedMessage[] => {
-				try {
-					const value: unknown = JSON.parse(line);
-					return isPlainRecord(value) &&
-						typeof value.at === "number" &&
-						(value.from === "hub" || value.from === "machine") &&
-						typeof value.text === "string"
-						? [{ at: value.at, from: value.from, text: value.text }]
-						: [];
-				} catch {
-					return [];
-				}
-			})
-			.slice(-MAX_LOGGED);
+		// A reply to a conversation turn the orchestrator placed is that lane's end.
+		const machineId = this.jobs?.machines.byName(machine)?.machineId;
+		if (machineId) this.jobs?.client.completeAsk(machineId, id, text);
 	}
 
 	private readConfig(): HubConfig | undefined {

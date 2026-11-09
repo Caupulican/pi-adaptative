@@ -20,7 +20,6 @@ import { dirname, join } from "path";
 import { CONFIG_DIR_NAME, getAgentDir, getBinDir } from "./config.ts";
 import {
 	botTeamStoreFile,
-	channelsDir,
 	configBackupsDir,
 	directoryProfilesDir,
 	extensionStateDir,
@@ -523,23 +522,25 @@ function restoreMisplacedCanonicalRoot(agentDir: string, name: string): void {
 }
 
 /**
- * Builds that did not declare `channels` a root entry archived it (channel tokens and journals) under
- * `state/legacy-layout/channels` on every start, while the running channels wrote a new one. Move each archived
- * top-level file back unless the live directory already has a file of that name; a live file is never replaced.
+ * Builds that did not declare a directory a root entry (`channels`, `remote`) archived it under `state/legacy-layout/<name>`
+ * on every start, while the running code wrote a new one. Move each archived top-level entry back unless the live
+ * directory already has one of that name; a live entry is never replaced. Channel tokens and journals are files; the
+ * remote link also keeps a directory (`chats`).
  */
-function restoreArchivedChannelFiles(agentDir: string): void {
-	const archived = stateFile(agentDir, "legacy-layout", "channels");
+function restoreArchivedRootEntries(agentDir: string, name: string, options: { directories: boolean }): void {
+	const archived = stateFile(agentDir, "legacy-layout", name);
 	if (!existsSync(archived)) return;
 	const archivedStats = lstatSync(archived);
 	if (!archivedStats.isDirectory() || archivedStats.isSymbolicLink()) return;
-	const live = channelsDir(agentDir);
+	const live = join(agentDir, name);
 	mkdirSync(live, { recursive: true });
 	for (const entry of readdirSync(archived).slice(0, MAX_LEGACY_DIRECTORY_ENTRIES_TO_MIGRATE)) {
 		const source = join(archived, entry);
 		const target = join(live, entry);
 		try {
 			const stats = lstatSync(source);
-			if (!stats.isFile() || stats.isSymbolicLink() || existsSync(target)) continue;
+			if (stats.isSymbolicLink() || existsSync(target)) continue;
+			if (!(stats.isFile() || (options.directories && stats.isDirectory()))) continue;
 			renameSync(source, target);
 		} catch {}
 	}
@@ -659,7 +660,10 @@ export function migrateAgentDirLayout(agentDir: string): void {
 		restoreMisplacedCanonicalRoot(agentDir, "memory");
 	} catch {}
 	try {
-		restoreArchivedChannelFiles(agentDir);
+		restoreArchivedRootEntries(agentDir, "channels", { directories: false });
+	} catch {}
+	try {
+		restoreArchivedRootEntries(agentDir, "remote", { directories: true });
 	} catch {}
 	pruneEmptySessionNamespaces(agentDir);
 }

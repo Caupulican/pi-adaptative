@@ -8,8 +8,9 @@
 import { randomUUID } from "node:crypto";
 import { chmodSync, existsSync, linkSync, mkdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { hostname } from "node:os";
-import { dirname, join } from "node:path";
+import { dirname, isAbsolute, join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { restrictWindowsToCurrentUser } from "../util/windows-user-acl.ts";
 import { isMachineName, newSecret } from "./protocol.ts";
@@ -39,6 +40,26 @@ export interface JoinRecord {
 	readonly secret: string;
 }
 
+/** A checkout this machine offers to placed jobs, by path; its identity is computed (`repo-identity.ts`). */
+export interface LinkRepoSetting {
+	readonly path: string;
+	/** Whether the checkout is prepared for work (installed dependencies); a job never runs a setup command. */
+	readonly ready?: boolean;
+}
+
+/** How far this machine lets a peer's jobs reach here: an answer only, reads of offered checkouts, or changes too. */
+export type LinkPeerTrust = "answers" | "reads" | "changes";
+export const LINK_PEER_TRUSTS: readonly LinkPeerTrust[] = ["answers", "reads", "changes"];
+
+/** The owner's choices about one peer, keyed by its machine id. */
+export interface LinkPeerSettings {
+	/** Whether this machine runs jobs the peer places; absent takes the default (yes from the hub it joined). */
+	readonly acceptsJobs?: boolean;
+	readonly trust?: LinkPeerTrust;
+	/** No new job is placed on the peer while held; jobs already there continue. */
+	readonly hold?: boolean;
+}
+
 /** Owner-set behaviour of the link on this machine (`remote/settings.json`). */
 export interface LinkSettings {
 	/**
@@ -46,7 +67,18 @@ export interface LinkSettings {
 	 * machine on an older build keeps linking unsealed.
 	 */
 	readonly requireSealed: boolean;
+	/** Checkouts placed jobs may read here. None by default: a peer can then only ask for an answer. */
+	readonly repos: readonly LinkRepoSetting[];
+	readonly peers: Readonly<Record<string, LinkPeerSettings>>;
+	/** How long a job placed on a peer that went offline waits for it to come back before it ends as unreachable. */
+	readonly offlineHoldMs: number;
+	/** How many placed jobs this machine runs at once. */
+	readonly jobRoom: number;
 }
+
+export const DEFAULT_OFFLINE_HOLD_MS = 600_000;
+export const DEFAULT_JOB_ROOM = 2;
+const MAX_LINK_REPOS = 32;
 
 const dirOf = (agentDir: string): string => join(agentDir, "remote");
 const WIN32 = process.platform === "win32";
@@ -100,9 +132,68 @@ function readJson(path: string, holdsSecret = true): unknown {
 	}
 }
 
+function readPeerSettings(value: unknown): LinkPeerSettings | undefined {
+	if (!isPlainRecord(value)) return undefined;
+	const trust = LINK_PEER_TRUSTS.find((level) => level === value.trust);
+	return {
+		...(typeof value.acceptsJobs === "boolean" ? { acceptsJobs: value.acceptsJobs } : {}),
+		...(trust ? { trust } : {}),
+		...(value.hold === true ? { hold: true } : {}),
+	};
+}
+
+function boundedInteger(value: unknown, min: number, max: number, fallback: number): number {
+	return typeof value === "number" && Number.isSafeInteger(value) && value >= min && value <= max ? value : fallback;
+}
+
 export function loadLinkSettings(agentDir: string): LinkSettings {
 	const stored = readJson(join(dirOf(agentDir), "settings.json"), false);
-	return { requireSealed: isPlainRecord(stored) && stored.requireSealed === true };
+	const record = isPlainRecord(stored) ? stored : {};
+	const repos = Array.isArray(record.repos)
+		? record.repos
+				.flatMap((entry): LinkRepoSetting[] =>
+					isPlainRecord(entry) && typeof entry.path === "string" && isAbsolute(entry.path)
+						? [{ path: entry.path, ...(entry.ready === true ? { ready: true } : {}) }]
+						: [],
+				)
+				.slice(0, MAX_LINK_REPOS)
+		: [];
+	const peers: Record<string, LinkPeerSettings> = {};
+	if (isPlainRecord(record.peers))
+		for (const [machineId, value] of Object.entries(record.peers)) {
+			const peer = readPeerSettings(value);
+			if (peer) peers[machineId] = peer;
+		}
+	return {
+		requireSealed: record.requireSealed === true,
+		repos,
+		peers,
+		offlineHoldMs: boundedInteger(record.offlineHoldMs, 0, 24 * 60 * 60_000, DEFAULT_OFFLINE_HOLD_MS),
+		jobRoom: boundedInteger(record.jobRoom, 0, 16, DEFAULT_JOB_ROOM),
+	};
+}
+
+/**
+ * Changes the owner's choices about one peer in `remote/settings.json`, leaving every other key as the owner wrote it.
+ * Under the settings file's lock, so two sessions changing two peers keep both.
+ */
+export function updateLinkPeerSettings(
+	agentDir: string,
+	machineId: string,
+	change: LinkPeerSettings,
+): LinkPeerSettings {
+	const path = join(dirOf(agentDir), "settings.json");
+	mkdirSync(dirOf(agentDir), { recursive: true });
+	return withFileLockSync(path, () => {
+		const stored = readJson(path, false);
+		const record = isPlainRecord(stored) ? { ...stored } : {};
+		const peers = isPlainRecord(record.peers) ? { ...record.peers } : {};
+		const next = { ...(readPeerSettings(peers[machineId]) ?? {}), ...change };
+		peers[machineId] = next;
+		record.peers = peers;
+		writeFileAtomicSync(path, `${JSON.stringify(record, null, 1)}\n`);
+		return next;
+	});
 }
 
 function sanitizeName(raw: string): string {
@@ -212,6 +303,16 @@ export function updateHubMachine(
 		machines.map((machine, i) => (i === index ? next : machine)),
 	);
 	return next;
+}
+
+/**
+ * Gives a joined machine a new secret under the same name and install id: the old secret stops proving anything at the
+ * next handshake, and every job keyed by the machine's id survives. The secret is returned once, for the owner to carry.
+ */
+export function rotateHubMachine(agentDir: string, name: string): HubMachineRecord | undefined {
+	const current = listHubMachines(agentDir).find((machine) => machine.name === name);
+	if (!current || current.revoked) return undefined;
+	return updateHubMachine(agentDir, name, { secret: newSecret() });
 }
 
 export function listJoins(agentDir: string): JoinRecord[] {

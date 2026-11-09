@@ -8,6 +8,7 @@
 
 import { createHmac, randomBytes, timingSafeEqual } from "node:crypto";
 import { isPlainRecord } from "../util/value-guards.ts";
+import type { JobFrame } from "./job-protocol.ts";
 
 export const LINK_PROTOCOL_VERSION = 1;
 /** A frame longer than this many UTF-8 bytes closes the connection; a sender refuses to write one. */
@@ -53,8 +54,18 @@ export type LinkFrame =
 	/** A frame after the welcome on a sealed link: `s` counts this direction's frames from 1, `c` is the sealed inner frame. */
 	| { readonly t: "sealed"; readonly s: number; readonly c: string };
 
-/** The frames a sealed link carries inside `sealed`; the handshake never travels sealed. */
-export type LinkInnerFrame = Extract<LinkFrame, { t: "msg" | "reply" | "ping" | "pong" }>;
+/** The chat frames every version of the link carries after the welcome. */
+export type LinkChatFrame = Extract<LinkFrame, { t: "msg" | "reply" | "ping" | "pong" }>;
+
+/**
+ * The frames carried after the welcome: chat, and on a sealed link that negotiated them the capability and job frames
+ * (`job-protocol.ts`). The handshake never travels sealed.
+ */
+export type LinkInnerFrame = LinkChatFrame | JobFrame;
+
+export function isChatFrame(frame: LinkFrame | LinkInnerFrame): frame is LinkChatFrame {
+	return frame.t === "msg" || frame.t === "reply" || frame.t === "ping" || frame.t === "pong";
+}
 
 /** Fixed phrases: a refusal never carries the other side's text. */
 export type LinkRefusal =

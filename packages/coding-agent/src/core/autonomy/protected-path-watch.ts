@@ -41,6 +41,8 @@ const HOST_WRITTEN_AGENT_ROOT_ENTRIES: ReadonlySet<string> = new Set<string>([
 	"git",
 	"worktrees",
 	"channels",
+	// The link's identity, joins, chats, job records and host lock: the hub and the job runner write them while any lane runs.
+	"remote",
 	"auth.json",
 	"MEMORY.md",
 	"USER.md",

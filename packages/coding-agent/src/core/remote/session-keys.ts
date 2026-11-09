@@ -9,11 +9,31 @@
  */
 
 import { createCipheriv, createDecipheriv, createHash, hkdfSync } from "node:crypto";
-import { encodeFrame, type LinkFrame, type LinkInnerFrame, MAX_FRAME_BYTES, parseFrame } from "./protocol.ts";
+import { CAP_FEATURE, featureOfJobFrame, JOBS_FEATURE, parseJobFrame } from "./job-protocol.ts";
+import {
+	commonFeatures,
+	encodeFrame,
+	isChatFrame,
+	type LinkFrame,
+	type LinkInnerFrame,
+	MAX_FRAME_BYTES,
+	parseFrame,
+} from "./protocol.ts";
 
 export const SEALED_FEATURE = "sealed/1";
 /** What this build offers in `challenge` and `hello`. */
-export const LINK_FEATURES: readonly string[] = [SEALED_FEATURE];
+export const LINK_FEATURES: readonly string[] = [SEALED_FEATURE, CAP_FEATURE, JOBS_FEATURE];
+/** Features that travel only inside sealed frames: without `sealed/1` they are never active. */
+const SEALED_ONLY: readonly string[] = [CAP_FEATURE, JOBS_FEATURE];
+
+/**
+ * The features active on a connection: the ones both sides offered, less every feature that needs a sealed link when
+ * `sealed/1` is not among them. The hub answers with this list; the joiner accepts a welcome only within it.
+ */
+export function negotiateFeatures(ours: readonly string[], theirs: readonly string[]): string[] {
+	const common = commonFeatures(ours, theirs);
+	return common.includes(SEALED_FEATURE) ? common : common.filter((feature) => !SEALED_ONLY.includes(feature));
+}
 
 const KEY_BYTES = 32;
 const TAG_BYTES = 16;
@@ -125,31 +145,49 @@ export class SealedLink {
 			return "tag";
 		}
 		this.received = frame.s;
-		const inner = parseFrame(plain.toString("utf8"));
-		return inner && (inner.t === "msg" || inner.t === "reply" || inner.t === "ping" || inner.t === "pong")
-			? inner
-			: "inner";
+		return parseInnerFrame(plain.toString("utf8")) ?? "inner";
+	}
+}
+
+/** A chat frame, or a capability or job frame, from the plain text of a sealed frame. */
+function parseInnerFrame(text: string): LinkInnerFrame | undefined {
+	const chat = parseFrame(text);
+	if (chat) return isChatFrame(chat) ? chat : undefined;
+	try {
+		return parseJobFrame(JSON.parse(text));
+	} catch {
+		return undefined;
 	}
 }
 
 /**
  * How one end writes and reads the frames after the welcome: sealed when both sides negotiated `sealed/1`, plain for
  * a peer on the first version of the link. A sealed link refuses every plain frame, and a plain one every sealed frame.
+ * A capability or job frame passes only when its feature is active on this connection, in either direction.
  */
 export class LinkFraming {
 	private readonly sealed: SealedLink | undefined;
+	private readonly features: readonly string[];
 
-	constructor(sealed: SealedLink | undefined) {
+	constructor(sealed: SealedLink | undefined, features: readonly string[] = []) {
 		this.sealed = sealed;
+		this.features = sealed ? features : features.filter((feature) => !SEALED_ONLY.includes(feature));
 	}
 
 	get isSealed(): boolean {
 		return this.sealed !== undefined;
 	}
 
-	/** The line to write for one frame, or undefined when it would pass the frame bound. */
+	/** Whether this connection may carry `frame`: chat always, a capability or job frame only under its feature. */
+	carries(frame: LinkInnerFrame): boolean {
+		return isChatFrame(frame) || this.features.includes(featureOfJobFrame(frame));
+	}
+
+	/** The line to write for one frame, or undefined when it would pass the frame bound or its feature is not active. */
 	encode(frame: LinkInnerFrame): string | undefined {
+		if (!this.carries(frame)) return undefined;
 		if (this.sealed) return this.sealed.seal(frame);
+		if (!isChatFrame(frame)) return undefined;
 		const line = encodeFrame(frame);
 		// The bound the reading side enforces, in UTF-8 bytes (the newline included).
 		return Buffer.byteLength(line, "utf8") <= MAX_FRAME_BYTES ? line : undefined;
@@ -157,7 +195,10 @@ export class LinkFraming {
 
 	/** The frame a received one carries, or why it is refused. */
 	decode(frame: LinkFrame): LinkInnerFrame | SealedOpenFailure {
-		if (this.sealed) return this.sealed.open(frame);
-		return frame.t === "msg" || frame.t === "reply" || frame.t === "ping" || frame.t === "pong" ? frame : "inner";
+		if (this.sealed) {
+			const inner = this.sealed.open(frame);
+			return typeof inner === "string" || this.carries(inner) ? inner : "inner";
+		}
+		return isChatFrame(frame) ? frame : "inner";
 	}
 }

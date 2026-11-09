@@ -6,11 +6,13 @@
 
 import { createConnection, type Socket } from "node:net";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import type { JobFrame, LinkPeerListener } from "./job-protocol.ts";
 import {
 	commonFeatures,
 	encodeFrame,
 	hubFeatureProof,
 	hubProof,
+	isChatFrame,
 	joinProof,
 	LineBuffer,
 	type LinkFrame,
@@ -23,7 +25,7 @@ import {
 	REFUSAL_TEXT,
 } from "./protocol.ts";
 import { type JoinRecord, type MachineIdentity, parseAddress } from "./registry.ts";
-import { LINK_FEATURES, LinkFraming, SEALED_FEATURE, SealedLink } from "./session-keys.ts";
+import { LINK_FEATURES, LinkFraming, negotiateFeatures, SEALED_FEATURE, SealedLink } from "./session-keys.ts";
 
 const HANDSHAKE_MS = 10_000;
 const SILENCE_MS = 60_000;
@@ -68,6 +70,7 @@ export class LinkClient {
 	private readonly subtree: () => readonly string[];
 	private readonly depth: () => number;
 	private readonly requireSealed: () => boolean;
+	private readonly peers: LinkPeerListener | undefined;
 	private socket: Socket | undefined;
 	private stopped = false;
 	private attempt = 0;
@@ -86,6 +89,8 @@ export class LinkClient {
 		depth?: () => number;
 		/** Whether this machine refuses a hub that does not seal the link (read at each welcome). */
 		requireSealed?: () => boolean;
+		/** The job layer: told when the hub is proven or lost and handed its capability and job frames. */
+		peers?: LinkPeerListener;
 	}) {
 		this.join = options.join;
 		this.identity = options.identity;
@@ -93,6 +98,7 @@ export class LinkClient {
 		this.subtree = options.subtree ?? (() => []);
 		this.depth = options.depth ?? (() => 0);
 		this.requireSealed = options.requireSealed ?? (() => false);
+		this.peers = options.peers;
 	}
 
 	get address(): string {
@@ -110,6 +116,9 @@ export class LinkClient {
 		this.retry = undefined;
 		this.socket?.destroy();
 		this.socket = undefined;
+		if (this.hub) this.peers?.down(this.hub.id);
+		this.hub = undefined;
+		this.framing = undefined;
 	}
 
 	/**
@@ -128,6 +137,15 @@ export class LinkClient {
 		}
 		const line = this.framing.encode({ t: "reply", id, text });
 		if (line === undefined) throw new Error("the answer is too long for the link once encoded");
+		socket.write(line);
+		return true;
+	}
+
+	/** Writes a capability or job frame to the hub proven on `socket`; false once that connection is gone or does not carry it. */
+	private sendJobFrame(socket: Socket, frame: JobFrame): boolean {
+		if (this.socket !== socket || socket.destroyed || !this.framing || !this.hub) return false;
+		const line = this.framing.encode(frame);
+		if (line === undefined) return false;
 		socket.write(line);
 		return true;
 	}
@@ -191,6 +209,7 @@ export class LinkClient {
 			// A superseded connection closing must not clear the hub the current one proved or schedule a second retry.
 			const current = this.socket === socket;
 			if (current) this.socket = undefined;
+			if (current && welcomed && challenger) this.peers?.down(challenger.id);
 			if (this.stopped || !current) return;
 			// A refusal that retrying cannot change waits for the owner; a lost connection is retried.
 			if (closeReason) this.wait(closeReason.text, closeReason.permanent);
@@ -262,7 +281,8 @@ export class LinkClient {
 						const active = frame.features ?? [];
 						// The hub may confirm only what both offered; a hub that offered sealing confirms it.
 						if (
-							commonFeatures(active, commonFeatures(LINK_FEATURES, challenger.features)).length !== active.length
+							commonFeatures(active, negotiateFeatures(LINK_FEATURES, challenger.features)).length !==
+							active.length
 						)
 							return failed("the hub confirmed a feature that was not offered");
 						const sealed = active.includes(SEALED_FEATURE);
@@ -293,6 +313,7 @@ export class LinkClient {
 										"joiner",
 									)
 								: undefined,
+							active,
 						);
 						this.hub = { id: challenger.id, name: challenger.name };
 						welcomed = true;
@@ -304,6 +325,13 @@ export class LinkClient {
 							hubName: this.hub.name,
 							hubId: this.hub.id,
 							features: active,
+						});
+						this.peers?.up({
+							machineId: challenger.id,
+							name: challenger.name,
+							role: "hub",
+							features: active,
+							send: (frame) => this.sendJobFrame(socket, frame),
 						});
 						break;
 					}
@@ -333,7 +361,8 @@ export class LinkClient {
 			socket.destroy();
 			return false;
 		}
-		if (inner.t === "msg") this.events.message(hub.id, hub.name, inner.id, inner.text);
+		if (!isChatFrame(inner)) this.peers?.receive(hub.id, inner);
+		else if (inner.t === "msg") this.events.message(hub.id, hub.name, inner.id, inner.text);
 		else if (inner.t === "ping") {
 			const pong = framing.encode({ t: "pong" });
 			if (pong !== undefined) socket.write(pong);
