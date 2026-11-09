@@ -160,6 +160,14 @@ export const SCORE_CONFIDENCE_FLOOR = 0.5;
 export const SCORE_BOUNDARY_MASS = 0.7;
 
 /**
+ * A plan vote's rubric criterion (S6): met when the Score mass at level 2 or above reaches {@link RUBRIC_MEET_MASS}, failed
+ * when that mass is at most {@link RUBRIC_FAIL_MASS}, open between. These are the owner's orchestration cuts (accept at 0.90,
+ * require absence at 0.10), so the rubric does not use the score floors above.
+ */
+export const RUBRIC_MEET_MASS = 0.9;
+export const RUBRIC_FAIL_MASS = 0.1;
+
+/**
  * The steering plane's floor on a Choice, Score or Set answer by consequence: below it the answer is a
  * doubt and a pass becomes `gather_more`. Unmeasured.
  */

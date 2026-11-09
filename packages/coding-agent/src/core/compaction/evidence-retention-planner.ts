@@ -43,11 +43,22 @@ export interface CompactionAuditStats {
 	readonly failureReason?: string;
 }
 
-/** A retention answer: the engine's probability that the call or its exact result is still worth keeping. */
+/**
+ * An answer to one question of a program. A noul question's answer is its probability that the claim is true (for
+ * retention, that the call or its exact result is still worth keeping). A Choice, Score or Set question's answer carries
+ * the engine's selected option, value, members and distribution, as the consumer asked for them.
+ */
 export interface RetentionAnswer {
 	readonly type?: string;
 	readonly noul?: number;
 	readonly probabilityTrue?: number;
+	readonly choice?: string;
+	readonly score?: number;
+	readonly selected?: readonly string[];
+	readonly probabilities?: Readonly<Record<string, number>>;
+	readonly memberships?: Readonly<Record<string, number>>;
+	readonly unsettled?: readonly string[];
+	readonly confidence?: number;
 }
 
 export interface DecisionEngineProgram {

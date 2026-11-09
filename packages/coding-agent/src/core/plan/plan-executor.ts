@@ -24,7 +24,6 @@ import type { WorkerClaim } from "../autonomy/contracts.ts";
 import { renderCommsStateLine } from "../comms/comms-records.ts";
 import type { WorkerLaneIsolationDeps } from "../delegation/worker-lane-isolation.ts";
 import type { Outcome } from "../delegation/worker-outcome-contract.ts";
-import { describeOutcomeForHandoff } from "../delegation/worker-outcome-words.ts";
 import type { FleetDispatch, FleetScheduler, RoomQuery } from "../fleet/fleet-types.ts";
 import { weightOf } from "../fleet/local-admit.ts";
 import type { GoalState } from "../goals/goal-state.ts";
@@ -38,7 +37,7 @@ import type { Placement } from "../placement/placement-types.ts";
 import type { ProofStakesLevel } from "../proof/stakes-levels.ts";
 import { workerResultStakes } from "../proof/worker-proof-sheet.ts";
 import type { OperationEffectEngine } from "../system-one/operation-classifier.ts";
-import { chooseVoteWinner } from "../system-one/plan-vote.ts";
+import { judgeVoteStep } from "../system-one/plan-vote-rubric.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import {
@@ -71,13 +70,12 @@ import { placementFor } from "./plan-placement.ts";
 import { type PlanAction, type PlanUpdateIntent, reconcilePlans } from "./plan-reconcile.ts";
 import { planNodeOfTask } from "./plan-reducer.ts";
 import { PlanResultGates } from "./plan-result-gates.ts";
-import { placeHereNodes, resolveSince, verifyWrapNodes } from "./plan-revision.ts";
+import { placeHereNodes, resolveSince, verifyWrapNodes, voteCheckNodes } from "./plan-revision.ts";
 import { planUpdateDelivery, planUpdateDeliveryId } from "./plan-update.ts";
 import { activeRootPlan, type PlanView, planNodeBrief, planView } from "./plan-view.ts";
 
 /** Reconcile passes one drain may run before it yields to the next event. */
 const MAX_DRAIN_PASSES = 16;
-const VOTE_SUMMARY_CHARS = 600;
 const NO_MACHINES: ReadonlySet<string> = new Set();
 
 type PlanFleet = Pick<
@@ -691,7 +689,7 @@ export class PlanExecutor implements PlanExecutorPort {
 		};
 	}
 
-	/** Rule 4: a code join's decision; a vote with two or more accepted candidates asks System One first. */
+	/** Rule 4: a code join's decision; a vote with accepted candidates is judged on its rubric first (S6). */
 	private decideJoin(planId: string, nodeId: string): void {
 		const { snapshot, plan, record } = this.planOf(planId);
 		const node = this.nodeOf(record, nodeId);
@@ -710,30 +708,7 @@ export class PlanExecutor implements PlanExecutorPort {
 		const key = `${planId}:${nodeId}:${node.since}`;
 		if (this.choosing.has(key)) return;
 		this.choosing.add(key);
-		const candidates = decision.candidates.map((candidate) => ({
-			nodeId: candidate.nodeId,
-			summary:
-				`${describeOutcomeForHandoff(candidate.outcome)}${candidate.outcome.digestRef ? ` Report: ${candidate.outcome.digestRef}` : ""}`.slice(
-					0,
-					VOTE_SUMMARY_CHARS,
-				),
-		}));
-		void chooseVoteWinner(this.deps.engine(), {
-			criterion: node.join?.criterion ?? node.intent,
-			candidates,
-			signal: this.abort.signal,
-		})
-			.then((winner) => {
-				const fresh = this.planOf(planId);
-				const runtime = fresh.plan.nodes[nodeId];
-				if (!runtime || runtime.join || runtime.since !== node.since || fresh.plan.closed) return;
-				const identityNow = this.joinIdentity(fresh.plan, planId, nodeId);
-				this.settleJoin(
-					planId,
-					nodeId,
-					settleVote(fresh.snapshot, fresh.plan, fresh.record, node, identityNow, winner),
-				);
-			})
+		void this.judgeVote(planId, nodeId, node.since, decision.candidates)
 			.catch((error: unknown) => {
 				if (!this.abort.signal.aborted)
 					harnessLog.warn("plan", "a vote could not settle", { planId, nodeId, error: errorText(error) });
@@ -742,6 +717,51 @@ export class PlanExecutor implements PlanExecutorPort {
 				this.choosing.delete(key);
 				this.requestDrain();
 			});
+	}
+
+	/**
+	 * S6: the vote's candidates are judged on its criteria and the exit they reach acts (`plan-vote-rubric.ts`). The plan is
+	 * re-read after the judgment: a vote that moved on in the meantime is left as it is.
+	 */
+	private async judgeVote(
+		planId: string,
+		nodeId: string,
+		since: number,
+		candidates: readonly { readonly nodeId: string; readonly outcome: Outcome }[],
+	): Promise<void> {
+		const { snapshot, plan, record } = this.planOf(planId);
+		const { step } = await judgeVoteStep(this.deps.engine(), {
+			snapshot,
+			plan,
+			record,
+			vote: this.nodeOf(record, nodeId),
+			candidates,
+			reportOf: this.reportOf,
+			signal: this.abort.signal,
+		});
+		const current = this.planOf(planId);
+		const runtime = current.plan.nodes[nodeId];
+		if (!runtime || runtime.join || runtime.since !== since || current.plan.closed) return;
+		if (step.kind === "hold") {
+			this.apply({ kind: "hold", planId, nodeId, reason: "replan", detail: step.detail, generation: since });
+			return;
+		}
+		if (step.kind === "auto_verify") {
+			const { top } = step;
+			this.hostRevision(planId, nodeId, since, "an independent check", (fresh, version) => {
+				const built = voteCheckNodes(fresh, nodeId, top, version);
+				return built && { nodes: built.nodes, final: fresh.final };
+			});
+			return;
+		}
+		const winner = step.kind === "winner" ? step.memberId : undefined;
+		const identity = this.joinIdentity(current.plan, planId, nodeId);
+		const node = this.nodeOf(current.record, nodeId);
+		this.settleJoin(
+			planId,
+			nodeId,
+			settleVote(current.snapshot, current.plan, current.record, node, identity, winner),
+		);
 	}
 
 	/**

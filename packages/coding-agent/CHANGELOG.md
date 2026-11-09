@@ -94,6 +94,7 @@
 - Lessons from the learner are routed into the structural backlog by System One judgments when a System One engine is bound.
 - The knowledge collection's budget notice refreshes after idle passes again.
 - A plan step whose result changes what a later step must do holds that later step for re-planning, and open items always reach the next step; combined results name files and findings that conflict. The judgments are labelled in `npm run eval:plan-graph` (the owner runs the eval; the gates stay on their 0.90/0.10 cuts until then).
+- Plan votes judge each candidate on each stated criterion with a per-criterion System One score, and verify the top two candidates automatically when the judgment is not settled; a vote with two or more accepted candidates now names a winner in production (the decision-engine bridge forwarded every question as a boolean, so choice and score decisions never reached the vote).
 
 ### Removed
 
@@ -101,6 +102,7 @@
 
 ### Fixed
 
+- Plan votes name a winner again: the plan's Choice and per-criterion Score questions reach System One as their own kinds, where the decision bridge had asked each as a yes/no question and read no winner.
 - A diagnostic's first line is cleaned (invisible and control characters removed), then redacted, then bounded, so a secret split by such a character stays masked in notices and scheduler warnings.
 - A goal's test is proven by a test-runner verification only from the host's builtin tool of that name; an extension tool, including one named like a builtin, can no longer prove it.
 - Queued host turns (goal continuations, reflections, host steers) carry a host identity (`host-steer:`, `host-followUp:`) and never count as the owner's words; owner-typed steers keep `steer:`. Records written earlier keep their identity (forward-only).

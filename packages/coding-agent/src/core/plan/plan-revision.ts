@@ -254,6 +254,80 @@ export function verifyWrapNodes(
 	return { nodes, final: record.final === nodeId ? id : record.final };
 }
 
+/** A vote's criteria: the rubric every candidate is judged on, or the one question it names when it states none. */
+export function voteCriteria(vote: PlanNodeSpec): readonly string[] {
+	const criteria = vote.join?.criteria ?? [];
+	return criteria.length > 0 ? criteria : [vote.join?.criterion ?? vote.intent];
+}
+
+/**
+ * The auto-verify checks a vote has added (S6): verify steps that check one of its members and are ordered before it. The
+ * record alone says whether a vote was checked already, so no flag is stored.
+ */
+export function voteChecksOf(
+	record: PlanRecord,
+	vote: PlanNodeSpec,
+): readonly { readonly id: string; readonly memberId: string }[] {
+	const members = new Set(vote.join?.members ?? []);
+	return record.nodes.flatMap((node) => {
+		const [member] = node.inputs;
+		if (
+			node.kind !== "verify" ||
+			member === undefined ||
+			node.inputs.length !== 1 ||
+			!vote.after.includes(node.id) ||
+			!members.has(member) ||
+			node.join?.members.length !== 1 ||
+			node.join.members[0] !== member
+		)
+			return [];
+		return [{ id: node.id, memberId: member }];
+	});
+}
+
+/**
+ * Host revision for an unsettled vote (S6, D10): an independent verify step for each of the two `top` candidates, ordered
+ * before the vote, so the vote re-decides from their verdicts. Undefined when the plan has no room for two more steps or for
+ * another version, the vote was checked already, or a named candidate is not one of its members.
+ */
+export function voteCheckNodes(
+	record: PlanRecord,
+	voteId: string,
+	top: readonly [string, string],
+	version: number,
+): { readonly nodes: PlanNodeSpec[] } | undefined {
+	const vote = record.nodes.find((node) => node.id === voteId);
+	if (vote?.kind !== "vote" || record.nodes.length + top.length > PLAN_LIMITS.nodes || version > PLAN_LIMITS.versions)
+		return undefined;
+	if (voteChecksOf(record, vote).length > 0) return undefined;
+	const members = new Set(vote.join?.members ?? []);
+	if (!top.every((id) => members.has(id))) return undefined;
+	const taken = new Set(record.nodes.map((node) => node.id));
+	const criteria = voteCriteria(vote).join("; ");
+	const checks: PlanNodeSpec[] = [];
+	for (const candidate of top) {
+		const id = freshId(`${voteId}-check-${candidate}`, taken);
+		if (id === undefined) return undefined;
+		taken.add(id);
+		checks.push({
+			id,
+			kind: "verify",
+			intent: `Independently verify step ${candidate} against: ${criteria}`.slice(0, PLAN_LIMITS.intentChars),
+			inputs: [candidate],
+			after: [],
+			writeScope: [],
+			requirementIds: [...vote.requirementIds],
+			effort: "normal",
+			join: { members: [candidate] },
+			since: version,
+		});
+	}
+	const nodes = record.nodes.map((node) =>
+		node.id === voteId ? { ...node, after: [...new Set([...node.after, ...checks.map((check) => check.id)])] } : node,
+	);
+	return { nodes: [...nodes, ...checks] };
+}
+
 /**
  * Host revision for `replace`: the step is restated pinned to this machine (a must), so the plan starts it afresh here
  * (`resolveSince` gives it the new version, since its spec changed). Undefined when the step is missing or the plan has no

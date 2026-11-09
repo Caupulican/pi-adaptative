@@ -5,8 +5,9 @@
  * - collect: `aggregateOutcomes(members, quorum ? {quorum} : "all")`; settles when the quorum succeeded or every
  *   member settled.
  * - race: settles on the first succeeded member (`any`); the other members still running are cancelled.
- * - vote: every member settled; no eligible (succeeded) candidate is a gap, one is the winner, two or more ask System
- *   One one Choice (the executor runs it and passes the winner back here).
+ * - vote: every member settled; no eligible (succeeded) candidate settles the vote as partial. Otherwise the executor judges
+ *   the candidates on the vote's rubric and acts on the exit it reads (`plan-vote-decision.ts`). A vote whose automatic
+ *   checks settled is decided by their verdicts here, in code.
  * - reduce and verify: run a worker task over the members (the reducer answers `criterion`, the verifier checks the
  *   subjects). A reduce join's outcome is the reducer's alone; a verify join's outcome aggregates the members with the
  *   verifier's.
@@ -25,7 +26,9 @@ import type { ConflictReading } from "../system-one/plan-result-review.ts";
 import { boundedLine } from "../util/bounded-line.ts";
 import type { FindingPair } from "./plan-evidence.ts";
 import type { PlanNodeKind, PlanNodeSpec, PlanRecord, PlanRuntimeState } from "./plan-graph.ts";
+import { voteChecksOf } from "./plan-revision.ts";
 import { planNodeOutcome } from "./plan-view.ts";
+import { verifiedVote } from "./plan-vote-decision.ts";
 
 export const JOIN_RESULT_MAX_BYTES = 256 * 1024;
 /** The most file conflicts one join names, in record order. */
@@ -68,9 +71,9 @@ export interface JoinIdentity {
 export type JoinDecision =
 	| { readonly kind: "wait" }
 	| { readonly kind: "settle"; readonly result: JoinResult; readonly cancel: readonly string[] }
-	/** vote with two or more eligible candidates: the executor asks System One which best meets the criterion. */
+	/** vote with eligible candidates and no automatic check yet: the executor judges them on the rubric (S6). */
 	| {
-			readonly kind: "choose";
+			readonly kind: "rubric";
 			readonly candidates: readonly { readonly nodeId: string; readonly outcome: Outcome }[];
 	  };
 
@@ -235,9 +238,20 @@ export function decideCodeJoin(
 		case "vote": {
 			if (pending.length > 0) return { kind: "wait" };
 			if (succeeded.length === 0) return settle("all");
-			const only = succeeded.length === 1 ? succeeded[0] : undefined;
-			if (only) return settle("any", [only], only.nodeId);
-			return { kind: "choose", candidates: succeeded };
+			const checks = voteChecksOf(record, node);
+			if (checks.length > 0) {
+				// The checks gate this join in the reconcile, so a settled vote has settled checks; a missing one waits.
+				if (checks.some((check) => plan.nodes[check.id]?.join === undefined)) return { kind: "wait" };
+				const verdict = verifiedVote(
+					checks.map((check) => ({
+						memberId: check.memberId,
+						accepted: planNodeOutcome(projection, plan, check.id)?.status === "succeeded",
+					})),
+				);
+				const winner = verdict.kind === "V7_verified" ? verdict.memberId : undefined;
+				return { kind: "settle", result: settleVote(projection, plan, record, node, identity, winner), cancel: [] };
+			}
+			return { kind: "rubric", candidates: succeeded };
 		}
 		default:
 			return { kind: "wait" };
@@ -245,8 +259,8 @@ export function decideCodeJoin(
 }
 
 /**
- * Settles a vote after System One's Choice: a decisive winner settles on that candidate; without one (`undefined`)
- * the join settles on every eligible candidate as partial, so the root reads them all (READ_ALL).
+ * Settles a vote with its winner: a winner settles on that candidate; without one (`undefined`) the join settles on every
+ * eligible candidate as partial, so the root reads them all (READ_ALL).
  */
 export function settleVote(
 	projection: JoinProjection,

@@ -19,16 +19,21 @@ export interface PlanVoteCandidate {
 	readonly summary: string;
 }
 
-/** The winning node id, or undefined when System One is absent, fails or is not decisive. */
+/**
+ * The winning node id, or undefined when System One is absent, fails or is not decisive. The Choice is offered over the
+ * `eligible` candidates only (the vote's exit V5 names the ones that met every criterion); fewer than two offers no Choice.
+ */
 export async function chooseVoteWinner(
 	engine: OperationEffectEngine | undefined,
 	input: {
 		readonly criterion: string;
 		readonly candidates: readonly PlanVoteCandidate[];
+		readonly eligible: readonly string[];
 		readonly signal?: AbortSignal;
 	},
 ): Promise<string | undefined> {
-	if (!engine || input.candidates.length < 2) return undefined;
+	const offered = input.candidates.filter((candidate) => input.eligible.includes(candidate.nodeId));
+	if (!engine || offered.length < 2) return undefined;
 	const program = {
 		schema_version: "2.0" as const,
 		program_id: "JEV-PLAN-VOTE",
@@ -40,7 +45,7 @@ export async function chooseVoteWinner(
 				instruction:
 					"Which item of `candidates` best meets `criterion`? Preserve uncertainty when they are equally good.",
 				options: Object.fromEntries(
-					input.candidates.map((candidate) => [candidate.nodeId, { description: candidate.summary }]),
+					offered.map((candidate) => [candidate.nodeId, { description: candidate.summary }]),
 				),
 			},
 		],
@@ -51,7 +56,7 @@ export async function chooseVoteWinner(
 			(signal) =>
 				engine.evaluate(
 					program,
-					{ criterion: input.criterion, candidates: input.candidates.map((candidate) => candidate.summary) },
+					{ criterion: input.criterion, candidates: offered.map((candidate) => candidate.summary) },
 					{ consequence: "medium", signal },
 				),
 			{ caller: input.signal },
@@ -69,7 +74,7 @@ export async function chooseVoteWinner(
 			? answer.choice
 			: undefined;
 	const winner =
-		reading === "act" && input.candidates.some((candidate) => candidate.nodeId === selected) ? selected : undefined;
+		reading === "act" && offered.some((candidate) => candidate.nodeId === selected) ? selected : undefined;
 	noteDecisionTrace(engine, evaluation, {
 		decision: winner ? `plan vote: ${winner} wins` : "plan vote: no decisive winner",
 		drove: ["best_candidate"],

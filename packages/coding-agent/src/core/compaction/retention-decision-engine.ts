@@ -1,31 +1,82 @@
 /**
- * Bridges the session's own semantic decision engine into the evidence retention planner.
+ * Bridges the session's own semantic decision engine into the batched-question shape its consumers speak.
  *
- * The planner speaks a minimal batched question program; the session owns a `SemanticDecisionEngine`.
- * Retention questions are boolean by construction ("is this still useful?"), so the engine's
- * probability of true is the planner's keep probability — no judgment is invented in between.
+ * The consumers (retention, the operation gate, plan review, project rules, the plan executor) send one program of
+ * questions and read one answer per question id. A question with no `kind`, or `kind: "boolean"`, is a noul question
+ * (the probability of true, read against its direction): retention and plan questions are boolean by construction, and
+ * their probability is passed through unchanged. A Choice, Score or Set question is passed to the engine as its consumer
+ * defined it, and its answer carries the engine's selected option, value or distribution, so the consumer reads the
+ * shape it asked for (a dropped kind would be asked as a yes/no and answered with a meaningless probability).
  *
- * Every consumer of this shape (retention, the operation gate, plan review, project rules) gets the
- * evaluation's ledger id and its judgments back, and attaches the decision it made from them through
- * `noteTrace`, which reaches the session's evaluation recorder when one is given.
+ * Every consumer of this shape gets the evaluation's ledger id and its judgments back, and attaches the decision it made
+ * from them through `noteTrace`, which reaches the session's evaluation recorder when one is given.
  */
 
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
-import type { Consequence } from "../decision/primitives.ts";
+import type { DecisionResult } from "../decision/evaluation.ts";
+import type { NoulDirection } from "../decision/noul.ts";
+import type { Consequence, DecisionDefinition } from "../decision/primitives.ts";
 import { createDecisionProgram } from "../decision/program.ts";
 import { type SemanticDecisionTrace, traceJudgmentsFromEvaluation } from "../system-one/semantic-evaluation-ledger.ts";
-import type { DecisionEngine, DecisionEngineProgram } from "./evidence-retention-planner.ts";
+import type { DecisionEngine, DecisionEngineProgram, RetentionAnswer } from "./evidence-retention-planner.ts";
 
 interface RetentionQuestion {
 	readonly id?: string;
 	readonly instruction?: string;
+	/** The question's shape. Absent means boolean. */
+	readonly kind?: DecisionDefinition["kind"];
 	/** What a true and a false answer mean, when the boundary is subtle; sent to the engine as is. */
 	readonly criteria?: { readonly true?: string; readonly false?: string };
+	/** Which end of the probability the asker needs; a boolean question's direction, sent to the engine when present. */
+	readonly direction?: NoulDirection;
 }
 
 /** Where a consumer's decision trace goes: the session's evaluation recorder. */
 export interface RetentionTraceObserver {
 	noteTrace(evaluationId: string, trace: SemanticDecisionTrace): void;
+}
+
+/** A question's definition for the engine: a noul question as before, any other shape as the consumer defined it. */
+function definitionOf(question: RetentionQuestion & { id: string; instruction: string }): DecisionDefinition {
+	if (question.kind === undefined || question.kind === "boolean")
+		return {
+			kind: "boolean",
+			id: question.id,
+			instruction: question.instruction,
+			...(question.criteria ? { criteria: question.criteria } : {}),
+			...(question.direction ? { direction: question.direction } : {}),
+		};
+	// The engine reads the options, levels or members the consumer's definition carries, and rejects a malformed one.
+	return question as DecisionDefinition;
+}
+
+/** A result as the consumer reads it. An unsupported result answers nothing. */
+function answerOf(result: DecisionResult): RetentionAnswer | undefined {
+	switch (result.kind) {
+		case "boolean":
+			return { type: "noul", noul: result.probabilityTrue };
+		case "choice":
+			return {
+				choice: result.selected,
+				probabilities: { ...result.distribution },
+				confidence: result.confidence.value,
+			};
+		case "score":
+			return {
+				score: result.value,
+				probabilities: Object.fromEntries(Object.entries(result.distribution)),
+				confidence: result.confidence.value,
+			};
+		case "set":
+			return {
+				selected: result.selected,
+				memberships: { ...result.memberships },
+				...(result.unsettled !== undefined ? { unsettled: result.unsettled } : {}),
+				confidence: result.confidence.value,
+			};
+		case "unsupported":
+			return undefined;
+	}
 }
 
 export function createRetentionDecisionEngine(
@@ -40,12 +91,7 @@ export function createRetentionDecisionEngine(
 				.filter((decision): decision is RetentionQuestion & { id: string; instruction: string } =>
 					Boolean(decision?.id && decision?.instruction),
 				)
-				.map((decision) => ({
-					kind: "boolean" as const,
-					id: decision.id,
-					instruction: decision.instruction,
-					...(decision.criteria ? { criteria: decision.criteria } : {}),
-				}));
+				.map(definitionOf);
 			if (decisions.length === 0) return {};
 
 			const evaluation = await engine.evaluate(
@@ -57,10 +103,10 @@ export function createRetentionDecisionEngine(
 				},
 			);
 
-			const answers: Record<string, { type?: string; noul?: number }> = {};
+			const answers: Record<string, RetentionAnswer> = {};
 			for (const [id, result] of Object.entries(evaluation.results)) {
-				if (result.kind !== "boolean") continue;
-				answers[id] = { type: "noul", noul: result.probabilityTrue };
+				const answer = answerOf(result);
+				if (answer !== undefined) answers[id] = answer;
 			}
 			const evaluationId = evaluation.audit?.evaluationId;
 			return {
