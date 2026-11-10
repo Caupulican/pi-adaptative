@@ -162,6 +162,13 @@ function toWireMessages(messages: Message[], toolNameMap: ToolNameMap): CommandC
 	return wire;
 }
 
+// Reasoning counts inside max_tokens here, so a sent effort gets the model's whole cap (the caller's cap is for the answer).
+// With no effort the caller's cap applies; the model's cap bounds both.
+function outputCap(model: Model<"command-code-generate">, settings: CommandCodeRequestSettings): number {
+	const reasoning = settings.reasoningEffort !== undefined && settings.reasoningEffort !== "off";
+	return reasoning ? model.maxTokens : Math.min(settings.maxTokens ?? model.maxTokens, model.maxTokens);
+}
+
 /** The body of one generate request. */
 export function buildCommandCodeRequest(
 	model: Model<"command-code-generate">,
@@ -178,7 +185,7 @@ export function buildCommandCodeRequest(
 			description: tool.description,
 			input_schema: tool.parameters,
 		})),
-		max_tokens: settings.maxTokens ?? model.maxTokens,
+		max_tokens: outputCap(model, settings),
 		stream: true,
 	};
 	if (context.systemPrompt) {
