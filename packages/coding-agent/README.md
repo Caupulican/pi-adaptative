@@ -121,6 +121,7 @@ You can also spell the model explicitly, e.g. `pi --model openai-codex/gpt-5.5` 
 - Anthropic Claude Pro/Max
 - OpenAI ChatGPT Plus/Pro (Codex)
 - GitHub Copilot
+- Command Code
 
 **API keys:**
 - Anthropic

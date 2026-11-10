@@ -9,6 +9,7 @@
 
 // Anthropic
 export { anthropicOAuthProvider, loginAnthropic, refreshAnthropicToken } from "./anthropic.ts";
+export { commandCodeOAuthProvider, loginCommandCode } from "./command-code.ts";
 export * from "./device-code.ts";
 // GitHub Copilot
 export {
@@ -41,6 +42,7 @@ export { loginXai, refreshXaiToken, xaiOAuthProvider } from "./xai.ts";
 
 import { SourceRegistry } from "../source-registry.ts";
 import { anthropicOAuthProvider } from "./anthropic.ts";
+import { commandCodeOAuthProvider } from "./command-code.ts";
 import { githubCopilotOAuthProvider } from "./github-copilot.ts";
 import { antigravityOAuthProvider } from "./google-antigravity.ts";
 import { kimiCodingOAuthProvider } from "./kimi-coding.ts";
@@ -58,6 +60,7 @@ const BUILT_IN_OAUTH_PROVIDERS: OAuthProviderInterface[] = [
 	xaiOAuthProvider,
 	kimiCodingOAuthProvider,
 	openRouterOAuthProvider,
+	commandCodeOAuthProvider,
 ];
 
 const oauthProviderRegistry = new SourceRegistry<OAuthProviderInterface>();

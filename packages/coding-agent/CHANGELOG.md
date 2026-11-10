@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Command Code as a model provider: `/login command-code` signs in through the Command Code page in the browser (or set `COMMAND_CODE_API_KEY`), and its models are listed under `command-code/` with their context windows, list prices and reasoning efforts. Requests carry the conversation and Pi's tools only; no project path, file listing or git state is sent beside them.
+
 ## [0.104.48] - 2026-11-10
 
 ### Added

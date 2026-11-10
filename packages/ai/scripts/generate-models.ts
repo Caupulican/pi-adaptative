@@ -23,6 +23,7 @@ import type {
 	OpenAICompletionsCompat,
 	OpenAIResponsesCompat,
 } from "../src/types.ts";
+import { COMMAND_CODE_PROVIDER, fetchCommandCodeModels } from "./command-code-catalog.ts";
 import { runModelCatalogGeneration } from "./model-catalog-generation-policy.ts";
 import { replaceModelCatalogProvider } from "./model-catalog-provider-update.ts";
 import { parseOpenRouterCatalogCost, parseOpenRouterCatalogMetadata, type OpenRouterCatalogMetadata } from "./openrouter-catalog-metadata.ts";
@@ -1471,24 +1472,36 @@ async function generateModels() {
 		modelCatalogProvider === "openai-codex" ||
 		modelCatalogProvider === "azure-openai-responses";
 	const needAiGateway = !modelCatalogProvider || modelCatalogProvider === "vercel-ai-gateway";
+	// Command Code publishes its own catalogue; no other source lists its models.
+	const needCommandCode = !modelCatalogProvider || modelCatalogProvider === COMMAND_CODE_PROVIDER;
 	const needModelsDev =
 		!modelCatalogProvider ||
 		(!staticOnlyProviders.has(modelCatalogProvider) &&
 			modelCatalogProvider !== "openrouter" &&
-			modelCatalogProvider !== "vercel-ai-gateway");
+			modelCatalogProvider !== "vercel-ai-gateway" &&
+			modelCatalogProvider !== COMMAND_CODE_PROVIDER);
 
 	// Fetch required upstream catalogs concurrently
-	const [modelsDevModels, { models: openRouterModels, metadata: openRouterMetadata }, aiGatewayModels] =
-		await Promise.all([
-			needModelsDev ? loadModelsDevData() : Promise.resolve([] as Model<any>[]),
-			needOpenRouter
-				? fetchOpenRouterModels()
-				: Promise.resolve({
-						models: [] as Model<"openai-completions">[],
-						metadata: new Map<string, OpenRouterCatalogMetadata>(),
-					}),
-			needAiGateway ? fetchAiGatewayModels() : Promise.resolve([] as Model<any>[]),
-		]);
+	const [
+		modelsDevModels,
+		{ models: openRouterModels, metadata: openRouterMetadata },
+		aiGatewayModels,
+		commandCodeModels,
+	] = await Promise.all([
+		needModelsDev ? loadModelsDevData() : Promise.resolve([] as Model<any>[]),
+		needOpenRouter
+			? fetchOpenRouterModels()
+			: Promise.resolve({
+					models: [] as Model<"openai-completions">[],
+					metadata: new Map<string, OpenRouterCatalogMetadata>(),
+				}),
+		needAiGateway ? fetchAiGatewayModels() : Promise.resolve([] as Model<any>[]),
+		needCommandCode
+			? fetchCommandCodeModels().catch((error: unknown) => {
+					throw new Error("Failed to fetch Command Code models", { cause: error });
+				})
+			: Promise.resolve([] as Model<any>[]),
+	]);
 	const compatibilityModelId = (model: Model<Api>): string =>
 		model.provider === "openrouter" ? openRouterMetadata.get(model.id)?.targetId ?? model.id : model.id;
 	// Empty feeds cannot be distinguished from an upstream outage or schema change.
@@ -1497,6 +1510,7 @@ async function generateModels() {
 		["models.dev", needModelsDev, modelsDevModels],
 		["OpenRouter", needOpenRouter, openRouterModels],
 		["Vercel AI Gateway", needAiGateway, aiGatewayModels],
+		["Command Code", needCommandCode, commandCodeModels],
 	] as const) {
 		if (requested && models.length === 0) {
 			throw new Error(`Refusing to publish model catalog: ${source} returned no usable models`);
@@ -1521,7 +1535,14 @@ async function generateModels() {
 	};
 
 	// Combine models (models.dev has priority) and index by provider + model ID in a single pass
-	for (const group of [modelsDevModels, openRouterModels, aiGatewayModels, FUGU_MODELS, TYPESAFE_MODELS]) {
+	for (const group of [
+		modelsDevModels,
+		openRouterModels,
+		aiGatewayModels,
+		commandCodeModels,
+		FUGU_MODELS,
+		TYPESAFE_MODELS,
+	]) {
 		for (const model of group) {
 			if (model.provider === "xai" && XAI_BUILTIN_EXCLUDED_MODEL_IDS.has(model.id)) continue;
 			if ((model.provider === "opencode" || model.provider === "opencode-go") && model.id === "gpt-5.3-codex-spark") {
@@ -2440,7 +2461,8 @@ async function generateModels() {
 			if (cacheControlFormat) model.compat = { ...model.compat, cacheControlFormat };
 		}
 		const metadata = model.provider === "openrouter" ? openRouterMetadata.get(model.id) : undefined;
-		applyThinkingLevelMetadata(model, compatibilityModelId(model));
+		// Command Code's catalogue states each model's efforts; the name-based rules describe other routes.
+		if (model.provider !== COMMAND_CODE_PROVIDER) applyThinkingLevelMetadata(model, compatibilityModelId(model));
 		if (metadata?.thinkingLevelMap) {
 			// Advertised efforts override name-based defaults. An omitted off mapping
 			// preserves tool-use restrictions such as Mercury's always-on reasoning.

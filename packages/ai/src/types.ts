@@ -26,7 +26,8 @@ export type KnownApi =
 	| "bedrock-converse-stream"
 	| "google-generative-ai"
 	| "google-antigravity"
-	| "google-vertex";
+	| "google-vertex"
+	| "command-code-generate";
 
 export type Api = KnownApi | (string & {});
 
@@ -62,6 +63,7 @@ export type KnownProvider =
 	| "opencode"
 	| "opencode-go"
 	| "kimi-coding"
+	| "command-code"
 	| "llama-cpp"
 	| "cloudflare-workers-ai"
 	| "cloudflare-ai-gateway"

@@ -14,6 +14,7 @@ export * from "./providers/anthropic-account.ts";
 export { type AnthropicCompatibilitySnapshot, resolveAnthropicCompatibility } from "./providers/anthropic-identity.ts";
 export * from "./providers/antigravity-account.ts";
 export type { AzureOpenAIResponsesOptions } from "./providers/azure-openai-responses.ts";
+export type { CommandCodeOptions } from "./providers/command-code.ts";
 export * from "./providers/faux.ts";
 export type { GoogleOptions } from "./providers/google.ts";
 export type { GoogleThinkingLevel } from "./providers/google-shared.ts";

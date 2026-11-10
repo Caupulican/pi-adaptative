@@ -13,6 +13,7 @@ import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import type { BedrockOptions } from "./amazon-bedrock.ts";
 import type { AnthropicOptions } from "./anthropic.ts";
 import type { AzureOpenAIResponsesOptions } from "./azure-openai-responses.ts";
+import type { CommandCodeOptions } from "./command-code.ts";
 import type { GoogleOptions } from "./google.ts";
 import { streamAntigravity, streamSimpleAntigravity } from "./google-antigravity.ts";
 
@@ -46,6 +47,11 @@ interface AnthropicProviderModule {
 interface AzureOpenAIResponsesProviderModule {
 	streamAzureOpenAIResponses: StreamFunction<"azure-openai-responses", AzureOpenAIResponsesOptions>;
 	streamSimpleAzureOpenAIResponses: StreamFunction<"azure-openai-responses", SimpleStreamOptions>;
+}
+
+interface CommandCodeProviderModule {
+	streamCommandCode: StreamFunction<"command-code-generate", CommandCodeOptions>;
+	streamSimpleCommandCode: StreamFunction<"command-code-generate", SimpleStreamOptions>;
 }
 
 interface GoogleProviderModule {
@@ -101,6 +107,9 @@ let anthropicProviderModulePromise:
 	| undefined;
 let azureOpenAIResponsesProviderModulePromise:
 	| Promise<LazyProviderModule<"azure-openai-responses", AzureOpenAIResponsesOptions, SimpleStreamOptions>>
+	| undefined;
+let commandCodeProviderModulePromise:
+	| Promise<LazyProviderModule<"command-code-generate", CommandCodeOptions, SimpleStreamOptions>>
 	| undefined;
 let googleProviderModulePromise:
 	| Promise<LazyProviderModule<"google-generative-ai", GoogleOptions, SimpleStreamOptions>>
@@ -198,6 +207,19 @@ function loadAzureOpenAIResponsesProviderModule(): Promise<
 		};
 	});
 	return azureOpenAIResponsesProviderModulePromise;
+}
+
+function loadCommandCodeProviderModule(): Promise<
+	LazyProviderModule<"command-code-generate", CommandCodeOptions, SimpleStreamOptions>
+> {
+	commandCodeProviderModulePromise ||= import("./command-code.ts").then((module) => {
+		const provider = module as CommandCodeProviderModule;
+		return {
+			stream: provider.streamCommandCode,
+			streamSimple: provider.streamSimpleCommandCode,
+		};
+	});
+	return commandCodeProviderModulePromise;
 }
 
 function loadGoogleProviderModule(): Promise<
@@ -304,6 +326,8 @@ export const streamSimpleAzureOpenAIResponses = createLazyStream(
 	loadAzureOpenAIResponsesProviderModule,
 	(module) => module.streamSimple,
 );
+export const streamCommandCode = createLazyStream(loadCommandCodeProviderModule, (module) => module.stream);
+export const streamSimpleCommandCode = createLazyStream(loadCommandCodeProviderModule, (module) => module.streamSimple);
 export const streamGoogle = createLazyStream(loadGoogleProviderModule, (module) => module.stream);
 export const streamSimpleGoogle = createLazyStream(loadGoogleProviderModule, (module) => module.streamSimple);
 export const streamGoogleVertex = createLazyStream(loadGoogleVertexProviderModule, (module) => module.stream);
@@ -392,6 +416,12 @@ export function registerBuiltInApiProviders(): void {
 		api: "bedrock-converse-stream",
 		stream: streamBedrockLazy,
 		streamSimple: streamSimpleBedrockLazy,
+	});
+
+	registerApiProvider({
+		api: "command-code-generate",
+		stream: streamCommandCode,
+		streamSimple: streamSimpleCommandCode,
 	});
 }
 

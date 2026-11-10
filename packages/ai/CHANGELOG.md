@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Added
+
+- Command Code as a provider (`command-code`, API `command-code-generate`). Sign-in opens the Command Code page in the browser and takes the account's key on a loopback callback tied to that login by a state token (`commandCodeOAuthProvider`, `loginCommandCode`); `COMMAND_CODE_API_KEY` works as a plain key. The adapter (`streamCommandCode`, `streamSimpleCommandCode`, subpath `./command-code`) posts one streamed request per turn and reads the service's event lines into text, thinking and tool calls, with usage split into input, cache read and cache write. A stream that ends without its finish event is an error, a paused turn continues, and a call the service ran itself is not handed to the caller. No project path, file listing or git state is sent.
+- The model catalog lists Command Code's models from the service's own public catalogue: context window, output cap, image input, list price with its context tiers, and the reasoning efforts each model takes. The generator reads it with the other live sources, so the daily catalog refresh follows it; `npm run sync:command-code-models` refreshes that one provider by hand.
+
+### Changed
+
+- `PI_MODEL_CATALOG_PROVIDER` can add a provider the committed catalog does not list yet: its section takes its place in the generator's provider order, and every other byte is preserved.
+
 ## [0.104.48] - 2026-11-10
 
 ## [0.104.47] - 2026-11-09

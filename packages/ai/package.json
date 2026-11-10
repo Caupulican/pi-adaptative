@@ -27,6 +27,11 @@
 			"pi-source": "./src/providers/azure-openai-responses.ts",
 			"import": "./dist/providers/azure-openai-responses.js"
 		},
+		"./command-code": {
+			"types": "./dist/providers/command-code.d.ts",
+			"pi-source": "./src/providers/command-code.ts",
+			"import": "./dist/providers/command-code.js"
+		},
 		"./google": {
 			"types": "./dist/providers/google.d.ts",
 			"pi-source": "./src/providers/google.ts",
@@ -182,6 +187,7 @@
 		"sync:claude-identity": "node scripts/sync-claude-identity.mjs",
 		"sync:agy-identity": "node scripts/sync-agy-identity.mjs",
 		"sync:grok-identity": "node scripts/sync-grok-identity.mjs",
+		"sync:command-code-models": "node scripts/sync-command-code-models.mjs",
 		"build": "npm run generate-models && npm run generate-image-models && node ../../scripts/run-tsc.mjs -p tsconfig.build.json",
 		"test": "vitest --run --bail=1"
 	},

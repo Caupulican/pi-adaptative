@@ -145,6 +145,7 @@ function getApiKeyEnvVars(provider: string): readonly string[] | undefined {
 		opencode: "OPENCODE_API_KEY",
 		"opencode-go": "OPENCODE_API_KEY",
 		"kimi-coding": "KIMI_API_KEY",
+		"command-code": "COMMAND_CODE_API_KEY",
 		"cloudflare-workers-ai": "CLOUDFLARE_API_KEY",
 		"cloudflare-ai-gateway": "CLOUDFLARE_API_KEY",
 		"qwen-token-plan": "QWEN_TOKEN_PLAN_API_KEY",

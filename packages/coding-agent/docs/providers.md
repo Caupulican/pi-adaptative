@@ -21,6 +21,7 @@ Use `/login` in interactive mode, then select a provider, or pass one directly (
 - Google Antigravity — `/login google-antigravity`. Discovers the agent models available to your Google account.
 - xAI (Grok/X subscription) — `/login xai`. Signs in with SuperGrok or X Premium via device-code OAuth; `XAI_API_KEY` remains available as an API key under [API Keys](#api-keys) for metered access instead.
 - Kimi Code (subscription) — `/login kimi-coding`.
+- Command Code (subscription) — `/login command-code`. Opens the Command Code sign-in page; the page hands your account's key to a callback on this machine (ports 5959 to 5968). The key does not expire, so nothing is refreshed; sign in again if Command Code rejects it. Requests carry your conversation and Pi's tools only: no project path, file listing or git state is sent beside them.
 - OpenRouter — `/login openrouter`. This OAuth flow exchanges a browser sign-in for a permanent OpenRouter API key rather than a metered/subscription credential, so it does not get the subscription-hop failover behavior described below.
 
 Use `/logout` to clear credentials. Tokens are stored per provider in `~/.pi/agent/auth.json` and auto-refresh when expired.
@@ -132,6 +133,7 @@ pi
 | Fireworks | `FIREWORKS_API_KEY` | `fireworks` |
 | Together AI | `TOGETHER_API_KEY` | `together` |
 | Kimi For Coding | `KIMI_API_KEY` | `kimi-coding` |
+| Command Code | `COMMAND_CODE_API_KEY` | `command-code` |
 | MiniMax | `MINIMAX_API_KEY` | `minimax` |
 | MiniMax (China) | `MINIMAX_CN_API_KEY` | `minimax-cn` |
 | Xiaomi MiMo | `XIAOMI_API_KEY` | `xiaomi` |
