@@ -6,6 +6,7 @@ import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
 	enqueueRoot,
 	enqueueStepWorker,
+	INTAKE_JUDGMENTS,
 	latestAttemptOf,
 	PLAN_CALL_JUDGMENTS,
 	planCallSteps,
@@ -16,7 +17,7 @@ import {
 	reportStep,
 	stepReached,
 } from "./journey-5-shared.ts";
-import { latestBatchResults } from "./shared.ts";
+import { latestBatchResults, REFLECTION_CHECKPOINT_MARKER, requestCarriesMarker } from "./shared.ts";
 
 const TITLE = "Read the retry limit, then state it in one line";
 /** Why a third party's run may not change a plan: the gate's own words, as the refused call's result carries them. */
@@ -188,5 +189,37 @@ export async function runJourney5PlanOriginPhase(world: HarnessWorld, session: A
 		],
 		updates: 1,
 	});
+	// The refused call is a correction the root owes a reflection on: the owner's next turn ends with that reflection.
+	const reflected = createBarrier();
+	const closing = world.provider.reached.length;
+	enqueueRoot(
+		world,
+		{
+			name: "j5-origin-owner-close",
+			reply: { content: [{ type: "text", text: "The plan stays as you stated it." }] },
+		},
+		{
+			name: "j5-origin-reflection",
+			check: (request) => {
+				if (!requestCarriesMarker(request, REFLECTION_CHECKPOINT_MARKER)) {
+					throw new Error("the turn after the owner's is not the reflection checkpoint");
+				}
+				reflected.release();
+			},
+			reply: { content: [{ type: "text", text: "Nothing durable to record." }] },
+		},
+	);
+	world.systemOne.enterPhase("j5-origin-close", {
+		...INTAKE_JUDGMENTS,
+		// The owner's words carry nothing over from the teammate's request.
+		carries_0: { kind: "noul", probability: 0.02 },
+	});
+	await withDeadline(trace, "J5 origin: the owner's closing turn", session.prompt("Leave the plan as I stated it."));
+	await withDeadline(trace, "J5 origin: the root reflected on the refused call", reflected.promise);
+	await withDeadline(trace, "J5 origin: root idle after the reflection", session.waitForForegroundIdle());
+	expect(
+		world.provider.reached.slice(closing),
+		"the owner's turn was answered once, and one reflection followed it",
+	).toEqual([`${ROOT_TRACK}:j5-origin-owner-close`, `${ROOT_TRACK}:j5-origin-reflection`]);
 	trace.mark("root", "j5.plan-origin");
 }

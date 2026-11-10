@@ -19,6 +19,16 @@ export const PLAN_CALL_JUDGMENTS = {
 	brief_self_contained: { kind: "noul", probability: 0.97 },
 } as const;
 
+/** What the final answer of a worker that changed a file is read for: it states the change, and claims nothing else delivered. */
+export const CHANGED_FILE_ANSWER_CLAIMS = {
+	states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+	states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+	states_committed: { kind: "noul", probability: 0.02 },
+	states_pushed: { kind: "noul", probability: 0.02 },
+	states_published: { kind: "noul", probability: 0.02 },
+	states_files_changed: { kind: "noul", probability: 0.97 },
+} as const;
+
 /** The script track of the root's own requests, shared by every phase of the journey. */
 export const ROOT_TRACK = "j5-root";
 

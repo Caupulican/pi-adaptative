@@ -3,6 +3,7 @@ import { expect } from "vitest";
 import { createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
+	CHANGED_FILE_ANSWER_CLAIMS,
 	deliveredLines,
 	enqueueRoot,
 	enqueueStepWorker,
@@ -45,16 +46,6 @@ const COMPLETION_JUDGMENTS = {
 	required_behavior_unverified: { kind: "noul", probability: 0.02 },
 	material_claim_unsupported: { kind: "noul", probability: 0.02 },
 	missing_requirement: { kind: "noul", probability: 0.02 },
-} as const;
-
-/** What a worker's final answer is read for: this one states that a file changed, and claims nothing else delivered. */
-const STEP_ANSWER_CLAIMS = {
-	states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-	states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-	states_committed: { kind: "noul", probability: 0.02 },
-	states_pushed: { kind: "noul", probability: 0.02 },
-	states_published: { kind: "noul", probability: 0.02 },
-	states_files_changed: { kind: "noul", probability: 0.97 },
 } as const;
 
 /**
@@ -318,7 +309,7 @@ export async function runJourney5PlanVerifyAcceptedPhase(world: HarnessWorld): P
 	world.systemOne.enterPhase("j5-verify", {
 		...PLAN_CALL_JUDGMENTS,
 		...GOAL_STEP_JUDGMENTS,
-		...STEP_ANSWER_CLAIMS,
+		...CHANGED_FILE_ANSWER_CLAIMS,
 		...COMPLETION_JUDGMENTS,
 	});
 	await withDeadline(
