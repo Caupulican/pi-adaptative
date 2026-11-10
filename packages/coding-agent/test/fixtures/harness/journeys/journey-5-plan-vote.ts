@@ -122,7 +122,7 @@ export async function runJourney5PlanVotePhase(world: HarnessWorld, session: Age
 	await withDeadline(trace, "J5 vote: root idle", session.waitForForegroundIdle());
 	const plan = planTitled(session, TITLE);
 	const record = "title" in plan.record ? plan.record : undefined;
-	const join = plan.nodes["pick"]?.join;
+	const join = plan.nodes.pick?.join;
 	// An outcome written by a newer build is opaque; this build wrote this one.
 	const joined = join && "status" in join.outcome ? join.outcome : undefined;
 	const result = JSON.parse(String(world.io.readFileSync(join!.artifact, "utf8"))) as {

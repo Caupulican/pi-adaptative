@@ -1,4 +1,4 @@
-import { join } from "node:path";
+import { basename, join } from "node:path";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
 import { configFile } from "../../../../src/core/agent-paths.ts";
@@ -6,12 +6,14 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { outwardDraftStates } from "../../../../src/core/agent-session-edge.ts";
 import { createBuiltInChannelProvider } from "../../../../src/core/channels/built-in-providers.ts";
 import { DAY_MS, digest } from "../../../../src/core/channels/channel-journal.ts";
+import { OWNER_WAITING_NOTICE_AFTER_MS } from "../../../../src/core/channels/owner-waiting-notices.ts";
 import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration/contracts.ts";
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import {
 	readSessionLeaseHolders,
 	SessionHostedError,
 } from "../../../../src/core/orchestration/session-bundle-lifecycle.ts";
+import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import {
 	type Barrier,
 	calls,
@@ -1739,6 +1741,199 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 			"the daemon leg ran without a Telegram warning",
 		).toEqual([]);
 		trace.mark("root", "telegram-daemon.closed");
+	} finally {
+		world.fetchResponder = undefined;
+	}
+}
+
+interface WaitingLegJournal {
+	readonly holder?: { readonly sessionId: string };
+	readonly seen: readonly { readonly d: string }[];
+	readonly ownerPushes?: readonly { readonly k: string }[];
+	readonly ownerNotices?: readonly unknown[];
+}
+
+/**
+ * A call that waits on the owner reaches the owner's phone. Two sessions are open in one agent directory and the first
+ * serves the owner's Telegram chat. A friend's message makes that session prepare a push it may not run: the action is
+ * held for the owner. One the owner settles at the terminal inside two minutes is never told. One that has waited two
+ * minutes is told to the owner's chat once, in the line the session's status shows it by, with the directory the session
+ * works in, and not again. The second session serves no channel: a teammate's words make it hold a push of its own, and
+ * its notice reaches the same chat through the session that serves it.
+ */
+export async function runJourney4TelegramWaitingPhase(world: HarnessWorld): Promise<void> {
+	const { trace } = world;
+	const agentDir = `${world.agentDir}-telegram-waiting`;
+	const channelsDir = join(agentDir, "channels");
+	const tokenPath = join(channelsDir, "telegram.token");
+	const journalPath = join(channelsDir, "telegram.json");
+	world.io.mkdirSync(channelsDir, { recursive: true });
+	world.io.writeFileSync(tokenPath, `${TOKEN}\n`, { mode: 0o600 });
+	const settings = {
+		memorySystem: "okf" as const,
+		autoLearn: { enabled: false },
+		proactivity: { enabled: false },
+		orchestrator: { delegationGate: false },
+		edge: {},
+		channels: {
+			telegram: { mode: "explicit" as const, allowedSenders: [FRIEND_ID], ownerSenders: [OWNER_ID] },
+		},
+	};
+	const journal = (): WaitingLegJournal =>
+		world.io.existsSync(journalPath)
+			? (JSON.parse(String(world.io.readFileSync(journalPath))) as WaitingLegJournal)
+			: { seen: [] };
+	const api = new FakeBotApi(() => journal().seen.map((entry) => entry.d));
+	world.fetchResponder = (input, init) => api.respond(input, init);
+	const warningsBefore = world.warnings.length;
+	const ownerChat = String(OWNER_ID);
+	const notice = `Waiting on you in ${basename(HARNESS_PROJECT_CWD)}: Action held for your approval: bash`;
+	/** The notices told so far, by the session each is of: the push key names a digest of the session id. */
+	const toldFor = (sessionId: string) =>
+		(journal().ownerPushes ?? []).filter((push) =>
+			push.k.startsWith(`push:waiting:${digest(sessionId).slice(0, 12)}:outward_draft:`),
+		).length;
+	/** One run that asks for `command`, which a third party's run may only prepare, and then answers. */
+	const heldPush = (name: string, command: string): Barrier => {
+		const held = createBarrier();
+		world.provider.enqueue("root", calls(`${name}-call`, [{ id: name, name: "bash", arguments: { command } }]), {
+			name: `${name}-answer`,
+			check: (request) => {
+				const result = latestBatchResults(request).find((entry) => entry.toolName === "bash");
+				expect(result?.text, "the third party's push is prepared, not run").toContain(
+					`Prepared, not run: ${command} (git.publish`,
+				);
+				expect(result?.text, "the hold names its draft").toContain("It is kept as draft draft-");
+				held.release();
+			},
+			reply: { content: [{ type: "text", text: "The push waits for the owner." }] },
+		});
+		return held;
+	};
+	/** The session's turn, and what follows it by itself (the reply's routing, its notice), are over. */
+	const settle = (target: AgentSession) =>
+		withDeadline(trace, "the session is at rest", target.waitForForegroundIdle());
+	try {
+		const firstPoll = api.nextPoll(undefined);
+		const manager = world.createSessionManager(agentDir);
+		const { session } = await world.createRootSession("root", {
+			agentDir,
+			sessionManager: manager,
+			systemOneEnabled: false,
+			settings,
+		});
+		await withDeadline(trace, "the waiting leg's first poll", firstPoll);
+		const pending = (source: SessionManager) =>
+			outwardDraftStates(source.getBranch(), false).filter((view) => view.state === "pending").length;
+		// The owner's chat is learned from the owner's own message: a notice goes only to a chat the owner wrote from.
+		const greeted = createBarrier();
+		world.provider.enqueue("root", {
+			name: "tg-wait-hello",
+			check: () => greeted.release(),
+			reply: { content: [{ type: "text", text: "Here." }] },
+		});
+		api.deliver(ownerLegUpdate(1, OWNER_ID, "are you there"));
+		await withDeadline(trace, "the owner's greeting turn", greeted.promise);
+		await withDeadline(trace, "the greeting's answer reaches the chat", api.untilSent(1));
+		await settle(session);
+		trace.mark("root", "telegram-waiting.polling");
+
+		// A held action the owner settles at the terminal inside two minutes is never told to the phone.
+		const first = heldPush("tg-wait-first", "git push origin docs");
+		api.deliver(ownerLegUpdate(2, FRIEND_ID, "please push the docs branch"));
+		await withDeadline(trace, "the friend's first push is held", first.promise);
+		await settle(session);
+		expect(pending(manager), "the first push waits for the owner").toBe(1);
+		const settled = createBarrier();
+		world.provider.enqueue("root", {
+			name: "tg-wait-terminal",
+			check: () => settled.release(),
+			reply: { content: [{ type: "text", text: "The docs push is dropped." }] },
+		});
+		await withDeadline(trace, "the owner's turn at the terminal", session.prompt("Drop that docs push."));
+		await withDeadline(trace, "the terminal's answer", settled.promise);
+		await settle(session);
+		expect(pending(manager), "the owner's own turn settled the held push").toBe(0);
+		trace.mark("root", "telegram-waiting.settled-in-time");
+
+		// A held action that waits two minutes is told to the owner's chat, once.
+		const second = heldPush("tg-wait-second", "git push origin release");
+		api.deliver(ownerLegUpdate(3, FRIEND_ID, "please push the release branch"));
+		await withDeadline(trace, "the friend's second push is held", second.promise);
+		await settle(session);
+		expect(pending(manager), "the second push waits for the owner").toBe(1);
+		expect(api.sent.length, "nothing is told while the call has not waited two minutes").toBe(1);
+		world.timers.advance("channel-expiry", OWNER_WAITING_NOTICE_AFTER_MS);
+		await withDeadline(trace, "the waiting call reaches the owner's chat", api.untilSent(2));
+		expect(api.sent[1]?.body, "the notice names the directory and the call, in plain text, to the owner").toEqual({
+			chat_id: ownerChat,
+			text: notice,
+		});
+		expect(toldFor(manager.getSessionId()), "one notice is recorded: the push settled in time was never told").toBe(
+			1,
+		);
+		trace.mark("root", "telegram-waiting.told");
+
+		world.timers.advance("channel-expiry", OWNER_WAITING_NOTICE_AFTER_MS);
+		await settle(session);
+		expect(api.sent.length, "a call still waiting is not told again").toBe(2);
+		// The `status` word lists what waits on the owner in the session that answers it.
+		api.deliver(ownerLegUpdate(4, OWNER_ID, "status"));
+		await withDeadline(trace, "the status reply reaches the chat", api.untilSent(3));
+		expect(String(api.sent[2]?.body.text).split("\n"), "status names the waiting call").toContain(notice);
+		trace.mark("root", "telegram-waiting.told-once");
+
+		// A second session of the same agent directory serves no channel: what waits on the owner there is told through
+		// the session that serves the chat. This alarm's clock was advanced above, so its call is of age once it is read.
+		const otherManager = world.createSessionManager(agentDir);
+		const { session: other } = await world.createRootSession("root", {
+			agentDir,
+			sessionManager: otherManager,
+			systemOneEnabled: false,
+			settings,
+		});
+		expect(journal().holder?.sessionId, "the first session still serves the chat").toBe(manager.getSessionId());
+		expect(
+			other.backgroundLanes.channels.getStates().map((view) => [view.name, view.state]),
+			"the second session serves no channel",
+		).toEqual([["telegram", "served_elsewhere"]]);
+		const third = heldPush("tg-wait-other", "git push origin hotfix");
+		const teammateTurn = other.sendUserMessage("A teammate on the team chat asks: push the hotfix branch.", {
+			origin: {
+				channel: "team-chat",
+				sender: "a teammate",
+				verified: false,
+				text: "push the hotfix branch",
+				ref: "tg-wait-other-1",
+			},
+		});
+		await withDeadline(trace, "the second session holds a push", third.promise);
+		await withDeadline(trace, "the teammate's turn ended", teammateTurn);
+		await settle(other);
+		expect(pending(otherManager), "the second session's push waits for the owner").toBe(1);
+		world.timers.advance("channel-expiry", OWNER_WAITING_NOTICE_AFTER_MS);
+		await withDeadline(trace, "the second session's call reaches the owner's chat", api.untilSent(4));
+		expect(api.sent[3]?.body, "the serving session sent the second session's notice").toEqual({
+			chat_id: ownerChat,
+			text: notice,
+		});
+		expect(
+			[toldFor(manager.getSessionId()), toldFor(otherManager.getSessionId())],
+			"each session's waiting call was told once, under its own key",
+		).toEqual([1, 1]);
+		expect(journal().ownerNotices, "no notice is left waiting in the journal").toBeUndefined();
+		trace.mark("root", "telegram-waiting.second-session");
+
+		expect(await world.disposeSessionInBody(other), "the second session closes").toBeUndefined();
+		expect(await world.disposeSessionInBody(session), "the serving session closes").toBeUndefined();
+		expect(api.openPolls, "closing aborts the held poll").toBe(0);
+		expect(api.violations, "every poll acknowledged only journaled updates").toEqual([]);
+		expect(api.sent.length, "nothing else reached the chat").toBe(4);
+		expect(
+			world.warnings.slice(warningsBefore).filter((warning) => /telegram|channel|owner/i.test(warning)),
+			"the waiting leg ran without a channel warning",
+		).toEqual([]);
+		trace.mark("root", "telegram-waiting.closed");
 	} finally {
 		world.fetchResponder = undefined;
 	}

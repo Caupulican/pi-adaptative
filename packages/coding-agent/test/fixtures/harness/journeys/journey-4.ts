@@ -9,6 +9,7 @@ import {
 	runJourney4TelegramOwnerPhase,
 	runJourney4TelegramPhase,
 	runJourney4TelegramQuotaPhase,
+	runJourney4TelegramWaitingPhase,
 } from "./journey-4-telegram.ts";
 /**
  * The real proper-lockfile runs its exclusion and lease logic; only its filesystem is redirected to the
@@ -42,6 +43,8 @@ export async function runJourney4(): Promise<void> {
 			await runJourney4AwayChannelsPhase(world);
 			await runJourney4SlackPhase(world);
 			await runJourney4GmailPhase(world);
+			// Last: it advances the clock of the channels' alarm, which every session of the world shares.
+			await runJourney4TelegramWaitingPhase(world);
 		},
 	);
 }
