@@ -202,6 +202,7 @@ import {
 	withoutVerificationPending,
 	withVerificationPending,
 } from "./worker-claim.ts";
+import { attemptStaysAtClose, handoffUnfinishedContexts } from "./worker-close-handoff.ts";
 import {
 	type WorkerContextForkSnapshot,
 	WorkerContextForkStore,
@@ -1259,13 +1260,8 @@ export class WorkerDelegationController {
 		// Bound attempts have an authoritative transcript and agent identity. A normal owner-session
 		// shutdown is an execution interruption, not an explicit worker cancellation: fence it into
 		// suspended state before the abort continuation can observe the signal.
-		const suspendedAttemptIds = new Set<string>();
 		try {
-			for (const attemptId of this.lifecycle.suspendBoundInProcessAttemptsForRestart(
-				this.agentControl.getProcessOwnerId(),
-			)) {
-				suspendedAttemptIds.add(attemptId);
-			}
+			this.lifecycle.suspendBoundInProcessAttemptsForRestart(this.agentControl.getProcessOwnerId());
 		} catch (error) {
 			this.shutdownErrors.add(error);
 			this.safeWarn(
@@ -1284,16 +1280,17 @@ export class WorkerDelegationController {
 		for (const record of records) {
 			if (record.status !== "queued" && record.status !== "running") continue;
 			let ownsLane = false;
-			let attemptId: string | undefined;
+			let stays = false;
 			this.runTeardownStep(`inspect worker ${record.laneId} teardown ownership`, () => {
 				ownsLane = this.ownsProjectLane(record.laneId);
-				attemptId = this.lifecycle.getActiveAttempt(record.laneId)?.attemptId;
+				stays = attemptStaysAtClose(this.lifecycle.getActiveAttempt(record.laneId));
 			});
 			if (!ownsLane) continue;
 			const ledger = this.inFlightLedgers.get(record.laneId);
-			// onStarted may dispose after the lease binds but before the execution ledger exists.
-			// The exact suspended attempt, rather than ledger presence, owns restart recovery.
-			if (attemptId && suspendedAttemptIds.has(attemptId)) {
+			// The close interrupts work, it does not cancel it (`worker-close-handoff.ts`): a queued attempt and a suspended
+			// one stay as they are. onStarted may dispose after the lease binds but before the execution ledger exists, so
+			// the attempt's own state, rather than ledger presence, owns restart recovery.
+			if (stays) {
 				this.inFlightLedgers.delete(record.laneId);
 				continue;
 			}
@@ -1306,7 +1303,7 @@ export class WorkerDelegationController {
 				} catch (error) {
 					this.shutdownErrors.add(error);
 					this.safeWarn(
-						`Failed to cancel durable queued worker ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
+						`Failed to cancel durable worker ${record.laneId}: ${error instanceof Error ? error.message : String(error)}`,
 					);
 				}
 				continue;
@@ -1326,7 +1323,7 @@ export class WorkerDelegationController {
 		this.inFlightLedgers.clear();
 
 		this.runTeardownStep("dispose worker controls", () => this.agentControl.dispose());
-		this.runTeardownStep("cancel queued worker dispatches", () => this.scheduler.cancelQueued());
+		this.runTeardownStep("release queued worker dispatches", () => this.scheduler.releaseQueued());
 		this.runTeardownStep("dispose worker recovery", () => this.recovery.dispose());
 		this.runTeardownStep("dispose worker terminal handoffs", () => this.terminalHandoffs.dispose());
 		const shellShutdowns: Promise<void>[] = [];
@@ -1389,28 +1386,17 @@ export class WorkerDelegationController {
 			// shutdown may reserve unfinished contexts for this parent; failed cleanup keeps the busy claim.
 			// Retired worktree releases are separate retained artifacts, not suspended execution resources.
 			if (this.shutdownErrors.size === 0 && this.retainedReleases.size === 0) {
-				this.runTeardownStep("handoff suspended worker contexts", () => {
-					const agents = Object.values(this.lifecycle.getTaskRuntimeSnapshot().agents);
-					for (const [sessionId, claim] of [...this.projectClaims]) {
-						if (
-							claim.parentSessionId !== this.deps.getSessionId() ||
-							claim.incarnation !== this.agentControl.getProcessOwnerId()
-						)
-							continue;
-						const bindings = agents.filter((agent) => agent.resumeContext.sessionId === sessionId);
-						const agent = bindings.length === 1 ? bindings[0] : undefined;
-						if (agent?.status !== "suspended") continue;
-						const attempt = this.lifecycle.getLatestAgentAttempt(agent.agentId);
-						const lease = attempt?.lease;
-						if (
-							attempt?.status !== "suspended" ||
-							attempt.agentId !== agent.agentId ||
-							agent.activeAttemptId !== attempt.attemptId ||
-							lease?.ownerId !== claim.incarnation
-						)
-							continue;
-						this.runTeardownStep(`handoff suspended worker ${agent.agentId} context`, () => {
-							this.agentControl.handoffSettledContext(agent.agentId, claim, (assertMailboxSettled) => {
+				this.runTeardownStep("handoff unfinished worker contexts", () =>
+					handoffUnfinishedContexts({
+						owner: {
+							parentSessionId: this.deps.getSessionId(),
+							incarnation: this.agentControl.getProcessOwnerId(),
+						},
+						snapshot: () => this.lifecycle.getTaskRuntimeSnapshot(),
+						claims: () => this.projectClaims,
+						isSettled: (agentId) => this.isSpecialistSettled(agentId),
+						publish: (agent, claim, assertUnchanged) =>
+							this.agentControl.handoffSettledContext(agent.agentId, claim, (assertMailboxSettled) =>
 								this.conversations.handoffProjectContext({
 									agentDir: this.deps.getAgentDir(),
 									resumeContext: agent.resumeContext,
@@ -1420,25 +1406,14 @@ export class WorkerDelegationController {
 									agentId: agent.agentId,
 									assertSettled: () => {
 										assertMailboxSettled();
-										const current = this.lifecycle.getLatestAgentAttempt(agent.agentId);
-										if (
-											this.projectClaims.get(sessionId) !== claim ||
-											!this.isSpecialistSettled(agent.agentId) ||
-											!isDeepStrictEqual(this.lifecycle.getAgent(agent.agentId), agent) ||
-											current?.attemptId !== attempt.attemptId ||
-											current.status !== "suspended" ||
-											current.lease?.ownerId !== lease.ownerId ||
-											current.lease.leaseId !== lease.leaseId ||
-											current.lease.fencingToken !== lease.fencingToken
-										)
-											throw new Error(`Worker ${agent.agentId} shutdown handoff ownership changed.`);
+										assertUnchanged();
 									},
-								});
-							});
-							this.projectClaims.delete(sessionId);
-						});
-					}
-				});
+								}),
+							),
+						released: (sessionId) => this.projectClaims.delete(sessionId),
+						step: (label, run) => this.runTeardownStep(label, run),
+					}),
+				);
 			}
 			this.runTeardownStep("clear worker conversation cache", () => this.conversations.clearCache());
 			for (const error of this.shutdownErrors) {

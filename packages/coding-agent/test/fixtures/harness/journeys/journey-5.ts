@@ -5,6 +5,7 @@ import { runJourney5PlanCollectPhase } from "./journey-5-plan-collect.ts";
 import { runJourney5PlanOriginPhase } from "./journey-5-plan-origin.ts";
 import { runJourney5PlanRacePhase } from "./journey-5-plan-race.ts";
 import { runJourney5PlanReducePhase } from "./journey-5-plan-reduce.ts";
+import { runJourney5PlanRestartPhase } from "./journey-5-plan-restart.ts";
 import { runJourney5PlanResultGatePhase } from "./journey-5-plan-result-gate.ts";
 import { runJourney5PlanReviseCancelPhase } from "./journey-5-plan-revise-cancel.ts";
 import { runJourney5PlanVerifyAcceptedPhase } from "./journey-5-plan-verify.ts";
@@ -44,6 +45,8 @@ export async function runJourney5(): Promise<void> {
 			expect(await world.disposeSessionInBody(session), "the plans owner disposes cleanly").toBeUndefined();
 			// A plan under a goal runs in its own session: the goal is that session's, and ends with it.
 			await runJourney5PlanVerifyAcceptedPhase(world);
+			// A plan whose owner closes and reopens mid-plan runs in its own session, which the phase closes and opens again.
+			await runJourney5PlanRestartPhase(world);
 		},
 	);
 }

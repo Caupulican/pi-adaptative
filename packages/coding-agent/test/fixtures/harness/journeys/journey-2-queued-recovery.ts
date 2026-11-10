@@ -377,7 +377,8 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 			},
 		},
 	);
-	// The recovered root's first prompt reply precedes B's wake turn; the prompt's foreground-idle boundary is what drains the queue.
+	// Recovery wakes the queue itself once the read that entered it returns, so B starts without waiting for a prompt. The
+	// recovered root's one reply to its prompt still precedes B's wake turn: B makes two requests and runs a tool first.
 	world.provider.enqueue("root", {
 		name: "e7-resume-reported",
 		reply: { content: [{ type: "text", text: "The restart is noted." }] },

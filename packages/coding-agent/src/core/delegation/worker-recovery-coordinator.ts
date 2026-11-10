@@ -83,7 +83,7 @@ export interface WorkerRecoveryCoordinatorOptions {
 	 * interrupted, so nothing supervises the worker). Returns true when it ended the attempt, which is then not requeued.
 	 */
 	endUnresumable?(attempt: AttemptRuntimeState): boolean;
-	/** Wake the scheduler and UI after a retained retry deadline becomes eligible. */
+	/** Wake the scheduler and UI: a retained retry deadline became eligible, or a restart's recovery put work back in the queue. */
 	retryReady?(): void;
 	/**
 	 * Publish a rate limit or overload this worker's retry ladder is about to wait out, so sibling
@@ -187,6 +187,7 @@ export class WorkerRecoveryCoordinator {
 					});
 				}
 				let recoveredAll = true;
+				let enqueued = false;
 				for (const { attempt, record, verificationOfTaskId } of queued) {
 					if (this.disposed) return;
 					if (this.options.runsAttempt?.(attempt) === false) continue;
@@ -206,12 +207,22 @@ export class WorkerRecoveryCoordinator {
 						);
 						continue;
 					}
-					if (retained) continue;
+					if (retained) {
+						enqueued = true;
+						continue;
+					}
 					recoveredAll = false;
 					break;
 				}
 				if (this.disposed) return;
 				this.queueRecovered = recoveredAll;
+				// Work this recovery put back in the queue is ready to run, as a retry whose time has come is. The queue is
+				// woken once the read that entered recovery returns, so a session opened again goes on with its work without
+				// waiting for its owner's next prompt.
+				if (enqueued)
+					queueMicrotask(() => {
+						if (!this.disposed) this.options.retryReady?.();
+					});
 			}
 
 			for (const recovery of lifecycle.getPendingVerificationRecoveries()) {

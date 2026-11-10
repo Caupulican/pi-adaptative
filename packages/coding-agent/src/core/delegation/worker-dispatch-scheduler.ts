@@ -861,29 +861,19 @@ export class WorkerDispatchScheduler {
 		this.unsubscribeRuntimeAvailability = undefined;
 	}
 
-	cancelQueued(): void {
-		for (const laneId of this.deferred.keys()) {
-			this.settleLaneObservers(laneId, { state: "cancelled", reasonCode: "session_disposed" }, true);
-		}
+	/**
+	 * Shutdown hands the queue back. Every entry is this process's view of a durable attempt that has not started, and
+	 * ending the process interrupts work without cancelling it: each entry leaves the queue with its attempt as it stands,
+	 * for the next controller generation to enqueue again, and every process-local blocker of the entry is released. A
+	 * disposed generation has no future signal, so an observer is told the lane is no longer this scheduler's, which
+	 * claims no completion. A cancellation already under way is finished.
+	 */
+	releaseQueued(): void {
+		for (const laneId of this.deferred.keys()) this.settleLaneObservers(laneId, { state: "unowned" }, true);
 		this.deferred.clear();
 		for (const laneId of this.queued.ids()) {
-			// The controller owns durable cancellation and any pre-admission resources (for example a
-			// write reservation). Disposal must still visit every lane and release every process-local
-			// blocker when one durable write fails; the next controller generation recovers any retained
-			// durable queued attempt.
-			const outcome = this.cancelWithOutcome(laneId, "session_disposed");
 			this.removeQueued(laneId);
-			// A disposed generation has no future signal, so an observer must not be left waiting for
-			// one. A successful durable cancellation is a cancellation; a failed one is reported as the
-			// failure it was, carrying the original error, and the next generation recovers the lane.
-			this.settleLaneObservers(
-				laneId,
-				outcome.state === "cancelled"
-					? { state: "cancelled", reasonCode: "session_disposed" }
-					: outcome.state === "unowned"
-						? { state: "unowned" }
-						: { state: "failed", error: outcome.error },
-			);
+			this.settleLaneObservers(laneId, { state: "unowned" });
 		}
 		for (const [laneId, pending] of [...this.pendingCancellations]) {
 			this.cancelWithOutcome(laneId, pending.reasonCode, pending.dispatchToken, pending.detail);

@@ -206,6 +206,24 @@ export function planTitled(session: AgentSession, title: string) {
 	return found[0]!;
 }
 
+/**
+ * Resolves once `holds` is true of the session's plans: read at once, then each time a plan's visible state moves (a step
+ * starts, settles or is held), which is when the owner's panel redraws.
+ */
+export function whenPlanState(session: AgentSession, holds: () => boolean): Promise<void> {
+	return new Promise((resolve) => {
+		if (holds()) {
+			resolve();
+			return;
+		}
+		const unsubscribe = session.backgroundLanes.subscribePlanChanges(() => {
+			if (!holds()) return;
+			unsubscribe();
+			resolve();
+		});
+	});
+}
+
 /** The newest attempt of a task, as the durable projection holds it. */
 export function latestAttemptOf(session: AgentSession, taskId: string | undefined) {
 	const snapshot = session.backgroundLanes.getTaskRuntimeSnapshot();
