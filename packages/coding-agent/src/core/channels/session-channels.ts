@@ -14,10 +14,10 @@
  * (`owner-control.ts`) is answered here and never becomes a turn; any other is delivered as an owner turn through
  * `ownerDelivery`, under the channel's owner spend pool and a `live` closure, and its answer goes back to that private
  * chat. Without `ownerSenders` or without the wiring, every path is the third-party one above. The owner's chat is
- * pushed only what concerns its own turns (`owner-push.ts`): held drafts, the bounds, stops and held answers.
+ * pushed what concerns its own turns (`owner-push.ts`: held drafts, the bounds, stops and held answers) and the calls
+ * that wait on the owner in a session (`owner-waiting-notices.ts`).
  */
 
-import { type FSWatcher, watch } from "node:fs";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { claimThenEffect } from "../../kernel/outbox.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
@@ -75,6 +75,7 @@ import {
 	plainLabel,
 } from "./channel-message.ts";
 import { type ChannelPolicyResolution, isValidChannelName, type ResolvedChannelPolicy } from "./channel-policy.ts";
+import { JournalDirWatch } from "./journal-dir-watch.ts";
 import {
 	listedOwnerDigests,
 	ownerAdmission,
@@ -103,8 +104,9 @@ import {
 	parseOwnerControl,
 	presentDraft,
 } from "./owner-control.ts";
-import { nameableSenderId, quotaStatusLine, senderNoticeText } from "./owner-notice-text.ts";
+import { channelStateNotice, nameableSenderId, quotaStatusLine, senderNoticeText } from "./owner-notice-text.ts";
 import { OwnerPush } from "./owner-push.ts";
+import { OwnerWaitingNotices, waitingStatusLine } from "./owner-waiting-notices.ts";
 import { sendReplyParts } from "./reply-parts.ts";
 
 /** The daemon's drafts one summary of what it left names by id and reason; the rest are counted. */
@@ -332,14 +334,23 @@ export class SessionChannels {
 	/** Per channel taken over from the daemon's host: that host's session, whose last turns still write drafts. */
 	private readonly followed = new Map<string, string>();
 	/**
-	 * The watch on the journal directory of an open session while it follows a preempted host or wants a channel another
-	 * session serves: a journal's change tells the drafts that host writes and takes a channel given up in another
-	 * process at once. The daemon's host has its own watch (`away-channel-host.ts`).
+	 * The watch on the journal directory of an open session while it follows a preempted host, wants a channel another
+	 * session serves, or serves the owner's: a journal's change tells the drafts that host writes, takes a channel given
+	 * up in another process at once, and sends a notice another session left for the owner. The daemon's host has its
+	 * own watch (`away-channel-host.ts`).
 	 */
-	private dirWatcher: FSWatcher | undefined;
-	private dirWatchFailure: string | undefined;
+	private readonly dirWatch = new JournalDirWatch({
+		dir: () => channelsDir(this.deps.getAgentDir()),
+		onChange: () => this.journalChanged(),
+		onFailure: (reason) =>
+			this.deps.warn(
+				`Channels: the journal directory cannot be watched (${reason}); a channel another session gives up is taken at the next settings change, and what the daemon left is told at this session's next channel pass (its next turn, message or settings change).`,
+			),
+	});
 	/** Updates to the owner's chats (`owner-push.ts`); pushes nothing without owner authority and the wiring. */
 	readonly ownerPush: OwnerPush;
+	/** The notices of the calls that wait on the owner in the session hosting their work (`owner-waiting-notices.ts`). */
+	private readonly waitingNotices: OwnerWaitingNotices;
 	/** Owner turns this session offered or runs, by batch id (`ref`). */
 	private readonly ownerRuns = new Map<string, OwnerRun>();
 	/** The held-draft subscription and the control handle it is on. */
@@ -355,7 +366,18 @@ export class SessionChannels {
 			journal: (name) => this.journal(name),
 			provider: (name) => this.registry.getChannel(name),
 			ownerPolicy: (name) => this.ownerPolicy(name),
+			ownerChannels: () => [...deps.getChannelPolicies().keys()].filter((name) => this.ownerPolicy(name)),
+			serves: (name) => {
+				const runtime = this.runtimes.get(name);
+				return runtime?.holding === true && (runtime.state === "armed" || runtime.state === "capped");
+			},
 			now: () => this.now(),
+			warn: (message) => deps.warn(message),
+		});
+		this.waitingNotices = new OwnerWaitingNotices({
+			push: this.ownerPush,
+			waiting: () => deps.ownerControl?.()?.waiting(),
+			timers: deps.wakeTimers ?? SYSTEM_TIMER_PORT,
 			warn: (message) => deps.warn(message),
 		});
 		this.registry = new GatewayRegistry({
@@ -552,6 +574,8 @@ export class SessionChannels {
 		this.unsubscribes.push(
 			this.deps.subscribeSettings(() => this.onSettingsChanged()),
 			this.deps.subscribeForegroundActivity(() => this.onActivity()),
+			// A call that starts waiting on the owner is written to the session before anything else tells of it.
+			this.deps.getSessionManager().onEntriesPersisted(() => this.waitingNotices.touch()),
 		);
 		// Engaged, the pass stops the owner runs (the kill switches); lifted, it offers the owner messages that waited.
 		if (this.deps.subscribeEmergencyStop)
@@ -579,6 +603,7 @@ export class SessionChannels {
 		this.transcriptWait?.();
 		this.transcriptWait = undefined;
 		this.clearWake();
+		this.waitingNotices.stop();
 		this.followed.clear();
 		this.syncDirWatch();
 		await this.registry.stop();
@@ -616,48 +641,16 @@ export class SessionChannels {
 		const runtime = this.runtime(name);
 		runtime.state = state;
 		runtime.detail = detail;
-		const notice = this.stateNotice(name, state, detail);
+		const notice = channelStateNotice(name, state, detail, {
+			connectionLost: detail !== undefined && runtime.connection === detail,
+			builtIn: this.builtIns.has(name),
+		});
 		this.deps.observeNotice("channel-state", () => ({ scope: name, state: notice ?? "clear" }));
 		const fields = { channel: name, state, reason: detail };
 		if (state === "suspended" || state === "invalid" || state === "capped")
 			harnessLog.warn("channels", "a channel changed to a degraded state", fields);
 		else harnessLog.info("channels", "a channel changed state", fields);
 		this.syncDirWatch();
-	}
-
-	private stateNotice(name: string, state: ChannelRuntimeState, detail: string | undefined) {
-		const reason = `${name}:${state}:${detail ?? ""}`;
-		switch (state) {
-			case "not_configured":
-				return {
-					reason,
-					text: `Channel ${name} is registered but not started: no channels.${name} policy in the global or directory-profile settings.`,
-				};
-			case "invalid":
-				return { reason, text: `Channel ${name} is not started: ${detail ?? "its policy cannot be read"}.` };
-			case "served_elsewhere":
-				return {
-					reason,
-					text: `Channel ${name} is not started in this session: another open session serves it.`,
-				};
-			case "suspended":
-				if (detail !== undefined && this.runtimes.get(name)?.connection === detail)
-					return {
-						reason,
-						text: `Channel ${name} is not receiving messages: ${detail}.`,
-					};
-				return {
-					reason,
-					text: `Channel ${name} did not start (${detail ?? "start failed"}); it is tried again when settings change or ${this.builtIns.has(name) ? "a session starts" : "the provider registers again"}.`,
-				};
-			case "capped":
-				return {
-					reason,
-					text: `Channel ${name} holds new messages: ${detail ?? "its daily bound is reached"}. They wait up to 24 hours.`,
-				};
-			default:
-				return undefined;
-		}
 	}
 
 	/** The registry's start gate: policy, name and the one serving session. Never throws. */
@@ -993,47 +986,25 @@ export class SessionChannels {
 		);
 	}
 
-	/** Open the journal directory's watch while this open session follows a host or waits for a channel; else close it. */
+	/**
+	 * Open the journal directory's watch while this open session follows a host, waits for a channel, or serves one that
+	 * carries owner authority (another session may leave the owner a notice there); else close it.
+	 */
 	private syncDirWatch(): void {
-		const wanted =
-			this.started &&
-			!this.deps.away &&
-			(this.followed.size > 0 ||
-				[...this.runtimes.values()].some((runtime) => runtime.state === "served_elsewhere"));
-		if (!wanted) {
-			this.dirWatcher?.close();
-			this.dirWatcher = undefined;
-			return;
-		}
-		if (this.dirWatcher) return;
-		try {
-			const watcher = watch(channelsDir(this.deps.getAgentDir()), { persistent: false }, (_event, filename) => {
-				// A journal is replaced by a rename onto `<name>.json`; its lock and temporary files change nothing.
-				if (this.dirWatcher !== watcher || (filename !== null && !String(filename).endsWith(".json"))) return;
-				this.onJournalDirChange();
-			});
-			watcher.on("error", () => {
-				if (this.dirWatcher !== watcher) return;
-				watcher.close();
-				this.dirWatcher = undefined;
-			});
-			this.dirWatcher = watcher;
-			this.dirWatchFailure = undefined;
-		} catch (error) {
-			const reason = error instanceof Error ? error.message : String(error);
-			if (this.dirWatchFailure === reason) return;
-			this.dirWatchFailure = reason;
-			this.deps.warn(
-				`Channels: the journal directory cannot be watched (${reason}); a channel another session gives up is taken at the next settings change, and what the daemon left is told at this session's next channel pass (its next turn, message or settings change).`,
-			);
-		}
+		const watched = ([name, runtime]: [string, ChannelRuntime]) =>
+			runtime.state === "served_elsewhere" || (runtime.holding && this.ownerPolicy(name) !== undefined);
+		this.dirWatch.sync(
+			this.started && !this.deps.away && (this.followed.size > 0 || [...this.runtimes].some(watched)),
+		);
 	}
 
-	private onJournalDirChange(): void {
+	private journalChanged(): void {
 		for (const [name, preempted] of this.followed) this.followStep(name, preempted);
 		// Admission reads the journal before it locks it, so a channel still served elsewhere costs no write here.
 		if ([...this.runtimes.values()].some((runtime) => runtime.state === "served_elsewhere"))
 			void this.registry.refreshChannels();
+		// A notice another session left for the owner is sent by the session that serves the channel.
+		for (const name of this.runtimes.keys()) void this.ownerPush.drain(name);
 		this.syncDirWatch();
 	}
 
@@ -1191,13 +1162,16 @@ export class SessionChannels {
 				}
 				if (runtime.state === "armed" || runtime.state === "capped") this.deliverNext(name, policy);
 				this.tellUntold(name);
+				void this.ownerPush.drain(name);
 			}
+			this.waitingNotices.touch();
 		} catch (error) {
 			this.deps.warn(`Channel delivery failed: ${error instanceof Error ? error.message : String(error)}`);
 		} finally {
 			this.routing = false;
 			if (this.rerun) this.scheduleWork();
 			this.armWake();
+			this.syncDirWatch();
 		}
 	}
 
@@ -2294,13 +2268,16 @@ export class SessionChannels {
 		);
 		const running = [...this.ownerRuns.values()].some((run) => run.name === name && run.accepted && !run.stopped);
 		let drafts: readonly OwnerDraftView[] = [];
+		let waitingLine: string | undefined;
 		const openerOf = this.ownerOpeners(name);
 		try {
-			drafts = (this.deps.ownerControl?.()?.drafts() ?? []).filter(
+			const control = this.deps.ownerControl?.();
+			drafts = (control?.drafts() ?? []).filter(
 				(view) => view.state === "pending" && draftInScope(view, name, senderDigest, openerOf),
 			);
+			waitingLine = waitingStatusLine(control?.waiting());
 		} catch {
-			drafts = [];
+			// What was read stands: a list that could not be read is left out of the reply.
 		}
 		const shown = (view: OwnerDraftView) => this.ownerPush.presentedAt(name, view.id, conversationKey) !== undefined;
 		const listed = drafts
@@ -2316,6 +2293,7 @@ export class SessionChannels {
 			listed.length > 0
 				? `Held: ${listed.join("; ")}${more > 0 ? `; and ${more} more` : ""}.`
 				: "No held action from this chat.",
+			...(waitingLine === undefined ? [] : [waitingLine]),
 			...(suppressed > 0
 				? [`${suppressed} update(s) were not pushed under channels.${name}.ownerPushPerHour.`]
 				: []),

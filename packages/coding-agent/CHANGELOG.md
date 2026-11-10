@@ -2,6 +2,7 @@
 
 ### Added
 
+- The phone hears of what waits on the owner: a call that has waited two minutes in a session (an action held for approval, a question, a held plan step, a decision left for later, a ready fix) is told once to the owner's chats as `Waiting on you in <directory>: <the status line of the call>`. A call settled before that is never told, a line that looks like it holds a secret is told without its text, and an action a phone turn holds is not repeated. Every open session tells its own waiting calls: one that does not serve the channel leaves its notice in the channel's journal, and the serving session (or the daemon's host) sends it at once. The notices count against `ownerPushPerHour`. The `status` word lists the calls waiting on the owner in the session that answers.
 - One-tap decisions on the phone: on Telegram, a held action's presentation carries **Approve** and **Deny** buttons. A press sends `approve <draft-id>` or `deny <draft-id>` as the owner's own message, so it is admitted and decided by the same model-free rules as the typed word. A channel transport can offer one-tap answers under any message it sends (`ChannelMessage.choices`, `ChannelCapabilities.choices`); a transport without them sends the text alone.
 
 ### Changed

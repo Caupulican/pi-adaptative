@@ -108,10 +108,35 @@ export interface OwnerDraftDecisions {
 	deny(draftId: string, by: OwnerDecisionBy): OwnerDraftView["state"] | "absent";
 }
 
-/** The decisions plus the stream of newly held drafts: what the channels core holds of the session that hosts the phone. */
+/** A call waiting on the owner in the hosting session, as that session's status shows it. */
+export interface OwnerWaitingCall {
+	/** Unique in the session and the same for as long as the call waits. */
+	readonly key: string;
+	/** One line of plain words. */
+	readonly what: string;
+	/** Epoch milliseconds the call started waiting; absent when no store records a time for it. */
+	readonly since?: number;
+}
+
+/** The calls waiting on the owner in the hosting session, and the directory that session works in. */
+export interface OwnerWaitingView {
+	readonly sessionId: string;
+	readonly cwd: string;
+	readonly calls: readonly OwnerWaitingCall[];
+}
+
+/**
+ * The decisions plus the stream of newly held drafts and the calls waiting on the owner: what the channels core holds of
+ * the session that hosts the owner's work.
+ */
 export interface OwnerChannelControl extends OwnerDraftDecisions {
 	/** Hears each draft the hosting session holds on a remote-owner run (to show it to the phone); returns the unsubscribe. */
 	onDraftHeld(listener: (view: OwnerDraftView) => void): () => void;
+	/**
+	 * The calls waiting on the owner in the hosting session, but a draft held on a remote-owner run: its own chat is
+	 * shown that one when it is held.
+	 */
+	waiting(): OwnerWaitingView;
 }
 
 /**

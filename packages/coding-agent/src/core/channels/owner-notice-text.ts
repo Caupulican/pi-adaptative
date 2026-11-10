@@ -1,7 +1,7 @@
 /**
- * The owner-facing words a channel session writes about a held sender and the subscription allowance: pure text
- * builders with no session state, so the notice rules (one bounded line, an id named only when the platform assigned it)
- * live in one place next to their bounds.
+ * The owner-facing words a channel session writes about a channel's state, a held sender and the subscription
+ * allowance: pure text builders with no session state, so the notice rules (one bounded line, an id named only when the
+ * platform assigned it) live in one place next to their bounds.
  */
 
 import type { ChannelSenderIds } from "../gateways/channel-provider.ts";
@@ -32,6 +32,43 @@ export function quotaStatusLine(
 	if (quota.kind === "exhausted")
 		return `Subscription usage: ${quota.reason} (${key} ${policy.ownerQuotaMaxUsedPercent}%); the dollar bounds apply.`;
 	return quota.subscription ? `Subscription usage: ${quota.reason}; the dollar bounds apply.` : undefined;
+}
+
+/**
+ * The notice a channel's state shows the owner, or none for a state that needs no telling. `connectionLost`: the detail
+ * is what the started transport reported; `builtIn`: the transport is a shipped one, which a session start tries again.
+ */
+export function channelStateNotice(
+	name: string,
+	state: string,
+	detail: string | undefined,
+	facts: { readonly connectionLost: boolean; readonly builtIn: boolean },
+): { readonly reason: string; readonly text: string } | undefined {
+	const reason = `${name}:${state}:${detail ?? ""}`;
+	switch (state) {
+		case "not_configured":
+			return {
+				reason,
+				text: `Channel ${name} is registered but not started: no channels.${name} policy in the global or directory-profile settings.`,
+			};
+		case "invalid":
+			return { reason, text: `Channel ${name} is not started: ${detail ?? "its policy cannot be read"}.` };
+		case "served_elsewhere":
+			return { reason, text: `Channel ${name} is not started in this session: another open session serves it.` };
+		case "suspended":
+			if (facts.connectionLost) return { reason, text: `Channel ${name} is not receiving messages: ${detail}.` };
+			return {
+				reason,
+				text: `Channel ${name} did not start (${detail ?? "start failed"}); it is tried again when settings change or ${facts.builtIn ? "a session starts" : "the provider registers again"}.`,
+			};
+		case "capped":
+			return {
+				reason,
+				text: `Channel ${name} holds new messages: ${detail ?? "its daily bound is reached"}. They wait up to 24 hours.`,
+			};
+		default:
+			return undefined;
+	}
 }
 
 export function senderNoticeText(name: string, namedId: string | undefined): string {

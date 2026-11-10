@@ -28,7 +28,7 @@
  * change.
  */
 
-import { existsSync, type FSWatcher, mkdirSync, watch } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
 import { isAbsolute, relative, resolve, sep } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { readSessionHeaderResult } from "../../kernel/session/session-header.ts";
@@ -50,6 +50,7 @@ import type { TimerSource } from "../util/timer-port.ts";
 import { AWAY_CHANNEL_SPEND_REFUSAL, type AwayChannel, awayChannels, readAwayChannelCharges } from "./away-channels.ts";
 import { ChannelJournal } from "./channel-journal.ts";
 import { isOwnerChannelName, type ResolvedChannelPolicy } from "./channel-policy.ts";
+import { JournalDirWatch } from "./journal-dir-watch.ts";
 import { SessionChannels } from "./session-channels.ts";
 
 /** The tools a channel turn away may call: it reads the working directory and answers. */
@@ -153,7 +154,28 @@ export class AwayChannelHosts {
 	private readonly reported = new Map<string, string>();
 	/** The owner's credential files as the daemon last read them: a change is worth opening a refused host again. */
 	private credentialStamp = "";
-	private watcher: FSWatcher | undefined;
+	/**
+	 * The watch on the journal directory: a change re-reads who holds each host's channel, and sends a notice another
+	 * session left for the owner on a channel a host serves. A watch that cannot open, or fails later, leaves the daemon's
+	 * tick, which re-reads the holders within one interval.
+	 */
+	private readonly watch = new JournalDirWatch({
+		dir: () => {
+			const dir = channelsDir(this.input.agentDir);
+			mkdirSync(dir, { recursive: true });
+			return dir;
+		},
+		onChange: () => {
+			for (const host of this.hosts.values()) {
+				this.refreshHolder(host);
+				void host.channels.ownerPush.drain(host.name);
+			}
+		},
+		onFailure: (reason) =>
+			this.input.report(
+				`Channels away: the journal directory cannot be watched (${reason}); a session closing is seen at the next daemon tick.`,
+			),
+	});
 	private closed = false;
 
 	constructor(input: AwayChannelHostsInput) {
@@ -270,29 +292,7 @@ export class AwayChannelHosts {
 	}
 
 	private ensureWatch(): void {
-		if (this.watcher || this.closed) return;
-		const dir = channelsDir(this.input.agentDir);
-		try {
-			mkdirSync(dir, { recursive: true });
-			const watcher = watch(dir, { persistent: false }, (_event, filename) => {
-				// A journal is replaced by a rename onto `<name>.json`; its lock and temporary files change nothing.
-				if (this.watcher !== watcher || (filename !== null && !String(filename).endsWith(".json"))) return;
-				for (const host of this.hosts.values()) this.refreshHolder(host);
-			});
-			// A watch that fails later leaves the daemon's tick, which re-reads the holders within one interval.
-			watcher.on("error", () => {
-				if (this.watcher !== watcher) return;
-				watcher.close();
-				this.watcher = undefined;
-			});
-			this.watcher = watcher;
-			this.reported.delete("watch");
-		} catch (error) {
-			this.report(
-				"watch",
-				`Channels away: the journal directory cannot be watched (${errorText(error)}); a session closing is seen at the next daemon tick.`,
-			);
-		}
+		if (!this.closed) this.watch.sync(true);
 	}
 
 	private registerProvider(host: AwayChannelHost, { name, policy }: AwayChannel): void {
@@ -654,8 +654,7 @@ export class AwayChannelHosts {
 	async close(): Promise<void> {
 		if (this.closed) return;
 		this.closed = true;
-		this.watcher?.close();
-		this.watcher = undefined;
+		this.watch.sync(false);
 		await Promise.all(this.opening.values());
 		await Promise.all(this.closing.values());
 		const hosts = [...this.hosts.values()];

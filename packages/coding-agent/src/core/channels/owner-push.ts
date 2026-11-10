@@ -5,12 +5,24 @@
  * rather than sending it twice). A push is Pi's own words: bounded to `MAX_OWNER_PUSH_CHARS`, refused when it looks like
  * it holds a secret, and never a third party's message text or a held answer in full. A held draft's presentation is the
  * one longer push (its complete rendering, fenced) and goes only to the chat whose turn held it.
+ *
+ * A notice (`tell`) is the one kind of push a session sends about work no phone turn opened: its caller writes the
+ * words (a waiting call's notice carries the line the session's status shows that call by). Only the session that
+ * serves a channel sends on it, so a notice from any other session of the agent directory waits in the channel's
+ * journal and the serving session sends it as that key's push (`drain`): at once when the journal directory's watch
+ * tells it, and at its next channel pass otherwise.
  */
 
 import type { ChannelChoice, ChannelProvider } from "../gateways/channel-provider.ts";
 import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { isShippedChannelProvider } from "./built-in-providers.ts";
-import { type ChannelJournal, type ChannelOwnerConversation, digest } from "./channel-journal.ts";
+import {
+	type ChannelJournal,
+	type ChannelJournalState,
+	type ChannelOwnerConversation,
+	type ChannelOwnerNoticeRecord,
+	digest,
+} from "./channel-journal.ts";
 import type { ResolvedChannelPolicy } from "./channel-policy.ts";
 import { listedOwnerDigests } from "./owner-channel.ts";
 
@@ -25,6 +37,10 @@ export interface OwnerPushHost {
 	provider(channel: string): ChannelProvider | undefined;
 	/** The policy while the channel carries owner authority in this session (wired, shipped, listed); else undefined. */
 	ownerPolicy(channel: string): ResolvedChannelPolicy | undefined;
+	/** The channels that carry owner authority in this session. */
+	ownerChannels(): readonly string[];
+	/** Whether this session serves `channel` with its transport started: the only session that sends on it. */
+	serves(channel: string): boolean;
 	now(): number;
 	warn(message: string): void;
 }
@@ -91,6 +107,72 @@ export class OwnerPush {
 			long: true,
 			...(presentation.choices.length > 0 ? { choices: presentation.choices } : {}),
 		});
+	}
+
+	/** Whether any channel carries owner authority in this session now. */
+	hasOwnerChannel(): boolean {
+		return this.host.ownerChannels().length > 0;
+	}
+
+	/**
+	 * Tell the owner once for `key` on every channel that carries owner authority in this session: pushed at once where
+	 * this session serves the channel, and left in the channel's journal for the session that does otherwise.
+	 */
+	tell(key: string, text: string): void {
+		const said = bounded(text);
+		if (hasMaskableSecretText(said)) return;
+		for (const channel of this.host.ownerChannels()) {
+			if (this.host.serves(channel)) void this.send(channel, key, said, { rated: true });
+			else if (!this.left(channel).some((notice) => notice.key === key))
+				this.changeNotices(channel, (notices, state) =>
+					state.ownerPushes?.some((entry) => entry.k === `push:${key}`)
+						? notices
+						: [...notices, { key, text: said, at: this.host.now() }],
+				);
+		}
+	}
+
+	/** Take back a notice no session sent yet: what it told of no longer waits. A sent one stays sent. */
+	retract(key: string): void {
+		for (const channel of this.host.ownerChannels())
+			if (this.left(channel).some((notice) => notice.key === key))
+				this.changeNotices(channel, (notices) => notices.filter((notice) => notice.key !== key));
+	}
+
+	/** Send the notices left for the owner on a channel this session serves, oldest first, each as its key's push. */
+	async drain(channel: string): Promise<void> {
+		if (!this.host.serves(channel) || !this.host.ownerPolicy(channel) || this.left(channel).length === 0) return;
+		let taken: readonly ChannelOwnerNoticeRecord[] = [];
+		// Taken before they are sent, like a push's own record: a crash loses a notice rather than sending it twice.
+		this.changeNotices(channel, (notices) => {
+			taken = notices;
+			return [];
+		});
+		for (const notice of taken) await this.send(channel, notice.key, notice.text, { rated: true });
+	}
+
+	/** The notices waiting in the channel's journal, read without its lock. */
+	private left(channel: string): readonly ChannelOwnerNoticeRecord[] {
+		return this.host.journal(channel).read().result.ownerNotices ?? [];
+	}
+
+	private changeNotices(
+		channel: string,
+		change: (
+			notices: readonly ChannelOwnerNoticeRecord[],
+			state: ChannelJournalState,
+		) => readonly ChannelOwnerNoticeRecord[],
+	): void {
+		try {
+			this.host.journal(channel).update(this.host.now(), (state) => {
+				const next = change(state.ownerNotices ?? [], state);
+				state.ownerNotices = next.length > 0 ? [...next] : undefined;
+			});
+		} catch (error) {
+			this.host.warn(
+				`Channel ${channel}: a notice for the owner was not recorded (${error instanceof Error ? error.message : String(error)}).`,
+			);
+		}
 	}
 
 	/** When the presentation of `draftId` was sent to `conversationKey`; undefined if it never was. */

@@ -2,7 +2,8 @@
  * The durable admission journal of one channel, shared by every session of the agent directory. The file is the truth:
  * an inbound event is acknowledged to its provider only after it is held here, a duplicate event id finds its earlier
  * outcome, and a delivered batch keeps the address its reply goes back to. Every list is bounded; a third party's text
- * is kept only while it waits to be delivered and in a reply draft.
+ * is kept only while it waits to be delivered and in a reply draft, and a notice for the owner only until the serving
+ * session sends it.
  */
 
 import { createHash } from "node:crypto";
@@ -32,6 +33,8 @@ export const MAX_OWNER_CONVERSATIONS = 8;
  * went may be pushed again.
  */
 const MAX_OWNER_PUSHES = 512;
+/** Notices left for the owner that the serving session has not sent yet. */
+const MAX_OWNER_NOTICES = 32;
 export const DAY_MS = 24 * 60 * 60 * 1000;
 /** A waiting message is delivered within a day or becomes a gap. */
 export const PENDING_EXPIRY_MS = DAY_MS;
@@ -109,6 +112,16 @@ export interface ChannelOwnerPushRecord {
 	c?: string;
 }
 
+/**
+ * A notice for the owner left by a session that does not serve the channel: the serving session sends it as the push of
+ * `key` and removes it. One not sent within a day is dropped: what it told of is old by then.
+ */
+export interface ChannelOwnerNoticeRecord {
+	readonly key: string;
+	readonly text: string;
+	readonly at: number;
+}
+
 export interface ChannelDraftRecord {
 	readonly id: string;
 	readonly batchId: string;
@@ -180,6 +193,8 @@ export interface ChannelJournalState {
 	ownerPushes?: ChannelOwnerPushRecord[];
 	/** Updates the push rate bound kept from the owner's chat since `status` last reported them; absent at zero. */
 	ownerPushSuppressed?: number;
+	/** Notices other sessions left for the owner, oldest first, until the serving session sends them; absent while none. */
+	ownerNotices?: ChannelOwnerNoticeRecord[];
 	/** The persistent session the daemon's host runs the owner's turns in (the phone session); absent until it wrote. */
 	ownerSession?: { sessionId: string; file: string };
 }
@@ -210,6 +225,7 @@ function emptyState(): ChannelJournalState {
 		ownerConversations: undefined,
 		ownerPushes: undefined,
 		ownerPushSuppressed: undefined,
+		ownerNotices: undefined,
 		ownerSession: undefined,
 	};
 }
@@ -278,6 +294,10 @@ function isOwnerConversation(value: unknown): value is ChannelOwnerConversation 
 
 function isOwnerPush(value: unknown): value is ChannelOwnerPushRecord {
 	return isPlainRecord(value) && isString(value.k) && isTime(value.at) && (value.c === undefined || isString(value.c));
+}
+
+function isOwnerNotice(value: unknown): value is ChannelOwnerNoticeRecord {
+	return isPlainRecord(value) && isString(value.key) && isString(value.text) && isTime(value.at);
 }
 
 function isDraft(value: unknown): value is ChannelDraftRecord {
@@ -411,6 +431,7 @@ function parseState(text: string): ChannelJournalState {
 			value.ownerConversations === undefined ? undefined : list(value.ownerConversations, isOwnerConversation),
 		ownerPushes: value.ownerPushes === undefined ? undefined : list(value.ownerPushes, isOwnerPush),
 		ownerPushSuppressed: value.ownerPushSuppressed as number | undefined,
+		ownerNotices: value.ownerNotices === undefined ? undefined : list(value.ownerNotices, isOwnerNotice),
 		// Absent in a journal written before the daemon hosted the owner's session, and until that session wrote.
 		ownerSession: ownerSession
 			? { sessionId: ownerSession.sessionId as string, file: ownerSession.file as string }
@@ -445,6 +466,8 @@ function prune(state: ChannelJournalState, now: number): void {
 	const conversations = state.ownerConversations?.slice(-MAX_OWNER_CONVERSATIONS);
 	state.ownerConversations = conversations && conversations.length > 0 ? conversations : undefined;
 	if (state.ownerPushSuppressed === 0) state.ownerPushSuppressed = undefined;
+	const notices = state.ownerNotices?.filter((entry) => now - entry.at < DAY_MS).slice(-MAX_OWNER_NOTICES);
+	state.ownerNotices = notices && notices.length > 0 ? notices : undefined;
 }
 
 /** What a journal update observed besides its own result: the file was unreadable and was replaced. */

@@ -21,6 +21,7 @@ import type {
 } from "./channels/owner-channel-types.ts";
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
+import type { OwnerDecisionItem } from "./owner-decisions/owner-decision-queue.ts";
 import { isRemoteOwnerOrigin } from "./turn-origin.ts";
 
 /**
@@ -37,6 +38,12 @@ export interface OwnerChannelSessionHost {
 	readonly agent: { subscribe(listener: (event: AgentEvent) => void): () => void; abort(reason: string): void };
 	emitHostWarning(message: string): void;
 }
+
+/** What the owner channel reads and writes of the session's store: its branch, its identity and its custom entries. */
+export type OwnerChannelSessionStore = Pick<
+	SessionManager,
+	"getBranch" | "appendCustomEntry" | "getSessionId" | "getCwd"
+>;
 
 /** The foreground run's authority, and the aborts of the submission that owns it and of its retry. */
 export type OwnerChannelForeground = Pick<
@@ -59,7 +66,7 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 	private readonly getForeground: () => OwnerChannelForeground;
 	/** Aborts the prompt submission that owns the foreground, if one does (`PromptSubmissionController.abortSubmission`). */
 	private readonly abortPromptSubmission: (reason: string) => void;
-	private readonly getSessionManager: () => Pick<SessionManager, "getBranch" | "appendCustomEntry">;
+	private readonly getSessionManager: () => OwnerChannelSessionStore;
 	private readonly isClosed: () => boolean;
 	private readonly readQuotaAllowance: (maxUsedPercent: number) => OwnerQuotaAllowance;
 	/** Insertion order is age: the first entry is the oldest. */
@@ -71,9 +78,10 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		host: OwnerChannelSessionHost,
 		getForeground: () => OwnerChannelForeground,
 		abortPromptSubmission: (reason: string) => void,
-		getSessionManager: () => Pick<SessionManager, "getBranch" | "appendCustomEntry">,
+		getSessionManager: () => OwnerChannelSessionStore,
 		isClosed: () => boolean,
 		readQuotaAllowance: (maxUsedPercent: number) => OwnerQuotaAllowance,
+		readOwnerDecisions: () => readonly OwnerDecisionItem[],
 	) {
 		this.readQuotaAllowance = readQuotaAllowance;
 		this.host = host;
@@ -97,6 +105,17 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 				if (this.draftListeners.size >= MAX_DRAFT_LISTENERS)
 					throw new Error(`At most ${MAX_DRAFT_LISTENERS} owner-channel draft listeners are kept.`);
 				return this.draftListeners.subscribe(listener);
+			},
+			waiting: () => {
+				const shown = new Set(
+					decisions.drafts().flatMap((draft) => (isRemoteOwnerOrigin(draft.origin) ? [draft.id] : [])),
+				);
+				const store = this.getSessionManager();
+				return {
+					sessionId: store.getSessionId(),
+					cwd: store.getCwd(),
+					calls: readOwnerDecisions().filter((item) => item.source !== "outward_draft" || !shown.has(item.id)),
+				};
 			},
 		};
 	}

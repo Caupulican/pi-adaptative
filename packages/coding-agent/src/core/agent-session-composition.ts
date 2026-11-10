@@ -43,6 +43,7 @@ import { noulProbability } from "./decision/noul.ts";
 import { createDecisionProgram } from "./decision/program.ts";
 import type { ExpertSelectionService } from "./expert-routing/service.ts";
 import type { ContextUsage } from "./extensions/index.ts";
+import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
@@ -100,7 +101,6 @@ import { sameLaneVerificationDirective } from "./system-one/control-directive.ts
 import type { SystemOneController } from "./system-one/controller.ts";
 import type { SystemOneWorkerControl } from "./system-one/worker-control.ts";
 import { captureSessionTaskDirectoryContext } from "./tasks/task-directory-context.ts";
-import type { LiveRunOrigin } from "./turn-origin.ts";
 
 export interface SessionOperatorProjectionWiringDeps {
 	readonly sessionManager: SessionManager;
@@ -785,8 +785,8 @@ export interface SessionProviderRequestContextOwners {
 	readonly agentDir: () => string;
 	readonly cwd: () => string;
 	readonly taskProjection: () => TaskRuntimeProjection | undefined;
-	readonly currentSubmissionEpoch: () => number | undefined;
-	readonly liveRun: () => LiveRunOrigin | undefined;
+	/** The foreground run in progress: the submission it belongs to and the origin that decided it. */
+	readonly foreground: () => Pick<ForegroundRecoveryController, "getCurrentSubmissionEpoch" | "turnOrigin">;
 	readonly warn: (message: string) => void;
 }
 
@@ -812,8 +812,8 @@ export function createSessionProviderRequestContext(
 		ownerInputs: owners.ownerInputs,
 		sessionManager: owners.sessionManager,
 		taskProjection: owners.taskProjection,
-		currentSubmissionEpoch: owners.currentSubmissionEpoch,
-		liveRun: owners.liveRun,
+		currentSubmissionEpoch: () => owners.foreground().getCurrentSubmissionEpoch(),
+		liveRun: () => owners.foreground().turnOrigin.live(),
 		warn: owners.warn,
 	});
 	const controller = new ProviderRequestContextController({

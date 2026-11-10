@@ -61,7 +61,8 @@ export {
  * - `channel-poll`: the schedule of a shipped channel transport that polls (Gmail): the wait between quiet polls, its
  *   error backoffs, its access-token expiry clock and its send pacing. Its request timeouts stay on the system clock.
  * - `channel-expiry`: the one alarm of a channel runtime for the earliest time a held item expires or a bound lifts,
- *   kept apart from `channel-poll` so a day-long expiry never reads as the transport's next scheduled wait.
+ *   kept apart from `channel-poll` so a day-long expiry never reads as the transport's next scheduled wait. The notices
+ *   of the calls waiting on the owner measure a call's age and arm their one alarm on this clock too.
  * - `semantic-usage`: the retry backoff of a session's System One usage journal (`cost/semantic-usage-delivery.ts`) after a
  *   failed journal write or read: the pending usage report is retried on the session's clock.
  */

@@ -418,6 +418,7 @@ export class AgentSession {
 		() => this.sessionManager,
 		() => this._disposed,
 		(maxUsedPercent) => this._subscriptionAllowance.read(maxUsedPercent),
+		() => this._ownerReturnBrief.queue(),
 	);
 	/** The usage the running model's subscription reports, read for the owner channel's dollar bounds (`OwnerChannelDelivery.quotaAllowance`). */
 	private _subscriptionAllowance!: SubscriptionAllowancePort;
@@ -1646,8 +1647,7 @@ export class AgentSession {
 			agentDir: () => this._agentDir,
 			cwd: () => this._cwd,
 			taskProjection: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
-			currentSubmissionEpoch: () => this._foregroundRecovery.getCurrentSubmissionEpoch(),
-			liveRun: () => this._foregroundRecovery.turnOrigin.live(),
+			foreground: () => this._foregroundRecovery,
 			warn: (message) => this._foregroundLifecycle.warn(message),
 		});
 		this._ownerReturnBrief = returnBrief;
