@@ -36,6 +36,6 @@ export const STATUS = {
 			? `verificar ${pending} ${pending === 1 ? "critério em aberto" : "critérios em aberto"}`
 			: "verificar",
 	nextDeliver: "entregar",
-	rootActor: "Orquestrador raiz",
+	rootActor: "Mente",
 	workerActor: (shortId: string) => `Worker ${shortId}`,
 } satisfies InterfaceText["status"];
