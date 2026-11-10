@@ -43,9 +43,11 @@ export const PLAN_ROOT_EXCERPT_BYTES = 2 * 1024;
 
 type DispatchProjection = Pick<TaskRuntimeProjection, "plans" | "tasks" | "attempts">;
 
-/** What a released step's dispatch reads beyond the plan record: the claim reports and a reduce step's open findings. */
+/** What a released step's dispatch reads beyond the plan record: the claim reports and a reduce step's reviewed findings. */
 export interface PlanDispatchEvidence {
 	readonly reportOf: PacketReport;
+	/** A reduce step's finding pairs its review read as conflicting: the step is told to resolve them. */
+	readonly conflictingFindings: readonly FindingPair[];
 	/** A reduce step's finding pairs its review left open: the step is told they may conflict. */
 	readonly openFindings: readonly FindingPair[];
 }
@@ -130,14 +132,23 @@ function openItemsOf(
 	return line === undefined ? [] : [line];
 }
 
-function joinTaskWords(node: PlanNodeSpec, openFindings: readonly FindingPair[]): string | undefined {
+/** One sentence naming finding pairs to a reduce step, or nothing when there are none. */
+function findingsSentence(label: string, pairs: readonly FindingPair[]): string {
+	if (pairs.length === 0) return "";
+	const named = pairs.map((pair) => `${pair.cite}: ${pair.summaryA} / ${pair.summaryB}`).join("; ");
+	return ` ${label}: ${clipBytes(named, PLAN_INPUT_DIGEST_BYTES)}.`;
+}
+
+function joinTaskWords(node: PlanNodeSpec, evidence: PlanDispatchEvidence): string | undefined {
 	const members = node.join?.members.join(", ") ?? "";
 	if (node.kind === "reduce") {
-		const possible =
-			openFindings.length > 0
-				? ` Possibly conflicting, not settled: ${clipBytes(openFindings.map((pair) => `${pair.cite}: ${pair.summaryA} / ${pair.summaryB}`).join("; "), PLAN_INPUT_DIGEST_BYTES)}.`
-				: "";
-		return `Combine the results of steps ${members} into one answer${node.join?.criterion ? ` to: ${node.join.criterion}` : ""}. Name every place the results disagree and resolve it or say why it stays open.${possible}`;
+		const told =
+			findingsSentence("These findings conflict", evidence.conflictingFindings) +
+			findingsSentence("Possibly conflicting, not settled", evidence.openFindings);
+		// The question keeps its own closing mark, so a question mark is not followed by a full stop.
+		const criterion = node.join?.criterion;
+		const question = criterion ? ` It answers: ${/[.?!]$/.test(criterion) ? criterion : `${criterion}.`}` : "";
+		return `Combine the results of steps ${members} into one answer.${question} Name every place the results disagree and resolve it or say why it stays open.${told}`;
 	}
 	return undefined;
 }
@@ -197,7 +208,7 @@ export function buildPlanDispatch(
 ): FleetDispatch {
 	const subjects = node.kind === "verify" ? planReviewSubjects(projection, plan, record, node) : [];
 	const anchor = subjects[0];
-	const words = joinTaskWords(node, evidence.openFindings);
+	const words = joinTaskWords(node, evidence);
 	const isolation = needsOwnWorktree(record, node.id) ? "worktree" : "shared";
 	// Every released step carries the same head in the same order. The tail is the review's brief (every subject, its report
 	// and files, so the predecessors' input digests stay out of it) or, for any other step, the predecessors' input digests.

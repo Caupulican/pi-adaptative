@@ -141,12 +141,12 @@ export class PlanResultGates {
 		return finding !== undefined && finding.readings === undefined;
 	}
 
-	/** The reduce step's finding pairs System One left open: named to the step as possibly conflicting. */
-	openFindings(planId: string, nodeId: string): readonly FindingPair[] {
+	/** The reduce step's finding pairs that were read as `reading`, once decided: the step is told its conflicts and its open pairs. */
+	findingsRead(planId: string, nodeId: string, reading: ConflictReading): readonly FindingPair[] {
 		const gate = this.findingGates.get(planId)?.get(nodeId);
 		if (gate?.readings === undefined) return [];
 		const readings = gate.readings;
-		return gate.pairs.filter((pair) => readings.get(pair.key) === "open");
+		return gate.pairs.filter((pair) => readings.get(pair.key) === reading);
 	}
 
 	/** The reduce step's finding pairs and readings once decided; undefined when it has none. */

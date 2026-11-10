@@ -37,6 +37,9 @@ const PACKET_LINE_CHARS = OUTCOME_LIMITS.maxStringChars;
 /** The most finding pairs one reduce step is asked about. */
 const MAX_FINDING_PAIRS = 12;
 const LINE_SUFFIX = /:\d+(?:-\d+)?$/;
+/** A path-shaped token of a finding's words: folders and a name, or a file name with an extension, each with an optional line. */
+const PLACE_TOKEN =
+	/(?:[\w@+-][\w@.+-]*[\\/])+[\w@+-][\w@.+-]*(?::\d+(?:-\d+)?)?|[\w@+-][\w@.+-]*\.[A-Za-z]\w*:\d+(?:-\d+)?/g;
 const FENCED_WORDS = new RegExp(`^<${UNTRUSTED_BOUNDARY_TAG} [^>]*>\\n([\\s\\S]*)\\n</${UNTRUSTED_BOUNDARY_TAG}>$`);
 
 /** Clips text to at most `maxBytes` UTF-8 bytes, marking the cut with an ellipsis that counts toward the bound. */
@@ -52,6 +55,7 @@ export type PacketReport = (taskId: string, attemptId: string | undefined) => Wo
 
 /** One settled step's result as a judgment reads it. Every text field is plain worker words, bounded. */
 export interface ResultPacket {
+	/** The plan step the result belongs to. */
 	readonly nodeId: string;
 	readonly status: OutcomeStatus;
 	readonly changedFiles: readonly string[];
@@ -59,6 +63,7 @@ export interface ResultPacket {
 	readonly uncovered: readonly string[];
 	/** The report's own open items. */
 	readonly remaining: readonly string[];
+	/** Each finding with the places its own words name (`findingPlaces`). */
 	readonly findings: readonly { readonly summary: string; readonly cites: readonly string[] }[];
 	readonly receipts: readonly { readonly command: string; readonly exitCode?: number }[];
 	readonly assurance: OutcomeAssurance;
@@ -142,19 +147,45 @@ function readDigestFile(outcome: Outcome): OutcomeDigest | undefined {
 	return undefined;
 }
 
-/** A step's result packet from its settled outcome and its claim report (the report's open items, when one was submitted). */
-export function resultPacket(outcome: Outcome, report: WorkerSubmittedReport | undefined): ResultPacket {
+/**
+ * The places a finding names in its own words, in the order it names them: a file path with an optional line or line range. A
+ * token counts when it names a line, when its last part carries an extension, or when it is at least three parts deep, so
+ * prose such as "read/write" names no place. The digest's own `cites` are evidence source ids (the same one for every
+ * finding of a worker), never places, so a finding's places are read here.
+ */
+export function findingPlaces(summary: string): string[] {
+	const places = new Set<string>();
+	for (const [token] of summary.matchAll(PLACE_TOKEN)) {
+		const place = token.replace(/\\/g, "/").replace(/\.+$/, "");
+		const path = placeOf(place);
+		const parts = path.split("/");
+		if (path !== place || parts.length >= 3 || (parts.at(-1) ?? "").includes(".")) places.add(place);
+		if (places.size >= PACKET_ITEMS) break;
+	}
+	return [...places];
+}
+
+/**
+ * The result packet of plan step `nodeId` from its settled outcome and its claim report (the report's open items, when one was
+ * submitted). The packet names the step, never the outcome's own node: a worker's outcome names its lane, which no reader of
+ * the plan knows.
+ */
+export function resultPacket(
+	nodeId: string,
+	outcome: Outcome,
+	report: WorkerSubmittedReport | undefined,
+): ResultPacket {
 	const digest = readOutcomeDigest(outcome);
 	return {
-		nodeId: outcome.nodeId,
+		nodeId,
 		status: outcome.status,
 		changedFiles: outcome.changedFiles.slice(0, PACKET_FILES),
 		uncovered: outcome.coverage.uncovered.slice(0, PACKET_ITEMS).map((entry) => entry.id),
 		remaining: (report?.remaining ?? []).slice(0, PACKET_ITEMS).map((item) => boundedLine(item, PACKET_LINE_CHARS)),
-		findings: (digest?.findings ?? []).slice(0, PACKET_FINDINGS).map((finding) => ({
-			summary: boundedLine(unfenced(finding.summary), PACKET_LINE_CHARS),
-			cites: finding.cites.slice(0, PACKET_ITEMS),
-		})),
+		findings: (digest?.findings ?? []).slice(0, PACKET_FINDINGS).map((finding) => {
+			const summary = boundedLine(unfenced(finding.summary), PACKET_LINE_CHARS);
+			return { summary, cites: findingPlaces(summary) };
+		}),
 		receipts: (digest?.receipts ?? []).slice(0, PACKET_RECEIPTS).map((receipt) => ({
 			command: boundedLine(receipt.command, PACKET_LINE_CHARS),
 			...(receipt.exitCode !== undefined ? { exitCode: receipt.exitCode } : {}),
@@ -176,7 +207,7 @@ export function planNodePacket(
 	const release = plan.nodes[nodeId]?.release;
 	const taskId = release ? currentTaskOf(projection, release.taskId) : undefined;
 	const report = taskId !== undefined ? reportOf(taskId, outcome.attempts.at(-1)?.attemptId) : undefined;
-	return resultPacket(outcome, report);
+	return resultPacket(nodeId, outcome, report);
 }
 
 /**

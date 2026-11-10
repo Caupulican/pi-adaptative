@@ -1,7 +1,7 @@
 /**
  * The one bounded `plan-update` message the root reads per join or plan result (design PG 6.6): at most 4 KiB, at most
  * 8 step lines, host codes `h PLAN_UPDATE,<JOIN_DONE|PLAN_DONE|REPLAN|OWNER_NEEDED>,<READ_REPORT|READ_ALL>`, the result
- * digest, coverage per requirement, gaps and the artifact path. Its delivery id is the plan, the step and the event's
+ * digest, coverage per requirement, gaps, conflicts and the artifact path. Its delivery id is the plan, the step and the event's
  * sequence, so a redelivery after restart is the same input and never a second wake.
  */
 
@@ -26,6 +26,8 @@ import type { PlanNodeView, PlanView } from "./plan-view.ts";
 export { PLAN_UPDATE_CUSTOM_TYPE };
 export const PLAN_UPDATE_MAX_BYTES = 4 * 1024;
 const MAX_NODE_LINES = 8;
+/** The most conflicts one update names; the full list is in the result file. */
+const MAX_CONFLICT_LINES = 4;
 const MAX_LINE_CHARS = 240;
 
 export type PlanUpdateKind = "join" | "settled" | "replan" | "owner" | "failed";
@@ -170,6 +172,11 @@ export function planUpdateDelivery(
 							]
 						: []),
 					...result.gaps.slice(0, 6).map((gap) => clip(`Gap: ${gap}`)),
+					...result.conflicts
+						.slice(0, MAX_CONFLICT_LINES)
+						.map((conflict) =>
+							clip(`Conflict (${conflict.kind}) between ${conflict.between.join(" and ")}: ${conflict.detail}`),
+						),
 					`Full result: ${result.artifact}`,
 				]
 			: []),

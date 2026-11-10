@@ -269,6 +269,7 @@ export interface OutcomeDigest {
 	readonly findings: readonly {
 		readonly summary: string;
 		readonly confidence: number;
+		/** The evidence source ids the finding rests on. They name sources, never places in the project. */
 		readonly cites: readonly string[];
 	}[];
 	readonly receipts?: readonly {

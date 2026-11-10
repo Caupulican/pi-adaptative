@@ -17,6 +17,9 @@
 - Plan steps that are ready together start together: each plan step runs on its own worker. A second step whose profile matched a worker already busy on another step used to be refused as `worker_specialist_busy` and wait for that step to finish, so independent steps ran one after another.
 - A closing session waits for the usage history read it started: a session closed right after it opened no longer leaves that read holding the session file open.
 - A plan step that names no files runs read-only, as the `plan` tool says: its worker holds no write path and no edit tool. Such a step used to start with write access to the whole project while the plan ran it beside other steps as read-only work.
+- Plan results name plan steps: a conflict between two steps' findings, a step held because an earlier result changes its work, and the open items a later step is told about named the workers' internal lane ids (`worker-5`) instead of the step ids the plan and its planner use.
+- A `reduce` step pairs findings by the place they name. Two findings are compared when their own words name the same file (and line); every finding of one step used to be paired with every finding of the other, because each carried the same evidence source id as its only citation, so the bounded number of comparisons was spent on unrelated findings.
+- A conflict the host reads between two steps' findings now reaches the step that combines them (its task lists the conflicting findings, as it already listed the unsettled ones) and the planner (the plan update names up to four conflicts and is marked `READ_ALL`). It used to be written only to the result file and the owner's proof sheet.
 
 ### Removed
 

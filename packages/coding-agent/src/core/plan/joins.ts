@@ -421,9 +421,15 @@ function verifiedOutcome(outcome: Outcome): Outcome {
 	};
 }
 
-/** Whether a join's result lets the root read the report alone: accepted, every cited requirement met, nothing open. */
+/**
+ * Whether a join's result lets the root read the report alone: accepted, every cited requirement met, nothing open and no
+ * conflict between its members.
+ */
 export function joinReadsAsReport(result: JoinResult): boolean {
 	return (
-		result.outcome.status === "succeeded" && Object.values(result.coverage).every(Boolean) && result.gaps.length === 0
+		result.outcome.status === "succeeded" &&
+		Object.values(result.coverage).every(Boolean) &&
+		result.gaps.length === 0 &&
+		result.conflicts.length === 0
 	);
 }

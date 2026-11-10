@@ -876,7 +876,8 @@ export class PlanExecutor implements PlanExecutorPort {
 		if (this.releasing.has(key) || this.resultGates.waiting(record.planId, node.id)) return;
 		const dispatch = buildPlanDispatch(snapshot, plan, record, node, planCriticalPath(record), {
 			reportOf: this.reportOf,
-			openFindings: this.resultGates.openFindings(record.planId, node.id),
+			conflictingFindings: this.resultGates.findingsRead(record.planId, node.id, "conflict"),
+			openFindings: this.resultGates.findingsRead(record.planId, node.id, "open"),
 		});
 		if (node.kind === "verify" && dispatch.verification === undefined) {
 			this.holdStep(record.planId, node.id, node.since, "this verify step has no finished step to check");

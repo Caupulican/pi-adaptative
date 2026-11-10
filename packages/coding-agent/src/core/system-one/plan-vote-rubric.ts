@@ -100,7 +100,7 @@ export function voteEvidence(
 	const report = taskId === undefined ? undefined : reportOf(taskId, candidate.outcome.attempts.at(-1)?.attemptId);
 	return {
 		memberId: candidate.nodeId,
-		packet: resultPacket(candidate.outcome, report),
+		packet: resultPacket(candidate.nodeId, candidate.outcome, report),
 		changes: report?.changes ?? [],
 	};
 }
