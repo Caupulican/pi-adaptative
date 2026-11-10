@@ -24,6 +24,7 @@
 import { randomUUID } from "node:crypto";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { owesParentItsResult } from "../orchestration/worker-terminal-notification.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { strictCanonicalDigest, withoutUndefinedMembers } from "../steering/canonical.ts";
 import type { BotAskRootResult } from "./bot-message-contract.ts";
@@ -463,7 +464,10 @@ export class LeaderController {
 			}
 			const last = leaderTurns.at(-1);
 			if (!last || ACTIVE_ATTEMPT_STATUSES.has(last.status)) continue;
-			if (ownedTurns.some((turn) => ACTIVE_ATTEMPT_STATUSES.has(turn.status))) continue;
+			// A bot's result that has not reached the agent that started it is the goal's unfinished work: its handoff files
+			// that agent's next turn under the goal, and a goal that settled first would leave that turn outside it.
+			if (ownedTurns.some((turn) => ACTIVE_ATTEMPT_STATUSES.has(turn.status) || owesParentItsResult(snapshot, turn)))
+				continue;
 			// A message filed under this goal still waiting in a bot's mailbox is the goal's unfinished work; an owner's chat is not.
 			if (this.deps.hasPendingDelegatedMessage(record.objectiveId)) continue;
 			const lastOutcome = sameOutcomeAttempt(snapshot.tasks[last.taskId]?.outcome, last.attemptId);

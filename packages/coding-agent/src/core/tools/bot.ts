@@ -65,7 +65,11 @@ const schema = Type.Object(
 		),
 		description: Type.Optional(Type.String({ minLength: 1, maxLength: 500, description: "One line about the bot." })),
 		model: Type.Optional(
-			Type.String({ minLength: 1, maxLength: 200, description: "<provider>/<model>; yours when omitted." }),
+			Type.String({
+				minLength: 1,
+				maxLength: 200,
+				description: "<provider>/<model>; the default worker model when omitted.",
+			}),
 		),
 		thinkingLevel: Type.Optional(Type.String({ minLength: 1, maxLength: 32 })),
 		canWrite: Type.Optional(Type.Boolean({ description: "Let the bot edit files; read-only when omitted." })),

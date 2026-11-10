@@ -34,6 +34,8 @@ export interface ResolvedWorkerProfile {
 	/** Metadata-only pointers admitted from the profile-linked resource configuration. */
 	resourcePointers: readonly ResourcePointer[];
 	soul?: string;
+	/** The soul of the bot this worker runs as; a worker compiled from this one as its base does not take it. */
+	botSoul?: string;
 }
 
 export interface ResolvedWorkerProfilePreset {
@@ -281,6 +283,7 @@ export class WorkerProfileResolver {
 				profile,
 				resourcePointers: structuredClone(contract.resourcePointers),
 				...(contract.soul ? { soul: contract.soul } : {}),
+				...(contract.botSoul ? { botSoul: contract.botSoul } : {}),
 			},
 		};
 	}

@@ -308,9 +308,9 @@ export interface WorkerDelegationRequest {
 	/** Host-admitted task context for a fresh dispatch; never exposed in the model schema. */
 	executionContext?: ExecutionContext;
 	/**
-	 * Host-owned soul of the persistent bot this start belongs to. Admission places it before any profile soul
-	 * in the new worker's execution contract, so it opens the worker's system prompt on every turn of that
-	 * worker. Runtime-owned: the delegate tool builds requests from named fields and cannot set it.
+	 * Host-owned soul of the persistent bot this start belongs to. Admission fixes it in the new worker's execution
+	 * contract apart from any profile soul, and it opens the worker's system prompt before that soul on every turn of
+	 * that worker. Runtime-owned: the delegate tool builds requests from named fields and cannot set it.
 	 */
 	botSoul?: string;
 	profileId?: string;

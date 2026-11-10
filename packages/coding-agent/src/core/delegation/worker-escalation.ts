@@ -100,7 +100,7 @@ function pinnedAuthorityOf(
 	return {
 		...(isAdaptiveProfileId(profileId) ? {} : { profileId }),
 		...(origin.parentAgentId ? { parentAgentId: origin.parentAgentId } : {}),
-		...(contract.soul !== undefined ? { botSoul: contract.soul } : {}),
+		...(contract.botSoul !== undefined ? { botSoul: contract.botSoul } : {}),
 		readOnly: contract.profile.readOnly === true,
 		...(contract.profile.shellReadOnly === true ? { shellReadOnly: true } : {}),
 		location: placement.location,

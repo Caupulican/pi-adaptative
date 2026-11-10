@@ -345,6 +345,11 @@ export interface WorkerProfileExecutionContract {
 	resourcePointers: readonly ResourcePointer[];
 	/** Resolved resource-profile identity text. Other worker resources are represented by profile tools. */
 	soul?: string;
+	/**
+	 * The soul of the persistent bot this worker runs as. It opens the worker's system prompt before `soul` and belongs
+	 * to this worker alone: a child inherits `soul`, never this.
+	 */
+	botSoul?: string;
 }
 
 /** Effective authority admitted for one materialized worker profile. */

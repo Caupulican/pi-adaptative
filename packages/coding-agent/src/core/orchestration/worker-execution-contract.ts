@@ -199,6 +199,24 @@ function parseAuthority(
 	};
 }
 
+/** One soul field of a contract: absent, or text that is not blank and fits the soul limit. */
+function parseSoul(value: unknown, label: string): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string" || value.length > MAX_WORKER_SOUL_LENGTH || !value.trim()) {
+		throw new WorkerExecutionContractError(`${label} is invalid.`);
+	}
+	return value;
+}
+
+/**
+ * The soul text a worker's system prompt opens with: the bot's own soul, a blank line, then the profile soul. This is
+ * the one place the two are joined; everything that compares or inherits a soul reads the fields apart.
+ */
+export function workerPromptSoul(source: { soul?: string; botSoul?: string }): string | undefined {
+	if (!source.botSoul) return source.soul;
+	return source.soul ? `${source.botSoul}\n\n${source.soul}` : source.botSoul;
+}
+
 function parseProfileContract(value: unknown, label: string): WorkerProfileExecutionContract {
 	if (
 		!isPlainRecord(value) ||
@@ -210,6 +228,7 @@ function parseProfileContract(value: unknown, label: string): WorkerProfileExecu
 			"executionContext",
 			"resourcePointers",
 			"soul",
+			"botSoul",
 		]) ||
 		value.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION
 	) {
@@ -227,11 +246,10 @@ function parseProfileContract(value: unknown, label: string): WorkerProfileExecu
 	if (!profile.modelPolicy.candidates.some((candidate) => isDeepStrictEqual(candidate, modelBinding))) {
 		throw new WorkerExecutionContractError(`${label} model binding is not declared by its profile.`);
 	}
-	if (
-		value.soul !== undefined &&
-		(typeof value.soul !== "string" || value.soul.length > MAX_WORKER_SOUL_LENGTH || !value.soul.trim())
-	) {
-		throw new WorkerExecutionContractError(`${label} soul is invalid.`);
+	const soul = parseSoul(value.soul, `${label} soul`);
+	const botSoul = parseSoul(value.botSoul, `${label} bot soul`);
+	if ((workerPromptSoul({ soul, botSoul })?.length ?? 0) > MAX_WORKER_SOUL_LENGTH) {
+		throw new WorkerExecutionContractError(`${label} soul and bot soul together exceed the soul limit.`);
 	}
 	const authority = parseAuthority(value.authority, profile, label);
 	const executionContext =
@@ -249,7 +267,8 @@ function parseProfileContract(value: unknown, label: string): WorkerProfileExecu
 		authority,
 		...(executionContext ? { executionContext } : {}),
 		resourcePointers,
-		...(typeof value.soul === "string" ? { soul: value.soul } : {}),
+		...(soul !== undefined ? { soul } : {}),
+		...(botSoul !== undefined ? { botSoul } : {}),
 	};
 }
 
@@ -287,14 +306,18 @@ function snapshotProfile(profile: OrchestrationProfile): OrchestrationProfile {
 	return structuredClone(persisted) as OrchestrationProfile;
 }
 
-function snapshotResolvedProfile(source: {
+/** A resolved profile and its admitted authority, as admission hands them over to be fixed in a contract. */
+interface ResolvedProfileSource {
 	profile: OrchestrationProfile;
 	modelBinding: OrchestrationModelBinding;
 	authority: WorkerExecutionAuthorityContract;
 	executionContext?: ExecutionContext;
 	resourcePointers?: readonly ResourcePointer[];
 	soul?: string;
-}): WorkerProfileExecutionContract {
+	botSoul?: string;
+}
+
+function snapshotResolvedProfile(source: ResolvedProfileSource): WorkerProfileExecutionContract {
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		profile: snapshotProfile(source.profile),
@@ -303,26 +326,13 @@ function snapshotResolvedProfile(source: {
 		...(source.executionContext ? { executionContext: structuredClone(source.executionContext) } : {}),
 		resourcePointers: structuredClone(source.resourcePointers ?? []),
 		...(source.soul ? { soul: source.soul } : {}),
+		...(source.botSoul ? { botSoul: source.botSoul } : {}),
 	};
 }
 
 export function createWorkerExecutionContract(args: {
-	worker: {
-		profile: OrchestrationProfile;
-		modelBinding: OrchestrationModelBinding;
-		authority: WorkerExecutionAuthorityContract;
-		executionContext?: ExecutionContext;
-		resourcePointers?: readonly ResourcePointer[];
-		soul?: string;
-	};
-	verifier?: {
-		profile: OrchestrationProfile;
-		modelBinding: OrchestrationModelBinding;
-		authority: WorkerExecutionAuthorityContract;
-		executionContext?: ExecutionContext;
-		resourcePointers?: readonly ResourcePointer[];
-		soul?: string;
-	};
+	worker: ResolvedProfileSource;
+	verifier?: ResolvedProfileSource;
 }): WorkerExecutionContract {
 	return parseWorkerExecutionContract({
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,

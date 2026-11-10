@@ -218,6 +218,8 @@ export interface WorkerMailboxConversationMessage {
  */
 export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 	private readonly options: WorkerAgentControlCoordinatorOptions;
+	/** Runs a mailbox mutation under its target's conversation admission: a project mailbox needs the claim it acquires. */
+	private readonly admit: NonNullable<WorkerAgentControlCoordinatorOptions["withConversationAdmission"]>;
 	private readonly mailboxes = new Map<string, WorkerAgentMailbox>();
 	private readonly stateListeners = new Set<() => void>();
 	private readonly conversations: WorkerConversationStore;
@@ -238,6 +240,8 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 
 	constructor(options: WorkerAgentControlCoordinatorOptions) {
 		this.options = options;
+		this.admit = (agent, operation) =>
+			options.withConversationAdmission ? options.withConversationAdmission(agent, operation) : operation();
 		this.conversations = options.conversationStore ?? new WorkerConversationStore();
 		this.sessionRootAddress = sessionRootAddress(options.parentSessionId);
 		this.sessionRootMailbox = new SessionRootMailbox({
@@ -250,8 +254,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 			lifecycle: () => options.getLifecycle(),
 			mailbox: (agentId) => this.getMailbox(agentId),
 			claim: (agent) => options.getConversationClaim?.(agent),
-			admit: (agent, operation) =>
-				options.withConversationAdmission ? options.withConversationAdmission(agent, operation) : operation(),
+			admit: this.admit,
 			resume: (agentId) => this.resumeWorkerAgent(agentId).started,
 			available: () => !this.disposed && options.isControlAvailable(),
 			warn: (message) => {
@@ -1283,8 +1286,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 					() => currentAgent() !== undefined,
 				);
 		};
-		if (this.options.withConversationAdmission) this.options.withConversationAdmission(agent, settle);
-		else settle();
+		this.admit(agent, settle);
 	}
 
 	/**
@@ -1615,21 +1617,20 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		// A nested child's handoff belongs to the goal it ran for: the leader's turn that reports it is that goal's turn, not
 		// the session's, and a steer would be absorbed into a turn that may not be the goal's.
 		const delegationObjectiveId = this.delegationOfAttempt(args.terminalAttemptId);
-		const queued = this.getMailbox(parent.agentId).enqueueWithReceipt({
-			kind: active && delegationObjectiveId === undefined ? "steer" : "follow_up",
-			content,
-			senderAgentId: args.childAgentId,
-			idempotencyKey,
-			task: { kind: "terminal_handoff", sourceAttemptId: args.terminalAttemptId },
-			...(receiptOrigin ? { receiptOrigin } : {}),
-			...(turnOrigin ? { turnOrigin } : {}),
-			...(delegationObjectiveId ? { delegationObjectiveId } : {}),
-		});
-		if (queued.status === "completed_replay") {
-			this.notifyStateChangedBestEffort();
-			return { messageId: queued.messageId, started: false, accepted: true };
-		}
-		if (queued.message.deliveredAt !== undefined) {
+		// Admitted as every send is: an idle parent holds no claim on its project conversation, and its mailbox needs one.
+		const queued = this.admit(parent, () =>
+			this.getMailbox(parent.agentId).enqueueWithReceipt({
+				kind: active && delegationObjectiveId === undefined ? "steer" : "follow_up",
+				content,
+				senderAgentId: args.childAgentId,
+				idempotencyKey,
+				task: { kind: "terminal_handoff", sourceAttemptId: args.terminalAttemptId },
+				...(receiptOrigin ? { receiptOrigin } : {}),
+				...(turnOrigin ? { turnOrigin } : {}),
+				...(delegationObjectiveId ? { delegationObjectiveId } : {}),
+			}),
+		);
+		if (queued.status === "completed_replay" || queued.message.deliveredAt !== undefined) {
 			this.notifyStateChangedBestEffort();
 			return { messageId: queued.messageId, started: false, accepted: true };
 		}
@@ -1987,9 +1988,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				...(onAdmitted ? { onAdmitted } : {}),
 			});
 		};
-		return this.options.withConversationAdmission
-			? this.options.withConversationAdmission(target, enqueue)
-			: enqueue();
+		return this.admit(target, enqueue);
 	}
 
 	private workerAgentView(

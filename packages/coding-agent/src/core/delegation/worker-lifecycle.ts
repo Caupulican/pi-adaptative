@@ -40,6 +40,7 @@ import {
 } from "../orchestration/verification-identity.ts";
 import { type VerifierVerdict, verdictReasonCode } from "../orchestration/verification-verdict.ts";
 import { verifierWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
+import { workerTerminalNotificationId } from "../orchestration/worker-terminal-notification.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import {
 	ACTIVE_WORKER_ATTEMPT_STATUSES,
@@ -901,7 +902,7 @@ export class WorkerLifecycle {
 		if (this.enqueueAttemptTerminalNotificationFrom(snapshot, attempt, record)) {
 			snapshot = this.ledger.runtime.getSnapshot();
 		}
-		const notificationId = `worker-terminal:${attemptId}`;
+		const notificationId = workerTerminalNotificationId(attemptId);
 		const notification = snapshot.notifications[notificationId];
 		return notification ? { notificationId, status: notification.status, record } : undefined;
 	}
@@ -917,7 +918,7 @@ export class WorkerLifecycle {
 		if (this.enqueueTerminalNotificationFrom(snapshot, record)) snapshot = this.ledger.runtime.getSnapshot();
 		const attempt = selectedWorkerAttempt(snapshot, laneId) ?? selectedManagedWorkerAttempt(snapshot, laneId);
 		if (!attempt) return undefined;
-		const notificationId = `worker-terminal:${attempt.attemptId}`;
+		const notificationId = workerTerminalNotificationId(attempt.attemptId);
 		const notification = snapshot.notifications[notificationId];
 		return notification ? { notificationId, status: notification.status, record } : undefined;
 	}
@@ -961,7 +962,7 @@ export class WorkerLifecycle {
 		if (!task) return false;
 		if (attemptAwaitsVerification(snapshot, attempt)) return false;
 		const notification = {
-			notificationId: `worker-terminal:${attempt.attemptId}`,
+			notificationId: workerTerminalNotificationId(attempt.attemptId),
 			objectiveId: task.task.objectiveId,
 			attemptId: attempt.attemptId,
 			message: `Worker ${record.laneId} reached ${record.status}.`,

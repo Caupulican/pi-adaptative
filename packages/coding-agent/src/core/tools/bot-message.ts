@@ -35,7 +35,7 @@ const sharedProperties = {
 		Type.String({
 			minLength: 1,
 			maxLength: 200,
-			description: "For create: <provider>/<model>; yours when omitted.",
+			description: "For create: <provider>/<model>; the default worker model when omitted.",
 		}),
 	),
 	thinkingLevel: Type.Optional(Type.String({ minLength: 1, maxLength: 32, description: "For create." })),

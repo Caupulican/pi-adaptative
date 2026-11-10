@@ -69,8 +69,11 @@ goal with the bots it owns; it is never a second orchestrator, and its authority
   the subscription window is the bound for those turns. `/lead show` and the leader's brief say so.
 - A bot the leader made that is not running is started by the leader's own message to it, as the leader's child under
   the goal; the goal's envelope applies to it (its providers, and write access only when the goal grants it). A bot that is
-  already running keeps the start it was given.
-- Stopping a leader stops the bots it owns. A leader leading an open goal cannot be retired; cancel the goal first.
+  already running keeps the start it was given. The bot runs on its own soul: a leader's soul is the leader's alone and is
+  not passed on to the bots it starts.
+- Stopping a leader stops the bots it owns. The stop interrupts their work and leaves the goal open: each stopped bot's
+  report still reaches the leader, and the leader's next turn ends the goal. To hold a goal instead, pause it
+  (`/lead pause <leader>`). A leader leading an open goal cannot be retired; cancel the goal first.
 - A paused goal holds the messages it filed to its bots, in order, and starts them again when it resumes. The goal closes
   only once none of its messages is still waiting.
 - The goal lives in this session's orchestration store, so a restart resumes every open goal where it stood.

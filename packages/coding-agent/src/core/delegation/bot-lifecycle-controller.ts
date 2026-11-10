@@ -137,6 +137,10 @@ export class BotLifecycleController {
 		const instructions =
 			memoryCtx.promptBlock.length > 0 ? `${message}${BOT_MEMORY_BLOCK_SEPARATOR}${memoryCtx.promptBlock}` : message;
 		const stance = botStartModelStance(this.deps.getSettingsManager().getWorkerModelPinPolicy(), bot);
+		// Bound before the start, as an owner's start is: the worker's first turn builds its bot tools from this binding, and
+		// one built before it would not know which bot it is. After a refused start the binding names a runtime that never
+		// existed, which reads everywhere as a bot that is not running.
+		this.botBindings.bind(alias, preferredAgentId);
 		const outcome = await this.host.workerController().admitNested({
 			parentAgentId: leaderAgentId,
 			delegationObjectiveId: goal.objectiveId,
@@ -160,8 +164,6 @@ export class BotLifecycleController {
 		});
 		if (!outcome.started)
 			return { handled: true, accepted: false, detail: `${alias} was not started: ${outcome.skipReason}.` };
-		// The alias is bound to the runtime only once that runtime exists, so a refused start leaves no binding behind.
-		this.botBindings.bind(alias, preferredAgentId);
 		return {
 			handled: true,
 			accepted: true,

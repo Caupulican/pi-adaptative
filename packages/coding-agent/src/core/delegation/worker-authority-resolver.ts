@@ -33,6 +33,7 @@ import {
 	type OrchestrationModelUnusableCause,
 	resolvePinnedOrchestrationModelResolution,
 } from "../orchestration/model-binding.ts";
+import { workerPromptSoul } from "../orchestration/worker-execution-contract.ts";
 import { SUBAGENT_CORE_SYSTEM_PROMPT } from "../provider-prompt-contracts.ts";
 import { DEFAULT_WORKER_DELEGATION_ACCOUNT, DEFAULT_WORKER_DELEGATION_THINKING } from "../settings/settings-rules.ts";
 import type { WorkerAccountRouting, WorkerThinkingPolicy } from "../settings/settings-schema.ts";
@@ -206,12 +207,14 @@ export function bindCompiledToolSurface(
 }
 
 /**
- * Place a persistent bot's soul before the profile soul of a new worker's shipment, so the admitted contract carries it
- * and every turn of that worker (mailbox reuse, queued dispatch, retry, restart recovery) opens its system prompt with it.
- * The soul is judged again here because this is where it becomes standing instructions: the stored record can have been
- * edited by hand. The soul has no size limit of its own; the combined soul must fit the worker contract limit and, with
- * the subagent core, the model's system prompt budget, or the executor would fail on the first provider request. Each
- * refusal is a skip reason that names the limit exceeded, never a throw.
+ * Give a new worker's shipment the soul of the persistent bot it runs as, so the admitted contract carries it and every
+ * turn of that worker (mailbox reuse, queued dispatch, retry, restart recovery) opens its system prompt with it, before
+ * the profile soul. It is kept apart from the profile soul: the profile soul is what a child inherits and is held to,
+ * the bot's soul is this worker's alone. The soul is judged again here because this is where it becomes standing
+ * instructions: the stored record can have been edited by hand. The soul has no size limit of its own; the two souls
+ * together must fit the worker contract limit and, with the subagent core, the model's system prompt budget, or the
+ * executor would fail on the first provider request. Each refusal is a skip reason that names the limit exceeded, never
+ * a throw.
  */
 export function bindBotSoul(
 	shipment: ResolvedWorkerProfile,
@@ -221,7 +224,7 @@ export function bindBotSoul(
 	const checked = checkSoulText(botSoul);
 	if (!checked.ok) return { ok: false, skipReason: `bot_soul_invalid:${checked.reason}` };
 	if (checked.soul === undefined) return { ok: true, shipment };
-	const soul = shipment.soul ? `${checked.soul}\n\n${shipment.soul}` : checked.soul;
+	const soul = workerPromptSoul({ soul: shipment.soul, botSoul: checked.soul }) ?? "";
 	if (soul.length > MAX_WORKER_SOUL_LENGTH) {
 		return {
 			ok: false,
@@ -236,7 +239,7 @@ export function bindBotSoul(
 			skipReason: `bot_soul_exceeds_prompt_budget:the worker core and the soul take ${minimumPromptChars} characters; this model's system prompt budget (systemPromptMaxChars) is ${systemPromptMaxChars}`,
 		};
 	}
-	return { ok: true, shipment: { ...shipment, soul } };
+	return { ok: true, shipment: { ...shipment, botSoul: checked.soul } };
 }
 
 /**

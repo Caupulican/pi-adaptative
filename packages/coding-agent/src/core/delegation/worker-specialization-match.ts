@@ -9,6 +9,7 @@ import type {
 	WorkerProfileExecutionContract,
 } from "../orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
+import { workerPromptSoul } from "../orchestration/worker-execution-contract.ts";
 import { NONTERMINAL_WORKER_ATTEMPT_STATUSES } from "./worker-lane-projection.ts";
 
 /**
@@ -106,7 +107,7 @@ function describeProfileContract(
 		budget: describeOptionalPolicy(contract.authority.budget),
 		executionPolicy: describeOptionalPolicy(contract.profile.executionPolicy),
 		delegationLimits: describeOptionalPolicy(contract.profile.delegationLimits),
-		soul: contract.soul ?? "",
+		soul: workerPromptSoul(contract) ?? "",
 		resourceProfileNames: [...contract.profile.resourceProfileNames],
 		requireIndependentVerification: contract.profile.requireIndependentVerification === true,
 		worktreeLaneKey: worktreeLaneKey ?? "",

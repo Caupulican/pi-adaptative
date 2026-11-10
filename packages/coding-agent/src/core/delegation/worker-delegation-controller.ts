@@ -119,6 +119,7 @@ import type { WorkerContextForkReference } from "../orchestration/worker-context
 import {
 	createWorkerExecutionContract,
 	verifierWorkerExecutionContract,
+	workerPromptSoul,
 } from "../orchestration/worker-execution-contract.ts";
 import { isPinBypass, resolveWorkerModelPin, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import {
@@ -1860,10 +1861,10 @@ export class WorkerDelegationController {
 	}
 
 	/**
-	 * A recovered legacy nested dispatch may retain a different routing profile, but it cannot widen
-	 * the immutable ancestor contract. Pointer ids alone are insufficient authority: retain only
-	 * pointers whose complete metadata matches, require exact soul text, and intersect the persisted
-	 * lineage limits. Fresh native workers never enter this compatibility path.
+	 * A child cannot widen its parent's contract, whether a leader starts it now or a recovered nested dispatch
+	 * returns with another routing profile. Pointer ids alone are insufficient authority: retain only pointers whose
+	 * complete metadata matches, require the parent's exact profile soul (a bot's own soul is not inherited and is
+	 * not compared), keep write paths inside the parent's write roots and intersect the lineage limits.
 	 */
 	private narrowWorkerShipmentContext(
 		shipment: ResolvedWorkerProfile,
@@ -1898,7 +1899,6 @@ export class WorkerDelegationController {
 					...(delegationLimits ? { delegationLimits } : {}),
 				},
 				resourcePointers,
-				...(shipment.soul ? { soul: shipment.soul } : {}),
 			},
 		};
 	}
@@ -5117,7 +5117,7 @@ export class WorkerDelegationController {
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
 		const { instructions, verifierShipment } = admission;
 		let { model, modelBinding } = admission.shipment;
-		const { profile: orchestrationProfile, soul } = admission.shipment;
+		const { profile: orchestrationProfile } = admission.shipment;
 		if (!this.hasFleetRoom(admission)) {
 			return { started: false, skipReason: "worker_delegation_already_running" };
 		}
@@ -5760,7 +5760,7 @@ export class WorkerDelegationController {
 				model,
 				thinkingLevel: modelBinding.thinkingLevel,
 				laneCapability,
-				...(soul ? { soul } : {}),
+				soul: workerPromptSoul(admission.shipment),
 				workerResourceSystemPrompt,
 				workerContextFiles,
 				initialUsage,

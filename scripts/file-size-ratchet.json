@@ -16,7 +16,7 @@
 		"packages/coding-agent/src/core/model-router/read-only-shell-policy.ts": 3357,
 		"packages/coding-agent/src/core/tools/delegate.ts": 3310,
 		"packages/coding-agent/src/core/routines/routine-intake-timing.ts": 3291,
-		"packages/coding-agent/src/core/delegation/worker-agent-control-coordinator.ts": 2090,
+		"packages/coding-agent/src/core/delegation/worker-agent-control-coordinator.ts": 2089,
 		"packages/coding-agent/src/core/routines/routine-contract.ts": 3125,
 		"packages/coding-agent/src/core/runtime-builder.ts": 3004,
 		"packages/coding-agent/src/kernel/agent-loop.ts": 3069,
