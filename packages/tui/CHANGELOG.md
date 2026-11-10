@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- The words the library draws itself can be replaced. `setLibraryText(words)` hands the library another table for the lines it writes without its host: an empty or unmatched list, the hint under a settings list, the loader's default message, the border of a scrolled edit frame, the titles of markdown alerts and the line an image falls back to. `LibraryText` is the table's shape, `ENGLISH_LIBRARY_TEXT` is the default, and `libraryText()` reads the active table. A host uses it to draw the library in its own language; a host that sets nothing draws the same English as before.
+
 ## [0.104.50] - 2026-11-10
 
 ## [0.104.49] - 2026-11-10
