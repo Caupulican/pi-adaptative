@@ -3,6 +3,7 @@ import { runJourney4AwayChannelsPhase, runJourney4ChannelsPhase } from "./journe
 import { runJourney4GmailPhase } from "./journey-4-gmail.ts";
 import { runJourney4OrchestrationGatePhase } from "./journey-4-orchestration-gate.ts";
 import { runJourney4SlackPhase } from "./journey-4-slack.ts";
+import { runJourney4SystemOneToolPhase } from "./journey-4-systemone-tool.ts";
 import {
 	runJourney4TelegramBoundsPhase,
 	runJourney4TelegramDaemonPhase,
@@ -43,6 +44,7 @@ export async function runJourney4(): Promise<void> {
 			await runJourney4AwayChannelsPhase(world);
 			await runJourney4SlackPhase(world);
 			await runJourney4GmailPhase(world);
+			await runJourney4SystemOneToolPhase(world);
 			// Last: it advances the clock of the channels' alarm, which every session of the world shares.
 			await runJourney4TelegramWaitingPhase(world);
 		},
