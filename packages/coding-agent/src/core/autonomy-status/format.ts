@@ -3,6 +3,7 @@
 import { describeDaemonBuild } from "../delegation/bot-team-routine-helpers.ts";
 import { describeGoalAutoContinue } from "../goals/goal-auto-continue-state.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import type { AutonomyStatusBlockKey } from "../language/text-en/autonomy-status.ts";
 import { planStatusLine } from "../plan/plan-panel.ts";
 import { reviewGaugeStatusLine } from "../proof/review-gauge.ts";
 import { describeAwayServiceInspection } from "../routines/away-service.ts";
@@ -38,21 +39,20 @@ function decisionLine(decision: ToolDecision): string {
  */
 function machineLine(machine: MachineStatusView): string {
 	const words = interfaceText().autonomyStatus.machines;
+	const plain = words.plain(machine.name, machine.state, machine.plain);
 	const state =
-		machine.entities && !machine.last
-			? words.noTransition
-			: machine.entities
-				? words.lastRecorded(machine.plain)
-				: machine.plain;
+		machine.entities && !machine.last ? words.noTransition : machine.entities ? words.lastRecorded(plain) : plain;
 	const last = machine.last ? words.last(machine.last.from, machine.last.to, machine.last.reason) : "";
 	return words.line(machine.name, state, machine.illegalCount, last);
 }
 
-function block<T>(title: string, section: StatusSection<T>, lines: (value: T) => string[]): string[] {
+/** One block: its title read from its key, its lines, or the word an empty one prints. */
+function block<T>(key: AutonomyStatusBlockKey, section: StatusSection<T>, lines: (value: T) => string[]): string[] {
 	const words = interfaceText().autonomyStatus;
-	if (section.status === "unavailable") return [`${title}: ${words.unavailable(section.reason)}`];
+	const title = words.blocks[key];
+	if (section.status === "unavailable") return [`${title}: ${words.unavailable(section.cause, section.reason)}`];
 	const body = lines(section.value);
-	return body.length === 0 ? [`${title}: ${words.none}`] : [`${title}:`, ...body.map((line) => `  ${line}`)];
+	return body.length === 0 ? [`${title}: ${words.none(key)}`] : [`${title}:`, ...body.map((line) => `  ${line}`)];
 }
 
 function list<T>(items: BoundedList<T>, line: (item: T) => string): string[] {
@@ -77,19 +77,18 @@ function pausedAfterFailures(pause: { readonly after: number; readonly lastError
 
 export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): string {
 	const words = interfaceText().autonomyStatus;
-	const titles = words.blocks;
 	return [
 		words.head(status.at),
-		...block(titles.goal, status.goalContinuation, (value) => [
+		...block("goal", status.goalContinuation, (value) => [
 			...(value.goal
 				? [words.goal.line(value.goal.text, value.goal.met, value.goal.total, words.goal.status(value.goal.status))]
 				: []),
 			...(value.state === "no_goal" ? [] : [describeGoalAutoContinue(value.state)]),
 		]),
-		...block(titles.plans, status.plans, (value) => list(value.plans, planStatusLine)),
+		...block("plans", status.plans, (value) => list(value.plans, planStatusLine)),
 		...(status.ownerDecisions === undefined
 			? []
-			: block(titles.ownerDecisions, status.ownerDecisions, (value) =>
+			: block("ownerDecisions", status.ownerDecisions, (value) =>
 					value.waiting === 0
 						? []
 						: [
@@ -99,14 +98,14 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 								),
 							],
 				)),
-		...block(titles.review, status.review, (value) => [
+		...block("review", status.review, (value) => [
 			reviewGaugeStatusLine(value.waiting) ?? words.review.none,
 			value.noticeAt > 0 ? words.review.noticeOn(value.noticeAt) : words.review.noticeOff,
 		]),
-		...block(titles.sessionFile, status.sessionSave, (value) => [
+		...block("sessionFile", status.sessionSave, (value) => [
 			value.fenced ? sessionSavePausedWords() : words.sessionFile.saving,
 		]),
-		...block(titles.routines, status.routines, (value) => [
+		...block("routines", status.routines, (value) => [
 			words.routines.wakes(count(value.resultWakes)),
 			...(value.intake ? [words.routines.intake(value.intake.state, value.intake.reason)] : []),
 			...list(value.routines, (routine) =>
@@ -120,14 +119,14 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 							: describeWatchCondition(routine.condition, interfaceText().chat.watch),
 					next: at(routine.nextRunAt),
 					startsFrom: routine.startsFrom === undefined ? undefined : at(routine.startsFrom),
-					lastStatus: routine.lastStatus ?? "-",
+					lastStatus: routine.lastStatus === undefined ? "-" : words.routines.lastStatus(routine.lastStatus),
 					awayRefusal: routine.awayRefusal?.reason,
 					pause: routine.failurePause ? pausedAfterFailures(routine.failurePause) : undefined,
 					progress: routine.progress,
 				}),
 			),
 		]),
-		...block(titles.awayDaemon, status.awayDaemon, (value) => [
+		...block("awayDaemon", status.awayDaemon, (value) => [
 			words.awayDaemon.state({
 				running: value.running,
 				pid: value.pid,
@@ -146,16 +145,16 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 			words.awayDaemon.parentsHosted(
 				value.hostedParents.status === "available"
 					? String(value.hostedParents.value)
-					: words.unavailable(value.hostedParents.reason),
+					: words.unavailable(value.hostedParents.cause, value.hostedParents.reason),
 			),
 			value.service.status === "available"
 				? describeAwayServiceInspection(value.service.value)
-				: words.awayDaemon.service(undefined, value.service.reason),
+				: words.awayDaemon.service(undefined, words.unavailable(value.service.cause, value.service.reason)),
 			...(value.lastEnd ? [words.awayDaemon.lastEnd(value.lastEnd.reason, value.lastEnd.detail)] : []),
 			...list(value.awayRefusals, (refusal) => words.awayDaemon.refusedAway(refusal.routineId, refusal.reason)),
 			...list(value.channels, (channel) => words.awayDaemon.channel(channel)),
 		]),
-		...block(titles.hostEvents, status.hostEvents, (value) => [
+		...block("hostEvents", status.hostEvents, (value) => [
 			...list(value.connections, (connection) =>
 				words.hostEvents.source(connection.source, connection.state, connection.reason),
 			),
@@ -166,21 +165,21 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 						value.ledger.value.deliveries.pending,
 						value.ledger.value.deliveries.reserved,
 					)
-				: words.hostEvents.ledgerUnavailable(value.ledger.reason),
+				: words.hostEvents.ledgerUnavailable(words.unavailable(value.ledger.cause, value.ledger.reason)),
 			words.hostEvents.githubInterests(
 				value.githubInterests.status === "available"
 					? String(value.githubInterests.value)
-					: words.unavailable(value.githubInterests.reason),
+					: words.unavailable(value.githubInterests.cause, value.githubInterests.reason),
 			),
 		]),
-		...block(titles.actingAhead, status.actAhead, (value) => [
+		...block("actingAhead", status.actAhead, (value) => [
 			words.actingAhead.state(value.enabled, count(value.attempts), count(value.spend, true)),
 			...list(value.episodes, (episode) => words.actingAhead.episode(episode.episode, episode.phase)),
 			...list(value.readyPatches, (patch) =>
 				words.actingAhead.patch(patch.episode, patch.present, Math.round(patch.ageMs / 60_000)),
 			),
 		]),
-		...block(titles.proactiveReview, status.proactiveReview, (value) => [
+		...block("proactiveReview", status.proactiveReview, (value) => [
 			words.proactiveReview.state({
 				enabled: value.enabled,
 				delivery: value.delivery,
@@ -190,10 +189,10 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 			}),
 			...list(value.setAside, (topic) => words.proactiveReview.setAside(at(topic.until), topic.label)),
 		]),
-		...block(titles.channels, status.channels, (value) => [
+		...block("channels", status.channels, (value) => [
 			...list(value.channels, (channel) => words.channels.channel(channel.name, channel.state, channel.detail)),
 			...(value.journal.status === "unavailable"
-				? [words.channels.journalUnavailable(value.journal.reason)]
+				? [words.channels.journalUnavailable(words.unavailable(value.journal.cause, value.journal.reason))]
 				: list(value.journal.value, (channel) =>
 						words.channels.journal({
 							name: channel.name,
@@ -211,7 +210,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 						}),
 					)),
 		]),
-		...block(titles.outwardDrafts, status.outwardDrafts, (value) => [
+		...block("outwardDrafts", status.outwardDrafts, (value) => [
 			words.outwardDrafts.counts(
 				value.pending.items.length + (value.pending.omitted ?? 0),
 				value.approved,
@@ -222,11 +221,11 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 				words.outwardDrafts.draft(draft.toolName, draft.classes.join(", "), draft.origin, draft.preparedAt),
 			),
 		]),
-		...block(titles.harnessNotices, status.harnessNotices, (value) => [
+		...block("harnessNotices", status.harnessNotices, (value) => [
 			words.harnessNotices.counts(value.pending.items.length + (value.pending.omitted ?? 0), value.unsaved),
 			...list(value.pending, (notice) => words.harnessNotices.notice(notice.kind, notice.reason)),
 		]),
-		...block(titles.knowledgeCollection, status.knowledgeCollection, (value) => [
+		...block("knowledgeCollection", status.knowledgeCollection, (value) => [
 			words.knowledgeCollection.line({
 				state: value.state,
 				reason: value.reason,
@@ -234,26 +233,28 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 				max: value.sessionMaxUsd === undefined ? undefined : money(value.sessionMaxUsd),
 			}),
 		]),
-		...block(titles.authority, status.authority, (value) => [
+		...block("authority", status.authority, (value) => [
 			words.authority.line({
 				run:
 					value.run.state === "idle"
 						? words.idle
-						: `${value.run.authority}${value.run.origin ? ` (${value.run.origin})` : ""}`,
+						: `${words.authority.held(value.run.authority)}${value.run.origin ? ` (${words.authority.origin(value.run.origin)})` : ""}`,
 				edgeMode: value.edgeMode,
 				thirdParty: value.thirdPartyAllow.join(", "),
 			}),
 			...list(value.standingGrants, (grant) => words.authority.grant(grant.class, grant.source)),
 		]),
-		...block(titles.systemOne, status.systemOne, (value) => [
-			value.state === "no-engine" ? words.systemOne.noEngine(SYSTEM_ONE_NO_ENGINE_CAUSE) : value.state,
+		...block("systemOne", status.systemOne, (value) => [
+			value.state === "no-engine"
+				? words.systemOne.noEngine(SYSTEM_ONE_NO_ENGINE_CAUSE)
+				: words.systemOne.state(value.state),
 		]),
-		...block(titles.machines, status.machines, (machines) => list(machines, machineLine)),
-		...block(titles.recentRuns, status.runs, (runs) =>
+		...block("machines", status.machines, (machines) => list(machines, machineLine)),
+		...block("recentRuns", status.runs, (runs) =>
 			runs.flatMap((run) => [
 				words.recentRuns.line({
 					runId: run.runId,
-					authority: run.authority,
+					authority: words.authority.held(run.authority),
 					authorityChanged: run.authorityChanged,
 					running: run.endedAt === undefined,
 					offered: run.offered.length + (run.offeredOmitted ?? 0),

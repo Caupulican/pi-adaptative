@@ -1,10 +1,20 @@
 /**
  * As palavras em português brasileiro do relatório de autonomia da sessão que o `/status` desenha: o título de cada
- * bloco, uma linha por fato, as palavras do estado de uma rotina e das transições de uma máquina, e a frase que diz por
- * que a continuação automática de um objetivo está parada. Nada aqui é lido por um modelo. Folhas que carregam um
- * valor, uma contagem ou uma concordância são funções, então cada língua coloca o valor e concorda com ele do seu jeito.
+ * bloco, uma linha por fato, as palavras do estado de uma rotina, de uma máquina e de cada identificador que a sessão
+ * guarda, e a frase que diz por que a continuação automática de um objetivo está parada. Um valor que é identificador é
+ * palavra aqui; um texto que alguém escreveu é desenhado como veio. Nada aqui é lido por um modelo. Folhas que carregam
+ * um valor, uma contagem ou uma concordância são funções, então cada língua coloca o valor e concorda com ele do seu
+ * jeito.
  */
 
+import type { StatusUnavailableCause } from "../../autonomy-status/autonomy-status.ts";
+import type { ChannelRuntimeState } from "../../channels/session-channels.ts";
+import type { HostEventConnectionView } from "../../events/host-event-contract.ts";
+import type { KnowledgeCollectionInactiveReason } from "../../memory/knowledge-collector.ts";
+import type { ActAheadPhase } from "../../proactivity/act-ahead-record.ts";
+import type { RoutineDefinitionView } from "../../routines/routine-contract.ts";
+import type { RoutineIntakeInactiveReason, RoutineIntakeStatus } from "../../routines/routine-intake.ts";
+import type { TurnAuthority, TurnOriginKind } from "../../turn-origin.ts";
 import type {
 	AutonomyAuthorityLine,
 	AutonomyAwayChannel,
@@ -15,8 +25,149 @@ import type {
 	AutonomyProactiveLine,
 	AutonomyRoutineLine,
 	AutonomyRunLine,
+	AutonomyStatusBlockKey,
 } from "../text-en/autonomy-status.ts";
 import { SESSIONS } from "./sessions.ts";
+
+/** A entrada de rotinas e a coleta de conhecimento dizem o mesmo estado; as duas são femininas em português. */
+const ACTIVE_STATE: Readonly<Record<"active" | "inactive", string>> = { active: "ativa", inactive: "inativa" };
+
+/**
+ * Por que a entrada de rotinas e a coleta de conhecimento não começam. Os códigos vêm do domínio, e o mesmo código tem
+ * a mesma razão nas duas, então a tabela é uma só.
+ */
+const INACTIVE_REASON: Readonly<Record<KnowledgeCollectionInactiveReason | RoutineIntakeInactiveReason, string>> = {
+	disabled: "desligada nas configurações",
+	configuration_unreadable: "as configurações não puderam ser lidas",
+	invalid_settings: "as configurações são inválidas",
+	no_model: "nenhum modelo configurado",
+	model_unpriced: "o modelo não tem preço cadastrado",
+	no_engine: "sem motor",
+	budget_exhausted: "orçamento esgotado",
+	accounting_unresolved: "os gastos ainda não fecharam",
+	ephemeral_session: "a sessão não é salva",
+	child_session: "a coleta não roda numa sessão filha",
+	memory_unavailable: "a memória não está disponível",
+};
+
+/** O estado de um canal, pelo identificador que a sessão guarda. */
+const CHANNEL_STATE: Readonly<Record<ChannelRuntimeState, string>> = {
+	not_configured: "não configurado",
+	invalid: "inválido",
+	ignored: "ignorado",
+	served_elsewhere: "servido em outro lugar",
+	starting: "iniciando",
+	armed: "ativo",
+	suspended: "suspenso",
+	capped: "limitado",
+	stopped: "parado",
+};
+
+/** O estado da ligação de uma origem de eventos do host; sem estado, a origem está ativa. */
+const SOURCE_STATE: Readonly<Record<HostEventConnectionView["state"], string>> = {
+	armed: "ativa",
+	waiting: "aguardando",
+	suspended: "suspensa",
+};
+
+/** A fase de um episódio de agir antes, pelo identificador que o registro guarda. */
+const ACT_AHEAD_PHASE: Readonly<Record<ActAheadPhase, string>> = {
+	armed: "preparado",
+	admitted: "admitido",
+	working: "trabalhando",
+	ready: "pronto",
+	abandoned: "abandonado",
+	capped: "limitado",
+	settled: "concluído",
+};
+
+/** O estado da última execução de uma rotina; a linha diz "última", então a palavra concorda com ela. */
+const RUN_STATUS: Readonly<Record<NonNullable<RoutineDefinitionView["lastStatus"]>, string>> = {
+	queued: "na fila",
+	running: "em execução",
+	succeeded: "concluída",
+	failed: "falhou",
+	cancelled: "cancelada",
+	uncertain: "incerta",
+};
+
+/** A autoridade que uma execução detém, pelo identificador que ela guarda. */
+const TURN_AUTHORITY: Readonly<Record<TurnAuthority, string>> = {
+	owner: "dono",
+	"remote-owner": "dono remoto",
+	"third-party": "terceiro",
+};
+
+/** De onde vieram as palavras de uma execução, pelo identificador que o turno guarda. */
+const TURN_ORIGIN: Readonly<Record<TurnOriginKind, string>> = {
+	"owner-typed": "mensagem digitada",
+	"extension-message": "mensagem de extensão",
+	routine: "rotina",
+	"host-event": "evento do host",
+	"peer-agent": "agente peer",
+	"inbound-channel": "mensagem de canal",
+	"owner-channel": "canal do dono",
+	"worker-result": "resultado de worker",
+	"goal-continuation": "continuação de objetivo",
+	"proactive-review": "revisão proativa",
+	harness: "harness",
+};
+
+/**
+ * A descrição que o mapa `describe` de uma máquina dá a cada estado. A chave é o nome da máquina, sem o número da
+ * instância que o registro do estado acrescenta; uma máquina sem descrição fica com a que o domínio deu.
+ */
+const MACHINE_STATE: Readonly<Record<string, Readonly<Record<string, string>>>> = {
+	"fleet-admission": {
+		running: "admitindo workers conforme o espaço disponível",
+		stopped: "parada: nada novo começa até retomar",
+	},
+	"plan-node": {
+		planned: "aguardando as etapas anteriores",
+		ready: "pronta para começar",
+		admitted: "começando",
+		running: "em execução",
+		settled: "concluída",
+		held: "retida",
+		superseded: "substituída",
+		cancelled: "cancelada",
+	},
+	"worker-outcome": {
+		none: "sem resultado ainda",
+		succeeded: "concluído",
+		partial: "feito em parte",
+		blocked: "bloqueado",
+		failed: "falhou",
+		cancelled: "cancelado",
+	},
+};
+
+/** Por que uma seção não traz o que o relatório pede: a frase em inglês continua ao lado do código, na própria seção. */
+const UNAVAILABLE_CAUSE: Readonly<Record<StatusUnavailableCause, string>> = {
+	routine_store: "o armazenamento de rotinas não está carregado nesta sessão",
+	child_session: "as rotinas não rodam numa sessão filha",
+	service_routine_store: "o armazenamento de rotinas não está carregado, então o serviço não é lido",
+	away_parents: "o daemon de ausência não registra as sessões pai que hospeda",
+	worker_ledger: "o registro de workers não está carregado nesta sessão",
+	no_edge_grants: "a sessão não fornece concessões de fronteira",
+};
+
+/** O vazio de cada bloco: estes títulos são femininos e pedem "nenhuma", e os outros ficam com "nenhum". */
+const EMPTY_WORD: Readonly<Partial<Record<AutonomyStatusBlockKey, string>>> = {
+	ownerDecisions: "nenhuma",
+	review: "nenhuma",
+	routines: "nenhuma",
+	proactiveReview: "nenhuma",
+	knowledgeCollection: "nenhuma",
+	authority: "nenhuma",
+	machines: "nenhuma",
+	recentRuns: "nenhuma",
+};
+
+/** O nome da máquina, sem o número da instância que o registro do estado acrescenta (`fleet-admission#1`). */
+function machineName(label: string): string {
+	return label.replace(/#\d+$/, "");
+}
 
 export const AUTONOMY_STATUS = {
 	head: (at: string) => `Situação da autonomia em ${at}`,
@@ -40,8 +191,9 @@ export const AUTONOMY_STATUS = {
 		machines: "Máquinas",
 		recentRuns: "Execuções recentes",
 	},
-	unavailable: (reason: string) => `indisponível: ${reason}`,
-	none: "nenhum",
+	unavailable: (cause: StatusUnavailableCause | undefined, reason: string) =>
+		`indisponível: ${cause === undefined ? reason : UNAVAILABLE_CAUSE[cause]}`,
+	none: (block: AutonomyStatusBlockKey) => EMPTY_WORD[block] ?? "nenhum",
 	count: {
 		plain: (used: string, max: string) => `${used} de ${max}`,
 		money: (used: string, max: string) => `$${used} de $${max}`,
@@ -90,7 +242,7 @@ export const AUTONOMY_STATUS = {
 		waitingMany: (count: number) =>
 			`${count} resultados concluídos chegaram desde a sua última mensagem e esperam a sua revisão.`,
 		none: "Nenhum resultado concluído espera a sua revisão.",
-		noticeOn: (at: number) => `Um aviso em ${at} esperando; nada fica retido.`,
+		noticeOn: (at: number) => `Um aviso ao chegar a ${at} resultados esperando; nada fica retido.`,
 		noticeOff: "O aviso de resultados esperando está desligado; nada fica retido.",
 	},
 
@@ -99,15 +251,16 @@ export const AUTONOMY_STATUS = {
 	},
 
 	routines: {
-		wakes: (count: string) => `despertares por resultado (24 h): ${count}`,
-		intake: (state: string, reason: string | undefined) =>
-			`entrada: ${state}${reason === undefined ? "" : ` (${reason})`}`,
+		wakes: (count: string) => `turnos iniciados por resultados (24 h): ${count}`,
+		intake: (state: RoutineIntakeStatus["state"], reason: RoutineIntakeInactiveReason | undefined) =>
+			`entrada: ${ACTIVE_STATE[state]}${reason === undefined ? "" : ` (${INACTIVE_REASON[reason]})`}`,
 		state: {
 			enabled: "ligada",
 			paused: "pausada",
 			"paused-after-failures": "pausada após falhas repetidas",
 			ended: "encerrada",
 		},
+		lastStatus: (status: NonNullable<RoutineDefinitionView["lastStatus"]>) => RUN_STATUS[status],
 		line: (line: AutonomyRoutineLine) =>
 			`${line.routineId}: ${line.state}${line.ended === undefined ? "" : ` (${line.ended})`}, ${line.schedule}, próxima ${line.next}${line.startsFrom === undefined ? "" : ` (a partir de ${line.startsFrom})`}, última ${line.lastStatus}${line.awayRefusal === undefined ? "" : `, ausência recusada: ${line.awayRefusal}`}${line.pause ?? ""}${line.progress === undefined ? "" : `; onde parou: ${line.progress}`}`,
 		pausedAfterFailures: (after: number, reason: string | undefined) =>
@@ -118,10 +271,10 @@ export const AUTONOMY_STATUS = {
 		state: (state: AutonomyAwayState) =>
 			`${state.running ? "em execução" : "parado"}${state.pid === undefined ? "" : ` (pid ${state.pid})`}${state.running ? `, ${state.build}` : ""}, heartbeat ${state.heartbeat}, ${state.activeRoutines} ativas, ${state.dueRoutines} vencidas`,
 		settings: (settings: AutonomyAwaySettings) =>
-			`ausência ${settings.enabled ? "ligada" : "desligada"}: gasto de $${settings.spent} em $${settings.maxPerDay} (24 h), $${settings.maxPerRun} por execução, ${settings.maxParentHosts} hosts pais (configurações desta sessão; o daemon lê as configurações globais)`,
-		parentsHosted: (hosted: string) => `hosts pais: ${hosted}`,
-		service: (inspection: string | undefined, reason: string | undefined) =>
-			inspection ?? `serviço sempre ativo: indisponível: ${reason}`,
+			`ausência ${settings.enabled ? "ligada" : "desligada"}: gasto $${settings.spent} de $${settings.maxPerDay} (24 h), $${settings.maxPerRun} por execução, até ${settings.maxParentHosts} ${settings.maxParentHosts === 1 ? "sessão pai" : "sessões pai"} (configurações desta sessão; o daemon lê as configurações globais)`,
+		parentsHosted: (hosted: string) => `sessões pai hospedadas: ${hosted}`,
+		service: (inspection: string | undefined, unavailable: string) =>
+			inspection ?? `serviço sempre ativo: ${unavailable}`,
 		lastEnd: (reason: string, detail: string | undefined) =>
 			`último encerramento: ${reason}${detail === undefined ? "" : `: ${detail}`}`,
 		refusedAway: (routineId: string, reason: string) => `${routineId} recusou rodar na ausência: ${reason}`,
@@ -130,34 +283,34 @@ export const AUTONOMY_STATUS = {
 	},
 
 	hostEvents: {
-		source: (source: string, state: string, reason: string | undefined) =>
-			`origem ${source}: ${state}${reason === undefined ? "" : ` (${reason})`}`,
+		source: (source: string, state: HostEventConnectionView["state"], reason: string | undefined) =>
+			`origem ${source}: ${SOURCE_STATE[state]}${reason === undefined ? "" : ` (${reason})`}`,
 		ledger: (sources: number, subscriptions: number, pending: number, reserved: number) =>
 			`registro: ${sources} origens, ${subscriptions} assinaturas, ${pending} entregas pendentes e ${reserved} reservadas`,
-		ledgerUnavailable: (reason: string) => `registro: indisponível: ${reason}`,
+		ledgerUnavailable: (unavailable: string) => `registro: ${unavailable}`,
 		githubInterests: (value: string) => `Interesses no GitHub: ${value}`,
 	},
 
 	actingAhead: {
 		state: (enabled: boolean, attempts: string, spend: string) =>
 			`${enabled ? "ligado" : "desligado"}: tentativas ${attempts}, gasto ${spend} (24 h)`,
-		episode: (episode: string, phase: string) => `${episode}: ${phase}`,
+		episode: (episode: string, phase: ActAheadPhase) => `${episode}: ${ACT_AHEAD_PHASE[phase]}`,
 		patch: (episode: string, present: boolean, ageMinutes: number) =>
 			`alteração preparada ${episode}: ${present ? "salva" : "sumiu"}, ${ageMinutes} min de idade`,
 	},
 
 	proactiveReview: {
 		state: (line: AutonomyProactiveLine) =>
-			`${line.enabled ? "ligada" : "desligada"} (${line.delivery}): despertares de turno ${line.turnWakes}, gasto em revisões ${line.reviewSpend} (24 h)${line.lastSkip === undefined ? "" : `, último motivo de dispensa: ${line.lastSkip}`}`,
+			`${line.enabled ? "ligada" : "desligada"} (${line.delivery}): turnos iniciados ${line.turnWakes}, gasto em revisões ${line.reviewSpend} (24 h)${line.lastSkip === undefined ? "" : `, último motivo de dispensa: ${line.lastSkip}`}`,
 		setAside: (until: string, label: string) => `deixado de lado até ${until}: ${label}`,
 	},
 
 	channels: {
-		channel: (name: string, state: string, detail: string | undefined) =>
-			`${name}: ${state}${detail === undefined ? "" : ` (${detail})`}`,
-		journalUnavailable: (reason: string) => `despertares, gasto, rascunhos: indisponível: ${reason}`,
+		channel: (name: string, state: ChannelRuntimeState, detail: string | undefined) =>
+			`${name}: ${CHANNEL_STATE[state]}${detail === undefined ? "" : ` (${detail})`}`,
+		journalUnavailable: (unavailable: string) => `turnos iniciados, gasto, rascunhos: ${unavailable}`,
 		journal: (line: AutonomyChannelJournal) =>
-			`${line.name}: servido por ${line.servedBy}, ${line.wakes} despertares, ${line.spend} de gasto (24 h), ${line.ownerSpend === undefined ? "" : `gasto do dono ${line.ownerSpend} (24 h), `}${line.ownerFullAuthority ? "autoridade total do dono, " : ""}${line.ownerQuotaUsedPercent === undefined ? "" : `assinatura em ${Math.round(line.ownerQuotaUsedPercent)}% (limites em dólar suspensos), `}${line.pendingMessages} esperando, ${line.pendingDrafts === 1 ? "1 rascunho" : `${line.pendingDrafts} rascunhos`} (${line.awayDrafts} gravados sem sessão aberta), ${line.heldTotal} retidos, ${line.gaps === 1 ? "1 lacuna" : `${line.gaps} lacunas`}`,
+			`${line.name}: servido por ${line.servedBy}, ${line.wakes} turnos iniciados, ${line.spend} de gasto (24 h), ${line.ownerSpend === undefined ? "" : `gasto do dono ${line.ownerSpend} (24 h), `}${line.ownerFullAuthority ? "autoridade total do dono, " : ""}${line.ownerQuotaUsedPercent === undefined ? "" : `assinatura em ${Math.round(line.ownerQuotaUsedPercent)}% (limites em dólar suspensos), `}${line.pendingMessages} esperando, ${line.pendingDrafts === 1 ? "1 rascunho" : `${line.pendingDrafts} rascunhos`} (${line.awayDrafts} gravados sem sessão aberta), ${line.heldTotal} retidos, ${line.gaps === 1 ? "1 lacuna" : `${line.gaps} lacunas`}`,
 	},
 
 	outwardDrafts: {
@@ -169,7 +322,7 @@ export const AUTONOMY_STATUS = {
 
 	knowledgeCollection: {
 		line: (line: AutonomyCollectionLine) =>
-			`${line.state}${line.reason === undefined ? "" : ` (${line.reason})`}${line.spent === undefined ? "" : `, gasto $${line.spent}${line.max === undefined ? "" : ` de $${line.max}`}`}`,
+			`${ACTIVE_STATE[line.state]}${line.reason === undefined ? "" : ` (${INACTIVE_REASON[line.reason]})`}${line.spent === undefined ? "" : `, gasto $${line.spent}${line.max === undefined ? "" : ` de $${line.max}`}`}`,
 	},
 
 	harnessNotices: {
@@ -180,14 +333,19 @@ export const AUTONOMY_STATUS = {
 	authority: {
 		line: (line: AutonomyAuthorityLine) =>
 			`execução: ${line.run}, fronteira ${line.edgeMode}, classes de terceiros: ${line.thirdParty === "" ? "nenhuma" : line.thirdParty}`,
+		held: (authority: TurnAuthority) => TURN_AUTHORITY[authority],
+		origin: (origin: TurnOriginKind) => TURN_ORIGIN[origin],
 		grant: (grantClass: string, source: string) => `concessão permanente ${grantClass} (${source})`,
 	},
 
 	systemOne: {
+		state: (state: "on" | "off") => (state === "on" ? "ligado" : "desligado"),
 		noEngine: (cause: string) => `sem motor: ${cause}`,
 	},
 
 	machines: {
+		plain: (name: string, state: string, description: string) =>
+			MACHINE_STATE[machineName(name)]?.[state] ?? description,
 		line: (name: string, state: string, illegal: number, last: string | undefined) =>
 			`${name}: ${state}, ${illegal} ${illegal === 1 ? "transição não declarada" : "transições não declaradas"}${last ?? ""}`,
 		noTransition: "nenhuma transição registrada ainda",

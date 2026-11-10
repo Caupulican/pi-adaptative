@@ -1,9 +1,21 @@
 /**
  * The English words of the session autonomy report that `/status` draws: the title of each block, one line per fact,
- * the words a routine's state and a machine's transitions read as, and the sentence that says why a goal's automatic
- * continuation is stopped. Nothing here is read by a model. Leaves that carry a value, a count or an inflection are
- * functions, so each language places the value and agrees with it in its own way.
+ * the words a routine's state, a routine's last run, a channel, a source, an episode, an authority and a machine's state
+ * read as, the cause that leaves a section with nothing to report, and the sentence that says why a goal's automatic
+ * continuation is stopped. Nothing here is read by a model. A value the report draws is an identifier the domain
+ * declares or free text someone else wrote: an identifier keeps its own English form here, so no sentence is written
+ * twice, and the other language words it. Leaves that carry a value, a count or an inflection are functions, so each
+ * language places the value and agrees with it in its own way.
  */
+
+import type { StatusUnavailableCause } from "../../autonomy-status/autonomy-status.ts";
+import type { ChannelRuntimeState } from "../../channels/session-channels.ts";
+import type { HostEventConnectionView } from "../../events/host-event-contract.ts";
+import type { KnowledgeCollectionInactiveReason, KnowledgeCollectionStatus } from "../../memory/knowledge-collector.ts";
+import type { ActAheadPhase } from "../../proactivity/act-ahead-record.ts";
+import type { RoutineDefinitionView } from "../../routines/routine-contract.ts";
+import type { RoutineIntakeInactiveReason, RoutineIntakeStatus } from "../../routines/routine-intake.ts";
+import type { TurnAuthority, TurnOriginKind } from "../../turn-origin.ts";
 
 /** The facts a routine's line in the report carries; already-formatted fragments arrive as strings. */
 export interface AutonomyRoutineLine {
@@ -85,8 +97,8 @@ export interface AutonomyProactiveLine {
 
 /** The knowledge collection's state and what it spent, the amounts already written the language's way. */
 export interface AutonomyCollectionLine {
-	readonly state: string;
-	readonly reason?: string;
+	readonly state: KnowledgeCollectionStatus["state"];
+	readonly reason?: KnowledgeCollectionInactiveReason;
 	readonly spent?: string;
 	readonly max?: string;
 }
@@ -98,33 +110,40 @@ export interface AutonomyAuthorityLine {
 	readonly thirdParty: string;
 }
 
+/** The title of every block the report can hold, keyed by the block: the empty word is chosen by the same key. */
+const BLOCKS = {
+	goal: "Goal",
+	plans: "Plans",
+	ownerDecisions: "Owner decisions",
+	review: "Review",
+	sessionFile: "Session file",
+	routines: "Routines",
+	awayDaemon: "Away daemon",
+	hostEvents: "Host events",
+	actingAhead: "Acting ahead",
+	proactiveReview: "Proactive review",
+	channels: "Channels",
+	outwardDrafts: "Outward drafts",
+	harnessNotices: "Harness notices",
+	knowledgeCollection: "Knowledge collection",
+	authority: "Authority",
+	systemOne: "System One",
+	machines: "Machines",
+	recentRuns: "Recent runs",
+};
+
+/** A block the report draws; its key chooses the block's title and the word it prints when it has nothing to report. */
+export type AutonomyStatusBlockKey = keyof typeof BLOCKS;
+
 export const AUTONOMY_STATUS = {
 	/** The report's first line, with the moment the status was taken. */
 	head: (at: string) => `Autonomy status at ${at}`,
 	/** The title of every block the report can hold. */
-	blocks: {
-		goal: "Goal",
-		plans: "Plans",
-		ownerDecisions: "Owner decisions",
-		review: "Review",
-		sessionFile: "Session file",
-		routines: "Routines",
-		awayDaemon: "Away daemon",
-		hostEvents: "Host events",
-		actingAhead: "Acting ahead",
-		proactiveReview: "Proactive review",
-		channels: "Channels",
-		outwardDrafts: "Outward drafts",
-		harnessNotices: "Harness notices",
-		knowledgeCollection: "Knowledge collection",
-		authority: "Authority",
-		systemOne: "System One",
-		machines: "Machines",
-		recentRuns: "Recent runs",
-	},
-	/** What a block whose source could not be read says, and one that has nothing to report. */
-	unavailable: (reason: string) => `unavailable: ${reason}`,
-	none: "none",
+	blocks: BLOCKS,
+	/** What a block whose source could not be read says: the cause is worded there, and a read that threw gives only its reason. */
+	unavailable: (_cause: StatusUnavailableCause | undefined, reason: string) => `unavailable: ${reason}`,
+	/** The word a block with nothing to report prints; its key lets that word agree with the block's title. */
+	none: (_block: AutonomyStatusBlockKey) => "none",
 	/** A count of two numbers, plain and as the two amounts of money it spent. */
 	count: {
 		plain: (used: string, max: string) => `${used} of ${max}`,
@@ -181,7 +200,7 @@ export const AUTONOMY_STATUS = {
 
 	routines: {
 		wakes: (count: string) => `result wakes (24 h): ${count}`,
-		intake: (state: string, reason: string | undefined) =>
+		intake: (state: RoutineIntakeStatus["state"], reason: RoutineIntakeInactiveReason | undefined) =>
 			`intake: ${state}${reason === undefined ? "" : ` (${reason})`}`,
 		/** A routine's state, keyed by the identifier the record holds. */
 		state: {
@@ -190,6 +209,8 @@ export const AUTONOMY_STATUS = {
 			"paused-after-failures": "paused after repeated failures",
 			ended: "ended",
 		},
+		/** The status of a routine's last run, keyed by the identifier the record holds. */
+		lastStatus: (status: NonNullable<RoutineDefinitionView["lastStatus"]>): string => status,
 		line: (line: AutonomyRoutineLine) =>
 			`${line.routineId}: ${line.state}${line.ended === undefined ? "" : ` (${line.ended})`}, ${line.schedule}, next ${line.next}${line.startsFrom === undefined ? "" : ` (starts from ${line.startsFrom})`}, last ${line.lastStatus}${line.awayRefusal === undefined ? "" : `, away refused: ${line.awayRefusal}`}${line.pause ?? ""}${line.progress === undefined ? "" : `; where it stood: ${line.progress}`}`,
 		pausedAfterFailures: (after: number, reason: string | undefined) =>
@@ -202,8 +223,8 @@ export const AUTONOMY_STATUS = {
 		settings: (settings: AutonomyAwaySettings) =>
 			`away ${settings.enabled ? "on" : "off"}: spent $${settings.spent} of $${settings.maxPerDay} (24 h), $${settings.maxPerRun} per run, ${settings.maxParentHosts} parent hosts (this session's settings; the daemon reads global settings)`,
 		parentsHosted: (hosted: string) => `parents hosted: ${hosted}`,
-		service: (inspection: string | undefined, reason: string | undefined) =>
-			inspection ?? `always-on service: unavailable: ${reason}`,
+		service: (inspection: string | undefined, unavailable: string) =>
+			inspection ?? `always-on service: ${unavailable}`,
 		lastEnd: (reason: string, detail: string | undefined) =>
 			`last end: ${reason}${detail === undefined ? "" : `: ${detail}`}`,
 		refusedAway: (routineId: string, reason: string) => `${routineId} refused away: ${reason}`,
@@ -212,18 +233,18 @@ export const AUTONOMY_STATUS = {
 	},
 
 	hostEvents: {
-		source: (source: string, state: string, reason: string | undefined) =>
+		source: (source: string, state: HostEventConnectionView["state"], reason: string | undefined) =>
 			`source ${source}: ${state}${reason === undefined ? "" : ` (${reason})`}`,
 		ledger: (sources: number, subscriptions: number, pending: number, reserved: number) =>
 			`ledger: ${sources} sources, ${subscriptions} subscriptions, ${pending} pending and ${reserved} reserved deliveries`,
-		ledgerUnavailable: (reason: string) => `ledger: unavailable: ${reason}`,
+		ledgerUnavailable: (unavailable: string) => `ledger: ${unavailable}`,
 		githubInterests: (value: string) => `GitHub interests: ${value}`,
 	},
 
 	actingAhead: {
 		state: (enabled: boolean, attempts: string, spend: string) =>
 			`${enabled ? "on" : "off"}: attempts ${attempts}, spend ${spend} (24 h)`,
-		episode: (episode: string, phase: string) => `${episode}: ${phase}`,
+		episode: (episode: string, phase: ActAheadPhase) => `${episode}: ${phase}`,
 		patch: (episode: string, present: boolean, ageMinutes: number) =>
 			`patch ${episode}: ${present ? "saved" : "gone"}, ${ageMinutes} min old`,
 	},
@@ -235,9 +256,9 @@ export const AUTONOMY_STATUS = {
 	},
 
 	channels: {
-		channel: (name: string, state: string, detail: string | undefined) =>
+		channel: (name: string, state: ChannelRuntimeState, detail: string | undefined) =>
 			`${name}: ${state}${detail === undefined ? "" : ` (${detail})`}`,
-		journalUnavailable: (reason: string) => `wakes, spend, drafts: unavailable: ${reason}`,
+		journalUnavailable: (unavailable: string) => `wakes, spend, drafts: ${unavailable}`,
 		journal: (line: AutonomyChannelJournal) =>
 			`${line.name}: served by ${line.servedBy}, wakes ${line.wakes}, spend ${line.spend} (24 h), ${line.ownerSpend === undefined ? "" : `owner spend ${line.ownerSpend} (24 h), `}${line.ownerFullAuthority ? "full owner authority, " : ""}${line.ownerQuotaUsedPercent === undefined ? "" : `subscription at ${Math.round(line.ownerQuotaUsedPercent)}% (dollar bounds lifted), `}${line.pendingMessages} waiting, ${line.pendingDrafts} draft(s) (${line.awayDrafts} written while no session was open), ${line.heldTotal} held, ${line.gaps} gap(s)`,
 	},
@@ -262,14 +283,22 @@ export const AUTONOMY_STATUS = {
 	authority: {
 		line: (line: AutonomyAuthorityLine) =>
 			`run: ${line.run}, edge ${line.edgeMode}, third-party classes: ${line.thirdParty === "" ? "none" : line.thirdParty}`,
+		/** The authority a run holds, keyed by the identifier the run records. */
+		held: (authority: TurnAuthority): string => authority,
+		/** Where the run's words came from, keyed by the identifier the turn records. */
+		origin: (origin: TurnOriginKind): string => origin,
 		grant: (grantClass: string, source: string) => `standing grant ${grantClass} (${source})`,
 	},
 
 	systemOne: {
+		/** Whether System One can judge here, keyed by the identifier the snapshot holds. */
+		state: (state: "on" | "off"): string => state,
 		noEngine: (cause: string) => `no engine: ${cause}`,
 	},
 
 	machines: {
+		/** The description a machine's own `describe` map gives its state, worded by the machine's name and state. */
+		plain: (_name: string, _state: string, description: string) => description,
 		line: (name: string, state: string, illegal: number, last: string | undefined) =>
 			`${name}: ${state}, ${illegal} undeclared transition(s)${last ?? ""}`,
 		noTransition: "no transition recorded yet",

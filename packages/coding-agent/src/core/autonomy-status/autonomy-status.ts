@@ -60,9 +60,28 @@ export const AUTONOMY_STATUS_LIST_LIMIT = 16;
 /** The waiting calls the owner-decision section lists; the rest are counted. */
 export const OWNER_DECISIONS_LIST_LIMIT = 10;
 
+/**
+ * Why a section holds nothing while the fact it reports exists: a code the reader chooses, worded by the interface when
+ * it draws, so the sentence the owner reads is written once per language. A read that threw carries none of these and
+ * its reason is the failure's own text.
+ */
+export type StatusUnavailableCause =
+	/** The routine store is not loaded, so neither the routines, the daemon status nor the GitHub interests are read. */
+	| "routine_store"
+	/** A child session owns no routines, and holds no routine store to list them from. */
+	| "child_session"
+	/** The always-on service is read from the routine store, so a session without one reads no service. */
+	| "service_routine_store"
+	/** Nothing records which parent sessions the away daemon hosts. */
+	| "away_parents"
+	/** The worker ledger holds the plans and the host-event accounting, so a session without it reads neither. */
+	| "worker_ledger"
+	/** This session supplies no standing grants, so the report states no authority for it. */
+	| "no_edge_grants";
+
 export type StatusSection<T> =
 	| { readonly status: "available"; readonly value: T }
-	| { readonly status: "unavailable"; readonly reason: string };
+	| { readonly status: "unavailable"; readonly cause?: StatusUnavailableCause; readonly reason: string };
 
 export interface BoundedList<T> {
 	readonly items: readonly T[];
@@ -420,7 +439,16 @@ function available<T>(value: T): StatusSection<T> {
 	return { status: "available", value };
 }
 
-function unavailable(reason: string): { readonly status: "unavailable"; readonly reason: string } {
+/** A section a session fact withholds: the cause is worded at draw time, and `reason` keeps its own English sentence. */
+function unavailable(
+	cause: StatusUnavailableCause,
+	reason: string,
+): { readonly status: "unavailable"; readonly cause: StatusUnavailableCause; readonly reason: string } {
+	return { status: "unavailable", cause, reason };
+}
+
+/** A section whose own read threw: the reason is the failure's text, so it carries no cause. */
+function unreadable(reason: string): { readonly status: "unavailable"; readonly reason: string } {
 	return { status: "unavailable", reason };
 }
 
@@ -429,7 +457,7 @@ async function section<T>(read: () => StatusSection<T> | Promise<StatusSection<T
 	try {
 		return await read();
 	} catch (error) {
-		return unavailable(
+		return unreadable(
 			`unreadable: ${text(error instanceof Error ? error.message : String(error)) ?? "unknown error"}`,
 		);
 	}
@@ -513,7 +541,11 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 
 	const [routines, awayDaemon, hostEvents, actAhead, proactiveReview] = await Promise.all([
 		section<RoutinesStatus>(async () => {
-			if (!store) return unavailable(sources.childSession ? "routines do not run in a child session" : NO_STORE);
+			if (!store)
+				return unavailable(
+					sources.childSession ? "child_session" : "routine_store",
+					sources.childSession ? "routines do not run in a child session" : NO_STORE,
+				);
 			const wakes = (await day()).routineResultTurnWakes;
 			return available({
 				routines: bounded(
@@ -526,11 +558,11 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 			});
 		}),
 		section<AwayDaemonStatusView>(async () => {
-			if (!store) return unavailable(NO_STORE);
+			if (!store) return unavailable("routine_store", NO_STORE);
 			const awayService = sources.awayService;
 			const service = awayService
 				? await section(() => available(awayService()))
-				: unavailable("the routine store is not loaded, so the service is not read");
+				: unavailable("service_routine_store", "the routine store is not loaded, so the service is not read");
 			const daemon = store.getDaemonStatus(nowMs);
 			const away = settings.getRoutineAwaySettings();
 			const spend = routineAwaySpendRoom(
@@ -566,7 +598,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 					maxParentHosts: away.maxParentHosts,
 				},
 				spentUsd: spend.chargedMicros / 1_000_000,
-				hostedParents: unavailable("the away daemon does not record the parents it hosts"),
+				hostedParents: unavailable("away_parents", "the away daemon does not record the parents it hosts"),
 				channels: bounded(sources.awayChannels()),
 				service,
 			});
@@ -598,10 +630,10 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 								pending: deliveries.filter((delivery) => delivery.status === "pending").length,
 							},
 						})
-					: unavailable("the worker ledger is not loaded in this session"),
+					: unavailable("worker_ledger", "the worker ledger is not loaded in this session"),
 				githubInterests: store
 					? available(routineGithubInterests(store.listRoutines(), sources.sessionId, nowMs).length)
-					: unavailable(NO_STORE),
+					: unavailable("routine_store", NO_STORE),
 			});
 		}),
 		section<ActAheadStatus>(async () => {
@@ -709,7 +741,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 		}),
 		section<KnowledgeCollectionStatus>(() => available(sources.memory.getKnowledgeCollectionStatus())),
 		section<AuthorityStatus>(() => {
-			if (!standingGrants) return unavailable("the session supplies no edge grants");
+			if (!standingGrants) return unavailable("no_edge_grants", "the session supplies no edge grants");
 			const edge = settings.getEdgeSettings();
 			const origin = run.turnOrigin.origin();
 			return available({
@@ -752,7 +784,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 	});
 	const plans = await section<PlansStatus>(() => {
 		const ledger = sources.hostEventLedger;
-		if (!ledger) return unavailable("the worker ledger is not loaded in this session");
+		if (!ledger) return unavailable("worker_ledger", "the worker ledger is not loaded in this session");
 		return available({
 			plans: bounded(
 				listPlanViews(ledger).flatMap((view) =>
