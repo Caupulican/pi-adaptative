@@ -7,13 +7,16 @@
  * jeito.
  */
 
-import type { StatusUnavailableCause } from "../../autonomy-status/autonomy-status.ts";
+import type { RoutineStatusItem, StatusUnavailableCause } from "../../autonomy-status/autonomy-status.ts";
+import type { ChannelServedBy } from "../../channels/away-channels.ts";
 import type { ChannelRuntimeState } from "../../channels/session-channels.ts";
+import type { BotDaemonEnd } from "../../delegation/bot-team-routine-helpers.ts";
 import type { HostEventConnectionView } from "../../events/host-event-contract.ts";
 import type { KnowledgeCollectionInactiveReason } from "../../memory/knowledge-collector.ts";
 import type { ActAheadPhase } from "../../proactivity/act-ahead-record.ts";
 import type { RoutineDefinitionView } from "../../routines/routine-contract.ts";
 import type { RoutineIntakeInactiveReason, RoutineIntakeStatus } from "../../routines/routine-intake.ts";
+import type { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../../system-one/semantic-plane-health.ts";
 import type { TurnAuthority, TurnOriginKind } from "../../turn-origin.ts";
 import type {
 	AutonomyAuthorityLine,
@@ -55,12 +58,42 @@ const CHANNEL_STATE: Readonly<Record<ChannelRuntimeState, string>> = {
 	not_configured: "não configurado",
 	invalid: "inválido",
 	ignored: "ignorado",
-	served_elsewhere: "servido em outro lugar",
+	served_elsewhere: "atendido em outro lugar",
 	starting: "iniciando",
 	armed: "ativo",
 	suspended: "suspenso",
 	capped: "limitado",
 	stopped: "parado",
+};
+
+/** Quem atende um canal agora, pelo identificador que o registro do canal guarda. */
+const SERVED_BY: Readonly<Record<ChannelServedBy, string>> = {
+	"this session": "atendido por esta sessão",
+	"the daemon": "atendido pelo daemon",
+	"another session": "atendido por outra sessão",
+	nobody: "ninguém atende",
+};
+
+/** Por que uma rotina terminou, pelo identificador que o relatório guarda. */
+const ROUTINE_ENDED: Readonly<Record<NonNullable<RoutineStatusItem["ended"]>, string>> = {
+	spent: "execução única feita",
+	condition: "condição atingida",
+	expired: "prazo vencido",
+};
+
+/** O tipo de agenda de uma rotina, pelo identificador que a definição guarda. */
+const SCHEDULE_KIND: Readonly<Record<RoutineStatusItem["schedule"], string>> = {
+	interval: "intervalo",
+	once: "uma vez",
+	calendar: "calendário",
+	event: "evento",
+};
+
+/** Como o daemon de ausência terminou da última vez, pelo identificador que o lease guarda. */
+const DAEMON_END: Readonly<Record<BotDaemonEnd["reason"], string>> = {
+	released: "uma sessão o parou",
+	signal: "o processo dele foi interrompido",
+	failed: "erro",
 };
 
 /** O estado da ligação de uma origem de eventos do host; sem estado, a origem está ativa. */
@@ -260,6 +293,8 @@ export const AUTONOMY_STATUS = {
 			"paused-after-failures": "pausada após falhas repetidas",
 			ended: "encerrada",
 		},
+		ended: (reason: NonNullable<RoutineStatusItem["ended"]>) => ROUTINE_ENDED[reason],
+		schedule: (kind: RoutineStatusItem["schedule"]) => SCHEDULE_KIND[kind],
 		lastStatus: (status: NonNullable<RoutineDefinitionView["lastStatus"]>) => RUN_STATUS[status],
 		line: (line: AutonomyRoutineLine) =>
 			`${line.routineId}: ${line.state}${line.ended === undefined ? "" : ` (${line.ended})`}, ${line.schedule}, próxima ${line.next}${line.startsFrom === undefined ? "" : ` (a partir de ${line.startsFrom})`}, última ${line.lastStatus}${line.awayRefusal === undefined ? "" : `, ausência recusada: ${line.awayRefusal}`}${line.pause ?? ""}${line.progress === undefined ? "" : `; onde parou: ${line.progress}`}`,
@@ -275,11 +310,11 @@ export const AUTONOMY_STATUS = {
 		parentsHosted: (hosted: string) => `sessões pai hospedadas: ${hosted}`,
 		service: (inspection: string | undefined, unavailable: string) =>
 			inspection ?? `serviço sempre ativo: ${unavailable}`,
-		lastEnd: (reason: string, detail: string | undefined) =>
-			`último encerramento: ${reason}${detail === undefined ? "" : `: ${detail}`}`,
+		lastEnd: (reason: BotDaemonEnd["reason"], detail: string | undefined) =>
+			`último encerramento: ${DAEMON_END[reason]}${detail === undefined ? "" : `: ${detail}`}`,
 		refusedAway: (routineId: string, reason: string) => `${routineId} recusou rodar na ausência: ${reason}`,
 		channel: (channel: AutonomyAwayChannel) =>
-			`canal ${channel.name} ausente em ${channel.cwd}: servido por ${channel.servedBy}, ${channel.awayDrafts === 1 ? "1 rascunho gravado espera" : `${channel.awayDrafts} rascunhos gravados esperam`} a próxima sessão (channel_reply)`,
+			`canal ${channel.name} na ausência, em ${channel.cwd}: ${SERVED_BY[channel.servedBy]}, ${channel.awayDrafts === 1 ? "1 rascunho gravado espera" : `${channel.awayDrafts} rascunhos gravados esperam`} a próxima sessão (channel_reply)`,
 	},
 
 	hostEvents: {
@@ -310,7 +345,7 @@ export const AUTONOMY_STATUS = {
 			`${name}: ${CHANNEL_STATE[state]}${detail === undefined ? "" : ` (${detail})`}`,
 		journalUnavailable: (unavailable: string) => `turnos iniciados, gasto, rascunhos: ${unavailable}`,
 		journal: (line: AutonomyChannelJournal) =>
-			`${line.name}: servido por ${line.servedBy}, ${line.wakes} turnos iniciados, ${line.spend} de gasto (24 h), ${line.ownerSpend === undefined ? "" : `gasto do dono ${line.ownerSpend} (24 h), `}${line.ownerFullAuthority ? "autoridade total do dono, " : ""}${line.ownerQuotaUsedPercent === undefined ? "" : `assinatura em ${Math.round(line.ownerQuotaUsedPercent)}% (limites em dólar suspensos), `}${line.pendingMessages} esperando, ${line.pendingDrafts === 1 ? "1 rascunho" : `${line.pendingDrafts} rascunhos`} (${line.awayDrafts} gravados sem sessão aberta), ${line.heldTotal} retidos, ${line.gaps === 1 ? "1 lacuna" : `${line.gaps} lacunas`}`,
+			`${line.name}: ${SERVED_BY[line.servedBy]}, ${line.wakes} turnos iniciados, ${line.spend} de gasto (24 h), ${line.ownerSpend === undefined ? "" : `gasto do dono ${line.ownerSpend} (24 h), `}${line.ownerFullAuthority ? "autoridade total do dono, " : ""}${line.ownerQuotaUsedPercent === undefined ? "" : `assinatura em ${Math.round(line.ownerQuotaUsedPercent)}% (limites em dólar suspensos), `}${line.pendingMessages} esperando, ${line.pendingDrafts === 1 ? "1 rascunho" : `${line.pendingDrafts} rascunhos`} (${line.awayDrafts} gravados sem sessão aberta), ${line.heldTotal} retidos, ${line.gaps === 1 ? "1 lacuna" : `${line.gaps} lacunas`}`,
 	},
 
 	outwardDrafts: {
@@ -340,7 +375,8 @@ export const AUTONOMY_STATUS = {
 
 	systemOne: {
 		state: (state: "on" | "off") => (state === "on" ? "ligado" : "desligado"),
-		noEngine: (cause: string) => `sem motor: ${cause}`,
+		noEngine: (_cause: typeof SYSTEM_ONE_NO_ENGINE_CAUSE) =>
+			"sem motor: o System One está configurado para esta sessão, mas nenhum motor de decisão foi fornecido",
 	},
 
 	machines: {

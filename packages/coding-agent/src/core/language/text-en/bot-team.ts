@@ -5,6 +5,8 @@
  * each language places them itself.
  */
 
+import type { ChannelServedBy } from "../../channels/away-channels.ts";
+
 export const BOT_TEAM = {
 	remoteUnavailable: "Remote machines are not available in this session.",
 	/** One usage line: the command and its arguments come from the caller, the word before them from here. */
@@ -127,7 +129,7 @@ export const BOT_TEAM = {
 					: `on an error${detail ? `: ${detail}` : ""}`
 		}.`,
 	daemonRefused: (routineId: string, reason: string) => `Routine ${routineId} was not run away: ${reason}`,
-	channelServed: (name: string, cwd: string, servedBy: string, drafts: number) =>
+	channelServed: (name: string, cwd: string, servedBy: ChannelServedBy, drafts: number) =>
 		`Channel ${name} is served by the daemon in ${cwd} while no session is open (now: ${servedBy}); ${drafts} reply draft(s) it wrote wait for the next session (channel_reply).`,
 	awayServiceUnavailable: "The always-on service is unavailable in this session.",
 	daemonStartUnavailable: "Detached bot daemon start unavailable.",

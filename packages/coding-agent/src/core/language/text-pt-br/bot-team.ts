@@ -5,7 +5,16 @@
  * posiciona do seu jeito.
  */
 
+import type { ChannelServedBy } from "../../channels/away-channels.ts";
 import type { InterfaceText } from "../interface-text.ts";
+
+/** Quem atende um canal agora, pelo identificador que o registro do canal guarda. */
+const CHANNEL_HOLDER: Readonly<Record<ChannelServedBy, string>> = {
+	"this session": "esta sessão",
+	"the daemon": "o daemon",
+	"another session": "outra sessão",
+	nobody: "ninguém",
+};
 
 export const BOT_TEAM = {
 	remoteUnavailable: "Máquinas remotas não estão disponíveis nesta sessão.",
@@ -133,8 +142,8 @@ export const BOT_TEAM = {
 					: `com erro${detail ? `: ${detail}` : ""}`
 		}.`,
 	daemonRefused: (routineId: string, reason: string) => `A rotina ${routineId} não rodou na ausência: ${reason}`,
-	channelServed: (name: string, cwd: string, servedBy: string, drafts: number) =>
-		`O canal ${name} é atendido pelo daemon em ${cwd} enquanto nenhuma sessão está aberta (agora: ${servedBy}); ${drafts} ${drafts === 1 ? "rascunho de resposta gravado espera" : "rascunhos de resposta gravados esperam"} a próxima sessão (channel_reply).`,
+	channelServed: (name: string, cwd: string, servedBy: ChannelServedBy, drafts: number) =>
+		`O canal ${name} é atendido pelo daemon em ${cwd} enquanto nenhuma sessão está aberta (agora: ${CHANNEL_HOLDER[servedBy]}); ${drafts} ${drafts === 1 ? "rascunho de resposta gravado espera" : "rascunhos de resposta gravados esperam"} a próxima sessão (channel_reply).`,
 	awayServiceUnavailable: "O serviço sempre ativo não está disponível nesta sessão.",
 	daemonStartUnavailable: "Iniciar o daemon de ausência não está disponível.",
 	daemonStopUnavailable: "Parar o daemon de ausência não está disponível.",

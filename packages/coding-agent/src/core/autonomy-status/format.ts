@@ -7,8 +7,13 @@ import type { AutonomyStatusBlockKey } from "../language/text-en/autonomy-status
 import { planStatusLine } from "../plan/plan-panel.ts";
 import { reviewGaugeStatusLine } from "../proof/review-gauge.ts";
 import { describeAwayServiceInspection } from "../routines/away-service.ts";
-import { describeRoutineFailureReason } from "../routines/routine-progress.ts";
+import {
+	describeRoutineFailureReason,
+	describeRoutineProgress,
+	type RoutineProgressLine,
+} from "../routines/routine-progress.ts";
 import { describeWatchCondition } from "../routines/watch-contract.ts";
+import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../system-one/semantic-plane-health.ts";
 import type {
 	BoundedList,
@@ -75,6 +80,15 @@ function pausedAfterFailures(pause: { readonly after: number; readonly lastError
 	return interfaceText().autonomyStatus.routines.pausedAfterFailures(pause.after, reason);
 }
 
+/**
+ * A routine's progress in the interface language, kept to the length the snapshot keeps its own English sentence to, so
+ * the line reads the same in English whether it is drawn or returned as data.
+ */
+function progressWords(line: RoutineProgressLine | undefined): string | undefined {
+	const worded = describeRoutineProgress(line, interfaceText().chat.routineProgress);
+	return worded === undefined ? undefined : boundedRedactedDiagnosticText(worded);
+}
+
 export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): string {
 	const words = interfaceText().autonomyStatus;
 	return [
@@ -112,17 +126,17 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 				words.routines.line({
 					routineId: routine.routineId,
 					state: words.routines.state[routine.state],
-					ended: routine.ended,
+					ended: routine.ended === undefined ? undefined : words.routines.ended(routine.ended),
 					schedule:
 						routine.condition === undefined
-							? routine.schedule
+							? words.routines.schedule(routine.schedule)
 							: describeWatchCondition(routine.condition, interfaceText().chat.watch),
 					next: at(routine.nextRunAt),
 					startsFrom: routine.startsFrom === undefined ? undefined : at(routine.startsFrom),
 					lastStatus: routine.lastStatus === undefined ? "-" : words.routines.lastStatus(routine.lastStatus),
 					awayRefusal: routine.awayRefusal?.reason,
 					pause: routine.failurePause ? pausedAfterFailures(routine.failurePause) : undefined,
-					progress: routine.progress,
+					progress: progressWords(routine.progressLine),
 				}),
 			),
 		]),
@@ -218,7 +232,12 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 				value.dismissed,
 			),
 			...list(value.pending, (draft) =>
-				words.outwardDrafts.draft(draft.toolName, draft.classes.join(", "), draft.origin, draft.preparedAt),
+				words.outwardDrafts.draft(
+					draft.toolName,
+					draft.classes.join(", "),
+					words.authority.origin(draft.origin),
+					draft.preparedAt,
+				),
 			),
 		]),
 		...block("harnessNotices", status.harnessNotices, (value) => [

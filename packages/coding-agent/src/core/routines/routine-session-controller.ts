@@ -20,7 +20,7 @@ import {
 	routineStartWindow,
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
-import { describeRoutineProgress } from "./routine-progress.ts";
+import { describeRoutineProgress, routineProgressLine } from "./routine-progress.ts";
 import type { RoutineSchedulerController } from "./routine-scheduler-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import {
@@ -99,7 +99,7 @@ function summary(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs:
 }
 
 function view(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: number): RoutineToolView {
-	const progress = describeRoutineProgress(routine.progress);
+	const progress = describeRoutineProgress(routineProgressLine(routine.progress), englishText().chat.routineProgress);
 	return {
 		...summary(routine, store, nowMs),
 		prompt: routine.prompt,

@@ -23,6 +23,7 @@ import {
 	MAX_PROGRESS_ITEM_CHARS,
 	MAX_PROGRESS_LINE_CHARS,
 } from "../delegation/worker-report-progress.ts";
+import type { InterfaceText } from "../language/interface-text.ts";
 import { cleanRedactBound } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
@@ -521,23 +522,54 @@ export function renderRoutineProgressBrief(
 	return kept.length > 0 ? render(kept) : undefined;
 }
 
-/** The record in the owner's plain words for status lines: where it stands, what is next, where it keeps stumbling. */
-export function describeRoutineProgress(progress: RoutineProgress | undefined): string | undefined {
+/**
+ * What a status line says of a routine's progress, chosen from its record: where it stands, what is next, the owner's
+ * note, the snags it keeps meeting and whether a third party's words reached it. The strings are the record's own, as a
+ * run or the owner wrote them; each reader words the parts in its own language.
+ */
+export interface RoutineProgressLine {
+	readonly position?: string;
+	readonly next?: string;
+	readonly ownerNote?: string;
+	/** Unresolved snags seen in at least {@link RECURRING_SNAG_RUNS} runs, the most frequent first, at most two. */
+	readonly recurring: readonly Pick<RoutineSnag, "seenCount" | "what" | "remedy">[];
+	readonly untrusted?: true;
+}
+
+/** The parts of a record that its status line names; undefined when the record holds none of them. */
+export function routineProgressLine(progress: RoutineProgress | undefined): RoutineProgressLine | undefined {
 	if (!progress) return undefined;
-	const recurring = briefSnags(progress).filter((snag) => snag.seenCount >= RECURRING_SNAG_RUNS);
-	const parts = [
-		...(progress.position ? [`at: ${progress.position}`] : []),
-		...(progress.next ? [`next: ${progress.next}`] : []),
-		...(progress.ownerNote ? [`your note: ${progress.ownerNote}`] : []),
-		...recurring
-			.slice(0, 2)
-			.map(
-				(snag) =>
-					`keeps stumbling (${times(snag.seenCount)}): ${snag.what}${snag.remedy ? `; remedy tried: ${snag.remedy}` : ""}`,
-			),
-		...(progress.untrusted ? ["partly written by a run that read a third party's words"] : []),
-	];
-	return parts.length > 0 ? parts.join("; ") : undefined;
+	const recurring = briefSnags(progress)
+		.filter((snag) => snag.seenCount >= RECURRING_SNAG_RUNS)
+		.slice(0, 2)
+		.map((snag) => ({ seenCount: snag.seenCount, what: snag.what, ...(snag.remedy ? { remedy: snag.remedy } : {}) }));
+	if (!progress.position && !progress.next && !progress.ownerNote && recurring.length === 0 && !progress.untrusted)
+		return undefined;
+	return {
+		...(progress.position ? { position: progress.position } : {}),
+		...(progress.next ? { next: progress.next } : {}),
+		...(progress.ownerNote ? { ownerNote: progress.ownerNote } : {}),
+		recurring,
+		...(progress.untrusted ? { untrusted: true as const } : {}),
+	};
+}
+
+/**
+ * A progress line in the words it is given: where the task stands, what is next, where it keeps stumbling. A model, a
+ * record and a diagnostic are given the English words; the screen is given the words of the interface language.
+ */
+export function describeRoutineProgress(
+	line: RoutineProgressLine | undefined,
+	words: InterfaceText["chat"]["routineProgress"],
+): string | undefined {
+	if (!line) return undefined;
+	return [
+		...(line.position ? [words.position(line.position)] : []),
+		...(line.next ? [words.next(line.next)] : []),
+		...(line.ownerNote ? [words.ownerNote(line.ownerNote)] : []),
+		...line.recurring.map((snag) => words.recurringSnag(snag.seenCount, snag.what, snag.remedy)),
+		...(line.untrusted ? [words.untrusted] : []),
+	].join("; ");
 }
 
 /** A routine's last failure reason for the owner's status line: its first line, cleaned and redacted, at most 160 characters. */

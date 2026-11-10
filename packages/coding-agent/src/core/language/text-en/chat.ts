@@ -44,6 +44,15 @@ export const CHAT = {
 	unknownState: "unknown",
 	teams: (ids: string) => `Teams: ${ids}`,
 	routines: (list: string) => `Routines: ${list}`,
+	/** A routine's progress line, part by part: a list, a status report and the routine tool's view say it the same way. */
+	routineProgress: {
+		position: (text: string) => `at: ${text}`,
+		next: (text: string) => `next: ${text}`,
+		ownerNote: (text: string) => `your note: ${text}`,
+		recurringSnag: (seenCount: number, what: string, remedy: string | undefined) =>
+			`keeps stumbling (${seenCount === 1 ? "once" : `${seenCount} times`}): ${what}${remedy === undefined ? "" : `; remedy tried: ${remedy}`}`,
+		untrusted: "partly written by a run that read a third party's words",
+	},
 	/** A routine's schedule in a few words, as a chat row and a status line name it. */
 	routine: {
 		every: (interval: string) => `every ${interval}`,

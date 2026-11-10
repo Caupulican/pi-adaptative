@@ -8,13 +8,16 @@
  * language places the value and agrees with it in its own way.
  */
 
-import type { StatusUnavailableCause } from "../../autonomy-status/autonomy-status.ts";
+import type { RoutineStatusItem, StatusUnavailableCause } from "../../autonomy-status/autonomy-status.ts";
+import type { ChannelServedBy } from "../../channels/away-channels.ts";
 import type { ChannelRuntimeState } from "../../channels/session-channels.ts";
+import type { BotDaemonEnd } from "../../delegation/bot-team-routine-helpers.ts";
 import type { HostEventConnectionView } from "../../events/host-event-contract.ts";
 import type { KnowledgeCollectionInactiveReason, KnowledgeCollectionStatus } from "../../memory/knowledge-collector.ts";
 import type { ActAheadPhase } from "../../proactivity/act-ahead-record.ts";
 import type { RoutineDefinitionView } from "../../routines/routine-contract.ts";
 import type { RoutineIntakeInactiveReason, RoutineIntakeStatus } from "../../routines/routine-intake.ts";
+import type { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../../system-one/semantic-plane-health.ts";
 import type { TurnAuthority, TurnOriginKind } from "../../turn-origin.ts";
 
 /** The facts a routine's line in the report carries; already-formatted fragments arrive as strings. */
@@ -55,14 +58,14 @@ export interface AutonomyAwaySettings {
 export interface AutonomyAwayChannel {
 	readonly name: string;
 	readonly cwd: string;
-	readonly servedBy: string;
+	readonly servedBy: ChannelServedBy;
 	readonly awayDrafts: number;
 }
 
 /** A channel's journal entry: what it served, what it spent and what waits in it. */
 export interface AutonomyChannelJournal {
 	readonly name: string;
-	readonly servedBy: string;
+	readonly servedBy: ChannelServedBy;
 	readonly wakes: string;
 	readonly spend: string;
 	readonly ownerSpend?: string;
@@ -209,6 +212,10 @@ export const AUTONOMY_STATUS = {
 			"paused-after-failures": "paused after repeated failures",
 			ended: "ended",
 		},
+		/** Why a routine ended, keyed by the identifier the report holds. */
+		ended: (reason: NonNullable<RoutineStatusItem["ended"]>): string => reason,
+		/** The kind of a routine's schedule, keyed by the identifier the definition holds. */
+		schedule: (kind: RoutineStatusItem["schedule"]): string => kind,
 		/** The status of a routine's last run, keyed by the identifier the record holds. */
 		lastStatus: (status: NonNullable<RoutineDefinitionView["lastStatus"]>): string => status,
 		line: (line: AutonomyRoutineLine) =>
@@ -225,7 +232,7 @@ export const AUTONOMY_STATUS = {
 		parentsHosted: (hosted: string) => `parents hosted: ${hosted}`,
 		service: (inspection: string | undefined, unavailable: string) =>
 			inspection ?? `always-on service: ${unavailable}`,
-		lastEnd: (reason: string, detail: string | undefined) =>
+		lastEnd: (reason: BotDaemonEnd["reason"], detail: string | undefined) =>
 			`last end: ${reason}${detail === undefined ? "" : `: ${detail}`}`,
 		refusedAway: (routineId: string, reason: string) => `${routineId} refused away: ${reason}`,
 		channel: (channel: AutonomyAwayChannel) =>
@@ -293,7 +300,8 @@ export const AUTONOMY_STATUS = {
 	systemOne: {
 		/** Whether System One can judge here, keyed by the identifier the snapshot holds. */
 		state: (state: "on" | "off"): string => state,
-		noEngine: (cause: string) => `no engine: ${cause}`,
+		/** The one cause a session without an engine has; its English sentence is the domain's own. */
+		noEngine: (cause: typeof SYSTEM_ONE_NO_ENGINE_CAUSE) => `no engine: ${cause}`,
 	},
 
 	machines: {

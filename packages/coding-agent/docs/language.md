@@ -28,9 +28,11 @@ Everything a model reads stays English in every language: the system prompt, too
 
 Command names, their arguments and identifiers such as model names, thinking levels, setting keys and status codes are the same in every language. So is a value you type or that `settings.json` holds: a model setting's `active`, for example, is written `active` in Portuguese too.
 
+A state or a cause that a report shows is worded in the interface language: whether a routine is paused and why it ended, how its last run went, who serves a channel, why the knowledge collection is inactive, what state a machine is in.
+
 Text written by you or by a model (a goal's words, a plan step, a bot's name, a session's title) is shown as it was written.
 
-A few values on screen are records or free text someone else wrote, and so are English in every language: a routine's stored progress and refusal reasons, a daemon's stored reports, and the text of an error. A line that a model also reads keeps its English in the transcript and is drawn in the interface language: the line an aborted request leaves in the conversation is one.
+A few values on screen are records or free text someone else wrote, and so are shown as they were written in every language: the notes a routine's runs stored about its progress, its refusal reasons, a daemon's stored reports, and the text of an error. A line that a model also reads keeps its English in the transcript and is drawn in the interface language: the line an aborted request leaves in the conversation is one.
 
 The command line outside the interface is English: `pi --help`, print mode (`pi -p`), JSON mode, RPC mode, and the records the harness writes to disk. Those modes, and the workers they run, never follow the language setting.
 
@@ -43,5 +45,7 @@ Code reads text at the moment it draws, through `interfaceText()`, and never kee
 A sentence that goes both to the screen and to a model, a record or a diagnostic is written once. Its formatter takes the words as an argument, and the caller chooses them: `interfaceText()` for the screen, `englishText()` for everything else. Do not write the English a second time in code.
 
 Core code that the screen and a model both hear from returns facts, not a sentence: a typed value that says what happened (`GoalActionRefusal`, `BotDaemonLaunchOutcome`). One formatter words the fact, and each reader passes its words.
+
+A value that is an identifier the domain declares (a state, a status, a cause) is worded where it is drawn. Its English entry is a function that returns the identifier, or the description the domain already gives it, so no English is written twice; the Portuguese entry is a table keyed by the identifier. Data that leaves the process, such as the status snapshot RPC mode returns, keeps the identifier and its English.
 
 Only a process that draws a screen sets the language: the interactive mode binds it (`bindInterfaceLanguage`) and a screen drawn before a session applies it once (`prepareStandaloneScreen`). Print and RPC modes set English when they start.

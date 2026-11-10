@@ -8,7 +8,7 @@
 import type { PersistentBotView, PersistentTeamRecord } from "../../core/delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../../core/language/interface-text.ts";
 import { nextRoutineAt, type RoutineDefinitionView } from "../../core/routines/routine-contract.ts";
-import { describeRoutineProgress } from "../../core/routines/routine-progress.ts";
+import { describeRoutineProgress, routineProgressLine } from "../../core/routines/routine-progress.ts";
 import { boundedLine } from "../../core/util/bounded-line.ts";
 import { routineScheduleLabel } from "./chat-routines.ts";
 import { REMOTE_MARK } from "./components/bot-state-mark.ts";
@@ -65,8 +65,13 @@ export function formatRoutineList(routines: readonly RoutineDefinitionView[]): s
 						: words.mainSession;
 			const next = nextRoutineAt(routine.schedule, routine.cursor);
 			const outcome = routine.lastSummary ? `: ${routine.lastSummary.replace(/\r?\n+/g, " ").slice(0, 100)}` : "";
-			const status = routine.lastStatus ? words.lastRun(`${routine.lastStatus}${outcome}`) : "";
-			const progress = describeRoutineProgress(routine.progress);
+			const status = routine.lastStatus
+				? words.lastRun(`${interfaceText().autonomyStatus.routines.lastStatus(routine.lastStatus)}${outcome}`)
+				: "";
+			const progress = describeRoutineProgress(
+				routineProgressLine(routine.progress),
+				interfaceText().chat.routineProgress,
+			);
 			const stood = progress ? words.stood(boundedLine(progress, 160)) : "";
 			const nextAt =
 				next !== undefined

@@ -23,6 +23,7 @@ import type { ForegroundRecoveryController } from "../foreground-recovery-contro
 import type { GoalAutoContinueState } from "../goals/goal-auto-continue-state.ts";
 import type { GoalState, GoalStatus } from "../goals/goal-state.ts";
 import { HARNESS_NOTICE_CUSTOM_TYPE, type HarnessNoticeController, type HarnessNoticeKind } from "../harness-notice.ts";
+import { englishText } from "../language/interface-text.ts";
 import type { KnowledgeCollectionStatus } from "../memory/knowledge-collector.ts";
 import type { MemoryController } from "../memory-controller.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
@@ -46,7 +47,11 @@ import {
 	routineOpensAt,
 } from "../routines/routine-contract.ts";
 import type { RoutineIntakeStatus } from "../routines/routine-intake.ts";
-import { describeRoutineProgress } from "../routines/routine-progress.ts";
+import {
+	describeRoutineProgress,
+	type RoutineProgressLine,
+	routineProgressLine,
+} from "../routines/routine-progress.ts";
 import { routineGithubInterests } from "../routines/routine-scheduler-controller.ts";
 import type { WatchCondition } from "../routines/watch-contract.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
@@ -112,6 +117,8 @@ export interface RoutineStatusItem {
 	readonly failurePause?: { readonly after: number; readonly at: number; readonly lastError?: string };
 	/** Where its task stood after the last run, in plain words (position, next step, owner's note, recurring snags). */
 	readonly progress?: string;
+	/** The same facts unworded: the report says them in the interface language. */
+	readonly progressLine?: RoutineProgressLine;
 }
 
 export interface RoutinesStatus {
@@ -475,7 +482,8 @@ function routineItem(
 	const lastError = routine.failurePause ? text(routine.failurePause.lastError) : undefined;
 	const awayReason = routine.awayRefusal ? text(routine.awayRefusal.reason) : undefined;
 	// Only a worker session's run records where its task stood; a bot or team routine shows none.
-	const progress = routine.target.kind === "session" ? text(describeRoutineProgress(routine.progress)) : undefined;
+	const progressLine = routine.target.kind === "session" ? routineProgressLine(routine.progress) : undefined;
+	const progress = text(describeRoutineProgress(progressLine, englishText().chat.routineProgress));
 	return {
 		routineId: routine.routineId,
 		state: ended ? "ended" : routine.enabled ? "enabled" : routine.failurePause ? "paused-after-failures" : "paused",
@@ -499,6 +507,7 @@ function routineItem(
 				}
 			: {}),
 		...(progress ? { progress } : {}),
+		...(progressLine ? { progressLine } : {}),
 	};
 }
 

@@ -40,6 +40,15 @@ export const CHAT = {
 	unknownState: "desconhecido",
 	teams: (ids: string) => `Equipes: ${ids}`,
 	routines: (list: string) => `Rotinas: ${list}`,
+	/** A linha de progresso de uma rotina, parte por parte; o texto de cada parte é o que a execução ou o dono gravou. */
+	routineProgress: {
+		position: (text: string) => `posição: ${text}`,
+		next: (text: string) => `próximo passo: ${text}`,
+		ownerNote: (text: string) => `sua anotação: ${text}`,
+		recurringSnag: (seenCount: number, what: string, remedy: string | undefined) =>
+			`problema recorrente (${seenCount === 1 ? "1 vez" : `${seenCount} vezes`}): ${what}${remedy === undefined ? "" : `; solução tentada: ${remedy}`}`,
+		untrusted: "escrito em parte por uma execução que leu texto de terceiros",
+	},
 	routine: {
 		every: (interval: string) => `a cada ${interval}`,
 		onceAt: (instant: string) => `uma vez em ${instant}`,
