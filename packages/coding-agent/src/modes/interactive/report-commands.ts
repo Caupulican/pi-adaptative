@@ -71,17 +71,21 @@ function localeNumber(value: number): string {
 	return interfaceText().reports.formats.number(value);
 }
 
+/** An amount of money, with the decimal separator of the interface language and the digits the line asks for. */
+function usd(value: number, fractionDigits: number): string {
+	return interfaceText().reports.formats.amount(value, fractionDigits);
+}
+
 export function formatCostReport(costs: SessionCostSummary, usingSubscription = false): string {
 	const text = interfaceText().reports.cost;
 	const { agentCost, agentReports, icmCost, icmReports } = backgroundCostBreakdown(costs);
 	const subNote = costs.costEstimate ? text.estimated : usingSubscription ? text.subscription : "";
 	const lines = [
-		`${theme.fg("dim", text.current)} $${costs.currentCost.toFixed(4)}${subNote}`,
-		`${theme.fg("dim", text.root)} $${costs.ownCost.toFixed(4)}`,
-		`${theme.fg("dim", text.subagents)} $${agentCost.toFixed(4)}${text.reports(agentReports)}`,
+		`${theme.fg("dim", text.current)} $${usd(costs.currentCost, 4)}${subNote}`,
+		`${theme.fg("dim", text.root)} $${usd(costs.ownCost, 4)}`,
+		`${theme.fg("dim", text.subagents)} $${usd(agentCost, 4)}${text.reports(agentReports)}`,
 	];
-	if (costs.reportedCost !== undefined)
-		lines.push(`${theme.fg("dim", text.recorded)} $${costs.reportedCost.toFixed(4)}`);
+	if (costs.reportedCost !== undefined) lines.push(`${theme.fg("dim", text.recorded)} $${usd(costs.reportedCost, 4)}`);
 	if (costs.accountingStatus) lines.push(theme.fg("warning", text.historicalAccounting(costs.accountingStatus)));
 	if (costs.apiEquivalentPartial)
 		lines.push(
@@ -93,10 +97,10 @@ export function formatCostReport(costs: SessionCostSummary, usingSubscription = 
 	if (costs.todayApiEquivalentPartial)
 		lines.push(theme.fg("warning", text.partialTodayPricing(costs.todayModelUnknownTokens ?? 0)));
 	if (icmReports > 0 || icmCost > 0) {
-		lines.push(`${theme.fg("dim", text.icmSummaries)} $${icmCost.toFixed(4)}${text.icmCalls(icmReports)}`);
+		lines.push(`${theme.fg("dim", text.icmSummaries)} $${usd(icmCost, 4)}${text.icmCalls(icmReports)}`);
 	}
 	lines.push(
-		`${theme.fg("dim", text.today)} ${costs.todayCostEstimate ? "~" : ""}$${costs.todayCost.toFixed(4)}${costs.todayCostEstimate ? text.estimated : ""}${costs.todayPending ? text.todayPending : ""}`,
+		`${theme.fg("dim", text.today)} ${costs.todayCostEstimate ? "~" : ""}$${usd(costs.todayCost, 4)}${costs.todayCostEstimate ? text.estimated : ""}${costs.todayPending ? text.todayPending : ""}`,
 		`${theme.fg("dim", text.rollover)} ${text.localMidnight}`,
 	);
 	return lines.join("\n");
@@ -182,7 +186,7 @@ export function handleUsageCommand(host: UsageReportHost): void {
 	const taskMetrics = host.session.getTaskAndModelMetrics();
 	if (taskMetrics && (taskMetrics.tasks.length > 0 || taskMetrics.models.length > 0)) {
 		if (taskMetrics.unassignedCostUsd > 0)
-			info += `${theme.fg("dim", text.unassignedReceipts)} $${taskMetrics.unassignedCostUsd.toFixed(4)}${text.noTaskIdentity}\n`;
+			info += `${theme.fg("dim", text.unassignedReceipts)} $${usd(taskMetrics.unassignedCostUsd, 4)}${text.noTaskIdentity}\n`;
 		if (taskMetrics.currentTask) {
 			const ct = taskMetrics.currentTask;
 			const stepsPart =
@@ -196,13 +200,13 @@ export function handleUsageCommand(host: UsageReportHost): void {
 				info += `${theme.fg("dim", text.goalClock)} ${formatCompactTaskDuration(ct.goalActiveMs)}\n`;
 			if (ct.workerActiveMs !== undefined)
 				info += `${theme.fg("dim", text.workerActive)} ${formatCompactTaskDuration(ct.workerActiveMs)}\n`;
-			const icmPart = ct.icmCostUsd > 0 ? text.icmPart(`$${ct.icmCostUsd.toFixed(4)}`) : "";
-			info += `${theme.fg("dim", text.taskCost)} ${text.taskCostDetail(`$${ct.totalCostUsd.toFixed(4)}`, `$${ct.rootCostUsd.toFixed(4)}`, `$${ct.subagentCostUsd.toFixed(4)}`, icmPart)}\n\n`;
+			const icmPart = ct.icmCostUsd > 0 ? text.icmPart(`$${usd(ct.icmCostUsd, 4)}`) : "";
+			info += `${theme.fg("dim", text.taskCost)} ${text.taskCostDetail(`$${usd(ct.totalCostUsd, 4)}`, `$${usd(ct.rootCostUsd, 4)}`, `$${usd(ct.subagentCostUsd, 4)}`, icmPart)}\n\n`;
 		}
 		if (taskMetrics.models.length > 0) {
 			info += `${theme.bold(text.modelBreakdownTitle)}\n`;
 			for (const row of taskMetrics.models.slice(0, 8)) {
-				info += `${theme.fg("dim", text.modelLabel(row.model, plainLabel(row.role)))} $${row.costUsd.toFixed(4)}${text.modelUsage(row.calls, row.role === "subagent", localeNumber(row.tokens))}\n`;
+				info += `${theme.fg("dim", text.modelLabel(row.model, plainLabel(row.role)))} $${usd(row.costUsd, 4)}${text.modelUsage(row.calls, row.role === "subagent", localeNumber(row.tokens))}\n`;
 			}
 			info += "\n";
 		}
@@ -264,7 +268,7 @@ export function handleUsageCommand(host: UsageReportHost): void {
 		info += `${theme.fg("dim", text.costGuard)} ${text.costGuardNotApplicable}\n`;
 	} else if (costGuard) {
 		const status = costGuard.over ? text.costGuardOver : text.costGuardOk;
-		info += `${theme.fg("dim", text.costGuard)} ${text.costGuardMeasured(status, costGuard.estUsd.toFixed(4), costGuard.thresholdUsd.toFixed(4), costGuard.action)}\n`;
+		info += `${theme.fg("dim", text.costGuard)} ${text.costGuardMeasured(status, usd(costGuard.estUsd, 4), usd(costGuard.thresholdUsd, 4), costGuard.action)}\n`;
 	} else {
 		info += `${theme.fg("dim", text.costGuard)} ${text.costGuardPending}\n`;
 	}

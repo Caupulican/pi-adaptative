@@ -19,6 +19,7 @@ import {
 	type OpenAICodexAccountModel,
 } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { RequestAuth } from "../request-auth.ts";
 
 export type AccountModelAvailability = "available" | "unavailable" | "unknown";
@@ -38,6 +39,27 @@ export type ProviderAccountState =
 	| { readonly kind: "key_valid" }
 	| { readonly kind: "rejected"; readonly reason: string }
 	| { readonly kind: "unchecked"; readonly reason: string };
+
+/** The registry members the access question needs: whether a credential exists for a model. */
+export interface ModelAccessRegistry {
+	hasConfiguredAuth(model: Model<Api>): boolean;
+}
+
+/**
+ * Why the owner cannot reach this model at all, or undefined when they can: no credential, or a provider account that
+ * does not offer it (checked with the provider, or refused by it).
+ */
+export function describeAccessProblem(
+	model: Model<Api>,
+	registry: ModelAccessRegistry,
+	accounts: AccountModelCatalog | undefined,
+): string | undefined {
+	if (!registry.hasConfiguredAuth(model)) return "has no auth";
+	if (accounts?.availability(model) === "unavailable") {
+		return `is not available on this account (${accounts.unavailableReason(model) ?? "unavailable"})`;
+	}
+	return undefined;
+}
 
 export interface AccountModelCatalogDeps {
 	/** Every model the registry knows. */
@@ -284,6 +306,7 @@ export class AccountModelCatalog {
 
 	/** One line per checked provider, for router status. */
 	describe(): string[] {
+		const words = interfaceText().localModels.routerAccounts;
 		const lines: string[] = [];
 		for (const [provider, state] of [...this.states].sort(([a], [b]) => a.localeCompare(b))) {
 			if (state.kind === "listed") {
@@ -291,11 +314,12 @@ export class AccountModelCatalog {
 					.filter((entry) => entry.visibility === "list")
 					.sort((a, b) => a.priority - b.priority)
 					.map((entry) => entry.slug);
-				lines.push(`${provider}: ${offered.join(", ") || "no models offered"}`);
-			} else if (state.kind === "key_valid") lines.push(`${provider}: key valid`);
-			else lines.push(`${provider}: ${state.kind === "rejected" ? "rejected" : "not checked"} (${state.reason})`);
+				lines.push(`${provider}: ${offered.join(", ") || words.noModels}`);
+			} else if (state.kind === "key_valid") lines.push(words.keyValid(provider));
+			else if (state.kind === "rejected") lines.push(words.rejected(provider, state.reason));
+			else lines.push(words.notChecked(provider, state.reason));
 		}
-		for (const [ref, reason] of this.refused) lines.push(`${ref}: refused (${reason})`);
+		for (const [ref, reason] of this.refused) lines.push(words.refused(ref, reason));
 		return lines;
 	}
 }

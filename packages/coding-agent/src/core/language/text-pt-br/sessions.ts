@@ -64,6 +64,15 @@ export const SESSIONS = {
 		verbOverridden: "substituído",
 		head: (userGoal: string) => `Objetivo: ${userGoal}`,
 		status: (word: string) => `Estado: ${word}`,
+		statusWords: {
+			active: "ativo",
+			paused: "pausado",
+			blocked: "bloqueado",
+			usage_limited: "parado no limite de uso",
+			budget_limited: "parado no limite de orçamento",
+			completed: "concluído",
+			cancelled: "cancelado",
+		},
 		blockedReason: (reason: string) => `Motivo do bloqueio: ${reason}`,
 		tokens: (used: number, budget?: number) =>
 			budget === undefined ? `Tokens: ${used}` : `Tokens: ${used}/${budget}`,

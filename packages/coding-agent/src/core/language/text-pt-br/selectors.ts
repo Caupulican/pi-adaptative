@@ -223,21 +223,21 @@ export const SELECTORS = {
 		position: (position: number, total: number) => `  Mensagem ${position} de ${total}`,
 	},
 	botTeam: {
-		title: "Conversas ativas · Bots e times",
+		title: "Conversas ativas · Bots e equipes",
 		subtitle: (active: string) =>
 			`Ativa: ${active}  ·  /bot new <id> [--write] [model] [role] · /team create <id> <bot1,bot2> · @<bot> <msg> · Esc fechar`,
 		activeRoot: "Mente (raiz)",
 		activeBot: (id: string) => `Bot: ${id}`,
-		activeTeam: (id: string) => `Time: ${id}`,
+		activeTeam: (id: string) => `Equipe: ${id}`,
 		rootItem: (mark: string) => `${mark} Mente (raiz)`,
 		botItem: (mark: string, id: string) => `${mark}Bot: ${id}`,
-		teamItem: (mark: string, name: string) => `${mark}Time: ${name}`,
+		teamItem: (mark: string, name: string) => `${mark}Equipe: ${name}`,
 		rootDescription: (model: string, status: string) => `${model} · ${status} · Conversa principal do orquestrador`,
 		noMembers: "sem membros",
 		memberList: (members: readonly string[]) => members.join(", "),
 		teamDescription: (members: string, unread: string, description: string) => `[${members}]${unread}${description}`,
 		unread: (count: number) => ` · ${count} não lidas`,
-		botTeams: (ids: string) => ` · times: ${ids}`,
+		botTeams: (ids: string) => ` · equipes: ${ids}`,
 		descriptionSuffix: (description: string) => ` · ${description}`,
 		state: (state: string) => BOT_STATE[state] ?? state,
 	},
@@ -272,5 +272,11 @@ export const SELECTORS = {
 		},
 		empty: "Nenhum perfil encontrado",
 		emptyHint: "Crie perfis em ~/.pi/agent/profiles/ ou em settings.resourceProfiles",
+	},
+	/** Um padrão de busca sem nada para casar. */
+	emptyRegex: "Expressão regular vazia",
+	/** O que a busca de modelos casa além do próprio modelo. */
+	modelSearch: {
+		subscriptionAccount: "assinatura subscription sub oauth conta account",
 	},
 } satisfies InterfaceText["selectors"];

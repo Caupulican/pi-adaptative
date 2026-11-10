@@ -14,6 +14,7 @@ import {
 } from "../autonomy/worker-session-private-scope.ts";
 import { ManagedLaneRuntimeAdmissionError } from "../extensions/managed-lane-records.ts";
 import type { ExtensionAPI, ExtensionContext } from "../extensions/types.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { knowledgeGrantReferencesSchema } from "../memory/knowledge-grant.ts";
 import type { KnowledgeHandoffProjection } from "../memory/knowledge-projection.ts";
 import { orchestrationThinkingLevelSchema } from "../orchestration/thinking-level-schema.ts";
@@ -214,6 +215,11 @@ function templates(): Static<typeof templateSchema>[] {
 	return [...result.values()];
 }
 
+/** The words this extension uses in the notices it reports, read when it reports them. */
+function collaborationWords() {
+	return interfaceText().notices.collaboration;
+}
+
 /** Packaged root adapter. Provider I/O and durable transitions live outside the extension entry. */
 export function piCollaborationExtension(pi: ExtensionAPI, options: CollaborationExtensionOptions = {}): void {
 	// A worker never starts, watches or recovers collaboration jobs (`pi_collaboration` is in its forbidden
@@ -309,10 +315,10 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 					controls.record(turn.jobId, turn.agentId, turn.turnId, String(error));
 					controls.flush();
 				} catch (handoffError) {
-					ctx.ui.notify(`Collaboration control handoff failed: ${String(handoffError).slice(0, 512)}`, "error");
+					ctx.ui.notify(collaborationWords().controlHandoffFailed(String(handoffError).slice(0, 512)), "error");
 				}
 				ctx.ui.notify(
-					`Collaboration cleanup exhausted for ${turn.jobId}/${turn.agentId}; live work remains fenced: ${String(error).slice(0, 1000)}`,
+					collaborationWords().cleanupExhausted(turn.jobId, turn.agentId, String(error).slice(0, 1000)),
 					"error",
 				);
 			},
@@ -336,7 +342,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 					void coordinator
 						.drainPeerMessages(readyJobs)
 						.catch((error: unknown) =>
-							ctx.ui.notify(`Collaboration peer delivery failed: ${String(error).slice(0, 512)}`, "error"),
+							ctx.ui.notify(collaborationWords().peerDeliveryFailed(String(error).slice(0, 512)), "error"),
 						);
 				deadlines.reconcile(
 					store.list().flatMap((job) =>
@@ -364,7 +370,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 					});
 					return;
 				}
-				ctx.ui.notify(`Collaboration handoff failed: ${String(error).slice(0, 1000)}`, "error");
+				ctx.ui.notify(collaborationWords().handoffFailed(String(error).slice(0, 1000)), "error");
 			}
 		};
 		const changed = (file: string | Buffer | null) => {
@@ -378,7 +384,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 			harnessLog.warn("collab", "the collaboration signal watcher failed", {
 				code: "code" in error ? String(error.code) : "unknown",
 			});
-			ctx.ui.notify(`Collaboration signal failed: ${error.message}`, "error");
+			ctx.ui.notify(collaborationWords().signalFailed(error.message), "error");
 		});
 		let reattaching: Promise<void> | undefined;
 		/** `fresh`: wait out a reconciliation already in flight (it listed jobs before the caller's change), then run. */
@@ -416,7 +422,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 		refresh();
 		void recover().catch((error: unknown) => {
 			if (binding?.store === store)
-				ctx.ui.notify(`Collaboration restoration failed: ${String(error).slice(0, 512)}`, "error");
+				ctx.ui.notify(collaborationWords().restorationFailed(String(error).slice(0, 512)), "error");
 		});
 		return binding;
 	};
@@ -465,10 +471,7 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 			);
 		}
 		if (detection.status === "unverifiable" && requestedPlacement === undefined)
-			ctx.ui.notify(
-				`Herdr pane ${detection.paneId} could not be verified (${detection.reason}); placement falls back to managed-workspace.`,
-				"warning",
-			);
+			ctx.ui.notify(collaborationWords().paneUnverified(detection.paneId, detection.reason), "warning");
 		const placement = requestedPlacement ?? (caller ? "current-pane" : "managed-workspace");
 		const isCurrentPane = placement === "current-pane";
 		if (isCurrentPane && !caller?.binPath) {

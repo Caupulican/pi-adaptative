@@ -21,7 +21,7 @@ import { interfaceText } from "../../../core/language/interface-text.ts";
 import { readProofSheetFailures, readProofSheetRecords } from "../../../core/proof/proof-sheet.ts";
 import { isPlainRecord } from "../../../core/util/value-guards.ts";
 import type { CustomMessage } from "../../../kernel/index.ts";
-import { isModelFacingText, MODEL_FACING_PLACEHOLDER, plainLabel } from "../../../presentation/plain-text.ts";
+import { isModelFacingText, plainLabel } from "../../../presentation/plain-text.ts";
 import { getMarkdownTheme, theme } from "../../../presentation/theme-model.ts";
 import { renderTitleBadge } from "../../../presentation/tool-title.ts";
 
@@ -143,9 +143,15 @@ export class CustomMessageComponent extends Container {
 		}
 
 		this.box.addChild(
-			new Markdown(isModelFacingText(text) ? MODEL_FACING_PLACEHOLDER : text, 0, 0, this.markdownTheme, {
-				color: (text: string) => theme.fg("customMessageText", text),
-			}),
+			new Markdown(
+				isModelFacingText(text) ? interfaceText().conversation.modelFacingDetails : text,
+				0,
+				0,
+				this.markdownTheme,
+				{
+					color: (text: string) => theme.fg("customMessageText", text),
+				},
+			),
 		);
 	}
 }

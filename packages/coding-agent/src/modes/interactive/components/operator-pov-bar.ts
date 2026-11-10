@@ -87,7 +87,7 @@ export interface OperatorPovSegment {
 export const OPERATOR_POV_SEPARATOR = "   ";
 
 function formatCost(value: number): string {
-	return `$${value.toFixed(3)}`;
+	return `$${interfaceText().reports.formats.amount(value, 3)}`;
 }
 
 const GAUGE_TONES: Readonly<Record<string, "accent" | "text" | "dim" | "muted" | "warning" | "error">> = {

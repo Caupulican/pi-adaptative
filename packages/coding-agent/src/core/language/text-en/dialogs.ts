@@ -128,4 +128,45 @@ export const DIALOGS = {
 		yes: "Yes",
 		no: "No",
 	},
+	/** The confirm dialog before a proactive change lands, and the question the ask-question tool draws. */
+	proactivity: {
+		title: "Proactivity",
+		confirmTurnOff: "Allow the assistant to turn the proactive review off?",
+		confirmTurnOn: "Allow the assistant to turn the proactive review on?",
+		confirmClearPreferences: "Allow the assistant to clear your standing proactivity preferences?",
+		confirmSavePreferences: (text: string) => `Allow the assistant to save these standing preferences: ${text}?`,
+	},
+	/** The question dialog the ask-question tool draws, and the panel that reports what it left. */
+	askQuestion: {
+		pasteUnavailable: "Clipboard paste is unavailable in this UI host.",
+		readingClipboard: "Reading clipboard…",
+		finishingPaste: "Finishing clipboard paste…",
+		chooseOneOrMore: "Choose one or more, then continue to review.",
+		other: "Other",
+		otherWithAnswer: (answer: string) => `Other: ${answer}`,
+		skip: "Skip",
+		yourAnswer: "Your answer",
+		earlierLines: (count: number) => `  ↑ ${count} earlier line${count === 1 ? "" : "s"}`,
+		laterLines: (count: number) => `  ↓ ${count} later line${count === 1 ? "" : "s"}`,
+		reviewTitle: "Review your answers",
+		skipped: "Skipped",
+		unanswered: "Unanswered",
+		unansweredCount: (count: number) =>
+			`${count} unanswered. Answer or explicitly skip each question before submitting.`,
+		helpInput: (save: string, newline: string, paste: string, back: string) =>
+			`${save} save  ·  ${newline} newline  ·  ${paste} paste  ·  ${back} back`,
+		helpReview: (submit: string, back: string, cancel: string) =>
+			`${submit} submit  ·  ${back} back  ·  ${cancel} cancel`,
+		helpMulti: (move: string, toggle: string, next: string, cancel: string) =>
+			`${move} move  ·  ${toggle} toggle  ·  ${next} next  ·  ${cancel} cancel`,
+		helpSingle: (move: string, select: string, cancel: string) =>
+			`${move} move  ·  ${select} select  ·  ${cancel} cancel`,
+		reviewSection: "review",
+		questionSection: "question",
+		moreAbove: (count: number) => `  ↑ ${count} more`,
+		moreBelow: (count: number) => `  ↓ ${count} more`,
+		panelNoAnswer: "No structured answer was retained.",
+		panelUnavailable: "User input is unavailable.",
+		panelPending: "Owner decision remains open.",
+	},
 };

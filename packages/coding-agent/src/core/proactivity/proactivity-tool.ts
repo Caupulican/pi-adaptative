@@ -1,5 +1,6 @@
 import { Type } from "typebox";
 import { defineTool, type ToolDefinition } from "../extensions/types.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { MAX_PROACTIVITY_PREFERENCES_CHARS } from "../settings/settings-rules.ts";
 import type { ProactivitySettings, ResolvedProactivitySettings } from "../settings/settings-schema.ts";
 import { operationTextResult as result } from "../tools/operation-result.ts";
@@ -59,26 +60,27 @@ export function createProactivityToolDefinition(getSettings: () => ProactivityTo
 			if (params.action === "view") return result(describe(current));
 			if (!ctx.hasUI) return result("Nothing changed: owner confirmation is unavailable.", true);
 			if (signal?.aborted) return result("Nothing changed: the request was cancelled.", true);
-			const change = ((): { enabled?: boolean; preferences?: string; summary: string } | undefined => {
+			const words = interfaceText().dialogs.proactivity;
+			const change = ((): { enabled?: boolean; preferences?: string; question: string } | undefined => {
 				switch (params.action) {
 					case "turn_off":
-						return { enabled: false, summary: "turn the proactive review off" };
+						return { enabled: false, question: words.confirmTurnOff };
 					case "turn_on":
-						return { enabled: true, summary: "turn the proactive review on" };
+						return { enabled: true, question: words.confirmTurnOn };
 					case "clear_preferences":
-						return { preferences: "", summary: "clear your standing proactivity preferences" };
+						return { preferences: "", question: words.confirmClearPreferences };
 					case "set_preferences": {
 						const text = params.text?.trim() ?? "";
 						return text.length === 0
 							? undefined
-							: { preferences: text, summary: `save these standing preferences: ${text}` };
+							: { preferences: text, question: words.confirmSavePreferences(text) };
 					}
 					default:
 						return undefined;
 				}
 			})();
 			if (change === undefined) return result("Nothing changed: set_preferences needs the text.", true);
-			const confirmed = await ctx.ui.confirm("Proactivity", `Allow the assistant to ${change.summary}?`, { signal });
+			const confirmed = await ctx.ui.confirm(words.title, change.question, { signal });
 			if (signal?.aborted) return result("Nothing changed: the request was cancelled.", true);
 			if (!confirmed) return result("Nothing changed: the owner did not confirm.", true);
 			const latest = settingsSource.getProactivitySettings();

@@ -28,7 +28,9 @@ export const CHAT = {
 	sentSteered: "sent while it works",
 	sentQueued: "queued for it",
 	sentToBot: (agentId: string, how: string, modelRef: string) => `Sent to ${agentId}: ${how} (${modelRef}).`,
-	sentToTeam: (teamId: string, delivered: number) => `Sent to team ${teamId} (${delivered} member deliveries).`,
+	/** `failed` counts the members a delivery did not reach; they are never counted as delivered. */
+	sentToTeam: (teamId: string, delivered: number, failed: number) =>
+		`Sent to team ${teamId} (${delivered} member deliveries${failed === 0 ? "" : `, ${failed} failed`}).`,
 	/** What a bot is doing now, said in a few words from its own transcript. */
 	writingAnswer: "writing its answer",
 	messagesTo: (target: string) => `messages ${target}`,
@@ -55,6 +57,35 @@ export const CHAT = {
 			`on CI ${conclusions}${workflowPath === undefined ? "" : ` of ${workflowPath}`}`,
 		mainSessionOnly: "Manage a main-session routine through its owner's routine tool.",
 	},
+	/** A watch a routine waits on, in the owner's words; the model reads its own spelling of the same facts. */
+	watch: {
+		globChanged: (name: string) => `watching files matching ${name} for changes`,
+		globCreated: (name: string) => `waiting for a file matching ${name} to appear`,
+		globRemoved: (name: string) => `waiting for the files matching ${name} to be removed`,
+		fileChanged: (name: string) => `watching ${name} for changes`,
+		fileCreated: (name: string) => `waiting for ${name} to appear`,
+		fileRemoved: (name: string) => `waiting for ${name} to be removed`,
+		processExit: "waiting for a managed process to exit",
+		pidExit: (every: string, pid: number) => `checking every ${every} for process ${pid} to exit`,
+		/** `host` is absent for a port of this machine. */
+		port: (port: number, host: string | undefined, every: string, opens: boolean) =>
+			`checking port ${port}${host === undefined ? "" : ` on ${host}`} every ${every} for it to ${opens ? "open" : "close"}`,
+		commandCheck: (every: string) => `running a command check every ${every}`,
+		http: (host: string, every: string) => `checking ${host} every ${every}`,
+	},
+	/** The daemon's build beside the session's: what runs, and what this session runs. */
+	daemonBuildRunning: (build: string | undefined) =>
+		build === undefined ? "build unstamped (an earlier build)" : `build ${build}`,
+	daemonBuildSession: (running: string, session: string | undefined) =>
+		`${running}; this session runs ${session ?? "an unknown build"}`,
+	/** The always-on service the away daemon can install, as `/bot daemon status` describes it. */
+	alwaysOnMode: (autostart: string) => `routines.away.autostart is ${autostart}`,
+	alwaysOnMissing: (mode: string, unavailable: string | undefined) =>
+		unavailable === undefined
+			? `Always-on: not installed (${mode}); \`/bot daemon service install\` installs it.`
+			: `Always-on: not installed (${mode}); it cannot be installed here: ${unavailable}`,
+	alwaysOnInstalled: (path: string, current: boolean, mode: string, lingerOff: boolean) =>
+		`Always-on: installed at ${path}${current ? "" : " (an older definition; the next install replaces it)"} (${mode}).${lingerOff ? " Lingering is off: the service runs from login to logout." : ""}`,
 	memory: (path: string) => `Memory: ${path}`,
 	resumedVia: (reference: string) => `Resumed via ${reference}`,
 	directChatHint: (agentId: string) =>

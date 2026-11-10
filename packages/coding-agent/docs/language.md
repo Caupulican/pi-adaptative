@@ -14,13 +14,13 @@ To choose it yourself, open `/settings` and change **Language**, or set it in `s
 
 The values are `"auto"` (follow the system), `"en"` and `"pt-BR"`. A change applies at once, to the running interface.
 
+The setting is followed wherever pi draws a screen for you: the interactive interface, and the screens shown before a session starts (the `--resume` picker, a startup question, `pi config`).
+
 ## What is translated
 
-The whole terminal interface: the frame around the conversation (the footer, the working and waiting words, the activity lane, the operator bar, the input's hints), the work panel and its panes, the settings screens, the selectors and dialogs, the chrome and the notices of the conversation, the output of the slash commands, the key descriptions in the shortcuts window (`/hotkeys`), and the few words the terminal library draws itself (an empty list, the loader, the titles of markdown alerts). In Portuguese the root conversation is **Mente**.
+The whole terminal interface: the frame around the conversation (the footer, the working and waiting words, the activity lane, the operator bar, the input's hints), the work panel and its panes, the settings screens, the selectors and dialogs, the chrome and the notices of the conversation, the output of the slash commands (the `/bot` and `/team` family and the status reports included), the dialogs a tool opens to ask you something, the key descriptions in the shortcuts window (`/hotkeys`), and the few words the terminal library draws itself (an empty list, the loader, the titles of markdown alerts). In Portuguese the root conversation is **Mente** and a team of bots is an **equipe**.
 
-Numbers and dates in reports are written the language's way.
-
-A few status reports still carry English lines beside the translated ones: the session's autonomy status and the model router's status among them. They are being moved over.
+Numbers, amounts of money and dates in reports are written the language's way: `$0,1234` in Portuguese.
 
 ## What stays English
 
@@ -30,10 +30,16 @@ Command names, their arguments and identifiers such as model names, thinking lev
 
 Text written by you or by a model (a goal's words, a plan step, a bot's name, a session's title) is shown as it was written.
 
-The command line outside the interface is English: `pi --help`, print mode (`pi -p`), RPC mode, and the records the harness writes to disk.
+A few lines on screen are records or are read by a model, and so are English in every language: the reason a refused goal command gives, the outcome line of `/bot daemon start` and `/bot daemon stop`, the line an aborted request leaves in the conversation, and a routine's stored progress and refusal reasons.
+
+The command line outside the interface is English: `pi --help`, print mode (`pi -p`), JSON mode, RPC mode, and the records the harness writes to disk. Those modes, and the workers they run, never follow the language setting.
 
 ## Adding text
 
 Interface text lives in `src/core/language/`: `text-en/` holds the English catalogue, the source every other language follows, and `text-pt-br/` holds the Portuguese one, in files of the same names, one file per area of the interface. A new entry goes into both. `catalogue.ts` joins the two, area by area; a new area is one line there and one field of `InterfaceText`. The Portuguese catalogue is typed by the English one, so a missing entry, an extra one or a different argument list does not compile.
 
 Code reads text at the moment it draws, through `interfaceText()`, and never keeps it in a constant: that is what lets a language change reach the next frame. An entry that carries a value or a plural is a function, so each language places the value and agrees with it in its own way.
+
+A sentence that goes both to the screen and to a model, a record or a diagnostic is written once. Its formatter takes the words as an argument, and the caller chooses them: `interfaceText()` for the screen, `englishText()` for everything else. Do not write the English a second time in code.
+
+Only a process that draws a screen sets the language: the interactive mode binds it (`bindInterfaceLanguage`) and a screen drawn before a session applies it once (`prepareStandaloneScreen`). Print and RPC modes set English when they start.

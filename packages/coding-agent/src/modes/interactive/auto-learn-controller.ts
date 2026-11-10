@@ -27,6 +27,7 @@ import {
 } from "../../core/cost/auto-learn-accounting.ts";
 import { readAutoLearnSessionIdFromFile } from "../../core/cost/session-usage.ts";
 import { interfaceText } from "../../core/language/interface-text.ts";
+import type { UnverifiedModelSetting } from "../../core/language/text-en/auto-learn.ts";
 import { AutoLearnHandoffStore } from "../../core/learning/auto-learn-handoff-store.ts";
 import {
 	AUTO_LEARN_LEARNER_TOOLS,
@@ -65,6 +66,7 @@ import { isAutoLearnSessionId } from "../../kernel/session/session-manager.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import type { LiveSessionServices } from "./live-session.ts";
+import { unverifiedModelWarning } from "./unverified-model-warning.ts";
 
 export const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
 const AUTO_LEARN_RESERVATION_MS = 2 * 60 * 1000;
@@ -770,17 +772,9 @@ export class AutoLearnController {
 		return { command: process.execPath, argsPrefix: [cliPath] };
 	}
 
-	validateAutoLearnModelValue(value: string | undefined): string | undefined {
-		const modelValue = value?.trim();
-		if (!modelValue || modelValue === "active") return undefined;
-		const available = this.deps.getModelRegistry().getAvailable();
-		if (modelValue.includes("/")) {
-			const [provider, modelId] = modelValue.split("/", 2);
-			if (available.some((model) => model.provider === provider && model.id === modelId)) return undefined;
-			return interfaceText().autoLearn.unverifiedModel(modelValue);
-		}
-		if (available.some((model) => model.id === modelValue)) return undefined;
-		return interfaceText().autoLearn.unverifiedModel(modelValue);
+	/** The warning for a model value no configured model matches; `setting` names the field it was typed into. */
+	validateAutoLearnModelValue(value: string | undefined, setting?: UnverifiedModelSetting): string | undefined {
+		return unverifiedModelWarning(value, this.deps.getModelRegistry().getAvailable(), setting);
 	}
 
 	/**

@@ -9,6 +9,8 @@ import type { InterfaceText } from "../interface-text.ts";
 
 export const AUTONOMY_COMMANDS = {
 	autonomy: {
+		/** O que uma lane de pesquisa informa quando falha antes de entregar seu relatório. */
+		researchLaneFailed: (message: string) => `A lane de pesquisa falhou: ${message}`,
 		statusTitle: "Estado da autonomia",
 		mode: (mode: string, standing: boolean) => `Modo: ${mode}${standing ? " (autonomia permanente)" : ""}`,
 		goalLoopRounds: (rounds: number) => `Rodadas do ciclo do objetivo: ${rounds}`,

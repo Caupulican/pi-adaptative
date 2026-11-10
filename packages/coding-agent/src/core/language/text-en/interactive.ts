@@ -136,4 +136,7 @@ export const INTERACTIVE = {
 	notAdmitted: (provider: string, after: string, cause: string) => `${provider} not admitted ${after}: ${cause}`,
 	waitInterrupted: (provider: string, after: string) => `${provider} wait interrupted by a new message ${after}`,
 	waitClosed: (provider: string, after: string) => `${provider} wait closed ${after}`,
+	/** What the paste key reports when the clipboard or the editor cannot take the text. */
+	clipboardEmpty: "Clipboard has no text to paste",
+	editorCannotPaste: "This editor cannot take a pasted selection",
 };

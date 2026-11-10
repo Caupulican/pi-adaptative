@@ -13,6 +13,7 @@ import { randomUUID } from "node:crypto";
 import { spawnProcess } from "../../utils/child-process.ts";
 import { configFile } from "../agent-paths.ts";
 import { daemonBaselineEnvironment, daemonGhCredentialPayload } from "../daemon-environment.ts";
+import { englishText } from "../language/interface-text.ts";
 import { getStableSelfLaunchTarget } from "../process-matrix/self-launch-target.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { botDaemonCommandArgs } from "./bot-daemon-command.ts";
@@ -109,7 +110,7 @@ export function launchDetachedBotDaemon(input: BotDaemonLaunch): BotDaemonLaunch
 	if (!claim.claimed) {
 		const { current } = claim;
 		const starting = current.lastHeartbeatAt === undefined;
-		const build = describeDaemonBuild(current.build, OWN_DAEMON_BUILD);
+		const build = describeDaemonBuild(current.build, OWN_DAEMON_BUILD, englishText().chat);
 		return {
 			started: false,
 			held: true,

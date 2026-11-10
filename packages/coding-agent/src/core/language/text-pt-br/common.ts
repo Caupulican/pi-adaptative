@@ -19,4 +19,6 @@ const BOT_STATE: Readonly<Record<string, string>> = {
 export const COMMON = {
 	noMembers: "sem membros",
 	botState: (state: string) => BOT_STATE[state] ?? state,
+	/** Uma falha sem texto escrito por ninguém: o dono lê isto, o código guarda a mensagem dele. */
+	unknownError: "erro desconhecido",
 } satisfies InterfaceText["common"];

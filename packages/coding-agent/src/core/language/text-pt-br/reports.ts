@@ -10,6 +10,7 @@ import type { InterfaceText } from "../interface-text.ts";
 export const REPORTS = {
 	formats: {
 		number: (value: number) => value.toLocaleString("pt-BR"),
+		amount: (value: number, fractionDigits: number) => value.toFixed(fractionDigits).replace(".", ","),
 		dateTime: (at: string) =>
 			new Intl.DateTimeFormat("pt-BR", { dateStyle: "medium", timeStyle: "short" }).format(new Date(at)),
 	},

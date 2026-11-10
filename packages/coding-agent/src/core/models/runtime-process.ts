@@ -8,6 +8,7 @@ import { spawnProcess, spawnProcessSync, waitForChildProcessWithTermination } fr
 import { sleep } from "../../utils/sleep.ts";
 import { extractZipFile } from "../../utils/zip-extractor.ts";
 import { createRollingOutputBuffer } from "../exec.ts";
+import { interfaceText } from "../language/interface-text.ts";
 
 export interface RuntimeCommandResult {
 	ok: boolean;
@@ -195,11 +196,11 @@ export async function installRuntimeArchive<TInput extends NodeJS.ReadableStream
 	onProgress?: (status: string) => void,
 	signal?: AbortSignal,
 ): Promise<{ ok: boolean; error?: string }> {
-	onProgress?.(`Downloading ${asset.name}…`);
+	onProgress?.(interfaceText().localModels.installProgress.downloading(asset.name));
 	const download = await fetchRuntimeDownload(fetchFn, downloadUrl, { signal });
 	if (!download.ok) return download;
 	mkdirSync(destDir, { recursive: true });
-	onProgress?.(`Extracting ${asset.name}…`);
+	onProgress?.(interfaceText().localModels.installProgress.extracting(asset.name));
 	return extractArchive(download.body as unknown as TInput, destDir, asset.kind);
 }
 

@@ -143,9 +143,6 @@ const TUI_HISTORY_RELOAD_CHUNK_SIZE = 20;
 const TUI_LIVE_HISTORY_MAX_COMPONENTS = 260;
 const TUI_LIVE_HISTORY_TRIM_TO_COMPONENTS = 220;
 
-const ANTHROPIC_SUBSCRIPTION_AUTH_WARNING =
-	"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.";
-
 function isAnthropicSubscriptionAuthKey(apiKey: string | undefined): boolean {
 	return typeof apiKey === "string" && apiKey.startsWith("sk-ant-oat");
 }
@@ -2810,8 +2807,8 @@ export class InteractiveMode {
 		return this.autoLearnController.getAutoLearnTenantDataDir();
 	}
 
-	private validateAutoLearnModelValue(value: string | undefined): string | undefined {
-		return this.autoLearnController.validateAutoLearnModelValue(value);
+	private validateAutoLearnModelValue(...args: Parameters<AutoLearnController["validateAutoLearnModelValue"]>) {
+		return this.autoLearnController.validateAutoLearnModelValue(...args);
 	}
 
 	private getCurrentCwdForSettings(): string {
@@ -3008,7 +3005,7 @@ export class InteractiveMode {
 			updateThinkingBlockVisibility: () => this.updateThinkingBlockVisibility(),
 			validateSelfModificationSource: (settings) => this.validateSelfModificationSource(settings),
 			applyAutonomyMode: (mode, scope) => this.applyAutonomyMode(mode, scope),
-			validateAutoLearnModelValue: (value) => this.validateAutoLearnModelValue(value),
+			validateAutoLearnModelValue: (...args) => this.validateAutoLearnModelValue(...args),
 			updateAutoLearnFooter: () => this.updateAutoLearnFooter(),
 			handleResourcesHubAction: (action) => this.handleResourcesHubAction(action),
 			handleModelRouterAction: (action) => this.handleModelRouterAction(action),
@@ -3081,7 +3078,7 @@ export class InteractiveMode {
 		const storedCredential = this.modelRegistry.authStorage.get("anthropic");
 		if (storedCredential?.type === "oauth") {
 			this.anthropicSubscriptionWarningShown = true;
-			this.showWarning(ANTHROPIC_SUBSCRIPTION_AUTH_WARNING);
+			this.showWarning(interfaceText().notices.anthropicSubscriptionAuth);
 			return;
 		}
 
@@ -3091,7 +3088,7 @@ export class InteractiveMode {
 				return;
 			}
 			this.anthropicSubscriptionWarningShown = true;
-			this.showWarning(ANTHROPIC_SUBSCRIPTION_AUTH_WARNING);
+			this.showWarning(interfaceText().notices.anthropicSubscriptionAuth);
 		} catch {
 			// Ignore auth lookup failures for warning-only checks.
 		}

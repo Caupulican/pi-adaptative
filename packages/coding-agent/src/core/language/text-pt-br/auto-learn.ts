@@ -6,6 +6,7 @@
  */
 
 import type { InterfaceText } from "../interface-text.ts";
+import type { UnverifiedModelSetting } from "../text-en/auto-learn.ts";
 
 export const AUTO_LEARN = {
 	title: "Estado do Auto Learn",
@@ -92,6 +93,7 @@ export const AUTO_LEARN = {
 		customConfig: "configuração personalizada do provedor",
 		configured: "configurado",
 	},
-	unverifiedModel: (value: string) =>
-		`O modelo do Auto Learn "${value}" não está entre os modelos de assinatura e de API configurados; salvo como manual/não verificado.`,
+	/** Um valor de modelo que nenhum modelo configurado atende. `setting` diz em qual campo ele foi digitado. */
+	unverifiedModel: (setting: UnverifiedModelSetting, value: string) =>
+		`${setting === "autoLearn" ? "O modelo do Auto Learn" : "O modelo do roteador de modelos"} "${value}" não está entre os modelos de assinatura e de API configurados; salvo como manual/não verificado.`,
 } satisfies InterfaceText["autoLearn"];

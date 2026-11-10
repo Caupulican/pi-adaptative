@@ -42,6 +42,7 @@ import {
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { type ExecResult, execCommand } from "../exec.ts";
 import type { HarnessNoticeObservation } from "../harness-notice.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { getStableSelfLaunchTarget } from "../process-matrix/self-launch-target.ts";
 import type { RoutineAwayAutostart } from "../settings/settings-schema.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -545,8 +546,6 @@ export interface AwayServiceManagerDeps {
 	readonly signal?: AbortSignal;
 }
 
-const REFUSAL = "Routines away cannot start at login:";
-
 /** Waits for a daemon `accepts` to hold the lease: a watch on the lease directory, ended by the deadline. */
 function awaitDaemonLease(
 	deps: AwayServiceManagerDeps,
@@ -623,7 +622,7 @@ async function restartAwayService(
 ): Promise<AwayServiceOutcome> {
 	try {
 		const failed = await runInstallCommands(spec, deps, true);
-		if (failed) return { ok: false, detail: `The always-on service was not restarted: ${failed}` };
+		if (failed) return { ok: false, detail: interfaceText().botTeam.serviceRestartFailed(failed) };
 		const lease = await awaitDaemonLease(
 			deps,
 			(status) => status.running && !isOlderDaemonBuild(status.build, build),
@@ -631,16 +630,16 @@ async function restartAwayService(
 		if (!lease.running || isOlderDaemonBuild(lease.build, build))
 			return {
 				ok: false,
-				detail: `The always-on service restarted, but no daemon of build ${build ?? "unknown"} or newer held the routine lease within ${LEASE_WAIT_MS / 1000} s.`,
+				detail: interfaceText().botTeam.serviceRestartNoLease(build, LEASE_WAIT_MS / 1000),
 			};
 		return {
 			ok: true,
-			detail: `The always-on service restarted; its daemon holds the routine lease (build ${lease.build ?? "unstamped"}).`,
+			detail: interfaceText().botTeam.serviceRestarted(lease.build),
 		};
 	} catch (error) {
 		return {
 			ok: false,
-			detail: `The always-on service was not restarted: ${error instanceof Error ? error.message : String(error)}`,
+			detail: interfaceText().botTeam.serviceRestartFailed(error instanceof Error ? error.message : String(error)),
 		};
 	}
 }
@@ -654,12 +653,12 @@ export async function installAwayService(
 	deps: AwayServiceManagerDeps,
 ): Promise<AwayServiceOutcome> {
 	const absence = awayServiceManagerAbsence(spec, deps.host);
-	if (absence) return { ok: false, detail: `${REFUSAL} ${absence}` };
+	if (absence) return { ok: false, detail: interfaceText().botTeam.serviceRefused(absence) };
 	try {
 		const existed = existsSync(spec.definitionPath);
 		writeDefinition(spec);
 		const failed = await runInstallCommands(spec, deps, existed);
-		if (failed) return { ok: false, detail: `${REFUSAL} ${failed}` };
+		if (failed) return { ok: false, detail: interfaceText().botTeam.serviceRefused(failed) };
 		const record = readAwayServiceRecord(spec.agentDir);
 		writeAwayServiceRecord(spec.agentDir, {
 			...record,
@@ -676,14 +675,17 @@ export async function installAwayService(
 		if (!lease.running)
 			return {
 				ok: false,
-				detail: `${REFUSAL} the service is installed at ${spec.definitionPath}, but no daemon held the routine lease within ${LEASE_WAIT_MS / 1000} s; \`/bot daemon service status\` shows why.`,
+				detail: interfaceText().botTeam.serviceNoLease(spec.definitionPath, LEASE_WAIT_MS / 1000),
 			};
 		return {
 			ok: true,
-			detail: `Always-on routines installed at ${spec.definitionPath}; the daemon holds the routine lease${lease.pid !== undefined ? ` (pid ${lease.pid})` : ""}.`,
+			detail: interfaceText().botTeam.serviceInstalled(spec.definitionPath, lease.pid),
 		};
 	} catch (error) {
-		return { ok: false, detail: `${REFUSAL} ${error instanceof Error ? error.message : String(error)}` };
+		return {
+			ok: false,
+			detail: interfaceText().botTeam.serviceRefused(error instanceof Error ? error.message : String(error)),
+		};
 	}
 }
 
@@ -715,16 +717,14 @@ export async function uninstallAwayService(
 	} catch (error) {
 		return {
 			ok: false,
-			detail: `The always-on service was not removed: ${error instanceof Error ? error.message : String(error)}`,
+			detail: interfaceText().botTeam.serviceRemoveFailed(error instanceof Error ? error.message : String(error)),
 		};
 	}
-	const running =
-		spec.platform === "win32"
-			? "A daemon the task launched keeps running until `/bot daemon stop`."
-			: "A daemon the service ran stops with it; one a session started keeps running until `/bot daemon stop`.";
+	const words = interfaceText().botTeam;
+	const running = spec.platform === "win32" ? words.serviceRemovedRunningTask : words.serviceRemovedRunningService;
 	return {
 		ok: true,
-		detail: `Always-on routines removed (${spec.definitionPath}). ${running}${problems.length ? ` Reported: ${problems.join("; ")}` : ""}`,
+		detail: words.serviceRemoved(spec.definitionPath, running, problems.join("; ")),
 	};
 }
 
@@ -784,13 +784,15 @@ export function inspectAwayService(input: {
 
 /** One line for `/bot daemon status`. */
 export function describeAwayServiceInspection(inspection: AwayServiceInspection): string {
-	const mode = `routines.away.autostart is ${inspection.autostart}`;
-	if (!inspection.installed)
-		return inspection.unavailable
-			? `Always-on: not installed (${mode}); it cannot be installed here: ${inspection.unavailable}`
-			: `Always-on: not installed (${mode}); \`/bot daemon service install\` installs it.`;
-	const linger = inspection.lingering === false ? " Lingering is off: the service runs from login to logout." : "";
-	return `Always-on: installed at ${inspection.definitionPath}${inspection.current ? "" : " (an older definition; the next install replaces it)"} (${mode}).${linger}`;
+	const words = interfaceText().chat;
+	const mode = words.alwaysOnMode(inspection.autostart);
+	if (!inspection.installed) return words.alwaysOnMissing(mode, inspection.unavailable);
+	return words.alwaysOnInstalled(
+		inspection.definitionPath ?? "",
+		inspection.current ?? true,
+		mode,
+		inspection.lingering === false,
+	);
 }
 
 function keyValues(text: string): Map<string, string> {
@@ -812,12 +814,16 @@ export async function awayServiceStatus(
 	spec: AwayServiceSpec | undefined,
 	deps: AwayServiceManagerDeps,
 ): Promise<string[]> {
+	const words = interfaceText().botTeam;
 	const lines = [describeAwayServiceInspection(inspection)];
 	const { lease } = inspection;
 	lines.push(
 		lease.running
-			? `Routine lease: held${lease.pid !== undefined ? ` by pid ${lease.pid}` : ""}${lease.heartbeatAgeMs !== undefined ? `, renewed ${ageText(lease.heartbeatAgeMs)} ago` : ", starting"}.`
-			: "Routine lease: no daemon holds it.",
+			? words.serviceLeaseHeld(
+					lease.pid,
+					lease.heartbeatAgeMs === undefined ? undefined : ageText(lease.heartbeatAgeMs),
+				)
+			: words.serviceLeaseFree,
 	);
 	if (spec && inspection.installed && !inspection.unavailable) {
 		let managerState: string | undefined;
@@ -831,47 +837,43 @@ export async function awayServiceStatus(
 			const result = await runManagerCommand(command, spec.workingDirectory, deps.signal);
 			if (result.code === 0) {
 				const values = keyValues(result.stdout);
-				managerState = `systemd: ${values.get("UnitFileState") ?? "unknown"}, ${values.get("ActiveState") ?? "unknown"} (${values.get("SubState") ?? "unknown"})`;
+				managerState = words.serviceSystemd(
+					values.get("UnitFileState") ?? "unknown",
+					values.get("ActiveState") ?? "unknown",
+					values.get("SubState") ?? "unknown",
+				);
 				if (values.get("ActiveState") === "failed")
-					why = `the service failed (${values.get("Result") ?? "unknown"}, exit status ${values.get("ExecMainStatus") ?? "unknown"}); \`journalctl --user -u ${unitName(spec)}\` shows its output.`;
-				else if (values.get("ActiveState") === "inactive")
-					why =
-						"the service's daemon exited normally: another daemon held the lease, a session of a newer build replaced it, or `/bot daemon stop` released it. It starts again at the next login or service start.";
-			} else managerState = `systemd did not answer: ${resultText(result)}`;
+					why = words.serviceSystemdFailed(
+						values.get("Result") ?? "unknown",
+						values.get("ExecMainStatus") ?? "unknown",
+						unitName(spec),
+					);
+				else if (values.get("ActiveState") === "inactive") why = words.serviceSystemdInactive;
+			} else managerState = words.serviceSystemdSilent(resultText(result));
 		} else if (spec.platform === "darwin") {
 			const command = { file: LAUNCHCTL, args: ["print", `${launchdDomain(spec)}/${spec.name}`] };
 			const result = await runManagerCommand(command, spec.workingDirectory, deps.signal);
 			if (result.code === 0) {
 				const state = /\bstate = (\S+)/.exec(result.stdout)?.[1] ?? "unknown";
 				const lastExit = /\blast exit code = ([^\n]+)/.exec(result.stdout)?.[1]?.trim();
-				managerState = `launchd: loaded, ${state}${lastExit ? `, last exit ${lastExit}` : ""}`;
-				if (state !== "running")
-					why =
-						"the agent's daemon is not running: another daemon held the lease, a session of a newer build replaced it, `/bot daemon stop` released it, or it failed (its last exit says which).";
-			} else managerState = "launchd: the agent is not loaded; it loads at the next login";
+				managerState = words.serviceLaunchd(state, lastExit);
+				if (state !== "running") why = words.serviceLaunchdIdle;
+			} else managerState = words.serviceLaunchdUnloaded;
 		} else {
 			const command = { file: schtasksPath(deps.host), args: ["/Query", "/TN", spec.name] };
 			const result = await runManagerCommand(command, spec.workingDirectory, deps.signal);
-			managerState =
-				result.code === 0
-					? "Task Scheduler: the task is registered; it launches the daemon at logon and exits"
-					: `Task Scheduler: the task is not registered (${resultText(result)})`;
-			why = "the task launches the daemon only at logon; a session start or `/bot daemon start` launches it now.";
+			managerState = result.code === 0 ? words.serviceTaskRegistered : words.serviceTaskMissing(resultText(result));
+			why = words.serviceTaskIdle;
 		}
-		lines.push(`${managerState}.`);
-		if (!lease.running && why) lines.push(`Why no daemon runs: ${why}`);
+		lines.push(managerState);
+		if (!lease.running && why) lines.push(words.serviceWhyNoDaemon(why));
 	}
 	const shellOnly = environmentOnlyCredentialNames(deps.host.env, [
 		configFile(deps.store.getAgentDir(), "auth.json"),
 		configFile(deps.store.getAgentDir(), "models.json"),
 	]);
-	if (shellOnly.length > 0)
-		lines.push(
-			`A daemon the service starts does not get these variables from this shell: ${shellOnly.join(", ")}. Keep those credentials in auth.json for routines away after a reboot.`,
-		);
-	lines.push(
-		"gh: a daemon the service starts uses gh's own stored sign-in; without one, event routines that need GitHub wait for their session.",
-	);
+	if (shellOnly.length > 0) lines.push(words.serviceShellCredentials(shellOnly.join(", ")));
+	lines.push(words.serviceGhSignIn);
 	return lines;
 }
 
@@ -950,7 +952,8 @@ export class AwayService {
 		if (this.refused === key) return;
 		if (!resolution.ok || unavailable !== undefined) {
 			this.refused = key;
-			this.deps.warn(`${REFUSAL} ${unavailable}`);
+			const reason = resolution.ok ? (unavailable ?? key) : (unavailable ?? resolution.reason);
+			this.deps.warn(interfaceText().botTeam.serviceRefused(reason));
 			return;
 		}
 		void this.runInstall(resolution.spec).then((outcome) => {
@@ -1007,9 +1010,9 @@ export class AwayService {
 
 	/** The explicit install: whatever `routines.away.autostart` says. */
 	async install(): Promise<AwayServiceOutcome> {
-		if (this.closed) return { ok: false, detail: `${REFUSAL} this session is closing.` };
+		if (this.closed) return { ok: false, detail: interfaceText().botTeam.serviceClosing };
 		const resolution = this.resolve();
-		if (!resolution.ok) return { ok: false, detail: `${REFUSAL} ${resolution.reason}` };
+		if (!resolution.ok) return { ok: false, detail: interfaceText().botTeam.serviceRefused(resolution.reason) };
 		await this.managing;
 		const outcome = await this.runInstall(resolution.spec);
 		if (outcome.ok) this.refused = undefined;
@@ -1018,7 +1021,7 @@ export class AwayService {
 
 	async uninstall(): Promise<AwayServiceOutcome> {
 		const resolution = this.resolve();
-		if (!resolution.ok) return { ok: false, detail: `No always-on service applies here: ${resolution.reason}` };
+		if (!resolution.ok) return { ok: false, detail: interfaceText().botTeam.serviceNoServiceHere(resolution.reason) };
 		await this.managing;
 		return uninstallAwayService(resolution.spec, this.managerDeps());
 	}

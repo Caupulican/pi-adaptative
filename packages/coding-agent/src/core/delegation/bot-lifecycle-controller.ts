@@ -7,6 +7,7 @@
 import { createHash } from "node:crypto";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-guard.ts";
 import { botStartModelStance } from "../orchestration/worker-model-pins.ts";
 import {
@@ -332,7 +333,10 @@ export class BotLifecycleController {
 			const bot = this.host.getBotTeamStore().retireBot(agentId);
 			return {
 				retired: hasWorker || bot !== undefined,
-				detail: hasWorker || bot ? `Bot ${agentId} retired.` : `Bot ${agentId} does not exist.`,
+				detail:
+					hasWorker || bot
+						? interfaceText().botTeam.botRetired(agentId)
+						: interfaceText().botTeam.botMissing(agentId),
 			};
 		} catch (error) {
 			return { retired: false, detail: error instanceof Error ? error.message : String(error) };
@@ -364,19 +368,19 @@ export class BotLifecycleController {
 				if (interrupted) stoppedBots.push(bot.agentId);
 			}
 			const res = results.find((result) => result.interrupted) ?? results[0] ?? { interrupted: false };
-			const named = `bot${stoppedBots.length === 1 ? "" : "s"} ${stoppedBots.join(", ")}`;
+			const words = interfaceText().botTeam;
 			return {
 				stopped: res.interrupted || stoppedBots.length > 0,
 				detail: res.interrupted
-					? `Stopped ${agentId}${stoppedBots.length > 0 ? ` and its ${named}` : ""} (${res.mode ?? "halt"}).`
+					? words.botStopped(agentId, stoppedBots, words.stopMode(res.mode ?? "halt"))
 					: stoppedBots.length > 0
-						? `Stopped ${agentId}'s ${named}; ${agentId} itself was not running.`
-						: (res.reason ?? `${agentId} is not running.`),
+						? words.botStoppedOwn(agentId, stoppedBots)
+						: (res.reason ?? words.botIdle(agentId)),
 			};
 		} catch (error) {
 			return {
 				stopped: false,
-				detail: error instanceof Error ? error.message : `${agentId} is not running.`,
+				detail: error instanceof Error ? error.message : interfaceText().botTeam.botIdle(agentId),
 			};
 		}
 	}

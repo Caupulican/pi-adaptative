@@ -40,6 +40,7 @@ import {
 } from "../human-input.ts";
 import { type HumanInputQuestion, humanInputToolName } from "../human-input-request.ts";
 import type { KeybindingsManager } from "../keybindings.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { SessionImageStore } from "../session-image-store.ts";
 import {
 	type ClarificationDecisionEngine,
@@ -355,7 +356,7 @@ export class AskQuestionDialog implements Component {
 		this.pasteClipboardImage =
 			options.pasteClipboardImage ??
 			(async (host) => {
-				host.showWarning("Clipboard paste is unavailable in this UI host.");
+				host.showWarning(interfaceText().dialogs.askQuestion.pasteUnavailable);
 			});
 		this.createAnswerEditor = options.createAnswerEditor ?? (() => new SingleLineAnswerEditor());
 		this.selections = options.questions.map(() => ({ optionIndexes: new Set(), skipped: false }));
@@ -439,7 +440,7 @@ export class AskQuestionDialog implements Component {
 		if (!input || this.pasteInFlight) return;
 		this.pasteInFlight = true;
 		this.inputError = undefined;
-		this.inputStatus = "Reading clipboard…";
+		this.inputStatus = interfaceText().dialogs.askQuestion.readingClipboard;
 		this.refresh();
 		let reported = false;
 		const host: ClipboardInputHost = bindClipboardQueue(this.clipboardQueue, {
@@ -538,7 +539,7 @@ export class AskQuestionDialog implements Component {
 			}
 			if (this.pasteInFlight && this.keybindings.matches(data, "tui.input.submit")) {
 				this.submitAfterPaste = true;
-				this.inputStatus = "Finishing clipboard paste…";
+				this.inputStatus = interfaceText().dialogs.askQuestion.finishingPaste;
 				this.refresh();
 				return;
 			}
@@ -621,16 +622,17 @@ export class AskQuestionDialog implements Component {
 		const cursor = this.cursors[questionIndex] ?? 0;
 		this.addWrapped(lines, this.theme.bold(question.question), width);
 		if (question.multiSelect) {
-			lines.push(this.theme.fg("muted", "Choose one or more, then continue to review."));
+			lines.push(this.theme.fg("muted", interfaceText().dialogs.askQuestion.chooseOneOrMore));
 		}
 		lines.push("");
 
 		const otherIndex = question.options.length;
 		const otherActive = cursor === otherIndex;
-		const otherLabel = selection.custom ? `Other: ${previewAnswer(selection.custom)}` : "Other";
+		const dialog = interfaceText().dialogs.askQuestion;
+		const otherLabel = selection.custom ? dialog.otherWithAnswer(previewAnswer(selection.custom)) : dialog.other;
 		const otherText = `${otherActive ? "›" : " "} ${selection.custom ? "●" : "+"} ${otherLabel}`;
 		const skipActive = cursor === otherIndex + 1;
-		const skipText = `${skipActive ? "›" : " "} ${selection.skipped ? "●" : "–"} Skip`;
+		const skipText = `${skipActive ? "›" : " "} ${selection.skipped ? "●" : "–"} ${dialog.skip}`;
 		const chip = (text: string, active: boolean, tone: "text" | "muted" | "dim"): string =>
 			active ? this.theme.bg("selectedBg", this.theme.fg("text", ` ${text} `)) : this.theme.fg(tone, text);
 		const choices = [
@@ -656,7 +658,7 @@ export class AskQuestionDialog implements Component {
 
 		if (this.input) {
 			lines.push("");
-			lines.push(this.theme.fg("muted", "Your answer"));
+			lines.push(this.theme.fg("muted", dialog.yourAnswer));
 			const renderedInput = this.input.render(Math.max(4, width - 2));
 			const cursorLine = Math.max(
 				0,
@@ -671,14 +673,14 @@ export class AskQuestionDialog implements Component {
 			);
 			const visibleInput = renderedInput.slice(viewportStart, viewportStart + ANSWER_EDITOR_VIEWPORT_LINES);
 			if (viewportStart > 0) {
-				lines.push(this.theme.fg("dim", `  ↑ ${viewportStart} earlier line${viewportStart === 1 ? "" : "s"}`));
+				lines.push(this.theme.fg("dim", dialog.earlierLines(viewportStart)));
 			}
 			for (const inputLine of visibleInput) {
 				lines.push(truncateToWidth(`  ${inputLine}`, width, ""));
 			}
 			const remainingLines = renderedInput.length - viewportStart - visibleInput.length;
 			if (remainingLines > 0) {
-				lines.push(this.theme.fg("dim", `  ↓ ${remainingLines} later line${remainingLines === 1 ? "" : "s"}`));
+				lines.push(this.theme.fg("dim", dialog.laterLines(remainingLines)));
 			}
 			if (this.inputError) this.addWrapped(lines, this.theme.fg("warning", this.inputError), width, "  ");
 			if (this.inputStatus) this.addWrapped(lines, this.theme.fg("success", this.inputStatus), width, "  ");
@@ -686,17 +688,18 @@ export class AskQuestionDialog implements Component {
 	}
 
 	private renderReview(lines: string[], width: number): void {
-		lines.push(this.theme.bold("Review your answers"));
+		lines.push(this.theme.bold(interfaceText().dialogs.askQuestion.reviewTitle));
 		lines.push("");
 		let unresolved = 0;
 		this.questions.forEach((question, index) => {
 			const answer = answerFor(question, this.selections[index]!);
 			const values = [...answer.selected, ...(answer.custom ? [previewAnswer(answer.custom)] : [])];
-			const value = answer.skipped ? "Skipped" : values.length > 0 ? values.join(", ") : "Unanswered";
+			const words = interfaceText().dialogs.askQuestion;
+			const value = answer.skipped ? words.skipped : values.length > 0 ? values.join(", ") : words.unanswered;
 			if (!isResolved(this.selections[index]!)) unresolved++;
 			this.addWrapped(
 				lines,
-				`${this.theme.fg("muted", `${question.header}:`)} ${this.theme.fg(value === "Unanswered" ? "warning" : "text", value)}`,
+				`${this.theme.fg("muted", `${question.header}:`)} ${this.theme.fg(value === words.unanswered ? "warning" : "text", value)}`,
 				width,
 			);
 		});
@@ -704,10 +707,7 @@ export class AskQuestionDialog implements Component {
 			lines.push("");
 			this.addWrapped(
 				lines,
-				this.theme.fg(
-					"warning",
-					`${unresolved} unanswered. Answer or explicitly skip each question before submitting.`,
-				),
+				this.theme.fg("warning", interfaceText().dialogs.askQuestion.unansweredCount(unresolved)),
 				width,
 			);
 		}
@@ -717,13 +717,31 @@ export class AskQuestionDialog implements Component {
 		const cancel = displayKeys(this.keybindings, "tui.select.cancel", 1);
 		let help: string;
 		if (this.input) {
-			help = `${displayKeys(this.keybindings, "tui.input.submit", 1)} save  ·  ${displayKeys(this.keybindings, "tui.input.newLine", 1)} newline  ·  ${displayKeys(this.keybindings, "app.clipboard.pasteImage", 1)} paste  ·  ${cancel} back`;
+			help = interfaceText().dialogs.askQuestion.helpInput(
+				displayKeys(this.keybindings, "tui.input.submit", 1),
+				displayKeys(this.keybindings, "tui.input.newLine", 1),
+				displayKeys(this.keybindings, "app.clipboard.pasteImage", 1),
+				cancel,
+			);
 		} else if (this.currentIndex === this.questions.length) {
-			help = `${displayKeys(this.keybindings, "tui.select.confirm", 1)} submit  ·  ${displayKeys(this.keybindings, "app.question.previous")} back  ·  ${cancel} cancel`;
+			help = interfaceText().dialogs.askQuestion.helpReview(
+				displayKeys(this.keybindings, "tui.select.confirm", 1),
+				displayKeys(this.keybindings, "app.question.previous"),
+				cancel,
+			);
 		} else if (this.questions[this.currentIndex]?.multiSelect) {
-			help = `${displayKeys(this.keybindings, "tui.select.up")}/${displayKeys(this.keybindings, "tui.select.down")} move  ·  ${displayKeys(this.keybindings, "app.question.toggle", 1)}/${displayKeys(this.keybindings, "tui.select.confirm", 1)} toggle  ·  ${displayKeys(this.keybindings, "app.question.next")} next  ·  ${cancel} cancel`;
+			help = interfaceText().dialogs.askQuestion.helpMulti(
+				`${displayKeys(this.keybindings, "tui.select.up")}/${displayKeys(this.keybindings, "tui.select.down")}`,
+				`${displayKeys(this.keybindings, "app.question.toggle", 1)}/${displayKeys(this.keybindings, "tui.select.confirm", 1)}`,
+				displayKeys(this.keybindings, "app.question.next"),
+				cancel,
+			);
 		} else {
-			help = `${displayKeys(this.keybindings, "tui.select.up")}/${displayKeys(this.keybindings, "tui.select.down")} move  ·  ${displayKeys(this.keybindings, "tui.select.confirm", 1)} select  ·  ${cancel} cancel`;
+			help = interfaceText().dialogs.askQuestion.helpSingle(
+				`${displayKeys(this.keybindings, "tui.select.up")}/${displayKeys(this.keybindings, "tui.select.down")}`,
+				displayKeys(this.keybindings, "tui.select.confirm", 1),
+				cancel,
+			);
 		}
 		this.addWrapped(lines, this.theme.fg("dim", help), width);
 	}
@@ -732,10 +750,12 @@ export class AskQuestionDialog implements Component {
 		if (this.cachedWidth === width && this.cachedLines) return this.cachedLines;
 		const safeWidth = Math.max(1, width);
 		const lines: string[] = [];
-		const header = this.currentIndex === this.questions.length ? "review" : this.questions[this.currentIndex]?.header;
+		const dialog = interfaceText().dialogs.askQuestion;
+		const header =
+			this.currentIndex === this.questions.length ? dialog.reviewSection : this.questions[this.currentIndex]?.header;
 		lines.push(
 			truncateToWidth(
-				`${this.theme.fg("accent", "?")} ${this.theme.bold(header ?? "question")}  ${this.theme.fg("dim", `${Math.min(this.currentIndex + 1, this.questions.length)}/${this.questions.length}`)}`,
+				`${this.theme.fg("accent", "?")} ${this.theme.bold(header ?? dialog.questionSection)}  ${this.theme.fg("dim", `${Math.min(this.currentIndex + 1, this.questions.length)}/${this.questions.length}`)}`,
 				safeWidth,
 				"",
 			),
@@ -775,9 +795,9 @@ export class AskQuestionDialog implements Component {
 		const below = body.length - start - shown.length;
 		return [
 			...lines.slice(0, head),
-			this.theme.fg("dim", above ? `  ↑ ${above} more` : ""),
+			this.theme.fg("dim", above ? interfaceText().dialogs.askQuestion.moreAbove(above) : ""),
 			...shown,
-			this.theme.fg("dim", below ? `  ↓ ${below} more` : ""),
+			this.theme.fg("dim", below ? interfaceText().dialogs.askQuestion.moreBelow(below) : ""),
 			...lines.slice(bodyEnd),
 		];
 	}
@@ -790,18 +810,27 @@ export class AskQuestionDialog implements Component {
 
 function questionPanelModel(details: AskQuestionToolDetails | undefined): OrchestrationPanelModel {
 	if (!details) {
-		return { label: "question", status: "error", emptyText: "No structured answer was retained." };
+		return {
+			label: interfaceText().dialogs.askQuestion.questionSection,
+			status: "error",
+			emptyText: interfaceText().dialogs.askQuestion.panelNoAnswer,
+		};
 	}
 	if (details.reason === "ui_unavailable" || details.reason === "invalid_questions") {
 		return {
-			label: "question",
+			label: interfaceText().dialogs.askQuestion.questionSection,
 			action: "unavailable",
 			status: "error",
-			emptyText: details.error ?? "User input is unavailable.",
+			emptyText: details.error ?? interfaceText().dialogs.askQuestion.panelUnavailable,
 		};
 	}
 	if (details.reason === "owner_unavailable") {
-		return { label: "question", action: "pending", status: "warning", emptyText: "Owner decision remains open." };
+		return {
+			label: interfaceText().dialogs.askQuestion.questionSection,
+			action: "pending",
+			status: "warning",
+			emptyText: interfaceText().dialogs.askQuestion.panelPending,
+		};
 	}
 	const rows = details.questions.map((question) => {
 		const answer = details.answers.find((candidate) => candidate.id === question.id);

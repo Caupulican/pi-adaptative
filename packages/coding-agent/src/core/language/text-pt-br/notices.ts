@@ -8,6 +8,8 @@
 import type { InterfaceText } from "../interface-text.ts";
 
 export const NOTICES = {
+	earendilJoined: "O pi entrou na Earendil",
+	earendilReadPost: "Leia o post do blog:",
 	error: (message: string) => `Erro: ${message}`,
 	warning: (message: string) => `Aviso: ${message}`,
 	toCancel: (keys: string) => `(${keys} para cancelar)`,
@@ -67,4 +69,19 @@ export const NOTICES = {
 	failedToForkSession: "Falha ao fazer fork da sessão",
 
 	widgetTruncated: "... (widget truncado)",
+	/** O aviso de cobrança de uma sessão autenticada com uma chave de assinatura. */
+	anthropicSubscriptionAuth:
+		"A autenticação por assinatura da Anthropic está ativa. O uso por harnesses de terceiros é descontado do uso extra e cobrado por token, fora dos limites do seu plano Claude. Gerencie o uso extra em https://claude.ai/settings/usage.",
+	/** O que a extensão de colaboração relata quando os próprios passos falham: o texto do erro vem em seguida. */
+	collaboration: {
+		controlHandoffFailed: (error: string) => `Falha no handoff de controle da colaboração: ${error}`,
+		cleanupExhausted: (jobId: string, agentId: string, error: string) =>
+			`A limpeza da colaboração se esgotou para ${jobId}/${agentId}; o trabalho em andamento segue isolado: ${error}`,
+		peerDeliveryFailed: (error: string) => `Falha na entrega a um peer da colaboração: ${error}`,
+		handoffFailed: (error: string) => `Falha no handoff da colaboração: ${error}`,
+		signalFailed: (error: string) => `Falha no sinal da colaboração: ${error}`,
+		restorationFailed: (error: string) => `Falha na restauração da colaboração: ${error}`,
+		paneUnverified: (paneId: string, reason: string) =>
+			`O painel Herdr ${paneId} não pôde ser verificado (${reason}); o posicionamento volta para managed-workspace.`,
+	},
 } satisfies InterfaceText["notices"];

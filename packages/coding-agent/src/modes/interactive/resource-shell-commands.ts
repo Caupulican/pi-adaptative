@@ -257,7 +257,11 @@ export async function handleBashCommand(
 		if (host.bashComponent) {
 			host.bashComponent.setComplete(undefined, false);
 		}
-		host.showError(interfaceText().resources.bash.failed(error instanceof Error ? error.message : "Unknown error"));
+		host.showError(
+			interfaceText().resources.bash.failed(
+				error instanceof Error ? error.message : interfaceText().common.unknownError,
+			),
+		);
 	}
 
 	host.bashComponent = undefined;

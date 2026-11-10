@@ -67,6 +67,16 @@ export const SESSIONS = {
 		verbOverridden: "overridden",
 		head: (userGoal: string) => `Goal: ${userGoal}`,
 		status: (word: string) => `Status: ${word}`,
+		/** The owner's word for a goal status, keyed by the identifier the goal record holds. The errors of a refused goal command keep their own words. */
+		statusWords: {
+			active: "active",
+			paused: "paused",
+			blocked: "blocked",
+			usage_limited: "usage-limited",
+			budget_limited: "budget-limited",
+			completed: "completed",
+			cancelled: "cancelled",
+		},
 		blockedReason: (reason: string) => `Blocked reason: ${reason}`,
 		tokens: (used: number, budget?: number) =>
 			budget === undefined ? `Tokens: ${used}` : `Tokens: ${used}/${budget}`,

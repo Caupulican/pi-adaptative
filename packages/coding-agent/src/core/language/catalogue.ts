@@ -9,6 +9,8 @@ import type { InterfaceText } from "./interface-text.ts";
 import { AGENTS_OVERLAY } from "./text-en/agents-overlay.ts";
 import { AUTO_LEARN } from "./text-en/auto-learn.ts";
 import { AUTONOMY_COMMANDS } from "./text-en/autonomy-commands.ts";
+import { AUTONOMY_STATUS } from "./text-en/autonomy-status.ts";
+import { BOT_TEAM } from "./text-en/bot-team.ts";
 import { CHAT } from "./text-en/chat.ts";
 import { COMMAND_CONTROLLER } from "./text-en/command-controller.ts";
 import { COMMANDS } from "./text-en/commands.ts";
@@ -42,6 +44,8 @@ import { STATUS } from "./text-en/status.ts";
 import { AGENTS_OVERLAY as AGENTS_OVERLAY_PT_BR } from "./text-pt-br/agents-overlay.ts";
 import { AUTO_LEARN as AUTO_LEARN_PT_BR } from "./text-pt-br/auto-learn.ts";
 import { AUTONOMY_COMMANDS as AUTONOMY_COMMANDS_PT_BR } from "./text-pt-br/autonomy-commands.ts";
+import { AUTONOMY_STATUS as AUTONOMY_STATUS_PT_BR } from "./text-pt-br/autonomy-status.ts";
+import { BOT_TEAM as BOT_TEAM_PT_BR } from "./text-pt-br/bot-team.ts";
 import { CHAT as CHAT_PT_BR } from "./text-pt-br/chat.ts";
 import { COMMAND_CONTROLLER as COMMAND_CONTROLLER_PT_BR } from "./text-pt-br/command-controller.ts";
 import { COMMANDS as COMMANDS_PT_BR } from "./text-pt-br/commands.ts";
@@ -78,6 +82,8 @@ const AREAS = {
 	agentsOverlay: [AGENTS_OVERLAY, AGENTS_OVERLAY_PT_BR],
 	autoLearn: [AUTO_LEARN, AUTO_LEARN_PT_BR],
 	autonomyCommands: [AUTONOMY_COMMANDS, AUTONOMY_COMMANDS_PT_BR],
+	autonomyStatus: [AUTONOMY_STATUS, AUTONOMY_STATUS_PT_BR],
+	botTeam: [BOT_TEAM, BOT_TEAM_PT_BR],
 	chat: [CHAT, CHAT_PT_BR],
 	commandController: [COMMAND_CONTROLLER, COMMAND_CONTROLLER_PT_BR],
 	commands: [COMMANDS, COMMANDS_PT_BR],

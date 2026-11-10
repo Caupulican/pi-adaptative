@@ -43,6 +43,7 @@ export const CONVERSATION = {
 	toExpand: "para expandir",
 	toCollapse: "para recolher",
 	imagePlaceholder: "[Imagem: abra a transcrição para ver]",
+	modelFacingDetails: "Detalhes para o assistente; eles ficam na transcrição.",
 
 	bashRunning: (keys: string) => `Rodando... (${keys} para cancelar)`,
 	bashCancelled: "(cancelado)",

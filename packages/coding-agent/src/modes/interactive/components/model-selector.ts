@@ -461,7 +461,8 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	private searchText(item: ModelItem): string {
 		const { id, provider, displayName, variants } = item;
 		const auth = this.authInfo(item);
-		const accountWords = auth.category === "subscription" ? "subscription sub oauth account" : auth.category;
+		const accountWords =
+			auth.category === "subscription" ? interfaceText().selectors.modelSearch.subscriptionAccount : auth.category;
 		return `${id} ${provider} ${provider}/${id} ${displayName ?? ""} ${variants?.map((model) => model.id).join(" ") ?? ""} ${auth.label} ${auth.badge} ${accountWords}`;
 	}
 

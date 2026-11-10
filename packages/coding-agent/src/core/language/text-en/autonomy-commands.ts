@@ -6,6 +6,8 @@
 
 export const AUTONOMY_COMMANDS = {
 	autonomy: {
+		/** What a research lane reports when it failed before it could report. */
+		researchLaneFailed: (message: string) => `Research lane failed: ${message}`,
 		statusTitle: "Autonomy status",
 		mode: (mode: string, standing: boolean) => `Mode: ${mode}${standing ? " (standing autonomy)" : ""}`,
 		goalLoopRounds: (rounds: number) => `Goal loop rounds: ${rounds}`,

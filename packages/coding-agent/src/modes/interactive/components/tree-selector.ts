@@ -23,7 +23,7 @@ import {
 import { interfaceText } from "../../../core/language/interface-text.ts";
 import { isSessionLifecycleEntry, type SessionTreeNode } from "../../../kernel/node.ts";
 import { keyHint, keyText } from "../../../presentation/keybinding-hints.ts";
-import { isModelFacingText, MODEL_FACING_PLACEHOLDER, plainLabel } from "../../../presentation/plain-text.ts";
+import { isModelFacingText, plainLabel } from "../../../presentation/plain-text.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import { renderTitleBadge } from "../../../presentation/tool-title.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -484,7 +484,7 @@ class TreeList implements Component {
 			}
 			case "custom_message": {
 				const content = extractTextContent(entry.content, 200);
-				result = `${renderTitleBadge(theme, { label: plainLabel(entry.customType) })}: ${normalize(isModelFacingText(content) ? MODEL_FACING_PLACEHOLDER : content)}`;
+				result = `${renderTitleBadge(theme, { label: plainLabel(entry.customType) })}: ${normalize(isModelFacingText(content) ? interfaceText().conversation.modelFacingDetails : content)}`;
 				break;
 			}
 			case "compaction": {

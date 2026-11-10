@@ -1,4 +1,5 @@
 import { fuzzyMatch } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { SessionInfo } from "../../../kernel/node.ts";
 
 export type SortMode = "threaded" | "recent" | "relevance";
@@ -46,7 +47,7 @@ export function parseSearchQuery(query: string): ParsedSearchQuery {
 	if (trimmed.startsWith("re:")) {
 		const pattern = trimmed.slice(3).trim();
 		if (!pattern) {
-			return { mode: "regex", tokens: [], regex: null, error: "Empty regex" };
+			return { mode: "regex", tokens: [], regex: null, error: interfaceText().selectors.emptyRegex };
 		}
 		try {
 			return { mode: "regex", tokens: [], regex: new RegExp(pattern, "i") };

@@ -320,7 +320,9 @@ export class FooterComponent implements Component {
 		// CURRENT/TODAY/SUBAGENTS totals rendered above.
 		const costGuard = this.session.getLastCostGuardDecision?.();
 		if (this.services.settingsManager.getCostGuardSettings().enabled && costGuard?.over) {
-			statsParts.push(theme.fg("warning", text.overLimit(costGuard.estUsd.toFixed(2))));
+			statsParts.push(
+				theme.fg("warning", text.overLimit(interfaceText().reports.formats.amount(costGuard.estUsd, 2))),
+			);
 		}
 
 		const autoIndicator = this.autoCompactEnabled ? ` ${text.autoCompaction}` : "";

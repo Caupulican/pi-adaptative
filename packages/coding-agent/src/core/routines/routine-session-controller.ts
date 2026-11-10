@@ -2,6 +2,7 @@ import { isDeepStrictEqual } from "node:util";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
+import { englishText } from "../language/interface-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { strictCanonicalDigest } from "../steering/canonical.ts";
 import { hostTimeZone } from "./calendar-schedule.ts";
@@ -85,7 +86,7 @@ function summary(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs:
 		enabled: routine.enabled,
 		schedule: routineScheduleInputOf(routine.schedule),
 		...(routine.schedule.kind === "event" && routine.schedule.source === "watch"
-			? { scheduleText: describeWatchCondition(routine.schedule.condition) }
+			? { scheduleText: describeWatchCondition(routine.schedule.condition, englishText().chat.watch) }
 			: {}),
 		...(nextRunAt === undefined ? {} : { nextRunAt }),
 		...(opensAt === undefined || nextRunAt === undefined || opensAt >= nextRunAt ? {} : { startsFrom: opensAt }),

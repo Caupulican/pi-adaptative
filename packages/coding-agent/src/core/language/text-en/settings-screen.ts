@@ -996,4 +996,11 @@ export const SETTINGS_SCREEN = {
 			customEmptyHint: 'empty uses "active"',
 		},
 	},
+	/** The scope of the project context files, as the settings row names it. */
+	projectContextScope: {
+		globalOnly: "global only",
+		thisProject: "this project",
+		allProjects: "all projects",
+		thisDirectory: "this directory",
+	},
 };

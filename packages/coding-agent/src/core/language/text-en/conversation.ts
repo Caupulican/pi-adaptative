@@ -49,6 +49,8 @@ export const CONVERSATION = {
 	toCollapse: "to collapse",
 	/** What stands in for an image the inline transcript cannot draw. */
 	imagePlaceholder: "[Image — open transcript to view]",
+	/** The line that stands where a message body is a payload written for the model and kept in the transcript. */
+	modelFacingDetails: "Details for the assistant; they are kept in the transcript.",
 
 	/** The bash tool's own line: what it runs, how it ended, and where the whole output went. */
 	bashRunning: (keys: string) => `Running... (${keys} to cancel)`,

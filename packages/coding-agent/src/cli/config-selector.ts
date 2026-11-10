@@ -6,13 +6,12 @@ import { ProcessTerminal, TUI } from "@caupulican/pi-tui";
 import type { ResolvedPaths } from "../core/package-manager.ts";
 import type { PackageSource, Settings } from "../core/settings/settings-schema.ts";
 import { ConfigSelectorComponent } from "../modes/interactive/components/config-selector.ts";
-import { initTheme, stopThemeWatcher } from "../presentation/theme/theme.ts";
+import { prepareStandaloneScreen, type StandaloneScreenSettings } from "./standalone-screen.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
-export interface ConfigSelectorSettingsSource {
+export interface ConfigSelectorSettingsSource extends StandaloneScreenSettings {
 	getGlobalSettings(): Settings;
 	getProjectSettings(): Settings;
-	getTheme(): string | undefined;
 	setExtensionPaths(paths: string[]): void;
 	setPackages(packages: PackageSource[]): void;
 	setProjectExtensionPaths(paths: string[]): void;
@@ -34,8 +33,8 @@ export interface ConfigSelectorOptions {
 
 /** Show TUI config selector and return when closed */
 export async function selectConfig(options: ConfigSelectorOptions): Promise<void> {
-	// Initialize theme before showing TUI
-	initTheme(options.settingsManager.getTheme(), true);
+	// The theme and the language are set before the screen is drawn.
+	const stopThemeWatcher = prepareStandaloneScreen(options.settingsManager, true);
 
 	return new Promise((resolve) => {
 		const ui = new TUI(new ProcessTerminal());

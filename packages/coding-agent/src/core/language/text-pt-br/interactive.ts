@@ -141,4 +141,7 @@ export const INTERACTIVE = {
 	waitInterrupted: (provider: string, after: string) =>
 		`${provider} espera interrompida por uma nova mensagem ${after}`,
 	waitClosed: (provider: string, after: string) => `${provider} espera encerrada ${after}`,
+	/** O que a tecla de colar informa quando a área de transferência ou o editor não aceita o texto. */
+	clipboardEmpty: "A área de transferência não tem texto para colar",
+	editorCannotPaste: "Este editor não aceita uma seleção colada",
 } satisfies InterfaceText["interactive"];

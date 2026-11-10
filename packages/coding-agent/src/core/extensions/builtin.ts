@@ -4,7 +4,7 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { sessionContextItems } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import { plainLabel } from "../../presentation/plain-text.ts";
+import { plainName } from "../../presentation/plain-text.ts";
 import type { SelfCompactionView } from "../compaction/self-compaction-controller.ts";
 import {
 	formatKnowledgeCollectionLine,
@@ -252,7 +252,7 @@ function formatMemoryProviderLines(retrieval: MemoryRetrievalDiagnostics): strin
 			providerReport.failure !== undefined
 				? `; failure: ${FAILURE_WORDS[providerReport.failure] ?? "an unexpected error"}`
 				: "";
-		return `  ${plainLabel(providerReport.providerId)}: ${providerReport.status} (${providerReport.resultCount} result(s)${rejection}${failure})`;
+		return `  ${plainName(providerReport.providerId)}: ${providerReport.status} (${providerReport.resultCount} result(s)${rejection}${failure})`;
 	});
 }
 

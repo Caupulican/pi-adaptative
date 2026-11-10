@@ -21,7 +21,7 @@ export function routineScheduleLabel(routine: RoutineDefinitionView): string {
 			return words.calendar(routine.schedule.cron, routine.schedule.timeZone);
 		case "event": {
 			const schedule = routine.schedule;
-			if (schedule.source === "watch") return describeWatchCondition(schedule.condition);
+			if (schedule.source === "watch") return describeWatchCondition(schedule.condition, interfaceText().chat.watch);
 			if (schedule.source === "github") {
 				const scope = [
 					schedule.pullRequest === undefined ? undefined : `#${schedule.pullRequest}`,

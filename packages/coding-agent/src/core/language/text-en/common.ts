@@ -17,4 +17,6 @@ const BOT_STATE: Readonly<Record<string, string>> = {
 export const COMMON = {
 	noMembers: "no members",
 	botState: (state: string) => BOT_STATE[state] ?? state,
+	/** A failure whose text nobody wrote: the owner reads this, the code keeps its own message. */
+	unknownError: "Unknown error",
 };

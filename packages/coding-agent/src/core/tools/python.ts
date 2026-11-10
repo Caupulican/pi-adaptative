@@ -37,6 +37,7 @@ import {
 import type { OutputReductionDetails } from "./output-reduction-types.ts";
 import "./output-reducers.ts";
 import { getAgentDir } from "../../config.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { BUNDLED_OUTPUT_RULES } from "./output-rules.bundled.ts";
 import {
 	compileOutputRulesDocument,
@@ -617,15 +618,15 @@ export function createPythonToolDefinition(
 			}
 		},
 		renderCall(args, theme) {
-			const mode = args.scriptPath ? args.scriptPath : "code";
+			const mode = args.scriptPath ? args.scriptPath : interfaceText().panes.python.codeLabel;
 			return new Text(`${theme.fg("toolTitle", theme.bold("python"))} ${theme.fg("muted", mode)}`, 0, 0);
 		},
 		renderResult(result, { expanded, isPartial }, theme) {
-			if (isPartial) return new Text(theme.fg("warning", "python running"), 0, 0);
+			if (isPartial) return new Text(theme.fg("warning", interfaceText().panes.python.running), 0, 0);
 			const details = result.details as PythonToolDetails | undefined;
-			if (!details) return new Text(theme.fg("dim", "python done"), 0, 0);
-			const status =
-				details.exitCode === 0 && !details.timedOut ? "python ok" : `python exit ${details.exitCode ?? "unknown"}`;
+			if (!details) return new Text(theme.fg("dim", interfaceText().panes.python.done), 0, 0);
+			const words = interfaceText().panes.python;
+			const status = details.exitCode === 0 && !details.timedOut ? words.ok : words.exit(details.exitCode);
 			const bridged = details.toolBridge ? ` · ${summarizeToolBridgeReport(details.toolBridge)}` : "";
 			let text = theme.fg(details.exitCode === 0 ? "success" : "warning", `${status}${bridged}`);
 			if (expanded) {
@@ -635,7 +636,7 @@ export function createPythonToolDefinition(
 					for (const line of lines) text += `\n${theme.fg("dim", line)}`;
 				}
 				for (const outputPath of [details.stdoutOutputPath, details.stderrOutputPath]) {
-					if (outputPath) text += `\n${theme.fg("muted", `full output: ${outputPath}`)}`;
+					if (outputPath) text += `\n${theme.fg("muted", words.fullOutput(outputPath))}`;
 				}
 			}
 			return new Text(text, 0, 0);

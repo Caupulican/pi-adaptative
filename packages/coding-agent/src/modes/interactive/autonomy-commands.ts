@@ -180,7 +180,7 @@ export function handleAutonomyCommand(host: AutonomyHost, text: string): void {
 			})
 			.catch((error: unknown) => {
 				const message = error instanceof Error ? error.message : String(error);
-				host.showStatus(`Research lane failed: ${message}`);
+				host.showStatus(words.researchLaneFailed(message));
 			});
 		return;
 	}

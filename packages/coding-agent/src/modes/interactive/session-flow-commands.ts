@@ -28,7 +28,6 @@ import {
 	cancelPersistedGoal,
 	clearPersistedGoal,
 	editPersistedGoal,
-	GOAL_STATUS_WORDS,
 	type GoalStateRevision,
 	getGoalStateRevision,
 	isSystemBlockedGoal,
@@ -841,7 +840,7 @@ function formatGoalStatus(snapshot: ReturnType<AgentSession["getGoalRuntimeSnaps
 				: "";
 	return [
 		words.head(state.userGoal),
-		`${words.status(GOAL_STATUS_WORDS[state.status])}${blockedReason}${tokenUsage}`,
+		`${words.status(words.statusWords[state.status])}${blockedReason}${tokenUsage}`,
 		`${words.counts({
 			open: snapshot.continuation.openRequirementIds.length,
 			blocked: snapshot.continuation.blockedRequirementIds.length,

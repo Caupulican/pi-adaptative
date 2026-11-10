@@ -86,6 +86,10 @@ export const AUTO_LEARN = {
 		customConfig: "custom provider config",
 		configured: "configured",
 	},
-	unverifiedModel: (value: string) =>
-		`Auto Learn model "${value}" is not in configured subscription/API models; saved as manual/unverified.`,
+	/** A model value no configured model matches. `setting` names the field it was typed into. */
+	unverifiedModel: (setting: UnverifiedModelSetting, value: string) =>
+		`${setting === "autoLearn" ? "Auto Learn model" : "Model router model"} "${value}" is not in configured subscription/API models; saved as manual/unverified.`,
 };
+
+/** The settings whose model field the unverified-model message can name. */
+export type UnverifiedModelSetting = "autoLearn" | "modelRouter";

@@ -200,7 +200,7 @@ export interface SettingsSelectorHost {
 	updateThinkingBlockVisibility(): void;
 	validateSelfModificationSource(settings: SelfModificationSettings): string | undefined;
 	applyAutonomyMode(mode: AutonomyMode, scope?: SettingsScope): void;
-	validateAutoLearnModelValue(value: string | undefined): string | undefined;
+	validateAutoLearnModelValue(value: string | undefined, setting?: "autoLearn" | "modelRouter"): string | undefined;
 	updateAutoLearnFooter(): void;
 	handleResourcesHubAction(action: string): Promise<void>;
 	/** Router Setup actions (configure-models, calibrate-*, preview:<task>, diagnostics). */
@@ -352,7 +352,10 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 					const text = interfaceText().settingsScreen;
 					host.showStatus(
 						settings.enabled
-							? text.statuses.costGuardOn(settings.maxTurnUsd.toFixed(2), settings.action)
+							? text.statuses.costGuardOn(
+									interfaceText().reports.formats.amount(settings.maxTurnUsd, 2),
+									settings.action,
+								)
 							: text.statuses.costGuardOff,
 					);
 				},
@@ -557,10 +560,8 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 				onModelRouterChange: (settings, scope) => {
 					host.settingsManager.setModelRouterSettings(settings, scope);
 					for (const value of [settings.cheapModel, settings.expensiveModel, settings.learningModel]) {
-						const validationMessage = host.validateAutoLearnModelValue(value);
-						if (validationMessage) {
-							host.showWarning(validationMessage.replace("Auto Learn model", "Model router model"));
-						}
+						const validationMessage = host.validateAutoLearnModelValue(value, "modelRouter");
+						if (validationMessage) host.showWarning(validationMessage);
 					}
 					host.updateAutoLearnFooter();
 					host.showStatus(interfaceText().settingsScreen.statuses.modelRouterSaved(scopeLabel(scope)));

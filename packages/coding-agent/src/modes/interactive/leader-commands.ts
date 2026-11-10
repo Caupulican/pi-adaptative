@@ -57,7 +57,9 @@ export function formatLeaderGoal(record: DelegationRecord, name: (alias: string)
 			: []),
 		...(lead.constraints.length ? [words.rules, ...lead.constraints.map((constraint) => `  - ${constraint}`)] : []),
 		envelope.writePaths.length ? words.mayChange(envelope.writePaths.join(", ")) : words.readOnly,
-		...(envelope.budgetUsd !== undefined ? [words.budget(envelope.budgetUsd.toFixed(2))] : []),
+		...(envelope.budgetUsd !== undefined
+			? [words.budget(interfaceText().reports.formats.amount(envelope.budgetUsd, 2))]
+			: []),
 		...(envelope.deadlineAt !== undefined ? [words.stopsAt(envelope.deadlineAt)] : []),
 		...(clipped.length ? [words.heldBack, ...clipped.map((item) => `  - ${item}`)] : []),
 		...(record.updates.length ? [words.updatesSent(record.updates.length)] : []),

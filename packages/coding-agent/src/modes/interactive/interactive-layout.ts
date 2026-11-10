@@ -574,13 +574,13 @@ export class InteractiveLayout {
 			paste: async () => {
 				const text = await readClipboardText();
 				if (!text) {
-					port.activityLane?.announce("Clipboard has no text to paste", "neutral");
+					port.activityLane?.announce(interfaceText().interactive.clipboardEmpty, "neutral");
 					return;
 				}
 				if (typeof port.ui.pasteText === "function" && port.ui.pasteText(text)) return;
 				const editor = port.getEditor();
 				if (!editor.insertTextAtCursor) {
-					port.activityLane?.announce("This editor cannot take a pasted selection", "failure");
+					port.activityLane?.announce(interfaceText().interactive.editorCannotPaste, "failure");
 					return;
 				}
 				editor.insertTextAtCursor(text);

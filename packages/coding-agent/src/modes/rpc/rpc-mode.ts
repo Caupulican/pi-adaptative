@@ -22,6 +22,7 @@ import type {
 } from "../../core/extensions/index.ts";
 import { disposeHttpDispatcher } from "../../core/http-dispatcher.ts";
 import type { HumanInputPresentationResult } from "../../core/human-input.ts";
+import { setInterfaceLanguage } from "../../core/language/interface-text.ts";
 import {
 	flushRawStdout,
 	setRawStdoutFailureHandler,
@@ -115,6 +116,8 @@ export async function runRpcMode(
 ): Promise<never> {
 	io.takeOverStdout();
 	io.environment.PI_CODING_AGENT = "true";
+	// This mode draws no interface: its text is English, whatever language a screen before it was drawn in.
+	setInterfaceLanguage("en");
 	io.environment.AI_AGENT = "pi";
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;

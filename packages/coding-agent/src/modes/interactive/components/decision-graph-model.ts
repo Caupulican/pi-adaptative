@@ -196,7 +196,7 @@ export function idlePreparationText(view: IdlePreparationView, nowMs: number): s
 			return words.prepared;
 		case "resumed":
 			return view.fresh && view.savedUsd !== undefined
-				? words.resumedSaved(view.savedUsd.toFixed(3))
+				? words.resumedSaved(interfaceText().reports.formats.amount(view.savedUsd, 3))
 				: view.fresh
 					? words.resumedFresh
 					: words.resumedWarm;

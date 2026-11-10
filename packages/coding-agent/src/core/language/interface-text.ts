@@ -9,6 +9,8 @@ import type { Language } from "./language.ts";
 import type { AGENTS_OVERLAY } from "./text-en/agents-overlay.ts";
 import type { AUTO_LEARN } from "./text-en/auto-learn.ts";
 import type { AUTONOMY_COMMANDS } from "./text-en/autonomy-commands.ts";
+import type { AUTONOMY_STATUS } from "./text-en/autonomy-status.ts";
+import type { BOT_TEAM } from "./text-en/bot-team.ts";
 import type { CHAT } from "./text-en/chat.ts";
 import type { COMMAND_CONTROLLER } from "./text-en/command-controller.ts";
 import type { COMMANDS } from "./text-en/commands.ts";
@@ -49,6 +51,8 @@ export interface InterfaceText {
 	agentsOverlay: typeof AGENTS_OVERLAY;
 	autoLearn: typeof AUTO_LEARN;
 	autonomyCommands: typeof AUTONOMY_COMMANDS;
+	autonomyStatus: typeof AUTONOMY_STATUS;
+	botTeam: typeof BOT_TEAM;
 	chat: typeof CHAT;
 	commandController: typeof COMMAND_CONTROLLER;
 	commands: typeof COMMANDS;
@@ -102,6 +106,15 @@ export function interfaceLanguage(): Language {
 /** The catalogue of the active language. */
 export function interfaceText(): InterfaceText {
 	return CATALOGUES[active];
+}
+
+/**
+ * The English catalogue, whatever language the interface draws in. A text a model reads, a record and a diagnostic are
+ * worded with it. A sentence that goes both to a model and to the screen has one formatter that takes its words, so the
+ * sentence is written once per language and only the caller chooses which.
+ */
+export function englishText(): InterfaceText {
+	return CATALOGUES.en;
 }
 
 /** Listen for a language change. The returned function removes the listener. */

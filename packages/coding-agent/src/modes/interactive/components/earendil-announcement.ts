@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import { Container, Image, Spacer, Text } from "@caupulican/pi-tui";
 import { getBundledInteractiveAssetPath } from "../../../config.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
@@ -29,9 +30,9 @@ export class EarendilAnnouncementComponent extends Container {
 		super();
 
 		this.addChild(new DynamicBorder((text) => theme.fg("accent", text)));
-		this.addChild(new Text(theme.bold(theme.fg("accent", "pi has joined Earendil")), 1, 0));
+		this.addChild(new Text(theme.bold(theme.fg("accent", interfaceText().notices.earendilJoined)), 1, 0));
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("muted", "Read the blog post:"), 1, 0));
+		this.addChild(new Text(theme.fg("muted", interfaceText().notices.earendilReadPost), 1, 0));
 		this.addChild(new Text(theme.fg("mdLink", BLOG_URL), 1, 0));
 		this.addChild(new Spacer(1));
 

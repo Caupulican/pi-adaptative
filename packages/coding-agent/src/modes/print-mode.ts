@@ -10,6 +10,7 @@ import type { AssistantMessage, ImageContent } from "@caupulican/pi-ai";
 import type { AgentSessionRuntime } from "../core/agent-session-runtime.ts";
 import { expandMessageForDisplay } from "../core/context/path-alias-display.ts";
 import { disposeHttpDispatcher } from "../core/http-dispatcher.ts";
+import { setInterfaceLanguage } from "../core/language/interface-text.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
 import { describeCause, neutralizeControls } from "../core/terminal-warnings.ts";
 import { projectSessionEventForJson } from "./json-event-projection.ts";
@@ -50,6 +51,8 @@ export interface PrintModeOptions {
  */
 export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: PrintModeOptions): Promise<number> {
 	const { mode, messages = [], initialMessage, initialImages, printUsage } = options;
+	// This mode draws no interface: its text is English, whatever language a screen before it was drawn in.
+	setInterfaceLanguage("en");
 	let exitCode = 0;
 	let session = runtimeHost.session;
 	let unsubscribe: (() => void) | undefined;

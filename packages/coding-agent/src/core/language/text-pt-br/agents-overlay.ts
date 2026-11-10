@@ -9,7 +9,7 @@ import type { InterfaceText } from "../interface-text.ts";
 export const AGENTS_OVERLAY = {
 	agents: "Agentes",
 	work: "Trabalho",
-	compact: "Trabalho / Time",
+	compact: "Trabalho / Equipe",
 	emptyAgents: "Nenhum agente ou trabalho em segundo plano agora",
 	emptyWork: "Nenhum objetivo, plano, agente ou trabalho em segundo plano agora",
 	unnamedTask: "Tarefa sem nome",

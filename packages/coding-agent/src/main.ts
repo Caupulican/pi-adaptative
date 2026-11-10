@@ -394,8 +394,8 @@ async function createSessionManager(
 		if (!hasHumanUI) {
 			refuseInvocation("Error: --resume requires --session-mode user; use --session <id> for workers.");
 		}
-		const { initTheme, stopThemeWatcher } = await import("./presentation/theme/theme.ts");
-		initTheme(settingsManager.getTheme(), true);
+		const { prepareStandaloneScreen } = await import("./cli/standalone-screen.ts");
+		const stopThemeWatcher = prepareStandaloneScreen(settingsManager, true);
 		try {
 			const selectedPath = await selectSession(
 				(onProgress) => listSessions(cwd, sessionDir, onProgress),
@@ -575,11 +575,11 @@ async function showStartupSelector<T>(
 	title: string,
 	options: Array<{ label: string; value: T }>,
 ): Promise<T | undefined> {
-	const [{ ExtensionSelectorComponent }, { initTheme }] = await Promise.all([
+	const [{ ExtensionSelectorComponent }, { prepareStandaloneScreen }] = await Promise.all([
 		import("./modes/interactive/components/extension-selector.ts"),
-		import("./presentation/theme/theme.ts"),
+		import("./cli/standalone-screen.ts"),
 	]);
-	initTheme(settingsManager.getTheme());
+	prepareStandaloneScreen(settingsManager);
 	setKeybindings(KeybindingsManager.create());
 
 	return new Promise((resolve) => {
@@ -1082,7 +1082,6 @@ export async function main(args: string[], options?: MainOptions) {
 	void session.prewarmShell();
 	const { settingsManager, modelRegistry, resourceLoader } = services;
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
-	bindInterfaceLanguage(settingsManager, process.env);
 	if (parsed.resume || parsed.continue || parsed.session !== undefined) {
 		// Restoring a session must not mutate owner intent. Active goals may resume their runtime;
 		// paused/blocked/limited goals remain stopped until an explicit owner action.
@@ -1304,6 +1303,7 @@ export async function main(args: string[], options?: MainOptions) {
 				? new CiSessionResource((message) => terminalWarnings.write([message]))
 				: undefined;
 		if (ciEvents) runtime.registerSessionResource(ciEvents);
+		bindInterfaceLanguage(settingsManager, process.env);
 		const { InteractiveMode } = await import("./modes/interactive/interactive-mode.ts");
 		const interactiveMode = new InteractiveMode(runtime, {
 			ciStatus: ciEvents,

@@ -114,7 +114,7 @@ function workerRow(record: LaneRecord, nowMs: number, planStep: string | undefin
 		record.modelRef,
 		record.thinkingLevel,
 		workerElapsed(record, nowMs),
-		record.costUsd !== undefined ? `$${record.costUsd.toFixed(2)}` : undefined,
+		record.costUsd !== undefined ? `$${interfaceText().reports.formats.amount(record.costUsd, 2)}` : undefined,
 	].filter((value): value is string => value !== undefined && value !== "");
 	const details = [
 		record.outcomeText ?? (record.reasonCode ? text.reason(record.reasonCode.replace(/_/g, " ")) : undefined),

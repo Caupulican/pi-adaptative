@@ -50,7 +50,7 @@ function tokens(count: number): string {
 }
 
 function dollars(value: number): string {
-	return `$${value.toFixed(value < 1 ? 4 : 2)}`;
+	return `$${interfaceText().reports.formats.amount(value, value < 1 ? 4 : 2)}`;
 }
 
 function percentTone(percent: number): (text: string) => string {

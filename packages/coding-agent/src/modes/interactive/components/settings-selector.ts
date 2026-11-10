@@ -151,7 +151,7 @@ function selfModificationSummary(settings: SelfModificationSettings): string {
 function costGuardSummary(settings: CostGuardSettings): string {
 	if (!settings.enabled) return screenText().summaries.disabled;
 	const action = screenText().valueLabels.costGuardAction[settings.action] ?? settings.action;
-	return screenText().summaries.costGuard(action, settings.maxTurnUsd.toFixed(2));
+	return screenText().summaries.costGuard(action, interfaceText().reports.formats.amount(settings.maxTurnUsd, 2));
 }
 
 function autonomyModeValue(settings: AutonomySettings): AutonomyMode {
@@ -829,10 +829,9 @@ function projectContextScopeFromValue(value: string): SettingsScope {
 }
 
 function projectContextFilesSummary(mode: "off" | "on-demand", scope: SettingsScope | undefined): string {
-	if (mode !== "on-demand") return "global only";
-	if (scope === "project") return "this project";
-	if (scope === "global") return "all projects";
-	return "this directory";
+	const words = interfaceText().settingsScreen.projectContextScope;
+	if (mode !== "on-demand") return words.globalOnly;
+	return scope === "project" ? words.thisProject : scope === "global" ? words.allProjects : words.thisDirectory;
 }
 
 class ProjectContextFilesSubmenu extends SettingsListSubmenu {

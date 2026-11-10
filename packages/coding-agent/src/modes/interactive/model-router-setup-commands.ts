@@ -118,7 +118,13 @@ function confirmBatchCalibration(
 		.filter((cost): cost is number => typeof cost === "number" && cost > 0);
 	const costNote =
 		knownCost.length > 0
-			? words.batchCostKnown(knownCost.reduce((sum, cost) => sum + cost, 0).toFixed(4), knownCost.length)
+			? words.batchCostKnown(
+					interfaceText().reports.formats.amount(
+						knownCost.reduce((sum, cost) => sum + cost, 0),
+						4,
+					),
+					knownCost.length,
+				)
 			: words.batchCostUnknown;
 	host.showSelector((done) => {
 		const options: SelectItem[] = [

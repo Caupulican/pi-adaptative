@@ -5,6 +5,9 @@
  */
 
 export const NOTICES = {
+	/** The announcement a command draws: its headline and the line above the link it carries. */
+	earendilJoined: "pi has joined Earendil",
+	earendilReadPost: "Read the blog post:",
 	/** The colour frame around a message the host caught from somewhere else. */
 	error: (message: string) => `Error: ${message}`,
 	warning: (message: string) => `Warning: ${message}`,
@@ -78,4 +81,19 @@ export const NOTICES = {
 
 	/** What a widget the extension drew too tall to keep becomes at the top of its frame. */
 	widgetTruncated: "... (widget truncated)",
+	/** The billing notice under a session signed in with a subscription key. */
+	anthropicSubscriptionAuth:
+		"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.",
+	/** What the collaboration extension reports when its own steps fail: the error text follows. */
+	collaboration: {
+		controlHandoffFailed: (error: string) => `Collaboration control handoff failed: ${error}`,
+		cleanupExhausted: (jobId: string, agentId: string, error: string) =>
+			`Collaboration cleanup exhausted for ${jobId}/${agentId}; live work remains fenced: ${error}`,
+		peerDeliveryFailed: (error: string) => `Collaboration peer delivery failed: ${error}`,
+		handoffFailed: (error: string) => `Collaboration handoff failed: ${error}`,
+		signalFailed: (error: string) => `Collaboration signal failed: ${error}`,
+		restorationFailed: (error: string) => `Collaboration restoration failed: ${error}`,
+		paneUnverified: (paneId: string, reason: string) =>
+			`Herdr pane ${paneId} could not be verified (${reason}); placement falls back to managed-workspace.`,
+	},
 };

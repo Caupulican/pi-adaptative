@@ -1,5 +1,6 @@
 import { isDeepStrictEqual } from "node:util";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { englishText } from "../language/interface-text.ts";
 import {
 	applyGoalEvent,
 	type GoalEvent,
@@ -122,16 +123,10 @@ export interface PersistedGoalStateHost {
 	clearGoalStateSnapshot?(state: GoalState, now: string): string;
 }
 
-/** The owner's words for each goal status. */
-export const GOAL_STATUS_WORDS: Readonly<Record<GoalStatus, string>> = {
-	active: "active",
-	paused: "paused",
-	blocked: "blocked",
-	usage_limited: "usage-limited",
-	budget_limited: "budget-limited",
-	completed: "completed",
-	cancelled: "cancelled",
-};
+/** The English word for a goal status: a refused command's reason is read by whoever asked, a model included. */
+function statusWord(status: GoalStatus): string {
+	return englishText().sessions.goal.statusWords[status];
+}
 
 function missingGoal(action: string): GoalActionFailure {
 	return { ok: false, error: `No goal exists to ${action}.` };
@@ -154,7 +149,7 @@ export function pauseGoal(current: GoalState | undefined, now: string): GoalActi
 			goalId: current.goalId,
 			status: current.status,
 		});
-		return { ok: false, error: `The goal is ${GOAL_STATUS_WORDS[current.status]}; only active goals can be paused.` };
+		return { ok: false, error: `The goal is ${statusWord(current.status)}; only active goals can be paused.` };
 	}
 	return { ok: true, state: applyGoalEvent(current, { type: "pause_goal", now }) };
 }
@@ -168,7 +163,7 @@ export function resumeGoal(current: GoalState | undefined, now: string, source?:
 		});
 		return {
 			ok: false,
-			error: `The goal is ${GOAL_STATUS_WORDS[current.status]}; only paused, blocked, or usage-limited goals can be resumed.`,
+			error: `The goal is ${statusWord(current.status)}; only paused, blocked, or usage-limited goals can be resumed.`,
 		};
 	}
 	return { ok: true, state: applyGoalEvent(current, { type: "resume_goal", now, ...(source ? { source } : {}) }) };
@@ -205,7 +200,7 @@ export function cancelGoal(current: GoalState | undefined, now: string): GoalAct
 			goalId: current.goalId,
 			status: current.status,
 		});
-		return { ok: false, error: `The goal is already ${GOAL_STATUS_WORDS[current.status]}.` };
+		return { ok: false, error: `The goal is already ${statusWord(current.status)}.` };
 	}
 	return { ok: true, state: applyGoalEvent(current, { type: "cancel_goal", now }) };
 }
@@ -229,7 +224,7 @@ export function stopGoalFromSystem(
 			goalId: current.goalId,
 			status: current.status,
 		});
-		return { ok: false, error: `The goal is ${GOAL_STATUS_WORDS[current.status]}; no system stop is needed.` };
+		return { ok: false, error: `The goal is ${statusWord(current.status)}; no system stop is needed.` };
 	}
 	const reason = args.reason.trim();
 	if (!reason) return { ok: false, error: "System goal stop requires a reason." };

@@ -111,7 +111,7 @@ export const SETTINGS_SCREEN = {
 			single: "Modelo único",
 			primary_critic: "Principal + crítico",
 			independent_verifier: "Verificador independente",
-			adaptive_team: "Time adaptativo",
+			adaptive_team: "Equipe adaptativa",
 		},
 		hmoeIndependence: {
 			none: "Nenhuma",
@@ -925,9 +925,9 @@ export const SETTINGS_SCREEN = {
 			description: "Predefinição numérica de pesos para habilidade, operação e confiabilidade",
 		},
 		hmoeTeam: {
-			label: "Estratégia de time H-MoE",
+			label: "Estratégia de equipe H-MoE",
 			description:
-				"Modo de seleção para modelo único, principal + crítico, verificador independente ou time adaptativo",
+				"Modo de seleção para modelo único, principal + crítico, verificador independente ou equipe adaptativa",
 		},
 		hmoeIndependence: {
 			label: "Independência H-MoE",
@@ -1018,5 +1018,12 @@ export const SETTINGS_SCREEN = {
 			customDescription: 'Digite "active" ou um padrão provedor/modelo como "openai/gpt-5.4".',
 			customEmptyHint: 'vazio usa "active"',
 		},
+	},
+	/** O escopo dos arquivos de contexto do projeto, como a linha de configurações o nomeia. */
+	projectContextScope: {
+		globalOnly: "só global",
+		thisProject: "este projeto",
+		allProjects: "todos os projetos",
+		thisDirectory: "este diretório",
 	},
 };

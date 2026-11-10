@@ -15,6 +15,7 @@
 
 import { randomUUID } from "node:crypto";
 import type { Consequence } from "../decision/primitives.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { IndependentObserverSet } from "../observer-dispatch.ts";
 import { systemOneFailureReasons } from "../review/system-one-failure-diagnostics.ts";
 import {
@@ -506,31 +507,32 @@ export const SYSTEM_ONE_BAR_LABEL = "S1";
  * there is deliberately no "?" state.
  */
 export function semanticPlaneHealthValue(health: SemanticPlaneHealth): string {
+	const words = interfaceText().status.semanticPlane;
 	let value: string;
 	switch (health.state) {
 		case "ok":
-			value = "ok";
+			value = words.ok;
 			break;
 		case "degraded": {
 			// Which evaluation is failing and how, so the operator can tell an outage from one bad input.
 			const detail = [health.lastFailedLabel, health.lastFailureKind].filter(Boolean).join(" ");
-			value = detail ? `degraded · ${detail}` : "degraded";
+			value = words.degraded(detail || undefined);
 			break;
 		}
 		case "evaluating":
-			value = "eval";
+			value = words.evaluating;
 			break;
 		case "unknown":
-			value = "ready";
+			value = words.ready;
 			break;
 		case "no-engine":
-			value = "no engine";
+			value = words.noEngine;
 			break;
 		default:
-			value = "off";
+			value = words.off;
 	}
 	const count = health.unresolvedDoubts?.length ?? 0;
-	return count ? `${value} · ${count} uncertain` : value;
+	return count ? words.uncertain(value, count) : value;
 }
 
 export function semanticPlaneHealthLabel(health: SemanticPlaneHealth): string {

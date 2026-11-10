@@ -27,5 +27,15 @@ export const STATUS = {
 	nextVerify: (pending: number) => (pending > 0 ? `verify ${pending} open criteria` : "verify"),
 	nextDeliver: "deliver",
 	rootActor: "Root orchestrator",
+	/** The System One plane's state, as the operator bar and the graph show it. */
+	semanticPlane: {
+		ok: "ok",
+		degraded: (detail: string | undefined) => (detail === undefined ? "degraded" : `degraded · ${detail}`),
+		evaluating: "eval",
+		ready: "ready",
+		noEngine: "no engine",
+		off: "off",
+		uncertain: (value: string, count: number) => `${value} · ${count} uncertain`,
+	},
 	workerActor: (shortId: string) => `Worker ${shortId}`,
 };

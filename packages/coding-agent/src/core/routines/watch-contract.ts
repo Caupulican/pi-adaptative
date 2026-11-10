@@ -9,6 +9,7 @@ import { isIP } from "node:net";
 import { join, parse } from "node:path";
 import { StringEnum } from "@caupulican/pi-ai/typebox-helpers";
 import { Type } from "typebox";
+import type { InterfaceText } from "../language/interface-text.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 
 /** Shortest cadence of a timer-based condition, and the one an omitted `everyMs` takes. */
@@ -386,32 +387,32 @@ function hostOf(url: string): string {
 	}
 }
 
-/** What a watch does, in the owner's words: no identifiers, codes or command text. */
-export function describeWatchCondition(condition: WatchCondition): string {
+/**
+ * What a watch does, in plain words: no identifiers, codes or command text. The caller passes the words: the English
+ * ones for the routine tool's result, which a model reads, and the interface's for a line drawn on screen.
+ */
+export function describeWatchCondition(condition: WatchCondition, words: InterfaceText["chat"]["watch"]): string {
+	const every = condition.type === "file" || condition.type === "process" ? "" : plainEvery(condition.everyMs);
 	switch (condition.type) {
 		case "file": {
 			const name = watchShortName(condition.path);
-			if (isWatchGlob(condition.path)) {
-				if (condition.on === "changed") return `watching files matching ${name} for changes`;
-				return condition.on === "created"
-					? `waiting for a file matching ${name} to appear`
-					: `waiting for the files matching ${name} to be removed`;
-			}
-			if (condition.on === "changed") return `watching ${name} for changes`;
-			return condition.on === "created" ? `waiting for ${name} to appear` : `waiting for ${name} to be removed`;
+			const glob = isWatchGlob(condition.path);
+			if (condition.on === "changed") return glob ? words.globChanged(name) : words.fileChanged(name);
+			if (condition.on === "created") return glob ? words.globCreated(name) : words.fileCreated(name);
+			return glob ? words.globRemoved(name) : words.fileRemoved(name);
 		}
 		case "process":
-			return "waiting for a managed process to exit";
+			return words.processExit;
 		case "pid":
-			return `checking every ${plainEvery(condition.everyMs)} for process ${condition.pid} to exit`;
+			return words.pidExit(every, condition.pid);
 		case "port": {
-			const where = LOOPBACK_HOSTS.has(condition.host) ? "" : ` on ${condition.host}`;
-			return `checking port ${condition.port}${where} every ${plainEvery(condition.everyMs)} for it to ${condition.on === "open" ? "open" : "close"}`;
+			const host = LOOPBACK_HOSTS.has(condition.host) ? undefined : condition.host;
+			return words.port(condition.port, host, every, condition.on === "open");
 		}
 		case "command":
-			return `running a command check every ${plainEvery(condition.everyMs)}`;
+			return words.commandCheck(every);
 		case "http":
-			return `checking ${hostOf(condition.url)} every ${plainEvery(condition.everyMs)}`;
+			return words.http(hostOf(condition.url), every);
 	}
 }
 

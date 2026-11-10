@@ -86,4 +86,37 @@ export const PANES = {
 		meta: (bots: number, teams: number) =>
 			`${bots} bot${bots === 1 ? "" : "s"}${teams > 0 ? ` · ${teams} team${teams === 1 ? "" : "s"}` : ""}`,
 	},
+	/** The execution preview's own words: what it says about the turn it draws, and what the copy keys report. */
+	executionPane: {
+		more: (count: number) => `  +${count} more`,
+		currentDiff: "Current diff; may include earlier or concurrent edits",
+		fileChanges: "file changes",
+		files: (count: number) => `${count} ${count === 1 ? "file" : "files"}`,
+		byWorkers: (count: number) => `+ ${count} ${count === 1 ? "worker" : "workers"}`,
+		filesAndDiff: "files and diff",
+		previousTurn: "Previous turn",
+		failed: (count: number) => `${count} failed`,
+		unknownEffects: (count: number) => `${count} with unknown effects`,
+		unclassified: (count: number) => `${count} unclassified`,
+		postprocessingFaults: (count: number) => `${count} postprocessing faults`,
+		conflictingReceipts: (count: number) => `${count} conflicting receipts`,
+		earlierErrorResults: (count: number) => `${count} earlier error results kept`,
+		mouseUnavailable: "This terminal has no mouse to hand over",
+		mouseWorkbench:
+			"Workbench owns the mouse: wheel scrolls, drag copies on release, drag edges to resize, click titles to hide or maximize, right click pastes",
+		mouseTerminal: "Terminal owns the mouse: native selection and paste; no wheel scrolling",
+		copyNoConversation: "No conversation to copy yet",
+		copySelectFirst: "Select conversation text first",
+		copyConversation: "Copied full conversation",
+		copySelection: "Copied selection",
+	},
+	/** The words the python tool draws for its own run. */
+	python: {
+		codeLabel: "code",
+		running: "python running",
+		done: "python done",
+		ok: "python ok",
+		exit: (code: number | null | undefined) => `python exit ${code ?? "unknown"}`,
+		fullOutput: (path: string) => `full output: ${path}`,
+	},
 };

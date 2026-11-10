@@ -59,8 +59,8 @@ export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsMan
 									intake.reason === undefined ? "" : words.intakeReason(plainLabel(intake.reason)),
 								),
 						intake.judge === undefined ? "" : words.intakeJudgedBy(intake.judge),
-						intake.spentUsd.toFixed(4),
-						intake.sessionMaxUsd.toFixed(2),
+						interfaceText().reports.formats.amount(intake.spentUsd, 4),
+						interfaceText().reports.formats.amount(intake.sessionMaxUsd, 2),
 						intake.last === undefined
 							? ""
 							: words.intakeLast(
@@ -78,16 +78,22 @@ export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsMan
 			settings.minOwnerTurnsBetweenRuns,
 			settings.maxRunsPerSession,
 			settings.maxNotesPerRun,
-			settings.maxUsd.toFixed(2),
+			interfaceText().reports.formats.amount(settings.maxUsd, 2),
 		),
-		words.dailyBounds(settings.maxUsdPerDay.toFixed(2), settings.maxTurnWakesPerDay),
+		words.dailyBounds(interfaceText().reports.formats.amount(settings.maxUsdPerDay, 2), settings.maxTurnWakesPerDay),
 		words.delivery(settings.delivery === "turn"),
 		words.preferences(settings.preferences.length > 0 ? settings.preferences : words.none),
 		words.ciEvents(settings.ciEvents),
 		...intakeState,
 		...(measured === undefined
 			? []
-			: [words.lastMeasured(measured.reviewUsd.toFixed(4), measured.turnWakes, measured.eventWakes)]),
+			: [
+					words.lastMeasured(
+						interfaceText().reports.formats.amount(measured.reviewUsd, 4),
+						measured.turnWakes,
+						measured.eventWakes,
+					),
+				]),
 		...suppressed.map((topic) => words.setAside(topic.label, new Date(topic.until).toISOString())),
 		...(skip === undefined ? [] : [words.lastGate(plainLabel(skip))]),
 		...(lastDelivery === undefined ? [] : [words.lastNoteDelivery(delivered(lastDelivery))]),

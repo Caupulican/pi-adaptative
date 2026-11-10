@@ -1,6 +1,7 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { findRenamedFreeTierModel } from "../model-registry.ts";
 
 /**
@@ -24,11 +25,15 @@ export interface RouterCandidatePool {
 	readonly models: readonly Model<Api>[];
 }
 
-const ROUTER_POOL_SOURCE_LABELS: Record<CustomizedRouterPoolSource, string> = {
-	enabled_models: "Models config",
-	cli_models: "--models",
-	sdk_models: "SDK scope",
-	models_selector: "Models selector",
+/** A customized pool's source, as the summary names it: the catalogue gives each source the owner's label. */
+const POOL_SOURCE_WORDS: Record<
+	CustomizedRouterPoolSource,
+	"modelsConfig" | "modelsArg" | "sdkScope" | "modelsSelector"
+> = {
+	enabled_models: "modelsConfig",
+	cli_models: "modelsArg",
+	sdk_models: "sdkScope",
+	models_selector: "modelsSelector",
 };
 
 /** Pure projection of the session's pool provenance onto the live registry. */
@@ -114,11 +119,13 @@ export function routerPoolModelRefs(pool: RouterCandidatePool): string[] {
 }
 
 export function formatRouterPoolSourceLabel(source: RouterPoolSource): string {
-	return source === "favorites" ? "favorites" : ROUTER_POOL_SOURCE_LABELS[source];
+	const words = interfaceText().localModels.routerStatus.poolSource;
+	return source === "favorites" ? words.favorites : words[POOL_SOURCE_WORDS[source]];
 }
 
 export function formatRouterPoolSummary(pool: RouterCandidatePool): string {
+	const words = interfaceText().localModels.routerStatus;
 	return pool.customized
-		? `${pool.models.length} selected model${pool.models.length === 1 ? "" : "s"} (${formatRouterPoolSourceLabel(pool.source)})`
-		: `${pool.models.length} favorite model${pool.models.length === 1 ? "" : "s"}`;
+		? words.poolSelected(pool.models.length, formatRouterPoolSourceLabel(pool.source))
+		: words.poolFavorite(pool.models.length);
 }

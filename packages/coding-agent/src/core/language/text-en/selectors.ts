@@ -263,4 +263,10 @@ export const SELECTORS = {
 		empty: "No profiles found",
 		emptyHint: "Create profiles under ~/.pi/agent/profiles/ or settings.resourceProfiles",
 	},
+	/** A search pattern that holds nothing to match. */
+	emptyRegex: "Empty regex",
+	/** What the model search matches besides the model itself. */
+	modelSearch: {
+		subscriptionAccount: "subscription sub oauth account",
+	},
 };

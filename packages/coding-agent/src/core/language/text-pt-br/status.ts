@@ -37,5 +37,14 @@ export const STATUS = {
 			: "verificar",
 	nextDeliver: "entregar",
 	rootActor: "Mente",
+	semanticPlane: {
+		ok: "ok",
+		degraded: (detail: string | undefined) => (detail === undefined ? "degradado" : `degradado · ${detail}`),
+		evaluating: "avaliando",
+		ready: "pronto",
+		noEngine: "sem motor",
+		off: "desligado",
+		uncertain: (value: string, count: number) => `${value} · ${count} em dúvida`,
+	},
 	workerActor: (shortId: string) => `Worker ${shortId}`,
 } satisfies InterfaceText["status"];

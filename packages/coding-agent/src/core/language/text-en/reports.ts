@@ -9,6 +9,8 @@ export const REPORTS = {
 	formats: {
 		/** A count or an amount of tokens, written the way the language writes numbers. */
 		number: (value: number) => value.toLocaleString("en-US"),
+		/** An amount of money, in the language's decimal separator, with the fraction digits the caller asks for and no grouping. */
+		amount: (value: number, fractionDigits: number) => value.toFixed(fractionDigits),
 		/** A moment the owner reads on screen, as a date and a time. */
 		dateTime: (at: string) =>
 			new Intl.DateTimeFormat("en-US", { dateStyle: "medium", timeStyle: "short" }).format(new Date(at)),

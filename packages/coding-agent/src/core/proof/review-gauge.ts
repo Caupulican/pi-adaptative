@@ -9,6 +9,7 @@
 
 import type { SessionEntry } from "../../kernel/node.ts";
 import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { ownerOriginKind, stampedHistoryStart } from "../turn-origin.ts";
 import { type ProofSheetRecord, readProofSheetRecords } from "./proof-sheet.ts";
 
@@ -55,9 +56,8 @@ export function latestProofSheet(entries: readonly SessionEntry[]): ProofSheetRe
 /** The status line, or undefined when nothing waits. */
 export function reviewGaugeStatusLine(waiting: number): string | undefined {
 	if (waiting <= 0) return undefined;
-	return waiting === 1
-		? "1 finished result arrived since your last message and is waiting for your review."
-		: `${waiting} finished results arrived since your last message and are waiting for your review.`;
+	const words = interfaceText().autonomyStatus.review;
+	return waiting === 1 ? words.waitingOne : words.waitingMany(waiting);
 }
 
 /** The notice observation for a count: one notice past the threshold, cleared once the count drops back under it. */

@@ -322,10 +322,10 @@ export class WorkbenchController {
 		const body = [
 			...shownPaths.map((path) => `${theme.fg("dim", "•")} ${theme.fg("text", path)}`),
 			...(result.paths.length > shownPaths.length
-				? [theme.fg("dim", `  +${result.paths.length - shownPaths.length} more`)]
+				? [theme.fg("dim", interfaceText().panes.executionPane.more(result.paths.length - shownPaths.length))]
 				: []),
 			"",
-			theme.fg("dim", "Current diff; may include earlier or concurrent edits"),
+			theme.fg("dim", interfaceText().panes.executionPane.currentDiff),
 			...patch.map((line) =>
 				theme.fg(
 					line.startsWith("+") ? "toolDiffAdded" : line.startsWith("-") ? "toolDiffRemoved" : "toolDiffContext",
@@ -335,10 +335,10 @@ export class WorkbenchController {
 		];
 		const entry: ExecutionEntry = {
 			state: "done",
-			name: "file changes",
-			subject: `${count} ${count === 1 ? "file" : "files"}`,
-			...(workers ? { by: `+ ${workers} ${workers === 1 ? "worker" : "workers"}` } : {}),
-			outputLabel: "files and diff",
+			name: interfaceText().panes.executionPane.fileChanges,
+			subject: interfaceText().panes.executionPane.files(count),
+			...(workers ? { by: interfaceText().panes.executionPane.byWorkers(workers) } : {}),
+			outputLabel: interfaceText().panes.executionPane.filesAndDiff,
 			body,
 		};
 		this.previews.push(createExecutionPreview(entry));
@@ -375,13 +375,14 @@ export class WorkbenchController {
 			return;
 		}
 		// The title carries the counts once, in plain words; the body lists only what went wrong.
+		const pane = interfaceText().panes.executionPane;
 		const problems = [
-			...(current.negative ? [`${current.negative} failed`] : []),
-			...(current.unknown ? [`${current.unknown} with unknown effects`] : []),
-			...(current.unclassified ? [`${current.unclassified} unclassified`] : []),
-			...(current.postprocessing ? [`${current.postprocessing} postprocessing faults`] : []),
-			...(current.conflicts ? [`${current.conflicts} conflicting receipts`] : []),
-			...(retained.errorResults ? [`${retained.errorResults} earlier error results kept`] : []),
+			...(current.negative ? [pane.failed(current.negative)] : []),
+			...(current.unknown ? [pane.unknownEffects(current.unknown)] : []),
+			...(current.unclassified ? [pane.unclassified(current.unclassified)] : []),
+			...(current.postprocessing ? [pane.postprocessingFaults(current.postprocessing)] : []),
+			...(current.conflicts ? [pane.conflictingReceipts(current.conflicts)] : []),
+			...(retained.errorResults ? [pane.earlierErrorResults(retained.errorResults)] : []),
 		];
 		const summary = problems.length
 			? theme.fg(
@@ -424,7 +425,8 @@ export class WorkbenchController {
 			rows.push(row);
 			targets.push(target);
 		};
-		if (this.staleEvidence && this.previews.length) push(theme.fg("dim", "Previous turn"));
+		if (this.staleEvidence && this.previews.length)
+			push(theme.fg("dim", interfaceText().panes.executionPane.previousTurn));
 		const live = new Set<string>();
 		this.previews.forEach((preview, index) => {
 			if (index) push("");
@@ -696,28 +698,34 @@ export class WorkbenchController {
 	toggleMouse(): void {
 		const mouse = this.ports.mouse;
 		if (!mouse) {
-			this.ports.notice("This terminal has no mouse to hand over", true);
+			this.ports.notice(interfaceText().panes.executionPane.mouseUnavailable, true);
 			return;
 		}
 		const enabled = !mouse.enabled();
 		mouse.set(enabled);
 		this.view.setMouseMode(enabled);
-		this.ports.notice(
-			enabled
-				? "Workbench owns the mouse: wheel scrolls, drag copies on release, drag edges to resize, click titles to hide or maximize, right click pastes"
-				: "Terminal owns the mouse: native selection and paste; no wheel scrolling",
-		);
+		const pane = interfaceText().panes.executionPane;
+		this.ports.notice(enabled ? pane.mouseWorkbench : pane.mouseTerminal);
 	}
 
 	async copy(all: boolean): Promise<void> {
 		try {
 			const text = all ? fullConversationText(this.ports.messages()) : this.view.conversation.selectionText();
 			if (!text) {
-				this.ports.notice(all ? "No conversation to copy yet" : "Select conversation text first");
+				this.ports.notice(
+					all
+						? interfaceText().panes.executionPane.copyNoConversation
+						: interfaceText().panes.executionPane.copySelectFirst,
+				);
 				return;
 			}
 			await this.ports.copy(text);
-			if (!this.disposed) this.ports.notice(all ? "Copied full conversation" : "Copied selection");
+			if (!this.disposed)
+				this.ports.notice(
+					all
+						? interfaceText().panes.executionPane.copyConversation
+						: interfaceText().panes.executionPane.copySelection,
+				);
 		} catch (error) {
 			if (!this.disposed) this.ports.notice(error instanceof Error ? error.message : String(error), true);
 		}
@@ -874,7 +882,9 @@ export function buildWorkbenchSections(
 				? text.activeTime(`${metrics.timingEstimated ? "~" : ""}${formatCompactDuration(metrics.activeMs)}`)
 				: undefined,
 			metrics && metrics.rounds > 0 ? text.rounds(metrics.rounds) : undefined,
-			metrics && metrics.totalCostUsd > 0 ? `$${metrics.totalCostUsd.toFixed(2)}` : undefined,
+			metrics && metrics.totalCostUsd > 0
+				? `$${interfaceText().reports.formats.amount(metrics.totalCostUsd, 2)}`
+				: undefined,
 		]
 			.filter(Boolean)
 			.join(" · ");

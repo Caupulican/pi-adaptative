@@ -70,7 +70,7 @@ export const PANES = {
 	},
 	roster: {
 		root: "Mente",
-		teams: (count: number) => (count === 0 ? " TIMES · /team create" : ` TIMES (${count})`),
+		teams: (count: number) => (count === 0 ? " EQUIPES · /team create" : ` EQUIPES (${count})`),
 		bots: (count: number) => (count === 0 ? " BOTS · /bot new <id>" : ` BOTS (${count})`),
 		leader: "líder",
 		remote: "remoto",
@@ -78,6 +78,40 @@ export const PANES = {
 			` WORKERS · ${running} em execução${waiting > 0 ? ` · ${waiting} aguardando` : ""}${total > running + waiting ? ` · ${total} no total` : ""}`,
 		hint: "Clique numa linha para retomar · @id para mandar mensagem",
 		meta: (bots: number, teams: number) =>
-			`${bots} ${bots === 1 ? "bot" : "bots"}${teams > 0 ? ` · ${teams} ${teams === 1 ? "time" : "times"}` : ""}`,
+			`${bots} ${bots === 1 ? "bot" : "bots"}${teams > 0 ? ` · ${teams} ${teams === 1 ? "equipe" : "equipes"}` : ""}`,
+	},
+	/** As palavras do painel de execução: o que ele diz do turno que desenha, e o que as teclas de cópia informam. */
+	executionPane: {
+		more: (count: number) => `  mais ${count}`,
+		currentDiff: "Diff atual; pode incluir edições anteriores ou concorrentes",
+		fileChanges: "mudanças em arquivos",
+		files: (count: number) => `${count} ${count === 1 ? "arquivo" : "arquivos"}`,
+		byWorkers: (count: number) => `+ ${count} ${count === 1 ? "worker" : "workers"}`,
+		filesAndDiff: "arquivos e diff",
+		previousTurn: "Turno anterior",
+		failed: (count: number) => `${count} ${count === 1 ? "falhou" : "falharam"}`,
+		unknownEffects: (count: number) => `${count} com efeitos desconhecidos`,
+		unclassified: (count: number) => `${count} sem classificação`,
+		postprocessingFaults: (count: number) => `${count} ${count === 1 ? "falha" : "falhas"} de pós-processamento`,
+		conflictingReceipts: (count: number) => `${count} ${count === 1 ? "recibo conflitante" : "recibos conflitantes"}`,
+		earlierErrorResults: (count: number) =>
+			`${count} ${count === 1 ? "resultado de erro anterior mantido" : "resultados de erro anteriores mantidos"}`,
+		mouseUnavailable: "Este terminal não tem mouse para entregar",
+		mouseWorkbench:
+			"O painel de trabalho controla o mouse: a roda rola, arrastar copia ao soltar, arrastar as bordas redimensiona, clicar no título oculta ou maximiza, clique com o botão direito cola",
+		mouseTerminal: "O terminal controla o mouse: seleção e colagem nativas; a roda não rola",
+		copyNoConversation: "Ainda não há conversa para copiar",
+		copySelectFirst: "Selecione o texto da conversa primeiro",
+		copyConversation: "Conversa inteira copiada",
+		copySelection: "Seleção copiada",
+	},
+	/** As palavras que a ferramenta python desenha para a própria execução. */
+	python: {
+		codeLabel: "código",
+		running: "python em execução",
+		done: "python concluído",
+		ok: "python ok",
+		exit: (code: number | null | undefined) => `python saiu com código ${code ?? "desconhecido"}`,
+		fullOutput: (path: string) => `saída completa: ${path}`,
 	},
 } satisfies InterfaceText["panes"];

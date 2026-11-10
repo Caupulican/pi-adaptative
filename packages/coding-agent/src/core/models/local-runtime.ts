@@ -639,7 +639,7 @@ export class OllamaRuntime {
 		if (!this._exists(binaryPath)) {
 			return { ok: false, error: "extract-fail: binary not found after extraction" };
 		}
-		onProgress?.("Ollama installed.");
+		onProgress?.(interfaceText().localModels.installProgress.ollamaInstalled);
 		return { ok: true };
 	}
 
@@ -1338,7 +1338,7 @@ export class TransformersRuntime {
 	private async createVenv(onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
 		const python = await this.findPython();
 		if (!python) return { ok: false, error: "python-missing" };
-		onProgress?.(`creating isolated Python venv at ${this.venvDir}`);
+		onProgress?.(interfaceText().localModels.installProgress.creatingVenv(this.venvDir));
 		const venv = await this._runCommand(python.command, [...python.args, "-m", "venv", this.venvDir]);
 		if (!venv.ok) return this.venvFailure(venv.error ?? venv.stderr);
 		if (!this._exists(this.pythonPath)) return this.venvFailure(`${this.pythonPath} was not created`);
@@ -1347,10 +1347,10 @@ export class TransformersRuntime {
 
 	private async repairExistingVenv(onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
 		if (await this.venvHealthy()) return { ok: true };
-		onProgress?.("repairing pi-managed Transformers venv with ensurepip");
+		onProgress?.(interfaceText().localModels.installProgress.repairingVenv);
 		const ensurepip = await this.runPython(["-m", "ensurepip", "--upgrade"], onProgress);
 		if (ensurepip.ok && (await this.venvHealthy())) return { ok: true };
-		onProgress?.("recreating pi-managed Transformers venv");
+		onProgress?.(interfaceText().localModels.installProgress.recreatingVenv);
 		rmSync(this.venvDir, { recursive: true, force: true });
 		return this.createVenv(onProgress);
 	}
@@ -1358,7 +1358,7 @@ export class TransformersRuntime {
 	private async ensurePipAvailable(onProgress?: (status: string) => void): Promise<{ ok: boolean; error?: string }> {
 		const pip = await this.runPython(["-m", "pip", "--version"]);
 		if (pip.ok) return { ok: true };
-		onProgress?.("bootstrapping pip inside pi-managed venv");
+		onProgress?.(interfaceText().localModels.installProgress.bootstrappingPip);
 		const ensurepip = await this.runPython(["-m", "ensurepip", "--upgrade"], onProgress);
 		if (!ensurepip.ok) return this.venvFailure(ensurepip.error ?? ensurepip.stderr);
 		const verified = await this.runPython(["-m", "pip", "--version"]);
@@ -1379,11 +1379,11 @@ export class TransformersRuntime {
 		const pipReady = await this.ensurePipAvailable(onProgress);
 		if (!pipReady.ok) return pipReady;
 
-		onProgress?.("upgrading pip inside pi-managed venv");
+		onProgress?.(interfaceText().localModels.installProgress.upgradingPip);
 		const pip = await this.runPython(["-m", "pip", "install", "--upgrade", "pip"], onProgress);
 		if (!pip.ok) return { ok: false, error: `pip-upgrade-fail: ${sanitizeCommandOutput(pip.error ?? pip.stderr)}` };
 
-		onProgress?.("installing pinned Transformers runtime packages");
+		onProgress?.(interfaceText().localModels.installProgress.installingPackages);
 		const transformers = await this.runPython(["-m", "pip", "install", ...TRANSFORMERS_PINNED_PACKAGES], onProgress);
 		if (!transformers.ok) {
 			return {
@@ -1392,7 +1392,7 @@ export class TransformersRuntime {
 			};
 		}
 
-		onProgress?.("installing pinned CPU PyTorch backend");
+		onProgress?.(interfaceText().localModels.installProgress.installingTorch);
 		const torch = await this.runPython(this.torchInstallArgs(), onProgress);
 		if (!torch.ok)
 			return { ok: false, error: `torch-install-fail: ${sanitizeCommandOutput(torch.error ?? torch.stderr)}` };
@@ -1412,7 +1412,7 @@ export class TransformersRuntime {
 		if (!this._exists(this._serverScriptPath))
 			return { ok: false, error: `server-script-missing: ${this._serverScriptPath}` };
 		mkdirSync(this.cacheDir, { recursive: true });
-		onProgress?.(`downloading ${this._modelId} into ${this.cacheDir}`);
+		onProgress?.(interfaceText().localModels.installProgress.downloadingModel(this._modelId, this.cacheDir));
 		const result = await this.runPython(
 			[this._serverScriptPath, "--model-id", this._modelId, "--cache-dir", this.cacheDir, "--download-only"],
 			onProgress,

@@ -4,6 +4,7 @@
  * this one function, and nothing here is read by the scheduling logic: it only describes.
  */
 
+import { interfaceText } from "../language/interface-text.ts";
 import type { GoalContinuationDecision, GoalContinuationReasonCode } from "./goal-continuation-controller.ts";
 
 export type GoalAutoContinueState =
@@ -112,28 +113,9 @@ export function goalAutoContinueHold(
 	return facts.interrupted && !facts.armed && !facts.running ? "interrupted" : undefined;
 }
 
-const OWNER_WORDS: Readonly<Record<GoalAutoContinueState, string>> = {
-	no_goal: "There is no goal, so nothing continues on its own.",
-	finished: "The goal is finished, so nothing continues on its own.",
-	owner_paused: "Automatic continuation is stopped because the goal is paused. Use /goal resume to continue.",
-	budget_limit: "Automatic continuation is stopped because the goal used its whole budget.",
-	usage_limit: "Automatic continuation is stopped because the model provider's usage limit was reached.",
-	owner_answer_needed: "Automatic continuation is stopped: the goal is blocked and needs your decision or answer.",
-	waiting_for_worker: "Automatic continuation is waiting for a helper agent to finish.",
-	waiting_for_background_task: "Automatic continuation is waiting for a background task to finish.",
-	off: "Automatic continuation is turned off, so the goal advances only when you send a message.",
-	tools_unavailable: "Automatic continuation cannot run because the goal tools are not available in this session.",
-	interrupted: "Automatic continuation stopped because you interrupted it. It starts again after your next message.",
-	running: "Automatic continuation is working on the goal now.",
-	waiting_for_turn: "Automatic continuation is waiting for the current turn to finish.",
-	scheduled: "Automatic continuation starts shortly.",
-	retrying: "Automatic continuation hit an error and will try again shortly.",
-	not_scheduled: "Automatic continuation is not scheduled right now. It starts again after your next message.",
-};
-
 /** The owner's sentence for a state, for the status lines. */
 export function describeGoalAutoContinue(state: GoalAutoContinueState): string {
-	return OWNER_WORDS[state];
+	return interfaceText().autonomyStatus.autoContinue[state];
 }
 
 const MODEL_NOTES: Readonly<Record<GoalAutoContinueHold, string>> = {

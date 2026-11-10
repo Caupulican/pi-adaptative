@@ -127,4 +127,45 @@ export const DIALOGS = {
 		yes: "Sim",
 		no: "Não",
 	},
+	/** O diálogo de confirmação antes de uma mudança proativa, e a pergunta que a ferramenta ask-question desenha. */
+	proactivity: {
+		title: "Proatividade",
+		confirmTurnOff: "Permitir que o assistente desative a revisão proativa?",
+		confirmTurnOn: "Permitir que o assistente ative a revisão proativa?",
+		confirmClearPreferences: "Permitir que o assistente apague suas preferências permanentes de proatividade?",
+		confirmSavePreferences: (text: string) =>
+			`Permitir que o assistente salve estas preferências permanentes: ${text}?`,
+	},
+	/** O diálogo de pergunta que a ferramenta ask-question desenha, e o painel que relata o que ele deixou. */
+	askQuestion: {
+		pasteUnavailable: "Colar da área de transferência não está disponível neste host de interface.",
+		readingClipboard: "Lendo a área de transferência…",
+		finishingPaste: "Concluindo a colagem da área de transferência…",
+		chooseOneOrMore: "Escolha uma ou mais opções e siga para a revisão.",
+		other: "Outro",
+		otherWithAnswer: (answer: string) => `Outro: ${answer}`,
+		skip: "Pular",
+		yourAnswer: "Sua resposta",
+		earlierLines: (count: number) => `  ↑ ${count} ${count === 1 ? "linha anterior" : "linhas anteriores"}`,
+		laterLines: (count: number) => `  ↓ ${count} ${count === 1 ? "linha seguinte" : "linhas seguintes"}`,
+		reviewTitle: "Revise suas respostas",
+		skipped: "Pulada",
+		unanswered: "Sem resposta",
+		unansweredCount: (count: number) => `${count} sem resposta. Responda ou pule cada pergunta antes de enviar.`,
+		helpInput: (save: string, newline: string, paste: string, back: string) =>
+			`${save} salvar  ·  ${newline} nova linha  ·  ${paste} colar  ·  ${back} voltar`,
+		helpReview: (submit: string, back: string, cancel: string) =>
+			`${submit} enviar  ·  ${back} voltar  ·  ${cancel} cancelar`,
+		helpMulti: (move: string, toggle: string, next: string, cancel: string) =>
+			`${move} mover  ·  ${toggle} marcar ou desmarcar  ·  ${next} próxima  ·  ${cancel} cancelar`,
+		helpSingle: (move: string, select: string, cancel: string) =>
+			`${move} mover  ·  ${select} selecionar  ·  ${cancel} cancelar`,
+		reviewSection: "revisão",
+		questionSection: "pergunta",
+		moreAbove: (count: number) => `  ↑ mais ${count}`,
+		moreBelow: (count: number) => `  ↓ mais ${count}`,
+		panelNoAnswer: "Nenhuma resposta estruturada foi mantida.",
+		panelUnavailable: "A entrada do usuário não está disponível.",
+		panelPending: "A decisão do dono continua aberta.",
+	},
 } satisfies InterfaceText["dialogs"];

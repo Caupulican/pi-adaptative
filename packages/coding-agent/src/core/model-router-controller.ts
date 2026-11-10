@@ -64,9 +64,10 @@ import type {
 	HmoeTeamStrategy,
 	HmoeWeights,
 } from "./expert-routing/vocabulary.ts";
+import { interfaceText } from "./language/interface-text.ts";
 import { deriveModelCapabilityProfile, partitionToolNamesForCapability } from "./model-capability.ts";
 import { resolveCliModel } from "./model-resolver.ts";
-import type { AccountModelCatalog } from "./model-router/account-models.ts";
+import { type AccountModelCatalog, describeAccessProblem } from "./model-router/account-models.ts";
 import {
 	type AutoSelectionDeps,
 	type AutoSelectionResult,
@@ -389,7 +390,11 @@ export class ModelRouterController {
 			const resolved = resolveCliModel({ cliModel: pattern, modelRegistry: this.deps.getModelRegistry() });
 			if (!resolved.model || isModelInRouterPool(pool, resolved.model)) continue;
 			notices.push(
-				`${tier} pin ${formatModelRouterModel(resolved.model)} is outside the candidate pool (${formatRouterPoolSummary(pool)}); this tier selects an eligible favorite instead.`,
+				interfaceText().localModels.routerStatus.poolException(
+					tier,
+					formatModelRouterModel(resolved.model),
+					formatRouterPoolSummary(pool),
+				),
 			);
 		}
 		return notices;
@@ -579,17 +584,8 @@ export class ModelRouterController {
 		return this._hasAccess(resolved.model);
 	}
 
-	/**
-	 * Why the owner cannot reach this model at all, or undefined when they can: no credential, or a
-	 * provider account that does not offer it (checked with the provider, or refused by it).
-	 */
 	private _accessProblem(model: Model<Api>): string | undefined {
-		if (!this.deps.getModelRegistry().hasConfiguredAuth(model)) return "has no auth";
-		const accounts = this.deps.getAccountModels?.();
-		if (accounts?.availability(model) === "unavailable") {
-			return `is not available on this account (${accounts.unavailableReason(model) ?? "unavailable"})`;
-		}
-		return undefined;
+		return describeAccessProblem(model, this.deps.getModelRegistry(), this.deps.getAccountModels?.());
 	}
 
 	private _hasAccess(model: Model<Api>): boolean {
@@ -1373,6 +1369,8 @@ export class ModelRouterController {
 		const lastDecision = this._lastModelRouterDecision ?? recentDecisions.at(-1);
 		const historicalDecisions = this._lastModelRouterDecision ? recentDecisions : recentDecisions.slice(0, -1);
 		const settings = this.deps.getSettingsManager().getModelRouterSettings();
+		const words = interfaceText().localModels.routerStatus;
+		const label = formatLabel ?? ((text: string) => text);
 		const lines = [
 			formatModelRouterStatus(
 				settings,
@@ -1387,18 +1385,16 @@ export class ModelRouterController {
 			),
 		];
 		if (this._lastExpertSelectionFailure) {
-			lines.push(
-				`${formatLabel ? formatLabel("H-MoE:") : "H-MoE:"} unavailable (${this._lastExpertSelectionFailure})`,
-			);
+			lines.push(`${label(words.hmoe)} ${words.unavailable(this._lastExpertSelectionFailure)}`);
 		}
 		const accountLines = this.deps.getAccountModels?.()?.describe() ?? [];
 		if (accountLines.length > 0) {
-			lines.push(formatLabel ? formatLabel("Accounts:") : "Accounts:");
+			lines.push(label(words.accounts));
 			for (const line of accountLines) lines.push(`- ${line}`);
 		}
 		const pinsOutsidePool = this._pinsOutsideCandidatePool();
 		if (pinsOutsidePool.length > 0) {
-			lines.push(formatLabel ? formatLabel("Pool exceptions:") : "Pool exceptions:");
+			lines.push(label(words.poolExceptions));
 			for (const notice of pinsOutsidePool) {
 				lines.push(`- ${notice}`);
 			}
@@ -1409,7 +1405,7 @@ export class ModelRouterController {
 			this.deps.getAgentDir(),
 		);
 		if (diagnostics.length > 0) {
-			lines.push(formatLabel ? formatLabel("Config diagnostics:") : "Config diagnostics:");
+			lines.push(label(words.configDiagnostics));
 			for (const diagnostic of diagnostics) {
 				lines.push(`- ${diagnostic}`);
 			}

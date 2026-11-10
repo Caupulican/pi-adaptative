@@ -48,7 +48,7 @@ import {
 import type { RoutineIntakeStatus } from "../routines/routine-intake.ts";
 import { describeRoutineProgress } from "../routines/routine-progress.ts";
 import { routineGithubInterests } from "../routines/routine-scheduler-controller.ts";
-import { describeWatchCondition } from "../routines/watch-contract.ts";
+import type { WatchCondition } from "../routines/watch-contract.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { SessionSemanticPlaneController } from "../session-semantic-plane-controller.ts";
 import type { SettingsManager } from "../settings-manager.ts";
@@ -81,8 +81,8 @@ export interface RoutineStatusItem {
 	readonly state: "enabled" | "paused" | "paused-after-failures" | "ended";
 	readonly ended?: "spent" | "condition" | "expired";
 	readonly schedule: RoutineDefinitionView["schedule"]["kind"];
-	/** A watch routine's condition in the owner's words; absent for every other schedule. */
-	readonly watching?: string;
+	/** The condition a watch routine waits on, drawn in the owner's words when the report is written; absent otherwise. */
+	readonly condition?: WatchCondition;
 	/** Absent for an event routine, an ended one, and a schedule with no slot left. */
 	readonly nextRunAt?: number;
 	/** The start a `readyBy` window gives `nextRunAt`'s run, when earlier than the slot (no earlier run unfinished). */
@@ -454,7 +454,7 @@ function routineItem(
 		...(ended ? { ended } : {}),
 		schedule: routine.schedule.kind,
 		...(routine.schedule.kind === "event" && routine.schedule.source === "watch"
-			? { watching: describeWatchCondition(routine.schedule.condition) }
+			? { condition: routine.schedule.condition }
 			: {}),
 		...(ended || routine.nextRunAt === ROUTINE_NO_NEXT_RUN_AT ? {} : { nextRunAt: routine.nextRunAt }),
 		...(ended || opensAt >= routine.nextRunAt ? {} : { startsFrom: opensAt }),

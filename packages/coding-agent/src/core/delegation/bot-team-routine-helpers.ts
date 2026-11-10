@@ -4,6 +4,7 @@ import { VERSION, VERSION_SOURCE_AVAILABLE } from "../../config.ts";
 import { judgeOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { isPositiveSafePid, probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
 import { comparePackageVersions } from "../../utils/version-check.ts";
+import type { InterfaceText } from "../language/interface-text.ts";
 import {
 	MIN_ROUTINE_INTERVAL_MS,
 	nextRoutineAt,
@@ -226,10 +227,17 @@ export function isOlderDaemonBuild(leaseBuild: string | undefined, own: string |
 	return order !== undefined && order < 0;
 }
 
-/** The daemon's build for status lines, and the session's when they differ. */
-export function describeDaemonBuild(build: string | undefined, sessionBuild: string | undefined): string {
-	const running = build === undefined ? "build unstamped (an earlier build)" : `build ${build}`;
-	return build === sessionBuild ? running : `${running}; this session runs ${sessionBuild ?? "an unknown build"}`;
+/**
+ * The daemon's build, and the session's when they differ. The caller passes the words: the English ones for the launch
+ * report, which is also written to the starter's diagnostics, and the interface's for a status line drawn on screen.
+ */
+export function describeDaemonBuild(
+	build: string | undefined,
+	sessionBuild: string | undefined,
+	words: Pick<InterfaceText["chat"], "daemonBuildRunning" | "daemonBuildSession">,
+): string {
+	const running = words.daemonBuildRunning(build);
+	return build === sessionBuild ? running : words.daemonBuildSession(running, sessionBuild);
 }
 
 /** The daemon a newer build's claim took the lease from: it exits on observing the new lease. */

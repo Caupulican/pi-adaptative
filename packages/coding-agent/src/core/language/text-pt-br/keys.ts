@@ -53,7 +53,7 @@ const BINDINGS = {
 	"app.agents.open": "Mostrar ou ocultar os detalhes de objetivo, plano e agentes",
 	"app.agents.close": "Fechar os detalhes do trabalho",
 	"app.agents.switchChat": "Trocar o chat ativo a partir dos detalhes do trabalho",
-	"app.chat.switch": "Trocar o chat ativo entre a Mente, bots persistentes e times",
+	"app.chat.switch": "Trocar o chat ativo entre a Mente, bots persistentes e equipes",
 	"app.thinking.toggle": "Mostrar ou ocultar os blocos de raciocínio",
 	"app.session.toggleNamedFilter": "Ligar ou desligar o filtro de sessões com nome",
 	"app.editor.external": "Abrir o editor externo",
@@ -67,7 +67,7 @@ const BINDINGS = {
 	"app.execution.toggle": "Recolher ou expandir o painel de trabalho",
 	"app.workbench.grow": "Dar uma linha a mais ao painel de trabalho",
 	"app.workbench.shrink": "Tirar uma linha do painel de trabalho",
-	"app.inspector.toggle": "Ocultar ou mostrar o inspetor de Plano de trabalho / Time",
+	"app.inspector.toggle": "Ocultar ou mostrar o inspetor de Plano de trabalho / Equipe",
 	"app.execution.maximize":
 		"Dar ao painel Execução todas as linhas que sobram do mínimo da conversa, ou restaurar o painel de trabalho",
 	"app.execution.pageUp": "Paginar o painel Execução para cima pelas evidências anteriores",

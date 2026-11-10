@@ -1,6 +1,7 @@
 import type { ThinkingLevel } from "../../kernel/index.ts";
 import type { SessionEntry } from "../../kernel/node.ts";
 import type { ModelTier, RouteDecision, RouteRisk } from "../autonomy/contracts.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRouterIntent } from "./intent-classifier.ts";
 
 export const MODEL_ROUTER_DECISION_CUSTOM_TYPE = "model_router_decision";
@@ -36,10 +37,8 @@ export type ModelRouterStatusSettings = {
 	executorThinking?: ThinkingLevel;
 };
 
-const MODEL_ROUTER_INHERIT_THINKING_LABEL = "(inherit)";
-
 function getThinkingLabel(level: ThinkingLevel | undefined): string {
-	return level ?? MODEL_ROUTER_INHERIT_THINKING_LABEL;
+	return level ?? interfaceText().localModels.routerStatus.inheritThinking;
 }
 
 function formatModelWithThinking(
@@ -48,14 +47,16 @@ function formatModelWithThinking(
 	level: ThinkingLevel | undefined,
 	fitness?: ModelRouterTierFitnessStatus,
 ): string {
-	const fitnessSuffix = fitness ? ` · fitness ${formatFitness(fitness)}` : "";
-	return `${label} ${model ?? "unset"} · thinking ${getThinkingLabel(level)}${fitnessSuffix}`;
+	const words = interfaceText().localModels.routerStatus;
+	const fitnessSuffix = fitness ? words.fitness(formatFitness(fitness)) : "";
+	return `${label} ${model ?? words.unset} · ${words.thinking(getThinkingLabel(level))}${fitnessSuffix}`;
 }
 
 function formatFitness(fitness: ModelRouterTierFitnessStatus): string {
-	if (fitness.status === "fit") return "fit";
-	if (fitness.status === "unprobed") return "unprobed";
-	return `UNFIT (${fitness.lane} ${fitness.succeeded}/${fitness.total})`;
+	const words = interfaceText().localModels.routerStatus;
+	if (fitness.status === "fit") return words.fitnessFit;
+	if (fitness.status === "unprobed") return words.fitnessUnprobed;
+	return words.fitnessUnfit(fitness.lane, fitness.succeeded, fitness.total);
 }
 
 export type ModelRouterDecisionStatus = {
@@ -104,15 +105,16 @@ function isModelRouterDecisionStatus(data: unknown): data is ModelRouterDecision
 
 function formatDecision(decision: ModelRouterDecisionStatus): string {
 	const { tier, risk, reasonCode, selection } = decision.route;
+	const words = interfaceText().localModels.routerStatus;
 	let outcomeText: string = decision.outcome;
 	if (decision.outcome === "escalated" && decision.retryModel) {
-		outcomeText = `escalated -> ${decision.retryModel}`;
+		outcomeText = words.escalatedTo(decision.retryModel);
 	} else if (decision.outcome === "failed") {
-		outcomeText = "failed";
+		outcomeText = words.failed;
 	}
 	// Selection provenance is shown only when it was recorded; older decisions carry none.
 	const selectionText = selection
-		? `, selected by ${selection === "hmoe" ? "H-MoE" : selection === "system_one" ? "System One" : selection}`
+		? words.selectedBy(selection === "hmoe" ? "H-MoE" : selection === "system_one" ? "System One" : selection)
 		: "";
 	return `${tier}/${risk} -> ${decision.routedModel} (${reasonCode}, ${outcomeText}${selectionText})`;
 }
@@ -138,62 +140,63 @@ export function formatModelRouterStatus(
 	failoverStatus?: ModelRouterFailoverStatus,
 	poolSummary?: string,
 ): string {
+	const words = interfaceText().localModels.routerStatus;
 	const effectiveLastDecision = lastSkipReason ? undefined : lastDecision;
 	const lines = [
-		`${formatLabel("Status:")} ${settings.enabled ? "enabled" : "disabled"}`,
-		...(settings.selectionMode ? [`${formatLabel("Selection mode:")} ${settings.selectionMode.toUpperCase()}`] : []),
-		...(poolSummary ? [`${formatLabel("Candidate pool:")} ${poolSummary}`] : []),
-		...(settings.poolPreference ? [`${formatLabel("Pool preference:")} ${settings.poolPreference}`] : []),
+		`${formatLabel(words.status)} ${settings.enabled ? words.enabled : words.disabled}`,
+		...(settings.selectionMode
+			? [`${formatLabel(words.selectionMode)} ${settings.selectionMode.toUpperCase()}`]
+			: []),
+		...(poolSummary ? [`${formatLabel(words.candidatePool)} ${poolSummary}`] : []),
+		...(settings.poolPreference ? [`${formatLabel(words.poolPreference)} ${settings.poolPreference}`] : []),
 		formatModelWithThinking(
-			formatLabel("Cheap model:"),
+			formatLabel(words.cheapModel),
 			settings.cheapModel,
 			settings.cheapThinking,
 			settings.fitnessGate ? fitnessStatuses?.cheap : undefined,
 		),
 		formatModelWithThinking(
-			formatLabel("Medium model:"),
+			formatLabel(words.mediumModel),
 			settings.mediumModel,
 			settings.mediumThinking,
 			settings.fitnessGate ? fitnessStatuses?.medium : undefined,
 		),
 		formatModelWithThinking(
-			formatLabel("Expensive model:"),
+			formatLabel(words.expensiveModel),
 			settings.expensiveModel,
 			settings.expensiveThinking,
 			settings.fitnessGate ? fitnessStatuses?.expensive : undefined,
 		),
-		formatModelWithThinking(formatLabel("Executor model:"), settings.executorModel, settings.executorThinking),
-		`${formatLabel("Learning model:")} ${settings.learningModel ?? "active"}`,
+		formatModelWithThinking(formatLabel(words.executorModel), settings.executorModel, settings.executorThinking),
+		`${formatLabel(words.learningModel)} ${settings.learningModel ?? words.active}`,
 	];
 	if (!settings.enabled) {
-		lines.push(`${formatLabel("Routing:")} inactive (disabled)`);
+		lines.push(`${formatLabel(words.routing)} ${words.inactive}`);
 	} else if (lastSkipReason) {
-		lines.push(`${formatLabel("Routing:")} skipped (${lastSkipReason})`);
+		lines.push(`${formatLabel(words.routing)} ${words.skipped(lastSkipReason)}`);
 	} else if (effectiveLastDecision) {
-		lines.push(`${formatLabel("Routing:")} active`);
+		lines.push(`${formatLabel(words.routing)} ${words.active}`);
 	} else {
-		lines.push(`${formatLabel("Routing:")} waiting for prompt`);
+		lines.push(`${formatLabel(words.routing)} ${words.waitingForPrompt}`);
 	}
-	lines.push(`${formatLabel("Latest intent:")} ${latestIntent ?? "none"}`);
+	lines.push(`${formatLabel(words.latestIntent)} ${latestIntent ?? words.none}`);
 	if (!effectiveLastDecision) {
-		lines.push(`${formatLabel("Last decision:")} none`);
+		lines.push(`${formatLabel(words.lastDecision)} ${words.none}`);
 	} else {
-		lines.push(`${formatLabel("Last decision:")} ${formatDecision(effectiveLastDecision)}`);
+		lines.push(`${formatLabel(words.lastDecision)} ${formatDecision(effectiveLastDecision)}`);
 	}
 	if (failoverStatus?.exhausted.length) {
-		lines.push(`${formatLabel("Exhausted models:")} ${failoverStatus.exhausted.join(", ")}`);
+		lines.push(`${formatLabel(words.exhaustedModels)} ${failoverStatus.exhausted.join(", ")}`);
 	}
 	if (failoverStatus?.lastNotice) {
-		lines.push(`${formatLabel("Last failover:")} ${failoverStatus.lastNotice}`);
+		lines.push(`${formatLabel(words.lastFailover)} ${failoverStatus.lastNotice}`);
 	}
 	if (failoverStatus?.failureStats && failoverStatus.failureStats.total > 0) {
 		const { total, unknown } = failoverStatus.failureStats;
-		lines.push(
-			`${formatLabel("Provider failures:")} ${total} provider failures this session (${unknown} unclassified — see failure corpus)`,
-		);
+		lines.push(`${formatLabel(words.providerFailures)} ${words.providerFailuresDetail(total, unknown)}`);
 	}
 	if (recentDecisions.length > 0) {
-		lines.push(formatLabel("Recent decisions:"));
+		lines.push(formatLabel(words.recentDecisions));
 		for (const decision of recentDecisions) {
 			lines.push(`- ${formatDecision(decision)}`);
 		}
