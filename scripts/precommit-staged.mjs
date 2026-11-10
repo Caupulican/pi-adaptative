@@ -21,6 +21,7 @@ import { dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { commitObligation, describeStatus, readCiStatus } from "./ci-status.mjs";
 import { pinGithubOriginGhDefault } from "./github-origin.mjs";
+import { resolvePackageDirectory } from "./lib/tool-resolution.mjs";
 
 const scriptsDir = dirname(fileURLToPath(import.meta.url));
 const repoRoot = resolve(scriptsDir, "..");
@@ -173,7 +174,12 @@ export function main(argv = process.argv.slice(2)) {
 	run("info-exclude guard", process.execPath, [join(scriptsDir, "check-info-exclude-staged.mjs")]);
 	run("lockfile guard", process.execPath, [join(scriptsDir, "check-lockfile-commit.mjs")]);
 	if (plan.biome.length > 0) {
-		const biomeBin = join(repoRoot, "node_modules/@biomejs/biome/bin/biome");
+		const biomeDirectory = resolvePackageDirectory("@biomejs/biome");
+		if (!biomeDirectory) {
+			console.error("precommit: error: @biomejs/biome is not resolvable from this worktree or its main checkout");
+			process.exit(1);
+		}
+		const biomeBin = join(biomeDirectory, "bin", "biome");
 		const unstagedChanged = execFileSync("git", ["diff", "--name-only", "-z", "--", ...plan.biome], {
 			cwd: repoRoot,
 			encoding: "utf8",

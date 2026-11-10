@@ -2,27 +2,13 @@
 import { spawnSync } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { createRequire } from "node:module";
-import { dirname, join } from "node:path";
+import { join } from "node:path";
+import { resolvePackageDirectory } from "./lib/tool-resolution.mjs";
 
 const args = process.argv.slice(2);
 
-/**
- * Resolve each compiler the way Node resolves any dependency, from this script's own location. A
- * path built from the script's parent directory only exists in the primary checkout: a linked
- * worktree has the tracked `scripts/` but no `node_modules` of its own, so the hardcoded path
- * aborted there while the compiler was resolvable one directory up. Resolution walks the same
- * chain npm installed into, so hoisting and worktrees both land on the single installed compiler.
- * `bin/*` entries are not in the packages' export maps; the manifest is, and the bin sits beside it.
- */
+/** `bin/*` entries are not in the packages' export maps; the manifest is, and the bin sits beside it. */
 const requireFromScript = createRequire(import.meta.url);
-
-function packageDirectory(specifier, from = requireFromScript) {
-	try {
-		return dirname(from.resolve(`${specifier}/package.json`));
-	} catch {
-		return undefined;
-	}
-}
 
 /**
  * tsrs (the Rust port of the TypeScript 7 compiler) ships its native binary in one per-platform
@@ -33,12 +19,12 @@ function packageDirectory(specifier, from = requireFromScript) {
  * platform filter) does not count: only one whose own `os` and `cpu` match this host does.
  */
 function resolveTsrsEntrypoint() {
-	const tsrsDirectory = packageDirectory("tsrs");
+	const tsrsDirectory = resolvePackageDirectory("tsrs", requireFromScript);
 	if (!tsrsDirectory) return undefined;
 	const manifest = JSON.parse(readFileSync(join(tsrsDirectory, "package.json"), "utf8"));
 	const requireFromTsrs = createRequire(join(tsrsDirectory, "package.json"));
 	const hasHostBinary = Object.keys(manifest.optionalDependencies ?? {}).some((name) => {
-		const platformDirectory = packageDirectory(name, requireFromTsrs);
+		const platformDirectory = resolvePackageDirectory(name, requireFromTsrs);
 		if (!platformDirectory) return false;
 		const platform = JSON.parse(readFileSync(join(platformDirectory, "package.json"), "utf8"));
 		return platform.os?.includes(process.platform) === true && platform.cpu?.includes(process.arch) === true;
@@ -50,7 +36,7 @@ let compilerName = "tsrs";
 let compilerEntrypoint = resolveTsrsEntrypoint();
 if (!compilerEntrypoint) {
 	compilerName = "typescript";
-	const typescriptDirectory = packageDirectory("typescript");
+	const typescriptDirectory = resolvePackageDirectory("typescript", requireFromScript);
 	if (!typescriptDirectory) {
 		console.error("No TypeScript compiler could be resolved (tsrs has no binary for this host and typescript is missing). Run npm install --ignore-scripts.");
 		process.exit(1);
