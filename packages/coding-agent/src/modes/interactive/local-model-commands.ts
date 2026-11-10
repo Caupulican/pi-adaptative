@@ -16,14 +16,7 @@ import { totalmem } from "node:os";
 import { join } from "node:path";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai";
 import type { Api, Model } from "@caupulican/pi-ai/types";
-import {
-	type Component,
-	Container,
-	type SelectItem,
-	SelectList,
-	type SelectListLayoutOptions,
-	type TUI,
-} from "@caupulican/pi-tui";
+import type { Component, Container, TUI } from "@caupulican/pi-tui";
 import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type {
@@ -33,6 +26,7 @@ import type {
 	HmoeTeamStrategy,
 	HmoeWeights,
 } from "../../core/expert-routing/vocabulary.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
 import { evaluateSurfaceFitness } from "../../core/model-router/fitness-gate.ts";
@@ -75,13 +69,15 @@ import type { ToolProbeResult } from "../../core/tool-protocol-controller.ts";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { ThinkingLevel } from "../../kernel/index.ts";
 import { plainLabel } from "../../presentation/plain-text.ts";
-import { getSelectListTheme } from "../../presentation/theme-model.ts";
-import { DynamicBorder } from "./components/dynamic-border.ts";
 import { FitnessRoleSelectorComponent } from "./components/fitness-role-selector.ts";
+import {
+	MODEL_ROUTER_THINKING_INHERIT_VALUE,
+	ModelRouterThinkingSelectorComponent,
+} from "./components/model-router-thinking-selector.ts";
 import { ModelSelectorComponent } from "./components/model-selector.ts";
 import { ModelSuggestionSelectorComponent } from "./components/model-suggestion-selector.ts";
+import { formatOllamaStore, probeReport, removalDisclosure, reportRefusedRegistration } from "./local-model-notices.ts";
 import { presentModelFitnessOutcome } from "./model-fitness-presentation.ts";
-import { THINKING_LEVEL_DESCRIPTIONS } from "./thinking-level-descriptions.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface LocalModelCommandsSettingsSource {
@@ -129,14 +125,6 @@ export interface LocalModelCommandsModelSource {
 
 type SelectorFactory = (done: () => void) => { component: Component; focus: Component };
 
-const MODEL_ROUTER_THINKING_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
-	minPrimaryColumnWidth: 12,
-	maxPrimaryColumnWidth: 32,
-};
-
-const MODEL_ROUTER_THINKING_INHERIT_VALUE = "__inherit_model_router_thinking__";
-const MODEL_ROUTER_THINKING_INHERIT_LABEL = "(inherit)";
-
 const MODEL_ROUTER_THINKING_FALLBACK_LEVELS: readonly ThinkingLevel[] = [
 	"off",
 	"minimal",
@@ -146,7 +134,6 @@ const MODEL_ROUTER_THINKING_FALLBACK_LEVELS: readonly ThinkingLevel[] = [
 	"xhigh",
 ];
 
-type RouterThinkingLevel = ThinkingLevel | typeof MODEL_ROUTER_THINKING_INHERIT_VALUE;
 type ModelRouterThinkingField = "cheapThinking" | "mediumThinking" | "expensiveThinking" | "executorThinking";
 
 /** Narrow seam for persisting a probed model's role — matches the fitness-role test. */
@@ -223,61 +210,13 @@ const NEEDLE_DEFAULT_TOOLS = [
 	},
 ];
 
-class ModelRouterThinkingSelectorComponent extends Container {
-	private selectList: SelectList;
-
-	constructor(
-		currentLevel: RouterThinkingLevel,
-		availableLevels: ThinkingLevel[],
-		onSelect: (level: RouterThinkingLevel) => void,
-		onCancel: () => void,
-	) {
-		super();
-
-		const thinkingOptions: SelectItem[] = [
-			{
-				value: MODEL_ROUTER_THINKING_INHERIT_VALUE,
-				label: MODEL_ROUTER_THINKING_INHERIT_LABEL,
-				description: "Use current session default for this tier.",
-			},
-			...availableLevels.map((level) => ({
-				value: level,
-				label: level,
-				description: THINKING_LEVEL_DESCRIPTIONS[level],
-			})),
-		];
-
-		this.addChild(new DynamicBorder());
-
-		this.selectList = new SelectList(
-			thinkingOptions,
-			thinkingOptions.length,
-			getSelectListTheme(),
-			MODEL_ROUTER_THINKING_SELECT_LIST_LAYOUT,
-		);
-
-		const index = thinkingOptions.findIndex((item) => item.value === currentLevel);
-		if (index !== -1) {
-			this.selectList.setSelectedIndex(index);
-		}
-
-		this.selectList.onSelect = (item) => {
-			onSelect(item.value as RouterThinkingLevel);
-		};
-		this.selectList.onCancel = () => {
-			onCancel();
-		};
-
-		this.addChild(this.selectList);
-		this.addChild(new DynamicBorder());
-	}
-}
 /**
  * /models — USER-invoked local model lifecycle (never a model-invokable tool):
  * list/add/remove/stop per local-model-lifecycle-design.md. Removal is explicit-only with
  * full disclosure; a pasted install command is parsed for its ref, never executed.
  */
 export async function handleModelsCommand(host: LocalModelHost, argsText: string): Promise<void> {
+	const words = interfaceText().localModels.models;
 	const [action = "list", ...rest] = argsText.split(/\s+/).filter(Boolean);
 	try {
 		if (action === "suggest" || action === "suggestions") {
@@ -302,28 +241,29 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 				.some((entry) => isPiManagedPrismLlamaCppModel(entry));
 			const stoppedPrism = hasPiManagedPrismModel && getPrismLlamaCppRuntime(host).stop().stopped;
 			const stoppedAny = stopped.stopped || stoppedTransformers > 0 || stoppedPrism;
-			host.showStatus(
-				stoppedAny
-					? `Pi-managed local model server stopped${stoppedTransformers > 0 ? ` (${stoppedTransformers} Transformers sidecar(s))` : ""}${stoppedPrism ? " (prism llama.cpp server)" : ""}; models remain installed.`
-					: "No pi-managed server running (a system server, if any, is not pi's to stop).",
-			);
+			host.showStatus(stoppedAny ? words.stopStopped(stoppedTransformers, stoppedPrism) : words.stopNone);
 			return;
 		}
 
 		if (action === "import") {
 			const imported = host.localRuntime.importUserModels();
 			host.showStatus(
-				`Imported Ollama models from ${imported.sourceDir} into pi-owned store ${imported.targetDir}: ` +
-					`${imported.manifestsImported} manifest(s), ${imported.blobsHardlinked} blob(s) hardlinked, ` +
-					`${imported.blobsCopied} blob(s) copied, ${imported.blobsSkipped + imported.manifestsSkipped} existing file(s) skipped.`,
+				words.imported({
+					sourceDir: imported.sourceDir,
+					targetDir: imported.targetDir,
+					manifests: imported.manifestsImported,
+					hardlinked: imported.blobsHardlinked,
+					copied: imported.blobsCopied,
+					skipped: imported.blobsSkipped + imported.manifestsSkipped,
+				}),
 			);
 			return;
 		}
 
 		if (action === "needle") {
 			if (rest.length === 0) {
-				host.showStatus("Usage: /models needle <query> [tools-json]");
-				host.showStatus("  tools-json defaults to the built-in smoke-test tool set (one city weather lookup)");
+				host.showStatus(words.needleUsage);
+				host.showStatus(words.needleToolsHint);
 				return;
 			}
 			await runNeedleQuery(host, rest);
@@ -333,21 +273,17 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 		if (action === "add") {
 			const rawRef = rest.join(" ");
 			if (!rawRef) {
-				host.showStatus(
-					"Usage: /models add <ollama-tag | hf.co/org/repo[:quant] | curated HF full-base ref | huggingface URL | pasted install command>",
-				);
-				host.showStatus("Or start from a validated suggestion: /models suggest");
+				host.showStatus(words.addUsage);
+				host.showStatus(words.addSuggestHint);
 				return;
 			}
 			const source = normalizeModelSource(rawRef);
 			if (source.type === "rejected") {
-				host.showStatus(`Not added: ${source.reason}`);
+				host.showStatus(words.notAdded(source.reason));
 				return;
 			}
 			if (source.type === "api") {
-				host.showStatus(
-					`${source.ref} is an API model — nothing to install. Configure auth for the provider, then probe it with /fitness ${source.ref}.`,
-				);
+				host.showStatus(words.apiModel(source.ref));
 				return;
 			}
 			if (source.type === "transformers") {
@@ -357,7 +293,7 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 			if (source.type === "prism-llamacpp") {
 				const descriptor = PRISM_LLAMACPP_DESCRIPTORS[source.modelId];
 				if (!descriptor) {
-					host.showStatus(`${source.modelId} has no curated prism llama.cpp descriptor — this is a wiring bug.`);
+					host.showStatus(words.descriptorMissing(source.modelId));
 					return;
 				}
 				await addPrismLlamaCppModel(host, descriptor);
@@ -383,7 +319,7 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 			const ref = restArgs[0];
 			const confirmed = restArgs[1] === "confirm";
 			if (!ref) {
-				h.showStatus(`Usage: /models ${actionName} <ref> confirm`);
+				h.showStatus(words.removalUsage(actionName));
 				return;
 			}
 			const source = normalizeModelSource(ref);
@@ -415,7 +351,7 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 			const ref = rest[0];
 			const confirmed = rest[1] === "confirm";
 			if (!ref) {
-				host.showStatus(`Usage: /models ${action} <ref> confirm`);
+				host.showStatus(words.removalUsage(action));
 				return;
 			}
 			const source = normalizeModelSource(ref);
@@ -439,7 +375,7 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 			const runtime = rest[0];
 			const confirmed = rest[1] === "confirm";
 			if (!runtime) {
-				host.showStatus("Usage: /models uninstall-runtime <prism> confirm");
+				host.showStatus(words.uninstallRuntimeUsage);
 				return;
 			}
 			await uninstallRuntime(host, runtime, confirmed);
@@ -449,11 +385,11 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 		if (action === "enable" || action === "disable") {
 			const runtime = rest[0];
 			if (runtime !== "ollama" && runtime !== "llamacpp" && runtime !== "transformers") {
-				host.showStatus(`Usage: /models ${action} <ollama | llamacpp | transformers>`);
+				host.showStatus(words.enableUsage(action));
 				return;
 			}
 			host.settingsManager.setLocalRuntimeEnabled(runtime, action === "enable");
-			host.showStatus(`Local runtime ${runtime} is now ${action}d.`);
+			host.showStatus(words.runtimeEnabled(runtime, action === "enable"));
 			return;
 		}
 
@@ -463,53 +399,45 @@ export async function handleModelsCommand(host: LocalModelHost, argsText: string
 	}
 }
 
-function formatOllamaStore(store: { kind: string; path: string; modelCount: number } | undefined): string {
-	if (!store) return "unknown store (0 model(s))";
-	return `${store.path} [${store.kind}, ${store.modelCount} model(s)]`;
-}
-
 export async function ensureLocalServer(host: LocalModelHost): Promise<boolean> {
+	const words = interfaceText().localModels.models;
 	const status = await host.localRuntime.detect();
 	if (status.serverUp) {
 		if (status.managedByPi && status.activeStore?.kind === "pi-owned") return true;
-		host.showStatus(
-			`Ollama is already running on ${status.serverUrl}; this session cannot verify its ownership or store. ` +
-				"Stop the other server before adding models.",
-		);
+		host.showStatus(words.serverAlreadyRunning(status.serverUrl));
 		return false;
 	}
 	if (!status.binaryPath) {
 		for (const line of host.localRuntime.installGuide()) host.showStatus(line);
 		return false;
 	}
-	host.showStatus(
-		`Starting local model server (${status.binarySource} binary, owned storage: ${status.ownedModelsDir})…`,
-	);
+	host.showStatus(words.startingServer(String(status.binarySource), String(status.ownedModelsDir)));
 	const started = await host.localRuntime.start();
 	if (!started.started) {
 		harnessLog.debug("ui", "the local server did not start", { reason: started.reason });
-		host.showStatus(`Could not start the local server: ${plainLabel(started.reason)}`);
+		host.showStatus(words.startFailed(plainLabel(String(started.reason))));
 		return false;
 	}
 	return true;
 }
 
 export async function listLocalModels(host: LocalModelHost): Promise<void> {
+	const words = interfaceText().localModels.models;
 	const status = await host.localRuntime.detect();
 	const models = status.serverUp ? await host.localRuntime.list() : [];
 	const ollamaLines = status.serverUp
 		? [
-				`Ollama models (active store: ${formatOllamaStore(status.activeStore)}; pi-owned store: ${status.ownedModelsDir} with ${status.ownedStore.modelCount} model(s)):`,
-				...(models.length === 0
-					? ["  (none installed — /models add <ref>, /models import, or /models suggest for a validated roster)"]
-					: []),
+				words.listHeader(
+					formatOllamaStore(status.activeStore),
+					status.ownedModelsDir,
+					status.ownedStore.modelCount,
+				),
+				...(models.length === 0 ? [words.listNone] : []),
 			]
 		: [
-				"Ollama models:",
+				words.listHeaderDown,
 				...(status.binaryPath
-					? [
-							`  server not running (binary: ${status.binarySource}). /models add starts it on demand; /fitness probes registered models.`,
-						]
+					? [words.listServerDown(String(status.binarySource))]
 					: host.localRuntime.installGuide().map((line) => `  ${line}`)),
 			];
 	const fitness = FitnessStore.forAgentDir(getAgentDir()).getForHost();
@@ -523,14 +451,14 @@ export async function listLocalModels(host: LocalModelHost): Promise<void> {
 			const runtimeStatus = await runtime.detect();
 			const report = fitness.find((entry) => entry.model === `${HF_TRANSFORMERS_PROVIDER}/${model.id}`);
 			const readiness = runtimeStatus.serverUp
-				? "server running"
+				? words.readinessRunning
 				: runtimeStatus.runtimeInstalled
-					? "runtime installed"
-					: "runtime missing";
+					? words.readinessInstalled
+					: words.readinessMissing;
 			const probe = report
-				? `probed ${report.at.slice(0, 10)}: digest ${report.report.digest?.succeeded ?? "?"}/${report.report.digest?.total ?? "?"}, tool-calls ${report.report.toolCall.succeeded}/${report.report.toolCall.total}${report.report.tokensPerSecond ? `, ~${report.report.tokensPerSecond} tok/s` : ""}`
-				: `unprobed — run /fitness ${HF_TRANSFORMERS_PROVIDER}/${model.id}`;
-			return `  - ${model.id} (${readiness}, cache: ${runtimeStatus.cacheDir}) · ${probe}`;
+				? words.probed(probeReport(report))
+				: words.unprobed(`${HF_TRANSFORMERS_PROVIDER}/${model.id}`);
+			return words.transformersRow(model.id, readiness, runtimeStatus.cacheDir, probe);
 		}),
 	);
 	const lines = [
@@ -538,20 +466,19 @@ export async function listLocalModels(host: LocalModelHost): Promise<void> {
 		...models.map((model) => {
 			const report = fitness.find((entry) => entry.model === `ollama/${model.name}`);
 			const gb = (model.sizeBytes / 1e9).toFixed(2);
-			const probe = report
-				? `probed ${report.at.slice(0, 10)}: digest ${report.report.digest?.succeeded ?? "?"}/${report.report.digest?.total ?? "?"}, tool-calls ${report.report.toolCall.succeeded}/${report.report.toolCall.total}${report.report.tokensPerSecond ? `, ~${report.report.tokensPerSecond} tok/s` : ""}`
-				: `unprobed — run /fitness ollama/${model.name}`;
-			return `  - ${model.name} (${gb} GB) · ${probe}`;
+			const probe = report ? words.probed(probeReport(report)) : words.unprobed(`ollama/${model.name}`);
+			return words.ollamaRow(model.name, gb, probe);
 		}),
-		...(transformersLines.length > 0 ? ["Pi-managed Transformers models:", ...transformersLines] : []),
-		"Commands: /models import · /models add <ref> · /models remove <ref> confirm · /models stop",
+		...(transformersLines.length > 0 ? [words.transformersHeader, ...transformersLines] : []),
+		words.listCommands,
 	];
 	for (const line of lines) host.showStatus(line);
 }
 
 export async function addLocalModel(host: LocalModelHost, pullRef: string, preselectRole?: FitnessRole): Promise<void> {
+	const words = interfaceText().localModels.models;
 	if (!(await ensureLocalServer(host))) return;
-	host.showStatus(`Pulling ${pullRef}… (weights land in pi's owned Ollama store)`);
+	host.showStatus(words.pulling(pullRef));
 	let lastShown = 0;
 	const result = await installOllamaModel({
 		runtime: host.localRuntime,
@@ -561,17 +488,17 @@ export async function addLocalModel(host: LocalModelHost, pullRef: string, prese
 			const now = Date.now();
 			if (now - lastShown > 2000) {
 				lastShown = now;
-				host.showStatus(`  ${pullRef}: ${progress}`);
+				host.showStatus(words.progress(pullRef, String(progress)));
 			}
 		},
 	});
 	if (!result.ok) {
 		harnessLog.debug("ui", "a local model install failed", { stage: result.stage, reason: result.reason });
-		host.showStatus(`Installation failed at the ${plainLabel(result.stage)} step: ${result.reason}`);
+		host.showStatus(words.installFailed(plainLabel(result.stage), result.reason));
 		return;
 	}
 	host.modelRegistry.refresh();
-	host.showStatus(`${pullRef} installed and registered as ${result.modelRef}. Probing fitness…`);
+	host.showStatus(words.installedRegistered(pullRef, result.modelRef));
 	await runFitnessAndAssign(host, result.modelRef, preselectRole);
 }
 
@@ -580,32 +507,37 @@ export async function addTransformersModel(
 	modelId: string,
 	preselectRole?: FitnessRole,
 ): Promise<void> {
+	const words = interfaceText().localModels.models;
 	const runtime = host.getTransformersRuntime(modelId);
 	let status = await runtime.detect();
 	if (!status.runtimeInstalled) {
-		host.showStatus(`Installing isolated Transformers runtime for ${modelId} at ${status.venvDir}…`);
-		const installed = await runtime.installManaged((progress) => host.showStatus(`  transformers: ${progress}`));
+		host.showStatus(words.installingTransformers(modelId, String(status.venvDir)));
+		const installed = await runtime.installManaged((progress) =>
+			host.showStatus(words.progress("transformers", progress)),
+		);
 		if (!installed.ok) {
-			host.showStatus(`Transformers runtime install failed: ${installed.error}`);
+			host.showStatus(words.transformersInstallFailed(String(installed.error)));
 			return;
 		}
 		status = await runtime.detect();
 	}
 	if (!status.runtimeInstalled) {
-		host.showStatus(`Transformers runtime is still unavailable at ${status.venvDir}.`);
+		host.showStatus(words.transformersUnavailable(String(status.venvDir)));
 		return;
 	}
 
-	const downloaded = await runtime.downloadModel((progress) => host.showStatus(`  ${modelId}: ${progress}`));
+	const downloaded = await runtime.downloadModel((progress) =>
+		host.showStatus(words.progress(modelId, String(progress))),
+	);
 	if (!downloaded.ok) {
-		host.showStatus(`Model download failed: ${downloaded.error}`);
+		host.showStatus(words.downloadFailed(String(downloaded.error)));
 		return;
 	}
 
 	const started = await runtime.start();
 	if (!started.started && started.reason !== "already_running") {
 		harnessLog.debug("ui", "the Transformers sidecar did not start", { reason: started.reason });
-		host.showStatus(`Could not start Transformers sidecar: ${plainLabel(started.reason)}`);
+		host.showStatus(words.sidecarStartFailed(plainLabel(String(started.reason))));
 		return;
 	}
 
@@ -615,16 +547,11 @@ export async function addTransformersModel(
 		baseUrl: runtime.baseUrl,
 	});
 	if (!registration.ok) {
-		host.showStatus(`Installed, but not auto-registered: ${registration.reason}`);
-		if (registration.manualSnippet) {
-			host.showStatus(`Add this to ${registration.modelsJsonPath} yourself:\n${registration.manualSnippet}`);
-		}
+		reportRefusedRegistration(host, registration, words.notAutoRegistered);
 		return;
 	}
 	host.modelRegistry.refresh();
-	host.showStatus(
-		`${modelId} installed in pi-managed Transformers and registered as ${HF_TRANSFORMERS_PROVIDER}/${modelId}. Probing fitness…`,
-	);
+	host.showStatus(words.registeredAs(modelId, `${HF_TRANSFORMERS_PROVIDER}/${modelId}`));
 	await runFitnessAndAssign(host, `${HF_TRANSFORMERS_PROVIDER}/${modelId}`, preselectRole);
 }
 
@@ -641,21 +568,24 @@ export async function addPrismLlamaCppModel(
 	descriptor: PrismModelDescriptor,
 	preselectRole?: FitnessRole,
 ): Promise<void> {
+	const words = interfaceText().localModels.models;
 	const runtime = getPrismLlamaCppRuntime(host);
 	const modelId = descriptor.repo;
 
 	let status = await runtime.detect();
 	if (!status.runtimeInstalled) {
-		host.showStatus(`Installing prism llama.cpp runtime for ${descriptor.displayName} at ${runtime.runtimeDir()}…`);
-		const installed = await runtime.installManaged((progress) => host.showStatus(`  prism-llamacpp: ${progress}`));
+		host.showStatus(words.installingPrism(descriptor.displayName, runtime.runtimeDir()));
+		const installed = await runtime.installManaged((progress) =>
+			host.showStatus(words.progress("prism-llamacpp", String(progress))),
+		);
 		if (!installed.ok) {
-			host.showStatus(`Prism llama.cpp runtime install failed: ${installed.error}`);
+			host.showStatus(words.prismInstallFailed(String(installed.error)));
 			return;
 		}
 		status = await runtime.detect();
 	}
 	if (!status.runtimeInstalled) {
-		host.showStatus(`Prism llama.cpp runtime is still unavailable at ${runtime.runtimeDir()}.`);
+		host.showStatus(words.prismUnavailable(runtime.runtimeDir()));
 		return;
 	}
 
@@ -669,10 +599,10 @@ export async function addPrismLlamaCppModel(
 	if (!served.ok) {
 		const label =
 			served.stage === "model-download"
-				? "Model download failed"
+				? words.downloadFailedLabel
 				: served.stage === "mmproj-download"
-					? "Vision projector download failed"
-					: "Could not start llama-server";
+					? words.visionDownloadFailed
+					: words.llamaServerStartFailed;
 		host.showStatus(`${label}: ${served.error}`);
 		return;
 	}
@@ -685,56 +615,52 @@ export async function addPrismLlamaCppModel(
 		servedContextWindow: numCtx,
 	});
 	if (!registration.ok) {
-		host.showStatus(`Served, but not auto-registered: ${registration.reason}`);
-		if (registration.manualSnippet) {
-			host.showStatus(`Add this to ${registration.modelsJsonPath} yourself:\n${registration.manualSnippet}`);
-		}
+		reportRefusedRegistration(host, registration, words.servedNotRegistered);
 		return;
 	}
 	host.modelRegistry.refresh();
-	host.showStatus(
-		`${descriptor.displayName} installed and registered as ${PRISM_LLAMACPP_PROVIDER}/${modelId}. Probing fitness…`,
-	);
+	host.showStatus(words.registeredAs(descriptor.displayName, `${PRISM_LLAMACPP_PROVIDER}/${modelId}`));
 	await runFitnessAndAssign(host, `${PRISM_LLAMACPP_PROVIDER}/${modelId}`, preselectRole);
 }
 
 export async function removeLocalModel(host: LocalModelHost, ref: string, confirmed: boolean): Promise<void> {
+	const words = interfaceText().localModels.models;
 	const status = await host.localRuntime.detect();
 	if (!status.serverUp) {
-		host.showStatus("Local server not running — start it (any /models action) before removing.");
+		host.showStatus(words.localServerDown);
 		return;
 	}
 	const models = await host.localRuntime.list();
 	const target = models.find((model) => matchesInstalledLocalModel(ref, model.name));
 	if (!target) {
-		host.showStatus(
-			`${ref} is not installed. Installed: ${models.map((model) => model.name).join(", ") || "(none)"}`,
-		);
+		host.showStatus(words.notInstalled(ref, models.map((model) => model.name).join(", ") || words.noneInstalled));
 		return;
 	}
 	if (!confirmed) {
 		// EXPLICIT USER ACTION ONLY: full disclosure, then require the confirm token.
 		const gb = (target.sizeBytes / 1e9).toFixed(2);
 		host.showStatus(
-			[
-				`Removing ${ref} will delete:`,
-				`  - model weights (${gb} GB) from ${status.managedByPi ? status.ownedModelsDir : "the system server's storage"}`,
-				`  - the ollama/${ref} entry in models.json`,
-				`  - its cached fitness report for this host`,
-				`Run: /models remove ${ref} confirm`,
-			].join("\n"),
+			removalDisclosure(
+				[
+					words.removalTitle(ref),
+					words.removalWeights(gb, status.managedByPi ? status.ownedModelsDir : words.systemStorage),
+					words.removalRegistration(`ollama/${ref}`),
+					words.removalFitness,
+				],
+				`/models remove ${ref} confirm`,
+			),
 		);
 		return;
 	}
 	const removed = await host.localRuntime.remove(ref);
 	if (!removed.ok) {
-		host.showStatus(`Remove failed: ${removed.error}`);
+		host.showStatus(words.removeFailed(String(removed.error)));
 		return;
 	}
 	unregisterLocalModel({ agentDir: getAgentDir(), ref });
 	FitnessStore.forAgentDir(getAgentDir()).remove(`ollama/${ref}`);
 	host.modelRegistry.refresh();
-	host.showStatus(`${ref} removed: weights deleted, registration and fitness report dropped.`);
+	host.showStatus(words.removed(ref));
 }
 
 async function performRegistrationDrop(
@@ -744,9 +670,10 @@ async function performRegistrationDrop(
 	unregister: (args: { agentDir: string; modelId: string }) => { ok: boolean; reason?: string },
 	successMessage: string,
 ) {
+	const words = interfaceText().localModels.models;
 	const registration = unregister({ agentDir: getAgentDir(), modelId });
 	if (!registration.ok) {
-		host.showStatus(`Remove failed: ${registration.reason}`);
+		host.showStatus(words.removeFailed(String(registration.reason)));
 		return;
 	}
 	FitnessStore.forAgentDir(getAgentDir()).remove(`${provider}/${modelId}`);
@@ -755,17 +682,20 @@ async function performRegistrationDrop(
 }
 
 async function removeTransformersModel(host: LocalModelHost, modelId: string, confirmed: boolean): Promise<void> {
+	const words = interfaceText().localModels.models;
 	const runtime = host.getTransformersRuntime(modelId);
 	const status = await runtime.detect();
 	if (!confirmed) {
 		host.showStatus(
-			[
-				`Removing ${modelId} will delete:`,
-				`  - the ${HF_TRANSFORMERS_PROVIDER}/${modelId} entry in models.json`,
-				`  - its cached fitness report for this host`,
-				`It will stop this session's Transformers sidecar if running. Cached weights remain under ${status.cacheDir}.`,
-				`Run: /models remove hf.co/${modelId} confirm`,
-			].join("\n"),
+			removalDisclosure(
+				[
+					words.removalTitle(modelId),
+					words.removalRegistration(`${HF_TRANSFORMERS_PROVIDER}/${modelId}`),
+					words.removalFitness,
+					`${words.stoppedSidecarNote} ${words.weightsRemain(status.cacheDir)}`,
+				],
+				`/models remove hf.co/${modelId} confirm`,
+			),
 		);
 		return;
 	}
@@ -775,7 +705,7 @@ async function removeTransformersModel(host: LocalModelHost, modelId: string, co
 		modelId,
 		HF_TRANSFORMERS_PROVIDER,
 		unregisterTransformersModel,
-		`${modelId} registration and fitness report dropped; cached weights remain under ${status.cacheDir}.`,
+		words.droppedWeightsRemain(modelId, status.cacheDir),
 	);
 }
 
@@ -789,18 +719,19 @@ async function removeTransformersModel(host: LocalModelHost, modelId: string, co
  * only carries that caveat, not a blanket "may not stop" disclaimer.
  */
 async function removePrismLlamaCppModel(host: LocalModelHost, modelId: string, confirmed: boolean): Promise<void> {
+	const words = interfaceText().localModels.models;
 	const runtime = getPrismLlamaCppRuntime(host);
 	if (!confirmed) {
 		host.showStatus(
-			[
-				`Removing ${modelId} will delete:`,
-				`  - the ${PRISM_LLAMACPP_PROVIDER}/${modelId} entry in models.json`,
-				`  - its cached fitness report for this host`,
-				`Downloaded GGUF weights remain under ${runtime.modelsDir()}. Its llama-server will be stopped if ` +
-					`this session started it; if it was started by a different pi process or session, it will keep ` +
-					`serving on 127.0.0.1:${PRISM_LLAMACPP_SERVE_PORT} until stopped manually.`,
-				`Run: /models remove hf.co/${modelId} confirm`,
-			].join("\n"),
+			removalDisclosure(
+				[
+					words.removalTitle(modelId),
+					words.removalRegistration(`${PRISM_LLAMACPP_PROVIDER}/${modelId}`),
+					words.removalFitness,
+					`${words.ggufRemain(runtime.modelsDir())} ${words.prismServerNote(PRISM_LLAMACPP_SERVE_PORT)}`,
+				],
+				`/models remove hf.co/${modelId} confirm`,
+			),
 		);
 		return;
 	}
@@ -810,14 +741,12 @@ async function removePrismLlamaCppModel(host: LocalModelHost, modelId: string, c
 		modelId,
 		PRISM_LLAMACPP_PROVIDER,
 		unregisterPrismLlamaCppModel,
-		`${modelId} registration and fitness report dropped; downloaded weights remain under ${runtime.modelsDir()}.` +
-			(stopped.stopped
-				? " Its llama-server was stopped."
-				: ` No llama-server tracked by this session — if one is still running (started by a different pi process or session), stop it manually on port ${PRISM_LLAMACPP_SERVE_PORT}.`),
+		words.prismDropped(modelId, runtime.modelsDir(), stopped.stopped, PRISM_LLAMACPP_SERVE_PORT),
 	);
 }
 
 async function uninstallTransformersModel(host: LocalModelHost, modelId: string, confirmed: boolean): Promise<void> {
+	const words = interfaceText().localModels.models;
 	const runtime = host.getTransformersRuntime(modelId);
 	const status = await runtime.detect();
 	const sanitized = modelId.replace(/\//g, "--");
@@ -835,16 +764,16 @@ async function uninstallTransformersModel(host: LocalModelHost, modelId: string,
 	const gb = (sizeBytes / 1e9).toFixed(2);
 	if (!confirmed) {
 		host.showStatus(
-			[
-				`Uninstalling ${modelId} will delete:`,
-				`  - the ${HF_TRANSFORMERS_PROVIDER}/${modelId} entry in models.json`,
-				`  - its cached fitness report for this host`,
-				artifactDir
-					? `  - downloaded model weights (${gb} GB) at ${artifactDir}`
-					: `  - no cached weights found under ${status.cacheDir}`,
-				`It will stop this session's Transformers sidecar if running.`,
-				`Run: /models uninstall hf.co/${modelId} confirm`,
-			].join("\n"),
+			removalDisclosure(
+				[
+					words.uninstallTitle(modelId),
+					words.removalRegistration(`${HF_TRANSFORMERS_PROVIDER}/${modelId}`),
+					words.removalFitness,
+					artifactDir ? words.weightsAt(gb, artifactDir) : words.noWeights(status.cacheDir),
+					words.stoppedSidecarNote,
+				],
+				`/models uninstall hf.co/${modelId} confirm`,
+			),
 		);
 		return;
 	}
@@ -853,7 +782,7 @@ async function uninstallTransformersModel(host: LocalModelHost, modelId: string,
 		try {
 			rmSync(artifactDir, { recursive: true, force: true });
 		} catch (e) {
-			host.showStatus(`Failed to delete weights: ${e instanceof Error ? e.message : String(e)}`);
+			host.showStatus(words.deleteWeightsFailed(e instanceof Error ? e.message : String(e)));
 		}
 	}
 	await performRegistrationDrop(
@@ -861,11 +790,12 @@ async function uninstallTransformersModel(host: LocalModelHost, modelId: string,
 		modelId,
 		HF_TRANSFORMERS_PROVIDER,
 		unregisterTransformersModel,
-		`${modelId} uninstalled: weights deleted (${gb} GB), registration and fitness dropped.`,
+		words.uninstalled(modelId, gb),
 	);
 }
 
 async function uninstallPrismLlamaCppModel(host: LocalModelHost, modelId: string, confirmed: boolean): Promise<void> {
+	const words = interfaceText().localModels.models;
 	const runtime = getPrismLlamaCppRuntime(host);
 	const descriptor = PRISM_LLAMACPP_DESCRIPTORS[modelId];
 	const modelFile = descriptor ? join(runtime.modelsDir(), descriptor.file) : undefined;
@@ -884,14 +814,16 @@ async function uninstallPrismLlamaCppModel(host: LocalModelHost, modelId: string
 	const gb = (totalSize / 1e9).toFixed(2);
 	if (!confirmed) {
 		host.showStatus(
-			[
-				`Uninstalling ${modelId} will delete:`,
-				`  - the ${PRISM_LLAMACPP_PROVIDER}/${modelId} entry in models.json`,
-				`  - its cached fitness report for this host`,
-				`  - downloaded GGUF weights (${gb} GB) under ${runtime.modelsDir()}`,
-				`Its llama-server will be stopped if this session started it.`,
-				`Run: /models uninstall hf.co/${modelId} confirm`,
-			].join("\n"),
+			removalDisclosure(
+				[
+					words.uninstallTitle(modelId),
+					words.removalRegistration(`${PRISM_LLAMACPP_PROVIDER}/${modelId}`),
+					words.removalFitness,
+					words.ggufAt(gb, runtime.modelsDir()),
+					words.prismUninstallServerNote,
+				],
+				`/models uninstall hf.co/${modelId} confirm`,
+			),
 		);
 		return;
 	}
@@ -906,47 +838,43 @@ async function uninstallPrismLlamaCppModel(host: LocalModelHost, modelId: string
 			rmSync(mmprojFile, { force: true });
 		} catch {}
 	}
-	const registration = unregisterPrismLlamaCppModel({ agentDir: getAgentDir(), modelId });
-	if (!registration.ok) {
-		host.showStatus(`Remove failed: ${registration.reason}`);
-		return;
-	}
-	FitnessStore.forAgentDir(getAgentDir()).remove(`${PRISM_LLAMACPP_PROVIDER}/${modelId}`);
-	host.modelRegistry.refresh();
-	host.showStatus(
-		`${modelId} uninstalled: GGUF weights deleted (${gb} GB), registration and fitness dropped.` +
-			(stopped.stopped ? " Its llama-server was stopped." : ""),
+	await performRegistrationDrop(
+		host,
+		modelId,
+		PRISM_LLAMACPP_PROVIDER,
+		unregisterPrismLlamaCppModel,
+		words.prismUninstalled(modelId, gb, stopped.stopped),
 	);
 }
 
 async function uninstallRuntime(host: LocalModelHost, runtimeName: string, confirmed: boolean): Promise<void> {
+	const words = interfaceText().localModels.models;
 	if (runtimeName === "prism" || runtimeName === "llamacpp" || runtimeName === "prism-llamacpp") {
 		const runtime = getPrismLlamaCppRuntime(host);
 		const runtimeDir = runtime.runtimeDir();
 		if (!existsSync(runtimeDir)) {
-			host.showStatus(`Prism llama.cpp runtime is not installed at ${runtimeDir}.`);
+			host.showStatus(words.runtimeNotInstalled(runtimeDir));
 			return;
 		}
 		if (!confirmed) {
 			host.showStatus(
-				[
-					`Uninstalling prism llama.cpp runtime will delete:`,
-					`  - Pi-owned runtime binaries and manifest under ${runtimeDir}`,
-					`Run: /models uninstall-runtime prism confirm`,
-				].join("\n"),
+				removalDisclosure(
+					[words.runtimeUninstallTitle, words.runtimeUninstallBinaries(runtimeDir)],
+					"/models uninstall-runtime prism confirm",
+				),
 			);
 			return;
 		}
 		runtime.stop();
 		try {
 			rmSync(runtimeDir, { recursive: true, force: true });
-			host.showStatus(`Prism llama.cpp runtime binaries deleted from ${runtimeDir}.`);
+			host.showStatus(words.runtimeDeleted(runtimeDir));
 		} catch (e) {
-			host.showStatus(`Failed to delete runtime binaries: ${e instanceof Error ? e.message : String(e)}`);
+			host.showStatus(words.runtimeDeleteFailed(e instanceof Error ? e.message : String(e)));
 		}
 		return;
 	}
-	host.showStatus(`Unknown runtime: ${runtimeName}. Supported: prism`);
+	host.showStatus(words.unknownRuntime(runtimeName));
 }
 
 /**
@@ -961,41 +889,44 @@ async function uninstallRuntime(host: LocalModelHost, runtimeName: string, confi
  * status on failure; nothing continues past a failed stage.
  */
 export async function addNeedleModel(host: LocalModelHost): Promise<void> {
+	const words = interfaceText().localModels.models;
 	const runtime = getNeedleRuntime(host);
 
 	let status = await runtime.detect();
 	if (!status.installed) {
-		host.showStatus(`Installing needle (function-call test bench) at ${runtime.runtimeDir()}…`);
-		const installed = await runtime.installManaged((progress) => host.showStatus(`  needle: ${progress}`));
+		host.showStatus(words.installingNeedle(runtime.runtimeDir()));
+		const installed = await runtime.installManaged((progress) =>
+			host.showStatus(words.progress("needle", String(progress))),
+		);
 		if (!installed.ok) {
-			host.showStatus(`needle install failed: ${installed.error}`);
+			host.showStatus(words.needleInstallFailed(String(installed.error)));
 			return;
 		}
 		status = await runtime.detect();
 	}
 	if (!status.installed) {
-		host.showStatus(`needle is still unavailable at ${runtime.runtimeDir()}.`);
+		host.showStatus(words.needleUnavailable(runtime.runtimeDir()));
 		return;
 	}
 
-	const downloaded = await runtime.downloadWeights((progress) => host.showStatus(`  ${progress}`));
+	const downloaded = await runtime.downloadWeights((progress) => host.showStatus(words.indented(String(progress))));
 	if (!downloaded.ok) {
-		host.showStatus(`needle weights download failed: ${downloaded.error}`);
+		host.showStatus(words.needleWeightsFailed(String(downloaded.error)));
 		return;
 	}
 
-	host.showStatus("Running needle smoke test (function-call probe)…");
+	host.showStatus(words.needleSmokeRunning);
 	const smoke = await runtime.smokeTest();
 	if (!smoke.ok || !smoke.call) {
-		host.showStatus(
-			`needle smoke test failed: ${smoke.error ?? "smoke test reported success but returned no parsed call"}`,
-		);
+		host.showStatus(words.needleSmokeFailed(smoke.error ?? words.needleSmokeNoCall));
 		return;
 	}
 	host.showStatus(
-		`needle installed and verified: smoke test called ${smoke.call.name}(${JSON.stringify(smoke.call.arguments)}) ` +
-			`in ${smoke.latencyMs}ms. Use /models needle <query> [tools-json] to test it further — it is a standalone ` +
-			"bench, not a chat/executor lane.",
+		words.needleVerified({
+			called: smoke.call.name,
+			argumentsJson: JSON.stringify(smoke.call.arguments),
+			latencyMs: smoke.latencyMs,
+		}),
 	);
 }
 
@@ -1009,25 +940,27 @@ export async function addNeedleModel(host: LocalModelHost): Promise<void> {
  * this deletes directly via the runtime's own path-derivation methods.
  */
 async function removeNeedleModel(host: LocalModelHost, confirmed: boolean): Promise<void> {
+	const words = interfaceText().localModels.models;
 	const runtime = getNeedleRuntime(host);
 	const runtimeDir = runtime.runtimeDir();
 	const modelsDir = runtime.modelsDir();
 	if (!confirmed) {
 		host.showStatus(
-			[
-				"Removing needle will delete:",
-				`  - the pi-managed needle runtime (clone + venv) at ${runtimeDir}`,
-				`  - the downloaded checkpoint at ${runtime.checkpointPath()}`,
-				"needle has no models.json entry or fitness report — it is a standalone function-call test bench, " +
-					"never registered as a chat/lane model.",
-				"Run: /models remove hf.co/Cactus-Compute/needle confirm",
-			].join("\n"),
+			removalDisclosure(
+				[
+					words.needleRemovalTitle,
+					words.needleRuntimeLine(runtimeDir),
+					words.needleCheckpointLine(runtime.checkpointPath()),
+					words.needleNoRegistration,
+				],
+				"/models remove hf.co/Cactus-Compute/needle confirm",
+			),
 		);
 		return;
 	}
 	if (existsSync(runtimeDir)) rmSync(runtimeDir, { recursive: true, force: true });
 	if (existsSync(modelsDir)) rmSync(modelsDir, { recursive: true, force: true });
-	host.showStatus(`needle removed: deleted ${runtimeDir} and ${modelsDir}.`);
+	host.showStatus(words.needleRemoved(runtimeDir, modelsDir));
 }
 
 /**
@@ -1040,23 +973,20 @@ async function removeNeedleModel(host: LocalModelHost, confirmed: boolean): Prom
  * backstop if state changes between the check and the call.
  */
 async function runNeedleQuery(host: LocalModelHost, args: string[]): Promise<void> {
+	const words = interfaceText().localModels.models;
 	if (args.length === 0) {
-		host.showStatus("Usage: /models needle <query> [tools-json]");
+		host.showStatus(words.needleUsage);
 		return;
 	}
 
 	const runtime = getNeedleRuntime(host);
 	const status = await runtime.detect();
 	if (!status.installed) {
-		host.showStatus(
-			"needle is not installed. Run /models add hf.co/Cactus-Compute/needle first (or /models suggest).",
-		);
+		host.showStatus(words.needleNotInstalled);
 		return;
 	}
 	if (!status.checkpointPresent) {
-		host.showStatus(
-			"needle is installed but its checkpoint hasn't been downloaded. Run /models add hf.co/Cactus-Compute/needle to fetch and verify it.",
-		);
+		host.showStatus(words.needleCheckpointMissing);
 		return;
 	}
 
@@ -1073,24 +1003,25 @@ async function runNeedleQuery(host: LocalModelHost, args: string[]): Promise<voi
 	}
 	const query = (toolsJsonParsed ? args.slice(0, -1) : args).join(" ");
 	if (!query.trim()) {
-		host.showStatus("Usage: /models needle <query> [tools-json]");
+		host.showStatus(words.needleUsage);
 		return;
 	}
 
-	host.showStatus(`needle: running "${query}"…`);
+	host.showStatus(words.needleRunning(query));
 	const startedAt = Date.now();
 	const result = await runtime.runFunctionCall({ query, tools });
 	const latencyMs = Date.now() - startedAt;
 	if (!result.ok) {
-		host.showStatus(`needle call failed (${latencyMs}ms): ${result.error}\nraw output:\n${result.rawOutput}`);
+		host.showStatus(words.needleCallFailed(latencyMs, result.error, result.rawOutput));
 		return;
 	}
-	host.showStatus(`needle (${latencyMs}ms): ${result.call.name}(${JSON.stringify(result.call.arguments)})`);
+	host.showStatus(words.needleCall(latencyMs, result.call.name, JSON.stringify(result.call.arguments)));
 }
 
 /** /fitness with no args: pick a model from the configured registry, probe it, assign a role. */
 /** Pick a validated suggestion → install it → probe on this host → land its shaped role. */
 export function showModelSuggestionSelector(host: LocalModelHost): void {
+	const words = interfaceText().localModels.models;
 	host.showSelector((done) => {
 		const selector = new ModelSuggestionSelectorComponent(
 			DEFAULT_MODEL_SUGGESTIONS,
@@ -1106,9 +1037,7 @@ export function showModelSuggestionSelector(host: LocalModelHost): void {
 				if (source.type === "prism-llamacpp") {
 					const descriptor = PRISM_LLAMACPP_DESCRIPTORS[source.modelId];
 					if (!descriptor) {
-						host.showStatus(
-							`Suggestion ${suggestion.name} maps to an unknown curated prism model "${source.modelId}" — wiring bug.`,
-						);
+						host.showStatus(words.suggestionUnknownPrism(suggestion.name, source.modelId));
 						return;
 					}
 					await addPrismLlamaCppModel(host, descriptor, suggestion.assignRole);
@@ -1123,7 +1052,7 @@ export function showModelSuggestionSelector(host: LocalModelHost): void {
 					return;
 				}
 				host.showStatus(
-					`Suggestion ${suggestion.name} is not installable: ${source.type === "rejected" ? source.reason : source.ref}`,
+					words.suggestionNotInstallable(suggestion.name, source.type === "rejected" ? source.reason : source.ref),
 				);
 			},
 			() => {
@@ -1229,7 +1158,8 @@ export async function runFitnessAndAssign(
 	modelRef: string,
 	preselectRole?: FitnessRole,
 ): Promise<void> {
-	host.showStatus(`Model fitness probe running on ${modelRef}… (6 surfaces; local models may take a few minutes)`);
+	const words = interfaceText().localModels.fitness;
+	host.showStatus(words.probeRunning(modelRef));
 	try {
 		const outcome = await host.session.runModelFitness({ model: modelRef });
 		if (!presentModelFitnessOutcome(host, outcome)) return;
@@ -1238,14 +1168,12 @@ export async function runFitnessAndAssign(
 		// of landing a role selector the user might reflexively confirm (this is the reported
 		// bug: a 0/3-everywhere model still got set as judge model and saved to Model Router).
 		if (isProbeAllFailed(outcome.report)) {
-			host.showStatus(
-				`${outcome.model} failed the fitness probe on all surfaces — not configured. Use /model to set it manually if you accept the risk.`,
-			);
+			host.showStatus(words.allSurfacesFailed(outcome.model));
 			return;
 		}
 		let toolProbe: ToolProbeResult | undefined;
 		if (preselectRole === undefined || roleRequiresToolExecution(preselectRole)) {
-			host.showStatus(`Real tool execution probe running on ${outcome.model}…`);
+			host.showStatus(words.toolProbeRunning(outcome.model));
 			try {
 				const toolProbeReport = await host.session.probeToolCalling(outcome.model);
 				toolProbe =
@@ -1253,7 +1181,7 @@ export async function runFitnessAndAssign(
 					(toolProbeReport.results.length === 1 ? toolProbeReport.results[0] : undefined);
 			} catch (error) {
 				host.showStatus(
-					`Real tool execution probe unavailable for ${outcome.model}: ${error instanceof Error ? error.message : String(error)}`,
+					words.toolProbeUnavailable(outcome.model, error instanceof Error ? error.message : String(error)),
 				);
 			}
 		}
@@ -1264,7 +1192,7 @@ export async function runFitnessAndAssign(
 					done();
 					const toolFailure = toolRoleFailure(role, toolProbe);
 					if (toolFailure) {
-						host.showStatus(`${outcome.model} not assigned as ${role}: real tool execution ${toolFailure}.`);
+						host.showStatus(words.notAssignedTool(outcome.model, role, toolFailure));
 						return;
 					}
 					if (role === "scout") {
@@ -1276,12 +1204,8 @@ export async function runFitnessAndAssign(
 								lane: verdict.reason === "lane_failed" ? verdict.lane : undefined,
 							});
 							const reason =
-								verdict.reason === "lane_failed"
-									? `failed ${verdict.lane === "toolCall" ? "tool call" : verdict.lane} check`
-									: "was not probed";
-							host.showStatus(
-								`${outcome.model} not assigned as scout: ${reason} in the scout fitness exam. Use the docs/scout.md Modelfile recipe, then rerun /fitness.`,
-							);
+								verdict.reason === "lane_failed" ? words.scoutLaneFailed(verdict.lane) : words.scoutNotProbed;
+							host.showStatus(words.scoutRefused(outcome.model, reason));
 							return;
 						}
 					}
@@ -1318,26 +1242,27 @@ function toolRoleFailure(role: FitnessRole, probe: ToolProbeResult | undefined):
 
 /** Persist a role assignment from the post-probe selector into the matching settings. */
 export function assignFitnessRole(host: AssignRoleHost, modelRef: string, role: FitnessRole): void {
+	const words = interfaceText().localModels.fitness;
 	if (role === "none") {
-		host.showStatus(`Fitness result for ${modelRef} saved. Assign a role later from /settings.`);
+		host.showStatus(words.roleNone(modelRef));
 		return;
 	}
 	if (role === "curator") {
 		const current = host.settingsManager.getContextCurationSettings();
 		host.settingsManager.setContextCurationSettings({ ...current, enabled: true, model: modelRef });
-		host.showStatus(`Context curation enabled with ${modelRef} as the curator.`);
+		host.showStatus(words.roleCurator(modelRef));
 		return;
 	}
 	if (role === "executor") {
 		const router = host.settingsManager.getModelRouterSettings();
 		host.settingsManager.setModelRouterSettings({ ...router, executorModel: modelRef });
-		const hint = router.enabled ? "" : " Model router is currently disabled — enable it in /settings → Model Router.";
-		host.showStatus(`${modelRef} set as the toolkit executor (direct Level-0 hits route to it).${hint}`);
+		const hint = router.enabled ? "" : words.routerDisabledHint;
+		host.showStatus(words.roleExecutor(modelRef, hint));
 		return;
 	}
 	if (role === "scout") {
 		host.settingsManager.setScoutSettings({ enabled: true, model: modelRef });
-		host.showStatus(`${modelRef} set as the repository scout and turned on.`);
+		host.showStatus(words.roleScout(modelRef));
 		return;
 	}
 	const router = host.settingsManager.getModelRouterSettings();
@@ -1350,6 +1275,6 @@ export function assignFitnessRole(host: AssignRoleHost, modelRef: string, role: 
 					? "expensiveModel"
 					: "learningModel";
 	host.settingsManager.setModelRouterSettings({ ...router, [field]: modelRef });
-	const hint = router.enabled ? "" : " Model router is currently disabled — enable it in /settings → Model Router.";
-	host.showStatus(`${modelRef} set as ${role.replace("router-", "router ")} model.${hint}`);
+	const hint = router.enabled ? "" : words.routerDisabledHint;
+	host.showStatus(words.roleSet(modelRef, role.replace("router-", "router "), hint));
 }

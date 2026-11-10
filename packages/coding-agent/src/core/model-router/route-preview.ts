@@ -1,4 +1,5 @@
 import type { RouteSelectionSource } from "../autonomy/contracts.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRouterPoolPreference, ModelRouterSelectionMode } from "../settings/settings-schema.ts";
 import { formatRouterPoolSourceLabel, type RouterPoolSource } from "./candidate-pool.ts";
 import type { ModelRouterIntent } from "./intent-classifier.ts";
@@ -45,6 +46,7 @@ export interface LiveRoutePreview {
 }
 
 export function formatRouteSelectionSource(selection: RouteSelectionSource | undefined): string {
+	const words = interfaceText().localModels.routerSetup.preview;
 	switch (selection) {
 		case "hmoe":
 			return "router/H-MoE";
@@ -53,57 +55,59 @@ export function formatRouteSelectionSource(selection: RouteSelectionSource | und
 		case "auto":
 			return "router";
 		case "manual":
-			return "manual pin";
+			return words.sourceManualPin;
 		default:
-			return "none";
+			return words.none;
 	}
 }
 
 export function formatRoutePreview(preview: RoutePreview): string {
+	const words = interfaceText().localModels.routerSetup.preview;
 	const lines = [
-		`Intent: ${preview.intent}`,
-		`Baseline tier: ${preview.baselineTier}`,
-		`Risk: ${preview.risk}`,
-		`Reason: ${preview.reasonCode}`,
-		`Selection mode: ${preview.selectionMode.toUpperCase()}`,
-		`Manual pin: ${preview.manualPin ?? "none"}`,
-		`Pool: ${preview.pool.customized ? `${preview.pool.count} selected (${formatRouterPoolSourceLabel(preview.pool.source)})` : `${preview.pool.count} favorites`}`,
-		`Pool preference: ${preview.poolPreference}`,
-		`Subscription candidates: ${preview.subscriptionCandidates}`,
-		`Eligible candidates: ${preview.eligibleCandidates}`,
-		`Would choose: ${preview.chosenModel ?? "no model (turn stays on the session model)"}`,
-		`Source: ${formatRouteSelectionSource(preview.selection)}`,
+		words.intent(preview.intent),
+		words.baselineTier(preview.baselineTier),
+		words.risk(preview.risk),
+		words.reason(preview.reasonCode),
+		words.selectionMode(preview.selectionMode.toUpperCase()),
+		words.manualPin(preview.manualPin ?? words.none),
+		preview.pool.customized
+			? words.poolSelected(preview.pool.count, formatRouterPoolSourceLabel(preview.pool.source))
+			: words.poolFavorites(preview.pool.count),
+		words.poolPreference(preview.poolPreference),
+		words.subscriptionCandidates(preview.subscriptionCandidates),
+		words.eligibleCandidates(preview.eligibleCandidates),
+		words.wouldChoose(preview.chosenModel ?? words.noModel),
+		words.source(formatRouteSelectionSource(preview.selection)),
 	];
 	if (preview.manualPinOutsidePool) {
-		lines.push(
-			"Excluded pin: the manual pin is outside the candidate pool; an eligible favorite is selected instead.",
-		);
+		lines.push(words.excludedPin);
 	}
-	if (preview.fitness) lines.push(`Fitness: ${preview.fitness}`);
-	if (preview.skipReason) lines.push(`Skip reason: ${preview.skipReason}`);
+	if (preview.fitness) lines.push(words.fitness(preview.fitness));
+	if (preview.skipReason) lines.push(words.skipReason(preview.skipReason));
 	if (preview.candidates.length > 0) {
-		lines.push("Candidates:");
+		lines.push(words.candidates);
 		for (const candidate of preview.candidates) lines.push(`- ${candidate}`);
 	}
-	lines.push("Deterministic preview: no provider call was made and the session model is unchanged.");
+	lines.push(words.deterministic);
 	return lines.join("\n");
 }
 
 export function formatLiveRoutePreview(preview: LiveRoutePreview): string {
+	const words = interfaceText().localModels.routerSetup.preview;
 	const lines = [
-		`Chosen tier: ${preview.tier}`,
-		`Risk: ${preview.risk}`,
-		`Reason: ${preview.reasonCode}`,
-		`Chosen model: ${preview.chosenModel ?? "no model (turn stays on the session model)"}`,
-		`Source: ${formatRouteSelectionSource(preview.selection)}`,
-		`Preference: ${preview.poolPreference}`,
+		words.chosenTier(preview.tier),
+		words.risk(preview.risk),
+		words.reason(preview.reasonCode),
+		words.chosenModel(preview.chosenModel ?? words.noModel),
+		words.source(formatRouteSelectionSource(preview.selection)),
+		words.preference(preview.poolPreference),
 	];
-	if (preview.fitness) lines.push(`Fitness: ${preview.fitness}`);
-	if (preview.skipReason) lines.push(`Skip reason: ${preview.skipReason}`);
+	if (preview.fitness) lines.push(words.fitness(preview.fitness));
+	if (preview.skipReason) lines.push(words.skipReason(preview.skipReason));
 	if (preview.reasons.length > 0) {
-		lines.push("Reasons:");
+		lines.push(words.reasons);
 		for (const reason of preview.reasons) lines.push(`- ${reason}`);
 	}
-	lines.push("Live preview: the routing judge/H-MoE may have run; the session model is unchanged.");
+	lines.push(words.live);
 	return lines.join("\n");
 }

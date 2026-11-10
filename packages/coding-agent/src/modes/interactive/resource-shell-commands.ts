@@ -16,6 +16,7 @@ import type { Component, Container, TUI } from "@caupulican/pi-tui";
 import { getAgentDir } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { ExtensionRunner } from "../../core/extensions/index.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { SettingsScope } from "../../core/settings/settings-schema.ts";
 import type { SessionManager, TruncationResult } from "../../kernel/node.ts";
 import { BashExecutionComponent } from "./components/bash-execution.ts";
@@ -75,6 +76,7 @@ export interface CompactCommandHost {
 }
 
 export async function handleInstallResourcesCommand(host: InstallResourcesHost, argsString: string): Promise<void> {
+	const words = interfaceText().resources;
 	try {
 		const tokens = argsString.split(/\s+/).filter(Boolean);
 		let force = false;
@@ -88,13 +90,13 @@ export async function handleInstallResourcesCommand(host: InstallResourcesHost, 
 		}
 
 		if (!dir) {
-			host.showError("Usage: /install-resources <dir> [--force]");
+			host.showError(words.install.usage);
 			return;
 		}
 
 		const canonical = host.settingsManager.canonicalizePath(dir);
 		if (!canonical || !fs.existsSync(canonical)) {
-			host.showError(`Source directory does not exist: ${dir}`);
+			host.showError(words.install.missingDir(dir));
 			return;
 		}
 
@@ -103,14 +105,14 @@ export async function handleInstallResourcesCommand(host: InstallResourcesHost, 
 
 		if (!trusted) {
 			const trust = await confirmExternalResourceTrust(host, {
-				title: "Trust external source for installation?",
-				description: `The directory "${canonical}" contains extensions/resources to install. Extensions can execute arbitrary code on your machine. Do you trust it?`,
-				acceptDescription: "Trust this directory and proceed with installation.",
-				rejectDescription: "Do not trust this directory. Abort.",
+				title: words.install.trustTitle,
+				description: words.install.trustDescription(canonical),
+				acceptDescription: words.install.trustAccept,
+				rejectDescription: words.install.trustReject,
 			});
 
 			if (!trust) {
-				host.showStatus("Installation aborted. Source directory was not trusted.");
+				host.showStatus(words.install.aborted);
 				return;
 			}
 
@@ -131,7 +133,7 @@ export async function handleInstallResourcesCommand(host: InstallResourcesHost, 
 
 		const installedCount = stats.installed.length;
 		const skippedCount = stats.skipped.length;
-		host.showStatus(`Installation complete: ${installedCount} resources installed, ${skippedCount} skipped.`);
+		host.showStatus(words.install.complete(installedCount, skippedCount));
 
 		await host.handleReloadCommand();
 	} catch (error) {
@@ -146,32 +148,27 @@ export async function handleInstallResourcesCommand(host: InstallResourcesHost, 
  * hand-authored skills; archival is restorable.
  */
 export function handleCurateCommand(host: CurateCommandHost, args: string): void {
+	const words = interfaceText().resources.curate;
 	const [sub, name] = args.split(/\s+/, 2);
 	if (sub === "archive" && name) {
-		host.showStatus(
-			host.session.archivePromotedSkill(name)
-				? `Archived promoted skill '${name}'`
-				: `Could not archive '${name}' (not a promoted skill?)`,
-		);
+		host.showStatus(host.session.archivePromotedSkill(name) ? words.archived(name) : words.archiveFailed(name));
 		return;
 	}
 	if (sub === "restore" && name) {
-		host.showStatus(
-			host.session.restorePromotedSkill(name) ? `Restored skill '${name}'` : `Could not restore '${name}'`,
-		);
+		host.showStatus(host.session.restorePromotedSkill(name) ? words.restored(name) : words.restoreFailed(name));
 		return;
 	}
 	const proposals = host.session.proposeSkillCuration();
 	if (proposals.archive.length === 0 && proposals.consolidate.length === 0) {
-		host.showStatus("Curator: no stale or overlapping promoted skills. Nothing to propose.");
+		host.showStatus(words.empty);
 		return;
 	}
-	const lines: string[] = ["Skill curator proposals (nothing applied automatically):"];
+	const lines: string[] = [words.header];
 	for (const a of proposals.archive) {
-		lines.push(`  • archive '${a.name}' — ${a.reason}  →  /curate archive ${a.name}`);
+		lines.push(words.archiveProposal(a.name, a.reason));
 	}
 	for (const c of proposals.consolidate) {
-		lines.push(`  • consider merging '${c.names[0]}' + '${c.names[1]}' (overlap ${(c.overlap * 100) | 0}%)`);
+		lines.push(words.mergeProposal(c.names[0], c.names[1], (c.overlap * 100) | 0));
 	}
 	host.showStatus(lines.join("\n"));
 }
@@ -260,7 +257,7 @@ export async function handleBashCommand(
 		if (host.bashComponent) {
 			host.bashComponent.setComplete(undefined, false);
 		}
-		host.showError(`Bash command failed: ${error instanceof Error ? error.message : "Unknown error"}`);
+		host.showError(interfaceText().resources.bash.failed(error instanceof Error ? error.message : "Unknown error"));
 	}
 
 	host.bashComponent = undefined;
@@ -272,7 +269,7 @@ export async function handleCompactCommand(host: CompactCommandHost, customInstr
 	const messageCount = entries.filter((e) => e.type === "message").length;
 
 	if (messageCount < 2) {
-		host.showWarning("Nothing to compact (no messages yet)");
+		host.showWarning(interfaceText().resources.compact.nothing);
 		return;
 	}
 

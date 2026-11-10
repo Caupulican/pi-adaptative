@@ -16,12 +16,17 @@ import type { FRAME } from "./text-en/frame.ts";
 import type { GRAPH } from "./text-en/graph.ts";
 import type { INSPECTOR } from "./text-en/inspector.ts";
 import type { KEYS } from "./text-en/keys.ts";
+import type { LOCAL_MODELS } from "./text-en/local-models.ts";
+import type { MACHINES } from "./text-en/machines.ts";
 import type { PANES } from "./text-en/panes.ts";
 import type { PROFILES_SCREEN } from "./text-en/profiles-screen.ts";
+import type { RESOURCES } from "./text-en/resources.ts";
 import type { SECRETS_SCREEN } from "./text-en/secrets-screen.ts";
 import type { SELECTORS } from "./text-en/selectors.ts";
+import type { SESSIONS } from "./text-en/sessions.ts";
 import type { SETTINGS } from "./text-en/settings.ts";
 import type { SETTINGS_SCREEN } from "./text-en/settings-screen.ts";
+import type { SMALL_COMMANDS } from "./text-en/small-commands.ts";
 import type { STATUS } from "./text-en/status.ts";
 
 /**
@@ -40,12 +45,17 @@ export interface InterfaceText {
 	graph: typeof GRAPH;
 	inspector: typeof INSPECTOR;
 	keys: typeof KEYS;
+	localModels: typeof LOCAL_MODELS;
+	machines: typeof MACHINES;
 	panes: typeof PANES;
 	profilesScreen: typeof PROFILES_SCREEN;
+	resources: typeof RESOURCES;
 	secretsScreen: typeof SECRETS_SCREEN;
 	selectors: typeof SELECTORS;
+	sessions: typeof SESSIONS;
 	settings: typeof SETTINGS;
 	settingsScreen: typeof SETTINGS_SCREEN;
+	smallCommands: typeof SMALL_COMMANDS;
 	status: typeof STATUS;
 }
 

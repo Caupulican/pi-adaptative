@@ -5,15 +5,13 @@
  */
 
 import { randomUUID } from "node:crypto";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { FleetMachine } from "../../core/remote/fleet-machines.ts";
 import type { RemoteHubController } from "../../core/remote/hub-controller.ts";
 import type { PlacerJobRecord } from "../../core/remote/job-store.ts";
 import { placedJobTerminal } from "../../core/remote/outcome-adapter.ts";
 import { LINK_PEER_TRUSTS, type LinkPeerSettings, updateLinkPeerSettings } from "../../core/remote/registry.ts";
 import type { RemoteJobs } from "../../core/remote/remote-jobs.ts";
-
-export const JOB_USAGE =
-	"/remote jobs | /remote run <name> <task> | /remote cancel <name> | /remote hold <name> | /remote release <name> | /remote trust <name> answers|reads|changes | /remote accept <name> on|off | /remote rotate <name>";
 
 const JOB_COMMANDS = new Set(["jobs", "run", "cancel", "hold", "release", "trust", "accept", "rotate"]);
 const SHOWN_JOBS = 10;
@@ -28,12 +26,13 @@ interface JobCommandHost {
 }
 
 function jobWords(record: PlacerJobRecord): string {
+	const words = interfaceText().machines.jobs;
 	const terminal = placedJobTerminal(record);
-	if (terminal) return `${terminal.status}${record.appliedAt === undefined ? ", reporting" : ""}`;
-	if (record.state === "pending") return `waiting for ${record.executorName} to take it`;
+	if (terminal) return record.appliedAt === undefined ? words.reporting(terminal.status) : terminal.status;
+	if (record.state === "pending") return words.waitingFor(record.executorName);
 	return record.progress?.line
-		? `${record.progress.phase}: ${record.progress.line}`
-		: (record.progress?.phase ?? "taken");
+		? words.progress(record.progress.phase, record.progress.line)
+		: (record.progress?.phase ?? words.taken);
 }
 
 /**
@@ -41,43 +40,43 @@ function jobWords(record: PlacerJobRecord): string {
  * `/remote cancel <name>` records a stop for each of that machine's. Undefined when there are none.
  */
 function unreadableLine(jobs: RemoteJobs): string | undefined {
+	const words = interfaceText().machines.jobs;
 	const { byMachine, unnamed } = jobs.client.unreadablePlaced();
-	const parts = [...byMachine].map(
-		([machineId, jobIds]) =>
-			`${jobs.machines.get(machineId)?.name ?? "a machine no longer linked"}: ${jobIds.length}`,
+	const parts = [...byMachine].map(([machineId, jobIds]) =>
+		words.unreadablePart(jobs.machines.get(machineId)?.name ?? words.unreadableUnnamedMachine, jobIds.length),
 	);
-	if (unnamed > 0) parts.push(`${unnamed} with no machine named`);
+	if (unnamed > 0) parts.push(words.unreadableUnnamed(unnamed));
 	if (parts.length === 0) return undefined;
-	return `Job records this build cannot read, kept as they are and counted as open: ${parts.join(", ")}.`;
+	return words.unreadableLine(parts.join(", "));
 }
 
 function jobsText(jobs: RemoteJobs): string {
+	const words = interfaceText().machines.jobs;
 	const placed = jobs.client.list();
 	const lines = placed
 		.slice(0, SHOWN_JOBS)
-		.map((record) => `- ${record.offer.label} on ${record.executorName}: ${jobWords(record)}`);
+		.map((record) => words.row(record.offer.label, record.executorName, jobWords(record)));
 	const here = jobs.runningHere();
 	const unreadable = unreadableLine(jobs);
 	return [
-		placed.length > 0 ? `Jobs placed from here (${placed.length}):` : "No jobs placed from here.",
+		placed.length > 0 ? words.placed(placed.length) : words.nonePlaced,
 		...lines,
-		...(placed.length > SHOWN_JOBS ? [`and ${placed.length - SHOWN_JOBS} older.`] : []),
+		...(placed.length > SHOWN_JOBS ? [words.older(placed.length - SHOWN_JOBS)] : []),
 		...(unreadable ? [unreadable] : []),
-		here > 0 ? `Running here for other machines: ${here}.` : "Nothing running here for other machines.",
+		here > 0 ? words.runningHere(here) : words.nothingRunningHere,
 	].join("\n");
 }
 
 async function runJob(jobs: RemoteJobs, machine: FleetMachine, task: string, host: JobCommandHost): Promise<void> {
+	const words = interfaceText().machines.jobs;
 	const cwd = await jobs.projectOn(machine.machineId);
 	const result = await jobs.place(
 		machine.machineId,
 		{ idempotencyKey: `owner-run:${randomUUID()}`, instructions: task },
 		cwd ? { cwd } : {},
 	);
-	if (result.kind === "refused") return host.showWarning(`${machine.name} was not given the job: ${result.reason}.`);
-	host.showStatus(
-		`${machine.name} has the job, read-only, ${cwd ? "in its checkout of this project" : "as a question without a checkout (it does not offer this project)"}. Its end reaches this session as a worker report.`,
-	);
+	if (result.kind === "refused") return host.showWarning(words.refused(machine.name, result.reason));
+	host.showStatus(words.accepted(machine.name, cwd ? words.inCheckout : words.noCheckout));
 }
 
 /** Runs one job command; `rest` is the words after the subcommand. */
@@ -87,24 +86,23 @@ export async function runJobCommand(
 	hub: RemoteHubController,
 	host: JobCommandHost,
 ): Promise<void> {
+	const words = interfaceText().machines.jobs;
 	const jobs = hub.jobs;
-	if (!jobs) return host.showWarning("Remote jobs are not available in this session.");
+	if (!jobs) return host.showWarning(words.unavailable);
 	if (sub === "jobs") return host.showStatus(jobsText(jobs));
 	const name = rest[0] ?? "";
 	if (sub === "rotate") {
 		const rotated = hub.rotate(name);
-		if (!rotated) return host.showWarning(`No machine named ${name} joined this hub.`);
-		return host.showStatus(
-			`${name} has a new secret and was disconnected; its jobs are kept. On that machine run /remote leave, then:\n/remote join <this-hub-address> ${rotated.token}\nThe token is shown once; keep it private.`,
-		);
+		if (!rotated) return host.showWarning(words.rotateUnknown(name));
+		return host.showStatus(words.rotated(name, rotated.token));
 	}
 	const machine = jobs.machines.byName(name);
-	if (!machine) return host.showWarning(`No linked machine named ${name} has connected yet. Usage: ${JOB_USAGE}`);
+	if (!machine) return host.showWarning(words.unknownMachine(name, words.usage));
 	const setPeer = (change: LinkPeerSettings) => updateLinkPeerSettings(hub.agentDir, machine.machineId, change);
 	switch (sub) {
 		case "run": {
 			const task = rest.slice(1).join(" ").trim();
-			if (!task) return host.showWarning("Usage: /remote run <name> <task>");
+			if (!task) return host.showWarning(words.runUsage);
 			return runJob(jobs, machine, task, host);
 		}
 		case "cancel": {
@@ -113,40 +111,34 @@ export async function runJobCommand(
 			// A record this build cannot read is named by its file alone: its stop is kept beside it as a marker, never written into it.
 			const unreadable = jobs.client.unreadablePlaced().byMachine.get(machine.machineId) ?? [];
 			const recorded = unreadable.filter((jobId) => jobs.client.cancelOn(machine.machineId, jobId, "owner")).length;
-			if (stopped === 0 && recorded === 0) return host.showStatus(`No open job on ${machine.name}.`);
-			const words = [
-				stopped > 0 ? `Stopped ${stopped} job(s) on ${machine.name}.` : undefined,
-				recorded > 0
-					? `Recorded a stop for ${recorded} job record(s) on ${machine.name} that this build cannot read. The records stay as they are; the placing session ends each job's lane when it next reconciles, and the stop is sent to ${machine.name} when it is connected.`
-					: undefined,
+			if (stopped === 0 && recorded === 0) return host.showStatus(words.noOpenJob(machine.name));
+			const parts = [
+				stopped > 0 ? words.stopped(stopped, machine.name) : undefined,
+				recorded > 0 ? words.stopRecorded(recorded, machine.name) : undefined,
 			];
-			return host.showStatus(words.filter((word) => word !== undefined).join(" "));
+			return host.showStatus(parts.filter((part) => part !== undefined).join(" "));
 		}
 		case "hold":
 		case "release":
 			setPeer({ hold: sub === "hold" });
-			return host.showStatus(
-				sub === "hold"
-					? `No new job goes to ${machine.name}; jobs already there continue.`
-					: `${machine.name} can be given jobs again.`,
-			);
+			return host.showStatus(sub === "hold" ? words.held(machine.name) : words.released(machine.name));
 		case "trust": {
 			const trust = LINK_PEER_TRUSTS.find((word) => word === rest[1]);
-			if (!trust) return host.showWarning("Usage: /remote trust <name> answers|reads|changes");
+			if (!trust) return host.showWarning(words.trustUsage);
 			setPeer({ trust });
 			return host.showStatus(
-				`${machine.name} may ask this machine for ${trust === "answers" ? "answers only" : trust === "reads" ? "answers and reads of its checkouts" : "answers, reads and changes"}.`,
+				trust === "answers"
+					? words.trustAnswers(machine.name)
+					: trust === "reads"
+						? words.trustReads(machine.name)
+						: words.trustChanges(machine.name),
 			);
 		}
 		case "accept": {
-			if (rest[1] !== "on" && rest[1] !== "off") return host.showWarning("Usage: /remote accept <name> on|off");
+			if (rest[1] !== "on" && rest[1] !== "off") return host.showWarning(words.acceptUsage);
 			setPeer({ acceptsJobs: rest[1] === "on" });
 			if (rest[1] === "on") jobs.start();
-			return host.showStatus(
-				rest[1] === "on"
-					? `This machine runs jobs ${machine.name} places here.`
-					: `This machine takes no new jobs from ${machine.name}; jobs already here finish.`,
-			);
+			return host.showStatus(rest[1] === "on" ? words.accepts(machine.name) : words.refuses(machine.name));
 		}
 	}
 }

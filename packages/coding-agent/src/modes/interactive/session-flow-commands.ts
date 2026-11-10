@@ -14,7 +14,7 @@
 import { randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { EditorComponent } from "@caupulican/pi-tui";
-import { type Component, type Container, Loader, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import { type Component, type Container, Loader, Spacer, type TUI } from "@caupulican/pi-tui";
 import { sessionsDir } from "../../core/agent-paths.ts";
 import type {
 	AgentSession,
@@ -22,7 +22,6 @@ import type {
 	GoalContinuationLoopResult,
 } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
-import { hasCostSummarySignal } from "../../core/cost/cost-summary.ts";
 import type { ExtensionCommandContext, ExtensionRunner } from "../../core/extensions/index.ts";
 import { describeGoalAutoContinue } from "../../core/goals/goal-auto-continue-state.ts";
 import {
@@ -41,6 +40,7 @@ import {
 import { type GoalState, isGoalExecutionActive } from "../../core/goals/goal-state.ts";
 import { applyGoalAction, completeGoalManually } from "../../core/goals/goal-tool-core.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import {
 	findExactModelReferenceMatch,
@@ -79,8 +79,9 @@ import { TreeSelectorComponent } from "./components/tree-selector.ts";
 import { TrustSelectorComponent } from "./components/trust-selector.ts";
 import { UserMessageSelectorComponent } from "./components/user-message-selector.ts";
 import type { ExtensionUiHost } from "./extension-ui-host.ts";
-import { formatCostReport } from "./report-commands.ts";
 import { handleNonFatalSessionReplacementError } from "./session-replacement-errors.ts";
+
+export { handleSessionCommand, type SessionInfoCommandHost } from "./session-info-view.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface SessionFlowCommandsSettingsSource {
@@ -168,7 +169,7 @@ export async function showModelSelector(host: SessionFlowHost, initialSearchInpu
 					host.footer.invalidate();
 					host.updateEditorBorderColor();
 					done();
-					host.showStatus(`Model: ${model.id}`);
+					host.showStatus(interfaceText().sessions.model.chosen(model.id));
 					void host.maybeWarnAboutAnthropicSubscriptionAuth(model);
 					host.checkDaxnutsEasterEgg(model);
 				} catch (error) {
@@ -186,7 +187,7 @@ export async function showModelSelector(host: SessionFlowHost, initialSearchInpu
 					host.footer.invalidate();
 					host.updateEditorBorderColor();
 					done();
-					host.showStatus(`Default model: ${model.id}`);
+					host.showStatus(interfaceText().sessions.model.defaultChosen(model.id));
 					void host.maybeWarnAboutAnthropicSubscriptionAuth(model);
 					host.checkDaxnutsEasterEgg(model);
 				} catch (error) {
@@ -209,7 +210,7 @@ export async function showModelsSelector(host: SessionFlowHost): Promise<void> {
 	const routerPool = host.session.getRouterCandidatePool();
 
 	if (allModels.length === 0 && !configuredPatterns?.length && !routerPool.customized) {
-		host.showStatus("No models available");
+		host.showStatus(interfaceText().sessions.model.noneAvailable);
 		return;
 	}
 	const configuredScope = configuredPatterns?.length
@@ -275,7 +276,7 @@ export async function showModelsSelector(host: SessionFlowHost): Promise<void> {
 						enabledIds.every((id) => allModelIds.has(id));
 					const newPatterns = enabledIds === null || allEnabled ? undefined : enabledIds;
 					host.settingsManager.setEnabledModels(newPatterns ? [...newPatterns] : undefined);
-					host.showStatus("Model selection saved to settings");
+					host.showStatus(interfaceText().sessions.model.selectionSaved);
 				},
 				onCancel: () => {
 					finishSelectorCancellation(host, done);
@@ -287,10 +288,11 @@ export async function showModelsSelector(host: SessionFlowHost): Promise<void> {
 }
 
 export function showUserMessageSelector(host: SessionFlowHost, newSessionName?: string): void {
+	const words = interfaceText().sessions.resume;
 	const userMessages = host.session.getUserMessagesForForking();
 
 	if (userMessages.length === 0) {
-		host.showStatus("No messages to fork from");
+		host.showStatus(words.forkNoMessages);
 		return;
 	}
 
@@ -313,7 +315,7 @@ export function showUserMessageSelector(host: SessionFlowHost, newSessionName?: 
 					}
 					host.editor.setText(result.selectedText ?? "", result.pasted);
 					done();
-					host.showStatus(newSessionName ? `Forked to new session: ${newSessionName}` : "Forked to new session");
+					host.showStatus(newSessionName ? words.forked(newSessionName) : words.forkedUnnamed);
 				} catch (error: unknown) {
 					finishSelectorError(host, done, error);
 				}
@@ -328,12 +330,13 @@ export function showUserMessageSelector(host: SessionFlowHost, newSessionName?: 
 }
 
 export function showTreeSelector(host: SessionFlowHost, initialSelectedId?: string): void {
+	const words = interfaceText().sessions.tree;
 	const tree = host.sessionManager.getTree();
 	const realLeafId = host.sessionManager.getLeafId();
 	const initialFilterMode = host.settingsManager.getTreeFilterMode();
 
 	if (tree.length === 0) {
-		host.showStatus("No entries in session");
+		host.showStatus(words.noEntries);
 		return;
 	}
 
@@ -346,7 +349,7 @@ export function showTreeSelector(host: SessionFlowHost, initialSelectedId?: stri
 				// Selecting the current leaf is a no-op (already there)
 				if (entryId === realLeafId) {
 					done();
-					host.showStatus("Already at this point");
+					host.showStatus(words.alreadyHere);
 					return;
 				}
 
@@ -356,28 +359,32 @@ export function showTreeSelector(host: SessionFlowHost, initialSelectedId?: stri
 				// Loop until user makes a complete choice or cancels to tree
 				let wantsSummary = false;
 				let customInstructions: string | undefined;
+				// The answers are identifiers: the label the owner reads never decides what happens next.
+				const summaryChoices = [
+					{ id: "none", label: words.noSummary },
+					{ id: "summary", label: words.summarize },
+					{ id: "custom", label: words.summarizeCustom },
+				] as const;
 
 				// Check if we should skip the prompt (user preference to always default to no summary)
 				if (!host.settingsManager.getBranchSummarySkipPrompt()) {
 					while (true) {
-						const summaryChoice = await host.extensionUiHost.showExtensionSelector("Summarize branch?", [
-							"No summary",
-							"Summarize",
-							"Summarize with custom prompt",
-						]);
+						const answer = await host.extensionUiHost.showExtensionSelector(
+							words.summarizeTitle,
+							summaryChoices.map((choice) => choice.label),
+						);
 
-						if (summaryChoice === undefined) {
+						if (answer === undefined) {
 							// User pressed escape - re-show tree selector with same selection
 							showTreeSelector(host, entryId);
 							return;
 						}
 
-						wantsSummary = summaryChoice !== "No summary";
+						const choice = summaryChoices.find((candidate) => candidate.label === answer)?.id ?? "none";
+						wantsSummary = choice !== "none";
 
-						if (summaryChoice === "Summarize with custom prompt") {
-							customInstructions = await host.extensionUiHost.showExtensionEditor(
-								"Custom summarization instructions",
-							);
+						if (choice === "custom") {
+							customInstructions = await host.extensionUiHost.showExtensionEditor(words.customInstructionsTitle);
 							if (customInstructions === undefined) {
 								// User cancelled - loop back to summary selector
 								continue;
@@ -402,7 +409,7 @@ export function showTreeSelector(host: SessionFlowHost, initialSelectedId?: stri
 						host.ui,
 						(spinner) => theme.fg("accent", spinner),
 						(text) => theme.fg("muted", text),
-						`Summarizing branch... (${keyText("app.interrupt")} to cancel)`,
+						words.loader(keyText("app.interrupt")),
 					);
 					host.statusContainer.addChild(summaryLoader);
 					host.ui.requestRender();
@@ -416,12 +423,12 @@ export function showTreeSelector(host: SessionFlowHost, initialSelectedId?: stri
 
 					if (result.aborted) {
 						// Summarization aborted - re-show tree selector with same selection
-						host.showStatus("Branch summarization cancelled");
+						host.showStatus(words.summarizationCancelled);
 						showTreeSelector(host, entryId);
 						return;
 					}
 					if (result.cancelled) {
-						host.showStatus("Navigation cancelled");
+						host.showStatus(words.navigationCancelled);
 						return;
 					}
 
@@ -430,7 +437,7 @@ export function showTreeSelector(host: SessionFlowHost, initialSelectedId?: stri
 					if (result.editorText && !host.editor.getText().trim()) {
 						host.editor.setText(result.editorText, result.pasted);
 					}
-					host.showStatus("Navigated to selected point");
+					host.showStatus(words.navigated);
 					void host.flushCompactionQueue({ willRetry: false });
 				} catch (error) {
 					host.showError(error instanceof Error ? error.message : String(error));
@@ -457,6 +464,7 @@ export function showTreeSelector(host: SessionFlowHost, initialSelectedId?: stri
 }
 
 export function showTrustSelector(host: SessionFlowHost): void {
+	const words = interfaceText().sessions.trust;
 	const cwd = host.sessionManager.getCwd();
 	const trustStore = new ProjectTrustStore(host.runtimeHost.services.agentDir);
 	const savedDecision = trustStore.get(cwd);
@@ -471,11 +479,7 @@ export function showTrustSelector(host: SessionFlowHost): void {
 				// The decision applies to this session now: project settings, instructions and extensions load or drop.
 				host.settingsManager.setProjectTrusted(trusted);
 				void host.reload().then((reloaded) => {
-					host.showStatus(
-						reloaded
-							? `Project ${trusted ? "trusted" : "untrusted"}; applied.`
-							: `Saved trust decision: ${trusted ? "trusted" : "untrusted"}. It applies after /reload.`,
-					);
+					host.showStatus(reloaded ? words.applied(trusted) : words.saved(trusted));
 				});
 			},
 			onCancel: () => {
@@ -564,13 +568,20 @@ async function offerRestoredGoalResume(host: SessionFlowHost): Promise<boolean> 
 		host.session.restoreGoalRuntimeAfterResume();
 		return false;
 	}
-	const choice = await host.extensionUiHost?.showExtensionSelector("Resume stopped goal?", [
-		"Resume goal",
-		"Leave stopped",
-	]);
-	if (choice !== "Resume goal") return false;
+	const words = interfaceText().sessions.resume;
+	// The answers are identifiers: the label the owner reads never decides what happens next.
+	const resumeChoices = [
+		{ id: "resume", label: words.resumeGoal },
+		{ id: "leave", label: words.leaveStopped },
+	] as const;
+	const answer = await host.extensionUiHost?.showExtensionSelector(
+		words.resumeGoalTitle,
+		resumeChoices.map((choice) => choice.label),
+	);
+	const choice = resumeChoices.find((candidate) => candidate.label === answer)?.id;
+	if (choice !== "resume") return false;
 	const resumed = resumePersistedGoal(host.session);
-	if (!resumed.ok) throw new Error(`Goal resume failed: ${resumed.error}`);
+	if (!resumed.ok) throw new Error(words.goalResumeFailed(resumed.error));
 	host.session.restoreGoalRuntimeAfterResume();
 	host.refreshAutonomyFooterStatus();
 	return true;
@@ -581,6 +592,7 @@ export async function handleResumeSession(
 	sessionPath: string,
 	options?: Parameters<ExtensionCommandContext["switchSession"]>[1],
 ): Promise<{ cancelled: boolean }> {
+	const words = interfaceText().sessions.resume;
 	if (host.loadingAnimation) {
 		host.loadingAnimation.stop();
 		host.loadingAnimation = undefined;
@@ -593,7 +605,7 @@ export async function handleResumeSession(
 		}
 		host.renderCurrentSessionState();
 		const goalResumed = await offerRestoredGoalResume(host);
-		host.showStatus(goalResumed ? "Resumed session and goal" : "Resumed session; goal state preserved");
+		host.showStatus(goalResumed ? words.resumedWithGoal : words.resumedGoalPreserved);
 		return result;
 	} catch (error: unknown) {
 		const disposition = handleNonFatalSessionReplacementError(host, error);
@@ -601,7 +613,7 @@ export async function handleResumeSession(
 		if (error instanceof MissingSessionCwdError) {
 			const selectedCwd = await host.promptForMissingSessionCwd(error);
 			if (!selectedCwd) {
-				host.showStatus("Resume cancelled");
+				host.showStatus(words.cancelled);
 				return { cancelled: true };
 			}
 			try {
@@ -611,19 +623,15 @@ export async function handleResumeSession(
 				}
 				host.renderCurrentSessionState();
 				const goalResumed = await offerRestoredGoalResume(host);
-				host.showStatus(
-					goalResumed
-						? "Resumed session and goal in current cwd"
-						: "Resumed session in current cwd; goal state preserved",
-				);
+				host.showStatus(goalResumed ? words.resumedWithGoalHere : words.resumedGoalPreservedHere);
 				return result;
 			} catch (retryError: unknown) {
 				const retryDisposition = handleNonFatalSessionReplacementError(host, retryError);
 				if (retryDisposition) return { cancelled: retryDisposition === "previous_restored" };
-				return host.handleFatalRuntimeError("Failed to resume session", retryError);
+				return host.handleFatalRuntimeError(words.failed, retryError);
 			}
 		}
-		return host.handleFatalRuntimeError("Failed to resume session", error);
+		return host.handleFatalRuntimeError(words.failed, error);
 	}
 }
 
@@ -639,7 +647,7 @@ export async function handleModelCommand(host: SessionFlowHost, searchTerm?: str
 			await host.session.setModel(model);
 			host.footer.invalidate();
 			host.updateEditorBorderColor();
-			host.showStatus(`Model: ${model.id}`);
+			host.showStatus(interfaceText().sessions.model.chosen(model.id));
 			void host.maybeWarnAboutAnthropicSubscriptionAuth(model);
 			host.checkDaxnutsEasterEgg(model);
 		} catch (error) {
@@ -657,10 +665,11 @@ export async function findExactModelMatch(host: SessionFlowHost, searchTerm: str
 }
 
 export async function showThinkingSelector(host: SessionFlowHost): Promise<void> {
+	const words = interfaceText().sessions.thinking;
 	const currentLevel = host.session.thinkingLevel;
 	const availableLevels = host.session.getAvailableThinkingLevels();
 	if (availableLevels.length === 0) {
-		host.showStatus("Current model does not support thinking");
+		host.showStatus(words.unsupported);
 		return;
 	}
 
@@ -673,7 +682,7 @@ export async function showThinkingSelector(host: SessionFlowHost): Promise<void>
 				host.footer.invalidate();
 				host.updateEditorBorderColor();
 				done();
-				host.showStatus(`Thinking level set to ${level}`);
+				host.showStatus(words.levelSet(level));
 			},
 			() => {
 				finishSelectorCancellation(host, done);
@@ -684,7 +693,7 @@ export async function showThinkingSelector(host: SessionFlowHost): Promise<void>
 				host.footer.invalidate();
 				host.updateEditorBorderColor();
 				done();
-				host.showStatus(`Default thinking level set to ${level}`);
+				host.showStatus(words.defaultLevelSet(level));
 			},
 		);
 		return { component: selector, focus: selector };
@@ -692,6 +701,7 @@ export async function showThinkingSelector(host: SessionFlowHost): Promise<void>
 }
 
 export async function handleThinkingCommand(host: SessionFlowHost, arg?: string): Promise<void> {
+	const words = interfaceText().sessions.thinking;
 	if (!arg) {
 		await showThinkingSelector(host);
 		return;
@@ -700,7 +710,7 @@ export async function handleThinkingCommand(host: SessionFlowHost, arg?: string)
 	const normalized = arg.trim().toLowerCase();
 	const availableLevels = host.session.getAvailableThinkingLevels();
 	if (availableLevels.length === 0) {
-		host.showStatus("Current model does not support thinking");
+		host.showStatus(words.unsupported);
 		return;
 	}
 
@@ -708,9 +718,9 @@ export async function handleThinkingCommand(host: SessionFlowHost, arg?: string)
 		host.session.setThinkingLevel(normalized as ThinkingLevel);
 		host.footer.invalidate();
 		host.updateEditorBorderColor();
-		host.showStatus(`Thinking level set to ${normalized}`);
+		host.showStatus(words.levelSet(normalized));
 	} else {
-		host.showError(`Invalid thinking level "${arg}". Valid levels: ${availableLevels.join(", ")}`);
+		host.showError(words.invalid(arg, availableLevels.join(", ")));
 	}
 }
 
@@ -732,9 +742,10 @@ export interface CloneCommandHost {
 }
 
 export async function handleCloneCommand(host: CloneCommandHost, newSessionName?: string): Promise<void> {
+	const words = interfaceText().sessions.clone;
 	const leafId = host.sessionManager.getLeafId();
 	if (!leafId) {
-		host.showStatus("Nothing to clone yet");
+		host.showStatus(words.nothing);
 		return;
 	}
 
@@ -750,7 +761,7 @@ export async function handleCloneCommand(host: CloneCommandHost, newSessionName?
 			host.session.setSessionName(newSessionName);
 		}
 		host.editor.setText("");
-		host.showStatus(newSessionName ? `Cloned to new session: ${newSessionName}` : "Cloned to new session");
+		host.showStatus(newSessionName ? words.cloned(newSessionName) : words.clonedUnnamed);
 	} catch (error: unknown) {
 		host.showError(error instanceof Error ? error.message : String(error));
 	}
@@ -808,23 +819,36 @@ function plainStopReason(reason: string): string {
 }
 
 function formatGoalStatus(snapshot: ReturnType<AgentSession["getGoalRuntimeSnapshot"]>): string {
+	const words = interfaceText().sessions.goal;
 	const state = snapshot.goalState;
-	if (!state) return "Goal: none";
-	const requirements = state.requirements.map((requirement) => {
-		const blockedReason = requirement.blockedReason ? ` — ${requirement.blockedReason}` : "";
-		return `- ${requirement.id}: ${requirement.status}${blockedReason}`;
-	});
-	const blockedReason = state.blockedReason ? `\nBlocked reason: ${plainStopReason(state.blockedReason)}` : "";
+	if (!state) return words.none;
+	const requirements = state.requirements.map((requirement) =>
+		words.requirement({
+			id: requirement.id,
+			status: requirement.status,
+			blockedReason: requirement.blockedReason,
+		}),
+	);
+	const blockedReason = state.blockedReason ? `\n${words.blockedReason(plainStopReason(state.blockedReason))}` : "";
 	const autoContinue =
 		snapshot.autoContinue === undefined ? "" : `\n${describeGoalAutoContinue(snapshot.autoContinue)}`;
 	const requirementDetails = requirements.length > 0 ? `\n${requirements.join("\n")}` : "";
 	const tokenUsage =
 		state.tokenBudget !== undefined
-			? `\nTokens: ${state.tokensUsed ?? 0}/${state.tokenBudget}`
+			? `\n${words.tokens(state.tokensUsed ?? 0, state.tokenBudget)}`
 			: (state.tokensUsed ?? 0) > 0
-				? `\nTokens: ${state.tokensUsed ?? 0}`
+				? `\n${words.tokens(state.tokensUsed ?? 0)}`
 				: "";
-	return `Goal: ${state.userGoal}\nStatus: ${GOAL_STATUS_WORDS[state.status]}${blockedReason}${tokenUsage}\nRequirements: open ${snapshot.continuation.openRequirementIds.length}, blocked ${snapshot.continuation.blockedRequirementIds.length}, satisfied ${snapshot.continuation.satisfiedRequirementIds.length}${requirementDetails}${autoContinue}\nControls: /goal edit | /goal pause | /goal resume | /goal reopen <requirement-id> | /goal complete | /goal clear | /goal override <text>`;
+	return [
+		words.head(state.userGoal),
+		`${words.status(GOAL_STATUS_WORDS[state.status])}${blockedReason}${tokenUsage}`,
+		`${words.counts({
+			open: snapshot.continuation.openRequirementIds.length,
+			blocked: snapshot.continuation.blockedRequirementIds.length,
+			satisfied: snapshot.continuation.satisfiedRequirementIds.length,
+		})}${requirementDetails}${autoContinue}`,
+		words.controls,
+	].join("\n");
 }
 
 /**
@@ -858,12 +882,13 @@ export async function tryHandleGoalEditorSubmit(
 	try {
 		await host.handleGoalCommand(text);
 	} catch (error) {
-		host.showError(`Goal command failed: ${error instanceof Error ? error.message : String(error)}`);
+		host.showError(interfaceText().sessions.goal.failed(error instanceof Error ? error.message : String(error)));
 	}
 	return true;
 }
 
 export async function handleGoalCommand(host: GoalCommandHost, text: string): Promise<void> {
+	const words = interfaceText().sessions.goal;
 	const input = text.replace(/^\/goal\s*/, "").trim();
 	if (!input || input === "status") {
 		host.showStatus(
@@ -880,7 +905,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			host.showError(resumed.error);
 			return;
 		}
-		host.showStatus("Goal resumed.");
+		host.showStatus(words.resumed);
 		return;
 	}
 
@@ -890,7 +915,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			host.showError(paused.error);
 			return;
 		}
-		host.showStatus("Goal paused.");
+		host.showStatus(words.paused);
 		host.refreshAutonomyFooterStatus();
 		return;
 	}
@@ -899,7 +924,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 		const inlineObjective = input.slice("edit".length).trim();
 		const objective = inlineObjective || (current ? await host.promptForGoalEdit?.(current.userGoal) : undefined);
 		if (!objective) {
-			host.showError(current ? "Usage: /goal edit <objective>" : "No goal exists to edit.");
+			host.showError(current ? words.editUsage : words.nothingToEdit);
 			return;
 		}
 		const edited = editPersistedGoal(host.session, { userGoal: objective }, now);
@@ -917,7 +942,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			});
 		}
 		if (isGoalExecutionActive(edited.state.status)) host.session.restoreGoalRuntimeAfterResume();
-		host.showStatus("Goal updated.");
+		host.showStatus(words.updated);
 		host.refreshAutonomyFooterStatus();
 		return;
 	}
@@ -929,7 +954,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			return;
 		}
 		host.session.saveGoalStateSnapshot(completed.state, current ? getGoalStateRevision(current) : undefined);
-		host.showStatus("Goal completed manually.");
+		host.showStatus(words.completed);
 		host.refreshAutonomyFooterStatus();
 		return;
 	}
@@ -940,7 +965,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			host.showError(cleared.error);
 			return;
 		}
-		host.showStatus(cleared.cleared ? "Goal cleared." : "No goal exists to clear.");
+		host.showStatus(cleared.cleared ? words.cleared : words.nothingToClear);
 		host.refreshAutonomyFooterStatus();
 		return;
 	}
@@ -951,7 +976,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			host.showError(cancelled.error);
 			return;
 		}
-		host.showStatus("Goal closed.");
+		host.showStatus(words.closed);
 		host.refreshAutonomyFooterStatus();
 		return;
 	}
@@ -959,19 +984,19 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 	if (input === "reopen" || input.startsWith("reopen ")) {
 		const requirementId = input.slice("reopen".length).trim();
 		if (!requirementId) {
-			host.showError("Usage: /goal reopen <requirement-id>");
+			host.showError(words.reopenUsage);
 			return;
 		}
 		if (!current) {
-			host.showError("No goal exists to update.");
+			host.showError(words.nothingToUpdate);
 			return;
 		}
 		const requirement = current.requirements.find((candidate) => candidate.id === requirementId);
 		if (requirement?.status !== "blocked") {
 			host.showError(
 				requirement
-					? `Requirement '${requirementId}' is ${requirement.status}; only blocked requirements can be reopened.`
-					: `Unknown requirement '${requirementId}'.`,
+					? words.requirementNotBlocked(requirementId, requirement.status)
+					: words.requirementUnknown(requirementId),
 			);
 			return;
 		}
@@ -998,9 +1023,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			hostGaps: [`${requirement.id} blocked: ${requirement.blockedReason ?? "no reason recorded"}`],
 		});
 		if (isGoalExecutionActive(reopened.state.status)) host.session.restoreGoalRuntimeAfterResume();
-		host.showStatus(
-			`Requirement '${requirementId}' reopened${current.status === "blocked" ? " and goal resumed" : ""}.`,
-		);
+		host.showStatus(words.requirementReopened(requirementId, current.status === "blocked"));
 		host.refreshAutonomyFooterStatus();
 		return;
 	}
@@ -1008,7 +1031,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 	const overriding = input === "override" || input.startsWith("override ");
 	const goalText = overriding ? input.slice("override".length).trim() : input;
 	if (!goalText) {
-		host.showError("Usage: /goal override <text>");
+		host.showError(words.overrideUsage);
 		return;
 	}
 	const goalId = `goal-${randomUUID()}`;
@@ -1016,11 +1039,11 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 		? replaceGoal({ goalId, userGoal: goalText }, now)
 		: applyGoalAction(current, { action: "start", goalId, userGoal: goalText }, now);
 	if (!started.ok) {
-		host.showError(`${started.error} Use /goal override <text> to replace it explicitly.`);
+		host.showError(`${started.error}${words.overrideHint}`);
 		return;
 	}
 	host.session.saveGoalStateSnapshot(started.state, current ? getGoalStateRevision(current) : undefined);
-	const verb = overriding ? "overridden" : "started";
+	const verb = overriding ? words.verbOverridden : words.verbStarted;
 	try {
 		// Submit one bootstrap pass, then yield to the event-driven idle scheduler. This is a scheduling
 		// quantum, not a goal ceiling: an active goal is immediately rearmed and the configured goal turn
@@ -1031,20 +1054,26 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 			maxWallClockMinutes: 0,
 		});
 		if (result.stopReason === "already_continuing") {
-			host.showStatus(`Goal ${verb}: the autonomy loop is already continuing this goal.`);
+			host.showStatus(words.alreadyContinuing(verb));
 		} else if (result.stopReason === "session_disposed") {
-			host.showStatus(`Goal ${verb}, but the session was disposed before continuation could run.`);
+			host.showStatus(words.disposedBeforeContinuation(verb));
 		} else {
 			const continuation = result.finalSnapshot.continuation;
 			harnessLog.debug("ui", "a goal continuation decided", {
 				action: continuation.action,
 				reasonCode: continuation.reasonCode,
 			});
-			host.showStatus(`Goal ${verb}: ${plainLabel(continuation.action)}, ${plainLabel(continuation.reasonCode)}.`);
+			host.showStatus(
+				words.started({
+					verb,
+					action: plainLabel(continuation.action),
+					reason: plainLabel(continuation.reasonCode),
+				}),
+			);
 			if (continuation.action === "continue") host.session.restoreGoalRuntimeAfterResume();
 		}
 	} catch (error) {
-		host.showError(`Goal continuation failed: ${error instanceof Error ? error.message : String(error)}`);
+		host.showError(words.continuationFailed(error instanceof Error ? error.message : String(error)));
 	} finally {
 		host.refreshAutonomyFooterStatus();
 	}
@@ -1066,9 +1095,7 @@ export function handleTaskCommand(host: TaskCommandHost, text: string): void {
 		return;
 	}
 	if (parsed.command.type === "retired_execution") {
-		host.showStatus(
-			`/task ${parsed.command.operation} is no longer available. Ask Pi to delegate the work instead; workers report back when they finish.`,
-		);
+		host.showStatus(interfaceText().sessions.task.retired(parsed.command.operation));
 		return;
 	}
 
@@ -1119,6 +1146,7 @@ export interface GoalContinueCommandHost {
 }
 
 export async function handleGoalContinueCommand(host: GoalContinueCommandHost, text: string): Promise<void> {
+	const words = interfaceText().sessions.goal;
 	const parsed = host.parseGoalContinueCommand(text);
 	if (!parsed.ok) {
 		host.showError(parsed.error);
@@ -1126,7 +1154,11 @@ export async function handleGoalContinueCommand(host: GoalContinueCommandHost, t
 	}
 
 	host.showStatus(
-		`Goal continuation started: ${parsed.maxTurns === 0 ? "unbounded turns" : `up to ${parsed.maxTurns} turn(s)`}, recovery threshold ${parsed.maxStallTurns}, wall-clock limit ${parsed.maxWallClockMinutes || "disabled"} minute(s).`,
+		words.continueStarted({
+			turns: parsed.maxTurns === 0 ? words.unboundedTurns : words.upToTurns(parsed.maxTurns),
+			stallTurns: parsed.maxStallTurns,
+			wallClock: parsed.maxWallClockMinutes ? String(parsed.maxWallClockMinutes) : words.disabled,
+		}),
 	);
 	try {
 		const result = await host.session.continueGoalLoop({
@@ -1141,63 +1173,16 @@ export async function handleGoalContinueCommand(host: GoalContinueCommandHost, t
 			reasonCode: continuation.reasonCode,
 		});
 		host.showStatus(
-			`Goal continuation stopped: ${plainLabel(result.stopReason)}; submitted ${result.turnsSubmitted} turn(s); latest decision: ${plainLabel(continuation.action)}, ${plainLabel(continuation.reasonCode)}.`,
+			words.continueStopped({
+				stopReason: plainLabel(result.stopReason),
+				turns: result.turnsSubmitted,
+				action: plainLabel(continuation.action),
+				reason: plainLabel(continuation.reasonCode),
+			}),
 		);
 	} catch (error) {
-		host.showError(`Goal continuation failed: ${error instanceof Error ? error.message : String(error)}`);
+		host.showError(words.continuationFailed(error instanceof Error ? error.message : String(error)));
 	} finally {
 		host.refreshAutonomyFooterStatus();
 	}
-}
-
-export interface SessionInfoCommandHost {
-	readonly session: {
-		getSessionStats: () => ReturnType<AgentSession["getSessionStats"]>;
-		getCostSummary: () => ReturnType<AgentSession["getCostSummary"]>;
-		getModelRouterStatus: (formatLabel: (label: string) => string) => string;
-	};
-	readonly sessionManager: { getSessionName: () => string | undefined };
-	readonly chatContainer: Container;
-	readonly ui: { requestRender: () => void };
-}
-
-export function handleSessionCommand(host: SessionInfoCommandHost): void {
-	const stats = host.session.getSessionStats();
-	const sessionName = host.sessionManager.getSessionName();
-
-	let info = `${theme.bold("Session Info")}\n\n`;
-	if (sessionName) {
-		info += `${theme.fg("dim", "Name:")} ${sessionName}\n`;
-	}
-	info += `${theme.fg("dim", "File:")} ${stats.sessionFile ?? "In-memory"}\n`;
-	info += `${theme.fg("dim", "ID:")} ${stats.sessionId}\n\n`;
-	info += `${theme.bold("Messages")}\n`;
-	info += `${theme.fg("dim", "User:")} ${stats.userMessages}\n`;
-	info += `${theme.fg("dim", "Assistant:")} ${stats.assistantMessages}\n`;
-	info += `${theme.fg("dim", "Tool Calls:")} ${stats.toolCalls}\n`;
-	info += `${theme.fg("dim", "Tool Results:")} ${stats.toolResults}\n`;
-	info += `${theme.fg("dim", "Total:")} ${stats.totalMessages}\n\n`;
-	info += `${theme.bold("Tokens")}\n`;
-	info += `${theme.fg("dim", "Input:")} ${stats.tokens.input.toLocaleString()}\n`;
-	info += `${theme.fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
-	if (stats.tokens.cacheRead > 0) {
-		info += `${theme.fg("dim", "Cache Read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
-	}
-	if (stats.tokens.cacheWrite > 0) {
-		info += `${theme.fg("dim", "Cache Write:")} ${stats.tokens.cacheWrite.toLocaleString()}\n`;
-	}
-	info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n`;
-
-	const costs = host.session.getCostSummary();
-	if (hasCostSummarySignal(costs)) {
-		info += `\n${theme.bold("Cost")}\n`;
-		info += formatCostReport(costs);
-	}
-
-	info += `\n\n${theme.bold("Model Router")}\n`;
-	info += host.session.getModelRouterStatus((label) => theme.fg("dim", label));
-
-	host.chatContainer.addChild(new Spacer(1));
-	host.chatContainer.addChild(new Text(info, 1, 0));
-	host.ui.requestRender();
 }

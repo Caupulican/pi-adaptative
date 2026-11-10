@@ -5,31 +5,31 @@ import {
 	setFastMode,
 	toggleFastModeTier,
 } from "../../core/fast-mode.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 
 export interface FastModeCommandHost {
 	session: FastModeSession;
 	showStatus(message: string): void;
 }
 
-const FAST_MODE_USAGE = "Usage: /fast [on|off|priority|ultrafast|status]";
-const ULTRAFAST_USAGE = "Usage: /ultrafast [on|off|status]";
-
 function describeFastMode(status: FastModeStatus, statusOnly: boolean, provider: string | undefined): string {
-	const state = status.enabled ? "on" : "off";
-	const prefix = statusOnly ? `Fast mode is ${state}` : `Fast mode ${state}`;
+	const text = interfaceText().smallCommands.fastMode;
+	const state = status.enabled ? text.on : text.off;
+	const prefix = text.prefix(statusOnly, state);
+	const providerName = provider === "xai" ? text.providerGrok : text.providerCodex;
 	if (status.catalogDefault) {
-		return `${prefix}: ${provider === "xai" ? "Grok" : "Codex"} requests ${status.tier} processing, the account catalog's default for this model. /${status.tier === "ultrafast" ? "ultrafast" : "fast"} turns it off.`;
+		return text.catalogDefault({
+			prefix,
+			provider: providerName,
+			tier: status.tier ?? text.defaultTier,
+			command: status.tier === "ultrafast" ? "ultrafast" : "fast",
+		});
 	}
 	if (status.kind === "model") {
-		return `${prefix}: Grok requests ${status.enabled ? "Grok 4.7 Fast" : "Grok 4.7 standard"}.`;
+		return text.modelVariant(prefix, status.enabled);
 	}
-	const providerName = provider === "xai" ? "Grok" : "Codex";
-	return `${prefix}: ${providerName} requests ${status.tier ?? "default"} processing.${
-		status.tier === "ultrafast"
-			? " Cost uses base rates; Ultrafast pricing is unavailable."
-			: status.reason
-				? ` ${status.reason}`
-				: ""
+	return `${text.tier(prefix, providerName, status.tier ?? text.defaultTier)}${
+		status.tier === "ultrafast" ? text.ultrafastCost : status.reason ? ` ${status.reason}` : ""
 	}`;
 }
 
@@ -42,7 +42,8 @@ export function handleFastModeCommand(host: FastModeCommandHost, text: string): 
 	const ultrafast = command === "/ultrafast";
 	const allowed = ultrafast ? ["on", "off", "status"] : ["on", "off", "priority", "ultrafast", "status"];
 	if (args.length > 1 || (args[0] !== undefined && !allowed.includes(args[0]))) {
-		host.showStatus(ultrafast ? ULTRAFAST_USAGE : FAST_MODE_USAGE);
+		const usage = interfaceText().smallCommands.fastMode;
+		host.showStatus(ultrafast ? usage.ultrafastUsage : usage.usage);
 		return;
 	}
 
@@ -58,11 +59,12 @@ export function handleFastModeCommand(host: FastModeCommandHost, text: string): 
 						? setFastMode(host.session, true)
 						: toggleFastModeTier(host.session, ultrafast ? "ultrafast" : "priority");
 	if (!result.available) {
+		const text = interfaceText().smallCommands.fastMode;
 		const model = host.session.model;
 		host.showStatus(
 			model
-				? `Fast mode is unavailable for ${model.provider}/${model.id}.${result.reason ? ` ${result.reason}` : ""}`
-				: "Fast mode is unavailable without an active model.",
+				? text.unavailableFor(`${model.provider}/${model.id}`, result.reason ? ` ${result.reason}` : "")
+				: text.unavailableNoModel,
 		);
 		return;
 	}

@@ -25,7 +25,7 @@ import {
 	soulSha256,
 } from "./soul-history.ts";
 import { clearSoulHold, readSoulHold, type SoulHold, type SoulHoldRead, writeSoulHold } from "./soul-hold.ts";
-import { reviewSoulText, type SoulReviewOutcome } from "./soul-review.ts";
+import { reviewSoulText, type SoulReviewOutcome, soulReviewAdverseClauses } from "./soul-review.ts";
 import { type SoulRevision, SoulWatch } from "./soul-watch.ts";
 
 /**
@@ -138,15 +138,6 @@ type SoulVerdict =
 
 /** An owner-path write: refused, or held off by the soul lock (`locked`, worth trying again). */
 type SoulWriteResult = SoulSaveResult | { readonly ok: false; readonly reason: string; readonly locked: true };
-
-/** The owner's words for why a review rejected the text: the clause of each adverse decision, joined. */
-function adverseReasons(outcome: SoulReviewOutcome): string {
-	if (outcome.kind !== "adverse") return "the review could not settle the text";
-	return outcome.findings
-		.filter((finding) => finding.answer === "adverse")
-		.map((finding) => finding.adverse)
-		.join("; ");
-}
 
 /** A verdict that went stale because the file moved is made again at most this many times, then the file is adopted. */
 const MAX_REJUDGE_ROUNDS = 3;
@@ -575,7 +566,7 @@ export class SoulController {
 			return block("System One could not settle this soul.md text. Simplify the text and write it again.");
 		}
 		return block(
-			`System One blocked the soul.md write: ${adverseReasons(outcome)}. Rewrite it as a plain description of who you are and how you work.`,
+			`System One blocked the soul.md write: ${soulReviewAdverseClauses(outcome)}. Rewrite it as a plain description of who you are and how you work.`,
 		);
 	}
 
@@ -1054,7 +1045,7 @@ export class SoulController {
 		this.endHeld(
 			held,
 			"write-rejected",
-			`System One rejected the held soul.md write (${adverseReasons(outcome)}); it was not written.`,
+			`System One rejected the held soul.md write (${soulReviewAdverseClauses(outcome)}); it was not written.`,
 			false,
 		);
 	}
@@ -1341,7 +1332,7 @@ export class SoulController {
 			case "allow":
 				return { kind: "accept", reviewer: "allow" };
 			case "adverse":
-				return { kind: "reject", reason: `System One: ${adverseReasons(outcome)}` };
+				return { kind: "reject", reason: `System One: ${soulReviewAdverseClauses(outcome)}` };
 			case "unsettled":
 				return { kind: "reject", reason: "System One could not settle the text" };
 			case "failed":

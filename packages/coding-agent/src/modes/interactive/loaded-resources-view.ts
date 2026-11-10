@@ -2,6 +2,7 @@ import * as path from "node:path";
 import { type Container, Spacer, Text } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { ExtensionRunner } from "../../core/extensions/index.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
@@ -29,6 +30,7 @@ export interface LoadedResourcesViewOptions {
 }
 
 function getBuiltInCommandConflictDiagnostics(host: LoadedResourcesViewHost): ResourceDiagnostic[] {
+	const words = interfaceText().resources.loaded;
 	const builtinNames = new Set<string>(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
 	return host.extensionRunner
 		.getRegisteredCommands()
@@ -37,8 +39,8 @@ function getBuiltInCommandConflictDiagnostics(host: LoadedResourcesViewHost): Re
 			type: "warning" as const,
 			message:
 				command.invocationName === command.name
-					? `Extension command '/${command.name}' conflicts with built-in interactive command. Skipping in autocomplete.`
-					: `Extension command '/${command.name}' conflicts with built-in interactive command. Available as '/${command.invocationName}'.`,
+					? words.commandConflictSkipped(command.name)
+					: words.commandConflictAvailable(command.name, command.invocationName),
 			path: command.sourceInfo.path,
 		}));
 }
@@ -51,6 +53,7 @@ function formatContextPath(host: LoadedResourcesViewHost, value: string): string
 
 /** Render startup resources and diagnostics without making InteractiveMode own their formatting rules. */
 export function renderLoadedResources(host: LoadedResourcesViewHost, options: LoadedResourcesViewOptions = {}): void {
+	const words = interfaceText().resources.loaded;
 	const settingsManager = host.settingsManager;
 	const resourceLoader = host.session.resourceLoader;
 	const showListing = options.force || host.verbose || !settingsManager.getQuietStartup();
@@ -112,7 +115,7 @@ export function renderLoadedResources(host: LoadedResourcesViewHost, options: Lo
 				.map((file) => theme.fg("dim", `  ${resourceDisplay.formatDisplayPath(file.path)}`))
 				.join("\n");
 			addLoadedSection(
-				"Context",
+				words.context,
 				formatCompactList(
 					contextFiles.map((file) => formatContextPath(host, file.path)),
 					{ sort: false },
@@ -130,7 +133,7 @@ export function renderLoadedResources(host: LoadedResourcesViewHost, options: Lo
 				formatPath: (item) => resourceDisplay.formatDisplayPath(item.path),
 				formatPackagePath: (item) => resourceDisplay.getShortPath(item.path, item.sourceInfo),
 			});
-			addLoadedSection("Skills", formatCompactList(skills.map((skill) => skill.name)), skillList);
+			addLoadedSection(words.skills, formatCompactList(skills.map((skill) => skill.name)), skillList);
 		}
 
 		const templates = host.session.promptTemplates;
@@ -149,7 +152,11 @@ export function renderLoadedResources(host: LoadedResourcesViewHost, options: Lo
 					return template ? `/${template.name}` : resourceDisplay.formatDisplayPath(item.path);
 				},
 			});
-			addLoadedSection("Prompts", formatCompactList(templates.map((template) => `/${template.name}`)), templateList);
+			addLoadedSection(
+				words.prompts,
+				formatCompactList(templates.map((template) => `/${template.name}`)),
+				templateList,
+			);
 		}
 
 		if (extensions.length > 0) {
@@ -160,7 +167,7 @@ export function renderLoadedResources(host: LoadedResourcesViewHost, options: Lo
 					resourceDisplay.formatExtensionDisplayPath(resourceDisplay.getShortPath(item.path, item.sourceInfo)),
 			});
 			addLoadedSection(
-				"Extensions",
+				words.extensions,
 				formatCompactList(resourceDisplay.getCompactExtensionLabels(extensions)),
 				extensionList,
 			);
@@ -179,7 +186,7 @@ export function renderLoadedResources(host: LoadedResourcesViewHost, options: Lo
 				formatPackagePath: (item) => resourceDisplay.getShortPath(item.path, item.sourceInfo),
 			});
 			addLoadedSection(
-				"Themes",
+				words.themes,
 				formatCompactList(
 					customThemes.map(
 						(loadedTheme) =>
@@ -199,8 +206,8 @@ export function renderLoadedResources(host: LoadedResourcesViewHost, options: Lo
 		host.chatContainer.addChild(new Text(`${theme.fg("warning", `[${name}]`)}\n${warningLines}`, 0, 0));
 		host.chatContainer.addChild(new Spacer(1));
 	};
-	addDiagnostics("Skill conflicts", skillsResult.diagnostics);
-	addDiagnostics("Prompt conflicts", promptsResult.diagnostics);
+	addDiagnostics(words.skillConflicts, skillsResult.diagnostics);
+	addDiagnostics(words.promptConflicts, promptsResult.diagnostics);
 
 	const extensionDiagnostics: ResourceDiagnostic[] = resourceLoader
 		.getExtensions()
@@ -208,6 +215,6 @@ export function renderLoadedResources(host: LoadedResourcesViewHost, options: Lo
 	extensionDiagnostics.push(...host.extensionRunner.getCommandDiagnostics());
 	extensionDiagnostics.push(...getBuiltInCommandConflictDiagnostics(host));
 	extensionDiagnostics.push(...host.extensionRunner.getShortcutDiagnostics());
-	addDiagnostics("Extension issues", extensionDiagnostics);
-	addDiagnostics("Theme conflicts", themesResult.diagnostics);
+	addDiagnostics(words.extensionIssues, extensionDiagnostics);
+	addDiagnostics(words.themeConflicts, themesResult.diagnostics);
 }

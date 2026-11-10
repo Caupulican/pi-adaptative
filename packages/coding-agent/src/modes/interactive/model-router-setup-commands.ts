@@ -8,6 +8,7 @@
 import type { Api, Model } from "@caupulican/pi-ai/types";
 import type { Component, SelectItem } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import {
 	describeRouterCalibration,
 	describeRouterCalibrationScope,
@@ -71,9 +72,10 @@ function calibrationRows(host: ModelRouterSetupHost): RouterCalibrationRow[] {
 }
 
 function pickPoolModel(host: ModelRouterSetupHost, onPick: (ref: string) => void): void {
+	const words = interfaceText().localModels.routerSetup;
 	const rows = calibrationRows(host);
 	if (rows.length === 0) {
-		host.showStatus("Router calibration: the candidate pool is empty. Configure models first.");
+		host.showStatus(words.calibrationEmpty);
 		return;
 	}
 	host.showSelector((done) => {
@@ -83,8 +85,8 @@ function pickPoolModel(host: ModelRouterSetupHost, onPick: (ref: string) => void
 			description: formatRouterCalibrationRow(row),
 		}));
 		const selector = new SelectSubmenu(
-			"Calibrate One Model",
-			`Runs the ${describeRouterCalibrationScope()} (provider calls), then offers a router role.`,
+			words.calibrateOneTitle,
+			words.calibrateOneDescription(describeRouterCalibrationScope()),
 			options,
 			rows.find((row) => row.needsCalibration)?.ref ?? rows[0].ref,
 			(value) => {
@@ -104,8 +106,9 @@ function confirmBatchCalibration(
 	rows: RouterCalibrationRow[],
 	onConfirm: () => void,
 ): void {
+	const words = interfaceText().localModels.routerSetup;
 	if (rows.length === 0) {
-		host.showStatus(`${title}: nothing to calibrate in the current pool.`);
+		host.showStatus(words.batchNothing(title));
 		return;
 	}
 	const knownCost = rows
@@ -115,25 +118,25 @@ function confirmBatchCalibration(
 		.filter((cost): cost is number => typeof cost === "number" && cost > 0);
 	const costNote =
 		knownCost.length > 0
-			? `last fitness runs cost $${knownCost.reduce((sum, cost) => sum + cost, 0).toFixed(4)} across ${knownCost.length} model(s)`
-			: "cost unknown until the first run (subscription-backed models may cost $0.00)";
+			? words.batchCostKnown(knownCost.reduce((sum, cost) => sum + cost, 0).toFixed(4), knownCost.length)
+			: words.batchCostUnknown;
 	host.showSelector((done) => {
 		const options: SelectItem[] = [
 			{
 				value: "run",
-				label: `Run calibration on ${rows.length} model(s)`,
-				description: `Provider calls: yes (${describeRouterCalibrationScope()}, per model). ${costNote}.`,
+				label: words.runOnModels(rows.length),
+				description: words.providerCalls(describeRouterCalibrationScope(), costNote),
 			},
 			...rows.map((row) => ({
 				value: `row:${row.ref}`,
 				label: row.ref,
 				description: formatRouterCalibrationRow(row),
 			})),
-			{ value: "cancel", label: "Cancel", description: "Run nothing." },
+			{ value: "cancel", label: words.cancelLabel, description: words.cancelDescription },
 		];
 		const selector = new SelectSubmenu(
 			title,
-			`Covers ${describeRouterCalibrationScope()}. Models run one at a time.`,
+			words.covers(describeRouterCalibrationScope()),
 			options,
 			"run",
 			(value) => {
@@ -149,43 +152,50 @@ function confirmBatchCalibration(
 }
 
 async function runBatchCalibration(host: ModelRouterSetupHost, rows: RouterCalibrationRow[]): Promise<void> {
+	const words = interfaceText().localModels.routerSetup;
 	let index = 0;
 	for (const row of rows) {
 		index += 1;
-		host.showStatus(`Calibrating ${row.ref} (${index}/${rows.length}): ${describeRouterCalibrationSurfaces()}…`);
+		host.showStatus(
+			words.calibrating({
+				modelRef: row.ref,
+				index,
+				total: rows.length,
+				surfaces: describeRouterCalibrationSurfaces(),
+			}),
+		);
 		try {
 			const outcome = await host.session.runModelFitness({ model: row.ref });
 			if (!outcome.started) {
 				harnessLog.debug("ui", "router calibration skipped", { ref: row.ref, skipReason: outcome.skipReason });
-				host.showWarning(`Calibration skipped for ${row.ref}: ${plainLabel(outcome.skipReason)}`);
+				host.showWarning(words.calibrationSkipped(row.ref, plainLabel(outcome.skipReason)));
 				continue;
 			}
-			host.showStatus(`Calibrating ${row.ref}: real tool execution probe…`);
+			host.showStatus(words.toolProbeOn(row.ref));
 			try {
 				await host.session.probeToolCalling(row.ref);
 			} catch (error) {
 				host.showWarning(
-					`Tool probe unavailable for ${row.ref}: ${error instanceof Error ? error.message : String(error)}`,
+					words.toolProbeUnavailable(row.ref, error instanceof Error ? error.message : String(error)),
 				);
 			}
 		} catch (error) {
-			host.showError(`Calibration failed for ${row.ref}: ${error instanceof Error ? error.message : String(error)}`);
+			host.showError(words.failed(row.ref, error instanceof Error ? error.message : String(error)));
 		}
 	}
 	const after = calibrationRows(host).filter((row) => rows.some((target) => target.ref === row.ref));
-	host.showStatus(
-		["Router calibration complete:", ...after.map((row) => `- ${formatRouterCalibrationRow(row)}`)].join("\n"),
-	);
+	host.showStatus([words.complete, ...after.map((row) => `- ${formatRouterCalibrationRow(row)}`)].join("\n"));
 }
 
 export async function handleModelRouterAction(host: ModelRouterSetupHost, action: string): Promise<void> {
+	const words = interfaceText().localModels.routerSetup;
 	if (action === "configure-models") {
 		// The Models editor owns the pool. When it closes (saved or cancelled), Router Setup comes
 		// back on a freshly built pool view, so the summary, calibration rows, tier pickers and the
 		// preview all describe the edited pool without a second operator round trip.
 		await host.showModelsSelector();
 		host.reopenModelRouterSetup();
-		host.showStatus("Router pool follows the Models selection; Router Setup is showing the edited pool.");
+		host.showStatus(words.poolFollowsModels);
 		return;
 	}
 	if (action === "diagnostics") {
@@ -201,11 +211,11 @@ export async function handleModelRouterAction(host: ModelRouterSetupHost, action
 	if (action.startsWith(LIVE_PREVIEW_PREFIX)) {
 		const task = action.slice(LIVE_PREVIEW_PREFIX.length).trim();
 		if (!task) return;
-		host.showStatus("Live route preview running (routing judge / H-MoE may spend)…");
+		host.showStatus(words.livePreviewRunning);
 		try {
 			host.showStatus(formatLiveRoutePreview(await host.session.previewRouteLive(task)));
 		} catch (error) {
-			host.showError(`Live route preview failed: ${error instanceof Error ? error.message : String(error)}`);
+			host.showError(words.livePreviewFailed(error instanceof Error ? error.message : String(error)));
 		}
 		return;
 	}
@@ -220,13 +230,13 @@ export async function handleModelRouterAction(host: ModelRouterSetupHost, action
 	}
 	if (action === "calibrate-unprobed") {
 		const rows = calibrationRows(host).filter((row) => row.needsCalibration);
-		confirmBatchCalibration(host, "Calibrate Unprobed Models", rows, () => void runBatchCalibration(host, rows));
+		confirmBatchCalibration(host, words.calibrateUnprobedTitle, rows, () => void runBatchCalibration(host, rows));
 		return;
 	}
 	if (action === "calibrate-all") {
 		const rows = calibrationRows(host);
-		confirmBatchCalibration(host, "Recalibrate Selected Models", rows, () => void runBatchCalibration(host, rows));
+		confirmBatchCalibration(host, words.calibrateAllTitle, rows, () => void runBatchCalibration(host, rows));
 		return;
 	}
-	host.showWarning(`Unknown router setup action: ${action}`);
+	host.showWarning(words.unknownAction(action));
 }

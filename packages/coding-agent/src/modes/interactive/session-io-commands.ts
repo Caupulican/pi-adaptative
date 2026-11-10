@@ -18,6 +18,7 @@ import { getAgentDir, getShareViewerUrl } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import { SessionImportFileNotFoundError } from "../../core/agent-session-runtime.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { MissingSessionCwdError } from "../../core/session-cwd.ts";
 import type { SessionManager } from "../../kernel/node.ts";
 import { theme } from "../../presentation/theme-model.ts";
@@ -81,34 +82,36 @@ export interface NameCommandHost {
 }
 
 export async function handleExportCommand(host: ExportCommandHost, text: string): Promise<void> {
+	const words = interfaceText().sessions.io;
 	const outputPath = host.getPathCommandArgument(text, "/export");
 
 	try {
 		if (outputPath?.endsWith(".jsonl")) {
 			const filePath = host.session.exportToJsonl(outputPath);
-			host.showStatus(`Session exported to: ${filePath}`);
+			host.showStatus(words.exported(filePath));
 		} else {
 			const filePath = await host.session.exportToHtml(outputPath);
-			host.showStatus(`Session exported to: ${filePath}`);
+			host.showStatus(words.exported(filePath));
 		}
 	} catch (error: unknown) {
-		host.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
+		host.showError(words.exportFailed(error instanceof Error ? error.message : words.unknownError));
 	}
 }
 
 export async function handleImportCommand(host: ImportCommandHost, text: string): Promise<void> {
+	const words = interfaceText().sessions.io;
 	const inputPath = host.getPathCommandArgument(text, "/import");
 	if (!inputPath) {
-		host.showError("Usage: /import <path.jsonl>");
+		host.showError(words.importUsage);
 		return;
 	}
 
 	const confirmed = await host.extensionUiHost.showExtensionConfirm(
-		"Import session",
-		`Replace current session with ${inputPath}?`,
+		words.importTitle,
+		words.importQuestion(inputPath),
 	);
 	if (!confirmed) {
-		host.showStatus("Import cancelled");
+		host.showStatus(words.importCancelled);
 		return;
 	}
 
@@ -120,38 +123,38 @@ export async function handleImportCommand(host: ImportCommandHost, text: string)
 		host.statusContainer.clear();
 		const result = await host.runtimeHost.importFromJsonl(inputPath);
 		if (result.cancelled) {
-			host.showStatus("Import cancelled");
+			host.showStatus(words.importCancelled);
 			return;
 		}
 		host.renderCurrentSessionState();
-		host.showStatus(`Session imported from: ${inputPath}`);
+		host.showStatus(words.imported(inputPath));
 	} catch (error: unknown) {
 		if (handleNonFatalSessionReplacementError(host, error)) return;
 		if (error instanceof MissingSessionCwdError) {
 			const selectedCwd = await host.promptForMissingSessionCwd(error);
 			if (!selectedCwd) {
-				host.showStatus("Import cancelled");
+				host.showStatus(words.importCancelled);
 				return;
 			}
 			try {
 				const result = await host.runtimeHost.importFromJsonl(inputPath, selectedCwd);
 				if (result.cancelled) {
-					host.showStatus("Import cancelled");
+					host.showStatus(words.importCancelled);
 					return;
 				}
 				host.renderCurrentSessionState();
-				host.showStatus(`Session imported from: ${inputPath}`);
+				host.showStatus(words.imported(inputPath));
 				return;
 			} catch (retryError: unknown) {
 				if (handleNonFatalSessionReplacementError(host, retryError)) return;
-				await host.handleFatalRuntimeError("Failed to import session", retryError);
+				await host.handleFatalRuntimeError(words.importFailed, retryError);
 			}
 		}
 		if (error instanceof SessionImportFileNotFoundError) {
-			host.showError(`Failed to import session: ${error.message}`);
+			host.showError(`${words.importFailed}: ${error.message}`);
 			return;
 		}
-		await host.handleFatalRuntimeError("Failed to import session", error);
+		await host.handleFatalRuntimeError(words.importFailed, error);
 	}
 }
 
@@ -161,6 +164,7 @@ const GIST_KILL_GRACE_MS = 500;
 const MAX_GIST_COMMAND_OUTPUT = 16 * 1024;
 
 export async function handleShareCommand(host: ShareCommandHost): Promise<void> {
+	const words = interfaceText().sessions.io;
 	const authResult = spawnProcessSync("gh", ["auth", "status"], {
 		encoding: "utf8",
 		maxBuffer: 1024 * 1024,
@@ -169,15 +173,11 @@ export async function handleShareCommand(host: ShareCommandHost): Promise<void> 
 	});
 	if (authResult.error) {
 		const code = (authResult.error as NodeJS.ErrnoException).code;
-		host.showError(
-			code === "ENOENT"
-				? "GitHub CLI (gh) is not installed. Install it from https://cli.github.com/"
-				: `Failed to check GitHub CLI authentication: ${authResult.error.message}`,
-		);
+		host.showError(code === "ENOENT" ? words.ghMissing : words.ghAuthCheckFailed(authResult.error.message));
 		return;
 	}
 	if (authResult.status !== 0) {
-		host.showError("GitHub CLI is not logged in. Run 'gh auth login' first.");
+		host.showError(words.ghNotLoggedIn);
 		return;
 	}
 
@@ -192,11 +192,11 @@ export async function handleShareCommand(host: ShareCommandHost): Promise<void> 
 		await host.session.exportToHtml(tempFile);
 	} catch (error: unknown) {
 		cleanupWorkRun();
-		host.showError(`Failed to export session: ${error instanceof Error ? error.message : "Unknown error"}`);
+		host.showError(words.exportFailed(error instanceof Error ? error.message : words.unknownError));
 		return;
 	}
 
-	const loader = new BorderedLoader(host.ui, theme, "Creating gist...");
+	const loader = new BorderedLoader(host.ui, theme, words.creatingGist);
 	let restored = false;
 	let aborted = false;
 	let superseded = false;
@@ -209,7 +209,7 @@ export async function handleShareCommand(host: ShareCommandHost): Promise<void> 
 	loader.onAbort = () => {
 		aborted = true;
 		restoreEditor();
-		if (!superseded) host.showStatus("Share cancelled");
+		if (!superseded) host.showStatus(words.shareCancelled);
 	};
 	host.overlayHost.swap(loader, {
 		onUnmount: () => {
@@ -242,26 +242,26 @@ export async function handleShareCommand(host: ShareCommandHost): Promise<void> 
 		if (terminal.reason === "aborted" || aborted) return;
 		restoreEditor();
 		if (terminal.reason === "timeout") {
-			host.showError("Timed out while creating gist");
+			host.showError(words.gistTimedOut);
 			return;
 		}
 		if (terminal.code !== 0) {
-			host.showError(`Failed to create gist${stderr.trim() ? `: ${stderr.trim()}` : ""}`);
+			host.showError(words.gistFailed(stderr.trim()));
 			return;
 		}
 
 		const gistUrl = stdout.trim();
 		const gistId = gistUrl.split("/").pop();
 		if (!gistId) {
-			host.showError("Failed to parse gist ID from gh output");
+			host.showError(words.gistIdUnparsed);
 			return;
 		}
 
 		const previewUrl = getShareViewerUrl(gistId);
-		host.showStatus(`Share URL: ${previewUrl}\nGist: ${gistUrl}`);
+		host.showStatus(words.shareUrls({ url: previewUrl, gistUrl }));
 	} catch (error: unknown) {
 		if (!aborted) {
-			host.showError(`Failed to create gist: ${error instanceof Error ? error.message : "Unknown error"}`);
+			host.showError(words.gistCreateFailed(error instanceof Error ? error.message : words.unknownError));
 		}
 	} finally {
 		restoreEditor();
@@ -270,32 +270,32 @@ export async function handleShareCommand(host: ShareCommandHost): Promise<void> 
 }
 
 export async function handleCopyCommand(host: CopyCommandHost): Promise<void> {
+	const words = interfaceText().sessions.io;
 	const selectionText = host.getSelectionText?.();
 	const text = selectionText ?? host.session.getLastAssistantText();
 	if (!text) {
-		host.showError("No agent messages to copy yet.");
+		host.showError(words.nothingToCopy);
 		return;
 	}
 
 	try {
 		await copyToClipboard(text);
-		host.showStatus(
-			selectionText !== undefined ? "Copied selection to clipboard" : "Copied last agent message to clipboard",
-		);
+		host.showStatus(selectionText !== undefined ? words.copiedSelection : words.copiedLast);
 	} catch (error) {
 		host.showError(error instanceof Error ? error.message : String(error));
 	}
 }
 
 export function handleNameCommand(host: NameCommandHost, text: string): void {
+	const words = interfaceText().sessions.io;
 	const name = text.replace(/^\/name\s*/, "").trim();
 	if (!name) {
 		const currentName = host.sessionManager.getSessionName();
 		if (currentName) {
 			host.chatContainer.addChild(new Spacer(1));
-			host.chatContainer.addChild(new Text(theme.fg("dim", `Session name: ${currentName}`), 1, 0));
+			host.chatContainer.addChild(new Text(theme.fg("dim", words.sessionName(currentName)), 1, 0));
 		} else {
-			host.showWarning("Usage: /name <name>");
+			host.showWarning(words.nameUsage);
 		}
 		host.ui.requestRender();
 		return;
@@ -303,6 +303,6 @@ export function handleNameCommand(host: NameCommandHost, text: string): void {
 
 	host.session.setSessionName(name);
 	host.chatContainer.addChild(new Spacer(1));
-	host.chatContainer.addChild(new Text(theme.fg("dim", `Session name set: ${name}`), 1, 0));
+	host.chatContainer.addChild(new Text(theme.fg("dim", words.sessionNameSet(name)), 1, 0));
 	host.ui.requestRender();
 }

@@ -3,6 +3,7 @@
  * here names a machine or a path.
  */
 
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { hostDescription, type RemoteHubController } from "../../core/remote/hub-controller.ts";
 import { type JoinLinkState, joinStateFor } from "../../core/remote/link-context.ts";
 import { isMachineName } from "../../core/remote/protocol.ts";
@@ -15,9 +16,7 @@ import {
 	saveJoin,
 } from "../../core/remote/registry.ts";
 import { SEALED_FEATURE } from "../../core/remote/session-keys.ts";
-import { isJobCommand, JOB_USAGE, runJobCommand } from "./remote-job-commands.ts";
-
-const USAGE = `Usage: /remote [status] | /remote listen [port] [host] | /remote stop | /remote add <name> | /remote revoke <name> | /remote join <host:port> <token> | /remote leave <host:port> | /remote name <name> | ${JOB_USAGE}`;
+import { isJobCommand, runJobCommand } from "./remote-job-commands.ts";
 
 export interface RemoteCommandPort {
 	readonly hub: RemoteHubController;
@@ -35,29 +34,60 @@ function isLoopback(host: string): boolean {
 }
 
 function joinStateText(link: JoinLinkState): string {
+	const words = interfaceText().machines.remote;
 	if (link.state !== "connected") return link.state;
-	return link.features?.includes(SEALED_FEATURE) ? "connected" : "connected, not sealed";
+	return link.features?.includes(SEALED_FEATURE) ? words.connected : words.connectedUnsealed;
 }
 
 function statusText(port: RemoteCommandPort): string {
+	const words = interfaceText().machines.remote;
 	const { hub } = port;
 	const status = hub.status();
 	const joins = listJoins(hub.agentDir);
-	const lines = [
-		`This machine is ${status.name}.`,
-		status.listening
-			? `Hub: listening on ${status.listening.host}:${status.listening.port}.`
-			: status.hostedBy
-				? `Hub: hosted by ${hostDescription(status.hostedBy)}; this session uses it.`
-				: "Hub: not listening (/remote listen [port] [host]).",
+	const machines =
 		status.machines.length > 0
-			? `Machines: ${status.machines.map((m) => `${m.name} ${m.revoked ? "revoked" : m.connected ? `connected${m.sealed ? "" : " (not sealed)"}` : "offline"}`).join(", ")}.`
-			: "Machines: none yet (/remote add <name>).",
+			? words.status.machinesSome(
+					status.machines
+						.map(
+							(m) =>
+								`${m.name} ${
+									m.revoked
+										? words.status.machineRevoked
+										: m.connected
+											? m.sealed
+												? words.status.machineConnectedSealed
+												: words.status.machineConnectedUnsealed
+											: words.status.machineOffline
+								}`,
+						)
+						.join(", "),
+				)
+			: words.status.machinesNone;
+	const joined =
 		joins.length > 0
-			? `Joined to: ${joins.map((j) => `${j.hubName} at ${j.address} as ${j.name} (${joinStateText(joinStateFor(hub.agentDir, j.address))})`).join(", ")}.`
-			: "Joined to: no hub (/remote join <host:port> <token>).",
-	];
-	return lines.join("\n");
+			? words.status.joinedSome(
+					joins
+						.map((j) =>
+							words.status.jobJoined({
+								hubName: j.hubName,
+								address: j.address,
+								name: j.name,
+								state: joinStateText(joinStateFor(hub.agentDir, j.address)),
+							}),
+						)
+						.join(", "),
+				)
+			: words.status.joinedNone;
+	return [
+		words.status.thisMachine(status.name),
+		status.listening
+			? words.status.listening(status.listening.host, status.listening.port)
+			: status.hostedBy
+				? words.status.hostedBy(hostDescription(status.hostedBy))
+				: words.status.notListening,
+		machines,
+		joined,
+	].join("\n");
 }
 
 export async function runRemoteCommand(
@@ -65,6 +95,8 @@ export async function runRemoteCommand(
 	port: RemoteCommandPort,
 	host: RemoteCommandHost,
 ): Promise<void> {
+	const words = interfaceText().machines.remote;
+	const usage = words.usage(interfaceText().machines.jobs.usage);
 	const [, sub = "", ...rest] = rawText.trim().split(/\s+/);
 	const { hub } = port;
 	try {
@@ -77,24 +109,19 @@ export async function runRemoteCommand(
 				const bound = await hub.listen(rest[1] ?? "127.0.0.1", rest[0] === undefined ? undefined : Number(rest[0]));
 				const where = hub.status().listening;
 				host.showStatus(
-					`Listening on ${where?.host ?? "127.0.0.1"}:${bound}. ${
-						where && !isLoopback(where.host)
-							? "The link proves a secret per machine and seals (encrypts and authenticates) every message with machines on a current build; a machine on an older build links unsealed. Prefer a private network (Tailscale, WireGuard) or an SSH tunnel."
-							: "Bound to this machine only; use an SSH tunnel or give a host to reach it from another machine."
+					`${words.listen.listening(where?.host ?? "127.0.0.1", bound)} ${
+						where && !isLoopback(where.host) ? words.listen.publicNote : words.listen.loopbackNote
 					}`,
 				);
 				return;
 			}
 			case "stop":
 				await hub.stopListening();
-				host.showStatus(
-					"The hub stopped listening. Joined machines stay known and reconnect when it listens again.",
-				);
+				host.showStatus(words.listen.stopped);
 				return;
 			case "add": {
 				const name = rest[0] ?? "";
-				if (!isMachineName(name))
-					return host.showWarning(`Usage: /remote add <name> (lowercase letters, digits, dashes). ${USAGE}`);
+				if (!isMachineName(name)) return host.showWarning(words.add.usage(usage));
 				let added: { token: string; address: string };
 				try {
 					added = hub.add(name);
@@ -102,49 +129,41 @@ export async function runRemoteCommand(
 					return host.showWarning(error instanceof Error ? error.message : String(error));
 				}
 				const { token, address } = added;
-				host.showStatus(
-					`${name} can join now, as a bot named ${name}. On that machine run:\n/remote join ${address} ${token}\nThe token is shown once; keep it private.${
-						hub.status().listening ? "" : "\nThis hub is not listening yet: run /remote listen."
-					}`,
-				);
+				host.showStatus(words.add.added({ name, address, token, listening: Boolean(hub.status().listening) }));
 				return;
 			}
 			case "revoke": {
 				const name = rest[0] ?? "";
-				host.showStatus(
-					hub.revoke(name) ? `${name} was cut off and its bot retired.` : `No machine named ${name}.`,
-				);
+				host.showStatus(hub.revoke(name) ? words.add.revoked(name) : words.add.unknown(name));
 				return;
 			}
 			case "join": {
 				const address = rest[0] ?? "";
 				const token = parseJoinToken(rest[1] ?? "");
-				if (!parseAddress(address) || !token) return host.showWarning("Usage: /remote join <host:port> <token>");
+				if (!parseAddress(address) || !token) return host.showWarning(words.join.usage);
 				saveJoin(hub.agentDir, { address, name: token.name, hubName: token.hubName, secret: token.secret });
 				port.reloadChannels();
 				// A joined machine runs the hub's jobs by default: placement and the runner start now, not at the next start.
 				hub.jobs?.start();
-				host.showStatus(
-					`Joined ${token.hubName} at ${address} as ${token.name}. Its messages reach this session as a peer's words, never as yours.`,
-				);
+				host.showStatus(words.join.joined({ hubName: token.hubName, address, name: token.name }));
 				return;
 			}
 			case "leave": {
 				const left = removeJoin(hub.agentDir, rest[0] ?? "");
 				port.reloadChannels();
-				host.showStatus(left ? "Left that hub." : "No hub joined at that address.");
+				host.showStatus(left ? words.join.left : words.join.notJoined);
 				return;
 			}
 			case "name": {
 				const identity = renameIdentity(hub.agentDir, rest[0] ?? "");
-				host.showStatus(`This machine is now ${identity.name}.`);
+				host.showStatus(words.rename(identity.name));
 				return;
 			}
 			default:
 				if (isJobCommand(sub)) return await runJobCommand(sub, rest, hub, host);
-				host.showWarning(`Unknown /remote command. ${USAGE}`);
+				host.showWarning(words.unknownCommand(usage));
 		}
 	} catch (error) {
-		host.showWarning(error instanceof Error ? error.message : "The link command failed.");
+		host.showWarning(error instanceof Error ? error.message : words.failed);
 	}
 }

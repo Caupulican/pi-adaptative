@@ -1,5 +1,6 @@
 import type { Container, TUI } from "@caupulican/pi-tui";
 import { Spacer, Text } from "@caupulican/pi-tui";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { formatModelFitnessReport, type ModelFitnessReport } from "../../core/research/model-fitness.ts";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { plainLabel } from "../../presentation/plain-text.ts";
@@ -22,7 +23,7 @@ export function presentModelFitnessOutcome(
 ): outcome is StartedModelFitnessOutcome {
 	if (!outcome.started) {
 		harnessLog.debug("ui", "model fitness was skipped", { skipReason: outcome.skipReason });
-		host.showStatus(`Model fitness skipped: ${plainLabel(outcome.skipReason)}`);
+		host.showStatus(interfaceText().smallCommands.modelFitness.skipped(plainLabel(outcome.skipReason)));
 		return false;
 	}
 	host.chatContainer.addChild(new Spacer(1));

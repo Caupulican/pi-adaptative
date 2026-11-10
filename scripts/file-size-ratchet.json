@@ -54,11 +54,11 @@
 		"packages/coding-agent/src/modes/interactive/auto-learn-controller.ts": 1508,
 		"packages/ai/src/providers/anthropic.ts": 1505,
 		"packages/coding-agent/src/core/prompt-submission-controller.ts": 1494,
-		"packages/coding-agent/src/core/models/local-runtime.ts": 1488,
+		"packages/coding-agent/src/core/models/local-runtime.ts": 1482,
 		"packages/coding-agent/src/core/goals/goal-session-controller.ts": 1379,
 		"packages/coding-agent/src/core/session-edge-intent-controller.ts": 1472,
 		"packages/coding-agent/src/modes/interactive/components/workbench.ts": 1339,
-		"packages/coding-agent/src/core/soul/soul-controller.ts": 1465,
+		"packages/coding-agent/src/core/soul/soul-controller.ts": 1456,
 		"packages/coding-agent/src/core/process-matrix/runtime.ts": 1455,
 		"packages/coding-agent/src/core/routines/routine-scheduler-controller.ts": 1450,
 		"packages/coding-agent/src/core/chat/mesh.ts": 1434,
@@ -71,7 +71,7 @@
 		"packages/ai/src/providers/amazon-bedrock.ts": 1370,
 		"packages/coding-agent/src/core/model-registry.ts": 1369,
 		"packages/coding-agent/src/core/extensions/runner.ts": 1287,
-		"packages/coding-agent/src/modes/interactive/local-model-commands.ts": 1355,
+		"packages/coding-agent/src/modes/interactive/local-model-commands.ts": 1280,
 		"packages/coding-agent/src/core/agent-session-runtime.ts": 1354,
 		"packages/coding-agent/src/core/steering/system-one-steering-plane.ts": 1337,
 		"packages/coding-agent/src/utils/tools-manager.ts": 1332,
@@ -82,7 +82,6 @@
 		"packages/coding-agent/src/core/autonomy/edge-policy.ts": 1270,
 		"packages/coding-agent/src/core/orchestration/event-store.ts": 1228,
 		"packages/coding-agent/src/core/memory/transcript-summary-catalog.ts": 1225,
-		"packages/tui/src/utils.ts": 1218,
-		"packages/coding-agent/src/modes/interactive/session-flow-commands.ts": 1203
+		"packages/tui/src/utils.ts": 1218
 	}
 }

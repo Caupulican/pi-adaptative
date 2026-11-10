@@ -6,8 +6,9 @@
  */
 
 import type { AgentSession } from "../../core/agent-session.ts";
-import type { DelegationCloseReason, DelegationRecord } from "../../core/delegation/leader-delegation-ledger.ts";
+import type { DelegationRecord } from "../../core/delegation/leader-delegation-ledger.ts";
 import { currentDelegationFor, leaderRow, leaderRows } from "../../core/delegation/leader-view.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 
 export interface LeaderCommandsHost {
 	readonly session: Pick<AgentSession, "backgroundLanes">;
@@ -16,17 +17,6 @@ export interface LeaderCommandsHost {
 }
 
 const ACTIONS = ["show", "cancel", "pause", "resume"] as const;
-const USAGE =
-	"Usage: /lead [list|show <leader>|cancel <leader>|pause <leader>|resume <leader>]. This works on goals handed to leaders; to make a bot a leader, use /bot lead <id>.";
-
-const CLOSE_WORDS: Readonly<Record<DelegationCloseReason, string>> = {
-	settled: "the leader finished",
-	cancelled: "cancelled",
-	deadline: "its time ran out",
-	budget: "its budget ran out",
-	allowance: "a subscription in use had no allowance left",
-	leader_unavailable: "its leader was not available",
-};
 
 function displayName(host: LeaderCommandsHost, alias: string): string {
 	return host.session.backgroundLanes.getBotTeamStore().getBot(alias)?.displayName ?? alias;
@@ -34,51 +24,48 @@ function displayName(host: LeaderCommandsHost, alias: string): string {
 
 /** The reason `/lead` cannot work on this bot, in plain words; undefined when the bot is a leader. */
 function notALeaderText(host: LeaderCommandsHost, alias: string): string | undefined {
+	const words = interfaceText().machines.lead;
 	const bot = host.session.backgroundLanes.getBotTeamStore().getBot(alias);
-	if (!bot) return `There is no bot named ${alias}. Bot names are in /bot list.`;
+	if (!bot) return words.noSuchBot(alias);
 	if (bot.leader === true) return undefined;
-	return `${bot.displayName} is not a leader, so it has no goals to show or override. To make it a leader, use /bot lead ${alias}.`;
+	return words.notALeader(bot.displayName, alias);
 }
 
 /** The goals, one line each: who leads, which goal, where it stands, and the name `/lead` takes. */
 export function formatLeaderList(records: readonly DelegationRecord[], name: (alias: string) => string): string {
+	const words = interfaceText().machines.lead;
 	const rows = leaderRows(records, name);
-	if (rows.length === 0)
-		return "No goal has been handed to a leader. The orchestrator hands one over with bot lead; /bot lead <id> makes a bot a standing leader.";
+	if (rows.length === 0) return words.listEmpty;
 	return [
-		"Goals handed to leaders:",
-		...rows.map((row) => `  ${row.name} (${row.leader}) · ${row.goal} · ${row.state}`),
-		USAGE,
+		words.listHeader,
+		...rows.map((row) => words.listRow({ name: row.name, leader: row.leader, goal: row.goal, state: row.state })),
+		words.usage,
 	].join("\n");
 }
 
 /** One goal in full: what was asked, what was held back, and how it stands or ended. */
 export function formatLeaderGoal(record: DelegationRecord, name: (alias: string) => string): string {
+	const words = interfaceText().machines.lead;
 	const { lead, envelope, clipped } = record.charter;
 	const row = leaderRow(record, name);
 	return [
-		`${row.name} leads: ${lead.goal}`,
-		`State: ${row.state}${record.closeReason ? ` (${CLOSE_WORDS[record.closeReason]})` : ""}`,
-		record.charter.appointedBy === "root"
-			? "Appointed by the orchestrator for this goal; retired once it ends."
-			: "A standing leader the owner made.",
+		words.leads(row.name, lead.goal),
+		words.state(row.state, record.closeReason ? words.closeWords[record.closeReason] : undefined),
+		record.charter.appointedBy === "root" ? words.appointed : words.standing,
 		...(lead.requirements.length
-			? ["Must be true at the end:", ...lead.requirements.map((requirement) => `  - ${requirement.text}`)]
+			? [words.requirements, ...lead.requirements.map((requirement) => `  - ${requirement.text}`)]
 			: []),
-		...(lead.constraints.length ? ["Rules:", ...lead.constraints.map((constraint) => `  - ${constraint}`)] : []),
-		envelope.writePaths.length ? `May change: ${envelope.writePaths.join(", ")}` : "Read-only: no file is changed.",
-		...(envelope.budgetUsd !== undefined
-			? [
-					`Budget: $${envelope.budgetUsd.toFixed(2)} of metered spending. Subscription turns cost nothing in metered terms, so they are not counted in it.`,
-				]
-			: []),
-		...(envelope.deadlineAt !== undefined ? [`Stops at: ${envelope.deadlineAt}`] : []),
-		...(clipped.length ? ["Held back:", ...clipped.map((item) => `  - ${item}`)] : []),
-		...(record.updates.length ? [`Updates sent: ${record.updates.length}`] : []),
+		...(lead.constraints.length ? [words.rules, ...lead.constraints.map((constraint) => `  - ${constraint}`)] : []),
+		envelope.writePaths.length ? words.mayChange(envelope.writePaths.join(", ")) : words.readOnly,
+		...(envelope.budgetUsd !== undefined ? [words.budget(envelope.budgetUsd.toFixed(2))] : []),
+		...(envelope.deadlineAt !== undefined ? [words.stopsAt(envelope.deadlineAt)] : []),
+		...(clipped.length ? [words.heldBack, ...clipped.map((item) => `  - ${item}`)] : []),
+		...(record.updates.length ? [words.updatesSent(record.updates.length)] : []),
 	].join("\n");
 }
 
 export async function handleLeadCommand(host: LeaderCommandsHost, text: string): Promise<void> {
+	const words = interfaceText().machines.lead;
 	const [action = "list", target, ...extra] = text.slice("/lead".length).trim().split(/\s+/).filter(Boolean);
 	try {
 		const name = (alias: string) => displayName(host, alias);
@@ -88,7 +75,7 @@ export async function handleLeadCommand(host: LeaderCommandsHost, text: string):
 			return;
 		}
 		if (target === undefined || extra.length > 0 || !(ACTIONS as readonly string[]).includes(action)) {
-			host.showError(USAGE);
+			host.showError(words.usage);
 			return;
 		}
 		if (action === "show") {
@@ -101,7 +88,7 @@ export async function handleLeadCommand(host: LeaderCommandsHost, text: string):
 				return;
 			}
 			const notLeader = notALeaderText(host, target);
-			host.showStatus(notLeader ?? `${name(target)} is a leader and has led no goal yet.`);
+			host.showStatus(notLeader ?? words.ledNothing(name(target)));
 			return;
 		}
 		const notLeader = notALeaderText(host, target);
@@ -116,7 +103,7 @@ export async function handleLeadCommand(host: LeaderCommandsHost, text: string):
 				: action === "pause"
 					? leaders.pause(target)
 					: await leaders.resume(target);
-		host.showStatus(`${name(target)}: ${leaderRow(record, name).state}.`);
+		host.showStatus(words.actionDone(name(target), leaderRow(record, name).state));
 	} catch (error) {
 		host.showError(error instanceof Error ? error.message : String(error));
 	}

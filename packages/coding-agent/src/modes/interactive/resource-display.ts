@@ -9,6 +9,7 @@
 
 import * as os from "node:os";
 import * as path from "node:path";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ResourceDiagnostic } from "../../core/resource-loader.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
 import { theme } from "../../presentation/theme-model.ts";
@@ -190,27 +191,34 @@ export function getDisplaySourceInfo(sourceInfo?: SourceInfo): {
 	scopeLabel?: string;
 	color: "accent" | "muted";
 } {
+	const words = interfaceText().resources.scope;
 	const source = sourceInfo?.source ?? "local";
 	const scope = sourceInfo?.scope ?? "project";
 	if (source === "local") {
 		if (scope === "user") {
-			return { label: "user", color: "muted" };
+			return { label: words.user, color: "muted" };
 		}
 		if (scope === "project") {
-			return { label: "project", color: "muted" };
+			return { label: words.project, color: "muted" };
 		}
 		if (scope === "temporary") {
-			return { label: "path", scopeLabel: "temp", color: "muted" };
+			return { label: words.path, scopeLabel: words.temp, color: "muted" };
 		}
-		return { label: "path", color: "muted" };
+		return { label: words.path, color: "muted" };
 	}
 
 	if (source === "cli") {
-		return { label: "path", scopeLabel: scope === "temporary" ? "temp" : undefined, color: "muted" };
+		return { label: words.path, scopeLabel: scope === "temporary" ? words.temp : undefined, color: "muted" };
 	}
 
 	const scopeLabel =
-		scope === "user" ? "user" : scope === "project" ? "project" : scope === "temporary" ? "temp" : undefined;
+		scope === "user"
+			? words.user
+			: scope === "project"
+				? words.project
+				: scope === "temporary"
+					? words.temp
+					: undefined;
 	return { label: source, scopeLabel, color: "accent" };
 }
 
@@ -274,7 +282,7 @@ export function formatScopeGroups(
 	const lines: string[] = [];
 
 	for (const group of groups) {
-		lines.push(`  ${theme.fg("accent", group.scope)}`);
+		lines.push(`  ${theme.fg("accent", interfaceText().resources.scope[group.scope])}`);
 
 		const sortedPaths = [...group.paths].sort((a, b) => a.path.localeCompare(b.path));
 		for (const item of sortedPaths) {
@@ -323,6 +331,7 @@ export function formatDiagnostics(
 	sourceInfos: Map<string, SourceInfo>,
 ): string {
 	const lines: string[] = [];
+	const words = interfaceText().resources.diagnostics;
 
 	// Group collision diagnostics by name
 	const collisions = new Map<string, ResourceDiagnostic[]>();
@@ -342,7 +351,7 @@ export function formatDiagnostics(
 	for (const [name, collisionList] of collisions) {
 		const first = collisionList[0]?.collision;
 		if (!first) continue;
-		lines.push(theme.fg("warning", `  "${name}" collision:`));
+		lines.push(theme.fg("warning", words.collision(name)));
 		lines.push(
 			theme.fg(
 				"dim",
@@ -354,7 +363,7 @@ export function formatDiagnostics(
 				lines.push(
 					theme.fg(
 						"dim",
-						`    ${theme.fg("warning", "✗")} ${formatPathWithSource(d.collision.loserPath, findSourceInfoForPath(d.collision.loserPath, sourceInfos))} (skipped)`,
+						`    ${theme.fg("warning", "✗")} ${formatPathWithSource(d.collision.loserPath, findSourceInfoForPath(d.collision.loserPath, sourceInfos))} ${words.skipped}`,
 					),
 				);
 			}

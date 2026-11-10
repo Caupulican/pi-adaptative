@@ -1,3 +1,4 @@
+import { interfaceText } from "../language/interface-text.ts";
 import { describeProviderAccountKey, splitProviderAccountKey } from "./account-key.ts";
 import { type EmergencyStopState, readEmergencyStop } from "./emergency-stop.ts";
 import { entryKey, type ProviderAdmissionEntry, type ProviderAdmissionLedger } from "./ledger.ts";
@@ -35,16 +36,22 @@ function seconds(ms: number): string {
 }
 
 function describeWindow(window: unknown): string | undefined {
+	const words = interfaceText().machines.load.view;
 	if (!window || typeof window !== "object") return undefined;
 	const w = window as { usedPercent?: unknown; windowMinutes?: unknown; resetsAt?: unknown };
 	if (typeof w.usedPercent !== "number") return undefined;
-	const minutes = typeof w.windowMinutes === "number" ? `${w.windowMinutes}m` : "window";
-	const reset = typeof w.resetsAt === "number" ? ` resets ${new Date(w.resetsAt * 1000).toISOString()}` : "";
-	return `${minutes} ${w.usedPercent}% used${reset}`;
+	const minutes =
+		typeof w.windowMinutes === "number" ? words.windowMinutes(w.windowMinutes) : words.windowFallbackName;
+	return words.windowUsed({
+		minutes,
+		percent: w.usedPercent,
+		resetsAt: typeof w.resetsAt === "number" ? new Date(w.resetsAt * 1000).toISOString() : undefined,
+	});
 }
 
 /** Plain-text rendering for the operator (`/load`). */
 export function formatProviderLoadView(view: ProviderLoadView): string {
+	const words = interfaceText().machines.load.view;
 	const lines: string[] = [];
 	const byProvider = new Map<string, ProviderAdmissionEntry[]>();
 	for (const entry of view.inflight) {
@@ -53,9 +60,7 @@ export function formatProviderLoadView(view: ProviderLoadView): string {
 		list.push(entry);
 		byProvider.set(key, list);
 	}
-	lines.push(
-		`Provider load — ${view.inflight.length} request${view.inflight.length === 1 ? "" : "s"} in flight machine-wide`,
-	);
+	lines.push(words.header(view.inflight.length));
 	for (const [key, entries] of [...byProvider.entries()].sort(([a], [b]) => a.localeCompare(b))) {
 		const provider = splitProviderAccountKey(key).provider;
 		const lanes = { foreground: 0, worker: 0, background: 0 };
@@ -67,23 +72,37 @@ export function formatProviderLoadView(view: ProviderLoadView): string {
 		const cap = view.configuredLimits[provider];
 		const oldest = Math.min(...entries.map((entry) => Date.parse(entry.startedAt)));
 		lines.push(
-			`  ${describeProviderAccountKey(key)}: ${entries.length} in flight (${lanes.foreground} foreground, ${lanes.worker} worker, ${lanes.background} background) ` +
-				`across ${pids.size} process${pids.size === 1 ? "" : "es"}${cap ? `, limit ${cap}` : ""}, oldest ${seconds(view.at - oldest)} ago`,
+			words.provider({
+				account: describeProviderAccountKey(key),
+				inFlight: entries.length,
+				foreground: lanes.foreground,
+				worker: lanes.worker,
+				background: lanes.background,
+				processes: pids.size,
+				limit: cap,
+				oldest: seconds(view.at - oldest),
+			}),
 		);
 	}
 	if (view.limits.length > 0) {
-		lines.push("Limited:");
+		lines.push(words.limitedHeader);
 		for (const limit of view.limits) {
 			lines.push(
-				`  ${describeProviderAccountKey(limit.provider)}: ${limit.reason.replace("_", " ")} until ${new Date(limit.limitedUntil).toISOString()} ` +
-					`(${seconds(limit.limitedUntil - view.at)} left, recorded by pid ${limit.pid}${limit.detail ? `: ${limit.detail}` : ""})`,
+				words.limitedRow({
+					account: describeProviderAccountKey(limit.provider),
+					reason: limit.reason.replace("_", " "),
+					until: new Date(limit.limitedUntil).toISOString(),
+					left: seconds(limit.limitedUntil - view.at),
+					pid: limit.pid,
+					detail: limit.detail,
+				}),
 			);
 		}
 	} else {
-		lines.push("Limited: none recorded");
+		lines.push(words.limitedNone);
 	}
 	if (view.usage.length > 0) {
-		lines.push("Provider windows:");
+		lines.push(words.windowsHeader);
 		for (const usage of view.usage) {
 			for (const snapshot of usage.rateLimits) {
 				if (!snapshot || typeof snapshot !== "object") continue;
@@ -92,26 +111,39 @@ export function formatProviderLoadView(view: ProviderLoadView): string {
 				if (parts.length === 0) continue;
 				const name = typeof s.limitName === "string" ? s.limitName : String(s.limitId ?? "window");
 				lines.push(
-					`  ${describeProviderAccountKey(usage.provider)} ${name}: ${parts.join("; ")} (seen ${seconds(view.at - usage.at)} ago)`,
+					words.window({
+						account: describeProviderAccountKey(usage.provider),
+						name,
+						parts: parts.join("; "),
+						seen: seconds(view.at - usage.at),
+					}),
 				);
 			}
 			const credits = usage.credits;
 			if (credits) {
 				const state = credits.unlimited
-					? "unlimited"
+					? words.creditsUnlimited
 					: credits.hasCredits
-						? `balance ${credits.balance ?? "unknown"}`
-						: "none";
+						? words.creditsBalance(credits.balance ?? words.creditsUnknown)
+						: words.creditsNone;
 				lines.push(
-					`  ${describeProviderAccountKey(usage.provider)} credits: ${state} (seen ${seconds(view.at - usage.at)} ago)`,
+					words.credits({
+						account: describeProviderAccountKey(usage.provider),
+						state,
+						seen: seconds(view.at - usage.at),
+					}),
 				);
 			}
 		}
 	}
 	lines.push(
 		view.emergencyStop.engaged
-			? `Emergency stop: ENGAGED${view.emergencyStop.reason ? ` — ${view.emergencyStop.reason}` : ""}${view.emergencyStop.engagedAt ? ` (since ${view.emergencyStop.engagedAt})` : ""}; new worker and background requests are held (${view.emergencyStop.path})`
-			: `Emergency stop: off (/estop on [reason] pauses new worker and background work on this machine)`,
+			? words.stopEngaged({
+					reason: view.emergencyStop.reason,
+					engagedAt: view.emergencyStop.engagedAt,
+					path: view.emergencyStop.path,
+				})
+			: words.stopOff,
 	);
 	return lines.join("\n");
 }

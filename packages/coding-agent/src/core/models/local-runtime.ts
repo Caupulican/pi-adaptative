@@ -24,6 +24,7 @@ import {
 	waitForChildProcessWithTermination,
 } from "../../utils/child-process.ts";
 import { modelsDir as agentModelsDir, runtimesDir as agentRuntimesDir } from "../agent-paths.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import {
 	deriveHostLocalInferenceProfile,
@@ -598,14 +599,9 @@ export class OllamaRuntime {
 	 * `curl | sh`) — these steps are the alternative for when that path isn't taken.
 	 */
 	installGuide(): string[] {
-		return [
-			"Ollama is not installed. Pi can install it for you now (asks first, never curl|sh) — or follow these manual steps yourself:",
-			"  1. Download the pinned release archive for your platform:",
-			"     https://github.com/ollama/ollama/releases (asset: ollama-linux-amd64.tar.zst or your platform)",
-			`  2. Extract it to ${join(this._homeDir, ".local", "share", "ollama-dist")}`,
-			"  3. Re-run your /models command - pi detects the binary automatically.",
-			"Alternatively install system-wide from https://ollama.com/download and pi will use the system server.",
-		];
+		return interfaceText().localModels.models.installGuide.ollama(
+			join(this._homeDir, ".local", "share", "ollama-dist"),
+		);
 	}
 
 	/** Which decompressor to use for a `.tar.zst` asset — native (this Node's own zlib) is always
@@ -1475,14 +1471,12 @@ export class TransformersRuntime {
 	}
 
 	installGuide(): string[] {
-		return [
-			"Hugging Face Transformers runtime is not installed for this model.",
-			`Pi can install it into its own venv at ${this.venvDir} and cache weights under ${this.cacheDir}.`,
-			"Manual equivalent:",
-			`  python -m venv ${this.venvDir}`,
-			`  ${this.pythonPath} -m pip install --upgrade pip`,
-			`  ${this.pythonPath} -m pip install ${TRANSFORMERS_PINNED_PACKAGES.join(" ")}`,
-			`  ${this.pythonPath} ${this.torchInstallArgs().join(" ")}`,
-		];
+		return interfaceText().localModels.models.installGuide.transformers({
+			venvDir: this.venvDir,
+			cacheDir: this.cacheDir,
+			pythonPath: this.pythonPath,
+			packages: TRANSFORMERS_PINNED_PACKAGES.join(" "),
+			torchArgs: this.torchInstallArgs().join(" "),
+		});
 	}
 }
