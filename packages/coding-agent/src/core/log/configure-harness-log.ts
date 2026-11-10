@@ -1,5 +1,5 @@
-import { join } from "node:path";
 import { harnessLog, type LogLevel } from "../../kernel/harness-log.ts";
+import { harnessLogDir } from "../agent-paths.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { getSessionRole } from "../session-role.ts";
 
@@ -17,7 +17,7 @@ export function configureHarnessLog(agentDir: string, settings: LoggingSettingsS
 	const logging = settings.getLoggingSettings();
 	harnessLog.setRedactor(redactKnownSecrets);
 	harnessLog.configure({
-		dir: join(agentDir, "logs", "harness"),
+		dir: harnessLogDir(agentDir),
 		...(logging.level ? { level: logging.level } : {}),
 		...(logging.categories ? { categories: logging.categories } : {}),
 		...(logging.maxFileMb ? { maxFileBytes: logging.maxFileMb * 1024 * 1024 } : {}),

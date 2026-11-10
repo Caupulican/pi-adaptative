@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- The doctor no longer reports the harness's own directories as unexpected. `pi update self` and the doctor printed `Agent directory layout -- 1 unexpected root entry: logs` on a healthy installation: the harness log's root (`logs/`) and the collaboration backend's managed configuration (`collaboration/`) were written by the harness but missing from the layout's list of expected entries. Each root is now declared once and used by its writer and by the layout; both are also listed as host-written for the protected-path watch, so their normal churn is not read as tampering.
 - A print-mode run whose last turn ends without an answer reports failure. A model that stopped normally but returned no text (for example after spending its whole reply on reasoning the provider does not return) used to end `pi -p` with exit code 0 and an empty answer. The run now exits 1; text mode prints `The model ended its turn without an answer.` to standard error and the json `result` event carries `outcome: "failed"`, `stopReason: "stop"` and that sentence.
 
 ## [0.104.50] - 2026-11-10

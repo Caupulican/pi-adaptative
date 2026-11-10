@@ -6,6 +6,7 @@ import { killTree } from "../../kernel/reliability/process-tree.ts";
 import { spawnProcess, waitForChildProcess } from "../../utils/child-process.ts";
 import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
 import { getToolPath } from "../../utils/tools-manager.ts";
+import { collaborationDir } from "../agent-paths.ts";
 import { writeFileAtomic } from "../util/atomic-file.ts";
 import { CollaborationBackendError } from "./backend.ts";
 import { runCollaborationCommand } from "./command-runner.ts";
@@ -55,7 +56,7 @@ export async function probeHerdrSocket(
 export async function createHerdrBackend(options: HerdrRuntimeOptions): Promise<HerdrBackend> {
 	if (!/^[a-zA-Z0-9][a-zA-Z0-9_-]{0,63}$/.test(options.session))
 		throw new Error("An explicit named Herdr session is required.");
-	const configPath = options.configPath ?? join(getAgentDir(), "collaboration", "herdr", "config.toml");
+	const configPath = options.configPath ?? join(collaborationDir(getAgentDir()), "herdr", "config.toml");
 	if (!isAbsolute(configPath) || configPath.includes("\0"))
 		throw new Error("Herdr configuration path must be absolute.");
 	const ensureRunning = options.ensureRunning !== false;

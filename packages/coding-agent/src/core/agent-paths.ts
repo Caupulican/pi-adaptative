@@ -22,6 +22,8 @@
  *              including context/sessions/<session-id>/{gc,artifacts}                     -- re-exported below
  *   runtimes/<kind>  models/<kind>                                                         -- runtimesDir/modelsDir
  *   npm/ git/ sessions/                                                                    -- npmDir/gitDir/sessionsDir
+ *   logs/harness/harness-<date>.jsonl  the harness's own log (kernel/harness-log.ts)      -- harnessLogDir
+ *   collaboration/herdr/config.toml    the collaboration backend's managed config         -- collaborationDir
  *   state/orchestration/sessions/<session-key>/                                             -- one foreground-session-owned
  *                                                                                            control-plane bundle
  *     worker-context-forks/<identity-digest>-<content-digest>.json                         -- immutable birth snapshots
@@ -73,6 +75,15 @@ import {
 } from "../utils/work-directory.ts";
 import { getReloadCoordinationDir } from "./reload-blockers.ts";
 
+/**
+ * `<agentDir>/logs` -- the harness's own log tree. Declared once, here: `AGENT_ROOT_DIRECTORY_NAMES` marks it an expected
+ * root entry, so the layout report never calls a directory the harness creates itself unexpected.
+ */
+export const HARNESS_LOG_ROOT_NAME = "logs";
+
+/** `<agentDir>/collaboration` -- the collaboration backend's own configuration (`collaboration/herdr/config.toml`). */
+export const COLLABORATION_DIR_NAME = "collaboration";
+
 /** Root entries reserved for user-authored configuration and memory. */
 export const AGENT_ROOT_FILE_NAMES = [
 	"auth.json",
@@ -122,6 +133,10 @@ export const AGENT_ROOT_DIRECTORY_NAMES = [
 	"channels",
 	// The remote link: this machine's identity, the hub's config and joined machines' secrets, joins, chats and the host lock.
 	"remote",
+	// The harness's own log (`logs/harness/harness-<date>.jsonl`).
+	HARNESS_LOG_ROOT_NAME,
+	// The collaboration backend's managed configuration (`collaboration/herdr/config.toml`).
+	COLLABORATION_DIR_NAME,
 ] as const;
 
 const AGENT_ROOT_ENTRY_NAMES = new Set<string>([...AGENT_ROOT_FILE_NAMES, ...AGENT_ROOT_DIRECTORY_NAMES]);
@@ -317,6 +332,19 @@ export function cacheFile(agentDir: string, ...segments: string[]): string {
 export function extensionCacheDir(agentDir: string, namespace: string): string {
 	assertPortablePathSegment("Extension namespace", namespace);
 	return cacheFile(agentDir, "extensions", namespace);
+}
+
+/**
+ * `<agentDir>/logs/harness` -- the harness's own log, one JSON-lines file per day (`kernel/harness-log.ts`). The one
+ * declaration of the root name serves both this writer and the layout report.
+ */
+export function harnessLogDir(agentDir: string): string {
+	return join(agentDir, HARNESS_LOG_ROOT_NAME, "harness");
+}
+
+/** `<agentDir>/collaboration` -- the collaboration backend's own configuration. */
+export function collaborationDir(agentDir: string): string {
+	return join(agentDir, COLLABORATION_DIR_NAME);
 }
 
 /** `<agentDir>/bin` -- managed executable helpers (fd, rg, jq, uv). */

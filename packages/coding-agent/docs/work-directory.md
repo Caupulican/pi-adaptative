@@ -73,6 +73,8 @@ straggler:
     work/extensions/<namespace>/<run-id>/                                              extension leased work
   runtimes/<kind>  models/<kind>  sessions/  npm/  git/  worktrees/                    -- runtimesDir/modelsDir/sessionsDir/npmDir/gitDir/worktreesDir
   channels/  channel tokens and per-channel journals (private to every lane)          -- channelsDir
+  logs/      the harness's own log, logs/harness/harness-<date>.jsonl                  -- harnessLogDir
+  collaboration/  the collaboration backend's managed config, herdr/config.toml        -- collaborationDir
 ```
 
 ### Session bundle retention

@@ -24,7 +24,9 @@ import { hostWroteDuring } from "../../utils/host-write-window.ts";
 import {
 	AGENT_ROOT_DIRECTORY_NAMES,
 	AGENT_ROOT_FILE_NAMES,
+	COLLABORATION_DIR_NAME,
 	configFile,
+	HARNESS_LOG_ROOT_NAME,
 	hostTransitionsFile,
 	remoteDir,
 } from "../agent-paths.ts";
@@ -62,6 +64,9 @@ const HOST_WRITTEN_AGENT_ROOT_ENTRIES: ReadonlySet<string> = new Set<string>([
 	// The link's directory is watched file by file (see WATCHED_REMOTE_FILE_NAMES): its job stores, chats, host lock and
 	// link state churn while any lane runs.
 	"remote",
+	// The harness's own log and the collaboration backend's managed config are written by the host while any lane runs.
+	HARNESS_LOG_ROOT_NAME,
+	COLLABORATION_DIR_NAME,
 	"auth.json",
 	"MEMORY.md",
 	"USER.md",
