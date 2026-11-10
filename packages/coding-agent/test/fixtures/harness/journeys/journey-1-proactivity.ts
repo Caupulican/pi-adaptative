@@ -1000,6 +1000,9 @@ async function runRollingDayBounds(world: HarnessWorld): Promise<void> {
 	});
 	const spendNoticeText = "reached proactivity.maxUsdPerDay";
 	expect(spendNotice.content, "the notice names the bound the owner can raise").toContain(spendNoticeText);
+	expect(spendNotice.content, "the notice keeps its sentence whole, to the remedy it ends with").toContain(
+		"or sooner if that setting is raised.",
+	);
 	expect(second.sessionManager.getPendingParentInputs("turn"), "no parent wake is pending").toEqual([]);
 	expect(world.provider.requests.length - beforeRefused, "a refused review and its notice send no request").toBe(0);
 	// The same gate observed again is the same state: no second notice.
