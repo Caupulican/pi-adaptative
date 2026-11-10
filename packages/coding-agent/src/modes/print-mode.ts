@@ -13,6 +13,7 @@ import { disposeHttpDispatcher } from "../core/http-dispatcher.ts";
 import { flushRawStdout, writeRawStdout } from "../core/output-guard.ts";
 import { describeCause, neutralizeControls } from "../core/terminal-warnings.ts";
 import { projectSessionEventForJson } from "./json-event-projection.ts";
+import { decidePrintOutcome, selectReplyMessage } from "./print-outcome.ts";
 import { registerTerminationSignalHandlers } from "./termination-signals.ts";
 
 /**
@@ -38,7 +39,7 @@ export interface PrintModeOptions {
 	/**
 	 * Emit the session's cumulative usage at exit so a spawner can roll this child's cost up.
 	 * - text mode: one `__PI_USAGE__<json>` line to stderr (keeps stdout = the answer).
-	 * - json mode: a terminal `{type:"result", usage}` event is always emitted regardless of this flag.
+	 * - json mode: a terminal `{type:"result", usage, outcome}` event is always emitted regardless of this flag.
 	 */
 	printUsage?: boolean;
 }
@@ -159,21 +160,17 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 			await session.waitForSelfCompactionHandoff();
 		}
 
-		if (mode === "text") {
-			// The reply is the last message that is not a host record (an owner-items or evidence record
-			// can land after it): the model's answer, or the owner execution a toolkit hit ran with no model.
-			const lastMessage = session.state.messages.findLast((message) => message.role !== "custom");
+		const lastMessage = selectReplyMessage(session.state.messages);
+		const outcome = decidePrintOutcome(lastMessage);
+		if (outcome.outcome === "failed") exitCode = 1;
 
+		if (mode === "text") {
 			if (lastMessage?.role === "bashExecution") {
 				writeRawStdout(`${lastMessage.output}\n`);
-				if (lastMessage.cancelled || (lastMessage.exitCode !== undefined && lastMessage.exitCode !== 0))
-					exitCode = 1;
 			} else if (lastMessage?.role === "assistant") {
 				const assistantMsg = lastMessage as AssistantMessage;
-				if (assistantMsg.stopReason === "error" || assistantMsg.stopReason === "aborted") {
-					console.error(assistantMsg.errorMessage || `Request ${assistantMsg.stopReason}`);
-					exitCode = 1;
-				} else {
+				// A reply cut off at the output limit still prints the text it has.
+				if (outcome.outcome === "completed" || assistantMsg.stopReason === "length") {
 					// Aliases are a wire-format token optimization; the operator reads real paths.
 					const shown = expandMessageForDisplay(session.peekPathAliasTable(), assistantMsg) as AssistantMessage;
 					for (const content of shown.content) {
@@ -183,6 +180,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 					}
 				}
 			}
+			if (outcome.outcome === "failed" && lastMessage?.role === "assistant") console.error(outcome.error);
 		}
 
 		// Emit cumulative session usage so a spawner can roll this child's cost into its own
@@ -190,7 +188,7 @@ export async function runPrintMode(runtimeHost: AgentSessionRuntime, options: Pr
 		// opt-in (`--print-usage`) sentinel line on stderr, leaving stdout = the answer.
 		const cumulativeUsage = session.getCumulativeUsage();
 		if (mode === "json") {
-			writeRawStdout(`${JSON.stringify({ type: "result", usage: cumulativeUsage })}\n`);
+			writeRawStdout(`${JSON.stringify({ type: "result", usage: cumulativeUsage, ...outcome })}\n`);
 		} else if (printUsage) {
 			process.stderr.write(`${PRINT_USAGE_LINE_PREFIX}${JSON.stringify(cumulativeUsage)}\n`);
 		}

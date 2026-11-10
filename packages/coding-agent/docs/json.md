@@ -84,6 +84,17 @@ Followed by events as they occur:
 {"type":"agent_end","messages":[...]}
 ```
 
+The stream ends with one `result` event:
+
+```json
+{"type":"result","usage":{...},"outcome":"completed"}
+{"type":"result","usage":{...},"outcome":"failed","stopReason":"length","error":"The reply was cut off at the output limit. Nothing was answered."}
+```
+
+- `outcome`: `"completed"` or `"failed"`. Decided from the last message that is not a host record.
+- `stopReason`, `error`: only when `failed`. `error` and `aborted` carry the provider message (or `Request <stopReason>`). `length` means the last reply was cut off at the output limit.
+- A failed run exits with code 1. A shell execution that was cancelled or exited non-zero also fails the run.
+
 ## Example
 
 ```bash
