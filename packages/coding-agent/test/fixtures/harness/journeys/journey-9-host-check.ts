@@ -187,12 +187,36 @@ export async function runJourney9HostCheckPhase(world: HarnessWorld): Promise<vo
 			world.shell.requests.filter((request) => request.command === CHECK_COMMAND),
 			"the host ran the requirement check exactly once",
 		).toHaveLength(1);
-		// The host check covers the requirement in the outcome. The goal's own account is not closed by it.
+		// The host check covers the requirement in the outcome, and its own proof satisfies the goal's requirement with the
+		// evidence the host recorded: one entry, named by the requirement, for this attempt.
 		const goal = getLatestGoalStateSnapshot(sessionManager);
+		const evidence = goal?.evidence ?? [];
 		expect(
-			goal?.requirements.map((requirement) => [requirement.id, requirement.status]),
-			"a check the host ran is not by itself written back to the goal requirement",
-		).toEqual([[REQUIREMENT_ID, "open"]]);
+			{
+				requirements: goal?.requirements.map((requirement) => [requirement.id, requirement.status]),
+				named: goal?.requirements.map((requirement) => requirement.evidenceIds),
+				evidence: evidence.map((entry) => ({
+					id: entry.id,
+					kind: entry.kind,
+					uri: entry.uri,
+					verified: entry.verified,
+					outcome: entry.outcome,
+				})),
+			},
+			"the check the host ran and saw pass is the goal's own proof of that requirement, recorded once",
+		).toEqual({
+			requirements: [[REQUIREMENT_ID, "satisfied"]],
+			named: [[evidence[0]?.id]],
+			evidence: [
+				{
+					id: evidence[0]?.id,
+					kind: "check",
+					uri: REQUIREMENT_ID,
+					verified: true,
+					outcome: "succeeded",
+				},
+			],
+		});
 		expect(await world.disposeSessionInBody(session), "the leg 4 owner disposes cleanly").toBeUndefined();
 		trace.mark("root", "j9.host-check");
 	} finally {

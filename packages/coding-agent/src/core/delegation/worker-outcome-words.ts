@@ -6,6 +6,7 @@
 import type { TaskEscalationRecord } from "../orchestration/task-runtime-state.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import {
+	type AbandonReason,
 	type BlockerCode,
 	isOutcomeFromNewerBuild,
 	type NextAction,
@@ -70,6 +71,19 @@ const BLOCKER_WORDS: Readonly<Record<BlockerCode, string>> = {
 	unclassified: "the cause is not known",
 };
 
+/** The plain words of one blocker code: what went wrong, with no ids and no code. */
+export function blockerWords(blocker: BlockerCode): string {
+	return BLOCKER_WORDS[blocker];
+}
+
+/** The plain next step of an abandoned task, by the reason it was abandoned. */
+const ABANDON_PHRASES: Readonly<Record<AbandonReason, string>> = {
+	cancelled: "nothing more will run",
+	dependency: "nothing more will run until the work it depends on is fixed",
+	superseded: "nothing more will run",
+	stopped: "nothing more will run until it is started again",
+};
+
 /** Whether the outcome's rerun is placed: a `task.escalation_scheduled` record exists for its outcome and rung. */
 export function rerunScheduled(outcome: Outcome, escalations: readonly TaskEscalationRecord[] | undefined): boolean {
 	const action = outcome.nextAction;
@@ -112,9 +126,7 @@ export function nextActionPhrase(action: NextAction, scheduled = false): string 
 		case "ask_root":
 			return "waiting for the lead agent's answer";
 		case "abandon":
-			return action.reason === "dependency"
-				? "nothing more will run until the work it depends on is fixed"
-				: "nothing more will run";
+			return ABANDON_PHRASES[action.reason];
 	}
 }
 

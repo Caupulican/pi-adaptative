@@ -1,5 +1,4 @@
 import { createHash } from "node:crypto";
-import { type PairedVerdict, readPairedJudgment } from "../decision/paired-judgment.ts";
 import { ORCHESTRATION_THINKING_LEVELS, type OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
 import type {
 	AbandonReason,
@@ -13,16 +12,10 @@ import type {
 /**
  * The escalation ladder: the only producer of an outcome's `nextAction`. An ordered decision table over code facts
  * (E0-E18 of the worker-outcome design, with the merged additions E3b, E3c, E5b, E7b, E9b, E10b); the first matching
- * exit wins and every evaluated exit is traced. System One answers enter only as probabilities of one atomic question
- * and its evidence-sufficiency pair (Q1, Q1s), combined here at 0.90 / 0.10; an absent or unsettled pair is `open` and
- * the table continues. Split is not a next action: work too large for one worker asks the owner at E18.
+ * exit wins and every evaluated exit is traced. Every exit reads a code fact: no answer of System One's decides a step
+ * here, and a blocker the worker stated in its own words falls through to E18, where the owner is asked. Split is not a
+ * next action: work too large for one worker asks the owner at E18.
  */
-
-/** A judgment pair: the question's probability and its evidence-sufficiency probability. */
-export interface JudgmentPair {
-	readonly probability: number;
-	readonly sufficiency: number;
-}
 
 export interface EscalationRecordFact {
 	readonly rung: number;
@@ -72,8 +65,6 @@ export interface LadderFacts {
 	readonly reviewRejection?: string;
 	/** The attempt runs a work step of an open plan: the plan places the independent check an unverified result needs. */
 	readonly planChecksResult?: boolean;
-	/** Q1/Q1s for a worker-stated blocker: only the owner can supply what is missing. */
-	readonly ownerOnly?: JudgmentPair;
 }
 
 export interface LadderDecision {
@@ -106,11 +97,6 @@ const BUDGET_SPENT_QUESTION = "another try would pass the task's budget; raise i
 const TIME_STOP_QUESTION =
 	"the task ran out of time before its requirements were met (cap: workerDelegation.maxWallClockMs); raise the cap or narrow the task";
 
-/** The settled reading of a judgment pair; `open` covers every combination the two cuts do not settle. */
-export function judgmentPairVerdict(pair: JudgmentPair | undefined): PairedVerdict {
-	return pair ? readPairedJudgment(pair.probability, pair.sufficiency).verdict : "open";
-}
-
 /** The no-repeat key of one placement: node, sorted remaining ids, model and thinking. */
 export function escalationSignature(
 	nodeId: string,
@@ -136,9 +122,17 @@ function askSignature(nodeId: string, blocker: BlockerCode): string {
 	return `ask-${createHash("sha256").update(`${nodeId}\u0000${blocker}`).digest("hex").slice(0, 24)}`;
 }
 
-function remainingCount(coverage: RequirementCoverage): string {
+/**
+ * The E18 question of a task whose requirements are not met: how many are left, or, when the task named none, what the work
+ * ended on.
+ */
+function unfinishedQuestion(coverage: RequirementCoverage, blocker: BlockerCode): string {
 	const count = coverage.uncovered.length;
-	return count > 0 ? `${count} requirement${count === 1 ? "" : "s"}` : "the task";
+	if (count > 0)
+		return `${count} requirement${count === 1 ? "" : "s"} still not met (${blocker}); decide how to continue`;
+	return blocker === "worker_reported_blocker"
+		? `the worker stopped on a blocker it reported (${blocker}); decide how to continue`
+		: `the work did not finish (${blocker}); decide how to continue`;
 }
 
 /** Run the ordered table over the facts; the first matching exit wins. */
@@ -199,10 +193,12 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 		if (move) return done(exit, move, 2);
 		return askOwner(exit, "no other allowed model can take the task; restore the model's access or name another");
 	}
-	// Only an action an executor performs is named. An interrupted attempt is suspended and the restart recovery resumes it
-	// (wait_capacity). A plan step released to a linked machine that could not take it or could not be reached is re-placed
-	// by the plan on this machine (replace); any other refused start is not re-placed by an executor, and goes to the owner.
-	if (blocker === "interrupted") return done("E7", { kind: "wait_capacity", reason: "runtime_generation" });
+	// Only an action an executor performs is named. An outcome is projected for a terminal attempt only (a suspended one
+	// has none until the restart recovery resumes it and it ends), so an interrupted attempt ended with a stop report and
+	// nothing resumes it: nothing more will run until it is started again. A plan step released to a linked machine that
+	// could not take it or could not be reached is re-placed by the plan on this machine (replace); any other refused start
+	// is not re-placed by an executor, and goes to the owner.
+	if (blocker === "interrupted") return done("E7", { kind: "abandon", reason: "stopped" });
 	if (
 		(blocker === "capacity_unavailable" || blocker === "placement_unreachable") &&
 		facts.remoteMachineId !== undefined
@@ -237,11 +233,6 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 		return askOwner("E10", "the task's budget is spent; raise it or accept the partial result");
 	if (coverage.uncovered.some((entry) => entry.reason === "inconclusive")) skip("E11", "inconclusive_uncovered");
 	if (facts.hostCheckable.length > 0) return done("E12", { kind: "host_check", requirementIds: facts.hostCheckable });
-	if (blocker === "worker_reported_blocker") {
-		const verdict = judgmentPairVerdict(facts.ownerOnly);
-		if (verdict === "yes") return askOwner("E13", "the worker needs information or a decision only you hold");
-		skip("E13", verdict);
-	}
 	// A refused rerun is never retried by the ladder: the owner is asked what to do with the refused rung.
 	if (facts.rungRefusal !== undefined) return askOwner("E14r", refusedRungQuestion(facts.rungRefusal));
 	const remaining = coverage.uncovered.map((entry) => entry.id);
@@ -279,7 +270,7 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 	}
 	// Open work after a time stop is the cap's to raise or the task's to narrow. A stop that covered every requirement is not.
 	if (blocker === "time_exhausted" && workRemains) return askOwner("E18", TIME_STOP_QUESTION);
-	return askOwner("E18", `${remainingCount(coverage)} still not met (${blocker}); decide how to continue`);
+	return askOwner("E18", unfinishedQuestion(coverage, blocker));
 }
 
 /** The owner's question for a refused rung: the plain reason the next try could not be started. */

@@ -2,6 +2,7 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
 import type { FleetScheduler } from "../fleet/fleet-types.ts";
 import type { GoalState } from "../goals/goal-state.ts";
+import type { RequirementCheckResult } from "../goals/requirement-checks.ts";
 import type { OutcomeRankQuery } from "../models/outcome-ledger-store.ts";
 import { ORCHESTRATION_THINKING_LEVELS, type OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
@@ -26,6 +27,8 @@ export interface WorkerOutcomeFollowUpDeps {
 	readonly signal: AbortSignal;
 	/** Whether a directory is a worktree lane (a rerun of its original cannot be placed back into it yet). */
 	isLaneDirectory(directory: string): boolean;
+	/** Record a passing host requirement check as the goal's own proof of that requirement. */
+	recordCheckProof(attemptId: string, requirementId: string, result: RequirementCheckResult): void;
 }
 
 /**
@@ -61,6 +64,7 @@ export class WorkerOutcomeFollowUp {
 			recordRefusal: (attemptId, detail) => {
 				deps.recorder.record(attemptId, undefined, { rungRefusal: detail });
 			},
+			recordCheckProof: deps.recordCheckProof,
 			signal: deps.signal,
 		});
 		this.releaseLadder = deps.recorder.useLadderContext({

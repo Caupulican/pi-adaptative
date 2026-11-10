@@ -161,12 +161,12 @@ export async function runJourney9FixAndOwnerPhase(world: HarnessWorld): Promise<
 		scope: {
 			header: `- ${scopeTask}: blocked reason=worker_blocked`,
 			outcome: "Outcome: blocked (blocker: scope_denied; requirements met: 0 of 0; assurance: unverified)",
-			next: "Next: fix the request and start again; leave it idle; a delegate start with its agentId gives it the next task (a follow_up continues the same task). Host verdict blocked: the worker reported a blocker.",
+			next: "Next: fix the request and start again; leave it idle; a delegate start with its agentId gives it the next task (a follow_up continues the same task). Host verdict blocked: the work reached outside its allowed area.",
 		},
 		owner: {
 			header: `- ${ownerTask}: blocked reason=worker_blocked`,
 			outcome: "Outcome: blocked (blocker: needs_owner_decision; requirements met: 0 of 0; assurance: unverified)",
-			next: "Next: your decision is needed; leave it idle; a delegate start with its agentId gives it the next task (a follow_up continues the same task). Host verdict blocked: the worker reported a blocker.",
+			next: "Next: your decision is needed; leave it idle; a delegate start with its agentId gives it the next task (a follow_up continues the same task). Host verdict blocked: your decision is needed.",
 		},
 	});
 

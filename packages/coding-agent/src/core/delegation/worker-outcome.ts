@@ -20,7 +20,7 @@ import {
 	type OutcomeLadderContext,
 	outcomeLadderFacts,
 } from "./worker-escalation-facts.ts";
-import { decideNextAction, type JudgmentPair } from "./worker-escalation-policy.ts";
+import { decideNextAction } from "./worker-escalation-policy.ts";
 import {
 	attemptAwaitsVerification,
 	isWorkerTimeoutReasonCode,
@@ -277,8 +277,6 @@ export interface ProjectOutcomeInput {
 	readonly requirementChecks?: readonly HostRequirementCheck[];
 	/** A rerun the escalation could not start under the original authority (recorded by the rung executor). */
 	readonly rungRefusal?: string;
-	/** System One's answer pair for a worker-stated blocker (Q1 owner-only, Q1s sufficient); absent is open. */
-	readonly ownerOnly?: JudgmentPair;
 }
 
 /**
@@ -380,7 +378,6 @@ export function projectOutcome(input: ProjectOutcomeInput): Outcome | undefined 
 			previous,
 			checkedIds: new Set(checks.keys()),
 			context: input.ladder,
-			...(input.ownerOnly ? { ownerOnly: input.ownerOnly } : {}),
 			...(input.rungRefusal !== undefined ? { rungRefusal: input.rungRefusal } : {}),
 		}),
 	);

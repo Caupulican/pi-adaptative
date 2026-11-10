@@ -28,11 +28,10 @@ const LEFT_NOTE = "Only the value was read, and nothing more was done with it.";
 
 /**
  * Leg 2: a worker's own blocker words and an attempt with nothing left to try. The first worker reports a blocker without a
- * declared code, so the ladder's owner-only question is the only exit that could take it; the pair that decides it is never
- * asked by production code, so the table skips that exit and falls through to the owner. The second worker answers for one
- * requirement of its task as partial, which no host check can settle, and the rerun rungs are switched off: the fall-through
- * names the uncovered requirement. The host does not accept a report that leaves its one requirement partial, so with
- * nothing covered the outcome reads blocked, not partial: partial is for a task with some requirements covered.
+ * declared code, so no exit names a cause of its own and the table falls through to the owner. The second worker answers for
+ * one requirement of its task as partial, which no host check can settle, and the rerun rungs are switched off: the
+ * fall-through names the uncovered requirement. The host does not accept a report that leaves its one requirement partial,
+ * so with nothing covered the outcome reads blocked, not partial: partial is for a task with some requirements covered.
  */
 export async function runJourney9OwnWordsPhase(world: HarnessWorld): Promise<void> {
 	await runWordsBlockerLeg(world);
@@ -115,7 +114,7 @@ async function runWordsBlockerLeg(world: HarnessWorld): Promise<void> {
 		status: "blocked",
 		blocker: "worker_reported_blocker",
 		next: "ask_owner",
-		question: "the task still not met (worker_reported_blocker); decide how to continue",
+		question: "the worker stopped on a blocker it reported (worker_reported_blocker); decide how to continue",
 		required: [],
 		exit: "E18",
 	});

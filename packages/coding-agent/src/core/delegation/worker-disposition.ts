@@ -3,8 +3,8 @@ import type { GoalState } from "../goals/goal-state.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { CommsStateCode } from "../provider-prompt-contracts.ts";
 import { boundedText } from "../util/bounded-line.ts";
-import type { NextAction } from "./worker-outcome-contract.ts";
-import { sameOutcomeAttempt } from "./worker-outcome-words.ts";
+import type { BlockerCode, NextAction } from "./worker-outcome-contract.ts";
+import { blockerWords, sameOutcomeAttempt } from "./worker-outcome-words.ts";
 
 /**
  * What the host recommends the root do with a worker whose task ended. It is advice printed for the
@@ -45,6 +45,8 @@ export interface WorkerDispositionFacts {
 	readonly openTasksForSameProfile?: number;
 	/** Goal requirements still open that this worker's task correlation can take. */
 	readonly uncoveredRequirementIds?: readonly string[];
+	/** The blocker the host settled for this attempt, from its recorded outcome; absent when no outcome is recorded. */
+	readonly blocker?: BlockerCode;
 }
 
 export interface WorkerDispositionInput extends WorkerDispositionFacts {
@@ -77,6 +79,14 @@ function step(nextAction: NextAction, exit: string, reason: string, keepWorker =
 	return { nextAction, keepWorker, exit, reason };
 }
 
+/**
+ * The reason the root reads for a blocked host verdict. The cause is the blocker the host settled, in the words the outcome
+ * already has for it, so the one line names what stopped the worker; a host that read no blocker names the worker's report.
+ */
+function blockedVerdictReason(blocker: BlockerCode | undefined): string {
+	return `Host verdict blocked: ${blockerWords(blocker ?? "worker_reported_blocker")}.`;
+}
+
 const FOLLOW_UP: NextAction = { kind: "verify_in_lane" };
 const ACCEPT: NextAction = { kind: "accept" };
 
@@ -101,7 +111,7 @@ export function deriveWorkerNextStep(input: WorkerDispositionInput): WorkerNextS
 	if (verdict === "rejected")
 		return step(FOLLOW_UP, "disposition_verdict_rejected", "Host verdict rejected: a stated claim is contradicted.");
 	if (verdict === "blocked")
-		return step(FOLLOW_UP, "disposition_verdict_blocked", "Host verdict blocked: the worker reported a blocker.");
+		return step(FOLLOW_UP, "disposition_verdict_blocked", blockedVerdictReason(input.blocker));
 	if (claim.blockers && claim.blockers.length > 0) {
 		return step(FOLLOW_UP, "disposition_blockers", `The claim carries ${claim.blockers.length} blocker(s).`);
 	}
@@ -238,6 +248,9 @@ export function deriveWorkerDispositionFacts(args: {
 	const attempt = dispositionAttempt(args);
 	const profileId = attempt?.dispatch.profileId;
 	const taskState = attempt ? snapshot?.tasks[attempt.taskId] : undefined;
+	const outcome = attempt
+		? sameOutcomeAttempt(snapshot?.tasks[attempt.taskId]?.outcome, attempt.attemptId)
+		: undefined;
 
 	let openTasksForSameProfile: number | undefined;
 	if (snapshot && attempt && taskState) {
@@ -276,6 +289,7 @@ export function deriveWorkerDispositionFacts(args: {
 		...(profileId !== undefined ? { profileId } : {}),
 		...(openTasksForSameProfile !== undefined ? { openTasksForSameProfile } : {}),
 		...(uncoveredRequirementIds !== undefined ? { uncoveredRequirementIds } : {}),
+		...(outcome && outcome.blocker !== "none" ? { blocker: outcome.blocker } : {}),
 	};
 }
 
@@ -291,6 +305,7 @@ function deriveWorkerNextStepForClaim(args: {
 	return deriveWorkerNextStep({
 		claim,
 		...(profileId !== undefined ? { profileId } : {}),
+		...(facts?.blocker !== undefined ? { blocker: facts.blocker } : {}),
 		...(facts?.openTasksForSameProfile !== undefined
 			? { openTasksForSameProfile: facts.openTasksForSameProfile }
 			: {}),

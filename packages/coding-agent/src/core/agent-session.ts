@@ -31,6 +31,7 @@ import { createSessionBackgroundToolTasks } from "./agent-session-background-tas
 import {
 	attachSessionAdaptiveRuntime,
 	buildSessionContextCompositionReport,
+	createGoalProofWrites,
 	createLessonRoutePort,
 	createSessionOperatorProjection,
 	createSessionProjectRules,
@@ -165,7 +166,6 @@ import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/g
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
-import { recordAcceptedWorkerRequirementEvidence } from "./goals/worker-requirement-evidence.ts";
 import { HarnessNoticeController } from "./harness-notice.ts";
 import { HostTurnReasoningController } from "./host-turn-reasoning.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
@@ -550,6 +550,14 @@ export class AgentSession {
 	private readonly _reflection: ReflectionController;
 	/** Durable goal lifecycle, accounting, and raw continuation loop. */
 	private readonly _goals: GoalSessionController;
+	/** The proof this session records on its goal from its workers: accepted claim evidence and the host's own checks. */
+	private readonly goalProof = createGoalProofWrites({
+		getGoalState: () => this._goals.getState(),
+		saveGoalState: (state, expected) => this._goals.saveState(state, expected),
+		getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
+		getWorkerClaimSnapshots: () => this.getWorkerClaimSnapshots(),
+		warn: (message) => this._emit({ type: "warning", message }),
+	});
 	// Coordinator slices (agent-session-*.ts): each owns one responsibility and reads its owners through lazy ports.
 	private readonly _agentEvents = new AgentSessionEvents({
 		agent: () => this.agent,
@@ -1270,6 +1278,8 @@ export class AgentSession {
 			getEvidenceBundleSnapshot: () => this.getEvidenceBundleSnapshot(),
 			saveEvidenceBundleSnapshot: (bundle) => this.saveEvidenceBundleSnapshot(bundle),
 			saveWorkerClaimSnapshot: (claim, request, options) => this.saveWorkerClaimSnapshot(claim, request, options),
+			recordRequirementCheckProof: (attemptId, requirementId, result) =>
+				this.goalProof.recordRequirementCheckProof(attemptId, requirementId, result),
 			reportWorkerTerminal: (handoff) => this.reportWorkerTerminal(handoff),
 			recordUnsettledForOwner: (items) => this._unsettledLadder.queueWorkerUnsettled(items),
 			deliverNotes: (input, options) => this._durableCustomMessageTurns.deliverParentInput(input, options),
@@ -4921,19 +4931,7 @@ export class AgentSession {
 	 * satisfies a requirement, and a failure here must not report a saved claim as unsaved.
 	 */
 	recordAcceptedWorkerEvidence(): void {
-		try {
-			recordAcceptedWorkerRequirementEvidence({
-				getGoalState: () => this._goals.getState(),
-				saveGoalState: (state, expected) => this._goals.saveState(state, expected),
-				getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
-				getWorkerClaimSnapshots: () => this.getWorkerClaimSnapshots(),
-			});
-		} catch (error) {
-			this._emit({
-				type: "warning",
-				message: `Worker evidence for the goal was not recorded: ${error instanceof Error ? error.message : String(error)}`,
-			});
-		}
+		this.goalProof.recordAcceptedWorkerEvidence();
 	}
 
 	getWorkerClaimSnapshots(): WorkerClaim[] {

@@ -82,6 +82,11 @@ export function projectWorkerLaneRecord(snapshot: TaskRuntimeProjection, taskId:
 	return attempt ? projectWorkerAttemptLaneRecord(snapshot, attempt.attemptId) : undefined;
 }
 
+/** The attempt a task's newest dispatch recorded: its last listed attempt, while that attempt is retained. */
+export function latestTaskAttempt(snapshot: TaskRuntimeProjection, taskId: string): AttemptRuntimeState | undefined {
+	return snapshot.attempts[snapshot.tasks[taskId]?.attemptIds.at(-1) ?? ""];
+}
+
 /** The lane record of one exact attempt (generation), whichever attempt its task now selects. */
 export function projectWorkerAttemptLaneRecord(
 	snapshot: TaskRuntimeProjection,

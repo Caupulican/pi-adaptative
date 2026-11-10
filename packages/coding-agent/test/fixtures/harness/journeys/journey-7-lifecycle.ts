@@ -329,9 +329,9 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		"a stop interrupts the work and leaves the goal open: the stopped bot's report reaches its leader, whose next turn ends the goal, and the root is told once",
 	).toEqual({
 		leaderHeard: { handoff: true, status: "blocked", reason: "worker_interrupted", carriesBotReport: true },
-		// The goal's outcome combines its turns as they ended. The bot's last turn was interrupted, and an interrupted turn
-		// is worded as one that waits to run again, also when a stop ended it.
-		outcome: `Leader ${displayNameFor(STOP_LEADER)} finished the goal "${STOP_GOAL}": Blocked: it was interrupted. Next: waiting for room to run.`,
+		// The goal's outcome combines its turns as they ended. The bot's last turn was stopped, so the lane is gone for good
+		// and nothing is waiting for room: the step is abandoned until someone starts it again.
+		outcome: `Leader ${displayNameFor(STOP_LEADER)} finished the goal "${STOP_GOAL}": Blocked: it was interrupted. Next: nothing more will run until it is started again.`,
 		reportQuoted: true,
 		goal: "closed",
 	});

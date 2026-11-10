@@ -93,12 +93,12 @@ export class WorkerOutcomeRecorder {
 
 	/**
 	 * Record the outcome of one terminal attempt; `claim` is the host-normalized claim when the terminal path holds it.
-	 * `facts` carries what the host learned after the attempt ended (requirement checks, a judgment pair).
+	 * `facts` carries what the host learned after the attempt ended (requirement checks, rung refusal).
 	 */
 	record(
 		attemptId: string,
 		claim?: WorkerClaim,
-		facts?: Pick<ProjectOutcomeInput, "requirementChecks" | "ownerOnly" | "rungRefusal">,
+		facts?: Pick<ProjectOutcomeInput, "requirementChecks" | "rungRefusal">,
 	): Outcome | undefined {
 		const taskId = this.runtime.getSnapshot().attempts[attemptId]?.taskId;
 		if (taskId === undefined) return undefined;

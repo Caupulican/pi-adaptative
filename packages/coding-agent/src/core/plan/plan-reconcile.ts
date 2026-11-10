@@ -14,7 +14,7 @@
  *    on this machine (host revision), or holds it for the owner when its must-pin names that machine;
  *    fix_request and abandon(dependency) hold for a revise (a vote's own check that rejects settles instead: its verdict
  *    answers the vote); ask_owner holds on the owner; ask_root holds on
- *    the root; abandon(cancelled/superseded) settles without acceptance. A reduce or verify worker's outcome settles
+ *    the root; abandon(cancelled/superseded/stopped) settles without acceptance. A reduce or verify worker's outcome settles
  *    its join instead;
  * 4. a code join (collect, race, vote) whose ordering edges settled and a member settled -> decide it;
  * 5. an unreleased node that is releasable (work: every predecessor accepted; join: every predecessor settled), while

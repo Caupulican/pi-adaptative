@@ -3,7 +3,7 @@ import { reviewRunVerdict } from "../orchestration/review-verdict.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { currentTaskOf } from "../orchestration/task-successor.ts";
 import { DEFAULT_WORKER_OUTCOME_SETTINGS } from "../settings/worker-outcome-settings.ts";
-import type { JudgmentPair, LadderCandidate, LadderFacts } from "./worker-escalation-policy.ts";
+import type { LadderCandidate, LadderFacts } from "./worker-escalation-policy.ts";
 import type { BlockerCode, Outcome, OutcomeStatus, RequirementCoverage } from "./worker-outcome-contract.ts";
 
 /**
@@ -113,7 +113,6 @@ export function outcomeLadderFacts(args: {
 	readonly previous: Outcome | undefined;
 	readonly checkedIds: ReadonlySet<string>;
 	readonly context: OutcomeLadderContext | undefined;
-	readonly ownerOnly?: JudgmentPair;
 	/** A rerun the original authority could not be rebuilt into: the owner decides, the ladder does not retry it. */
 	readonly rungRefusal?: string;
 }): LadderFacts {
@@ -161,7 +160,6 @@ export function outcomeLadderFacts(args: {
 		hostCheckable,
 		budgetLeft: budgetLeft(snapshot, attempt),
 		...(remoteMachineId !== undefined ? { remoteMachineId } : {}),
-		...(args.ownerOnly ? { ownerOnly: args.ownerOnly } : {}),
 		...(args.rungRefusal !== undefined ? { rungRefusal: args.rungRefusal } : {}),
 		...(review?.kind === "rejected" ? { reviewRejection: boundedReasonCodes(review.reasonCodes) } : {}),
 		...(runsPlanWorkStep(snapshot, attempt.taskId) ? { planChecksResult: true } : {}),

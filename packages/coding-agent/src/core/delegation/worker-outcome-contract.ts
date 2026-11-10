@@ -166,7 +166,7 @@ export interface OutcomeAttempt {
 	readonly attestedBy?: string;
 }
 
-export const ABANDON_REASONS = ["cancelled", "dependency", "superseded"] as const;
+export const ABANDON_REASONS = ["cancelled", "dependency", "superseded", "stopped"] as const;
 export type AbandonReason = (typeof ABANDON_REASONS)[number];
 
 /**

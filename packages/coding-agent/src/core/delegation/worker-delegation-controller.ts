@@ -267,6 +267,7 @@ import {
 import type { WorkerLaneIsolation } from "./worker-lane-isolation.ts";
 import {
 	attemptVerification,
+	latestTaskAttempt,
 	NONTERMINAL_WORKER_ATTEMPT_STATUSES,
 	projectWorkerAttemptLaneRecord,
 } from "./worker-lane-projection.ts";
@@ -743,10 +744,7 @@ export class WorkerDelegationController {
 			currentRecord: (laneId) => this.lifecycle.getRecord(laneId),
 			withWaitReason: (record) => this.withWaitReasons([record])[0] ?? record,
 			activeAttempt: (laneId) => this.getWorkerLifecycle().getActiveAttempt(laneId),
-			lastAttempt: (taskId) => {
-				const snapshot = this.getWorkerLifecycle().getTaskRuntimeSnapshot();
-				return snapshot.attempts[snapshot.tasks[taskId]?.attemptIds.at(-1) ?? ""];
-			},
+			lastAttempt: (taskId) => latestTaskAttempt(this.getWorkerLifecycle().getTaskRuntimeSnapshot(), taskId),
 			waitState: (laneId) => this.scheduler.getWaitState(laneId),
 			warn: (message) => this.safeWarn(message),
 		});
@@ -763,6 +761,8 @@ export class WorkerDelegationController {
 			cwd: () => this.deps.getCwd(),
 			signal: this.workerAbort.signal,
 			isLaneDirectory: (directory) => this.laneIsolation?.isLaneDirectory(directory) ?? false,
+			recordCheckProof: (attemptId, requirementId, result) =>
+				this.deps.recordRequirementCheckProof?.(attemptId, requirementId, result),
 		});
 		this.recovery = new WorkerRecoveryCoordinator({
 			timers: this.deps.getTimers().port("orchestration"),

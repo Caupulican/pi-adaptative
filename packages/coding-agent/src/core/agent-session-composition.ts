@@ -21,7 +21,7 @@ import { ExternalCapabilityAcquisitionGate } from "./acquisition/external-capabi
 import type { AdaptiveCapabilityController } from "./adaptive/adaptive-capability-controller.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import type { AgentSessionEvent } from "./agent-session-contracts.ts";
-import type { CapabilityEnvelope } from "./autonomy/contracts.ts";
+import type { CapabilityEnvelope, WorkerClaim } from "./autonomy/contracts.ts";
 import type { EdgeGrantView } from "./autonomy/edge-policy.ts";
 import type { ExecutionCharter } from "./autonomy/execution-charter.ts";
 import { formatForegroundEnvelopeObservation } from "./autonomy/foreground-envelope.ts";
@@ -48,8 +48,9 @@ import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import type { GoalState } from "./goals/goal-state.ts";
-import { proveRequirementChecks } from "./goals/prove-requirement-checks.ts";
-import { runRequirementCheck } from "./goals/requirement-checks.ts";
+import { proveRequirementChecks, recordHostRequirementCheckProof } from "./goals/prove-requirement-checks.ts";
+import { type RequirementCheckResult, runRequirementCheck } from "./goals/requirement-checks.ts";
+import { recordAcceptedWorkerRequirementEvidence } from "./goals/worker-requirement-evidence.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
 import type { AutoLearnApplyPorts } from "./learning/auto-learn-proposals.ts";
 import { ObservationStore, observationKey } from "./learning/observation-store.ts";
@@ -903,5 +904,46 @@ export function createLessonRoutePort(owners: {
 			judge,
 			now: Date.now(),
 		});
+	};
+}
+
+/**
+ * The writes a session makes into its goal state from its workers' proof: the evidence an accepted claim gives, and the
+ * result of the host's own requirement check. A write that fails is reported as a warning, so a saved claim never reports
+ * itself unsaved and a passing check never fails the attempt that ran it.
+ */
+export function createGoalProofWrites(deps: {
+	getGoalState(): GoalState | undefined;
+	saveGoalState(state: GoalState, expected: GoalStateRevision): string;
+	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined;
+	getWorkerClaimSnapshots(): readonly WorkerClaim[];
+	warn(message: string): void;
+}): {
+	/** Makes accepted worker proof citable by the goal's completion account, after every claim save and review acknowledgement. */
+	recordAcceptedWorkerEvidence(): void;
+	/** Records the host's own check as the goal's proof: a check that passed satisfies its requirement. */
+	recordRequirementCheckProof(attemptId: string, requirementId: string, result: RequirementCheckResult): void;
+} {
+	const guarded = (failure: string, write: () => void): void => {
+		try {
+			write();
+		} catch (error) {
+			deps.warn(`${failure}: ${error instanceof Error ? error.message : String(error)}`);
+		}
+	};
+	return {
+		recordAcceptedWorkerEvidence: () =>
+			guarded("Worker evidence for the goal was not recorded", () =>
+				recordAcceptedWorkerRequirementEvidence({
+					getGoalState: deps.getGoalState,
+					saveGoalState: deps.saveGoalState,
+					getTaskRuntimeSnapshot: deps.getTaskRuntimeSnapshot,
+					getWorkerClaimSnapshots: deps.getWorkerClaimSnapshots,
+				}),
+			),
+		recordRequirementCheckProof: (attemptId, requirementId, result) =>
+			guarded("The host check's proof for a goal requirement was not recorded", () =>
+				recordHostRequirementCheckProof(deps, { attemptId, requirementId, result }),
+			),
 	};
 }

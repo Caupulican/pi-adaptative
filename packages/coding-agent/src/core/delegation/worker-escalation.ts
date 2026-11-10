@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import { existsSync } from "node:fs";
 import { isAbsolute, relative } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import {
@@ -9,7 +10,7 @@ import {
 	laneSubtreeId,
 } from "../fleet/fleet-types.ts";
 import type { GoalState } from "../goals/goal-state.ts";
-import { runRequirementCheck } from "../goals/requirement-checks.ts";
+import { type RequirementCheckResult, runRequirementCheck } from "../goals/requirement-checks.ts";
 import { nativeAgentIdForAttempt } from "../orchestration/attempt-agent-identity.ts";
 import {
 	ORCHESTRATION_THINKING_LEVELS,
@@ -163,6 +164,8 @@ export interface WorkerEscalationDeps {
 	cwd(): string;
 	/** Re-record the attempt's outcome with the host checks just run. */
 	recordChecks(attemptId: string, checks: readonly HostRequirementCheck[]): void;
+	/** Record a passing host check as the goal's own proof of that requirement (`recordHostRequirementCheckProof`). */
+	recordCheckProof(attemptId: string, requirementId: string, result: RequirementCheckResult): void;
 	/** Record that a rung could not start under the original authority: the ladder then asks the owner. */
 	recordRefusal(attemptId: string, detail: string): void;
 	readonly signal: AbortSignal;
@@ -197,13 +200,15 @@ export class WorkerEscalation {
 		if (!attemptId || this.checkedAttempts.has(attemptId)) return;
 		this.checkedAttempts.add(attemptId);
 		const requirements = new Map((this.deps.goalState()?.requirements ?? []).map((entry) => [entry.id, entry]));
+		const cwd = this.checkCwd(attemptId);
 		const checks: HostRequirementCheck[] = [];
 		for (const id of requirementIds) {
 			const check = requirements.get(id)?.check;
 			if (!check) continue;
-			const result = await runRequirementCheck(check, { cwd: this.deps.cwd(), signal: this.deps.signal });
+			const result = await runRequirementCheck(check, { cwd, signal: this.deps.signal });
 			if (this.deps.signal.aborted) return;
 			checks.push({ id, passed: result.passed });
+			if (result.passed) this.deps.recordCheckProof(attemptId, id, result);
 		}
 		harnessLog.info("escalation", "host requirement checks ran after a worker attempt", {
 			outcomeId: outcome.outcomeId,
@@ -211,6 +216,19 @@ export class WorkerEscalation {
 			failed: checks.filter((check) => !check.passed).length,
 		});
 		if (checks.length > 0) this.deps.recordChecks(attemptId, checks);
+	}
+
+	/**
+	 * Where E12 runs: the directory the attempt ran in, while it is still there. A worker in a worktree lane or another
+	 * directory left its result there, so the check reads that directory; a lane the plan landed and released has been
+	 * discarded, and the check then runs in the session's directory. The attempt's contract names it (`authority.cwd`).
+	 */
+	private checkCwd(attemptId: string): string {
+		const attemptCwd =
+			this.deps.runtime.getSnapshot().attempts[attemptId]?.dispatch.executionContract?.worker.authority.cwd;
+		return attemptCwd !== undefined && isAbsolute(attemptCwd) && existsSync(attemptCwd)
+			? attemptCwd
+			: this.deps.cwd();
 	}
 
 	/** Place one rung through `prepare` then `admit`; a refusal is logged and nothing is recorded. */
