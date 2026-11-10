@@ -203,14 +203,20 @@ export function allBots(session: AgentSession): PersistentBotRecord[] {
 }
 
 /**
- * The owner's messages the store keeps for a group, oldest first. The group's log also holds each member's answers, and a
- * member that answers at once is logged before the message it answers: the owner's message is stored after its
- * deliveries, with their outcomes.
+ * The owner's messages the store keeps for a group, oldest first, taken out of the group's whole log: the log also holds
+ * each member's answers, in the order they happened.
  */
 export function teamMessages(session: AgentSession, teamId: string): PersistentTeamMessage[] {
 	const store = session.getBotTeamStore();
 	store.reload(true);
 	return store.listTeamMessages(teamId).filter((message) => message.sender.kind === "operator");
+}
+
+/** The group's whole log in the order it was written: the owner's messages and the members' answers together. */
+export function teamLog(session: AgentSession, teamId: string): PersistentTeamMessage[] {
+	const store = session.getBotTeamStore();
+	store.reload(true);
+	return store.listTeamMessages(teamId);
 }
 
 /** The worker agents this session runs on one model, as the live roster holds them. */

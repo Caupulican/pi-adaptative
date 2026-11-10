@@ -25,7 +25,7 @@ import {
 	workerDispositionGuidance,
 	workerLaneStateCodes,
 } from "./delegation/worker-disposition.ts";
-import { FANOUT_LINE_MAX_CHARS } from "./delegation/worker-fanout.ts";
+import { FANOUT_LINE_MAX_CHARS, type FanoutGroupReport, fanoutNoteForLane } from "./delegation/worker-fanout.ts";
 import { selectedWorkerAttempt } from "./delegation/worker-lane-projection.ts";
 import {
 	type WorkerTerminalHandoffRecord,
@@ -136,8 +136,10 @@ interface ForegroundTerminalHandoffControllerDeps {
 	getWorkerClaimSnapshot?(laneId: string, attemptId?: string): WorkerClaimSnapshotPayload | undefined;
 	/** The result of the exact generation when `attemptId` is given; never another generation's. */
 	getWorkerResult?(laneId: string, attemptId?: string): Pick<WorkerResultContract, "artifacts"> | undefined;
-	/** The fan-out group line (coverage, race winner) for a lane that belongs to a group; undefined otherwise. */
-	getWorkerFanoutNote?(laneId: string): string | undefined;
+	/** The fan-out groups of this session's lanes: a block of a grouped lane names its coverage and its race winner. */
+	getWorkerFanoutGroups?(): readonly FanoutGroupReport[];
+	/** The bot whose runtime a lane is, by id and the name its record shows; undefined for a lane that is no bot's. */
+	getWorkerBot?(laneId: string): { agentId: string; displayName?: string } | undefined;
 	startCustomMessageTurn(
 		message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">,
 		lease: ForegroundSubmissionLease,
@@ -225,6 +227,8 @@ export function buildForegroundWorkerTerminalHandoffContent(
 		outputArtifact?: ArtifactContract;
 		/** Host-written fan-out group line; reason codes inside it are already identifier-sanitized. */
 		fanout?: string;
+		/** The bot this lane is the runtime of, when a persistent bot owns it: the root asked that bot, so it is named. */
+		bot?: { agentId: string; displayName?: string };
 		/** The host's judgment of the claim against the receipts; names the missing proof a follow-up asks for. */
 		hostVerdict?: WorkerHostVerdict;
 		/** The host-computed outcome of this exact attempt. */
@@ -257,6 +261,11 @@ export function buildForegroundWorkerTerminalHandoffContent(
 			// line cannot carry free text a worker chose.
 			const reason = record.reasonCode ? ` reason=${handoffReasonCode(record.reasonCode)}` : "";
 			const lines = [`- ${record.laneId}: ${record.status}${reason}`];
+			// The bot's own id is an identifier; its display name is free text the caller chose, so it stays on one line and bounded.
+			if (record.bot) {
+				const name = boundedUtf8Text(record.bot.displayName?.replace(/[\r\n]+/g, " ").trim() ?? "", 80);
+				lines.push(`  Bot: ${record.bot.agentId}${name && name !== record.bot.agentId ? ` (${name})` : ""}`);
+			}
 			if (record.reasonDetail)
 				lines.push(
 					`  Diagnostic (untrusted):\n${wrapUntrustedText(record.reasonDetail, `worker-diagnostic:${record.laneId}`)}`,
@@ -525,7 +534,9 @@ export class ForegroundTerminalHandoffController {
 				index < 8
 					? workerTerminalOutputArtifact(this.deps.getWorkerResult?.(record.laneId, record.attemptId))
 					: undefined;
-			const fanout = index < 8 ? this.deps.getWorkerFanoutNote?.(record.laneId) : undefined;
+			const groups = index < 8 ? this.deps.getWorkerFanoutGroups?.() : undefined;
+			const fanout = groups ? fanoutNoteForLane(groups, record.laneId) : undefined;
+			const bot = index < 8 ? this.deps.getWorkerBot?.(record.laneId) : undefined;
 			const outcome = index < 8 ? this.terminalOutcome(record.laneId, record.attemptId, claim) : undefined;
 			const nextStep = index < 8 && claim ? this.nextStep(claim, record.laneId, record.attemptId) : undefined;
 			return {
@@ -543,6 +554,7 @@ export class ForegroundTerminalHandoffController {
 				...(record.reasonDetail ? { reasonDetail: record.reasonDetail } : {}),
 				...(outputArtifact ? { outputArtifact } : {}),
 				...(fanout ? { fanout } : {}),
+				...(bot ? { bot } : {}),
 				...(claim?.hostVerdict ? { hostVerdict: claim.hostVerdict } : {}),
 				...(outcome ? { outcome } : {}),
 				...(nextStep ? { nextStep } : {}),

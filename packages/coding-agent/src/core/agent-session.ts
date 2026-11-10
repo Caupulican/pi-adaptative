@@ -126,7 +126,6 @@ import {
 import type { WorkerResponseObservation } from "./delegation/worker-attempt-executor.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { createWorkerEdgePolicy } from "./delegation/worker-edge-policy.ts";
-import { fanoutNoteForLane } from "./delegation/worker-fanout.ts";
 import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
 import { createWorkerRequestPlanner } from "./delegation/worker-request-planner.ts";
 import { createWorkerSettlementPolicy } from "./delegation/worker-settlement-policy.ts";
@@ -1827,7 +1826,8 @@ export class AgentSession {
 			// Exact attempt only: a record without its attempt has no proof, so it never reads its lane's latest result.
 			getWorkerResult: (_laneId, attemptId) =>
 				attemptId === undefined ? undefined : this._backgroundLanes.getWorkerAttemptResult(attemptId),
-			getWorkerFanoutNote: (laneId) => fanoutNoteForLane(this._backgroundLanes.getWorkerFanoutGroups(), laneId),
+			getWorkerFanoutGroups: () => this._backgroundLanes.getWorkerFanoutGroups(),
+			getWorkerBot: (laneId) => this._backgroundLanes.botOfRuntime(laneId),
 			startCustomMessageTurn: (message, lease, goalId) =>
 				this._durableCustomMessageTurns.start(message, lease, goalId),
 			enqueueCustomMessageTurn: (message) => this._durableCustomMessageTurns.enqueue(message),

@@ -82,6 +82,12 @@ import {
 	renewDaemonLeaseFile,
 } from "./bot-team-routine-helpers.ts";
 import {
+	BOT_OR_TEAM_ID_REGEX,
+	parseBotRecord,
+	parseTeamMessage,
+	parseTeamRecord,
+} from "./persistent-bot-team-codecs.ts";
+import {
 	claimDueRoutineOccurrences,
 	clearRoutineAwayRefusals,
 	decideAwayEventRoutines,
@@ -208,7 +214,7 @@ export interface PersistentTeamRecord {
 
 export interface PersistentTeamMemberDelivery {
 	readonly agentId: string;
-	readonly outcome: "started" | "steering" | "queued" | "failed";
+	readonly outcome: "started" | "steering" | "followed_up" | "queued" | "failed";
 	readonly messageId?: string;
 	readonly detail?: string;
 }
@@ -327,7 +333,6 @@ export function botReplyText(text: string): string {
 	return text;
 }
 
-const BOT_OR_TEAM_ID_REGEX = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const MAX_TEAM_MESSAGES_PER_TEAM = 200;
 
 /** Legacy records retain a deterministic identity; every new group receives a fresh random identity. */
@@ -451,186 +456,6 @@ function parseModelRef(rawRef: string): { provider: string; modelId: string } {
 	return {
 		provider: "unknown",
 		modelId: trimmed || "default",
-	};
-}
-
-function parseBotRecord(value: unknown): PersistentBotRecord | undefined {
-	if (!isRecordObject(value)) {
-		return undefined;
-	}
-	const {
-		agentId,
-		displayName,
-		description,
-		provider,
-		modelId,
-		thinkingLevel,
-		soul: storedSoul,
-		instructions: legacyInstructions,
-		profileId,
-		canWrite,
-		leader,
-		createdBy,
-		remote,
-		createdAt,
-		updatedAt,
-		retired,
-		lastTranscriptRef,
-		lastSummary,
-		lastMessageAt,
-		lastReadAt,
-	} = value;
-	// Records written before the soul concept stored the same text under `instructions`; the next save writes `soul`.
-	const soul = storedSoul ?? legacyInstructions;
-
-	if (
-		typeof agentId !== "string" ||
-		!BOT_OR_TEAM_ID_REGEX.test(agentId) ||
-		typeof displayName !== "string" ||
-		typeof provider !== "string" ||
-		typeof modelId !== "string" ||
-		typeof createdAt !== "string" ||
-		typeof updatedAt !== "string"
-	) {
-		return undefined;
-	}
-
-	return {
-		agentId,
-		displayName,
-		description: typeof description === "string" ? description : undefined,
-		provider,
-		modelId,
-		thinkingLevel: typeof thinkingLevel === "string" ? thinkingLevel : undefined,
-		soul: typeof soul === "string" ? soul : undefined,
-		profileId: typeof profileId === "string" ? profileId : undefined,
-		canWrite: typeof canWrite === "boolean" ? canWrite : undefined,
-		leader: typeof leader === "boolean" ? leader : undefined,
-		createdBy: typeof createdBy === "string" && createdBy.length > 0 ? createdBy : undefined,
-		remote: remote === true ? true : undefined,
-		createdAt,
-		updatedAt,
-		retired: typeof retired === "boolean" ? retired : undefined,
-		lastTranscriptRef: typeof lastTranscriptRef === "string" ? lastTranscriptRef : undefined,
-		lastSummary: typeof lastSummary === "string" ? lastSummary : undefined,
-		lastMessageAt: typeof lastMessageAt === "number" && Number.isFinite(lastMessageAt) ? lastMessageAt : undefined,
-		lastReadAt: typeof lastReadAt === "number" && Number.isFinite(lastReadAt) ? lastReadAt : undefined,
-	};
-}
-
-function parseTeamRecord(value: unknown): PersistentTeamRecord | undefined {
-	if (!isRecordObject(value)) {
-		return undefined;
-	}
-	const {
-		teamId,
-		incarnationId,
-		name,
-		description,
-		memberAgentIds,
-		createdAt,
-		updatedAt,
-		lastMessageAt,
-		lastReadAt,
-		memoryFilePath,
-	} = value;
-
-	if (
-		typeof teamId !== "string" ||
-		!BOT_OR_TEAM_ID_REGEX.test(teamId) ||
-		typeof createdAt !== "string" ||
-		typeof updatedAt !== "string" ||
-		(incarnationId !== undefined &&
-			(typeof incarnationId !== "string" || !/^[A-Za-z0-9_-]{1,64}$/.test(incarnationId))) ||
-		!Array.isArray(memberAgentIds)
-	) {
-		return undefined;
-	}
-
-	const validMembers: string[] = [];
-	for (const id of memberAgentIds) {
-		if (typeof id === "string" && BOT_OR_TEAM_ID_REGEX.test(id)) {
-			validMembers.push(id);
-		}
-	}
-
-	return {
-		teamId,
-		...(typeof incarnationId === "string" && /^[A-Za-z0-9_-]{1,64}$/.test(incarnationId) ? { incarnationId } : {}),
-		name: typeof name === "string" ? name : teamId,
-		description: typeof description === "string" ? description : undefined,
-		memberAgentIds: validMembers,
-		createdAt,
-		updatedAt,
-		lastMessageAt: typeof lastMessageAt === "number" && Number.isFinite(lastMessageAt) ? lastMessageAt : undefined,
-		lastReadAt: typeof lastReadAt === "number" && Number.isFinite(lastReadAt) ? lastReadAt : undefined,
-		memoryFilePath: typeof memoryFilePath === "string" ? memoryFilePath : undefined,
-	};
-}
-
-function parseTeamMessage(value: unknown): PersistentTeamMessage | undefined {
-	if (!isRecordObject(value)) {
-		return undefined;
-	}
-	const { messageId, teamId, teamIncarnationId, sender, text, timestamp, targetAgentIds, deliveries } = value;
-
-	if (
-		typeof messageId !== "string" ||
-		typeof teamId !== "string" ||
-		!BOT_OR_TEAM_ID_REGEX.test(teamId) ||
-		typeof text !== "string" ||
-		typeof timestamp !== "number" ||
-		!Number.isFinite(timestamp) ||
-		!isRecordObject(sender) ||
-		!Array.isArray(targetAgentIds) ||
-		!Array.isArray(deliveries)
-	) {
-		return undefined;
-	}
-
-	let parsedSender: PersistentTeamMessage["sender"] | undefined;
-	if (sender.kind === "operator") {
-		parsedSender = { kind: "operator" };
-	} else if (sender.kind === "brain") {
-		parsedSender = { kind: "brain" };
-	} else if (sender.kind === "bot" && typeof sender.agentId === "string") {
-		parsedSender = { kind: "bot", agentId: sender.agentId };
-	}
-	if (!parsedSender) {
-		return undefined;
-	}
-
-	const validTargets: string[] = [];
-	for (const t of targetAgentIds) {
-		if (typeof t === "string") {
-			validTargets.push(t);
-		}
-	}
-
-	const validDeliveries: PersistentTeamMemberDelivery[] = [];
-	for (const d of deliveries) {
-		if (isRecordObject(d) && typeof d.agentId === "string") {
-			const outcome = d.outcome;
-			if (outcome === "started" || outcome === "steering" || outcome === "queued" || outcome === "failed") {
-				validDeliveries.push({
-					agentId: d.agentId,
-					outcome,
-					messageId: typeof d.messageId === "string" ? d.messageId : undefined,
-					detail: typeof d.detail === "string" ? d.detail : undefined,
-				});
-			}
-		}
-	}
-
-	return {
-		messageId,
-		teamId,
-		...(typeof teamIncarnationId === "string" ? { teamIncarnationId } : {}),
-		sender: parsedSender,
-		text,
-		timestamp,
-		targetAgentIds: validTargets,
-		deliveries: validDeliveries,
 	};
 }
 
@@ -1325,38 +1150,6 @@ export class PersistentBotTeamStore {
 			this.bots.set(normalizedId, updated);
 			this.save();
 			return updated;
-		});
-	}
-
-	deleteBot(agentId: string): boolean {
-		return this.mutate(() => {
-			const normalizedId = normalizeBotOrTeamId(agentId, "agentId");
-			if (!this.bots.has(normalizedId)) {
-				return false;
-			}
-			this.bots.delete(normalizedId);
-
-			const now = new Date().toISOString();
-			for (const [teamId, team] of this.teams.entries()) {
-				if (team.memberAgentIds.includes(normalizedId)) {
-					const filteredMembers = team.memberAgentIds.filter((id) => id !== normalizedId);
-					this.teams.set(teamId, {
-						...team,
-						memberAgentIds: filteredMembers,
-						updatedAt: now,
-					});
-				}
-			}
-
-			for (const [routineId, routine] of this.routines.entries()) {
-				if (routine.target.kind === "bot" && routine.target.agentId === normalizedId) {
-					cancelUndispatchedRoutineOccurrences(this.routineState, routineId, Date.now());
-					this.routines.delete(routineId);
-				}
-			}
-
-			this.save();
-			return true;
 		});
 	}
 
@@ -2299,18 +2092,28 @@ export class PersistentBotTeamStore {
 		});
 	}
 
-	appendTeamMessage(message: PersistentTeamMessage): void {
-		this.mutate(() => {
-			this.recordTeamMessage(message);
-		});
-	}
-
 	appendScopedTeamMessage(message: PersistentTeamMessage, incarnationId: string): void {
 		this.mutate(() => {
 			const team = this.teams.get(message.teamId);
 			if (!team || teamIncarnation(team) !== incarnationId)
 				throw new Error("Group was deleted or replaced before message publication.");
 			this.recordTeamMessage(message);
+		});
+	}
+
+	/**
+	 * Records one member's delivery outcome on a group message the log already holds. The message keeps the identity it
+	 * was appended with, and its deliveries grow in the order the dispatches settled, so a message landed before its
+	 * deliveries still reads as what happened to each member.
+	 */
+	recordTeamMessageDelivery(teamId: string, messageId: string, delivery: PersistentTeamMemberDelivery): void {
+		this.mutate(() => {
+			const messages = this.teamMessages.get(normalizeBotOrTeamId(teamId, "teamId")) ?? [];
+			const index = messages.findIndex((entry) => entry.messageId === messageId);
+			if (index < 0) throw new Error("Group message is not in the log; its delivery outcome was not stored.");
+			const message = messages[index]!;
+			messages[index] = { ...message, deliveries: [...message.deliveries, delivery] };
+			this.save();
 		});
 	}
 

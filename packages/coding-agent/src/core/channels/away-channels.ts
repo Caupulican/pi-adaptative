@@ -45,6 +45,13 @@ export function awayChannels(
 	return channels;
 }
 
+/** The channels served away, by name and directory: what the daemon's start depends on besides the routines. */
+export function awayChannelsKey(settings: Parameters<typeof awayChannels>[0]): string {
+	return awayChannels(settings)
+		.map((channel) => `${channel.name}:${channel.cwd}`)
+		.join(",");
+}
+
 /**
  * What one channel turn the daemon delivered charges the away spend bound, for 24 hours after it was accepted: its
  * recorded spend once answered, and the larger of its full per-run bound and its recorded spend while it runs or when

@@ -348,6 +348,23 @@ export class BotOperatorDispatch {
 		}
 
 		const targets = targetAgentIds.length > 0 ? targetAgentIds : members;
+		// The owner's message enters the log before the first dispatch, so a member that answers at once is logged after
+		// the question it answers. Each member's outcome is recorded on it as that member's dispatch settles.
+		const teamMsg: PersistentTeamMessage = {
+			messageId,
+			teamId,
+			sender: { kind: "operator" },
+			text: message,
+			timestamp,
+			targetAgentIds: [...targets],
+			deliveries: [],
+		};
+		assertContext();
+		store.appendScopedTeamMessage(teamMsg, teamIncarnation(team));
+		const noteDelivery = (delivery: PersistentTeamMemberDelivery): void => {
+			deliveries.push(delivery);
+			store.recordTeamMessageDelivery(teamId, messageId, delivery);
+		};
 
 		for (const memberId of targets) {
 			assertContext();
@@ -357,14 +374,15 @@ export class BotOperatorDispatch {
 					teamIncarnationId: teamIncarnation(team),
 				});
 				assertContext();
-				deliveries.push({
+				// A member either takes the words as a steer or in a follow-up turn of its own, and the record keeps which.
+				noteDelivery({
 					agentId: memberId,
-					outcome: botResult.mode === "started" ? "started" : botResult.mode === "queued" ? "queued" : "steering",
+					outcome: botResult.mode === "steered" ? "steering" : botResult.mode,
 					messageId: botResult.messageId,
 				});
 			} catch (err) {
 				assertContext();
-				deliveries.push({
+				noteDelivery({
 					agentId: memberId,
 					outcome: "failed",
 					detail: err instanceof Error ? err.message : String(err),
@@ -372,21 +390,9 @@ export class BotOperatorDispatch {
 			}
 		}
 
-		const teamMsg: PersistentTeamMessage = {
-			messageId,
-			teamId,
-			sender: { kind: "operator" },
-			text: message,
-			timestamp,
-			targetAgentIds: [...targets],
-			deliveries,
-		};
-		assertContext();
-		store.appendScopedTeamMessage(teamMsg, teamIncarnation(team));
-
 		return {
 			teamId,
-			message: teamMsg,
+			message: { ...teamMsg, deliveries: [...deliveries] },
 			deliveries,
 		};
 	}

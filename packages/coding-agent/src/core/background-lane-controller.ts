@@ -39,6 +39,7 @@ import type { BackgroundLaneControllerDeps, RunningAttemptWaitOutcome } from "./
 import {
 	type AwayChannelStatus,
 	awayChannels,
+	awayChannelsKey,
 	readAwayChannelCharges,
 	readAwayChannelStatus,
 } from "./channels/away-channels.ts";
@@ -218,13 +219,6 @@ const DAEMON_RECHECK_MAX_BACKOFF_MS = 600_000;
 
 export type { SessionChannelsView } from "./channels/session-channels.ts";
 export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
-
-/** The channels served away, by name and directory: what the daemon's start depends on besides the routines. */
-function awayChannelsKey(settings: Parameters<typeof awayChannels>[0]): string {
-	return awayChannels(settings)
-		.map((channel) => `${channel.name}:${channel.cwd}`)
-		.join(",");
-}
 
 export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Live lane registry — the real source for AutonomyStatusSnapshot.activeLaneCount. */
@@ -1923,6 +1917,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return teamId ? views.filter((view) => team?.memberAgentIds.includes(view.agentId)) : [...views];
 	}
 
+	/** The bot a worker runtime belongs to, as the store names it; undefined for a managed lane or a group thread. */
+	botOfRuntime(runtime: string): { agentId: string; displayName?: string } | undefined {
+		const context = this.botBindings.generationContext(runtime);
+		const bot = context.teamId === undefined ? this.getBotTeamStore().getBot(context.agentId) : undefined;
+		return bot ? { agentId: bot.agentId, displayName: bot.displayName } : undefined;
+	}
+
 	/**
 	 * The live managed lanes (collaboration agents and other externally hosted workers), apart from the bot roster:
 	 * they are not bots and have no chat. Served until a lane record changes.
@@ -2086,6 +2087,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					.listBots({ includeRetired: true })
 					.map((bot) => ({
 						agentId: bot.agentId,
+						...(bot.displayName ? { displayName: bot.displayName } : {}),
 						modelRef: `${bot.provider}/${bot.modelId}`,
 						leader: bot.leader === true,
 						retired: bot.retired === true,
@@ -2310,10 +2312,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			bots: () => store().listBots({ includeRetired: true }).map(leaderBotViewOf),
 			createGoalLeader: (request, appointer) =>
 				this.createBotFor(appointer ?? { kind: "root" }, request, { goalLeader: true }),
-			directBotOf: (runtime) => {
-				const context = this.botBindings.generationContext(runtime);
-				return context.teamId === undefined && store().getBot(context.agentId) ? context.agentId : undefined;
-			},
+			directBotOf: (runtime) => this.botOfRuntime(runtime)?.agentId,
 			runtimesOf: (alias) => this.botBindings.runtimes(alias),
 			workers: () => this.listWorkerAgents(),
 			send: async (alias, text, delegationObjectiveId, options) => {

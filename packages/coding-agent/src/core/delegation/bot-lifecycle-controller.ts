@@ -343,32 +343,34 @@ export class BotLifecycleController {
 		try {
 			agentId = normalizeBotOrTeamId(agentId, "agentId");
 			const runtimes = new Set(this.botBindings.runtimes(agentId));
-			// Stopping a leader stops the bots it owns: their work was its work.
-			const ownedRuntimes = new Set(
-				this.host
-					.getBotTeamStore()
-					.listBots()
-					.filter((bot) => bot.createdBy === agentId)
-					.flatMap((bot) => this.botBindings.runtimes(bot.agentId)),
-			);
 			const agents = this.host.listWorkerAgents();
 			const results = agents
 				.filter((agent) => runtimes.has(agent.agentId))
 				.map((agent) => this.host.interruptWorkerAgent(agent.agentId, undefined, { force: false }));
-			const owned = agents
-				.filter(
-					(agent) => ownedRuntimes.has(agent.agentId) && agent.status !== "retired" && agent.activity !== "idle",
-				)
-				.map((agent) => this.host.interruptWorkerAgent(agent.agentId, undefined, { force: false }))
-				.filter((result) => result.interrupted).length;
+			// Stopping a leader stops the bots it owns: their work was its work. A bot is named once, in store order, and
+			// only when one of its runtimes was running and the halt reached it.
+			const stoppedBots: string[] = [];
+			for (const bot of this.host.getBotTeamStore().listBots()) {
+				if (bot.createdBy !== agentId) continue;
+				const interrupted = this.botBindings
+					.runtimes(bot.agentId)
+					.filter((runtime) =>
+						agents.some(
+							(agent) => agent.agentId === runtime && agent.status !== "retired" && agent.activity !== "idle",
+						),
+					)
+					.map((runtime) => this.host.interruptWorkerAgent(runtime, undefined, { force: false }))
+					.some((result) => result.interrupted);
+				if (interrupted) stoppedBots.push(bot.agentId);
+			}
 			const res = results.find((result) => result.interrupted) ?? results[0] ?? { interrupted: false };
-			const ownedText = owned > 0 ? ` and ${owned} of its bots` : "";
+			const named = `bot${stoppedBots.length === 1 ? "" : "s"} ${stoppedBots.join(", ")}`;
 			return {
-				stopped: res.interrupted || owned > 0,
+				stopped: res.interrupted || stoppedBots.length > 0,
 				detail: res.interrupted
-					? `Stopped ${agentId}${ownedText} (${res.mode ?? "halt"}).`
-					: owned > 0
-						? `Stopped ${owned} of ${agentId}'s bots; ${agentId} itself was not running.`
+					? `Stopped ${agentId}${stoppedBots.length > 0 ? ` and its ${named}` : ""} (${res.mode ?? "halt"}).`
+					: stoppedBots.length > 0
+						? `Stopped ${agentId}'s ${named}; ${agentId} itself was not running.`
 						: (res.reason ?? `${agentId} is not running.`),
 			};
 		} catch (error) {

@@ -13,6 +13,7 @@ import {
 	positionOf,
 	reached,
 	TRACK,
+	teamLog,
 	teamMessages,
 } from "./journey-7-shared.ts";
 
@@ -191,15 +192,20 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		world.provider.whenReached(reached(TRACK.teamTwo, "j7-team-two-first")),
 	);
 	const storedGroup = teamMessages(session, TEAM)[0];
+	// The group's whole log, as it was written: the owner's message entered it before the first member was dispatched, so a
+	// member that answers at once is logged after the question it answers.
+	const logAfterGroup = teamLog(session, TEAM);
 	expect(
 		{
 			targets: [...groupMessage.message.targetAgentIds],
 			deliveries: groupMessage.deliveries.map((delivery) => [delivery.agentId, delivery.outcome]),
 			storedTargets: [...(storedGroup?.targetAgentIds ?? [])],
+			storedDeliveries: storedGroup?.deliveries.map((delivery) => [delivery.agentId, delivery.outcome]),
 			storedText: storedGroup?.text,
+			firstInLog: { sent: logAfterGroup[0]?.sender.kind, text: logAfterGroup[0]?.text },
 			requestsEach: [seen.teamOneBodies.length, seen.teamTwoCount],
 		},
-		"a group message with no mention is delivered to both members, one request each, and stored for both",
+		"a group message with no mention is delivered to both members, one request each, and stored for both before their answers",
 	).toEqual({
 		targets: [TEAM_ONE, TEAM_TWO],
 		deliveries: [
@@ -207,7 +213,12 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			[TEAM_TWO, "started"],
 		],
 		storedTargets: [TEAM_ONE, TEAM_TWO],
+		storedDeliveries: [
+			[TEAM_ONE, "started"],
+			[TEAM_TWO, "started"],
+		],
 		storedText: TEAM_MESSAGE,
+		firstInLog: { sent: "operator", text: TEAM_MESSAGE },
 		requestsEach: [1, 1],
 	});
 
@@ -224,14 +235,16 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			targets: [...mentioned.message.targetAgentIds],
 			deliveries: mentioned.deliveries.map((delivery) => [delivery.agentId, delivery.outcome]),
 			storedTargets: [...(storedMention?.targetAgentIds ?? [])],
+			storedDeliveries: storedMention?.deliveries.map((delivery) => [delivery.agentId, delivery.outcome]),
 			storedText: storedMention?.text,
 			unmentionedRequests: world.provider.requests.filter((entry) => entry.model.id === MODEL_ID.teamTwo).length,
 		},
-		"a group message that names one member reaches only that member and is stored for it alone",
+		"a group message that names one member reaches only that member and is stored for it alone, with what its delivery did",
 	).toEqual({
 		targets: [TEAM_ONE],
-		deliveries: [[TEAM_ONE, "steering"]],
+		deliveries: [[TEAM_ONE, "followed_up"]],
 		storedTargets: [TEAM_ONE],
+		storedDeliveries: [[TEAM_ONE, "followed_up"]],
 		storedText: TEAM_MENTION,
 		unmentionedRequests: 1,
 	});

@@ -246,20 +246,34 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		{
 			header: seen.wakeLines[0],
 			lanes: laneLines,
+			namesTheBot: seen.wakeLines.includes(`  Bot: ${BOT_ID} (${BOT_NAME})`),
 			tellsTheAnswer: seen.wakeLines.includes("  Claim Summary (untrusted worker evidence):")
 				? seen.wakeLines.some((line) => line.includes(ANSWER))
 				: false,
 			laneIsTheBots: botLane?.agentId === agentId,
 		},
-		"the answer starts a root turn of its own: one handoff header, one lane line naming the bot's lane, and the bot's words as the claim summary",
+		"the answer starts a root turn of its own: one handoff header, one lane line naming the bot's lane and the bot it is, and the bot's words as the claim summary",
 	).toEqual({
 		header: HANDOFF_HEADER,
 		lanes: [`- ${botLane?.laneId}: succeeded reason=worker_completed_plain_text`],
+		namesTheBot: true,
 		tellsTheAnswer: true,
 		laneIsTheBots: true,
 	});
-	expect(seen.list, "bot list answers with the one bot the root made, by id, model, leadership and creator").toEqual({
-		bots: [{ agentId: BOT_ID, modelRef: modelOf(MODEL_ID.retry), leader: false, retired: false, createdBy: "root" }],
+	expect(
+		seen.list,
+		"bot list answers with the one bot the root made: its id, the name its record shows, its model, leadership and creator",
+	).toEqual({
+		bots: [
+			{
+				agentId: BOT_ID,
+				displayName: BOT_NAME,
+				modelRef: modelOf(MODEL_ID.retry),
+				leader: false,
+				retired: false,
+				createdBy: "root",
+			},
+		],
 	});
 	expect(
 		allBots(session).map((bot) => bot.agentId),

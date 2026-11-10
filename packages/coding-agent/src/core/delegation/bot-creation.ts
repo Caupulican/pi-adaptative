@@ -62,7 +62,15 @@ export interface BotToolPort {
 	create(request: BotCreationRequest): CreatedBotView;
 	/** Hands a goal to a leader; its one Outcome reaches the orchestrator as an event when the goal ends. */
 	lead(request: LeadRequest): LeadResult;
-	list(): readonly { agentId: string; modelRef: string; leader: boolean; retired: boolean; createdBy?: string }[];
+	/** The bots the roster holds, each by the id the caller asks it by and the name its record shows. */
+	list(): readonly {
+		agentId: string;
+		displayName?: string;
+		modelRef: string;
+		leader: boolean;
+		retired: boolean;
+		createdBy?: string;
+	}[];
 }
 
 /**

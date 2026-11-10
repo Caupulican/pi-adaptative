@@ -289,7 +289,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		stillLive: liveAfterStop,
 	};
 	expect(afterStop, "stopping the working leader halts it and the bot it made, and retires neither").toEqual({
-		stopped: { stopped: true, detail: `Stopped ${STOP_LEADER} and 1 of its bots (halt).` },
+		stopped: { stopped: true, detail: `Stopped ${STOP_LEADER} and its bot ${STOP_HELPER} (halt).` },
 		leaderRetired: false,
 		helperRetired: false,
 		stillLive: [true, true],
