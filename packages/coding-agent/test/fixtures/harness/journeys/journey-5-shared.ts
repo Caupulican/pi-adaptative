@@ -120,19 +120,27 @@ export function planCallSteps(
 	];
 }
 
+type RequestMessage = ScriptedRequest["context"]["messages"][number];
+
+function textOf(message: RequestMessage): string {
+	return typeof message.content === "string"
+		? message.content
+		: message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])).join("\n");
+}
+
 /** The text lines the current request delivers: the messages after the root's latest reply. */
 export function deliveredLines(request: ScriptedRequest): string[] {
 	const messages = request.context.messages;
 	let start = messages.length;
 	while (start > 0 && messages[start - 1]?.role !== "assistant") start--;
-	return messages
-		.slice(start)
-		.flatMap((message) =>
-			typeof message.content === "string"
-				? [message.content]
-				: message.content.flatMap((block) => (block.type === "text" ? [block.text] : [])),
-		)
-		.flatMap((text) => text.split("\n"));
+	return messages.slice(start).flatMap((message) => textOf(message).split("\n"));
+}
+
+/** The lines of the task a step's worker was given: the message that carries the step's header. */
+export function stepTaskLines(request: ScriptedRequest): string[] {
+	const task = request.context.messages.map(textOf).find((text) => STEP_HEADER.test(text));
+	if (task === undefined) throw new Error("the request carries no plan step task");
+	return task.split("\n");
 }
 
 /** How many plan updates the current request delivers. */
