@@ -135,6 +135,38 @@ function boundWorkerContinuation(args: {
 	};
 }
 
+/**
+ * The decision while steps of the goal's running plan are in flight: the loop waits on the plan as it does on a bound
+ * worker. The plan's own wake is the primary one; the stable deadline (the plan's last movement plus the worker wait limit)
+ * recovers a lost wake and ends a plan that has stopped moving, as a worker wait ends. Undefined when no step is in flight.
+ */
+function planContinuation(args: {
+	stepsInFlight: number | undefined;
+	remainingMs: number | undefined;
+	baseDecision: GoalContinuationBaseDecision;
+	now: string | undefined;
+	maxWorkerWaitMs: number | undefined;
+}): GoalContinuationDecision | undefined {
+	const steps = args.stepsInFlight ?? 0;
+	if (steps <= 0) return undefined;
+	const timing = planWaitTiming(args.remainingMs, args.now);
+	if (timing.timedOut && args.maxWorkerWaitMs !== undefined) {
+		return {
+			...args.baseDecision,
+			action: "continue",
+			reasonCode: "worker_wait_timeout",
+			message: planWaitTimeoutMessage(steps, args.maxWorkerWaitMs),
+		};
+	}
+	return {
+		...args.baseDecision,
+		action: "waiting",
+		reasonCode: "plan_in_flight",
+		message: `${steps} step(s) of the running plan are in flight; the plan wakes you with each combined result and when a step needs you.`,
+		...(timing.resumeAt ? { resumeAt: timing.resumeAt } : {}),
+	};
+}
+
 export interface GoalContinuationSettings {
 	maxStallTurns: number;
 }
@@ -195,10 +227,10 @@ export function evaluateGoalContinuation(args: {
 	 */
 	inFlightToolTaskIds?: ReadonlySet<string>;
 	/**
-	 * Steps of this goal's running plan that the fleet admitted (queued or running). The plan executor wakes the root
-	 * with each combined result and whenever a step needs it, so while any is in flight the loop waits as it does for a
-	 * bound worker. A step that is only ready (the fleet has not admitted it), held or unable to move does not hold the
-	 * loop, so a plan the fleet refuses never parks the goal.
+	 * Steps of this goal's running plan that the plan moves by itself: running, starting, or ready (being released or
+	 * decided now). The plan executor wakes the root with each combined result and whenever a step needs it, so while any
+	 * is in flight the loop waits as it does for a bound worker, whether or not the goal has an open requirement. A step
+	 * that is held or unable to move does not hold the loop, so a plan that cannot go on never parks the goal.
 	 */
 	planStepsInFlight?: number;
 	/**
@@ -350,6 +382,16 @@ export function evaluateGoalContinuation(args: {
 		}
 	}
 
+	// A running plan under the goal holds the loop whether or not a requirement is open: a goal recorded without
+	// requirements, or one whose requirements are all closed, has put its remaining work into the plan just the same.
+	const planWait = planContinuation({
+		stepsInFlight: args.planStepsInFlight,
+		remainingMs: args.planRemainingMs,
+		baseDecision,
+		now: args.now,
+		maxWorkerWaitMs: args.maxWorkerWaitMs,
+	});
+
 	if (openRequirementIds.length === 0) {
 		if (blockedRequirementIds.length > 0) {
 			return {
@@ -360,6 +402,8 @@ export function evaluateGoalContinuation(args: {
 					"All remaining legacy goal requirements are blocked. Verify each blocker, reopen recoverable work, and ask the owner only for a proven owner/approval boundary.",
 			};
 		}
+		// Asked before every exit below: each of them prompts the root, and a prompt mid-plan is a turn with nothing to do.
+		if (planWait) return planWait;
 		if (state.requirements.length === 0) {
 			return {
 				...baseDecision,
@@ -467,26 +511,7 @@ export function evaluateGoalContinuation(args: {
 	});
 	if (workerContinuation) return workerContinuation;
 
-	if (args.planStepsInFlight && args.planStepsInFlight > 0) {
-		// The plan's own wake is the primary one; the stable deadline (the plan's last movement plus the worker wait limit)
-		// recovers a lost wake and ends a plan that has stopped moving, as a worker wait ends.
-		const planWait = planWaitTiming(args.planRemainingMs, args.now);
-		if (planWait.timedOut && args.maxWorkerWaitMs !== undefined) {
-			return {
-				...baseDecision,
-				action: "continue",
-				reasonCode: "worker_wait_timeout",
-				message: planWaitTimeoutMessage(args.planStepsInFlight, args.maxWorkerWaitMs),
-			};
-		}
-		return {
-			...baseDecision,
-			action: "waiting",
-			reasonCode: "plan_in_flight",
-			message: `${args.planStepsInFlight} step(s) of the running plan are in flight; the plan wakes you with each combined result and when a step needs you.`,
-			...(planWait.resumeAt ? { resumeAt: planWait.resumeAt } : {}),
-		};
-	}
+	if (planWait) return planWait;
 
 	if (args.inFlightToolTaskIds && args.inFlightToolTaskIds.size > 0) {
 		return {

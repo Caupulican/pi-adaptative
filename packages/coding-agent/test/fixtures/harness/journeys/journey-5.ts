@@ -3,6 +3,7 @@ import { expect } from "vitest";
 import { runJourney5PlanAutoCheckPhase } from "./journey-5-plan-auto-check.ts";
 import { runJourney5PlanCollectPhase } from "./journey-5-plan-collect.ts";
 import { runJourney5PlanCrashPhase } from "./journey-5-plan-crash.ts";
+import { runJourney5PlanGoalWaitPhase } from "./journey-5-plan-goal-wait.ts";
 import { runJourney5PlanOrderPhase } from "./journey-5-plan-order.ts";
 import { runJourney5PlanOriginPhase } from "./journey-5-plan-origin.ts";
 import { runJourney5PlanRacePhase } from "./journey-5-plan-race.ts";
@@ -51,6 +52,8 @@ export async function runJourney5(): Promise<void> {
 			// A plan whose owner closes and reopens mid-plan runs in its own session, which the phase closes and opens again.
 			await runJourney5PlanRestartPhase(world);
 			await runJourney5PlanCrashPhase(world);
+			// A plan under a goal holds that goal's wait: the wake, its deadline on the orchestration clock, and the plan's own end.
+			await runJourney5PlanGoalWaitPhase(world);
 		},
 	);
 }

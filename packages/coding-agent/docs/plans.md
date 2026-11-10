@@ -14,6 +14,8 @@ Before anything runs, code checks the plan: known step ids, no loops, size and d
 
 A plan survives its session being closed. Closing the session interrupts the plan's workers and cancels none of them: a step whose worker was running goes on with the task it was given, a step whose worker was waiting for room starts when there is room, and a step that had finished is not run again. When the session is opened again the plan goes on by itself, without a prompt, and the root is told of each join and of the plan's result. The same holds when the process ends without closing the session: on the next opening a step whose worker was running under the ended process is suspended and then goes on, and a step that was waiting for room is taken up as it was.
 
+A plan started under a goal holds that goal's automatic continuation while any of its steps is running, starting or ready: the root is not prompted to go on in the meantime, whether or not the goal has an open requirement, and is woken by the plan itself, with each combined result and when a step needs it. The wait ends by itself when the plan shows no movement for an hour (no step released, finished or held, no join combined): the goal then continues once, so the root can go on with what is known and re-plan what is stuck. A goal that stops (its budget is spent, the owner pauses it) does not stop the plan's running steps: they finish and report, steps that had not started wait until the goal goes on, and what the plan has to tell still reaches the root.
+
 ## Joins
 
 A join is a step that combines the steps in its `uses`:
