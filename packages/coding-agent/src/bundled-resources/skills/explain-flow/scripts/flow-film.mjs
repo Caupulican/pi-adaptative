@@ -161,7 +161,7 @@ async function commandSheet(scene, options) {
 	const out = outputPath(options, [".png", ".jpg"]);
 	const count = numberOption(options, "count", 8, 2, 24);
 	const columns = numberOption(options, "columns", count <= 4 ? 2 : count <= 9 ? 3 : 4, 1, 6);
-	const frames = Array.from({ length: count }, (_, index) => frameSvg(scene, (scene.loop * index) / count));
+	const frames = Array.from({ length: count }, (_, index) => frameSvg(scene, (scene.period * index) / count));
 	const rows = Math.ceil(count / columns);
 	const width = Math.round(numberOption(options, "width", 960, 240, 1920) / 2) * 2;
 	await rasterize(frames, 1, [
@@ -179,7 +179,7 @@ async function commandVideo(scene, options) {
 	const out = outputPath(options, [".mp4"]);
 	const fps = numberOption(options, "fps", scene.fps, 10, 60);
 	const loops = numberOption(options, "loops", 1, 1, 20);
-	const count = Math.round(scene.loop * fps * loops);
+	const count = Math.round(scene.period * fps * loops);
 	if (count > MAX_FRAMES) throw new UsageError(`${count} frames is past the ${MAX_FRAMES} frame bound; lower --fps or --loops`);
 	// The part that never changes is drawn once and every instant is laid over it, so a frame costs only what moves.
 	const still = join(mkdtempSync(join(tmpdir(), "flow-film-")), "still.png");
@@ -303,6 +303,7 @@ function commandCheck(scene) {
 	const lefts = new Set(scene.nodes.map((node) => Math.round(node.shape.box.x)));
 	return [
 		`${scene.title}: ${scene.width}x${scene.height}, a ${scene.loop} s loop at ${scene.fps} fps`,
+		`${scene.rounds} round(s) of ${scene.loop} s`,
 		`${scene.bands.length} band(s), ${scene.nodes.length} station(s) on ${lefts.size} left edge(s), ${scene.wires.length} wire(s), ${scene.runs.length} journey(s)`,
 		"Storyboard:",
 		...storyboard(scene).map((beat) => `  ${beat}`),

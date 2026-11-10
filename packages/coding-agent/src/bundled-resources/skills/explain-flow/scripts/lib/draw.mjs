@@ -12,6 +12,7 @@ import {
 	CHIP_RADIUS,
 	HOP_SECONDS,
 	MARGIN,
+	roundText,
 	SMALL_TEXT_SIZE,
 	STATION_RADIUS,
 	SUB_STEP,
@@ -77,7 +78,40 @@ function subTop(node, u) {
 	return y + h + (2.5 + CAPTION_ROWS[node.kind] * SUB_STEP) * u;
 }
 
-function nodeLabels(scene, node) {
+/** A chain chip's words: dim, inside its chip. */
+function chipWords(scene, chip, round) {
+	const u = scene.unit;
+	return words(scene, chip.x + 1.5 * u, chip.y + 2 * u, SMALL_TEXT_SIZE * u, [{ text: roundText(chip.text, round), fill: scene.theme.dim }]);
+}
+
+/** A tally's words: its count, after its boxes. */
+function tallyWords(scene, node, round) {
+	const u = scene.unit;
+	const { words: place } = node.shape;
+	return words(scene, place.x, place.y, SMALL_TEXT_SIZE * u, [{ text: roundText(node.text, round), fill: scene.theme.dim }]);
+}
+
+/** A note's lines: words alone, so the station is its text. */
+function noteWords(scene, node, round) {
+	const u = scene.unit;
+	const { box } = node.shape;
+	return node.lines
+		.map((text, index) => words(scene, box.x, box.y + (index + 0.75) * 2.5 * u, TEXT_SIZE * u, [{ text: roundText(text, round), fill: scene.theme.dim }]))
+		.join("");
+}
+
+/**
+ * The words a station writes inside its body, for the live layer of a film whose rounds change them. The body writes
+ * them in its own order, through the same helpers, when it draws a film of one round.
+ */
+function nodeWords(scene, node, round) {
+	if (node.kind === "chain") return node.shape.chips.map((chip) => chipWords(scene, chip, round)).join("");
+	if (node.kind === "tally") return tallyWords(scene, node, round);
+	if (node.kind === "note") return noteWords(scene, node, round);
+	return "";
+}
+
+function nodeLabels(scene, node, round) {
 	const u = scene.unit;
 	const { theme } = scene;
 	const size = TEXT_SIZE * u;
@@ -85,9 +119,9 @@ function nodeLabels(scene, node) {
 	const alpha = tierStyle(scene, node.tier).alpha;
 	if (node.kind === "chain" && node.lead !== undefined) {
 		// A list row: tag and name at the left on the chips' line, the rest under the name.
-		let out = words(scene, left, y + 2 * u, size, [{ text: node.tag ? `${node.tag} ` : "", fill: theme.text, bold: true }, { text: node.label, fill: theme.dim }], "start", alpha);
+		let out = words(scene, left, y + 2 * u, size, [{ text: roundText(node.tag ? `${node.tag} ` : "", round), fill: theme.text, bold: true }, { text: roundText(node.label, round), fill: theme.dim }], "start", alpha);
 		for (const [index, text] of [node.note, ...node.sub].filter(Boolean).entries())
-			out += words(scene, left, y + 2 * u + (index + 1) * SUB_STEP * u, size, [{ text, fill: theme.dim }], "start", alpha * 0.75);
+			out += words(scene, left, y + 2 * u + (index + 1) * SUB_STEP * u, size, [{ text: roundText(text, round), fill: theme.dim }], "start", alpha * 0.75);
 		return out;
 	}
 	const x = wordsLeft(node, "top", u);
@@ -100,20 +134,25 @@ function nodeLabels(scene, node) {
 			y - (node.value ? 4 : 1.5) * u,
 			size,
 			[
-				{ text: node.label, fill: theme.text, bold: true },
+				{ text: roundText(node.label, round), fill: theme.text, bold: true },
 				{ text: node.label && node.note ? " · " : "", fill: theme.dim },
-				{ text: node.note, fill: theme.dim },
+				{ text: roundText(node.note, round), fill: theme.dim },
 			],
 			"start",
 			alpha,
 		);
-	if (node.value) out += words(scene, x, y - 1.5 * u, size, [{ text: node.value, fill: theme.info }], "start", alpha);
+	if (node.value) out += words(scene, x, y - 1.5 * u, size, [{ text: roundText(node.value, round), fill: theme.info }], "start", alpha);
 	for (const [index, text] of node.sub.entries())
-		out += words(scene, wordsLeft(node, "bottom", u), subTop(node, u) + index * SUB_STEP * u, size, [{ text, fill: theme.dim }], "start", alpha * 0.9);
+		out += words(scene, wordsLeft(node, "bottom", u), subTop(node, u) + index * SUB_STEP * u, size, [{ text: roundText(text, round), fill: theme.dim }], "start", alpha * 0.9);
 	return out;
 }
 
-function nodeBody(scene, node) {
+/**
+ * A station's body: its outline, and for a film of one round the words inside it. `round` is the round those words take;
+ * `undefined` draws the outline alone, which is what the still layer of a film of several rounds holds, because the live
+ * layer then writes the words for the round it is in.
+ */
+function nodeBody(scene, node, round) {
 	const u = scene.unit;
 	const { theme } = scene;
 	const { shape, tier } = node;
@@ -144,7 +183,7 @@ function nodeBody(scene, node) {
 		case "chain":
 			for (const [index, chip] of shape.chips.entries()) {
 				out += rectEl(chip, CHIP_RADIUS * u, stroke);
-				out += words(scene, chip.x + 1.5 * u, chip.y + 2 * u, SMALL_TEXT_SIZE * u, [{ text: chip.text, fill: theme.dim }]);
+				if (round !== undefined) out += chipWords(scene, chip, round);
 				const next = shape.chips[index + 1];
 				if (!next) continue;
 				const y = chip.y + chip.h / 2;
@@ -160,11 +199,10 @@ function nodeBody(scene, node) {
 				out += lineEl(cell.x + 0.4 * u, cell.y + 0.4 * u, cell.x + cell.w - 0.4 * u, cell.y + cell.h - 0.4 * u, strokeOf(theme.dim, u * 0.15));
 				out += lineEl(cell.x + cell.w - 0.4 * u, cell.y + 0.4 * u, cell.x + 0.4 * u, cell.y + cell.h - 0.4 * u, strokeOf(theme.dim, u * 0.15));
 			}
-			out += words(scene, shape.words.x, shape.words.y, SMALL_TEXT_SIZE * u, [{ text: node.text, fill: theme.dim }]);
+			if (round !== undefined) out += tallyWords(scene, node, round);
 			break;
 		case "note":
-			for (const [index, text] of node.lines.entries())
-				out += words(scene, shape.box.x, shape.box.y + (index + 0.75) * 2.5 * u, TEXT_SIZE * u, [{ text, fill: theme.dim }]);
+			if (round !== undefined) out += noteWords(scene, node, round);
 			break;
 		default:
 			break;
@@ -223,6 +261,18 @@ function loopBar(scene) {
 	return { left: MARGIN * u, right: scene.width - MARGIN * u, y: scene.height - 1.75 * u };
 }
 
+/** The two captions over the loop bar: what one item stands for, and what one round stands for. */
+function captions(scene, round) {
+	const u = scene.unit;
+	const bar = loopBar(scene);
+	let out = "";
+	if (scene.footer)
+		out += words(scene, bar.left, bar.y - 1.5 * u, TEXT_SIZE * u, [{ text: roundText(scene.footer, round), fill: scene.theme.dim }]);
+	if (scene.clock)
+		out += words(scene, bar.right, bar.y - 1.5 * u, TEXT_SIZE * u, [{ text: roundText(scene.clock, round), fill: scene.theme.dim }], "end");
+	return out;
+}
+
 /** Everything that is the same in every frame. */
 export function drawStatic(scene) {
 	const u = scene.unit;
@@ -230,16 +280,20 @@ export function drawStatic(scene) {
 	let out = `<rect width="${scene.width}" height="${scene.height}" fill="${theme.bg}"/>`;
 	for (const [index, band] of scene.bands.entries()) out += bandHeader(scene, band, index);
 	for (const wire of scene.wires) out += wireEl(scene, wire);
-	for (const node of scene.nodes) out += nodeBody(scene, node) + nodeLabels(scene, node);
+	// A station's words belong to the live layer when a round changes them; a film of one round draws them here.
+	const wordsRound = scene.rounds === 1 ? 0 : undefined;
+	for (const node of scene.nodes)
+		out += nodeBody(scene, node, wordsRound) + (wordsRound === undefined ? "" : nodeLabels(scene, node, wordsRound));
 	const bar = loopBar(scene);
 	const quiet = `${strokeOf(theme.line, u * 0.12)} opacity="0.6"`;
 	out += lineEl(bar.left, bar.y, bar.right, bar.y, quiet);
-	for (let quarter = 0; quarter <= 4; quarter++) {
-		const x = bar.left + ((bar.right - bar.left) * quarter) / 4;
+	// The bar is one segment per round, with a tick where each round begins; a film of one round keeps its quarters.
+	const segments = scene.rounds === 1 ? 4 : scene.rounds;
+	for (let index = 0; index <= segments; index++) {
+		const x = bar.left + ((bar.right - bar.left) * index) / segments;
 		out += lineEl(x, bar.y - 0.4 * u, x, bar.y + 0.4 * u, quiet);
 	}
-	if (scene.footer) out += words(scene, bar.left, bar.y - 1.5 * u, TEXT_SIZE * u, [{ text: scene.footer, fill: theme.dim }]);
-	if (scene.clock) out += words(scene, bar.right, bar.y - 1.5 * u, TEXT_SIZE * u, [{ text: scene.clock, fill: theme.dim }], "end");
+	if (wordsRound !== undefined) out += captions(scene, wordsRound);
 	return out;
 }
 
@@ -273,7 +327,7 @@ function queueStays(scene, node, stays) {
 	return out;
 }
 
-function workerEl(scene, node, stay) {
+function workerEl(scene, node, stay, round) {
 	const u = scene.unit;
 	const { theme } = scene;
 	const { box } = node.shape;
@@ -292,18 +346,18 @@ function workerEl(scene, node, stay) {
 	const size = TEXT_SIZE * u;
 	const x = wordsLeft(node, "bottom", u);
 	const first = box.y + box.h + 2.5 * u;
-	if (stay.lane) out += words(scene, x, first, size, [{ text: stay.lane, fill: toneOf(scene, stay.laneTone) }], "start", settle);
+	if (stay.lane) out += words(scene, x, first, size, [{ text: roundText(stay.lane, round), fill: toneOf(scene, stay.laneTone) }], "start", settle);
 	// One phase rolls out before the next rolls in, so two sets of words never sit on each other.
 	const row = first + SUB_STEP * u;
 	const leaving = stay.before ? Math.max(0, 1 - stay.blend * 2) : 0;
 	const arriving = stay.before ? Math.max(0, stay.blend * 2 - 1) : stay.blend;
-	if (leaving > 0) out += words(scene, x, row - (1 - leaving) * 0.6 * u, size, [{ text: stay.before, fill: theme.dim }], "start", leaving);
+	if (leaving > 0) out += words(scene, x, row - (1 - leaving) * 0.6 * u, size, [{ text: roundText(stay.before, round), fill: theme.dim }], "start", leaving);
 	if (stay.phase && arriving > 0)
-		out += words(scene, x, row + (1 - arriving) * 0.6 * u, size, [{ text: stay.phase, fill: stay.failed ? theme.fail : theme.dim }], "start", arriving);
+		out += words(scene, x, row + (1 - arriving) * 0.6 * u, size, [{ text: roundText(stay.phase, round), fill: stay.failed ? theme.fail : theme.dim }], "start", arriving);
 	return out;
 }
 
-function railEl(scene, node, rail) {
+function railEl(scene, node, rail, round) {
 	const u = scene.unit;
 	const { theme } = scene;
 	const { shape } = node;
@@ -313,9 +367,9 @@ function railEl(scene, node, rail) {
 	out += rectEl({ x: shape.line.x2 - 0.25 * u, y: shape.line.y - 1.5 * u, w: 0.5 * u, h: 3 * u }, 0.25 * u, `fill="${theme.line}"`);
 	const state = result === "ok" ? node.okText : result === "fail" ? node.failText : undefined;
 	out += words(scene, shape.box.x, shape.box.y - 1.5 * u, TEXT_SIZE * u, [
-		{ text: node.label, fill: theme.text, bold: true },
+		{ text: roundText(node.label, round), fill: theme.text, bold: true },
 		{ text: node.label && (state ?? node.note) ? " · " : "", fill: theme.dim },
-		{ text: state ?? node.note, fill: state ? colour : theme.dim },
+		{ text: roundText(state ?? node.note, round), fill: state ? colour : theme.dim },
 	]);
 	const radius = 0.8 * u;
 	const quiet = mixHex(theme.text, theme.bg, 0.25);
@@ -345,7 +399,7 @@ function railEl(scene, node, rail) {
 }
 
 /** The chips of a chain that are lit now, each with how strongly, and where the pass's cursor is. */
-function chainEl(scene, node, pass) {
+function chainEl(scene, node, pass, round) {
 	const u = scene.unit;
 	const { theme } = scene;
 	const { chips } = node.shape;
@@ -361,7 +415,7 @@ function chainEl(scene, node, pass) {
 		else strength = index === pass.step ? Math.min(1, pass.part * 4, (1 - pass.part) * 4) : 0;
 		if (strength <= 0.01) continue;
 		out += `<g opacity="${alphaOf(strength)}">${rectEl(chip, CHIP_RADIUS * u, `fill="${theme.info}" fill-opacity="0.16" stroke="${theme.info}" stroke-width="${px(u * 0.16)}"`)}`;
-		out += `${words(scene, chip.x + 1.5 * u, chip.y + 2 * u, SMALL_TEXT_SIZE * u, [{ text: chip.text, fill: theme.text }])}</g>`;
+		out += `${words(scene, chip.x + 1.5 * u, chip.y + 2 * u, SMALL_TEXT_SIZE * u, [{ text: roundText(chip.text, round), fill: theme.text }])}</g>`;
 	}
 	if (node.mode !== "together" && pass.step < count) {
 		// A cursor rides over the chain from the step in hand to the next one.
@@ -374,7 +428,7 @@ function chainEl(scene, node, pass) {
 	return out;
 }
 
-function itemEl(scene, item) {
+function itemEl(scene, item, round) {
 	const u = scene.unit;
 	const { theme } = scene;
 	const colour = toneOf(scene, item.tone);
@@ -399,7 +453,7 @@ function itemEl(scene, item) {
 	out += "</g>";
 	// What an item carries is named only while it is clear of the stations at both ends of its wire.
 	if (item.carry && item.carryAlpha > 0.01)
-		out += words(scene, item.x, item.y - 1.75 * u, SMALL_TEXT_SIZE * u, [{ text: item.carry, fill: colour }], "middle", item.carryAlpha);
+		out += words(scene, item.x, item.y - 1.75 * u, SMALL_TEXT_SIZE * u, [{ text: roundText(item.carry, round), fill: colour }], "middle", item.carryAlpha);
 	return `<g opacity="${alphaOf(item.alpha)}">${out}</g>`;
 }
 
@@ -408,13 +462,16 @@ export function drawLive(scene, state) {
 	const u = scene.unit;
 	const { theme } = scene;
 	let out = "";
+	// A film of several rounds writes its stations' words here, with the tokens of the round it is in.
+	if (scene.rounds > 1)
+		out += scene.nodes.map((node) => nodeWords(scene, node, state.round) + nodeLabels(scene, node, state.round)).join("");
 	for (const node of scene.nodes) {
 		const stays = state.stays.get(node.id) ?? [];
 		if (node.kind === "source") out += sourcePulses(scene, node, state);
 		else if (node.kind === "queue") out += queueStays(scene, node, stays);
-		else if (node.kind === "worker") out += workerEl(scene, node, stays[0]);
-		else if (node.kind === "rail") out += railEl(scene, node, state.rails.get(node.id));
-		else if (node.kind === "chain") out += chainEl(scene, node, state.chains.get(node.id));
+		else if (node.kind === "worker") out += workerEl(scene, node, stays[0], state.round);
+		else if (node.kind === "rail") out += railEl(scene, node, state.rails.get(node.id), state.round);
+		else if (node.kind === "chain") out += chainEl(scene, node, state.chains.get(node.id), state.round);
 		else if (node.kind === "sweep") {
 			const { track } = node.shape;
 			const x = track.x1 + (track.x2 - track.x1) * (state.sweeps.get(node.id) ?? 0);
@@ -422,9 +479,11 @@ export function drawLive(scene, state) {
 			out += circleEl(x, track.y, 0.7 * u, `fill="${theme.info}" opacity="0.5" filter="url(#flow-glow)"`) + circleEl(x, track.y, 0.6 * u, `fill="${theme.info}"`);
 		}
 	}
-	for (const item of state.items) out += itemEl(scene, item);
+	for (const item of state.items) out += itemEl(scene, item, state.round);
 	const bar = loopBar(scene);
-	const at = bar.left + ((bar.right - bar.left) * state.now) / scene.loop;
+	if (scene.rounds > 1) out += captions(scene, state.round);
+	// The marker travels the whole bar once per period, so one pass of the bar is one film and one segment is one round.
+	const at = bar.left + ((bar.right - bar.left) * state.periodNow) / scene.period;
 	return out + rectEl({ x: at - 0.9 * u, y: bar.y - 0.3 * u, w: 1.8 * u, h: 0.6 * u }, 0.3 * u, `fill="${theme.text}"`);
 }
 

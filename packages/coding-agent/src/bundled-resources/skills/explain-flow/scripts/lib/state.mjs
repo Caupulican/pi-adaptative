@@ -5,7 +5,7 @@
  */
 
 import { easeInOut, easeSpeed, pointAt } from "./geometry.mjs";
-import { HOP_SECONDS } from "./scene.mjs";
+import { HOP_SECONDS, roundText } from "./scene.mjs";
 
 /** How long the motion blur behind a moving item covers, in seconds of its travel. */
 const TRAIL_SECONDS = 0.07;
@@ -96,21 +96,39 @@ function stayOf(segment, local) {
 	};
 }
 
-/** The dots a rail shows, newest first, with one more that is leaving while the rest make room. */
-function railAt(scene, node, now) {
+/**
+ * The dots a rail shows, newest first, with one more that is leaving while the rest make room. A film of one round shows
+ * the record of a film that has always been running; a film of several shows only what landed since the period began,
+ * so its first round starts empty and the record grows. A dot's mark takes the round it landed in.
+ */
+function railAt(scene, node, now, periodNow) {
 	const landings = [];
 	for (const run of scene.runs)
 		for (const landing of run.landings)
-			if (landing.node === node)
-				landings.push({ age: wrap(now - run.start - landing.at, scene.loop), result: landing.result, mark: landing.mark });
+			if (landing.node === node) {
+				const at = run.start + landing.at;
+				landings.push({ at, age: wrap(now - at, scene.loop), result: landing.result, mark: landing.mark });
+			}
 	if (landings.length === 0) return { dots: [], slide: 1, newest: undefined, ring: undefined };
 	landings.sort((a, b) => a.age - b.age);
 	const dots = [];
-	for (let cycle = 0; dots.length <= node.dots; cycle++)
+	for (let cycle = 0; dots.length <= node.dots; cycle++) {
+		let shown = 0;
 		for (const landing of landings) {
 			if (dots.length > node.dots) break;
-			dots.push({ age: landing.age + cycle * scene.loop, result: landing.result, mark: landing.mark });
+			// The round the landing is from: the rounds that passed since it landed, less the ones already shown.
+			const landed = Math.floor((periodNow - landing.at) / scene.loop) - cycle;
+			if (scene.rounds > 1 && landed < 0) continue;
+			dots.push({
+				age: landing.age + cycle * scene.loop,
+				result: landing.result,
+				mark: roundText(landing.mark, scene.rounds > 1 ? landed : 0),
+			});
+			shown++;
 		}
+		if (shown === 0) break;
+	}
+	if (dots.length === 0) return { dots: [], slide: 1, newest: undefined, ring: undefined };
 	const newest = dots[0];
 	return {
 		dots,
@@ -127,7 +145,10 @@ function cyclesIn(scene, period) {
 
 export function stateAt(scene, time) {
 	const loop = scene.loop;
+	// The time inside the round drives the journeys, the sweeps and the chains; the period is what the film repeats over.
 	const now = wrap(time, loop);
+	const periodNow = wrap(time, scene.period);
+	const round = Math.floor(periodNow / loop);
 	const items = [];
 	const stays = new Map();
 	const pulses = new Map();
@@ -159,7 +180,7 @@ export function stateAt(scene, time) {
 	const sweeps = new Map();
 	const chains = new Map();
 	for (const node of scene.nodes) {
-		if (node.kind === "rail") rails.set(node.id, railAt(scene, node, now));
+		if (node.kind === "rail") rails.set(node.id, railAt(scene, node, now, periodNow));
 		else if (node.kind === "sweep") {
 			const turn = wrap((now * cyclesIn(scene, node.period)) / loop, 1);
 			sweeps.set(node.id, 0.5 - 0.5 * Math.cos(2 * Math.PI * turn));
@@ -169,5 +190,5 @@ export function stateAt(scene, time) {
 			chains.set(node.id, { step: Math.floor(turn), part: turn % 1 });
 		}
 	}
-	return { now, items, stays, pulses, rails, sweeps, chains };
+	return { now, periodNow, round, items, stays, pulses, rails, sweeps, chains };
 }

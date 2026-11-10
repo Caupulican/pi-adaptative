@@ -22,7 +22,7 @@ The owner watches one loop and can say what the system does, where it can fail a
 
 ### The mechanism
 
-A process is drawn as a circuit. Stations are joined by wires. Work items travel the wires, wait or are worked on inside stations, and end on a record or go back to where they came from. Everything repeats on one loop, so any frame can be drawn alone and the last frame meets the first. Parts that are built but not proven, or only planned, sit in their own bands below, drawn dashed and then dotted. At rest the picture is line and text; a state colour appears only where something happens.
+A process is drawn as a circuit. Stations are joined by wires. Work items travel the wires, wait or are worked on inside stations, and end on a record or go back to where they came from. Everything repeats on one loop, so any frame can be drawn alone and the last frame meets the first. A loop may repeat in rounds: the same circuit runs again, a counter says which round it is, and a rail keeps what earlier rounds landed. Parts that are built but not proven, or only planned, sit in their own bands below, drawn dashed and then dotted. At rest the picture is line and text; a state colour appears only where something happens.
 
 Stations are a closed set, each shaped by what it does. Choose by function, not by look:
 
@@ -31,7 +31,7 @@ Stations are a closed set, each shaped by what it does. Choose by function, not 
 | `source` | The authors of work: one emitter per author. An item starts here and may come back here. |
 | `queue` | Items wait or run side by side in slots, each with its progress. |
 | `worker` | One item at a time, in named phases, with a mechanism: `scan` (read, measure), `stamp` (sign, approve), `turn` (build, transform), `braid` (merge, join), `focus` (review, judge). |
-| `rail` | The record of what landed, newest first. A failure keeps its colour and can carry a mark. |
+| `rail` | The record of what landed, newest first. A failure keeps its colour and can carry a mark. With `rounds` over 1 it keeps what the period landed, so the record grows. |
 | `sweep` | A check that runs on a schedule. |
 | `chain` | Named steps in order; as a list row it carries a tag and a name at the left. Modes: `step`, `fill`, `together`. |
 | `tally` | A count shown as boxes, some crossed. |

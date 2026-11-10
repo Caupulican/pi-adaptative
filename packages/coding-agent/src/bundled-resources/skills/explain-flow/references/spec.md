@@ -9,12 +9,13 @@ A flow spec is one JSON object. Positions are in grid units (`unit` pixels). A s
 | `title` | The film's name: the page title. |
 | `size` | `[width, height]` in pixels, both even. Default `[1280, 800]`. |
 | `unit` | Pixels per grid unit, 4 to 24. Default 10. Text is 1.75 units high. |
-| `loop` | Seconds in one loop, 2 to 120. Everything repeats with this period. |
+| `loop` | Seconds in one round, 2 to 120. Every journey runs once per round. |
+| `rounds` | Whole rounds in one period, 1 to 12. Default 1. The film's period is `loop × rounds`, at most 120 seconds. |
 | `fps` | Frames per second of a video, 10 to 60. Default 30. |
 | `speed` | How fast an item travels a wire, in pixels per second. Default 440. A step's `travel` overrides it. |
 | `theme` | A built-in name (`matrix`, `paper`) or an object with the roles `bg`, `line`, `text`, `dim`, `work`, `ok`, `fail`, `info` as `#rrggbb` and an optional `font` (a CSS font-family list). |
 | `footer` | Words at the left over the loop bar: what one item stands for. |
-| `clock` | Words at the right over the loop bar: what one loop stands for. |
+| `clock` | Words at the right over the loop bar: what one round stands for. |
 | `bands` | The horizontal bands, top to bottom. |
 | `nodes` | The stations. |
 | `wires` | The wires. |
@@ -76,6 +77,20 @@ Each step is one hop along a declared wire and what happens on arrival:
 
 A journey ends when it reaches a `rail` (the item becomes the newest dot), a `source` emitter (the emitter lights), or after its last stay (the item fades inside the station). A queue holds as many items as it has slots and a worker one; the tool refuses a spec that asks for more.
 
+## Rounds
+
+`rounds` runs the whole circuit more than once. The same journeys run again in each round, in the same order. `loop` stays the seconds of one round, so the film's period is `loop × rounds` and a period is at most 120 seconds.
+
+A rail keeps the record of the period. It shows what landed in this round so far, then what landed in the rounds before it in this period, newest first. Nothing from before the period began stays. The first round starts with an empty rail and the record grows.
+
+Words may hold a round token. `{round}` is the round's number, starting at 1. A whole offset after `+` or `-` shifts it.
+
+```json
+"clock": "round {round} of 3"
+```
+
+A rail dot's `mark` is a token too. It takes the round the item landed in, so the record reads `v3 v2 v1`. A station's words, the `footer`, the `clock`, a `mark` and a step's `carry` may hold a token: when `rounds` is over 1 the tool draws them for the round it is in. A band `title` and a wire `label` belong to the still picture and keep their words. Text with a token is measured by its widest form, so it fits in every round.
+
 ## Commands
 
 ```
@@ -86,6 +101,8 @@ node flow-film.mjs html   <spec.json> --out <file.html>
 node flow-film.mjs video  <spec.json> --out <file.mp4> [--fps 30] [--loops 1] [--gif <file.gif>] [--gif-width 800]
 node flow-film.mjs import <diagram>   --out <spec.json> [--title <words>]
 ```
+
+`sheet` spreads its frames over the whole period and `video` renders the period, times `--loops`; `frame --at` takes any second of the period.
 
 Every command but `import` also takes `--theme <built-in name>` or `--theme-file <harness theme file>`. A harness theme file gives `bg` from `export.pageBg`, `line` from `colors.borderMuted`, `text` from `colors.text`, `dim` from `colors.dim`, `work` from `colors.warning`, `ok` from `colors.success`, `fail` from `colors.error` and `info` from `colors.mdLink`.
 

@@ -97,9 +97,36 @@ function readOneOf(value, allowed, path, problems, fallback) {
 	return value;
 }
 
-/** How wide `text` is at `size` pixels: every character of the film's one type family has the same advance. */
-export function textWidth(text, size) {
-	return text.length * size * CHAR_ADVANCE;
+/** A round token in words: `{round}`, or `{round+1}`, `{round-2}` for a shift. */
+const ROUND_TOKEN = /\{round([+-]\d+)?\}/g;
+
+/**
+ * `text` with every round token replaced. A token is a round's number starting at 1, shifted by the whole offset it
+ * writes, so in the first round `{round}` is 1 and `{round+1}` is 2. Text with no token comes back as it went in, and
+ * undefined stays undefined.
+ */
+export function roundText(text, round) {
+	if (text === undefined) return undefined;
+	return text.replace(ROUND_TOKEN, (_, offset) => String(round + 1 + (offset === undefined ? 0 : Number(offset))));
+}
+
+/** The widest form of `text` over `rounds` rounds: a layout that measures it holds in every round. */
+function widestRoundText(text, rounds) {
+	if (text === undefined) return undefined;
+	let widest = roundText(text, 0);
+	for (let round = 1; round < rounds; round++) {
+		const form = roundText(text, round);
+		if (form.length > widest.length) widest = form;
+	}
+	return widest;
+}
+
+/**
+ * How wide `text` is at `size` pixels: every character of the film's one type family has the same advance. Text that
+ * holds a round token is as wide as its widest form over `rounds` rounds.
+ */
+export function textWidth(text, size, rounds = 1) {
+	return (widestRoundText(text, rounds)?.length ?? 0) * size * CHAR_ADVANCE;
 }
 
 /**
@@ -124,7 +151,7 @@ export function wordsLeft(node, side, u) {
 }
 
 /** The box, ports and inner geometry of one station, in pixels. `x`, `y` are the top left of its body. */
-function shapeNode(node, x, y, u) {
+function shapeNode(node, x, y, u, rounds) {
 	const side = (px, py, name) => ({ x: px, y: py, side: name });
 	switch (node.kind) {
 		case "source": {
@@ -175,14 +202,15 @@ function shapeNode(node, x, y, u) {
 		case "tally": {
 			const boxes = Array.from({ length: node.boxes }, (_, index) => ({ x: x + index * 2.2 * u, y: y + 0.2 * u, w: 1.6 * u, h: 1.6 * u }));
 			const words = { x: x + node.boxes * 2.2 * u + u, y: y + 1.6 * u };
-			return { box: { x, y, w: words.x - x + textWidth(node.text ?? "", SMALL_TEXT_SIZE * u), h: 2 * u }, boxes, words, ports: {} };
+			const said = textWidth(node.text ?? "", SMALL_TEXT_SIZE * u, rounds);
+			return { box: { x, y, w: words.x - x + said, h: 2 * u }, boxes, words, ports: {} };
 		}
 		case "chain": {
 			const size = SMALL_TEXT_SIZE * u;
 			const gap = 3 * u;
 			let cursor = x + (node.lead ?? 0) * u;
 			const chips = node.items.map((item) => {
-				const chip = { x: cursor, y, w: textWidth(item, size) + 3 * u, h: 3 * u, text: item };
+				const chip = { x: cursor, y, w: textWidth(item, size, rounds) + 3 * u, h: 3 * u, text: item };
 				cursor += chip.w + gap;
 				return chip;
 			});
@@ -192,7 +220,7 @@ function shapeNode(node, x, y, u) {
 		}
 		default: {
 			const size = TEXT_SIZE * u;
-			const w = Math.max(0, ...node.lines.map((line) => textWidth(line, size)));
+			const w = Math.max(0, ...node.lines.map((line) => textWidth(line, size, rounds)));
 			return { box: { x, y, w, h: Math.max(node.lines.length, 1) * LINE_STEP * u }, ports: {} };
 		}
 	}
@@ -522,9 +550,11 @@ function rowsBelow(node) {
 }
 
 /** The words a station writes above its body: its name and note, or for a rail the longest thing it can say. */
-function labelText(node) {
+function labelText(node, rounds) {
 	const notes = node.kind === "rail" ? [node.note, node.okText, node.failText] : [node.note];
-	const longest = notes.filter(Boolean).sort((a, b) => b.length - a.length)[0];
+	const longest = notes
+		.filter(Boolean)
+		.sort((a, b) => widestRoundText(b, rounds).length - widestRoundText(a, rounds).length)[0];
 	return [node.label, longest].filter(Boolean).join(" · ");
 }
 
@@ -536,39 +566,39 @@ function captionWidths(scene) {
 		for (const segment of run.segments) {
 			if (segment.kind !== "work") continue;
 			const said = [segment.lane, segment.text, ...segment.phases].filter(Boolean);
-			const widest = Math.max(0, ...said.map((text) => textWidth(text, size)));
+			const widest = Math.max(0, ...said.map((text) => textWidth(text, size, scene.rounds)));
 			widths.set(segment.node, Math.max(widths.get(segment.node) ?? 0, widest));
 		}
 	return widths;
 }
 
 /** The rectangle the letters of one line of text cover, from the top of a tall letter to the foot of a low one. */
-function lineRect(what, x, baseline, text, u, width) {
-	return { what, x, y: baseline - 1.6 * u, w: width ?? textWidth(text, TEXT_SIZE * u), h: 2.1 * u };
+function lineRect(what, x, baseline, text, u, rounds, width) {
+	return { what, x, y: baseline - 1.6 * u, w: width ?? textWidth(text, TEXT_SIZE * u, rounds), h: 2.1 * u };
 }
 
 /** The rectangles a station covers: its body, its lines above and its lines below. Text is measured, not guessed. */
-function extents(node, u, captionWidth) {
+function extents(node, u, captionWidth, rounds) {
 	const { box } = node.shape;
 	if (node.kind === "chain" && node.lead !== undefined) {
 		// A list row: its name sits at the left on the chips' own line, its other lines under the name.
 		const chipsLeft = box.x + node.lead * u;
 		const rects = [{ what: "body", x: chipsLeft, y: box.y, w: box.x + box.w - chipsLeft, h: box.h }];
-		rects.push(lineRect("label", box.x, box.y + 2 * u, [node.tag, node.label].filter(Boolean).join(" "), u));
+		rects.push(lineRect("label", box.x, box.y + 2 * u, [node.tag, node.label].filter(Boolean).join(" "), u, rounds));
 		for (const [index, text] of [node.note, ...node.sub].filter(Boolean).entries())
-			rects.push(lineRect("lines", box.x, box.y + 2 * u + (index + 1) * SUB_STEP * u, text, u));
+			rects.push(lineRect("lines", box.x, box.y + 2 * u + (index + 1) * SUB_STEP * u, text, u, rounds));
 		return rects;
 	}
 	const rects = [{ what: "body", x: box.x, y: box.y, w: box.w, h: box.h }];
-	const label = labelText(node);
+	const label = labelText(node, rounds);
 	const above = [];
 	if (node.value) above.push(node.value);
 	if (label) above.push(label);
 	for (const [index, text] of above.entries())
-		rects.push(lineRect("label", wordsLeft(node, "top", u), box.y - (1.5 + index * LINE_STEP) * u, text, u));
+		rects.push(lineRect("label", wordsLeft(node, "top", u), box.y - (1.5 + index * LINE_STEP) * u, text, u, rounds));
 	const below = [...Array.from({ length: CAPTION_ROWS[node.kind] }, () => undefined), ...node.sub];
 	for (const [index, text] of below.entries())
-		rects.push(lineRect("lines", wordsLeft(node, "bottom", u), box.y + box.h + (2.5 + index * SUB_STEP) * u, text ?? "", u, text === undefined ? captionWidth : undefined));
+		rects.push(lineRect("lines", wordsLeft(node, "bottom", u), box.y + box.h + (2.5 + index * SUB_STEP) * u, text ?? "", u, rounds, text === undefined ? captionWidth : undefined));
 	return rects;
 }
 
@@ -590,7 +620,7 @@ function wireCrosses(path, rect) {
 function checkLayout(scene, problems) {
 	const u = scene.unit;
 	const said = captionWidths(scene);
-	const all = scene.nodes.map((node) => ({ node, rects: extents(node, u, said.get(node) ?? 0) }));
+	const all = scene.nodes.map((node) => ({ node, rects: extents(node, u, said.get(node) ?? 0, scene.rounds) }));
 	for (const { node, rects } of all) {
 		const left = Math.min(...rects.map((rect) => rect.x));
 		const right = Math.max(...rects.map((rect) => rect.x + rect.w));
@@ -642,12 +672,20 @@ export function compileScene(spec) {
 	const problems = [];
 	if (!isRecord(spec)) throw new SpecError(["the spec must be a JSON object"]);
 	const size = Array.isArray(spec.size) && spec.size.length === 2 ? spec.size : [1280, 800];
+	const loop = readNumber(spec.loop, "loop", problems, { min: 2, max: 120, fallback: 12 });
+	const rounds = readNumber(spec.rounds, "rounds", problems, { min: 1, max: 12, fallback: 1, integer: true });
+	// A film repeats over its period: one round's seconds, times the rounds it runs.
+	const period = loop * rounds;
+	if (period > 120)
+		problems.push(`rounds: ${rounds} round(s) of ${loop} s make a ${period} s period; a period is at most 120 s`);
 	const scene = {
 		title: readText(spec.title, "title", problems) ?? "Flow",
 		width: readNumber(size[0], "size[0]", problems, { min: 320, max: 3840, integer: true }),
 		height: readNumber(size[1], "size[1]", problems, { min: 240, max: 2160, integer: true }),
 		unit: readNumber(spec.unit, "unit", problems, { min: 4, max: 24, fallback: 10 }),
-		loop: readNumber(spec.loop, "loop", problems, { min: 2, max: 120, fallback: 12 }),
+		loop,
+		rounds,
+		period,
 		fps: readNumber(spec.fps, "fps", problems, { min: 10, max: 60, fallback: 30, integer: true }),
 		speed: readNumber(spec.speed, "speed", problems, { min: 60, max: 2400, fallback: 440 }),
 		theme: resolveTheme(spec.theme, problems),
@@ -690,7 +728,7 @@ export function compileScene(spec) {
 		if (seen.has(node.id)) problems.push(`nodes[${index}].id: "${node.id}" is used twice`);
 		seen.add(node.id);
 		node.tier = node.band.tier;
-		node.shape = shapeNode(node, (MARGIN + node.column) * u, node.band.top + (BAND_HEADER + node.row) * u, u);
+		node.shape = shapeNode(node, (MARGIN + node.column) * u, node.band.top + (BAND_HEADER + node.row) * u, u, scene.rounds);
 		node.bottom = node.shape.box.y + node.shape.box.h + rowsBelow(node) * u;
 		node.usedPorts = new Set();
 		scene.nodes.push(node);
