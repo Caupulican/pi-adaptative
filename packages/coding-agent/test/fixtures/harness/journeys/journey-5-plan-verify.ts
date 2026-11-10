@@ -64,6 +64,8 @@ export async function runJourney5PlanVerifyAcceptedPhase(world: HarnessWorld): P
 	let updates = 0;
 	let update: string[] = [];
 	let verifierTask: string[] = [];
+	// What the goal's continuation decided while the plan's verifier ran, with the goal's requirement still open.
+	let goalDuringPlan: { action: string; reasonCode: string; open: readonly string[] } | undefined;
 	let verificationEvidence: { id: string; kind: string; summary: string }[] = [];
 	let factsBeforeCompletion: string | undefined;
 	const mark = world.provider.reached.length;
@@ -125,6 +127,13 @@ export async function runJourney5PlanVerifyAcceptedPhase(world: HarnessWorld): P
 			name: "j5-verify-check-run",
 			check: (request) => {
 				verifierTask = stepTaskLines(request);
+				const { maxStallTurns } = world.settingsManager.getAutonomySettings();
+				const waiting = session.getGoalRuntimeSnapshot({ maxStallTurns }).continuation;
+				goalDuringPlan = {
+					action: waiting.action,
+					reasonCode: waiting.reasonCode,
+					open: waiting.openRequirementIds,
+				};
 			},
 			reply: {
 				content: [{ type: "toolCall", id: "j5-verify-check-run-1", name: "bash", arguments: { command: CHECK } }],
@@ -329,6 +338,10 @@ export async function runJourney5PlanVerifyAcceptedPhase(world: HarnessWorld): P
 	const join = plan.nodes["check-limit"]?.join;
 	// An outcome written by a newer build is opaque; this build wrote this one.
 	const joined = join && "status" in join.outcome ? join.outcome : undefined;
+	expect(
+		goalDuringPlan,
+		"while the plan's verifier ran, the goal waited on the plan with its requirement still open, and did not ask the root to go on",
+	).toEqual({ action: "waiting", reasonCode: "plan_in_flight", open: [requirementId] });
 	const brief = verifierTask.indexOf("Original task as dispatched:");
 	expect(
 		{
