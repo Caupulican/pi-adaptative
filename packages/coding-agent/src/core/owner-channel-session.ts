@@ -18,6 +18,7 @@ import type {
 	OwnerChannelOrigin,
 	OwnerDraftView,
 	OwnerQuotaAllowance,
+	OwnerSessionWork,
 } from "./channels/owner-channel-types.ts";
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import { IndependentObserverSet } from "./observer-dispatch.ts";
@@ -36,6 +37,8 @@ const MAX_DRAFT_LISTENERS = 8;
 export interface OwnerChannelSessionHost {
 	prompt(text: string, options?: PromptOptions): Promise<void>;
 	readonly agent: { subscribe(listener: (event: AgentEvent) => void): () => void; abort(reason: string): void };
+	/** The session's canonical work state: whether it works now, and why it rests when it does not. */
+	getSessionWorkState(): OwnerSessionWork;
 	emitHostWarning(message: string): void;
 }
 
@@ -111,9 +114,11 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 					decisions.drafts().flatMap((draft) => (isRemoteOwnerOrigin(draft.origin) ? [draft.id] : [])),
 				);
 				const store = this.getSessionManager();
+				const { busy, phase } = this.host.getSessionWorkState();
 				return {
 					sessionId: store.getSessionId(),
 					cwd: store.getCwd(),
+					work: { busy, phase },
 					calls: readOwnerDecisions().filter((item) => item.source !== "outward_draft" || !shown.has(item.id)),
 				};
 			},

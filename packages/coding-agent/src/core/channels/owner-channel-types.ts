@@ -118,10 +118,19 @@ export interface OwnerWaitingCall {
 	readonly since?: number;
 }
 
-/** The calls waiting on the owner in the hosting session, and the directory that session works in. */
+/** What the hosting session is doing now, from its canonical work state (`session-work-state.ts`). */
+export interface OwnerSessionWork {
+	/** A run, a worker, a tool, a compaction or an armed continuation is in progress. */
+	readonly busy: boolean;
+	/** The canonical phase. At rest it says why: `done` (the goal is complete), `blocked`, `waiting_user` or `idle`. */
+	readonly phase: string;
+}
+
+/** The calls waiting on the owner in the hosting session, the directory that session works in, and what it does now. */
 export interface OwnerWaitingView {
 	readonly sessionId: string;
 	readonly cwd: string;
+	readonly work: OwnerSessionWork;
 	readonly calls: readonly OwnerWaitingCall[];
 }
 
