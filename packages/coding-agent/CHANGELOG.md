@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Taste: a seventh kind of owner knowledge. The harness learns how the owner wants code and other work products written (naming, structure, idioms, tools and libraries to prefer or avoid, test and review habits, commit and documentation style) from the owner's own messages, under the same rules as every other kind: original owner evidence only, the admission floor, independent observations and a calibrated judge for an inferred pattern, corrections, forgetting, project or global scope. Taste is standing guidance: it enters every root request's knowledge view beside profile, behavior and procedure, and `/knowledge list taste` lists it. How the assistant talks or works with the owner stays `behavior`; an ordered way of doing a recurring task stays `procedure`.
+
 ### Fixed
 
 - `explain-flow` import: a Mermaid sequence diagram in which a participant answers back now imports into a spec that renders. The reply wire leaves from the bottom port instead of crossing its own station's words, and journey starts and the loop come from the engine's own timing of the real wire lengths (for flowcharts, state diagrams and DOT graphs too) instead of a per-step guess.

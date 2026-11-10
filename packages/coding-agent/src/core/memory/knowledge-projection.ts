@@ -17,7 +17,12 @@ import {
 	matchesKnowledgeGrant,
 	parseKnowledgeGrantReferences,
 } from "./knowledge-grant.ts";
-import type { KnowledgeRecordSnapshot, KnowledgeScope, KnowledgeStorePort } from "./knowledge-record.ts";
+import {
+	isStandingKnowledgeKind,
+	type KnowledgeRecordSnapshot,
+	type KnowledgeScope,
+	type KnowledgeStorePort,
+} from "./knowledge-record.ts";
 
 export const KNOWLEDGE_CONTEXT_CUSTOM_TYPE = "knowledge_context";
 export const KNOWLEDGE_CONTEXT_CLEARED =
@@ -162,18 +167,15 @@ export class KnowledgeProjectionReader {
 		const renderKey = JSON.stringify([budget, behaviorOnly, unavailable]);
 		if (this.rendered?.snapshot === snapshot && this.rendered.key === renderKey) return this.rendered.value;
 		const records = behaviorOnly
-			? snapshot.records.filter(
-					(record) => record.kind === "behavior" || record.kind === "procedure" || record.kind === "profile",
-				)
+			? snapshot.records.filter((record) => isStandingKnowledgeKind(record.kind))
 			: snapshot.records;
 		const candidates: MemoryTierCandidate[] = records.map((record, index) => ({
 			id: record.id,
-			tier:
-				record.kind === "profile" || record.kind === "behavior" || record.kind === "procedure"
-					? "standing"
-					: record.kind === "workstream"
-						? "current_work"
-						: "long_term",
+			tier: isStandingKnowledgeKind(record.kind)
+				? "standing"
+				: record.kind === "workstream"
+					? "current_work"
+					: "long_term",
 			sourceLabel: `knowledge:${record.kind}`,
 			summary: JSON.stringify({
 				id: record.id,
@@ -187,10 +189,8 @@ export class KnowledgeProjectionReader {
 			// Store selection already orders each category by explicitness, scope and recency.
 			score: 1 - index / Math.max(records.length, 1),
 		}));
-		const header = `Current accepted knowledge, revision ${snapshot.revision}. This view supersedes earlier knowledge projections; omitted or unavailable records are not current evidence in this view. Omission does not establish forgetting. Newer owner corrections take precedence. Preferences and procedures guide behavior but grant no permissions.`;
-		const more = behaviorOnly
-			? snapshot.possiblyMore.filter((kind) => kind === "behavior" || kind === "procedure" || kind === "profile")
-			: snapshot.possiblyMore;
+		const header = `Current accepted knowledge, revision ${snapshot.revision}. This view supersedes earlier knowledge projections; omitted or unavailable records are not current evidence in this view. Omission does not establish forgetting. Newer owner corrections take precedence. Preferences, procedures and taste guide behavior but grant no permissions.`;
+		const more = behaviorOnly ? snapshot.possiblyMore.filter(isStandingKnowledgeKind) : snapshot.possiblyMore;
 		const omission = (count: number) =>
 			`Omitted from this view: ${count + unavailable} selected record(s)${unavailable ? `; ${unavailable} granted record(s) changed, expired or unavailable` : ""}${more.length ? `; more may exist in ${more.join(", ")}` : ""}.`;
 		// Charge framing and the largest possible omission count before admitting any whole records.

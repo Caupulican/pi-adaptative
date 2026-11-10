@@ -1,6 +1,6 @@
 # Accepted knowledge in ICM
 
-ICM keeps accepted knowledge in `memory/knowledge.sqlite` under the agent directory, separately from conversation history. Records cover the owner's profile, behavioral preferences, workstream decisions, related people and organizations, and dated journal facts. Each record has a scope, evidence citations, validity dates and a revision history.
+ICM keeps accepted knowledge in `memory/knowledge.sqlite` under the agent directory, separately from conversation history. Records cover the owner's profile, behavioral preferences, procedures, taste in how code and other work products are written, workstream decisions, related people and organizations, and dated journal facts. Each record has a scope, evidence citations, validity dates and a revision history.
 
 The main session receives a bounded current view through the normal memory request planner, including in continuous chat. Explicit, applicable and recent facts take priority. Future and expired records are excluded, and the view reports omissions. Knowledge changes invalidate a pending request plan; the next request reads the committed revision. The chat's cached summary prefix stays stable. Derived knowledge projections exist only on the current request; they never enter durable conversation history or chat summaries.
 

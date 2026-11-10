@@ -3,8 +3,12 @@ import { createHash } from "node:crypto";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import type { KnowledgeWorkCache } from "./knowledge-work-journal.ts";
 
-export const KNOWLEDGE_KINDS = ["profile", "behavior", "procedure", "workstream", "world", "journal"] as const;
+export const KNOWLEDGE_KINDS = ["profile", "behavior", "procedure", "taste", "workstream", "world", "journal"] as const;
 export type KnowledgeKind = (typeof KNOWLEDGE_KINDS)[number];
+
+/** Kinds that guide every request until changed, as opposed to facts about work in progress or the past. */
+const STANDING_KNOWLEDGE_KINDS: ReadonlySet<KnowledgeKind> = new Set(["profile", "behavior", "procedure", "taste"]);
+export const isStandingKnowledgeKind = (kind: KnowledgeKind): boolean => STANDING_KNOWLEDGE_KINDS.has(kind);
 export type KnowledgeBasis = "explicit" | "inferred";
 
 /** Empty project/role names mean global applicability, never an implicit wildcard audience. */
