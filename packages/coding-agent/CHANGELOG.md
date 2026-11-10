@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- A print-mode run whose last turn ends without an answer reports failure. A model that stopped normally but returned no text (for example after spending its whole reply on reasoning the provider does not return) used to end `pi -p` with exit code 0 and an empty answer. The run now exits 1; text mode prints `The model ended its turn without an answer.` to standard error and the json `result` event carries `outcome: "failed"`, `stopReason: "stop"` and that sentence.
+
 ## [0.104.50] - 2026-11-10
 
 ### Added

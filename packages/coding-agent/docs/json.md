@@ -92,7 +92,7 @@ The stream ends with one `result` event:
 ```
 
 - `outcome`: `"completed"` or `"failed"`. Decided from the last message that is not a host record.
-- `stopReason`, `error`: only when `failed`. `error` and `aborted` carry the provider message (or `Request <stopReason>`). `length` means the last reply was cut off at the output limit.
+- `stopReason`, `error`: only when `failed`. `error` and `aborted` carry the provider message (or `Request <stopReason>`). `length` means the last reply was cut off at the output limit. `stop` means the last reply ended its turn normally but holds no text (`The model ended its turn without an answer.`).
 - A failed run exits with code 1. A shell execution that was cancelled or exited non-zero also fails the run.
 
 ## Example

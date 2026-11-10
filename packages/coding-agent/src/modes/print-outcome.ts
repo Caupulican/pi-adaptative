@@ -9,10 +9,15 @@ import type { AgentMessage } from "../kernel/types.ts";
 export type PrintOutcome = { outcome: "completed" } | { outcome: "failed"; stopReason: string; error: string };
 
 export const OUTPUT_LIMIT_ERROR = "The reply was cut off at the output limit.";
+export const NO_ANSWER_ERROR = "The model ended its turn without an answer.";
 
 /** The reply: the last message that is not a host record (an owner-items or evidence record can land after it). */
 export function selectReplyMessage(messages: readonly AgentMessage[]): AgentMessage | undefined {
 	return messages.findLast((message) => message.role !== "custom");
+}
+
+function isAnswerText(content: AssistantMessage["content"][number]): boolean {
+	return content.type === "text" && content.text.trim() !== "";
 }
 
 export function decidePrintOutcome(lastMessage: AgentMessage | undefined): PrintOutcome {
@@ -33,12 +38,15 @@ export function decidePrintOutcome(lastMessage: AgentMessage | undefined): Print
 		};
 	}
 	if (assistant.stopReason === "length") {
-		const hasText = assistant.content.some((content) => content.type === "text" && content.text.trim() !== "");
+		const hasText = assistant.content.some(isAnswerText);
 		return {
 			outcome: "failed",
 			stopReason: "length",
 			error: hasText ? OUTPUT_LIMIT_ERROR : `${OUTPUT_LIMIT_ERROR} Nothing was answered.`,
 		};
+	}
+	if (assistant.stopReason === "stop" && !assistant.content.some(isAnswerText)) {
+		return { outcome: "failed", stopReason: "stop", error: NO_ANSWER_ERROR };
 	}
 	return { outcome: "completed" };
 }
