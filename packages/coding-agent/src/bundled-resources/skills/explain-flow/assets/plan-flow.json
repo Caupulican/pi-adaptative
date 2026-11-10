@@ -1,0 +1,383 @@
+{
+	"title": "How a plan runs",
+	"size": [
+		1280,
+		860
+	],
+	"loop": 16,
+	"theme": "matrix",
+	"clock": "one loop, sped up",
+	"footer": "one item is one plan step",
+	"bands": [
+		{
+			"id": "live",
+			"tier": "live",
+			"title": "Proven",
+			"note": "five journeys, both modes",
+			"height": 41
+		},
+		{
+			"id": "next",
+			"tier": "next",
+			"title": "Built",
+			"note": "no journey yet",
+			"height": 14
+		},
+		{
+			"id": "later",
+			"tier": "later",
+			"title": "Planned",
+			"note": "in this order",
+			"height": 25
+		}
+	],
+	"nodes": [
+		{
+			"id": "steps",
+			"kind": "source",
+			"band": "live",
+			"at": [
+				2,
+				7
+			],
+			"count": 4,
+			"pitch": 5,
+			"label": "plan",
+			"note": "steps the root wrote"
+		},
+		{
+			"id": "fleet",
+			"kind": "queue",
+			"band": "live",
+			"at": [
+				20,
+				10
+			],
+			"slots": 3,
+			"label": "fleet",
+			"note": "runs what fits",
+			"sub": [
+				"one worker a step"
+			]
+		},
+		{
+			"id": "join",
+			"kind": "worker",
+			"mechanism": "braid",
+			"band": "live",
+			"at": [
+				40,
+				13
+			],
+			"label": "join",
+			"note": "collect, race, vote"
+		},
+		{
+			"id": "verify",
+			"kind": "worker",
+			"mechanism": "focus",
+			"band": "live",
+			"at": [
+				70,
+				13
+			],
+			"label": "verify",
+			"note": "independent"
+		},
+		{
+			"id": "goal",
+			"kind": "rail",
+			"band": "live",
+			"at": [
+				88,
+				15.5
+			],
+			"dots": 5,
+			"label": "goal",
+			"note": "requirements",
+			"okText": "requirement covered"
+		},
+		{
+			"id": "phone",
+			"kind": "sweep",
+			"band": "live",
+			"at": [
+				93,
+				24
+			],
+			"period": 8,
+			"label": "phone",
+			"note": "told what waits",
+			"sub": [
+				"after two minutes, once"
+			]
+		},
+		{
+			"id": "link",
+			"kind": "chain",
+			"band": "next",
+			"at": [
+				2,
+				4
+			],
+			"items": [
+				"hub",
+				"joined machine",
+				"placed job",
+				"result"
+			],
+			"pulse": 8,
+			"mode": "fill",
+			"label": "linked machines",
+			"note": "a job on another machine"
+		},
+		{
+			"id": "bots",
+			"kind": "chain",
+			"band": "next",
+			"at": [
+				70,
+				4
+			],
+			"items": [
+				"leader",
+				"bot",
+				"bot"
+			],
+			"pulse": 5,
+			"mode": "together",
+			"label": "bots and leaders",
+			"note": "made as the work runs"
+		},
+		{
+			"id": "writes",
+			"kind": "chain",
+			"band": "later",
+			"at": [
+				2,
+				1.5
+			],
+			"lead": 30,
+			"tag": "R2",
+			"label": "remote writes",
+			"note": "after a trust decision",
+			"items": [
+				"write on another machine",
+				"its own worktree lane",
+				"land gate"
+			]
+		},
+		{
+			"id": "setup",
+			"kind": "chain",
+			"band": "later",
+			"at": [
+				2,
+				8
+			],
+			"lead": 30,
+			"tag": "R5",
+			"label": "machine setup",
+			"note": "over SSH",
+			"items": [
+				"one command",
+				"install",
+				"join",
+				"serve"
+			]
+		},
+		{
+			"id": "status",
+			"kind": "chain",
+			"band": "later",
+			"at": [
+				2,
+				14.5
+			],
+			"lead": 30,
+			"tag": "M3",
+			"label": "live status",
+			"note": "one message, edited",
+			"items": [
+				"working",
+				"edited in place",
+				"result"
+			]
+		},
+		{
+			"id": "waits",
+			"kind": "tally",
+			"band": "later",
+			"at": [
+				84,
+				8.5
+			],
+			"boxes": 3,
+			"crossed": 0,
+			"text": "decisions wait on the owner"
+		}
+	],
+	"wires": [
+		{
+			"from": "steps:1",
+			"to": "fleet"
+		},
+		{
+			"from": "steps:2",
+			"to": "fleet"
+		},
+		{
+			"from": "steps:3",
+			"to": "fleet"
+		},
+		{
+			"from": "steps:4",
+			"to": "fleet"
+		},
+		{
+			"from": "fleet",
+			"to": "join"
+		},
+		{
+			"from": "join",
+			"to": "verify"
+		},
+		{
+			"from": "verify",
+			"to": "goal"
+		},
+		{
+			"from": "verify.bottom",
+			"to": "steps:3",
+			"route": "loop",
+			"lane": 32,
+			"label": "rejected: held for the root to re-plan"
+		}
+	],
+	"runs": [
+		{
+			"id": "step 1",
+			"from": "steps:1",
+			"start": 0.3,
+			"steps": [
+				{
+					"to": "fleet",
+					"work": 3.0
+				},
+				{
+					"to": "join",
+					"work": 1.3,
+					"lane": "collect",
+					"laneTone": "info",
+					"phases": [
+						"wait for members",
+						"combine"
+					]
+				},
+				{
+					"to": "verify",
+					"work": 1.8,
+					"lane": "read-only",
+					"phases": [
+						"read the result",
+						"verdict"
+					],
+					"result": "ok"
+				},
+				{
+					"to": "goal",
+					"result": "ok"
+				}
+			]
+		},
+		{
+			"id": "step 2",
+			"from": "steps:2",
+			"start": 0.8,
+			"steps": [
+				{
+					"to": "fleet",
+					"work": 1.3
+				},
+				{
+					"to": "join",
+					"work": 1.0,
+					"lane": "collect",
+					"laneTone": "info",
+					"phases": [
+						"member result"
+					]
+				}
+			]
+		},
+		{
+			"id": "step 3",
+			"from": "steps:3",
+			"start": 6.4,
+			"steps": [
+				{
+					"to": "fleet",
+					"work": 1.8
+				},
+				{
+					"to": "join",
+					"work": 1.0,
+					"lane": "reduce",
+					"laneTone": "info",
+					"phases": [
+						"combine"
+					]
+				},
+				{
+					"to": "verify",
+					"work": 1.7,
+					"lane": "read-only",
+					"phases": [
+						"read the result"
+					],
+					"result": "fail",
+					"text": "rejected"
+				},
+				{
+					"to": "steps:3",
+					"carry": "re-plan"
+				}
+			]
+		},
+		{
+			"id": "step 4",
+			"from": "steps:4",
+			"start": 9.2,
+			"steps": [
+				{
+					"to": "fleet",
+					"work": 2.0
+				},
+				{
+					"to": "join",
+					"work": 1.0,
+					"lane": "vote",
+					"laneTone": "info",
+					"phases": [
+						"score",
+						"pick one"
+					]
+				},
+				{
+					"to": "verify",
+					"work": 1.6,
+					"lane": "read-only",
+					"phases": [
+						"read the result",
+						"verdict"
+					],
+					"result": "ok"
+				},
+				{
+					"to": "goal",
+					"result": "ok"
+				}
+			]
+		}
+	]
+}
