@@ -22,7 +22,8 @@ function watchFacts(task: string): unknown {
  * A watch routine: the owner asks to be told when a file changes. The host follows the file in code, with no model
  * call while it waits. The file as it was when the watch was armed fires nothing; each change starts one run of the
  * routine, which is told what was seen as data (the file, what happened, its size then); the same content again is no
- * change; and a run that reports nothing for the owner starts no turn of the root.
+ * change; and a run that reports nothing for the owner starts no turn of the root. A file that appears and a file that
+ * goes are watches of their own: each fires once, at its own moment, and never for the other.
  */
 export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
@@ -179,6 +180,79 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 		facts: { condition: "file", change: "changed", label: "notes.txt", facts: { sizeBytes: 12 } },
 		runs: 2,
 	});
+	// A file that appears and a file that goes: each is its own watch, and each fires once, at its own moment.
+	const flag = projectPath("release.flag");
+	const runsOf = (routineId: string) => store().listRoutineOccurrences({ routineId }).length;
+	const flagsSaved = createBarrier();
+	world.provider.enqueue(
+		"root",
+		calls(
+			"j4-watch-flags-call",
+			(["created", "deleted"] as const).map((on) => ({
+				id: `j4-watch-flag-${on}`,
+				name: "routine",
+				arguments: {
+					action: "create",
+					routineId: `flag-${on}`,
+					prompt: `Say that release.flag was ${on}.`,
+					schedule: { kind: "event", source: "watch", condition: { type: "file", path: flag, on } },
+					profileId: PROFILE_ID,
+				},
+			})),
+		),
+		{
+			name: "j4-watch-flags-answer",
+			check: (request) => {
+				const results = latestBatchResults(request).filter((entry) => entry.toolName === "routine");
+				expect(
+					results.map((result) => result.isError),
+					results.map((result) => result.text).join(" | "),
+				).toEqual([false, false]);
+				flagsSaved.release();
+			},
+			reply: { content: [{ type: "text", text: "Both watches are saved." }] },
+		},
+	);
+	await withDeadline(
+		trace,
+		"the owner's second watch turn",
+		session.prompt("Tell me when release.flag appears and when it goes."),
+	);
+	await withDeadline(trace, "both flag watches are saved", flagsSaved.promise);
+	await withDeadline(trace, "the session is at rest", session.waitForForegroundIdle());
+	const untilRuns = async (routineId: string, count: number): Promise<void> => {
+		for (let step = 0; step < 8 && runsOf(routineId) < count; step++) {
+			world.timers.advance("routines", 500);
+			await new Promise<void>((resolve) => setImmediate(resolve));
+		}
+	};
+	const appeared = quietRun("j4-watch-flag-created", "release.flag appeared.");
+	world.io.writeFileSync(flag, "ready\n");
+	await untilRuns("flag-created", 1);
+	const appearedTask = await withDeadline(trace, "the file's appearance starts one run", appeared);
+	await withDeadline(trace, "the session is at rest after the created run", session.waitForForegroundIdle());
+	expect(
+		{ facts: watchFacts(appearedTask), created: runsOf("flag-created"), deleted: runsOf("flag-deleted") },
+		"a file that appears fires the created watch only",
+	).toEqual({
+		facts: { condition: "file", change: "created", label: "release.flag", facts: { sizeBytes: 6 } },
+		created: 1,
+		deleted: 0,
+	});
+	const gone = quietRun("j4-watch-flag-deleted", "release.flag is gone.");
+	world.io.unlinkSync(flag);
+	await untilRuns("flag-deleted", 1);
+	const goneTask = await withDeadline(trace, "the file's removal starts one run", gone);
+	await withDeadline(trace, "the session is at rest after the deleted run", session.waitForForegroundIdle());
+	expect(
+		{ facts: watchFacts(goneTask), created: runsOf("flag-created"), deleted: runsOf("flag-deleted") },
+		"a file that goes fires the deleted watch only",
+	).toEqual({
+		facts: { condition: "file", change: "deleted", label: "release.flag", facts: {} },
+		created: 1,
+		deleted: 1,
+	});
+
 	expect(await world.disposeSessionInBody(session), "the watch session closes").toBeUndefined();
 	trace.mark("root", "watch.closed");
 }
