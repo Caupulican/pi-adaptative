@@ -5,7 +5,7 @@
  */
 
 import { easeInOut, easeSpeed, pointAt } from "./geometry.mjs";
-import { HOP_SECONDS, roundText } from "./scene.mjs";
+import { HOP_SECONDS, roundText } from "./metrics.mjs";
 
 /** How long the motion blur behind a moving item covers, in seconds of its travel. */
 const TRAIL_SECONDS = 0.07;

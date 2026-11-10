@@ -23,6 +23,16 @@ export function circleEl(x, y, r, attrs) {
 	return `<circle cx="${px(x)}" cy="${px(y)}" r="${px(r)}" ${attrs}/>`;
 }
 
+/** One line of text from parts, each with its own colour and weight. */
+export function words(scene, x, y, size, parts, anchor = "start", alpha = 1) {
+	const spans = parts
+		.filter((part) => part.text !== undefined && part.text !== "")
+		.map((part) => `<tspan fill="${part.fill}"${part.bold ? ' font-weight="700"' : ""}>${esc(part.text)}</tspan>`)
+		.join("");
+	if (spans === "") return "";
+	return `<text x="${px(x)}" y="${px(y)}" font-family="${esc(scene.theme.font.replace(/"/g, "'"))}" font-size="${px(size)}" text-anchor="${anchor}" xml:space="preserve"${alpha < 1 ? ` opacity="${alphaOf(alpha)}"` : ""}>${spans}</text>`;
+}
+
 export function pathEl(d, attrs) {
 	return `<path d="${d}" ${attrs}/>`;
 }

@@ -30,7 +30,16 @@ import { themeFromHarness } from "./lib/theme.mjs";
 
 const LIB_DIR = join(dirname(fileURLToPath(import.meta.url)), "lib");
 /** The engine's modules in dependency order: a page gets them inlined as one script. */
-const ENGINE_MODULES = ["theme.mjs", "geometry.mjs", "svg.mjs", "mechanisms.mjs", "scene.mjs", "state.mjs", "draw.mjs"];
+const ENGINE_MODULES = [
+	"theme.mjs",
+	"geometry.mjs",
+	"svg.mjs",
+	"metrics.mjs",
+	"mechanisms.mjs",
+	"scene.mjs",
+	"state.mjs",
+	"draw.mjs",
+];
 const MAX_FRAMES = 7200;
 
 class UsageError extends Error {}

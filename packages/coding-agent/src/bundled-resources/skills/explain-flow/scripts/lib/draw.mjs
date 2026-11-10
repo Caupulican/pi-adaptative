@@ -8,7 +8,6 @@
 import { pieceOf, px } from "./geometry.mjs";
 import { activityMarks, drawMechanism } from "./mechanisms.mjs";
 import {
-	CAPTION_ROWS,
 	CHIP_RADIUS,
 	HOP_SECONDS,
 	MARGIN,
@@ -17,10 +16,10 @@ import {
 	STATION_RADIUS,
 	SUB_STEP,
 	TEXT_SIZE,
-	wordsLeft,
-} from "./scene.mjs";
+} from "./metrics.mjs";
+import { CAPTION_ROWS, wordsLeft } from "./scene.mjs";
 import { stateAt } from "./state.mjs";
-import { alphaOf, circleEl, esc, lineEl, pathEl, rectEl, strokeOf } from "./svg.mjs";
+import { alphaOf, circleEl, lineEl, pathEl, rectEl, strokeOf, words } from "./svg.mjs";
 import { mixHex } from "./theme.mjs";
 
 /** The lengths of the two ruled lines on a source's cards, in grid units: no two neighbours look alike. */
@@ -42,16 +41,6 @@ function tierStyle(scene, tier) {
 function tierStroke(scene, tier, colour, width) {
 	const style = tierStyle(scene, tier);
 	return strokeOf(colour, width ?? scene.unit * 0.15, style.dash ? `stroke-dasharray="${style.dash}" stroke-linecap="${style.cap}"` : "");
-}
-
-/** One line of text from parts, each with its own colour and weight. */
-function words(scene, x, y, size, parts, anchor = "start", alpha = 1) {
-	const spans = parts
-		.filter((part) => part.text !== undefined && part.text !== "")
-		.map((part) => `<tspan fill="${part.fill}"${part.bold ? ' font-weight="700"' : ""}>${esc(part.text)}</tspan>`)
-		.join("");
-	if (spans === "") return "";
-	return `<text x="${px(x)}" y="${px(y)}" font-family="${esc(scene.theme.font.replace(/"/g, "'"))}" font-size="${px(size)}" text-anchor="${anchor}" xml:space="preserve"${alpha < 1 ? ` opacity="${alphaOf(alpha)}"` : ""}>${spans}</text>`;
 }
 
 function toneOf(scene, tone) {
