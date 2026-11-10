@@ -6,6 +6,7 @@
  * Test with: npx tsx src/cli-new.ts [args...]
  */
 import type { Args } from "./cli/args.ts";
+import { DECISIONS_COMMAND } from "./cli/maintenance-command.ts";
 import { APP_NAME, VERSION } from "./config.ts";
 import { BOT_DAEMON_COMMAND } from "./core/delegation/bot-daemon-command.ts";
 import { CI_STATUS_COMMAND, runCiStatusCommand } from "./host/ci/ci-status-command.ts";
@@ -17,7 +18,19 @@ process.emitWarning = (() => {}) as typeof process.emitWarning;
 
 const cliArgs = process.argv.slice(2);
 const [firstArg] = cliArgs;
-const packageCommands = new Set(["install", "remove", "uninstall", "update", "list", "config", "auth", "lfm3"]);
+// First arguments that run a command instead of a session: their own parser reads the rest, so
+// neither the session parser nor the session help may take them.
+const commandArguments = new Set([
+	"install",
+	"remove",
+	"uninstall",
+	"update",
+	"list",
+	"config",
+	"auth",
+	"lfm3",
+	"accounting-reconcile",
+]);
 
 // Fast path: version needs nothing beyond config.ts (already loaded). Mirrors main.ts's
 // `parsed.version` output exactly; skipping main's import graph turns ~1s into ~150ms.
@@ -32,6 +45,12 @@ if (firstArg === CI_STATUS_COMMAND) {
 	process.exit(0);
 }
 
+// The decision ledger's command reads one database: it runs here, without the session program.
+if (firstArg === DECISIONS_COMMAND) {
+	const { runDecisionsEntry } = await import("./cli/decisions-command.ts");
+	process.exit(await runDecisionsEntry(cliArgs.slice(1)));
+}
+
 // The detached bot daemon is pi's own routine process, started by a session through the stable self-launch target.
 // It never parses as a session launch and never binds a supervisor channel it may have inherited.
 if (firstArg === BOT_DAEMON_COMMAND) {
@@ -44,7 +63,7 @@ if (firstArg === BOT_DAEMON_COMMAND) {
 // too, before the session program loads: the parent only supervises, the child runs the session.
 let launchArgs: Args | undefined;
 let interactiveLaunch = false;
-if (!packageCommands.has(firstArg ?? "")) {
+if (!commandArguments.has(firstArg ?? "")) {
 	const [{ parseArgs, resolveAppMode }, { holdStartupTypeahead }] = await Promise.all([
 		import("./cli/args.ts"),
 		import("./cli/startup-typeahead.ts"),
@@ -68,7 +87,7 @@ if (firstArg === "--provision-herdr" && cliArgs.length === 1) {
 	await runHerdrProvisionCommand();
 	process.exit(0);
 }
-if ((cliArgs.includes("--help") || cliArgs.includes("-h")) && !packageCommands.has(firstArg ?? "")) {
+if ((cliArgs.includes("--help") || cliArgs.includes("-h")) && !commandArguments.has(firstArg ?? "")) {
 	const [{ parseArgs, printHelp }, { takeOverStdout }] = await Promise.all([
 		import("./cli/args.ts"),
 		import("./core/output-guard.ts"),

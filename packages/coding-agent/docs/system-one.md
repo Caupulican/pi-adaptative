@@ -654,6 +654,37 @@ objective's recent routes are a history block in the state the judge reads; "rep
 evidence" is one route on one evidence marker, twice. The root reads the ledger with
 `decision_ledger_read` (`sessions`, `stages`, `evaluations`, `replay`); workers never do.
 
+### Reading the ledger from the shell
+
+Two maintenance commands read the ledger without a session. They start no session and make no provider
+request.
+
+`pi decisions report` totals the rows of one scope. It prints the ledger path and the scope first. Then it
+prints the session count, the evaluation outcomes, and one entry per program. A program entry holds its
+uncertain and cached counts, its median and p90 duration, its exits and its verdicts. Models, shell gate
+decisions, routes with their executors, supervision actions and doubt dispositions follow. `--json` prints
+the same report as one object.
+
+`pi decisions export --out <file.jsonl>` writes settled System One evaluations as replay cases, oldest
+first, one JSON object per line. A case holds the evaluation id, session, working directory, program,
+label, consequence, scope, namespace, both times, model, outcome, verdict, reasons, question states and
+the decision trace. Its `expected` field is always `null`. That is the slot a person fills with the
+verdict that would have been right. An existing file is replaced only with `--force`. A scope with no
+settled evaluation writes no file.
+
+The scope is the current working directory. `--cwd <path>` reads another project, `--all` reads every
+project, and `--days <n>` sets the window (default 30 days; `--days 0` reads all time).
+`--program <id>` limits an export to one program.
+
+The export stays on the machine. Trace texts were redacted and bounded when they were recorded (8 gates,
+16 judgments, 8 facts, 120 characters per string), and every text of a case passes the secret redaction
+again when it is written. A case therefore holds what the recorder kept. A row whose stored JSON does not
+decode is counted as unreadable in the report and left out of the export.
+
+A wrong argument, two scopes at once, or a file in the way of an export is refused in one line with the
+usage line, and the command ends with exit code 1. A ledger that an earlier version wrote is read as far
+as it goes: a table or a column it does not have yet counts as empty.
+
 An evaluation may carry its decision trace: the decision code took, the gates it checked, the judgments
 behind it (P(true) and band for a yes/no, P(chosen option) and the runner-up for a Choice, and whether each
 drove the decision), short facts, the exit code took, and whether the answer came from the certificate cache.

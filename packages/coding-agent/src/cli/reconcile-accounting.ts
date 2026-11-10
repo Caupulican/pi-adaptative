@@ -6,12 +6,15 @@ import { readAccountedSession, reconcileSessionAccounting } from "../core/cost/a
 import { aggregateCurrentSessionCostsFromEntries } from "../core/cost/cost-summary.ts";
 import { computeSessionTaskAndModelMetrics } from "../core/cost/task-cost-metrics.ts";
 import { getDefaultSessionDirCandidates, readSessionHeaderResult } from "../kernel/session/session-manager.ts";
-
-export const ACCOUNTING_RECONCILE_HELP =
-	"accounting-reconcile [--cwd <path> | --session <file> | --all]  Recover historical accounting without starting a model";
+import { ACCOUNTING_RECONCILE_HELP, answeringRefusals, CommandRefusal } from "./maintenance-command.ts";
 
 /** Explicit maintenance command; no session runtime, provider request, or transcript write. */
 export async function runAccountingReconcileCommand(args: string[]): Promise<void> {
+	if ((await answeringRefusals(ACCOUNTING_RECONCILE_HELP, () => reconcileAccounting(args))) !== 0)
+		process.exitCode = 1;
+}
+
+async function reconcileAccounting(args: string[]): Promise<void> {
 	let cwd = process.cwd();
 	let session: string | undefined;
 	let all = false;
@@ -24,16 +27,16 @@ export async function runAccountingReconcileCommand(args: string[]): Promise<voi
 		}
 		if (arg === "--all") all = true;
 		else if ((arg === "--cwd" || arg === "--session") && args[index + 1]) {
-			if (args[index + 1]!.startsWith("--")) throw new Error(`Missing value for ${arg}`);
+			if (args[index + 1]!.startsWith("--")) throw new CommandRefusal(`Missing value for ${arg}`);
 			const value = resolve(args[++index]!);
 			if (arg === "--cwd") {
 				cwd = value;
 				explicitCwd = true;
 			} else session = value;
-		} else throw new Error(`Unknown or incomplete accounting argument: ${arg}`);
+		} else throw new CommandRefusal(`Unknown or incomplete accounting argument: ${arg}`);
 	}
 	if (Number(all) + Number(session !== undefined) + Number(explicitCwd) > 1)
-		throw new Error("Choose only one scope: --cwd, --session, or --all.");
+		throw new CommandRefusal("Choose only one scope: --cwd, --session, or --all.");
 	const agentDir = getAgentDir();
 	const paths = new Set<string>();
 	if (session) paths.add(session);
