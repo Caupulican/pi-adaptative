@@ -48,6 +48,8 @@ const LEADER_AWAKE = "Stay with your bot's questions.";
 const MAY_NOT_CREATE = mayNotCreateBotsText([LEADER], LEADER);
 
 const WAITING = "Waiting.";
+/** What the leader answers its bot's question with; the root reads it in the handoff of that turn. */
+const LEADER_NOTED = "The question is noted.";
 
 /**
  * Legs 3, 4 and 5a: the owner marks a bot a standing leader, the root hands it a goal, and the leader runs a subtree of its
@@ -97,6 +99,8 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	const rootRequestsBefore = world.provider.requests.filter((request) => request.model.id === MODEL_ID.root).length;
 	/** Released by the leader's request that carries its bot's question: the step is reached earlier, by the owner's words. */
 	const leaderHeardAsk = createBarrier();
+	/** Released by the root's turn for the leader's last turn, the one its bot's message started. */
+	const rootToldOfLeaderTurn = createBarrier();
 
 	enqueueBot(
 		world,
@@ -182,7 +186,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 					carriesHelperId: carries(request, HELPER),
 				};
 				leaderHeardAsk.release();
-				return { content: [{ type: "text", text: "The question is noted." }] };
+				return { content: [{ type: "text", text: LEADER_NOTED }] };
 			},
 		},
 	);
@@ -300,6 +304,18 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 				seen.wakeLines = lines;
 				return { content: [{ type: "text", text: "Noted." }] };
 			},
+		},
+		{
+			// After the goal, a turn the leader takes for its bot's message is a bot turn like any other: its end reaches
+			// the root as a worker handoff. The owner's own messages to the leader and to its bot do not start one.
+			name: "j7-leader-turn-told",
+			maxRequests: 8,
+			until: (request) => {
+				const told = deliveredLines(request).includes(LEADER_NOTED);
+				if (told) rootToldOfLeaderTurn.release();
+				return told;
+			},
+			reply: { content: [{ type: "text", text: "Noted." }] },
 		},
 	);
 	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-leader", PHASE_JUDGMENTS);
@@ -438,6 +454,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		world.provider.whenReached(reached(TRACK.helper, "j7-helper-second-done")),
 	);
 	await withDeadline(trace, "J7 leg 4: the leader heard its bot", leaderHeardAsk.promise);
+	await withDeadline(trace, "J7 leg 4: the end of the leader's turn reached the root", rootToldOfLeaderTurn.promise);
 	await withDeadline(trace, "J7 leg 4: the root is idle", session.waitForForegroundIdle());
 	assertSeen(
 		{
