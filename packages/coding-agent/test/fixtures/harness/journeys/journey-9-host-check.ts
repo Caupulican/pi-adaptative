@@ -66,7 +66,7 @@ export async function runJourney9HostCheckPhase(world: HarnessWorld): Promise<vo
 		recorded.push(outcome);
 		if (outcome.ladder.exit === "E0") accepted.release();
 	});
-	const restoreSpawn = scriptRequirementCheckSpawn(world, CHECK_COMMAND);
+	const scriptedCheck = scriptRequirementCheckSpawn(world, CHECK_COMMAND);
 	world.shell.enqueue({
 		name: "j9-l4-check",
 		command: CHECK_COMMAND,
@@ -128,7 +128,14 @@ export async function runJourney9HostCheckPhase(world: HarnessWorld): Promise<vo
 		});
 		const session = created.session;
 		await withDeadline(trace, "J9 leg 4 turn", session.prompt(PROMPT));
-		await withDeadline(trace, "J9 leg 4 accepted outcome", accepted.promise, 120_000);
+		// The accepted outcome follows the host's own check. When it does not come, the processes the host started say why:
+		// no shell among them means the check never ran.
+		await withDeadline(trace, "J9 leg 4 accepted outcome", accepted.promise, 120_000).catch((error: unknown) => {
+			throw new Error(
+				`the host check led to no accepted outcome; the host started: ${JSON.stringify(scriptedCheck.spawned)}; outcomes: ${JSON.stringify(recorded.map((outcome) => [outcome.ladder.exit, outcome.status, outcome.blocker]))}`,
+				{ cause: error },
+			);
+		});
 		await withDeadline(trace, "J9 leg 4 handoff", reported.promise, 120_000);
 		await withDeadline(trace, "J9 leg 4 root idle", session.waitForForegroundIdle());
 
@@ -190,7 +197,7 @@ export async function runJourney9HostCheckPhase(world: HarnessWorld): Promise<vo
 		trace.mark("root", "j9.host-check");
 	} finally {
 		unsubscribe();
-		restoreSpawn();
+		scriptedCheck.restore();
 	}
 }
 

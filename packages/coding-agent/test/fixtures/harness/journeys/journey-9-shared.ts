@@ -169,22 +169,37 @@ export function queueWords(question: string): string {
 	return `A worker is waiting for your decision: ${question}`;
 }
 
+/** A scripted host requirement check: how to put the world's spawn back, and what the host spawned meanwhile. */
+export interface ScriptedRequirementCheck {
+	restore(): void;
+	/** The executable of every process the host started while the check was scripted, in order. */
+	readonly spawned: readonly string[];
+}
+
 /**
  * Answers the one process a passing host requirement check starts. `runRequirementCheck` spawns the check's command in a
  * shell (`src/core/goals/requirement-checks.ts`); the world's process port answers git and the host tools only, so the
  * journey routes that exact command line to the world's shell, which scripts its output and raises the world's failure
  * for an unscripted run. Every other spawn keeps the world's own answer.
+ *
+ * On Windows the product looks for that shell where Git for Windows installs it (`getBashConfig` in
+ * `src/utils/shell.ts`). The world holds no such file until one is seeded, and without it the product reports that the
+ * check could not start, so the file is seeded at the path the product probes.
  */
-export function scriptRequirementCheckSpawn(world: HarnessWorld, command: string): () => void {
-	return builtinBoundary.replace("process", "spawn", (...args) => {
+export function scriptRequirementCheckSpawn(world: HarnessWorld, command: string): ScriptedRequirementCheck {
+	if (process.platform === "win32" && process.env.ProgramFiles)
+		world.io.seed(`${process.env.ProgramFiles}\\Git\\bin\\bash.exe`, "virtual Git Bash\n");
+	const spawned: string[] = [];
+	const restore = builtinBoundary.replace("process", "spawn", (...args) => {
 		world.guard.effects.push({ kind: "process.spawn", arguments: args });
 		const [file, argv, options] = args as [
 			string,
 			readonly string[],
 			{ cwd?: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal } | undefined,
 		];
+		spawned.push(file);
 		if (argv.at(-1) !== command) return world.processes.run("spawn", args);
-		expect(file, "a requirement check runs in a shell").toMatch(/^(?:.*\/)?(?:sh|bash)$/u);
+		expect(file, "a requirement check runs in a shell").toMatch(/(?:^|[\\/])(?:sh|bash)(?:\.exe)?$/iu);
 		const child = Object.assign(new EventEmitter(), {
 			pid: 0,
 			exitCode: null as number | null,
@@ -223,4 +238,5 @@ export function scriptRequirementCheckSpawn(world: HarnessWorld, command: string
 			});
 		return child;
 	});
+	return { restore, spawned };
 }
