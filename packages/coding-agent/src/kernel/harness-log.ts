@@ -10,8 +10,17 @@
  * redactor, and a line is dropped rather than written unredacted once one is installed and throws.
  */
 
-import { appendFileSync, mkdirSync, readdirSync, renameSync, rmSync, statSync } from "node:fs";
-import { join } from "node:path";
+type NodeFileSystem = typeof import("node:fs");
+type NodePath = typeof import("node:path");
+
+/**
+ * The browser bundle must not import Node built-ins statically; `scripts/check-browser-smoke.mjs` enforces that rule.
+ * Without Node the log is inert: loading this module throws nothing, every call is a no-op, and no timer or exit hook is
+ * scheduled. Under Node the two built-ins are resolved once, before any line is written.
+ */
+const hasNode = typeof process !== "undefined" && typeof process.getBuiltinModule === "function";
+const nodeFileSystemModule = hasNode ? (process.getBuiltinModule("node:fs") as NodeFileSystem) : undefined;
+const nodePathModule = hasNode ? (process.getBuiltinModule("node:path") as NodePath) : undefined;
 
 export const LOG_LEVELS = ["off", "error", "warn", "info", "debug", "trace"] as const;
 export type LogLevel = (typeof LOG_LEVELS)[number];
@@ -63,7 +72,7 @@ class HarnessLog {
 			categoriesFromEnvironment() ?? (options.categories?.length ? new Set(options.categories) : undefined);
 		this.maxFileBytes = options.maxFileBytes ?? DEFAULT_MAX_FILE_BYTES;
 		this.role = options.role ?? "main";
-		if (!this.exitHooked) {
+		if (hasNode && !this.exitHooked) {
 			this.exitHooked = true;
 			process.once("exit", () => {
 				this.flush();
@@ -88,6 +97,7 @@ class HarnessLog {
 
 	/** Whether a line of this level (in this category) would be written: guard work that only feeds a log line with it. */
 	enabled(level: Exclude<LogLevel, "off">, category?: string): boolean {
+		if (!hasNode) return false;
 		if (rank(level) > rank(this.level)) return false;
 		return category === undefined || this.categories === undefined || this.categories.has(category);
 	}
@@ -137,11 +147,14 @@ class HarnessLog {
 		}
 		const text = `${this.buffer.join("\n")}\n`;
 		this.buffer = [];
+		const fs = nodeFileSystemModule;
+		const path = nodePathModule;
+		if (!fs || !path) return;
 		try {
-			mkdirSync(dir, { recursive: true });
-			const file = join(dir, `harness-${new Date().toISOString().slice(0, 10)}.jsonl`);
+			fs.mkdirSync(dir, { recursive: true });
+			const file = path.join(dir, `harness-${new Date().toISOString().slice(0, 10)}.jsonl`);
 			this.rotate(file);
-			appendFileSync(file, text, { mode: 0o600 });
+			fs.appendFileSync(file, text, { mode: 0o600 });
 		} catch {
 			// The log's own failures are not the harness's.
 		}
@@ -168,10 +181,12 @@ class HarnessLog {
 	}
 
 	private rotate(file: string): void {
+		const fs = nodeFileSystemModule;
+		if (!fs) return;
 		try {
-			if (statSync(file).size < this.maxFileBytes) return;
-			rmSync(`${file}.1`, { force: true });
-			renameSync(file, `${file}.1`);
+			if (fs.statSync(file).size < this.maxFileBytes) return;
+			fs.rmSync(`${file}.1`, { force: true });
+			fs.renameSync(file, `${file}.1`);
 		} catch {
 			// No file yet.
 		}
@@ -180,12 +195,15 @@ class HarnessLog {
 	private prune(retainDays: number): void {
 		const dir = this.dir;
 		if (!dir) return;
+		const fs = nodeFileSystemModule;
+		const path = nodePathModule;
+		if (!fs || !path) return;
 		try {
 			const cutoff = Date.now() - retainDays * 86_400_000;
-			for (const name of readdirSync(dir)) {
+			for (const name of fs.readdirSync(dir)) {
 				if (!name.startsWith("harness-")) continue;
-				const path = join(dir, name);
-				if (statSync(path).mtimeMs < cutoff) rmSync(path, { force: true });
+				const file = path.join(dir, name);
+				if (fs.statSync(file).mtimeMs < cutoff) fs.rmSync(file, { force: true });
 			}
 		} catch {
 			// Nothing to prune.
@@ -194,11 +212,13 @@ class HarnessLog {
 }
 
 function levelFromEnvironment(): LogLevel | undefined {
+	if (!hasNode) return undefined;
 	const value = process.env.PI_LOG_LEVEL?.trim().toLowerCase();
 	return isLogLevel(value) ? value : undefined;
 }
 
 function categoriesFromEnvironment(): ReadonlySet<string> | undefined {
+	if (!hasNode) return undefined;
 	const value = process.env.PI_LOG_CATEGORIES?.trim();
 	return value
 		? new Set(

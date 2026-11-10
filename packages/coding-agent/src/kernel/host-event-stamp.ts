@@ -1,10 +1,22 @@
-import { createHash } from "node:crypto";
 import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH, MAX_WORKER_AUTHORITY_PATH_LENGTH } from "./session/agent-identity.ts";
 import {
 	normalizeSpecialistContextOwnership,
 	type SpecialistContextClaim,
 } from "./session/specialist-context-ownership.ts";
 import { isPlainRecord } from "./utils/value-guards.ts";
+
+type NodeCrypto = typeof import("node:crypto");
+
+/**
+ * Node-only digest source, reached lazily so the browser bundle never imports `node:crypto` statically (see
+ * `scripts/check-browser-smoke.mjs`). In a browser `nodeCrypto()` returns undefined and `hostEventBindingDigest`
+ * throws; that is acceptable because only the Node-side host-event transport and runtime create or verify these
+ * records, so the browser never asks for a digest.
+ */
+function nodeCrypto(): NodeCrypto | undefined {
+	if (typeof process === "undefined" || typeof process.getBuiltinModule !== "function") return undefined;
+	return process.getBuiltinModule("node:crypto") as NodeCrypto;
+}
 
 /** Exact started execution allowed to receive one operational event. This never grants execution authority. */
 export interface HostEventExecutionIdentity {
@@ -81,6 +93,14 @@ function digest(value: unknown): value is string {
 	return typeof value === "string" && DIGEST.test(value);
 }
 
+let utf8ByteLengthEncoder: TextEncoder | undefined;
+
+/** UTF-8 byte length without the Node `Buffer` global; TextEncoder exists in browsers and Node and counts the same bytes. */
+function utf8ByteLength(text: string): number {
+	utf8ByteLengthEncoder ??= new TextEncoder();
+	return utf8ByteLengthEncoder.encode(text).length;
+}
+
 export function parseHostEventExecutionIdentity(value: unknown): HostEventExecutionIdentity | undefined {
 	if (!isPlainRecord(value) || !Object.keys(value).every((field) => EXECUTION_FIELDS.includes(field)))
 		return undefined;
@@ -119,7 +139,7 @@ export function parseHostEventExecutionIdentity(value: unknown): HostEventExecut
 		sessionFile: value.sessionFile,
 		...(contextClaim ? { contextClaim: Object.freeze(contextClaim) } : {}),
 	};
-	return Buffer.byteLength(JSON.stringify(execution)) <= MAX_STAMP_BYTES ? Object.freeze(execution) : undefined;
+	return utf8ByteLength(JSON.stringify(execution)) <= MAX_STAMP_BYTES ? Object.freeze(execution) : undefined;
 }
 
 function parseBindingBody(value: unknown): Omit<WorkerHostEventRecord, "bindingDigest"> | undefined {
@@ -154,14 +174,16 @@ function parseBindingBody(value: unknown): Omit<WorkerHostEventRecord, "bindingD
 		contentDigest: value.contentDigest,
 		execution,
 	};
-	return Buffer.byteLength(JSON.stringify(body)) <= MAX_STAMP_BYTES - 96 ? body : undefined;
+	return utf8ByteLength(JSON.stringify(body)) <= MAX_STAMP_BYTES - 96 ? body : undefined;
 }
 
 /** Canonical ordered serialization is shared by creation and persisted proof validation. */
 export function hostEventBindingDigest(value: Omit<WorkerHostEventRecord, "bindingDigest">): string {
 	const body = parseBindingBody(value);
 	if (!body) throw new TypeError("Host event binding is invalid.");
-	return createHash("sha256").update(JSON.stringify(body)).digest("hex");
+	const crypto = nodeCrypto();
+	if (!crypto) throw new Error("Host event binding digests are unavailable in this runtime");
+	return crypto.createHash("sha256").update(JSON.stringify(body)).digest("hex");
 }
 
 export function createWorkerHostEventRecord(

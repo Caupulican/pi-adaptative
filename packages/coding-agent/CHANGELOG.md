@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- The kernel's browser-safe entry bundles for a browser again and loads there: the harness log, the host-event stamp and the agent identity module no longer import Node built-ins statically. The log is inert where Node is absent (loading it throws nothing and every call is a no-op), the stamp measures its size bound without the `Buffer` global, and two resume contexts are compared through the canonical encoder, so a member that is `undefined` reads the same as an absent one (as it does once a context has been stored). `npm run check` now runs the browser bundle check, which had stopped being run and had started failing.
 - `explain-flow` import: a Mermaid sequence diagram in which a participant answers back now imports into a spec that renders. The reply wire leaves from the bottom port instead of crossing its own station's words, and journey starts and the loop come from the engine's own timing of the real wire lengths (for flowcharts, state diagrams and DOT graphs too) instead of a per-step guess.
 
 ## [0.104.49] - 2026-11-10

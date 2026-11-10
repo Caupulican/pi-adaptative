@@ -1,5 +1,5 @@
-import { isDeepStrictEqual } from "node:util";
 import type { JsonObject } from "../utils/json-types.ts";
+import { strictCanonicalJson, withoutUndefinedMembers } from "../utils/strict-canonical-json.ts";
 import { isPlainRecord } from "../utils/value-guards.ts";
 
 /** Shared bound for durable orchestration identity fields. */
@@ -106,7 +106,10 @@ export function createAgentIdentity(agentId: string, resumeContext: AgentResumeC
 export function sameAgentResumeIdentity(left: AgentResumeContext, right: AgentResumeContext): boolean {
 	const { latestCheckpointId: _leftCheckpoint, ...leftIdentity } = left;
 	const { latestCheckpointId: _rightCheckpoint, ...rightIdentity } = right;
-	return isDeepStrictEqual(leftIdentity, rightIdentity);
+	return (
+		strictCanonicalJson(withoutUndefinedMembers(leftIdentity)) ===
+		strictCanonicalJson(withoutUndefinedMembers(rightIdentity))
+	);
 }
 
 export function cloneResumeContext(context: AgentResumeContext): AgentResumeContext {
