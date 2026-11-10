@@ -80,6 +80,17 @@ jobs:
           npm ls typescript@7.0.2 tsrs@0.18.0-ts7.1.0-dev.20260929 --depth=0
           node scripts/run-tsc.mjs --version
 
+      # The static check and the model search read sources only (a script that executes workspace source runs with
+      # --conditions=pi-source). They run before the build so that a check that needs one fails here: the daily
+      # model catalog refresh runs the same static check on a tree that is never built.
+      - name: Check
+        if: runner.os == 'Linux'
+        run: npm run check
+
+      - name: Machine models
+        if: runner.os == 'Linux'
+        run: node --conditions=pi-source scripts/check-machine-models.mjs --explore
+
       # Deterministic CI: builds are hermetic by default (see
       # packages/ai/scripts/model-catalog-generation-policy.ts) and use the COMMITTED model
       # catalogs instead of refetching live pricing that can drift between the release commit
@@ -87,14 +98,6 @@ jobs:
       # refresh only happens when PI_FETCH_MODELS=1 is explicitly set, which this job never does.
       - name: Build
         run: npm run build
-
-      - name: Check
-        if: runner.os == 'Linux'
-        run: npm run check
-
-      - name: Machine models
-        if: runner.os == 'Linux'
-        run: node scripts/check-machine-models.mjs --explore
 
       - name: Harness journeys
         run: npm run check:harness-journeys

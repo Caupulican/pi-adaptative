@@ -3,10 +3,14 @@
  * Machine-model checks, the kernel model checker (D3). The models are plain data: the remote-job delivery model in
  * core/remote and the kernel vocabulary in kernel/machine-model*.ts. Two modes:
  *
- *   node scripts/check-machine-models.mjs --static    shape, coverage and symbols, then a bounded search of the real model
- *                                                     (invariants, deadlocks, liveness) under reduced budgets (check:static)
- *   node scripts/check-machine-models.mjs --explore   exhaustive search of the real model at full bounds, the projection, and
- *                                                     every variant (CI only)
+ *   node --conditions=pi-source scripts/check-machine-models.mjs --static
+ *       shape, coverage and symbols, then a bounded search of the real model (invariants, deadlocks, liveness) under
+ *       reduced budgets (check:static)
+ *   node --conditions=pi-source scripts/check-machine-models.mjs --explore
+ *       exhaustive search of the real model at full bounds, the projection, and every variant (CI only)
+ *
+ * The models are imported from source, and the kernel imports workspace packages: `--conditions=pi-source` resolves those
+ * to their sources too, so the check needs no build and never reads a `dist` that lags behind the sources.
  *
  * --explore fails when the search is not exhausted, when the real model breaks an invariant, deadlocks, or fails a liveness
  * property, when a declared action or crash never fires (so no model is vacuous), when the machine projection is ambiguous, and
@@ -27,7 +31,7 @@ import { crashLabel, modelShapeFailures, projectMachine } from "../packages/codi
 
 const mode = process.argv[2];
 if (mode !== "--static" && mode !== "--explore") {
-	console.error("usage: node scripts/check-machine-models.mjs --static | --explore");
+	console.error("usage: node --conditions=pi-source scripts/check-machine-models.mjs --static | --explore");
 	process.exit(2);
 }
 
