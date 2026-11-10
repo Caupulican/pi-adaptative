@@ -14,6 +14,7 @@ import { runJourney3 } from "./fixtures/harness/journeys/journey-3.ts";
 import { runJourney4 } from "./fixtures/harness/journeys/journey-4.ts";
 import { runJourney5 } from "./fixtures/harness/journeys/journey-5.ts";
 import { runJourney6 } from "./fixtures/harness/journeys/journey-6.ts";
+import { runJourney7 } from "./fixtures/harness/journeys/journey-7.ts";
 
 describe("Adaptive harness composed journeys", () => {
 	it(
@@ -42,5 +43,9 @@ describe("Adaptive harness composed journeys", () => {
 
 	it("plan lanes: steps that change files work in their own worktree lanes and a merge join lands them on main in order", async () => {
 		await runJourney6();
+	}, 360_000);
+
+	it("bots and leaders: a root creates and asks a bot, the owner writes to a bot and a group, a leader runs a subtree", async () => {
+		await runJourney7();
 	}, 360_000);
 });
