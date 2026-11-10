@@ -55,6 +55,19 @@ function privateText(updateId: number, userId: number, name: string, text: strin
 	};
 }
 
+/** A press of one of the bot's inline buttons by a person in their private chat with it: the press carries the button's data. */
+function privatePress(updateId: number, userId: number, data: string): Record<string, unknown> {
+	return {
+		update_id: updateId,
+		callback_query: {
+			id: `press-${updateId}`,
+			from: { id: userId, is_bot: false, first_name: "Owner" },
+			message: { message_id: updateId * 10, chat: { id: userId, type: "private" } },
+			data,
+		},
+	};
+}
+
 /**
  * The Bot API as the shipped transport reaches it through the world's fetch port. A poll with no update waiting is held
  * until the journey hands one over, refuses it, or the transport aborts it. Each poll's `offset` is checked against the
@@ -62,6 +75,8 @@ function privateText(updateId: number, userId: number, name: string, text: strin
  */
 class FakeBotApi {
 	readonly sent: SentMessage[] = [];
+	/** The presses the transport told Telegram it received (`answerCallbackQuery`), by press id. */
+	readonly acknowledged: string[] = [];
 	readonly offsets: (number | undefined)[] = [];
 	readonly violations: string[] = [];
 	openPolls = 0;
@@ -73,6 +88,7 @@ class FakeBotApi {
 	private held: ((response: Response) => void) | undefined;
 	private pollWaiter: { readonly offset: number | undefined; readonly barrier: Barrier } | undefined;
 	private sendWaiter: Barrier | undefined;
+	private pressWaiter: Barrier | undefined;
 	private readonly journalSeen: () => readonly string[];
 
 	constructor(journalSeen: () => readonly string[]) {
@@ -90,6 +106,11 @@ class FakeBotApi {
 			this.sent.push({ body });
 			this.sendWaiter?.release();
 			return Promise.resolve(Response.json({ ok: true, result: { message_id: 1 } }));
+		}
+		if (route[2] === "answerCallbackQuery") {
+			this.acknowledged.push(String(body.callback_query_id));
+			this.pressWaiter?.release();
+			return Promise.resolve(Response.json({ ok: true, result: true }));
 		}
 		if (route[2] !== "getUpdates")
 			return Promise.resolve(Response.json({ ok: false, error_code: 404 }, { status: 404 }));
@@ -165,6 +186,14 @@ class FakeBotApi {
 	/** Resolves once `count` messages were sent in all. */
 	async untilSent(count: number): Promise<void> {
 		while (this.sent.length < count) await this.nextSend();
+	}
+
+	/** Resolves once the transport acknowledged the press `id` to Telegram. */
+	async untilAcknowledged(id: string): Promise<void> {
+		while (!this.acknowledged.includes(id)) {
+			this.pressWaiter = createBarrier();
+			await this.pressWaiter.promise;
+		}
 	}
 
 	/** The update `id` carries no message the transport admits; the leg asserts the journal never holds it. */
@@ -688,6 +717,18 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 			);
 			expect(presentation, "it carries the complete call").toContain(`command: ${command}`);
 			expect(presentation.endsWith(`Reply approve ${id} or deny ${id}.`), presentation).toBe(true);
+			// The same two words are one tap away: the presentation carries them as buttons.
+			expect(
+				api.sent.find((message) => message.body.text === presentation)?.body.reply_markup,
+				"the presentation offers its two decisions as buttons",
+			).toEqual({
+				inline_keyboard: [
+					[
+						{ text: "Approve", callback_data: `approve ${id}` },
+						{ text: "Deny", callback_data: `deny ${id}` },
+					],
+				],
+			});
 		}
 		expect(api.texts(), "the turn's answer follows").toContain("Both pushes wait for your approval.");
 		const heldRun = (await rootRuns()).find((run) =>
@@ -757,9 +798,11 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 			ownerLegUpdate(6, OWNER_ID, `approve ${mainId}`),
 			ownerLegUpdate(7, OWNER_ID, `approve ${mainId}`),
 			ownerLegUpdate(8, OWNER_ID, `approve ${unknownId}`),
-			ownerLegUpdate(9, OWNER_ID, `deny ${releaseId}`),
+			// The other push is denied with its button: a press is the owner sending that word.
+			privatePress(9, OWNER_ID, `deny ${releaseId}`),
 		);
 		await withDeadline(trace, "the three control replies reach the chat", api.untilSent(9));
+		await withDeadline(trace, "the press is acknowledged to Telegram", api.untilAcknowledged("press-9"));
 		expect(api.texts().slice(6).sort(), "each control word is answered once, the replay not at all").toEqual(
 			[
 				`Draft ${mainId} was already released.`,
@@ -768,6 +811,11 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 			].sort(),
 		);
 		expect(seen(6), "the replayed update is journaled once").toBe(1);
+		expect(api.acknowledged, "only the press is acknowledged, once").toEqual(["press-9"]);
+		expect(
+			api.sent.slice(6).map((message) => message.body.reply_markup),
+			"a control reply offers no button",
+		).toEqual([undefined, undefined, undefined]);
 		expect(pushDraft("release")?.state, "the denied push is ended").toBe("denied");
 		expect(pushesRun(), "the denied push never runs, and the released one not again").toEqual([pushCommands[0]]);
 		trace.mark("root", "telegram-owner.decided");
