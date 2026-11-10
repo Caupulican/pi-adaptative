@@ -9,12 +9,15 @@ import type { Language } from "./language.ts";
 import type { CHAT } from "./text-en/chat.ts";
 import type { COMMANDS } from "./text-en/commands.ts";
 import type { COMMON } from "./text-en/common.ts";
+import type { CONFIG_SCREEN } from "./text-en/config-screen.ts";
 import type { FRAME } from "./text-en/frame.ts";
 import type { GRAPH } from "./text-en/graph.ts";
 import type { INSPECTOR } from "./text-en/inspector.ts";
 import type { KEYS } from "./text-en/keys.ts";
 import type { PANES } from "./text-en/panes.ts";
+import type { SECRETS_SCREEN } from "./text-en/secrets-screen.ts";
 import type { SETTINGS } from "./text-en/settings.ts";
+import type { SETTINGS_SCREEN } from "./text-en/settings-screen.ts";
 import type { STATUS } from "./text-en/status.ts";
 
 /**
@@ -26,12 +29,15 @@ export interface InterfaceText {
 	chat: typeof CHAT;
 	commands: typeof COMMANDS;
 	common: typeof COMMON;
+	configScreen: typeof CONFIG_SCREEN;
 	frame: typeof FRAME;
 	graph: typeof GRAPH;
 	inspector: typeof INSPECTOR;
 	keys: typeof KEYS;
 	panes: typeof PANES;
+	secretsScreen: typeof SECRETS_SCREEN;
 	settings: typeof SETTINGS;
+	settingsScreen: typeof SETTINGS_SCREEN;
 	status: typeof STATUS;
 }
 

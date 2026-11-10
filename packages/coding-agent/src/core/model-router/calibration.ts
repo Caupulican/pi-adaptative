@@ -1,4 +1,5 @@
 import type { Api, Model } from "@caupulican/pi-ai";
+import { interfaceText } from "../language/interface-text.ts";
 import type { ModelToolProbe } from "../models/adaptation-store.ts";
 import type { StoredFitnessReport } from "../models/fitness-store.ts";
 import { evaluateSurfaceFitness, type FitnessGatedSurface } from "./fitness-gate.ts";
@@ -120,15 +121,15 @@ const SURFACE_SHORT: Record<FitnessGatedSurface, string> = {
  * execution probe is named separately: it is not a fitness surface.
  */
 export function describeRouterCalibrationScope(): string {
-	const names = ROUTER_CALIBRATION_SURFACES.map((surface) => SURFACE_SHORT[surface]).join(", ");
-	return `${ROUTER_CALIBRATION_SURFACES.length} router fitness surfaces (${names}) + real tool execution probe`;
+	const words = interfaceText().settingsScreen.modelRouter.calibrate;
+	return words.scope(describeRouterCalibrationSurfaces(), words.probe);
 }
 
 /** The fitness surfaces alone, for copy that names the probe separately. */
 export function describeRouterCalibrationSurfaces(): string {
-	return `${ROUTER_CALIBRATION_SURFACES.length} router fitness surfaces (${ROUTER_CALIBRATION_SURFACES.map(
-		(surface) => SURFACE_SHORT[surface],
-	).join(", ")})`;
+	const words = interfaceText().settingsScreen.modelRouter.calibrate;
+	const names = ROUTER_CALIBRATION_SURFACES.map((surface) => words.surfaceNames[SURFACE_SHORT[surface]]).join(", ");
+	return words.surfaces(ROUTER_CALIBRATION_SURFACES.length, names);
 }
 
 export function formatRouterCalibrationRow(row: RouterCalibrationRow): string {

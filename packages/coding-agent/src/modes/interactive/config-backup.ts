@@ -14,6 +14,7 @@ import * as path from "node:path";
 import type { Component } from "@caupulican/pi-tui";
 import { getAgentDir, getProfilesDir } from "../../config.ts";
 import { configBackupsDir } from "../../core/agent-paths.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type {
 	GlobalResourceProfileConfiguration,
 	ModelRouterSettings,
@@ -96,7 +97,7 @@ function canonicalActiveResourceProfiles(settings: Settings): string[] {
 
 function decodeStringArray(label: string, value: unknown): string[] {
 	if (!Array.isArray(value) || value.some((entry) => typeof entry !== "string")) {
-		throw new Error(`Invalid backup file: ${label} must be an array of strings`);
+		throw new Error(interfaceText().configScreen.validation.arrayOfStrings(label));
 	}
 	return [...new Set(value.map((entry) => entry.trim()).filter((entry) => entry.length > 0))];
 }
@@ -114,12 +115,12 @@ function decodeActiveResourceProfiles(settings: Record<string, unknown>): string
 function decodeResourceProfiles(value: unknown): Record<string, ProfileDefinitionInput> {
 	if (value === undefined) return {};
 	if (!isRecord(value)) {
-		throw new Error("Invalid backup file: settings.resourceProfiles must be an object");
+		throw new Error(interfaceText().configScreen.validation.profilesObject);
 	}
 	const profiles: Record<string, ProfileDefinitionInput> = {};
 	for (const [name, definition] of Object.entries(value)) {
 		const decoded = decodeBackupProfile(name, definition);
-		if (!decoded) throw new Error(`Invalid backup file: malformed resource profile "${name}"`);
+		if (!decoded) throw new Error(interfaceText().configScreen.validation.malformedProfile(name));
 		profiles[name] = decoded;
 	}
 	return profiles;
@@ -127,10 +128,10 @@ function decodeResourceProfiles(value: unknown): Record<string, ProfileDefinitio
 
 function decodeProfileFiles(value: unknown): Record<string, unknown> {
 	if (value === undefined) return {};
-	if (!isRecord(value)) throw new Error("Invalid backup file: profiles must be an object");
+	if (!isRecord(value)) throw new Error(interfaceText().configScreen.validation.profilesMustBeObject);
 	for (const filename of Object.keys(value)) {
 		if (path.basename(filename) !== filename || !filename.endsWith(".json")) {
-			throw new Error(`Invalid backup file: unsafe profile filename "${filename}"`);
+			throw new Error(interfaceText().configScreen.validation.unsafeProfileFile(filename));
 		}
 	}
 	return value;
@@ -163,7 +164,8 @@ function replaceProfileFiles(profilesDir: string, profiles: Record<string, unkno
 	clearProfileFiles(profilesDir);
 	for (const [filename, content] of Object.entries(profiles)) {
 		const serialized = JSON.stringify(content, null, 2);
-		if (serialized === undefined) throw new Error(`Invalid backup file: profile "${filename}" is not serializable`);
+		if (serialized === undefined)
+			throw new Error(interfaceText().configScreen.validation.profileNotSerializable(filename));
 		fs.writeFileSync(path.join(profilesDir, filename), serialized, "utf-8");
 	}
 }
@@ -236,7 +238,7 @@ export async function handleConfigBackupCommand(host: ConfigBackupHost, fileArg?
 
 		fs.mkdirSync(path.dirname(targetFile), { recursive: true });
 		fs.writeFileSync(targetFile, JSON.stringify(backupData, null, 2), "utf-8");
-		host.showStatus(`Configuration backup saved to ${targetFile}`);
+		host.showStatus(interfaceText().configScreen.backup.saved(targetFile));
 	} catch (error) {
 		host.showError(error instanceof Error ? error.message : String(error));
 	}
@@ -246,13 +248,13 @@ export async function handleConfigRestoreCommand(host: ConfigRestoreHost, fileAr
 	try {
 		const trimmed = fileArg.trim();
 		if (!trimmed) {
-			host.showError("Usage: /config-restore <file>");
+			host.showError(interfaceText().configScreen.backup.usage);
 			return;
 		}
 
 		const resolved = host.settingsManager.canonicalizePath(trimmed);
 		if (!resolved || !fs.existsSync(resolved)) {
-			host.showError(`Backup file does not exist: ${trimmed}`);
+			host.showError(interfaceText().configScreen.backup.missing(trimmed));
 			return;
 		}
 
@@ -261,12 +263,14 @@ export async function handleConfigRestoreCommand(host: ConfigRestoreHost, fileAr
 			const content = fs.readFileSync(resolved, "utf-8");
 			bundle = JSON.parse(content);
 		} catch (error) {
-			host.showError(`Failed to parse backup file: ${error instanceof Error ? error.message : String(error)}`);
+			host.showError(
+				interfaceText().configScreen.backup.parseFailed(error instanceof Error ? error.message : String(error)),
+			);
 			return;
 		}
 
 		if (!isRecord(bundle)) {
-			host.showError("Invalid backup file: must be a JSON object");
+			host.showError(interfaceText().configScreen.backup.notObject);
 			return;
 		}
 
@@ -297,12 +301,13 @@ export async function handleConfigRestoreCommand(host: ConfigRestoreHost, fileAr
 					settled = true;
 					resolve(value);
 				};
+				const text = interfaceText().configScreen.backup;
 				const submenu = new SelectSubmenu(
-					"Restore configuration?",
-					"This will overwrite existing local profiles and settings with the backup values. Do you want to continue?",
+					text.confirmTitle,
+					text.confirmBody,
 					[
-						{ value: "yes", label: "Yes", description: "Proceed with restoration." },
-						{ value: "no", label: "No", description: "Cancel and abort." },
+						{ value: "yes", label: interfaceText().settingsScreen.values.yes, description: text.proceed },
+						{ value: "no", label: interfaceText().settingsScreen.values.no, description: text.abort },
 					],
 					"no",
 					(value) => {
@@ -323,7 +328,7 @@ export async function handleConfigRestoreCommand(host: ConfigRestoreHost, fileAr
 		});
 
 		if (!confirm) {
-			host.showStatus("Restore aborted.");
+			host.showStatus(interfaceText().configScreen.backup.aborted);
 			return;
 		}
 
@@ -344,9 +349,9 @@ export async function handleConfigRestoreCommand(host: ConfigRestoreHost, fileAr
 			});
 			await host.settingsManager.flush();
 			if (!(await host.handleReloadCommand())) {
-				throw new Error("restored configuration failed runtime validation");
+				throw new Error(interfaceText().configScreen.validation.runtimeValidation);
 			}
-			host.showStatus("Configuration restored successfully.");
+			host.showStatus(interfaceText().configScreen.backup.restored);
 		} catch (error) {
 			let rollbackError: unknown;
 			if (restoreStarted) {
@@ -364,8 +369,11 @@ export async function handleConfigRestoreCommand(host: ConfigRestoreHost, fileAr
 			const message = error instanceof Error ? error.message : String(error);
 			host.showError(
 				rollbackError
-					? `Configuration restore failed: ${message}; rollback failed: ${rollbackError instanceof Error ? rollbackError.message : String(rollbackError)}`
-					: `Configuration restore failed: ${message}; previous configuration restored`,
+					? interfaceText().configScreen.backup.failedWithRollback(
+							message,
+							rollbackError instanceof Error ? rollbackError.message : String(rollbackError),
+						)
+					: interfaceText().configScreen.backup.failed(message),
 			);
 		}
 	} catch (error) {

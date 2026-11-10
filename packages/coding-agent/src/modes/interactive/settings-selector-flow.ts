@@ -20,6 +20,7 @@ import type {
 	HmoeWeights,
 } from "../../core/expert-routing/vocabulary.ts";
 import { configureHttpDispatcher, formatHttpIdleTimeoutMs } from "../../core/http-dispatcher.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { resolveCliModel } from "../../core/model-resolver.ts";
 import { describeRouterCalibration, formatRouterCalibrationRow } from "../../core/model-router/calibration.ts";
@@ -59,9 +60,15 @@ import { describeSystemOneAccess } from "../../core/system-one/access.ts";
 import { plainLabel } from "../../presentation/plain-text.ts";
 import { getAvailableThemes, setTheme } from "../../presentation/theme/theme.ts";
 import { ActionTranscriptComponent } from "./components/action-transcript.ts";
+
 import type { CustomEditor } from "./components/custom-editor.ts";
 import type { FooterComponent } from "./components/footer.ts";
 import { type ModelRouterPoolView, SettingsSelectorComponent } from "./components/settings-selector.ts";
+
+/** The words for the scope a setting was saved to; the scope value itself stays the code's own word. */
+function scopeLabel(scope: SettingsScope | undefined): string {
+	return interfaceText().settingsScreen.scopes[scope ?? "global"];
+}
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface SettingsSelectorFlowSettingsSource {
@@ -240,8 +247,8 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 		const profileOptions = [
 			{
 				value: "(none)",
-				label: "(none)",
-				description: "Use configured profile selection (session default)",
+				label: interfaceText().settingsScreen.values.none,
+				description: interfaceText().settingsScreen.resourcesMenu.profileDefault,
 			},
 			...host.settingsManager
 				.getProfileRegistry()
@@ -342,10 +349,11 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 					host.session.setCostGuardSettings(settings, scope);
 					host.footer.invalidate();
 					host.ui.requestRender();
+					const text = interfaceText().settingsScreen;
 					host.showStatus(
 						settings.enabled
-							? `Foreground cost guard enabled at $${settings.maxTurnUsd.toFixed(2)}/turn (${settings.action}).`
-							: "Foreground cost guard disabled.",
+							? text.statuses.costGuardOn(settings.maxTurnUsd.toFixed(2), settings.action)
+							: text.statuses.costGuardOff,
 					);
 				},
 				onShowImagesChange: (enabled) => {
@@ -389,7 +397,9 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 				onHttpIdleTimeoutMsChange: (timeoutMs) => {
 					host.settingsManager.setHttpIdleTimeoutMs(timeoutMs);
 					configureHttpDispatcher(timeoutMs);
-					host.showStatus(`HTTP idle timeout: ${formatHttpIdleTimeoutMs(timeoutMs)}`);
+					const text = interfaceText().settingsScreen;
+					const value = formatHttpIdleTimeoutMs(timeoutMs);
+					host.showStatus(text.statuses.httpIdleTimeout(text.valueLabels.httpIdleTimeout[value] ?? value));
 				},
 				onThinkingLevelChange: (level) => {
 					host.session.setThinkingLevel(level);
@@ -401,7 +411,7 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 					host.settingsManager.setTheme(themeName);
 					host.ui.invalidate();
 					if (!result.success) {
-						host.showError(`Failed to load theme "${themeName}": ${result.error}\nFell back to dark theme.`);
+						host.showError(interfaceText().settingsScreen.statuses.themeFailed(themeName, result.error ?? ""));
 					}
 				},
 				onLanguageChange: (language) => {
@@ -416,14 +426,16 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 				},
 				onProjectContextFilesChange: (mode, scope) => {
 					host.settingsManager.setProjectContextFiles(mode, scope);
+					const text = interfaceText().settingsScreen;
 					const where =
 						scope === "directoryProfile"
-							? "this directory"
+							? text.statuses.projectContextWhere.thisDirectory
 							: scope === "project"
-								? "this project"
-								: "all projects";
-					const load = mode === "on-demand" ? "lists this project's AGENTS.md" : "global AGENTS.md only";
-					host.showStatus(`Project context files: ${load} (${where}). Run /reload to apply.`);
+								? text.statuses.projectContextWhere.thisProject
+								: text.statuses.projectContextWhere.allProjects;
+					const load =
+						mode === "on-demand" ? text.statuses.projectContextOn : text.statuses.projectContextGlobalOnly;
+					host.showStatus(text.statuses.projectContextFiles(load, where));
 				},
 				onHideThinkingBlockChange: (hidden) => {
 					host.hideThinkingBlock = hidden;
@@ -476,71 +488,71 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 					if (validationMessage) {
 						host.showWarning(validationMessage);
 					}
-					host.showStatus(
-						`Self modification settings saved to ${scope}. Start a new session or /reload for system-prompt guardrails to fully refresh.`,
-					);
+					host.showStatus(interfaceText().settingsScreen.statuses.selfModificationSaved(scopeLabel(scope)));
 				},
 				onAutonomyChange: (settings, scope) => {
 					host.applyAutonomyMode(settings.mode ?? "off", scope);
-					host.showStatus(`Autonomy mode ${settings.mode ?? "off"} saved to ${scope}. Use /autonomy status.`);
+					host.showStatus(
+						interfaceText().settingsScreen.statuses.autonomySaved(settings.mode ?? "off", scopeLabel(scope)),
+					);
 				},
 				onResearchLaneChange: (settings, scope) => {
 					host.settingsManager.setResearchLaneSettings(settings, scope);
-					host.showStatus(
-						`Research lane settings saved to ${scope}. Use /autonomy research or /autonomy diagnostics.`,
-					);
+					host.showStatus(interfaceText().settingsScreen.statuses.researchLaneSaved(scopeLabel(scope)));
 				},
 				onWorkerDelegationChange: (settings, scope) => {
 					host.settingsManager.setWorkerDelegationSettings(settings, scope);
-					host.showStatus(`Worker delegation settings saved to ${scope}. The delegate tool uses them.`);
+					host.showStatus(interfaceText().settingsScreen.statuses.workerDelegationSaved(scopeLabel(scope)));
 				},
 				onLearningPolicyChange: (settings, scope) => {
 					host.settingsManager.setLearningPolicySettings(settings, scope);
-					host.showStatus(`Learning policy saved to ${scope}.`);
+					host.showStatus(interfaceText().settingsScreen.statuses.learningPolicySaved(scopeLabel(scope)));
 				},
 				onSystemOneProviderChange: (choice) => {
 					host.settingsManager.setSystemOneProvider(choice);
-					host.showStatus(`System One provider set to ${choice}; the next evaluation uses it.`);
+					host.showStatus(interfaceText().settingsScreen.statuses.systemOneProviderSaved(choice));
 				},
 				onAdvisorChange: (settings, scope) => {
 					host.settingsManager.setAdvisorSettings(settings, scope);
 					const activeScope = host.settingsManager.getAdvisorSettingsScope();
 					const effective = host.settingsManager.getAdvisorSettings();
 					if (effective.error) {
-						host.showWarning(`Peer configuration error: ${effective.error}`);
+						host.showWarning(interfaceText().settingsScreen.statuses.peerError(effective.error));
 						return effective;
 					}
+					const text = interfaceText().settingsScreen;
 					const selection =
 						effective.enabled === false
-							? "disabled"
-							: `${effective.model ?? "agent chooses"} (${effective.thinkingLevel ?? "agent chooses effort"})`;
+							? text.statuses.peerSelectionDisabled
+							: text.statuses.peerSelection(
+									effective.model ?? text.values.agentChoosesLower,
+									effective.thinkingLevel ?? text.values.agentChoosesEffort,
+								);
 					if (activeScope !== scope) {
-						host.showWarning(`Peer saved to ${scope}; active ${activeScope} configuration remains ${selection}.`);
+						host.showWarning(text.statuses.peerOtherScope(scopeLabel(scope), scopeLabel(activeScope), selection));
 						return effective;
 					}
 					const options = host.session.getPeerReviewController()?.options();
 					if (effective.enabled && (!options || options.reason)) {
 						host.showWarning(
-							`Peer settings saved to ${scope}: ${options?.reason ?? "the root peer tool is unavailable in this session"}`,
+							text.statuses.peerSaved(scopeLabel(scope), options?.reason ?? text.statuses.peerToolUnavailable),
 						);
 						return effective;
 					}
 					host.showStatus(
 						effective.enabled === false
-							? "Peer disabled; existing findings remain available."
-							: `Peer: ${selection}, saved to ${scope}. Applies to the next review; omitted effort uses the model default.`,
+							? text.statuses.peerDisabled
+							: text.statuses.peerApplied(selection, scopeLabel(scope)),
 					);
 					return effective;
 				},
 				onModelCapabilityChange: (settings, scope) => {
 					host.settingsManager.setModelCapabilitySettings(settings, scope);
-					host.showStatus(`Model capability mode saved to ${scope}. Applies on the next model switch or /reload.`);
+					host.showStatus(interfaceText().settingsScreen.statuses.modelCapabilitySaved(scopeLabel(scope)));
 				},
 				onContextCurationChange: (settings, scope) => {
 					host.settingsManager.setContextCurationSettings(settings, scope);
-					host.showStatus(
-						`Context curation settings saved to ${scope}. Run /fitness <model> first if the model is unprobed.`,
-					);
+					host.showStatus(interfaceText().settingsScreen.statuses.contextCurationSaved(scopeLabel(scope)));
 				},
 				onModelRouterChange: (settings, scope) => {
 					host.settingsManager.setModelRouterSettings(settings, scope);
@@ -551,7 +563,7 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 						}
 					}
 					host.updateAutoLearnFooter();
-					host.showStatus(`Model Router settings saved to ${scope}. Use /session or /usage to inspect routing.`);
+					host.showStatus(interfaceText().settingsScreen.statuses.modelRouterSaved(scopeLabel(scope)));
 				},
 				onAutoLearnChange: (settings, scope) => {
 					host.settingsManager.setAutoLearnSettings(settings, scope);
@@ -560,15 +572,15 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 						host.showWarning(validationMessage);
 					}
 					host.updateAutoLearnFooter();
-					host.showStatus(`Auto Learn settings saved to ${scope}. Use /auto-learn status or /auto-learn run.`);
+					host.showStatus(interfaceText().settingsScreen.statuses.autoLearnSaved(scopeLabel(scope)));
 				},
 				onContextPolicyEnforcementChange: (settings, scope) => {
 					host.settingsManager.setContextPromptEnforcementSettings(settings, scope);
-					host.showStatus(`Context/prompt-policy settings saved to ${scope}.`);
+					host.showStatus(interfaceText().settingsScreen.statuses.contextPolicySaved(scopeLabel(scope)));
 				},
 				onContextMemoryRetrievalChange: (settings, scope) => {
 					host.settingsManager.setMemoryRetrievalSettings(settings, scope);
-					host.showStatus(`Context/memory-retrieval settings saved to ${scope}.`);
+					host.showStatus(interfaceText().settingsScreen.statuses.contextMemorySaved(scopeLabel(scope)));
 				},
 				onResourcesHubAction: (action) => {
 					done();

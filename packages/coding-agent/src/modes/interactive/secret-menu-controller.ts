@@ -1,6 +1,7 @@
 import { readFile, stat } from "node:fs/promises";
 import { isAbsolute } from "node:path";
 import type { ExtensionUIContext } from "../../core/extensions/types.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import {
 	type CredentialManager,
 	CredentialManagerError,
@@ -16,19 +17,17 @@ import {
 } from "../../core/secrets/secret-dotenv.ts";
 import { ExtensionEditorComponent } from "./components/extension-editor.ts";
 
-const ADD_ACTION = "Add or update credentials";
-const ACTIVATE_ACTION = "Activate credentials for this project";
-const BIND_ACTION = "Use an existing profile in this project";
-const REMOVE_ACTION = "Remove a credential profile";
-const RECONNECT_ACTION = "Reconnect Bitwarden";
-const LOCK_ACTION = "Lock Pi credentials";
-const CLOSE_ACTION = "Close";
+/** The actions the menu offers. The list shows their labels; the controller acts on these identifiers. */
+type SecretMenuAction = "add" | "activate" | "bind" | "remove" | "reconnect" | "lock" | "close";
 
-const USER_PASSWORD_KIND = "Username and password";
-const KEY_KIND = "API token or private key";
-const DOTENV_KIND = "Environment variables (.env format)";
-const MACHINE_SETUP_NOTICE =
-	"Bitwarden is not connected. Set BWS_ACCESS_TOKEN or BW_SESSION in your environment yourself; Pi never asks for it.";
+/** The shapes a new credential can take. Also an identifier, labelled by the catalogue. */
+type CredentialShape = "userPassword" | "key" | "dotenv";
+
+/** Turn the chosen label back into the identifier it stands for. */
+function identifierOf<T extends string>(options: T[], labels: string[], chosen: string | undefined): T | undefined {
+	if (chosen === undefined) return undefined;
+	return options[labels.indexOf(chosen)];
+}
 
 export interface SecretMenuControllerOptions {
 	manager: CredentialManager;
@@ -43,7 +42,7 @@ function safeErrorMessage(error: unknown): string {
 	) {
 		return error.message;
 	}
-	return "Credential operation failed safely without exposing private data.";
+	return interfaceText().secretsScreen.notices.failedSafely;
 }
 
 async function openPrivateEditor(
@@ -80,9 +79,9 @@ async function resolvePrivateValue(editorValue: string): Promise<string> {
 	const pathCandidate = unquoteDroppedPath(editorValue.trim());
 	if (!isAbsolute(pathCandidate)) return editorValue;
 	const metadata = await stat(pathCandidate).catch(() => undefined);
-	if (!metadata?.isFile()) throw new SecretDotenvError("dropped key file was not found or is not a regular file");
+	if (!metadata?.isFile()) throw new SecretDotenvError(interfaceText().secretsScreen.notices.keyFileMissing);
 	if (metadata.size > MAX_DOTENV_VALUE_BYTES) {
-		throw new SecretDotenvError("dropped key file exceeds the 64 KiB value limit");
+		throw new SecretDotenvError(interfaceText().secretsScreen.notices.keyFileTooLarge);
 	}
 	return readFile(pathCandidate, "utf8");
 }
@@ -97,6 +96,7 @@ export class SecretMenuController {
 	}
 
 	async open(ui: ExtensionUIContext): Promise<void> {
+		const text = interfaceText().secretsScreen;
 		let profiles: CredentialProfileSummary[] | undefined;
 		if (!this.manager.status.connected && this.manager.status.sessionAvailable) {
 			try {
@@ -106,54 +106,55 @@ export class SecretMenuController {
 			}
 		}
 		if (!this.manager.status.connected) {
-			ui.notify(MACHINE_SETUP_NOTICE, "error");
+			ui.notify(text.notices.machineSetup, "error");
 			return;
 		}
 		while (true) {
 			try {
 				profiles ??= await this.manager.listForProject(this.cwd);
-				const actions = [ADD_ACTION];
-				if (profiles.some((profile) => profile.boundToCurrentProject)) actions.push(ACTIVATE_ACTION);
-				if (profiles.some((profile) => !profile.boundToCurrentProject)) actions.push(BIND_ACTION);
-				if (profiles.length > 0) actions.push(REMOVE_ACTION);
-				actions.push(RECONNECT_ACTION, LOCK_ACTION, CLOSE_ACTION);
-				const action = await ui.select("Secrets · Bitwarden", actions);
+				const actions: SecretMenuAction[] = ["add"];
+				if (profiles.some((profile) => profile.boundToCurrentProject)) actions.push("activate");
+				if (profiles.some((profile) => !profile.boundToCurrentProject)) actions.push("bind");
+				if (profiles.length > 0) actions.push("remove");
+				actions.push("reconnect", "lock", "close");
+				const labels = actions.map((value) => text.actions[value]);
+				const action = identifierOf(actions, labels, await ui.select(text.title, labels));
 				switch (action) {
-					case ADD_ACTION:
+					case "add":
 						await this.addOrUpdate(ui, profiles);
 						profiles = undefined;
 						continue;
-					case ACTIVATE_ACTION:
+					case "activate":
 						await this.activate(ui, profiles);
 						continue;
-					case BIND_ACTION:
+					case "bind":
 						await this.bind(ui, profiles);
 						profiles = undefined;
 						continue;
-					case REMOVE_ACTION:
+					case "remove":
 						await this.remove(ui, profiles);
 						profiles = undefined;
 						continue;
-					case RECONNECT_ACTION:
+					case "reconnect":
 						this.manager.lock();
 						try {
 							await this.manager.ensureAvailable();
 							profiles = await this.manager.listForProject(this.cwd);
-							ui.notify("Bitwarden reconnected from machine-owned credentials.", "info");
+							ui.notify(text.notices.reconnected, "info");
 							continue;
 						} catch (error) {
 							this.manager.lock();
 							ui.notify(
-								isCredentialSessionKeyRequired(error) ? MACHINE_SETUP_NOTICE : safeErrorMessage(error),
+								isCredentialSessionKeyRequired(error) ? text.notices.machineSetup : safeErrorMessage(error),
 								"error",
 							);
 							return;
 						}
-					case LOCK_ACTION:
+					case "lock":
 						this.manager.lock();
-						ui.notify("Pi credential access is locked for this session.", "info");
+						ui.notify(text.notices.locked, "info");
 						return;
-					case CLOSE_ACTION:
+					case "close":
 					case undefined:
 						return;
 				}
@@ -165,38 +166,35 @@ export class SecretMenuController {
 	}
 
 	private async addOrUpdate(ui: ExtensionUIContext, profiles: CredentialProfileSummary[]): Promise<void> {
-		const profileInput = await ui.input("Credential profile", "Example: deploy-prod");
+		const text = interfaceText().secretsScreen;
+		const profileInput = await ui.input(text.prompts.profile, text.prompts.profilePlaceholder);
 		if (profileInput === undefined) return;
 		const profile = profileInput.trim();
 		if (!profile) {
-			ui.notify("Credential profile name is required.", "error");
+			ui.notify(text.notices.profileRequired, "error");
 			return;
 		}
 		if (profiles.some((candidate) => candidate.profile === profile)) {
-			const approved = await ui.confirm(
-				"Update credential profile",
-				`Replace the stored values for ${profile} while preserving its project bindings?`,
-			);
+			const approved = await ui.confirm(text.prompts.updateTitle, text.prompts.updateBody(profile));
 			if (!approved) return;
 		}
-		const descriptionInput = await ui.input("Description", "Optional non-secret description");
+		const descriptionInput = await ui.input(text.prompts.description, text.prompts.descriptionPlaceholder);
 		if (descriptionInput === undefined) return;
 		const description = descriptionInput.trim() || undefined;
-		const kind = await ui.select("Credential shape", [USER_PASSWORD_KIND, KEY_KIND, DOTENV_KIND]);
+		const shapes: CredentialShape[] = ["userPassword", "key", "dotenv"];
+		const shapeLabels = shapes.map((shape) => text.shapes[shape]);
+		const kind = identifierOf(shapes, shapeLabels, await ui.select(text.prompts.shape, shapeLabels));
 		if (!kind) return;
 		let dotenv = "";
 		try {
-			if (kind === USER_PASSWORD_KIND) dotenv = (await this.captureUserPassword(ui)) ?? "";
-			else if (kind === KEY_KIND) dotenv = (await this.captureKey(ui)) ?? "";
+			if (kind === "userPassword") dotenv = (await this.captureUserPassword(ui)) ?? "";
+			else if (kind === "key") dotenv = (await this.captureKey(ui)) ?? "";
 			else dotenv = (await this.captureDotenv(ui)) ?? "";
 			if (!dotenv) return;
 			const stored = await this.manager.storeForProject(this.cwd, { profile, description, dotenv });
-			ui.notify(
-				`Stored and activated ${stored.profile} (${stored.variableNames.length} variables) in Bitwarden.`,
-				"info",
-			);
+			ui.notify(text.prompts.stored(stored.profile, text.variableCount(stored.variableNames.length)), "info");
 			if (stored.portable === false) {
-				ui.notify("This project has no portable Git remote, so its binding is local to this machine.", "warning");
+				ui.notify(text.notices.noGitRemote, "warning");
 			}
 		} catch (error) {
 			ui.notify(safeErrorMessage(error), "error");
@@ -206,18 +204,19 @@ export class SecretMenuController {
 	}
 
 	private async captureUserPassword(ui: ExtensionUIContext): Promise<string | undefined> {
-		const usernameVariableInput = await ui.input("Username variable", "USERNAME");
+		const text = interfaceText().secretsScreen;
+		const usernameVariableInput = await ui.input(text.prompts.usernameVariable, "USERNAME");
 		if (usernameVariableInput === undefined) return undefined;
 		const usernameVariable = usernameVariableInput.trim() || "USERNAME";
-		let username = await ui.input("Username", "Type the account username", { sensitive: true });
+		let username = await ui.input(text.prompts.username, text.prompts.usernamePlaceholder, { sensitive: true });
 		if (username === undefined) return undefined;
-		const passwordVariableInput = await ui.input("Password variable", "PASSWORD");
+		const passwordVariableInput = await ui.input(text.prompts.passwordVariable, "PASSWORD");
 		if (passwordVariableInput === undefined) {
 			username = "";
 			return undefined;
 		}
 		const passwordVariable = passwordVariableInput.trim() || "PASSWORD";
-		let password = await ui.input("Password", "Type the account password", { sensitive: true });
+		let password = await ui.input(text.prompts.password, text.prompts.passwordPlaceholder, { sensitive: true });
 		if (password === undefined) {
 			username = "";
 			return undefined;
@@ -234,14 +233,15 @@ export class SecretMenuController {
 	}
 
 	private async captureKey(ui: ExtensionUIContext): Promise<string | undefined> {
-		const variableInput = await ui.input("Key variable", "API_KEY");
+		const text = interfaceText().secretsScreen;
+		const variableInput = await ui.input(text.prompts.keyVariable, "API_KEY");
 		if (variableInput === undefined) return undefined;
 		const variable = variableInput.trim() || "API_KEY";
 		let editorValue = await openPrivateEditor(
 			ui,
-			`Private value · ${variable}`,
+			text.prompts.privateValueTitle(variable),
 			"",
-			"Paste a token/key, or drag an absolute key-file path here · never sent to the model",
+			text.prompts.privateValueNotice,
 		);
 		if (editorValue === undefined) return undefined;
 		let value = "";
@@ -257,11 +257,12 @@ export class SecretMenuController {
 	private async captureDotenv(ui: ExtensionUIContext): Promise<string | undefined> {
 		let draft = "# NAME=value\n";
 		while (true) {
+			const text = interfaceText().secretsScreen;
 			const edited = await openPrivateEditor(
 				ui,
-				"Environment credentials",
+				text.prompts.environmentTitle,
 				draft,
-				"Private .env editor · paste one or more NAME=value entries · never sent to the model",
+				text.prompts.environmentNotice,
 			);
 			if (edited === undefined) return undefined;
 			try {
@@ -277,44 +278,48 @@ export class SecretMenuController {
 
 	private async activate(ui: ExtensionUIContext, profiles: CredentialProfileSummary[]): Promise<void> {
 		const bound = profiles.filter((profile) => profile.boundToCurrentProject);
+		const text = interfaceText().secretsScreen;
 		const profile = await ui.select(
-			"Activate credentials",
+			text.prompts.activateTitle,
 			bound.map((candidate) => candidate.profile),
 		);
 		if (!profile) return;
 		const activated = await this.manager.activateForProject(this.cwd, profile);
 		ui.notify(
-			`Activated ${activated.profile} for ${activated.project} (${activated.variableNames.length} variables).`,
+			text.prompts.activated(
+				activated.profile,
+				activated.project,
+				text.variableCount(activated.variableNames.length),
+			),
 			"info",
 		);
 	}
 
 	private async bind(ui: ExtensionUIContext, profiles: CredentialProfileSummary[]): Promise<void> {
 		const unbound = profiles.filter((profile) => !profile.boundToCurrentProject);
+		const text = interfaceText().secretsScreen;
 		const profile = await ui.select(
-			"Use profile in this project",
+			text.prompts.bindTitle,
 			unbound.map((candidate) => candidate.profile),
 		);
 		if (!profile) return;
 		const bound = await this.manager.bindProfileToProject(this.cwd, profile);
-		ui.notify(`Bound ${bound.profile} to ${bound.project}.`, "info");
+		ui.notify(text.prompts.bound(bound.profile, bound.project ?? ""), "info");
 		if (bound.portable === false) {
-			ui.notify("This project has no portable Git remote, so its binding is local to this machine.", "warning");
+			ui.notify(text.notices.noGitRemote, "warning");
 		}
 	}
 
 	private async remove(ui: ExtensionUIContext, profiles: CredentialProfileSummary[]): Promise<void> {
+		const text = interfaceText().secretsScreen;
 		const profile = await ui.select(
-			"Remove credential profile",
+			text.prompts.removeTitle,
 			profiles.map((candidate) => candidate.profile),
 		);
 		if (!profile) return;
-		const approved = await ui.confirm(
-			"Remove credential profile",
-			`Move ${profile} to Bitwarden trash and clear its active environment?`,
-		);
+		const approved = await ui.confirm(text.prompts.removeTitle, text.prompts.removeBody(profile));
 		if (!approved) return;
 		const removed = await this.manager.removeProfile(profile);
-		ui.notify(`Removed ${removed.profile} (${removed.variableNames.length} variables).`, "info");
+		ui.notify(text.prompts.removed(removed.profile, text.variableCount(removed.variableNames.length)), "info");
 	}
 }

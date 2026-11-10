@@ -36,6 +36,19 @@ export interface SettingsListTheme {
 
 export interface SettingsListOptions {
 	enableSearch?: boolean;
+	/** The host's words for the hint line and for the shorter line drawn while a search is active. */
+	hints?: SettingsListHints;
+}
+
+export interface SettingsListHints {
+	/** Shown before anything is typed: what the search field and the keys do. */
+	search?: string;
+	/** Shown when the search field has focus: what the keys do. */
+	change?: string;
+	/** Shown when the list holds no settings at all. */
+	empty?: string;
+	/** Shown when a search leaves no setting to display. */
+	noMatch?: string;
 }
 
 export class SettingsList implements Component {
@@ -48,6 +61,7 @@ export class SettingsList implements Component {
 	private onCancel: () => void;
 	private searchInput?: Input;
 	private searchEnabled: boolean;
+	private hints: Required<SettingsListHints>;
 
 	// Submenu state
 	private submenuComponent: Component | null = null;
@@ -68,6 +82,12 @@ export class SettingsList implements Component {
 		this.onChange = onChange;
 		this.onCancel = onCancel;
 		this.searchEnabled = options.enableSearch ?? false;
+		this.hints = {
+			search: options.hints?.search ?? "Type to search · Enter/Space to change · Esc to cancel",
+			change: options.hints?.change ?? "Enter/Space to change · Esc to cancel",
+			empty: options.hints?.empty ?? "No settings available",
+			noMatch: options.hints?.noMatch ?? "No matching settings",
+		};
 		if (this.searchEnabled) {
 			this.searchInput = new Input();
 		}
@@ -117,7 +137,7 @@ export class SettingsList implements Component {
 		}
 
 		if (this.items.length === 0) {
-			lines.push(this.theme.hint("  No settings available"));
+			lines.push(this.theme.hint(`  ${this.hints.empty}`));
 			if (this.searchEnabled) {
 				this.addHintLine(lines, width);
 			}
@@ -126,7 +146,7 @@ export class SettingsList implements Component {
 
 		const displayItems = this.searchEnabled ? this.filteredItems : this.items;
 		if (displayItems.length === 0) {
-			lines.push(truncateToWidth(this.theme.hint("  No matching settings"), width));
+			lines.push(truncateToWidth(this.theme.hint(`  ${this.hints.noMatch}`), width));
 			this.addHintLine(lines, width);
 			return lines;
 		}
@@ -266,14 +286,7 @@ export class SettingsList implements Component {
 	private addHintLine(lines: string[], width: number): void {
 		lines.push("");
 		lines.push(
-			truncateToWidth(
-				this.theme.hint(
-					this.searchEnabled
-						? "  Type to search · Enter/Space to change · Esc to cancel"
-						: "  Enter/Space to change · Esc to cancel",
-				),
-				width,
-			),
+			truncateToWidth(this.theme.hint(`  ${this.searchEnabled ? this.hints.search : this.hints.change}`), width),
 		);
 	}
 }

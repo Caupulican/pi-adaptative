@@ -8,6 +8,7 @@ import {
 	SelectList,
 	type SettingItem,
 	SettingsList,
+	type SettingsListHints,
 	Spacer,
 	Text,
 } from "@caupulican/pi-tui";
@@ -19,6 +20,7 @@ import type {
 	HmoeTeamStrategy,
 } from "../../../core/expert-routing/vocabulary.ts";
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { LanguageSetting } from "../../../core/language/language.ts";
 import { DEFAULT_AUTO_LEARN_SETTINGS, resolveAutoLearnSettings } from "../../../core/learning/auto-learn-settings.ts";
 import { describeRouterCalibrationScope } from "../../../core/model-router/calibration.ts";
@@ -85,7 +87,6 @@ import {
 const AUTO_LEARN_CUSTOM_MODEL_VALUE = "__custom_auto_learn_model__";
 const MODEL_ROUTER_UNSET_MODEL_VALUE = "__unset_model_router_model__";
 const MODEL_ROUTER_INHERIT_THINKING_VALUE = "__inherit_model_router_thinking__";
-const MODEL_ROUTER_INHERIT_THINKING_LABEL = "(inherit)";
 
 const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"];
 const AUTONOMY_GOAL_CONTINUE_TURN_VALUES = ["0", "1", "3", "5", "10", "20"];
@@ -117,65 +118,47 @@ const CONTEXT_MEMORY_RETRIEVAL_DEFAULTS = {
 } as const;
 
 /**
- * Plain-words display text for machine values. A row stores, cycles and saves the machine value; these
- * maps only feed SettingItem.valueLabels (and the summaries that print the same value), so no screen
- * shows a raw enum value.
+ * The settings screen's words. A row stores and saves a machine value and reads the label for it here when
+ * the row is drawn, so a change of language needs no restart.
  */
-const ON_OFF_VALUE_LABELS: Readonly<Record<string, string>> = { true: "On", false: "Off" };
-const SCOPE_VALUE_LABELS: Readonly<Record<string, string>> = {
-	global: "Global",
-	project: "This project",
-	directoryProfile: "This directory",
-};
-const DELIVERY_MODE_VALUE_LABELS: Readonly<Record<string, string>> = {
-	"one-at-a-time": "One at a time",
-	all: "All",
-};
-const COST_GUARD_ACTION_VALUE_LABELS: Readonly<Record<string, string>> = {
-	warn: "Warn only",
-	downgrade: "Reduce reasoning",
-};
-const MODEL_CAPABILITY_MODE_VALUE_LABELS: Readonly<Record<string, string>> = {
-	auto: "Automatic",
-	off: "Off",
-	full: "Full",
-	lean: "Lean",
-	minimal: "Minimal",
-	chat: "Chat",
-};
-const MODEL_ROUTER_SELECTION_MODE_VALUE_LABELS: Readonly<Record<string, string>> = {
-	manual: "Manual",
-	auto: "Automatic",
-	hybrid: "Hybrid",
-};
-const MODEL_ROUTER_POOL_PREFERENCE_VALUE_LABELS: Readonly<Record<string, string>> = {
-	"subscription-first": "Subscriptions first",
-	balanced: "Balanced",
-};
+function screenText() {
+	return interfaceText().settingsScreen;
+}
+
+/** The words the settings list draws under its rows: the search hint, the change hint and the empty states. */
+function settingsListHints(): SettingsListHints {
+	const hints = interfaceText().settingsScreen.hints;
+	return { search: hints.searchAndChange, change: hints.change, empty: hints.noSettings, noMatch: hints.noMatch };
+}
 
 function routerTierValue(
 	model: string | undefined,
 	thinking: ThinkingLevel | undefined,
-	fallback = "(not set)",
+	fallback = screenText().values.notSet,
 ): string {
-	return `${optionalStringValue(model, fallback)} · thinking ${thinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL}`;
+	return screenText().summaries.routerTier(
+		optionalStringValue(model, fallback),
+		thinking ?? screenText().values.inherit,
+	);
 }
 
 function autoLearnModelValue(settings: AutoLearnSettings): string {
-	return optionalStringValue(settings.model, DEFAULT_AUTO_LEARN_SETTINGS.model);
+	const model = optionalStringValue(settings.model, DEFAULT_AUTO_LEARN_SETTINGS.model);
+	return model === DEFAULT_AUTO_LEARN_SETTINGS.model ? screenText().values.active : model;
 }
 
 function selfModificationSummary(settings: SelfModificationSettings): string {
-	if (!(settings.enabled ?? false)) return "disabled";
+	if (!(settings.enabled ?? false)) return screenText().summaries.disabled;
 	const hasPath =
 		Boolean(settings.sourcePath?.trim()) ||
 		(Array.isArray(settings.sourcePaths) && settings.sourcePaths.some((candidate) => Boolean(candidate?.trim())));
-	return hasPath ? "enabled" : "enabled (missing path)";
+	return screenText().summaries.selfModification(hasPath);
 }
 
 function costGuardSummary(settings: CostGuardSettings): string {
-	if (!settings.enabled) return "disabled";
-	return `${COST_GUARD_ACTION_VALUE_LABELS[settings.action] ?? settings.action} at $${settings.maxTurnUsd.toFixed(2)}/turn`;
+	if (!settings.enabled) return screenText().summaries.disabled;
+	const action = screenText().valueLabels.costGuardAction[settings.action] ?? settings.action;
+	return screenText().summaries.costGuard(action, settings.maxTurnUsd.toFixed(2));
 }
 
 function autonomyModeValue(settings: AutonomySettings): AutonomyMode {
@@ -187,8 +170,10 @@ function autonomySummary(settings: AutonomySettings): string {
 	const turns = settings.goalContinueTurns ?? DEFAULT_AUTONOMY_GOAL_CONTINUE_TURNS;
 	const stall = settings.maxStallTurns ?? DEFAULT_AUTONOMY_MAX_STALL_TURNS;
 	const autoContinue = settings.goalAutoContinue ?? DEFAULT_AUTONOMY_GOAL_AUTO_CONTINUE;
-	const modeLabel = mode === "full" ? "standing autonomy" : mode;
-	return `${modeLabel}, ${turns === 0 ? "unbounded turns" : `${turns} turns`}, stall ${stall}, auto ${autoContinue ? "on" : "off"}`;
+	const text = screenText();
+	const modeLabel = mode === "full" ? text.values.autonomyModeFull : mode;
+	const autoContinueLabel = autoContinue ? text.values.onLower : text.values.offLower;
+	return text.summaries.autonomy(modeLabel, text.summaries.turns(turns), stall, autoContinueLabel);
 }
 
 function autonomyGoalContinueTurnsValue(settings: AutonomySettings): string {
@@ -212,57 +197,67 @@ function autonomyGoalAutoContinueDelayMsValue(settings: AutonomySettings): strin
 }
 
 function researchLaneSummary(settings: ResearchLaneSettings): string {
-	if (!(settings.enabled ?? DEFAULT_RESEARCH_LANE_ENABLED)) return "disabled";
+	if (!(settings.enabled ?? DEFAULT_RESEARCH_LANE_ENABLED)) return screenText().summaries.disabled;
 	const maxUsd = settings.maxUsd ?? DEFAULT_RESEARCH_LANE_MAX_USD;
 	const maxRuns = settings.maxRunsPerSession ?? DEFAULT_RESEARCH_LANE_MAX_RUNS_PER_SESSION;
-	return `enabled ($${maxUsd}/pass, ${maxRuns} runs/session)`;
+	return screenText().summaries.researchLane(String(maxUsd), maxRuns);
 }
 
 function contextCurationSummary(settings: ContextCurationSettings): string {
-	if (!settings.enabled) return "disabled";
-	return `on · ${settings.model ?? "no model"} · ${settings.maxJobsPerTurn ?? 4} jobs/turn`;
+	if (!settings.enabled) return screenText().summaries.disabled;
+	return screenText().summaries.contextCuration(
+		settings.model ?? screenText().values.noModel,
+		settings.maxJobsPerTurn ?? 4,
+	);
 }
 
 function learningPolicySummary(settings: LearningPolicySettings): string {
-	if (!(settings.enabled ?? DEFAULT_LEARNING_POLICY_ENABLED)) return "disabled (legacy direct apply)";
+	const text = screenText();
+	if (!(settings.enabled ?? DEFAULT_LEARNING_POLICY_ENABLED)) return text.summaries.disabledLegacyDirectApply;
 	const autoApply = settings.autoApplyEnabled ?? DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED;
 	const confidence = settings.confidenceThreshold ?? DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD;
-	return `on · auto-apply ${autoApply ? "on" : "off"} · confidence at least ${confidence}`;
+	return text.summaries.learningPolicy(autoApply ? text.values.onLower : text.values.offLower, confidence);
 }
 
 function modelCapabilitySummary(settings: ModelCapabilitySettings): string {
 	const mode = settings.mode ?? "auto";
 	return mode === "auto"
-		? "Automatic (derived from the model's context window)"
-		: (MODEL_CAPABILITY_MODE_VALUE_LABELS[mode] ?? mode);
+		? screenText().summaries.modelCapabilityAuto
+		: (screenText().valueLabels.modelCapability[mode] ?? mode);
 }
 
 function workerDelegationSummary(settings: WorkerDelegationSettings): string {
-	if (!(settings.enabled ?? DEFAULT_WORKER_DELEGATION_ENABLED)) return "disabled";
+	if (!(settings.enabled ?? DEFAULT_WORKER_DELEGATION_ENABLED)) return screenText().summaries.disabled;
 	const maxUsd = settings.maxUsd ?? DEFAULT_WORKER_DELEGATION_MAX_USD;
-	return maxUsd > 0 ? `enabled ($${maxUsd}/worker)` : "enabled (unbounded)";
+	return maxUsd > 0
+		? screenText().summaries.workerDelegationBudget(String(maxUsd))
+		: screenText().summaries.enabledUnbounded;
 }
 
 function autoLearnSummary(settings: AutoLearnSettings, autonomyMode: AutonomyMode): string {
 	const effective = resolveAutoLearnSettings(autonomyMode, settings);
-	return effective.enabled ? `enabled (${effective.model})` : "disabled";
+	return effective.enabled ? screenText().summaries.autoLearn(effective.model) : screenText().summaries.disabled;
 }
 
 function contextPolicyEnforcementSummary(settings: ContextPromptEnforcementSettings): string {
-	if (!(settings.enabled ?? CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.enabled)) return "disabled";
+	if (!(settings.enabled ?? CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.enabled)) return screenText().summaries.disabled;
 	const preserve = settings.preserveRecentMessages ?? CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.preserveRecentMessages;
 	const minChars = settings.minChars ?? CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.minChars;
-	return `enabled (preserve ${preserve}, min ${minChars} chars)`;
+	return screenText().summaries.contextPolicy(preserve, minChars);
 }
 
 function contextMemoryRetrievalSummary(settings: MemoryRetrievalSettings): string {
+	const text = screenText();
 	const externalEgress = settings.allowExternalEgress ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.allowExternalEgress;
+	const consent = text.summaries.contextMemoryExternalConsent(externalEgress);
 	if (!(settings.enabled ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.enabled)) {
-		return `disabled (${externalEgress ? "external consent on" : "external off"})`;
+		return text.summaries.contextMemoryOff(consent);
 	}
 	const maxResults = settings.maxResults ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.maxResults;
 	const includeInPrompt = settings.includeInPrompt ?? CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.includeInPrompt;
-	return `enabled (max ${maxResults}${includeInPrompt ? ", in prompt" : ""}, ${externalEgress ? "external on" : "local only"})`;
+	const inPrompt = includeInPrompt ? text.summaries.contextMemoryInPrompt : "";
+	const external = text.summaries.contextMemoryExternal(externalEgress);
+	return text.summaries.contextMemory(maxResults, inPrompt, external);
 }
 
 /**
@@ -287,23 +282,33 @@ export interface ModelRouterPoolView {
 }
 
 function modelRouterPoolSummary(pool: ModelRouterPoolView | undefined): string {
-	return pool ? pool.summary : "unknown";
+	return pool ? pool.summary : screenText().values.unknown;
 }
 
 function modelRouterTierLabel(model: string | undefined, mode: ModelRouterSelectionMode | undefined): string {
 	if (model) return model;
-	return mode === "auto" || mode === "hybrid" ? "AUTO" : "(not set)";
+	return mode === "auto" || mode === "hybrid" ? screenText().values.auto : screenText().values.notSet;
 }
 
 function modelRouterSummary(settings: ModelRouterSettings, pool?: ModelRouterPoolView): string {
-	const state = settings.enabled ? "enabled" : "disabled";
-	const mode = MODEL_ROUTER_SELECTION_MODE_VALUE_LABELS[settings.selectionMode ?? "manual"] ?? settings.selectionMode;
+	const text = screenText();
+	const state = settings.enabled ? text.summaries.enabled : text.summaries.disabled;
+	const mode = text.valueLabels.routerSelection[settings.selectionMode ?? "manual"] ?? settings.selectionMode;
 	const preference =
-		MODEL_ROUTER_POOL_PREFERENCE_VALUE_LABELS[settings.poolPreference ?? "subscription-first"] ??
-		settings.poolPreference;
-	const gate = settings.fitnessGate ? "gate on" : "gate off";
+		text.valueLabels.routerPoolPreference[settings.poolPreference ?? "subscription-first"] ?? settings.poolPreference;
 	const tier = (model: string | undefined) => modelRouterTierLabel(model, settings.selectionMode);
-	return `${state} · ${mode} · pool ${modelRouterPoolSummary(pool)} · ${preference} · ${gate} · cheap: ${tier(settings.cheapModel)} · medium: ${tier(settings.mediumModel)} · expensive: ${tier(settings.expensiveModel)} · learn: ${optionalStringValue(settings.learningModel, "active")}`;
+	const learn = optionalStringValue(settings.learningModel, DEFAULT_AUTO_LEARN_SETTINGS.model);
+	return text.summaries.router({
+		state,
+		mode,
+		pool: modelRouterPoolSummary(pool),
+		preference,
+		gate: text.summaries.routerGate(Boolean(settings.fitnessGate)),
+		cheap: tier(settings.cheapModel),
+		medium: tier(settings.mediumModel),
+		expensive: tier(settings.expensiveModel),
+		learn: learn === DEFAULT_AUTO_LEARN_SETTINGS.model ? text.values.active : learn,
+	});
 }
 
 function buildAutoLearnModelOptions(
@@ -315,10 +320,10 @@ function buildAutoLearnModelOptions(
 	const options: SelectItem[] = [
 		{
 			value: DEFAULT_AUTO_LEARN_SETTINGS.model,
-			label: "active",
+			label: screenText().values.active,
 			description: currentModelPattern
-				? `Use the current session model (${currentModelPattern})`
-				: "Use the current session model",
+				? screenText().modelPicker.activeOptionWithModel(currentModelPattern)
+				: screenText().modelPicker.activeOption,
 		},
 	];
 	const seen = new Set(options.map((option) => option.value));
@@ -333,15 +338,15 @@ function buildAutoLearnModelOptions(
 		options.push({
 			value: currentValue,
 			label: currentValue,
-			description: "Current custom setting",
+			description: screenText().modelPicker.customSetting,
 		});
 		seen.add(currentValue);
 	}
 
 	options.push({
 		value: AUTO_LEARN_CUSTOM_MODEL_VALUE,
-		label: "Manual / custom…",
-		description: "Type a model pattern not listed above",
+		label: screenText().modelPicker.manualOption,
+		description: screenText().modelPicker.manualOptionDescription,
 	});
 
 	return options;
@@ -364,17 +369,17 @@ function buildModelRouterRoleModelOptions(options: {
 	if (options.includeActive) {
 		modelOptions.push({
 			value: DEFAULT_AUTO_LEARN_SETTINGS.model,
-			label: "active",
+			label: screenText().values.active,
 			description: options.currentModelPattern
-				? `Use the current session model (${options.currentModelPattern})`
-				: "Use the current session model",
+				? screenText().modelPicker.activeOptionWithModel(options.currentModelPattern)
+				: screenText().modelPicker.activeOption,
 		});
 		seen.add(DEFAULT_AUTO_LEARN_SETTINGS.model);
 	} else {
 		modelOptions.push({
 			value: MODEL_ROUTER_UNSET_MODEL_VALUE,
-			label: options.unsetLabel ?? "(unset)",
-			description: options.unsetDescription ?? "Clear this model setting",
+			label: options.unsetLabel ?? screenText().values.unset,
+			description: options.unsetDescription ?? screenText().modelPicker.clearModel,
 		});
 		seen.add(MODEL_ROUTER_UNSET_MODEL_VALUE);
 	}
@@ -394,8 +399,8 @@ function buildModelRouterRoleModelOptions(options: {
 	for (const option of ordered) {
 		if (seen.has(option.value)) continue;
 		const marks = [
-			...(favorites.has(option.value) ? ["favorite"] : []),
-			...(pool && !inPool.has(option.value) ? ["outside pool · favorite and include in scope to route"] : []),
+			...(favorites.has(option.value) ? [screenText().modelPicker.favoriteMark] : []),
+			...(pool && !inPool.has(option.value) ? [screenText().modelPicker.outsidePoolMark] : []),
 		];
 		modelOptions.push(
 			marks.length > 0 ? { ...option, description: `${option.description} · ${marks.join(" · ")}` } : option,
@@ -408,15 +413,15 @@ function buildModelRouterRoleModelOptions(options: {
 		modelOptions.push({
 			value: currentValue,
 			label: currentValue,
-			description: "Current custom setting",
+			description: screenText().modelPicker.customSetting,
 		});
 		seen.add(currentValue);
 	}
 
 	modelOptions.push({
 		value: AUTO_LEARN_CUSTOM_MODEL_VALUE,
-		label: "Manual / custom…",
-		description: "Type a model pattern not listed above",
+		label: screenText().modelPicker.manualOption,
+		description: screenText().modelPicker.manualOptionDescription,
 	});
 
 	return modelOptions;
@@ -429,7 +434,7 @@ function buildModelRouterThinkingOptions(
 	return [
 		{
 			value: MODEL_ROUTER_INHERIT_THINKING_VALUE,
-			label: MODEL_ROUTER_INHERIT_THINKING_LABEL,
+			label: screenText().values.inherit,
 			description: inheritDescription,
 		},
 		...availableLevels.map((level) => ({
@@ -576,7 +581,7 @@ class TextInputSubmenu extends Container {
 		currentValue: string,
 		onSubmit: (value: string) => void,
 		onCancel: () => void,
-		emptyHint = "empty clears the setting",
+		emptyHint = screenText().hints.emptyClearsSetting,
 	) {
 		super();
 
@@ -590,7 +595,7 @@ class TextInputSubmenu extends Container {
 		this.addChild(this.input);
 
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", `  Enter to save · Esc to go back · ${emptyHint}`), 0, 0));
+		this.addChild(new Text(theme.fg("dim", `  ${screenText().hints.textInput(emptyHint)}`), 0, 0));
 	}
 
 	handleInput(data: string): void {
@@ -616,12 +621,11 @@ class ModelSelectionSubmenu extends Container {
 			customEmptyHint: string;
 			customEmptyValue: string | undefined;
 		} = {
-			title: "Auto Learn Scavenger Model",
-			description:
-				"Choose active or a model from currently configured subscription/API accounts. Type to filter; choose manual for a custom pattern.",
-			customTitle: "Custom Auto Learn Model",
-			customDescription: 'Enter "active" or a provider/model pattern like "openai/gpt-5.4".',
-			customEmptyHint: 'empty uses "active"',
+			title: screenText().modelPicker.autoLearn.title,
+			description: screenText().modelPicker.autoLearn.description,
+			customTitle: screenText().modelPicker.autoLearn.customTitle,
+			customDescription: screenText().modelPicker.autoLearn.customDescription,
+			customEmptyHint: screenText().modelPicker.autoLearn.customEmptyHint,
 			customEmptyValue: DEFAULT_AUTO_LEARN_SETTINGS.model,
 		},
 	) {
@@ -668,7 +672,7 @@ class ModelSelectionSubmenu extends Container {
 		this.addChild(this.selectList);
 
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Type to filter · Enter to select · Esc to go back"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", `  ${screenText().hints.filterAndSelect}`), 0, 0));
 	}
 
 	handleInput(data: string): void {
@@ -715,6 +719,9 @@ class SettingsListSubmenu extends Container {
 			getSettingsListTheme(),
 			onChange,
 			onCancel,
+			{
+				hints: settingsListHints(),
+			},
 		);
 		this.addChild(this.settingsList);
 	}
@@ -741,30 +748,29 @@ class CostGuardSettingsSubmenu extends SettingsListSubmenu {
 			[
 				{
 					id: "cost-guard-scope",
-					label: "Save scope",
-					description: "Save this foreground cost guard globally or in the current project's .pi/settings.json",
+					label: screenText().costGuard.scope.label,
+					description: screenText().costGuard.scope.description,
 					currentValue: this.scope,
 					values: ["global", "project"],
-					valueLabels: SCOPE_VALUE_LABELS,
+					valueLabels: screenText().valueLabels.scope,
 				},
 				{
 					id: "cost-guard-enabled",
-					label: "Enabled",
-					description:
-						"Explicit opt-in. A saved threshold alone remains dormant and never limits or labels a turn.",
+					label: screenText().costGuard.enabled.label,
+					description: screenText().costGuard.enabled.description,
 					currentValue: String(this.state.enabled),
 					values: ["false", "true"],
-					valueLabels: ON_OFF_VALUE_LABELS,
+					valueLabels: screenText().valueLabels.onOff,
 				},
 				{
 					id: "cost-guard-max-turn-usd",
-					label: "Maximum USD per turn",
-					description: "Projected foreground plus current-turn background spend; zero keeps the guard inactive",
+					label: screenText().costGuard.maxTurnUsd.label,
+					description: screenText().costGuard.maxTurnUsd.description,
 					currentValue: String(this.state.maxTurnUsd),
 					submenu: (_currentValue, done) =>
 						new TextInputSubmenu(
-							"Foreground Cost Guard Threshold",
-							"Enter a nonnegative finite USD projection threshold. The Enabled switch is still mandatory.",
+							screenText().costGuard.title,
+							screenText().costGuard.description,
 							String(this.state.maxTurnUsd),
 							(value) => {
 								const maxTurnUsd = Number(value.trim());
@@ -777,16 +783,16 @@ class CostGuardSettingsSubmenu extends SettingsListSubmenu {
 								done(String(maxTurnUsd));
 							},
 							() => done(),
-							"nonnegative finite number; invalid input keeps the current value",
+							screenText().costGuard.hint,
 						),
 				},
 				{
 					id: "cost-guard-action",
-					label: "Action",
-					description: "warn only, or reduce reasoning one supported level for the imminent request",
+					label: screenText().costGuard.action.label,
+					description: screenText().costGuard.action.description,
 					currentValue: this.state.action,
 					values: ["warn", "downgrade"],
-					valueLabels: COST_GUARD_ACTION_VALUE_LABELS,
+					valueLabels: screenText().valueLabels.costGuardAction,
 				},
 			],
 			(id, newValue) => {
@@ -856,25 +862,19 @@ class ProjectContextFilesSubmenu extends SettingsListSubmenu {
 			[
 				{
 					id: "project-context-scope",
-					label: "Save scope",
-					description:
-						"This directory: this folder only (user overlay). This project: .pi/settings.json. All projects: every repo.",
+					label: screenText().projectContext.scope.label,
+					description: screenText().projectContext.scope.description,
 					currentValue: projectContextScopeValue(this.scope),
 					values: [...PROJECT_CONTEXT_SCOPE_VALUES],
-					valueLabels: {
-						"this-directory": "This directory",
-						"this-project": "This project",
-						"all-projects": "All projects",
-					},
+					valueLabels: screenText().valueLabels.projectContextScope,
 				},
 				{
 					id: "project-context-load",
-					label: "Load",
-					description:
-						"Global only excludes project AGENTS-family files, extensions, skills, and prompts. On demand admits them.",
+					label: screenText().projectContext.load.label,
+					description: screenText().projectContext.load.description,
 					currentValue: this.mode === "on-demand" ? "on-demand" : "global-only",
 					values: ["global-only", "on-demand"],
-					valueLabels: { "global-only": "Global only", "on-demand": "On demand" },
+					valueLabels: screenText().valueLabels.projectContextLoad,
 				},
 			],
 			(id, newValue) => {
@@ -909,30 +909,29 @@ class SelfModificationSettingsSubmenu extends SettingsListSubmenu {
 		const items: SettingItem[] = [
 			{
 				id: "self-modification-scope",
-				label: "Save scope",
-				description:
-					"Save this self-modification configuration globally or in the current project's .pi/settings.json",
+				label: screenText().selfModification.scope.label,
+				description: screenText().selfModification.scope.description,
 				currentValue: this.scope,
 				values: ["global", "project"],
-				valueLabels: SCOPE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.scope,
 			},
 			{
 				id: "self-modification-enabled",
-				label: "Enabled",
-				description: "Allow agents to modify Pi's own source/harness only when explicitly tasked",
+				label: screenText().selfModification.enabled.label,
+				description: screenText().selfModification.enabled.description,
 				currentValue: booleanSettingValue(this.state.enabled),
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "self-modification-source-path",
-				label: "Source path",
-				description: "Path to the pi-adaptative source checkout agents may edit for self-evolution",
+				label: screenText().selfModification.sourcePath.label,
+				description: screenText().selfModification.sourcePath.description,
 				currentValue: optionalStringValue(this.state.sourcePath),
 				submenu: (_currentValue, done) =>
 					new TextInputSubmenu(
-						"Pi-adaptative Source Path",
-						"Set the source checkout path used by self-evolution guardrails. Empty clears it.",
+						screenText().selfModification.sourcePathTitle,
+						screenText().selfModification.sourcePathDescription,
 						this.state.sourcePath ?? "",
 						(value) => {
 							const sourcePath = normalizeOptionalString(value);
@@ -989,55 +988,53 @@ class AutonomySettingsSubmenu extends SettingsListSubmenu {
 		const items: SettingItem[] = [
 			{
 				id: "autonomy-scope",
-				label: "Save scope",
-				description: "Save this autonomy preset globally or in the current project's .pi/settings.json",
+				label: screenText().autonomy.scope.label,
+				description: screenText().autonomy.scope.description,
 				currentValue: this.scope,
 				values: ["global", "project"],
-				valueLabels: SCOPE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.scope,
 			},
 			{
 				id: "autonomy-mode",
-				label: "Mode",
-				description:
-					"One preset for learning and root-session reflection cues: off, safe, balanced, or standing autonomy",
+				label: screenText().autonomy.mode.label,
+				description: screenText().autonomy.mode.description,
 				currentValue: autonomyModeValue(this.state),
 				values: AUTONOMY_MODES,
-				valueLabels: { off: "Off", safe: "Safe", balanced: "Balanced", full: "Standing autonomy" },
+				valueLabels: screenText().valueLabels.autonomyMode,
 			},
 			{
 				id: "autonomy-goal-auto-continue",
-				label: "Goal auto-continue",
-				description: "Continue an active goal whenever Pi becomes idle until a real terminal condition",
+				label: screenText().autonomy.autoContinue.label,
+				description: screenText().autonomy.autoContinue.description,
 				currentValue: autonomyGoalAutoContinueValue(this.state),
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "autonomy-goal-continue-turns",
-				label: "Goal turns",
-				description: "Optional continuation prompt limit; 0 is unbounded like Codex",
+				label: screenText().autonomy.turns.label,
+				description: screenText().autonomy.turns.description,
 				currentValue: autonomyGoalContinueTurnsValue(this.state),
 				values: AUTONOMY_GOAL_CONTINUE_TURN_VALUES,
 			},
 			{
 				id: "autonomy-max-stall-turns",
-				label: "Goal recovery threshold",
-				description:
-					"Unchanged rounds before Pi must inspect failure evidence and switch approach without stopping",
+				label: screenText().autonomy.recoveryThreshold.label,
+				description: screenText().autonomy.recoveryThreshold.description,
 				currentValue: autonomyMaxStallTurnsValue(this.state),
 				values: AUTONOMY_MAX_STALL_TURN_VALUES,
 			},
 			{
 				id: "autonomy-goal-wall-clock-minutes",
-				label: "Goal max minutes",
-				description: "Wall-clock budget per goal continuation loop; 0 disables the time budget",
+				label: screenText().autonomy.maxMinutes.label,
+				description: screenText().autonomy.maxMinutes.description,
 				currentValue: autonomyGoalContinueMaxWallClockMinutesValue(this.state),
 				values: AUTONOMY_GOAL_CONTINUE_MAX_WALL_CLOCK_MINUTE_VALUES,
 			},
 			{
 				id: "autonomy-goal-auto-continue-delay-ms",
-				label: "Goal delay ms",
-				description: "Delay before idle auto-continuation starts; 0 starts immediately after idle",
+				label: screenText().autonomy.delayMs.label,
+				description: screenText().autonomy.delayMs.description,
 				currentValue: autonomyGoalAutoContinueDelayMsValue(this.state),
 				values: AUTONOMY_GOAL_AUTO_CONTINUE_DELAY_MS_VALUES,
 			},
@@ -1102,46 +1099,45 @@ class ResearchLaneSettingsSubmenu extends SettingsListSubmenu {
 		const items: SettingItem[] = [
 			{
 				id: "research-lane-scope",
-				label: "Save scope",
-				description: "Save these research-lane settings globally or in the current project's .pi/settings.json",
+				label: screenText().researchLane.scope.label,
+				description: screenText().researchLane.scope.description,
 				currentValue: this.scope,
 				values: ["global", "project"],
-				valueLabels: SCOPE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.scope,
 			},
 			{
 				id: "research-lane-enabled",
-				label: "Enabled",
-				description:
-					"Run bounded, read-only background research when idle with an active goal (requires autonomy mode on)",
+				label: screenText().researchLane.enabled.label,
+				description: screenText().researchLane.enabled.description,
 				currentValue: String(this.state.enabled),
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "research-lane-max-usd",
-				label: "Budget per pass",
-				description: "USD budget per research pass; breaches mark the lane as budget exhausted in diagnostics",
+				label: screenText().researchLane.budget.label,
+				description: screenText().researchLane.budget.description,
 				currentValue: String(this.state.maxUsd),
 				values: RESEARCH_LANE_MAX_USD_VALUES,
 			},
 			{
 				id: "research-lane-max-wall-clock-ms",
-				label: "Max milliseconds",
-				description: "Wall-clock budget per research pass; 0 disables the time budget",
+				label: screenText().researchLane.maxMilliseconds.label,
+				description: screenText().researchLane.maxMilliseconds.description,
 				currentValue: String(this.state.maxWallClockMs),
 				values: RESEARCH_LANE_MAX_WALL_CLOCK_MS_VALUES,
 			},
 			{
 				id: "research-lane-idle-delay-ms",
-				label: "Idle delay ms",
-				description: "Delay before idle-triggered research starts; 0 starts immediately after idle",
+				label: screenText().researchLane.idleDelayMs.label,
+				description: screenText().researchLane.idleDelayMs.description,
 				currentValue: String(this.state.idleDelayMs),
 				values: RESEARCH_LANE_IDLE_DELAY_MS_VALUES,
 			},
 			{
 				id: "research-lane-max-runs-per-session",
-				label: "Runs per session",
-				description: "Maximum idle-triggered research passes per session; explicit /autonomy research is uncapped",
+				label: screenText().researchLane.runsPerSession.label,
+				description: screenText().researchLane.runsPerSession.description,
 				currentValue: String(this.state.maxRunsPerSession),
 				values: RESEARCH_LANE_MAX_RUNS_PER_SESSION_VALUES,
 			},
@@ -1195,49 +1191,47 @@ class LearningPolicySettingsSubmenu extends SettingsListSubmenu {
 		const items: SettingItem[] = [
 			{
 				id: "learning-policy-scope",
-				label: "Save scope",
-				description: "Save these learning-policy settings globally or in the project's .pi/settings.json",
+				label: screenText().learningPolicy.scope.label,
+				description: screenText().learningPolicy.scope.description,
 				currentValue: this.scope,
 				values: ["global", "project"],
-				valueLabels: SCOPE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.scope,
 			},
 			{
 				id: "learning-policy-enabled",
-				label: "Enabled",
-				description:
-					"Gate root-session reflection writes through the learning policy (proposals, audits, rollback). Disabled keeps legacy direct-apply with audit records.",
+				label: screenText().learningPolicy.enabled.label,
+				description: screenText().learningPolicy.enabled.description,
 				currentValue: String(this.state.enabled ?? DEFAULT_LEARNING_POLICY_ENABLED),
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "learning-policy-auto-apply",
-				label: "Auto-apply",
-				description: "Allow eligible writes to auto-apply; otherwise everything becomes a proposal",
+				label: screenText().learningPolicy.autoApply.label,
+				description: screenText().learningPolicy.autoApply.description,
 				currentValue: String(this.state.autoApplyEnabled ?? DEFAULT_LEARNING_POLICY_AUTO_APPLY_ENABLED),
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "learning-policy-auto-apply-supersessions",
-				label: "Auto-apply supersessions",
-				description:
-					"Allow a memory replace or remove (overwrites or deletes an existing fact) to auto-apply once otherwise eligible; off keeps every supersession a proposal",
+				label: screenText().learningPolicy.autoApplySupersessions.label,
+				description: screenText().learningPolicy.autoApplySupersessions.description,
 				currentValue: String(this.state.autoApplySupersessions ?? DEFAULT_LEARNING_POLICY_AUTO_APPLY_SUPERSESSIONS),
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "learning-policy-confidence",
-				label: "Confidence threshold",
-				description: "Minimum confidence (0-100) before a write may auto-apply; below it, proposal or no-op",
+				label: screenText().learningPolicy.confidence.label,
+				description: screenText().learningPolicy.confidence.description,
 				currentValue: String(this.state.confidenceThreshold ?? DEFAULT_LEARNING_POLICY_CONFIDENCE_THRESHOLD),
 				values: ["25", "50", "60", "75", "90"],
 			},
 			{
 				id: "learning-policy-min-observations",
-				label: "Min observations",
-				description: "Observations required before auto-apply (allowedAutoApplyLayers stays JSON-only)",
+				label: screenText().learningPolicy.minObservations.label,
+				description: screenText().learningPolicy.minObservations.description,
 				currentValue: String(this.state.minObservations ?? DEFAULT_LEARNING_POLICY_MIN_OBSERVATIONS),
 				values: ["1", "2", "3", "5"],
 			},
@@ -1289,37 +1283,41 @@ class AdvisorSettingsSubmenu extends SettingsListSubmenu {
 		const publish = () => {
 			state = { ...onChange({ ...state }, saveScope) };
 			items.find((item) => item.id === "advisor-enabled")!.currentValue = String(state.enabled ?? true);
-			items.find((item) => item.id === "advisor-model")!.currentValue = state.model ?? "Agent chooses";
-			items.find((item) => item.id === "advisor-thinking")!.currentValue = state.thinkingLevel ?? "Agent chooses";
+			items.find((item) => item.id === "advisor-model")!.currentValue =
+				state.model ?? screenText().values.agentChooses;
+			items.find((item) => item.id === "advisor-thinking")!.currentValue =
+				state.thinkingLevel ?? screenText().values.agentChooses;
 		};
 		const items: SettingItem[] = [
 			{
 				id: "advisor-scope",
-				label: "Save scope",
-				description:
-					"Each scope replaces the whole peer configuration; directory profile overrides project, which overrides global.",
+				label: screenText().peer.scope.label,
+				description: screenText().peer.scope.description,
 				currentValue: saveScope,
 				values: ["global", "project", "directoryProfile"],
-				valueLabels: SCOPE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.scope,
 			},
 			{
 				id: "advisor-enabled",
-				label: "Enabled",
-				description: "Root-only independent peer; works with System One off. Disabling preserves earlier findings.",
+				label: screenText().peer.enabled.label,
+				description: screenText().peer.enabled.description,
 				currentValue: String(state.enabled ?? true),
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "advisor-model",
-				label: "Model",
-				description:
-					"Choose a peer from configured accounts. Lead model, quota and explicit --models/SDK scope can make a choice unavailable.",
-				currentValue: state.model ?? "Agent chooses",
+				label: screenText().peer.model.label,
+				description: screenText().peer.model.description,
+				currentValue: state.model ?? screenText().values.agentChooses,
 				submenu: (_value, done) =>
 					new ModelSelectionSubmenu(
 						[
-							{ value: "", label: "Agent chooses", description: "Choose independently for each review" },
+							{
+								value: "",
+								label: screenText().values.agentChooses,
+								description: screenText().peer.choosesForEachReview,
+							},
 							...modelOptions,
 						],
 						state.model ?? "",
@@ -1336,32 +1334,30 @@ class AdvisorSettingsSubmenu extends SettingsListSubmenu {
 										: undefined,
 							};
 							publish();
-							done(state.model ?? "Agent chooses");
+							done(state.model ?? screenText().values.agentChooses);
 						},
 						() => done(),
 						{
-							title: "Peer Model",
-							description:
-								"Type to filter configured models. Selecting a model enables the root peer; unsupported effort resets to Agent chooses.",
-							customTitle: "Peer Model",
-							customDescription: "Enter an exact provider/model reference.",
-							customEmptyHint: "empty lets the agent choose",
+							title: screenText().modelPicker.peer.title,
+							description: screenText().modelPicker.peer.description,
+							customTitle: screenText().modelPicker.peer.customTitle,
+							customDescription: screenText().modelPicker.peer.customDescription,
+							customEmptyHint: screenText().modelPicker.peer.customEmptyHint,
 							customEmptyValue: "",
 						},
 					),
 			},
 			{
 				id: "advisor-thinking",
-				label: "Thinking",
-				description:
-					"Choose a supported effort or let the agent choose. Omitted effort uses the model default. Selecting another model clears an incompatible override.",
-				currentValue: state.thinkingLevel ?? "Agent chooses",
+				label: screenText().peer.thinking.label,
+				description: screenText().peer.thinking.description,
+				currentValue: state.thinkingLevel ?? screenText().values.agentChooses,
 				submenu: (_value, done) =>
 					new SelectSubmenu(
-						"Peer Thinking",
-						"Choose an effort or let the agent choose; omitted effort uses the model default",
+						screenText().peer.thinkingTitle,
+						screenText().peer.thinkingDescription,
 						[
-							{ value: "", label: "Agent chooses" },
+							{ value: "", label: screenText().values.agentChooses },
 							...(state.model ? (resolveLevels(state.model) ?? []) : []).map((level) => ({
 								value: level,
 								label: level,
@@ -1371,7 +1367,7 @@ class AdvisorSettingsSubmenu extends SettingsListSubmenu {
 						(value) => {
 							state = { ...state, thinkingLevel: value ? (value as ThinkingLevel) : undefined };
 							publish();
-							done(state.thinkingLevel ?? "Agent chooses");
+							done(state.thinkingLevel ?? screenText().values.agentChooses);
 						},
 						() => done(),
 					),
@@ -1408,20 +1404,19 @@ class ModelCapabilitySettingsSubmenu extends SettingsListSubmenu {
 		const items: SettingItem[] = [
 			{
 				id: "model-capability-scope",
-				label: "Save scope",
-				description: "Save globally or in the project's .pi/settings.json",
+				label: screenText().modelCapability.scope.label,
+				description: screenText().modelCapability.scope.description,
 				currentValue: this.scope,
 				values: ["global", "project"],
-				valueLabels: SCOPE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.scope,
 			},
 			{
 				id: "model-capability-mode",
-				label: "Mode",
-				description:
-					'"Automatic" derives the tool surface and lane budgets from the model\'s own context window; "Off" disables adaptation; a class name forces it',
+				label: screenText().modelCapability.mode.label,
+				description: screenText().modelCapability.mode.description,
 				currentValue: this.state.mode ?? "auto",
 				values: ["auto", "off", "full", "lean", "minimal", "chat"],
-				valueLabels: MODEL_CAPABILITY_MODE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.modelCapability,
 			},
 		];
 		this.mountSettingsList(
@@ -1467,33 +1462,32 @@ class ContextCurationSettingsSubmenu extends SettingsListSubmenu {
 		const items: SettingItem[] = [
 			{
 				id: "context-curation-scope",
-				label: "Save scope",
-				description: "Save these curation settings globally or in the current project's .pi/settings.json",
+				label: screenText().contextCuration.scope.label,
+				description: screenText().contextCuration.scope.description,
 				currentValue: this.scope,
 				values: ["global", "project"],
-				valueLabels: SCOPE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.scope,
 			},
 			{
 				id: "context-curation-enabled",
-				label: "Enabled",
-				description:
-					"Local brain curator: digests GC-packed stubs and scores stale-chunk relevance. Requires a digest-fit local model (run /fitness <model>).",
+				label: screenText().contextCuration.enabled.label,
+				description: screenText().contextCuration.enabled.description,
 				currentValue: String(this.state.enabled),
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "context-curation-model",
-				label: "Curator model",
-				description:
-					"Local model that runs curation jobs; refused until it passes the digest fitness probe on this host",
+				label: screenText().contextCuration.model.label,
+				description: screenText().contextCuration.model.description,
 				currentValue: this.state.model ?? "(unset)",
 				values: modelValues,
+				valueLabels: screenText().valueLabels.unsetModel,
 			},
 			{
 				id: "context-curation-max-jobs",
-				label: "Max jobs per turn",
-				description: "Curation jobs drained per turn (each is one small local completion)",
+				label: screenText().contextCuration.maxJobsPerTurn.label,
+				description: screenText().contextCuration.maxJobsPerTurn.description,
 				currentValue: String(this.state.maxJobsPerTurn),
 				values: ["1", "2", "4", "8", "16"],
 			},
@@ -1547,30 +1541,29 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 		const items: SettingItem[] = [
 			{
 				id: "worker-delegation-scope",
-				label: "Save scope",
-				description: "Save these delegation settings globally or in the current project's .pi/settings.json",
+				label: screenText().workerDelegation.scope.label,
+				description: screenText().workerDelegation.scope.description,
 				currentValue: this.scope,
 				values: ["global", "project"],
-				valueLabels: SCOPE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.scope,
 			},
 			{
 				id: "worker-delegation-enabled",
-				label: "Enabled",
-				description:
-					"Allow capable models to dispatch autonomous persistent leaf workers; enabled by default, and explicit false is a hard off-switch",
+				label: screenText().workerDelegation.enabled.label,
+				description: screenText().workerDelegation.enabled.description,
 				currentValue: String(this.state.enabled),
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "worker-delegation-max-usd",
-				label: "Budget per worker task",
-				description: "Cumulative USD budget for one worker task; 0 disables this ceiling",
+				label: screenText().workerDelegation.budget.label,
+				description: screenText().workerDelegation.budget.description,
 				currentValue: String(this.state.maxUsd),
 				submenu: (_currentValue, done) =>
 					new TextInputSubmenu(
-						"Worker Task USD Budget",
-						`Enter a nonnegative finite number no greater than ${MAX_WORKER_DELEGATION_MAX_USD}. Zero disables the settings-level cost ceiling.`,
+						screenText().workerDelegation.budgetTitle,
+						screenText().workerDelegation.budgetDescription(MAX_WORKER_DELEGATION_MAX_USD),
 						String(this.state.maxUsd),
 						(value) => {
 							const maxUsd = Number(value.trim());
@@ -1582,18 +1575,18 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 							done();
 						},
 						() => done(),
-						`number in [0, ${MAX_WORKER_DELEGATION_MAX_USD}]; invalid input keeps the current value`,
+						screenText().workerDelegation.budgetHint(MAX_WORKER_DELEGATION_MAX_USD),
 					),
 			},
 			{
 				id: "worker-delegation-max-wall-clock-ms",
-				label: "Worker task milliseconds",
-				description: "Active wall-clock budget for one worker task; 0 disables the time budget",
+				label: screenText().workerDelegation.milliseconds.label,
+				description: screenText().workerDelegation.milliseconds.description,
 				currentValue: String(this.state.maxWallClockMs),
 				submenu: (_currentValue, done) =>
 					new TextInputSubmenu(
-						"Worker Task Active Time",
-						"Enter active milliseconds per worker task as a nonnegative safe integer. Zero disables the time ceiling.",
+						screenText().workerDelegation.millisecondsTitle,
+						screenText().workerDelegation.millisecondsDescription,
 						String(this.state.maxWallClockMs),
 						(value) => {
 							const maxWallClockMs = Number(value.trim());
@@ -1605,17 +1598,16 @@ class WorkerDelegationSettingsSubmenu extends SettingsListSubmenu {
 							done();
 						},
 						() => done(),
-						"nonnegative safe integer; invalid input keeps the current value",
+						screenText().workerDelegation.millisecondsHint,
 					),
 			},
 			{
 				id: "worker-delegation-write-enabled",
-				label: "Allow file writes",
-				description:
-					"Let workers change files through direct write/edit tools; default authority is machine-wide and explicit false revokes it",
+				label: screenText().workerDelegation.writeEnabled.label,
+				description: screenText().workerDelegation.writeEnabled.description,
 				currentValue: String(this.state.writeEnabled ?? DEFAULT_WORKER_DELEGATION_WRITE_ENABLED),
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 		];
 
@@ -1666,31 +1658,29 @@ class AutoLearnSettingsSubmenu extends SettingsListSubmenu {
 		this.state = { ...settings };
 		this.scope = scope;
 		const defaults = resolveAutoLearnSettings(autonomyMode, settings);
-		const modelDescription = currentModelPattern
-			? `Model for explicit/background learning. "active" uses ${currentModelPattern}; configured subscription/API models are listed first. Automatic reflection uses the orchestrator's current session turn.`
-			: 'Model for explicit/background learning. Use "active" for the current session model, or choose a configured subscription/API model. Automatic reflection uses the orchestrator\'s current session turn.';
+		const modelDescription = screenText().autoLearn.model.description(currentModelPattern);
 		const selectableModelOptions = buildAutoLearnModelOptions(this.state, modelOptions, currentModelPattern);
 
 		const items: SettingItem[] = [
 			{
 				id: "auto-learn-scope",
-				label: "Save scope",
-				description: "Save this Auto Learn configuration globally or in the current project's .pi/settings.json",
+				label: screenText().autoLearn.scope.label,
+				description: screenText().autoLearn.scope.description,
 				currentValue: this.scope,
 				values: ["global", "project"],
-				valueLabels: SCOPE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.scope,
 			},
 			{
 				id: "auto-learn-enabled",
-				label: "Enabled",
-				description: "Autonomously trigger background history scavenging for long sessions",
+				label: screenText().autoLearn.enabled.label,
+				description: screenText().autoLearn.enabled.description,
 				currentValue: booleanSettingValue(this.state.enabled, defaults.enabled),
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "auto-learn-model",
-				label: "Scavenger model",
+				label: screenText().autoLearn.model.label,
 				description: modelDescription,
 				currentValue: autoLearnModelValue(this.state),
 				submenu: (_currentValue, done) =>
@@ -1707,68 +1697,66 @@ class AutoLearnSettingsSubmenu extends SettingsListSubmenu {
 			},
 			{
 				id: "auto-learn-long-session-messages",
-				label: "Message trigger",
-				description: "Trigger after this many message entries in the active branch",
+				label: screenText().autoLearn.messageTrigger.label,
+				description: screenText().autoLearn.messageTrigger.description,
 				currentValue: numberSettingValue(this.state.longSessionMessages, defaults.longSessionMessages),
 				values: ["16", "32", "64", "128", "256"],
 			},
 			{
 				id: "auto-learn-context-percent",
-				label: "Context trigger %",
-				description: "Trigger when current context usage reaches this percentage",
+				label: screenText().autoLearn.contextTrigger.label,
+				description: screenText().autoLearn.contextTrigger.description,
 				currentValue: numberSettingValue(this.state.longSessionContextPercent, defaults.longSessionContextPercent),
 				values: ["50", "60", "70", "80", "85", "90"],
 			},
 			{
 				id: "auto-learn-cooldown-minutes",
-				label: "Cooldown minutes",
-				description: "Per-session-tenant cooldown between learner launches",
+				label: screenText().autoLearn.cooldown.label,
+				description: screenText().autoLearn.cooldown.description,
 				currentValue: numberSettingValue(this.state.cooldownMinutes, defaults.cooldownMinutes),
 				values: ["15", "30", "60", "120", "240", "1440"],
 			},
 			{
 				id: "auto-learn-lease-minutes",
-				label: "Lease minutes",
-				description: "Shared-state lease duration for a running background learner",
+				label: screenText().autoLearn.lease.label,
+				description: screenText().autoLearn.lease.description,
 				currentValue: numberSettingValue(this.state.leaseMinutes, defaults.leaseMinutes),
 				values: ["30", "60", "90", "180"],
 			},
 			{
 				id: "auto-learn-max-concurrent",
-				label: "Max learners",
-				description: "Maximum running Auto Learn background learners per session tenant",
+				label: screenText().autoLearn.maxLearners.label,
+				description: screenText().autoLearn.maxLearners.description,
 				currentValue: numberSettingValue(this.state.maxConcurrentLearners, defaults.maxConcurrentLearners),
 				values: ["1", "2", "3", "4"],
 			},
 			{
 				id: "auto-learn-apply-high-confidence",
-				label: "Apply high confidence",
-				description:
-					"Allow high-confidence memory candidates to be applied automatically; broader write authority follows autonomy.mode",
+				label: screenText().autoLearn.applyHighConfidence.label,
+				description: screenText().autoLearn.applyHighConfidence.description,
 				currentValue: booleanSettingValue(this.state.applyHighConfidence, defaults.applyHighConfidence),
 				values: ["false", "true"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "auto-learn-reflection-review",
-				label: "Reflection review",
-				description:
-					"Include one durable root-session reflection cue on eligible external turns; completed-turn signals coalesce into it",
+				label: screenText().autoLearn.reflectionReview.label,
+				description: screenText().autoLearn.reflectionReview.description,
 				currentValue: booleanSettingValue(this.state.reflectionReview, defaults.reflectionReview),
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "auto-learn-reflection-tool-calls",
-				label: "Reflection tool trigger",
-				description: "Queue a root-session reflection cue after this many tool calls in one completed turn",
+				label: screenText().autoLearn.reflectionToolTrigger.label,
+				description: screenText().autoLearn.reflectionToolTrigger.description,
 				currentValue: numberSettingValue(this.state.reflectionMinToolCalls, defaults.reflectionMinToolCalls),
 				values: ["3", "5", "8", "12"],
 			},
 			{
 				id: "auto-learn-reflection-cooldown",
-				label: "Reflection cooldown",
-				description: "Per-session-tenant cooldown between automatic root-session reflection cues",
+				label: screenText().autoLearn.reflectionCooldown.label,
+				description: screenText().autoLearn.reflectionCooldown.description,
 				currentValue: numberSettingValue(this.state.reflectionCooldownMinutes, defaults.reflectionCooldownMinutes),
 				values: ["15", "30", "60", "120", "1440"],
 			},
@@ -1839,26 +1827,24 @@ class ContextPolicyEnforcementSettingsSubmenu extends SettingsListSubmenu {
 		const items: SettingItem[] = [
 			{
 				id: "context-policy-scope",
-				label: "Save scope",
-				description:
-					"Save this context/prompt-policy configuration globally or in the current project's .pi/settings.json",
+				label: screenText().contextPolicy.scope.label,
+				description: screenText().contextPolicy.scope.description,
 				currentValue: this.scope,
 				values: ["global", "project"],
-				valueLabels: SCOPE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.scope,
 			},
 			{
 				id: "context-policy-enabled",
-				label: "Prompt policy enforcement",
-				description:
-					"Opt-in: stub stale artifact-backed grep/find output in the model-visible prompt only. Never touches transcript/session history. Requires the artifact retrieval tool to be active this turn (not configurable here -- it's a runtime fact, not a setting).",
+				label: screenText().contextPolicy.enabled.label,
+				description: screenText().contextPolicy.enabled.description,
 				currentValue: booleanSettingValue(this.state.enabled, CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.enabled),
 				values: ["false", "true"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "context-policy-preserve-recent-messages",
-				label: "Preserve recent messages",
-				description: "Never stub a tool result within this many of the most recent messages",
+				label: screenText().contextPolicy.preserveRecent.label,
+				description: screenText().contextPolicy.preserveRecent.description,
 				currentValue: numberSettingValue(
 					this.state.preserveRecentMessages,
 					CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.preserveRecentMessages,
@@ -1867,9 +1853,8 @@ class ContextPolicyEnforcementSettingsSubmenu extends SettingsListSubmenu {
 			},
 			{
 				id: "context-policy-min-chars",
-				label: "Minimum chars before stubbing",
-				description:
-					"Only stub a tool result whose original provider-visible text is at least this many characters",
+				label: screenText().contextPolicy.minChars.label,
+				description: screenText().contextPolicy.minChars.description,
 				currentValue: numberSettingValue(this.state.minChars, CONTEXT_POLICY_ENFORCEMENT_DEFAULTS.minChars),
 				values: CONTEXT_POLICY_MIN_CHARS_VALUES,
 			},
@@ -1924,52 +1909,48 @@ class ContextMemoryRetrievalSettingsSubmenu extends SettingsListSubmenu {
 		const items: SettingItem[] = [
 			{
 				id: "context-memory-scope",
-				label: "Save scope",
-				description:
-					"Save this local memory-retrieval configuration globally or in the current project's .pi/settings.json",
+				label: screenText().contextMemory.scope.label,
+				description: screenText().contextMemory.scope.description,
 				currentValue: this.scope,
 				values: ["global", "project"],
-				valueLabels: SCOPE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.scope,
 			},
 			{
 				id: "context-memory-enabled",
-				label: "Local memory retrieval",
-				description:
-					"Default on: search local Pi memory for relevant evidence. Explicit false is a hard off-switch for both legacy recall and context retrieval. External providers remain blocked by the separate consent below.",
+				label: screenText().contextMemory.enabled.label,
+				description: screenText().contextMemory.enabled.description,
 				currentValue: booleanSettingValue(this.state.enabled, CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.enabled),
 				values: ["false", "true"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "context-memory-max-results",
-				label: "Max results",
-				description: "Maximum number of memory items to retrieve per query (1-20)",
+				label: screenText().contextMemory.maxResults.label,
+				description: screenText().contextMemory.maxResults.description,
 				currentValue: numberSettingValue(this.state.maxResults, CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.maxResults),
 				values: CONTEXT_MEMORY_RETRIEVAL_MAX_RESULTS_VALUES,
 			},
 			{
 				id: "context-memory-include-in-prompt",
-				label: "Include in prompt",
-				description:
-					"Default on and budget-gated: surface retrieved memory as bounded, source-labeled untrusted evidence in the model prompt only -- never the transcript or an instruction.",
+				label: screenText().contextMemory.includeInPrompt.label,
+				description: screenText().contextMemory.includeInPrompt.description,
 				currentValue: booleanSettingValue(
 					this.state.includeInPrompt,
 					CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.includeInPrompt,
 				),
 				values: ["false", "true"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "context-memory-allow-external-egress",
-				label: "Allow external queries",
-				description:
-					"Explicit consent to send bounded query text to eligible external memory providers. Default off; secret-like and oversized queries still fail closed, and returned recall is centrally fenced as untrusted data.",
+				label: screenText().contextMemory.externalQueries.label,
+				description: screenText().contextMemory.externalQueries.description,
 				currentValue: booleanSettingValue(
 					this.state.allowExternalEgress,
 					CONTEXT_MEMORY_RETRIEVAL_DEFAULTS.allowExternalEgress,
 				),
 				values: ["false", "true"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 		];
 
@@ -2025,9 +2006,10 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			poolPreference: settings.poolPreference ?? "subscription-first",
 			learningModel: settings.learningModel ?? "active",
 		};
-		const tierUnsetLabel = this.state.selectionMode === "manual" ? "(unset)" : "(AUTO)";
+		const manualTiers = this.state.selectionMode === "manual";
+		const tierUnsetLabel = manualTiers ? screenText().values.unset : screenText().values.autoTier;
 		const tierValue = (model: string | undefined, thinking: ThinkingLevel | undefined): string =>
-			routerTierValue(model, thinking, this.state.selectionMode === "manual" ? "(not set)" : "AUTO");
+			routerTierValue(model, thinking, manualTiers ? screenText().values.notSet : screenText().values.auto);
 		const levelsForModel = (modelPattern: string | undefined): ThinkingLevel[] | undefined =>
 			resolveModelThinkingLevels?.(modelPattern ?? currentModelPattern);
 		const keepSupportedThinking = (
@@ -2047,10 +2029,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			configuredModelOptions: modelOptions,
 			currentModelPattern,
 			includeActive: false,
-			unsetDescription:
-				this.state.selectionMode === "manual"
-					? "Clear cheap routing model; research turns fall back to the active session model"
-					: "Let the router select this tier's model automatically from the candidate pool",
+			unsetDescription: manualTiers ? screenText().modelRouter.clearCheap : screenText().modelRouter.autoSelectTier,
 			unsetLabel: tierUnsetLabel,
 			pool,
 		});
@@ -2059,10 +2038,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			configuredModelOptions: modelOptions,
 			currentModelPattern,
 			includeActive: false,
-			unsetDescription:
-				this.state.selectionMode === "manual"
-					? "Clear medium routing model; implementation turns fall back according to router policy"
-					: "Let the router select this tier's model automatically from the candidate pool",
+			unsetDescription: manualTiers ? screenText().modelRouter.clearMedium : screenText().modelRouter.autoSelectTier,
 			unsetLabel: tierUnsetLabel,
 			pool,
 		});
@@ -2071,10 +2047,9 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			configuredModelOptions: modelOptions,
 			currentModelPattern,
 			includeActive: false,
-			unsetDescription:
-				this.state.selectionMode === "manual"
-					? "Clear expensive routing model; modify turns fall back to the active session model"
-					: "Let the router select this tier's model automatically from the candidate pool",
+			unsetDescription: manualTiers
+				? screenText().modelRouter.clearExpensive
+				: screenText().modelRouter.autoSelectTier,
 			unsetLabel: tierUnsetLabel,
 			pool,
 		});
@@ -2083,7 +2058,7 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			configuredModelOptions: modelOptions,
 			currentModelPattern,
 			includeActive: false,
-			unsetDescription: "Clear executor lane model; direct toolkit execution stays disabled",
+			unsetDescription: screenText().modelRouter.clearExecutor,
 			pool,
 		});
 		const learningModelOptions = buildModelRouterRoleModelOptions({
@@ -2094,51 +2069,46 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			pool,
 		});
 		const routedTierThinkingOptions = (modelPattern: string | undefined) =>
-			buildModelRouterThinkingOptions(
-				"Inherit the session thinking level for this turn, clamped to the routed model",
-				levelsForModel(modelPattern),
-			);
-		this.addChild(new Text(theme.bold(theme.fg("accent", "Model Router")), 0, 0));
+			buildModelRouterThinkingOptions(screenText().modelRouter.inheritThinking, levelsForModel(modelPattern));
+		this.addChild(new Text(theme.bold(theme.fg("accent", screenText().rows.modelRouter.label)), 0, 0));
 		this.addChild(new Spacer(1));
 
 		const items: SettingItem[] = [
 			{
 				id: "model-router-scope",
-				label: "Save scope",
-				description: "Save this routing configuration globally or in the current project's .pi/settings.json",
+				label: screenText().modelRouter.scope.label,
+				description: screenText().modelRouter.scope.description,
 				currentValue: this.scope,
 				values: ["global", "project"],
-				valueLabels: SCOPE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.scope,
 			},
 			{
 				id: "model-router-enabled",
-				label: "Enabled",
-				description: "Route read-only/research turns to cheap model and modify/tool-heavy turns to expensive model",
+				label: screenText().modelRouter.enabled.label,
+				description: screenText().modelRouter.enabled.description,
 				currentValue: booleanSettingValue(this.state.enabled),
 				values: ["false", "true"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "model-router-selection-mode",
-				label: "Selection mode",
-				description:
-					"Manual: exact tier pins only · Automatic: the router picks each tier's model from the candidate pool · Hybrid: pinned tiers win, unpinned tiers auto-select",
+				label: screenText().modelRouter.selectionMode.label,
+				description: screenText().modelRouter.selectionMode.description,
 				currentValue: this.state.selectionMode ?? "manual",
 				values: ["manual", "auto", "hybrid"],
-				valueLabels: MODEL_ROUTER_SELECTION_MODE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.routerSelection,
 			},
 			{
 				id: "model-router-pool",
-				label: "Candidate pool",
-				description:
-					"Only available favorites can be routed. Configure models narrows that list; favorite models in /model. An empty favorite list leaves no routing candidates.",
+				label: screenText().modelRouter.pool.label,
+				description: screenText().modelRouter.pool.description,
 				currentValue: modelRouterPoolSummary(pool),
 				submenu: (_currentValue, done) => {
 					const options: SelectItem[] = [
 						{
 							value: "configure-models",
-							label: "Configure models →",
-							description: "Open the Models selector; closing it brings Router Setup back on the edited pool.",
+							label: screenText().modelRouter.configureModels.label,
+							description: screenText().modelRouter.configureModels.description,
 						},
 						...(pool?.refs ?? []).map((ref, index) => ({
 							value: `calibrate:${ref}`,
@@ -2147,10 +2117,13 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 						})),
 					];
 					return new SelectSubmenu(
-						"Router Candidate Pool",
+						screenText().modelRouter.poolMenuTitle,
 						pool
-							? `${modelRouterPoolSummary(pool)} · ${pool.subscriptionRefs.length} subscription-backed · select a model to calibrate it`
-							: "Pool unavailable in this view",
+							? screenText().modelRouter.poolMenuDescription(
+									modelRouterPoolSummary(pool),
+									pool.subscriptionRefs.length,
+								)
+							: screenText().modelRouter.poolUnavailable,
 						options,
 						"",
 						(value) => {
@@ -2163,17 +2136,16 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			},
 			{
 				id: "model-router-pool-preference",
-				label: "Pool preference",
-				description:
-					"Subscriptions first: adequate subscription-backed models rank ahead of metered ones (after hard admission) · Balanced: evidence ranking only",
+				label: screenText().modelRouter.poolPreference.label,
+				description: screenText().modelRouter.poolPreference.description,
 				currentValue: this.state.poolPreference ?? "subscription-first",
 				values: ["subscription-first", "balanced"],
-				valueLabels: MODEL_ROUTER_POOL_PREFERENCE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.routerPoolPreference,
 			},
 			{
 				id: "model-router-cheap",
-				label: "Cheap model",
-				description: "Pick the model for read-only, research, explanation, and question turns",
+				label: screenText().modelRouter.cheapModel.label,
+				description: screenText().modelRouter.cheapModel.description,
 				currentValue: tierValue(this.state.cheapModel, this.state.cheapThinking),
 				submenu: (_currentValue, done) =>
 					new ModelSelectionSubmenu(
@@ -2191,20 +2163,19 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 						},
 						() => done(),
 						{
-							title: "Cheap / Research Model",
-							description:
-								"Choose from models available through configured subscription/API accounts. Type to filter; manual is fallback.",
-							customTitle: "Custom Cheap / Research Model",
-							customDescription: "Enter a provider/model pattern from pi --list-models.",
-							customEmptyHint: "empty clears the setting",
+							title: screenText().modelPicker.cheap.title,
+							description: screenText().modelPicker.description,
+							customTitle: screenText().modelPicker.cheap.customTitle,
+							customDescription: screenText().modelPicker.customDescription,
+							customEmptyHint: screenText().modelPicker.emptyClears,
 							customEmptyValue: MODEL_ROUTER_UNSET_MODEL_VALUE,
 						},
 					),
 			},
 			{
 				id: "model-router-medium",
-				label: "Medium model",
-				description: "Pick the model for normal scoped implementation, edits, tests, and mechanical refactors",
+				label: screenText().modelRouter.mediumModel.label,
+				description: screenText().modelRouter.mediumModel.description,
 				currentValue: tierValue(this.state.mediumModel, this.state.mediumThinking),
 				submenu: (_currentValue, done) =>
 					new ModelSelectionSubmenu(
@@ -2222,20 +2193,19 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 						},
 						() => done(),
 						{
-							title: "Medium / Implementation Model",
-							description:
-								"Choose from models available through configured subscription/API accounts. Type to filter; manual is fallback.",
-							customTitle: "Custom Medium / Implementation Model",
-							customDescription: "Enter a provider/model pattern from pi --list-models.",
-							customEmptyHint: "empty clears the setting",
+							title: screenText().modelPicker.medium.title,
+							description: screenText().modelPicker.description,
+							customTitle: screenText().modelPicker.medium.customTitle,
+							customDescription: screenText().modelPicker.customDescription,
+							customEmptyHint: screenText().modelPicker.emptyClears,
 							customEmptyValue: MODEL_ROUTER_UNSET_MODEL_VALUE,
 						},
 					),
 			},
 			{
 				id: "model-router-expensive",
-				label: "Expensive model",
-				description: "Pick the model for modify, implementation, and escalated tool-heavy turns",
+				label: screenText().modelRouter.expensiveModel.label,
+				description: screenText().modelRouter.expensiveModel.description,
 				currentValue: tierValue(this.state.expensiveModel, this.state.expensiveThinking),
 				submenu: (_currentValue, done) =>
 					new ModelSelectionSubmenu(
@@ -2253,20 +2223,19 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 						},
 						() => done(),
 						{
-							title: "Expensive / Modify Model",
-							description:
-								"Choose from models available through configured subscription/API accounts. Type to filter; manual is fallback.",
-							customTitle: "Custom Expensive / Modify Model",
-							customDescription: "Enter a provider/model pattern from pi --list-models.",
-							customEmptyHint: "empty clears the setting",
+							title: screenText().modelPicker.expensive.title,
+							description: screenText().modelPicker.description,
+							customTitle: screenText().modelPicker.expensive.customTitle,
+							customDescription: screenText().modelPicker.customDescription,
+							customEmptyHint: screenText().modelPicker.emptyClears,
 							customEmptyValue: MODEL_ROUTER_UNSET_MODEL_VALUE,
 						},
 					),
 			},
 			{
 				id: "model-router-executor",
-				label: "Executor model",
-				description: "Pick the local executor lane model; unset disables direct toolkit execution",
+				label: screenText().modelRouter.executorModel.label,
+				description: screenText().modelRouter.executorModel.description,
 				currentValue: routerTierValue(this.state.executorModel, this.state.executorThinking),
 				submenu: (_currentValue, done) =>
 					new ModelSelectionSubmenu(
@@ -2284,20 +2253,19 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 						},
 						() => done(),
 						{
-							title: "Executor Lane Model",
-							description: "Choose from configured models. Type to filter; manual is fallback.",
-							customTitle: "Custom Executor Lane Model",
-							customDescription: "Enter a provider/model pattern from pi --list-models.",
-							customEmptyHint: "empty clears the setting",
+							title: screenText().modelPicker.executor.title,
+							description: screenText().modelPicker.executorDescription,
+							customTitle: screenText().modelPicker.executor.customTitle,
+							customDescription: screenText().modelPicker.customDescription,
+							customEmptyHint: screenText().modelPicker.emptyClears,
 							customEmptyValue: MODEL_ROUTER_UNSET_MODEL_VALUE,
 						},
 					),
 			},
 			{
 				id: "model-router-learning",
-				label: "Learning model",
-				description:
-					"Pick the model for explicit/background learning and skill-creator work; automatic reflection uses the orchestrator's current session turn",
+				label: screenText().modelRouter.learningModel.label,
+				description: screenText().modelRouter.learningModel.description,
 				currentValue: optionalStringValue(this.state.learningModel, "active"),
 				submenu: (_currentValue, done) =>
 					new ModelSelectionSubmenu(
@@ -2310,27 +2278,24 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 						},
 						() => done(),
 						{
-							title: "Learning Model",
-							description:
-								"Choose active or a model from configured subscription/API accounts for explicit/background learning. Automatic reflection uses the orchestrator's current session turn. Type to filter; manual is fallback.",
-							customTitle: "Custom Learning Model",
-							customDescription:
-								'Enter "active" or a provider/model pattern for explicit/background learning from pi --list-models.',
-							customEmptyHint: 'empty uses "active"',
+							title: screenText().modelPicker.learning.title,
+							description: screenText().modelPicker.learning.description,
+							customTitle: screenText().modelPicker.learning.customTitle,
+							customDescription: screenText().modelPicker.learning.customDescription,
+							customEmptyHint: screenText().modelPicker.learning.customEmptyHint,
 							customEmptyValue: DEFAULT_AUTO_LEARN_SETTINGS.model,
 						},
 					),
 			},
 			{
 				id: "model-router-cheap-thinking",
-				label: "Cheap thinking",
-				description:
-					"Thinking-level override for cheap-tier (read-only/research) routed turns; (inherit) keeps today's behavior: the session level, clamped to the routed model",
-				currentValue: this.state.cheapThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL,
+				label: screenText().modelRouter.cheapThinking.label,
+				description: screenText().modelRouter.cheapThinking.description,
+				currentValue: this.state.cheapThinking ?? screenText().values.inherit,
 				submenu: (_currentValue, done) =>
 					new SelectSubmenu(
-						"Cheap Tier Thinking",
-						"Select a thinking-level override for cheap-tier routed turns, or inherit the session level",
+						screenText().modelRouter.cheapThinkingTitle,
+						screenText().modelRouter.cheapThinkingDescription,
 						routedTierThinkingOptions(this.state.cheapModel),
 						this.state.cheapThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
 						(value) => {
@@ -2340,21 +2305,20 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 									value === MODEL_ROUTER_INHERIT_THINKING_VALUE ? undefined : (value as ThinkingLevel),
 							};
 							onChange({ ...this.state }, this.scope);
-							done(this.state.cheapThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL);
+							done(this.state.cheapThinking ?? screenText().values.inherit);
 						},
 						() => done(),
 					),
 			},
 			{
 				id: "model-router-medium-thinking",
-				label: "Medium thinking",
-				description:
-					"Thinking-level override for medium-tier (scoped implementation) routed turns; (inherit) keeps today's behavior: the session level, clamped to the routed model",
-				currentValue: this.state.mediumThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL,
+				label: screenText().modelRouter.mediumThinking.label,
+				description: screenText().modelRouter.mediumThinking.description,
+				currentValue: this.state.mediumThinking ?? screenText().values.inherit,
 				submenu: (_currentValue, done) =>
 					new SelectSubmenu(
-						"Medium Tier Thinking",
-						"Select a thinking-level override for medium-tier routed turns, or inherit the session level",
+						screenText().modelRouter.mediumThinkingTitle,
+						screenText().modelRouter.mediumThinkingDescription,
 						routedTierThinkingOptions(this.state.mediumModel),
 						this.state.mediumThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
 						(value) => {
@@ -2364,21 +2328,20 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 									value === MODEL_ROUTER_INHERIT_THINKING_VALUE ? undefined : (value as ThinkingLevel),
 							};
 							onChange({ ...this.state }, this.scope);
-							done(this.state.mediumThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL);
+							done(this.state.mediumThinking ?? screenText().values.inherit);
 						},
 						() => done(),
 					),
 			},
 			{
 				id: "model-router-expensive-thinking",
-				label: "Expensive thinking",
-				description:
-					"Thinking-level override for expensive-tier (modify/escalated) routed turns; (inherit) keeps today's behavior: the session level, clamped to the routed model",
-				currentValue: this.state.expensiveThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL,
+				label: screenText().modelRouter.expensiveThinking.label,
+				description: screenText().modelRouter.expensiveThinking.description,
+				currentValue: this.state.expensiveThinking ?? screenText().values.inherit,
 				submenu: (_currentValue, done) =>
 					new SelectSubmenu(
-						"Expensive Tier Thinking",
-						"Select a thinking-level override for expensive-tier routed turns, or inherit the session level",
+						screenText().modelRouter.expensiveThinkingTitle,
+						screenText().modelRouter.expensiveThinkingDescription,
 						routedTierThinkingOptions(this.state.expensiveModel),
 						this.state.expensiveThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
 						(value) => {
@@ -2388,21 +2351,20 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 									value === MODEL_ROUTER_INHERIT_THINKING_VALUE ? undefined : (value as ThinkingLevel),
 							};
 							onChange({ ...this.state }, this.scope);
-							done(this.state.expensiveThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL);
+							done(this.state.expensiveThinking ?? screenText().values.inherit);
 						},
 						() => done(),
 					),
 			},
 			{
 				id: "model-router-executor-thinking",
-				label: "Executor thinking",
-				description:
-					"Thinking-level override for the local executor-direct lane; (inherit) keeps today's behavior: the session level, clamped to the routed model",
-				currentValue: this.state.executorThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL,
+				label: screenText().modelRouter.executorThinking.label,
+				description: screenText().modelRouter.executorThinking.description,
+				currentValue: this.state.executorThinking ?? screenText().values.inherit,
 				submenu: (_currentValue, done) =>
 					new SelectSubmenu(
-						"Executor Thinking",
-						"Select a thinking-level override for the executor-direct lane, or inherit the session level",
+						screenText().modelRouter.executorThinkingTitle,
+						screenText().modelRouter.executorThinkingDescription,
 						routedTierThinkingOptions(this.state.executorModel),
 						this.state.executorThinking ?? MODEL_ROUTER_INHERIT_THINKING_VALUE,
 						(value) => {
@@ -2412,49 +2374,49 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 									value === MODEL_ROUTER_INHERIT_THINKING_VALUE ? undefined : (value as ThinkingLevel),
 							};
 							onChange({ ...this.state }, this.scope);
-							done(this.state.executorThinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL);
+							done(this.state.executorThinking ?? screenText().values.inherit);
 						},
 						() => done(),
 					),
 			},
 			{
 				id: "model-router-fitness-gate",
-				label: "Fitness gate",
-				description: "Opt-in subtractive gate: blocks tier models only when their probed router lane failed",
+				label: screenText().modelRouter.fitnessGate.label,
+				description: screenText().modelRouter.fitnessGate.description,
 				currentValue: booleanSettingValue(this.state.fitnessGate),
 				values: ["false", "true"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "model-router-calibrate",
-				label: "Calibrate",
-				description:
-					"Operator-triggered only. Reuses the fitness probe (runModelFitness) and the real tool probe; nothing runs by opening settings.",
-				currentValue: pool ? `${pool.needsCalibration.length} need calibration` : "unavailable",
+				label: screenText().modelRouter.calibrate.label,
+				description: screenText().modelRouter.calibrate.description,
+				currentValue: pool
+					? screenText().modelRouter.calibrate.currentValue(pool.needsCalibration.length)
+					: screenText().modelRouter.calibrate.currentValue(undefined),
 				submenu: (_currentValue, done) => {
 					const count = pool?.refs.length ?? 0;
 					const pending = pool?.needsCalibration.length ?? 0;
 					const options: SelectItem[] = [
 						{
 							value: "calibrate-one",
-							label: "Calibrate one model",
-							description: `Pick one pool model; runs the ${describeRouterCalibrationScope()}, then offers a role.`,
+							label: screenText().modelRouter.calibrate.one.label,
+							description: screenText().modelRouter.calibrate.one.description(describeRouterCalibrationScope()),
 						},
 						{
 							value: "calibrate-unprobed",
-							label: `Calibrate unprobed (${pending})`,
-							description:
-								"Probe every pool model whose router evidence is missing or stale. Provider calls required.",
+							label: screenText().modelRouter.calibrate.unprobed.label(pending),
+							description: screenText().modelRouter.calibrate.unprobed.description,
 						},
 						{
 							value: "calibrate-all",
-							label: `Recalibrate selected (${count})`,
-							description: "Re-probe every pool model, replacing existing evidence. Provider calls required.",
+							label: screenText().modelRouter.calibrate.all.label(count),
+							description: screenText().modelRouter.calibrate.all.description,
 						},
 					];
 					return new SelectSubmenu(
-						"Router Calibration",
-						`Covers ${describeRouterCalibrationScope()}. You confirm before anything runs.`,
+						screenText().modelRouter.calibrate.title,
+						screenText().modelRouter.calibrate.subtitle(describeRouterCalibrationScope()),
 						options,
 						"",
 						(value) => {
@@ -2467,14 +2429,13 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			},
 			{
 				id: "model-router-preview",
-				label: "Preview route",
-				description:
-					"Enter an example task. Deterministic preview makes no provider call; live preview (judge/H-MoE) is a separate explicit action.",
-				currentValue: "enter a task",
+				label: screenText().modelRouter.preview.label,
+				description: screenText().modelRouter.preview.description,
+				currentValue: screenText().values.enterTask,
 				submenu: (_currentValue, done) =>
 					new TextInputSubmenu(
-						"Preview Route",
-						"Type an example task. Enter previews deterministically (no provider call). Prefix with `live:` to run the judge/H-MoE path.",
+						screenText().modelRouter.preview.title,
+						screenText().modelRouter.preview.taskDescription,
 						"",
 						(value) => {
 							done();
@@ -2487,24 +2448,23 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 							);
 						},
 						() => done(),
-						"empty cancels",
+						screenText().modelRouter.preview.emptyHint,
 					),
 			},
 			{
 				id: "model-router-diagnostics",
-				label: "Diagnostics",
-				description:
-					"Show router status: mode, pool, preference, tier fitness, recent decisions with selection provenance.",
-				currentValue: "show",
+				label: screenText().modelRouter.diagnostics.label,
+				description: screenText().modelRouter.diagnostics.description,
+				currentValue: screenText().values.show,
 				submenu: (_currentValue, done) =>
 					new SelectSubmenu(
-						"Router Diagnostics",
-						"Prints the router status report into the conversation.",
+						screenText().modelRouter.diagnostics.title,
+						screenText().modelRouter.diagnostics.reportInto,
 						[
 							{
 								value: "diagnostics",
-								label: "Show diagnostics",
-								description: "Same report as /session routing status",
+								label: screenText().modelRouter.diagnostics.show.label,
+								description: screenText().modelRouter.diagnostics.show.description,
 							},
 						],
 						"diagnostics",
@@ -2517,59 +2477,35 @@ class ModelRouterSettingsSubmenu extends SettingsListSubmenu {
 			},
 			{
 				id: "model-router-hmoe-preset",
-				label: "H-MoE preset",
-				description: "Numeric policy preset for ability, operational, and reliability weighting",
+				label: screenText().modelRouter.hmoePreset.label,
+				description: screenText().modelRouter.hmoePreset.description,
 				currentValue: this.state.hmoePreset ?? "balanced",
 				values: [...HMOE_PRESETS],
-				valueLabels: {
-					balanced: "Balanced",
-					quality: "Quality",
-					"subscription-first": "Subscriptions first",
-					cost: "Cost",
-					speed: "Speed",
-					"local-first": "Local first",
-					custom: "Custom",
-				},
+				valueLabels: screenText().valueLabels.hmoePreset,
 			},
 			{
 				id: "model-router-hmoe-team",
-				label: "H-MoE team strategy",
-				description: "Selection mode for single model, primary+critic, independent verifier, or adaptive team",
+				label: screenText().modelRouter.hmoeTeam.label,
+				description: screenText().modelRouter.hmoeTeam.description,
 				currentValue: this.state.hmoeTeamStrategy ?? "single",
 				values: [...HMOE_TEAM_STRATEGIES],
-				valueLabels: {
-					single: "Single model",
-					primary_critic: "Primary + critic",
-					independent_verifier: "Independent verifier",
-					adaptive_team: "Adaptive team",
-				},
+				valueLabels: screenText().valueLabels.hmoeTeam,
 			},
 			{
 				id: "model-router-hmoe-independence",
-				label: "H-MoE independence",
-				description: "Independence level required when selecting verifier or critic models",
+				label: screenText().modelRouter.hmoeIndependence.label,
+				description: screenText().modelRouter.hmoeIndependence.description,
 				currentValue: this.state.hmoeIndependence ?? "none",
 				values: [...HMOE_INDEPENDENCE_LEVELS],
-				valueLabels: {
-					none: "None",
-					fresh_context: "Fresh context",
-					distinct_profile: "Distinct profile",
-					distinct_model: "Distinct model",
-					distinct_family: "Distinct family",
-					distinct_provider: "Distinct provider",
-				},
+				valueLabels: screenText().valueLabels.hmoeIndependence,
 			},
 			{
 				id: "model-router-hmoe-preference",
-				label: "H-MoE preference",
-				description: "Ordering preference among adequate candidates after hard admission",
+				label: screenText().modelRouter.hmoePreference.label,
+				description: screenText().modelRouter.hmoePreference.description,
 				currentValue: this.state.hmoePreference ?? "prefer_subscription",
 				values: [...HMOE_PREFERENCES],
-				valueLabels: {
-					prefer_subscription: "Prefer subscription",
-					prefer_local: "Prefer local",
-					neutral: "Neutral",
-				},
+				valueLabels: screenText().valueLabels.hmoePreference,
 			},
 		];
 
@@ -2628,11 +2564,11 @@ class WarningSettingsSubmenu extends SettingsListSubmenu {
 		const items: SettingItem[] = [
 			{
 				id: "anthropic-extra-usage",
-				label: "Anthropic extra usage",
-				description: "Warn when Anthropic subscription auth may use paid extra usage",
+				label: screenText().warnings.anthropicExtraUsage.label,
+				description: screenText().warnings.anthropicExtraUsage.description,
 				currentValue: (this.state.anthropicExtraUsage ?? true) ? "true" : "false",
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 		];
 
@@ -2701,7 +2637,7 @@ export class SelectSubmenu extends Container {
 
 		// Hint
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("dim", "  Enter to select · Esc to go back"), 0, 0));
+		this.addChild(new Text(theme.fg("dim", `  ${screenText().hints.select}`), 0, 0));
 	}
 
 	handleInput(data: string): void {
@@ -2735,7 +2671,9 @@ export class SettingsSelectorComponent extends Container {
 		let currentAdvisor: AdvisorSettings & { error?: string } = { ...config.advisor };
 		const advisorDescription = () =>
 			currentAdvisor.error ??
-			`Root peer independent of System One; active scope: ${config.getAdvisorSettingsScope?.() ?? config.advisorScope ?? "global"}. Directory profile overrides project, which overrides global.`;
+			screenText().peer.description(
+				screenText().scopes[config.getAdvisorSettingsScope?.() ?? config.advisorScope ?? "global"],
+			);
 		let currentModelCapability: ModelCapabilitySettings = { ...config.modelCapability };
 		let currentWorkerDelegation: WorkerDelegationSettings = { ...config.workerDelegation };
 		let currentModelRouter: ModelRouterSettings = { ...config.modelRouter };
@@ -2745,16 +2683,16 @@ export class SettingsSelectorComponent extends Container {
 		const items: SettingItem[] = [
 			{
 				id: "autocompact",
-				label: "Auto-compact",
-				description: "Automatically compact context when it gets too large",
+				label: screenText().rows.autoCompact.label,
+				description: screenText().rows.autoCompact.description,
 				currentValue: config.autoCompact ? "true" : "false",
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "cost-guard",
-				label: "Foreground cost guard",
-				description: "Optional per-turn USD projection warning or reasoning downgrade; disabled by default",
+				label: screenText().rows.costGuard.label,
+				description: screenText().rows.costGuard.description,
 				currentValue: costGuardSummary(currentCostGuard),
 				submenu: (_currentValue, done) =>
 					new CostGuardSettingsSubmenu(
@@ -2769,55 +2707,48 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "steering-mode",
-				label: "Steering mode",
-				description:
-					"Enter while streaming queues steering messages. 'One at a time': deliver one, wait for response. 'All': deliver all at once.",
+				label: screenText().rows.steeringMode.label,
+				description: screenText().rows.steeringMode.description,
 				currentValue: config.steeringMode,
 				values: ["one-at-a-time", "all"],
-				valueLabels: DELIVERY_MODE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.delivery,
 			},
 			{
 				id: "follow-up-mode",
-				label: "Follow-up mode",
-				description: `${followUpKey} queues follow-up messages until agent stops. 'One at a time': deliver one, wait for response. 'All': deliver all at once.`,
+				label: screenText().rows.followUpMode.label,
+				description: screenText().rows.followUpMode.description(followUpKey),
 				currentValue: config.followUpMode,
 				values: ["one-at-a-time", "all"],
-				valueLabels: DELIVERY_MODE_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.delivery,
 			},
 			{
 				id: "transport",
-				label: "Transport",
-				description: "Preferred transport for providers that support multiple transports",
+				label: screenText().rows.transport.label,
+				description: screenText().rows.transport.description,
 				currentValue: config.transport,
 				values: ["sse", "websocket", "websocket-cached", "auto"],
-				valueLabels: {
-					sse: "Streaming (SSE)",
-					websocket: "WebSocket",
-					"websocket-cached": "WebSocket, cached",
-					auto: "Automatic",
-				},
+				valueLabels: screenText().valueLabels.transport,
 			},
 			{
 				id: "http-idle-timeout",
-				label: "HTTP idle timeout",
-				description:
-					"Maximum idle gap while waiting for HTTP headers or body chunks. Disable for local models that pause longer than five minutes.",
+				label: screenText().rows.httpIdleTimeout.label,
+				description: screenText().rows.httpIdleTimeout.description,
 				currentValue: formatHttpIdleTimeoutMs(config.httpIdleTimeoutMs),
 				values: HTTP_IDLE_TIMEOUT_CHOICES.map((choice) => choice.label),
+				valueLabels: screenText().valueLabels.httpIdleTimeout,
 			},
 			{
 				id: "hide-thinking",
-				label: "Hide thinking",
-				description: "Hide thinking blocks in assistant responses",
+				label: screenText().rows.hideThinking.label,
+				description: screenText().rows.hideThinking.description,
 				currentValue: config.hideThinkingBlock ? "true" : "false",
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "project-context-files",
-				label: "Project instructions",
-				description:
-					"Opt in to this directory's AGENTS-family files, extensions, skills, and prompts. Global/bundled resources remain available.",
+				label: screenText().rows.projectInstructions.label,
+				description: screenText().rows.projectInstructions.description,
 				currentValue: projectContextFilesSummary(config.projectContextFiles, config.projectContextFilesScope),
 				submenu: (_currentValue, done) =>
 					new ProjectContextFilesSubmenu(
@@ -2833,46 +2764,40 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "collapse-changelog",
-				label: "Collapse changelog",
-				description: "Show condensed changelog after updates",
+				label: screenText().rows.collapseChangelog.label,
+				description: screenText().rows.collapseChangelog.description,
 				currentValue: config.collapseChangelog ? "true" : "false",
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "quiet-startup",
-				label: "Quiet startup",
-				description: "Disable verbose printing at startup",
+				label: screenText().rows.quietStartup.label,
+				description: screenText().rows.quietStartup.description,
 				currentValue: config.quietStartup ? "true" : "false",
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			},
 			{
 				id: "double-escape-action",
-				label: "Double-escape action",
-				description: "Action when pressing Escape twice with empty editor",
+				label: screenText().rows.doubleEscapeAction.label,
+				description: screenText().rows.doubleEscapeAction.description,
 				currentValue: config.doubleEscapeAction,
 				values: ["tree", "fork", "none"],
-				valueLabels: { tree: "Open tree", fork: "Fork", none: "None" },
+				valueLabels: screenText().valueLabels.doubleEscape,
 			},
 			{
 				id: "tree-filter-mode",
-				label: "Tree filter mode",
-				description: "Default filter when opening /tree",
+				label: screenText().rows.treeFilterMode.label,
+				description: screenText().rows.treeFilterMode.description,
 				currentValue: config.treeFilterMode,
 				values: ["default", "no-tools", "user-only", "labeled-only", "all"],
-				valueLabels: {
-					default: "Default",
-					"no-tools": "No tools",
-					"user-only": "Your messages only",
-					"labeled-only": "Labeled only",
-					all: "All",
-				},
+				valueLabels: screenText().valueLabels.treeFilter,
 			},
 			{
 				id: "self-modification",
-				label: "Self modification",
-				description: "Enable Pi self-evolution guardrails and configure the editable pi-adaptative source checkout",
+				label: screenText().rows.selfModification.label,
+				description: screenText().rows.selfModification.description,
 				currentValue: selfModificationSummary(currentSelfModification),
 				submenu: (_currentValue, done) =>
 					new SelfModificationSettingsSubmenu(
@@ -2887,8 +2812,8 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "autonomy",
-				label: "Autonomy",
-				description: "Choose one autonomy preset instead of tuning many background-learning knobs",
+				label: screenText().rows.autonomy.label,
+				description: screenText().rows.autonomy.description,
 				currentValue: autonomySummary(currentAutonomy),
 				submenu: (_currentValue, done) =>
 					new AutonomySettingsSubmenu(
@@ -2903,9 +2828,8 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "research-lane",
-				label: "Research Lane",
-				description:
-					"Opt-in autonomous read-only research: bounded background passes that produce evidence bundles for active goals",
+				label: screenText().rows.researchLane.label,
+				description: screenText().rows.researchLane.description,
 				currentValue: researchLaneSummary(currentResearchLane),
 				submenu: (_currentValue, done) =>
 					new ResearchLaneSettingsSubmenu(
@@ -2920,9 +2844,8 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "worker-delegation",
-				label: "Worker Delegation",
-				description:
-					"Default-on provider-neutral leaf workers with inherited authority and optional owner-authored execution presets",
+				label: screenText().rows.workerDelegation.label,
+				description: screenText().rows.workerDelegation.description,
 				currentValue: workerDelegationSummary(currentWorkerDelegation),
 				submenu: (_currentValue, done) =>
 					new WorkerDelegationSettingsSubmenu(
@@ -2937,9 +2860,8 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "learning-policy",
-				label: "Learning Policy",
-				description:
-					"Gate reflection-sourced durable writes: proposals, confidence thresholds, audits, and rollback",
+				label: screenText().rows.learningPolicy.label,
+				description: screenText().rows.learningPolicy.description,
 				currentValue: learningPolicySummary(currentLearningPolicy),
 				submenu: (_currentValue, done) =>
 					new LearningPolicySettingsSubmenu(
@@ -2954,9 +2876,8 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "model-capability",
-				label: "Model Capability",
-				description:
-					"How pi adapts the tool surface and lane budgets to small models (derived from the model's own metadata)",
+				label: screenText().rows.modelCapability.label,
+				description: screenText().rows.modelCapability.description,
 				currentValue: modelCapabilitySummary(currentModelCapability),
 				submenu: (_currentValue, done) =>
 					new ModelCapabilitySettingsSubmenu(
@@ -2971,9 +2892,8 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "context-curation",
-				label: "Context Curation",
-				description:
-					"Opt-in local brain curator: digests GC-packed context stubs and scores stale-chunk relevance in small local-model jobs",
+				label: screenText().rows.contextCuration.label,
+				description: screenText().rows.contextCuration.description,
 				currentValue: contextCurationSummary(currentContextCuration),
 				submenu: (_currentValue, done) =>
 					new ContextCurationSettingsSubmenu(
@@ -2991,19 +2911,22 @@ export class SettingsSelectorComponent extends Container {
 				? [
 						{
 							id: "system-one-provider",
-							label: "System One provider",
+							label: screenText().rows.systemOneProvider.label,
 							description: config.describeSystemOneAccess?.(config.systemOneProvider) ?? "",
 							currentValue: config.systemOneProvider,
 							values: [...SYSTEM_ONE_PROVIDER_CHOICES],
-							valueLabels: { auto: "Automatic", typesafe: "TypeSafe", openrouter: "OpenRouter" },
+							valueLabels: screenText().valueLabels.systemOneProvider,
 						},
 					]
 				: []),
 			{
 				id: "advisor",
-				label: "Peer",
+				label: screenText().rows.peer.label,
 				description: advisorDescription(),
-				currentValue: currentAdvisor.enabled === false ? "Off" : (currentAdvisor.model ?? "Agent chooses"),
+				currentValue:
+					currentAdvisor.enabled === false
+						? screenText().values.off
+						: (currentAdvisor.model ?? screenText().values.agentChooses),
 				submenu: (_value, done) =>
 					new AdvisorSettingsSubmenu(
 						currentAdvisor,
@@ -3015,15 +2938,19 @@ export class SettingsSelectorComponent extends Container {
 							if (row) row.description = advisorDescription();
 							return currentAdvisor;
 						},
-						() => done(currentAdvisor.enabled === false ? "Off" : (currentAdvisor.model ?? "Agent chooses")),
+						() =>
+							done(
+								currentAdvisor.enabled === false
+									? screenText().values.off
+									: (currentAdvisor.model ?? screenText().values.agentChooses),
+							),
 						config.getAdvisorSettingsScope?.() ?? config.advisorScope ?? "global",
 					),
 			},
 			{
 				id: "model-router",
-				label: "Model Router",
-				description:
-					"Router Setup: selection mode (Manual, Automatic or Hybrid), favorite candidate models, Subscriptions first preference, tier pins, calibration, route preview and diagnostics",
+				label: screenText().rows.modelRouter.label,
+				description: screenText().rows.modelRouter.description,
 				currentValue: modelRouterSummary(currentModelRouter, config.modelRouterPool),
 				submenu: (_currentValue, done) =>
 					new ModelRouterSettingsSubmenu(
@@ -3046,8 +2973,8 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "auto-learn",
-				label: "Auto Learn Advanced",
-				description: "Advanced overrides for autonomous background learning/scavenging",
+				label: screenText().rows.autoLearn.label,
+				description: screenText().rows.autoLearn.description,
 				currentValue: autoLearnSummary(currentAutoLearn, autonomyModeValue(currentAutonomy)),
 				submenu: (_currentValue, done) =>
 					new AutoLearnSettingsSubmenu(
@@ -3065,9 +2992,8 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "context-policy-enforcement",
-				label: "Context / Prompt Policy",
-				description:
-					"Opt-in artifact-stub prompt-policy enforcement: stubs stale artifact-backed tool output in the model-visible prompt only, never the transcript. Requires the artifact retrieval tool to be active.",
+				label: screenText().rows.contextPolicy.label,
+				description: screenText().rows.contextPolicy.description,
 				currentValue: contextPolicyEnforcementSummary(currentContextPolicyEnforcement),
 				submenu: (_currentValue, done) =>
 					new ContextPolicyEnforcementSettingsSubmenu(
@@ -3082,9 +3008,8 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "context-memory-retrieval",
-				label: "Context / Memory Retrieval",
-				description:
-					"Default-on local safe-auto recall with budgeted prompt evidence. External query egress is a separate visible consent and remains off by default.",
+				label: screenText().rows.contextMemory.label,
+				description: screenText().rows.contextMemory.description,
 				currentValue: contextMemoryRetrievalSummary(currentContextMemoryRetrieval),
 				submenu: (_currentValue, done) =>
 					new ContextMemoryRetrievalSettingsSubmenu(
@@ -3099,9 +3024,9 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "warnings",
-				label: "Warnings",
-				description: "Enable or disable individual warnings",
-				currentValue: "configure",
+				label: screenText().rows.warnings.label,
+				description: screenText().rows.warnings.description,
+				currentValue: screenText().values.configure,
 				submenu: (_currentValue, done) =>
 					new WarningSettingsSubmenu(
 						currentWarnings,
@@ -3114,13 +3039,13 @@ export class SettingsSelectorComponent extends Container {
 			},
 			{
 				id: "thinking",
-				label: "Thinking level",
-				description: "Reasoning depth for the active model; delegation policy is configured independently",
+				label: screenText().rows.thinkingLevel.label,
+				description: screenText().rows.thinkingLevel.description,
 				currentValue: config.thinkingLevel,
 				submenu: (currentValue, done) =>
 					new SelectSubmenu(
-						"Thinking Level",
-						"Select the reasoning depth supported by the active model",
+						screenText().dialogs.thinkingTitle,
+						screenText().dialogs.thinkingDescription,
 						config.availableThinkingLevels.map((level) => ({
 							value: level,
 							label: level,
@@ -3137,13 +3062,13 @@ export class SettingsSelectorComponent extends Container {
 			languageSettingsItem(config.language),
 			{
 				id: "theme",
-				label: "Theme",
-				description: "Color theme for the interface",
+				label: screenText().rows.theme.label,
+				description: screenText().rows.theme.description,
 				currentValue: config.currentTheme,
 				submenu: (currentValue, done) =>
 					new SelectSubmenu(
-						"Theme",
-						"Select color theme",
+						screenText().dialogs.themeTitle,
+						screenText().dialogs.themeDescription,
 						config.availableThemes.map((t) => ({
 							value: t,
 							label: t,
@@ -3172,47 +3097,49 @@ export class SettingsSelectorComponent extends Container {
 
 		items.push({
 			id: "resources",
-			label: "Resources",
-			description: "Manage profiles/situations, library, and external resource sources.",
-			currentValue: config.activeProfileName ?? "(none)",
+			label: screenText().rows.resources.label,
+			description: screenText().rows.resources.description,
+			currentValue: config.activeProfileName ?? screenText().values.none,
 			submenu: (_currentValue, done) => {
 				const options: SelectItem[] = [];
 
 				if (!hasSources && !hasProfiles) {
 					options.push({
 						value: "nudge-add-source",
-						label: "Add your catalog directory →",
-						description: "First-run nudge: Add a directory of shared skills, extensions, profiles, and agents.",
+						label: screenText().resourcesMenu.addCatalog.label,
+						description: screenText().resourcesMenu.addCatalog.description,
 					});
 				}
 
 				options.push({
 					value: "active-profile",
-					label: "Profile / Situation",
-					description: `Select the active profile/situation. Current: ${config.activeProfileName ?? "(none)"}`,
+					label: screenText().resourcesMenu.profile.label,
+					description: screenText().resourcesMenu.profile.description(
+						config.activeProfileName ?? screenText().values.none,
+					),
 				});
 
 				options.push({
 					value: "manage-library",
-					label: "Manage Library",
-					description: "Toggle allowed tools/skills/extensions in the active profile/scope.",
+					label: screenText().resourcesMenu.library.label,
+					description: screenText().resourcesMenu.library.description,
 				});
 
 				options.push({
 					value: "manage-profiles",
-					label: "Manage Profiles / Situations",
-					description: "Create, delete, or persist profile/situation definitions.",
+					label: screenText().resourcesMenu.profiles.label,
+					description: screenText().resourcesMenu.profiles.description,
 				});
 
 				options.push({
 					value: "sources",
-					label: "Sources",
-					description: `Manage external resource roots (${externalRoots.length} registered).`,
+					label: screenText().resourcesMenu.sources.label,
+					description: screenText().resourcesMenu.sources.description(externalRoots.length),
 				});
 
 				return new SelectSubmenu(
-					"Resources Hub",
-					"Configure profiles/situations and external resource catalogs.",
+					screenText().resourcesMenu.title,
+					screenText().resourcesMenu.description,
 					options,
 					"",
 					(value) => {
@@ -3229,16 +3156,16 @@ export class SettingsSelectorComponent extends Container {
 			// Insert after autocompact
 			items.splice(1, 0, {
 				id: "show-images",
-				label: "Show images",
-				description: "Render images inline in terminal",
+				label: screenText().rows.showImages.label,
+				description: screenText().rows.showImages.description,
 				currentValue: config.showImages ? "true" : "false",
 				values: ["true", "false"],
-				valueLabels: ON_OFF_VALUE_LABELS,
+				valueLabels: screenText().valueLabels.onOff,
 			});
 			items.splice(2, 0, {
 				id: "image-width-cells",
-				label: "Image width",
-				description: "Preferred inline image width in terminal cells",
+				label: screenText().rows.imageWidth.label,
+				description: screenText().rows.imageWidth.description,
 				currentValue: String(config.imageWidthCells),
 				values: ["60", "80", "120"],
 			});
@@ -3247,52 +3174,52 @@ export class SettingsSelectorComponent extends Container {
 		// Image auto-resize toggle (always available, affects both attached and read images)
 		items.splice(supportsImages ? 3 : 1, 0, {
 			id: "auto-resize-images",
-			label: "Auto-resize images",
-			description: "Resize large images to 2000x2000 max for better model compatibility",
+			label: screenText().rows.autoResizeImages.label,
+			description: screenText().rows.autoResizeImages.description,
 			currentValue: config.autoResizeImages ? "true" : "false",
 			values: ["true", "false"],
-			valueLabels: ON_OFF_VALUE_LABELS,
+			valueLabels: screenText().valueLabels.onOff,
 		});
 
 		// Block images toggle (always available, insert after auto-resize-images)
 		const autoResizeIndex = items.findIndex((item) => item.id === "auto-resize-images");
 		items.splice(autoResizeIndex + 1, 0, {
 			id: "block-images",
-			label: "Block images",
-			description: "Prevent images from being sent to LLM providers",
+			label: screenText().rows.blockImages.label,
+			description: screenText().rows.blockImages.description,
 			currentValue: config.blockImages ? "true" : "false",
 			values: ["true", "false"],
-			valueLabels: ON_OFF_VALUE_LABELS,
+			valueLabels: screenText().valueLabels.onOff,
 		});
 
 		// Skill commands toggle (insert after block-images)
 		const blockImagesIndex = items.findIndex((item) => item.id === "block-images");
 		items.splice(blockImagesIndex + 1, 0, {
 			id: "skill-commands",
-			label: "Skill commands",
-			description: "Register skills as /skill:name commands",
+			label: screenText().rows.skillCommands.label,
+			description: screenText().rows.skillCommands.description,
 			currentValue: config.enableSkillCommands ? "true" : "false",
 			values: ["true", "false"],
-			valueLabels: ON_OFF_VALUE_LABELS,
+			valueLabels: screenText().valueLabels.onOff,
 		});
 
 		// Hardware cursor toggle (insert after skill-commands)
 		const skillCommandsIndex = items.findIndex((item) => item.id === "skill-commands");
 		items.splice(skillCommandsIndex + 1, 0, {
 			id: "show-hardware-cursor",
-			label: "Show hardware cursor",
-			description: "Show the terminal cursor while still positioning it for IME support",
+			label: screenText().rows.showHardwareCursor.label,
+			description: screenText().rows.showHardwareCursor.description,
 			currentValue: config.showHardwareCursor ? "true" : "false",
 			values: ["true", "false"],
-			valueLabels: ON_OFF_VALUE_LABELS,
+			valueLabels: screenText().valueLabels.onOff,
 		});
 
 		// Editor padding toggle (insert after show-hardware-cursor)
 		const hardwareCursorIndex = items.findIndex((item) => item.id === "show-hardware-cursor");
 		items.splice(hardwareCursorIndex + 1, 0, {
 			id: "editor-padding",
-			label: "Editor padding",
-			description: "Horizontal padding for input editor (0-3)",
+			label: screenText().rows.editorPadding.label,
+			description: screenText().rows.editorPadding.description,
 			currentValue: String(config.editorPaddingX),
 			values: ["0", "1", "2", "3"],
 		});
@@ -3301,8 +3228,8 @@ export class SettingsSelectorComponent extends Container {
 		const editorPaddingIndex = items.findIndex((item) => item.id === "editor-padding");
 		items.splice(editorPaddingIndex + 1, 0, {
 			id: "autocomplete-max-visible",
-			label: "Autocomplete max items",
-			description: "Max visible items in autocomplete dropdown (3-20)",
+			label: screenText().rows.autocompleteMaxItems.label,
+			description: screenText().rows.autocompleteMaxItems.description,
 			currentValue: String(config.autocompleteMaxVisible),
 			values: ["3", "5", "7", "10", "15", "20"],
 		});
@@ -3311,22 +3238,22 @@ export class SettingsSelectorComponent extends Container {
 		const autocompleteIndex = items.findIndex((item) => item.id === "autocomplete-max-visible");
 		items.splice(autocompleteIndex + 1, 0, {
 			id: "clear-on-shrink",
-			label: "Clear on shrink",
-			description: "Clear empty rows when content shrinks (may cause flicker)",
+			label: screenText().rows.clearOnShrink.label,
+			description: screenText().rows.clearOnShrink.description,
 			currentValue: config.clearOnShrink ? "true" : "false",
 			values: ["true", "false"],
-			valueLabels: ON_OFF_VALUE_LABELS,
+			valueLabels: screenText().valueLabels.onOff,
 		});
 
 		// Terminal progress toggle (insert after clear-on-shrink)
 		const clearOnShrinkIndex = items.findIndex((item) => item.id === "clear-on-shrink");
 		items.splice(clearOnShrinkIndex + 1, 0, {
 			id: "terminal-progress",
-			label: "Terminal progress",
-			description: "Show OSC 9;4 progress indicators in the terminal tab bar",
+			label: screenText().rows.terminalProgress.label,
+			description: screenText().rows.terminalProgress.description,
 			currentValue: config.showTerminalProgress ? "true" : "false",
 			values: ["true", "false"],
-			valueLabels: ON_OFF_VALUE_LABELS,
+			valueLabels: screenText().valueLabels.onOff,
 		});
 
 		// Add borders
@@ -3418,7 +3345,10 @@ export class SettingsSelectorComponent extends Container {
 				}
 			},
 			callbacks.onCancel,
-			{ enableSearch: true },
+			{
+				enableSearch: true,
+				hints: settingsListHints(),
+			},
 		);
 
 		this.addChild(this.settingsList);

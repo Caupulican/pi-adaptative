@@ -9,22 +9,28 @@ import type { InterfaceText } from "./interface-text.ts";
 import { CHAT } from "./text-en/chat.ts";
 import { COMMANDS } from "./text-en/commands.ts";
 import { COMMON } from "./text-en/common.ts";
+import { CONFIG_SCREEN } from "./text-en/config-screen.ts";
 import { FRAME } from "./text-en/frame.ts";
 import { GRAPH } from "./text-en/graph.ts";
 import { INSPECTOR } from "./text-en/inspector.ts";
 import { KEYS } from "./text-en/keys.ts";
 import { PANES } from "./text-en/panes.ts";
+import { SECRETS_SCREEN } from "./text-en/secrets-screen.ts";
 import { SETTINGS } from "./text-en/settings.ts";
+import { SETTINGS_SCREEN } from "./text-en/settings-screen.ts";
 import { STATUS } from "./text-en/status.ts";
 import { CHAT as CHAT_PT_BR } from "./text-pt-br/chat.ts";
 import { COMMANDS as COMMANDS_PT_BR } from "./text-pt-br/commands.ts";
 import { COMMON as COMMON_PT_BR } from "./text-pt-br/common.ts";
+import { CONFIG_SCREEN as CONFIG_SCREEN_PT_BR } from "./text-pt-br/config-screen.ts";
 import { FRAME as FRAME_PT_BR } from "./text-pt-br/frame.ts";
 import { GRAPH as GRAPH_PT_BR } from "./text-pt-br/graph.ts";
 import { INSPECTOR as INSPECTOR_PT_BR } from "./text-pt-br/inspector.ts";
 import { KEYS as KEYS_PT_BR } from "./text-pt-br/keys.ts";
 import { PANES as PANES_PT_BR } from "./text-pt-br/panes.ts";
+import { SECRETS_SCREEN as SECRETS_SCREEN_PT_BR } from "./text-pt-br/secrets-screen.ts";
 import { SETTINGS as SETTINGS_PT_BR } from "./text-pt-br/settings.ts";
+import { SETTINGS_SCREEN as SETTINGS_SCREEN_PT_BR } from "./text-pt-br/settings-screen.ts";
 import { STATUS as STATUS_PT_BR } from "./text-pt-br/status.ts";
 
 /** Every area of the interface this build translates, its two languages in this order: English, then Portuguese. */
@@ -32,12 +38,15 @@ const AREAS = {
 	chat: [CHAT, CHAT_PT_BR],
 	commands: [COMMANDS, COMMANDS_PT_BR],
 	common: [COMMON, COMMON_PT_BR],
+	configScreen: [CONFIG_SCREEN, CONFIG_SCREEN_PT_BR],
 	frame: [FRAME, FRAME_PT_BR],
 	graph: [GRAPH, GRAPH_PT_BR],
 	inspector: [INSPECTOR, INSPECTOR_PT_BR],
 	keys: [KEYS, KEYS_PT_BR],
 	panes: [PANES, PANES_PT_BR],
+	secretsScreen: [SECRETS_SCREEN, SECRETS_SCREEN_PT_BR],
 	settings: [SETTINGS, SETTINGS_PT_BR],
+	settingsScreen: [SETTINGS_SCREEN, SETTINGS_SCREEN_PT_BR],
 	status: [STATUS, STATUS_PT_BR],
 } as const;
 

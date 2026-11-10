@@ -1,4 +1,5 @@
 import type { SelectItem } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { getAvailableThemes } from "../../../presentation/theme/theme.ts";
 import { BorderedSelectListComponent } from "./selector-list.ts";
 
@@ -16,7 +17,7 @@ export class ThemeSelectorComponent extends BorderedSelectListComponent {
 		const themeItems: SelectItem[] = themes.map((name) => ({
 			value: name,
 			label: name,
-			description: name === currentTheme ? "(current)" : undefined,
+			description: name === currentTheme ? interfaceText().settingsScreen.dialogs.themeCurrent : undefined,
 		}));
 		super({
 			items: themeItems,

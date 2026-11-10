@@ -6,6 +6,8 @@
  * session's AuthStorage, through `SystemOneAccessResolver` (access.ts).
  */
 
+import { interfaceText } from "../language/interface-text.ts";
+
 /**
  * The owner's pinned Jev version for scalar decisions through either provider.
  * Experimental image evaluation has a separate explicit capability pin on its driver.
@@ -42,7 +44,7 @@ export class TypeSafeSystemOneDriver implements SystemOneProviderDriver {
 	}
 
 	formatSetupHelp(): string {
-		return "use /login typesafe or TYPESAFE_API_KEY";
+		return interfaceText().settingsScreen.systemOne.setupTypesafe;
 	}
 }
 
@@ -75,7 +77,7 @@ export class OpenRouterSystemOneDriver implements SystemOneProviderDriver {
 	}
 
 	formatSetupHelp(): string {
-		return "use /login openrouter or OPENROUTER_API_KEY";
+		return interfaceText().settingsScreen.systemOne.setupOpenRouter;
 	}
 }
 

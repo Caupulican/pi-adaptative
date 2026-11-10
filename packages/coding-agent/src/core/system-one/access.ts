@@ -5,6 +5,7 @@
  * evaluation, and no path can pair one provider's endpoint with another provider's key.
  */
 
+import { interfaceText } from "../language/interface-text.ts";
 import { getSystemOneProviderDriver, type SystemOneProviderDriver } from "./provider-driver.ts";
 
 /** Which provider System One authenticates with. `auto` prefers the owner's TypeSafe key, then OpenRouter. */
@@ -45,15 +46,16 @@ export function describeSystemOneAccess(
 	choice: SystemOneProviderChoice,
 	hasKey: (provider: "typesafe" | "openrouter") => boolean,
 ): string {
+	const words = interfaceText().settingsScreen.systemOne;
 	const provider = providerCandidates(choice).find(hasKey);
 	if (provider) {
 		const driver = getSystemOneProviderDriver(provider);
-		return `In force: ${driver.displayName} (${driver.model}).`;
+		return words.inForce(driver.displayName, driver.model);
 	}
 	const setup = providerCandidates(choice)
 		.map((candidate) => getSystemOneProviderDriver(candidate).formatSetupHelp())
-		.join(", or ");
-	return `No key for this choice: System One is off until you ${setup}.`;
+		.join(words.orJoiner);
+	return words.noKey(setup);
 }
 
 export interface SystemOneAccess {

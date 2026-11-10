@@ -16,6 +16,7 @@ import {
 	visibleWidth,
 } from "@caupulican/pi-tui";
 import { CONFIG_DIR_NAME } from "../../../config.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { ResolvedPaths, ResolvedResource } from "../../../core/package-manager.ts";
 import type { PackageSource, Settings } from "../../../core/settings/settings-schema.ts";
 import type { PathMetadata } from "../../../core/source-info.ts";
@@ -42,12 +43,10 @@ export interface ConfigSelectorSettingsSource {
 
 type ResourceType = "extensions" | "skills" | "prompts" | "themes";
 
-const RESOURCE_TYPE_LABELS: Record<ResourceType, string> = {
-	extensions: "Extensions",
-	skills: "Skills",
-	prompts: "Prompts",
-	themes: "Themes",
-};
+/** The type name a group heading shows; the resource type itself stays the code's own value. */
+function resourceTypeLabel(resourceType: ResourceType): string {
+	return interfaceText().configScreen.resourceTypes[resourceType];
+}
 
 interface ResourceItem {
 	path: string;
@@ -103,19 +102,20 @@ function formatBaseDir(baseDir: string): string {
 }
 
 function getGroupLabel(metadata: PathMetadata): string {
+	const text = interfaceText().configScreen;
 	if (metadata.origin === "package") {
-		return `${metadata.source} (${metadata.scope})`;
+		return text.groups.package(metadata.source, text.scope[metadata.scope]);
 	}
 	// Top-level resources
 	if (metadata.source === "auto") {
 		if (metadata.baseDir) {
 			return metadata.scope === "user"
-				? `User (${formatBaseDir(metadata.baseDir)})`
-				: `Project (${formatBaseDir(metadata.baseDir)})`;
+				? text.groups.userAt(formatBaseDir(metadata.baseDir))
+				: text.groups.projectAt(formatBaseDir(metadata.baseDir));
 		}
-		return metadata.scope === "user" ? "User (~/.pi/agent/)" : "Project (.pi/)";
+		return metadata.scope === "user" ? text.groups.userDefault : text.groups.projectDefault;
 	}
-	return metadata.scope === "user" ? "User settings" : "Project settings";
+	return metadata.scope === "user" ? text.groups.userSettings : text.groups.projectSettings;
 }
 
 function buildGroups(resolved: ResolvedPaths): ResourceGroup[] {
@@ -144,7 +144,7 @@ function buildGroups(resolved: ResolvedPaths): ResourceGroup[] {
 			if (!subgroup) {
 				subgroup = {
 					type: resourceType,
-					label: RESOURCE_TYPE_LABELS[resourceType],
+					label: resourceTypeLabel(resourceType),
 					items: [],
 				};
 				group.subgroups.push(subgroup);
@@ -210,7 +210,7 @@ class ConfigSelectorHeader implements Component {
 	invalidate(): void {}
 
 	render(width: number): string[] {
-		const title = theme.bold("Resource Configuration");
+		const title = theme.bold(interfaceText().configScreen.title);
 		const sep = theme.fg("muted", " · ");
 		const hint = rawKeyHint("space", "toggle") + sep + rawKeyHint("esc/ctrl+c", "close");
 		const hintWidth = visibleWidth(hint);
@@ -219,7 +219,7 @@ class ConfigSelectorHeader implements Component {
 
 		return [
 			truncateToWidth(`${title}${" ".repeat(spacing)}${hint}`, width, ""),
-			theme.fg("muted", "Type to filter resources"),
+			theme.fg("muted", interfaceText().configScreen.filter),
 		];
 	}
 }
@@ -374,7 +374,7 @@ class ResourceList implements Component, Focusable {
 		lines.push("");
 
 		if (this.filteredItems.length === 0) {
-			lines.push(theme.fg("muted", "  No resources found"));
+			lines.push(theme.fg("muted", `  ${interfaceText().configScreen.empty}`));
 			return lines;
 		}
 

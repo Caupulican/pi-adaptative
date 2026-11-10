@@ -1,13 +1,33 @@
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ThinkingLevel } from "../../kernel/index.ts";
 
-/** Provider-neutral labels shared by every interactive thinking-level selector. */
+/**
+ * Provider-neutral descriptions shared by every interactive thinking-level selector. Each entry is read
+ * when the level is drawn, so the keys stay the levels themselves and the words follow the language.
+ */
 export const THINKING_LEVEL_DESCRIPTIONS: Readonly<Record<ThinkingLevel, string>> = {
-	off: "No reasoning",
-	minimal: "Very brief reasoning (~1k tokens)",
-	low: "Light reasoning (~2k tokens)",
-	medium: "Moderate reasoning (~8k tokens)",
-	high: "Deep reasoning (~16k tokens)",
-	xhigh: "Maximum reasoning (~32k tokens)",
-	max: "Maximum reasoning depth for the hardest problems",
-	ultra: "Maximum available reasoning effort (provider permitting)",
+	get off() {
+		return interfaceText().settingsScreen.dialogs.thinkingLevels.off;
+	},
+	get minimal() {
+		return interfaceText().settingsScreen.dialogs.thinkingLevels.minimal;
+	},
+	get low() {
+		return interfaceText().settingsScreen.dialogs.thinkingLevels.low;
+	},
+	get medium() {
+		return interfaceText().settingsScreen.dialogs.thinkingLevels.medium;
+	},
+	get high() {
+		return interfaceText().settingsScreen.dialogs.thinkingLevels.high;
+	},
+	get xhigh() {
+		return interfaceText().settingsScreen.dialogs.thinkingLevels.xhigh;
+	},
+	get max() {
+		return interfaceText().settingsScreen.dialogs.thinkingLevels.max;
+	},
+	get ultra() {
+		return interfaceText().settingsScreen.dialogs.thinkingLevels.ultra;
+	},
 };
