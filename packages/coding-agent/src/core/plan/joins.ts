@@ -362,8 +362,10 @@ export function workerJoinResult(
 
 /**
  * A verify join settles through its verifier (R6). A verifier that did not succeed fails the step with its blocker and next action,
- * whatever its members did. An independently verified verifier counts each member whose only shortfall is an unverified result as
- * verified, the way an accepted verification settles a subject: succeeded, every required requirement covered by the verification.
+ * whatever its members did. An independently verified verifier counts each member it accepted as verified, the way an accepted
+ * verification settles a subject: succeeded, every required requirement covered by the verification. That is each member that
+ * succeeded and each whose only shortfall is an unverified result, so the join's own assurance reads independently verified; a
+ * member that ended any other way keeps its outcome and the join does not succeed.
  */
 function verifyJoinResult(
 	record: PlanRecord,
@@ -391,7 +393,7 @@ function verifyJoinResult(
 		return buildResult(node, settled, failed, identity, undefined, workerStakes, conflicts);
 	}
 	const counted = settled.map((member) =>
-		member.outcome.status !== "succeeded" && member.outcome.blocker === "unverified_result"
+		member.outcome.status === "succeeded" || member.outcome.blocker === "unverified_result"
 			? { ...member, outcome: verifiedOutcome(member.outcome) }
 			: member,
 	);

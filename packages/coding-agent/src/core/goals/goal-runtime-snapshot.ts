@@ -226,9 +226,13 @@ export function buildGoalRuntimeSnapshot(args: {
 	const maxWorkerWaitMs = args.maxWorkerWaitMs ?? DEFAULT_GOAL_WORKER_WAIT_MS;
 	const inFlightToolTaskIds = new Set(workState.runningToolTaskIds);
 	const plan = args.taskRuntime ? activeRootPlan(args.taskRuntime) : undefined;
+	// A step the plan moves by itself counts: one that runs, one that is starting, and one that is ready, which the plan is
+	// releasing or deciding now (a step whose predecessor just settled, a join being combined). Counting only running steps
+	// ended the wait in the gap between one step settling and the next one starting, and prompted the root mid-plan.
 	const planStepsInFlight =
 		plan && goalState && plan.goalId === goalState.goalId
-			? plan.nodes.filter((node) => node.state === "admitted" || node.state === "running").length
+			? plan.nodes.filter((node) => node.state === "admitted" || node.state === "running" || node.state === "ready")
+					.length
 			: 0;
 	// The plan wait's deadline counts from the plan's last movement, so a plan that keeps settling steps keeps its wait.
 	// Its remaining time is measured on the orchestration clock that stamped that movement, never against `now`, which

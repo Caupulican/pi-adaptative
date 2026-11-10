@@ -184,7 +184,12 @@ function submitReportSchema(blockerCodes: readonly WorkerDeclarableBlocker[]) {
 					description: "Verifier workers only: whether the subject's evidence proves it.",
 				}),
 			),
-			reasonCodes: Type.Optional(Type.Array(Type.String())),
+			reasonCodes: Type.Optional(
+				Type.Array(Type.String(), {
+					description:
+						"Verifier workers only: at least one short stable code for the verdict (what the checks showed, or what failed).",
+				}),
+			),
 			ownerUpdate: Type.Optional(
 				Type.Union([Type.Literal("needed"), Type.Literal("none")], {
 					description:
@@ -555,6 +560,14 @@ const ACTIONABLE_REASON_CODES: ReadonlySet<string> = new Set([
 	"requirement_evidence_incomplete",
 	"requirement_not_applicable_without_reason",
 	"verifier_without_verdict",
+	"verifier_without_reason_codes",
+]);
+
+/** Reasons a worker answers only by citing what the host recorded: a requirement's evidence names a receipt or a changed file. */
+const RECORD_CITATION_REASON_CODES: ReadonlySet<string> = new Set([
+	"requirement_without_evidence",
+	"requirement_unknown_evidence",
+	"requirement_evidence_incomplete",
 ]);
 
 /**
@@ -576,10 +589,15 @@ export function buildNeedsMoreRequest(
 ): string {
 	// A check that matches no recorded command is usually a command the worker did run but wrote differently (a `python -c`
 	// line for code the python tool ran): showing what the host recorded lets it cite the exact input instead of giving up.
+	// A requirement reported met needs a receipt name or a changed file as its evidence, and a worker that reports as its
+	// closing action has been shown no receipt name: the review shows the record, or the requirement could never be proven.
+	const citesRecord = verdict.reasonCodes.some(
+		(code) => code.startsWith("check_") || RECORD_CITATION_REASON_CODES.has(code),
+	);
 	const recorded =
-		receipts.length > 0 && verdict.reasonCodes.some((code) => code.startsWith("check_"))
+		receipts.length > 0 && citesRecord
 			? [
-					"Commands the host recorded; to keep a check, give its receipt name (c-...) and repeat that exact input as the check's command:",
+					"Commands the host recorded; cite a receipt name (c-...) as a requirement's evidence, and to keep a check give its receipt name and repeat that exact input as the check's command:",
 					...receipts.slice(-12).map(receiptLine),
 				]
 			: [];
@@ -772,6 +790,10 @@ export function judgeSubmittedReport(input: {
 	if (context.verifier && !submitted.verdict) {
 		missing.push("a verifier's report carries a verdict (accepted or rejected)");
 		reasons.push("verifier_without_verdict");
+	} else if (context.verifier && submitted.reasonCodes.length === 0) {
+		// A verdict without a reason code ends the run as an invalid verifier result: the review asks for it while it can be given.
+		missing.push("a verifier's report names at least one reason code for its verdict (reasonCodes)");
+		reasons.push("verifier_without_reason_codes");
 	}
 
 	if (contradicted.length > 0) {

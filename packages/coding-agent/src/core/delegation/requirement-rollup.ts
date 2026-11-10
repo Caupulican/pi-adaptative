@@ -59,10 +59,12 @@ function coverageSource(
 ): { source: RequirementCoverageRef["source"]; claim: RollupClaim } | undefined {
 	const claim = attempt.claim;
 	if (claim?.status !== "completed" || !reviewSettled(claim)) return undefined;
+	// An accepted independent verification is the stronger showing, so it is named first: a verifier whose own report the
+	// host also accepted still covers the requirement by its verification, not by that report.
+	if (attempt.verificationAccepted) return { source: "verification", claim };
 	if (claim.hostVerdict?.verdict === "accepted" && claim.hostVerdict.coveredRequirementIds.includes(requirementId)) {
 		return { source: "host_verdict", claim };
 	}
-	if (attempt.verificationAccepted) return { source: "verification", claim };
 	return undefined;
 }
 
