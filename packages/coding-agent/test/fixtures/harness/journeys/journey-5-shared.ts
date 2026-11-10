@@ -4,8 +4,10 @@ import type { ScriptedRequest, ScriptStep } from "../scripted-provider.ts";
 import type { HarnessWorld } from "../session-fixture.ts";
 import { currentRequestCarries, ICM_INTAKE_JUDGMENTS, latestBatchResults } from "./shared.ts";
 
-/** The intake judgments a plain prompt consumes here: a plan call without a profile asks no capability question. */
-const { capabilities_authorized: _capabilities, ...INTAKE_JUDGMENTS } = ICM_INTAKE_JUDGMENTS;
+const { capabilities_authorized: _capabilities, ...intake } = ICM_INTAKE_JUDGMENTS;
+
+/** The intake judgments a plain owner prompt consumes here: a plan call without a profile asks no capability question. */
+export const INTAKE_JUDGMENTS = intake;
 
 /**
  * What the owner's request and the plan call's review read with System One on: the request's intake, that the plan covers
@@ -90,7 +92,7 @@ export function reportStep(name: string, report: Record<string, unknown>, gate?:
  */
 export function planCallSteps(
 	name: string,
-	args: Record<string, unknown>,
+	args: Record<string, unknown> | ((request: ScriptedRequest) => Record<string, unknown>),
 	code: "PLAN_STARTED" | "PLAN_UPDATE",
 	onAccepted: (text: string) => void,
 ): ScriptStep[] {
@@ -101,10 +103,17 @@ export function planCallSteps(
 				const offered = (request.context.tools ?? []).map((tool) => tool.name);
 				if (!offered.includes("plan")) throw new Error(`the root is not offered plan: ${offered.join(", ")}`);
 			},
-			reply: {
-				content: [{ type: "toolCall", id: `${name}-call-1`, name: "plan", arguments: args }],
+			reply: (request) => ({
+				content: [
+					{
+						type: "toolCall",
+						id: `${name}-call-1`,
+						name: "plan",
+						arguments: typeof args === "function" ? args(request) : args,
+					},
+				],
 				stopReason: "toolUse",
-			},
+			}),
 		},
 		{
 			name: `${name}-result`,
@@ -134,6 +143,13 @@ export function deliveredLines(request: ScriptedRequest): string[] {
 	let start = messages.length;
 	while (start > 0 && messages[start - 1]?.role !== "assistant") start--;
 	return messages.slice(start).flatMap((message) => textOf(message).split("\n"));
+}
+
+/** The requirement ids a step's task says it proves, as the worker reads them. */
+export function stepRequirementIds(request: ScriptedRequest): string[] {
+	const prefix = "Requirements this step proves: ";
+	const line = stepTaskLines(request).find((candidate) => candidate.startsWith(prefix));
+	return line === undefined ? [] : line.slice(prefix.length).split(", ");
 }
 
 /** The lines of the task a step's worker was given: the message that carries the step's header. */

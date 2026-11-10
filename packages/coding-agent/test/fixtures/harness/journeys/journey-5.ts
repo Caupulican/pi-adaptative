@@ -4,6 +4,7 @@ import { runJourney5PlanCollectPhase } from "./journey-5-plan-collect.ts";
 import { runJourney5PlanOriginPhase } from "./journey-5-plan-origin.ts";
 import { runJourney5PlanRacePhase } from "./journey-5-plan-race.ts";
 import { runJourney5PlanReducePhase } from "./journey-5-plan-reduce.ts";
+import { runJourney5PlanVerifyAcceptedPhase } from "./journey-5-plan-verify.ts";
 import { LIMITS_PATH, runJourney } from "./shared.ts";
 
 /**
@@ -27,6 +28,8 @@ export async function runJourney5(): Promise<void> {
 			await runJourney5PlanReducePhase(world, session);
 			await runJourney5PlanOriginPhase(world, session);
 			expect(await world.disposeSessionInBody(session), "the plans owner disposes cleanly").toBeUndefined();
+			// A plan under a goal runs in its own session: the goal is that session's, and ends with it.
+			await runJourney5PlanVerifyAcceptedPhase(world);
 		},
 	);
 }
