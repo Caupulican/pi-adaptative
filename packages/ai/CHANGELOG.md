@@ -4,6 +4,10 @@
 
 - Command Code adapter: a turn names the event kinds it did not read. The service can send kinds the adapter has no use for yet (a tool call's input streamed in parts, provider metadata) and may add kinds at any time; they used to be dropped in silence. A turn that saw one now carries one diagnostic on its message (`command_code_unread_events`): the kinds and how often each was seen, across all posts of the turn, at most 20 kinds named, no event content. A turn that read everything carries none.
 
+### Fixed
+
+- Command Code adapter: a used-up usage window of the plan ends the turn at once and says when it opens again. The service refuses with status 429 and names the window (`error.rateLimit.window`, or the words "usage limit for your plan") and its reset (`rateLimit.reset`, or an ISO time after "resets at"). The adapter used to pass this on as an ordinary rate limit, so a host retried a request that could not succeed for hours. The failure now carries the retry directive `do not retry` and the seconds until the reset. The shared quota wording also recognises a limit written with the verb first (`You've reached your 5-hour usage limit`), so hosts classify it as an exhausted quota (no retry, the model marked exhausted until the stated time, failover where one is configured) and not as a rate limit. An ordinary 429 is retried as before.
+
 ## [0.104.50] - 2026-11-10
 
 ### Fixed

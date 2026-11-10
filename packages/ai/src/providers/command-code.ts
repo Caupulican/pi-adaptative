@@ -61,6 +61,12 @@ const MAX_ERROR_TEXT_CHARS = 500;
 const REFUSAL_FINISH_REASONS = new Set(["refusal", "content_filter", "content-filter"]);
 /** Failures the service reports with no status that another try cannot change. */
 const TERMINAL_ERROR_MARKERS = ["premium_credits_exhausted", "model_not_in_plan", "insufficient credits"];
+/** The usage windows a plan has, as the service names them in `error.rateLimit.window`. */
+const USAGE_WINDOWS = new Set(["fiveHour", "weekly", "daily"]);
+/** The service's words for a used-up usage window, for a refusal that names no window. */
+const USAGE_WINDOW_WORDS = /usage limit for your plan/i;
+/** The time a used-up window opens again, as the service writes it in the refusal's message. */
+const USAGE_WINDOW_RESET_WORDS = /resets at (\d{4}-\d{2}-\d{2}T[\d:.]+Z)/i;
 /** How many kinds a turn's report names; kinds past it are only counted. */
 const MAX_REPORTED_UNREAD_KINDS = 20;
 /** Bounds one kind's key in a report, because a kind is the service's own string and its length is not. */
@@ -78,18 +84,32 @@ type ServiceEvent = Record<string, unknown> & { type: string };
 class CommandCodeError extends Error {
 	readonly status: number | undefined;
 	readonly headers: Headers | undefined;
-	/** The service's own word on trying again, when it gave one. */
-	readonly error: { availability: { retryable: boolean } } | undefined;
+	/** The service's own word on trying again, when it gave one, and how many seconds it said to wait. */
+	readonly error: { availability: { retryable: boolean; retry_after?: number } } | undefined;
 
 	constructor(
 		message: string,
-		detail: { status?: number; headers?: Headers; retryable?: boolean; cause?: unknown } = {},
+		detail: {
+			status?: number;
+			headers?: Headers;
+			retryable?: boolean;
+			retryAfterSeconds?: number;
+			cause?: unknown;
+		} = {},
 	) {
 		super(message, detail.cause === undefined ? undefined : { cause: detail.cause });
 		this.name = "CommandCodeError";
 		this.status = detail.status;
 		this.headers = detail.headers;
-		this.error = detail.retryable === undefined ? undefined : { availability: { retryable: detail.retryable } };
+		this.error =
+			detail.retryable === undefined
+				? undefined
+				: {
+						availability: {
+							retryable: detail.retryable,
+							...(detail.retryAfterSeconds === undefined ? {} : { retry_after: detail.retryAfterSeconds }),
+						},
+					};
 	}
 }
 
@@ -99,7 +119,9 @@ function boundedText(text: string): string {
 }
 
 /** A service error that travels as text: an optional status, then JSON holding `error.message`. */
-function readEmbeddedError(text: string): { status?: number; message: string } | undefined {
+function readEmbeddedError(
+	text: string,
+): { status?: number; message: string; body: Record<string, unknown> } | undefined {
 	const at = text.indexOf("{");
 	if (at < 0) return undefined;
 	let parsed: unknown;
@@ -114,15 +136,44 @@ function readEmbeddedError(text: string): { status?: number; message: string } |
 	return {
 		...(/^\d{3}$/.test(prefix) ? { status: Number(prefix) } : {}),
 		message: boundedText(typeof error.type === "string" ? `${error.type}: ${error.message}` : error.message),
+		body: error,
+	};
+}
+
+/**
+ * A usage window of the plan that is used up. The service refuses with status 429 (or the code `RATE_LIMITED`), names
+ * the window in `error.rateLimit.window` or in words, and says when the window opens again: `rateLimit.reset` in epoch
+ * seconds, or an ISO time after "resets at" in the message. Every try before that time is refused the same way, so the
+ * failure tells the shared retry policy not to retry and, when the time is stated, how many seconds remain. Undefined
+ * for every other refusal: an ordinary rate limit stays the policy's to retry.
+ */
+function usedUpUsageWindow(
+	body: Record<string, unknown> | undefined,
+	message: string,
+	nowMs: number,
+): { retryable: false; retryAfterSeconds?: number } | undefined {
+	const limit = isRecord(body?.rateLimit) ? body.rateLimit : undefined;
+	const named = typeof limit?.window === "string" && USAGE_WINDOWS.has(limit.window);
+	if (!named && !USAGE_WINDOW_WORDS.test(message)) return undefined;
+	const opensAt =
+		typeof limit?.reset === "number" && Number.isFinite(limit.reset)
+			? limit.reset * 1000
+			: Date.parse(USAGE_WINDOW_RESET_WORDS.exec(message)?.[1] ?? "");
+	const waitMs = opensAt - nowMs;
+	return {
+		retryable: false,
+		...(Number.isFinite(waitMs) && waitMs > 0 ? { retryAfterSeconds: Math.ceil(waitMs / 1000) } : {}),
 	};
 }
 
 async function httpFailure(response: Response): Promise<CommandCodeError> {
 	const raw = ((await readBoundedResponseText(response, MAX_ERROR_BODY_BYTES).catch(() => "")) ?? "").trim();
-	const detail = readEmbeddedError(raw)?.message ?? boundedText(raw);
+	const embedded = readEmbeddedError(raw);
+	const detail = embedded?.message ?? boundedText(raw);
 	return new CommandCodeError(`Command Code request failed (HTTP ${response.status})${detail ? `: ${detail}` : ""}`, {
 		status: response.status,
 		headers: response.headers,
+		...(response.status === 429 ? usedUpUsageWindow(embedded?.body, detail, Date.now()) : {}),
 	});
 }
 
@@ -138,6 +189,12 @@ function streamFailure(event: ServiceEvent): CommandCodeError {
 	const embedded = readEmbeddedError(text);
 	const status = embedded?.status ?? (typeof reported?.statusCode === "number" ? reported.statusCode : undefined);
 	const message = embedded?.message ?? boundedText(text);
+	// A used-up usage window is final whatever else the event says: no flag of the event makes another try succeed.
+	const usedUp =
+		status === 429 || reported?.code === "RATE_LIMITED"
+			? usedUpUsageWindow(embedded?.body ?? reported, message, Date.now())
+			: undefined;
+	if (usedUp) return new CommandCodeError(`Command Code reported an error: ${message}`, { status, ...usedUp });
 	const lower = message.toLowerCase();
 	// With a status the shared policy decides by it; with none, only the service's flag and its terminal failures do.
 	const retryable =
