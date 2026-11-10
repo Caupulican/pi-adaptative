@@ -1,6 +1,7 @@
 /**
  * The shipped Telegram transport: one bot, private chats, text only, over the Bot API's HTTPS long polling
- * (`getUpdates`, `sendMessage`). No SDK, no webhook, no listening socket.
+ * (`getUpdates`, `sendMessage`). No SDK, no webhook, no listening socket. A message may carry one-tap answers
+ * (`ChannelMessage.choices`) as an inline keyboard; a press arrives as the presser's own message with the choice's text.
  *
  * The bot token is a secret read from `<agentDir>/channels/telegram.token` at every start. It appears only in the
  * request URL; every error, report and thrown text is built from the API method and HTTP status in this module's own
@@ -69,15 +70,74 @@ const RELAYED_FIELDS = [
 	"via_bot",
 ] as const;
 
+/** Telegram's bounds on one inline button: its words, and the bytes its press carries back. */
+const MAX_CHOICE_LABEL_CHARS = 64;
+const MAX_CHOICE_REPLY_BYTES = 64;
+
+/**
+ * The inline keyboard of a message's choices, one row; undefined when it has none or one does not fit Telegram's bounds
+ * (the message is then sent as text alone, which already names the words to type).
+ */
+function inlineKeyboard(choices: ChannelMessage["choices"]): Record<string, unknown> | undefined {
+	if (!choices || choices.length === 0) return undefined;
+	const fits = choices.every(
+		(choice) =>
+			choice.label.length > 0 &&
+			choice.label.length <= MAX_CHOICE_LABEL_CHARS &&
+			choice.reply.length > 0 &&
+			Buffer.byteLength(choice.reply, "utf8") <= MAX_CHOICE_REPLY_BYTES,
+	);
+	if (!fits) return undefined;
+	return { inline_keyboard: [choices.map((choice) => ({ text: choice.label, callback_data: choice.reply }))] };
+}
+
+/** One update as the core sees it, and the button press to acknowledge once it is held. */
+interface ReadUpdate {
+	readonly id: number;
+	readonly message?: ChannelMessage;
+	/** The id of the press this update is: Telegram is told it was received, so the button stops waiting. */
+	readonly pressId?: string;
+}
+
+/**
+ * A press of one of this bot's inline buttons, as the presser's own message: the text is the button's data, which the
+ * presser's client sends, so it is that person's words exactly as a typed message is and is admitted the same way. It is
+ * read only in the presser's own private chat with the bot.
+ */
+function readPress(id: number, press: unknown): ReadUpdate {
+	if (!isPlainRecord(press) || typeof press.id !== "string" || typeof press.data !== "string") return { id };
+	const pressId = press.id;
+	const from = press.from;
+	const chat = isPlainRecord(press.message) ? press.message.chat : undefined;
+	if (!isPlainRecord(chat) || chat.type !== "private" || !safeInteger(chat.id)) return { id, pressId };
+	if (!isPlainRecord(from) || from.is_bot === true || !safeInteger(from.id)) return { id, pressId };
+	const chatId = String(chat.id);
+	return {
+		id,
+		pressId,
+		message: {
+			conversationKey: `telegram:${chatId}`,
+			address: chatId,
+			eventId: `tg:${id}`,
+			text: press.data,
+			kind: "message",
+			sender: { id: String(from.id), verified: true },
+			privateChat: chat.id === from.id,
+			forwarded: false,
+		},
+	};
+}
+
 /**
  * One update as the core sees it: its id, and the message a person wrote the bot in a private chat (if it is one).
  * Only `message.text` enters a turn: a replied-to message, a quote or a caption never does. `privateChat` holds when
  * the chat is the sender's own one-to-one chat with the bot and no channel or group speaks as the sender; `forwarded`
  * when any relay field is present. Both are owner-admission facts (`owner-channel.ts`).
  */
-function readUpdate(update: unknown): { readonly id: number; readonly message?: ChannelMessage } | undefined {
+function readUpdate(update: unknown): ReadUpdate | undefined {
 	if (!isPlainRecord(update) || !safeInteger(update.update_id) || update.update_id < 0) return undefined;
 	const id = update.update_id;
+	if (update.callback_query !== undefined) return readPress(id, update.callback_query);
 	const message = update.message;
 	if (!isPlainRecord(message) || typeof message.text !== "string") return { id };
 	const chat = message.chat;
@@ -116,7 +176,7 @@ export function telegramTokenPath(agentDir: string): string {
 
 export class TelegramChannelProvider extends ChannelTransport implements ChannelProvider {
 	readonly name = TELEGRAM_CHANNEL;
-	readonly capabilities: ChannelCapabilities = { maxMessageChars: 4096, markdown: false };
+	readonly capabilities: ChannelCapabilities = { maxMessageChars: 4096, markdown: false, choices: true };
 	/** A Telegram user id is a number Telegram assigns. */
 	readonly senderIds: ChannelSenderIds = { assignedBy: "platform" };
 	private readonly tokenPath: string;
@@ -152,7 +212,11 @@ export class TelegramChannelProvider extends ChannelTransport implements Channel
 			signal: this.signal,
 			timers: this.timers,
 			pacer: this.pacer,
-			call: (signal) => this.call("sendMessage", { chat_id: chatId, text: message.text }, signal, SEND_ABORT_MS),
+			call: (signal) => {
+				const keyboard = inlineKeyboard(message.choices);
+				const body = { chat_id: chatId, text: message.text, ...(keyboard ? { reply_markup: keyboard } : {}) };
+				return this.call("sendMessage", body, signal, SEND_ABORT_MS);
+			},
 			refusal: (outcome) => this.sendRefusal(outcome.status),
 		});
 	}
@@ -168,7 +232,7 @@ export class TelegramChannelProvider extends ChannelTransport implements Channel
 	}
 
 	private async call(
-		method: "getUpdates" | "sendMessage",
+		method: "getUpdates" | "sendMessage" | "answerCallbackQuery",
 		body: Record<string, unknown>,
 		signal: AbortSignal,
 		timeoutMs: number,
@@ -196,6 +260,15 @@ export class TelegramChannelProvider extends ChannelTransport implements Channel
 					? boundedRetryAfterMs(parameters.retry_after)
 					: outcome.retryAfterMs;
 		return { kind: "refused", status, payload, ...(retryAfter !== undefined ? { retryAfterMs: retryAfter } : {}) };
+	}
+
+	/**
+	 * Tells Telegram a press was received, once its message is held, so the button stops waiting. It is a courtesy to the
+	 * person's screen: nothing waits for it and its failure changes nothing that was decided.
+	 */
+	private acknowledgePress(pressId: string, signal: AbortSignal): void {
+		const body = { callback_query_id: pressId };
+		void this.call("answerCallbackQuery", body, signal, SEND_ABORT_MS).catch(() => undefined);
 	}
 
 	/** Long polling: an update is acknowledged (the next `offset`) only after the core's handler resolved. */
@@ -226,7 +299,7 @@ export class TelegramChannelProvider extends ChannelTransport implements Channel
 				{
 					...(offset !== undefined ? { offset } : {}),
 					timeout: POLL_TIMEOUT_SECONDS,
-					allowed_updates: ["message"],
+					allowed_updates: ["message", "callback_query"],
 				},
 				signal,
 				POLL_ABORT_MS,
@@ -256,6 +329,7 @@ export class TelegramChannelProvider extends ChannelTransport implements Channel
 							break;
 						}
 					}
+					if (update.pressId !== undefined) this.acknowledgePress(update.pressId, signal);
 					offset = update.id + 1;
 				}
 				// A batch that moved nothing forward (a rejected handler, or only unreadable updates) is not polled again at once.

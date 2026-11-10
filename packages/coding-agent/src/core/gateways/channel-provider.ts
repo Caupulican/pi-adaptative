@@ -20,6 +20,18 @@ export interface ChannelSender {
 	verified: boolean;
 }
 
+/**
+ * A one-tap answer an outbound message offers (a button under it, where the transport has them). Pressing it is the
+ * person sending `reply` in that conversation: the transport delivers it as an ordinary inbound message from the person
+ * who pressed, so it is admitted, bounded and decided exactly as typed words are. It grants nothing a typed reply would not.
+ */
+export interface ChannelChoice {
+	/** The button's words. */
+	readonly label: string;
+	/** The text the press sends, as if typed. */
+	readonly reply: string;
+}
+
 /** A message arriving from / sent to an external channel (gateway). */
 export interface ChannelMessage {
 	/** Stable conversation/session key for this channel (e.g. `slack_C123`). */
@@ -45,6 +57,11 @@ export interface ChannelMessage {
 	/** When the provider received the event, epoch milliseconds; defaults to admission time. */
 	receivedAt?: number;
 	/**
+	 * Outbound: one-tap answers under the message. A transport that cannot show them (`ChannelCapabilities.choices`) sends
+	 * the text alone, so the text always names the words to type.
+	 */
+	choices?: readonly ChannelChoice[];
+	/**
 	 * Inbound: the platform says this is a one-to-one chat between the sender and the bot. Read only from a shipped
 	 * transport (owner admission, `channels/owner-channel.ts`); absent means not established.
 	 */
@@ -64,6 +81,8 @@ export interface ChannelCapabilities {
 	markdown?: boolean;
 	/** Whether an address can name a thread inside a conversation. */
 	threads?: boolean;
+	/** Whether an outbound message's `choices` are shown as one-tap answers. */
+	choices?: boolean;
 }
 
 /** What a transport's sender ids are: the core reads it to decide where an id may be shown and how ids compare. */

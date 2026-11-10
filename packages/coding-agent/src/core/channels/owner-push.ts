@@ -7,7 +7,7 @@
  * one longer push (its complete rendering, fenced) and goes only to the chat whose turn held it.
  */
 
-import type { ChannelProvider } from "../gateways/channel-provider.ts";
+import type { ChannelChoice, ChannelProvider } from "../gateways/channel-provider.ts";
 import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { isShippedChannelProvider } from "./built-in-providers.ts";
 import { type ChannelJournal, type ChannelOwnerConversation, digest } from "./channel-journal.ts";
@@ -38,11 +38,19 @@ interface PushOptions {
 	readonly from?: string;
 	/** Exempt from `MAX_OWNER_PUSH_CHARS` (a draft presentation). */
 	readonly long?: boolean;
+	/** One-tap answers under the push (a draft presentation's two decisions), where the transport shows them. */
+	readonly choices?: readonly ChannelChoice[];
 }
 
 type PushPlan =
 	| { readonly kind: "skip" }
-	| { readonly kind: "send"; readonly targets: readonly ChannelOwnerConversation[]; readonly text: string };
+	| {
+			readonly kind: "send";
+			readonly targets: readonly ChannelOwnerConversation[];
+			readonly text: string;
+			/** Whether this send is the push itself (it carries the choices) or the line that says more are waiting. */
+			readonly own: boolean;
+	  };
 
 function presentationKey(draftId: string, conversationKey: string): string {
 	return `draft:${draftId}:${digest(conversationKey).slice(0, 12)}`;
@@ -71,16 +79,17 @@ export class OwnerPush {
 	present(
 		channel: string,
 		draftId: string,
-		text: string,
+		presentation: { readonly text: string; readonly choices: readonly ChannelChoice[] },
 		conversationKey: string,
 		senderDigest: string,
 		rated: boolean,
 	): Promise<boolean> {
-		return this.send(channel, presentationKey(draftId, conversationKey), text, {
+		return this.send(channel, presentationKey(draftId, conversationKey), presentation.text, {
 			rated,
 			to: conversationKey,
 			from: senderDigest,
 			long: true,
+			...(presentation.choices.length > 0 ? { choices: presentation.choices } : {}),
 		});
 	}
 
@@ -138,11 +147,12 @@ export class OwnerPush {
 							kind: "send",
 							targets,
 							text: `${suppressed} more update(s) waiting past channels.${channel}.ownerPushPerHour; send status.`,
+							own: false,
 						};
 					}
 				}
 				if (!existing) state.ownerPushes = [...pushes, { k, at: now }];
-				return { kind: "send", targets, text };
+				return { kind: "send", targets, text, own: true };
 			}).result;
 		} catch (error) {
 			this.host.warn(
@@ -160,6 +170,7 @@ export class OwnerPush {
 					text: plan.text,
 					kind: "message",
 					eventId: `push:${digest(`${k}:${target.conversationKey}`).slice(0, 16)}`,
+					...(plan.own && options.choices && provider.capabilities?.choices ? { choices: options.choices } : {}),
 				});
 				sent = true;
 			} catch (error) {

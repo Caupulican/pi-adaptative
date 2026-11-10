@@ -99,9 +99,9 @@ import {
 	classLabels,
 	decideOwnerDraft,
 	draftInScope,
-	draftPresentation,
 	MAX_STATUS_DRAFTS,
 	parseOwnerControl,
+	presentDraft,
 } from "./owner-control.ts";
 import { nameableSenderId, quotaStatusLine, senderNoticeText } from "./owner-notice-text.ts";
 import { OwnerPush } from "./owner-push.ts";
@@ -2138,7 +2138,7 @@ export class SessionChannels {
 			await this.ownerPush.present(
 				name,
 				view.id,
-				draftPresentation(view, policy.ownerTerminalOnlyClasses),
+				presentDraft(view, policy.ownerTerminalOnlyClasses),
 				batch.conversationKey,
 				batch.senderDigest,
 				true,
@@ -2172,7 +2172,7 @@ export class SessionChannels {
 					await this.ownerPush.present(
 						name,
 						view.id,
-						draftPresentation(view, policy.ownerTerminalOnlyClasses),
+						presentDraft(view, policy.ownerTerminalOnlyClasses),
 						event.conversationKey,
 						senderDigest,
 						false,

@@ -6,6 +6,7 @@
  */
 
 import type { EdgeClass } from "../autonomy/edge-policy.ts";
+import type { ChannelChoice } from "../gateways/channel-provider.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { digest } from "./channel-journal.ts";
@@ -77,7 +78,7 @@ export function classLabels(view: Pick<OwnerDraftView, "classes">): string {
  * The phone presentation of a held draft: its classes, id and complete rendering fenced as data, and the two words that
  * decide it; or, when the rendering is missing or a class is terminal-only, that it is released at the terminal.
  */
-export function draftPresentation(view: OwnerDraftView, terminalOnlyClasses: readonly EdgeClass[]): string {
+function draftPresentation(view: OwnerDraftView, terminalOnlyClasses: readonly EdgeClass[]): string {
 	const fenced = fencedPresentation(view);
 	if (fenced !== undefined && !terminalOnly(view, terminalOnlyClasses)) return fenced;
 	const why =
@@ -87,6 +88,29 @@ export function draftPresentation(view: OwnerDraftView, terminalOnlyClasses: rea
 				? "the call looks like it holds a secret"
 				: "its class is kept for the terminal";
 	return `${headLine(view)} Release it at the terminal: ${why}.`;
+}
+
+/** A held draft as a phone is shown it: the presentation's words, and the one-tap answers under them. */
+export interface DraftPresentation {
+	readonly text: string;
+	readonly choices: readonly ChannelChoice[];
+}
+
+/**
+ * A held draft's presentation with its one-tap answers: the same two control words the text names, so a press is the
+ * owner sending that word and is decided by the same rules. A draft released only at the terminal offers none.
+ */
+export function presentDraft(view: OwnerDraftView, terminalOnlyClasses: readonly EdgeClass[]): DraftPresentation {
+	const decidable = !terminalOnly(view, terminalOnlyClasses);
+	return {
+		text: draftPresentation(view, terminalOnlyClasses),
+		choices: decidable
+			? [
+					{ label: "Approve", reply: `approve ${view.id}` },
+					{ label: "Deny", reply: `deny ${view.id}` },
+				]
+			: [],
+	};
 }
 
 /**

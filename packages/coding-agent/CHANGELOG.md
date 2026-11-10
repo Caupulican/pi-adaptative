@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- One-tap decisions on the phone: on Telegram, a held action's presentation carries **Approve** and **Deny** buttons. A press sends `approve <draft-id>` or `deny <draft-id>` as the owner's own message, so it is admitted and decided by the same model-free rules as the typed word. A channel transport can offer one-tap answers under any message it sends (`ChannelMessage.choices`, `ChannelCapabilities.choices`); a transport without them sends the text alone.
+
 ### Changed
 
 - Plan `verify` steps run as read-only independent verifiers with a typed verdict. One verify step reviews every worker result under its members, including the results a join the harness settled in code counted. An accepted verdict proves the step's requirements for the goal's completion account ("independent verification accepted it") and settles a member whose only shortfall was an unverified result; a rejected verdict holds the step for re-planning with the verifier's reason codes, and the changed step is verified again after the revise; a verify step no longer reads as accepted when its verifier did not accept. The verifier is the checked step's profile in read-only verifier form (the default worker profile when the step ran on a linked machine), it reads no parent context, and nothing is written on the steps it checks.
