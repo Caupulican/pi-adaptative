@@ -171,7 +171,8 @@ function nodeBody(scene, node) {
 	}
 	if (node.kind === "queue" || node.kind === "worker" || node.kind === "sweep")
 		for (const name of node.usedPorts) out += pin(scene, shape.ports[name], theme.line);
-	return `<g opacity="${tierStyle(scene, tier).alpha}">${out}</g>`;
+	// The structure stays quiet so what moves and what changed carry the picture.
+	return `<g opacity="${alphaOf(tierStyle(scene, tier).alpha * 0.8)}">${out}</g>`;
 }
 
 /** The longest level run of a wire: where its label sits. */
@@ -190,7 +191,7 @@ function labelRun(path) {
 function wireEl(scene, wire) {
 	const u = scene.unit;
 	const style = tierStyle(scene, wire.tier);
-	let out = pathEl(wire.path.d, `${tierStroke(scene, wire.tier, scene.theme.line, u * 0.13)} opacity="${alphaOf(style.alpha * 0.62)}"`);
+	let out = pathEl(wire.path.d, `${tierStroke(scene, wire.tier, scene.theme.line, u * 0.13)} opacity="${alphaOf(style.alpha * 0.48)}"`);
 	if (!wire.label) return out;
 	// A curved wire is named where it arrives, so two wires that leave one pin are never named in one place; a wire
 	// with a level run is named under the middle of that run.
@@ -282,7 +283,8 @@ function workerEl(scene, node, stay) {
 	if (!stay) return `<g opacity="${tierStyle(scene, node.tier).alpha}">${drawMechanism(node.mechanism, parts)}</g>`;
 	const colour = toneOf(scene, stay.tone);
 	const settle = Math.min(1, stay.since / 0.25);
-	let out = rectEl(box, STATION_RADIUS * u, `fill="${colour}" fill-opacity="${stay.failed ? 0.14 : 0.05}" stroke="${colour}" stroke-width="${px(u * 0.18)}" opacity="${alphaOf(settle * 0.85)}"`);
+	let out = rectEl(box, STATION_RADIUS * u, `${strokeOf(colour, u * 0.5)} opacity="${alphaOf(settle * 0.35)}" filter="url(#flow-glow)"`);
+	out += rectEl(box, STATION_RADIUS * u, `fill="${colour}" fill-opacity="${stay.failed ? 0.14 : 0.05}" stroke="${colour}" stroke-width="${px(u * 0.18)}" opacity="${alphaOf(settle * 0.9)}"`);
 	out += drawMechanism(node.mechanism, { ...parts, colour, since: stay.since, progress: stay.progress, failed: stay.failed });
 	if (!stay.failed) out += activityMarks({ u, box, colour, since: stay.since });
 	out += lineEl(rail.left, rail.base, rail.left + (rail.right - rail.left) * stay.progress, rail.base, strokeOf(colour, u * 0.3, 'stroke-linecap="round"'));
