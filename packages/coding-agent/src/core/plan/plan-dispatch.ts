@@ -33,10 +33,11 @@ import { planNodeOutcome } from "./plan-view.ts";
 
 /**
  * The line a step that writes in its own worktree lane is given: the lane is what lands, so its work must be committed there
- * before the step reports (an uncommitted lane is refused by the land gate).
+ * before the step reports (an uncommitted lane is refused by the land gate). The worker commits with git in its shell: the
+ * lane is its working directory, and an in-process worker is never given the `worktree_sync` tool.
  */
 const LANE_COMMIT_WORDS =
-	"Your work is in your own worktree lane, not the shared checkout. Before you report, commit every change there: worktree_sync git_add with the paths you changed, then git_commit. The land gate refuses a lane with uncommitted changes.";
+	"Your work is in your own worktree lane, not the shared checkout: your working directory is that lane. Before you report, commit every change there with git: `git add` the files you changed, then `git commit`. The land gate refuses a lane with uncommitted changes.";
 
 /** The root-context excerpt an `annotate` exit bakes into a step's brief. */
 export const PLAN_ROOT_EXCERPT_BYTES = 2 * 1024;
@@ -183,6 +184,10 @@ export function buildPlanDispatch(
 ): FleetDispatch {
 	const subjects = node.kind === "verify" ? planReviewSubjects(projection, plan, record, node) : [];
 	const anchor = subjects[0];
+	// Where the anchor's worker worked: the execution directory its contract pins (a worktree lane, or the shared checkout).
+	const subjectDirectory = anchor
+		? projection.attempts[anchor.attemptId]?.dispatch.executionContract?.worker.authority.cwd
+		: undefined;
 	const words = joinTaskWords(node, evidence);
 	const isolation = needsOwnWorktree(record, node.id) ? "worktree" : "shared";
 	// Every released step carries the same head in the same order. The tail is the review's brief (every subject, its report
@@ -227,7 +232,15 @@ export function buildPlanDispatch(
 		dependsOnTaskIds: dependencyTaskIds(projection, plan, record, node),
 		thinking: node.effort === "deep" ? "raise_one" : "inherit",
 		plan: { planId: record.planId, version: node.since, nodeId: node.id },
-		...(anchor ? { verification: { subjectTaskId: anchor.taskId, subjectAttemptId: anchor.attemptId } } : {}),
+		...(anchor
+			? {
+					verification: {
+						subjectTaskId: anchor.taskId,
+						subjectAttemptId: anchor.attemptId,
+						...(subjectDirectory ? { directory: subjectDirectory } : {}),
+					},
+				}
+			: {}),
 	};
 }
 

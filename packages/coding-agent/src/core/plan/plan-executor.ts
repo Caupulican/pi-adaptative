@@ -68,7 +68,14 @@ import {
 	type PlanRuntimeState,
 	planCriticalPath,
 } from "./plan-graph.ts";
-import { MergeLandings, type MergeStep, mergeLanes, mergeWorkerNodes, WORKTREE_UNAVAILABLE } from "./plan-merge.ts";
+import {
+	MergeLandings,
+	type MergeStep,
+	mergeLanes,
+	mergeWorkerNodes,
+	WORKTREE_UNAVAILABLE,
+	worktreeUnavailableWords,
+} from "./plan-merge.ts";
 import { PLAN_NODE_MACHINE } from "./plan-node-machine.ts";
 import { placementFor } from "./plan-placement.ts";
 import { type PlanAction, type PlanUpdateIntent, reconcilePlans } from "./plan-reconcile.ts";
@@ -960,7 +967,7 @@ export class PlanExecutor implements PlanExecutorPort {
 			if (refusal.detail.startsWith(`${PLAN_VERIFIER_UNAVAILABLE}:`))
 				return this.holdStep(planId, nodeId, version, `the verifier cannot run: ${refusal.detail}`);
 			if (refusal.detail.startsWith(WORKTREE_UNAVAILABLE))
-				return this.holdStep(planId, nodeId, version, "this step needs its own worktree and none can be made here");
+				return this.holdStep(planId, nodeId, version, worktreeUnavailableWords(refusal.detail));
 			// A start that threw is not a wait for room: retrying it changes nothing, so the planner is told what failed.
 			if (refusal.detail.startsWith(WORKER_START_ERROR))
 				return this.holdStep(

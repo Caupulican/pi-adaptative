@@ -140,7 +140,10 @@ branch off main before it is admitted, through the same engine as every other la
   worker resumes in the same lane) and its `write`/`edit` scope, shell directory and claim review are the lane's;
 - the worker's repository writes can only land on its own lane branch; `git switch main` fails because main is
   checked out in the hub, and nothing it commits reaches main except through `sync` and `land`;
-- the lane registration records the worker as its owner when the worker starts;
+- the lane registration records the worker as its owner when the worker starts, and the lane stays that worker's.
+  A plan's review of the worker's result runs in the same lane, because the work is there and nowhere else until
+  it lands, and owns nothing in it: the review's start changes no registration, its claim carries no lane
+  blocker, and its retirement releases nothing;
 - when the worker ends and its lane holds work (uncommitted changes or commits ahead of main), the claim carries
   a `worker_lane:` blocker naming the lane key, path and branch and the steps to integrate it, and requires
   parent review, so the parent looks in the lane and not in the shared checkout. The root reviews with

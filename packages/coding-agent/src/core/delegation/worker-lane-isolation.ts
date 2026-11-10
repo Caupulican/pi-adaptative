@@ -11,6 +11,10 @@
  *   released if, and only if, it is landed and clean. A lane holding work is kept and the parent is told.
  * - land: the land gate takes the lane to main and returns what is still open (`worktree-sync/lane-landing.ts`).
  *
+ * A lane belongs to the one worker its registration is bound to. A review of that worker's result runs in the same lane,
+ * because the work is there and nowhere else until it lands, and owns nothing in it: bind leaves the lane with its worker,
+ * the report names no lane for the review, and the review's retirement releases nothing.
+ *
  * A requested lane (`create(cwd, "worktree")`) is made whether or not worktree-sync is on by default; the caller refuses a
  * requested start that gets none, and never runs it shared.
  *
@@ -24,7 +28,11 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExecutionContext } from "../../kernel/index.ts";
 import type { WorkerHostFinding } from "../autonomy/contracts.ts";
 import { hostFinding } from "../autonomy/host-findings.ts";
-import type { WorkerExecutionContract, WorkerProfileExecutionContract } from "../orchestration/contracts.ts";
+import type {
+	OrchestrationProfile,
+	WorkerExecutionContract,
+	WorkerProfileExecutionContract,
+} from "../orchestration/contracts.ts";
 import { parseWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
 import { quotedSpan } from "../util/bounded-line.ts";
 import type { ReleaseOutcome } from "../util/resource-release.ts";
@@ -49,6 +57,7 @@ import {
 	type WorkerLaneCreation,
 } from "../worktree-sync/worker-lane.ts";
 import type { ParentWriteOrigin } from "./parent-execution-context.ts";
+import { sameWorkerApartFromPlace } from "./worker-authority-resolver.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 
 export interface WorkerLaneIsolationDeps {
@@ -68,6 +77,12 @@ const EXPECTED_SHARED_REASONS: ReadonlySet<string> = new Set([
 	"checkout_dirty",
 	"dependencies_installed_in_checkout",
 ]);
+
+/**
+ * Binding answers that leave the lane with its owner: the worker now owns it, already did, or another worker does (the one
+ * arriving reviews that worker's result there).
+ */
+const LANE_KEPT_BY_BIND: ReadonlySet<string> = new Set(["bound", "already_bound", "binding_conflict"]);
 
 /** Lane release refusals a later retry may not meet. */
 const RETRYABLE_LANE_RELEASE_CODES: ReadonlySet<string> = new Set([
@@ -107,22 +122,23 @@ export class WorkerLaneIsolation {
 
 	/**
 	 * A lane for a fresh writing worker whose task directory is `cwd`. Without a `requested` lane it is made only when
-	 * worktree-sync is on by default. `undefined` when no lane is made (the worker stays in the shared checkout, or the
-	 * lane could not be made); an unexpected reason (a git error, the lane ceiling) is warned.
+	 * worktree-sync is on by default. When no lane is made the answer says why, in words the caller can pass on: a worker
+	 * that did not ask for a lane stays in the shared checkout, and a start that asked for one is refused with the reason.
+	 * An unexpected reason (a git error, the lane ceiling) is warned.
 	 */
-	async create(
-		cwd: string,
-		requested?: "worktree",
-	): Promise<Extract<WorkerLaneCreation, { kind: "isolated" }> | undefined> {
-		if (requested !== "worktree" && !this.deps.isolateByDefault()) return undefined;
+	async create(cwd: string, requested?: "worktree"): Promise<WorkerLaneCreation> {
+		if (requested !== "worktree" && !this.deps.isolateByDefault())
+			return { kind: "shared", reason: "isolation_off", message: "worktree lanes are off for workers here" };
 		const engine = this.deps.engineDeps(cwd);
-		if (!engine) return undefined;
+		if (!engine)
+			return { kind: "shared", reason: "no_engine", message: "worktree lanes are not available in this session" };
 		let created: WorkerLaneCreation;
 		try {
 			created = await createWorkerLane(engine, `worker:${randomUUID()}`);
 		} catch (error) {
-			this.deps.warn(`Worker lane isolation unavailable: ${error instanceof Error ? error.message : String(error)}`);
-			return undefined;
+			const message = error instanceof Error ? error.message : String(error);
+			this.deps.warn(`Worker lane isolation unavailable: ${message}`);
+			return { kind: "shared", reason: "git_error", message };
 		}
 		if (created.kind === "isolated") return created;
 		if (!EXPECTED_SHARED_REASONS.has(created.reason)) {
@@ -130,7 +146,7 @@ export class WorkerLaneIsolation {
 				`Worker lane isolation unavailable [${created.reason}]: ${created.message}. The worker runs in the shared checkout.`,
 			);
 		}
-		return undefined;
+		return created;
 	}
 
 	/**
@@ -208,6 +224,14 @@ export class WorkerLaneIsolation {
 	/** Whether `directory` is the lane's worktree or inside it. */
 	isInsideLane(worktreePath: string, directory: string): boolean {
 		return isWithin(worktreePath, directory);
+	}
+
+	/**
+	 * Whether the admission redone for the lane compiled the worker the first admission chose: the lane changes where the
+	 * worker works and nothing else about it.
+	 */
+	carriesSameWorker(shared: OrchestrationProfile, inLane: OrchestrationProfile): boolean {
+		return sameWorkerApartFromPlace(shared, inLane);
 	}
 
 	/** The key of the lane at `cwd`; undefined when `cwd` is not a lane. */
@@ -320,13 +344,16 @@ export class WorkerLaneIsolation {
 		}
 	}
 
-	/** Record `agentId` as the owner of the lane at `cwd`, when `cwd` is a lane. */
+	/**
+	 * Record `agentId` as the owner of the lane at `cwd`, when `cwd` is a lane no worker owns yet. A lane bound to another
+	 * worker stays that worker's: the one arriving reviews the work in it and takes nothing over.
+	 */
 	async bind(cwd: string, agentId: string): Promise<void> {
 		const engine = this.deps.engineDeps(cwd);
 		if (!engine || !isUnderLaneRoot(engine, cwd)) return;
 		try {
 			const bound = await bindWorkerLaneByPath(engine, cwd, agentId);
-			if (bound && bound.code !== "bound" && bound.code !== "already_bound") {
+			if (bound && !LANE_KEPT_BY_BIND.has(bound.code)) {
 				this.deps.warn(`Worker ${agentId}'s worktree lane '${bound.laneKey}' could not be bound: [${bound.code}].`);
 			}
 		} catch (error) {
@@ -335,15 +362,17 @@ export class WorkerLaneIsolation {
 	}
 
 	/**
-	 * The claim finding for a worker that worked in a lane and left changes there; `undefined` when `cwd` is not
-	 * a lane or the lane holds nothing. Bounded to fit a claim blocker.
+	 * The claim finding for worker `agentId` when it worked in its lane and left changes there; `undefined` when `cwd` is
+	 * not a lane, the lane holds nothing, or the lane is another worker's (the changes in it are that worker's, and its own
+	 * claim names them). Bounded to fit a claim blocker.
 	 */
-	async claimFinding(cwd: string): Promise<WorkerHostFinding | undefined> {
+	async claimFinding(cwd: string, agentId: string): Promise<WorkerHostFinding | undefined> {
 		const engine = this.deps.engineDeps(cwd);
 		if (!engine || !isUnderLaneRoot(engine, cwd)) return undefined;
 		try {
 			const state = await describeWorkerLane(engine, cwd);
-			if (!state || (!state.facts.dirty && state.facts.aheadOfMain === 0)) return undefined;
+			if (!state || (state.boundLaneId !== undefined && state.boundLaneId !== agentId)) return undefined;
+			if (!state.facts.dirty && state.facts.aheadOfMain === 0) return undefined;
 			const holds = [
 				...(state.facts.dirty ? ["uncommitted changes"] : []),
 				...(state.facts.aheadOfMain > 0 ? [`${state.facts.aheadOfMain} commit(s) ahead of main`] : []),
@@ -361,8 +390,10 @@ export class WorkerLaneIsolation {
 	/**
 	 * The worker `agentId` was retired: release the lane at `cwd` if (and only if) nothing would be lost. A lane that
 	 * is gone (or none) is released. A lane holding work is kept for the parent, who is told (abandoned to its
-	 * `release_lane`). A lane bound to another worker or owner is superseded and warned. Anything else (a git error, an
-	 * unavailable checkout, a throw) rejects, so the caller retains and retries the release.
+	 * `release_lane`). A lane bound to another worker is that worker's and is superseded here without a word: `agentId`
+	 * reviewed the work in it, or its own lane is long gone and the directory holds a later one. A lane owned by another live
+	 * session is superseded and warned. Anything else (a git error, an unavailable checkout, a throw) rejects, so the caller
+	 * retains and retries the release.
 	 */
 	async release(cwd: string, agentId: string, attemptId: string): Promise<ReleaseOutcome> {
 		const engine = this.deps.engineDeps(cwd);
@@ -382,7 +413,8 @@ export class WorkerLaneIsolation {
 			};
 		}
 		const detail = `Retired worker ${agentId}'s worktree lane '${released.laneKey}' was not released: [${released.code}]${released.message ? ` ${released.message}` : ""}`;
-		if (released.code === "lane_bound_elsewhere" || released.code === "lane_owner_conflict") {
+		if (released.code === "lane_bound_elsewhere") return { kind: "superseded", detail };
+		if (released.code === "lane_owner_conflict") {
 			this.deps.warn(detail);
 			return { kind: "superseded", detail };
 		}

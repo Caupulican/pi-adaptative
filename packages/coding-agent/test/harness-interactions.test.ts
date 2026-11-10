@@ -13,6 +13,7 @@ import { runJourney2 } from "./fixtures/harness/journeys/journey-2.ts";
 import { runJourney3 } from "./fixtures/harness/journeys/journey-3.ts";
 import { runJourney4 } from "./fixtures/harness/journeys/journey-4.ts";
 import { runJourney5 } from "./fixtures/harness/journeys/journey-5.ts";
+import { runJourney6 } from "./fixtures/harness/journeys/journey-6.ts";
 
 describe("Adaptive harness composed journeys", () => {
 	it(
@@ -37,5 +38,9 @@ describe("Adaptive harness composed journeys", () => {
 
 	it("plans: a root plan runs parallel steps, joins their results, verifies, and holds on a rejected check", async () => {
 		await runJourney5();
+	}, 360_000);
+
+	it("plan lanes: steps that change files work in their own worktree lanes and a merge join lands them on main in order", async () => {
+		await runJourney6();
 	}, 360_000);
 });

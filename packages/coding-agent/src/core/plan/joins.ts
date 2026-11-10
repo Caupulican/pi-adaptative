@@ -297,8 +297,50 @@ export function settleVote(
 }
 
 /**
- * A merge join's result once its members' lanes landed (or none needed to): collect semantics over the settled members, so a
- * member that did not succeed reads as a gap and its lane stays where it is.
+ * The independent checks a merge waits for before it lands one member: the verify steps over that member alone, ordered
+ * before the merge.
+ */
+export function mergeChecksOf(record: PlanRecord, merge: PlanNodeSpec, memberId: string): readonly PlanNodeSpec[] {
+	return record.nodes.filter(
+		(check) =>
+			check.kind === "verify" &&
+			merge.after.includes(check.id) &&
+			check.join?.members.length === 1 &&
+			check.join.members[0] === memberId,
+	);
+}
+
+/**
+ * A merge member's outcome as its merge reads it. A member whose only shortfall is an unverified result, and that every
+ * independent check the merge waits for accepted, counts as verified, the way a verify join counts the members its accepted
+ * review covers (`verifyJoinResult`): the check's verdict is what the member's own result could not carry. Any other member
+ * keeps its own outcome. Undefined while the member is held or has no outcome.
+ */
+export function mergeMemberOutcome(
+	projection: JoinProjection,
+	plan: PlanRuntimeState,
+	record: PlanRecord,
+	merge: PlanNodeSpec,
+	memberId: string,
+): Outcome | undefined {
+	const settledOutcome = (nodeId: string) =>
+		plan.nodes[nodeId]?.held ? undefined : planNodeOutcome(projection, plan, nodeId);
+	const own = settledOutcome(memberId);
+	if (own?.blocker !== "unverified_result") return own;
+	const checks = mergeChecksOf(record, merge, memberId);
+	const accepted =
+		checks.length > 0 &&
+		checks.every((check) => {
+			const verdict = settledOutcome(check.id);
+			return verdict?.status === "succeeded" && verdict.assurance === "independently_verified";
+		});
+	return accepted ? verifiedOutcome(own) : own;
+}
+
+/**
+ * A merge join's result once its members' lanes landed (or none needed to): collect semantics over the settled members, each
+ * read as its merge reads it (`mergeMemberOutcome`), so a member that did not succeed reads as a gap and its lane stays where
+ * it is.
  */
 export function mergeResult(
 	projection: JoinProjection,
@@ -307,7 +349,10 @@ export function mergeResult(
 	node: PlanNodeSpec,
 	identity: JoinIdentity,
 ): JoinResult {
-	const { settled } = memberOutcomes(projection, plan, node);
+	const settled = memberOutcomes(projection, plan, node).settled.map((member) => ({
+		...member,
+		outcome: mergeMemberOutcome(projection, plan, record, node, member.nodeId) ?? member.outcome,
+	}));
 	return buildResult(
 		node,
 		settled,

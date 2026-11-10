@@ -4381,7 +4381,7 @@ export class WorkerDelegationController {
 			return shared;
 		if (!isolation) return refused("no lane could be created here");
 		const lane = await isolation.create(plan.cwd, requested ? "worktree" : undefined);
-		if (!lane) return requested ? refused("no lane could be created here") : shared;
+		if (lane.kind !== "isolated") return requested ? refused(lane.message) : shared;
 		let failure: string;
 		try {
 			const boundedSignal = AbortSignal.any([
@@ -4402,7 +4402,7 @@ export class WorkerDelegationController {
 			if (!admitted.ok) {
 				failure = admitted.skipReason;
 			} else if (
-				admitted.shipment.profile.profileId !== shared.shipment.profile.profileId ||
+				!isolation.carriesSameWorker(shared.shipment.profile, admitted.shipment.profile) ||
 				!isDeepStrictEqual(admitted.shipment.modelBinding, shared.shipment.modelBinding)
 			) {
 				failure = "the lane admission chose a different worker profile or model";
@@ -5992,7 +5992,7 @@ export class WorkerDelegationController {
 				};
 				registerInFlightLedger();
 				leaseHeartbeat.start();
-				// The lane's registration records which worker owns it (a no-op when the cwd is not a lane).
+				// The lane's registration records which worker owns it (a no-op when the cwd is no lane, or another worker's).
 				await this.laneIsolation?.bind(executionPlan.cwd, agentId);
 				// Resolve credentials before repository observation. A rejected or expired account must
 				// fail admission without paying for a checkout-wide snapshot first. The executor resolves
@@ -6215,7 +6215,7 @@ export class WorkerDelegationController {
 				// What the host itself observed, attributed to this worker and never blocking it: a file another
 				// concurrently running worker also changed, and a change to the harness write-protected set made
 				// while one of its process tools ran. Both reach the parent as blockers and require its review.
-				const laneFinding = await this.laneIsolation?.claimFinding(executionPlan.cwd);
+				const laneFinding = await this.laneIsolation?.claimFinding(executionPlan.cwd, agentId);
 				const hostFindings = [
 					...(laneFinding ? [laneFinding] : []),
 					...this.writeOverlaps.findingsFor(startedRecord.laneId),

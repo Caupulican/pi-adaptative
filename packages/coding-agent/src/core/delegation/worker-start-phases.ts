@@ -160,6 +160,8 @@ export function workerRequestForDispatch(
 		// A plan step that names no files is read-only work, as an assigned task that names none is: the plan runs such steps
 		// side by side in the shared checkout on that promise. A rerun keeps what its original was admitted with.
 		...(dispatch.plan && !pinned && writePaths.length === 0 ? { readOnly: true } : {}),
+		// A review inspects the workspace its subject worked in, which is a worktree lane until that work lands.
+		...(dispatch.verification?.directory && !pinned ? { path: dispatch.verification.directory } : {}),
 		...(pinned
 			? {
 					readOnly: pinned.readOnly,

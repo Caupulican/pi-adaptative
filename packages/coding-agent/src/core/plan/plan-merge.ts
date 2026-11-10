@@ -21,6 +21,7 @@ import type { Outcome } from "../delegation/worker-outcome-contract.ts";
 import { boundedLine } from "../util/bounded-line.ts";
 import { laneBranch } from "../worktree-sync/git-engine.ts";
 import type { LandingItem, LaneLanding } from "../worktree-sync/lane-landing.ts";
+import { mergeChecksOf, mergeMemberOutcome } from "./joins.ts";
 import {
 	landStepOf,
 	mergeLandNodeId,
@@ -43,6 +44,18 @@ export const WORKTREE_UNAVAILABLE = "worktree_unavailable";
 const MERGE_FILES_SHOWN = 6;
 /** The detail of a refused land, as a hold's words quote it. */
 const MERGE_DETAIL_CHARS = 120;
+
+/**
+ * A hold's words for a step that needs its own worktree lane when none could be made, with the reason the start was
+ * refused for: the planner can only act on a cause it is told (commit or stash the checkout's changes, order the steps
+ * instead of merging them).
+ */
+export function worktreeUnavailableWords(refusalDetail: string): string {
+	const reason = refusalDetail.slice(WORKTREE_UNAVAILABLE.length).replace(/^:\s*/, "").trim();
+	const words = "this step needs its own worktree and none can be made here";
+	return reason ? `${words}: ${boundedLine(reason, MERGE_DETAIL_CHARS)}` : words;
+}
+
 const MERGE_REPLAN_PAIR = "Re-plan: order them with after, or merge them into one step.";
 const MERGE_REPLAN_SINGLE = "Re-plan: change that step or its files, then retry.";
 
@@ -386,9 +399,7 @@ function uncheckedBy(
 	merge: PlanNodeSpec,
 	memberId: string,
 ): string | undefined {
-	for (const check of record.nodes) {
-		if (check.kind !== "verify" || !merge.after.includes(check.id)) continue;
-		if (check.join?.members.length !== 1 || check.join.members[0] !== memberId) continue;
+	for (const check of mergeChecksOf(record, merge, memberId)) {
 		if (settledOutcome(projection, plan, check.id)?.status !== "succeeded")
 			return `the independent check of step ${memberId} did not accept it`;
 	}
@@ -396,10 +407,11 @@ function uncheckedBy(
 }
 
 /**
- * The lanes a merge lands, in record order: each member that succeeded, as its own lane or, when the merge made one, as its
- * land step's lane. A member that did not succeed is not landed and its lane is left alone. `blocked` names the first step
- * that blocks the landing before any lane is tried: a land step with no accepted result, or a member an independent check
- * did not accept.
+ * The lanes a merge lands, in record order: each member whose work is accepted, as its own lane or, when the merge made one,
+ * as its land step's lane. A member's work is accepted when its own result succeeded, or when it ended only unverified and
+ * every independent check the merge waits for accepted it (`mergeMemberOutcome`). A member that ended any other way is not
+ * landed and its lane is left alone. `blocked` names the first step that blocks the landing before any lane is tried: a land
+ * step with no accepted result, or a member an independent check did not accept.
  */
 export function mergeLanes(
 	projection: PlanProjection,
@@ -410,10 +422,15 @@ export function mergeLanes(
 	const members: MergeLane[] = [];
 	for (const member of record.nodes) {
 		if (!merge.join?.members.includes(member.id)) continue;
-		const own = settledOutcome(projection, plan, member.id);
-		if (own?.status !== "succeeded") continue;
+		const stated = settledOutcome(projection, plan, member.id);
+		if (stated === undefined) continue;
+		// A check that did not accept blocks the landing for a member that could otherwise land: one that succeeded, or one
+		// that only lacks the verification the check was to give.
 		const rejected = uncheckedBy(projection, plan, record, merge, member.id);
-		if (rejected !== undefined) return { members, blocked: rejected };
+		if (rejected !== undefined && (stated.status === "succeeded" || stated.blocker === "unverified_result"))
+			return { members, blocked: rejected };
+		const own = mergeMemberOutcome(projection, plan, record, merge, member.id);
+		if (own?.status !== "succeeded") continue;
 		const landStep = landStepOf(record, merge.id, member.id);
 		if (landStep === undefined) {
 			members.push({

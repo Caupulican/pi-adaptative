@@ -23,7 +23,9 @@ A join is a step that combines the steps in its `uses`:
 - `vote`: picks the best of several attempts at the same task against the `question`.
 - `race`: the first accepted attempt wins; the others are cancelled.
 - `verify`: an independent check of the members' work.
-- `merge` (combining file changes) is not available yet: the tool does not offer it, and a stored plan that names it is refused with a fix to use `collect`.
+- `merge`: lands file changes on main. Every step in its `uses` is plain work that names its `files`. Each of those steps works in its own worktree lane (its own folder and branch off main) and commits there with git before it reports. A result that is not verified is checked first by an independent review, which the plan adds by itself; the review runs in that step's lane, because the work is there and not in the shared checkout until it lands. When every check has accepted, the harness lands the lanes on main in the plan's order through the land check (`worktreeSync.gate`, `worktreeSync.gateCommand`), without a worker. A lane that cannot land gets one worker to merge it; a second failure holds the join and names the steps and files, and a refusal only the owner can fix holds at once with the fix in words.
+
+A lane is a fresh checkout of main, so a `merge` needs a git repository whose checkout is on main, has no uncommitted or untracked changes, and keeps no installed dependencies in it (`node_modules`, `.venv`, `venv`). Where no lane can be made the step is held and says why, so the root can order the steps with `after` instead of merging them. See [Worktree sync](worktree-sync.md) for what a lane is and when it is released.
 
 ## What the owner sees
 

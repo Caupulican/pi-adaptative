@@ -532,6 +532,29 @@ export function isAdaptiveProfileId(profileId: string): boolean {
 	return profileId.startsWith(ADAPTIVE_PROFILE_PREFIX);
 }
 
+/**
+ * Whether two admissions of one request compiled the same worker, apart from where it works. A registered profile is the
+ * same by its id. An adaptive profile's id hashes its workspace and its write paths, so the same request admitted for
+ * another directory (a worktree lane in place of the shared checkout) carries another id by design: such a pair is the
+ * same worker when everything else it was compiled with is equal. The two compile instants are not part of that.
+ */
+export function sameWorkerApartFromPlace(left: OrchestrationProfile, right: OrchestrationProfile): boolean {
+	if (!isAdaptiveProfileId(left.profileId) || !isAdaptiveProfileId(right.profileId))
+		return left.profileId === right.profileId;
+	const apartFromPlace = (profile: OrchestrationProfile) => {
+		const {
+			profileId: _id,
+			workspacePath: _place,
+			writePaths: _writes,
+			createdAt: _made,
+			updatedAt: _changed,
+			...rest
+		} = profile;
+		return rest;
+	};
+	return isDeepStrictEqual(apartFromPlace(left), apartFromPlace(right));
+}
+
 function tokenBudgetFloorFailure(maxTokens: number | undefined): string | undefined {
 	return maxTokens !== undefined && maxTokens < MIN_VIABLE_WORKER_TOKEN_BUDGET
 		? `token_budget_below_floor:requested=${maxTokens},min=${MIN_VIABLE_WORKER_TOKEN_BUDGET}`

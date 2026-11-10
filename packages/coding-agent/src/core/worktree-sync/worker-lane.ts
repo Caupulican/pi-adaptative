@@ -181,6 +181,8 @@ export interface WorkerLaneState {
 	laneKey: string;
 	branch: string;
 	worktreePath: string;
+	/** The worker the lane's registration is bound to: the one it was made for. Absent until that worker starts. */
+	boundLaneId?: string;
 	facts: LaneFacts;
 }
 
@@ -195,6 +197,7 @@ export async function describeWorkerLane(
 		laneKey: found.lane.laneKey,
 		branch: found.lane.branch,
 		worktreePath: found.lane.worktreePath,
+		...(found.lane.boundLaneId ? { boundLaneId: found.lane.boundLaneId } : {}),
 		facts: await deriveLaneFacts({ ...deps, cwd: worktreePath }, found.context, found.lane),
 	};
 }

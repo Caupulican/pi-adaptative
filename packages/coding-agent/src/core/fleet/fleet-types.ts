@@ -113,10 +113,16 @@ export interface FleetDispatch {
 	/** Brokered starts. */
 	delegation?: { objectiveId: string; leaderAttemptId: string };
 	/**
-	 * A plan verify step: the review run's anchor, the first worker result the step checks (`orchestration/plan-review-subjects.ts`).
+	 * A plan verify step: the review run's anchor, the first worker result the step checks (`orchestration/plan-review-subjects.ts`),
+	 * and the directory that result was worked in. The review runs there: work done in a worktree lane is not in the shared
+	 * checkout until it lands, and a review that looked in the shared checkout would judge files the work never touched.
 	 * Absent for every other dispatch.
 	 */
-	verification?: { readonly subjectTaskId: string; readonly subjectAttemptId: string };
+	verification?: {
+		readonly subjectTaskId: string;
+		readonly subjectAttemptId: string;
+		readonly directory?: string;
+	};
 }
 
 /**
