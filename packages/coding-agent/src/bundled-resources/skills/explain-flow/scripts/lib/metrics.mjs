@@ -34,12 +34,19 @@ export function roundText(text, round) {
 	return text.replace(ROUND_TOKEN, (_, offset) => String(round + 1 + (offset === undefined ? 0 : Number(offset))));
 }
 
-/** The widest form of `text` over `rounds` rounds: a layout that measures it holds in every round. */
+/** The widest name a `{kept}` token can stand for: a stem of three characters and a two-digit number. */
+const WIDEST_KEPT_NAME = "MMM00";
+
+/**
+ * The widest form of `text` over `rounds` rounds: a layout that measures it holds in every round. A `{kept}` token is
+ * measured as the widest candidate name there can be.
+ */
 export function widestRoundText(text, rounds) {
 	if (text === undefined) return undefined;
-	let widest = roundText(text, 0);
+	const named = text.replace(/\{kept\}/g, WIDEST_KEPT_NAME);
+	let widest = roundText(named, 0);
 	for (let round = 1; round < rounds; round++) {
-		const form = roundText(text, round);
+		const form = roundText(named, round);
 		if (form.length > widest.length) widest = form;
 	}
 	return widest;

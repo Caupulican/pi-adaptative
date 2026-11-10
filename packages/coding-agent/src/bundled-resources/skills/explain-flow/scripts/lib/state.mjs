@@ -6,6 +6,7 @@
 
 import { easeInOut, easeSpeed, pointAt } from "./geometry.mjs";
 import { HOP_SECONDS, roundText } from "./metrics.mjs";
+import { keptText, trialAt } from "./trial.mjs";
 
 /** How long the motion blur behind a moving item covers, in seconds of its travel. */
 const TRAIL_SECONDS = 0.07;
@@ -49,6 +50,7 @@ function itemOnWire(segment, local, first) {
 		alpha: first ? Math.min(1, (local - segment.from) / APPEAR_SECONDS) : 1,
 		trail: trail > 1 ? { path: segment.wire.path, from: along - trail, to: along } : undefined,
 		carry: segment.carry,
+		trial: segment.trial,
 		carryAlpha: Math.min(1, Math.max(0, (Math.min(along, segment.wire.path.length - along) - 28) / 20)),
 		passed: segment.passed,
 		wire: segment.wire,
@@ -89,6 +91,7 @@ function stayOf(segment, local) {
 		tone: failed ? "fail" : segment.tone,
 		lane: segment.lane,
 		laneTone: segment.laneTone,
+		phases: segment.phases,
 		phase: failed ? (segment.text ?? "failed") : index >= 0 ? segment.phases[index] : undefined,
 		before: !failed && index > 0 ? segment.phases[index - 1] : undefined,
 		blend: failed ? 1 : Math.min(1, (since - phaseStart) / PHASE_BLEND_SECONDS),
@@ -107,7 +110,7 @@ function railAt(scene, node, now, periodNow) {
 		for (const landing of run.landings)
 			if (landing.node === node) {
 				const at = run.start + landing.at;
-				landings.push({ at, age: wrap(now - at, scene.loop), result: landing.result, mark: landing.mark });
+				landings.push({ at, age: wrap(now - at, scene.loop), result: landing.result, mark: landing.mark, trial: landing.trial });
 			}
 	if (landings.length === 0) return { dots: [], slide: 1, newest: undefined, ring: undefined };
 	landings.sort((a, b) => a.age - b.age);
@@ -122,7 +125,7 @@ function railAt(scene, node, now, periodNow) {
 			dots.push({
 				age: landing.age + cycle * scene.loop,
 				result: landing.result,
-				mark: roundText(landing.mark, scene.rounds > 1 ? landed : 0),
+				mark: roundText(keptText(landing.mark, scene, landing.trial, scene.rounds > 1 ? landed : 0), scene.rounds > 1 ? landed : 0),
 			});
 			shown++;
 		}
@@ -168,7 +171,11 @@ export function stateAt(scene, time) {
 		const index = run.segments.findIndex((segment) => local >= segment.from && local < segment.to);
 		if (index < 0) continue;
 		const segment = run.segments[index];
-		if (segment.kind === "travel") items.push({ run, ...itemOnWire(segment, local, index === 0) });
+		if (segment.kind === "travel") {
+			const item = itemOnWire(segment, local, index === 0);
+			// What it carries may name the candidate its last trial kept in this round.
+			items.push({ run, ...item, carry: keptText(item.carry, scene, item.trial, round) });
+		}
 		else {
 			items.push({ run, ...itemInStation(segment, local) });
 			const held = stays.get(segment.node.id) ?? [];
@@ -179,8 +186,10 @@ export function stateAt(scene, time) {
 	const rails = new Map();
 	const sweeps = new Map();
 	const chains = new Map();
+	const trials = new Map();
 	for (const node of scene.nodes) {
 		if (node.kind === "rail") rails.set(node.id, railAt(scene, node, now, periodNow));
+		else if (node.kind === "trial") trials.set(node.id, trialAt(scene, node, now, round, stays.get(node.id)?.[0]));
 		else if (node.kind === "sweep") {
 			const turn = wrap((now * cyclesIn(scene, node.period)) / loop, 1);
 			sweeps.set(node.id, 0.5 - 0.5 * Math.cos(2 * Math.PI * turn));
@@ -190,5 +199,5 @@ export function stateAt(scene, time) {
 			chains.set(node.id, { step: Math.floor(turn), part: turn % 1 });
 		}
 	}
-	return { now, periodNow, round, items, stays, pulses, rails, sweeps, chains };
+	return { now, periodNow, round, items, stays, pulses, rails, sweeps, chains, trials };
 }

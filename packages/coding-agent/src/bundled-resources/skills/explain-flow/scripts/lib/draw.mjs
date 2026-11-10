@@ -17,10 +17,11 @@ import {
 	SUB_STEP,
 	TEXT_SIZE,
 } from "./metrics.mjs";
-import { CAPTION_ROWS, wordsLeft } from "./scene.mjs";
+import { captionRows, wordsLeft } from "./scene.mjs";
 import { stateAt } from "./state.mjs";
 import { alphaOf, circleEl, lineEl, pathEl, rectEl, strokeOf, words } from "./svg.mjs";
 import { mixHex } from "./theme.mjs";
+import { trialBody, trialLive } from "./trial.mjs";
 
 /** The lengths of the two ruled lines on a source's cards, in grid units: no two neighbours look alike. */
 const CARD_LINES = [
@@ -64,7 +65,7 @@ function litPins(scene, stay) {
 /** The y of a station's first static sub line. */
 function subTop(node, u) {
 	const { y, h } = node.shape.box;
-	return y + h + (2.5 + CAPTION_ROWS[node.kind] * SUB_STEP) * u;
+	return y + h + (2.5 + captionRows(node) * SUB_STEP) * u;
 }
 
 /** A chain chip's words: dim, inside its chip. */
@@ -166,6 +167,9 @@ function nodeBody(scene, node, round) {
 			out += rectEl(shape.box, STATION_RADIUS * u, stroke);
 			out += lineEl(shape.box.x + 2 * u, shape.box.y + shape.box.h - 1.5 * u, shape.box.x + shape.box.w - 2 * u, shape.box.y + shape.box.h - 1.5 * u, faint);
 			break;
+		case "trial":
+			out += trialBody(scene, node, stroke, faint, STATION_RADIUS * u);
+			break;
 		case "sweep":
 			out += rectEl(shape.box, STATION_RADIUS * u, stroke) + lineEl(shape.track.x1, shape.track.y, shape.track.x2, shape.track.y, faint);
 			break;
@@ -196,7 +200,7 @@ function nodeBody(scene, node, round) {
 		default:
 			break;
 	}
-	if (node.kind === "queue" || node.kind === "worker" || node.kind === "sweep")
+	if (node.kind === "queue" || node.kind === "worker" || node.kind === "trial" || node.kind === "sweep")
 		for (const name of node.usedPorts) out += pin(scene, shape.ports[name], theme.line);
 	// The structure stays quiet so what moves and what changed carry the picture.
 	return `<g opacity="${alphaOf(tierStyle(scene, tier).alpha * 0.8)}">${out}</g>`;
@@ -316,6 +320,29 @@ function queueStays(scene, node, stays) {
 	return out;
 }
 
+/** The outline of a station while it holds an item: a soft glow and its edge in the item's colour, settling in. */
+function heldOutline(scene, box, colour, settle, failed) {
+	const u = scene.unit;
+	return (
+		rectEl(box, STATION_RADIUS * u, `${strokeOf(colour, u * 0.5)} opacity="${alphaOf(settle * 0.35)}" filter="url(#flow-glow)"`) +
+		rectEl(box, STATION_RADIUS * u, `fill="${colour}" fill-opacity="${failed ? 0.14 : 0.05}" stroke="${colour}" stroke-width="${px(u * 0.18)}" opacity="${alphaOf(settle * 0.9)}"`)
+	);
+}
+
+/** A trial: the frame of a station that holds an item, its rack through `trial.mjs`, and its progress on the rack's line. */
+function trialEl(scene, node, stay, view) {
+	const u = scene.unit;
+	const { shape } = node;
+	const caption = { x: wordsLeft(node, "bottom", u), y: shape.box.y + shape.box.h + 2.5 * u };
+	if (!stay) return trialLive(scene, node, view, scene.theme.line, caption);
+	const colour = toneOf(scene, stay.tone);
+	let out = heldOutline(scene, shape.box, colour, Math.min(1, stay.since / 0.25), stay.failed);
+	out += trialLive(scene, node, { ...view, phases: stay.phases }, colour, caption);
+	const reach = shape.line.x1 + (shape.line.x2 - shape.line.x1) * stay.progress;
+	out += lineEl(shape.line.x1, shape.base, reach, shape.base, strokeOf(colour, u * 0.3, 'stroke-linecap="round"'));
+	return out + litPins(scene, stay);
+}
+
 function workerEl(scene, node, stay, round) {
 	const u = scene.unit;
 	const { theme } = scene;
@@ -326,8 +353,7 @@ function workerEl(scene, node, stay, round) {
 	if (!stay) return `<g opacity="${tierStyle(scene, node.tier).alpha}">${drawMechanism(node.mechanism, parts)}</g>`;
 	const colour = toneOf(scene, stay.tone);
 	const settle = Math.min(1, stay.since / 0.25);
-	let out = rectEl(box, STATION_RADIUS * u, `${strokeOf(colour, u * 0.5)} opacity="${alphaOf(settle * 0.35)}" filter="url(#flow-glow)"`);
-	out += rectEl(box, STATION_RADIUS * u, `fill="${colour}" fill-opacity="${stay.failed ? 0.14 : 0.05}" stroke="${colour}" stroke-width="${px(u * 0.18)}" opacity="${alphaOf(settle * 0.9)}"`);
+	let out = heldOutline(scene, box, colour, settle, stay.failed);
 	out += drawMechanism(node.mechanism, { ...parts, colour, since: stay.since, progress: stay.progress, failed: stay.failed });
 	if (!stay.failed) out += activityMarks({ u, box, colour, since: stay.since });
 	out += lineEl(rail.left, rail.base, rail.left + (rail.right - rail.left) * stay.progress, rail.base, strokeOf(colour, u * 0.3, 'stroke-linecap="round"'));
@@ -376,8 +402,9 @@ function railEl(scene, node, rail, round) {
 		// The newest dot and every failure keep their colour; a success that is no longer news goes quiet.
 		const fill = dot.result === "fail" ? theme.fail : dot.result === "ok" && index === 0 ? theme.ok : quiet;
 		out += circleEl(x, shape.first.y, index === 0 ? radius * (0.5 + 0.5 * rail.slide) : radius, `fill="${fill}" opacity="${alphaOf(alpha)}"`);
+		// A mark stands under its dot, in the row the rail keeps for marks: the rail's name has the row above the line.
 		if (dot.mark)
-			out += `<g letter-spacing="${px(u * 0.1)}">${words(scene, x, shape.first.y - 1.9 * u, 1.2 * u, [{ text: dot.mark.toUpperCase(), fill }], "middle", alpha)}</g>`;
+			out += `<g letter-spacing="${px(u * 0.1)}">${words(scene, x, shape.first.y + 2.7 * u, 1.2 * u, [{ text: dot.mark.toUpperCase(), fill }], "middle", alpha)}</g>`;
 	}
 	if (rail.ring !== undefined) {
 		const x = shape.first.x - 0.5 * (1 - rail.slide) * shape.pitch;
@@ -459,6 +486,7 @@ export function drawLive(scene, state) {
 		if (node.kind === "source") out += sourcePulses(scene, node, state);
 		else if (node.kind === "queue") out += queueStays(scene, node, stays);
 		else if (node.kind === "worker") out += workerEl(scene, node, stays[0], state.round);
+		else if (node.kind === "trial") out += trialEl(scene, node, stays[0], state.trials.get(node.id));
 		else if (node.kind === "rail") out += railEl(scene, node, state.rails.get(node.id), state.round);
 		else if (node.kind === "chain") out += chainEl(scene, node, state.chains.get(node.id), state.round);
 		else if (node.kind === "sweep") {

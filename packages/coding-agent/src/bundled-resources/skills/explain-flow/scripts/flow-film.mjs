@@ -36,6 +36,7 @@ const ENGINE_MODULES = [
 	"svg.mjs",
 	"metrics.mjs",
 	"mechanisms.mjs",
+	"trial.mjs",
 	"scene.mjs",
 	"state.mjs",
 	"draw.mjs",

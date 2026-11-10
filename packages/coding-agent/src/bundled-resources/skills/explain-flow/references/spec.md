@@ -36,13 +36,14 @@ Every station has `id` (lowercase letters, digits, hyphens), `kind`, `band`, `at
 | `source` | `count` 1 to 8 (default 3), `pitch` rows between emitters (default 6) | 8 wide, 3 high per emitter | emitter `id:N` leaves at its right and takes a returning item at its left |
 | `queue` | `slots` 1 to 6 (default 3) | 7 wide, 4 per slot plus 1 | `in`, `out`, `top`, `bottom` |
 | `worker` | `mechanism`: `scan` (default), `stamp`, `turn`, `braid`, `focus` | 11 by 7 | `in`, `out`, `top`, `bottom` |
+| `trial` | `count` candidates, 2 to 12 (default 8); `keep`: `highest` (default) or `lowest`; `stem`: 1 to 3 letters that name the candidates (default `c`: `c1`, `c2`, …); `scores`: one list per round with one number from 0 to 1 per candidate | 5.5 plus 3.25 per candidate less 0.75 wide, 9.5 high | `in`, `out`, `top`, `bottom` |
 | `rail` | `dots` 3 to 16 (default 7), `okText`, `failText`: what it says after an `ok` or a `fail` landing | 6 per dot plus 2, 2 high | `in` |
 | `sweep` | `period` seconds for one pass (rounded so whole passes fit the loop) | 14 by 4 | `in`, `out`, `top`, `bottom` |
 | `chain` | `items` (up to 8), `pulse` seconds for one pass, `mode`: `step` (one lit at a time), `fill` (they stay lit until the pass ends), `together`; `tag` and `lead` (columns kept at the left for the tag, name and note) make it a list row | chips sized to their words, 3 high | `in`, `out`, `top`, `bottom` |
 | `tally` | `boxes` 1 to 12, `crossed`, `text` | 2.2 per box plus the words | none |
 | `note` | `lines` (up to 6) | the words | none |
 
-A worker keeps two rows under its body for what it says about the item it holds (its lane, then its phase); its `sub` lines start after them. `top` and `bottom` ports sit 2.5 units in from the left edge, and the station's words on that side start after the wire.
+A worker keeps two rows under its body for what it says about the item it holds (its lane, then its phase); its `sub` lines start after them. A trial keeps one row (its phase, then the kept candidate and its score). A rail whose landings carry a `mark` keeps one row under its line for the marks; a wire cannot meet such a rail from below. `top` and `bottom` ports sit 2.5 units in from the left edge, and the station's words on that side start after the wire.
 
 ## Wires
 
@@ -66,16 +67,28 @@ Each step is one hop along a declared wire and what happens on arrival:
 | `to` | The station (or emitter) the item travels to. A wire from where it is to there must exist. |
 | `wire` | The wire's `id`, when more than one joins the two stations. |
 | `travel` | Seconds on the wire; by default the wire's length over `speed`, at least 0.4. |
-| `work` | Seconds inside a `queue` or `worker` (default 1.2). |
+| `work` | Seconds inside a `queue`, a `worker` or a `trial` (default 1.2). A trial shows three phases in that time: it makes its candidates, scores them, and keeps one. Give it 3 seconds or more. |
 | `lane`, `laneTone` | A line under a worker while it holds the item, and its colour role (default `text`). |
-| `phases` | Up to 6 names the worker shows in turn while it works. |
+| `phases` | Up to 6 names the worker shows in turn while it works. A trial has three phases (`propose`, `score`, `keep`); three names here rename them. |
 | `result` | `ok` or `fail`. At a worker, `fail` turns the item to the `fail` colour for the rest of its journey and shows `text`; `ok` gives it a passed mark. At a rail, it colours the dot that lands. |
 | `text` | What a worker says when the step fails. |
-| `mark` | At a rail: a short word over the dot that lands. |
+| `mark` | At a rail: a short word under the dot that lands. |
 | `carry` | Words that travel with the item on this hop. |
 | `tone` | The item's colour role from this step on. |
 
-A journey ends when it reaches a `rail` (the item becomes the newest dot), a `source` emitter (the emitter lights), or after its last stay (the item fades inside the station). A queue holds as many items as it has slots and a worker one; the tool refuses a spec that asks for more.
+A journey ends when it reaches a `rail` (the item becomes the newest dot), a `source` emitter (the emitter lights), or after its last stay (the item fades inside the station). A queue holds as many items as it has slots, and a worker or a trial one; the tool refuses a spec that asks for more.
+
+## Trials
+
+A `trial` is the station where several candidates are made, each is scored, and one is kept. While it holds an item, its candidates light in turn, then a bar rises over each to its score, then the kept candidate turns to the `ok` colour and the others go quiet. The row under the station names the phase, then the kept candidate and its score. After the item leaves, that outcome stays in a quiet tone until the next item arrives.
+
+Give `scores` when the numbers are known: one list per round, one number per candidate. Without `scores` the tool makes them from the station's `id`, the round and the candidate, so a frame is always drawn the same; they go from 0.15 to 0.95 and rise a little with each round. Say in the reply that such scores are an illustration, not a measurement.
+
+After a stay at a trial, the words of the journey may hold `{kept}`: the name of the candidate that trial kept in that round. A step's `carry` and a rail `mark` take it.
+
+```json
+{ "to": "versions", "result": "ok", "mark": "v{round}", "carry": "{kept} kept" }
+```
 
 ## Rounds
 

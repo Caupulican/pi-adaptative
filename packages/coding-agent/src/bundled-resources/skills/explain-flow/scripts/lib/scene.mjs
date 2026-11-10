@@ -6,7 +6,8 @@
  * Geometry is counted in grid units (`unit` pixels, 10 by default). Stations are a closed set, each shaped by what it
  * does: `source` (authors of work), `queue` (items wait in slots), `worker` (one item at a time, in phases), `rail` (the
  * record of what landed, newest first), `sweep` (a check that runs on a schedule), `chain` (named steps in order, also
- * as one row of a list with its name at the left), `tally` (a count shown as boxes) and `note` (words only).
+ * as one row of a list with its name at the left), `tally` (a count shown as boxes), `note` (words only) and `trial`
+ * (several candidates, each scored, one kept; see `trial.mjs`).
  */
 
 import { cornerPath, curvePath } from "./geometry.mjs";
@@ -25,9 +26,12 @@ import {
 	widestRoundText,
 } from "./metrics.mjs";
 import { resolveTheme } from "./theme.mjs";
+import { shapeTrial, TRIAL_KEEPS, TRIAL_PHASES, trialCaptionLength } from "./trial.mjs";
 
 export const TIERS = ["live", "next", "later"];
-export const NODE_KINDS = ["source", "queue", "worker", "rail", "sweep", "chain", "tally", "note"];
+export const NODE_KINDS = ["source", "queue", "worker", "trial", "rail", "sweep", "chain", "tally", "note"];
+/** The stations that hold an item for a stay; a queue holds one per slot, the others one at a time. */
+const HOLDING_KINDS = ["queue", "worker", "trial"];
 export const CHAIN_MODES = ["step", "fill", "together"];
 export const TONES = ["work", "ok", "fail", "info", "text"];
 const PORT_NAMES = ["in", "out", "top", "bottom"];
@@ -37,7 +41,12 @@ const ID = /^[a-z][a-z0-9-]{0,31}$/;
 const ENDPOINT = /^([a-z][a-z0-9-]{0,31})(?::(\d+))?(?:\.(in|out|top|bottom))?$/;
 
 /** Rows under a station kept for what it says about the item it holds (a worker: its lane, then its phase). */
-export const CAPTION_ROWS = { source: 0, queue: 0, worker: 2, rail: 0, sweep: 0, chain: 0, tally: 0, note: 0 };
+const CAPTION_ROWS = { source: 0, queue: 0, worker: 2, trial: 1, rail: 0, sweep: 0, chain: 0, tally: 0, note: 0 };
+
+/** The rows a station keeps under its body: its kind's, and for a rail whose landings carry marks one row for them. */
+export function captionRows(node) {
+	return CAPTION_ROWS[node.kind] + (node.marked ? 1 : 0);
+}
 const MIN_TRAVEL_SECONDS = 0.4;
 const MAX_TEXT = 96;
 
@@ -133,6 +142,8 @@ function shapeNode(node, x, y, u, rounds) {
 			const box = { x, y, w: 11 * u, h: 7 * u };
 			return { box, bench: { x: x + box.w / 2, y: y + box.h / 2 }, ports: boxPorts(box, u) };
 		}
+		case "trial":
+			return shapeTrial(node, x, y, u);
 		case "rail": {
 			const pitch = 6 * u;
 			const w = node.dots * pitch + 2 * u;
@@ -176,7 +187,25 @@ function shapeNode(node, x, y, u, rounds) {
 	}
 }
 
-function readNode(raw, path, bands, problems) {
+/** A trial's own scores: one list per round, one number from 0 to 1 per candidate. Undefined when the spec gives none. */
+function readScores(raw, path, problems, rounds, count) {
+	if (raw === undefined) return undefined;
+	const shaped =
+		Array.isArray(raw) &&
+		raw.length === rounds &&
+		raw.every((round) => Array.isArray(round) && round.length === count && round.every((score) => typeof score === "number"));
+	if (!shaped) {
+		problems.push(`${path}: must hold ${rounds} round(s) of ${count} numbers each, one score per candidate`);
+		return undefined;
+	}
+	if (raw.some((round) => round.some((score) => !(score >= 0 && score <= 1)))) {
+		problems.push(`${path}: every score must be from 0 to 1`);
+		return undefined;
+	}
+	return raw;
+}
+
+function readNode(raw, path, bands, problems, rounds, marked) {
 	if (!isRecord(raw)) {
 		problems.push(`${path}: must be an object`);
 		return undefined;
@@ -208,9 +237,16 @@ function readNode(raw, path, bands, problems) {
 		node.boxes = readNumber(raw.boxes, `${path}.boxes`, problems, { min: 1, max: 12, integer: true });
 		node.crossed = readNumber(raw.crossed, `${path}.crossed`, problems, { min: 0, max: node.boxes, fallback: 0, integer: true });
 		node.text = readText(raw.text, `${path}.text`, problems);
+	} else if (kind === "trial") {
+		node.count = readNumber(raw.count, `${path}.count`, problems, { min: 2, max: 12, fallback: 8, integer: true });
+		node.keep = readOneOf(raw.keep, TRIAL_KEEPS, `${path}.keep`, problems, "highest");
+		node.stem = readText(raw.stem, `${path}.stem`, problems) ?? "c";
+		if (!/^[A-Za-z]{1,3}$/.test(node.stem)) problems.push(`${path}.stem: must be 1 to 3 letters`);
+		node.scores = readScores(raw.scores, `${path}.scores`, problems, rounds, node.count);
 	} else if (kind === "queue") {
 		node.slots = readNumber(raw.slots, `${path}.slots`, problems, { min: 1, max: 6, fallback: 3, integer: true });
 	} else if (kind === "rail") {
+		node.marked = marked.has(node.id);
 		node.dots = readNumber(raw.dots, `${path}.dots`, problems, { min: 3, max: 16, fallback: 7, integer: true });
 		node.okText = readText(raw.okText, `${path}.okText`, problems);
 		node.failText = readText(raw.failText, `${path}.failText`, problems);
@@ -364,6 +400,8 @@ function readRun(raw, path, scene, problems) {
 	let clock = 0;
 	let tone = readOneOf(raw.tone, TONES, `${path}.tone`, problems, "work");
 	let passed = false;
+	/** The trial the item last stayed in: the words it carries from there on may name the kept candidate. */
+	let trial;
 	for (const [index, step] of steps.entries()) {
 		const at = `${path}.steps[${index}]`;
 		if (!isRecord(step)) {
@@ -396,6 +434,7 @@ function readRun(raw, path, scene, problems) {
 			tone,
 			passed,
 			carry: readText(step.carry, `${at}.carry`, problems),
+			trial,
 		});
 		clock += travel;
 		const target = to.node;
@@ -405,6 +444,7 @@ function readRun(raw, path, scene, problems) {
 				at: clock,
 				result: step.result === undefined ? undefined : readOneOf(step.result, RESULTS, `${at}.result`, problems),
 				mark: readText(step.mark, `${at}.mark`, problems),
+				trial,
 			});
 			here = to;
 			if (index < steps.length - 1) problems.push(`${at}: a rail ends a journey; it has no step after it`);
@@ -416,8 +456,8 @@ function readRun(raw, path, scene, problems) {
 			if (index < steps.length - 1) problems.push(`${at}: a source ends a journey; start a new one from it`);
 			break;
 		}
-		if (target.kind !== "queue" && target.kind !== "worker") {
-			problems.push(`${at}.to: an item travels to a queue, a worker, a rail or a source, not to a ${target.kind}`);
+		if (!HOLDING_KINDS.includes(target.kind)) {
+			problems.push(`${at}.to: an item travels to a queue, a worker, a trial, a rail or a source, not to a ${target.kind}`);
 			return run;
 		}
 		const work = readNumber(step.work, `${at}.work`, problems, {
@@ -433,13 +473,14 @@ function readRun(raw, path, scene, problems) {
 			node: target,
 			enter: wire.path.points[wire.path.points.length - 1],
 			tone,
-			phases: readTextList(step.phases, `${at}.phases`, problems, 6),
+			phases: stayPhases(target, readTextList(step.phases, `${at}.phases`, problems, 6)),
 			lane: readText(step.lane, `${at}.lane`, problems),
 			laneTone: readOneOf(step.laneTone, TONES, `${at}.laneTone`, problems, "text"),
 			result,
 			text: readText(step.text, `${at}.text`, problems),
 		});
 		clock += work;
+		if (target.kind === "trial") trial = target;
 		passed = result === "ok";
 		if (result === "fail") tone = "fail";
 		else if (step.tone !== undefined) tone = readOneOf(step.tone, TONES, `${at}.tone`, problems, tone);
@@ -456,6 +497,12 @@ function readRun(raw, path, scene, problems) {
 	return run;
 }
 
+/** The phases a stay shows: a trial always has its three, named by the step when it names three. */
+function stayPhases(target, named) {
+	if (target.kind !== "trial") return named;
+	return named.length === TRIAL_PHASES.length ? named : TRIAL_PHASES;
+}
+
 /** Whether two stays overlap inside the loop, each given as a start in the loop and a length. */
 function staysOverlap(a, b, loop) {
 	const meets = (start, end, otherStart, otherEnd) => start < otherEnd && otherStart < end;
@@ -467,7 +514,7 @@ function staysOverlap(a, b, loop) {
 /** Gives every stay in a queue its slot, and refuses a station that would hold more than it can. */
 function assignPlaces(scene, problems) {
 	for (const node of scene.nodes) {
-		if (node.kind !== "queue" && node.kind !== "worker") continue;
+		if (!HOLDING_KINDS.includes(node.kind)) continue;
 		const stays = [];
 		for (const run of scene.runs)
 			for (const segment of run.segments)
@@ -495,7 +542,7 @@ function assignPlaces(scene, problems) {
 
 /** The rows a station's lines take under its body: its captions, then its sub lines. */
 function rowsBelow(node) {
-	const lines = CAPTION_ROWS[node.kind] + node.sub.length;
+	const lines = captionRows(node) + node.sub.length;
 	return lines > 0 ? lines * SUB_STEP + 1 : 0;
 }
 
@@ -516,6 +563,7 @@ function captionWidths(scene) {
 		for (const segment of run.segments) {
 			if (segment.kind !== "work") continue;
 			const said = [segment.lane, segment.text, ...segment.phases].filter(Boolean);
+			if (segment.node.kind === "trial") said.push("M".repeat(trialCaptionLength(segment.node, segment.phases)));
 			const widest = Math.max(0, ...said.map((text) => textWidth(text, size, scene.rounds)));
 			widths.set(segment.node, Math.max(widths.get(segment.node) ?? 0, widest));
 		}
@@ -546,9 +594,11 @@ function extents(node, u, captionWidth, rounds) {
 	if (label) above.push(label);
 	for (const [index, text] of above.entries())
 		rects.push(lineRect("label", wordsLeft(node, "top", u), box.y - (1.5 + index * LINE_STEP) * u, text, u, rounds));
-	const below = [...Array.from({ length: CAPTION_ROWS[node.kind] }, () => undefined), ...node.sub];
+	const below = [...Array.from({ length: captionRows(node) }, () => undefined), ...node.sub];
 	for (const [index, text] of below.entries())
 		rects.push(lineRect("lines", wordsLeft(node, "bottom", u), box.y + box.h + (2.5 + index * SUB_STEP) * u, text ?? "", u, rounds, text === undefined ? captionWidth : undefined));
+	// A rail's marks stand under its dots, along its whole line: that row is theirs.
+	if (node.marked) rects.push({ what: "lines", x: box.x, y: box.y + box.h + 0.2 * u, w: box.w, h: 1.9 * u });
 	return rects;
 }
 
@@ -615,6 +665,19 @@ function checkLayout(scene, problems) {
 }
 
 /**
+ * The rails whose landings carry a mark, read from the spec before anything is placed: such a rail keeps a row under
+ * its line for the marks, and its place on the canvas must know that from the start.
+ */
+function markedRails(spec) {
+	const ids = new Set();
+	for (const run of Array.isArray(spec.runs) ? spec.runs : [])
+		for (const step of isRecord(run) && Array.isArray(run.steps) ? run.steps : [])
+			if (isRecord(step) && typeof step.mark === "string" && step.mark !== "" && typeof step.to === "string")
+				ids.add(ENDPOINT.exec(step.to)?.[1]);
+	return ids;
+}
+
+/**
  * Compiles a spec into its scene and lists every rule it breaks. The scene is complete enough to read (paths, journeys,
  * durations) even when problems are listed; only a spec with no readable bands or no object at all throws a `SpecError`.
  */
@@ -671,9 +734,10 @@ export function compileScene(spec) {
 		problems.push(`bands: together they take ${Math.round(top / u)} rows and the loop bar ${FOOT_ROWS}; the canvas has ${Math.floor(scene.height / u)}`);
 	if (problems.length > 0 && scene.bands.length === 0) throw new SpecError(problems);
 
+	const marked = markedRails(spec);
 	const seen = new Set();
 	for (const [index, raw] of (Array.isArray(spec.nodes) ? spec.nodes : []).entries()) {
-		const node = readNode(raw, `nodes[${index}]`, scene.bands, problems);
+		const node = readNode(raw, `nodes[${index}]`, scene.bands, problems, scene.rounds, marked);
 		if (!node) continue;
 		if (seen.has(node.id)) problems.push(`nodes[${index}].id: "${node.id}" is used twice`);
 		seen.add(node.id);
@@ -690,6 +754,9 @@ export function compileScene(spec) {
 		scene.wires.push(wire);
 		wire.from.node.usedPorts.add(wire.from.port ?? "out");
 		wire.to.node.usedPorts.add(wire.to.port ?? "in");
+		for (const end of [wire.from, wire.to])
+			if (end.node.marked && end.port === "bottom")
+				problems.push(`wires[${index}]: it meets "${end.node.id}" from below, where that rail's marks stand; use another port, or land its items without a mark`);
 	}
 	for (const [index, raw] of (Array.isArray(spec.runs) ? spec.runs : []).entries()) {
 		const run = readRun(raw, `runs[${index}]`, scene, problems);
