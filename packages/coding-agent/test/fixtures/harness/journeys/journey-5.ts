@@ -13,6 +13,7 @@ import {
 	runJourney5PlanVerifyRejectedPhase,
 	TIMEOUTS_PATH,
 } from "./journey-5-plan-verify-rejected.ts";
+import { runJourney5PlanVotePhase } from "./journey-5-plan-vote.ts";
 import { LIMITS_PATH, runJourney } from "./shared.ts";
 
 /**
@@ -39,6 +40,7 @@ export async function runJourney5(): Promise<void> {
 			await runJourney5PlanVerifyRejectedPhase(world, session);
 			await runJourney5PlanReviseCancelPhase(world, session);
 			await runJourney5PlanResultGatePhase(world, session);
+			await runJourney5PlanVotePhase(world, session);
 			expect(await world.disposeSessionInBody(session), "the plans owner disposes cleanly").toBeUndefined();
 			// A plan under a goal runs in its own session: the goal is that session's, and ends with it.
 			await runJourney5PlanVerifyAcceptedPhase(world);
