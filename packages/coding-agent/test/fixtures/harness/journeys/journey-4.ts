@@ -12,6 +12,7 @@ import {
 	runJourney4TelegramQuotaPhase,
 	runJourney4TelegramWaitingPhase,
 } from "./journey-4-telegram.ts";
+import { runJourney4WatchPhase } from "./journey-4-watch.ts";
 /**
  * The real proper-lockfile runs its exclusion and lease logic; only its filesystem is redirected to the
  * active world's virtual fs through the library's own `fs` option, so no lock directory reaches disk.
@@ -45,6 +46,7 @@ export async function runJourney4(): Promise<void> {
 			await runJourney4SlackPhase(world);
 			await runJourney4GmailPhase(world);
 			await runJourney4SystemOneToolPhase(world);
+			await runJourney4WatchPhase(world);
 			// Last: it advances the clock of the channels' alarm, which every session of the world shares.
 			await runJourney4TelegramWaitingPhase(world);
 		},
