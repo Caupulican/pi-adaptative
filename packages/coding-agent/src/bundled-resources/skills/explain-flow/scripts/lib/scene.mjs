@@ -634,8 +634,11 @@ function checkLayout(scene, problems) {
 		}
 }
 
-/** The scene of a spec, or a `SpecError` that names every problem. */
-export function buildScene(spec) {
+/**
+ * Compiles a spec into its scene and lists every rule it breaks. The scene is complete enough to read (paths, journeys,
+ * durations) even when problems are listed; only a spec with no readable bands or no object at all throws a `SpecError`.
+ */
+export function compileScene(spec) {
 	const problems = [];
 	if (!isRecord(spec)) throw new SpecError(["the spec must be a JSON object"]);
 	const size = Array.isArray(spec.size) && spec.size.length === 2 ? spec.size : [1280, 800];
@@ -706,6 +709,12 @@ export function buildScene(spec) {
 	}
 	assignPlaces(scene, problems);
 	checkLayout(scene, problems);
+	return { scene, problems };
+}
+
+/** The scene of a spec, or a `SpecError` that names every problem. */
+export function buildScene(spec) {
+	const { scene, problems } = compileScene(spec);
 	if (problems.length > 0) throw new SpecError(problems);
 	return scene;
 }

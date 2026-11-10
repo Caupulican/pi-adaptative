@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- `explain-flow` import: a Mermaid sequence diagram in which a participant answers back now imports into a spec that renders. The reply wire leaves from the bottom port instead of crossing its own station's words, and journey starts and the loop come from the engine's own timing of the real wire lengths (for flowcharts, state diagrams and DOT graphs too) instead of a per-step guess.
+
 ## [0.104.49] - 2026-11-10
 
 ### Added

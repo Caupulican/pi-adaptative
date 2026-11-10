@@ -9,6 +9,8 @@
  * under the rows.
  */
 
+import { compileScene } from "./scene.mjs";
+
 const TEXT_ADVANCE = 1.05;
 const LABEL_CHARS = 26;
 const MARGIN_COLUMNS = 4;
@@ -19,6 +21,10 @@ const BODY_WIDTH = { source: 8, worker: 11, rail: 20, queue: 7 };
 /** Rows from a row's top to the top of a station's body, so every kind's port sits on one line. */
 const BODY_DROP = { source: 5, worker: 3, rail: 5.5, queue: 3 };
 const MAX_JOURNEYS = 6;
+const MAX_LOOP = 120;
+const MIN_LOOP = 4;
+/** Seconds between the end of one journey and the start of the next, and before the first. */
+const JOURNEY_GAP = 0.6;
 const FAIL_WORDS = /\b(fail|failed|failure|error|reject|rejected|denied|invalid|timeout|abort|aborted)\b/i;
 
 function wrapWords(text, width) {
@@ -196,7 +202,6 @@ function flowSpec(graph, notes) {
 	}
 	if (paths.length > chosen.length && covered.size < wireOf.size) notes.push(`${wireOf.size - covered.size} edge(s) are on no journey shown; add journeys for them`);
 	const runs = [];
-	let clock = 0.4;
 	for (const [index, path] of chosen.entries()) {
 		const steps = path.map((edge, at) => {
 			const target = stations.get(edge.to);
@@ -213,10 +218,9 @@ function flowSpec(graph, notes) {
 				...(taken?.text ? (failed ? { result: "fail", text: taken.text } : { phases: [taken.text] }) : {}),
 			};
 		});
-		runs.push({ id: `path ${index + 1}`, from: endOf(path[0].from, "direct"), start: Math.round(clock * 10) / 10, steps });
-		clock += path.length * 1.9 + 0.6;
+		runs.push({ id: `path ${index + 1}`, from: endOf(path[0].from, "direct"), steps });
 	}
-	return { nodes, wires, runs, columns: cursor, rows: rows * pitch + (lanes > 0 ? lanes * 2.5 + 4 : 0), loop: clock + 0.6 };
+	return { nodes, wires, runs, columns: cursor, rows: rows * pitch + (lanes > 0 ? lanes * 2.5 + 4 : 0) };
 }
 
 /** The spec of a sequence: one item visits the stations in the order the messages are written. */
@@ -254,14 +258,33 @@ function sequenceSpec(graph, notes) {
 	const wires = pairs.map((pair, index) => {
 		pair.id = `w${index + 1}`;
 		const lane = under.indexOf(pair);
-		return { id: pair.id, from: pair.from, to: pair.to, ...(lane >= 0 ? { route: "loop", lane: 17 + lane * 2.5 } : {}) };
+		// A wire that runs under the row leaves from the bottom port: out of the right port it would cross its own station's words.
+		return { id: pair.id, from: lane >= 0 ? `${pair.from}.bottom` : pair.from, to: pair.to, ...(lane >= 0 ? { route: "loop", lane: 17 + lane * 2.5 } : {}) };
 	});
 	const steps = graph.edges
 		.filter((edge) => edge.from !== edge.to)
 		.map((edge) => ({ to: stations[place.get(edge.to)].id, wire: wireOf.get(`${edge.from}>${edge.to}`).id, work: 1.0, ...(edge.text ? { phases: [edge.text] } : {}) }));
 	const first = graph.edges.find((edge) => edge.from !== edge.to);
-	const runs = first ? [{ id: "messages", from: stations[place.get(first.from)].id, start: 0.4, steps }] : [];
-	return { nodes, wires, runs, columns: cursor, rows: 17 + (under.length > 0 ? under.length * 2.5 + 4 : 0), loop: steps.length * 1.7 + 1.4 };
+	const runs = first ? [{ id: "messages", from: stations[place.get(first.from)].id, steps }] : [];
+	return { nodes, wires, runs, columns: cursor, rows: 17 + (under.length > 0 ? under.length * 2.5 + 4 : 0) };
+}
+
+/**
+ * Gives every journey its start and the spec its loop, from the journeys' real lengths: the compiled scene knows each
+ * journey's duration along the real wires. The scene is read with its problems set aside: a duration does not depend on
+ * the capacity or layout rules, and the import reports those problems itself. A journey starts when the one before it
+ * has ended; the loop closes after the last.
+ */
+function timeJourneys(spec) {
+	const { scene } = compileScene({ ...spec, loop: MAX_LOOP });
+	if (scene.runs.length !== spec.runs.length) throw new Error("a journey of the converted spec could not be compiled");
+	let clock = JOURNEY_GAP;
+	const runs = spec.runs.map((run, index) => {
+		const start = Math.ceil(clock * 10) / 10;
+		clock = start + scene.runs[index].duration + JOURNEY_GAP;
+		return { ...run, start };
+	});
+	return { ...spec, runs, loop: Math.min(MAX_LOOP, Math.max(MIN_LOOP, Math.ceil(clock))) };
 }
 
 /**
@@ -277,12 +300,11 @@ export function specFromGraph(graph, options = {}) {
 	const bandRows = Math.ceil(laid.rows) + HEADER_ROWS + 2;
 	const even = (value) => Math.ceil(value / 2) * 2;
 	if (widthUnits * unit > 3840) notes.push("the diagram is wider than one picture can carry; split it into parts");
-	const loop = Math.min(120, Math.max(4, Math.ceil(laid.loop)));
 	const spec = {
 		title: options.title ?? "Flow",
 		size: [even(Math.max(960, Math.min(3840, widthUnits * unit))), even(Math.max(360, (bandRows + FOOT_ROWS) * unit))],
 		unit,
-		loop,
+		loop: MAX_LOOP,
 		theme: options.theme ?? "matrix",
 		footer: graph.kind === "sequence" ? "one item carries the messages in order" : "one item follows one path at a time",
 		bands: [{ id: "flow", tier: "live", title: options.title ?? "Flow", height: bandRows }],
@@ -290,5 +312,5 @@ export function specFromGraph(graph, options = {}) {
 		wires: laid.wires,
 		runs: laid.runs,
 	};
-	return { spec, notes };
+	return { spec: timeJourneys(spec), notes };
 }
