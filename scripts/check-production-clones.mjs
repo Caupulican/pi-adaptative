@@ -14,9 +14,13 @@ import {
 	validateCoverageSummary,
 } from "./production-clone-gate.mjs";
 import { pruneTemporaryJscpdReports } from "./jscpd-report-retention.mjs";
+import { resolvePackageDirectory } from "./lib/tool-resolution.mjs";
 
 const repositoryRoot = resolve(import.meta.dirname, "..");
-const jscpdRunner = resolve(repositoryRoot, "node_modules", "jscpd", "run-jscpd.js");
+// Only the scanner is installed: it comes from wherever Node resolves it (this worktree or the checkout that owns it).
+// Everything the scanner reads and writes stays in this tree, because this tree is the code being scanned.
+const jscpdDirectory = resolvePackageDirectory("jscpd");
+const jscpdRunner = jscpdDirectory ? join(jscpdDirectory, "run-jscpd.js") : undefined;
 const reportFilename = "jscpd-report.json";
 
 function parseArguments(argv) {
@@ -76,7 +80,9 @@ try {
 	validateCloneExclusions(repositoryRoot);
 	candidates = discoverCloneCandidates(repositoryRoot);
 	validateCandidateLimits(candidates);
-	if (!existsSync(jscpdRunner)) throw new Error("jscpd is not installed; run npm install --ignore-scripts");
+	if (!jscpdRunner || !existsSync(jscpdRunner)) {
+		throw new Error("jscpd is not installed; run npm install --ignore-scripts");
+	}
 	eligibleCandidates = candidates.filter((candidate) => candidate.lines >= CLONE_LIMITS.minLines);
 	belowMinimumCandidates = candidates.filter((candidate) => candidate.lines < CLONE_LIMITS.minLines);
 	const configPath = resolve(repositoryRoot, ".jscpd.json");
