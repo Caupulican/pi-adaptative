@@ -8,7 +8,6 @@ import {
 	fleetNow,
 	handoffTurn,
 	harnessNotices,
-	J8_INTAKE_JUDGMENTS,
 	noticesSaved,
 	seedSpendFile,
 	settle,
@@ -17,7 +16,7 @@ import {
 	startStep,
 	submitReport,
 } from "./journey-8-shared.ts";
-import { expectOwnerWords } from "./shared.ts";
+import { expectOwnerWords, INTAKE_JUDGMENTS_WITHOUT_GRANT } from "./shared.ts";
 
 /**
  * Leg 2: the day budget and the spend brake, which bind only paid work.
@@ -128,7 +127,7 @@ export async function runJourney8MeteredPhase(world: HarnessWorld): Promise<void
 		handoffTurn("j8b-wake-paid-one", wake()),
 		handoffTurn("j8b-wake-paid-two", wake()),
 	);
-	world.systemOne.enterPhase("j8b-metered", J8_INTAKE_JUDGMENTS, {
+	world.systemOne.enterPhase("j8b-metered", INTAKE_JUDGMENTS_WITHOUT_GRANT, {
 		expect: expectOwnerWords({
 			sessionManager: () => sessionManager,
 			userRequests: [PAID_PROMPT, CEILING_PROMPT, BRAKE_PROMPT],

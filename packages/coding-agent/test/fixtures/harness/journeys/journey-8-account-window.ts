@@ -15,14 +15,13 @@ import {
 	carriesMarker,
 	contentText,
 	delegateReceipts,
-	J8_INTAKE_JUDGMENTS,
 	scriptedAccountKey,
 	seedAccountWindow,
 	startOf,
 	startStep,
 	submitReport,
 } from "./journey-8-shared.ts";
-import { expectOwnerWords } from "./shared.ts";
+import { expectOwnerWords, INTAKE_JUDGMENTS_WITHOUT_GRANT } from "./shared.ts";
 
 /**
  * Leg 1: a rate refusal narrows the account the workers share.
@@ -168,7 +167,7 @@ export async function runJourney8AccountWindowPhase(world: HarnessWorld): Promis
 			reply: { content: [{ type: "text", text: "Noted." }] },
 		},
 	);
-	world.systemOne.enterPhase("j8a-account-window", J8_INTAKE_JUDGMENTS, {
+	world.systemOne.enterPhase("j8a-account-window", INTAKE_JUDGMENTS_WITHOUT_GRANT, {
 		expect: expectOwnerWords({
 			sessionManager: () => sessionManager,
 			userRequests: [START_PROMPT, WAIT_PROMPT],

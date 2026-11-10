@@ -21,22 +21,9 @@ import {
 	type ScriptStep,
 } from "../scripted-provider.ts";
 import type { HarnessWorld } from "../session-fixture.ts";
-import { ICM_INTAKE_JUDGMENTS } from "./shared.ts";
 
 /** The provider every worker of these legs runs on, so one account's window governs them all. */
 export { HARNESS_PROVIDER };
-
-/**
- * The judgments an owner prompt of these legs asks. The capability question is asked only while a grant is pending, and
- * no leg here has one, so it is not declared: a declared judgment nobody asks fails the phase.
- */
-export const J8_INTAKE_JUDGMENTS = {
-	changes_model_pools: ICM_INTAKE_JUDGMENTS.changes_model_pools,
-	local_commits_only: ICM_INTAKE_JUDGMENTS.local_commits_only,
-	lifts_delivery_block: ICM_INTAKE_JUDGMENTS.lifts_delivery_block,
-	full_handoff: ICM_INTAKE_JUDGMENTS.full_handoff,
-	optional_tool_0: ICM_INTAKE_JUDGMENTS.optional_tool_0,
-} as const;
 
 /** One `delegate` result as the root reads it: its text and the details the product attached. */
 export interface DelegateReceipt {

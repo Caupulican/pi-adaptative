@@ -1422,13 +1422,24 @@ export const OWNER_DRAFT_DIRTY = "owner draft v2 (unstaged, not mine)\n";
 
 export const ICM_CREDENTIAL_KEY = ["AIza", "0123456789abcdefghijklmnopqrstuvwxy"].join("");
 
-/** The judgments a plain owner request that leads to a tool call consumes (the E4 set). */
-export const ICM_INTAKE_JUDGMENTS = {
+/**
+ * The judgments an owner request that leads to a tool call asks while no grant is pending. A declared judgment nobody
+ * asks fails its phase, so a phase with no pending grant declares this set and not the one below.
+ */
+export const INTAKE_JUDGMENTS_WITHOUT_GRANT = {
 	changes_model_pools: { kind: "noul", probability: 0.02 },
 	local_commits_only: { kind: "noul", probability: 0.02 },
 	lifts_delivery_block: { kind: "noul", probability: 0.02 },
 	full_handoff: { kind: "noul", probability: 0.02 },
 	optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
+} as const;
+
+/**
+ * The judgments a plain owner request that leads to a tool call consumes (the E4 set): the intake questions and the
+ * capability question, which is asked only while a grant is pending.
+ */
+export const ICM_INTAKE_JUDGMENTS = {
+	...INTAKE_JUDGMENTS_WITHOUT_GRANT,
 	capabilities_authorized: { kind: "noul", probability: 0.02 },
 } as const;
 

@@ -16,6 +16,7 @@ import { runJourney5 } from "./fixtures/harness/journeys/journey-5.ts";
 import { runJourney6 } from "./fixtures/harness/journeys/journey-6.ts";
 import { runJourney7 } from "./fixtures/harness/journeys/journey-7.ts";
 import { runJourney8 } from "./fixtures/harness/journeys/journey-8.ts";
+import { runJourney9 } from "./fixtures/harness/journeys/journey-9.ts";
 
 describe("Adaptive harness composed journeys", () => {
 	it(
@@ -52,5 +53,9 @@ describe("Adaptive harness composed journeys", () => {
 
 	it("fleet: a rate refusal narrows an account, the day budget and the spend brake hold paid work, the emergency stop holds and releases the queue", async () => {
 		await runJourney8();
+	}, 360_000);
+
+	it("ladder: a worker that falls short is answered by the exit its outcome selects, and a host check the worker skipped is run by the host", async () => {
+		await runJourney9();
 	}, 360_000);
 });

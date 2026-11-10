@@ -13,13 +13,12 @@ import {
 	contentText,
 	delegateReceipts,
 	handoffTurn,
-	J8_INTAKE_JUDGMENTS,
 	settle,
 	startOf,
 	startStep,
 	submitReport,
 } from "./journey-8-shared.ts";
-import { expectOwnerWords } from "./shared.ts";
+import { expectOwnerWords, INTAKE_JUDGMENTS_WITHOUT_GRANT } from "./shared.ts";
 
 /**
  * Leg 3: the machine-wide emergency stop holds new starts and a worker's next provider request, and never the root's
@@ -121,7 +120,7 @@ export async function runJourney8EmergencyStopPhase(world: HarnessWorld): Promis
 		handoffTurn("j8c-wake-waiting", wakeAt(1)),
 		handoffTurn("j8c-wake-queued", wakeAt(2)),
 	);
-	world.systemOne.enterPhase("j8c-emergency-stop", J8_INTAKE_JUDGMENTS, {
+	world.systemOne.enterPhase("j8c-emergency-stop", INTAKE_JUDGMENTS_WITHOUT_GRANT, {
 		expect: expectOwnerWords({
 			sessionManager: () => sessionManager,
 			userRequests: [START_PROMPT, STOPPED_PROMPT],
