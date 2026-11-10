@@ -1,6 +1,7 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
 import { runJourney5PlanCollectPhase } from "./journey-5-plan-collect.ts";
+import { runJourney5PlanOriginPhase } from "./journey-5-plan-origin.ts";
 import { runJourney5PlanRacePhase } from "./journey-5-plan-race.ts";
 import { runJourney5PlanReducePhase } from "./journey-5-plan-reduce.ts";
 import { LIMITS_PATH, runJourney } from "./shared.ts";
@@ -24,6 +25,7 @@ export async function runJourney5(): Promise<void> {
 			await runJourney5PlanCollectPhase(world, session);
 			await runJourney5PlanRacePhase(world, session);
 			await runJourney5PlanReducePhase(world, session);
+			await runJourney5PlanOriginPhase(world, session);
 			expect(await world.disposeSessionInBody(session), "the plans owner disposes cleanly").toBeUndefined();
 		},
 	);
