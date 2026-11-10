@@ -3,7 +3,8 @@
  *
  * A turn is complete only when a `finish` event arrives: a stream that ends without one was cut short. A turn the
  * service paused (`pause_turn`) continues by posting the same request again, as the service's own client does. A
- * call the service ran itself is not the caller's to run and stays out of the message.
+ * call the service ran itself is not the caller's to run and stays out of the message. A kind the adapter does not
+ * read is not dropped in silence: a turn that saw one says which kinds and how many, once, on its message.
  */
 
 import { calculateCost } from "../models.ts";
@@ -18,6 +19,7 @@ import type {
 	ThinkingContent,
 	ToolCall,
 } from "../types.ts";
+import { appendAssistantMessageDiagnostic } from "../utils/diagnostics.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { parseStreamingJsonState } from "../utils/json-parse.ts";
 import { dropNullOptionals } from "../utils/nullable-optionals.ts";
@@ -59,6 +61,16 @@ const MAX_ERROR_TEXT_CHARS = 500;
 const REFUSAL_FINISH_REASONS = new Set(["refusal", "content_filter", "content-filter"]);
 /** Failures the service reports with no status that another try cannot change. */
 const TERMINAL_ERROR_MARKERS = ["premium_credits_exhausted", "model_not_in_plan", "insufficient credits"];
+/** How many kinds a turn's report names; kinds past it are only counted. */
+const MAX_REPORTED_UNREAD_KINDS = 20;
+/** Bounds one kind's key in a report, because a kind is the service's own string and its length is not. */
+const MAX_UNREAD_KIND_CHARS = 60;
+/** The diagnostic type a turn reports its unread kinds under. */
+const UNREAD_EVENTS_DIAGNOSTIC_TYPE = "command_code_unread_events";
+/** Counts the distinct kinds a report left out, so the key can never be taken for a service kind. */
+const UNREAD_KINDS_OVER_LIMIT = "kinds-over-limit";
+/** The key an event that names no usable kind is counted under, so no event of a turn goes unreported. */
+const UNTYPED_EVENT_KIND = "(no type)";
 
 type ServiceEvent = Record<string, unknown> & { type: string };
 
@@ -170,7 +182,10 @@ async function postGenerate(
 	return response;
 }
 
-/** A line that is not a JSON event is passed over, as the service's client passes it over. */
+/**
+ * A line that is not a JSON event object is passed over, as the service's client passes it over. An event object
+ * that names no usable kind keeps its place in the turn's report, under one fixed key.
+ */
 function parseEventLine(line: string): ServiceEvent | undefined {
 	const text = line.trim();
 	if (!text) return undefined;
@@ -180,7 +195,10 @@ function parseEventLine(line: string): ServiceEvent | undefined {
 	} catch {
 		return undefined;
 	}
-	return isRecord(value) && typeof value.type === "string" ? (value as ServiceEvent) : undefined;
+	if (!isRecord(value)) return undefined;
+	return typeof value.type === "string" && value.type
+		? (value as ServiceEvent)
+		: { ...value, type: UNTYPED_EVENT_KIND };
 }
 
 async function* readEvents(response: Response, signal: AbortSignal | undefined): AsyncGenerator<ServiceEvent> {
@@ -266,6 +284,31 @@ function readToolInput(raw: unknown): ToolInput {
 	};
 }
 
+/**
+ * Counts the event kinds a turn reads nothing from, across all of its posts. Kinds and counts only, no content: the
+ * report exists so a finished run can say which kinds it did not read.
+ */
+class UnreadEventKinds {
+	private readonly counts = new Map<string, number>();
+
+	add(kind: string): void {
+		const key = kind.length <= MAX_UNREAD_KIND_CHARS ? kind : `${kind.slice(0, MAX_UNREAD_KIND_CHARS - 1)}…`;
+		this.counts.set(key, (this.counts.get(key) ?? 0) + 1);
+	}
+
+	/** The kinds seen most often, busiest first; undefined when the turn read every kind it saw. */
+	details(): Record<string, number> | undefined {
+		if (this.counts.size === 0) return undefined;
+		const ordered = [...this.counts].sort(([leftKind, leftCount], [rightKind, rightCount]) =>
+			rightCount === leftCount ? (leftKind < rightKind ? -1 : leftKind > rightKind ? 1 : 0) : rightCount - leftCount,
+		);
+		const named = ordered.slice(0, MAX_REPORTED_UNREAD_KINDS);
+		const details: Record<string, number> = Object.fromEntries(named);
+		if (ordered.length > named.length) details[UNREAD_KINDS_OVER_LIMIT] = ordered.length - named.length;
+		return details;
+	}
+}
+
 /** One model turn being assembled from the service's events, over one or more posts. */
 class CommandCodeTurn {
 	private open: TextContent | ThinkingContent | undefined;
@@ -275,6 +318,8 @@ class CommandCodeTurn {
 	private readonly toolNameMap: ToolNameMap;
 	/** The tools' own schemas by provider tool name. */
 	private readonly toolSchemas: ReadonlyMap<string, object>;
+	/** Kinds this turn read nothing from, counted across every post. */
+	private readonly unreadKinds = new UnreadEventKinds();
 
 	constructor(
 		model: Model<"command-code-generate">,
@@ -326,6 +371,9 @@ class CommandCodeTurn {
 					break;
 				case "error":
 					throw streamFailure(event);
+				default:
+					// No kind is ignored on purpose today: every kind the switch does not name is worth reporting.
+					this.unreadKinds.add(event.type);
 			}
 		}
 		this.close();
@@ -339,6 +387,21 @@ class CommandCodeTurn {
 			);
 		}
 		return this.finishLeg(finish, cacheWriteSeen);
+	}
+
+	/**
+	 * Appends the one diagnostic that names the kinds the turn read nothing from. Called wherever the turn ends, so a
+	 * finished, failed and aborted turn all say the same thing, and a turn says it once.
+	 */
+	reportUnreadEventKinds(): void {
+		if (this.output.diagnostics?.some((entry) => entry.type === UNREAD_EVENTS_DIAGNOSTIC_TYPE)) return;
+		const details = this.unreadKinds.details();
+		if (!details) return;
+		appendAssistantMessageDiagnostic(this.output, {
+			type: UNREAD_EVENTS_DIAGNOSTIC_TYPE,
+			timestamp: Date.now(),
+			details,
+		});
 	}
 
 	private append(kind: "text" | "thinking", text: string): void {
@@ -427,6 +490,7 @@ export const streamCommandCode: StreamFunction<"command-code-generate", CommandC
 
 	(async () => {
 		const output = createAssistantMessage(model);
+		let turn: CommandCodeTurn | undefined;
 		try {
 			const apiKey = options?.apiKey;
 			if (!apiKey) throw new Error("No Command Code key. Sign in with /login or set COMMAND_CODE_API_KEY.");
@@ -447,7 +511,7 @@ export const streamCommandCode: StreamFunction<"command-code-generate", CommandC
 				...model.headers,
 				...options?.headers,
 			});
-			const turn = new CommandCodeTurn(
+			turn = new CommandCodeTurn(
 				model,
 				output,
 				stream,
@@ -463,8 +527,10 @@ export const streamCommandCode: StreamFunction<"command-code-generate", CommandC
 				const finishReason = await turn.readLeg(response, options?.signal);
 				if (finishReason !== "pause_turn" || post >= MAX_PAUSE_CONTINUATIONS) break;
 			}
+			turn.reportUnreadEventKinds();
 			completeAssistantStream(stream, output, options?.signal);
 		} catch (error) {
+			turn?.reportUnreadEventKinds();
 			terminateAssistantStreamWithError(stream, output, options?.signal, error, {
 				formatError: (failure) => (failure instanceof Error ? failure.message : String(failure)),
 			});

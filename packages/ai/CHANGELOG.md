@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Command Code adapter: a turn names the event kinds it did not read. The service can send kinds the adapter has no use for yet (a tool call's input streamed in parts, provider metadata) and may add kinds at any time; they used to be dropped in silence. A turn that saw one now carries one diagnostic on its message (`command_code_unread_events`): the kinds and how often each was seen, across all posts of the turn, at most 20 kinds named, no event content. A turn that read everything carries none.
+
 ## [0.104.50] - 2026-11-10
 
 ### Fixed
