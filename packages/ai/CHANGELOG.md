@@ -2,6 +2,7 @@
 
 ### Fixed
 
+- Command Code adapter: its transport failures are retried. A request that could not reach the service, a response with no stream, a stream that broke mid-answer, and a stream that ended (or was aborted by the service) before its finish event now carry an explicit retry directive, so a host that retries transient provider failures retries the turn instead of ending the run. A cancelled request is never marked for retry.
 - Command Code adapter: a reasoning effort has room under the output cap. Reasoning counts inside `max_tokens` on this route, so a request that carries an effort other than `off` asks for the model's own output cap (as the service's client does) instead of the caller's per-response cap; a turn at a high effort could otherwise spend the whole cap reasoning and stop with `length` before any answer. Without an effort the caller's cap applies, bounded by the model's.
 - Command Code adapter: a tool call's input is read in every shape the service sends it (an object, a list holding one object, JSON text of either, or nothing). An input that cannot be read as arguments (a list of several items, a number, text cut short) no longer becomes an empty argument object: the tool call carries an error message naming the shape, which the agent loop returns to the model instead of running the tool.
 

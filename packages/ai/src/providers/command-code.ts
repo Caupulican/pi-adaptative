@@ -151,11 +151,12 @@ async function postGenerate(
 		});
 	} catch (error) {
 		signal?.throwIfAborted();
-		throw new CommandCodeError("Command Code could not be reached", { cause: error });
+		throw new CommandCodeError("Command Code could not be reached", { retryable: true, cause: error });
 	}
 	if (!response.ok) throw await httpFailure(response);
 	if (!response.body) {
 		throw new CommandCodeError("Command Code answered with no stream", {
+			retryable: true,
 			status: response.status,
 			headers: response.headers,
 		});
@@ -187,7 +188,7 @@ async function* readEvents(response: Response, signal: AbortSignal | undefined):
 				chunk = await reader.read();
 			} catch (error) {
 				signal?.throwIfAborted();
-				throw new CommandCodeError("Command Code's stream broke mid-answer", { cause: error });
+				throw new CommandCodeError("Command Code's stream broke mid-answer", { retryable: true, cause: error });
 			}
 			if (chunk.done) break;
 			for (const line of lines.push(decoder.decode(chunk.value, { stream: true }))) {
@@ -324,6 +325,7 @@ class CommandCodeTurn {
 				aborted
 					? "Command Code aborted the answer before it finished"
 					: "Command Code's stream ended before the answer finished",
+				{ retryable: true },
 			);
 		}
 		return this.finishLeg(finish, cacheWriteSeen);
