@@ -348,6 +348,8 @@ function readWire(raw, path, nodes, scene, problems) {
 		from,
 		to,
 		path: shape,
+		// How the wire runs: along a lane it was given, level between two ports, or with a turn to another row.
+		run: Array.isArray(raw.via) || route === "loop" ? "lane" : Math.abs(a.y - b.y) < 0.5 ? "level" : "turn",
 		tier: from.node.band.tier,
 		label: readText(raw.label, `${path}.label`, problems),
 	};
@@ -570,6 +572,21 @@ function extents(node, u, captionWidth) {
 	return rects;
 }
 
+/** Whether a wire's path enters a rectangle, walking each of its pieces in steps of a few pixels. */
+function wireCrosses(path, rect) {
+	for (let index = 1; index < path.points.length; index++) {
+		const a = path.points[index - 1];
+		const b = path.points[index];
+		const steps = Math.max(1, Math.ceil(Math.hypot(b.x - a.x, b.y - a.y) / 4));
+		for (let step = 0; step <= steps; step++) {
+			const x = a.x + ((b.x - a.x) * step) / steps;
+			const y = a.y + ((b.y - a.y) * step) / steps;
+			if (x > rect.x && x < rect.x + rect.w && y > rect.y && y < rect.y + rect.h) return true;
+		}
+	}
+	return false;
+}
+
 function checkLayout(scene, problems) {
 	const u = scene.unit;
 	const said = captionWidths(scene);
@@ -584,6 +601,19 @@ function checkLayout(scene, problems) {
 			problems.push(`nodes "${node.id}": it runs past the ${left < 0 ? "left" : "right"} edge (its widest line ends at column ${Math.round(right / u) - MARGIN}; the last column is ${Math.round(scene.width / u) - 2 * MARGIN})`);
 		if (top < band.top + 3.5 * u || bottom > band.top + band.height)
 			problems.push(`nodes "${node.id}": it does not fit inside band "${band.id}" (rows ${Math.round((top - band.top) / u) - BAND_HEADER} to ${Math.round((bottom - band.top) / u) - BAND_HEADER}; the band has ${Math.round(band.height / u) - BAND_HEADER})`);
+	}
+	// A wire never runs through words, nor through a station it does not end at.
+	for (const [index, wire] of scene.wires.entries()) {
+		const hit = all.find(({ node, rects }) =>
+			rects.some((rect) => {
+				const body = rect.what === "body";
+				if (body && (node === wire.from.node || node === wire.to.node)) return false;
+				const inset = body ? 0.2 * u : 0;
+				return wireCrosses(wire.path, { x: rect.x + inset, y: rect.y + inset, w: rect.w - 2 * inset, h: rect.h - 2 * inset });
+			}),
+		);
+		if (hit)
+			problems.push(`wires[${index}] (${wire.from.node.id} to ${wire.to.node.id}): it runs through "${hit.node.id}" or its words; route it another way (a loop lane, via corners) or move the station`);
 	}
 	for (let first = 0; first < all.length; first++)
 		for (let second = first + 1; second < all.length; second++) {

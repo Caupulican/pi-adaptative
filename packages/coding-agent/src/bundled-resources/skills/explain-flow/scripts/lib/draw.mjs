@@ -193,10 +193,10 @@ function wireEl(scene, wire) {
 	const style = tierStyle(scene, wire.tier);
 	let out = pathEl(wire.path.d, `${tierStroke(scene, wire.tier, scene.theme.line, u * 0.13)} opacity="${alphaOf(style.alpha * 0.48)}"`);
 	if (!wire.label) return out;
-	// A curved wire is named where it arrives, so two wires that leave one pin are never named in one place; a wire
-	// with a level run is named under the middle of that run.
+	// A wire that turns to another row is named where it arrives, so two wires that leave one pin are never named in
+	// one place; a level wire and a lane are named under the middle of their longest level run.
 	const end = wire.path.points[wire.path.points.length - 1];
-	const run = wire.path.d.includes("C") ? undefined : labelRun(wire.path);
+	const run = wire.run === "turn" ? undefined : labelRun(wire.path);
 	const place = run ? { x: run.x + run.length / 2, y: run.y + 2.25 * u, anchor: "middle" } : { x: end.x - 1.5 * u, y: end.y - 0.9 * u, anchor: "end" };
 	return out + words(scene, place.x, place.y, TEXT_SIZE * u, [{ text: wire.label, fill: scene.theme.dim }], place.anchor, style.alpha * 0.9);
 }

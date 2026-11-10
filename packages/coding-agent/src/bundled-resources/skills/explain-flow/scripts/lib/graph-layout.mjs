@@ -118,6 +118,8 @@ function flowSpec(graph, notes) {
 	for (const [column, members] of columns.entries())
 		for (const [row, node] of members.entries()) {
 			const station = stations.get(node.id);
+			station.column = column;
+			station.row = row;
 			nodes.push({
 				id: station.id = `n${nodes.length + 1}`,
 				kind: station.kind,
@@ -157,6 +159,13 @@ function flowSpec(graph, notes) {
 		if (!direct) {
 			wire.route = "loop";
 			wire.lane = rows * pitch + 1 + lanes++ * 2.5;
+		} else if (stations.get(edge.from).row !== stations.get(edge.to).row) {
+			// A wire to another row turns in the clear strip between the two columns, past every station's words.
+			const from = stations.get(edge.from);
+			const start = lefts[from.column] + BODY_WIDTH[from.kind];
+			const end = lefts[from.column + 1];
+			wire.route = "elbow";
+			wire.bend = Math.min(0.95, Math.max(0.05, Math.round(((end - COLUMN_GAP / 2 - start) / (end - start)) * 100) / 100));
 		}
 		if (edge.text) wire.label = edge.text;
 		wires.push(wire);

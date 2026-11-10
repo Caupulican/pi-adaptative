@@ -93,5 +93,6 @@ Every command but `import` also takes `--theme <built-in name>` or `--theme-file
 
 - A station with its words fits inside its band and the canvas.
 - Two stations keep a clear strip between everything they draw. Two lines of words side by side need 2 units between them.
+- A wire never runs through words, nor through a station it does not end at.
 - A queue never holds more items than it has slots, and a worker never more than one.
 - Every hop of every journey has exactly one wire under it.
