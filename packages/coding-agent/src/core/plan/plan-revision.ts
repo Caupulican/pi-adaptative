@@ -381,8 +381,10 @@ export function dependencyCandidates(
 	focus?: ReadonlySet<string>,
 ): { readonly earlier: PlanNodeSpec; readonly later: PlanNodeSpec }[] {
 	const scored: { earlier: PlanNodeSpec; later: PlanNodeSpec; score: number }[] = [];
-	const work = nodes.filter((node) => node.kind === "work");
-	for (const [a, b] of concurrentPlanPairs(work)) {
+	// Paths are read over the whole plan: two plain steps ordered through a join (a step, its verify step, the step after
+	// it) are not concurrent, and asking about them could add an edge that bypasses the join between them.
+	for (const [a, b] of concurrentPlanPairs(nodes)) {
+		if (a.kind !== "work" || b.kind !== "work") continue;
 		if (focus && !focus.has(a.id) && !focus.has(b.id)) continue;
 		const overlap = writeScopesOverlap(a.writeScope, b.writeScope) !== undefined ? 3 : 0;
 		const forward = overlap + (mentions(b, a) ? 2 : 0) + (a.writeScope.length > 0 ? 1 : 0);

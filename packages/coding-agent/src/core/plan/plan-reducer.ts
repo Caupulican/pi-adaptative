@@ -258,6 +258,19 @@ export function reducePlanEvent(
 }
 
 /**
+ * The idempotency key of a step's settlement, hold or join settlement. It names the step's spec version: a step a revise
+ * restated runs on a new task, whose outcome generation starts again at 1, and its join's sequence starts again at 1, so
+ * without the version the restated step's first settlement would read as a replay of the earlier version's and be dropped.
+ */
+export function planStepEventKey(
+	plans: Readonly<Record<string, PlanRuntimeState>>,
+	step: { readonly planId: string; readonly nodeId: string },
+	event: string,
+): string {
+	return `plan:${step.planId}:${step.nodeId}:v${plans[step.planId]?.nodes[step.nodeId]?.since ?? 0}:${event}`;
+}
+
+/**
  * The released node, current or retired, that a task belongs to; the terminal route's code fact. A step whose task an
  * escalation superseded belongs to every task of that successor chain, so the successor's terminal reaches the plan.
  */

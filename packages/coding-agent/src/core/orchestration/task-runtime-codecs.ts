@@ -1,6 +1,6 @@
 import { parseTurnOriginRecord, type TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { JsonObject, WorkerReportProgress } from "../autonomy/contracts.ts";
-import { parseTaskBrief, renderTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
+import { parseTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
 import { storedOutcomeFromValue, taskEscalationsFromValue } from "../delegation/worker-outcome-codec.ts";
 import { parseWorkerReportProgress } from "../delegation/worker-report-progress.ts";
 import { parseHostEventProjection, validateHostEventGraph } from "../events/host-event-codecs.ts";
@@ -38,6 +38,7 @@ import {
 	type AttemptRetryState,
 	type AttemptStatus,
 	type AttemptUsageSnapshot,
+	dispatchTextStatesBrief,
 	type EvidenceContract,
 	type ExecutionGrant,
 	isHarnessCapability,
@@ -449,9 +450,8 @@ export function dispatchFromValue(value: unknown, label: string): OrchestrationD
 		throw new DurableTaskRuntimeError(`${label} cannot combine a worker execution contract with managed execution.`);
 	}
 	const instructions = dispatchInstructions(dispatch.instructions, `${label}.instructions`);
-	// A brief and its text are one fact stated twice: the stored text must be exactly what the brief's own renderer
-	// produces, or recovery would run a task the record does not state. A dispatch without a brief is free text.
-	if (brief && renderTaskBrief(brief) !== instructions) {
+	// The text must state the brief as its renderer produces it (`dispatchTextStatesBrief`); without one it is free text.
+	if (brief && !dispatchTextStatesBrief(instructions, brief)) {
 		throw new DurableTaskRuntimeError(`${label}.brief does not render its instructions.`);
 	}
 	return {

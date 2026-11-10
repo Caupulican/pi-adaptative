@@ -1,6 +1,7 @@
 import { ORCHESTRATION_THINKING_LEVELS, type OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
 import { reviewRunVerdict } from "../orchestration/review-verdict.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
+import { currentTaskOf } from "../orchestration/task-successor.ts";
 import { DEFAULT_WORKER_OUTCOME_SETTINGS } from "../settings/worker-outcome-settings.ts";
 import type { JudgmentPair, LadderCandidate, LadderFacts } from "./worker-escalation-policy.ts";
 import type { BlockerCode, Outcome, OutcomeStatus, RequirementCoverage } from "./worker-outcome-contract.ts";
@@ -83,6 +84,21 @@ function remoteMachineOf(snapshot: TaskRuntimeProjection, taskId: string): strin
 	return undefined;
 }
 
+/**
+ * Whether `taskId` carries a work step of an open plan (the step's release task, or the task a rerun moved it to). Such a
+ * step's unverified result is checked by the plan: its verify step reviews it, or the plan adds one.
+ */
+function runsPlanWorkStep(snapshot: TaskRuntimeProjection, taskId: string): boolean {
+	for (const plan of Object.values(snapshot.plans)) {
+		if (plan.closed || "unsupported" in plan.record) continue;
+		for (const [nodeId, node] of Object.entries(plan.nodes)) {
+			if (!node.release || currentTaskOf(snapshot, node.release.taskId) !== taskId) continue;
+			return plan.record.nodes.find((spec) => spec.id === nodeId)?.kind === "work";
+		}
+	}
+	return false;
+}
+
 /** The most characters of a rejected review's reason codes a remedy quotes. */
 const REVIEW_REASON_CHARS = 240;
 
@@ -148,6 +164,7 @@ export function outcomeLadderFacts(args: {
 		...(args.ownerOnly ? { ownerOnly: args.ownerOnly } : {}),
 		...(args.rungRefusal !== undefined ? { rungRefusal: args.rungRefusal } : {}),
 		...(review?.kind === "rejected" ? { reviewRejection: boundedReasonCodes(review.reasonCodes) } : {}),
+		...(runsPlanWorkStep(snapshot, attempt.taskId) ? { planChecksResult: true } : {}),
 	};
 }
 

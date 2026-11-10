@@ -20,7 +20,7 @@ import type { ExecutionContext } from "../../kernel/utils/paths.ts";
 import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
 import type { JsonObject, JsonValue, WorkerReportProgress } from "../autonomy/contracts.ts";
 import { HARNESS_CAPABILITIES, type HarnessCapability } from "../capability-contract.ts";
-import type { TaskBrief } from "../comms/comms-records.ts";
+import { renderTaskBrief, type TaskBrief } from "../comms/comms-records.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { WorkerContextForkReference } from "./worker-context-fork-reference.ts";
 
@@ -42,6 +42,17 @@ export const MAX_ORCHESTRATION_DESCRIPTION_LENGTH = 4 * 1024;
 export const MAX_ORCHESTRATION_WORKER_RESULT_SUMMARY_BYTES = DEFAULT_MAX_BYTES;
 export const MAX_ORCHESTRATION_COLLECTION_LENGTH = 64;
 export const MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH = 16 * 1024;
+
+/**
+ * Whether a dispatch's task text states its brief: the brief's own rendering is in the text, whole and unchanged. A brief and
+ * its text are one fact stated twice, so a record whose text does not state its brief would name a task the worker was not
+ * given. A task started from a brief alone has that rendering as its whole text. The host may frame it instead: a plan
+ * step's text puts its header, the plan's title and its inputs around the step's brief, and a rerun's text puts the lines
+ * about what is left before the original task.
+ */
+export function dispatchTextStatesBrief(instructions: string, brief: TaskBrief): boolean {
+	return instructions.includes(renderTaskBrief(brief));
+}
 /**
  * Lifetime ceilings for the retained hot projection. Terminal records are intentionally retained,
  * so these limits match the durable worker-fleet ceiling rather than only counting active work.

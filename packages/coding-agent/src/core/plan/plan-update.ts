@@ -1,13 +1,16 @@
 /**
  * The one bounded `plan-update` message the root reads per join or plan result (design PG 6.6): at most 4 KiB, at most
  * 8 step lines, host codes `h PLAN_UPDATE,<JOIN_DONE|PLAN_DONE|REPLAN|OWNER_NEEDED>,<READ_REPORT|READ_ALL>`, the result
- * digest, coverage per requirement, gaps, conflicts and the artifact path. Its delivery id is the plan, the step and the event's
+ * digest, coverage per requirement, gaps, conflicts and the artifact path (for a plan that finished on a plain step, that
+ * step's outcome line, changed files and report). Its delivery id is the plan, the step and the event's
  * sequence, so a redelivery after restart is the same input and never a second wake.
  */
 
 import { createHash } from "node:crypto";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { renderCommsStateLine, type TaskBrief } from "../comms/comms-records.ts";
+import type { Outcome } from "../delegation/worker-outcome-contract.ts";
+import { describeOutcomeForHandoff } from "../delegation/worker-outcome-words.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { buildPlanProofSheet } from "../proof/plan-proof-sheet.ts";
 import {
@@ -41,10 +44,14 @@ export interface PlanUpdateInput {
 	readonly detail?: string;
 	/** Distinguishes two updates of the same kind about the same step (join sequence, hold generation). */
 	readonly sequence: number;
+	/** The spec version of the step the update is about: a restated step's join sequence and hold generation start again. */
+	readonly since?: number;
 	/** The brief of the step the update is about; a result's proof sheet repeats its done-when and out-of-scope lines. */
 	readonly brief?: Pick<TaskBrief, "done" | "outOfScope">;
 	/** The stakes the join recorded when it settled (its steps' highest level); the result's proof sheet reads it. */
 	readonly stakes?: ProofStakesLevel;
+	/** A plan that finished on a plain step has no combined result: that step's outcome, which the update then carries. */
+	readonly stepOutcome?: Outcome;
 }
 
 const KIND_CODE: Readonly<Record<PlanUpdateKind, CommsStateCode>> = {
@@ -109,12 +116,17 @@ function bounded(lines: readonly string[]): string {
 	return kept.join("\n");
 }
 
-/** The delivery id of one update: the plan, the kind, the step and the sequence, so a redelivery is the same input. */
+/**
+ * The delivery id of one update: the plan, the kind, the step, the step's spec version and the sequence, so a redelivery is
+ * the same input and an update about a restated step is a new one. A step still at its first version keeps the id it
+ * always had, so an update delivered by an earlier build is not delivered again.
+ */
 export function planUpdateDeliveryId(
 	planId: string,
-	input: Pick<PlanUpdateInput, "kind" | "nodeId" | "sequence">,
+	input: Pick<PlanUpdateInput, "kind" | "nodeId" | "sequence" | "since">,
 ): string {
-	return `plan-update:${planId}:${input.kind}:${input.nodeId ?? "plan"}:${input.sequence}`;
+	const version = input.since !== undefined && input.since > 1 ? `v${input.since}:` : "";
+	return `plan-update:${planId}:${input.kind}:${input.nodeId ?? "plan"}:${version}${input.sequence}`;
 }
 
 /** The plan-update parent input; `origin` is the receipt origin the root transcript records the input under. */
@@ -124,7 +136,12 @@ export function planUpdateDelivery(
 	origin: ParentInputDelivery["origin"],
 ): ParentInputDelivery {
 	const result = input.result;
-	const reads = result && joinReadsAsReport(result) ? "READ_REPORT" : "READ_ALL";
+	// The plain step a plan finished on, read only when no combined result exists.
+	const step = result ? undefined : input.stepOutcome;
+	const asReport = result
+		? joinReadsAsReport(result)
+		: step !== undefined && step.status === "succeeded" && step.coverage.uncovered.length === 0;
+	const reads = asReport ? "READ_REPORT" : "READ_ALL";
 	const codes = renderCommsStateLine(["PLAN_UPDATE", KIND_CODE[input.kind], reads]);
 	const coverage = result ? Object.entries(result.coverage) : [];
 	// A combined result carries its proof sheet for the owner (shown ahead of the update); the root reads the update lines.
@@ -178,6 +195,13 @@ export function planUpdateDelivery(
 							clip(`Conflict (${conflict.kind}) between ${conflict.between.join(" and ")}: ${conflict.detail}`),
 						),
 					`Full result: ${result.artifact}`,
+				]
+			: []),
+		...(step
+			? [
+					clip(`Result: ${describeOutcomeForHandoff(step)}`, 600),
+					...(step.changedFiles.length > 0 ? [clip(`Changed files: ${step.changedFiles.join(", ")}`, 600)] : []),
+					...(step.digestRef ? [`Report: ${step.digestRef}`] : []),
 				]
 			: []),
 		...(sheetFailure ? [sheetFailure] : []),

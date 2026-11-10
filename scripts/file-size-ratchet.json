@@ -44,7 +44,7 @@
 		"packages/coding-agent/src/core/background-tool-task-controller.ts": 1782,
 		"packages/coding-agent/src/core/system-one/controller.ts": 1774,
 		"packages/tui/src/tui.ts": 1728,
-		"packages/coding-agent/src/core/orchestration/task-runtime.ts": 1650,
+		"packages/coding-agent/src/core/orchestration/task-runtime.ts": 1649,
 		"packages/coding-agent/src/core/memory/providers/transcript-recall-processor.ts": 1642,
 		"packages/coding-agent/src/core/collaboration/job-store.ts": 1641,
 		"packages/coding-agent/src/core/tools/goal.ts": 1564,

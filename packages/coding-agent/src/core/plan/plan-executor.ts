@@ -75,7 +75,7 @@ import { planNodeOfTask } from "./plan-reducer.ts";
 import { PlanResultGates } from "./plan-result-gates.ts";
 import { placeHereNodes, resolveSince, verifyWrapNodes, voteCheckNodes } from "./plan-revision.ts";
 import { planUpdateDelivery, planUpdateDeliveryId } from "./plan-update.ts";
-import { activeRootPlan, type PlanView, planNodeBrief, planView } from "./plan-view.ts";
+import { activeRootPlan, type PlanView, planNodeBrief, planNodeOutcome, planView } from "./plan-view.ts";
 
 /** Reconcile passes one drain may run before it yields to the next event. */
 const MAX_DRAIN_PASSES = 16;
@@ -196,6 +196,9 @@ function isJoinResult(value: unknown): value is JoinResult {
 		return false;
 	return isStringArray(value.changedFiles) && isStringArray(value.gaps);
 }
+
+/** The skip-reason prefix of a worker start that threw while it was being made (`worker-start-phases.ts`). */
+const WORKER_START_ERROR = "worker_start_error:";
 
 const STATE_WORDS: Readonly<Record<PlanNodeState, string>> = {
 	planned: "waits for earlier steps",
@@ -957,6 +960,14 @@ export class PlanExecutor implements PlanExecutorPort {
 				return this.holdStep(planId, nodeId, version, `the verifier cannot run: ${refusal.detail}`);
 			if (refusal.detail.startsWith(WORKTREE_UNAVAILABLE))
 				return this.holdStep(planId, nodeId, version, "this step needs its own worktree and none can be made here");
+			// A start that threw is not a wait for room: retrying it changes nothing, so the planner is told what failed.
+			if (refusal.detail.startsWith(WORKER_START_ERROR))
+				return this.holdStep(
+					planId,
+					nodeId,
+					version,
+					`this step could not be started: ${refusal.detail.slice(WORKER_START_ERROR.length)}`,
+				);
 			if (placement.kind !== "remote_machine") return park(refusal.reason, refusal.detail);
 			const machineId = placement.machineId;
 			// A must-pinned step can only be placed on its machine, so only a candidate change can help it: every refusal parks it.
@@ -1047,6 +1058,12 @@ export class PlanExecutor implements PlanExecutorPort {
 			const view = planView(snapshot, intent.planId);
 			if (!view) continue;
 			const result = intent.artifact ? readJoinResult(intent.artifact) : undefined;
+			// A plan that finished on a plain step has no combined result to read: its update carries that step's outcome.
+			const plan = snapshot.plans[intent.planId];
+			const stepOutcome =
+				!result && plan && intent.input.kind === "settled" && intent.input.nodeId !== undefined
+					? planNodeOutcome(snapshot, plan, intent.input.nodeId)
+					: undefined;
 			const brief = planNodeBrief(snapshot, intent.planId, intent.input.nodeId);
 			// The join's recorded level: the highest its steps settled at, read from the durable record, not the artifact.
 			const joinStakes =
@@ -1058,6 +1075,7 @@ export class PlanExecutor implements PlanExecutorPort {
 				{
 					...intent.input,
 					...(result ? { result } : {}),
+					...(stepOutcome ? { stepOutcome } : {}),
 					...(brief ? { brief } : {}),
 					...(joinStakes ? { stakes: joinStakes } : {}),
 				},

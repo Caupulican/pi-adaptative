@@ -9,7 +9,8 @@
  *    running -> cancel it;
  * 3. a released node whose task recorded an outcome newer than its hold -> the reconciled nextAction table:
  *    accept settles; verify_in_lane, host_check, rerun_uncovered, retry_after and wait_capacity wait (the worker
- *    ladder acts); verify_independently wraps a verify step (host revision); replace restates a remotely released step
+ *    ladder acts); verify_independently settles a step a verify step already checks and wraps any other in a verify
+ *    step (host revision); replace restates a remotely released step
  *    on this machine (host revision), or holds it for the owner when its must-pin names that machine;
  *    fix_request and abandon(dependency) hold for a revise; ask_owner holds on the owner; ask_root holds on
  *    the root; abandon(cancelled/superseded) settles without acceptance. A reduce or verify worker's outcome settles
@@ -143,8 +144,11 @@ function isWorkerJoin(node: PlanNodeSpec): boolean {
 	return node.kind === "reduce" || node.kind === "verify";
 }
 
-/** Rule 3: the action a released node's newest outcome asks of the plan, or undefined to wait. */
-function outcomeAction(ref: NodeRef, node: PlanNodeSpec, outcome: Outcome): PlanAction | undefined {
+/**
+ * Rule 3: the action a released node's newest outcome asks of the plan, or undefined to wait. `checked` says a verify step
+ * of the plan already checks this node.
+ */
+function outcomeAction(ref: NodeRef, node: PlanNodeSpec, outcome: Outcome, checked: boolean): PlanAction | undefined {
 	const hold = (reason: PlanHoldReason, detail: string): PlanAction => ({
 		...ref,
 		kind: "hold",
@@ -161,7 +165,8 @@ function outcomeAction(ref: NodeRef, node: PlanNodeSpec, outcome: Outcome): Plan
 		case "accept":
 			return settle;
 		case "verify_independently":
-			return isWorkerJoin(node)
+			// A step a verify step already checks settles as it is and that review decides; any other step gets its check added.
+			return isWorkerJoin(node) || checked
 				? settle
 				: { ...ref, kind: "verify_wrap", requirementIds: next.requirementIds, outcome, settled: false };
 		case "replace":
@@ -270,7 +275,7 @@ function nodeActions(
 				return;
 			}
 			if (outcome && outcome.generation > (runtime.held?.generation ?? 0)) {
-				const action = outcomeAction(ref, node, outcome);
+				const action = outcomeAction(ref, node, outcome, wrapped.has(node.id));
 				if (action) actions.push(action);
 			} else if (
 				!outcome &&
@@ -314,7 +319,7 @@ function openPlanUpdates(plan: PlanRuntimeState, record: PlanRecord, goal: GoalS
 		if (runtime?.join && node.id !== record.final) {
 			updates.push({
 				planId: record.planId,
-				input: { kind: "join", nodeId: node.id, sequence: runtime.join.n },
+				input: { kind: "join", nodeId: node.id, sequence: runtime.join.n, since: runtime.since },
 				artifact: runtime.join.artifact,
 			});
 		}
@@ -326,6 +331,7 @@ function openPlanUpdates(plan: PlanRuntimeState, record: PlanRecord, goal: GoalS
 					nodeId: node.id,
 					detail: runtime.held.detail,
 					sequence: runtime.held.generation,
+					since: runtime.since,
 				},
 			});
 		}

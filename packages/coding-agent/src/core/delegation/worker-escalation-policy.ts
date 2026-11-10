@@ -70,6 +70,8 @@ export interface LadderFacts {
 	readonly rungRefusal?: string;
 	/** A review run whose verdict rejected the result: the reason codes it named, bounded. Set only for such a run. */
 	readonly reviewRejection?: string;
+	/** The attempt runs a work step of an open plan: the plan places the independent check an unverified result needs. */
+	readonly planChecksResult?: boolean;
 	/** Q1/Q1s for a worker-stated blocker: only the owner can supply what is missing. */
 	readonly ownerOnly?: JudgmentPair;
 }
@@ -218,12 +220,19 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 		return askOwner("E7b", "the placement could not be reached and no other placement can take the work");
 	if (blocker === "dependency_failed") return done("E8", { kind: "abandon", reason: "dependency" });
 	if (blocker === "verification_pending") return done("E9", { kind: "verify_in_lane" });
-	// No executor places an independent verifier from the ladder yet, so the unverified result goes to the owner.
-	if (blocker === "unverified_result")
+	// A plan checks its own steps: the verify step over the step reviews the result, or the plan adds one. Anywhere else no
+	// executor places an independent verifier, so the unverified result goes to the owner.
+	if (blocker === "unverified_result") {
+		if (facts.planChecksResult)
+			return done("E9b", {
+				kind: "verify_independently",
+				requirementIds: coverage.uncovered.map((entry) => entry.id),
+			});
 		return askOwner(
 			"E9b",
 			"the result is unverified and no independent verifier is placed automatically; verify it or accept it",
 		);
+	}
 	if (blocker === "budget_exhausted")
 		return askOwner("E10", "the task's budget is spent; raise it or accept the partial result");
 	if (coverage.uncovered.some((entry) => entry.reason === "inconclusive")) skip("E11", "inconclusive_uncovered");

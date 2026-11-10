@@ -15,7 +15,7 @@ import type {
 	PlanNodeSettledPayload,
 } from "../plan/plan-codec.ts";
 import type { PlanRecord } from "../plan/plan-graph.ts";
-import type { PlanEventType } from "../plan/plan-reducer.ts";
+import { type PlanEventType, planStepEventKey } from "../plan/plan-reducer.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { AtomicFileLockOptions } from "../util/atomic-file.ts";
 import { deepFreeze } from "../util/deep-freeze.ts";
@@ -980,25 +980,24 @@ export class DurableTaskRuntime {
 	}
 
 	settlePlanNode(payload: PlanNodeSettledPayload): void {
-		const key = `plan:${payload.planId}:${payload.nodeId}:settled:${payload.generation}`;
-		this.commitPlanEvent("plan.node_settled", payload.planId, key, payload);
+		this.commitStepEvent("plan.node_settled", payload, `settled:${payload.generation}`);
 	}
 
 	holdPlanNode(payload: PlanNodeHeldPayload): void {
-		const key = `plan:${payload.planId}:${payload.nodeId}:held:${payload.reason}:${payload.generation}`;
-		this.commitPlanEvent("plan.node_held", payload.planId, key, payload);
+		this.commitStepEvent("plan.node_held", payload, `held:${payload.reason}:${payload.generation}`);
 	}
 
-	/** Settles a join; its sequence number is the join's next settlement, so a re-settled join after a revise is new. */
+	/** Settles a join; its sequence number is the join's next settlement under the step's spec version. */
 	settlePlanJoin(payload: PlanJoinSettledPayload): void {
 		this.refresh();
 		const n = (this.state.plans[payload.planId]?.nodes[payload.nodeId]?.join?.n ?? 0) + 1;
-		this.commitPlanEvent(
-			"plan.join_settled",
-			payload.planId,
-			`plan:${payload.planId}:${payload.nodeId}:join:${n}`,
-			payload,
-		);
+		this.commitStepEvent("plan.join_settled", payload, `join:${n}`);
+	}
+
+	/** Commits a step's settlement, hold or join under its spec version (`planStepEventKey`). */
+	private commitStepEvent(type: PlanEventType, payload: { planId: string; nodeId: string }, event: string): void {
+		this.refresh();
+		this.commitPlanEvent(type, payload.planId, planStepEventKey(this.state.plans, payload, event), payload);
 	}
 
 	closePlan(payload: PlanClosedPayload): void {
