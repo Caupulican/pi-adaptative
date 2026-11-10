@@ -269,6 +269,8 @@ export interface KnowledgeStorePort {
 	/** Live records in scope whose identity starts with `prefix` (at least 8 hex), at most two so ambiguity shows. */
 	resolve(scope: KnowledgeScope, prefix: string): KnowledgeRecord[];
 	history(id: string, beforeRevision?: number): KnowledgeRecord[];
+	/** Distinct original owner sources behind a live record, counted across all its revisions. */
+	sourceCount(id: string): number;
 	isSourceForgotten(id: string, sessionId: string, sourceId: string): boolean;
 	put(
 		record: KnowledgeRecord,

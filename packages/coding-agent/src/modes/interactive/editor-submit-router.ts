@@ -25,6 +25,7 @@ import { handleQuizCommand } from "./quiz-commands.ts";
 import * as reportCommands from "./report-commands.ts";
 import * as sessionFlows from "./session-flow-commands.ts";
 import type { SlashCommandController, SlashCommandHost } from "./slash-command-controller.ts";
+import { handleTasteCommand } from "./taste-commands.ts";
 import { handleVerificationCommand } from "./verification-commands.ts";
 import { handleVerifyCommand } from "./verify-commands.ts";
 
@@ -147,6 +148,18 @@ export class EditorSubmitRouter {
 			this.host.editor.setText("");
 			await handleKnowledgeCommand(
 				{ session: this.host.session, ...this.slashCommands.operatorCommandOutput() },
+				text,
+			);
+			return;
+		}
+		if (text === "/taste" || text.startsWith("/taste ")) {
+			this.host.editor.setText("");
+			await handleTasteCommand(
+				{
+					session: this.host.session,
+					cwd: this.host.sessionManager.getCwd(),
+					...this.slashCommands.operatorCommandOutput(),
+				},
 				text,
 			);
 			return;

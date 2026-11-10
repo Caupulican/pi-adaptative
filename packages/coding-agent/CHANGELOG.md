@@ -4,6 +4,12 @@
 
 - Taste: a seventh kind of owner knowledge. The harness learns how the owner wants code and other work products written (naming, structure, idioms, tools and libraries to prefer or avoid, test and review habits, commit and documentation style) from the owner's own messages, under the same rules as every other kind: original owner evidence only, the admission floor, independent observations and a calibrated judge for an inferred pattern, corrections, forgetting, project or global scope. Taste is standing guidance: it enters every root request's knowledge view beside profile, behavior and procedure, and `/knowledge list taste` lists it. How the assistant talks or works with the owner stays `behavior`; an ordered way of doing a recurring task stays `procedure`.
 
+- `/taste`: the owner's learned taste as Markdown, without a model turn. It lists this project's taste and global taste, grouped by subject, each fact with whether it was stated or inferred, how many distinct original owner messages support it across its revisions, the date of the last evidence and its short id; more than a page continues with `/taste <id>`. `/taste export [path]` writes the same view to a file (default `.pi/taste.md`; a relative path stays inside the working directory) under a first line that says it is a generated view and that edits are made with `/knowledge correct` and `/knowledge forget`.
+
+### Changed
+
+- A knowledge store that holds records of a kind this version does not know (written by a newer version) no longer breaks reads: lists and searches leave such records out and the harness log counts them once, and a direct read of one refuses with a message that names the kind. Versions released before this one still fail on such a record.
+
 ### Fixed
 
 - A run that waits on piped standard input says so. `pi -p` reads piped input to its end; a launcher that left standard input open and silent (a socket or pipe that never closes) made the run wait forever without a word. After 3 seconds with no byte it now writes one line to standard error, once, saying that it waits and how to stop that (close the input, or redirect it from `/dev/null`). Reading itself is unchanged, and standard output stays clean in every output mode.

@@ -31,7 +31,7 @@ const CITATION_PAGE = 4;
 const SHORT_ID = 12;
 
 /** One display line: redacted before it is cut, so a cut never leaves part of a secret behind. */
-function bounded(text: string, max: number): string {
+export function bounded(text: string, max: number): string {
 	const line = redactKnownSecrets(text).replace(/\s+/g, " ").trim();
 	return line.length <= max ? line : `${line.slice(0, max - 1)}…`;
 }

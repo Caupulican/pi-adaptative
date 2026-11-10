@@ -6,6 +6,7 @@ import {
 } from "../../../../src/core/learning/owner-evidence-ledger.ts";
 import type { KnowledgeCollectionOutcome } from "../../../../src/core/memory/knowledge-collector.ts";
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
+import { handleTasteCommand } from "../../../../src/modes/interactive/taste-commands.ts";
 import { text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, icmWaitForChatIdle, knowledgeJudgment } from "./shared.ts";
@@ -139,6 +140,23 @@ export async function runJourney1TastePhase(world: HarnessWorld): Promise<void> 
 		expect(store.list({ project: "", role: "", audience: "owner" })).toMatchObject([
 			{ kind: "taste", text: TASTE_TEXT, basis: "explicit" },
 		]);
+
+		// `/taste` reads the committed record without a model turn: its Markdown names the fact, its basis and its sources.
+		const shown: string[] = [];
+		await handleTasteCommand(
+			{
+				session: root.session,
+				cwd: agentDir,
+				showStatus: (message) => shown.push(message),
+				showError: (message) => shown.push(message),
+				showText: (block) => shown.push(block),
+			},
+			"/taste",
+		);
+		expect(shown).toHaveLength(1);
+		expect(shown[0]).toContain(TASTE_TEXT);
+		expect(shown[0]).toContain("stated");
+		expect(shown[0]).toContain("1 source");
 
 		world.systemOne.enterPhase("taste-projection-owner", {
 			...ICM_INTAKE_JUDGMENTS,

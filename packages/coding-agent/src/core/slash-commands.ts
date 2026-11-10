@@ -51,6 +51,10 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		description:
 			"Owner knowledge: /knowledge list [kind|global|project] · show <id> · history <id> · correct <id> <value> · forget <id>",
 	},
+	{
+		name: "taste",
+		description: "How you want work written, as learned: /taste [<after-id>] · /taste export [path]",
+	},
 	{ name: "edge", description: "The edge: /edge [list] · allow <class> [note] · revoke <class>" },
 	{
 		name: "load",

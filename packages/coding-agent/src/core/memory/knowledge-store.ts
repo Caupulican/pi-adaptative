@@ -6,6 +6,7 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import { knowledgeDatabaseFile } from "../agent-paths.ts";
 import { constructSqliteDatabase, type SqliteDatabase, withSqliteTransaction } from "../context/sqlite-database.ts";
 import type { TimerPort } from "../util/timer-port.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import { KNOWLEDGE_COLLECTION_SCHEMA, KnowledgeCollectionJournal } from "./knowledge-collection-journal.ts";
 import {
 	isKnowledgeCitation,
@@ -69,9 +70,21 @@ function requireVersion(value: unknown): number {
 	return value;
 }
 
+const KNOWN_KINDS_SQL = KNOWLEDGE_KINDS.map((kind) => `'${kind}'`).join(",");
+
+/**
+ * Refuses a row of a kind a newer version added, by name, so a direct read says why instead of reporting corruption.
+ * Reads that page over many rows never reach it: they leave such rows out in the query.
+ */
 function decode(row: Record<string, unknown>): KnowledgeRecord {
 	if (typeof row.body !== "string" || row.body.length > 64_000) throw new Error("Invalid knowledge row");
-	const record = parseKnowledgeRecord(JSON.parse(row.body));
+	const body: unknown = JSON.parse(row.body);
+	const kind = isPlainRecord(body) ? body.kind : undefined;
+	if (typeof kind === "string" && !KNOWLEDGE_KINDS.some((known) => known === kind))
+		throw new Error(
+			`Knowledge record ${String(row.id).slice(0, 8)} is of kind "${kind.slice(0, 40)}", which this version does not know. Use a newer version to read it.`,
+		);
+	const record = parseKnowledgeRecord(body);
 	if (row.id !== record.id || row.revision !== record.revision) throw new Error("Knowledge row identity changed");
 	return record;
 }
@@ -81,6 +94,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 	readonly collection: KnowledgeCollectionJournal;
 	readonly work: KnowledgeWorkJournal;
 	private closed = false;
+	private unknownKindsChecked = false;
 
 	private constructor(
 		db: SqliteDatabase,
@@ -363,7 +377,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 			.prepare(`
 			SELECT e.id,e.revision,e.body FROM entries e ${search}
 			e.audience=? AND e.project IN('',?) AND e.role IN('',?) AND e.body IS NOT NULL
-			AND e.id>? ${options.kind === undefined ? "" : "AND e.kind=?"}
+			AND e.kind IN (${KNOWN_KINDS_SQL}) AND e.id>? ${options.kind === undefined ? "" : "AND e.kind=?"}
 			${options.reach === undefined ? "" : options.reach === "global" ? "AND e.project=''" : "AND e.project<>''"}
 			GROUP BY e.id ${words.length ? "HAVING count(DISTINCT t.term)=?" : ""}
 			ORDER BY e.id LIMIT ?
@@ -379,6 +393,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 				limit,
 			)
 			.map(decode);
+		this.reportUnknownKinds(scope);
 		if (
 			records.some(
 				(record) =>
@@ -390,6 +405,27 @@ export class KnowledgeStore implements KnowledgeStorePort {
 			throw new Error("Knowledge scope index does not match its records");
 		}
 		return records;
+	}
+
+	/**
+	 * Rows of kinds this version does not know are left out of lists and searches. The first list of an open store counts
+	 * them for the log; it is a diagnostic, so later lists do not pay for the count again.
+	 */
+	private reportUnknownKinds(scope: KnowledgeScope): void {
+		if (this.unknownKindsChecked) return;
+		this.unknownKindsChecked = true;
+		const count = this.db
+			.prepare(`SELECT count(*) AS n FROM entries WHERE body IS NOT NULL AND audience=? AND project IN('',?)
+			AND role IN('',?) AND kind NOT IN (${KNOWN_KINDS_SQL})`)
+			.get(scope.audience, scope.project, scope.role)?.n;
+		if (typeof count !== "number" || count === 0) return;
+		harnessLog.warn("memory", "knowledge records of an unknown kind are skipped in lists and searches", { count });
+	}
+
+	/** Distinct original owner sources that support a live record across all its revisions. */
+	sourceCount(id: string): number {
+		requireId(id);
+		return requireVersion(this.db.prepare("SELECT count(*) AS n FROM sources WHERE id=?").get(id)?.n);
 	}
 
 	resolve(scope: KnowledgeScope, prefix: string): KnowledgeRecord[] {

@@ -152,7 +152,7 @@ export type KnowledgeOwnerCommand =
 /** The owner's `/knowledge` view and exact-record commands, in the owner's own scope. */
 export interface KnowledgeOwnerControls {
 	readonly scope: KnowledgeScope;
-	readonly store: Pick<KnowledgeStorePort, "revision" | "get" | "list" | "resolve" | "history">;
+	readonly store: Pick<KnowledgeStorePort, "revision" | "get" | "list" | "resolve" | "history" | "sourceCount">;
 	/** Admits after the owner confirmed; the admission is created here so no dialog holds its fences open. */
 	command(input: KnowledgeOwnerCommand, signal?: AbortSignal): KnowledgeAdmissionOutcome;
 }

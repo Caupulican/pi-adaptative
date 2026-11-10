@@ -58,6 +58,15 @@ Forgetting is conservative about existing work identities: a retired result is n
 /knowledge forget <id>
 ```
 
+`/taste` shows what the harness has learned about how the owner wants work written, also without a model turn:
+
+```
+/taste [<after-id>]
+/taste export [path]
+```
+
+`/taste` prints Markdown: one heading for this project's taste and one for global taste (a heading with no facts is left out), the facts grouped by subject. Each fact shows its basis (`stated` or `inferred`), the number of distinct original owner sources behind it across all its revisions, the date of its last evidence and its short id. More than a page continues with `/taste <after-id>`. `/taste export` writes the same Markdown to `.pi/taste.md` in the working directory, or to the given path, with a first line saying it is a generated view. A relative path must stay inside the working directory. Edit facts with `/knowledge correct` and `/knowledge forget`.
+
 `list`, `show` and `history` page current records, citations and revisions with their provenance: owner message or owner command, evidence dates, revision, scope and validity. An ID may be a unique prefix of at least eight characters. `correct` replaces the value verbatim and keeps the fact's identity, scope and validity; the old value stays in history. `forget` removes the value, its history and its names and leaves only the identity digest as an evidence barrier. Both ask for confirmation on the owner's screen first and are refused without an owner UI. They pass through the same admission and store fences as the `knowledge` tool (expected revision, forgotten sources, newer-evidence rules, replay receipts) and run no judge and spend nothing, with or without System One. The typed command, its session and its time are the change's evidence; they are never added to the owner-evidence ledger, so model and collector proposals still cite only original owner messages.
 
 ## What history recall covers
