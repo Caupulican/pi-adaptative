@@ -366,6 +366,16 @@ export interface WorkerDelegationRequest {
 }
 
 /**
+ * Whether the runtime, not the run in progress, starts this root worker: a saved intent's occurrence, a verifier and a plan
+ * step. The run in progress did not ask for such a start, so its origin is not the worker's. A plan is stated only in the
+ * owner's own turn (the third-party gate refuses every `plan` action), and its steps are released whenever they become
+ * ready: a step released while a third party's run happens to be in progress is still the owner's.
+ */
+export function carriesOwnOrigin(request: WorkerDelegationRequest): boolean {
+	return Boolean(request.savedIntent || request.verificationOfTaskId || request.planStep);
+}
+
+/**
  * Whether a request always starts its own worker and is never matched to a specialist's standing conversation. A verifier or a
  * review run keeps its independence. A child belongs to its parent agent. A third party's words never enter a conversation that
  * later owner work would read. A rung is a new attempt of its own source task. A plan step runs from its own self-contained

@@ -20,6 +20,7 @@
 - Plan results name plan steps: a conflict between two steps' findings, a step held because an earlier result changes its work, and the open items a later step is told about named the workers' internal lane ids (`worker-5`) instead of the step ids the plan and its planner use.
 - A `reduce` step pairs findings by the place they name. Two findings are compared when their own words name the same file (and line); every finding of one step used to be paired with every finding of the other, because each carried the same evidence source id as its only citation, so the bounded number of comparisons was spent on unrelated findings.
 - A conflict the host reads between two steps' findings now reaches the step that combines them (its task lists the conflicting findings, as it already listed the unsettled ones) and the planner (the plan update names up to four conflicts and is marked `READ_ALL`). It used to be written only to the result file and the owner's proof sheet.
+- A plan step released while a third party's turn is in progress (a peer's message, a channel message, a routine's delivery) starts as the owner's work. It used to take that turn's origin, and with it the reduced capabilities of a third party's worker, depending on which turn happened to be running when the plan released it. A third party's turn still cannot start, revise or cancel a plan.
 
 ### Removed
 

@@ -223,6 +223,7 @@ import {
 	workerModelMoveReason,
 } from "./worker-credential-health.ts";
 import {
+	carriesOwnOrigin,
 	parseWorkerDelegationAuthorityRequest,
 	parseWorkerParallelWorkIntent,
 	startsOwnWorker,
@@ -4668,10 +4669,9 @@ export class WorkerDelegationController {
 				assertReceiptAdmission,
 				request.receiptOriginAnchor,
 			);
-			// A root start carries the run it is made in: a run with a third party's words taints the worker it starts. A
-			// saved intent's occurrence and a verifier are the runtime's starts and carry their own origin.
-			const runOrigin =
-				request.savedIntent || request.verificationOfTaskId ? undefined : this.deps.getRunTurnOrigin?.();
+			// A root start carries the run it is made in: a run with a third party's words taints the worker it starts. The
+			// runtime's own starts (`carriesOwnOrigin`) carry theirs.
+			const runOrigin = carriesOwnOrigin(request) ? undefined : this.deps.getRunTurnOrigin?.();
 			if (runOrigin?.thirdParty) capturedRequest.turnOrigin ??= runOrigin;
 		}
 		return capturedRequest;
