@@ -25,6 +25,7 @@ import {
 	workerDispositionGuidance,
 	workerLaneStateCodes,
 } from "./delegation/worker-disposition.ts";
+import { FANOUT_LINE_MAX_CHARS } from "./delegation/worker-fanout.ts";
 import { selectedWorkerAttempt } from "./delegation/worker-lane-projection.ts";
 import {
 	type WorkerTerminalHandoffRecord,
@@ -260,7 +261,8 @@ export function buildForegroundWorkerTerminalHandoffContent(
 				lines.push(
 					`  Diagnostic (untrusted):\n${wrapUntrustedText(record.reasonDetail, `worker-diagnostic:${record.laneId}`)}`,
 				);
-			if (record.fanout) lines.push(`  Fan-out: ${record.fanout.replace(/[\r\n]+/g, " ").slice(0, 600)}`);
+			if (record.fanout)
+				lines.push(`  Fan-out: ${record.fanout.replace(/[\r\n]+/g, " ").slice(0, FANOUT_LINE_MAX_CHARS)}`);
 			if (record.outputArtifact) {
 				lines.push(
 					`  Full Output: ${record.outputArtifact.uri}${record.outputArtifact.sizeBytes === undefined ? "" : ` (${record.outputArtifact.sizeBytes} bytes)`}`,

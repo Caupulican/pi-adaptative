@@ -261,7 +261,41 @@ function describeMember(member: FanoutMemberReport): string {
 	return `${member.memberId} ${member.state.replace("_", " ")}${reason}${lane}`;
 }
 
-/** One bounded line: group, outcome, and every member that is not an accepted result. */
+/**
+ * The longest group line. The handoff that carries the line cuts it at this length, so the line is built to fit it: the
+ * outcome and its findings are always whole, and the members that are not accepted results are named for as long as
+ * there is room, with a count of the rest.
+ */
+export const FANOUT_LINE_MAX_CHARS = 600;
+
+/** The slices a coverage gap names before it counts the rest. */
+const FANOUT_GAP_IDS = 8;
+
+function countOfRest(count: number): string {
+	return `+${count} more`;
+}
+
+/** The finding of a partition or a race that settled without covering its task. */
+function coverageGap(group: FanoutGroupReport, open: readonly FanoutMemberReport[]): string {
+	if (!group.settled || group.covered) return "";
+	if (group.kind !== "partition") return " COVERAGE GAP: no candidate produced an accepted result.";
+	const named = open.slice(0, FANOUT_GAP_IDS).map((member) => member.memberId);
+	const rest = open.length - named.length;
+	return ` COVERAGE GAP: no accepted result for ${[...named, ...(rest > 0 ? [countOfRest(rest)] : [])].join(", ")}.`;
+}
+
+/** The candidates a win could not stop: the first in full, with why; the others by name. */
+function cancelFailures(group: FanoutGroupReport): string {
+	const [first, ...others] = group.cancelFailures ?? [];
+	if (!first) return "";
+	const also =
+		others.length > 0
+			? ` Also still running: ${others.map((failure) => `${failure.memberId} (lane ${failure.laneId})`).join(", ")}.`
+			: "";
+	return ` CANCEL FAILED: candidate ${first.memberId} (lane ${first.laneId}) is still running after the win; the host ${first.attempts >= 2 ? "retried and could not stop it" : "retries once on the next event"} (${first.reason.replace(/[\r\n]+/g, " ").slice(0, 120)}).${also}`;
+}
+
+/** One bounded line: group, outcome, the members that are not an accepted result, and the group's findings. */
 export function formatFanoutGroupLine(group: FanoutGroupReport): string {
 	const accepted = group.members.filter((member) => member.state === "accepted").length;
 	const open = group.members.filter((member) => member.state !== "accepted");
@@ -271,18 +305,21 @@ export function formatFanoutGroupLine(group: FanoutGroupReport): string {
 			: group.winner
 				? `fan-out ${group.groupId} race: ${group.winner.memberId} won (lane ${group.winner.laneId})`
 				: `fan-out ${group.groupId} race: no candidate accepted yet`;
-	const tail = open.length > 0 ? `; ${open.map(describeMember).join("; ")}` : "";
-	const stuck = (group.cancelFailures ?? []).map(
-		(failure) =>
-			` CANCEL FAILED: candidate ${failure.memberId} (lane ${failure.laneId}) is still running after the win; the host ${failure.attempts >= 2 ? "retried and could not stop it" : "retries once on the next event"} (${failure.reason.replace(/[\r\n]+/g, " ").slice(0, 120)}).`,
-	);
-	const gap =
-		group.settled && !group.covered
-			? group.kind === "partition"
-				? ` COVERAGE GAP: no accepted result for ${open.map((member) => member.memberId).join(", ")}.`
-				: " COVERAGE GAP: no candidate produced an accepted result."
-			: "";
-	return `${head}${tail}${group.settled ? "" : " (still running)"}${gap}${stuck.join("")}`;
+	const findings = `${group.settled ? "" : " (still running)"}${coverageGap(group, open)}${cancelFailures(group)}`;
+	// Members are named while the whole line still fits with a count of the ones left unnamed.
+	const room = FANOUT_LINE_MAX_CHARS - head.length - findings.length;
+	let tail = "";
+	for (const [index, member] of open.entries()) {
+		const named = `; ${describeMember(member)}`;
+		const after = open.length - index - 1;
+		const reserve = after > 0 ? `; ${countOfRest(after)}`.length : 0;
+		if (tail.length + named.length + reserve > room) {
+			tail += `; ${countOfRest(open.length - index)}`;
+			break;
+		}
+		tail += named;
+	}
+	return `${head}${tail}${findings}`;
 }
 
 /** The group line for one terminal lane's handoff, or undefined when the lane is not a group member. */
