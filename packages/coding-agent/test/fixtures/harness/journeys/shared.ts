@@ -1645,6 +1645,14 @@ export function icmLatestResult(request: ScriptedRequest, toolName: string): { i
 }
 
 /**
+ * A tool's own output in a stored result: the text inside the fence the harness puts around tool output, without the
+ * rule blocks appended after it. A text with no fence is returned as it is.
+ */
+export function fencedToolOutput(text: string): string {
+	return /^<untrusted_content[^>]*>\n([\s\S]*?)\n<\/untrusted_content>/.exec(text)?.[1] ?? text;
+}
+
+/**
  * The diagnostic a refused call's `[harness]` failure record carries: the record is JSON, so a Windows path in the
  * refusal reads with its separators escaped in the raw text and is compared only after the record is parsed.
  */

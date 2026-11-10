@@ -3,6 +3,7 @@ import { expect } from "vitest";
 import { DEFAULT_ACTIVE_TOOL_NAMES } from "../../../../src/core/default-tool-surface.ts";
 import { runJourney2BackgroundAndStallPhase } from "./journey-2-background-and-stall.ts";
 import { runJourney2ContinuousChatPhase } from "./journey-2-continuous-chat.ts";
+import { runJourney2FanoutRacePhase, runJourney2FanoutSlicesPhase } from "./journey-2-fanout.ts";
 import { verifyGoalReplacementDuringRoute } from "./journey-2-goal-replacement.ts";
 import { runJourney2OrchestrationPhase } from "./journey-2-orchestration.ts";
 import { runJourney2QueuedRecoveryPhase } from "./journey-2-queued-recovery.ts";
@@ -91,6 +92,8 @@ export async function runJourney2(): Promise<void> {
 				collectionWarnings(),
 				"the lease takeover and recovered in-memory roots each refuse automatic collection once",
 			).toHaveLength(2);
+			await runJourney2FanoutSlicesPhase(world);
+			await runJourney2FanoutRacePhase(world);
 		},
 	);
 }
