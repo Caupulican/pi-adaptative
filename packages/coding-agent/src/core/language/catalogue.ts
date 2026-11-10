@@ -22,6 +22,8 @@ import { INSPECTOR } from "./text-en/inspector.ts";
 import { INTERACTIVE } from "./text-en/interactive.ts";
 import { KEYS } from "./text-en/keys.ts";
 import { KNOWLEDGE_COMMANDS } from "./text-en/knowledge-commands.ts";
+import { LABELS } from "./text-en/labels.ts";
+import { LIBRARY } from "./text-en/library.ts";
 import { LOCAL_MODELS } from "./text-en/local-models.ts";
 import { MACHINES } from "./text-en/machines.ts";
 import { NOTICES } from "./text-en/notices.ts";
@@ -53,6 +55,8 @@ import { INSPECTOR as INSPECTOR_PT_BR } from "./text-pt-br/inspector.ts";
 import { INTERACTIVE as INTERACTIVE_PT_BR } from "./text-pt-br/interactive.ts";
 import { KEYS as KEYS_PT_BR } from "./text-pt-br/keys.ts";
 import { KNOWLEDGE_COMMANDS as KNOWLEDGE_COMMANDS_PT_BR } from "./text-pt-br/knowledge-commands.ts";
+import { LABELS as LABELS_PT_BR } from "./text-pt-br/labels.ts";
+import { LIBRARY as LIBRARY_PT_BR } from "./text-pt-br/library.ts";
 import { LOCAL_MODELS as LOCAL_MODELS_PT_BR } from "./text-pt-br/local-models.ts";
 import { MACHINES as MACHINES_PT_BR } from "./text-pt-br/machines.ts";
 import { NOTICES as NOTICES_PT_BR } from "./text-pt-br/notices.ts";
@@ -87,6 +91,8 @@ const AREAS = {
 	interactive: [INTERACTIVE, INTERACTIVE_PT_BR],
 	keys: [KEYS, KEYS_PT_BR],
 	knowledgeCommands: [KNOWLEDGE_COMMANDS, KNOWLEDGE_COMMANDS_PT_BR],
+	labels: [LABELS, LABELS_PT_BR],
+	library: [LIBRARY, LIBRARY_PT_BR],
 	localModels: [LOCAL_MODELS, LOCAL_MODELS_PT_BR],
 	machines: [MACHINES, MACHINES_PT_BR],
 	notices: [NOTICES, NOTICES_PT_BR],

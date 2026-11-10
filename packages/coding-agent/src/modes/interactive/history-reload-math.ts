@@ -8,6 +8,7 @@
  */
 
 import type { Message } from "@caupulican/pi-ai";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
 
 export const TUI_HISTORY_RELOAD_MAX_LINES = 1000;
@@ -81,12 +82,12 @@ export function trimTextToTuiHistoryTail(text: string, maxEstimatedLines: number
 	const lines = text.split(/\r\n|\r|\n/);
 	if (lines.length > maxLines) {
 		const omitted = lines.length - maxLines;
-		return `[Earlier ${omitted} line${omitted === 1 ? "" : "s"} omitted from TUI reload history; full session remains available to the model.]\n${lines.slice(-maxLines).join("\n")}`;
+		return `${interfaceText().panes.history.omittedLines(omitted)}\n${lines.slice(-maxLines).join("\n")}`;
 	}
 	const maxChars = Math.max(TUI_HISTORY_RELOAD_WRAP_WIDTH, maxLines * TUI_HISTORY_RELOAD_WRAP_WIDTH);
 	if (text.length > maxChars) {
 		const omitted = text.length - maxChars;
-		return `[Earlier ${omitted} character${omitted === 1 ? "" : "s"} omitted from TUI reload history; full session remains available to the model.]\n${text.slice(-maxChars)}`;
+		return `${interfaceText().panes.history.omittedCharacters(omitted)}\n${text.slice(-maxChars)}`;
 	}
 	return text;
 }

@@ -28,6 +28,49 @@ export const GRAPH = {
 	peerFindings: (count: number) => `${count} peer finding${count === 1 ? "" : "s"}`,
 	unsure: (count: number) => `${count} unsure`,
 	noRunYet: "no run yet · the graph composes when work starts",
+	/** The idle root lane's compaction preparation, and how the lane resumed instead. */
+	idle: {
+		armed: (preparesIn: string, expectedUsd: string) => `idle · prepare in ${preparesIn} · ~$${expectedUsd} expected`,
+		preparing: (elapsed: string) => `idle · preparing a summary ${elapsed}`,
+		prepared: "idle · summary prepared",
+		resumedFresh: "resumed · fresh",
+		resumedSaved: (savedUsd: string) => `resumed · fresh · saved ~$${savedUsd}`,
+		resumedWarm: "resumed · warm",
+	},
+	/** Why a queued lane waits, by the scheduler's reason code. */
+	waitReason: {
+		capacity: "waiting for a free worker slot",
+		dependencies: "waiting for work it depends on",
+		objective: "waiting for the objective to be ready",
+		write_reservation: "waiting for files another worker is writing",
+		foreground: "waiting for your current turn to finish",
+		runtime_generation: "waiting for the runtime to reload",
+		preflight: "checking before it starts",
+		unspecified: "waiting to start",
+	},
+	/** What System One is doing with control right now, in two words. */
+	doing: {
+		judging: (label: string) => `judging ${label}`,
+		decidesNext: "decides next",
+		standingBy: "standing by",
+	},
+	/** The root's own task while it holds an open action. */
+	thinking: "thinking",
+	/** Who chose a lane's model, beside the model it chose. */
+	route: {
+		contract: "contract",
+		inherited: "inherited",
+		modelPin: (source: string | undefined) => (source ? `model pin (${source})` : "model pin"),
+		profile: (id: string | undefined) => (id ? `profile ${id}` : "profile"),
+		requested: "requested model",
+	},
+	/** One routing row: which model serves whom. */
+	routed: {
+		root: (choice: string, model: string) => `${choice} → ${model} for root`,
+		participant: (choice: string, model: string, label: string) => `${choice} → ${model} for ${label}`,
+	},
+	/** The stage history's store failure, said without the error text, which goes to the log. */
+	stageHistoryLost: "Stage history could not be saved; the rows shown are live.",
 	list: {
 		head: {
 			peerFindings: "PEER FINDINGS",

@@ -5,33 +5,35 @@
 
 import type { PersistentBotTeamStore } from "../../core/delegation/persistent-bot-team-store.ts";
 import { formatDurationIntervalMs } from "../../core/delegation/persistent-bot-team-store.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { RoutineDefinitionView } from "../../core/routines/routine-contract.ts";
 import { describeWatchCondition } from "../../core/routines/watch-contract.ts";
 
 /** A routine's schedule in a few words. */
 export function routineScheduleLabel(routine: RoutineDefinitionView): string {
+	const words = interfaceText().chat.routine;
 	switch (routine.schedule.kind) {
 		case "interval":
-			return `every ${formatDurationIntervalMs(routine.schedule.intervalMs)}`;
+			return words.every(formatDurationIntervalMs(routine.schedule.intervalMs));
 		case "once":
-			return `once at ${new Date(routine.schedule.at).toISOString()}`;
+			return words.onceAt(new Date(routine.schedule.at).toISOString());
 		case "calendar":
-			return `"${routine.schedule.cron}" in ${routine.schedule.timeZone}`;
+			return words.calendar(routine.schedule.cron, routine.schedule.timeZone);
 		case "event": {
 			const schedule = routine.schedule;
 			if (schedule.source === "watch") return describeWatchCondition(schedule.condition);
 			if (schedule.source === "github") {
 				const scope = [
 					schedule.pullRequest === undefined ? undefined : `#${schedule.pullRequest}`,
-					schedule.branch === undefined ? undefined : `branch ${schedule.branch}`,
-					schedule.ownPullRequests ? "own pull requests" : undefined,
+					schedule.branch === undefined ? undefined : words.branch(schedule.branch),
+					schedule.ownPullRequests ? words.ownPullRequests : undefined,
 					schedule.authors === undefined
 						? undefined
-						: `by ${schedule.authors.map((login) => `@${login}`).join(", ")}`,
+						: words.by(schedule.authors.map((login) => `@${login}`).join(", ")),
 				].filter((part) => part !== undefined);
-				return `on GitHub ${schedule.kinds.join("/")}${scope.length ? ` (${scope.join("; ")})` : ""}`;
+				return words.github(schedule.kinds.join("/"), scope.join("; "));
 			}
-			return `on CI ${schedule.conclusions.join("/")}${schedule.workflowPath === undefined ? "" : ` of ${schedule.workflowPath}`}`;
+			return words.ci(schedule.conclusions.join("/"), schedule.workflowPath);
 		}
 	}
 }
@@ -39,7 +41,6 @@ export function routineScheduleLabel(routine: RoutineDefinitionView): string {
 /** The routine a chat command names; a main-session routine is its owner's business, never a chat's. */
 export function chatRoutine(store: PersistentBotTeamStore, routineId: string): RoutineDefinitionView | undefined {
 	const routine = store.getRoutine(routineId);
-	if (routine?.target.kind === "session")
-		throw new Error("Manage a main-session routine through its owner's routine tool.");
+	if (routine?.target.kind === "session") throw new Error(interfaceText().chat.routine.mainSessionOnly);
 	return routine;
 }

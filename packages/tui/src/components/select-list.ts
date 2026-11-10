@@ -1,4 +1,5 @@
 import { getKeybindings } from "../keybindings.ts";
+import { libraryText } from "../library-text.ts";
 import { getCenteredVisibleRange } from "../list-window.ts";
 import type { Component } from "../tui.ts";
 import { truncateToWidth, visibleWidth } from "../utils.ts";
@@ -77,7 +78,7 @@ export class SelectList implements Component {
 
 		// If no items match filter, show message
 		if (this.filteredItems.length === 0) {
-			lines.push(this.theme.noMatch("  No matching commands"));
+			lines.push(truncateToWidth(this.theme.noMatch(`  ${libraryText().noMatchingCommands}`), width));
 			return lines;
 		}
 

@@ -32,12 +32,7 @@ export {
 	type SelectListTheme,
 	type SelectListTruncatePrimaryContext,
 } from "./components/select-list.ts";
-export {
-	type SettingItem,
-	SettingsList,
-	type SettingsListHints,
-	type SettingsListTheme,
-} from "./components/settings-list.ts";
+export { type SettingItem, SettingsList, type SettingsListTheme } from "./components/settings-list.ts";
 export { Spacer } from "./components/spacer.ts";
 export { Text } from "./components/text.ts";
 export { TruncatedText } from "./components/truncated-text.ts";
@@ -81,6 +76,14 @@ export {
 	parseKey,
 	setKittyProtocolActive,
 } from "./keys.ts";
+// The words the library draws itself, which the host sets for the interface language
+export {
+	type AlertKind,
+	ENGLISH_LIBRARY_TEXT,
+	type LibraryText,
+	libraryText,
+	setLibraryText,
+} from "./library-text.ts";
 export { type CenteredVisibleRange, getCenteredVisibleRange } from "./list-window.ts";
 // Mouse input handling
 export {

@@ -42,6 +42,19 @@ export const CHAT = {
 	unknownState: "unknown",
 	teams: (ids: string) => `Teams: ${ids}`,
 	routines: (list: string) => `Routines: ${list}`,
+	/** A routine's schedule in a few words, as a chat row and a status line name it. */
+	routine: {
+		every: (interval: string) => `every ${interval}`,
+		onceAt: (instant: string) => `once at ${instant}`,
+		calendar: (cron: string, timeZone: string) => `"${cron}" in ${timeZone}`,
+		branch: (name: string) => `branch ${name}`,
+		ownPullRequests: "own pull requests",
+		by: (authors: string) => `by ${authors}`,
+		github: (kinds: string, scope: string) => `on GitHub ${kinds}${scope ? ` (${scope})` : ""}`,
+		ci: (conclusions: string, workflowPath: string | undefined) =>
+			`on CI ${conclusions}${workflowPath === undefined ? "" : ` of ${workflowPath}`}`,
+		mainSessionOnly: "Manage a main-session routine through its owner's routine tool.",
+	},
 	memory: (path: string) => `Memory: ${path}`,
 	resumedVia: (reference: string) => `Resumed via ${reference}`,
 	directChatHint: (agentId: string) =>

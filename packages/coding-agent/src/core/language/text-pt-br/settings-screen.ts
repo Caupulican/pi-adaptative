@@ -128,14 +128,10 @@ export const SETTINGS_SCREEN = {
 		},
 	},
 	hints: {
-		searchAndChange: "Digite para buscar · Enter/Espaço para alterar · Esc para cancelar",
-		change: "Enter/Espaço para alterar · Esc para cancelar",
 		select: "Enter para selecionar · Esc para voltar",
 		filterAndSelect: "Digite para filtrar · Enter para selecionar · Esc para voltar",
 		textInput: (emptyHint: string) => `Enter para salvar · Esc para voltar · ${emptyHint}`,
 		emptyClearsSetting: "vazio limpa a configuração",
-		noSettings: "Nenhuma configuração disponível",
-		noMatch: "Nenhuma configuração encontrada",
 	},
 	summaries: {
 		disabled: "desativado",

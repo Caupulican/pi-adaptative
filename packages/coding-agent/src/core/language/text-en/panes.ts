@@ -53,6 +53,24 @@ export const PANES = {
 	/** Why a wheel does nothing in the workbench: the terminal owns the mouse. */
 	terminalMouse: "terminal mouse",
 	pullRequestState: (state: string) => PULL_REQUEST_STATE[state] ?? state,
+	/** What the workbench's workspace pane says about what it observed, and when it could not observe. */
+	workspace: {
+		preview: "Workspace preview",
+		unavailable:
+			"Workspace observation unavailable or over budget; edit/write evidence remains visible. Requires a Git worktree.",
+		limitedPaths: (count: number) => `Observation limited to ${count} dirty paths`,
+		overlapped: "Initial snapshot overlapped execution; displayed workspace changes may predate this task",
+		diffUnavailable: "Changes observed; diff unavailable or exceeds preview budget",
+		failed: "Workspace observation failed; no claim of a clean workspace",
+		cancelled: "Observation cancelled",
+	},
+	/** The marker a reloaded transcript row carries when only its tail fits the reload budget. */
+	history: {
+		omittedLines: (count: number) =>
+			`[Earlier ${count} line${count === 1 ? "" : "s"} omitted from TUI reload history; full session remains available to the model.]`,
+		omittedCharacters: (count: number) =>
+			`[Earlier ${count} character${count === 1 ? "" : "s"} omitted from TUI reload history; full session remains available to the model.]`,
+	},
 	roster: {
 		/** The root chat's name in the roster; the Orchestration panel's business is its model and state. */
 		root: "Brain",

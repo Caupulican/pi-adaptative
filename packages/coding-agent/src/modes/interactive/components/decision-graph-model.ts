@@ -8,6 +8,7 @@
 
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
 import type { IdlePreparationView } from "../../../core/compaction-controller.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
 import type { DecisionStage, DecisionStageLogView } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { FlowEvent, FlowOutcome } from "../../../core/operator-projection/flow-trace.ts";
@@ -185,17 +186,20 @@ export function goalClosure(model: DecisionGraphModel): GoalClosure {
 
 /** The idle preparation in the operator's words: when it prepares and what it expects, or how the lane resumed. */
 export function idlePreparationText(view: IdlePreparationView, nowMs: number): string {
+	const words = interfaceText().graph.idle;
 	switch (view.state) {
 		case "armed":
-			return `idle · prepare in ${formatCompactDuration(view.prepareAt - nowMs)} · ~$${view.valueUsd.toFixed(3)} expected`;
+			return words.armed(formatCompactDuration(view.prepareAt - nowMs), view.valueUsd.toFixed(3));
 		case "preparing":
-			return `idle · preparing a summary ${formatCompactDuration(nowMs - view.since)}`;
+			return words.preparing(formatCompactDuration(nowMs - view.since));
 		case "prepared":
-			return "idle · summary prepared";
+			return words.prepared;
 		case "resumed":
-			return view.fresh
-				? `resumed · fresh${view.savedUsd !== undefined ? ` · saved ~$${view.savedUsd.toFixed(3)}` : ""}`
-				: "resumed · warm";
+			return view.fresh && view.savedUsd !== undefined
+				? words.resumedSaved(view.savedUsd.toFixed(3))
+				: view.fresh
+					? words.resumedFresh
+					: words.resumedWarm;
 	}
 }
 
@@ -208,28 +212,18 @@ function logRawOnce(message: string, raw: string): void {
 	harnessLog.debug("ui", message, { raw });
 }
 
-const WAIT_REASON_WORDS: Readonly<Record<string, string>> = {
-	capacity: "waiting for a free worker slot",
-	dependencies: "waiting for work it depends on",
-	objective: "waiting for the objective to be ready",
-	write_reservation: "waiting for files another worker is writing",
-	foreground: "waiting for your current turn to finish",
-	runtime_generation: "waiting for the runtime to reload",
-	preflight: "checking before it starts",
-	unspecified: "waiting to start",
-};
-
 /** The scheduler's wait text (`reason[: detail] (since time)`) in the owner's words; the raw text goes to the log. */
 export function plainWaitReason(waitReason: string): string {
 	logRawOnce("a queued worker's wait reason is kept in the log, not on screen", waitReason);
+	const words: Readonly<Record<string, string>> = interfaceText().graph.waitReason;
 	const reason = /^[a-z_]+/.exec(waitReason)?.[0] ?? "";
-	return WAIT_REASON_WORDS[reason] ?? "waiting to start";
+	return words[reason] ?? interfaceText().graph.waitReason.unspecified;
 }
 
 /** The stage history's store failure in the owner's words; the error text itself goes to the log. */
 function stageHistoryFailureText(error: string): string {
 	logRawOnce("the stage history could not be saved; the error is kept in the log", error);
-	return "Stage history could not be saved; the rows shown are live.";
+	return interfaceText().graph.stageHistoryLost;
 }
 
 /**
@@ -238,19 +232,20 @@ function stageHistoryFailureText(error: string): string {
  * the router or H-MoE, which choose no worker models.
  */
 export function workerRouteText(lane: LaneRecord): string | undefined {
+	const words = interfaceText().graph.route;
 	switch (lane.routeSource) {
 		case "contract":
-			return "contract";
+			return words.contract;
 		case "inherited":
-			return "inherited";
+			return words.inherited;
 		case "model_pin":
-			return `model pin${lane.routePinSource ? ` (${plainLabel(lane.routePinSource).toLowerCase()})` : ""}`;
+			return words.modelPin(lane.routePinSource ? plainLabel(lane.routePinSource).toLowerCase() : undefined);
 		case "profile":
-			return lane.profileId ? `profile ${lane.profileId}` : "profile";
+			return words.profile(lane.profileId);
 		case "authority":
-			return "requested model";
+			return words.requested;
 		default:
-			return lane.profileId ? `profile ${lane.profileId}` : undefined;
+			return lane.profileId ? words.profile(lane.profileId) : undefined;
 	}
 }
 
@@ -304,6 +299,7 @@ function timedEventsOf(events: DecisionGraphInput["events"]): readonly TimedEven
 
 export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGraphModel {
 	const { projection, stageLog, health, evaluations, route, lanes, nowMs } = input;
+	const words = interfaceText();
 	const open = stageLog.open;
 	const stages: DecisionStageRow[] = [];
 	const timedEvents = timedEventsOf(input.events);
@@ -370,16 +366,16 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 		...(last ? { last } : {}),
 		evaluations: evaluations.length,
 		doing: inFlight
-			? `judging ${inFlight.label}`
+			? words.graph.doing.judging(inFlight.label)
 			: health.state === "unbound" || health.state === "no-engine"
 				? semanticPlaneHealthValue({ state: health.state })
 				: projection.phase === "done"
-					? "delivered"
+					? words.graph.diagram.delivered
 					: projection.control.owner === "system_one"
-						? "decides next"
+						? words.graph.doing.decidesNext
 						: projection.control.owner === "user"
-							? "waiting for you"
-							: "standing by",
+							? words.graph.waitingForYou
+							: words.graph.doing.standingBy,
 		rootOwned,
 	};
 
@@ -392,7 +388,7 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 	const rootAction = openRoot.findLast((event) => event.kind !== "turn");
 	const rootRunning = openRoot.some((event) => event.kind === "turn");
 	const lastTurnOutcome = flow.findLast((event) => event.kind === "turn" && event.endedAt !== undefined)?.outcome;
-	const rootTask = waiting ? "waiting for your answer" : (rootAction?.label ?? "thinking");
+	const rootTask = waiting ? words.graph.diagram.waitingForAnswer : (rootAction?.label ?? words.graph.thinking);
 	const rootActed =
 		input.receipts.actions > 0 || flow.some((event) => event.actor === "root" && event.kind !== "notice");
 	const participants: DecisionParticipant[] = [
@@ -469,13 +465,18 @@ export function buildDecisionGraphModel(input: DecisionGraphInput): DecisionGrap
 
 	const routing: { text: string; live: boolean }[] = [];
 	if (routed)
-		routing.push({ text: `${formatRouteValue(route)} → ${shortModelName(route.activeModel)} for root`, live: true });
+		routing.push({
+			text: words.graph.routed.root(formatRouteValue(route), shortModelName(route.activeModel)),
+			live: true,
+		});
 	for (const lane of laneParticipants) {
-		if (lane.routeText && lane.model)
-			routing.push({
-				text: `${lane.routeText} → ${lane.model}${lane.label ? ` for ${lane.label}` : ""}`,
-				live: lane.running || lane.queued === true,
-			});
+		if (!lane.routeText || !lane.model) continue;
+		routing.push({
+			text: lane.label
+				? words.graph.routed.participant(lane.routeText, lane.model, lane.label)
+				: `${lane.routeText} → ${lane.model}`,
+			live: lane.running || lane.queued === true,
+		});
 	}
 
 	const lastVerify = [...evaluations]

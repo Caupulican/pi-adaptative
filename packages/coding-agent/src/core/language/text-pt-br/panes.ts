@@ -51,6 +51,23 @@ export const PANES = {
 	noOpenSteps: "Nenhuma etapa em aberto",
 	terminalMouse: "mouse do terminal",
 	pullRequestState: (state: string) => PULL_REQUEST_STATE[state] ?? state,
+	workspace: {
+		preview: "Prévia do workspace",
+		unavailable:
+			"Observação do workspace indisponível ou acima do orçamento; as evidências de edição e escrita continuam visíveis. Requer uma worktree do Git.",
+		limitedPaths: (count: number) => `Observação limitada a ${count} caminhos alterados`,
+		overlapped:
+			"A primeira captura se sobrepôs à execução; as mudanças no workspace podem ser anteriores a esta tarefa",
+		diffUnavailable: "Mudanças observadas; diff indisponível ou acima do orçamento da prévia",
+		failed: "A observação do workspace falhou; nada garante um workspace limpo",
+		cancelled: "Observação cancelada",
+	},
+	history: {
+		omittedLines: (count: number) =>
+			`[${count} ${count === 1 ? "linha anterior omitida" : "linhas anteriores omitidas"} do histórico recarregado na TUI; a sessão completa continua disponível para o modelo.]`,
+		omittedCharacters: (count: number) =>
+			`[${count} ${count === 1 ? "caractere anterior omitido" : "caracteres anteriores omitidos"} do histórico recarregado na TUI; a sessão completa continua disponível para o modelo.]`,
+	},
 	roster: {
 		root: "Mente",
 		teams: (count: number) => (count === 0 ? " TIMES · /team create" : ` TIMES (${count})`),

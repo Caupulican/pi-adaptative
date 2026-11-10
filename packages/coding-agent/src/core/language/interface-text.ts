@@ -22,6 +22,8 @@ import type { INSPECTOR } from "./text-en/inspector.ts";
 import type { INTERACTIVE } from "./text-en/interactive.ts";
 import type { KEYS } from "./text-en/keys.ts";
 import type { KNOWLEDGE_COMMANDS } from "./text-en/knowledge-commands.ts";
+import type { LABELS } from "./text-en/labels.ts";
+import type { LIBRARY } from "./text-en/library.ts";
 import type { LOCAL_MODELS } from "./text-en/local-models.ts";
 import type { MACHINES } from "./text-en/machines.ts";
 import type { NOTICES } from "./text-en/notices.ts";
@@ -60,6 +62,8 @@ export interface InterfaceText {
 	interactive: typeof INTERACTIVE;
 	keys: typeof KEYS;
 	knowledgeCommands: typeof KNOWLEDGE_COMMANDS;
+	labels: typeof LABELS;
+	library: typeof LIBRARY;
 	localModels: typeof LOCAL_MODELS;
 	machines: typeof MACHINES;
 	notices: typeof NOTICES;

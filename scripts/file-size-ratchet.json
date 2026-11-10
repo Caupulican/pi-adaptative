@@ -24,7 +24,7 @@
 		"packages/coding-agent/src/core/compaction-controller.ts": 2866,
 		"packages/coding-agent/src/core/channels/session-channels.ts": 2557,
 		"packages/coding-agent/src/core/delegation/worker-agent-control.ts": 2582,
-		"packages/tui/src/components/editor.ts": 2595,
+		"packages/tui/src/components/editor.ts": 2578,
 		"packages/coding-agent/src/core/reflection-controller.ts": 2583,
 		"packages/ai/src/providers/openai-codex-responses.ts": 2529,
 		"packages/coding-agent/src/core/package-manager.ts": 2414,

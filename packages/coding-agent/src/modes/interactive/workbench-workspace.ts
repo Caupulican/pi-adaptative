@@ -2,8 +2,12 @@ import { execFile } from "node:child_process";
 import { createHash } from "node:crypto";
 import { lstat } from "node:fs/promises";
 import { isAbsolute, relative, resolve } from "node:path";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { readBoundedTextFile } from "../../core/util/bounded-file.ts";
 import { bindChildProcessAbort } from "../../utils/child-process.ts";
+
+/** How many changed paths one observation lists before it says the list is limited. */
+const DIRTY_PATH_LIMIT = 128;
 
 interface WorkspaceSnapshot {
 	files: Map<string, string>;
@@ -68,21 +72,21 @@ const gitObservation: ObservationPort = {
 			if (!rootPath.startsWith(prefix)) continue;
 			const path = rootPath.slice(prefix.length);
 			if (state.includes("R") || state.includes("C")) i++; // NUL rename source follows destination.
-			if (files.size >= 128) {
+			if (files.size >= DIRTY_PATH_LIMIT) {
 				limited = true;
 				break;
 			}
 			const absolute = resolve(cwd, path);
 			const local = relative(cwd, absolute);
 			if (isAbsolute(local) || local === ".." || local.startsWith("../") || local.startsWith("..\\")) continue;
-			if (signal.aborted) throw new Error("Observation cancelled");
+			if (signal.aborted) throw new Error(interfaceText().panes.workspace.cancelled);
 			let fingerprint = state;
 			try {
 				const info = await lstat(absolute);
 				fingerprint += `:${info.size}:${info.mtimeMs}:${info.ctimeMs}`;
 				// Reuse the stable bounded-read owner. Large files use metadata, never an unbounded read.
 				if (info.isFile() && info.size <= 64 * 1024) {
-					const content = await readBoundedTextFile(absolute, 64 * 1024, "Workspace preview");
+					const content = await readBoundedTextFile(absolute, 64 * 1024, interfaceText().panes.workspace.preview);
 					fingerprint += createHash("sha256").update(content).digest("hex");
 				}
 			} catch (error) {
@@ -121,8 +125,7 @@ export class WorkspaceObservation {
 				scope.baseline = snapshot;
 			},
 			() => {
-				scope.error =
-					"Workspace observation unavailable or over budget; edit/write evidence remains visible. Requires a Git worktree.";
+				scope.error = interfaceText().panes.workspace.unavailable;
 			},
 		);
 		return scope.ready;
@@ -157,16 +160,17 @@ export class WorkspaceObservation {
 			if (!snapshot.limited)
 				for (const path of previous?.files.keys() ?? []) if (!snapshot.files.has(path)) paths.push(path);
 			let patch = "";
+			const words = interfaceText().panes.workspace;
 			let note = snapshot.limited
-				? "Observation limited to 128 dirty paths"
+				? words.limitedPaths(DIRTY_PATH_LIMIT)
 				: scope.overlapped
-					? "Initial snapshot overlapped execution; displayed workspace changes may predate this task"
+					? words.overlapped
 					: undefined;
 			if (paths.length) {
 				try {
 					patch = await this.port.patch(scope.cwd, paths.slice(0, 32), scope.abort.signal);
 				} catch {
-					note = "Changes observed; diff unavailable or exceeds preview budget";
+					note = words.diffUnavailable;
 				}
 			}
 			if (this.scope !== scope) return undefined;
@@ -175,7 +179,7 @@ export class WorkspaceObservation {
 			return { paths, patch, note };
 		} catch {
 			return this.scope === scope && !scope.abort.signal.aborted
-				? { paths: [], patch: "", note: "Workspace observation failed; no claim of a clean workspace" }
+				? { paths: [], patch: "", note: interfaceText().panes.workspace.failed }
 				: undefined;
 		}
 	}

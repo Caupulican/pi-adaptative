@@ -127,14 +127,10 @@ export const SETTINGS_SCREEN = {
 		},
 	},
 	hints: {
-		searchAndChange: "Type to search · Enter/Space to change · Esc to cancel",
-		change: "Enter/Space to change · Esc to cancel",
 		select: "Enter to select · Esc to go back",
 		filterAndSelect: "Type to filter · Enter to select · Esc to go back",
 		textInput: (emptyHint: string) => `Enter to save · Esc to go back · ${emptyHint}`,
 		emptyClearsSetting: "empty clears the setting",
-		noSettings: "No settings available",
-		noMatch: "No matching settings",
 	},
 	/** The one-line state the value column of a row with a submenu shows. */
 	summaries: {

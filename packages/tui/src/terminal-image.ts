@@ -1,4 +1,5 @@
 import { execSync } from "node:child_process";
+import { libraryText } from "./library-text.ts";
 
 export type ImageProtocol = "kitty" | "iterm2" | null;
 
@@ -523,5 +524,5 @@ export function imageFallback(mimeType: string, dimensions?: ImageDimensions, fi
 	if (filename) parts.push(filename);
 	parts.push(`[${mimeType}]`);
 	if (dimensions) parts.push(`${dimensions.widthPx}x${dimensions.heightPx}`);
-	return `[Image: ${parts.join(" ")}]`;
+	return libraryText().imageFallback(parts.join(" "));
 }

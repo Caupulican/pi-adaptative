@@ -4,6 +4,7 @@ import { detectColorDepth, getCapabilities } from "@caupulican/pi-tui";
 import { type Static, Type } from "typebox";
 import { Compile } from "typebox/compile";
 import { getCustomThemesDir, getThemesDir } from "../../config.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { ansi256ToHex } from "../../utils/ansi-colors.ts";
 import { closeWatcher, watchWithErrorHandler } from "../../utils/fs-watch.ts";
 import { stripBom } from "../../utils/text.ts";
@@ -220,10 +221,10 @@ function resolveVarRefs(
 		return value;
 	}
 	if (visited.has(value)) {
-		throw new Error(`Circular variable reference detected: ${value}`);
+		throw new Error(interfaceText().labels.theme.circularVariable(value));
 	}
 	if (!(value in vars)) {
-		throw new Error(`Variable reference not found: ${value}`);
+		throw new Error(interfaceText().labels.theme.unknownVariable(value));
 	}
 	visited.add(value);
 	return resolveVarRefs(vars[value], vars, visited);
@@ -352,18 +353,19 @@ function parseThemeJson(label: string, json: unknown): ThemeJson {
 			otherErrors.push(`  - ${path}: ${error.message}`);
 		}
 
-		let errorMessage = `Invalid theme "${label}":\n`;
+		const words = interfaceText().labels.theme;
+		let errorMessage = `${words.invalid(label)}\n`;
 		if (missingColors.size > 0) {
-			errorMessage += "\nMissing required color tokens:\n";
+			errorMessage += `\n${words.missingTokens}\n`;
 			errorMessage += Array.from(missingColors)
 				.sort()
 				.map((color) => `  - ${color}`)
 				.join("\n");
-			errorMessage += '\n\nPlease add these colors to your theme\'s "colors" object.';
-			errorMessage += "\nSee the built-in themes (dark.json, light.json) for reference values.";
+			errorMessage += `\n\n${words.addTokens}`;
+			errorMessage += `\n${words.reference}`;
 		}
 		if (otherErrors.length > 0) {
-			errorMessage += `\n\nOther errors:\n${otherErrors.join("\n")}`;
+			errorMessage += `\n\n${words.otherErrors}\n${otherErrors.join("\n")}`;
 		}
 
 		throw new Error(errorMessage);
@@ -377,7 +379,7 @@ function parseThemeJsonContent(label: string, content: string): ThemeJson {
 	try {
 		json = JSON.parse(stripBom(content));
 	} catch (error) {
-		throw new Error(`Failed to parse theme ${label}: ${error}`);
+		throw new Error(interfaceText().labels.theme.parseFailed(label, String(error)));
 	}
 	return parseThemeJson(label, json);
 }
@@ -398,7 +400,7 @@ function loadThemeJson(name: string): ThemeJson {
 	const customThemesDir = getCustomThemesDir();
 	const themePath = path.join(customThemesDir, `${name}.json`);
 	if (!fs.existsSync(themePath)) {
-		throw new Error(`Theme not found: ${name}`);
+		throw new Error(interfaceText().labels.theme.notFound(name));
 	}
 	const content = fs.readFileSync(themePath, "utf-8");
 	return parseThemeJsonContent(name, content);

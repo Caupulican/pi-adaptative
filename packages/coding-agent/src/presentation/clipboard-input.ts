@@ -11,6 +11,7 @@
 
 import type { ImageContent } from "@caupulican/pi-ai";
 import { carryTextRanges, type EditorComponent, pasteIntoEditor, type TUI } from "@caupulican/pi-tui";
+import { interfaceText } from "../core/language/interface-text.ts";
 import type { OwnerWords } from "../core/learning/owner-evidence-ledger.ts";
 import type { SessionImageStore } from "../core/session-image-store.ts";
 import { readClipboardText } from "../utils/clipboard.ts";
@@ -94,7 +95,7 @@ export async function handleClipboardImagePaste(host: ClipboardInputHost): Promi
 			return;
 		}
 		if (host.blockImages) {
-			host.showWarning(host.blockImagesReason ?? "Image paste is blocked by images.blockImages.");
+			host.showWarning(host.blockImagesReason ?? interfaceText().labels.paste.blocked);
 			return;
 		}
 
@@ -104,7 +105,7 @@ export async function handleClipboardImagePaste(host: ClipboardInputHost): Promi
 		if (host.autoResizeImages) {
 			const resized = await resizeImage(bytes, mimeType);
 			if (!resized) {
-				host.showWarning("Clipboard image could not be resized below the inline image limit.");
+				host.showWarning(interfaceText().labels.paste.notResizable);
 				return;
 			}
 			bytes = Buffer.from(resized.data, "base64");
@@ -117,7 +118,7 @@ export async function handleClipboardImagePaste(host: ClipboardInputHost): Promi
 			storedSequence = host.imageStore?.write(bytes, mimeType).sequence;
 		} catch (error: unknown) {
 			const message = error instanceof Error ? error.message : String(error);
-			host.showWarning(`Image attached but could not be stored: ${message}`);
+			host.showWarning(interfaceText().labels.paste.storeFailed(message));
 		}
 		const label = storedSequence === undefined ? nextClipboardImageLabel(host) : `[Image #${storedSequence}]`;
 		if (storedSequence !== undefined) host.clipboardImageCounter = storedSequence;
@@ -132,11 +133,13 @@ export async function handleClipboardImagePaste(host: ClipboardInputHost): Promi
 
 		host.editor.insertTextAtCursor?.(`${label}${dimensionNote ? ` ${dimensionNote}` : ""} `);
 		const sizeKiB = Math.max(1, Math.ceil(bytes.byteLength / 1024));
-		host.showStatus(`Attached ${label} · ${mimeType.slice("image/".length).toUpperCase()} · ${sizeKiB} KiB`);
+		host.showStatus(
+			interfaceText().labels.paste.attached(label, mimeType.slice("image/".length).toUpperCase(), sizeKiB),
+		);
 		host.ui.requestRender();
 	} catch (error: unknown) {
 		const message = error instanceof Error ? error.message : String(error);
-		host.showWarning(`Failed to paste image: ${message}`);
+		host.showWarning(interfaceText().labels.paste.failed(message));
 	}
 }
 

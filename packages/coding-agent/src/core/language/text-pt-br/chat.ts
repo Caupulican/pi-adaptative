@@ -40,6 +40,18 @@ export const CHAT = {
 	unknownState: "desconhecido",
 	teams: (ids: string) => `Times: ${ids}`,
 	routines: (list: string) => `Rotinas: ${list}`,
+	routine: {
+		every: (interval: string) => `a cada ${interval}`,
+		onceAt: (instant: string) => `uma vez em ${instant}`,
+		calendar: (cron: string, timeZone: string) => `"${cron}" em ${timeZone}`,
+		branch: (name: string) => `branch ${name}`,
+		ownPullRequests: "pull requests próprios",
+		by: (authors: string) => `por ${authors}`,
+		github: (kinds: string, scope: string) => `no GitHub ${kinds}${scope ? ` (${scope})` : ""}`,
+		ci: (conclusions: string, workflowPath: string | undefined) =>
+			`no CI ${conclusions}${workflowPath === undefined ? "" : ` de ${workflowPath}`}`,
+		mainSessionOnly: "Rotinas da sessão principal pertencem à ferramenta de rotinas do dono.",
+	},
 	memory: (path: string) => `Memória: ${path}`,
 	resumedVia: (reference: string) => `Retomado de ${reference}`,
 	directChatHint: (agentId: string) =>

@@ -1,4 +1,5 @@
 import { Marked, type Token, Tokenizer, type Tokens } from "marked";
+import { type AlertKind, libraryText } from "../library-text.ts";
 import { getCapabilities, hyperlink, isImageLine } from "../terminal-image.ts";
 import type { Component } from "../tui.ts";
 import { visibleWidth, wrapTextWithAnsi } from "../utils.ts";
@@ -97,15 +98,8 @@ export interface DefaultTextStyle {
 	underline?: boolean;
 }
 
-export type MarkdownAlertKind = "note" | "tip" | "important" | "warning" | "caution";
+export type MarkdownAlertKind = AlertKind;
 
-const ALERT_LABELS: Record<MarkdownAlertKind, string> = {
-	note: "Note",
-	tip: "Tip",
-	important: "Important",
-	warning: "Warning",
-	caution: "Caution",
-};
 const ALERT_MARKER = /^\[!(NOTE|TIP|IMPORTANT|WARNING|CAUTION)\][ \t]*\n?/i;
 
 /**
@@ -423,7 +417,7 @@ export class Markdown extends CachedTextComponent implements Component {
 					? (text: string) => this.theme.alert!(alertKind, text)
 					: (text: string) => this.theme.quoteBorder(text);
 				if (alertKind)
-					renderedQuoteLines.push(this.theme.alert!(alertKind, this.theme.bold(ALERT_LABELS[alertKind])));
+					renderedQuoteLines.push(this.theme.alert!(alertKind, this.theme.bold(libraryText().alert[alertKind])));
 				for (let i = 0; i < quoteTokens.length; i++) {
 					const quoteToken = quoteTokens[i];
 					const nextQuoteToken = quoteTokens[i + 1];

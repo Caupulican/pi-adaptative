@@ -33,6 +33,43 @@ export const GRAPH = {
 	peerFindings: (count: number) => `${count} ${count === 1 ? "achado do peer" : "achados do peer"}`,
 	unsure: (count: number) => `${count} em dúvida`,
 	noRunYet: "nenhuma execução ainda · o grafo se compõe quando o trabalho começa",
+	idle: {
+		armed: (preparesIn: string, expectedUsd: string) =>
+			`ocioso · prepara em ${preparesIn} · ~$${expectedUsd} previstos`,
+		preparing: (elapsed: string) => `ocioso · preparando um resumo ${elapsed}`,
+		prepared: "ocioso · resumo pronto",
+		resumedFresh: "retomado · contexto novo",
+		resumedSaved: (savedUsd: string) => `retomado · contexto novo · ~$${savedUsd} economizados`,
+		resumedWarm: "retomado · contexto aquecido",
+	},
+	waitReason: {
+		capacity: "aguardando uma vaga de worker",
+		dependencies: "aguardando o trabalho de que depende",
+		objective: "aguardando o objetivo ficar pronto",
+		write_reservation: "aguardando arquivos que outro worker está gravando",
+		foreground: "aguardando seu turno atual terminar",
+		runtime_generation: "aguardando o runtime recarregar",
+		preflight: "verificando antes de começar",
+		unspecified: "aguardando para começar",
+	},
+	doing: {
+		judging: (label: string) => `avaliando ${label}`,
+		decidesNext: "decide o próximo passo",
+		standingBy: "em espera",
+	},
+	thinking: "pensando",
+	route: {
+		contract: "contrato",
+		inherited: "herdado",
+		modelPin: (source: string | undefined) => (source ? `pin de modelo (${source})` : "pin de modelo"),
+		profile: (id: string | undefined) => (id ? `perfil ${id}` : "perfil"),
+		requested: "modelo pedido",
+	},
+	routed: {
+		root: (choice: string, model: string) => `${choice} → ${model} para a Mente`,
+		participant: (choice: string, model: string, label: string) => `${choice} → ${model} para ${label}`,
+	},
+	stageHistoryLost: "Não foi possível salvar o histórico de etapas; as linhas mostradas são ao vivo.",
 	list: {
 		head: {
 			peerFindings: "ACHADOS DO PEER",

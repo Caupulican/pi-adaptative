@@ -1,3 +1,4 @@
+import { libraryText } from "../library-text.ts";
 import type { TUI } from "../tui.ts";
 import { Text } from "./text.ts";
 
@@ -23,13 +24,13 @@ export class Loader extends Text {
 	private renderIndicatorVerbatim = false;
 	private spinnerColorFn: (str: string) => string;
 	private messageColorFn: (str: string) => string;
-	private message: string = "Loading...";
+	private message: string | undefined;
 
 	constructor(
 		ui: TUI,
 		spinnerColorFn: (str: string) => string,
 		messageColorFn: (str: string) => string,
-		message: string = "Loading...",
+		message?: string,
 		indicator?: LoaderIndicatorOptions,
 	) {
 		super("", 1, 0);
@@ -84,7 +85,7 @@ export class Loader extends Text {
 		const frame = this.frames[this.currentFrame] ?? "";
 		const renderedFrame = this.renderIndicatorVerbatim ? frame : this.spinnerColorFn(frame);
 		const indicator = frame.length > 0 ? `${renderedFrame} ` : "";
-		this.setText(`${indicator}${this.messageColorFn(this.message)}`);
+		this.setText(`${indicator}${this.messageColorFn(this.message ?? libraryText().loading)}`);
 		if (this.ui) {
 			this.ui.requestRender();
 		}

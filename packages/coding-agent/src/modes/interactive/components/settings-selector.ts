@@ -8,7 +8,6 @@ import {
 	SelectList,
 	type SettingItem,
 	SettingsList,
-	type SettingsListHints,
 	Spacer,
 	Text,
 } from "@caupulican/pi-tui";
@@ -123,12 +122,6 @@ const CONTEXT_MEMORY_RETRIEVAL_DEFAULTS = {
  */
 function screenText() {
 	return interfaceText().settingsScreen;
-}
-
-/** The words the settings list draws under its rows: the search hint, the change hint and the empty states. */
-function settingsListHints(): SettingsListHints {
-	const hints = interfaceText().settingsScreen.hints;
-	return { search: hints.searchAndChange, change: hints.change, empty: hints.noSettings, noMatch: hints.noMatch };
 }
 
 function routerTierValue(
@@ -720,7 +713,6 @@ class SettingsListSubmenu extends Container {
 			onChange,
 			onCancel,
 			{
-				hints: settingsListHints(),
 			},
 		);
 		this.addChild(this.settingsList);
@@ -3347,7 +3339,6 @@ export class SettingsSelectorComponent extends Container {
 			callbacks.onCancel,
 			{
 				enableSearch: true,
-				hints: settingsListHints(),
 			},
 		);
 

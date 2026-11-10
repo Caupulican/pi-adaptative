@@ -22,14 +22,7 @@ import { decodePrintableKey, isLegacyMultilineNewline, matchesKey } from "../key
 import { KillRing } from "../kill-ring.ts";
 import { type Component, CURSOR_MARKER, type Focusable, type TUI } from "../tui.ts";
 import { UndoStack } from "../undo-stack.ts";
-import {
-	getGraphemeSegmenter,
-	getWordSegmenter,
-	isWhitespaceChar,
-	sliceByColumn,
-	truncateToWidth,
-	visibleWidth,
-} from "../utils.ts";
+import { getGraphemeSegmenter, getWordSegmenter, isWhitespaceChar, truncateToWidth, visibleWidth } from "../utils.ts";
 import { findWordBackward, findWordForward } from "../word-navigation.ts";
 import {
 	CodeHighlightCache,
@@ -41,6 +34,7 @@ import {
 	type StyleRun,
 	styledRuns,
 } from "./editor-code.ts";
+import { createScrollBorder } from "./scroll-border.ts";
 import { SelectList, type SelectListLayoutOptions, type SelectListTheme } from "./select-list.ts";
 
 const graphemeSegmenter = getGraphemeSegmenter();
@@ -385,17 +379,6 @@ const SLASH_COMMAND_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 };
 
 const ATTACHMENT_AUTOCOMPLETE_DEBOUNCE_MS = 20;
-
-function createScrollBorder(direction: "↑" | "↓", hiddenLineCount: number, width: number): string {
-	const availableWidth = Math.max(0, width);
-	const indicator = `─── ${direction} ${hiddenLineCount} more `;
-	const remaining = availableWidth - visibleWidth(indicator);
-	if (remaining >= 0) return indicator + "─".repeat(remaining);
-
-	const ellipsis = "...".slice(0, availableWidth);
-	const indicatorWidth = availableWidth - visibleWidth(ellipsis);
-	return sliceByColumn(indicator, 0, indicatorWidth, true) + ellipsis;
-}
 
 /** A placeholder of " · " separated hints, kept to whole hints that fit; the tail is dropped, never cut mid-word. */
 function fitPlaceholder(text: string, width: number): string {
