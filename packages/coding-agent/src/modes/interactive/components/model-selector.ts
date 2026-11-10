@@ -11,6 +11,7 @@ import {
 	visibleWidth,
 } from "@caupulican/pi-tui";
 import type { AuthStatus } from "../../../core/auth-storage.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { ANTIGRAVITY_EFFORT_ORDER, antigravityGeminiEffortFamily } from "../../../core/models/antigravity-effort.ts";
 import type { ModelFavorite } from "../../../core/settings/settings-schema.ts";
 import { harnessLog } from "../../../kernel/harness-log.ts";
@@ -90,16 +91,34 @@ type SelectorRow =
 	| { kind: "model"; item: ModelItem; group: ModelGroup };
 
 function apiBadge(status: AuthStatus): string {
+	const text = interfaceText().selectors.model;
 	switch (status.source) {
 		case "environment":
-			return "API · env";
+			return text.badgeApiEnvironment;
 		case "stored":
-			return "API · key";
+			return text.badgeApiKey;
 		case "models_json_key":
 		case "models_json_command":
-			return "API · models.json";
+			return text.badgeApiModelsJson;
 		default:
-			return "API";
+			return text.badgeApi;
+	}
+}
+
+/** The word the owner reads for a scope; the scope's own id stays what the code switches on. */
+function scopeLabel(scope: ModelScope): string {
+	const text = interfaceText().selectors.model;
+	switch (scope) {
+		case "all":
+			return text.scopeAll;
+		case "favorites":
+			return text.scopeFavorites;
+		case "subscriptions":
+			return text.scopeSubscriptions;
+		case "api":
+			return text.scopeApi;
+		case "scoped":
+			return text.scopeScoped;
 	}
 }
 
@@ -215,9 +234,9 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 
 		// Add hint about model filtering
+		const text = interfaceText().selectors.model;
 		if (scopedModels.length === 0) {
-			const hintText = "Only showing models from configured providers. Use /login to add providers.";
-			this.addChild(new Text(theme.fg("warning", hintText), 0, 0));
+			this.addChild(new Text(theme.fg("warning", text.loginHint), 0, 0));
 		}
 		this.scopeText = new Text(this.getScopeText(), 0, 0);
 		this.addChild(this.scopeText);
@@ -233,7 +252,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 		this.addChild(
 			new Text(
-				`${formatSelectorActionHints(Boolean(onSelectAsDefault))}  ${keyHint("app.models.toggleFavorite", "pin/unpin")}  ${keyHint("app.models.toggleProvider", "expand all")}`,
+				`${formatSelectorActionHints(Boolean(onSelectAsDefault))}  ${keyHint("app.models.toggleFavorite", text.pinHint)}  ${keyHint("app.models.toggleProvider", text.expandAllHint)}`,
 				1,
 			),
 		);
@@ -265,8 +284,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 		const loadError = this.modelRegistry.getError();
 		if (loadError) {
 			harnessLog.debug("ui", "models.json could not be loaded", () => ({ error: loadError }));
-			this.errorMessage =
-				"models.json could not be loaded; built-in models are still listed. The reason is in the log.";
+			this.errorMessage = interfaceText().selectors.model.loadFailed;
 		}
 
 		// Load available models (built-in models still work even if models.json failed)
@@ -287,7 +305,7 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			harnessLog.debug("ui", "the model list could not be loaded", () => ({
 				error: error instanceof Error ? error.message : String(error),
 			}));
-			this.errorMessage = "The model list could not be loaded. The reason is in the log.";
+			this.errorMessage = interfaceText().selectors.model.listFailed;
 			return;
 		}
 
@@ -355,18 +373,21 @@ export class ModelSelectorComponent extends Container implements Focusable {
 
 	/** The credential behind a provider's models; auth is per provider, so it is read once per provider. */
 	private authInfo(item: ModelItem): ProviderAuthInfo {
+		const text = interfaceText().selectors.model;
 		const cached = this.providerAuth.get(item.provider);
 		if (cached) return cached;
 		const label = this.modelRegistry.getProviderDisplayName(item.provider);
 		const status = this.modelRegistry.getProviderAuthStatus(item.provider);
 		let info: ProviderAuthInfo;
-		if (this.modelRegistry.isUsingSubscription(item.model)) info = { category: "subscription", badge: "Sub", label };
-		else if (this.modelRegistry.isUsingOAuth(item.model)) info = { category: "subscription", badge: "OAuth", label };
+		if (this.modelRegistry.isUsingSubscription(item.model))
+			info = { category: "subscription", badge: text.badgeSubscription, label };
+		else if (this.modelRegistry.isUsingOAuth(item.model))
+			info = { category: "subscription", badge: text.badgeOAuth, label };
 		else if (
 			LOCAL_PROVIDERS.has(item.provider) ||
 			(status.source === "runtime" && status.label === "no API key required")
 		)
-			info = { category: "local", badge: "Local", label };
+			info = { category: "local", badge: text.badgeLocal, label };
 		else info = { category: "api", badge: apiBadge(status), label };
 		this.providerAuth.set(item.provider, info);
 		return info;
@@ -397,13 +418,22 @@ export class ModelSelectorComponent extends Container implements Focusable {
 	}
 
 	private getScopeText(): string {
-		const parts = this.availableScopes().map((scope) => theme.fg(this.scope === scope ? "accent" : "muted", scope));
-		return `${theme.fg("muted", "Models: ")}${parts.join(theme.fg("muted", " | "))}`;
+		const text = interfaceText().selectors.model;
+		const parts = this.availableScopes().map((scope) =>
+			theme.fg(this.scope === scope ? "accent" : "muted", scopeLabel(scope)),
+		);
+		return `${theme.fg("muted", text.scopesLabel)}${parts.join(theme.fg("muted", text.scopeSeparator))}`;
 	}
 
 	private getScopeHintText(): string {
 		return (
-			keyHint("app.models.toggleFavoritesTab", "tabs") + theme.fg("muted", ` (${this.availableScopes().join("/")})`)
+			keyHint("app.models.toggleFavoritesTab", interfaceText().selectors.model.tabsHint) +
+			theme.fg(
+				"muted",
+				` (${this.availableScopes()
+					.map((scope) => scopeLabel(scope))
+					.join("/")})`,
+			)
 		);
 	}
 
@@ -593,23 +623,37 @@ export class ModelSelectorComponent extends Container implements Focusable {
 			const selected = this.rows[this.selectedIndex];
 			if (!selected) return;
 			this.listContainer.addChild(new Spacer(1));
+			const text = interfaceText().selectors.model;
 			const detail =
 				selected.kind === "group"
-					? `  ${selected.group.label} · ${selected.group.badge} · ${selected.group.items.length} models  ${keyHint("tui.select.confirm", selected.expanded && !this.allOpen() ? "retract" : "expand")}`
+					? text.groupDetail(
+							selected.group.label,
+							selected.group.badge,
+							selected.group.items.length,
+							keyHint(
+								"tui.select.confirm",
+								selected.expanded && !this.allOpen() ? text.retractHint : text.expandHint,
+							),
+						)
 					: selected.item.variants
-						? `  Effort: ${selected.item.model.defaultThinkingLevel}  ${keyHint("app.models.effortLower", "lower")} / ${keyHint("app.models.effortHigher", "higher")}`
-						: `  Model Name: ${selected.item.model.name}`;
+						? text.effortDetail(
+								selected.item.model.defaultThinkingLevel,
+								keyHint("app.models.effortLower", text.lowerHint),
+								keyHint("app.models.effortHigher", text.higherHint),
+							)
+						: text.modelName(selected.item.model.name);
 			this.listContainer.addChild(new Text(theme.fg("muted", detail), 0, 0));
 		}
 	}
 
 	private emptyText(): string {
-		if (this.searchInput.getValue()) return "  No matching models";
+		const text = interfaceText().selectors.model;
+		if (this.searchInput.getValue()) return text.emptyMatching;
 		if (this.scope === "favorites")
-			return `  No pinned models. ${keyText("app.models.toggleFavorite")} pin/unpin a model in All.`;
-		if (this.scope === "subscriptions") return "  No subscription or OAuth account is logged in. Use /login.";
-		if (this.scope === "api") return "  No API or local models are available.";
-		return "  No matching models";
+			return text.emptyFavorites(keyText("app.models.toggleFavorite"), scopeLabel("all"));
+		if (this.scope === "subscriptions") return text.emptySubscriptions;
+		if (this.scope === "api") return text.emptyApi;
+		return text.emptyMatching;
 	}
 
 	handleInput(keyData: string): void {

@@ -53,11 +53,13 @@ export function rawKeyHint(key: string, description: string): string {
 	return theme.fg("dim", formatKeyText(key)) + theme.fg("muted", ` ${description}`);
 }
 
+/** The three actions every selector offers, in the active language, in one hint line. */
 export function formatSelectorActionHints(hasDefault: boolean): string {
-	const parts = [keyHint("tui.select.confirm", "select")];
+	const text = interfaceText().selectors.shared;
+	const parts = [keyHint("tui.select.confirm", text.select)];
 	if (hasDefault) {
-		parts.push(keyHint("app.models.save", "set as default"));
+		parts.push(keyHint("app.models.save", text.setAsDefault));
 	}
-	parts.push(keyHint("tui.select.cancel", "cancel"));
+	parts.push(keyHint("tui.select.cancel", text.cancel));
 	return parts.join("  ");
 }

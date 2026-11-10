@@ -14,6 +14,7 @@ import {
 	type TUI,
 } from "@caupulican/pi-tui";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { keyHint } from "../../../presentation/keybinding-hints.ts";
 import { getEditorTheme, theme } from "../../../presentation/theme-model.ts";
 import { editInExternalEditor } from "../external-editor.ts";
@@ -76,11 +77,8 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		// Add title
 		this.addChild(new Text(theme.fg("accent", title), 1, 0));
 		this.addChild(new Spacer(1));
-		const notice =
-			options?.notice ??
-			(options?.privateContent
-				? "Private editor · visible only in this terminal · not sent to the model"
-				: undefined);
+		const text = interfaceText().selectors;
+		const notice = options?.notice ?? (options?.privateContent ? text.extension.privateEditor : undefined);
 		if (notice) {
 			this.addChild(new Text(theme.fg("muted", notice), 1, 0));
 			this.addChild(new Spacer(1));
@@ -102,12 +100,12 @@ export class ExtensionEditorComponent extends Container implements Focusable {
 		// Add hint
 		const hasExternalEditor = this.allowExternalEditor && !!(process.env.VISUAL || process.env.EDITOR);
 		const hint =
-			keyHint("tui.select.confirm", "submit") +
+			keyHint("tui.select.confirm", text.shared.submit) +
 			"  " +
-			keyHint("tui.input.newLine", "newline") +
+			keyHint("tui.input.newLine", text.shared.newline) +
 			"  " +
-			keyHint("tui.select.cancel", "cancel") +
-			(hasExternalEditor ? `  ${keyHint("app.editor.external", "external editor")}` : "");
+			keyHint("tui.select.cancel", text.shared.cancel) +
+			(hasExternalEditor ? `  ${keyHint("app.editor.external", text.shared.externalEditor)}` : "");
 		this.addChild(new Text(hint, 1, 0));
 
 		this.addChild(new Spacer(1));

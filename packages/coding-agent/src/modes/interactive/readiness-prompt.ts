@@ -6,6 +6,7 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import { describeReadinessProblem } from "../../core/harness-readiness.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { WorkerDelegationSettings } from "../../core/settings/settings-schema.ts";
 
 export interface ReadinessPromptHost {
@@ -22,8 +23,6 @@ export interface ReadinessPromptHost {
 	showStatus(text: string): void;
 }
 
-const SKIP = "Not now";
-const AUTO = "Set it up for me (subscriptions first; API keys stay unused unless you say so)";
 const MAX_LISTED = 8;
 
 /** Checks readiness once; prompts only when a fix needs the owner. Never throws: a failed check is no reason to stop a session. */
@@ -33,32 +32,32 @@ export async function promptHarnessReadiness(host: ReadinessPromptHost): Promise
 		if (probe.ready) return;
 		const problem = describeReadinessProblem(probe.reason);
 		if (!problem) return;
+		const text = interfaceText().dialogs.readiness;
 		if (problem.fix === "enable_delegation") {
-			const choice = await host.select(problem.text, [problem.fixText ?? "Turn delegation on", SKIP]);
-			if (choice === undefined || choice === SKIP) return;
+			const choice = await host.select(problem.text, [problem.fixText ?? text.delegationFix, text.skip]);
+			if (choice === undefined || choice === text.skip) return;
 			host.saveWorkerDelegation({ ...host.currentWorkerDelegation(), enabled: true });
-			host.showStatus("Delegation is on.");
+			host.showStatus(text.delegationOn);
 			return;
 		}
 		const current = host.currentModel();
 		const options = new Map<string, Model<Api>>();
-		if (current) options.set(`This session's model (${current.provider}/${current.id})`, current);
+		if (current) options.set(text.sessionModel(`${current.provider}/${current.id}`), current);
 		for (const model of host.availableModels().slice(0, MAX_LISTED))
 			options.set(`${model.provider}/${model.id}`, model);
 		const subscriptions = host.subscriptionProviders();
-		const choice = await host.select(
-			`${problem.text} Choose how workers get their model, or pick a worker profile: one model every worker uses (a hard task raises only its thinking).`,
-			[...(subscriptions.length > 0 ? [AUTO] : []), ...options.keys(), SKIP],
-		);
-		if (choice === AUTO) {
+		const choice = await host.select(text.choosePrompt(problem.text), [
+			...(subscriptions.length > 0 ? [text.auto] : []),
+			...options.keys(),
+			text.skip,
+		]);
+		if (choice === text.auto) {
 			host.saveWorkerDelegation({
 				...host.currentWorkerDelegation(),
 				account: "other",
 				routeProviders: [...subscriptions],
 			});
-			host.showStatus(
-				`Workers will use your subscriptions (${subscriptions.join(", ")}). API keys are left unused.`,
-			);
+			host.showStatus(text.workersSubscriptions(subscriptions.join(", ")));
 			return;
 		}
 		const picked = choice === undefined ? undefined : options.get(choice);
@@ -75,9 +74,7 @@ export async function promptHarnessReadiness(host: ReadinessPromptHost): Promise
 				},
 			},
 		});
-		host.showStatus(
-			`Workers will use ${picked.provider}/${picked.id}. Change it any time under workerDelegation.modelPins in settings.`,
-		);
+		host.showStatus(text.workersModel(`${picked.provider}/${picked.id}`));
 	} catch {
 		// A readiness check that fails leaves the session as it was.
 	}

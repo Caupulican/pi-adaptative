@@ -3,6 +3,7 @@
  */
 
 import { Container, type Focusable, getKeybindings, Input, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { keyHint } from "../../../presentation/keybinding-hints.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
@@ -52,7 +53,7 @@ export class ExtensionInputComponent extends Container implements Focusable {
 		this.addChild(this.titleText);
 		this.addChild(new Spacer(1));
 		if (opts?.sensitive) {
-			this.addChild(new Text(theme.fg("muted", "Hidden input · not sent to the model"), 1, 0));
+			this.addChild(new Text(theme.fg("muted", interfaceText().selectors.extension.hiddenInput), 1, 0));
 			this.addChild(new Spacer(1));
 		}
 
@@ -68,8 +69,9 @@ export class ExtensionInputComponent extends Container implements Focusable {
 		this.input = new Input({ sensitive: opts?.sensitive });
 		this.addChild(this.input);
 		this.addChild(new Spacer(1));
+		const text = interfaceText().selectors.shared;
 		this.addChild(
-			new Text(`${keyHint("tui.select.confirm", "submit")}  ${keyHint("tui.select.cancel", "cancel")}`, 1, 0),
+			new Text(`${keyHint("tui.select.confirm", text.submit)}  ${keyHint("tui.select.cancel", text.cancel)}`, 1, 0),
 		);
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());

@@ -22,6 +22,7 @@ import {
 	verifyBedrockScope,
 } from "../../core/bedrock-scope.ts";
 import { type BedrockSsoLoginOptions, loginBedrockSsoProfile } from "../../core/bedrock-sso-login.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { cliProviderAliases, defaultModelPerProvider } from "../../core/model-resolver.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../../core/provider-display-names.ts";
@@ -45,6 +46,14 @@ const LOGIN_CANCELLATION_MESSAGES = ["Login cancelled"] as const;
 const BEDROCK_CANCELLATION_MESSAGES = ["Login cancelled", "AWS SSO login was cancelled"] as const;
 
 const BUILT_IN_MODEL_PROVIDERS = new Set<string>(getProviders());
+
+/** The value behind the label a selector returned, so the words on screen never decide the branch the code takes. */
+function valueOfLabel<T>(
+	options: readonly { readonly label: string; readonly value: T }[],
+	chosen: string,
+): T | undefined {
+	return options.find((option) => option.label === chosen)?.value;
+}
 
 export function isApiKeyLoginProvider(
 	providerId: string,
@@ -260,27 +269,34 @@ export class AuthDialogsController {
 			this.modelRegistry.authStorage.logout(providerOption.id);
 			await this.session.refreshModelsAfterAuthChange(providerOption.id);
 			await this.ui.updateAvailableProviderCount();
+			const text = interfaceText().dialogs.authDialogs;
 			const message =
 				providerOption.authType === "oauth"
-					? `Logged out of ${providerOption.name}`
-					: `Removed stored API key for ${providerOption.name}. Environment variables and models.json config are unchanged.`;
+					? text.loggedOut(providerOption.name)
+					: text.apiKeyRemoved(providerOption.name);
 			this.ui.showStatus(message);
 		} catch (error: unknown) {
-			this.ui.showError(`Logout failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.ui.showError(
+				interfaceText().dialogs.authDialogs.logoutFailed(error instanceof Error ? error.message : String(error)),
+			);
 		}
 	}
 
 	private showLoginAuthTypeSelector(): void {
-		const subscriptionLabel = "Use a subscription";
-		const apiKeyLabel = "Use an API key";
+		const text = interfaceText().dialogs.authDialogs;
+		// The method's own id decides the flow; the label is only what the selector hands back.
+		const methods: readonly { readonly value: "oauth" | "api_key"; readonly label: string }[] = [
+			{ value: "oauth", label: text.methodSubscription },
+			{ value: "api_key", label: text.methodApiKey },
+		];
 		this.ui.showSelector((done) => {
 			const selector = new ExtensionSelectorComponent(
-				"Select authentication method:",
-				[subscriptionLabel, apiKeyLabel],
-				(option) => {
+				text.methodTitle,
+				methods.map((method) => method.label),
+				(chosen) => {
 					done();
-					const authType = option === subscriptionLabel ? "oauth" : "api_key";
-					this.showLoginProviderSelector(authType);
+					const authType = valueOfLabel(methods, chosen);
+					if (authType) this.showLoginProviderSelector(authType);
 				},
 				() => {
 					done();
@@ -294,9 +310,8 @@ export class AuthDialogsController {
 	private showLoginProviderSelector(authType: "oauth" | "api_key"): void {
 		const providerOptions = this.getLoginProviderOptions(authType);
 		if (providerOptions.length === 0) {
-			this.ui.showStatus(
-				authType === "oauth" ? "No subscription providers available." : "No API key providers available.",
-			);
+			const text = interfaceText().dialogs.authDialogs;
+			this.ui.showStatus(authType === "oauth" ? text.noSubscriptionProviders : text.noApiKeyProviders);
 			return;
 		}
 
@@ -346,9 +361,7 @@ export class AuthDialogsController {
 				const providerOptions = this.getLoginProviderOptions();
 				const providerOption = this.resolveAuthProviderOption(providerReference, providerOptions);
 				if (!providerOption) {
-					this.ui.showError(
-						`Unknown login provider "${providerReference}". Use /login to select from available providers.`,
-					);
+					this.ui.showError(interfaceText().dialogs.authDialogs.unknownLoginProvider(providerReference));
 					return;
 				}
 				await this.startProviderLogin(providerOption);
@@ -360,18 +373,14 @@ export class AuthDialogsController {
 
 		const providerOptions = this.getLogoutProviderOptions();
 		if (providerOptions.length === 0) {
-			this.ui.showStatus(
-				"No stored credentials to remove. /logout only removes credentials saved by /login; environment variables and models.json config are unchanged.",
-			);
+			this.ui.showStatus(interfaceText().dialogs.authDialogs.noStoredCredentials);
 			return;
 		}
 
 		if (providerReference) {
 			const providerOption = this.resolveAuthProviderOption(providerReference, providerOptions);
 			if (!providerOption) {
-				this.ui.showError(
-					`No stored credentials found for "${providerReference}". Use /logout to select a saved provider.`,
-				);
+				this.ui.showError(interfaceText().dialogs.authDialogs.noStoredCredentialsFor(providerReference));
 				return;
 			}
 			await this.logoutProvider(providerOption);
@@ -393,14 +402,13 @@ export class AuthDialogsController {
 		previousModel: Model<any> | undefined,
 	): Promise<void> {
 		await this.session.refreshModelsAfterAuthChange(providerId);
+		const text = interfaceText().dialogs.authDialogs;
 		if (providerId === TYPESAFE_PROVIDER) {
-			this.ui.showStatus(
-				"System One is available through systemone; TypeSafe authentication is checked on first use.",
-			);
+			this.ui.showStatus(text.typesafeStatus);
 			return;
 		}
 
-		const actionLabel = authType === "oauth" ? `Logged in to ${providerName}` : `Saved API key for ${providerName}`;
+		const actionLabel = authType === "oauth" ? text.loggedIn(providerName) : text.apiKeySaved(providerName);
 
 		let selectedModel: Model<any> | undefined;
 		let selectionError: string | undefined;
@@ -408,21 +416,21 @@ export class AuthDialogsController {
 			const availableModels = this.modelRegistry.getAvailable();
 			const providerModels = availableModels.filter((model) => model.provider === providerId);
 			if (!hasDefaultModelProvider(providerId)) {
-				selectionError = `${actionLabel}, but no default model is configured for provider "${providerId}". Use /model to select a model.`;
+				selectionError = text.noDefaultModel(actionLabel, providerId);
 			} else if (providerModels.length === 0) {
-				selectionError = `${actionLabel}, but no models are available for that provider. Use /model to select a model.`;
+				selectionError = text.noModels(actionLabel);
 			} else {
 				const defaultModelId = defaultModelPerProvider[providerId];
 				selectedModel = providerModels.find((model) => model.id === defaultModelId);
 				if (!selectedModel) {
-					selectionError = `${actionLabel}, but its default model "${defaultModelId}" is not available. Use /model to select a model.`;
+					selectionError = text.defaultModelUnavailable(actionLabel, defaultModelId);
 				} else {
 					try {
 						await this.session.setModel(selectedModel);
 					} catch (error: unknown) {
 						selectedModel = undefined;
 						const errorMessage = error instanceof Error ? error.message : String(error);
-						selectionError = `${actionLabel}, but selecting its default model failed: ${errorMessage}. Use /model to select a model.`;
+						selectionError = text.selectModelFailed(actionLabel, errorMessage);
 					}
 				}
 			}
@@ -432,11 +440,11 @@ export class AuthDialogsController {
 		this.ui.invalidateFooter();
 		this.ui.updateEditorBorderColor();
 		if (selectedModel) {
-			this.ui.showStatus(`${actionLabel}. Selected ${selectedModel.id}. Credentials saved to ${getAuthPath()}`);
+			this.ui.showStatus(text.statusSelected(actionLabel, selectedModel.id, getAuthPath()));
 			void this.ui.maybeWarnAboutAnthropicSubscriptionAuth(selectedModel);
 			this.ui.checkDaxnutsEasterEgg(selectedModel);
 		} else {
-			this.ui.showStatus(`${actionLabel}. Credentials saved to ${getAuthPath()}`);
+			this.ui.showStatus(text.statusSaved(actionLabel, getAuthPath()));
 			if (selectionError) {
 				this.ui.showError(selectionError);
 			} else {
@@ -446,18 +454,22 @@ export class AuthDialogsController {
 	}
 
 	private showBedrockSetupDialog(providerId: string, providerName: string): void {
+		const text = interfaceText().dialogs.authDialogs;
 		const configuredProfile = this.getConfiguredBedrockProfile();
-		const ssoLabel = configuredProfile
-			? `Sign in with SSO profile "${configuredProfile}"`
-			: "Sign in with an AWS SSO profile";
-		const otherLabel = "Use IAM, bearer, or role credentials";
+		const ssoLabel = configuredProfile ? text.bedrockSsoProfile(configuredProfile) : text.bedrockSso;
+		const otherLabel = text.bedrockOther;
+		// Whichever way the owner signs in is a value of its own; the labels only carry it to the screen.
+		const routes: readonly { readonly value: "sso" | "credentials"; readonly label: string }[] = [
+			{ value: "sso", label: ssoLabel },
+			{ value: "credentials", label: otherLabel },
+		];
 		this.ui.showSelector((done) => {
 			const selector = new ExtensionSelectorComponent(
-				"Set up Amazon Bedrock:",
-				[ssoLabel, otherLabel],
-				(option) => {
+				text.bedrockTitle,
+				routes.map((route) => route.label),
+				(chosen) => {
 					done();
-					if (option === ssoLabel) void this.showBedrockSsoDialog(providerId, providerName);
+					if (valueOfLabel(routes, chosen) === "sso") void this.showBedrockSsoDialog(providerId, providerName);
 					else void this.showBedrockCredentialInfoDialog(providerId, providerName);
 				},
 				() => {
@@ -499,12 +511,12 @@ export class AuthDialogsController {
 		this.ui.invalidateFooter();
 		this.ui.updateEditorBorderColor();
 		this.ui.showStatus(
-			`${message} Verified ${scope.modelIds.length} model${scope.modelIds.length === 1 ? "" : "s"} in ${scope.region}.`,
+			interfaceText().dialogs.authDialogs.bedrockVerified(message, scope.modelIds.length, scope.region),
 		);
 	}
 
-	private async showBedrockCredentialInfoDialog(providerId: string, providerName: string): Promise<void> {
-		this.cancelActiveDialog();
+	/** The login dialog a Bedrock setup draws, already mounted over the editor. */
+	private bedrockDialog(providerId: string, providerName: string, title: string): LoginDialogComponent {
 		const dialog = new LoginDialogComponent(
 			this.ui.tui,
 			providerId,
@@ -512,15 +524,20 @@ export class AuthDialogsController {
 				this.restoreEditorFromDialog(dialog);
 			},
 			providerName,
-			"Amazon Bedrock setup",
+			title,
 		);
+		this.mountLoginDialog(dialog);
+		return dialog;
+	}
+
+	private async showBedrockCredentialInfoDialog(providerId: string, providerName: string): Promise<void> {
+		this.cancelActiveDialog();
+		const text = interfaceText().dialogs.authDialogs;
+		const dialog = this.bedrockDialog(providerId, providerName, text.bedrockCredentialInfoTitle);
 		dialog.showInfo([
-			theme.fg("text", "Amazon Bedrock uses AWS credentials instead of a single API key."),
-			theme.fg(
-				"text",
-				"Configure IAM keys, a bearer token, or role-based credentials, then verify their exact region.",
-			),
-			theme.fg("muted", "See:"),
+			theme.fg("text", text.bedrockCredentialUses),
+			theme.fg("text", text.bedrockCredentialConfigure),
+			theme.fg("muted", text.see),
 			theme.fg("accent", `  ${path.join(getDocsPath(), "providers.md")}`),
 		]);
 		this.mountLoginDialog(dialog);
@@ -528,11 +545,9 @@ export class AuthDialogsController {
 		await this.runMountedLoginDialog(
 			dialog,
 			async () => {
-				const region = (
-					await dialog.showPrompt("AWS region (required):", this.getConfiguredBedrockRegion())
-				).trim();
-				if (!region) throw new Error("AWS region cannot be empty.");
-				dialog.showProgress("Verifying AWS identity, Bedrock profiles, and model access...");
+				const region = (await dialog.showPrompt(text.regionPrompt, this.getConfiguredBedrockRegion())).trim();
+				if (!region) throw new Error(text.regionEmpty);
+				dialog.showProgress(text.verifyingAws);
 				scope = await this.verifyAndActivateBedrockScope({
 					region,
 					profile: process.env.AWS_PROFILE?.trim(),
@@ -542,48 +557,39 @@ export class AuthDialogsController {
 			},
 			async () => {
 				if (!scope) return;
-				await this.completeBedrockSetup(scope, "Amazon Bedrock credentials are ready.");
+				await this.completeBedrockSetup(scope, text.bedrockReady);
 			},
-			`Failed to configure ${providerName}: `,
+			text.configureFailed(providerName),
 			BEDROCK_CANCELLATION_MESSAGES,
 		);
 	}
 
 	private async showBedrockSsoDialog(providerId: string, providerName: string): Promise<void> {
 		this.cancelActiveDialog();
-		const dialog = new LoginDialogComponent(
-			this.ui.tui,
-			providerId,
-			() => {
-				this.restoreEditorFromDialog(dialog);
-			},
-			providerName,
-			"Amazon Bedrock SSO",
-		);
-		this.mountLoginDialog(dialog);
+		const text = interfaceText().dialogs.authDialogs;
+		const dialog = this.bedrockDialog(providerId, providerName, text.bedrockSsoTitle);
 		let profile = "";
 		let scope: Awaited<ReturnType<typeof verifyBedrockScope>> | undefined;
 		await this.runMountedLoginDialog(
 			dialog,
 			async () => {
 				const configuredProfile = this.getConfiguredBedrockProfile();
-				profile = configuredProfile ?? (await dialog.showPrompt("AWS SSO profile name:", "my-work-profile")).trim();
-				if (!profile) throw new Error("AWS profile name cannot be empty.");
-				const region = (
-					await dialog.showPrompt("AWS region (required):", this.getConfiguredBedrockRegion())
-				).trim();
-				if (!region) throw new Error("AWS region cannot be empty.");
+				profile =
+					configuredProfile ?? (await dialog.showPrompt(text.ssoProfilePrompt, text.ssoProfileExample)).trim();
+				if (!profile) throw new Error(text.profileEmpty);
+				const region = (await dialog.showPrompt(text.regionPrompt, this.getConfiguredBedrockRegion())).trim();
+				if (!region) throw new Error(text.regionEmpty);
 
 				if (configuredProfile) {
 					dialog.showInfo([
-						theme.fg("text", `Using AWS profile: ${profile}`),
-						theme.fg("text", `Bedrock region: ${region}`),
-						theme.fg("muted", "Complete the IAM Identity Center sign-in in your browser."),
+						theme.fg("text", text.usingProfile(profile)),
+						theme.fg("text", text.bedrockRegion(region)),
+						theme.fg("muted", text.finishSignIn),
 					]);
 				}
-				dialog.showProgress("Waiting for AWS SSO authentication...");
+				dialog.showProgress(text.waitingForSso);
 				await (this.deps.loginBedrockSso ?? loginBedrockSsoProfile)(profile, { signal: dialog.signal });
-				dialog.showProgress("Verifying AWS identity, Bedrock profiles, and model access...");
+				dialog.showProgress(text.verifyingAws);
 				scope = await this.verifyAndActivateBedrockScope({
 					profile,
 					region,
@@ -593,9 +599,9 @@ export class AuthDialogsController {
 			},
 			async () => {
 				if (!scope) return;
-				await this.completeBedrockSetup(scope, `Signed in with AWS profile "${profile}".`);
+				await this.completeBedrockSetup(scope, text.bedrockSignedIn(profile));
 			},
-			`Failed to sign in to ${providerName}: `,
+			text.signInFailed(providerName),
 			BEDROCK_CANCELLATION_MESSAGES,
 		);
 	}
@@ -603,6 +609,7 @@ export class AuthDialogsController {
 	private async showApiKeyLoginDialog(providerId: string, providerName: string): Promise<void> {
 		this.cancelActiveDialog();
 		const previousModel = this.session.model;
+		const text = interfaceText().dialogs.authDialogs;
 
 		const dialog = new LoginDialogComponent(
 			this.ui.tui,
@@ -617,16 +624,13 @@ export class AuthDialogsController {
 		await this.runMountedLoginDialog(
 			dialog,
 			async () => {
-				const apiKey = (await dialog.showPrompt("Enter API key:")).trim();
-				if (!apiKey) throw new Error("API key cannot be empty.");
+				const apiKey = (await dialog.showPrompt(text.apiKeyPrompt)).trim();
+				if (!apiKey) throw new Error(text.apiKeyEmpty);
 				const saved = this.modelRegistry.authStorage.set(providerId, { type: "api_key", key: apiKey });
-				if (saved === false)
-					throw new Error(
-						"API key was not saved; it is available only in this session. Check credential storage permissions and retry.",
-					);
+				if (saved === false) throw new Error(text.apiKeyNotSaved);
 			},
 			() => this.completeProviderAuthentication(providerId, providerName, "api_key", previousModel),
-			`Failed to save API key for ${providerName}: `,
+			text.saveApiKeyFailed(providerName),
 		);
 	}
 
@@ -667,6 +671,7 @@ export class AuthDialogsController {
 			.getOAuthProviders()
 			.find((provider) => provider.id === providerId);
 		const previousModel = this.session.model;
+		const text = interfaceText().dialogs.authDialogs;
 
 		// Providers that use callback servers (can paste redirect URL)
 		const usesCallbackServer = providerInfo?.usesCallbackServer ?? false;
@@ -702,7 +707,7 @@ export class AuthDialogsController {
 						if (usesCallbackServer) {
 							// Show input for manual paste, racing with callback
 							dialog
-								.showManualInput("Paste redirect URL below, or complete login in browser:")
+								.showManualInput(text.manualCodePrompt)
 								.then((value) => {
 									if (value && manualCodeResolve) {
 										manualCodeResolve(value);
@@ -721,7 +726,7 @@ export class AuthDialogsController {
 
 					onDeviceCode: (info) => {
 						dialog.showDeviceCode(info);
-						dialog.showWaiting("Waiting for authentication...");
+						dialog.showWaiting(text.waitingForAuth);
 					},
 
 					onPrompt: async (prompt: { message: string; placeholder?: string }) => {
@@ -739,7 +744,7 @@ export class AuthDialogsController {
 					signal: dialog.signal,
 				}),
 			() => this.completeProviderAuthentication(providerId, providerName, "oauth", previousModel),
-			`Failed to login to ${providerName}: `,
+			text.loginFailed(providerName),
 		);
 	}
 }

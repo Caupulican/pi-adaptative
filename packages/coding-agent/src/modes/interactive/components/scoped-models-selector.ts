@@ -9,6 +9,7 @@ import {
 	Spacer,
 	Text,
 } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { keyText } from "../../../presentation/keybinding-hints.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -128,12 +129,11 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 		this.listState.items = this.buildItems();
 
 		// Header
+		const text = interfaceText().selectors.scopedModels;
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.fg("accent", theme.bold("Model Configuration")), 0, 0));
-		this.addChild(
-			new Text(theme.fg("muted", `Session-only. ${keyText("app.models.save")} to save to settings.`), 0, 0),
-		);
+		this.addChild(new Text(theme.fg("accent", theme.bold(text.title)), 0, 0));
+		this.addChild(new Text(theme.fg("muted", text.sessionOnly(keyText("app.models.save"))), 0, 0));
 		this.addChild(new Spacer(1));
 
 		this.searchSurface = SearchableListSurface.mount(this);
@@ -155,19 +155,20 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 	}
 
 	private getFooterText(): string {
+		const text = interfaceText().selectors.scopedModels;
 		const enabledCount = this.enabledIds?.filter((id) => this.modelsById.has(id)).length ?? this.allIds.length;
 		const unavailableCount = this.enabledIds?.filter((id) => !this.modelsById.has(id)).length ?? 0;
 		const allEnabled = this.enabledIds === null;
 		const countText = allEnabled
-			? "all enabled"
-			: `${enabledCount}/${this.allIds.length} enabled${unavailableCount ? ` · ${unavailableCount} unavailable` : ""}`;
+			? text.allEnabled
+			: text.enabledCount(enabledCount, this.allIds.length, unavailableCount);
 		const parts = [
-			`${keyText("tui.select.confirm")} toggle`,
-			`${keyText("app.models.enableAll")} all`,
-			`${keyText("app.models.clearAll")} clear`,
-			`${keyText("app.models.toggleProvider")} provider`,
-			`${keyText("app.models.reorderUp")}/${keyText("app.models.reorderDown")} reorder`,
-			`${keyText("app.models.save")} save`,
+			`${keyText("tui.select.confirm")} ${text.toggleHint}`,
+			`${keyText("app.models.enableAll")} ${text.allHint}`,
+			`${keyText("app.models.clearAll")} ${text.clearHint}`,
+			`${keyText("app.models.toggleProvider")} ${text.providerHint}`,
+			`${keyText("app.models.reorderUp")}/${keyText("app.models.reorderDown")} ${text.reorderHint}`,
+			`${keyText("app.models.save")} ${text.saveHint}`,
 			countText,
 		];
 		return formatDirtySelectorFooter(parts, this.isDirty);
@@ -187,9 +188,10 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 
 	private updateList(): void {
 		this.listContainer.clear();
+		const text = interfaceText().selectors.scopedModels;
 
 		if (this.listState.items.length === 0) {
-			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching models"), 0, 0));
+			this.listContainer.addChild(new Text(theme.fg("muted", text.empty), 0, 0));
 			return;
 		}
 
@@ -199,7 +201,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 			const prefix = isSelected ? theme.fg("accent", "→ ") : "  ";
 			const id = item.model?.id ?? item.fullId;
 			const modelText = isSelected ? theme.fg("accent", id) : id;
-			const providerBadge = theme.fg("muted", item.model ? ` [${item.model.provider}]` : " [unavailable]");
+			const providerBadge = theme.fg("muted", item.model ? ` [${item.model.provider}]` : text.unavailableBadge);
 			const status = item.model
 				? allEnabled
 					? ""
@@ -217,7 +219,7 @@ export class ScopedModelsSelectorComponent extends Container implements Focusabl
 			this.listContainer.addChild(new Spacer(1));
 			this.listContainer.addChild(
 				new Text(
-					theme.fg("muted", `  ${selected.model ? `Model Name: ${selected.model.name}` : "Model unavailable"}`),
+					theme.fg("muted", `  ${selected.model ? text.modelName(selected.model.name) : text.modelUnavailable}`),
 					0,
 					0,
 				),

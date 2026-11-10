@@ -1,4 +1,5 @@
 import type { Component, TUI } from "@caupulican/pi-tui";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { ExtensionInputComponent } from "./components/extension-input.ts";
 import { SelectSubmenu } from "./components/settings-selector.ts";
 
@@ -69,12 +70,13 @@ export function confirmExternalResourceTrust(
 	prompt: ExternalResourceTrustPrompt,
 ): Promise<boolean> {
 	return showSettledSelection<boolean>(host, false, (settle) => {
+		const words = interfaceText().dialogs.selectionPrompts;
 		const submenu = new SelectSubmenu(
 			prompt.title,
 			prompt.description,
 			[
-				{ value: "yes", label: "Yes", description: prompt.acceptDescription },
-				{ value: "no", label: "No", description: prompt.rejectDescription },
+				{ value: "yes", label: words.yes, description: prompt.acceptDescription },
+				{ value: "no", label: words.no, description: prompt.rejectDescription },
 			],
 			"no",
 			(value) => settle(value === "yes"),

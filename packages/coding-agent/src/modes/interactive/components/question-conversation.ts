@@ -1,3 +1,4 @@
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { isAssistantDisplayText } from "../../../core/message-phase.ts";
 import { isRecordObject } from "../../../core/util/value-guards.ts";
 import type { AgentMessage } from "../../../kernel/index.ts";
@@ -29,15 +30,17 @@ export function questionConversationText(
 		?.filter((block) => block.type === "text")
 		.map((block) => block.text ?? "")
 		.join("\n");
+	const text = interfaceText().dialogs.question;
 	return sanitizeBinaryOutput(
 		stripAnsi(
-			`${question ? `Assistant\n${question}\n\n` : ""}${answer === undefined ? "Waiting for your answer" : `${failed ? "Question status" : "You"}\n${answer}`}`,
+			`${question ? `${text.assistant}\n${question}\n\n` : ""}${answer === undefined ? text.waiting : `${failed ? text.status : text.you}\n${answer}`}`,
 		),
 	);
 }
 
 /** Explicit copy path, never a render hot path. Rejects oversize copies instead of silently truncating. */
 export function fullConversationText(messages: Iterable<AgentMessage>): string {
+	const text = interfaceText().dialogs.question;
 	const parts: string[] = [];
 	const questions = new Map<string, unknown>();
 	let bytes = 0;
@@ -63,11 +66,10 @@ export function fullConversationText(messages: Iterable<AgentMessage>): string {
 							.map((block) => (block.type === "text" ? block.text : ""))
 							.join("\n\n");
 			if (!content.trim()) continue;
-			part = `${message.role === "user" ? "You" : "Assistant"}\n${content}`;
+			part = `${message.role === "user" ? text.you : text.assistant}\n${content}`;
 		} else continue;
 		bytes += Buffer.byteLength(part) + 2;
-		if (bytes > 10 * 1024 * 1024)
-			throw new Error("Conversation exceeds clipboard limit; use /export for the complete session.");
+		if (bytes > 10 * 1024 * 1024) throw new Error(text.clipboardLimit);
 		parts.push(part);
 	}
 	return parts.join("\n\n");

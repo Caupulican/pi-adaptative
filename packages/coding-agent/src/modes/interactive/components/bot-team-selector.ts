@@ -4,6 +4,7 @@ import type {
 	PersistentBotView,
 	PersistentTeamRecord,
 } from "../../../core/delegation/persistent-bot-team-store.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { getSelectListTheme, theme } from "../../../presentation/theme-model.ts";
 import { botStateMark } from "./bot-state-mark.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -24,13 +25,14 @@ export interface BotTeamSelectorOptions {
 }
 
 function formatActiveTargetLabel(target: ActiveChatTarget): string {
+	const text = interfaceText().selectors.botTeam;
 	switch (target.kind) {
 		case "root":
-			return "Brain (root)";
+			return text.activeRoot;
 		case "bot":
-			return `Bot: ${target.agentId}`;
+			return text.activeBot(target.agentId);
 		case "team":
-			return `Team: ${target.teamId}`;
+			return text.activeTeam(target.teamId);
 		default: {
 			const _exhaustive: never = target;
 			return _exhaustive;
@@ -75,43 +77,49 @@ export class BotTeamSelectorComponent extends Container {
 		super();
 
 		const activeValue = formatActiveTargetValue(options.activeTarget);
-		const subtitleText = `Active: ${formatActiveTargetLabel(options.activeTarget)}  ·  /bot new <id> [--write] [model] [role] · /team create <id> <bot1,bot2> · @<bot> <msg> · Esc close`;
+		const text = interfaceText().selectors.botTeam;
+		const subtitleText = text.subtitle(formatActiveTargetLabel(options.activeTarget));
 
 		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.fg("accent", theme.bold("Live Chats · Bots & Teams")), 1, 0));
+		this.addChild(new Text(theme.fg("accent", theme.bold(text.title)), 1, 0));
 		this.addChild(new Text(theme.fg("muted", subtitleText), 1, 0));
 
 		const isRootCurrent = options.activeTarget.kind === "root";
 		const items: SelectItem[] = [
 			{
 				value: "root",
-				label: `${isRootCurrent ? "✓" : "●"} Brain (root)`,
-				description: `${options.rootModelLabel} · ${options.rootStatusLabel} · Primary orchestrator chat`,
+				label: text.rootItem(isRootCurrent ? "✓" : "●"),
+				description: text.rootDescription(options.rootModelLabel, options.rootStatusLabel),
 			},
 			...options.teams.map((team): SelectItem => {
 				const isCurrent = options.activeTarget.kind === "team" && options.activeTarget.teamId === team.teamId;
-				const unread = (team.unreadCount ?? 0) > 0 ? ` · ${team.unreadCount} unread` : "";
+				const unread = (team.unreadCount ?? 0) > 0 ? text.unread(team.unreadCount ?? 0) : "";
+				const members = team.memberAgentIds.length > 0 ? text.memberList(team.memberAgentIds) : text.noMembers;
 				return {
 					value: `team:${team.teamId}`,
-					label: `${isCurrent ? "✓ " : "◆ "}Team: ${team.name || team.teamId}`,
-					description: `[${team.memberAgentIds.join(", ") || "no members"}]${unread}${team.description ? ` · ${team.description}` : ""}`,
+					label: text.teamItem(isCurrent ? "✓ " : "◆ ", team.name || team.teamId),
+					description: text.teamDescription(
+						members,
+						unread,
+						team.description ? text.descriptionSuffix(team.description) : "",
+					),
 				};
 			}),
 			...options.bots.map((bot): SelectItem => {
 				const isCurrent = options.activeTarget.kind === "bot" && options.activeTarget.agentId === bot.agentId;
 				// Plain: the list colours a selected row whole, and a toned glyph would cut that colour.
 				const glyph = botStateMark(bot.state).glyph;
-				const unread = (bot.unreadCount ?? 0) > 0 ? ` · ${bot.unreadCount} unread` : "";
+				const unread = (bot.unreadCount ?? 0) > 0 ? text.unread(bot.unreadCount ?? 0) : "";
 				const schedules = (bot.routineCount ?? 0) > 0 ? ` · ⏱${bot.routineCount}` : "";
 				const summaryOrDesc = bot.currentSummary
-					? ` · ${bot.currentSummary}`
+					? text.descriptionSuffix(bot.currentSummary)
 					: bot.description
-						? ` · ${bot.description}`
+						? text.descriptionSuffix(bot.description)
 						: "";
 				return {
 					value: `bot:${bot.agentId}`,
-					label: `${isCurrent ? "✓ " : `${glyph} `}Bot: ${bot.agentId}`,
-					description: `${bot.modelRef}${bot.thinkingLevel ? ` (${bot.thinkingLevel})` : ""} · ${bot.state}${unread}${schedules}${bot.teamIds.length ? ` · teams: ${bot.teamIds.join(",")}` : ""}${summaryOrDesc}`,
+					label: text.botItem(isCurrent ? "✓ " : `${glyph} `, bot.agentId),
+					description: `${bot.modelRef}${bot.thinkingLevel ? ` (${bot.thinkingLevel})` : ""} · ${text.state(bot.state)}${unread}${schedules}${bot.teamIds.length ? text.botTeams(bot.teamIds.join(",")) : ""}${summaryOrDesc}`,
 				};
 			}),
 		];

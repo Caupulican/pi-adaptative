@@ -1,4 +1,13 @@
-import { type Component, Container, getKeybindings, Spacer, Text, truncateToWidth } from "@caupulican/pi-tui";
+import {
+	type Component,
+	Container,
+	getKeybindings,
+	Spacer,
+	Text,
+	truncateToWidth,
+	visibleWidth,
+} from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
@@ -34,7 +43,7 @@ class UserMessageList implements Component {
 		const lines: string[] = [];
 
 		if (this.messages.length === 0) {
-			lines.push(theme.fg("muted", "  No user messages found"));
+			lines.push(theme.fg("muted", interfaceText().selectors.userMessage.empty));
 			return lines;
 		}
 
@@ -55,7 +64,7 @@ class UserMessageList implements Component {
 
 			// First line: cursor + message
 			const cursor = isSelected ? theme.fg("accent", "› ") : "  ";
-			const maxMsgWidth = width - 2; // Account for cursor (2 chars)
+			const maxMsgWidth = Math.max(0, width - visibleWidth("› "));
 			const truncatedMsg = truncateToWidth(normalizedMessage, maxMsgWidth);
 			const messageLine = cursor + (isSelected ? theme.bold(truncatedMsg) : truncatedMsg);
 
@@ -63,7 +72,7 @@ class UserMessageList implements Component {
 
 			// Second line: metadata (position in history)
 			const position = i + 1;
-			const metadata = `  Message ${position} of ${this.messages.length}`;
+			const metadata = interfaceText().selectors.userMessage.position(position, this.messages.length);
 			const metadataLine = theme.fg("muted", metadata);
 			lines.push(metadataLine);
 			lines.push(""); // Blank line between messages
@@ -119,15 +128,10 @@ export class UserMessageSelectorComponent extends Container {
 		super();
 
 		// Add header
+		const text = interfaceText().selectors.userMessage;
 		this.addChild(new Spacer(1));
-		this.addChild(new Text(theme.bold("Fork from Message"), 1, 0));
-		this.addChild(
-			new Text(
-				theme.fg("muted", "Select a user message to copy the active path up to that point into a new session"),
-				1,
-				0,
-			),
-		);
+		this.addChild(new Text(theme.bold(text.title), 1, 0));
+		this.addChild(new Text(theme.fg("muted", text.description), 1, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
 		this.addChild(new Spacer(1));

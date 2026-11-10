@@ -12,6 +12,7 @@ import {
 	Spacer,
 	Text,
 } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { keyHint, rawKeyHint } from "../../../presentation/keybinding-hints.ts";
 import { getSelectListTheme, theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -120,7 +121,9 @@ export class SelectorListState<T> {
 
 export function formatDirtySelectorFooter(parts: string[], dirty: boolean): string {
 	const text = parts.join(" · ");
-	return dirty ? theme.fg("dim", `  ${text} `) + theme.fg("warning", "(unsaved)") : theme.fg("dim", `  ${text}`);
+	return dirty
+		? theme.fg("dim", `  ${text} `) + theme.fg("warning", interfaceText().selectors.shared.unsaved)
+		: theme.fg("dim", `  ${text}`);
 }
 
 export class SearchableListSurface extends Container implements Focusable {
@@ -217,14 +220,15 @@ export class SelectorHeading extends Container {
 export class SelectorNavigationFooter extends Container {
 	constructor(confirmLabel: string) {
 		super();
+		const text = interfaceText().selectors.shared;
 		this.addChild(new Spacer(1));
 		this.addChild(
 			new Text(
-				rawKeyHint("↑↓", "navigate") +
+				rawKeyHint("↑↓", text.navigate) +
 					"  " +
 					keyHint("tui.select.confirm", confirmLabel) +
 					"  " +
-					keyHint("tui.select.cancel", "cancel"),
+					keyHint("tui.select.cancel", text.cancel),
 				1,
 				0,
 			),

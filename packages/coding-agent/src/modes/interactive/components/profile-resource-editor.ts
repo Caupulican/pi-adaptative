@@ -11,6 +11,7 @@ import {
 	Spacer,
 	Text,
 } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import {
 	decodeResourceSelection,
 	detectResourceFraming,
@@ -74,18 +75,18 @@ interface ResourceItem {
 	isMissing?: boolean;
 }
 
-const TOOL_DESCRIPTIONS: Record<string, string> = {
-	read: "Read files from the filesystem.",
-	bash: "Execute arbitrary commands in the shell.",
-	edit: "Preflight and edit existing files surgically.",
-	write: "Preflight and create new files without overwriting.",
-	grep: "Search for text patterns using ripgrep.",
-	find: "Locate files matching a search query.",
-	ls: "List files and directories.",
-	skill_audit: "Inspect and audit local skills.",
-	skillify: "Convert a set of files/instructions into a skill.",
-	extensionify: "Package a tool or script as an extension.",
-};
+/** The owner's words for a profile scope; a scope the profile menu does not name shows its id with spaces. */
+function scopeWord(scope: string): string {
+	const scopes = interfaceText().profilesScreen.menu.scopes;
+	const known = scopes[scope as keyof typeof scopes];
+	return known?.label ?? scope.replace(/-/g, " ");
+}
+
+/** What a built-in tool does, as the library lists it; a tool the catalogue does not describe shows none. */
+function toolDescription(id: string): string | undefined {
+	const descriptions: Readonly<Record<string, string>> = interfaceText().profilesScreen.editor.toolDescriptions;
+	return descriptions[id];
+}
 
 export function resolveResourceEditPath(
 	_id: string,
@@ -254,22 +255,25 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		}
 
 		// Header
+		const text = interfaceText().profilesScreen.editor;
 		this.addChild(new DynamicBorder());
 		this.addChild(
-			new Text(
-				theme.fg(
-					"accent",
-					theme.bold(`Library — editing "${this.profileName}" (${this.profileScope.replace(/-/g, " ")})`),
-				),
-				0,
-				0,
-			),
+			new Text(theme.fg("accent", theme.bold(text.title(this.profileName, scopeWord(this.profileScope)))), 0, 0),
 		);
 		this.addChild(
 			new Text(
 				theme.fg(
 					"muted",
-					`Navigate kinds: ${keyText("tui.input.tab")}. Toggle: ${keyText("tui.select.confirm")}. Mode: ${theme.fg("accent", "a")} allow / ${theme.fg("accent", "b")} block. Scope: ${theme.fg("accent", "s")} change. Edit: ${theme.fg("accent", "e")}. Bulk: ${keyText("app.profiles.enableAll")} enable all / ${keyText("app.profiles.clearAll")} clear all.`,
+					text.hints(
+						keyText("tui.input.tab"),
+						keyText("tui.select.confirm"),
+						theme.fg("accent", "a"),
+						theme.fg("accent", "b"),
+						theme.fg("accent", "s"),
+						theme.fg("accent", "e"),
+						keyText("app.profiles.enableAll"),
+						keyText("app.profiles.clearAll"),
+					),
 				),
 				0,
 				0,
@@ -297,8 +301,9 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		const kind = this.kinds[this.currentKindIndex]!;
 		const enabledSet = this.enabledByKind.get(kind.kind)!;
 		const framing = this.framingByKind.get(kind.kind)!;
-		const framingText = framing === "allow" ? "allow list" : "block list";
-		const countText = `${enabledSet.size}/${kind.items.length} enabled (${framingText})`;
+		const text = interfaceText().profilesScreen.editor;
+		const framingText = framing === "allow" ? text.framingAllow : text.framingBlock;
+		const countText = text.enabledCount(enabledSet.size, kind.items.length, framingText);
 		const kindIndicator = this.kinds
 			.map((k, i) => {
 				const marker = i === this.currentKindIndex ? "●" : "○";
@@ -328,7 +333,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			const isEnabled = enabledSet.has(availableItem.id);
 			let desc = availableItem.description;
 			if (kind.kind === "tools" && !desc) {
-				desc = TOOL_DESCRIPTIONS[availableItem.id];
+				desc = toolDescription(availableItem.id);
 			}
 			items.push({
 				id: availableItem.id,
@@ -355,7 +360,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 				label: missingId,
 				enabled: isEnabled,
 				isMissing: true,
-				description: "Referenced in profile but missing from available resources.",
+				description: interfaceText().profilesScreen.editor.missingDescription,
 			});
 		}
 
@@ -375,13 +380,14 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 	private getFooterText(): string {
 		const kind = this.getCurrentKind();
 		const enabledSet = this.getCurrentEnabledSet();
-		const countText = `${enabledSet.size}/${kind.items.length} enabled`;
+		const text = interfaceText().profilesScreen.editor;
+		const countText = text.enabledTotal(enabledSet.size, kind.items.length);
 		const parts = [
-			`${keyText("tui.select.confirm")} toggle`,
-			`${keyText("tui.input.tab")} kind`,
-			`${keyText("app.models.save")} save`,
-			`${theme.fg("accent", "e")} edit`,
-			`${theme.fg("accent", "Ctrl+Q")}/${keyText("app.interrupt")} cancel`,
+			`${keyText("tui.select.confirm")} ${text.toggleHint}`,
+			`${keyText("tui.input.tab")} ${text.kindHint}`,
+			`${keyText("app.models.save")} ${text.saveHint}`,
+			`${theme.fg("accent", "e")} ${text.editHint}`,
+			`${theme.fg("accent", "Ctrl+Q")}/${keyText("app.interrupt")} ${text.cancelHint}`,
 			countText,
 		];
 		return formatDirtySelectorFooter(parts, this.isDirty);
@@ -401,20 +407,19 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		this.listContainer.clear();
 
 		const kind = this.getCurrentKind();
+		const text = interfaceText().profilesScreen.editor;
 		const missingSet = this.missingIdsByKind.get(kind.kind) || new Set<string>();
 		const totalAvailableCount = kind.items.length + missingSet.size;
 
 		if (totalAvailableCount === 0) {
-			this.listContainer.addChild(
-				new Text(theme.fg("muted", "  (none available — add a Source or install resources)"), 0, 0),
-			);
-			this.descriptionText.setText(theme.fg("muted", "  No description available"));
+			this.listContainer.addChild(new Text(theme.fg("muted", text.emptyNone), 0, 0));
+			this.descriptionText.setText(theme.fg("muted", text.noDescription));
 			return;
 		}
 
 		if (this.listState.items.length === 0) {
-			this.listContainer.addChild(new Text(theme.fg("muted", "  No matching resources"), 0, 0));
-			this.descriptionText.setText(theme.fg("muted", "  No description available"));
+			this.listContainer.addChild(new Text(theme.fg("muted", text.emptyMatching), 0, 0));
+			this.descriptionText.setText(theme.fg("muted", text.noDescription));
 			return;
 		}
 
@@ -423,7 +428,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 			let resourceText = isSelected ? theme.fg("accent", item.label) : item.label;
 
 			if (item.isMissing) {
-				resourceText = theme.fg("muted", `${item.label} [missing]`);
+				resourceText = theme.fg("muted", text.missing(item.label));
 			} else if (item.sourceLabel) {
 				const labelColor =
 					item.sourceLabel === "catalog"
@@ -433,7 +438,7 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 							: item.sourceLabel === "user"
 								? "warning"
 								: "muted";
-				const labelText = theme.fg(labelColor, ` [${item.sourceLabel}]`);
+				const labelText = theme.fg(labelColor, ` [${text.sources[item.sourceLabel]}]`);
 				resourceText = `${resourceText}${labelText}`;
 			}
 
@@ -446,11 +451,11 @@ export class ProfileResourceEditorComponent extends Container implements Focusab
 		// Update description area for current selection
 		const selectedItem = this.listState.items[this.listState.selectedIndex];
 		if (selectedItem?.description) {
-			this.descriptionText.setText(theme.fg("muted", `  Description: ${selectedItem.description}`));
+			this.descriptionText.setText(theme.fg("muted", text.description(selectedItem.description)));
 		} else if (selectedItem && selectedItem.label !== selectedItem.id) {
-			this.descriptionText.setText(theme.fg("muted", `  Resource: ${selectedItem.id}`));
+			this.descriptionText.setText(theme.fg("muted", text.resource(selectedItem.id)));
 		} else {
-			this.descriptionText.setText(theme.fg("muted", "  No description available"));
+			this.descriptionText.setText(theme.fg("muted", text.noDescription));
 		}
 	}
 

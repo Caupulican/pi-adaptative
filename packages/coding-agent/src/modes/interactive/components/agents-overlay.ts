@@ -3,6 +3,7 @@ import type { EdgeGrantView } from "../../../core/autonomy/edge-policy.ts";
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
 import type { GoalState } from "../../../core/goals/goal-state.ts";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { panelPlans, planPanelRows } from "../../../core/plan/plan-panel.ts";
 import { type PlanView, planIsMoving, planNeedsAttention } from "../../../core/plan/plan-view.ts";
 import type { SemanticVerificationObligationView } from "../../../core/system-one/verification-obligations.ts";
@@ -104,10 +105,11 @@ function workerRow(record: LaneRecord, nowMs: number, planStep: string | undefin
 		worktree: record.worktreeLaneKey,
 		evidence: record.evidenceEntryId,
 	});
+	const text = interfaceText().agentsOverlay;
 	const started = clockTime(record.startedAt);
 	const completed = clockTime(record.completedAt);
 	const meta = [
-		record.type === "managed-worker" ? "managed" : "agent",
+		record.type === "managed-worker" ? text.kindManaged : text.kindAgent,
 		record.profileId,
 		record.modelRef,
 		record.thinkingLevel,
@@ -115,13 +117,13 @@ function workerRow(record: LaneRecord, nowMs: number, planStep: string | undefin
 		record.costUsd !== undefined ? `$${record.costUsd.toFixed(2)}` : undefined,
 	].filter((value): value is string => value !== undefined && value !== "");
 	const details = [
-		record.outcomeText ?? (record.reasonCode ? `reason: ${record.reasonCode.replace(/_/g, " ")}` : undefined),
-		started ? `started: ${started}` : undefined,
-		completed ? `completed: ${completed}` : undefined,
+		record.outcomeText ?? (record.reasonCode ? text.reason(record.reasonCode.replace(/_/g, " ")) : undefined),
+		started ? text.started(started) : undefined,
+		completed ? text.completed(completed) : undefined,
 	].filter((value): value is string => value !== undefined);
 	return {
 		status: record.status,
-		label: planStep ?? record.label ?? "Unnamed task",
+		label: planStep ?? record.label ?? text.unnamedTask,
 		section: "workers",
 		meta,
 		details,
@@ -223,33 +225,33 @@ function projectWorkActivity(snapshot: AgentsOverlaySnapshot, nowMs: number): Wo
 			nowMs,
 			record.attemptId === undefined ? undefined : snapshot.planStepByAttempt?.get(record.attemptId),
 		);
+	const text = interfaceText().agentsOverlay;
 	return {
 		specialists,
 		currentLanes,
 		activeWorkers,
 		rows: [...activeWorkers.map(row), ...finishedWorkers.map(row), ...backgroundTools.map(backgroundToolRow)],
 		summary: [
-			running > 0 ? `${running} running` : undefined,
-			queued > 0 ? `${queued} queued` : undefined,
-			idleSpecialists > 0 ? `${idleSpecialists} idle` : undefined,
-			backgroundTools.length > 0
-				? `${backgroundTools.length} background tool${backgroundTools.length === 1 ? "" : "s"}`
-				: undefined,
+			running > 0 ? text.running(running) : undefined,
+			queued > 0 ? text.queued(queued) : undefined,
+			idleSpecialists > 0 ? text.idle(idleSpecialists) : undefined,
+			backgroundTools.length > 0 ? text.backgroundToolCount(backgroundTools.length) : undefined,
 		].filter((value): value is string => value !== undefined),
 	};
 }
 
 export function buildAgentsPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: number): OrchestrationPanelModel {
 	const activity = projectWorkActivity(snapshot, nowMs);
+	const text = interfaceText().agentsOverlay;
 	const shown = activity.rows.slice(0, MAX_ROWS);
 	return {
-		label: "Agents",
+		label: text.agents,
 		// A specialist's own current state, never a task it finished several tasks ago.
 		status: activity.currentLanes.some((record) => record.status === "failed") ? "error" : "info",
 		summary: activity.summary,
 		rows: shown,
 		hiddenRowCount: activity.rows.length - shown.length,
-		emptyText: "No agents or background work right now",
+		emptyText: text.emptyAgents,
 	};
 }
 
@@ -257,6 +259,7 @@ export function buildAgentsPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: nu
 export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: number): OrchestrationPanelModel {
 	const goal = snapshot.goalState;
 	const task = snapshot.taskState;
+	const text = interfaceText().agentsOverlay;
 	const activity = projectWorkActivity(snapshot, nowMs);
 	const peerFindings = snapshot.peerFindings ?? [];
 	const satisfied = goal?.requirements.filter((requirement) => requirement.status === "satisfied").length ?? 0;
@@ -279,8 +282,8 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 				section: "peerFindings",
 				meta: [`#${finding.sequence}`],
 				details: [
-					`scope: ${finding.scope}`,
-					`about: ${finding.candidateKind === "outcome" ? "an outcome" : "the repository"}`,
+					text.scope(finding.scope),
+					finding.candidateKind === "outcome" ? text.aboutOutcome : text.aboutRepository,
 				],
 			};
 		}),
@@ -288,24 +291,24 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 			? [
 					{
 						status: "info" as const,
-						label: `+${peerFindings.length - 3} more`,
+						label: text.more(peerFindings.length - 3),
 						section: "peerFindings",
-						meta: [`${peerFindings.length} total`],
+						meta: [text.total(peerFindings.length)],
 					},
 				]
 			: []),
 		...activity.rows,
 	];
 	const summary = [
-		goal ? `goal ${goal.status.replace(/_/g, " ")}` : undefined,
-		goal ? `${satisfied}/${goal.requirements.length} requirements` : undefined,
-		shownPlans.length > 0 ? `${shownPlans.length} plan${shownPlans.length === 1 ? "" : "s"}` : undefined,
-		task ? `${task.steps.length + task.archive.completed + task.archive.cancelled} task steps` : undefined,
-		`${peerFindings.length} peer finding${peerFindings.length === 1 ? "" : "s"}`,
+		goal ? text.goal(goal.status.replace(/_/g, " ")) : undefined,
+		goal ? text.requirements(satisfied, goal.requirements.length) : undefined,
+		shownPlans.length > 0 ? text.plans(shownPlans.length) : undefined,
+		task ? text.taskStepCount(task.steps.length + task.archive.completed + task.archive.cancelled) : undefined,
+		text.peerFindingCount(peerFindings.length),
 		...activity.summary,
 	].filter((value): value is string => value !== undefined);
 	return {
-		label: "Work",
+		label: text.work,
 		status:
 			goal?.status === "blocked" ||
 			goal?.status === "paused" ||
@@ -322,12 +325,13 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 		wrapRows: true,
 		rows,
 		notices: goal?.blockedReason ? [{ status: "warning", text: goal.blockedReason }] : [],
-		emptyText: "No goal, plan, agents, or background work right now",
+		emptyText: text.emptyWork,
 	};
 }
 
 /** Content-sized preview of the same inspector model. Detail remains in the work inspector. */
 export function compactWorkPanel(model: OrchestrationPanelModel, limit = 6): OrchestrationPanelModel {
+	const text = interfaceText().agentsOverlay;
 	const rows = model.rows ?? [];
 	const urgent = rows.filter((row) =>
 		["blocked", "failed", "timeout", "budget_exhausted", "partial"].includes(row.status),
@@ -337,10 +341,10 @@ export function compactWorkPanel(model: OrchestrationPanelModel, limit = 6): Orc
 	const shown = [...urgent, ...active, ...pending].slice(0, limit);
 	return {
 		...model,
-		label: "Work / Team",
+		label: text.compact,
 		rows: shown.map((row) => ({ ...row, meta: undefined, details: undefined })),
 		summary:
-			shown.length === 0 && rows.length > 0 ? [...(model.summary ?? []), `${rows.length} finished`] : model.summary,
+			shown.length === 0 && rows.length > 0 ? [...(model.summary ?? []), text.finished(rows.length)] : model.summary,
 		description: undefined,
 		wrapRows: false,
 		emptyText: undefined,
@@ -440,8 +444,9 @@ export class AgentsOverlay implements Component {
 		const visible = body.slice(this.scrollTop, this.scrollTop + pageRows);
 		const position =
 			this.lastMaxScroll > 0 ? ` · ${this.scrollTop + 1}-${this.scrollTop + visible.length}/${body.length}` : "";
-		const switchChat = this.options.onSwitchChat ? ` · ${key("app.agents.switchChat")} switch chat` : "";
-		const footer = ` ${key("app.transcript.scrollUp")}/${key("app.transcript.scrollDown")} scroll · ${key("app.transcript.pageUp")}/${key("app.transcript.pageDown")} page · ${key("app.transcript.top")}/${key("app.transcript.bottom")} jump${switchChat} · ${key("app.agents.close")} close${position}`;
+		const text = interfaceText().agentsOverlay;
+		const switchChat = this.options.onSwitchChat ? ` · ${key("app.agents.switchChat")} ${text.switchChatHint}` : "";
+		const footer = ` ${key("app.transcript.scrollUp")}/${key("app.transcript.scrollDown")} ${text.scrollHint} · ${key("app.transcript.pageUp")}/${key("app.transcript.pageDown")} ${text.pageHint} · ${key("app.transcript.top")}/${key("app.transcript.bottom")} ${text.jumpHint}${switchChat} · ${key("app.agents.close")} ${text.closeHint}${position}`;
 		return [surface(""), ...visible.map((line) => surface(` ${line}`)), surface(theme.fg("muted", footer))];
 	}
 

@@ -1,4 +1,5 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Text } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { ModelSuggestion } from "../../../core/models/default-model-suggestions.ts";
 import { getSelectListTheme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -23,16 +24,23 @@ export class ModelSuggestionSelectorComponent extends Container {
 	) {
 		super();
 
+		const text = interfaceText().selectors.modelSuggestion;
 		const items: SelectItem[] = suggestions.map((suggestion, index) => ({
 			value: String(index),
-			label: `${suggestion.name}${suggestion.toolCalling === false ? "  [no tool-calling]" : suggestion.toolCalling === "unverified" ? "  [tool-calling unverified]" : ""}`,
+			label: `${suggestion.name}${
+				suggestion.toolCalling === false
+					? text.noToolCalling
+					: suggestion.toolCalling === "unverified"
+						? text.unverifiedToolCalling
+						: ""
+			}`,
 			// Surface the note (quant/RAM caveats) here so a caveat is seen BEFORE the pull, not as a
 			// confusing failure after picking.
-			description: `${suggestion.role} — ${suggestion.rationale}${suggestion.note ? `  (note: ${suggestion.note})` : ""}`,
+			description: text.description(suggestion.role, suggestion.rationale, suggestion.note),
 		}));
 
 		this.addChild(new DynamicBorder());
-		this.addChild(new Text("Pick a local model suggestion to install and evaluate on your hardware:", 1, 0));
+		this.addChild(new Text(text.prompt, 1, 0));
 		this.selectList = new SelectList(items, 8, getSelectListTheme(), MODEL_SUGGESTION_SELECT_LIST_LAYOUT);
 		this.selectList.onSelect = (item) => {
 			const suggestion = suggestions[Number(item.value)];

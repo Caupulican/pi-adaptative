@@ -1,4 +1,5 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Text } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { NormalizedProfile } from "../../../core/profile-registry.ts";
 import { getSelectListTheme, theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -8,24 +9,26 @@ const PROFILE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	maxPrimaryColumnWidth: 32,
 };
 
-function profileSourceLabel(profile: NormalizedProfile): string {
+/** Where a profile is read from, in the owner's words; the source's own id never reaches the screen. */
+export function profileSourceLabel(profile: NormalizedProfile): string {
+	const sources = interfaceText().selectors.profile.sources;
 	switch (profile.source) {
 		case "global-settings":
-			return "global settings";
+			return sources["global-settings"];
 		case "project-settings":
-			return "project settings";
+			return sources["project-settings"];
 		case "external-settings":
-			return "external settings";
+			return sources["external-settings"];
 		case "directory-overlay":
-			return "directory overlay";
+			return sources["directory-overlay"];
 		case "profile-file":
-			return "profile file";
+			return sources["profile-file"];
 		case "inline":
-			return "runtime";
+			return sources.inline;
 		case "embedded":
-			return "embedded";
+			return sources.embedded;
 		case "bundle":
-			return "bundle";
+			return sources.bundle;
 	}
 }
 
@@ -40,21 +43,22 @@ export class ProfileSelectorComponent extends Container {
 	) {
 		super();
 
+		const text = interfaceText().selectors.profile;
 		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.fg("accent", theme.bold("Profiles")), 1, 0));
+		this.addChild(new Text(theme.fg("accent", theme.bold(text.title)), 1, 0));
 
 		const active = new Set(activeProfileNames);
 		const items: SelectItem[] = [
 			{
 				value: "(none)",
-				label: "(none)",
-				description: active.size === 0 ? "active" : "Use configured profile selection (session default)",
+				label: text.noneLabel,
+				description: active.size === 0 ? text.active : text.useConfigured,
 			},
 			...profiles.map((profile) => ({
 				value: profile.name,
 				label: profile.name,
 				description: [
-					active.has(profile.name) ? "active" : undefined,
+					active.has(profile.name) ? text.active : undefined,
 					profileSourceLabel(profile),
 					profile.description,
 				]
@@ -66,8 +70,8 @@ export class ProfileSelectorComponent extends Container {
 		if (profiles.length === 0) {
 			items.push({
 				value: "",
-				label: "No profiles found",
-				description: "Create profiles under ~/.pi/agent/profiles/ or settings.resourceProfiles",
+				label: text.empty,
+				description: text.emptyHint,
 			});
 		}
 

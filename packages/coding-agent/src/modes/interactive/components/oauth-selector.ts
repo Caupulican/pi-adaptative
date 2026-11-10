@@ -1,5 +1,6 @@
 import { Container, type Focusable, getKeybindings, type Input, Spacer, TruncatedText } from "@caupulican/pi-tui";
 import type { AuthStatus, AuthStorage } from "../../../core/auth-storage.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import {
@@ -66,7 +67,8 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 		this.addChild(new Spacer(1));
 
 		// Add title
-		const title = mode === "login" ? "Select provider to configure:" : "Select provider to logout:";
+		const words = interfaceText().dialogs.oauth;
+		const title = mode === "login" ? words.titleLogin : words.titleLogout;
 		this.addChild(new TruncatedText(theme.fg("accent", theme.bold(title)), 1, 0));
 		this.addChild(new Spacer(1));
 
@@ -132,39 +134,41 @@ export class OAuthSelectorComponent extends Container implements Focusable {
 
 		// Show "no providers" if empty
 		if (this.filteredProviders.length === 0) {
+			const words = interfaceText().dialogs.oauth;
 			const message =
 				this.allProviders.length === 0
 					? this.mode === "login"
-						? "No providers available"
-						: "No providers logged in. Use /login first."
-					: "No matching providers";
+						? words.noProviders
+						: words.noLoggedIn
+					: words.noMatching;
 			this.listContainer.addChild(new TruncatedText(theme.fg("muted", `  ${message}`), 1, 0));
 		}
 	}
 
 	private formatStatusIndicator(provider: AuthSelectorProvider): string {
 		const credential = this.authStorage.get(provider.id);
-		if (credential?.type === provider.authType) return theme.fg("success", " ✓ configured");
+		const words = interfaceText().dialogs.oauth;
+		if (credential?.type === provider.authType) return theme.fg("success", words.configured);
 		if (credential) {
-			const label = credential.type === "oauth" ? "subscription configured" : "API key configured";
+			const label = credential.type === "oauth" ? words.subscriptionConfigured : words.apiKeyConfigured;
 			return theme.fg("muted", " • ") + theme.fg("warning", label);
 		}
-		if (provider.authType !== "api_key") return theme.fg("muted", " • unconfigured");
+		if (provider.authType !== "api_key") return theme.fg("muted", ` • ${words.unconfigured}`);
 
 		const status = this.getAuthStatus(provider.id);
 		switch (status.source) {
 			case "environment":
-				return theme.fg("success", ` ✓ env: ${status.label ?? "API key"}`);
+				return theme.fg("success", words.environmentKey(status.label ?? words.environmentKeyDefault));
 			case "runtime":
-				return theme.fg("success", " ✓ runtime API key");
+				return theme.fg("success", words.runtimeKey);
 			case "fallback":
-				return theme.fg("success", " ✓ custom API key");
+				return theme.fg("success", words.customKey);
 			case "models_json_key":
-				return theme.fg("success", " ✓ key in models.json");
+				return theme.fg("success", words.modelsJsonKey);
 			case "models_json_command":
-				return theme.fg("success", " ✓ command in models.json");
+				return theme.fg("success", words.modelsJsonCommand);
 			default:
-				return theme.fg("muted", " • unconfigured");
+				return theme.fg("muted", ` • ${words.unconfigured}`);
 		}
 	}
 

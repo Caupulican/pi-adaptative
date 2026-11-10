@@ -4,6 +4,7 @@
  */
 
 import { Container, getKeybindings, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import { CountdownTimer } from "./countdown-timer.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -59,7 +60,7 @@ export class ExtensionSelectorComponent extends Container {
 
 		this.listContainer = new Container();
 		this.addChild(this.listContainer);
-		this.addChild(new SelectorNavigationFooter("select"));
+		this.addChild(new SelectorNavigationFooter(interfaceText().selectors.shared.select));
 
 		this.updateList();
 	}

@@ -73,7 +73,6 @@
 		"packages/coding-agent/src/core/extensions/runner.ts": 1287,
 		"packages/coding-agent/src/modes/interactive/local-model-commands.ts": 1355,
 		"packages/coding-agent/src/core/agent-session-runtime.ts": 1354,
-		"packages/coding-agent/src/modes/interactive/profile-menu-controller.ts": 1333,
 		"packages/coding-agent/src/core/steering/system-one-steering-plane.ts": 1337,
 		"packages/coding-agent/src/utils/tools-manager.ts": 1332,
 		"packages/coding-agent/src/modes/interactive/bot-team-chat-controller.ts": 1275,

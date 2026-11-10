@@ -8,6 +8,7 @@ import {
 	Text,
 	TruncatedText,
 	truncateToWidth,
+	visibleWidth,
 } from "@caupulican/pi-tui";
 import {
 	buildActivePathIds,
@@ -19,6 +20,7 @@ import {
 	hasTextContent,
 	recalculateVisibleTreeLayout,
 } from "../../../core/export-html/session-tree-foundations.mjs";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { isSessionLifecycleEntry, type SessionTreeNode } from "../../../kernel/node.ts";
 import { keyHint, keyText } from "../../../presentation/keybinding-hints.ts";
 import { isModelFacingText, MODEL_FACING_PLACEHOLDER, plainLabel } from "../../../presentation/plain-text.ts";
@@ -248,6 +250,7 @@ class TreeList implements Component {
 	/** Get searchable text content from a node */
 	private getSearchableText(node: SessionTreeNode): string {
 		const entry = node.entry;
+		const words = interfaceText().selectors.tree;
 		const parts: string[] = [];
 
 		if (node.label) {
@@ -277,26 +280,26 @@ class TreeList implements Component {
 				break;
 			}
 			case "compaction":
-				parts.push("compaction");
+				parts.push(words.compaction);
 				break;
 			case "branch_summary":
-				parts.push("branch summary", entry.summary);
+				parts.push(words.branchSummary, entry.summary);
 				break;
 			case "session_info":
-				parts.push("title");
+				parts.push(words.sessionTitle);
 				if (entry.name) parts.push(entry.name);
 				break;
 			case "model_change":
-				parts.push("model", entry.modelId);
+				parts.push(words.modelChange, entry.modelId);
 				break;
 			case "thinking_level_change":
-				parts.push("thinking", entry.thinkingLevel);
+				parts.push(words.thinkingChange, entry.thinkingLevel);
 				break;
 			case "custom":
-				parts.push("record", plainLabel(entry.customType));
+				parts.push(words.record, plainLabel(entry.customType));
 				break;
 			case "label":
-				parts.push("label", entry.label ?? "");
+				parts.push(words.label, entry.label ?? "");
 				break;
 		}
 
@@ -348,23 +351,24 @@ class TreeList implements Component {
 	}
 
 	private getStatusLabels(): string {
+		const words = interfaceText().selectors.tree;
 		let labels = "";
 		switch (this.filterMode) {
 			case "no-tools":
-				labels += " [no-tools]";
+				labels += words.statusNoTools;
 				break;
 			case "user-only":
-				labels += " [user]";
+				labels += words.statusUserOnly;
 				break;
 			case "labeled-only":
-				labels += " [labeled]";
+				labels += words.statusLabeled;
 				break;
 			case "all":
-				labels += " [all]";
+				labels += words.statusAll;
 				break;
 		}
 		if (this.showLabelTimestamps) {
-			labels += " [+label time]";
+			labels += words.statusLabelTimestamps;
 		}
 		return labels;
 	}
@@ -373,7 +377,7 @@ class TreeList implements Component {
 		const lines: string[] = [];
 
 		if (this.filteredNodes.length === 0) {
-			lines.push(truncateToWidth(theme.fg("muted", "  No entries found"), width));
+			lines.push(truncateToWidth(theme.fg("muted", interfaceText().selectors.tree.empty), width));
 			lines.push(truncateToWidth(theme.fg("muted", `  (0/0)${this.getStatusLabels()}`), width));
 			return lines;
 		}
@@ -433,6 +437,7 @@ class TreeList implements Component {
 
 	private getEntryDisplayText(node: SessionTreeNode, isSelected: boolean): string {
 		const entry = node.entry;
+		const words = interfaceText().selectors.tree;
 		let result: string;
 
 		const normalize = (s: string) => s.replace(/[\n\t]/g, " ").trim();
@@ -444,19 +449,19 @@ class TreeList implements Component {
 				if (role === "user") {
 					const msgWithContent = msg as { content?: unknown };
 					const content = normalize(extractTextContent(msgWithContent.content, 200));
-					result = theme.fg("accent", "user: ") + content;
+					result = theme.fg("accent", words.roleUser) + content;
 				} else if (role === "assistant") {
 					const msgWithContent = msg as { content?: unknown; stopReason?: string; errorMessage?: string };
 					const textContent = normalize(extractTextContent(msgWithContent.content, 200));
 					if (textContent) {
-						result = theme.fg("success", "assistant: ") + textContent;
+						result = theme.fg("success", words.roleAssistant) + textContent;
 					} else if (msgWithContent.stopReason === "aborted") {
-						result = theme.fg("success", "assistant: ") + theme.fg("muted", "(aborted)");
+						result = theme.fg("success", words.roleAssistant) + theme.fg("muted", words.aborted);
 					} else if (msgWithContent.errorMessage) {
 						const errMsg = normalize(msgWithContent.errorMessage).slice(0, 80);
-						result = theme.fg("success", "assistant: ") + theme.fg("error", errMsg);
+						result = theme.fg("success", words.roleAssistant) + theme.fg("error", errMsg);
 					} else {
-						result = theme.fg("success", "assistant: ") + theme.fg("muted", "(no content)");
+						result = theme.fg("success", words.roleAssistant) + theme.fg("muted", words.noContent);
 					}
 				} else if (role === "toolResult") {
 					const toolMsg = msg as { toolCallId?: string; toolName?: string };
@@ -464,11 +469,14 @@ class TreeList implements Component {
 					if (toolCall) {
 						result = theme.fg("muted", formatTreeToolCall(toolCall.name, toolCall.arguments, shortenTreePath));
 					} else {
-						result = renderTitleBadge(theme, { label: toolMsg.toolName ?? "tool", badgeColor: "muted" });
+						result = renderTitleBadge(theme, {
+							label: toolMsg.toolName ?? words.toolFallback,
+							badgeColor: "muted",
+						});
 					}
 				} else if (role === "bashExecution") {
 					const bashMsg = msg as { command?: string };
-					result = `${renderTitleBadge(theme, { label: "bash", badgeColor: "dim" })}: ${normalize(bashMsg.command ?? "")}`;
+					result = `${renderTitleBadge(theme, { label: words.roleBash, badgeColor: "dim" })}: ${normalize(bashMsg.command ?? "")}`;
 				} else {
 					result = renderTitleBadge(theme, { label: role, badgeColor: "dim" });
 				}
@@ -482,47 +490,47 @@ class TreeList implements Component {
 			case "compaction": {
 				const tokens = Math.round(entry.tokensBefore / 1000);
 				result = renderTitleBadge(theme, {
-					label: "compaction",
-					details: [{ text: `${tokens}k tokens`, color: "borderAccent" }],
+					label: words.compaction,
+					details: [{ text: words.compactionTokens(tokens), color: "borderAccent" }],
 					badgeColor: "borderAccent",
 				});
 				break;
 			}
 			case "branch_summary":
-				result = `${renderTitleBadge(theme, { label: "branch summary", badgeColor: "warning" })}: ${normalize(entry.summary)}`;
+				result = `${renderTitleBadge(theme, { label: words.branchSummary, badgeColor: "warning" })}: ${normalize(entry.summary)}`;
 				break;
 			case "model_change":
 				result = renderTitleBadge(theme, {
-					label: "model",
+					label: words.modelChange,
 					details: [{ text: entry.modelId, color: "dim" }],
 					badgeColor: "dim",
 				});
 				break;
 			case "thinking_level_change":
 				result = renderTitleBadge(theme, {
-					label: "thinking",
+					label: words.thinkingChange,
 					details: [{ text: entry.thinkingLevel, color: "dim" }],
 					badgeColor: "dim",
 				});
 				break;
 			case "custom":
 				result = renderTitleBadge(theme, {
-					label: "record",
+					label: words.record,
 					details: [{ text: plainLabel(entry.customType), color: "dim" }],
 					badgeColor: "dim",
 				});
 				break;
 			case "label":
 				result = renderTitleBadge(theme, {
-					label: "label",
-					details: [{ text: entry.label ?? "(cleared)", color: "dim" }],
+					label: words.label,
+					details: [{ text: entry.label ?? words.labelCleared, color: "dim" }],
 					badgeColor: "dim",
 				});
 				break;
 			case "session_info":
 				result = renderTitleBadge(theme, {
-					label: "title",
-					details: [{ text: entry.name ?? "empty", color: "dim", italic: !entry.name }],
+					label: words.sessionTitle,
+					details: [{ text: entry.name ?? words.sessionTitleEmpty, color: "dim", italic: !entry.name }],
 					badgeColor: "dim",
 				});
 				break;
@@ -728,10 +736,11 @@ class SearchLine implements Component {
 
 	render(width: number): string[] {
 		const query = this.treeList.getSearchQuery();
+		const prompt = interfaceText().selectors.tree.search;
 		if (query) {
-			return [truncateToWidth(`  ${theme.fg("muted", "Type to search:")} ${theme.fg("accent", query)}`, width)];
+			return [truncateToWidth(`  ${theme.fg("muted", prompt)} ${theme.fg("accent", query)}`, width)];
 		}
-		return [truncateToWidth(`  ${theme.fg("muted", "Type to search:")}`, width)];
+		return [truncateToWidth(`  ${theme.fg("muted", prompt)}`, width)];
 	}
 
 	handleInput(_keyData: string): void {}
@@ -767,12 +776,13 @@ class LabelInput implements Component, Focusable {
 	render(width: number): string[] {
 		const lines: string[] = [];
 		const indent = "  ";
-		const availableWidth = width - indent.length;
-		lines.push(truncateToWidth(`${indent}${theme.fg("muted", "Label (empty to remove):")}`, width));
+		const words = interfaceText().selectors.tree;
+		const availableWidth = width - visibleWidth(indent);
+		lines.push(truncateToWidth(`${indent}${theme.fg("muted", words.labelPrompt)}`, width));
 		lines.push(...this.input.render(availableWidth).map((line) => truncateToWidth(`${indent}${line}`, width)));
 		lines.push(
 			truncateToWidth(
-				`${indent}${keyHint("tui.select.confirm", "save")}  ${keyHint("tui.select.cancel", "cancel")}`,
+				`${indent}${keyHint("tui.select.confirm", interfaceText().selectors.shared.save)}  ${keyHint("tui.select.cancel", interfaceText().selectors.shared.cancel)}`,
 				width,
 			),
 		);
@@ -842,7 +852,8 @@ export class TreeSelectorComponent extends Container implements Focusable {
 
 		this.addChild(new Spacer(1));
 		this.addChild(new DynamicBorder());
-		this.addChild(new Text(theme.bold("  Session Tree"), 1, 0));
+		const words = interfaceText().selectors.tree;
+		this.addChild(new Text(theme.bold(words.title), 1, 0));
 		const filterKeys = [
 			keyText("app.tree.filter.default"),
 			keyText("app.tree.filter.noTools"),
@@ -856,7 +867,13 @@ export class TreeSelectorComponent extends Container implements Focusable {
 			new TruncatedText(
 				theme.fg(
 					"muted",
-					`  ↑/↓: move. ←/→: page. ${branchKeys}: fold/branch. ${keyText("app.tree.editLabel")}: label. ${filterKeys}: filters (${cycleKeys} cycle). ${keyText("app.tree.toggleLabelTimestamp")}: label time`,
+					words.hints(
+						branchKeys,
+						keyText("app.tree.editLabel"),
+						filterKeys,
+						cycleKeys,
+						keyText("app.tree.toggleLabelTimestamp"),
+					),
 				),
 				0,
 				0,

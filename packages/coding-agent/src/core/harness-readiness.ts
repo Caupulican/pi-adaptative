@@ -4,6 +4,8 @@
  * cannot serve is the owner's to fix once, at session start.
  */
 
+import { interfaceText } from "./language/interface-text.ts";
+
 export type ReadinessFix = "workers_use_session_model" | "enable_delegation";
 
 export interface ReadinessProblem {
@@ -17,11 +19,12 @@ export interface ReadinessProblem {
 
 /** The owner's words for a skip reason of the worker admission; undefined for a reason that needs no owner action. */
 export function describeReadinessProblem(reason: string): ReadinessProblem | undefined {
+	const text = interfaceText().dialogs.readiness;
 	if (reason === "worker_delegation_disabled")
 		return {
-			text: "Delegation is turned off, so the orchestrator cannot start workers.",
+			text: text.delegationOff,
 			fix: "enable_delegation",
-			fixText: "Turn delegation on",
+			fixText: text.delegationFix,
 		};
 	if (
 		reason.startsWith("orchestration_model_policy_no_allowed_model") ||
@@ -30,9 +33,9 @@ export function describeReadinessProblem(reason: string): ReadinessProblem | und
 		reason.startsWith("worker_model_not_allowed")
 	)
 		return {
-			text: "Workers have no model they are allowed to use, so delegated work would fail.",
+			text: text.workersNoModel,
 			fix: "workers_use_session_model",
-			fixText: "Let workers use this session's model",
+			fixText: text.workersFix,
 		};
 	return undefined;
 }

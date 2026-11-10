@@ -1,4 +1,5 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Text } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { FitnessRole } from "../../../core/models/fitness-role.ts";
 import { getSelectListTheme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
@@ -8,55 +9,17 @@ const FITNESS_ROLE_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
 	maxPrimaryColumnWidth: 34,
 };
 
-/** The role options in presentation order — one source of truth for the list AND pre-selection. */
-const FITNESS_ROLE_ITEMS: readonly SelectItem[] = [
-	{
-		value: "curator",
-		label: "Context curator",
-		description: "Local brain: digests GC-packed stubs, scores stale-chunk relevance (enables curation)",
-	},
-	{
-		value: "executor",
-		label: "Toolkit executor",
-		description:
-			"Owns direct toolkit commands end-to-end (exact command matches route here; needs the tool-call check)",
-	},
-	{
-		value: "scout",
-		label: "Repository scout",
-		description:
-			"Repository scout role; writes scout.model and enables the scout tool after its fitness check passes",
-	},
-	{
-		value: "router-cheap",
-		label: "Router: cheap tier",
-		description: "Handles trivial/read-only routed turns (model router settings)",
-	},
-	{
-		value: "router-medium",
-		label: "Router: medium tier",
-		description: "Handles normal implementation turns (model router settings)",
-	},
-	{
-		value: "router-expensive",
-		label: "Router: expensive tier",
-		description: "Handles high-impact/architecture turns (model router settings)",
-	},
-	{
-		value: "learning",
-		label: "Learning",
-		description:
-			"Explicit/background learning passes; automatic reflection uses the orchestrator's current session turn",
-	},
-	{
-		value: "none",
-		label: "No role for now",
-		description: "Keep the result in the fitness store only (assign later from /settings)",
-	},
-];
-
 /** The assignable roles in the order the selector presents them (index 0 is the default landing). */
-export const FITNESS_ROLE_ORDER: readonly FitnessRole[] = FITNESS_ROLE_ITEMS.map((item) => item.value as FitnessRole);
+export const FITNESS_ROLE_ORDER: readonly FitnessRole[] = [
+	"curator",
+	"executor",
+	"scout",
+	"router-cheap",
+	"router-medium",
+	"router-expensive",
+	"learning",
+	"none",
+];
 
 /**
  * Post-probe role assignment: after /fitness measures a model, this selector turns the result
@@ -76,13 +39,14 @@ export class FitnessRoleSelectorComponent extends Container {
 		super();
 
 		this.addChild(new DynamicBorder());
-		this.addChild(new Text(`Assign a role for ${modelRef}:`, 1, 0));
-		this.selectList = new SelectList(
-			[...FITNESS_ROLE_ITEMS],
-			8,
-			getSelectListTheme(),
-			FITNESS_ROLE_SELECT_LIST_LAYOUT,
-		);
+		const text = interfaceText().selectors.fitnessRole;
+		this.addChild(new Text(text.prompt(modelRef), 1, 0));
+		const items: SelectItem[] = FITNESS_ROLE_ORDER.map((role) => ({
+			value: role,
+			label: text.roles[role].label,
+			description: text.roles[role].description,
+		}));
+		this.selectList = new SelectList(items, 8, getSelectListTheme(), FITNESS_ROLE_SELECT_LIST_LAYOUT);
 		this.selectList.onSelect = (item) => onSelect(item.value as FitnessRole);
 		this.selectList.onCancel = () => onCancel();
 		if (preselectRole) {

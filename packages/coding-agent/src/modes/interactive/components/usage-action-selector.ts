@@ -1,4 +1,5 @@
 import { Container, type SelectItem, SelectList, type SelectListLayoutOptions, Spacer, Text } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { getSelectListTheme, theme } from "../../../presentation/theme-model.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 import { SelectorNavigationFooter } from "./selector-list.ts";
@@ -38,7 +39,7 @@ export class UsageActionSelectorComponent extends Container {
 		this.selectList.onSelect = (item) => options.onSelect(item.value);
 		this.selectList.onCancel = options.onCancel;
 		this.addChild(this.selectList);
-		this.addChild(new SelectorNavigationFooter("select"));
+		this.addChild(new SelectorNavigationFooter(interfaceText().selectors.shared.select));
 	}
 
 	handleInput(data: string): void {
