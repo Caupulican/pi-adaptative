@@ -641,12 +641,22 @@ export class ScriptedSystemOneTransport {
 	};
 }
 
-/** One commit of the virtual repository: the full tree it records and its subject line. */
+/** The identity a commit records, which is the line `--author` matches and the identity `user.email` answers. */
+interface GitAuthor {
+	readonly name: string;
+	readonly email: string;
+}
+
+/** One commit of the virtual repository: the full tree it records, its subject line and who wrote it when. */
 interface GitCommit {
 	readonly sha: string;
 	readonly parent: string | undefined;
 	readonly tree: ReadonlyMap<string, string>;
 	readonly subject: string;
+	/** Undefined until a journey gives the repository an identity: a commit of no known author. */
+	readonly author: GitAuthor | undefined;
+	/** The author date in git's `%aI` form, a function of the commit's order rather than of the clock. */
+	readonly authoredAt: string;
 }
 
 type GitHead = { readonly kind: "branch"; readonly ref: string } | { readonly kind: "detached"; readonly sha: string };
@@ -715,6 +725,165 @@ function gitRelative(from: string, to: string): string {
 }
 
 /**
+ * Commits of the fixture are dated by their order, not by the clock: the first at a fixed instant, each later one a minute
+ * after it, in `%aI` form. Nothing in a journey reads a wall clock, and newest-last stays true.
+ */
+const AUTHOR_DATE_BASE_MS = Date.parse("2026-01-01T00:00:00Z");
+const AUTHOR_DATE_STEP_MS = 60_000;
+
+/** One line of an edit script: kept, removed or added, in reading order. */
+interface DiffLine {
+	readonly kind: "equal" | "delete" | "insert";
+	readonly text: string;
+}
+
+/** One unified-diff hunk: its `@@` header and the lines it shows. */
+interface DiffHunk {
+	readonly header: string;
+	readonly lines: readonly DiffLine[];
+}
+
+/** A file's lines as git counts them: one entry per line, the final newline ending the last one. */
+function splitContent(content: string): string[] {
+	const body = content.endsWith("\n") ? content.slice(0, -1) : content;
+	return body === "" ? [] : body.split("\n");
+}
+
+/**
+ * The edit script of two line lists, from the longest common subsequence. The fixture's files are small, so the
+ * quadratic table is the simplest exact answer; it is what git's unified output is a rendering of.
+ */
+function lineDiff(before: readonly string[], after: readonly string[]): DiffLine[] {
+	const columns = after.length + 1;
+	const lengths = new Uint32Array((before.length + 1) * columns);
+	for (let row = before.length - 1; row >= 0; row--) {
+		for (let column = after.length - 1; column >= 0; column--) {
+			lengths[row * columns + column] =
+				before[row] === after[column]
+					? (lengths[(row + 1) * columns + column + 1] ?? 0) + 1
+					: Math.max(lengths[(row + 1) * columns + column] ?? 0, lengths[row * columns + column + 1] ?? 0);
+		}
+	}
+	const script: DiffLine[] = [];
+	let row = 0;
+	let column = 0;
+	while (row < before.length || column < after.length) {
+		if (row < before.length && column < after.length && before[row] === after[column]) {
+			script.push({ kind: "equal", text: before[row] ?? "" });
+			row++;
+			column++;
+		} else if (
+			column < after.length &&
+			(row >= before.length ||
+				(lengths[row * columns + column + 1] ?? 0) > (lengths[(row + 1) * columns + column] ?? 0))
+		) {
+			script.push({ kind: "insert", text: after[column] ?? "" });
+			column++;
+		} else {
+			script.push({ kind: "delete", text: before[row] ?? "" });
+			row++;
+		}
+	}
+	return script;
+}
+
+/**
+ * The script as git's hunks: changes closer than `2 * context` kept lines share one hunk, as git joins them, and each
+ * `@@` header names the enclosing line of the before side, as git's default function-name pattern does.
+ */
+function unifiedHunks(script: readonly DiffLine[], context: number, before: readonly string[]): DiffHunk[] {
+	const hunks: DiffHunk[] = [];
+	let position = 0;
+	while (position < script.length) {
+		while (position < script.length && script[position]?.kind === "equal") position++;
+		if (position >= script.length) break;
+		const first = position;
+		let last = position;
+		let cursor = position;
+		while (cursor < script.length) {
+			if (script[cursor]?.kind !== "equal") {
+				last = cursor;
+				cursor++;
+				continue;
+			}
+			let runEnd = cursor;
+			while (runEnd < script.length && script[runEnd]?.kind === "equal") runEnd++;
+			if (runEnd === script.length || runEnd - cursor > context * 2) break;
+			cursor = runEnd;
+		}
+		const start = Math.max(0, first - context);
+		const stop = Math.min(script.length, last + 1 + context);
+		const lines = script.slice(start, stop);
+		const keptBefore = script.slice(0, start);
+		const oldBefore = keptBefore.filter((line) => line.kind !== "insert").length;
+		const newBefore = keptBefore.filter((line) => line.kind !== "delete").length;
+		const oldCount = lines.filter((line) => line.kind !== "insert").length;
+		const newCount = lines.filter((line) => line.kind !== "delete").length;
+		const oldStart = oldCount === 0 ? oldBefore : oldBefore + 1;
+		const newStart = newCount === 0 ? newBefore : newBefore + 1;
+		const enclosing = before
+			.slice(0, oldCount === 0 ? oldStart : oldStart - 1)
+			.findLast((line) => /^[A-Za-z_$]/.test(line));
+		const heading = enclosing === undefined ? "" : ` ${enclosing}`;
+		hunks.push({
+			header: `@@ -${rangeOf(oldStart, oldCount)} +${rangeOf(newStart, newCount)} @@${heading}`,
+			lines,
+		});
+		position = stop;
+	}
+	return hunks;
+}
+
+/** One side of a hunk header: git prints the count only when it is not one. */
+function rangeOf(start: number, count: number): string {
+	return count === 1 ? `${start}` : `${start},${count}`;
+}
+
+/**
+ * A `:(glob)` pathspec as git's wildmatch reads it with pathname matching: `**\/` also matches no directory at all,
+ * `**` crosses directory boundaries, and `*` and `?` never cross one. Character classes are not modelled.
+ */
+function globPathspec(pattern: string): (path: string) => boolean {
+	if (/[[\]]/.test(pattern)) throw new Error(`Unscripted glob pathspec: ${pattern}`);
+	const source = pattern
+		.replaceAll(/[.+^${}()|\\]/g, (character) => `\\${character}`)
+		.replaceAll(/\*\*\/|\*\*|\*|\?/g, (token) =>
+			token === "**/" ? "(?:[^/]+/)*" : token === "**" ? ".*" : token === "*" ? "[^/]*" : "[^/]",
+		);
+	const expression = new RegExp(`^${source}$`);
+	return (path) => expression.test(path);
+}
+
+/** The value of the `--name=value` option in a git argument list, or undefined when the call does not carry it. */
+function optionValue(args: readonly string[], prefix: string): string | undefined {
+	return args.find((arg) => arg.startsWith(prefix))?.slice(prefix.length);
+}
+
+/**
+ * Whether an author filter names this commit, as `--fixed-strings --author=` does: a fixed substring of the commit's
+ * `Name <email>` line, which is how a bracketed address selects one identity and not another that contains it.
+ */
+function matchesAuthor(commit: GitCommit, author: string | undefined): boolean {
+	if (author === undefined) return true;
+	if (commit.author === undefined) return false;
+	return `${commit.author.name} <${commit.author.email}>`.includes(author);
+}
+
+/** The `--format` placeholders the fixture models: the commit id, its author date, its subject and git's separator. */
+function expandLogFormat(format: string, commit: GitCommit): string {
+	const placeholders = /%(?:H|aI|s|x1f|%)/g;
+	const leftover = format.replaceAll(placeholders, "").match(/%[A-Za-z]/);
+	if (leftover !== null) throw new Error(`Unscripted log format: ${leftover[0]}`);
+	return format.replaceAll(placeholders, (token) => {
+		if (token === "%H") return commit.sha;
+		if (token === "%aI") return commit.authoredAt;
+		if (token === "%s") return commit.subject;
+		if (token === "%x1f") return "\u001f";
+		return "%";
+	});
+}
+
+/**
  * Stateful git for the worktree-sync engine and the SDK's own git reads. Commits, branches, worktrees, the
  * staged snapshot, merges and rebases are real state transitions; the working files and the git dirs live in
  * the world's virtual filesystem. Only the subcommands the production code issues are implemented; any other
@@ -733,6 +902,8 @@ export class VirtualGit {
 	private readonly refs = new Map<string, string>();
 	private readonly worktrees = new Map<string, GitWorktree>();
 	private counter = 0;
+	/** The identity the repository is configured with, which every commit records until a `-c user.email=` replaces it. */
+	private identity: GitAuthor | undefined;
 	/** Blob contents by object id; tree contents by tree id; scratch index files by GIT_INDEX_FILE path. */
 	private readonly blobs = new Map<string, string>();
 	private readonly trees = new Map<string, ReadonlyMap<string, string>>();
@@ -758,7 +929,7 @@ export class VirtualGit {
 	initialize(branch: string, committed: Readonly<Record<string, string>>): void {
 		this.io.mkdirSync(this.commonDir, { recursive: true });
 		const tree = new Map(Object.entries(committed));
-		const sha = this.commit(tree, undefined, "Initial commit");
+		const sha = this.commit(tree, undefined, "Initial commit", this.identity);
 		this.refs.set(`refs/heads/${branch}`, sha);
 		this.worktrees.set(this.root, {
 			path: this.root,
@@ -768,6 +939,14 @@ export class VirtualGit {
 			unmerged: new Map(),
 			rebase: undefined,
 		});
+	}
+
+	/**
+	 * Gives the repository the identity its configuration holds, the way the other state here is set: `user.email`
+	 * answers it from now on, and every later commit is authored with it. Undefined leaves the repository unnamed.
+	 */
+	configureIdentity(email: string, name = "Harness Owner"): void {
+		this.identity = { name, email };
 	}
 
 	/** The commit a ref names in the virtual repository, or undefined when the ref does not exist. */
@@ -821,15 +1000,20 @@ export class VirtualGit {
 	): GitOutcome {
 		try {
 			const args = [...argv];
+			/** The `-c key=value` options of this call: one run's configuration, as git reads it above every file. */
+			const config: Record<string, string> = {};
 			// These native global options affect presentation/path parsing, not the repository's state transitions.
 			while (args[0]?.startsWith("-")) {
 				if (args[0] === "--no-pager" || args[0] === "--literal-pathspecs") args.shift();
-				else if (args[0] === "-c" && args[1]?.includes("=")) args.splice(0, 2);
-				else throw new Error(`Unscripted Git global option: ${args[0]}`);
+				else if (args[0] === "-c" && args[1]?.includes("=")) {
+					const [key = "", ...value] = (args[1] ?? "").split("=");
+					config[key] = value.join("=");
+					args.splice(0, 2);
+				} else throw new Error(`Unscripted Git global option: ${args[0]}`);
 			}
 			// Outside any repository every git command fails the way real git fails.
 			if (this.worktreeFor(cwd) === undefined) return { code: 128, stdout: "", stderr: NOT_A_REPOSITORY };
-			return this.dispatch(args, cwd, env, input);
+			return this.dispatch(args, cwd, env, input, config);
 		} catch (error) {
 			// Every throw is an unscripted command: it is recorded here so the close check cannot miss it.
 			this.unscripted.push(
@@ -844,6 +1028,7 @@ export class VirtualGit {
 		cwd: string,
 		env: Readonly<Record<string, string | undefined>>,
 		input: string | undefined,
+		config: Readonly<Record<string, string>>,
 	): GitOutcome {
 		const [command = "", ...rest] = args;
 		switch (command) {
@@ -856,12 +1041,17 @@ export class VirtualGit {
 			case "write-tree":
 				return this.writeTree(env);
 			case "config":
-				// git init writes core.filemode; any other unset key is exit status 1 unless --default is supplied.
+				// git init writes core.filemode; the repository's own identity is set by a journey; any other unset key is
+				// exit status 1 unless --default is supplied.
 				if (
 					(rest[0] === "--get" && rest[1] === "core.filemode") ||
 					(rest[0] === "--default" && rest[2] === "--get" && rest[3] === "core.filemode")
 				)
 					return { code: 0, stdout: "true\n", stderr: "" };
+				if (rest[0] === "--get" && rest[1] === "user.email") {
+					if (this.identity !== undefined) return { code: 0, stdout: `${this.identity.email}\n`, stderr: "" };
+					return { code: 1, stdout: "", stderr: "" };
+				}
 				if (rest[0] === "--default" && rest[2] === "--get" && rest[3] !== undefined)
 					return { code: 0, stdout: `${rest[1] ?? ""}\n`, stderr: "" };
 				if (rest[0] === "--get" && rest[1] !== undefined) return { code: 1, stdout: "", stderr: "" };
@@ -879,7 +1069,7 @@ export class VirtualGit {
 			case "add":
 				return this.addCommand(rest, cwd);
 			case "commit":
-				return this.commitCommand(rest, cwd);
+				return this.commitCommand(rest, cwd, config);
 			case "diff":
 				return this.diffCommand(rest, cwd);
 			case "show":
@@ -921,12 +1111,28 @@ export class VirtualGit {
 		return { code: step.code, stdout: step.stdout, stderr: step.stderr };
 	}
 
-	private commit(tree: ReadonlyMap<string, string>, parent: string | undefined, subject: string): string {
+	private commit(
+		tree: ReadonlyMap<string, string>,
+		parent: string | undefined,
+		subject: string,
+		author: GitAuthor | undefined,
+	): string {
+		const sequence = this.counter++;
 		const sha = createHash("sha1")
-			.update(JSON.stringify([parent ?? "", subject, [...tree].sort(), this.counter++]))
+			.update(JSON.stringify([parent ?? "", subject, [...tree].sort(), sequence]))
 			.digest("hex");
-		this.commits.set(sha, { sha, parent, tree: new Map(tree), subject });
+		const authoredAt = new Date(AUTHOR_DATE_BASE_MS + sequence * AUTHOR_DATE_STEP_MS)
+			.toISOString()
+			.replace(/\.\d{3}Z$/, "+00:00");
+		this.commits.set(sha, { sha, parent, tree: new Map(tree), subject, author, authoredAt });
 		return sha;
+	}
+
+	/** The identity a commit made in this run records: its `-c user.email=`/`-c user.name=`, else the configured one. */
+	private authorFor(config: Readonly<Record<string, string>>): GitAuthor | undefined {
+		const email = config["user.email"] ?? this.identity?.email;
+		if (email === undefined) return undefined;
+		return { name: config["user.name"] ?? this.identity?.name ?? email, email };
 	}
 
 	private worktreeFor(cwd: string): GitWorktree | undefined {
@@ -1087,12 +1293,14 @@ export class VirtualGit {
 				arg === "--show-toplevel" ||
 				arg === "--git-common-dir" ||
 				arg === "--git-path" ||
-				arg === "--absolute-git-dir"
+				arg === "--absolute-git-dir" ||
+				arg === "--is-inside-work-tree"
 			) {
 				if (!worktree) return { code: 128, stdout: "", stderr: NOT_A_REPOSITORY };
 				if (arg === "--show-toplevel") out.push(worktree.path);
 				else if (arg === "--git-common-dir") out.push(this.commonDir);
 				else if (arg === "--absolute-git-dir") out.push(worktree.gitDir);
+				else if (arg === "--is-inside-work-tree") out.push("true");
 				else out.push(join(worktree.gitDir, args[++index] ?? ""));
 				continue;
 			}
@@ -1499,7 +1707,7 @@ export class VirtualGit {
 		return { code: 0, stdout: "", stderr: "" };
 	}
 
-	private commitCommand(args: readonly string[], cwd: string): GitOutcome {
+	private commitCommand(args: readonly string[], cwd: string, config: Readonly<Record<string, string>>): GitOutcome {
 		const worktree = this.worktreeFor(cwd);
 		if (!worktree) return { code: 128, stdout: "", stderr: NOT_A_REPOSITORY };
 		const messageIndex = args.indexOf("-m");
@@ -1513,7 +1721,7 @@ export class VirtualGit {
 		) {
 			return { code: 1, stdout: "nothing to commit\n", stderr: "" };
 		}
-		const next = this.commit(worktree.index, parent, subject);
+		const next = this.commit(worktree.index, parent, subject, this.authorFor(config));
 		if (worktree.head.kind === "branch") this.refs.set(worktree.head.ref, next);
 		else worktree.head = { kind: "detached", sha: next };
 		return { code: 0, stdout: "", stderr: "" };
@@ -1602,11 +1810,110 @@ export class VirtualGit {
 		}
 		const commit = this.commits.get(this.resolveCommit(revision, cwd) ?? "");
 		if (commit === undefined) return { code: 128, stdout: "", stderr: `fatal: bad revision '${revision}'\n` };
+		// Two forms ask for a rendering without the commit heading, and both spell the format empty: the changed paths
+		// (`--name-only -z`) and one path's patch (`-U<n>`). Every other `--format=` value, `medium` included, is ignored as
+		// it always was, and the heading stays.
+		const formats = options.filter((option) => option.startsWith("--format="));
+		const silent = formats.length > 0 && formats.every((option) => option === "--format=");
+		const listing = silent && options.includes("--name-only") && options.includes("-z");
+		const patch = silent && options.some((option) => /^-U\d+$/.test(option));
+		if (listing || patch) return this.renderCommitChange(commit, options, args, cwd);
 		const change = this.renderDiff(this.treeOf(commit.parent), commit.tree, args, cwd);
 		const heading = options.includes("--oneline")
 			? `${commit.sha.slice(0, 7)} ${commit.subject}\n`
 			: `commit ${commit.sha}\n\n    ${commit.subject}\n\n`;
 		return { ...change, stdout: heading + change.stdout };
+	}
+
+	/**
+	 * `show --format=`: the commit's change with no heading, either its paths (`--name-only`, NUL-separated with `-z`) or
+	 * each path's unified patch with the `-U<n>` context asked for. Unlike the older renderer below, which the journeys
+	 * pinned to its whole-file `-`/`+` blocks, this renders the form git prints for a patch.
+	 */
+	private renderCommitChange(
+		commit: GitCommit,
+		options: readonly string[],
+		args: readonly string[],
+		cwd: string,
+	): GitOutcome {
+		const before = this.treeOf(commit.parent);
+		const paths = this.selectedPaths(before, commit.tree, args, cwd);
+		if (options.includes("--name-only")) {
+			const terminator = options.includes("-z") ? "\0" : "\n";
+			return { code: 0, stdout: paths.map((path) => `${path}${terminator}`).join(""), stderr: "" };
+		}
+		const context = options.findLast((option) => /^-U\d+$/.test(option));
+		const lines = context === undefined ? 3 : Number(context.slice("-U".length));
+		return {
+			code: 0,
+			stdout: paths.map((path) => this.unifiedPatch(path, before.get(path), commit.tree.get(path), lines)).join(""),
+			stderr: "",
+		};
+	}
+
+	/** The paths one commit changed, in path order, that the call's pathspecs select. */
+	private selectedPaths(
+		before: ReadonlyMap<string, string>,
+		after: ReadonlyMap<string, string>,
+		args: readonly string[],
+		cwd: string,
+	): string[] {
+		const separator = args.indexOf("--");
+		const selected = this.pathspecMatcher(separator < 0 ? [] : args.slice(separator + 1), cwd);
+		return [...new Set([...before.keys(), ...after.keys()])]
+			.filter((path) => before.get(path) !== after.get(path) && selected(path))
+			.sort();
+	}
+
+	/**
+	 * The one reading of a pathspec: a plain path and `:(literal)` are worktree-relative, `:/` is the whole repository,
+	 * `:(top,literal)` is root-relative, and `:(exclude,glob)` removes what its glob matches. Include specs decide
+	 * together, and an empty include set means every path.
+	 */
+	private pathspecMatcher(specs: readonly string[], cwd: string): (path: string) => boolean {
+		const worktree = this.worktreeFor(cwd);
+		if (worktree === undefined) throw new Error("A pathspec needs a working tree");
+		const includes: Array<(path: string) => boolean> = [];
+		const excludes: Array<(path: string) => boolean> = [];
+		for (const spec of specs) {
+			if (spec.startsWith(":(exclude,glob)")) excludes.push(globPathspec(spec.slice(":(exclude,glob)".length)));
+			else if (spec === ":/") includes.push(() => true);
+			else if (spec.startsWith(":(top,literal)")) {
+				const path = spec.slice(":(top,literal)".length);
+				includes.push((candidate) => candidate === path);
+			} else if (spec.startsWith(":(literal)")) {
+				const path = gitRelative(worktree.path, resolve(cwd, spec.slice(":(literal)".length)));
+				includes.push((candidate) => candidate === path);
+			} else if (spec.startsWith(":")) throw new Error(`Unscripted pathspec: ${spec}`);
+			else {
+				const path = gitRelative(worktree.path, resolve(cwd, spec));
+				includes.push((candidate) => path === "" || candidate === path || candidate.startsWith(`${path}/`));
+			}
+		}
+		return (path) =>
+			(includes.length === 0 || includes.some((matches) => matches(path))) &&
+			!excludes.some((matches) => matches(path));
+	}
+
+	/** One path's change as git's unified patch with `context` kept lines, or with git's markers for an added or deleted file. */
+	private unifiedPatch(path: string, old: string | undefined, next: string | undefined, context: number): string {
+		const lines = [`diff --git a/${path} b/${path}`];
+		if (old === undefined) lines.push("new file mode 100644");
+		if (next === undefined) lines.push("deleted file mode 100644");
+		const oldBlob = old === undefined ? "0000000" : this.blobOf(old).slice(0, 7);
+		const newBlob = next === undefined ? "0000000" : this.blobOf(next).slice(0, 7);
+		const mode = old !== undefined && next !== undefined ? " 100644" : "";
+		lines.push(`index ${oldBlob}..${newBlob}${mode}`);
+		lines.push(old === undefined ? "--- /dev/null" : `--- a/${path}`);
+		lines.push(next === undefined ? "+++ /dev/null" : `+++ b/${path}`);
+		const before = old === undefined ? [] : splitContent(old);
+		const after = next === undefined ? [] : splitContent(next);
+		for (const hunk of unifiedHunks(lineDiff(before, after), context, before)) {
+			lines.push(hunk.header);
+			for (const line of hunk.lines)
+				lines.push(`${line.kind === "equal" ? " " : line.kind === "delete" ? "-" : "+"}${line.text}`);
+		}
+		return `${lines.join("\n")}\n`;
 	}
 
 	/** One literal path selection and patch renderer for working-tree diffs and committed changes. */
@@ -1620,22 +1927,13 @@ export class VirtualGit {
 		if (worktree === undefined) return { code: 128, stdout: "", stderr: NOT_A_REPOSITORY };
 		const dashes = args.indexOf("--");
 		const options = args.slice(0, dashes < 0 ? args.length : dashes);
-		const pathspecs =
-			dashes < 0
-				? []
-				: args
-						.slice(dashes + 1)
-						.map((spec) => gitRelative(worktree.path, resolve(cwd, spec.replace(/^:\(literal\)/, ""))));
+		const selected = this.pathspecMatcher(dashes < 0 ? [] : args.slice(dashes + 1), cwd);
 		const readAfter = (path: string): string | undefined =>
 			after ? after.get(path) : this.readWorking(worktree, path);
 		const candidates = new Set([...before.keys(), ...(after ? after.keys() : worktree.index.keys())]);
 		const added = args.includes("--diff-filter=A");
 		const changed = [...candidates]
-			.filter(
-				(path) =>
-					pathspecs.length === 0 ||
-					pathspecs.some((spec) => spec === "" || path === spec || path.startsWith(`${spec}/`)),
-			)
+			.filter((path) => selected(path))
 			.sort()
 			.map((path) => ({ path, old: before.get(path), next: readAfter(path) }))
 			.filter(({ old, next }) => old !== next)
@@ -1728,6 +2026,7 @@ export class VirtualGit {
 	}
 
 	private revListCommand(args: readonly string[], cwd: string): GitOutcome {
+		if (args.includes("--count") && !args.includes("--left-right")) return this.revListCount(args, cwd);
 		const range = args.find((arg) => arg.includes("..."));
 		if (range === undefined || !args.includes("--left-right") || !args.includes("--count")) {
 			throw new Error(`Unscripted rev-list: ${args.join(" ")}`);
@@ -1746,10 +2045,67 @@ export class VirtualGit {
 	private logCommand(args: readonly string[], cwd: string): GitOutcome {
 		const sha = args.at(-1) ?? "";
 		const commit = this.commits.get(this.resolveCommit(sha, cwd) ?? "");
-		if (args[0] !== "-1" || args[1] !== "--format=%s" || commit === undefined) {
-			throw new Error(`Unscripted log: ${args.join(" ")}`);
+		if (args[0] === "-1" && args[1] === "--format=%s" && commit !== undefined) {
+			return { code: 0, stdout: `${commit.subject}\n`, stderr: "" };
 		}
-		return { code: 0, stdout: `${commit.subject}\n`, stderr: "" };
+		return this.logListing(args, cwd);
+	}
+
+	/**
+	 * `rev-list --count --no-merges --fixed-strings --author=<...> <from>..<to>`: the commits reachable from `<to>` and not
+	 * from `<from>` that the author filter names, which is what a later look would read. No merge exists here.
+	 */
+	private revListCount(args: readonly string[], cwd: string): GitOutcome {
+		const author = optionValue(args, "--author=");
+		for (const option of args) {
+			if (option === "--count" || option === "--no-merges" || option === "--fixed-strings") continue;
+			if (option.startsWith("--author=")) continue;
+			if (option.includes("..") && !option.includes("...")) continue;
+			throw new Error(`Unscripted rev-list: ${option}`);
+		}
+		const range = args.find((arg) => arg.includes("..") && !arg.includes("..."));
+		if (range === undefined) throw new Error(`Unscripted rev-list: ${args.join(" ")}`);
+		const [fromRef = "", toRef = ""] = range.split("..");
+		const from = this.resolveCommit(fromRef, cwd);
+		const to = this.resolveCommit(toRef, cwd);
+		if (from === undefined || to === undefined)
+			return { code: 128, stdout: "", stderr: `fatal: bad revision '${range}'\n` };
+		const excluded = this.ancestorsOf(from);
+		let count = 0;
+		let current: string | undefined = to;
+		while (current !== undefined && !excluded.has(current)) {
+			const commit = this.commits.get(current);
+			if (commit !== undefined && matchesAuthor(commit, author)) count++;
+			current = commit?.parent;
+		}
+		return { code: 0, stdout: `${count}\n`, stderr: "" };
+	}
+
+	/**
+	 * `log --no-merges --fixed-strings --author=<...> --max-count=N --format=<...> HEAD`, newest first: the one listing form
+	 * the reader runs, with the author matched as a fixed substring of the commit's `Name <email>` line.
+	 */
+	private logListing(args: readonly string[], cwd: string): GitOutcome {
+		const revision = args.at(-1) ?? "";
+		const author = optionValue(args, "--author=");
+		const maxCount = Number(optionValue(args, "--max-count=") ?? Number.POSITIVE_INFINITY);
+		const format = optionValue(args, "--format=");
+		for (const option of args.slice(0, -1)) {
+			if (option === "--no-merges" || option === "--fixed-strings") continue;
+			if (["--author=", "--max-count=", "--format="].some((prefix) => option.startsWith(prefix))) continue;
+			throw new Error(`Unscripted log option: ${option}`);
+		}
+		if (format === undefined) throw new Error(`Unscripted log: ${args.join(" ")}`);
+		let current = this.resolveCommit(revision, cwd);
+		if (current === undefined) return { code: 128, stdout: "", stderr: `fatal: bad revision '${revision}'\n` };
+		const lines: string[] = [];
+		while (current !== undefined && lines.length < maxCount) {
+			const commit = this.commits.get(current);
+			if (commit === undefined) break;
+			if (matchesAuthor(commit, author)) lines.push(expandLogFormat(format, commit));
+			current = commit.parent;
+		}
+		return { code: 0, stdout: lines.map((line) => `${line}\n`).join(""), stderr: "" };
 	}
 
 	private updateRef(args: readonly string[]): GitOutcome {
@@ -1895,7 +2251,7 @@ export class VirtualGit {
 					stderr: `${detail.join("\n")}\nerror: could not apply ${sha.slice(0, 7)}... ${commit.subject}\n`,
 				};
 			}
-			rebase.replayHead = this.commit(worktree.index, rebase.replayHead, commit.subject);
+			rebase.replayHead = this.commit(worktree.index, rebase.replayHead, commit.subject, commit.author);
 			rebase.todo.shift();
 			rebase.done++;
 		}
@@ -1944,8 +2300,10 @@ export class VirtualGit {
 			worktree.index.set(path, working);
 		}
 		worktree.unmerged.clear();
-		const subject = this.commits.get(rebase.stoppedAt)?.subject ?? "";
-		rebase.replayHead = this.commit(worktree.index, rebase.replayHead, subject);
+		// A replay keeps the author of the commit it replaces, as git does.
+		const stopped = this.commits.get(rebase.stoppedAt ?? "");
+		const subject = stopped?.subject ?? "";
+		rebase.replayHead = this.commit(worktree.index, rebase.replayHead, subject, stopped?.author);
 		rebase.todo.shift();
 		rebase.done++;
 		rebase.stoppedAt = undefined;

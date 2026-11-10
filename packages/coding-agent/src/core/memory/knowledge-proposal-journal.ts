@@ -10,6 +10,10 @@
  * A proposal is offered once. Its id digests the project key, the kind and the normalized text, so the same proposal
  * is one row in any status, also after it was accepted or rejected. A decision erases its text and evidence and keeps
  * the id, status and times, which is all that is needed to refuse an offer of the same proposal again.
+ *
+ * The same connection carries one more small table, `knowledge_origin_looks`: what an origin already looked at in a
+ * project, so a repeated look reads only what is new ({@link KnowledgeOriginLookJournal}). It is created the same way,
+ * it changes no schema version, and what it holds is not owner evidence either.
  */
 import { createHash } from "node:crypto";
 import { type SqliteDatabase, withSqliteTransaction } from "../context/sqlite-database.ts";
@@ -24,10 +28,17 @@ export const KNOWLEDGE_PROPOSAL_SCHEMA = `CREATE TABLE IF NOT EXISTS knowledge_p
 ) STRICT;
 CREATE INDEX IF NOT EXISTS knowledge_proposals_project ON knowledge_proposals(project,status,offered_at);`;
 
+export const KNOWLEDGE_ORIGIN_LOOK_SCHEMA = `CREATE TABLE IF NOT EXISTS knowledge_origin_looks (
+ project TEXT NOT NULL, origin TEXT NOT NULL, cursor TEXT NOT NULL, recorded_at TEXT NOT NULL,
+ PRIMARY KEY(project, origin)
+) STRICT;`;
+
 export const MAX_PENDING_PROPOSALS = 20;
 export const MAX_PROPOSAL_EVIDENCE = 8;
 export const MAX_PROPOSAL_EVIDENCE_REF_CHARS = 80;
 export const MAX_PROPOSAL_EVIDENCE_NOTE_CHARS = 200;
+/** A look's cursor is opaque to this table: its meaning is the origin's, and its length is bounded here anyway. */
+export const MAX_ORIGIN_LOOK_CURSOR_CHARS = 200;
 const MAX_ORIGIN_CHARS = 60;
 
 export type KnowledgeProposalStatus = "pending" | "accepted" | "rejected";
@@ -222,5 +233,66 @@ export class KnowledgeProposalJournal {
 			},
 			"Knowledge proposal decision",
 		);
+	}
+}
+
+/** What one origin already looked at in one project: its own opaque cursor and when it recorded it. */
+export interface KnowledgeOriginLook {
+	/** Opaque text this table never interprets: for a repository origin, the head commit that was read. */
+	readonly cursor: string;
+	/** When the look was recorded, ISO 8601. */
+	readonly recordedAt: string;
+}
+
+/** A project key of a look: any bounded text, empty for a global look, exactly as a proposal's project. */
+function lookProject(project: unknown): string {
+	if (typeof project !== "string" || project.length > MAX_KNOWLEDGE_NAME_CHARS || project.includes("\0"))
+		throw new TypeError("Invalid origin look project");
+	return project;
+}
+
+/** A bounded, non-empty, secret-free text field of a look; nothing here interprets its content. */
+function lookText(value: unknown, max: number, what: string): string {
+	if (typeof value !== "string" || !value.trim() || value.length > max || value.includes("\0"))
+		throw new TypeError(`Invalid origin look ${what}`);
+	if (hasMaskableSecretText(value)) throw new TypeError(`An origin look ${what} must not contain secrets`);
+	return value;
+}
+
+/**
+ * What an origin already looked at, per project key and origin label, so a repeated look reads only what is new since
+ * the cursor it recorded. One row per project and origin: recording replaces the previous look.
+ */
+export class KnowledgeOriginLookJournal {
+	private readonly db: SqliteDatabase;
+	private readonly now: () => number;
+
+	constructor(db: SqliteDatabase, now: () => number = Date.now) {
+		this.db = db;
+		this.now = now;
+		db.exec(KNOWLEDGE_ORIGIN_LOOK_SCHEMA);
+	}
+
+	/** The last look this origin recorded in this project, or undefined when it never looked. */
+	last(project: string, origin: string): KnowledgeOriginLook | undefined {
+		const row = this.db
+			.prepare("SELECT cursor,recorded_at FROM knowledge_origin_looks WHERE project=? AND origin=?")
+			.get(lookProject(project), lookText(origin, MAX_ORIGIN_CHARS, "origin"));
+		if (row === undefined) return undefined;
+		if (typeof row.cursor !== "string" || typeof row.recorded_at !== "string")
+			throw new Error("Invalid origin look row");
+		return { cursor: row.cursor, recordedAt: row.recorded_at };
+	}
+
+	/** Records a look, replacing this project's previous one for this origin. */
+	record(project: string, origin: string, cursor: string): KnowledgeOriginLook {
+		const look = {
+			cursor: lookText(cursor, MAX_ORIGIN_LOOK_CURSOR_CHARS, "cursor"),
+			recordedAt: new Date(this.now()).toISOString(),
+		};
+		this.db
+			.prepare("INSERT OR REPLACE INTO knowledge_origin_looks(project,origin,cursor,recorded_at) VALUES(?,?,?,?)")
+			.run(lookProject(project), lookText(origin, MAX_ORIGIN_CHARS, "origin"), look.cursor, look.recordedAt);
+		return look;
 	}
 }

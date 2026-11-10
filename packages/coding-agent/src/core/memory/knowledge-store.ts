@@ -8,7 +8,7 @@ import { constructSqliteDatabase, type SqliteDatabase, withSqliteTransaction } f
 import type { TimerPort } from "../util/timer-port.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { KNOWLEDGE_COLLECTION_SCHEMA, KnowledgeCollectionJournal } from "./knowledge-collection-journal.ts";
-import { KnowledgeProposalJournal } from "./knowledge-proposal-journal.ts";
+import { KnowledgeOriginLookJournal, KnowledgeProposalJournal } from "./knowledge-proposal-journal.ts";
 import {
 	isKnowledgeCitation,
 	isKnowledgeScope,
@@ -95,6 +95,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 	readonly collection: KnowledgeCollectionJournal;
 	readonly work: KnowledgeWorkJournal;
 	readonly proposals: KnowledgeProposalJournal;
+	readonly originLooks: KnowledgeOriginLookJournal;
 	private closed = false;
 	private unknownKindsChecked = false;
 
@@ -107,6 +108,7 @@ export class KnowledgeStore implements KnowledgeStorePort {
 		this.collection = new KnowledgeCollectionJournal(db, collectionTime);
 		this.work = new KnowledgeWorkJournal(db, hasUsageReceipt);
 		this.proposals = new KnowledgeProposalJournal(db);
+		this.originLooks = new KnowledgeOriginLookJournal(db);
 	}
 
 	/** `hasUsageReceipt` is the owning session's usage owner: it releases work a crashed process left measured. */

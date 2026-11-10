@@ -13,6 +13,7 @@ import { runJourney1ProactivityPhase } from "./journey-1-proactivity.ts";
 import { runJourney1RoutinesPhase } from "./journey-1-routines.ts";
 import { verifySessionReplacementTerminalIdentity } from "./journey-1-session-replacement.ts";
 import { runJourney1TastePhase } from "./journey-1-taste.ts";
+import { runJourney1TasteHistoryPhase } from "./journey-1-taste-history.ts";
 import { runJourney1WorkerBudgetsPhase } from "./journey-1-worker-budgets.ts";
 import { runJourney1WriteReservationsPhase } from "./journey-1-write-reservations.ts";
 /**
@@ -136,6 +137,7 @@ export async function runJourney1(): Promise<void> {
 			await runJourney1ProactivityPhase(world);
 			await runJourney1RoutinesPhase(world);
 			await runJourney1HostEventsPhase(world);
+			await runJourney1TasteHistoryPhase(world);
 			await runJourney1HostShutdownPhase(world);
 			await verifySessionReplacementTerminalIdentity(world);
 		},
