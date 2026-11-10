@@ -66,9 +66,20 @@ Forgetting is conservative about existing work identities: a retired result is n
 ```
 /taste [<after-id>]
 /taste export [path]
+/taste proposals
+/taste accept <id>
+/taste reject <id>
 ```
 
 `/taste` prints Markdown: one heading for this project's taste and one for global taste (a heading with no facts is left out), the facts grouped by subject. Each fact shows its basis (`stated` or `inferred`), the number of distinct original owner sources behind it across all its revisions, the date of its last evidence and its short id. More than a page continues with `/taste <after-id>`. `/taste export` writes the same Markdown to `.pi/taste.md` in the working directory, or to the given path, with a first line saying it is a generated view. A relative path must stay inside the working directory. Edit facts with `/knowledge correct` and `/knowledge forget`.
+
+A taste proposal is a candidate fact that waits for the owner. A proposal records the text, the scope (this project or global), where it came from (for example `repository-history`) and at most eight evidence references, such as a commit id with a short description. A proposal is not knowledge: it is not retrieved, not projected to any model and not evidence. Nothing a proposal source finds becomes knowledge until the owner accepts it. At most 20 proposals wait per project, and a proposal is never offered twice, also after it was accepted or rejected.
+
+- `/taste proposals` lists the waiting proposals for this project and global, each with its text, scope, origin, evidence references and short id.
+- `/taste accept <id>` asks the owner to confirm the exact text and scope. When the owner confirms, the typed command is the evidence: the fact is stated with basis `stated` and one owner-command citation, and the proposal is marked accepted. If the same fact already exists, nothing changes and the proposal stays pending; use `/knowledge correct`. Without an owner UI nothing changes.
+- `/taste reject <id>` marks the proposal rejected. It is not proposed again. A decided proposal keeps only its id, status and times; its text and evidence are erased.
+
+Proposals live in their own table of the knowledge store. The store's schema version is unchanged, so an earlier version of pi can still read the store.
 
 `list`, `show` and `history` page current records, citations and revisions with their provenance: owner message or owner command, evidence dates, revision, scope and validity. An ID may be a unique prefix of at least eight characters. `correct` replaces the value verbatim and keeps the fact's identity, scope and validity; the old value stays in history. `forget` removes the value, its history and its names and leaves only the identity digest as an evidence barrier. Both ask for confirmation on the owner's screen first and are refused without an owner UI. They pass through the same admission and store fences as the `knowledge` tool (expected revision, forgotten sources, newer-evidence rules, replay receipts) and run no judge and spend nothing, with or without System One. The typed command, its session and its time are the change's evidence; they are never added to the owner-evidence ledger, so model and collector proposals still cite only original owner messages.
 

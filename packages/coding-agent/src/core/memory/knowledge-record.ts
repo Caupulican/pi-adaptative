@@ -96,7 +96,7 @@ export const OWNER_COMMAND_SOURCE_PREFIX = "owner-command:";
 export const MAX_KNOWLEDGE_TEXT_CHARS = 2_000;
 export const MAX_KNOWLEDGE_CITATIONS = 16;
 export const MAX_KNOWLEDGE_PAGE_SIZE = 100;
-const MAX_NAME_CHARS = 200;
+export const MAX_KNOWLEDGE_NAME_CHARS = 200;
 const RECORD_KEYS = [
 	"id",
 	"revision",
@@ -135,9 +135,9 @@ export function isKnowledgeScope(value: unknown): value is KnowledgeScope {
 	return (
 		isPlainRecord(value) &&
 		hasOnlyKeys(value, ["project", "role", "audience"]) &&
-		boundedString(value.project, MAX_NAME_CHARS, true) &&
-		boundedString(value.role, MAX_NAME_CHARS, true) &&
-		boundedString(value.audience, MAX_NAME_CHARS)
+		boundedString(value.project, MAX_KNOWLEDGE_NAME_CHARS, true) &&
+		boundedString(value.role, MAX_KNOWLEDGE_NAME_CHARS, true) &&
+		boundedString(value.audience, MAX_KNOWLEDGE_NAME_CHARS)
 	);
 }
 
@@ -145,8 +145,8 @@ export function isKnowledgeCitation(value: unknown): value is KnowledgeCitation 
 	return (
 		isPlainRecord(value) &&
 		hasOnlyKeys(value, ["sourceId", "sessionId", "quote", "at"]) &&
-		boundedString(value.sourceId, MAX_NAME_CHARS) &&
-		boundedString(value.sessionId, MAX_NAME_CHARS) &&
+		boundedString(value.sourceId, MAX_KNOWLEDGE_NAME_CHARS) &&
+		boundedString(value.sessionId, MAX_KNOWLEDGE_NAME_CHARS) &&
 		boundedString(value.quote, MAX_KNOWLEDGE_TEXT_CHARS) &&
 		isKnowledgeTimestamp(value.at)
 	);
@@ -174,8 +174,8 @@ export function parseKnowledgeRecord(value: unknown): KnowledgeRecord {
 		!hasOnlyKeys(value, RECORD_KEYS) ||
 		!KNOWLEDGE_KINDS.some((kind) => kind === value.kind) ||
 		!isKnowledgeScope(value.scope) ||
-		!boundedString(value.subject, MAX_NAME_CHARS) ||
-		!boundedString(value.key, MAX_NAME_CHARS) ||
+		!boundedString(value.subject, MAX_KNOWLEDGE_NAME_CHARS) ||
+		!boundedString(value.key, MAX_KNOWLEDGE_NAME_CHARS) ||
 		!boundedString(value.text, MAX_KNOWLEDGE_TEXT_CHARS) ||
 		(value.basis !== "explicit" && value.basis !== "inferred") ||
 		typeof value.revision !== "number" ||
@@ -221,8 +221,8 @@ export function parseKnowledgeSlot(value: unknown): KnowledgeSlot {
 		!hasOnlyKeys(value, ["id", "revision", "kind", "scope", "subject", "key"]) ||
 		!KNOWLEDGE_KINDS.some((kind) => kind === value.kind) ||
 		!isKnowledgeScope(value.scope) ||
-		!boundedString(value.subject, MAX_NAME_CHARS) ||
-		!boundedString(value.key, MAX_NAME_CHARS) ||
+		!boundedString(value.subject, MAX_KNOWLEDGE_NAME_CHARS) ||
+		!boundedString(value.key, MAX_KNOWLEDGE_NAME_CHARS) ||
 		typeof value.revision !== "number" ||
 		!Number.isSafeInteger(value.revision) ||
 		value.revision < 1

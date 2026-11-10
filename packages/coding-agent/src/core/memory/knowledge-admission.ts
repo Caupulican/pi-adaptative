@@ -16,12 +16,15 @@ import { strictCanonicalDigest, withoutUndefinedMembers } from "../steering/cano
 import { isPlainRecord } from "../util/value-guards.ts";
 import { type CitedOwnerWords, ownerCitationRefusal } from "./knowledge-citation.ts";
 import { KnowledgeGrounding } from "./knowledge-grounding.ts";
+import type { KnowledgeProposalJournal } from "./knowledge-proposal-journal.ts";
 import {
 	isKnowledgeCitation,
 	isKnowledgeTimestamp,
 	KNOWLEDGE_KINDS,
 	type KnowledgeCitation,
+	type KnowledgeKind,
 	type KnowledgeMutationReceipt,
+	type KnowledgeOperation,
 	type KnowledgeRecord,
 	type KnowledgeScope,
 	type KnowledgeSlot,
@@ -29,6 +32,7 @@ import {
 	knowledgeAppliesTo,
 	knowledgeId,
 	MAX_KNOWLEDGE_CITATIONS,
+	MAX_KNOWLEDGE_NAME_CHARS,
 	MAX_KNOWLEDGE_PAGE_SIZE,
 	MAX_KNOWLEDGE_TEXT_CHARS,
 	OWNER_COMMAND_SOURCE_PREFIX,
@@ -140,6 +144,16 @@ export interface KnowledgeAdmissionOperation {
  * collector can construct it; `command` is the owner's text as typed and becomes the citation quote.
  */
 export type KnowledgeOwnerCommand =
+	| {
+			/** States a new fact the owner confirmed; an existing identity is corrected with `correct`, never overwritten. */
+			readonly action: "state";
+			readonly kind: KnowledgeKind;
+			readonly scope: "project" | "global";
+			readonly subject: string;
+			readonly key: string;
+			readonly text: string;
+			readonly command: string;
+	  }
 	| { readonly action: "forget"; readonly id: string; readonly expectedRevision: number; readonly command: string }
 	| {
 			readonly action: "correct";
@@ -153,7 +167,10 @@ export type KnowledgeOwnerCommand =
 /** The owner's `/knowledge` view and exact-record commands, in the owner's own scope. */
 export interface KnowledgeOwnerControls {
 	readonly scope: KnowledgeScope;
-	readonly store: Pick<KnowledgeStorePort, "revision" | "get" | "list" | "resolve" | "history" | "sourceCount">;
+	readonly store: Pick<KnowledgeStorePort, "revision" | "get" | "list" | "resolve" | "history" | "sourceCount"> & {
+		/** Candidates waiting for the owner; deciding one is not stating it, which only `command` does. */
+		readonly proposals: Pick<KnowledgeProposalJournal, "listPending" | "resolve" | "decide">;
+	};
 	/** Admits after the owner confirmed; the admission is created here so no dialog holds its fences open. */
 	command(input: KnowledgeOwnerCommand, signal?: AbortSignal): KnowledgeAdmissionOutcome;
 }
@@ -195,6 +212,16 @@ interface ScreenedChange {
 	readonly liveOwn?: KnowledgeRecord;
 	/** The proposal's exact identity was forgotten: relearning continues its revision under the store's fences. */
 	readonly forgottenOwn?: { id: string; revision: number };
+}
+
+/** The owner's typed command as its own evidence; `notBefore` orders it after any evidence already retained. */
+function ownerCitation(operationId: string, sessionId: string, command: string, notBefore: number): KnowledgeCitation {
+	return {
+		sourceId: `${OWNER_COMMAND_SOURCE_PREFIX}${operationId}`,
+		sessionId,
+		quote: command,
+		at: new Date(Math.max(Date.now(), notBefore)).toISOString(),
+	};
 }
 
 /** Every exact scope whose records apply to `scope`: global and project reach, any role and this role. */
@@ -735,6 +762,7 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 	 * reads its meaning and nothing is spent. Exact identity, revision, evidence fences and receipts stay the store's.
 	 */
 	ownerCommand(input: KnowledgeOwnerCommand, sessionId: string, signal?: AbortSignal): KnowledgeAdmissionOutcome {
+		if (input.action === "state") return this.ownerStatement(input, sessionId, signal);
 		const text = input.action === "correct" ? input.text.trim() : undefined;
 		if (
 			!/^[a-f0-9]{64}$/.test(input.id) ||
@@ -744,27 +772,18 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 		)
 			return held("invalid_change", "never", "Invalid owner knowledge command");
 		const { store, scope } = this.deps;
-		const digest = strictCanonicalDigest({
-			ownerCommand: {
+		const fence = this.ownerFence(
+			{
 				action: input.action,
 				id: input.id,
 				expectedRevision: input.expectedRevision,
 				// A forget has no text: the member is absent, not undefined, so the digest needs no strip.
 				...(text !== undefined ? { text } : {}),
 			},
-			scope,
-		});
-		// The same command against the same revision is one operation: a repeat replays its receipt.
-		const operation = { id: strictCanonicalDigest(["knowledge-owner-command", digest]), digest };
-		const revision = store.revision();
-		const assertCurrent = () => {
-			signal?.throwIfAborted();
-			this.deps.assertCurrent();
-			if (store.revision() !== revision) throw new Error("Knowledge changed during admission; read it again");
-		};
-		assertCurrent();
-		const replay = store.operationReceipt(operation);
-		if (replay) return { status: "applied", ...replay };
+			signal,
+		);
+		if (fence.replay) return { status: "applied", ...fence.replay };
+		const { operation, assertCurrent } = fence;
 		const existing = store.get(input.id);
 		if (!existing || !knowledgeAppliesTo(existing.scope, scope) || existing.revision !== input.expectedRevision)
 			return held(
@@ -774,13 +793,8 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 			);
 		if (hasMaskableSecretText(input.command) || (text !== undefined && hasMaskableSecretText(text)))
 			return held("secret", "never", "Secret-bearing knowledge is not retained");
-		const citation: KnowledgeCitation = {
-			sourceId: `${OWNER_COMMAND_SOURCE_PREFIX}${operation.id}`,
-			sessionId,
-			quote: input.command,
-			// Strictly after the confirmed revision's evidence, as the ledger orders owner sources inside one millisecond.
-			at: new Date(Math.max(Date.now(), Date.parse(existing.lastEvidencedAt) + 1)).toISOString(),
-		};
+		// Strictly after the confirmed revision's evidence, as the ledger orders owner sources inside one millisecond.
+		const citation = ownerCitation(operation.id, sessionId, input.command, Date.parse(existing.lastEvidencedAt) + 1);
 		if (!isKnowledgeCitation(citation)) return held("invalid_change", "never", "Invalid owner knowledge command");
 		if (input.action === "forget")
 			return {
@@ -797,6 +811,97 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 			citations: [citation],
 		});
 		return { status: "applied", ...store.put(record, existing.revision, assertCurrent, signal, operation) };
+	}
+
+	/**
+	 * The same operation fence for every owner command: one digest per typed payload and scope, a repeat replays its
+	 * receipt, and every write re-checks that the host and the store are unchanged since this read.
+	 */
+	private ownerFence(
+		payload: Record<string, unknown>,
+		signal?: AbortSignal,
+	):
+		| { readonly replay: KnowledgeMutationReceipt }
+		| { readonly replay?: undefined; readonly operation: KnowledgeOperation; readonly assertCurrent: () => void } {
+		const { store, scope } = this.deps;
+		const digest = strictCanonicalDigest({ ownerCommand: payload, scope });
+		const operation = { id: strictCanonicalDigest(["knowledge-owner-command", digest]), digest };
+		const revision = store.revision();
+		const assertCurrent = () => {
+			signal?.throwIfAborted();
+			this.deps.assertCurrent();
+			if (store.revision() !== revision) throw new Error("Knowledge changed during admission; read it again");
+		};
+		assertCurrent();
+		const replay = store.operationReceipt(operation);
+		return replay ? { replay } : { operation, assertCurrent };
+	}
+
+	/** A new fact the owner stated by command. An identity that already holds a fact is never overwritten here. */
+	private ownerStatement(
+		input: Extract<KnowledgeOwnerCommand, { action: "state" }>,
+		sessionId: string,
+		signal?: AbortSignal,
+	): KnowledgeAdmissionOutcome {
+		const subject = input.subject.trim();
+		const key = input.key.trim();
+		const text = input.text.trim();
+		if (
+			!KNOWLEDGE_KINDS.some((kind) => kind === input.kind) ||
+			(input.scope !== "project" && input.scope !== "global") ||
+			[subject, key].some((name) => !name || name.length > MAX_KNOWLEDGE_NAME_CHARS || name.includes("\0")) ||
+			!text ||
+			text.length > MAX_KNOWLEDGE_TEXT_CHARS ||
+			text.includes("\0")
+		)
+			return held("invalid_change", "never", "Invalid owner knowledge command");
+		const { store } = this.deps;
+		const scope = { ...this.deps.scope, project: input.scope === "global" ? "" : this.deps.scope.project };
+		const id = knowledgeId({ kind: input.kind, scope, subject, key });
+		const live = store.get(id);
+		// A forgotten identity continues its revision; the store keeps its evidence fence.
+		const evidenceFence = store.evidenceFence(id);
+		// The state this statement is made against, so the same words after a forget are a new operation. A live fact
+		// is read as the statement's own result (its revision minus one): repeating a statement that was applied
+		// replays its receipt, which is what makes the caller's write-then-mark sequence safe to repeat.
+		const previous = live ? live.revision - 1 : (evidenceFence?.revision ?? 0);
+		const fence = this.ownerFence(
+			{ action: input.action, kind: input.kind, scope: input.scope, subject, key, text, previous },
+			signal,
+		);
+		if (fence.replay) return { status: "applied", ...fence.replay };
+		const { operation, assertCurrent } = fence;
+		if (hasMaskableSecretText(input.command) || hasMaskableSecretText(`${subject} ${key} ${text}`))
+			return held("secret", "never", "Secret-bearing knowledge is not retained");
+		if (live)
+			return held(
+				"identity_ambiguous",
+				"never",
+				"This fact is already known; change its value with /knowledge correct <id> <new value>",
+			);
+		// Evidence at or before a forget cannot teach the identity again; this command is strictly newer.
+		const citation = ownerCitation(
+			operation.id,
+			sessionId,
+			input.command,
+			evidenceFence ? Date.parse(evidenceFence.evidenceAfter) + 1 : 0,
+		);
+		if (!isKnowledgeCitation(citation)) return held("invalid_change", "never", "Invalid owner knowledge command");
+		const record = parseKnowledgeRecord({
+			id,
+			revision: previous + 1,
+			kind: input.kind,
+			scope,
+			subject,
+			key,
+			text,
+			basis: "explicit",
+			firstEvidencedAt: citation.at,
+			lastEvidencedAt: citation.at,
+			validFrom: citation.at,
+			citations: [citation],
+		});
+		return { status: "applied", ...store.put(record, previous, assertCurrent, signal, operation) };
 	}
 
 	/**

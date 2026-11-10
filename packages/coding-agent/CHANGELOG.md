@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- Taste proposals the owner accepts or rejects. A candidate `taste` fact can now wait as a proposal: it is not knowledge, is never retrieved or shown to a model, and teaches nothing until the owner decides. `/taste proposals` lists what waits for this project and globally, with where each came from and its evidence references; `/taste accept <id>` asks the owner to confirm the exact text and then states it as the owner's own fact (the typed command is the evidence: basis `stated`, one owner-command citation); `/taste reject <id>` drops it for good. A decided proposal keeps only its id, status and times, and is never offered again. Proposals live in their own table of the knowledge store and the store's schema version is unchanged, so an earlier version of pi still reads the store. Nothing offers proposals yet: this is the base for learning taste from a repository's history.
+
 ### Fixed
 
 - A print-mode run whose last turn ends without an answer reports failure. A model that stopped normally but returned no text (for example after spending its whole reply on reasoning the provider does not return) used to end `pi -p` with exit code 0 and an empty answer. The run now exits 1; text mode prints `The model ended its turn without an answer.` to standard error and the json `result` event carries `outcome: "failed"`, `stopReason: "stop"` and that sentence.

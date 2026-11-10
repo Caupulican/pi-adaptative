@@ -7,6 +7,7 @@ import {
 import { emitKnowledgeCollection } from "../../../../src/core/memory/knowledge-announcement.ts";
 import type { KnowledgeCollectionOutcome } from "../../../../src/core/memory/knowledge-collector.ts";
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
+import { handleKnowledgeCommand } from "../../../../src/modes/interactive/knowledge-commands.ts";
 import { handleTasteCommand } from "../../../../src/modes/interactive/taste-commands.ts";
 import { text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
@@ -54,6 +55,128 @@ const nextCollectionOutcome = (session: AgentSession): Promise<KnowledgeCollecti
 			resolve(event);
 		});
 	});
+
+const PROPOSAL_ONE = "Names boolean variables as questions, such as isReady.";
+const PROPOSAL_REVISED = "Names boolean variables as questions, such as isReady or hasItems.";
+const PROPOSAL_TWO = "Keeps functions under forty lines.";
+
+/**
+ * Proposals wait for the owner: `/taste accept` states one as the owner's own command, `/taste reject` drops one, and
+ * neither the accepted nor the rejected text is offered again. No model turn runs; the host records what is shown.
+ */
+async function runProposalLeg(session: AgentSession, store: KnowledgeStore, agentDir: string): Promise<void> {
+	const owner = { project: "", role: "", audience: "owner" };
+	const offer = (text: string, ref: string) =>
+		store.proposals.offer({
+			project: "",
+			kind: "taste",
+			origin: "repository-history",
+			subject: "owner",
+			key: text.slice(0, 20),
+			text,
+			evidence: [{ ref, note: `Seen in ${ref}` }],
+		});
+	const first = offer(PROPOSAL_ONE, "commit-aaaa111");
+	const second = offer(PROPOSAL_TWO, "commit-bbbb222");
+	if (first.status !== "offered" || second.status !== "offered") throw new Error("Proposals were not offered");
+	const short = (id: string) => id.slice(0, 8);
+
+	const run = async (command: string, confirm: boolean | undefined): Promise<string[]> => {
+		const shown: string[] = [];
+		await handleTasteCommand(
+			{
+				session: {
+					memoryOperator: session.memoryOperator,
+					ownerConfirm: confirm === undefined ? undefined : async () => confirm,
+				},
+				cwd: agentDir,
+				showStatus: (message) => shown.push(message),
+				showError: (message) => shown.push(message),
+				showText: (block) => shown.push(block),
+			},
+			command,
+		);
+		return shown;
+	};
+
+	const listed = await run("/taste proposals", undefined);
+	expect(listed).toHaveLength(1);
+	for (const [id, ref, body] of [
+		[first.id, "commit-aaaa111", PROPOSAL_ONE],
+		[second.id, "commit-bbbb222", PROPOSAL_TWO],
+	] as const) {
+		expect(listed[0]).toContain(body);
+		expect(listed[0]).toContain(ref);
+		expect(listed[0]).toContain(short(id));
+	}
+
+	// Without an owner confirmation nothing changes.
+	expect(await run(`/taste accept ${short(first.id)}`, false)).toEqual([
+		"Nothing changed: the owner did not confirm.",
+	]);
+	expect(await run(`/taste accept ${short(first.id)}`, undefined)).toEqual([
+		"Nothing changed: owner confirmation is unavailable.",
+	]);
+	expect(store.list(owner, { kind: "taste" })).toHaveLength(1);
+	expect((await run("/taste proposals", undefined))[0]).toContain(PROPOSAL_ONE);
+
+	const accepted = await run(`/taste accept ${short(first.id)}`, true);
+	expect(accepted).toHaveLength(1);
+	const stated = store.list(owner, { kind: "taste" }).find((record) => record.text === PROPOSAL_ONE)!;
+	expect(accepted[0]).toContain(`/knowledge show ${short(stated.id)}`);
+	expect(accepted[0]).toContain(short(first.id));
+	expect(stated.basis).toBe("explicit");
+	expect(stated.citations).toHaveLength(1);
+	expect(stated.citations[0]!.sourceId.startsWith("owner-command:")).toBe(true);
+	const shownTaste = await run("/taste", undefined);
+	expect(shownTaste[0]).toContain(PROPOSAL_ONE);
+	expect(shownTaste[0]).toContain("stated");
+	const remaining = (await run("/taste proposals", undefined))[0]!;
+	expect(remaining).toContain(PROPOSAL_TWO);
+	expect(remaining).not.toContain(PROPOSAL_ONE);
+
+	expect(await run(`/taste reject ${short(second.id)}`, undefined)).toEqual([
+		`Rejected proposal ${short(second.id)}. It will not be proposed again.`,
+	]);
+	expect(await run("/taste proposals", undefined)).toEqual(["No taste proposals are waiting."]);
+	expect(store.list(owner, { kind: "taste" }).some((record) => record.text === PROPOSAL_TWO)).toBe(false);
+
+	expect(offer(PROPOSAL_TWO, "commit-cccc333")).toEqual({ status: "known", id: second.id, state: "rejected" });
+	expect(offer(PROPOSAL_ONE, "commit-dddd444")).toEqual({ status: "known", id: first.id, state: "accepted" });
+
+	// A fact the owner forgot can be stated again: the new statement is newer than the forget and is a new operation.
+	const forget: string[] = [];
+	await handleKnowledgeCommand(
+		{
+			session: { memoryOperator: session.memoryOperator, ownerConfirm: async () => true },
+			showStatus: (message) => forget.push(message),
+			showError: (message) => forget.push(message),
+			showText: (block) => forget.push(block),
+		},
+		`/knowledge forget ${short(stated.id)}`,
+	);
+	expect(forget.join("\n")).toContain(`Forgot ${short(stated.id)}`);
+	expect(store.get(stated.id)).toBeUndefined();
+	const again = store.proposals.offer({
+		project: "",
+		kind: "taste",
+		origin: "repository-history",
+		subject: "owner",
+		key: PROPOSAL_ONE.slice(0, 20),
+		text: PROPOSAL_REVISED,
+		evidence: [{ ref: "commit-eeee555", note: "Seen in commit-eeee555" }],
+	});
+	if (again.status !== "offered") throw new Error("The revised proposal was not offered");
+	const restated = await run(`/taste accept ${short(again.id)}`, true);
+	expect(restated).toHaveLength(1);
+	expect(restated[0]).toContain("Accepted proposal");
+	const back = store.get(stated.id)!;
+	expect(back.text).toBe(PROPOSAL_REVISED);
+	expect(back.basis).toBe("explicit");
+	expect(back.revision).toBeGreaterThan(stated.revision);
+	expect(back.citations).toHaveLength(1);
+	expect(back.citations[0]!.sourceId.startsWith("owner-command:")).toBe(true);
+}
 
 /**
  * Part of journey 1: an owner message that plainly states a coding preference is collected as a `taste` fact, and the
@@ -182,6 +305,8 @@ export async function runJourney1TastePhase(world: HarnessWorld): Promise<void> 
 		expect(shown[0]).toContain(TASTE_TEXT);
 		expect(shown[0]).toContain("stated");
 		expect(shown[0]).toContain("1 source");
+
+		await runProposalLeg(root.session, store, agentDir);
 
 		world.systemOne.enterPhase("taste-projection-owner", {
 			...ICM_INTAKE_JUDGMENTS,
