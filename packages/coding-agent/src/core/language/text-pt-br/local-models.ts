@@ -12,8 +12,8 @@ export const LOCAL_MODELS = {
 		thinkingInheritLabel: "(herdar)",
 		thinkingInheritDescription: "Usar o padrão da sessão atual neste nível.",
 		stopStopped: (sidecars: number, prismServer: boolean) =>
-			`Servidor de modelo local do pi parado${sidecars > 0 ? ` (${sidecars} sidecar(s) do Transformers)` : ""}${prismServer ? " (servidor prism llama.cpp)" : ""}; os modelos continuam instalados.`,
-		stopNone: "Nenhum servidor do pi em execução (um servidor do sistema, se houver, não é do pi parar).",
+			`Servidor de modelo local do pi parado${sidecars > 0 ? ` (${sidecars} ${sidecars === 1 ? "sidecar" : "sidecars"} do Transformers)` : ""}${prismServer ? " (servidor prism llama.cpp)" : ""}; os modelos continuam instalados.`,
+		stopNone: "Nenhum servidor do pi em execução (um servidor do sistema, se houver, não cabe ao pi parar).",
 		imported: (args: {
 			sourceDir: string;
 			targetDir: string;
@@ -22,7 +22,7 @@ export const LOCAL_MODELS = {
 			copied: number;
 			skipped: number;
 		}) =>
-			`Modelos do Ollama importados de ${args.sourceDir} para o armazenamento do pi ${args.targetDir}: ${args.manifests} manifesto(s), ${args.hardlinked} blob(s) com hardlink, ${args.copied} blob(s) copiados, ${args.skipped} arquivo(s) já existentes ignorados.`,
+			`Modelos do Ollama importados de ${args.sourceDir} para o armazenamento do pi ${args.targetDir}: ${args.manifests} ${args.manifests === 1 ? "manifesto" : "manifestos"}, ${args.hardlinked} com hardlink, ${args.copied} ${args.copied === 1 ? "copiado" : "copiados"}, ${args.skipped} já ${args.skipped === 1 ? "existente ignorado" : "existentes ignorados"}.`,
 		needleUsage: "Uso: /models needle <query> [tools-json]",
 		needleToolsHint:
 			"  tools-json usa por padrão o conjunto de ferramentas do teste rápido embutido (uma consulta de clima de uma cidade)",
@@ -36,18 +36,19 @@ export const LOCAL_MODELS = {
 		apiModel: (ref: string) =>
 			`${ref} é um modelo de API, não há nada para instalar. Configure a autenticação do provedor e depois sonde com /fitness ${ref}.`,
 		descriptorMissing: (modelId: string) =>
-			`${modelId} não tem descritor curado do prism llama.cpp, isto é um erro de ligação.`,
+			`${modelId} não tem descritor curado do prism llama.cpp, isto é um erro interno de configuração.`,
 		runtimeEnabled: (runtime: string, enabled: boolean) =>
 			`O runtime local ${runtime} agora está ${enabled ? "ativado" : "desativado"}.`,
-		unknownStore: "armazenamento desconhecido (0 modelo(s))",
-		store: (path: string, kind: string, count: number) => `${path} [${kind}, ${count} modelo(s)]`,
+		unknownStore: "armazenamento desconhecido (0 modelos)",
+		store: (path: string, kind: string, count: number) =>
+			`${path} [${kind}, ${count} ${count === 1 ? "modelo" : "modelos"}]`,
 		serverAlreadyRunning: (serverUrl: string) =>
 			`O Ollama já está em execução em ${serverUrl}; esta sessão não consegue verificar a posse nem o armazenamento dele. Pare o outro servidor antes de adicionar modelos.`,
 		startingServer: (binarySource: string, ownedModelsDir: string) =>
 			`Iniciando o servidor de modelo local (binário ${binarySource}, armazenamento próprio: ${ownedModelsDir})…`,
 		startFailed: (reason: string) => `Não foi possível iniciar o servidor local: ${reason}`,
 		listHeader: (activeStore: string, ownedModelsDir: string, count: number) =>
-			`Modelos do Ollama (armazenamento ativo: ${activeStore}; armazenamento do pi: ${ownedModelsDir} com ${count} modelo(s)):`,
+			`Modelos do Ollama (armazenamento ativo: ${activeStore}; armazenamento do pi: ${ownedModelsDir} com ${count} ${count === 1 ? "modelo" : "modelos"}):`,
 		listNone: "  (nenhum instalado: /models add <ref>, /models import ou /models suggest para uma lista validada)",
 		listHeaderDown: "Modelos do Ollama:",
 		listServerDown: (binarySource: string) =>
@@ -65,7 +66,7 @@ export const LOCAL_MODELS = {
 			tokensPerSecond?: number;
 		}) =>
 			`sondado em ${args.at}: digest ${args.digestSucceeded}/${args.digestTotal}, chamadas de ferramenta ${args.toolSucceeded}/${args.toolTotal}${args.tokensPerSecond ? `, ~${args.tokensPerSecond} tok/s` : ""}`,
-		unprobed: (ref: string) => `sem sonda: rode /fitness ${ref}`,
+		unprobed: (ref: string) => `sem sondagem: rode /fitness ${ref}`,
 		transformersRow: (modelId: string, readiness: string, cacheDir: string, probe: string) =>
 			`  - ${modelId} (${readiness}, cache: ${cacheDir}) · ${probe}`,
 		ollamaRow: (name: string, gigabytes: string, probe: string) => `  - ${name} (${gigabytes} GB) · ${probe}`,
@@ -142,7 +143,7 @@ export const LOCAL_MODELS = {
 		needleInstallFailed: (error: string) => `A instalação do needle falhou: ${error}`,
 		needleUnavailable: (runtimeDir: string) => `O needle continua indisponível em ${runtimeDir}.`,
 		needleWeightsFailed: (error: string) => `O download dos pesos do needle falhou: ${error}`,
-		needleSmokeRunning: "Rodando o teste rápido do needle (sonda de chamada de função)…",
+		needleSmokeRunning: "Rodando o teste rápido do needle (sondagem de chamada de função)…",
 		needleSmokeFailed: (error: string) => `O teste rápido do needle falhou: ${error}`,
 		needleSmokeNoCall: "o teste rápido relatou sucesso mas não devolveu nenhuma chamada interpretada",
 		needleVerified: (args: { called: string; argumentsJson: string; latencyMs: number }) =>
@@ -165,7 +166,7 @@ export const LOCAL_MODELS = {
 		needleCall: (latencyMs: number, called: string, argumentsJson: string) =>
 			`needle (${latencyMs}ms): ${called}(${argumentsJson})`,
 		suggestionUnknownPrism: (name: string, modelId: string) =>
-			`A sugestão ${name} aponta para um modelo prism curado desconhecido "${modelId}"; é um erro de ligação.`,
+			`A sugestão ${name} aponta para um modelo prism curado desconhecido "${modelId}"; é um erro interno de configuração.`,
 		suggestionNotInstallable: (name: string, why: string) => `A sugestão ${name} não pode ser instalada: ${why}`,
 		installGuide: {
 			ollama: (distDir: string) => [
@@ -197,10 +198,10 @@ export const LOCAL_MODELS = {
 		probeRunning: (modelRef: string) =>
 			`Sondando o fitness de ${modelRef}… (6 superfícies; modelos locais podem levar alguns minutos)`,
 		allSurfacesFailed: (model: string) =>
-			`${model} falhou na sonda de fitness em todas as superfícies; não configurado. Use /model para defini-lo à mão se aceitar o risco.`,
-		toolProbeRunning: (model: string) => `Sonda real de execução de ferramenta em ${model}…`,
+			`${model} falhou na sondagem de fitness em todas as superfícies; não configurado. Use /model para defini-lo à mão se aceitar o risco.`,
+		toolProbeRunning: (model: string) => `Sondagem real de execução de ferramenta em ${model}…`,
 		toolProbeUnavailable: (model: string, error: string) =>
-			`Sonda real de execução de ferramenta indisponível para ${model}: ${error}`,
+			`Sondagem real de execução de ferramenta indisponível para ${model}: ${error}`,
 		notAssignedTool: (model: string, role: string, failure: string) =>
 			`${model} não atribuído como ${role}: a execução real de ferramenta ${failure}.`,
 		scoutLaneFailed: (lane: string) =>
@@ -213,20 +214,20 @@ export const LOCAL_MODELS = {
 		roleCurator: (modelRef: string) => `Curadoria de contexto ativada com ${modelRef} como curador.`,
 		roleExecutor: (modelRef: string, hint: string) =>
 			`${modelRef} definido como executor do toolkit (acertos diretos de Nível 0 vão para ele).${hint}`,
-		routerDisabledHint: " O model router está desativado; ative em /settings → Model Router.",
+		routerDisabledHint: " O roteador de modelos está desativado; ative em /settings → Roteador de modelos.",
 		roleScout: (modelRef: string) => `${modelRef} definido como scout do repositório e ativado.`,
 		roleSet: (modelRef: string, role: string, hint: string) => `${modelRef} definido como modelo ${role}.${hint}`,
 	},
 	routerSetup: {
-		calibrationEmpty: "Calibração do router: o pool de candidatos está vazio. Configure os modelos primeiro.",
+		calibrationEmpty: "Calibração do roteador: o conjunto de candidatos está vazio. Configure os modelos primeiro.",
 		calibrateOneTitle: "Calibrar um modelo",
 		calibrateOneDescription: (scope: string) =>
-			`Roda o ${scope} (chamadas ao provedor) e depois oferece um papel de router.`,
-		batchNothing: (title: string) => `${title}: nada para calibrar no pool atual.`,
+			`Roda o ${scope} (chamadas ao provedor) e depois oferece um papel no roteador.`,
+		batchNothing: (title: string) => `${title}: nada para calibrar no conjunto atual.`,
 		batchCostKnown: (total: string, models: number) =>
-			`as últimas execuções de fitness custaram $${total} em ${models} modelo(s)`,
+			`as últimas execuções de fitness custaram $${total} em ${models} ${models === 1 ? "modelo" : "modelos"}`,
 		batchCostUnknown: "custo desconhecido até a primeira execução (modelos por assinatura podem custar $0.00)",
-		runOnModels: (models: number) => `Rodar a calibração em ${models} modelo(s)`,
+		runOnModels: (models: number) => `Rodar a calibração em ${models} ${models === 1 ? "modelo" : "modelos"}`,
 		providerCalls: (scope: string, costNote: string) =>
 			`Chamadas ao provedor: sim (${scope}, por modelo). ${costNote}.`,
 		cancelLabel: "Cancelar",
@@ -235,27 +236,28 @@ export const LOCAL_MODELS = {
 		calibrating: (args: { modelRef: string; index: number; total: number; surfaces: string }) =>
 			`Calibrando ${args.modelRef} (${args.index}/${args.total}): ${args.surfaces}…`,
 		calibrationSkipped: (modelRef: string, reason: string) => `Calibração ignorada para ${modelRef}: ${reason}`,
-		toolProbeOn: (modelRef: string) => `Calibrando ${modelRef}: sonda real de execução de ferramenta…`,
+		toolProbeOn: (modelRef: string) => `Calibrando ${modelRef}: sondagem real de execução de ferramenta…`,
 		toolProbeUnavailable: (modelRef: string, error: string) =>
-			`Sonda de ferramenta indisponível para ${modelRef}: ${error}`,
+			`Sondagem de ferramenta indisponível para ${modelRef}: ${error}`,
 		failed: (modelRef: string, error: string) => `A calibração falhou para ${modelRef}: ${error}`,
-		complete: "Calibração do router concluída:",
-		poolFollowsModels: "O pool do router segue a seleção de Modelos; a Configuração do Router mostra o pool editado.",
+		complete: "Calibração do roteador concluída:",
+		poolFollowsModels:
+			"O conjunto do roteador segue a seleção de modelos; a configuração do roteador mostra o conjunto editado.",
 		livePreviewRunning: "Prévia de rota ao vivo em execução (o juiz de roteamento e o H-MoE podem gastar)…",
 		livePreviewFailed: (error: string) => `A prévia de rota ao vivo falhou: ${error}`,
-		unknownAction: (action: string) => `Ação de configuração do router desconhecida: ${action}`,
+		unknownAction: (action: string) => `Ação de configuração do roteador desconhecida: ${action}`,
 		calibrateUnprobedTitle: "Calibrar modelos não sondados",
 		calibrateAllTitle: "Recalibrar modelos selecionados",
 		preview: {
 			intent: (value: string) => `Intenção: ${value}`,
-			baselineTier: (value: string) => `Nível base: ${value}`,
+			baselineTier: (value: string) => `Faixa base: ${value}`,
 			risk: (value: string) => `Risco: ${value}`,
 			reason: (value: string) => `Motivo: ${value}`,
 			selectionMode: (value: string) => `Modo de seleção: ${value}`,
 			manualPin: (value: string) => `Fixação manual: ${value}`,
-			poolSelected: (count: number, source: string) => `Pool: ${count} selecionados (${source})`,
-			poolFavorites: (count: number) => `Pool: ${count} favoritos`,
-			poolPreference: (value: string) => `Preferência de pool: ${value}`,
+			poolSelected: (count: number, source: string) => `Conjunto: ${count} selecionados (${source})`,
+			poolFavorites: (count: number) => `Conjunto: ${count} favoritos`,
+			poolPreference: (value: string) => `Preferência do conjunto: ${value}`,
 			subscriptionCandidates: (count: number) => `Candidatos por assinatura: ${count}`,
 			eligibleCandidates: (count: number) => `Candidatos elegíveis: ${count}`,
 			wouldChoose: (value: string) => `Escolheria: ${value}`,
@@ -264,12 +266,12 @@ export const LOCAL_MODELS = {
 			none: "nenhum",
 			noModel: "nenhum modelo (o turno fica no modelo da sessão)",
 			excludedPin:
-				"Fixação excluída: a fixação manual está fora do pool de candidatos; um favorito elegível é escolhido no lugar.",
+				"Fixação excluída: a fixação manual está fora do conjunto de candidatos; um favorito elegível é escolhido no lugar.",
 			fitness: (value: string) => `Fitness: ${value}`,
-			skipReason: (value: string) => `Motivo de dispensa: ${value}`,
+			skipReason: (value: string) => `Motivo do descarte: ${value}`,
 			candidates: "Candidatos:",
 			deterministic: "Prévia determinística: nenhuma chamada ao provedor foi feita e o modelo da sessão não mudou.",
-			chosenTier: (value: string) => `Nível escolhido: ${value}`,
+			chosenTier: (value: string) => `Faixa escolhida: ${value}`,
 			chosenModel: (value: string) => `Modelo escolhido: ${value}`,
 			preference: (value: string) => `Preferência: ${value}`,
 			reasons: "Motivos:",

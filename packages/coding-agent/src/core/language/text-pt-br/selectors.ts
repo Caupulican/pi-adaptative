@@ -52,8 +52,8 @@ export const SELECTORS = {
 			hours: (count: number) => `${count}h`,
 			days: (count: number) => `${count}d`,
 			weeks: (count: number) => `${count}sem`,
-			months: (count: number) => `${count}${count === 1 ? "mês" : "meses"}`,
-			years: (count: number) => `${count}${count === 1 ? "ano" : "anos"}`,
+			months: (count: number) => `${count} ${count === 1 ? "mês" : "meses"}`,
+			years: (count: number) => `${count} ${count === 1 ? "ano" : "anos"}`,
 		},
 		deletionConfirm: (keys: string) => `Excluir a sessão? ${keys}`,
 		hintScope: "escopo",
@@ -88,7 +88,7 @@ export const SELECTORS = {
 	tree: {
 		title: "  Árvore da sessão",
 		hints: (branch: string, label: string, filters: string, cycle: string, timestamps: string) =>
-			`  ↑/↓: mover. ←/→: página. ${branch}: recolher/branch. ${label}: rótulo. ${filters}: filtros (${cycle} alterna). ${timestamps}: hora do rótulo`,
+			`  ↑/↓: mover. ←/→: página. ${branch}: recolher/branch. ${label}: rótulo. ${filters}: filtros (${cycle} troca). ${timestamps}: hora do rótulo`,
 		statusNoTools: " [sem ferramentas]",
 		statusUserOnly: " [usuário]",
 		statusLabeled: " [com rótulo]",
@@ -100,7 +100,7 @@ export const SELECTORS = {
 		roleUser: "você: ",
 		roleAssistant: "assistente: ",
 		roleBash: "bash",
-		aborted: "(abortado)",
+		aborted: "(interrompido)",
 		noContent: "(sem conteúdo)",
 		toolFallback: "ferramenta",
 		compaction: "compactação",
@@ -154,7 +154,7 @@ export const SELECTORS = {
 	scopedModels: {
 		title: "Configuração de modelos",
 		sessionOnly: (saveKey: string) => `Só nesta sessão. ${saveKey} para salvar nas configurações.`,
-		toggleHint: "alternar",
+		toggleHint: "ativar ou desativar",
 		allHint: "todos",
 		clearHint: "limpar",
 		providerHint: "provedor",
@@ -181,7 +181,7 @@ export const SELECTORS = {
 			curator: {
 				label: "Curador de contexto",
 				description:
-					"Cérebro local: digere stubs compactados pelo GC e pontua a relevância de trechos antigos (ativa a curadoria)",
+					"Curador local: resume os textos compactados pelo GC e pontua a relevância de trechos antigos (ativa a curadoria)",
 			},
 			executor: {
 				label: "Executor do toolkit",
@@ -189,9 +189,9 @@ export const SELECTORS = {
 					"Cuida dos comandos diretos do toolkit de ponta a ponta (comandos exatos roteiam para cá; precisa da checagem de chamada de ferramenta)",
 			},
 			scout: {
-				label: "Batedor do repositório",
+				label: "Scout do repositório",
 				description:
-					"Papel de batedor do repositório; grava scout.model e ativa a ferramenta scout quando a checagem de fitness passa",
+					"Papel de scout do repositório; grava scout.model e ativa a ferramenta scout quando a checagem de fitness passa",
 			},
 			"router-cheap": {
 				label: "Roteador: nível barato",
@@ -208,11 +208,11 @@ export const SELECTORS = {
 			learning: {
 				label: "Aprendizado",
 				description:
-					"Passes explícitos e de segundo plano do aprendizado; a reflexão automática usa o turno atual da sessão do orquestrador",
+					"Passadas de aprendizado explícitas e em segundo plano; a reflexão automática usa o turno atual da sessão do orquestrador",
 			},
 			none: {
 				label: "Nenhum papel por enquanto",
-				description: "Manter o resultado só no acervo de fitness (atribuir depois em /settings)",
+				description: "Manter o resultado só no registro de fitness (atribuir depois em /settings)",
 			},
 		},
 	},

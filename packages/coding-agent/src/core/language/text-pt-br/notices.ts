@@ -39,8 +39,6 @@ export const NOTICES = {
 	retryFailed: (attempts: number, error: string) =>
 		`A nova tentativa falhou depois de ${attempts} tentativas: ${error}`,
 
-	moreCauses: (count: number) => `${count} ${count === 1 ? "mais causa" : "mais causas"}`,
-
 	unhandledRejection: (headline: string) => `Promise rejeitada sem tratamento. A sessão continua. ${headline}`,
 
 	migratedCredentials: (providers: string) => `Credenciais migradas para auth.json: ${providers}`,
@@ -54,8 +52,8 @@ export const NOTICES = {
 		`Curador: ${count} ${count === 1 ? "skill antiga arquivada" : "skills antigas arquivadas"} automaticamente: ${names}. Para restaurar, use /curate restore <name>.`,
 
 	shortcutHandlerError: (message: string) => `Erro no atalho: ${message}`,
-	terminalInputHandlerError: (message: string) => `Erro no tratador de entrada do terminal: ${message}`,
-	handlerFailed: "O tratador falhou.",
+	terminalInputHandlerError: (message: string) => `Erro no handler de entrada do terminal: ${message}`,
+	handlerFailed: "O handler falhou.",
 	extensionError: (extension: string, error: string) => `Erro na extensão "${extension}": ${error}`,
 
 	savingPaused: "Gravação pausada: /resume reabre esta sessão",

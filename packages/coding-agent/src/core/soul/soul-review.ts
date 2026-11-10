@@ -5,12 +5,16 @@ import { settledBoolean } from "../decision/evaluation.ts";
 import type { NoulDirection } from "../decision/noul.ts";
 import { createDecisionProgram } from "../decision/program.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import {
+	SOUL_ADVERSE_CLAUSES,
+	SOUL_REVIEW_UNSETTLED_REASON,
+	type SoulReviewQuestionId,
+} from "./soul-review-clauses.ts";
+
+export type { SoulReviewQuestionId };
 
 /** How long a soul review may take before it counts as failed. */
 export const SOUL_REVIEW_TIMEOUT_MS = 20_000;
-
-/** The decisions a soul review settles. Each id names one decision; its owner-facing words live in the catalogue. */
-export type SoulReviewQuestionId = "override" | "authority" | "covert" | "external" | "identity";
 
 interface SoulReviewQuestion {
 	readonly id: SoulReviewQuestionId;
@@ -135,13 +139,15 @@ export async function reviewSoulText(
 	return { kind: "allow", findings };
 }
 
-/** Why a review rejected the text, in the owner's words: the clause of each adverse decision, joined. */
+/**
+ * Why a review rejected the text, as the agent is told it when its write is refused: the clause of each adverse
+ * decision, joined. A model reads this, so it never follows the interface language.
+ */
 export function soulReviewAdverseClauses(outcome: SoulReviewOutcome): string {
-	const words = interfaceText().smallCommands.soul;
-	if (outcome.kind !== "adverse") return words.reviewUnsettledReason;
+	if (outcome.kind !== "adverse") return SOUL_REVIEW_UNSETTLED_REASON;
 	return outcome.findings
 		.filter((finding) => finding.answer === "adverse")
-		.map((finding) => words.adverseClauses[finding.id])
+		.map((finding) => SOUL_ADVERSE_CLAUSES[finding.id])
 		.join("; ");
 }
 

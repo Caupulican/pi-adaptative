@@ -16,17 +16,21 @@ The values are `"auto"` (follow the system), `"en"` and `"pt-BR"`. A change appl
 
 ## What is translated
 
-The always-visible frame is translated: the footer, the working and waiting words, the activity lane, the operator bar, the input's hints, the key descriptions in the shortcuts window (`/hotkeys`), and the built-in slash commands' descriptions.
+The whole terminal interface: the frame around the conversation (the footer, the working and waiting words, the activity lane, the operator bar, the input's hints), the work panel and its panes, the settings screens, the selectors and dialogs, the chrome and the notices of the conversation, the output of the slash commands, the key descriptions in the shortcuts window (`/hotkeys`), and the few words the terminal library draws itself (an empty list, the loader, the titles of markdown alerts). In Portuguese the root conversation is **Mente**.
 
-The work panel is translated too: the conversation roster (**Conversas**, where the root conversation is **Mente**), the pane titles and their buttons, the work plan, the orchestration, checks and edge sections, the chrome of bot and team conversations, and the graph's views.
+Numbers and dates in reports are written the language's way.
 
-Dialogs, selectors, the output of commands and the help text are still English; they follow area by area.
+A few status reports still carry English lines beside the translated ones: the session's autonomy status and the model router's status among them. They are being moved over.
 
 ## What stays English
 
-Everything a model reads stays English in every language: the system prompt, tool names and descriptions, tool results, the briefs and reports of workers, plan updates and the goal's context. The interface language changes what the owner sees and nothing a model is told, so it has no effect on behaviour or on the prompt cache.
+Everything a model reads stays English in every language: the system prompt, tool names and descriptions, tool results and refusals, the briefs and reports of workers, plan updates and the goal's context. The interface language changes what the owner sees and nothing a model is told, so it has no effect on behaviour or on the prompt cache. A text that reaches both the screen and a model, such as the reason a refused call is given, is English for both.
 
-Command names, their arguments and identifiers such as model names, thinking levels and status codes are also the same in every language.
+Command names, their arguments and identifiers such as model names, thinking levels, setting keys and status codes are the same in every language. So is a value you type or that `settings.json` holds: a model setting's `active`, for example, is written `active` in Portuguese too.
+
+Text written by you or by a model (a goal's words, a plan step, a bot's name, a session's title) is shown as it was written.
+
+The command line outside the interface is English: `pi --help`, print mode (`pi -p`), RPC mode, and the records the harness writes to disk.
 
 ## Adding text
 

@@ -712,8 +712,6 @@ class SettingsListSubmenu extends Container {
 			getSettingsListTheme(),
 			onChange,
 			onCancel,
-			{
-			},
 		);
 		this.addChild(this.settingsList);
 	}
@@ -3337,9 +3335,7 @@ export class SettingsSelectorComponent extends Container {
 				}
 			},
 			callbacks.onCancel,
-			{
-				enableSearch: true,
-			},
+			{ enableSearch: true },
 		);
 
 		this.addChild(this.settingsList);

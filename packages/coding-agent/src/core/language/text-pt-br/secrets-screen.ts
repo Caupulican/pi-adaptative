@@ -29,14 +29,14 @@ export const SECRETS_SCREEN = {
 		reconnected: "Bitwarden reconectado com as credenciais da máquina.",
 		locked: "O acesso às credenciais do Pi está bloqueado nesta sessão.",
 		profileRequired: "O nome do perfil de credenciais é obrigatório.",
-		noGitRemote: "Este projeto não tem um remoto Git portátil, então a ligação fica local nesta máquina.",
+		noGitRemote: "Este projeto não tem um remoto Git portátil, então o vínculo fica local nesta máquina.",
 	},
 	prompts: {
 		profile: "Perfil de credenciais",
 		profilePlaceholder: "Exemplo: deploy-prod",
 		updateTitle: "Atualizar perfil de credenciais",
 		updateBody: (profile: string) =>
-			`Substituir os valores gravados de ${profile} e manter as ligações aos projetos?`,
+			`Substituir os valores gravados de ${profile} e manter os vínculos com os projetos?`,
 		description: "Descrição",
 		descriptionPlaceholder: "Descrição opcional, sem segredo",
 		shape: "Formato da credencial",
@@ -58,7 +58,7 @@ export const SECRETS_SCREEN = {
 		activated: (profile: string, project: string, variables: string) =>
 			`${profile} ativado em ${project} (${variables}).`,
 		bindTitle: "Usar perfil neste projeto",
-		bound: (profile: string, project: string) => `${profile} ligado a ${project}.`,
+		bound: (profile: string, project: string) => `${profile} vinculado a ${project}.`,
 		removeTitle: "Excluir perfil de credenciais",
 		removeBody: (profile: string) => `Mover ${profile} para a lixeira do Bitwarden e limpar seu ambiente ativo?`,
 		removed: (profile: string, variables: string) => `${profile} excluído (${variables}).`,

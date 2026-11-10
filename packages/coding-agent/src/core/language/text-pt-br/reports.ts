@@ -55,10 +55,10 @@ export const REPORTS = {
 			forced: string,
 			forcedSetting: string,
 		) =>
-			`aviso ${notice} (${noticeSetting} do primeiro gatilho), alerta ${warning} (${warningSetting}), forçada ${forced} (${forcedSetting} do limite duro)`,
+			`aviso ${notice} (${noticeSetting} do primeiro gatilho), alerta ${warning} (${warningSetting}), forçada ${forced} (${forcedSetting} do limite rígido)`,
 		hostCompaction: "Compactação do host:",
 		hostCompactionOff: "desligada",
-		hostCompactionDetail: (early: string, hard: string) => `antecipada ${early}, limite duro ${hard}`,
+		hostCompactionDetail: (early: string, hard: string) => `antecipada ${early}, limite rígido ${hard}`,
 		until: "Até:",
 		untilDetail: (warning: string, forced: string) => `alerta ${warning}, forçada ${forced} tokens`,
 		cycles: "Ciclos concluídos:",
@@ -70,7 +70,7 @@ export const REPORTS = {
 			ownerRequested: boolean,
 			running: boolean,
 		) =>
-			`${status}${attempts > 0 ? `, ${attempts} tentativa(s) com falha` : ""}${lastError ? `, último erro: ${lastError}` : ""}${ownerRequested ? ", o dono pediu para compactar agora" : ""}${running ? ", executor ativo" : ""}`,
+			`${status}${attempts > 0 ? `, ${attempts} ${attempts === 1 ? "tentativa falhou" : "tentativas falharam"}` : ""}${lastError ? `, último erro: ${lastError}` : ""}${ownerRequested ? ", o dono pediu para compactar agora" : ""}${running ? ", executor ativo" : ""}`,
 		prompts: "Prompts:",
 		promptsDetail: (notice: string, warning: string, summary: string) =>
 			`aviso ${notice}; alerta ${warning}; resumo ${summary}`,
@@ -94,7 +94,7 @@ export const REPORTS = {
 		taskStatus: (status: string) => ` (${status})`,
 		durationRounds: "Duração e rodadas:",
 		durationDetail: (active: string, wall: string, rounds: number, toolCalls: number) =>
-			`${active} ativos (${wall} de parede), ${rounds} rodadas, ${toolCalls} chamadas de ferramenta`,
+			`${active} ativos (${wall} de relógio), ${rounds} rodadas, ${toolCalls} chamadas de ferramenta`,
 		steps: (completed: number, total: number) => `, ${completed}/${total} etapas`,
 		goalClock: "Relógio do objetivo registrado:",
 		workerActive: "Tempo ativo dos workers:",
@@ -122,7 +122,7 @@ export const REPORTS = {
 			`${failures} (${gapFills} preenchimento determinístico de lacuna)`,
 		failingChecks: "Verificações de compactação com falha:",
 		moreChecks: (count: number) => `+${count} a mais`,
-		costGuard: "Guarda de custo:",
+		costGuard: "Proteção de custo:",
 		costGuardNotApplicable: "não se aplica ao uso da assinatura ChatGPT",
 		costGuardOver: "acima",
 		costGuardOk: "ok",
@@ -142,13 +142,14 @@ export const REPORTS = {
 		reflectionCue: "Sinal de reflexão:",
 		reflectionCueDetail: (toolCalls: number) => ` (sinal durável só da raiz; gatilho de ${toolCalls} chamadas)`,
 		concurrency: "Concorrência do Auto Learn:",
-		concurrencyDetail: (learners: number, cooldown: number) => `${learners} aprendiz(es), ${cooldown}m de espera`,
+		concurrencyDetail: (learners: number, cooldown: number) =>
+			`${learners} ${learners === 1 ? "coletor" : "coletores"}, ${cooldown} min de espera`,
 		modelRouter: "Roteador de modelos",
 		manualControls: "Controles manuais",
 		manualCompact: "compactar o contexto ativo agora",
-		manualSettings: "ajustar Auto Learn, guarda de custo, compactação e configuração do roteador de modelos",
+		manualSettings: "ajustar Auto Learn, proteção de custo, compactação e configuração do roteador de modelos",
 		manualAutoLearn: "ver o estado ou disparar o aprendizado em segundo plano",
-		manualContext: "ver os contribuintes do contexto que o provedor enxerga, sem tokens do modelo",
+		manualContext: "ver o que compõe o contexto que o provedor enxerga, sem gastar tokens do modelo",
 	},
 	changelog: {
 		title: "Novidades",
@@ -271,7 +272,7 @@ export const REPORTS = {
 			tokens: string,
 			cost: string,
 		) =>
-			`${active} ativos (${wall} de parede) · ${rounds} ${rounds === 1 ? "rodada" : "rodadas"} · ${tools} ferramentas${steps} · ${tokens} tokens · ${cost}`,
+			`${active} ativos (${wall} de relógio) · ${rounds} ${rounds === 1 ? "rodada" : "rodadas"} · ${tools} ferramentas${steps} · ${tokens} tokens · ${cost}`,
 		goalAccounted: (span: string) => `objetivo contabilizado ${span}`,
 		workerActive: (span: string) => `worker ativo ${span}`,
 		unresolvedIntervals: (count: number) => `${count} intervalos de tempo sem resolução`,

@@ -27,7 +27,7 @@ export const KNOWLEDGE_COMMANDS = {
 		none: (filter: string) => `Nenhum registro de conhecimento aceito${filter}.`,
 		listHead: (revision: number, filter: string) => `Conhecimento aceito, revisão ${revision}${filter}:`,
 		listMore: (query: string) => `Mais: /knowledge list ${query}`,
-		listHint: "/knowledge show <id> para procedência · history <id> · correct <id> <novo valor> · forget <id>",
+		listHint: "/knowledge show <id> para procedência · history <id> · correct <id> <new value> · forget <id>",
 		title: (id: string) => `Conhecimento ${id}`,
 		factLine: (subject: string, key: string) => `  ${subject} / ${key}`,
 		value: (text: string) => `  Valor: ${text}`,
@@ -56,15 +56,15 @@ export const KNOWLEDGE_COMMANDS = {
 		notConfirmed: "Nada mudou: o dono não confirmou.",
 		held: (reason: string) => `Nada mudou: ${reason}.`,
 		forgot: (shortId: string, revision: number) =>
-			`Esqueci ${shortId} (revisão ${revision}). Só uma evidência do dono mais nova pode ensiná-lo de novo.`,
+			`${shortId} esquecido (revisão ${revision}). Só uma evidência do dono mais nova pode ensiná-lo de novo.`,
 		corrected: (shortId: string, revision: number) =>
-			`Corrigi ${shortId}: a revisão ${revision} tem o novo valor; o anterior fica no histórico.`,
+			`${shortId} corrigido: a revisão ${revision} tem o novo valor; o anterior fica no histórico.`,
 		unavailable: "O conhecimento do dono fica disponível enquanto a memória ICM está ativa numa sessão raiz.",
 		failed: (error: string) => `Conhecimento: ${error}`,
 	},
 	taste: {
 		empty: 'Nenhum gosto aprendido ainda. O gosto vem do que você declara sobre como quer o código e os outros trabalhos escritos, por exemplo "prefiro retornos antecipados a condicionais aninhadas".',
-		noMore: "Não há mais gosto.",
+		noMore: "Não há mais itens de gosto.",
 		basisStated: "declarado",
 		basisInferred: "inferido",
 		sourceCount: (count: number) => `${count} ${count === 1 ? "fonte" : "fontes"}`,
@@ -74,7 +74,7 @@ export const KNOWLEDGE_COMMANDS = {
 		projectHeading: "Gosto deste projeto",
 		globalHeading: "Gosto global",
 		exportRelativePath: "Nada foi escrito: um caminho relativo precisa ficar dentro da pasta de trabalho.",
-		exported: (target: string) => `Escrevi ${target}`,
+		exported: (target: string) => `Arquivo gravado: ${target}`,
 		exportHeader: (date: string) =>
 			`<!-- Visão gerada do que o harness aprendeu, ${date}. Edite com /knowledge correct e /knowledge forget, não aqui. -->`,
 		proposalsTitle: "# Propostas de gosto",
@@ -104,8 +104,8 @@ export const KNOWLEDGE_COMMANDS = {
 		unchanged: (reason: string) => `Nada mudou: ${reason}`,
 		held: (reason: string) => `Nada mudou: ${reason}. A proposta continua pendente.`,
 		accepted: (proposalId: string, tasteId: string) =>
-			`Aceitei a proposta ${proposalId} como gosto ${tasteId}.  /knowledge show ${tasteId}`,
-		rejected: (shortId: string) => `Rejeitei a proposta ${shortId}. Ela não será proposta de novo.`,
+			`Proposta ${proposalId} aceita como gosto ${tasteId}.  /knowledge show ${tasteId}`,
+		rejected: (shortId: string) => `Proposta ${shortId} rejeitada. Ela não será oferecida de novo.`,
 		unavailable: "O gosto fica disponível enquanto a memória ICM está ativa numa sessão raiz.",
 		failed: (error: string) => `Gosto: ${error}`,
 		more: (id: string) => `\nMais: /taste ${id}`,
@@ -113,14 +113,14 @@ export const KNOWLEDGE_COMMANDS = {
 	memory: {
 		unavailable: "A memória gerenciada não está disponível nesta sessão.",
 		drifted: (count: number) =>
-			`${count} ${count === 1 ? "arquivo de memória gerenciada divergiu" : "arquivos de memória gerenciada divergiram"} — /memory accept <target> adota o arquivo, /memory restore <target> traz o conteúdo gerenciado de volta`,
+			`${count} ${count === 1 ? "arquivo de memória gerenciada divergiu" : "arquivos de memória gerenciada divergiram"}: /memory accept <target> adota o arquivo, /memory restore <target> traz o conteúdo gerenciado de volta`,
 		inSync: "Os arquivos de memória gerenciada estão em sincronia com as revisões gerenciadas.",
 		managedState: (status: string) => `estado gerenciado ${status}`,
-		empty: "VAZIO no disco — divergiu",
+		empty: "VAZIO no disco: divergiu",
 		driftedOne: "divergiu (editado fora do protocolo gerenciado)",
 		inSyncOne: "em sincronia",
 		entryLine: (target: string, label: string, state: string, chars: number, managed: string, path: string) =>
-			`- ${target}: ${label} — ${state}; no disco ${chars} caracteres; ${managed}\n  ${path}`,
+			`- ${target}: ${label}, ${state}; no disco ${chars} caracteres; ${managed}\n  ${path}`,
 		managedChars: (chars: number) => `${chars} caracteres gerenciados guardados`,
 		managedMissing: "conteúdo gerenciado não guardado",
 		historyIndexingError: (at: string, message: string) => `  detalhe do erro de indexação (${at}): ${message}`,

@@ -54,7 +54,7 @@ export const PANES = {
 	workspace: {
 		preview: "Prévia do workspace",
 		unavailable:
-			"Observação do workspace indisponível ou acima do orçamento; as evidências de edição e escrita continuam visíveis. Requer uma worktree do Git.",
+			"Observação do workspace indisponível ou acima do orçamento; as evidências de edição e escrita continuam visíveis. Requer um worktree do Git.",
 		limitedPaths: (count: number) => `Observação limitada a ${count} caminhos alterados`,
 		overlapped:
 			"A primeira captura se sobrepôs à execução; as mudanças no workspace podem ser anteriores a esta tarefa",

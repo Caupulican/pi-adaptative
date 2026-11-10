@@ -14,7 +14,7 @@ export const SETTINGS_SCREEN = {
 		unset: "(não definido)",
 		none: "(nenhum)",
 		inherit: "(herdar)",
-		active: "ativo",
+		active: "active",
 		agentChooses: "O agente escolhe",
 		agentChoosesEffort: "o agente escolhe o esforço",
 		agentChoosesLower: "o agente escolhe",
@@ -139,16 +139,16 @@ export const SETTINGS_SCREEN = {
 		enabled: "ativado",
 		enabledUnbounded: "ativado (sem limite)",
 		selfModification: (hasPath: boolean): string => (hasPath ? "ativado" : "ativado (caminho ausente)"),
-		costGuard: (action: string, usd: string) => `${action} em US$ ${usd}/turno`,
+		costGuard: (action: string, usd: string) => `${action} em $${usd}/turno`,
 		autonomy: (mode: string, turns: string, stall: number, autoContinue: string) =>
 			`${mode}, ${turns}, parada após ${stall}, automático ${autoContinue}`,
 		turns: (turns: number): string => (turns === 0 ? "turnos ilimitados" : `${turns} turnos`),
-		researchLane: (usd: string, runs: number) => `ativado (US$ ${usd}/passada, ${runs} execuções por sessão)`,
+		researchLane: (usd: string, runs: number) => `ativado ($${usd}/passada, ${runs} execuções por sessão)`,
 		contextCuration: (model: string, jobs: number) => `ligado · ${model} · ${jobs} tarefas por turno`,
 		learningPolicy: (autoApply: string, confidence: number) =>
 			`ligado · aplicação automática ${autoApply} · confiança mínima ${confidence}`,
 		modelCapabilityAuto: "Automática (derivada da janela de contexto do modelo)",
-		workerDelegationBudget: (usd: string) => `ativado (US$ ${usd}/worker)`,
+		workerDelegationBudget: (usd: string) => `ativado ($${usd}/worker)`,
 		autoLearn: (model: string) => `ativado (${model})`,
 		contextPolicy: (preserve: number, minChars: number) =>
 			`ativado (preserva ${preserve}, mínimo de ${minChars} caracteres)`,
@@ -180,10 +180,9 @@ export const SETTINGS_SCREEN = {
 		directoryProfile: "perfil do diretório",
 	},
 	statuses: {
-		costGuardOn: (usd: string, action: string) =>
-			`Proteção de custo por turno ativada em US$ ${usd}/turno (${action}).`,
+		costGuardOn: (usd: string, action: string) => `Proteção de custo por turno ativada em $${usd}/turno (${action}).`,
 		costGuardOff: "Proteção de custo por turno desativada.",
-		httpIdleTimeout: (value: string) => `Tempo ocioso do HTTP: ${value}`,
+		httpIdleTimeout: (value: string) => `Limite de ociosidade do HTTP: ${value}`,
 		themeFailed: (name: string, error: string) =>
 			`Falha ao carregar o tema "${name}": ${error}\nTema escuro aplicado.`,
 		projectContextOn: "lista o AGENTS.md deste projeto",
@@ -206,16 +205,16 @@ export const SETTINGS_SCREEN = {
 		learningPolicySaved: (scope: string) => `Política de aprendizado salva no escopo ${scope}.`,
 		systemOneProviderSaved: (provider: string) =>
 			`Provedor do System One definido como ${provider}; a próxima avaliação o usa.`,
-		peerError: (error: string) => `Erro na configuração do modelo par: ${error}`,
+		peerError: (error: string) => `Erro na configuração do peer: ${error}`,
 		peerSelectionDisabled: "desativado",
 		peerSelection: (model: string, effort: string) => `${model} (${effort})`,
 		peerOtherScope: (scope: string, activeScope: string, selection: string) =>
-			`Modelo par salvo no escopo ${scope}; a configuração ativa do escopo ${activeScope} continua ${selection}.`,
-		peerSaved: (scope: string, reason: string) => `Configurações do modelo par salvas no escopo ${scope}: ${reason}`,
-		peerToolUnavailable: "a ferramenta de modelo par da raiz não está disponível nesta sessão",
-		peerDisabled: "Modelo par desativado; as descobertas anteriores continuam disponíveis.",
+			`Peer salvo no escopo ${scope}; a configuração ativa do escopo ${activeScope} continua ${selection}.`,
+		peerSaved: (scope: string, reason: string) => `Configurações do peer salvas no escopo ${scope}: ${reason}`,
+		peerToolUnavailable: "a ferramenta de peer da raiz não está disponível nesta sessão",
+		peerDisabled: "Peer desativado; os achados anteriores continuam disponíveis.",
 		peerApplied: (selection: string, scope: string) =>
-			`Modelo par: ${selection}, salvo no escopo ${scope}. Vale para a próxima revisão; sem esforço, vale o padrão do modelo.`,
+			`Peer: ${selection}, salvo no escopo ${scope}. Vale para a próxima revisão; sem esforço, vale o padrão do modelo.`,
 		modelCapabilitySaved: (scope: string) =>
 			`Modo de capacidade do modelo salvo no escopo ${scope}. Vale na próxima troca de modelo ou em /reload.`,
 		contextCurationSaved: (scope: string) =>
@@ -253,7 +252,7 @@ export const SETTINGS_SCREEN = {
 			description: "Transporte preferido para provedores que aceitam mais de um",
 		},
 		httpIdleTimeout: {
-			label: "Tempo ocioso do HTTP",
+			label: "Limite de ociosidade do HTTP",
 			description:
 				"Intervalo ocioso máximo ao esperar cabeçalhos ou partes do corpo HTTP. Desative para modelos locais que pausam por mais de cinco minutos.",
 		},
@@ -300,7 +299,7 @@ export const SETTINGS_SCREEN = {
 		workerDelegation: {
 			label: "Delegação para workers",
 			description:
-				"Workers folha neutros de provedor, ativados por padrão, com autoridade herdada e predefinições de execução opcionais escritas pelo dono",
+				"Workers folha que rodam em qualquer provedor, ativados por padrão, com autoridade herdada e predefinições de execução opcionais escritas pelo dono",
 		},
 		learningPolicy: {
 			label: "Política de aprendizado",
@@ -310,7 +309,7 @@ export const SETTINGS_SCREEN = {
 		modelCapability: {
 			label: "Capacidade do modelo",
 			description:
-				"Como o pi adapta a superfície de ferramentas e os orçamentos das vias de execução a modelos pequenos (derivado dos metadados do próprio modelo)",
+				"Como o pi adapta a superfície de ferramentas e os orçamentos das lanes a modelos pequenos (derivado dos metadados do próprio modelo)",
 		},
 		contextCuration: {
 			label: "Curadoria de contexto",
@@ -318,7 +317,7 @@ export const SETTINGS_SCREEN = {
 				"Curador local opcional: resume os textos compactados pelo GC e pontua a relevância de trechos antigos em pequenas tarefas locais",
 		},
 		systemOneProvider: { label: "Provedor do System One" },
-		peer: { label: "Modelo par" },
+		peer: { label: "Peer" },
 		modelRouter: {
 			label: "Roteador de modelos",
 			description:
@@ -407,7 +406,7 @@ export const SETTINGS_SCREEN = {
 		},
 		profiles: {
 			label: "Gerenciar perfis e situações",
-			description: "Cria, exclui ou persiste definições de perfil e situação.",
+			description: "Cria, exclui ou salva definições de perfil e situação.",
 		},
 		sources: {
 			label: "Origens",
@@ -428,7 +427,7 @@ export const SETTINGS_SCREEN = {
 		},
 		enabled: {
 			label: "Ativado",
-			description: "Adesão explícita. Um limite salvo sozinho fica dormente e nunca limita nem rotula um turno.",
+			description: "Adesão explícita. Um limite salvo sozinho fica inativo: não limita nem rotula turno nenhum.",
 		},
 		maxTurnUsd: {
 			label: "Máximo de dólares por turno",
@@ -437,7 +436,7 @@ export const SETTINGS_SCREEN = {
 		},
 		action: {
 			label: "Ação",
-			description: "apenas avisar, ou reduzir o raciocínio em um nível suportado para a requisição iminente",
+			description: "apenas avisar, ou reduzir o raciocínio em um nível suportado para a próxima requisição",
 		},
 	},
 	projectContext: {
@@ -525,7 +524,7 @@ export const SETTINGS_SCREEN = {
 			description: "Orçamento de tempo por passada de pesquisa; 0 desativa o orçamento de tempo",
 		},
 		idleDelayMs: {
-			label: "Atraso ocioso (ms)",
+			label: "Atraso após ociosidade (ms)",
 			description: "Atraso antes do início da pesquisa disparada por ociosidade; 0 começa logo após a ociosidade",
 		},
 		runsPerSession: {
@@ -606,7 +605,7 @@ export const SETTINGS_SCREEN = {
 		mode: {
 			label: "Modo",
 			description:
-				'"Automática" deriva a superfície de ferramentas e os orçamentos das vias de execução da janela de contexto do próprio modelo; "Desligada" desativa a adaptação; um nome de classe a força',
+				'"Automática" deriva a superfície de ferramentas e os orçamentos das lanes da janela de contexto do próprio modelo; "Desligada" desativa a adaptação; um nome de classe a força',
 		},
 	},
 	contextCuration: {
@@ -626,7 +625,7 @@ export const SETTINGS_SCREEN = {
 		},
 		maxJobsPerTurn: {
 			label: "Máximo de tarefas por turno",
-			description: "Tarefas de curadoria drenadas por turno (cada uma é uma pequena conclusão local)",
+			description: "Tarefas de curadoria processadas por turno (cada uma é uma pequena conclusão local)",
 		},
 	},
 	systemOne: {
@@ -638,28 +637,28 @@ export const SETTINGS_SCREEN = {
 	},
 	peer: {
 		description: (scope: string) =>
-			`Modelo par da raiz independente do System One; escopo ativo: ${scope}. O perfil de diretório sobrepõe o projeto, que sobrepõe o global.`,
+			`Peer da raiz, independente do System One; escopo ativo: ${scope}. O perfil de diretório sobrepõe o projeto, que sobrepõe o global.`,
 		scope: {
 			label: "Escopo de gravação",
 			description:
-				"Cada escopo substitui toda a configuração do modelo par; o perfil de diretório sobrepõe o projeto, que sobrepõe o global.",
+				"Cada escopo substitui toda a configuração do peer; o perfil de diretório sobrepõe o projeto, que sobrepõe o global.",
 		},
 		enabled: {
 			label: "Ativado",
 			description:
-				"Modelo par independente, apenas na sessão raiz; funciona com o System One desligado. Desativar preserva descobertas anteriores.",
+				"Peer independente, apenas na sessão raiz; funciona com o System One desligado. Desativar preserva os achados anteriores.",
 		},
 		model: {
 			label: "Modelo",
 			description:
-				"Escolha um modelo par entre as contas configuradas. O modelo líder, a cota e o escopo explícito de --models/SDK podem tornar uma escolha indisponível.",
+				"Escolha o modelo do peer entre as contas configuradas. O modelo líder, a cota e o escopo explícito de --models/SDK podem tornar uma escolha indisponível.",
 		},
 		thinking: {
 			label: "Raciocínio",
 			description:
 				"Escolha um esforço suportado ou deixe o agente escolher. Sem esforço, vale o padrão do modelo. Escolher outro modelo limpa uma sobreposição incompatível.",
 		},
-		thinkingTitle: "Raciocínio do modelo par",
+		thinkingTitle: "Raciocínio do peer",
 		thinkingDescription: "Escolha um esforço ou deixe o agente escolher; sem esforço, vale o padrão do modelo",
 		choosesForEachReview: "Escolhe para cada revisão",
 	},
@@ -676,8 +675,8 @@ export const SETTINGS_SCREEN = {
 			label: "Modelo coletor",
 			description: (pattern?: string) =>
 				pattern
-					? `Modelo para o aprendizado explícito e em segundo plano. "ativo" usa ${pattern}; modelos configurados por assinatura/API aparecem primeiro. A reflexão automática usa o turno atual da sessão do orquestrador.`
-					: 'Modelo para o aprendizado explícito e em segundo plano. Use "ativo" para o modelo da sessão atual, ou escolha um modelo configurado por assinatura/API. A reflexão automática usa o turno atual da sessão do orquestrador.',
+					? `Modelo para o aprendizado explícito e em segundo plano. "active" usa ${pattern}; modelos configurados por assinatura/API aparecem primeiro. A reflexão automática usa o turno atual da sessão do orquestrador.`
+					: 'Modelo para o aprendizado explícito e em segundo plano. Use "active" para o modelo da sessão atual, ou escolha um modelo configurado por assinatura/API. A reflexão automática usa o turno atual da sessão do orquestrador.',
 		},
 		messageTrigger: {
 			label: "Gatilho de mensagens",
@@ -764,7 +763,7 @@ export const SETTINGS_SCREEN = {
 		externalQueries: {
 			label: "Permitir consultas externas",
 			description:
-				"Consentimento explícito para enviar texto de consulta limitado a provedores de memória externos elegíveis. Desligado por padrão; consultas secretas ou grandes ainda falham fechadas, e a lembrança retornada é cercada como dado não confiável.",
+				"Consentimento explícito para enviar texto de consulta limitado a provedores de memória externos elegíveis. Desligado por padrão; consultas com segredos ou grandes demais continuam recusadas, e o que volta é marcado como dado não confiável.",
 		},
 	},
 	modelRouter: {
@@ -816,7 +815,7 @@ export const SETTINGS_SCREEN = {
 		executorModel: {
 			label: "Modelo do executor",
 			description:
-				"Escolha o modelo da via do executor local; sem definição, a execução direta do toolkit fica desativada",
+				"Escolha o modelo da lane do executor local; sem definição, a execução direta do toolkit fica desativada",
 		},
 		learningModel: {
 			label: "Modelo de aprendizado",
@@ -841,7 +840,7 @@ export const SETTINGS_SCREEN = {
 		executorThinking: {
 			label: "Raciocínio do executor",
 			description:
-				"Sobreposição do nível de raciocínio para a via direta do executor; (herdar) mantém o comportamento de hoje: o nível da sessão, limitado ao modelo roteado",
+				"Sobreposição do nível de raciocínio para a lane direta do executor; (herdar) mantém o comportamento de hoje: o nível da sessão, limitado ao modelo roteado",
 		},
 		cheapThinkingTitle: "Raciocínio da faixa barata",
 		cheapThinkingDescription:
@@ -854,12 +853,12 @@ export const SETTINGS_SCREEN = {
 			"Selecione uma sobreposição do nível de raciocínio para turnos roteados da faixa cara, ou herde o nível da sessão",
 		executorThinkingTitle: "Raciocínio do executor",
 		executorThinkingDescription:
-			"Selecione uma sobreposição do nível de raciocínio para a via direta do executor, ou herde o nível da sessão",
+			"Selecione uma sobreposição do nível de raciocínio para a lane direta do executor, ou herde o nível da sessão",
 		inheritThinking: "Herda o nível de raciocínio da sessão neste turno, limitado ao modelo roteado",
 		fitnessGate: {
 			label: "Filtro de fitness",
 			description:
-				"Filtro subtrativo opcional: bloqueia modelos de faixa apenas quando a via sondada do roteador falhou",
+				"Filtro subtrativo opcional: bloqueia modelos de faixa apenas quando a lane sondada do roteador falhou",
 		},
 		calibrate: {
 			label: "Calibrar",
@@ -899,7 +898,7 @@ export const SETTINGS_SCREEN = {
 		clearCheap: "Limpa o modelo barato do roteamento; turnos de pesquisa voltam ao modelo da sessão ativa",
 		clearMedium: "Limpa o modelo médio do roteamento; turnos de implementação voltam conforme a política do roteador",
 		clearExpensive: "Limpa o modelo caro do roteamento; turnos de modificação voltam ao modelo da sessão ativa",
-		clearExecutor: "Limpa o modelo da via do executor; a execução direta do toolkit fica desativada",
+		clearExecutor: "Limpa o modelo da lane do executor; a execução direta do toolkit fica desativada",
 		autoSelectTier: "Deixa o roteador escolher o modelo desta faixa automaticamente no conjunto de candidatos",
 		preview: {
 			label: "Prévia de rota",
@@ -991,33 +990,33 @@ export const SETTINGS_SCREEN = {
 			customTitle: "Modelo caro / de modificação personalizado",
 		},
 		executor: {
-			title: "Modelo da via do executor",
-			customTitle: "Modelo da via do executor personalizado",
+			title: "Modelo da lane do executor",
+			customTitle: "Modelo da lane do executor personalizado",
 		},
 		learning: {
 			title: "Modelo de aprendizado",
 			description:
-				"Escolha ativo ou um modelo das contas de assinatura ou API configuradas para o aprendizado explícito e em segundo plano. A reflexão automática usa o turno atual da sessão do orquestrador. Digite para filtrar; o modo manual é a alternativa.",
+				'Escolha "active" ou um modelo das contas de assinatura ou API configuradas para o aprendizado explícito e em segundo plano. A reflexão automática usa o turno atual da sessão do orquestrador. Digite para filtrar; o modo manual é a alternativa.',
 			customTitle: "Modelo de aprendizado personalizado",
 			customDescription:
-				'Digite "ativo" ou um padrão provedor/modelo para o aprendizado explícito e em segundo plano, de pi --list-models.',
-			customEmptyHint: 'vazio usa "ativo"',
+				'Digite "active" ou um padrão provedor/modelo para o aprendizado explícito e em segundo plano, de pi --list-models.',
+			customEmptyHint: 'vazio usa "active"',
 		},
 		peer: {
-			title: "Modelo par",
+			title: "Modelo do peer",
 			description:
-				"Digite para filtrar os modelos configurados. Escolher um modelo ativa o modelo par da sessão raiz; um esforço sem suporte volta para O agente escolhe.",
-			customTitle: "Modelo par",
+				"Digite para filtrar os modelos configurados. Escolher um modelo ativa o peer da sessão raiz; um esforço sem suporte volta para O agente escolhe.",
+			customTitle: "Modelo do peer",
 			customDescription: "Digite uma referência provedor/modelo exata.",
 			customEmptyHint: "vazio deixa o agente escolher",
 		},
 		autoLearn: {
 			title: "Modelo coletor do Auto Learn",
 			description:
-				"Escolha ativo ou um modelo das contas de assinatura ou API configuradas no momento. Digite para filtrar; escolha manual para um padrão personalizado.",
+				'Escolha "active" ou um modelo das contas de assinatura ou API configuradas no momento. Digite para filtrar; escolha manual para um padrão personalizado.',
 			customTitle: "Modelo do Auto Learn personalizado",
-			customDescription: 'Digite "ativo" ou um padrão provedor/modelo como "openai/gpt-5.4".',
-			customEmptyHint: 'vazio usa "ativo"',
+			customDescription: 'Digite "active" ou um padrão provedor/modelo como "openai/gpt-5.4".',
+			customEmptyHint: 'vazio usa "active"',
 		},
 	},
 };

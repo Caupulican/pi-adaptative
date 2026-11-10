@@ -34,7 +34,7 @@ export const CONFIG_SCREEN = {
 		confirmBody:
 			"Isto sobrescreve os perfis e as configurações locais com os valores da cópia de segurança. Deseja continuar?",
 		proceed: "Prosseguir com a restauração.",
-		abort: "Cancelar e abortar.",
+		abort: "Cancelar a restauração.",
 		aborted: "Restauração cancelada.",
 		restored: "Configuração restaurada.",
 		failed: (message: string) => `Falha ao restaurar a configuração: ${message}; configuração anterior restaurada`,

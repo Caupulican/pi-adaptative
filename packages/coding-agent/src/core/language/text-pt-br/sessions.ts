@@ -79,7 +79,7 @@ export const SESSIONS = {
 		resumed: "Objetivo retomado.",
 		paused: "Objetivo pausado.",
 		updated: "Objetivo atualizado.",
-		completed: "Objetivo concluído à mão.",
+		completed: "Objetivo concluído manualmente.",
 		cleared: "Objetivo limpo.",
 		nothingToClear: "Não existe objetivo para limpar.",
 		closed: "Objetivo encerrado.",
@@ -101,12 +101,12 @@ export const SESSIONS = {
 			`Objetivo ${args.verb}: ${args.action}, ${args.reason}.`,
 		continuationFailed: (error: string) => `A continuação do objetivo falhou: ${error}`,
 		continueStarted: (args: { turns: string; stallTurns: number; wallClock: string }) =>
-			`Continuação do objetivo iniciada: ${args.turns}, limite de recuperação ${args.stallTurns}, limite de tempo ${args.wallClock} minuto(s).`,
+			`Continuação do objetivo iniciada: ${args.turns}, limite de recuperação ${args.stallTurns}, limite de tempo em minutos: ${args.wallClock}.`,
 		unboundedTurns: "turnos sem limite",
-		upToTurns: (turns: number) => `até ${turns} turno(s)`,
+		upToTurns: (turns: number) => `até ${turns} ${turns === 1 ? "turno" : "turnos"}`,
 		disabled: "desativado",
 		continueStopped: (args: { stopReason: string; turns: number; action: string; reason: string }) =>
-			`Continuação do objetivo parada: ${args.stopReason}; ${args.turns} turno(s) enviados; última decisão: ${args.action}, ${args.reason}.`,
+			`Continuação do objetivo parada: ${args.stopReason}; ${args.turns} ${args.turns === 1 ? "turno enviado" : "turnos enviados"}; última decisão: ${args.action}, ${args.reason}.`,
 	},
 	task: {
 		retired: (operation: string) =>
@@ -130,7 +130,7 @@ export const SESSIONS = {
 		cacheRead: "Leitura de cache:",
 		cacheWrite: "Escrita de cache:",
 		cost: "Custo",
-		modelRouter: "Model router",
+		modelRouter: "Roteador de modelos",
 	},
 	io: {
 		exported: (path: string) => `Sessão exportada para: ${path}`,

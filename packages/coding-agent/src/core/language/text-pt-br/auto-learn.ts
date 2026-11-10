@@ -21,17 +21,17 @@ export const AUTO_LEARN = {
 	reflection: (status: string, toolCalls: number) =>
 		`Reflexão na sessão atual: ${status} (gatilho de complexidade: ${toolCalls} chamadas de ferramenta; requisições automáticas ao provedor: 0)`,
 	historyRetention: "Retenção do histórico: 7 dias para prompts, logs e sessões internos do Auto Learn",
-	runningLearners: (count: number, maximum: number) => `Aprendizes rodando: ${count}/${maximum}`,
-	otherProjects: (count: number) => `Aprendizes de outros projetos: ${count}`,
+	runningLearners: (count: number, maximum: number) => `Coletores rodando: ${count}/${maximum}`,
+	otherProjects: (count: number) => `Coletores de outros projetos: ${count}`,
 	artifactFolder: (dir: string) => `Pasta de artefatos: ${dir}`,
 	reloadBlockers: (value: string) => `Bloqueios de recarga automática do Pi: ${value}`,
-	reloadBlockerCount: (count: number) => `${count} outra(s) sessão(ões)`,
+	reloadBlockerCount: (count: number) => `${count} ${count === 1 ? "outra sessão" : "outras sessões"}`,
 	inFlight: (count: number) =>
-		`Trabalho em curso no portão de recarga: ${count > 0 ? `${count} unidade(s)` : "nenhum"}`,
+		`Trabalho em andamento que segura a recarga: ${count > 0 ? `${count} ${count === 1 ? "unidade" : "unidades"}` : "nenhum"}`,
 	runs: "Execuções:",
 	noRuns: "- nenhuma",
 	runLine: (kind: string, model: string, status: string, logPath: string) =>
-		`- aprendiz ${kind} em ${model}, ${status}; log: ${logPath}`,
+		`- coletor ${kind} em ${model}, ${status}; log: ${logPath}`,
 	runKindReflection: "de reflexão",
 	runKindAutomatic: "automático",
 	runStatusStarting: "iniciando",
@@ -42,9 +42,9 @@ export const AUTO_LEARN = {
 	none: "nenhum",
 	outcome: {
 		reported: "concluído",
-		child_failed: "o aprendiz falhou",
+		child_failed: "o coletor falhou",
 		unparseable: "não foi possível ler o resultado",
-		learner_not_pass: "o aprendiz não passou",
+		learner_not_pass: "o coletor não passou",
 		parent_session_changed: "a sessão dele mudou antes de terminar",
 		apply_failed: "não foi possível aplicar as propostas",
 	},
@@ -53,7 +53,8 @@ export const AUTO_LEARN = {
 	reoffered: (outcome: string, applied: number, findings: number) =>
 		`Auto Learn: propostas reoferecidas, ${outcome}; ${applied} aplicadas, ${findings} registradas como achados`,
 	usageRecordsLost: "Auto Learn: não foi possível recuperar os registros de uso.",
-	needsAttention: (count: number) => `Auto Learn: ${count} resultado(s) de aprendizado salvos precisam de atenção.`,
+	needsAttention: (count: number) =>
+		`Auto Learn: ${count} ${count === 1 ? "resultado de aprendizado salvo precisa" : "resultados de aprendizado salvos precisam"} de atenção.`,
 	reofferUnconfirmed: "Auto Learn: não foi possível confirmar um resultado reoferecido.",
 	noticePending: "Auto Learn: um aviso foi entregue; algumas cópias salvas ainda esperam limpeza.",
 	deferred: (count: number, nearRetention: number) =>
@@ -65,7 +66,7 @@ export const AUTO_LEARN = {
 	notStarted: (reason: string) => `Auto Learn não iniciou: ${reason}`,
 	started: (logPath: string) => `Auto Learn iniciou. Log: ${logPath}`,
 	reflectionCurrentOnly:
-		"a reflexão automática roda só na sessão raiz atual; aprendizes de reflexão em segundo plano estão desativados.",
+		"a reflexão automática roda só na sessão raiz atual; coletores de reflexão em segundo plano estão desativados.",
 	noActiveModel: "não há modelo ativo disponível para model=active.",
 	cliPathMissing: "não foi possível resolver o caminho atual do CLI do pi.",
 	nullByte: (input: string) => `Auto Learn não iniciou: ${input} contém um byte nulo.`,
@@ -74,9 +75,9 @@ export const AUTO_LEARN = {
 	accountingUnavailable: (error: string) =>
 		`Auto Learn não iniciou: obrigação de contabilidade indisponível (${error}).`,
 	spawnFailedWithMessage: (message: string, logPath: string) =>
-		`Auto Learn não iniciou: não foi possível iniciar o aprendiz em segundo plano (${message}). Log: ${logPath}`,
+		`Auto Learn não iniciou: não foi possível iniciar o coletor em segundo plano (${message}). Log: ${logPath}`,
 	spawnFailed: (logPath: string) =>
-		`Auto Learn não iniciou: não foi possível iniciar o aprendiz em segundo plano. Log: ${logPath}`,
+		`Auto Learn não iniciou: não foi possível iniciar o coletor em segundo plano. Log: ${logPath}`,
 	learningBadge: "(aprendendo)",
 	current: " · atual",
 	auth: {

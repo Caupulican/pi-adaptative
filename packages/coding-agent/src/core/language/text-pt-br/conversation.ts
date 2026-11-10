@@ -30,7 +30,7 @@ export const CONVERSATION = {
 	delegated: (action: string) => `→ delegado (${action}) para`,
 	delegatedTarget: (action: string) =>
 		action === "slices" ? "fatias em paralelo" : action === "race" ? "workers em corrida" : "subagente",
-	awaitingHandoff: "→ aguardando a passagem do subagente…",
+	awaitingHandoff: "→ aguardando o retorno do subagente…",
 	goalStarted: "→ objetivo iniciado:",
 	goalCompleted: "→ objetivo concluído",
 	requirementSatisfied: (requirement: string) => `→ requisito atendido${requirement}`,
@@ -119,9 +119,9 @@ export const CONVERSATION = {
 		`Não executado: ${code}${diagnostic ? ` (${diagnostic})` : ""}.${next ? ` ${next}` : ""}`,
 
 	transcriptTitle: "Transcrição",
-	liveTail: "acompanhando o fim",
+	liveTail: "ao vivo",
 	pagerFooter: (scroll: string, page: string, jump: string, close: string) =>
-		` ${scroll} rolar  ·  ${page} página  ·  ${jump} ir  ·  ${close} fechar`,
+		` ${scroll} rolar  ·  ${page} página  ·  ${jump} pular  ·  ${close} fechar`,
 
 	cycle: (count: number) => `ciclo ${count}`,
 	phaseTag: (phase: string) =>

@@ -20,7 +20,7 @@ export const COMMAND_CONTROLLER = {
 		editGoalObjective: "Editar o objetivo",
 		selfCompactionRefused: (reason: string) => `Autocompactação: ${reason}.`,
 		selfCompactionResumed: (chars: string) => `Autocompactação: compactando com a nota salva (${chars} caracteres).`,
-		selfCompactionAsked: "Autocompactação: pedi ao agente que escrevesse a nota e compactasse.",
+		selfCompactionAsked: "Autocompactação: o agente foi instruído a escrever a nota e compactar.",
 		selfCompactionFailed: (error: string) => `A autocompactação falhou: ${error}`,
 		newSessionNamed: (name: string) => `✓ Nova sessão iniciada: ${name}`,
 		newSession: "✓ Nova sessão iniciada",

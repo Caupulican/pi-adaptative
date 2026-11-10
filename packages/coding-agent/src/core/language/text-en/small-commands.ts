@@ -4,6 +4,8 @@
  * tier names, the command names and the words the owner wrote into the soul are the same in every language.
  */
 
+import { SOUL_ADVERSE_CLAUSES } from "../../soul/soul-review-clauses.ts";
+
 export const SMALL_COMMANDS = {
 	fastMode: {
 		usage: "Usage: /fast [on|off|priority|ultrafast|status]",
@@ -56,7 +58,6 @@ export const SMALL_COMMANDS = {
 		reviewFailed: (error: string) => `Soul review failed: ${error}`,
 		reviewCannotRun: (error: string) => `Soul review cannot run: ${error}`,
 		reviewVerdict: (word: string) => `Soul review: ${word}`,
-		reviewUnsettledReason: "the review could not settle the text",
 		verdictAllowed: "allowed",
 		verdictRejected: "rejected",
 		verdictUnsettled: "not settled",
@@ -70,13 +71,7 @@ export const SMALL_COMMANDS = {
 			external: "Copied text",
 			identity: "Self-description",
 		},
-		adverseClauses: {
-			override: "overrides owner instructions, safety rules or tool gates",
-			authority: "grants itself authority",
-			covert: "asks for covert or deceptive behavior",
-			external: "reads as copied external text",
-			identity: "is not a description of who the assistant is",
-		},
+		adverseClauses: SOUL_ADVERSE_CLAUSES,
 	},
 	systemPrompt: {
 		usage: "Usage: /sysprompt [default|reset]",

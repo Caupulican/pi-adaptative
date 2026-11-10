@@ -57,11 +57,10 @@ export const SMALL_COMMANDS = {
 		reviewFailed: (error: string) => `A revisão do soul falhou: ${error}`,
 		reviewCannotRun: (error: string) => `A revisão do soul não pode rodar: ${error}`,
 		reviewVerdict: (word: string) => `Revisão do soul: ${word}`,
-		reviewUnsettledReason: "a revisão não conseguiu decidir o texto",
 		verdictAllowed: "permitido",
 		verdictRejected: "rejeitado",
 		verdictUnsettled: "não decidido",
-		answerClear: "claro",
+		answerClear: "nada encontrado",
 		answerFlagged: (clause: string) => `sinalizado (o texto ${clause})`,
 		answerUnsettled: "não decidido",
 		labels: {
@@ -72,7 +71,7 @@ export const SMALL_COMMANDS = {
 			identity: "Autodescrição",
 		},
 		adverseClauses: {
-			override: "sobrepõe instruções do dono, regras de segurança ou portões de ferramenta",
+			override: "sobrepõe instruções do dono, regras de segurança ou as checagens das ferramentas",
 			authority: "concede autoridade a si mesmo",
 			covert: "pede comportamento encoberto ou enganoso",
 			external: "parece texto externo copiado",

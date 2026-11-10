@@ -60,7 +60,7 @@ export const PROFILES_SCREEN = {
 		trustedRoot: "Pasta externa confiável",
 		untrustedRoot: "Pasta externa não confiável",
 		noActiveTitle: "Nenhum perfil / situação ativo",
-		noActiveDescription: "Selecione ou crie um perfil ou situação para gerenciar o acervo.",
+		noActiveDescription: "Selecione ou crie um perfil ou situação para gerenciar a biblioteca.",
 		selectExisting: {
 			label: "Selecionar perfil / situação existente...",
 			description: "Escolher um perfil ou situação existente para ativar.",
@@ -82,7 +82,7 @@ export const PROFILES_SCREEN = {
 			label: "Herdar o modelo da sessão ou padrão",
 			description: "Remover o modelo fixado do perfil e usar o modelo atual da sessão ou padrão",
 		},
-		inheritValue: "(inherit)",
+		inheritValue: "(herdar)",
 		unavailableModelDescription: "Modelo atual do perfil (não disponível agora)",
 		addRootTitle: "Adicionar pasta externa",
 		addRootPlaceholder: "Digite o caminho da pasta externa",
@@ -125,7 +125,7 @@ export const PROFILES_SCREEN = {
 		rootRemoved: (root: string) => `Pasta externa removida: ${root}`,
 	},
 	editor: {
-		title: (profile: string, scope: string) => `Acervo — editando "${profile}" (${scope})`,
+		title: (profile: string, scope: string) => `Biblioteca: editando "${profile}" (${scope})`,
 		hints: (
 			tab: string,
 			confirm: string,
@@ -136,7 +136,7 @@ export const PROFILES_SCREEN = {
 			enableAll: string,
 			clearAll: string,
 		) =>
-			`Navegar entre tipos: ${tab}. Alternar: ${confirm}. Modo: ${allowKey} permitir / ${blockKey} bloquear. Escopo: ${scopeKey} alterar. Editar: ${editKey}. Em lote: ${enableAll} ativar todos / ${clearAll} limpar todos.`,
+			`Navegar entre tipos: ${tab}. Ativar ou desativar: ${confirm}. Modo: ${allowKey} permitir / ${blockKey} bloquear. Escopo: ${scopeKey} alterar. Editar: ${editKey}. Em lote: ${enableAll} ativar todos / ${clearAll} limpar todos.`,
 		kinds: {
 			tools: "Ferramentas",
 			skills: "Skills",
@@ -149,7 +149,7 @@ export const PROFILES_SCREEN = {
 		enabledTotal: (enabled: number, total: number) => `${enabled}/${total} ativados`,
 		framingAllow: "lista de permissão",
 		framingBlock: "lista de bloqueio",
-		emptyNone: "  (nenhum disponível — adicione uma origem ou instale recursos)",
+		emptyNone: "  (nenhum disponível: adicione uma origem ou instale recursos)",
 		emptyMatching: "  Nenhum recurso corresponde",
 		noDescription: "  Sem descrição disponível",
 		description: (text: string) => `  Descrição: ${text}`,
@@ -162,7 +162,7 @@ export const PROFILES_SCREEN = {
 			project: "projeto",
 			bundled: "embutido",
 		},
-		toggleHint: "alternar",
+		toggleHint: "ativar ou desativar",
 		kindHint: "tipo",
 		saveHint: "salvar",
 		editHint: "editar",

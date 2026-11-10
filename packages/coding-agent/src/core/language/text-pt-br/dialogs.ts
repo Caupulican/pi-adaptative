@@ -68,11 +68,11 @@ export const DIALOGS = {
 		bedrockTitle: "Configurar o Amazon Bedrock:",
 		bedrockSsoProfile: (profile: string) => `Entrar com o perfil SSO "${profile}"`,
 		bedrockSso: "Entrar com um perfil SSO da AWS",
-		bedrockOther: "Usar credenciais IAM, bearer ou de papel",
+		bedrockOther: "Usar credenciais IAM, bearer ou de role",
 		bedrockCredentialInfoTitle: "Configuração do Amazon Bedrock",
 		bedrockCredentialUses: "O Amazon Bedrock usa credenciais da AWS em vez de uma única chave de API.",
 		bedrockCredentialConfigure:
-			"Configure chaves IAM, um token bearer ou credenciais por papel e então verifique a região exata delas.",
+			"Configure chaves IAM, um token bearer ou credenciais de role e então verifique a região exata delas.",
 		see: "Veja:",
 		bedrockVerified: (message: string, count: number, region: string) =>
 			`${message} ${count} ${count === 1 ? "modelo verificado" : "modelos verificados"} em ${region}.`,

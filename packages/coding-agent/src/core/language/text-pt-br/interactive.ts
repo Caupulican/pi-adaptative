@@ -33,8 +33,8 @@ export const INTERACTIVE = {
 		toExitEmpty: "para sair (editor vazio)",
 		toSuspend: "para suspender",
 		toDeleteToEnd: "para apagar até o fim",
-		toCycleThinking: "para alternar o nível de raciocínio",
-		toCycleModels: "para alternar os modelos",
+		toCycleThinking: "para trocar o nível de raciocínio",
+		toCycleModels: "para trocar de modelo",
 		toSelectModel: "para selecionar o modelo",
 		toExpandTools: "para expandir as ferramentas",
 		toLoadHistory: "para carregar o histórico da sessão",
@@ -64,7 +64,7 @@ export const INTERACTIVE = {
 		onboarding:
 			"O Pi explica os próprios recursos e consulta a documentação. Pergunte a ele como usar ou estender o Pi.",
 		modelScope: (models: string, cycleHint: string) => `Modelos no escopo: ${models}${cycleHint}`,
-		cycleHint: (keys: string) => ` (${keys} para alternar)`,
+		cycleHint: (keys: string) => ` (${keys} para trocar)`,
 	},
 
 	forked: "Fork feito para uma sessão nova",
@@ -114,7 +114,7 @@ export const INTERACTIVE = {
 	protocolMissing: (model: string) => `Nenhuma calibração do protocolo de ferramentas de texto para ${model}.`,
 	protocolUsage: "Uso: /toolprotocol-reset <provider/model>",
 	foregroundBusy: (command: string, interruptKeys: string) =>
-		`/${command} precisa que o foreground esteja ocioso. ${interruptKeys} interrompe; seu comando fica no editor.`,
+		`/${command} só roda com o primeiro plano ocioso. ${interruptKeys} interrompe; seu comando fica no editor.`,
 	bashAlreadyRunning: "Um comando bash já está rodando. Aperte Esc para cancelar antes.",
 
 	memorySummariesWaiting: (built: number, needed: number, failed: number) =>

@@ -12,7 +12,7 @@
 		"packages/coding-agent/src/core/background-lane-controller.ts": 2449,
 		"packages/coding-agent/src/core/memory/transcript-summary-store.ts": 3702,
 		"packages/coding-agent/src/core/memory-controller.ts": 3703,
-		"packages/coding-agent/src/modes/interactive/components/settings-selector.ts": 3363,
+		"packages/coding-agent/src/modes/interactive/components/settings-selector.ts": 3350,
 		"packages/coding-agent/src/core/model-router/read-only-shell-policy.ts": 3357,
 		"packages/coding-agent/src/core/tools/delegate.ts": 3310,
 		"packages/coding-agent/src/core/routines/routine-intake-timing.ts": 3291,

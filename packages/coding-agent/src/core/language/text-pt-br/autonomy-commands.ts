@@ -20,12 +20,12 @@ export const AUTONOMY_COMMANDS = {
 			`Sinal de reflexão: ${enabled ? "ativado" : "desativado"}; sinal durável só da raiz para o próximo turno comum; espera=${cooldown}m`,
 		reflectionTool: (enabled: boolean, toolCalls: number, cooldown: number) =>
 			`Sinal de reflexão: ${enabled ? "ativado" : "desativado"}; gatilho de ${toolCalls} chamadas de ferramenta; próximo turno comum; espera=${cooldown}m`,
-		runningLearners: (running: number, maximum: number) => `Aprendizes rodando: ${running}/${maximum}`,
-		otherProjectLearners: (count: number) => `Aprendizes de outros projetos: ${count}`,
+		runningLearners: (running: number, maximum: number) => `Coletores rodando: ${running}/${maximum}`,
+		otherProjectLearners: (count: number) => `Coletores de outros projetos: ${count}`,
 		historyRetention: "Retenção do histórico: 7 dias para prompts, logs e sessões internos do Auto Learn",
 		learningAuthority: (authority: string) => `Autoridade de aprendizado: ${authority}`,
 		authorityFull:
-			"aprendizes somente leitura devolvem propostas; esta sessão aplica memória, skills e ajustes de autoLearn elegíveis e registra extensão, código-fonte e entradas inelegíveis como achados",
+			"coletores somente leitura devolvem propostas; esta sessão aplica memória, skills e ajustes de autoLearn elegíveis e registra extensão, código-fonte e entradas inelegíveis como achados",
 		authorityGated: "propostas passam por aprovação fora da política de memória de alta confiança configurada",
 		executionAuthority: "Autoridade de execução: /edge list (independente do preset de aprendizado)",
 		auditDir: (dir: string) => `Pasta de auditoria e logs: ${dir}`,
@@ -35,15 +35,15 @@ export const AUTONOMY_COMMANDS = {
 		modeSet: (mode: string, standing: boolean) =>
 			`Modo de autonomia definido como ${mode}${standing ? " (autonomia permanente)" : ""}.`,
 		rollbackUsage: "Uso: /autonomy rollback <auditId> (veja /autonomy diagnostics para os ids de auditoria)",
-		rolledBack: (auditId: string) => `Reverti a mudança de aprendizado ${auditId}.`,
+		rolledBack: (auditId: string) => `Mudança de aprendizado ${auditId} revertida.`,
 		rollbackSkipped: (reason: string) => `Reversão ignorada: ${reason}`,
 		rollbackFailed: (message: string) => `A reversão falhou: ${message}`,
 		fitnessUsage: "Uso: /autonomy fitness <model-pattern> [trials]",
 		fitnessRunning: (pattern: string) => `Sondagem de fitness do modelo rodando em ${pattern}…`,
 		fitnessFailed: (message: string) => `O fitness do modelo falhou: ${message}`,
-		researchRunning: "Faixa de pesquisa: rodando…",
-		researchSkipped: (reason: string) => `Faixa de pesquisa ignorada: ${reason}`,
-		researchResult: (status: string, reason: string) => `Faixa de pesquisa ${status}${reason}`,
+		researchRunning: "Pesquisa em segundo plano: rodando…",
+		researchSkipped: (reason: string) => `Pesquisa em segundo plano ignorada: ${reason}`,
+		researchResult: (status: string, reason: string) => `Pesquisa em segundo plano ${status}${reason}`,
 		researchReason: (reason: string) => ` (${reason})`,
 		usage: "Uso: /autonomy [status|diagnostics|research|rollback <auditId>|off|safe|balanced|full]",
 		autoLearnUsage: "Uso: /auto-learn [status|run]",
@@ -53,7 +53,7 @@ export const AUTONOMY_COMMANDS = {
 	diagnostics: {
 		section: (name: string) => `--- ${name} ---`,
 		routes: "Rotas",
-		gates: "Portões",
+		gates: "Filtros",
 		costs: "Custos",
 		research: "Pesquisa",
 		delegation: "Delegação",
@@ -67,10 +67,10 @@ export const AUTONOMY_COMMANDS = {
 	proactivity: {
 		on: (on: boolean) => `Proatividade: ${on ? "ligada" : "desligada"}`,
 		reviewBounds: (seconds: number, turns: number, runs: number, notes: number, usd: string) =>
-			`Revisão após ${seconds}s ocioso, com pelo menos ${turns} novo(s) turno(s) do dono entre uma e outra, ${runs} por sessão, até ${notes} nota(s), $${usd} de limite por revisão.`,
+			`Revisão após ${seconds}s ocioso, com pelo menos ${turns} ${turns === 1 ? "novo turno" : "novos turnos"} do dono entre uma e outra, ${runs} por sessão, até ${notes} ${notes === 1 ? "nota" : "notas"}, $${usd} de limite por revisão.`,
 		dailyBounds: (usd: string, wakes: number) =>
-			`Janela móvel de 24 h entre as sessões guardadas com esta: $${usd} de gasto em revisões, ${wakes} despertar(es) de turno do dono por notas e eventos de CI juntos; passado o limite de despertares, os dois esperam o próximo turno do dono.`,
-		delivery: (wakes: boolean) => `Entrega: ${wakes ? "desperta um turno" : "uma nota visível no próximo turno"}`,
+			`Janela móvel de 24 h entre as sessões guardadas com esta: $${usd} de gasto em revisões, ${wakes} ${wakes === 1 ? "turno do dono iniciado" : "turnos do dono iniciados"} por notas e eventos de CI juntos; passado esse limite, os dois esperam o próximo turno do dono.`,
+		delivery: (wakes: boolean) => `Entrega: ${wakes ? "inicia um turno" : "uma nota visível no próximo turno"}`,
 		preferences: (preferences: string) => `Preferências: ${preferences}`,
 		none: "nenhuma",
 		ciEvents: (on: boolean) => `Eventos de CI: ${on ? "ligados" : "desligados"}`,
@@ -81,24 +81,24 @@ export const AUTONOMY_COMMANDS = {
 		intake: (state: string, judge: string, spent: string, maximum: string, last: string) =>
 			`Entrada de rotinas: ${state}${judge}, $${spent} de $${maximum} nesta sessão${last}`,
 		intakeLast: (status: string, sources: number, created: number, refused: number) =>
-			`; última passada ${status}: ${sources} fonte(s), ${created} criada(s), ${refused} recusada(s)`,
+			`; última passada ${status}: ${sources} ${sources === 1 ? "fonte" : "fontes"}, ${created} ${created === 1 ? "criada" : "criadas"}, ${refused} ${refused === 1 ? "recusada" : "recusadas"}`,
 		lastMeasured: (usd: string, wakes: number, eventWakes: number) =>
-			`Última medição: $${usd} de gasto em revisões, ${wakes} despertar(es) de turno do dono (${eventWakes} por eventos de CI) na janela de 24 h`,
+			`Última medição: $${usd} de gasto em revisões, ${wakes} ${wakes === 1 ? "turno do dono iniciado" : "turnos do dono iniciados"} (${eventWakes} por eventos de CI) na janela de 24 h`,
 		setAside: (label: string, until: string) =>
 			`Deixado de lado após notas sem resposta ou recusadas: ${label}, até ${until}`,
-		lastGate: (gate: string) => `Último portão: ${gate}`,
+		lastGate: (gate: string) => `Último bloqueio: ${gate}`,
 		lastNoteDelivery: (delivery: string) => `Última entrega de nota: ${delivery}`,
 		lastEventDelivery: (delivery: string) => `Última entrega de evento de CI: ${delivery}`,
-		wokeParent: "despertou um turno do pai",
+		wokeParent: "iniciou um turno do pai",
 		waitsForOwner: "espera o próximo turno do dono",
 		waitsForOwnerHeld: (hold: string) => `espera o próximo turno do dono (${hold})`,
-		switchedOn: "Proatividade ligada: revisões ociosas podem levantar notas.",
+		switchedOn: "Proatividade ligada: revisões ociosas podem gerar notas.",
 		switchedOff: "Proatividade desligada: nenhuma revisão ociosa roda.",
 		reviewRunning: "Revisão proativa: rodando…",
 		reviewSkipped: (reason: string) => `Revisão proativa ignorada: ${reason}`,
-		reviewNothing: "Revisão proativa: nada a levantar.",
-		reviewRaised: (count: number) => `A revisão proativa levantou ${count} nota(s)`,
-		reviewHeld: (hold: string) => `; elas esperam o seu próximo turno (${hold}).`,
+		reviewNothing: "Revisão proativa: nada a apontar.",
+		reviewRaised: (count: number) => `A revisão proativa gerou ${count} ${count === 1 ? "nota" : "notas"}`,
+		reviewHeld: (hold: string) => `; o que ela gerou espera o seu próximo turno (${hold}).`,
 		reviewFailed: (message: string) => `A revisão proativa falhou: ${message}`,
 		preferencesShown: (preferences: string) => `Preferências: ${preferences}`,
 		noPreferences: "Nenhuma preferência de proatividade salva.",
@@ -110,14 +110,14 @@ export const AUTONOMY_COMMANDS = {
 	},
 	edge: {
 		summary: (granted: number, total: number) =>
-			`Fronteira — ${granted} de ${total} classes concedidas; uma destructive.fs ou toolkit.script não concedida pergunta uma vez`,
+			`Fronteira: ${granted} de ${total} classes concedidas; uma destructive.fs ou toolkit.script não concedida pergunta uma vez`,
 		asks: "pergunta",
 		runs: "roda",
 		granted: (from: string) => `concedida · ${from}`,
 		fromInstructions: (quote: string) => `instruções${quote}`,
-		fromInstructionsQuote: (quote: string) => ` — "${quote}"`,
+		fromInstructionsQuote: (quote: string) => `: "${quote}"`,
 		fromSession: (note: string) => `esta sessão${note}`,
-		fromSessionNote: (note: string) => ` — ${note}`,
+		fromSessionNote: (note: string) => `: ${note}`,
 		fromSettings: "configurações (edge.allow)",
 		unknownTarget: (classes: string) => `classes: ${classes}, ou all`,
 		everyClassGranted: "Fronteira: todas as classes concedidas para esta sessão; nada vai perguntar até revogar.",
@@ -136,7 +136,7 @@ export const AUTONOMY_COMMANDS = {
 			"settings.authority": "editar configurações e credenciais roda sem perguntar",
 			"toolkit.script": "rodar scripts perigosos registrados do toolkit",
 			"operation.irreversible":
-				"uma operação que o System One considera irreversível, para fora ou não resolvida (código enviado por pipe para um interpretador, um comando destrutivo sobre uma variável não expandida, envio de dados para fora da máquina, uma escrita fora da tarefa) e que o pedido do dono não pede",
+				"uma operação que o System One considera irreversível, que sai da máquina ou que ele não conseguiu resolver (código enviado por pipe para um interpretador, um comando destrutivo sobre uma variável não expandida, envio de dados para fora da máquina, uma escrita fora da tarefa) e que o pedido do dono não pede",
 			"agent.delegate": "uma execução que carrega palavras de terceiros entrega trabalho a outro agente",
 			"forge.write":
 				"uma execução que carrega palavras de terceiros age no GitHub além de ler (gh pr, issue, escritas na api)",
@@ -144,16 +144,17 @@ export const AUTONOMY_COMMANDS = {
 	},
 	verification: {
 		title: "Verificação",
-		none: "Verificação — nenhum achado aberto.",
+		none: "Verificação: nenhum achado aberto.",
 		open: (count: number) =>
-			`Verificação — ${count} ${count === 1 ? "achado aberto" : "achados abertos"}; cada um segura o trabalho até ser respondido com evidência ou dispensado`,
+			`Verificação: ${count} ${count === 1 ? "achado aberto" : "achados abertos"}; cada um segura o trabalho até ser respondido com evidência ou dispensado`,
 		finding: (id: string, source: string, reason: string) => `${id}  [${source}]\n    ${reason}`,
 		unknownAction: (action: string, usage: string) => `Ação desconhecida de /verification "${action}". ${usage}`,
 		nameOne: (usage: string) => `Informe o id de um achado aberto ou "all". ${usage}`,
 		waiverNeedsReason: (usage: string) => `Uma dispensa precisa de motivo: ele fica registrado no achado. ${usage}`,
 		reasonTooLong: (length: number, maximum: number) => `O motivo tem ${length} caracteres; o limite é ${maximum}.`,
 		noneMatched: "Nenhum achado aberto correspondeu; nada foi dispensado.",
-		waived: (count: number, ids: string) => `Dispensei ${count} ${count === 1 ? "achado" : "achados"}: ${ids}.`,
+		waived: (count: number, ids: string) =>
+			`${count} ${count === 1 ? "achado dispensado" : "achados dispensados"}: ${ids}.`,
 	},
 	verify: {
 		where: (cwd: string) => ` (em ${cwd})`,
@@ -162,11 +163,11 @@ export const AUTONOMY_COMMANDS = {
 		idLine: (id: string) => `\n   id ${id}`,
 		none: "Nenhuma obrigação de verificação está ativa.",
 		active: (count: number) =>
-			`${count} ${count > 1 ? "obrigações de verificação ativas" : "obrigação de verificação ativa"} — rode a mesma verificação de novo, ou /verify dismiss <id|all> [nota]`,
+			`${count} ${count > 1 ? "obrigações de verificação ativas" : "obrigação de verificação ativa"}; rode a mesma verificação de novo, ou /verify dismiss <id|all> [nota]`,
 		unknown: (id: string) => `Nenhuma obrigação ativa ${id}.`,
 		nothingDismissed: "Nada foi dispensado.",
 		dismissed: (count: number) =>
-			`Dispensei ${count} ${count > 1 ? "obrigações de verificação" : "obrigação de verificação"} por autoridade do operador; a conclusão do objetivo não espera mais por ${count > 1 ? "elas" : "ela"}.`,
+			`${count} ${count > 1 ? "obrigações de verificação dispensadas" : "obrigação de verificação dispensada"} por autoridade do operador; a conclusão do objetivo não espera mais por ${count > 1 ? "elas" : "ela"}.`,
 	},
 	quiz: {
 		usage: "/quiz faz algumas perguntas sobre o resultado recém-concluído",
@@ -198,7 +199,7 @@ export const AUTONOMY_COMMANDS = {
 		headerFailedCommands: "Comandos com falha",
 		questionFailedCommands: (total: number) => `Quantos dos ${total} comandos registrados falharam?`,
 		whyFailedCommands: (failed: number, total: number) =>
-			`O host registrou ${failed} comando(s) com falha de ${total}.`,
+			`O host registrou ${failed} ${failed === 1 ? "comando com falha" : "comandos com falha"} de ${total}.`,
 		countOf: (value: number, total: number) => `${value} de ${total}`,
 		headerWhatHolds: "O que é verdade",
 		questionWhatHolds: "Qual afirmação é verdadeira sobre este resultado, pela folha de provas?",
@@ -213,11 +214,11 @@ export const AUTONOMY_COMMANDS = {
 		statementStakesLow: "O risco foi avaliado como baixo.",
 		noRecord: "Ainda não há neste branch nenhum resultado concluído com folha de provas.",
 		tooFewFacts: (questions: number, needed: number) =>
-			`A folha de provas do resultado mais novo registra poucos fatos para um quiz (${questions} pergunta(s), pelo menos ${needed}); leia a própria folha.`,
+			`A folha de provas do resultado mais novo registra poucos fatos para um quiz (${questions} ${questions === 1 ? "pergunta" : "perguntas"}, pelo menos ${needed}); leia a própria folha.`,
 		score: (right: number, total: number) => `Nota do quiz: ${right} de ${total}.`,
 		skipped: "pulada",
 		right: "certa",
-		choseInstead: (choice: string) => `quase (você escolheu "${choice}")`,
+		choseInstead: (choice: string) => `não foi essa (você escolheu "${choice}")`,
 		answerLine: (index: number, question: string, verdict: string, answer: string, why: string) =>
 			`${index}. ${question} ${verdict}. Resposta: ${answer}. ${why}`,
 	},
@@ -251,7 +252,7 @@ export const AUTONOMY_COMMANDS = {
 			host_check: "verificação do host em seguida",
 			rerun_uncovered: "rodar de novo o que falta",
 			retry_after: "tentar de novo depois",
-			wait_capacity: "esperando espaço",
+			wait_capacity: "aguardando vaga",
 			replace: "rodando de novo nesta máquina",
 			fix_request: "precisa de correção",
 			ask_owner: "precisa da sua resposta",

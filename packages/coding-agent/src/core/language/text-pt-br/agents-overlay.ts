@@ -38,6 +38,6 @@ export const AGENTS_OVERLAY = {
 	scrollHint: "rolar",
 	pageHint: "página",
 	jumpHint: "pular",
-	switchChatHint: "trocar de chat",
+	switchChatHint: "trocar de conversa",
 	closeHint: "fechar",
 } satisfies InterfaceText["agentsOverlay"];

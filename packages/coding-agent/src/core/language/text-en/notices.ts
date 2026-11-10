@@ -41,7 +41,6 @@ export const NOTICES = {
 		`Retry ${attempt}/${maxAttempts} in ${seconds}s · ${keys} cancel`,
 	retryFailed: (attempts: number, error: string) => `Retry failed after ${attempts} attempts: ${error}`,
 
-	moreCauses: (count: number) => `${count} more causes`,
 	/** A rejection nobody awaited: the session lives on. */
 	unhandledRejection: (headline: string) => `Unhandled promise rejection — session kept alive. ${headline}`,
 

@@ -32,9 +32,9 @@ export const MACHINES = {
 		listen: {
 			listening: (host: string, port: number) => `Escutando em ${host}:${port}.`,
 			publicNote:
-				"O link prova um segredo por máquina e sela (criptografa e autentica) cada mensagem com máquinas numa build atual; uma máquina numa build antiga se liga sem selo. Prefira uma rede privada (Tailscale, WireGuard) ou um túnel SSH.",
+				"O link prova um segredo por máquina e sela (criptografa e autentica) cada mensagem com máquinas numa build atual; uma máquina numa build antiga se conecta sem selo. Prefira uma rede privada (Tailscale, WireGuard) ou um túnel SSH.",
 			loopbackNote:
-				"Ligado só a esta máquina; use um túnel SSH ou informe um host para alcançá-la de outra máquina.",
+				"Escutando só nesta máquina; use um túnel SSH ou informe um host para alcançá-la de outra máquina.",
 			stopped:
 				"O hub parou de escutar. As máquinas conectadas continuam conhecidas e se reconectam quando ele voltar.",
 		},
@@ -88,9 +88,10 @@ export const MACHINES = {
 			`Nenhuma máquina conectada chamada ${name} se conectou ainda. Uso: ${jobUsage}`,
 		runUsage: "Uso: /remote run <name> <task>",
 		noOpenJob: (machine: string) => `Nenhum job aberto em ${machine}.`,
-		stopped: (count: number, machine: string) => `Parou ${count} job(s) em ${machine}.`,
+		stopped: (count: number, machine: string) =>
+			`${count} ${count === 1 ? "job parado" : "jobs parados"} em ${machine}.`,
 		stopRecorded: (count: number, machine: string) =>
-			`Registrou uma parada para ${count} registro(s) de job em ${machine} que esta build não consegue ler. Os registros ficam como estão; a sessão que colocou o job encerra a lane de cada um na próxima reconciliação, e a parada é enviada para ${machine} quando ela estiver conectada.`,
+			`Parada registrada para ${count} ${count === 1 ? "registro" : "registros"} de job em ${machine} que esta build não consegue ler. Os registros ficam como estão; a sessão que colocou o job encerra a lane de cada um na próxima reconciliação, e a parada é enviada para ${machine} quando ela estiver conectada.`,
 		held: (machine: string) => `Nenhum job novo vai para ${machine}; os que já estão lá continuam.`,
 		released: (machine: string) => `${machine} pode receber jobs de novo.`,
 		trustUsage: "Uso: /remote trust <name> answers|reads|changes",
@@ -108,7 +109,7 @@ export const MACHINES = {
 			cancelled: "cancelado",
 			deadline: "o tempo acabou",
 			budget: "o orçamento acabou",
-			allowance: "uma assinatura em uso ficou sem franquia",
+			allowance: "uma assinatura em uso ficou sem cota na janela de uso",
 			leader_unavailable: "o líder não estava disponível",
 		},
 		noSuchBot: (alias: string) => `Não existe bot chamado ${alias}. Os nomes de bot estão em /bot list.`,
@@ -128,7 +129,7 @@ export const MACHINES = {
 		mayChange: (paths: string) => `Pode alterar: ${paths}`,
 		readOnly: "Só leitura: nenhum arquivo é alterado.",
 		budget: (amount: string) =>
-			`Orçamento: $${amount} de gasto medido. Turnos por assinatura não custam em termos medidos, então não entram nessa conta.`,
+			`Orçamento: $${amount} de gasto cobrado por uso. Turnos por assinatura não são cobrados por uso, então não entram nessa conta.`,
 		stopsAt: (at: string) => `Para em: ${at}`,
 		heldBack: "Retido:",
 		updatesSent: (count: number) => `Atualizações enviadas: ${count}`,
@@ -148,7 +149,7 @@ export const MACHINES = {
 			"Nenhuma parada de emergência estava acionada; inícios pagos retidos e workers na fila voltam agora.",
 		view: {
 			header: (count: number) =>
-				`Carga dos provedores: ${count} requisição${count === 1 ? "" : "ões"} em curso na máquina`,
+				`Carga dos provedores: ${count} ${count === 1 ? "requisição" : "requisições"} em andamento na máquina`,
 			provider: (args: {
 				account: string;
 				inFlight: number;
@@ -159,7 +160,7 @@ export const MACHINES = {
 				limit?: number;
 				oldest: string;
 			}) =>
-				`  ${args.account}: ${args.inFlight} em curso (${args.foreground} primeiro plano, ${args.worker} worker, ${args.background} segundo plano) ` +
+				`  ${args.account}: ${args.inFlight} em andamento (${args.foreground} primeiro plano, ${args.worker} worker, ${args.background} segundo plano) ` +
 				`em ${args.processes} processo${args.processes === 1 ? "" : "s"}${args.limit ? `, limite ${args.limit}` : ""}, a mais antiga há ${args.oldest}`,
 			limitedHeader: "Limitados:",
 			limitedRow: (args: {

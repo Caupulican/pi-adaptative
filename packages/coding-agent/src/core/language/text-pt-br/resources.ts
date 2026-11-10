@@ -15,8 +15,8 @@ export const RESOURCES = {
 		trustDescription: (dir: string) =>
 			`A pasta "${dir}" tem extensões e recursos para instalar. Extensões podem executar código arbitrário na sua máquina. Confiar nela?`,
 		trustAccept: "Confiar nesta pasta e seguir com a instalação.",
-		trustReject: "Não confiar nesta pasta. Abortar.",
-		aborted: "Instalação abortada. A pasta de origem não foi considerada confiável.",
+		trustReject: "Não confiar nesta pasta. Cancelar a instalação.",
+		aborted: "Instalação cancelada. A pasta de origem não foi considerada confiável.",
 		complete: (installed: number, skipped: number) =>
 			`Instalação concluída: ${installed} recursos instalados, ${skipped} ignorados.`,
 	},
@@ -25,7 +25,7 @@ export const RESOURCES = {
 		archiveFailed: (name: string) => `Não foi possível arquivar '${name}' (não é uma skill promovida?)`,
 		restored: (name: string) => `Skill '${name}' restaurada`,
 		restoreFailed: (name: string) => `Não foi possível restaurar '${name}'`,
-		empty: "Curador: nenhuma skill promovida parada ou sobreposta. Nada a propor.",
+		empty: "Curador: nenhuma skill promovida antiga ou sobreposta. Nada a propor.",
 		header: "Propostas do curador de skills (nada é aplicado automaticamente):",
 		archiveProposal: (name: string, reason: string) =>
 			`  • arquivar '${name}': ${reason}  →  /curate archive ${name}`,
