@@ -1,0 +1,318 @@
+{
+	"title": "A file that improves by rounds",
+	"size": [
+		1280,
+		1500
+	],
+	"unit": 10,
+	"loop": 10,
+	"rounds": 4,
+	"theme": "matrix",
+	"footer": "one item = one round's candidate set",
+	"clock": "round {round} of 4",
+	"bands": [
+		{
+			"id": "loop",
+			"tier": "live",
+			"title": "The loop",
+			"note": "one file, four rounds",
+			"height": 30
+		},
+		{
+			"id": "views",
+			"tier": "live",
+			"title": "What the rounds add up to",
+			"height": 60
+		},
+		{
+			"id": "words",
+			"tier": "live",
+			"title": "The words",
+			"height": 54
+		}
+	],
+	"nodes": [
+		{
+			"id": "misses",
+			"kind": "source",
+			"band": "loop",
+			"at": [
+				0,
+				12
+			],
+			"count": 1,
+			"label": "misses",
+			"sub": [
+				"what failed"
+			]
+		},
+		{
+			"id": "editor",
+			"kind": "worker",
+			"band": "loop",
+			"at": [
+				15,
+				10
+			],
+			"mechanism": "scan",
+			"label": "editor"
+		},
+		{
+			"id": "candidates",
+			"kind": "trial",
+			"band": "loop",
+			"at": [
+				30,
+				8.75
+			],
+			"count": 8,
+			"label": "candidates"
+		},
+		{
+			"id": "runner",
+			"kind": "worker",
+			"band": "loop",
+			"at": [
+				64,
+				10
+			],
+			"mechanism": "turn",
+			"label": "runner"
+		},
+		{
+			"id": "versions",
+			"kind": "rail",
+			"band": "loop",
+			"at": [
+				82,
+				12.5
+			],
+			"dots": 4,
+			"label": "versions",
+			"okText": "kept"
+		},
+		{
+			"id": "who",
+			"kind": "table",
+			"band": "views",
+			"at": [
+				0,
+				4
+			],
+			"label": "Who writes what",
+			"columns": [
+				"who",
+				"writes",
+				"how often"
+			],
+			"rows": [
+				{
+					"cells": [
+						"editor",
+						"the edits",
+						"eight a round"
+					],
+					"when": "editor"
+				},
+				{
+					"cells": [
+						"candidates",
+						"the scores",
+						"one set a round"
+					],
+					"when": "candidates"
+				},
+				{
+					"cells": [
+						"runner",
+						"the check",
+						"one a round"
+					],
+					"when": "runner"
+				}
+			]
+		},
+		{
+			"id": "steps",
+			"kind": "table",
+			"band": "views",
+			"at": [
+				0,
+				20
+			],
+			"label": "One round",
+			"numbered": true,
+			"rows": [
+				{
+					"cells": [
+						"collect the misses"
+					],
+					"when": "misses"
+				},
+				{
+					"cells": [
+						"propose eight edits"
+					],
+					"when": "editor"
+				},
+				{
+					"cells": [
+						"score the candidates"
+					],
+					"when": "candidates"
+				},
+				{
+					"cells": [
+						"run the check"
+					],
+					"when": "runner"
+				}
+			]
+		},
+		{
+			"id": "score",
+			"kind": "series",
+			"band": "views",
+			"at": [
+				50,
+				4
+			],
+			"label": "Score by round",
+			"note": "the kept edit",
+			"of": "candidates",
+			"axis": "held-out score",
+			"w": 50,
+			"h": 14
+		},
+		{
+			"id": "kept",
+			"kind": "tally",
+			"band": "views",
+			"at": [
+				50,
+				28
+			],
+			"label": "Versions kept",
+			"per": "round",
+			"marks": "v{round}"
+		},
+		{
+			"id": "lanes",
+			"kind": "lanes",
+			"band": "views",
+			"at": [
+				0,
+				40
+			],
+			"label": "Who holds the work",
+			"rows": [
+				"editor",
+				"candidates",
+				"runner"
+			],
+			"w": 100
+		},
+		{
+			"id": "headline",
+			"kind": "note",
+			"band": "words",
+			"at": [
+				0,
+				10
+			],
+			"size": "title",
+			"lines": [
+				"A file that improves by rounds"
+			]
+		},
+		{
+			"id": "story",
+			"kind": "note",
+			"band": "words",
+			"at": [
+				0,
+				24
+			],
+			"lines": [
+				{
+					"text": "The editor reads what failed and proposes eight edits.",
+					"when": "editor"
+				},
+				{
+					"text": "Each edit is scored on questions kept out of the editing.",
+					"when": "candidates"
+				},
+				{
+					"text": "The runner checks the best edit before it lands.",
+					"when": "runner"
+				}
+			]
+		},
+		{
+			"id": "closing",
+			"kind": "note",
+			"band": "words",
+			"at": [
+				0,
+				38
+			],
+			"size": "lede",
+			"lines": [
+				"Write the check before the change."
+			]
+		}
+	],
+	"wires": [
+		{
+			"from": "misses:1",
+			"to": "editor"
+		},
+		{
+			"from": "editor",
+			"to": "candidates"
+		},
+		{
+			"from": "candidates",
+			"to": "runner"
+		},
+		{
+			"from": "runner",
+			"to": "versions"
+		}
+	],
+	"runs": [
+		{
+			"id": "round",
+			"from": "misses:1",
+			"start": 0.3,
+			"steps": [
+				{
+					"to": "editor",
+					"work": 2,
+					"phases": [
+						"read",
+						"propose"
+					]
+				},
+				{
+					"to": "candidates",
+					"work": 3.6
+				},
+				{
+					"to": "runner",
+					"work": 2.2,
+					"phases": [
+						"run",
+						"measure"
+					]
+				},
+				{
+					"to": "versions",
+					"result": "ok",
+					"mark": "v{round}",
+					"carry": "{kept}"
+				}
+			]
+		}
+	]
+}

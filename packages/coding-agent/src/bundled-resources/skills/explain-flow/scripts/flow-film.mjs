@@ -37,6 +37,7 @@ const ENGINE_MODULES = [
 	"metrics.mjs",
 	"read.mjs",
 	"mechanisms.mjs",
+	"stays.mjs",
 	"trial.mjs",
 	"instruments.mjs",
 	"scene.mjs",

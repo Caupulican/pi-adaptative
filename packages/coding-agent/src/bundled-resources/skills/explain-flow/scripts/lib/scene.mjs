@@ -8,8 +8,8 @@
  * record of what landed, newest first), `sweep` (a check that runs on a schedule), `chain` (named steps in order, also
  * as one row of a list with its name at the left), `tally` (a count shown as boxes), `note` (words only) and `trial`
  * (several candidates, each scored, one kept; see `trial.mjs`). The instruments, which hold no item and have no port
- * (`table`, `series`, a `tally` by rounds, and the lines of a `note` that follow a station), are read and shaped in
- * `instruments.mjs`.
+ * (`table`, `series`, a `tally` by rounds, `lanes`, and the lines of a `note` that follow a station), are read and
+ * shaped in `instruments.mjs`.
  */
 
 import { cornerPath, curvePath } from "./geometry.mjs";
@@ -29,22 +29,24 @@ import {
 } from "./metrics.mjs";
 import {
 	NOTE_SIZES,
+	readLanes,
 	readLinkedLines,
 	readSeries,
 	readTable,
+	resolveLanes,
 	resolveLinks,
+	shapeLanes,
 	shapeSeries,
 	shapeTable,
 	tallyMarks,
 } from "./instruments.mjs";
 import { isRecord, readNumber, readOneOf, readText, readTextList } from "./read.mjs";
+import { HOLDING_KINDS } from "./stays.mjs";
 import { resolveTheme } from "./theme.mjs";
 import { shapeTrial, TRIAL_KEEPS, TRIAL_PHASES, trialCaptionLength } from "./trial.mjs";
 
 export const TIERS = ["live", "next", "later"];
-export const NODE_KINDS = ["source", "queue", "worker", "trial", "rail", "sweep", "chain", "tally", "note", "table", "series"];
-/** The stations that hold an item for a stay; a queue holds one per slot, the others one at a time. */
-const HOLDING_KINDS = ["queue", "worker", "trial"];
+export const NODE_KINDS = ["source", "queue", "worker", "trial", "rail", "sweep", "chain", "tally", "note", "table", "series", "lanes"];
 export const CHAIN_MODES = ["step", "fill", "together"];
 export const TONES = ["work", "ok", "fail", "info", "text"];
 const PORT_NAMES = ["in", "out", "top", "bottom"];
@@ -54,7 +56,7 @@ const ID = /^[a-z][a-z0-9-]{0,31}$/;
 const ENDPOINT = /^([a-z][a-z0-9-]{0,31})(?::(\d+))?(?:\.(in|out|top|bottom))?$/;
 
 /** Rows under a station kept for what it says about the item it holds (a worker: its lane, then its phase). */
-const CAPTION_ROWS = { source: 0, queue: 0, worker: 2, trial: 1, rail: 0, sweep: 0, chain: 0, tally: 0, note: 0, table: 0, series: 0 };
+const CAPTION_ROWS = { source: 0, queue: 0, worker: 2, trial: 1, rail: 0, sweep: 0, chain: 0, tally: 0, note: 0, table: 0, series: 0, lanes: 0 };
 
 /** The rows a station keeps under its body: its kind's, and for a rail whose landings carry marks one row for them. */
 export function captionRows(node) {
@@ -153,6 +155,8 @@ function shapeNode(node, x, y, u, rounds) {
 			return shapeTable(node, x, y, u, rounds);
 		case "series":
 			return shapeSeries(node, x, y, u);
+		case "lanes":
+			return shapeLanes(node, x, y, u, rounds);
 		default: {
 			// A note: its lines at its size, the line step growing with the size in the same ratio.
 			const scale = node.size === "text" ? 1 : NOTE_SIZES[node.size] / TEXT_SIZE;
@@ -254,6 +258,8 @@ function readNode(raw, path, bands, problems, rounds, marked) {
 		readTable(raw, node, path, problems);
 	} else if (kind === "series") {
 		readSeries(raw, node, path, problems, rounds);
+	} else if (kind === "lanes") {
+		readLanes(raw, node, path, problems);
 	}
 	return node;
 }
@@ -734,12 +740,17 @@ export function compileScene(spec) {
 		if (seen.has(node.id)) problems.push(`nodes[${index}].id: "${node.id}" is used twice`);
 		seen.add(node.id);
 		node.tier = node.band.tier;
-		node.shape = shapeNode(node, (MARGIN + node.column) * u, node.band.top + (BAND_HEADER + node.row) * u, u, scene.rounds);
-		node.bottom = node.shape.box.y + node.shape.box.h + rowsBelow(node) * u;
 		node.usedPorts = new Set();
 		scene.nodes.push(node);
 	}
 	if (scene.nodes.length === 0) problems.push("nodes: at least one station is needed");
+	// Every station is placed in one pass, once the rows of a `lanes` are known: they name stations that may be declared
+	// after it, and every bottom must be known before the wires are read, because a loop wire takes the lowest of them.
+	resolveLanes(scene, problems);
+	for (const node of scene.nodes) {
+		node.shape = shapeNode(node, (MARGIN + node.column) * u, node.band.top + (BAND_HEADER + node.row) * u, u, scene.rounds);
+		node.bottom = node.shape.box.y + node.shape.box.h + rowsBelow(node) * u;
+	}
 	for (const [index, raw] of (Array.isArray(spec.wires) ? spec.wires : []).entries()) {
 		const wire = readWire(raw, `wires[${index}]`, scene.nodes, scene, problems);
 		if (!wire) continue;

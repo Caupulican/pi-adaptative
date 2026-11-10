@@ -1,8 +1,9 @@
 /**
  * Instruments: the views of a film that hold no item and have no port. Each shows the circuit's beat in another
  * notation, so the same moment reads in the circuit and beside it: a line of words or a table's row lights while the
- * station it names is busy. This module holds the one linking rule and, for each instrument, its reading, its shape
- * and its drawing; `scene.mjs` and `draw.mjs` only hand over to it.
+ * station it names is busy, and a lane shows who holds an item from when to when. This module holds the one linking
+ * rule and, for each instrument, its reading, its shape and its drawing; `scene.mjs` and `draw.mjs` only hand over to
+ * it.
  *
  * Words are lit one way everywhere: a soft wash behind them and a brighter ink. Never a solid bar, never colour alone.
  */
@@ -10,6 +11,7 @@
 import { px } from "./geometry.mjs";
 import { CHIP_RADIUS, LINE_STEP, roundText, SMALL_TEXT_SIZE, TEXT_SIZE, textWidth } from "./metrics.mjs";
 import { isRecord, readNumber, readText } from "./read.mjs";
+import { HOLDING_KINDS, staysAt } from "./stays.mjs";
 import { alphaOf, circleEl, lineEl, pathEl, rectEl, strokeOf, words } from "./svg.mjs";
 import { trialKeptAt, trialOutcome } from "./trial.mjs";
 
@@ -29,6 +31,16 @@ const NEW_POINT_SECONDS = 1.4;
 /** The rows a series keeps over its plot (the measure's name) and under it (the rounds' numbers), in grid units. */
 const SERIES_HEAD = 2.4;
 const SERIES_FOOT = 2.6;
+/** A sample of the hairline of `base` before its words, so those words still name the line they belong to. */
+const SERIES_SAMPLE = 2;
+/** A lanes: the height of a row, its bar, the gap after a row's name, and the scale under the last row, in grid units. */
+const LANES_ROW = LINE_STEP + 0.5;
+const LANES_BAR = 1.2;
+const LANES_LABEL_GAP = 2;
+const LANES_TAIL = 2.1;
+/** How strongly a lanes fills a stay the playhead is inside, and one it has passed in this round. */
+const LANES_ACTIVE = 0.72;
+const LANES_PASSED = 0.16;
 
 /**
  * How strongly a station is busy at this instant, from 0 to 1: a queue, a worker or a trial while it holds an item, a
@@ -300,7 +312,15 @@ export function seriesBody(scene, node) {
 		const level = seriesPlace(node, scene.rounds).y(node.base);
 		// A solid hairline: in this film a dashed line means "built, not proven".
 		out += lineEl(plot.x, level, plot.x + plot.w, level, `${strokeOf(theme.dim, u * 0.1)} opacity="0.7"`);
-		if (node.baseWords) out += words(scene, plot.x + plot.w, level - 0.6 * u, SMALL_TEXT_SIZE * u, [{ text: node.baseWords, fill: theme.dim }], "end");
+		if (node.baseWords) {
+			// The level's words stand in the head row, clear of the marks: a quiet dot of the last round would cover them
+			// over the level itself. A short sample of the hairline names the line they belong to.
+			const head = plot.y - 0.9 * u;
+			const right = plot.x + plot.w;
+			const left = right - textWidth(node.baseWords, SMALL_TEXT_SIZE * u) - 0.8 * u;
+			out += lineEl(left - SERIES_SAMPLE * u, head - 0.5 * u, left, head - 0.5 * u, `${strokeOf(theme.dim, u * 0.1)} opacity="0.7"`);
+			out += words(scene, right, head, SMALL_TEXT_SIZE * u, [{ text: node.baseWords, fill: theme.dim }], "end");
+		}
 	}
 	return out;
 }
@@ -370,14 +390,11 @@ export function seriesLive(scene, node, state) {
 			const ring = entry.since / NEW_POINT_SECONDS;
 			out += circleEl(x, y, (0.9 + 1.6 * ring) * u, `${strokeOf(theme.ok, u * 0.16)} opacity="${alphaOf((1 - ring) * 0.9)}"`);
 		}
-		// Only the newest point says its value, in the text ink, placed so it stays inside the plot and off the base's words.
+		// Only the newest point says its value, in the text ink, placed so it stays inside the plot.
 		const value = node.of ? entry.value.toFixed(2) : String(entry.value);
 		const wide = textWidth(value, SMALL_TEXT_SIZE * u);
 		const baseline = y + (y - plot.y < 2 * u ? 1.8 : -0.9) * u;
-		const level = node.base === undefined ? undefined : place.y(node.base);
-		const baseLeft = plot.x + plot.w - textWidth(node.baseWords ?? "", SMALL_TEXT_SIZE * u) - u;
-		const meetsBase = level !== undefined && node.baseWords !== undefined && x + 1.2 * u + wide > baseLeft && Math.abs(baseline - (level - 0.6 * u)) < 2 * u;
-		const right = !meetsBase && x + 1.2 * u + wide <= plot.x + plot.w;
+		const right = x + 1.2 * u + wide <= plot.x + plot.w;
 		out += words(scene, x + (right ? 1.2 : -1.2) * u, baseline, SMALL_TEXT_SIZE * u, [{ text: value, fill: theme.text }], right ? "start" : "end");
 	}
 	return out;
@@ -409,5 +426,146 @@ export function tallyRounds(scene, node, state) {
 		if (texts[index])
 			out += words(scene, cell.x + cell.w / 2, cell.y + cell.h + 1.7 * u, 1.2 * u, [{ text: texts[index].toUpperCase(), fill: index === state.round ? theme.text : theme.dim }], "middle");
 	}
+	return out;
+}
+
+/**
+ * A lanes from a spec: `rows` names the stations to show and `w` the width of its track. A row names a station that may
+ * be declared after the lanes, so its names are resolved once every station is read, by `resolveLanes`.
+ */
+export function readLanes(raw, node, path, problems) {
+	node.trackW = readNumber(raw.w, `${path}.w`, problems, { min: 20, max: 100, fallback: 40 });
+	node.rowIds = undefined;
+	if (raw.rows === undefined) return;
+	if (!Array.isArray(raw.rows) || raw.rows.length === 0) {
+		problems.push(`${path}.rows: must be a list of station ids`);
+		return;
+	}
+	node.rowIds = raw.rows.map((entry, index) => {
+		if (typeof entry !== "string" || entry === "") {
+			problems.push(`${path}.rows[${index}]: must be the id of a station`);
+			return undefined;
+		}
+		return entry;
+	});
+}
+
+/**
+ * Resolves the rows of every lanes to the stations they name, once every station is read and before the wires are: a
+ * loop wire takes its lane from the lowest bottom of a band, the lanes' own included. By default a lanes shows every
+ * worker and every trial of the scene, in the order they are declared. A row that names no station, or a station that
+ * holds no item, is a problem: its row would stand for nothing.
+ */
+export function resolveLanes(scene, problems) {
+	for (const [index, node] of scene.nodes.entries()) {
+		if (node.kind !== "lanes") continue;
+		if (node.rowIds === undefined) {
+			node.rows = scene.nodes.filter((other) => other.kind === "worker" || other.kind === "trial");
+			if (node.rows.length === 0)
+				problems.push(`nodes[${index}].rows: no station of the scene holds an item; name a queue, a worker or a trial`);
+			continue;
+		}
+		node.rows = [];
+		for (const [row, id] of node.rowIds.entries()) {
+			const at = `nodes[${index}].rows[${row}]`;
+			if (id === undefined) continue;
+			const station = scene.nodes.find((other) => other.id === id);
+			if (!station) problems.push(`${at}: "${id}" names no station`);
+			else if (!HOLDING_KINDS.includes(station.kind)) problems.push(`${at}: a ${station.kind} holds no item; name a queue, a worker or a trial`);
+			else node.rows.push(station);
+		}
+	}
+}
+
+/** The box and the rows of a lanes: a station's name at the left, a track for one round, a scale under the last row. */
+export function shapeLanes(node, x, y, u, rounds) {
+	const names = node.rows.map((station) => station.label ?? station.id);
+	const labelW = Math.max(0, ...names.map((name) => textWidth(name, SMALL_TEXT_SIZE * u, rounds)));
+	const left = x + (names.length > 0 ? labelW + LANES_LABEL_GAP * u : 0);
+	const right = left + node.trackW * u;
+	const rows = names.map((name, index) => {
+		const top = y + (index * LANES_ROW + (LANES_ROW - LANES_BAR) / 2) * u;
+		return { station: node.rows[index], name, top, line: top + (LANES_BAR / 2) * u };
+	});
+	const last = rows.at(-1);
+	return {
+		box: { x, y, w: right - x, h: (names.length * LANES_ROW + LANES_TAIL) * u },
+		rows,
+		track: { x1: left, x2: right },
+		playhead: { y1: rows[0]?.top ?? y, y2: last === undefined ? y : last.top + LANES_BAR * u },
+		scale: y + (names.length * LANES_ROW + 1.6) * u,
+		ports: {},
+	};
+}
+
+/**
+ * The bars of one row: every stay of every journey at that station, from its start to its end inside the round. A
+ * journey ends inside the loop, so no stay runs past it and no bar wraps.
+ */
+function laneBars(scene, station) {
+	return staysAt(scene, station).map((stay) => ({ from: stay.start, to: stay.end, failed: stay.segment.result === "fail" }));
+}
+
+/** The rectangle a stay takes on a lanes' track, in pixels. */
+function laneBarEl(scene, node, row, bar, attrs) {
+	const u = scene.unit;
+	const { track } = node.shape;
+	const span = track.x2 - track.x1;
+	const x = track.x1 + (span * bar.from) / scene.loop;
+	return rectEl({ x, y: row.top, w: (span * (bar.to - bar.from)) / scene.loop, h: LANES_BAR * u }, CHIP_RADIUS * u, attrs);
+}
+
+/** A lanes' still part: a track for one round on each row, one outline per stay, and the seconds at its ends. */
+export function lanesBody(scene, node) {
+	const u = scene.unit;
+	const { theme } = scene;
+	const { shape } = node;
+	const quiet = `${strokeOf(theme.line, u * 0.12)} opacity="0.7"`;
+	const outline = `${strokeOf(theme.line, u * 0.14)} opacity="0.85"`;
+	let out = "";
+	for (const row of shape.rows) {
+		out += lineEl(shape.track.x1, row.line, shape.track.x2, row.line, quiet);
+		for (const bar of laneBars(scene, row.station)) out += laneBarEl(scene, node, row, bar, outline);
+	}
+	const ends = SMALL_TEXT_SIZE * u;
+	out += words(scene, shape.track.x1, shape.scale, ends, [{ text: "0 s", fill: theme.dim }]);
+	out += words(scene, shape.track.x2, shape.scale, ends, [{ text: `${scene.loop} s`, fill: theme.dim }], "end");
+	return out;
+}
+
+/**
+ * A lanes at one instant: a playhead across every row, the stay it is inside filled in the colour the storyboard gives it,
+ * the stays it has passed in this round filled quiet, and the name of a row lit while its station holds the item. With
+ * rounds over one, the round in hand stands in the middle of the scale.
+ */
+export function lanesLive(scene, node, state) {
+	const u = scene.unit;
+	const { theme } = scene;
+	const { shape } = node;
+	let out = "";
+	for (const row of shape.rows) {
+		const bars = laneBars(scene, row.station);
+		const active = bars.find((bar) => bar.from <= state.now && state.now < bar.to);
+		for (const bar of bars) {
+			if (bar === active) {
+				const colour = bar.failed ? theme.fail : theme.work;
+				out += laneBarEl(scene, node, row, bar, `fill="${colour}" fill-opacity="${LANES_ACTIVE}" stroke="${colour}" stroke-width="${px(u * 0.14)}"`);
+			} else if (bar.to <= state.now) out += laneBarEl(scene, node, row, bar, `fill="${theme.text}" opacity="${LANES_PASSED}"`);
+		}
+		out += words(scene, shape.box.x, row.line + 0.5 * u, SMALL_TEXT_SIZE * u, [
+			{ text: roundText(row.name, state.round), fill: active ? theme.text : theme.dim },
+		]);
+	}
+	const at = shape.track.x1 + ((shape.track.x2 - shape.track.x1) * state.now) / scene.loop;
+	out += lineEl(at, shape.playhead.y1, at, shape.playhead.y2, strokeOf(theme.text, u * 0.16));
+	if (scene.rounds > 1)
+		out += words(
+			scene,
+			(shape.track.x1 + shape.track.x2) / 2,
+			shape.scale,
+			SMALL_TEXT_SIZE * u,
+			[{ text: roundText(`round {round} of ${scene.rounds}`, state.round), fill: theme.text }],
+			"middle",
+		);
 	return out;
 }

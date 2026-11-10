@@ -24,7 +24,7 @@ The owner watches one loop and can say what the system does, where it can fail a
 
 A process is drawn as a circuit. Stations are joined by wires. Work items travel the wires, wait or are worked on inside stations, and end on a record or go back to where they came from. Everything repeats on one loop, so any frame can be drawn alone and the last frame meets the first. A loop may repeat in rounds: the same circuit runs again, a counter says which round it is, and a rail keeps what earlier rounds landed. Parts that are built but not proven, or only planned, sit in their own bands below, drawn dashed and then dotted. At rest the picture is line and text; a state colour appears only where something happens.
 
-The same beat can show in more than one notation: a line of words or a row of a table lights while the station it names is busy. Use that when the owner must connect the picture to a procedure or to who does what.
+The same beat can show in more than one notation: a line of words or a row of a table lights while the station it names is busy, and a `lanes` shows every stay of the round at once. Use that when the owner must connect the picture to a procedure or to who does what.
 
 Stations are a closed set, each shaped by what it does. Choose by function, not by look:
 
@@ -41,6 +41,7 @@ Stations are a closed set, each shaped by what it does. Choose by function, not 
 | `note` | Words only. A line can light while a station works; a note can be the film's title or its closing sentence. |
 | `table` | Rows of short facts, or ordered steps with numbers. A row can light while a station works. |
 | `series` | One measure with one point per round: what the rounds add up to. It can read a trial's scores. |
+| `lanes` | Who works when: one row per station, a bar per stay, on a track for one round, with a playhead at the round's time. It reads the storyboard, so it cannot disagree with the circuit. |
 
 ### Procedure
 
@@ -48,7 +49,8 @@ Stations are a closed set, each shaped by what it does. Choose by function, not 
 2. State the arrival question in one sentence ("what happens to a change after it is pushed"). The film answers that question and nothing else.
 3. Write the storyboard as journeys: who starts an item, where it goes, how long each stay lasts, and how it ends. Include one journey that fails if the real system can fail.
 4. Write the spec. Place stations on the grid, declare a wire for every hop of every journey, give every worker the mechanism that matches its work.
-5. Run `node scripts/flow-film.mjs check <spec.json>`. Fix every problem it names. It prints the storyboard as timed beats: read it against step 3.
+5. For a process that repeats and improves, give the spec its rounds: add `rounds`, a `trial` where the candidates are compared, and the instruments that show what the rounds add up to. A `series` draws the measure of each round, a `tally` crosses the rounds that are over, and a `lanes` shows who holds the item when. They read the journeys, never a copy of them, so they cannot disagree with the circuit.
+6. Run `node scripts/flow-film.mjs check <spec.json>`. Fix every problem it names. It prints the storyboard as timed beats: read it against step 3.
 6. Run `sheet` and view the contact sheet with the read tool. Look for words that touch, a wire that crosses words, more than one thing lit in a region with no reason, and a station whose mechanism does not match its work. Fix the spec and run it again.
 7. Render: `html` for the page that plays the loop (Pause and speed controls, `?t=<seconds>` for one instant), `video` for an MP4 and with `--gif` a GIF.
 8. Verify the result: `ffprobe` shows one video stream with the loop's duration; view the first frame and one frame mid-loop. Say which checks ran.
@@ -56,7 +58,7 @@ Stations are a closed set, each shaped by what it does. Choose by function, not 
 
 ### Start from a diagram or a plan
 
-`node scripts/flow-film.mjs import <file> --out <spec.json>` reads Mermaid (`flowchart`, `graph`, `sequenceDiagram`, `stateDiagram`, alone or in a Markdown fence), Graphviz DOT, and a plan file (the object given to the `plan` tool: a title and steps with `id`, `do`, `uses`, `join`). Nodes become stations, edges become wires, and the paths become journeys shown in turn. The command prints what the source notation could not carry. The result is a starting point: check the station kinds, shorten the words, set real timings, then go on from step 5.
+`node scripts/flow-film.mjs import <file> --out <spec.json>` reads Mermaid (`flowchart`, `graph`, `sequenceDiagram`, `stateDiagram`, alone or in a Markdown fence), Graphviz DOT, and a plan file (the object given to the `plan` tool: a title and steps with `id`, `do`, `uses`, `join`). Nodes become stations, edges become wires, and the paths become journeys shown in turn. The command prints what the source notation could not carry. The result is a starting point: check the station kinds, shorten the words, set real timings, then go on from step 6.
 
 ### Before the owner approves
 
@@ -84,6 +86,7 @@ Artifacts are discardable local files. Write them to `${PI_EXPLAINERS_DIR:-${TMP
 - "Show me how a plan runs before I approve it": write the plan's steps to `plan.json`, run `import`, set each step's real station kind and mechanism, add the journey of a rejected check, run `check` and `sheet`, render the page with the owner's theme file, and ask for the go-ahead with the page path and what the film does not show.
 - "Turn this Mermaid flowchart into something better": run `import` on the file, read the notes it prints, replace generic workers with the right mechanisms, shorten the labels, render, and report what the Mermaid source could not carry.
 - "Explain our release pipeline as an animation for the site": read the pipeline config, list stages and gates, storyboard one release that passes and one that fails a gate, put the stages that are not built yet in a `later` band, render an MP4 and a GIF, and report the `ffprobe` result.
+- "Show how a file gets better round after round": start from [assets/round-loop.json](assets/round-loop.json), a loop that improves by rounds, and replace its stations and words with the real ones: a source, a worker, a trial where the candidates are compared, a worker, and a rail whose marks come from `{round}`. Keep its `rounds`, its round counter and its instruments: a `series` of the trial's scores, a `tally` by rounds and a `lanes`.
 
 ## Self-Check
 
@@ -101,3 +104,4 @@ Artifacts are discardable local files. Write them to `${PI_EXPLAINERS_DIR:-${TMP
 - The importer lays a diagram out left to right in one band. A wide graph makes a wide canvas; a graph too wide for one picture must be split by hand.
 - Mermaid diagram types other than flowchart, sequence and state are not read. Styling, notes and click handlers are reported, not carried.
 - The host offers this skill to the main session only; a worker reports what it found and the main session makes the film.
+- A `lanes` draws one bar per stay on one row: a `queue` that holds several items at once shows them one over another, so its row tells when the queue is busy, not how many items it holds.

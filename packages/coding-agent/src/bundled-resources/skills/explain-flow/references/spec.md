@@ -44,6 +44,7 @@ Every station has `id` (lowercase letters, digits, hyphens), `kind`, `band`, `at
 | `note` | `lines` (up to 6): each a text, or `{ "text", "when" }` to light the line while a station is busy; `size`: `text` (default), `lede` or `title` | the words | none |
 | `table` | `columns`: up to 4 header words (none: no header); `rows`: 1 to 8, each `{ "cells", "when" }`; `numbered`: `true` adds a column of row numbers | the cells, one line per row | none |
 | `series` | one of `of` (a trial's id) or `values` (one number per round); `w` and `h`, the plot in units (30 by 12; 16 by 8 to 80 by 30); `axis`: what is measured; `base` with `baseWords`: a level to compare with; `floor`, `ceiling`: the scale | the plot plus 5 rows | none |
+| `lanes` | `rows`: the ids of the stations to show, each a `queue`, a `worker` or a `trial` (default: every worker and every trial, in the order they are declared); `w`: the width of a track that stands for one round, in units (40; 20 to 100) | the names at the left, then the track; 3.5 per row plus 2 for the scale | none |
 
 A worker keeps two rows under its body for what it says about the item it holds (its lane, then its phase); its `sub` lines start after them. A trial keeps one row (its phase, then the kept candidate and its score). A rail whose landings carry a `mark` keeps one row under its line for the marks; a wire cannot meet such a rail from below. `top` and `bottom` ports sit 2.5 units in from the left edge, and the station's words on that side start after the wire.
 
@@ -82,7 +83,7 @@ A journey ends when it reaches a `rail` (the item becomes the newest dot), a `so
 
 ## Linked views
 
-A line of a `note` and a row of a `table` can follow a station: `"when": "<station id>"`. It lights while that station is busy: a `queue`, a `worker` or a `trial` while it holds an item, a `source` while its emitter pulses, a `rail` while the ring of a landing shows. A lit line gets a soft wash and brighter ink, so the same beat shows in the circuit and in words. A `sweep`, a `chain`, a `tally`, a `note` and a `table` cannot be named.
+A line of a `note` and a row of a `table` can follow a station: `"when": "<station id>"`. It lights while that station is busy: a `queue`, a `worker` or a `trial` while it holds an item, a `source` while its emitter pulses, a `rail` while the ring of a landing shows. A lit line gets a soft wash and brighter ink, so the same beat shows in the circuit and in words. A `sweep`, a `chain`, a `tally`, a `table`, a `series`, a `lanes` and a `note` cannot be named.
 
 ```json
 { "id": "steps", "kind": "table", "band": "views", "at": [0, 4], "label": "One round", "numbered": true,

@@ -11,6 +11,7 @@
 
 import { easeInOut, px } from "./geometry.mjs";
 import { boxPorts, CHIP_RADIUS, TEXT_SIZE } from "./metrics.mjs";
+import { staysAt } from "./stays.mjs";
 import { alphaOf, lineEl, rectEl, strokeOf, words } from "./svg.mjs";
 
 /** The three phases of a stay, with the share of the stay each takes. */
@@ -92,22 +93,12 @@ export function keptText(text, scene, trial, round) {
 	return text.replace(TRIAL_KEPT_TOKEN, () => candidateName(trial, trialOutcome(scene, trial, round).kept));
 }
 
-/** The stays of every journey at this trial, as times inside one round. */
-function trialStays(scene, node) {
-	const stays = [];
-	for (const run of scene.runs)
-		for (const segment of run.segments)
-			if (segment.kind === "work" && segment.node === node)
-				stays.push({ start: run.start + segment.from, end: run.start + segment.to });
-	return stays;
-}
-
 /**
  * The time inside a round at which this trial's kept candidate is known: the start of the keep phase of its last stay.
  * Undefined when no journey stays here. What the rounds add up to (a series) grows at this moment.
  */
 export function trialKeptAt(scene, node) {
-	const stays = trialStays(scene, node);
+	const stays = staysAt(scene, node);
 	if (stays.length === 0) return undefined;
 	const last = stays.reduce((latest, stay) => (stay.end > latest.end ? stay : latest));
 	return last.start + (TRIAL_PHASE_SHARES[0] + TRIAL_PHASE_SHARES[1]) * (last.end - last.start);
@@ -120,7 +111,7 @@ export function trialKeptAt(scene, node) {
  */
 export function trialAt(scene, node, now, round, stay) {
 	if (stay) return { live: true, round, progress: stay.progress, failed: stay.failed };
-	const stays = trialStays(scene, node);
+	const stays = staysAt(scene, node);
 	if (stays.length === 0) return undefined;
 	if (stays.some((window) => window.end <= now)) return { live: false, round };
 	if (scene.rounds === 1) return { live: false, round: 0 };

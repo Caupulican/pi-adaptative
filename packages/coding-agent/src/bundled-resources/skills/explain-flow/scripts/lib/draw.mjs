@@ -6,7 +6,7 @@
  */
 
 import { pieceOf, px } from "./geometry.mjs";
-import { isLinked, noteLines, seriesBody, seriesLive, tableBody, tableRows, tallyRounds } from "./instruments.mjs";
+import { isLinked, lanesBody, lanesLive, noteLines, seriesBody, seriesLive, tableBody, tableRows, tallyRounds } from "./instruments.mjs";
 import { activityMarks, drawMechanism } from "./mechanisms.mjs";
 import {
 	CHIP_RADIUS,
@@ -196,6 +196,9 @@ function nodeBody(scene, node, round) {
 			break;
 		case "series":
 			out += seriesBody(scene, node);
+			break;
+		case "lanes":
+			out += lanesBody(scene, node);
 			break;
 		default:
 			break;
@@ -490,6 +493,7 @@ export function drawLive(scene, state) {
 		else if (node.kind === "worker") out += workerEl(scene, node, stays[0], state.round);
 		else if (node.kind === "trial") out += trialEl(scene, node, stays[0], state.trials.get(node.id));
 		else if (node.kind === "series") out += seriesLive(scene, node, state);
+		else if (node.kind === "lanes") out += lanesLive(scene, node, state);
 		else if (node.kind === "tally" && node.per) out += tallyRounds(scene, node, state);
 		else if (node.kind === "rail") out += railEl(scene, node, state.rails.get(node.id), state.round);
 		else if (node.kind === "chain") out += chainEl(scene, node, state.chains.get(node.id), state.round);
