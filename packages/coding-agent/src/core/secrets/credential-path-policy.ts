@@ -275,6 +275,41 @@ export class CredentialPathPolicy {
 		return typeof result === "boolean" ? result : undefined;
 	}
 
+	/** The extension of a path as the policy's path api writes it, folded for comparison. */
+	private extension(path: string): string {
+		return this.paths.extname(path).toLowerCase();
+	}
+
+	/** The comparison both forms of {@link keepsExtension} share: a known file whose canonical path keeps it. */
+	private keepsExtensionOf(resolved: string, isFile: unknown, canonical: unknown): boolean | undefined {
+		if (isFile !== true || typeof canonical !== "string") return undefined;
+		return this.extension(resolved) === this.extension(canonical);
+	}
+
+	/**
+	 * Does `rawPath` name a regular file whose canonical path keeps the extension the path is written with? True only
+	 * then. False when the canonical path ends in another extension (a link to a file of another type). Undefined when
+	 * the probe cannot say: no canonical path, or not known to be a file.
+	 */
+	keepsExtension(rawPath: string): boolean | undefined {
+		const resolved = resolveExecutionPath(this.expandHome(rawPath), this.cwd, this.flavor);
+		return this.keepsExtensionOf(
+			resolved,
+			requireSynchronousPreflight(this.probe.isFile(resolved)),
+			requireSynchronousPreflight(this.probe.canonicalPath(resolved)),
+		);
+	}
+
+	async keepsExtensionAsync(rawPath: string, signal?: AbortSignal): Promise<boolean | undefined> {
+		signal?.throwIfAborted();
+		const resolved = resolveExecutionPath(this.expandHome(rawPath), this.cwd, this.flavor);
+		const isFile = await this.probe.isFile(resolved, signal);
+		signal?.throwIfAborted();
+		const canonical = await this.probe.canonicalPath(resolved, signal);
+		signal?.throwIfAborted();
+		return this.keepsExtensionOf(resolved, isFile, canonical);
+	}
+
 	async isFileAsync(rawPath: string, signal?: AbortSignal): Promise<boolean | undefined> {
 		signal?.throwIfAborted();
 		const resolved = resolveExecutionPath(this.expandHome(rawPath), this.cwd, this.flavor);

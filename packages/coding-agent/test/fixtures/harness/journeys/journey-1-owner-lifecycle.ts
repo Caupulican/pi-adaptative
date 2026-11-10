@@ -13,7 +13,27 @@ import {
 	CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE,
 	type ReflectionController,
 } from "../../../../src/core/reflection-controller.ts";
-import { isCredentialSecretKey, mockCredentialFields } from "../../../../src/core/secrets/credential-content-mock.ts";
+import {
+	createCredentialBlockMask,
+	isCredentialSecretKey,
+	mockCredentialFields,
+} from "../../../../src/core/secrets/credential-content-mock.ts";
+import {
+	assessCredentialExposureAsync,
+	type CredentialExposureBoundary,
+	wrapToolWithCredentialExposureGuard,
+} from "../../../../src/core/secrets/credential-exposure-guard.ts";
+import type { CredentialPathProbe } from "../../../../src/core/secrets/credential-path-policy.ts";
+import { createExposureMock, errorMaskFor } from "../../../../src/core/secrets/exposure-mock.ts";
+import { isProgramSourcePath } from "../../../../src/core/secrets/program-source-path.ts";
+import { callPrintsProgramSource, resultHoldsWholeOutput } from "../../../../src/core/secrets/source-assessment.ts";
+import { maskSourceText } from "../../../../src/core/secrets/source-mask.ts";
+import {
+	SOURCE_SCAN_START,
+	type SourceDialect,
+	scanSourceLine,
+	sourceDialectOf,
+} from "../../../../src/core/security/source-scanner.ts";
 import { SoulHistory, soulSha256 } from "../../../../src/core/soul/soul-history.ts";
 import {
 	enforceExplicitOptionalToolRequest,
@@ -24,6 +44,7 @@ import { localFileMutationIntentOperations } from "../../../../src/core/tools/fi
 import { routeShellContract } from "../../../../src/core/tools/shell-contract-router.ts";
 import { parentInputOriginalDetails } from "../../../../src/kernel/session/parent-input-ledger.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
+import type { AgentTool } from "../../../../src/kernel/types.ts";
 import { calls, createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
 import {
 	branchForClosingReflection,
@@ -1363,6 +1384,600 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 	const tokenLaneKey = "ghp_abcdefghijklmnopqrstuvwxyz0123456789";
 	expect(mockCredentialFields(`{"laneKey":"${tokenLaneKey}"}`), "a token-shaped lane key is masked").not.toContain(
 		tokenLaneKey,
+	);
+
+	// Program source the mask may read: one whole file from its first line, in a dialect the scanner knows, so the
+	// scanner state at the start is known. Each row is the input line and the line the source mask returns for it.
+	const sourceKept: readonly (readonly [string, SourceDialect])[] = [
+		["key: string;", "javascript"],
+		["sessionId: record.sessionId,", "javascript"],
+		["maxOutputTokens: () =>", "javascript"],
+		['credential?.type === "oauth"', "javascript"],
+		["maxTokens: 128000,", "javascript"],
+		["self.password = password", "python"],
+		["const password = other;", "javascript"],
+		["apiKey := cfg.APIKey", "go"],
+		['type AuthCategory = "oauth" | "api_key";', "javascript"],
+		['mode: "token" | "key";', "javascript"],
+		["maxTokens: 128_000,", "javascript"],
+		["port = 8080", "javascript"],
+		// A literal that names or selects something is not the value: an index, a compared word, an element of a list, one
+		// argument of several, a link of a chain, a member of a union of types.
+		['const token = process.env["GITHUB_TOKEN"];', "javascript"],
+		['const scopeKey = "scope" in details ? a : b;', "javascript"],
+		['const cacheSessionId = cacheRetention === "none" ? undefined : options?.sessionId;', "javascript"],
+		['const UNION_KEYS = ["anyOf", "oneOf", "allOf"] as const;', "javascript"],
+		['const token = randomBytes(32).toString("hex");', "javascript"],
+		['token: "bearer" | "basic";', "javascript"],
+		['let status: AuthReport["status"] = expired ? "expired" : "valid";', "javascript"],
+		['const kind = Key::Named("Enter");', "rust"],
+		// In value position, but not a secret by what it is: a constant's name, a digest's or an encoding's name, a delimiter.
+		['const TOKEN_ENV = "GITHUB_TOKEN";', "javascript"],
+		['const key = createHash("sha256").update(text).digest("hex");', "javascript"],
+		['const signature = createHash("sha256")', "javascript"],
+	];
+	const sourceLiterals: readonly (readonly [string, string, SourceDialect])[] = [
+		['const password = "hunter2xyz";', 'const password = "<mocked:password>";', "javascript"],
+		['const password: string = "hunter2xyz";', 'const password: string = "<mocked:password>";', "javascript"],
+		["  token: `abc123secretvalue`,", "  token: `<mocked:token>`,", "javascript"],
+		["    cookie: 'sid=abc123',", "    cookie: '<mocked:cookie>',", "javascript"],
+		["password = 12345678;", "password = <mocked:password>;", "javascript"],
+		['api_key = r"abc123fakevalue"', 'api_key = r"<mocked:api_key>"', "python"],
+		['var password string = "hunter2xyz"', 'var password string = "<mocked:password>"', "go"],
+		['let password = b"s3cr3tP4ss";', 'let password = b"<mocked:password>";', "rust"],
+		['let credential = br#"s3cr3tP4ss"#;', 'let credential = br#"<mocked:credential>"#;', "rust"],
+		[
+			'let c = Config { password: String::from("s3cr3tP4ss") };',
+			'let c = Config { password: String::from("<mocked:password>") };',
+			"rust",
+		],
+		['const password = <string>"s3cr3tP4ss";', 'const password = <string>"<mocked:password>";', "javascript"],
+		['user, password = "admin", "s3cr3tP4ss"', 'user, password = "<mocked:password>", "<mocked:password>"', "python"],
+		['user, password := "admin", "s3cr3tP4ss"', 'user, password := "<mocked:password>", "<mocked:password>"', "go"],
+		['opts.password ??= "s3cr3tP4ss";', 'opts.password ??= "<mocked:password>";', "javascript"],
+		[
+			'const apiKey = env.API_KEY ?? "abc123fakevalue";',
+			'const apiKey = env.API_KEY ?? "<mocked:apiKey>";',
+			"javascript",
+		],
+		['const token = dev ? "abc123fakevalue" : other;', 'const token = dev ? "<mocked:token>" : other;', "javascript"],
+		['process.env["API_KEY"] = "abc123fakevalue";', 'process.env["API_KEY"] = "<mocked:API_KEY>";', "javascript"],
+		["config['password'] = \"s3cr3tP4ss\";", "config['password'] = \"<mocked:password>\";", "javascript"],
+		['const password =\n  "s3cr3tP4ss";', 'const password =\n  "<mocked:password>";', "javascript"],
+		["secret: 9876_5432,", "secret: <mocked:secret>,", "javascript"],
+		["key: 0xDEADBEEFCAFEBABE,", "key: <mocked:key>,", "javascript"],
+		["const password = 12345678901234567890n;", "const password = <mocked:password>;", "javascript"],
+		// Value position: a whole arm of a fallback, a branch or a concatenation, with a conversion that takes no
+		// argument or a cast around it, or the only argument of a call that is a whole arm.
+		['const password = env.PW || "s3cr3tP4ss";', 'const password = env.PW || "<mocked:password>";', "javascript"],
+		[
+			'const password = "abc12345" + "def67890";',
+			'const password = "<mocked:password>" + "<mocked:password>";',
+			"javascript",
+		],
+		['const password = "s3cr3tP4ss" as string;', 'const password = "<mocked:password>" as string;', "javascript"],
+		['let password = "s3cr3tP4ss".to_string();', 'let password = "<mocked:password>".to_string();', "rust"],
+		[
+			'let secret = SecretString::new("s3cr3tP4ss".into());',
+			'let secret = SecretString::new("<mocked:secret>".into());',
+			"rust",
+		],
+		['password := []byte("s3cr3tP4ss")', 'password := []byte("<mocked:password>")', "go"],
+		[
+			'creds = {"user": "admin", "password": "s3cr3tP4ss"}',
+			'creds = {"user": "admin", "password": "<mocked:password>"}',
+			"python",
+		],
+		[
+			'const { pw: password = "s3cr3tP4ss" } = opts;',
+			'const { pw: password = "<mocked:password>" } = opts;',
+			"javascript",
+		],
+		// A value that goes on over lines: the separator ends its line, or the next line starts with the operator.
+		[
+			'const password = cond\n  ? "s3cr3tP4ss"\n  : other;',
+			'const password = cond\n  ? "<mocked:password>"\n  : other;',
+			"javascript",
+		],
+		[
+			'login({\n  password:\n    "s3cr3tP4ss",\n  user: "admin",\n});',
+			'login({\n  password:\n    "<mocked:password>",\n  user: "admin",\n});',
+			"javascript",
+		],
+	];
+	// A line that keeps string text after the source rule is also masked as plain text is: a hardcoded secret is string
+	// text, and the rule that finds it in value position must never show more than the data rule of a line would. The
+	// kept text is a whole literal the rule does not replace, or a piece of one that is not whole on its line (a
+	// template's text beside an expression, the opening line of a literal that spans lines, a regular expression's
+	// body). Each of these comes out exactly as the data rule leaves it, and none comes out as written.
+	const sourceAsText: readonly (readonly [string, SourceDialect])[] = [
+		['password = "s3cr3tP4ss".encode("utf-8")', "python"],
+		['password = bytes("s3cr3tP4ss", "utf-8")', "python"],
+		['password = "s3cr3tP4ss" if DEBUG else os.environ["PW"]', "python"],
+		['password = ("s3cr3tP4ss")', "python"],
+		['password = "s3cr3tP4ss{}".format(x)', "python"],
+		['const secret = Buffer.from("s3cr3tP4ss", "utf8");', "javascript"],
+		['const password = "s3cr3tP4ss".split("").reverse().join("");', "javascript"],
+		['const password = "s3cr3tP4ss" satisfies string;', "javascript"],
+		['let password = env::var("PW").unwrap_or("s3cr3tP4ss".to_string());', "rust"],
+		['let password = format!("s3cr3tP4ss");', "rust"],
+		['const password = "password";', "javascript"],
+		['const apiKey = "SK_LIVE_ABCDEF";', "javascript"],
+		['password = "ADMIN_PASS_2024"', "python"],
+		['const apiKey = field("apiKey");', "javascript"],
+		['password = os.getenv("PASSWORD")', "python"],
+		['api_key = os.getenv("OPENAI_API_KEY")', "python"],
+		['user, password = line.split(":")', "python"],
+		['const secret = readFileSync(file, "utf8").trim();', "javascript"],
+		['const secret = await vault.read("kv/data/app");', "javascript"],
+		['call({ password: "s3cr3tP4ss", user: "admin" }, "next")', "javascript"],
+		['const label = "x"; const password = other;', "javascript"],
+		['typeof entry.secret === "string"', "javascript"],
+		['{ grant_type: "refresh_token", refresh_token: submitted.refresh }', "javascript"],
+		['return verdict === "session_gone" ? "session_gone" : "moved";', "javascript"],
+		// `\u0024` is the dollar sign of a template's expression, written apart so that no string here holds a placeholder.
+		["const password = `s3cr3tP4ss\u0024{suffix}`;", "javascript"],
+		["const password = `\u0024{prefix}s3cr3tP4ss`;", "javascript"],
+		['const password = "s3cr3tP4ss\\\n  more";', "javascript"],
+		['password = """s3cr3tP4ss\n"""', "python"],
+		["password := `s3cr3tP4ss\n`", "go"],
+		['let password = "s3cr3tP4ss\n";', "rust"],
+		["const password = /s3cr3tP4ss/;", "javascript"],
+		// A quoted secret key that ends one line and its value on the next: the data rule reads the pair across the break.
+		['const body = `{"password":\n"s3cr3tP4ss"}`;', "javascript"],
+		['BODY = """{"client_secret":\n"s3cr3tP4ss"}"""', "python"],
+		['x = flag ? "session_token"\n\n  : "s3cr3tP4ss";', "javascript"],
+	];
+	const sourceData: readonly (readonly [string, string, SourceDialect])[] = [
+		[
+			"const sql = `select 1\npassword: hunter2xyz\nServer=db;User Id=sa;Password=hunter2xyz;\n`;",
+			"const sql = `select 1\npassword: <mocked:password>\nServer=db;User Id=sa;[REDACTED]\n`;",
+			"javascript",
+		],
+		['doc = """\nPASSWORD=hunter2xyz\n"""', 'doc = """\nPASSWORD=<mocked:PASSWORD>\n"""', "python"],
+		["// secret: hunter2xyz", "// [REDACTED]", "javascript"],
+		["# password = Summer2024!", "# [REDACTED]", "python"],
+		["/*\n *   password: hunter2xyz,\n */", "/*\n *   [REDACTED]\n */", "javascript"],
+		[
+			'const conn = "Server=db;User Id=sa;Password=hunter2xyz;";',
+			'const conn = "Server=db;User Id=sa;[REDACTED]";',
+			"javascript",
+		],
+		// A `/` after a condition head, a keyword, a postfix `++` or `--`, or a value that ended the last line is read
+		// the way the toolchain reads it, so the template literal after the tricky `/` keeps its body data.
+		[
+			"if (x) /`/.test(s);\nconst a = `\npassword: hunter2xyz\n`;\nwhile (y) /`/.test(s);\nconst b = `\npassword: hunter2xyz\n`;\nfor (const i of j) /`/.test(i);\nconst c = `\npassword: hunter2xyz\n`;\nwith (z) /`/.test(s);\nconst d = `\npassword: hunter2xyz\n`;",
+			"if (x) /`/.test(s);\nconst a = `\npassword: <mocked:password>\n`;\nwhile (y) /`/.test(s);\nconst b = `\npassword: <mocked:password>\n`;\nfor (const i of j) /`/.test(i);\nconst c = `\npassword: <mocked:password>\n`;\nwith (z) /`/.test(s);\nconst d = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"for await (const k of list) /`/.test(k);\nconst a = `\npassword: hunter2xyz\n`;",
+			"for await (const k of list) /`/.test(k);\nconst a = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"function* g() { yield /`/.test(s); }\nconst a = `\npassword: hunter2xyz\n`;\nasync function f() { await /`/.test(s); }\nconst b = `\npassword: hunter2xyz\n`;\nif (p) q(); else /`/.test(s);\nconst c = `\npassword: hunter2xyz\n`;\ndo /`/.test(s); while (p);\nconst d = `\npassword: hunter2xyz\n`;",
+			"function* g() { yield /`/.test(s); }\nconst a = `\npassword: <mocked:password>\n`;\nasync function f() { await /`/.test(s); }\nconst b = `\npassword: <mocked:password>\n`;\nif (p) q(); else /`/.test(s);\nconst c = `\npassword: <mocked:password>\n`;\ndo /`/.test(s); while (p);\nconst d = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"i++ / 2; const a = `\npassword: hunter2xyz\n`;\nj-- / 2; const b = `\npassword: hunter2xyz\n`;",
+			"i++ / 2; const a = `\npassword: <mocked:password>\n`;\nj-- / 2; const b = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"const ratio = total\n  / count; const a = `\npassword: hunter2xyz\n`;",
+			"const ratio = total\n  / count; const a = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"const x = a / b / c;\nconst a = `\npassword: hunter2xyz\n`;",
+			"const x = a / b / c;\nconst a = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: the source text holds a template's `${`, not a placeholder
+			"function f(x: string) {\n\treturn tag`${/`/.test(x)}`;\n}\nconst help = `\npassword: hunter2xyz\n`;",
+			// biome-ignore lint/suspicious/noTemplateCurlyInString: the same source text, with its body masked
+			"function f(x: string) {\n\treturn tag`${/`/.test(x)}`;\n}\nconst help = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"const half = width! / 2; const help = `\npassword: hunter2xyz\n`;",
+			"const half = width! / 2; const help = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"const ok = ready\n!/`/.test(s) || stop();\nconst help = `\npassword: hunter2xyz\n`;",
+			"const ok = ready\n!/`/.test(s) || stop();\nconst help = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"export default /[`'\"]/;\nconst help = `\npassword: hunter2xyz\n`;",
+			"export default /[`'\"]/;\nconst help = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"const ratio = io.in / io.out; const help = `\npassword: hunter2xyz\n`;",
+			"const ratio = io.in / io.out; const help = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"const first = list.with(0, total) / 2; const text = `\npassword: hunter2xyz\n`;",
+			"const first = list.with(0, total) / 2; const text = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"if ((count) / 2 > limit) label = `\npassword: hunter2xyz\n`;",
+			"if ((count) / 2 > limit) label = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"const third = 1. / 3; const help = `\npassword: hunter2xyz\n`;",
+			"const third = 1. / 3; const help = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"const parts = [.../`(a+)`/.exec(s) ?? []];\nconst help = `\npassword: hunter2xyz\n`;",
+			"const parts = [.../`(a+)`/.exec(s) ?? []];\nconst help = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+		[
+			"const half = \u03c0 / 2; const help = `\npassword: hunter2xyz\n`;",
+			"const half = \u03c0 / 2; const help = `\npassword: <mocked:password>\n`;",
+			"javascript",
+		],
+	];
+	const sourceNumbered: readonly (readonly [string, string, SourceDialect])[] = [
+		[
+			'1: key: string;\n2: const password = "hunter2xyz";\n3: export {};',
+			'1: key: string;\n2: const password = "<mocked:password>";\n3: export {};',
+			"javascript",
+		],
+		[
+			'     1\tkey: string;\n     2\tconst password = "hunter2xyz";\n     3\texport {};',
+			'     1\tkey: string;\n     2\tconst password = "<mocked:password>";\n     3\texport {};',
+			"javascript",
+		],
+	];
+	const sourceWhole =
+		"const note = `line one\npassword: hunter2xyz\nline three`;\nexport const x = 1;\nexport const y = 2;";
+	const sourceBlocks = [
+		"const note = `line one\npassword: hunter2xyz\n",
+		"line three`;\n",
+		"export const x = 1;\nexport const y = 2;",
+	];
+
+	for (const [input, dialect] of sourceKept) {
+		expect(maskSourceText(input, dialect, SOURCE_SCAN_START), `source keeps ${input}`).toBe(input);
+	}
+	for (const [input, expected, dialect] of sourceLiterals) {
+		expect(maskSourceText(input, dialect, SOURCE_SCAN_START), `source masks ${input}`).toBe(expected);
+	}
+	for (const [input, dialect] of sourceAsText) {
+		const masked = maskSourceText(input, dialect, SOURCE_SCAN_START);
+		expect(masked, `a kept literal's line is masked as text: ${input}`).toBe(mockCredentialFields(input));
+		expect(masked, `and is not left as written: ${input}`).not.toBe(input);
+	}
+	for (const [input, expected, dialect] of sourceData) {
+		expect(maskSourceText(input, dialect, SOURCE_SCAN_START), `source data ${input}`).toBe(expected);
+	}
+	for (const [input, expected, dialect] of sourceNumbered) {
+		expect(maskSourceText(input, dialect, SOURCE_SCAN_START, true), `numbered source ${input}`).toBe(expected);
+	}
+
+	// `.c`, `.cpp` and `.kt` have no dialect: the preprocessor and Kotlin's string rules hold free text the scanner
+	// cannot follow yet, so their text keeps the data rule.
+	expect(sourceDialectOf("a.c"), "a .c file has no dialect").toBeUndefined();
+	expect(sourceDialectOf("a.cpp"), "a .cpp file has no dialect").toBeUndefined();
+	expect(sourceDialectOf("a.kt"), "a .kt file has no dialect").toBeUndefined();
+	expect(isProgramSourcePath("a.c"), "a .c file is not source").toBe(false);
+
+	// A first line that starts with `#!` names an interpreter, not code: the whole line is a comment.
+	const shebang = "#!/usr/bin/env node --password=hunter2xyz";
+	expect(
+		scanSourceLine(shebang, SOURCE_SCAN_START, "javascript").stretches,
+		"a first line that starts with #! is one comment",
+	).toEqual([{ start: 0, end: shebang.length, kind: "comment" }]);
+	expect(
+		scanSourceLine(shebang, { open: [] }, "javascript").stretches[0]?.kind,
+		"a later line that starts with #! is not a comment",
+	).not.toBe("comment");
+
+	// The block mask takes blocks of complete lines and only the final block may end without a line break; the scanner
+	// state alone carries over, so the last line of a saved file is neither lost nor held back.
+	const blockMask = createCredentialBlockMask({ kind: "source", dialect: "javascript", numbered: false });
+	const inBlocks = sourceBlocks.map((block) => blockMask(block)).join("");
+	expect(inBlocks, "the block mask equals the text mask").toBe(
+		maskSourceText(sourceWhole, "javascript", SOURCE_SCAN_START),
+	);
+	expect(inBlocks.endsWith("export const y = 2;"), "the last line of a saved file survives").toBe(true);
+
+	// Not known, so the data rule: a line range, a path with no dialect, a search result line.
+	expect(callPrintsProgramSource("read", { path: "a.ts", offset: 40 }), "read from line 40").toBeUndefined();
+	expect(callPrintsProgramSource("read", { path: "a.ts", tail: 20 }), "read of a tail").toBeUndefined();
+	expect(callPrintsProgramSource("read", { path: "a.ts", mode: "outline" }), "read of an outline").toBeUndefined();
+	expect(callPrintsProgramSource("read", { path: "a.js" }), "a .js file may hold JSX").toBeUndefined();
+	expect(callPrintsProgramSource("read", { path: "a.tsx" }), "a .tsx file is JSX").toBeUndefined();
+	expect(callPrintsProgramSource("read", { path: "a.ts", lineNumbers: true }), "a numbered read").toEqual({
+		path: "a.ts",
+		numbered: true,
+	});
+	expect(isProgramSourcePath("a.js"), "a .js file is not source").toBe(false);
+	expect(isProgramSourcePath("a.tsx"), "a .tsx file is not source").toBe(false);
+	expect(mockCredentialFields("key: string;"), "the data rule masks a source-shaped line").toBe("key: <mocked:key>");
+	// A search keeps the rule it has on main: a line of a protected file gets the data rule, and a line of any other file
+	// stays as the search printed it (known values and secret shapes are redacted before either).
+	const searchLine = 'x.json:2:   "client_secret": "abc123secretvalue",';
+	const openSearch = createExposureMock("search", () => ({ isProtected: () => false }) as never);
+	expect(openSearch.text(searchLine), "a search line of an unprotected file stays as printed").toBe(searchLine);
+	const guardedSearch = createExposureMock(
+		"search",
+		() => ({ isProtected: (path: string) => path === "x.json" }) as never,
+	);
+	expect(guardedSearch.text(searchLine), "a search line of a protected file gets the data rule").toBe(
+		mockCredentialFields(searchLine),
+	);
+	const grepAssessment = await assessCredentialExposureAsync(
+		"grep",
+		{ pattern: "client_secret" },
+		process.cwd(),
+		undefined,
+		undefined,
+		undefined,
+		undefined,
+		true,
+	);
+	expect(grepAssessment.kind, "a harness grep keeps the search kind of main").toBe("search");
+
+	// The guard asks the disk about the files a call names. This leg answers from a table of its own files: `notes.py` is
+	// a link to the text file `notes.txt`, so it is not python source, and a path the table omits names no file at all.
+	const fileFacts: readonly (readonly [string, string])[] = [
+		["a.ts", "a.ts"],
+		["src/a.ts", "src/a.ts"],
+		["b.ts", "b.ts"],
+		["a.js", "a.js"],
+		["notes.txt", "notes.txt"],
+		["notes.py", "notes.txt"],
+	];
+	const legFiles = new Map(
+		fileFacts.map(([path, canonical]) => [resolve(process.cwd(), path), resolve(process.cwd(), canonical)]),
+	);
+	const probe: CredentialPathProbe = {
+		isFile: (path) => legFiles.has(path),
+		canonicalPath: (path) => legFiles.get(path),
+	};
+	const boundary: CredentialExposureBoundary = {
+		redactSensitiveText: (text: string) => text,
+		getPathProbe: () => probe,
+	};
+
+	// The guard asks the source question only for the harness's own tool, and an error text is never source.
+	const harnessRead = await assessCredentialExposureAsync(
+		"read",
+		{ path: "a.ts" },
+		process.cwd(),
+		boundary,
+		undefined,
+		undefined,
+		undefined,
+		true,
+	);
+	expect(harnessRead.kind, "the harness read of a .ts file is source").toBe("source");
+	expect(harnessRead.dialect, "the source kind carries the dialect").toBe("javascript");
+	expect(harnessRead.numbered, "an unnumbered read carries no prefix").toBe(false);
+	const foreignRead = await assessCredentialExposureAsync(
+		"read",
+		{ path: "a.ts" },
+		process.cwd(),
+		boundary,
+		undefined,
+		undefined,
+		undefined,
+		false,
+	);
+	expect(foreignRead.kind, "a same-named foreign tool keeps the data rule").toBe("none");
+	expect(errorMaskFor()("password: hunter2xyz"), "an error text is data").toBe("password: <mocked:password>");
+
+	// A shell line is source only when it prints one named file whole, from its first line: everything that starts
+	// elsewhere, reorders, counts or adds to the file keeps the data rule.
+	const sourceShell: readonly (readonly [string, boolean])[] = [
+		["cat a.ts", false],
+		["head -n 40 a.ts", false],
+		["nl a.ts", true],
+		["nl -ba a.ts", true],
+		["cat -n a.ts", true],
+		["sed -n '1,80p' a.ts", false],
+		["cd src && cat a.ts", false],
+		["cat a.ts | head -n 20", false],
+		["cat a.ts 2>/dev/null", false],
+	];
+	for (const [command, numbered] of sourceShell) {
+		const assessed = await assessCredentialExposureAsync(
+			"bash",
+			{ command },
+			process.cwd(),
+			boundary,
+			undefined,
+			undefined,
+			undefined,
+			true,
+		);
+		expect(assessed.kind, command).toBe("source");
+		expect(assessed.dialect, command).toBe("javascript");
+		expect(assessed.numbered, command).toBe(numbered);
+	}
+	// A shell search keeps the assessment main gives it: a search of a directory names its files, so only the lines of
+	// protected files are replaced; a search of one known file that no rule protects is ordinary output (the data rule).
+	const searchShell = ["grep -rn token src", "rg token src"];
+	const dataShell = [
+		'nl -s \'"""\' a.ts',
+		"nl -w 3 a.ts",
+		"nl -n ln a.ts",
+		"cat a.ts | nl -s x",
+		"grep -n token a.ts",
+		"rg token a.ts",
+		"tail -n 20 a.ts",
+		"sed -n '120,140p' a.ts",
+		"cat a.ts | sort",
+		"cat a.ts | tac",
+		"cat a.ts | sed -n '20,40p'",
+		"nl a.ts | tail -n 5",
+		"echo x; cat a.ts",
+		"cat a.ts && echo done",
+		"cat a.ts b.ts",
+		"cat *.ts",
+		"cat a.ts > out.txt",
+		"cat -A a.ts",
+		"cat a.js",
+	];
+	for (const [commands, kind] of [
+		[dataShell, "none"],
+		[searchShell, "search"],
+	] as const) {
+		for (const command of commands) {
+			const assessed = await assessCredentialExposureAsync(
+				"bash",
+				{ command },
+				process.cwd(),
+				boundary,
+				undefined,
+				undefined,
+				undefined,
+				true,
+			);
+			expect(assessed.kind, command).toBe(kind);
+		}
+	}
+
+	// A path's dialect must be the file's: a link named notes.py to the text file notes.txt, and a path that names no
+	// file, are not source, so their key/value lines keep the data rule of main.
+	const notSource: readonly (readonly [string, Record<string, unknown>])[] = [
+		["read", { path: "notes.py" }],
+		["bash", { command: "cat notes.py" }],
+		["read", { path: "missing.ts" }],
+		["bash", { command: "cd elsewhere && cat a.ts" }],
+	];
+	for (const [toolName, args] of notSource) {
+		const assessed = await assessCredentialExposureAsync(
+			toolName,
+			args,
+			process.cwd(),
+			boundary,
+			undefined,
+			undefined,
+			undefined,
+			true,
+		);
+		expect(assessed.kind, `${toolName} of ${JSON.stringify(args)} is not source`).toBe("none");
+	}
+	// A `cd` to the directory that holds the file keeps the dialect the file really has.
+	const changedDirectory = await assessCredentialExposureAsync(
+		"bash",
+		{ command: "cd src && cat a.ts" },
+		process.cwd(),
+		boundary,
+		undefined,
+		undefined,
+		undefined,
+		true,
+	);
+	expect(changedDirectory.kind, "a cd into src keeps the source kind of src/a.ts").toBe("source");
+
+	// The source mask reads one text only: a final result that holds the call's whole output from its first line.
+	// A streamed update, a detail, and a result that was cut or reduced keep the data rule.
+	const oneText = [{ type: "text" }];
+	const wholeOutput: readonly (readonly [
+		string,
+		{ readonly content: readonly { readonly type: string }[]; readonly details?: unknown },
+		boolean,
+	])[] = [
+		["read", { content: oneText }, true],
+		["read", { content: oneText, details: { truncation: { truncated: true } } }, true],
+		["bash", { content: oneText }, true],
+		["bash", { content: oneText, details: { preview: { content: "x", skippedLines: 3 } } }, true],
+		["bash", { content: oneText, details: { truncation: { truncated: true } } }, false],
+		["bash", { content: oneText, details: { outputProjection: { kind: "test" } } }, false],
+		["run_process", { content: oneText }, false],
+		["grep", { content: oneText }, false],
+		["read", { content: [{ type: "text" }, { type: "text" }] }, false],
+		["bash", { content: [{ type: "image" }] }, false],
+	];
+	for (const [toolName, result, expected] of wholeOutput) {
+		expect(
+			resultHoldsWholeOutput(toolName, result),
+			`${toolName} holds its whole output in ${result.content.length} block(s), ${JSON.stringify(result.details) ?? "no details"}`,
+		).toBe(expected);
+	}
+	// A process's text is a frame around the output, so it is never the one file from its first line.
+	expect(
+		callPrintsProgramSource("run_process", { executable: "cat", args: ["a.ts"] }),
+		"a process frame is not program source",
+	).toBeUndefined();
+	const processAssessment = await assessCredentialExposureAsync(
+		"run_process",
+		{ executable: "cat", args: ["a.ts"] },
+		process.cwd(),
+		boundary,
+		undefined,
+		undefined,
+		undefined,
+		true,
+	);
+	expect(processAssessment.kind, "a process keeps the data rule").toBe("none");
+
+	// The tail of a template literal: its opening line was cut, so the scanner cannot know it is inside a string. A
+	// fragment therefore takes the data rule, while the whole-text mask reads the same tail as code — the defect.
+	const tail = "password: hunter2xyz\n`;";
+	const tailMasked = "password: <mocked:password>\n`;";
+	const sourceMock = createExposureMock("source", () => ({ isProtected: () => false }) as never, "javascript");
+	expect(sourceMock.fragment(tail), "the body of a cut template tail is data").toBe(tailMasked);
+	expect(sourceMock.text(tail), "the whole-text mask reads a cut tail as code: the defect").toBe(tail);
+	const lineMock = createExposureMock("none", () => ({ isProtected: () => false }) as never);
+	expect(lineMock.fragment, "a line mask reads a fragment as its text").toBe(lineMock.text);
+	const wholeContentMock = createExposureMock("content", () => ({ isProtected: () => false }) as never);
+	expect(wholeContentMock.fragment, "a content mask reads a fragment as its text").toBe(wholeContentMock.text);
+
+	// A guarded shell in mock mode: its update, its content and its details all pass the fragment mask, and only a
+	// result that holds the whole output is read as source.
+	const guardedShellText = async (
+		output: string,
+		details?: unknown,
+	): Promise<{ readonly updated: string; readonly content: string; readonly preview: string }> => {
+		const updates: string[] = [];
+		const fakeShell: AgentTool = {
+			name: "bash",
+			label: "bash",
+			description: "a fake shell that streams and returns the text the credential guard must mask",
+			parameters: {} as never,
+			execute: async (_callId, _params, _signal, onUpdate) => {
+				onUpdate?.({ content: [{ type: "text" as const, text: output }], details: {} });
+				return { content: [{ type: "text" as const, text: output }], details };
+			},
+		};
+		const guarded = wrapToolWithCredentialExposureGuard(fakeShell, process.cwd(), boundary, "mock", true);
+		const result = await guarded.execute("credential-whole-output", { command: "cat a.ts" }, undefined, (partial) => {
+			const [block] = partial.content;
+			if (block?.type === "text") updates.push(block.text);
+		});
+		const [block] = result.content;
+		return {
+			updated: updates.join(""),
+			content: block?.type === "text" ? block.text : "",
+			preview: (result.details as { preview?: { content?: string } } | undefined)?.preview?.content ?? "",
+		};
+	};
+	const cutShell = await guardedShellText(tail, {
+		truncation: { truncated: true },
+		preview: { content: tail },
+		skippedLines: 3,
+	});
+	expect(cutShell.updated, "a streamed update of a cut shell output is a fragment").toBe(tailMasked);
+	expect(cutShell.content, "the content of a cut shell output is a fragment").toBe(tailMasked);
+	expect(cutShell.preview, "a detail string of a cut shell output is a fragment").toBe(tailMasked);
+	const wholeShell = await guardedShellText("const help = `\npassword: hunter2xyz\n`;");
+	expect(wholeShell.content, "a result that holds the whole output is read as source").toBe(
+		"const help = `\npassword: <mocked:password>\n`;",
 	);
 
 	currentInput.arm();

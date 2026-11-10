@@ -987,26 +987,15 @@ export class RuntimeBuilder {
 						childEnvelope,
 						scopeCwd,
 					);
-					return [
+					const guard = (tool: AgentTool) =>
 						wrapToolWithCredentialExposureGuard(
-							readTool,
+							tool,
 							toolCwd,
 							this._credentialExposureBoundary,
 							exposureMode,
-						),
-						wrapToolWithCredentialExposureGuard(
-							grepTool,
-							toolCwd,
-							this._credentialExposureBoundary,
-							exposureMode,
-						),
-						wrapToolWithCredentialExposureGuard(
-							findTool,
-							toolCwd,
-							this._credentialExposureBoundary,
-							exposureMode,
-						),
-					];
+							true,
+						);
+					return [guard(readTool), guard(grepTool), guard(findTool)];
 				},
 				streamFn: this.deps.getAgent().streamFn,
 				signal,
@@ -1255,6 +1244,8 @@ export class RuntimeBuilder {
 		);
 		const toolRegistry = new Map<string, AgentTool>();
 		// Both sources cross the same binding/guard boundary; later extension entries still override built-ins.
+		// An SDK base-tool override replaces every built-in, so nothing is the harness's own then.
+		const harnessTools = new Set<AgentTool>(this.deps.getBaseToolsOverride() ? [] : wrappedBuiltInTools);
 		for (const tool of [...wrappedBuiltInTools, ...wrappedExtensionTools]) {
 			let bound = tool;
 			if (tool.name === "task_steps") bound = { ...tool, executionMode: "sequential" };
@@ -1275,6 +1266,7 @@ export class RuntimeBuilder {
 				this.deps.getCwd(),
 				this._credentialExposureBoundary,
 				this.credentialExposureMode(),
+				harnessTools.has(tool),
 			);
 			const privateScoped = this._workerSessionPrivatePathEnvelope
 				? wrapToolWithEnvelopeScope(guarded, this._workerSessionPrivatePathEnvelope, this.deps.getCwd())

@@ -16,6 +16,7 @@ import {
 } from "../../kernel/tool-failure-receipt.ts";
 import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
+import { type SourceDialect, sourceDialectOf } from "../security/source-scanner.ts";
 import { runWithPersistedOutputMask } from "../tools/persisted-output-mask.ts";
 import {
 	parseShellSearchInvocationScope,
@@ -33,17 +34,16 @@ import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { isMissingPathError } from "../util/filesystem-errors.ts";
 import { isRecordObject as isRecord } from "../util/value-guards.ts";
 import {
-	type CredentialBlockMaskKind,
 	createCredentialBlockMask,
 	isCredentialSecretKey,
-	mockCredentialContent,
 	mockCredentialFields,
 	mockedValue,
-	mockProtectedSearchLines,
 } from "./credential-content-mock.ts";
 import type { CredentialPathPolicy, CredentialPathProbe, CredentialPathProtection } from "./credential-path-policy.ts";
+import { createExposureMock, type ExposureTextKind, errorMaskFor } from "./exposure-mock.ts";
 import { createCredentialPathPolicy } from "./native-credential-path-probe.ts";
 import { pythonCredentialPathCandidates } from "./python-credential-literals.ts";
+import { callPrintsProgramSource, resultHoldsWholeOutput } from "./source-assessment.ts";
 
 /** Tools whose path arguments name the files they read or write. */
 const PATH_ARGUMENT_TOOLS = new Set(["read", "edit", "write", "patch", "ls", "image_generate"]);
@@ -209,8 +209,15 @@ export interface CredentialExposureBoundary extends CredentialPathProtection {
 export type CredentialExposureMode = "mock" | "deny";
 
 export interface CredentialExposureAssessment {
-	/** `search`: only lines attributed to protected files are mocked; `content`: the whole output is. */
-	kind: "none" | "search" | "content";
+	/**
+	 * `search`: only lines attributed to protected files are mocked; `content`: the whole output is; `source`: the whole
+	 * output is one program source file, printed from its first line; `sections`: sections that were already masked.
+	 */
+	kind: ExposureTextKind;
+	/** For `source`: the dialect of the file the call prints whole from its first line. */
+	dialect?: SourceDialect;
+	/** For `source`: the text numbers every line (`read` with `lineNumbers`, `nl`), which the mask keeps apart. */
+	numbered?: boolean;
 	/** Why deny mode refuses the call; absent when the call runs in both modes. */
 	reason?: string;
 }
@@ -248,12 +255,9 @@ export async function isProtectedCredentialPathAsync(
 	).isProtectedAsync(rawPath, signal);
 }
 
-/**
- * A filesystem fact the credential walk asks for. The walk is written once as a generator; the synchronous and the
- * asynchronous checks answer its questions with the policy's synchronous or asynchronous methods, so both judge alike.
- */
+/** A filesystem fact the credential walk asks for, answered by the policy's synchronous or asynchronous method. */
 interface PathQuery {
-	readonly kind: "protected" | "token" | "file" | "storage";
+	readonly kind: "protected" | "token" | "file" | "storage" | "extension";
 	readonly path: string;
 	readonly policy: CredentialPathPolicy;
 }
@@ -265,6 +269,7 @@ const SYNC_PATH_ANSWERS: Record<PathQuery["kind"], (policy: CredentialPathPolicy
 	token: (policy, path) => policy.isProtectedToken(path),
 	file: (policy, path) => policy.isFile(path),
 	storage: (policy, path) => policy.containsProtectedPath(path),
+	extension: (policy, path) => policy.keepsExtension(path),
 };
 const ASYNC_PATH_ANSWERS: Record<
 	PathQuery["kind"],
@@ -274,11 +279,12 @@ const ASYNC_PATH_ANSWERS: Record<
 	token: (policy, path, signal) => policy.isProtectedTokenAsync(path, signal),
 	file: (policy, path, signal) => policy.isFileAsync(path, signal),
 	storage: (policy, path, signal) => policy.containsProtectedPathAsync(path, signal),
+	extension: (policy, path, signal) => policy.keepsExtensionAsync(path, signal),
 };
 
 /** A missing path is an unknown file type; every other failure stays the caller's. */
 function missingFileAnswer(query: PathQuery, error: unknown): PathAnswer {
-	if (query.kind !== "file" || !isMissingPathError(error)) throw error;
+	if ((query.kind !== "file" && query.kind !== "extension") || !isMissingPathError(error)) throw error;
 	return undefined;
 }
 
@@ -792,8 +798,33 @@ function stringArgument(args: Record<string, unknown>, name: string): string | u
 	return typeof value === "string" ? value : undefined;
 }
 
-/** The credential assessment of one tool call, written once for the synchronous and asynchronous checks. */
+/**
+ * The credential assessment of one tool call, written once for the synchronous and asynchronous checks. A call with no
+ * credential risk is refined to how its output is read: a batch of masked sections, a search that names its files, or
+ * program source — only when the path really names a file of that dialect, since a link to another type prints data.
+ * `lookup` and `grep` are refined only when `harnessTool` says the tool is the harness's own: a same-named tool may
+ * print anything, so it keeps the data rule.
+ */
 function* toolCredentialAssessment(
+	toolName: string,
+	args: Record<string, unknown>,
+	paths: CredentialPathPolicy,
+	grepSkipsProtectedFiles: boolean,
+	harnessTool: boolean,
+): CredentialWalk<CredentialExposureAssessment> {
+	const base = yield* baseCredentialAssessment(toolName, args, paths, grepSkipsProtectedFiles);
+	if (base.kind !== "none") return base;
+	if (harnessTool && toolName === "lookup") return { kind: "sections" };
+	const programSource = harnessTool ? callPrintsProgramSource(toolName, args) : undefined;
+	if (programSource === undefined) return base;
+	const dialect = sourceDialectOf(programSource.path);
+	if (dialect === undefined) return base;
+	const from = programSource.directory === undefined ? paths : paths.withCwd(programSource.directory);
+	if ((yield { kind: "extension", path: programSource.path, policy: from }) !== true) return base;
+	return { kind: "source", dialect, numbered: programSource.numbered };
+}
+
+function* baseCredentialAssessment(
 	toolName: string,
 	args: Record<string, unknown>,
 	paths: CredentialPathPolicy,
@@ -888,7 +919,7 @@ export function credentialToolBlockReason(
 	if (toolName === "secret_store" || !isRecord(args)) return undefined;
 	const paths = credentialPolicyFor(cwd, boundary, executionContext, pathAuthority);
 	return runCredentialWalk(
-		toolCredentialAssessment(toolName, args, paths, boundary?.grepToolSkipsProtectedFiles === true),
+		toolCredentialAssessment(toolName, args, paths, boundary?.grepToolSkipsProtectedFiles === true, false),
 	).reason;
 }
 
@@ -900,12 +931,13 @@ export async function assessCredentialExposureAsync(
 	executionContext?: ExecutionContext,
 	pathAuthority?: ExecutionPathAuthority,
 	signal?: AbortSignal,
+	harnessTool = false,
 ): Promise<CredentialExposureAssessment> {
 	if (toolName === "secret_store" || !isRecord(args)) return NO_EXPOSURE;
 	signal?.throwIfAborted();
 	const paths = credentialPolicyFor(cwd, boundary, executionContext, pathAuthority);
 	return runCredentialWalkAsync(
-		toolCredentialAssessment(toolName, args, paths, boundary?.grepToolSkipsProtectedFiles === true),
+		toolCredentialAssessment(toolName, args, paths, boundary?.grepToolSkipsProtectedFiles === true, harnessTool),
 		signal,
 	);
 }
@@ -967,8 +999,11 @@ function redactResult<T>(
 	boundary?: CredentialExposureBoundary,
 	mock: (text: string) => string = mockCredentialFields,
 	additionalValues: readonly string[] = [],
+	detailMock: (text: string) => string = mock,
 ): AgentToolResult<T> {
 	const redact = createOutputRedactor(boundary, mock, additionalValues);
+	// A detail string is a fragment of the call's text, never the file itself: it may start inside a literal.
+	const redactDetail = detailMock === mock ? redact : createOutputRedactor(boundary, detailMock, additionalValues);
 	// Keys are identifiers, not credential content: the whole-content mocks would replace every key, so keys
 	// get only known-value and secret-shape masking.
 	const redactKey = createOutputRedactor(boundary, redactKnownSecrets, additionalValues);
@@ -976,7 +1011,7 @@ function redactResult<T>(
 	return {
 		...result,
 		content: result.content.map((block) => (block.type === "text" ? { ...block, text: redact(block.text) } : block)),
-		details: redactStructuredDetails(result.details, redact, redactKey, budget) as T,
+		details: redactStructuredDetails(result.details, redactDetail, redactKey, budget) as T,
 	};
 }
 
@@ -1039,32 +1074,6 @@ function redactStructuredDetails(
 	}
 }
 
-/** The mock of one tool call's result text, and the same mock for the output file the call saves, block by block. */
-function createExposureMock(
-	assessment: CredentialExposureAssessment,
-	cwd: string,
-	boundary: CredentialExposureBoundary | undefined,
-	executionContext: ExecutionContext | undefined,
-	pathAuthority: ExecutionPathAuthority | undefined,
-): { text: (text: string) => string; kind: CredentialBlockMaskKind } {
-	if (assessment.kind === "content") return { text: mockCredentialContent, kind: { kind: "content" } };
-	if (assessment.kind === "search") {
-		const paths = createCredentialPathPolicy(
-			cwd,
-			boundary,
-			executionContext,
-			boundary?.getPathProbe?.(executionContext),
-			pathAuthority,
-		);
-		const isProtectedPath = (path: string) => paths.isProtected(path);
-		return {
-			text: (text) => mockProtectedSearchLines(text, isProtectedPath),
-			kind: { kind: "search", isProtectedPath },
-		};
-	}
-	return { text: mockCredentialFields, kind: { kind: "fields" } };
-}
-
 /**
  * Apply the same credential assessment and output mock stream to foreground, extension, scout, and
  * lane tools. The default is the fail-closed authority contract; the owner runtime opts into the
@@ -1084,6 +1093,7 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 	cwd: string,
 	boundary?: CredentialExposureBoundary,
 	mode: CredentialExposureMode = "deny",
+	harnessTool = false,
 ): AgentTool<TParameters, TDetails> {
 	return wrapToolExecution(tool, (executor, executionContext, pathAuthority) => ({
 		...executor,
@@ -1095,11 +1105,13 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 			},
 		},
 		async execute(toolCallId, params, signal, onUpdate) {
-			let mock: (text: string) => string = mockCredentialFields;
+			let fragment: (text: string) => string = mockCredentialFields;
+			let errorMock: (text: string) => string = mockCredentialFields;
 			let sensitiveValues: readonly string[] = [];
+			// A streamed update is the last lines so far, so it starts wherever the output is: a fragment of it.
 			const safeUpdate = onUpdate
 				? (partial: AgentToolResult<TDetails>) => {
-						onUpdate(redactResult(partial, boundary, mock, sensitiveValues));
+						onUpdate(redactResult(partial, boundary, fragment, sensitiveValues));
 					}
 				: undefined;
 			try {
@@ -1113,6 +1125,7 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 					executionContext,
 					pathAuthority,
 					signal,
+					harnessTool,
 				);
 				if (assessment.reason && mode === "deny") {
 					throw new AgentToolExecutionError(
@@ -1122,8 +1135,14 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 						"tool_failure",
 					);
 				}
-				const exposureMock = createExposureMock(assessment, cwd, boundary, executionContext, pathAuthority);
-				mock = exposureMock.text;
+				const exposureMock = createExposureMock(
+					assessment.kind,
+					() => credentialPolicyFor(cwd, boundary, executionContext, pathAuthority),
+					assessment.dialect,
+					assessment.numbered === true,
+				);
+				fragment = exposureMock.fragment;
+				errorMock = errorMaskFor();
 				signal?.throwIfAborted();
 				// The output file a call saves (a shell's full output) is written through the same mock, block by
 				// block, so a later read of the file shows what the result would.
@@ -1131,13 +1150,21 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 					() => createOutputRedactor(boundary, createCredentialBlockMask(exposureMock.kind), sensitiveValues),
 					() => executor.execute(toolCallId, params, signal, safeUpdate),
 				);
-				return redactResult(result, boundary, mock, sensitiveValues);
+				// Only a final result that holds the call's whole output from its first line may be read as source.
+				const whole = assessment.kind !== "source" || resultHoldsWholeOutput(tool.name, result);
+				return redactResult(
+					result,
+					boundary,
+					whole ? exposureMock.text : exposureMock.fragment,
+					sensitiveValues,
+					exposureMock.fragment,
+				);
 			} catch (error) {
 				// A cancellation is not this guard's to describe: the run's abort reason (a plain string for a
 				// named abort, thrown verbatim by throwIfAborted) passes through untouched so the loop finalizes
 				// the call as `Operation aborted (<reason>)` without a second line about the guard.
 				if (signal?.aborted || (signal?.reason !== undefined && error === signal.reason)) throw error;
-				const redact = createOutputRedactor(boundary, mockCredentialFields, sensitiveValues);
+				const redact = createOutputRedactor(boundary, errorMock, sensitiveValues);
 				const classified = readAgentToolExecutionError(error);
 				if (classified) {
 					throw new AgentToolExecutionError(

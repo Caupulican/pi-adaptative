@@ -1,4 +1,6 @@
 import { redactKnownSecrets } from "../security/secret-text.ts";
+import type { SourceDialect } from "../security/source-scanner.ts";
+import { createSourceBlockMask } from "./source-mask.ts";
 
 /**
  * Credential content mock stream.
@@ -14,7 +16,8 @@ const MOCK_SUFFIX = ">";
 const MAX_MOCKED_LINES = 200_000;
 
 /** Optional read-tool `N: ` / grep `path:N:` style prefixes precede a line's own content. */
-const LINE_PREFIX_RE = /^(\s*(?:\d+[:\t]\s?)?)/u;
+/** The line-number prefix a numbered output puts before a line: none, `N: ` or `N` and a tab. */
+export const LINE_PREFIX_RE = /^(\s*(?:\d+[:\t]\s?)?)/u;
 const DOTENV_ASSIGNMENT_RE = /^(\s*(?:export\s+)?)([A-Za-z_][A-Za-z0-9_.-]*)(\s*[=:]\s*)(\S.*)$/u;
 const SECRET_KEY_WORDS = new Set([
 	"password",
@@ -140,13 +143,33 @@ function maskLines(text: string, mask: LineMask): string {
 	return out.join("\n");
 }
 
+/** A quoted pair, `"key": "value"`: its value runs to its closing quote, or to the end of the text when none closes it. */
+const QUOTED_PAIR_RE = /"([A-Za-z_][A-Za-z0-9_.-]*)"(\s*:\s*)"(?:\\.|[^"\\\r\n])*(?:"|$)/gu;
+
 /** Quoted JSON pairs whose key names a secret, anywhere in the text (a pair may span a line break before its value). */
 function mockQuotedSecretFields(text: string): string {
-	return text.replace(
-		/"([A-Za-z_][A-Za-z0-9_.-]*)"(\s*:\s*)"(?:\\.|[^"\\\r\n])*(?:"|$)/gu,
-		(match, key: string, separator: string) =>
-			isCredentialSecretKey(key) ? `"${key}"${separator}"${mockedValue(key)}"` : match,
+	return text.replace(QUOTED_PAIR_RE, (match, key: string, separator: string) =>
+		isCredentialSecretKey(key) ? `"${key}"${separator}"${mockedValue(key)}"` : match,
 	);
+}
+
+/**
+ * `line` as the quoted-pair rule leaves it when it is read after `before`, a line break apart, and a secret pair spans
+ * that break: its key ends `before` and its value starts `line`. Undefined when no secret pair spans the break. `line`
+ * holds no line break of its own.
+ */
+export function mockQuotedSecretPairAcrossBreak(before: string, line: string): string | undefined {
+	const breakAt = before.length;
+	let spans = false;
+	const mocked = `${before}\n${line}`.replace(
+		QUOTED_PAIR_RE,
+		(match, key: string, separator: string, offset: number) => {
+			if (!isCredentialSecretKey(key)) return match;
+			if (offset < breakAt && offset + match.length > breakAt + 1) spans = true;
+			return `"${key}"${separator}"${mockedValue(key)}"`;
+		},
+	);
+	return spans ? mocked.slice(mocked.lastIndexOf("\n") + 1) : undefined;
 }
 
 const fieldLineMask: LineMask = (line) => mockLine(line, false);
@@ -253,6 +276,10 @@ function createSearchLineMask(isProtectedPath: (path: string) => boolean): LineM
 export type CredentialBlockMaskKind =
 	| { readonly kind: "fields" }
 	| { readonly kind: "content" }
+	/** Known program source: the source mask, which needs the dialect of the file it prints. */
+	| { readonly kind: "source"; readonly dialect: SourceDialect; readonly numbered: boolean }
+	/** Only known values and secret-shaped tokens: text whose sections were each masked by their own call. */
+	| { readonly kind: "shapes" }
 	| { readonly kind: "search"; readonly isProtectedPath: (path: string) => boolean };
 
 /**
@@ -262,12 +289,15 @@ export type CredentialBlockMaskKind =
  * block only: a quoted secret pair split over a line break, and whole-content JSON, which is masked line by line.
  */
 export function createCredentialBlockMask(kind: CredentialBlockMaskKind): (block: string) => string {
+	if (kind.kind === "source") return createSourceBlockMask(kind.dialect, kind.numbered);
 	const mask =
 		kind.kind === "content"
 			? createContentLineMask()
 			: kind.kind === "search"
 				? createSearchLineMask(kind.isProtectedPath)
-				: fieldLineMask;
+				: kind.kind === "shapes"
+					? redactKnownSecrets
+					: fieldLineMask;
 	return (block) => {
 		let out = "";
 		for (const line of (kind.kind === "fields" ? mockQuotedSecretFields(block) : block).split(/(?<=\n)/u)) {
