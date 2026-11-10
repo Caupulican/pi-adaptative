@@ -126,6 +126,7 @@ import {
 import type { KnowledgeScope } from "./memory/knowledge-record.ts";
 import { KnowledgeStore } from "./memory/knowledge-store.ts";
 import type { KnowledgeReadSource } from "./memory/knowledge-tool.ts";
+import { type LaneKnowledgeSelection, projectLaneKnowledge } from "./memory/lane-knowledge-view.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import {
 	assertMemoryReadActive,
@@ -1679,27 +1680,6 @@ export class MemoryController {
 		return { references, isCurrent };
 	}
 
-	private _projectKnowledgeForLane(
-		references: readonly KnowledgeGrantReference[],
-		budget: MemoryPromptBudget,
-		purpose: "prompt" | "read",
-	): KnowledgeProjection {
-		const context = this._captureKnowledgeReadContext();
-		const { reader, scope, settings } = context;
-		const enabled = settings.enabled && (purpose === "read" || settings.includeInPrompt);
-		const projection =
-			enabled && references.length > 0 ? reader?.previewSelected(scope, references, budget) : undefined;
-		return {
-			revision: projection?.revision ?? 0,
-			text: projection?.text ?? "",
-			includedCount: projection?.includedCount ?? 0,
-			omittedCount: projection?.omittedCount ?? references.length,
-			references: projection?.references ?? [],
-			...(projection?.dropped ? { dropped: projection.dropped } : {}),
-			isCurrent: () => context.isCurrent() && (projection?.isCurrent() ?? true),
-		};
-	}
-
 	/** Shared mutation authority for the root tool and the original-owner collection coordinator. */
 	getKnowledgeAdmission(request?: Pick<DecisionOptions, "budget" | "origin">): KnowledgeAdmissionPort | undefined {
 		const store = this._knowledgeStore;
@@ -2221,10 +2201,11 @@ export class MemoryController {
 		if (references.length === 0) return { text: "", references, unavailable: [], omitted: [], isCurrent: () => true };
 		const blocked = allowed();
 		if (blocked || !store) return blockedKnowledgeHandoff(blocked ?? "knowledge_unavailable");
-		const projection = this._projectKnowledgeForLane(
+		const projection = projectLaneKnowledge(
+			this._captureKnowledgeReadContext(),
 			references,
 			{ ...charBoundedMemoryPromptBudget(maxBytes), maxBytes },
-			"prompt",
+			"managed_handoff",
 		);
 		const grant = this.captureKnowledgeGrant(projection.references);
 		const included = new Set(projection.references.map((reference) => reference.id));
@@ -2378,8 +2359,12 @@ export class MemoryController {
 	 */
 	createLaneMemoryBroker(
 		capacity: LaneMemoryCapacitySource,
-		knowledgeReferences: () => readonly KnowledgeGrantReference[] = () => [],
+		laneSelection: () => LaneKnowledgeSelection = () => [],
 	): WorkerMemoryBroker {
+		const knowledgeReferences = (): LaneKnowledgeSelection => {
+			const selection = laneSelection();
+			return selection && parseKnowledgeGrantReferences(selection);
+		};
 		interface Admission {
 			generation: number;
 			policy: string;
@@ -2429,8 +2414,13 @@ export class MemoryController {
 		};
 		return {
 			projectKnowledge: (budget) => {
-				const references = parseKnowledgeGrantReferences(knowledgeReferences());
-				const projection = this._projectKnowledgeForLane(references, budget, "prompt");
+				const references = knowledgeReferences();
+				const projection = projectLaneKnowledge(
+					this._captureKnowledgeReadContext(),
+					references,
+					budget,
+					"worker_prompt",
+				);
 				return {
 					...projection,
 					isCurrent: () => {
@@ -2444,12 +2434,12 @@ export class MemoryController {
 			},
 			read: async (query, options = {}) => {
 				const policy = this._retrievalPolicyKey();
-				const references = parseKnowledgeGrantReferences(knowledgeReferences());
+				const references = knowledgeReferences() ?? [];
 				// One deadline for the whole tool call, set once here and passed unchanged to every summary read.
 				const deadlineAt = options.deadlineAt ?? Date.now() + TRANSCRIPT_FOREGROUND_READ_MS;
 				const snapshot = await this.readMemorySnapshotForLane(query, capacity, deadlineAt, references, options);
 				assertMemoryReadActive({ signal: options.signal, deadlineAt });
-				if (!snapshot.isCurrent() || !isDeepStrictEqual(references, knowledgeReferences()))
+				if (!snapshot.isCurrent() || !isDeepStrictEqual(references, knowledgeReferences() ?? []))
 					throw new LaneMemorySnapshotStaleError();
 				observe(
 					"search",
@@ -3145,10 +3135,11 @@ export class MemoryController {
 		if (!remaining.enabled) return constrained(remaining.reason);
 
 		const omitted: string[] = [];
-		const knowledge = this._projectKnowledgeForLane(
+		const knowledge = projectLaneKnowledge(
+			this._captureKnowledgeReadContext(),
 			input.knowledgeReferences,
 			shareOfMemoryPromptBudget(remaining, LANE_STANDING_BUDGET_SHARE),
-			"read",
+			"memory_read",
 		);
 		const knowledgeText = knowledge.text;
 		if (knowledgeText && knowledge.references.length) {

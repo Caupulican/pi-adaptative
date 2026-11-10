@@ -9,6 +9,7 @@
 
 ### Changed
 
+- The owner's taste reaches the workers that read owner knowledge. A delegated worker whose profile or dispatch gives it `memory_read` already saw the records selected for its task in a per-request knowledge view; that view now also carries the owner's accepted `taste` in scope (this project's and global), after the selected records, read fresh for every request and never stored in the task. With selected records taste takes at most half of the view's allowance. A worker without memory access gets none, and neither does one whose run carries a third party's words (from its start or from a later steer) or that no longer holds its lease. With no taste in scope the view is exactly what it was. A worker started without a profile or a tool list holds no `memory_read`, so it gets no taste: name the tool or use a profile with `memory.query`.
 - A knowledge store that holds records of a kind this version does not know (written by a newer version) no longer breaks reads: lists and searches leave such records out and the harness log counts them once, and a direct read of one refuses with a message that names the kind. Versions released before this one still fail on such a record.
 
 ### Fixed

@@ -64,9 +64,9 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 	const at = new Date(evidenceTime).toISOString();
 	const correctionAt = new Date(evidenceTime + 1_000).toISOString();
 	const forgettingAt = new Date(evidenceTime + 2_000).toISOString();
-	const record = (key: string, value: string): KnowledgeRecord => {
+	const record = (key: string, value: string, kind: KnowledgeRecord["kind"] = "behavior"): KnowledgeRecord => {
 		const identity = {
-			kind: "behavior" as const,
+			kind,
 			scope: { project: "", role: "", audience: "owner" },
 			subject: "owner",
 			key,
@@ -198,14 +198,19 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 					"the reader retains its admitted memory tool",
 				).toContain("memory_read");
 				if (value) {
-					if (root.settingsManager.getMemoryRetrievalSettings().includeInPrompt)
+					if (root.settingsManager.getMemoryRetrievalSettings().includeInPrompt) {
 						expect(projection).toContain(value);
-					else {
+						expect(projection, "an owner with no taste sees no taste wording").not.toContain("Taste records are");
+					} else {
 						expect(projection).toContain(KNOWLEDGE_CONTEXT_CLEARED);
 						expect(projection).not.toContain(value);
 					}
 				} else {
 					expect(projection).not.toContain(selected.text);
+					expect(projection, "an owner with no taste and no selection sees the cleared notice").toContain(
+						KNOWLEDGE_CONTEXT_CLEARED,
+					);
+					expect(projection).not.toContain("Current accepted knowledge,");
 					reached.release();
 				}
 			},
@@ -431,6 +436,63 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 		prompt = undefined;
 		held = undefined;
 	};
+	/** One worker on `profileId` whose first request is inspected; every start and wait is scripted like `run`. */
+	const runTasteView = async (
+		label: string,
+		profileId: string,
+		references: readonly KnowledgeGrantReference[] | undefined,
+		inspect: (request: ScriptedRequest) => void,
+	) => {
+		let viewAgentId: string | undefined;
+		world.systemOne.enterPhase(label, ICM_INTAKE_JUDGMENTS);
+		world.provider.enqueue(
+			"root",
+			calls(`${label}-start`, [
+				{
+					id: `${label}-start`,
+					name: "delegate",
+					arguments: {
+						action: "start",
+						profileId,
+						instructions: "Inspect your knowledge view, then submit a report.",
+						...(references ? { knowledge: references } : {}),
+					},
+				},
+			]),
+			{
+				name: `${label}-wait`,
+				check: (request) => {
+					const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
+					expect(result?.isError, result?.text).toBe(false);
+					viewAgentId = startedIdentity(root.session, `${label}-start`).agentId;
+				},
+				reply: () => ({
+					content: [
+						{
+							type: "toolCall",
+							id: `${label}-wait`,
+							name: "delegate",
+							arguments: { action: "wait", agentId: viewAgentId, timeoutMs: 60_000 },
+						},
+					],
+					stopReason: "toolUse",
+				}),
+			},
+			{
+				name: `${label}-done`,
+				check: (request) => {
+					expect(latestBatchResults(request).find((entry) => entry.toolName === "delegate")?.isError).toBe(false);
+				},
+				reply: { content: [{ type: "text", text: "The reader has finished." }] },
+			},
+		);
+		world.provider.enqueue("worker-a", {
+			name: `${label}-first`,
+			check: inspect,
+			reply: report(`${label}-report`).reply,
+		});
+		await withDeadline(world.trace, `${label} completed`, root.session.prompt(`Run the ${label} reader task.`));
+	};
 	try {
 		await run("knowledge-no-selection", undefined);
 		root.settingsManager.setMemoryRetrievalSettings({ enabled: true, includeInPrompt: false });
@@ -486,6 +548,43 @@ export async function runJourney1KnowledgeWorkersPhase(world: HarnessWorld): Pro
 		root.settingsManager.setFleetSettings({ ceiling: { running: 1 } });
 		await runQueued("correct");
 		await runQueued("forget");
+		// The owner's taste reaches a worker's view whether or not records were selected for its task.
+		const taste = record("code-style", "Writes small modules that each have one reason to change.", "taste");
+		const tasteSelected = record("taste-case-selected", "Names test fixtures after the behavior they prove.");
+		store.put(taste, 0, () => {});
+		store.put(tasteSelected, 0, () => {});
+		await runTasteView("knowledge-taste-no-selection", profile.profileId, undefined, (request) => {
+			const projection = currentProjection(request);
+			expect(projection, "taste alone builds the view").toContain(taste.text);
+			expect(projection, "taste carries its kind label").toContain("knowledge:taste");
+			expect(projection).not.toContain(tasteSelected.text);
+			expect(projection).not.toContain(privateRecord.text);
+		});
+		await runTasteView(
+			"knowledge-taste-with-selection",
+			profile.profileId,
+			[{ id: tasteSelected.id, revision: 1 }],
+			(request) => {
+				const projection = currentProjection(request);
+				expect(projection).toContain(tasteSelected.text);
+				expect(projection).toContain(taste.text);
+				expect(projection.indexOf(tasteSelected.text), "selected records come first").toBeLessThan(
+					projection.indexOf(taste.text),
+				);
+			},
+		);
+		await runTasteView("knowledge-taste-no-capability", "knowledge-no-memory", undefined, (request) => {
+			expect(JSON.stringify(request.context), "a plan without memory capability gets no taste").not.toContain(
+				taste.text,
+			);
+		});
+		root.settingsManager.setMemoryRetrievalSettings({ enabled: true, includeInPrompt: false });
+		await runTasteView("knowledge-taste-prompt-excluded", profile.profileId, undefined, (request) => {
+			const projection = currentProjection(request);
+			expect(projection).toContain(KNOWLEDGE_CONTEXT_CLEARED);
+			expect(projection).not.toContain(taste.text);
+		});
+		root.settingsManager.setMemoryRetrievalSettings({ enabled: true, includeInPrompt: true });
 		const before = world.provider.requests.filter((request) => request.model.id === "worker-a").length;
 		world.systemOne.enterPhase("knowledge-no-capability", ICM_INTAKE_JUDGMENTS);
 		world.provider.enqueue(

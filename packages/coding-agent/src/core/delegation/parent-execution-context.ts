@@ -40,6 +40,7 @@ import type {
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import type { GoalState } from "../goals/goal-state.ts";
 import type { KnowledgeGrant, KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
+import type { LaneKnowledgeSelection } from "../memory/lane-knowledge-view.ts";
 import type { LaneMemoryCapacitySource, WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { RepositoryMutationObserver } from "../objective-execution/repository-mutation-observer.ts";
@@ -225,7 +226,7 @@ export interface ParentExecutionPolicy {
 	 */
 	createLaneMemoryBroker(
 		capacity: LaneMemoryCapacitySource,
-		knowledgeReferences?: () => readonly KnowledgeGrantReference[],
+		knowledgeReferences?: () => LaneKnowledgeSelection,
 	): WorkerMemoryBroker;
 	/** Validate root-selected canonical versions without transferring owner-wide memory authority. */
 	captureKnowledgeGrant?(references: readonly KnowledgeGrantReference[]): KnowledgeGrant;

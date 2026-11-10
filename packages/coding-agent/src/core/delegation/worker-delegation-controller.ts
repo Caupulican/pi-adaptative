@@ -5504,7 +5504,7 @@ export class WorkerDelegationController {
 				remainingTokenAllowance: () => toolSurface.gateway?.remainingTokenBudget(),
 			});
 		let laneMemoryCapacity = buildLaneMemoryCapacity(model);
-		// A tainted start plans no memory (above); a steer that taints the attempt later leaves it no selected facts.
+		// A tainted start plans no memory (above); a later taint or a lost lease leaves no owner facts to read (`undefined`, not `[]`).
 		const memoryBroker = executionPlan.readMemory
 			? this.deps.createLaneMemoryBroker(
 					() => laneMemoryCapacity.source(),
@@ -5516,7 +5516,7 @@ export class WorkerDelegationController {
 							current.lease?.fencingToken === durableHandle.fencingToken &&
 							!this.carriesThirdPartyWords(durableHandle.attemptId)
 							? (current.dispatch.knowledgeReferences ?? [])
-							: [];
+							: undefined;
 					},
 				)
 			: undefined;

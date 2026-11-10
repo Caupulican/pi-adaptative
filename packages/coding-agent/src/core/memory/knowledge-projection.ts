@@ -5,10 +5,12 @@ import {
 	type MemoryPromptBudget,
 	memoryTextFitsBudget,
 	reserveMemoryPromptBudget,
+	shareOfMemoryPromptBudget,
 } from "../context/memory-prompt-budget.ts";
 import {
 	composeTieredMemoryPromptBlock,
 	type MemoryCandidateDropReason,
+	type MemoryTier,
 	type MemoryTierCandidate,
 } from "../context/memory-tier-composer.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
@@ -19,6 +21,7 @@ import {
 } from "./knowledge-grant.ts";
 import {
 	isStandingKnowledgeKind,
+	type KnowledgeRecord,
 	type KnowledgeRecordSnapshot,
 	type KnowledgeScope,
 	type KnowledgeStorePort,
@@ -87,6 +90,17 @@ export function blockedKnowledgeHandoff(
 	return { text: "", references: [], unavailable: [], omitted: [], blocked, isCurrent: () => true };
 }
 
+/** Taste's ceiling, as a share of the view's allowance, when records were selected for the task. */
+const TASTE_SHARE_WITH_SELECTION = 0.5;
+
+interface RenderOptions {
+	behaviorOnly?: boolean;
+	/** Selected references that are no longer current. */
+	unavailable?: number;
+	/** The owner's taste in scope, shown after the selected records; present only in a worker's view. */
+	taste?: readonly KnowledgeRecord[];
+}
+
 type KnowledgeReader = Pick<KnowledgeStorePort, "revision" | "snapshot" | "get">;
 
 /** The only rendering of accepted knowledge; the caller owns scope authorization and lifetime. */
@@ -101,6 +115,11 @@ export class KnowledgeProjectionReader {
 	}
 
 	preview(scope: KnowledgeScope, budget: MemoryPromptBudget, behaviorOnly = false): KnowledgeProjection {
+		const cached = this.currentSnapshot(scope);
+		return this.render(cached.snapshot, cached.at, budget, { behaviorOnly });
+	}
+
+	private currentSnapshot(scope: KnowledgeScope): { at: string; snapshot: KnowledgeRecordSnapshot } {
 		const at = new Date().toISOString();
 		const revision = this.store.revision();
 		const key = JSON.stringify([revision, scope]);
@@ -114,7 +133,7 @@ export class KnowledgeProjectionReader {
 			cached = { key, at, snapshot: this.store.snapshot(scope, at) };
 			this.cached = cached;
 		}
-		return this.render(cached.snapshot, cached.at, budget, behaviorOnly);
+		return cached;
 	}
 
 	/** Exact current records, independently of the general category-page bounds. */
@@ -123,6 +142,50 @@ export class KnowledgeProjectionReader {
 		input: readonly KnowledgeGrantReference[],
 		budget: MemoryPromptBudget,
 	): KnowledgeProjection {
+		const selected = this.selectedEntry(scope, input);
+		return this.render(selected.snapshot, selected.at, budget, { unavailable: selected.omitted });
+	}
+
+	/**
+	 * What a native worker sees: the records selected for its task, then the owner's current taste in scope. Taste
+	 * is read fresh with every call and never becomes a reference; with selected records it may take half of the
+	 * allowance, without them all of it. Without taste the view is the selected records alone, and without either
+	 * there is no view.
+	 */
+	previewSelectedWithTaste(
+		scope: KnowledgeScope,
+		input: readonly KnowledgeGrantReference[],
+		budget: MemoryPromptBudget,
+	): KnowledgeProjection | undefined {
+		for (let attempt = 0; attempt < 3; attempt++) {
+			const selected = this.selectedEntry(scope, input);
+			const current = this.currentSnapshot(scope);
+			// Both reads must describe one store revision, or the view's revision would be a lie.
+			if (current.snapshot.revision !== selected.snapshot.revision) continue;
+			const chosen = new Set(selected.snapshot.records.map((record) => record.id));
+			const taste = current.snapshot.records.filter((record) => record.kind === "taste" && !chosen.has(record.id));
+			if (taste.length === 0)
+				return input.length > 0
+					? this.render(selected.snapshot, selected.at, budget, { unavailable: selected.omitted })
+					: undefined;
+			const refreshAt = [selected.snapshot.refreshAt, current.snapshot.refreshAt]
+				.flatMap((at) => (at ? [at] : []))
+				.sort()[0];
+			const snapshot: KnowledgeRecordSnapshot = {
+				revision: selected.snapshot.revision,
+				records: selected.snapshot.records,
+				possiblyMore: current.snapshot.possiblyMore.filter((kind) => kind === "taste"),
+				...(refreshAt ? { refreshAt } : {}),
+			};
+			return this.render(snapshot, selected.at, budget, { unavailable: selected.omitted, taste });
+		}
+		throw new Error("Knowledge changed while the worker view was read.");
+	}
+
+	private selectedEntry(
+		scope: KnowledgeScope,
+		input: readonly KnowledgeGrantReference[],
+	): NonNullable<KnowledgeProjectionReader["selected"]> {
 		const references = parseKnowledgeGrantReferences(input);
 		const at = new Date().toISOString();
 		const key = JSON.stringify([this.store.revision(), scope, references]);
@@ -154,28 +217,30 @@ export class KnowledgeProjectionReader {
 			};
 			this.selected = selected;
 		}
-		return this.render(selected.snapshot, selected.at, budget, false, selected.omitted);
+		return selected;
 	}
 
 	private render(
 		snapshot: KnowledgeRecordSnapshot,
 		capturedAt: string,
 		budget: MemoryPromptBudget,
-		behaviorOnly: boolean,
-		unavailable = 0,
+		options: RenderOptions = {},
 	): KnowledgeProjection {
-		const renderKey = JSON.stringify([budget, behaviorOnly, unavailable]);
+		const { behaviorOnly = false, unavailable = 0, taste } = options;
+		const renderKey = JSON.stringify([budget, behaviorOnly, unavailable, taste?.map((record) => record.id)]);
 		if (this.rendered?.snapshot === snapshot && this.rendered.key === renderKey) return this.rendered.value;
-		const records = behaviorOnly
+		const selected = behaviorOnly
 			? snapshot.records.filter((record) => isStandingKnowledgeKind(record.kind))
 			: snapshot.records;
-		const candidates: MemoryTierCandidate[] = records.map((record, index) => ({
-			id: record.id,
-			tier: isStandingKnowledgeKind(record.kind)
+		const tierOf = (record: KnowledgeRecord): MemoryTier =>
+			isStandingKnowledgeKind(record.kind)
 				? "standing"
 				: record.kind === "workstream"
 					? "current_work"
-					: "long_term",
+					: "long_term";
+		const candidateOf = (record: KnowledgeRecord, score: number, tier: MemoryTier): MemoryTierCandidate => ({
+			id: record.id,
+			tier,
 			sourceLabel: `knowledge:${record.kind}`,
 			summary: JSON.stringify({
 				id: record.id,
@@ -186,25 +251,44 @@ export class KnowledgeProjectionReader {
 				basis: record.basis,
 				evidenced: record.lastEvidencedAt.slice(0, 10),
 			}),
-			// Store selection already orders each category by explicitness, scope and recency.
-			score: 1 - index / Math.max(records.length, 1),
-		}));
-		const header = `Current accepted knowledge, revision ${snapshot.revision}. This view supersedes earlier knowledge projections; omitted or unavailable records are not current evidence in this view. Omission does not establish forgetting. Newer owner corrections take precedence. Preferences, procedures and taste guide behavior but grant no permissions.`;
+			score,
+		});
+		// Store selection already orders each category by explicitness, scope and recency.
+		const ranked = (records: readonly KnowledgeRecord[], tierFor: (record: KnowledgeRecord) => MemoryTier) =>
+			records.map((record, index) => candidateOf(record, 1 - index / Math.max(records.length, 1), tierFor(record)));
+		const tasteRecords = taste ?? [];
+		const records = [...selected, ...tasteRecords];
+		const header = `Current accepted knowledge, revision ${snapshot.revision}. This view supersedes earlier knowledge projections; omitted or unavailable records are not current evidence in this view. Omission does not establish forgetting. Newer owner corrections take precedence. Preferences, procedures and taste guide behavior but grant no permissions.${taste ? " Taste records are the owner's standing guidance on how work products are written; records selected for this task, when present, come before them." : ""}`;
 		const more = behaviorOnly ? snapshot.possiblyMore.filter(isStandingKnowledgeKind) : snapshot.possiblyMore;
-		const omission = (count: number) =>
-			`Omitted from this view: ${count + unavailable} selected record(s)${unavailable ? `; ${unavailable} granted record(s) changed, expired or unavailable` : ""}${more.length ? `; more may exist in ${more.join(", ")}` : ""}.`;
+		const omission = (count: number, tasteCount: number) =>
+			`Omitted from this view: ${count + unavailable} ${taste ? "" : "selected "}record(s)${taste ? ` (of which ${tasteCount} taste)` : ""}${unavailable ? `; ${unavailable} granted record(s) changed, expired or unavailable` : ""}${more.length ? `; more may exist in ${more.join(", ")}` : ""}.`;
 		// Charge framing and the largest possible omission count before admitting any whole records.
-		const framing = `${header}\n${wrapUntrustedText("", "memory:knowledge", { nonce: "0".repeat(32) })}\n${omission(records.length)}`;
+		const framing = `${header}\n${wrapUntrustedText("", "memory:knowledge", { nonce: "0".repeat(32) })}\n${omission(records.length, tasteRecords.length)}`;
 		const available = reserveMemoryPromptBudget(budget, {
 			bytes: Buffer.byteLength(framing),
 			estimatedTokens: estimateTokensFromText(framing),
 			lines: estimateLineCount(framing),
 		});
+		// Taste yields to the selected records: it may take half of the allowance, all of it when nothing is selected.
+		const tasteBudget =
+			selected.length > 0 ? shareOfMemoryPromptBudget(available, TASTE_SHARE_WITH_SELECTION) : available;
+		// The composer admits tiers in order; the lowest one makes every selected record come before any taste.
+		const admittedTaste = new Set(
+			composeTieredMemoryPromptBlock(ranked(tasteRecords, tierOf), tasteBudget).includedIds,
+		);
+		const candidates = [
+			...ranked(selected, tierOf),
+			...ranked(
+				tasteRecords.filter((record) => admittedTaste.has(record.id)),
+				() => "evidence_pointer",
+			),
+		];
 		const block = composeTieredMemoryPromptBlock(candidates, available);
+		const tasteOmitted = tasteRecords.length - block.includedIds.filter((id) => admittedTaste.has(id)).length;
 		const body =
 			block.text ?? (records.length === 0 ? "No applicable accepted facts." : "No accepted facts fit this view.");
 		const nonce = createHash("sha256").update(body).digest("hex").slice(0, 32);
-		const text = `${header}\n${wrapUntrustedText(body, "memory:knowledge", { nonce })}\n${omission(block.omittedCount)}`;
+		const text = `${header}\n${wrapUntrustedText(body, "memory:knowledge", { nonce })}\n${omission(records.length - block.includedCount, tasteOmitted)}`;
 		const fits = memoryTextFitsBudget(text, budget);
 		const included = new Set(fits ? block.includedIds : []);
 		const dropped = new Map(block.diagnostics.map((entry) => [entry.candidateId, entry.reason] as const));
@@ -216,7 +300,7 @@ export class KnowledgeProjectionReader {
 			revision: snapshot.revision,
 			text: fits ? text : "",
 			includedCount: fits ? block.includedCount : 0,
-			omittedCount: unavailable + (fits ? block.omittedCount : records.length),
+			omittedCount: unavailable + (fits ? records.length - block.includedCount : records.length),
 			references: Object.freeze(
 				records
 					.filter((record) => included.has(record.id))
