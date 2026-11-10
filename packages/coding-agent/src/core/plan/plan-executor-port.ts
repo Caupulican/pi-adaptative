@@ -15,6 +15,8 @@ export interface PlanToolStep {
 	readonly req?: readonly string[];
 	readonly deep?: boolean;
 	readonly join?: PlanJoinKind;
+	/** collect: how many of the steps in `uses` must succeed for the join's result; absent: every one is waited for. */
+	readonly need?: number;
 	readonly question?: string;
 	readonly by?: string;
 	/** What makes the step done, one line; carried into the step's brief and its result's proof sheet. */

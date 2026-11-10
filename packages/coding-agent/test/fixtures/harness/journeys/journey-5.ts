@@ -4,6 +4,7 @@ import { runJourney5PlanAutoCheckPhase } from "./journey-5-plan-auto-check.ts";
 import { runJourney5PlanCollectPhase } from "./journey-5-plan-collect.ts";
 import { runJourney5PlanCrashPhase } from "./journey-5-plan-crash.ts";
 import { runJourney5PlanGoalWaitPhase } from "./journey-5-plan-goal-wait.ts";
+import { runJourney5PlanNeedPhase } from "./journey-5-plan-need.ts";
 import { runJourney5PlanOrderPhase } from "./journey-5-plan-order.ts";
 import { runJourney5PlanOriginPhase } from "./journey-5-plan-origin.ts";
 import { runJourney5PlanRacePhase } from "./journey-5-plan-race.ts";
@@ -46,6 +47,7 @@ export async function runJourney5(): Promise<void> {
 			await runJourney5PlanResultGatePhase(world, session);
 			await runJourney5PlanVotePhase(world, session);
 			await runJourney5PlanOrderPhase(world, session);
+			await runJourney5PlanNeedPhase(world, session);
 			expect(await world.disposeSessionInBody(session), "the plans owner disposes cleanly").toBeUndefined();
 			// A plan under a goal runs in its own session: the goal is that session's, and ends with it.
 			await runJourney5PlanVerifyAcceptedPhase(world);

@@ -63,7 +63,8 @@ export function proofFields(
 
 /**
  * The refusals a step's own fields earn before it is built: a proof outside the grammar (it would otherwise be dropped),
- * and a join-only field on a plain step (`question`, `criteria`), which nothing would read.
+ * a join-only field on a plain step (`question`, `criteria`), which nothing would read, and a `need` on a step that is
+ * no collect join, which nothing would settle by.
  */
 export function stepShapeProblems(steps: readonly PlanToolStep[]): string[] {
 	return steps.flatMap((step) => {
@@ -75,6 +76,10 @@ export function stepShapeProblems(steps: readonly PlanToolStep[]): string[] {
 		}
 		if (step.join === undefined && (step.question !== undefined || step.criteria !== undefined)) {
 			problems.push(`step "${step.id}" is plain work; question and criteria belong to a join step`);
+		}
+		if (step.need !== undefined && step.join !== "collect") {
+			const stated = step.join === undefined ? "plain work" : `a ${step.join} join`;
+			problems.push(`step "${step.id}" is ${stated}; need belongs to a collect step`);
 		}
 		return problems;
 	});
@@ -120,6 +125,8 @@ export function nodeFromStep(step: PlanToolStep, version: number): PlanNodeSpec 
 			? {
 					join: {
 						members: inputs,
+						// The step's `need` is the join's quorum: how many of the members must succeed for it to settle.
+						...(kind === "collect" && step.need !== undefined ? { quorum: step.need } : {}),
 						...(step.question ? { criterion: step.question.trim() } : {}),
 						...(criteria.length > 0 ? { criteria } : {}),
 					},

@@ -49,6 +49,12 @@ const step = Type.Object(
 				},
 			),
 		),
+		need: Type.Optional(
+			Type.Integer({
+				description:
+					"collect only: how many of the steps in uses must succeed for this join's result. When that many have, the join settles and the steps still running are stopped. Leave out to wait for every step in uses.",
+			}),
+		),
 		question: Type.Optional(
 			Type.String({
 				maxLength: PLAN_LIMITS.criterionChars,
@@ -151,7 +157,7 @@ export function createPlanToolDefinition(getPort: () => PlanExecutorPort | undef
 		label: "Plan",
 		// The root director role names this tool for multi-part work, so its schema is in every request.
 		neverDefer: true,
-		description: `Run work with several parts as one plan: plan {action:start, title, steps:[{id, do, files?, uses?, after?, req?, deep?, join?, question?, criteria?, by?, doneWhen?, outOfScope?, proof?}], final?}. The harness checks the plan, starts every ready step in parallel on workers, passes each step the results of the steps in its uses, retries, combines results in join steps (${JOIN_KIND_LIST}) and wakes you once per combined result. revise {steps, remove?, reason} adds or replaces steps (same id replaces) and keeps running work that did not change; cancel {reason} stops the plan. Use assign for a single task.`,
+		description: `Run work with several parts as one plan: plan {action:start, title, steps:[{id, do, files?, uses?, after?, req?, deep?, join?, need?, question?, criteria?, by?, doneWhen?, outOfScope?, proof?}], final?}. The harness checks the plan, starts every ready step in parallel on workers, passes each step the results of the steps in its uses, retries, combines results in join steps (${JOIN_KIND_LIST}) and wakes you once per combined result. revise {steps, remove?, reason} adds or replaces steps (same id replaces) and keeps running work that did not change; cancel {reason} stops the plan. Use assign for a single task.`,
 		promptSnippet: "Run a multi-step plan on workers (steps, files, uses, joins)",
 		parameters: schema,
 		// As for assign: a refusal lists every fix, and that view reaches the model as the failure record's evidence.

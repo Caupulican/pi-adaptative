@@ -137,7 +137,10 @@ export interface PlanJoinSpec {
 	readonly members: readonly string[];
 	/** reduce: the question the combined answer answers; vote: what the winner must meet. */
 	readonly criterion?: string;
-	/** collect/reduce: members that must be accepted before the join settles; default all. */
+	/**
+	 * collect: how many members must succeed before the join settles (the plan tool's `need`); default all. No other
+	 * kind reads it.
+	 */
 	readonly quorum?: number;
 	/** vote: the rubric every candidate is judged on, one criterion each (`PLAN_LIMITS.criteria` at most). */
 	readonly criteria?: readonly string[];
@@ -564,7 +567,12 @@ function checkJoinShape(node: PlanNodeSpec, nodes: readonly PlanNodeSpec[], prob
 		}
 	}
 	if (join.quorum !== undefined && (!Number.isSafeInteger(join.quorum) || join.quorum < 1 || join.quorum > count)) {
-		problems.push({ fact: "F4", nodeId: node.id, fix: `step "${node.id}": quorum must be between 1 and ${count}` });
+		// The plan tool states a quorum as the step's `need`, so the fix speaks that word.
+		problems.push({
+			fact: "F4",
+			nodeId: node.id,
+			fix: `step "${node.id}": need must be between 1 and ${count}, the number of steps it combines`,
+		});
 	}
 	const criteria = join.criteria ?? [];
 	if (node.kind === "vote" && !join.criterion && criteria.length === 0) {

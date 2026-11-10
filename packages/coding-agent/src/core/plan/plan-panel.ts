@@ -150,17 +150,30 @@ function rowStatus(node: PlanNodeView): OrchestrationRowStatus {
 }
 
 /**
+ * The words of a step's kind. A collect join that settles on a quorum says there how many of its members it needs, so it
+ * never reads as if every one of them were needed.
+ */
+function kindWords(node: PlanNodeView): string | undefined {
+	const join = node.join;
+	if (node.kind === "collect" && join?.quorum !== undefined)
+		return `collects results; needs ${join.quorum} of ${steps(join.members)}`;
+	return KIND_WORDS[node.kind];
+}
+
+/**
  * The state, dependency, kind, effort, placement, attempt and outcome of one step in plain words, in that order. The
  * dependency is shown only while the step still waits; a finished step's count is history.
  */
 function nodeWords(node: PlanNodeView): string[] {
 	const waiting = node.state === "planned" || node.state === "ready";
+	// A quorum join states its quorum in its kind words, in place of a count of every step it reads.
+	const quorumJoin = node.kind === "collect" && node.join?.quorum !== undefined;
 	const outcome = node.state === "settled" && node.outcomeStatus ? OUTCOME_WORDS[node.outcomeStatus] : undefined;
 	const next = node.state === "settled" && node.nextAction ? NEXT_ACTION_WORDS[node.nextAction] : undefined;
 	return [
 		stateWord(node),
-		waiting && node.predecessors > 0 ? `after ${steps(node.predecessors)}` : undefined,
-		KIND_WORDS[node.kind],
+		waiting && !quorumJoin && node.predecessors > 0 ? `after ${steps(node.predecessors)}` : undefined,
+		kindWords(node),
 		node.effort === "deep" ? "hard step, deep thinking" : undefined,
 		placementWord(node),
 		node.attempts > 1 ? `attempt ${node.attempts}` : undefined,

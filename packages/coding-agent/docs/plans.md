@@ -6,7 +6,7 @@ A plan is the root session's whole breakdown of one goal: a titled set of steps,
 
 `plan` is a root-only tool. Workers and bots never receive it.
 
-- `start`: a `title` and every step. Each step has an `id`, `do` (the task in plain words), and optionally `files` (what it may change; none means read-only), `uses` (steps whose results it needs and receives), `after` (steps that must finish first, without results), `req` (goal requirement ids it proves), `deep` (a hard step that needs more thinking), `join` with `question`, `by` (a bot, leader or machine to prefer), `doneWhen` (the one line that says the step is done) and `outOfScope` (what the step must not touch). The worker reads the last two as `Done when:` and `Out of scope:` lines, and the step's proof sheet repeats them. `final` names the step whose result finishes the plan.
+- `start`: a `title` and every step. Each step has an `id`, `do` (the task in plain words), and optionally `files` (what it may change; none means read-only), `uses` (steps whose results it needs and receives), `after` (steps that must finish first, without results), `req` (goal requirement ids it proves), `deep` (a hard step that needs more thinking), `join` with `question`, `need` (a collect join: how many of the steps in `uses` must succeed), `by` (a bot, leader or machine to prefer), `doneWhen` (the one line that says the step is done) and `outOfScope` (what the step must not touch). The worker reads the last two as `Done when:` and `Out of scope:` lines, and the step's proof sheet repeats them. `final` names the step whose result finishes the plan.
 - `revise`: steps to add or replace (the same id replaces) and `remove`; an unchanged running step keeps running, a changed one starts afresh.
 - `cancel`: ends the plan with a `reason`.
 
@@ -20,7 +20,7 @@ A plan started under a goal holds that goal's automatic continuation while any o
 
 A join is a step that combines the steps in its `uses`:
 
-- `collect`: gathers the members' results in order, with which requirements they cover.
+- `collect`: gathers the members' results in order, with which requirements they cover. A `need` settles it on a quorum: `need: 2` over three members settles the join once two have succeeded, and stops the one still running; left out, every member is waited for.
 - `reduce`: a read-only worker turns the members' findings into one answer to the step's `question`.
 - `vote`: picks the best of several attempts at the same task against the `question`.
 - `race`: the first accepted attempt wins; the others are cancelled.

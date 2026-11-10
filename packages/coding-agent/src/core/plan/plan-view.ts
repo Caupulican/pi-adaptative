@@ -48,6 +48,11 @@ export interface PlanNodeView {
 	readonly doubts?: readonly string[];
 	/** The steps this one waits for: its uses and its ordering edges. */
 	readonly predecessors: number;
+	/**
+	 * A join's display summary: how many steps it combines (its members) and, when it settles on a quorum, how many of
+	 * them must succeed. Absent for plain work.
+	 */
+	readonly join?: { readonly members: number; readonly quorum?: number };
 	/** The attempts its current task has run (0 before the step is released). */
 	readonly attempts: number;
 	readonly effort: PlanNodeSpec["effort"];
@@ -181,6 +186,14 @@ function nodeView(
 		...(pinnedMachineName !== undefined ? { pinnedMachineName } : {}),
 		...(node.doubts && node.doubts.length > 0 ? { doubts: node.doubts } : {}),
 		predecessors: planNodeEdges(node).length,
+		...(node.join
+			? {
+					join: {
+						members: node.join.members.length,
+						...(node.join.quorum !== undefined ? { quorum: node.join.quorum } : {}),
+					},
+				}
+			: {}),
 		attempts: runtime?.release
 			? (projection.tasks[currentTaskOf(projection, runtime.release.taskId)]?.attemptIds.length ?? 0)
 			: 0,
