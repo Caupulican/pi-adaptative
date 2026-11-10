@@ -4,7 +4,6 @@ import {
 	orchestrationSessionDir,
 	sessionRootMailboxFile,
 	workerContextForkFile,
-	workerProjectSpecializationFile,
 } from "../../../../src/core/agent-paths.ts";
 import {
 	type BackgroundToolTaskRecord,
@@ -37,6 +36,7 @@ import {
 	LIMITS_PATH,
 	lastToolResultDetails,
 	latestBatchResults,
+	ownedFilesManifest,
 	rawReplyAcknowledgements,
 	rawReplyReceiptOf,
 } from "./shared.ts";
@@ -255,52 +255,18 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 			] as const;
 		}),
 	);
-	// The canonical referenced manifest, bounded and explicit: the auxiliary session file, the control-plane children of this parent
-	// (without the SQLite store or live work-lease markers), each worker's session file and sidecar, the specialization file its native
-	// binding names, and the birth fork file its native reference names. A missing optional file is absent; a cap breach fails.
-	const E7_MAX_FILES = 512;
-	const E7_MAX_BYTES = 8 * 1024 * 1024;
-	const e7Manifest = (): Map<string, string> => {
-		const entries = world.io.fileEntries();
-		const selected = new Map<string, string>();
-		const take = (path: string | undefined): void => {
-			if (path === undefined) return;
-			const content = entries.get(path);
-			if (content !== undefined) selected.set(path, content);
-		};
-		take(e7AuxFile);
-		for (const [path, content] of bundleEntries(
-			entries,
-			orchestrationSessionDir(world.agentDir, e7Owner.sessionManager.getSessionId()),
-		)) {
-			selected.set(path, content);
-		}
-		for (const agentId of [e7StartA.agentId, e7StartB.agentId]) {
+	// The canonical referenced manifest (`ownedFilesManifest`): the auxiliary session file, the control-plane children of this
+	// parent, and each worker's files as its native binding and its native birth reference name them.
+	const e7Manifest = ownedFilesManifest(
+		world,
+		{ sessionFile: e7AuxFile, sessionId: e7Owner.sessionManager.getSessionId() },
+		[e7StartA.agentId, e7StartB.agentId].map((agentId) => {
 			const sessionFile = e7Runtime.agents[agentId]?.resumeContext.sessionFile;
 			if (sessionFile === undefined) throw new Error(`no session file for ${agentId}`);
-			take(sessionFile);
-			take(`${sessionFile}.worker.json`);
 			const native = e7Native.get(agentId);
-			if (native?.binding !== undefined) {
-				take(workerProjectSpecializationFile(world.agentDir, native.binding.specializationKey));
-			}
-			if (native?.birth !== undefined) {
-				take(
-					workerContextForkFile(
-						world.agentDir,
-						e7Owner.sessionManager.getSessionId(),
-						native.birth.identityDigest,
-						native.birth.contentDigest,
-					),
-				);
-			}
-		}
-		const bytes = [...selected.values()].reduce((sum, content) => sum + Buffer.byteLength(content), 0);
-		if (selected.size > E7_MAX_FILES || bytes > E7_MAX_BYTES) {
-			throw new Error(`the E7 manifest exceeds its caps: ${selected.size} files, ${bytes} bytes`);
-		}
-		return selected;
-	};
+			return { sessionFile, specializationKey: native?.binding?.specializationKey, birth: native?.birth };
+		}),
+	);
 	const e7Capture = e7Manifest();
 	// Native facts before the cut: each binding is busy, and each birth reference names a file the manifest captured.
 	for (const [agentId, native] of e7Native) {

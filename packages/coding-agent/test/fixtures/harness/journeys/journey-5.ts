@@ -2,6 +2,7 @@ import "../builtin-install.ts";
 import { expect } from "vitest";
 import { runJourney5PlanAutoCheckPhase } from "./journey-5-plan-auto-check.ts";
 import { runJourney5PlanCollectPhase } from "./journey-5-plan-collect.ts";
+import { runJourney5PlanCrashPhase } from "./journey-5-plan-crash.ts";
 import { runJourney5PlanOriginPhase } from "./journey-5-plan-origin.ts";
 import { runJourney5PlanRacePhase } from "./journey-5-plan-race.ts";
 import { runJourney5PlanReducePhase } from "./journey-5-plan-reduce.ts";
@@ -47,6 +48,7 @@ export async function runJourney5(): Promise<void> {
 			await runJourney5PlanVerifyAcceptedPhase(world);
 			// A plan whose owner closes and reopens mid-plan runs in its own session, which the phase closes and opens again.
 			await runJourney5PlanRestartPhase(world);
+			await runJourney5PlanCrashPhase(world);
 		},
 	);
 }

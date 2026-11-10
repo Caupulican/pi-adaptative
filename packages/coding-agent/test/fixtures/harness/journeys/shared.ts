@@ -6,10 +6,17 @@ import { writeHeapSnapshot } from "node:v8";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import type { CheckOptions, LockOptions, UnlockOptions } from "proper-lockfile";
 import { expect } from "vitest";
-import { stateFile } from "../../../../src/core/agent-paths.ts";
+import {
+	orchestrationSessionDir,
+	stateFile,
+	workerContextForkFile,
+	workerProjectSpecializationFile,
+} from "../../../../src/core/agent-paths.ts";
 import type { AgentSession, AgentSessionEvent } from "../../../../src/core/agent-session.ts";
+import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import { CONTINUOUS_CHAT_FOREGROUND_QUIET_MS } from "../../../../src/core/memory/continuous-chat-runtime.ts";
 import { KNOWLEDGE_JUDGMENT_TOOL_NAME } from "../../../../src/core/memory/knowledge-judgment-runner.ts";
+import type { AgentBindingContract } from "../../../../src/core/orchestration/contracts.ts";
 import { formatRuleHook, loadRuleHooks } from "../../../../src/core/rule-hooks/rule-hook-catalog.ts";
 import { SERIAL_CALL_HINT_PREFIX } from "../../../../src/core/serial-call-hint.ts";
 import { getDirectoryResourceProfileInfo } from "../../../../src/core/settings/settings-rules.ts";
@@ -226,6 +233,83 @@ export function bundleEntries(entries: ReadonlyMap<string, string>, bundleDir: s
 		selected.push([path, content]);
 	}
 	return selected;
+}
+
+/** Where one worker's own files live, beyond its parent's bundle: its conversation, its specialization and its birth context. */
+export interface OwnedWorkerFiles {
+	readonly sessionFile: string;
+	readonly specializationKey: string | undefined;
+	readonly birth: { readonly identityDigest: string; readonly contentDigest: string } | undefined;
+}
+
+/** One worker's owned files, read from its conversation as it stands. Read it once, before the cut. */
+export function ownedWorkerFiles(
+	world: HarnessWorld,
+	agent: Pick<AgentBindingContract, "agentId" | "resumeContext" | "contextOrigin">,
+): OwnedWorkerFiles {
+	const sessionFile = agent.resumeContext.sessionFile;
+	if (sessionFile === undefined) throw new Error(`no session file for ${agent.agentId}`);
+	const store = new WorkerConversationStore();
+	const options = {
+		agentDir: world.agentDir,
+		resumeContext: agent.resumeContext,
+		expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+	};
+	return {
+		sessionFile,
+		specializationKey: store.getProjectContextBinding(options)?.specializationKey,
+		birth: store.open(options).getBirthContextForkReference(),
+	};
+}
+
+const OWNED_MANIFEST_MAX_FILES = 512;
+const OWNED_MANIFEST_MAX_BYTES = 8 * 1024 * 1024;
+
+/**
+ * The files a crash cut captures and restores for one root session, bounded and explicit: its session file, the control-plane
+ * bundle of this parent (without SQLite files or live lease markers), and each worker's session file and sidecar, the
+ * specialization file its project-context binding names and the birth fork file its conversation names. Each call reads the
+ * files as they are now; a missing optional file is absent; a cap breach fails.
+ */
+export function ownedFilesManifest(
+	world: HarnessWorld,
+	owner: { readonly sessionFile: string; readonly sessionId: string },
+	workers: readonly OwnedWorkerFiles[],
+): () => Map<string, string> {
+	return () => {
+		const entries = world.io.fileEntries();
+		const selected = new Map<string, string>();
+		const take = (path: string): void => {
+			const content = entries.get(path);
+			if (content !== undefined) selected.set(path, content);
+		};
+		take(owner.sessionFile);
+		for (const [path, content] of bundleEntries(entries, orchestrationSessionDir(world.agentDir, owner.sessionId))) {
+			selected.set(path, content);
+		}
+		for (const worker of workers) {
+			take(worker.sessionFile);
+			take(`${worker.sessionFile}.worker.json`);
+			if (worker.specializationKey !== undefined) {
+				take(workerProjectSpecializationFile(world.agentDir, worker.specializationKey));
+			}
+			if (worker.birth !== undefined) {
+				take(
+					workerContextForkFile(
+						world.agentDir,
+						owner.sessionId,
+						worker.birth.identityDigest,
+						worker.birth.contentDigest,
+					),
+				);
+			}
+		}
+		const bytes = [...selected.values()].reduce((sum, content) => sum + Buffer.byteLength(content), 0);
+		if (selected.size > OWNED_MANIFEST_MAX_FILES || bytes > OWNED_MANIFEST_MAX_BYTES) {
+			throw new Error(`the owned-files manifest exceeds its caps: ${selected.size} files, ${bytes} bytes`);
+		}
+		return selected;
+	};
 }
 
 /** A session file that is already written, so a notice is saved when it is observed. */
