@@ -6,9 +6,10 @@
 import { renderTaskBrief } from "../comms/comms-records.ts";
 import { type VerifierSubject, verifierBrief } from "../delegation/verifier-brief.ts";
 import { describeOutcomeForHandoff } from "../delegation/worker-outcome-words.ts";
-import { type FleetDispatch, type FleetPriority, laneSubtreeId } from "../fleet/fleet-types.ts";
+import { type FleetDispatch, laneSubtreeId } from "../fleet/fleet-types.ts";
 import { MAX_ORCHESTRATION_DISPATCH_INSTRUCTIONS_LENGTH } from "../orchestration/contracts.ts";
 import { planReviewSubjects, type ReviewSubject } from "../orchestration/plan-review-subjects.ts";
+import { planNodeRank } from "../orchestration/plan-step-rank.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { currentTaskOf } from "../orchestration/task-successor.ts";
 import type { Placement } from "../placement/placement-types.ts";
@@ -26,7 +27,6 @@ import {
 	type PlanRecord,
 	type PlanRuntimeState,
 	planNodeEdges,
-	planTopologicalOrder,
 } from "./plan-graph.ts";
 import { needsOwnWorktree } from "./plan-merge.ts";
 import { planNodeOutcome } from "./plan-view.ts";
@@ -69,31 +69,6 @@ export function planReleaseKey(planId: string, nodeId: string, version: number):
  */
 export function decidePlacement(node: PlanNodeSpec): { readonly placement: Placement; readonly exit: string } {
 	return { placement: { kind: "local_worker" }, exit: node.pin ? "pin_kept_local" : "local_default" };
-}
-
-/** Nodes on a longest path of the plan: they are released first. */
-export function planCriticalPath(record: PlanRecord): ReadonlySet<string> {
-	const order = planTopologicalOrder(record.nodes);
-	if (!order.acyclic) return new Set();
-	const byId = new Map(record.nodes.map((node) => [node.id, node]));
-	const longest = new Map<string, number>();
-	const next = new Map<string, string>();
-	for (const id of [...order.order].reverse()) {
-		let best = 0;
-		for (const dependent of record.nodes.filter((node) => planNodeEdges(node).includes(id))) {
-			const length = longest.get(dependent.id) ?? 0;
-			if (length >= best) {
-				best = length;
-				next.set(id, dependent.id);
-			}
-		}
-		longest.set(id, best + 1);
-	}
-	let start = order.order.find((id) => (byId.get(id)?.inputs.length ?? 0) + (byId.get(id)?.after.length ?? 0) === 0);
-	for (const id of order.order) if ((longest.get(id) ?? 0) > (longest.get(start ?? "") ?? 0)) start = id;
-	const path = new Set<string>();
-	for (let id = start; id !== undefined && !path.has(id); id = next.get(id)) path.add(id);
-	return path;
 }
 
 /** The most changed-file references one predecessor's input line names. */
@@ -231,8 +206,7 @@ export function buildPlanDispatch(
 			]
 		: planNodeEdges(node).map((id) => inputDigest(projection, plan, id));
 	const sections = [...head, ...tail];
-	const onCriticalPath = criticalPath.has(node.id);
-	const priority: FleetPriority = node.kind === "verify" ? 3 : onCriticalPath ? 2 : 1;
+	const rank = planNodeRank(node, criticalPath);
 	const writeScope = node.kind === "verify" ? [] : node.writeScope;
 	return {
 		idempotencyKey: planReleaseKey(record.planId, node.id, node.since),
@@ -240,8 +214,8 @@ export function buildPlanDispatch(
 			nodeId: node.id,
 			objectiveId: record.objectiveId,
 			subtreeId: laneSubtreeId(undefined),
-			priority,
-			onCriticalPath,
+			priority: rank.priority,
+			onCriticalPath: rank.criticalPath,
 			writes: writeScope.length > 0,
 			heavy: node.effort === "deep",
 		},

@@ -3,6 +3,7 @@ import type { ExecutionContext } from "../../kernel/index.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { TaskBrief } from "../comms/comms-records.ts";
 import type { HostEventSubscriptionInput } from "../events/host-event-contract.ts";
+import type { FleetRank } from "../fleet/fleet-types.ts";
 import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
 import { parseBoundedStringArray } from "../orchestration/bounded-string-array.ts";
 import {
@@ -333,6 +334,11 @@ export interface WorkerDelegationRequest {
 	reviewOf?: { readonly taskId: string; readonly attemptId: string };
 	/** Host-only: the plan step this request runs (set from its fleet dispatch). Never model-settable. */
 	planStep?: { readonly planId: string; readonly nodeId: string };
+	/**
+	 * Host-only: where the lane waits in its flow, as its fleet dispatch demands it; a restart reads it again from the plan
+	 * (`plan-step-rank.ts`). Absent, the lane waits as ordinary work. Never model-settable.
+	 */
+	fleetRank?: FleetRank;
 	/** Runtime-owned durable task correlation; the delegate tool schema intentionally omits this. */
 	taskContext?: WorkerDelegationTaskContext;
 	/**

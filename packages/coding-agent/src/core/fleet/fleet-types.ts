@@ -65,6 +65,12 @@ export type { PlanNodeDemand };
 
 export type FleetPriority = 0 | 1 | 2 | 3;
 
+/** A lane's place in its flow's order (`fleet-queue.ts`): its base priority, and whether it is on a plan's critical path. */
+export interface FleetRank {
+	readonly priority: FleetPriority;
+	readonly criticalPath: boolean;
+}
+
 export interface FleetDispatch {
 	/** plan:<planId>:<nodeId>:v<version> | escalation:<outcomeId>:r<rung> | adhoc:<toolCallId> */
 	idempotencyKey: string;

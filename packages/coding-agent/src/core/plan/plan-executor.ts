@@ -53,7 +53,7 @@ import {
 	workerJoinResult,
 } from "./joins.ts";
 import { acceptPlanCall } from "./plan-acceptance.ts";
-import { buildPlanDispatch, decidePlacement, planCriticalPath, planReleaseKey } from "./plan-dispatch.ts";
+import { buildPlanDispatch, decidePlacement, planReleaseKey } from "./plan-dispatch.ts";
 import type { PlanCallContext, PlanExecutorPort, PlanToolInput, PlanToolResult } from "./plan-executor-port.ts";
 import { PlanFingerprint, sameVisibleView } from "./plan-fingerprint.ts";
 import {
@@ -66,6 +66,7 @@ import {
 	type PlanNodeState,
 	type PlanRecord,
 	type PlanRuntimeState,
+	planCriticalPath,
 } from "./plan-graph.ts";
 import { MergeLandings, type MergeStep, mergeLanes, mergeWorkerNodes, WORKTREE_UNAVAILABLE } from "./plan-merge.ts";
 import { PLAN_NODE_MACHINE } from "./plan-node-machine.ts";

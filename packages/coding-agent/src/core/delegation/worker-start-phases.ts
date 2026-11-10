@@ -192,6 +192,8 @@ export function workerRequestForDispatch(
 				}
 			: {}),
 		...(dispatch.plan ? { planStep: { planId: dispatch.plan.planId, nodeId: dispatch.plan.nodeId } } : {}),
+		// The lane waits where its dispatch demands: a verify step first, then the plan's critical path.
+		fleetRank: { priority: dispatch.demand.priority, criticalPath: dispatch.demand.onCriticalPath },
 		...(pinned?.parentAgentId !== undefined ? { parentAgentId: pinned.parentAgentId } : {}),
 		...(pinned?.botSoul !== undefined ? { botSoul: pinned.botSoul } : {}),
 		...(pinned?.turnOrigin !== undefined ? { turnOrigin: pinned.turnOrigin } : {}),

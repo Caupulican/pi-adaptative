@@ -245,12 +245,14 @@ export class WorkerDispatchScheduler {
 		}
 		if (!this.hasQueueCapacity(priority)) throw new Error("worker_dispatch_queue_full");
 		// Priority work runs ahead of ordinary work in its flow but not ahead of older priority work, so an
-		// earlier mandatory verifier is never overtaken by a later one.
+		// earlier mandatory verifier is never overtaken by a later one. A planned dispatch waits where its fleet rank
+		// puts it: a verify step with the mandatory verifiers, then the plan's critical path, then the rest.
 		this.queued.push({
 			id: record.laneId,
 			payload: request,
 			...this.options.flowOf(record),
-			priority: priority ? 3 : 0,
+			priority: priority ? 3 : (request.fleetRank?.priority ?? 0),
+			criticalPath: request.fleetRank?.criticalPath === true,
 		});
 		this.queuedDispatchTokens.set(record.laneId, dispatchToken);
 		try {

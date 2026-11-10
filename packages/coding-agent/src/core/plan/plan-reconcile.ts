@@ -33,7 +33,6 @@ import { isOutcomeFromNewerBuild, type Outcome, type StoredOutcome } from "../de
 import type { GoalState } from "../goals/goal-state.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { currentTaskOf } from "../orchestration/task-successor.ts";
-import { planCriticalPath } from "./plan-dispatch.ts";
 import {
 	isCodeSettledJoin,
 	isPlanFromNewerBuild,
@@ -43,6 +42,7 @@ import {
 	type PlanNodeSpec,
 	type PlanRecord,
 	type PlanRuntimeState,
+	planCriticalPath,
 	planNodeEdges,
 } from "./plan-graph.ts";
 import { planNodeOfTask } from "./plan-reducer.ts";

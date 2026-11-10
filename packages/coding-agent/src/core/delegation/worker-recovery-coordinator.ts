@@ -9,6 +9,7 @@ import { isPathWithinScope } from "../autonomy/path-scope.ts";
 import { reconcileAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { AttemptUsageSnapshot, ExecutionGrant, ResourcePointer, RiskBudget } from "../orchestration/contracts.ts";
 import { planReviewAnchorOfTask } from "../orchestration/plan-review-subjects.ts";
+import { planStepRankOfTask } from "../orchestration/plan-step-rank.ts";
 import { isReviewRun } from "../orchestration/review-verdict.ts";
 import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
 import { isGoalObjectiveId } from "../orchestration/work-state-projection.ts";
@@ -613,6 +614,8 @@ export class WorkerRecoveryCoordinator {
 				? planReviewAnchorOfTask(this.options.lifecycle.getTaskRuntimeSnapshot(), attempt.taskId)
 				: undefined;
 		const reviewContract = reviewOf ? attempt.dispatch.executionContract?.worker : undefined;
+		// A plan step waits where its plan ranks it, read again from the plan as it stands.
+		const fleetRank = planStepRankOfTask(this.options.lifecycle.getTaskRuntimeSnapshot(), attempt.taskId);
 		return {
 			instructions: attempt.dispatch.instructions,
 			objectiveId: task && isGoalObjectiveId(task.objectiveId) ? task.objectiveId : null,
@@ -625,6 +628,7 @@ export class WorkerRecoveryCoordinator {
 			...(durableVerificationOfTaskId ? { verificationOfTaskId: durableVerificationOfTaskId } : {}),
 			...(task?.verificationOfAttemptId ? { verificationOfAttemptId: task.verificationOfAttemptId } : {}),
 			...(reviewOf ? { reviewOf } : {}),
+			...(fleetRank ? { fleetRank } : {}),
 			...(reviewContract
 				? {
 						verifierPreset: {

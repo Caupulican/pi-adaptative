@@ -382,6 +382,31 @@ export function planTopologicalOrder(nodes: readonly Pick<PlanNodeSpec, "id" | "
 	return { acyclic: false, cycle: nodes.filter((node) => !placed.has(node.id)).map((node) => node.id) };
 }
 
+/** Nodes on a longest path of the plan: they are released first. */
+export function planCriticalPath(record: PlanRecord): ReadonlySet<string> {
+	const order = planTopologicalOrder(record.nodes);
+	if (!order.acyclic) return new Set();
+	const byId = new Map(record.nodes.map((node) => [node.id, node]));
+	const longest = new Map<string, number>();
+	const next = new Map<string, string>();
+	for (const id of [...order.order].reverse()) {
+		let best = 0;
+		for (const dependent of record.nodes.filter((node) => planNodeEdges(node).includes(id))) {
+			const length = longest.get(dependent.id) ?? 0;
+			if (length >= best) {
+				best = length;
+				next.set(id, dependent.id);
+			}
+		}
+		longest.set(id, best + 1);
+	}
+	let start = order.order.find((id) => (byId.get(id)?.inputs.length ?? 0) + (byId.get(id)?.after.length ?? 0) === 0);
+	for (const id of order.order) if ((longest.get(id) ?? 0) > (longest.get(start ?? "") ?? 0)) start = id;
+	const path = new Set<string>();
+	for (let id = start; id !== undefined && !path.has(id); id = next.get(id)) path.add(id);
+	return path;
+}
+
 /** True when a path leads from `from` to `to` over the nodes' edges. */
 export function planPathExists(
 	nodes: readonly Pick<PlanNodeSpec, "id" | "inputs" | "after">[],
