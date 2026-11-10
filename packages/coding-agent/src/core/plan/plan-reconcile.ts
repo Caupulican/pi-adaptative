@@ -12,7 +12,8 @@
  *    ladder acts); verify_independently settles a step a verify step already checks and wraps any other in a verify
  *    step (host revision); replace restates a remotely released step
  *    on this machine (host revision), or holds it for the owner when its must-pin names that machine;
- *    fix_request and abandon(dependency) hold for a revise; ask_owner holds on the owner; ask_root holds on
+ *    fix_request and abandon(dependency) hold for a revise (a vote's own check that rejects settles instead: its verdict
+ *    answers the vote); ask_owner holds on the owner; ask_root holds on
  *    the root; abandon(cancelled/superseded) settles without acceptance. A reduce or verify worker's outcome settles
  *    its join instead;
  * 4. a code join (collect, race, vote) whose ordering edges settled and a member settled -> decide it;
@@ -45,6 +46,7 @@ import {
 	planNodeEdges,
 } from "./plan-graph.ts";
 import { planNodeOfTask } from "./plan-reducer.ts";
+import { voteChecksOf } from "./plan-revision.ts";
 import type { PlanUpdateInput } from "./plan-update.ts";
 import { planNodeReleasable } from "./plan-view.ts";
 
@@ -144,11 +146,21 @@ function isWorkerJoin(node: PlanNodeSpec): boolean {
 	return node.kind === "reduce" || node.kind === "verify";
 }
 
-/**
- * Rule 3: the action a released node's newest outcome asks of the plan, or undefined to wait. `checked` says a verify step
- * of the plan already checks this node.
- */
-function outcomeAction(ref: NodeRef, node: PlanNodeSpec, outcome: Outcome, checked: boolean): PlanAction | undefined {
+/** What the plan's own record says about a node, beyond its outcome: read once per plan by `nodeActions`. */
+interface NodeStanding {
+	/** A verify step of the plan already checks this node. */
+	readonly checked: boolean;
+	/** The node is a check the host added for a vote: its verdict answers the vote. */
+	readonly answersVote: boolean;
+}
+
+/** Rule 3: the action a released node's newest outcome asks of the plan, or undefined to wait. */
+function outcomeAction(
+	ref: NodeRef,
+	node: PlanNodeSpec,
+	outcome: Outcome,
+	standing: NodeStanding,
+): PlanAction | undefined {
 	const hold = (reason: PlanHoldReason, detail: string): PlanAction => ({
 		...ref,
 		kind: "hold",
@@ -166,7 +178,7 @@ function outcomeAction(ref: NodeRef, node: PlanNodeSpec, outcome: Outcome, check
 			return settle;
 		case "verify_independently":
 			// A step a verify step already checks settles as it is and that review decides; any other step gets its check added.
-			return isWorkerJoin(node) || checked
+			return isWorkerJoin(node) || standing.checked
 				? settle
 				: { ...ref, kind: "verify_wrap", requirementIds: next.requirementIds, outcome, settled: false };
 		case "replace":
@@ -177,7 +189,9 @@ function outcomeAction(ref: NodeRef, node: PlanNodeSpec, outcome: Outcome, check
 					)
 				: { ...ref, kind: "replace", excludePlacement: next.excludePlacement, outcome };
 		case "fix_request":
-			return hold("replan", next.remedy);
+			// A vote's check that rejects its candidate has answered the vote: it settles, and the vote decides from both
+			// checks. Held for re-planning it would never settle, and the vote would wait for it without end.
+			return standing.answersVote ? settle : hold("replan", next.remedy);
 		case "ask_owner":
 			return hold("owner", next.question);
 		case "ask_root":
@@ -256,6 +270,11 @@ function nodeActions(
 	const wrapped = new Set(
 		record.nodes.filter((node) => node.kind === "verify").flatMap((node) => node.join?.members ?? []),
 	);
+	const voteChecks = new Set(
+		record.nodes
+			.filter((node) => node.kind === "vote")
+			.flatMap((vote) => voteChecksOf(record, vote).map((check) => check.id)),
+	);
 	record.nodes.forEach((node, order) => {
 		const runtime = plan.nodes[node.id];
 		const ref = { planId: record.planId, nodeId: node.id };
@@ -275,7 +294,10 @@ function nodeActions(
 				return;
 			}
 			if (outcome && outcome.generation > (runtime.held?.generation ?? 0)) {
-				const action = outcomeAction(ref, node, outcome, wrapped.has(node.id));
+				const action = outcomeAction(ref, node, outcome, {
+					checked: wrapped.has(node.id),
+					answersVote: voteChecks.has(node.id),
+				});
 				if (action) actions.push(action);
 			} else if (
 				!outcome &&
