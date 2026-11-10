@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Command Code adapter: a tool call's input is read in every shape the service sends it (an object, a list holding one object, JSON text of either, or nothing). An input that cannot be read as arguments (a list of several items, a number, text cut short) no longer becomes an empty argument object: the tool call carries an error message naming the shape, which the agent loop returns to the model instead of running the tool.
+
 ## [0.104.49] - 2026-11-10
 
 ### Added

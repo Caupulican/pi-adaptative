@@ -19,6 +19,7 @@ import type {
 	ToolCall,
 } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
+import { parseStreamingJsonState } from "../utils/json-parse.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
@@ -209,16 +210,53 @@ function tokenCount(value: unknown): number {
 	return typeof value === "number" && Number.isFinite(value) && value > 0 ? value : 0;
 }
 
-/** A tool call's arguments: an object, or JSON text of one. */
-function toolArguments(raw: unknown): Record<string, unknown> {
-	if (isRecord(raw)) return raw;
-	if (typeof raw !== "string") return {};
-	try {
-		const parsed: unknown = JSON.parse(raw);
-		return isRecord(parsed) ? parsed : {};
-	} catch {
-		return {};
+/** What a tool input was read as: its arguments, and why it could not be read as arguments when it could not. */
+interface ToolInput {
+	arguments: Record<string, unknown>;
+	errorMessage?: string;
+}
+
+/** A few words naming the shape of a value, never its content. */
+function describeShape(value: unknown): string {
+	if (value === null) return "null";
+	if (Array.isArray(value)) return `a list of ${value.length} ${value.length === 1 ? "item" : "items"}`;
+	if (typeof value === "string") return "text";
+	if (typeof value === "number") return "a number";
+	if (typeof value === "boolean") return "a boolean";
+	return typeof value;
+}
+
+/** An object, or the object alone in a list: the two shapes that hold arguments. */
+function argumentsOf(value: unknown): Record<string, unknown> | undefined {
+	if (isRecord(value)) return value;
+	if (Array.isArray(value) && value.length === 1 && isRecord(value[0])) return value[0];
+	return undefined;
+}
+
+/**
+ * Reads a tool input the way the service's own client does: an object, a list of one object, JSON text of either,
+ * or nothing. Any other shape yields no arguments and a message that names it, for the model to correct.
+ */
+function readToolInput(raw: unknown): ToolInput {
+	if (raw === undefined || raw === null) return { arguments: {} };
+	let value = raw;
+	if (typeof raw === "string") {
+		const parsed = parseStreamingJsonState<object>(raw);
+		if (!parsed.complete) {
+			return {
+				arguments: {},
+				errorMessage:
+					"Tool call arguments were truncated before complete JSON was received. Retry the tool call with complete JSON arguments.",
+			};
+		}
+		value = parsed.value;
 	}
+	const found = argumentsOf(value);
+	if (found) return { arguments: found };
+	return {
+		arguments: {},
+		errorMessage: `Tool call arguments must be a JSON object, but ${describeShape(value)} was received. Retry the tool call with a JSON object of arguments.`,
+	};
 }
 
 /** One model turn being assembled from the service's events, over one or more posts. */
@@ -315,11 +353,13 @@ class CommandCodeTurn {
 	}
 
 	private toolCall(event: ServiceEvent): void {
+		const input = readToolInput(event.input ?? event.args);
 		const toolCall: ToolCall = {
 			type: "toolCall",
 			id: typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : `call_${uuidv7()}`,
 			name: this.toolNameMap.toOriginalName(typeof event.toolName === "string" ? event.toolName : ""),
-			arguments: toolArguments(event.input ?? event.args),
+			arguments: input.arguments,
+			...(input.errorMessage ? { errorMessage: input.errorMessage } : {}),
 		};
 		this.output.content.push(toolCall);
 		const contentIndex = this.lastIndex();
