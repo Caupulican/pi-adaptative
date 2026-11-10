@@ -595,7 +595,7 @@ export class ReflectionController {
 							if (durable) listener();
 						});
 					},
-					onTerminal: (outcome) => {
+					onTerminal: (outcome, _handoff, changes) => {
 						let failure: unknown;
 						try {
 							if (manager.getSessionId() !== sessionId)
@@ -650,7 +650,7 @@ export class ReflectionController {
 										),
 									};
 						try {
-							runtime.onTerminal(outcome, handoff);
+							runtime.onTerminal(outcome, handoff, changes);
 						} catch (error) {
 							failure =
 								failure === undefined

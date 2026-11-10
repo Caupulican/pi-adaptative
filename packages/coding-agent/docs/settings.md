@@ -402,6 +402,7 @@ Safe `memory_add`, `okf_add`, and `okf_organize` writes can therefore land auton
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `autoLearn.enabled` | boolean | `true` in every autonomy mode | Enable root-session current-turn reflection. Disabling it immediately dismisses the session cue and releases any exact version claim. Re-enabling lets the next external root turn reconcile a still-pending version transition, but does not resurrect ordinary dismissed cue evidence. Automatic reflection never schedules a separate or background model request. |
+| `autoLearn.announce` | boolean | `true` | Show the owner one line on screen for each fact that automatic knowledge collection learns or updates (at most three per pass, then a count). The lines are never sent to a model and never become knowledge, evidence or history. `false` turns them off. |
 | `autoLearn.model` | string | `modelRouter.learningModel`, otherwise `"active"` | Legacy/direct override for the background learner; `"active"` uses the current session model, otherwise use a `pi --model` pattern |
 | `autoLearn.longSessionMessages` | number | `32` | Readiness threshold after this many message entries in the active branch for an eligible learner run |
 | `autoLearn.longSessionContextPercent` | number | `70` | Readiness threshold when current context usage reaches this percent |

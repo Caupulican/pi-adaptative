@@ -513,7 +513,9 @@ export class KnowledgeStore implements KnowledgeStorePort {
 			const addSource = this.db.prepare("INSERT OR IGNORE INTO sources VALUES(?,?,?)");
 			for (const citation of record.citations) addSource.run(record.id, citation.sessionId, citation.sourceId);
 			this.db.prepare("UPDATE meta SET revision=revision+1 WHERE id=1").run();
-			return this.recordOperation({ action: "remember", id: record.id, revision: record.revision }, operation);
+			const receipt = { action: "remember", id: record.id, revision: record.revision } as const;
+			this.recordOperation(receipt, operation);
+			return { ...receipt, committed: { kind: record.kind, text: record.text, existed: previous !== undefined } };
 		});
 	}
 

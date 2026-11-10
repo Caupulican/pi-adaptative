@@ -18,6 +18,7 @@ import type {
 import { canonicalDigest, strictCanonicalDigest } from "../steering/canonical.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { type KnowledgeAdmissionPort, type KnowledgeChange, parseKnowledgeChange } from "./knowledge-admission.ts";
+import { EMPTY_CHANGE_DIGEST, type KnowledgeChangeDigest, withAppliedChange } from "./knowledge-announcement.ts";
 import { type KnowledgeCollectionClaim, knowledgeCollectionSourceIdentity } from "./knowledge-collection-journal.ts";
 import { extractKnowledgeCandidates, KnowledgeExtractionRefusal } from "./knowledge-extractor.ts";
 import type { KnowledgeScope } from "./knowledge-record.ts";
@@ -42,6 +43,7 @@ interface CollectionProgress {
 	applied: number;
 	rejected: number;
 	held: number;
+	changes: KnowledgeChangeDigest;
 }
 
 export interface KnowledgeCollectionOutcome {
@@ -75,7 +77,11 @@ export interface KnowledgeCollectionRuntime {
 	subscribeForegroundActivity(listener: () => void): () => void;
 	maxEstimatedUsd(): number | undefined;
 	/** Persist the bounded handoff and notify the parent, even after cancellation. */
-	onTerminal(outcome: KnowledgeCollectionOutcome, handoff?: KnowledgeCollectionHandoff): void;
+	onTerminal(
+		outcome: KnowledgeCollectionOutcome,
+		handoff?: KnowledgeCollectionHandoff,
+		changes?: KnowledgeChangeDigest,
+	): void;
 	/** Called after an idle pass that claimed nothing: it writes no terminal, so this is its only signal. Nothing persists. */
 	onIdlePass?(): void;
 }
@@ -191,6 +197,7 @@ export class KnowledgeCollector {
 	private more = false;
 	private retryAt: number | undefined;
 	private pendingTerminal: KnowledgeCollectionOutcome | undefined;
+	private pendingChanges: KnowledgeChangeDigest = EMPTY_CHANGE_DIGEST;
 	private lastTerminal: KnowledgeCollectionOutcome | undefined;
 	private lastIdlePass: { readonly id: string; readonly at: number } | undefined;
 	private accountingDirty = false;
@@ -417,6 +424,7 @@ export class KnowledgeCollector {
 			applied: 0,
 			rejected: 0,
 			held: 0,
+			changes: EMPTY_CHANGE_DIGEST,
 		};
 		let status: KnowledgeCollectionOutcome["status"] = "completed";
 		const deadline = this.deps.time.setTimeout(
@@ -493,7 +501,8 @@ export class KnowledgeCollector {
 			}
 		} finally {
 			this.deps.time.clearTimeout(deadline);
-			const terminal = { ...outcome, status };
+			const { changes, ...counts } = outcome;
+			const terminal = { ...counts, status };
 			// A pass that completes without claiming a source changes nothing the owner sees, so it writes no session entry and
 			// no event. The status keeps it as the last idle pass; any other pass ends that state.
 			if (status === "completed" && outcome.sources === 0) {
@@ -502,6 +511,7 @@ export class KnowledgeCollector {
 			} else {
 				this.lastIdlePass = undefined;
 				this.pendingTerminal = terminal;
+				this.pendingChanges = changes;
 				this.flushTerminal();
 			}
 		}
@@ -516,7 +526,7 @@ export class KnowledgeCollector {
 	private flushTerminal(): boolean {
 		if (!this.pendingTerminal) return true;
 		try {
-			this.deps.onTerminal(this.pendingTerminal);
+			this.deps.onTerminal(this.pendingTerminal, undefined, this.pendingChanges);
 			this.lastTerminal = this.pendingTerminal;
 			this.pendingTerminal = undefined;
 			return true;
@@ -742,6 +752,7 @@ export class KnowledgeCollector {
 					if (admitted.status === "applied") {
 						journal.acknowledge(claim, operation, "applied");
 						progress.applied++;
+						progress.changes = withAppliedChange(progress.changes, admitted);
 						if (admitted.action === "forget") return true;
 					} else if (admitted.retry === "never") {
 						journal.acknowledge(claim, operation, "rejected");

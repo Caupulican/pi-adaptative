@@ -205,9 +205,9 @@ export async function runJourney1LongCollection(world: HarnessWorld): Promise<vo
 		await withDeadline(world.trace, "long second window reached", reached.promise);
 		expect(inspected).toEqual([0, 8_000, 16_000]);
 		expect(firstExtractions, "retained extraction is not paid again after reopen").toBe(1);
-		expect(store.list({ project: "", role: "", audience: "owner" })).toMatchObject([
-			{ text: "Prefers tabs only when offline." },
-		]);
+		const [learned] = store.list({ project: "", role: "", audience: "owner" });
+		expect(learned).toMatchObject({ text: "Prefers tabs only when offline." });
+		expect(store.list({ project: "", role: "", audience: "owner" })).toHaveLength(1);
 		expect(
 			store.list({ project: "", role: "", audience: "owner" }).some((record) => record.text === "Uses Emacs."),
 		).toBe(false);
@@ -233,6 +233,8 @@ export async function runJourney1LongCollection(world: HarnessWorld): Promise<vo
 			"shutdown retains the gated request with explicit unknown usage",
 		).toEqual([
 			`Provider request ${unresolved![0]!.requestId} ended locally with usage still unknown; its original accounting identity is retained in the session journal.`,
+			// The cancelled pass had already committed one fact: the owner is told of it as the pass ends.
+			`Learned (behavior): Prefers tabs only when offline.  /knowledge show ${learned!.id.slice(0, 8)}`,
 			"Usage handoff: 0 usage report(s) pending in the session journal, 0 not retained, 0 confirmed row(s) with a journal copy left, 0 unmatched journal(s), 1 request(s) with unknown usage; none is charged to another session.",
 		]);
 		world.warnings.splice(warningMark);

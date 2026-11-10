@@ -197,6 +197,7 @@ import {
 } from "./memory/continuous-chat-projection.ts";
 import { readContinuousChatSettings, validateContinuousChatSummaryModel } from "./memory/continuous-chat-settings.ts";
 import { ContinuousChatSpendMeter } from "./memory/continuous-chat-spend.ts";
+import { knowledgeTerminalHook } from "./memory/knowledge-announcement.ts";
 import { MemoryController, type MemoryOperatorPort } from "./memory-controller.ts";
 import {
 	deriveModelCapabilityProfile,
@@ -1376,10 +1377,9 @@ export class AgentSession {
 					isForegroundBusy: () => this._foregroundRecovery.isBusy,
 					subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
 					maxEstimatedUsd: () => this.capabilityEnvelope?.maxEstimatedUsd,
-					onTerminal: (outcome, handoff) => {
-						this._emit({ type: "knowledge_collection", ...outcome, handoff });
-						this._observeKnowledgeCollection();
-					},
+					onTerminal: knowledgeTerminalHook(this.settingsManager, this._emit.bind(this), () =>
+						this._observeKnowledgeCollection(),
+					),
 					onIdlePass: () => this._observeKnowledgeCollection(),
 				}),
 			subscribeEntriesPersisted: (listener) => this.sessionManager.onEntriesPersisted(listener),

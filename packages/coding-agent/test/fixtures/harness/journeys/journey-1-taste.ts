@@ -4,6 +4,7 @@ import {
 	getOwnerEvidenceSnapshots,
 	OWNER_EVIDENCE_CUSTOM_TYPE,
 } from "../../../../src/core/learning/owner-evidence-ledger.ts";
+import { emitKnowledgeCollection } from "../../../../src/core/memory/knowledge-announcement.ts";
 import type { KnowledgeCollectionOutcome } from "../../../../src/core/memory/knowledge-collector.ts";
 import { KnowledgeStore } from "../../../../src/core/memory/knowledge-store.ts";
 import { handleTasteCommand } from "../../../../src/modes/interactive/taste-commands.ts";
@@ -21,6 +22,7 @@ const JUDGED_STATED = [
 const CHAT_RECORDS = 4;
 const OWNER_WORDS = "In TypeScript I always prefer early returns over nested conditionals.";
 const TASTE_TEXT = "Prefers early returns over nested conditionals in TypeScript.";
+const TASTE_NOTICE = `Learned (taste): ${TASTE_TEXT}`;
 
 /** Each of the chat's possible leaf and parent compactions gets at most one optional reply. */
 function registerCompactionTracks(world: HarnessWorld): string[] {
@@ -130,6 +132,7 @@ export async function runJourney1TastePhase(world: HarnessWorld): Promise<void> 
 		);
 		await withDeadline(world.trace, "taste collection armed", world.timers.whenArmed("knowledge-collection"));
 		const ended = nextCollectionOutcome(root.session);
+		const warningMark = world.warnings.length;
 		expect(world.timers.advance("knowledge-collection", 1_000)).toBe(1);
 		expect(await withDeadline(world.trace, "taste collection committed", ended)).toMatchObject({
 			status: "completed",
@@ -140,6 +143,28 @@ export async function runJourney1TastePhase(world: HarnessWorld): Promise<void> 
 		expect(store.list({ project: "", role: "", audience: "owner" })).toMatchObject([
 			{ kind: "taste", text: TASTE_TEXT, basis: "explicit" },
 		]);
+
+		// The owner sees what was learned: one plain line, with the way to open the fact.
+		await withDeadline(
+			world.trace,
+			"taste notice shown",
+			world.whenWarnings(warningMark, (seen) => seen.some((line) => line.startsWith(TASTE_NOTICE))),
+		);
+		expect(world.warnings.slice(warningMark)).toEqual([
+			`${TASTE_NOTICE}  /knowledge show ${store.list({ project: "", role: "", audience: "owner" })[0]!.id.slice(0, 8)}`,
+		]);
+
+		// `autoLearn.announce: false` silences it: the same outcome emits its event and no line.
+		const silent: string[] = [];
+		emitKnowledgeCollection(
+			{
+				outcome: { id: "silent", status: "completed", sources: 1, applied: 1, rejected: 0, held: 0 },
+				changes: { changes: [{ kind: "taste", id: "0".repeat(64), text: TASTE_TEXT, existed: false }], more: 0 },
+			},
+			{ getAutonomySettings: () => ({ mode: "balanced" }), getAutoLearnSettings: () => ({ announce: false }) },
+			(event) => silent.push(event.type),
+		);
+		expect(silent).toEqual(["knowledge_collection"]);
 
 		// `/taste` reads the committed record without a model turn: its Markdown names the fact, its basis and its sources.
 		const shown: string[] = [];
@@ -170,6 +195,7 @@ export async function runJourney1TastePhase(world: HarnessWorld): Promise<void> 
 					/knowledge:taste \{/,
 				);
 				expect(messages).toContain(TASTE_TEXT);
+				expect(messages, "the owner's notice is not part of the request").not.toContain(TASTE_NOTICE);
 			},
 		});
 		await withDeadline(world.trace, "taste projection input", root.session.prompt("Thanks, carry on."));

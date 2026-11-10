@@ -222,6 +222,7 @@ export type AutoLearnThinkingLevel = "off" | "minimal" | "low" | "medium" | "hig
 export interface AutoLearnSettings {
 	knowledgeMaxUsd?: number; // default: 0.05 per original owner source per session, extraction and admission combined
 	knowledgeSessionMaxUsd?: number; // default: 0.50 cumulative collection spend per session, retained across restarts
+	announce?: boolean; // default: true; tell the owner on screen when automatic collection learns or updates a fact
 	knowledgeIdleDelayMs?: number; // default: 2000 before collecting original owner knowledge while idle
 	knowledgeMaxSourcesPerPass?: number; // default: 4 sources before yielding back to the session
 	enabled?: boolean; // effective default: true in every autonomy preset; explicit false is the kill switch

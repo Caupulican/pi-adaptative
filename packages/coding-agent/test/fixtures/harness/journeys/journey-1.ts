@@ -103,6 +103,9 @@ export async function runJourney1(): Promise<void> {
 				/^Continuous-chat compaction 0\+1 failed: The ICM chat needs a cheap model for its compactions, and contextPolicy\.memory\.history\.summaryModel is not set: set it to a configured model, for example "<provider>\/<model>"\. If that model is not local, also set contextPolicy\.memory\.history\.allowExternalSummaryEgress to true\.$/,
 				/^Continuous-chat compaction 0\+1 failed: The ICM chat's summary model harness-script\/worker-c is not local, and external summary egress is not allowed: set contextPolicy\.memory\.history\.allowExternalSummaryEgress to true to allow it\.$/,
 				/^Continuous-chat compaction 0\+1 failed: The ICM chat's summary model harness-script\/worker-b does not support medium thinking, which its compactions request: set contextPolicy\.memory\.history\.compactionThinkingLevel to a level it supports, or contextPolicy\.memory\.history\.summaryModel to another model, for example "<provider>\/<model>"\.$/,
+				// The owner's notice of what automatic collection learned or updated: informational, shown on screen only.
+				/^(Learned|Updated) \(\w+\): .+ {2}\/knowledge show [0-9a-f]{8}$/,
+				/^and \d+ more: \/knowledge list$/,
 				// R10s: each failed attempt of the fresh chat's leaf 1 (both requests met the scripted 503): exact text.
 				/^Continuous-chat compaction 1\+1 failed: Continuous-chat compaction stopped \(error\): HTTP 503 Service Unavailable: upstream overloaded$/,
 				// An owner that disposes with paid usage still unconfirmed keeps it in its journal. The pending form is for a file that exists

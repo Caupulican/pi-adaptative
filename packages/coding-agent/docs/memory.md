@@ -31,10 +31,13 @@ Collection settings live under `autoLearn`:
 |---|---|---|
 | `enabled` | `true` | Automatic learning switch; explicit knowledge requests still use admission |
 | `model` | `"active"` | Extraction model, and the judge when System One is not bound; resolved through the shared lane-model policy |
+| `announce` | `true` | Tell the owner on screen when a pass learns or updates a fact (see below) |
 | `knowledgeIdleDelayMs` | `2000` | Idle delay before a pass |
 | `knowledgeMaxSourcesPerPass` | `4` | Sources considered before yielding |
 | `knowledgeMaxUsd` | `0.05` | Combined extraction and admission allowance per original source within one session |
 | `knowledgeSessionMaxUsd` | `0.50` | Combined collection allowance for the owning session |
+
+When a pass learns or updates a fact, the owner sees one line per change, for example `Learned (taste): <fact>  /knowledge show <id>`, or `Updated (...)` for a changed fact. A pass names at most three changes and then adds `and N more: /knowledge list`. The line is shown on the owner's screen only: it is never sent to a model and is not evidence, history or knowledge. A change the owner makes with `/knowledge` or the `knowledge` tool in the foreground shows no line. `autoLearn.announce: false` turns the lines off.
 
 Spending includes retries, earlier attempts and explicit-change judgments in the same session, including after reopening it. An exhausted allowance, or a per-source limit of zero, holds new sources before any request until a limit changes, and status reports collection `inactive` with `budget_exhausted`. A held source is judged again only when something its verdict depends on changes: knowledge (a target revision or a forget) for evidence and context holds, the configuration (model, engine, limits) for configuration holds, and the settled charge for an accounting hold. A new owner message alone does not reopen it. A failed request is retried after a minute. Whatever the model's price, a source that returns from a paying hold four times then waits for a configuration change (`retry_limit`); accounting holds and a pass deadline that retained new work do not count, a deadline that retained nothing does. In the background, a hold that only an exact record id or a calibrated judge could lift (`identity_ambiguous` under a self-reported judge) waits for a configuration change. Unknown charges stop new collection until accounting settles. Opening a different session does not clear globally retained processed-source or hold records; these spending limits are session limits, not lifetime limits across all sessions. In-memory-only sessions do not run automatic collection because they cannot retain its evidence and accounting handoff.
 

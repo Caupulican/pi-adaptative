@@ -21,6 +21,7 @@ import {
 	isKnowledgeTimestamp,
 	KNOWLEDGE_KINDS,
 	type KnowledgeCitation,
+	type KnowledgeMutationReceipt,
 	type KnowledgeRecord,
 	type KnowledgeScope,
 	type KnowledgeSlot,
@@ -114,7 +115,7 @@ export type KnowledgeHoldCode =
 	| "stale_evidence"
 	| "owner_turn_required";
 export type KnowledgeAdmissionOutcome =
-	| { status: "applied"; action: KnowledgeChange["action"]; id: string; revision: number }
+	| ({ status: "applied" } & KnowledgeMutationReceipt)
 	| {
 			status: "held";
 			code: KnowledgeHoldCode;

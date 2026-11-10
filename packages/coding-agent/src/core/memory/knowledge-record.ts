@@ -78,6 +78,13 @@ export interface KnowledgeMutationReceipt {
 	readonly action: "remember" | "forget";
 	readonly id: string;
 	readonly revision: number;
+	/** What this commit wrote. Absent on a replayed receipt and on forgetting: nothing new was committed by this call. */
+	readonly committed?: {
+		readonly kind: KnowledgeKind;
+		readonly text: string;
+		/** Whether the identity held a live accepted value before this commit. */
+		readonly existed: boolean;
+	};
 }
 
 /**
