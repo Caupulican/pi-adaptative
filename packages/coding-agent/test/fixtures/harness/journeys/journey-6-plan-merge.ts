@@ -2,6 +2,8 @@ import "../builtin-install.ts";
 import { basename, join } from "node:path";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { OrchestrationEventStore } from "../../../../src/core/orchestration/event-store.ts";
+import { readTaskRuntimeProjection } from "../../../../src/core/orchestration/task-runtime-reader.ts";
 import { createBarrier, type ScriptStep } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { TIMEOUTS_PATH } from "./journey-5-plan-verify-rejected.ts";
@@ -10,7 +12,6 @@ import {
 	deliveredLines,
 	enqueueRoot,
 	enqueueStepWorker,
-	INTAKE_JUDGMENTS,
 	latestAttemptOf,
 	PLAN_CALL_JUDGMENTS,
 	planCallSteps,
@@ -18,7 +19,7 @@ import {
 	reportStep,
 	stepTaskLines,
 } from "./journey-5-shared.ts";
-import { currentRequestCarries, dynamicCalls, LIMITS_PATH, latestBatchResults } from "./shared.ts";
+import { currentRequestCarries, LIMITS_PATH, latestBatchResults } from "./shared.ts";
 
 const TITLE = "Raise the retry limit and the request timeout, each in its own lane, and land both";
 const GATE = "npm run check";
@@ -65,6 +66,8 @@ export async function runJourney6PlanMergePhase(world: HarnessWorld, session: Ag
 	const offered = new Map<string, string[]>();
 	const tasks = new Map<string, string[]>();
 	const seenByCheck = new Map<string, string>();
+	// Each member's commit in its lane, read when it is made: once the plan has settled the lanes are released.
+	const commitOf = new Map<string, string | undefined>();
 	const laneOf = (nodeId: string): string => {
 		const taskId = planTitled(session, TITLE).nodes[nodeId]?.release?.taskId;
 		const cwd = latestAttemptOf(session, taskId)?.dispatch.executionContract?.worker.authority.cwd;
@@ -82,6 +85,7 @@ export async function runJourney6PlanMergePhase(world: HarnessWorld, session: Ag
 			effect: (request) => {
 				world.git.run(["add", member.file], request.cwd);
 				world.git.run(["commit", "-m", member.message], request.cwd);
+				commitOf.set(member.id, world.git.refSha(`refs/heads/pi/wt/${basename(request.cwd)}`));
 			},
 		});
 		return [
@@ -222,7 +226,6 @@ export async function runJourney6PlanMergePhase(world: HarnessWorld, session: Ag
 	await withDeadline(trace, "J6 merge: root idle", session.waitForForegroundIdle());
 	const plan = planTitled(session, TITLE);
 	const lanes = MEMBERS.map((member) => laneOf(member.id));
-	const branchTip = (lane: string) => world.git.refSha(`refs/heads/pi/wt/${basename(lane)}`);
 	expect(
 		{
 			laneEach: lanes.map((lane) => lane !== HARNESS_PROJECT_CWD),
@@ -271,10 +274,13 @@ export async function runJourney6PlanMergePhase(world: HarnessWorld, session: Ag
 			closed: plan.closed?.status,
 			gateRanIn: world.shell.requests.filter((request) => request.command === GATE).map((request) => request.cwd),
 			mainMoved: world.git.refSha("refs/heads/main") !== mainBefore,
-			mainIsTheLastLane: world.git.refSha("refs/heads/main") === branchTip(lanes[1]),
-			firstLaneIsInMain:
-				world.git.run(["merge-base", "--is-ancestor", branchTip(lanes[0]) ?? "", "main"], HARNESS_PROJECT_CWD)
-					.code === 0,
+			// The second member landed last, so its commit is main's newest; the first member's own commit is under it.
+			mainNewest: world.git.run(["log", "-1", "--format=%s", "main"], HARNESS_PROJECT_CWD).stdout.trim(),
+			firstCommitIsInMain:
+				world.git.run(
+					["merge-base", "--is-ancestor", commitOf.get(MEMBERS[0].id) ?? "", "main"],
+					HARNESS_PROJECT_CWD,
+				).code === 0,
 			checkout: [world.io.readFileSync(LIMITS_PATH, "utf8"), world.io.readFileSync(TIMEOUTS_PATH, "utf8")],
 			checkoutClean: world.git.run(["status", "--porcelain"], HARNESS_PROJECT_CWD).stdout,
 		},
@@ -286,8 +292,8 @@ export async function runJourney6PlanMergePhase(world: HarnessWorld, session: Ag
 		closed: "settled",
 		gateRanIn: lanes,
 		mainMoved: true,
-		mainIsTheLastLane: true,
-		firstLaneIsInMain: true,
+		mainNewest: MEMBERS[1].message,
+		firstCommitIsInMain: true,
 		checkout: ["export const MAX_RETRIES = 5;\n", "export const TIMEOUT_MS = 2000;\n"],
 		checkoutClean: "",
 	});
@@ -323,79 +329,48 @@ export async function runJourney6PlanMergePhase(world: HarnessWorld, session: Ag
 }
 
 /**
- * A lane's end. Each member's check ran in that member's lane without owning it, so retiring a check releases nothing;
- * retiring a member's worker releases its lane, which holds nothing main lacks once it has landed. The first member's worker
- * stays, so its lane is the control: both of its visitors are gone and it is still there. A release is finished when the
- * session closes, which is where the lanes are read.
+ * A lane's end. A plan that has closed retires the workers it made, and a retired worker's lane is released when it holds
+ * nothing main lacks: after this plan settled, both members' lanes are gone without a word from the root or the owner. Each
+ * check ran in a member's lane without owning it, so its retirement released nothing and warned nothing. A release is
+ * finished when the session closes, which is where the end state is read.
  */
 export async function runJourney6LaneEndPhase(world: HarnessWorld, session: AgentSession): Promise<void> {
-	const trace = world.trace;
 	const plan = planTitled(session, TITLE);
-	const attemptOf = (nodeId: string) => latestAttemptOf(session, plan.nodes[nodeId]?.release?.taskId);
-	const agentOf = (nodeId: string): string => {
-		const agentId = attemptOf(nodeId)?.agentId;
-		if (agentId === undefined) throw new Error(`step ${nodeId} has no worker to retire`);
+	const steps = [...MEMBERS.map((member) => member.id), ...MEMBERS.map((member) => `${member.id}-check`)];
+	const workerOf = (nodeId: string): string => {
+		const agentId = latestAttemptOf(session, plan.nodes[nodeId]?.release?.taskId)?.agentId;
+		if (agentId === undefined) throw new Error(`step ${nodeId} has no worker`);
 		return agentId;
 	};
-	const [kept, released] = MEMBERS.map((member) => {
-		const lane = attemptOf(member.id)?.dispatch.executionContract?.worker.authority.cwd;
+	const workers = steps.map(workerOf);
+	const lanes = MEMBERS.map((member) => {
+		const lane = latestAttemptOf(session, plan.nodes[member.id]?.release?.taskId)?.dispatch.executionContract?.worker
+			.authority.cwd;
 		if (lane === undefined) throw new Error(`step ${member.id} has no lane`);
-		return { member, lane, branch: `refs/heads/pi/wt/${basename(lane)}` };
+		return { folder: lane, branch: `refs/heads/pi/wt/${basename(lane)}` };
 	});
-	const retiring = [`${kept.member.id}-check`, `${released.member.id}-check`, released.member.id];
-	const lanesNow = () => ({
-		folders: [world.io.existsSync(kept.lane), world.io.existsSync(released.lane)],
-		branches: [world.git.refSha(kept.branch) !== undefined, world.git.refSha(released.branch) !== undefined],
-	});
-	expect(lanesNow(), "both lanes are still there after the merge landed them").toEqual({
-		folders: [true, true],
-		branches: [true, true],
-	});
+	const sessionId = session.sessionId;
 	const warningsBefore = world.warnings.length;
 	const mainBefore = world.git.refSha("refs/heads/main");
-	enqueueRoot(
-		world,
-		dynamicCalls("j6-retire", () =>
-			retiring.map((nodeId, index) => ({
-				id: `j6-retire-${index + 1}`,
-				name: "delegate",
-				arguments: { action: "retire", agentId: agentOf(nodeId) },
-			})),
-		),
-		{
-			name: "j6-retired",
-			check: (request) => {
-				const retirements = latestBatchResults(request).filter((result) => result.toolName === "delegate");
-				if (
-					retirements.length !== retiring.length ||
-					retirements.some((result) => result.isError || !result.text.includes("retired"))
-				)
-					throw new Error(`the plan's workers were not all retired: ${JSON.stringify(retirements)}`);
-			},
-			reply: { content: [{ type: "text", text: "The three workers are retired." }] },
-		},
-	);
-	world.systemOne.enterPhase("j6-lane-end", INTAKE_JUDGMENTS);
-	await withDeadline(
-		trace,
-		"J6 lane end turn",
-		session.prompt("Retire both checks and the worker of the second step; keep the first step's worker."),
-	);
 	expect(await world.disposeSessionInBody(session), "the root disposes cleanly").toBeUndefined();
+	const stored = readTaskRuntimeProjection(new OrchestrationEventStore({ agentDir: world.agentDir, sessionId }));
 	expect(
 		{
-			...lanesNow(),
+			workers: workers.map((agentId) => stored.agents[agentId]?.status),
+			folders: lanes.map((lane) => world.io.existsSync(lane.folder)),
+			branches: lanes.map((lane) => world.git.refSha(lane.branch) !== undefined),
 			warnings: world.warnings.slice(warningsBefore),
 			mainMoved: world.git.refSha("refs/heads/main") !== mainBefore,
 			checkout: [world.io.readFileSync(LIMITS_PATH, "utf8"), world.io.readFileSync(TIMEOUTS_PATH, "utf8")],
 		},
-		"retiring the checks released no lane and warned nothing; retiring the second step's worker released its landed lane, and main kept both changes",
+		"the settled plan retired its four workers, both landed lanes were released with their branches, nothing was warned, and main kept both changes",
 	).toEqual({
-		folders: [true, false],
-		branches: [true, false],
+		workers: ["retired", "retired", "retired", "retired"],
+		folders: [false, false],
+		branches: [false, false],
 		warnings: [],
 		mainMoved: false,
 		checkout: ["export const MAX_RETRIES = 5;\n", "export const TIMEOUT_MS = 2000;\n"],
 	});
-	trace.mark("root", "j6.lane-end");
+	world.trace.mark("root", "j6.lane-end");
 }

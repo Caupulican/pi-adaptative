@@ -289,16 +289,21 @@ export function planNodeOfTask(
 	return undefined;
 }
 
-/** Whether `taskId` is `origin` or a successor an escalation placed after it (a malformed chain ends, never loops). */
-function taskChainHas(projection: Pick<TaskRuntimeProjection, "tasks">, origin: string, taskId: string): boolean {
+/** `origin` and then each task an escalation placed after it, in order (a malformed chain ends, never loops). */
+export function* planTaskChain(projection: Pick<TaskRuntimeProjection, "tasks">, origin: string): Generator<string> {
 	const visited = new Set<string>();
 	for (
 		let current: string | undefined = origin;
 		current !== undefined && !visited.has(current);
 		current = successorOf(projection, current)
 	) {
-		if (current === taskId) return true;
 		visited.add(current);
+		yield current;
 	}
+}
+
+/** Whether `taskId` is `origin` or a successor an escalation placed after it. */
+function taskChainHas(projection: Pick<TaskRuntimeProjection, "tasks">, origin: string, taskId: string): boolean {
+	for (const current of planTaskChain(projection, origin)) if (current === taskId) return true;
 	return false;
 }

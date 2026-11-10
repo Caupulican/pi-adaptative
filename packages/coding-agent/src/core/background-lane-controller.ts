@@ -2157,6 +2157,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			deliver: (delivery, signal) => this.deps.deliverNotes(delivery, { signal }),
 			isDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
 			acknowledge: (notificationIds) => lifecycle.markNotificationsDelivered(notificationIds),
+			retireWorker: (agentId) => void this.retireWorkerAgent(agentId),
 			planChanged: () => {
 				for (const listener of this._planChangeListeners) listener();
 				this._goalAutoContinue.wakePlanWait();

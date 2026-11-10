@@ -16,6 +16,8 @@ A plan survives its session being closed. Closing the session interrupts the pla
 
 A plan started under a goal holds that goal's automatic continuation while any of its steps is running, starting or ready: the root is not prompted to go on in the meantime, whether or not the goal has an open requirement, and is woken by the plan itself, with each combined result and when a step needs it. The wait ends by itself when the plan shows no movement for an hour (no step released, finished or held, no join combined): the goal then continues once, so the root can go on with what is known and re-plan what is stuck. A goal that stops (its budget is spent, the owner pauses it) does not stop the plan's running steps: they finish and report, steps that had not started wait until the goal goes on, and what the plan has to tell still reaches the root.
 
+When a plan closes, however it ends, the workers it started for its steps are retired: a plan starts a worker of its own for every step, and none has work left once the plan is closed. A worker whose turn is still being stopped is retired as soon as that turn has ended. A retired worker that worked in its own worktree lane has the lane released when it holds nothing main lacks, so the lanes a `merge` landed are gone without the root or the owner asking; a lane that still holds work is kept and the root is told where it is.
+
 ## Joins
 
 A join is a step that combines the steps in its `uses`:

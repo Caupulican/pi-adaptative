@@ -150,10 +150,11 @@ branch off main before it is admitted, through the same engine as every other la
   `worktree_sync git_diff laneKey=<key>` and integrates with `git_add`/`git_commit` (laneKey), `sync`, `land`; a
   `git_commit` the root makes in a lane bound to a worker records that worker as the commit's author (the
   committer stays the committing session), so the work stays attributed to the worker that did it;
-- the lane is released when the worker's persistent identity is retired (`delegate retire`), the lifecycle edge
-  itself, never polled, and only if it is fully landed and clean; a lane holding work is kept, the parent is
-  told, and discarding it stays the explicit `release_lane` `confirm: "yes-discard-lane"` decision (G11). A
-  lane a refused start never used is removed at once.
+- the lane is released when the worker's persistent identity is retired (`delegate retire`, or the close of the
+  plan that started the worker: a closed plan retires its own workers), the lifecycle edge itself, never polled,
+  and only if it is fully landed and clean; a lane holding work is kept, the parent is told, and discarding it
+  stays the explicit `release_lane` `confirm: "yes-discard-lane"` decision (G11). A lane a refused start never
+  used is removed at once.
 
 **By design, isolation applies to clean repositories without in-tree dependency directories.** A lane is a fresh
 checkout of main, so it is only the same code the worker would have seen when the checkout is on main and

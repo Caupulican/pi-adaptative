@@ -124,6 +124,8 @@ export interface PlanExecutorDeps {
 	readonly isDelivered: (deliveryId: string) => boolean;
 	/** Acknowledges routed terminal notifications the plan consumed. */
 	readonly acknowledge: (notificationIds: readonly string[]) => void;
+	/** Retires a worker a closed plan made for one of its steps; the retirement also frees its worktree lane when it had one. */
+	readonly retireWorker: (agentId: string) => void;
 	/** Fires when a plan's visible state changes (a step starts, settles or is held, a plan opens or closes). */
 	readonly planChanged: () => void;
 	readonly timers?: () => TimerPort;
@@ -511,6 +513,8 @@ export class PlanExecutor implements PlanExecutorPort {
 				return `cancel:${action.taskId}`;
 			case "close":
 				return `close:${action.planId}`;
+			case "retire_worker":
+				return `retire:${action.agentId}`;
 			case "release": {
 				const plan = this.deps.runtime().getSnapshot().plans[action.planId];
 				const since = plan?.nodes[action.nodeId]?.since ?? 0;
@@ -573,6 +577,10 @@ export class PlanExecutor implements PlanExecutorPort {
 				return;
 			case "cancel_task":
 				this.cancelTask(action.taskId, action.reason);
+				return;
+			case "retire_worker":
+				this.deps.retireWorker(action.agentId);
+				harnessLog.info("plan", "a closed plan's worker is retired", { planId: action.planId });
 				return;
 			case "code_join":
 				this.decideJoin(action.planId, action.nodeId);

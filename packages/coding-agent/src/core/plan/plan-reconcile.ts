@@ -20,7 +20,10 @@
  * 5. an unreleased node that is releasable (work: every predecessor accepted; join: every predecessor settled), while
  *    the objective is not paused and no step waits on the owner for an exhausted budget -> release it, verifiers
  *    first, then the critical path, then plan order;
- * 6. the final node settled -> close the plan as settled.
+ * 6. the final node settled -> close the plan as settled;
+ * 7. a closed plan's workers -> retire each one that has no turn still open. The plan started a worker of its own for
+ *    every step, so none has work left once the plan is closed, and the retirement is what frees a worktree lane the
+ *    plan landed.
  *
  * Updates (one bounded plan-update each, idempotent by delivery id): every settled join other than the final, every
  * hold, the final result of a plan closed as settled, a plan that can no longer move (no step running, ready, held or
@@ -45,14 +48,14 @@ import {
 	planCriticalPath,
 	planNodeEdges,
 } from "./plan-graph.ts";
-import { planNodeOfTask } from "./plan-reducer.ts";
+import { planNodeOfTask, planTaskChain } from "./plan-reducer.ts";
 import { voteChecksOf } from "./plan-revision.ts";
 import type { PlanUpdateInput } from "./plan-update.ts";
 import { planNodeReleasable } from "./plan-view.ts";
 
 export type ReconcileProjection = Pick<
 	TaskRuntimeProjection,
-	"plans" | "tasks" | "attempts" | "objectives" | "notifications"
+	"plans" | "tasks" | "attempts" | "objectives" | "notifications" | "agents"
 >;
 
 interface NodeRef {
@@ -88,7 +91,8 @@ export type PlanAction =
 			readonly outcome: Outcome;
 	  })
 	| { readonly kind: "close"; readonly planId: string; readonly status: PlanCloseStatus; readonly reason: string }
-	| { readonly kind: "cancel_task"; readonly planId: string; readonly taskId: string; readonly reason: string };
+	| { readonly kind: "cancel_task"; readonly planId: string; readonly taskId: string; readonly reason: string }
+	| { readonly kind: "retire_worker"; readonly planId: string; readonly agentId: string };
 
 /** A plan-update the root is owed; `artifact` is the join result file the update summarizes, when there is one. */
 export interface PlanUpdateIntent {
@@ -203,6 +207,39 @@ function outcomeAction(
 		default:
 			return undefined;
 	}
+}
+
+/** The attempt states in which a worker's turn is still open. */
+const OPEN_ATTEMPT_STATUSES: ReadonlySet<string> = new Set(["queued", "leased", "running", "suspended"]);
+
+/**
+ * Rule 7: the workers of a closed plan that can be retired now. They are the workers of every task the plan released, for
+ * its current steps and for the ones a revision replaced, through each task's successors. A worker with a turn still open
+ * (a step being stopped) is left for a later pass, and one already retired asks for nothing.
+ */
+function workersToRetire(projection: ReconcileProjection, plan: PlanRuntimeState, planId: string): PlanAction[] {
+	const released = [
+		...Object.values(plan.nodes).flatMap((runtime) => (runtime.release ? [runtime.release.taskId] : [])),
+		...plan.retired.map((entry) => entry.taskId),
+	];
+	const open = new Set<string>();
+	const workers = new Set<string>();
+	for (const origin of released) {
+		for (const taskId of planTaskChain(projection, origin)) {
+			for (const attemptId of projection.tasks[taskId]?.attemptIds ?? []) {
+				const attempt = projection.attempts[attemptId];
+				if (attempt?.agentId === undefined) continue;
+				workers.add(attempt.agentId);
+				if (OPEN_ATTEMPT_STATUSES.has(attempt.status)) open.add(attempt.agentId);
+			}
+		}
+	}
+	return [...workers]
+		.filter((agentId) => {
+			const status = projection.agents[agentId]?.status;
+			return status !== undefined && status !== "retired" && !open.has(agentId);
+		})
+		.map((agentId) => ({ kind: "retire_worker", planId, agentId }));
 }
 
 /** Whether a node's settlement is in: a join settled, or a released node settled. */
@@ -432,6 +469,7 @@ export function reconcilePlans(projection: ReconcileProjection, goal: GoalState 
 		if (isPlanFromNewerBuild(record)) continue;
 		actions.push(...tasksToCancel(projection, plan, planId));
 		if (plan.closed) {
+			actions.push(...workersToRetire(projection, plan, planId));
 			if (plan.closed.status === "settled") {
 				const artifact = plan.nodes[record.final]?.join?.artifact;
 				updates.push({
