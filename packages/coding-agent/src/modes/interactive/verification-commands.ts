@@ -5,6 +5,7 @@
  * example a behavior only the CI journeys or a look at the interface can show. The model has no way to close those; the
  * owner does, with a reason, and the closing is recorded on the finding as `waived`.
  */
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { SemanticVerificationObligationView } from "../../core/system-one/verification-obligations.ts";
 import { plainLabel } from "../../presentation/plain-text.ts";
 
@@ -25,7 +26,7 @@ export const VERIFICATION_USAGE = "/verification [list] · /verification waive <
 const MAX_NOTE_LENGTH = 500;
 
 function describeFinding(finding: SemanticVerificationObligationView): string {
-	return `${finding.id}  [${plainLabel(finding.source)}]\n    ${finding.reason}`;
+	return interfaceText().autonomyCommands.verification.finding(finding.id, plainLabel(finding.source), finding.reason);
 }
 
 export async function handleVerificationCommand(host: VerificationHost, text: string): Promise<void> {
@@ -33,19 +34,16 @@ export async function handleVerificationCommand(host: VerificationHost, text: st
 	const [action = "list", ...rest] = args.split(/\s+/).filter(Boolean);
 	if (action === "list") {
 		const findings = host.listVerificationFindings();
+		const words = interfaceText().autonomyCommands.verification;
 		host.showText(
 			findings.length === 0
-				? "Verification — no open findings."
-				: [
-						`Verification — ${findings.length} open finding${findings.length === 1 ? "" : "s"}; each holds the work until it is answered with evidence or waived`,
-						...findings.map(describeFinding),
-						VERIFICATION_USAGE,
-					].join("\n"),
+				? words.none
+				: [words.open(findings.length), ...findings.map(describeFinding), VERIFICATION_USAGE].join("\n"),
 		);
 		return;
 	}
 	if (action !== "waive") {
-		host.showError(`Unknown /verification action "${action}". ${VERIFICATION_USAGE}`);
+		host.showError(interfaceText().autonomyCommands.verification.unknownAction(action, VERIFICATION_USAGE));
 		return;
 	}
 	const open = new Map(host.listVerificationFindings().map((finding) => [finding.id, finding]));
@@ -63,21 +61,24 @@ export async function handleVerificationCommand(host: VerificationHost, text: st
 	}
 	const note = rest.slice(index).join(" ").trim();
 	if (!all && ids.length === 0) {
-		host.showError(`Name an open finding id or "all". ${VERIFICATION_USAGE}`);
+		host.showError(interfaceText().autonomyCommands.verification.nameOne(VERIFICATION_USAGE));
 		return;
 	}
 	if (note.length === 0) {
-		host.showError(`A waiver needs a reason: it is recorded on the finding. ${VERIFICATION_USAGE}`);
+		host.showError(interfaceText().autonomyCommands.verification.waiverNeedsReason(VERIFICATION_USAGE));
 		return;
 	}
 	if (note.length > MAX_NOTE_LENGTH) {
-		host.showError(`The reason is ${note.length} characters; the limit is ${MAX_NOTE_LENGTH}.`);
+		host.showError(interfaceText().autonomyCommands.verification.reasonTooLong(note.length, MAX_NOTE_LENGTH));
 		return;
 	}
 	const closed = host.waiveVerificationFindings(all ? "all" : ids, note);
 	host.showStatus(
 		closed.length === 0
-			? "No open finding matched; nothing was waived."
-			: `Waived ${closed.length} finding${closed.length === 1 ? "" : "s"}: ${closed.map((finding) => finding.id).join(", ")}.`,
+			? interfaceText().autonomyCommands.verification.noneMatched
+			: interfaceText().autonomyCommands.verification.waived(
+					closed.length,
+					closed.map((finding) => finding.id).join(", "),
+				),
 	);
 }

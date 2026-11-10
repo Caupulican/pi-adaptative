@@ -51,7 +51,7 @@
 		"packages/coding-agent/src/core/tools/bash.ts": 1551,
 		"packages/coding-agent/src/core/worktree-sync/git-engine.ts": 1547,
 		"packages/coding-agent/src/core/context-pipeline.ts": 1530,
-		"packages/coding-agent/src/modes/interactive/auto-learn-controller.ts": 1508,
+		"packages/coding-agent/src/modes/interactive/auto-learn-controller.ts": 1503,
 		"packages/ai/src/providers/anthropic.ts": 1505,
 		"packages/coding-agent/src/core/prompt-submission-controller.ts": 1494,
 		"packages/coding-agent/src/core/models/local-runtime.ts": 1482,
@@ -79,7 +79,7 @@
 		"packages/coding-agent/src/core/improvement-loop.ts": 1306,
 		"packages/ai/src/providers/openai-completions.ts": 1299,
 		"packages/coding-agent/src/core/automation/task-automation-controller.ts": 1276,
-		"packages/coding-agent/src/core/autonomy/edge-policy.ts": 1270,
+		"packages/coding-agent/src/core/autonomy/edge-policy.ts": 1265,
 		"packages/coding-agent/src/core/orchestration/event-store.ts": 1228,
 		"packages/coding-agent/src/core/memory/transcript-summary-catalog.ts": 1225,
 		"packages/tui/src/utils.ts": 1218

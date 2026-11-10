@@ -20,6 +20,7 @@ import {
 } from "../../core/goals/goal-continuation-defaults.ts";
 import { configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import type { AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ManagedMemoryTarget } from "../../core/memory/providers/file-store.ts";
 import { recordLessonCandidate } from "../../core/proof/lesson-candidates.ts";
 import { AccountUsageMonitor } from "../../core/provider-admission/account-usage-monitor.ts";
@@ -177,7 +178,7 @@ export class SlashCommandController {
 
 	handleSecretsCommand(): Promise<void> {
 		if (!this.host.hasHumanAudience) {
-			this.host.showWarning("/secrets requires an owner-controlled interactive terminal.");
+			this.host.showWarning(interfaceText().commandController.commands.secretsNeedsTerminal);
 			return Promise.resolve();
 		}
 		const controller = new SecretMenuController({
@@ -250,11 +251,11 @@ export class SlashCommandController {
 	/** Reload and report whether the previous runtime was replaced successfully. */
 	async handleReloadCommandWithResult(): Promise<boolean> {
 		if (this.host.session.isStreaming) {
-			this.host.showWarning("Wait for the current response to finish before reloading.");
+			this.host.showWarning(interfaceText().commandController.commands.reloadWaitingForResponse);
 			return false;
 		}
 		if (this.host.session.isCompacting) {
-			this.host.showWarning("Wait for compaction to finish before reloading.");
+			this.host.showWarning(interfaceText().commandController.commands.reloadWaitingForCompaction);
 			return false;
 		}
 
@@ -264,9 +265,7 @@ export class SlashCommandController {
 		const borderColor = (s: string) => theme.fg("border", s);
 		reloadBox.addChild(new DynamicBorder(borderColor));
 		reloadBox.addChild(new Spacer(1));
-		reloadBox.addChild(
-			new Text(theme.fg("muted", "Reloading keybindings, extensions, skills, prompts, themes..."), 1, 0),
-		);
+		reloadBox.addChild(new Text(theme.fg("muted", interfaceText().commandController.commands.reloading), 1, 0));
 		reloadBox.addChild(new Spacer(1));
 		reloadBox.addChild(new DynamicBorder(borderColor));
 
@@ -307,13 +306,17 @@ export class SlashCommandController {
 			});
 			const modelsJsonError = this.host.modelRegistry.getError();
 			if (modelsJsonError) {
-				this.host.showError(`models.json error: ${modelsJsonError}`);
+				this.host.showError(interfaceText().commandController.commands.modelsJsonError(modelsJsonError));
 			}
-			this.host.showStatus("Reloaded keybindings, extensions, skills, prompts, themes");
+			this.host.showStatus(interfaceText().commandController.commands.reloaded);
 			return true;
 		} catch (error) {
 			dismissReloadBox(previousEditor as Component);
-			this.host.showError(`Reload failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.host.showError(
+				interfaceText().commandController.commands.reloadFailed(
+					error instanceof Error ? error.message : String(error),
+				),
+			);
 			return false;
 		}
 	}
@@ -339,7 +342,11 @@ export class SlashCommandController {
 			this.host.footer.invalidate();
 			this.host.ui.requestRender();
 		} catch (error) {
-			this.host.showError(`Extension refresh failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.host.showError(
+				interfaceText().commandController.commands.extensionRefreshFailed(
+					error instanceof Error ? error.message : String(error),
+				),
+			);
 		}
 	}
 
@@ -453,7 +460,7 @@ export class SlashCommandController {
 	):
 		| { ok: true; maxTurns: number; maxStallTurns: number; maxWallClockMinutes: number }
 		| { ok: false; error: string } {
-		const usage = "Usage: /goal-continue [maxTurns 0=unbounded] [maxStallTurns 0-100] [maxMinutes 0-1440]";
+		const usage = interfaceText().commandController.commands.goalContinueUsage;
 		const parts = text.trim().split(/\s+/).slice(1);
 		if (parts.length > 3) {
 			return { ok: false, error: usage };
@@ -497,7 +504,10 @@ export class SlashCommandController {
 			{
 				session: this.host.session,
 				promptForGoalEdit: (currentObjective) =>
-					this.host.extensionUiHost.showExtensionEditor("Edit goal objective", currentObjective),
+					this.host.extensionUiHost.showExtensionEditor(
+						interfaceText().commandController.commands.editGoalObjective,
+						currentObjective,
+					),
 				recordLessonCandidate: (entry) =>
 					recordLessonCandidate(
 						this.host.runtimeHost.services.agentDir,
@@ -583,14 +593,21 @@ export class SlashCommandController {
 	async handleSelfCompactNowCommand(): Promise<void> {
 		try {
 			const outcome = await this.host.session.selfCompactNow();
-			if (outcome.kind === "refused") this.host.showError(`Self-compaction: ${outcome.reason}.`);
+			if (outcome.kind === "refused")
+				this.host.showError(interfaceText().commandController.commands.selfCompactionRefused(outcome.reason));
 			else if (outcome.kind === "resumed")
 				this.host.showStatus(
-					`Self-compaction: compacting with the saved note (${outcome.noteChars.toLocaleString("en-US")} chars).`,
+					interfaceText().commandController.commands.selfCompactionResumed(
+						interfaceText().reports.formats.number(outcome.noteChars),
+					),
 				);
-			else this.host.showStatus("Self-compaction: asked the agent to write its note and compact.");
+			else this.host.showStatus(interfaceText().commandController.commands.selfCompactionAsked);
 		} catch (error) {
-			this.host.showError(`Self-compaction failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.host.showError(
+				interfaceText().commandController.commands.selfCompactionFailed(
+					error instanceof Error ? error.message : String(error),
+				),
+			);
 		}
 	}
 
@@ -687,12 +704,14 @@ export class SlashCommandController {
 				this.host.session.setSessionName(newSessionName);
 			}
 			this.host.chatContainer.addChild(new Spacer(1));
-			const label = newSessionName ? `✓ New session started: ${newSessionName}` : "✓ New session started";
+			const label = newSessionName
+				? interfaceText().commandController.commands.newSessionNamed(newSessionName)
+				: interfaceText().commandController.commands.newSession;
 			this.host.chatContainer.addChild(new Text(`${theme.fg("accent", label)}`, 1, 1));
 			this.host.ui.requestRender();
 		} catch (error: unknown) {
 			if (this.host.handleNonFatalSessionReplacementError(error)) return;
-			await this.host.handleFatalRuntimeError("Failed to create session", error);
+			await this.host.handleFatalRuntimeError(interfaceText().commandController.commands.createSessionFailed, error);
 		}
 	}
 

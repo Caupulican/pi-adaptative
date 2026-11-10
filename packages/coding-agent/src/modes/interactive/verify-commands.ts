@@ -6,6 +6,7 @@
  * machine). The dismissal is a user-plane record: the model has no tool for it, and it is never a
  * passing test.
  */
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { VerificationObligationView } from "../../kernel/verification-obligations.ts";
 
 export interface VerifyHost {
@@ -20,10 +21,11 @@ export interface VerifyHost {
 export const VERIFY_USAGE = "/verify [list] · /verify show <id> · /verify dismiss <id|all> [note]";
 
 function describe(obligation: VerificationObligationView, index: number): string {
-	const where = obligation.cwd ? ` (in ${obligation.cwd})` : "";
-	const what = obligation.command ? `${obligation.command}${where}` : "(command not recorded)";
-	const setup = obligation.setupRepairGroup ? " · empty-test setup failure" : "";
-	return `${index + 1}. ${what}${setup}\n   id ${obligation.id}`;
+	const words = interfaceText().autonomyCommands.verify;
+	const where = obligation.cwd ? words.where(obligation.cwd) : "";
+	const what = obligation.command ? `${obligation.command}${where}` : words.commandMissing;
+	const setup = obligation.setupRepairGroup ? words.setupFailure : "";
+	return `${index + 1}. ${what}${setup}${words.idLine(obligation.id)}`;
 }
 
 export async function handleVerifyCommand(host: VerifyHost, text: string): Promise<void> {
@@ -32,14 +34,11 @@ export async function handleVerifyCommand(host: VerifyHost, text: string): Promi
 	const obligations = host.getVerificationObligations();
 	if (action === "list" || action === "") {
 		if (obligations.length === 0) {
-			host.showStatus("No verification obligations are active.");
+			host.showStatus(interfaceText().autonomyCommands.verify.none);
 			return;
 		}
 		host.showText(
-			[
-				`${obligations.length} verification obligation${obligations.length > 1 ? "s" : ""} active — rerun the same check, or /verify dismiss <id|all> [note]`,
-				...obligations.map(describe),
-			].join("\n"),
+			[interfaceText().autonomyCommands.verify.active(obligations.length), ...obligations.map(describe)].join("\n"),
 		);
 		return;
 	}
@@ -47,7 +46,7 @@ export async function handleVerifyCommand(host: VerifyHost, text: string): Promi
 		const id = rest[0];
 		const obligation = obligations.find((candidate) => candidate.id === id);
 		if (!obligation) {
-			host.showError(id ? `No active obligation ${id}.` : VERIFY_USAGE);
+			host.showError(id ? interfaceText().autonomyCommands.verify.unknown(id) : VERIFY_USAGE);
 			return;
 		}
 		host.showText(describe(obligation, 0));
@@ -63,18 +62,18 @@ export async function handleVerifyCommand(host: VerifyHost, text: string): Promi
 		const note = rest.slice(1).join(" ").trim() || undefined;
 		if (ids.length === 0 || (target !== "all" && !obligations.some((obligation) => obligation.id === target))) {
 			host.showError(
-				target === "all" ? "No verification obligations are active." : `No active obligation ${target}.`,
+				target === "all"
+					? interfaceText().autonomyCommands.verify.none
+					: interfaceText().autonomyCommands.verify.unknown(target),
 			);
 			return;
 		}
 		const dismissed = await host.dismissVerificationObligations(ids, note);
 		if (dismissed.length === 0) {
-			host.showError("Nothing was dismissed.");
+			host.showError(interfaceText().autonomyCommands.verify.nothingDismissed);
 			return;
 		}
-		host.showStatus(
-			`Dismissed ${dismissed.length} verification obligation${dismissed.length > 1 ? "s" : ""} by operator authority; goal completion no longer waits on ${dismissed.length > 1 ? "them" : "it"}.`,
-		);
+		host.showStatus(interfaceText().autonomyCommands.verify.dismissed(dismissed.length));
 		return;
 	}
 	host.showError(VERIFY_USAGE);

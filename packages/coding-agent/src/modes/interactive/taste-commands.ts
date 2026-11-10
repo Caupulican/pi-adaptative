@@ -7,6 +7,7 @@
 import { mkdirSync, writeFileSync } from "node:fs";
 import { dirname, isAbsolute, relative, resolve } from "node:path";
 import type { AgentSession } from "../../core/agent-session.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { KnowledgeOwnerControls } from "../../core/memory/knowledge-admission.ts";
 import type { KnowledgeProposal } from "../../core/memory/knowledge-proposal-journal.ts";
 import {
@@ -32,16 +33,21 @@ const TASTE_PAGE = 20;
 const TASTE_KIND = "taste";
 const SHORT_ID = 8;
 const DEFAULT_EXPORT_PATH = ".pi/taste.md";
-const NO_TASTE =
-	'No taste learned yet. Taste is learned from what you state about how you want code and other work written, for example "I prefer early returns over nested conditionals".';
-
 function basisWords(record: KnowledgeRecord): string {
-	return record.basis === "explicit" ? "stated" : "inferred";
+	const words = interfaceText().knowledgeCommands.taste;
+	return record.basis === "explicit" ? words.basisStated : words.basisInferred;
 }
 
 function bullet(controls: KnowledgeOwnerControls, record: KnowledgeRecord): string {
+	const words = interfaceText().knowledgeCommands.taste;
 	const sources = controls.store.sourceCount(record.id);
-	return `- ${bounded(record.text, 400)} (${basisWords(record)}, ${sources} ${sources === 1 ? "source" : "sources"}, last evidence ${record.lastEvidencedAt.slice(0, 10)}) \`${record.id.slice(0, SHORT_ID)}\``;
+	return words.bullet(
+		bounded(record.text, 400),
+		basisWords(record),
+		words.sourceCount(sources),
+		record.lastEvidencedAt.slice(0, 10),
+		record.id.slice(0, SHORT_ID),
+	);
 }
 
 function section(controls: KnowledgeOwnerControls, heading: string, records: readonly KnowledgeRecord[]): string[] {
@@ -64,13 +70,14 @@ function section(controls: KnowledgeOwnerControls, heading: string, records: rea
 }
 
 function markdown(controls: KnowledgeOwnerControls, records: readonly KnowledgeRecord[]): string {
+	const words = interfaceText().knowledgeCommands.taste;
 	const project = records.filter((record) => record.scope.project !== "");
 	const global = records.filter((record) => record.scope.project === "");
 	return [
-		"# Taste",
+		words.title,
 		"",
-		...section(controls, "This project's taste", project),
-		...section(controls, "Global taste", global),
+		...section(controls, words.projectHeading, project),
+		...section(controls, words.globalHeading, global),
 	]
 		.join("\n")
 		.trimEnd();
@@ -98,17 +105,18 @@ function exportTarget(cwd: string, requested: string | undefined): string | unde
 }
 
 function exportCommand(host: TasteCommandHost, controls: KnowledgeOwnerControls, requested: string | undefined): void {
+	const words = interfaceText().knowledgeCommands.taste;
 	const target = exportTarget(host.cwd, requested);
 	if (!target) {
-		host.showError("Nothing written: a relative path must stay inside the working directory.");
+		host.showError(words.exportRelativePath);
 		return;
 	}
 	const records = allRecords(controls);
-	const body = records.length === 0 ? NO_TASTE : markdown(controls, records);
-	const header = `<!-- Generated view of what the harness has learned, ${new Date().toISOString().slice(0, 10)}. Edit with /knowledge correct and /knowledge forget, not here. -->`;
+	const body = records.length === 0 ? words.empty : markdown(controls, records);
+	const header = words.exportHeader(new Date().toISOString().slice(0, 10));
 	mkdirSync(dirname(target), { recursive: true });
 	writeFileSync(target, `${header}\n\n${body}\n`);
-	host.showStatus(`Wrote ${target}`);
+	host.showStatus(words.exported(target));
 }
 
 function isTaste(proposal: KnowledgeProposal): boolean {
@@ -116,39 +124,34 @@ function isTaste(proposal: KnowledgeProposal): boolean {
 }
 
 function proposalBlock(proposal: KnowledgeProposal): string {
+	const words = interfaceText().knowledgeCommands.taste;
 	const content = proposal.content!;
 	const evidence = content.evidence.map((entry) => `  - \`${bounded(entry.ref, 80)}\` ${bounded(entry.note, 200)}`);
+	const scope = proposal.project ? words.proposalScopeProject : words.proposalScopeGlobal;
 	return [
-		`- ${bounded(content.text, 400)} \`${proposal.id.slice(0, SHORT_ID)}\``,
-		`  ${proposal.project ? "This project" : "Global"} · from ${bounded(proposal.origin, 60)} · offered ${proposal.offeredAt.slice(0, 10)}`,
-		...(evidence.length ? ["  Evidence:", ...evidence] : []),
+		words.proposalHead(bounded(content.text, 400), proposal.id.slice(0, SHORT_ID)),
+		words.proposalMeta(scope, bounded(proposal.origin, 60), proposal.offeredAt.slice(0, 10)),
+		...(evidence.length ? [words.proposalEvidence, ...evidence] : []),
 	].join("\n");
 }
 
 function proposalsText(controls: KnowledgeOwnerControls): string {
+	const words = interfaceText().knowledgeCommands.taste;
 	const pending = controls.store.proposals.listPending(controls.scope.project).filter(isTaste);
-	if (pending.length === 0) return "No taste proposals are waiting.";
-	return [
-		"# Taste proposals",
-		"",
-		"Nothing here is knowledge yet. `/taste accept <id>` states one as your own taste; `/taste reject <id>` drops it for good.",
-		"",
-		...pending.map(proposalBlock),
-	].join("\n");
+	if (pending.length === 0) return words.noProposals;
+	return [words.proposalsTitle, "", words.proposalsIntro, "", ...pending.map(proposalBlock)].join("\n");
 }
 
 /** One proposal by id prefix, still pending; an unknown, ambiguous or decided one is an error that changes nothing. */
 function pendingProposal(controls: KnowledgeOwnerControls, token: string | undefined): KnowledgeProposal | string {
-	if (!token || !/^[a-f0-9]{8,64}$/.test(token)) return "Give the proposal's id: at least eight hex characters.";
+	const words = interfaceText().knowledgeCommands.taste;
+	if (!token || !/^[a-f0-9]{8,64}$/.test(token)) return words.needProposalId;
 	const found = controls.store.proposals.resolve(controls.scope.project, token);
-	if (found.length === 0) return `No proposal starts with ${token}.`;
-	if (found.length > 1) return `More than one proposal starts with ${token}; give more characters.`;
+	if (found.length === 0) return words.noProposalStartsWith(token);
+	if (found.length > 1) return words.ambiguousProposal(token);
 	const [proposal] = found;
-	if (!isTaste(proposal!))
-		return `Proposal ${token.slice(0, SHORT_ID)} is not a taste proposal; /taste does not decide it.`;
-	return proposal!.status === "pending"
-		? proposal!
-		: `Proposal ${token.slice(0, SHORT_ID)} was already ${proposal!.status}.`;
+	if (!isTaste(proposal!)) return words.notTasteProposal(token.slice(0, SHORT_ID));
+	return proposal!.status === "pending" ? proposal! : words.alreadyDecided(token.slice(0, SHORT_ID), proposal!.status);
 }
 
 async function acceptCommand(
@@ -157,6 +160,7 @@ async function acceptCommand(
 	command: string,
 	token: string | undefined,
 ): Promise<void> {
+	const words = interfaceText().knowledgeCommands.taste;
 	const proposal = pendingProposal(controls, token);
 	if (typeof proposal === "string") {
 		host.showError(proposal);
@@ -164,27 +168,31 @@ async function acceptCommand(
 	}
 	const content = proposal.content!;
 	if (command.length > MAX_KNOWLEDGE_TEXT_CHARS) {
-		host.showError(`Nothing changed: the command is longer than ${MAX_KNOWLEDGE_TEXT_CHARS} characters.`);
+		host.showError(words.commandTooLong(MAX_KNOWLEDGE_TEXT_CHARS));
 		return;
 	}
 	const confirm = host.session.ownerConfirm;
 	if (!confirm) {
-		host.showError("Nothing changed: owner confirmation is unavailable.");
+		host.showError(words.noConfirmation);
 		return;
 	}
 	const scope = proposal.project ? "project" : "global";
 	const confirmed = await confirm(
-		"Accept taste",
-		`State this ${proposal.kind} fact as yours, for ${scope === "project" ? "this project" : "every project"}?\n${bounded(content.text, 400)}`,
+		words.acceptTitle,
+		words.acceptQuestion(
+			proposal.kind,
+			scope === "project" ? words.scopeProject : words.scopeEveryProject,
+			bounded(content.text, 400),
+		),
 	);
 	if (!confirmed) {
-		host.showStatus("Nothing changed: the owner did not confirm.");
+		host.showStatus(words.notConfirmed);
 		return;
 	}
 	// The dialog can stay open while another session decides the same proposal.
 	const current = pendingProposal(controls, proposal.id);
 	if (typeof current === "string") {
-		host.showError(`Nothing changed: ${current}`);
+		host.showError(words.unchanged(current));
 		return;
 	}
 	// Fact first, mark second: the same statement in the same scope is one operation, so repeating this command after
@@ -199,23 +207,22 @@ async function acceptCommand(
 		command,
 	});
 	if (outcome.status === "held") {
-		host.showError(`Nothing changed: ${outcome.reason}. The proposal stays pending.`);
+		host.showError(words.held(outcome.reason));
 		return;
 	}
 	controls.store.proposals.decide(proposal.id, "accepted");
-	host.showStatus(
-		`Accepted proposal ${proposal.id.slice(0, SHORT_ID)} as taste ${outcome.id.slice(0, SHORT_ID)}.  /knowledge show ${outcome.id.slice(0, SHORT_ID)}`,
-	);
+	host.showStatus(words.accepted(proposal.id.slice(0, SHORT_ID), outcome.id.slice(0, SHORT_ID)));
 }
 
 function rejectCommand(host: TasteCommandHost, controls: KnowledgeOwnerControls, token: string | undefined): void {
+	const words = interfaceText().knowledgeCommands.taste;
 	const proposal = pendingProposal(controls, token);
 	if (typeof proposal === "string") {
 		host.showError(proposal);
 		return;
 	}
 	controls.store.proposals.decide(proposal.id, "rejected");
-	host.showStatus(`Rejected proposal ${proposal.id.slice(0, SHORT_ID)}. It will not be proposed again.`);
+	host.showStatus(words.rejected(proposal.id.slice(0, SHORT_ID)));
 }
 
 export async function handleTasteCommand(host: TasteCommandHost, text: string): Promise<void> {
@@ -226,7 +233,7 @@ export async function handleTasteCommand(host: TasteCommandHost, text: string): 
 		.filter(Boolean);
 	const controls = host.session.memoryOperator.getKnowledgeOwnerControls();
 	if (!controls) {
-		host.showError("Taste is available while ICM memory is active in a root session.");
+		host.showError(interfaceText().knowledgeCommands.taste.unavailable);
 		return;
 	}
 	try {
@@ -250,16 +257,22 @@ export async function handleTasteCommand(host: TasteCommandHost, text: string): 
 		}
 		const records = page(controls, after, TASTE_PAGE);
 		if (records.length === 0) {
-			host.showText(after ? "No more taste." : NO_TASTE);
+			host.showText(
+				after ? interfaceText().knowledgeCommands.taste.noMore : interfaceText().knowledgeCommands.taste.empty,
+			);
 			return;
 		}
 		host.showText(
 			[
 				markdown(controls, records),
-				...(records.length === TASTE_PAGE ? [`\nMore: /taste ${records.at(-1)!.id}`] : []),
+				...(records.length === TASTE_PAGE
+					? [interfaceText().knowledgeCommands.taste.more(records.at(-1)!.id)]
+					: []),
 			].join("\n"),
 		);
 	} catch (error) {
-		host.showError(`Taste: ${error instanceof Error ? error.message : String(error)}`);
+		host.showError(
+			interfaceText().knowledgeCommands.taste.failed(error instanceof Error ? error.message : String(error)),
+		);
 	}
 }

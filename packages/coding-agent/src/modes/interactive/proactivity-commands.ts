@@ -4,6 +4,7 @@
  */
 
 import type { AgentSession } from "../../core/agent-session.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ParentWakeDelivery } from "../../core/proactivity/proactivity-controller.ts";
 import { withProactivityChange } from "../../core/proactivity/proactivity-settings.ts";
 import { MAX_PROACTIVITY_PREFERENCES_CHARS } from "../../core/settings/settings-rules.ts";
@@ -27,9 +28,8 @@ export interface ProactivityHost {
 	showStatus(message: string): void;
 }
 
-const USAGE = "Usage: /proactivity [status|on|off|review|prefs <text>|prefs clear]";
-
 export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsManager" | "session">): string {
+	const words = interfaceText().autonomyCommands.proactivity;
 	const settings = host.settingsManager.getProactivitySettings();
 	const lanes = host.session.backgroundLanes;
 	const skip = lanes.getLastProactivitySkipReason();
@@ -44,36 +44,59 @@ export function formatProactivityStatus(host: Pick<ProactivityHost, "settingsMan
 	});
 	const delivered = (delivery: ParentWakeDelivery) =>
 		delivery.mode === "turn"
-			? "woke a parent turn"
-			: `waits for the owner's next turn${delivery.hold === undefined ? "" : ` (${plainLabel(delivery.hold)})`}`;
-	return [
-		`Proactivity: ${settings.enabled ? "on" : "off"}`,
-		`Review after ${Math.round(settings.idleDelayMs / 1000)}s idle, at least ${settings.minOwnerTurnsBetweenRuns} new owner turn(s) apart, ${settings.maxRunsPerSession} per session, up to ${settings.maxNotesPerRun} note(s), $${settings.maxUsd.toFixed(2)} bound per review.`,
-		`Rolling 24 h across the sessions stored with this one: $${settings.maxUsdPerDay.toFixed(2)} review spend, ${settings.maxTurnWakesPerDay} parent-turn wake(s) by notes and CI events together; past the wake bound, both wait for the owner's next turn.`,
-		`Delivery: ${settings.delivery === "turn" ? "wakes a turn" : "a visible note with the next turn"}`,
-		`Preferences: ${settings.preferences.length > 0 ? settings.preferences : "none"}`,
-		`CI events: ${settings.ciEvents ? "on" : "off"}`,
-		...(intake === undefined
+			? words.wokeParent
+			: delivery.hold === undefined
+				? words.waitsForOwner
+				: words.waitsForOwnerHeld(plainLabel(delivery.hold));
+	const intakeState =
+		intake === undefined
 			? []
 			: [
-					`Routine intake: ${intake.state === "active" ? "on" : `off${intake.reason === undefined ? "" : ` (${plainLabel(intake.reason)})`}`}${intake.judge === undefined ? "" : `, judged by ${intake.judge}`}, $${intake.spentUsd.toFixed(4)} of $${intake.sessionMaxUsd.toFixed(2)} this session${intake.last === undefined ? "" : `; last pass ${intake.last.status}: ${intake.last.sources} source(s), ${intake.last.created} created, ${intake.last.refused} refused`}`,
-				]),
+					words.intake(
+						intake.state === "active"
+							? words.intakeOn
+							: words.intakeOff(
+									intake.reason === undefined ? "" : words.intakeReason(plainLabel(intake.reason)),
+								),
+						intake.judge === undefined ? "" : words.intakeJudgedBy(intake.judge),
+						intake.spentUsd.toFixed(4),
+						intake.sessionMaxUsd.toFixed(2),
+						intake.last === undefined
+							? ""
+							: words.intakeLast(
+									intake.last.status,
+									intake.last.sources,
+									intake.last.created,
+									intake.last.refused,
+								),
+					),
+				];
+	return [
+		words.on(settings.enabled),
+		words.reviewBounds(
+			Math.round(settings.idleDelayMs / 1000),
+			settings.minOwnerTurnsBetweenRuns,
+			settings.maxRunsPerSession,
+			settings.maxNotesPerRun,
+			settings.maxUsd.toFixed(2),
+		),
+		words.dailyBounds(settings.maxUsdPerDay.toFixed(2), settings.maxTurnWakesPerDay),
+		words.delivery(settings.delivery === "turn"),
+		words.preferences(settings.preferences.length > 0 ? settings.preferences : words.none),
+		words.ciEvents(settings.ciEvents),
+		...intakeState,
 		...(measured === undefined
 			? []
-			: [
-					`Last measured: $${measured.reviewUsd.toFixed(4)} review spend, ${measured.turnWakes} parent-turn wake(s) (${measured.eventWakes} by CI events) in the rolling 24 h`,
-				]),
-		...suppressed.map(
-			(topic) =>
-				`Set aside after unanswered or declined notes: ${topic.label}, until ${new Date(topic.until).toISOString()}`,
-		),
-		...(skip === undefined ? [] : [`Last gate: ${plainLabel(skip)}`]),
-		...(lastDelivery === undefined ? [] : [`Last note delivery: ${delivered(lastDelivery)}`]),
-		...(lastEventDelivery === undefined ? [] : [`Last CI event delivery: ${delivered(lastEventDelivery)}`]),
+			: [words.lastMeasured(measured.reviewUsd.toFixed(4), measured.turnWakes, measured.eventWakes)]),
+		...suppressed.map((topic) => words.setAside(topic.label, new Date(topic.until).toISOString())),
+		...(skip === undefined ? [] : [words.lastGate(plainLabel(skip))]),
+		...(lastDelivery === undefined ? [] : [words.lastNoteDelivery(delivered(lastDelivery))]),
+		...(lastEventDelivery === undefined ? [] : [words.lastEventDelivery(delivered(lastEventDelivery))]),
 	].join("\n");
 }
 
 export function handleProactivityCommand(host: ProactivityHost, text: string): void {
+	const labels = interfaceText().autonomyCommands.proactivity;
 	const action = text.slice("/proactivity".length).trim() || "status";
 	const settings = host.settingsManager.getProactivitySettings();
 	if (action === "status") {
@@ -82,31 +105,31 @@ export function handleProactivityCommand(host: ProactivityHost, text: string): v
 	}
 	if (action === "on" || action === "off") {
 		host.settingsManager.setProactivitySettings(withProactivityChange(settings, { enabled: action === "on" }));
-		host.showStatus(
-			action === "on" ? "Proactivity on: idle reviews may raise notes." : "Proactivity off: no idle review runs.",
-		);
+		host.showStatus(action === "on" ? labels.switchedOn : labels.switchedOff);
 		return;
 	}
 	if (action === "review") {
-		host.showStatus("Proactive review: running…");
+		host.showStatus(labels.reviewRunning);
 		void host.session.backgroundLanes
 			.runProactiveReviewOnce()
 			.then((outcome) => {
 				if (!outcome.started) {
 					harnessLog.debug("ui", "proactive review skipped", { skipReason: outcome.skipReason });
-					host.showStatus(`Proactive review skipped: ${plainLabel(outcome.skipReason ?? "unknown")}`);
+					host.showStatus(labels.reviewSkipped(plainLabel(outcome.skipReason ?? "unknown")));
 					return;
 				}
 				if (outcome.deliveryHold !== undefined)
 					harnessLog.debug("ui", "proactive review notes held", { deliveryHold: outcome.deliveryHold });
 				host.showStatus(
 					outcome.delivered.length === 0
-						? "Proactive review: nothing to raise."
-						: `Proactive review raised ${outcome.delivered.length} note(s)${outcome.deliveryHold === undefined ? "." : `; they wait for your next turn (${plainLabel(outcome.deliveryHold)}).`}`,
+						? labels.reviewNothing
+						: `${labels.reviewRaised(outcome.delivered.length)}${
+								outcome.deliveryHold === undefined ? "." : labels.reviewHeld(plainLabel(outcome.deliveryHold))
+							}`,
 				);
 			})
 			.catch((error: unknown) => {
-				host.showStatus(`Proactive review failed: ${error instanceof Error ? error.message : String(error)}`);
+				host.showStatus(labels.reviewFailed(error instanceof Error ? error.message : String(error)));
 			});
 		return;
 	}
@@ -114,26 +137,22 @@ export function handleProactivityCommand(host: ProactivityHost, text: string): v
 		const words = action.slice("prefs".length).trim();
 		if (words.length === 0) {
 			host.showStatus(
-				settings.preferences.length > 0
-					? `Preferences: ${settings.preferences}`
-					: "No proactivity preferences are saved.",
+				settings.preferences.length > 0 ? labels.preferencesShown(settings.preferences) : labels.noPreferences,
 			);
 			return;
 		}
 		if (words === "clear") {
 			host.settingsManager.setProactivitySettings(withProactivityChange(settings, { preferences: "" }));
-			host.showStatus("Cleared. No proactivity preferences are saved.");
+			host.showStatus(labels.cleared);
 			return;
 		}
 		if (words.length > MAX_PROACTIVITY_PREFERENCES_CHARS) {
-			host.showStatus(
-				`Nothing changed: preferences are at most ${MAX_PROACTIVITY_PREFERENCES_CHARS} characters; that one is ${words.length}.`,
-			);
+			host.showStatus(labels.preferencesTooLong(MAX_PROACTIVITY_PREFERENCES_CHARS, words.length));
 			return;
 		}
 		host.settingsManager.setProactivitySettings(withProactivityChange(settings, { preferences: words }));
-		host.showStatus(`Saved. Every review reads: ${words}`);
+		host.showStatus(labels.preferencesSaved(words));
 		return;
 	}
-	host.showStatus(USAGE);
+	host.showStatus(labels.usage);
 }

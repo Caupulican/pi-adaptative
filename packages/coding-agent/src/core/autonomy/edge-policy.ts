@@ -4,6 +4,7 @@ import nodePath from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { SessionEntry } from "../../kernel/node.ts";
 import { MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS } from "../../kernel/tool-failure-memory.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { argvExecutions, type ShellExecutions, shellExecutions } from "../model-router/read-only-shell-policy.ts";
 import { matchToolkitScript, type ToolkitScript } from "../toolkit/script-registry.ts";
 import { expandPath } from "../tools/path-utils.ts";
@@ -40,19 +41,13 @@ export const EDGE_CLASSES = [
 ] as const;
 export type EdgeClass = (typeof EDGE_CLASSES)[number];
 
-export const EDGE_CLASS_DESCRIPTIONS: Readonly<Record<EdgeClass, string>> = {
-	"git.publish": "git push, tag, and release run without asking",
-	"package.publish": "publishing a package or image runs without asking",
-	"package.install": "installing a package runs without asking",
-	"destructive.fs":
-		"deleting the repository, a directory that contains it, the home directory, a filesystem root, or a disk, or discarding a shared worktree that holds another session's uncommitted work",
-	"settings.authority": "editing settings and credentials runs without asking",
-	"toolkit.script": "running registered dangerous toolkit scripts",
-	"operation.irreversible":
-		"an operation System One finds irreversible, outward or unsettled (code piped into an interpreter, a destructive command on an unexpanded variable, sending data off the machine, a write outside the task) that the owner's request does not ask for",
-	"agent.delegate": "a run carrying a third party's words hands work to another agent",
-	"forge.write": "a run carrying a third party's words acts on GitHub beyond reading (gh pr, issue, api writes)",
-};
+/**
+ * The owner's words for what each class lets run, by the class identifier. They are read when the list is drawn, so a
+ * language change reaches the next frame.
+ */
+export function edgeClassDescriptions(): Readonly<Record<EdgeClass, string>> {
+	return interfaceText().autonomyCommands.edge.descriptions;
+}
 
 /** Classes a tool call can still make the operator confirm. The other names stay for grants. */
 export function edgeClassRequiresConfirmation(edgeClass: EdgeClass): boolean {

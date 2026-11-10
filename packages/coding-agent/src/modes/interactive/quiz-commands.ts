@@ -4,6 +4,7 @@
  * only: taking it, skipping it or failing it changes nothing about the work.
  */
 import type { HumanInputPresentationRequest, HumanInputPresentationResult } from "../../core/human-input.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { buildChangeQuiz, scoreChangeQuiz } from "../../core/proof/change-quiz.ts";
 import type { ProofSheetRecord } from "../../core/proof/proof-sheet.ts";
 
@@ -16,11 +17,14 @@ export interface QuizCommandHost {
 	showText(text: string): void;
 }
 
-export const QUIZ_USAGE = "/quiz asks a few questions about the newest finished result";
+/** What `/quiz` answers with when it is given an argument it does not take. */
+export function quizUsage(): string {
+	return interfaceText().autonomyCommands.quiz.usage;
+}
 
 export async function handleQuizCommand(host: QuizCommandHost, text: string): Promise<void> {
 	if (text.replace(/^\/quiz\b/, "").trim().length > 0) {
-		host.showError(QUIZ_USAGE);
+		host.showError(quizUsage());
 		return;
 	}
 	const quiz = buildChangeQuiz(host.latestProofSheet());
@@ -29,7 +33,7 @@ export async function handleQuizCommand(host: QuizCommandHost, text: string): Pr
 		return;
 	}
 	if (!host.askQuestions) {
-		host.showError("The quiz needs the question panel, which this mode does not have.");
+		host.showError(interfaceText().autonomyCommands.quiz.needsPanel);
 		return;
 	}
 	const result = await host.askQuestions({
@@ -43,12 +47,14 @@ export async function handleQuizCommand(host: QuizCommandHost, text: string): Pr
 		})),
 	});
 	if (result.cancelled) {
-		host.showText("Quiz closed; nothing changed.");
+		host.showText(interfaceText().autonomyCommands.quiz.closed);
 		return;
 	}
 	const picked = quiz.questions.map((entry) => {
 		const answer = result.answers.find((candidate) => candidate.id === entry.id);
 		return answer && !answer.skipped ? (answer.selected[0] ?? answer.custom) : undefined;
 	});
-	host.showText([`Quiz on "${quiz.subject}"`, scoreChangeQuiz(quiz.questions, picked)].join("\n"));
+	host.showText(
+		[interfaceText().autonomyCommands.quiz.subject(quiz.subject), scoreChangeQuiz(quiz.questions, picked)].join("\n"),
+	);
 }

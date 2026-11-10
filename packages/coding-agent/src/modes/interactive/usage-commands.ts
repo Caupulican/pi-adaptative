@@ -11,6 +11,7 @@ import { consumeOpenAICodexRateLimitResetCredit, listOpenAICodexRateLimitResetCr
 import type { Component } from "@caupulican/pi-tui";
 import type { AgentSessionEvent } from "../../core/agent-session-contracts.ts";
 import type { SessionCostSummary, SessionTaskAndModelSummary } from "../../core/cost/cost-summary.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { resolveProviderAccountKey } from "../../core/provider-admission/account-key.ts";
 import type { AccountUsageMonitor } from "../../core/provider-admission/account-usage-monitor.ts";
 import type { ProviderLoadView } from "../../core/provider-admission/load-view.ts";
@@ -98,8 +99,17 @@ const DEFAULT_RESET_CLIENT: OpenAICodexUsageResetClient = {
 	consume: consumeOpenAICodexRateLimitResetCredit,
 };
 
+/** The interface language's date and time form, for a moment the owner reads on screen. */
+function localeDateTime(at: string): string {
+	return interfaceText().reports.formats.dateTime(at);
+}
+
 function formatError(error: unknown): string {
-	return normalizedCopy(error instanceof Error ? error.message : String(error), "Unknown error", 2_000);
+	return normalizedCopy(
+		error instanceof Error ? error.message : String(error),
+		interfaceText().reports.usageMenu.unknownError,
+		2_000,
+	);
 }
 
 function accountRequestOptions(auth: UsageResetAuth): OpenAICodexAccountRequestOptions {
@@ -123,13 +133,15 @@ function normalizedCopy(value: string | undefined, fallback: string, maxChars = 
 }
 
 function expirationDetail(expiresAt: string | undefined): string {
-	if (!expiresAt) return "Does not expire";
+	const text = interfaceText().reports.usageMenu;
+	if (!expiresAt) return text.doesNotExpire;
 	const date = new Date(expiresAt);
-	if (Number.isNaN(date.getTime())) return "Expiration unavailable";
-	return `Expires ${new Intl.DateTimeFormat(undefined, { dateStyle: "medium", timeStyle: "short" }).format(date)}`;
+	if (Number.isNaN(date.getTime())) return text.expirationUnavailable;
+	return text.expires(localeDateTime(expiresAt));
 }
 
 export function resetCreditOptions(summary: OpenAICodexRateLimitResetCredits): ResetCreditOption[] {
+	const text = interfaceText().reports.usageMenu;
 	const available = summary.credits
 		.filter((credit) => credit.status === "available" && credit.resetType === "codex_rate_limits")
 		.sort((left, right) => {
@@ -146,9 +158,9 @@ export function resetCreditOptions(summary: OpenAICodexRateLimitResetCredits): R
 		return [
 			{
 				value: "credit:automatic",
-				title: "Full reset",
-				detail: "Backend-selected reset",
-				description: "Reset your current eligible usage limits.",
+				title: text.fullReset,
+				detail: text.backendSelected,
+				description: text.resetDescription,
 			},
 		];
 	}
@@ -156,9 +168,9 @@ export function resetCreditOptions(summary: OpenAICodexRateLimitResetCredits): R
 	return available.map((credit: OpenAICodexRateLimitResetCredit, index) => ({
 		value: `credit:${index}`,
 		creditId: credit.id,
-		title: normalizedCopy(credit.title, "Full reset", 120),
+		title: normalizedCopy(credit.title, text.fullReset, 120),
 		detail: expirationDetail(credit.expiresAt),
-		description: normalizedCopy(credit.description, "Reset your current eligible usage limits."),
+		description: normalizedCopy(credit.description, text.resetDescription),
 	}));
 }
 
@@ -259,16 +271,17 @@ function openUsageDashboard(host: UsageCommandHost, client: OpenAICodexUsageRese
 }
 
 async function loadResetCredits(host: UsageCommandHost, client: OpenAICodexUsageResetClient): Promise<void> {
+	const text = interfaceText().reports.usageMenu;
 	const model = codexSubscriptionModel(host);
 	if (!model) {
-		host.showError("Usage limit resets need an OpenAI Codex subscription login (/login).");
+		host.showError(text.needsLogin);
 		return;
 	}
 
-	host.showStatus("Checking available usage limit resets...");
+	host.showStatus(text.checking);
 	try {
 		const accessToken = await host.modelRegistry.getApiKeyForProvider(model.provider);
-		if (!accessToken) throw new Error("OpenAI Codex subscription credentials are unavailable. Run /login.");
+		if (!accessToken) throw new Error(text.credentialsUnavailable);
 		const auth = {
 			accessToken,
 			baseUrl: model.baseUrl,
@@ -277,12 +290,12 @@ async function loadResetCredits(host: UsageCommandHost, client: OpenAICodexUsage
 		const summary = await client.list(accountRequestOptions(auth));
 		const options = resetCreditOptions(summary);
 		if (summary.availableCount === 0 || options.length === 0) {
-			host.showStatus("No usage limit resets are available for this OpenAI subscription.");
+			host.showStatus(text.noneAvailable);
 			return;
 		}
 		showResetCreditPicker(host, client, auth, summary.availableCount, options);
 	} catch (error) {
-		host.showError(`Couldn't load usage limit resets: ${formatError(error)}`);
+		host.showError(text.loadFailed(formatError(error)));
 	}
 }
 
@@ -293,13 +306,14 @@ function showResetCreditPicker(
 	availableCount: number,
 	options: ResetCreditOption[],
 ): void {
+	const text = interfaceText().reports.usageMenu;
 	host.showSelector((done) => {
 		const selector = new UsageActionSelectorComponent({
-			title: "Usage limit resets",
-			subtitle: `${availableCount} ${availableCount === 1 ? "reset" : "resets"} available.`,
+			title: text.pickerTitle,
+			subtitle: text.pickerSubtitle(availableCount),
 			items: [
 				...options.map((option) => ({ value: option.value, label: option.title, description: option.detail })),
-				{ value: "cancel", label: "Cancel", description: "Keep current usage windows" },
+				{ value: "cancel", label: text.cancel, description: text.keepWindows },
 			],
 			onSelect: (value) => {
 				if (value === "cancel") {
@@ -325,14 +339,15 @@ function showResetConfirmation(
 	options: ResetCreditOption[],
 	option: ResetCreditOption,
 ): void {
+	const text = interfaceText().reports.usageMenu;
 	const redeemRequestId = randomUUID();
 	host.showSelector((done) => {
 		const selector = new UsageActionSelectorComponent({
-			title: "Use this reset?",
-			subtitle: `${option.title} · ${option.detail}`,
+			title: text.confirmTitle,
+			subtitle: text.confirmSubtitle(option.title, option.detail),
 			items: [
-				{ value: "confirm", label: "Yes, use reset", description: option.description },
-				{ value: "cancel", label: "No, go back", description: "Choose a different reset" },
+				{ value: "confirm", label: text.confirmYes, description: option.description },
+				{ value: "cancel", label: text.confirmNo, description: text.chooseAnother },
 			],
 			initialSelectedIndex: 1,
 			onSelect: (value) => {
@@ -356,7 +371,8 @@ async function consumeResetCredit(
 	option: ResetCreditOption,
 	redeemRequestId: string,
 ): Promise<void> {
-	host.showStatus("Resetting OpenAI subscription usage...");
+	const text = interfaceText().reports.usageMenu;
+	host.showStatus(text.resetting);
 	try {
 		const result = await client.consume(accountRequestOptions(auth), redeemRequestId, option.creditId);
 		switch (result.outcome) {
@@ -366,14 +382,14 @@ async function consumeResetCredit(
 				await refreshAfterReset(host, client, auth);
 				return;
 			case "nothing_to_reset":
-				host.showStatus("Your OpenAI subscription usage does not need a reset right now.");
+				host.showStatus(text.nothingToReset);
 				return;
 			case "no_credit":
-				host.showStatus("That usage limit reset is no longer available.");
+				host.showStatus(text.creditGone);
 				return;
 		}
 	} catch (error) {
-		host.showError(`Couldn't reset OpenAI subscription usage: ${formatError(error)}`);
+		host.showError(text.resetFailed(formatError(error)));
 		showResetRetry(host, client, auth, option, redeemRequestId);
 	}
 }
@@ -383,13 +399,12 @@ async function refreshAfterReset(
 	client: OpenAICodexUsageResetClient,
 	auth: UsageResetAuth,
 ): Promise<void> {
+	const text = interfaceText().reports.usageMenu;
 	try {
 		const summary = await client.list(accountRequestOptions(auth));
-		host.showStatus(
-			`Usage reset. You have ${summary.availableCount} ${summary.availableCount === 1 ? "reset" : "resets"} left.`,
-		);
+		host.showStatus(text.afterReset(summary.availableCount));
 	} catch {
-		host.showStatus("Usage reset. Remaining reset availability could not be refreshed.");
+		host.showStatus(text.afterResetStale);
 	}
 }
 
@@ -400,13 +415,14 @@ function showResetRetry(
 	option: ResetCreditOption,
 	redeemRequestId: string,
 ): void {
+	const text = interfaceText().reports.usageMenu;
 	host.showSelector((done) => {
 		const selector = new UsageActionSelectorComponent({
-			title: "Reset failed",
-			subtitle: "Retry the same reset?",
+			title: text.retryTitle,
+			subtitle: text.retrySubtitle,
 			items: [
-				{ value: "retry", label: "Try again", description: "Send the same reset request again" },
-				{ value: "cancel", label: "Cancel", description: "Leave usage unchanged" },
+				{ value: "retry", label: text.retryYes, description: text.retryYesDescription },
+				{ value: "cancel", label: text.cancel, description: text.retryNoDescription },
 			],
 			initialSelectedIndex: 1,
 			onSelect: (value) => {

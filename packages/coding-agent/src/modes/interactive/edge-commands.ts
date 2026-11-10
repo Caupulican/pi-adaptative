@@ -7,13 +7,14 @@
  * machine's settings (`edge.allow`).
  */
 import {
-	EDGE_CLASS_DESCRIPTIONS,
 	EDGE_CLASSES,
 	type EdgeClass,
 	type EdgeGrantView,
+	edgeClassDescriptions,
 	edgeClassRequiresConfirmation,
 	isEdgeClass,
 } from "../../core/autonomy/edge-policy.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 
 export interface EdgeHost {
 	getEdgeGrants(): EdgeGrantView[];
@@ -51,27 +52,30 @@ export function resolveEdgeTargets(tokens: readonly string[]): { classes: EdgeCl
 }
 
 function describeGrant(grant: EdgeGrantView): string {
+	const words = interfaceText().autonomyCommands.edge;
 	const from =
 		grant.source === "instructions"
-			? `instructions${grant.quote ? ` — "${grant.quote}"` : ""}`
+			? words.fromInstructions(grant.quote ? words.fromInstructionsQuote(grant.quote) : "")
 			: grant.source === "operator"
-				? `this session${grant.note ? ` — ${grant.note}` : ""}`
-				: "settings (edge.allow)";
-	return `granted · ${from}`;
+				? words.fromSession(grant.note ? words.fromSessionNote(grant.note) : "")
+				: words.fromSettings;
+	return words.granted(from);
 }
 
 export async function handleEdgeCommand(host: EdgeHost, text: string): Promise<void> {
 	const args = text.replace(/^\/edge\b/, "").trim();
 	const [action = "list", target, ...rest] = args.split(/\s+/).filter(Boolean);
 	if (action === "list" || action === "") {
+		const words = interfaceText().autonomyCommands.edge;
+		const descriptions = edgeClassDescriptions();
 		const grants = new Map(host.getEdgeGrants().map((grant) => [grant.class, grant]));
 		host.showText(
 			[
-				`Edge — ${grants.size} of ${EDGE_CLASSES.length} classes granted; an ungranted destructive.fs or toolkit.script asks once`,
+				words.summary(grants.size, EDGE_CLASSES.length),
 				...EDGE_CLASSES.map((cls) => {
 					const grant = grants.get(cls);
-					const pending = edgeClassRequiresConfirmation(cls) ? "asks" : "runs";
-					return `${grant ? "✓" : "·"} ${cls} — ${EDGE_CLASS_DESCRIPTIONS[cls]}\n   ${grant ? describeGrant(grant) : pending}`;
+					const pending = edgeClassRequiresConfirmation(cls) ? words.asks : words.runs;
+					return `${grant ? "✓" : "·"} ${cls} — ${descriptions[cls]}\n   ${grant ? describeGrant(grant) : pending}`;
 				}),
 				EDGE_USAGE,
 			].join("\n"),
@@ -79,9 +83,10 @@ export async function handleEdgeCommand(host: EdgeHost, text: string): Promise<v
 		return;
 	}
 	if (action === "allow" || action === "revoke") {
+		const words = interfaceText().autonomyCommands.edge;
 		const targets = resolveEdgeTargets(target === undefined ? [] : [target, ...rest]);
 		if (!targets) {
-			host.showError(`${EDGE_USAGE} — classes: ${EDGE_CLASSES.join(", ")}, or all`);
+			host.showError(`${EDGE_USAGE} — ${words.unknownTarget(EDGE_CLASSES.join(", "))}`);
 			return;
 		}
 		if (action === "allow") {
@@ -90,8 +95,8 @@ export async function handleEdgeCommand(host: EdgeHost, text: string): Promise<v
 			for (const cls of targets.classes) await host.grantEdge(cls, targets.note);
 			host.showStatus(
 				targets.classes.length === EDGE_CLASSES.length
-					? "Edge: every class granted for this session; nothing will ask until revoked."
-					: `Edge: ${targets.classes.join(", ")} granted for this session; ${targets.classes.length === 1 ? "it" : "they"} will not ask.`,
+					? words.everyClassGranted
+					: words.classesGranted(targets.classes.join(", "), targets.classes.length === 1),
 			);
 			return;
 		}
@@ -101,15 +106,13 @@ export async function handleEdgeCommand(host: EdgeHost, text: string): Promise<v
 		host.showStatus(
 			[
 				revoked.length > 0
-					? `Edge: ${revoked.join(", ")} revoked${
+					? `${words.revoked(revoked.join(", "))}${
 							revoked.some((cls) => edgeClassRequiresConfirmation(cls))
-								? `; ${revoked.length === 1 ? "it asks" : "they ask"} again.`
+								? words.revokedAsksAgain(revoked.length === 1)
 								: "."
 						}`
 					: "",
-				untouched.length > 0
-					? `Edge: ${untouched.join(", ")} ${untouched.length === 1 ? "was" : "were"} not granted in this session (a settings grant is changed in edge.allow).`
-					: "",
+				untouched.length > 0 ? words.notGranted(untouched.join(", "), untouched.length === 1) : "",
 			]
 				.filter(Boolean)
 				.join(" "),

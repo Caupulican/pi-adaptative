@@ -4,6 +4,7 @@
  * screen; the typed command is their evidence, so no judge runs and nothing is spent.
  */
 import type { AgentSession } from "../../core/agent-session.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { KnowledgeOwnerControls } from "../../core/memory/knowledge-admission.ts";
 import {
 	KNOWLEDGE_KINDS,
@@ -37,23 +38,27 @@ export function bounded(text: string, max: number): string {
 }
 
 function validity(record: KnowledgeRecord, at: string): string {
-	if (record.validFrom > at) return `future, from ${record.validFrom}`;
-	if (record.validUntil !== undefined && record.validUntil <= at) return `expired ${record.validUntil}`;
-	return "current";
+	const words = interfaceText().knowledgeCommands.knowledge;
+	if (record.validFrom > at) return words.validityFuture(record.validFrom);
+	if (record.validUntil !== undefined && record.validUntil <= at) return words.validityExpired(record.validUntil);
+	return words.validityCurrent;
 }
 
 function reach(record: KnowledgeRecord): string {
-	return record.scope.project ? "this project" : "global";
+	const words = interfaceText().knowledgeCommands.knowledge;
+	return record.scope.project ? words.reachProject : words.reachGlobal;
 }
 
 function provenance(citation: KnowledgeCitation): string {
-	return citation.sourceId.startsWith(OWNER_COMMAND_SOURCE_PREFIX) ? "owner command" : "owner message";
+	const words = interfaceText().knowledgeCommands.knowledge;
+	return citation.sourceId.startsWith(OWNER_COMMAND_SOURCE_PREFIX) ? words.ownerCommand : words.ownerMessage;
 }
 
 function summaryLine(record: KnowledgeRecord, at: string): string {
+	const words = interfaceText().knowledgeCommands.knowledge;
 	return [
-		`${record.id.slice(0, SHORT_ID)}  ${record.kind} · ${reach(record)} · r${record.revision} · ${record.basis} · ${validity(record, at)} · evidenced ${record.lastEvidencedAt.slice(0, 10)}`,
-		`    ${bounded(record.subject, 80)} / ${bounded(record.key, 80)}: ${bounded(record.text, 160)}`,
+		`${record.id.slice(0, SHORT_ID)}  ${record.kind} · ${reach(record)} · ${words.shortRevision(record.revision)} · ${record.basis} · ${validity(record, at)} · ${words.evidenced(record.lastEvidencedAt.slice(0, 10))}`,
+		words.summaryBody(bounded(record.subject, 80), bounded(record.key, 80), bounded(record.text, 160)),
 	].join("\n");
 }
 
@@ -65,12 +70,12 @@ function parseCount(token: string | undefined, minimum: number): number | undefi
 
 /** A full id or a unique prefix of at least eight characters, live in the owner's scope. */
 function resolveRecord(controls: KnowledgeOwnerControls, token: string | undefined): KnowledgeRecord | string {
+	const words = interfaceText().knowledgeCommands.knowledge;
 	const prefix = token?.toLowerCase();
-	if (!prefix || !/^[a-f0-9]{8,64}$/.test(prefix))
-		return "Name a knowledge record by its id or its first 8 or more characters (see /knowledge list).";
+	if (!prefix || !/^[a-f0-9]{8,64}$/.test(prefix)) return words.needId;
 	const matches = controls.store.resolve(controls.scope, prefix);
-	if (matches.length === 0) return `No current knowledge record ${prefix} in this scope.`;
-	if (matches.length > 1) return `${prefix} matches more than one record; type more of its id.`;
+	if (matches.length === 0) return words.unknownRecord(prefix);
+	if (matches.length > 1) return words.ambiguousRecord(prefix);
 	return matches[0]!;
 }
 
@@ -87,56 +92,64 @@ function listText(controls: KnowledgeOwnerControls, args: readonly string[]): st
 	}
 	const revision = controls.store.revision();
 	const records = controls.store.list(controls.scope, { kind, reach: range, after, limit: LIST_PAGE });
-	const filter = [kind, range === undefined ? undefined : range === "global" ? "global" : "this project"]
+	const words = interfaceText().knowledgeCommands.knowledge;
+	const filter = [kind, range === undefined ? undefined : range === "global" ? words.reachGlobal : words.reachProject]
 		.filter((part) => part !== undefined)
 		.join(", ");
-	if (records.length === 0)
-		return after
-			? "No more accepted knowledge records."
-			: `No accepted knowledge records${filter ? ` (${filter})` : ""}.`;
+	if (records.length === 0) return after ? words.noMore : words.none(filter ? ` (${filter})` : "");
 	const at = new Date().toISOString();
+	const query = [kind, range, records.at(-1)!.id].filter((part) => part !== undefined).join(" ");
 	return [
-		`Accepted knowledge, revision ${revision}${filter ? ` (${filter})` : ""}:`,
+		words.listHead(revision, filter ? ` (${filter})` : ""),
 		...records.map((record) => summaryLine(record, at)),
-		...(records.length === LIST_PAGE
-			? [`More: /knowledge list ${[kind, range, records.at(-1)!.id].filter((part) => part !== undefined).join(" ")}`]
-			: []),
-		"/knowledge show <id> for provenance · history <id> · correct <id> <new value> · forget <id>",
+		...(records.length === LIST_PAGE ? [words.listMore(query)] : []),
+		words.listHint,
 	].join("\n");
 }
 
 function showText(record: KnowledgeRecord, offset: number): string {
+	const words = interfaceText().knowledgeCommands.knowledge;
 	const page = record.citations.slice(offset, offset + CITATION_PAGE);
 	const short = record.id.slice(0, SHORT_ID);
+	const until = record.validUntil === undefined ? "" : words.validUntilPart(record.validUntil);
 	return [
-		`Knowledge ${record.id}`,
-		`  ${record.kind} · ${reach(record)} · revision ${record.revision} · ${record.basis} · ${validity(record, new Date().toISOString())}`,
-		`  ${bounded(record.subject, 200)} / ${bounded(record.key, 200)}`,
-		`  Value: ${bounded(record.text, MAX_KNOWLEDGE_TEXT_CHARS)}`,
-		`  Evidenced: first ${record.firstEvidencedAt}, last ${record.lastEvidencedAt}`,
-		`  Valid: from ${record.validFrom}${record.validUntil === undefined ? "" : ` until ${record.validUntil}`}`,
-		`  Evidence of this revision (${offset + 1}-${offset + page.length} of ${record.citations.length}; earlier revisions keep theirs in /knowledge history ${short}):`,
-		...page.map(
-			(citation) =>
-				`  - ${provenance(citation)}, ${citation.at}, session ${bounded(citation.sessionId, 80)}, source ${bounded(citation.sourceId, 100)}\n      "${bounded(citation.quote, 240)}"`,
+		words.title(record.id),
+		`  ${record.kind} · ${reach(record)} · ${words.revision(record.revision)} · ${record.basis} · ${validity(record, new Date().toISOString())}`,
+		words.factLine(bounded(record.subject, 200), bounded(record.key, 200)),
+		words.value(bounded(record.text, MAX_KNOWLEDGE_TEXT_CHARS)),
+		words.evidencedRange(record.firstEvidencedAt, record.lastEvidencedAt),
+		words.validRange(record.validFrom, until),
+		words.evidenceHead(offset + 1, offset + page.length, record.citations.length, short),
+		...page.map((citation) =>
+			words.citation(
+				provenance(citation),
+				citation.at,
+				bounded(citation.sessionId, 80),
+				bounded(citation.sourceId, 100),
+				bounded(citation.quote, 240),
+			),
 		),
-		...(record.citations.length > offset + page.length
-			? [`More evidence: /knowledge show ${short} ${offset + page.length}`]
-			: []),
+		...(record.citations.length > offset + page.length ? [words.moreEvidence(short, offset + page.length)] : []),
 	].join("\n");
 }
 
 function historyText(controls: KnowledgeOwnerControls, record: KnowledgeRecord, before?: number): string {
+	const words = interfaceText().knowledgeCommands.knowledge;
 	const versions = controls.store.history(record.id, before).slice(0, HISTORY_PAGE);
 	const short = record.id.slice(0, SHORT_ID);
-	if (versions.length === 0) return `No earlier revisions of ${short}.`;
+	if (versions.length === 0) return words.historyNone(short);
 	return [
-		`Revisions of ${short} (${bounded(record.subject, 80)} / ${bounded(record.key, 80)}), newest first:`,
-		...versions.map(
-			(version) =>
-				`  r${version.revision} · ${version.basis} · evidenced ${version.lastEvidencedAt} · ${[...new Set(version.citations.map(provenance))].join(", ")}\n    ${bounded(version.text, 240)}`,
+		words.historyHead(short, bounded(record.subject, 80), bounded(record.key, 80)),
+		...versions.map((version) =>
+			words.historyVersion(
+				version.revision,
+				version.basis,
+				version.lastEvidencedAt,
+				[...new Set(version.citations.map(provenance))].join(", "),
+				bounded(version.text, 240),
+			),
 		),
-		...(versions.length === HISTORY_PAGE ? [`More: /knowledge history ${short} ${versions.at(-1)!.revision}`] : []),
+		...(versions.length === HISTORY_PAGE ? [words.historyMore(short, versions.at(-1)!.revision)] : []),
 	].join("\n");
 }
 
@@ -148,6 +161,7 @@ async function change(
 	token: string | undefined,
 	value: string | undefined,
 ): Promise<void> {
+	const words = interfaceText().knowledgeCommands.knowledge;
 	const record = resolveRecord(controls, token);
 	if (typeof record === "string") {
 		host.showError(record);
@@ -155,27 +169,33 @@ async function change(
 	}
 	// The typed command is retained as the change's evidence quote, under the same bound as any citation.
 	if (text.length > MAX_KNOWLEDGE_TEXT_CHARS) {
-		host.showError(`Nothing changed: the command is longer than ${MAX_KNOWLEDGE_TEXT_CHARS} characters.`);
+		host.showError(words.commandTooLong(MAX_KNOWLEDGE_TEXT_CHARS));
 		return;
 	}
 	const confirm = host.session.ownerConfirm;
 	if (!confirm) {
-		host.showError("Nothing changed: owner confirmation is unavailable.");
+		host.showError(words.noConfirmation);
 		return;
 	}
 	const fact = `${bounded(record.subject, 80)} / ${bounded(record.key, 80)}`;
 	const confirmed =
 		action === "forget"
 			? await confirm(
-					"Forget knowledge",
-					`Forget this ${record.kind} fact at revision ${record.revision}? Its value, revision history and names are removed; only owner evidence newer than this request can teach it again.\n${fact}: ${bounded(record.text, 240)}`,
+					words.forgetTitle,
+					words.forgetQuestion(record.kind, record.revision, fact, bounded(record.text, 240)),
 				)
 			: await confirm(
-					"Correct knowledge",
-					`Replace the value of this ${record.kind} fact at revision ${record.revision}?\n${fact}\nNow: ${bounded(record.text, 240)}\nNew: ${bounded(value ?? "", 240)}`,
+					words.correctTitle,
+					words.correctQuestion(
+						record.kind,
+						record.revision,
+						fact,
+						bounded(record.text, 240),
+						bounded(value ?? "", 240),
+					),
 				);
 	if (!confirmed) {
-		host.showStatus("Nothing changed: the owner did not confirm.");
+		host.showStatus(words.notConfirmed);
 		return;
 	}
 	const outcome = controls.command(
@@ -184,14 +204,12 @@ async function change(
 			: { action, id: record.id, expectedRevision: record.revision, text: value ?? "", command: text },
 	);
 	if (outcome.status === "held") {
-		host.showError(`Nothing changed: ${outcome.reason}.`);
+		host.showError(words.held(outcome.reason));
 		return;
 	}
 	const short = record.id.slice(0, SHORT_ID);
 	host.showStatus(
-		action === "forget"
-			? `Forgot ${short} (revision ${outcome.revision}). Only newer owner evidence can teach it again.`
-			: `Corrected ${short}: revision ${outcome.revision} holds the new value; the previous one stays in its history.`,
+		action === "forget" ? words.forgot(short, outcome.revision) : words.corrected(short, outcome.revision),
 	);
 }
 
@@ -203,7 +221,7 @@ export async function handleKnowledgeCommand(host: KnowledgeCommandHost, text: s
 		.filter(Boolean);
 	const controls = host.session.memoryOperator.getKnowledgeOwnerControls();
 	if (!controls) {
-		host.showError("Owner knowledge is available while ICM memory is active in a root session.");
+		host.showError(interfaceText().knowledgeCommands.knowledge.unavailable);
 		return;
 	}
 	try {
@@ -245,6 +263,8 @@ export async function handleKnowledgeCommand(host: KnowledgeCommandHost, text: s
 		}
 		host.showError(KNOWLEDGE_COMMAND_USAGE);
 	} catch (error) {
-		host.showError(`Knowledge: ${error instanceof Error ? error.message : String(error)}`);
+		host.showError(
+			interfaceText().knowledgeCommands.knowledge.failed(error instanceof Error ? error.message : String(error)),
+		);
 	}
 }

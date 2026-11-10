@@ -11,6 +11,7 @@ import {
 	sanitizeTranscriptHistoryForDiagnostics,
 	type TranscriptHistoryStatus,
 } from "../../core/context/memory-diagnostics.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { KnowledgeCollectionStatus } from "../../core/memory/knowledge-collector.ts";
 import type { ManagedMemoryDriftEntry, ManagedMemoryTarget } from "../../core/memory/providers/file-store.ts";
 
@@ -38,17 +39,17 @@ export const MEMORY_COMMAND_USAGE =
 const TARGETS = new Set<ManagedMemoryTarget>(["memory", "project", "user"]);
 
 function describe(entry: ManagedMemoryDriftEntry): string {
+	const words = interfaceText().knowledgeCommands.memory;
 	const state =
 		entry.stateStatus !== "valid"
-			? `managed state ${entry.stateStatus}`
+			? words.managedState(entry.stateStatus)
 			: entry.drift
 				? entry.emptyOnDisk
-					? "EMPTY on disk — drifted"
-					: "drifted (edited outside the managed protocol)"
-				: "in sync";
-	const managed =
-		entry.managedChars !== undefined ? `managed ${entry.managedChars} chars stored` : "managed content not stored";
-	return `- ${entry.target}: ${entry.label} — ${state}; on disk ${entry.currentChars} chars; ${managed}\n  ${entry.path}`;
+					? words.empty
+					: words.driftedOne
+				: words.inSyncOne;
+	const managed = entry.managedChars !== undefined ? words.managedChars(entry.managedChars) : words.managedMissing;
+	return words.entryLine(entry.target, entry.label, state, entry.currentChars, managed, entry.path);
 }
 
 /**
@@ -56,50 +57,49 @@ function describe(entry: ManagedMemoryDriftEntry): string {
  * text the model-facing projection withholds (it may name a path). No history content is printed.
  */
 function describeHistory(status: TranscriptHistoryStatus): string {
+	const words = interfaceText().knowledgeCommands.memory;
 	const lines = formatTranscriptMemoryLines(sanitizeTranscriptHistoryForDiagnostics(status));
 	const indexingError = status.coverage?.lastError;
 	if (indexingError) {
 		const failing = (status.coverage?.activeFailures ?? 0) > 0;
 		lines.push(
-			`  ${failing ? "indexing error detail" : "historical indexing error detail, no source failing now"} (${indexingError.at}): ${indexingError.message}`,
+			failing
+				? words.historyIndexingError(indexingError.at, indexingError.message)
+				: words.historyOldIndexingError(indexingError.at, indexingError.message),
 		);
 	}
 	// Only a worker that stopped serving (it carries `stoppedAt`) is a transport failure; a child session, a
 	// memory switch or a failed start is not, and is labelled as plain unavailability.
 	if (status.unavailableReason) {
-		const label = status.transport?.stoppedAt !== undefined ? "transport stopped" : "history unavailable";
-		lines.push(`  ${label}: ${status.unavailableReason}`);
+		const label =
+			status.transport?.stoppedAt !== undefined ? words.historyTransportStopped : words.historyUnavailable;
+		lines.push(words.historyDetail(label, status.unavailableReason));
 	}
 	const retrievalError = status.latestRetrieval?.error;
-	if (retrievalError) lines.push(`  retrieval error detail: ${retrievalError}`);
+	if (retrievalError) lines.push(words.historyRetrievalError(retrievalError));
 	const hierarchy = status.hierarchy;
-	if (hierarchy?.disabledReason) lines.push(`  hierarchy not running: ${hierarchy.disabledReason}`);
-	if (hierarchy?.readAccessReason) lines.push(`  summary read access detail: ${hierarchy.readAccessReason}`);
+	if (hierarchy?.disabledReason) lines.push(words.historyHierarchyOff(hierarchy.disabledReason));
+	if (hierarchy?.readAccessReason) lines.push(words.historyReadAccess(hierarchy.readAccessReason));
 	for (const failure of hierarchy?.failures.slice(-5) ?? []) {
-		lines.push(`  hierarchy failure (level ${failure.level}, ${plainLabel(failure.reason)}): ${failure.message}`);
+		lines.push(words.historyFailure(failure.level, plainLabel(failure.reason), failure.message));
 	}
-	for (const issue of hierarchy?.recoveryIssues ?? []) lines.push(`  hierarchy recovery: ${issue}`);
+	for (const issue of hierarchy?.recoveryIssues ?? []) lines.push(words.historyRecovery(issue));
 	// One slot the next cause overwrites, not cleared when its condition ends: its time says how old it is.
 	const activeCause = hierarchy?.activeCause;
-	if (activeCause) {
-		lines.push(`  coordinator's latest fault (recorded ${activeCause.at}, may be over): ${activeCause.cause}`);
-	}
+	if (activeCause) lines.push(words.historyFault(activeCause.at, activeCause.cause));
 	const internalCause = hierarchy?.lastInternalError;
 	// The newest event is the active fault when nothing benign happened after it: shown once, as the fault.
 	if (
 		internalCause &&
 		!(activeCause && activeCause.cause === internalCause.cause && activeCause.at === internalCause.at)
 	) {
-		lines.push(
-			`  coordinator's latest internal cause (newest only, recorded ${internalCause.at}, may be over): ${internalCause.cause}`,
-		);
+		lines.push(words.historyInternalCause(internalCause.at, internalCause.cause));
 	}
 	const admission = hierarchy?.admission;
-	if (admission?.blocked) lines.push(`  model summaries held: ${admission.blocked.reason}`);
+	if (admission?.blocked) lines.push(words.historySummariesHeld(admission.blocked.reason));
 	if (admission?.heldReason) {
-		lines.push(
-			`  first held job cause${admission.heldKind !== undefined ? ` (hold: ${plainLabel(admission.heldKind)})` : ""}: ${admission.heldReason}`,
-		);
+		const hold = admission.heldKind !== undefined ? words.historyHeldKind(plainLabel(admission.heldKind)) : "";
+		lines.push(words.historyHeldJob(hold, admission.heldReason));
 	}
 	return lines.join("\n");
 }
@@ -110,15 +110,15 @@ export async function handleMemoryCommand(host: MemoryCommandHost, text: string)
 	if (action === "drift" || action === "") {
 		const entries = await host.memoryDriftReport();
 		if (entries.length === 0) {
-			host.showStatus("Managed memory is not available in this session.");
+			host.showStatus(interfaceText().knowledgeCommands.memory.unavailable);
 			return;
 		}
 		const drifted = entries.filter((entry) => entry.drift).length;
 		host.showText(
 			[
 				drifted
-					? `${drifted} managed memory file${drifted > 1 ? "s" : ""} drifted — /memory accept <target> adopts the file, /memory restore <target> brings the managed content back`
-					: "Managed memory files are in sync with their managed revisions.",
+					? interfaceText().knowledgeCommands.memory.drifted(drifted)
+					: interfaceText().knowledgeCommands.memory.inSync,
 				...entries.map(describe),
 			].join("\n"),
 		);
@@ -140,9 +140,7 @@ export async function handleMemoryCommand(host: MemoryCommandHost, text: string)
 		if (target === "repair-forget") {
 			// Repairing an unknown forget state can make sessions forgotten only in lost records summarizable again.
 			if (rest.length !== 1 || rest[0] !== "I-accept-lost-forgets") {
-				host.showError(
-					"Acknowledge the possible loss to repair: /memory history repair-forget I-accept-lost-forgets",
-				);
+				host.showError(interfaceText().knowledgeCommands.memory.repairAcknowledge);
 				return;
 			}
 			const repaired = await host.repairHistoryForgetState();
@@ -154,9 +152,7 @@ export async function handleMemoryCommand(host: MemoryCommandHost, text: string)
 		const [sessionId, repeated] = rest;
 		if (target !== "forget" || sessionId === undefined || repeated !== sessionId || rest.length !== 2) {
 			host.showError(
-				target === "forget"
-					? "Repeat the session id to confirm: /memory history forget <session> <session>"
-					: MEMORY_COMMAND_USAGE,
+				target === "forget" ? interfaceText().knowledgeCommands.memory.repeatSessionId : MEMORY_COMMAND_USAGE,
 			);
 			return;
 		}
@@ -180,7 +176,7 @@ export async function handleMemoryCommand(host: MemoryCommandHost, text: string)
 	}
 	if (action === "system") {
 		if (target === undefined) {
-			host.showStatus(`Memory system: ${host.getMemorySystem()}`);
+			host.showStatus(interfaceText().knowledgeCommands.memory.system(host.getMemorySystem()));
 			return;
 		}
 		if (target !== "okf" && target !== "icm") {

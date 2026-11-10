@@ -3,6 +3,7 @@
  * reads; a plan runs, retries, joins and finishes without the owner typing anything.
  */
 import type { GoalState } from "../../core/goals/goal-state.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { planInspectionText } from "../../core/plan/plan-panel.ts";
 import type { PlanView } from "../../core/plan/plan-view.ts";
 
@@ -15,11 +16,14 @@ export interface PlanCommandHost {
 	showText(text: string): void;
 }
 
-export const PLAN_USAGE = "/plan shows the session's plans";
+/** What `/plan` answers with when it is given an argument it does not take. */
+export function planUsage(): string {
+	return interfaceText().autonomyCommands.plan.usage;
+}
 
 export function handlePlanCommand(host: PlanCommandHost, text: string): void {
 	if (text.replace(/^\/plan\b/, "").trim().length > 0) {
-		host.showError(PLAN_USAGE);
+		host.showError(planUsage());
 		return;
 	}
 	const requirements = new Map(

@@ -13,6 +13,7 @@ import type { Container, MarkdownTheme, TUI } from "@caupulican/pi-tui";
 import { getCapabilities, hyperlink, Markdown, Spacer, Text } from "@caupulican/pi-tui";
 import { APP_NAME, getAgentDir, VERSION } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
 import type {
 	PackageSource,
@@ -110,11 +111,11 @@ export async function checkTmuxKeyboardSetup(): Promise<string | undefined> {
 	if (extendedKeys === undefined) return undefined;
 
 	if (extendedKeys !== "on" && extendedKeys !== "always") {
-		return "tmux extended-keys is off. Modified Enter keys may not work. Add `set -g extended-keys on` to ~/.tmux.conf and restart tmux.";
+		return interfaceText().commandController.startup.tmuxExtendedKeys;
 	}
 
 	if (extendedKeysFormat === "xterm") {
-		return "tmux extended-keys-format is xterm. Pi works best with csi-u. Add `set -g extended-keys-format csi-u` to ~/.tmux.conf and restart tmux.";
+		return interfaceText().commandController.startup.tmuxExtendedKeysFormat;
 	}
 
 	return undefined;
@@ -166,10 +167,12 @@ export function showStartupNoticesIfNeeded(host: StartupChecksHost): void {
 	if (host.settingsManager.getCollapseChangelog()) {
 		const versionMatch = host.changelogMarkdown.match(/##\s+\[?(\d+\.\d+\.\d+)\]?/);
 		const latestVersion = versionMatch ? versionMatch[1] : host.version;
-		const condensedText = `Updated to v${latestVersion}. Use ${theme.bold("/changelog")} to view full changelog.`;
+		const condensedText = interfaceText().commandController.startup.updated(latestVersion, theme.bold("/changelog"));
 		host.chatContainer.addChild(new Text(condensedText, 1, 0));
 	} else {
-		host.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+		host.chatContainer.addChild(
+			new Text(theme.bold(theme.fg("accent", interfaceText().reports.changelog.title)), 1, 0),
+		);
 		host.chatContainer.addChild(new Spacer(1));
 		host.chatContainer.addChild(
 			new Markdown(host.changelogMarkdown.trim(), 1, 0, host.getMarkdownThemeWithSettings()),
@@ -188,14 +191,7 @@ export function renderProjectTrustWarningIfNeeded(host: StartupChecksHost): void
 		host.chatContainer.addChild(new Spacer(1));
 	}
 	host.chatContainer.addChild(
-		new Text(
-			theme.fg(
-				"warning",
-				"This project is not trusted. Project instructions (AGENTS.md/CLAUDE.md/GEMINI.md), .pi resources, and project packages are ignored. Use /trust to trust it.",
-			),
-			1,
-			0,
-		),
+		new Text(theme.fg("warning", interfaceText().commandController.startup.trustWarning), 1, 0),
 	);
 }
 
@@ -211,17 +207,22 @@ function finishWarningNotification(host: StartupChecksHost): void {
 
 export function showNewVersionNotification(host: StartupChecksHost, release: LatestPiRelease): void {
 	const action = theme.fg("accent", `${APP_NAME} update`);
-	const updateInstruction = theme.fg("muted", `New version ${release.version} is available. Run `) + action;
+	const updateInstruction =
+		theme.fg("muted", interfaceText().commandController.startup.newVersion(APP_NAME, release.version)) + action;
 	const changelogUrl = "https://github.com/Caupulican/pi-adaptative/blob/main/packages/coding-agent/CHANGELOG.md";
 	const changelogLink = getCapabilities().hyperlinks
-		? hyperlink(theme.fg("accent", "open changelog"), changelogUrl)
+		? hyperlink(theme.fg("accent", interfaceText().commandController.startup.openChangelog), changelogUrl)
 		: theme.fg("accent", changelogUrl);
-	const changelogLine = theme.fg("muted", "Changelog: ") + changelogLink;
+	const changelogLine = theme.fg("muted", interfaceText().commandController.startup.changelogLabel) + changelogLink;
 	const note = release.note?.trim();
 
 	beginWarningNotification(host);
 	host.chatContainer.addChild(
-		new Text(`${theme.bold(theme.fg("warning", "Update Available"))}\n${updateInstruction}`, 1, 0),
+		new Text(
+			`${theme.bold(theme.fg("warning", interfaceText().commandController.startup.updateAvailable))}\n${updateInstruction}`,
+			1,
+			0,
+		),
 	);
 	if (note) {
 		host.chatContainer.addChild(new Spacer(1));
@@ -238,13 +239,14 @@ export function showNewVersionNotification(host: StartupChecksHost, release: Lat
 
 export function showPackageUpdateNotification(host: StartupChecksHost, packages: string[]): void {
 	const action = theme.fg("accent", `${APP_NAME} update`);
-	const updateInstruction = theme.fg("muted", "Package updates are available. Run ") + action;
+	const updateInstruction =
+		theme.fg("muted", interfaceText().commandController.startup.packageUpdates(APP_NAME)) + action;
 	const packageLines = packages.map((pkg) => `- ${pkg}`).join("\n");
 
 	beginWarningNotification(host);
 	host.chatContainer.addChild(
 		new Text(
-			`${theme.bold(theme.fg("warning", "Package Updates Available"))}\n${updateInstruction}\n${theme.fg("muted", "Packages:")}\n${packageLines}`,
+			`${theme.bold(theme.fg("warning", interfaceText().commandController.startup.packageUpdatesAvailable))}\n${updateInstruction}\n${theme.fg("muted", interfaceText().commandController.startup.packagesLabel)}\n${packageLines}`,
 			1,
 			0,
 		),

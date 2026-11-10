@@ -66,39 +66,38 @@ export interface DebugReportHost extends ReportRenderHost {
 	readonly session: AgentSession;
 }
 
+/** A count of tokens or characters, written the way the interface language writes numbers. */
+function localeNumber(value: number): string {
+	return interfaceText().reports.formats.number(value);
+}
+
 export function formatCostReport(costs: SessionCostSummary, usingSubscription = false): string {
+	const text = interfaceText().reports.cost;
 	const { agentCost, agentReports, icmCost, icmReports } = backgroundCostBreakdown(costs);
-	const subNote = costs.costEstimate ? " (includes catalog estimates)" : usingSubscription ? " (subscription)" : "";
+	const subNote = costs.costEstimate ? text.estimated : usingSubscription ? text.subscription : "";
 	const lines = [
-		`${theme.fg("dim", "CURRENT (session total):")} $${costs.currentCost.toFixed(4)}${subNote}`,
-		`${theme.fg("dim", "ROOT (foreground & System One):")} $${costs.ownCost.toFixed(4)}`,
-		`${theme.fg("dim", "SUBAGENTS (workers & bots):")} $${agentCost.toFixed(4)} (${agentReports} reports)`,
+		`${theme.fg("dim", text.current)} $${costs.currentCost.toFixed(4)}${subNote}`,
+		`${theme.fg("dim", text.root)} $${costs.ownCost.toFixed(4)}`,
+		`${theme.fg("dim", text.subagents)} $${agentCost.toFixed(4)}${text.reports(agentReports)}`,
 	];
 	if (costs.reportedCost !== undefined)
-		lines.push(`${theme.fg("dim", "RECORDED (unmodified usage totals):")} $${costs.reportedCost.toFixed(4)}`);
-	if (costs.accountingStatus) lines.push(`${theme.fg("warning", `Historical accounting ${costs.accountingStatus}`)}`);
+		lines.push(`${theme.fg("dim", text.recorded)} $${costs.reportedCost.toFixed(4)}`);
+	if (costs.accountingStatus) lines.push(theme.fg("warning", text.historicalAccounting(costs.accountingStatus)));
 	if (costs.apiEquivalentPartial)
 		lines.push(
 			theme.fg(
 				"warning",
-				`Catalog-equivalent total is partial: ${costs.modelUnknownTokens ?? 0} tokens / ${costs.modelUnknownOperations ?? 0} operations have no recorded model.`,
+				text.partialCatalogTotal(costs.modelUnknownTokens ?? 0, costs.modelUnknownOperations ?? 0),
 			),
 		);
 	if (costs.todayApiEquivalentPartial)
-		lines.push(
-			theme.fg(
-				"warning",
-				`Today's pricing is partial: ${costs.todayModelUnknownTokens ?? 0} tokens have no recorded model.`,
-			),
-		);
+		lines.push(theme.fg("warning", text.partialTodayPricing(costs.todayModelUnknownTokens ?? 0)));
 	if (icmReports > 0 || icmCost > 0) {
-		lines.push(
-			`${theme.fg("dim", "ICM history summaries (included in CURRENT):")} $${icmCost.toFixed(4)} (${icmReports} calls)`,
-		);
+		lines.push(`${theme.fg("dim", text.icmSummaries)} $${icmCost.toFixed(4)}${text.icmCalls(icmReports)}`);
 	}
 	lines.push(
-		`${theme.fg("dim", "TODAY (host local day):")} ${costs.todayCostEstimate ? "~" : ""}$${costs.todayCost.toFixed(4)}${costs.todayCostEstimate ? " (includes catalog estimates)" : ""}${costs.todayPending ? " (partial; updating)" : ""}`,
-		`${theme.fg("dim", "Today rollover:")} local midnight`,
+		`${theme.fg("dim", text.today)} ${costs.todayCostEstimate ? "~" : ""}$${costs.todayCost.toFixed(4)}${costs.todayCostEstimate ? text.estimated : ""}${costs.todayPending ? text.todayPending : ""}`,
+		`${theme.fg("dim", text.rollover)} ${text.localMidnight}`,
 	);
 	return lines.join("\n");
 }
@@ -108,49 +107,46 @@ export interface SelfCompactionReportHost extends ReportRenderHost {
 }
 
 export function formatSelfCompactionInfo(session: Pick<AgentSession, "getSelfCompactionInfo">): string {
+	const text = interfaceText().reports.selfCompaction;
 	const { view, settings, promptSources, note, running } = session.getSelfCompactionInfo();
-	const label = (text: string) => theme.fg("dim", text);
-	const count = (tokens: number | null) => (tokens === null ? "unknown" : tokens.toLocaleString("en-US"));
-	const lines = [theme.bold("Self-compaction")];
+	const label = (words: string) => theme.fg("dim", words);
+	const count = (tokens: number | null) => (tokens === null ? text.unknown : localeNumber(tokens));
+	const lines = [theme.bold(text.title)];
 	if (view.settingsError) {
-		lines.push(`${label("State:")} disabled because its settings were rejected (${view.settingsError})`);
+		lines.push(`${label(text.state)} ${text.settingsRejected(view.settingsError)}`);
 	} else if (!view.thresholds) {
-		lines.push(
-			`${label("State:")} ${view.enabled ? "unavailable (no compaction trigger or context window)" : "disabled"}`,
-		);
+		lines.push(`${label(text.state)} ${view.enabled ? text.unavailable : text.disabled}`);
 	} else {
 		const t = view.thresholds;
 		const gauge = selfCompactionGauge(view);
+		const gaugeText = gauge ? [gauge.bar, gauge.percent, gauge.tag].filter(Boolean).join(" ") : text.unknown;
+		lines.push(`${label(text.gauge)} ${gaugeText}`);
 		lines.push(
-			`${label("Gauge:")} ${gauge ? [gauge.bar, gauge.percent, gauge.tag].filter(Boolean).join(" ") : "unknown"}`,
+			`${label(text.phase)} ${text.phaseDetail(view.phase, String(view.level))}; ${text.tools(view.toolsLocked)}`,
 		);
 		lines.push(
-			`${label("Phase:")} ${view.phase} (level ${view.level}); tools ${view.toolsLocked ? "locked to self-compaction" : "open"}`,
+			`${label(text.usage)} ${text.usageDetail(count(view.usedTokens), localeNumber(t.contextWindow), view.usedPercent, count(view.cachedTokens))}`,
 		);
 		lines.push(
-			`${label("Usage:")} ${count(view.usedTokens)} of ${t.contextWindow.toLocaleString("en-US")} tokens${view.usedPercent === null ? "" : ` (${view.usedPercent}%)`}, cached ${count(view.cachedTokens)}`,
+			`${label(text.lines)} ${text.linesDetail(count(t.noticeTokens), String(settings.notice), count(t.warningTokens), String(settings.warning), count(t.forcedTokens), String(settings.forced))}`,
 		);
+		const early = t.earlyTokens === null ? text.hostCompactionOff : count(t.earlyTokens);
+		lines.push(`${label(text.hostCompaction)} ${text.hostCompactionDetail(early, count(t.hardTokens))}`);
 		lines.push(
-			`${label("Lines:")} notice ${count(t.noticeTokens)} (${settings.notice} of the first trigger), warning ${count(t.warningTokens)} (${settings.warning}), forced ${count(t.forcedTokens)} (${settings.forced} of hard)`,
-		);
-		lines.push(
-			`${label("Host compaction:")} early ${t.earlyTokens === null ? "off" : count(t.earlyTokens)}, hard ${count(t.hardTokens)}`,
-		);
-		lines.push(
-			`${label("Until:")} warning ${count(view.tokensUntilWarning)}, forced ${count(view.tokensUntilForced)} tokens`,
+			`${label(text.until)} ${text.untilDetail(count(view.tokensUntilWarning), count(view.tokensUntilForced))}`,
 		);
 	}
-	lines.push(`${label("Cycles completed:")} ${view.cycles}`);
+	lines.push(`${label(text.cycles)} ${view.cycles}`);
 	lines.push(
-		`${label("Handoff:")} ${view.handoff.status}${view.handoff.attempts > 0 ? `, ${view.handoff.attempts} failed attempt(s)` : ""}${view.handoff.lastError ? `, last error: ${view.handoff.lastError}` : ""}${view.handoff.ownerRequested ? ", owner asked to compact now" : ""}${running ? ", runner active" : ""}`,
+		`${label(text.handoff)} ${text.handoffDetail(view.handoff.status, view.handoff.attempts, view.handoff.lastError ?? undefined, view.handoff.ownerRequested, running)}`,
 	);
 	lines.push(
-		`${label("Prompts:")} notice ${promptSources.notice}; warning ${promptSources.warning}; summary ${promptSources.summary}`,
+		`${label(text.prompts)} ${text.promptsDetail(promptSources.notice, promptSources.warning, promptSources.summary)}`,
 	);
 	if (note !== null) {
-		lines.push(`${label(`Saved note (${note.length.toLocaleString("en-US")} chars):`)}`, note);
+		lines.push(`${label(text.savedNote(localeNumber(note.length)))}`, note);
 	}
-	lines.push("", `${label("/self-compact-now")}: compact now, reusing a saved note or asking the agent for one`);
+	lines.push("", `${label(text.nowHint)}${text.nowHintDetail}`);
 	return lines.join("\n");
 }
 
@@ -161,6 +157,7 @@ export function handleSelfCompactInfoCommand(host: SelfCompactionReportHost): vo
 }
 
 export function handleUsageCommand(host: UsageReportHost): void {
+	const text = interfaceText().reports.usage;
 	const stats = host.session.getSessionStats();
 	const costs = host.session.getCostSummary();
 	const context = host.session.getContextUsage();
@@ -171,50 +168,51 @@ export function handleUsageCommand(host: UsageReportHost): void {
 	const usingSubscription = activeModel ? host.modelRegistry.isUsingSubscription(activeModel) : false;
 	const isChatGptSubscription = usingSubscription && activeModel?.provider === "openai-codex";
 
-	let info = `${theme.bold("Usage & Optimization")}\n\n`;
-	info += `${theme.bold("Session tokens")}\n`;
-	info += `${theme.fg("dim", "Input:")} ${stats.tokens.input.toLocaleString()}\n`;
-	info += `${theme.fg("dim", "Output:")} ${stats.tokens.output.toLocaleString()}\n`;
-	info += `${theme.fg("dim", "Cache read:")} ${stats.tokens.cacheRead.toLocaleString()}\n`;
-	info += `${theme.fg("dim", "Cache write:")} ${stats.tokens.cacheWrite.toLocaleString()}\n`;
-	info += `${theme.fg("dim", "Total:")} ${stats.tokens.total.toLocaleString()}\n\n`;
+	let info = `${theme.bold(text.title)}\n\n`;
+	info += `${theme.bold(text.sessionTokens)}\n`;
+	info += `${theme.fg("dim", text.input)} ${localeNumber(stats.tokens.input)}\n`;
+	info += `${theme.fg("dim", text.output)} ${localeNumber(stats.tokens.output)}\n`;
+	info += `${theme.fg("dim", text.cacheRead)} ${localeNumber(stats.tokens.cacheRead)}\n`;
+	info += `${theme.fg("dim", text.cacheWrite)} ${localeNumber(stats.tokens.cacheWrite)}\n`;
+	info += `${theme.fg("dim", text.total)} ${localeNumber(stats.tokens.total)}\n\n`;
 
-	info += `${theme.bold("Cost")}\n`;
+	info += `${theme.bold(text.costTitle)}\n`;
 	info += `${formatCostReport(costs, usingSubscription)}\n\n`;
 
 	const taskMetrics = host.session.getTaskAndModelMetrics();
 	if (taskMetrics && (taskMetrics.tasks.length > 0 || taskMetrics.models.length > 0)) {
 		if (taskMetrics.unassignedCostUsd > 0)
-			info += `${theme.fg("dim", "Unassigned asynchronous receipts:")} $${taskMetrics.unassignedCostUsd.toFixed(4)} (no task identity)\n`;
+			info += `${theme.fg("dim", text.unassignedReceipts)} $${taskMetrics.unassignedCostUsd.toFixed(4)}${text.noTaskIdentity}\n`;
 		if (taskMetrics.currentTask) {
 			const ct = taskMetrics.currentTask;
 			const stepsPart =
 				ct.stepsTotal !== undefined && ct.stepsCompleted !== undefined
-					? `, ${ct.stepsCompleted}/${ct.stepsTotal} steps`
+					? text.steps(ct.stepsCompleted, ct.stepsTotal)
 					: "";
-			info += `${theme.bold("Task & Goal Metrics")}\n`;
-			info += `${theme.fg("dim", "Current/Last task:")} ${ct.title} (${ct.status})\n`;
-			info += `${theme.fg("dim", "Duration & rounds:")} ${ct.timingEstimated ? "~" : ""}${formatCompactTaskDuration(ct.activeMs)} active (${formatCompactTaskDuration(ct.wallMs)} wall), ${ct.rounds} rounds, ${ct.toolCalls} tool calls${stepsPart}\n`;
+			info += `${theme.bold(text.taskMetricsTitle)}\n`;
+			info += `${theme.fg("dim", text.currentTask)} ${ct.title}${text.taskStatus(ct.status)}\n`;
+			info += `${theme.fg("dim", text.durationRounds)} ${ct.timingEstimated ? "~" : ""}${text.durationDetail(formatCompactTaskDuration(ct.activeMs), formatCompactTaskDuration(ct.wallMs), ct.rounds, ct.toolCalls)}${stepsPart}\n`;
 			if (ct.goalActiveMs !== undefined)
-				info += `${theme.fg("dim", "Recorded goal clock:")} ${formatCompactTaskDuration(ct.goalActiveMs)}\n`;
+				info += `${theme.fg("dim", text.goalClock)} ${formatCompactTaskDuration(ct.goalActiveMs)}\n`;
 			if (ct.workerActiveMs !== undefined)
-				info += `${theme.fg("dim", "Worker active time:")} ${formatCompactTaskDuration(ct.workerActiveMs)}\n`;
-			info += `${theme.fg("dim", "Task cost:")} $${ct.totalCostUsd.toFixed(4)} (root $${ct.rootCostUsd.toFixed(4)} · sub $${ct.subagentCostUsd.toFixed(4)}${ct.icmCostUsd > 0 ? ` · ICM $${ct.icmCostUsd.toFixed(4)}` : ""})\n\n`;
+				info += `${theme.fg("dim", text.workerActive)} ${formatCompactTaskDuration(ct.workerActiveMs)}\n`;
+			const icmPart = ct.icmCostUsd > 0 ? text.icmPart(`$${ct.icmCostUsd.toFixed(4)}`) : "";
+			info += `${theme.fg("dim", text.taskCost)} ${text.taskCostDetail(`$${ct.totalCostUsd.toFixed(4)}`, `$${ct.rootCostUsd.toFixed(4)}`, `$${ct.subagentCostUsd.toFixed(4)}`, icmPart)}\n\n`;
 		}
 		if (taskMetrics.models.length > 0) {
-			info += `${theme.bold("Model Cost Breakdown")}\n`;
+			info += `${theme.bold(text.modelBreakdownTitle)}\n`;
 			for (const row of taskMetrics.models.slice(0, 8)) {
-				info += `${theme.fg("dim", `${row.model} (${plainLabel(row.role)}):`)} $${row.costUsd.toFixed(4)} (${row.calls} ${row.role === "subagent" ? "reports" : "calls"}, ${row.tokens.toLocaleString()} tokens)\n`;
+				info += `${theme.fg("dim", text.modelLabel(row.model, plainLabel(row.role)))} $${row.costUsd.toFixed(4)}${text.modelUsage(row.calls, row.role === "subagent", localeNumber(row.tokens))}\n`;
 			}
 			info += "\n";
 		}
 	}
 
 	const processMemory = getProcessMemoryMb();
-	info += `${theme.bold("Process")}\n`;
-	info += `${theme.fg("dim", "Memory:")} rss ${processMemory.rssMb}MB, heap ${processMemory.heapUsedMb}MB, external ${processMemory.externalMb}MB\n\n`;
+	info += `${theme.bold(text.processTitle)}\n`;
+	info += `${theme.fg("dim", text.memory)} ${text.memoryDetail(String(processMemory.rssMb), String(processMemory.heapUsedMb), String(processMemory.externalMb))}\n\n`;
 
-	info += `${theme.bold("Optimization state")}\n`;
+	info += `${theme.bold(text.optimizationTitle)}\n`;
 	const contextPercent = context?.percent;
 	const contextTokens = context?.tokens;
 	if (
@@ -224,18 +222,18 @@ export function handleUsageCommand(host: UsageReportHost): void {
 		contextTokens !== undefined &&
 		contextTokens !== null
 	) {
-		info += `${theme.fg("dim", "Context:")} ${contextPercent.toFixed(1)}% (${contextTokens.toLocaleString()}/${context.contextWindow.toLocaleString()})\n`;
+		info += `${theme.fg("dim", text.context)} ${text.contextDetail(contextPercent.toFixed(1), localeNumber(contextTokens), localeNumber(context.contextWindow))}\n`;
 	} else {
-		info += `${theme.fg("dim", "Context:")} unknown until next provider usage sample\n`;
+		info += `${theme.fg("dim", text.context)} ${text.contextUnknown}\n`;
 	}
-	info += `${theme.fg("dim", "Auto-compaction:")} ${host.session.autoCompactionEnabled ? "enabled" : "disabled"}\n`;
+	info += `${theme.fg("dim", text.autoCompaction)} ${host.session.autoCompactionEnabled ? text.enabled : text.disabled}\n`;
 	const compactionGates = stats.compactionGates ?? {
 		gateFailures: 0,
 		deterministicGapFills: 0,
 		compactionsWithGateFailures: 0,
 		checks: {},
 	};
-	info += `${theme.fg("dim", "Compaction gate failures:")} ${compactionGates.gateFailures} (${compactionGates.deterministicGapFills} deterministic gap-fill)\n`;
+	info += `${theme.fg("dim", text.gateFailures)} ${text.gateFailuresDetail(compactionGates.gateFailures, compactionGates.deterministicGapFills)}\n`;
 	const failingChecks = Object.entries(compactionGates.checks).sort(
 		([leftName, left], [rightName, right]) => right.failures - left.failures || leftName.localeCompare(rightName),
 	);
@@ -256,45 +254,46 @@ export function handleUsageCommand(host: UsageReportHost): void {
 			return `${plainLabel(check)} x${checkStats.failures}${score}`;
 		});
 		if (failingChecks.length > visibleChecks.length) {
-			visibleChecks.push(`+${failingChecks.length - visibleChecks.length} more`);
+			visibleChecks.push(text.moreChecks(failingChecks.length - visibleChecks.length));
 		}
-		info += `${theme.fg("dim", "Failing compaction checks:")} ${visibleChecks.join("; ")}\n`;
+		info += `${theme.fg("dim", text.failingChecks)} ${visibleChecks.join("; ")}\n`;
 	}
 	if (!costGuardSettings.enabled) {
-		info += `${theme.fg("dim", "Cost guard:")} disabled\n`;
+		info += `${theme.fg("dim", text.costGuard)} ${text.disabled}\n`;
 	} else if (isChatGptSubscription) {
-		info += `${theme.fg("dim", "Cost guard:")} not applicable to ChatGPT subscription usage\n`;
+		info += `${theme.fg("dim", text.costGuard)} ${text.costGuardNotApplicable}\n`;
 	} else if (costGuard) {
-		const status = costGuard.over ? "over" : "ok";
-		info += `${theme.fg("dim", "Cost guard:")} ${status} $${costGuard.estUsd.toFixed(4)}/$${costGuard.thresholdUsd.toFixed(4)} (${costGuard.action})\n`;
+		const status = costGuard.over ? text.costGuardOver : text.costGuardOk;
+		info += `${theme.fg("dim", text.costGuard)} ${text.costGuardMeasured(status, costGuard.estUsd.toFixed(4), costGuard.thresholdUsd.toFixed(4), costGuard.action)}\n`;
 	} else {
-		info += `${theme.fg("dim", "Cost guard:")} enabled; awaiting the next provider projection\n`;
+		info += `${theme.fg("dim", text.costGuard)} ${text.costGuardPending}\n`;
 	}
 	const hostTurn = host.session.hostTurnReasoning.getLastDecision();
 	const loweredHostTurns = host.session.hostTurnReasoning.getLoweredRequestCount();
 	if (hostTurn) {
 		const effect = hostTurn.held
-			? `${hostTurn.sessionLevel} to ${hostTurn.resolvedLevel} proposed, held at the lane's sent level`
+			? text.hostTurnHeld(hostTurn.sessionLevel, hostTurn.resolvedLevel)
 			: hostTurn.lowered
-				? `${hostTurn.sessionLevel} to ${hostTurn.resolvedLevel}`
-				: "inherited";
-		info += `${theme.fg("dim", "Host-turn thinking:")} ${effect} (${loweredHostTurns} lowered; last ${hostTurn.customType ? plainLabel(hostTurn.customType) : "none"})\n`;
+				? text.hostTurnLowered(hostTurn.sessionLevel, hostTurn.resolvedLevel)
+				: text.hostTurnInherited;
+		const last = hostTurn.customType ? plainLabel(hostTurn.customType) : text.hostTurnLastNone;
+		info += `${theme.fg("dim", text.hostTurn)} ${effect}${text.hostTurnDetail(loweredHostTurns, last)}\n`;
 	} else {
-		info += `${theme.fg("dim", "Host-turn thinking:")} no host-initiated turn yet\n`;
+		info += `${theme.fg("dim", text.hostTurn)} ${text.hostTurnNone}\n`;
 	}
-	info += `${theme.fg("dim", "Auto Learn:")} ${autoLearn.enabled ? "enabled" : "disabled"}\n`;
-	info += `${theme.fg("dim", "Scavenger model:")} ${autoLearn.model || "active"}\n`;
-	info += `${theme.fg("dim", "Reflection cue:")} ${autoLearn.reflectionReview ? "enabled" : "disabled"} (root-only durable cue; ${autoLearn.reflectionMinToolCalls} tool-call trigger)\n`;
-	info += `${theme.fg("dim", "Auto Learn concurrency:")} ${autoLearn.maxConcurrentLearners} learner(s), ${autoLearn.cooldownMinutes}m cooldown\n\n`;
+	info += `${theme.fg("dim", text.autoLearn)} ${autoLearn.enabled ? text.enabled : text.disabled}\n`;
+	info += `${theme.fg("dim", text.scavengerModel)} ${autoLearn.model || text.activeModel}\n`;
+	info += `${theme.fg("dim", text.reflectionCue)} ${autoLearn.reflectionReview ? text.enabled : text.disabled}${text.reflectionCueDetail(autoLearn.reflectionMinToolCalls)}\n`;
+	info += `${theme.fg("dim", text.concurrency)} ${text.concurrencyDetail(autoLearn.maxConcurrentLearners, autoLearn.cooldownMinutes)}\n\n`;
 
-	info += `${theme.bold("Model Router")}\n`;
+	info += `${theme.bold(text.modelRouter)}\n`;
 	info += `${host.session.getModelRouterStatus((label) => theme.fg("dim", label))}\n\n`;
 
-	info += `${theme.bold("Manual controls")}\n`;
-	info += `${theme.fg("dim", "/compact")}: compact the active context now\n`;
-	info += `${theme.fg("dim", "/settings")}: adjust Auto Learn, cost guard, compaction, and model-router config\n`;
-	info += `${theme.fg("dim", "/auto-learn status|run")}: inspect status or explicitly launch background learning\n`;
-	info += `${theme.fg("dim", "/context")}: inspect provider-visible context contributors without model tokens\n`;
+	info += `${theme.bold(text.manualControls)}\n`;
+	info += `${theme.fg("dim", "/compact")}: ${text.manualCompact}\n`;
+	info += `${theme.fg("dim", "/settings")}: ${text.manualSettings}\n`;
+	info += `${theme.fg("dim", "/auto-learn status|run")}: ${text.manualAutoLearn}\n`;
+	info += `${theme.fg("dim", "/context")}: ${text.manualContext}\n`;
 
 	host.chatContainer.addChild(new Spacer(1));
 	host.chatContainer.addChild(new Text(info, 1, 0));
@@ -302,6 +301,7 @@ export function handleUsageCommand(host: UsageReportHost): void {
 }
 
 export function handleChangelogCommand(host: ChangelogReportHost): void {
+	const text = interfaceText().reports.changelog;
 	const changelogPath = getChangelogPath();
 	const allEntries = parseChangelog(changelogPath);
 
@@ -311,11 +311,11 @@ export function handleChangelogCommand(host: ChangelogReportHost): void {
 					.reverse()
 					.map((e) => e.content)
 					.join("\n\n")
-			: "No changelog entries found.";
+			: text.empty;
 
 	host.chatContainer.addChild(new Spacer(1));
 	host.chatContainer.addChild(new DynamicBorder());
-	host.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", "What's New")), 1, 0));
+	host.chatContainer.addChild(new Text(theme.bold(theme.fg("accent", text.title)), 1, 0));
 	host.chatContainer.addChild(new Spacer(1));
 	host.chatContainer.addChild(new Markdown(changelogMarkdown, 1, 1, host.getMarkdownThemeWithSettings()));
 	host.chatContainer.addChild(new DynamicBorder());
@@ -440,24 +440,25 @@ export function handleHotkeysCommand(host: HotkeysReportHost): void {
 }
 
 export function handleDebugCommand(host: DebugReportHost): void {
+	const text = interfaceText().reports.debug;
 	const width = host.ui.terminal.columns;
 	const height = host.ui.terminal.rows;
 	const allLines = host.ui.render(width);
 
 	const debugLogPath = getDebugLogPath();
 	const debugData = [
-		`Debug output at ${new Date().toISOString()}`,
-		`Terminal: ${width}x${height}`,
-		`Total lines: ${allLines.length}`,
+		text.header(new Date().toISOString()),
+		text.terminal(width, height),
+		text.totalLines(allLines.length),
 		"",
-		"=== All rendered lines with visible widths ===",
+		text.renderedSection,
 		...allLines.map((line, idx) => {
 			const vw = visibleWidth(line);
 			const escaped = JSON.stringify(line);
 			return `[${idx}] (w=${vw}) ${escaped}`;
 		}),
 		"",
-		"=== Agent messages (JSONL) ===",
+		text.messagesSection,
 		...host.session.messages.map((msg) => JSON.stringify(msg)),
 		"",
 	].join("\n");
@@ -467,7 +468,7 @@ export function handleDebugCommand(host: DebugReportHost): void {
 
 	host.chatContainer.addChild(new Spacer(1));
 	host.chatContainer.addChild(
-		new Text(`${theme.fg("accent", "✓ Debug log written")}\n${theme.fg("muted", debugLogPath)}`, 1, 1),
+		new Text(`${theme.fg("accent", text.written)}\n${theme.fg("muted", debugLogPath)}`, 1, 1),
 	);
 	host.ui.requestRender();
 }

@@ -26,6 +26,7 @@ import {
 	withAutoLearnAccountingProtection,
 } from "../../core/cost/auto-learn-accounting.ts";
 import { readAutoLearnSessionIdFromFile } from "../../core/cost/session-usage.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { AutoLearnHandoffStore } from "../../core/learning/auto-learn-handoff-store.ts";
 import {
 	AUTO_LEARN_LEARNER_TOOLS,
@@ -69,16 +70,6 @@ export const AUTONOMY_MODES: AutonomyMode[] = ["off", "safe", "balanced", "full"
 const AUTO_LEARN_RESERVATION_MS = 2 * 60 * 1000;
 const AUTO_LEARN_HANDOFF_DIR = "handoffs";
 export const AUTO_LEARN_HISTORY_RETENTION_MS = 7 * 24 * 60 * 60 * 1000;
-
-/** How a learner run's outcome reads on screen; the raw status stays in the handoff record. */
-const AUTO_LEARN_OUTCOME_TEXT: Readonly<Record<AutoLearnHandoffRecord["status"], string>> = {
-	reported: "finished",
-	child_failed: "the learner failed",
-	unparseable: "its result could not be read",
-	learner_not_pass: "the learner did not pass",
-	parent_session_changed: "its session changed before it finished",
-	apply_failed: "its proposals could not be applied",
-};
 
 /** How an unreadable proposal block reads on screen; the raw reason goes to the harness log. */
 const AUTO_LEARN_PARSE_FAILURE_TEXT: Partial<Record<string, string>> = {
@@ -393,24 +384,25 @@ export class AutoLearnController {
 	}
 
 	private getAutoLearnModelAuthLabel(model: Model<any>): string {
+		const words = interfaceText().autoLearn;
 		const credential = this.deps.getModelRegistry().authStorage.get(model.provider);
-		if (credential?.type === "oauth") return "subscription";
-		if (credential?.type === "api_key") return "API key";
+		if (credential?.type === "oauth") return words.auth.subscription;
+		if (credential?.type === "api_key") return words.auth.apiKey;
 
 		const authStatus = this.deps.getModelRegistry().getProviderAuthStatus(model.provider);
 		switch (authStatus.source) {
 			case "runtime":
-				return authStatus.label ? `runtime ${authStatus.label}` : "runtime API key";
+				return authStatus.label ? words.auth.runtime(authStatus.label) : words.auth.runtimeApiKey;
 			case "environment":
-				return authStatus.label ? `env ${authStatus.label}` : "environment API key";
+				return authStatus.label ? words.auth.environment(authStatus.label) : words.auth.environmentApiKey;
 			case "models_json_key":
-				return "models.json API key";
+				return words.auth.modelsJsonKey;
 			case "models_json_command":
-				return "models.json command";
+				return words.auth.modelsJsonCommand;
 			case "fallback":
-				return authStatus.label ?? "custom provider config";
+				return authStatus.label ?? words.auth.customConfig;
 			default:
-				return "configured";
+				return words.auth.configured;
 		}
 	}
 
@@ -435,7 +427,7 @@ export class AutoLearnController {
 			const modelPattern = `${model.provider}/${model.id}`;
 			const currentLabel =
 				currentModel && model.provider === currentModel.provider && model.id === currentModel.id
-					? " · current"
+					? interfaceText().autoLearn.current
 					: "";
 			const displayName = model.name && model.name !== model.id ? ` · ${model.name}` : "";
 			return {
@@ -495,7 +487,7 @@ export class AutoLearnController {
 				}
 			} catch (error) {
 				harnessLog.debug("ui", "auto-learn accounting recovery failed", { error: String(error) });
-				if (this.deps.isActive()) this.deps.ui.showStatus("Auto Learn: could not recover its usage records.");
+				if (this.deps.isActive()) this.deps.ui.showStatus(interfaceText().autoLearn.usageRecordsLost);
 			} finally {
 				this.accountingRecoveryScheduled = false;
 			}
@@ -785,10 +777,10 @@ export class AutoLearnController {
 		if (modelValue.includes("/")) {
 			const [provider, modelId] = modelValue.split("/", 2);
 			if (available.some((model) => model.provider === provider && model.id === modelId)) return undefined;
-			return `Auto Learn model "${modelValue}" is not in configured subscription/API models; saved as manual/unverified.`;
+			return interfaceText().autoLearn.unverifiedModel(modelValue);
 		}
 		if (available.some((model) => model.id === modelValue)) return undefined;
-		return `Auto Learn model "${modelValue}" is not in configured subscription/API models; saved as manual/unverified.`;
+		return interfaceText().autoLearn.unverifiedModel(modelValue);
 	}
 
 	/**
@@ -1104,9 +1096,8 @@ export class AutoLearnController {
 		const open = record.entries.length - applied;
 		harnessLog.debug("ui", "an auto-learn run settled", { runId: run.runId, status: record.status });
 		const detailText = shownDetail ?? record.detail;
-		this.deps.ui.showStatus(
-			`Auto Learn: ${AUTO_LEARN_OUTCOME_TEXT[record.status]}${detailText ? ` (${detailText})` : ""}; ${applied} applied, ${open} recorded as findings${persisted ? "" : " (result not saved)"}`,
-		);
+		const words = interfaceText().autoLearn;
+		this.deps.ui.showStatus(words.settled(words.outcome[record.status], detailText, applied, open, persisted));
 		this.updateAutoLearnFooter();
 	}
 
@@ -1139,7 +1130,7 @@ export class AutoLearnController {
 		if (!isCurrent()) return;
 		if (result.unresolved.length > 0) {
 			harnessLog.debug("ui", "auto-learn saved results need attention", { issues: result.unresolved });
-			this.deps.ui.showStatus(`Auto Learn: ${result.unresolved.length} saved learning result(s) need attention.`);
+			this.deps.ui.showStatus(interfaceText().autoLearn.needsAttention(result.unresolved.length));
 		}
 		for (const { directory, record } of result.finalized) {
 			if (!isCurrent()) break;
@@ -1150,7 +1141,7 @@ export class AutoLearnController {
 					runId: record.runId,
 					error: String(error),
 				});
-				this.deps.ui.showStatus("Auto Learn: could not confirm a re-offered result.");
+				this.deps.ui.showStatus(interfaceText().autoLearn.reofferUnconfirmed);
 			}
 			const applied = record.entries.filter((entry) => entry.outcome === "applied").length;
 			await session
@@ -1169,9 +1160,7 @@ export class AutoLearnController {
 						harnessLog.debug("ui", "auto-learn notice delivered; receipt cleanup pending", {
 							runId: record.runId,
 						});
-						this.deps.ui.showStatus(
-							"Auto Learn: a notice was delivered; some saved copies are still pending cleanup.",
-						);
+						this.deps.ui.showStatus(interfaceText().autoLearn.noticePending);
 					}
 				})
 				.catch(() => {
@@ -1182,18 +1171,13 @@ export class AutoLearnController {
 				status: record.status,
 				detail: record.detail,
 			});
+			const words = interfaceText().autoLearn;
 			this.deps.ui.showStatus(
-				`Auto Learn: re-offered proposals, ${AUTO_LEARN_OUTCOME_TEXT[record.status]}; ${applied} applied, ${record.entries.length - applied} recorded as findings`,
+				words.reoffered(words.outcome[record.status], applied, record.entries.length - applied),
 			);
 		}
 		if (result.deferred > 0) {
-			this.deps.ui.showStatus(
-				`Auto Learn: ${result.deferred} unapplied proposal set${result.deferred > 1 ? "s are" : " is"} held for this project; they are offered when autoLearn is enabled.${
-					result.deferredNearRetention > 0
-						? ` ${result.deferredNearRetention} deferred set${result.deferredNearRetention === 1 ? " is" : "s are"} approaching or beyond the normal retention age; review before cleanup.`
-						: ""
-				}`,
-			);
+			this.deps.ui.showStatus(interfaceText().autoLearn.deferred(result.deferred, result.deferredNearRetention));
 		}
 		this.scheduleAccountingRecovery();
 	}
@@ -1209,16 +1193,16 @@ export class AutoLearnController {
 		} = {},
 	): string {
 		if (options.promptKind === "reflection" || options.cooldownKind === "reflection") {
-			return "Auto Learn not started: automatic reflection runs only in the current root session; background reflection learners are disabled.";
+			return interfaceText().autoLearn.notStarted(interfaceText().autoLearn.reflectionCurrentOnly);
 		}
 		const settings = this.getEffectiveAutoLearnSettings();
 		const modelPattern = this.resolveAutoLearnModelPattern(settings);
 		if (!modelPattern) {
-			return "Auto Learn not started: no active model is available for model=active.";
+			return interfaceText().autoLearn.notStarted(interfaceText().autoLearn.noActiveModel);
 		}
 		const spawnTarget = this.getAutoLearnSpawnTarget();
 		if (!spawnTarget) {
-			return "Auto Learn not started: could not resolve current pi CLI path.";
+			return interfaceText().autoLearn.notStarted(interfaceText().autoLearn.cliPathMissing);
 		}
 
 		const dir = this.getAutoLearnTenantDataDir();
@@ -1248,7 +1232,7 @@ export class AutoLearnController {
 		});
 		const invalidSpawnInput = findAutoLearnSpawnNullByteInput(spawnTarget.command, args);
 		if (invalidSpawnInput) {
-			const message = `Auto Learn not started: ${invalidSpawnInput} contains a null byte.`;
+			const message = interfaceText().autoLearn.nullByte(invalidSpawnInput);
 			this.appendAutoLearnLog(logPath, message);
 			this.updateAutoLearnFooter();
 			return `${message} Log: ${logPath}`;
@@ -1269,7 +1253,7 @@ export class AutoLearnController {
 			kind,
 		});
 		if (!reservationResult.ok) {
-			return `Auto Learn not started: ${reservationResult.reason}`;
+			return interfaceText().autoLearn.notStarted(reservationResult.reason);
 		}
 		const { reservation } = reservationResult;
 
@@ -1280,7 +1264,7 @@ export class AutoLearnController {
 			this.releaseAutoLearnReservation(reservation, options.cooldownKind);
 			this.appendAutoLearnLog(logPath, `Auto Learn failed to write prompt file: ${message}`);
 			this.updateAutoLearnFooter();
-			return `Auto Learn not started: failed to write prompt file (${message}). Log: ${logPath}`;
+			return interfaceText().autoLearn.promptWriteFailed(message, logPath);
 		}
 
 		let child: ReturnType<typeof spawn> | undefined;
@@ -1295,7 +1279,7 @@ export class AutoLearnController {
 			});
 		} catch (error) {
 			this.releaseAutoLearnReservation(reservation, options.cooldownKind);
-			return `Auto Learn not started: accounting obligation unavailable (${String(error)}).`;
+			return interfaceText().autoLearn.accountingUnavailable(String(error));
 		}
 		try {
 			outFd = fs.openSync(logPath, "a");
@@ -1323,7 +1307,7 @@ export class AutoLearnController {
 			this.releaseAutoLearnReservation(reservation, options.cooldownKind);
 			this.appendAutoLearnLog(logPath, `Auto Learn failed to start: ${message}`);
 			this.updateAutoLearnFooter();
-			return `Auto Learn not started: failed to spawn background learner (${message}). Log: ${logPath}`;
+			return interfaceText().autoLearn.spawnFailedWithMessage(message, logPath);
 		} finally {
 			if (outFd !== undefined) {
 				try {
@@ -1337,7 +1321,7 @@ export class AutoLearnController {
 			this.cancelPreparedAccounting(runId, logPath);
 			this.releaseAutoLearnReservation(reservation, options.cooldownKind);
 			this.updateAutoLearnFooter();
-			return `Auto Learn not started: failed to spawn background learner. Log: ${logPath}`;
+			return interfaceText().autoLearn.spawnFailed(logPath);
 		}
 		const childPid = child.pid;
 		// The exit event is the terminal signal: it settles every run, successful or not, by reading
@@ -1376,7 +1360,7 @@ export class AutoLearnController {
 		this.markAutoLearnReservationRunning(reservation, childPid, settings);
 
 		this.updateAutoLearnFooter();
-		return `Auto Learn started. Log: ${logPath}`;
+		return interfaceText().autoLearn.started(logPath);
 	}
 
 	/**
@@ -1452,7 +1436,7 @@ export class AutoLearnController {
 		);
 		this.deps.ui.footerDataProvider.setExtensionStatus(
 			"auto-learn",
-			hasActiveRun ? theme.fg("warning", "(learning)") : undefined,
+			hasActiveRun ? theme.fg("warning", interfaceText().autoLearn.learningBadge) : undefined,
 		);
 		this.deps.ui.invalidateFooter();
 		this.deps.ui.requestRender();
@@ -1465,9 +1449,14 @@ export class AutoLearnController {
 		const tenant = this.getAutoLearnTenantKey();
 		const runs = Object.entries(state.runs ?? {}).filter(([, run]) => run.tenant === tenant);
 		const otherTenantRuns = Object.values(state.runs ?? {}).filter((run) => run.tenant !== tenant).length;
-		const contextText = decision.contextPercent === null ? "unknown" : `${decision.contextPercent.toFixed(1)}%`;
+		const contextText =
+			decision.contextPercent === null
+				? interfaceText().autoLearn.unknownContext
+				: `${decision.contextPercent.toFixed(1)}%`;
 		const cooldownText =
-			decision.cooldownRemainingMs > 0 ? `${Math.ceil(decision.cooldownRemainingMs / 60000)}m remaining` : "ready";
+			decision.cooldownRemainingMs > 0
+				? interfaceText().autoLearn.cooldownRemaining(Math.ceil(decision.cooldownRemainingMs / 60000))
+				: interfaceText().autoLearn.ready;
 		const runLines = runs.length
 			? runs
 					.map(([id, run]) => {
@@ -1478,12 +1467,13 @@ export class AutoLearnController {
 							pid: run.pid,
 							authority: run.authority,
 						});
-						const kindText = run.kind === "reflection" ? "reflection" : "automatic";
-						const statusText = run.status === "reserved" ? "starting" : "running";
-						return `- ${kindText} learner on ${run.model}, ${statusText}; log: ${run.logPath}`;
+						const words = interfaceText().autoLearn;
+						const kindText = run.kind === "reflection" ? words.runKindReflection : words.runKindAutomatic;
+						const statusText = run.status === "reserved" ? words.runStatusStarting : words.runStatusRunning;
+						return words.runLine(kindText, run.model, statusText, run.logPath);
 					})
 					.join("\n")
-			: "- none";
+			: interfaceText().autoLearn.noRuns;
 		const reloadBlockers = getPendingReloadBlockers({
 			ownPid: process.pid,
 			ownSessionId: this.deps.getSessionManager().getSessionId(),
@@ -1494,7 +1484,9 @@ export class AutoLearnController {
 				descriptions: reloadBlockers.descriptions,
 				reason: reloadBlockers.reason,
 			});
-		const reloadBlockerText = reloadBlockers.pending ? `${reloadBlockers.blockers.length} other session(s)` : "none";
+		const reloadBlockerText = reloadBlockers.pending
+			? interfaceText().autoLearn.reloadBlockerCount(reloadBlockers.blockers.length)
+			: interfaceText().autoLearn.none;
 		// In-process quiesce registry (background lanes, scout runs, isolated completions) — the
 		// reload gate's OTHER source of blockers, distinct from the cross-process ones above.
 		const inFlightWork = getInFlightWorkUnits(getAgentDir());
@@ -1502,7 +1494,10 @@ export class AutoLearnController {
 			harnessLog.debug("ui", "auto-learn status lists in-flight work", {
 				units: inFlightWork.map(describeInFlightWorkUnit),
 			});
-		const reflectionStatus = this.isNativeReflectionEnabled() ? "enabled" : "disabled";
-		return `Auto Learn status\nEnabled: ${settings.enabled}\nModel: ${settings.model}\nNext decision: ${decision.shouldRun ? "ready" : decision.reason}\nMessages: ${decision.messageCount}/${settings.longSessionMessages}\nContext: ${contextText}/${settings.longSessionContextPercent}%\nCooldown: ${cooldownText}\nCurrent-session reflection: ${reflectionStatus} (complex trigger ${settings.complexTaskToolCalls} tool calls; automatic provider requests 0)\nHistory retention: 7 days for internal Auto Learn prompts/logs/sessions\nRunning learners: ${runs.length}/${settings.maxConcurrentLearners}\nLearners of other projects: ${otherTenantRuns}\nArtifact folder: ${this.getAutoLearnTenantDataDir()}\nPi auto-reload blockers: ${reloadBlockerText}\nIn-process reload-gate work: ${inFlightWork.length ? `${inFlightWork.length} unit(s)` : "none"}\nRuns:\n${runLines}`;
+		const reflectionStatus = this.isNativeReflectionEnabled()
+			? interfaceText().autoLearn.enabledWord
+			: interfaceText().autoLearn.disabledWord;
+		const words = interfaceText().autoLearn;
+		return `${words.title}\n${words.enabled(settings.enabled)}\n${words.model(settings.model)}\n${words.nextDecision(decision.shouldRun ? words.nextReady : decision.reason)}\n${words.messages(decision.messageCount, settings.longSessionMessages)}\n${words.context(contextText, settings.longSessionContextPercent)}\n${words.cooldown(cooldownText)}\n${words.reflection(reflectionStatus, settings.complexTaskToolCalls)}\n${words.historyRetention}\n${words.runningLearners(runs.length, settings.maxConcurrentLearners)}\n${words.otherProjects(otherTenantRuns)}\n${words.artifactFolder(this.getAutoLearnTenantDataDir())}\n${words.reloadBlockers(reloadBlockerText)}\n${words.inFlight(inFlightWork.length)}\n${words.runs}\n${runLines}`;
 	}
 }

@@ -13,6 +13,7 @@ import type { Container, TUI } from "@caupulican/pi-tui";
 import { Spacer, Text } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { formatAutonomyDiagnostics } from "../../core/autonomy/status.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type {
 	AutoLearnSettings,
 	AutonomyMode,
@@ -65,44 +66,47 @@ export function formatAutonomyStatus(
 		| "getAutoLearnTenantDataDir"
 	>,
 ): string {
+	const words = interfaceText().autonomyCommands.autonomy;
 	const autonomy = host.settingsManager.getAutonomySettings();
 	const settings = host.getEffectiveAutoLearnSettings();
 	const autoLearnState = host.getPrunedAutoLearnState();
 	const tenant = host.getAutoLearnTenantKey();
 	const running = Object.entries(autoLearnState.runs ?? {}).filter(([, run]) => run.tenant === tenant);
 	const otherTenantRunning = Object.values(autoLearnState.runs ?? {}).filter((run) => run.tenant !== tenant).length;
-	const safety =
-		autonomy.mode === "full"
-			? "read-only learners return proposals; this session applies eligible memory, skill and autoLearn tuning entries and records extension, source and ineligible entries as findings"
-			: "proposal-gated outside configured high-confidence memory policy";
+	const safety = autonomy.mode === "full" ? words.authorityFull : words.authorityGated;
 	const reflectionLine =
 		autonomy.mode === "full"
-			? `Reflection cue: ${settings.reflectionReview ? "enabled" : "disabled"}; root-only durable cue for the next ordinary turn; cooldown=${settings.reflectionCooldownMinutes}m`
-			: `Reflection cue: ${settings.reflectionReview ? "enabled" : "disabled"}; tool trigger=${settings.reflectionMinToolCalls}; next ordinary turn; cooldown=${settings.reflectionCooldownMinutes}m`;
+			? words.reflectionRoot(settings.reflectionReview, settings.reflectionCooldownMinutes)
+			: words.reflectionTool(
+					settings.reflectionReview,
+					settings.reflectionMinToolCalls,
+					settings.reflectionCooldownMinutes,
+				);
 	return [
-		"Autonomy status",
-		`Mode: ${autonomy.mode}${autonomy.mode === "full" ? " (standing autonomy)" : ""}`,
-		`Goal loop rounds: ${autonomy.maxStallTurns}`,
-		`Auto Learn: ${settings.enabled ? "enabled" : "disabled"}; model=${settings.model}; applyHighConfidence=${settings.applyHighConfidence}`,
-		`Long-session trigger: ${settings.longSessionMessages} messages or ${settings.longSessionContextPercent}% context; cooldown=${settings.cooldownMinutes}m`,
+		words.statusTitle,
+		words.mode(autonomy.mode, autonomy.mode === "full"),
+		words.goalLoopRounds(autonomy.maxStallTurns),
+		words.autoLearn(settings.enabled, settings.model, settings.applyHighConfidence),
+		words.longSession(settings.longSessionMessages, settings.longSessionContextPercent, settings.cooldownMinutes),
 		reflectionLine,
-		`Running learners: ${running.length}/${settings.maxConcurrentLearners}`,
-		`Learners of other projects: ${otherTenantRunning}`,
-		"History retention: 7 days for internal Auto Learn prompts/logs/sessions",
-		`Learning authority: ${safety}`,
-		"Execution authority: /edge list (independent of learning preset)",
-		`Audit/log dir: ${host.getAutoLearnDataDir()}`,
-		`Artifact folder: ${host.getAutoLearnTenantDataDir()}`,
-		"Use /autonomy off|safe|balanced|full to switch presets. Advanced overrides remain in /settings → Auto Learn Advanced.",
+		words.runningLearners(running.length, settings.maxConcurrentLearners),
+		words.otherProjectLearners(otherTenantRunning),
+		words.historyRetention,
+		words.learningAuthority(safety),
+		words.executionAuthority,
+		words.auditDir(host.getAutoLearnDataDir()),
+		words.artifactFolder(host.getAutoLearnTenantDataDir()),
+		words.presets,
 	].join("\n");
 }
 
 export function handleAutonomyCommand(host: AutonomyHost, text: string): void {
+	const words = interfaceText().autonomyCommands.autonomy;
 	const action = text.slice("/autonomy".length).trim() || "status";
 	if (AUTONOMY_MODES.includes(action as AutonomyMode)) {
 		const mode = action as AutonomyMode;
 		host.applyAutonomyMode(mode);
-		host.showStatus(`Autonomy mode set to ${mode}${mode === "full" ? " (standing autonomy)" : ""}.`);
+		host.showStatus(words.modeSet(mode, mode === "full"));
 		return;
 	}
 	if (action === "status") {
@@ -122,7 +126,7 @@ export function handleAutonomyCommand(host: AutonomyHost, text: string): void {
 	if (action.startsWith("rollback")) {
 		const auditId = action.slice("rollback".length).trim();
 		if (!auditId) {
-			host.showStatus("Usage: /autonomy rollback <auditId> (see /autonomy diagnostics for audit ids)");
+			host.showStatus(words.rollbackUsage);
 			return;
 		}
 		void host.session
@@ -130,13 +134,11 @@ export function handleAutonomyCommand(host: AutonomyHost, text: string): void {
 			.then((result) => {
 				if (!result.ok)
 					harnessLog.debug("ui", "a learning rollback was skipped", { auditId, reason: result.reason });
-				host.showStatus(
-					result.ok ? `Rolled back learning change ${auditId}.` : `Rollback skipped: ${plainLabel(result.reason)}`,
-				);
+				host.showStatus(result.ok ? words.rolledBack(auditId) : words.rollbackSkipped(plainLabel(result.reason)));
 			})
 			.catch((error: unknown) => {
 				const message = error instanceof Error ? error.message : String(error);
-				host.showStatus(`Rollback failed: ${message}`);
+				host.showStatus(words.rollbackFailed(message));
 			});
 		return;
 	}
@@ -144,11 +146,11 @@ export function handleAutonomyCommand(host: AutonomyHost, text: string): void {
 		const rest = action.slice("fitness".length).trim().split(/\s+/).filter(Boolean);
 		const modelPattern = rest[0];
 		if (!modelPattern) {
-			host.showStatus("Usage: /autonomy fitness <model-pattern> [trials]");
+			host.showStatus(words.fitnessUsage);
 			return;
 		}
 		const trials = rest[1] ? Number(rest[1]) : undefined;
-		host.showStatus(`Model fitness probe running on ${modelPattern}…`);
+		host.showStatus(words.fitnessRunning(modelPattern));
 		void host.session
 			.runModelFitness({ model: modelPattern, trials: Number.isFinite(trials) ? trials : undefined })
 			.then((outcome) => {
@@ -156,23 +158,25 @@ export function handleAutonomyCommand(host: AutonomyHost, text: string): void {
 			})
 			.catch((error: unknown) => {
 				const message = error instanceof Error ? error.message : String(error);
-				host.showStatus(`Model fitness failed: ${message}`);
+				host.showStatus(words.fitnessFailed(message));
 			});
 		return;
 	}
 	if (action === "research") {
-		host.showStatus("Research lane: running…");
+		host.showStatus(words.researchRunning);
 		void host.session.backgroundLanes
 			.runResearchLaneOnce()
 			.then((outcome) => {
 				if (!outcome.started) {
 					harnessLog.debug("ui", "research lane skipped", { skipReason: outcome.skipReason });
-					host.showStatus(`Research lane skipped: ${plainLabel(outcome.skipReason ?? "unknown")}`);
+					host.showStatus(words.researchSkipped(plainLabel(outcome.skipReason ?? "unknown")));
 					return;
 				}
 				const status = outcome.record?.status ?? "unknown";
-				const reason = outcome.record?.reasonCode ? ` (${plainLabel(outcome.record.reasonCode)})` : "";
-				host.showStatus(`Research lane ${status}${reason}`);
+				const reason = outcome.record?.reasonCode
+					? words.researchReason(plainLabel(outcome.record.reasonCode))
+					: "";
+				host.showStatus(words.researchResult(status, reason));
 			})
 			.catch((error: unknown) => {
 				const message = error instanceof Error ? error.message : String(error);
@@ -180,7 +184,7 @@ export function handleAutonomyCommand(host: AutonomyHost, text: string): void {
 			});
 		return;
 	}
-	host.showStatus("Usage: /autonomy [status|diagnostics|research|rollback <auditId>|off|safe|balanced|full]");
+	host.showStatus(words.usage);
 }
 
 export function handleAutoLearnCommand(host: AutonomyHost, text: string): void {
@@ -195,5 +199,5 @@ export function handleAutoLearnCommand(host: AutonomyHost, text: string): void {
 		host.ui.requestRender();
 		return;
 	}
-	host.showStatus("Usage: /auto-learn [status|run]");
+	host.showStatus(interfaceText().autonomyCommands.autonomy.autoLearnUsage);
 }

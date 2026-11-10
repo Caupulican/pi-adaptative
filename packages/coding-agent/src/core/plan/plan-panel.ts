@@ -4,81 +4,15 @@
  * bounded: intents and titles are clipped and the inspection lists at most `PLAN_LIMITS.nodes` steps per plan.
  */
 
-import type { NextAction, OutcomeStatus } from "../delegation/worker-outcome-contract.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
-import type { Placement } from "../placement/placement-types.ts";
 import type { OrchestrationPanelRow, OrchestrationRowStatus } from "../tools/orchestration-panel.ts";
-import { PLAN_LIMITS, type PlanHoldReason, type PlanNodeKind, type PlanNodeState } from "./plan-graph.ts";
+import { PLAN_LIMITS } from "./plan-graph.ts";
 import { PIN_MUST_LOCAL } from "./plan-placement.ts";
 import type { PlanCounts, PlanNodeView, PlanView } from "./plan-view.ts";
 
 /** Characters a step intent, a plan title and a held step's detail keep on screen. */
 export const PLAN_PANEL_LIMITS = { intentChars: 120, titleChars: 60, detailChars: 240 } as const;
-
-const STATE_WORDS: Readonly<Record<Exclude<PlanNodeState, "held">, string>> = {
-	planned: "waiting",
-	ready: "starting",
-	admitted: "starting",
-	running: "running",
-	settled: "done",
-	superseded: "replaced",
-	cancelled: "cancelled",
-};
-
-const HOLD_WORDS: Readonly<Record<PlanHoldReason, string>> = {
-	owner: "needs you",
-	replan: "needs a re-plan",
-	root: "waiting on the root",
-};
-
-const OUTCOME_WORDS: Readonly<Record<OutcomeStatus, string>> = {
-	succeeded: "finished",
-	partial: "partly finished",
-	blocked: "stopped on a blocker",
-	failed: "failed",
-	cancelled: "cancelled",
-};
-
-/** What happens next after a settled step's outcome; `accept` needs no words. */
-const NEXT_ACTION_WORDS: Readonly<Record<NextAction["kind"], string | undefined>> = {
-	accept: undefined,
-	verify_in_lane: "to be checked by the same worker",
-	verify_independently: "independent check next",
-	host_check: "host check next",
-	rerun_uncovered: "rerun for what is missing",
-	retry_after: "retry later",
-	wait_capacity: "waiting for room",
-	replace: "running again on this machine",
-	fix_request: "needs a fix",
-	ask_owner: "needs your answer",
-	ask_root: "question for the root",
-	abandon: "given up",
-};
-
-const KIND_WORDS: Readonly<Record<PlanNodeKind, string | undefined>> = {
-	work: undefined,
-	collect: "collects results",
-	reduce: "combines answers",
-	merge: "merges changes",
-	vote: "picks the best",
-	race: "first one wins",
-	verify: "independent check",
-};
-
-const PLACEMENT_WORDS: Readonly<Record<Placement["kind"], string>> = {
-	local_worker: "worker",
-	bot: "bot",
-	leader: "leader",
-	remote_machine: "another machine",
-};
-
-const PLAN_STATUS_WORDS: Readonly<Record<PlanView["status"], string>> = {
-	active: "running",
-	paused: "paused",
-	settled: "finished",
-	cancelled: "cancelled",
-	unsupported: "kept, not run by this version",
-};
 
 /** One line of model or owner text, whitespace folded, clipped to `max` characters. */
 function clip(text: string, max: number): string {
@@ -87,7 +21,7 @@ function clip(text: string, max: number): string {
 }
 
 function steps(count: number): string {
-	return `${count} step${count === 1 ? "" : "s"}`;
+	return interfaceText().autonomyCommands.plan.steps(count);
 }
 
 function isOpen(view: PlanView): boolean {
@@ -95,24 +29,25 @@ function isOpen(view: PlanView): boolean {
 }
 
 function stateWord(node: PlanNodeView): string {
-	if (node.state === "held") return node.held ? HOLD_WORDS[node.held.reason] : "held";
-	return STATE_WORDS[node.state];
+	const words = interfaceText().autonomyCommands.plan;
+	if (node.state === "held") return node.held ? words.hold[node.held.reason] : words.state.held;
+	return words.state[node.state];
 }
 
 /** Where a released step runs, in plain words: a must-pinned step that ran here says so, and a machine is named when known. */
 function placementWord(node: PlanNodeView): string | undefined {
+	const words = interfaceText().autonomyCommands.plan;
 	if (!node.placement) return undefined;
-	if (node.placementExit === PIN_MUST_LOCAL) return "pinned machine unavailable: runs here";
+	if (node.placementExit === PIN_MUST_LOCAL) return words.pinnedUnavailable;
 	if (node.placement.kind === "remote_machine" && node.placementName !== undefined)
-		return `machine ${node.placementName}`;
-	return PLACEMENT_WORDS[node.placement.kind];
+		return words.machine(node.placementName);
+	return words.placement[node.placement.kind];
 }
 
 /** The machine a must-pinned step waits for, in plain words: its name when the fleet names it, else that it is not linked. */
 function pinnedMachineWords(node: PlanNodeView): string {
-	return node.pinnedMachineName !== undefined
-		? `machine ${node.pinnedMachineName}`
-		: "a machine this one is not linked to";
+	const words = interfaceText().autonomyCommands.plan;
+	return node.pinnedMachineName !== undefined ? words.machine(node.pinnedMachineName) : words.unlinkedMachine;
 }
 
 /**
@@ -120,13 +55,14 @@ function pinnedMachineWords(node: PlanNodeView): string {
  * the work-panel rows and the `/plan` text so both read the same.
  */
 function stepDetailLines(node: PlanNodeView): string[] {
+	const words = interfaceText().autonomyCommands.plan;
 	const pinned =
 		node.placementExit === PIN_MUST_LOCAL && node.pinnedMachine !== undefined
-			? [`pinned to ${pinnedMachineWords(node)}, no linked machine can take it now`]
+			? [words.pinnedNoMachine(pinnedMachineWords(node))]
 			: [];
 	return [
 		...pinned.map((line) => clip(line, PLAN_PANEL_LIMITS.detailChars)),
-		...(node.doubts ?? []).map((doubt) => clip(`doubt: ${doubt}`, PLAN_PANEL_LIMITS.detailChars)),
+		...(node.doubts ?? []).map((doubt) => clip(words.doubt(doubt), PLAN_PANEL_LIMITS.detailChars)),
 	];
 }
 
@@ -156,8 +92,8 @@ function rowStatus(node: PlanNodeView): OrchestrationRowStatus {
 function kindWords(node: PlanNodeView): string | undefined {
 	const join = node.join;
 	if (node.kind === "collect" && join?.quorum !== undefined)
-		return `collects results; needs ${join.quorum} of ${steps(join.members)}`;
-	return KIND_WORDS[node.kind];
+		return interfaceText().autonomyCommands.plan.quorumKind(join.quorum, steps(join.members));
+	return interfaceText().autonomyCommands.plan.kind[node.kind];
 }
 
 /**
@@ -165,18 +101,19 @@ function kindWords(node: PlanNodeView): string | undefined {
  * dependency is shown only while the step still waits; a finished step's count is history.
  */
 function nodeWords(node: PlanNodeView): string[] {
+	const words = interfaceText().autonomyCommands.plan;
 	const waiting = node.state === "planned" || node.state === "ready";
 	// A quorum join states its quorum in its kind words, in place of a count of every step it reads.
 	const quorumJoin = node.kind === "collect" && node.join?.quorum !== undefined;
-	const outcome = node.state === "settled" && node.outcomeStatus ? OUTCOME_WORDS[node.outcomeStatus] : undefined;
-	const next = node.state === "settled" && node.nextAction ? NEXT_ACTION_WORDS[node.nextAction] : undefined;
+	const outcome = node.state === "settled" && node.outcomeStatus ? words.outcome[node.outcomeStatus] : undefined;
+	const next = node.state === "settled" && node.nextAction ? words.nextAction[node.nextAction] : undefined;
 	return [
 		stateWord(node),
-		waiting && !quorumJoin && node.predecessors > 0 ? `after ${steps(node.predecessors)}` : undefined,
+		waiting && !quorumJoin && node.predecessors > 0 ? words.afterSteps(steps(node.predecessors)) : undefined,
 		kindWords(node),
-		node.effort === "deep" ? "hard step, deep thinking" : undefined,
+		node.effort === "deep" ? words.hardStep : undefined,
 		placementWord(node),
-		node.attempts > 1 ? `attempt ${node.attempts}` : undefined,
+		node.attempts > 1 ? words.attempt(node.attempts) : undefined,
 		outcome,
 		next,
 	].filter((word): word is string => word !== undefined);
@@ -184,22 +121,24 @@ function nodeWords(node: PlanNodeView): string[] {
 
 /** `3 of 7 done`, then running, waiting and held counts that are not zero. */
 export function planCountWords(counts: PlanCounts): string[] {
+	const words = interfaceText().autonomyCommands.plan;
 	const heldElsewhere = counts.held - counts.heldOnOwner;
 	return [
-		`${counts.settled} of ${counts.total} done`,
-		counts.running > 0 ? `${counts.running} running` : undefined,
-		counts.waiting > 0 ? `${counts.waiting} waiting` : undefined,
-		counts.heldOnOwner > 0 ? `${counts.heldOnOwner} need${counts.heldOnOwner === 1 ? "s" : ""} you` : undefined,
-		heldElsewhere > 0 ? `${heldElsewhere} held` : undefined,
+		words.doneCount(counts.settled, counts.total),
+		counts.running > 0 ? words.running(counts.running) : undefined,
+		counts.waiting > 0 ? words.waiting(counts.waiting) : undefined,
+		counts.heldOnOwner > 0 ? words.needsYou(counts.heldOnOwner) : undefined,
+		heldElsewhere > 0 ? words.heldCount(heldElsewhere) : undefined,
 	].filter((word): word is string => word !== undefined);
 }
 
 /** The section heading the plan's rows sit under: title, then counts or how it ended. */
 export function planSectionHeading(view: PlanView): string {
+	const words = interfaceText().autonomyCommands.plan;
 	const title = clip(view.title, PLAN_PANEL_LIMITS.titleChars);
-	if (view.status === "unsupported") return `Plan: ${title}`;
-	const tail = view.status === "active" ? planCountWords(view.counts) : [PLAN_STATUS_WORDS[view.status]];
-	return [`Plan: ${title}`, ...tail].join(" · ");
+	if (view.status === "unsupported") return words.heading(title);
+	const tail = view.status === "active" ? planCountWords(view.counts) : [words.status[view.status]];
+	return [words.heading(title), ...tail].join(" · ");
 }
 
 export function planNodePanelRow(view: PlanView, node: PlanNodeView): OrchestrationPanelRow {
@@ -253,16 +192,17 @@ export function planPanelRows(views: readonly PlanView[]): OrchestrationPanelRow
  * `Plan "Add export to CSV": 3 of 7 done, 2 running, waiting on you for 1 step.`
  */
 export function planStatusLine(view: Pick<PlanView, "title" | "status" | "counts">): string {
+	const words = interfaceText().autonomyCommands.plan;
 	const { counts } = view;
 	const heldElsewhere = counts.held - counts.heldOnOwner;
 	const parts = [
-		`${counts.settled} of ${counts.total} done`,
-		counts.running > 0 ? `${counts.running} running` : undefined,
-		heldElsewhere > 0 ? `${heldElsewhere} held for a new plan or the root` : undefined,
-		counts.heldOnOwner > 0 ? `waiting on you for ${steps(counts.heldOnOwner)}` : undefined,
-		view.status === "paused" ? "paused" : undefined,
+		words.doneCount(counts.settled, counts.total),
+		counts.running > 0 ? words.running(counts.running) : undefined,
+		heldElsewhere > 0 ? words.statusLineHeldElsewhere(heldElsewhere) : undefined,
+		counts.heldOnOwner > 0 ? words.statusLineWaitingOnOwner(steps(counts.heldOnOwner)) : undefined,
+		view.status === "paused" ? words.paused : undefined,
 	].filter((part): part is string => part !== undefined);
-	return `Plan "${clip(view.title, PLAN_LIMITS.titleChars)}": ${parts.join(", ")}.`;
+	return words.statusLine(clip(view.title, PLAN_LIMITS.titleChars), parts.join(", "));
 }
 
 export interface PlanInspectionOptions {
@@ -271,6 +211,7 @@ export interface PlanInspectionOptions {
 }
 
 function inspectOpenPlan(view: PlanView, options: PlanInspectionOptions): string[] {
+	const words = interfaceText().autonomyCommands.plan;
 	const shown = view.nodes.slice(0, PLAN_LIMITS.nodes);
 	const known = view.rootOwned.flatMap((id) => {
 		const text = options.requirementText?.(id);
@@ -278,35 +219,50 @@ function inspectOpenPlan(view: PlanView, options: PlanInspectionOptions): string
 	});
 	const unnamed = view.rootOwned.length - known.length;
 	return [
-		`Plan "${clip(view.title, PLAN_LIMITS.titleChars)}" (version ${view.version}, ${PLAN_STATUS_WORDS[view.status]}): ${planCountWords(view.counts).join(", ")}`,
-		...(view.unjudged ? ["  Checked without System One: it was unavailable when the plan was recorded."] : []),
+		words.openHead(
+			clip(view.title, PLAN_LIMITS.titleChars),
+			view.version,
+			words.status[view.status],
+			planCountWords(view.counts).join(", "),
+		),
+		...(view.unjudged ? [words.unjudged] : []),
 		...shown.flatMap((node, index) => {
 			const detail = node.held ? `: ${clip(node.held.detail, PLAN_PANEL_LIMITS.detailChars)}` : "";
-			return [
-				`  ${index + 1}. ${clip(node.intent, PLAN_PANEL_LIMITS.intentChars)} (${nodeWords(node).join(", ")})${detail}`,
-				...stepDetailLines(node).map((line) => `     ${line}`),
-			];
+			const step = words.openStep(
+				index + 1,
+				clip(node.intent, PLAN_PANEL_LIMITS.intentChars),
+				nodeWords(node).join(", "),
+			);
+			return [`${step}${detail}`, ...stepDetailLines(node).map((line) => `     ${line}`)];
 		}),
-		...(view.nodes.length > shown.length ? [`  … ${steps(view.nodes.length - shown.length)} more`] : []),
+		...(view.nodes.length > shown.length ? [words.moreSteps(steps(view.nodes.length - shown.length))] : []),
 		...(view.rootOwned.length > 0
 			? [
-					`  The root keeps ${view.rootOwned.length} requirement${view.rootOwned.length === 1 ? "" : "s"} no step covers${known.length > 0 ? ":" : "."}`,
-					...known.map((text) => `    - ${text}`),
-					...(known.length > 0 && unnamed > 0 ? [`    - and ${unnamed} more`] : []),
+					words.rootKeeps(view.rootOwned.length, known.length > 0),
+					...known.map((text) => words.rootKeepsItem(text)),
+					...(known.length > 0 && unnamed > 0 ? [words.rootKeepsMore(unnamed)] : []),
 				]
 			: []),
 	];
 }
 
 function inspectClosedPlan(view: PlanView): string {
-	if (view.status === "unsupported") return `Plan: ${view.title}; kept, not run by this version.`;
-	const reason = view.closedReason ? `: ${clip(view.closedReason, PLAN_PANEL_LIMITS.detailChars)}` : "";
-	return `Plan "${clip(view.title, PLAN_LIMITS.titleChars)}" (version ${view.version}) ${PLAN_STATUS_WORDS[view.status]}${reason}; ${view.counts.settled} of ${view.counts.total} done.`;
+	const words = interfaceText().autonomyCommands.plan;
+	if (view.status === "unsupported") return words.unsupportedHeading(view.title);
+	const reason = view.closedReason ? words.closedReason(clip(view.closedReason, PLAN_PANEL_LIMITS.detailChars)) : "";
+	return words.closed(
+		clip(view.title, PLAN_LIMITS.titleChars),
+		view.version,
+		words.status[view.status],
+		reason,
+		view.counts.settled,
+		view.counts.total,
+	);
 }
 
 /** The `/plan` text: open plans step by step, closed and unsupported plans one line each. */
 export function planInspectionText(views: readonly PlanView[], options: PlanInspectionOptions = {}): string {
-	if (views.length === 0) return "No plan in this session.";
+	if (views.length === 0) return interfaceText().autonomyCommands.plan.none;
 	return views
 		.flatMap((view) => (isOpen(view) ? inspectOpenPlan(view, options) : [inspectClosedPlan(view)]))
 		.join("\n");

@@ -1,4 +1,5 @@
 import { formatStatusCostSummary, type SessionCostSummary } from "../cost/cost-summary.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { GateOutcomeKind } from "./contracts.ts";
 
 export interface AutonomyStatusSnapshot {
@@ -112,37 +113,39 @@ export function formatAutonomyStatus(args: AutonomyStatusSnapshot): string {
 }
 
 function formatDiagnosticSection(name: string, entries?: readonly DiagnosticEntry[]): string | undefined {
+	const words = interfaceText().autonomyCommands.diagnostics;
 	if (!entries || entries.length === 0) return undefined;
 
-	const lines: string[] = [`--- ${name} ---`];
+	const lines: string[] = [words.section(name)];
 	for (const entry of entries) {
 		let header = `- ${redactAndTruncateString(entry.title)}`;
 		if (entry.reasonCode) header += ` [${redactAndTruncateString(entry.reasonCode)}]`;
 		lines.push(header);
 
 		if (entry.summary) {
-			lines.push(`  Summary: ${redactAndTruncateString(entry.summary)}`);
+			lines.push(words.summary(redactAndTruncateString(entry.summary)));
 		}
 
 		if (entry.metadata) {
-			lines.push(`  Metadata: ${JSON.stringify(sanitizeMetadata(entry.metadata))}`);
+			lines.push(words.metadata(JSON.stringify(sanitizeMetadata(entry.metadata))));
 		}
 	}
 	return lines.join("\n");
 }
 
 export function formatAutonomyDiagnostics(args: AutonomyDiagnosticSnapshot): string {
+	const words = interfaceText().autonomyCommands.diagnostics;
 	const sections = [
-		formatDiagnosticSection("Routes", args.routes),
-		formatDiagnosticSection("Gates", args.gates),
-		formatDiagnosticSection("Costs", args.costs),
-		formatDiagnosticSection("Research", args.research),
-		formatDiagnosticSection("Delegation", args.delegation),
-		formatDiagnosticSection("Learning", args.learning),
-		formatDiagnosticSection("Goals", args.goals),
-		formatDiagnosticSection("Process Memory", args.processMemory),
+		formatDiagnosticSection(words.routes, args.routes),
+		formatDiagnosticSection(words.gates, args.gates),
+		formatDiagnosticSection(words.costs, args.costs),
+		formatDiagnosticSection(words.research, args.research),
+		formatDiagnosticSection(words.delegation, args.delegation),
+		formatDiagnosticSection(words.learning, args.learning),
+		formatDiagnosticSection(words.goals, args.goals),
+		formatDiagnosticSection(words.processMemory, args.processMemory),
 	].filter((section): section is string => Boolean(section));
 
-	if (sections.length === 0) return "No diagnostics available.";
+	if (sections.length === 0) return words.none;
 	return sections.join("\n\n");
 }
