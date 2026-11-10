@@ -14,16 +14,20 @@ import { COMMAND_CONTROLLER } from "./text-en/command-controller.ts";
 import { COMMANDS } from "./text-en/commands.ts";
 import { COMMON } from "./text-en/common.ts";
 import { CONFIG_SCREEN } from "./text-en/config-screen.ts";
+import { CONVERSATION } from "./text-en/conversation.ts";
 import { DIALOGS } from "./text-en/dialogs.ts";
 import { FRAME } from "./text-en/frame.ts";
 import { GRAPH } from "./text-en/graph.ts";
 import { INSPECTOR } from "./text-en/inspector.ts";
+import { INTERACTIVE } from "./text-en/interactive.ts";
 import { KEYS } from "./text-en/keys.ts";
 import { KNOWLEDGE_COMMANDS } from "./text-en/knowledge-commands.ts";
 import { LOCAL_MODELS } from "./text-en/local-models.ts";
 import { MACHINES } from "./text-en/machines.ts";
+import { NOTICES } from "./text-en/notices.ts";
 import { PANES } from "./text-en/panes.ts";
 import { PROFILES_SCREEN } from "./text-en/profiles-screen.ts";
+import { QUEUE } from "./text-en/queue.ts";
 import { REPORTS } from "./text-en/reports.ts";
 import { RESOURCES } from "./text-en/resources.ts";
 import { SECRETS_SCREEN } from "./text-en/secrets-screen.ts";
@@ -41,16 +45,20 @@ import { COMMAND_CONTROLLER as COMMAND_CONTROLLER_PT_BR } from "./text-pt-br/com
 import { COMMANDS as COMMANDS_PT_BR } from "./text-pt-br/commands.ts";
 import { COMMON as COMMON_PT_BR } from "./text-pt-br/common.ts";
 import { CONFIG_SCREEN as CONFIG_SCREEN_PT_BR } from "./text-pt-br/config-screen.ts";
+import { CONVERSATION as CONVERSATION_PT_BR } from "./text-pt-br/conversation.ts";
 import { DIALOGS as DIALOGS_PT_BR } from "./text-pt-br/dialogs.ts";
 import { FRAME as FRAME_PT_BR } from "./text-pt-br/frame.ts";
 import { GRAPH as GRAPH_PT_BR } from "./text-pt-br/graph.ts";
 import { INSPECTOR as INSPECTOR_PT_BR } from "./text-pt-br/inspector.ts";
+import { INTERACTIVE as INTERACTIVE_PT_BR } from "./text-pt-br/interactive.ts";
 import { KEYS as KEYS_PT_BR } from "./text-pt-br/keys.ts";
 import { KNOWLEDGE_COMMANDS as KNOWLEDGE_COMMANDS_PT_BR } from "./text-pt-br/knowledge-commands.ts";
 import { LOCAL_MODELS as LOCAL_MODELS_PT_BR } from "./text-pt-br/local-models.ts";
 import { MACHINES as MACHINES_PT_BR } from "./text-pt-br/machines.ts";
+import { NOTICES as NOTICES_PT_BR } from "./text-pt-br/notices.ts";
 import { PANES as PANES_PT_BR } from "./text-pt-br/panes.ts";
 import { PROFILES_SCREEN as PROFILES_SCREEN_PT_BR } from "./text-pt-br/profiles-screen.ts";
+import { QUEUE as QUEUE_PT_BR } from "./text-pt-br/queue.ts";
 import { REPORTS as REPORTS_PT_BR } from "./text-pt-br/reports.ts";
 import { RESOURCES as RESOURCES_PT_BR } from "./text-pt-br/resources.ts";
 import { SECRETS_SCREEN as SECRETS_SCREEN_PT_BR } from "./text-pt-br/secrets-screen.ts";
@@ -71,16 +79,20 @@ const AREAS = {
 	commands: [COMMANDS, COMMANDS_PT_BR],
 	common: [COMMON, COMMON_PT_BR],
 	configScreen: [CONFIG_SCREEN, CONFIG_SCREEN_PT_BR],
+	conversation: [CONVERSATION, CONVERSATION_PT_BR],
 	dialogs: [DIALOGS, DIALOGS_PT_BR],
 	frame: [FRAME, FRAME_PT_BR],
 	graph: [GRAPH, GRAPH_PT_BR],
 	inspector: [INSPECTOR, INSPECTOR_PT_BR],
+	interactive: [INTERACTIVE, INTERACTIVE_PT_BR],
 	keys: [KEYS, KEYS_PT_BR],
 	knowledgeCommands: [KNOWLEDGE_COMMANDS, KNOWLEDGE_COMMANDS_PT_BR],
 	localModels: [LOCAL_MODELS, LOCAL_MODELS_PT_BR],
 	machines: [MACHINES, MACHINES_PT_BR],
+	notices: [NOTICES, NOTICES_PT_BR],
 	panes: [PANES, PANES_PT_BR],
 	profilesScreen: [PROFILES_SCREEN, PROFILES_SCREEN_PT_BR],
+	queue: [QUEUE, QUEUE_PT_BR],
 	reports: [REPORTS, REPORTS_PT_BR],
 	resources: [RESOURCES, RESOURCES_PT_BR],
 	secretsScreen: [SECRETS_SCREEN, SECRETS_SCREEN_PT_BR],

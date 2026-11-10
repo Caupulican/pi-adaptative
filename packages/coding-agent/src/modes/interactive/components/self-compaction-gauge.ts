@@ -1,4 +1,5 @@
 import type { SelfCompactionPhase, SelfCompactionView } from "../../../core/compaction/self-compaction-controller.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 
 export const SELF_COMPACTION_GAUGE_CELLS = 20;
 
@@ -20,17 +21,6 @@ export interface SelfCompactionGauge {
 	readonly tone: SelfCompactionGaugeTone | null;
 	readonly cycle: string | null;
 }
-
-const PHASE_TAGS: Readonly<Record<SelfCompactionPhase, string | null>> = {
-	off: null,
-	clear: null,
-	notice: "NOTICE",
-	warning: "WARNING",
-	forced: "FORCED",
-	compacting: "COMPACTING",
-	compacted: "COMPACTED",
-	resuming: "RESUMING",
-};
 
 const PHASE_TONES: Readonly<Record<SelfCompactionPhase, SelfCompactionGaugeTone | null>> = {
 	off: null,
@@ -56,6 +46,7 @@ export function selfCompactionGauge(
 	view: SelfCompactionView,
 	cells = SELF_COMPACTION_GAUGE_CELLS,
 ): SelfCompactionGauge | null {
+	const text = interfaceText().conversation;
 	const thresholds = view.thresholds;
 	const window = thresholds?.contextWindow ?? view.contextWindow ?? 0;
 	if (window <= 0) return null;
@@ -77,8 +68,8 @@ export function selfCompactionGauge(
 	return {
 		bar: `[${out.join("")}]`,
 		percent: view.usedTokens === null ? "?%" : `${((view.usedTokens / window) * 100).toFixed(1)}%`,
-		tag: PHASE_TAGS[view.phase],
+		tag: interfaceText().conversation.phaseTag(view.phase),
 		tone: PHASE_TONES[view.phase],
-		cycle: view.cycles > 0 ? `cycle ${view.cycles}` : null,
+		cycle: view.cycles > 0 ? text.cycle(view.cycles) : null,
 	};
 }

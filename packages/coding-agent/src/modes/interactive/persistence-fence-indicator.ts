@@ -4,11 +4,11 @@
  * while it lasts and removes it when it lifts, and tells the owner once in full words when it starts.
  */
 
-import { SESSION_SAVE_PAUSED_WORDS } from "../../core/autonomy-status/format.ts";
+import { sessionSavePausedWords } from "../../core/autonomy-status/format.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 
 export const SESSION_FENCE_STATUS_KEY = "session-save";
-const SESSION_FENCE_FOOTER_TEXT = "Saving paused: /resume reopens this session";
 
 export interface PersistenceFenceIndicatorHost {
 	readonly sessionManager: Pick<SessionManager, "isPersistenceStateUncertain" | "onPersistenceFenceChange">;
@@ -25,8 +25,11 @@ export interface PersistenceFenceIndicatorHost {
 export function bindPersistenceFenceIndicator(host: PersistenceFenceIndicatorHost): () => void {
 	const sync = (): void => {
 		const fenced = host.sessionManager.isPersistenceStateUncertain();
-		host.footerData.setExtensionStatus(SESSION_FENCE_STATUS_KEY, fenced ? SESSION_FENCE_FOOTER_TEXT : undefined);
-		if (fenced) host.showWarning(SESSION_SAVE_PAUSED_WORDS);
+		host.footerData.setExtensionStatus(
+			SESSION_FENCE_STATUS_KEY,
+			fenced ? interfaceText().notices.savingPaused : undefined,
+		);
+		if (fenced) host.showWarning(sessionSavePausedWords());
 		host.refresh();
 	};
 	sync();

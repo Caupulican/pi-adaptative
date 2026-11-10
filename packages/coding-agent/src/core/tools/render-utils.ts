@@ -9,6 +9,7 @@ import type { Theme } from "../../presentation/theme-model.ts";
 import { stripAnsi } from "../../utils/ansi.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import type { ToolRenderResultOptions } from "../extensions/types.ts";
+import { interfaceText } from "../language/interface-text.ts";
 
 function toDisplaySeparators(path: string): string {
 	return path.split(sep).join("/");
@@ -95,7 +96,7 @@ export function getTextOutput(
 }
 
 export function formatCollapsedToolOutputHint(currentTheme: Theme): string {
-	return `\n${currentTheme.fg("muted", "...")} ${keyHint("app.tools.expand", "to expand")}`;
+	return `\n${currentTheme.fg("muted", "...")} ${keyHint("app.tools.expand", interfaceText().conversation.toExpand)}`;
 }
 
 export type ToolRenderResultLike<TDetails> = {

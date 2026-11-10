@@ -1,5 +1,6 @@
 import { type Component, truncateToWidth } from "@caupulican/pi-tui";
 import type { KeybindingsManager } from "../../../core/keybindings.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { formatKeyText } from "../../../presentation/keybinding-hints.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 
@@ -37,9 +38,12 @@ export class TranscriptPager implements Component {
 		this.lastMaxScroll = maxScroll;
 		this.scrollTop = this.followTail ? maxScroll : Math.min(this.scrollTop, maxScroll);
 
-		const status = this.followTail ? "live tail" : `${Math.round((this.scrollTop / Math.max(1, maxScroll)) * 100)}%`;
+		const text = interfaceText().conversation;
+		const status = this.followTail
+			? text.liveTail
+			: `${Math.round((this.scrollTop / Math.max(1, maxScroll)) * 100)}%`;
 		const header = this.surfaceLine(
-			`${theme.bold(theme.fg("text", " Transcript"))}${theme.fg("muted", `  ${status}`)}`,
+			`${theme.bold(theme.fg("text", ` ${text.transcriptTitle}`))}${theme.fg("muted", `  ${status}`)}`,
 			width,
 		);
 		const content = sourceLines
@@ -51,7 +55,12 @@ export class TranscriptPager implements Component {
 
 		const key = (action: Parameters<KeybindingsManager["getKeys"]>[0]) =>
 			formatKeyText(this.keybindings.getKeys(action).join("/"), { capitalize: true });
-		const footerText = ` ${key("app.transcript.scrollUp")}/${key("app.transcript.scrollDown")} scroll  ·  ${key("app.transcript.pageUp")}/${key("app.transcript.pageDown")} page  ·  ${key("app.transcript.top")}/${key("app.transcript.bottom")} jump  ·  ${key("app.transcript.close")} close`;
+		const footerText = text.pagerFooter(
+			`${key("app.transcript.scrollUp")}/${key("app.transcript.scrollDown")}`,
+			`${key("app.transcript.pageUp")}/${key("app.transcript.pageDown")}`,
+			`${key("app.transcript.top")}/${key("app.transcript.bottom")}`,
+			key("app.transcript.close"),
+		);
 		return [header, ...content, this.surfaceLine(theme.fg("muted", footerText), width)];
 	}
 

@@ -46,6 +46,7 @@ import type { ReadonlyFooterDataProvider } from "../../core/footer-data-contract
 import type { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import type { HumanInputPresentationRequest, HumanInputPresentationResult } from "../../core/human-input.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { SessionImageStore } from "../../core/session-image-store.ts";
 import { AskQuestionDialog } from "../../core/tools/ask-question.ts";
 import { harnessLog } from "../../kernel/harness-log.ts";
@@ -207,7 +208,9 @@ export class ExtensionUiHost {
 				// Cast to KeyId - extension shortcuts use the same format
 				if (matchesKey(data, shortcutStr as KeyId)) {
 					const reportError = (err: unknown) => {
-						this.ui.showError(`Shortcut handler error: ${err instanceof Error ? err.message : String(err)}`);
+						this.ui.showError(
+							interfaceText().notices.shortcutHandlerError(err instanceof Error ? err.message : String(err)),
+						);
 					};
 					// Preserve synchronous invocation while observing asynchronous settlement without blocking input.
 					try {
@@ -284,7 +287,7 @@ export class ExtensionUiHost {
 				container.addChild(new Text(line, 1, 0));
 			}
 			if (content.length > ExtensionUiHost.MAX_WIDGET_LINES) {
-				container.addChild(new Text(theme.fg("muted", "... (widget truncated)"), 1, 0));
+				container.addChild(new Text(theme.fg("muted", interfaceText().notices.widgetTruncated), 1, 0));
 			}
 			component = container;
 		} else {
@@ -458,7 +461,11 @@ export class ExtensionUiHost {
 			} catch (error) {
 				unsubscribe();
 				this.extensionTerminalInputUnsubscribers.delete(unsubscribe);
-				this.ui.showError(`Terminal input handler error: ${safeErrorMessage(error, "Handler failed.")}`);
+				this.ui.showError(
+					interfaceText().notices.terminalInputHandlerError(
+						safeErrorMessage(error, interfaceText().notices.handlerFailed),
+					),
+				);
 				return undefined;
 			}
 		};
@@ -558,9 +565,7 @@ export class ExtensionUiHost {
 				clipboard: {
 					autoResizeImages: settings.getImageAutoResize(),
 					blockImages: settings.getBlockImages() || modelCannotSeeImages,
-					blockImagesReason: modelCannotSeeImages
-						? "The selected model does not accept image input. Switch to an image-capable model or route this inspection to a vision worker."
-						: undefined,
+					blockImagesReason: modelCannotSeeImages ? interfaceText().interactive.imagesBlocked : undefined,
 					imageStore: this.ui.getClipboardImageStore(),
 				},
 				pasteClipboardImage: handleClipboardImagePaste,
@@ -612,8 +617,10 @@ export class ExtensionUiHost {
 	 * Show a confirmation dialog for extensions.
 	 */
 	async showExtensionConfirm(title: string, message: string, opts?: ExtensionUIDialogOptions): Promise<boolean> {
-		const result = await this.showExtensionSelector(`${title}\n${message}`, ["Yes", "No"], opts);
-		return result === "Yes";
+		const words = interfaceText().interactive;
+		const answers = [words.yes, words.no];
+		const result = await this.showExtensionSelector(`${title}\n${message}`, answers, opts);
+		return result === answers[0];
 	}
 
 	/**
@@ -923,7 +930,7 @@ export class ExtensionUiHost {
 	 * Show an extension error in the UI.
 	 */
 	showExtensionError(extensionPath: string, error: string, stack?: string): void {
-		const errorMsg = `Extension "${extensionPath}" error: ${error}`;
+		const errorMsg = interfaceText().notices.extensionError(extensionPath, error);
 		const errorText = new Text(theme.fg("error", errorMsg), 1, 0);
 		this.ui.chatContainer.addChild(errorText);
 		// The stack is diagnostic detail: it goes to the harness log, not the screen.

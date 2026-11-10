@@ -1,4 +1,5 @@
 import { Box, Container, Markdown, type MarkdownTheme, Text } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { plainLabel } from "../../../presentation/plain-text.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import { REMOTE_MARK } from "./bot-state-mark.ts";
@@ -11,8 +12,8 @@ export class ChannelMessageComponent extends Container {
 	constructor(channel: string, words: string, markdownTheme: MarkdownTheme) {
 		super();
 		const box = new Box(1, 1, (content: string) => theme.bg("customMessageBg", content));
-		const source =
-			channel === "link" ? `${REMOTE_MARK} Message from another machine` : `${plainLabel(channel)} message`;
+		const text = interfaceText().conversation;
+		const source = channel === "link" ? text.fromAnotherMachine(REMOTE_MARK) : text.onChannel(plainLabel(channel));
 		box.addChild(new Text(theme.fg("customMessageLabel", theme.bold(source)), 0, 0));
 		box.addChild(
 			new Markdown(words, 0, 0, markdownTheme, {

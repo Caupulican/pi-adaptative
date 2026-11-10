@@ -11,6 +11,7 @@ import {
 	truncateToWidth,
 } from "@caupulican/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { readProofSheetRecord } from "../../../core/proof/proof-sheet.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import {
@@ -95,7 +96,8 @@ class ToolTimingComponent implements Component {
 		if (this.startedAt === undefined) return undefined;
 		const current = this.endedAt ?? this.clock();
 		if (!Number.isFinite(current)) return undefined;
-		const label = this.endedAt === undefined ? "Elapsed" : "Took";
+		const text = interfaceText().conversation;
+		const label = this.endedAt === undefined ? text.elapsed : text.took;
 		return `${label} ${formatToolDuration(Math.max(0, current - this.startedAt))}`;
 	}
 
@@ -176,11 +178,12 @@ function orchestrationConversationText(
 	result: ToolExecutionResult | undefined,
 	isPartial: boolean,
 ): string | undefined {
+	const text = interfaceText().conversation;
 	const input: Record<string, unknown> = isRecordObject(args) ? args : {};
 	const details: Record<string, unknown> = isRecordObject(result?.details) ? result.details : {};
 	if (toolName === "delegate") {
 		const action = typeof input.action === "string" ? input.action : "start";
-		if (result?.isError) return `${theme.fg("error", "✗")} ${theme.fg("muted", `Brain · delegate ${action} failed`)}`;
+		if (result?.isError) return `${theme.fg("error", "✗")} ${theme.fg("muted", text.delegateFailed(action))}`;
 		if (DELEGATE_PROGRESS_ACTIONS.has(action)) {
 			const target =
 				typeof details.agentId === "string"
@@ -189,11 +192,7 @@ function orchestrationConversationText(
 						? details.laneId
 						: typeof input.agentId === "string"
 							? input.agentId
-							: action === "slices"
-								? "parallel slices"
-								: action === "race"
-									? "race workers"
-									: "subagent";
+							: text.delegatedTarget(action);
 			const inputModel = isRecordObject(input.model) ? input.model : undefined;
 			const model =
 				typeof details.modelRef === "string"
@@ -204,30 +203,30 @@ function orchestrationConversationText(
 			const summary = oneLinePreview(input.task ?? input.instructions ?? input.message);
 			const suffix = `${model ? theme.fg("dim", ` [${model}]`) : ""}${summary ? theme.fg("muted", ` — ${summary}`) : ""}`;
 			if (isPartial || !result) {
-				return `${theme.fg("accent", "◆")} ${theme.fg("accent", "Brain")} ${theme.fg("muted", `→ delegating (${action}) to`)} ${theme.fg("text", String(target))}${suffix}`;
+				return `${theme.fg("accent", "◆")} ${theme.fg("accent", text.brain)} ${theme.fg("muted", text.delegating(action))} ${theme.fg("text", String(target))}${suffix}`;
 			}
-			return `${theme.fg("success", "◆")} ${theme.fg("accent", "Brain")} ${theme.fg("muted", `→ delegated (${action}) to`)} ${theme.fg("text", String(target))}${suffix}`;
+			return `${theme.fg("success", "◆")} ${theme.fg("accent", text.brain)} ${theme.fg("muted", text.delegated(action))} ${theme.fg("text", String(target))}${suffix}`;
 		}
 		if ((action === "wait" || action === "wait_many") && (isPartial || !result)) {
-			return `${theme.fg("accent", "◌")} ${theme.fg("accent", "Brain")} ${theme.fg("muted", "→ waiting for subagent handoff…")}`;
+			return `${theme.fg("accent", "◌")} ${theme.fg("accent", text.brain)} ${theme.fg("muted", text.awaitingHandoff)}`;
 		}
 		return undefined;
 	}
 	if (toolName === "create_goal") {
 		const objective = oneLinePreview(input.objective);
 		if (!objective) return undefined;
-		return `${theme.fg("accent", "◆")} ${theme.fg("accent", "Brain")} ${theme.fg("muted", "→ goal started:")} ${theme.fg("text", objective)}`;
+		return `${theme.fg("accent", "◆")} ${theme.fg("accent", text.brain)} ${theme.fg("muted", text.goalStarted)} ${theme.fg("text", objective)}`;
 	}
 	if (toolName === "goal" && result && !result.isError) {
 		if (input.action === "complete") {
-			const chip = `${theme.fg("success", "✓")} ${theme.fg("accent", "Brain")} ${theme.fg("success", "→ goal completed")}`;
+			const chip = `${theme.fg("success", "✓")} ${theme.fg("accent", text.brain)} ${theme.fg("success", text.goalCompleted)}`;
 			// The host proof sheet is shown under the chip, ahead of the model's own summary of the work.
 			const sheet = readProofSheetRecord(details, { kind: "tool-result", toolName });
 			return sheet ? `${chip}\n${theme.fg("text", sheet.text)}` : chip;
 		}
 		if (input.action === "satisfy_requirement" || input.action === "increment") {
 			const requirement = typeof input.requirementId === "string" ? ` (${input.requirementId})` : "";
-			return `${theme.fg("success", "✓")} ${theme.fg("accent", "Brain")} ${theme.fg("muted", `→ requirement satisfied${requirement}`)}`;
+			return `${theme.fg("success", "✓")} ${theme.fg("accent", text.brain)} ${theme.fg("muted", text.requirementSatisfied(requirement))}`;
 		}
 	}
 	return undefined;
@@ -394,7 +393,9 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private createRepairMarker(): Component | undefined {
-		return this.repair?.repaired ? new Text(theme.fg("dim", "[repaired arguments]"), 0, 0) : undefined;
+		return this.repair?.repaired
+			? new Text(theme.fg("dim", interfaceText().conversation.repairedArguments), 0, 0)
+			: undefined;
 	}
 
 	private createResultFallback(result: ToolExecutionResult): Component | undefined {
@@ -408,10 +409,7 @@ export class ToolExecutionComponent extends Container {
 		if (!truncation.truncated) {
 			return new Text(theme.fg("toolOutput", output), 0, 0);
 		}
-		const note = theme.fg(
-			"dim",
-			`[output truncated for display: showing ${truncation.outputLines} lines; the full result is retained in the conversation]`,
-		);
+		const note = theme.fg("dim", interfaceText().conversation.outputTruncatedForDisplay(truncation.outputLines));
 		return new Text(`${theme.fg("toolOutput", truncation.content)}\n${note}`, 0, 0);
 	}
 
@@ -749,12 +747,13 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	private formatToolExecution(result: ToolExecutionResult | undefined): string {
+		const words = interfaceText().conversation;
 		let text = renderTitleBadge(theme, {
 			label: this.getDisplayLabel(),
 			status: this.titleBadgeStatus(),
 		});
 		if (this.repair?.repaired) {
-			text += `\n${theme.fg("dim", "[repaired arguments]")}`;
+			text += `\n${theme.fg("dim", words.repairedArguments)}`;
 		}
 		const content = JSON.stringify(this.args, null, 2);
 		if (content) {
@@ -773,7 +772,7 @@ export class ToolExecutionComponent extends Container {
 			// dump arbitrarily large payloads into the scrollback.
 			const truncation = truncateHead(output);
 			if (truncation.truncated) {
-				text += `\n${truncation.content}\n${theme.fg("dim", `[output truncated for display: showing ${truncation.outputLines} lines; the full result is retained in the conversation]`)}`;
+				text += `\n${truncation.content}\n${theme.fg("dim", words.outputTruncatedForDisplay(truncation.outputLines))}`;
 			} else {
 				text += `\n${output}`;
 			}

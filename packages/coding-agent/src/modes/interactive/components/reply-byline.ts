@@ -1,4 +1,5 @@
 import type { AssistantMessage } from "@caupulican/pi-ai";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
 import { formatRouteValue } from "../../../core/route-text.ts";
 import { attributionText } from "./workbench-tool-preview.ts";
@@ -25,7 +26,12 @@ export function replyByline(
 ): ReplyByline | undefined {
 	// The session's own model is on the status line; a reply says who wrote it only when a routed model did.
 	if (route?.switched !== true) return undefined;
-	const base = attributionText({ kind: "root", label: "routed", modelRef, ...(modelName ? { modelName } : {}) });
+	const base = attributionText({
+		kind: "root",
+		label: interfaceText().conversation.routed,
+		modelRef,
+		...(modelName ? { modelName } : {}),
+	});
 	return { text: `${base} · ${formatRouteValue(route)}`, routed: true };
 }
 

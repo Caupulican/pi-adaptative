@@ -8,6 +8,7 @@ import {
 	TruncatedText,
 	VisibilityContainer,
 } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { isAssistantDisplayText } from "../../../core/message-phase.ts";
 import { harnessLog } from "../../../kernel/harness-log.ts";
 import { VERIFICATION_HANDOFF_REQUIRED_ERROR } from "../../../kernel/index.ts";
@@ -35,7 +36,7 @@ export interface AssistantMessageComponentOptions {
 function ownerErrorText(raw: string): string {
 	if (/^[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)+(?::|\s|$)/.test(raw) || /^\s*[[{]/.test(raw) || isModelFacingText(raw)) {
 		harnessLog.debug("ui", "an assistant turn error is kept in the log, not on screen", () => ({ error: raw }));
-		return "The model turn failed with an internal error. Details are in the log.";
+		return interfaceText().conversation.modelInternalError;
 	}
 	return raw;
 }
@@ -251,7 +252,7 @@ export class AssistantMessageComponent extends Container {
 				const abortMessage =
 					message.errorMessage && message.errorMessage !== "Request was aborted"
 						? ownerErrorText(message.errorMessage)
-						: "Operation aborted";
+						: interfaceText().conversation.operationAborted;
 				if (hasVisibleContent) {
 					this.contentContainer.addChild(new Spacer(1));
 				} else {
@@ -261,24 +262,19 @@ export class AssistantMessageComponent extends Container {
 			} else if (message.stopReason === "error" && message.errorMessage === VERIFICATION_HANDOFF_REQUIRED_ERROR) {
 				this.contentContainer.addChild(new Spacer(1));
 				this.contentContainer.addChild(
-					new Text(
-						theme.fg(
-							"warning",
-							"Verification remains unresolved: this run's own check is still failing. Rerun it, or /verify to see and dismiss it.",
-						),
-						1,
-						0,
-					),
+					new Text(theme.fg("warning", interfaceText().conversation.verificationUnresolved), 1, 0),
 				);
 			} else if (message.stopReason === "error") {
-				const errorMsg = ownerErrorText(message.errorMessage || "Unknown error");
+				const errorMsg = ownerErrorText(message.errorMessage || interfaceText().notices.unknownError);
 				this.contentContainer.addChild(new Spacer(1));
-				this.contentContainer.addChild(new Text(theme.fg("error", `Error: ${errorMsg}`), 1, 0));
+				this.contentContainer.addChild(new Text(theme.fg("error", interfaceText().notices.error(errorMsg)), 1, 0));
 			} else if (!this.isStreaming && !hasReadableContent) {
 				// The placeholder reports an empty turn. A turn that produced text or a thinking block
 				// has something to read, so it never gets one.
 				this.contentContainer.addChild(new Spacer(1));
-				this.contentContainer.addChild(new Text(theme.fg("muted", "(No response received from model)"), 1, 0));
+				this.contentContainer.addChild(
+					new Text(theme.fg("muted", interfaceText().conversation.noResponseReceived), 1, 0),
+				);
 			}
 		}
 	}

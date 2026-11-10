@@ -16,6 +16,7 @@
 
 import type { ImageContent } from "@caupulican/pi-ai";
 import type { AgentSession } from "../../core/agent-session.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { OwnerTextRange } from "../../core/learning/owner-evidence-ledger.ts";
 import type { OwnerInputEnd } from "../../core/owner-input-ledger.ts";
 import type { PendingInputHandle } from "../../core/pending-input-queue-controller.ts";
@@ -124,12 +125,13 @@ export async function flushCompactionQueue(
 		host.compactionQueuedMessages = [...returned, ...host.compactionQueuedMessages];
 		host.updatePendingMessagesDisplay();
 		const detail = error instanceof Error ? error.message : String(error);
+		const words = interfaceText().queue;
 		host.showError(
 			unsent.length === 0
-				? `A queued message failed after it was accepted: ${detail}`
+				? words.compactionFailedAfterAccepted(detail)
 				: returned.length === 0
-					? `A queued message failed; it is back in the queue: ${detail}`
-					: `Failed to send ${returned.length} queued message${returned.length === 1 ? "" : "s"}; ${returned.length === 1 ? "it is" : "they are"} back in the queue: ${detail}`,
+					? words.compactionFailedBackInQueue(detail)
+					: words.compactionFailedToSend(returned.length, detail),
 		);
 	};
 

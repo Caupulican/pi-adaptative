@@ -1,4 +1,5 @@
 import { existsSync } from "node:fs";
+import { interfaceText } from "./language/interface-text.ts";
 
 export interface SessionCwdIssue {
 	sessionFile?: string;
@@ -38,7 +39,7 @@ export function formatMissingSessionCwdError(issue: SessionCwdIssue): string {
 }
 
 export function formatMissingSessionCwdPrompt(issue: SessionCwdIssue): string {
-	return `cwd from session file does not exist\n${issue.sessionCwd}\n\ncontinue in current cwd\n${issue.fallbackCwd}`;
+	return interfaceText().interactive.sessionCwdPrompt(issue.sessionCwd, issue.fallbackCwd);
 }
 
 export class MissingSessionCwdError extends Error {

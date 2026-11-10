@@ -1,4 +1,5 @@
 import type { MarkdownTheme } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { CompactionSummaryMessage } from "../../../kernel/index.ts";
 import { keyText } from "../../../presentation/keybinding-hints.ts";
 import { getMarkdownTheme } from "../../../presentation/theme-model.ts";
@@ -11,18 +12,18 @@ import { ExpandableMarkdownMessageComponent } from "./expandable-markdown-messag
 export class CompactionSummaryMessageComponent extends ExpandableMarkdownMessageComponent {
 	constructor(message: CompactionSummaryMessage, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
 		const tokenStr = message.tokensBefore.toLocaleString();
-		super(
-			{
-				label: "compaction",
-				expandedMarkdown: () => [`**Compacted from ${tokenStr} tokens**\n\n`, message.summary].join(""),
+		super(() => {
+			const text = interfaceText().conversation;
+			return {
+				label: text.compactionLabel,
+				expandedMarkdown: () => [`**${text.compactedFrom(tokenStr)}**\n\n`, message.summary].join(""),
 				collapsedSegments: [
-					{ text: `Compacted from ${tokenStr} tokens (`, color: "customMessageText" },
+					{ text: text.compactedFromOpen(tokenStr), color: "customMessageText" },
 					{ text: keyText("app.tools.expand"), color: "dim" },
-					{ text: " to expand)", color: "customMessageText" },
+					{ text: text.toExpandParen, color: "customMessageText" },
 				],
 				separateBody: true,
-			},
-			markdownTheme,
-		);
+			};
+		}, markdownTheme);
 	}
 }

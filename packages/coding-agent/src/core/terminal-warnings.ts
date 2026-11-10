@@ -3,6 +3,8 @@
  * A host that owns the terminal holds them until it releases the terminal; a host with an open stream routes them there.
  */
 
+import { interfaceText } from "./language/interface-text.ts";
+
 /**
  * Shows each control character (C0, DEL, C1) as a visible `\xNN` escape, so a warning cannot move the cursor, end its line, or inject
  * a terminal sequence. Only terminal output is escaped; the sinks receive the raw text.
@@ -74,10 +76,11 @@ export function describeCause(cause: unknown): string {
 	const describeChecked = (value: unknown, depth: number): string => {
 		if (!(value instanceof AggregateError))
 			return value instanceof Error ? plainText(value.message) : plainText(value);
-		if (depth >= CAUSE_MAX_DEPTH) return `${plainText(value.message)} (${value.errors.length} more causes)`;
+		if (depth >= CAUSE_MAX_DEPTH)
+			return `${plainText(value.message)} (${interfaceText().notices.moreCauses(value.errors.length)})`;
 		const listed = value.errors.slice(0, CAUSE_MAX_LISTED).map((inner) => describe(inner, depth + 1));
 		const omitted = value.errors.length - listed.length;
-		if (omitted > 0) listed.push(`${omitted} more causes`);
+		if (omitted > 0) listed.push(interfaceText().notices.moreCauses(omitted));
 		return `${plainText(value.message)} (${listed.join("; ")})`;
 	};
 	// A value whose class check or message read throws (a hostile proxy or getter) is named by its plain text instead.

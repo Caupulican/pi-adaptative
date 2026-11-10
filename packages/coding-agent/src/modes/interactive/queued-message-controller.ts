@@ -7,6 +7,7 @@ import type { Container, EditorComponent, TUI } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import type { AppKeybinding } from "../../core/keybindings.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { joinOwnerWords, type OwnerTextRange, type OwnerWords } from "../../core/learning/owner-evidence-ledger.ts";
 import type { SessionImageStore } from "../../core/session-image-store.ts";
 import * as clipboardInput from "../../presentation/clipboard-input.ts";
@@ -51,11 +52,11 @@ export class QueuedMessageController {
 		if (restored === 0) {
 			this.host.showStatus(
 				this.hasQueuedMessages()
-					? "Messages remain queued until their images can be read"
-					: "No queued messages to restore",
+					? interfaceText().queue.messagesStayQueued
+					: interfaceText().queue.nothingToRestore,
 			);
 		} else {
-			this.host.showStatus(`Restored ${restored} queued message${restored > 1 ? "s" : ""} to editor`);
+			this.host.showStatus(interfaceText().queue.restored(restored));
 		}
 	}
 
@@ -113,7 +114,7 @@ export class QueuedMessageController {
 	 */
 	async sendQueuedMessagesNow(): Promise<void> {
 		if (this.host.session.isCompacting) {
-			this.host.showStatus("Compaction in progress; queued messages are sent when it ends");
+			this.host.showStatus(interfaceText().queue.compactionInProgress);
 			return;
 		}
 		// The session's queue holds what was queued for after compaction too: taking it leaves that queue nothing to send.
@@ -124,10 +125,7 @@ export class QueuedMessageController {
 		this.updatePendingMessagesDisplay();
 		const { text, pasted } = joinOwnerWords(entries, "\n\n");
 		const images = entries.flatMap((entry) => entry.images ?? []);
-		this.host.activityLane?.announce(
-			`Interrupting to send ${entries.length} queued message${entries.length > 1 ? "s" : ""} now`,
-			"neutral",
-		);
+		this.host.activityLane?.announce(interfaceText().queue.interrupting(entries.length), "neutral");
 		try {
 			await this.host.session.abort("send now");
 			// The aborted prompt still holds the foreground lease until its tail finishes; a root prompt
@@ -146,9 +144,7 @@ export class QueuedMessageController {
 			);
 			this.host.editor.setText(back.text, back.pasted);
 			const detail = error instanceof Error ? error.message : String(error);
-			this.host.showError(
-				`Send now failed: ${detail}. The queued input is back in the editor${images.length ? " with its images" : ""}.`,
-			);
+			this.host.showError(interfaceText().queue.sendNowFailed(detail, images.length > 0));
 		} finally {
 			this.host.refreshAutonomyFooterStatus();
 		}
@@ -169,20 +165,19 @@ export class QueuedMessageController {
 			// The label states the delivery boundary; a queued message is never a mystery in flight.
 			// Extension commands execute against the session after the run; send-now never sends them,
 			// so the offer appears only when a message would actually go.
+			const words = interfaceText().queue;
 			const details = [
 				steeringCount > 0
-					? this.host.session.steeringMode === "one-at-a-time" && steeringCount > 1
-						? `${steeringCount} steering → one per model turn`
-						: `${steeringCount} steering → next model turn`
+					? words.steering(steeringCount, this.host.session.steeringMode === "one-at-a-time")
 					: undefined,
-				followUpCount > 0 ? `${followUpCount} follow-up → after this run` : undefined,
-				commandCount > 0 ? `${commandCount} command${commandCount > 1 ? "s" : ""} → after this run` : undefined,
-				steeringCount + followUpCount > 0 ? "enter send now" : undefined,
-				`${dequeueHint} edit`,
+				followUpCount > 0 ? words.followUp(followUpCount) : undefined,
+				commandCount > 0 ? words.commands(commandCount) : undefined,
+				steeringCount + followUpCount > 0 ? words.sendNow : undefined,
+				words.editHint(dequeueHint),
 			]
 				.filter((value): value is string => value !== undefined)
 				.join(" · ");
-			this.host.activityLane?.wait({ id: "queue:messages", kind: "queue", label: `Queued ${total} · ${details}` });
+			this.host.activityLane?.wait({ id: "queue:messages", kind: "queue", label: words.queued(total, details) });
 		} else {
 			this.host.activityLane?.remove("queue:messages");
 		}
@@ -192,7 +187,9 @@ export class QueuedMessageController {
 		const { steering, followUp } = this.clearAllQueues();
 		if (options?.abort) {
 			void this.host.session.abort("user interrupt").catch((error: unknown) => {
-				this.host.showError(`Interrupt failed: ${error instanceof Error ? error.message : String(error)}`);
+				this.host.showError(
+					interfaceText().queue.interruptFailed(error instanceof Error ? error.message : String(error)),
+				);
 			});
 		}
 		const allQueued = [...steering, ...followUp];
@@ -222,7 +219,7 @@ export class QueuedMessageController {
 		this.host.editor.addToHistory?.(text, pasted);
 		this.host.editor.setText("");
 		this.updatePendingMessagesDisplay();
-		this.host.showStatus("Queued message for after compaction");
+		this.host.showStatus(interfaceText().queue.queuedForAfterCompaction);
 	}
 
 	isExtensionCommand(text: string): boolean {

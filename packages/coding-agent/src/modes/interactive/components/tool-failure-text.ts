@@ -1,10 +1,11 @@
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { isRecordObject } from "../../../core/util/value-guards.ts";
 
 const flat = (value: unknown): string | undefined =>
 	typeof value === "string" && value.trim().length > 0 ? value.replace(/\s+/g, " ").trim() : undefined;
 
 function sentence(failureCode: string, diagnostic: string | undefined, next: string | undefined): string {
-	return `Not run: ${failureCode.replace(/_/g, " ")}${diagnostic ? ` (${diagnostic})` : ""}.${next ? ` ${next}` : ""}`;
+	return interfaceText().conversation.notRun(failureCode.replace(/_/g, " "), diagnostic, next);
 }
 
 /**

@@ -10,14 +10,17 @@ export interface ExpandableMarkdownMessageOptions {
 	separateBody: boolean;
 }
 
+/** How a notice draws: its badge label, its expanded body and its collapsed line, read again at every draw. */
+export type ExpandableMarkdownMessageSource = () => ExpandableMarkdownMessageOptions;
+
 /** Shared expansion, invalidation, and themed rendering lifecycle for transcript markdown notices. */
 export class ExpandableMarkdownMessageComponent extends Box {
 	private expanded = false;
 	private expandedMarkdown: string | undefined;
 	private readonly markdownTheme: MarkdownTheme;
-	private readonly options: ExpandableMarkdownMessageOptions;
+	private readonly options: ExpandableMarkdownMessageSource;
 
-	constructor(options: ExpandableMarkdownMessageOptions, markdownTheme: MarkdownTheme) {
+	constructor(options: ExpandableMarkdownMessageSource, markdownTheme: MarkdownTheme) {
 		super(1, 1, (text) => theme.bg("customMessageBg", text));
 		this.options = options;
 		this.markdownTheme = markdownTheme;
@@ -35,24 +38,21 @@ export class ExpandableMarkdownMessageComponent extends Box {
 	}
 
 	private updateDisplay(): void {
+		const options = this.options();
 		this.clear();
 
-		if (!this.expanded && this.options.collapsedDetails !== undefined) {
+		if (!this.expanded && options.collapsedDetails !== undefined) {
 			this.addChild(
-				new Text(
-					renderTitleBadge(theme, { label: this.options.label, details: this.options.collapsedDetails }),
-					0,
-					0,
-				),
+				new Text(renderTitleBadge(theme, { label: options.label, details: options.collapsedDetails }), 0, 0),
 			);
 			return;
 		}
 
-		this.addChild(new Text(renderTitleBadge(theme, { label: this.options.label }), 0, 0));
-		if (this.options.separateBody) this.addChild(new Spacer(1));
+		this.addChild(new Text(renderTitleBadge(theme, { label: options.label }), 0, 0));
+		if (options.separateBody) this.addChild(new Spacer(1));
 
 		if (this.expanded) {
-			this.expandedMarkdown ??= this.options.expandedMarkdown();
+			this.expandedMarkdown ??= options.expandedMarkdown();
 			this.addChild(
 				new Markdown(this.expandedMarkdown, 0, 0, this.markdownTheme, {
 					color: (text: string) => theme.fg("customMessageText", text),
@@ -61,8 +61,8 @@ export class ExpandableMarkdownMessageComponent extends Box {
 			return;
 		}
 
-		if (this.options.collapsedSegments !== undefined) {
-			const text = this.options.collapsedSegments
+		if (options.collapsedSegments !== undefined) {
+			const text = options.collapsedSegments
 				.map((segment) => {
 					const raw = String(segment.text ?? "");
 					return segment.color === undefined ? raw : theme.fg(segment.color, raw);

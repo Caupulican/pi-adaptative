@@ -5,6 +5,7 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionEvent } from "../../core/agent-session-contracts.ts";
 import { expandArgumentsForDisplay, expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
 import type { FooterDataProvider } from "../../core/footer-data-provider.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { latestAssistantCommentaryLabel } from "../../core/message-phase.ts";
 import type { ProviderAdmissionWaitEvent } from "../../core/provider-admission/gate.ts";
 import { isRecordObject } from "../../core/util/value-guards.ts";
@@ -45,39 +46,34 @@ interface AdmissionWaitEndLine {
  * cancelled or let through only by its spent budget never reads as admitted.
  */
 function admissionWaitEnd(event: ProviderAdmissionWaitEvent): AdmissionWaitEndLine {
-	const after = `after ${Math.ceil((event.waitedMs ?? 0) / 1000)}s`;
+	const labels = interfaceText().interactive;
+	const after = labels.waitedFor(Math.ceil((event.waitedMs ?? 0) / 1000));
 	const end: WaitEndReport = event.end ?? { kind: "satisfied", by: "provider_admission" };
 	switch (end.kind) {
 		case "satisfied":
-			return { label: `${event.provider} admitted ${after}`, status: "neutral" };
+			return { label: labels.admitted(event.provider, after), status: "neutral" };
 		case "timed_out":
 			// At its budget a capacity wait goes anyway and an emergency stop refuses; a reset wait reads the limit again.
 			if (event.reason === "capacity")
-				return { label: `${event.provider} admitted at its wait budget ${after}`, status: "neutral" };
+				return { label: labels.admittedAtBudget(event.provider, after), status: "neutral" };
 			if (event.reason === "emergency_stop")
-				return { label: `${event.provider} refused: emergency stop still engaged ${after}`, status: "failure" };
-			return { label: `${event.provider} wait budget spent ${after}`, status: "neutral" };
+				return { label: labels.refusedEmergencyStop(event.provider, after), status: "failure" };
+			return { label: labels.waitBudgetSpent(event.provider, after), status: "neutral" };
 		case "aborted":
-			return { label: `${event.provider} wait cancelled ${after}`, status: "neutral" };
+			return { label: labels.waitCancelled(event.provider, after), status: "neutral" };
 		case "unavailable":
-			return { label: `${event.provider} not admitted ${after}: ${end.cause}`, status: "failure" };
+			return { label: labels.notAdmitted(event.provider, after, end.cause), status: "failure" };
 		case "steered":
-			return { label: `${event.provider} wait interrupted by a new message ${after}`, status: "neutral" };
+			return { label: labels.waitInterrupted(event.provider, after), status: "neutral" };
 		case "disposed":
-			return { label: `${event.provider} wait closed ${after}`, status: "neutral" };
+			return { label: labels.waitClosed(event.provider, after), status: "neutral" };
 	}
 }
-
-const COMPACTION_FALLBACK_CAUSE_TEXT: Partial<Record<string, string>> = {
-	unresolved: "the summary model is not configured",
-	unauthed: "the summary model has no credentials",
-	exhausted: "the summary model's quota is used up",
-};
 
 /** The compaction fallback cause as the owner reads it; the raw cause stays in the harness log. */
 function compactionFallbackCauseText(cause: string): string {
 	harnessLog.debug("ui", "a compaction used its fallback checkpoint", { cause });
-	return COMPACTION_FALLBACK_CAUSE_TEXT[cause.replace(/^fallback:/, "")] ?? "the summary model was unavailable";
+	return interfaceText().notices.compactionFallbackCause(cause.replace(/^fallback:/, ""));
 }
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
@@ -287,6 +283,8 @@ export class InteractiveEventController {
 	async handle(event: AgentSessionEvent): Promise<void> {
 		if (!this.port.isInitialized()) await this.port.init();
 		this.port.footer.invalidate();
+		const text = interfaceText();
+		const notices = text.notices;
 
 		switch (event.type) {
 			case "routing_start":
@@ -299,7 +297,11 @@ export class InteractiveEventController {
 						this.loadingAnimation = this.port.runtimeStatus.createWorkingLoader();
 						this.port.statusContainer.addChild(this.loadingAnimation);
 					} else {
-						this.port.activityLane?.start({ id: "runtime:routing", kind: "runtime", label: "Routing" });
+						this.port.activityLane?.start({
+							id: "runtime:routing",
+							kind: "runtime",
+							label: interfaceText().interactive.routing,
+						});
 					}
 					this.port.ui.requestRender();
 				}
@@ -490,7 +492,7 @@ export class InteractiveEventController {
 					streamingComponent.setStreaming(false);
 					this.applyStreamingMessageUpdate(this.streamingMessage, { force: true });
 					if (this.streamingMessage.stopReason === "aborted" || this.streamingMessage.stopReason === "error") {
-						errorMessage ??= this.streamingMessage.errorMessage || "Error";
+						errorMessage ??= this.streamingMessage.errorMessage || interfaceText().notices.errorWord;
 						for (const [, component] of this.port.activeToolCalls.activeEntries()) {
 							component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
 						}
@@ -599,9 +601,10 @@ export class InteractiveEventController {
 						(message): message is AssistantMessage => message.role === "assistant",
 					);
 					const failed = finalAssistant?.stopReason === "error" || finalAssistant?.stopReason === "aborted";
+					const words = text.interactive;
 					this.port.activityLane?.setForegroundOutcome(
 						failed ? "failure" : "success",
-						failed ? "Turn failed" : "Done",
+						failed ? words.turnFailed : words.turnDone,
 					);
 					const block = misalignmentBlock(finalAssistant);
 					if (block) this.port.offerMisalignmentContinuation(block);
@@ -628,11 +631,11 @@ export class InteractiveEventController {
 				this.autoCompactionEscapeHandler = this.port.defaultEditor.onEscape;
 				this.port.defaultEditor.onEscape = () => this.port.getSession().abortCompaction();
 				if (!this.loadingAnimation) this.port.runtimeStatus.stopWorkingLoader();
-				const cancelHint = `(${keyText("app.interrupt")} to cancel)`;
+				const cancelHint = interfaceText().notices.toCancel(keyText("app.interrupt"));
 				const label =
 					event.reason === "manual"
-						? `Compacting context ${cancelHint}`
-						: `${event.reason === "overflow" ? "Context overflow · " : ""}Auto-compacting ${cancelHint}`;
+						? notices.compactingContext(cancelHint)
+						: notices.autoCompacting(event.reason === "overflow", cancelHint);
 				if (
 					!this.loadingAnimation &&
 					this.port.runtimeStatus.isWorkingVisible &&
@@ -657,29 +660,25 @@ export class InteractiveEventController {
 					this.port.activityLane?.finish("runtime:compaction", "neutral", {
 						id: "runtime:compaction",
 						kind: "runtime",
-						label: "Compaction cancelled",
+						label: notices.compactionCancelled,
 					});
-					if (event.reason === "manual") this.port.showError("Compaction cancelled");
+					if (event.reason === "manual") this.port.showError(notices.compactionCancelled);
 				} else if (event.result) {
 					const fallback = event.result.deterministic;
 					const fallbackText = fallback ? compactionFallbackCauseText(fallback.cause) : undefined;
 					this.port.activityLane?.finish("runtime:compaction", fallback ? "neutral" : "success", {
 						id: "runtime:compaction",
 						kind: "runtime",
-						label: fallbackText ? `Context compacted (fallback: ${fallbackText})` : "Context compacted",
+						label: fallbackText ? notices.contextCompactedWithFallback(fallbackText) : notices.contextCompacted,
 					});
-					if (fallbackText) {
-						this.port.showError(
-							`Compaction fell back to a simpler checkpoint (${fallbackText}): the narrative summary was lost; only files and task facts were kept.`,
-						);
-					}
+					if (fallbackText) this.port.showError(notices.compactionFallbackLost(fallbackText));
 					await this.port.rebuildChatFromMessages({ checkpointWhenDeferred: true });
 					this.port.footer.invalidate();
 				} else if (event.errorMessage) {
 					this.port.activityLane?.finish("runtime:compaction", "failure", {
 						id: "runtime:compaction",
 						kind: "runtime",
-						label: "Compaction failed",
+						label: notices.compactionFailed,
 					});
 					if (event.reason === "manual") this.port.showError(event.errorMessage);
 					else {
@@ -690,7 +689,7 @@ export class InteractiveEventController {
 					this.port.activityLane?.finish("runtime:compaction", "neutral", {
 						id: "runtime:compaction",
 						kind: "runtime",
-						label: `Compaction skipped · ${event.skipReason}`,
+						label: notices.compactionSkipped(event.skipReason),
 					});
 				}
 				void this.port.flushCompactionQueue({ willRetry: event.willRetry });
@@ -708,7 +707,12 @@ export class InteractiveEventController {
 				this.port.defaultEditor.onEscape = () => this.port.getSession().abortRetry();
 				this.retryCountdown?.dispose();
 				const retryMessage = (seconds: number) =>
-					`Retry ${event.attempt}/${event.maxAttempts} in ${seconds}s · ${keyText("app.interrupt")} cancel`;
+					interfaceText().notices.retryCountdown(
+						event.attempt,
+						event.maxAttempts,
+						seconds,
+						keyText("app.interrupt"),
+					);
 				this.port.activityLane?.wait({
 					id: "runtime:retry",
 					kind: "runtime",
@@ -740,17 +744,18 @@ export class InteractiveEventController {
 							account: event.account,
 						});
 					const where = event.provider;
+					const labels = interfaceText().interactive;
 					const resetsIn =
-						event.expectedMs !== undefined ? `, resets in ${Math.ceil(event.expectedMs / 1000)}s` : "";
+						event.expectedMs !== undefined ? labels.waitResetsIn(Math.ceil(event.expectedMs / 1000)) : "";
 					const why =
 						event.reason === "provider_limit"
-							? `rate-limited${resetsIn}`
+							? labels.waitRateLimited(resetsIn)
 							: event.reason === "model_quota"
-								? `out of quota${resetsIn}`
+								? labels.waitOutOfQuota(resetsIn)
 								: event.reason === "emergency_stop"
-									? "emergency stop engaged"
-									: "at its in-flight limit";
-					const label = `${event.lane} request waiting: ${where} ${why}`;
+									? labels.emergencyStopEngaged
+									: labels.waitInFlightLimit;
+					const label = labels.requestWaiting(event.lane, where, why);
 					this.port.activityLane?.wait({ id, kind: "runtime", scope: event.lane, label });
 					if (event.lane === "foreground") this.loadingAnimation?.setMessage(label);
 				} else {
@@ -764,7 +769,7 @@ export class InteractiveEventController {
 			}
 			case "continuous_chat_prefix_wait": {
 				const id = "runtime:memory-summaries";
-				const label = `waiting for memory summaries (${event.built} of ${event.needed} leaves built${event.failed > 0 ? `, ${event.failed} failed` : ""})`;
+				const label = interfaceText().interactive.memorySummariesWaiting(event.built, event.needed, event.failed);
 				if (event.phase === "start") {
 					this.port.activityLane?.wait({ id, kind: "runtime", scope: "foreground", label });
 					this.loadingAnimation?.setMessage(label);
@@ -784,11 +789,11 @@ export class InteractiveEventController {
 				this.port.activityLane?.finish("runtime:retry", event.success ? "success" : "failure", {
 					id: "runtime:retry",
 					kind: "runtime",
-					label: event.success ? "Retry resumed" : "Retry failed",
+					label: event.success ? text.interactive.retryResumed : text.interactive.retryFailedRow,
 				});
 				if (!event.success) {
 					this.port.showError(
-						`Retry failed after ${event.attempt} attempts: ${event.finalError || "Unknown error"}`,
+						text.notices.retryFailed(event.attempt, event.finalError || text.notices.unknownError),
 					);
 				}
 				this.port.ui.requestRender();

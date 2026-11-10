@@ -1,5 +1,6 @@
 import type { MarkdownTheme } from "@caupulican/pi-tui";
 import type { ParsedSkillBlock } from "../../../core/agent-session.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { keyText } from "../../../presentation/keybinding-hints.ts";
 import { getMarkdownTheme } from "../../../presentation/theme-model.ts";
 import { ExpandableMarkdownMessageComponent } from "./expandable-markdown-message.ts";
@@ -11,17 +12,17 @@ import { ExpandableMarkdownMessageComponent } from "./expandable-markdown-messag
  */
 export class SkillInvocationMessageComponent extends ExpandableMarkdownMessageComponent {
 	constructor(skillBlock: ParsedSkillBlock, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
-		super(
-			{
-				label: "Skill",
+		super(() => {
+			const text = interfaceText().conversation;
+			return {
+				label: text.skillLabel,
 				expandedMarkdown: () => [`**${skillBlock.name}**\n\n`, skillBlock.content].join(""),
 				collapsedDetails: [
 					{ text: skillBlock.name, color: "customMessageText" },
-					{ text: `(${keyText("app.tools.expand")} to expand)`, color: "dim" },
+					{ text: `(${keyText("app.tools.expand")} ${text.toExpand})`, color: "dim" },
 				],
 				separateBody: false,
-			},
-			markdownTheme,
-		);
+			};
+		}, markdownTheme);
 	}
 }

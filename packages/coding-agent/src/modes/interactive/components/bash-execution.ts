@@ -3,6 +3,7 @@
  */
 
 import { Container, Loader, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { formatCollapsedToolOutputHint } from "../../../core/tools/render-utils.ts";
 import { DEFAULT_MAX_BYTES, DEFAULT_MAX_LINES, type TruncationResult, truncateTail } from "../../../kernel/node.ts";
 import { keyHint, keyText } from "../../../presentation/keybinding-hints.ts";
@@ -49,7 +50,7 @@ export class BashExecutionComponent extends Container {
 			ui,
 			(spinner) => theme.fg(colorKey, spinner),
 			(text) => theme.fg("muted", text),
-			`Running... (${keyText("tui.select.cancel")} to cancel)`, // Plain text for loader
+			interfaceText().conversation.bashRunning(keyText("tui.select.cancel")), // Plain text for loader
 		);
 		this.contentContainer.addChild(this.loader);
 
@@ -157,19 +158,21 @@ export class BashExecutionComponent extends Container {
 			const statusParts: string[] = [];
 
 			if (this.expanded && availableLines.length > 0) {
-				statusParts.push(`(${keyHint("app.tools.expand", "to collapse")})`);
+				statusParts.push(`(${keyHint("app.tools.expand", interfaceText().conversation.toCollapse)})`);
 			}
 
 			if (this.status === "cancelled") {
-				statusParts.push(theme.fg("warning", "(cancelled)"));
+				statusParts.push(theme.fg("warning", interfaceText().conversation.bashCancelled));
 			} else if (this.status === "error") {
-				statusParts.push(theme.fg("error", `(exit ${this.exitCode})`));
+				statusParts.push(theme.fg("error", interfaceText().conversation.bashExit(this.exitCode as number)));
 			}
 
 			// Add truncation warning (context truncation, not preview truncation)
 			const wasTruncated = this.truncationResult?.truncated || contextTruncation.truncated;
 			if (wasTruncated && this.fullOutputPath) {
-				statusParts.push(theme.fg("warning", `Output truncated. Full output: ${this.fullOutputPath}`));
+				statusParts.push(
+					theme.fg("warning", interfaceText().conversation.bashOutputTruncated(this.fullOutputPath)),
+				);
 			}
 
 			if (statusParts.length > 0) {
@@ -188,6 +191,7 @@ export class BashExecutionComponent extends Container {
 
 	/** Independent bounded view of the same command; does not toggle the full transcript. */
 	getWorkbenchPreview(): Text {
+		const text = interfaceText().conversation;
 		this.workbenchPreview ??= new Text(
 			theme.fg("bashMode", `$ ${this.command}`) +
 				"\n" +
@@ -196,10 +200,10 @@ export class BashExecutionComponent extends Container {
 				theme.fg(
 					this.status === "error" ? "error" : "muted",
 					this.status === "running"
-						? "Running"
+						? text.bashRunningState
 						: this.status === "cancelled"
-							? "Cancelled"
-							: `exit ${this.exitCode ?? "unknown"}`,
+							? text.bashCancelledState
+							: text.bashExitState(this.exitCode),
 				),
 			0,
 			0,

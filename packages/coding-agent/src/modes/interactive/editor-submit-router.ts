@@ -5,6 +5,7 @@
  */
 import type { ImageContent } from "@caupulican/pi-ai";
 import { formatSessionAutonomyStatus } from "../../core/autonomy-status/format.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { type OwnerTextRange, trimOwnerWords } from "../../core/learning/owner-evidence-ledger.ts";
 import { namedPlanViews } from "../../core/plan/plan-views-named.ts";
 import { latestProofSheet } from "../../core/proof/review-gauge.ts";
@@ -236,9 +237,7 @@ export class EditorSubmitRouter {
 				);
 		if (builtin && foregroundTurnLive && builtin.duringWork !== "local") {
 			this.host.editor.setText(text, pasted);
-			this.host.showWarning(
-				`/${builtin.name} requires the foreground to be idle. ${keyText("app.interrupt")} interrupts it; your command stays in the editor.`,
-			);
+			this.host.showWarning(interfaceText().interactive.foregroundBusy(builtin.name, keyText("app.interrupt")));
 			return;
 		}
 		if (!builtin && workState.busy && (!isCommandText || foregroundTurnLive)) {
@@ -357,7 +356,7 @@ export class EditorSubmitRouter {
 		if (text === "/toolprobe" || text.startsWith("/toolprobe ")) {
 			const target = text.slice("/toolprobe".length).trim();
 			this.host.editor.setText("");
-			this.host.showStatus("Running tool probe...");
+			this.host.showStatus(interfaceText().interactive.toolProbeRunning);
 			try {
 				const report = await this.host.session.probeToolCalling(target || undefined);
 				this.host.showStatus(report.table);
@@ -368,23 +367,25 @@ export class EditorSubmitRouter {
 		}
 		if (text.startsWith("/toolrule-remove")) {
 			const [model, mode] = text.slice("/toolrule-remove".length).trim().split(/\s+/, 2);
+			const words = interfaceText().interactive;
 			const message =
 				model && mode
 					? this.host.session.removeToolRepairRule(model, mode)
-						? `Removed tool repair rule ${mode} for ${model}.`
-						: `No tool repair rule ${mode} found for ${model}.`
-					: "Usage: /toolrule-remove <provider/model> <mode>";
+						? words.toolRuleRemoved(mode, model)
+						: words.toolRuleMissing(mode, model)
+					: words.toolRuleUsage;
 			this.host.showStatus(message);
 			this.host.editor.setText("");
 			return;
 		}
 		if (text.startsWith("/toolprotocol-reset")) {
 			const model = text.slice("/toolprotocol-reset".length).trim();
+			const words = interfaceText().interactive;
 			const message = model
 				? this.host.session.resetToolProtocolCalibration(model)
-					? `Reset text tool protocol calibration for ${model}.`
-					: `No text tool protocol calibration found for ${model}.`
-				: "Usage: /toolprotocol-reset <provider/model>";
+					? words.protocolReset(model)
+					: words.protocolMissing(model)
+				: words.protocolUsage;
 			this.host.showStatus(message);
 			this.host.editor.setText("");
 			return;
@@ -598,7 +599,7 @@ export class EditorSubmitRouter {
 			const command = isExcluded ? text.slice(2).trim() : text.slice(1).trim();
 			if (command) {
 				if (this.host.session.isBashRunning) {
-					this.host.showWarning("A bash command is already running. Press Esc to cancel it first.");
+					this.host.showWarning(interfaceText().interactive.bashAlreadyRunning);
 					this.host.editor.setText(text, pasted);
 					return;
 				}

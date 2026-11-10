@@ -1,6 +1,7 @@
 import { existsSync, statSync } from "node:fs";
 import { isAbsolute, relative, resolve } from "node:path";
 import { type Component, visibleWidth, wrapTextWithAnsi } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { shortModelName } from "../../../core/route-text.ts";
 import type { SemanticEvaluationRecord } from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import { formatCompactDuration } from "../../../core/util/format-duration.ts";
@@ -27,7 +28,7 @@ export interface PreviewAttribution {
  * repeating it on every entry is noise. A routed turn or another actor is named, by its display name.
  */
 export function attributionText(by: PreviewAttribution): string | undefined {
-	if (by.kind === "system-one") return "System One";
+	if (by.kind === "system-one") return interfaceText().conversation.systemOne;
 	if (by.label === "root") return undefined;
 	return `${by.label} · ${by.modelName ?? shortModelName(by.modelRef)}`;
 }
@@ -127,10 +128,7 @@ export function renderExecutionEntry(
 	const top = `${edge("╭─")}${label ? theme.fg("muted", label) : ""}${edge(`${"─".repeat(Math.max(0, inner - 1 - visibleWidth(label)))}╮`)}`;
 	const bottom = edge(`╰${"─".repeat(inner)}╯`);
 	const boxed = (row: string) => ` ${edge("│")}${toneRow(OUTPUT_BACKGROUND, ` ${row}`, inner)}${edge("│")}`;
-	const more =
-		hidden > 0
-			? [boxed(theme.fg("mdLink", `▾ ${hidden} more ${hidden === 1 ? "line" : "lines"} · click to show all`))]
-			: [];
+	const more = hidden > 0 ? [boxed(theme.fg("mdLink", `▾ ${interfaceText().conversation.moreLines(hidden)}`))] : [];
 	return {
 		rows: [bar, ` ${top}`, ...rows.map(boxed), ...more, ` ${bottom}`],
 		roles: ["bar", "body", ...rows.map((): RowRole => "body"), ...more.map((): RowRole => "more"), "body"],
@@ -199,12 +197,12 @@ export function createSystemOneEvaluationPreview(record: SemanticEvaluationRecor
 		.map((reason) => sanitizeBinaryOutput(stripAnsi(reason)).slice(0, 240));
 	return createExecutionPreview({
 		state: failed ? "failed" : "done",
-		name: "System One",
+		name: interfaceText().conversation.systemOne,
 		subject: `${label} · ${outcome} · ${formatCompactDuration(record.durationMs)}`,
 		...(reasons.length
 			? {
-					outputLabel: "reasons",
-					summary: `${reasons.length} ${reasons.length === 1 ? "reason" : "reasons"}`,
+					outputLabel: interfaceText().conversation.reasons,
+					summary: interfaceText().conversation.reasonCount(reasons.length),
 					body: reasons.map((reason) => theme.fg(failed ? "error" : SYSTEM_ONE_TONE, reason)),
 				}
 			: {}),
@@ -286,6 +284,7 @@ export function createWorkbenchToolPreview(
 	by?: PreviewAttribution,
 	cwd?: string,
 ): ExecutionPreview | undefined {
+	const text = interfaceText().conversation;
 	const parameters = isRecordObject(args) ? args : {};
 	// A delegation dispatch is a receipt for the Execution pane; its reads and waits are not.
 	const delegateDispatch =
@@ -347,19 +346,11 @@ export function createWorkbenchToolPreview(
 		: sourceLines.map((line) => styleOutputLine(line, paths));
 	const styled = [
 		...(sourceLines.length ? styledLines : []),
-		...(truncated ? [theme.fg("dim", "… full result in transcript")] : []),
+		...(truncated ? [theme.fg("dim", text.fullResultInTranscript)] : []),
 	];
 	const failed = result.isError;
-	const summary = failed
-		? `error · ${lines} ${lines === 1 ? "line" : "lines"}`
-		: diff
-			? `+${added} −${removed}`
-			: `${lines} ${lines === 1 ? "line" : "lines"}`;
-	const outputLabel = failed
-		? "error"
-		: diff
-			? `diff${added || removed ? `  +${added} −${removed}` : ""}`
-			: `output · ${lines} ${lines === 1 ? "line" : "lines"}`;
+	const summary = failed ? text.errorCount(lines) : diff ? text.diffSummary(added, removed) : text.lineCount(lines);
+	const outputLabel = failed ? text.errorLabel : diff ? text.diffLabel(added, removed) : text.outputLabel(lines);
 	return createExecutionPreview({
 		state: failed ? "failed" : "done",
 		name,

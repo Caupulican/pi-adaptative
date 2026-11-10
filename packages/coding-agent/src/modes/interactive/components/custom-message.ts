@@ -17,6 +17,7 @@ import {
 	isBackgroundActivitySummaryContract,
 } from "../../../core/foreground-terminal-handoff-controller.ts";
 import { harnessNoticeHeadline } from "../../../core/harness-notice.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { readProofSheetFailures, readProofSheetRecords } from "../../../core/proof/proof-sheet.ts";
 import { isPlainRecord } from "../../../core/util/value-guards.ts";
 import type { CustomMessage } from "../../../kernel/index.ts";
@@ -185,14 +186,19 @@ export function teamSpeakerTone(name: string): (typeof TEAM_SPEAKER_TONES)[numbe
 class TeamMessageComponent extends Container {
 	constructor(view: TeamMessageView, markdownTheme: MarkdownTheme) {
 		super();
+		const words = interfaceText().conversation;
 		const who =
-			view.from.kind === "operator" ? "You" : view.from.kind === "brain" ? "Brain" : (view.from.agentId ?? "bot");
+			view.from.kind === "operator"
+				? words.you
+				: view.from.kind === "brain"
+					? words.brain
+					: (view.from.agentId ?? "bot");
 		const tone = view.from.kind === "operator" ? "text" : view.from.kind === "brain" ? "muted" : teamSpeakerTone(who);
 		const recipients =
 			view.to.length > 0
 				? view.to.map((id) => `@${id}`).join(", ")
 				: view.from.kind === "operator"
-					? "everyone"
+					? words.everyone
 					: "";
 		const time = view.timestamp
 			? new Date(view.timestamp).toLocaleTimeString([], { hour: "2-digit", minute: "2-digit" })
@@ -204,7 +210,7 @@ class TeamMessageComponent extends Container {
 		this.addChild(new Text(header, 1, 0));
 		const text =
 			view.from.kind !== "operator" && view.text.length > MAX_TEAM_MESSAGE_CHARS
-				? `${view.text.slice(0, MAX_TEAM_MESSAGE_CHARS).trimEnd()}…\n\n_+${view.text.length - MAX_TEAM_MESSAGE_CHARS} more characters; open ${who}'s own chat for the rest._`
+				? `${view.text.slice(0, MAX_TEAM_MESSAGE_CHARS).trimEnd()}…\n\n${words.teamMessageTruncated(view.text.length - MAX_TEAM_MESSAGE_CHARS, who)}`
 				: view.text;
 		this.addChild(new Markdown(text, 3, 0, markdownTheme, { color: (text: string) => theme.fg("text", text) }));
 	}
@@ -241,27 +247,20 @@ class BackgroundActivitySummaryComponent implements Component {
 	invalidate(): void {}
 }
 
-function noun(count: number, singular: string): string {
-	return count === 1 ? singular : `${singular}s`;
-}
-
 function formatCountedStatus(
 	count: number,
-	singularNoun: string,
-	singularVerb: string,
-	pluralVerb: string,
+	noun: (count: number) => string,
+	status: (count: number, noun: string) => string,
 	ids: readonly string[],
 ): string | undefined {
 	if (count === 0) return undefined;
-	const verb = count === 1 ? singularVerb : pluralVerb;
 	const idsText = ids.length > 0 ? ` ${boundedIds(ids, count)}` : "";
-	return `${count} ${noun(count, singularNoun)} ${verb}${idsText}`;
+	return `${status(count, noun(count))}${idsText}`;
 }
 
 function fallbackBackgroundActivitySummary(kind: "agent" | "task"): BackgroundActivitySummary {
-	const singularNoun = kind === "agent" ? "agent" : "background task";
 	return {
-		text: `Background ${singularNoun} activity unavailable`,
+		text: interfaceText().conversation.backgroundActivityUnavailable(kind),
 		status: "warning",
 	};
 }
@@ -361,38 +360,36 @@ function formatRoutineActivitySummary(message: CustomMessage<unknown>): Backgrou
 	const raw = isPlainRecord(message.details) ? message.details : {};
 	const details = "parentInput" in raw && isPlainRecord(raw.originalDetails) ? raw.originalDetails : raw;
 	const routineId = typeof details.routineId === "string" ? details.routineId : undefined;
+	const text = interfaceText().conversation;
 	if (message.customType === "routine-intake") {
-		if (routineId) return { text: `Scheduled routine ${routineId}`, status: "success" };
+		if (routineId) return { text: text.scheduledRoutine(routineId), status: "success" };
 		const refused = typeof details.refused === "string" ? details.refused : undefined;
 		const other = Object.entries(details).find(
 			([key, value]) => key !== "routineIntakeKey" && key !== "sourceId" && typeof value === "string",
 		);
 		const reason = refused ?? (typeof other?.[1] === "string" ? other[1] : undefined);
 		return {
-			text: `${refused ? "Not scheduled" : "Could not schedule"}${reason ? `: ${reason}` : ""}`,
+			text: text.scheduleOutcome(Boolean(refused), reason),
 			status: "warning",
 		};
 	}
 	if (message.customType !== "routine-completion" || !routineId) return undefined;
-	if (typeof details.expiresAt === "number")
-		return { text: `Routine ${routineId} reached its end time and was removed`, status: "warning" };
-	if (typeof details.conditionMetBy === "string")
-		return { text: `Routine ${routineId} met its end and was removed`, status: "success" };
-	const outcome = typeof details.outcome === "string" ? details.outcome : "ended";
+	if (typeof details.expiresAt === "number") return { text: text.routineExpired(routineId), status: "warning" };
+	if (typeof details.conditionMetBy === "string") return { text: text.routineEnded(routineId), status: "success" };
+	const outcome = typeof details.outcome === "string" ? details.outcome : text.routineEndedOutcome;
 	const note = [
-		details.ownerUpdate === "none" ? "nothing for you" : undefined,
-		details.deliveryHold !== undefined ? "waits for your next message" : undefined,
+		details.ownerUpdate === "none" ? text.routineNothingForYou : undefined,
+		details.deliveryHold !== undefined ? text.routineWaitsForMessage : undefined,
 		typeof details.missedCount === "number" && details.missedCount > 0
-			? `covers ${details.missedCount} earlier ${details.missedCount === 1 ? "slot" : "slots"}`
+			? text.routineEarlierSlots(details.missedCount)
 			: undefined,
 		typeof details.resultPreview === "string" ? details.resultPreview : undefined,
 	].filter((part): part is string => part !== undefined);
 	// A watch run leads with what the host saw in plain words ('A watched file changed: notes.txt'), not the routine's id.
 	const cause = typeof details.cause === "string" ? details.cause : undefined;
+	const suffix = note.length > 0 ? ` · ${note.join(" · ")}` : "";
 	return {
-		text: cause
-			? `${cause} · ${outcome}${note.length > 0 ? ` · ${note.join(" · ")}` : ""}`
-			: `Routine ${routineId} ${outcome}${note.length > 0 ? ` · ${note.join(" · ")}` : ""}`,
+		text: `${cause ? text.routineOutcomeWithCause(cause, outcome) : text.routineOutcome(routineId, outcome)}${suffix}`,
 		status: outcome === "succeeded" ? "success" : outcome === "failed" ? "error" : "warning",
 	};
 }
@@ -416,17 +413,18 @@ function formatBackgroundActivitySummary(message: CustomMessage<unknown>): Backg
 	const items = recordSummaryItems(kind, records);
 	const summary = readSummaryContract(message, kind, items);
 	if (!summary || !items) return fallbackBackgroundActivitySummary(kind);
-	const nounName = kind === "agent" ? "agent" : "background task";
+	const words = interfaceText().conversation;
+	const noun = kind === "agent" ? words.agentNoun : words.taskNoun;
 	const successIds = items.filter((item) => item.status === "success").map((item) => item.id);
 	const attentionIds = items.filter((item) => item.status === "attention").map((item) => item.id);
 	const failedIds = items.filter((item) => item.status === "failed").map((item) => item.id);
 	const canceledIds = items.filter((item) => item.status === "canceled").map((item) => item.id);
 	const successCount = summary.totalCount - summary.attentionCount - summary.failedCount - summary.canceledCount;
 	const text = [
-		formatCountedStatus(successCount, nounName, "succeeded", "succeeded", successIds),
-		formatCountedStatus(summary.attentionCount, nounName, "needs verification", "need verification", attentionIds),
-		formatCountedStatus(summary.failedCount, nounName, "failed", "failed", failedIds),
-		formatCountedStatus(summary.canceledCount, nounName, "canceled", "canceled", canceledIds),
+		formatCountedStatus(successCount, noun, words.activitySucceeded, successIds),
+		formatCountedStatus(summary.attentionCount, noun, words.activityNeedsVerification, attentionIds),
+		formatCountedStatus(summary.failedCount, noun, words.activityFailed, failedIds),
+		formatCountedStatus(summary.canceledCount, noun, words.activityCanceled, canceledIds),
 	]
 		.filter((part): part is string => part !== undefined)
 		.join(" | ");
@@ -451,10 +449,10 @@ function formatBackgroundActivitySummary(message: CustomMessage<unknown>): Backg
  */
 function formatSupervisionActivitySummary(message: CustomMessage<unknown>): BackgroundActivitySummary | undefined {
 	if (message.customType === "worktree-sync-notice") {
-		return { text: "Worktree sync activity", status: "warning" };
+		return { text: interfaceText().conversation.worktreeSyncActivity, status: "warning" };
 	}
 	if (message.customType === "process-matrix-notice") {
-		return { text: "Process supervision activity", status: "warning" };
+		return { text: interfaceText().conversation.processSupervisionActivity, status: "warning" };
 	}
 	return undefined;
 }

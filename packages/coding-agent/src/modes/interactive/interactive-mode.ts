@@ -35,7 +35,7 @@ import { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
-import { onInterfaceLanguageChange } from "../../core/language/interface-text.ts";
+import { interfaceText, onInterfaceLanguageChange } from "../../core/language/interface-text.ts";
 import {
 	OWNER_EVIDENCE_CUSTOM_TYPE,
 	type OwnerTextRange,
@@ -66,7 +66,7 @@ import type { SessionContext, SessionManager, TruncationResult } from "../../ker
 import { turnOriginStampOf } from "../../kernel/turn-origin-stamp.ts";
 import type { AgentMessage, ToolCallRepairInfo } from "../../kernel/types.ts";
 import * as clipboardInput from "../../presentation/clipboard-input.ts";
-import { formatKeyText, keyDisplayText, keyHint, keyText, rawKeyHint } from "../../presentation/keybinding-hints.ts";
+import { formatKeyText, keyDisplayText, keyText } from "../../presentation/keybinding-hints.ts";
 import {
 	initTheme,
 	onThemeChange,
@@ -101,6 +101,12 @@ import { FooterComponent, type FooterServices } from "./components/footer.ts";
 import type { MarkdownTransformFn } from "./components/markdown-transform.ts";
 import { ReplyBylineTracker, replyByline, replyModelRef } from "./components/reply-byline.ts";
 import { SkillInvocationMessageComponent } from "./components/skill-invocation-message.ts";
+import {
+	compactStartupHints,
+	expandedStartupHints,
+	startupHelpLine,
+	startupOnboarding,
+} from "./components/startup-header.ts";
 import { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { openTranscriptOverlay } from "./components/transcript-overlay.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
@@ -124,6 +130,7 @@ import { QueuedMessageController, type UserInputSubmission } from "./queued-mess
 import { promptHarnessReadiness } from "./readiness-prompt.ts";
 import * as reportCommands from "./report-commands.ts";
 import { RuntimeStatusController } from "./runtime-status-controller.ts";
+import { describeSelfModificationSourceProblem } from "./self-modification-source.ts";
 import * as sessionFlows from "./session-flow-commands.ts";
 import { handleNonFatalSessionReplacementError } from "./session-replacement-errors.ts";
 import * as settingsSelectorFlow from "./settings-selector-flow.ts";
@@ -664,14 +671,16 @@ export class InteractiveMode {
 		// The edge asks here, once, with one key: an ungranted operation waits for the answer in the
 		// workbench instead of failing the model's call. Escape declines.
 		this.session.setEdgeConfirmation(async (request, signal) => {
+			const words = interfaceText().interactive;
+			const choices = [words.allowOnce, words.allowForSession, words.deny];
 			const choice = await this.extensionUiHost.showExtensionSelector(
-				`Edge · ${request.class}\n${request.operation}\n${request.reason}`,
-				["Allow once", "Allow for this session", "Deny"],
+				words.edgeTitle(request.class, request.operation, request.reason),
+				choices,
 				signal ? { signal } : undefined,
 			);
 			this.refreshActivityLane();
-			if (choice === "Allow once") return "allow-once";
-			if (choice === "Allow for this session") return "allow-session";
+			if (choice === choices[0]) return "allow-once";
+			if (choice === choices[1]) return "allow-session";
 			return "deny";
 		});
 		this.footer.setAutoCompactEnabled(this.session.autoCompactionEnabled);
@@ -781,16 +790,23 @@ export class InteractiveMode {
 		if (this.session.scopedModels.length > 0 && (this.options.verbose || !this.settingsManager.getQuietStartup())) {
 			const modelList = this.session.scopedModels
 				.map((sm) => {
-					const thinkingStr = sm.thinkingLevel ? `:${sm.thinkingLevel}` : "";
+					const thinkingStr = sm.thinkingLevel
+						? `:${interfaceText().interactive.thinkingLevelName(sm.thinkingLevel)}`
+						: "";
 					return `${sm.model.id}${thinkingStr}`;
 				})
 				.join(", ");
 			const cycleKeys = this.keybindings.getKeys("app.model.cycleForward");
 			const cycleHint =
 				cycleKeys.length > 0
-					? theme.fg("muted", ` (${formatKeyText(cycleKeys.join("/"), { capitalize: true })} to cycle)`)
+					? theme.fg(
+							"muted",
+							interfaceText().interactive.startup.cycleHint(
+								formatKeyText(cycleKeys.join("/"), { capitalize: true }),
+							),
+						)
 					: "";
-			console.log(theme.fg("dim", `Model scope: ${modelList}${cycleHint}`));
+			console.log(theme.fg("dim", interfaceText().interactive.startup.modelScope(modelList, cycleHint)));
 		}
 
 		// Add header container as first child
@@ -799,53 +815,9 @@ export class InteractiveMode {
 		if (this.options.verbose || !this.settingsManager.getQuietStartup()) {
 			const logo = theme.bold(theme.fg("accent", APP_NAME)) + theme.fg("dim", ` v${this.version}`);
 
-			// Build startup instructions using keybinding hint helpers
-			const hint = (keybinding: AppKeybinding, description: string) => keyHint(keybinding, description);
-
-			const expandedInstructions = [
-				hint("app.interrupt", "to interrupt"),
-				hint("app.clear", "to clear"),
-				rawKeyHint(`${keyText("app.clear")} twice`, "to exit"),
-				hint("app.exit", "to exit (empty)"),
-				hint("app.suspend", "to suspend"),
-				keyHint("tui.editor.deleteToLineEnd", "to delete to end"),
-				hint("app.thinking.cycle", "to cycle thinking level"),
-				rawKeyHint(`${keyText("app.model.cycleForward")}/${keyText("app.model.cycleBackward")}`, "to cycle models"),
-				hint("app.model.select", "to select model"),
-				hint("app.tools.expand", "to expand tools"),
-				hint("app.history.load", "to load session history"),
-				hint("app.agents.open", "to inspect goal, plan, and agents"),
-				hint("app.transcript.open", "to view transcript"),
-				hint("app.thinking.toggle", "to expand thinking"),
-				hint("app.editor.external", "for external editor"),
-				rawKeyHint("/", "for commands"),
-				rawKeyHint("!", "to run bash"),
-				rawKeyHint("!!", "to run bash (no context)"),
-				hint("app.message.followUp", "to queue follow-up"),
-				rawKeyHint(">>", "prefix to queue follow-up"),
-				hint("app.message.dequeue", "to edit all queued messages"),
-				rawKeyHint("↑", "(empty editor) to recall queued messages"),
-				hint("app.clipboard.pasteImage", "to paste image"),
-				rawKeyHint("drop files", "to attach"),
-			].join("\n");
-			const compactInstructions = [
-				hint("app.interrupt", "interrupt"),
-				rawKeyHint(`${keyText("app.clear")}/${keyText("app.exit")}`, "clear/exit"),
-				rawKeyHint("/", "commands"),
-				rawKeyHint("!", "bash"),
-				hint("app.tools.expand", "expand tools"),
-			].join(theme.fg("muted", " · "));
-			const compactOnboarding = theme.fg(
-				"dim",
-				`Press ${keyText("app.tools.expand")} for full startup help. Press ${keyText("app.history.load")} to load session history.`,
-			);
-			const onboarding = theme.fg(
-				"dim",
-				`Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.`,
-			);
 			this.builtInHeader = new ExpandableText(
-				() => `${logo}\n${compactInstructions}\n${compactOnboarding}\n\n${onboarding}`,
-				() => `${logo}\n${expandedInstructions}\n\n${onboarding}`,
+				() => `${logo}\n${compactStartupHints()}\n${startupHelpLine()}\n\n${startupOnboarding()}`,
+				() => `${logo}\n${expandedStartupHints()}\n\n${startupOnboarding()}`,
 				this.getStartupExpansionState(),
 				1,
 				0,
@@ -922,6 +894,7 @@ export class InteractiveMode {
 	 * Initializes the UI, shows warnings, processes initial messages, and starts the interactive loop.
 	 */
 	async run(): Promise<void> {
+		const notices = interfaceText().notices;
 		await this.init();
 		if (this.hasHumanAudience) this.startAudienceChecks();
 
@@ -930,7 +903,7 @@ export class InteractiveMode {
 			try {
 				await this.session.prompt(initialMessage, { images: initialImages });
 			} catch (error: unknown) {
-				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+				const errorMessage = error instanceof Error ? error.message : notices.unknownErrorOccurred;
 				this.showError(errorMessage);
 			} finally {
 				this.refreshAutonomyFooterStatus();
@@ -942,7 +915,7 @@ export class InteractiveMode {
 				try {
 					await this.session.prompt(message);
 				} catch (error: unknown) {
-					const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+					const errorMessage = error instanceof Error ? error.message : notices.unknownErrorOccurred;
 					this.showError(errorMessage);
 				} finally {
 					this.refreshAutonomyFooterStatus();
@@ -955,7 +928,7 @@ export class InteractiveMode {
 			try {
 				await this.session.prompt(userInput.text, { images: userInput.images, pasted: userInput.pasted });
 			} catch (error: unknown) {
-				const errorMessage = error instanceof Error ? error.message : "Unknown error occurred";
+				const errorMessage = error instanceof Error ? error.message : notices.unknownErrorOccurred;
 				this.showError(errorMessage);
 			} finally {
 				this.reportCacheMissNoticeIfEvidenced();
@@ -1019,9 +992,7 @@ export class InteractiveMode {
 			.runStartupSkillCuration()
 			.then((archived) => {
 				if (archived.length > 0) {
-					this.showStatus(
-						`Curator: auto-archived ${archived.length} stale skill(s) — ${archived.join(", ")}. Restore with /curate restore <name>.`,
-					);
+					this.showStatus(interfaceText().notices.curatorArchived(archived.length, archived.join(", ")));
 				}
 			})
 			.catch(() => {
@@ -1031,12 +1002,12 @@ export class InteractiveMode {
 		const { migratedProviders, modelFallbackMessage } = this.options;
 
 		if (migratedProviders && migratedProviders.length > 0) {
-			this.showWarning(`Migrated credentials to auth.json: ${migratedProviders.join(", ")}`);
+			this.showWarning(interfaceText().notices.migratedCredentials(migratedProviders.join(", ")));
 		}
 
 		const modelsJsonError = this.modelRegistry.getError();
 		if (modelsJsonError) {
-			this.showError(`models.json error: ${modelsJsonError}`);
+			this.showError(interfaceText().notices.modelsJsonError(modelsJsonError));
 		}
 
 		if (modelFallbackMessage) {
@@ -1202,7 +1173,7 @@ export class InteractiveMode {
 					} catch (error: unknown) {
 						const disposition = this.handleNonFatalSessionReplacementError(error);
 						if (disposition) return { cancelled: disposition === "previous_restored" };
-						return this.handleFatalRuntimeError("Failed to create session", error);
+						return this.handleFatalRuntimeError(interfaceText().notices.failedToCreateSession, error);
 					}
 				},
 				fork: async (entryId, options) => {
@@ -1211,13 +1182,13 @@ export class InteractiveMode {
 						if (!result.cancelled) {
 							this.renderCurrentSessionState();
 							this.editor.setText(result.selectedText ?? "", result.pasted);
-							this.showStatus("Forked to new session");
+							this.showStatus(interfaceText().interactive.forked);
 						}
 						return { cancelled: result.cancelled };
 					} catch (error: unknown) {
 						const disposition = this.handleNonFatalSessionReplacementError(error);
 						if (disposition) return { cancelled: disposition === "previous_restored" };
-						return this.handleFatalRuntimeError("Failed to fork session", error);
+						return this.handleFatalRuntimeError(interfaceText().notices.failedToForkSession, error);
 					}
 				},
 				navigateTree: async (targetId, options) => {
@@ -1235,7 +1206,7 @@ export class InteractiveMode {
 					if (result.editorText && !this.editor.getText().trim()) {
 						this.editor.setText(result.editorText, result.pasted);
 					}
-					this.showStatus("Navigated to selected point");
+					this.showStatus(interfaceText().interactive.navigated);
 					void this.queuedMessages.flushCompactionQueue({ willRetry: false });
 					return { cancelled: false };
 				},
@@ -1305,8 +1276,8 @@ export class InteractiveMode {
 		this.hideThinkingBlock = this.settingsManager.getHideThinkingBlock();
 		const themeName = this.settingsManager.getTheme();
 		const themeResult = themeName ? setTheme(themeName, true) : { success: true };
-		if (!themeResult.success) {
-			this.showError(`Failed to load theme "${themeName}": ${themeResult.error}\nFell back to dark theme.`);
+		if (themeName && !themeResult.success) {
+			this.showError(interfaceText().notices.themeLoadFailed(themeName, themeResult.error ?? ""));
 		}
 		this.applyEditorPresentationSettings();
 	}
@@ -1352,7 +1323,7 @@ export class InteractiveMode {
 			await this.session.resumePendingHumanInput();
 		} catch (error: unknown) {
 			this.showError(
-				`Failed to resume pending user input: ${error instanceof Error ? error.message : String(error)}`,
+				interfaceText().notices.pendingInputResumeFailed(error instanceof Error ? error.message : String(error)),
 			);
 		}
 		// Input the previous run still held queued returns pending, visible and takeable into the editor.
@@ -1363,7 +1334,9 @@ export class InteractiveMode {
 		}
 		// Learner proposals a previous session could not apply are offered once more, under the same gates.
 		void this.autoLearnController.reofferUnappliedProposals().catch((error: unknown) => {
-			this.showWarning(`Auto Learn re-offer failed: ${error instanceof Error ? error.message : String(error)}`);
+			this.showWarning(
+				interfaceText().notices.autoLearnOfferFailed(error instanceof Error ? error.message : String(error)),
+			);
 		});
 		this.session.resumeSelfCompaction();
 	}
@@ -1516,7 +1489,7 @@ export class InteractiveMode {
 
 	private async promptForMissingSessionCwd(error: MissingSessionCwdError): Promise<string | undefined> {
 		const confirmed = await this.extensionUiHost.showExtensionConfirm(
-			"Session cwd not found",
+			interfaceText().interactive.sessionCwdTitle,
 			formatMissingSessionCwdPrompt(error.issue),
 		);
 		return confirmed ? error.issue.fallbackCwd : undefined;
@@ -1592,9 +1565,7 @@ export class InteractiveMode {
 				ui: this.ui,
 				autoResizeImages: this.settingsManager.getImageAutoResize(),
 				blockImages: this.settingsManager.getBlockImages() || modelCannotSeeImages,
-				blockImagesReason: modelCannotSeeImages
-					? "The selected model does not accept image input. Switch to an image-capable model or route this inspection to a vision worker."
-					: undefined,
+				blockImagesReason: modelCannotSeeImages ? interfaceText().interactive.imagesBlocked : undefined,
 				imageStore: this.clipboardImageStore,
 				showStatus: (message) => this.showStatus(message),
 				showWarning: (message) => this.showWarning(message),
@@ -1787,7 +1758,7 @@ export class InteractiveMode {
 				waiting: activity.phase === "waiting",
 			});
 			this.loadingAnimation?.setMessage(
-				activity.phase === "waiting" ? "Awaiting you" : this.getWorkingLoaderMessage(),
+				activity.phase === "waiting" ? interfaceText().frame.activity.awaitingYou : this.getWorkingLoaderMessage(),
 			);
 			// The POV bar derives CONTROL from the durable human-input record on its next read; the
 			// render is what makes an opening or closing question visible the moment it happens.
@@ -1893,10 +1864,7 @@ export class InteractiveMode {
 		if (recordCount > 0) {
 			this.chatContainer.addChild(
 				new Text(
-					theme.fg(
-						"dim",
-						`History hidden for typing performance. Press ${keyText("app.history.load")} to load session history.`,
-					),
+					theme.fg("dim", interfaceText().interactive.historyHiddenForTyping(keyText("app.history.load"))),
 					1,
 					0,
 				),
@@ -1914,7 +1882,9 @@ export class InteractiveMode {
 			try {
 				await this.renderInitialMessages({ forceHistoryLoad: true });
 			} catch (error) {
-				this.showError(`Failed to load TUI history: ${error instanceof Error ? error.message : String(error)}`);
+				this.showError(
+					interfaceText().notices.historyLoadFailed(error instanceof Error ? error.message : String(error)),
+				);
 			} finally {
 				this.tuiHistoryLoadInProgress = false;
 			}
@@ -2020,7 +1990,7 @@ export class InteractiveMode {
 
 		const noticeText = theme.fg(
 			"dim",
-			`Older TUI history hidden to preserve FPS (${this.liveHistoryHiddenComponents} components). Full session remains available to the model.`,
+			interfaceText().interactive.olderHistoryHidden(this.liveHistoryHiddenComponents),
 		);
 		if (children[0] === this.liveHistoryHiddenNotice) {
 			this.liveHistoryHiddenNotice?.setText(noticeText);
@@ -2254,7 +2224,10 @@ export class InteractiveMode {
 				const tuiHistory = this.messagesForTuiHistoryReload(sessionContext.messages);
 				if (tuiHistory.omittedMessages > 0) {
 					this.appendStatusToChat(
-						`Showing last ~${historyReloadMath.TUI_HISTORY_RELOAD_MAX_LINES} TUI history lines; omitted ${tuiHistory.omittedMessages} older message${tuiHistory.omittedMessages === 1 ? "" : "s"}. Full session remains available to the model.`,
+						interfaceText().interactive.historyWindow(
+							historyReloadMath.TUI_HISTORY_RELOAD_MAX_LINES,
+							tuiHistory.omittedMessages,
+						),
 						{ requestRender: false },
 					);
 				}
@@ -2285,10 +2258,10 @@ export class InteractiveMode {
 										const retryAttempt = this.session.retryAttempt;
 										errorMessage =
 											retryAttempt > 0
-												? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-												: "Operation aborted";
+												? interfaceText().conversation.abortedAfterRetries(retryAttempt)
+												: interfaceText().conversation.operationAborted;
 									} else {
-										errorMessage = message.errorMessage || "Error";
+										errorMessage = message.errorMessage || interfaceText().notices.errorWord;
 									}
 									component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
 									this.activeToolCalls.finish(content.id);
@@ -2364,8 +2337,7 @@ export class InteractiveMode {
 		const allEntries = this.sessionManager.getEntries();
 		const compactionCount = allEntries.filter((e) => e.type === "compaction").length;
 		if (compactionCount > 0) {
-			const times = compactionCount === 1 ? "1 time" : `${compactionCount} times`;
-			this.showStatus(`Session compacted ${times}`);
+			this.showStatus(interfaceText().interactive.sessionCompacted(compactionCount));
 		}
 	}
 
@@ -2417,7 +2389,9 @@ export class InteractiveMode {
 				this.appendTranscriptAction(component);
 				if (message.stopReason === "aborted" || message.stopReason === "error") {
 					component.updateResult({
-						content: [{ type: "text", text: message.errorMessage || "Operation aborted" }],
+						content: [
+							{ type: "text", text: message.errorMessage || interfaceText().conversation.operationAborted },
+						],
 						isError: true,
 					});
 				} else {
@@ -2572,12 +2546,13 @@ export class InteractiveMode {
 
 	private cycleThinkingLevel(): void {
 		const newLevel = this.session.cycleThinkingLevel();
+		const words = interfaceText().interactive;
 		if (newLevel === undefined) {
-			this.showStatus("Current model does not support thinking");
+			this.showStatus(words.thinkingUnsupported);
 		} else {
 			this.footer.invalidate();
 			this.updateEditorBorderColor();
-			this.showStatus(`Thinking level: ${newLevel}`);
+			this.showStatus(words.thinkingLevel(words.thinkingLevelName(newLevel)));
 		}
 	}
 
@@ -2585,14 +2560,19 @@ export class InteractiveMode {
 		try {
 			const result = await this.session.cycleModel(direction);
 			if (result === undefined) {
-				const msg = this.session.scopedModels.length > 0 ? "Only one model in scope" : "Only one model available";
-				this.showStatus(msg);
+				const words = interfaceText().interactive;
+				this.showStatus(
+					this.session.scopedModels.length > 0 ? words.onlyOneModelInScope : words.onlyOneModelAvailable,
+				);
 			} else {
 				this.footer.invalidate();
 				this.updateEditorBorderColor();
-				const thinkingStr =
-					result.model.reasoning && result.thinkingLevel !== "off" ? ` (thinking: ${result.thinkingLevel})` : "";
-				this.showStatus(`Switched to ${result.model.name || result.model.id}${thinkingStr}`);
+				const words = interfaceText().interactive;
+				const level =
+					result.model.reasoning && result.thinkingLevel !== "off"
+						? words.thinkingLevelName(result.thinkingLevel)
+						: undefined;
+				this.showStatus(words.switchedTo(result.model.name || result.model.id, level));
 				void this.maybeWarnAboutAnthropicSubscriptionAuth(result.model);
 			}
 		} catch (error) {
@@ -2630,7 +2610,7 @@ export class InteractiveMode {
 		this.hideThinkingBlock = !this.hideThinkingBlock;
 		this.settingsManager.setHideThinkingBlock(this.hideThinkingBlock);
 		this.updateThinkingBlockVisibility();
-		this.showStatus(`Thinking blocks: ${this.hideThinkingBlock ? "hidden" : "visible"}`);
+		this.showStatus(interfaceText().interactive.thinkingBlocks(this.hideThinkingBlock));
 	}
 
 	private updateThinkingBlockVisibility(): void {
@@ -2676,14 +2656,14 @@ export class InteractiveMode {
 
 	showError(errorMessage: string): void {
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(theme.fg("error", `Error: ${errorMessage}`), 1, 0));
+		this.chatContainer.addChild(new Text(theme.fg("error", interfaceText().notices.error(errorMessage)), 1, 0));
 		this.chatContainer.addChild(new Spacer(1));
 		this.ui.requestRender();
 	}
 
 	showWarning(warningMessage: string): void {
 		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(theme.fg("warning", `Warning: ${warningMessage}`), 1, 0));
+		this.chatContainer.addChild(new Text(theme.fg("warning", interfaceText().notices.warning(warningMessage)), 1, 0));
 		this.ui.requestRender();
 	}
 
@@ -2855,25 +2835,7 @@ export class InteractiveMode {
 	}
 
 	private validateSelfModificationSource(settings: SelfModificationSettings): string | undefined {
-		if (!settings.enabled) return undefined;
-		const cwd = this.getCurrentCwdForSettings();
-		const resolved = collectSelfModificationSourceCandidates(settings).map((candidate) =>
-			resolvePath(candidate, cwd, { trim: true }),
-		);
-		if (resolved.length === 0) return "Self modification is enabled, but no pi-adaptative source path is set.";
-		const valid = resolved.find(
-			(candidate) =>
-				fs.existsSync(candidate) &&
-				fs.existsSync(path.join(candidate, "package.json")) &&
-				fs.existsSync(path.join(candidate, "packages", "coding-agent")),
-		);
-		if (valid) return undefined;
-		const first = resolved[0];
-		if (!fs.existsSync(first)) return `Self modification source path does not exist: ${first}`;
-		if (!fs.existsSync(path.join(first, "package.json"))) {
-			return `Self modification source path has no package.json: ${first}`;
-		}
-		return `Self modification source path does not look like pi-adaptative (missing packages/coding-agent): ${first}`;
+		return describeSelfModificationSourceProblem(settings, this.getCurrentCwdForSettings());
 	}
 
 	private launchAutoLearn(

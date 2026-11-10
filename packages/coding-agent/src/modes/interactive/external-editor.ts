@@ -13,6 +13,7 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { carryTextRanges, type EditorComponent, type TUI } from "@caupulican/pi-tui";
 import { getAgentDir } from "../../config.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { runExternalEditor } from "../../utils/external-editor-command.ts";
 import { waitForStdinEvent } from "../../utils/stdin-events.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
@@ -46,7 +47,7 @@ export async function editInExternalEditor(options: ExternalEditorOptions): Prom
 
 	try {
 		fs.writeFileSync(tmpFile, options.content, "utf-8");
-		process.stdout.write(`Launching external editor: ${options.command}\nPi will resume when the editor exits.\n`);
+		process.stdout.write(interfaceText().queue.launching(options.command));
 		const status = await runExternalEditor(options.command, tmpFile);
 		if (status !== 0) {
 			return { status: "failed" };
@@ -64,7 +65,7 @@ export async function editInExternalEditor(options: ExternalEditorOptions): Prom
 export async function openExternalEditor(host: ExternalEditorHost): Promise<void> {
 	const editorCmd = resolveEditorCommand();
 	if (!editorCmd) {
-		host.showWarning("No editor configured. Set $VISUAL or $EDITOR environment variable.");
+		host.showWarning(interfaceText().queue.noEditor);
 		return;
 	}
 
@@ -101,20 +102,18 @@ export async function openEditorForPath(host: ExternalEditorHost, filePath: stri
 		// Stop TUI to release terminal
 		host.ui.stop();
 
-		process.stdout.write(
-			`Launching external editor: ${editorCmd} ${filePath}\nPi will resume when the editor exits.\n`,
-		);
+		process.stdout.write(interfaceText().queue.launching(`${editorCmd} ${filePath}`));
 
 		const status = await runExternalEditor(editorCmd, filePath);
 
 		if (status === null) {
 			if (isFallback) {
-				process.stdout.write(`\nError: Failed to launch fallback editor "vi".\n`);
+				process.stdout.write(interfaceText().queue.launchFailedFallback("vi"));
 			} else {
-				process.stdout.write(`\nError: Failed to launch editor "${editorCmd}".\n`);
+				process.stdout.write(interfaceText().queue.launchFailed(editorCmd));
 			}
-			process.stdout.write(`Please set the $EDITOR or $VISUAL environment variable to edit inline.\n`);
-			process.stdout.write(`Absolute file path: ${filePath}\n\nPress Enter to return to Pi...`);
+			process.stdout.write(`${interfaceText().queue.setEditorVariable}\n`);
+			process.stdout.write(interfaceText().queue.absolutePath(filePath));
 			// Wait for enter, but do not remain pending if stdin closes during shutdown.
 			await waitForStdinEvent();
 		}

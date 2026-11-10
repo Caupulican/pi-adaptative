@@ -2,6 +2,7 @@
 
 import { describeDaemonBuild } from "../delegation/bot-team-routine-helpers.ts";
 import { describeGoalAutoContinue } from "../goals/goal-auto-continue-state.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { planStatusLine } from "../plan/plan-panel.ts";
 import { reviewGaugeStatusLine } from "../proof/review-gauge.ts";
 import { describeAwayServiceInspection } from "../routines/away-service.ts";
@@ -18,8 +19,9 @@ import type {
 import type { ToolDecision } from "./tool-manifest.ts";
 
 /** What the owner is told while the session file refuses new writes: why, what is safe, and the way out. */
-export const SESSION_SAVE_PAUSED_WORDS =
-	"Saving is paused: the last write to this session's file did not finish cleanly, so nothing more is saved until the file is reopened. What is on screen stays. Use /resume and choose this session to reopen it, or /new to start a new one.";
+export function sessionSavePausedWords(): string {
+	return interfaceText().notices.sessionSavePaused;
+}
 
 function decisionLine(decision: ToolDecision): string {
 	return `${decision.tool}: ${decision.code} (${decision.owner}${decision.detail ? `: ${decision.detail}` : ""})`;
@@ -102,7 +104,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 				: "The waiting-results notice is off; nothing is ever held.",
 		]),
 		...block("Session file", status.sessionSave, (value) => [
-			value.fenced ? SESSION_SAVE_PAUSED_WORDS : "Saving normally.",
+			value.fenced ? sessionSavePausedWords() : "Saving normally.",
 		]),
 		...block("Routines", status.routines, (value) => [
 			`result wakes (24 h): ${count(value.resultWakes)}`,

@@ -18,6 +18,7 @@ import chalk from "chalk";
 import type { AgentSessionRuntime } from "../../core/agent-session-runtime.ts";
 import { writeRejectionRecord } from "../../core/crash-record.ts";
 import { disposeHttpDispatcher } from "../../core/http-dispatcher.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { declareExit, exitProcess, type ProcessEndReason } from "../../core/process-end-recorder.ts";
 import { causeHeadline, describeCause, errorDetail, neutralizeControls } from "../../core/terminal-warnings.ts";
 import { disposeUnclaimedCliPowerShellWarmStart } from "../../core/tools/early-powershell-session.ts";
@@ -231,7 +232,7 @@ export class SignalLifecycle {
 
 		const resumeCommand = this.port.formatResumeCommand();
 		if (resumeCommand) {
-			this.io.stdout(`${chalk.dim("To resume this session:")} ${resumeCommand}\n`);
+			this.io.stdout(`${chalk.dim(interfaceText().notices.resumeThisSession)} ${resumeCommand}\n`);
 		}
 
 		// The orderly quit: every cleanup step succeeded, so it writes no record.
@@ -355,7 +356,7 @@ export class SignalLifecycle {
 			this.io.stderr(`${neutralizeControls(`Unhandled promise rejection during shutdown. ${detail}`)}\n`);
 			return;
 		}
-		this.port.showError(`Unhandled promise rejection — session kept alive. ${causeHeadline(error)}`);
+		this.port.showError(interfaceText().notices.unhandledRejection(causeHeadline(error)));
 	}
 
 	/**
@@ -484,7 +485,7 @@ export class SignalLifecycle {
 
 export function handleCtrlZ(host: Pick<SignalLifecyclePort, "showStatus" | "ui">): void {
 	if (process.platform === "win32") {
-		host.showStatus("Suspend to background is not supported on Windows");
+		host.showStatus(interfaceText().notices.suspendUnsupported);
 		return;
 	}
 

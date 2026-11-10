@@ -1,4 +1,5 @@
 import { type Component, truncateToWidth } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { keyText } from "../../../presentation/keybinding-hints.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
@@ -72,13 +73,12 @@ export class ActionTranscriptComponent implements Component {
 			if (action.isToolPartial()) pending++;
 			if (action.isToolError()) failed++;
 		}
-		const status = pending > 0 ? "Performing" : "Performed";
-		const noun = total === 1 ? "action" : "actions";
-		const failureSuffix = failed > 0 ? ` · ${failed} failed` : "";
+		const text = interfaceText().conversation;
+		const failureSuffix = failed > 0 ? text.actionFailure(failed) : "";
 		const color = failed > 0 ? "error" : pending > 0 ? "accent" : "success";
-		const summary = `${theme.fg(color, "•")} ${theme.bold(`${status} ${total} ${noun}`)}${theme.fg(
+		const summary = `${theme.fg(color, "•")} ${theme.bold(text.actionStatus(pending, total))}${theme.fg(
 			"dim",
-			`${failureSuffix} · ${keyText("app.transcript.open")} to view transcript`,
+			`${failureSuffix} · ${keyText("app.transcript.open")} ${text.viewTranscript}`,
 		)}`;
 		return [truncateToWidth(summary, safeWidth, "...")];
 	}

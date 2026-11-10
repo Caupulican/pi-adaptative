@@ -1,5 +1,6 @@
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { Component } from "@caupulican/pi-tui";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { UsageActionSelectorComponent } from "./components/usage-action-selector.ts";
 
 /** A Codex misalignment block the owner may choose to continue past. */
@@ -30,12 +31,13 @@ export interface MisalignmentContinuationHost {
 /** Show the explanation and let the owner continue with the backend's instruction, or stop. */
 export function offerMisalignmentContinuation(host: MisalignmentContinuationHost, block: MisalignmentBlock): void {
 	host.showSelector((done) => {
+		const text = interfaceText().interactive;
 		const selector = new UsageActionSelectorComponent({
-			title: "Codex blocked this request",
+			title: text.continuationTitle("Codex"),
 			subtitle: block.detailedExplanation,
 			items: [
-				{ value: "continue", label: "Continue", description: "Send the suggested follow-up as your next message" },
-				{ value: "stop", label: "Stop", description: "Leave the turn as it ended" },
+				{ value: "continue", label: text.continuationLabel, description: text.continuationDescription },
+				{ value: "stop", label: text.stopLabel, description: text.stopDescription },
 			],
 			initialSelectedIndex: 1,
 			onSelect: (value) => {
