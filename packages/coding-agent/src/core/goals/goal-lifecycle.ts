@@ -1,11 +1,10 @@
 import { isDeepStrictEqual } from "node:util";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { englishText } from "../language/interface-text.ts";
+import { type GoalRefusalAction, type RefusedGoalAction, refuseGoalAction } from "./goal-refusal.ts";
 import {
 	applyGoalEvent,
 	type GoalEvent,
 	type GoalState,
-	type GoalStatus,
 	isGoalExecutionActive,
 	isGoalResumableStatus,
 	isGoalUnfinishedStatus,
@@ -123,13 +122,9 @@ export interface PersistedGoalStateHost {
 	clearGoalStateSnapshot?(state: GoalState, now: string): string;
 }
 
-/** The English word for a goal status: a refused command's reason is read by whoever asked, a model included. */
-function statusWord(status: GoalStatus): string {
-	return englishText().sessions.goal.statusWords[status];
-}
-
-function missingGoal(action: string): GoalActionFailure {
-	return { ok: false, error: `No goal exists to ${action}.` };
+/** The refusal for an action asked of a goal that does not exist: the wording names the action. */
+function missingGoal(action: GoalRefusalAction): RefusedGoalAction {
+	return refuseGoalAction({ kind: "no_goal", action });
 }
 
 function persistResult(
@@ -149,7 +144,7 @@ export function pauseGoal(current: GoalState | undefined, now: string): GoalActi
 			goalId: current.goalId,
 			status: current.status,
 		});
-		return { ok: false, error: `The goal is ${statusWord(current.status)}; only active goals can be paused.` };
+		return refuseGoalAction({ kind: "not_active", status: current.status });
 	}
 	return { ok: true, state: applyGoalEvent(current, { type: "pause_goal", now }) };
 }
@@ -161,10 +156,7 @@ export function resumeGoal(current: GoalState | undefined, now: string, source?:
 			goalId: current.goalId,
 			status: current.status,
 		});
-		return {
-			ok: false,
-			error: `The goal is ${statusWord(current.status)}; only paused, blocked, or usage-limited goals can be resumed.`,
-		};
+		return refuseGoalAction({ kind: "not_resumable", status: current.status });
 	}
 	return { ok: true, state: applyGoalEvent(current, { type: "resume_goal", now, ...(source ? { source } : {}) }) };
 }
@@ -177,15 +169,15 @@ export function editGoal(
 	if (!current) return missingGoal("edit");
 	if (current.status === "cancelled") {
 		harnessLog.debug("ui", "a goal edit was refused: the goal is cancelled", { goalId: current.goalId });
-		return { ok: false, error: "The goal is cancelled; start a new goal instead." };
+		return refuseGoalAction({ kind: "edit_goal_cancelled" });
 	}
 	const userGoal = args.userGoal.trim();
-	if (!userGoal) return { ok: false, error: "Goal objective must not be empty." };
+	if (!userGoal) return refuseGoalAction({ kind: "edit_objective_empty" });
 	if (userGoal.length > MAX_GOAL_OBJECTIVE_LENGTH) {
-		return { ok: false, error: `Goal objective must be at most ${MAX_GOAL_OBJECTIVE_LENGTH} characters.` };
+		return refuseGoalAction({ kind: "edit_objective_too_long", limit: MAX_GOAL_OBJECTIVE_LENGTH });
 	}
 	if (args.tokenBudget !== undefined && (!Number.isSafeInteger(args.tokenBudget) || args.tokenBudget <= 0)) {
-		return { ok: false, error: "Goal token budget must be a positive integer when provided." };
+		return refuseGoalAction({ kind: "edit_token_budget_invalid" });
 	}
 	return {
 		ok: true,
@@ -200,7 +192,7 @@ export function cancelGoal(current: GoalState | undefined, now: string): GoalAct
 			goalId: current.goalId,
 			status: current.status,
 		});
-		return { ok: false, error: `The goal is already ${statusWord(current.status)}.` };
+		return refuseGoalAction({ kind: "goal_already_ended", status: current.status });
 	}
 	return { ok: true, state: applyGoalEvent(current, { type: "cancel_goal", now }) };
 }
@@ -224,10 +216,10 @@ export function stopGoalFromSystem(
 			goalId: current.goalId,
 			status: current.status,
 		});
-		return { ok: false, error: `The goal is ${statusWord(current.status)}; no system stop is needed.` };
+		return refuseGoalAction({ kind: "system_stop_unneeded", status: current.status });
 	}
 	const reason = args.reason.trim();
-	if (!reason) return { ok: false, error: "System goal stop requires a reason." };
+	if (!reason) return refuseGoalAction({ kind: "system_stop_reason_empty" });
 	return { ok: true, state: applyGoalEvent(current, { type: "system_stop_goal", ...args, reason, now }) };
 }
 
@@ -263,7 +255,7 @@ export function clearPersistedGoal(
 ): ClearPersistedGoalResult {
 	const current = host.getGoalStateSnapshot();
 	if (!current) return { ok: true, cleared: false };
-	if (!host.clearGoalStateSnapshot) return { ok: false, error: "This session does not support clearing goals." };
+	if (!host.clearGoalStateSnapshot) return refuseGoalAction({ kind: "clear_unsupported" });
 	host.clearGoalStateSnapshot(current, now);
 	return { ok: true, cleared: true };
 }

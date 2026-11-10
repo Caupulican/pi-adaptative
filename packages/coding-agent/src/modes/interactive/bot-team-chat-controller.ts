@@ -1,8 +1,9 @@
 import { type Container, Spacer, Text, type TUI } from "@caupulican/pi-tui";
 import type { AwayChannelStatus } from "../../core/channels/away-channels.ts";
 import { SPAWNER_BOT_ID, SPAWNER_SOUL } from "../../core/delegation/bot-creation.ts";
+import { type BotDaemonLaunchResult, describeBotDaemonLaunch } from "../../core/delegation/bot-daemon-launch.ts";
+import { type BotDaemonStopResult, describeBotDaemonStop } from "../../core/delegation/bot-daemon-stop.ts";
 import { displayNameFor } from "../../core/delegation/bot-naming.ts";
-import { describeDaemonBuild, OWN_DAEMON_BUILD } from "../../core/delegation/bot-team-routine-helpers.ts";
 import {
 	type ActiveChatTarget,
 	type BotOperatorMessageDispatchResult,
@@ -23,9 +24,10 @@ import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { isModelReference } from "../../core/model-resolver.ts";
 import type { RemoteHubController } from "../../core/remote/hub-controller.ts";
-import { type AwayService, describeAwayServiceInspection } from "../../core/routines/away-service.ts";
+import type { AwayService } from "../../core/routines/away-service.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
+import { describeBotDaemonStatusLines } from "./bot-daemon-status.ts";
 import { formatBotList, formatRoutineList, formatTeamList, formatTeamSend } from "./bot-team-lines.ts";
 import { chatRoutine, routineScheduleLabel } from "./chat-routines.ts";
 import { formatActiveChatTargetBadge } from "./chat-target-badge.ts";
@@ -73,8 +75,8 @@ export interface BotTeamChatSessionPort {
 	getBotTeamStore?(): PersistentBotTeamStore;
 	tickPersistentRoutines?(routineId?: string): Promise<{ dispatched: string[]; failed: string[] }>;
 	getPersistentBotDaemonStatus?(): PersistentBotDaemonStatus;
-	startPersistentBotDaemon?(): { started: boolean; pid?: number; detail: string };
-	stopPersistentBotDaemon?(): { stopped: boolean; detail: string };
+	startPersistentBotDaemon?(): BotDaemonLaunchResult;
+	stopPersistentBotDaemon?(): BotDaemonStopResult;
 	/** The session's background lanes: the always-on service of its agent directory and its channels served away. */
 	readonly backgroundLanes?: {
 		getAwayService(): AwayService;
@@ -1132,23 +1134,7 @@ export class BotTeamChatController {
 					this.host.showWarning(interfaceText().botTeam.daemonStatusUnavailable);
 					return;
 				}
-				const words = interfaceText().botTeam;
-				const counts = words.daemonCounts(status.activeRoutines, status.dueRoutines);
-				const legacyNote = status.legacy ? words.daemonLegacy(status.legacy.pid) : "";
-				const endNote =
-					!status.running && status.lastEnd ? words.daemonEnd(status.lastEnd.reason, status.lastEnd.detail) : "";
-				const lines = [
-					status.running
-						? `${words.daemonRunning(status.pid, describeDaemonBuild(status.build, OWN_DAEMON_BUILD, interfaceText().chat), counts)}${legacyNote}`
-						: `${words.daemonStopped(counts)}${endNote}${legacyNote}`,
-					...status.awayRefusals.map((refusal) => words.daemonRefused(refusal.routineId, refusal.reason)),
-					...status.reports.slice(-5).map((report) => `${new Date(report.at).toISOString()} ${report.message}`),
-				];
-				const awayService = port.backgroundLanes?.getAwayService();
-				if (awayService) lines.push(describeAwayServiceInspection(awayService.inspect()));
-				for (const channel of port.backgroundLanes?.readAwayChannelStatus() ?? [])
-					lines.push(words.channelServed(channel.name, channel.cwd, channel.servedBy, channel.awayDrafts));
-				this.host.showStatus(lines.join("\n"));
+				this.host.showStatus(describeBotDaemonStatusLines(status, port).join("\n"));
 				return;
 			}
 			case "service": {
@@ -1177,8 +1163,9 @@ export class BotTeamChatController {
 					this.host.showWarning(interfaceText().botTeam.daemonStartUnavailable);
 					return;
 				}
-				if (res.started) this.host.showStatus(res.detail);
-				else this.host.showWarning(res.detail);
+				const detail = describeBotDaemonLaunch(res.outcome, interfaceText());
+				if (res.started) this.host.showStatus(detail);
+				else this.host.showWarning(detail);
 				return;
 			}
 			case "stop": {
@@ -1187,8 +1174,9 @@ export class BotTeamChatController {
 					this.host.showWarning(interfaceText().botTeam.daemonStopUnavailable);
 					return;
 				}
-				if (res.stopped) this.host.showStatus(res.detail);
-				else this.host.showWarning(res.detail);
+				const detail = describeBotDaemonStop(res.outcome, interfaceText().botTeam);
+				if (res.stopped) this.host.showStatus(detail);
+				else this.host.showWarning(detail);
 				return;
 			}
 			case "tick": {

@@ -5,7 +5,7 @@ import type { AgentSession } from "../../core/agent-session.ts";
 import type { AgentSessionEvent } from "../../core/agent-session-contracts.ts";
 import { expandArgumentsForDisplay, expandMessageTextForDisplay } from "../../core/context/path-alias-display.ts";
 import type { FooterDataProvider } from "../../core/footer-data-provider.ts";
-import { interfaceText } from "../../core/language/interface-text.ts";
+import { englishText, interfaceText } from "../../core/language/interface-text.ts";
 import { latestAssistantCommentaryLabel } from "../../core/message-phase.ts";
 import type { ProviderAdmissionWaitEvent } from "../../core/provider-admission/gate.ts";
 import { isRecordObject } from "../../core/util/value-guards.ts";
@@ -16,6 +16,7 @@ import { type AgentMessage, retainedToolInvocation, type ToolCallRepairInfo } fr
 import type { SessionManager } from "../../kernel/node.ts";
 import { keyText } from "../../presentation/keybinding-hints.ts";
 import { theme } from "../../presentation/theme-model.ts";
+import { abortedTurnText } from "./aborted-turn.ts";
 import type { ActiveToolCallRegistry } from "./components/active-tool-call-registry.ts";
 import {
 	type ActivityLaneComponent,
@@ -480,11 +481,8 @@ export class InteractiveEventController {
 					this.updateCommentaryActivity(this.streamingMessage);
 					let errorMessage: string | undefined;
 					if (this.streamingMessage.stopReason === "aborted") {
-						const retryAttempt = this.port.getSession().retryAttempt;
-						errorMessage =
-							retryAttempt > 0
-								? `Aborted after ${retryAttempt} retry attempt${retryAttempt > 1 ? "s" : ""}`
-								: "Operation aborted";
+						// The transcript keeps this text in English, because a model reads it; the screen words it.
+						errorMessage = abortedTurnText(this.port.getSession().retryAttempt, englishText().conversation);
 						this.streamingMessage.errorMessage = errorMessage;
 					}
 					// Mark final before the last (force) render so this update's markdown transforms see

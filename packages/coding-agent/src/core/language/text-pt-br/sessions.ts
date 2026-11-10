@@ -7,6 +7,32 @@
 
 import type { InterfaceText } from "../interface-text.ts";
 
+/** A palavra do dono para cada estado do objetivo, indexada pelo identificador que o registro do objetivo guarda. */
+const GOAL_STATUS_WORDS = {
+	active: "ativo",
+	paused: "pausado",
+	blocked: "bloqueado",
+	usage_limited: "parado no limite de uso",
+	budget_limited: "parado no limite de orçamento",
+	completed: "concluído",
+	cancelled: "cancelado",
+};
+
+/** O verbo de cada ação de objetivo, para uma recusa que diz qual ação não havia objetivo para fazer. */
+const GOAL_ACTION_WORDS: Record<string, string> = {
+	pause: "pausar",
+	resume: "retomar",
+	edit: "editar",
+	cancel: "cancelar",
+	stop: "parar",
+	complete: "concluir",
+};
+
+/** A palavra de um estado, quando o texto recebe o identificador do estado no lugar da palavra. */
+function goalStatusWord(status: string): string {
+	return (GOAL_STATUS_WORDS as Record<string, string>)[status] ?? status;
+}
+
 export const SESSIONS = {
 	model: {
 		chosen: (modelId: string) => `Modelo: ${modelId}`,
@@ -64,14 +90,36 @@ export const SESSIONS = {
 		verbOverridden: "substituído",
 		head: (userGoal: string) => `Objetivo: ${userGoal}`,
 		status: (word: string) => `Estado: ${word}`,
-		statusWords: {
-			active: "ativo",
-			paused: "pausado",
-			blocked: "bloqueado",
-			usage_limited: "parado no limite de uso",
-			budget_limited: "parado no limite de orçamento",
-			completed: "concluído",
-			cancelled: "cancelado",
+		statusWords: GOAL_STATUS_WORDS,
+		/**
+		 * Uma frase por ação de objetivo recusada. A ação recusada informa o fato (`goal-refusal.ts`) e tira as palavras
+		 * daqui, então o comando do dono e o texto em inglês da mesma recusa nunca escrevem a frase duas vezes.
+		 */
+		refusal: {
+			noGoal: (action: string) => `Não existe objetivo para ${GOAL_ACTION_WORDS[action] ?? action}.`,
+			pauseNotActive: (status: string) => `O objetivo está ${status}; só objetivos ativos podem ser pausados.`,
+			resumeNotResumable: (status: string) =>
+				`O objetivo está ${status}; só é possível retomar um objetivo pausado, bloqueado ou parado no limite de uso.`,
+			editGoalCancelled: "O objetivo está cancelado; inicie um novo objetivo.",
+			editObjectiveEmpty: "O objetivo não pode ficar vazio.",
+			editObjectiveTooLong: (limit: number) => `O objetivo pode ter no máximo ${limit} caracteres.`,
+			editTokenBudgetInvalid: "O orçamento de tokens do objetivo precisa ser um inteiro positivo quando informado.",
+			goalAlreadyEnded: (status: string) => `O objetivo já está ${status}.`,
+			systemStopUnneeded: (status: string) => `O objetivo está ${status}; nenhuma parada do sistema é necessária.`,
+			systemStopReasonEmpty: "A parada de um objetivo pelo sistema exige um motivo.",
+			clearUnsupported: "Esta sessão não permite limpar objetivos.",
+			startGoalIdEmpty: "Não é possível iniciar um objetivo sem um goalId.",
+			startObjectiveEmpty: "Não é possível iniciar um objetivo sem um userGoal.",
+			startGoalIdTooLong: (limit: number) => `O goalId de um objetivo novo pode ter no máximo ${limit} caracteres.`,
+			startObjectiveTooLong: (limit: number) => `O userGoal pode ter no máximo ${limit} caracteres.`,
+			startTokenBudgetInvalid: "O tokenBudget precisa ser um inteiro positivo quando informado.",
+			/** O estado chega como o identificador que o registro guarda, e a frase em português mostra a palavra dele. */
+			unfinishedGoal: (goalId: string, status: string, newGoalId: string) =>
+				`Já existe um objetivo inacabado '${goalId}' (${goalStatusWord(status)}). Conclua, limpe ou substitua esse objetivo explicitamente antes de iniciar '${newGoalId}'.`,
+			reopenRequirementIdEmpty: "Não é possível reabrir um requisito sem um requirementId.",
+			goalAlreadyCompleted: (goalId: string) => `O objetivo '${goalId}' já está concluído.`,
+			goalAlreadyCancelled: (goalId: string) =>
+				`O objetivo '${goalId}' está cancelado; inicie um novo objetivo ou substitua por ele.`,
 		},
 		blockedReason: (reason: string) => `Motivo do bloqueio: ${reason}`,
 		tokens: (used: number, budget?: number) =>

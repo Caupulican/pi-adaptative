@@ -23,6 +23,7 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { parseLinuxProcessStat } from "../../kernel/reliability/process-termination-protection.ts";
 import { isPositiveSafePid } from "../../kernel/reliability/process-tree.ts";
+import type { InterfaceText } from "../language/interface-text.ts";
 import type { PersistentBotTeamStore } from "./persistent-bot-team-store.ts";
 
 /** The exact `-e` script the inline-script start passed for `storeFile` (unchanged across every build that used it). */
@@ -199,25 +200,32 @@ export function retireLegacyBotDaemons(store: PersistentBotTeamStore): LegacyDae
 }
 
 /**
+ * The bot-team entries that word what retiring earlier builds' daemons did.
+ *
+ * @deprecated Operator wording for retireLegacyBotDaemons; remove with it.
+ */
+export type LegacyDaemonWords = Pick<
+	InterfaceText["botTeam"],
+	| "daemonLegacyLeaseReleased"
+	| "daemonLegacyDaemonStopped"
+	| "daemonLegacyDaemonUnsignalled"
+	| "daemonLegacyDaemonSealedOut"
+>;
+
+/**
  * One sentence per earlier-generation outcome worth telling the operator; empty when there was none.
  *
  * @deprecated Operator wording for retireLegacyBotDaemons; remove with it.
  */
-export function describeLegacyDaemonRetirement(retirement: LegacyDaemonRetirement): string {
+export function describeLegacyDaemonRetirement(retirement: LegacyDaemonRetirement, words: LegacyDaemonWords): string {
 	const parts: string[] = [];
 	if (retirement.releasedTokenDaemon?.held)
-		parts.push(
-			`Released an earlier build's daemon lease${retirement.releasedTokenDaemon.pid ? ` (pid ${retirement.releasedTokenDaemon.pid})` : ""}; it exits on observing the release.`,
-		);
+		parts.push(words.daemonLegacyLeaseReleased(retirement.releasedTokenDaemon.pid));
 	if (retirement.sweep.signalled.length > 0)
-		parts.push(`Stopped an earlier build's inline-script daemon (pid ${retirement.sweep.signalled.join(", ")}).`);
+		parts.push(words.daemonLegacyDaemonStopped(retirement.sweep.signalled.join(", ")));
 	if (retirement.sweep.unsignalled.length > 0)
-		parts.push(
-			`An earlier build's inline-script daemon (pid ${retirement.sweep.unsignalled.join(", ")}) could not be signalled; it is sealed out of the store.`,
-		);
+		parts.push(words.daemonLegacyDaemonUnsignalled(retirement.sweep.unsignalled.join(", ")));
 	if (retirement.sealedOutPid !== undefined)
-		parts.push(
-			`An earlier build's inline-script daemon (pid ${retirement.sealedOutPid}) is still running; its identity was not proven${retirement.sweep.provable ? "" : " (no identity probe on this host)"}, so it was not signalled. It is sealed out of the store and idles until it is killed, the user logs out or the host restarts.`,
-		);
+		parts.push(words.daemonLegacyDaemonSealedOut(retirement.sealedOutPid, retirement.sweep.provable));
 	return parts.join(" ");
 }

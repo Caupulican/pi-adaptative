@@ -138,6 +138,33 @@ export const BOT_TEAM = {
 	awayServiceUnavailable: "O serviço sempre ativo não está disponível nesta sessão.",
 	daemonStartUnavailable: "Iniciar o daemon de ausência não está disponível.",
 	daemonStopUnavailable: "Parar o daemon de ausência não está disponível.",
+	/** O que um lançamento do daemon de ausência fez: um relatório, um diagnóstico e a tela tiram as palavras daqui. */
+	daemonLaunchUnavailable:
+		"O daemon de ausência não está disponível: este host não tem uma forma estável de iniciar o pi.",
+	daemonLaunchStarting: (pid: number | undefined, build: string) =>
+		`O daemon de ausência já está iniciando (${pid === undefined ? "" : `pid ${pid}, `}${build}).`,
+	daemonLaunchRunning: (pid: number | undefined, build: string, activeRoutines: number) =>
+		`O daemon de ausência já está em execução (pid ${pid ?? "desconhecido"}, ${build}, ${activeRoutines} ${activeRoutines === 1 ? "rotina ativa" : "rotinas ativas"}).`,
+	daemonLaunchSpawnFailed: "Não foi possível iniciar o processo do daemon de ausência.",
+	daemonLaunchStarted: (pid: number, storeFilePath: string) =>
+		`Daemon de ausência iniciado (pid ${pid}); ele observa ${storeFilePath} mesmo quando a TUI reinicia.`,
+	/** O daemon de quem um build mais novo tomou o lease. */
+	daemonReplacement: (build: string | undefined, pid: number | undefined, own: string | undefined) =>
+		`O daemon ${build === undefined ? "de um build anterior" : `do build ${build}`}${pid === undefined ? "" : ` (pid ${pid})`} foi substituído pelo build ${own ?? "desconhecido"}; ele encerra ao observar o novo lease.`,
+	/** O que uma parada do daemon de ausência fez. */
+	daemonStopReleased: (pid: number | undefined) =>
+		`Lease do daemon de ausência liberado${pid === undefined ? "" : ` (pid ${pid})`}; ele encerra assim que observar a liberação.`,
+	daemonStopNotRunning: (staleReleased: boolean) =>
+		`O daemon de ausência não está em execução${staleReleased ? "; o lease antigo foi liberado" : ""}.`,
+	/** O daemon de um build anterior: o que este lançamento retirou, ou não conseguiu retirar. */
+	daemonLegacyLeaseReleased: (pid: number | undefined) =>
+		`O lease do daemon de um build anterior${pid === undefined ? "" : ` (pid ${pid})`} foi liberado; ele encerra ao observar a liberação.`,
+	daemonLegacyDaemonStopped: (pids: string) =>
+		`O daemon de script inline de um build anterior (pid ${pids}) foi encerrado.`,
+	daemonLegacyDaemonUnsignalled: (pids: string) =>
+		`Não foi possível enviar um sinal ao daemon de script inline de um build anterior (pid ${pids}); ele não pode mais gravar no armazenamento.`,
+	daemonLegacyDaemonSealedOut: (pid: number, provable: boolean) =>
+		`O daemon de script inline de um build anterior (pid ${pid}) ainda está em execução; a identidade dele não foi confirmada${provable ? "" : " (este host não tem como verificar a identidade de um processo)"}, então nenhum sinal foi enviado. Ele não pode mais gravar no armazenamento e fica ocioso até ser encerrado, o usuário sair ou o host reiniciar.`,
 	tickDispatched: (dispatched: string) => `Tick do daemon e das rotinas disparou: ${dispatched}.`,
 	tickUnavailable: "O tick das rotinas não está disponível.",
 	/** O que um lançamento fez, nas palavras do dono: o lançamento informa os fatos, nunca a frase. */

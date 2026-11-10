@@ -67,7 +67,7 @@ export const SESSIONS = {
 		verbOverridden: "overridden",
 		head: (userGoal: string) => `Goal: ${userGoal}`,
 		status: (word: string) => `Status: ${word}`,
-		/** The owner's word for a goal status, keyed by the identifier the goal record holds. The errors of a refused goal command keep their own words. */
+		/** The owner's word for a goal status, keyed by the identifier the goal record holds. */
 		statusWords: {
 			active: "active",
 			paused: "paused",
@@ -76,6 +76,35 @@ export const SESSIONS = {
 			budget_limited: "budget-limited",
 			completed: "completed",
 			cancelled: "cancelled",
+		},
+		/**
+		 * One sentence per refused goal action. A refused action reports the fact (`goal-refusal.ts`) and takes its words
+		 * from here, so the owner's command and the English wording of the same refusal never spell the sentence twice.
+		 */
+		refusal: {
+			noGoal: (action: string) => `No goal exists to ${action}.`,
+			pauseNotActive: (status: string) => `The goal is ${status}; only active goals can be paused.`,
+			resumeNotResumable: (status: string) =>
+				`The goal is ${status}; only paused, blocked, or usage-limited goals can be resumed.`,
+			editGoalCancelled: "The goal is cancelled; start a new goal instead.",
+			editObjectiveEmpty: "Goal objective must not be empty.",
+			editObjectiveTooLong: (limit: number) => `Goal objective must be at most ${limit} characters.`,
+			editTokenBudgetInvalid: "Goal token budget must be a positive integer when provided.",
+			goalAlreadyEnded: (status: string) => `The goal is already ${status}.`,
+			systemStopUnneeded: (status: string) => `The goal is ${status}; no system stop is needed.`,
+			systemStopReasonEmpty: "System goal stop requires a reason.",
+			clearUnsupported: "This session does not support clearing goals.",
+			startGoalIdEmpty: "start requires a non-empty goalId.",
+			startObjectiveEmpty: "start requires a non-empty userGoal.",
+			startGoalIdTooLong: (limit: number) => `start goalId must be at most ${limit} characters.`,
+			startObjectiveTooLong: (limit: number) => `start userGoal must be at most ${limit} characters.`,
+			startTokenBudgetInvalid: "start tokenBudget must be a positive integer when provided.",
+			/** The status arrives as the identifier the goal record holds, which is how this sentence has always read it. */
+			unfinishedGoal: (goalId: string, status: string, newGoalId: string) =>
+				`An unfinished goal '${goalId}' already exists (${status}). Complete, clear, or explicitly replace it before starting '${newGoalId}'.`,
+			reopenRequirementIdEmpty: "reopen_requirement requires a non-empty requirementId.",
+			goalAlreadyCompleted: (goalId: string) => `Goal '${goalId}' is already completed.`,
+			goalAlreadyCancelled: (goalId: string) => `Goal '${goalId}' is cancelled; start or override with a new goal.`,
 		},
 		blockedReason: (reason: string) => `Blocked reason: ${reason}`,
 		tokens: (used: number, budget?: number) =>

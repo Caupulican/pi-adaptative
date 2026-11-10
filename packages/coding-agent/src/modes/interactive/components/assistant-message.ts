@@ -14,6 +14,7 @@ import { harnessLog } from "../../../kernel/harness-log.ts";
 import { VERIFICATION_HANDOFF_REQUIRED_ERROR } from "../../../kernel/index.ts";
 import { isModelFacingText } from "../../../presentation/plain-text.ts";
 import { getMarkdownTheme, theme } from "../../../presentation/theme-model.ts";
+import { abortedTurnScreenText } from "../aborted-turn.ts";
 import { applyMarkdownTransform, type MarkdownTransformFn, type MarkdownTransformSlot } from "./markdown-transform.ts";
 import type { ReplyByline } from "./reply-byline.ts";
 
@@ -249,10 +250,12 @@ export class AssistantMessageComponent extends Container {
 		this.hasToolCalls = hasToolCalls;
 		if (!hasToolCalls) {
 			if (message.stopReason === "aborted") {
+				// The stored text is the transcript's, in English; an abort is drawn in the interface's words.
 				const abortMessage =
-					message.errorMessage && message.errorMessage !== "Request was aborted"
+					abortedTurnScreenText(message.errorMessage) ??
+					(message.errorMessage
 						? ownerErrorText(message.errorMessage)
-						: interfaceText().conversation.operationAborted;
+						: interfaceText().conversation.operationAborted);
 				if (hasVisibleContent) {
 					this.contentContainer.addChild(new Spacer(1));
 				} else {

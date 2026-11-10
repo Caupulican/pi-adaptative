@@ -50,7 +50,7 @@ import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
 import { BotChatTranscript } from "./delegation/bot-chat-transcript.ts";
 import { type BotCreationRequest, type CreatedBotView, MAX_BOTS_PER_LEADER } from "./delegation/bot-creation.ts";
 import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./delegation/bot-daemon-launch.ts";
-import { describeLegacyDaemonRetirement, retireLegacyBotDaemons } from "./delegation/bot-daemon-legacy.ts";
+import { type BotDaemonStopResult, stopDetachedBotDaemon } from "./delegation/bot-daemon-stop.ts";
 import { BotLifecycleController } from "./delegation/bot-lifecycle-controller.ts";
 import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
 import { displayNameFor } from "./delegation/bot-naming.ts";
@@ -1821,27 +1821,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/**
-	 * Stops the detached daemon by releasing its lease; the daemon exits when it observes the release. No signal is
-	 * sent to it: a pid in the lease may belong to an unrelated process by now, while the lease token is the daemon's
-	 * own. Earlier-generation daemons are then retired as on start, signalling only an identity proven on this host.
+	 * Stops the detached daemon and reports what the stop did: the lease it renews is released, and earlier-generation
+	 * daemons are retired as on start, signalling only an identity proven on this host (see `bot-daemon-stop.ts`).
 	 */
-	stopPersistentBotDaemon(): { stopped: boolean; detail: string } {
-		const store = this.getBotTeamStore();
-		store.reload();
-		const released = store.releaseDaemonLease(undefined, this.deps.getTimers().port("routines").now());
-		const retirement = retireLegacyBotDaemons(store);
-		const legacy = describeLegacyDaemonRetirement(retirement);
-		const legacyStopped = retirement.releasedTokenDaemon?.held === true || retirement.sweep.signalled.length > 0;
-		if (released.released && released.held) {
-			return {
-				stopped: true,
-				detail: `Released the detached bot daemon's lease${released.pid !== undefined ? ` (pid ${released.pid})` : ""}; it exits as soon as it observes the release.${legacy ? ` ${legacy}` : ""}`,
-			};
-		}
-		const current = released.released
-			? "Detached bot daemon is not running; its stale lease was released."
-			: "Detached bot daemon is not running.";
-		return { stopped: legacyStopped, detail: legacy ? `${current} ${legacy}` : current };
+	stopPersistentBotDaemon(): BotDaemonStopResult {
+		return stopDetachedBotDaemon(this.getBotTeamStore(), this.deps.getTimers().port("routines"));
 	}
 
 	private createBotMessageDirectory(sender: string, attemptId: string): BotMessageDirectory {

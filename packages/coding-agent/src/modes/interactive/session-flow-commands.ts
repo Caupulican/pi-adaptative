@@ -36,6 +36,7 @@ import {
 	resumeGoal,
 	resumePersistedGoal,
 } from "../../core/goals/goal-lifecycle.ts";
+import { type GoalActionRefusal, refusedGoalActionText } from "../../core/goals/goal-refusal.ts";
 import { type GoalState, isGoalExecutionActive } from "../../core/goals/goal-state.ts";
 import { applyGoalAction, completeGoalManually } from "../../core/goals/goal-tool-core.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
@@ -580,7 +581,9 @@ async function offerRestoredGoalResume(host: SessionFlowHost): Promise<boolean> 
 	const choice = resumeChoices.find((candidate) => candidate.label === answer)?.id;
 	if (choice !== "resume") return false;
 	const resumed = resumePersistedGoal(host.session);
-	if (!resumed.ok) throw new Error(words.goalResumeFailed(resumed.error));
+	if (!resumed.ok) {
+		throw new Error(words.goalResumeFailed(refusedGoalActionText(resumed, interfaceText().sessions.goal)));
+	}
 	host.session.restoreGoalRuntimeAfterResume();
 	host.refreshAutonomyFooterStatus();
 	return true;
@@ -801,7 +804,9 @@ export interface GoalCommandHost extends GoalResumeHost {
 	showError(message: string): void;
 }
 
-export type GoalResumeResult = { ok: true; resumed: true; state: GoalState } | { ok: false; error: string };
+export type GoalResumeResult =
+	| { ok: true; resumed: true; state: GoalState }
+	| { ok: false; error: string; refusal?: GoalActionRefusal };
 
 /** Canonical persisted transition used by both `/goal resume` and session `/resume`. */
 export function resumeCurrentGoal(host: GoalResumeHost, now = new Date().toISOString()): GoalResumeResult {
@@ -901,7 +906,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 	if (input === "resume") {
 		const resumed = resumeCurrentGoal(host, now);
 		if (!resumed.ok) {
-			host.showError(resumed.error);
+			host.showError(refusedGoalActionText(resumed, words));
 			return;
 		}
 		host.showStatus(words.resumed);
@@ -911,7 +916,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 	if (input === "pause") {
 		const paused = pausePersistedGoal(host.session, now);
 		if (!paused.ok) {
-			host.showError(paused.error);
+			host.showError(refusedGoalActionText(paused, words));
 			return;
 		}
 		host.showStatus(words.paused);
@@ -928,7 +933,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 		}
 		const edited = editPersistedGoal(host.session, { userGoal: objective }, now);
 		if (!edited.ok) {
-			host.showError(edited.error);
+			host.showError(refusedGoalActionText(edited, words));
 			return;
 		}
 		// Rewriting a goal the work called complete is the owner correcting finished work.
@@ -949,7 +954,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 	if (input === "complete") {
 		const completed = completeGoalManually(current, now);
 		if (!completed.ok) {
-			host.showError(completed.error);
+			host.showError(refusedGoalActionText(completed, words));
 			return;
 		}
 		host.session.saveGoalStateSnapshot(completed.state, current ? getGoalStateRevision(current) : undefined);
@@ -961,7 +966,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 	if (input === "clear") {
 		const cleared = clearPersistedGoal(host.session, now);
 		if (!cleared.ok) {
-			host.showError(cleared.error);
+			host.showError(refusedGoalActionText(cleared, words));
 			return;
 		}
 		host.showStatus(cleared.cleared ? words.cleared : words.nothingToClear);
@@ -972,7 +977,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 	if (input === "close" || input === "cancel") {
 		const cancelled = cancelPersistedGoal(host.session, now);
 		if (!cancelled.ok) {
-			host.showError(cancelled.error);
+			host.showError(refusedGoalActionText(cancelled, words));
 			return;
 		}
 		host.showStatus(words.closed);
@@ -1003,14 +1008,14 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 		if (active.status === "blocked") {
 			const resumed = resumeGoal(active, now);
 			if (!resumed.ok) {
-				host.showError(resumed.error);
+				host.showError(refusedGoalActionText(resumed, words));
 				return;
 			}
 			active = resumed.state;
 		}
 		const reopened = applyGoalAction(active, { action: "reopen_requirement", requirementId }, now);
 		if (!reopened.ok) {
-			host.showError(reopened.error);
+			host.showError(refusedGoalActionText(reopened, words));
 			return;
 		}
 		host.session.saveGoalStateSnapshot(reopened.state, getGoalStateRevision(current));
@@ -1038,7 +1043,7 @@ export async function handleGoalCommand(host: GoalCommandHost, text: string): Pr
 		? replaceGoal({ goalId, userGoal: goalText }, now)
 		: applyGoalAction(current, { action: "start", goalId, userGoal: goalText }, now);
 	if (!started.ok) {
-		host.showError(`${started.error}${words.overrideHint}`);
+		host.showError(`${refusedGoalActionText(started, words)}${words.overrideHint}`);
 		return;
 	}
 	host.session.saveGoalStateSnapshot(started.state, current ? getGoalStateRevision(current) : undefined);

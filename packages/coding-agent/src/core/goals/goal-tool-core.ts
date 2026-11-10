@@ -7,6 +7,7 @@ import {
 	getUnprovenGoalRequirementIds,
 } from "./goal-acceptance.ts";
 import { formatGoalRecord, projectGoalRecord } from "./goal-record.ts";
+import { type GoalActionRefusal, refuseGoalAction } from "./goal-refusal.ts";
 import {
 	applyGoalEvent,
 	createGoalState,
@@ -97,6 +98,8 @@ export interface GoalActionSuccess {
 export interface GoalActionFailure {
 	ok: false;
 	error: string;
+	/** The fact `error` words, when the refusal is one the owner's commands can show. */
+	refusal?: GoalActionRefusal;
 }
 
 export type GoalActionResult = GoalActionSuccess | GoalActionFailure;
@@ -214,22 +217,24 @@ export function applyGoalAction(
 	if (action.action === "start") {
 		const goalId = action.goalId.trim();
 		const userGoal = action.userGoal.trim();
-		if (!goalId) return { ok: false, error: "start requires a non-empty goalId." };
-		if (!userGoal) return { ok: false, error: "start requires a non-empty userGoal." };
+		if (!goalId) return refuseGoalAction({ kind: "start_goal_id_empty" });
+		if (!userGoal) return refuseGoalAction({ kind: "start_objective_empty" });
 		if (goalId.length > MAX_GOAL_ID_LENGTH) {
-			return { ok: false, error: `start goalId must be at most ${MAX_GOAL_ID_LENGTH} characters.` };
+			return refuseGoalAction({ kind: "start_goal_id_too_long", limit: MAX_GOAL_ID_LENGTH });
 		}
 		if (userGoal.length > MAX_GOAL_OBJECTIVE_LENGTH) {
-			return { ok: false, error: `start userGoal must be at most ${MAX_GOAL_OBJECTIVE_LENGTH} characters.` };
+			return refuseGoalAction({ kind: "start_objective_too_long", limit: MAX_GOAL_OBJECTIVE_LENGTH });
 		}
 		if (action.tokenBudget !== undefined && (!Number.isSafeInteger(action.tokenBudget) || action.tokenBudget <= 0)) {
-			return { ok: false, error: "start tokenBudget must be a positive integer when provided." };
+			return refuseGoalAction({ kind: "start_token_budget_invalid" });
 		}
 		if (current && isGoalUnfinishedStatus(current.status)) {
-			return {
-				ok: false,
-				error: `An unfinished goal '${current.goalId}' already exists (${current.status}). Complete, clear, or explicitly replace it before starting '${goalId}'.`,
-			};
+			return refuseGoalAction({
+				kind: "unfinished_goal",
+				goalId: current.goalId,
+				status: current.status,
+				newGoalId: goalId,
+			});
 		}
 		return { ok: true, state: createGoalState({ goalId, userGoal, tokenBudget: action.tokenBudget, now }) };
 	}
@@ -408,16 +413,17 @@ function toGoalEvent(
 		}
 		case "reopen_requirement": {
 			const id = action.requirementId.trim();
-			if (!id) return { ok: false, error: "reopen_requirement requires a non-empty requirementId." };
+			if (!id) return refuseGoalAction({ kind: "reopen_requirement_id_empty" });
 			const requirement = state.requirements.find((candidate) => candidate.id === id);
 			if (!requirement) {
-				return { ok: false, error: `Unknown requirement '${id}'.` };
+				return refuseGoalAction({ kind: "reopen_requirement_unknown", requirementId: id });
 			}
 			if (requirement.status !== "blocked") {
-				return {
-					ok: false,
-					error: `Requirement '${id}' is ${requirement.status}; only blocked requirements can be reopened.`,
-				};
+				return refuseGoalAction({
+					kind: "reopen_requirement_not_blocked",
+					requirementId: id,
+					status: requirement.status,
+				});
 			}
 			return { ok: true, event: { type: "reopen_requirement", id, now } };
 		}
@@ -562,13 +568,13 @@ function toGoalEvent(
  */
 export function completeGoalManually(current: GoalState | undefined, now: string): GoalActionResult {
 	if (!current) {
-		return { ok: false, error: "No goal exists to complete." };
+		return refuseGoalAction({ kind: "no_goal", action: "complete" });
 	}
 	if (current.status === "completed") {
-		return { ok: false, error: `Goal '${current.goalId}' is already completed.` };
+		return refuseGoalAction({ kind: "goal_already_completed", goalId: current.goalId });
 	}
 	if (current.status === "cancelled") {
-		return { ok: false, error: `Goal '${current.goalId}' is cancelled; start or override with a new goal.` };
+		return refuseGoalAction({ kind: "goal_already_cancelled", goalId: current.goalId });
 	}
 	return { ok: true, state: applyGoalEvent(current, { type: "complete_goal_manually", now }) };
 }

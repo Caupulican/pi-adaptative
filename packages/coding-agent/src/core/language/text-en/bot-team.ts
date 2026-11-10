@@ -132,6 +132,31 @@ export const BOT_TEAM = {
 	awayServiceUnavailable: "The always-on service is unavailable in this session.",
 	daemonStartUnavailable: "Detached bot daemon start unavailable.",
 	daemonStopUnavailable: "Detached bot daemon stop unavailable.",
+	/** What a launch of the detached daemon did: a report, a diagnostic and the screen all word these facts. */
+	daemonLaunchUnavailable: "Detached bot daemon unavailable: this host has no stable pi launch target.",
+	daemonLaunchStarting: (pid: number | undefined, build: string) =>
+		`Detached bot daemon is already starting (${pid === undefined ? "" : `launched as pid ${pid}, `}${build}).`,
+	daemonLaunchRunning: (pid: number | undefined, build: string, activeRoutines: number) =>
+		`Detached bot daemon is already running (pid ${pid ?? "unknown"}, ${build}, ${activeRoutines} active routines).`,
+	daemonLaunchSpawnFailed: "Failed to spawn detached bot daemon process.",
+	daemonLaunchStarted: (pid: number, storeFilePath: string) =>
+		`Started detached bot daemon (pid ${pid}) watching ${storeFilePath} across TUI restarts.`,
+	/** The daemon a newer build's claim took the lease from. */
+	daemonReplacement: (build: string | undefined, pid: number | undefined, own: string | undefined) =>
+		`Replaced the daemon of ${build === undefined ? "an earlier build" : `build ${build}`}${pid === undefined ? "" : ` (pid ${pid})`} with build ${own ?? "unknown"}; it exits on observing the new lease.`,
+	/** What a stop of the detached daemon did. */
+	daemonStopReleased: (pid: number | undefined) =>
+		`Released the detached bot daemon's lease${pid === undefined ? "" : ` (pid ${pid})`}; it exits as soon as it observes the release.`,
+	daemonStopNotRunning: (staleReleased: boolean) =>
+		`Detached bot daemon is not running${staleReleased ? "; its stale lease was released" : ""}.`,
+	/** An earlier build's daemon: what this launch retired, or could not retire. */
+	daemonLegacyLeaseReleased: (pid: number | undefined) =>
+		`Released an earlier build's daemon lease${pid === undefined ? "" : ` (pid ${pid})`}; it exits on observing the release.`,
+	daemonLegacyDaemonStopped: (pids: string) => `Stopped an earlier build's inline-script daemon (pid ${pids}).`,
+	daemonLegacyDaemonUnsignalled: (pids: string) =>
+		`An earlier build's inline-script daemon (pid ${pids}) could not be signalled; it is sealed out of the store.`,
+	daemonLegacyDaemonSealedOut: (pid: number, provable: boolean) =>
+		`An earlier build's inline-script daemon (pid ${pid}) is still running; its identity was not proven${provable ? "" : " (no identity probe on this host)"}, so it was not signalled. It is sealed out of the store and idles until it is killed, the user logs out or the host restarts.`,
 	tickDispatched: (dispatched: string) => `Daemon/routine tick dispatched: ${dispatched}.`,
 	tickUnavailable: "Routine tick unavailable.",
 	/** What a launch did, worded for the owner: the launch reports the facts, never the sentence. */

@@ -4,7 +4,7 @@ import { VERSION, VERSION_SOURCE_AVAILABLE } from "../../config.ts";
 import { judgeOwner, type ProcessOwner } from "../../kernel/reliability/owner-identity.ts";
 import { isPositiveSafePid, probeProcessLiveness } from "../../kernel/reliability/process-tree.ts";
 import { comparePackageVersions } from "../../utils/version-check.ts";
-import type { InterfaceText } from "../language/interface-text.ts";
+import { englishText, type InterfaceText } from "../language/interface-text.ts";
 import {
 	MIN_ROUTINE_INTERVAL_MS,
 	nextRoutineAt,
@@ -246,8 +246,16 @@ export interface ReplacedBotDaemon {
 	readonly pid?: number;
 }
 
-export function describeDaemonReplacement(replaced: ReplacedBotDaemon, own: string | undefined): string {
-	return `Replaced the daemon of ${replaced.build === undefined ? "an earlier build" : `build ${replaced.build}`}${replaced.pid !== undefined ? ` (pid ${replaced.pid})` : ""} with build ${own ?? "unknown"}; it exits on observing the new lease.`;
+/**
+ * The daemon a newer build's claim took the lease from: it exits on observing the new lease. The caller passes the
+ * words: the English ones for the launch report and the lease record, the interface's for a line drawn on screen.
+ */
+export function describeDaemonReplacement(
+	replaced: ReplacedBotDaemon,
+	own: string | undefined,
+	words: Pick<InterfaceText["botTeam"], "daemonReplacement">,
+): string {
+	return words.daemonReplacement(replaced.build, replaced.pid, own);
 }
 
 /** Whether `value` is a daemon lease token (`crypto.randomUUID()` spelling). */
@@ -493,11 +501,10 @@ export function claimDaemonLeaseFile(
 		const replaced: ReplacedBotDaemon | undefined = held
 			? { ...(current.build !== undefined ? { build: current.build } : {}), ...(pid !== undefined ? { pid } : {}) }
 			: undefined;
-		const reports = replaced
-			? [...(current?.reports ?? []), { at: nowMs, message: describeDaemonReplacement(replaced, build) }].slice(
-					-MAX_DAEMON_REPORTS,
-				)
-			: [];
+		const report = replaced
+			? { at: nowMs, message: describeDaemonReplacement(replaced, build, englishText().botTeam) }
+			: undefined;
+		const reports = report ? [...(current?.reports ?? []), report].slice(-MAX_DAEMON_REPORTS) : [];
 		writeDaemonLease(leasePath, {
 			token,
 			startedAt: new Date(nowMs).toISOString(),
