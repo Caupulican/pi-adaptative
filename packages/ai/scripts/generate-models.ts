@@ -2514,6 +2514,9 @@ export const MODELS: Readonly<Record<string, Readonly<Record<string, Model<Api>>
 			if (model.kind) {
 				outputChunks.push(`\t\t\tkind: "${model.kind}",\n`);
 			}
+			if (model.upstream) {
+				outputChunks.push(`\t\t\tupstream: "${model.upstream}",\n`);
+			}
 			outputChunks.push(`\t\t\treasoning: ${model.reasoning},\n`);
 			if (model.defaultThinkingLevel) {
 				outputChunks.push(`\t\t\tdefaultThinkingLevel: "${model.defaultThinkingLevel}",\n`);

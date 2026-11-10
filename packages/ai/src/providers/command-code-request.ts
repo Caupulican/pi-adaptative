@@ -15,6 +15,7 @@ import type {
 	TextContent,
 	ToolResultMessage,
 } from "../types.ts";
+import { withNullableOptionals } from "../utils/nullable-optionals.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import type { ToolNameMap } from "../utils/tool-names.ts";
 import { joinTextContent, transformMessages } from "./transform-messages.ts";
@@ -169,6 +170,31 @@ function outputCap(model: Model<"command-code-generate">, settings: CommandCodeR
 	return reasoning ? model.maxTokens : Math.min(settings.maxTokens ?? model.maxTokens, model.maxTokens);
 }
 
+/**
+ * Whether the model's tools go out with nullable optional parameters. The service applies strict function schemas to
+ * its OpenAI upstream, where every declared property is required, so "not set" must be a value the model can send.
+ */
+export function sendsNullForUnset(model: Model<"command-code-generate">): boolean {
+	return model.upstream === "openai";
+}
+
+/** What the model is told where a strict upstream makes every parameter required. */
+const UNSET_PARAMETER_NOTE = "Send null for a parameter you do not set.";
+
+/** A strict upstream takes every property as required, so an optional one is sent as nullable. */
+function toolsForUpstream(
+	model: Model<"command-code-generate">,
+	context: Context,
+	toolNameMap: ToolNameMap,
+): CommandCodeRequestBody["params"]["tools"] {
+	const nullable = sendsNullForUnset(model);
+	return (context.tools ?? []).map((tool) => ({
+		name: toolNameMap.toProviderName(tool.name),
+		description: nullable ? `${tool.description} ${UNSET_PARAMETER_NOTE}` : tool.description,
+		input_schema: nullable ? withNullableOptionals(tool.parameters) : tool.parameters,
+	}));
+}
+
 /** The body of one generate request. */
 export function buildCommandCodeRequest(
 	model: Model<"command-code-generate">,
@@ -180,11 +206,7 @@ export function buildCommandCodeRequest(
 	const params: CommandCodeRequestBody["params"] = {
 		model: model.id,
 		messages: toWireMessages(transformMessages(context.messages, model, normalizeToolCallId), toolNameMap),
-		tools: (context.tools ?? []).map((tool) => ({
-			name: toolNameMap.toProviderName(tool.name),
-			description: tool.description,
-			input_schema: tool.parameters,
-		})),
+		tools: toolsForUpstream(model, context, toolNameMap),
 		max_tokens: outputCap(model, settings),
 		stream: true,
 	};

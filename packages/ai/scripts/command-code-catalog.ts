@@ -42,6 +42,20 @@ export interface CommandCodeCatalogModel {
 	inputModalities: string[] | null;
 	reasoningEfforts: string[];
 	pricing: CatalogPricing | undefined;
+	/** The model family the service forwards the model to, when its catalogue names one pi knows. */
+	upstream: Model<"command-code-generate">["upstream"];
+}
+
+/** The catalogue's family labels (`display.group`) that name a family pi knows; any other label names none. */
+const UPSTREAM_BY_GROUP: Record<string, NonNullable<Model<"command-code-generate">["upstream"]>> = {
+	OpenAI: "openai",
+	Anthropic: "anthropic",
+	Google: "google",
+};
+
+function readUpstream(display: unknown): CommandCodeCatalogModel["upstream"] {
+	const group = isRecord(display) ? display.group : undefined;
+	return typeof group === "string" && Object.hasOwn(UPSTREAM_BY_GROUP, group) ? UPSTREAM_BY_GROUP[group] : undefined;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
@@ -105,6 +119,7 @@ function readModel(value: unknown): CommandCodeCatalogModel | string {
 		inputModalities,
 		reasoningEfforts: reasoningEfforts ?? [],
 		pricing: readPricing(value.pricing),
+		upstream: readUpstream(value.display),
 	};
 }
 
@@ -182,6 +197,7 @@ export function commandCodeModels(
 			reasoning,
 			...(reasoning ? { thinkingLevelMap: toThinkingLevelMap(entry.reasoningEfforts) } : {}),
 			input: takesImages ? ["text", "image"] : ["text"],
+			...(entry.upstream ? { upstream: entry.upstream } : {}),
 			cost: toCost(entry.pricing),
 			contextWindow: entry.contextWindow,
 			maxTokens: Math.min(entry.maxOutputTokens ?? DEFAULT_MAX_OUTPUT_TOKENS, entry.contextWindow),

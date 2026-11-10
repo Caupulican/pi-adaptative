@@ -662,7 +662,7 @@ function buildReadToolDefinition(
 					(limit !== undefined && limit !== 1))
 			) {
 				throw new Error(
-					"column requires a positive integer and a single-line read using offset; omit outline/tail and use limit=1.",
+					"column requires a positive integer and a single-line read using offset. To read one line at a column, omit outline/tail and use limit=1; to read whole lines, leave column out.",
 				);
 			}
 			const result = await new Promise<{

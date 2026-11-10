@@ -20,13 +20,19 @@ import type {
 } from "../types.ts";
 import { AssistantMessageEventStream } from "../utils/event-stream.ts";
 import { parseStreamingJsonState } from "../utils/json-parse.ts";
+import { dropNullOptionals } from "../utils/nullable-optionals.ts";
 import { retryProviderRequest } from "../utils/provider-retry.ts";
 import { StreamingLineDecoder } from "../utils/streaming-lines.ts";
 import { createToolNameMap, type ToolNameMap } from "../utils/tool-names.ts";
 import { uuidv7 } from "../utils/uuid.ts";
 import { isRecord } from "../utils/value-guards.ts";
 import { readBoundedResponseText } from "./account-request.ts";
-import { buildCommandCodeRequest, COMMAND_CODE_GENERATE_ROUTE, commandCodeHeaders } from "./command-code-request.ts";
+import {
+	buildCommandCodeRequest,
+	COMMAND_CODE_GENERATE_ROUTE,
+	commandCodeHeaders,
+	sendsNullForUnset,
+} from "./command-code-request.ts";
 import {
 	applyProviderPayloadHook,
 	beginAssistantResponseStream,
@@ -267,17 +273,21 @@ class CommandCodeTurn {
 	private readonly output: AssistantMessage;
 	private readonly stream: AssistantMessageEventStream;
 	private readonly toolNameMap: ToolNameMap;
+	/** The tools' own schemas by provider tool name. */
+	private readonly toolSchemas: ReadonlyMap<string, object>;
 
 	constructor(
 		model: Model<"command-code-generate">,
 		output: AssistantMessage,
 		stream: AssistantMessageEventStream,
 		toolNameMap: ToolNameMap,
+		toolSchemas: ReadonlyMap<string, object>,
 	) {
 		this.model = model;
 		this.output = output;
 		this.stream = stream;
 		this.toolNameMap = toolNameMap;
+		this.toolSchemas = toolSchemas;
 	}
 
 	/** Reads one post's answer; returns the service's own finish reason. */
@@ -356,6 +366,9 @@ class CommandCodeTurn {
 
 	private toolCall(event: ServiceEvent): void {
 		const input = readToolInput(event.input ?? event.args);
+		const schema = typeof event.toolName === "string" ? this.toolSchemas.get(event.toolName) : undefined;
+		// An OpenAI-family model was asked to send null for a parameter it leaves unset; the caller never sees those.
+		if (sendsNullForUnset(this.model) && schema) input.arguments = dropNullOptionals(input.arguments, schema);
 		const toolCall: ToolCall = {
 			type: "toolCall",
 			id: typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : `call_${uuidv7()}`,
@@ -434,7 +447,13 @@ export const streamCommandCode: StreamFunction<"command-code-generate", CommandC
 				...model.headers,
 				...options?.headers,
 			});
-			const turn = new CommandCodeTurn(model, output, stream, toolNameMap);
+			const turn = new CommandCodeTurn(
+				model,
+				output,
+				stream,
+				toolNameMap,
+				new Map((context.tools ?? []).map((tool) => [toolNameMap.toProviderName(tool.name), tool.parameters])),
+			);
 			for (let post = 0; ; post++) {
 				const response = await retryProviderRequest(
 					() => postGenerate(model, headers, body, options?.signal),
