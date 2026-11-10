@@ -6,6 +6,7 @@
  */
 
 import { pieceOf, px } from "./geometry.mjs";
+import { isLinked, noteLines, tableBody, tableRows } from "./instruments.mjs";
 import { activityMarks, drawMechanism } from "./mechanisms.mjs";
 import {
 	CHIP_RADIUS,
@@ -81,23 +82,15 @@ function tallyWords(scene, node, round) {
 	return words(scene, place.x, place.y, SMALL_TEXT_SIZE * u, [{ text: roundText(node.text, round), fill: scene.theme.dim }]);
 }
 
-/** A note's lines: words alone, so the station is its text. */
-function noteWords(scene, node, round) {
-	const u = scene.unit;
-	const { box } = node.shape;
-	return node.lines
-		.map((text, index) => words(scene, box.x, box.y + (index + 0.75) * 2.5 * u, TEXT_SIZE * u, [{ text: roundText(text, round), fill: scene.theme.dim }]))
-		.join("");
-}
-
 /**
  * The words a station writes inside its body, for the live layer of a film whose rounds change them. The body writes
  * them in its own order, through the same helpers, when it draws a film of one round.
  */
-function nodeWords(scene, node, round) {
+function nodeWords(scene, node, round, state) {
 	if (node.kind === "chain") return node.shape.chips.map((chip) => chipWords(scene, chip, round)).join("");
 	if (node.kind === "tally") return tallyWords(scene, node, round);
-	if (node.kind === "note") return noteWords(scene, node, round);
+	if (node.kind === "note") return noteLines(scene, node, round, state);
+	if (node.kind === "table") return tableRows(scene, node, round, state);
 	return "";
 }
 
@@ -195,7 +188,11 @@ function nodeBody(scene, node, round) {
 			if (round !== undefined) out += tallyWords(scene, node, round);
 			break;
 		case "note":
-			if (round !== undefined) out += noteWords(scene, node, round);
+			// A note that follows a station lights with it, so its words belong to the live layer.
+			if (round !== undefined && !isLinked(node)) out += noteLines(scene, node, round);
+			break;
+		case "table":
+			out += tableBody(scene, node);
 			break;
 		default:
 			break;
@@ -478,9 +475,11 @@ export function drawLive(scene, state) {
 	const u = scene.unit;
 	const { theme } = scene;
 	let out = "";
-	// A film of several rounds writes its stations' words here, with the tokens of the round it is in.
+	// A film of several rounds writes its stations' words here, with the tokens of the round it is in; a film of one
+	// round writes here only the words that light with the circuit.
 	if (scene.rounds > 1)
-		out += scene.nodes.map((node) => nodeWords(scene, node, state.round) + nodeLabels(scene, node, state.round)).join("");
+		out += scene.nodes.map((node) => nodeWords(scene, node, state.round, state) + nodeLabels(scene, node, state.round)).join("");
+	else out += scene.nodes.filter(isLinked).map((node) => nodeWords(scene, node, 0, state)).join("");
 	for (const node of scene.nodes) {
 		const stays = state.stays.get(node.id) ?? [];
 		if (node.kind === "source") out += sourcePulses(scene, node, state);

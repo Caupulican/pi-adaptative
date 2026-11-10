@@ -7,7 +7,8 @@
  * does: `source` (authors of work), `queue` (items wait in slots), `worker` (one item at a time, in phases), `rail` (the
  * record of what landed, newest first), `sweep` (a check that runs on a schedule), `chain` (named steps in order, also
  * as one row of a list with its name at the left), `tally` (a count shown as boxes), `note` (words only) and `trial`
- * (several candidates, each scored, one kept; see `trial.mjs`).
+ * (several candidates, each scored, one kept; see `trial.mjs`). The instruments, which hold no item and have no port
+ * (`table`, and the lines of a `note` that follow a station), are read and shaped in `instruments.mjs`.
  */
 
 import { cornerPath, curvePath } from "./geometry.mjs";
@@ -25,11 +26,13 @@ import {
 	textWidth,
 	widestRoundText,
 } from "./metrics.mjs";
+import { NOTE_SIZES, readLinkedLines, readTable, resolveLinks, shapeTable } from "./instruments.mjs";
+import { isRecord, readNumber, readOneOf, readText, readTextList } from "./read.mjs";
 import { resolveTheme } from "./theme.mjs";
 import { shapeTrial, TRIAL_KEEPS, TRIAL_PHASES, trialCaptionLength } from "./trial.mjs";
 
 export const TIERS = ["live", "next", "later"];
-export const NODE_KINDS = ["source", "queue", "worker", "trial", "rail", "sweep", "chain", "tally", "note"];
+export const NODE_KINDS = ["source", "queue", "worker", "trial", "rail", "sweep", "chain", "tally", "note", "table"];
 /** The stations that hold an item for a stay; a queue holds one per slot, the others one at a time. */
 const HOLDING_KINDS = ["queue", "worker", "trial"];
 export const CHAIN_MODES = ["step", "fill", "together"];
@@ -41,14 +44,13 @@ const ID = /^[a-z][a-z0-9-]{0,31}$/;
 const ENDPOINT = /^([a-z][a-z0-9-]{0,31})(?::(\d+))?(?:\.(in|out|top|bottom))?$/;
 
 /** Rows under a station kept for what it says about the item it holds (a worker: its lane, then its phase). */
-const CAPTION_ROWS = { source: 0, queue: 0, worker: 2, trial: 1, rail: 0, sweep: 0, chain: 0, tally: 0, note: 0 };
+const CAPTION_ROWS = { source: 0, queue: 0, worker: 2, trial: 1, rail: 0, sweep: 0, chain: 0, tally: 0, note: 0, table: 0 };
 
 /** The rows a station keeps under its body: its kind's, and for a rail whose landings carry marks one row for them. */
 export function captionRows(node) {
 	return CAPTION_ROWS[node.kind] + (node.marked ? 1 : 0);
 }
 const MIN_TRAVEL_SECONDS = 0.4;
-const MAX_TEXT = 96;
 
 export class SpecError extends Error {
 	constructor(problems) {
@@ -56,51 +58,6 @@ export class SpecError extends Error {
 		this.name = "SpecError";
 		this.problems = problems;
 	}
-}
-
-function isRecord(value) {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function readNumber(value, path, problems, { min, max, fallback, integer = false }) {
-	if (value === undefined && fallback !== undefined) return fallback;
-	if (typeof value !== "number" || !Number.isFinite(value) || (integer && !Number.isInteger(value))) {
-		problems.push(`${path}: must be ${integer ? "a whole number" : "a number"}`);
-		return fallback ?? min;
-	}
-	if (value < min || value > max) {
-		problems.push(`${path}: must be between ${min} and ${max}`);
-		return Math.min(Math.max(value, min), max);
-	}
-	return value;
-}
-
-function readText(value, path, problems, required = false) {
-	if (value === undefined && !required) return undefined;
-	if (typeof value !== "string" || value.trim() === "" || value.length > MAX_TEXT) {
-		problems.push(`${path}: must be text of 1 to ${MAX_TEXT} characters`);
-		return undefined;
-	}
-	return value.replace(/\s+/g, " ").trim();
-}
-
-function readTextList(value, path, problems, max) {
-	if (value === undefined) return [];
-	const list = typeof value === "string" ? [value] : value;
-	if (!Array.isArray(list) || list.length > max) {
-		problems.push(`${path}: must be a list of at most ${max} lines of text`);
-		return [];
-	}
-	return list.flatMap((entry, index) => readText(entry, `${path}[${index}]`, problems, true) ?? []);
-}
-
-function readOneOf(value, allowed, path, problems, fallback) {
-	if (value === undefined && fallback !== undefined) return fallback;
-	if (!allowed.includes(value)) {
-		problems.push(`${path}: must be one of ${allowed.join(", ")}`);
-		return fallback ?? allowed[0];
-	}
-	return value;
 }
 
 /** Where a station's words start on one side: at its left edge, or after the wire that meets it on that side. */
@@ -179,10 +136,14 @@ function shapeNode(node, x, y, u, rounds) {
 			const first = chips[0] ?? box;
 			return { box, chips, ports: { ...boxPorts(box, u), in: { x: first.x, y: y + 1.5 * u, side: "in" } } };
 		}
+		case "table":
+			return shapeTable(node, x, y, u, rounds);
 		default: {
-			const size = TEXT_SIZE * u;
+			// A note: its lines at its size, the line step growing with the size in the same ratio.
+			const scale = node.size === "text" ? 1 : NOTE_SIZES[node.size] / TEXT_SIZE;
+			const size = TEXT_SIZE * u * scale;
 			const w = Math.max(0, ...node.lines.map((line) => textWidth(line, size, rounds)));
-			return { box: { x, y, w, h: Math.max(node.lines.length, 1) * LINE_STEP * u }, ports: {} };
+			return { box: { x, y, w, h: Math.max(node.lines.length, 1) * LINE_STEP * u * scale }, ports: {} };
 		}
 	}
 }
@@ -261,7 +222,12 @@ function readNode(raw, path, bands, problems, rounds, marked) {
 		node.tag = readText(raw.tag, `${path}.tag`, problems);
 		node.lead = raw.lead === undefined ? undefined : readNumber(raw.lead, `${path}.lead`, problems, { min: 4, max: 120 });
 	} else if (kind === "note") {
-		node.lines = readTextList(raw.lines, `${path}.lines`, problems, 6);
+		const lines = readLinkedLines(raw.lines, `${path}.lines`, problems, 6);
+		node.lines = lines.texts;
+		node.links = lines.links;
+		node.size = readOneOf(raw.size, Object.keys(NOTE_SIZES), `${path}.size`, problems, "text");
+	} else if (kind === "table") {
+		readTable(raw, node, path, problems);
 	}
 	return node;
 }
@@ -762,6 +728,7 @@ export function compileScene(spec) {
 		const run = readRun(raw, `runs[${index}]`, scene, problems);
 		if (run) scene.runs.push(run);
 	}
+	resolveLinks(scene, problems);
 	assignPlaces(scene, problems);
 	checkLayout(scene, problems);
 	return { scene, problems };

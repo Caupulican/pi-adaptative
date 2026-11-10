@@ -24,6 +24,8 @@ The owner watches one loop and can say what the system does, where it can fail a
 
 A process is drawn as a circuit. Stations are joined by wires. Work items travel the wires, wait or are worked on inside stations, and end on a record or go back to where they came from. Everything repeats on one loop, so any frame can be drawn alone and the last frame meets the first. A loop may repeat in rounds: the same circuit runs again, a counter says which round it is, and a rail keeps what earlier rounds landed. Parts that are built but not proven, or only planned, sit in their own bands below, drawn dashed and then dotted. At rest the picture is line and text; a state colour appears only where something happens.
 
+The same beat can show in more than one notation: a line of words or a row of a table lights while the station it names is busy. Use that when the owner must connect the picture to a procedure or to who does what.
+
 Stations are a closed set, each shaped by what it does. Choose by function, not by look:
 
 | Station | What it shows |
@@ -36,7 +38,8 @@ Stations are a closed set, each shaped by what it does. Choose by function, not 
 | `sweep` | A check that runs on a schedule. |
 | `chain` | Named steps in order; as a list row it carries a tag and a name at the left. Modes: `step`, `fill`, `together`. |
 | `tally` | A count shown as boxes, some crossed. |
-| `note` | Words only. |
+| `note` | Words only. A line can light while a station works; a note can be the film's title or its closing sentence. |
+| `table` | Rows of short facts, or ordered steps with numbers. A row can light while a station works. |
 
 ### Procedure
 

@@ -41,7 +41,8 @@ Every station has `id` (lowercase letters, digits, hyphens), `kind`, `band`, `at
 | `sweep` | `period` seconds for one pass (rounded so whole passes fit the loop) | 14 by 4 | `in`, `out`, `top`, `bottom` |
 | `chain` | `items` (up to 8), `pulse` seconds for one pass, `mode`: `step` (one lit at a time), `fill` (they stay lit until the pass ends), `together`; `tag` and `lead` (columns kept at the left for the tag, name and note) make it a list row | chips sized to their words, 3 high | `in`, `out`, `top`, `bottom` |
 | `tally` | `boxes` 1 to 12, `crossed`, `text` | 2.2 per box plus the words | none |
-| `note` | `lines` (up to 6) | the words | none |
+| `note` | `lines` (up to 6): each a text, or `{ "text", "when" }` to light the line while a station is busy; `size`: `text` (default), `lede` or `title` | the words | none |
+| `table` | `columns`: up to 4 header words (none: no header); `rows`: 1 to 8, each `{ "cells", "when" }`; `numbered`: `true` adds a column of row numbers | the cells, one line per row | none |
 
 A worker keeps two rows under its body for what it says about the item it holds (its lane, then its phase); its `sub` lines start after them. A trial keeps one row (its phase, then the kept candidate and its score). A rail whose landings carry a `mark` keeps one row under its line for the marks; a wire cannot meet such a rail from below. `top` and `bottom` ports sit 2.5 units in from the left edge, and the station's words on that side start after the wire.
 
@@ -77,6 +78,22 @@ Each step is one hop along a declared wire and what happens on arrival:
 | `tone` | The item's colour role from this step on. |
 
 A journey ends when it reaches a `rail` (the item becomes the newest dot), a `source` emitter (the emitter lights), or after its last stay (the item fades inside the station). A queue holds as many items as it has slots, and a worker or a trial one; the tool refuses a spec that asks for more.
+
+## Linked views
+
+A line of a `note` and a row of a `table` can follow a station: `"when": "<station id>"`. It lights while that station is busy: a `queue`, a `worker` or a `trial` while it holds an item, a `source` while its emitter pulses, a `rail` while the ring of a landing shows. A lit line gets a soft wash and brighter ink, so the same beat shows in the circuit and in words. A `sweep`, a `chain`, a `tally`, a `note` and a `table` cannot be named.
+
+```json
+{ "id": "steps", "kind": "table", "band": "views", "at": [0, 4], "label": "One round", "numbered": true,
+  "rows": [
+    { "cells": ["propose 8 edits"], "when": "editor" },
+    { "cells": ["score each edit"], "when": "candidates" }
+  ] }
+```
+
+A table with `numbered` and one column is a list of ordered steps. A table with `columns` is a small table of facts: its first column is the row's name. Keep cells short: a column is as wide as its widest cell.
+
+A note's `size` gives a film a title and a closing sentence: `title` is bold, `lede` is a little larger than the text. Use one of each at most.
 
 ## Trials
 
