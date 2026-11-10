@@ -53,6 +53,7 @@ import type {
 	WarningSettings,
 	WorkerDelegationSettings,
 } from "../../core/settings/settings-schema.ts";
+import type { PlainSettingKey } from "../../core/settings-manager.ts";
 import type { SystemOneProviderChoice } from "../../core/system-one/access.ts";
 import { describeSystemOneAccess } from "../../core/system-one/access.ts";
 import { plainLabel } from "../../presentation/plain-text.ts";
@@ -129,6 +130,7 @@ export interface SettingsSelectorFlowSettingsSource {
 		loopMode?: SystemOneSettings["loopMode"];
 		completionProfile?: SystemOneSettings["completionProfile"];
 	};
+	getPlain<K extends PlainSettingKey>(key: K): Settings[K];
 	getTheme(): string | undefined;
 	getTransport(): TransportSetting;
 	getTreeFilterMode(): "default" | "no-tools" | "user-only" | "labeled-only" | "all";
@@ -138,6 +140,7 @@ export interface SettingsSelectorFlowSettingsSource {
 	isResourceAllowedByProfile(kind: ResourceProfileKind, resourcePath: string, baseDir?: string): boolean;
 	setAutoLearnSettings(settings: AutoLearnSettings, scope?: SettingsScope): void;
 	setAutocompleteMaxVisible(maxVisible: number): void;
+	setPlain<K extends PlainSettingKey>(key: K, value: Settings[K]): void;
 	setBlockImages(blocked: boolean): void;
 	setClearOnShrink(enabled: boolean): void;
 	setCollapseChangelog(collapse: boolean): void;
@@ -266,6 +269,7 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 				thinkingLevel: host.session.thinkingLevel,
 				availableThinkingLevels: host.session.getAvailableThinkingLevels(),
 				currentTheme: host.settingsManager.getTheme() || "dark",
+				language: host.settingsManager.getPlain("language") ?? "auto",
 				// The picker offers only themes the active profile permits (no-bypass). The theme
 				// registry/renderer keeps the full set, so an already-applied theme still renders
 				// even if the profile would block re-selecting it.
@@ -399,6 +403,9 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 					if (!result.success) {
 						host.showError(`Failed to load theme "${themeName}": ${result.error}\nFell back to dark theme.`);
 					}
+				},
+				onLanguageChange: (language) => {
+					host.settingsManager.setPlain("language", language);
 				},
 				onThemePreview: (themeName) => {
 					const result = setTheme(themeName, true);

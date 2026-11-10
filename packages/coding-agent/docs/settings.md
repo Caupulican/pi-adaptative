@@ -64,6 +64,7 @@ The inspected Codex catalog supplies tier availability, not Ultrafast dollar pri
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `theme` | string | `"dark"` | Theme name (`"dark"`, `"light"`, or custom) |
+| `language` | string | `"auto"` | Language of the interface: `"auto"` follows the system locale, otherwise `"en"` or `"pt-BR"`. See [Interface language](language.md) |
 | `quietStartup` | boolean | `true` | Hide the startup banner and the loaded-resources listing; `false` shows them |
 | `projectTrust` | string | `"trusted"` | Global only. What a project with no saved `/trust` decision gets: `"trusted"` loads its `.pi` settings, extensions and instructions, `"untrusted"` ignores them. A saved `/trust` decision wins, and `--approve` / `--no-approve` win for one run. `/trust` applies to the running session |
 | `collapseChangelog` | boolean | `false` | Show condensed changelog after updates |

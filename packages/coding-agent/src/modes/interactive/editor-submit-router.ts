@@ -8,7 +8,7 @@ import { formatSessionAutonomyStatus } from "../../core/autonomy-status/format.t
 import { type OwnerTextRange, trimOwnerWords } from "../../core/learning/owner-evidence-ledger.ts";
 import { namedPlanViews } from "../../core/plan/plan-views-named.ts";
 import { latestProofSheet } from "../../core/proof/review-gauge.ts";
-import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
+import { BUILTIN_SLASH_COMMANDS, type BuiltinSlashCommand } from "../../core/slash-commands.ts";
 import { keyText } from "../../presentation/keybinding-hints.ts";
 import type { AuthDialogsController } from "./auth-dialogs-controller.ts";
 import type { BotTeamChatController } from "./bot-team-chat-controller.ts";
@@ -229,7 +229,7 @@ export class EditorSubmitRouter {
 			this.host.session.isCompacting ||
 			this.host.session.isRetrying ||
 			this.host.session.getForegroundActivity().epoch !== undefined;
-		const builtin = queueAsFollowUp
+		const builtin: BuiltinSlashCommand | undefined = queueAsFollowUp
 			? undefined
 			: BUILTIN_SLASH_COMMANDS.find(
 					(command) => text === `/${command.name}` || text.startsWith(`/${command.name} `),

@@ -77,6 +77,10 @@
           "path": "themes.md"
         },
         {
+          "title": "Interface Language",
+          "path": "language.md"
+        },
+        {
           "title": "Pi Packages",
           "path": "packages.md"
         },

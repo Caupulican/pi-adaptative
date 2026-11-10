@@ -29,7 +29,7 @@ export interface LoadedResourcesViewOptions {
 }
 
 function getBuiltInCommandConflictDiagnostics(host: LoadedResourcesViewHost): ResourceDiagnostic[] {
-	const builtinNames = new Set(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
+	const builtinNames = new Set<string>(BUILTIN_SLASH_COMMANDS.map((command) => command.name));
 	return host.extensionRunner
 		.getRegisteredCommands()
 		.filter((command) => builtinNames.has(command.name))

@@ -1,4 +1,5 @@
 import { randomUUID } from "node:crypto";
+import { interfaceText } from "../language/interface-text.ts";
 import type {
 	ActiveActor,
 	AdaptationProjection,
@@ -60,7 +61,7 @@ export class OperatorProjectionController {
 			// Control starts with the root loop: no objective exists yet, so nothing else can own the
 			// next transition.
 			control: init.control ?? { owner: "root", state: "deciding" },
-			active_actors: init.activeActors ?? [{ id: "root", kind: "root", label: "Root orchestrator" }],
+			active_actors: init.activeActors ?? [{ id: "root", kind: "root", label: interfaceText().status.rootActor }],
 			adaptation: init.adaptation ?? null,
 			proof: init.proof ?? { satisfied: 0, total: 1, failing: 0, pending: 1 },
 			context: init.context ?? null,

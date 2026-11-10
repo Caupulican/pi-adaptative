@@ -11,6 +11,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { GoalContinuationDecision } from "../goals/goal-continuation-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import { DecisionStageLog, type DecisionStageLogView, type DecisionStageSink } from "./decision-stage-log.ts";
 import { OperatorEventController } from "./operator-event-controller.ts";
@@ -125,9 +126,6 @@ const ROUTE_ROOT_EXECUTES: ReadonlySet<string> = new Set([
 	"replan",
 	"escalate_capability",
 ]);
-
-/** The compact fast-iteration indicator, shown without listing every skipped check. */
-export const FAST_ITERATION_INDICATOR = "fast iteration · targeted validation";
 
 /**
  * Owns the session's one projection controller and refreshes it from canonical state.
@@ -471,26 +469,27 @@ export class SessionOperatorProjection {
 		blocker: string | undefined,
 	): string {
 		if (blocker) return blocker;
+		const text = interfaceText().status;
 		const fast = this.deps.isFastIteration() && (phase === "build" || phase === "adapt");
-		const suffix = fast ? ` · ${FAST_ITERATION_INDICATOR}` : "";
+		const suffix = fast ? ` · ${text.fastIteration}` : "";
 		switch (phase) {
 			case "understand":
-				if (!goal) return "Ready for operator instructions";
-				return isDormantGoal(goal) ? `Objective ${goal.status.replace("_", " ")}` : `Framing ${goal.userGoal}`;
+				if (!goal) return text.ready;
+				return isDormantGoal(goal) ? text.dormantGoal(goal.status) : text.framing(goal.userGoal);
 			case "plan":
-				return `Decomposing ${goal?.userGoal ?? "the objective"}`;
+				return text.decomposing(goal?.userGoal);
 			case "build":
-				return `${lanes[0]?.label ?? (goal ? "Implementing" : "Working the operator's turn")}${suffix}`;
+				return `${lanes[0]?.label ?? (goal ? text.implementing : text.operatorTurn)}${suffix}`;
 			case "adapt":
-				return `${adaptation?.label ?? "Adapting the runtime"}${suffix}`;
+				return `${adaptation?.label ?? text.adapting}${suffix}`;
 			case "verify":
-				return "Running acceptance proof";
+				return text.runningProof;
 			case "deliver":
-				return "Delivering authorized changes";
+				return text.delivering;
 			case "done":
-				return `Completed ${goal?.userGoal ?? "the objective"}`;
+				return text.completed(goal?.userGoal);
 			default:
-				return "Working";
+				return text.working;
 		}
 	}
 
@@ -501,26 +500,27 @@ export class SessionOperatorProjection {
 		blocker: string | undefined,
 	): string {
 		if (blocker) return blocker;
-		if (phase === "understand" && (!goal || isDormantGoal(goal))) return "Standing by for user directives";
-		if (phase === "verify") return `${proof.satisfied}/${proof.total} acceptance criteria satisfied`;
-		if (phase === "done") return `Delivered with ${proof.satisfied}/${proof.total} criteria satisfied`;
-		return goal?.userGoal ?? "Advancing the objective";
+		const text = interfaceText().status;
+		if (phase === "understand" && (!goal || isDormantGoal(goal))) return text.standingBy;
+		if (phase === "verify") return text.criteriaSatisfied(proof.satisfied, proof.total);
+		if (phase === "done") return text.deliveredWith(proof.satisfied, proof.total);
+		return goal?.userGoal ?? text.advancing;
 	}
 
 	private describeNext(phase: OperatorPhase, proof: ProofProgress): string | null {
 		if (phase === "build" || phase === "adapt") {
-			return proof.pending > 0 ? `verify ${proof.pending} open criteria` : "verify";
+			return interfaceText().status.nextVerify(proof.pending);
 		}
-		if (phase === "verify") return "deliver";
+		if (phase === "verify") return interfaceText().status.nextDeliver;
 		return null;
 	}
 
 	private resolveActors(lanes: readonly LiveLaneView[]): readonly ActiveActor[] {
-		if (lanes.length === 0) return [{ id: "root", kind: "root", label: "Root orchestrator" }];
+		if (lanes.length === 0) return [{ id: "root", kind: "root", label: interfaceText().status.rootActor }];
 		return lanes.map((lane) => ({
 			id: lane.laneId,
 			kind: lane.type === "research" ? "specialist" : "worker",
-			label: lane.label ?? `Worker ${lane.laneId.slice(0, 8)}`,
+			label: lane.label ?? interfaceText().status.workerActor(lane.laneId.slice(0, 8)),
 			...(lane.startedAt ? { elapsedMs: Math.max(0, Date.now() - Date.parse(lane.startedAt)) } : {}),
 		}));
 	}

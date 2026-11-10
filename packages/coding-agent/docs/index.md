@@ -60,6 +60,7 @@ For the full first-run flow, see [Quickstart](quickstart.md).
 - [Self-adaptation](self-adaptation.md) - draft live skills/extensions and run evidence-backed Pi harness improvement loops.
 - [Prompt templates](prompt-templates.md) - reusable prompts that expand from slash commands.
 - [Themes](themes.md) - built-in and custom terminal themes.
+- [Interface language](language.md) - English and Brazilian Portuguese, and how the language is chosen.
 - [Pi packages](packages.md) - bundle and share extensions, skills, prompts, and themes.
 - [Custom models](models.md) - add model entries for supported provider APIs.
 - [LFM3 local models](lfm3.md) - install and evaluate the text, vision, audio, and omni models.

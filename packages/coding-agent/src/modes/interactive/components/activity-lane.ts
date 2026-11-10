@@ -2,6 +2,7 @@ import type { Component } from "@caupulican/pi-tui";
 import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
 import type { LaneRecord } from "../../../core/autonomy/lane-tracker.ts";
 import { type GoalState, isGoalExecutionActive, isGoalUnfinishedStatus } from "../../../core/goals/goal-state.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { PlanView } from "../../../core/plan/plan-view.ts";
 import { runningRootPlan } from "../../../core/plan/plan-view.ts";
 import type { TaskStep, TaskStepsState } from "../../../core/tasks/task-state.ts";
@@ -129,7 +130,9 @@ function taskLabel(step: TaskStep, state: TaskStepsState): string {
 	const activeIndex = state.steps.findIndex((candidate) => candidate.id === step.id);
 	const archived = state.archive.completed + state.archive.cancelled;
 	const position = Math.min(total, archived + Math.max(0, activeIndex) + 1);
-	const prefix = step.status === "blocked" ? "Blocked" : step.status === "pending" ? "Next" : "Step";
+	const activity = interfaceText().frame.activity;
+	const prefix =
+		step.status === "blocked" ? activity.blocked : step.status === "pending" ? activity.next : activity.step;
 	const content = step.status === "in_progress" ? (step.activeForm ?? step.content) : step.content;
 	return boundedLabel(`${prefix} ${position}/${total} · ${content}`);
 }
@@ -157,7 +160,9 @@ function projectTaskState(state: TaskStepsState | undefined): ActivityLaneProjec
 				id: `terminal:task:${step.id}:${step.status}:${step.updatedAt}`,
 				kind: "task",
 				label: boundedLabel(
-					step.status === "completed" ? `Completed · ${step.content}` : `Cancelled · ${step.content}`,
+					step.status === "completed"
+						? interfaceText().frame.activity.completed(step.content)
+						: interfaceText().frame.activity.cancelled(step.content),
 				),
 				status: step.status === "completed" ? "success" : "neutral",
 			}),
@@ -176,7 +181,7 @@ function projectPlanState(plans: readonly PlanView[] | undefined): ActivityLaneP
 				id: `plan:${plan.planId}`,
 				kind: "task",
 				label: boundedLabel(
-					`${needsOwner ? "Needs you" : "Plan"} ${plan.counts.settled}/${plan.counts.total} · ${plan.title}`,
+					`${needsOwner ? interfaceText().frame.activity.needsYou : interfaceText().frame.activity.plan} ${plan.counts.settled}/${plan.counts.total} · ${plan.title}`,
 				),
 				status: needsOwner ? "waiting" : "active",
 			},
@@ -200,7 +205,7 @@ function projectGoalState(state: GoalState | undefined): ActivityLaneProjection 
 				{
 					id: `goal:${state.goalId}`,
 					kind: "goal",
-					label: `${goalActive ? "active" : state.status.replaceAll("_", " ")}${metricsSuffix}`,
+					label: `${goalActive ? interfaceText().frame.activity.goalActive : state.status.replaceAll("_", " ")}${metricsSuffix}`,
 					status: goalActive ? "active" : "waiting",
 					...(state.createdAt ? { originAt: state.createdAt } : {}),
 				},
@@ -214,7 +219,7 @@ function projectGoalState(state: GoalState | undefined): ActivityLaneProjection 
 			{
 				id: `terminal:goal:${state.goalId}:${state.status}:${state.updatedAt}`,
 				kind: "goal",
-				label: `${state.status === "completed" ? "Goal achieved" : "Goal closed"}${metricsSuffix}`,
+				label: `${state.status === "completed" ? interfaceText().frame.activity.goalAchieved : interfaceText().frame.activity.goalClosed}${metricsSuffix}`,
 				status: state.status === "completed" ? "success" : "neutral",
 			},
 		],
@@ -240,11 +245,11 @@ function projectLaneRecords(records: readonly LaneRecord[]): ActivityLaneProject
 				tag:
 					record.type === "managed-worker"
 						? record.status === "queued"
-							? "managed agent queued"
-							: "managed agent running"
+							? interfaceText().frame.activity.managedAgentQueued
+							: interfaceText().frame.activity.managedAgentRunning
 						: record.status === "queued"
-							? "agent queued"
-							: "agent running",
+							? interfaceText().frame.activity.agentQueued
+							: interfaceText().frame.activity.agentRunning,
 				...(record.startedAt ? { originAt: record.startedAt } : {}),
 			}),
 		);
@@ -507,7 +512,9 @@ export function renderActivityLaneLine(
 	const elapsed = (item: ActivityLaneItem | undefined): string => {
 		if (item?.startedAt === undefined || now === undefined) return "";
 		const total = formatElapsed((item.completedAt ?? now) - item.startedAt);
-		const kind = item.clockKind === "observed" ? "observed " : item.timingRole === "oldest" ? "oldest " : "";
+		const activity = interfaceText().frame.activity;
+		const kind =
+			item.clockKind === "observed" ? activity.observed : item.timingRole === "oldest" ? activity.oldest : "";
 		return ` (${kind}${total})`;
 	};
 
@@ -526,8 +533,8 @@ export function renderActivityLaneLine(
 		let mode: ActivityStatusMode | undefined;
 		if (!slots.overlay) {
 			if (slots.running.some((item) => item.phase === "worker-wait")) mode = "worker-wait";
-			else if (slots.turn?.label === "Thinking...") mode = "thinking";
-			else if (slots.turn?.label === "Working...") mode = "working";
+			else if (slots.turn?.label === interfaceText().frame.working.thinkingMessage) mode = "thinking";
+			else if (slots.turn?.label === interfaceText().frame.working.workingMessage) mode = "working";
 			else if (backgroundSubject?.id.startsWith("worker:") && isActivityRunning(backgroundSubject.status))
 				mode = "workers";
 		}
@@ -541,13 +548,15 @@ export function renderActivityLaneLine(
 				item.startedAt !== undefined &&
 				now !== undefined
 			) {
-				const kind = item.clockKind === "observed" ? "observed " : "";
+				const kind = item.clockKind === "observed" ? interfaceText().frame.activity.observed : "";
 				suffix = ` (${kind}${formatElapsed((item.completedAt ?? now) - item.startedAt)})`;
 			}
 			if (!label) return suffix.trim();
 			const labelWidth = Math.max(0, Math.min(turnTextMax, available) - visibleWidth(suffix));
 			if (mode) label = activityStatusPhrase(mode);
-			if (safeWidth < 24 && visibleWidth(label) > labelWidth) label = status === "waiting" ? "Waiting" : "Working";
+			if (safeWidth < 24 && visibleWidth(label) > labelWidth)
+				label =
+					status === "waiting" ? interfaceText().frame.activity.waiting : interfaceText().frame.activity.working;
 			const renderedLabel = truncateToWidth(label, labelWidth, "…");
 			if (mode) animatedLabel = renderedLabel;
 			return `${renderedLabel}${suffix}`;
@@ -555,7 +564,11 @@ export function renderActivityLaneLine(
 		let text = "";
 		if (slots.turn) {
 			text = withTiming(
-				wait ? (externalRunning ? "Working" : wait.label) : (slots.overlay?.label ?? slots.turn.label),
+				wait
+					? externalRunning
+						? interfaceText().frame.activity.working
+						: wait.label
+					: (slots.overlay?.label ?? slots.turn.label),
 				slots.turn,
 			);
 		} else if (slots.overlay && !externalRunning) {
@@ -563,12 +576,12 @@ export function renderActivityLaneLine(
 		} else if (backgroundSubject) {
 			const label =
 				backgroundSubject.status === "waiting"
-					? "Agents queued"
+					? interfaceText().frame.activity.agentsQueued
 					: slots.running.length === 1 &&
 							backgroundSubject.kind === "tool" &&
 							!isBackgroundToolActivityItem(backgroundSubject)
 						? backgroundSubject.label
-						: "Background work";
+						: interfaceText().frame.activity.backgroundWork;
 			text = withTiming(label, backgroundSubject);
 		} else if (slots.overlay) {
 			text = withTiming(slots.overlay.label, slots.overlay);
@@ -584,7 +597,7 @@ export function renderActivityLaneLine(
 		if (mode && slots.plan && !slots.queue && safeWidth >= 80)
 			turnPart += " ".repeat(Math.max(0, turnTextMax + 2 - visibleWidth(turnPart)));
 	} else if (slots.plan) {
-		turnPart = theme.fg("muted", "Paused");
+		turnPart = theme.fg("muted", interfaceText().frame.activity.paused);
 	}
 
 	// Plan slot: task/goal only. Do not copy the turn label into the plan slot.
@@ -608,7 +621,7 @@ export function renderActivityLaneLine(
 	const secondary =
 		slots.queue?.label ??
 		(externalRunning && wait
-			? `${isParentRuntimeItem(wait) ? "Parent " : ""}${wait.label}`
+			? `${isParentRuntimeItem(wait) ? interfaceText().frame.activity.parent : ""}${wait.label}`
 			: slots.externalWait !== slots.overlay
 				? slots.externalWait?.label
 				: undefined);
@@ -928,7 +941,10 @@ export class ActivityLaneComponent implements Component {
 	}
 
 	/** Submission identity and settlement are owned by the existing foreground lease. */
-	syncForegroundActivity(activity: { sessionId: string; epoch?: number; busy: boolean }, label = "Preparing"): void {
+	syncForegroundActivity(
+		activity: { sessionId: string; epoch?: number; busy: boolean },
+		label = interfaceText().frame.activity.preparing,
+	): void {
 		if (this.sessionKey !== activity.sessionId) {
 			this.replaceCanonical(activity.sessionId, { laneRecords: [] });
 		}
@@ -942,7 +958,10 @@ export class ActivityLaneComponent implements Component {
 			// The submission ended when its lease did. Background work (a backgrounded tool, an armed
 			// continuation, System One checking the answer) keeps the session busy, but it has its own
 			// rows; holding the turn row open for it reported a finished turn as still preparing.
-			const outcome = this.foregroundOutcome ?? { status: "neutral" as const, label: "Stopped" };
+			const outcome = this.foregroundOutcome ?? {
+				status: "neutral" as const,
+				label: interfaceText().frame.activity.stopped,
+			};
 			this.finish(RUNTIME_TURN_ACTIVITY_ID, outcome.status, {
 				id: RUNTIME_TURN_ACTIVITY_ID,
 				kind: "runtime",
@@ -961,7 +980,13 @@ export class ActivityLaneComponent implements Component {
 	syncHumanInputActivity(activity: { requestId: string; toolCallId?: string; waiting: boolean }): void {
 		const id = `runtime:input:${activity.requestId}`;
 		if (activity.waiting) {
-			this.wait({ id, kind: "runtime", phase: "input", toolCallId: activity.toolCallId, label: "Awaiting you" });
+			this.wait({
+				id,
+				kind: "runtime",
+				phase: "input",
+				toolCallId: activity.toolCallId,
+				label: interfaceText().frame.activity.awaitingYou,
+			});
 		} else {
 			this.remove(id);
 		}

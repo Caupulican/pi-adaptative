@@ -10,6 +10,7 @@ import type {
 	HmoeWeights,
 } from "../expert-routing/vocabulary.ts";
 import type { FastModePreference } from "../fast-mode.ts";
+import type { LanguageSetting } from "../language/language.ts";
 import type { WorkerModelPinsSettings } from "../orchestration/worker-model-pins.ts";
 import type { SystemOneProviderChoice } from "../system-one/access.ts";
 import type { ToolkitScript } from "../toolkit/script-registry.ts";
@@ -811,6 +812,8 @@ export interface Settings {
 	steeringMode?: "all" | "one-at-a-time";
 	followUpMode?: "all" | "one-at-a-time";
 	theme?: string;
+	/** Language of the interface text; `auto` follows the system locale. */
+	language?: LanguageSetting;
 	/** Resource catalog directory (round resource management): the folder pi installs/updates/backs up from. */
 	catalogDir?: string;
 	compaction?: CompactionSettings;

@@ -19,6 +19,7 @@ import type {
 	HmoeTeamStrategy,
 } from "../../../core/expert-routing/vocabulary.ts";
 import { formatHttpIdleTimeoutMs, HTTP_IDLE_TIMEOUT_CHOICES } from "../../../core/http-dispatcher.ts";
+import type { LanguageSetting } from "../../../core/language/language.ts";
 import { DEFAULT_AUTO_LEARN_SETTINGS, resolveAutoLearnSettings } from "../../../core/learning/auto-learn-settings.ts";
 import { describeRouterCalibrationScope } from "../../../core/model-router/calibration.ts";
 import {
@@ -72,7 +73,14 @@ import { keyDisplayText } from "../../../presentation/keybinding-hints.ts";
 import { getSelectListTheme, getSettingsListTheme, theme } from "../../../presentation/theme-model.ts";
 import { THINKING_LEVEL_DESCRIPTIONS } from "../thinking-level-descriptions.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
+import { languageSettingsItem } from "./language-settings-item.ts";
 import { COMPACT_SELECTOR_LIST_LAYOUT, SelectorHeading } from "./selector-list.ts";
+import {
+	booleanSettingValue,
+	normalizeOptionalString,
+	numberSettingValue,
+	optionalStringValue,
+} from "./settings-value-text.ts";
 
 const AUTO_LEARN_CUSTOM_MODEL_VALUE = "__custom_auto_learn_model__";
 const MODEL_ROUTER_UNSET_MODEL_VALUE = "__unset_model_router_model__";
@@ -145,30 +153,12 @@ const MODEL_ROUTER_POOL_PREFERENCE_VALUE_LABELS: Readonly<Record<string, string>
 	balanced: "Balanced",
 };
 
-function booleanSettingValue(value: boolean | undefined, defaultValue = false): string {
-	return (value ?? defaultValue) ? "true" : "false";
-}
-
-function optionalStringValue(value: string | undefined, fallback = "(not set)"): string {
-	const trimmed = value?.trim();
-	return trimmed && trimmed.length > 0 ? trimmed : fallback;
-}
-
 function routerTierValue(
 	model: string | undefined,
 	thinking: ThinkingLevel | undefined,
 	fallback = "(not set)",
 ): string {
 	return `${optionalStringValue(model, fallback)} · thinking ${thinking ?? MODEL_ROUTER_INHERIT_THINKING_LABEL}`;
-}
-
-function normalizeOptionalString(value: string): string | undefined {
-	const trimmed = value.trim();
-	return trimmed.length > 0 ? trimmed : undefined;
-}
-
-function numberSettingValue(value: number | undefined, defaultValue: number): string {
-	return String(value ?? defaultValue);
 }
 
 function autoLearnModelValue(settings: AutoLearnSettings): string {
@@ -466,6 +456,7 @@ export interface SettingsConfig {
 	thinkingLevel: ThinkingLevel;
 	availableThinkingLevels: ThinkingLevel[];
 	currentTheme: string;
+	language: LanguageSetting;
 	availableThemes: string[];
 	hideThinkingBlock: boolean;
 	projectContextFiles: "off" | "on-demand";
@@ -543,6 +534,7 @@ export interface SettingsCallbacks {
 	onHttpIdleTimeoutMsChange: (timeoutMs: number) => void;
 	onThinkingLevelChange: (level: ThinkingLevel) => void;
 	onThemeChange: (theme: string) => void;
+	onLanguageChange: (language: LanguageSetting) => void;
 	onThemePreview?: (theme: string) => void;
 	onHideThinkingBlockChange: (hidden: boolean) => void;
 	onProjectContextFilesChange: (mode: "off" | "on-demand", scope: SettingsScope) => void;
@@ -3142,6 +3134,7 @@ export class SettingsSelectorComponent extends Container {
 						() => done(),
 					),
 			},
+			languageSettingsItem(config.language),
 			{
 				id: "theme",
 				label: "Theme",
@@ -3345,6 +3338,9 @@ export class SettingsSelectorComponent extends Container {
 			getSettingsListTheme(),
 			(id, newValue) => {
 				switch (id) {
+					case "language":
+						callbacks.onLanguageChange(newValue as LanguageSetting);
+						break;
 					case "system-one-provider": {
 						const choice = newValue as SystemOneProviderChoice;
 						callbacks.onSystemOneProviderChange?.(choice);

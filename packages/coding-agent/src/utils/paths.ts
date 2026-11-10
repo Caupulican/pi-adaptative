@@ -42,6 +42,14 @@ export function isLocalPath(value: string): boolean {
 	return true;
 }
 
+/**
+ * Resolve the local paths of a command line option against the working directory, leaving anything that is not a local
+ * path, such as a package source or a URL, exactly as the owner typed it.
+ */
+export function resolveCliPaths(cwd: string, paths: string[] | undefined): string[] | undefined {
+	return paths?.map((value) => (isLocalPath(value) ? resolvePath(value, cwd) : value));
+}
+
 export function getCwdRelativePath(filePath: string, cwd: string): string | undefined {
 	const resolvedCwd = resolvePath(cwd);
 	const resolvedPath = resolvePath(filePath, resolvedCwd);

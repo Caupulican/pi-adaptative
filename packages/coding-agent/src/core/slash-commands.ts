@@ -17,7 +17,11 @@ export interface BuiltinSlashCommand {
 	duringWork?: "local";
 }
 
-export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
+/**
+ * Every built-in command, as a literal tuple so the command names survive as a union type: the interface text catalogue
+ * is keyed by that union, which makes a command without owner-facing text a compile error.
+ */
+export const BUILTIN_SLASH_COMMANDS = [
 	{ name: "settings", description: "Open settings menu" },
 	{ name: "secrets", description: "Store and activate project credentials with Bitwarden" },
 	{ name: "autonomy", description: "Autonomy mode, diagnostics, research, fitness (/autonomy status)" },
@@ -211,4 +215,7 @@ export const BUILTIN_SLASH_COMMANDS: ReadonlyArray<BuiltinSlashCommand> = [
 		description: "Restore profiles and resource settings from a JSON file (/config-restore <file>)",
 	},
 	{ name: "quit", description: `Quit ${APP_NAME}` },
-];
+] as const satisfies ReadonlyArray<BuiltinSlashCommand>;
+
+/** The name of every built-in command. */
+export type BuiltinCommandName = (typeof BUILTIN_SLASH_COMMANDS)[number]["name"];

@@ -7,6 +7,7 @@ import {
 	type SessionCostSummary,
 	type TaskExecutionMetrics,
 } from "../../../core/cost/cost-summary.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
 import { isIdleProjection } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { OperatorProjection } from "../../../core/operator-projection/types.ts";
@@ -109,18 +110,23 @@ function paintGauge(bar: string): string {
  * an abbreviation and a dot at rest told the operator nothing they could act on.
  */
 function systemOneStyled(health: SemanticPlaneHealth): string | undefined {
+	const operator = interfaceText().frame.operator;
 	const doubts = health.unresolvedDoubts?.length ?? 0;
 	if (health.state === "evaluating")
-		return theme.fg("accent", `◆ System One judging${doubts ? ` · ${doubts} uncertain` : ""}`);
+		return theme.fg(
+			"accent",
+			`◆ ${operator.systemOneName} ${operator.systemOneJudging}${doubts ? ` · ${operator.systemOneUncertain(doubts)}` : ""}`,
+		);
 	if (health.state === "degraded" || health.state === "no-engine")
-		return theme.fg("warning", `System One ${semanticPlaneHealthValue(health)}`);
-	if (doubts) return theme.fg("warning", `System One · ${doubts} uncertain`);
+		return theme.fg("warning", `${operator.systemOneName} ${semanticPlaneHealthValue(health)}`);
+	if (doubts) return theme.fg("warning", `${operator.systemOneName} · ${operator.systemOneUncertain(doubts)}`);
 	return undefined;
 }
 
 /** CI that needs attention, in words: a passing or unknown run says nothing and is not drawn. */
 function ciStyled(state: "running" | "red"): string {
-	return state === "red" ? theme.fg("error", "CI failed") : theme.fg("warning", "CI running");
+	const operator = interfaceText().frame.operator;
+	return state === "red" ? theme.fg("error", operator.ciFailed) : theme.fg("warning", operator.ciRunning);
 }
 
 /**
@@ -128,6 +134,7 @@ function ciStyled(state: "running" | "red"): string {
  * testable as data; see {@link layoutOperatorPovSegments}.
  */
 export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPovSegment[] {
+	const operator = interfaceText().frame.operator;
 	const projection = source.getProjection();
 	const route = source.getRouteSnapshot();
 	const health = source.getSemanticPlaneHealth();
@@ -141,52 +148,52 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	const idle =
 		!needsInput && !livenessFault && (workState ? workState.phase === "idle" : isIdleProjection(projection));
 
-	let phaseLabel = "WORKING";
+	let phaseLabel = operator.working;
 	let phaseTone: "accent" | "warning" | "error" | "success" | undefined;
 	let phaseValue = projection.current_action;
 	let phaseBare = false;
 
 	if (livenessFault) {
-		phaseLabel = "LIVENESS FAULT";
+		phaseLabel = operator.livenessFault;
 		phaseTone = "error";
-		phaseValue = workState?.faultReason ?? projection.why ?? "active objective without execution path";
+		phaseValue = workState?.faultReason ?? projection.why ?? operator.livenessValue;
 	} else if (needsInput) {
-		phaseLabel = "NEEDS INPUT";
+		phaseLabel = operator.needsInput;
 		phaseTone = "warning";
-		phaseValue = projection.why || "waiting for your input";
+		phaseValue = projection.why || operator.needsInputValue;
 	} else if (projection.phase === "blocked" || workState?.phase === "blocked") {
-		phaseLabel = "BLOCKED";
+		phaseLabel = operator.blocked;
 		phaseTone = "error";
-		phaseValue = projection.why || "execution blocked";
+		phaseValue = projection.why || operator.blockedValue;
 	} else if (projection.phase === "done" || workState?.phase === "done") {
-		phaseLabel = "DONE";
+		phaseLabel = operator.done;
 		phaseTone = "success";
-		phaseValue = projection.current_action || "objective completed";
+		phaseValue = projection.current_action || operator.doneValue;
 	} else if (idle) {
-		phaseLabel = "READY";
+		phaseLabel = operator.ready;
 		phaseTone = undefined;
 		phaseBare = true;
-		phaseValue = projection.current_action || "Ready";
+		phaseValue = projection.current_action || operator.readyValue;
 	} else if (workState?.phase === "system_one_evaluating") {
-		phaseLabel = "S1 EVAL";
+		phaseLabel = operator.systemOneEvaluating;
 		phaseTone = "accent";
-		phaseValue = projection.current_action || "System One evaluating";
+		phaseValue = projection.current_action || operator.systemOneEvaluatingValue;
 	} else if (workState?.phase === "continuation_armed") {
-		phaseLabel = "CONTINUING";
+		phaseLabel = operator.continuing;
 		phaseTone = "accent";
-		phaseValue = projection.current_action || "Continuation armed";
+		phaseValue = projection.current_action || operator.continuingValue;
 	} else if (workState?.phase === "retrying") {
-		phaseLabel = "RETRYING";
+		phaseLabel = operator.retrying;
 		phaseTone = "warning";
-		phaseValue = projection.why || projection.current_action || "Retrying transient failure";
+		phaseValue = projection.why || projection.current_action || operator.retryingValue;
 	} else if (workState?.phase === "waiting_tool" || workState?.phase === "waiting_worker") {
 		// Only background work runs: the foreground turn is over, so its last action is not what is happening.
-		phaseLabel = "BACKGROUND";
+		phaseLabel = operator.background;
 		phaseTone = undefined;
 		phaseValue = workState.label;
 	} else {
 		// The activity row above already says that it is working, and for how long: this row says on what.
-		phaseLabel = "WORKING";
+		phaseLabel = operator.working;
 		phaseTone = undefined;
 		phaseBare = true;
 		phaseValue = `${projection.phase}: ${projection.current_action}`;
@@ -202,7 +209,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	});
 
 	if (projection.next_action) {
-		segments.push({ id: "next", label: "NEXT", value: projection.next_action, dropOrder: 40 });
+		segments.push({ id: "next", label: operator.next, value: projection.next_action, dropOrder: 40 });
 	}
 
 	// Only a turn someone other than the session's own choice is routing is worth a word; the default is silence.
@@ -210,7 +217,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		const routeValue = formatRouteValue(route);
 		segments.push({
 			id: "route",
-			label: "ROUTE",
+			label: operator.route,
 			value: `⇢ ${routeValue}`,
 			compact: `⇢ ${routeValue.replace("via model-router", "via router")}`,
 			dropOrder: 0,
@@ -223,8 +230,8 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	if (peerFindingCount > 0) {
 		segments.push({
 			id: "peer-findings",
-			label: "PEER",
-			value: `${peerFindingCount} peer ${peerFindingCount === 1 ? "finding" : "findings"}`,
+			label: operator.peer,
+			value: operator.peerFindings(peerFindingCount),
 			compact: `⚑ ${peerFindingCount}`,
 			dropOrder: 30,
 			tone: "warning",
@@ -236,7 +243,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	if (systemOne) {
 		segments.push({
 			id: "system-one",
-			label: "S1",
+			label: operator.systemOne,
 			value: semanticPlaneHealthValue(health),
 			dropOrder: 0,
 			bare: true,
@@ -248,8 +255,8 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	if (ci && (ci.state === "red" || ci.state === "running")) {
 		segments.push({
 			id: "ci",
-			label: "CI",
-			value: ci.state === "red" ? "CI failed" : "CI running",
+			label: operator.ci,
+			value: ci.state === "red" ? operator.ciFailed : operator.ciRunning,
 			// A red branch is the fact to keep in view; a running one yields width early.
 			dropOrder: ci.state === "red" ? 50 : 12,
 			bare: true,
@@ -262,7 +269,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		const rate = `${tokensPerSecond.toFixed(tokensPerSecond < 10 ? 1 : 0)} tok/s`;
 		segments.push({
 			id: "tps",
-			label: "TPS",
+			label: operator.tokensPerSecond,
 			value: rate,
 			dropOrder: 14,
 			bare: true,
@@ -273,11 +280,11 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	const taskMetrics = source.getTaskMetrics?.();
 	if (taskMetrics && (taskMetrics.rounds > 0 || taskMetrics.activeMs > 0)) {
 		const duration = `${taskMetrics.timingEstimated ? "~" : ""}${formatCompactTaskDuration(taskMetrics.activeMs)}`;
-		const fullTask = `⏱ ${duration} · ${taskMetrics.rounds} ${taskMetrics.rounds === 1 ? "round" : "rounds"}`;
+		const fullTask = `⏱ ${duration} · ${operator.rounds(taskMetrics.rounds)}`;
 		const compactTask = `⏱ ${duration}·${taskMetrics.rounds}r`;
 		segments.push({
 			id: "task",
-			label: "TASK",
+			label: operator.task,
 			value: fullTask,
 			compact: compactTask,
 			dropOrder: 35,
@@ -289,9 +296,9 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	const { agentCost, icmCost, icmReports } = backgroundCostBreakdown(cost);
 	const prefix = cost.costEstimate ? "~" : "";
 	const fullBreakdown = [
-		`root ${formatCost(cost.ownCost)}`,
-		`sub ${formatCost(agentCost)}`,
-		...(icmCost > 0 || icmReports > 0 ? [`ICM ${formatCost(icmCost)}`] : []),
+		operator.costRoot(formatCost(cost.ownCost)),
+		operator.costSub(formatCost(agentCost)),
+		...(icmCost > 0 || icmReports > 0 ? [operator.costIcm(formatCost(icmCost))] : []),
 	].join(" · ");
 	const compactBreakdown = [
 		`r:${formatCost(cost.ownCost)}`,
@@ -300,7 +307,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	].join(" ");
 	segments.push({
 		id: "cost",
-		label: "COST",
+		label: operator.cost,
 		value: `${prefix}${formatCost(cost.currentCost)} (${fullBreakdown})`,
 		compact: `${prefix}${formatCost(cost.currentCost)} (${compactBreakdown})`,
 		dropOrder: 0,
@@ -308,13 +315,13 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 	});
 
 	if (control.blocker) {
-		segments.push({ id: "block", label: "BLOCK", value: control.blocker, dropOrder: 35 });
+		segments.push({ id: "block", label: operator.block, value: control.blocker, dropOrder: 35 });
 	}
 
 	if (projection.proof.total > 0) {
 		segments.push({
 			id: "proof",
-			label: "PROOF",
+			label: operator.proof,
 			value: `${projection.proof.satisfied}/${projection.proof.total}`,
 			dropOrder: 15,
 		});
@@ -325,10 +332,10 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		const live = cacheRemainingMs > 0;
 		const seconds = Math.ceil(cacheRemainingMs / 1000);
 		const clock = `${Math.floor(seconds / 60)}:${String(seconds % 60).padStart(2, "0")}`;
-		const text = live ? `◷ ${clock}` : "◷ cold";
+		const text = live ? `◷ ${clock}` : `◷ ${operator.cacheCold}`;
 		segments.push({
 			id: "cache",
-			label: "CACHE",
+			label: operator.cache,
 			value: text,
 			dropOrder: 16,
 			bare: true,
@@ -343,7 +350,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		const reading = [gauge.percent, gauge.tag].filter(Boolean).join(" ");
 		segments.push({
 			id: "ctx",
-			label: "CTX",
+			label: operator.context,
 			value: `${gauge.bar} ${reading}`,
 			compact: reading,
 			styled: `${paintGauge(gauge.bar)} ${gauge.tone ? theme.fg(gauge.tone, reading) : reading}`,
@@ -353,7 +360,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		});
 	} else if (projection.context) {
 		const reading = contextPercent === undefined ? "?%" : `${contextPercent.toFixed(1)}%`;
-		segments.push({ id: "ctx", label: "CTX", value: reading, dropOrder: 10, bare: true });
+		segments.push({ id: "ctx", label: operator.context, value: reading, dropOrder: 10, bare: true });
 	}
 
 	return segments;

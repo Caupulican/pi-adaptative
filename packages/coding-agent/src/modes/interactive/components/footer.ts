@@ -4,14 +4,13 @@ import type { AgentSession } from "../../../core/agent-session.ts";
 import { formatFooterCostParts } from "../../../core/cost/cost-summary.ts";
 import { getFastModeStatus } from "../../../core/fast-mode.ts";
 import type { ReadonlyFooterDataProvider } from "../../../core/footer-data-contract.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { ModelRegistry } from "../../../core/model-registry.ts";
 import type { SettingsManager } from "../../../core/settings-manager.ts";
 import type { SessionManager } from "../../../kernel/node.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import { stripAnsi, stripAnsiExceptSgr } from "../../../utils/ansi.ts";
 import { type SelfCompactionGauge, selfCompactionGauge } from "./self-compaction-gauge.ts";
-
-const FAST_MODE_BADGE = "[fast]";
 
 /**
  * Sanitize text for display in a single-line status.
@@ -78,7 +77,10 @@ function formatExtensionStatuses(statuses: ReadonlyMap<string, string>): string[
 	if (!sawLearningStatus) return regularStatuses;
 	const phases = Array.from(learningPhases).filter((phase) => phase !== "active");
 	const phaseText = phases.length > 0 ? phases.join("/") : "active";
-	return [theme.fg("warning", "learn") + theme.fg("dim", `:${phaseText}`), ...regularStatuses];
+	return [
+		theme.fg("warning", interfaceText().frame.footer.learning) + theme.fg("dim", `:${phaseText}`),
+		...regularStatuses,
+	];
 }
 
 /**
@@ -251,6 +253,7 @@ export class FooterComponent implements Component {
 			return [];
 		}
 
+		const text = interfaceText().frame.footer;
 		const state = this.session.state;
 		const usageSnapshot = this.getUsageSnapshot(state.messages?.length ?? 0);
 		const { totalInput, totalOutput, totalCacheRead, totalCacheWrite, contextUsage, gauge } = usageSnapshot;
@@ -306,7 +309,7 @@ export class FooterComponent implements Component {
 			const totalInputWithCache = u.input + u.cacheRead + u.cacheWrite;
 			if (totalInputWithCache > 0 && (u.cacheRead > 0 || u.cacheWrite > 0)) {
 				const hitRate = Math.round((u.cacheRead / totalInputWithCache) * 100);
-				statsParts.push(`cache ${hitRate}%`);
+				statsParts.push(text.cacheHitRate(hitRate));
 			}
 		}
 
@@ -317,10 +320,10 @@ export class FooterComponent implements Component {
 		// CURRENT/TODAY/SUBAGENTS totals rendered above.
 		const costGuard = this.session.getLastCostGuardDecision?.();
 		if (this.services.settingsManager.getCostGuardSettings().enabled && costGuard?.over) {
-			statsParts.push(theme.fg("warning", `over limit $${costGuard.estUsd.toFixed(2)}/turn`));
+			statsParts.push(theme.fg("warning", text.overLimit(costGuard.estUsd.toFixed(2))));
 		}
 
-		const autoIndicator = this.autoCompactEnabled ? " (auto)" : "";
+		const autoIndicator = this.autoCompactEnabled ? ` ${text.autoCompaction}` : "";
 		const contextPercentDisplay =
 			contextPercent === "?"
 				? `?/${formatTokens(contextWindow)}${autoIndicator}`
@@ -345,13 +348,13 @@ export class FooterComponent implements Component {
 		};
 
 		// Add model display name on the right side, plus thinking level if model supports it
-		const modelName = state.model?.name || state.model?.id || "no model";
+		const modelName = state.model?.name || state.model?.id || text.noModel;
 		const fastModeEnabled = getFastModeStatus({
 			model: this.session.model,
 			settingsManager: this.services.settingsManager,
 			getFastModeCatalog: (model) => this.session.getFastModeCatalog(model),
 		}).enabled;
-		const modelDisplayName = fastModeEnabled ? `${modelName} ${FAST_MODE_BADGE}` : modelName;
+		const modelDisplayName = fastModeEnabled ? `${modelName} ${text.fastBadge}` : modelName;
 
 		// Calculate available space for padding (minimum 2 spaces between stats and model)
 		const minPadding = 2;
@@ -360,8 +363,10 @@ export class FooterComponent implements Component {
 		let rightSideWithoutProvider = modelDisplayName;
 		if (state.model?.reasoning) {
 			const thinkingLevel = state.thinkingLevel || "off";
-			rightSideWithoutProvider =
-				thinkingLevel === "off" ? `${modelDisplayName} • thinking off` : `${modelDisplayName} • ${thinkingLevel}`;
+			rightSideWithoutProvider = text.withThinking(
+				modelDisplayName,
+				thinkingLevel === "off" ? text.thinkingOff : thinkingLevel,
+			);
 		}
 
 		const rightSideRoom = minPadding + visibleWidth(rightSideWithoutProvider);
@@ -414,12 +419,12 @@ export class FooterComponent implements Component {
 		// before and after the colored section independently.
 		const dimStatsLeft = theme.fg("dim", statsLeft);
 		const dimTail = (remainder: string): string => {
-			const badgeIndex = fastModeEnabled ? remainder.indexOf(FAST_MODE_BADGE) : -1;
+			const badgeIndex = fastModeEnabled ? remainder.indexOf(text.fastBadge) : -1;
 			return badgeIndex === -1
 				? theme.fg("dim", remainder)
 				: theme.fg("dim", remainder.slice(0, badgeIndex)) +
-						theme.bg("selectedBg", theme.bold(theme.fg("accent", FAST_MODE_BADGE))) +
-						theme.fg("dim", remainder.slice(badgeIndex + FAST_MODE_BADGE.length));
+						theme.bg("selectedBg", theme.bold(theme.fg("accent", text.fastBadge))) +
+						theme.fg("dim", remainder.slice(badgeIndex + text.fastBadge.length));
 		};
 
 		// Extension statuses share a single line. Learning-related statuses are folded into

@@ -1,0 +1,87 @@
+/**
+ * The English descriptions of the built-in slash commands, keyed by command name. A command's own definition keeps its
+ * description because it identifies the command to every reader; this catalogue is what the owner's screen shows, in the
+ * active language. Completeness against the command names is a type fact, so a built-in command without an entry here,
+ * or an entry for a command that no longer exists, does not compile.
+ */
+
+import { APP_NAME } from "../../../config.ts";
+import type { BuiltinCommandName } from "../../slash-commands.ts";
+
+export const COMMANDS = {
+	settings: "Open settings menu",
+	secrets: "Store and activate project credentials with Bitwarden",
+	autonomy: "Autonomy mode, diagnostics, research, fitness (/autonomy status)",
+	status: "What runs automatically: routines, away daemon, host events, drafts, notices, grants, recent runs' tools",
+	plan: "The session's plans: each open plan step by step, closed ones in one line",
+	quiz: "A short quiz, built from its proof sheet, on the newest finished result",
+	proactivity: "Idle review that raises notes: /proactivity [status|on|off|review|prefs <text>]",
+	verify: "Verification obligations: /verify [list|show <id>|dismiss <id|all> [note]]",
+	memory: "Managed memory files: /memory drift · knowledge · history · accept <target> · restore <target>",
+	knowledge:
+		"Owner knowledge: /knowledge list [kind|global|project] · show <id> · history <id> · correct <id> <value> · forget <id>",
+	taste: "How you want work written, as learned: /taste [<after-id>] · /taste export [path] · /taste proposals · /taste accept <id> · /taste reject <id>",
+	edge: "The edge: /edge [list] · allow <class> [note] · revoke <class>",
+	load: "Machine-wide provider load: in-flight requests, recorded limits, provider windows, emergency stop",
+	estop: "Emergency stop for new worker/background work on this machine: /estop [status|on [reason]|off]",
+	models: "Local model lifecycle: /models [list|suggest|add <ref>|remove <ref> confirm|stop]",
+	fitness: "Pick and probe a model for local/heavy-lifter roles, then assign it (/fitness [model] [trials])",
+	context: "Context composition dashboard: what rides on every request",
+	sysprompt: "Edit this session's system prompt in a panel: /sysprompt [default|reset]",
+	soul: "Edit the agent's soul file in a panel: /soul [show|review|history|restore <n>]",
+	toolhealth: "Show tool repair diagnostics and learned standing rules",
+	toolprobe: "Probe native/text tool-call support (/toolprobe [provider/model])",
+	"toolrule-remove": "Remove a learned tool repair standing rule (/toolrule-remove <model> <mode>)",
+	"toolprotocol-reset": "Reset text tool protocol calibration for a model (/toolprotocol-reset <provider/model>)",
+	"auto-learn": "Show Auto Learn/reflection status or run now (/auto-learn run)",
+	goal: "Goal lifecycle: view, edit, pause, resume, complete, clear, or replace (/goal to inspect)",
+	"goal-continue": "Continue the current goal loop explicitly (/goal-continue [turns] [stalls])",
+	task: "Manage native session task steps (/task to list; /task add <text>)",
+	steps: "Alias for /task",
+	chat: "Switch live chat view between Brain (root), a persistent bot, or a team (/chat [root|<bot>|team:<id>])",
+	bot: "Manage and message persistent bots directly (/bot [list|new <id> [--write] [model] [soul]|soul <id>|open <id>|msg <id> <text>|stop <id>|retire <id>])",
+	lead: "See the goals handed to leaders, and cancel, pause or resume one (/lead [list|show <leader>|cancel <leader>|pause <leader>|resume <leader>])",
+	remote:
+		"Link machines: any machine can host (/remote listen, add <name>) or join (/remote join <host:port> <token>); a joined machine shows up as a bot with a remote mark",
+	bots: "Open live Bot & Team chat switcher (/bots or /bot)",
+	team: "Manage and message multi-bot teams (/team [list|create <id> <bots> [desc]|members <id> <bots>|open <id>|msg <id> <text>|delete <id>])",
+	teams: "Alias for /team",
+	verification:
+		"List open verification findings, or waive them with a reason when only you can answer them (/verification [list|waive <id|all> <reason>])",
+	model: "Select model (opens selector UI)",
+	thinking: "Select thinking level (/thinking [level])",
+	fast: "Toggle the model's Fast (priority) tier (/fast [on|off|priority|ultrafast|status])",
+	ultrafast: "Toggle the model's Ultrafast tier (/ultrafast [on|off|status])",
+	profiles: "Select a runtime profile for this session",
+	"scoped-models": "Enable/disable models for Ctrl+P cycling",
+	export: "Export session (HTML default, or specify path: .html/.jsonl)",
+	import: "Import and resume a session from a JSONL file",
+	share: "Share session as a secret GitHub gist",
+	copy: "Copy last agent message to clipboard",
+	name: "Set session display name",
+	session: "Show session info and stats",
+	cost: "Show session cost breakdown",
+	usage: "Usage and limits: session, today, machine and each signed-in account (/usage reset redeems an earned reset)",
+	changelog: "Show changelog entries",
+	hotkeys: "Show all keyboard shortcuts",
+	fork: "Create a new fork from a previous user message (optional name: /fork <name>)",
+	clone: "Duplicate the current session at the current position (optional name: /clone <name>)",
+	tree: "Navigate session tree (switch branches)",
+	trust: "Trust or untrust this project folder",
+	login: "Configure provider authentication",
+	logout: "Remove provider authentication",
+	new: "Start a new session (optional name: /new <name>)",
+	compact: "Manually compact the session context",
+	"self-compact-info": "Show self-compaction usage, lines, phase, cycles, prompts and any saved note (no model turn)",
+	"self-compact-now": "Compact now: reuse a saved self-compaction note, or ask the agent to write one",
+	curate: "Review/archive stale or overlapping reflection-promoted skills",
+	resume: "Resume a different session",
+	reload: "Reload keybindings, extensions, skills, prompts, and themes",
+	"install-resources":
+		"Copy resources from a trusted directory to user local settings (/install-resources <dir> [--force])",
+	"config-backup": "Backup profiles and resource settings to a JSON file (/config-backup [file])",
+	"config-restore": "Restore profiles and resource settings from a JSON file (/config-restore <file>)",
+	/** Both spellings of leaving name the product. */
+	exit: `Quit ${APP_NAME}`,
+	quit: `Quit ${APP_NAME}`,
+} satisfies Record<BuiltinCommandName, string>;

@@ -3,6 +3,7 @@
  */
 
 import { getKeybindings, type Keybinding, type KeyId } from "@caupulican/pi-tui";
+import { interfaceText } from "../core/language/interface-text.ts";
 import { theme } from "./theme-model.ts";
 
 export interface KeyTextFormatOptions {
@@ -39,8 +40,13 @@ export function keyDisplayText(keybinding: Keybinding): string {
 	return formatKeys(getKeybindings().getKeys(keybinding), { capitalize: true });
 }
 
-export function keyHint(keybinding: Keybinding, description: string): string {
-	return theme.fg("dim", keyText(keybinding)) + theme.fg("muted", ` ${description}`);
+/**
+ * A key and what it does. A site with wording of its own passes it; a site that shows the binding the way the owner
+ * finds it in their settings leaves it out and gets the binding's own description in the active language.
+ */
+export function keyHint(keybinding: Keybinding, description?: string): string {
+	const wording = description ?? interfaceText().keys.bindings[keybinding];
+	return theme.fg("dim", keyText(keybinding)) + theme.fg("muted", ` ${wording}`);
 }
 
 export function rawKeyHint(key: string, description: string): string {

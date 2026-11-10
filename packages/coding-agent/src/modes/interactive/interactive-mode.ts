@@ -35,6 +35,7 @@ import { FooterDataProvider } from "../../core/footer-data-provider.ts";
 import { configureHttpDispatcher } from "../../core/http-dispatcher.ts";
 import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
 import { type AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
+import { onInterfaceLanguageChange } from "../../core/language/interface-text.ts";
 import {
 	OWNER_EVIDENCE_CUSTOM_TYPE,
 	type OwnerTextRange,
@@ -105,6 +106,7 @@ import { openTranscriptOverlay } from "./components/transcript-overlay.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
 import { countConversationEntries } from "./conversation-entries.ts";
 import { EditorOverlayHost } from "./editor-overlay-host.ts";
+import { composeEditorPlaceholder } from "./editor-placeholder.ts";
 import { type EditorSubmitHost, EditorSubmitRouter } from "./editor-submit-router.ts";
 import { ExtensionUiHost } from "./extension-ui-host.ts";
 import { openEditorForPath, openExternalEditor } from "./external-editor.ts";
@@ -270,6 +272,7 @@ export class InteractiveMode {
 	private unsubscribePersistenceFence?: () => void;
 	private subscriptionGeneration = 0;
 	private unsubscribeExtensionsChanged?: () => void;
+	private unsubscribeLanguage?: () => void;
 	/** Owns shutdown state and the process listeners it registered; see signal-lifecycle.ts. */
 	private readonly signals: signalLifecycle.SignalLifecycle;
 	/** Owns the mounted Workbench and its session listeners; see interactive-layout.ts. */
@@ -874,6 +877,15 @@ export class InteractiveMode {
 		onThemeChange(() => {
 			this.ui.invalidate();
 			this.updateEditorBorderColor();
+			this.refreshActivityLane();
+			this.ui.requestRender();
+		});
+
+		// The interface language changes while the interface runs: redraw every row in the new words.
+		this.unsubscribeLanguage = onInterfaceLanguageChange(() => {
+			this.defaultEditor.setPlaceholder(this.editorPlaceholder());
+			this.setupAutocompleteProvider();
+			this.ui.invalidate();
 			this.refreshActivityLane();
 			this.ui.requestRender();
 		});
@@ -3163,28 +3175,8 @@ export class InteractiveMode {
 
 	/** The input's own hints: what to type and the few keys that matter every turn; `?` lists the rest. */
 	private editorPlaceholder(): string {
-		if (this.botTeamChat && !this.botTeamChat.isRootChatActive()) {
-			return `Message ${this.botTeamChat.getActiveTargetBadge()} directly · @bot · /chat root or Alt+A to switch`;
-		}
-		const key = (binding: Parameters<typeof keyText>[0], text: string) => {
-			const keys = keyText(binding);
-			return keys ? `${keys} ${text}` : "";
-		};
-		// Ordered by how much a first-timer needs each: the placeholder is cut from the tail on a narrow row, so the
-		// key that lists every other key leads.
-		return [
-			"Ask anything",
-			`${keyText("app.shortcuts.show")} shortcuts`,
-			"/ commands",
-			"@ files",
-			"! bash",
-			key("app.interrupt", "interrupt"),
-			// Windows Terminal swallows alt+enter; the `>>` prefix is the follow-up gesture there.
-			process.env.WT_SESSION ? ">> follow-up" : key("app.message.followUp", "follow-up"),
-			key("app.execution.toggle", "work area"),
-		]
-			.filter(Boolean)
-			.join(" · ");
+		const chat = this.botTeamChat;
+		return composeEditorPlaceholder(chat && !chat.isRootChatActive() ? chat.getActiveTargetBadge() : undefined);
 	}
 
 	private checkDaxnutsEasterEgg(model: { provider: string; id: string }): void {
@@ -3235,6 +3227,7 @@ export class InteractiveMode {
 		this.unsubscribePlanChanges = undefined;
 		attempt(() => this.unsubscribe?.());
 		attempt(() => this.unsubscribeExtensionsChanged?.());
+		attempt(() => this.unsubscribeLanguage?.());
 		try {
 			if (wasInitialized) {
 				this.ui.stop();

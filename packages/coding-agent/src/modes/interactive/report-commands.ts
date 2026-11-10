@@ -21,6 +21,7 @@ import {
 } from "../../core/cost/cost-summary.ts";
 import type { ExtensionRunner } from "../../core/extensions/index.ts";
 import type { AppKeybinding, KeybindingsManager } from "../../core/keybindings.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import type { AutoLearnSettings } from "../../core/settings/settings-schema.ts";
 import type { SettingsManager } from "../../core/settings-manager.ts";
@@ -364,59 +365,61 @@ export function handleHotkeysCommand(host: HotkeysReportHost): void {
 	const dequeue = host.getAppKeyDisplay("app.message.dequeue");
 	const pasteImage = host.getAppKeyDisplay("app.clipboard.pasteImage");
 
+	const window = interfaceText().keys.window;
+	const rows = window.rows;
 	const sections: ShortcutSection[] = [
 		{
-			title: "Navigation",
+			title: window.sections.navigation,
 			rows: [
 				{
 					keys: `${cursorUp} / ${cursorDown} / ${cursorLeft} / ${cursorRight}`,
-					action: "Move cursor / browse history (Up when empty)",
+					action: rows.moveCursor,
 				},
-				{ keys: `${cursorWordLeft} / ${cursorWordRight}`, action: "Move by word" },
-				{ keys: cursorLineStart, action: "Start of line" },
-				{ keys: cursorLineEnd, action: "End of line" },
-				{ keys: jumpForward, action: "Jump forward to character" },
-				{ keys: jumpBackward, action: "Jump backward to character" },
-				{ keys: `${pageUp} / ${pageDown}`, action: "Scroll by page" },
+				{ keys: `${cursorWordLeft} / ${cursorWordRight}`, action: rows.moveByWord },
+				{ keys: cursorLineStart, action: rows.lineStart },
+				{ keys: cursorLineEnd, action: rows.lineEnd },
+				{ keys: jumpForward, action: rows.jumpForward },
+				{ keys: jumpBackward, action: rows.jumpBackward },
+				{ keys: `${pageUp} / ${pageDown}`, action: rows.scrollByPage },
 			],
 		},
 		{
-			title: "Editing",
+			title: window.sections.editing,
 			rows: [
-				{ keys: submit, action: "Send message" },
+				{ keys: submit, action: rows.send },
 				{
 					keys: newLine,
-					action: `New line${process.platform === "win32" ? " (Ctrl+Enter on Windows Terminal)" : ""}`,
+					action: rows.newLine(process.platform === "win32"),
 				},
-				{ keys: deleteWordBackward, action: "Delete word backwards" },
-				{ keys: deleteWordForward, action: "Delete word forwards" },
-				{ keys: deleteToLineStart, action: "Delete to start of line" },
-				{ keys: deleteToLineEnd, action: "Delete to end of line" },
-				{ keys: yank, action: "Paste the most-recently-deleted text" },
-				{ keys: yankPop, action: "Cycle through the deleted text after pasting" },
-				{ keys: undo, action: "Undo" },
+				{ keys: deleteWordBackward, action: rows.deleteWordBackwards },
+				{ keys: deleteWordForward, action: rows.deleteWordForwards },
+				{ keys: deleteToLineStart, action: rows.deleteToLineStart },
+				{ keys: deleteToLineEnd, action: rows.deleteToLineEnd },
+				{ keys: yank, action: rows.pasteDeleted },
+				{ keys: yankPop, action: rows.cyclePasted },
+				{ keys: undo, action: rows.undo },
 			],
 		},
 		{
-			title: "Other",
+			title: window.sections.other,
 			rows: [
-				{ keys: tab, action: "Path completion / accept autocomplete" },
-				{ keys: interrupt, action: "Cancel autocomplete / abort streaming" },
-				{ keys: clear, action: "Clear editor (first) / exit (second)" },
-				{ keys: exit, action: "Exit (when editor is empty)" },
-				{ keys: suspend, action: "Suspend to background" },
-				{ keys: cycleThinkingLevel, action: "Cycle thinking level" },
-				{ keys: `${cycleModelForward} / ${cycleModelBackward}`, action: "Cycle models" },
-				{ keys: selectModel, action: "Open model selector" },
-				{ keys: expandTools, action: "Toggle tool output expansion" },
-				{ keys: toggleThinking, action: "Toggle thinking block visibility" },
-				{ keys: externalEditor, action: "Edit message in external editor" },
-				{ keys: followUp, action: "Queue follow-up message" },
-				{ keys: dequeue, action: "Restore queued messages" },
-				{ keys: pasteImage, action: "Paste image from clipboard" },
-				{ keys: "/", action: "Slash commands" },
-				{ keys: "!", action: "Run bash command" },
-				{ keys: "!!", action: "Run bash command (excluded from context)" },
+				{ keys: tab, action: rows.pathCompletion },
+				{ keys: interrupt, action: rows.cancelAutocomplete },
+				{ keys: clear, action: rows.clearEditor },
+				{ keys: exit, action: rows.exitWhenEmpty },
+				{ keys: suspend, action: rows.suspend },
+				{ keys: cycleThinkingLevel, action: rows.cycleThinkingLevel },
+				{ keys: `${cycleModelForward} / ${cycleModelBackward}`, action: rows.cycleModels },
+				{ keys: selectModel, action: rows.openModelSelector },
+				{ keys: expandTools, action: rows.toggleToolOutput },
+				{ keys: toggleThinking, action: rows.toggleThinking },
+				{ keys: externalEditor, action: rows.externalEditor },
+				{ keys: followUp, action: rows.queueFollowUp },
+				{ keys: dequeue, action: rows.restoreQueued },
+				{ keys: pasteImage, action: rows.pasteImage },
+				{ keys: "/", action: rows.slashCommands },
+				{ keys: "!", action: rows.runBash },
+				{ keys: "!!", action: rows.runBashExcluded },
 			],
 		},
 	];
@@ -425,7 +428,7 @@ export function handleHotkeysCommand(host: HotkeysReportHost): void {
 	const shortcuts = host.extensionRunner.getShortcuts(host.keybindings.getEffectiveConfig());
 	if (shortcuts.size > 0) {
 		sections.push({
-			title: "Extensions",
+			title: window.sections.extensions,
 			rows: [...shortcuts].map(([key, shortcut]) => ({
 				keys: formatKeyText(key, { capitalize: true }),
 				action: shortcut.description ?? shortcut.extensionPath,

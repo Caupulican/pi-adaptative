@@ -1,5 +1,6 @@
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { type Container, Loader, type LoaderIndicatorOptions, type TUI } from "@caupulican/pi-tui";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { keyText } from "../../presentation/keybinding-hints.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import type { ActivityLaneComponent } from "./components/activity-lane.ts";
@@ -21,10 +22,23 @@ export class RuntimeStatusController {
 	private workingMessage: string | undefined;
 	private workingVisible: boolean;
 	private workingIndicatorOptions: LoaderIndicatorOptions | undefined;
-	private readonly defaultWorkingMessage = "Working...";
-	private readonly defaultHiddenThinkingLabel = "Thinking...";
-	private hiddenThinkingLabel = this.defaultHiddenThinkingLabel;
+	private hiddenThinkingLabelOverride: string | undefined;
 	private runtimeStatusLabel: string | undefined;
+
+	/** What the turn indicator says while the harness works and says nothing more precise. */
+	private get defaultWorkingMessage(): string {
+		return interfaceText().frame.working.workingMessage;
+	}
+
+	/** What the turn indicator says while the model thinks with its thinking block hidden. */
+	private get defaultHiddenThinkingLabel(): string {
+		return interfaceText().frame.working.thinkingMessage;
+	}
+
+	/** The label in force: the caller's own, or the one this language writes for a hidden thinking block. */
+	private get hiddenThinkingLabel(): string {
+		return this.hiddenThinkingLabelOverride ?? this.defaultHiddenThinkingLabel;
+	}
 
 	constructor(host: RuntimeStatusControllerHost) {
 		this.host = host;
@@ -133,7 +147,7 @@ export class RuntimeStatusController {
 	}
 
 	setHiddenThinkingLabel(label?: string): void {
-		this.hiddenThinkingLabel = label ?? this.defaultHiddenThinkingLabel;
+		this.hiddenThinkingLabelOverride = label;
 	}
 
 	updateRuntimeStatus(message?: AssistantMessage): void {
@@ -175,7 +189,8 @@ export class RuntimeStatusController {
 		this.workingVisible = this.host.hasHumanAudience;
 		this.setWorkingIndicator();
 		if (this.activeLoader) {
-			this.activeLoader.setMessage(`${this.defaultWorkingMessage} (${keyText("app.interrupt")} to interrupt)`);
+			const text = interfaceText().frame.working;
+			this.activeLoader.setMessage(`${text.workingMessage} (${text.toInterrupt(keyText("app.interrupt"))})`);
 		}
 		this.setHiddenThinkingLabel();
 	}

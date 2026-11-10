@@ -13,6 +13,7 @@ import type { AutocompleteItem, AutocompleteProvider, SlashCommand } from "@caup
 import { CombinedAutocompleteProvider, fuzzyFilter } from "@caupulican/pi-tui";
 import type { AgentSession } from "../../core/agent-session.ts";
 import type { ExtensionRunner } from "../../core/extensions/index.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { BUILTIN_SLASH_COMMANDS } from "../../core/slash-commands.ts";
 import type { SourceInfo } from "../../core/source-info.ts";
@@ -72,9 +73,10 @@ export function prefixAutocompleteDescription(
 
 export function createBaseAutocompleteProvider(host: AutocompleteProviderHost): AutocompleteProvider {
 	// Define commands for autocomplete
+	const commands = interfaceText().commands;
 	const slashCommands: SlashCommand[] = BUILTIN_SLASH_COMMANDS.map((command) => ({
 		name: command.name,
-		description: command.description,
+		description: commands[command.name],
 	}));
 
 	const modelCommand = slashCommands.find((command) => command.name === "model");

@@ -1,4 +1,5 @@
 import { type Component, getKeybindings, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import { cardPalette, scrollDelta, scrolledOffset } from "./card-frame.ts";
 
@@ -81,13 +82,14 @@ export class ShortcutsWindow implements Component {
 		this.bodyRows = Math.max(3, Math.min(content.length, budget - 2));
 		this.offset = Math.min(this.offset, Math.max(0, content.length - this.bodyRows));
 
-		const title = ` ${theme.bold(theme.fg("text", "Shortcuts"))} `;
-		const titleWidth = visibleWidth(" Shortcuts ");
+		const window = interfaceText().keys.window;
+		const title = ` ${theme.bold(theme.fg("text", window.title))} `;
+		const titleWidth = visibleWidth(` ${window.title} `);
 		const top = `${border("╭─")}${surface(title)}${border(`${"─".repeat(Math.max(0, width - 3 - titleWidth))}╮`)}`;
 
 		const more = content.length > this.bodyRows;
 		const position = more ? `${this.offset + 1}-${this.offset + this.bodyRows}/${content.length} · ↑↓ · ` : "";
-		const footer = ` ${position}${this.options.closeLabel} close `;
+		const footer = ` ${position}${this.options.closeLabel} ${window.close} `;
 		const footerWidth = visibleWidth(footer);
 		const bottom = `${border(`╰${"─".repeat(Math.max(0, width - 3 - footerWidth))}`)}${surface(theme.fg("dim", footer))}${border("─╯")}`;
 

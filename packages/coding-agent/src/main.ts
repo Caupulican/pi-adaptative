@@ -51,6 +51,7 @@ import type { ExtensionFactory } from "./core/extensions/types.ts";
 import { dropSessionSecretsFromProcess } from "./core/harness-environment.ts";
 import { configureHttpDispatcher, disposeHttpDispatcher } from "./core/http-dispatcher.ts";
 import { KeybindingsManager } from "./core/keybindings.ts";
+import { bindInterfaceLanguage } from "./core/language/language-binding.ts";
 import { formatLaneWorkerRefusal } from "./core/model-capability.ts";
 import {
 	resolveCliModel,
@@ -102,7 +103,7 @@ import { assertValidSessionId, SessionManager } from "./kernel/session/session-m
 import { runMigrations, showDeprecationWarnings } from "./migrations.ts";
 import { terminalCapabilityOverridesFromSettings } from "./modes/interactive/terminal-capability-settings.ts";
 import { handleConfigCommand, handlePackageCommand } from "./package-manager-cli.ts";
-import { isLocalPath, normalizePath, resolvePath } from "./utils/paths.ts";
+import { normalizePath, resolveCliPaths, resolvePath } from "./utils/paths.ts";
 import { getProcessWorkRun, getWorkRoot, PI_WORK_ROOT_ENV } from "./utils/work-directory.ts";
 
 /** The model registry members this module uses, declared by the module itself; the composition root passes the ModelRegistry. */
@@ -567,10 +568,6 @@ export function buildSessionOptions(
 	}
 
 	return { options, cliThinkingFromModel, diagnostics };
-}
-
-function resolveCliPaths(cwd: string, paths: string[] | undefined): string[] | undefined {
-	return paths?.map((value) => (isLocalPath(value) ? resolvePath(value, cwd) : value));
 }
 
 async function showStartupSelector<T>(
@@ -1085,6 +1082,7 @@ export async function main(args: string[], options?: MainOptions) {
 	void session.prewarmShell();
 	const { settingsManager, modelRegistry, resourceLoader } = services;
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
+	bindInterfaceLanguage(settingsManager, process.env);
 	if (parsed.resume || parsed.continue || parsed.session !== undefined) {
 		// Restoring a session must not mutate owner intent. Active goals may resume their runtime;
 		// paused/blocked/limited goals remain stopped until an explicit owner action.
