@@ -8,7 +8,8 @@
  * record of what landed, newest first), `sweep` (a check that runs on a schedule), `chain` (named steps in order, also
  * as one row of a list with its name at the left), `tally` (a count shown as boxes), `note` (words only) and `trial`
  * (several candidates, each scored, one kept; see `trial.mjs`). The instruments, which hold no item and have no port
- * (`table`, and the lines of a `note` that follow a station), are read and shaped in `instruments.mjs`.
+ * (`table`, `series`, a `tally` by rounds, and the lines of a `note` that follow a station), are read and shaped in
+ * `instruments.mjs`.
  */
 
 import { cornerPath, curvePath } from "./geometry.mjs";
@@ -26,13 +27,22 @@ import {
 	textWidth,
 	widestRoundText,
 } from "./metrics.mjs";
-import { NOTE_SIZES, readLinkedLines, readTable, resolveLinks, shapeTable } from "./instruments.mjs";
+import {
+	NOTE_SIZES,
+	readLinkedLines,
+	readSeries,
+	readTable,
+	resolveLinks,
+	shapeSeries,
+	shapeTable,
+	tallyMarks,
+} from "./instruments.mjs";
 import { isRecord, readNumber, readOneOf, readText, readTextList } from "./read.mjs";
 import { resolveTheme } from "./theme.mjs";
 import { shapeTrial, TRIAL_KEEPS, TRIAL_PHASES, trialCaptionLength } from "./trial.mjs";
 
 export const TIERS = ["live", "next", "later"];
-export const NODE_KINDS = ["source", "queue", "worker", "trial", "rail", "sweep", "chain", "tally", "note", "table"];
+export const NODE_KINDS = ["source", "queue", "worker", "trial", "rail", "sweep", "chain", "tally", "note", "table", "series"];
 /** The stations that hold an item for a stay; a queue holds one per slot, the others one at a time. */
 const HOLDING_KINDS = ["queue", "worker", "trial"];
 export const CHAIN_MODES = ["step", "fill", "together"];
@@ -44,7 +54,7 @@ const ID = /^[a-z][a-z0-9-]{0,31}$/;
 const ENDPOINT = /^([a-z][a-z0-9-]{0,31})(?::(\d+))?(?:\.(in|out|top|bottom))?$/;
 
 /** Rows under a station kept for what it says about the item it holds (a worker: its lane, then its phase). */
-const CAPTION_ROWS = { source: 0, queue: 0, worker: 2, trial: 1, rail: 0, sweep: 0, chain: 0, tally: 0, note: 0, table: 0 };
+const CAPTION_ROWS = { source: 0, queue: 0, worker: 2, trial: 1, rail: 0, sweep: 0, chain: 0, tally: 0, note: 0, table: 0, series: 0 };
 
 /** The rows a station keeps under its body: its kind's, and for a rail whose landings carry marks one row for them. */
 export function captionRows(node) {
@@ -118,10 +128,13 @@ function shapeNode(node, x, y, u, rounds) {
 			return { box, track: { x1: x + 2 * u, x2: x + box.w - 2 * u, y: y + box.h / 2 }, ports: boxPorts(box, u) };
 		}
 		case "tally": {
-			const boxes = Array.from({ length: node.boxes }, (_, index) => ({ x: x + index * 2.2 * u, y: y + 0.2 * u, w: 1.6 * u, h: 1.6 * u }));
-			const words = { x: x + node.boxes * 2.2 * u + u, y: y + 1.6 * u };
+			// A tally by rounds writes a word under each box: its boxes stand as far apart as the widest word needs.
+			const marks = tallyMarks(node, rounds);
+			const pitch = Math.max(2.2, node.per ? textWidth(marks.widest, 1.2 * u) / u + 1 : 0);
+			const boxes = Array.from({ length: node.boxes }, (_, index) => ({ x: x + index * pitch * u, y: y + 0.2 * u, w: 1.6 * u, h: 1.6 * u }));
+			const words = { x: x + node.boxes * pitch * u + u, y: y + 1.6 * u };
 			const said = textWidth(node.text ?? "", SMALL_TEXT_SIZE * u, rounds);
-			return { box: { x, y, w: words.x - x + said, h: 2 * u }, boxes, words, ports: {} };
+			return { box: { x, y, w: words.x - x + said, h: (marks.texts.length > 0 ? 4.2 : 2) * u }, boxes, words, ports: {} };
 		}
 		case "chain": {
 			const size = SMALL_TEXT_SIZE * u;
@@ -138,6 +151,8 @@ function shapeNode(node, x, y, u, rounds) {
 		}
 		case "table":
 			return shapeTable(node, x, y, u, rounds);
+		case "series":
+			return shapeSeries(node, x, y, u);
 		default: {
 			// A note: its lines at its size, the line step growing with the size in the same ratio.
 			const scale = node.size === "text" ? 1 : NOTE_SIZES[node.size] / TEXT_SIZE;
@@ -194,6 +209,15 @@ function readNode(raw, path, bands, problems, rounds, marked) {
 		node.pitch = readNumber(raw.pitch, `${path}.pitch`, problems, { min: 4, max: 16, fallback: 6 });
 	} else if (kind === "worker") {
 		node.mechanism = readOneOf(raw.mechanism, MECHANISMS, `${path}.mechanism`, problems, "scan");
+	} else if (kind === "tally" && raw.per !== undefined) {
+		// A tally by rounds: one box per round, the rounds that are over crossed, the round in hand lit.
+		node.per = readOneOf(raw.per, ["round"], `${path}.per`, problems);
+		if (raw.boxes !== undefined || raw.crossed !== undefined)
+			problems.push(`${path}: a tally by rounds has one box per round; it takes no "boxes" and no "crossed"`);
+		node.boxes = rounds;
+		node.crossed = 0;
+		node.text = readText(raw.text, `${path}.text`, problems);
+		node.marks = readText(raw.marks, `${path}.marks`, problems);
 	} else if (kind === "tally") {
 		node.boxes = readNumber(raw.boxes, `${path}.boxes`, problems, { min: 1, max: 12, integer: true });
 		node.crossed = readNumber(raw.crossed, `${path}.crossed`, problems, { min: 0, max: node.boxes, fallback: 0, integer: true });
@@ -228,6 +252,8 @@ function readNode(raw, path, bands, problems, rounds, marked) {
 		node.size = readOneOf(raw.size, Object.keys(NOTE_SIZES), `${path}.size`, problems, "text");
 	} else if (kind === "table") {
 		readTable(raw, node, path, problems);
+	} else if (kind === "series") {
+		readSeries(raw, node, path, problems, rounds);
 	}
 	return node;
 }

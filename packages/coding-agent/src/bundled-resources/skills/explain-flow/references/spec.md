@@ -40,9 +40,10 @@ Every station has `id` (lowercase letters, digits, hyphens), `kind`, `band`, `at
 | `rail` | `dots` 3 to 16 (default 7), `okText`, `failText`: what it says after an `ok` or a `fail` landing | 6 per dot plus 2, 2 high | `in` |
 | `sweep` | `period` seconds for one pass (rounded so whole passes fit the loop) | 14 by 4 | `in`, `out`, `top`, `bottom` |
 | `chain` | `items` (up to 8), `pulse` seconds for one pass, `mode`: `step` (one lit at a time), `fill` (they stay lit until the pass ends), `together`; `tag` and `lead` (columns kept at the left for the tag, name and note) make it a list row | chips sized to their words, 3 high | `in`, `out`, `top`, `bottom` |
-| `tally` | `boxes` 1 to 12, `crossed`, `text` | 2.2 per box plus the words | none |
+| `tally` | `boxes` 1 to 12, `crossed`, `text`; or `per`: `round` for one box per round, with `marks` (a word under each box, as `v{round}`) | 2.2 per box plus the words | none |
 | `note` | `lines` (up to 6): each a text, or `{ "text", "when" }` to light the line while a station is busy; `size`: `text` (default), `lede` or `title` | the words | none |
 | `table` | `columns`: up to 4 header words (none: no header); `rows`: 1 to 8, each `{ "cells", "when" }`; `numbered`: `true` adds a column of row numbers | the cells, one line per row | none |
+| `series` | one of `of` (a trial's id) or `values` (one number per round); `w` and `h`, the plot in units (30 by 12; 16 by 8 to 80 by 30); `axis`: what is measured; `base` with `baseWords`: a level to compare with; `floor`, `ceiling`: the scale | the plot plus 5 rows | none |
 
 A worker keeps two rows under its body for what it says about the item it holds (its lane, then its phase); its `sub` lines start after them. A trial keeps one row (its phase, then the kept candidate and its score). A rail whose landings carry a `mark` keeps one row under its line for the marks; a wire cannot meet such a rail from below. `top` and `bottom` ports sit 2.5 units in from the left edge, and the station's words on that side start after the wire.
 
@@ -118,6 +119,8 @@ Words may hold a round token. `{round}` is the round's number, starting at 1. A 
 ```json
 "clock": "round {round} of 3"
 ```
+
+Two instruments show what the rounds add up to. A `series` is one measure with one point per round. With `of` it reads a trial: the kept score of each round is a point, the other candidates are quiet dots, and a step line shows the best kept score so far. With `values` it joins the numbers the spec gives. A round's point appears when that round reaches its number, so the plot grows through the period; only the newest point says its value. A series has one scale: two measures are two series. A `tally` with `"per": "round"` has one box per round: the rounds that are over are crossed and the round in hand is lit.
 
 A rail dot's `mark` is a token too. It takes the round the item landed in, so the record reads `v3 v2 v1`. A station's words, the `footer`, the `clock`, a `mark` and a step's `carry` may hold a token: when `rounds` is over 1 the tool draws them for the round it is in. A band `title` and a wire `label` belong to the still picture and keep their words. Text with a token is measured by its widest form, so it fits in every round.
 

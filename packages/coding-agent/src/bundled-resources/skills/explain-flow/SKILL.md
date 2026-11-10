@@ -37,9 +37,10 @@ Stations are a closed set, each shaped by what it does. Choose by function, not 
 | `rail` | The record of what landed, newest first. A failure keeps its colour and can carry a mark. With `rounds` over 1 it keeps what the period landed, so the record grows. |
 | `sweep` | A check that runs on a schedule. |
 | `chain` | Named steps in order; as a list row it carries a tag and a name at the left. Modes: `step`, `fill`, `together`. |
-| `tally` | A count shown as boxes, some crossed. |
+| `tally` | A count shown as boxes, some crossed. By rounds: one box per round, the past crossed, the present lit. |
 | `note` | Words only. A line can light while a station works; a note can be the film's title or its closing sentence. |
 | `table` | Rows of short facts, or ordered steps with numbers. A row can light while a station works. |
+| `series` | One measure with one point per round: what the rounds add up to. It can read a trial's scores. |
 
 ### Procedure
 

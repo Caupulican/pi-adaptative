@@ -103,6 +103,17 @@ function trialStays(scene, node) {
 }
 
 /**
+ * The time inside a round at which this trial's kept candidate is known: the start of the keep phase of its last stay.
+ * Undefined when no journey stays here. What the rounds add up to (a series) grows at this moment.
+ */
+export function trialKeptAt(scene, node) {
+	const stays = trialStays(scene, node);
+	if (stays.length === 0) return undefined;
+	const last = stays.reduce((latest, stay) => (stay.end > latest.end ? stay : latest));
+	return last.start + (TRIAL_PHASE_SHARES[0] + TRIAL_PHASE_SHARES[1]) * (last.end - last.start);
+}
+
+/**
  * What a trial shows at one instant: the stay in hand (its round, and how far it is), or the outcome that the last
  * finished stay left, or nothing before the first stay of the period. A film of one round has always been running, so
  * its trial shows the outcome of the loop before.
