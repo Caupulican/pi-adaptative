@@ -260,7 +260,7 @@ interface JudgedAnswer {
 const KNOWLEDGE_JUDGMENT_FORMAT = 2;
 
 /** What one judgment answered, reduced to what admission reads. Content-free, so it is retained and reused. */
-interface KnowledgeJudgment {
+export interface KnowledgeJudgment {
 	readonly calibrated: boolean;
 	readonly answers: Readonly<Record<string, JudgedAnswer>>;
 }
@@ -905,60 +905,10 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 	}
 
 	/**
-	 * One paid judgment per exact program, state and engine. Its content-free answers are retained in the work journal
-	 * and reused instead of buying the same answer again; every gate stays with the caller, and every host fence has
-	 * already run. An engine that cannot checkpoint request admission is asked every time.
+	 * One paid judgment per exact program, state and engine: the shared owner is {@link judgeDecision}.
 	 */
 	private async judge(program: DecisionProgram, state: unknown, signal?: AbortSignal): Promise<KnowledgeJudgment> {
-		const { engine, store } = this.deps;
-		if (!engine) throw new Error("Knowledge judgment engine unavailable");
-		const options = {
-			...this.deps.request,
-			signal,
-			consequence: "high" as const,
-			occupancy: "background" as const,
-		};
-		if (!engine.capabilities().requestLifecycle) return judgmentOf(await engine.evaluate(program, state, options));
-		const key = strictCanonicalDigest(
-			withoutUndefinedMembers({
-				program,
-				state,
-				engine: [engine.id, engine.model],
-				format: KNOWLEDGE_JUDGMENT_FORMAT,
-			}),
-		);
-		const retained = store.work.read(key);
-		if (retained !== undefined) return retainedJudgment(retained);
-		let begun = false;
-		let evaluation: DecisionEvaluation;
-		try {
-			evaluation = await engine.evaluate(program, state, {
-				...options,
-				onRequestAdmitted: (requestId) => {
-					if (begun) return;
-					store.work.beginBatch(
-						[
-							{
-								id: key,
-								owner: strictCanonicalDigest(withoutUndefinedMembers(state)),
-								window: strictCanonicalDigest(program),
-								kind: "grounding",
-							},
-						],
-						requestId,
-					);
-					begun = true;
-				},
-			});
-		} catch (error) {
-			// A received, measured failure releases the cell; a request aborted in flight (deadline, shutdown) is never
-			// replayed. A cooperative stop never aborts one: it withholds the next request at the budget's gate.
-			if (begun && !signal?.aborted) store.work.settle(key);
-			throw error;
-		}
-		const judgment = judgmentOf(evaluation);
-		if (begun) store.work.complete(key, judgment);
-		return judgment;
+		return judgeDecision(this.deps, program, state, signal);
 	}
 
 	private capacityHold(state: unknown): KnowledgeHold | undefined {
@@ -1065,4 +1015,73 @@ export class KnowledgeAdmission implements KnowledgeAdmissionPort {
 		}
 		return found;
 	}
+}
+
+/** What one knowledge judgment needs: a bound engine, the store's work journal, and the request's spending and origin. */
+export interface KnowledgeJudgmentDeps {
+	readonly engine: SemanticDecisionEngine | undefined;
+	readonly store: Pick<KnowledgeStorePort, "work">;
+	readonly request?: Pick<DecisionOptions, "budget" | "origin">;
+}
+
+/**
+ * One paid judgment per exact program, state and engine. Its content-free answers are retained in the work journal and
+ * reused instead of buying the same answer again; every gate stays with the caller, and every host fence has already
+ * run. An engine that cannot checkpoint request admission is asked every time.
+ */
+export async function judgeDecision(
+	deps: KnowledgeJudgmentDeps,
+	program: DecisionProgram,
+	state: unknown,
+	signal?: AbortSignal,
+): Promise<KnowledgeJudgment> {
+	const { engine, store } = deps;
+	if (!engine) throw new Error("Knowledge judgment engine unavailable");
+	const options = {
+		...deps.request,
+		signal,
+		consequence: "high" as const,
+		occupancy: "background" as const,
+	};
+	if (!engine.capabilities().requestLifecycle) return judgmentOf(await engine.evaluate(program, state, options));
+	const key = strictCanonicalDigest(
+		withoutUndefinedMembers({
+			program,
+			state,
+			engine: [engine.id, engine.model],
+			format: KNOWLEDGE_JUDGMENT_FORMAT,
+		}),
+	);
+	const retained = store.work.read(key);
+	if (retained !== undefined) return retainedJudgment(retained);
+	let begun = false;
+	let evaluation: DecisionEvaluation;
+	try {
+		evaluation = await engine.evaluate(program, state, {
+			...options,
+			onRequestAdmitted: (requestId) => {
+				if (begun) return;
+				store.work.beginBatch(
+					[
+						{
+							id: key,
+							owner: strictCanonicalDigest(withoutUndefinedMembers(state)),
+							window: strictCanonicalDigest(program),
+							kind: "grounding",
+						},
+					],
+					requestId,
+				);
+				begun = true;
+			},
+		});
+	} catch (error) {
+		// A received, measured failure releases the cell; a request aborted in flight (deadline, shutdown) is never
+		// replayed. A cooperative stop never aborts one: it withholds the next request at the budget's gate.
+		if (begun && !signal?.aborted) store.work.settle(key);
+		throw error;
+	}
+	const judgment = judgmentOf(evaluation);
+	if (begun) store.work.complete(key, judgment);
+	return judgment;
 }

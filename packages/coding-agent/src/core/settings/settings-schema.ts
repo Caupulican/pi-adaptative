@@ -221,6 +221,8 @@ export type AutoLearnThinkingLevel = "off" | "minimal" | "low" | "medium" | "hig
 
 export interface AutoLearnSettings {
 	knowledgeMaxUsd?: number; // default: 0.05 per original owner source per session, extraction and admission combined
+	history?: boolean; // default: true; an idle collection pass may read the repository's history for taste proposals
+	historyMaxUsd?: number; // default: 0.25 spent at most by one look at the repository's history
 	knowledgeSessionMaxUsd?: number; // default: 0.50 cumulative collection spend per session, retained across restarts
 	announce?: boolean; // default: true; tell the owner on screen when automatic collection learns or updates a fact
 	knowledgeIdleDelayMs?: number; // default: 2000 before collecting original owner knowledge while idle

@@ -107,6 +107,8 @@ export async function runJourney1(): Promise<void> {
 				// The owner's notice of what automatic collection learned or updated: informational, shown on screen only.
 				/^(Learned|Updated) \(\w+\): .+ {2}\/knowledge show [0-9a-f]{8}$/,
 				/^and \d+ more: \/knowledge list$/,
+				// The owner's notice of what a look at the repository's history offered: informational, exact text.
+				/^Taste proposals from this repository's history: \d+\. {2}\/taste proposals$/,
 				// R10s: each failed attempt of the fresh chat's leaf 1 (both requests met the scripted 503): exact text.
 				/^Continuous-chat compaction 1\+1 failed: Continuous-chat compaction stopped \(error\): HTTP 503 Service Unavailable: upstream overloaded$/,
 				// An owner that disposes with paid usage still unconfirmed keeps it in its journal. The pending form is for a file that exists

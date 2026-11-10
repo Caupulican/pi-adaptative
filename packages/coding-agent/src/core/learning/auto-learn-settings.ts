@@ -3,6 +3,8 @@ import type { AutoLearnSettings, AutonomyMode } from "../settings/settings-schem
 /** The authoritative Auto Learn defaults used by runtime resolution and settings UI. */
 export const DEFAULT_AUTO_LEARN_SETTINGS = {
 	knowledgeMaxUsd: 0.05,
+	history: true,
+	historyMaxUsd: 0.25,
 	knowledgeSessionMaxUsd: 0.5,
 	knowledgeIdleDelayMs: 2_000,
 	announce: true,
@@ -55,6 +57,8 @@ export function resolveAutoLearnSettings(
 	const preset = getAutoLearnPreset(mode, settings);
 	return {
 		knowledgeMaxUsd: settings.knowledgeMaxUsd ?? preset.knowledgeMaxUsd,
+		history: settings.history ?? preset.history,
+		historyMaxUsd: settings.historyMaxUsd ?? preset.historyMaxUsd,
 		knowledgeSessionMaxUsd: settings.knowledgeSessionMaxUsd ?? preset.knowledgeSessionMaxUsd,
 		knowledgeIdleDelayMs: settings.knowledgeIdleDelayMs ?? preset.knowledgeIdleDelayMs,
 		announce: settings.announce ?? preset.announce,

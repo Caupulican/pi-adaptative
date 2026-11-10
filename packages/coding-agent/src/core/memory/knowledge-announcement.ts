@@ -5,7 +5,11 @@
  */
 import { resolveAutoLearnSettings } from "../learning/auto-learn-settings.ts";
 import type { AutoLearnSettings, AutonomySettings } from "../settings/settings-schema.ts";
-import type { KnowledgeCollectionHandoff, KnowledgeCollectionOutcome } from "./knowledge-collector.ts";
+import type {
+	KnowledgeCollectionHandoff,
+	KnowledgeCollectionOutcome,
+	KnowledgeHistoryLook,
+} from "./knowledge-collector.ts";
 import type { KnowledgeKind, KnowledgeMutationReceipt } from "./knowledge-record.ts";
 
 /** Lines a pass names one by one; the rest is counted. */
@@ -103,5 +107,34 @@ export function knowledgeTerminalHook(
 	return (outcome, handoff, changes) => {
 		emitKnowledgeCollection({ outcome, handoff, changes }, settings, emit);
 		afterwards();
+	};
+}
+
+/** The one line the owner gets for a look at the repository's history that offered proposals. */
+export function tasteProposalNotice(offered: number): string {
+	return `Taste proposals from this repository's history: ${offered}.  /taste proposals`;
+}
+
+/**
+ * Every knowledge hook a session gives its collector: the terminal announcement, the idle-pass signal, and the one
+ * repository look an idle pass may take, with its owner-facing line. The line is an informational session event, so no
+ * model request carries it and nothing records it as evidence, history or knowledge.
+ */
+export function knowledgeSessionHooks(
+	settings: Parameters<typeof emitKnowledgeCollection>[1],
+	emit: Parameters<typeof emitKnowledgeCollection>[2],
+	cwd: string,
+	afterwards: () => void,
+): { onTerminal: ReturnType<typeof knowledgeTerminalHook>; onIdlePass: () => void; history: KnowledgeHistoryLook } {
+	const announceTaste = (offered: number): void => {
+		if (offered < 1) return;
+		if (!resolveAutoLearnSettings(settings.getAutonomySettings().mode, settings.getAutoLearnSettings()).announce)
+			return;
+		emit({ type: "warning", message: tasteProposalNotice(offered), severity: "info" });
+	};
+	return {
+		onTerminal: knowledgeTerminalHook(settings, emit, afterwards),
+		onIdlePass: afterwards,
+		history: { cwd, announce: announceTaste },
 	};
 }

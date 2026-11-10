@@ -197,7 +197,7 @@ import {
 } from "./memory/continuous-chat-projection.ts";
 import { readContinuousChatSettings, validateContinuousChatSummaryModel } from "./memory/continuous-chat-settings.ts";
 import { ContinuousChatSpendMeter } from "./memory/continuous-chat-spend.ts";
-import { knowledgeTerminalHook } from "./memory/knowledge-announcement.ts";
+import { knowledgeSessionHooks } from "./memory/knowledge-announcement.ts";
 import { MemoryController, type MemoryOperatorPort } from "./memory-controller.ts";
 import {
 	deriveModelCapabilityProfile,
@@ -1377,10 +1377,9 @@ export class AgentSession {
 					isForegroundBusy: () => this._foregroundRecovery.isBusy,
 					subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
 					maxEstimatedUsd: () => this.capabilityEnvelope?.maxEstimatedUsd,
-					onTerminal: knowledgeTerminalHook(this.settingsManager, this._emit.bind(this), () =>
+					...knowledgeSessionHooks(this.settingsManager, this._emit.bind(this), this._cwd, () =>
 						this._observeKnowledgeCollection(),
 					),
-					onIdlePass: () => this._observeKnowledgeCollection(),
 				}),
 			subscribeEntriesPersisted: (listener) => this.sessionManager.onEntriesPersisted(listener),
 			// ICM's project chat: each turn projects onto the provider runtime, and its compactions repeat the accepted prefix.

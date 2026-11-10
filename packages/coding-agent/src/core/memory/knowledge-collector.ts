@@ -17,14 +17,21 @@ import type {
 } from "../settings/settings-schema.ts";
 import { canonicalDigest, strictCanonicalDigest } from "../steering/canonical.ts";
 import type { TimerPort } from "../util/timer-port.ts";
-import { type KnowledgeAdmissionPort, type KnowledgeChange, parseKnowledgeChange } from "./knowledge-admission.ts";
+import {
+	judgeDecision,
+	type KnowledgeAdmissionPort,
+	type KnowledgeChange,
+	parseKnowledgeChange,
+} from "./knowledge-admission.ts";
 import { EMPTY_CHANGE_DIGEST, type KnowledgeChangeDigest, withAppliedChange } from "./knowledge-announcement.ts";
 import { type KnowledgeCollectionClaim, knowledgeCollectionSourceIdentity } from "./knowledge-collection-journal.ts";
 import { extractKnowledgeCandidates, KnowledgeExtractionRefusal } from "./knowledge-extractor.ts";
-import type { KnowledgeScope } from "./knowledge-record.ts";
+import { type KnowledgeRecord, type KnowledgeScope, knowledgeId, MAX_KNOWLEDGE_PAGE_SIZE } from "./knowledge-record.ts";
 import type { KnowledgeStore } from "./knowledge-store.ts";
 import type { KnowledgeReadSource } from "./knowledge-tool.ts";
 import { KnowledgeWorkUnresolved } from "./knowledge-work-journal.ts";
+import { countOwnerCommitsAfter, REPOSITORY_HISTORY_ORIGIN, readOwnerHistory } from "./repository-history.ts";
+import { mineTasteFromHistory, type TasteHistoryMiningResult } from "./taste-history-miner.ts";
 
 const EXTRACTOR_VERSION = "owner-knowledge-v1";
 export const KNOWLEDGE_COLLECTION_OPERATION_PREFIX = "knowledge-collection:";
@@ -33,6 +40,14 @@ const PASS_DEADLINE_MS = 120_000;
 const RETRY_DELAY_MS = 60_000;
 /** Resumptions from a paying hold before a source waits for a configuration change. */
 const MAX_SOURCE_RETRIES = 4;
+/** The output limit of one bounded reading: the model's own limit, capped. */
+const MAX_READING_OUTPUT_TOKENS = 4_096;
+/** Looks that threw a request error after which the look is decided, so a failing request is asked twice, not on every pass. */
+const MAX_HISTORY_LOOK_ATTEMPTS = 2;
+/** Owner commits after a recorded history cursor that make a new look worth paying for. */
+const HISTORY_LOOK_COMMITS = 50;
+/** Commits a sample must hold before a look is worth a request. */
+const MIN_HISTORY_SAMPLE_COMMITS = 5;
 
 class CollectionDeadline extends Error {}
 /** The owner moved on. It stops the pass from starting requests and never aborts a request already sent. */
@@ -84,6 +99,16 @@ export interface KnowledgeCollectionRuntime {
 	): void;
 	/** Called after an idle pass that claimed nothing: it writes no terminal, so this is its only signal. Nothing persists. */
 	onIdlePass?(): void;
+	/** Where a pass may read this repository's history, and how the owner hears what a look offered. */
+	readonly history?: KnowledgeHistoryLook;
+}
+
+/** One repository a collector may read, and the one line its owner gets for what a look offered. */
+export interface KnowledgeHistoryLook {
+	/** The working directory whose repository is read, by its configured identity. */
+	readonly cwd: string;
+	/** One owner-facing count of what a look offered; zero says nothing. */
+	announce(offered: number): void;
 }
 
 /** Why automatic collection starts no requests; explicit owner changes through the knowledge tool stay available. */
@@ -202,6 +227,10 @@ export class KnowledgeCollector {
 	private lastIdlePass: { readonly id: string; readonly at: number } | undefined;
 	private accountingDirty = false;
 	private beganWithUnresolvedAccounting = false;
+	/** One look at the repository's history is decided per collector: looked, not due, or nothing to read. */
+	private historyDecided = false;
+	/** Looks whose request threw: the look is decided after {@link MAX_HISTORY_LOOK_ATTEMPTS} of them. */
+	private historyAttempts = 0;
 
 	constructor(deps: KnowledgeCollectorDeps) {
 		this.deps = deps;
@@ -322,6 +351,9 @@ export class KnowledgeCollector {
 		const valid =
 			Number.isFinite(settings.knowledgeMaxUsd) &&
 			settings.knowledgeMaxUsd >= 0 &&
+			typeof settings.history === "boolean" &&
+			Number.isFinite(settings.historyMaxUsd) &&
+			settings.historyMaxUsd >= 0 &&
 			Number.isFinite(settings.knowledgeSessionMaxUsd) &&
 			settings.knowledgeSessionMaxUsd >= 0 &&
 			Number.isSafeInteger(settings.knowledgeIdleDelayMs) &&
@@ -491,6 +523,9 @@ export class KnowledgeCollector {
 			}
 			this.more = this.deps.evidence.readSources(this.cursor).length > 0;
 			this.revision = this.deps.store.revision();
+			// A pass that claimed no source and finds none waiting may look at the repository's history instead.
+			if (outcome.sources === 0 && !this.more)
+				await this.lookAtHistory(config, origin, assertCurrent, controller.signal);
 			if (outcome.held > 0) status = "held";
 		} catch {
 			status = controller.signal.aborted || yielding.signal.aborted ? "cancelled" : "failed";
@@ -514,6 +549,100 @@ export class KnowledgeCollector {
 				this.pendingChanges = changes;
 				this.flushTerminal();
 			}
+		}
+	}
+
+	/**
+	 * One idle pass may read this repository's history once and offer taste proposals from the owner's own commits. When the
+	 * look returns, it changes nothing about how the pass ends: a pass that claimed no source stays an idle pass. When its
+	 * request throws, the pass fails like any other thrown request, writes its terminal and is retried after the delay, and
+	 * the look stays undecided; {@link MAX_HISTORY_LOOK_ATTEMPTS} such looks decide it, so a request that fails every time
+	 * is asked twice, not on every later pass.
+	 */
+	private async lookAtHistory(
+		config: Configuration,
+		origin: ReturnType<SessionSemanticUsageDelivery["captureOrigin"]>,
+		assertCurrent: () => void,
+		signal: AbortSignal,
+	): Promise<void> {
+		const history = this.deps.history;
+		const model = config.model;
+		if (!history || !config.settings.history || !config.engine || !model) return;
+		if (this.historyDecided) return;
+		// Spending first: a look nothing can pay for reads no git and asks nothing.
+		const project = this.deps.scope.project;
+		const operationId = `${KNOWLEDGE_COLLECTION_OPERATION_PREFIX}${REPOSITORY_HISTORY_ORIGIN}:${project}`;
+		const spending = this.deps.usageOwner.spending(KNOWLEDGE_COLLECTION_OPERATION_PREFIX, operationId);
+		// An unresolved charge is settled by a later pass, which may look then: this pass reads nothing and stays undecided.
+		if (spending.unresolved) return;
+		const remaining = Math.min(
+			config.settings.historyMaxUsd - spending.operationUsd,
+			config.settings.knowledgeSessionMaxUsd - spending.totalUsd,
+			this.deps.maxEstimatedUsd() ?? Number.POSITIVE_INFINITY,
+		);
+		if (remaining <= 0) {
+			this.historyDecided = true;
+			return;
+		}
+		assertCurrent();
+		const looked = this.deps.store.originLooks.last(project, REPOSITORY_HISTORY_ORIGIN);
+		if (looked !== undefined) {
+			const counted = await countOwnerCommitsAfter({ cwd: history.cwd, after: looked.cursor, signal });
+			if (counted.status === "counted" && counted.count < HISTORY_LOOK_COMMITS) {
+				this.historyDecided = true;
+				return;
+			}
+		}
+		assertCurrent();
+		const sample = await readOwnerHistory({ cwd: history.cwd, signal });
+		if (sample.status !== "sample" || sample.commits.length < MIN_HISTORY_SAMPLE_COMMITS) {
+			this.historyDecided = true;
+			return;
+		}
+		const budget = new RequestSpendBudget(remaining, assertCurrent);
+		const request = { budget, origin: { ...origin, operationId } };
+		const knownTasteTexts = this.tasteFacts().map((record) => record.text);
+		this.historyAttempts += 1;
+		let result: TasteHistoryMiningResult;
+		try {
+			result = await mineTasteFromHistory({
+				sample,
+				project,
+				journal: this.deps.store.proposals,
+				knownTasteTexts,
+				// The identity a proposal would carry at this collector's own scope, which is the one the journal offers.
+				hasLiveTaste: (subject, key) =>
+					this.deps.store.get(knowledgeId({ kind: "taste", scope: this.deps.scope, subject, key })) !== undefined,
+				model,
+				maxTokens: Math.min(model.maxTokens, MAX_READING_OUTPUT_TOKENS),
+				budget,
+				usageOwner: this.deps.usageOwner,
+				origin: request.origin,
+				runIsolatedCompletion: this.deps.runIsolatedCompletion,
+				assertCurrent,
+				signal,
+				judge: (program, state, judgedSignal) =>
+					judgeDecision({ engine: config.engine, store: this.deps.store, request }, program, state, judgedSignal),
+			});
+		} catch (error) {
+			if (this.historyAttempts >= MAX_HISTORY_LOOK_ATTEMPTS) this.historyDecided = true;
+			throw error;
+		}
+		this.historyDecided = true;
+		this.deps.store.originLooks.record(project, REPOSITORY_HISTORY_ORIGIN, sample.head);
+		history.announce(result.offered);
+	}
+
+	/** The live taste facts that apply here (global and project reach), read the way `/taste` reads them. */
+	private tasteFacts(): KnowledgeRecord[] {
+		const records: KnowledgeRecord[] = [];
+		let after: string | undefined;
+		for (;;) {
+			const page = this.deps.store.list(this.deps.scope, { kind: "taste", after, limit: MAX_KNOWLEDGE_PAGE_SIZE });
+			records.push(...page);
+			const last = page.at(-1)?.id;
+			if (page.length < MAX_KNOWLEDGE_PAGE_SIZE || last === undefined) return records;
+			after = last;
 		}
 	}
 
@@ -691,7 +820,7 @@ export class KnowledgeCollector {
 									else this.deps.store.work.discard(workId, "forgotten");
 								},
 								model: config.model!,
-								maxTokens: Math.min(config.model!.maxTokens, 4_096),
+								maxTokens: Math.min(config.model!.maxTokens, MAX_READING_OUTPUT_TOKENS),
 								budget,
 								origin: request.origin,
 								usageOwner: this.deps.usageOwner,

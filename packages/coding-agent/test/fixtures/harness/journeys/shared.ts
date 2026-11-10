@@ -1584,7 +1584,7 @@ export type KnowledgeJudgmentAnswer =
  */
 export function knowledgeJudgment(
 	name: string,
-	program: "knowledge.admission" | "knowledge.identity" | "routine.intake",
+	program: "knowledge.admission" | "knowledge.identity" | "routine.intake" | "taste.history",
 	answers: readonly KnowledgeJudgmentAnswer[],
 	evidence: () => string,
 ): ScriptStep {

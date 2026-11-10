@@ -1,17 +1,15 @@
 /** Bounded proposal extraction; the collection coordinator owns admission and persistence. */
 import type { Api, Model } from "@caupulican/pi-ai";
-import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
 import { Type } from "typebox";
 import type { AgentTool } from "../../kernel/types.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
-import { BoundedCompletionUsage } from "../cost/bounded-completion-usage.ts";
 import type { RequestSpendBudget } from "../cost/request-spend-budget.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
 import type { OwnerEvidenceRecord } from "../learning/owner-evidence-ledger.ts";
 import type { OwnerEvidenceWindow } from "../learning/owner-evidence-window.ts";
-import { isolatedCompletionError } from "../provider-admission/refusal.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
+import { runBoundedSubmissionCompletion } from "./bounded-submission-completion.ts";
 import { type KnowledgeChange, knowledgeChangeSchema } from "./knowledge-admission.ts";
 import { MAX_COLLECTION_CANDIDATES, validateCollectionCandidates } from "./knowledge-collection-journal.ts";
 import { isKnowledgeTimestamp } from "./knowledge-record.ts";
@@ -115,60 +113,11 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 		);
 	if (hasMaskableSecretText(source.text))
 		throw new KnowledgeExtractionRefusal("unsafe_source", "Secret-bearing owner evidence cannot enter extraction.");
-	if (!Number.isSafeInteger(input.maxTokens) || input.maxTokens < 1 || input.maxTokens > input.model.maxTokens)
-		throw new RangeError("Knowledge extraction requires a valid model output limit.");
-	const usage = new BoundedCompletionUsage(
-		input.usageOwner,
-		"knowledge_collection",
-		input.budget,
-		MAX_KNOWLEDGE_EXTRACTION_TURNS,
-		input.origin,
-	);
-	let closed = false;
 	const capture: { submission?: KnowledgeExtractionSubmission } = {};
-	// A response already received is processed and retained unless the extraction was aborted or ended. A cooperative
-	// stop (the owner typing, new evidence, a settings change) only withholds the next request.
+	let open = true;
 	const assertOpen = (): void => {
 		input.signal.throwIfAborted();
-		if (closed) throw new Error("Knowledge extraction already ended.");
-	};
-	const assertMayRequest = (): void => {
-		assertOpen();
-		input.assertCurrent();
-	};
-	const submit: AgentTool<typeof submissionParameters> = {
-		name: KNOWLEDGE_SUBMISSION_TOOL_NAME,
-		label: "Submit knowledge candidates",
-		description: "Submit one complete, evidence-backed proposal list. This ends extraction and stores nothing.",
-		parameters: submissionParameters,
-		executionMode: "sequential",
-		execute: async (_id, params) => {
-			assertOpen();
-			if (capture.submission !== undefined)
-				throw new KnowledgeExtractionRefusal("invalid_submission", "Knowledge candidates were already submitted.");
-			if (params.candidates.length > MAX_COLLECTION_CANDIDATES || (!params.complete && params.candidates.length > 0))
-				throw new KnowledgeExtractionRefusal(
-					"invalid_submission",
-					"Only a complete bounded candidate list is accepted.",
-				);
-			let candidates: KnowledgeChange[];
-			try {
-				candidates = validateCollectionCandidates(source.sourceId, params.candidates);
-			} catch (error) {
-				// Refused at the tool boundary, so the model can correct it and no uninstallable answer is retained.
-				throw new KnowledgeExtractionRefusal(
-					"invalid_submission",
-					error instanceof Error ? error.message : "Invalid knowledge candidates.",
-				);
-			}
-			capture.submission = { complete: params.complete, candidates };
-			input.onSubmission?.(capture.submission);
-			return {
-				content: [{ type: "text", text: "Proposal received for independent admission. No knowledge was stored." }],
-				details: { complete: params.complete, candidates: capture.submission.candidates.length },
-				terminate: true,
-			};
-		},
+		if (!open) throw new Error("Knowledge extraction already ended.");
 	};
 	const knowledge: AgentTool<ReturnType<typeof createKnowledgeTool>["parameters"]> = createKnowledgeTool(
 		() => {
@@ -178,7 +127,7 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 		{ readOnly: true },
 	);
 	try {
-		const result = await input.runIsolatedCompletion({
+		const outcome = await runBoundedSubmissionCompletion({
 			systemPrompt: SYSTEM_PROMPT,
 			messages: [
 				{
@@ -197,14 +146,16 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 				},
 			],
 			model: input.model,
-			thinkingLevel: resolveModelThinkingLevel(input.model, "low"),
 			maxTokens: input.maxTokens,
+			budget: input.budget,
+			usageOwner: input.usageOwner,
+			origin: input.origin,
 			maxTurns: MAX_KNOWLEDGE_EXTRACTION_TURNS,
-			maxRetries: 0,
+			lane: "knowledge_collection",
 			signal: input.signal,
-			cacheRetention: "short",
-			laneKind: "knowledge_collection",
-			tools: [knowledge, submit],
+			assertCurrent: () => input.assertCurrent(),
+			runIsolatedCompletion: (options) => input.runIsolatedCompletion(options),
+			tools: [knowledge],
 			// A tool runs on a response already received: its own measured charge never blocks it, and the next
 			// request's preflight refuses a failed allowance.
 			beforeToolCall: async (context) => {
@@ -224,34 +175,53 @@ export async function extractKnowledgeCandidates(input: KnowledgeExtractionInput
 					};
 				return undefined;
 			},
-			requestPreflight: (request) => {
-				assertMayRequest();
-				const decision = usage.preflight(request);
-				return decision;
+			stoppedLabel: "Knowledge extraction",
+			submission: {
+				name: KNOWLEDGE_SUBMISSION_TOOL_NAME,
+				label: "Submit knowledge candidates",
+				description: "Submit one complete, evidence-backed proposal list. This ends extraction and stores nothing.",
+				parameters: submissionParameters,
+				accept: (params) => {
+					if (
+						params.candidates.length > MAX_COLLECTION_CANDIDATES ||
+						(!params.complete && params.candidates.length > 0)
+					)
+						throw new KnowledgeExtractionRefusal(
+							"invalid_submission",
+							"Only a complete bounded candidate list is accepted.",
+						);
+					let candidates: KnowledgeChange[];
+					try {
+						candidates = validateCollectionCandidates(source.sourceId, params.candidates);
+					} catch (error) {
+						// Refused at the tool boundary, so the model can correct it and no uninstallable answer is retained.
+						throw new KnowledgeExtractionRefusal(
+							"invalid_submission",
+							error instanceof Error ? error.message : "Invalid knowledge candidates.",
+						);
+					}
+					const submission: KnowledgeExtractionSubmission = { complete: params.complete, candidates };
+					capture.submission = submission;
+					input.onSubmission?.(submission);
+					return {
+						submission,
+						text: "Proposal received for independent admission. No knowledge was stored.",
+						details: { complete: params.complete, candidates: candidates.length },
+					};
+				},
 			},
-			requestGuard: () => {
-				assertMayRequest();
-				usage.assertHealthy();
-			},
-			providerResponseObserver: usage,
 		});
-		assertOpen();
 		// A received submission was retained by `onSubmission` and is the result even if its measured charge failed
 		// the allowance; the caller's next request is refused instead.
-		if (capture.submission === undefined) {
-			usage.assertHealthy();
-			if (result.stopReason === "error" || result.stopReason === "aborted")
-				throw isolatedCompletionError(result, `Knowledge extraction ${result.stopReason}.`);
+		if (outcome.status === "no_submission")
 			throw new KnowledgeExtractionRefusal(
 				"missing_submission",
 				"Extraction ended without a complete candidate submission.",
 			);
-		}
-		if (!capture.submission.complete)
+		if (!outcome.submission.complete)
 			throw new KnowledgeExtractionRefusal("source_capacity", "Source core requires subdivision");
-		return capture.submission.candidates;
+		return outcome.submission.candidates;
 	} finally {
-		closed = true;
-		usage.release();
+		open = false;
 	}
 }
