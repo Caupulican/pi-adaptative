@@ -23,10 +23,10 @@ import { expectOwnerWords, INTAKE_JUDGMENTS_WITHOUT_GRANT } from "./shared.ts";
  *
  * A priced model is one an API key pays for, so its starts carry a metered estimate; a model with no price costs nothing
  * and is never held by dollars. With today's spend already at `fleet.budgets.meteredUsdPerDay`, a paid start waits on the
- * day budget while an unpriced one runs. Then a start waits on the running ceiling, and raising that ceiling alone does
- * not start it: the terminal of the worker that was running does. Finally, with the current 15-minute window's spend over
- * the brake's line, a paid start waits on the brake, the owner is told once, unpriced work still starts, and the owner's
- * continue lifts the brake for the rest of the window so the waiting paid start runs.
+ * day budget while an unpriced one runs. Then a start waits on the running ceiling, and raising that ceiling starts the
+ * waiting worker at once, while the worker that held the room still runs. Finally, with the current 15-minute window's
+ * spend over the brake's line, a paid start waits on the brake, the owner is told once, unpriced work still starts, and
+ * the owner's continue lifts the brake for the rest of the window so the waiting paid start runs.
  */
 
 /** The priced model: the world configures its price, so an estimate per worker exists. */
@@ -159,7 +159,7 @@ export async function runJourney8MeteredPhase(world: HarnessWorld): Promise<void
 		"the waiting paid start sent no request and reserved no money against the budget",
 	).toEqual({ paidRequests: 0, reservations: {}, dayUsd: DAY_BUDGET_USD });
 
-	// 2. A start waits for the running ceiling, and raising the ceiling alone does not start it.
+	// 2. A start waits for the running ceiling, and raising the ceiling starts it before anything else ends.
 	world.settingsManager.setFleetSettings({
 		...world.settingsManager.getGlobalSettings().fleet,
 		ceiling: { ...world.settingsManager.getGlobalSettings().fleet?.ceiling, running: 1 },
@@ -175,18 +175,21 @@ export async function runJourney8MeteredPhase(world: HarnessWorld): Promise<void
 		...world.settingsManager.getGlobalSettings().fleet,
 		ceiling: { ...world.settingsManager.getGlobalSettings().fleet?.ceiling, running: 2 },
 	});
-	await settle();
-	expect(
-		world.provider.requests.filter((request) => request.model.id === FREE_B).length,
-		"raising the running ceiling starts nothing by itself: the waiting start needs another event",
-	).toBe(0);
-	// The event is the terminal of the worker that was running.
-	unpaidOne.holds.release();
 	await withDeadline(
 		trace,
-		"the ceiling start runs after the running worker ends",
+		"the start that waited for the ceiling reaches its first request on the raise itself",
 		ceilingWorker.firstRequest.promise,
 	);
+	expect(
+		{
+			ceilingRequests: world.provider.requests.filter((request) => request.model.id === FREE_B).length,
+			heldStatus: session.getLaneRecords().find((record) => record.laneId === unpaidReceipt.laneId)?.status,
+			ceilingStatus: session.getLaneRecords().find((record) => record.laneId === ceilingReceipt.laneId)?.status,
+		},
+		"raising the running ceiling decides the waiting start again, so it runs while the worker that held the room still runs",
+	).toEqual({ ceilingRequests: 1, heldStatus: "running", ceilingStatus: "running" });
+	// The worker that held the room now ends, and its handoff reaches the root as before.
+	unpaidOne.holds.release();
 	await withDeadline(trace, "the first handoff reaches the root", wakeAt(0).promise);
 	await withDeadline(trace, "the handoff turn settles", session.waitForForegroundIdle());
 

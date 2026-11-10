@@ -110,6 +110,7 @@ export class AwayParentUnavailable extends Error {
 /** The settings worker execution reads, narrowed to what a run away may do: no memory, no System One, its spend bound. */
 function awaySettingsSource(settings: SettingsManager, maxUsdPerRun: () => number): ParentExecutionSettingsSource {
 	return {
+		subscribeChanges: (listener) => settings.subscribeChanges(listener),
 		getCompactionSettings: () => settings.getCompactionSettings(),
 		getEdgeSettings: () => settings.getEdgeSettings(),
 		getFleetSettings: () => settings.getFleetSettings(),

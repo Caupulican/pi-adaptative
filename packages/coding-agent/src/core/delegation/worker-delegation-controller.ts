@@ -130,7 +130,7 @@ import {
 import { captureWorkerReceiptFacts } from "../orchestration/worker-result-receipts.ts";
 import { PROACTIVITY_TOOL_NAME } from "../proactivity/proactivity-tool.ts";
 import { resolveProviderAccountKey } from "../provider-admission/account-key.ts";
-import { isEmergencyStopEngaged, subscribeOwnerContinue } from "../provider-admission/emergency-stop.ts";
+import { isEmergencyStopEngaged } from "../provider-admission/emergency-stop.ts";
 import { ProviderLimitStore } from "../provider-admission/limit-state.ts";
 import { BUILT_IN_PROVIDER_DISPLAY_NAMES } from "../provider-display-names.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
@@ -289,6 +289,7 @@ import {
 	WorkerProfileResolver,
 } from "./worker-profile-resolver.ts";
 import { type WorkerProjectAdmission, WorkerProjectDirectory } from "./worker-project-directory.ts";
+import { startWorkerQueueWakes } from "./worker-queue-wakes.ts";
 import { assertQueuedWorkerContextRecoverable } from "./worker-queued-context-recovery.ts";
 import { recordWorkerReceiptAcceptance } from "./worker-receipt-acceptance.ts";
 import { WorkerRecoveryCoordinator, type WorkerRecoveryDispatchResult } from "./worker-recovery-coordinator.ts";
@@ -969,23 +970,18 @@ export class WorkerDelegationController {
 			this.agentControl.signalStateChanged();
 			if (!this.deps.isDisposed() && !this.workerAbort.signal.aborted) this.scheduler.drain(true);
 		});
-		// Admission holds every queued worker while the machine-wide emergency stop exists; the owner's continue (a lift, or
-		// `/estop off` with no stop engaged) wakes the queue and resumes the fleet, since nothing else drains an idle queue.
-		this.unsubscribeEmergencyStop = subscribeOwnerContinue(this.deps.getAgentDir(), () => {
-			if (isEmergencyStopEngaged(this.deps.getAgentDir())) return;
-			if (this.deps.isDisposed() || this.workerAbort.signal.aborted) return;
-			harnessLog.info("delegation", "queued workers were woken by the owner's continue");
-			// The continue runs this synchronously inside the caller's `liftEmergencyStop`: a failed drain never fails it.
-			try {
-				// The owner's continue: the fleet's resume lifts the spend brake and ramps the account windows before the drain.
-				this.fleet.resume();
-				this.scheduler.drain(true);
-			} catch (error) {
-				this.safeWarn(
-					`Worker queue wake after the owner's continue failed: ${error instanceof Error ? error.message : String(error)}`,
-				);
-			}
-		});
+		// Admission holds every queued worker while the machine-wide emergency stop exists, and a raised setting is what a
+		// queued start waited for; nothing else drains an idle queue. Both wakes re-decide the whole queue.
+		this.stopQueueWakes = startWorkerQueueWakes(
+			{
+				agentDir: () => this.deps.getAgentDir(),
+				isClosed: () => this.deps.isDisposed() || this.workerAbort.signal.aborted,
+				resumeFleet: () => this.fleet.resume(),
+				drainQueue: (reservationAvailable) => this.scheduler.drain(reservationAvailable),
+				warn: (message) => this.safeWarn(message),
+			},
+			this.deps.getSettingsManager(),
+		);
 	}
 
 	/**
@@ -1240,8 +1236,8 @@ export class WorkerDelegationController {
 		this.fleet.dispose();
 		this.unsubscribeRuntimeRecovery?.();
 		this.unsubscribeRuntimeRecovery = undefined;
-		this.unsubscribeEmergencyStop?.();
-		this.unsubscribeEmergencyStop = undefined;
+		this.stopQueueWakes?.();
+		this.stopQueueWakes = undefined;
 		// Retained releases get one last pass after every execution joined; no alarm fires for them from here on.
 		this.retainedReleases.close();
 		this.laneReleases.close();
@@ -1512,7 +1508,7 @@ export class WorkerDelegationController {
 	}
 
 	private unsubscribeRuntimeRecovery: (() => void) | undefined;
-	private unsubscribeEmergencyStop: (() => void) | undefined;
+	private stopQueueWakes: (() => void) | undefined;
 
 	private async joinWorkerCompletions(finalizePhysicalCleanup = false): Promise<void> {
 		// Settlements may finish an already-admitted start's cleanup. Await that work's actual promise;

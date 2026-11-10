@@ -85,6 +85,11 @@ import type { WorkerTerminalHandoff } from "./worker-terminal-handoff-coordinato
 
 /** The settings worker execution reads, declared here; the composition root passes the SettingsManager. */
 export interface ParentExecutionSettingsSource {
+	/**
+	 * Announces every effective-settings transition, from a setter or from a reload. The fleet reads its settings at
+	 * each decision, so a change is what re-decides the starts that were queued under the old ones.
+	 */
+	subscribeChanges(listener: () => void): () => void;
 	getCompactionSettings(): {
 		enabled: boolean;
 		reserveTokens: number;
