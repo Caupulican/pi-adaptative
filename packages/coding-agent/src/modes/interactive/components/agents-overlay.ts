@@ -122,7 +122,7 @@ function workerRow(record: LaneRecord, nowMs: number, planStep: string | undefin
 	return {
 		status: record.status,
 		label: planStep ?? record.label ?? "Unnamed task",
-		section: "Workers",
+		section: "workers",
 		meta,
 		details,
 	};
@@ -132,7 +132,7 @@ function backgroundToolRow(item: ActivityLaneItem): OrchestrationPanelRow {
 	return {
 		status: item.status === "waiting" ? "queued" : "running",
 		label: item.label,
-		section: "Background tools",
+		section: "backgroundTools",
 		meta: item.tag ? [item.tag] : [],
 	};
 }
@@ -266,7 +266,7 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 		...(goal?.requirements.map(goalRequirementPanelRow) ?? []),
 		...(goal?.evidence.map(goalEvidencePanelRow) ?? []),
 		...planRows,
-		...(task?.steps.map((step) => ({ ...taskStepPanelRow(step), section: "Task steps" })) ?? []),
+		...(task?.steps.map((step) => ({ ...taskStepPanelRow(step), section: "taskSteps" })) ?? []),
 		...peerFindings.slice(0, 3).map((finding) => {
 			keepIdsInLog(finding.id, {
 				finding: finding.id,
@@ -276,7 +276,7 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 			return {
 				status: "blocked" as const,
 				label: finding.reason,
-				section: "Peer findings",
+				section: "peerFindings",
 				meta: [`#${finding.sequence}`],
 				details: [
 					`scope: ${finding.scope}`,
@@ -289,7 +289,7 @@ export function buildWorkPanelModel(snapshot: AgentsOverlaySnapshot, nowMs: numb
 					{
 						status: "info" as const,
 						label: `+${peerFindings.length - 3} more`,
-						section: "Peer findings",
+						section: "peerFindings",
 						meta: [`${peerFindings.length} total`],
 					},
 				]

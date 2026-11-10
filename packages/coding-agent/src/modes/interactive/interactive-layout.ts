@@ -14,6 +14,7 @@ import { GenerationRate } from "../../core/generation-rate.ts";
 import type { GoalState } from "../../core/goals/goal-state.ts";
 import { subscribeHumanInputActivity } from "../../core/human-input-activity.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import { FlowTrace } from "../../core/operator-projection/flow-trace.ts";
 import { onPullRequestChange, readPullRequestView } from "../../core/pull-request-view.ts";
 import type { WorkbenchSettings } from "../../core/settings/settings-schema.ts";
@@ -22,6 +23,7 @@ import type { AgentMessage } from "../../kernel/index.ts";
 import type { SessionManager } from "../../kernel/node.ts";
 import { copyToClipboard, readClipboardText } from "../../utils/clipboard.ts";
 import { type ActivityLaneComponent, isBackgroundToolActivityItem } from "./components/activity-lane.ts";
+import type { WorkbenchChatRosterSnapshot } from "./components/chat-roster-pane.ts";
 import {
 	buildDecisionGraphModel,
 	type DecisionGraphInput,
@@ -31,7 +33,7 @@ import {
 import type { FooterComponent } from "./components/footer.ts";
 import { OperatorPovBarComponent } from "./components/operator-pov-bar.ts";
 import { isConversationMessage } from "./components/question-conversation.ts";
-import { type WorkbenchChatRosterSnapshot, WorkbenchComponent } from "./components/workbench.ts";
+import { WorkbenchComponent } from "./components/workbench.ts";
 import type { ExtensionUiHost } from "./extension-ui-host.ts";
 import { WorkbenchController } from "./workbench-controller.ts";
 
@@ -68,7 +70,7 @@ export interface InteractiveLayoutPort {
 	getStreamingMessage(): AssistantMessage | undefined;
 	/** The display name of a `provider/model` ref, as the status line shows it; undefined for an unknown model. */
 	findModelName(modelRef: string): string | undefined;
-	/** The header's conversation name (e.g. the live bot or team); absent shows "Conversation". */
+	/** The header's conversation name (e.g. the live bot or team); absent shows the catalogue's word for it. */
 	getConversationTitle?: () => string;
 	/** Label of the header chip that opens the Bot & Team chat switcher; absent hides the chip. */
 	getSwitchChatChip?: () => string | undefined;
@@ -474,7 +476,7 @@ export class InteractiveLayout {
 			operatorStatus,
 			brand: APP_NAME,
 			title: () => port.getSessionManager().getSessionName() || path.basename(port.getSessionManager().getCwd()),
-			conversationTitle: () => port.getConversationTitle?.() ?? "Conversation",
+			conversationTitle: () => port.getConversationTitle?.() ?? interfaceText().panes.conversation,
 			switchChatChip: () => port.getSwitchChatChip?.(),
 			chatRoster: () => port.getChatRoster?.(),
 			branch: () => port.footerDataProvider.getGitBranch(),

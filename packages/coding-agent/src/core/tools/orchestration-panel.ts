@@ -5,6 +5,7 @@ import type { Theme, ThemeColor } from "../../presentation/theme-model.ts";
 import { renderTitleBadge, type TitleBadgeStatus } from "../../presentation/tool-title.ts";
 import type { GoalEvidenceKind, GoalEvidenceRef, Requirement } from "../goals/goal-state.ts";
 import { isTrustedGoalEvidence } from "../goals/goal-state.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { TaskStep } from "../tasks/task-state.ts";
 
 export type OrchestrationRowStatus =
@@ -24,9 +25,34 @@ export type OrchestrationRowStatus =
 	| "reviewed"
 	| "info";
 
+/** The headings this build draws for itself: identities the code groups and compares rows by, never the words drawn. */
+export const FIXED_SECTIONS = [
+	"requirements",
+	"evidence",
+	"taskSteps",
+	"peerFindings",
+	"workers",
+	"backgroundTools",
+] as const;
+
+export type FixedSectionId = (typeof FIXED_SECTIONS)[number];
+
+const FIXED_SECTION_SET: ReadonlySet<string> = new Set(FIXED_SECTIONS);
+
+/** Whether a row's heading is one of the fixed identities rather than words its producer owns. */
+export function isFixedSection(section: string): section is FixedSectionId {
+	return FIXED_SECTION_SET.has(section);
+}
+
+/** The words of a heading: the catalogue's for a fixed identity, the producer's own words otherwise. */
+export function sectionHeading(section: string): string {
+	return isFixedSection(section) ? interfaceText().inspector.heading[section] : section;
+}
+
 export interface OrchestrationPanelRow {
 	status: OrchestrationRowStatus;
 	label: string;
+	/** The heading the row sits under: an identity the renderer groups rows by, drawn through `sectionHeading`. */
 	section?: string;
 	meta?: readonly string[];
 	details?: readonly string[];
@@ -107,7 +133,7 @@ export function goalRequirementPanelRow(requirement: Requirement): Orchestration
 		status:
 			requirement.status === "satisfied" ? "completed" : requirement.status === "blocked" ? "blocked" : "pending",
 		label: requirement.text,
-		section: "Requirements",
+		section: "requirements",
 		meta: [
 			requirement.evidenceIds.length > 0 ? `${requirement.evidenceIds.length} evidence` : undefined,
 			requirement.boundLaneId ? "worker assigned" : undefined,
@@ -126,7 +152,7 @@ export function goalEvidencePanelRow(evidence: GoalEvidenceRef): OrchestrationPa
 	return {
 		status: trusted ? (evidence.outcome ?? "reviewed") : "info",
 		label: evidence.summary,
-		section: "Evidence",
+		section: "evidence",
 		meta: [
 			EVIDENCE_KIND_WORDS[evidence.kind],
 			trusted ? "verified" : "unverified",
@@ -214,7 +240,7 @@ export function renderOrchestrationPanelRows(
 		for (const row of rows) {
 			if (row.section && row.section !== section) {
 				section = row.section;
-				lines.push(`  ${theme.fg("muted", theme.bold(row.section))}`);
+				lines.push(`  ${theme.fg("muted", theme.bold(sectionHeading(row.section)))}`);
 			}
 			lines.push(...renderRow(theme, row, safeWidth, expanded, model.wrapRows === true));
 		}

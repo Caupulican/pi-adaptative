@@ -9,6 +9,7 @@
  */
 
 import { visibleWidth } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
 import { formatCompactDuration } from "../../../core/util/format-duration.ts";
 import { type ThemeColor, theme } from "../../../presentation/theme-model.ts";
@@ -17,7 +18,7 @@ import {
 	type DecisionGraphRows,
 	formatLastEvaluation,
 	graphFocusKey,
-	NO_RUN_YET,
+	noRunYet,
 	participantSubText,
 	participantText,
 	plainTurnStatus,
@@ -69,41 +70,44 @@ function style(run: Run): CellStyle {
 
 /** A closed stage's accumulated total with its passes; the current stage's clock is this visit, not the total. */
 function stageMeta(stage: DecisionStageRow): Run {
-	const passes = stage.passes > 1 ? ` ×${stage.passes}` : "";
+	const text = interfaceText().graph.list;
+	const passes = stage.passes > 1 ? text.passes(stage.passes) : "";
 	// `done` has no visit clock to tick.
 	if (!stage.current || stage.stage === "done") {
 		return { text: `${formatCompactDuration(stage.totalMs)}${passes}`, tone: "muted" };
 	}
-	const visited = stage.passes > 1 ? ` · total ${formatCompactDuration(stage.totalMs)}${passes}` : "";
-	return { text: `now ${formatCompactDuration(stage.passMs)}${visited}` };
+	const visited = stage.passes > 1 ? text.total(formatCompactDuration(stage.totalMs), passes) : "";
+	return { text: `${text.now(formatCompactDuration(stage.passMs))}${visited}` };
 }
 
 /** The goal's verdict. The closure is the model's: a check, a peer finding or a doubt each keep the goal open. */
 function goalVerdict(model: DecisionGraphModel): Run {
+	const text = interfaceText().graph.list;
 	const closure = goalClosure(model);
-	if (closure.delivered) return { text: "yes → delivered", tone: "success" };
-	if (closure.delivering) return { text: "yes → deliver", tone: "success" };
+	if (closure.delivered) return { text: text.verdict.delivered, tone: "success" };
+	if (closure.delivering) return { text: text.verdict.delivering, tone: "success" };
 	const openChecks = model.checks.filter((check) => check.status !== "satisfied").length;
 	const peerFindings = model.peerFindings.length;
 	const doubts = model.unresolvedDoubtCount;
 	if (closure.open > 0) {
 		const note = [
-			openChecks > 0 ? `${openChecks} check${openChecks === 1 ? "" : "s"}` : "",
-			peerFindings > 0 ? `${peerFindings} peer` : "",
-			doubts > 0 ? `${doubts} doubt${doubts === 1 ? "" : "s"}` : "",
+			openChecks > 0 ? text.checkCount(openChecks) : "",
+			peerFindings > 0 ? text.peerCount(peerFindings) : "",
+			doubts > 0 ? text.doubtCount(doubts) : "",
 		]
 			.filter(Boolean)
 			.join(" · ");
-		return { text: `not closed · ${note}`, tone: doubts > 0 ? SYSTEM_ONE_TONE : "dim" };
+		return { text: text.verdict.notClosedWith(note), tone: doubts > 0 ? SYSTEM_ONE_TONE : "dim" };
 	}
-	if (model.blocked) return { text: "blocked → replan", tone: "warning" };
-	if (model.goal.branch === "repair") return { text: `no → repair (loop ${model.loop})`, tone: "warning" };
-	if (model.goal.branch === "clarify") return { text: "not yet → ask you", tone: "warning" };
-	return { text: "not closed", tone: "dim" };
+	if (model.blocked) return { text: text.verdict.blocked, tone: "warning" };
+	if (model.goal.branch === "repair") return { text: text.verdict.repair(model.loop), tone: "warning" };
+	if (model.goal.branch === "clarify") return { text: text.verdict.askYou, tone: "warning" };
+	return { text: text.verdict.notClosed, tone: "dim" };
 }
 
 /** The model as rows, top to bottom. */
 function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined): ListRow[] {
+	const text = interfaceText().graph.list;
 	const rows: ListRow[] = [];
 	const head = (title: string, meta?: Run, tone: ThemeColor = TITLE_TONE): void => {
 		rows.push({ indent: 0, left: { text: title, tone }, meta });
@@ -134,11 +138,11 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 	};
 	const peerFindings = (): void => {
 		if (!model.peerFindings.length) return;
-		head("PEER FINDINGS", { text: `${model.peerFindings.length} active`, tone: "warning" }, "warning");
+		head(text.head.peerFindings, { text: text.active(model.peerFindings.length), tone: "warning" }, "warning");
 		for (const finding of model.peerFindings.slice(0, MAX_LISTED))
 			item(ITEM_INDENT, "!", "warning", `${finding.reason} · ${finding.scope}`, "warning");
 		if (model.peerFindings.length > MAX_LISTED)
-			line(ITEM_INDENT, `+${model.peerFindings.length - MAX_LISTED} more`, "dim");
+			line(ITEM_INDENT, text.more(model.peerFindings.length - MAX_LISTED), "dim");
 	};
 	const historyFailure = (): void => {
 		if (model.stageHistoryFailure) item(0, "!", "warning", model.stageHistoryFailure, "dim");
@@ -147,13 +151,13 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 	if (model.stageLogEmpty) {
 		historyFailure();
 		if (!model.plan.length) {
-			line(0, "No task yet · the graph composes when work starts", "dim");
+			line(0, text.empty, "dim");
 			peerFindings();
 			return rows;
 		}
-		head("PLAN", { text: planProgress(model), tone: "muted" });
+		head(text.head.plan, { text: planProgress(model), tone: "muted" });
 		for (const step of planItems(model)) item(ITEM_INDENT, step.glyph, step.glyphTone, step.text, step.tone);
-		line(0, NO_RUN_YET, "dim");
+		line(0, noRunYet(), "dim");
 		peerFindings();
 		return rows;
 	}
@@ -164,22 +168,19 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 				model.you.waitingSinceMs !== undefined
 					? ` ${formatCompactDuration(model.nowMs - model.you.waitingSinceMs)}`
 					: "";
-			head("YOU", { text: `? waiting${since}`, tone: "warning" }, "warning");
+			head(text.head.you, { text: text.waiting(since), tone: "warning" }, "warning");
 			if (model.you.question) item(ITEM_INDENT, "?", "muted", model.you.question, "muted");
 		} else {
-			head("YOU", { text: `asked ${model.you.asked} · answered ${model.you.answered}`, tone: "dim" });
+			head(text.head.you, { text: text.asked(model.you.asked, model.you.answered), tone: "dim" });
 		}
 	}
 
 	const evaluating = model.decider.evaluating;
-	const evalPrefix =
-		model.decider.evaluations > 0
-			? `${model.decider.evaluations} eval${model.decider.evaluations === 1 ? "" : "s"} · `
-			: "";
+	const evalPrefix = model.decider.evaluations > 0 ? `${text.evaluations(model.decider.evaluations)} · ` : "";
 	head(
-		"SYSTEM ONE",
+		text.head.systemOne,
 		evaluating
-			? { text: `◆ judging ${formatCompactDuration(model.nowMs - evaluating.startedAt)}`, tone: SYSTEM_ONE_TONE }
+			? { text: text.judging(formatCompactDuration(model.nowMs - evaluating.startedAt)), tone: SYSTEM_ONE_TONE }
 			: { text: `${evalPrefix}${model.decider.doing}`, tone: "dim" },
 		SYSTEM_ONE_TONE,
 	);
@@ -194,20 +195,20 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 			ITEM_INDENT,
 			stage.current ? "●" : "✓",
 			stage.current ? "accent" : "success",
-			stage.current && stage.loop > 1 ? `${baseLabel} · loop ${stage.loop}` : baseLabel,
+			stage.current && stage.loop > 1 ? `${baseLabel}${text.loop(stage.loop)}` : baseLabel,
 			stage.current ? undefined : "muted",
 			{ meta: stageMeta(stage), stage: stage.stage, current: stage.current },
 		);
 		if (selected !== stage.stage) continue;
 		if (stage.note) line(DETAIL_INDENT, stage.note, "muted", stage.stage);
-		if (stage.reasonCode) line(DETAIL_INDENT, `reason: ${stage.reasonCode.replace(/_/g, " ")}`, "dim", stage.stage);
+		if (stage.reasonCode) line(DETAIL_INDENT, text.reason(stage.reasonCode.replace(/_/g, " ")), "dim", stage.stage);
 		for (const event of stage.events) {
 			const tone: ThemeColor =
 				event.severity === "failure" ? "error" : event.severity === "warning" ? "warning" : "muted";
 			item(DETAIL_INDENT, "·", tone, event.title, tone, { stage: stage.stage });
 		}
 	}
-	if (model.next && model.goal.branch !== "delivered") item(ITEM_INDENT, "›", "dim", `next → ${model.next}`, "dim");
+	if (model.next && model.goal.branch !== "delivered") item(ITEM_INDENT, "›", "dim", text.next(model.next), "dim");
 
 	const participantItem = (participant: (typeof model.participants)[number]) => {
 		const detail = participantSubText(participant, model);
@@ -221,7 +222,7 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 		);
 	};
 
-	head("BRAIN");
+	head(text.head.brain);
 	const brain = model.participants.filter((p) => p.kind === "root");
 	const subagents = model.participants.filter((p) => p.kind !== "root" && p.kind !== "capability");
 	for (const participant of brain) {
@@ -229,8 +230,8 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 	}
 	if (subagents.length > 0) {
 		const activeCount = subagents.filter((p) => p.running || p.queued).length;
-		head("SUBAGENTS", {
-			text: `${activeCount} active · ${subagents.length} total`,
+		head(text.head.subagents, {
+			text: text.activeTotal(activeCount, subagents.length),
 			tone: activeCount > 0 ? "accent" : "muted",
 		});
 	}
@@ -239,26 +240,26 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 	}
 	for (const capability of model.participants.filter((p) => p.kind === "capability")) {
 		const tone: ThemeColor = capability.running ? "accent" : "muted";
-		item(ITEM_INDENT, "◇", tone, `capability ${capability.label}`, tone, {
-			meta: { text: flat(capability.task ?? "active"), tone: "muted" },
+		item(ITEM_INDENT, "◇", tone, text.capability(capability.label), tone, {
+			meta: { text: flat(capability.task ?? text.capabilityActive), tone: "muted" },
 		});
 	}
 
 	const hasEvidence = model.evidence.actions > 0 || model.evidence.fileEffects > 0 || model.evidence.failures > 0;
 	if (hasEvidence || (model.checks.length === 0 && model.peerFindings.length === 0 && !model.goal.present)) {
-		head("EVIDENCE", {
+		head(text.head.evidence, {
 			text: hasEvidence
-				? `${model.evidence.actions} actions · ${model.evidence.fileEffects} file effects${model.evidence.failures ? ` · ${model.evidence.failures} failure` : ""}`
-				: "none yet",
+				? text.evidence(model.evidence.actions, model.evidence.fileEffects, model.evidence.failures)
+				: text.noneYet,
 			tone: model.evidence.failures ? "warning" : "muted",
 		});
 	}
 	if (model.checks.length > 0) {
 		const ok = model.checks.filter((check) => check.status === "satisfied").length;
 		if (ok === model.checks.length) {
-			head("CHECKS", { text: `✓ ${ok}/${model.checks.length}`, tone: "success" });
+			head(text.head.checks, { text: text.checksDone(ok, model.checks.length), tone: "success" });
 		} else {
-			head("CHECKS", { text: `${ok}/${model.checks.length}`, tone: "muted" });
+			head(text.head.checks, { text: text.checks(ok, model.checks.length), tone: "muted" });
 			const openChecks = model.checks.filter((check) => check.status !== "satisfied");
 			for (const check of openChecks.slice(0, MAX_LISTED)) {
 				const failed = check.status === "failed";
@@ -270,7 +271,7 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 					check.status === "pending" ? "dim" : "muted",
 				);
 			}
-			if (openChecks.length > MAX_LISTED) line(ITEM_INDENT, `+${openChecks.length - MAX_LISTED} more`, "dim");
+			if (openChecks.length > MAX_LISTED) line(ITEM_INDENT, text.more(openChecks.length - MAX_LISTED), "dim");
 		}
 	}
 	peerFindings();
@@ -283,7 +284,7 @@ function listRows(model: DecisionGraphModel, selected: DecisionStage | undefined
 		return rows;
 	}
 	const verdict = goalVerdict(model);
-	head("GOAL", verdict);
+	head(text.head.goal, verdict);
 	return rows;
 }
 

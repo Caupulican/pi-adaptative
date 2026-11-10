@@ -7,8 +7,6 @@ import {
 	type ActiveChatTarget,
 	type BotOperatorMessageDispatchResult,
 	type BotTeamChange,
-	formatActiveChatTargetBadge,
-	formatDurationIntervalMs,
 	normalizeBotOrTeamId,
 	type PersistentBotDaemonStatus,
 	type PersistentBotRecord,
@@ -21,32 +19,34 @@ import {
 	type UpsertPersistentBotInput,
 	type UpsertPersistentTeamInput,
 } from "../../core/delegation/persistent-bot-team-store.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ModelRegistry } from "../../core/model-registry.ts";
 import { isModelReference } from "../../core/model-resolver.ts";
 import type { RemoteHubController } from "../../core/remote/hub-controller.ts";
 import { type AwayService, describeAwayServiceInspection } from "../../core/routines/away-service.ts";
 import { nextRoutineAt, type RoutineDefinitionView } from "../../core/routines/routine-contract.ts";
 import { describeRoutineProgress } from "../../core/routines/routine-progress.ts";
-import { describeWatchCondition } from "../../core/routines/watch-contract.ts";
 import { boundedLine } from "../../core/util/bounded-line.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
-import { REMOTE_MARK } from "./components/bot-state-mark.ts";
+import { chatRoutine, routineScheduleLabel } from "./chat-routines.ts";
+import { formatActiveChatTargetBadge } from "./chat-target-badge.ts";
+import { botStateGlyph, REMOTE_MARK } from "./components/bot-state-mark.ts";
 import { teamSpeakerTone } from "./components/custom-message.ts";
 import { DynamicBorder } from "./components/dynamic-border.ts";
-import { botStateGlyph } from "./components/workbench.ts";
 import { runRemoteCommand } from "./remote-commands.ts";
 
 /** What the owner is told after a message went to a bot, in plain words (no mode names, no link labels). */
 function sentToBotText(agentId: string, result: BotOperatorMessageDispatchResult): string {
-	if (result.modelRef === "link/remote") return `Sent to ${agentId}; its answer comes back here.`;
+	const text = interfaceText().chat;
+	if (result.modelRef === "link/remote") return text.sentRemote(agentId);
 	const how: Record<BotOperatorMessageDispatchResult["mode"], string> = {
-		started: "it started on it",
-		followed_up: "added to its conversation",
-		steered: "sent while it works",
-		queued: "queued for it",
+		started: text.sentStarted,
+		followed_up: text.sentFollowedUp,
+		steered: text.sentSteered,
+		queued: text.sentQueued,
 	};
-	return `Sent to ${agentId}: ${how[result.mode]} (${result.modelRef}).`;
+	return text.sentToBot(agentId, how[result.mode], result.modelRef);
 }
 
 export interface BotTeamChatSessionPort {
@@ -122,40 +122,6 @@ function parseIdList(raw: string): string[] {
 		.map((part) => normalizeBotOrTeamId(part, "agentId"));
 }
 
-function routineScheduleLabel(routine: RoutineDefinitionView): string {
-	switch (routine.schedule.kind) {
-		case "interval":
-			return `every ${formatDurationIntervalMs(routine.schedule.intervalMs)}`;
-		case "once":
-			return `once at ${new Date(routine.schedule.at).toISOString()}`;
-		case "calendar":
-			return `"${routine.schedule.cron}" in ${routine.schedule.timeZone}`;
-		case "event": {
-			const schedule = routine.schedule;
-			if (schedule.source === "watch") return describeWatchCondition(schedule.condition);
-			if (schedule.source === "github") {
-				const scope = [
-					schedule.pullRequest === undefined ? undefined : `#${schedule.pullRequest}`,
-					schedule.branch === undefined ? undefined : `branch ${schedule.branch}`,
-					schedule.ownPullRequests ? "own pull requests" : undefined,
-					schedule.authors === undefined
-						? undefined
-						: `by ${schedule.authors.map((login) => `@${login}`).join(", ")}`,
-				].filter((part) => part !== undefined);
-				return `on GitHub ${schedule.kinds.join("/")}${scope.length ? ` (${scope.join("; ")})` : ""}`;
-			}
-			return `on CI ${schedule.conclusions.join("/")}${schedule.workflowPath === undefined ? "" : ` of ${schedule.workflowPath}`}`;
-		}
-	}
-}
-
-function chatRoutine(store: PersistentBotTeamStore, routineId: string): RoutineDefinitionView | undefined {
-	const routine = store.getRoutine(routineId);
-	if (routine?.target.kind === "session")
-		throw new Error("Manage a main-session routine through its owner's routine tool.");
-	return routine;
-}
-
 function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
@@ -166,11 +132,12 @@ function errorMessage(error: unknown): string {
  */
 /** What a bot is doing now, in a few words: its last tool call with the argument that names its target, from its own transcript. */
 function currentActivity(messages: readonly AgentMessage[]): string | undefined {
+	const text = interfaceText().chat;
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
 		if (message?.role !== "assistant") continue;
 		const call = [...message.content].reverse().find((block) => block.type === "toolCall");
-		if (call?.type !== "toolCall") return "writing its answer";
+		if (call?.type !== "toolCall") return text.writingAnswer;
 		const args = call.arguments as Record<string, unknown>;
 		// A message to a peer shows who it goes to, never its text; any other call shows the argument that names its target.
 		const keys =
@@ -180,7 +147,7 @@ function currentActivity(messages: readonly AgentMessage[]): string | undefined 
 		const key = keys.find((name) => typeof args[name] === "string");
 		const value = key ? String(args[key]).replace(/\s+/g, " ").trim() : "";
 		const shown = value.length > 42 ? `${value.slice(0, 41)}…` : value;
-		if (call.name === "bot_message") return shown ? `messages ${shown}` : "messages a peer";
+		if (call.name === "bot_message") return shown ? text.messagesTo(shown) : text.messagesPeer;
 		return shown ? `${call.name} ${shown}` : call.name;
 	}
 	return undefined;
@@ -246,35 +213,36 @@ export class BotTeamChatController {
 	}
 
 	getConversationTitleLabel(): string {
+		const text = interfaceText().chat;
 		const target = this.activeTarget;
 		switch (target.kind) {
 			case "root": {
 				const port = this.host.getSessionPort();
 				const hasPeers = port.listPersistentBots().length > 0 || port.listPersistentTeams().length > 0;
-				return hasPeers ? "Conversation · Brain" : "Conversation";
+				return hasPeers ? text.conversationRoot : text.conversation;
 			}
 			case "bot":
-				return `Conversation · ${this.getActiveTargetBadge()}`;
 			case "team":
-				return `Conversation · ${this.getActiveTargetBadge()}`;
+				return text.conversationOf(this.getActiveTargetBadge());
 			default: {
 				const _exhaustive: never = target;
-				return "Conversation";
+				return text.conversation;
 			}
 		}
 	}
 
 	getSwitchChipLabel(): string | undefined {
+		const text = interfaceText().chat;
 		const port = this.host.getSessionPort();
 		const bots = port.listPersistentBots();
 		const teams = port.listPersistentTeams();
 		if (!this.isRootChatActive()) {
-			return "Chats · Brain ↩";
+			return text.switchBack;
 		}
 		if (bots.length > 0 || teams.length > 0) {
-			return `Chats (${bots.length + teams.length})`;
+			return text.switchCount(bots.length + teams.length);
 		}
-		return "Chats";
+		return text.switchChip;
 	}
 
 	async switchTarget(target: ActiveChatTarget): Promise<void> {
@@ -320,7 +288,7 @@ export class BotTeamChatController {
 				case "root":
 					if (!this.isRootChatActive()) {
 						await this.switchTarget(ROOT_TARGET);
-						this.host.showStatus("Switched live chat to Brain (root).");
+						this.host.showStatus(interfaceText().chat.switchedToRoot);
 					}
 					return false;
 				case "bot":
@@ -590,6 +558,7 @@ export class BotTeamChatController {
 	}
 
 	private renderBotChat(agentId: string): void {
+		const text = interfaceText();
 		const port = this.host.getSessionPort();
 		port.getBotTeamStore?.().acknowledgeBotInbox(agentId);
 		const bot = port.listPersistentBots().find((b) => b.agentId === agentId);
@@ -599,39 +568,33 @@ export class BotTeamChatController {
 		);
 		if (!this.beginChatRender(chatSignature({ kind: "bot", agentId, bot: bot ?? null, routines }, messages))) return;
 
-		const modelLabel = bot?.modelRef ?? "unknown model";
-		const thinking = bot?.thinkingLevel ?? "default";
-		const state = bot?.state ?? "unknown";
-		const teams = bot && bot.teamIds.length > 0 ? `Teams: ${bot.teamIds.join(", ")}` : undefined;
+		const modelLabel = bot?.modelRef ?? text.chat.unknownModel;
+		const thinking = bot?.thinkingLevel ?? text.chat.defaultThinking;
+		const state = bot ? text.common.botState(bot.state) : text.chat.unknownState;
+		const teams = bot && bot.teamIds.length > 0 ? text.chat.teams(bot.teamIds.join(", ")) : undefined;
 		const routineLabel =
 			routines.length > 0
-				? `Routines: ${routines.map((r) => `${r.routineId} (${routineScheduleLabel(r)})`).join(", ")}`
+				? text.chat.routines(routines.map((r) => `${r.routineId} (${routineScheduleLabel(r)})`).join(", "))
 				: undefined;
 		const detail = [bot?.description, bot?.currentSummary].filter((part): part is string => !!part).join(" · ");
 
+		const remote = bot?.remote ? ` ${REMOTE_MARK} ${text.chat.remote}` : "";
 		const lines = [
-			theme.fg("accent", theme.bold(`● LIVE BOT CHAT · ${agentId}${bot?.remote ? ` ${REMOTE_MARK} remote` : ""}`)) +
-				theme.fg("muted", ` · ${modelLabel} · thinking ${thinking} · ${state}`),
+			theme.fg("accent", theme.bold(`${text.chat.liveBotChat(agentId)}${remote}`)) +
+				theme.fg("muted", text.chat.botFacts(modelLabel, thinking, state)),
 		];
 		const secondLine = [teams, routineLabel, detail].filter((part): part is string => !!part).join("  ");
 		if (secondLine.length > 0) {
 			lines.push(theme.fg("text", secondLine));
 		}
 		const memoryPath = bot?.memoryFilePath ?? `~/.pi/agent/memory/bots/${agentId}.md`;
-		const continuity = bot?.lastTranscriptRef ? `Resumed via ${bot.lastTranscriptRef.slice(0, 22)}…` : undefined;
-		const memoryParts = [`Memory: ${memoryPath}`, continuity].filter((part): part is string => Boolean(part));
+		const continuity = bot?.lastTranscriptRef
+			? text.chat.resumedVia(`${bot.lastTranscriptRef.slice(0, 22)}…`)
+			: undefined;
+		const memoryParts = [text.chat.memory(memoryPath), continuity].filter((part): part is string => Boolean(part));
 		lines.push(theme.fg("muted", memoryParts.join(" · ")));
-		lines.push(
-			theme.fg(
-				"muted",
-				`Direct chat active: messages you submit here go directly to ${agentId} · /chat root or Alt+A to return to Brain · /bot stop ${agentId} to halt`,
-			),
-		);
-		this.finishChatRender(
-			lines,
-			messages,
-			`  No messages with ${agentId} yet. Type below and press Enter to message ${agentId} directly.`,
-		);
+		lines.push(theme.fg("muted", text.chat.directChatHint(agentId)));
+		this.finishChatRender(lines, messages, text.chat.noMessagesWith(agentId));
 	}
 
 	/** Starts rebuilding the chat container for `signature`. False when it already shows exactly that. */
@@ -684,8 +647,10 @@ export class BotTeamChatController {
 			const state = liveBots.find((b) => b.agentId === memberId)?.state;
 			if (state !== "running" && state !== "queued") return [];
 			const activity =
-				state === "queued" ? "waiting to start" : currentActivity(port.readBotChatMessages(memberId, teamId));
-			return [{ memberId, activity: activity ?? "starting" }];
+				state === "queued"
+					? interfaceText().chat.waitingToStart
+					: currentActivity(port.readBotChatMessages(memberId, teamId));
+			return [{ memberId, activity: activity ?? interfaceText().chat.starting }];
 		});
 		const routines = (port.getBotTeamStore?.().listRoutines() ?? []).filter(
 			(r) => r.target.kind === "team" && r.target.teamId === teamId,
@@ -705,13 +670,13 @@ export class BotTeamChatController {
 		// The members' own glyphs say who is working; the hint is the one thing a newcomer to the group needs.
 		const lines = [
 			theme.fg("accent", theme.bold(`◆ ${team?.name ?? teamId}`)) +
-				`  ${memberStatus.length > 0 ? memberStatus : theme.fg("muted", "no members")}${theme.fg("muted", routineLine)}`,
-			theme.fg("dim", "Type to message everyone · @bot for one · /chat root returns to Brain"),
+				`  ${memberStatus.length > 0 ? memberStatus : theme.fg("muted", interfaceText().chat.noMembers)}${theme.fg("muted", routineLine)}`,
+			theme.fg("dim", interfaceText().chat.teamHint),
 		];
 		this.finishChatRender(
 			lines,
 			messages,
-			`  No messages in team ${teamId} yet. Type below and press Enter to message the team.`,
+			interfaceText().chat.noTeamMessages(teamId),
 			working.map(
 				({ memberId, activity }) =>
 					`${theme.fg(teamSpeakerTone(memberId), `◐ ${memberId}`)} ${theme.fg("muted", activity)}`,
@@ -756,7 +721,7 @@ export class BotTeamChatController {
 				await this.refreshActiveChatView();
 			}
 			if (!options.refreshOnly) {
-				this.host.showStatus(`Sent to team ${teamId} (${delivered} member deliveries).`);
+				this.host.showStatus(interfaceText().chat.sentToTeam(teamId, delivered));
 			}
 		} catch (error) {
 			this.host.showError(errorMessage(error));

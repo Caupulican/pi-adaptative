@@ -5,6 +5,7 @@
  * Diagram. Pure: no clock, no state.
  */
 
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
 import { evaluationResultText } from "../../../core/system-one/semantic-evaluation-ledger.ts";
 import { formatCompactDuration } from "../../../core/util/format-duration.ts";
@@ -44,18 +45,10 @@ export interface DecisionGraphRows {
  */
 export const SYSTEM_ONE_TONE: ThemeColor = "customMessageLabel";
 
-export const STAGE_LABEL: Readonly<Record<DecisionStage, string>> = {
-	understand: "understand",
-	plan: "plan",
-	build: "build",
-	dispatch: "dispatch",
-	observe: "observe",
-	verify: "verify",
-	clarify: "clarify (ask you)",
-	repair: "repair / replan",
-	deliver: "deliver",
-	done: "done",
-};
+/** The loop's stage name as the owner reads it. */
+export function stageName(stage: DecisionStage): string {
+	return interfaceText().graph.stage[stage];
+}
 
 const PLAN_GLYPH: Readonly<Record<DecisionPlanStepStatus, readonly [string, ThemeColor]>> = {
 	done: ["✓", "success"],
@@ -68,13 +61,14 @@ const PLAN_GLYPH: Readonly<Record<DecisionPlanStepStatus, readonly [string, Them
 
 export function participantText(participant: DecisionParticipant): string {
 	// The session's own model is on the status line; the session itself is just the agent.
-	if (participant.kind === "root") return participant.model ? `brain · ${participant.model}` : "brain";
+	const text = interfaceText().graph;
+	if (participant.kind === "root") return participant.model ? text.brainModel(participant.model) : text.brain;
 	const head = participant.label ? `${participant.kind} ${participant.label}` : participant.kind;
 	return participant.model ? `${head} · ${participant.model}` : head;
 }
 
 function queuedText(participant: DecisionParticipant): string {
-	return `queued${participant.waitReason ? ` · ${participant.waitReason}` : ""}`;
+	return interfaceText().graph.queued(participant.waitReason);
 }
 
 export function formatLastEvaluation(model: DecisionGraphModel): string | undefined {
@@ -95,9 +89,7 @@ function orchestratingText(model: DecisionGraphModel): string | undefined {
 	const activeSubagents = model.participants.filter(
 		(p) => (p.kind === "specialist" || p.kind === "worker") && (p.running || p.queued),
 	).length;
-	return activeSubagents > 0
-		? `orchestrating ${activeSubagents} subagent${activeSubagents === 1 ? "" : "s"}`
-		: undefined;
+	return activeSubagents > 0 ? interfaceText().graph.orchestrating(activeSubagents) : undefined;
 }
 
 /** What an executor is doing, in one line. Route text names who chose the model; it is never System One's tone. */
@@ -123,8 +115,8 @@ export function participantSubText(
 	if (participant.kind === "root") {
 		const orchestrating = orchestratingText(model);
 		if (orchestrating) return { text: orchestrating, tone: "muted" };
-		if (model.you.waiting) return { text: "waiting for you", tone: "dim" };
-		if (model.decider.evaluating) return { text: "waiting for System One", tone: "dim" };
+		if (model.you.waiting) return { text: interfaceText().graph.waitingForYou, tone: "dim" };
+		if (model.decider.evaluating) return { text: interfaceText().graph.waitingForSystemOne, tone: "dim" };
 		if (model.idleText) return { text: model.idleText, tone: "dim" };
 		if (participant.routeText) return { text: participant.routeText, tone: "muted" };
 		return undefined;
@@ -136,8 +128,8 @@ export function participantSubText(
 
 export function stageLabel(stage: DecisionStage, model: DecisionGraphModel): string {
 	return stage === "plan" && model.plan.length > 0
-		? `${STAGE_LABEL.plan} (${planProgress(model)})`
-		: STAGE_LABEL[stage];
+		? `${stageName("plan")} (${planProgress(model)})`
+		: stageName(stage);
 }
 
 export function shouldShowPlainTurnStatus(model: DecisionGraphModel): boolean {
@@ -149,21 +141,20 @@ export function shouldShowPlainTurnStatus(model: DecisionGraphModel): boolean {
 }
 
 export function plainTurnStatus(model: DecisionGraphModel): [string, ThemeColor] {
+	const text = interfaceText().graph;
 	const open = [
-		model.peerFindings.length
-			? `${model.peerFindings.length} peer finding${model.peerFindings.length === 1 ? "" : "s"}`
-			: "",
-		model.unresolvedDoubtCount ? `${model.unresolvedDoubtCount} unsure` : "",
+		model.peerFindings.length ? text.peerFindings(model.peerFindings.length) : "",
+		model.unresolvedDoubtCount ? text.unsure(model.unresolvedDoubtCount) : "",
 	]
 		.filter(Boolean)
 		.join(" · ");
 	const suffix = open ? ` · ${open}` : "";
-	if (model.turnRunning) return [`turn running${suffix}`, "accent"];
-	if (model.lastTurnOutcome === "failed") return [`turn failed${suffix}`, "error"];
-	if (model.lastTurnOutcome === "cancelled") return [`turn cancelled${suffix}`, "dim"];
+	if (model.turnRunning) return [`${text.turn.running}${suffix}`, "accent"];
+	if (model.lastTurnOutcome === "failed") return [`${text.turn.failed}${suffix}`, "error"];
+	if (model.lastTurnOutcome === "cancelled") return [`${text.turn.cancelled}${suffix}`, "dim"];
 	// Peer findings are reviewers' findings; only an unresolved doubt is System One's own.
 	return [
-		`turn finished${suffix}`,
+		`${text.turn.finished}${suffix}`,
 		model.peerFindings.length > 0 ? "warning" : model.unresolvedDoubtCount > 0 ? SYSTEM_ONE_TONE : "success",
 	];
 }
@@ -190,7 +181,10 @@ export function planItems(model: DecisionGraphModel): PlanItem[] {
 	});
 }
 
-export const NO_RUN_YET = "no run yet · the graph composes when work starts";
+/** The empty state of a page that has a plan but has not run yet. */
+export function noRunYet(): string {
+	return interfaceText().graph.noRunYet;
+}
 
 /* ============================================================ Diagram view */
 export interface DiagramNode {
@@ -245,10 +239,11 @@ export function graphFocusKey(model: DecisionGraphModel): string {
 }
 
 function goalYesNode(model: DecisionGraphModel): DiagramNode & { readonly lit: boolean } {
+	const text = interfaceText().graph;
 	const { delivered, delivering } = goalClosure(model);
 	if (delivered || delivering) {
 		return {
-			text: delivered ? "delivered" : "DELIVER",
+			text: delivered ? text.diagram.delivered : text.diagram.deliver,
 			tone: delivered ? "success" : "accent",
 			bold: delivering,
 			stage: "deliver",
@@ -256,7 +251,7 @@ function goalYesNode(model: DecisionGraphModel): DiagramNode & { readonly lit: b
 		};
 	}
 	return {
-		text: "not closed",
+		text: text.diagram.notClosed,
 		tone: model.unresolvedDoubtCount > 0 ? SYSTEM_ONE_TONE : "dim",
 		stage: "deliver",
 		lit: false,
@@ -265,6 +260,7 @@ function goalYesNode(model: DecisionGraphModel): DiagramNode & { readonly lit: b
 
 /** Levels derived from the task; nothing here is fixed. */
 export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[] {
+	const text = interfaceText().graph;
 	const now = model.nowMs;
 	const cur = model.current;
 	const currentStage = cur?.stage;
@@ -273,22 +269,22 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	if (model.stageLogEmpty) {
 		const quiet: DiagramLevel[] = model.plan.length
 			? [
-					{ kind: "tree", title: `plan ${planProgress(model)}`, items: planItems(model) },
-					{ kind: "level", nodes: [{ text: NO_RUN_YET, tone: "dim" }] },
+					{ kind: "tree", title: text.diagram.planTree(planProgress(model)), items: planItems(model) },
+					{ kind: "level", nodes: [{ text: text.noRunYet, tone: "dim" }] },
 				]
-			: [{ kind: "level", nodes: [{ text: "no task yet", tone: "dim" }] }];
+			: [{ kind: "level", nodes: [{ text: text.diagram.noTaskYet, tone: "dim" }] }];
 		const statuses: DiagramNode[] = [];
 		if (model.checks.length) {
 			const openChecks = model.checks.filter((check) => check.status !== "satisfied").length;
 			statuses.push({
-				text: `CHECKS ${model.checks.length - openChecks}/${model.checks.length}`,
+				text: text.diagram.checks(model.checks.length - openChecks, model.checks.length, false),
 				tone: openChecks ? "warning" : "success",
 			});
 		}
 		if (model.peerFindings.length)
-			statuses.push({ text: `PEER FINDINGS ${model.peerFindings.length} active`, tone: "warning" });
+			statuses.push({ text: text.diagram.peerFindings(model.peerFindings.length), tone: "warning" });
 		if (model.unresolvedDoubtCount)
-			statuses.push({ text: `ADVISORY DOUBTS ${model.unresolvedDoubtCount}`, tone: SYSTEM_ONE_TONE });
+			statuses.push({ text: text.diagram.advisoryDoubts(model.unresolvedDoubtCount), tone: SYSTEM_ONE_TONE });
 		if (statuses.length) quiet.push({ kind: "level", nodes: statuses });
 		return quiet;
 	}
@@ -298,13 +294,13 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 		levels.push({
 			kind: "you",
 			node: {
-				text: "YOU",
+				text: text.diagram.you,
 				tone: isCur ? "warning" : undefined,
 				bold: isCur,
 				current: isCur,
 				stage: "clarify",
 			},
-			note: isCur ? "waiting for your answer" : `asked ${model.you.asked} · answered ${model.you.answered}`,
+			note: isCur ? text.diagram.waitingForAnswer : text.list.asked(model.you.asked, model.you.answered),
 			noteTone: isCur ? "warning" : "dim",
 		});
 	}
@@ -315,7 +311,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	levels.push({
 		kind: "box",
 		node: {
-			text: "SYSTEM ONE",
+			text: text.diagram.systemOne,
 			tone: s1cur ? "accent" : rootOwned ? "dim" : undefined,
 			bold: s1cur,
 			current: s1cur || Boolean(evaluating),
@@ -326,7 +322,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 			: lastEvaluation
 				? `◇ ${lastEvaluation}${model.decider.evaluations > 1 ? ` (${model.decider.evaluations})` : ""}`
 				: rootOwned
-					? `${model.decider.doing} · root decides`
+					? `${model.decider.doing} · ${text.diagram.rootDecides}`
 					: model.decider.doing,
 		subTone: evaluating ? SYSTEM_ONE_TONE : lastEvaluation ? "muted" : rootOwned ? "dim" : "muted",
 		boxTone: s1cur || evaluating ? SYSTEM_ONE_TONE : "muted",
@@ -334,7 +330,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	if (model.stages.length) {
 		levels.push({
 			kind: "tree",
-			title: `${model.loop > 1 ? "↺ " : ""}loop ${model.loop}`,
+			title: model.loop > 1 ? text.diagram.loopMark(model.loop) : text.diagram.loop(model.loop),
 			items: model.stages.map((stage) => ({
 				text: stageLabel(stage.stage, model),
 				glyph: stage.current ? "●" : "✓",
@@ -379,7 +375,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	const evidenceNodes: DiagramNode[] = [];
 	if (model.evidence.actions > 0 || model.evidence.fileEffects > 0 || model.evidence.failures > 0) {
 		evidenceNodes.push({
-			text: `EVIDENCE ${model.evidence.actions} actions · ${model.evidence.fileEffects} effects`,
+			text: text.diagram.evidence(model.evidence.actions, model.evidence.fileEffects),
 			tone: model.evidence.failures ? "warning" : undefined,
 		});
 	}
@@ -388,7 +384,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 		const failing = model.checks.some((check) => check.status === "failed");
 		const isCur = currentStage === "verify" && !evaluating;
 		evidenceNodes.push({
-			text: `CHECKS ${ok}/${model.checks.length}${failing ? " ✗" : ""}`,
+			text: text.diagram.checks(ok, model.checks.length, failing),
 			tone: isCur ? "accent" : failing ? "error" : ok === model.checks.length ? "success" : undefined,
 			bold: isCur,
 			stage: "verify",
@@ -396,19 +392,22 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	}
 	if (model.peerFindings.length) {
 		evidenceNodes.push({
-			text: `PEER FINDINGS ${model.peerFindings.length} active`,
+			text: text.diagram.peerFindings(model.peerFindings.length),
 			tone: "warning",
 		});
 	}
 	if (model.unresolvedDoubtCount > 0) {
 		evidenceNodes.push({
-			text: `DOUBTS ${model.unresolvedDoubtCount}`,
+			text: text.diagram.doubts(model.unresolvedDoubtCount),
 			tone: SYSTEM_ONE_TONE,
 		});
 	}
 	if (evidenceNodes.length > 0) levels.push({ kind: "level", nodes: evidenceNodes });
 	if (model.blocked)
-		levels.push({ kind: "level", nodes: [{ text: `BLOCKED · ${model.blocked}`, tone: "warning", bold: true }] });
+		levels.push({
+			kind: "level",
+			nodes: [{ text: text.diagram.blocked(model.blocked), tone: "warning", bold: true }],
+		});
 	// A request without an objective has no goal to satisfy: it ends when its turn does.
 	if (!model.goal.present) {
 		if (shouldShowPlainTurnStatus(model)) {
@@ -421,7 +420,7 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 	const branch: DiagramLevel = {
 		kind: "branch",
 		question: {
-			text: "goal satisfied?",
+			text: text.diagram.goalSatisfied,
 			tone: evaluating ? SYSTEM_ONE_TONE : model.decider.last ? undefined : "dim",
 			bold: Boolean(evaluating),
 			current: Boolean(evaluating),
@@ -430,16 +429,17 @@ export function composeDecisionDiagram(model: DecisionGraphModel): DiagramLevel[
 		...(repairTaken || model.blocked
 			? {
 					no: {
-						text: "repair",
+						text: text.diagram.repair,
 						tone: currentStage === "repair" ? "warning" : "muted",
 						bold: currentStage === "repair",
 						stage: "repair",
-						...(model.loop > 1 ? { loop: "↺ → SYSTEM ONE" } : {}),
+						...(model.loop > 1 ? { loop: text.diagram.repairLoop } : {}),
 					},
 				}
 			: {}),
 	};
 	levels.push(branch);
-	if (model.next && model.goal.branch !== "delivered") levels.push({ kind: "next", text: `next → ${model.next}` });
+	if (model.next && model.goal.branch !== "delivered")
+		levels.push({ kind: "next", text: text.diagram.next(model.next) });
 	return levels;
 }

@@ -1,4 +1,5 @@
 import { fitToWidth, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 
 const FULL_RESET = "\x1b[0m";
@@ -252,7 +253,9 @@ export class WorkbenchPane {
 			this.count > this.viewport && this.viewport > 0
 				? `${this.pinnedCount + this.offset + 1}-${this.pinnedCount + Math.min(this.count, this.offset + this.viewport)}/${lines.length} ↕`
 				: "";
-		const combinedMeta = [meta, range, this.newerProgress ? "new" : ""].filter(Boolean).join(" · ");
+		const combinedMeta = [meta, range, this.newerProgress ? interfaceText().panes.newRows : ""]
+			.filter(Boolean)
+			.join(" · ");
 		const leading = actions.find((action) => action.leading);
 		// The chevron and the space after it; the title follows.
 		const leadingWidth = leading ? visibleWidth(leading.label) + 1 : 0;

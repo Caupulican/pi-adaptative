@@ -4,12 +4,36 @@
  * reaches the next frame.
  */
 
+import { EN, PT_BR } from "./catalogue.ts";
 import type { Language } from "./language.ts";
-import { EN } from "./text-en/index.ts";
-import { PT_BR } from "./text-pt-br/index.ts";
+import type { CHAT } from "./text-en/chat.ts";
+import type { COMMANDS } from "./text-en/commands.ts";
+import type { COMMON } from "./text-en/common.ts";
+import type { FRAME } from "./text-en/frame.ts";
+import type { GRAPH } from "./text-en/graph.ts";
+import type { INSPECTOR } from "./text-en/inspector.ts";
+import type { KEYS } from "./text-en/keys.ts";
+import type { PANES } from "./text-en/panes.ts";
+import type { SETTINGS } from "./text-en/settings.ts";
+import type { STATUS } from "./text-en/status.ts";
 
-/** The English catalogue's shape: the same keys in every language, with a string or a formatting function per leaf. */
-export type InterfaceText = typeof EN;
+/**
+ * The English catalogue's shape: the same areas in every language, each with a string or a formatting function per
+ * leaf. Every area file of either language is held to it, so a missing entry, an extra entry or a different argument
+ * list is a compile error rather than a window that falls back to English.
+ */
+export interface InterfaceText {
+	chat: typeof CHAT;
+	commands: typeof COMMANDS;
+	common: typeof COMMON;
+	frame: typeof FRAME;
+	graph: typeof GRAPH;
+	inspector: typeof INSPECTOR;
+	keys: typeof KEYS;
+	panes: typeof PANES;
+	settings: typeof SETTINGS;
+	status: typeof STATUS;
+}
 
 const CATALOGUES: Record<Language, InterfaceText> = { en: EN, "pt-BR": PT_BR };
 

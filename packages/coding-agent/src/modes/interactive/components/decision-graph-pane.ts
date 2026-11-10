@@ -5,24 +5,28 @@
  * geometry, persisted with the other operator choices.
  */
 
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { WorkbenchGraphView } from "../../../core/settings/settings-schema.ts";
 import { renderDecisionList } from "./decision-graph-list.ts";
 import type { DecisionGraphModel } from "./decision-graph-model.ts";
-import { STAGE_LABEL } from "./decision-graph-render.ts";
+import { stageName } from "./decision-graph-render.ts";
 import { renderDecisionScene } from "./decision-graph-scene.ts";
 import { renderFlowLanes } from "./flow-lanes-render.ts";
 import { SPRING_SNAPPY, SpringTable } from "./graph/spring.ts";
 import { WorkbenchPane, type WorkbenchPaneTitleButton } from "./workbench-pane.ts";
 
-export const GRAPH_PANE_TITLE = "Decision graph";
+/** The pane's title: what it draws, whatever view it is in. */
+export function graphPaneTitle(): string {
+	return interfaceText().panes.graphTitle;
+}
 
 /** The title's meta: the current stage by its label and, after a repair, the loop it is in (`build · loop 2`). */
 export function graphTitleMeta(model: DecisionGraphModel): string {
 	// Idle is the resting state and says nothing; only a finished goal or a running stage is worth a word.
-	if (!model.current) return model.goal.branch === "delivered" ? "delivered" : "";
-	const stage = STAGE_LABEL[model.current.stage];
-	return model.loop > 1 ? `${stage} · loop ${model.loop}` : stage;
+	if (!model.current) return model.goal.branch === "delivered" ? interfaceText().graph.diagram.delivered : "";
+	const stage = stageName(model.current.stage);
+	return model.loop > 1 ? `${stage}${interfaceText().graph.list.loop(model.loop)}` : stage;
 }
 
 /** A draw this long after the previous one means the pane was hidden in between; its springs start over. */
@@ -115,7 +119,7 @@ export class DecisionGraphPane extends WorkbenchPane {
 		this.stageAtCell = composed.stageAtCell;
 		this.motion = composed.motionUntil;
 		return this.render(
-			GRAPH_PANE_TITLE,
+			graphPaneTitle(),
 			graphTitleMeta(model),
 			[...composed.rows],
 			x,

@@ -383,35 +383,6 @@ export function sameActiveChatTarget(a: ActiveChatTarget, b: ActiveChatTarget): 
 	}
 }
 
-export function formatActiveChatTargetBadge(
-	target: ActiveChatTarget,
-	bots?: readonly PersistentBotView[],
-	teams?: readonly PersistentTeamRecord[],
-): string {
-	switch (target.kind) {
-		case "root":
-			return "Brain (root)";
-		case "bot": {
-			const bot = bots?.find((b) => b.agentId === target.agentId);
-			if (bot) {
-				return `Bot: ${target.agentId} · ${bot.state}`;
-			}
-			return `Bot: ${target.agentId}`;
-		}
-		case "team": {
-			const team = teams?.find((t) => t.teamId === target.teamId);
-			if (team) {
-				return `Team: ${target.teamId} (${team.memberAgentIds.length} bots)`;
-			}
-			return `Team: ${target.teamId}`;
-		}
-		default: {
-			const _exhaustive: never = target;
-			return "Brain (root)";
-		}
-	}
-}
-
 export function parseDirectChatAddress(
 	text: string,
 	knownBotIds: ReadonlySet<string>,

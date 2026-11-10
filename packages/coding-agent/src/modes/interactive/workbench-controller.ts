@@ -11,6 +11,7 @@ import type { TaskExecutionMetrics } from "../../core/cost/cost-summary.ts";
 import type { LeaderRow } from "../../core/delegation/leader-view.ts";
 import type { ActiveChatTarget, PersistentBotView } from "../../core/delegation/persistent-bot-team-store.ts";
 import type { KeybindingsManager } from "../../core/keybindings.ts";
+import { interfaceText } from "../../core/language/interface-text.ts";
 import type { ForegroundRouteSnapshot } from "../../core/model-router-controller.ts";
 import type { OperatorProjection } from "../../core/operator-projection/types.ts";
 import { runningRootPlan } from "../../core/plan/plan-view.ts";
@@ -38,14 +39,7 @@ import {
 import { type DecisionGraphModel, workerRouteText } from "./components/decision-graph-model.ts";
 import { SYSTEM_ONE_TONE } from "./components/decision-graph-render.ts";
 import { fullConversationText } from "./components/question-conversation.ts";
-import {
-	CHECKS_SECTION,
-	PLAN_SECTION,
-	TEAM_SECTION,
-	type WorkbenchComponent,
-	type WorkbenchGeometry,
-	type WorkbenchSection,
-} from "./components/workbench.ts";
+import type { WorkbenchComponent, WorkbenchGeometry, WorkbenchSection } from "./components/workbench.ts";
 import {
 	createExecutionPreview,
 	createSystemOneEvaluationPreview,
@@ -731,7 +725,8 @@ export class WorkbenchController {
 }
 
 const DEFAULT_PREVIEW_LIMIT = 24;
-const TEAM_SECTIONS = new Set(["Workers", "Background tools"]);
+/** The row headings that belong to the Team block rather than the plan's checklist. */
+const TEAM_SECTIONS: ReadonlySet<string> = new Set(["workers", "backgroundTools"]);
 
 function rowsComponent(model: OrchestrationPanelModel): Component {
 	return { render: (width) => renderOrchestrationPanelRows(theme, model, width), invalidate() {} };
@@ -751,15 +746,16 @@ export function workTitle(items: readonly ActivityLaneItem[]): string | undefine
 export function renderDeciderRows(facts: WorkbenchTeamFacts, nowMs: number): string[] {
 	const evaluating = facts.health.inFlightEvaluations?.at(-1);
 	const owner = facts.projection.control.owner;
-	const name = theme.fg(SYSTEM_ONE_TONE, "System One");
+	const text = interfaceText().inspector;
+	const name = theme.fg(SYSTEM_ONE_TONE, text.systemOne);
 	const lastResult = facts.last && evaluationResultText(facts.last);
 	const state = evaluating
-		? theme.fg(SYSTEM_ONE_TONE, `judging ${evaluating.label} ${formatCompactDuration(nowMs - evaluating.startedAt)}`)
+		? theme.fg(SYSTEM_ONE_TONE, text.judging(evaluating.label, formatCompactDuration(nowMs - evaluating.startedAt)))
 		: facts.last
 			? theme.fg(
 					facts.last.outcome === "failed" ? "error" : "muted",
 					facts.last.outcome === "ok"
-						? `last: ${facts.last.label}${lastResult ? ` · ${lastResult}` : ""}`
+						? `${text.lastJudgment(facts.last.label)}${lastResult ? ` · ${lastResult}` : ""}`
 						: `${facts.last.outcome}: ${facts.last.label}`,
 				)
 			: facts.health.state === "unbound" || facts.health.state === "no-engine"
@@ -767,14 +763,14 @@ export function renderDeciderRows(facts: WorkbenchTeamFacts, nowMs: number): str
 						facts.health.state === "no-engine" ? "warning" : "dim",
 						semanticPlaneHealthValue({ state: facts.health.state }),
 					)
-				: theme.fg("dim", "ready");
+				: theme.fg("dim", text.ready);
 	const glyph = evaluating ? theme.fg(SYSTEM_ONE_TONE, "◆") : theme.fg("muted", "◇");
 	// The session executing is the default and needs no word; only a handover is worth one.
 	const control =
 		owner === "system_one"
-			? theme.fg("accent", "decides next")
+			? theme.fg("accent", text.decidesNext)
 			: owner === "user"
-				? theme.fg("warning", "waiting for you")
+				? theme.fg("warning", text.waitingForYou)
 				: "";
 	const head = `  ${glyph} ${name}${control ? ` ${theme.fg("dim", "·")} ${control}` : ""}`;
 	// A state that says nothing happened (off, ready, no engine) shares the name's line; work or a judgment keeps its own.
@@ -792,7 +788,7 @@ function renderRootRow(facts: WorkbenchTeamFacts): string {
 	const model = shortModelName(route.activeModel ?? route.rootModel);
 	const glyph = running ? theme.fg("accent", "●") : theme.fg("muted", "○");
 	const task = running ? `  ${theme.fg("muted", projection.current_action)}` : "";
-	return `  ${glyph} ${theme.fg("muted", "brain")} ${theme.fg(running ? "accent" : "text", model)}${task}`;
+	return `  ${glyph} ${theme.fg("muted", interfaceText().inspector.root)} ${theme.fg(running ? "accent" : "text", model)}${task}`;
 }
 
 const LEADER_TONE: Readonly<Record<LeaderRow["tone"], "accent" | "muted" | "warning" | "success">> = {
@@ -814,15 +810,16 @@ export function renderLeaderRows(rows: readonly LeaderRow[]): string[] {
 
 /** Routed choices that are live: who chose which model for whom, in the operator's words. */
 export function renderRoutingRows(facts: WorkbenchTeamFacts): string[] {
+	const text = interfaceText().inspector;
 	const rows: string[] = [];
 	if (facts.route.switched && facts.route.activeModel !== facts.route.rootModel) {
-		rows.push(`    ${formatRouteValue(facts.route)} → ${shortModelName(facts.route.activeModel)} for root`);
+		rows.push(`    ${formatRouteValue(facts.route)} → ${shortModelName(facts.route.activeModel)} ${text.forRoot}`);
 	}
 	for (const lane of facts.lanes) {
 		if (lane.status !== "queued" && lane.status !== "running") continue;
 		const route = workerRouteText(lane);
 		if (!route || !lane.modelRef) continue;
-		rows.push(`    ${route} → ${shortModelName(lane.modelRef)} for ${lane.label ?? lane.laneId}`);
+		rows.push(`    ${route} → ${shortModelName(lane.modelRef)} ${text.forActor(lane.label ?? lane.laneId)}`);
 	}
 	return rows.map((row) => theme.fg("muted", row));
 }
@@ -838,6 +835,7 @@ export function buildWorkbenchSections(
 	nowMs: number,
 	sources: WorkbenchSectionSources = {},
 ): WorkbenchSection[] {
+	const text = interfaceText().inspector;
 	const { team, graphShown, taskMetrics, leaders } = sources;
 	const model = buildWorkPanelModel(snapshot, nowMs);
 	const rows = model.rows ?? [];
@@ -866,16 +864,16 @@ export function buildWorkbenchSections(
 			: task
 				? `${doneSteps} / ${totalSteps}`
 				: goal
-					? `${satisfied} / ${goal.requirements.length} requirements`
+					? text.requirements(satisfied, goal.requirements.length)
 					: "";
 		const meta = `${baseMeta}${metricsMeta}`;
 		const singleSection = new Set(shown.map((row) => row.section)).size <= 1;
 		const doneSummary = [
-			planRows.length ? `Work complete · ${planRows.length} steps` : "No open steps",
+			planRows.length ? text.workComplete(planRows.length) : text.noOpenSteps,
 			metrics && metrics.activeMs > 0
-				? `${metrics.timingEstimated ? "~" : ""}${formatCompactDuration(metrics.activeMs)} active`
+				? text.activeTime(`${metrics.timingEstimated ? "~" : ""}${formatCompactDuration(metrics.activeMs)}`)
 				: undefined,
-			metrics && metrics.rounds > 0 ? `${metrics.rounds} ${metrics.rounds === 1 ? "round" : "rounds"}` : undefined,
+			metrics && metrics.rounds > 0 ? text.rounds(metrics.rounds) : undefined,
 			metrics && metrics.totalCostUsd > 0 ? `$${metrics.totalCostUsd.toFixed(2)}` : undefined,
 		]
 			.filter(Boolean)
@@ -888,7 +886,7 @@ export function buildWorkbenchSections(
 			: [`  ${theme.fg("success", "✓")} ${theme.fg("text", doneSummary)}`];
 		const nothingToShow = !shown.length && !planRows.length;
 		sections.push({
-			title: PLAN_SECTION,
+			id: "plan",
 			meta,
 			body,
 			...(nothingToShow ? { empty: true, quiet: true } : {}),
@@ -901,18 +899,18 @@ export function buildWorkbenchSections(
 			const what = check.command ?? check.id;
 			return `  ${theme.fg("error", "✗")} ${theme.fg("text", what)}`;
 		});
-		if (checks.length > 3) rows.push(`  ${theme.fg("dim", `+${checks.length - 3} more`)}`);
-		rows.push(`  ${theme.fg("dim", "rerun the same check, or /verify dismiss")}`);
-		sections.push({ title: CHECKS_SECTION, meta: `${checks.length} failing`, body: rows });
+		if (checks.length > 3) rows.push(`  ${theme.fg("dim", text.more(checks.length - 3))}`);
+		rows.push(`  ${theme.fg("dim", text.checkHint)}`);
+		sections.push({ id: "checks", meta: text.failing(checks.length), body: rows });
 	}
 	const peerFindings = snapshot.peerFindings ?? [];
 	if (peerFindings.length) {
 		const rows = peerFindings
 			.slice(0, 3)
 			.map((finding) => `  ${theme.fg("warning", "!")} ${theme.fg("text", `${finding.id}: ${finding.reason}`)}`);
-		if (peerFindings.length > 3) rows.push(`  ${theme.fg("dim", `+${peerFindings.length - 3} more`)}`);
-		rows.push(`  ${theme.fg("dim", "answer with evidence, or /verification waive <id|all> <reason>")}`);
-		sections.push({ title: "Peer findings", meta: `${peerFindings.length} active`, body: rows });
+		if (peerFindings.length > 3) rows.push(`  ${theme.fg("dim", text.more(peerFindings.length - 3))}`);
+		rows.push(`  ${theme.fg("dim", text.findingHint)}`);
+		sections.push({ id: "peerFindings", meta: text.activeFindings(peerFindings.length), body: rows });
 	}
 	// Edge grants stay armed in the host; they are not a workbench inspector section.
 	// The team is its specialists, not its task history: a specialist with three finished tasks and
@@ -924,8 +922,8 @@ export function buildWorkbenchSections(
 		const shown = panel.rows ?? [];
 		const workers = specialists.flatMap((specialist) => (specialist.current ? [specialist.current] : []));
 		const active = workers.filter(isActiveWorkerLane).length;
-		const executors = active ? `${active} running` : "idle";
-		const idle = [`  ${theme.fg("muted", "No workers running")}`];
+		const executors = active ? text.executorsRunning(active) : text.executorsIdle;
+		const idle = [`  ${theme.fg("muted", text.noWorkersRunning)}`];
 		const lanePanel = { ...panel, rows: shown.map((row) => ({ ...row, section: undefined })) };
 		const executorRows = (width: number): string[] =>
 			shown.length ? renderOrchestrationPanelRows(theme, lanePanel, width) : idle;
@@ -935,7 +933,7 @@ export function buildWorkbenchSections(
 			lines.map((line) => truncateToWidth(line, Math.max(1, width), ""));
 		if (!team) {
 			sections.push({
-				title: TEAM_SECTION,
+				id: "orchestration",
 				meta: executors,
 				body: shown.length ? rowsComponent(lanePanel) : idle,
 				quiet: !shown.length && !specialists.length,
@@ -946,27 +944,27 @@ export function buildWorkbenchSections(
 		// right rows (the workers alone beside the graph, the whole panel without it).
 		const leaderLines = (): string[] => {
 			const rows = renderLeaderRows(leaders?.() ?? []);
-			return rows.length ? [group("Leaders"), ...rows] : [];
+			return rows.length ? [group(text.group.leaders), ...rows] : [];
 		};
 		const body: Component = {
 			render: (width) => {
 				if (graphShown?.() === true)
 					return clampLines(
-						[...leaderLines(), ...(hasSpecialists ? [group("Workers"), ...executorRows(width)] : [])],
+						[...leaderLines(), ...(hasSpecialists ? [group(text.group.workers), ...executorRows(width)] : [])],
 						width,
 					);
 				const facts = team();
 				const routing = renderRoutingRows(facts);
 				return clampLines(
 					[
-						group("Brain"),
+						group(text.group.brain),
 						renderRootRow(facts),
-						group("Decider"),
+						group(text.group.decider),
 						...renderDeciderRows(facts, Date.now()),
 						...leaderLines(),
-						group("Workers"),
+						group(text.group.workers),
 						...(hasSpecialists ? executorRows(width) : idle),
-						...(routing.length ? [group("Routing"), ...routing] : []),
+						...(routing.length ? [group(text.group.routing), ...routing] : []),
 					],
 					width,
 				);
@@ -975,7 +973,7 @@ export function buildWorkbenchSections(
 		};
 		const hasLeaders = (leaders?.().length ?? 0) > 0;
 		if (graphShown?.() === true && !hasSpecialists && !hasLeaders) return sections;
-		sections.push({ title: TEAM_SECTION, meta: executors, body, quiet: !hasSpecialists && !hasLeaders });
+		sections.push({ id: "orchestration", meta: executors, body, quiet: !hasSpecialists && !hasLeaders });
 	}
 	return sections;
 }

@@ -28,6 +28,7 @@
  */
 
 import { truncateToWidth } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { FlowEvent, FlowKind } from "../../../core/operator-projection/flow-trace.ts";
 import { theme } from "../../../presentation/theme-model.ts";
 import type { DecisionGraphRows } from "./decision-graph-render.ts";
@@ -44,22 +45,22 @@ import {
 
 /** How each kind of action looks. Exhaustive: a new kind does not compile until it has a look. */
 const KIND_LOOK: Readonly<Record<FlowKind, SequenceKindLook>> = {
-	prompt: { glyph: "»", folds: false, plural: "prompts" },
-	turn: { glyph: "■", folds: true, plural: "turns" },
-	reply: { glyph: "«", folds: false, plural: "replies" },
-	tool: { glyph: "▸", folds: true, plural: "tools" },
-	background: { glyph: "▹", folds: false, plural: "background tools" },
-	route: { glyph: "◇", folds: true, plural: "routes" },
-	judgment: { glyph: "◆", folds: true, plural: "judgments" },
-	delegate: { glyph: "›", folds: false, plural: "delegations" },
-	worker: { glyph: "□", folds: false, plural: "workers" },
-	report: { glyph: "‹", folds: false, plural: "reports" },
-	question: { glyph: "?", folds: false, plural: "questions" },
-	answer: { glyph: "↵", folds: false, plural: "answers" },
-	notice: { glyph: "▲", folds: true, plural: "notices" },
-	compaction: { glyph: "≡", folds: true, plural: "compactions" },
-	retry: { glyph: "↻", folds: true, plural: "retries" },
-	wait: { glyph: "○", folds: true, plural: "waits" },
+	prompt: { glyph: "»", folds: false },
+	turn: { glyph: "■", folds: true },
+	reply: { glyph: "«", folds: false },
+	tool: { glyph: "▸", folds: true },
+	background: { glyph: "▹", folds: false },
+	route: { glyph: "◇", folds: true },
+	judgment: { glyph: "◆", folds: true },
+	delegate: { glyph: "›", folds: false },
+	worker: { glyph: "□", folds: false },
+	report: { glyph: "‹", folds: false },
+	question: { glyph: "?", folds: false },
+	answer: { glyph: "↵", folds: false },
+	notice: { glyph: "▲", folds: true },
+	compaction: { glyph: "≡", folds: true },
+	retry: { glyph: "↻", folds: true },
+	wait: { glyph: "○", folds: true },
 };
 
 /** The titles at their lifeline columns (the pinned header), then the legend for any title that did not fit. */
@@ -167,10 +168,7 @@ export function renderFlowLanes(
 	const pinnedRows = layout.header.length > 0 ? 1 : 0;
 	const pinned = pinnedRows > 0 ? { pinnedRows } : {};
 	if (layout.rows.length === 0) {
-		const rows = [
-			...head,
-			theme.fg("dim", truncateToWidth("no activity yet · the lanes fill as work happens", width, "…")),
-		];
+		const rows = [...head, theme.fg("dim", truncateToWidth(interfaceText().graph.lanes.empty, width, "…"))];
 		return { rows, stageAt: rows.map(() => undefined), currentRow: 0, focusKey: "flow:empty", ...pinned };
 	}
 	const labels = labelRows(layout);

@@ -43,6 +43,7 @@
  */
 
 import { truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { FlowActor, FlowEvent, FlowKind, FlowOutcome } from "../../../core/operator-projection/flow-trace.ts";
 import { formatCompactDuration } from "../../../core/util/format-duration.ts";
 import { harnessLog } from "../../../kernel/harness-log.ts";
@@ -54,8 +55,6 @@ export interface SequenceKindLook {
 	readonly glyph: string;
 	/** A run of finished actions of this kind folds into one counted row. */
 	readonly folds: boolean;
-	/** The folded row's noun ("tools ×6"). */
-	readonly plural: string;
 }
 
 export type SequenceLook = Readonly<Record<FlowKind, SequenceKindLook>>;
@@ -163,11 +162,11 @@ const LABEL_GAP = 2;
 const FIXED_LIFELINES = 3;
 const TAGS = "123456789abcdefghijklmnopqrstuvwxyz";
 
-const FIXED_TITLE: Readonly<Record<Exclude<FlowActor, "worker">, string>> = {
-	owner: "you",
-	system_one: "System One",
-	root: "root",
-};
+/** The fixed lifelines' titles: the owner, System One and the root, as the catalogue names them. */
+function fixedTitle(actor: Exclude<FlowActor, "worker">): string {
+	const sequence = interfaceText().graph.sequence;
+	return actor === "owner" ? sequence.owner : actor === "system_one" ? sequence.systemOne : sequence.root;
+}
 const FIXED_KEYS: readonly Exclude<FlowActor, "worker">[] = ["owner", "system_one", "root"];
 
 const OUTCOME_MARK: Readonly<Record<FlowOutcome, string>> = {
@@ -380,9 +379,8 @@ function fitLabel(text: string, suffix: string, width: number): string {
 	return truncateToWidth(whole, width, "…");
 }
 
-function rowLabel(row: FlowRow, look: SequenceLook, nowMs: number, width: number, lifelineHasTag = false): string {
+function rowLabel(row: FlowRow, nowMs: number, width: number, lifelineHasTag = false): string {
 	const event = row.first;
-	const kind = look[event.kind];
 	const mark =
 		event.endedAt === undefined
 			? ""
@@ -392,7 +390,11 @@ function rowLabel(row: FlowRow, look: SequenceLook, nowMs: number, width: number
 	if (row.count > 1) {
 		const names = row.labels.slice(0, 3).join(", ");
 		return fitLabel(
-			`${mark}${kind.plural} ×${row.count} · avg ${formatCompactDuration(row.totalMs / row.count)} (${names})`,
+			`${mark}${interfaceText().graph.sequence.folded(
+				interfaceText().graph.lanes[event.kind],
+				row.count,
+				formatCompactDuration(row.totalMs / row.count),
+			)} (${names})`,
 			"",
 			width,
 		);
@@ -402,8 +404,8 @@ function rowLabel(row: FlowRow, look: SequenceLook, nowMs: number, width: number
 	const text =
 		event.kind === "worker"
 			? event.endedAt === undefined
-				? "running"
-				: "work"
+				? interfaceText().graph.sequence.running
+				: interfaceText().graph.sequence.work
 			: event.kind === "report" && !lifelineHasTag && event.result !== undefined
 				? event.result.replace(/_/g, " ")
 				: event.label;
@@ -438,7 +440,7 @@ function buildLabelsOnlyLayout(
 	const { width, nowMs, look, cellWidth } = options;
 	const rows = folded.map((row): SequenceRow => {
 		const lead = `${look[row.first.kind].glyph} `;
-		const label = `${lead}${rowLabel(row, look, nowMs, Math.max(0, width - visibleWidth(lead)), true)}`;
+		const label = `${lead}${rowLabel(row, nowMs, Math.max(0, width - visibleWidth(lead)), true)}`;
 		return { first: row.first, last: row.last, count: row.count, label, labelTone: labelTone(row) };
 	});
 	return {
@@ -518,10 +520,10 @@ export function buildSequenceLayout(
 		const list = keys.map((key, index): SequenceLifeline => {
 			const title =
 				key === "overflow"
-					? `+${hiddenCount} more`
+					? interfaceText().graph.sequence.more(hiddenCount)
 					: key.startsWith("worker:")
 						? workerTitle.get(key)!
-						: FIXED_TITLE[key as Exclude<FlowActor, "worker">];
+						: fixedTitle(key as Exclude<FlowActor, "worker">);
 			const busy = key === "overflow" ? [...busyKeys].some((busyKey) => hiddenKeys.has(busyKey)) : busyKeys.has(key);
 			const fits = visibleWidth(title) <= available;
 			return { key, title, ...(fits ? {} : { tag: TAGS[index] ?? "*" }), cell: index * pitch, busy };
@@ -623,7 +625,7 @@ export function buildSequenceLayout(
 		const to = target === undefined ? from : lifelines[indexOf(target)]!.cell;
 		const glyph = look[event.kind].glyph;
 		const lifelineHasTag = originLifeline.tag !== undefined || originLifeline.key === "overflow";
-		const label = rowLabel(row, look, nowMs, labelWidth, lifelineHasTag);
+		const label = rowLabel(row, nowMs, labelWidth, lifelineHasTag);
 		if (to === from) {
 			const tone = edgeTone(row, event.endedAt === undefined ? "flight" : "settled");
 			return {

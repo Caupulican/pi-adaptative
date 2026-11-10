@@ -1,10 +1,6 @@
 import { type Component, Container, hyperlink, truncateToWidth, visibleWidth } from "@caupulican/pi-tui";
-import type { ManagedLaneView } from "../../../core/delegation/managed-lane-views.ts";
-import type {
-	ActiveChatTarget,
-	PersistentBotView,
-	PersistentTeamRecord,
-} from "../../../core/delegation/persistent-bot-team-store.ts";
+import type { ActiveChatTarget } from "../../../core/delegation/persistent-bot-team-store.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { DecisionStage } from "../../../core/operator-projection/decision-stage-log.ts";
 import type { PullRequestView } from "../../../core/pull-request-view.ts";
 import {
@@ -17,7 +13,7 @@ import { keyText } from "../../../presentation/keybinding-hints.ts";
 import { getSelectionStyle, theme } from "../../../presentation/theme-model.ts";
 import { ActionTranscriptComponent } from "./action-transcript.ts";
 import { BashExecutionComponent } from "./bash-execution.ts";
-import { botStateMark, REMOTE_MARK } from "./bot-state-mark.ts";
+import { drawChatRosterPane, type WorkbenchChatRosterSnapshot } from "./chat-roster-pane.ts";
 import { ConversationWindow } from "./conversation-window.ts";
 import { type DecisionGraphModel, graphHasContent } from "./decision-graph-model.ts";
 import { DecisionGraphPane } from "./decision-graph-pane.ts";
@@ -37,7 +33,8 @@ export interface WorkbenchModelStatus {
 
 /** One inspector block: a titled group of rows (plan steps, team members). */
 export interface WorkbenchSection {
-	title: string;
+	/** What the block is; the words drawn as its title come from the catalogue's section names. */
+	id: WorkbenchSectionId;
 	meta?: string;
 	body: Component | string[];
 	/** Standing facts with no work in them (an idle team): listed beside real work, never a reason to open the panel. */
@@ -52,38 +49,6 @@ export type WorkbenchHeaderButtonAction = "latest" | "layout" | "showLeftPane" |
 
 /** What the left pane shows: the Decision graph, or the Chats & Teams roster. */
 export type WorkbenchLeftPaneMode = "chats" | "graph";
-
-/** The live facts behind the Chats & Teams roster: the active target, the Brain's state, every bot and team. */
-/**
- * The roster's bot order: each bot a listed leader owns follows that leader, marked owned; every other bot keeps its
- * place. A bot whose leader is not listed stands on its own.
- */
-export function rosterBotOrder(
-	bots: readonly PersistentBotView[],
-): { readonly bot: PersistentBotView; readonly owned: boolean }[] {
-	const leaders = new Set(bots.filter((bot) => bot.leader === true).map((bot) => bot.agentId));
-	const isOwned = (bot: PersistentBotView) =>
-		bot.createdBy !== undefined && bot.createdBy !== bot.agentId && leaders.has(bot.createdBy);
-	const order: { bot: PersistentBotView; owned: boolean }[] = [];
-	for (const bot of bots) {
-		if (isOwned(bot)) continue;
-		order.push({ bot, owned: false });
-		if (bot.leader === true)
-			for (const child of bots)
-				if (isOwned(child) && child.createdBy === bot.agentId) order.push({ bot: child, owned: true });
-	}
-	return order;
-}
-
-export interface WorkbenchChatRosterSnapshot {
-	readonly activeTarget: ActiveChatTarget;
-	readonly rootModelLabel: string;
-	readonly rootRunning: boolean;
-	readonly bots: readonly PersistentBotView[];
-	/** Live managed lanes: listed read-only, never a chat target. */
-	readonly lanes: readonly ManagedLaneView[];
-	readonly teams: readonly PersistentTeamRecord[];
-}
 
 export interface WorkbenchOptions {
 	conversation: Container;
@@ -122,20 +87,15 @@ export interface WorkbenchDividerJunction {
 	readonly glyph: "┴" | "┬" | "┼";
 }
 
-const GRAPH_VIEW_NAMES: Readonly<Record<WorkbenchGraphView, string>> = {
-	list: "List",
-	diagram: "Diagram",
-	lanes: "Lanes",
-};
-
 const THINKING_METER_LEVELS = ["minimal", "low", "medium", "high", "xhigh"];
 const THINKING_METER_CELLS = THINKING_METER_LEVELS.length;
 
-export const PLAN_SECTION = "Work plan";
-/** The panel of what runs the work: the brain, the decider and the workers. Chats live in the roster, not here. */
-export const TEAM_SECTION = "Orchestration";
-export const CHECKS_SECTION = "Checks";
-export const EDGE_SECTION = "Edge";
+/**
+ * The inspector's sections, by what they hold: `plan` is the work plan, `orchestration` what runs the work (the brain,
+ * the decider and the workers; chats live in the roster, not here), `checks` what verified it, `peerFindings` what
+ * peers reported. Code compares these; the words drawn for them come from the catalogue at draw time.
+ */
+export type WorkbenchSectionId = "plan" | "orchestration" | "checks" | "peerFindings";
 const MIN_INSPECTOR_WIDTH = 24;
 const SIDE_BY_SIDE_MIN_COLUMNS = 80;
 export const DEFAULT_INSPECTOR_FRACTION = 0.3;
@@ -189,12 +149,6 @@ export interface WorkbenchGeometry {
 	graph?: "shown" | "hidden";
 	graphFraction?: number;
 	graphView?: WorkbenchGraphView;
-}
-
-/** A bot's live state as one toned glyph; the Chats list and the Team section draw the same one. */
-export function botStateGlyph(state: PersistentBotView["state"]): string {
-	const { glyph, tone } = botStateMark(state);
-	return theme.fg(tone, glyph);
 }
 
 /** The zone width a left-pane mode needs: its own minimum, the rule and a readable chat beside it. */
@@ -610,16 +564,17 @@ export class WorkbenchComponent extends Container {
 		return this.executionPane.hasTitleActions();
 	}
 	private inspectorTitleButtons(): WorkbenchPaneTitleButton[] {
-		return [{ action: "hideInspector", label: "Hide" }];
+		return [{ action: "hideInspector", label: interfaceText().panes.hide }];
 	}
 	private executionTitleButtons(): WorkbenchPaneTitleButton[] {
+		const text = interfaceText().panes;
 		const buttons: WorkbenchPaneTitleButton[] = [];
 		if (this.inspectorHidden && !this.executionMaximized) {
-			buttons.push({ action: "showInspector", label: "Show plan" });
+			buttons.push({ action: "showInspector", label: text.showPlan });
 		}
 		// One chip: the columns layout lives on its key and on the conversation header's Stacked chip.
 		if (!this.columns) {
-			buttons.push({ action: "maximize", label: this.executionMaximized ? "Restore" : "Maximize" });
+			buttons.push({ action: "maximize", label: this.executionMaximized ? text.restore : text.maximize });
 		}
 		return buttons;
 	}
@@ -628,21 +583,24 @@ export class WorkbenchComponent extends Container {
 	 * that steps List → Diagram → Lanes on click (as alt+l does). Only the active view is drawn.
 	 */
 	private graphTitleButtons(): WorkbenchPaneTitleButton[] {
+		const text = interfaceText().panes;
 		// One fixed width for every view, so the pill never moves under the pointer as it steps.
-		const width = Math.max(...WORKBENCH_GRAPH_VIEWS.map((view) => GRAPH_VIEW_NAMES[view].length));
-		const name = GRAPH_VIEW_NAMES[this.graphView];
-		const left = Math.floor((width - name.length) / 2);
-		const label = `${" ".repeat(left)}${name}${" ".repeat(width - name.length - left)}`;
+		const label = (view: WorkbenchGraphView): string => text.graphView(view);
+		const width = Math.max(...WORKBENCH_GRAPH_VIEWS.map((view) => visibleWidth(label(view))));
+		const name = label(this.graphView);
+		const cells = visibleWidth(name);
+		const left = Math.floor((width - cells) / 2);
+		const pill = `${" ".repeat(left)}${name}${" ".repeat(width - cells - left)}`;
 		const buttons: WorkbenchPaneTitleButton[] = [{ action: "hideGraph", label: "▾", leading: true }];
 		if (this.graphPane.isPinned() || this.graphPane.hasNewerProgress()) {
-			buttons.push({ action: "followCurrent", label: "Follow current" });
+			buttons.push({ action: "followCurrent", label: text.followCurrent });
 		}
 		// The way back to the roster depends on the host offering one, not on this frame having composed it:
 		// a frame on the graph skips composing the roster, and the chip must still be there to return to it.
 		if (this.options.chatRoster !== undefined) {
-			buttons.push({ action: "toggleLeftPaneMode", label: "Chats", raised: true });
+			buttons.push({ action: "toggleLeftPaneMode", label: text.chats, raised: true });
 		}
-		buttons.push({ action: "graphCycle", label, raised: true });
+		buttons.push({ action: "graphCycle", label: pill, raised: true });
 		return buttons;
 	}
 	headerAction(column: number): WorkbenchHeaderButtonAction | undefined {
@@ -737,13 +695,14 @@ export class WorkbenchComponent extends Container {
 	}
 
 	private conversationHeader(columns: number, originX = 0): string {
+		const text = interfaceText().panes;
 		const inner = Math.max(0, columns - 2);
 		const following = this.conversation.following;
 		// Following the latest is the default and needs no word; only a reader scrolled away is told.
-		const stateText = following ? "" : " · Reading";
-		const convTitle = this.options.conversationTitle?.() || "Conversation";
+		const stateText = following ? "" : ` · ${text.reading}`;
+		const convTitle = this.options.conversationTitle?.() || text.conversation;
 		const heading = theme.bold(theme.fg("text", convTitle)) + theme.fg("muted", stateText);
-		const headingWidth = visibleWidth(convTitle) + stateText.length;
+		const headingWidth = visibleWidth(convTitle) + visibleWidth(stateText);
 		// The way back to a pane the operator hid, offered while the left pane draws nothing; it names what a click opens at this width.
 		const opens =
 			(this.leftPaneHidden || this.graphHidden) && !this.effectiveLeftPaneMode(this.zoneWidth)
@@ -755,11 +714,11 @@ export class WorkbenchComponent extends Container {
 		// Chips drop from the end on a narrow header; the only way back to a hidden left pane comes first.
 		const buttons: { action: WorkbenchHeaderButtonAction; label: string }[] = [
 			...(opens
-				? [{ action: "showLeftPane" as const, label: opens === "chats" ? "Show chats" : "Show graph" }]
+				? [{ action: "showLeftPane" as const, label: opens === "chats" ? text.showChats : text.showGraph }]
 				: []),
 			...(switchChatLabel ? [{ action: "switchChat" as const, label: switchChatLabel }] : []),
-			...(this.columns ? [{ action: "layout" as const, label: "Stacked" }] : []),
-			...(following ? [] : [{ action: "latest" as const, label: "Latest ↓" }]),
+			...(this.columns ? [{ action: "layout" as const, label: text.stacked }] : []),
+			...(following ? [] : [{ action: "latest" as const, label: text.latest }]),
 		];
 		const chipTone = this.mouseMode ? "accent" : "muted";
 		for (let count = buttons.length; count >= 0; count--) {
@@ -792,13 +751,17 @@ export class WorkbenchComponent extends Container {
 
 	/** What a collapsed work area holds: its section titles, and Execution only when it has evidence. Empty when it holds nothing. */
 	private collapsedSummary(columns: number): string {
+		const text = interfaceText().panes;
 		const blocks = [
-			...this.sections.map((section) => (section.meta ? `${section.title} ${section.meta}` : section.title)),
-			this.hasExecutionEvidence(columns) ? "Execution" : "",
+			...this.sections.map((section) => {
+				const title = text.sections[section.id];
+				return section.meta ? `${title} ${section.meta}` : title;
+			}),
+			this.hasExecutionEvidence(columns) ? text.execution : "",
 		].filter(Boolean);
 		if (!blocks.length) return "";
 		const toggle = keyText("app.execution.toggle");
-		return [`▸ ${blocks.join(" · ")}`, toggle && `${toggle} expand`].filter(Boolean).join(" · ");
+		return [`▸ ${blocks.join(" · ")}`, toggle && `${toggle} ${text.expand}`].filter(Boolean).join(" · ");
 	}
 
 	/** Expanded: a drag handle and nothing else; the editor's placeholder and `?` carry the keys. Collapsed: the summary, or a bare rule when there is nothing to name. */
@@ -835,7 +798,8 @@ export class WorkbenchComponent extends Container {
 					: view.state === "closed"
 						? "error"
 						: "dim";
-		const plain = `PR #${view.number}${view.state === "open" ? "" : ` ${view.state}`}`;
+		const state = interfaceText().panes.pullRequestState(view.state);
+		const plain = `PR #${view.number}${view.state === "open" ? "" : ` ${state}`}`;
 		return { text: theme.fg(tone, hyperlink(plain, view.url)), width: visibleWidth(plain) };
 	}
 
@@ -854,9 +818,9 @@ export class WorkbenchComponent extends Container {
 		const model = this.options.model?.();
 		const meter = model?.thinking ? this.thinkingMeter(model.thinking) : undefined;
 		// The terminal owning the mouse is a standing fact: a wheel that does nothing in the workbench needs its reason on screen.
-		const terminalMouse = "terminal mouse";
+		const terminalMouse = interfaceText().panes.terminalMouse;
 		const parts: { text: string; width: number }[] = [
-			...(this.mouseMode ? [] : [{ text: theme.fg("muted", terminalMouse), width: terminalMouse.length }]),
+			...(this.mouseMode ? [] : [{ text: theme.fg("muted", terminalMouse), width: visibleWidth(terminalMouse) }]),
 			...(model ? [{ text: theme.fg("text", model.name), width: visibleWidth(model.name) }] : []),
 			...(meter ? [meter] : []),
 		];
@@ -878,29 +842,31 @@ export class WorkbenchComponent extends Container {
 	}
 
 	private inspectorContent(width: number): { title: string; meta: string; lines: string[] } {
+		const text = interfaceText().panes;
 		const body = (section: WorkbenchSection | undefined, placeholder: string): string[] =>
 			section
 				? Array.isArray(section.body)
 					? section.body
 					: section.body.render(width)
 				: [`  ${theme.fg("dim", placeholder)}`];
-		const plan = this.sections.find((section) => section.title === PLAN_SECTION);
-		const team = this.sections.find((section) => section.title === TEAM_SECTION);
+		const label = (section: WorkbenchSection): string => text.sections[section.id];
+		const plan = this.sections.find((section) => section.id === "plan");
+		const team = this.sections.find((section) => section.id === "orchestration");
 		const others = this.sections.filter((section) => section !== plan && section !== team);
 		// A plan with nothing in it is not a panel: the team heads the inspector instead of a row saying there is nothing.
 		if ((!plan || plan.empty) && team) {
-			const lines = [...body(team, "No agents")];
+			const lines = [...body(team, text.noAgents)];
 			for (const section of others)
-				lines.push("", labelRow(section.title, section.meta ?? "", width), ...body(section, ""));
-			return { title: TEAM_SECTION, meta: team.meta ?? "", lines };
+				lines.push("", labelRow(label(section), section.meta ?? "", width), ...body(section, ""));
+			return { title: label(team), meta: team.meta ?? "", lines };
 		}
-		const lines = [...body(plan, "No open steps")];
+		const lines = [...body(plan, text.noOpenSteps)];
 		if (team || !this.graphShown) {
-			lines.push("", labelRow(TEAM_SECTION, team?.meta ?? "", width), ...body(team, "No agents"));
+			lines.push("", labelRow(text.sections.orchestration, team?.meta ?? "", width), ...body(team, text.noAgents));
 		}
 		for (const section of others)
-			lines.push("", labelRow(section.title, section.meta ?? "", width), ...body(section, ""));
-		return { title: PLAN_SECTION, meta: plan?.meta ?? "", lines };
+			lines.push("", labelRow(label(section), section.meta ?? "", width), ...body(section, ""));
+		return { title: text.sections.plan, meta: plan?.meta ?? "", lines };
 	}
 
 	/** The plan and team beside the evidence: shown when there is work or standing members to list, unless the operator hid them or Execution is maximized. */
@@ -938,6 +904,7 @@ export class WorkbenchComponent extends Container {
 	}
 
 	private renderUpper(columns: number, height: number, top: number, originX = 0): string[] {
+		const executionTitle = interfaceText().panes.execution;
 		this.inspectorPane.hide();
 		this.executionPane.hide();
 		this.splitStart = -1;
@@ -957,7 +924,7 @@ export class WorkbenchComponent extends Container {
 		const hasExecution = fullWidthLines.length > 0;
 		if (!this.showsInspector()) {
 			return this.executionPane.render(
-				"Execution",
+				executionTitle,
 				executionMeta,
 				fullWidthLines,
 				originX,
@@ -1005,7 +972,7 @@ export class WorkbenchComponent extends Container {
 				this.mouseMode,
 			);
 			const right = this.executionPane.render(
-				"Execution",
+				executionTitle,
 				executionMeta,
 				executionLines(rightWidth - 2),
 				originX + rightX,
@@ -1032,7 +999,7 @@ export class WorkbenchComponent extends Container {
 				...inspector.lines,
 			];
 			return this.executionPane.render(
-				"Execution",
+				executionTitle,
 				executionMeta,
 				lines,
 				originX,
@@ -1048,7 +1015,7 @@ export class WorkbenchComponent extends Container {
 		const inspectorHeight = height - 1 - executionHeight;
 		return [
 			...this.executionPane.render(
-				"Execution",
+				executionTitle,
 				executionMeta,
 				executionLines(width),
 				originX,
@@ -1110,6 +1077,17 @@ export class WorkbenchComponent extends Container {
 			this.leftPaneMode === "graph" ? ["graph", "chats"] : ["chats", "graph"];
 		return order.find(
 			(mode) => zoneWidth >= leftPaneZoneMinimum(mode) && (mode === "graph" ? hasGraph() : hasChats()),
+		);
+	}
+
+	/**
+	 * Whether the roster offers the way to the graph: only where the graph fits. A graph the operator hid composes no
+	 * model this frame, so its source stands in, and the chip shows it again.
+	 */
+	private graphChipReachable(): boolean {
+		return (
+			this.zoneWidth >= leftPaneZoneMinimum("graph") &&
+			(this.frameGraphModel !== undefined || (this.graphHidden && this.graphSource !== undefined))
 		);
 	}
 
@@ -1210,7 +1188,19 @@ export class WorkbenchComponent extends Container {
 			this.graphPane.hide();
 			const roster = this.chatRosterForFrame();
 			if (roster) {
-				left = this.drawChatRosterPane(roster, originX, top, graphWidth, height + 1);
+				const drawn = drawChatRosterPane({
+					pane: this.chatRosterPane,
+					roster,
+					originX,
+					top,
+					width: graphWidth,
+					height: height + 1,
+					graphReachable: this.graphChipReachable(),
+					graphView: this.graphView,
+					mouseMode: this.mouseMode,
+				});
+				this.chatTargetsByRow = drawn.targets;
+				left = drawn.lines;
 			} else {
 				this.chatRosterPane.hide();
 				this.chatTargetsByRow = [];
@@ -1222,125 +1212,6 @@ export class WorkbenchComponent extends Container {
 		const right = [this.conversationHeader(rightWidth, originX + rightX), ...body];
 		const rule = theme.fg("borderMuted", "│");
 		return left.map((line, row) => `${line}${rule} ${right[row] ?? ""}`);
-	}
-
-	/**
-	 * The Chats & Teams roster: Brain, teams, then bots. Each row names the target it selects; the main line and
-	 * its subtitle select the same target. Rows are drawn at the graph pane's origin so hit-testing matches.
-	 */
-	private drawChatRosterPane(
-		roster: WorkbenchChatRosterSnapshot,
-		originX: number,
-		top: number,
-		width: number,
-		height: number,
-	): string[] {
-		const active = roster.activeTarget;
-		const rows: string[] = [];
-		const targets: (ActiveChatTarget | undefined)[] = [];
-		const add = (row: string, target?: ActiveChatTarget): void => {
-			rows.push(row);
-			targets.push(target);
-		};
-		const isRoot = active.kind === "root";
-		// The roster is the directory of chats: the Brain is the first of them, by name only. Its model and state are the
-		// Orchestration panel's business, so they are not repeated here.
-		add(
-			`${isRoot ? theme.fg("accent", "▸ ") : "  "}${roster.rootRunning ? theme.fg("accent", "●") : theme.fg("success", "●")} ${isRoot ? theme.bold(theme.fg("accent", "Brain")) : theme.fg("text", "Brain")}`,
-			{ kind: "root" },
-		);
-		// An empty group is its header with the way to fill it, not a header and a row saying it is empty.
-		add(theme.fg("muted", roster.teams.length === 0 ? " TEAMS · /team create" : ` TEAMS (${roster.teams.length})`));
-		for (const team of roster.teams) {
-			const isSelected = active.kind === "team" && active.teamId === team.teamId;
-			const target: ActiveChatTarget = { kind: "team", teamId: team.teamId };
-			const name = team.name || team.teamId;
-			const unreadBadge = (team.unreadCount ?? 0) > 0 ? ` ${theme.fg("warning", `●${team.unreadCount}`)}` : "";
-			add(
-				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${theme.fg("accent", "◆")} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)} ${theme.fg("muted", `[${team.memberAgentIds.length}]`)}${unreadBadge}`,
-				target,
-			);
-			add(`    ${theme.fg("muted", team.description || team.memberAgentIds.join(", ") || "no members")}`, target);
-		}
-		add(theme.fg("muted", roster.bots.length === 0 ? " BOTS · /bot new <id>" : ` BOTS (${roster.bots.length})`));
-		for (const { bot, owned } of rosterBotOrder(roster.bots)) {
-			const isSelected = active.kind === "bot" && active.agentId === bot.agentId;
-			// A bot a leader owns sits under that leader; its detail line keeps the same indent.
-			const pad = owned ? `  ${theme.fg("dim", "└")} ` : "";
-			const detailPad = owned ? "      " : "    ";
-			const target: ActiveChatTarget = { kind: "bot", agentId: bot.agentId };
-			const name = bot.displayName || bot.agentId;
-			const glyph = botStateGlyph(bot.state);
-			const unreadBadge = (bot.unreadCount ?? 0) > 0 ? ` ${theme.fg("warning", `●${bot.unreadCount}`)}` : "";
-			const scheduleBadge = (bot.routineCount ?? 0) > 0 ? ` ${theme.fg("accent", `⏱${bot.routineCount}`)}` : "";
-			const leaderBadge = `${bot.leader ? ` ${theme.fg("warning", "leader")}` : ""}${bot.remote ? ` ${theme.fg("accent", `${REMOTE_MARK} remote`)}` : ""}`;
-			add(
-				`${isSelected ? theme.fg("accent", "▸ ") : "  "}${pad}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)}${leaderBadge}${unreadBadge}${scheduleBadge}`,
-				target,
-			);
-			// The row is the bot's name. Its model is a hint on the line below, shown only for the selected bot; the idle state is
-			// the glyph's business, so only a difference earns a word.
-			const detail = [
-				isSelected ? `@${bot.agentId}` : undefined,
-				isSelected && !bot.remote ? bot.modelId || bot.modelRef : undefined,
-				bot.state === "idle" ? undefined : bot.state,
-				bot.teamIds.length > 0 ? `[${bot.teamIds.join(",")}]` : undefined,
-				bot.currentSummary,
-			]
-				.filter(Boolean)
-				.join(" · ");
-			if (detail) add(`${detailPad}${theme.fg("muted", detail)}`, target);
-		}
-		if (roster.lanes.length > 0) {
-			const running = roster.lanes.filter((lane) => lane.state === "running").length;
-			const waiting = roster.lanes.filter((lane) => lane.state === "queued").length;
-			add(
-				theme.fg(
-					"muted",
-					` WORKERS · ${running} running${waiting > 0 ? ` · ${waiting} waiting` : ""}${roster.lanes.length > running + waiting ? ` · ${roster.lanes.length} in all` : ""}`,
-				),
-			);
-			for (const lane of roster.lanes) {
-				add(
-					`  ${botStateGlyph(lane.state)} ${theme.fg("text", lane.label)}${lane.modelRef ? ` ${theme.fg("muted", lane.modelRef)}` : ""}`,
-				);
-			}
-		}
-		add(`  ${theme.fg("dim", "Click row to resume · @id to msg")}`);
-		this.chatTargetsByRow = targets;
-		const teams = roster.teams.length;
-		const bots = roster.bots.length;
-		const meta = `${bots} bot${bots === 1 ? "" : "s"}${teams > 0 ? ` · ${teams} team${teams === 1 ? "" : "s"}` : ""}`;
-		// The way to the graph is offered only where the graph fits; a graph the operator hid composes no model this
-		// frame, so its source stands in, and the chip shows it again.
-		const graphReachable =
-			this.zoneWidth >= leftPaneZoneMinimum("graph") &&
-			(this.frameGraphModel !== undefined || (this.graphHidden && this.graphSource !== undefined));
-		const actions: WorkbenchPaneTitleButton[] = [
-			{ action: "hideLeftPane", label: "▾", leading: true },
-			...(graphReachable
-				? [
-						{
-							action: "toggleLeftPaneMode" as const,
-							label: `Graph (${GRAPH_VIEW_NAMES[this.graphView]})`,
-							raised: true,
-						},
-					]
-				: []),
-			{ action: "switchChat", label: "Modal", raised: true },
-		];
-		return this.chatRosterPane.render(
-			"Chats",
-			meta,
-			rows,
-			originX,
-			top,
-			width,
-			height,
-			false,
-			actions,
-			this.mouseMode,
-		);
 	}
 
 	private renderColumns(
