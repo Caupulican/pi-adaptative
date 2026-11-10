@@ -2736,8 +2736,9 @@ export class WorkerDelegationController {
 		return decision.ok ? decision.room : 0;
 	}
 
-	private hasFleetRoom(admission: Extract<WorkerAdmission, { ok: true }>): boolean {
-		return this.fleetRoom(admission) >= 1;
+	/** That room for a start that skips the queue: none while the machine-wide emergency stop holds every new lane. */
+	private directStartRoom(admission: Extract<WorkerAdmission, { ok: true }>): number {
+		return isEmergencyStopEngaged(this.deps.getAgentDir()) ? 0 : this.fleetRoom(admission);
 	}
 
 	/** The session's fleet scheduler, for owners that stop, resume or read its room. */
@@ -4596,7 +4597,7 @@ export class WorkerDelegationController {
 		const fleetSkipReason = this.newWorkerFleetSkipReason(request, remaining + pendingVerifiers.size);
 		if (fleetSkipReason) return fleetSkipReason;
 		const admission = this.resolveWorkerAdmission(request);
-		const freeConcurrency = admission.ok ? this.fleetRoom(admission) : 0;
+		const freeConcurrency = admission.ok ? this.directStartRoom(admission) : 0;
 		const queueSlotsNeeded = Math.max(0, remaining - freeConcurrency) + pendingVerifiers.size;
 		const queueSlotsFree = this.fleet.readyWindow() - this.scheduler.queuedCount;
 		return queueSlotsNeeded > queueSlotsFree ? "worker_dispatch_queue_full" : undefined;
@@ -4863,7 +4864,7 @@ export class WorkerDelegationController {
 
 		const contendsWithLocalForeground = this.contendsWithLocalForeground(shipment.model);
 		const dependencyGated = (request.taskContext?.dependsOnTaskIds.length ?? 0) > 0;
-		if (!preparedAdmission || dependencyGated || contendsWithLocalForeground || !this.hasFleetRoom(admission)) {
+		if (!preparedAdmission || dependencyGated || contendsWithLocalForeground || this.directStartRoom(admission) < 1) {
 			// A mandatory verifier is the continuation of an already admitted implementation, not a
 			// new owner request. Reserve its queue admission so a burst of ordinary work cannot strand
 			// the subject behind `independent_verification_required` with no terminal handoff.
@@ -5118,9 +5119,7 @@ export class WorkerDelegationController {
 		const { instructions, verifierShipment } = admission;
 		let { model, modelBinding } = admission.shipment;
 		const { profile: orchestrationProfile } = admission.shipment;
-		if (!this.hasFleetRoom(admission)) {
-			return { started: false, skipReason: "worker_delegation_already_running" };
-		}
+		if (this.fleetRoom(admission) < 1) return { started: false, skipReason: "worker_delegation_already_running" };
 		let laneCapability = this.laneCapabilityProfile(model);
 		const buildRetentionPolicy = (activeModel: Model<Api>) =>
 			workerConversationRetentionPolicy(

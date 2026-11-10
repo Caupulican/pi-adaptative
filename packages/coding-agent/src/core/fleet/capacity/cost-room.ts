@@ -467,9 +467,11 @@ export class MeteredSpend {
 			windowUsd: Number(spent.toFixed(4)),
 			lineUsd: Number(line.toFixed(4)),
 		}));
+		// One notice line. A notice keeps a bounded head of its text, so the sentence is short enough to be kept whole with
+		// room for larger amounts, and what the owner can do comes before what keeps running.
 		this.options.onBrake?.({
 			engaged: true,
-			text: `Workers paused new paid (API-key) starts: ${usd(spent)} was spent in the last 15 minutes, above the ${usd(line)} safety line. Subscription work continues and running workers finish. Paid starts resume when the next 15-minute window begins, or now with /estop off.`,
+			text: `Paid (API-key) worker starts are paused: ${usd(spent)} spent in 15 minutes is above the ${usd(line)} safety line. Resume now with /estop off, or wait for the next 15-minute window. Subscription work continues and running workers finish.`,
 		});
 	}
 

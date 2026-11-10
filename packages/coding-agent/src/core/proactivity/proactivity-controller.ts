@@ -92,7 +92,7 @@ export function proactiveReviewNotice(
 		case "max_usd_per_day_reached":
 			return {
 				reason: skipReason,
-				text: `${paused} review spend over the last 24 hours, across this agent's sessions, reached proactivity.maxUsdPerDay. Reviews start again once older spend leaves the rolling day, or sooner if proactivity.maxUsdPerDay is raised.`,
+				text: `${paused} review spend over the last 24 hours, across this agent's sessions, reached proactivity.maxUsdPerDay. Reviews start again once older spend leaves the rolling day, or sooner if that setting is raised.`,
 			};
 		case "no_proactivity_model":
 			return settings.model === undefined
