@@ -1,5 +1,5 @@
 import { EventEmitter } from "node:events";
-import { dirname, isAbsolute, join } from "node:path";
+import { dirname, isAbsolute, join, resolve } from "node:path";
 import { PassThrough, type Readable, Writable } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import { getAgentDir, getBundledResourcesDir } from "../../../src/config.ts";
@@ -573,20 +573,24 @@ export class ScriptedWindowsShellProcesses {
 	/** Refusals of operations on provisioned executables that did not match their exact protocol. */
 	readonly unscripted: string[] = [];
 	readonly spawns: WindowsShellSpawnRecord[] = [];
-	/** Declared real-shaped answers for the lookups the native owners issue (Git discovery, taskkill). */
+	/** Declared real-shaped answers for the lookups the native owners issue (Git discovery, taskkill, icacls, reg). */
 	readonly lookups: Array<{ readonly command: string; readonly arguments: readonly string[] }> = [];
-	private readonly io: Pick<VirtualFileSystem, "seed">;
+	private readonly io: Pick<VirtualFileSystem, "seed" | "existsSync">;
 	private readonly shell: Pick<VirtualShell, "execProtocol">;
 	private readonly processTable: VirtualProcessTable;
 	private readonly ledger: WindowsShellRequestRecord[] = [];
 	private readonly children = new Set<ScriptedChild>();
 	private readonly failures: Array<{ readonly cause: unknown }> = [];
+	private readonly acls = new Map<
+		string,
+		{ readonly principal: string; readonly flags: string; readonly perm: string }
+	>();
 	private runtime: ProvisionedWindowsRuntime | undefined;
 	private projectCwd = "";
 	private disposed = false;
 
 	constructor(
-		io: Pick<VirtualFileSystem, "seed">,
+		io: Pick<VirtualFileSystem, "seed" | "existsSync">,
 		shell: Pick<VirtualShell, "execProtocol">,
 		processTable: VirtualProcessTable,
 	) {
@@ -648,12 +652,16 @@ export class ScriptedWindowsShellProcesses {
 				return { handled: true, value: this.spawnEngine(file, argumentsList, options) };
 			}
 		}
+		const system32 = (executable: string) => join(process.env.SystemRoot ?? "C:\\Windows", "System32", executable);
+		const sameFile = (candidate: string) =>
+			process.platform === "win32" ? candidate.toLowerCase() === file.toLowerCase() : candidate === file;
 		if (operation === "spawnSync") {
-			const taskkill = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "taskkill.exe");
-			const sameFile = (candidate: string) =>
-				process.platform === "win32" ? candidate.toLowerCase() === file.toLowerCase() : candidate === file;
-			if (sameFile(taskkill) && argumentsList.length === 4) return this.taskkill(argumentsList);
+			if (sameFile(system32("taskkill.exe")) && argumentsList.length === 4) return this.taskkill(argumentsList);
+			if (sameFile(system32("icacls.exe"))) return this.icacls(argumentsList);
 			if (file === "where" && isDeepStrictEqual(argumentsList, ["git.exe"])) return this.whereGit();
+		}
+		if (operation === "execFile" && sameFile(system32("reg.exe"))) {
+			return this.regQueryMachineGuid(argumentsList, args[3]);
 		}
 		return undefined;
 	}
@@ -813,6 +821,85 @@ export class ScriptedWindowsShellProcesses {
 			handled: true,
 			value: { pid: 0, output: [null, "", stderr], stdout: "", stderr, status: 1, signal: null },
 		};
+	}
+
+	/**
+	 * Windows private-path ACL operations (`windows-user-acl.ts`) over the world's virtual filesystem: `/inheritance:r /grant:r`
+	 * records an explicit current-user grant on an existing virtual path, and `icacls <path>` prints that grant (or an ancestor
+	 * directory's `(OI)`/`(CI)` inherited grant, or `BUILTIN\Users:(I)(RX)` when unnarrowed).
+	 */
+	private icacls(argv: readonly unknown[]): WindowsShellProcessResult {
+		const aclKey = (target: string): string => {
+			const normalized = resolve(target);
+			return process.platform === "win32" ? normalized.toLowerCase() : normalized;
+		};
+		const notFound = (target: string): WindowsShellProcessResult => {
+			const stderr = `${target}: The system cannot find the file specified.\r\n`;
+			return {
+				handled: true,
+				value: { pid: 0, output: [null, "", stderr], stdout: "", stderr, status: 2, signal: null },
+			};
+		};
+		if (
+			argv.length === 4 &&
+			typeof argv[0] === "string" &&
+			argv[1] === "/inheritance:r" &&
+			argv[2] === "/grant:r" &&
+			typeof argv[3] === "string"
+		) {
+			const targetPath = argv[0];
+			const parsed = /^([^:]+):((?:\([A-Za-z,]+\))*)(\([A-Za-z,]+\)|[A-Za-z,]+)$/u.exec(argv[3]);
+			if (!parsed) return undefined;
+			this.lookups.push({ command: "icacls", arguments: argv.map(String) });
+			if (!this.io.existsSync(targetPath)) return notFound(targetPath);
+			const perm = parsed[3]!.startsWith("(") ? parsed[3]! : `(${parsed[3]!})`;
+			this.acls.set(aclKey(targetPath), { principal: parsed[1]!, flags: parsed[2]!, perm });
+			const stdout = `processed file: ${targetPath}\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
+			return {
+				handled: true,
+				value: { pid: 0, output: [null, stdout, ""], stdout, stderr: "", status: 0, signal: null },
+			};
+		}
+		if (argv.length === 1 && typeof argv[0] === "string") {
+			const targetPath = argv[0];
+			this.lookups.push({ command: "icacls", arguments: [targetPath] });
+			if (!this.io.existsSync(targetPath)) return notFound(targetPath);
+			const direct = this.acls.get(aclKey(targetPath));
+			let entry = direct ? `${direct.principal}:${direct.flags}${direct.perm}` : undefined;
+			if (!entry) {
+				let current = resolve(targetPath);
+				for (;;) {
+					const parent = dirname(current);
+					if (parent === current) break;
+					const inherited = this.acls.get(aclKey(parent));
+					if (inherited && (inherited.flags.includes("(OI)") || inherited.flags.includes("(CI)"))) {
+						entry = `${inherited.principal}:(I)${inherited.perm}`;
+						break;
+					}
+					current = parent;
+				}
+			}
+			const aclEntry = entry ?? "BUILTIN\\Users:(I)(RX)";
+			const stdout = `${targetPath} ${aclEntry}\r\n\r\nSuccessfully processed 1 files; Failed processing 0 files\r\n`;
+			return {
+				handled: true,
+				value: { pid: 0, output: [null, stdout, ""], stdout, stderr: "", status: 0, signal: null },
+			};
+		}
+		return undefined;
+	}
+
+	/** Windows host-identity lookup (`warmHostIdentity` in `host-identity.ts`): answers the exact `MachineGuid` registry query. */
+	private regQueryMachineGuid(argv: readonly unknown[], callback: unknown): WindowsShellProcessResult {
+		const expected = ["query", "HKLM\\SOFTWARE\\Microsoft\\Cryptography", "/v", "MachineGuid", "/reg:64"] as const;
+		if (!isDeepStrictEqual(argv, [...expected]) || typeof callback !== "function") return undefined;
+		this.lookups.push({ command: "reg", arguments: argv.map(String) });
+		const stdout =
+			"\r\nHKEY_LOCAL_MACHINE\\SOFTWARE\\Microsoft\\Cryptography\r\n    MachineGuid    REG_SZ    00000000-0000-4000-8000-000000000001\r\n\r\n";
+		queueMicrotask(() => {
+			(callback as (error: Error | null, stdout: string, stderr: string) => void)(null, stdout, "");
+		});
+		return { handled: true, value: new EventEmitter() };
 	}
 
 	/** Synchronous: every owned child has joined, nothing was refused, and no failure was retained. */

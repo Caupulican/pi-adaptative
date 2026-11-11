@@ -6,7 +6,7 @@ import { subscribeOutcomes } from "../../../../src/core/delegation/worker-outcom
 import { createGoalState, type GoalState } from "../../../../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../../../../src/core/goals/session-goal-state.ts";
 import { createBarrier, HARNESS_PROVIDER, type ScriptedRequest, type ScriptStep } from "../scripted-provider.ts";
-import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
 	carriesTask,
 	delegateStart,
@@ -18,7 +18,7 @@ import {
 	scriptRequirementCheckSpawn,
 	taskForInstructions,
 } from "./journey-9-shared.ts";
-import { LIMITS_PATH, latestBatchResults } from "./shared.ts";
+import { latestBatchResults } from "./shared.ts";
 
 const MOVE_PROMPT = "Start an unbound read-only worker to report the retry limit from the limits file.";
 const MOVE_TASK = "Inspect MAX_RETRIES in the limits file across escalation rungs and cover the requirement.";
@@ -29,7 +29,7 @@ const TIME_TASK = "Cover both the host-checkable and open limits requirements wi
 const TIME_CHECK_REQ_ID = "j9-time-checked";
 const TIME_OPEN_REQ_ID = "j9-time-open";
 
-const CHECK_COMMAND = `rg MAX_RETRIES ${LIMITS_PATH}`;
+const CHECK_COMMAND = "grep -n MAX_RETRIES src/limits.ts";
 /** Words outside the delivery-claim vocabulary so read-only worker turns ask no claim-delivery judgment. */
 const PARTIAL_NOTE = "Only the value was read, and I did nothing more with it.";
 const NOW = "2026-10-08T00:00:00.000Z";
@@ -79,6 +79,12 @@ function proveRequirementWithShellSteps(
 		},
 		{
 			name: `${prefix}-draft`,
+			check: (request) => {
+				const bash = latestBatchResults(request).find((result) => result.toolName === "bash");
+				if (bash?.isError || !bash?.text.includes("MAX_RETRIES = 3")) {
+					throw new Error(`${prefix} bash check failed: ${bash?.text ?? "no result"}`);
+				}
+			},
 			reply: {
 				content: [{ type: "text", text: "MAX_RETRIES = 3 appears in the limits file." }],
 			},
@@ -138,7 +144,8 @@ async function runRerunThenModelMoveSubleg(world: HarnessWorld): Promise<void> {
 	world.shell.enqueue({
 		name: "j9-l5-move-bash",
 		command: CHECK_COMMAND,
-		output: "MAX_RETRIES = 3\n",
+		cwd: HARNESS_PROJECT_CWD,
+		output: "1:export const MAX_RETRIES = 3;\n",
 		exitCode: 0,
 	});
 	world.provider.enqueue(
@@ -369,13 +376,15 @@ async function runTimeExhaustedSameThinkingSubleg(world: HarnessWorld): Promise<
 		{
 			name: "j9-l5-time-e12-check",
 			command: CHECK_COMMAND,
-			output: "MAX_RETRIES = 3\n",
+			cwd: HARNESS_PROJECT_CWD,
+			output: "1:export const MAX_RETRIES = 3;\n",
 			exitCode: 0,
 		},
 		{
 			name: "j9-l5-time-attempt2-bash",
 			command: CHECK_COMMAND,
-			output: "MAX_RETRIES = 3\n",
+			cwd: HARNESS_PROJECT_CWD,
+			output: "1:export const MAX_RETRIES = 3;\n",
 			exitCode: 0,
 		},
 	);
