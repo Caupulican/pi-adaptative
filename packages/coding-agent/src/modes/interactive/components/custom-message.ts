@@ -18,7 +18,6 @@ import {
 } from "../../../core/foreground-terminal-handoff-controller.ts";
 import { harnessNoticeHeadline } from "../../../core/harness-notice.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
-import { readProofSheetFailures, readProofSheetRecords } from "../../../core/proof/proof-sheet.ts";
 import { isPlainRecord } from "../../../core/util/value-guards.ts";
 import type { CustomMessage } from "../../../kernel/index.ts";
 import { isModelFacingText, plainLabel } from "../../../presentation/plain-text.ts";
@@ -37,6 +36,9 @@ export class CustomMessageComponent extends Container {
 	private markdownTheme: MarkdownTheme;
 	private _expanded = false;
 	private outputPad: number;
+	private revision = 0;
+	/** True only while the content is a component an extension's renderer returned, whose revision we cannot trust. */
+	private usesExtensionRenderer = false;
 
 	constructor(
 		message: CustomMessage<unknown>,
@@ -58,6 +60,25 @@ export class CustomMessageComponent extends Container {
 		this.rebuild();
 	}
 
+	/**
+	 * Folded child revision for extension-rendered content, whose own text can change without this
+	 * container seeing an invalidate; undefined there, so no cached row is reused for it.
+	 */
+	get renderRevision(): number | undefined {
+		if (!this.usesExtensionRenderer || !this.customComponent) return this.revision;
+		const child = this.customComponent as Component & { renderRevision?: number };
+		// A plain `Container` reports its own counter, which is 0 until it changes: its extension child's
+		// rows could still be rewritten without us seeing it, so it is never cacheable here.
+		if (child instanceof Container) {
+			const prototype = Object.getPrototypeOf(child);
+			if (prototype === Container.prototype || !Object.hasOwn(prototype, "renderRevision")) return undefined;
+		}
+		const childRevision = child.renderRevision;
+		if (childRevision !== undefined) return (this.revision * 31 + childRevision) | 0;
+		// An extension component without a revision of its own is a black box: never cache its rows.
+		return undefined;
+	}
+
 	setExpanded(expanded: boolean): void {
 		if (this._expanded !== expanded) {
 			this._expanded = expanded;
@@ -71,6 +92,8 @@ export class CustomMessageComponent extends Container {
 	}
 
 	private rebuild(): void {
+		this.revision++;
+		this.usesExtensionRenderer = false;
 		// Remove previous content component
 		if (this.customComponent) {
 			this.removeChild(this.customComponent);
@@ -103,6 +126,7 @@ export class CustomMessageComponent extends Container {
 				if (component) {
 					// Custom renderer provides its own styled component
 					this.customComponent = component;
+					this.usesExtensionRenderer = true;
 					this.addChild(component);
 					return;
 				}
@@ -118,15 +142,6 @@ export class CustomMessageComponent extends Container {
 		// Default rendering: label + content
 		this.box.addChild(new Text(renderTitleBadge(theme, { label: plainLabel(this.message.customType) }), 0, 0));
 		this.box.addChild(new Spacer(1));
-
-		// A delivery that carries host proof sheets (a plan result) shows them ahead of its own text.
-		for (const sheet of readProofSheetRecords(this.message.details, {
-			kind: "custom-message",
-			customType: this.message.customType,
-		})) {
-			this.box.addChild(new Text(theme.fg("customMessageText", sheet.text), 0, 0));
-			this.box.addChild(new Spacer(1));
-		}
 
 		// Extract text content. A harness notice shows its headline; its model text (any fenced evidence) stays in the transcript.
 		let text: string;
@@ -231,8 +246,6 @@ function boundedIds(ids: readonly string[], totalCount: number): string {
 interface BackgroundActivitySummary {
 	text: string;
 	status: "success" | "warning" | "error";
-	/** Host proof sheets the delivery carries, shown in full under the one-line summary. */
-	proofSheets?: readonly string[];
 }
 
 class BackgroundActivitySummaryComponent implements Component {
@@ -244,10 +257,7 @@ class BackgroundActivitySummaryComponent implements Component {
 
 	render(width: number): string[] {
 		const line = `${theme.fg(this.summary.status, "•")} ${theme.fg("muted", this.summary.text)}`;
-		const sheets = (this.summary.proofSheets ?? []).flatMap((sheet) =>
-			new Text(theme.fg("text", sheet), 2, 0).render(width),
-		);
-		return [truncateToWidth(line, Math.max(1, width), "…"), ...sheets];
+		return [truncateToWidth(line, Math.max(1, width), "…")];
 	}
 
 	invalidate(): void {}
@@ -435,14 +445,8 @@ function formatBackgroundActivitySummary(message: CustomMessage<unknown>): Backg
 		.filter((part): part is string => part !== undefined)
 		.join(" | ");
 	const detail = kind === "agent" ? agentDetailSuffix(records) : undefined;
-	const carrier = { kind: "custom-message", customType: message.customType } as const;
-	const proofSheets = [
-		...readProofSheetRecords(message.details, carrier).map((sheet) => sheet.text),
-		...readProofSheetFailures(message.details, carrier),
-	];
 	return {
 		text: detail ? `${text} · ${detail}` : text,
-		...(proofSheets.length > 0 ? { proofSheets } : {}),
 		status:
 			summary.failedCount > 0 ? "error" : summary.attentionCount + summary.canceledCount > 0 ? "warning" : "success",
 	};

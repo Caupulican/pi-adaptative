@@ -12,7 +12,6 @@ import {
 } from "@caupulican/pi-tui";
 import type { ToolDefinition, ToolRenderContext } from "../../../core/extensions/types.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
-import { readProofSheetRecord } from "../../../core/proof/proof-sheet.ts";
 import { createAllToolDefinitions, type ToolName } from "../../../core/tools/index.ts";
 import {
 	formatCollapsedToolOutputHint,
@@ -29,6 +28,7 @@ import { type ThemeBg, theme } from "../../../presentation/theme-model.ts";
 import { renderTitleBadge, titleBadge } from "../../../presentation/tool-title.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
 import { convertToPng } from "../../../utils/image-convert.ts";
+import { bumpActionTranscriptEpoch } from "../action-transcript-epoch.ts";
 import { questionConversationText } from "./question-conversation.ts";
 import { toolFailureText } from "./tool-failure-text.ts";
 import { createWorkbenchToolPreview, type PreviewAttribution } from "./workbench-tool-preview.ts";
@@ -39,9 +39,11 @@ export interface ToolExecutionOptions {
 	repair?: ToolCallRepairInfo;
 	/** Avoid reading retained history result payloads until the user expands tool output. */
 	deferResultUntilExpanded?: boolean;
+	/** Lazy display transform applied to the result only when materialized for display. */
+	transformResult?: (result: ToolExecutionResult) => ToolExecutionResult;
 }
 
-interface ToolExecutionResult {
+export interface ToolExecutionResult {
 	content: Array<{ type: string; text?: string; data?: string; mimeType?: string }>;
 	isError: boolean;
 	details?: unknown;
@@ -156,15 +158,20 @@ function getBuiltInToolDefinitions(cwd: string): ReturnType<typeof createAllTool
 const ORCHESTRATION_TOOLS: ReadonlySet<string> = new Set(["delegate", "create_goal", "goal"]);
 const DELEGATE_PROGRESS_ACTIONS: ReadonlySet<string> = new Set(["start", "follow_up", "send", "race", "slices"]);
 
-/** First non-empty line of a request, stripped of a `Task:` or heading prefix and bounded. */
+/** First non-empty line of a request, stripped of a section header and bounded. */
 function oneLinePreview(value: unknown, max = 96): string | undefined {
 	if (typeof value !== "string") return undefined;
+	// A brief that opens with `TASK` / `Goal:` / `Context:` on its own line narrates nothing: the first
+	// line that carries words is the only one worth previewing.
+	const headerOnly = /^(?:#+\s*)?(?:task|goal|objective|instructions|context)\s*:?\s*$/i;
+	const headerPrefix = /^(?:#+\s*)?(?:task|goal|objective|instructions|context)\s*:\s*/i;
 	const line = value
 		.split("\n")
 		.map((text) => text.trim())
-		.find((text) => text.length > 0);
+		.find((text) => text.length > 0 && !headerOnly.test(text));
 	const cleaned = (line ?? "")
-		.replace(/^(task:|#+)\s*/i, "")
+		.replace(headerPrefix, "")
+		.replace(/^#+\s*/, "")
 		.replace(/\s+/g, " ")
 		.trim();
 	if (!cleaned) return undefined;
@@ -183,6 +190,9 @@ function orchestrationConversationText(
 	const details: Record<string, unknown> = isRecordObject(result?.details) ? result.details : {};
 	if (toolName === "delegate") {
 		const action = typeof input.action === "string" ? input.action : "start";
+		// A rejection that never started anything (bad arguments, an incompatible reuse request) is
+		// transcript detail, not a chat line: the harness retries it or the model corrects it.
+		if (result?.isError && details.started !== true) return undefined;
 		if (result?.isError) return `${theme.fg("error", "✗")} ${theme.fg("muted", text.delegateFailed(action))}`;
 		if (DELEGATE_PROGRESS_ACTIONS.has(action)) {
 			const target =
@@ -219,10 +229,8 @@ function orchestrationConversationText(
 	}
 	if (toolName === "goal" && result && !result.isError) {
 		if (input.action === "complete") {
-			const chip = `${theme.fg("success", "✓")} ${theme.fg("accent", text.brain)} ${theme.fg("success", text.goalCompleted)}`;
-			// The host proof sheet is shown under the chip, ahead of the model's own summary of the work.
-			const sheet = readProofSheetRecord(details, { kind: "tool-result", toolName });
-			return sheet ? `${chip}\n${theme.fg("text", sheet.text)}` : chip;
+			// The chip only: a goal's proof sheet is evidence for the model, not a TUI banner.
+			return `${theme.fg("success", "✓")} ${theme.fg("accent", text.brain)} ${theme.fg("success", text.goalCompleted)}`;
 		}
 		if (input.action === "satisfy_requirement" || input.action === "increment") {
 			const requirement = typeof input.requirementId === "string" ? ` (${input.requirementId})` : "";
@@ -246,6 +254,8 @@ export class ToolExecutionComponent extends Container {
 	private args: any;
 	private repair: ToolCallRepairInfo | undefined;
 	private deferResultUntilExpanded: boolean;
+	private transformResult?: (result: ToolExecutionResult) => ToolExecutionResult;
+	private displayDirty = false;
 	private expanded = false;
 	private showImages: boolean;
 	private imageWidthCells: number;
@@ -281,6 +291,7 @@ export class ToolExecutionComponent extends Container {
 		this.args = args;
 		this.repair = options.repair;
 		this.deferResultUntilExpanded = options.deferResultUntilExpanded ?? false;
+		this.transformResult = options.transformResult;
 		this.toolDefinition = toolDefinition;
 		this.builtInToolDefinition = getBuiltInToolDefinitions(cwd)[toolName as ToolName];
 		this.showImages = options.showImages ?? true;
@@ -450,7 +461,28 @@ export class ToolExecutionComponent extends Container {
 	updateArgs(args: any, repair?: ToolCallRepairInfo): void {
 		this.args = args;
 		this.repair = repair;
-		this.updateDisplay();
+		if (!this.expanded && this.deferResultUntilExpanded) {
+			this.deferDisplay();
+		} else {
+			this.updateDisplay();
+		}
+	}
+
+	/**
+	 * Collapsed historical calls skip formatting altogether, but the derived orchestration/question
+	 * text still has to be dropped and its revision bumped: `ConversationWindow` and the transcript
+	 * caches key on {@link actionRevision}, so a silent state change would serve stale rows.
+	 */
+	private deferDisplay(): void {
+		this.displayDirty = true;
+		this.questionText = undefined;
+		this.questionRevision++;
+		bumpActionTranscriptEpoch();
+	}
+
+	/** Revision of the lazily derived presentation text; part of an `ActionTranscriptComponent`'s cache key. */
+	get actionRevision(): number {
+		return this.questionRevision;
 	}
 
 	markExecutionStarted(repair?: ToolCallRepairInfo): void {
@@ -473,13 +505,19 @@ export class ToolExecutionComponent extends Container {
 		// same compacted form a resumed session would see.
 		if (!isPartial) {
 			this.timing.finish();
-			compactRetainedDetails(result, MAX_TUI_RETAINED_DETAILS_BYTES);
+			if (!this.mustDeferResultPayload(result)) {
+				compactRetainedDetails(result, MAX_TUI_RETAINED_DETAILS_BYTES);
+			}
 		}
 		this.result = result;
 		this.materializedResult = undefined;
 		this.resetImageConversions();
 		this.isPartial = isPartial;
-		this.updateDisplay();
+		if (!this.expanded && this.deferResultUntilExpanded) {
+			this.deferDisplay();
+		} else {
+			this.updateDisplay();
+		}
 		if (this.shouldMaterializeResult()) this.maybeConvertImagesForKitty();
 	}
 
@@ -489,12 +527,16 @@ export class ToolExecutionComponent extends Container {
 
 	private getMaterializedResult(): ToolExecutionResult | undefined {
 		if (!this.shouldMaterializeResult() || !this.result) return undefined;
-		if (!this.deferResultUntilExpanded) return this.result;
-		this.materializedResult ??= {
-			content: this.result.content,
-			isError: this.result.isError,
-			details: this.result.details,
-		};
+		if (!this.materializedResult) {
+			const base = this.deferResultUntilExpanded
+				? {
+						content: this.result.content,
+						isError: this.result.isError,
+						details: this.result.details,
+					}
+				: this.result;
+			this.materializedResult = this.transformResult ? this.transformResult(base) : base;
+		}
 		return this.materializedResult;
 	}
 
@@ -534,24 +576,31 @@ export class ToolExecutionComponent extends Container {
 	}
 
 	setExpanded(expanded: boolean): void {
+		if (this.expanded === expanded) return;
 		this.expanded = expanded;
 		if (!expanded) {
 			this.resultRendererComponent = undefined;
 			this.materializedResult = undefined;
 			this.resetImageConversions();
 		}
+		this.displayDirty = false;
 		this.updateDisplay();
 		if (expanded) this.maybeConvertImagesForKitty();
 	}
 
 	setShowImages(show: boolean): void {
+		if (this.showImages === show) return;
 		this.showImages = show;
-		this.updateDisplay();
+		if (!this.expanded && this.deferResultUntilExpanded) this.deferDisplay();
+		else this.updateDisplay();
 	}
 
 	setImageWidthCells(width: number): void {
-		this.imageWidthCells = Math.max(1, Math.floor(width));
-		this.updateDisplay();
+		const next = Math.max(1, Math.floor(width));
+		if (this.imageWidthCells === next) return;
+		this.imageWidthCells = next;
+		if (!this.expanded && this.deferResultUntilExpanded) this.deferDisplay();
+		else this.updateDisplay();
 	}
 
 	getBackgroundColor(): ThemeBg {
@@ -628,10 +677,18 @@ export class ToolExecutionComponent extends Container {
 
 	override invalidate(): void {
 		super.invalidate();
-		this.updateDisplay();
+		if (!this.expanded && this.deferResultUntilExpanded) {
+			this.deferDisplay();
+		} else {
+			this.updateDisplay();
+		}
 	}
 
 	override render(width: number): string[] {
+		if (this.displayDirty) {
+			this.displayDirty = false;
+			this.updateDisplay();
+		}
 		if (this.hideComponent) {
 			return [];
 		}
@@ -642,6 +699,7 @@ export class ToolExecutionComponent extends Container {
 	private updateDisplay(): void {
 		this.questionText = undefined;
 		this.questionRevision++;
+		bumpActionTranscriptEpoch();
 		const bgFn = (text: string) => theme.bg(this.getBackgroundColor(), text);
 		const materializedResult = this.getMaterializedResult();
 

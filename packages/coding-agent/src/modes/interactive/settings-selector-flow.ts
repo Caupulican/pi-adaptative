@@ -181,6 +181,10 @@ export interface SettingsSelectorFlowSettingsSource {
 
 export interface SettingsSelectorHost {
 	readonly session: AgentSession;
+	/** Pushes an image-visibility change into the cached bot and team chats, which the Root loop never reaches. */
+	setBotTeamShowImages(show: boolean): void;
+	/** Pushes an image-width change into the cached bot and team chats, which the Root loop never reaches. */
+	setBotTeamImageWidthCells(width: number): void;
 	readonly settingsManager: SettingsSelectorFlowSettingsSource;
 	readonly modelRegistry: ModelRegistry;
 	readonly footer: FooterComponent;
@@ -366,6 +370,7 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 							child.setShowImages(enabled);
 						}
 					}
+					host.setBotTeamShowImages(enabled);
 					host.ui.requestRender();
 				},
 				onImageWidthCellsChange: (width) => {
@@ -375,6 +380,7 @@ export function showSettingsSelector(host: SettingsSelectorHost, initialItemId?:
 							child.setImageWidthCells(width);
 						}
 					}
+					host.setBotTeamImageWidthCells(width);
 					host.ui.requestRender();
 				},
 				onAutoResizeImagesChange: (enabled) => {

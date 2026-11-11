@@ -169,11 +169,13 @@ export function buildGoalProofSheet(input: GoalProofSheetInput): { text: string;
 	});
 	const citedCalls = new Set(receipts.map((receipt) => receipt.ref));
 	const otherCommands = lifetimeCommands.filter((command) => !citedCalls.has(command.ref)).length;
-	const text = [
-		renderProofSheet(sheet),
-		...(otherCommands > 0
+	const otherCommandsLines =
+		otherCommands > 0
 			? [`${otherCommands} other command(s) ran during the goal without being cited as evidence.`]
-			: []),
-	].join("\n");
-	return { text, record: proofSheetRecord(sheet, text) };
+			: [];
+	const modelText = [renderProofSheet(sheet, undefined, { includeQuizOffer: false }), ...otherCommandsLines].join(
+		"\n",
+	);
+	const recordText = [renderProofSheet(sheet), ...otherCommandsLines].join("\n");
+	return { text: modelText, record: proofSheetRecord(sheet, recordText) };
 }

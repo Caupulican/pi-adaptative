@@ -2,12 +2,15 @@ import { type Component, truncateToWidth } from "@caupulican/pi-tui";
 import { interfaceText } from "../../../core/language/interface-text.ts";
 import { keyText } from "../../../presentation/keybinding-hints.ts";
 import { theme } from "../../../presentation/theme-model.ts";
+import { bumpActionTranscriptEpoch, getActionTranscriptEpoch } from "../action-transcript-epoch.ts";
 import type { ToolExecutionComponent } from "./tool-execution.ts";
 
 // A pathological tool-only turn must not turn one top-level TUI component into
 // an unbounded retention root. A new adjacent transcript segment starts at the
 // bound and uses the same presentation contract.
 export const ACTION_TRANSCRIPT_SEGMENT_LIMIT = 256;
+
+export { bumpActionTranscriptEpoch, getActionTranscriptEpoch };
 
 /**
  * The single history projection for model-invoked actions.
@@ -20,9 +23,21 @@ export class ActionTranscriptComponent implements Component {
 	private readonly actions: ToolExecutionComponent[] = [];
 	private transcriptExpanded = false;
 	private readonly conversation: Component[] = [];
+	private revision = 0;
 
 	constructor(actions: ToolExecutionComponent[] = []) {
 		for (const action of actions) this.addAction(action);
+	}
+
+	/**
+	 * Folded action revisions, or undefined while an expanded transcript holds a live call: those rows
+	 * carry a running clock, so no cached row may be reused for them.
+	 */
+	get renderRevision(): number | undefined {
+		if (this.transcriptExpanded && this.actions.some((action) => action.isToolPartial())) return undefined;
+		let revision = this.revision;
+		for (const action of this.actions) revision = (revision * 31 + action.actionRevision) | 0;
+		return revision;
 	}
 
 	addAction(action: ToolExecutionComponent): void {
@@ -30,6 +45,26 @@ export class ActionTranscriptComponent implements Component {
 		this.actions.push(action);
 		const conversation = action.getConversationComponent();
 		if (conversation) this.conversation.push(conversation);
+		this.revision++;
+		bumpActionTranscriptEpoch();
+	}
+
+	/** Hands one admitted action to another segment, so a partition boundary never splits a turn. */
+	removeAction(action: ToolExecutionComponent): void {
+		const index = this.actions.indexOf(action);
+		if (index === -1) return;
+		this.actions.splice(index, 1);
+		const conversation = action.getConversationComponent();
+		if (conversation) {
+			const conversationIndex = this.conversation.indexOf(conversation);
+			if (conversationIndex !== -1) this.conversation.splice(conversationIndex, 1);
+		}
+		this.revision++;
+		bumpActionTranscriptEpoch();
+	}
+
+	actionComponents(): readonly ToolExecutionComponent[] {
+		return this.actions;
 	}
 
 	conversationComponents(): readonly Component[] {
@@ -45,20 +80,30 @@ export class ActionTranscriptComponent implements Component {
 	}
 
 	setTranscriptExpanded(expanded: boolean): void {
-		this.transcriptExpanded = expanded;
-		for (const action of this.actions) action.setExpanded(expanded);
+		if (this.transcriptExpanded !== expanded) {
+			this.transcriptExpanded = expanded;
+			for (const action of this.actions) action.setExpanded(expanded);
+			this.revision++;
+			bumpActionTranscriptEpoch();
+		}
 	}
 
 	setShowImages(show: boolean): void {
 		for (const action of this.actions) action.setShowImages(show);
+		this.revision++;
+		bumpActionTranscriptEpoch();
 	}
 
 	setImageWidthCells(width: number): void {
 		for (const action of this.actions) action.setImageWidthCells(width);
+		this.revision++;
+		bumpActionTranscriptEpoch();
 	}
 
 	invalidate(): void {
 		for (const action of this.actions) action.invalidate();
+		this.revision++;
+		bumpActionTranscriptEpoch();
 	}
 
 	render(width: number): string[] {

@@ -5,17 +5,25 @@ import type { Component } from "../tui.ts";
  */
 export class Spacer implements Component {
 	private lines: number;
+	private revision = 0;
 
 	constructor(lines: number = 1) {
 		this.lines = lines;
 	}
 
+	get renderRevision(): number {
+		return this.revision;
+	}
+
 	setLines(lines: number): void {
-		this.lines = lines;
+		if (this.lines !== lines) {
+			this.lines = lines;
+			this.revision++;
+		}
 	}
 
 	invalidate(): void {
-		// No cached state to invalidate currently
+		this.revision++;
 	}
 
 	render(_width: number): string[] {

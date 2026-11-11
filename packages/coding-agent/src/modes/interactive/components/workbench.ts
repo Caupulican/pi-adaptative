@@ -11,14 +11,14 @@ import {
 import { WORKBENCH_GRAPH_VIEWS, type WorkbenchGraphView } from "../../../core/settings/settings-schema.ts";
 import { keyText } from "../../../presentation/keybinding-hints.ts";
 import { getSelectionStyle, theme } from "../../../presentation/theme-model.ts";
-import { ActionTranscriptComponent } from "./action-transcript.ts";
-import { BashExecutionComponent } from "./bash-execution.ts";
+import type { BashExecutionComponent } from "./bash-execution.ts";
 import { drawChatRosterPane, type WorkbenchChatRosterSnapshot } from "./chat-roster-pane.ts";
-import { ConversationWindow } from "./conversation-window.ts";
+import { ConversationSnapshotBuilder, ConversationWindow } from "./conversation-window.ts";
 import { type DecisionGraphModel, graphHasContent } from "./decision-graph-model.ts";
 import { DecisionGraphPane } from "./decision-graph-pane.ts";
 import { FlowAnimator } from "./flow-animator.ts";
 import { fitRow, labelRow, surfaceRow, WorkbenchPane, type WorkbenchPaneTitleButton } from "./workbench-pane.ts";
+import { lastUserShell } from "./workbench-shell-lookup.ts";
 
 /** The title strip names the work; the run state lives on the live row inside the conversation zone. */
 export interface WorkbenchHeadline {
@@ -52,6 +52,8 @@ export type WorkbenchLeftPaneMode = "chats" | "graph";
 
 export interface WorkbenchOptions {
 	conversation: Container;
+	activeConversation?: () => Container;
+	onInvalidateCachedConversations?: () => void;
 	editor: Container;
 	/** Rows directly above the input, in order: transient notices, widgets, session status. */
 	dock: Component[];
@@ -294,20 +296,13 @@ export class WorkbenchComponent extends Container {
 		]) {
 			if (child) this.addChild(child);
 		}
-		this.conversation = new ConversationWindow(
-			() => [
-				...(options.header ? [options.header] : []),
-				...options.conversation.children.flatMap((child) =>
-					child instanceof ActionTranscriptComponent
-						? [...child.conversationComponents()]
-						: child instanceof BashExecutionComponent
-							? []
-							: [child],
-				),
-			],
-			undefined,
-			getSelectionStyle,
-		);
+		const getActive = options.activeConversation ?? (() => options.conversation);
+		const snapshotBuilder = new ConversationSnapshotBuilder({
+			getRoot: () => options.conversation,
+			getActive,
+			getHeader: () => options.header as Container | undefined,
+		});
+		this.conversation = new ConversationWindow(() => snapshotBuilder.getSnapshot(), undefined, getSelectionStyle);
 	}
 
 	get isCollapsed(): boolean {
@@ -420,9 +415,7 @@ export class WorkbenchComponent extends Container {
 	}
 	dismissUserShell(): void {
 		this.frameExecutionLines.clear();
-		this.dismissedShell = this.options.conversation.children.findLast(
-			(child): child is BashExecutionComponent => child instanceof BashExecutionComponent,
-		);
+		this.dismissedShell = lastUserShell(this.options.conversation);
 	}
 	toggleUpper(): void {
 		this.collapsed = !this.collapsed;
@@ -677,6 +670,7 @@ export class WorkbenchComponent extends Container {
 		super.invalidate();
 		this.frameExecutionLines.clear();
 		this.conversation.invalidate();
+		this.options.onInvalidateCachedConversations?.();
 		this.execution?.invalidate();
 		this.options.activity?.invalidate();
 		for (const section of this.sections) if (!Array.isArray(section.body)) section.body.invalidate();
@@ -891,11 +885,14 @@ export class WorkbenchComponent extends Container {
 
 	/** A user shell on show, or a command or file effect that renders rows: what Execution would draw. */
 	private hasExecutionEvidence(columns: number): boolean {
-		const shell = this.options.conversation.children.findLast(
-			(child): child is BashExecutionComponent => child instanceof BashExecutionComponent,
-		);
+		const shell = lastUserShell(this.options.conversation);
 		if (shell && shell !== this.dismissedShell) return true;
 		return this.renderSourceLines(this.execution, "exec", columns - 2).length > 0;
+	}
+
+	/** The last `!` command in the Root transcript, resolved once per conversation revision. */
+	private userShell(): BashExecutionComponent | undefined {
+		return lastUserShell(this.options.conversation);
 	}
 
 	/** Neither a command or file effect nor a plan to show: the work area takes no rows and has no divider. */
@@ -909,9 +906,7 @@ export class WorkbenchComponent extends Container {
 		this.executionPane.hide();
 		this.splitStart = -1;
 		this.splitEnd = -1;
-		const shell = this.options.conversation.children.findLast(
-			(child): child is BashExecutionComponent => child instanceof BashExecutionComponent,
-		);
+		const shell = this.userShell();
 		const visibleShell = shell && shell !== this.dismissedShell ? shell : undefined;
 		if (visibleShell !== this.displayedShell) this.executionPane.reset();
 		this.displayedShell = visibleShell;

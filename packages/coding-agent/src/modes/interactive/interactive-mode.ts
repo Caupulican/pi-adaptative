@@ -50,7 +50,6 @@ import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local
 import { planStepByAttempt } from "../../core/plan/plan-panel.ts";
 import { namedPlanViews } from "../../core/plan/plan-views-named.ts";
 import { REPLY_ROUTE_CUSTOM_TYPE, type ReplyRouteRecord } from "../../core/reply-route.ts";
-import { boundedRedactedDiagnosticText } from "../../core/security/secret-text.ts";
 import { formatMissingSessionCwdPrompt, type MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { SessionImageStore } from "../../core/session-image-store.ts";
 import { getSessionRole } from "../../core/session-role.ts";
@@ -68,7 +67,7 @@ import { ownerInputIdOf } from "../../kernel/owner-input-stamp.ts";
 import { turnOriginStampOf } from "../../kernel/turn-origin-stamp.ts";
 import type { AgentMessage, ToolCallRepairInfo } from "../../kernel/types.ts";
 import * as clipboardInput from "../../presentation/clipboard-input.ts";
-import { formatKeyText, keyDisplayText, keyText } from "../../presentation/keybinding-hints.ts";
+import { formatKeyText, keyDisplayText } from "../../presentation/keybinding-hints.ts";
 import { isModelFacingText } from "../../presentation/plain-text.ts";
 import {
 	initTheme,
@@ -110,16 +109,22 @@ import {
 	startupHelpLine,
 	startupOnboarding,
 } from "./components/startup-header.ts";
-import { ToolExecutionComponent } from "./components/tool-execution.ts";
+import { ToolExecutionComponent, type ToolExecutionResult } from "./components/tool-execution.ts";
 import { openTranscriptOverlay } from "./components/transcript-overlay.ts";
 import { UserMessageComponent } from "./components/user-message.ts";
-import { countConversationEntries } from "./conversation-entries.ts";
 import { EditorOverlayHost } from "./editor-overlay-host.ts";
 import { composeEditorPlaceholder } from "./editor-placeholder.ts";
 import { type EditorSubmitHost, EditorSubmitRouter } from "./editor-submit-router.ts";
 import { ExtensionUiHost } from "./extension-ui-host.ts";
 import { openEditorForPath, openExternalEditor } from "./external-editor.ts";
 import * as historyReloadMath from "./history-reload-math.ts";
+import {
+	renderPrefixHistory,
+	rootToolFailureText,
+	seedReplyBylines,
+	targetToolFailureText,
+} from "./history-render-support.ts";
+import { findCleanHistoryPartition } from "./history-tail-partition.ts";
 import { InteractiveEventController } from "./interactive-event-controller.ts";
 import { InteractiveLayout } from "./interactive-layout.ts";
 import * as keyHandlers from "./key-handlers.ts";
@@ -141,10 +146,6 @@ import * as signalLifecycle from "./signal-lifecycle.ts";
 import { SlashCommandController } from "./slash-command-controller.ts";
 import * as startupChecks from "./startup-checks.ts";
 import { terminalCapabilityOverridesFromSettings } from "./terminal-capability-settings.ts";
-
-const TUI_HISTORY_RELOAD_CHUNK_SIZE = 20;
-const TUI_LIVE_HISTORY_MAX_COMPONENTS = 260;
-const TUI_LIVE_HISTORY_TRIM_TO_COMPONENTS = 220;
 
 function isAnthropicSubscriptionAuthKey(apiKey: string | undefined): boolean {
 	return typeof apiKey === "string" && apiKey.startsWith("sk-ant-oat");
@@ -248,11 +249,7 @@ export class InteractiveMode {
 	private lastStatusSpacer: Spacer | undefined = undefined;
 	private lastStatusText: Text | undefined = undefined;
 
-	// Live TUI history cap. Full session history remains in SessionManager/model state.
-	private liveHistoryHiddenNotice: Text | undefined = undefined;
-	private liveHistoryHiddenComponents = 0;
 	private tuiHistoryLoaded = false;
-	private tuiHistoryLoadInProgress = false;
 
 	// Active execution identity. Completed actions are owned by the transcript.
 	private activeToolCalls = new ActiveToolCallRegistry(() => this.layout.workbench?.refreshExecution());
@@ -294,7 +291,6 @@ export class InteractiveMode {
 	private readonly submitRouter: EditorSubmitRouter;
 	/** Owns the live-chat target (Brain, Bot, Team) and the bot/team chat rendering; see bot-team-chat-controller.ts. */
 	private readonly botTeamChat: BotTeamChatController;
-	private readonly botPendingToolCalls = new Map<string, ToolExecutionComponent>();
 
 	// Track if editor is in bash mode (text starts with !)
 	private isBashMode = false;
@@ -559,14 +555,16 @@ export class InteractiveMode {
 			},
 		});
 		this.botTeamChat = new BotTeamChatController({
-			chatContainer: this.chatContainer,
 			ui: this.ui,
 			getSessionPort: () => this.session,
 			renderRootConversation: async () => {
-				await this.renderCurrentSessionState();
+				if (!this.tuiHistoryLoaded) {
+					await this.renderInitialMessages({ forceHistoryLoad: true });
+				}
+				this.ui.requestRender();
 			},
-			appendRenderedMessageToChat: (message) => {
-				this.renderBotOrTeamMessage(message);
+			appendRenderedMessageToTarget: (container, pendingToolCalls, message, bylines) => {
+				this.renderBotOrTeamMessage(message, container, pendingToolCalls, bylines);
 			},
 			showStatus: (message) => this.showStatus(message),
 			showWarning: (message) => this.showWarning(message),
@@ -601,7 +599,6 @@ export class InteractiveMode {
 			isInitialized: () => this.isInitialized,
 			isThinkingHidden: () => this.hideThinkingBlock,
 			init: () => this.init(),
-			isRootChatActive: () => this.botTeamChat.isRootChatActive(),
 			clearActiveToolCalls: () => this.clearActiveToolCalls(),
 			updatePendingMessagesDisplay: () => this.queuedMessages.updatePendingMessagesDisplay(),
 			updateTerminalTitle: () => this.updateTerminalTitle(),
@@ -611,7 +608,6 @@ export class InteractiveMode {
 			addMessageToChat: (message) => this.addMessageToChat(message),
 			removeUserMessageFromChat: (message) => this.removeUserMessageFromChat(message),
 			getMarkdownThemeWithSettings: () => this.getMarkdownThemeWithSettings(),
-			trimLiveTuiHistory: () => this.trimLiveTuiHistory(),
 			attachToolExecutionComponent: (toolName, toolCallId, args, repair) =>
 				this.attachToolExecutionComponent(toolName, toolCallId, args, repair),
 			toolActivityKind: (toolName) => this.toolActivityKind(toolName),
@@ -630,6 +626,8 @@ export class InteractiveMode {
 			hasHumanAudience: this.hasHumanAudience,
 			ciStatus: options.ciStatus,
 			ui: this.ui,
+			getActiveChatContainer: () => this.getActiveChatContainer(),
+			onInvalidateCachedConversations: () => this.botTeamChat.invalidate(),
 			headerContainer: this.headerContainer,
 			chatContainer: this.chatContainer,
 			editorContainer: this.editorContainer,
@@ -695,6 +693,10 @@ export class InteractiveMode {
 		this.slashCommands = new SlashCommandController(commandHost);
 		this.queuedMessages = new QueuedMessageController(commandHost);
 		this.submitRouter = new EditorSubmitRouter(commandHost, this.slashCommands, this.queuedMessages);
+	}
+
+	getActiveChatContainer(): Container {
+		return this.botTeamChat?.getActiveContainer() ?? this.chatContainer;
 	}
 
 	// Thin delegate: the base-provider seam that setupAutocompleteProvider calls, kept as a method so it can be replaced.
@@ -1383,14 +1385,13 @@ export class InteractiveMode {
 		return this.session.getToolDefinition(toolName);
 	}
 
-	private appendTranscriptAction(component: ToolExecutionComponent): void {
-		const children = this.chatContainer.children;
+	private appendTranscriptAction(component: ToolExecutionComponent, container = this.chatContainer): void {
+		const children = container.children;
 		for (let index = children.length - 1; index >= 0; index--) {
 			const candidate = children[index];
 			if (candidate instanceof ActionTranscriptComponent) {
 				if (candidate.canAccept()) {
 					candidate.addAction(component);
-					this.trimLiveTuiHistory();
 					return;
 				}
 				break;
@@ -1400,8 +1401,7 @@ export class InteractiveMode {
 		}
 		const transcript = new ActionTranscriptComponent([component]);
 		transcript.setTranscriptExpanded(this.transcriptActionsExpanded);
-		this.chatContainer.addChild(transcript);
-		this.trimLiveTuiHistory();
+		container.addChild(transcript);
 	}
 
 	private attachToolExecutionComponent(
@@ -1410,6 +1410,7 @@ export class InteractiveMode {
 		args: any,
 		repair?: ToolCallRepairInfo,
 		deferResultUntilExpanded = false,
+		container = this.chatContainer,
 	): ToolExecutionComponent {
 		const toolDefinition = this.getRegisteredToolDefinition(toolName);
 		const component = new ToolExecutionComponent(
@@ -1421,13 +1422,20 @@ export class InteractiveMode {
 				imageWidthCells: this.settingsManager.getImageWidthCells(),
 				repair,
 				deferResultUntilExpanded,
+				transformResult: (result) =>
+					expandMessageForDisplay(
+						this.session.peekPathAliasTable(),
+						result as unknown as AgentMessage,
+					) as unknown as ToolExecutionResult,
 			},
 			toolDefinition,
 			this.ui,
 			this.sessionManager.getCwd(),
 		);
-		this.appendTranscriptAction(component);
-		this.activeToolCalls.register(toolCallId, component);
+		this.appendTranscriptAction(component, container);
+		if (container === this.chatContainer) {
+			this.activeToolCalls.register(toolCallId, component);
+		}
 		return component;
 	}
 
@@ -1830,65 +1838,9 @@ export class InteractiveMode {
 		this.setEditorInputHistory(history);
 	}
 
-	private populateEditorInputHistoryFromSession(): void {
-		this.setEditorInputHistory(this.sessionManager.getRecentUserInputHistory(100));
-	}
-
-	private resetLiveTuiHistoryTrim(): void {
-		this.liveHistoryHiddenNotice = undefined;
-		this.liveHistoryHiddenComponents = 0;
-	}
-
-	/**
-	 * Conversation turns on the session, not control records: what "History hidden" can stand for.
-	 * The manager counts them itself; startup never walks the entries here (typing performance).
-	 */
-	private getSessionRecordCount(): number {
-		const manager = this.sessionManager as typeof this.sessionManager & {
-			getConversationEntryCount?: () => number;
-			getEntryCount?: () => number;
-		};
-		return (
-			manager.getConversationEntryCount?.() ??
-			manager.getEntryCount?.() ??
-			countConversationEntries(manager.getEntries())
-		);
-	}
-
-	private showDeferredHistoryPlaceholder(options: { requestRender?: boolean } = {}): void {
-		this.chatContainer.children = [];
-		this.resetLiveTuiHistoryTrim();
-		this.clearActiveToolCallState();
-
-		const recordCount = this.getSessionRecordCount();
-		if (recordCount > 0) {
-			this.chatContainer.addChild(
-				new Text(
-					theme.fg("dim", interfaceText().interactive.historyHiddenForTyping(keyText("app.history.load"))),
-					1,
-					0,
-				),
-			);
-		}
-
-		if (options.requestRender ?? true) this.ui.requestRender();
-	}
-
 	private loadTuiHistoryOnDemand(): void {
-		if (this.tuiHistoryLoadInProgress || this.tuiHistoryLoaded || this.getSessionRecordCount() === 0) return;
-
-		this.tuiHistoryLoadInProgress = true;
-		void (async () => {
-			try {
-				await this.renderInitialMessages({ forceHistoryLoad: true });
-			} catch (error) {
-				this.showError(
-					interfaceText().notices.historyLoadFailed(error instanceof Error ? error.message : String(error)),
-				);
-			} finally {
-				this.tuiHistoryLoadInProgress = false;
-			}
-		})();
+		this.layout.workbench?.view.conversation.latest();
+		this.ui.requestRender();
 	}
 
 	private agentsOverlay: AgentsOverlay | undefined;
@@ -1945,7 +1897,7 @@ export class InteractiveMode {
 
 	private showTranscriptPager(): void {
 		openTranscriptOverlay({
-			source: this.chatContainer,
+			source: this.getActiveChatContainer(),
 			viewportRows: () => this.ui.terminal.rows,
 			keybindings: this.keybindings,
 			getToolsExpanded: () => this.toolOutputExpanded,
@@ -1956,52 +1908,17 @@ export class InteractiveMode {
 		});
 	}
 
-	private trimLiveTuiHistory(): void {
-		const children = this.chatContainer.children;
-		if (children.length <= TUI_LIVE_HISTORY_MAX_COMPONENTS) return;
-
-		let protectedStart = children.length;
-		const protect = (component: Component | undefined) => {
-			if (!component) return;
-			const index = children.indexOf(component);
-			if (index !== -1 && index < protectedStart) protectedStart = index;
-		};
-
-		protect(this.events.getStreamingComponent());
-		protect(this.lastStatusSpacer);
-		protect(this.lastStatusText);
-		for (const [, action] of this.activeToolCalls.activeEntries()) {
-			const transcript = children.find(
-				(child): child is ActionTranscriptComponent =>
-					child instanceof ActionTranscriptComponent && child.containsAction(action),
-			);
-			protect(transcript);
-		}
-
-		const trimStart = children[0] === this.liveHistoryHiddenNotice ? 1 : 0;
-		const targetTrimEnd = children.length - TUI_LIVE_HISTORY_TRIM_TO_COMPONENTS;
-		const trimEnd = Math.min(targetTrimEnd, protectedStart);
-		if (trimEnd <= trimStart) return;
-
-		const removed = children.splice(trimStart, trimEnd - trimStart);
-		this.liveHistoryHiddenComponents += removed.length;
-		if (removed.includes(this.lastStatusSpacer as Component)) this.lastStatusSpacer = undefined;
-		if (removed.includes(this.lastStatusText as Component)) this.lastStatusText = undefined;
-
-		const noticeText = theme.fg(
-			"dim",
-			interfaceText().interactive.olderHistoryHidden(this.liveHistoryHiddenComponents),
-		);
-		if (children[0] === this.liveHistoryHiddenNotice) {
-			this.liveHistoryHiddenNotice?.setText(noticeText);
+	private appendStatusToChat(message: string, options: { requestRender?: boolean } = {}): void {
+		const targetContainer = this.getActiveChatContainer();
+		if (targetContainer !== this.chatContainer) {
+			const spacer = new Spacer(1);
+			const text = new Text(theme.fg("dim", message), 1, 0);
+			targetContainer.addChild(spacer);
+			targetContainer.addChild(text);
+			if (options.requestRender ?? true) this.ui.requestRender();
 			return;
 		}
 
-		this.liveHistoryHiddenNotice = new Text(noticeText, 1, 0);
-		children.unshift(this.liveHistoryHiddenNotice);
-	}
-
-	private appendStatusToChat(message: string, options: { requestRender?: boolean } = {}): void {
 		const children = this.chatContainer.children;
 		const last = children.length > 0 ? children[children.length - 1] : undefined;
 		const secondLast = children.length > 1 ? children[children.length - 2] : undefined;
@@ -2018,7 +1935,6 @@ export class InteractiveMode {
 		this.chatContainer.addChild(text);
 		this.lastStatusSpacer = spacer;
 		this.lastStatusText = text;
-		this.trimLiveTuiHistory();
 		if (options.requestRender ?? true) this.ui.requestRender();
 	}
 
@@ -2040,7 +1956,12 @@ export class InteractiveMode {
 		for (const component of components) this.chatContainer.removeChild(component);
 	}
 
-	private addMessageToChat(rawMessage: AgentMessage, options?: { populateHistory?: boolean }): void {
+	private addMessageToChat(
+		rawMessage: AgentMessage,
+		options?: { populateHistory?: boolean },
+		container = this.chatContainer,
+		bylines: ReplyBylineTracker = this.replyBylines,
+	): void {
 		// Aliases are a wire-format token optimization; the operator reads their own paths.
 		const message = expandMessageForDisplay(this.session.peekPathAliasTable(), rawMessage);
 		switch (message.role) {
@@ -2055,7 +1976,7 @@ export class InteractiveMode {
 					message.truncated ? ({ truncated: true } as TruncationResult) : undefined,
 					message.fullOutputPath,
 				);
-				this.chatContainer.addChild(component);
+				container.addChild(component);
 				break;
 			}
 			case "custom": {
@@ -2066,26 +1987,26 @@ export class InteractiveMode {
 					// aligns with its neighbors instead of silently seeing the unplumbed default of 0.
 					const component = new CustomMessageComponent(message, renderer, this.getMarkdownThemeWithSettings(), 1);
 					component.setExpanded(this.toolOutputExpanded);
-					this.chatContainer.addChild(component);
+					container.addChild(component);
 				}
 				break;
 			}
 			case "compactionSummary": {
-				this.chatContainer.addChild(new Spacer(1));
+				container.addChild(new Spacer(1));
 				const component = new CompactionSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
-				this.chatContainer.addChild(component);
+				container.addChild(component);
 				break;
 			}
 			case "branchSummary": {
-				this.chatContainer.addChild(new Spacer(1));
+				container.addChild(new Spacer(1));
 				const component = new BranchSummaryMessageComponent(message, this.getMarkdownThemeWithSettings());
 				component.setExpanded(this.toolOutputExpanded);
-				this.chatContainer.addChild(component);
+				container.addChild(component);
 				break;
 			}
 			case "user": {
-				const echoStart = this.chatContainer.children.length;
+				const echoStart = container.children.length;
 				const textContent = this.getUserMessageText(message);
 				const origin = turnOriginStampOf(rawMessage);
 				if (
@@ -2094,37 +2015,41 @@ export class InteractiveMode {
 						ownerInputIdOf(rawMessage) !== undefined ||
 						!isModelFacingText(textContent))
 				) {
-					this.replyBylines.ownerMessage();
-					if (this.chatContainer.children.length > 0) this.chatContainer.addChild(new Spacer(1));
+					bylines.ownerMessage();
+					if (container.children.length > 0) container.addChild(new Spacer(1));
 					const mdTheme = this.getMarkdownThemeWithSettings();
 					const skillBlock = origin?.shown === undefined ? parseSkillBlock(textContent) : undefined;
 					if (origin?.shown !== undefined && origin.channel !== undefined) {
 						// A third party's words read as who wrote them and what they said, not as the frame the model gets.
-						this.chatContainer.addChild(new ChannelMessageComponent(origin.channel, origin.shown, mdTheme));
+						container.addChild(new ChannelMessageComponent(origin.channel, origin.shown, mdTheme));
 					} else if (skillBlock) {
 						const component = new SkillInvocationMessageComponent(skillBlock, mdTheme);
 						component.setExpanded(this.toolOutputExpanded);
-						this.chatContainer.addChild(component);
+						container.addChild(component);
 						if (skillBlock.userMessage) {
-							this.chatContainer.addChild(
+							container.addChild(
 								new UserMessageComponent(skillBlock.userMessage, mdTheme, this.transformMarkdownForDisplay),
 							);
 						}
 					} else {
-						this.chatContainer.addChild(
-							new UserMessageComponent(textContent, mdTheme, this.transformMarkdownForDisplay),
-						);
+						container.addChild(new UserMessageComponent(textContent, mdTheme, this.transformMarkdownForDisplay));
 					}
 					if (options?.populateHistory) this.editor.addToHistory?.(textContent);
 				}
 				// The components this message added, so a withdrawn echo can be taken back out (see removeUserMessageFromChat).
-				this.userEchoComponents.set(rawMessage, this.chatContainer.children.slice(echoStart));
+				if (container === this.chatContainer) {
+					this.userEchoComponents.set(rawMessage, container.children.slice(echoStart));
+				}
 				break;
 			}
 			case "assistant": {
 				const modelRef = replyModelRef(message);
-				const byline = this.replyBylines.shouldShow(modelRef)
-					? replyByline(modelRef, this.replyRoutes?.get(message.timestamp), this.findModelName(modelRef))
+				const byline = bylines.shouldShow(modelRef)
+					? replyByline(
+							modelRef,
+							container === this.chatContainer ? this.replyRoutes?.get(message.timestamp) : undefined,
+							this.findModelName(modelRef),
+						)
 					: undefined;
 				const assistantComponent = new AssistantMessageComponent(
 					message,
@@ -2137,7 +2062,7 @@ export class InteractiveMode {
 						...(byline ? { byline } : {}),
 					},
 				);
-				this.chatContainer.addChild(assistantComponent);
+				container.addChild(assistantComponent);
 				break;
 			}
 			case "toolResult": {
@@ -2148,173 +2073,86 @@ export class InteractiveMode {
 				const _exhaustive: never = message;
 			}
 		}
-		this.trimLiveTuiHistory();
 	}
 
-	// Thin `this.`-delegate to the pure reload-window math in ./history-reload-math.ts;
-	// kept so renderSessionContext and the prototype-based history tests resolve it via `this`.
-	private messagesForTuiHistoryReload(messages: AgentMessage[]): {
-		messages: AgentMessage[];
-		omittedMessages: number;
-		estimatedLines: number;
-	} {
-		return historyReloadMath.messagesForTuiHistoryReload(messages, {
-			includeToolResultContent: this.toolOutputExpanded,
-		});
-	}
+	private renderGeneration = 0;
 
 	/**
-	 * Render session context to chat. Used for initial load and rebuild after compaction.
-	 * @param sessionContext Session context to render
-	 * @param options.updateFooter Update footer state
-	 * @param options.populateHistory Add user messages to editor history
+	 * Render session context to chat. The tail slice paints synchronously, so no microtask can clear or
+	 * reorder the transcript before the first frame; older messages then stream in behind it.
 	 */
-	private renderGeneration = 0;
-	private renderQueue?: Promise<void>;
-
 	private async renderSessionContext(
 		sessionContext: SessionContext,
 		options: { updateFooter?: boolean; populateHistory?: boolean } = {},
 	): Promise<void> {
-		const run = async () => {
-			// Build long history offscreen, then atomically swap it into the visible
-			// chat container. This keeps the TUI responsive without flashing blank or
-			// partial transcript frames during resume/reload/compaction rebuilds.
-			this.renderGeneration = (this.renderGeneration ?? 0) + 1;
-			const generation = this.renderGeneration;
-			let processed = 0;
-			let committed = false;
+		const generation = ++this.renderGeneration;
 
-			const visibleChatContainer = this.chatContainer;
-			const previousLiveHistoryHiddenNotice = this.liveHistoryHiddenNotice;
-			const previousLiveHistoryHiddenComponents = this.liveHistoryHiddenComponents;
-			const previousLastStatusSpacer = this.lastStatusSpacer;
-			const previousLastStatusText = this.lastStatusText;
-			const stagingChatContainer = new Container();
-
-			this.chatContainer = stagingChatContainer;
-			this.resetLiveTuiHistoryTrim();
-			this.clearActiveToolCallState();
-			const renderedPendingTools = new Map<string, ToolExecutionComponent>();
-
-			try {
-				if (options.updateFooter) {
-					this.footer.invalidate();
-					this.updateEditorBorderColor();
-				}
-
-				this.replyBylines.reset();
-				this.replyRoutes = new Map();
-				for (const entry of this.sessionManager.getEntries()) {
-					if (entry.type !== "custom" || entry.customType !== REPLY_ROUTE_CUSTOM_TYPE) continue;
-					const record = entry.data as ReplyRouteRecord | undefined;
-					if (record && typeof record.timestamp === "number") this.replyRoutes.set(record.timestamp, record.route);
-				}
-				const tuiHistory = this.messagesForTuiHistoryReload(sessionContext.messages);
-				if (tuiHistory.omittedMessages > 0) {
-					this.appendStatusToChat(
-						interfaceText().interactive.historyWindow(
-							historyReloadMath.TUI_HISTORY_RELOAD_MAX_LINES,
-							tuiHistory.omittedMessages,
-						),
-						{ requestRender: false },
-					);
-				}
-
-				for (const message of tuiHistory.messages) {
-					if (processed > 0 && processed % TUI_HISTORY_RELOAD_CHUNK_SIZE === 0) {
-						await new Promise((resolve) => setImmediate(resolve));
-						if (generation !== this.renderGeneration) return;
-					}
-					processed++;
-					// Assistant messages need special handling for tool calls
-					if (message.role === "assistant") {
-						this.addMessageToChat(message);
-						// Render tool call components
-						for (const content of message.content) {
-							if (content.type === "toolCall") {
-								const component = this.attachToolExecutionComponent(
-									content.name,
-									content.id,
-									expandArgumentsForDisplay(this.session.peekPathAliasTable(), content.arguments),
-									undefined,
-									true,
-								);
-
-								if (message.stopReason === "aborted" || message.stopReason === "error") {
-									let errorMessage: string;
-									if (message.stopReason === "aborted") {
-										const retryAttempt = this.session.retryAttempt;
-										errorMessage =
-											retryAttempt > 0
-												? interfaceText().conversation.abortedAfterRetries(retryAttempt)
-												: interfaceText().conversation.operationAborted;
-									} else {
-										errorMessage = message.errorMessage || interfaceText().notices.errorWord;
-									}
-									component.updateResult({ content: [{ type: "text", text: errorMessage }], isError: true });
-									this.activeToolCalls.finish(content.id);
-								} else {
-									renderedPendingTools.set(content.id, component);
-								}
-							}
-						}
-					} else if (message.role === "toolResult") {
-						// Match tool results to pending tool components
-						const component = renderedPendingTools.get(message.toolCallId);
-						if (component) {
-							component.updateResult(expandMessageForDisplay(this.session.peekPathAliasTable(), message));
-							renderedPendingTools.delete(message.toolCallId);
-							this.activeToolCalls.finish(message.toolCallId);
-						}
-					} else {
-						// All other messages use standard rendering
-						this.addMessageToChat(message, options);
-					}
-				}
-
-				if (generation !== this.renderGeneration) return;
-				visibleChatContainer.children = stagingChatContainer.children;
-				committed = true;
-			} finally {
-				const stagedLiveHistoryHiddenNotice = this.liveHistoryHiddenNotice;
-				const stagedLiveHistoryHiddenComponents = this.liveHistoryHiddenComponents;
-				const stagedLastStatusSpacer = this.lastStatusSpacer;
-				const stagedLastStatusText = this.lastStatusText;
-
-				this.chatContainer = visibleChatContainer;
-				if (committed) {
-					this.liveHistoryHiddenNotice = stagedLiveHistoryHiddenNotice;
-					this.liveHistoryHiddenComponents = stagedLiveHistoryHiddenComponents;
-					this.lastStatusSpacer = stagedLastStatusSpacer;
-					this.lastStatusText = stagedLastStatusText;
-				} else {
-					this.liveHistoryHiddenNotice = previousLiveHistoryHiddenNotice;
-					this.liveHistoryHiddenComponents = previousLiveHistoryHiddenComponents;
-					this.lastStatusSpacer = previousLastStatusSpacer;
-					this.lastStatusText = previousLastStatusText;
-				}
-			}
-
-			if (committed) this.ui.requestRender();
-		};
-
-		this.renderQueue = (this.renderQueue ?? Promise.resolve()).then(run, run);
-		return this.renderQueue;
-	}
-
-	async renderInitialMessages(options: { forceHistoryLoad?: boolean } = {}): Promise<void> {
-		if (!options.forceHistoryLoad) {
-			this.populateEditorInputHistoryFromSession();
-			this.tuiHistoryLoaded = false;
-			this.showDeferredHistoryPlaceholder({ requestRender: true });
+		if (options.updateFooter) {
 			this.footer.invalidate();
 			this.updateEditorBorderColor();
-			return;
 		}
 
-		// Get aligned messages and entries from session context only when the user
-		// explicitly requests TUI history. The model/session state is already loaded.
+		this.replyBylines.reset();
+		this.replyRoutes = new Map();
+		for (const entry of this.sessionManager.getEntries()) {
+			if (entry.type !== "custom" || entry.customType !== REPLY_ROUTE_CUSTOM_TYPE) continue;
+			const record = entry.data as ReplyRouteRecord | undefined;
+			if (record && typeof record.timestamp === "number") this.replyRoutes.set(record.timestamp, record.route);
+		}
+
+		const allMessages = sessionContext.messages;
+		if (options.populateHistory) this.populateEditorInputHistoryFromMessages(allMessages);
+		// Populated once, in one ordered pass; the per-message renders must not repeat it.
+		const renderOptions = options.populateHistory ? { ...options, populateHistory: false } : options;
+		const splitIndex = findCleanHistoryPartition(allMessages, 60);
+		const prefixMessages = allMessages.slice(0, splitIndex);
+		const tailMessages = allMessages.slice(splitIndex);
+
+		seedReplyBylines(prefixMessages, this.replyBylines);
+
+		this.chatContainer.clear();
+		this.clearActiveToolCallState();
+		const renderedPendingTools = new Map<string, ToolExecutionComponent>();
+
+		for (const message of tailMessages) {
+			this.renderHistoricalMessage(message, this.chatContainer, renderedPendingTools, renderOptions, true);
+		}
+
+		this.ui.requestRender();
+		const conversation = this.layout.workbench?.view.conversation;
+		if (this.botTeamChat.isRootChatActive()) conversation?.latest();
+		else conversation?.resetContainerScroll(this.chatContainer);
+
+		if (prefixMessages.length === 0) return;
+		void this.renderPrefixHistory(prefixMessages, generation, renderOptions);
+	}
+
+	private async renderPrefixHistory(
+		prefixMessages: readonly AgentMessage[],
+		generation: number,
+		options: { updateFooter?: boolean; populateHistory?: boolean },
+	): Promise<void> {
+		await renderPrefixHistory(prefixMessages, generation, {
+			chatContainer: this.chatContainer,
+			generation: () => this.renderGeneration,
+			displayState: () => ({
+				showImages: this.settingsManager.getShowImages(),
+				imageWidthCells: this.settingsManager.getImageWidthCells(),
+				toolsExpanded: this.toolOutputExpanded,
+				actionsExpanded: this.transcriptActionsExpanded,
+				hideThinkingBlock: this.hideThinkingBlock,
+			}),
+			renderMessage: (message, container, pending, bylines) =>
+				this.renderHistoricalMessage(message, container, pending, options, false, bylines),
+			requestRender: () => this.ui.requestRender(),
+			historyLoadFailed: (error) =>
+				this.showError(
+					interfaceText().notices.historyLoadFailed(error instanceof Error ? error.message : String(error)),
+				),
+		});
+	}
+
+	async renderInitialMessages(_options: { forceHistoryLoad?: boolean } = {}): Promise<void> {
 		const context = this.sessionManager.buildSessionContext();
 		this.populateEditorInputHistoryFromMessages(context.messages);
 		await this.renderSessionContext(context, {
@@ -2353,67 +2191,67 @@ export class InteractiveMode {
 		});
 	}
 
-	private renderBotOrTeamMessage(message: AgentMessage): void {
-		if (this.chatContainer.children.length <= 3) {
-			this.botPendingToolCalls.clear();
-		}
+	private renderHistoricalMessage(
+		message: AgentMessage,
+		container: Container,
+		pendingTools: Map<string, ToolExecutionComponent>,
+		options?: { populateHistory?: boolean },
+		isLiveTail = false,
+		bylines: ReplyBylineTracker = this.replyBylines,
+	): void {
 		if (message.role === "assistant") {
-			this.addMessageToChat(message);
+			this.addMessageToChat(message, options, container, bylines);
+			const isRoot = container === this.chatContainer;
 			for (const content of message.content) {
 				if (content.type !== "toolCall") continue;
-				const toolDefinition = this.getRegisteredToolDefinition(content.name);
-				const component = new ToolExecutionComponent(
+				const component = this.attachToolExecutionComponent(
 					content.name,
 					content.id,
 					expandArgumentsForDisplay(this.session.peekPathAliasTable(), content.arguments),
-					{
-						showImages: this.settingsManager.getShowImages(),
-						imageWidthCells: this.settingsManager.getImageWidthCells(),
-						deferResultUntilExpanded: true,
-					},
-					toolDefinition,
-					this.ui,
-					this.sessionManager.getCwd(),
+					undefined,
+					true,
+					container,
 				);
-				this.appendTranscriptAction(component);
+
 				if (message.stopReason === "aborted" || message.stopReason === "error") {
-					const errorText =
-						message.stopReason === "aborted"
-							? interfaceText().conversation.operationAborted
-							: (boundedRedactedDiagnosticText(message.errorMessage ?? "") ?? interfaceText().notices.errorWord);
-					component.updateResult({ content: [{ type: "text", text: errorText }], isError: true });
+					const failureText = isRoot
+						? rootToolFailureText(message, this.session.retryAttempt)
+						: targetToolFailureText(message);
+					component.updateResult({ content: [{ type: "text", text: failureText }], isError: true });
+					if (isLiveTail) this.activeToolCalls.finish(content.id);
 				} else {
-					this.botPendingToolCalls.set(content.id, component);
+					pendingTools.set(content.id, component);
 				}
 			}
-			return;
-		}
-		if (message.role === "toolResult") {
-			const component = this.botPendingToolCalls.get(message.toolCallId);
+		} else if (message.role === "toolResult") {
+			const component = pendingTools.get(message.toolCallId);
 			if (component) {
-				component.updateResult(expandMessageForDisplay(this.session.peekPathAliasTable(), message));
-				this.botPendingToolCalls.delete(message.toolCallId);
+				component.updateResult(message as unknown as ToolExecutionResult);
+				pendingTools.delete(message.toolCallId);
+				if (isLiveTail) this.activeToolCalls.finish(message.toolCallId);
 			}
-			return;
+		} else {
+			this.addMessageToChat(message, options, container, bylines);
 		}
-		this.addMessageToChat(message);
+	}
+
+	private renderBotOrTeamMessage(
+		message: AgentMessage,
+		container: Container,
+		pendingToolCalls: Map<string, ToolExecutionComponent>,
+		bylines: ReplyBylineTracker,
+	): void {
+		this.renderHistoricalMessage(message, container, pendingToolCalls, undefined, false, bylines);
 	}
 
 	private async rebuildChatFromMessages(options?: { checkpointWhenDeferred?: boolean }): Promise<boolean> {
-		if (this.botTeamChat && !this.botTeamChat.isRootChatActive()) {
-			await this.botTeamChat.refreshActiveChatView();
-			return true;
-		}
-		if (!this.tuiHistoryLoaded && !options?.checkpointWhenDeferred) {
-			this.showDeferredHistoryPlaceholder({ requestRender: true });
-			return false;
-		}
+		// Root is rebuilt even while a bot or team chat is on screen: the Root transcript must never be
+		// left showing a superseded conversation the moment the operator switches back to it.
 		const context = this.sessionManager.buildSessionContext();
 		await this.renderSessionContext(context);
-		// The provider context is what a history load renders. After compaction that context is the
-		// checkpoint, not the pre-compaction entry tree. Marking it loaded keeps a later rebuild from
-		// replacing the checkpoint with the hidden-history placeholder.
-		if (options?.checkpointWhenDeferred) this.tuiHistoryLoaded = true;
+		this.tuiHistoryLoaded = true;
+		if (!options?.checkpointWhenDeferred) this.botTeamChat.resetViews();
+		if (!this.botTeamChat.isRootChatActive()) await this.botTeamChat.refreshActiveChatView();
 		return true;
 	}
 
@@ -2583,7 +2421,18 @@ export class InteractiveMode {
 				child.setExpanded(expanded);
 			}
 		}
+		this.botTeamChat?.setToolsExpanded(expanded);
+		this.layout.workbench?.view.conversation.invalidate();
 		this.ui.requestRender();
+	}
+
+	/** Image visibility is a root-only setting until now; bot and team chats keep their own cached rows. */
+	setBotTeamShowImages(show: boolean): void {
+		this.botTeamChat.setShowImages(show);
+	}
+
+	setBotTeamImageWidthCells(width: number): void {
+		this.botTeamChat.setImageWidthCells(width);
 	}
 
 	private setTranscriptActionsExpanded(expanded: boolean): void {
@@ -2591,6 +2440,8 @@ export class InteractiveMode {
 		for (const child of this.chatContainer.children) {
 			if (child instanceof ActionTranscriptComponent) child.setTranscriptExpanded(expanded);
 		}
+		this.botTeamChat?.setTranscriptActionsExpanded(expanded);
+		this.layout.workbench?.view.conversation.invalidate();
 		this.ui.requestRender();
 	}
 
@@ -2611,6 +2462,8 @@ export class InteractiveMode {
 		if (streamingComponent && !this.chatContainer.children.includes(streamingComponent)) {
 			streamingComponent.setHideThinkingBlock(this.hideThinkingBlock);
 		}
+		this.botTeamChat?.setHideThinkingBlock(this.hideThinkingBlock);
+		this.layout.workbench?.view.conversation.invalidate();
 		this.ui.requestRender();
 	}
 
@@ -2643,15 +2496,17 @@ export class InteractiveMode {
 	}
 
 	showError(errorMessage: string): void {
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(theme.fg("error", interfaceText().notices.error(errorMessage)), 1, 0));
-		this.chatContainer.addChild(new Spacer(1));
+		const targetContainer = this.getActiveChatContainer();
+		targetContainer.addChild(new Spacer(1));
+		targetContainer.addChild(new Text(theme.fg("error", interfaceText().notices.error(errorMessage)), 1, 0));
+		targetContainer.addChild(new Spacer(1));
 		this.ui.requestRender();
 	}
 
 	showWarning(warningMessage: string): void {
-		this.chatContainer.addChild(new Spacer(1));
-		this.chatContainer.addChild(new Text(theme.fg("warning", interfaceText().notices.warning(warningMessage)), 1, 0));
+		const targetContainer = this.getActiveChatContainer();
+		targetContainer.addChild(new Spacer(1));
+		targetContainer.addChild(new Text(theme.fg("warning", interfaceText().notices.warning(warningMessage)), 1, 0));
 		this.ui.requestRender();
 	}
 
@@ -2975,6 +2830,8 @@ export class InteractiveMode {
 			footer: this.footer,
 			chatContainer: this.chatContainer,
 			ui: this.ui,
+			setBotTeamShowImages: (show) => this.setBotTeamShowImages(show),
+			setBotTeamImageWidthCells: (width) => this.setBotTeamImageWidthCells(width),
 			defaultEditor: this.defaultEditor,
 			editor: this.editor,
 			get hideThinkingBlock() {

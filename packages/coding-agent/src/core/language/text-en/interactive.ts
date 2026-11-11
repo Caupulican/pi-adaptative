@@ -48,8 +48,7 @@ export const INTERACTIVE = {
 			bash: "bash",
 			expandTools: "expand tools",
 		},
-		fullHelp: (expandToolsKeys: string, historyKeys: string) =>
-			`Press ${expandToolsKeys} for full startup help. Press ${historyKeys} to load session history.`,
+		fullHelp: (expandToolsKeys: string, _historyKeys?: string) => `Press ${expandToolsKeys} for full startup help.`,
 		onboarding: "Pi can explain its own features and look up its docs. Ask it how to use or extend Pi.",
 		modelScope: (models: string, cycleHint: string) => `Model scope: ${models}${cycleHint}`,
 		cycleHint: (keys: string) => ` (${keys} to cycle)`,

@@ -70,6 +70,10 @@ export interface InteractiveLayoutPort {
 	getStreamingMessage(): AssistantMessage | undefined;
 	/** The display name of a `provider/model` ref, as the status line shows it; undefined for an unknown model. */
 	findModelName(modelRef: string): string | undefined;
+	/** The active chat container (Bot, Team, or Root) */
+	getActiveChatContainer?: () => Container;
+	/** Invalidate cached non-root chat containers */
+	onInvalidateCachedConversations?: () => void;
 	/** The header's conversation name (e.g. the live bot or team); absent shows the catalogue's word for it. */
 	getConversationTitle?: () => string;
 	/** Label of the header chip that opens the Bot & Team chat switcher; absent hides the chip. */
@@ -470,6 +474,8 @@ export class InteractiveLayout {
 		this.subscribe();
 		const view = new WorkbenchComponent({
 			conversation: port.chatContainer,
+			activeConversation: () => port.getActiveChatContainer?.() ?? port.chatContainer,
+			onInvalidateCachedConversations: () => port.onInvalidateCachedConversations?.(),
 			editor: port.editorContainer,
 			header: port.headerContainer,
 			activity: port.activityLane,

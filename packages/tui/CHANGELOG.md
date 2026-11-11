@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- `Spacer` exposes a monotonic `renderRevision`, and `Container.renderRevision` widens its return type to `number | undefined` so subclasses hosting dynamic or extension-owned children can opt out of row-measurement caching while live.
+
 ## [0.104.53] - 2026-11-11
 
 ## [0.104.52] - 2026-11-11

@@ -10,6 +10,10 @@ import { ExpandableMarkdownMessageComponent } from "./expandable-markdown-messag
  * Uses same background color as custom messages for visual consistency.
  */
 export class CompactionSummaryMessageComponent extends ExpandableMarkdownMessageComponent {
+	override get renderRevision(): number {
+		return this.revision;
+	}
+
 	constructor(message: CompactionSummaryMessage, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
 		const tokenStr = message.tokensBefore.toLocaleString();
 		super(() => {

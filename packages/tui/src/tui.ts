@@ -288,7 +288,7 @@ export class Container implements Component {
 	children: Component[] = [];
 	private _renderRevision = 0;
 
-	get renderRevision(): number {
+	get renderRevision(): number | undefined {
 		return this._renderRevision;
 	}
 

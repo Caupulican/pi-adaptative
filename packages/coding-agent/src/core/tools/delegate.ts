@@ -23,6 +23,8 @@ import {
 	taskBriefProblem,
 	taskBriefVersionFor,
 } from "../comms/comms-records.ts";
+import { prepareDelegateArguments } from "../delegation/delegate-brief-spill.ts";
+import { reuseAcceptedMessage, reuseRefusal, startCompatibleFallback } from "../delegation/delegate-reuse-start.ts";
 import type { SessionRootReply } from "../delegation/session-root-mailbox.ts";
 import {
 	normalizeWorkerAgentDependencyTaskIds,
@@ -2102,20 +2104,9 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 		promptSnippet: "Persistent leaf workers",
 		neverDefer: true,
 		parameters: createDelegateSchema(availableActions),
-		// The flat wire schema exposes profile_create's `task` (3,500-char cap) beside start's
-		// `instructions` (16k cap). `sanitizeExactActionInput` already folds a start that only
-		// supplied `task` onto `instructions`, but it runs after schema validation, so a long brief
-		// was refused by the wrong cap. Apply the same fold before validation.
-		prepareArguments(args: unknown) {
-			if (!args || typeof args !== "object" || Array.isArray(args)) return args as DelegateToolInput;
-			const input = args as Record<string, unknown>;
-			const action = input.action ?? "start";
-			if (action !== "start" || typeof input.task !== "string" || typeof input.instructions === "string") {
-				return args as DelegateToolInput;
-			}
-			const { task, ...rest } = input;
-			return { ...rest, instructions: task } as DelegateToolInput;
-		},
+		// Folding `task` onto its action's own field runs before schema validation, and a brief still over
+		// its cap is spilled to a file the worker is told to read, so length alone never refuses a brief.
+		prepareArguments: (args: unknown) => prepareDelegateArguments(args) as DelegateToolInput,
 		renderShell: "self",
 		foregroundWait: (input: { action?: unknown }) =>
 			input.action === "wait" || input.action === "wait_many" || input.action === "inbox_wait",
@@ -2987,47 +2978,51 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							messageReplayKey: messageIdempotencyKey(caller, replayScope, toolCallId, "start", "session"),
 							...(dependsOnTaskIds ? { dependsOnTaskIds } : {}),
 						});
-						const validated = deps.startWorkerDelegation
+						let validated = deps.startWorkerDelegation
 							? await deps.startWorkerDelegation(validatedRequest, signal)
 							: await deps.runWorkerDelegation(validatedRequest);
+						const fallbackResult = await startCompatibleFallback(
+							validated,
+							{
+								instructions: reuseInstructions,
+								...(brief ? { brief } : {}),
+								toolInput: { ...input, agentId: undefined },
+								requirementIds: reuseRequirementIds,
+								...(dependsOnTaskIds ? { dependsOnTaskIds } : {}),
+							},
+							buildDelegateStartRequest,
+							deps,
+							signal,
+						);
+						validated = fallbackResult.validated;
 						if (!validated.started) {
-							const refusedDetails: DelegateToolDetails = {
-								started: false,
+							const refusal = reuseRefusal(
+								reuseAgentId,
 								action,
-								agentId: reuseAgentId,
-								skipReason: validated.skipReason ?? "worker_reuse_overrides_incompatible",
-							};
-							// Options that match the worker, refused by its own state (still running, or held by a failed
-							// release), are not different work: the refusal says what it waits for.
+								validated.skipReason,
+								input.writePaths !== undefined,
+							);
 							if (validated.skipReason && isSpecialistStateRefusal(validated.skipReason)) {
 								return refusalResult(
 									delegateStartRejection(validated.skipReason),
-									refusedDetails,
+									refusal.details as DelegateToolDetails,
 									"operation_outcome",
 								);
 							}
-							return invalid(
-								`delegate start could not apply those options to worker ${reuseAgentId}: ${validated.skipReason ?? "not_started"}. They describe different work; start without agentId to run it as its own worker.${
-									reuseOverrideFields.includes("writePaths")
-										? " A reused worker keeps the write scope it was created with and cannot be widened: start a new worker with `writePaths`."
-										: ""
-								}`,
-								refusedDetails,
-								{ c: "E_STATE", f: "agentId", h: "RETRY_OMIT" },
-							);
+							return invalid(refusal.message, refusal.details as DelegateToolDetails, refusal.flags);
 						}
 						const validatedRecord = "record" in validated ? validated.record : undefined;
-						const validatedWaiting = queuedWaitLine(validatedRecord);
+						const acceptedText = withStateLine(
+							reuseAcceptedMessage({
+								agentId: validatedRecord?.agentId ?? reuseAgentId,
+								record: validatedRecord,
+								waiting: queuedWaitLine(validatedRecord),
+								routedFrom: fallbackResult.rerouted ? reuseAgentId : undefined,
+							}),
+							validatedRecord?.status === "queued" ? ["QUEUED"] : [],
+						);
 						return {
-							content: [
-								{
-									type: "text" as const,
-									text: withStateLine(
-										`worker ${reuseAgentId} accepted this task with its own admitted binding (lane ${validatedRecord?.laneId ?? "queued"}${validatedWaiting ? `; ${validatedWaiting}` : ""})`,
-										validatedRecord?.status === "queued" ? ["QUEUED"] : [],
-									),
-								},
-							],
+							content: [{ type: "text" as const, text: acceptedText }],
 							details: {
 								started: true,
 								action,

@@ -237,6 +237,8 @@ export function buildForegroundWorkerTerminalHandoffContent(
 		nextStep?: WorkerNextStep;
 		/** Host state codes for this lane (see `workerHandoffStateCodes`); the glossary lives in the root prompt. */
 		h?: readonly CommsStateCode[];
+		/** The host's proof sheet for this worker, carried to whoever started it. */
+		proofSheet?: { text: string };
 		claim?: {
 			summary?: string;
 			status?: string;
@@ -307,6 +309,11 @@ export function buildForegroundWorkerTerminalHandoffContent(
 			}
 			if (record.nextStep) lines.push(`  ${describeHandoffNextStep(record.nextStep, record.hostVerdict)}`);
 			else if (record.outcome) lines.push(`  Next: ${nextActionPhrase(record.outcome.nextAction)}.`);
+			// The proof the parent is owed: worker-written words, so fenced as evidence like every other claim.
+			if (record.proofSheet)
+				lines.push(
+					`  Proof Summary (untrusted worker evidence):\n${wrapUntrustedText(record.proofSheet.text, `worker-proof:${record.laneId}`)}`,
+				);
 			const stateLine = renderCommsStateLine(record.h ?? []);
 			if (stateLine) lines.push(`  ${stateLine}`);
 			return lines;
@@ -614,9 +621,12 @@ export class ForegroundTerminalHandoffController {
 		// Each result's sheet is built on its own: a sheet that cannot be built leaves its result delivered without one, with a plain line.
 		const proofSheets: ProofSheetRecord[] = [];
 		const proofSheetFailures: string[] = [];
+		const handoffProofTextByLane = new Map<string, string>();
 		for (const record of sheetRecords) {
 			try {
-				proofSheets.push(this.workerProofSheet(record, snapshot, sheetBytes));
+				const built = this.workerProofSheet(record, snapshot, sheetBytes);
+				proofSheets.push(built.record);
+				handoffProofTextByLane.set(record.laneId, built.text);
 			} catch (error) {
 				harnessLog.warn("proof", "a worker result's proof sheet could not be built; it is delivered without one", {
 					laneId: record.laneId,
@@ -635,10 +645,16 @@ export class ForegroundTerminalHandoffController {
 						record.attemptId ? attempt.attemptId === record.attemptId : attempt.taskId === record.laneId,
 					) && conversationTurnOrigin(snapshot, attempt)?.thirdParty === true,
 			);
+		// The sheet rides with its own record, so whoever started this worker reads the proof in the
+		// handoff content itself rather than in an owner-only details field.
+		const delivered = included.map((record) => {
+			const text = handoffProofTextByLane.get(record.laneId);
+			return text ? { ...record, proofSheet: { text } } : record;
+		});
 		return {
 			message: {
 				customType: BACKGROUND_WORKER_COMPLETION_CUSTOM_TYPE,
-				content: buildForegroundWorkerTerminalHandoffContent(included, {
+				content: buildForegroundWorkerTerminalHandoffContent(delivered, {
 					wakeParent: wake.wakeParent,
 					totalCount: unread.length,
 				}),
@@ -651,7 +667,7 @@ export class ForegroundTerminalHandoffController {
 						prepared.map((entry) => entry.summaryItem),
 					),
 					...(thirdParty ? { thirdParty: true } : {}),
-					// Owner-facing only: the sheets quote worker-written strings, so they stay out of the model's content.
+					// Owner-facing transcript rendering only: the sheets quote worker-written strings.
 					...(proofSheets.length > 0 ? { [PROOF_SHEET_DETAILS_KEY]: proofSheets } : {}),
 					...(proofSheetFailures.length > 0 ? { [PROOF_SHEET_FAILURES_DETAILS_KEY]: proofSheetFailures } : {}),
 				},
@@ -670,7 +686,7 @@ export class ForegroundTerminalHandoffController {
 		},
 		snapshot: TaskRuntimeProjection | undefined,
 		maxTextBytes: number,
-	): ProofSheetRecord {
+	): { text: string; record: ProofSheetRecord } {
 		const claim = this.deps.getWorkerClaimSnapshot?.(record.laneId, record.attemptId)?.claim;
 		const attempt = record.attemptId !== undefined ? snapshot?.attempts[record.attemptId] : undefined;
 		const task = attempt ? snapshot?.tasks[attempt.taskId]?.task : undefined;
@@ -683,7 +699,7 @@ export class ForegroundTerminalHandoffController {
 			...(attempt?.dispatch.requirementIds ? { requirementIds: attempt.dispatch.requirementIds } : {}),
 			...(record.outputArtifact ? { outputUri: record.outputArtifact.uri } : {}),
 			maxTextBytes,
-		}).record;
+		});
 	}
 
 	/**

@@ -10,6 +10,10 @@ import { ExpandableMarkdownMessageComponent } from "./expandable-markdown-messag
  * Uses same background color as custom messages for visual consistency.
  */
 export class BranchSummaryMessageComponent extends ExpandableMarkdownMessageComponent {
+	override get renderRevision(): number {
+		return this.revision;
+	}
+
 	constructor(message: BranchSummaryMessage, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
 		super(() => {
 			const text = interfaceText().conversation;

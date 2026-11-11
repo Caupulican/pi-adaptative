@@ -59,8 +59,8 @@ export const INTERACTIVE = {
 			bash: "bash",
 			expandTools: "expandir ferramentas",
 		},
-		fullHelp: (expandToolsKeys: string, historyKeys: string) =>
-			`Aperte ${expandToolsKeys} para ver toda a ajuda de início. Aperte ${historyKeys} para carregar o histórico da sessão.`,
+		fullHelp: (expandToolsKeys: string, _historyKeys?: string) =>
+			`Aperte ${expandToolsKeys} para ver toda a ajuda de início.`,
 		onboarding:
 			"O Pi explica os próprios recursos e consulta a documentação. Pergunte a ele como usar ou estender o Pi.",
 		modelScope: (models: string, cycleHint: string) => `Modelos no escopo: ${models}${cycleHint}`,

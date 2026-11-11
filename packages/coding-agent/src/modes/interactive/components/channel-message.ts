@@ -9,6 +9,8 @@ import { REMOTE_MARK } from "./bot-state-mark.ts";
  * they came from, then the words. The framing written for the model is never shown.
  */
 export class ChannelMessageComponent extends Container {
+	private revision = 0;
+
 	constructor(channel: string, words: string, markdownTheme: MarkdownTheme) {
 		super();
 		const box = new Box(1, 1, (content: string) => theme.bg("customMessageBg", content));
@@ -21,5 +23,14 @@ export class ChannelMessageComponent extends Container {
 			}),
 		);
 		this.addChild(box);
+	}
+
+	get renderRevision(): number {
+		return this.revision;
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+		this.revision++;
 	}
 }

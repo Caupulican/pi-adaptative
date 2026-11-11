@@ -1,4 +1,4 @@
-import { type Container, Spacer, Text, type TUI } from "@caupulican/pi-tui";
+import type { Container, TUI } from "@caupulican/pi-tui";
 import type { AwayChannelStatus } from "../../core/channels/away-channels.ts";
 import { SPAWNER_BOT_ID, SPAWNER_SOUL } from "../../core/delegation/bot-creation.ts";
 import { type BotDaemonLaunchResult, describeBotDaemonLaunch } from "../../core/delegation/bot-daemon-launch.ts";
@@ -28,12 +28,14 @@ import type { AwayService } from "../../core/routines/away-service.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import { describeBotDaemonStatusLines } from "./bot-daemon-status.ts";
+import { currentActivity, TargetChatViewRegistry } from "./bot-team-chat-target-view.ts";
 import { formatBotList, formatRoutineList, formatTeamList, formatTeamSend } from "./bot-team-lines.ts";
 import { chatRoutine, routineScheduleLabel } from "./chat-routines.ts";
 import { formatActiveChatTargetBadge } from "./chat-target-badge.ts";
 import { botStateGlyph, REMOTE_MARK } from "./components/bot-state-mark.ts";
 import { teamSpeakerTone } from "./components/custom-message.ts";
-import { DynamicBorder } from "./components/dynamic-border.ts";
+import type { ReplyBylineTracker } from "./components/reply-byline.ts";
+import type { ToolExecutionComponent } from "./components/tool-execution.ts";
 import { runRemoteCommand } from "./remote-commands.ts";
 
 /** What the owner is told after a message went to a bot, in plain words (no mode names, no link labels). */
@@ -87,11 +89,15 @@ export interface BotTeamChatSessionPort {
 }
 
 export interface BotTeamChatHost {
-	readonly chatContainer: Container;
 	readonly ui: TUI;
 	getSessionPort(): BotTeamChatSessionPort;
 	renderRootConversation(): Promise<void>;
-	appendRenderedMessageToChat(message: AgentMessage): void;
+	appendRenderedMessageToTarget(
+		container: Container,
+		pendingToolCalls: Map<string, ToolExecutionComponent>,
+		message: AgentMessage,
+		bylines: ReplyBylineTracker,
+	): void;
 	showStatus(message: string): void;
 	showWarning(message: string): void;
 	showError(message: string): void;
@@ -126,52 +132,60 @@ function errorMessage(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/**
- * What a rendered chat shows: its header facts plus the message count and the last message's time. A transcript only
- * grows, so these change whenever a message is added; hashing every message on each event would cost more than it saves.
- */
-/** What a bot is doing now, in a few words: its last tool call with the argument that names its target, from its own transcript. */
-function currentActivity(messages: readonly AgentMessage[]): string | undefined {
-	const text = interfaceText().chat;
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const message = messages[index];
-		if (message?.role !== "assistant") continue;
-		const call = [...message.content].reverse().find((block) => block.type === "toolCall");
-		if (call?.type !== "toolCall") return text.writingAnswer;
-		const args = call.arguments as Record<string, unknown>;
-		// A message to a peer shows who it goes to, never its text; any other call shows the argument that names its target.
-		const keys =
-			call.name === "bot_message"
-				? ["to", "agentId", "target", "recipient"]
-				: ["path", "command", "pattern", "query", "url", "prompt", "message", "text"];
-		const key = keys.find((name) => typeof args[name] === "string");
-		const value = key ? String(args[key]).replace(/\s+/g, " ").trim() : "";
-		const shown = value.length > 42 ? `${value.slice(0, 41)}…` : value;
-		if (call.name === "bot_message") return shown ? text.messagesTo(shown) : text.messagesPeer;
-		return shown ? `${call.name} ${shown}` : call.name;
-	}
-	return undefined;
-}
-
-function chatSignature(header: object, messages: readonly AgentMessage[]): string {
-	return JSON.stringify({ header, count: messages.length, last: messages.at(-1)?.timestamp ?? null });
-}
-
 export class BotTeamChatController {
 	private activeTarget: ActiveChatTarget = { kind: "root" };
 	private unsubscribeUpdates?: () => void;
 	private refreshQueued = false;
 	private readonly host: BotTeamChatHost;
-	/** What the chat container shows for the open bot or team chat. An unchanged one skips the rebuild. */
-	private lastRenderedChatSignature: string | undefined;
+	private readonly targetViews = new TargetChatViewRegistry();
 
 	constructor(host: BotTeamChatHost) {
 		this.host = host;
 	}
 
+	getActiveContainer(): Container | undefined {
+		return this.targetViews.getActiveContainer(this.activeTarget);
+	}
+
+	invalidate(): void {
+		this.targetViews.invalidate();
+	}
+
+	setToolsExpanded(expanded: boolean): void {
+		this.targetViews.setToolsExpanded(expanded);
+	}
+
+	setTranscriptActionsExpanded(expanded: boolean): void {
+		this.targetViews.setTranscriptActionsExpanded(expanded);
+	}
+
+	setHideThinkingBlock(hide: boolean): void {
+		this.targetViews.setHideThinkingBlock(hide);
+	}
+
+	setShowImages(show: boolean): void {
+		this.targetViews.setShowImages(show);
+	}
+
+	setImageWidthCells(width: number): void {
+		this.targetViews.setImageWidthCells(width);
+	}
+
+	resetViews(): void {
+		this.targetViews.reset();
+	}
+
+	/** A replaced session must not keep painting into the previous one's chat, so the view returns to Root. */
+	private resetTargetToRoot(): void {
+		if (this.activeTarget.kind === "root") return;
+		this.activeTarget = { kind: "root" };
+		this.host.onActiveTargetChanged?.(this.activeTarget);
+	}
+
 	/** Subscribe to bot and team updates. Re-binding replaces the previous subscription. */
 	bindSession(): void {
-		this.lastRenderedChatSignature = undefined;
+		this.resetViews();
+		this.resetTargetToRoot();
 		this.unsubscribeUpdates?.();
 		this.unsubscribeUpdates = this.host.getSessionPort().subscribeBotTeamUpdates((change) => {
 			if (!this.isRootChatActive()) {
@@ -196,7 +210,8 @@ export class BotTeamChatController {
 		this.unsubscribeUpdates?.();
 		this.unsubscribeUpdates = undefined;
 		this.refreshQueued = false;
-		this.lastRenderedChatSignature = undefined;
+		this.resetViews();
+		this.resetTargetToRoot();
 	}
 
 	getActiveTarget(): ActiveChatTarget {
@@ -246,8 +261,15 @@ export class BotTeamChatController {
 	}
 
 	async switchTarget(target: ActiveChatTarget): Promise<void> {
+		if (
+			this.activeTarget.kind === target.kind &&
+			(target.kind === "root" ||
+				(target.kind === "bot" && (this.activeTarget as { agentId: string }).agentId === target.agentId) ||
+				(target.kind === "team" && (this.activeTarget as { teamId: string }).teamId === target.teamId))
+		) {
+			return;
+		}
 		this.activeTarget = target;
-		this.lastRenderedChatSignature = undefined;
 		this.host.onActiveTargetChanged?.(target);
 		await this.refreshActiveChatView();
 	}
@@ -256,7 +278,6 @@ export class BotTeamChatController {
 		const target = this.activeTarget;
 		switch (target.kind) {
 			case "root":
-				this.lastRenderedChatSignature = undefined;
 				await this.host.renderRootConversation();
 				return;
 			case "bot":
@@ -562,7 +583,6 @@ export class BotTeamChatController {
 		const routines = (port.getBotTeamStore?.().listRoutines() ?? []).filter(
 			(r) => r.target.kind === "bot" && r.target.agentId === agentId,
 		);
-		if (!this.beginChatRender(chatSignature({ kind: "bot", agentId, bot: bot ?? null, routines }, messages))) return;
 
 		const modelLabel = bot?.modelRef ?? text.chat.unknownModel;
 		const thinking = bot?.thinkingLevel ?? text.chat.defaultThinking;
@@ -590,39 +610,16 @@ export class BotTeamChatController {
 		const memoryParts = [text.chat.memory(memoryPath), continuity].filter((part): part is string => Boolean(part));
 		lines.push(theme.fg("muted", memoryParts.join(" · ")));
 		lines.push(theme.fg("muted", text.chat.directChatHint(agentId)));
-		this.finishChatRender(lines, messages, text.chat.noMessagesWith(agentId));
-	}
-
-	/** Starts rebuilding the chat container for `signature`. False when it already shows exactly that. */
-	private beginChatRender(signature: string): boolean {
-		if (signature === this.lastRenderedChatSignature) {
-			this.host.ui.requestRender();
-			return false;
-		}
-		this.lastRenderedChatSignature = signature;
-		this.host.chatContainer.clear();
-		this.host.chatContainer.addChild(new DynamicBorder());
-		return true;
-	}
-
-	/** Adds the header lines and the messages, or the empty-chat hint, to the chat `beginChatRender` opened. */
-	private finishChatRender(
-		header: readonly string[],
-		messages: readonly AgentMessage[],
-		emptyHint: string,
-		footer: readonly string[] = [],
-	): void {
-		const chat = this.host.chatContainer;
-		chat.addChild(new Text(header.join("\n"), 1, 0));
-		chat.addChild(new DynamicBorder());
-		chat.addChild(new Spacer(1));
-		if (messages.length === 0) {
-			chat.addChild(new Text(theme.fg("muted", emptyHint), 1, 0));
-		} else {
-			for (const message of messages) this.host.appendRenderedMessageToChat(message);
-		}
-		// What is happening now sits after the last message, where the eye is, not in the header that scrolls away.
-		if (footer.length > 0) chat.addChild(new Text(footer.join("\n"), 1, 0));
+		const headerSignature = JSON.stringify({ kind: "bot", agentId, bot: bot ?? null, routines });
+		this.targetViews.renderTargetChat(
+			`bot:${agentId}`,
+			lines,
+			headerSignature,
+			messages,
+			text.chat.noMessagesWith(agentId),
+			(container, pending, msg, bylines) =>
+				this.host.appendRenderedMessageToTarget(container, pending, msg, bylines),
+		);
 		this.host.ui.requestRender();
 	}
 
@@ -652,12 +649,6 @@ export class BotTeamChatController {
 			(r) => r.target.kind === "team" && r.target.teamId === teamId,
 		);
 		const messages = port.readTeamChatMessages(teamId);
-		if (
-			!this.beginChatRender(
-				chatSignature({ kind: "team", teamId, team: team ?? null, memberStatus, routines, working }, messages),
-			)
-		)
-			return;
 
 		const routineLine =
 			routines.length > 0
@@ -669,15 +660,28 @@ export class BotTeamChatController {
 				`  ${memberStatus.length > 0 ? memberStatus : theme.fg("muted", interfaceText().chat.noMembers)}${theme.fg("muted", routineLine)}`,
 			theme.fg("dim", interfaceText().chat.teamHint),
 		];
-		this.finishChatRender(
+		const headerSignature = JSON.stringify({
+			kind: "team",
+			teamId,
+			team: team ?? null,
+			memberStatus,
+			routines,
+			working,
+		});
+		this.targetViews.renderTargetChat(
+			`team:${teamId}`,
 			lines,
+			headerSignature,
 			messages,
 			interfaceText().chat.noTeamMessages(teamId),
+			(container, pending, msg, bylines) =>
+				this.host.appendRenderedMessageToTarget(container, pending, msg, bylines),
 			working.map(
 				({ memberId, activity }) =>
 					`${theme.fg(teamSpeakerTone(memberId), `◐ ${memberId}`)} ${theme.fg("muted", activity)}`,
 			),
 		);
+		this.host.ui.requestRender();
 	}
 
 	/**

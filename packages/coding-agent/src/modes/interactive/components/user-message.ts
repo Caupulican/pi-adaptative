@@ -13,6 +13,7 @@ export class UserMessageComponent extends Container {
 	private contentBox: Box;
 	private transformMarkdown?: MarkdownTransformFn;
 	private markdownSlot: MarkdownTransformSlot;
+	private revision = 0;
 
 	constructor(
 		text: string,
@@ -35,6 +36,15 @@ export class UserMessageComponent extends Container {
 		this.markdownSlot = { component: markdown, rawText: text, messageType: "user" };
 		this.contentBox.addChild(markdown);
 		this.addChild(this.contentBox);
+	}
+
+	get renderRevision(): number {
+		return this.revision;
+	}
+
+	override invalidate(): void {
+		super.invalidate();
+		this.revision++;
 	}
 
 	override render(width: number): string[] {

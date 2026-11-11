@@ -25,7 +25,6 @@ export function expandedStartupHints(): string {
 		rawKeyHint(`${keyText("app.model.cycleForward")}/${keyText("app.model.cycleBackward")}`, words.toCycleModels),
 		hint("app.model.select", words.toSelectModel),
 		hint("app.tools.expand", words.toExpandTools),
-		hint("app.history.load", words.toLoadHistory),
 		hint("app.agents.open", words.toInspectAgents),
 		hint("app.transcript.open", words.toViewTranscript),
 		hint("app.thinking.toggle", words.toExpandThinking),
@@ -54,12 +53,9 @@ export function compactStartupHints(): string {
 	].join(theme.fg("muted", " · "));
 }
 
-/** The line that points at the full list and at the session history. */
+/** The line that points at the full startup help list. */
 export function startupHelpLine(): string {
-	return theme.fg(
-		"dim",
-		interfaceText().interactive.startup.fullHelp(keyText("app.tools.expand"), keyText("app.history.load")),
-	);
+	return theme.fg("dim", interfaceText().interactive.startup.fullHelp(keyText("app.tools.expand")));
 }
 
 /** The line that says the agent explains its own features and looks its docs up. */

@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Changed
+
+- Interactive TUI full-session history retention, per-chat isolation, and $O(1)$ viewport rendering: removed live 260->220 component trimming and `"History hidden"` placeholders; sessions paint a tool-pair-safe tail slice synchronously first (`findCleanHistoryPartition`) and stream older prefix chunks via `setImmediate` with generation fencing, toggle synchronization, and adjacent `ActionTranscriptComponent` seam coalescing; Bot and Team chats render in isolated `TargetChatView` containers with independent tool-call and reply-byline state while keeping `chatContainer` dedicated to Root; `ConversationSnapshotBuilder` and `ConversationWindow` cache and preserve scroll anchors and row measurements per container in $O(1)$ per keystroke across `Root <-> Bot <-> Team` switches.
+- Proof-sheet TUI projection and parent handoff routing: removed multi-line proof-sheet banners and `/quiz` prompts from operator TUI worker/plan/goal chat rows (retaining compact one-line completion summaries and explicit `/quiz` command support), and routed fenced `Proof Summary` evidence in `buildForegroundWorkerTerminalHandoffContent` to the parent agent that started the worker.
+
+### Fixed
+
+- `delegate` harness argument preparation and incompatible-reuse fallback: `prepareDelegateArguments` strips and folds `task` onto `instructions`/`message` before Ajv validation and spills oversized briefs (`> 16,384` chars for `start`/`slices`, `> 4,096` chars for message actions, up to 256 KiB) to session-scoped `delegate-brief-<sha256>.md` files; `delegate start` with `agentId` automatically reroutes `worker_reuse_overrides_incompatible` dispatches onto a compatible/fresh worker instead of bouncing back to the model; main-chat delegation narration suppresses pre-start rejections and skips standalone header lines (`TASK`, `Goal:`, `Instructions:`) in previews.
+
 ## [0.104.53] - 2026-11-11
 
 ### Added

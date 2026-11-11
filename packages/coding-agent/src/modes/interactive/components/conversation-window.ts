@@ -8,6 +8,9 @@ import {
 } from "@caupulican/pi-tui";
 import { interfaceText } from "../../../core/language/interface-text.ts";
 import { stripAnsi } from "../../../utils/ansi.ts";
+import { getActionTranscriptEpoch } from "../action-transcript-epoch.ts";
+import { ActionTranscriptComponent } from "./action-transcript.ts";
+import { BashExecutionComponent } from "./bash-execution.ts";
 
 /** OSC 133 prompt-zone marks emitted by the inline transcript components. */
 const PROMPT_ZONE_MARK = /\x1b\]133;[^\x07\x1b]*(?:\x07|\x1b\\)/g;
@@ -27,12 +30,90 @@ interface CachedRows {
 	bytes: number;
 }
 
+export interface ConversationWindowSnapshot {
+	readonly container?: Container;
+	readonly entries: readonly Component[];
+	readonly indexMap: Map<Component, number>;
+	readonly revision: number;
+}
+
+export type ConversationWindowSource = () => readonly Component[] | ConversationWindowSnapshot;
+
+export interface ConversationSnapshotBuilderOptions {
+	getRoot: () => Container;
+	getActive: () => Container;
+	getHeader?: () => Container | undefined;
+}
+
+export class ConversationSnapshotBuilder {
+	private readonly options: ConversationSnapshotBuilderOptions;
+	private lastActive?: Container;
+	private lastContainerRevision?: number;
+	private lastHeaderRevision = -1;
+	private lastEpoch?: number;
+	/** Counts rebuilds, not reads: a removed child must still move the revision even when the epoch holds. */
+	private snapshotRevision = 0;
+	private memoized?: ConversationWindowSnapshot;
+
+	constructor(options: ConversationSnapshotBuilderOptions) {
+		this.options = options;
+	}
+
+	getSnapshot(): ConversationWindowSnapshot {
+		const root = this.options.getRoot();
+		const active = this.options.getActive();
+		const header = active === root ? this.options.getHeader?.() : undefined;
+		const containerRevision = active.renderRevision;
+		const headerRevision = header?.renderRevision ?? -1;
+		const epoch = getActionTranscriptEpoch();
+
+		// O(1) on a keystroke: the four things that can change a transcript without re-walking children.
+		if (
+			this.memoized &&
+			this.lastActive === active &&
+			this.lastContainerRevision === containerRevision &&
+			this.lastHeaderRevision === headerRevision &&
+			this.lastEpoch === epoch
+		) {
+			return this.memoized;
+		}
+
+		const entries: Component[] = [];
+		if (header) entries.push(header);
+		const children = active.children;
+		for (let index = 0; index < children.length; index++) {
+			const child = children[index];
+			if (child instanceof ActionTranscriptComponent) {
+				for (const conversation of child.conversationComponents()) entries.push(conversation);
+			} else if (child instanceof BashExecutionComponent) {
+				// skipped: a `!` command renders in the execution pane, not the transcript
+			} else {
+				entries.push(child);
+			}
+		}
+
+		const indexMap = new Map<Component, number>();
+		for (let index = 0; index < entries.length; index++) indexMap.set(entries[index], index);
+
+		this.lastActive = active;
+		this.lastContainerRevision = containerRevision;
+		this.lastHeaderRevision = headerRevision;
+		this.lastEpoch = epoch;
+		this.memoized = { container: active, entries, indexMap, revision: ++this.snapshotRevision };
+		return this.memoized;
+	}
+}
+
 /** Lazy, identity-anchored viewport. Never renders the transcript merely to count its rows. */
 export class ConversationWindow {
-	private readonly entries: () => readonly Component[];
+	private readonly entries: ConversationWindowSource;
 	private readonly byteLimit: number;
 	private readonly selectionStyle: () => string;
 	private readonly cache = new Map<Component, CachedRows>();
+	private readonly scrollStates = new WeakMap<object, { tail: boolean; anchor?: Anchor }>();
+	private readonly containerEntries = new WeakMap<object, { revision: number; entries: readonly Component[] }>();
+	private currentContainer?: object;
+	private lastEntriesRevision?: number;
 	private anchor?: Anchor;
 	private width = 1;
 	private height = 1;
@@ -48,7 +129,7 @@ export class ConversationWindow {
 	 * change applies at once). The default is reverse video, which keeps each cell's own colors.
 	 */
 	constructor(
-		entries: () => readonly Component[],
+		entries: ConversationWindowSource,
 		byteLimit = 2 * 1024 * 1024,
 		selectionStyle: () => string = () => "\x1b[7m",
 	) {
@@ -79,6 +160,19 @@ export class ConversationWindow {
 		this.invalidate();
 		this.anchor = undefined;
 		this.visible = [];
+		this.currentContainer = undefined;
+	}
+
+	/** Forgets one container's scroll position and row keys, so a rebuilt transcript starts at its tail. */
+	resetContainerScroll(container: object): void {
+		this.scrollStates.delete(container);
+		this.containerEntries.delete(container);
+		if (this.currentContainer !== container) return;
+		this.currentContainer = undefined;
+		this.tail = true;
+		this.anchor = undefined;
+		this.frozen = undefined;
+		this.selection = undefined;
 	}
 
 	latest(): void {
@@ -122,17 +216,63 @@ export class ConversationWindow {
 		return lines;
 	}
 
+	private getSnapshot(): ConversationWindowSnapshot {
+		const raw = this.entries();
+		let snapshot: ConversationWindowSnapshot;
+		if (raw && typeof raw === "object" && "entries" in raw && "indexMap" in raw) {
+			snapshot = raw as ConversationWindowSnapshot;
+		} else {
+			const entries = (raw ?? []) as readonly Component[];
+			const indexMap = new Map<Component, number>();
+			for (let i = 0; i < entries.length; i++) indexMap.set(entries[i], i);
+			snapshot = { entries, indexMap, revision: 0 };
+		}
+		if (snapshot.container && snapshot.container !== this.currentContainer) {
+			if (this.currentContainer) {
+				this.scrollStates.set(this.currentContainer, { tail: this.tail, anchor: this.anchor });
+			}
+			this.currentContainer = snapshot.container;
+			const saved = this.scrollStates.get(snapshot.container);
+			if (saved) {
+				this.tail = saved.tail;
+				this.anchor = saved.anchor;
+			} else {
+				this.tail = true;
+				this.anchor = undefined;
+			}
+		}
+		return snapshot;
+	}
+
 	render(width: number, height: number): string[] {
 		this.width = Math.max(1, width);
 		this.height = Math.max(0, height);
 		if (this.frozen) return this.highlight(this.frozen.slice(0, this.height));
-		const entries = this.entries();
+		const snapshot = this.getSnapshot();
+		const entries = snapshot.entries;
+		const indexMap = snapshot.indexMap;
 		// The anchored entry was trimmed from live history: the rows being read are gone, so follow
 		// the latest instead of jumping to whatever now sits first.
-		if (!this.tail && this.anchor && !entries.includes(this.anchor.component)) this.latest();
-		// Prune evicted transcript identities; cache capacity is byte-based as well.
-		const retained = new Set(entries);
-		for (const component of this.cache.keys()) if (!retained.has(component)) this.invalidate(component);
+		if (!this.tail && this.anchor && !indexMap.has(this.anchor.component)) this.latest();
+		// Prune evicted transcript identities only for the container whose transcript changed, and only
+		// when its revision moved: cached rows of the chats we are not looking at stay usable.
+		const container = snapshot.container;
+		if (container) {
+			const record = this.containerEntries.get(container);
+			if (!record || record.revision !== snapshot.revision) {
+				if (record) {
+					for (const component of record.entries) {
+						if (!indexMap.has(component)) this.invalidate(component);
+					}
+				}
+				this.containerEntries.set(container, { revision: snapshot.revision, entries });
+			}
+		} else if (this.lastEntriesRevision !== snapshot.revision) {
+			this.lastEntriesRevision = snapshot.revision;
+			for (const component of this.cache.keys()) {
+				if (!indexMap.has(component)) this.invalidate(component);
+			}
+		}
 		const lines: string[] = [];
 		if (this.tail) {
 			for (let index = entries.length - 1; index >= 0 && lines.length < this.height; index--) {
@@ -145,7 +285,7 @@ export class ConversationWindow {
 			}
 			lines.reverse();
 		} else {
-			let index = this.anchor ? entries.indexOf(this.anchor.component) : 0;
+			let index = this.anchor ? (indexMap.get(this.anchor.component) ?? 0) : 0;
 			let offset = index >= 0 ? (this.anchor?.row ?? 0) : 0;
 			index = Math.max(0, index);
 			for (; index < entries.length && lines.length < this.height; index++) {
@@ -165,15 +305,17 @@ export class ConversationWindow {
 	}
 
 	scroll(delta: number): void {
-		const entries = this.entries();
-		if (this.anchor && !entries.includes(this.anchor.component)) {
+		const snapshot = this.getSnapshot();
+		const entries = snapshot.entries;
+		const indexMap = snapshot.indexMap;
+		if (this.anchor && !indexMap.has(this.anchor.component)) {
 			this.latest();
 			return;
 		}
 		this.tail = false;
 		this.selection = undefined;
 		this.frozen = undefined;
-		let index = this.anchor ? entries.indexOf(this.anchor.component) : 0;
+		let index = this.anchor ? (indexMap.get(this.anchor.component) ?? 0) : 0;
 		index = Math.max(0, index);
 		let row = (this.anchor?.row ?? 0) + delta;
 		while (row < 0 && index > 0) row += this.rows(entries[--index]!).length;

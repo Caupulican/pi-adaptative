@@ -19,6 +19,7 @@ export class ExpandableMarkdownMessageComponent extends Box {
 	private expandedMarkdown: string | undefined;
 	private readonly markdownTheme: MarkdownTheme;
 	private readonly options: ExpandableMarkdownMessageSource;
+	protected revision = 0;
 
 	constructor(options: ExpandableMarkdownMessageSource, markdownTheme: MarkdownTheme) {
 		super(1, 1, (text) => theme.bg("customMessageBg", text));
@@ -27,13 +28,21 @@ export class ExpandableMarkdownMessageComponent extends Box {
 		this.updateDisplay();
 	}
 
+	get renderRevision(): number {
+		return this.revision;
+	}
+
 	setExpanded(expanded: boolean): void {
-		this.expanded = expanded;
-		this.updateDisplay();
+		if (this.expanded !== expanded) {
+			this.expanded = expanded;
+			this.revision++;
+			this.updateDisplay();
+		}
 	}
 
 	override invalidate(): void {
 		super.invalidate();
+		this.revision++;
 		this.updateDisplay();
 	}
 

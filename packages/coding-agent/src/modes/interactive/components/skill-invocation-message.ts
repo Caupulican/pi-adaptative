@@ -11,6 +11,10 @@ import { ExpandableMarkdownMessageComponent } from "./expandable-markdown-messag
  * Only renders the skill block itself - user message is rendered separately.
  */
 export class SkillInvocationMessageComponent extends ExpandableMarkdownMessageComponent {
+	override get renderRevision(): number {
+		return this.revision;
+	}
+
 	constructor(skillBlock: ParsedSkillBlock, markdownTheme: MarkdownTheme = getMarkdownTheme()) {
 		super(() => {
 			const text = interfaceText().conversation;

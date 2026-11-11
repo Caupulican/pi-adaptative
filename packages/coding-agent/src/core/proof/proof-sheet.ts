@@ -281,7 +281,11 @@ export function reviewWaitingLine(waiting: number | undefined): string | undefin
  * The owner-facing text. Low stakes: a headline and the not-checked line. Elevated: commands, checks and what was decided or assumed.
  * High: everything, plus the quiz offer in one plain sentence.
  */
-export function renderProofSheet(sheet: ProofSheet, maxBytes = PROOF_SHEET_MAX_BYTES): string {
+export function renderProofSheet(
+	sheet: ProofSheet,
+	maxBytes = PROOF_SHEET_MAX_BYTES,
+	options?: { readonly includeQuizOffer?: boolean },
+): string {
 	const passed = sheet.checks.filter((check) => check.passed).length;
 	const failed = sheet.checks.length - passed;
 	const headline = clip(
@@ -336,8 +340,9 @@ export function renderProofSheet(sheet: ProofSheet, maxBytes = PROOF_SHEET_MAX_B
 	}
 	if (sheet.sourceRefs && sheet.sourceRefs.length > 0) lines.push(clip(`Full record: ${listed(sheet.sourceRefs, 4)}`));
 	if (waiting) lines.push(waiting);
-	if (sheet.quizOffered)
+	if ((options?.includeQuizOffer ?? true) && sheet.quizOffered) {
 		lines.push("This change is high stakes: type /quiz for a short quiz on what it changed before you rely on it.");
+	}
 	return bounded(lines, maxBytes);
 }
 

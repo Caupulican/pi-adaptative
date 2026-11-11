@@ -170,6 +170,7 @@ export function buildWorkerProofSheet(input: WorkerProofSheetInput): { text: str
 			...(outcome?.digestRef ? [outcome.digestRef] : []),
 		],
 	});
-	const text = renderProofSheet(sheet, input.maxTextBytes);
-	return { text, record: proofSheetRecord(sheet, text) };
+	const recordText = renderProofSheet(sheet, input.maxTextBytes);
+	const modelText = renderProofSheet(sheet, input.maxTextBytes, { includeQuizOffer: false });
+	return { text: modelText, record: proofSheetRecord(sheet, recordText) };
 }

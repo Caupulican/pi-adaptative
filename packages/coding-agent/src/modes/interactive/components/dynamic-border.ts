@@ -10,13 +10,18 @@ import { theme } from "../../../presentation/theme-model.ts";
  */
 export class DynamicBorder implements Component {
 	private color: (str: string) => string;
+	private revision = 0;
 
 	constructor(color: (str: string) => string = (str) => theme.fg("borderMuted", str)) {
 		this.color = color;
 	}
 
+	get renderRevision(): number {
+		return this.revision;
+	}
+
 	invalidate(): void {
-		// No cached state to invalidate currently
+		this.revision++;
 	}
 
 	render(width: number): string[] {
