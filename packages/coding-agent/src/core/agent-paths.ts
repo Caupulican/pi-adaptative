@@ -72,6 +72,7 @@ import {
 	getWorkTenantDir,
 	hasActiveWorkRunLease,
 	pruneWorkTenant,
+	removeWorkRun,
 } from "../utils/work-directory.ts";
 import { getReloadCoordinationDir } from "./reload-blockers.ts";
 
@@ -537,6 +538,7 @@ export {
 	getWorkTenantDir,
 	hasActiveWorkRunLease,
 	pruneWorkTenant,
+	removeWorkRun,
 };
 
 /**

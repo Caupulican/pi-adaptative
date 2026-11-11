@@ -2,6 +2,7 @@ import type {
 	AnthropicOAuthUsage,
 	AntigravityAccountUsage,
 	Api,
+	CommandCodeAccountUsage,
 	Model,
 	OpenAICodexLimitReachedType,
 	OpenAICodexUsage,
@@ -21,6 +22,7 @@ import type { ProviderLimitReason, ProviderUsageRecord } from "./limit-state.ts"
 import type { ProviderLoadView } from "./load-view.ts";
 
 export interface UsageWindow {
+	id?: string;
 	label: string;
 	usedPercent: number;
 	resetsAt?: number;
@@ -139,6 +141,7 @@ export function openAICodexCredentialHeaders(
 }
 export const ANTHROPIC_PROVIDER = "anthropic";
 export const ANTIGRAVITY_PROVIDER = "google-antigravity";
+export const COMMAND_CODE_PROVIDER = "command-code";
 export const OPENROUTER_PROVIDER = "openrouter";
 export const XAI_PROVIDER = "xai";
 
@@ -512,6 +515,166 @@ export function openRouterUsageSnapshot(
 			: spend.length > 0
 				? { details: [`key spend ${spend.join(" · ")}`] }
 				: {}),
+	};
+}
+
+const COMMAND_CODE_ORG_INTERVALS: Readonly<Record<string, string>> = {
+	daily: "/day",
+	weekly: "/week",
+	monthly: "/mo",
+	total: "",
+};
+
+function clampPercent(value: number): number {
+	return Math.max(0, Math.min(100, value));
+}
+
+export function commandCodeUsageSnapshot(
+	usage: CommandCodeAccountUsage,
+): Omit<AccountUsageSnapshot, "observedAt" | "source"> {
+	const windows: UsageWindow[] = [];
+	const windowLimits = usage.billingCredits?.windowLimits;
+	if (windowLimits && windowLimits.limited !== false) {
+		const fiveHour = windowLimits.fiveHour;
+		if (fiveHour && fiveHour.cap > 0) {
+			windows.push({
+				id: "5h",
+				label: "5h window",
+				usedPercent: fiveHour.used >= fiveHour.cap ? 100 : clampPercent((fiveHour.used / fiveHour.cap) * 100),
+				...(fiveHour.resetAt !== undefined ? { resetsAt: fiveHour.resetAt } : {}),
+			});
+		}
+		const weekly = windowLimits.weekly;
+		if (weekly && weekly.cap > 0) {
+			windows.push({
+				id: "weekly",
+				label: "Weekly window",
+				usedPercent: weekly.used >= weekly.cap ? 100 : clampPercent((weekly.used / weekly.cap) * 100),
+				...(weekly.resetAt !== undefined ? { resetsAt: weekly.resetAt } : {}),
+			});
+		}
+	}
+
+	const credits = usage.billingCredits?.credits;
+	const monthlyRemaining = credits?.monthlyCredits;
+	const subscriptionStatus = usage.subscription?.status?.toLowerCase();
+	const activeSubscription = subscriptionStatus === "active" || subscriptionStatus === "trialing";
+	const hasBillingPlan = activeSubscription || (usage.subscription === undefined && Boolean(credits?.planId));
+	const planCap = usage.planMonthlyCredits;
+	const summary = usage.usageSummary;
+	const billingPeriodSpent =
+		summary?.totalCost !== undefined &&
+		(summary.periodBasis === "billing-period" ||
+			summary.periodBasis === undefined ||
+			Boolean(usage.subscription?.currentPeriodStart))
+			? summary.totalCost
+			: undefined;
+	const monthlyResetsAt = usage.subscription?.currentPeriodEnd;
+
+	if (
+		planCap !== undefined &&
+		planCap > 0 &&
+		(hasBillingPlan || (monthlyRemaining !== undefined && monthlyRemaining > 0))
+	) {
+		if (monthlyRemaining !== undefined) {
+			const cap = Math.max(planCap, monthlyRemaining);
+			const used = Math.max(0, cap - monthlyRemaining);
+			windows.push({
+				id: "monthly",
+				label: "Monthly included",
+				usedPercent: monthlyRemaining <= 0 ? 100 : clampPercent((used / cap) * 100),
+				...(monthlyResetsAt !== undefined ? { resetsAt: monthlyResetsAt } : {}),
+				detail: `${usd(monthlyRemaining)} of ${usd(cap)} left`,
+			});
+		} else if (billingPeriodSpent !== undefined) {
+			windows.push({
+				id: "monthly",
+				label: "Monthly included",
+				usedPercent: billingPeriodSpent >= planCap ? 100 : clampPercent((billingPeriodSpent / planCap) * 100),
+				...(monthlyResetsAt !== undefined ? { resetsAt: monthlyResetsAt } : {}),
+				detail: `${usd(billingPeriodSpent)} of ${usd(planCap)} used`,
+			});
+		}
+	} else if (monthlyRemaining !== undefined && (monthlyRemaining > 0 || hasBillingPlan)) {
+		if (monthlyRemaining <= 0) {
+			windows.push({
+				id: "monthly",
+				label: "Monthly included",
+				usedPercent: 100,
+				...(monthlyResetsAt !== undefined ? { resetsAt: monthlyResetsAt } : {}),
+				detail: "$0.00 left",
+			});
+		} else {
+			const spent = billingPeriodSpent ?? 0;
+			const cap = monthlyRemaining + spent;
+			windows.push({
+				id: "monthly",
+				label: "Monthly included",
+				usedPercent: clampPercent((spent / cap) * 100),
+				...(monthlyResetsAt !== undefined ? { resetsAt: monthlyResetsAt } : {}),
+				detail:
+					billingPeriodSpent !== undefined
+						? `${usd(monthlyRemaining)} of ${usd(cap)} left`
+						: `${usd(monthlyRemaining)} left`,
+			});
+		}
+	}
+
+	for (const [index, orgLimit] of usage.whoami.orgLimits.entries()) {
+		if (orgLimit.limit <= 0 && orgLimit.exceeded !== true) continue;
+		const isModelScope = orgLimit.scope === "model";
+		const target = isModelScope ? providerText(orgLimit.modelLabel || orgLimit.model || "Model", 20) : undefined;
+		const parsedReset = orgLimit.resetAt ? Date.parse(orgLimit.resetAt) : Number.NaN;
+		const resetsAt = Number.isFinite(parsedReset) && parsedReset > 0 ? parsedReset : undefined;
+		const intervalSuffix =
+			(orgLimit.resetInterval ? COMMAND_CODE_ORG_INTERVALS[orgLimit.resetInterval] : undefined) ?? "";
+		windows.push({
+			id: isModelScope
+				? `org:model:${orgLimit.model || orgLimit.modelLabel || index}`
+				: `org:${orgLimit.resetInterval || "total"}:${index}`,
+			label: target ? `Org cap (${target})` : "Org spend cap",
+			usedPercent:
+				orgLimit.exceeded || orgLimit.limit <= 0 || orgLimit.spent >= orgLimit.limit
+					? 100
+					: clampPercent((orgLimit.spent / orgLimit.limit) * 100),
+			...(resetsAt !== undefined ? { resetsAt } : {}),
+			detail:
+				orgLimit.limit > 0
+					? `${usd(orgLimit.spent)} of ${usd(orgLimit.limit)}${intervalSuffix}`
+					: `${usd(orgLimit.spent)} spent${intervalSuffix} · limit reached`,
+		});
+	}
+
+	const hasExtraCredits = credits?.purchasedCredits !== undefined || credits?.freeCredits !== undefined;
+	const extraCreditsUsd = (credits?.purchasedCredits ?? 0) + (credits?.freeCredits ?? 0);
+	const balance = hasExtraCredits ? `extra credits ${usd(extraCreditsUsd)} USD` : undefined;
+
+	const details: string[] = [];
+	if (summary) {
+		const prefix = summary.periodBasis === "billing-period" ? "billing period" : "usage summary";
+		if (summary.totalCost !== undefined && summary.totalCount !== undefined) {
+			details.push(
+				`${prefix} ${usd(summary.totalCost)} · ${summary.totalCount.toLocaleString("en-US")} ${summary.totalCount === 1 ? "request" : "requests"}`,
+			);
+		} else if (summary.totalCost !== undefined) {
+			details.push(`${prefix} ${usd(summary.totalCost)}`);
+		} else if (summary.totalCount !== undefined) {
+			details.push(
+				`${summary.totalCount.toLocaleString("en-US")} ${summary.totalCount === 1 ? "request" : "requests"}${summary.periodBasis === "billing-period" ? " this billing period" : ""}`,
+			);
+		}
+	}
+	const orgLabel = usage.whoami.org?.name || usage.whoami.org?.login;
+	if (orgLabel) details.push(`org ${providerText(orgLabel, 40)}`);
+	if (usage.subscription?.status && usage.subscription.status.toLowerCase() !== "active") {
+		details.push(`subscription ${providerText(usage.subscription.status, 24)}`);
+	}
+
+	return {
+		windows,
+		...(usage.plan ? { plan: providerText(usage.plan, 32) } : {}),
+		...(balance ? { balance } : {}),
+		...(details.length > 0 ? { details } : {}),
 	};
 }
 

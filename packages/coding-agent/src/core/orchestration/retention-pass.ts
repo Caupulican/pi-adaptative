@@ -65,11 +65,15 @@ export type RetentionPassResult =
 			readonly truncated: boolean;
 	  };
 
-/** True when the store has fewer free objective or attempt slots than the pressure headroom: the age floor is then waived. */
+/** True when any retained record kind has fewer free slots than the pressure headroom: the age floor is then waived. */
 export function isUnderRetentionPressure(capacity: OrchestrationProjectionCapacity): boolean {
+	const { headroom } = capacity;
 	return (
-		capacity.headroom.objectives < RETENTION_PRESSURE_HEADROOM ||
-		capacity.headroom.attempts < RETENTION_PRESSURE_HEADROOM
+		headroom.objectives < RETENTION_PRESSURE_HEADROOM ||
+		headroom.tasks < RETENTION_PRESSURE_HEADROOM ||
+		headroom.attempts < RETENTION_PRESSURE_HEADROOM ||
+		headroom.agents < RETENTION_PRESSURE_HEADROOM ||
+		headroom.notifications < RETENTION_PRESSURE_HEADROOM
 	);
 }
 
@@ -134,6 +138,9 @@ function externalHolds(state: TaskRuntimeProjection, deps: RetentionPassDeps): E
 			if (agentId !== undefined) agentIds.add(agentId);
 		}
 	}
+	for (const [agentId, agent] of Object.entries(state.agents)) {
+		if (agent.status === "retired") agentIds.add(agentId);
+	}
 	const agents = new Set<string>();
 	for (const agentId of agentIds) {
 		if (hasPendingControlMessages(deps.agentDir, deps.sessionId, agentId, deps.warn)) agents.add(agentId);
@@ -178,9 +185,8 @@ export function runRetentionPass(deps: RetentionPassDeps): RetentionPassResult {
 		const runtime = deps.runtime();
 		const state = runtime.getSnapshot();
 		const now = deps.now();
-		const cutoff = new Date(
-			now - (isUnderRetentionPressure(runtime.getProjectionCapacity()) ? RETENTION_REPLAY_FLOOR_MS : days * DAY_MS),
-		).toISOString();
+		const underPressure = isUnderRetentionPressure(runtime.getProjectionCapacity());
+		const cutoff = new Date(now - (underPressure ? RETENTION_REPLAY_FLOOR_MS : days * DAY_MS)).toISOString();
 		const holds = externalHolds(state, deps);
 		const selection: RetentionSelection = selectRetention({
 			state,
@@ -204,7 +210,13 @@ export function runRetentionPass(deps: RetentionPassDeps): RetentionPassResult {
 				`Orchestration retention archive ${path} does not verify or belongs to another session; it is kept.`,
 			);
 		}
-		if (selection.objectiveIds.length === 0 && selection.taskIds.length === 0 && selection.planIds.length === 0) {
+		if (
+			selection.objectiveIds.length === 0 &&
+			selection.taskIds.length === 0 &&
+			selection.planIds.length === 0 &&
+			selection.agentIds.length === 0 &&
+			(!underPressure || selection.dependents.notificationIds.length === 0)
+		) {
 			return nothing();
 		}
 		const file = buildRetentionArchive({
@@ -215,7 +227,7 @@ export function runRetentionPass(deps: RetentionPassDeps): RetentionPassResult {
 		});
 		writeRetentionArchive(archiveDir, file);
 		const payload: RetentionPrunedPayload = {
-			v: 1,
+			v: 2,
 			archiveId: retentionArchiveId(file.digest),
 			archiveDigest: file.digest,
 			cutoff,
@@ -223,6 +235,7 @@ export function runRetentionPass(deps: RetentionPassDeps): RetentionPassResult {
 			taskIds: selection.taskIds,
 			attemptIds: selection.attemptIds,
 			planIds: selection.planIds,
+			agentIds: selection.agentIds,
 			dependentsDigest: retentionDependentsDigest(selection.dependents),
 		};
 		try {

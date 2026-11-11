@@ -103,8 +103,9 @@ function isWithin(base: string, target: string): boolean {
  * lane uses this one translation: a saved contract, a request's write paths and the grants derived from them.
  */
 export function relocatedInto(root: string, laneRoot: string, entry: string): string {
-	if (isWithin(laneRoot, entry)) return entry;
-	return isWithin(root, entry) ? resolve(laneRoot, relative(root, entry)) : entry;
+	const resolved = resolve(root, entry);
+	if (isWithin(laneRoot, resolved)) return resolved;
+	return isWithin(root, resolved) ? resolve(laneRoot, relative(root, resolved)) : entry;
 }
 
 /** The lane directory's engine deps and lane key; undefined when `cwd` is not a lane. */

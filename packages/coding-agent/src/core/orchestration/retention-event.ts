@@ -5,6 +5,7 @@
 
 import {
 	type AppendOrchestrationEventInput,
+	MAX_ORCHESTRATION_AGENT_BINDINGS,
 	MAX_ORCHESTRATION_ATTEMPTS,
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	MAX_ORCHESTRATION_OBJECTIVES,
@@ -29,7 +30,7 @@ export const RETENTION_AGGREGATE_ID = "retention";
 export function retentionArchiveId(digest: string): string {
 	return `ar-${digest.slice(0, 16)}`;
 }
-const RETENTION_PRUNED_FIELDS = [
+const RETENTION_PRUNED_V1_FIELDS = [
 	"v",
 	"archiveId",
 	"archiveDigest",
@@ -40,10 +41,11 @@ const RETENTION_PRUNED_FIELDS = [
 	"planIds",
 	"dependentsDigest",
 ] as const;
+const RETENTION_PRUNED_V2_FIELDS = [...RETENTION_PRUNED_V1_FIELDS, "agentIds"] as const;
 const SHA256_HEX = /^[0-9a-f]{64}$/;
 
 export interface RetentionPrunedPayload {
-	readonly v: 1;
+	readonly v: 1 | 2;
 	readonly archiveId: string; // "ar-" + first 16 hex of archiveDigest
 	readonly archiveDigest: string; // sha256 hex of the archive's canonical content
 	readonly cutoff: string; // ISO; every released unit's last activity is <= cutoff; cutoff <= event.occurredAt
@@ -51,6 +53,7 @@ export interface RetentionPrunedPayload {
 	readonly taskIds: readonly string[]; // every released task (whole objectives' tasks, finished session tasks, session plan groups' tasks)
 	readonly attemptIds: readonly string[]; // every released attempt
 	readonly planIds: readonly string[]; // plans of released objectives, and closed session plans released with every task they name
+	readonly agentIds: readonly string[]; // retired agent bindings released in v2 (empty on v1)
 	readonly dependentsDigest: string; // sha256 hex of canonical JSON of the derived dependents
 }
 
@@ -69,10 +72,12 @@ export class RetentionPlanStaleError extends DurableTaskRuntimeError {
  * changed record (for example a plan's `subgraphOf.parentPlanId`) is never listed.
  */
 const RECORD_ID_PATHS = [
+	["agentId"],
 	["objectiveId"],
 	["taskId"],
 	["attemptId"],
 	["planId"],
+	["agent", "agentId"], // agent.registered
 	["task", "taskId"], // task.created, task.attempt_prepared
 	["approval", "objectiveId"], // approval.requested
 	["approval", "taskId"],
@@ -155,10 +160,14 @@ export function retentionArchiveIdsField(snapshot: Readonly<Record<string, unkno
 
 /** Decodes a `retention.pruned` payload with the same strictness the projection decoder applies to its records. */
 export function retentionPrunedPayloadFromValue(value: unknown): RetentionPrunedPayload {
-	const input = exactRecord(value, "retention.pruned", [...RETENTION_PRUNED_FIELDS]);
-	if (input.v !== 1) throw new DurableTaskRuntimeError("retention.pruned.v is invalid.");
+	const version = typeof value === "object" && value !== null ? (value as Record<string, unknown>).v : undefined;
+	const input =
+		version === 1
+			? exactRecord(value, "retention.pruned", [...RETENTION_PRUNED_V1_FIELDS])
+			: exactRecord(value, "retention.pruned", [...RETENTION_PRUNED_V2_FIELDS]);
+	if (input.v !== 1 && input.v !== 2) throw new DurableTaskRuntimeError("retention.pruned.v is invalid.");
 	return {
-		v: 1,
+		v: input.v,
 		archiveId: canonicalRetentionId(input.archiveId, "retention.pruned.archiveId"),
 		archiveDigest: sha256Hex(input.archiveDigest, "retention.pruned.archiveDigest"),
 		cutoff: canonicalIsoInstant(input.cutoff, "retention.pruned.cutoff"),
@@ -166,18 +175,29 @@ export function retentionPrunedPayloadFromValue(value: unknown): RetentionPruned
 		taskIds: uniqueIdList(input.taskIds, "retention.pruned.taskIds"),
 		attemptIds: uniqueIdList(input.attemptIds, "retention.pruned.attemptIds"),
 		planIds: uniqueIdList(input.planIds, "retention.pruned.planIds"),
+		agentIds:
+			input.v === 1
+				? []
+				: canonicalIdList(input.agentIds, "retention.pruned.agentIds", MAX_ORCHESTRATION_AGENT_BINDINGS),
 		dependentsDigest: sha256Hex(input.dependentsDigest, "retention.pruned.dependentsDigest"),
 	};
 }
 
 /** The append the runtime commits for one planned prune. The key is the archive, so a replayed prune is idempotent. */
 export function retentionPruneEventInput(payload: RetentionPrunedPayload): AppendOrchestrationEventInput {
+	const wire =
+		payload.v === 1
+			? (() => {
+					const { agentIds: _unused, ...v1 } = payload;
+					return v1;
+				})()
+			: payload;
 	return {
 		type: "retention.pruned",
 		aggregateId: RETENTION_AGGREGATE_ID,
 		actor: "runtime",
 		idempotencyKey: `retention:${payload.archiveId}`,
-		payload: toJsonObject(payload),
+		payload: toJsonObject(wire),
 	};
 }
 
@@ -185,7 +205,13 @@ export function retentionPruneEventInput(payload: RetentionPrunedPayload): Appen
 export function retiredRecordIds(event: OrchestrationEvent): ReadonlySet<string> {
 	if (event.type !== "retention.pruned") return new Set();
 	const payload = retentionPrunedPayloadFromValue(event.payload);
-	return new Set([...payload.objectiveIds, ...payload.taskIds, ...payload.attemptIds, ...payload.planIds]);
+	return new Set([
+		...payload.objectiveIds,
+		...payload.taskIds,
+		...payload.attemptIds,
+		...payload.planIds,
+		...payload.agentIds,
+	]);
 }
 
 /**

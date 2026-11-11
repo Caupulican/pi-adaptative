@@ -1,6 +1,8 @@
 import {
 	AnthropicAccountError,
 	AntigravityAccountError,
+	CommandCodeAccountError,
+	fetchCommandCodeAccountUsage,
 	getAnthropicOAuthUsage,
 	getAntigravityAccountUsage,
 	getOpenAICodexUsage,
@@ -22,7 +24,9 @@ import {
 	type AuthenticatedAccount,
 	anthropicUsageSnapshot,
 	antigravityUsageSnapshot,
+	COMMAND_CODE_PROVIDER,
 	codexUsageSnapshot,
+	commandCodeUsageSnapshot,
 	OPENAI_CODEX_PROVIDER,
 	OPENROUTER_PROVIDER,
 	openAICodexCredentialHeaders,
@@ -135,6 +139,30 @@ export function createAntigravityUsageAdapter(fetchImpl?: typeof fetch): Account
 	};
 }
 
+export function createCommandCodeUsageAdapter(fetchImpl?: typeof fetch): AccountUsageAdapter {
+	return {
+		provider: COMMAND_CODE_PROVIDER,
+		request(account, registry) {
+			const model = registry.getAll().find((candidate) => candidate.provider === COMMAND_CODE_PROVIDER);
+			return {
+				account,
+				run: async (signal, isCurrent) => {
+					const apiKey = await registry.getApiKeyForProvider(COMMAND_CODE_PROVIDER);
+					if (!apiKey) throw new AccountCredentialsUnavailableError();
+					if (!isCurrent()) return undefined;
+					return commandCodeUsageSnapshot(
+						await fetchCommandCodeAccountUsage(apiKey, {
+							baseUrl: model?.baseUrl,
+							signal,
+							...(fetchImpl ? { fetch: fetchImpl } : {}),
+						}),
+					);
+				},
+			};
+		},
+	};
+}
+
 export function createOpenRouterUsageAdapter(fetchImpl?: typeof fetch): AccountUsageAdapter {
 	return {
 		provider: OPENROUTER_PROVIDER,
@@ -193,6 +221,7 @@ export function describeAccountFailure(error: unknown): string {
 	if (
 		error instanceof OpenAICodexAccountError ||
 		error instanceof AnthropicAccountError ||
+		error instanceof CommandCodeAccountError ||
 		error instanceof OpenRouterAccountError ||
 		error instanceof XaiAccountError ||
 		error instanceof AntigravityAccountError
@@ -225,12 +254,24 @@ function retryAfterOf(error: unknown): number | undefined {
 	const isAccountError =
 		error instanceof OpenAICodexAccountError ||
 		error instanceof AnthropicAccountError ||
+		error instanceof CommandCodeAccountError ||
 		error instanceof OpenRouterAccountError ||
 		error instanceof XaiAccountError ||
 		error instanceof AntigravityAccountError;
 	return isAccountError && typeof error.retryAfterMs === "number" && error.retryAfterMs > 0
 		? error.retryAfterMs
 		: undefined;
+}
+
+export function createDefaultAccountUsageAdapters(fetchImpl?: typeof fetch): AccountUsageAdapter[] {
+	return [
+		createOpenAICodexUsageAdapter(fetchImpl),
+		createAnthropicUsageAdapter(fetchImpl),
+		createAntigravityUsageAdapter(fetchImpl),
+		createCommandCodeUsageAdapter(fetchImpl),
+		createOpenRouterUsageAdapter(fetchImpl),
+		createXaiUsageAdapter(fetchImpl),
+	];
 }
 
 export class AccountUsageMonitor {
@@ -247,13 +288,7 @@ export class AccountUsageMonitor {
 	private active = 0;
 
 	constructor(options: AccountUsageMonitorOptions = {}) {
-		this.adapters = options.adapters ?? [
-			createOpenAICodexUsageAdapter(),
-			createAnthropicUsageAdapter(),
-			createAntigravityUsageAdapter(),
-			createOpenRouterUsageAdapter(),
-			createXaiUsageAdapter(),
-		];
+		this.adapters = options.adapters ?? createDefaultAccountUsageAdapters();
 		this.now = options.now ?? Date.now;
 		this.timeoutMs = options.timeoutMs ?? ACCOUNT_USAGE_TIMEOUT_MS;
 		this.freshMs = options.freshMs ?? ACCOUNT_USAGE_FRESH_MS;

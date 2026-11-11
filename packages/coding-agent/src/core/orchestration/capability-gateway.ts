@@ -50,6 +50,8 @@ export interface CapabilityGatewayOptions {
 	onAudit?: (record: GatewayAuditRecord) => void;
 	/** Session-tree cumulative budget owner. Per-attempt grants remain independently enforced. */
 	sharedBudget?: SharedCapabilityBudget;
+	/** Per-lane process scratch directories whose spilled tool outputs this lane may read back. */
+	scratchReadPaths?: readonly string[];
 }
 
 export interface GatewayUsageDelta {
@@ -218,6 +220,7 @@ export class CapabilityGateway {
 	private readonly now: () => number;
 	private readonly onAudit?: (record: GatewayAuditRecord) => void;
 	private readonly sharedBudget?: SharedCapabilityBudget;
+	private readonly scratchReadPaths: readonly string[];
 	private startedAt: number;
 	private initialWallClockMs: number;
 	private stoppedAt?: number;
@@ -249,6 +252,7 @@ export class CapabilityGateway {
 		this.now = options.now ?? Date.now;
 		this.onAudit = options.onAudit;
 		this.sharedBudget = options.sharedBudget;
+		this.scratchReadPaths = options.scratchReadPaths ?? [];
 		this.startedAt = this.currentTime();
 		this.initialWallClockMs = initialUsage.activeWallClockMs;
 		this.toolCalls = initialUsage.toolCalls;
@@ -495,7 +499,11 @@ export class CapabilityGateway {
 		) {
 			const isWrite =
 				pathAccess === "write" || callCapabilities.some((capability) => WRITE_CAPABILITIES.has(capability));
-			const allowedPaths = isWrite ? this.grant.writePaths : this.grant.readPaths;
+			const allowedPaths = isWrite
+				? this.grant.writePaths
+				: this.scratchReadPaths.length > 0
+					? [...this.grant.readPaths, ...this.scratchReadPaths]
+					: this.grant.readPaths;
 			if (paths.length === 0) {
 				this.deny(toolName, "path_argument_required", `Tool '${toolName}' requires an explicit path argument.`);
 			}

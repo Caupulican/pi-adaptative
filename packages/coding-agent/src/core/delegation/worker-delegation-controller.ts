@@ -255,7 +255,12 @@ import {
 	raceLosersToCancel,
 	raceLostReasonCode,
 } from "./worker-fanout.ts";
-import { type WorkerAdmission, WorkerFitRoute, type WorkerFitRoutePort } from "./worker-fit-route.ts";
+import {
+	preserveWorkerAdmissionRoute,
+	type WorkerAdmission,
+	WorkerFitRoute,
+	type WorkerFitRoutePort,
+} from "./worker-fit-route.ts";
 import {
 	DEFAULT_WORKER_FLEET_LIMITS,
 	evaluateNewWorkerAdmission,
@@ -322,6 +327,7 @@ import {
 import { WORKER_TRANSCRIPT_REFERENCE_PREFIX } from "./worker-transcript-reference.ts";
 import {
 	collectWorkerTreeBudgetSeeds,
+	cumulativeWorkerTreeBudget,
 	WorkerTreeBudgetCoordinator,
 	workerTreeBudgetKey,
 	workerTreeCanAdmitAttempt,
@@ -4002,24 +4008,19 @@ export class WorkerDelegationController {
 										agentDir: this.deps.getAgentDir(),
 										sessionId: ownership.claim.parentSessionId,
 									});
-						const bindings = Object.values(ownerLifecycle.getTaskRuntimeSnapshot().agents).filter(
-							(agent) =>
-								agent.resumeContext.sessionId === reference.resumeContext.sessionId &&
-								agent.resumeContext.sessionFile === reference.resumeContext.sessionFile,
-						);
+						const bindingStatuses = ownerLifecycle.getProjectOwnerBindingStatuses(reference.resumeContext);
 						if (
-							bindings.some(
-								(agent) =>
-									agent.status === "retired" || agent.status === "suspended" || agent.status === "resuming",
+							bindingStatuses.some(
+								(status) => status === "retired" || status === "suspended" || status === "resuming",
 							)
 						)
 							return false;
-						if (bindings.length !== 1 && ownership.state === "idle") {
+						if (bindingStatuses.length !== 1 && ownership.state === "idle") {
 							// Setup can enroll a transcript before its first agent binding is registered.
 							// A cancelled, never-leased birth task proves this is that window, not lost live state.
 							const birthAttempt = ownerLifecycle.getActiveAttempt(reference.logicalAgentId);
 							if (
-								bindings.length !== 0 ||
+								bindingStatuses.length !== 0 ||
 								ownership.claim.generation !== 1 ||
 								ownership.claim.parentSessionId !== reference.parentSessionId ||
 								birthAttempt?.status !== "cancelled" ||
@@ -4316,10 +4317,8 @@ export class WorkerDelegationController {
 	}
 
 	/**
-	 * A command that targets a worker already living in its own worktree lane (a named `agentId`, or the replay of
-	 * the command that created it) is admitted in that lane's directory, so the comparison against the worker's
-	 * pinned contract, and any reuse of it, see one directory. When the lane is gone the caller's directory stays
-	 * and the comparison reports the difference.
+	 * Admit a reuse, `attemptOf` rerun, or replay in its prior worker's worktree lane when that lane still exists, so
+	 * contract comparison and reuse see one directory; when the lane is gone, the caller's directory stays.
 	 */
 	private async adoptPriorLaneDirectory(
 		request: WorkerDelegationRequest,
@@ -4413,11 +4412,7 @@ export class WorkerDelegationController {
 			} else {
 				request.executionContext = executionContext;
 				Object.assign(request, relocated);
-				return {
-					...admitted,
-					modelRouteSource: shared.modelRouteSource,
-					...(shared.modelPinBypass ? { modelPinBypass: shared.modelPinBypass } : {}),
-				};
+				return preserveWorkerAdmissionRoute(admitted, shared);
 			}
 		} catch (error) {
 			failure = error instanceof Error ? error.message : String(error);
@@ -4435,9 +4430,10 @@ export class WorkerDelegationController {
 		request: WorkerDelegationRequest,
 		signal?: AbortSignal,
 	): Promise<WorkerStartAdmission<FreshWorkerAdmission>> {
-		const prior = request.reuseAgentId
-			? this.lifecycle.getAgentTurnDispatch(request.reuseAgentId)
-			: this.replayedWorkerAttempt(request.messageReplayKey)?.dispatch;
+		const priorAgentId = request.reuseAgentId ?? request.attemptOf?.taskId;
+		const prior =
+			(priorAgentId ? this.lifecycle.getAgentTurnDispatch(priorAgentId) : undefined) ??
+			this.replayedWorkerAttempt(request.messageReplayKey)?.dispatch;
 		await this.adoptPriorLaneDirectory(request, prior, signal);
 		let selectedBinding: OrchestrationModelBinding | undefined;
 		if (prior && !request.profileId && !request.authority?.model && request.authority?.thinkingLevel === undefined) {
@@ -4570,11 +4566,7 @@ export class WorkerDelegationController {
 		}
 		return {
 			kind: "fresh",
-			admission: {
-				...prepared,
-				modelRouteSource: shared.modelRouteSource,
-				...(shared.modelPinBypass ? { modelPinBypass: shared.modelPinBypass } : {}),
-			},
+			admission: preserveWorkerAdmissionRoute(prepared, shared),
 			...(reuse.releaseAllocation ? { releaseAllocation: reuse.releaseAllocation } : {}),
 		};
 	}
@@ -4783,9 +4775,7 @@ export class WorkerDelegationController {
 				executionContract,
 				options,
 			);
-			return current.ok
-				? { ...current, ...(admission.modelPinBypass ? { modelPinBypass: admission.modelPinBypass } : {}) }
-				: current;
+			return current.ok ? preserveWorkerAdmissionRoute(current, admission) : current;
 		} catch (error) {
 			harnessLog.warn("workers", "a worker's directory could not be prepared; the worker is not started", () => ({
 				error: error instanceof Error ? error.name : typeof error,
@@ -5037,6 +5027,9 @@ export class WorkerDelegationController {
 				? "worker_directory_session_changed"
 				: undefined;
 		} catch (error) {
+			if (this.deps.isDisposed() || sessionId !== this.deps.getSessionId())
+				return "worker_directory_session_changed";
+			if (this.workerAbort.signal.aborted) return "worker_start_aborted";
 			this.safeWarn(`Worker directory unavailable: ${error instanceof Error ? error.message : String(error)}`);
 			return "worker_directory_unavailable";
 		}
@@ -5329,7 +5322,10 @@ export class WorkerDelegationController {
 			return { started: false, skipReason: "orchestration_agent_missing" };
 		}
 		const rootTurn = lifecycle.getAgentTurnDispatch(agentBinding.rootAgentId);
-		const rootBudget = rootTurn?.executionContract?.worker.authority.budget ?? grant.budget;
+		const rootBudget = cumulativeWorkerTreeBudget(
+			rootTurn?.executionContract?.worker.authority.budget ?? grant.budget,
+			(rootTurn?.executionContract?.worker.profile ?? orchestrationProfile).budget,
+		);
 		const treeTaskId = workerTreeTaskId({
 			agentId: agentBinding.agentId,
 			rootAgentId: agentBinding.rootAgentId,

@@ -17,6 +17,7 @@ import { strictCanonicalDigest } from "../steering/canonical.ts";
 import { nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { latestAgentAttemptByDurableOrder, latestAgentAttemptsByDurableOrder } from "./attempt-ordering.ts";
 import type { AgentPrunedTurns } from "./contracts.ts";
+import { APPROVAL_NOTIFICATION_PREFIX, isUnboundDeliveredNotification } from "./notification-eviction.ts";
 import { MAX_RETENTION_PRUNE_RECORDS, type RetentionPrunedPayload, retentionArchiveId } from "./retention-event.ts";
 import {
 	type AttemptRuntimeState,
@@ -108,6 +109,7 @@ export interface RetentionSelection {
 	readonly taskIds: readonly string[];
 	readonly attemptIds: readonly string[];
 	readonly planIds: readonly string[];
+	readonly agentIds: readonly string[];
 	readonly dependents: RetentionDependents;
 	readonly carry: ReadonlyMap<string, AgentPrunedTurns>;
 	/** The per-list bound stopped selection before every eligible unit was taken. */
@@ -415,6 +417,7 @@ function holdFacts(state: TaskRuntimeProjection): HoldFacts {
 	const resumeAttempts = new Set<string>();
 	for (const agent of Object.values(state.agents)) {
 		if (agent.activeAttemptId !== undefined) resumeAttempts.add(agent.activeAttemptId);
+		if (agent.status === "retired") continue;
 		const checkpointId = agent.resumeContext.latestCheckpointId;
 		const checkpoint = checkpointId === undefined ? undefined : state.checkpoints[checkpointId];
 		if (checkpoint) resumeAttempts.add(checkpoint.attemptId);
@@ -610,29 +613,43 @@ function unitIsReferenced(unit: RetentionUnit, referenced: ReadonlySet<string>):
 export function deriveDependents(
 	state: TaskRuntimeProjection,
 	released: {
+		readonly v?: 1 | 2;
 		readonly objectiveIds: readonly string[];
 		readonly taskIds: readonly string[];
 		readonly attemptIds: readonly string[];
 		readonly planIds: readonly string[];
 	},
 ): RetentionDependents {
+	const version = released.v ?? 2;
 	const objectives = new Set(released.objectiveIds);
 	const tasks = new Set(released.taskIds);
 	const attempts = new Set(released.attemptIds);
+	const approvalIds = Object.values(state.approvals)
+		.filter(({ request }) => {
+			const taskOwned = request.taskId !== undefined && tasks.has(request.taskId);
+			const attemptOwned = request.attemptId !== undefined && attempts.has(request.attemptId);
+			return objectives.has(request.objectiveId) || taskOwned || attemptOwned;
+		})
+		.map(({ request }) => request.approvalId)
+		.sort();
+	const releasedApprovals = new Set(approvalIds);
 	return {
 		checkpointIds: released.attemptIds.flatMap((id) => state.attempts[id]?.checkpointIds ?? []).sort(),
 		notificationIds: Object.values(state.notifications)
-			.filter((n) => objectives.has(n.objectiveId) || (n.attemptId !== undefined && attempts.has(n.attemptId)))
+			.filter((n) => {
+				if (objectives.has(n.objectiveId) || (n.attemptId !== undefined && attempts.has(n.attemptId))) return true;
+				if (version === 1) return false;
+				if (
+					n.notificationId.startsWith(APPROVAL_NOTIFICATION_PREFIX) &&
+					releasedApprovals.has(n.notificationId.slice(APPROVAL_NOTIFICATION_PREFIX.length))
+				) {
+					return true;
+				}
+				return isUnboundDeliveredNotification(state, n, { approvalIds: releasedApprovals, attemptIds: attempts });
+			})
 			.map((n) => n.notificationId)
 			.sort(),
-		approvalIds: Object.values(state.approvals)
-			.filter(({ request }) => {
-				const taskOwned = request.taskId !== undefined && tasks.has(request.taskId);
-				const attemptOwned = request.attemptId !== undefined && attempts.has(request.attemptId);
-				return objectives.has(request.objectiveId) || taskOwned || attemptOwned;
-			})
-			.map(({ request }) => request.approvalId)
-			.sort(),
+		approvalIds,
 		planIds: released.planIds
 			.filter((planId) => {
 				const plan = state.plans[planId];
@@ -706,6 +723,42 @@ export function deriveCarry(
 	return carry;
 }
 
+function eligibleAgentIds(
+	state: TaskRuntimeProjection,
+	releasedAttemptIds: ReadonlySet<string>,
+	externalAgentHolds: ReadonlySet<string>,
+): string[] {
+	const referencedByAttempts = new Set<string>();
+	for (const [attemptId, attempt] of Object.entries(state.attempts)) {
+		if (releasedAttemptIds.has(attemptId)) continue;
+		if (attempt.agentId !== undefined) referencedByAttempts.add(attempt.agentId);
+		const nativeId = nativeAgentIdForAttempt(attempt);
+		if (nativeId !== undefined) referencedByAttempts.add(nativeId);
+	}
+	const referencedByDeliveries = new Set<string>();
+	for (const delivery of Object.values(state.eventDeliveries)) {
+		const deliveryAgentId = delivery.binding?.execution.agentId;
+		if (deliveryAgentId !== undefined) referencedByDeliveries.add(deliveryAgentId);
+	}
+	const candidates = new Set<string>();
+	for (const [agentId, agent] of Object.entries(state.agents)) {
+		if (agent.status !== "retired" || agent.activeAttemptId !== undefined) continue;
+		if (externalAgentHolds.has(agentId)) continue;
+		if (referencedByAttempts.has(agentId) || referencedByDeliveries.has(agentId)) continue;
+		candidates.add(agentId);
+	}
+	for (;;) {
+		let changed = false;
+		for (const [agentId, agent] of Object.entries(state.agents)) {
+			if (candidates.has(agentId)) continue;
+			if (agent.parentAgentId !== undefined && candidates.delete(agent.parentAgentId)) changed = true;
+			if (candidates.delete(agent.rootAgentId)) changed = true;
+		}
+		if (!changed) break;
+	}
+	return [...candidates].sort();
+}
+
 /**
  * The planner's selection: old units with no hold, taken oldest first within the per-list bound, then reduced until no
  * retained record names a member and every agent's released attempts form a prefix. A session plan group is one unit, so
@@ -764,12 +817,14 @@ export function selectRetention(input: RetentionSelectionInput): RetentionSelect
 	}
 	const released = releasedIdsOf(current);
 	const attemptIds = [...released.attemptIds].sort();
+	const agentIds = hasOpaquePlan(state) ? [] : eligibleAgentIds(state, new Set(attemptIds), input.externalAgentHolds);
 	return {
 		objectiveIds: [...released.objectiveIds].sort(),
 		taskIds: [...released.taskIds].sort(),
 		attemptIds,
 		planIds: [...released.planIds].sort(),
-		dependents: deriveDependents(state, released),
+		agentIds,
+		dependents: deriveDependents(state, { ...released, v: 2 }),
 		carry: deriveCarry(state, { attemptIds }),
 		truncated,
 		held: old.length - candidates.length + taken.length - current.length,
@@ -810,9 +865,45 @@ export function assertRetentionPruneWellFormed(
 	for (const planId of payload.planIds) {
 		if (!state.plans[planId]) refuse(`plan ${planId} is unknown`);
 	}
+	if (payload.v === 1 && payload.agentIds.length > 0) refuse("v1 prune cannot release agent bindings");
+	for (const agentId of payload.agentIds) {
+		const agent = state.agents[agentId];
+		if (!agent) refuse(`agent ${agentId} is unknown`);
+		if (agent.status !== "retired" || agent.activeAttemptId !== undefined) {
+			refuse(`agent ${agentId} is not retired`);
+		}
+	}
 	const tasks = new Set(payload.taskIds);
 	const attempts = new Set(payload.attemptIds);
 	const plans = new Set(payload.planIds);
+	const releasedAgents = new Set(payload.agentIds);
+	if (releasedAgents.size > 0) {
+		for (const [attemptId, attempt] of Object.entries(state.attempts)) {
+			if (attempts.has(attemptId)) continue;
+			const nativeId = nativeAgentIdForAttempt(attempt);
+			if (
+				(attempt.agentId !== undefined && releasedAgents.has(attempt.agentId)) ||
+				(nativeId !== undefined && releasedAgents.has(nativeId))
+			) {
+				refuse(`attempt ${attemptId} references a released agent`);
+			}
+		}
+		for (const delivery of Object.values(state.eventDeliveries)) {
+			const deliveryAgentId = delivery.binding?.execution.agentId;
+			if (deliveryAgentId !== undefined && releasedAgents.has(deliveryAgentId)) {
+				refuse(`event delivery ${delivery.deliveryId} references released agent ${deliveryAgentId}`);
+			}
+		}
+		for (const [agentId, agent] of Object.entries(state.agents)) {
+			if (releasedAgents.has(agentId)) continue;
+			if (
+				(agent.parentAgentId !== undefined && releasedAgents.has(agent.parentAgentId)) ||
+				releasedAgents.has(agent.rootAgentId)
+			) {
+				refuse(`agent ${agentId} lineage references a released agent`);
+			}
+		}
+	}
 	for (const taskId of payload.taskIds) {
 		for (const attemptId of state.tasks[taskId]!.attemptIds) {
 			if (!attempts.has(attemptId)) refuse(`attempt ${attemptId} of task ${taskId} is not released with it`);

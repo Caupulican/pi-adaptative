@@ -404,6 +404,11 @@ export interface AgentToolResult<T> {
 	 * Early termination only happens when every finalized tool result in the batch sets this to true.
 	 */
 	terminate?: boolean;
+	/**
+	 * When `terminate` is true, marks the result as a structured terminal handoff (e.g. `submit_report`)
+	 * rather than a silent stop, satisfying unresolved-verification handoff enforcement for this run.
+	 */
+	handoff?: boolean;
 }
 
 /** Callback used by tools to stream partial execution updates. */

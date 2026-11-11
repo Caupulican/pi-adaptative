@@ -5,6 +5,7 @@ import {
 	type PersistedParentInput,
 	parentInputMessage,
 } from "../kernel/session/parent-input-ledger.ts";
+import { expectedSessionAppendDurability } from "../kernel/session/session-append-receipt.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
@@ -123,9 +124,11 @@ export class ParentInputDeliveryController {
 				this.closed ||
 				this.deps.getSessionManager() !== manager ||
 				origin.sessionId !== manager.getSessionId() ||
-				(origin.sessionFile !== undefined && origin.sessionFile !== manager.getSessionFile()) ||
+				(manager.isPersisted()
+					? origin.sessionFile !== manager.getSessionFile()
+					: origin.sessionFile !== undefined) ||
 				!isSessionAppendAnchorCurrent(manager, origin) ||
-				!manager.isEntryPersisted(origin.leafId)
+				!manager.isEntryDurableForSession(origin.leafId)
 			)
 				throw new Error("Parent input session or branch changed before acceptance.");
 		};
@@ -144,7 +147,11 @@ export class ParentInputDeliveryController {
 			this.foreground.assertSubmissionCurrent(lease);
 			const appended = manager.appendParentInput(message, options.withAppend);
 			const entry = appended.entries[0];
-			if (appended.durability !== "persisted" || appended.entries.length !== 1 || !entry)
+			if (
+				appended.durability !== expectedSessionAppendDurability(manager.isPersisted()) ||
+				appended.entries.length !== 1 ||
+				!entry
+			)
 				throw new Error("Parent input has no physical canonical receipt.");
 			receipt = { entryId: entry.id, sessionId: appended.sessionId };
 			if (mode === "next-owner-turn" && appended.created) {
@@ -287,9 +294,11 @@ export class ParentInputDeliveryController {
 			lease.signal.aborted ||
 			!this.foreground.ownsSubmission(lease) ||
 			this.deps.getSessionManager() !== manager ||
-			(origin.sessionFile !== undefined && origin.sessionFile !== manager.getSessionFile()) ||
+			(manager.isPersisted()
+				? origin.sessionFile !== undefined && origin.sessionFile !== manager.getSessionFile()
+				: origin.sessionFile !== undefined) ||
 			!isSessionAppendAnchorCurrent(manager, origin) ||
-			!manager.isEntryPersisted(input.entryId)
+			!manager.isEntryDurableForSession(input.entryId)
 		)
 			throw new Error("Parent input wake lost its original session branch.");
 	}

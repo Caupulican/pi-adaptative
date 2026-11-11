@@ -199,6 +199,7 @@ export interface CredentialExposureBoundary extends CredentialPathProtection {
 	 * (`GrepToolOptions.excludeFile`), so such a search reads no dotenv file and needs no file filter.
 	 */
 	grepToolSkipsProtectedFiles?: boolean;
+	toolStreamsDirectory?: string;
 }
 
 /**
@@ -894,10 +895,12 @@ function* baseCredentialAssessment(
 }
 
 function credentialPolicyFor(
+	toolName: string,
+	args: unknown,
 	cwd: string,
-	boundary: CredentialExposureBoundary | undefined,
-	executionContext: ExecutionContext | undefined,
-	pathAuthority: ExecutionPathAuthority | undefined,
+	boundary?: CredentialExposureBoundary,
+	executionContext?: ExecutionContext,
+	pathAuthority?: ExecutionPathAuthority,
 ): CredentialPathPolicy {
 	return createCredentialPathPolicy(
 		cwd,
@@ -905,7 +908,7 @@ function credentialPolicyFor(
 		executionContext,
 		boundary?.getPathProbe?.(executionContext),
 		pathAuthority,
-	);
+	).forToolCall(toolName, args);
 }
 
 export function credentialToolBlockReason(
@@ -917,7 +920,7 @@ export function credentialToolBlockReason(
 	pathAuthority?: ExecutionPathAuthority,
 ): string | undefined {
 	if (toolName === "secret_store" || !isRecord(args)) return undefined;
-	const paths = credentialPolicyFor(cwd, boundary, executionContext, pathAuthority);
+	const paths = credentialPolicyFor(toolName, args, cwd, boundary, executionContext, pathAuthority);
 	return runCredentialWalk(
 		toolCredentialAssessment(toolName, args, paths, boundary?.grepToolSkipsProtectedFiles === true, false),
 	).reason;
@@ -935,7 +938,7 @@ export async function assessCredentialExposureAsync(
 ): Promise<CredentialExposureAssessment> {
 	if (toolName === "secret_store" || !isRecord(args)) return NO_EXPOSURE;
 	signal?.throwIfAborted();
-	const paths = credentialPolicyFor(cwd, boundary, executionContext, pathAuthority);
+	const paths = credentialPolicyFor(toolName, args, cwd, boundary, executionContext, pathAuthority);
 	return runCredentialWalkAsync(
 		toolCredentialAssessment(toolName, args, paths, boundary?.grepToolSkipsProtectedFiles === true, harnessTool),
 		signal,
@@ -1137,18 +1140,17 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 				}
 				const exposureMock = createExposureMock(
 					assessment.kind,
-					() => credentialPolicyFor(cwd, boundary, executionContext, pathAuthority),
+					() => credentialPolicyFor(tool.name, params, cwd, boundary, executionContext, pathAuthority),
 					assessment.dialect,
 					assessment.numbered === true,
 				);
 				fragment = exposureMock.fragment;
 				errorMock = errorMaskFor();
 				signal?.throwIfAborted();
-				// The output file a call saves (a shell's full output) is written through the same mock, block by
-				// block, so a later read of the file shows what the result would.
 				const result = await runWithPersistedOutputMask(
 					() => createOutputRedactor(boundary, createCredentialBlockMask(exposureMock.kind), sensitiveValues),
 					() => executor.execute(toolCallId, params, signal, safeUpdate),
+					boundary?.toolStreamsDirectory,
 				);
 				// Only a final result that holds the call's whole output from its first line may be read as source.
 				const whole = assessment.kind !== "source" || resultHoldsWholeOutput(tool.name, result);

@@ -242,10 +242,10 @@ function workersToRetire(projection: ReconcileProjection, plan: PlanRuntimeState
 		.map((agentId) => ({ kind: "retire_worker", planId, agentId }));
 }
 
-/** Whether a node's settlement is in: a join settled, or a released node settled. */
+/** Whether a node's settlement is in: an unheld join settled, or an unheld released node settled. */
 function settledNode(plan: PlanRuntimeState, nodeId: string): boolean {
 	const runtime = plan.nodes[nodeId];
-	return runtime !== undefined && (runtime.join !== undefined || runtime.settled !== undefined);
+	return runtime !== undefined && !runtime.held && (runtime.join !== undefined || runtime.settled !== undefined);
 }
 
 /** Rule 2: released tasks the plan must stop, with the reason code. */

@@ -27,6 +27,18 @@ export const PROVIDER_FAILURE_SIGNATURES: Record<string, readonly ProviderSignat
 			source: "sdk:@anthropic-ai/sdk@0.91.1 node_modules/@anthropic-ai/sdk/core/error.js",
 		},
 	],
+	"command-code": [
+		{
+			reason: "model_unsupported",
+			pattern: /\bmodel_not_in_plan\b|model not in plan:/i,
+			source: "packages/ai/src/providers/command-code.ts:63",
+		},
+		{
+			reason: "billing_or_quota",
+			pattern: /premium[_ ]credits[_ ]exhausted|insufficient credits/i,
+			source: "packages/ai/src/providers/command-code.ts:63",
+		},
+	],
 	mistral: [
 		{
 			reason: "billing_or_quota",

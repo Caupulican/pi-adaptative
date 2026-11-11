@@ -9,7 +9,11 @@ import {
 	truncateKnownHeadTail,
 } from "../../kernel/utils/truncate.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
-import { createScopedPersistedOutputMask, MaskedOutputStream } from "./persisted-output-mask.ts";
+import {
+	createScopedPersistedOutputMask,
+	getScopedToolStreamsDirectory,
+	MaskedOutputStream,
+} from "./persisted-output-mask.ts";
 import { createShellOutputDecoder, type ShellOutputDecoder } from "./shell-output-decoder.ts";
 
 export interface OutputAccumulatorOptions {
@@ -131,7 +135,10 @@ export class OutputAccumulator {
 		this.maxLines = options.maxLines ?? DEFAULT_MAX_LINES;
 		this.maxBytes = options.maxBytes ?? DEFAULT_MAX_BYTES;
 		this.tempFilePrefix = options.tempFilePrefix ?? "pi-output";
-		this.tempDirectory = options.tempDirectory ?? getProcessWorkRun(getAgentDir(), "outputs", "tool-streams").path;
+		this.tempDirectory =
+			options.tempDirectory ??
+			getScopedToolStreamsDirectory() ??
+			getProcessWorkRun(getAgentDir(), "outputs", "tool-streams").path;
 		this.persistAllOutput = options.persistAllOutput ?? false;
 		this.maxPersistedBytes = options.maxPersistedBytes ?? Number.POSITIVE_INFINITY;
 		this.decoder = createShellOutputDecoder(options.windowsCompatibleEncoding);

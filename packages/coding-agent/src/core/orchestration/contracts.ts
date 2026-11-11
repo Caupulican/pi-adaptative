@@ -54,17 +54,18 @@ export function dispatchTextStatesBrief(instructions: string, brief: TaskBrief):
 	return instructions.includes(renderTaskBrief(brief));
 }
 /**
- * Lifetime ceilings for the retained hot projection. Terminal records are intentionally retained,
- * so these limits match the durable worker-fleet ceiling rather than only counting active work.
+ * Lifetime ceilings for the retained hot projection. Terminal records and retired bindings stay
+ * until retention releases them past the replay floor, so agent bindings and notifications keep
+ * headroom above the live 256-agent fleet cap and per-attempt/approval notification pairs.
  */
-export const MAX_ORCHESTRATION_AGENT_BINDINGS = 256;
+export const MAX_ORCHESTRATION_AGENT_BINDINGS = 1024;
 export const MAX_ORCHESTRATION_OBJECTIVES = 256;
 export const MAX_ORCHESTRATION_TASKS = 256;
 export const MAX_ORCHESTRATION_ATTEMPTS = 256;
 export const MAX_ORCHESTRATION_CHECKPOINTS = 4_096;
 export const MAX_ORCHESTRATION_APPROVALS = 256;
-/** Approval prompts and terminal handoffs may each retain one notification per attempt. */
-export const MAX_ORCHESTRATION_NOTIFICATIONS = 512;
+/** Approval prompts, terminal handoffs, and custom notices share one hot notification map. */
+export const MAX_ORCHESTRATION_NOTIFICATIONS = 1024;
 /** Parent writes one attempt's away run may hold until the parent imports them: claims, notices and reports. */
 export const MAX_ORCHESTRATION_ATTEMPT_PARENT_WRITES = 16;
 /** Source goal state admits at most 512 evidence entries for one objective. */

@@ -135,10 +135,12 @@ real-provider behavior or indefinite memory boundedness.
 Enforced by: prose only
 
 **Every request carries an output cap.** `maxOutputTokens` narrows the model's registry limit, the
-capability tier narrows it further, a goal budget further still; nothing widens a model's limit.
+capability tier narrows it further, a goal budget further still; nothing widens a model's limit, and
+provider adapters clamp `max_tokens` to `model.maxTokens` (defaulting to `model.maxTokens` under
+reasoning on Command Code's simple stream only when the caller omitted `maxTokens`).
 Why: one full-class model streamed a single sentence for twenty-three minutes against a 500,000
 token limit.
-Enforced by: prose only
+Enforced by: packages/coding-agent/src/core/provider-request-runtime-controller.ts (installedAdmission narrows maxTokens to maxOutputTokens, goalMaxTokens and model.maxTokens); packages/ai/src/providers/command-code-request.ts (outputCap clamps max_tokens to model.maxTokens; other adapters are prose only)
 
 **A turn the host starts for itself runs one rung cheaper, and the live row says where the time
 went.** The request that answers a host-delivered completion (`background-tool-completion`,
@@ -227,11 +229,16 @@ list of tools, so an unknown toolchain reduces the same way or passes through wh
 an unknown shape passes through untouched; the raw output is persisted and named in the notice
 whenever lines were dropped (for a JSON document the notice ends with a jq projection over the
 persisted file, so the omitted records are one jq call away, never a full read), and the model
-bypasses every stage with `fullOutput: true`. Reduction
-is byte-stable: the same output reduces to the same bytes, so a re-sent result never re-prefills.
-Measured on live sessions (`scripts/output-reduction-census.mjs`): search results save a quarter of
-their bytes, compiler reports three quarters.
-Enforced by: prose only
+bypasses every stage with `fullOutput: true`. Each session acquires its own private
+`outputs/tool-streams` run directory under `<agentDir>/work` (removed when the session disposes),
+and provably observational reads of that directory pass the credential path policy, capability
+envelope and worker private-path scope while writes, symlinks resolving outside it, `<agentDir>/work`
+itself, sibling sessions' run directories and dotenv or credential filenames remain refused; an
+in-process worker lane's own process scratch directory is likewise readable for spilled output.
+Reduction is byte-stable: the same output reduces to the same bytes, so a re-sent result never
+re-prefills. Measured on live sessions (`scripts/output-reduction-census.mjs`): search results save
+a quarter of their bytes, compiler reports three quarters.
+Enforced by: packages/coding-agent/src/core/secrets/credential-path-policy.ts (forToolCall exempts a session's own tool-streams directory only on observational reads and never for dotenv or credential files); packages/coding-agent/src/core/autonomy/envelope-enforcement.ts (exemptReadPaths admits read-only access to the session's own tool-streams directory); packages/coding-agent/src/core/orchestration/capability-gateway.ts (scratchReadPaths admits read-only access to a lane's own process scratch directory); .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-1-worker-tool-streams.ts (asserts per-session tool-streams read recovery and sibling, write and .env refusals; reduction ratios are prose only)
 
 **A NUL never reaches a text file through `edit` or `write`.** U+0000 in a replacement or in
 written content is a transport defect, not content: an editing model has been observed sending it in
@@ -617,9 +624,13 @@ Enforced by: prose only
 ## Workers
 
 **Workers deny by default; the shell is the one host guarantee.** A worker's other tools come from
-the parent's active tool set; root-only tools and nested delegation are refused with the rule named.
+the parent's active tool set; root-only launchers and team tools (`delegate`, `assign`, `plan`,
+`bot`, `routine`, `proactivity`, `knowledge`, `channel_reply`) and nested delegation are refused
+with the rule named.
 Read is read: a parent with `bash` lends the catalog read tools (`grep`, `find`, `ls`) and read-only
-git (`repo_read`, capability `repo.read`) natively. Every worker also receives `bash` and
+git (`repo_read`, capability `repo.read`) natively, and a parent with `read` or `bash` lends batch
+`lookup` (which holds no authority of its own and runs each request under the worker's own gates).
+Every worker also receives `bash` and
 `process.exec`, including `readOnly: true`, named profiles, narrow tool lists, and a foreground
 session without bash. A `readOnly` grant, persisted on the worker's profile, holds that shell to
 commands that edit nothing that exists, create files only inside the worker's own scratch directory
@@ -636,8 +647,9 @@ is judged where the shell would land, through symbolic links and `..`, including
 link-following search (`rg -L`, `grep -R`) meets below its roots. A worker may search its project
 recursively without a file filter, through its shell or its grep tool, which skips credential files
 itself; a search whose root holds harness storage or a credential store, or a descent that may read
-dotenv files, is refused. A shell's saved full output lands in the worker's scratch directory,
-masked as its result is. These rules judge the command text, a policy gate rather than OS isolation. Without a network grant, the shell's environment also turns off git's lazy fetch,
+dotenv files, is refused. A session's saved full `bash` or `python` output lands in that session's
+private `outputs/tool-streams` run directory (and an in-process lane's process output in its own
+scratch directory), masked as its result is, readable only by that session or lane. These rules judge the command text, a policy gate rather than OS isolation. Without a network grant, the shell's environment also turns off git's lazy fetch,
 credential prompt, pager and filesystem monitor. The machine's credential stores (SSH, GPG, cloud,
 cluster, registry and git credentials, keychains) are private paths for every worker, and a worker
 of a routine run away reads only its session's working directory, its profile's workspace and
@@ -706,16 +718,23 @@ machine-wide cap.** Every pi process on the machine registers each in-flight pro
 `state/provider-admission/` (one file per request, released when its stream settles, pruned by any
 reader once its owner's pid is gone or its heartbeat is stale). The first process to see a 429, an
 overload, or a fully used subscription window records the reset time under
-`state/provider-admission/limits/`; the latest windows are kept per provider under
-`state/provider-admission/usage/`, with the account's credits when the provider reports them
-(Codex's `x-codex-credits-*`), so `/load` shows what remains beside what is used; before sending, every lane waits out a recorded limit that fits
+`state/provider-admission/limits/`; provider-stated quota resets (`billing_or_quota` with a provider
+retry directive, `Retry-After`, or `retryAfterMs`, HTTP 429 quota responses included) classify as
+`usage_window` before generic 429 congestion so subscription windows hold starts until `resetAt`
+without halving the fleet's adaptive account window; the latest windows are kept per provider under
+`state/provider-admission/usage/`, with the account's credits kept separate under `balance` when the
+provider reports them (Codex's `x-codex-credits-*`, Command Code's purchased and free credits beside
+its 5-hour, weekly, monthly and organization windows), so `/load` and `/usage` show what remains
+beside what is used without letting extra credits mask an exhausted subscription window, and
+account-usage fetches are bounded by 30-second timeouts; before sending, every lane waits out a recorded limit that fits
 its budget and otherwise refuses the request unsent with a message the reliability classifier
 reads as a rate limit carrying the remaining delay, so no retry ladder rediscovers a limit at the
 account's expense; a worker's own retry ladder publishes its wait the same way. Bedrock's
 `ThrottlingException` enters this rate-limit policy through the adapter's `Throttling error:`
 message; admission records a shared limit only when that failure provides a reset or retry delay.
 Counts and limits
-are keyed by provider plus credential identity (`<provider>#<identity>`, never a secret), so two
+are keyed by provider plus credential identity (`<provider>#<identity>`, resolving OAuth `accountId`,
+then `userId`, before token hashes, never a secret), so two
 accounts on one provider are two budgets. Admission captures that identity once and retains it
 through result observation, even if the session's credentials change. A success clears a rate-limit
 or overload record only when its request started strictly after that record was published; an older,
@@ -733,7 +752,7 @@ perf profiler, so waiting is neither a connect stall nor time to first token. Wh
 request in flight from any process cut generation from 97.7 to 62.2 tokens per second, and no
 process knew what its siblings were sending; the census did not measure the count at which a cap
 pays for itself, so the ledger records by default and a limit is the owner's choice.
-Enforced by: packages/coding-agent/src/core/provider-admission/gate.ts (only: ESTOP holds non-foreground lanes); .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-2-orchestration.ts (asserts only R25: a worker waits out a shared limit)
+Enforced by: packages/coding-agent/src/core/provider-admission/gate.ts (only: ESTOP holds non-foreground lanes); packages/coding-agent/src/core/provider-admission/limit-state.ts (maps provider-stated quota resets to usage_window); packages/coding-agent/src/core/provider-admission/request-outcome.ts (classifies usage_window before HTTP 429 congestion); packages/coding-agent/src/core/provider-admission/account-key.ts (resolves OAuth accountId and userId); .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-2-orchestration.ts (asserts only R25: a worker waits out a shared limit); packages/coding-agent/test/fixtures/harness/journeys/journey-8-command-code-allowance.ts (asserts exhausted subscription windows hold starts while extra credits stay in balance)
 
 **Queue validation cannot substitute a directory or start an attempt twice.** Fresh worker and
 verifier contracts capture native directory identity before durable dispatch. Queued and resumed
@@ -778,6 +797,56 @@ erase the completion that the next owner must recover. Why: the completion wake-
 the result; replaying output-derived summaries from a later list wastes context and can reintroduce
 stale failure diagnostics.
 Enforced by: .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-2-tool-handoff-ownership.ts (asserts only that the completion wake-up carries the task output)
+
+**Plans execute declared graphs through the fleet, verify independently, and escalate worktree
+writers without losing work.** `plan` validates step graphs before dispatch: `question` is admitted
+only on `reduce`, `verify`, and `vote` joins, `criteria` only on `vote`, `need` only on `collect`
+within the member count, and unordered overlapping writes or unproved non-goal writes are refused.
+Ready steps run on distinct workers ranked in the fleet queue (`verify` steps with mandatory
+verifiers, then longest-path steps, then ordinary steps); `verify` steps run as read-only
+independent verifiers with a typed verdict (inside a `merge` member's worktree lane before merge
+without owning the lane), `verify_wrap` settles a node only after its host revision succeeds and
+never settles a held node, `plan cancel` cancels prepared, queued and running lanes at plan scope
+while retiring the plan's workers on close, and a goal's plan-wait timeout names the in-flight step
+ids. On the worker outcome ladder, an uncommitted worktree-lane finding never masks unfinished work
+before host checks, uncovered-requirement reruns, or model moves; unverified completions whose goal
+has checkable requirements run those host checks first before asking the owner; failed host checks
+and rejected independent verifications mark unproved requirements uncovered; a wall-clock stop
+(`time_exhausted`) on the first rerun rung keeps the attempt's thinking level and runs only when the
+stopped attempt covered at least one requirement; cumulative wall-clock room compares spent time
+against task and objective `riskBudget.maxWallClockMs`; the model-move rung reads `modelPolicy` and
+`modelRouteSource` from the chain's origin attempt so ordered-fallback profiles advance after a
+pinned first-rung rerun; and worktree-writer reruns reuse the existing worktree lane in place when
+continuing the same blocked task (`attemptOfTaskId`) or allocate a fresh worktree lane carrying the
+origin dispatch's full requirement list when superseding or unlinked.
+Enforced by: packages/coding-agent/src/core/plan/plan-revision.ts (refuses misplaced join question and vote criteria); packages/coding-agent/src/core/plan/plan-executor.ts (verify_wrap settles only after revision and cancel releases plan lanes); packages/coding-agent/src/core/delegation/worker-outcome.ts (defers lane findings behind uncovered work and failed checks); packages/coding-agent/src/core/delegation/worker-escalation.ts (reuses or allocates worktree lanes); packages/coding-agent/src/core/delegation/worker-escalation-policy.ts (host-check, time_exhausted and model-move ladder gates); packages/coding-agent/src/core/delegation/worker-escalation-facts.ts (reads origin model policy and cumulative wall-clock ceilings); .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-5-plan-in-memory.ts; packages/coding-agent/test/fixtures/harness/journeys/journey-9-rerun-and-model-move.ts; packages/coding-agent/test/fixtures/harness/journeys/journey-9-worktree-rerun.ts
+
+**Bots, standing leaders, orchestration retention, and in-memory sessions bound live state without
+stranding active work.** Persistent bots keep their own `botSoul` separate from a profile's soul;
+standing leaders coordinate their own bots and nested leaders through `bot_message`, with child
+creation serialized per `(sessionId, alias)` and leader dispatches serialized per leader under
+deterministic idempotency keys. Live identity headroom (`maxAgentsPerSession` at 256 and
+`directChildren`) counts only non-retired agent bindings beneath the 1,024 hot-projection ceilings
+for agent bindings and notifications; notification writes evict the oldest delivered notifications
+not bound to a retained approval or attempt before refusing at capacity, and closed-objective
+retention (`RetentionPrunedPayload` `v: 2`, keeping `v: 1` replay compatibility) archives and prunes
+retired agent bindings and released approval and unbound delivered notifications after the replay
+floor while checking worker transcript files so `worker-N` ids never collide after pruning. Entry
+durability checks match the session's storage mode (`isEntryDurableForSession`), so ephemeral
+`--no-session` (`SessionManager.inMemory()`) runs deliver parent inputs and record harness notices
+without requiring an on-disk session file.
+Enforced by: packages/coding-agent/src/core/delegation/bot-lifecycle-controller.ts (serializes child bot starts); packages/coding-agent/src/core/delegation/leader-controller.ts (serializes per-leader dispatches); packages/coding-agent/src/core/delegation/worker-fleet-limits.ts (excludes retired bindings from live caps); packages/coding-agent/src/core/orchestration/notification-eviction.ts (evicts oldest unbound delivered notifications); packages/coding-agent/src/core/orchestration/retention-eligibility.ts (v: 2 retired-agent and notification pruning); packages/coding-agent/src/kernel/session/session-manager.ts (isEntryDurableForSession admits in-memory parent input); .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-8-orchestration-retention.ts; packages/coding-agent/test/fixtures/harness/journeys/journey-5-plan-in-memory.ts
+
+**Linked machines pair once, run fenced read-only jobs silently on the joiner, and place plan steps
+only across open gates.** Pairing over `sealed/1` consumes a one-time join token and refuses replays
+from another machine (`machine_changed`), advertises capabilities and repository checkouts over
+`cap/1`, and runs placed read-only jobs over `jobs/1` inside a fenced worker with third-party memory
+withheld (`THIRD_PARTY_MEMORY_WITHHELD`), read-only tool ceiling, and silent joiner foregrounds
+(`acknowledgePlacedJobTerminals`). Plan placement prefers a bound machine only while its gate is
+open in the live candidate set, falling back locally when job acceptance closes, propagates
+`plan cancel` as `job.cancel` (`plan_closed`) to abort remote workers, serves `RemoteHubController.ask`
+over fenced `channel:link` turns, and expires offline holds on the orchestration timer port.
+Enforced by: packages/coding-agent/src/core/remote/remote-jobs.ts (places and runs fenced read-only jobs and expires offline holds on TimerPort); packages/coding-agent/src/core/remote/placed-job-terminal-acks.ts (keeps joiner foregrounds silent); packages/coding-agent/src/core/plan/plan-placement.ts (requires bound machines to be open in live candidates); .github/workflows/ci.yml (Harness journeys step); packages/coding-agent/test/fixtures/harness/journeys/journey-10.ts
 
 ## System One
 
@@ -1199,3 +1268,4 @@ Enforced by: prose only
 | 2026-11-05 | The read-only shell line is one walk over one tokenizer for the router, System One's observational line, requirement checks and worker lanes: line continuations, comments, expansions and PowerShell blocks are structural, assignments follow an allowlist, paths are judged lexically and physically, `tsc` leaves the read-only list, and a worker's project search runs without a glob while storage roots and dotenv descents are refused. |
 | 2026-11-05 | The worker report gains `conditionMet` (`WorkerSubmittedReport`, `WorkerResultContract`), stamped under the same clean host-accepted completion rule as `ownerUpdate` and read only by the routine result path: a routine with a stated end that a run reports met runs no more and is removed with one host notice once its results are delivered; any other routine ignores it with a diagnostic. |
 | 2026-11-08 | Tool schema deferral covers every provider: tools that declare `neverDefer` stay resident, the rest fill a resident schema-token budget instead of a fixed count, native surfaces disclose through the provider, and other providers get harness disclosure (catalog in the search tool, schemas in the search result, activated tools appended after the residents). |
+| 2026-11-11 | Per-session `outputs/tool-streams` run directories isolate spilled `bash` and `python` outputs per session and exempt observational self-reads across the credential path policy, capability gates and worker private-path scope while keeping writes, sibling runs and dotenv/credential filenames refused; Command Code clamps `max_tokens` to `model.maxTokens`. Provider-stated quota resets classify as `usage_window` before HTTP 429 congestion, Command Code subscription windows hold fleet starts while keeping extra credits in `balance`, and OAuth `userId` disambiguates multi-account keys. Plans, worktree-lane escalation reruns, bots and standing leaders, `v: 2` orchestration retention and notification eviction, `--no-session` parent-input and notice delivery, and linked-machine `sealed/1`/`cap/1`/`jobs/1` placement are pinned by named mechanisms and Journeys 1, 5, 8, 9 and 10 (`proseOnly` lowered from 60 to 58). |

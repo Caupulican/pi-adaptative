@@ -5,11 +5,18 @@ import {
 	resolveExecutionPath,
 } from "../../kernel/utils/paths.ts";
 import { isPathWithinScopeWithDialect } from "../autonomy/path-scope.ts";
+import { isProvablyObservationalToolCall } from "../model-router/tool-escalation.ts";
 import { requireSynchronousPreflight } from "../preflight.ts";
 
 export interface CredentialPathProtection {
 	protectedFiles?: readonly string[];
 	protectedDirectories?: readonly string[];
+	/**
+	 * Directories inside an ancestor `protectedDirectories` root that provably read-only inspections may read
+	 * (for example this session's own `outputs/tool-streams/<run>` directory). Never exempts `protectedFiles`,
+	 * credential or private-key filenames, more-specific `protectedDirectories` children, or mutating calls.
+	 */
+	exemptReadDirectories?: readonly string[];
 	/**
 	 * Protected files a recursive search may pass through: denied to a read that names them, but project files rather
 	 * than storage (a project's own settings file), so a search root containing one is not refused for it.
@@ -36,11 +43,24 @@ const WINDOWS_HOME_PREFIX_RE = /^(?:\$USERPROFILE|\$\{USERPROFILE\}|\$env:USERPR
  * environment can carry credentials). A command line stays readable: `ps` prints every one anyway.
  */
 const PROCESS_SECRET_FILE_RE = /^\/proc\/[^/]+(?:\/task\/[^/]+)?\/(?:environ|mem)$/u;
+const NEVER_EXEMPT_FILENAMES = new Set([
+	".npmrc",
+	".netrc",
+	"_netrc",
+	".git-credentials",
+	".pypirc",
+	"id_rsa",
+	"id_ed25519",
+	"id_ecdsa",
+	"id_dsa",
+]);
+const NEVER_EXEMPT_EXTENSIONS = new Set([".pem", ".key", ".p12", ".pfx", ".kdbx"]);
 
 /** Protection entries with every spelling the policy compares: as written and canonical. */
 interface ProtectionRoots {
 	readonly files: readonly string[];
 	readonly directories: readonly string[];
+	readonly exemptReadDirectories: readonly string[];
 	/** Every protected file and directory except the searchable files: what a search root must not contain. */
 	readonly storage: readonly string[];
 }
@@ -54,6 +74,7 @@ export class CredentialPathPolicy {
 	private readonly caseSensitive: boolean;
 	private readonly probe: CredentialPathProbe;
 	private readonly protectionCwd: string | undefined;
+	private readonly allowExemptRead: boolean;
 	/** The synchronous protection roots, resolved once per policy (search-output masking asks per output line). */
 	private synchronousRoots: ProtectionRoots | undefined;
 
@@ -64,6 +85,7 @@ export class CredentialPathPolicy {
 		protection?: CredentialPathProtection;
 		protectionCwd?: string;
 		probe: CredentialPathProbe;
+		allowExemptRead?: boolean;
 	}) {
 		this.cwd = options.cwd;
 		this.protection = options.protection;
@@ -72,18 +94,45 @@ export class CredentialPathPolicy {
 		this.caseSensitive = options.caseSensitive;
 		this.probe = options.probe;
 		this.protectionCwd = options.protectionCwd;
+		this.allowExemptRead = options.allowExemptRead === true;
 	}
 
 	/** The same policy judging paths from `cwd` instead: a command line that changed directory before naming a path. */
 	withCwd(cwd: string): CredentialPathPolicy {
-		return new CredentialPathPolicy({
+		const next = new CredentialPathPolicy({
 			cwd: resolveExecutionPath(this.expandHome(cwd), this.cwd, this.flavor),
 			flavor: this.flavor,
 			caseSensitive: this.caseSensitive,
 			protection: this.protection,
 			protectionCwd: this.protectionCwd,
 			probe: this.probe,
+			allowExemptRead: this.allowExemptRead,
 		});
+		next.synchronousRoots = this.synchronousRoots;
+		return next;
+	}
+
+	/** Same policy for a provably read-only inspection, admitting `exemptReadDirectories` under ancestor protected roots. */
+	asReadOnly(): CredentialPathPolicy {
+		if (this.allowExemptRead) return this;
+		const next = new CredentialPathPolicy({
+			cwd: this.cwd,
+			flavor: this.flavor,
+			caseSensitive: this.caseSensitive,
+			protection: this.protection,
+			protectionCwd: this.protectionCwd,
+			probe: this.probe,
+			allowExemptRead: true,
+		});
+		next.synchronousRoots = this.synchronousRoots;
+		return next;
+	}
+
+	/** Scope read-only directory exemptions strictly to provably observational tool calls. */
+	forToolCall(toolName: string, args: unknown): CredentialPathPolicy {
+		return toolName.toLowerCase() === "repo_read" || isProvablyObservationalToolCall(toolName, args)
+			? this.asReadOnly()
+			: this;
 	}
 
 	/** Where this policy resolves relative paths. */
@@ -143,7 +192,12 @@ export class CredentialPathPolicy {
 	}
 
 	/** The protection entries resolved the way they are compared, before canonical forms are added. */
-	private protectionEntries(): { files: string[]; directories: string[]; storage: string[] } {
+	private protectionEntries(): {
+		files: string[];
+		directories: string[];
+		exemptReadDirectories: string[];
+		storage: string[];
+	} {
 		const resolve = (values: readonly string[] | undefined) =>
 			(values ?? []).flatMap((path) => {
 				if (this.protectionCwd === undefined) {
@@ -158,11 +212,12 @@ export class CredentialPathPolicy {
 			});
 		const files = resolve(this.protection?.protectedFiles);
 		const directories = resolve(this.protection?.protectedDirectories);
+		const exemptReadDirectories = resolve(this.protection?.exemptReadDirectories);
 		const searchable = resolve(this.protection?.searchableFiles);
 		const storage = [...new Set([...files, ...directories])].filter(
 			(entry) => !searchable.some((file) => this.samePath(file, entry)),
 		);
-		return { files, directories, storage };
+		return { files, directories, exemptReadDirectories, storage };
 	}
 
 	private roots(): ProtectionRoots {
@@ -172,6 +227,7 @@ export class CredentialPathPolicy {
 			this.synchronousRoots = {
 				files: canonical(entries.files),
 				directories: canonical(entries.directories),
+				exemptReadDirectories: canonical(entries.exemptReadDirectories),
 				storage: canonical(entries.storage),
 			};
 		}
@@ -188,6 +244,7 @@ export class CredentialPathPolicy {
 		return {
 			files: await canonical(entries.files),
 			directories: await canonical(entries.directories),
+			exemptReadDirectories: await canonical(entries.exemptReadDirectories),
 			storage: await canonical(entries.storage),
 		};
 	}
@@ -196,6 +253,11 @@ export class CredentialPathPolicy {
 		const name = this.paths.basename(path);
 		const comparable = this.caseSensitive ? name : name.toLowerCase();
 		return comparable === ".env" || comparable.startsWith(".env.") || comparable.endsWith(".env");
+	}
+
+	private isNeverExemptCredentialFile(path: string): boolean {
+		const lowerName = this.paths.basename(path).toLowerCase();
+		return NEVER_EXEMPT_FILENAMES.has(lowerName) || NEVER_EXEMPT_EXTENSIONS.has(this.extension(path));
 	}
 
 	private isLexicallyProtectedToken(token: string, root: string): boolean {
@@ -262,7 +324,17 @@ export class CredentialPathPolicy {
 		return candidates.some(
 			(candidate) =>
 				roots.files.some((file) => this.samePath(file, candidate)) ||
-				roots.directories.some((root) => this.isInside(root, candidate)) ||
+				roots.directories.some(
+					(root) =>
+						this.isInside(root, candidate) &&
+						!(
+							this.allowExemptRead &&
+							!this.isNeverExemptCredentialFile(candidate) &&
+							roots.exemptReadDirectories.some(
+								(exempt) => this.isInside(exempt, candidate) && this.isInside(root, exempt),
+							)
+						),
+				) ||
 				this.hasCredentialFilename(candidate) ||
 				(this.flavor === "posix" && PROCESS_SECRET_FILE_RE.test(candidate)),
 		);

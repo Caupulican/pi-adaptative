@@ -68,6 +68,7 @@ export function buildWorkerSessionPrivatePathEnvelope(
 	allowedPaths: readonly string[] = parseWorkerSessionAllowedPaths(process.env[PI_WORKER_ALLOWED_PATHS_ENV]),
 	readableFiles: readonly string[] = parseWorkerSessionReadableFiles(process.env[PI_WORKER_READABLE_FILES_ENV]),
 	extraDeniedPaths: readonly string[] = [],
+	exemptReadPaths: readonly string[] = [],
 ): CapabilityEnvelope {
 	const capabilities = Object.freeze(["filesystem.read", "filesystem.write"] as const);
 	const immutableAllowedPaths = Object.freeze([...allowedPaths]);
@@ -84,6 +85,7 @@ export function buildWorkerSessionPrivatePathEnvelope(
 		allowedPaths: immutableAllowedPaths,
 		deniedPaths,
 		...(readableFiles.length > 0 ? { exemptPaths: Object.freeze([...readableFiles]) } : {}),
+		...(exemptReadPaths.length > 0 ? { exemptReadPaths: Object.freeze([...exemptReadPaths]) } : {}),
 	});
 }
 

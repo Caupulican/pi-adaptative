@@ -10,7 +10,7 @@ import {
 	parseHostEventSubscriptionInput,
 } from "../events/host-event-contract.ts";
 import { getGoalCompletionRefusal, hasGoalAcceptanceOverride } from "../goals/goal-acceptance.ts";
-import type { GoalState } from "../goals/goal-state.ts";
+import { type GoalState, isGoalExecutionActive, isGoalStoppedStatus } from "../goals/goal-state.ts";
 import { type KnowledgeGrantReference, parseKnowledgeGrantReferences } from "../memory/knowledge-grant.ts";
 import { agentBasisTurnOrigin, agentNativeTurnCount, agentTurnBasis } from "./agent-turn-basis.ts";
 import { nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
@@ -748,28 +748,20 @@ export class DelegationOrchestrationLedger {
 			this.runtime.recordObjectiveEvidence(objective.objectiveId, item);
 		}
 		const status = this.runtime.getSnapshot().objectives[goalObjectiveId(goal.goalId)]?.objective.status;
-		switch (goal.status) {
-			case "active":
-				if (status === "paused") this.runtime.resumeObjective(objective.objectiveId);
-				break;
-			case "paused":
-			case "blocked":
-			case "usage_limited":
-			case "budget_limited":
-				if (status === "active") this.runtime.pauseObjective(objective.objectiveId, "kernel");
-				break;
+		if (isGoalExecutionActive(goal.status)) {
+			if (status === "paused") this.runtime.resumeObjective(objective.objectiveId);
+		} else if (isGoalStoppedStatus(goal.status)) {
+			if (status === "active") this.runtime.pauseObjective(objective.objectiveId, "kernel");
+		} else if (goal.status === "cancelled") {
 			// A settled objective (completed or cancelled) is terminal: the goal's move toward the other terminal status
 			// has nothing left to apply, so it is skipped rather than thrown.
-			case "cancelled":
-				if (status !== "cancelled" && status !== "completed") this.runtime.cancelObjective(objective.objectiveId);
-				break;
-			case "completed":
-				// A completion the trusted evidence does not support is not applied here: the goal layer reopens the goal
-				// as active on the same predicate, and the objective stays open until the evidence exists.
-				if (status !== "completed" && status !== "cancelled" && getGoalCompletionRefusal(goal) === undefined) {
-					this.runtime.completeObjectiveFromOwner(objective.objectiveId, hasGoalAcceptanceOverride(goal));
-				}
-				break;
+			if (status !== "cancelled" && status !== "completed") this.runtime.cancelObjective(objective.objectiveId);
+		} else if (goal.status === "completed") {
+			// A completion the trusted evidence does not support is not applied here: the goal layer reopens the goal
+			// as active on the same predicate, and the objective stays open until the evidence exists.
+			if (status !== "completed" && status !== "cancelled" && getGoalCompletionRefusal(goal) === undefined) {
+				this.runtime.completeObjectiveFromOwner(objective.objectiveId, hasGoalAcceptanceOverride(goal));
+			}
 		}
 	}
 

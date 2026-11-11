@@ -183,11 +183,14 @@ export function harnessNoticeHeadline(message: {
  * anchor. Before it, a notice waits in memory for the session's next saved entry and is lost if the runtime ends first.
  */
 export function transcriptKeepsNotices(
-	manager: Pick<SessionManager, "getSessionFile" | "getLeafId" | "isEntryPersisted">,
+	manager: Pick<
+		SessionManager,
+		"isPersisted" | "isPersistenceStateUncertain" | "getSessionFile" | "getLeafId" | "isEntryPersisted"
+	>,
 ): boolean {
+	if (!manager.isPersisted()) return !manager.isPersistenceStateUncertain();
 	const leafId = manager.getLeafId();
-	if (!manager.getSessionFile() || !leafId) return false;
-	return manager.isEntryPersisted(leafId);
+	return Boolean(manager.getSessionFile() && leafId && manager.isEntryPersisted(leafId));
 }
 
 /**
@@ -343,8 +346,7 @@ export class HarnessNoticeController {
 			return true;
 		}
 		const text = boundedRedactedDiagnosticText(observation.text);
-		// A session that keeps no transcript has no channel for a notice: nothing is kept for it.
-		if (!text || !manager.isPersisted()) {
+		if (!text) {
 			state.unsaved = recurred;
 			return false;
 		}

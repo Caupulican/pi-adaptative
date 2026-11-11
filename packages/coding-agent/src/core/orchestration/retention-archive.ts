@@ -35,9 +35,11 @@ export interface RetentionArchiveContent {
 	readonly taskIds: readonly string[];
 	readonly attemptIds: readonly string[];
 	readonly planIds: readonly string[];
+	readonly agentIds?: readonly string[];
 	readonly dependents: RetentionDependents;
 	/** Raw projection JSON, exactly as the snapshot holds it, keyed by the ids the selection names. */
 	readonly records: {
+		readonly agents?: JsonObject;
 		readonly objectives: JsonObject;
 		readonly tasks: JsonObject;
 		readonly attempts: JsonObject;
@@ -83,8 +85,10 @@ export function buildRetentionArchive(args: {
 		taskIds: selection.taskIds,
 		attemptIds: selection.attemptIds,
 		planIds: selection.planIds,
+		agentIds: selection.agentIds,
 		dependents: selection.dependents,
 		records: {
+			agents: sliceRecords(projection.agents, selection.agentIds),
 			objectives: sliceRecords(projection.objectives, selection.objectiveIds),
 			tasks: sliceRecords(projection.tasks, selection.taskIds),
 			attempts: sliceRecords(projection.attempts, selection.attemptIds),

@@ -39,8 +39,10 @@ import type { SessionManager } from "../kernel/node.ts";
 import { getShellEnv } from "../utils/shell.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import {
+	acquireWorkRun,
 	bitwardenSecretsManagerCoordinationFile,
 	managedSecretEnvDir,
+	removeWorkRun,
 	resourceDir,
 	secretVaultFile,
 } from "./agent-paths.ts";
@@ -694,6 +696,7 @@ export class RuntimeBuilder {
 	private readonly _credentialBootstrapFiles: readonly string[];
 	private readonly _credentialDiscoveryRoots: readonly string[];
 	private readonly _fileMutationIntents: FileMutationIntentController;
+	private readonly _toolStreamsWorkRun: ReturnType<typeof acquireWorkRun>;
 	private readonly _workerSessionPrivatePathEnvelope: CapabilityEnvelope | undefined;
 	private readonly _workerSessionHarnessWriteEnvelope: CapabilityEnvelope | undefined;
 	private readonly _workerSessionDefaultWriteScopeEnvelope: CapabilityEnvelope | undefined;
@@ -715,7 +718,6 @@ export class RuntimeBuilder {
 		return this._taskDirectories.withContext(() => operation(), signal, onAdmissionError);
 	}
 	private readonly _taskAutomationAdapter: TaskAutomationRuntimeAdapter;
-
 	private readonly deps: RuntimeBuilderDeps;
 
 	constructor(deps: RuntimeBuilderDeps) {
@@ -724,27 +726,21 @@ export class RuntimeBuilder {
 		const workerExtensionGrants = isWorkerSession()
 			? readWorkerExtensionToolGrants().filter((grant) => !builtinToolNames.has(grant.tool))
 			: [];
-		// The harness cannot judge what a granted extension's code opens: classify the granted tools so the
-		// worker's path envelopes (private paths, harness write protection, default write scope) govern their
-		// path arguments exactly as they govern the builtin file tools.
+		// Granted extension tools cannot be inspected statically: classify them under the worker path envelopes.
 		registerWorkerExtensionToolPolicies(workerExtensionGrants);
 		this._workerExtensionToolNames = new Set(workerExtensionGrants.map((grant) => grant.tool));
+		const agentDir = deps.getAgentDir();
+		this._toolStreamsWorkRun = acquireWorkRun({ agentDir, category: "outputs", tenant: "tool-streams" });
 		const privatePathScope = deps.getPrivatePathScope?.();
-		this._workerSessionPrivatePathEnvelope = isWorkerSession()
-			? buildWorkerSessionPrivatePathEnvelope(
-					deps.getCwd(),
-					deps.getAgentDir(),
-					undefined,
-					undefined,
-					privatePathScope?.deniedPaths,
-				)
-			: privatePathScope
+		this._workerSessionPrivatePathEnvelope =
+			isWorkerSession() || privatePathScope
 				? buildWorkerSessionPrivatePathEnvelope(
 						deps.getCwd(),
-						deps.getAgentDir(),
-						privatePathScope.allowedPaths ?? [],
-						[],
-						privatePathScope.deniedPaths,
+						agentDir,
+						isWorkerSession() ? undefined : (privatePathScope?.allowedPaths ?? []),
+						isWorkerSession() ? undefined : [],
+						privatePathScope?.deniedPaths,
+						[this._toolStreamsWorkRun.path],
 					)
 				: undefined;
 		this._workerSessionHarnessWriteEnvelope = isWorkerSession()
@@ -788,14 +784,14 @@ export class RuntimeBuilder {
 			getSensitiveValues: () => this.deps.getModelRegistry().getKnownCredentialValues(),
 			// Data from the retired local vault remains protected even though it is no longer executable.
 			protectedFiles: [secretVaultFile(deps.getAgentDir()), ...this._credentialBootstrapFiles],
-			// Worker process tools remain host-wide for ordinary sibling-project work, but the
-			// recognizable private harness roots still pass through the same execution guard as
-			// direct filesystem tools. This is lexical/recognizable protection only; obfuscated
-			// runtime path construction requires OS-level isolation.
+			// Private harness roots stay lexically guarded on worker process tools as well as direct file tools;
+			// only this session's own tool-streams run directory is exempted for read-only inspection.
 			protectedDirectories: [
 				managedSecretEnvDir(deps.getAgentDir()),
 				...(this._workerSessionPrivatePathEnvelope?.deniedPaths ?? []),
 			],
+			exemptReadDirectories: [this._toolStreamsWorkRun.path],
+			toolStreamsDirectory: this._toolStreamsWorkRun.path,
 			// The project's own settings file is denied by name but is a project file a recursive search may pass through.
 			searchableFiles: [projectLaneSettingsPath(deps.getCwd())],
 			// The harness's own memory, skills and sessions are searchable without a file glob.
@@ -1074,14 +1070,18 @@ export class RuntimeBuilder {
 		return this._credentialManager;
 	}
 
-	/** Release session-owned mutation payload leases retained by the write/edit tool pair. */
+	/** Release session-owned mutation payload, task directory, and tool-stream leases. */
 	async dispose(): Promise<void> {
 		this.assertCanAwaitDisposal();
 		this.closeMutationAdmission();
 		if (this.hasPendingMutation) await this.settleMutations();
 		this._credentialManager.lock();
 		await settleIndependentLifecycle(
-			[() => this._fileMutationIntents.dispose(), () => this._taskDirectories.dispose()],
+			[
+				() => this._fileMutationIntents.dispose(),
+				() => this._taskDirectories.dispose(),
+				() => removeWorkRun(this._toolStreamsWorkRun),
+			],
 			"Runtime resource disposal failed",
 		);
 	}

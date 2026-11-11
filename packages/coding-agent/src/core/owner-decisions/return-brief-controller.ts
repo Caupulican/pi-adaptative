@@ -5,9 +5,7 @@
  * the bounded commit read that the brief waits for; a failed build warns and yields no brief.
  */
 
-import { execFile } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { promisify } from "node:util";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../../kernel/storage/atomic-file.ts";
 import { stateFile } from "../agent-paths.ts";
@@ -19,6 +17,7 @@ import {
 	type StatusSection,
 } from "../autonomy-status/autonomy-status.ts";
 import { isOutcomeFromNewerBuild } from "../delegation/worker-outcome-contract.ts";
+import { execCommand, withoutInheritedGitLocation } from "../exec.ts";
 import { getResumableHumanInputSnapshot } from "../human-input.ts";
 import { ownerPasteRestorer } from "../learning/owner-evidence-ledger.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
@@ -53,8 +52,6 @@ export const RETURN_BRIEF_IDLE_GAP_MS = 30 * 60_000;
 const GIT_TIMEOUT_MS = 2_000;
 const COMMITS_MAX = 20;
 const WORDS = /[\p{L}\p{N}]/u;
-
-const execFileAsync = promisify(execFile);
 
 /** The brief one owner turn was armed for. Its commit read starts at arming, so a plan rarely waits for it. */
 interface ArmedBrief {
@@ -382,12 +379,14 @@ function workerOutcomesSince(ledger: TaskRuntimeProjection, awaySince: number): 
  */
 async function readCommitsSince(cwd: string, sinceMs: number): Promise<ReturnBriefCommits | undefined> {
 	try {
-		const { stdout } = await execFileAsync(
+		const result = await execCommand(
 			"git",
 			["log", `--since=@${Math.floor(sinceMs / 1000)}`, "-n", String(COMMITS_MAX), "--format=%h%x09%s"],
-			{ cwd, timeout: GIT_TIMEOUT_MS, windowsHide: true },
+			cwd,
+			{ timeout: GIT_TIMEOUT_MS, env: withoutInheritedGitLocation() },
 		);
-		const shown = stdout
+		if (result.code !== 0) return undefined;
+		const shown = result.stdout
 			.split("\n")
 			.filter((line) => line.length > 0)
 			.map((line) => {

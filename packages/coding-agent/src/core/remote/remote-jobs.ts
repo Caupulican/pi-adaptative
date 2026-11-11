@@ -12,7 +12,7 @@
 import { join } from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { alarmAt, SYSTEM_TIMER_PORT, type WallAlarm } from "../../kernel/timer-port.ts";
+import { alarmAt, SYSTEM_TIMER_PORT, type TimerPort, type WallAlarm } from "../../kernel/timer-port.ts";
 import type { ManagedLaneView } from "../delegation/managed-lane-views.ts";
 import type { PersistentBotLiveState } from "../delegation/persistent-bot-team-store.ts";
 import type { RemoteBackendPort } from "../fleet/remote-admit.ts";
@@ -48,6 +48,7 @@ export interface RemoteJobPorts {
 	/** The models this session can run, for the advert's provider classes (never an account or a key). */
 	readonly models: () => readonly Model<Api>[];
 	readonly usesSubscription: (model: Model<Api>) => boolean;
+	readonly timers?: TimerPort;
 }
 
 /** The fleet a session's remote machines register with (`attachFleet`): their room, and this session's placement backend. */
@@ -122,6 +123,7 @@ export function runningFor(since: number, now = Date.now()): string {
 export class RemoteJobs {
 	private readonly agentDir: string;
 	private readonly ports: RemoteJobPorts;
+	private readonly timers: TimerPort;
 	readonly machines: FleetMachines;
 	readonly client: RemoteJobClient;
 	private readonly store: JobStore;
@@ -143,6 +145,7 @@ export class RemoteJobs {
 	constructor(agentDir: string, identity: () => MachineIdentity, ports: RemoteJobPorts, onRosterChange: () => void) {
 		this.agentDir = agentDir;
 		this.ports = ports;
+		this.timers = ports.timers ?? SYSTEM_TIMER_PORT;
 		this.machines = new FleetMachines(agentDir);
 		this.store = new JobStore(agentDir);
 		this.client = new RemoteJobClient({
@@ -151,6 +154,7 @@ export class RemoteJobs {
 			sessionId: ports.sessionId,
 			session: ports.session,
 			machines: this.machines,
+			timers: this.timers,
 		});
 		this.onRosterChange = onRosterChange;
 	}
@@ -208,6 +212,7 @@ export class RemoteJobs {
 				session: this.ports.session,
 				models: () => modelFacts(this.ports.models(), this.ports.usesSubscription),
 				room: () => loadLinkSettings(this.agentDir).jobRoom,
+				timers: this.timers,
 			});
 		}
 		this.runner.arm();
@@ -243,7 +248,7 @@ export class RemoteJobs {
 	/** The session's directory when `machineId` offers its project, so an owner's job runs in that checkout. */
 	async projectOn(machineId: string): Promise<string | undefined> {
 		const cwd = this.ports.cwd();
-		const identity = await resolveRepoIdentity(cwd);
+		const identity = await resolveRepoIdentity(cwd, this.timers.now());
 		const offered = this.machines
 			.get(machineId)
 			?.facts?.checkouts.some((checkout) => checkout.repoKey === identity?.repoKey);
@@ -252,7 +257,7 @@ export class RemoteJobs {
 
 	/** Jobs other machines placed here that have not finished. */
 	runningHere(): number {
-		return activeExecutorJobs(this.store, Date.now(), loadLinkSettings(this.agentDir).offlineHoldMs);
+		return activeExecutorJobs(this.store, this.timers.now(), loadLinkSettings(this.agentDir).offlineHoldMs);
 	}
 
 	/**
@@ -398,7 +403,7 @@ export class RemoteJobs {
 			records: [...pass.valid.values()].filter(
 				(record) => record.executorId === machineId && record.appliedAt === undefined && !record.ending,
 			),
-			unreadable: unreadableHoldingRoom(pass.unreadable, Date.now(), holdMs, "placer").filter(
+			unreadable: unreadableHoldingRoom(pass.unreadable, this.timers.now(), holdMs, "placer").filter(
 				(entry) => entry.machineId === machineId,
 			).length,
 		};
@@ -426,7 +431,7 @@ export class RemoteJobs {
 				currentSummary:
 					since === undefined
 						? `working on ${plural(count, "job")}`
-						: `working on ${plural(count, "job")} for ${runningFor(since)}`,
+						: `working on ${plural(count, "job")} for ${runningFor(since, this.timers.now())}`,
 			};
 		}
 		const facts = machine?.facts;
@@ -441,7 +446,7 @@ export class RemoteJobs {
 	/** A running job's duration is re-read once a minute, through the roster's own change path. */
 	private scheduleRosterTick(): void {
 		if (this.rosterTick) return;
-		this.rosterTick = alarmAt(SYSTEM_TIMER_PORT, Date.now() + ROSTER_TICK_MS, () => {
+		this.rosterTick = alarmAt(this.timers, this.timers.now() + ROSTER_TICK_MS, () => {
 			this.rosterTick = undefined;
 			this.onRosterChange();
 		});
@@ -458,7 +463,7 @@ export class RemoteJobs {
 				? `waiting for ${record.executorName} to come back`
 				: record.state === "pending"
 					? `waiting for ${record.executorName} to take it`
-					: `on ${record.executorName} for ${runningFor(record.createdAt)}`;
+					: `on ${record.executorName} for ${runningFor(record.createdAt, this.timers.now())}`;
 		return { ...view, label: `${REMOTE_MARK} ${record.offer.label} · ${where}` };
 	}
 }

@@ -51,11 +51,11 @@ export function placementFor(node: PlanNodeSpec, base: Chosen, facts: PlacementF
 	if (node.inputs.length > 0) return base;
 	if ((node.brief?.refs?.length ?? 0) > 0) return base;
 	if (target === "here") return base;
-	// A permanently refused machine is not returned to; the step then takes the ordinary exits below.
-	if (facts.boundMachine !== undefined && facts.remoteBackend && !facts.refused.has(facts.boundMachine))
-		return remote(facts.boundMachine, "bound_machine");
 	const open = (machineId: string): boolean =>
 		facts.candidates.some((candidate) => candidate.machineId === machineId) && !facts.refused.has(machineId);
+	// A machine that is not an open candidate (offline, full, or permanently refused) is not returned to; the step then takes the ordinary exits below.
+	if (facts.boundMachine !== undefined && facts.remoteBackend && open(facts.boundMachine))
+		return remote(facts.boundMachine, "bound_machine");
 	if (pinnedMachine !== undefined && open(pinnedMachine)) return remote(pinnedMachine, "pin_machine_remote");
 	if (facts.localRunnable >= 1) return base;
 	const first = facts.candidates.find((candidate) => !facts.refused.has(candidate.machineId));

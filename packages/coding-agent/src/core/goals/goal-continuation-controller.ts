@@ -58,9 +58,10 @@ function planWaitTiming(
 	return { timedOut: false, resumeAt: new Date(nowMs + remainingMs).toISOString() };
 }
 
-function planWaitTimeoutMessage(steps: number, maxWaitMs: number): string {
+function planWaitTimeoutMessage(steps: number, maxWaitMs: number, stepIds?: readonly string[]): string {
 	const hours = Math.round((maxWaitMs / 3_600_000) * 10) / 10;
-	return `The plan's ${steps} running step(s) have shown no progress for ${hours} h; continue the goal with what is known and re-plan what is stuck.`;
+	const named = stepIds && stepIds.length > 0 ? ` (${stepIds.join(", ")})` : "";
+	return `The plan's ${steps} running step(s)${named} have shown no progress for ${hours} h; continue the goal with what is known and re-plan what is stuck.`;
 }
 
 export type GoalContinuationAction = "continue" | "ask-user" | "finalize" | "stop" | "waiting";
@@ -142,6 +143,7 @@ function boundWorkerContinuation(args: {
  */
 function planContinuation(args: {
 	stepsInFlight: number | undefined;
+	inFlightStepIds?: readonly string[];
 	remainingMs: number | undefined;
 	baseDecision: GoalContinuationBaseDecision;
 	now: string | undefined;
@@ -155,7 +157,7 @@ function planContinuation(args: {
 			...args.baseDecision,
 			action: "continue",
 			reasonCode: "worker_wait_timeout",
-			message: planWaitTimeoutMessage(steps, args.maxWorkerWaitMs),
+			message: planWaitTimeoutMessage(steps, args.maxWorkerWaitMs, args.inFlightStepIds),
 		};
 	}
 	return {
@@ -233,6 +235,8 @@ export function evaluateGoalContinuation(args: {
 	 * that is held or unable to move does not hold the loop, so a plan that cannot go on never parks the goal.
 	 */
 	planStepsInFlight?: number;
+	/** IDs of the in-flight plan steps counted in `planStepsInFlight`, named when the plan wait times out. */
+	planInFlightStepIds?: readonly string[];
 	/**
 	 * What is left of the running plan's wait, in milliseconds, measured on the orchestration clock that stamped the plan's
 	 * last movement (a release, a settlement, a hold or a join): the snapshot computes it as that movement plus
@@ -386,6 +390,7 @@ export function evaluateGoalContinuation(args: {
 	// requirements, or one whose requirements are all closed, has put its remaining work into the plan just the same.
 	const planWait = planContinuation({
 		stepsInFlight: args.planStepsInFlight,
+		inFlightStepIds: args.planInFlightStepIds,
 		remainingMs: args.planRemainingMs,
 		baseDecision,
 		now: args.now,

@@ -25,7 +25,7 @@ export interface WorkerOutcomeFollowUpDeps {
 	cwd(): string;
 	/** Aborting it detaches the follow-up: no subscription, ladder context or placement outlives the controller. */
 	readonly signal: AbortSignal;
-	/** Whether a directory is a worktree lane (a rerun of its original cannot be placed back into it yet). */
+	/** Whether a directory is a worktree lane, so a rerun reuses that lane when bound to it or isolates a fresh lane. */
 	isLaneDirectory(directory: string): boolean;
 	/** Record a passing host requirement check as the goal's own proof of that requirement. */
 	recordCheckProof(attemptId: string, requirementId: string, result: RequirementCheckResult): void;

@@ -229,11 +229,12 @@ export function buildGoalRuntimeSnapshot(args: {
 	// A step the plan moves by itself counts: one that runs, one that is starting, and one that is ready, which the plan is
 	// releasing or deciding now (a step whose predecessor just settled, a join being combined). Counting only running steps
 	// ended the wait in the gap between one step settling and the next one starting, and prompted the root mid-plan.
-	const planStepsInFlight =
+	const inFlightNodes =
 		plan && goalState && plan.goalId === goalState.goalId
 			? plan.nodes.filter((node) => node.state === "admitted" || node.state === "running" || node.state === "ready")
-					.length
-			: 0;
+			: [];
+	const planStepsInFlight = inFlightNodes.length;
+	const planInFlightStepIds = inFlightNodes.map((node) => node.id);
 	// The plan wait's deadline counts from the plan's last movement, so a plan that keeps settling steps keeps its wait.
 	// Its remaining time is measured on the orchestration clock that stamped that movement, never against `now`, which
 	// reads the continuation clock; the continuation turns what is left into its own resume instant.
@@ -260,7 +261,7 @@ export function buildGoalRuntimeSnapshot(args: {
 		laneSyncConflictLaneKeys: laneSyncConflictLaneKeys.size > 0 ? laneSyncConflictLaneKeys : undefined,
 		syncRequiredLaneKeys: syncRequiredLaneKeys.size > 0 ? syncRequiredLaneKeys : undefined,
 		...(inFlightToolTaskIds.size > 0 ? { inFlightToolTaskIds } : {}),
-		...(planStepsInFlight > 0 ? { planStepsInFlight } : {}),
+		...(planStepsInFlight > 0 ? { planStepsInFlight, planInFlightStepIds } : {}),
 		...(planRemainingMs !== undefined ? { planRemainingMs } : {}),
 	});
 

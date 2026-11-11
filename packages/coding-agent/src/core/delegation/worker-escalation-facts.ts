@@ -45,32 +45,32 @@ export function attemptRung(snapshot: TaskRuntimeProjection, attempt: AttemptRun
 }
 
 /**
- * Whether the task's attempt ceiling, spent cost and active time leave room for one more attempt like the last one. The
- * ceiling binds a non-completed task only: a completed source's rung is a successor with its own budget.
+ * Whether the task's attempt ceiling, spent cost and cumulative wall-clock ceiling leave room for one more attempt like the
+ * last one. Task/objective ceilings bind a non-completed task only (a completed source's rung is a successor with its own
+ * budget), while `authority.budget.maxWallClockMs` is the per-attempt wall-clock cap rather than a cumulative task sum.
  */
 function budgetLeft(snapshot: TaskRuntimeProjection, attempt: AttemptRuntimeState): boolean {
 	const task = snapshot.tasks[attempt.taskId];
 	const objective = task ? snapshot.objectives[task.task.objectiveId] : undefined;
+	const completed = task?.task.status === "completed";
 	const ceilings = [task?.task.riskBudget.maxAttempts, objective?.objective.riskBudget.maxAttempts].filter(
 		(value): value is number => value !== undefined,
 	);
-	if (
-		task &&
-		task.task.status !== "completed" &&
-		ceilings.length > 0 &&
-		task.attemptIds.length >= Math.min(...ceilings)
-	)
-		return false;
+	if (task && !completed && ceilings.length > 0 && task.attemptIds.length >= Math.min(...ceilings)) return false;
+	const timeCeilings = [task?.task.riskBudget.maxWallClockMs, objective?.objective.riskBudget.maxWallClockMs].filter(
+		(value): value is number => value !== undefined && value > 0,
+	);
 	const budget = attempt.dispatch.executionContract?.worker.authority.budget;
-	if (!budget || (!budget.maxCostUsd && !budget.maxWallClockMs)) return true;
-	const attempts = (snapshot.tasks[attempt.taskId]?.attemptIds ?? [])
+	if (!budget?.maxCostUsd && (completed || timeCeilings.length === 0)) return true;
+	const attempts = (task?.attemptIds ?? [])
 		.map((attemptId) => snapshot.attempts[attemptId]?.usageAccounting?.total)
 		.filter((total) => total !== undefined);
 	const spentUsd = attempts.reduce((sum, total) => sum + total.costUsd, 0);
 	const spentMs = attempts.reduce((sum, total) => sum + total.activeWallClockMs, 0);
 	const last = attempt.usageAccounting?.total;
-	const costRoom = !budget.maxCostUsd || spentUsd + (last?.costUsd ?? 0) <= budget.maxCostUsd;
-	const timeRoom = !budget.maxWallClockMs || spentMs + (last?.activeWallClockMs ?? 0) <= budget.maxWallClockMs;
+	const costRoom = !budget?.maxCostUsd || spentUsd + (last?.costUsd ?? 0) <= budget.maxCostUsd;
+	const timeRoom =
+		completed || timeCeilings.length === 0 || spentMs + (last?.activeWallClockMs ?? 0) <= Math.min(...timeCeilings);
 	return costRoom && timeRoom;
 }
 
@@ -118,10 +118,19 @@ export function outcomeLadderFacts(args: {
 }): LadderFacts {
 	const { snapshot, attempt, context } = args;
 	const task = snapshot.tasks[attempt.taskId];
+	const escalations = task?.escalations ?? [];
+	const originTaskId = escalations.find((entry) => entry.supersedesTaskId !== undefined)?.supersedesTaskId;
+	const firstAttemptId =
+		(originTaskId ? snapshot.tasks[originTaskId]?.attemptIds[0] : undefined) ??
+		args.previous?.attempts[0]?.attemptId ??
+		task?.attemptIds[0] ??
+		attempt.attemptId;
+	const originAttempt = snapshot.attempts[firstAttemptId] ?? attempt;
 	const contract = attempt.dispatch.executionContract?.worker;
+	const originContract = originAttempt.dispatch.executionContract?.worker ?? contract;
 	const modelRef = args.lane.modelRef ?? (contract ? modelRefOf(contract.modelBinding) : "unknown");
 	const thinking = isThinkingLevel(args.lane.thinkingLevel) ? args.lane.thinkingLevel : undefined;
-	const policy = contract?.profile.modelPolicy;
+	const policy = originContract?.profile.modelPolicy;
 	const candidates: LadderCandidate[] =
 		policy?.mode === "ordered-fallback"
 			? policy.candidates.map((candidate) => ({
@@ -129,12 +138,11 @@ export function outcomeLadderFacts(args: {
 					...(candidate.thinkingLevel ? { thinking: candidate.thinkingLevel } : {}),
 				}))
 			: [];
-	const escalations = task?.escalations ?? [];
 	const checkable = context?.requirementCheckIds?.() ?? new Set<string>();
 	const hostCheckable = args.coverage.uncovered
 		.filter((entry) => checkable.has(entry.id) && !args.checkedIds.has(entry.id))
 		.map((entry) => entry.id);
-	const route = attempt.dispatch.modelRouteSource;
+	const route = originAttempt.dispatch.modelRouteSource;
 	const remoteMachineId = remoteMachineOf(snapshot, attempt.taskId);
 	const review = reviewRunVerdict(snapshot, attempt);
 	return {

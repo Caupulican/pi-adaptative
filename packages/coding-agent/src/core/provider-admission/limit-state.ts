@@ -385,14 +385,15 @@ export function providerLimitFromFailure(
 		errorMessage = String(errorOrMessage);
 	}
 
-	if (delayMs === undefined && typeof errorOrMessage === "object" && errorOrMessage !== null) {
+	let providerDelayMs: number | undefined;
+	if (typeof errorOrMessage === "object" && errorOrMessage !== null) {
 		const directive = getProviderRetryDirective(errorOrMessage);
 		if (
 			directive?.retryAfterMs !== undefined &&
 			Number.isFinite(directive.retryAfterMs) &&
 			directive.retryAfterMs > 0
 		) {
-			delayMs = directive.retryAfterMs;
+			providerDelayMs = directive.retryAfterMs;
 		} else {
 			const headers =
 				(errorOrMessage as { headers?: unknown; response?: { headers?: unknown } }).headers ??
@@ -400,7 +401,7 @@ export function providerLimitFromFailure(
 			if (headers) {
 				const headerDelay = extractHeaderDelayMs(headers, nowMs);
 				if (headerDelay !== undefined) {
-					delayMs = headerDelay;
+					providerDelayMs = headerDelay;
 				}
 			}
 		}
@@ -410,6 +411,8 @@ export function providerLimitFromFailure(
 	let reason: ProviderLimitReason | undefined;
 	if (classified.reason === "rate_limit" || classified.reason === "overloaded") {
 		reason = classified.reason;
+	} else if (classified.reason === "billing_or_quota") {
+		reason = "usage_window";
 	} else if (typeof errorOrMessage === "object" && errorOrMessage !== null) {
 		const status = (errorOrMessage as { status?: unknown }).status;
 		if (status === 429) reason = "rate_limit";
@@ -417,7 +420,8 @@ export function providerLimitFromFailure(
 	}
 	if (!reason) return undefined;
 
-	const waitMs = delayMs ?? classified.retryAfterMs;
+	const statedDelayMs = providerDelayMs ?? classified.retryAfterMs;
+	const waitMs = reason === "usage_window" ? statedDelayMs : (delayMs ?? statedDelayMs);
 	if (waitMs === undefined || !Number.isFinite(waitMs) || waitMs <= 0) {
 		harnessLog.debug("provider", "a rate limit without a known reset was not recorded", () => ({ provider, reason }));
 		return undefined;

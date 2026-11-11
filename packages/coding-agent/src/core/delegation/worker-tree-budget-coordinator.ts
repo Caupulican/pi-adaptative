@@ -133,6 +133,18 @@ export function workerTreeBudgetKey(treeTaskId: string): string {
 }
 
 /**
+ * The cumulative budget shared across a task's attempts: authority ceilings apply except per-attempt `maxWallClockMs`,
+ * where only the profile's own `budget.maxWallClockMs` (`task.riskBudget.maxWallClockMs`) caps cumulative task time.
+ */
+export function cumulativeWorkerTreeBudget(authorityBudget: RiskBudget, profileBudget: RiskBudget): RiskBudget {
+	const { maxWallClockMs: _perAttemptWallClockMs, ...rest } = authorityBudget;
+	return {
+		...rest,
+		...(profileBudget.maxWallClockMs !== undefined ? { maxWallClockMs: profileBudget.maxWallClockMs } : {}),
+	};
+}
+
+/**
  * Rebuild every durable attempt of one task's tree, including attempts with no usage checkpoint yet. The root agent's
  * attempts count only for `treeTaskId` (a persistent specialist's earlier tasks are not charged to a new one); a
  * descendant agent's attempts all count, because recovered nested lineage records no per-task link.

@@ -17,6 +17,7 @@ import { sanitizeToolFailureContext } from "../../kernel/tool-failure-memory.ts"
 import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts";
 import type { AgentMessage, ThinkingLevel } from "../../kernel/types.ts";
 import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
+import { VERIFICATION_HANDOFF_REQUIRED_ERROR } from "../../kernel/verification-obligations.ts";
 import { workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
@@ -29,7 +30,6 @@ import { TASK_EVENTS_TOOL_NAME } from "../events/host-event-tool-names.ts";
 import { createTaskEventsTool } from "../events/task-events-tool.ts";
 import type { WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
 import { type ModelCapabilityProfile, resolveWorkerOutputTokenCeiling } from "../model-capability.ts";
-
 import { attemptUsageFromGatewayUsage, EMPTY_ATTEMPT_USAGE } from "../orchestration/attempt-usage.ts";
 import { CapabilityGatewayDeniedError, type ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
 import type { ArtifactContract, AttemptUsageSnapshot, ExecutionGrant } from "../orchestration/contracts.ts";
@@ -139,7 +139,9 @@ export async function runProviderCompletionWithBackoff(args: {
 	for (let attempt = 1; ; attempt++) {
 		try {
 			const completion = await args.attempt();
-			if (completion.stopReason !== "error") return completion;
+			if (completion.stopReason !== "error" || completion.errorMessage === VERIFICATION_HANDOFF_REQUIRED_ERROR) {
+				return completion;
+			}
 			throw new Error(
 				completion.errorMessage?.trim() || "Provider completion stopped with an error without diagnostic detail.",
 			);
@@ -341,11 +343,10 @@ function callbackEvidencedCompletion(
 	emittedMessages: readonly WorkerTranscriptMessage[],
 	endToolName?: string,
 ): { completion: IsolatedCompletionResult; suffix: WorkerTranscriptMessage[] } {
-	if (result.messages !== undefined && result.messages.length < historyLength) {
+	if (result.messages !== undefined && result.messages.length < historyLength)
 		throw new WorkerCompletionProtocolError(
 			"Worker completion protocol returned fewer messages than its input history.",
 		);
-	}
 	// `result.messages` is declared `Message[]` (IsolatedCompletionResult, agent-session-contracts.ts)
 	// but a child loop that committed a transient record (the kernel's step-3 host-gap hook) makes
 	// it genuinely WorkerTranscriptMessage[] at runtime - widening here, not narrowing, so this
@@ -363,14 +364,12 @@ function callbackEvidencedCompletion(
 	} else {
 		suffix = [...emittedMessages];
 	}
-	if (suffix.length === 0) {
+	if (suffix.length === 0)
 		throw new WorkerCompletionProtocolError("Worker completion protocol returned no durable message suffix.");
-	}
-	if (!suffix.some((message) => message.role === "assistant")) {
+	if (!suffix.some((message) => message.role === "assistant"))
 		throw new WorkerCompletionProtocolError(
 			"Worker completion protocol returned no assistant in its durable suffix.",
 		);
-	}
 	const assistants = emittedMessages.filter((message): message is AssistantMessage => message.role === "assistant");
 	const finalMessage = assistants.at(-1);
 	// A run ends on its last assistant message, or on the results of the tool calls that assistant made when
@@ -776,9 +775,12 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				fencingToken: options.durableHandle.fencingToken,
 			})
 		: undefined;
-	const projectCompletion = (text: string, stopReason: string, costUsd: number): WorkerCompletion => {
+	const projectCompletion = (
+		done: { text: string; stopReason: unknown; errorMessage?: string },
+		costUsd: number,
+	): WorkerCompletion => {
 		options.toolSurface.assertHealthy();
-		terminalOutput = text;
+		terminalOutput = done.text;
 		const finalChangedFiles = sealChangedFiles();
 		const submittedReport = reportCapture.submitted ?? lastSubmittedReport;
 		const hostVerdict = submittedReport ? judgeReport(submittedReport) : undefined;
@@ -800,9 +802,10 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				? [`worker report ${hostVerdict.verdict}: ${hostVerdict.reasonCodes[0] ?? "report_not_accepted"}`]
 				: [];
 		return {
-			text,
+			text: done.text,
 			costUsd,
-			stopReason,
+			stopReason: String(done.stopReason),
+			...(done.errorMessage ? { errorMessage: done.errorMessage } : {}),
 			changedFiles: finalChangedFiles,
 			blockers: [...toolIssues, ...reportBlockers],
 			commandReceipts: [...commandReceipts],
@@ -1105,11 +1108,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 							for (const receipt of options.recoveredTerminal.commandReceipts)
 								appendCommandReceipt(commandReceipts, { ...receipt });
 							checkpointUsage("Reused the persisted terminal worker assistant response after recovery.");
-							return projectCompletion(
-								options.recoveredTerminal.text,
-								options.recoveredTerminal.stopReason,
-								currentUsage().costUsd,
-							);
+							return projectCompletion(options.recoveredTerminal, currentUsage().costUsd);
 						}
 						const retentionPolicy = createRetentionPolicy(signal);
 						let activeProviderTurn: WorkerProviderTurnProtocol | undefined;
@@ -1720,11 +1719,10 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 								const appended = options.conversation.commitTranscript(transcriptCursor, evidenced.suffix, {
 									appendMissing: false,
 								});
-								if (appended !== 0) {
+								if (appended !== 0)
 									throw new WorkerConversationOwnershipError(
 										"Worker callback transcript verification unexpectedly appended missing messages.",
 									);
-								}
 								committed = true;
 								return evidenced.completion;
 							} finally {
@@ -1753,7 +1751,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 						);
 						// A replacement or further work can change the evidence. Never reuse an earlier
 						// accepted verdict, and never lose a typed report merely because correction ended in text.
-						return projectCompletion(completion.text, String(completion.stopReason), cumulativeUsage.costUsd);
+						return projectCompletion(completion, cumulativeUsage.costUsd);
 					}),
 				});
 				stopUsageClock();

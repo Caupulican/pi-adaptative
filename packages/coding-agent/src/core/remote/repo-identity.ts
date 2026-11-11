@@ -67,6 +67,10 @@ interface CachedIdentity {
 
 const cache = new Map<string, Promise<CachedIdentity>>();
 
+export function resetRepoIdentityCache(): void {
+	cache.clear();
+}
+
 async function readKey(path: string): Promise<CachedIdentity> {
 	const roots = (await git(path, ["rev-list", "--max-parents=0", "HEAD"]))
 		?.split(/\s+/)

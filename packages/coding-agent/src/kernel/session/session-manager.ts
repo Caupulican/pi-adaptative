@@ -62,6 +62,7 @@ import {
 	type ParentInputWake,
 	type ParentNoteSelection,
 	type PersistedParentInput,
+	parentInputMetadataOfMessage,
 	parentInputOf,
 	parentNoteMarker,
 	parentWakeContent,
@@ -70,6 +71,7 @@ import {
 import {
 	captureSessionAppendIdentity,
 	captureSessionAppendWriteIdentity,
+	expectedSessionAppendDurability,
 	SessionAppendCommittedError,
 	type SessionAppendIdentity,
 	type SessionAppendReceipt,
@@ -779,6 +781,10 @@ export class SessionManager {
 	/** Whether the entry is already written to the session file. Entries buffered before the first flush are not. */
 	isEntryPersisted(entryId: string): boolean {
 		return this.persist && this._getEntryFileLocation(entryId) !== undefined;
+	}
+
+	isEntryDurableForSession(entryId: string): boolean {
+		return this.persist ? this.isEntryPersisted(entryId) : !this.persistenceStateUncertain && this.byId.has(entryId);
 	}
 
 	/** Whether a failed write left the file's state unknown: appends are refused until the file is reopened. */
@@ -2125,7 +2131,7 @@ export class SessionManager {
 				payloadDigest: current.metadata.payloadDigest,
 				reason,
 			});
-			if (!this.isEntryPersisted(id)) throw new Error("Parent input skip was not physically persisted.");
+			if (!this.isEntryDurableForSession(id)) throw new Error("Parent input skip was not physically persisted.");
 			return true;
 		});
 	}
@@ -2154,7 +2160,7 @@ export class SessionManager {
 				return new Map(
 					ids.map((id) => {
 						const entry = byId.get(id);
-						if (!entry || entry.id !== id || !this.isEntryPersisted(id))
+						if (!entry || entry.id !== id || !this.isEntryDurableForSession(id))
 							throw new Error("Parent input source entry is not durable.");
 						return [id, entry] as const;
 					}),
@@ -2313,7 +2319,8 @@ export class SessionManager {
 				ownerEntryId,
 				inputs: selection.inputs,
 			});
-			if (!this.isEntryPersisted(entryId)) throw new Error("Parent note binding was not physically persisted.");
+			if (!this.isEntryDurableForSession(entryId))
+				throw new Error("Parent note binding was not physically persisted.");
 			if (owner) owner.ownerEntryId = ownerEntryId;
 		});
 		return selection.inputs.map((input) => input.deliveryId);
@@ -2342,7 +2349,10 @@ export class SessionManager {
 			if (!(error instanceof SessionAppendCommittedError)) throw error;
 			receipt = error.receipt;
 		}
-		if (receipt?.durability !== "persisted" || !receipt.entries.every((entry) => this.isEntryPersisted(entry.id)))
+		if (
+			receipt?.durability !== expectedSessionAppendDurability(this.persist) ||
+			!receipt.entries.every((entry) => this.isEntryDurableForSession(entry.id))
+		)
 			throw new Error("Parent input did not reach physical session storage.");
 		return receipt;
 	}
@@ -2368,29 +2378,20 @@ export class SessionManager {
 		message: CustomMessage<unknown>,
 		withAppend?: (append: () => ParentInputAppendReceipt) => ParentInputAppendReceipt,
 	): ParentInputAppendReceipt {
-		const candidate = parentInputOf({
-			type: "custom_message",
-			id: "candidate",
-			parentId: null,
-			timestamp: new Date().toISOString(),
-			customType: message.customType,
-			content: message.content,
-			display: message.display,
-			details: message.details,
-		});
-		if (!candidate) throw new Error("Parent input metadata is required.");
-		return this._withParentInputMutation(candidate.metadata.origin, () => {
+		const metadata = parentInputMetadataOfMessage(message);
+		if (!metadata) throw new Error("Parent input metadata is required.");
+		return this._withParentInputMutation(metadata.origin, () => {
 			const index = this._parentInputIndex();
-			const existing = this._parentInputReceipt(candidate.metadata.deliveryId);
+			const existing = this._parentInputReceipt(metadata.deliveryId);
 			if (existing) {
-				if (JSON.stringify(existing.metadata) !== JSON.stringify(candidate.metadata))
+				if (JSON.stringify(existing.metadata) !== JSON.stringify(metadata))
 					throw new Error("Parent input delivery ID conflicts with its saved payload.");
-				if (index.find(candidate.metadata.deliveryId)?.entryId !== existing.entryId)
+				if (index.find(metadata.deliveryId)?.entryId !== existing.entryId)
 					throw new Error("Parent input belongs to another branch.");
 				const entry = this.byId.get(existing.entryId)!;
 				return {
 					...captureSessionAppendIdentity(this.sessionId, this.sessionFile, [entry]),
-					durability: "persisted",
+					durability: expectedSessionAppendDurability(this.persist),
 					created: false,
 				};
 			}
@@ -2412,8 +2413,7 @@ export class SessionManager {
 
 	/** One durable detached batch, reused after restart until its exact provider answer settles it. */
 	beginParentInputWake(): ParentInputWake | undefined {
-		const index = this._parentInputIndex();
-		const existing = index.openWake();
+		const existing = this._parentInputIndex().openWake();
 		if (existing) return existing;
 		const pending = this._pendingParentBatch("turn");
 		if (!pending.length) return undefined;
@@ -2424,15 +2424,10 @@ export class SessionManager {
 				payloadDigest: input.metadata.payloadDigest,
 			}));
 			const wakeId = createHash("sha256").update(JSON.stringify(inputs)).digest("hex");
-			const content = parentWakeContent(wakeId, inputs);
+			const details = { version: 1, wakeId, inputs, detached: true };
+			const now = new Date().toISOString();
 			this._appendParentMessage(
-				createCustomMessage(
-					PARENT_INPUT_WAKE_CUSTOM_TYPE,
-					content,
-					false,
-					{ version: 1, wakeId, inputs, detached: true },
-					new Date().toISOString(),
-				),
+				createCustomMessage(PARENT_INPUT_WAKE_CUSTOM_TYPE, parentWakeContent(wakeId, inputs), false, details, now),
 			);
 			return this._parentInputIndex().openWake()!;
 		});
@@ -2463,12 +2458,9 @@ export class SessionManager {
 			return entry.content;
 		});
 		assertParentInputVisible(messages, parentWakeMarker(active.wakeId), contents);
-		const id = this.appendCustomEntry(PARENT_INPUT_WAKE_REQUEST_CUSTOM_TYPE, {
-			version: 1,
-			wakeId: active.wakeId,
-			requestId,
-		});
-		if (!this.isEntryPersisted(id)) throw new Error("Parent wake request binding was not persisted.");
+		const data = { version: 1, wakeId: active.wakeId, requestId };
+		const id = this.appendCustomEntry(PARENT_INPUT_WAKE_REQUEST_CUSTOM_TYPE, data);
+		if (!this.isEntryDurableForSession(id)) throw new Error("Parent wake request binding was not persisted.");
 	}
 
 	settleParentInputWake(wakeId: string): void {
@@ -2487,28 +2479,42 @@ export class SessionManager {
 			const id = generateId(ids);
 			ids.add(id);
 			const timestamp = new Date().toISOString();
-			const settlement: CustomEntry = {
+			const makeCustom = (
+				entryId: string,
+				parentId: string | null,
+				customType: string,
+				data: unknown,
+			): CustomEntry => ({
 				type: "custom",
-				id,
-				parentId: this.leafId,
+				id: entryId,
+				parentId,
 				timestamp,
-				customType: PARENT_INPUT_SETTLED_CUSTOM_TYPE,
-				data: { version: 1, wakeId, ...current.completed },
-			};
-			const report: CustomEntry = {
-				type: "custom",
-				id: generateId(ids),
-				parentId: id,
-				timestamp,
-				customType: PARENT_INPUT_CONSUMED_CUSTOM_TYPE,
-				data: consumption,
-			};
+				customType,
+				data,
+			});
+			const settlement = makeCustom(id, this.leafId, PARENT_INPUT_SETTLED_CUSTOM_TYPE, {
+				version: 1,
+				wakeId,
+				...current.completed,
+			});
+			const report = makeCustom(generateId(ids), id, PARENT_INPUT_CONSUMED_CUSTOM_TYPE, consumption);
 			this._appendEntries([settlement, report]);
-			if (!this.isEntryPersisted(report.id)) throw new Error("Parent wake settlement was not persisted.");
+			if (!this.isEntryDurableForSession(report.id)) throw new Error("Parent wake settlement was not persisted.");
 		});
 	}
 
 	private _withParentInputMutation<T>(origin: ParentInputOrigin, operation: () => T): T {
+		const assertOrigin = (): void => {
+			const badFile = origin.sessionFile !== undefined && (!this.persist || origin.sessionFile !== this.sessionFile);
+			if (origin.sessionId !== this.sessionId || badFile) throw new Error("Parent input session identity changed.");
+			if (!this.getBranch().some((e) => e.id === origin.leafId) || !this.isEntryDurableForSession(origin.leafId))
+				throw new Error("Parent input origin is not on the current durable branch.");
+		};
+		if (!this.persist) {
+			if (this.persistenceStateUncertain) throw new Error("Parent input session persistence is uncertain.");
+			assertOrigin();
+			return operation();
+		}
 		if (!this.hasDurableSessionFile() || !this.sessionFile || this.persistenceStateUncertain)
 			throw new Error("Parent input requires a healthy durable session file.");
 		return withSessionFileMutation(
@@ -2519,13 +2525,7 @@ export class SessionManager {
 			() => {
 				if (!this.storageRevision || !sameFileVersion(this.storageRevision, statSync(this.sessionFile!)))
 					throw new Error("Parent session changed on disk; reopen it before delivering input.");
-				if (
-					origin.sessionId !== this.sessionId ||
-					(origin.sessionFile !== undefined && origin.sessionFile !== this.sessionFile)
-				)
-					throw new Error("Parent input session identity changed.");
-				if (!this.getBranch().some((entry) => entry.id === origin.leafId) || !this.isEntryPersisted(origin.leafId))
-					throw new Error("Parent input origin is not on the current durable branch.");
+				assertOrigin();
 				return operation();
 			},
 			{ session: this, revision: this.storageRevision },

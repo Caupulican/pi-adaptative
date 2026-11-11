@@ -21,11 +21,13 @@ export interface WorkerFleetLimits {
 	maxNestedAgentsPerSession: number;
 }
 
+export const MAX_LIVE_WORKER_AGENTS_PER_SESSION = 256;
+
 export const DEFAULT_WORKER_FLEET_LIMITS: Readonly<WorkerFleetLimits> = Object.freeze({
 	maxDepth: MAX_ORCHESTRATION_AGENT_DEPTH,
-	maxAgentsPerSession: MAX_ORCHESTRATION_AGENT_BINDINGS,
+	maxAgentsPerSession: MAX_LIVE_WORKER_AGENTS_PER_SESSION,
 	maxChildrenPerAgent: MAX_ORCHESTRATION_DIRECT_CHILDREN,
-	maxNestedAgentsPerSession: MAX_ORCHESTRATION_AGENT_BINDINGS,
+	maxNestedAgentsPerSession: MAX_LIVE_WORKER_AGENTS_PER_SESSION,
 });
 
 /** Every newly compiled native worker is a leaf; legacy wider limits are narrowed to this contract. */
@@ -166,7 +168,14 @@ function evaluateWorkerIdentityHeadroom(
 	if (!Number.isSafeInteger(requiredAgentSlots) || requiredAgentSlots < 0) {
 		throw new TypeError("requiredAgentSlots must be a non-negative safe integer.");
 	}
-	return requiredAgentSlots > limits.maxAgentsPerSession - Object.keys(agents).length
+	let liveAgents = 0;
+	let totalAgents = 0;
+	for (const agent of Object.values(agents)) {
+		totalAgents += 1;
+		if (agent.status !== "retired") liveAgents += 1;
+	}
+	return requiredAgentSlots > limits.maxAgentsPerSession - liveAgents ||
+		totalAgents + requiredAgentSlots > MAX_ORCHESTRATION_AGENT_BINDINGS
 		? { ok: false, reasonCode: "worker_agent_session_limit_reached" }
 		: { ok: true };
 }
@@ -206,17 +215,16 @@ export function evaluateNewWorkerAdmission(
 	if (depth > limits.maxDepth) return { ok: false, reasonCode: "worker_agent_depth_limit_reached" };
 	let directChildren = 0;
 	for (const agent of Object.values(agents)) {
-		if (agent.parentAgentId === parent.agentId) directChildren += 1;
+		if (agent.parentAgentId === parent.agentId && agent.status !== "retired") directChildren += 1;
 	}
 	if (directChildren >= limits.maxChildrenPerAgent) {
 		return { ok: false, reasonCode: "worker_agent_child_limit_reached" };
 	}
 	let nestedAgents = 0;
 	for (const agent of Object.values(agents)) {
-		// A retired agent's durable identity slot is still reserved (evaluateWorkerIdentityHeadroom
-		// above already bounds total agent count), but it no longer occupies a live nested-fleet
-		// slot. Counting it here permanently blocks all future nested delegation once any nested
-		// child has ever finished when a recovered legacy contract retains a nested-session limit of one.
+		// Retired bindings remain in the hot projection only until retention releases them
+		// (`evaluateWorkerIdentityHeadroom` guards the total projection ceiling), and no longer
+		// occupy a live direct-child or nested-fleet slot.
 		if (agent.parentAgentId && agent.status !== "retired") nestedAgents += 1;
 	}
 	if (nestedAgents >= limits.maxNestedAgentsPerSession) {

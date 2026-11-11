@@ -420,6 +420,7 @@ export function createSubmitReportTool(
 				content: [{ type: "text", text: "Report received." }],
 				details: { requirements: capture.submitted.report.requirements.length },
 				terminate: true,
+				handoff: true,
 			};
 		},
 	};

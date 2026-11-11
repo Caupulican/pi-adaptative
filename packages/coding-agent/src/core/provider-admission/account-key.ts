@@ -9,8 +9,8 @@ import { resolveConfigValue } from "../resolve-config-value.ts";
  * credential is configured. Two accounts on one provider are two budgets; keying on the provider
  * alone made them share a limit one of them never hit.
  *
- * The identity is never a secret: an OAuth account id when the credential carries one, otherwise
- * the `sub` claim of the access token, otherwise a short digest of the credential material.
+ * The identity is never a secret: an OAuth account or user id when the credential carries one,
+ * otherwise the `sub` claim of the access token, otherwise a short digest of the credential material.
  */
 
 export interface ProviderAccountKey {
@@ -19,14 +19,19 @@ export interface ProviderAccountKey {
 	account?: string;
 }
 
+function nonEmptyString(value: unknown): string | undefined {
+	return typeof value === "string" && value.trim() ? value.trim() : undefined;
+}
+
 export function credentialIdentity(credential: AuthCredential | undefined): string | undefined {
 	if (!credential) return undefined;
 	if (credential.type === "oauth") {
-		const accountId = (credential as { accountId?: unknown }).accountId;
-		if (typeof accountId === "string" && accountId.trim()) return accountId.trim();
-		const sub = jwtSubject(credential.access);
-		if (sub) return sub;
-		return digest(credential.refresh || credential.access);
+		return (
+			nonEmptyString(credential.accountId) ??
+			nonEmptyString(credential.userId) ??
+			jwtSubject(credential.access) ??
+			digest(credential.refresh || credential.access)
+		);
 	}
 	return credential.key ? digest(credential.key) : undefined;
 }
@@ -41,7 +46,7 @@ function jwtSubject(token: string | undefined): string | undefined {
 		) as {
 			sub?: unknown;
 		};
-		return typeof payload.sub === "string" && payload.sub.trim() ? payload.sub.trim() : undefined;
+		return nonEmptyString(payload.sub);
 	} catch {
 		return undefined;
 	}

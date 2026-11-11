@@ -45,15 +45,15 @@ export function isRunawayStopReason(reason: string | undefined): boolean {
 export function isGoalExecutionActive(status: GoalStatus): boolean {
 	return status === "active";
 }
-
 export function isGoalResumableStatus(status: GoalStatus): boolean {
 	return status === "paused" || status === "blocked" || status === "usage_limited";
 }
-
+export function isGoalStoppedStatus(status: GoalStatus): boolean {
+	return isGoalResumableStatus(status) || status === "budget_limited";
+}
 export function isGoalTerminalStatus(status: GoalStatus): boolean {
 	return status === "completed" || status === "cancelled" || status === "budget_limited";
 }
-
 export function isGoalUnfinishedStatus(status: GoalStatus): boolean {
 	return !isGoalTerminalStatus(status);
 }

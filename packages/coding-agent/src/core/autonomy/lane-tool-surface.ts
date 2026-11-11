@@ -564,12 +564,36 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	if (!options.yolo && options.grant?.allowedTools.some((name) => !manifestsByName.has(name))) {
 		throw new Error("Compiled lane grant references a tool without a capability manifest.");
 	}
+	// A worker's commands run in the worker run environment (per-worker temp directory, no inherited
+	// credentials, an ownership marker): disposal ends every process still carrying the marker and removes
+	// the scratch directory, so a shell lane leaves nothing behind.
+	// Every route a worker has to a process (bash, python, run_process) gets the same environment, so no tool is
+	// the unattributed or credential-bearing one; a worker with none of them has nothing to run and no scratch.
+	// Created before admission: a read-only shell may write only inside this scratch directory.
+	const runsProcesses =
+		options.shellSessionKey !== undefined ||
+		allowedToolSet.has(PYTHON_LANE_TOOL_NAME) ||
+		allowedToolSet.has(PROCESS_LANE_TOOL_NAME);
+	// A lane with a read-only shell and no `network.http` reaches no network through git's implicit paths either.
+	const networkGranted = options.grant?.capabilities.includes("network.http") === true;
+	const offline = (options.readOnly === true || options.shellReadOnly === true) && !networkGranted;
+	const runEnvironment = runsProcesses
+		? createWorkerRunEnvironment(
+				options.workerLabel ?? options.shellSessionKey ?? mutationScope,
+				options.onWorkerProcessesReaped,
+				{ offline, readOnly: options.readOnly === true },
+			)
+		: undefined;
+	const scratchRoots = runEnvironment
+		? [...new Set([runEnvironment.scratchDirectory, safeRealpathSync(runEnvironment.scratchDirectory)])]
+		: [];
 	const gateway = options.grant
 		? new CapabilityGateway({
 				grant: options.grant,
 				cwd: options.cwd,
 				...(options.initialUsage !== undefined ? { initialUsage: options.initialUsage } : {}),
 				...(options.sharedBudget ? { sharedBudget: options.sharedBudget } : {}),
+				...(scratchRoots.length > 0 ? { scratchReadPaths: scratchRoots } : {}),
 			})
 		: undefined;
 	const toolUsage = new LaneToolUsage(gateway ? (usage) => gateway.recordUsage(usage) : undefined);
@@ -595,7 +619,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		],
 		allowedTools,
 		deniedTools,
-		allowedPaths: [path.resolve(options.cwd)],
+		allowedPaths: [path.resolve(options.cwd), ...scratchRoots],
 		...(deniedPaths && deniedPaths.length > 0 ? { deniedPaths } : {}),
 	};
 	const writeProtectionEnvelope: CapabilityEnvelope | undefined =
@@ -627,33 +651,10 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			}
 		: undefined;
 
-	// A worker's commands run in the worker run environment (per-worker temp directory, no inherited
-	// credentials, an ownership marker): disposal ends every process still carrying the marker and removes
-	// the scratch directory, so a shell lane leaves nothing behind.
-	// Every route a worker has to a process (bash, python, run_process) gets the same environment, so no tool is
-	// the unattributed or credential-bearing one; a worker with none of them has nothing to run and no scratch.
-	// Created before admission: a read-only shell may write only inside this scratch directory.
-	const runsProcesses =
-		options.shellSessionKey !== undefined ||
-		allowedToolSet.has(PYTHON_LANE_TOOL_NAME) ||
-		allowedToolSet.has(PROCESS_LANE_TOOL_NAME);
-	// A lane with a read-only shell and no `network.http` reaches no network through git's implicit paths either.
-	const networkGranted = options.grant?.capabilities.includes("network.http") === true;
-	const offline = (options.readOnly === true || options.shellReadOnly === true) && !networkGranted;
-	const runEnvironment = runsProcesses
-		? createWorkerRunEnvironment(
-				options.workerLabel ?? options.shellSessionKey ?? mutationScope,
-				options.onWorkerProcessesReaped,
-				{ offline, readOnly: options.readOnly === true },
-			)
-		: undefined;
 	const readScopeRoots = options.readScopeRoots?.flatMap((entry) => {
 		const root = path.resolve(entry);
 		return [...new Set([root, safeRealpathSync(root)])];
 	});
-	const scratchRoots = runEnvironment
-		? [...new Set([runEnvironment.scratchDirectory, safeRealpathSync(runEnvironment.scratchDirectory)])]
-		: [];
 	const readOnlyShell: ReadOnlyShellLaneScope | undefined = options.shellReadOnly
 		? {
 				network: networkGranted,

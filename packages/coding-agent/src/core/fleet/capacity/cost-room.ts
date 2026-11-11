@@ -68,6 +68,7 @@ interface SettledRecord {
 	readonly usd: number;
 	readonly at: number;
 	readonly terminal?: boolean;
+	readonly modelRef?: string;
 }
 
 /** One charge made by this process, merged into the shared file under its lock against the record the file holds then. */
@@ -77,6 +78,7 @@ interface PendingCharge {
 	readonly at: number;
 	readonly terminal: boolean;
 	readonly objectiveId?: string;
+	readonly modelRef?: string;
 }
 
 interface SpendFile {
@@ -179,7 +181,12 @@ function parseSpendFile(value: unknown): SpendFile | undefined {
 		for (const [attemptId, raw] of Object.entries(value.settled))
 			if (isPlainRecord(raw) && typeof raw.usd === "number" && typeof raw.at === "number")
 				if (Number.isFinite(raw.usd) && Number.isFinite(raw.at))
-					settled[attemptId] = { usd: raw.usd, at: raw.at, ...(raw.terminal === true ? { terminal: true } : {}) };
+					settled[attemptId] = {
+						usd: raw.usd,
+						at: raw.at,
+						...(raw.terminal === true ? { terminal: true } : {}),
+						...(typeof raw.modelRef === "string" ? { modelRef: raw.modelRef } : {}),
+					};
 	return { v: 1, day: value.day, dayUsd: value.dayUsd, goals, windows, reservations, settled };
 }
 
@@ -303,6 +310,7 @@ export class MeteredSpend {
 		cumulativeUsd: number | undefined,
 		objectiveId: string | undefined,
 		terminal = false,
+		finalModelRef?: string,
 	): void {
 		this.adoptDisk();
 		const reservation = this.reservations.get(attemptId);
@@ -315,14 +323,16 @@ export class MeteredSpend {
 		const cumulative =
 			cumulativeUsd !== undefined && Number.isFinite(cumulativeUsd) && cumulativeUsd > 0 ? cumulativeUsd : 0;
 		const pendingCumulative = this.pendingCharges.filter((charge) => charge.attemptId === attemptId).at(-1);
-		const already = Math.max(this.state.settled?.[attemptId]?.usd ?? 0, pendingCumulative?.cumulative ?? 0);
+		const priorSettled = this.state.settled?.[attemptId];
+		const already = Math.max(priorSettled?.usd ?? 0, pendingCumulative?.cumulative ?? 0);
 		const delta = cumulative - already;
-		if (reservation) {
-			const spent = Math.max(0, delta);
-			const previous = this.averages.get(reservation.modelRef);
+		const modelRef = finalModelRef ?? reservation?.modelRef ?? pendingCumulative?.modelRef ?? priorSettled?.modelRef;
+		if (terminal && modelRef !== undefined) {
+			const actual = Math.max(0, cumulative);
+			const previous = this.averages.get(modelRef);
 			this.averages.set(
-				reservation.modelRef,
-				previous === undefined ? spent : (1 - ESTIMATE_SMOOTHING) * previous + ESTIMATE_SMOOTHING * spent,
+				modelRef,
+				previous === undefined ? actual : (1 - ESTIMATE_SMOOTHING) * previous + ESTIMATE_SMOOTHING * actual,
 			);
 		}
 		if (delta <= 0) return;
@@ -334,6 +344,7 @@ export class MeteredSpend {
 			at: now,
 			terminal,
 			...(goal ? { objectiveId: goal } : {}),
+			...(modelRef ? { modelRef } : {}),
 		});
 		const day = localDay(now);
 		if (this.pending.day !== day) this.pending = { dayUsd: 0, day, goals: new Map(), windows: new Map() };
@@ -487,9 +498,16 @@ export class MeteredSpend {
 		// lands goes to the day, goal and window the charge was made in, so two processes charging one attempt never both count it.
 		this.mergedCharges = [...this.pendingCharges];
 		for (const charge of this.mergedCharges) {
-			const delta = charge.cumulative - (settled.get(charge.attemptId)?.usd ?? 0);
+			const prior = settled.get(charge.attemptId);
+			const delta = charge.cumulative - (prior?.usd ?? 0);
 			if (delta <= 0) continue;
-			settled.set(charge.attemptId, { usd: charge.cumulative, at: charge.at, terminal: charge.terminal });
+			const modelRef = charge.modelRef ?? prior?.modelRef;
+			settled.set(charge.attemptId, {
+				usd: charge.cumulative,
+				at: charge.at,
+				terminal: charge.terminal,
+				...(modelRef ? { modelRef } : {}),
+			});
 			const chargeDay = localDay(charge.at);
 			if (chargeDay > day) {
 				day = chargeDay;

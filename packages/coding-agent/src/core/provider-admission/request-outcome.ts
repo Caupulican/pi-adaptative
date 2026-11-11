@@ -58,6 +58,10 @@ function failureOutcome(provider: string, failure: unknown, nowMs: number): Prov
 		isPlainRecord(failure) || failure instanceof Error ? (failure as { status?: unknown }).status : undefined;
 	const { reason } = classifyFailure({ message, provider });
 	if (reason === "aborted") return { kind: "aborted" };
+	if (reason === "billing_or_quota") {
+		const limit = providerLimitFromFailure(provider, failure, nowMs);
+		return limit ? { kind: "usage_window", resetAt: limit.limitedUntil } : { kind: "other" };
+	}
 	if (reason === "rate_limit" || reason === "overloaded" || status === 429 || status === 529) {
 		const limit = providerLimitFromFailure(provider, failure, nowMs);
 		return { kind: "congestion", ...(limit ? { resetAt: limit.limitedUntil } : {}) };

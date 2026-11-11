@@ -61,24 +61,29 @@ export function proofFields(
 	return { evid: "cmd", note: `Proof: run ${command}; exit code 0 proves the step.` };
 }
 
+const QUESTION_JOINS: ReadonlySet<string> = new Set(["reduce", "verify", "vote"]);
+
 /**
  * The refusals a step's own fields earn before it is built: a proof outside the grammar (it would otherwise be dropped),
- * a join-only field on a plain step (`question`, `criteria`), which nothing would read, and a `need` on a step that is
- * no collect join, which nothing would settle by.
+ * a join-only field on a step whose join does not read it (`question` belongs to reduce, verify or vote; `criteria` to
+ * vote), and a `need` on a step that is no collect join, which nothing would settle by.
  */
 export function stepShapeProblems(steps: readonly PlanToolStep[]): string[] {
 	return steps.flatMap((step) => {
 		const problems: string[] = [];
+		const stated = step.join === undefined ? "plain work" : `a ${step.join} join`;
 		if (step.proof !== undefined && proofFields(step.proof) === undefined) {
 			problems.push(
 				`step "${step.id}": proof is cite, cmd, diff, or check:<command> (a command whose exit code 0 proves the step)`,
 			);
 		}
-		if (step.join === undefined && (step.question !== undefined || step.criteria !== undefined)) {
-			problems.push(`step "${step.id}" is plain work; question and criteria belong to a join step`);
+		if (step.question !== undefined && (step.join === undefined || !QUESTION_JOINS.has(step.join))) {
+			problems.push(`step "${step.id}" is ${stated}; question belongs to a reduce, verify, or vote step`);
+		}
+		if (step.criteria !== undefined && step.join !== "vote") {
+			problems.push(`step "${step.id}" is ${stated}; criteria belong to a vote step`);
 		}
 		if (step.need !== undefined && step.join !== "collect") {
-			const stated = step.join === undefined ? "plain work" : `a ${step.join} join`;
 			problems.push(`step "${step.id}" is ${stated}; need belongs to a collect step`);
 		}
 		return problems;

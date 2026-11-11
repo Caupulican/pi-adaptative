@@ -8,7 +8,11 @@ import {
 	toolPathSpellings,
 } from "../../kernel/utils/paths.ts";
 import { awaitPreflight, requireSynchronousPreflight } from "../preflight.ts";
-import { isGrantedExtensionToolName, resolveToolCallPathAccess } from "../tool-capability-policy.ts";
+import {
+	isGrantedExtensionToolName,
+	resolveToolCallPathAccess,
+	type ToolPathAccess,
+} from "../tool-capability-policy.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { isPathWithinScopeWithDialect, safeRealpathSync } from "./path-scope.ts";
@@ -167,6 +171,7 @@ export interface AssessPathEnvelopeOptions {
 	scopeCwd?: string;
 	pathAuthority?: ExecutionPathAuthority;
 	signal?: AbortSignal;
+	pathAccess?: Exclude<ToolPathAccess, "none">;
 }
 
 function inferFlavor(cwd: string, authority?: ExecutionPathAuthority): ExecutionPathFlavor {
@@ -265,6 +270,7 @@ function initEnvelopeContext(envelope: CapabilityEnvelope, rawPath: string, opti
 		allowed: envelope.allowedPaths ?? [],
 		denied: envelope.deniedPaths ?? [],
 		exempt: envelope.exemptPaths ?? [],
+		exemptRead: options.pathAccess === "read" ? (envelope.exemptReadPaths ?? []) : [],
 	};
 }
 
@@ -290,12 +296,40 @@ function* matchesAllowedScope(
 function* assessEnvelopeScope(
 	ctx: ReturnType<typeof initEnvelopeContext>,
 ): Generator<string, PathEnvelopeAssessment, PathResolutionFact> {
-	if (ctx.allowed.length > 0 && !(yield* matchesAllowedScope(ctx.lexicalTarget, ctx))) {
+	const resolvedExemptReads: { raw: string; lexical: string; resolved?: string }[] = [];
+	for (const exemptReadPath of ctx.exemptRead) {
+		const lexical = resolveExecutionPath(exemptReadPath, ctx.scopeCwd, ctx.flavor);
+		const { resolved } = yield lexical;
+		resolvedExemptReads.push({ raw: exemptReadPath, lexical, resolved });
+	}
+	const lexicallyExemptRead = resolvedExemptReads.some((entry) =>
+		matchesEnvelopeCandidate(
+			ctx.lexicalTarget,
+			entry.raw,
+			ctx.scopeCwd,
+			ctx.flavor,
+			ctx.caseSensitive,
+			entry.resolved,
+		),
+	);
+	if (!lexicallyExemptRead && ctx.allowed.length > 0 && !(yield* matchesAllowedScope(ctx.lexicalTarget, ctx))) {
 		return { allowed: false, reasonCode: "path_outside_allowed_roots" };
 	}
 
 	const { resolved: target } = yield ctx.lexicalTarget;
 	if (!target) return { allowed: false, reasonCode: "path_outside_allowed_roots" };
+
+	const matchingExemptReads = resolvedExemptReads.filter(
+		(entry) =>
+			matchesEnvelopeCandidate(
+				ctx.lexicalTarget,
+				entry.raw,
+				ctx.scopeCwd,
+				ctx.flavor,
+				ctx.caseSensitive,
+				entry.resolved,
+			) && matchesEnvelopeCandidate(target, entry.raw, ctx.scopeCwd, ctx.flavor, ctx.caseSensitive, entry.resolved),
+	);
 
 	let exempt = false;
 	for (const exemptPath of ctx.exempt) {
@@ -307,15 +341,27 @@ function* assessEnvelopeScope(
 	}
 	for (const denied of exempt ? [] : ctx.denied) {
 		const { resolved, unavailable } = yield resolveExecutionPath(denied, ctx.scopeCwd, ctx.flavor);
-		if (
-			unavailable ||
-			matchesEnvelopeCandidate(target, denied, ctx.scopeCwd, ctx.flavor, ctx.caseSensitive, resolved)
-		) {
+		if (unavailable) {
 			return { allowed: false, reasonCode: "path_denied", target };
+		}
+		if (matchesEnvelopeCandidate(target, denied, ctx.scopeCwd, ctx.flavor, ctx.caseSensitive, resolved)) {
+			const ancestorOfExemptRead = matchingExemptReads.some((entry) =>
+				matchesEnvelopeCandidate(
+					entry.resolved ?? entry.lexical,
+					denied,
+					ctx.scopeCwd,
+					ctx.flavor,
+					ctx.caseSensitive,
+					resolved,
+				),
+			);
+			if (!ancestorOfExemptRead) {
+				return { allowed: false, reasonCode: "path_denied", target };
+			}
 		}
 	}
 
-	if (ctx.allowed.length === 0 || (yield* matchesAllowedScope(target, ctx))) {
+	if (matchingExemptReads.length > 0 || ctx.allowed.length === 0 || (yield* matchesAllowedScope(target, ctx))) {
 		return { allowed: true, target };
 	}
 
@@ -496,6 +542,7 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 								scopeCwd: cwd,
 								pathAuthority,
 								signal,
+								pathAccess,
 							});
 							if (!assessment.allowed) {
 								return denialBlock(rawPath);
@@ -510,6 +557,7 @@ export function wrapToolWithEnvelopeScope<T extends EnvelopeScopedTool>(
 					const assessment = assessPathWithinEnvelopeSync(envelope, rawPath, {
 						cwd: executionContext?.cwd ?? cwd,
 						scopeCwd: cwd,
+						pathAccess,
 					});
 					if (!assessment.allowed) {
 						return denialBlock(rawPath) as ReturnType<Execute>;

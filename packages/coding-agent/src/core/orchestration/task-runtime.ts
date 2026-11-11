@@ -38,7 +38,6 @@ import {
 	MAX_ORCHESTRATION_APPROVALS,
 	MAX_ORCHESTRATION_ATTEMPTS,
 	MAX_ORCHESTRATION_CHECKPOINTS,
-	MAX_ORCHESTRATION_NOTIFICATIONS,
 	MAX_ORCHESTRATION_OBJECTIVE_EVIDENCE,
 	MAX_ORCHESTRATION_OBJECTIVES,
 	MAX_ORCHESTRATION_TASKS,
@@ -54,6 +53,7 @@ import {
 	type WorkerResultContract,
 } from "./contracts.ts";
 import type { OrchestrationEventStore } from "./event-store.ts";
+import { assertNotificationCapacity } from "./notification-eviction.ts";
 import { assertLifetimeHeadroom, describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
 import { assertRetentionPruneAllowed } from "./retention-eligibility.ts";
 import { RetentionPlanStaleError, type RetentionPrunedPayload, retentionPruneEventInput } from "./retention-event.ts";
@@ -1298,7 +1298,7 @@ export class DurableTaskRuntime {
 			normalized,
 		);
 		assertRecordHasCapacity(this.state.approvals, MAX_ORCHESTRATION_APPROVALS, "approval");
-		assertRecordHasCapacity(this.state.notifications, MAX_ORCHESTRATION_NOTIFICATIONS, "notification");
+		assertNotificationCapacity(this.state);
 		this.commit({
 			type: "approval.requested",
 			aggregateId: normalized.attemptId ?? normalized.taskId ?? normalized.objectiveId,
@@ -1363,7 +1363,7 @@ export class DurableTaskRuntime {
 			}
 			return structuredClone(existing);
 		}
-		assertRecordHasCapacity(this.state.notifications, MAX_ORCHESTRATION_NOTIFICATIONS, "notification");
+		assertNotificationCapacity(this.state);
 		this.commit({
 			type: "notification.enqueued",
 			aggregateId: args.objectiveId,

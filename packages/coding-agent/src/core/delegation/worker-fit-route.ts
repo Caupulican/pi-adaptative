@@ -67,6 +67,19 @@ export type WorkerAdmission =
 	  }
 	| { ok: false; skipReason: string };
 
+/** Keep the original route provenance and pin diagnostics across contract/directory re-admission. */
+export function preserveWorkerAdmissionRoute(
+	current: Extract<WorkerAdmission, { ok: true }>,
+	origin: Pick<Extract<WorkerAdmission, { ok: true }>, "modelRouteSource" | "modelPinSource" | "modelPinBypass">,
+): Extract<WorkerAdmission, { ok: true }> {
+	return {
+		...current,
+		modelRouteSource: origin.modelRouteSource,
+		...(origin.modelPinSource ? { modelPinSource: origin.modelPinSource } : {}),
+		...(origin.modelPinBypass ? { modelPinBypass: origin.modelPinBypass } : {}),
+	};
+}
+
 /** What the fit route reads from, and asks of, the worker controller. */
 export interface WorkerFitRoutePort {
 	settings(): ParentExecutionSettingsSource;

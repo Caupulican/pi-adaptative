@@ -149,10 +149,24 @@ export function workerRequestForDispatch(
 				? raisedThinking(supersededThinking)
 				: dispatch.thinking;
 	const pinned = dispatch.escalation?.pinned;
-	// A rerun's scopes are relative to where its original's cwd sat; a plan step's are relative to the session cwd.
-	const base = pinned ? locationBase(pinned.location, sessionCwd) : sessionCwd;
+	const inLane = pinned?.location === "lane";
+	const freshPinnedLane = inLane && pinned.laneDirectory === undefined;
+	// A rerun's scopes are relative to where its original's cwd sat (the reused lane directory for an in-place lane rerun, or
+	// the session cwd before `isolateFreshWriter` relocates a fresh lane rerun); a plan step's are relative to the session cwd.
+	const base = pinned
+		? inLane
+			? (pinned.laneDirectory ?? sessionCwd)
+			: locationBase(pinned.location, sessionCwd)
+		: sessionCwd;
 	const fromBase = (path: string): string => (isAbsolute(path) ? path : resolve(base, path));
 	const writePaths = dispatch.writeScope.map(fromBase);
+	const pinnedPath = inLane
+		? dispatch.escalation?.attemptOfTaskId
+			? undefined
+			: pinned.laneDirectory
+		: pinned && pinned.location !== "."
+			? pinned.location
+			: undefined;
 	const authority = {
 		...(dispatch.model ? { model: { provider: dispatch.model.provider, modelId: dispatch.model.modelId } } : {}),
 		...(thinkingLevel !== undefined ? { thinkingLevel } : {}),
@@ -164,12 +178,15 @@ export function workerRequestForDispatch(
 		...(dispatch.verification?.directory && !pinned ? { path: dispatch.verification.directory } : {}),
 		...(pinned
 			? {
+					...(pinned.role !== undefined ? { role: pinned.role } : {}),
+					...(pinned.capabilities !== undefined ? { capabilities: [...pinned.capabilities] } : {}),
+					...(pinned.toolNames !== undefined ? { toolNames: [...pinned.toolNames] } : {}),
 					readOnly: pinned.readOnly,
 					...(pinned.shellReadOnly ? { shellReadOnly: true } : {}),
 					...(pinned.readScope !== undefined ? { readPaths: pinned.readScope.map(fromBase) } : {}),
 					budget: { ...pinned.budget },
-					// The original's workspace: the rerun's cwd is the directory the original's cwd was, not the session root.
-					...(pinned.location !== "." ? { path: pinned.location } : {}),
+					// The original's workspace: set for a read-only lane review rerun or non-root shared path; omitted for `attemptOf` lane reruns (adopted via `prior`) and fresh lanes.
+					...(pinnedPath !== undefined ? { path: pinnedPath } : {}),
 				}
 			: {}),
 	};
@@ -201,10 +218,19 @@ export function workerRequestForDispatch(
 		...(pinned?.turnOrigin !== undefined ? { turnOrigin: pinned.turnOrigin } : {}),
 		...(pinned?.receiptOrigin !== undefined ? { receiptOrigin: pinned.receiptOrigin } : {}),
 		...(pinned
-			? { isolation: "shared" as const }
+			? { isolation: freshPinnedLane ? ("worktree" as const) : ("shared" as const) }
 			: dispatch.isolation === "worktree"
 				? { isolation: "worktree" as const }
 				: {}),
+		// A fresh worktree-lane rerun needs its own new worker identity so `isolateFreshWriter` binds a new lane rather than reusing an idle specialist.
+		...(freshPinnedLane
+			? {
+					parallelWork: {
+						independentOf: dispatch.escalation?.supersedesTaskId ? [dispatch.escalation.supersedesTaskId] : [],
+						justification: "Escalation rerun isolated in a fresh worktree lane.",
+					},
+				}
+			: {}),
 		...(dispatch.escalation?.attemptOfTaskId ? { attemptOf: { taskId: dispatch.escalation.attemptOfTaskId } } : {}),
 		messageReplayKey: `fleet:${dispatch.idempotencyKey}`,
 		...(Object.keys(authority).length > 0 ? { authority } : {}),

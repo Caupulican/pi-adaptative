@@ -42,7 +42,6 @@ import {
 	MAX_ORCHESTRATION_ATTEMPT_PARENT_WRITES,
 	MAX_ORCHESTRATION_ATTEMPTS,
 	MAX_ORCHESTRATION_CHECKPOINTS,
-	MAX_ORCHESTRATION_NOTIFICATIONS,
 	MAX_ORCHESTRATION_OBJECTIVES,
 	MAX_ORCHESTRATION_TASKS,
 	type ManagedLaneLifetime,
@@ -55,6 +54,7 @@ import {
 	WORKER_RESULT_STATUSES,
 	type WorkerResultContract,
 } from "./contracts.ts";
+import { ensureNotificationCapacity } from "./notification-eviction.ts";
 import { applyRetentionEvent, describeAttemptLimit, describeObjectiveLimit } from "./retention.ts";
 import {
 	admittedTurnOriginFromValue,
@@ -1924,7 +1924,7 @@ export function reduceOrchestrationEvent(
 				throw new DurableTaskRuntimeError(`Notification '${notificationId}' already exists.`);
 			}
 			assertRecordHasCapacity(approvals, MAX_ORCHESTRATION_APPROVALS, "approval");
-			assertRecordHasCapacity(notifications, MAX_ORCHESTRATION_NOTIFICATIONS, "notification");
+			ensureNotificationCapacity(state, notifications);
 			approvals[approval.approvalId] = { request: approval, status: "pending" };
 			notifications[notificationId] = {
 				notificationId,
@@ -1981,7 +1981,7 @@ export function reduceOrchestrationEvent(
 			if (notifications[notificationId]) {
 				throw new DurableTaskRuntimeError(`Notification '${notificationId}' was enqueued more than once.`);
 			}
-			assertRecordHasCapacity(notifications, MAX_ORCHESTRATION_NOTIFICATIONS, "notification");
+			ensureNotificationCapacity(state, notifications);
 			notifications[notificationId] = {
 				notificationId,
 				objectiveId,

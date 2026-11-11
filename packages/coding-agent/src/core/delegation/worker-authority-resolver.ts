@@ -787,6 +787,12 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 					toolName === BOT_MESSAGE_TOOL_NAME &&
 					input.workerToolAdapterNames?.includes(BOT_MESSAGE_TOOL_NAME) &&
 					input.authority?.capabilities?.includes("workflow.message")
+				) &&
+				!(
+					!input.base &&
+					toolName === "artifact_retrieve" &&
+					input.artifactRetrieveAvailable === true &&
+					uniqueToolNames.some((name) => PACKED_TOOL_OUTPUT_TOOLS.has(name))
 				),
 		);
 		if (uninheritedTools.length > 0) {

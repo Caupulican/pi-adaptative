@@ -98,9 +98,13 @@ export class RoutineRuntimeAssembly {
 			const manager = this.deps.getSessionManager();
 			return (
 				origin.sessionId === manager.getSessionId() &&
-				(origin.sessionFile === undefined || origin.sessionFile === manager.getSessionFile()) &&
+				(manager.isPersisted()
+					? Boolean(manager.getSessionFile()) &&
+						(origin.sessionFile === undefined || origin.sessionFile === manager.getSessionFile())
+					: origin.sessionFile === undefined) &&
+				!manager.isPersistenceStateUncertain() &&
 				isSessionAppendAnchorCurrent(manager, origin) &&
-				manager.isEntryPersisted(origin.leafId)
+				Boolean(origin.leafId && manager.isEntryDurableForSession(origin.leafId))
 			);
 		};
 		const worker = new RoutineWorkerExecutor({

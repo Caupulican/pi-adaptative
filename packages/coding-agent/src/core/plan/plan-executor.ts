@@ -605,8 +605,15 @@ export class PlanExecutor implements PlanExecutorPort {
 				);
 				return;
 			}
-			case "verify_wrap":
-				if (!action.settled) {
+			case "verify_wrap": {
+				const revised = this.hostRevision(
+					action.planId,
+					action.nodeId,
+					action.outcome.generation,
+					"an independent check",
+					(record, version) => verifyWrapNodes(record, action.nodeId, action.requirementIds, version),
+				);
+				if (revised && !action.settled) {
 					const { snapshot, plan } = this.planOf(action.planId);
 					const { outcomeId, generation } = action.outcome;
 					const stakes = this.stakesOfStep(snapshot, plan, action.nodeId, action.outcome);
@@ -618,14 +625,8 @@ export class PlanExecutor implements PlanExecutorPort {
 						...optionalStakes(stakes),
 					});
 				}
-				this.hostRevision(
-					action.planId,
-					action.nodeId,
-					action.outcome.generation,
-					"an independent check",
-					(record, version) => verifyWrapNodes(record, action.nodeId, action.requirementIds, version),
-				);
 				return;
+			}
 			case "replace":
 				this.hostRevision(
 					action.planId,
@@ -666,7 +667,7 @@ export class PlanExecutor implements PlanExecutorPort {
 		generation: number,
 		what: string,
 		build: (record: PlanRecord, version: number) => { nodes: PlanNodeSpec[]; final: string } | undefined,
-	): void {
+	): boolean {
 		const runtime = this.deps.runtime();
 		const { plan, record } = this.planOf(planId);
 		const version = record.version + 1;
@@ -688,7 +689,7 @@ export class PlanExecutor implements PlanExecutorPort {
 			const detail = `step ${nodeId} needs ${what}, and the plan has no room for it; revise the plan`;
 			runtime.holdPlanNode({ planId, nodeId, reason: "replan", detail, generation });
 			harnessLog.info("plan", "a host revision does not fit; the step is held", { planId, nodeId, what });
-			return;
+			return false;
 		}
 		runtime.recordPlan({
 			...record,
@@ -698,6 +699,7 @@ export class PlanExecutor implements PlanExecutorPort {
 			revisedAt: new Date(this.now()).toISOString(),
 		});
 		harnessLog.info("plan", "a plan is revised by the host", { planId, nodeId, what, version });
+		return true;
 	}
 
 	private joinIdentity(plan: PlanRuntimeState, planId: string, nodeId: string): JoinIdentity {

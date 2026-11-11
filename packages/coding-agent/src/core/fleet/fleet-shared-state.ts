@@ -46,12 +46,14 @@ export class FleetSharedState<T> {
 
 	/**
 	 * Merges this process's state into the file once the current synchronous work ends: `merge` receives what the file
-	 * holds under its lock and returns what is written. Repeated calls in one microtask write once, with the last merge.
-	 * `committed` runs only after that write succeeded; a failed write leaves the caller's state pending for the next one.
+	 * holds under its lock and returns what is written. Repeated calls in one microtask write once, composing their merges
+	 * in order. `committed` runs only after that write succeeded; a failed write leaves the caller's state pending for the
+	 * next one.
 	 */
 	schedule(merge: (disk: T | undefined) => T, committed?: () => void): void {
-		const first = this.pending === undefined;
-		this.pending = merge;
+		const previous = this.pending;
+		const first = previous === undefined;
+		this.pending = previous ? (disk) => merge(previous(disk)) : merge;
 		if (committed) this.committed.push(committed);
 		if (!first) return;
 		queueMicrotask(() => {

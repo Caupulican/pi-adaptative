@@ -653,6 +653,7 @@ async function runLoop(
 
 			const toolResults: ToolResultMessage[] = [];
 			hasMoreToolCalls = false;
+			let batchHandoff = false;
 			if (toolCalls.length > 0) {
 				const textProtocolBatch = toolCalls.every((toolCall) => toolCall.source === "text-protocol");
 				const incomingBatchSignature = textProtocolBatchSignature(toolCalls);
@@ -676,6 +677,7 @@ async function runLoop(
 				);
 				toolResults.push(...executedToolBatch.messages);
 				hasMoreToolCalls = !executedToolBatch.terminate;
+				batchHandoff = executedToolBatch.handoff === true;
 
 				for (const result of toolResults) {
 					currentContext.messages.push(result);
@@ -713,7 +715,7 @@ async function runLoop(
 			}
 			// A verification THIS run failed must end in a readable handoff, not a silent terminal
 			// batch; obligations inherited from earlier runs stay listed and block goal completion only.
-			const verificationBlocksCompletion = verificationObligations.getIdsOpenedThisRun().length > 0;
+			const verificationBlocksCompletion = !batchHandoff && verificationObligations.getIdsOpenedThisRun().length > 0;
 			if (verificationBlocksCompletion && !signal?.aborted) hasMoreToolCalls = true;
 
 			await emit({ type: "turn_end", message, toolResults });
@@ -1184,6 +1186,7 @@ function releasePendingPreparations(execCtx: ToolExecutionContext): unknown[] {
 type ExecutedToolCallBatch = {
 	messages: ToolResultMessage[];
 	terminate: boolean;
+	handoff?: boolean;
 	failure?: { cause: unknown };
 };
 
@@ -1403,12 +1406,10 @@ async function executeToolCallsSequential(
 		if (finalized.batchFailure) throw finalized.batchFailure.cause;
 		if (finalized.deliveryFailure) throw finalized.deliveryFailure;
 
-		if (execCtx.signal?.aborted) {
-			break;
-		}
+		if (execCtx.signal?.aborted) break;
 	}
 
-	return { messages, terminate: shouldTerminateToolBatch(finalizedCalls) };
+	return finalizeExecutedToolBatch(messages, finalizedCalls);
 }
 
 type ToolExecutionGroup =
@@ -1639,7 +1640,7 @@ async function executeToolCallsPartitioned(
 		if (settled.failure) throw settled.failure.cause;
 	}
 
-	return { messages, terminate: shouldTerminateToolBatch(orderedFinalizedCalls) };
+	return finalizeExecutedToolBatch(messages, orderedFinalizedCalls);
 }
 
 type PreparedToolCall = {
@@ -1802,22 +1803,20 @@ function createPolicyDeniedToolCallOutcome(denial: AgentToolPolicyDeniedError): 
 	};
 }
 
-function shouldTerminateToolBatch(finalizedCalls: FinalizedToolCallOutcome[]): boolean {
-	return finalizedCalls.length > 0 && finalizedCalls.every((finalized) => finalized.result.terminate === true);
+function finalizeExecutedToolBatch(
+	messages: ToolResultMessage[],
+	calls: FinalizedToolCallOutcome[],
+): ExecutedToolCallBatch {
+	const terminate = calls.length > 0 && calls.every((call) => call.result.terminate === true);
+	const handoff = terminate && calls.every((call) => call.result.handoff === true);
+	return { messages, terminate, ...(handoff ? { handoff: true } : {}) };
 }
 
 function prepareToolCallArguments(tool: AgentTool<any>, toolCall: AgentToolCall): AgentToolCall {
-	if (!tool.prepareArguments) {
-		return toolCall;
-	}
+	if (!tool.prepareArguments) return toolCall;
 	const preparedArguments = tool.prepareArguments(toolCall.arguments);
-	if (preparedArguments === toolCall.arguments) {
-		return toolCall;
-	}
-	return {
-		...toolCall,
-		arguments: preparedArguments as Record<string, any>,
-	};
+	if (preparedArguments === toolCall.arguments) return toolCall;
+	return { ...toolCall, arguments: preparedArguments as Record<string, any> };
 }
 
 function createValidationBounceTelemetry(
@@ -2812,6 +2811,7 @@ async function finalizeExecutedToolCall(
 			);
 			if (afterResult) {
 				result = {
+					...result,
 					content: afterResult.content ?? result.content,
 					details: afterResult.details ?? result.details,
 					usage: afterResult.usage ?? result.usage,

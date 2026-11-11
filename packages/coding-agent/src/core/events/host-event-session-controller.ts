@@ -1,3 +1,4 @@
+import { expectedSessionAppendDurability } from "../../kernel/session/session-append-receipt.ts";
 import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
@@ -402,7 +403,10 @@ export class HostEventSessionController {
 					if (!this.deps.canDeliver())
 						throw new HostEventError("disabled", "Proactive event delivery is disabled.");
 					const receipt = append();
-					if (receipt.durability !== "persisted" || receipt.entries.length !== 1)
+					if (
+						receipt.durability !== expectedSessionAppendDurability(receipt.sessionFile !== undefined) ||
+						receipt.entries.length !== 1
+					)
 						throw new HostEventError("unpersisted", "Host event parent receipt is not durable.");
 					transaction.acknowledge(receipt.entries[0]!.id);
 					return receipt;

@@ -92,6 +92,7 @@ export interface EvaluateToolGateInput {
 function checkEnvelopeAndToolCapabilities(input: EvaluateToolGateInput): {
 	earlyOutcome?: GateOutcome;
 	paths: string[];
+	pathAccess?: "read" | "write";
 } {
 	input.signal?.throwIfAborted();
 	if (!input.envelope) {
@@ -159,7 +160,7 @@ function checkEnvelopeAndToolCapabilities(input: EvaluateToolGateInput): {
 
 	const pathAccess = resolveToolCallPathAccess(envelope.capabilities, input.toolName, input.args);
 	const paths = pathAccess === "none" ? [] : extractCandidatePaths(input.toolName, input.args);
-	return { paths };
+	return { paths, ...(pathAccess !== "none" ? { pathAccess } : {}) };
 }
 
 function pathBlockOutcome(targetPath: string, reasonCode: "path_denied" | "path_outside_allowed_roots"): GateOutcome {
@@ -207,6 +208,7 @@ export function evaluateToolGate(input: EvaluateToolGateInput): GateOutcome {
 			scopeCwd: input.scopeCwd,
 			pathAuthority: input.pathAuthority,
 			signal: input.signal,
+			pathAccess: checked.pathAccess,
 		}),
 	);
 	if (blocked) return blocked;
@@ -225,6 +227,7 @@ export async function evaluateToolGateAsync(input: EvaluateToolGateInput): Promi
 			scopeCwd: input.scopeCwd,
 			pathAuthority: input.pathAuthority,
 			signal: input.signal,
+			pathAccess: checked.pathAccess,
 		});
 		if (!assessment.allowed) {
 			return pathBlockOutcome(targetPath, assessment.reasonCode ?? "path_outside_allowed_roots");

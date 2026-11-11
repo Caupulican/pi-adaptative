@@ -94,6 +94,8 @@ export class LeaderController {
 	private readonly settled = new Set<string>();
 	/** Leaders whose fleet subtree is open in this process; a restart re-opens the subtree of each running goal. */
 	private readonly openSubtrees = new Set<string>();
+	/** Serializes `deps.send` per leader so concurrent goal dispatches, updates, resumes and child notices never race. */
+	private readonly sendChains = new Map<string, Promise<unknown>>();
 	private readonly listeners = new Set<() => void>();
 	private disposed = false;
 
@@ -314,7 +316,7 @@ export class LeaderController {
 		if (record.state === "running") {
 			const source = fromLeader === undefined ? "the orchestrator" : this.displayName(fromLeader);
 			const content = `Update from ${source} for your goal:\n${text}`;
-			await this.deps.send(leader, content, record.objectiveId, { fromLeader });
+			await this.sendToLeader(leader, content, record.objectiveId, { fromLeader });
 		}
 	}
 
@@ -369,7 +371,7 @@ export class LeaderController {
 		this.ledger.resume(record.objectiveId);
 		// The goal's messages held while it was paused start first, in the order they were filed.
 		this.deps.reconcileDelegatedMessages(record.objectiveId);
-		await this.deps.send(leader, "Continue your goal from where you stopped.", record.objectiveId);
+		await this.sendToLeader(leader, "Continue your goal from where you stopped.", record.objectiveId);
 		return this.ledger.get(record.objectiveId) ?? record;
 	}
 
@@ -510,6 +512,25 @@ export class LeaderController {
 		return parent && isOpen(parent) ? parent : undefined;
 	}
 
+	private sendToLeader(
+		leader: string,
+		content: string,
+		objectiveId: string,
+		options?: { readonly idempotencyKey?: string; readonly fromLeader?: string },
+	): Promise<void> {
+		const prior = this.sendChains.get(leader) ?? Promise.resolve();
+		const run = prior.catch(() => undefined).then(() => this.deps.send(leader, content, objectiveId, options));
+		const settled = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.sendChains.set(leader, settled);
+		void settled.then(() => {
+			if (this.sendChains.get(leader) === settled) this.sendChains.delete(leader);
+		});
+		return run;
+	}
+
 	/**
 	 * Sends a notice from a nested leader (`fromLeader`) to the parent leader of its goal, filed under that parent's goal. The
 	 * key makes a repeated send one message, so a restart that sends again delivers nothing twice. A send that did not land
@@ -522,7 +543,7 @@ export class LeaderController {
 		fromLeader: string,
 	): Promise<boolean> {
 		try {
-			await this.deps.send(parent.charter.leader, content, parent.objectiveId, { idempotencyKey, fromLeader });
+			await this.sendToLeader(parent.charter.leader, content, parent.objectiveId, { idempotencyKey, fromLeader });
 			return true;
 		} catch (error) {
 			harnessLog.warn("leaders", "a nested leader's notice could not reach the parent leader yet", () => ({
@@ -580,7 +601,9 @@ export class LeaderController {
 			this.ledger.markDispatched(record.objectiveId);
 			changed = true;
 			try {
-				await this.deps.send(leader.agentId, brief, record.objectiveId);
+				await this.sendToLeader(leader.agentId, brief, record.objectiveId, {
+					idempotencyKey: `leader-dispatch:${record.objectiveId}`,
+				});
 			} catch (error) {
 				harnessLog.warn("leaders", "a leader could not be started for its goal", () => ({
 					leader: leader.agentId,
@@ -706,7 +729,8 @@ export class LeaderController {
 	): Promise<boolean> {
 		const outcome = record.outcome;
 		if (!outcome) return false;
-		if (record.outcomeDeliveredToParent) return true;
+		const deliveryId = `leader-outcome:${record.objectiveId}`;
+		if (record.outcomeDeliveredToParent || this.delivered.has(deliveryId)) return true;
 		const { leaderTurns } = splitTurnsByLeader(this.turnsOf(snapshot, record), aliasOf, record.charter.leader);
 		const last = leaderTurns.at(-1);
 		const notice = {
@@ -717,13 +741,13 @@ export class LeaderController {
 			outcome,
 			report: record.closeReason === "settled" ? last?.result?.summary?.trim() : undefined,
 		};
-		const deliveryId = `leader-outcome:${record.objectiveId}`;
 		const parent = this.parentOf(record);
 		if (parent) {
 			// A paused parent takes the Outcome when it resumes: the next pass retries it.
 			if (parent.state !== "running") return false;
 			const content = leaderOutcomeNotice({ ...notice, to: "parent_leader" });
 			if (!(await this.sendToParent(parent, content, deliveryId, record.charter.leader))) return false;
+			this.delivered.add(deliveryId);
 			this.ledger.recordChildOutcomeDelivered(record.objectiveId);
 			return true;
 		}

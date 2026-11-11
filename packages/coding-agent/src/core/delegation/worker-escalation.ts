@@ -38,8 +38,8 @@ const MAX_LISTED_REQUIREMENT_CHARS = 400;
 const LOCAL_PLACEMENT: Placement = { kind: "local_worker" };
 
 /**
- * Where a worker's writes land: its cwd relative to the session cwd ("." for the session root, or an absolute path outside
- * it), and the isolation it runs under. A worktree lane is not a location a rerun can be placed into, so it is `lane`.
+ * Where a worker's writes land: `"lane"` under `"worktree"` when its cwd is a worktree lane, else its cwd relative to the
+ * session cwd (`"."` for the session root, or an absolute path outside it) under `"shared"`.
  */
 export interface RerunPlacement {
 	readonly location: string;
@@ -95,16 +95,25 @@ function pinnedAuthorityOf(
 	contract: WorkerProfileExecutionContract,
 	placement: RerunPlacement,
 	originCwd: string,
+	laneDirectory?: string,
 ): EscalationPinnedAuthority {
 	const profileId = contract.profile.profileId;
+	const adaptive = isAdaptiveProfileId(profileId);
 	const readPaths = contract.profile.readPaths;
 	return {
-		...(isAdaptiveProfileId(profileId) ? {} : { profileId }),
+		...(adaptive
+			? {
+					role: contract.profile.role,
+					capabilities: [...new Set(contract.profile.capabilityCeiling)],
+					toolNames: [...new Set(contract.profile.toolNames)],
+				}
+			: { profileId }),
 		...(origin.parentAgentId ? { parentAgentId: origin.parentAgentId } : {}),
 		...(contract.botSoul !== undefined ? { botSoul: contract.botSoul } : {}),
 		readOnly: contract.profile.readOnly === true,
 		...(contract.profile.shellReadOnly === true ? { shellReadOnly: true } : {}),
 		location: placement.location,
+		...(laneDirectory !== undefined ? { laneDirectory } : {}),
 		...(readPaths !== undefined ? { readScope: relativeToDirectory(originCwd, readPaths) } : {}),
 		budget: { ...contract.profile.budget },
 		// The rerun keeps who wrote its words and where its results go: a third party's taint is never laundered by a rerun.
@@ -156,7 +165,7 @@ export function rungRefusalReasonOf(refusal: FleetRefusal): RungRefusalReason | 
 }
 
 export interface WorkerEscalationDeps {
-	/** Whether a directory is a worktree lane: a rerun of a lane's original cannot be placed back into that lane yet. */
+	/** Whether a directory is a worktree lane, so a rerun reuses that lane when bound to it or isolates a fresh lane. */
 	isLaneDirectory(directory: string): boolean;
 	readonly runtime: DurableTaskRuntime;
 	readonly fleet: Pick<FleetScheduler, "prepare" | "admit">;
@@ -241,19 +250,6 @@ export class WorkerEscalation {
 		if (!task || this.inFlight.has(key)) return;
 		if (task.escalations?.some((entry) => entry.outcomeId === outcome.outcomeId && entry.rung === action.rung))
 			return;
-		const firstAttemptId = outcome.attempts[0]?.attemptId;
-		const originCwd = firstAttemptId
-			? snapshot.attempts[firstAttemptId]?.dispatch.executionContract?.worker.authority.cwd
-			: undefined;
-		if (originCwd !== undefined && this.deps.isLaneDirectory(originCwd)) {
-			const refusedAttemptId = outcome.attempts.at(-1)?.attemptId;
-			if (refusedAttemptId !== undefined)
-				this.deps.recordRefusal(
-					refusedAttemptId,
-					"the original ran in its own worktree lane, and a rerun cannot be placed back into that lane yet",
-				);
-			return;
-		}
 		const dispatch = this.dispatchFor(snapshot, outcome, action, key);
 		if (!dispatch) {
 			harnessLog.info("escalation", "an escalation rung has no admitted contract to repeat", {
@@ -341,11 +337,28 @@ export class WorkerEscalation {
 		});
 		const writes = contract.authority.writePaths.length > 0 && contract.profile.readOnly !== true;
 		// The rerun is rebuilt from the attempt the outcome was recorded under: its authority, scope, placement and origin.
-		const firstAttemptId = outcome.attempts[0]?.attemptId ?? attempt.attemptId;
+		const originTaskId = task.escalations?.find((entry) => entry.supersedesTaskId !== undefined)?.supersedesTaskId;
+		const firstAttemptId =
+			(originTaskId ? snapshot.tasks[originTaskId]?.attemptIds[0] : undefined) ??
+			outcome.attempts[0]?.attemptId ??
+			attempt.attemptId;
 		const origin = snapshot.attempts[firstAttemptId]?.dispatch ?? attempt.dispatch;
 		const originContract = origin.executionContract?.worker ?? contract;
 		const originCwd = originContract.authority.cwd ?? this.deps.cwd();
-		const placement = placementOf(originCwd, this.deps.cwd(), this.deps.isLaneDirectory(originCwd));
+		const originInLane = this.deps.isLaneDirectory(originCwd);
+		// A worktree lane is bound to the worker that created it: a read-only check inspecting that lane, or a new attempt of
+		// that same worker continuing its conversation while the lane exists on disk, reuses `originCwd` in place. Any other
+		// lane rerun (a completed writer's successor, an unlinked rerun, or a removed lane) starts in a fresh worktree lane.
+		const reuseOriginLane =
+			originInLane && existsSync(originCwd) && (originContract.profile.readOnly === true || relation === "X2");
+		const freshLane = originInLane && !reuseOriginLane;
+		const placement = placementOf(originCwd, this.deps.cwd(), originInLane);
+		// A fresh worktree lane branches off the base checkout without unlanded edits from the earlier lane, so it carries the
+		// task's full requirement set and omits what only the abandoned lane had already met or touched.
+		const requirementIds =
+			freshLane && (origin.requirementIds?.length ?? 0) > 0
+				? [...origin.requirementIds!]
+				: [...action.requirementIds];
 		return {
 			idempotencyKey,
 			demand: {
@@ -357,11 +370,17 @@ export class WorkerEscalation {
 				writes,
 				heavy: false,
 			},
-			instructions: this.narrowedInstructions(outcome, action, attempt.dispatch.instructions),
+			instructions: this.narrowedInstructions(
+				outcome,
+				action,
+				requirementIds,
+				attempt.dispatch.instructions,
+				freshLane,
+			),
 			...(attempt.dispatch.brief ? { brief: attempt.dispatch.brief } : {}),
 			writeScope: relativeToDirectory(originCwd, originContract.authority.writePaths),
-			isolation: "shared",
-			requirementIds: action.requirementIds,
+			isolation: freshLane ? "worktree" : "shared",
+			requirementIds,
 			dependsOnTaskIds: [],
 			thinking,
 			model: { provider, modelId: rest.join("/") },
@@ -370,8 +389,14 @@ export class WorkerEscalation {
 				rung: action.rung,
 				authorityDigest: authorityDigest(originContract.authority, placement),
 				previousPlacement: LOCAL_PLACEMENT,
-				requirementIds: [...action.requirementIds],
-				pinned: pinnedAuthorityOf(origin, originContract, placement, originCwd),
+				requirementIds: [...requirementIds],
+				pinned: pinnedAuthorityOf(
+					origin,
+					originContract,
+					placement,
+					originCwd,
+					reuseOriginLane ? originCwd : undefined,
+				),
 				...(relation === "X1" ? { supersedesTaskId: task.task.taskId } : {}),
 				...(relation === "X2"
 					? { attemptOfTaskId: task.task.taskId, acceptanceCriterionIds: [...task.task.acceptanceCriterionIds] }
@@ -380,24 +405,38 @@ export class WorkerEscalation {
 		};
 	}
 
-	/** The remaining requirements with their text, the met ones marked as done, then the original task. */
-	private narrowedInstructions(outcome: Outcome, action: RerunAction, original: string): string {
+	/**
+	 * The requirements to meet with their text, the met ones and earlier changed files when their work is present in the
+	 * rerun's workspace, then the original task.
+	 */
+	private narrowedInstructions(
+		outcome: Outcome,
+		action: RerunAction,
+		requirementIds: readonly string[],
+		original: string,
+		freshLane: boolean,
+	): string {
 		const requirements = new Map((this.deps.goalState()?.requirements ?? []).map((entry) => [entry.id, entry.text]));
-		const remaining = action.requirementIds.map(
+		const remaining = requirementIds.map(
 			(id) =>
 				`- ${id}: ${boundedText(requirements.get(id) ?? "(text not available)", MAX_LISTED_REQUIREMENT_CHARS)}`,
 		);
-		const met = outcome.coverage.covered.map((entry) => entry.id);
-		const header = [
+		const met = freshLane ? [] : outcome.coverage.covered.map((entry) => entry.id);
+		const changedFiles = freshLane ? [] : outcome.changedFiles;
+		const leadLine =
 			action.rung === 1
-				? "An earlier attempt at this task left work unfinished; this run has more thinking."
-				: "An earlier attempt at this task left work unfinished; this run is on another model.",
+				? outcome.blocker === "time_exhausted"
+					? "An earlier attempt at this task ran out of time after partial progress; continue the remaining work."
+					: "An earlier attempt at this task left work unfinished; this run has more thinking."
+				: "An earlier attempt at this task left work unfinished; this run is on another model.";
+		const header = [
+			leadLine,
 			...(remaining.length > 0
 				? ["Requirements still to meet:", ...remaining]
 				: ["The whole task is still to be done."]),
 			...(met.length > 0 ? [`Already met, do not redo: ${met.join(", ")}`] : []),
-			...(outcome.changedFiles.length > 0
-				? [`Files the earlier attempt changed: ${outcome.changedFiles.slice(0, 16).join(", ")}`]
+			...(changedFiles.length > 0
+				? [`Files the earlier attempt changed: ${changedFiles.slice(0, 16).join(", ")}`]
 				: []),
 			"Stay inside the original write scope.",
 			"",

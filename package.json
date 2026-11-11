@@ -32,6 +32,7 @@
 		"probe:system-one-claim": "node --conditions=pi-source scripts/system-one-claim-probe.mjs",
 		"probe:system-one-ladder": "node --conditions=pi-source scripts/system-one-ladder-probe.mjs",
 		"probe:system-one-route": "node --conditions=pi-source scripts/system-one-route-probe.mjs",
+		"eval:plan-graph": "npm --workspace packages/coding-agent run eval:plan-graph",
 		"check:kernel-layer": "node scripts/check-kernel-layer.mjs",
 		"check:comms-text-parsing": "node scripts/check-comms-text-parsing.mjs",
 		"check:coordinator-boundaries": "node --test scripts/check-coordinator-boundaries.test.mjs && node scripts/check-coordinator-boundaries.mjs",

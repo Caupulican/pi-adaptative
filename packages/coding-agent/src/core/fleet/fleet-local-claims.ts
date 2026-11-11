@@ -32,6 +32,7 @@ interface Claim {
 	readonly releaseWorker?: () => void;
 	/** The worker's work is paid per request: its cost is charged at release, whatever model it finished on. */
 	readonly metered: boolean;
+	readonly modelRef?: string;
 	readonly objectiveId?: string;
 }
 
@@ -86,15 +87,18 @@ export class FleetLocalClaims {
 		if (this.claims.has(attemptId)) return;
 		const accountKey = this.deps.accountKey?.(model.provider);
 		const estimateUsd = this.meteredEstimate(model, undefined);
+		const metered = this.deps.isMetered?.(model) === true;
+		const modelRef = `${model.provider}/${model.id}`;
 		if (estimateUsd !== undefined)
 			this.spend.reserve(attemptId, {
-				modelRef: `${model.provider}/${model.id}`,
+				modelRef,
 				usd: estimateUsd,
 				...(objectiveId ? { objectiveId } : {}),
 			});
 		this.claims.set(attemptId, {
 			...(this.windows && accountKey !== undefined ? { releaseWorker: this.windows.acquireWorker(accountKey) } : {}),
-			metered: this.deps.isMetered?.(model) === true,
+			metered,
+			...(metered ? { modelRef } : {}),
 			...(objectiveId ? { objectiveId } : {}),
 		});
 	}
@@ -109,8 +113,10 @@ export class FleetLocalClaims {
 		if (!claim) return;
 		this.claims.delete(attemptId);
 		claim.releaseWorker?.();
-		const metered = claim.metered || (finalModel !== undefined && this.deps.isMetered?.(finalModel) === true);
-		if (metered) this.spend.charge(attemptId, measuredUsd(), claim.objectiveId, terminal);
+		const finalMetered = finalModel !== undefined && this.deps.isMetered?.(finalModel) === true;
+		const metered = claim.metered || finalMetered;
+		const finalModelRef = finalMetered ? `${finalModel.provider}/${finalModel.id}` : claim.modelRef;
+		if (metered) this.spend.charge(attemptId, measuredUsd(), claim.objectiveId, terminal, finalModelRef);
 	}
 
 	/** Settles every claim whose attempt is no longer live: such an attempt has ended. */

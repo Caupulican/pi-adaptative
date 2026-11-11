@@ -23,9 +23,13 @@ export const RETENTION_MIN_INTERVAL_MS = 600_000;
 const STORE_FULL_SHARE = 0.9;
 
 function nearFull(capacity: OrchestrationProjectionCapacity): boolean {
+	const { counts, limits } = capacity;
 	return (
-		capacity.counts.objectives >= capacity.limits.objectives * STORE_FULL_SHARE ||
-		capacity.counts.attempts >= capacity.limits.attempts * STORE_FULL_SHARE
+		counts.objectives >= limits.objectives * STORE_FULL_SHARE ||
+		counts.tasks >= limits.tasks * STORE_FULL_SHARE ||
+		counts.attempts >= limits.attempts * STORE_FULL_SHARE ||
+		counts.agents >= limits.agents * STORE_FULL_SHARE ||
+		counts.notifications >= limits.notifications * STORE_FULL_SHARE
 	);
 }
 

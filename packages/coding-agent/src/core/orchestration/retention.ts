@@ -14,8 +14,8 @@
  * - Backstop (the snapshot decoder, `projectionFromSnapshot`, at the end of the apply): a result that leaves a dangling
  *   reference throws, whichever rule set wrote the prune.
  *
- * Version: v1 is the only `retention.pruned` payload version. A later version applies here under its own branch on
- * `payload.v`, so a logged v1 prune keeps its v1 meaning.
+ * Version: `retention.pruned` payloads carry `v: 1 | 2`. Version-dependent derivations branch on `payload.v`, so a
+ * logged v1 prune keeps its v1 meaning and digest while new prunes emit v2.
  */
 
 import { type OrchestrationEvent, toJsonObject } from "./contracts.ts";
@@ -210,9 +210,6 @@ function describeRecordShortfall(
 	capacity: OrchestrationProjectionCapacity,
 	external?: ExternalKeepCounts,
 ): string {
-	if (record.field === "agents") {
-		return "Agent bindings are not released yet; start a new session to continue.";
-	}
 	const counted = record.field === "objectives" || record.field === "attempts";
 	const summary = counted ? ` ${objectiveSummary(state)}` : "";
 	const outside = counted && external !== undefined ? keptOutsideSentence(external) : "";
@@ -262,6 +259,13 @@ export function applyRetentionEvent(state: TaskRuntimeProjection, event: Orchest
 		if (!agent) throw new DurableTaskRuntimeError(`Retention carry names unknown agent '${agentId}'.`);
 		agents[agentId] = { ...agent, prunedTurns: turns };
 	}
+	const releasedCheckpoints = new Set(dependents.checkpointIds);
+	for (const [agentId, agent] of Object.entries(state.agents)) {
+		const latestCheckpointId = agent.resumeContext.latestCheckpointId;
+		if (latestCheckpointId === undefined || !releasedCheckpoints.has(latestCheckpointId)) continue;
+		const { latestCheckpointId: _released, ...resumeContext } = agent.resumeContext;
+		agents[agentId] = { ...agent, resumeContext };
+	}
 	const released = new Set(payload.taskIds);
 	for (const [objectiveId, runtime] of Object.entries(state.objectives)) {
 		if (!objectiveId.startsWith(SESSION_OBJECTIVE_PREFIX)) continue;
@@ -272,6 +276,7 @@ export function applyRetentionEvent(state: TaskRuntimeProjection, event: Orchest
 		};
 	}
 	deleteIds(state.attempts, payload.attemptIds);
+	deleteIds(state.agents, payload.agentIds);
 	deleteIds(state.checkpoints, dependents.checkpointIds);
 	deleteIds(state.notifications, dependents.notificationIds);
 	deleteIds(state.approvals, dependents.approvalIds);

@@ -430,7 +430,7 @@ function projectCoverage(
 	if (verificationVerdict === "accepted") {
 		return { required, covered: required.map((id) => ({ id, by: "verification" as const })), uncovered: [] };
 	}
-	const coveredIds = new Set(facts?.coveredIds ?? []);
+	const coveredIds = new Set(verificationVerdict === "rejected" ? [] : (facts?.coveredIds ?? []));
 	const covered = required
 		.filter((id) => coveredIds.has(id) || checks.get(id) === true)
 		.map((id) => ({ id, by: coveredIds.has(id) ? ("host_verdict" as const) : ("requirement_check" as const) }));
@@ -512,7 +512,8 @@ function selectBlocker(args: {
 	if (args.awaitingVerification) return { blocker: "verification_pending" };
 	if (facts?.declared) return { blocker: facts.declared, source: `worker_declared:${facts.declared}` };
 	const finding =
-		facts?.findingCodes.find((code) => FINDING_BLOCKERS[code] === "scope_denied") ?? facts?.findingCodes[0];
+		facts?.findingCodes.find((code) => FINDING_BLOCKERS[code] === "scope_denied") ??
+		facts?.findingCodes.find((code) => code !== "lane");
 	if (finding) return { blocker: FINDING_BLOCKERS[finding], source: `host_finding:${finding}` };
 	if (facts?.verdict === "rejected" || facts?.verdict === "needs_more") {
 		const mapped = facts.verdictReasonCodes
@@ -526,13 +527,22 @@ function selectBlocker(args: {
 	if (args.laneStatus === "timeout") return timeoutBlocker(reasonCode);
 	if (args.laneStatus === "budget_exhausted") return { blocker: "budget_exhausted", source: reasonCode };
 	if (reasonCode === "completion_error") return classifiedCompletionError(args.attempt);
-	const mapped = mappedBlocker(reasonCode);
+	const mapped = reasonCode === "worker_host_findings" ? ({ blocker: "none" } as const) : mappedBlocker(reasonCode);
 	if (mapped.blocker !== "none" && mapped.blocker !== "unclassified") return mapped;
 	if (args.coverage.uncovered.length > 0) {
+		if (args.coverage.uncovered.some((entry) => entry.reason === "evidence_failed")) {
+			return { blocker: "evidence_contradicts_claim" };
+		}
 		// The host accepted the work but nothing it checked covers these ids: the result stands unverified.
 		return args.resultAccepted || facts?.verdict === "accepted" || facts?.verdict === "unverified"
 			? { blocker: "unverified_result" }
 			: { blocker: "requirement_uncovered" };
+	}
+	if (facts?.findingCodes.includes("lane") || reasonCode === "worker_host_findings") {
+		return {
+			blocker: "unverified_result",
+			source: facts?.findingCodes.includes("lane") ? "host_finding:lane" : reasonCode,
+		};
 	}
 	if (facts?.verdict === "unverified") return { blocker: "unverified_result" };
 	if (args.resultAccepted) return { blocker: "none" };

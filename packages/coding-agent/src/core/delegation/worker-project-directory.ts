@@ -103,7 +103,7 @@ export class WorkerProjectDirectory {
 							reference,
 							input.specializationKey,
 						);
-						if (!input.isCompatible(reference, ownership) || ownership.state === "retired") continue;
+						if (ownership.state === "retired" || !input.isCompatible(reference, ownership)) continue;
 						if (ownership.state === "idle") idle.push(reference);
 						else busy = true;
 					} catch {

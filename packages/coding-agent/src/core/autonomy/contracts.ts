@@ -77,6 +77,12 @@ export interface CapabilityEnvelope {
 	 * itself, never its siblings). Other envelopes on the same tool, such as a write scope, still apply.
 	 */
 	exemptPaths?: readonly string[];
+	/**
+	 * Paths inside an ancestor `deniedPaths` root that `filesystem.read` calls may read even when `allowedPaths`
+	 * confines other reads (for example this session's own `outputs/tool-streams/<run>` directory). Writes and
+	 * more-specific `deniedPaths` children below an `exemptReadPaths` entry remain denied.
+	 */
+	exemptReadPaths?: readonly string[];
 	maxEstimatedUsd?: number;
 	createdAt?: string;
 }

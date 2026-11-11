@@ -54,6 +54,10 @@ export const BOT_TEAM = {
 		`${agentId} agora aparece como ${name}. O endereço continua @${agentId}.`,
 	botRetired: (agentId: string) => `Bot ${agentId} retirado.`,
 	botMissing: (agentId: string) => `O bot ${agentId} não existe.`,
+	botLeadsOpenGoal: (agentId: string) =>
+		`O bot ${agentId} lidera um objetivo aberto; cancele antes (/lead cancel ${agentId}).`,
+	botHasActiveWork: (agentId: string) =>
+		`O bot ${agentId} ainda está em atendimento direto ou em equipe; pare antes com /bot stop ${agentId}.`,
 	botStopped: (agentId: string, bots: readonly string[], mode: string) =>
 		`${agentId} parado${bots.length === 0 ? "" : `, junto com ${bots.length === 1 ? "o bot" : "os bots"} ${bots.join(", ")}`} (${mode}).`,
 	botStoppedOwn: (agentId: string, bots: readonly string[]) =>

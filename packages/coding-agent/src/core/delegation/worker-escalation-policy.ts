@@ -224,10 +224,11 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 				kind: "verify_independently",
 				requirementIds: coverage.uncovered.map((entry) => entry.id),
 			});
-		return askOwner(
-			"E9b",
-			"the result is unverified and no independent verifier is placed automatically; verify it or accept it",
-		);
+		if (facts.hostCheckable.length === 0)
+			return askOwner(
+				"E9b",
+				"the result is unverified and no independent verifier is placed automatically; verify it or accept it",
+			);
 	}
 	if (blocker === "budget_exhausted")
 		return askOwner("E10", "the task's budget is spent; raise it or accept the partial result");
@@ -244,14 +245,15 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 			if (room === "budget") return askOwner("E10b", BUDGET_SPENT_QUESTION);
 		} else {
 			// A time stop is never answered with more thinking: its rerun keeps the attempt's level (the fallback the model
-			// move uses), and it is placed only when the stopped attempt covered something, so the rest is a narrower task.
+			// move uses), and it is placed only when the stopped attempt covered part of the task while leaving uncovered work.
 			const timeStop = blocker === "time_exhausted";
+			const partialProgress = coverage.covered.length > 0 && remaining.length > 0;
 			const thinking = timeStop
 				? (facts.thinking ?? "off")
 				: nextThinkingLevel(facts.thinking, facts.thinkingCeiling);
-			const rung1Used = facts.escalations.some((entry) => entry.rung === 1);
+			const rung1Used = usedRung >= 1;
 			const signature = thinking ? escalationSignature(facts.nodeId, remaining, facts.modelRef, thinking) : "";
-			if (timeStop && coverage.covered.length === 0) skip("E14", "time_stop_no_progress");
+			if (timeStop && !partialProgress) skip("E14", "time_stop_no_progress");
 			else if (rung1Used) skip("E14", "rung1_used");
 			else if (!thinking) skip("E14", "thinking_ceiling");
 			else if (facts.escalations.some((entry) => entry.signature === signature)) skip("E14", "signature_placed");
@@ -262,6 +264,7 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 					1,
 				);
 			if (facts.modelBound) skip("E15", "model_bound");
+			else if (usedRung >= 2) skip("E15", "rung2_used");
 			else {
 				const move = nextModelRung(facts, skip, "E15");
 				if (move) return done("E15", move, 2);

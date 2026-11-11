@@ -178,16 +178,26 @@ export function readHistoricalWorkerAccountingState(store: OrchestrationEventSto
 		const committed = new Set(retentionArchiveIdsField(raw).retentionArchiveIds ?? []);
 		for (const archive of readRetentionArchives(retentionArchiveDir(store.rootDir)).archives) {
 			if (archive.sessionId !== store.sessionId || !archiveIsCommitted(archive, committed)) continue;
+			const archiveRecords = record(archive.records, "archive records");
 			readRecordSet(
 				state,
 				{
-					tasks: archive.records.tasks,
-					attempts: archive.records.attempts,
-					checkpoints: archive.records.checkpoints,
+					tasks: archiveRecords.tasks,
+					attempts: archiveRecords.attempts,
+					checkpoints: archiveRecords.checkpoints,
 				},
 				readTask,
 				true,
 			);
+			if (archiveRecords.agents !== undefined) {
+				for (const [key, value] of Object.entries(record(archiveRecords.agents, "agents"))) {
+					if (state.agents.has(key)) continue;
+					if (record(value, "agent").agentId !== key) {
+						throw new Error("Archived agent key conflicts with its identity.");
+					}
+					readAgent(value);
+				}
+			}
 		}
 	}
 	const events = snapshot ? store.readAfter(snapshot.throughOrdinal) : store.readAll();

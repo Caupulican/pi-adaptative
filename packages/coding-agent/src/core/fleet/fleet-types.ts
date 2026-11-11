@@ -5,7 +5,12 @@
 
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { TaskBrief } from "../comms/comms-records.ts";
-import type { OrchestrationThinkingLevel, RiskBudget } from "../orchestration/contracts.ts";
+import type {
+	HarnessCapability,
+	OrchestrationThinkingLevel,
+	RiskBudget,
+	WorkerRole,
+} from "../orchestration/contracts.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { PlacementCapacitySource } from "../placement/capacity-source.ts";
 import type { Placement } from "../placement/placement-types.ts";
@@ -132,15 +137,24 @@ export interface FleetDispatch {
 export interface EscalationPinnedAuthority {
 	/** The registered profile the original ran under; absent when it was compiled from an adaptive profile. */
 	readonly profileId?: string;
+	/** The role, capabilities and tools compiled for an adaptive original when no registered profile id carries them. */
+	readonly role?: WorkerRole;
+	readonly capabilities?: readonly HarnessCapability[];
+	readonly toolNames?: readonly string[];
 	readonly parentAgentId?: string;
 	readonly botSoul?: string;
 	readonly readOnly: boolean;
 	readonly shellReadOnly?: boolean;
 	/**
-	 * Where the original's cwd sat: relative to the session cwd ("." for the session root) or an absolute path outside it.
-	 * The rerun is admitted with it as its workspace, so its scopes resolve where the original's did.
+	 * Where the original's cwd sat: `"lane"` for a worktree lane, else relative to the session cwd (`"."` for the session
+	 * root) or an absolute path outside it. The rerun is admitted under the same placement, so its scopes and digest match.
 	 */
 	readonly location: string;
+	/**
+	 * The original worktree lane's directory when the rerun reuses that lane in place (a read-only review inspecting it, or a
+	 * new attempt of the same worker continuing its conversation there); absent when a fresh worktree lane is isolated instead.
+	 */
+	readonly laneDirectory?: string;
 	/** Read roots relative to the original's cwd; absent keeps the default read scope. */
 	readonly readScope?: readonly string[];
 	readonly budget: RiskBudget;

@@ -44,6 +44,10 @@ export const BOT_TEAM = {
 		`${agentId} is now shown as ${name}. Address it as @${agentId} as before.`,
 	botRetired: (agentId: string) => `Bot ${agentId} retired.`,
 	botMissing: (agentId: string) => `Bot ${agentId} does not exist.`,
+	botLeadsOpenGoal: (agentId: string) =>
+		`Bot ${agentId} leads an open goal; cancel it first (/lead cancel ${agentId}).`,
+	botHasActiveWork: (agentId: string) =>
+		`Bot ${agentId} still has active team or direct work; run /bot stop ${agentId} first.`,
 	/** `bots`: the ids of the bots it owns that were stopped with it. */
 	botStopped: (agentId: string, bots: readonly string[], mode: string) =>
 		`Stopped ${agentId}${bots.length === 0 ? "" : ` and its ${bots.length === 1 ? "bot" : "bots"} ${bots.join(", ")}`} (${mode}).`,

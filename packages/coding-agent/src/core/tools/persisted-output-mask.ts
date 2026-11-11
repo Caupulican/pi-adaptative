@@ -6,30 +6,47 @@ import { AsyncLocalStorage } from "node:async_hooks";
  */
 export type PersistedOutputMask = (lines: string) => string;
 
-const scopes = new AsyncLocalStorage<() => PersistedOutputMask>();
+interface PersistedOutputScope {
+	readonly createMask: () => PersistedOutputMask;
+	readonly toolStreamsDirectory?: string;
+}
+
+const scopes = new AsyncLocalStorage<PersistedOutputScope>();
 
 /**
  * Runs `run` so that every output file opened inside it (an `OutputAccumulator` constructed in its async scope) is
- * written through a fresh mask from `create`. Inside an enclosing scope the enclosing mask is applied after this one,
- * the order in which nested wrappers mask a tool's result.
+ * written through a fresh mask from `create`, into `toolStreamsDirectory` when bound. Inside an enclosing scope the
+ * enclosing mask is applied after this one, the order in which nested wrappers mask a tool's result.
  */
-export function runWithPersistedOutputMask<T>(create: () => PersistedOutputMask, run: () => T): T {
+export function runWithPersistedOutputMask<T>(
+	create: () => PersistedOutputMask,
+	run: () => T,
+	toolStreamsDirectory?: string,
+): T {
 	const enclosing = scopes.getStore();
 	return scopes.run(
-		enclosing
-			? () => {
-					const inner = create();
-					const outer = enclosing();
-					return (lines) => outer(inner(lines));
-				}
-			: create,
+		{
+			createMask: enclosing
+				? () => {
+						const inner = create();
+						const outer = enclosing.createMask();
+						return (lines) => outer(inner(lines));
+					}
+				: create,
+			toolStreamsDirectory: toolStreamsDirectory ?? enclosing?.toolStreamsDirectory,
+		},
 		run,
 	);
 }
 
 /** A fresh mask for one output file in the current scope; undefined outside every scope (the file is written as is). */
 export function createScopedPersistedOutputMask(): PersistedOutputMask | undefined {
-	return scopes.getStore()?.();
+	return scopes.getStore()?.createMask();
+}
+
+/** The active session's private tool-streams run directory, when bound in the current tool scope. */
+export function getScopedToolStreamsDirectory(): string | undefined {
+	return scopes.getStore()?.toolStreamsDirectory;
 }
 
 /** A line longer than this is masked in parts rather than held whole. */

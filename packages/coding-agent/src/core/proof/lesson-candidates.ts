@@ -24,7 +24,7 @@ const MAX_TEXT_CHARS = 1_000;
  */
 export type LessonCandidateSignal = "completion-continued" | "completed-goal-edited" | "blocked-requirement-reopened";
 
-export interface LessonCandidate {
+export interface OwnerLessonCandidate {
 	readonly at: string;
 	readonly signal: LessonCandidateSignal;
 	readonly sessionId: string;
@@ -48,7 +48,7 @@ function bounded(text: string): string {
 	return clean.length <= MAX_TEXT_CHARS ? clean : `${clean.slice(0, MAX_TEXT_CHARS - 3)}...`;
 }
 
-function isCandidate(value: unknown): value is LessonCandidate {
+function isCandidate(value: unknown): value is OwnerLessonCandidate {
 	if (typeof value !== "object" || value === null) return false;
 	const entry = value as Record<string, unknown>;
 	return (
@@ -67,7 +67,7 @@ function isCandidate(value: unknown): value is LessonCandidate {
 /** The reader interface a standards step uses; it never writes. */
 export interface LessonCandidateReader {
 	/** Every kept candidate, oldest first. */
-	list(): LessonCandidate[];
+	list(): OwnerLessonCandidate[];
 }
 
 /** The bounded candidate store of one agent directory. */
@@ -78,9 +78,9 @@ export class LessonCandidateStore implements LessonCandidateReader {
 		this.file = lessonCandidatesFile(agentDir);
 	}
 
-	list(): LessonCandidate[] {
+	list(): OwnerLessonCandidate[] {
 		if (!existsSync(this.file)) return [];
-		const entries: LessonCandidate[] = [];
+		const entries: OwnerLessonCandidate[] = [];
 		for (const line of readFileSync(this.file, "utf8").split("\n")) {
 			if (line.trim() === "") continue;
 			try {
@@ -94,13 +94,13 @@ export class LessonCandidateStore implements LessonCandidateReader {
 	}
 
 	/** Appends one candidate (redacted and bounded) and keeps the last {@link LESSON_CANDIDATE_LIMIT}. Throws on a failed write. */
-	append(input: Omit<LessonCandidate, "at"> & { readonly at?: string }): void {
+	append(input: Omit<OwnerLessonCandidate, "at"> & { readonly at?: string }): void {
 		const ownerWords = input.ownerWords ? bounded(input.ownerWords) : "";
 		const hostGaps = (input.hostGaps ?? [])
 			.map(bounded)
 			.filter((gap) => gap.length > 0)
 			.slice(0, 8);
-		const entry: LessonCandidate = {
+		const entry: OwnerLessonCandidate = {
 			at: input.at ?? new Date().toISOString(),
 			signal: input.signal,
 			sessionId: input.sessionId,
@@ -128,7 +128,7 @@ export class LessonCandidateStore implements LessonCandidateReader {
  */
 export function recordLessonCandidate(
 	agentDir: string,
-	input: Omit<LessonCandidate, "at">,
+	input: Omit<OwnerLessonCandidate, "at">,
 	warn: (message: string) => void,
 ): void {
 	try {

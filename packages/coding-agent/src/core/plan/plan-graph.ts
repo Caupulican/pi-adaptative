@@ -582,6 +582,13 @@ function checkJoinShape(node: PlanNodeSpec, nodes: readonly PlanNodeSpec[], prob
 			fix: `step "${node.id}": a vote needs the question the winner must meet, or the criteria it is judged on`,
 		});
 	}
+	if (join.criterion !== undefined && node.kind !== "reduce" && node.kind !== "verify" && node.kind !== "vote") {
+		problems.push({
+			fact: "F4",
+			nodeId: node.id,
+			fix: `step "${node.id}" (${node.kind}) takes no question; question belongs to a reduce, verify, or vote step`,
+		});
+	}
 	if (node.kind !== "vote" && criteria.length > 0) {
 		problems.push({
 			fact: "F4",

@@ -1,3 +1,4 @@
+import { VERIFICATION_HANDOFF_REQUIRED_ERROR } from "../../kernel/index.ts";
 import type { WorkerControlBody } from "../../kernel/worker-control-stamp.ts";
 import { runBoundedCompletion } from "../autonomy/bounded-completion.ts";
 import type {
@@ -65,6 +66,7 @@ export interface WorkerCompletion {
 	text: string;
 	costUsd: number;
 	stopReason: string;
+	errorMessage?: string;
 	/** Files successfully changed by the worker tool loop before it produced the final JSON. */
 	changedFiles?: readonly string[];
 	/** Capability refusals or execution failures observed inside the worker tool loop. */
@@ -595,7 +597,9 @@ export async function runWorker(options: WorkerRunnerOptions): Promise<WorkerRun
 		changedFiles: completionChangedFiles,
 		...(completion?.commandReceipts?.length ? { commandReceipts: completion.commandReceipts } : {}),
 	};
-	if (!completion || completion.stopReason === "error" || completion.stopReason === "aborted") {
+	const modelFailed =
+		completion?.stopReason === "error" && completion.errorMessage !== VERIFICATION_HANDOFF_REQUIRED_ERROR;
+	if (!completion || modelFailed || completion.stopReason === "aborted") {
 		const modelErrorEvidence = completion?.text?.trim()
 			? buildWorkerEvidenceBundle({
 					request: options.request,

@@ -29,6 +29,10 @@ export interface SessionAppendReceipt extends SessionAppendIdentity {
 	readonly durability: "persisted" | "buffered" | "memory";
 }
 
+export function expectedSessionAppendDurability(persisted: boolean): "persisted" | "memory" {
+	return persisted ? "persisted" : "memory";
+}
+
 /** One identity path for committed and unresolved append outcomes. */
 export function captureSessionAppendIdentity(
 	sessionId: string,

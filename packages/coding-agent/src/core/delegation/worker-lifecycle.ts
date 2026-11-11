@@ -1,5 +1,11 @@
+import { existsSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import {
+	workerConversationMetadataFile,
+	workerTranscriptLocation,
+} from "../../kernel/session/worker-storage-identity.ts";
+import { orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { laneSubtreeId } from "../fleet/fleet-types.ts";
@@ -28,6 +34,8 @@ import {
 	type StartedDelegationAttempt,
 } from "../orchestration/delegation-ledger.ts";
 import type { OrchestrationEventStore } from "../orchestration/event-store.ts";
+import { archiveIsCommitted, readRetentionArchives, retentionArchiveDir } from "../orchestration/retention-archive.ts";
+import { reviewEvidenceVerdict } from "../orchestration/review-verdict.ts";
 import type {
 	AttemptDispatchReadiness,
 	AttemptRuntimeState,
@@ -42,6 +50,7 @@ import { type VerifierVerdict, verdictReasonCode } from "../orchestration/verifi
 import { verifierWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
 import { workerTerminalNotificationId } from "../orchestration/worker-terminal-notification.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import {
 	ACTIVE_WORKER_ATTEMPT_STATUSES,
 	attemptAwaitsVerification,
@@ -129,6 +138,8 @@ export interface ManagedLaneBinding {
 
 export class WorkerLifecycle {
 	readonly ledger: DelegationOrchestrationLedger;
+	private readonly agentDir: string;
+	private readonly sessionId: string;
 	private readonly outcomes: WorkerOutcomeRecorder;
 	private nextLaneNumber: number;
 	private readonly isProcessAlive: (pid: number) => boolean;
@@ -146,6 +157,8 @@ export class WorkerLifecycle {
 		 */
 		store?: OrchestrationEventStore;
 	}) {
+		this.agentDir = options.agentDir;
+		this.sessionId = options.sessionId;
 		this.ledger = new DelegationOrchestrationLedger(options);
 		this.outcomes = new WorkerOutcomeRecorder({
 			runtime: this.ledger.runtime,
@@ -155,8 +168,8 @@ export class WorkerLifecycle {
 		});
 		this.isProcessAlive = options.isProcessAlive ?? isLocalProcessAlive;
 		const snapshot = this.ledger.runtime.getSnapshot();
-		const highest = Object.keys(snapshot.tasks).reduce((current, taskId) => {
-			const suffix = /^worker-(\d+)$/.exec(taskId)?.[1];
+		const highest = [...Object.keys(snapshot.tasks), ...Object.keys(snapshot.agents)].reduce((current, id) => {
+			const suffix = /^worker-(\d+)$/.exec(id)?.[1];
 			return suffix ? Math.max(current, Number(suffix)) : current;
 		}, 0);
 		this.nextLaneNumber = highest + 1;
@@ -170,12 +183,14 @@ export class WorkerLifecycle {
 		attempt: AttemptRuntimeState;
 	} {
 		let selectedLaneId = laneId;
-		const generatedLaneId = !selectedLaneId;
 		if (!selectedLaneId) {
 			selectedLaneId = this.getNextAvailableLaneIdCandidate();
 		}
 		const attempt = this.ledger.prepare({ ...input, laneId: selectedLaneId });
-		if (generatedLaneId) this.nextLaneNumber = Number(selectedLaneId.slice("worker-".length)) + 1;
+		const generatedSuffix = /^worker-(\d+)$/.exec(selectedLaneId)?.[1];
+		if (generatedSuffix) {
+			this.nextLaneNumber = Math.max(this.nextLaneNumber, Number(generatedSuffix) + 1);
+		}
 		const record = this.getRecord(selectedLaneId);
 		if (!record) throw new Error(`Durable worker '${selectedLaneId}' was not projected after enqueue.`);
 		return { record, attempt };
@@ -185,8 +200,22 @@ export class WorkerLifecycle {
 	getNextAvailableLaneIdCandidate(): string {
 		const snapshot = this.ledger.runtime.getSnapshot();
 		let candidateNumber = this.nextLaneNumber;
-		while (snapshot.tasks[`worker-${candidateNumber}`]) candidateNumber += 1;
+		while (
+			snapshot.tasks[`worker-${candidateNumber}`] ||
+			snapshot.agents[`worker-${candidateNumber}`] ||
+			this.hasRetainedWorkerConversation(`worker-${candidateNumber}`)
+		) {
+			candidateNumber += 1;
+		}
 		return `worker-${candidateNumber}`;
+	}
+
+	private hasRetainedWorkerConversation(laneId: string): boolean {
+		const { sessionFile } = workerTranscriptLocation(this.agentDir, {
+			parentSessionId: this.sessionId,
+			logicalAgentId: laneId,
+		});
+		return existsSync(sessionFile) || existsSync(workerConversationMetadataFile(sessionFile));
 	}
 
 	/** Queue the next distinct task/attempt for an idle logical agent. */
@@ -229,6 +258,45 @@ export class WorkerLifecycle {
 	/** Retire one idle logical worker while retaining its durable binding and transcript identity. */
 	retireAgent(agentId: string): AgentBindingContract {
 		return this.ledger.runtime.retireAgent(agentId);
+	}
+
+	/**
+	 * Statuses of bindings in this session that own `resumeContext`, folding committed retention archives when a retired
+	 * binding has been pruned from the hot projection.
+	 */
+	getProjectOwnerBindingStatuses(resumeContext: {
+		readonly sessionId?: string;
+		readonly sessionFile?: string;
+	}): readonly AgentBindingContract["status"][] {
+		const snapshot = this.ledger.runtime.getSnapshot();
+		const live = Object.values(snapshot.agents)
+			.filter(
+				(agent) =>
+					agent.resumeContext.sessionId === resumeContext.sessionId &&
+					agent.resumeContext.sessionFile === resumeContext.sessionFile,
+			)
+			.map((agent) => agent.status);
+		if (live.length > 0 || !snapshot.retentionArchiveIds?.length) return live;
+		const committed = new Set(snapshot.retentionArchiveIds);
+		const archiveRead = readRetentionArchives(
+			retentionArchiveDir(orchestrationEventStoreDir(this.agentDir, this.sessionId)),
+		);
+		const archived: AgentBindingContract["status"][] = [];
+		for (const archive of archiveRead.archives) {
+			if (archive.sessionId !== this.sessionId || !archiveIsCommitted(archive, committed)) continue;
+			for (const entry of Object.values(archive.records.agents ?? {})) {
+				if (!isPlainRecord(entry) || !isPlainRecord(entry.resumeContext) || typeof entry.status !== "string") {
+					throw new Error("Archived agent binding is malformed.");
+				}
+				if (
+					entry.resumeContext.sessionId === resumeContext.sessionId &&
+					entry.resumeContext.sessionFile === resumeContext.sessionFile
+				) {
+					archived.push(entry.status as AgentBindingContract["status"]);
+				}
+			}
+		}
+		return archived;
 	}
 
 	prepareManaged(
@@ -706,29 +774,13 @@ export class WorkerLifecycle {
 			}
 			const verifierAttempt = selectedWorkerAttempt(snapshot, verifier.task.taskId);
 			if (!verifierAttempt || NONTERMINAL_WORKER_ATTEMPT_STATUSES.has(verifierAttempt.status)) return [];
-			const review = verifierAttempt.result?.evidence.find(
-				(evidence) =>
-					evidence.trusted &&
-					evidence.kind === "review" &&
-					evidence.metadata?.subjectTaskId === subject.task.taskId &&
-					(!verifier.task.verificationOfAttemptId ||
-						evidence.metadata.subjectAttemptId === implementationAttempt.attemptId) &&
-					(evidence.metadata.verdict === "accepted" || evidence.metadata.verdict === "rejected"),
-			);
-			const verdictValue = review?.metadata?.verdict;
-			const reasonCodesValue = review?.metadata?.reasonCodes;
-			const reasonCodes = Array.isArray(reasonCodesValue)
-				? reasonCodesValue.filter((reasonCode): reasonCode is string => typeof reasonCode === "string")
-				: [];
-			const verdict: VerifierVerdict =
-				verdictValue === "accepted"
-					? { kind: "accepted" }
-					: verdictValue === "rejected"
-						? { kind: "rejected", reasonCodes }
-						: {
-								kind: "inconclusive",
-								cause: verifierAttempt.reasonCode ?? verifierAttempt.result?.reasonCode ?? "interrupted",
-							};
+			const verdict: VerifierVerdict = reviewEvidenceVerdict(verifierAttempt, {
+				taskId: subject.task.taskId,
+				...(verifier.task.verificationOfAttemptId ? { attemptId: implementationAttempt.attemptId } : {}),
+			}) ?? {
+				kind: "inconclusive",
+				cause: verifierAttempt.reasonCode ?? verifierAttempt.result?.reasonCode ?? "interrupted",
+			};
 			return [
 				{
 					action: "reconcile" as const,

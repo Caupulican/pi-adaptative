@@ -75,6 +75,7 @@ export class BotLifecycleController {
 	>;
 	private readonly botBindings: BotRuntimeBindings;
 	private readonly host: BotLifecycleHost;
+	private readonly ownedBotStarts = new Map<string, Promise<unknown>>();
 
 	constructor(
 		deps: Pick<
@@ -94,7 +95,31 @@ export class BotLifecycleController {
 	 * running now, and is held to that goal's envelope (its providers; its write paths only when the goal grants them). A
 	 * live bot, or a bot the leader did not make, is left to the ordinary mailbox send.
 	 */
-	private async startOwnedBotAsChild(
+	private startOwnedBotAsChild(
+		leaderAgentId: string,
+		leaderAlias: string,
+		alias: string,
+		message: string,
+		invocationId: string,
+	): Promise<BotOwnedStartOutcome> {
+		const sessionId = this.deps.getSessionManager()?.getSessionId() ?? "";
+		const key = `${sessionId}\0${alias}`;
+		const prior = this.ownedBotStarts.get(key) ?? Promise.resolve();
+		const run = prior
+			.catch(() => undefined)
+			.then(() => this.runOwnedBotChildStart(leaderAgentId, leaderAlias, alias, message, invocationId));
+		const settled = run.then(
+			() => undefined,
+			() => undefined,
+		);
+		this.ownedBotStarts.set(key, settled);
+		void settled.then(() => {
+			if (this.ownedBotStarts.get(key) === settled) this.ownedBotStarts.delete(key);
+		});
+		return run;
+	}
+
+	private async runOwnedBotChildStart(
 		leaderAgentId: string,
 		leaderAlias: string,
 		alias: string,
@@ -320,14 +345,14 @@ export class BotLifecycleController {
 				!this.deps.isChildSession() &&
 				this.host.getLeaders().leadsOpenDelegation(agentId)
 			)
-				throw new Error(`Bot ${agentId} leads an open goal; cancel it first (/lead cancel ${agentId}).`);
+				throw new Error(interfaceText().botTeam.botLeadsOpenGoal(agentId));
 			this.host.assertBotDispatchIdle(agentId);
 			const runtimes = new Set(this.botBindings.runtimes(agentId));
 			const workers = this.host.hasWorkerState()
 				? this.host.listWorkerAgents().filter((agent) => runtimes.has(agent.agentId))
 				: [];
 			if (workers.some((agent) => agent.status !== "retired" && agent.activity !== "idle"))
-				throw new Error(`Bot ${agentId} still has active group or direct work.`);
+				throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
 			for (const worker of workers) this.host.retireWorkerAgent(worker.agentId, undefined, { discardPending: true });
 			const hasWorker = workers.length > 0;
 			const bot = this.host.getBotTeamStore().retireBot(agentId);
