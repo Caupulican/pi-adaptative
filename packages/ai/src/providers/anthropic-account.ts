@@ -118,7 +118,10 @@ export async function getAnthropicOAuthUsage(options: AnthropicAccountRequestOpt
 	if (!token || token.length > 64 * 1024 || /[^\x21-\x7e]/.test(token)) {
 		throw new AnthropicAccountError("Anthropic OAuth access token is not a valid header value.");
 	}
-	const compatibility = await awaitAuthorizationInput(resolveAnthropicCompatibility, options.signal);
+	const signal = options.signal
+		? AbortSignal.any([options.signal, AbortSignal.timeout(30_000)])
+		: AbortSignal.timeout(30_000);
+	const compatibility = await awaitAuthorizationInput(resolveAnthropicCompatibility, signal);
 	const json = await requestBoundedAccountJson({
 		url: ANTHROPIC_OAUTH_USAGE_URL,
 		headers: new Headers({
@@ -128,11 +131,12 @@ export async function getAnthropicOAuthUsage(options: AnthropicAccountRequestOpt
 			"User-Agent": compatibility.identity.usageUserAgent,
 		}),
 		init: { method: "GET" },
-		signal: options.signal,
+		signal,
 		fetch: options.fetch,
 		label: "Anthropic account",
 		createError: (message, status, retryAfterMs) => new AnthropicAccountError(message, status, retryAfterMs),
 	});
+	signal.throwIfAborted();
 	if (!isRecord(json)) throw new AnthropicAccountError("Anthropic usage response is not an object");
 	const windows: AnthropicUsageWindow[] = [];
 	for (const name of ANTHROPIC_USAGE_WINDOWS) {

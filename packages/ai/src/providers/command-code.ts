@@ -33,6 +33,7 @@ import {
 	buildCommandCodeRequest,
 	COMMAND_CODE_GENERATE_ROUTE,
 	commandCodeHeaders,
+	resolveCommandCodeSessionId,
 	sendsNullForUnset,
 } from "./command-code-request.ts";
 import {
@@ -77,6 +78,8 @@ const UNREAD_EVENTS_DIAGNOSTIC_TYPE = "command_code_unread_events";
 const UNREAD_KINDS_OVER_LIMIT = "kinds-over-limit";
 /** The key an event that names no usable kind is counted under, so no event of a turn goes unreported. */
 const UNTYPED_EVENT_KIND = "(no type)";
+const TRUNCATED_TOOL_INPUT_MESSAGE =
+	"Tool call arguments were truncated before complete JSON was received. Retry the tool call with complete JSON arguments.";
 
 type ServiceEvent = Record<string, unknown> & { type: string };
 
@@ -327,8 +330,7 @@ function readToolInput(raw: unknown): ToolInput {
 		if (!parsed.complete) {
 			return {
 				arguments: {},
-				errorMessage:
-					"Tool call arguments were truncated before complete JSON was received. Retry the tool call with complete JSON arguments.",
+				errorMessage: TRUNCATED_TOOL_INPUT_MESSAGE,
 			};
 		}
 		value = parsed.value;
@@ -366,6 +368,29 @@ class UnreadEventKinds {
 	}
 }
 
+interface PendingToolInput {
+	id: string;
+	toolName: string;
+	providerExecuted: boolean;
+	chunks: string[];
+	chars: number;
+}
+
+function toolInputEventId(event: ServiceEvent): string | undefined {
+	if (typeof event.id === "string" && event.id) return event.id;
+	if (typeof event.toolCallId === "string" && event.toolCallId) return event.toolCallId;
+	return undefined;
+}
+
+function isLengthFinish(finish: ServiceEvent): boolean {
+	for (const candidate of [finish.finishReason, finish.rawFinishReason]) {
+		if (typeof candidate !== "string") continue;
+		const normalized = candidate.trim().toLowerCase();
+		if (normalized === "length" || normalized === "max_tokens" || normalized === "max_output_tokens") return true;
+	}
+	return false;
+}
+
 /** One model turn being assembled from the service's events, over one or more posts. */
 class CommandCodeTurn {
 	private open: TextContent | ThinkingContent | undefined;
@@ -397,6 +422,7 @@ class CommandCodeTurn {
 		let finish: ServiceEvent | undefined;
 		let aborted = false;
 		let cacheWriteSeen: number | undefined;
+		const pendingToolInputs = new Map<string, PendingToolInput>();
 		for await (const event of readEvents(response, signal)) {
 			switch (event.type) {
 				case "text-delta":
@@ -409,10 +435,45 @@ class CommandCodeTurn {
 				case "reasoning-delta":
 					if (typeof event.text === "string" && event.text) this.append("thinking", event.text);
 					break;
-				case "tool-call":
+				case "tool-input-start": {
 					this.close();
+					const id = toolInputEventId(event);
+					if (id) {
+						pendingToolInputs.set(id, {
+							id,
+							toolName: typeof event.toolName === "string" ? event.toolName : "",
+							providerExecuted: event.providerExecuted === true,
+							chunks: [],
+							chars: 0,
+						});
+					}
+					break;
+				}
+				case "tool-input-delta": {
+					const id = toolInputEventId(event);
+					const pending = id ? pendingToolInputs.get(id) : undefined;
+					const delta =
+						typeof event.delta === "string"
+							? event.delta
+							: typeof event.inputTextDelta === "string"
+								? event.inputTextDelta
+								: undefined;
+					if (pending && delta && pending.chars < MAX_EVENT_CHARS) {
+						const slice = delta.slice(0, MAX_EVENT_CHARS - pending.chars);
+						pending.chunks.push(slice);
+						pending.chars += slice.length;
+					}
+					break;
+				}
+				case "tool-input-end":
+					break;
+				case "tool-call": {
+					this.close();
+					const id = toolInputEventId(event);
+					if (id) pendingToolInputs.delete(id);
 					if (event.providerExecuted !== true) this.toolCall(event);
 					break;
+				}
 				case "tool-result":
 					// The result of a call the service ran itself.
 					this.close();
@@ -442,6 +503,20 @@ class CommandCodeTurn {
 					: "Command Code's stream ended before the answer finished",
 				{ retryable: true },
 			);
+		}
+		if (isLengthFinish(finish)) {
+			for (const pending of pendingToolInputs.values()) {
+				if (pending.providerExecuted) continue;
+				const raw = pending.chunks.join("");
+				const input = raw.trim()
+					? readToolInput(raw)
+					: { arguments: {}, errorMessage: TRUNCATED_TOOL_INPUT_MESSAGE };
+				this.emitToolCall(
+					pending.id,
+					pending.toolName,
+					input.errorMessage ? input : { arguments: {}, errorMessage: TRUNCATED_TOOL_INPUT_MESSAGE },
+				);
+			}
 		}
 		return this.finishLeg(finish, cacheWriteSeen);
 	}
@@ -486,13 +561,18 @@ class CommandCodeTurn {
 
 	private toolCall(event: ServiceEvent): void {
 		const input = readToolInput(event.input ?? event.args);
-		const schema = typeof event.toolName === "string" ? this.toolSchemas.get(event.toolName) : undefined;
+		const providerToolName = typeof event.toolName === "string" ? event.toolName : "";
+		const schema = providerToolName ? this.toolSchemas.get(providerToolName) : undefined;
 		// An OpenAI-family model was asked to send null for a parameter it leaves unset; the caller never sees those.
 		if (sendsNullForUnset(this.model) && schema) input.arguments = dropNullOptionals(input.arguments, schema);
+		this.emitToolCall(toolInputEventId(event), providerToolName, input);
+	}
+
+	private emitToolCall(id: string | undefined, providerToolName: string, input: ToolInput): void {
 		const toolCall: ToolCall = {
 			type: "toolCall",
-			id: typeof event.toolCallId === "string" && event.toolCallId ? event.toolCallId : `call_${uuidv7()}`,
-			name: this.toolNameMap.toOriginalName(typeof event.toolName === "string" ? event.toolName : ""),
+			id: id || `call_${uuidv7()}`,
+			name: this.toolNameMap.toOriginalName(providerToolName),
 			arguments: input.arguments,
 			...(input.errorMessage ? { errorMessage: input.errorMessage } : {}),
 		};
@@ -529,10 +609,11 @@ class CommandCodeTurn {
 				throw new CommandCodeError(`Command Code finish reason: ${value}`, { retryable: false });
 			}
 		}
-		if (this.output.content.some((block) => block.type === "toolCall") && reason !== "length") {
+		const lengthCutoff = isLengthFinish(finish);
+		if (this.output.content.some((block) => block.type === "toolCall") && !lengthCutoff) {
 			this.output.stopReason = "toolUse";
 		} else {
-			this.output.stopReason = reason === "length" ? "length" : reason === "tool-calls" ? "toolUse" : "stop";
+			this.output.stopReason = lengthCutoff ? "length" : reason === "tool-calls" ? "toolUse" : "stop";
 		}
 		return raw;
 	}
@@ -552,19 +633,20 @@ export const streamCommandCode: StreamFunction<"command-code-generate", CommandC
 			const apiKey = options?.apiKey;
 			if (!apiKey) throw new Error("No Command Code key. Sign in with /login or set COMMAND_CODE_API_KEY.");
 			const toolNameMap = createToolNameMap(context.tools ?? []);
+			const sessionId = await resolveCommandCodeSessionId(options?.sessionId);
 			const payload = await applyProviderPayloadHook(
 				buildCommandCodeRequest(model, context, toolNameMap, {
 					maxTokens: options?.maxTokens,
 					temperature: options?.temperature,
 					reasoningEffort: options?.reasoningEffort,
 					cacheRetention: resolveCacheRetention(options?.cacheRetention),
-					sessionId: options?.sessionId,
+					sessionId,
 				}),
 				model,
 				options?.onPayload,
 			);
 			const body = JSON.stringify(payload);
-			const headers = commandCodeHeaders(apiKey, options?.sessionId ?? uuidv7(), {
+			const headers = commandCodeHeaders(apiKey, sessionId, {
 				...model.headers,
 				...options?.headers,
 			});
@@ -603,12 +685,15 @@ export const streamSimpleCommandCode: StreamFunction<"command-code-generate", Si
 	options?: SimpleStreamOptions,
 ): AssistantMessageEventStream => {
 	const { base, clampedReasoning } = buildClampedSimpleOptions(model, options);
+	// A model with no effort control takes none; one with it takes the level's own name unless the catalog maps it.
+	const reasoningEffort =
+		model.reasoning && clampedReasoning
+			? (model.thinkingLevelMap?.[clampedReasoning] ?? clampedReasoning)
+			: undefined;
+	const reasoning = reasoningEffort !== undefined && reasoningEffort !== "off";
 	return streamCommandCode(model, context, {
 		...base,
-		// A model with no effort control takes none; one with it takes the level's own name unless the catalog maps it.
-		reasoningEffort:
-			model.reasoning && clampedReasoning
-				? (model.thinkingLevelMap?.[clampedReasoning] ?? clampedReasoning)
-				: undefined,
+		maxTokens: base.maxTokens ?? (reasoning ? model.maxTokens : undefined),
+		reasoningEffort,
 	} satisfies CommandCodeOptions);
 };

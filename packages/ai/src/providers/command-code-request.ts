@@ -18,6 +18,7 @@ import type {
 import { withNullableOptionals } from "../utils/nullable-optionals.ts";
 import { sanitizeSurrogates } from "../utils/sanitize-unicode.ts";
 import type { ToolNameMap } from "../utils/tool-names.ts";
+import { uuidv7 } from "../utils/uuid.ts";
 import { joinTextContent, transformMessages } from "./transform-messages.ts";
 
 export const COMMAND_CODE_BASE_URL = "https://api.commandcode.ai";
@@ -81,7 +82,47 @@ export interface CommandCodeRequestSettings {
 	sessionId?: string;
 }
 
-const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+
+function formatDeterministicUuid(bytes: Uint8Array): string {
+	const copy = bytes.slice(0, 16);
+	copy[6] = (copy[6]! & 0x0f) | 0x50;
+	copy[8] = (copy[8]! & 0x3f) | 0x80;
+	const hex = Array.from(copy, (byte) => byte.toString(16).padStart(2, "0"));
+	return `${hex.slice(0, 4).join("")}-${hex.slice(4, 6).join("")}-${hex.slice(6, 8).join("")}-${hex.slice(8, 10).join("")}-${hex.slice(10, 16).join("")}`;
+}
+
+function fallbackSessionDigest(input: string): Uint8Array {
+	const bytes = new Uint8Array(16);
+	const seeds = [0x811c9dc5, 0x9e3779b9, 0x85ebca6b, 0xc2b2ae35];
+	for (let lane = 0; lane < 4; lane++) {
+		let hash = seeds[lane]!;
+		for (let index = 0; index < input.length; index++) {
+			hash ^= input.charCodeAt(index) + lane * 31;
+			hash = Math.imul(hash, 0x01000193) >>> 0;
+		}
+		bytes[lane * 4] = (hash >>> 24) & 0xff;
+		bytes[lane * 4 + 1] = (hash >>> 16) & 0xff;
+		bytes[lane * 4 + 2] = (hash >>> 8) & 0xff;
+		bytes[lane * 4 + 3] = hash & 0xff;
+	}
+	return bytes;
+}
+
+/**
+ * Resolves the one UUID shared by `body.threadId` and `x-session-id` for a conversation: an existing RFC UUID as-is,
+ * a deterministic UUID derived from SHA-256 for non-UUID session ids (such as `auto-learn-*`), or a fresh `uuidv7()`.
+ */
+export async function resolveCommandCodeSessionId(sessionId?: string): Promise<string> {
+	const trimmed = sessionId?.trim();
+	if (!trimmed) return uuidv7();
+	if (UUID.test(trimmed)) return trimmed;
+	const subtle = globalThis.crypto?.subtle;
+	const digest = subtle
+		? new Uint8Array(await subtle.digest("SHA-256", new TextEncoder().encode(`command-code-session:${trimmed}`)))
+		: fallbackSessionDigest(trimmed);
+	return formatDeterministicUuid(digest);
+}
 
 /** Tool call ids of other providers can carry characters and lengths this route's upstream providers refuse. */
 function normalizeToolCallId(id: string): string {
@@ -163,11 +204,9 @@ function toWireMessages(messages: Message[], toolNameMap: ToolNameMap): CommandC
 	return wire;
 }
 
-// Reasoning counts inside max_tokens here, so a sent effort gets the model's whole cap (the caller's cap is for the answer).
-// With no effort the caller's cap applies; the model's cap bounds both.
+// The caller's cap narrows the model's own cap; nothing widens it.
 function outputCap(model: Model<"command-code-generate">, settings: CommandCodeRequestSettings): number {
-	const reasoning = settings.reasoningEffort !== undefined && settings.reasoningEffort !== "off";
-	return reasoning ? model.maxTokens : Math.min(settings.maxTokens ?? model.maxTokens, model.maxTokens);
+	return Math.min(settings.maxTokens ?? model.maxTokens, model.maxTokens);
 }
 
 /**

@@ -62,6 +62,9 @@ export async function getXaiAccountUsage(options: XaiAccountRequestOptions): Pro
 			throw new XaiAccountError(`xAI ${field} is not a valid header value`);
 		}
 	}
+	const signal = options.signal
+		? AbortSignal.any([options.signal, AbortSignal.timeout(30_000)])
+		: AbortSignal.timeout(30_000);
 	const json = await requestBoundedAccountJson({
 		url: `${XAI_CLI_PROXY_BASE_URL}/billing?format=credits`,
 		headers: new Headers({
@@ -70,12 +73,12 @@ export async function getXaiAccountUsage(options: XaiAccountRequestOptions): Pro
 			Authorization: `Bearer ${options.accessToken}`,
 		}),
 		init: { method: "GET" },
-		signal: options.signal,
+		signal,
 		fetch: options.fetch,
 		label: "xAI account",
 		createError: (message, status, retryAfterMs) => new XaiAccountError(message, status, retryAfterMs),
 	});
-	options.signal?.throwIfAborted();
+	signal.throwIfAborted();
 	if (!isRecord(json) || !isRecord(json.config)) throw new XaiAccountError("xAI billing response has no config");
 	const config = json.config;
 	const usage: XaiAccountUsage = {};

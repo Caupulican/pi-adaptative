@@ -1,5 +1,17 @@
 ## [Unreleased]
 
+### Added
+
+- Command Code account usage reader (`fetchCommandCodeAccountUsage`). Reads `GET /alpha/whoami?limits=1` alongside `/alpha/billing/credits`, `/alpha/billing/subscriptions`, and `/alpha/usage/summary` (each bounded by a 30-second timeout), mapping the service's plan tiers (`go`, `provider`, `pro`, `teams_pro`, `goat`, `max`, `ultra`, and their `individual-*` and versioned aliases), 5-hour, weekly, and organization windows, monthly included allowance, and purchased or free credit balances. Uses Web standard APIs only, with no Node-only imports, so browser bundles load it unchanged.
+
+### Changed
+
+- Synced reviewed OAuth and CLI compatibility profiles to Claude Code `2.1.322`, Google Antigravity `1.5.5`, and xAI Grok CLI `1.0.77`, and bounded Anthropic and xAI account-usage fetches with 30-second timeouts composed with any caller `AbortSignal`.
+
+### Fixed
+
+- Command Code adapter (`streamCommandCode`, `streamSimpleCommandCode`): `max_tokens` is always capped at `model.maxTokens` (`Math.min(settings.maxTokens ?? model.maxTokens, model.maxTokens)`), keeping caller and budget ceilings in force when reasoning is active while `streamSimpleCommandCode` defaults to `model.maxTokens` under reasoning when `maxTokens` is omitted; `body.threadId` and `x-session-id` carry the same RFC UUID across initial posts and `pause_turn` continuations (passing valid UUIDs through, deriving a deterministic RFC UUID via Web Crypto SHA-256 when a caller's `sessionId` is not already a UUID, or minting one UUID per turn when omitted); and streamed `tool-input-start`, `tool-input-delta`, and `tool-input-end` chunks are buffered per call so normal turns no longer emit `command_code_unread_events` for them and a turn cut off at `length` materializes any incomplete client tool call with `TRUNCATED_TOOL_INPUT_MESSAGE` instead of dropping it in silence.
+
 ## [0.104.51] - 2026-11-10
 
 ### Added

@@ -1,4 +1,4 @@
 export const ANTIGRAVITY_CLIENT_CONFIG = {
-	version: "1.4.12",
-	userAgentPrefix: "antigravity/cli/1.4.12",
+	version: "1.5.5",
+	userAgentPrefix: "antigravity/cli/1.5.5",
 } as const;
