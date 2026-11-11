@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { EventEmitter } from "node:events";
-import { hostname } from "node:os";
+import { hostname, tmpdir } from "node:os";
 import { basename, delimiter, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { PassThrough, Writable } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
@@ -45,6 +45,7 @@ import { ModelRegistry } from "../../../src/core/model-registry.ts";
 import type { OrchestrationProfile } from "../../../src/core/orchestration/contracts.ts";
 import { CURRENT_TURN_REFLECTION_STATE_CUSTOM_TYPE } from "../../../src/core/reflection-controller.ts";
 import { getInFlightWorkUnits } from "../../../src/core/reload-blockers.ts";
+import { resetRepoIdentityCache } from "../../../src/core/remote/repo-identity.ts";
 import { DefaultResourceLoader, type ResourceLoader } from "../../../src/core/resource-loader.ts";
 import type { AwayEventSourceFactory } from "../../../src/core/routines/away-event-feed.ts";
 import {
@@ -869,18 +870,29 @@ function matchesAuthor(commit: GitCommit, author: string | undefined): boolean {
 	return `${commit.author.name} <${commit.author.email}>`.includes(author);
 }
 
-/** The `--format` placeholders the fixture models: the commit id, its author date, its subject and git's separator. */
+/** The `--format` placeholders the fixture models: full/short commit id, author date, subject and git's separators. */
 function expandLogFormat(format: string, commit: GitCommit): string {
-	const placeholders = /%(?:H|aI|s|x1f|%)/g;
+	const placeholders = /%(?:H|h|aI|s|x09|x1f|%)/g;
 	const leftover = format.replaceAll(placeholders, "").match(/%[A-Za-z]/);
 	if (leftover !== null) throw new Error(`Unscripted log format: ${leftover[0]}`);
 	return format.replaceAll(placeholders, (token) => {
 		if (token === "%H") return commit.sha;
+		if (token === "%h") return commit.sha.slice(0, 7);
 		if (token === "%aI") return commit.authoredAt;
 		if (token === "%s") return commit.subject;
+		if (token === "%x09") return "\t";
 		if (token === "%x1f") return "\u001f";
 		return "%";
 	});
+}
+
+function parseGitDateMs(raw: string | undefined): number | undefined {
+	if (raw === undefined) return undefined;
+	const epoch = /^@(-?\d+)(?:\s+[+-]\d{4})?$/.exec(raw.trim());
+	if (epoch) return Number(epoch[1]) * 1000;
+	const parsed = Date.parse(raw);
+	if (!Number.isNaN(parsed)) return parsed;
+	throw new Error(`Unscripted git date: ${raw}`);
 }
 
 /**
@@ -1069,7 +1081,7 @@ export class VirtualGit {
 			case "add":
 				return this.addCommand(rest, cwd);
 			case "commit":
-				return this.commitCommand(rest, cwd, config);
+				return this.commitCommand(rest, cwd, config, env);
 			case "diff":
 				return this.diffCommand(rest, cwd);
 			case "show":
@@ -1116,12 +1128,13 @@ export class VirtualGit {
 		parent: string | undefined,
 		subject: string,
 		author: GitAuthor | undefined,
+		authoredAtMs?: number,
 	): string {
 		const sequence = this.counter++;
 		const sha = createHash("sha1")
 			.update(JSON.stringify([parent ?? "", subject, [...tree].sort(), sequence]))
 			.digest("hex");
-		const authoredAt = new Date(AUTHOR_DATE_BASE_MS + sequence * AUTHOR_DATE_STEP_MS)
+		const authoredAt = new Date(authoredAtMs ?? AUTHOR_DATE_BASE_MS + sequence * AUTHOR_DATE_STEP_MS)
 			.toISOString()
 			.replace(/\.\d{3}Z$/, "+00:00");
 		this.commits.set(sha, { sha, parent, tree: new Map(tree), subject, author, authoredAt });
@@ -1707,12 +1720,20 @@ export class VirtualGit {
 		return { code: 0, stdout: "", stderr: "" };
 	}
 
-	private commitCommand(args: readonly string[], cwd: string, config: Readonly<Record<string, string>>): GitOutcome {
+	private commitCommand(
+		args: readonly string[],
+		cwd: string,
+		config: Readonly<Record<string, string>>,
+		env: Readonly<Record<string, string | undefined>> = {},
+	): GitOutcome {
 		const worktree = this.worktreeFor(cwd);
 		if (!worktree) return { code: 128, stdout: "", stderr: NOT_A_REPOSITORY };
 		const messageIndex = args.indexOf("-m");
 		const subject = messageIndex >= 0 ? (args[messageIndex + 1] ?? "") : undefined;
 		if (subject === undefined || worktree.rebase) throw new Error(`Unscripted commit: ${args.join(" ")}`);
+		const dateOption =
+			optionValue(args, "--date=") ?? (args.includes("--date") ? args[args.indexOf("--date") + 1] : undefined);
+		const authoredAtMs = parseGitDateMs(dateOption ?? env.GIT_AUTHOR_DATE ?? env.GIT_COMMITTER_DATE);
 		const parent = this.headSha(worktree);
 		if (
 			parent !== undefined &&
@@ -1721,7 +1742,7 @@ export class VirtualGit {
 		) {
 			return { code: 1, stdout: "nothing to commit\n", stderr: "" };
 		}
-		const next = this.commit(worktree.index, parent, subject, this.authorFor(config));
+		const next = this.commit(worktree.index, parent, subject, this.authorFor(config), authoredAtMs);
 		if (worktree.head.kind === "branch") this.refs.set(worktree.head.ref, next);
 		else worktree.head = { kind: "detached", sha: next };
 		return { code: 0, stdout: "", stderr: "" };
@@ -2026,6 +2047,12 @@ export class VirtualGit {
 	}
 
 	private revListCommand(args: readonly string[], cwd: string): GitOutcome {
+		if (args.length === 2 && args[0] === "--max-parents=0") {
+			const head = this.resolveCommit(args[1] ?? "", cwd);
+			if (head === undefined) return { code: 128, stdout: "", stderr: "fatal: bad revision\n" };
+			const roots = [...this.ancestorsOf(head)].filter((sha) => this.commits.get(sha)?.parent === undefined);
+			return { code: 0, stdout: roots.map((sha) => `${sha}\n`).join(""), stderr: "" };
+		}
 		if (args.includes("--count") && !args.includes("--left-right")) return this.revListCount(args, cwd);
 		const range = args.find((arg) => arg.includes("..."));
 		if (range === undefined || !args.includes("--left-right") || !args.includes("--count")) {
@@ -2082,27 +2109,60 @@ export class VirtualGit {
 	}
 
 	/**
-	 * `log --no-merges --fixed-strings --author=<...> --max-count=N --format=<...> HEAD`, newest first: the one listing form
-	 * the reader runs, with the author matched as a fixed substring of the commit's `Name <email>` line.
+	 * `log` listing, newest first: supports `--no-merges`, `--fixed-strings`, `--author=<...>`, `--max-count=N` / `-n N` /
+	 * `-nN`, `--since=@<epochSec>`, `--format=<...>` and an optional trailing revision (defaulting to `HEAD`).
 	 */
 	private logListing(args: readonly string[], cwd: string): GitOutcome {
-		const revision = args.at(-1) ?? "";
-		const author = optionValue(args, "--author=");
-		const maxCount = Number(optionValue(args, "--max-count=") ?? Number.POSITIVE_INFINITY);
-		const format = optionValue(args, "--format=");
-		for (const option of args.slice(0, -1)) {
+		let author: string | undefined;
+		let maxCount = Number.POSITIVE_INFINITY;
+		let sinceMs: number | undefined;
+		let format: string | undefined;
+		let revision: string | undefined;
+		for (let i = 0; i < args.length; i++) {
+			const option = args[i] ?? "";
 			if (option === "--no-merges" || option === "--fixed-strings") continue;
-			if (["--author=", "--max-count=", "--format="].some((prefix) => option.startsWith(prefix))) continue;
+			if (option.startsWith("--author=")) {
+				author = option.slice("--author=".length);
+				continue;
+			}
+			if (option.startsWith("--max-count=")) {
+				maxCount = Number(option.slice("--max-count=".length));
+				continue;
+			}
+			if (option === "-n" && i + 1 < args.length && /^\d+$/.test(args[i + 1] ?? "")) {
+				maxCount = Number(args[++i]);
+				continue;
+			}
+			if (/^-n\d+$/.test(option)) {
+				maxCount = Number(option.slice(2));
+				continue;
+			}
+			if (option.startsWith("--since=")) {
+				sinceMs = parseGitDateMs(option.slice("--since=".length));
+				continue;
+			}
+			if (option.startsWith("--format=")) {
+				format = option.slice("--format=".length);
+				continue;
+			}
+			if (!option.startsWith("-") && i === args.length - 1) {
+				revision = option;
+				continue;
+			}
 			throw new Error(`Unscripted log option: ${option}`);
 		}
 		if (format === undefined) throw new Error(`Unscripted log: ${args.join(" ")}`);
-		let current = this.resolveCommit(revision, cwd);
-		if (current === undefined) return { code: 128, stdout: "", stderr: `fatal: bad revision '${revision}'\n` };
+		const target = revision ?? "HEAD";
+		let current = this.resolveCommit(target, cwd);
+		if (current === undefined) return { code: 128, stdout: "", stderr: `fatal: bad revision '${target}'\n` };
 		const lines: string[] = [];
 		while (current !== undefined && lines.length < maxCount) {
 			const commit = this.commits.get(current);
 			if (commit === undefined) break;
-			if (matchesAuthor(commit, author)) lines.push(expandLogFormat(format, commit));
+			const authoredMs = Date.parse(commit.authoredAt);
+			if ((sinceMs === undefined || authoredMs >= sinceMs) && matchesAuthor(commit, author)) {
+				lines.push(expandLogFormat(format, commit));
+			}
 			current = commit.parent;
 		}
 		return { code: 0, stdout: lines.map((line) => `${line}\n`).join(""), stderr: "" };
@@ -3020,6 +3080,7 @@ export async function runHarnessWorld(
 ): Promise<void> {
 	const hostIdentity = HOST_IDENTITY_ENV.map((name) => [name, process.env[name]] as const);
 	for (const name of HOST_IDENTITY_ENV) delete process.env[name];
+	resetRepoIdentityCache();
 	try {
 		const world = new HarnessWorld(options);
 		let bodyFailure: { readonly error: unknown } | undefined;
@@ -3030,6 +3091,7 @@ export async function runHarnessWorld(
 		}
 		await world.close(bodyFailure);
 	} finally {
+		resetRepoIdentityCache();
 		for (const [name, value] of hostIdentity) if (value !== undefined) process.env[name] = value;
 	}
 }
@@ -3315,6 +3377,7 @@ export class HarnessWorld {
 			// Process table of the fixture: an explicit empty /proc. Worker run environments list it to reap marked
 			// processes during disposal; the fixture starts no processes, so the listing is genuinely empty.
 			this.io.mkdirSync("/proc", { recursive: true });
+			this.io.mkdirSync(tmpdir(), { recursive: true });
 			for (const [path, text] of Object.entries(options.files ?? {})) this.io.seed(path, text);
 			if (options.repository) {
 				this.git.initialize("main", options.repository.committed);

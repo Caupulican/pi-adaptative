@@ -17,6 +17,7 @@ import { runJourney6 } from "./fixtures/harness/journeys/journey-6.ts";
 import { runJourney7 } from "./fixtures/harness/journeys/journey-7.ts";
 import { runJourney8 } from "./fixtures/harness/journeys/journey-8.ts";
 import { runJourney9 } from "./fixtures/harness/journeys/journey-9.ts";
+import { runJourney10 } from "./fixtures/harness/journeys/journey-10.ts";
 
 describe("Adaptive harness composed journeys", () => {
 	it(
@@ -57,5 +58,9 @@ describe("Adaptive harness composed journeys", () => {
 
 	it("ladder: a worker that falls short is answered by the exit its outcome selects, and a host check the worker skipped is run by the host", async () => {
 		await runJourney9();
+	}, 360_000);
+
+	it("linked machines: a hub and a joiner pair over a sealed link, place read-only work and plans with closed-gate fallback and remote cancel, and exchange ask replies", async () => {
+		await runJourney10();
 	}, 360_000);
 });

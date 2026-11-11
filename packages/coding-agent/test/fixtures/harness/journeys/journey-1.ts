@@ -10,11 +10,13 @@ import { runJourney1KnowledgeWorkersPhase } from "./journey-1-knowledge-workers.
 import { runJourney1OwnerLifecyclePhase } from "./journey-1-owner-lifecycle.ts";
 import { runJourney1PiChatPhase } from "./journey-1-pi-chat.ts";
 import { runJourney1ProactivityPhase } from "./journey-1-proactivity.ts";
+import { runJourney1ProofAndReturnBriefPhase } from "./journey-1-proof-and-return-brief.ts";
 import { runJourney1RoutinesPhase } from "./journey-1-routines.ts";
 import { verifySessionReplacementTerminalIdentity } from "./journey-1-session-replacement.ts";
 import { runJourney1TastePhase } from "./journey-1-taste.ts";
 import { runJourney1TasteHistoryPhase } from "./journey-1-taste-history.ts";
 import { runJourney1WorkerBudgetsPhase } from "./journey-1-worker-budgets.ts";
+import { runJourney1WorkerToolStreamsPhase } from "./journey-1-worker-tool-streams.ts";
 import { runJourney1WriteReservationsPhase } from "./journey-1-write-reservations.ts";
 /**
  * The real proper-lockfile runs its exclusion and lease logic; only its filesystem is redirected to the
@@ -71,6 +73,8 @@ export async function runJourney1(): Promise<void> {
 				/^Worker inner completion cleanup failed: Worker worker-1 attempt attempt-[0-9a-f-]{36} physical settlement timed out after 5000ms with 2 inner call\(s\) still pending\.$/,
 				/^Worker shutdown failed: Shell execution session terminal release timed out after 5000ms before child close event$/,
 				/^System One verification was not run because the session was closing; no judgment was recorded\.$/,
+				// The return-brief subleg seeds one unsettled owner follow-up; the unsettled ladder announces its exact file once on turn settlement.
+				/^Owner follow-ups are recorded in (?:\/harness\/agent-journey-1-system-one-(?:on|off)-return-brief\/state\/follow-ups\/|[A-Z]:\\harness\\agent-journey-1-system-one-(?:on|off)-return-brief\\state\\follow-ups\\)[0-9a-f-]{36}\.md\. Review them before relying on unresolved decisions\.$/,
 				// The quit's bounded settle expires for a run that an extension holds past the abort (the message-end witness): exact text.
 				/^A run did not settle within 5s of quit; its final message may not have been persisted\.$/,
 				/^A compaction did not settle within 5s of quit; its result is discarded\.$/,
@@ -140,6 +144,8 @@ export async function runJourney1(): Promise<void> {
 			await runJourney1RoutinesPhase(world);
 			await runJourney1HostEventsPhase(world);
 			await runJourney1TasteHistoryPhase(world);
+			await runJourney1WorkerToolStreamsPhase(world);
+			await runJourney1ProofAndReturnBriefPhase(world);
 			await runJourney1HostShutdownPhase(world);
 			await verifySessionReplacementTerminalIdentity(world);
 		},

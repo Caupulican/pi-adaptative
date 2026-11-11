@@ -46,7 +46,7 @@ const GOAL_TURN_LINES = ["Continue objective.", "Recover/reassign timeouts; veri
  * What the plan's wait timeout is built from: one running step and the default worker wait. The same two numbers the
  * decision's own message reads.
  */
-const TIMEOUT_MESSAGE = `The plan's 1 running step(s) have shown no progress for ${Math.round((DEFAULT_GOAL_WORKER_WAIT_MS / 3_600_000) * 10) / 10} h; continue the goal with what is known and re-plan what is stuck.`;
+const TIMEOUT_MESSAGE = `The plan's 1 running step(s) (${SECOND}) have shown no progress for ${Math.round((DEFAULT_GOAL_WORKER_WAIT_MS / 3_600_000) * 10) / 10} h; continue the goal with what is known and re-plan what is stuck.`;
 
 /**
  * A plan under a goal: the goal's wait on the plan's running steps. The session runs with System One off, because this

@@ -186,9 +186,14 @@ export interface ScriptedRequirementCheck {
  * `src/utils/shell.ts`). The world holds no such file until one is seeded, and without it the product reports that the
  * check could not start, so the file is seeded at the path the product probes.
  */
-export function scriptRequirementCheckSpawn(world: HarnessWorld, command: string): ScriptedRequirementCheck {
+export function scriptRequirementCheckSpawn(
+	world: HarnessWorld,
+	command: string,
+	...extraCommands: readonly string[]
+): ScriptedRequirementCheck {
 	if (process.platform === "win32" && process.env.ProgramFiles)
 		world.io.seed(`${process.env.ProgramFiles}\\Git\\bin\\bash.exe`, "virtual Git Bash\n");
+	const matchedCommands = new Set([command, ...extraCommands]);
 	const spawned: string[] = [];
 	const restore = builtinBoundary.replace("process", "spawn", (...args) => {
 		world.guard.effects.push({ kind: "process.spawn", arguments: args });
@@ -198,7 +203,8 @@ export function scriptRequirementCheckSpawn(world: HarnessWorld, command: string
 			{ cwd?: string; env?: NodeJS.ProcessEnv; signal?: AbortSignal } | undefined,
 		];
 		spawned.push(file);
-		if (argv.at(-1) !== command) return world.processes.run("spawn", args);
+		const invoked = argv.at(-1);
+		if (invoked === undefined || !matchedCommands.has(invoked)) return world.processes.run("spawn", args);
 		expect(file, "a requirement check runs in a shell").toMatch(/(?:^|[\\/])(?:sh|bash)(?:\.exe)?$/iu);
 		const child = Object.assign(new EventEmitter(), {
 			pid: 0,
@@ -226,7 +232,7 @@ export function scriptRequirementCheckSpawn(world: HarnessWorld, command: string
 			},
 		});
 		void world.shell
-			.exec(command, options?.cwd ?? HARNESS_PROJECT_CWD, {
+			.exec(invoked, options?.cwd ?? HARNESS_PROJECT_CWD, {
 				onData: (chunk) => child.stdout.emit("data", Buffer.from(chunk)),
 				...(options?.signal ? { signal: options.signal } : {}),
 				...(options?.env ? { env: options.env } : {}),

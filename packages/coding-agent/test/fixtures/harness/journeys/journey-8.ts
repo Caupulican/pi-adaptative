@@ -1,7 +1,10 @@
 import "../builtin-install.ts";
 import { runJourney8AccountWindowPhase } from "./journey-8-account-window.ts";
 import { runJourney8MeteredPhase } from "./journey-8-budgets-and-brake.ts";
+import { runJourney8CommandCodeAllowancePhase } from "./journey-8-command-code-allowance.ts";
 import { runJourney8EmergencyStopPhase } from "./journey-8-emergency-stop.ts";
+import { runJourney8OrchestrationRetentionPhase } from "./journey-8-orchestration-retention.ts";
+import { HARNESS_PROVIDER } from "./journey-8-shared.ts";
 import { runJourney } from "./shared.ts";
 
 /**
@@ -60,6 +63,38 @@ export async function runJourney8(): Promise<void> {
 		},
 		async (world) => {
 			await runJourney8EmergencyStopPhase(world);
+		},
+	);
+
+	await runJourney(
+		{
+			name: "journey-8-command-code-allowance",
+			journey: 8,
+			settings: {
+				fleet: { ceiling: { running: 4 } },
+				workerDelegation: {
+					routeProviders: [HARNESS_PROVIDER],
+					outcomes: { escalation: { enabled: false } },
+				},
+			},
+			modelOptions: { "worker-b": { cost: { input: 15, output: 75, cacheRead: 0, cacheWrite: 0 } } },
+		},
+		async (world) => {
+			await runJourney8CommandCodeAllowancePhase(world);
+		},
+	);
+
+	await runJourney(
+		{
+			name: "journey-8-orchestration-retention",
+			journey: 8,
+			settings: {
+				orchestration: { retention: { closedObjectiveDays: 1 } },
+				workerDelegation: { outcomes: { escalation: { enabled: false } } },
+			},
+		},
+		async (world) => {
+			await runJourney8OrchestrationRetentionPhase(world);
 		},
 	);
 }

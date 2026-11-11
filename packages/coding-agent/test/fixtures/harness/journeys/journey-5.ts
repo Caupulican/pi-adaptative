@@ -4,6 +4,7 @@ import { runJourney5PlanAutoCheckPhase } from "./journey-5-plan-auto-check.ts";
 import { runJourney5PlanCollectPhase } from "./journey-5-plan-collect.ts";
 import { runJourney5PlanCrashPhase } from "./journey-5-plan-crash.ts";
 import { runJourney5PlanGoalWaitPhase } from "./journey-5-plan-goal-wait.ts";
+import { runJourney5PlanInMemoryPhase } from "./journey-5-plan-in-memory.ts";
 import { runJourney5PlanNeedPhase } from "./journey-5-plan-need.ts";
 import { runJourney5PlanOrderPhase } from "./journey-5-plan-order.ts";
 import { runJourney5PlanOriginPhase } from "./journey-5-plan-origin.ts";
@@ -56,6 +57,8 @@ export async function runJourney5(): Promise<void> {
 			await runJourney5PlanCrashPhase(world);
 			// A plan under a goal holds that goal's wait: the wake, its deadline on the orchestration clock, and the plan's own end.
 			await runJourney5PlanGoalWaitPhase(world);
+			// An unpersisted in-memory session runs plans, keeps harness notices, refuses collect questions, and cancels plan-scoped fleet work.
+			await runJourney5PlanInMemoryPhase(world);
 		},
 	);
 }
