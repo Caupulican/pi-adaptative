@@ -2,11 +2,14 @@ import { createInterface } from "node:readline";
 import { spawn } from "child_process";
 import { minimatch } from "minimatch";
 import path from "path";
+import { getAgentDir } from "../../config.ts";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentTool } from "../../kernel/index.ts";
 import { DEFAULT_MAX_BYTES, formatSize } from "../../kernel/utils/truncate.ts";
 import type { Theme } from "../../presentation/theme-model.ts";
 import { waitForChildProcessWithTermination } from "../../utils/child-process.ts";
+import { getPrivateLaneDeniedPaths } from "../autonomy/lane-private-paths.ts";
+import { isPathWithinScope, safeRealpathSync } from "../autonomy/path-scope.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
 import {
 	type BroadQueryTracker,
@@ -42,6 +45,58 @@ import { wrapToolDefinition } from "./tool-definition-wrapper.ts";
 
 function toPosixPath(value: string): string {
 	return value.replaceAll("\\", "/");
+}
+
+function strictlyBelowRelativePaths(root: string, target: string, resolveLinks: boolean): string[] {
+	const pairs: Array<[string, string]> = [[path.resolve(root), path.resolve(target)]];
+	if (resolveLinks) {
+		try {
+			pairs.push([safeRealpathSync(root), safeRealpathSync(target)]);
+		} catch {
+			// Broken symlink cycles fall back to lexical resolution.
+		}
+	}
+	const out: string[] = [];
+	for (const [base, child] of pairs) {
+		const rawRel = path.relative(base, child);
+		if (
+			!rawRel ||
+			rawRel === "." ||
+			rawRel === ".." ||
+			rawRel.startsWith(`..${path.sep}`) ||
+			path.isAbsolute(rawRel)
+		) {
+			continue;
+		}
+		out.push(toPosixPath(rawRel));
+	}
+	return out;
+}
+
+function excludedHarnessRelativePaths(cwd: string, searchPath: string, resolveLinks: boolean): string[] {
+	const agentDir = path.resolve(getAgentDir());
+	const privateWithinAgentDir = getPrivateLaneDeniedPaths(cwd, agentDir).filter((entry) =>
+		isPathWithinScope(entry, agentDir),
+	);
+	const candidates = new Set<string>();
+	for (const target of [agentDir, ...privateWithinAgentDir]) {
+		for (const rel of strictlyBelowRelativePaths(searchPath, target, resolveLinks)) {
+			candidates.add(rel);
+		}
+	}
+	const sorted = [...candidates].sort((a, b) => a.length - b.length || a.localeCompare(b));
+	const collapsed: string[] = [];
+	for (const rel of sorted) {
+		if (collapsed.some((prefix) => rel === prefix || rel.startsWith(`${prefix}/`))) continue;
+		collapsed.push(rel);
+	}
+	return collapsed;
+}
+
+function isExcludedRelativePath(relativePath: string, excludedRelPaths: readonly string[]): boolean {
+	if (excludedRelPaths.length === 0) return false;
+	const clean = relativePath.replace(/\/+$/, "");
+	return excludedRelPaths.some((prefix) => clean === prefix || clean.startsWith(`${prefix}/`));
 }
 
 const DEFAULT_LIMIT = 1000;
@@ -158,10 +213,21 @@ function fffSearchOutput(
 	searchPathRelativeToCwd: string,
 	effectiveLimit: number,
 	packing: FindPackingOptions,
+	excludedRelPaths: readonly string[],
+	probeLimit: number,
 ) {
+	let droppedExcluded = false;
 	const relativized = result.items
 		.map((item) => toSearchRelative(toPosixPath(item.relativePath), searchPathRelativeToCwd))
-		.filter((item): item is string => Boolean(item));
+		.filter((item): item is string => {
+			if (!item) return false;
+			if (isExcludedRelativePath(item, excludedRelPaths)) {
+				droppedExcluded = true;
+				return false;
+			}
+			return true;
+		});
+	if (droppedExcluded && result.items.length >= probeLimit) return undefined;
 	return formatFindResults(relativized, effectiveLimit, packing);
 }
 
@@ -193,6 +259,7 @@ export async function tryFffFind(options: {
 	});
 	if (!routed) return undefined;
 	const { finder, searchPathRelativeToCwd } = routed;
+	const excludedRelPaths = excludedHarnessRelativePaths(options.cwd, options.searchPath, true);
 
 	const packing: FindPackingOptions = {
 		toolCallId: options.toolCallId,
@@ -208,7 +275,14 @@ export async function tryFffFind(options: {
 			pageSize: probeLimit,
 		});
 		return result.ok
-			? fffSearchOutput(result.value, searchPathRelativeToCwd, options.effectiveLimit, packing)
+			? fffSearchOutput(
+					result.value,
+					searchPathRelativeToCwd,
+					options.effectiveLimit,
+					packing,
+					excludedRelPaths,
+					probeLimit,
+				)
 			: undefined;
 	}
 
@@ -217,7 +291,14 @@ export async function tryFffFind(options: {
 		pageSize: probeLimit,
 	});
 	return result.ok
-		? fffSearchOutput(result.value, searchPathRelativeToCwd, options.effectiveLimit, packing)
+		? fffSearchOutput(
+				result.value,
+				searchPathRelativeToCwd,
+				options.effectiveLimit,
+				packing,
+				excludedRelPaths,
+				probeLimit,
+			)
 		: undefined;
 }
 
@@ -405,6 +486,7 @@ function buildFindToolDefinition(
 						const effectiveLimit = limit ?? DEFAULT_LIMIT;
 						const probeLimit = effectiveLimit + 1;
 						const ops = search.operations ?? defaultFindOperations;
+						const excludedRelPaths = excludedHarnessRelativePaths(cwd, searchPath, !search.operations);
 
 						let effectivePattern = pattern;
 						if (pattern === ".") {
@@ -446,7 +528,11 @@ function buildFindToolDefinition(
 								return;
 							}
 							const results = await ops.glob(effectivePattern, searchPath, {
-								ignore: ["**/node_modules/**", "**/.git/**"],
+								ignore: [
+									"**/node_modules/**",
+									"**/.git/**",
+									...excludedRelPaths.flatMap((rel) => [rel, `${rel}/**`]),
+								],
 								limit: probeLimit,
 							});
 							if (signal?.aborted) {
@@ -455,10 +541,12 @@ function buildFindToolDefinition(
 							}
 
 							// Relativize paths against the search root for stable output.
-							const relativized = results.map((p) => {
-								if (p.startsWith(searchPath)) return toPosixPath(p.slice(searchPath.length + 1));
-								return toPosixPath(path.relative(searchPath, p));
-							});
+							const relativized = results
+								.map((p) => {
+									if (p.startsWith(searchPath)) return toPosixPath(p.slice(searchPath.length + 1));
+									return toPosixPath(path.relative(searchPath, p));
+								})
+								.filter((p) => !isExcludedRelativePath(p, excludedRelPaths));
 
 							const formatted = formatFindResults(relativized, effectiveLimit, {
 								toolCallId,
@@ -482,6 +570,9 @@ function buildFindToolDefinition(
 						// leaking sibling-directory rules the way --ignore-file (a global source) would.
 						const portablePathGlob = process.platform === "win32" && effectivePattern.includes("/");
 						const args: string[] = ["--color=never", "--hidden", "--no-require-git"];
+						for (const rel of excludedRelPaths) {
+							args.push("--exclude", rel.includes("/") ? rel : `/${rel}`);
+						}
 						if (!portablePathGlob) {
 							args.push("--glob", "--max-results", String(probeLimit));
 						}
@@ -540,6 +631,7 @@ function buildFindToolDefinition(
 								relativePath = path.relative(searchPath, line);
 							}
 							relativePath = toPosixPath(relativePath);
+							if (isExcludedRelativePath(relativePath, excludedRelPaths)) return;
 							if (
 								portablePathGlob &&
 								!minimatch(relativePath.replace(/\/$/, ""), effectivePattern, {

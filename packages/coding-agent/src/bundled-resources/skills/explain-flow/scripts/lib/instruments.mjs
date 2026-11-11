@@ -10,7 +10,7 @@
 
 import { px } from "./geometry.mjs";
 import { CHIP_RADIUS, LINE_STEP, roundText, SMALL_TEXT_SIZE, TEXT_SIZE, textWidth } from "./metrics.mjs";
-import { isRecord, readNumber, readText } from "./read.mjs";
+import { isRecord, readNumber, readPeriodMoment, readText } from "./read.mjs";
 import { HOLDING_KINDS, staysAt } from "./stays.mjs";
 import { alphaOf, circleEl, lineEl, pathEl, rectEl, strokeOf, words } from "./svg.mjs";
 import { trialKeptAt, trialOutcome } from "./trial.mjs";
@@ -18,7 +18,8 @@ import { trialKeptAt, trialOutcome } from "./trial.mjs";
 /** The text sizes a note may take, in grid units: weight and ink carry the hierarchy, so they stay close. */
 export const NOTE_SIZES = { text: TEXT_SIZE, lede: 2.25, title: 3 };
 /** The stations a linked line or row can name: the ones that are busy at some time. */
-const LINKABLE_KINDS = ["source", "queue", "worker", "trial", "rail"];
+const LINKABLE_KINDS = ["source", "queue", "worker", "trial", "rail", "card", "batch", "slots"];
+const MAX_NOTE_CUES = 16;
 /** How long a linked thing takes to light and to go quiet, so nothing snaps. */
 const LINK_BLEND_SECONDS = 0.28;
 const WASH_OPACITY = 0.14;
@@ -43,11 +44,16 @@ const LANES_ACTIVE = 0.72;
 const LANES_PASSED = 0.16;
 
 /**
- * How strongly a station is busy at this instant, from 0 to 1: a queue, a worker or a trial while it holds an item, a
- * source while its emitters pulse, a rail while the ring of a landing shows. Every linked view asks this one question.
+ * How strongly a station (or one emitter or phase of a station) is busy at this instant, from 0 to 1: a holding station
+ * while it holds an item, a source or trigger card while it pulses, a rail while the ring of a landing shows. Every
+ * linked view asks this one question.
  */
-export function busyStrength(state, node) {
-	if (node.kind === "source") {
+export function busyStrength(state, link) {
+	const node = link.kind ? link : link.node;
+	const phase = link.kind ? undefined : link.phase;
+	const emitter = link.kind ? undefined : link.emitter;
+	if (node.kind === "source" || node.kind === "slots") {
+		if (emitter !== undefined) return state.pulses.get(`${node.id}:${emitter}`)?.strength ?? 0;
 		let strength = 0;
 		for (const [key, pulse] of state.pulses)
 			if (key.startsWith(`${node.id}:`)) strength = Math.max(strength, pulse.strength);
@@ -58,19 +64,44 @@ export function busyStrength(state, node) {
 		return ring === undefined ? 0 : 1 - ring;
 	}
 	let strength = 0;
-	for (const stay of state.stays.get(node.id) ?? [])
-		strength = Math.max(strength, Math.min(1, stay.since / LINK_BLEND_SECONDS, stay.left / LINK_BLEND_SECONDS));
+	for (const stay of state.stays.get(node.id) ?? []) {
+		if (phase !== undefined && stay.phase !== phase && stay.phaseIndex !== phase) continue;
+		const enter = phase !== undefined ? stay.blend : stay.since / LINK_BLEND_SECONDS;
+		strength = Math.max(strength, Math.min(1, enter, stay.left / LINK_BLEND_SECONDS));
+	}
+	if (strength === 0 && node.kind === "card" && phase === undefined)
+		return state.pulses.get(`${node.id}:0`)?.strength ?? 0;
 	return strength;
 }
 
 /** The station a `when` names, as written: resolved to a station once every station is read. */
-function readWhen(value, path, problems) {
+export function readWhen(value, path, problems) {
 	if (value === undefined) return undefined;
 	if (typeof value !== "string" || value === "") {
-		problems.push(`${path}: must be the id of a station`);
+		problems.push(`${path}: must be the id of a station (or "station:phase")`);
 		return undefined;
 	}
 	return value;
+}
+
+/** Timed single-line captions for a `note` that updates its words across beats and rounds. */
+export function readNoteCues(raw, path, problems, rounds, loop) {
+	if (!Array.isArray(raw) || raw.length === 0 || raw.length > MAX_NOTE_CUES) {
+		problems.push(`${path}: must be a list of 1 to ${MAX_NOTE_CUES} cue objects`);
+		return [];
+	}
+	const cues = [];
+	for (const [index, entry] of raw.entries()) {
+		const atPath = `${path}[${index}]`;
+		if (!isRecord(entry)) {
+			problems.push(`${atPath}: must be an object with "text" and optional "round", "at"`);
+			continue;
+		}
+		const moment = readPeriodMoment(entry, atPath, problems, rounds, loop);
+		const text = readText(entry.text, `${atPath}.text`, problems, true);
+		if (text !== undefined) cues.push({ ...moment, text });
+	}
+	return cues.sort((left, right) => left.time - right.time);
 }
 
 /**
@@ -125,24 +156,47 @@ export function readTable(raw, node, path, problems) {
 	}
 }
 
+/** Resolves one `"station"` or `"station:phase"` reference against `scene.nodes`. */
+export function resolveWhenTarget(spec, path, scene, problems) {
+	if (spec === undefined) return undefined;
+	const [id, qualifier] = spec.split(":");
+	const target = scene.nodes.find((node) => node.id === id);
+	if (!target) {
+		problems.push(`${path}: "${id}" names no station`);
+		return undefined;
+	}
+	if (!LINKABLE_KINDS.includes(target.kind)) {
+		problems.push(`${path}: a ${target.kind} is never busy; name a ${LINKABLE_KINDS.join(", ")}`);
+		return undefined;
+	}
+	if (qualifier === undefined || qualifier === "") return target;
+	if (target.kind === "source" || target.kind === "slots") {
+		const limit = target.kind === "source" ? target.count : target.cells;
+		const emitter = Number(qualifier);
+		if (!Number.isInteger(emitter) || emitter < 1 || emitter > limit) {
+			problems.push(`${path}: "${target.id}" has ${target.kind === "source" ? "emitters" : "cells"} 1 to ${limit}`);
+			return undefined;
+		}
+		return { node: target, emitter: emitter - 1 };
+	}
+	if (!HOLDING_KINDS.includes(target.kind)) {
+		problems.push(`${path}: only a holding station has phases`);
+		return undefined;
+	}
+	return { node: target, phase: /^\d+$/.test(qualifier) ? Number(qualifier) : qualifier };
+}
+
 /**
  * Resolves every `when` of the scene's notes and tables to the station it names, once all stations are read. A name
- * that is no station, or a station that is never busy (a sweep, a chain, a tally, a note, a table), is a problem.
+ * that is no station, or a station that is never busy, is a problem.
  */
 export function resolveLinks(scene, problems) {
-	const find = (id, path) => {
-		if (id === undefined) return undefined;
-		const target = scene.nodes.find((node) => node.id === id);
-		if (!target) problems.push(`${path}: "${id}" names no station`);
-		else if (!LINKABLE_KINDS.includes(target.kind))
-			problems.push(`${path}: a ${target.kind} is never busy; name a source, a queue, a worker, a trial or a rail`);
-		else return target;
-		return undefined;
-	};
 	for (const [index, node] of scene.nodes.entries()) {
-		if (node.kind === "note") node.links = node.links.map((id, line) => find(id, `nodes[${index}].lines[${line}].when`));
+		if (node.kind === "note")
+			node.links = node.links.map((id, line) => resolveWhenTarget(id, `nodes[${index}].lines[${line}].when`, scene, problems));
 		if (node.kind === "table")
-			for (const [line, row] of node.rows.entries()) row.when = find(row.when, `nodes[${index}].rows[${line}].when`);
+			for (const [line, row] of node.rows.entries())
+				row.when = resolveWhenTarget(row.when, `nodes[${index}].rows[${line}].when`, scene, problems);
 		if (node.kind === "series" && node.of !== undefined) {
 			const trial = scene.nodes.find((other) => other.id === node.of);
 			if (trial?.kind !== "trial") problems.push(`nodes[${index}].of: "${node.of}" names no trial`);
@@ -153,7 +207,7 @@ export function resolveLinks(scene, problems) {
 
 /** Whether a note or a table lights with the circuit, so its words belong to the live layer. */
 export function isLinked(node) {
-	if (node.kind === "note") return node.links.some((link) => link !== undefined);
+	if (node.kind === "note") return Boolean(node.cues) || node.links.some((link) => link !== undefined);
 	return node.kind === "table";
 }
 
@@ -180,11 +234,21 @@ export function noteLines(scene, node, round, state) {
 	const size = TEXT_SIZE * u * scale;
 	const step = LINE_STEP * u * scale;
 	const rest = node.size === "text" ? scene.theme.dim : scene.theme.text;
+	if (node.cues) {
+		const periodNow = state ? state.round * scene.loop + state.now : 0;
+		let active = node.cues[0];
+		for (const cue of node.cues) if (cue.time <= periodNow) active = cue;
+		if (!active) return "";
+		const since = Math.max(0, periodNow - active.time);
+		const alpha = active === node.cues[0] && periodNow < 0.05 ? 1 : Math.min(1, 0.35 + since / 0.22);
+		const shown = roundText(active.text, round, scene.vars);
+		return words(scene, box.x, box.y + 0.75 * step, size, [{ text: shown, fill: scene.theme.text, bold: node.size === "title" }], "start", alpha);
+	}
 	let out = "";
 	for (const [index, text] of node.lines.entries()) {
 		const link = node.links[index];
 		const strength = link && state ? busyStrength(state, link) : 0;
-		const shown = roundText(text, round);
+		const shown = roundText(text, round, scene.vars);
 		const baseline = box.y + (index + 0.75) * step;
 		if (link) out += wash(scene, box.x - 0.5 * u, baseline - step * 0.66, textWidth(shown, size) + u, step - 0.5 * u, strength);
 		out += words(scene, box.x, baseline, size, [{ text: shown, fill: inkOf(scene, strength, rest), bold: node.size === "title" }]);
@@ -193,7 +257,7 @@ export function noteLines(scene, node, round, state) {
 }
 
 /** The columns of a table in pixels: each as wide as its widest cell or header, with the gap between them. */
-function tableColumns(node, u, rounds) {
+function tableColumns(node, u, rounds, vars) {
 	const count = Math.max(node.columns.length, ...node.rows.map((row) => row.cells.length));
 	const number = node.numbered ? textWidth(String(node.rows.length), TEXT_SIZE * u) + 1.5 * u : 0;
 	const lefts = [];
@@ -201,8 +265,8 @@ function tableColumns(node, u, rounds) {
 	for (let column = 0; column < count; column++) {
 		lefts.push(cursor);
 		const widest = Math.max(
-			textWidth(node.columns[column] ?? "", SMALL_TEXT_SIZE * u, rounds),
-			...node.rows.map((row) => textWidth(row.cells[column] ?? "", TEXT_SIZE * u, rounds)),
+			textWidth(node.columns[column] ?? "", SMALL_TEXT_SIZE * u, rounds, vars),
+			...node.rows.map((row) => textWidth(row.cells[column] ?? "", TEXT_SIZE * u, rounds, vars)),
 		);
 		cursor += widest + COLUMN_GAP * u;
 	}
@@ -210,8 +274,8 @@ function tableColumns(node, u, rounds) {
 }
 
 /** The box and inner geometry of a table: an optional header with its rule, then one line per row. No box, no port. */
-export function shapeTable(node, x, y, u, rounds) {
-	const { lefts, width } = tableColumns(node, u, rounds);
+export function shapeTable(node, x, y, u, rounds, vars) {
+	const { lefts, width } = tableColumns(node, u, rounds, vars);
 	const header = node.columns.length > 0 ? 3 * u : 0;
 	const step = LINE_STEP * u;
 	return {
@@ -248,7 +312,7 @@ export function tableRows(scene, node, round, state) {
 		if (node.numbered) out += words(scene, shape.box.x, baseline, size, [{ text: String(index + 1), fill: inkOf(scene, strength, scene.theme.dim) }]);
 		for (const [column, cell] of row.cells.entries())
 			out += words(scene, shape.lefts[column], baseline, size, [
-				{ text: roundText(cell, round), fill: column === 0 ? scene.theme.text : inkOf(scene, strength, scene.theme.dim) },
+				{ text: roundText(cell, round, scene.vars), fill: column === 0 ? scene.theme.text : inkOf(scene, strength, scene.theme.dim) },
 			]);
 	}
 	return out;
@@ -401,9 +465,9 @@ export function seriesLive(scene, node, state) {
 }
 
 /** The words a tally by rounds writes under its boxes, one per box, with the widest of them. */
-export function tallyMarks(node, rounds) {
+export function tallyMarks(node, rounds, vars) {
 	if (node.marks === undefined) return { texts: [], widest: "" };
-	const texts = Array.from({ length: rounds }, (_, round) => roundText(node.marks, round));
+	const texts = Array.from({ length: rounds }, (_, round) => roundText(node.marks, round, vars));
 	return { texts, widest: texts.reduce((widest, text) => (text.length > widest.length ? text : widest), "") };
 }
 
@@ -414,7 +478,7 @@ export function tallyMarks(node, rounds) {
 export function tallyRounds(scene, node, state) {
 	const u = scene.unit;
 	const { theme } = scene;
-	const { texts } = tallyMarks(node, scene.rounds);
+	const { texts } = tallyMarks(node, scene.rounds, scene.vars);
 	let out = "";
 	for (const [index, cell] of node.shape.boxes.entries()) {
 		if (index < state.round) {
@@ -478,9 +542,9 @@ export function resolveLanes(scene, problems) {
 }
 
 /** The box and the rows of a lanes: a station's name at the left, a track for one round, a scale under the last row. */
-export function shapeLanes(node, x, y, u, rounds) {
+export function shapeLanes(node, x, y, u, rounds, vars) {
 	const names = node.rows.map((station) => station.label ?? station.id);
-	const labelW = Math.max(0, ...names.map((name) => textWidth(name, SMALL_TEXT_SIZE * u, rounds)));
+	const labelW = Math.max(0, ...names.map((name) => textWidth(name, SMALL_TEXT_SIZE * u, rounds, vars)));
 	const left = x + (names.length > 0 ? labelW + LANES_LABEL_GAP * u : 0);
 	const right = left + node.trackW * u;
 	const rows = names.map((name, index) => {
@@ -502,8 +566,13 @@ export function shapeLanes(node, x, y, u, rounds) {
  * The bars of one row: every stay of every journey at that station, from its start to its end inside the round. A
  * journey ends inside the loop, so no stay runs past it and no bar wraps.
  */
-function laneBars(scene, station) {
-	return staysAt(scene, station).map((stay) => ({ from: stay.start, to: stay.end, failed: stay.segment.result === "fail" }));
+function laneBars(scene, station, round) {
+	return staysAt(scene, station, round).map((stay) => ({ from: stay.start, to: stay.end, failed: stay.segment.result === "fail" }));
+}
+
+/** Whether any journey in `scene` restricts which rounds it runs in, so `lanes` outlines vary by round. */
+function lanesVaryByRound(scene) {
+	return scene.rounds > 1 && scene.runs.some((run) => run.rounds !== undefined);
 }
 
 /** The rectangle a stay takes on a lanes' track, in pixels. */
@@ -522,10 +591,11 @@ export function lanesBody(scene, node) {
 	const { shape } = node;
 	const quiet = `${strokeOf(theme.line, u * 0.12)} opacity="0.7"`;
 	const outline = `${strokeOf(theme.line, u * 0.14)} opacity="0.85"`;
+	const varies = lanesVaryByRound(scene);
 	let out = "";
 	for (const row of shape.rows) {
 		out += lineEl(shape.track.x1, row.line, shape.track.x2, row.line, quiet);
-		for (const bar of laneBars(scene, row.station)) out += laneBarEl(scene, node, row, bar, outline);
+		if (!varies) for (const bar of laneBars(scene, row.station)) out += laneBarEl(scene, node, row, bar, outline);
 	}
 	const ends = SMALL_TEXT_SIZE * u;
 	out += words(scene, shape.track.x1, shape.scale, ends, [{ text: "0 s", fill: theme.dim }]);
@@ -542,18 +612,21 @@ export function lanesLive(scene, node, state) {
 	const u = scene.unit;
 	const { theme } = scene;
 	const { shape } = node;
+	const varies = lanesVaryByRound(scene);
+	const outline = `${strokeOf(theme.line, u * 0.14)} opacity="0.85"`;
 	let out = "";
 	for (const row of shape.rows) {
-		const bars = laneBars(scene, row.station);
+		const bars = laneBars(scene, row.station, varies ? state.round : undefined);
 		const active = bars.find((bar) => bar.from <= state.now && state.now < bar.to);
 		for (const bar of bars) {
+			if (varies) out += laneBarEl(scene, node, row, bar, outline);
 			if (bar === active) {
 				const colour = bar.failed ? theme.fail : theme.work;
 				out += laneBarEl(scene, node, row, bar, `fill="${colour}" fill-opacity="${LANES_ACTIVE}" stroke="${colour}" stroke-width="${px(u * 0.14)}"`);
 			} else if (bar.to <= state.now) out += laneBarEl(scene, node, row, bar, `fill="${theme.text}" opacity="${LANES_PASSED}"`);
 		}
 		out += words(scene, shape.box.x, row.line + 0.5 * u, SMALL_TEXT_SIZE * u, [
-			{ text: roundText(row.name, state.round), fill: active ? theme.text : theme.dim },
+			{ text: roundText(row.name, state.round, scene.vars), fill: active ? theme.text : theme.dim },
 		]);
 	}
 	const at = shape.track.x1 + ((shape.track.x2 - shape.track.x1) * state.now) / scene.loop;

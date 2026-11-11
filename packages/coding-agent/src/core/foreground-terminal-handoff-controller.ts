@@ -601,14 +601,20 @@ export class ForegroundTerminalHandoffController {
 		const wake = this.resolveWake(unread);
 		// A report of work a third party's words reached opens a third-party run (`customTurnOrigin`).
 		const snapshot = this.deps.getTaskRuntimeSnapshot?.();
+		// A Path A verifier reconciles into its subject's result, which carries the single worker proof sheet for that work.
+		const sheetRecords = included.filter((record) => {
+			const attempt = record.attemptId !== undefined ? snapshot?.attempts[record.attemptId] : undefined;
+			const task = snapshot?.tasks[attempt?.taskId ?? record.laneId]?.task;
+			return task?.verificationOfTaskId === undefined;
+		});
 		const sheetBytes = Math.min(
 			PROOF_SHEET_MAX_BYTES,
-			Math.floor(PROOF_SHEET_BATCH_MAX_BYTES / Math.max(1, included.length)),
+			Math.floor(PROOF_SHEET_BATCH_MAX_BYTES / Math.max(1, sheetRecords.length)),
 		);
 		// Each result's sheet is built on its own: a sheet that cannot be built leaves its result delivered without one, with a plain line.
 		const proofSheets: ProofSheetRecord[] = [];
 		const proofSheetFailures: string[] = [];
-		for (const record of included) {
+		for (const record of sheetRecords) {
 			try {
 				proofSheets.push(this.workerProofSheet(record, snapshot, sheetBytes));
 			} catch (error) {
@@ -617,7 +623,7 @@ export class ForegroundTerminalHandoffController {
 					...(record.attemptId !== undefined ? { attemptId: record.attemptId } : {}),
 				});
 				const attempt = record.attemptId !== undefined ? snapshot?.attempts[record.attemptId] : undefined;
-				const title = attempt ? snapshot?.tasks[attempt.taskId]?.task?.title : undefined;
+				const title = snapshot?.tasks[attempt?.taskId ?? record.laneId]?.task?.title;
 				proofSheetFailures.push(proofSheetUnavailableLine(error, title));
 			}
 		}

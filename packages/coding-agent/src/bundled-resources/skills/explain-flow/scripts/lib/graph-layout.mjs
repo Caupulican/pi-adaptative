@@ -1,8 +1,8 @@
 /**
  * Turns a plain graph (see `read-diagram.mjs`) into a flow spec: every node becomes a station on the grid, every edge a
- * wire, and the paths through the graph become journeys shown one after another, so the picture is alive from the first
- * render. The result is a starting point an author refines (station kinds, words, timing), and it already passes the
- * layout check.
+ * wire, and the paths through the graph become journeys scheduled concurrently where branches are independent and queued
+ * in turn where they share a station, so the picture is alive from the first render. The result is a starting point an
+ * author refines (station kinds, words, timing), and it already passes the layout check.
  *
  * Layout: a node's column is its distance from the start (the longest way there), its row its place among the nodes of
  * that column. An edge to the next column is a direct wire; an edge that skips columns or goes back runs along a lane
@@ -145,6 +145,14 @@ function flowSpec(graph, notes) {
 	};
 	const wires = [];
 	const wireOf = new Map();
+	const crossInColumn = new Map();
+	for (const edge of graph.edges) {
+		if (edge.from === edge.to || edge.back || rank.get(edge.to) !== rank.get(edge.from) + 1) continue;
+		const from = stations.get(edge.from);
+		const to = stations.get(edge.to);
+		if (from.kind !== "rail" && from.row !== to.row) crossInColumn.set(from.column, (crossInColumn.get(from.column) ?? 0) + 1);
+	}
+	const crossSeen = new Map();
 	let lanes = 0;
 	for (const edge of graph.edges) {
 		if (edge.from === edge.to) {
@@ -170,8 +178,12 @@ function flowSpec(graph, notes) {
 			const from = stations.get(edge.from);
 			const start = lefts[from.column] + BODY_WIDTH[from.kind];
 			const end = lefts[from.column + 1];
+			const totalCross = crossInColumn.get(from.column) ?? 1;
+			const indexCross = crossSeen.get(from.column) ?? 0;
+			crossSeen.set(from.column, indexCross + 1);
+			const inset = totalCross === 1 ? COLUMN_GAP / 2 : 2.2 + ((COLUMN_GAP - 4) * indexCross) / (totalCross - 1);
 			wire.route = "elbow";
-			wire.bend = Math.min(0.95, Math.max(0.05, Math.round(((end - COLUMN_GAP / 2 - start) / (end - start)) * 100) / 100));
+			wire.bend = Math.min(0.95, Math.max(0.05, Math.round(((end - inset - start) / (end - start)) * 100) / 100));
 		}
 		if (edge.text) wire.label = edge.text;
 		wires.push(wire);
@@ -269,22 +281,52 @@ function sequenceSpec(graph, notes) {
 	return { nodes, wires, runs, columns: cursor, rows: 17 + (under.length > 0 ? under.length * 2.5 + 4 : 0) };
 }
 
+function journeyConflicts(candidate, start, placed) {
+	for (const other of placed) {
+		for (const seg of candidate.segments) {
+			const segFrom = start + seg.from;
+			const segTo = start + seg.to;
+			for (const otherSeg of other.run.segments) {
+				const otherFrom = other.start + otherSeg.from;
+				const otherTo = other.start + otherSeg.to;
+				if (seg.kind === "work" && otherSeg.kind === "work" && seg.node === otherSeg.node) {
+					if (segFrom < otherTo + 0.2 && otherFrom < segTo + 0.2) return true;
+				}
+				if (seg.kind === "travel" && otherSeg.kind === "travel" && seg.wire === otherSeg.wire) {
+					if (Math.abs(segFrom - otherFrom) < 0.35) return true;
+				}
+			}
+		}
+	}
+	return false;
+}
+
 /**
- * Gives every journey its start and the spec its loop, from the journeys' real lengths: the compiled scene knows each
- * journey's duration along the real wires. The scene is read with its problems set aside: a duration does not depend on
- * the capacity or layout rules, and the import reports those problems itself. A journey starts when the one before it
- * has ended; the loop closes after the last.
+ * Gives every journey its start and the spec its loop, from the journeys' real lengths: independent branches start
+ * together, while journeys that share a station or wire advance just enough to keep every 1-item station honest.
  */
-function timeJourneys(spec) {
+function timeJourneys(spec, isSequence) {
 	const { scene } = compileScene({ ...spec, loop: MAX_LOOP });
 	if (scene.runs.length !== spec.runs.length) throw new Error("a journey of the converted spec could not be compiled");
-	let clock = JOURNEY_GAP;
+	const placed = [];
 	const runs = spec.runs.map((run, index) => {
-		const start = Math.ceil(clock * 10) / 10;
-		clock = start + scene.runs[index].duration + JOURNEY_GAP;
+		const compiled = scene.runs[index];
+		let start = JOURNEY_GAP;
+		while (start + compiled.duration + JOURNEY_GAP < MAX_LOOP && journeyConflicts(compiled, start, placed))
+			start = Math.round((start + 0.1) * 10) / 10;
+		placed.push({ start, duration: compiled.duration, run: compiled });
 		return { ...run, start };
 	});
-	return { ...spec, runs, loop: Math.min(MAX_LOOP, Math.max(MIN_LOOP, Math.ceil(clock))) };
+	const end = placed.reduce((latest, entry) => Math.max(latest, entry.start + entry.duration + JOURNEY_GAP), MIN_LOOP);
+	const overlaps = placed.some((entry, index) =>
+		placed.slice(0, index).some((earlier) => entry.start < earlier.start + earlier.duration - 0.05),
+	);
+	const footer = isSequence
+		? "one item carries the messages in order"
+		: overlaps
+			? "independent branches overlap; shared stations take one item at a time"
+			: "one item follows one path at a time";
+	return { ...spec, footer, runs, loop: Math.min(MAX_LOOP, Math.max(MIN_LOOP, Math.ceil(end))) };
 }
 
 /**
@@ -306,11 +348,11 @@ export function specFromGraph(graph, options = {}) {
 		unit,
 		loop: MAX_LOOP,
 		theme: options.theme ?? "matrix",
-		footer: graph.kind === "sequence" ? "one item carries the messages in order" : "one item follows one path at a time",
+		footer: "one item follows one path at a time",
 		bands: [{ id: "flow", tier: "live", title: options.title ?? "Flow", height: bandRows }],
 		nodes: laid.nodes,
 		wires: laid.wires,
 		runs: laid.runs,
 	};
-	return { spec: timeJourneys(spec), notes };
+	return { spec: timeJourneys(spec, graph.kind === "sequence"), notes };
 }

@@ -232,6 +232,8 @@ export function workerRequestForDispatch(
 				}
 			: {}),
 		...(dispatch.escalation?.attemptOfTaskId ? { attemptOf: { taskId: dispatch.escalation.attemptOfTaskId } } : {}),
+		...(dispatch.escalation?.supersedesTaskId ? { supersedesTaskId: dispatch.escalation.supersedesTaskId } : {}),
+		...(dispatch.escalation ? { escalationOutcomeId: dispatch.escalation.outcomeId } : {}),
 		messageReplayKey: `fleet:${dispatch.idempotencyKey}`,
 		...(Object.keys(authority).length > 0 ? { authority } : {}),
 		taskContext: {

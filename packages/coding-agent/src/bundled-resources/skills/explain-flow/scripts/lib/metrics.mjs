@@ -23,15 +23,19 @@ export const HOP_SECONDS = 0.22;
 
 /** A round token in words: `{round}`, or `{round+1}`, `{round-2}` for a shift. */
 const ROUND_TOKEN = /\{round([+-]\d+)?\}/g;
+/** A named round variable in words, replaced only when the spec declared that variable in `vars`. */
+const VAR_TOKEN = /\{([a-z][a-z0-9_]{0,23})\}/g;
 
 /**
- * `text` with every round token replaced. A token is a round's number starting at 1, shifted by the whole offset it
- * writes, so in the first round `{round}` is 1 and `{round+1}` is 2. Text with no token comes back as it went in, and
- * undefined stays undefined.
+ * `text` with every round token and declared `vars` token replaced. A round token is a round's number starting at 1,
+ * shifted by the whole offset it writes, so in the first round `{round}` is 1 and `{round+1}` is 2. Text with no token
+ * comes back as it went in, and undefined stays undefined.
  */
-export function roundText(text, round) {
+export function roundText(text, round, vars) {
 	if (text === undefined) return undefined;
-	return text.replace(ROUND_TOKEN, (_, offset) => String(round + 1 + (offset === undefined ? 0 : Number(offset))));
+	const stepped = text.replace(ROUND_TOKEN, (_, offset) => String(round + 1 + (offset === undefined ? 0 : Number(offset))));
+	if (!vars) return stepped;
+	return stepped.replace(VAR_TOKEN, (whole, name) => (Object.hasOwn(vars, name) ? (vars[name][round] ?? vars[name][0] ?? "") : whole));
 }
 
 /** The widest name a `{kept}` token can stand for: a stem of three characters and a two-digit number. */
@@ -41,12 +45,12 @@ const WIDEST_KEPT_NAME = "MMM00";
  * The widest form of `text` over `rounds` rounds: a layout that measures it holds in every round. A `{kept}` token is
  * measured as the widest candidate name there can be.
  */
-export function widestRoundText(text, rounds) {
+export function widestRoundText(text, rounds, vars) {
 	if (text === undefined) return undefined;
 	const named = text.replace(/\{kept\}/g, WIDEST_KEPT_NAME);
-	let widest = roundText(named, 0);
+	let widest = roundText(named, 0, vars);
 	for (let round = 1; round < rounds; round++) {
-		const form = roundText(named, round);
+		const form = roundText(named, round, vars);
 		if (form.length > widest.length) widest = form;
 	}
 	return widest;
@@ -56,20 +60,25 @@ export function widestRoundText(text, rounds) {
  * How wide `text` is at `size` pixels: every character of the film's one type family has the same advance. Text that
  * holds a round token is as wide as its widest form over `rounds` rounds.
  */
-export function textWidth(text, size, rounds = 1) {
-	return (widestRoundText(text, rounds)?.length ?? 0) * size * CHAR_ADVANCE;
+export function textWidth(text, size, rounds = 1, vars = undefined) {
+	return (widestRoundText(text, rounds, vars)?.length ?? 0) * size * CHAR_ADVANCE;
 }
 
 /**
- * The ports of a boxed station. A wire enters on the left and leaves on the right; one may also meet the station above
- * or below, a little in from its left edge, so the station's words on that side start after the wire.
+ * The ports of a boxed station. A wire enters on the left (`in` or `left`) and leaves on the right (`out` or `right`);
+ * one may also leave from the left or meet the station above or below, a little in from its left edge, so the station's
+ * words on that side start after the wire.
  */
 export function boxPorts(box, u) {
 	const middle = box.y + box.h / 2;
 	const inset = box.x + 2.5 * u;
+	const left = { x: box.x, y: middle, side: "in" };
+	const right = { x: box.x + box.w, y: middle, side: "out" };
 	return {
-		in: { x: box.x, y: middle, side: "in" },
-		out: { x: box.x + box.w, y: middle, side: "out" },
+		in: left,
+		out: right,
+		left,
+		right,
 		top: { x: inset, y: box.y, side: "top" },
 		bottom: { x: inset, y: box.y + box.h, side: "bottom" },
 	};

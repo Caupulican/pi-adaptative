@@ -15,6 +15,8 @@ const MAX_NOTICE_GENERATIONS = 32;
 const MAX_PENDING_NOTICES = 32;
 /** Failed saves of one notice before it is dropped; the capability's next signal of the state starts a new one. */
 const MAX_NOTICE_SAVE_ATTEMPTS = 3;
+/** The one-line headline one notice keeps for the owner and the model: wide enough for multi-clause host notices without clipping their remedy. */
+export const MAX_NOTICE_HEADLINE_CHARS = 1_200;
 /** The worker-written detail one notice carries for the model: fenced, and never shown on the owner's surface. */
 const MAX_NOTICE_EVIDENCE_CHARS = 1_200;
 
@@ -110,6 +112,16 @@ export function harnessNoticeDeliveryId(
 	return `${HARNESS_NOTICE_CUSTOM_TYPE}:${createHash("sha256")
 		.update(JSON.stringify([sessionId, kind, reason, generation]))
 		.digest("hex")}`;
+}
+
+/**
+ * The one-line headline a notice keeps for the owner and the model: cleaned, redacted and bounded to at most
+ * {@link MAX_NOTICE_HEADLINE_CHARS} characters in that order (`cleanRedactBound`), so multi-clause host notices keep
+ * their actionable remedy whole while a longer text keeps its head and tail around one elision without splitting a
+ * secret or a path. Nothing left means no notice.
+ */
+function boundedRedactedNoticeHeadline(headline: string): string | undefined {
+	return cleanRedactBound(headline, MAX_NOTICE_HEADLINE_CHARS) || undefined;
 }
 
 /**
@@ -345,7 +357,7 @@ export class HarnessNoticeController {
 			state.covered = reason;
 			return true;
 		}
-		const text = boundedRedactedDiagnosticText(observation.text);
+		const text = boundedRedactedNoticeHeadline(observation.text);
 		if (!text) {
 			state.unsaved = recurred;
 			return false;

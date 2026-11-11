@@ -5,6 +5,8 @@
  * of two corner radii shapes everything.
  */
 
+import { batchBody, batchLive } from "./batch.mjs";
+import { cardBody, cardLive } from "./cards.mjs";
 import { pieceOf, px } from "./geometry.mjs";
 import { isLinked, lanesBody, lanesLive, noteLines, seriesBody, seriesLive, tableBody, tableRows, tallyRounds } from "./instruments.mjs";
 import { activityMarks, drawMechanism } from "./mechanisms.mjs";
@@ -19,6 +21,7 @@ import {
 	TEXT_SIZE,
 } from "./metrics.mjs";
 import { captionRows, wordsLeft } from "./scene.mjs";
+import { slotsBody, slotsLive } from "./slots.mjs";
 import { stateAt } from "./state.mjs";
 import { alphaOf, circleEl, lineEl, pathEl, rectEl, strokeOf, words } from "./svg.mjs";
 import { mixHex } from "./theme.mjs";
@@ -72,14 +75,14 @@ function subTop(node, u) {
 /** A chain chip's words: dim, inside its chip. */
 function chipWords(scene, chip, round) {
 	const u = scene.unit;
-	return words(scene, chip.x + 1.5 * u, chip.y + 2 * u, SMALL_TEXT_SIZE * u, [{ text: roundText(chip.text, round), fill: scene.theme.dim }]);
+	return words(scene, chip.x + 1.5 * u, chip.y + 2 * u, SMALL_TEXT_SIZE * u, [{ text: roundText(chip.text, round, scene.vars), fill: scene.theme.dim }]);
 }
 
 /** A tally's words: its count, after its boxes. */
 function tallyWords(scene, node, round) {
 	const u = scene.unit;
 	const { words: place } = node.shape;
-	return words(scene, place.x, place.y, SMALL_TEXT_SIZE * u, [{ text: roundText(node.text, round), fill: scene.theme.dim }]);
+	return words(scene, place.x, place.y, SMALL_TEXT_SIZE * u, [{ text: roundText(node.text, round, scene.vars), fill: scene.theme.dim }]);
 }
 
 /**
@@ -102,9 +105,9 @@ function nodeLabels(scene, node, round) {
 	const alpha = tierStyle(scene, node.tier).alpha;
 	if (node.kind === "chain" && node.lead !== undefined) {
 		// A list row: tag and name at the left on the chips' line, the rest under the name.
-		let out = words(scene, left, y + 2 * u, size, [{ text: roundText(node.tag ? `${node.tag} ` : "", round), fill: theme.text, bold: true }, { text: roundText(node.label, round), fill: theme.dim }], "start", alpha);
+		let out = words(scene, left, y + 2 * u, size, [{ text: roundText(node.tag ? `${node.tag} ` : "", round, scene.vars), fill: theme.text, bold: true }, { text: roundText(node.label, round, scene.vars), fill: theme.dim }], "start", alpha);
 		for (const [index, text] of [node.note, ...node.sub].filter(Boolean).entries())
-			out += words(scene, left, y + 2 * u + (index + 1) * SUB_STEP * u, size, [{ text: roundText(text, round), fill: theme.dim }], "start", alpha * 0.75);
+			out += words(scene, left, y + 2 * u + (index + 1) * SUB_STEP * u, size, [{ text: roundText(text, round, scene.vars), fill: theme.dim }], "start", alpha * 0.75);
 		return out;
 	}
 	const x = wordsLeft(node, "top", u);
@@ -117,16 +120,16 @@ function nodeLabels(scene, node, round) {
 			y - (node.value ? 4 : 1.5) * u,
 			size,
 			[
-				{ text: roundText(node.label, round), fill: theme.text, bold: true },
+				{ text: roundText(node.label, round, scene.vars), fill: theme.text, bold: true },
 				{ text: node.label && node.note ? " · " : "", fill: theme.dim },
-				{ text: roundText(node.note, round), fill: theme.dim },
+				{ text: roundText(node.note, round, scene.vars), fill: theme.dim },
 			],
 			"start",
 			alpha,
 		);
-	if (node.value) out += words(scene, x, y - 1.5 * u, size, [{ text: roundText(node.value, round), fill: theme.info }], "start", alpha);
+	if (node.value) out += words(scene, x, y - 1.5 * u, size, [{ text: roundText(node.value, round, scene.vars), fill: theme.info }], "start", alpha);
 	for (const [index, text] of node.sub.entries())
-		out += words(scene, wordsLeft(node, "bottom", u), subTop(node, u) + index * SUB_STEP * u, size, [{ text: roundText(text, round), fill: theme.dim }], "start", alpha * 0.9);
+		out += words(scene, wordsLeft(node, "bottom", u), subTop(node, u) + index * SUB_STEP * u, size, [{ text: roundText(text, round, scene.vars), fill: theme.dim }], "start", alpha * 0.9);
 	return out;
 }
 
@@ -162,6 +165,15 @@ function nodeBody(scene, node, round) {
 			break;
 		case "trial":
 			out += trialBody(scene, node, stroke, faint, STATION_RADIUS * u);
+			break;
+		case "card":
+			out += cardBody(scene, node, stroke, faint, round);
+			break;
+		case "batch":
+			out += batchBody(scene, node, stroke);
+			break;
+		case "slots":
+			out += slotsBody(scene, node, stroke);
 			break;
 		case "sweep":
 			out += rectEl(shape.box, STATION_RADIUS * u, stroke) + lineEl(shape.track.x1, shape.track.y, shape.track.x2, shape.track.y, faint);
@@ -203,8 +215,11 @@ function nodeBody(scene, node, round) {
 		default:
 			break;
 	}
-	if (node.kind === "queue" || node.kind === "worker" || node.kind === "trial" || node.kind === "sweep")
-		for (const name of node.usedPorts) out += pin(scene, shape.ports[name], theme.line);
+	if (node.kind === "queue" || node.kind === "worker" || node.kind === "trial" || node.kind === "card" || node.kind === "batch" || node.kind === "sweep")
+		for (const name of node.usedPorts) {
+			if (node.kind === "batch" && name === "out" && scene.rounds > 1 && node.plan.length > 1) continue;
+			out += pin(scene, shape.ports[name], theme.line);
+		}
 	// The structure stays quiet so what moves and what changed carry the picture.
 	return `<g opacity="${alphaOf(tierStyle(scene, tier).alpha * 0.8)}">${out}</g>`;
 }
@@ -231,7 +246,17 @@ function wireEl(scene, wire) {
 	// one place; a level wire and a lane are named under the middle of their longest level run.
 	const end = wire.path.points[wire.path.points.length - 1];
 	const run = wire.run === "turn" ? undefined : labelRun(wire.path);
-	const place = run ? { x: run.x + run.length / 2, y: run.y + 2.25 * u, anchor: "middle" } : { x: end.x - 1.5 * u, y: end.y - 0.9 * u, anchor: "end" };
+	const toSide = wire.toPort?.side ?? "in";
+	const shift = (wire.turnRank ?? 0) * 2.1 * u;
+	const place = run
+		? { x: run.x + run.length / 2, y: run.y + 2.25 * u, anchor: "middle" }
+		: toSide === "top"
+			? { x: end.x + 1.2 * u, y: end.y - 1.0 * u - shift, anchor: "start" }
+			: toSide === "bottom"
+				? { x: end.x + 1.2 * u, y: end.y + 2.1 * u + shift, anchor: "start" }
+				: toSide === "out"
+					? { x: end.x + 1.5 * u, y: end.y - 0.9 * u - shift, anchor: "start" }
+					: { x: end.x - 1.5 * u, y: end.y - 0.9 * u - shift, anchor: "end" };
 	return out + words(scene, place.x, place.y, TEXT_SIZE * u, [{ text: wire.label, fill: scene.theme.dim }], place.anchor, style.alpha * 0.9);
 }
 
@@ -263,9 +288,9 @@ function captions(scene, round) {
 	const bar = loopBar(scene);
 	let out = "";
 	if (scene.footer)
-		out += words(scene, bar.left, bar.y - 1.5 * u, TEXT_SIZE * u, [{ text: roundText(scene.footer, round), fill: scene.theme.dim }]);
+		out += words(scene, bar.left, bar.y - 1.5 * u, TEXT_SIZE * u, [{ text: roundText(scene.footer, round, scene.vars), fill: scene.theme.dim }]);
 	if (scene.clock)
-		out += words(scene, bar.right, bar.y - 1.5 * u, TEXT_SIZE * u, [{ text: roundText(scene.clock, round), fill: scene.theme.dim }], "end");
+		out += words(scene, bar.right, bar.y - 1.5 * u, TEXT_SIZE * u, [{ text: roundText(scene.clock, round, scene.vars), fill: scene.theme.dim }], "end");
 	return out;
 }
 
@@ -346,6 +371,16 @@ function trialEl(scene, node, stay, view) {
 	return out + litPins(scene, stay);
 }
 
+function batchEl(scene, node, stay, view) {
+	const u = scene.unit;
+	const { shape } = node;
+	const caption = { x: wordsLeft(node, "bottom", u), y: shape.box.y + shape.box.h + 2.5 * u };
+	const wireAlpha = tierStyle(scene, node.tier).alpha * 0.48;
+	if (!stay) return batchLive(scene, node, view, scene.theme.line, caption, wireAlpha);
+	const colour = toneOf(scene, stay.tone);
+	return batchLive(scene, node, view, colour, caption, wireAlpha) + litPins(scene, stay);
+}
+
 function workerEl(scene, node, stay, round) {
 	const u = scene.unit;
 	const { theme } = scene;
@@ -364,14 +399,14 @@ function workerEl(scene, node, stay, round) {
 	const size = TEXT_SIZE * u;
 	const x = wordsLeft(node, "bottom", u);
 	const first = box.y + box.h + 2.5 * u;
-	if (stay.lane) out += words(scene, x, first, size, [{ text: roundText(stay.lane, round), fill: toneOf(scene, stay.laneTone) }], "start", settle);
+	if (stay.lane) out += words(scene, x, first, size, [{ text: roundText(stay.lane, round, scene.vars), fill: toneOf(scene, stay.laneTone) }], "start", settle);
 	// One phase rolls out before the next rolls in, so two sets of words never sit on each other.
 	const row = first + SUB_STEP * u;
 	const leaving = stay.before ? Math.max(0, 1 - stay.blend * 2) : 0;
 	const arriving = stay.before ? Math.max(0, stay.blend * 2 - 1) : stay.blend;
-	if (leaving > 0) out += words(scene, x, row - (1 - leaving) * 0.6 * u, size, [{ text: roundText(stay.before, round), fill: theme.dim }], "start", leaving);
+	if (leaving > 0) out += words(scene, x, row - (1 - leaving) * 0.6 * u, size, [{ text: roundText(stay.before, round, scene.vars), fill: theme.dim }], "start", leaving);
 	if (stay.phase && arriving > 0)
-		out += words(scene, x, row + (1 - arriving) * 0.6 * u, size, [{ text: roundText(stay.phase, round), fill: stay.failed ? theme.fail : theme.dim }], "start", arriving);
+		out += words(scene, x, row + (1 - arriving) * 0.6 * u, size, [{ text: roundText(stay.phase, round, scene.vars), fill: stay.failed ? theme.fail : theme.dim }], "start", arriving);
 	return out;
 }
 
@@ -385,9 +420,9 @@ function railEl(scene, node, rail, round) {
 	out += rectEl({ x: shape.line.x2 - 0.25 * u, y: shape.line.y - 1.5 * u, w: 0.5 * u, h: 3 * u }, 0.25 * u, `fill="${theme.line}"`);
 	const state = result === "ok" ? node.okText : result === "fail" ? node.failText : undefined;
 	out += words(scene, shape.box.x, shape.box.y - 1.5 * u, TEXT_SIZE * u, [
-		{ text: roundText(node.label, round), fill: theme.text, bold: true },
+		{ text: roundText(node.label, round, scene.vars), fill: theme.text, bold: true },
 		{ text: node.label && (state ?? node.note) ? " · " : "", fill: theme.dim },
-		{ text: roundText(state ?? node.note, round), fill: state ? colour : theme.dim },
+		{ text: roundText(state ?? node.note, round, scene.vars), fill: state ? colour : theme.dim },
 	]);
 	const radius = 0.8 * u;
 	const quiet = mixHex(theme.text, theme.bg, 0.25);
@@ -434,7 +469,7 @@ function chainEl(scene, node, pass, round) {
 		else strength = index === pass.step ? Math.min(1, pass.part * 4, (1 - pass.part) * 4) : 0;
 		if (strength <= 0.01) continue;
 		out += `<g opacity="${alphaOf(strength)}">${rectEl(chip, CHIP_RADIUS * u, `fill="${theme.info}" fill-opacity="0.16" stroke="${theme.info}" stroke-width="${px(u * 0.16)}"`)}`;
-		out += `${words(scene, chip.x + 1.5 * u, chip.y + 2 * u, SMALL_TEXT_SIZE * u, [{ text: roundText(chip.text, round), fill: theme.text }])}</g>`;
+		out += `${words(scene, chip.x + 1.5 * u, chip.y + 2 * u, SMALL_TEXT_SIZE * u, [{ text: roundText(chip.text, round, scene.vars), fill: theme.text }])}</g>`;
 	}
 	if (node.mode !== "together" && pass.step < count) {
 		// A cursor rides over the chain from the step in hand to the next one.
@@ -472,8 +507,22 @@ function itemEl(scene, item, round) {
 	out += "</g>";
 	// What an item carries is named only while it is clear of the stations at both ends of its wire.
 	if (item.carry && item.carryAlpha > 0.01)
-		out += words(scene, item.x, item.y - 1.75 * u, SMALL_TEXT_SIZE * u, [{ text: roundText(item.carry, round), fill: colour }], "middle", item.carryAlpha);
+		out += words(scene, item.x, item.y - 1.75 * u, SMALL_TEXT_SIZE * u, [{ text: roundText(item.carry, round, scene.vars), fill: colour }], "middle", item.carryAlpha);
 	return `<g opacity="${alphaOf(item.alpha)}">${out}</g>`;
+}
+
+function beadEl(scene, bead) {
+	const u = scene.unit;
+	const colour = scene.theme.ok;
+	let out = "";
+	if (bead.trail) {
+		const pieces = 4;
+		const span = (bead.trail.to - bead.trail.from) / pieces;
+		for (let piece = 0; piece < pieces; piece++)
+			out += pathEl(pieceOf(bead.trail.path, bead.trail.from + piece * span, bead.trail.from + (piece + 1) * span), `${strokeOf(colour, 0.7 * u)} opacity="${alphaOf(((piece + 1) / pieces) * 0.4)}"`);
+	}
+	out += circleEl(bead.x, bead.y, 0.55 * u, `fill="${colour}" opacity="0.55" filter="url(#flow-glow)"`);
+	return out + circleEl(bead.x, bead.y, 0.45 * u, `fill="${colour}"`);
 }
 
 /** Everything that depends on the instant. */
@@ -492,6 +541,9 @@ export function drawLive(scene, state) {
 		else if (node.kind === "queue") out += queueStays(scene, node, stays);
 		else if (node.kind === "worker") out += workerEl(scene, node, stays[0], state.round);
 		else if (node.kind === "trial") out += trialEl(scene, node, stays[0], state.trials.get(node.id));
+		else if (node.kind === "card") out += cardLive(scene, node, stays[0], state, heldOutline, litPins);
+		else if (node.kind === "batch") out += batchEl(scene, node, stays[0], state.batches.get(node.id));
+		else if (node.kind === "slots") out += slotsLive(scene, node, state.slots.get(node.id), state);
 		else if (node.kind === "series") out += seriesLive(scene, node, state);
 		else if (node.kind === "lanes") out += lanesLive(scene, node, state);
 		else if (node.kind === "tally" && node.per) out += tallyRounds(scene, node, state);
@@ -505,6 +557,7 @@ export function drawLive(scene, state) {
 		}
 	}
 	for (const item of state.items) out += itemEl(scene, item, state.round);
+	for (const bead of state.beads) out += beadEl(scene, bead);
 	const bar = loopBar(scene);
 	if (scene.rounds > 1) out += captions(scene, state.round);
 	// The marker travels the whole bar once per period, so one pass of the bar is one film and one segment is one round.

@@ -7,7 +7,11 @@ import { waitForChildProcessWithTermination } from "../../utils/child-process.ts
 import { createSafeWriteStream, endWriteStream } from "../../utils/safe-write-stream.ts";
 import { trackDetachedChild, untrackDetachedChild } from "../../utils/shell.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
-import { createScopedPersistedOutputMask, MaskedOutputStream } from "./persisted-output-mask.ts";
+import {
+	createScopedPersistedOutputMask,
+	getScopedToolStreamsDirectory,
+	MaskedOutputStream,
+} from "./persisted-output-mask.ts";
 import { hasShellOnlySyntax, isChangeDirectoryInvocation, parseShellCommandSequence } from "./shell-command-parser.ts";
 import { createShellOutputDecoder } from "./shell-output-decoder.ts";
 
@@ -73,7 +77,7 @@ interface GitFilterOptions {
 	environment?: NodeJS.ProcessEnv;
 	/** Test seam and safety bound for terminal spill settlement. */
 	spillFlushTimeoutMs?: number;
-	/** Where an overflow spill is written (the bash tool's output directory); the process work run otherwise. */
+	/** Where an overflow spill is written (the bash tool's output directory); the scoped tool-streams directory or process work run otherwise. */
 	outputDirectory?: string;
 }
 
@@ -152,6 +156,7 @@ export async function runGitQuery(
 	};
 	// Inside a persisted-output mask scope (the credential guard's) the spill file receives the masked text.
 	const scopedMask = createScopedPersistedOutputMask();
+	const scopedOutputDirectory = options?.outputDirectory ?? getScopedToolStreamsDirectory();
 	const maskedOverflow = scopedMask
 		? { decoder: createShellOutputDecoder(), stream: new MaskedOutputStream(scopedMask) }
 		: undefined;
@@ -222,7 +227,7 @@ export async function runGitQuery(
 			retainedStdoutBytes += chunk.length;
 			if (retainedStdoutBytes > maxRetainedBytes) {
 				overflowPath = join(
-					options?.outputDirectory ?? getProcessWorkRun(getAgentDir(), "outputs", "git").path,
+					scopedOutputDirectory ?? getProcessWorkRun(getAgentDir(), "outputs", "git").path,
 					`pi-git-${randomBytes(8).toString("hex")}.log`,
 				);
 				overflowStream = createSafeWriteStream(overflowPath, recordOverflowWriteError);

@@ -163,7 +163,7 @@ async function runProbeTurn({ agentDir, sessionDir, provider, model, fixtures })
 		const readSuccessCount = successfulToolResults(turnEvents, "read").length;
 		return { metrics: summarizeAssistantMessages(turnEvents), readSuccessCount };
 	} finally {
-		rpc.close();
+		await rpc.close();
 	}
 }
 

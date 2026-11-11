@@ -10,6 +10,7 @@
  * (`plan/plan-vote-decision.ts`), and each answered request's trace records the exit it fed (`noteVoteTrace`).
  */
 
+import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerReportChange } from "../autonomy/contracts.ts";
 import { readNoul } from "../decision/noul.ts";
 import { RUBRIC_FAIL_MASS, RUBRIC_MEET_MASS, scoreBoundaryMass } from "../decision/thresholds.ts";
@@ -19,7 +20,6 @@ import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { currentTaskOf } from "../orchestration/task-successor.ts";
 import { type PacketReport, type ResultPacket, resultPacket } from "../plan/plan-evidence.ts";
 import type { PlanNodeSpec, PlanRecord, PlanRuntimeState } from "../plan/plan-graph.ts";
-import { voteCriteria } from "../plan/plan-revision.ts";
 import {
 	type CandidateReading,
 	decideVote,
@@ -199,15 +199,20 @@ export async function judgeVoteStep(
 		readonly signal: AbortSignal;
 	},
 ): Promise<VoteJudgement> {
-	const judgments = await judgeCandidates(
-		engine,
-		voteCriteria(input.vote),
-		input.candidates.map((candidate) => voteEvidence(input.snapshot, input.plan, candidate, input.reportOf)),
-		{ signal: input.signal },
-	);
+	input.signal.throwIfAborted();
 	const facts = voteFacts(input.record, input.vote, input.candidates);
+	const pre = decideVote(facts, undefined);
+	const judgments =
+		pre.kind === "too_many" || pre.kind === "V1_divergent"
+			? undefined
+			: await judgeCandidates(
+					engine,
+					facts.criteria,
+					input.candidates.map((candidate) => voteEvidence(input.snapshot, input.plan, candidate, input.reportOf)),
+					{ signal: input.signal },
+				);
 	const readings = judgments?.map((judgment) => judgment.reading);
-	const exit = decideVote(facts, readings);
+	const exit = readings ? decideVote(facts, readings) : pre;
 	const choice =
 		exit.kind === "V5_choose"
 			? await chooseVoteWinner(engine, {
@@ -224,7 +229,15 @@ export async function judgeVoteStep(
 					signal: input.signal,
 				})
 			: undefined;
-	noteVoteTrace(engine, judgments, exit.kind);
+	if (!judgments?.length) {
+		harnessLog.info("plan", "a plan vote took a judgment-free exit", {
+			planId: input.record.planId,
+			nodeId: input.vote.id,
+			exit: exit.kind,
+		});
+	} else {
+		noteVoteTrace(engine, judgments, exit.kind);
+	}
 	const step = voteStep({ record: input.record, vote: input.vote, facts, readings, exit, choice });
 	return { judgments, exit, step };
 }

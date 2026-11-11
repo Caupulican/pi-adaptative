@@ -77,7 +77,11 @@ async function prepareOllamaAcceptanceTarget(target, runtime) {
 	if (!runtime) throw new Error(`Missing managed Ollama runtime for ${target.ref}`);
 	const shown = await runtime.show(target.model);
 	if (!shown.ok) throw new Error(`Could not inspect ${target.ref}: ${shown.error}`);
+	// Keep Ollama's actual KV/context allocation at 4096 for low-memory hosts while registering 8192 in
+	// pi's capability profile (>= MODEL_CAPABILITY_MINIMAL_MIN_CONTEXT) so `read`/`write`/`edit`/`bash`
+	// stay on the model's tool surface instead of collapsing into `"chat"` class.
 	const numCtx = 4_096;
+	const capabilityContextWindow = 8_192;
 	const plan = planManagedOllamaModel({
 		sourceRef: target.model,
 		modelInfo: shown.info.modelInfo,
@@ -94,7 +98,8 @@ async function prepareOllamaAcceptanceTarget(target, runtime) {
 		ref: `ollama/${plan.name}`,
 		expectationRef: target.ref,
 		baseUrl: `${runtime.baseUrl}/v1`,
-		contextWindow: numCtx,
+		numCtx,
+		contextWindow: capabilityContextWindow,
 	};
 }
 
@@ -117,7 +122,7 @@ function ensureOllamaModel(modelsConfig, target) {
 			id: target.model,
 			name: target.model,
 			contextWindow: target.contextWindow ?? 32_768,
-			maxTokens: Math.min(2_048, Math.max(512, Math.floor((target.contextWindow ?? 16_384) / 8))),
+			maxTokens: Math.min(2_048, Math.max(512, Math.floor((target.numCtx ?? target.contextWindow ?? 16_384) / 8))),
 			reasoning: false,
 			input: ["text"],
 			cost: { input: 0, output: 0, cacheRead: 0, cacheWrite: 0 },
@@ -194,7 +199,7 @@ async function hydrateAgentDir(agentDir, target) {
 	const stall = stallSettingsFromPerf(await perfProfileFor(target.ref));
 	await writeFile(
 		path.join(agentDir, "settings.json"),
-		JSON.stringify({ retry: { stall }, httpIdleTimeoutMs: 0 }, null, 2),
+		JSON.stringify({ retry: { stall: { local: stall } }, httpIdleTimeoutMs: 0 }, null, 2),
 		"utf8",
 	);
 }
@@ -441,7 +446,7 @@ async function runPreparedModel(target, keepSessions) {
 		const detail = error instanceof Error ? error.message : String(error);
 		throw new Error(`${detail}; preserved session: ${sessionDir}`);
 	} finally {
-		rpc.close();
+		await rpc.close();
 		if (keepSessions) workRun.release();
 		else removeScriptWorkRun(workRun);
 	}

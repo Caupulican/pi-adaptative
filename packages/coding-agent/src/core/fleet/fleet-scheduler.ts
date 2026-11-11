@@ -573,12 +573,14 @@ export class SessionFleetScheduler implements FleetScheduler {
 		});
 		this.sources.set(source.key, { source, unsubscribe });
 		this.changed();
+		this.notifyCandidates();
 		return () => {
 			const current = this.sources.get(source.key);
 			if (current?.source !== source) return;
 			current.unsubscribe();
 			this.sources.delete(source.key);
 			this.changed();
+			this.notifyCandidates();
 		};
 	}
 
@@ -835,6 +837,7 @@ export class SessionFleetScheduler implements FleetScheduler {
 
 	/** Tells every placement listener the candidates may have changed; each listener's failure is its own. */
 	private notifyCandidates(): void {
+		if (this.disposed) return;
 		for (const listener of [...this.candidateListeners]) {
 			try {
 				listener();

@@ -51,8 +51,6 @@ export interface LadderFacts {
 	readonly settings: { readonly enabled: boolean; readonly maxRungs: number };
 	/** A follow-up is installed that places rungs and runs host checks; without one no automatic step is offered. */
 	readonly executor: boolean;
-	/** When a transient failure's existing retry is scheduled. */
-	readonly retryNotBefore?: string;
 	/** Uncovered ids with a host requirement check that has not run since the attempt ended. */
 	readonly hostCheckable: readonly string[];
 	/** Remaining task budget: cost, active time and, for a non-completed task, its attempt ceiling. */
@@ -175,10 +173,7 @@ export function decideNextAction(facts: LadderFacts): LadderDecision {
 	}
 	if (blocker === "action_outcome_unknown" && facts.writeCapable)
 		return askOwner("E4", "whether a write took effect is unknown; check the changed files before anything reruns");
-	if (blocker === "provider_transient") {
-		if (facts.retryNotBefore) return done("E5", { kind: "retry_after", notBefore: facts.retryNotBefore });
-		skip("E5", "retries_spent");
-	}
+	if (blocker === "provider_transient") skip("E5", "retries_spent");
 	// A model move would propose the same refused rerun again: a refusal records no escalation, so the move's exit asks the
 	// owner first. Every other blocker keeps the owner-ask exit E14r below.
 	if (facts.rungRefusal !== undefined && (blocker === "provider_transient" || MOVE_MODEL_BLOCKERS.has(blocker)))

@@ -1,5 +1,27 @@
 ## [Unreleased]
 
+### Added
+
+- The flow film of the `explain-flow` skill can show stateful, branching workflows that narrow work or reuse state across rounds. Top-level `vars` substitutes named per-round words (`{filter}`) across stations, captions and journey labels, and a journey's `rounds` runs it only in the rounds it names. Three new station kinds join the circuit: `card` (framed prompt, call or inspector lines whose active clause lights by phase or `when` link, with an optional input caret or `collectFrom` progressive match list), `batch` (an item set swept by a caliper that prunes skipped items by round and sends match beads to its collector card), and `slots` (numbered buffer, cache or heap cells with `1`-based cell ports that fill via `write` and exchange cards smoothly via `swap`). `note` adds timed `cues`, `when` accepts `"station:phase"` and `"slots:N"`, wires add `left`/`right` port aliases and right-angle `elbow` turns between horizontal and vertical ports, and `flow-film.mjs import` schedules independent branches concurrently while queueing shared stations. `assets/stateful-workflow.json` is a worked example comparing a cold full scan that allocates each round against a warm narrowed pass that swaps two reused slots. Existing specs render byte for byte as before.
+
+### Fixed
+
+- A worker task verified by a subordinate verifier now produces one proof sheet instead of two. Previously both the verifier's completion and the reconciled task's completion emitted proof sheets, counting twice toward unreviewed work and allowing `/quiz` to open on the verifier's empty diff rather than the task's changes. Standalone review steps in a plan still emit their own proof sheet.
+- Host notices keep multi-sentence headlines whole up to 1,200 characters instead of cutting off at 240 characters before the recovery command at the end of the notice. Longer headlines are still cleaned, redacted for secrets, and collapsed onto one line.
+- In-process worker lanes can read and search their own spilled `bash`, `python`, and `git` output files through `read` and `grep`, and `git` queries over 48 MiB spill into the session's scoped output directory. Guarded and read-confined lanes previously rejected reads inside their own process scratch directory under the agent work area while still writing large tool outputs there. `.env` files, private keys, registry credentials, writes, symlinks escaping the scratch directory, and sibling workers' scratch directories remain blocked.
+- Escalation rungs that supersede an earlier task or continue after their original worker was retired start a fresh worker instead of reusing an idle specialist's standing conversation, and keep the origin of the task they continue rather than inheriting third-party taint from an unrelated turn running at the same time.
+- A job placed on a linked machine that reaches its executor deadline now settles on the placing session as `timeout` (`remote_deadline`) rather than `blocked`, so timeout handling and escalation treat it as a deadline stop.
+- A `plan` step pinned with `must` to a linked machine wakes as soon as that machine's first capability frame registers its capacity source, instead of staying parked when the plan started before the capability frame arrived.
+- A `plan` `vote` join checks code-decided exits (`too_many` and divergent change shapes) before running System One rubric evaluations, sparing unnecessary judgments and logging whenever a vote takes a judgment-free exit.
+- Proactive CI repair (`proactivity.actAhead`) skips a failing workflow run when a newer run on the same workflow has already passed, even when the local checkout is still on the older failing commit.
+- Session subscription-allowance checks, GitHub interest windows, host-event root delivery, act-ahead, and `autonomyStatus` read their respective session timer domains (`provider-admission`, `routines`, and `proactivity`) instead of mixing live wall-clock reads into routine and rolling-day windows.
+- The proof-stakes scanner for Python scripts counts `open()` as a file write only on bare `open(`, `io.open(`, or `builtins.open(` outside comments and string literals, so calls such as `Image.open` or `webbrowser.open` and `open(` inside strings no longer raise stakes to high.
+- Unconfined `find` excludes private harness storage (`sessions`, `work`, `state`, `remote`, `channels`, `memory`, and credentials) when searching a directory that contains the agent directory, while keeping skills and isolated worktree checkouts searchable.
+- Auto-learn handoff loading validates each entry's optional `suggestion` shape (`description` and `body`) before accepting a stored handoff record.
+- In interactive bot and team chat views, an aborted tool call shows the localized abort message instead of raw provider error text, and failed tool calls redact and bound their error text before display.
+- Host-injected model-facing user messages (such as `REPORT REVIEW` prompts in worker and bot transcripts) are omitted from interactive chat views and editor history instead of rendering onto the owner's screen as user messages.
+- Nested `lookup` and `python` (`pi_tools`) sub-calls inside worker lanes resolve against the lane's watched and path-alias-expanded tools under `admission.admitNested` instead of re-entering top-level `admission.admit` attribution, preventing `worker_protocol_error` (`Worker execution does not match its prepared tool request.`) and expanding `p/...` path aliases before nested admission checks.
+
 ## [0.104.52] - 2026-11-11
 
 ### Added

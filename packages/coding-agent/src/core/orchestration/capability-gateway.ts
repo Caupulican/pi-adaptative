@@ -4,6 +4,7 @@ import { toolPathSpellings } from "../../kernel/utils/paths.ts";
 import { BoundedCompletionFailureError } from "../autonomy/bounded-completion.ts";
 import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
 import { isPathWithinScope, safeRealpathSync } from "../autonomy/path-scope.ts";
+import { isNeverExemptReadPath } from "../autonomy/session-read-scope.ts";
 import {
 	getToolCapabilityPolicy,
 	resolveCapabilityPathAccess,
@@ -499,16 +500,17 @@ export class CapabilityGateway {
 		) {
 			const isWrite =
 				pathAccess === "write" || callCapabilities.some((capability) => WRITE_CAPABILITIES.has(capability));
+			const exemptReadPaths = isWrite ? [] : this.scratchReadPaths;
 			const allowedPaths = isWrite
 				? this.grant.writePaths
-				: this.scratchReadPaths.length > 0
-					? [...this.grant.readPaths, ...this.scratchReadPaths]
+				: exemptReadPaths.length > 0
+					? [...this.grant.readPaths, ...exemptReadPaths]
 					: this.grant.readPaths;
 			if (paths.length === 0) {
 				this.deny(toolName, "path_argument_required", `Tool '${toolName}' requires an explicit path argument.`);
 			}
 			for (const rawPath of paths) {
-				if (!this.pathAllowed(rawPath, allowedPaths)) {
+				if (!this.pathAllowed(rawPath, allowedPaths, exemptReadPaths)) {
 					const reasonCode = isWrite ? "scope_denied" : "path_outside_scope";
 					this.deny(toolName, reasonCode, `Path '${rawPath}' is outside grant '${this.grant.grantId}'.`);
 				}
@@ -555,7 +557,11 @@ export class CapabilityGateway {
 	}
 
 	/** Every spelling the tool may open for `rawPath` must lie inside a grant root and outside every denied path. */
-	private pathAllowed(rawPath: string, allowedPaths: readonly string[]): boolean {
+	private pathAllowed(
+		rawPath: string,
+		allowedPaths: readonly string[],
+		exemptReadPaths: readonly string[] = [],
+	): boolean {
 		if (allowedPaths.length === 0) return false;
 		const spellings = toolPathSpellings(rawPath, this.cwd);
 		if (spellings === undefined) return false;
@@ -563,6 +569,10 @@ export class CapabilityGateway {
 			const lexicalRoot = resolve(this.cwd, allowed);
 			const realRoot = resolveRealPath(this.cwd, allowed);
 			return realRoot ? [lexicalRoot, realRoot] : [lexicalRoot];
+		});
+		const exemptEntries = exemptReadPaths.map((exempt) => {
+			const lexical = resolve(this.cwd, exempt);
+			return { lexical, real: resolveRealPath(this.cwd, exempt) };
 		});
 		const deniedRoots = this.grant.deniedPaths.flatMap((denied) => {
 			const root = resolveRealPath(this.cwd, denied);
@@ -572,7 +582,25 @@ export class CapabilityGateway {
 			if (!allowedRoots.some((root) => isPathWithinScope(spelled, root))) return false;
 			const target = resolveRealPath(this.cwd, spelled);
 			if (!target) return false;
-			if (deniedRoots.some((root) => isPathWithinScope(target, root))) return false;
+			const matchingExempts =
+				isNeverExemptReadPath(spelled) || isNeverExemptReadPath(target)
+					? []
+					: exemptEntries.filter((entry) => {
+							const entryRoots = entry.real ? [entry.lexical, entry.real] : [entry.lexical];
+							return (
+								entryRoots.some((root) => isPathWithinScope(spelled, root)) &&
+								entryRoots.some((root) => isPathWithinScope(target, root))
+							);
+						});
+			if (
+				deniedRoots.some(
+					(deniedRoot) =>
+						isPathWithinScope(target, deniedRoot) &&
+						!matchingExempts.some((entry) => isPathWithinScope(entry.real ?? entry.lexical, deniedRoot)),
+				)
+			) {
+				return false;
+			}
 			return allowedRoots.some((root) => isPathWithinScope(target, root));
 		});
 	}

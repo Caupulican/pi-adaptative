@@ -15,6 +15,7 @@
  *
  * `--dry-run` prints the plan for the current staged set without running anything.
  */
+import "./lib/worktree-module-resolution.mjs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";

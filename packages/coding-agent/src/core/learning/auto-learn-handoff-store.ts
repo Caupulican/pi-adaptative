@@ -136,6 +136,10 @@ function isHandoffRecord(value: unknown): value is AutoLearnHandoffRecord {
 				optionalString(entry.subject) &&
 				optionalString(entry.detail) &&
 				optionalString(entry.proposalId) &&
+				(entry.suggestion === undefined ||
+					(isPlainRecord(entry.suggestion) &&
+						optionalString(entry.suggestion.description) &&
+						typeof entry.suggestion.body === "string")) &&
 				optionalString(entry.routeFailure),
 		) &&
 		value.forwarded.every(

@@ -80,9 +80,43 @@ export interface CommandCodeRequestSettings {
 	reasoningEffort?: string;
 	cacheRetention: CacheRetention;
 	sessionId?: string;
+	/** The conversation's pinned `YYYY-MM-DD` date; unset captures the first turn's date per `sessionId`. */
+	sessionDate?: string;
 }
 
+/** Maximum conversations whose first-turn `YYYY-MM-DD` date stays pinned in memory at once (FIFO). */
+export const MAX_PINNED_SESSION_DATES = 256;
+
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
+const pinnedSessionDates = new Map<string, string>();
+
+function pinSessionDate(sessionId: string, date: string): string {
+	if (!pinnedSessionDates.has(sessionId) && pinnedSessionDates.size >= MAX_PINNED_SESSION_DATES) {
+		const oldest = pinnedSessionDates.keys().next().value;
+		if (oldest !== undefined) pinnedSessionDates.delete(oldest);
+	}
+	pinnedSessionDates.set(sessionId, date);
+	return date;
+}
+
+/**
+ * Resolves `config.date` (`YYYY-MM-DD`), which the service substitutes into its upstream system prompt: a conversation
+ * keeps its first turn's date across UTC midnight unless an explicit cold-moment `sessionDate` advances it.
+ */
+function resolveCommandCodeDate(settings: CommandCodeRequestSettings): string {
+	const explicit = settings.sessionDate?.trim();
+	const sessionKey = settings.sessionId?.trim();
+	if (explicit && ISO_DATE.test(explicit)) {
+		return sessionKey ? pinSessionDate(sessionKey, explicit) : explicit;
+	}
+	if (sessionKey) {
+		const pinned = pinnedSessionDates.get(sessionKey);
+		if (pinned !== undefined) return pinned;
+		return pinSessionDate(sessionKey, new Date().toISOString().slice(0, 10));
+	}
+	return new Date().toISOString().slice(0, 10);
+}
 
 function formatDeterministicUuid(bytes: Uint8Array): string {
 	const copy = bytes.slice(0, 16);
@@ -258,7 +292,7 @@ export function buildCommandCodeRequest(
 	const body: CommandCodeRequestBody = {
 		config: {
 			workingDir: "",
-			date: new Date().toISOString().slice(0, 10),
+			date: resolveCommandCodeDate(settings),
 			environment: typeof process !== "undefined" && process.platform ? process.platform : "unknown",
 			structure: [],
 			isGitRepo: false,

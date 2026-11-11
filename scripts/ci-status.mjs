@@ -1,13 +1,31 @@
 #!/usr/bin/env node
 /** Repository hook adapter; the installed package owns CI watching, retention and display. */
+import "./lib/worktree-module-resolution.mjs";
 import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { runCiStatusCommand } from "../packages/coding-agent/src/host/ci/ci-status-command.ts";
+
+const {
+	commitObligation,
+	describeStatus,
+	prePushTargets,
+	readCiStatus,
+	reconcile,
+	runCiStatusCommand,
+	statusDirectory,
+	statusFile,
+	watch,
+} = await import("../packages/coding-agent/src/host/ci/ci-status-command.ts");
 
 export {
-	commitObligation, describeStatus, prePushTargets, readCiStatus,
-	reconcile, statusDirectory, statusFile, watch,
-} from "../packages/coding-agent/src/host/ci/ci-status-command.ts";
+	commitObligation,
+	describeStatus,
+	prePushTargets,
+	readCiStatus,
+	reconcile,
+	statusDirectory,
+	statusFile,
+	watch,
+};
 
 if (process.argv[1] && import.meta.url === pathToFileURL(resolve(process.argv[1])).href) {
 	runCiStatusCommand(process.argv.slice(2)).catch((error) => {

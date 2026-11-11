@@ -51,6 +51,8 @@ import {
 export interface CommandCodeOptions extends StreamOptions {
 	/** The effort sent as `reasoning_effort`. Left out, the model's own default applies. */
 	reasoningEffort?: string;
+	/** The conversation's pinned `YYYY-MM-DD` date sent as `config.date`; unset pins the first turn's date per `sessionId`. */
+	sessionDate?: string;
 }
 
 /** How many times the service's client continues a turn the service paused. */
@@ -641,6 +643,7 @@ export const streamCommandCode: StreamFunction<"command-code-generate", CommandC
 					reasoningEffort: options?.reasoningEffort,
 					cacheRetention: resolveCacheRetention(options?.cacheRetention),
 					sessionId,
+					sessionDate: options?.sessionDate,
 				}),
 				model,
 				options?.onPayload,

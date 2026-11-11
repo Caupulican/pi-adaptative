@@ -81,9 +81,41 @@ test("RPC acceptance streams fragmented JSON lines once and preserves process ow
 	child.stderr.write("diagnostic");
 	assert.equal(stderr, "diagnostic");
 
-	client.close();
+	let closeSettled = false;
+	const closed = client.close().then(() => {
+		closeSettled = true;
+	});
 	assert.equal(child.stdin.writableEnded, true);
-	assert.deepEqual(child.killedWith, ["SIGTERM"]);
+	assert.deepEqual(child.killedWith, []);
+	await Promise.resolve();
+	assert.equal(closeSettled, false);
+	child.emit("exit", 0, null);
+	await closed;
+	assert.equal(closeSettled, true);
+	assert.deepEqual(child.killedWith, []);
+});
+
+test("RPC acceptance close escalates from stdin EOF to SIGTERM and SIGKILL when child ignores both", async () => {
+	const child = createFakeChild();
+	const client = startPiAcceptanceRpc({
+		root: "/repo",
+		provider: "provider",
+		model: "model",
+		agentDir: "/agent",
+		sessionDir: "/sessions",
+		timeoutMs: 1_000,
+		stderr: { write: () => undefined },
+		spawnProcess: () => child,
+	});
+	const originalKill = child.kill;
+	child.kill = (signal) => {
+		originalKill(signal);
+		if (signal === "SIGKILL") child.emit("exit", null, "SIGKILL");
+		return true;
+	};
+	await client.close({ graceMs: 16 });
+	assert.equal(child.stdin.writableEnded, true);
+	assert.deepEqual(child.killedWith, ["SIGTERM", "SIGKILL"]);
 });
 
 test("RPC acceptance rejects an over-limit unterminated line without flattening it", async () => {
@@ -102,7 +134,9 @@ test("RPC acceptance rejects an over-limit unterminated line without flattening 
 	const pending = client.waitForEvent(() => false, "bounded line");
 	child.stdout.write("a".repeat(33));
 	await assert.rejects(pending, /exceeded 32 characters/);
-	client.close();
+	const closed = client.close();
+	child.emit("exit", 0, "SIGTERM");
+	await closed;
 });
 
 test("shared JSON reads distinguish a missing file from malformed persisted state", async () => {
@@ -285,16 +319,20 @@ test("live workflow requires a visible assistant answer that uses a successful t
 });
 
 test("live acceptance scripts delegate RPC framing instead of accumulating prefixes", async () => {
-	const [owner, coldStart, textProtocol] = await Promise.all([
+	const [owner, coldStart, textProtocol, parallelEmission] = await Promise.all([
 		readFile(new URL("./lib/live-acceptance-rpc.mjs", import.meta.url), "utf8"),
 		readFile(new URL("./accept-local-cold-start-live.mjs", import.meta.url), "utf8"),
 		readFile(new URL("./accept-text-protocol-live.mjs", import.meta.url), "utf8"),
+		readFile(new URL("./accept-parallel-emission-live.mjs", import.meta.url), "utf8"),
 	]);
 	assert.match(owner, /fragments\.join\(""\)/);
 	assert.doesNotMatch(owner, /(?:buffer|pending|line|text)\s*\+=\s*chunk/);
 	for (const source of [coldStart, textProtocol]) {
 		assert.match(source, /startPiAcceptanceRpc/);
 		assert.doesNotMatch(source, /function makeLineReader|function waitForEvent|function readJsonIfExists/);
+	}
+	for (const source of [coldStart, textProtocol, parallelEmission]) {
+		assert.match(source, /await rpc\.close\(\)/);
 	}
 	assert.match(textProtocol, /waitForEvent\(\s*\(event\) => event\.type === "agent_end"/);
 	assert.doesNotMatch(textProtocol, /message\.stopReason !== "toolUse"/);

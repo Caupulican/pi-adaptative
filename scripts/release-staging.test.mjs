@@ -6,12 +6,12 @@ import { fileURLToPath } from "node:url";
 import {
 	collectChangedPaths,
 	computeReleaseAllowlist,
-	parsePorcelainPath,
-	partitionReleaseChanges,
 	mainCiGateDecision,
 	matchesReleaseCandidateSubject,
+	parsePorcelainPath,
+	partitionReleaseChanges,
 	pickWorkflowConclusion,
-	releaseBranchesToPrune,
+	prepareAdoptedChangelog,
 	stripEmptyUnreleasedSection,
 } from "./release-staging.mjs";
 
@@ -169,12 +169,48 @@ test("the release gate needs a green main CI run on the exact commit", () => {
 	});
 });
 
-test("only tagged release dispatch branches are pruned; an in-flight candidate stays", () => {
-	assert.deepEqual(
-		releaseBranchesToPrune(
-			["release-v0.99.49", "release-v0.99.50", "release-notes", "release-v1.0", "main"],
-			["v0.99.48", "v0.99.49"],
-		),
-		["release-v0.99.49"],
+test("prepareAdoptedChangelog folds next-cycle notes into the prepared version without altering older sections", () => {
+	const changelog = [
+		"# Changelog",
+		"",
+		"## [Unreleased]",
+		"",
+		"### Fixed",
+		"",
+		"- Post-prepare gate fix.",
+		"",
+		"## [0.93.6] - 2026-08-18",
+		"",
+		"### Fixed",
+		"",
+		"- Initial candidate fix.",
+		"",
+		"## [0.93.5] - 2026-08-10",
+		"",
+		"### Added",
+		"",
+		"- Prior release note.",
+		"",
+	].join("\n");
+	assert.equal(
+		prepareAdoptedChangelog(changelog, "0.93.6"),
+		[
+			"# Changelog",
+			"",
+			"## [0.93.6] - 2026-08-18",
+			"",
+			"### Fixed",
+			"",
+			"- Initial candidate fix.",
+			"",
+			"- Post-prepare gate fix.",
+			"",
+			"## [0.93.5] - 2026-08-10",
+			"",
+			"### Added",
+			"",
+			"- Prior release note.",
+			"",
+		].join("\n"),
 	);
 });

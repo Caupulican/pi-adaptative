@@ -73,10 +73,28 @@ export interface WindowsShellRequestRecord {
 }
 
 export interface WindowsShellSpawnRecord {
-	readonly kind: "uv-python-find" | "python-version" | "engine-daemon";
+	readonly kind: "uv-python-find" | "python-version" | "engine-daemon" | "python-tool";
 	readonly pid: number;
 	readonly cwd: string;
 }
+
+export interface ScriptedPythonToolInvocation {
+	readonly argv: readonly string[];
+	readonly cwd: string;
+	readonly stdin: string;
+	readonly env: Readonly<Record<string, string | undefined>>;
+	readonly signal: AbortSignal;
+}
+
+export interface ScriptedPythonToolOutcome {
+	readonly exitCode: number;
+	readonly stdout?: string;
+	readonly stderr?: string;
+}
+
+export type ScriptedPythonToolHandler = (
+	invocation: ScriptedPythonToolInvocation,
+) => Promise<ScriptedPythonToolOutcome> | ScriptedPythonToolOutcome;
 
 interface EngineRequest {
 	readonly requestId: string;
@@ -285,6 +303,7 @@ class ScriptedChild extends EventEmitter {
 		this.signalCode = signal;
 		const closed = [streamClosed(this.stdout), streamClosed(this.stderr)];
 		if (this.stdin) closed.push(streamClosed(this.stdin));
+		this.attempt(() => this.table.releaseChild(this.pid));
 		this.emitIsolated("exit", code, signal);
 		this.endStream(this.stdout, () => this.stdout.end());
 		this.endStream(this.stderr, () => this.stderr.end());
@@ -296,7 +315,6 @@ class ScriptedChild extends EventEmitter {
 		this.attempt(() => this.stdout.resume());
 		this.attempt(() => this.stderr.resume());
 		await Promise.all(closed);
-		this.attempt(() => this.table.releaseChild(this.pid));
 		this.emitIsolated("close", code, signal);
 		this.resolveTerminal();
 	}
@@ -329,6 +347,70 @@ class InterpreterQueryChild extends ScriptedChild {
 				});
 			}),
 		);
+	}
+}
+
+/** One scripted `python` tool child (`PI_PYTHON_TOOL=1`): reads stdin to EOF, runs its handler, writes stdout/stderr, and exits. */
+class PythonToolChild extends ScriptedChild {
+	private readonly argv: readonly string[];
+	private readonly cwd: string;
+	private readonly env: Readonly<Record<string, string | undefined>>;
+	private readonly handler: ScriptedPythonToolHandler;
+	private readonly abortController = new AbortController();
+	private readonly stdinChunks: Buffer[] = [];
+	private startedHandler = false;
+
+	constructor(options: {
+		table: VirtualProcessTable;
+		spawnfile: string;
+		argv: readonly string[];
+		cwd: string;
+		env: Readonly<Record<string, string | undefined>>;
+		detached: boolean;
+		handler: ScriptedPythonToolHandler;
+		onFailure: (cause: unknown) => void;
+	}) {
+		super({
+			table: options.table,
+			spawnfile: options.spawnfile,
+			spawnargs: [options.spawnfile, ...options.argv],
+			detached: options.detached,
+			withStdin: true,
+			onFailure: options.onFailure,
+		});
+		this.argv = options.argv;
+		this.cwd = options.cwd;
+		this.env = options.env;
+		this.handler = options.handler;
+	}
+
+	protected override acceptInput(chunk: Buffer): void {
+		this.stdinChunks.push(Buffer.from(chunk));
+	}
+
+	protected override endInput(): void {
+		if (this.startedHandler || this.admissionClosed) return;
+		this.startedHandler = true;
+		const stdin = Buffer.concat(this.stdinChunks).toString("utf8");
+		void this.track(
+			(async () => {
+				const outcome = await this.handler({
+					argv: this.argv,
+					cwd: this.cwd,
+					stdin,
+					env: this.env,
+					signal: this.abortController.signal,
+				});
+				if (this.admissionClosed) return;
+				if (outcome.stdout) this.stdout.write(outcome.stdout);
+				if (outcome.stderr) this.stderr.write(outcome.stderr);
+				void this.beginExit(outcome.exitCode, null, false);
+			})(),
+		);
+	}
+
+	protected override cancelAdmitted(): void {
+		this.abortController.abort();
 	}
 }
 
@@ -585,6 +667,10 @@ export class ScriptedWindowsShellProcesses {
 		string,
 		{ readonly principal: string; readonly flags: string; readonly perm: string }
 	>();
+	private readonly pythonToolHandlers: Array<{
+		readonly label: string;
+		readonly handler: ScriptedPythonToolHandler;
+	}> = [];
 	private runtime: ProvisionedWindowsRuntime | undefined;
 	private projectCwd = "";
 	private disposed = false;
@@ -607,6 +693,11 @@ export class ScriptedWindowsShellProcesses {
 	/** Snapshot of the metadata-only request ledger. */
 	get requests(): readonly WindowsShellRequestRecord[] {
 		return this.ledger.map((record) => ({ ...record }));
+	}
+
+	/** Enqueues one scripted `python` tool execution (`PI_PYTHON_TOOL=1`); unused handlers fail `assertDrained()`. */
+	enqueuePythonToolRun(label: string, handler: ScriptedPythonToolHandler): void {
+		this.pythonToolHandlers.push({ label, handler });
 	}
 
 	/**
@@ -648,6 +739,9 @@ export class ScriptedWindowsShellProcesses {
 			if (file === this.runtime.pythonPath) {
 				if (isDeepStrictEqual(argumentsList, [...PYTHON_VERSION_ARGUMENTS])) {
 					return { handled: true, value: this.spawnPythonVersion(file, options) };
+				}
+				if (environmentValue(options, "PI_PYTHON_TOOL") === "1") {
+					return { handled: true, value: this.spawnPythonTool(file, argumentsList, options) };
 				}
 				return { handled: true, value: this.spawnEngine(file, argumentsList, options) };
 			}
@@ -735,6 +829,38 @@ export class ScriptedWindowsShellProcesses {
 		});
 		this.adopt(child, { kind: "python-version", pid: child.pid, cwd: agentDir });
 		child.respond("3.13");
+		return child;
+	}
+
+	private spawnPythonTool(pythonPath: string, argv: readonly unknown[], options: unknown): PythonToolChild {
+		if (this.disposed) this.refuse("python tool spawn after disposal");
+		const next = this.pythonToolHandlers.shift();
+		if (
+			next === undefined ||
+			!isRecordObject(options) ||
+			typeof options.cwd !== "string" ||
+			options.detached !== (process.platform !== "win32") ||
+			!isDeepStrictEqual(options.stdio, [...ENGINE_STDIO]) ||
+			!isRecordObject(options.env) ||
+			argv.some((entry) => typeof entry !== "string")
+		) {
+			this.refuse(`unscripted or malformed python tool spawn (arguments=${JSON.stringify(argv)})`);
+		}
+		const envSnapshot: Record<string, string | undefined> = {};
+		for (const [key, value] of Object.entries(options.env)) {
+			if (typeof value === "string") envSnapshot[key] = value;
+		}
+		const child = new PythonToolChild({
+			table: this.processTable,
+			spawnfile: pythonPath,
+			argv: argv as readonly string[],
+			cwd: options.cwd,
+			env: envSnapshot,
+			detached: options.detached === true,
+			handler: next.handler,
+			onFailure: (cause) => this.recordFailure(cause),
+		});
+		this.adopt(child, { kind: "python-tool", pid: child.pid, cwd: options.cwd });
 		return child;
 	}
 
@@ -909,6 +1035,9 @@ export class ScriptedWindowsShellProcesses {
 		if (this.children.size) problems.push(`live children=${[...this.children].map((child) => child.pid).join(",")}`);
 		const pending = this.ledger.filter((record) => record.outcome === "pending").map((record) => record.requestId);
 		if (pending.length) problems.push(`pending requests=${pending.join(",")}`);
+		if (this.pythonToolHandlers.length) {
+			problems.push(`unused python tool handlers=${this.pythonToolHandlers.map((item) => item.label).join(",")}`);
+		}
 		if (this.failures.length) problems.push(`retained failures=${this.failures.length}`);
 		if (problems.length) throw new Error(`Windows shell adapter not settled: ${problems.join("; ")}`);
 	}

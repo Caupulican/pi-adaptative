@@ -222,8 +222,12 @@ test("jscpd configuration and root check keep the zero-clone gate enforceable", 
 	assert.equal(packageLock.packages["node_modules/jscpd"].optionalDependencies["jscpd-windows-x64-msvc"], scannerVersion);
 	assert.deepEqual(packageLock.packages["node_modules/jscpd-windows-x64-msvc"].os, ["win32"]);
 	assert.deepEqual(packageLock.packages["node_modules/jscpd-windows-x64-msvc"].cpu, ["x64"]);
-	assert.match(packageJson.scripts.check, /npm run check:clone-config/);
-	assert.match(packageJson.scripts.check, /npm run check:clones/);
+	assert.equal(packageJson.scripts.check, "npm run check:static");
+	assert.match(
+		packageJson.scripts["check:static"],
+		/(?:^|&&\s*)node scripts\/check-production-clones\.mjs(?:\s*&&|$)/,
+	);
+	assert.doesNotMatch(packageJson.scripts["check:static"], /\b(?:node\b[^&]*--test|vitest)\b/);
 });
 
 test("temporary jscpd evidence retention removes stale and excess reports without touching active or explicit paths", (context) => {

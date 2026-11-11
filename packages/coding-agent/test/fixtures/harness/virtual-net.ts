@@ -14,6 +14,12 @@ export type VirtualListenOptions = {
 
 export type VirtualConnectOptions = { readonly path: string } | { readonly port: number; readonly host?: string };
 
+export interface VirtualNetworkOptions {
+	/** Materializes and cleans up a virtual POSIX socket path when the world pairs `VirtualNetwork` with `VirtualFileSystem`. */
+	readonly onUnixBind?: (path: string) => boolean;
+	readonly onUnixUnbind?: (path: string) => void;
+}
+
 /**
  * An in-memory network of unix-socket and TCP `host:port` endpoints, for the journey phases that exercise the pi-chat
  * mesh and linked-machine hub/client transports. It reaches nothing outside the process: a server listens on a path or
@@ -69,6 +75,7 @@ class VirtualServer extends EventEmitter {
 	listening = false;
 	private readonly network: VirtualNetwork;
 	private endpoint: VirtualEndpoint | undefined;
+	private createdSocketFile = false;
 	private readonly connections = new Set<VirtualSocket>();
 
 	constructor(network: VirtualNetwork, onConnection?: (socket: VirtualSocket) => void) {
@@ -113,6 +120,7 @@ class VirtualServer extends EventEmitter {
 				return;
 			}
 			this.endpoint = endpoint;
+			this.createdSocketFile = endpoint.kind === "unix" && this.network.notifyUnixBind(endpoint.path);
 			this.listening = true;
 			this.emit("listening");
 		});
@@ -141,8 +149,14 @@ class VirtualServer extends EventEmitter {
 
 	close(callback?: () => void): this {
 		if (this.endpoint !== undefined) {
-			this.network.unbind(this.endpoint.key, this);
+			const bound = this.endpoint;
+			const createdSocketFile = this.createdSocketFile;
+			this.createdSocketFile = false;
+			this.network.unbind(bound.key, this);
 			this.endpoint = undefined;
+			if (bound.kind === "unix" && createdSocketFile) {
+				this.network.notifyUnixUnbind(bound.path);
+			}
 		}
 		this.listening = false;
 		for (const socket of [...this.connections]) socket.destroy();
@@ -156,12 +170,25 @@ class VirtualServer extends EventEmitter {
 
 export class VirtualNetwork {
 	private readonly servers = new Map<string, VirtualServer>();
+	private readonly options: VirtualNetworkOptions;
 	private liveSockets = 0;
 	private nextPort = 40_000;
+
+	constructor(options: VirtualNetworkOptions = {}) {
+		this.options = options;
+	}
 
 	/** Sockets and listeners still open: a phase that ends with any has leaked one. */
 	get open(): number {
 		return this.servers.size + this.liveSockets;
+	}
+
+	notifyUnixBind(path: string): boolean {
+		return this.options.onUnixBind?.(path) === true;
+	}
+
+	notifyUnixUnbind(path: string): void {
+		this.options.onUnixUnbind?.(path);
 	}
 
 	allocatePort(host: string): number {

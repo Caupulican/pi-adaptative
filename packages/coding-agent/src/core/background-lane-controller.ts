@@ -178,7 +178,7 @@ import {
 import { observeReviewGauge } from "./proof/review-gauge.ts";
 import { isEmergencyStopEngaged, subscribeEmergencyStop } from "./provider-admission/emergency-stop.ts";
 import {
-	createSubscriptionAllowanceReader,
+	createSessionAllowanceReader,
 	type SubscriptionAllowanceReader,
 } from "./provider-admission/subscription-allowance.ts";
 import { RemoteHubController } from "./remote/hub-controller.ts";
@@ -518,6 +518,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _allowance: SubscriptionAllowanceReader | undefined;
 	private readonly _terminalRouting = new TerminalRouting();
 
+	private _getAllowance(): SubscriptionAllowanceReader {
+		if (!this._allowance) this._allowance = createSessionAllowanceReader(this.deps);
+		return this._allowance;
+	}
+
 	/** Claims a durable terminal for a structured owner (plan executor, leader controller); see `terminal-routing.ts`. */
 	registerTerminalRoute(owner: TerminalRouteOwner, route: TerminalRoute): () => void {
 		return this._terminalRouting.register(owner, route);
@@ -538,13 +543,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				...this._getTranscriptWrites(),
 				createBotMessageDirectory: (sender, attempt) => this.createBotMessageDirectory(sender, attempt),
 				// The worker's model decides the account the fleet's allowance term reads, not the foreground's.
-				fleetAllowance: subscriptionAllowancePort(
-					() =>
-						(this._allowance ??= createSubscriptionAllowanceReader({
-							getRegistry: () => this.deps.getModelRegistry(),
-							getModel: () => this.deps.getModel(),
-						})),
-				),
+				fleetAllowance: subscriptionAllowancePort(() => this._getAllowance()),
 			},
 			this._getWorkerNotificationCoordinator(),
 			this._getWorkerLifecycle(),
@@ -847,7 +846,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/** What this session's GitHub routines ask its CI source to collect; changes with the routine store. */
 	getGithubInterests() {
-		return routineGithubInterests(this.getBotTeamStore().listRoutines(), this.deps.getSessionId(), Date.now());
+		const nowMs = this.deps.getTimers().port("routines").now();
+		return routineGithubInterests(this.getBotTeamStore().listRoutines(), this.deps.getSessionId(), nowMs);
 	}
 
 	subscribeRoutineDefinitions(listener: () => void): () => void {
@@ -899,7 +899,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				// A replay must repeat the saved metadata, so a saved delivery is never measured again.
 				const saved = manager.getParentInput(deliveryId);
 				if (saved) return { mode: saved.metadata.mode };
-				const day = await this.deps.aggregateUsageWindow(rollingDayWindow(Date.now()));
+				const nowMs = this.deps.getTimers().port("proactivity").now();
+				const day = await this.deps.aggregateUsageWindow(rollingDayWindow(nowMs));
 				return parentTurnWakes(day) >= this.deps.getSettingsManager().getProactivitySettings().maxTurnWakesPerDay
 					? { mode: "next-owner-turn", hold: MAX_TURN_WAKES_HOLD }
 					: { mode: "turn" };
@@ -1581,11 +1582,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			engineDeps: (cwd) => this._worktreeEngineDeps(cwd),
 			cwd: () => this.deps.getCwd(),
 			sessionId: () => this.deps.getSessionId(),
-			aggregateDay: () => this.deps.aggregateUsageWindow(rollingDayWindow(Date.now())),
+			aggregateDay: () =>
+				this.deps.aggregateUsageWindow(rollingDayWindow(this.deps.getTimers().port("proactivity").now())),
 			evidence: () => this._ciFailureEvidence,
 			observeNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read) ?? false,
 			warn: (message) => this._safeWarn(message),
-			now: () => Date.now(),
+			now: () => this.deps.getTimers().port("proactivity").now(),
 		});
 		return this._actAhead;
 	}
@@ -1766,7 +1768,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		harnessNotices: AutonomyStatusSources["harnessNotices"],
 		memory: AutonomyStatusSources["memory"],
 	): Promise<SessionAutonomyStatus> {
-		const nowMs = Date.now();
+		const nowMs = this.deps.getTimers().port("routines").now();
 		const getEdgeGrants = this.deps.getEdgeGrants;
 		return readSessionAutonomyStatus({
 			nowMs,
@@ -1774,7 +1776,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			childSession: this.deps.isChildSession(),
 			sessionManager: this.deps.getSessionManager(),
 			settings: this.deps.getSettingsManager(),
-			usageWindow: () => this.deps.aggregateUsageWindow(rollingDayWindow(nowMs)),
+			usageWindow: () =>
+				this.deps.aggregateUsageWindow(rollingDayWindow(this.deps.getTimers().port("proactivity").now())),
 			routineStore: this._botTeamStore,
 			routineIntake: this._routines?.intake.status(),
 			hostEventLedger: this.getTaskRuntimeSnapshot(),
@@ -2255,11 +2258,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	private subscriptionExhaustedFor(aliases: readonly string[]): boolean {
 		const registry = this.deps.getModelRegistry();
-		this._allowance ??= createSubscriptionAllowanceReader({
-			getRegistry: () => this.deps.getModelRegistry(),
-			getModel: () => this.deps.getModel(),
-		});
-		const reader = this._allowance;
+		const reader = this._getAllowance();
 		return aliases.some((alias) => {
 			const bot = this.getBotTeamStore().getBot(alias);
 			const model = bot ? registry.find(bot.provider, bot.modelId) : undefined;

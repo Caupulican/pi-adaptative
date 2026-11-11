@@ -256,8 +256,8 @@ export async function withDeadline<T>(trace: HarnessTrace, label: string, work: 
 }
 
 export interface JudgeQuestion {
-	type: "choice" | "noul" | "score";
-	instructions?: string;
+	type: "choice" | "noul" | "score" | "box";
+	instructions?: string | Record<string, unknown> | null;
 	criteria?: Record<string, unknown> | unknown[];
 }
 
@@ -272,6 +272,7 @@ interface JudgeRequestBody {
 	model: string;
 	state: unknown;
 	questions: Record<string, JudgeQuestion>;
+	assets?: Record<string, { type?: string; part?: string }>;
 }
 
 /**
@@ -322,7 +323,7 @@ function stateIndexedBy(state: unknown, field: string, index: number): boolean {
  */
 function checkInstructionReferences(request: SystemOneDecodedRequest): void {
 	for (const [id, question] of Object.entries(request.questions)) {
-		const instructions = question.instructions ?? "";
+		const instructions = typeof question.instructions === "string" ? question.instructions : "";
 		const indexed = /^(carries|optional_tool)_(\d+)$/.exec(id);
 		if (indexed === null) continue;
 		const index = Number(indexed[2]);
@@ -344,12 +345,27 @@ export type ScriptedJudgment =
 	| { readonly kind: "noul"; readonly probability: number }
 	| { readonly kind: "choice"; readonly choice: string; readonly confidence: number }
 	/** A score question: the level the judgment puts its probability on, and the probability of that level. */
-	| { readonly kind: "score"; readonly level: number; readonly confidence: number };
+	| { readonly kind: "score"; readonly level: number; readonly confidence: number }
+	/** A vision box question: normalized `[0, 1]` coordinates and optional detection confidence. */
+	| {
+			readonly kind: "box";
+			readonly box: {
+				readonly left: number;
+				readonly top: number;
+				readonly right: number;
+				readonly bottom: number;
+			};
+			readonly confidence: number | null;
+	  };
 
 function judgmentAnswer(judgment: ScriptedJudgment, question: JudgeQuestion): Record<string, unknown> {
 	if (judgment.kind === "noul") {
 		if (question.type !== "noul") throw new Error(`scripted noul judgment does not fit a ${question.type} question`);
 		return { type: "noul", noul: judgment.probability };
+	}
+	if (judgment.kind === "box") {
+		if (question.type !== "box") throw new Error(`scripted box judgment does not fit a ${question.type} question`);
+		return { type: "box", box: judgment.box, confidence: judgment.confidence };
 	}
 	if (judgment.kind === "score") {
 		if (question.type !== "score" || !Array.isArray(question.criteria)) {
@@ -400,6 +416,31 @@ function optionalIntentSnapshot(manager: SessionManager): Map<string, string> {
 
 function transportAbortError(): Error {
 	return Object.assign(new Error("The operation was aborted."), { name: "AbortError" });
+}
+
+async function decodeSystemOneRequestBody(init?: RequestInit): Promise<JudgeRequestBody | undefined> {
+	if (typeof init?.body === "string") {
+		return JSON.parse(init.body) as JudgeRequestBody;
+	}
+	if (!(init?.body instanceof Uint8Array)) return undefined;
+	const headers = new Headers(init.headers);
+	const contentType = headers.get("content-type") ?? "";
+	if (!contentType.startsWith("multipart/form-data") || headers.get("typesafe-danger-zone-images") !== "true") {
+		return undefined;
+	}
+	const bytes = new Uint8Array(init.body);
+	const form = await new Response(bytes, { headers: { "Content-Type": contentType } }).formData();
+	const requestPart = form.get("request");
+	if (!(requestPart instanceof Blob)) return undefined;
+	const decoded = JSON.parse(await requestPart.text()) as JudgeRequestBody;
+	for (const asset of Object.values(decoded.assets ?? {})) {
+		if (typeof asset?.part !== "string") return undefined;
+		const imagePart = form.get(asset.part);
+		if (!(imagePart instanceof Blob) || imagePart.type !== "image/png" || imagePart.size === 0) {
+			return undefined;
+		}
+	}
+	return decoded;
 }
 
 export class ScriptedSystemOneTransport {
@@ -567,11 +608,12 @@ export class ScriptedSystemOneTransport {
 			throw new Error(`System One is disabled: ${method} ${url}`);
 		}
 		if (method === "GET" && url === SYSTEM_ONE_MODELS_URL) return Response.json({ data: [] });
-		if (method !== "POST" || url !== SYSTEM_ONE_DECISIONS_URL || typeof init?.body !== "string") {
+		const body =
+			method === "POST" && url === SYSTEM_ONE_DECISIONS_URL ? await decodeSystemOneRequestBody(init) : undefined;
+		if (body === undefined) {
 			this.unscripted.push(`${this.phase}: ${method} ${url}`);
 			throw new Error(`Unscripted System One request: ${method} ${url}`);
 		}
-		const body = JSON.parse(init.body) as JudgeRequestBody;
 		// The request answers from the phase that received it, even when a gate holds it past a phase change.
 		const phase = this.phase;
 		const expected = this.expected;
@@ -3282,7 +3324,24 @@ export class HarnessWorld {
 	readonly trace = new HarnessTrace();
 	readonly io = new VirtualFileSystem(HARNESS_PROJECT_CWD);
 	/** The world's in-memory network; installed only when the world's options ask for it. */
-	readonly network = new VirtualNetwork();
+	readonly network = new VirtualNetwork({
+		onUnixBind: (path) => {
+			if (!path || path.startsWith("\\\\.\\pipe\\") || this.io.existsSync(path)) return false;
+			try {
+				this.io.writeFileSync(path, "");
+				return true;
+			} catch {
+				return false;
+			}
+		},
+		onUnixUnbind: (path) => {
+			try {
+				this.io.unlinkSync(path);
+			} catch {
+				// Already removed by its owner or parent-directory teardown.
+			}
+		},
+	});
 	readonly systemOne: ScriptedSystemOneTransport;
 	/** The fault and control marks of this world's journey and System One mode; close requires both for every covered row. */
 	readonly faultMatrix: FaultMatrixMarks;

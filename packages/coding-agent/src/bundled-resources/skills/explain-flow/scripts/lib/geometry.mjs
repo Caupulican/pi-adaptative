@@ -23,11 +23,21 @@ function pathOf(d, points) {
 	return { d, points, lengths, length: lengths[lengths.length - 1] };
 }
 
-/** A curve from `a` to `b` that leaves and arrives horizontally: the shape of a wire between two side ports. */
+/** How a curve leaves or meets a port along the outward normal of that port's edge. */
+function portControl(port, reach) {
+	if (port.side === "top") return { x: port.x, y: port.y - reach };
+	if (port.side === "bottom") return { x: port.x, y: port.y + reach };
+	if (port.side === "in") return { x: port.x - reach, y: port.y };
+	return { x: port.x + reach, y: port.y };
+}
+
+/** A smooth cubic curve from `a` to `b` that leaves and arrives perpendicular to each port's edge. */
 export function curvePath(a, b) {
-	const reach = Math.max(Math.abs(b.x - a.x) / 2, 16);
-	const c1 = { x: a.x + reach, y: a.y };
-	const c2 = { x: b.x - reach, y: b.y };
+	const vertical = a.side === "top" || a.side === "bottom" || b.side === "top" || b.side === "bottom";
+	const span = vertical ? Math.max(Math.abs(b.x - a.x), Math.abs(b.y - a.y)) : Math.abs(b.x - a.x);
+	const reach = Math.max(span / 2, 16);
+	const c1 = portControl(a, reach);
+	const c2 = portControl(b, reach);
 	const points = [];
 	for (let step = 0; step <= CURVE_STEPS; step++) {
 		const t = step / CURVE_STEPS;

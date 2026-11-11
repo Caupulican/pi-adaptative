@@ -1,0 +1,775 @@
+{
+	"title": "Cold check vs warm narrowed pass",
+	"size": [
+		1360,
+		920
+	],
+	"unit": 10,
+	"loop": 8,
+	"rounds": 3,
+	"theme": "matrix",
+	"vars": {
+		"filter": [
+			"auth",
+			"auth.token",
+			"auth.token.ttl"
+		],
+		"prev_carry": [
+			"none",
+			"3 suites",
+			"2 suites"
+		]
+	},
+	"footer": "one round = one narrowed edit to the filter",
+	"clock": "round {round} of 3 · {filter}",
+	"bands": [
+		{
+			"id": "live",
+			"tier": "live",
+			"title": "Stateful workflow",
+			"note": "cold full scan vs warm narrowed state swap",
+			"height": 86
+		}
+	],
+	"nodes": [
+		{
+			"id": "prompt",
+			"kind": "card",
+			"band": "live",
+			"at": [
+				40,
+				1
+			],
+			"w": 28,
+			"cursor": true,
+			"lines": [
+				"> check: {filter}"
+			]
+		},
+		{
+			"id": "cold-call",
+			"kind": "card",
+			"band": "live",
+			"at": [
+				4,
+				11
+			],
+			"w": 42,
+			"label": "Cold pass",
+			"note": "checks all 8, allocates each round",
+			"header": "coldPass(filter)",
+			"lines": [
+				{
+					"text": "suites = runSuites({filter})",
+					"emphasis": [
+						"{filter}"
+					],
+					"phase": "compile",
+					"when": "cold-suites"
+				},
+				{
+					"text": "heap.push(suites)  // kept",
+					"dim": true,
+					"sep": true,
+					"when": "cold-heap"
+				}
+			]
+		},
+		{
+			"id": "warm-call",
+			"kind": "card",
+			"band": "live",
+			"at": [
+				70,
+				11
+			],
+			"w": 46,
+			"label": "Warm pass",
+			"note": "narrows from prev, swaps",
+			"header": "warmPass(filter, prev, next)",
+			"lines": [
+				{
+					"text": "runNarrowed({filter}, prev, next)",
+					"emphasis": [
+						"{filter}",
+						"prev",
+						"next"
+					],
+					"phase": "compile",
+					"when": "warm-suites"
+				},
+				{
+					"text": "swap(prev, next)  // zero alloc",
+					"sep": true,
+					"when": "warm-slots",
+					"tone": "ok"
+				}
+			]
+		},
+		{
+			"id": "cold-suites",
+			"kind": "batch",
+			"band": "live",
+			"at": [
+				4,
+				29.5
+			],
+			"count": 8,
+			"label": "suite batch",
+			"unitWord": "suites run",
+			"plan": [
+				{
+					"hits": [
+						"02",
+						"05",
+						"07"
+					],
+					"outputs": {
+						"02": "02  store.spec:18",
+						"05": "05  token.spec:42",
+						"07": "07  ttl.spec:11"
+					}
+				},
+				{
+					"hits": [
+						"05",
+						"07"
+					],
+					"outputs": {
+						"05": "05  token.spec:42",
+						"07": "07  ttl.spec:11"
+					}
+				},
+				{
+					"hits": [
+						"07"
+					],
+					"outputs": {
+						"07": "07  ttl.spec:11"
+					}
+				}
+			]
+		},
+		{
+			"id": "cold-hits",
+			"kind": "card",
+			"band": "live",
+			"at": [
+				40,
+				24.8
+			],
+			"w": 20,
+			"rows": 3,
+			"header": "matched",
+			"collectFrom": "cold-suites",
+			"unitSingular": "suite",
+			"unitPlural": "suites"
+		},
+		{
+			"id": "warm-suites",
+			"kind": "batch",
+			"band": "live",
+			"at": [
+				70,
+				29.5
+			],
+			"count": 8,
+			"label": "narrowed batch",
+			"unitWord": "suites run",
+			"plan": [
+				{
+					"active": [
+						"01",
+						"02",
+						"03",
+						"04",
+						"05",
+						"06",
+						"07",
+						"08"
+					],
+					"hits": [
+						"02",
+						"05",
+						"07"
+					],
+					"outputs": {
+						"02": "02  store.spec:18",
+						"05": "05  token.spec:42",
+						"07": "07  ttl.spec:11"
+					}
+				},
+				{
+					"active": [
+						"02",
+						"05",
+						"07"
+					],
+					"hits": [
+						"05",
+						"07"
+					],
+					"outputs": {
+						"05": "05  token.spec:42",
+						"07": "07  ttl.spec:11"
+					}
+				},
+				{
+					"active": [
+						"05",
+						"07"
+					],
+					"hits": [
+						"07"
+					],
+					"outputs": {
+						"07": "07  ttl.spec:11"
+					}
+				}
+			]
+		},
+		{
+			"id": "warm-hits",
+			"kind": "card",
+			"band": "live",
+			"at": [
+				106,
+				24.8
+			],
+			"w": 20,
+			"rows": 3,
+			"header": "matched",
+			"collectFrom": "warm-suites",
+			"unitSingular": "suite",
+			"unitPlural": "suites"
+		},
+		{
+			"id": "cold-heap",
+			"kind": "slots",
+			"band": "live",
+			"at": [
+				4,
+				47
+			],
+			"cells": 3,
+			"cellW": 16,
+			"captions": [
+				"alloc #1",
+				"alloc #2",
+				"alloc #3"
+			],
+			"changes": [
+				{
+					"round": 1,
+					"at": 5.1,
+					"op": "write",
+					"cell": 0,
+					"tag": "1",
+					"text": "3 suites",
+					"sub": "0.9 MB",
+					"tone": "work"
+				},
+				{
+					"round": 2,
+					"at": 0.2,
+					"op": "write",
+					"cell": 0,
+					"tag": "1",
+					"text": "3 suites",
+					"sub": "0.9 MB",
+					"tone": "dim"
+				},
+				{
+					"round": 2,
+					"at": 5.1,
+					"op": "write",
+					"cell": 1,
+					"tag": "2",
+					"text": "2 suites",
+					"sub": "0.6 MB",
+					"tone": "work"
+				},
+				{
+					"round": 3,
+					"at": 0.2,
+					"op": "write",
+					"cell": 1,
+					"tag": "2",
+					"text": "2 suites",
+					"sub": "0.6 MB",
+					"tone": "dim"
+				},
+				{
+					"round": 3,
+					"at": 5.1,
+					"op": "write",
+					"cell": 2,
+					"tag": "3",
+					"text": "1 suite",
+					"sub": "0.3 MB",
+					"tone": "work"
+				}
+			]
+		},
+		{
+			"id": "warm-slots",
+			"kind": "slots",
+			"band": "live",
+			"at": [
+				70,
+				47
+			],
+			"cells": 2,
+			"cellW": 18,
+			"framed": true,
+			"captions": [
+				"prev",
+				"next"
+			],
+			"initial": [
+				{
+					"tag": "A",
+					"text": "empty",
+					"sub": "reused",
+					"tone": "dim"
+				},
+				{
+					"tag": "B",
+					"text": "empty",
+					"sub": "reused",
+					"tone": "dim"
+				}
+			],
+			"changes": [
+				{
+					"round": 1,
+					"at": 4.9,
+					"op": "write",
+					"cell": 1,
+					"tag": "B",
+					"text": "3 suites",
+					"sub": "02 · 05 · 07",
+					"tone": "ok"
+				},
+				{
+					"round": 1,
+					"at": 5.15,
+					"op": "swap",
+					"cells": [
+						0,
+						1
+					],
+					"duration": 0.65
+				},
+				{
+					"round": 2,
+					"at": 3.9,
+					"op": "write",
+					"cell": 1,
+					"tag": "A",
+					"text": "2 suites",
+					"sub": "05 · 07",
+					"tone": "ok"
+				},
+				{
+					"round": 2,
+					"at": 4.2,
+					"op": "swap",
+					"cells": [
+						0,
+						1
+					],
+					"duration": 0.65
+				},
+				{
+					"round": 2,
+					"at": 5.0,
+					"op": "write",
+					"cell": 1,
+					"tag": "B",
+					"text": "stale",
+					"sub": "reused next",
+					"tone": "dim"
+				},
+				{
+					"round": 3,
+					"at": 3.5,
+					"op": "write",
+					"cell": 1,
+					"tag": "B",
+					"text": "1 suite",
+					"sub": "07 only",
+					"tone": "ok"
+				},
+				{
+					"round": 3,
+					"at": 3.8,
+					"op": "swap",
+					"cells": [
+						0,
+						1
+					],
+					"duration": 0.65
+				},
+				{
+					"round": 3,
+					"at": 4.6,
+					"op": "write",
+					"cell": 1,
+					"tag": "A",
+					"text": "stale",
+					"sub": "reused next",
+					"tone": "dim"
+				}
+			]
+		},
+		{
+			"id": "timing",
+			"kind": "lanes",
+			"band": "live",
+			"at": [
+				4,
+				61
+			],
+			"w": 96,
+			"label": "Batch runtime in this round",
+			"rows": [
+				"cold-suites",
+				"warm-suites"
+			]
+		},
+		{
+			"id": "caption",
+			"kind": "note",
+			"band": "live",
+			"at": [
+				4,
+				75
+			],
+			"size": "lede",
+			"cues": [
+				{
+					"round": 1,
+					"at": 0,
+					"text": "Round 1 · first filter \"auth\": both branches scan all 8 suites."
+				},
+				{
+					"round": 1,
+					"at": 4.8,
+					"text": "Round 1 · cold allocates slot #1; warm writes next and swaps it into prev."
+				},
+				{
+					"round": 2,
+					"at": 0,
+					"text": "Round 2 · narrowed to \"auth.token\": warm reads prev and skips 5 suites."
+				},
+				{
+					"round": 2,
+					"at": 3.8,
+					"text": "Round 2 · warm finishes early and swaps A into prev while cold still scans."
+				},
+				{
+					"round": 3,
+					"at": 0,
+					"text": "Round 3 · narrowed to \"auth.token.ttl\": warm checks 2 suites instead of 8."
+				},
+				{
+					"round": 3,
+					"at": 3.5,
+					"text": "3 rounds · cold ran 24 suite checks in 3 allocations; warm ran 13 in 2 reused slots."
+				}
+			]
+		}
+	],
+	"wires": [
+		{
+			"id": "in-cold",
+			"from": "prompt.left",
+			"to": "cold-call.top",
+			"route": "elbow"
+		},
+		{
+			"id": "in-warm",
+			"from": "prompt.right",
+			"to": "warm-call.top",
+			"route": "elbow"
+		},
+		{
+			"id": "cold-to-batch",
+			"from": "cold-call.bottom",
+			"to": "cold-suites.top",
+			"route": "elbow"
+		},
+		{
+			"id": "cold-to-hits",
+			"from": "cold-suites",
+			"to": "cold-hits"
+		},
+		{
+			"id": "cold-alloc-1",
+			"from": "cold-suites.bottom",
+			"to": "cold-heap:1.top",
+			"route": "elbow",
+			"bend": 0.62
+		},
+		{
+			"id": "cold-alloc-2",
+			"from": "cold-suites.bottom",
+			"to": "cold-heap:2.top",
+			"route": "elbow",
+			"bend": 0.62
+		},
+		{
+			"id": "cold-alloc-3",
+			"from": "cold-suites.bottom",
+			"to": "cold-heap:3.top",
+			"route": "elbow",
+			"bend": 0.62
+		},
+		{
+			"id": "warm-to-batch",
+			"from": "warm-call.bottom",
+			"to": "warm-suites.top",
+			"route": "elbow",
+			"bend": 0.45
+		},
+		{
+			"id": "warm-to-hits",
+			"from": "warm-suites",
+			"to": "warm-hits"
+		},
+		{
+			"id": "prev-to-warm",
+			"from": "warm-slots:1.top",
+			"to": "warm-suites.bottom",
+			"route": "elbow",
+			"bend": 0.42
+		},
+		{
+			"id": "warm-to-next",
+			"from": "warm-suites.bottom",
+			"to": "warm-slots:2.top",
+			"route": "elbow",
+			"bend": 0.68
+		}
+	],
+	"runs": [
+		{
+			"id": "cold-r1",
+			"rounds": [
+				1
+			],
+			"from": "prompt.left",
+			"start": 0.3,
+			"steps": [
+				{
+					"to": "cold-call.top",
+					"travel": 0.5,
+					"carry": "{filter}",
+					"work": 1.0,
+					"phases": [
+						"compile"
+					]
+				},
+				{
+					"to": "cold-suites.top",
+					"travel": 0.4,
+					"work": 2.4,
+					"phases": [
+						"scan"
+					]
+				},
+				{
+					"to": "cold-heap:1.top",
+					"wire": "cold-alloc-1",
+					"travel": 0.5,
+					"carry": "3 suites"
+				}
+			]
+		},
+		{
+			"id": "cold-r2",
+			"rounds": [
+				2
+			],
+			"from": "prompt.left",
+			"start": 0.3,
+			"steps": [
+				{
+					"to": "cold-call.top",
+					"travel": 0.5,
+					"carry": "{filter}",
+					"work": 1.0,
+					"phases": [
+						"compile"
+					]
+				},
+				{
+					"to": "cold-suites.top",
+					"travel": 0.4,
+					"work": 2.4,
+					"phases": [
+						"scan"
+					]
+				},
+				{
+					"to": "cold-heap:2.top",
+					"wire": "cold-alloc-2",
+					"travel": 0.5,
+					"carry": "2 suites"
+				}
+			]
+		},
+		{
+			"id": "cold-r3",
+			"rounds": [
+				3
+			],
+			"from": "prompt.left",
+			"start": 0.3,
+			"steps": [
+				{
+					"to": "cold-call.top",
+					"travel": 0.5,
+					"carry": "{filter}",
+					"work": 1.0,
+					"phases": [
+						"compile"
+					]
+				},
+				{
+					"to": "cold-suites.top",
+					"travel": 0.4,
+					"work": 2.4,
+					"phases": [
+						"scan"
+					]
+				},
+				{
+					"to": "cold-heap:3.top",
+					"wire": "cold-alloc-3",
+					"travel": 0.5,
+					"carry": "1 suite"
+				}
+			]
+		},
+		{
+			"id": "warm-seed",
+			"rounds": [
+				2,
+				3
+			],
+			"from": "warm-slots:1.top",
+			"start": 1.2,
+			"tone": "ok",
+			"steps": [
+				{
+					"to": "warm-suites.bottom",
+					"wire": "prev-to-warm",
+					"travel": 0.65,
+					"carry": "{prev_carry}",
+					"work": 0
+				}
+			]
+		},
+		{
+			"id": "warm-r1",
+			"rounds": [
+				1
+			],
+			"from": "prompt.right",
+			"start": 0.3,
+			"steps": [
+				{
+					"to": "warm-call.top",
+					"travel": 0.5,
+					"carry": "{filter}",
+					"work": 1.0,
+					"phases": [
+						"compile"
+					]
+				},
+				{
+					"to": "warm-suites.top",
+					"travel": 0.4,
+					"work": 2.2,
+					"phases": [
+						"scan"
+					]
+				},
+				{
+					"to": "warm-slots:2.top",
+					"wire": "warm-to-next",
+					"travel": 0.5,
+					"carry": "3 suites"
+				}
+			]
+		},
+		{
+			"id": "warm-r2",
+			"rounds": [
+				2
+			],
+			"from": "prompt.right",
+			"start": 0.3,
+			"steps": [
+				{
+					"to": "warm-call.top",
+					"travel": 0.5,
+					"carry": "{filter}",
+					"work": 1.0,
+					"phases": [
+						"compile"
+					]
+				},
+				{
+					"to": "warm-suites.top",
+					"travel": 0.4,
+					"work": 1.2,
+					"phases": [
+						"scan"
+					]
+				},
+				{
+					"to": "warm-slots:2.top",
+					"wire": "warm-to-next",
+					"travel": 0.5,
+					"carry": "2 suites"
+				}
+			]
+		},
+		{
+			"id": "warm-r3",
+			"rounds": [
+				3
+			],
+			"from": "prompt.right",
+			"start": 0.3,
+			"steps": [
+				{
+					"to": "warm-call.top",
+					"travel": 0.5,
+					"carry": "{filter}",
+					"work": 1.0,
+					"phases": [
+						"compile"
+					]
+				},
+				{
+					"to": "warm-suites.top",
+					"travel": 0.4,
+					"work": 0.8,
+					"phases": [
+						"scan"
+					]
+				},
+				{
+					"to": "warm-slots:2.top",
+					"wire": "warm-to-next",
+					"travel": 0.5,
+					"carry": "1 suite"
+				}
+			]
+		}
+	]
+}

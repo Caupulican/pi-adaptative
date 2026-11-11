@@ -65,8 +65,12 @@ async function unloadModel(baseUrl, model) {
 	}).catch(() => undefined);
 }
 
+// Must stay >= MODEL_CAPABILITY_MINIMAL_MIN_CONTEXT (8192) so pi exposes the `read` tool instead of
+// classifying the model as "chat" class; Ollama's low-impact serving runtime remains isolated separately.
+const COLD_START_CONTEXT_WINDOW = 8_192;
+
 async function hydrateAgentDir(agentDir, baseUrl, model) {
-	const modelsConfig = await buildSingleOllamaModelsConfig(baseUrl, model, 4096);
+	const modelsConfig = await buildSingleOllamaModelsConfig(baseUrl, model, COLD_START_CONTEXT_WINDOW);
 	await writeScratchAgentConfig(agentDir, modelsConfig, { ensureOllamaAuth: true });
 }
 
@@ -121,7 +125,7 @@ async function runPiTurn({ agentDir, sessionDir, model, markerPath, marker }) {
 		}
 		if (!successfulRead) throw new Error("Cold-start turn completed without a successful read tool result");
 	} finally {
-		rpc.close();
+		await rpc.close();
 	}
 }
 

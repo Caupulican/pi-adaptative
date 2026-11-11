@@ -164,7 +164,6 @@ export function outcomeLadderFacts(args: {
 		escalations,
 		settings: context?.settings?.() ?? DEFAULT_WORKER_OUTCOME_SETTINGS.escalation,
 		executor: context !== undefined,
-		...(attempt.status === "suspended" && attempt.retry ? { retryNotBefore: attempt.retry.notBefore } : {}),
 		hostCheckable,
 		budgetLeft: budgetLeft(snapshot, attempt),
 		...(remoteMachineId !== undefined ? { remoteMachineId } : {}),

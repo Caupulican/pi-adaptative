@@ -448,8 +448,14 @@ class TreeList implements Component {
 				const role = msg.role;
 				if (role === "user") {
 					const msgWithContent = msg as { content?: unknown };
-					const content = normalize(extractTextContent(msgWithContent.content, 200));
-					result = theme.fg("accent", words.roleUser) + content;
+					const rawContent = entry.turnOrigin?.shown ?? extractTextContent(msgWithContent.content, 200);
+					const shown =
+						entry.ownerInputId === undefined &&
+						entry.turnOrigin?.shown === undefined &&
+						isModelFacingText(rawContent)
+							? interfaceText().conversation.modelFacingDetails
+							: rawContent;
+					result = theme.fg("accent", words.roleUser) + normalize(shown);
 				} else if (role === "assistant") {
 					const msgWithContent = msg as { content?: unknown; stopReason?: string; errorMessage?: string };
 					const textContent = normalize(extractTextContent(msgWithContent.content, 200));

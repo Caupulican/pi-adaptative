@@ -4,15 +4,32 @@
  * with no wire under it, two items in a one-item station) is refused with every problem named at once.
  *
  * Geometry is counted in grid units (`unit` pixels, 10 by default). Stations are a closed set, each shaped by what it
- * does: `source` (authors of work), `queue` (items wait in slots), `worker` (one item at a time, in phases), `rail` (the
- * record of what landed, newest first), `sweep` (a check that runs on a schedule), `chain` (named steps in order, also
- * as one row of a list with its name at the left), `tally` (a count shown as boxes), `note` (words only) and `trial`
- * (several candidates, each scored, one kept; see `trial.mjs`). The instruments, which hold no item and have no port
- * (`table`, `series`, a `tally` by rounds, `lanes`, and the lines of a `note` that follow a station), are read and
- * shaped in `instruments.mjs`.
+ * does: `source` (authors of work), `queue` (items wait in slots), `worker` (one item at a time, in phases), `card`
+ * (boxed structured lines: input trigger, procedure, or collector), `batch` (discrete item set scanned or pruned by
+ * round), `slots` (state cells that write or swap across rounds), `rail` (the record of what landed, newest first),
+ * `sweep` (a check that runs on a schedule), `chain` (named steps in order, also as one row of a list with its name at
+ * the left), `tally` (a count shown as boxes), `note` (words only) and `trial` (several candidates, each scored, one
+ * kept; see `trial.mjs`). The instruments, which hold no item and have no port (`table`, `series`, a `tally` by rounds,
+ * `lanes`, and the lines of a `note` that follow a station), are read and shaped in `instruments.mjs`.
  */
 
+import { batchCaptionLength, readBatch, shapeBatch } from "./batch.mjs";
+import { readCard, resolveCardLinks, resolveCards, shapeCard } from "./cards.mjs";
 import { cornerPath, curvePath } from "./geometry.mjs";
+import {
+	NOTE_SIZES,
+	readLanes,
+	readLinkedLines,
+	readNoteCues,
+	readSeries,
+	readTable,
+	resolveLanes,
+	resolveLinks,
+	shapeLanes,
+	shapeSeries,
+	shapeTable,
+	tallyMarks,
+} from "./instruments.mjs";
 import { MECHANISMS } from "./mechanisms.mjs";
 import {
 	BAND_HEADER,
@@ -27,40 +44,65 @@ import {
 	textWidth,
 	widestRoundText,
 } from "./metrics.mjs";
-import {
-	NOTE_SIZES,
-	readLanes,
-	readLinkedLines,
-	readSeries,
-	readTable,
-	resolveLanes,
-	resolveLinks,
-	shapeLanes,
-	shapeSeries,
-	shapeTable,
-	tallyMarks,
-} from "./instruments.mjs";
 import { isRecord, readNumber, readOneOf, readText, readTextList } from "./read.mjs";
-import { HOLDING_KINDS } from "./stays.mjs";
+import { readSlots, shapeSlots } from "./slots.mjs";
+import { HOLDING_KINDS, runInRound } from "./stays.mjs";
 import { resolveTheme } from "./theme.mjs";
 import { shapeTrial, TRIAL_KEEPS, TRIAL_PHASES, trialCaptionLength } from "./trial.mjs";
 
 export const TIERS = ["live", "next", "later"];
-export const NODE_KINDS = ["source", "queue", "worker", "trial", "rail", "sweep", "chain", "tally", "note", "table", "series", "lanes"];
+export const NODE_KINDS = [
+	"source",
+	"queue",
+	"worker",
+	"trial",
+	"card",
+	"batch",
+	"slots",
+	"rail",
+	"sweep",
+	"chain",
+	"tally",
+	"note",
+	"table",
+	"series",
+	"lanes",
+];
 export const CHAIN_MODES = ["step", "fill", "together"];
 export const TONES = ["work", "ok", "fail", "info", "text"];
-const PORT_NAMES = ["in", "out", "top", "bottom"];
 const ROUTES = ["curve", "elbow", "loop"];
 const RESULTS = ["ok", "fail"];
 const ID = /^[a-z][a-z0-9-]{0,31}$/;
-const ENDPOINT = /^([a-z][a-z0-9-]{0,31})(?::(\d+))?(?:\.(in|out|top|bottom))?$/;
+const VAR_ID = /^[a-z][a-z0-9_]{0,23}$/;
+const ENDPOINT = /^([a-z][a-z0-9-]{0,31})(?::(\d+))?(?:\.(in|out|left|right|top|bottom))?$/;
 
 /** Rows under a station kept for what it says about the item it holds (a worker: its lane, then its phase). */
-const CAPTION_ROWS = { source: 0, queue: 0, worker: 2, trial: 1, rail: 0, sweep: 0, chain: 0, tally: 0, note: 0, table: 0, series: 0, lanes: 0 };
+const CAPTION_ROWS = {
+	source: 0,
+	queue: 0,
+	worker: 2,
+	trial: 1,
+	card: 0,
+	batch: 1,
+	slots: 0,
+	rail: 0,
+	sweep: 0,
+	chain: 0,
+	tally: 0,
+	note: 0,
+	table: 0,
+	series: 0,
+	lanes: 0,
+};
 
-/** The rows a station keeps under its body: its kind's, and for a rail whose landings carry marks one row for them. */
+/** The rows a station keeps under its body: its kind's, and any row kept for marks, collector counts or cell captions. */
 export function captionRows(node) {
-	return CAPTION_ROWS[node.kind] + (node.marked ? 1 : 0);
+	return (
+		CAPTION_ROWS[node.kind] +
+		(node.marked ? 1 : 0) +
+		(node.kind === "card" && node.collectFrom ? 1 : 0) +
+		(node.kind === "slots" && node.hasCaptions ? 1 : 0)
+	);
 }
 const MIN_TRAVEL_SECONDS = 0.4;
 
@@ -79,7 +121,7 @@ export function wordsLeft(node, side, u) {
 }
 
 /** The box, ports and inner geometry of one station, in pixels. `x`, `y` are the top left of its body. */
-function shapeNode(node, x, y, u, rounds) {
+function shapeNode(node, x, y, u, rounds, vars) {
 	const side = (px, py, name) => ({ x: px, y: py, side: name });
 	switch (node.kind) {
 		case "source": {
@@ -113,6 +155,12 @@ function shapeNode(node, x, y, u, rounds) {
 		}
 		case "trial":
 			return shapeTrial(node, x, y, u);
+		case "card":
+			return shapeCard(node, x, y, u, rounds, vars);
+		case "batch":
+			return shapeBatch(node, x, y, u);
+		case "slots":
+			return shapeSlots(node, x, y, u);
 		case "rail": {
 			const pitch = 6 * u;
 			const w = node.dots * pitch + 2 * u;
@@ -131,11 +179,11 @@ function shapeNode(node, x, y, u, rounds) {
 		}
 		case "tally": {
 			// A tally by rounds writes a word under each box: its boxes stand as far apart as the widest word needs.
-			const marks = tallyMarks(node, rounds);
+			const marks = tallyMarks(node, rounds, vars);
 			const pitch = Math.max(2.2, node.per ? textWidth(marks.widest, 1.2 * u) / u + 1 : 0);
 			const boxes = Array.from({ length: node.boxes }, (_, index) => ({ x: x + index * pitch * u, y: y + 0.2 * u, w: 1.6 * u, h: 1.6 * u }));
 			const words = { x: x + node.boxes * pitch * u + u, y: y + 1.6 * u };
-			const said = textWidth(node.text ?? "", SMALL_TEXT_SIZE * u, rounds);
+			const said = textWidth(node.text ?? "", SMALL_TEXT_SIZE * u, rounds, vars);
 			return { box: { x, y, w: words.x - x + said, h: (marks.texts.length > 0 ? 4.2 : 2) * u }, boxes, words, ports: {} };
 		}
 		case "chain": {
@@ -143,7 +191,7 @@ function shapeNode(node, x, y, u, rounds) {
 			const gap = 3 * u;
 			let cursor = x + (node.lead ?? 0) * u;
 			const chips = node.items.map((item) => {
-				const chip = { x: cursor, y, w: textWidth(item, size, rounds) + 3 * u, h: 3 * u, text: item };
+				const chip = { x: cursor, y, w: textWidth(item, size, rounds, vars) + 3 * u, h: 3 * u, text: item };
 				cursor += chip.w + gap;
 				return chip;
 			});
@@ -152,19 +200,42 @@ function shapeNode(node, x, y, u, rounds) {
 			return { box, chips, ports: { ...boxPorts(box, u), in: { x: first.x, y: y + 1.5 * u, side: "in" } } };
 		}
 		case "table":
-			return shapeTable(node, x, y, u, rounds);
+			return shapeTable(node, x, y, u, rounds, vars);
 		case "series":
 			return shapeSeries(node, x, y, u);
 		case "lanes":
-			return shapeLanes(node, x, y, u, rounds);
+			return shapeLanes(node, x, y, u, rounds, vars);
 		default: {
 			// A note: its lines at its size, the line step growing with the size in the same ratio.
 			const scale = node.size === "text" ? 1 : NOTE_SIZES[node.size] / TEXT_SIZE;
 			const size = TEXT_SIZE * u * scale;
-			const w = Math.max(0, ...node.lines.map((line) => textWidth(line, size, rounds)));
-			return { box: { x, y, w, h: Math.max(node.lines.length, 1) * LINE_STEP * u * scale }, ports: {} };
+			const w = Math.max(0, ...node.lines.map((line) => textWidth(line, size, rounds, vars)));
+			const lineCount = node.cues ? 1 : Math.max(node.lines.length, 1);
+			return { box: { x, y, w, h: lineCount * LINE_STEP * u * scale }, ports: {} };
 		}
 	}
+}
+
+/** Named per-round variables (`vars`): each key maps to `rounds` strings substituted via `{name}`. */
+function readVars(raw, rounds, problems) {
+	if (raw === undefined) return undefined;
+	if (!isRecord(raw)) {
+		problems.push("vars: must be an object mapping variable names to per-round string lists");
+		return undefined;
+	}
+	const vars = {};
+	for (const [name, list] of Object.entries(raw)) {
+		if (!VAR_ID.test(name) || name === "round" || name === "kept") {
+			problems.push(`vars.${name}: name must be lowercase letters, digits and underscores, and not "round" or "kept"`);
+			continue;
+		}
+		if (!Array.isArray(list) || list.length !== rounds) {
+			problems.push(`vars.${name}: must hold ${rounds} value(s), one per round`);
+			continue;
+		}
+		vars[name] = list.map((entry, index) => readText(entry, `vars.${name}[${index}]`, problems, true) ?? "");
+	}
+	return Object.keys(vars).length > 0 ? vars : undefined;
 }
 
 /** A trial's own scores: one list per round, one number from 0 to 1 per candidate. Undefined when the spec gives none. */
@@ -185,7 +256,7 @@ function readScores(raw, path, problems, rounds, count) {
 	return raw;
 }
 
-function readNode(raw, path, bands, problems, rounds, marked) {
+function readNode(raw, path, bands, problems, rounds, loop, marked) {
 	if (!isRecord(raw)) {
 		problems.push(`${path}: must be an object`);
 		return undefined;
@@ -213,6 +284,12 @@ function readNode(raw, path, bands, problems, rounds, marked) {
 		node.pitch = readNumber(raw.pitch, `${path}.pitch`, problems, { min: 4, max: 16, fallback: 6 });
 	} else if (kind === "worker") {
 		node.mechanism = readOneOf(raw.mechanism, MECHANISMS, `${path}.mechanism`, problems, "scan");
+	} else if (kind === "card") {
+		readCard(raw, node, path, problems);
+	} else if (kind === "batch") {
+		readBatch(raw, node, path, problems, rounds);
+	} else if (kind === "slots") {
+		readSlots(raw, node, path, problems, rounds, loop);
 	} else if (kind === "tally" && raw.per !== undefined) {
 		// A tally by rounds: one box per round, the rounds that are over crossed, the round in hand lit.
 		node.per = readOneOf(raw.per, ["round"], `${path}.per`, problems);
@@ -250,9 +327,16 @@ function readNode(raw, path, bands, problems, rounds, marked) {
 		node.tag = readText(raw.tag, `${path}.tag`, problems);
 		node.lead = raw.lead === undefined ? undefined : readNumber(raw.lead, `${path}.lead`, problems, { min: 4, max: 120 });
 	} else if (kind === "note") {
-		const lines = readLinkedLines(raw.lines, `${path}.lines`, problems, 6);
-		node.lines = lines.texts;
-		node.links = lines.links;
+		if (raw.cues !== undefined) {
+			if (raw.lines !== undefined) problems.push(`${path}: a note takes "lines" or "cues", not both`);
+			node.cues = readNoteCues(raw.cues, `${path}.cues`, problems, rounds, loop);
+			node.lines = node.cues.map((cue) => cue.text);
+			node.links = [];
+		} else {
+			const lines = readLinkedLines(raw.lines, `${path}.lines`, problems, 6);
+			node.lines = lines.texts;
+			node.links = lines.links;
+		}
 		node.size = readOneOf(raw.size, Object.keys(NOTE_SIZES), `${path}.size`, problems, "text");
 	} else if (kind === "table") {
 		readTable(raw, node, path, problems);
@@ -264,11 +348,17 @@ function readNode(raw, path, bands, problems, rounds, marked) {
 	return node;
 }
 
+function normalizePort(port) {
+	if (port === "left") return "in";
+	if (port === "right") return "out";
+	return port;
+}
+
 /** Splits `node`, `node:2` or `node.bottom` into its parts. */
 function readEndpoint(value, path, nodes, problems) {
 	const match = typeof value === "string" ? ENDPOINT.exec(value) : null;
 	if (!match) {
-		problems.push(`${path}: must name a station as "id", "id:emitter" or "id.port"`);
+		problems.push(`${path}: must name a station as "id", "id:unit" or "id.port"`);
 		return undefined;
 	}
 	const node = nodes.find((entry) => entry.id === match[1]);
@@ -277,13 +367,15 @@ function readEndpoint(value, path, nodes, problems) {
 		return undefined;
 	}
 	const index = match[2] === undefined ? undefined : Number(match[2]);
-	if (node.kind === "source") {
-		if (index !== undefined && (index < 1 || index > node.count)) {
-			problems.push(`${path}: "${node.id}" has emitters 1 to ${node.count}`);
+	if (node.kind === "source" || node.kind === "slots") {
+		const limit = node.kind === "source" ? node.count : node.cells;
+		const noun = node.kind === "source" ? "emitters" : "cells";
+		if (index !== undefined && (index < 1 || index > limit)) {
+			problems.push(`${path}: "${node.id}" has ${noun} 1 to ${limit}`);
 			return undefined;
 		}
 	} else if (index !== undefined) {
-		problems.push(`${path}: only a source has numbered emitters`);
+		problems.push(`${path}: only a source or slots station has numbered units`);
 		return undefined;
 	}
 	return { node, emitter: index === undefined ? undefined : index - 1, port: match[3] };
@@ -297,7 +389,8 @@ function portOf(endpoint, role, path, problems) {
 		return role === "from" ? unit.out : unit.in;
 	}
 	const name = port ?? (role === "from" ? "out" : "in");
-	const found = node.shape.ports[name];
+	const ports = node.kind === "slots" && emitter !== undefined ? node.shape.cellPorts[emitter] : node.shape.ports;
+	const found = ports?.[name];
 	if (!found) {
 		problems.push(`${path}: a ${node.kind} has no "${name}" port`);
 		return undefined;
@@ -314,6 +407,22 @@ function loopCorners(a, b, laneY, reach) {
 	else corners.push({ x: b.x - reach, y: laneY }, { x: b.x - reach, y: b.y });
 	corners.push({ x: b.x, y: b.y });
 	return corners;
+}
+
+/** The corner points of an `elbow` wire, leaving and arriving perpendicular to `a` and `b`. */
+function elbowCorners(a, b, rawBend, path, problems) {
+	const bend = readNumber(rawBend, `${path}.bend`, problems, { min: 0.05, max: 0.95, fallback: 0.5 });
+	const aVert = a.side === "top" || a.side === "bottom";
+	const bVert = b.side === "top" || b.side === "bottom";
+	if (!aVert && bVert) return [{ x: a.x, y: a.y }, { x: b.x, y: a.y }, { x: b.x, y: b.y }];
+	if (aVert && !bVert) return [{ x: a.x, y: a.y }, { x: a.x, y: b.y }, { x: b.x, y: b.y }];
+	if (aVert && bVert) {
+		if (Math.abs(a.x - b.x) < 0.5) return [{ x: a.x, y: a.y }, { x: b.x, y: b.y }];
+		const middleY = a.y + (b.y - a.y) * bend;
+		return [{ x: a.x, y: a.y }, { x: a.x, y: middleY }, { x: b.x, y: middleY }, { x: b.x, y: b.y }];
+	}
+	const middle = a.x + (b.x - a.x) * bend;
+	return [{ x: a.x, y: a.y }, { x: middle, y: a.y }, { x: middle, y: b.y }, { x: b.x, y: b.y }];
 }
 
 function readWire(raw, path, nodes, scene, problems) {
@@ -350,29 +459,52 @@ function readWire(raw, path, nodes, scene, problems) {
 				: origin.y + readNumber(raw.lane, `${path}.lane`, problems, { min: 0, max: 400 }) * u;
 		shape = cornerPath(loopCorners(a, b, laneY, 2 * u), 1.5 * u);
 	} else if (route === "elbow") {
-		const bend = readNumber(raw.bend, `${path}.bend`, problems, { min: 0.05, max: 0.95, fallback: 0.5 });
-		const middle = a.x + (b.x - a.x) * bend;
-		shape = cornerPath([{ x: a.x, y: a.y }, { x: middle, y: a.y }, { x: middle, y: b.y }, { x: b.x, y: b.y }], 1.5 * u);
-	} else if (Math.abs(a.y - b.y) < 0.5) shape = cornerPath([{ x: a.x, y: a.y }, { x: b.x, y: b.y }], 0);
+		shape = cornerPath(elbowCorners(a, b, raw.bend, path, problems), 1.5 * u);
+	} else if (Math.abs(a.y - b.y) < 0.5 && a.side === "out" && b.side === "in")
+		shape = cornerPath([{ x: a.x, y: a.y }, { x: b.x, y: b.y }], 0);
 	else shape = curvePath(a, b);
 	return {
 		id: typeof raw.id === "string" && ID.test(raw.id) ? raw.id : undefined,
 		from,
 		to,
+		toPort: b,
+		turnRank: 0,
 		path: shape,
 		// How the wire runs: along a lane it was given, level between two ports, or with a turn to another row.
-		run: Array.isArray(raw.via) || route === "loop" ? "lane" : Math.abs(a.y - b.y) < 0.5 ? "level" : "turn",
+		run: Array.isArray(raw.via) || route === "loop" ? "lane" : Math.abs(a.y - b.y) < 0.5 && a.side === "out" && b.side === "in" ? "level" : "turn",
 		tier: from.node.band.tier,
 		label: readText(raw.label, `${path}.label`, problems),
 	};
 }
 
 function sameEnd(wireEnd, endpoint) {
+	const wirePort = normalizePort(wireEnd.port);
+	const endPort = normalizePort(endpoint.port);
+	const sameUnit =
+		endpoint.node.kind === "source"
+			? (wireEnd.emitter ?? 0) === (endpoint.emitter ?? 0)
+			: endpoint.node.kind === "slots"
+				? endpoint.emitter === undefined || wireEnd.emitter === undefined || wireEnd.emitter === endpoint.emitter
+				: true;
 	return (
 		wireEnd.node === endpoint.node &&
-		(endpoint.node.kind !== "source" || (wireEnd.emitter ?? 0) === (endpoint.emitter ?? 0)) &&
-		(endpoint.port === undefined || wireEnd.port === undefined || wireEnd.port === endpoint.port)
+		sameUnit &&
+		(endPort === undefined || wirePort === undefined || wirePort === endPort)
 	);
+}
+
+function readRunRounds(raw, path, rounds, problems) {
+	if (raw === undefined) return undefined;
+	if (!Array.isArray(raw) || raw.length === 0 || raw.length > rounds) {
+		problems.push(`${path}: must be a list of 1 to ${rounds} round numbers (1 to ${rounds})`);
+		return undefined;
+	}
+	const picked = [];
+	for (const [index, entry] of raw.entries()) {
+		const round = readNumber(entry, `${path}[${index}]`, problems, { min: 1, max: rounds, integer: true });
+		if (!picked.includes(round - 1)) picked.push(round - 1);
+	}
+	return picked.sort((a, b) => a - b);
 }
 
 /** One token's journey as timed segments, counted from the journey's start. */
@@ -388,6 +520,7 @@ function readRun(raw, path, scene, problems) {
 	const run = {
 		id: readText(raw.id, `${path}.id`, problems) ?? path,
 		start: readNumber(raw.start, `${path}.start`, problems, { min: 0, max: scene.loop, fallback: 0 }),
+		rounds: readRunRounds(raw.rounds, `${path}.rounds`, scene.rounds, problems),
 		from,
 		segments: [],
 		landings: [],
@@ -448,15 +581,23 @@ function readRun(raw, path, scene, problems) {
 			if (index < steps.length - 1) problems.push(`${at}: a rail ends a journey; it has no step after it`);
 			break;
 		}
-		if (target.kind === "source") {
-			run.arrivals.push({ node: target, emitter: to.emitter ?? 0, at: clock });
+		if (target.kind === "source" || target.kind === "slots") {
+			run.arrivals.push({ node: target, emitter: to.emitter ?? wire.to.emitter ?? 0, at: clock });
 			here = to;
-			if (index < steps.length - 1) problems.push(`${at}: a source ends a journey; start a new one from it`);
+			if (index < steps.length - 1) problems.push(`${at}: a ${target.kind} ends a journey; start a new one from it`);
 			break;
 		}
 		if (!HOLDING_KINDS.includes(target.kind)) {
-			problems.push(`${at}.to: an item travels to a queue, a worker, a trial, a rail or a source, not to a ${target.kind}`);
+			problems.push(
+				`${at}.to: an item travels to a queue, a worker, a trial, a card, a batch, a slots, a rail or a source, not to a ${target.kind}`,
+			);
 			return run;
+		}
+		if (step.work === 0 && (target.kind === "card" || target.kind === "batch")) {
+			run.arrivals.push({ node: target, emitter: 0, at: clock });
+			here = { node: target };
+			if (index < steps.length - 1) problems.push(`${at}: a step with work 0 ends a journey`);
+			break;
 		}
 		const work = readNumber(step.work, `${at}.work`, problems, {
 			min: HOP_SECONDS * 2 + 0.1,
@@ -482,7 +623,7 @@ function readRun(raw, path, scene, problems) {
 		passed = result === "ok";
 		if (result === "fail") tone = "fail";
 		else if (step.tone !== undefined) tone = readOneOf(step.tone, TONES, `${at}.tone`, problems, tone);
-		here = to;
+		here = { node: target };
 	}
 	run.duration = clock;
 	// A stay ends at the port its next wire leaves from, so the item slides out instead of jumping.
@@ -509,6 +650,12 @@ function staysOverlap(a, b, loop) {
 	return false;
 }
 
+function runsShareRound(a, b, rounds) {
+	if (a.rounds === undefined && b.rounds === undefined) return true;
+	for (let round = 0; round < rounds; round++) if (runInRound(a, round) && runInRound(b, round)) return true;
+	return false;
+}
+
 /** Gives every stay in a queue its slot, and refuses a station that would hold more than it can. */
 function assignPlaces(scene, problems) {
 	for (const node of scene.nodes) {
@@ -517,12 +664,14 @@ function assignPlaces(scene, problems) {
 		for (const run of scene.runs)
 			for (const segment of run.segments)
 				if (segment.kind === "work" && segment.node === node)
-					stays.push({ segment, start: (run.start + segment.from) % scene.loop, length: segment.to - segment.from });
+					stays.push({ run, segment, start: (run.start + segment.from) % scene.loop, length: segment.to - segment.from });
 		stays.sort((a, b) => a.start - b.start);
 		const places = node.kind === "queue" ? node.slots : 1;
 		for (const stay of stays) {
 			const taken = new Set(
-				stays.filter((other) => other.slot !== undefined && staysOverlap(stay, other, scene.loop)).map((o) => o.slot),
+				stays
+					.filter((other) => other.slot !== undefined && runsShareRound(stay.run, other.run, scene.rounds) && staysOverlap(stay, other, scene.loop))
+					.map((o) => o.slot),
 			);
 			let slot = 0;
 			while (taken.has(slot)) slot++;
@@ -545,56 +694,63 @@ function rowsBelow(node) {
 }
 
 /** The words a station writes above its body: its name and note, or for a rail the longest thing it can say. */
-function labelText(node, rounds) {
+function labelText(node, rounds, vars) {
 	const notes = node.kind === "rail" ? [node.note, node.okText, node.failText] : [node.note];
 	const longest = notes
 		.filter(Boolean)
-		.sort((a, b) => widestRoundText(b, rounds).length - widestRoundText(a, rounds).length)[0];
+		.sort((a, b) => widestRoundText(b, rounds, vars).length - widestRoundText(a, rounds, vars).length)[0];
 	return [node.label, longest].filter(Boolean).join(" · ");
 }
 
 /** The widest thing each station says about an item it holds (a worker's lane, phases and failure words), in pixels. */
 function captionWidths(scene) {
-	const size = TEXT_SIZE * scene.unit;
+	const u = scene.unit;
+	const size = TEXT_SIZE * u;
 	const widths = new Map();
+	for (const node of scene.nodes) {
+		if (node.kind === "batch")
+			widths.set(node, textWidth("M".repeat(batchCaptionLength(node, scene.rounds, scene.vars)), size));
+		else if ((node.kind === "card" && node.collectFrom) || (node.kind === "slots" && node.hasCaptions))
+			widths.set(node, Math.max(0, node.shape.box.x + node.shape.box.w - wordsLeft(node, "bottom", u)));
+	}
 	for (const run of scene.runs)
 		for (const segment of run.segments) {
 			if (segment.kind !== "work") continue;
 			const said = [segment.lane, segment.text, ...segment.phases].filter(Boolean);
 			if (segment.node.kind === "trial") said.push("M".repeat(trialCaptionLength(segment.node, segment.phases)));
-			const widest = Math.max(0, ...said.map((text) => textWidth(text, size, scene.rounds)));
+			const widest = Math.max(0, ...said.map((text) => textWidth(text, size, scene.rounds, scene.vars)));
 			widths.set(segment.node, Math.max(widths.get(segment.node) ?? 0, widest));
 		}
 	return widths;
 }
 
 /** The rectangle the letters of one line of text cover, from the top of a tall letter to the foot of a low one. */
-function lineRect(what, x, baseline, text, u, rounds, width) {
-	return { what, x, y: baseline - 1.6 * u, w: width ?? textWidth(text, TEXT_SIZE * u, rounds), h: 2.1 * u };
+function lineRect(what, x, baseline, text, u, rounds, vars, width) {
+	return { what, x, y: baseline - 1.6 * u, w: width ?? textWidth(text, TEXT_SIZE * u, rounds, vars), h: 2.1 * u };
 }
 
 /** The rectangles a station covers: its body, its lines above and its lines below. Text is measured, not guessed. */
-function extents(node, u, captionWidth, rounds) {
+function extents(node, u, captionWidth, rounds, vars) {
 	const { box } = node.shape;
 	if (node.kind === "chain" && node.lead !== undefined) {
 		// A list row: its name sits at the left on the chips' own line, its other lines under the name.
 		const chipsLeft = box.x + node.lead * u;
 		const rects = [{ what: "body", x: chipsLeft, y: box.y, w: box.x + box.w - chipsLeft, h: box.h }];
-		rects.push(lineRect("label", box.x, box.y + 2 * u, [node.tag, node.label].filter(Boolean).join(" "), u, rounds));
+		rects.push(lineRect("label", box.x, box.y + 2 * u, [node.tag, node.label].filter(Boolean).join(" "), u, rounds, vars));
 		for (const [index, text] of [node.note, ...node.sub].filter(Boolean).entries())
-			rects.push(lineRect("lines", box.x, box.y + 2 * u + (index + 1) * SUB_STEP * u, text, u, rounds));
+			rects.push(lineRect("lines", box.x, box.y + 2 * u + (index + 1) * SUB_STEP * u, text, u, rounds, vars));
 		return rects;
 	}
 	const rects = [{ what: "body", x: box.x, y: box.y, w: box.w, h: box.h }];
-	const label = labelText(node, rounds);
+	const label = labelText(node, rounds, vars);
 	const above = [];
 	if (node.value) above.push(node.value);
 	if (label) above.push(label);
 	for (const [index, text] of above.entries())
-		rects.push(lineRect("label", wordsLeft(node, "top", u), box.y - (1.5 + index * LINE_STEP) * u, text, u, rounds));
+		rects.push(lineRect("label", wordsLeft(node, "top", u), box.y - (1.5 + index * LINE_STEP) * u, text, u, rounds, vars));
 	const below = [...Array.from({ length: captionRows(node) }, () => undefined), ...node.sub];
 	for (const [index, text] of below.entries())
-		rects.push(lineRect("lines", wordsLeft(node, "bottom", u), box.y + box.h + (2.5 + index * SUB_STEP) * u, text ?? "", u, rounds, text === undefined ? captionWidth : undefined));
+		rects.push(lineRect("lines", wordsLeft(node, "bottom", u), box.y + box.h + (2.5 + index * SUB_STEP) * u, text ?? "", u, rounds, vars, text === undefined ? captionWidth : undefined));
 	// A rail's marks stand under its dots, along its whole line: that row is theirs.
 	if (node.marked) rects.push({ what: "lines", x: box.x, y: box.y + box.h + 0.2 * u, w: box.w, h: 1.9 * u });
 	return rects;
@@ -618,7 +774,7 @@ function wireCrosses(path, rect) {
 function checkLayout(scene, problems) {
 	const u = scene.unit;
 	const said = captionWidths(scene);
-	const all = scene.nodes.map((node) => ({ node, rects: extents(node, u, said.get(node) ?? 0, scene.rounds) }));
+	const all = scene.nodes.map((node) => ({ node, rects: extents(node, u, said.get(node) ?? 0, scene.rounds, scene.vars) }));
 	for (const { node, rects } of all) {
 		const left = Math.min(...rects.map((rect) => rect.x));
 		const right = Math.max(...rects.map((rect) => rect.x + rect.w));
@@ -697,6 +853,7 @@ export function compileScene(spec) {
 		loop,
 		rounds,
 		period,
+		vars: readVars(spec.vars, rounds, problems),
 		fps: readNumber(spec.fps, "fps", problems, { min: 10, max: 60, fallback: 30, integer: true }),
 		speed: readNumber(spec.speed, "speed", problems, { min: 60, max: 2400, fallback: 440 }),
 		theme: resolveTheme(spec.theme, problems),
@@ -735,7 +892,7 @@ export function compileScene(spec) {
 	const marked = markedRails(spec);
 	const seen = new Set();
 	for (const [index, raw] of (Array.isArray(spec.nodes) ? spec.nodes : []).entries()) {
-		const node = readNode(raw, `nodes[${index}]`, scene.bands, problems, scene.rounds, marked);
+		const node = readNode(raw, `nodes[${index}]`, scene.bands, problems, scene.rounds, scene.loop, marked);
 		if (!node) continue;
 		if (seen.has(node.id)) problems.push(`nodes[${index}].id: "${node.id}" is used twice`);
 		seen.add(node.id);
@@ -744,19 +901,25 @@ export function compileScene(spec) {
 		scene.nodes.push(node);
 	}
 	if (scene.nodes.length === 0) problems.push("nodes: at least one station is needed");
-	// Every station is placed in one pass, once the rows of a `lanes` are known: they name stations that may be declared
-	// after it, and every bottom must be known before the wires are read, because a loop wire takes the lowest of them.
+	// Every station is placed in one pass, once the rows of a `lanes` and any `collectFrom` batch are known: they name
+	// stations that may be declared after them, and every bottom must be known before the wires are read.
 	resolveLanes(scene, problems);
+	resolveCards(scene, problems);
 	for (const node of scene.nodes) {
-		node.shape = shapeNode(node, (MARGIN + node.column) * u, node.band.top + (BAND_HEADER + node.row) * u, u, scene.rounds);
+		node.shape = shapeNode(node, (MARGIN + node.column) * u, node.band.top + (BAND_HEADER + node.row) * u, u, scene.rounds, scene.vars);
 		node.bottom = node.shape.box.y + node.shape.box.h + rowsBelow(node) * u;
 	}
 	for (const [index, raw] of (Array.isArray(spec.wires) ? spec.wires : []).entries()) {
 		const wire = readWire(raw, `wires[${index}]`, scene.nodes, scene, problems);
 		if (!wire) continue;
+		if (wire.run === "turn" && wire.label) {
+			wire.turnRank = scene.wires.filter(
+				(other) => other.run === "turn" && other.label && other.to.node === wire.to.node && other.toPort.side === wire.toPort.side,
+			).length;
+		}
 		scene.wires.push(wire);
-		wire.from.node.usedPorts.add(wire.from.port ?? "out");
-		wire.to.node.usedPorts.add(wire.to.port ?? "in");
+		wire.from.node.usedPorts.add(normalizePort(wire.from.port) ?? "out");
+		wire.to.node.usedPorts.add(normalizePort(wire.to.port) ?? "in");
 		for (const end of [wire.from, wire.to])
 			if (end.node.marked && end.port === "bottom")
 				problems.push(`wires[${index}]: it meets "${end.node.id}" from below, where that rail's marks stand; use another port, or land its items without a mark`);
@@ -766,6 +929,7 @@ export function compileScene(spec) {
 		if (run) scene.runs.push(run);
 	}
 	resolveLinks(scene, problems);
+	resolveCardLinks(scene, problems);
 	assignPlaces(scene, problems);
 	checkLayout(scene, problems);
 	return { scene, problems };
@@ -782,18 +946,22 @@ export function buildScene(spec) {
 export function storyboard(scene) {
 	const beats = [];
 	for (const run of scene.runs) {
+		const scope = run.rounds ? ` [rounds ${run.rounds.map((round) => round + 1).join(",")}]` : "";
 		for (const segment of run.segments) {
 			const from = run.start + segment.from;
 			const to = run.start + segment.to;
 			if (segment.kind === "travel")
-				beats.push({ at: from, line: `${from.toFixed(1)}-${to.toFixed(1)} s  ${run.id} travels ${segment.wire.from.node.id} to ${segment.wire.to.node.id}${segment.carry ? ` carrying "${segment.carry}"` : ""}` });
+				beats.push({ at: from, line: `${from.toFixed(1)}-${to.toFixed(1)} s  ${run.id}${scope} travels ${segment.wire.from.node.id} to ${segment.wire.to.node.id}${segment.carry ? ` carrying "${segment.carry}"` : ""}` });
 			else
-				beats.push({ at: from, line: `${from.toFixed(1)}-${to.toFixed(1)} s  ${run.id} at ${segment.node.id}${segment.phases.length > 0 ? ` (${segment.phases.join(", ")})` : ""}${segment.result ? `, ends ${segment.result}${segment.text ? `: ${segment.text}` : ""}` : ""}` });
+				beats.push({ at: from, line: `${from.toFixed(1)}-${to.toFixed(1)} s  ${run.id}${scope} at ${segment.node.id}${segment.phases.length > 0 ? ` (${segment.phases.join(", ")})` : ""}${segment.result ? `, ends ${segment.result}${segment.text ? `: ${segment.text}` : ""}` : ""}` });
 		}
 		for (const landing of run.landings)
-			beats.push({ at: run.start + landing.at, line: `${(run.start + landing.at).toFixed(1)} s  ${run.id} lands on ${landing.node.id}${landing.result ? ` as ${landing.result}` : ""}` });
-		for (const arrival of run.arrivals)
-			beats.push({ at: run.start + arrival.at, line: `${(run.start + arrival.at).toFixed(1)} s  ${run.id} is back at ${arrival.node.id}:${arrival.emitter + 1}` });
+			beats.push({ at: run.start + landing.at, line: `${(run.start + landing.at).toFixed(1)} s  ${run.id}${scope} lands on ${landing.node.id}${landing.result ? ` as ${landing.result}` : ""}` });
+		for (const arrival of run.arrivals) {
+			const verb = arrival.node.kind === "slots" ? "writes to" : arrival.node.kind === "source" ? "is back at" : "seeds";
+			const unit = arrival.node.kind === "source" || arrival.node.kind === "slots" ? `:${arrival.emitter + 1}` : "";
+			beats.push({ at: run.start + arrival.at, line: `${(run.start + arrival.at).toFixed(1)} s  ${run.id}${scope} ${verb} ${arrival.node.id}${unit}` });
+		}
 	}
 	return beats.sort((a, b) => a.at - b.at).map((beat) => beat.line);
 }

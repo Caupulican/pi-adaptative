@@ -38,7 +38,10 @@ Stations are a closed set, each shaped by what it does. Choose by function, not 
 | `sweep` | A check that runs on a schedule. |
 | `chain` | Named steps in order; as a list row it carries a tag and a name at the left. Modes: `step`, `fill`, `together`. |
 | `tally` | A count shown as boxes, some crossed. By rounds: one box per round, the past crossed, the present lit. |
-| `note` | Words only. A line can light while a station works; a note can be the film's title or its closing sentence. |
+| `card` | Code, prompt or inspector lines in a framed box. A line lights for a phase or while another station works; with `collectFrom` it gathers matches from a `batch`. |
+| `batch` | A row of items swept by a caliper, with matches emitted as beads and the set optionally narrowed across rounds. |
+| `slots` | Numbered buffer, cache or heap cells that fill (`write`), exchange (`swap`) or feed later rounds. |
+| `note` | Words only. A line can light while a station works, `cues` change the caption at timed beats, and `size` sets a title or closing sentence. |
 | `table` | Rows of short facts, or ordered steps with numbers. A row can light while a station works. |
 | `series` | One measure with one point per round: what the rounds add up to. It can read a trial's scores. |
 | `lanes` | Who works when: one row per station, a bar per stay, on a track for one round, with a playhead at the round's time. It reads the storyboard, so it cannot disagree with the circuit. |
@@ -49,16 +52,16 @@ Stations are a closed set, each shaped by what it does. Choose by function, not 
 2. State the arrival question in one sentence ("what happens to a change after it is pushed"). The film answers that question and nothing else.
 3. Write the storyboard as journeys: who starts an item, where it goes, how long each stay lasts, and how it ends. Include one journey that fails if the real system can fail.
 4. Write the spec. Place stations on the grid, declare a wire for every hop of every journey, give every worker the mechanism that matches its work.
-5. For a process that repeats and improves, give the spec its rounds: add `rounds`, a `trial` where the candidates are compared, and the instruments that show what the rounds add up to. A `series` draws the measure of each round, a `tally` crosses the rounds that are over, and a `lanes` shows who holds the item when. They read the journeys, never a copy of them, so they cannot disagree with the circuit.
+5. For a process that repeats, narrows or carries state across rounds, give the spec `rounds` (and `vars` when an input changes each round). Use `trial` + `series` when rounds score candidates, or `card` + `batch` + `slots` when rounds narrow a scan or reuse state across steps. A `lanes` and a `tally` read the journeys directly, so they cannot disagree with the circuit.
 6. Run `node scripts/flow-film.mjs check <spec.json>`. Fix every problem it names. It prints the storyboard as timed beats: read it against step 3.
-6. Run `sheet` and view the contact sheet with the read tool. Look for words that touch, a wire that crosses words, more than one thing lit in a region with no reason, and a station whose mechanism does not match its work. Fix the spec and run it again.
-7. Render: `html` for the page that plays the loop (Pause and speed controls, `?t=<seconds>` for one instant), `video` for an MP4 and with `--gif` a GIF.
-8. Verify the result: `ffprobe` shows one video stream with the loop's duration; view the first frame and one frame mid-loop. Say which checks ran.
-9. Reply with the file paths and a reading guide of one to three sentences.
+7. Run `sheet` and view the contact sheet with the read tool. Look for words that touch, a wire that crosses words, more than one thing lit in a region with no reason, and a station whose mechanism does not match its work. Fix the spec and run it again.
+8. Render: `html` for the page that plays the loop (Pause and speed controls, `?t=<seconds>` for one instant), `video` for an MP4 and with `--gif` a GIF.
+9. Verify the result: `ffprobe` shows one video stream with the loop's duration; view the first frame and one frame mid-loop. Say which checks ran.
+10. Reply with the file paths and a reading guide of one to three sentences.
 
 ### Start from a diagram or a plan
 
-`node scripts/flow-film.mjs import <file> --out <spec.json>` reads Mermaid (`flowchart`, `graph`, `sequenceDiagram`, `stateDiagram`, alone or in a Markdown fence), Graphviz DOT, and a plan file (the object given to the `plan` tool: a title and steps with `id`, `do`, `uses`, `join`). Nodes become stations, edges become wires, and the paths become journeys shown in turn. The command prints what the source notation could not carry. The result is a starting point: check the station kinds, shorten the words, set real timings, then go on from step 6.
+`node scripts/flow-film.mjs import <file> --out <spec.json>` reads Mermaid (`flowchart`, `graph`, `sequenceDiagram`, `stateDiagram`, alone or in a Markdown fence), Graphviz DOT, and a plan file (the object given to the `plan` tool: a title and steps with `id`, `do`, `uses`, `join`). Nodes become stations, edges become wires, independent branches run side by side while shared stations queue in order, and the command prints what the source notation could not carry. The result is a starting point: check the station kinds, shorten the words, set real timings, then go on from step 6.
 
 ### Before the owner approves
 
@@ -87,6 +90,7 @@ Artifacts are discardable local files. Write them to `${PI_EXPLAINERS_DIR:-${TMP
 - "Turn this Mermaid flowchart into something better": run `import` on the file, read the notes it prints, replace generic workers with the right mechanisms, shorten the labels, render, and report what the Mermaid source could not carry.
 - "Explain our release pipeline as an animation for the site": read the pipeline config, list stages and gates, storyboard one release that passes and one that fails a gate, put the stages that are not built yet in a `later` band, render an MP4 and a GIF, and report the `ffprobe` result.
 - "Show how a file gets better round after round": start from [assets/round-loop.json](assets/round-loop.json), a loop that improves by rounds, and replace its stations and words with the real ones: a source, a worker, a trial where the candidates are compared, a worker, and a rail whose marks come from `{round}`. Keep its `rounds`, its round counter and its instruments: a `series` of the trial's scores, a `tally` by rounds and a `lanes`.
+- "Compare a cold pass with a warm stateful pass across edits": start from [assets/stateful-workflow.json](assets/stateful-workflow.json), put the shared input in a `card` with `vars`, split left and right into the two `card` call paths, sweep each `batch` into its `collectFrom` card, show heap growth versus `slots` `swap` below, and compare stay durations on one `lanes`.
 
 ## Self-Check
 

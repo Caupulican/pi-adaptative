@@ -7,6 +7,7 @@
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
+import type { TimerSource } from "../util/timer-port.ts";
 import { resolveProviderAccountKey } from "./account-key.ts";
 import { AccountUsageMonitor } from "./account-usage-monitor.ts";
 import {
@@ -151,12 +152,45 @@ function snapshotOf(state: ReturnType<AccountUsageMonitor["state"]>): AccountUsa
 
 /** The production reader of a session: its own usage monitor over the provider's usage endpoint, for the registry and model it names. */
 export function createSubscriptionAllowanceReader(
-	deps: Pick<SubscriptionAllowanceReaderDeps, "getRegistry" | "getModel">,
+	deps: Pick<SubscriptionAllowanceReaderDeps, "getRegistry" | "getModel"> & { now?: () => number },
 ): SubscriptionAllowanceReader {
+	const now = deps.now ?? (() => Date.now());
 	return new SubscriptionAllowanceReader({
 		...deps,
-		monitor: new AccountUsageMonitor(),
+		monitor: new AccountUsageMonitor({ now }),
 		currentAccountKey: (provider) => resolveProviderAccountKey(deps.getRegistry().authStorage, provider),
-		now: () => Date.now(),
+		now,
 	});
+}
+
+/** A session's own reader, wired to its `provider-admission` clock. */
+export function createSessionAllowanceReader(deps: {
+	getModelRegistry(): ReturnType<SubscriptionAllowanceReaderDeps["getRegistry"]>;
+	getModel(): Model<Api> | undefined;
+	getTimers(): Pick<TimerSource, "port">;
+}): SubscriptionAllowanceReader {
+	return createSubscriptionAllowanceReader({
+		getRegistry: () => deps.getModelRegistry(),
+		getModel: () => deps.getModel(),
+		now: () => deps.getTimers().port("provider-admission").now(),
+	});
+}
+
+/** The session's subscription allowance port: an injected port as-is, or a production reader on its `provider-admission` clock. */
+export function openSubscriptionAllowance(
+	config: {
+		subscriptionAllowance?: SubscriptionAllowancePort;
+		modelRegistry: ReturnType<SubscriptionAllowanceReaderDeps["getRegistry"]>;
+		timers: Pick<TimerSource, "port">;
+	},
+	getModel: SubscriptionAllowanceReaderDeps["getModel"],
+): SubscriptionAllowancePort {
+	return (
+		config.subscriptionAllowance ??
+		createSubscriptionAllowanceReader({
+			getRegistry: () => config.modelRegistry,
+			getModel,
+			now: () => config.timers.port("provider-admission").now(),
+		})
+	);
 }

@@ -79,10 +79,19 @@ test("npm run format is formatter-only", () => {
 		"biome format --write .",
 		"`format` must invoke the formatter, never `biome check --write`, which applies lint fixes",
 	);
+	const checkScript = packageJson.scripts.check;
+	const resolvedCheck =
+		checkScript === "npm run check:static" ? packageJson.scripts["check:static"] : checkScript;
+	assert.equal(typeof resolvedCheck, "string", "`check` must resolve to a static validation command");
 	assert.match(
-		packageJson.scripts.check,
-		/biome check --error-on-warnings \./,
+		resolvedCheck,
+		/(?:^|&&\s*)biome check --error-on-warnings \.(?:\s*&&|$)/,
 		"lint validation stays a separate, non-writing gate",
+	);
+	assert.doesNotMatch(
+		resolvedCheck,
+		/biome (?:check|format|lint)\b[^&]*--write\b/,
+		"`check` must never write or autofix files",
 	);
 });
 

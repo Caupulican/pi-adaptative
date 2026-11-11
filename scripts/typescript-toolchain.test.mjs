@@ -30,13 +30,17 @@ test("ports import analysis to the TypeScript 7 API", () => {
 	assert.doesNotMatch(source, /@typescript\/typescript6|@typescript\/native-preview/);
 });
 
-test("has one compiler execution path with no legacy fallback", () => {
+test("resolves host-matched tsrs first and falls back to pinned typescript with no legacy wrapper", () => {
 	const source = readFileSync(join("scripts", "run-tsc.mjs"), "utf8");
 	assert.match(source, /createRequire\(import\.meta\.url\)/);
+	assert.match(source, /resolvePackageDirectory\("tsrs", requireFromScript\)/);
 	assert.match(
 		source,
-		/compilerEntrypoint = join\(dirname\(requireFromScript\.resolve\("typescript\/package\.json"\)\), "bin", "tsc"\)/,
+		/platform\.os\?\.includes\(process\.platform\) === true && platform\.cpu\?\.includes\(process\.arch\) === true/,
 	);
+	assert.match(source, /hasHostBinary \? join\(tsrsDirectory, "bin", "tsrs"\) : undefined/);
+	assert.match(source, /const typescriptDirectory = resolvePackageDirectory\("typescript", requireFromScript\)/);
+	assert.match(source, /compilerEntrypoint = join\(typescriptDirectory, "bin", "tsc"\)/);
 	assert.match(source, /run\(process\.execPath, \[compilerEntrypoint, \.\.\.args\]\)/);
 	assert.doesNotMatch(source, /\.cmd|shell:|run\("tsgo"|falling back|native-preview/);
 	assert.throws(() => readFileSync(join("scripts", "tsgo-or-tsc.mjs"), "utf8"), { code: "ENOENT" });
@@ -49,14 +53,27 @@ test("root typechecking resolves kernel compaction subpaths to workspace source"
 	]);
 });
 
-test("keeps CI and release toolchain assertions on the pinned Vite and Vitest versions", () => {
+test("keeps CI and release toolchain assertions on the pinned Vite, Vitest, TypeScript, and tsrs versions", () => {
 	for (const relativePath of [".github/workflows/ci.yml", ".github/workflows/build-binaries.yml"]) {
 		const source = readFileSync(relativePath, "utf8");
-		const assertions = [...source.matchAll(/npm ls vite@([^\s]+) vitest@([^\s]+) --depth=0/g)];
+		const assertions = [...source.matchAll(/npm ls vite@([^\s]+) vitest@([^\s]+)(?:\s+[^\r\n]+)?\s+--depth=0/g)];
 		assert.ok(assertions.length > 0, `${relativePath} must assert the native TypeScript test toolchain`);
 		for (const [, vite, vitest] of assertions) {
 			assert.equal(vite, rootPackage.devDependencies.vite, relativePath);
 			assert.equal(vitest, rootPackage.devDependencies.vitest, relativePath);
+		}
+	}
+	for (const relativePath of [
+		".github/workflows/ci.yml",
+		".github/workflows/build-binaries.yml",
+		".github/workflows/release.yml",
+	]) {
+		const source = readFileSync(relativePath, "utf8");
+		const compilerAssertions = [...source.matchAll(/typescript@([^\s]+)\s+tsrs@([^\s]+)\s+--depth=0/g)];
+		assert.ok(compilerAssertions.length > 0, `${relativePath} must assert the pinned TypeScript and tsrs compilers`);
+		for (const [, typescriptVersion, tsrsVersion] of compilerAssertions) {
+			assert.equal(typescriptVersion, rootPackage.devDependencies.typescript, relativePath);
+			assert.equal(tsrsVersion, rootPackage.devDependencies.tsrs, relativePath);
 		}
 	}
 });

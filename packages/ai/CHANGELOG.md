@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Changed
+
+- Refreshed the generated model catalog from upstream provider listings.
+
+### Fixed
+
+- Command Code adapter: a session keeps one `config.date` across UTC midnight. The service substitutes `config.date` into its system prompt, so recomputing the UTC date on every request changed the prompt prefix at midnight and invalidated the session's prompt cache. A request that carries `sessionId` now pins the `YYYY-MM-DD` date seen on its first turn for the rest of the session (retaining up to 256 active sessions in memory with Web standard APIs only), and `CommandCodeOptions` and `CommandCodeRequestSettings` accept an optional `sessionDate` when a host wants to set or advance that date at a cold boundary.
+
 ## [0.104.52] - 2026-11-11
 
 ### Added

@@ -4,8 +4,11 @@
  * the same every time, and its last frame meets its first.
  */
 
-import { easeInOut, easeSpeed, pointAt } from "./geometry.mjs";
+import { batchAt, batchHitSchedule } from "./batch.mjs";
+import { cornerPath, easeInOut, easeSpeed, pointAt } from "./geometry.mjs";
 import { HOP_SECONDS, roundText } from "./metrics.mjs";
+import { slotsAt } from "./slots.mjs";
+import { runInRound } from "./stays.mjs";
 import { keptText, trialAt } from "./trial.mjs";
 
 /** How long the motion blur behind a moving item covers, in seconds of its travel. */
@@ -92,6 +95,7 @@ function stayOf(segment, local) {
 		lane: segment.lane,
 		laneTone: segment.laneTone,
 		phases: segment.phases,
+		phaseIndex: index,
 		phase: failed ? (segment.text ?? "failed") : index >= 0 ? segment.phases[index] : undefined,
 		before: !failed && index > 0 ? segment.phases[index - 1] : undefined,
 		blend: failed ? 1 : Math.min(1, (since - phaseStart) / PHASE_BLEND_SECONDS),
@@ -110,7 +114,7 @@ function railAt(scene, node, now, periodNow) {
 		for (const landing of run.landings)
 			if (landing.node === node) {
 				const at = run.start + landing.at;
-				landings.push({ at, age: wrap(now - at, scene.loop), result: landing.result, mark: landing.mark, trial: landing.trial });
+				landings.push({ run, at, age: wrap(now - at, scene.loop), result: landing.result, mark: landing.mark, trial: landing.trial });
 			}
 	if (landings.length === 0) return { dots: [], slide: 1, newest: undefined, ring: undefined };
 	landings.sort((a, b) => a.age - b.age);
@@ -122,10 +126,12 @@ function railAt(scene, node, now, periodNow) {
 			// The round the landing is from: the rounds that passed since it landed, less the ones already shown.
 			const landed = Math.floor((periodNow - landing.at) / scene.loop) - cycle;
 			if (scene.rounds > 1 && landed < 0) continue;
+			const landedRound = scene.rounds > 1 ? landed : 0;
+			if (!runInRound(landing.run, landedRound)) continue;
 			dots.push({
 				age: landing.age + cycle * scene.loop,
 				result: landing.result,
-				mark: roundText(keptText(landing.mark, scene, landing.trial, scene.rounds > 1 ? landed : 0), scene.rounds > 1 ? landed : 0),
+				mark: roundText(keptText(landing.mark, scene, landing.trial, landedRound), landedRound, scene.vars),
 			});
 			shown++;
 		}
@@ -139,6 +145,43 @@ function railAt(scene, node, now, periodNow) {
 		newest,
 		ring: newest.age < RAIL_RING_SECONDS ? newest.age / RAIL_RING_SECONDS : undefined,
 	};
+}
+
+/** Match beads travelling from a `batch` station to a collector `card` at `now` inside `round`. */
+function collectorBeads(scene, round, now) {
+	const beads = [];
+	for (const node of scene.nodes) {
+		if (node.kind !== "card" || !node.sourceBatch) continue;
+		const { hits } = batchHitSchedule(scene, node.sourceBatch, round);
+		if (hits.length === 0) continue;
+		const wire = scene.wires.find((entry) => entry.from.node === node.sourceBatch && entry.to.node === node);
+		for (const hit of hits) {
+			if (now < hit.emittedAt || now >= hit.arrivesAt) continue;
+			const part = easeInOut((now - hit.emittedAt) / Math.max(0.05, hit.arrivesAt - hit.emittedAt));
+			if (wire) {
+				const startPt = wire.path.points[0];
+				const endPt = wire.path.points[wire.path.points.length - 1];
+				const activePath =
+					wire.run === "level" && hit.fromX < startPt.x - 1
+						? cornerPath([{ x: hit.fromX, y: startPt.y }, { x: endPt.x, y: endPt.y }], 0)
+						: wire.path;
+				const along = activePath.length * part;
+				const at = pointAt(activePath, along);
+				const trailLen = Math.min(along, activePath.length * 0.24 * Math.sin(part * Math.PI));
+				beads.push({
+					x: at.x,
+					y: at.y,
+					trail: trailLen > 1 ? { path: activePath, from: along - trailLen, to: along } : undefined,
+				});
+			} else {
+				const start = { x: hit.fromX, y: node.sourceBatch.shape.ports.out.y };
+				const end = node.shape.ports.in;
+				const place = between(start, end, part);
+				beads.push({ x: place.x, y: place.y, trail: undefined });
+			}
+		}
+	}
+	return beads;
 }
 
 /** How many times a repeating motion of about `period` seconds fits the loop, as a whole number so the loop closes. */
@@ -160,8 +203,10 @@ export function stateAt(scene, time) {
 		if ((pulses.get(key)?.strength ?? 0) < strength) pulses.set(key, { strength, tone });
 	};
 	for (const run of scene.runs) {
+		if (!runInRound(run, round)) continue;
 		const local = wrap(now - run.start, loop);
-		if (run.from.node.kind === "source" && local < EMIT_PULSE_SECONDS)
+		const originKind = run.from.node.kind;
+		if ((originKind === "source" || originKind === "card" || originKind === "slots") && local < EMIT_PULSE_SECONDS)
 			pulse(run.from.node, run.from.emitter ?? 0, 1 - local / EMIT_PULSE_SECONDS, run.segments[0]?.tone ?? "work");
 		for (const arrival of run.arrivals) {
 			const since = local - arrival.at;
@@ -175,9 +220,9 @@ export function stateAt(scene, time) {
 			const item = itemOnWire(segment, local, index === 0);
 			// What it carries may name the candidate its last trial kept in this round.
 			items.push({ run, ...item, carry: keptText(item.carry, scene, item.trial, round) });
-		}
-		else {
-			items.push({ run, ...itemInStation(segment, local) });
+		} else {
+			if (segment.node.kind !== "card" && segment.node.kind !== "batch")
+				items.push({ run, ...itemInStation(segment, local) });
 			const held = stays.get(segment.node.id) ?? [];
 			held.push(stayOf(segment, local));
 			stays.set(segment.node.id, held);
@@ -187,9 +232,13 @@ export function stateAt(scene, time) {
 	const sweeps = new Map();
 	const chains = new Map();
 	const trials = new Map();
+	const batches = new Map();
+	const slots = new Map();
 	for (const node of scene.nodes) {
 		if (node.kind === "rail") rails.set(node.id, railAt(scene, node, now, periodNow));
 		else if (node.kind === "trial") trials.set(node.id, trialAt(scene, node, now, round, stays.get(node.id)?.[0]));
+		else if (node.kind === "batch") batches.set(node.id, batchAt(scene, node, now, round, stays.get(node.id)?.[0]));
+		else if (node.kind === "slots") slots.set(node.id, slotsAt(scene, node, round, now));
 		else if (node.kind === "sweep") {
 			const turn = wrap((now * cyclesIn(scene, node.period)) / loop, 1);
 			sweeps.set(node.id, 0.5 - 0.5 * Math.cos(2 * Math.PI * turn));
@@ -199,5 +248,6 @@ export function stateAt(scene, time) {
 			chains.set(node.id, { step: Math.floor(turn), part: turn % 1 });
 		}
 	}
-	return { now, periodNow, round, items, stays, pulses, rails, sweeps, chains, trials };
+	const beads = collectorBeads(scene, round, now);
+	return { now, periodNow, round, items, stays, pulses, rails, sweeps, chains, trials, batches, slots, beads };
 }

@@ -56,6 +56,17 @@ const NEVER_EXEMPT_FILENAMES = new Set([
 ]);
 const NEVER_EXEMPT_EXTENSIONS = new Set([".pem", ".key", ".p12", ".pfx", ".kdbx"]);
 
+/** Dotenv, registry-credential and private-key filenames never inherit a directory-level read exemption. */
+export function isNeverExemptReadPath(
+	filePath: string,
+	flavor: ExecutionPathFlavor = process.platform === "win32" ? "win32" : "posix",
+): boolean {
+	const paths = executionPathApi(flavor);
+	const lowerName = paths.basename(filePath).toLowerCase();
+	if (lowerName === ".env" || lowerName.startsWith(".env.") || lowerName.endsWith(".env")) return true;
+	return NEVER_EXEMPT_FILENAMES.has(lowerName) || NEVER_EXEMPT_EXTENSIONS.has(paths.extname(lowerName));
+}
+
 /** Protection entries with every spelling the policy compares: as written and canonical. */
 interface ProtectionRoots {
 	readonly files: readonly string[];
@@ -256,8 +267,7 @@ export class CredentialPathPolicy {
 	}
 
 	private isNeverExemptCredentialFile(path: string): boolean {
-		const lowerName = this.paths.basename(path).toLowerCase();
-		return NEVER_EXEMPT_FILENAMES.has(lowerName) || NEVER_EXEMPT_EXTENSIONS.has(this.extension(path));
+		return isNeverExemptReadPath(path, this.flavor);
 	}
 
 	private isLexicallyProtectedToken(token: string, root: string): boolean {

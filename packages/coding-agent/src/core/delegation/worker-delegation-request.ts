@@ -303,6 +303,10 @@ export interface WorkerDelegationRequest {
 	isolation?: "shared" | "worktree";
 	/** Host-only: the rerun is a new attempt of this task (an escalation rung on a non-completed source). */
 	attemptOf?: { readonly taskId: string };
+	/** Host-only: the rerun is a successor task that supersedes this completed source task (`X1` escalation rung). */
+	supersedesTaskId?: string;
+	/** Host-only: outcome id of the escalation rung (`X1`/`X2`/`X3`), present even when the source agent was pruned (`X3`). */
+	escalationOutcomeId?: string;
 	/** Host-only durable authorization for a scheduled task; never exposed in the delegate schema. */
 	savedIntent?: WorkerSavedIntent;
 	/** Host-admitted task context for a fresh dispatch; never exposed in the model schema. */
@@ -378,13 +382,21 @@ export interface WorkerDelegationRequest {
  * ready: a step released while a third party's run happens to be in progress is still the owner's.
  */
 export function carriesOwnOrigin(request: WorkerDelegationRequest): boolean {
-	return Boolean(request.savedIntent || request.verificationOfTaskId || request.planStep);
+	return Boolean(
+		request.savedIntent ||
+			request.verificationOfTaskId ||
+			request.planStep ||
+			request.attemptOf ||
+			request.supersedesTaskId ||
+			request.escalationOutcomeId,
+	);
 }
 
 /**
  * Whether a request always starts its own worker and is never matched to a specialist's standing conversation. A verifier or a
  * review run keeps its independence. A child belongs to its parent agent. A third party's words never enter a conversation that
- * later owner work would read. A rung is a new attempt of its own source task. A plan step runs from its own self-contained
+ * later owner work would read. An escalation rung (`X1` successor, `X2` attempt rerun or `X3` unlinked rerun) runs on its own
+ * isolated worker rather than entering an idle specialist's standing conversation. A plan step runs from its own self-contained
  * brief beside its sibling steps: matched to a specialist that a sibling keeps busy, it would wait for that sibling to finish
  * instead of running in parallel.
  */
@@ -395,6 +407,8 @@ export function startsOwnWorker(request: WorkerDelegationRequest): boolean {
 			request.parentAgentId ||
 			request.turnOrigin?.thirdParty ||
 			request.attemptOf ||
+			request.supersedesTaskId ||
+			request.escalationOutcomeId ||
 			request.planStep,
 	);
 }

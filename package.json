@@ -48,7 +48,7 @@
 		"profile:growth": "node scripts/report-long-session-growth.mjs",
 		"profile:rpc": "node scripts/profile-coding-agent-node.mjs --mode rpc",
 		"test": "npm run check:harness-journeys",
-		"check:provider-regressions": "npm exec --workspace packages/ai -- vitest run test/provider-accounting.test.ts test/xai-oauth.test.ts test/anthropic-stream.test.ts test/antigravity-provider.test.ts && npm exec --workspace packages/coding-agent -- vitest run test/provider-request-secrets.test.ts",
+		"check:provider-regressions": "npm exec --workspace packages/ai -- vitest run test/provider-accounting.test.ts test/xai-oauth.test.ts test/anthropic-stream.test.ts test/antigravity-provider.test.ts test/command-code.test.ts && npm exec --workspace packages/coding-agent -- vitest run test/provider-request-secrets.test.ts test/command-code-usage.test.ts",
 		"version:patch": "npm version patch --workspaces --no-git-tag-version --workspaces-update=false && node scripts/sync-versions.js && npm install --package-lock-only --ignore-scripts",
 		"version:minor": "npm version minor --workspaces --no-git-tag-version --workspaces-update=false && node scripts/sync-versions.js && npm install --package-lock-only --ignore-scripts",
 		"version:major": "npm version major --workspaces --no-git-tag-version --workspaces-update=false && node scripts/sync-versions.js && npm install --package-lock-only --ignore-scripts",

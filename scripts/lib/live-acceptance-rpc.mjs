@@ -124,6 +124,8 @@ export function startPiAcceptanceRpc({
 	const waits = new Set();
 	let failure;
 	let closing = false;
+	let exited = false;
+	let closePromise;
 	const child = spawnProcess(
 		path.join(root, "pi-test.sh"),
 		[
@@ -200,6 +202,7 @@ export function startPiAcceptanceRpc({
 	child.stderr.on("data", (chunk) => stderr.write(chunk));
 	child.once("error", fail);
 	child.once("exit", (code, signal) => {
+		exited = true;
 		if (closing) return;
 		fail(new Error(`Pi RPC exited before acceptance completed (code ${code ?? "-"}, signal ${signal ?? "-"})`));
 	});
@@ -228,11 +231,40 @@ export function startPiAcceptanceRpc({
 		checkpoint: () => events.length,
 		send: (value) => child.stdin.write(`${JSON.stringify(value)}\n`),
 		waitForEvent,
-		close: () => {
-			if (closing) return;
+		close: ({ graceMs = 5_000 } = {}) => {
+			if (closePromise) return closePromise;
 			closing = true;
-			child.stdin.end();
-			child.kill("SIGTERM");
+			if (exited || typeof child.exitCode === "number" || typeof child.signalCode === "string") {
+				child.stdin.end();
+				closePromise = Promise.resolve();
+				return closePromise;
+			}
+			closePromise = new Promise((resolve) => {
+				let termTimer;
+				let killTimer;
+				let forceResolveTimer;
+				const finish = () => {
+					clearTimeout(termTimer);
+					clearTimeout(killTimer);
+					clearTimeout(forceResolveTimer);
+					child.removeListener("exit", finish);
+					resolve();
+				};
+				child.once("exit", finish);
+				const eofGraceMs = Math.min(500, Math.max(1, Math.floor(graceMs / 2)));
+				termTimer = setTimeout(() => {
+					child.kill("SIGTERM");
+					killTimer = setTimeout(() => {
+						child.kill("SIGKILL");
+						forceResolveTimer = setTimeout(finish, Math.max(100, Math.min(1_000, graceMs)));
+						forceResolveTimer.unref?.();
+					}, graceMs);
+					killTimer.unref?.();
+				}, eofGraceMs);
+				termTimer.unref?.();
+				child.stdin.end();
+			});
+			return closePromise;
 		},
 	};
 }

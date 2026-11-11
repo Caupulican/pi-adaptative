@@ -268,7 +268,7 @@ import { type ProviderAdmissionLedger, providerAdmissionDir } from "./provider-a
 import type { ProviderLimitStore } from "./provider-admission/limit-state.ts";
 import { buildProviderLoadView, type ProviderLoadView } from "./provider-admission/load-view.ts";
 import {
-	createSubscriptionAllowanceReader,
+	openSubscriptionAllowance,
 	type SubscriptionAllowancePort,
 } from "./provider-admission/subscription-allowance.ts";
 import { ProviderRequestRuntimeController } from "./provider-request-runtime-controller.ts";
@@ -1096,9 +1096,7 @@ export class AgentSession {
 			getLearningAuditRecords: () => this.getLearningAuditRecords(),
 		});
 		this._modelRegistry = config.modelRegistry;
-		this._subscriptionAllowance =
-			config.subscriptionAllowance ??
-			createSubscriptionAllowanceReader({ getRegistry: () => this._modelRegistry, getModel: () => this.model });
+		this._subscriptionAllowance = openSubscriptionAllowance(config, () => this.model);
 		this.hostTurnReasoning = new HostTurnReasoningController(() => this.settingsManager.getCheapTurnSettings());
 		this._costGuard = new CostGuardController({
 			getSettings: () => this.settingsManager.getCostGuardSettings(),

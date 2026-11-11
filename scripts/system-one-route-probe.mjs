@@ -30,7 +30,12 @@ const fitnessStore = FitnessStore.forAgentDir(agentDir);
 const adaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
 const controller = liveSystemOneController("system-one-route-probe");
 const service = new ExpertSelectionService(
-	new ExpertCatalog({ modelRegistry: registry, fitnessStore, adaptationStore }),
+	new ExpertCatalog({
+		modelRegistry: registry,
+		getCandidateModels: () => registry.getAvailable(),
+		fitnessStore,
+		adaptationStore,
+	}),
 	new ExpertAdmissionPolicy(),
 	new ExpertFeatureBuilder({ fitnessStore, adaptationStore }),
 	new ExpertRankingPolicy(),

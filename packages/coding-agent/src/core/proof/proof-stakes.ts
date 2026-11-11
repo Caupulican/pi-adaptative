@@ -232,10 +232,10 @@ const PYTHON_OPERATION_FACTS: readonly { readonly pattern: RegExp; readonly fact
 	{ pattern: /\bpip3?\s+install\b|-m\s+pip\s+install\b/u, fact: "a python script installed packages (pip install)" },
 ];
 /**
- * Where an `open(` call starts; its arguments follow the parenthesis (see {@link callArguments}). `os.open` is not one: its
- * second argument is integer flags, not a mode string.
+ * Where a builtin or `io` `open(` call starts; its arguments follow the parenthesis (see {@link callArguments}). `os.open`
+ * takes integer flags rather than a mode string, and object methods (`Image.open`, `webbrowser.open`) are not file-mode opens.
  */
-const OPEN_CALL_START = /(?<!\bos\.)\bopen\s*\(/gu;
+const OPEN_CALL_START = /(?<![.\w])(?:(?:io|builtins)\.)?open\s*\(/gu;
 /** A whole quoted string literal (`'w'`, `"rb"`): the only form of a mode argument the host reads. */
 const MODE_STRING_LITERAL = /^(?:"[^"]*"|'[^']*')$/u;
 /** The `mode=` keyword and its equals sign, in front of a keyword mode argument. */
@@ -258,26 +258,105 @@ export interface PythonCodeFacts {
 }
 
 /**
+ * Blanks python comments (`#` to end of line) and quoted string literals (`'...'`, `"..."`, `'''...'''`, `"""..."""`) to
+ * spaces while keeping every character offset and newline intact, so `open(` inside a string or comment matches nothing while
+ * a real call's offset still indexes into `code`. An unterminated single-line quote ends at its line break.
+ */
+function blankPythonNonCode(code: string): string {
+	let out = "";
+	for (let index = 0; index < code.length; index++) {
+		const char = code[index] as string;
+		if (char === "#") {
+			while (index < code.length && code[index] !== "\n") {
+				out += " ";
+				index++;
+			}
+			if (index < code.length) out += "\n";
+			continue;
+		}
+		if (char === '"' || char === "'") {
+			const triple = code[index + 1] === char && code[index + 2] === char;
+			if (triple) {
+				out += "   ";
+				index += 3;
+			} else {
+				out += " ";
+				index++;
+			}
+			while (index < code.length) {
+				const inner = code[index] as string;
+				if (inner === "\\" && index + 1 < code.length) {
+					const escaped = code[index + 1] as string;
+					out += escaped === "\n" ? " \n" : "  ";
+					index += 2;
+					continue;
+				}
+				if (triple) {
+					if (inner === char && code[index + 1] === char && code[index + 2] === char) {
+						out += "   ";
+						index += 2;
+						break;
+					}
+					out += inner === "\n" ? "\n" : " ";
+					index++;
+					continue;
+				}
+				if (inner === char) {
+					out += " ";
+					break;
+				}
+				if (inner === "\n") {
+					out += "\n";
+					break;
+				}
+				out += " ";
+				index++;
+			}
+			continue;
+		}
+		out += char;
+	}
+	return out;
+}
+
+/**
  * The top-level arguments of a call whose argument list starts at `start` (just past its opening parenthesis), read to the
- * matching closing parenthesis. Brackets and braces nest, and a quoted literal is read whole, so a parenthesis inside a
- * string nests nothing. A call left open reads to the end of the code.
+ * matching closing parenthesis. Brackets and braces nest, comments are skipped, and a quoted literal is read whole, so a
+ * parenthesis or comma inside a string or comment nests or splits nothing. A call left open reads to the end of the code.
  */
 function callArguments(code: string, start: number): string[] {
 	const args: string[] = [];
 	let current = "";
 	let depth = 0;
 	let quote: string | undefined;
+	let triple = false;
 	for (let index = start; index < code.length; index++) {
 		const char = code[index] as string;
 		if (quote !== undefined) {
 			current += char;
 			if (char === "\\" && index + 1 < code.length) current += code[++index];
-			else if (char === quote) quote = undefined;
+			else if (triple && char === quote && code[index + 1] === quote && code[index + 2] === quote) {
+				current += quote + quote;
+				index += 2;
+				quote = undefined;
+				triple = false;
+			} else if (!triple && (char === quote || char === "\n")) quote = undefined;
+			continue;
+		}
+		if (char === "#") {
+			while (index + 1 < code.length && code[index + 1] !== "\n") index++;
 			continue;
 		}
 		if (char === ")" && depth === 0) break;
-		if (char === '"' || char === "'") quote = char;
-		else if (char === "(" || char === "[" || char === "{") depth++;
+		if (char === '"' || char === "'") {
+			quote = char;
+			triple = code[index + 1] === char && code[index + 2] === char;
+			if (triple) {
+				current += char + char + char;
+				index += 2;
+				continue;
+			}
+		} else if (char === "(" || char === "[" || char === "{") depth++;
 		else if (char === ")" || char === "]" || char === "}") depth = Math.max(0, depth - 1);
 		if (char === "," && depth === 0) {
 			args.push(current.trim());
@@ -295,7 +374,8 @@ function callArguments(code: string, start: number): string[] {
  * read literal is no fact. Other arguments (an `encoding=` value) are not the mode.
  */
 function opensForWriting(code: string): boolean {
-	for (const call of code.matchAll(OPEN_CALL_START)) {
+	const scrubbed = blankPythonNonCode(code);
+	for (const call of scrubbed.matchAll(OPEN_CALL_START)) {
 		const args = callArguments(code, (call.index ?? 0) + call[0].length);
 		const second = args[1];
 		const modes = [

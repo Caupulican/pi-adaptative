@@ -11,7 +11,7 @@ import {
 import { resolveInstalledManagedTool } from "../../utils/tools-manager.ts";
 import type { ToolDecision } from "../autonomy-status/tool-manifest.ts";
 import type { ArtifactStore } from "../context/context-artifacts.ts";
-import type { PathAliasTable } from "../context/path-alias-table.ts";
+import { expandParams, type PathAliasTable } from "../context/path-alias-table.ts";
 import { wrapToolWithPathAliasExpansion } from "../context/path-alias-tool-wrap.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import { settleIndependentLifecycle } from "../lifecycle-settlement.ts";
@@ -42,6 +42,7 @@ import {
 	isProtectedCredentialPath,
 	wrapToolWithCredentialExposureGuard,
 } from "../secrets/credential-exposure-guard.ts";
+import { createCredentialPathPolicy } from "../secrets/native-credential-path-probe.ts";
 import { matchesResourceProfilePattern } from "../settings/settings-rules.ts";
 import { wrapToolWithVerification } from "../system-one/session-verification-host.ts";
 import type { VerificationCoordinator } from "../system-one/verification-coordinator.ts";
@@ -309,12 +310,18 @@ function createLaneTools(
 			"grep",
 			() => {
 				// A judgment that cannot be made skips the file: a skipped file is reported nowhere, a read one is exposed.
+				const readPolicy = createCredentialPathPolicy(
+					cwd,
+					privatePathBoundary,
+					undefined,
+					privatePathBoundary?.getPathProbe?.(),
+				).asReadOnly();
 				const verdicts = new Map<string, boolean>();
 				const excludeFile = (file: string): boolean => {
 					let verdict = verdicts.get(file);
 					if (verdict === undefined) {
 						try {
-							verdict = isProtectedCredentialPath(file, cwd, privatePathBoundary);
+							verdict = readPolicy.isProtected(file);
 						} catch {
 							verdict = true;
 						}
@@ -469,10 +476,6 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	// with the parent's command runs and writes (a lane's write waits for the parent's running
 	// build), while a lane in its own worktree shares nothing (see tools/file-mutation-queue.ts).
 	const mutationScope = mutationScopeForWorktree(options.cwd);
-	const fileMutationIntents = new FileMutationIntentController({
-		mutationScope,
-		...(options.shellSessionKey ? { mutationAnnouncer: options.shellSessionKey } : {}),
-	});
 	// YOLO widens a lane to every tool except where the lane is read-only: that is the parent's promise.
 	const yoloWrites = options.yolo === true && options.readOnly !== true;
 	const writeCapable = yoloWrites || (options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0);
@@ -564,6 +567,10 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	if (!options.yolo && options.grant?.allowedTools.some((name) => !manifestsByName.has(name))) {
 		throw new Error("Compiled lane grant references a tool without a capability manifest.");
 	}
+	const fileMutationIntents = new FileMutationIntentController({
+		mutationScope,
+		...(options.shellSessionKey ? { mutationAnnouncer: options.shellSessionKey } : {}),
+	});
 	// A worker's commands run in the worker run environment (per-worker temp directory, no inherited
 	// credentials, an ownership marker): disposal ends every process still carrying the marker and removes
 	// the scratch directory, so a shell lane leaves nothing behind.
@@ -601,13 +608,19 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	// The project's own `.pi/settings.json` stays denied to direct reads, but it is a project file a
 	// recursive project search may pass through; everything else denied is harness storage.
 	const projectSettingsPath = path.resolve(projectLaneSettingsPath(options.cwd));
-	// The lane's grep tool skips every protected file a directory search reaches (`excludeFile` below), so the
-	// boundary admits such a search without a file filter.
-	const laneBoundary: CredentialExposureBoundary = privatePathBoundary(deniedPaths, options.cwd);
+	// The lane's grep tool skips every protected file a directory search reaches (`excludeFile` above), so the
+	// boundary admits such a search without a file filter; process lanes scope spills to their own scratch directory
+	// and exempt provably observational reads of that scratch directory without exposing `<workRoot>` or sibling lanes.
+	const laneBoundary: CredentialExposureBoundary = {
+		...privatePathBoundary(deniedPaths, options.cwd),
+		...(runEnvironment ? { toolStreamsDirectory: runEnvironment.scratchDirectory } : {}),
+		...(scratchRoots.length > 0 ? { exemptReadDirectories: scratchRoots } : {}),
+	};
 	const readEnvelope: CapabilityEnvelope = {
 		id: "isolated-lane-read-tools",
 		capabilities: [
 			"filesystem.read",
+			...(allowedToolSet.has("repo_read") ? (["repo.read"] as const) : []),
 			...(WORKER_MEMORY_BROKER_TOOL_NAMES.some((name) => allowedToolSet.has(name))
 				? (["memory.query"] as const)
 				: []),
@@ -620,6 +633,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		allowedTools,
 		deniedTools,
 		allowedPaths: [path.resolve(options.cwd), ...scratchRoots],
+		...(scratchRoots.length > 0 ? { exemptReadPaths: scratchRoots } : {}),
 		...(deniedPaths && deniedPaths.length > 0 ? { deniedPaths } : {}),
 	};
 	const writeProtectionEnvelope: CapabilityEnvelope | undefined =
@@ -674,7 +688,12 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	const readScope: SessionReadScope | undefined =
 		readScopeRoots === undefined
 			? undefined
-			: { cwd: options.cwd, readRoots: [...readScopeRoots, ...scratchRoots], deniedPaths: deniedPaths ?? [] };
+			: {
+					cwd: options.cwd,
+					readRoots: [...readScopeRoots, ...scratchRoots],
+					deniedPaths: deniedPaths ?? [],
+					...(scratchRoots.length > 0 ? { exemptReadPaths: scratchRoots } : {}),
+				};
 
 	const admission = new LaneToolAdmission({
 		cwd: options.cwd,
@@ -702,7 +721,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					...options.sharedToolOptions?.bash,
 					spawnHook: runEnvironment.spawnHook,
 					outputDirectory: runEnvironment.scratchDirectory,
-					outputReadableByShellOnly: true,
+					outputReadableByShellOnly: !allowedToolSet.has("read"),
 				},
 				python: {
 					...options.sharedToolOptions?.python,
@@ -733,42 +752,60 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				find: { ...processToolOptions?.find, ...installedToolsOnly },
 			}
 		: processToolOptions;
-	// A lookup request or a script's tool call runs through the lane's final tools (path aliases, credential guard, task
-	// binding and the execution admission above all inside their `execute`), resolved late because the lookup and
-	// python tools are among them. A tool the lane did not materialize does not resolve, so it is refused.
+	// A lookup request or a script's tool call runs through the lane's watched, path-alias-expanded tools (credential
+	// guard, task binding and protected-path watch inside their `execute`, without top-level call attribution), resolved
+	// late because lookup and python are among them. A tool the lane did not materialize does not resolve, so it is refused.
+	const getPathAliasTable = options.getPathAliasTable;
 	let laneToolsByName: ReadonlyMap<string, AgentTool> = new Map();
 	const nestedHost: NestedCallHost = {
 		resolveTool: (name) => laneToolsByName.get(name),
 		admit: async (_parentToolCallId, call, signal) => {
+			if (call.toolName === LOOKUP_TOOL_NAME || call.toolName === "python") {
+				return { kind: "refused", reason: `${call.toolName} cannot run as a sub-call of another tool call` };
+			}
+			const args = getPathAliasTable ? expandParams(getPathAliasTable(), call.args, true) : call.args;
 			// The same checks a standalone call faces (grant, budget, edge, path), with no attribution of the sub-call of its own.
-			const refused = await admission.admitNested(call.toolName, call.args, signal);
+			const refused = await admission.admitNested(call.toolName, args, signal);
+			signal?.throwIfAborted();
+			toolUsage.assertOpen();
+			admission.assertHealthy();
 			if (refused?.block) return { kind: "refused", reason: refused.reason ?? "refused by this lane's tool policy" };
 			return {
 				kind: "admitted",
-				start() {},
+				start() {
+					signal?.throwIfAborted();
+					toolUsage.assertOpen();
+					admission.assertHealthy();
+				},
 				finish: async (result, isError) => ({ content: result.content, isError }),
 				abandon() {},
 			};
 		},
 	};
-	const rawTools = createLaneTools(
-		options.cwd,
-		allowedTools,
-		fileMutationIntents,
-		mutationScope,
-		toolUsage,
-		laneBoundary,
-		options.memoryBroker,
-		options.memoryReadOptions,
-		options.executionPolicy,
-		options.processMaxWallClockMs,
-		options.shellSessionKey,
-		options.workerToolAdapters,
-		options.bindTool,
-		sharedToolOptions,
-		nestedHost,
-	);
-	const getPathAliasTable = options.getPathAliasTable;
+	let rawTools: AgentTool[];
+	try {
+		rawTools = createLaneTools(
+			options.cwd,
+			allowedTools,
+			fileMutationIntents,
+			mutationScope,
+			toolUsage,
+			laneBoundary,
+			options.memoryBroker,
+			options.memoryReadOptions,
+			options.executionPolicy,
+			options.processMaxWallClockMs,
+			options.shellSessionKey,
+			options.workerToolAdapters,
+			options.bindTool,
+			sharedToolOptions,
+			nestedHost,
+		);
+	} catch (error) {
+		runEnvironment?.dispose();
+		fileMutationIntents.dispose();
+		throw error;
+	}
 	const wrappedTools = new WeakSet<AgentTool>();
 	const protectedPathWatch = options.protectedPathWatch;
 	// Process tools are host-trust boundaries (see protected-path-watch.ts): each call runs between two
@@ -805,8 +842,14 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				wrapToolWithPathAliasExpansion(tool, getPathAliasTable, wrappedTools, () => options.cwd),
 			)
 		: admittedTools;
+	const nestedWrappedTools = new WeakSet<AgentTool>();
+	const nestedTools = getPathAliasTable
+		? watchedTools.map((tool) =>
+				wrapToolWithPathAliasExpansion(tool, getPathAliasTable, nestedWrappedTools, () => options.cwd),
+			)
+		: watchedTools;
 
-	laneToolsByName = new Map(tools.map((tool) => [tool.name, tool]));
+	laneToolsByName = new Map(nestedTools.map((tool) => [tool.name, tool]));
 
 	return {
 		tools,

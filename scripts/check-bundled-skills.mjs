@@ -56,10 +56,34 @@ const limits = {
 	race: numericConstant(fanoutHeader, "MAX_FANOUT_RACE_CANDIDATES"),
 };
 
-/** Claims that mirror a constant: each pattern captures the claimed upper bound in its last group. */
+/**
+ * Claims that mirror a constant: each pattern captures the claimed upper bound in its last group. Action names must be
+ * backticked (`\`slices\``, `\`race\``) or anchored to a `delegate` / `fan-out` clause so ordinary English prose ("2 to 4
+ * slices", "up to 3 candidates") does not collide with the fan-out constant check.
+ */
 const claimPatterns = [
-	{ label: "slices", limit: limits.slices, patterns: [/\bslices?`?\s*\(?\s*(\d+)\s*(?:to|-|–|through)\s*(\d+)/gi, /\bslices?`?\s+(?:up to|max(?:imum)?(?: of)?)\s+(\d+)/gi, /\bup to\s+(\d+)\s+slices/gi] },
-	{ label: "race", limit: limits.race, patterns: [/\brace`?\s*\(?\s*(\d+)\s*(?:to|-|–|through)\s*(\d+)/gi, /\brace`?\s+(?:up to|max(?:imum)?(?: of)?)\s+(\d+)/gi, /\bup to\s+(\d+)\s+(?:race )?candidates/gi] },
+	{
+		label: "slices",
+		limit: limits.slices,
+		patterns: [
+			/`slices`\s*\(?\s*(\d+)\s*(?:to|-|–|through)\s*(\d+)/gi,
+			/`slices`\s+(?:up to|max(?:imum)?(?: of)?)\s+(\d+)/gi,
+			/\b(?:`delegate`|delegate|fan[- ]out)\b[^.\n]{0,120}?(?<!`)\bslices(?!`)\s*\(?\s*(\d+)\s*(?:to|-|–|through)\s*(\d+)/gi,
+			/\b(?:`delegate`|delegate|fan[- ]out)\b[^.\n]{0,120}?(?<!`)\bslices(?!`)\s+(?:up to|max(?:imum)?(?: of)?)\s+(\d+)/gi,
+			/\b(?:`delegate`|delegate|fan[- ]out)\b[^.\n]{0,120}?\bup to\s+(\d+)\s+`?slices`?(?:\b|`)/gi,
+		],
+	},
+	{
+		label: "race",
+		limit: limits.race,
+		patterns: [
+			/`race`\s*\(?\s*(\d+)\s*(?:to|-|–|through)\s*(\d+)/gi,
+			/`race`\s+(?:up to|max(?:imum)?(?: of)?)\s+(\d+)/gi,
+			/\b(?:`delegate`|delegate|fan[- ]out)\b[^.\n]{0,120}?(?<!`)\brace(?!`)\s*\(?\s*(\d+)\s*(?:to|-|–|through)\s*(\d+)/gi,
+			/\b(?:`delegate`|delegate|fan[- ]out)\b[^.\n]{0,120}?(?<!`)\brace(?!`)\s+(?:up to|max(?:imum)?(?: of)?)\s+(\d+)/gi,
+			/\bup to\s+(\d+)\s+`?race`?\s+candidates\b/gi,
+		],
+	},
 ];
 
 const registry = toolRegistry();

@@ -21,10 +21,15 @@ import type { DailyUsageTotals } from "../cost/daily-usage.ts";
 import { workerAgentMessageId } from "../delegation/worker-agent-control.ts";
 import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
 import { projectWorkerLaneRecord } from "../delegation/worker-lane-projection.ts";
-import type { CiAttemptTerminalEvent } from "../events/host-event-contract.ts";
+import {
+	type CiAttemptTerminalEvent,
+	ciEventSubject,
+	ciSubjectKey,
+	ciThreadKey,
+} from "../events/host-event-contract.ts";
 import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
-import type { RoutineHostEventFeed } from "../routines/routine-contract.ts";
+import type { RoutineHostEventFact, RoutineHostEventFeed } from "../routines/routine-contract.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import type { ResolvedActAheadSettings } from "../settings/settings-schema.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -245,10 +250,10 @@ export class ActAheadController {
 		if (!settings.enabled || !this.deps.canDispatch()) return;
 		const handled = new Set([...episodes.values()].map((episode) => episode.records[0]!.eventId));
 		const now = this.deps.now();
-		const candidate = this.deps.hostEvents
-			.feed()
-			.events.filter(
-				(fact) =>
+		const events = this.deps.hostEvents.feed().events;
+		const candidate = events
+			.filter(
+				(fact): fact is RoutineHostEventFact & { readonly event: CiAttemptTerminalEvent } =>
 					fact.ready &&
 					fact.current &&
 					fact.rootApplicable &&
@@ -256,21 +261,23 @@ export class ActAheadController {
 					(fact.event.conclusion === "failure" || fact.event.conclusion === "timed_out") &&
 					now - Date.parse(fact.event.observedAt) <= MAX_EVENT_AGE_MS &&
 					!handled.has(fact.event.eventId) &&
-					!this.unworkable.has(fact.event.eventId),
+					!this.unworkable.has(fact.event.eventId) &&
+					!supersededByPassingCi(fact.event, fact.acceptedOrdinal, events),
 			)
 			.sort((a, b) => b.acceptedOrdinal - a.acceptedOrdinal)[0];
-		if (candidate?.event.kind !== "ci-attempt-terminal") return;
+		if (!candidate) return;
 		// The owner's session stays authoritative: nothing starts while the owner's turn runs.
 		if (this.deps.isForegroundBusy()) return;
-		await this.begin(candidate.event, settings, episodes);
+		await this.begin(candidate, settings, episodes);
 	}
 
 	/** Starts an episode for one failed attempt: bounds, evidence, lane, first check, worker. */
 	private async begin(
-		event: CiAttemptTerminalEvent,
+		candidate: RoutineHostEventFact & { readonly event: CiAttemptTerminalEvent },
 		settings: ResolvedActAheadSettings,
 		episodes: ReadonlyMap<string, Episode>,
 	): Promise<void> {
+		const { event } = candidate;
 		const signal = this.abort.signal;
 		const base = { episode: actAheadEpisodeId(event.eventId), eventId: event.eventId, headSha: event.headSha };
 		// A checkout acting ahead cannot work in (worktree-sync off, not a git repository) has no episode: nothing is
@@ -286,7 +293,11 @@ export class ActAheadController {
 			timeout: GIT_TIMEOUT_MS,
 			signal,
 		});
-		if (head.code !== 0 || head.stdout.trim() !== event.headSha)
+		if (
+			head.code !== 0 ||
+			head.stdout.trim() !== event.headSha ||
+			supersededByPassingCi(event, candidate.acceptedOrdinal, this.deps.hostEvents.feed().events)
+		)
 			return this.append({ ...base, phase: "abandoned", reason: "superseded" });
 		if (await this.overDayBound(settings)) return this.append({ ...base, phase: "capped", reason: "day_bound" });
 		let evidence: CiFailureEvidence | undefined;
@@ -519,6 +530,35 @@ export class ActAheadController {
 			return undefined;
 		}
 	}
+}
+
+/**
+ * Whether a later accepted CI run on the same workflow thread already passed (and was not itself followed by a failing
+ * attempt on that subject), so fixing the earlier failure would duplicate an already-fixed workflow.
+ */
+function supersededByPassingCi(
+	event: CiAttemptTerminalEvent,
+	acceptedOrdinal: number,
+	events: readonly RoutineHostEventFact[],
+): boolean {
+	const threadKey = ciThreadKey(ciEventSubject(event));
+	return events.some((later) => {
+		if (
+			later.acceptedOrdinal <= acceptedOrdinal ||
+			later.event.kind !== "ci-attempt-terminal" ||
+			later.event.conclusion !== "success" ||
+			ciThreadKey(ciEventSubject(later.event)) !== threadKey
+		)
+			return false;
+		const laterSubject = ciSubjectKey(ciEventSubject(later.event));
+		return !events.some(
+			(after) =>
+				after.acceptedOrdinal > later.acceptedOrdinal &&
+				after.event.kind === "ci-attempt-terminal" &&
+				after.event.conclusion !== "success" &&
+				ciSubjectKey(ciEventSubject(after.event)) === laterSubject,
+		);
+	});
 }
 
 /**

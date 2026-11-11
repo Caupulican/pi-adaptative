@@ -225,7 +225,9 @@ export function parseContinuousChatNavigationCommand(
 	}
 	const n = args.n;
 	if (!isNonNegativeSafeInteger(n) || n === 0) {
-		return invalidArguments("zoom with a message id requires n, a positive safe integer.");
+		return invalidArguments(
+			`zoom with a message id requires n, a positive safe integer (use n: 1 for message ${id}, or a power of two where id is a multiple of n).`,
+		);
 	}
 	return { tool: "zoom", kind: "node", id, n, page };
 }
@@ -324,8 +326,19 @@ export class ContinuousChatNavigator {
 		context?: MemoryReadContext,
 	): Promise<ContinuousChatNavigationResult> {
 		const level = Math.round(Math.log2(n));
-		if (2 ** level !== n) return rejected("not-power-of-two", `n must be a power of two, got ${n}.`);
-		if (id % n !== 0) return rejected("misaligned", `id ${id} is not a multiple of n ${n}.`);
+		if (2 ** level !== n) {
+			return rejected(
+				"not-power-of-two",
+				`n must be a power of two, got ${n} (use n: 1 for message ${id}, or a power-of-two block where id is a multiple of n).`,
+			);
+		}
+		if (id % n !== 0) {
+			const alignedId = id - (id % n);
+			return rejected(
+				"misaligned",
+				`id ${id} is not a multiple of n ${n} (use id: ${alignedId}, n: ${n} for that block, or id: ${id}, n: 1 for message ${id}).`,
+			);
+		}
 		if (!Number.isSafeInteger(id + n - 1)) {
 			return rejected("out-of-range", `Line ${id}+${n} exceeds the safe message-id range.`);
 		}

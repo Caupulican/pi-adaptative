@@ -1,7 +1,10 @@
 import "../builtin-install.ts";
+import { loadPhoton } from "../../../../src/utils/photon.ts";
 import { runJourney4AwayChannelsPhase, runJourney4ChannelsPhase } from "./journey-4-channels.ts";
 import { runJourney4GmailPhase } from "./journey-4-gmail.ts";
 import { runJourney4OrchestrationGatePhase } from "./journey-4-orchestration-gate.ts";
+import { runJourney4PiToolsBridgePhase } from "./journey-4-pi-tools-bridge.ts";
+import { runJourney4RoutineProgressPhase } from "./journey-4-routine-progress.ts";
 import { runJourney4SlackPhase } from "./journey-4-slack.ts";
 import { runJourney4SystemOneToolPhase } from "./journey-4-systemone-tool.ts";
 import {
@@ -22,10 +25,14 @@ import { runJourney4WatchPhase } from "./journey-4-watch.ts";
 import { LIMITS_PATH, runJourney } from "./shared.ts";
 
 export async function runJourney4(): Promise<void> {
+	// Preload Photon's WASM module before the world's virtual filesystem guard activates so System One vision
+	// prepares images strictly in memory inside the guarded world.
+	await loadPhoton();
 	await runJourney(
 		{
 			name: "journey-4",
 			journey: 4,
+			virtualNetwork: true,
 			// Orchestration enabled: the root orchestrates and its workers carry out the work (the other journeys run the root directly).
 			settings: { orchestrator: { delegationGate: true } },
 			warningAllowances: [
@@ -46,6 +53,8 @@ export async function runJourney4(): Promise<void> {
 			await runJourney4SlackPhase(world);
 			await runJourney4GmailPhase(world);
 			await runJourney4SystemOneToolPhase(world);
+			await runJourney4PiToolsBridgePhase(world);
+			await runJourney4RoutineProgressPhase(world);
 			await runJourney4WatchPhase(world);
 			// Last: it advances the clock of the channels' alarm, which every session of the world shares.
 			await runJourney4TelegramWaitingPhase(world);

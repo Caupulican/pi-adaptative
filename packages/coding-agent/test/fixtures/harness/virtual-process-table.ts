@@ -95,6 +95,14 @@ export class VirtualProcessTable {
 	signal(pid: number, signal?: NodeJS.Signals | number): boolean {
 		this.probes.push({ pid, signal });
 		if (signal !== 0) return this.deliverToOwnedChild(pid, signal);
+		if (pid < 0) {
+			const id = Math.abs(pid);
+			const live = this.active.get(id);
+			if (live?.detached === true) return true;
+			if (this.closed.has(id) || live?.detached === false) {
+				throw Object.assign(new Error(`Virtual process group ${pid} is dead`), { code: "ESRCH" });
+			}
+		}
 		const state = this.states.get(pid) ?? "unknown";
 		if (state === "alive") return true;
 		throw Object.assign(new Error(`Virtual process ${pid} is ${state}`), {

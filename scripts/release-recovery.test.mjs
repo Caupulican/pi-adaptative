@@ -88,19 +88,22 @@ test("a changed or missing CI revision, or branch switch, prevents every mutatio
 	}
 });
 
-test("prepare, repair and adoption all receive the validated main CI revision", () => {
+test("prepare, repair and adoption all fence mutations on the preflight revision and reject red main CI", () => {
 	const release = readFileSync(new URL("./release.mjs", import.meta.url), "utf8");
-	assert.match(release, /prepareRelease\(validatedSha\)/);
-	assert.match(release, /prepareReleaseRepair\(validatedSha\)/);
-	assert.match(release, /adoptRelease\(validatedSha\)/);
-	assert.equal((release.match(/const validatedSha = await requireGreenMainCi\(\)/g) ?? []).length, 3);
-	assert.match(release, /assertReleaseSourceIdentity\(validatedSha, source\)/);
+	const recovery = readFileSync(new URL("./release-recovery.mjs", import.meta.url), "utf8");
+	assert.equal((release.match(/const preflightSha = preflight\(/g) ?? []).length, 3);
+	assert.match(release, /const source = getReleaseSource\(\);\s*rejectRedMainCi\(source\.sha\);\s*[\s\S]*?return source\.sha;/);
+	assert.match(release, /const decision = mainCiGateDecision\(runs, sha\);\s*if \(decision\.verdict === "red"\)/);
+	assert.match(recovery, /assertReleaseSourceIdentity\(checkpoint\.sha, readSource\(\)\);/);
 });
 
-test("promotion reports workflow evidence without claiming tests or published artifacts", () => {
+test("promotion delegates CI verification to the tag quality-gate without claiming published artifacts", () => {
 	const release = readFileSync(new URL("./release.mjs", import.meta.url), "utf8");
-	assert.match(release, /destructive\.yml workflow gate succeeded/);
-	assert.match(release, /this does not establish test coverage/);
+	const buildWorkflow = readFileSync(new URL("../.github/workflows/build-binaries.yml", import.meta.url), "utf8");
+	assert.match(release, /exact-tag GitHub platform\/provider and artifact gates remain required/);
+	assert.match(release, /the tag's quality-gate runs the full ci\.yml on it before any asset is published/);
 	assert.match(release, /standalone artifact publication remains gated/);
-	assert.doesNotMatch(release, /Destructive suite (?:succeeded|did not succeed)|=== Released/);
+	assert.doesNotMatch(release, /destructive\.yml|Destructive suite (?:succeeded|did not succeed)|=== Released/);
+	assert.match(buildWorkflow, /quality-gate:[\s\S]*?uses: \.\/\.github\/workflows\/ci\.yml[\s\S]*?release_verification: true/);
+	assert.match(buildWorkflow, /release:[\s\S]*?needs: \[quality-gate, build, release-provenance, verify-release-binary-performance\]/);
 });

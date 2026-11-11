@@ -81,6 +81,10 @@ export function placedJobTerminal(record: PlacerJobRecord): PlacedJobTerminal | 
 		if (status === "failed" && blockerCode === "time_exhausted") {
 			return { status: "timeout", reasonCode: "timeout", summary };
 		}
+		// An executor's job-level deadline stop arrives as `blocked` (or `failed` from a nested deadline) with `deadline_reached`.
+		if ((status === "blocked" || status === "failed") && blockerCode === "deadline_reached") {
+			return { status: "timeout", reasonCode: "remote_deadline", summary };
+		}
 		return {
 			status: OUTCOME_LANE_STATUS[status],
 			...(blockerCode && blockerCode !== "none" ? { reasonCode: `remote_reported:${blockerCode}` } : {}),

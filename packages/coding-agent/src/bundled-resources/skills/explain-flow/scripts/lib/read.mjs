@@ -49,3 +49,10 @@ export function readOneOf(value, allowed, path, problems, fallback) {
 	}
 	return value;
 }
+
+/** Reads a 1-based `round` and intra-round `at` second from `entry` and returns `{ round, at, time }` (0-based `round`). */
+export function readPeriodMoment(entry, path, problems, rounds, loop) {
+	const round = readNumber(entry.round, `${path}.round`, problems, { min: 1, max: rounds, fallback: 1, integer: true });
+	const at = readNumber(entry.at, `${path}.at`, problems, { min: 0, max: loop, fallback: 0 });
+	return { round: round - 1, at, time: (round - 1) * loop + at };
+}

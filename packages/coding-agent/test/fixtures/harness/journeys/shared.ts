@@ -901,10 +901,9 @@ export function durableGoalEvidenceIds(sessionManager: SessionManager): string[]
  * evidence key, so the payload carries that evidence once; the first such item's key holds it.
  */
 export function evidenceKeyOf(request: SystemOneDecodedRequest, index: string): string | undefined {
-	const instructions =
-		request.questions[`shows_true_${index}`]?.instructions ??
-		request.questions[`shows_false_${index}`]?.instructions ??
-		"";
+	const raw =
+		request.questions[`shows_true_${index}`]?.instructions ?? request.questions[`shows_false_${index}`]?.instructions;
+	const instructions = typeof raw === "string" ? raw : "";
 	return /`(e\d+)`/.exec(instructions)?.[1];
 }
 
@@ -923,7 +922,7 @@ export function checkCompletionItems(
 		const shown = /^shows_(?:true|false)_(\d+)$/.exec(id);
 		if (shown === null) continue;
 		const index = shown[1];
-		const instructions = question.instructions ?? "";
+		const instructions = typeof question.instructions === "string" ? question.instructions : "";
 		const evidenceKey = /`(e\d+)`/.exec(instructions)?.[1];
 		if (!instructions.includes(`\`s${index}\``) || evidenceKey === undefined) {
 			throw new Error(`question ${id} does not name s${index} and an evidence key in its instructions`);

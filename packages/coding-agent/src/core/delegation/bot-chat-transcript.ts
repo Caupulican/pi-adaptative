@@ -7,6 +7,7 @@
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { workerControlOf } from "../../kernel/worker-control-stamp.ts";
+import { isModelFacingText } from "../../presentation/plain-text.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { RemoteHubController } from "../remote/hub-controller.ts";
 import type { BotRuntimeBindings } from "./bot-runtime-bindings.ts";
@@ -108,7 +109,9 @@ export class BotChatTranscript {
 						shown.push(msg);
 						continue;
 					}
-					const text = botChatOperatorText(msg, workerControlOf(msg));
+					const control = workerControlOf(msg);
+					const text = botChatOperatorText(msg, control);
+					if (!control?.body && isModelFacingText(text)) continue;
 					// A follow-up reaches the bot twice, as its wake task and as its mailbox message: one line in the chat.
 					const previous = shown.at(-1);
 					if (previous?.role === "user" && previous.timestamp !== undefined && msg.timestamp !== undefined) {

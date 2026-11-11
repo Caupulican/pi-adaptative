@@ -50,6 +50,7 @@ import type { OllamaRuntime, TransformersRuntime } from "../../core/models/local
 import { planStepByAttempt } from "../../core/plan/plan-panel.ts";
 import { namedPlanViews } from "../../core/plan/plan-views-named.ts";
 import { REPLY_ROUTE_CUSTOM_TYPE, type ReplyRouteRecord } from "../../core/reply-route.ts";
+import { boundedRedactedDiagnosticText } from "../../core/security/secret-text.ts";
 import { formatMissingSessionCwdPrompt, type MissingSessionCwdError } from "../../core/session-cwd.ts";
 import { SessionImageStore } from "../../core/session-image-store.ts";
 import { getSessionRole } from "../../core/session-role.ts";
@@ -63,10 +64,12 @@ import { collectSelfModificationSourceCandidates } from "../../core/system-promp
 import { describeCause, type TerminalWarnings } from "../../core/terminal-warnings.ts";
 import { isRecordObject } from "../../core/util/value-guards.ts";
 import type { SessionContext, SessionManager, TruncationResult } from "../../kernel/node.ts";
+import { ownerInputIdOf } from "../../kernel/owner-input-stamp.ts";
 import { turnOriginStampOf } from "../../kernel/turn-origin-stamp.ts";
 import type { AgentMessage, ToolCallRepairInfo } from "../../kernel/types.ts";
 import * as clipboardInput from "../../presentation/clipboard-input.ts";
 import { formatKeyText, keyDisplayText, keyText } from "../../presentation/keybinding-hints.ts";
+import { isModelFacingText } from "../../presentation/plain-text.ts";
 import {
 	initTheme,
 	onThemeChange,
@@ -2082,48 +2085,37 @@ export class InteractiveMode {
 				break;
 			}
 			case "user": {
-				this.replyBylines.ownerMessage();
 				const echoStart = this.chatContainer.children.length;
 				const textContent = this.getUserMessageText(message);
-				if (textContent) {
-					if (this.chatContainer.children.length > 0) {
-						this.chatContainer.addChild(new Spacer(1));
-					}
-					const origin = turnOriginStampOf(rawMessage);
+				const origin = turnOriginStampOf(rawMessage);
+				if (
+					textContent &&
+					(origin?.shown !== undefined ||
+						ownerInputIdOf(rawMessage) !== undefined ||
+						!isModelFacingText(textContent))
+				) {
+					this.replyBylines.ownerMessage();
+					if (this.chatContainer.children.length > 0) this.chatContainer.addChild(new Spacer(1));
+					const mdTheme = this.getMarkdownThemeWithSettings();
 					const skillBlock = origin?.shown === undefined ? parseSkillBlock(textContent) : undefined;
 					if (origin?.shown !== undefined && origin.channel !== undefined) {
 						// A third party's words read as who wrote them and what they said, not as the frame the model gets.
-						this.chatContainer.addChild(
-							new ChannelMessageComponent(origin.channel, origin.shown, this.getMarkdownThemeWithSettings()),
-						);
+						this.chatContainer.addChild(new ChannelMessageComponent(origin.channel, origin.shown, mdTheme));
 					} else if (skillBlock) {
-						// Render skill block (collapsible)
-						const component = new SkillInvocationMessageComponent(
-							skillBlock,
-							this.getMarkdownThemeWithSettings(),
-						);
+						const component = new SkillInvocationMessageComponent(skillBlock, mdTheme);
 						component.setExpanded(this.toolOutputExpanded);
 						this.chatContainer.addChild(component);
-						// Render user message separately if present
 						if (skillBlock.userMessage) {
-							const userComponent = new UserMessageComponent(
-								skillBlock.userMessage,
-								this.getMarkdownThemeWithSettings(),
-								this.transformMarkdownForDisplay,
+							this.chatContainer.addChild(
+								new UserMessageComponent(skillBlock.userMessage, mdTheme, this.transformMarkdownForDisplay),
 							);
-							this.chatContainer.addChild(userComponent);
 						}
 					} else {
-						const userComponent = new UserMessageComponent(
-							textContent,
-							this.getMarkdownThemeWithSettings(),
-							this.transformMarkdownForDisplay,
+						this.chatContainer.addChild(
+							new UserMessageComponent(textContent, mdTheme, this.transformMarkdownForDisplay),
 						);
-						this.chatContainer.addChild(userComponent);
 					}
-					if (options?.populateHistory) {
-						this.editor.addToHistory?.(textContent);
-					}
+					if (options?.populateHistory) this.editor.addToHistory?.(textContent);
 				}
 				// The components this message added, so a withdrawn echo can be taken back out (see removeUserMessageFromChat).
 				this.userEchoComponents.set(rawMessage, this.chatContainer.children.slice(echoStart));
@@ -2385,12 +2377,11 @@ export class InteractiveMode {
 				);
 				this.appendTranscriptAction(component);
 				if (message.stopReason === "aborted" || message.stopReason === "error") {
-					component.updateResult({
-						content: [
-							{ type: "text", text: message.errorMessage || interfaceText().conversation.operationAborted },
-						],
-						isError: true,
-					});
+					const errorText =
+						message.stopReason === "aborted"
+							? interfaceText().conversation.operationAborted
+							: (boundedRedactedDiagnosticText(message.errorMessage ?? "") ?? interfaceText().notices.errorWord);
+					component.updateResult({ content: [{ type: "text", text: errorText }], isError: true });
 				} else {
 					this.botPendingToolCalls.set(content.id, component);
 				}
