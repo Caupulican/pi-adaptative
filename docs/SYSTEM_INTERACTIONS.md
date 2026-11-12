@@ -1238,3 +1238,12 @@ warmup, disposal between grant and delivery, physical child custody and healthy 
 Windows-specific controls are explicitly platform-scoped; a Linux skip does not establish their
 execution. Final source, cross-platform journey, release and native verdicts remain in the v59
 verification ledger.
+
+The frozen `ca1bd08b7` local run passed nine journeys and failed J1's final guard because the
+watch-replacement response omitted explicit answer-claim judgments; its 3,023 source hashes stayed
+unchanged. Windows additionally refused the new warmup fixture's worker dispatch; its boolean
+assertion did not preserve the reason. Source review found that ordinary direct dispatch of the
+fixture's verifier profile is explicitly refused. The fixture now uses an explorer for that ordinary
+worker, retains the same shell capability, and reports the actual bounded dispatch refusal instead
+of hiding it behind a warmup timeout. The next Windows run must establish the outcome. These are
+evaluator corrections; the admission and claim-check guards remain strict.

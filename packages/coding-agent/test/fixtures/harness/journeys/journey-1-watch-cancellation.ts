@@ -6,9 +6,23 @@ import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
+import { CHANGED_FILE_ANSWER_CLAIMS } from "./journey-5-shared.ts";
 import { ICM_INTAKE_JUDGMENTS, latestBatchResults } from "./shared.ts";
 
 const PROFILE_ID = "watch-cancellation-reader";
+const WATCH_OBSERVATION_CLAIMS = {
+	...CHANGED_FILE_ANSWER_CLAIMS,
+	// The worker reports an externally observed file change; it does not claim to have edited workspace files.
+	states_files_changed: { kind: "noul", probability: 0.02 },
+} as const;
+const WATCH_OBSERVATION_QUESTION_IDS = [
+	"states_tests_pass",
+	"states_checks_pass",
+	"states_committed",
+	"states_pushed",
+	"states_published",
+	"states_files_changed",
+] as const;
 
 /** A real routine watch is canceled during its glob scan; shutdown joins it before a later watch runs. */
 export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Promise<void> {
@@ -298,7 +312,19 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 			matches: (operation) => operation.path === healthyRoot,
 		});
 		const replacementWarningMark = world.warnings.length;
-		world.systemOne.enterPhase("watch-replacement", ICM_INTAKE_JUDGMENTS);
+		let watchedFileClaimRequests = 0;
+		world.systemOne.enterPhase(
+			"watch-replacement",
+			{ ...ICM_INTAKE_JUDGMENTS, ...WATCH_OBSERVATION_CLAIMS },
+			{
+				expect: (request) => {
+					if (!("states_tests_pass" in request.questions)) return;
+					watchedFileClaimRequests += 1;
+					expect(Object.keys(request.questions).sort()).toEqual([...WATCH_OBSERVATION_QUESTION_IDS].sort());
+					expect(request.state).toMatchObject({ final_answer: "The watched file changed." });
+				},
+			},
+		);
 		world.provider.enqueue(
 			"root",
 			calls("watch-replacement-update", [
@@ -413,6 +439,7 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 		);
 		expect(workerTask).toContain("Inspect the watched files and report whether they changed.");
 		expect(workerTask).toContain("a condition the host was watching became true");
+		expect(watchedFileClaimRequests).toBe(world.systemOne.enabled ? 1 : 0);
 		expect(healthyOccurrences(), "the post-cancel watch produced exactly one occurrence").toHaveLength(1);
 		const healthyDisposal = await world.disposeSessionInBody(healthy.session);
 		healthyOwned = false;

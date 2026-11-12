@@ -136,7 +136,7 @@ async function verifyScheduledWorkerWarmup(world: HarnessWorld, tier: "engine" |
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		profileId: "h29-shell-worker",
 		description: "Read-only worker with a shell tool.",
-		role: "verifier",
+		role: "explorer",
 		modelPolicy: {
 			mode: "fixed",
 			candidates: [{ provider: "harness-script", modelId: "worker-a", thinkingLevel: "off" }],
@@ -178,6 +178,7 @@ async function verifyScheduledWorkerWarmup(world: HarnessWorld, tier: "engine" |
 	let floorWarm: Promise<void> | undefined;
 	let rootOpen = true;
 	let prompt: Promise<void> | undefined;
+	let dispatchFailure: string | undefined;
 	try {
 		RuntimeBuilder.prototype.getSharedLaneToolOptions = function () {
 			const options = originalOptions.call(this);
@@ -209,7 +210,11 @@ async function verifyScheduledWorkerWarmup(world: HarnessWorld, tier: "engine" |
 			{
 				...text("h29-worker-started", "The worker is running."),
 				check: (request) => {
-					expect(latestBatchResults(request).find((item) => item.toolName === "delegate")?.isError).toBe(false);
+					const result = latestBatchResults(request).find((item) => item.toolName === "delegate");
+					if (!result || result.isError) {
+						dispatchFailure = result?.text.slice(0, 1000) ?? "delegate result missing";
+						throw new Error(`H29 delegate admission failed: ${dispatchFailure}`);
+					}
 				},
 			},
 		);
@@ -223,7 +228,17 @@ async function verifyScheduledWorkerWarmup(world: HarnessWorld, tier: "engine" |
 			reply: { content: [{ type: "text", text: "Worker stopped." }] },
 		});
 		prompt = root.session.prompt("Start the shell worker.");
-		await withDeadline(world.trace, "H29 worker scheduled its own warmup", scheduled.promise);
+		await withDeadline(
+			world.trace,
+			"H29 worker scheduled its own warmup",
+			Promise.race([
+				scheduled.promise,
+				prompt.then(() => {
+					if (dispatchFailure) throw new Error(`H29 delegate admission failed: ${dispatchFailure}`);
+					return scheduled.promise;
+				}),
+			]),
+		);
 		await withDeadline(world.trace, "H29 worker entered its provider turn", reached.promise);
 		await withDeadline(world.trace, "H29 root dispatch answer is terminal", prompt);
 		expect(callbacks).toHaveLength(1);
