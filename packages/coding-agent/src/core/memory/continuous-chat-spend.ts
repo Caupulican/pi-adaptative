@@ -294,12 +294,13 @@ export class ContinuousChatSpendMeter {
 		if (!Number.isFinite(state.usd) || !Number.isFinite(state.archivedMeasuredUsd))
 			throw new Error("Continuous-chat spend overflow.");
 	}
-	private locked<T>(fn: (state: SpendState) => T): T {
+	private locked<T>(fn: (state: SpendState, validatedDay: string) => T): T {
 		return withFileLockSync(`${this.file}.lock`, () => {
 			const state = this.read();
-			if (this.today() < state.day)
+			const validatedDay = this.today();
+			if (validatedDay < state.day)
 				throw new Error("Continuous-chat accounting clock moved before its active UTC day.");
-			return fn(state);
+			return fn(state, validatedDay);
 		});
 	}
 	private ensureRoom(state: SpendState, key: string): void {
@@ -470,8 +471,8 @@ export class ContinuousChatSpendMeter {
 		this.reconcile();
 		const limit = this.maxUsdPerDay();
 		if (!(limit > 0)) return undefined;
-		return this.locked((state) => {
-			const spent = state.day === this.today() ? state.usd : 0;
+		return this.locked((state, validatedDay) => {
+			const spent = state.day === validatedDay ? state.usd : 0;
 			return spent >= limit
 				? `Memory summaries are paused for today: they have used $${spent.toFixed(2)} of the $${limit.toFixed(2)} daily limit. They resume tomorrow or as soon as the limit is raised, and the full history stays readable.`
 				: undefined;
@@ -487,7 +488,7 @@ export class ContinuousChatSpendMeter {
 		return this.locked((state) => this.remaining(state, key));
 	}
 	/** Recheck shared account rules under the same lock as each admission transition. */
-	private assertAccountAdmission(state: SpendState): void {
+	private assertAccountAdmission(state: SpendState, validatedDay: string): void {
 		if (
 			Object.values(state.circuits).some(
 				(item) =>
@@ -499,7 +500,7 @@ export class ContinuousChatSpendMeter {
 		)
 			throw new ContinuousChatAccountingUnresolved();
 		const limit = this.maxUsdPerDay();
-		if (limit > 0 && state.day === this.today() && state.usd >= limit)
+		if (limit > 0 && state.day === validatedDay && state.usd >= limit)
 			throw new ContinuousChatAccountingBusy("The daily memory summary spending limit is reached.");
 	}
 	/** Reserves the physical slot under the shared lock before the provider can be called. */
@@ -508,8 +509,8 @@ export class ContinuousChatSpendMeter {
 		const reference = recoveryIdentity(identity);
 		if (!reference) throw new Error("Memory summary requires a persisted usage ledger identity.");
 		this.reconcile();
-		return this.locked((state) => {
-			this.assertAccountAdmission(state);
+		return this.locked((state, validatedDay) => {
+			this.assertAccountAdmission(state, validatedDay);
 			if (this.remaining(state, key) > 0) throw new ContinuousChatAccountingBusy();
 			this.ensureRoom(state, key);
 			const token = randomUUID();
@@ -525,10 +526,10 @@ export class ContinuousChatSpendMeter {
 	/** Fence the exact reservation as potentially sent before crossing the physical transport boundary. */
 	attempt(key: string, token: string): void {
 		this.reconcile();
-		this.locked((state) => {
+		this.locked((state, validatedDay) => {
 			const circuit = state.circuits[key];
 			if (circuit?.status !== "reserved" || circuit.token !== token) throw new ContinuousChatAccountingUnresolved();
-			this.assertAccountAdmission(state);
+			this.assertAccountAdmission(state, validatedDay);
 			state.circuits[key] = { ...circuit, status: "flight" };
 			this.save(state);
 		});

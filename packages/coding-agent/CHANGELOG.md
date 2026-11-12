@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Summary spending decisions use one validated UTC day, preventing a clock rollback between checks from bypassing a reached daily limit.
+
 ## [0.104.56] - 2026-11-12
 
 ### Fixed

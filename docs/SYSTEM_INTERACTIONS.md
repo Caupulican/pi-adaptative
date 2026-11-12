@@ -664,3 +664,37 @@ The full `npm run check` passed, including type checking and unchanged clone cov
 2,227/2,257 eligible/owned, 2,128 detection-pass files, zero clones, largest 6,550 lines / 297,557
 bytes. No baseline, sensitivity or file-size ceiling was raised. Exact-tag publication and a new
 pinned live run remain outstanding.
+
+### UTC decision sample repair before publication
+
+The first follow-up candidate was prepared as `v0.104.56` at
+`1a1f4a2fa8cd8ff71cde75527452b77cef388f16` by release workflow `43208080464`; binary workflow
+`43208305113` started. A further bounded clock audit found a source-supported defect before
+publication, so that binary run was cancelled and the outer release concluded failure. The release
+API returned HTTP 404; both workflows are inactive. The unpublished tag was retired after saving
+its exact SHA and `/tmp/pi-v0.104.56-initial-candidate-evidence.json`. This is same-version recovery,
+not a failed test presented as green or a rewrite of published 0.104.55.
+
+**H-20261112-15 — mixed UTC samples can erase an established cap.** A locked decision validated
+stored day D against one clock sample, then hold/admission sampled again. With a reached cap on D
+and a rollback to D-1 between samples, the second comparison treated spend as zero/not current.
+There is no valid admission point: the reached cap refuses before the rollback, and backward-clock
+policy refuses afterward. The lock owner now passes one validated day to hold and the mandatory
+claim/physical-admission rule. Settlement-day rollover is unchanged. Three controls force the
+actual sample gap and preserve next-day admission. The focused accounting suites passed 39 tests;
+independent source review found no blocking finding. Combined gates and repaired publication remain
+required below.
+
+The live fixture also selected a remote summary model while leaving its required external-summary
+permission at the product's false default. The validator would therefore refuse that test model.
+The isolated synthetic fixture now explicitly grants summary egress to its configured test provider,
+so ordinary background summaries can participate in acceptance. This changes only the live test
+settings; no owner history or private integration data is loaded. `node --check` passed after this
+configuration correction. The default-setup scenario continues to exercise untouched defaults.
+
+The frozen clock repair's combined target passed 145 Vitest tests across 18 files and six Node
+tests, with no skips or pending cases. JSON: `/tmp/pi-harness-release-v0.104.56-clock-final.json`.
+The complete static/type/architecture check also passed; the clone gate remains zero with the
+same 2,227/2,257 coverage and unchanged limits. The live-fixture egress-setting correction received
+its separate syntax check after this run. The repaired exact tag must still execute all required
+release gates and published-binary live acceptance.

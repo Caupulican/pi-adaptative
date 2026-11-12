@@ -215,7 +215,7 @@ writeFileSync(
 		advisor: { enabled: false },
 		routines: { away: { enabled: false } },
 		workerDelegation: { account: "other", routeProviders: ["xai", "google-antigravity"] },
-		contextPolicy: { memory: { history: { summaryModel: MODEL_A } } },
+		contextPolicy: { memory: { history: { summaryModel: MODEL_A, allowExternalSummaryEgress: true } } },
 	}),
 );
 const fixtureDigest = () => {

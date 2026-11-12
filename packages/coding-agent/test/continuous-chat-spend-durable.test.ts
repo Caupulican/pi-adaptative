@@ -73,6 +73,8 @@ function setup() {
 		identity,
 		receipts,
 		journal,
+		timers,
+		owners,
 		now: () => now,
 		advance: (ms: number) => {
 			now += ms;
@@ -386,6 +388,51 @@ describe("durable continuous-chat accounting", () => {
 		meter.settle(key, token, true, 100, h.now());
 		expect(() => h.meter().claim("b".repeat(64), h.identity)).toThrow(ContinuousChatAccountingBusy);
 	});
+
+	it.each(["hold", "claim", "attempt"] as const)(
+		"keeps the validated day for %s when the clock rolls back",
+		(operation) => {
+			const h = setup();
+			const normal = new ContinuousChatSpendMeter(h.file, () => 100, h.timers, h.owners, undefined, h.journal);
+			const reserved = operation === "attempt" ? normal.claim("b".repeat(64), h.identity) : undefined;
+			const meter = h.meter();
+			const token = meter.claim(key, h.identity);
+			meter.settle(key, token, true, 100, h.now());
+			let armed = false;
+			const timers = {
+				...h.timers,
+				now: () => {
+					const current = h.now();
+					if (armed) {
+						armed = false;
+						h.advance(-86_400_000);
+					}
+					return current;
+				},
+			};
+			const changing = new ContinuousChatSpendMeter(
+				h.file,
+				() => {
+					if (operation === "hold") armed = true;
+					else h.advance(-86_400_000);
+					return 100;
+				},
+				timers,
+				h.owners,
+				undefined,
+				h.journal,
+			);
+			if (operation === "hold") expect(changing.hold()).toContain("paused for today");
+			else if (operation === "claim")
+				expect(() => changing.claim("b".repeat(64), h.identity)).toThrow(ContinuousChatAccountingBusy);
+			else expect(() => changing.attempt("b".repeat(64), reserved!)).toThrow(ContinuousChatAccountingBusy);
+			expect(() => normal.hold()).toThrow("clock moved before");
+			h.advance(86_520_000);
+			expect(normal.hold()).toBeUndefined();
+			if (reserved) expect(() => normal.attempt("b".repeat(64), reserved)).not.toThrow();
+			else expect(() => normal.claim("c".repeat(64), h.identity)).not.toThrow();
+		},
+	);
 
 	it("prunes only expired holds when circuit capacity is exhausted", () => {
 		const h = setup();
