@@ -1032,7 +1032,8 @@ export class ScriptedWindowsShellProcesses {
 	assertDrained(): void {
 		const problems: string[] = [];
 		if (this.unscripted.length) problems.push(`refused=${this.unscripted.join("; ")}`);
-		if (this.children.size) problems.push(`live children=${[...this.children].map((child) => child.pid).join(",")}`);
+		if (this.children.size)
+			problems.push(`live children=${[...this.children].map((child) => this.describeChild(child)).join(",")}`);
 		const pending = this.ledger.filter((record) => record.outcome === "pending").map((record) => record.requestId);
 		if (pending.length) problems.push(`pending requests=${pending.join(",")}`);
 		if (this.pythonToolHandlers.length) {
@@ -1051,7 +1052,9 @@ export class ScriptedWindowsShellProcesses {
 		for (const child of this.children) {
 			if (child.signaled) continue;
 			this.recordFailure(
-				new Error(`Owned child ${child.pid} was never signaled by its native owner before disposal`),
+				new Error(
+					`Owned child ${child.pid} was never signaled by its native owner before disposal; ${this.childMetadata(child)}`,
+				),
 			);
 			try {
 				this.processTable.signal(child.pid, "SIGKILL");
@@ -1066,5 +1069,18 @@ export class ScriptedWindowsShellProcesses {
 				"Windows shell adapter retained failures",
 			);
 		}
+	}
+
+	/** Safe bounded metadata shared by the strict leak guard and the fallback cleanup diagnostic. */
+	private describeChild(child: ScriptedChild): string {
+		return `${child.pid}(${this.childMetadata(child)})`;
+	}
+
+	private childMetadata(child: ScriptedChild): string {
+		const matches = this.spawns.filter((spawn) => spawn.pid === child.pid);
+		if (matches.length !== 1) return `spawn=${matches.length === 0 ? "missing" : `ambiguous:${matches.length}`}`;
+		const spawn = matches[0]!;
+		const cwd = spawn.cwd.length > 160 ? `${spawn.cwd.slice(0, 157)}...` : spawn.cwd;
+		return `kind=${spawn.kind},cwd=${JSON.stringify(cwd)}`;
 	}
 }

@@ -1,5 +1,6 @@
 /** Composed proof of simultaneous owner-note and detached-wake custody for one physical request. */
 import { expect } from "vitest";
+import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import {
 	PARENT_INPUT_CONSUMED_CUSTOM_TYPE,
 	PARENT_INPUT_SETTLED_CUSTOM_TYPE,
@@ -12,13 +13,14 @@ import {
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { verifyParentInputLegacyOverlap } from "./journey-1-parent-input-legacy-overlap.ts";
-import { icmContinuousStore, icmReadContinuousRecords } from "./shared.ts";
+import { icmContinuousStore, icmReadContinuousRecords, icmReadScheduler } from "./shared.ts";
 
 /** The existing routine journey supplies actual scheduler result, notice, owner steering and provider answer. */
 export async function verifyParentInputOverlap(
 	world: HarnessWorld,
 	manager: SessionManager,
 	agentDir: string,
+	session: AgentSession,
 ): Promise<void> {
 	const entries = manager.getEntries();
 	const notice = entries.find(
@@ -87,7 +89,27 @@ export async function verifyParentInputOverlap(
 			}
 			return { total: [...counts.values()].reduce((sum, count) => sum + count, 0), keys: [...counts].slice(0, 8) };
 		});
-		throw new Error(`H25 continuous-chat delivery timeout: ${JSON.stringify({ expected: keys, observed })}`, {
+		const rootRaw = world.io.peekFile(store.rootFile);
+		const root = rootRaw === undefined ? undefined : (JSON.parse(rootRaw) as { nextId?: unknown });
+		const diagnostic = {
+			memorySystem: session.getMemorySystem(),
+			cwd: manager.getCwd(),
+			sessionId: manager.getSessionId(),
+			expected: keys,
+			observed,
+			storePresent: world.io.existsSync(store.root),
+			mainPresent: world.io.existsSync(store.mainDir),
+			rootPresent: rootRaw !== undefined,
+			rootNextId: root?.nextId,
+			queue: icmReadScheduler(world, store),
+			totalRecords: records.length,
+			lastSourceKeys: records.slice(-8).map((record) => record.sourceKey),
+			ingestionWarnings: world.warnings
+				.filter((warning) => warning.startsWith("Continuous chat ingestion is waiting to retry:"))
+				.slice(-4)
+				.map((warning) => warning.slice(0, 256)),
+		};
+		throw new Error(`H25 continuous-chat delivery timeout: ${JSON.stringify(diagnostic)}`, {
 			cause: error,
 		});
 	}

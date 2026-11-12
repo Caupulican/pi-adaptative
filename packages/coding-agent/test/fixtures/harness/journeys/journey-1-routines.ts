@@ -1496,7 +1496,7 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				}
 				await withDeadline(world.trace, label, settled);
 				await withDeadline(world.trace, `${label} turn ended`, root.session.agent.waitForIdle());
-				if (run === 5) await verifyParentInputOverlap(world, root.sessionManager, agentDir);
+				if (run === 5) await verifyParentInputOverlap(world, root.sessionManager, agentDir, root.session);
 				const failing = store().getRoutine(failingId)!;
 				if (run < 5) {
 					expect(failing.enabled, `${label}: fewer than three failures in a row keep the routine running`).toBe(
