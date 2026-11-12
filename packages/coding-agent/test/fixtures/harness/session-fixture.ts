@@ -3170,6 +3170,10 @@ const PINNED_CLOCK_OWNERS: ReadonlyMap<TimerOwner, number> = new Map<TimerOwner,
 	["system-prompt", Date.parse("2026-01-15T12:00:00.000Z")],
 ]);
 
+// This owner's alarms are virtual. Pin its clock to the creation instant too, so a wall tick between computing an
+// absolute deadline and arming it cannot shorten the interval the scenario advances and checks.
+const START_CLOCK_OWNERS: ReadonlySet<TimerOwner> = new Set<TimerOwner>(["continuous-chat"]);
+
 /**
  * One owner's timers in a journey. `now()` is the wall clock (or the owner's pinned instant, `PINNED_CLOCK_OWNERS`) plus
  * the time the scenario advanced this owner, so the timestamps the owner persists keep moving forward; an alarm is due on
@@ -3349,7 +3353,8 @@ export class HarnessTimers implements TimerSource {
 	private ownerTimers(owner: TimerOwner): HarnessOwnerTimers {
 		let timers = this.owners.get(owner);
 		if (timers === undefined) {
-			timers = new HarnessOwnerTimers(WALL_CLOCK_OWNERS.has(owner), PINNED_CLOCK_OWNERS.get(owner));
+			const pinnedAt = PINNED_CLOCK_OWNERS.get(owner) ?? (START_CLOCK_OWNERS.has(owner) ? Date.now() : undefined);
+			timers = new HarnessOwnerTimers(WALL_CLOCK_OWNERS.has(owner), pinnedAt);
 			this.owners.set(owner, timers);
 		}
 		return timers;

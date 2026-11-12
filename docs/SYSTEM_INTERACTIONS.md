@@ -698,3 +698,32 @@ The complete static/type/architecture check also passed; the clone gate remains 
 same 2,227/2,257 coverage and unchanged limits. The live-fixture egress-setting correction received
 its separate syntax check after this run. The repaired exact tag must still execute all required
 release gates and published-binary live acceptance.
+
+### Cross-platform virtual-clock evaluator repair
+
+Candidate `a610db485b38077cc817a443c4b95f2f0835d812` completed binary workflow `43210406826`
+with Ubuntu quality success and Windows quality failure. Ubuntu runner logs explicitly report ten
+journeys, 145 focused Vitest tests across 18 files, and six Node tests passing. Windows reported nine
+journeys passing and R10s failing on an accounting poll delay of 1999 ms versus an expected 2000 ms;
+subsequent provider regressions were skipped, not passed. Evidence is
+`/tmp/pi-v0.104.56-clock-fixture-run-logs.zip` and the extracted platform logs. Release workflow
+`43210096647` concluded failure; no GitHub release exists (HTTP 404). Both workflows were inactive
+before the unpublished tag was retired, with its exact SHA preserved here.
+
+This is a confirmed evaluator clock mismatch, not a production timing defect: `alarmAt` legitimately
+re-reads time after constructing an absolute two-second deadline, so one millisecond may already
+have elapsed. The fixture used wall time plus virtual advancement for `now()`, but virtual time
+alone for alarm firing. Only its `continuous-chat` clock is now anchored at owner creation and then
+advanced virtually. The exact two-second poll, two/four-second transport and no-overlap assertions
+are retained, without tolerance widening. Independent source review approved the scoped change.
+The focused two-mode journey is running against this frozen fixture in
+`/tmp/pi-v0.104.56-clock-journey.log`; its outcome is not yet a passing result.
+
+The frozen clock-coherent fixture passed the standalone journey in both System One modes in
+482.11 seconds: one test passed and nine unrelated journeys were intentionally filtered. Its full
+log is `/tmp/pi-v0.104.56-clock-journey.log`. The combined target again passed 145 Vitest tests in
+18 files and six Node tests, with no skipped/pending cases, in
+`/tmp/pi-harness-release-v0.104.56-virtual-clock-final.json`. Full `npm run check` passed, including
+type/architecture/immutability checks and unchanged zero-clone coverage. Source review found no
+blocking issue; the scoped change alters fixture time only. The repaired release and published
+binary's complete live scope remain outstanding.
