@@ -96,6 +96,7 @@ export interface SharedLaneToolOptions {
 		| "platform"
 		| "windowsShellPythonEngine"
 		| "windowsShellEngineOptions"
+		| "scheduleWarmup"
 		| "spawnHook"
 		| "operations"
 		| "managedToolResolver"

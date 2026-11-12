@@ -141,12 +141,39 @@ export async function verifyParentInputLegacyOverlap(
 	const path = join(target.getSessionDir(), basename(source));
 	const bytes = `${header}\n${legacy.map((entry) => JSON.stringify(entry)).join("\n")}\n`;
 	world.io.writeFileSync(path, bytes);
-	const settings = icmContinuousSettings("worker-c", {
+	const settings = icmContinuousSettings("worker-b", {
 		autoLearn: { enabled: false },
 		proactivity: { enabled: false },
 	});
+	const priorModel = world.provider.model("worker-b");
+	const beforeRequests = world.provider.requests.filter((request) => request.model.id === "worker-b").length;
+	const tracks: string[] = [];
+	const failures: unknown[] = [];
 	let active: AgentSession | undefined;
 	try {
+		// This new store can summarize the same dyadic ranges as the still-live original store.
+		// Its own model and bounded scripts keep those two real actors from consuming each other's replies.
+		world.setModelReasoning("worker-b", true, { xhigh: "xhigh" });
+		for (let size = 1; size <= 256; size *= 2)
+			for (let first = 0; first + size <= 256; first += size) {
+				const task =
+					size === 1
+						? `Compaction: compress message ${first} into`
+						: `Compaction: merge lines ${first}+${size / 2} and ${first + size / 2}+${size / 2},`;
+				const name = `h25-legacy-compaction-${first}+${size}`;
+				tracks.push(name);
+				world.provider.enqueueTrack(
+					name,
+					"worker-b",
+					(request) => JSON.stringify(request.context.messages.at(-1)).includes(task),
+					{
+						name,
+						optional: true,
+						reply: { content: [{ type: "text", text: "Verified background deliveries and earlier history." }] },
+					},
+				);
+			}
+		let firstRequests: number | undefined;
 		for (let pass = 0; pass < 2; pass++) {
 			const opened = await world.createRootSession("root", {
 				agentDir,
@@ -161,8 +188,43 @@ export async function verifyParentInputLegacyOverlap(
 			expect(utf8Text(world.io.readFileSync(path, "utf8"))).toBe(bytes);
 			expect(await world.disposeSessionInBody(active)).toBeUndefined();
 			active = undefined;
+			await world.provider.waitForProducers();
+			const requests = world.provider.requests.filter((request) => request.model.id === "worker-b").length;
+			if (pass === 0) {
+				expect(requests, "the imported store dispatches real summaries").toBeGreaterThan(beforeRequests);
+				firstRequests = requests;
+			} else expect(requests, "reopening the imported store starts no duplicate summaries").toBe(firstRequests);
 		}
+	} catch (error) {
+		failures.push(error);
 	} finally {
-		if (active) await world.disposeSessionInBody(active);
+		try {
+			if (active) expect(await world.disposeSessionInBody(active)).toBeUndefined();
+		} catch (error) {
+			failures.push(error);
+		}
+		let joined = false;
+		try {
+			await world.provider.waitForProducers();
+			joined = true;
+		} catch (error) {
+			failures.push(error);
+		}
+		if (joined) {
+			for (const track of tracks) {
+				try {
+					world.provider.retireOptional(track);
+				} catch (error) {
+					failures.push(error);
+				}
+			}
+		}
+		try {
+			world.setModelReasoning("worker-b", priorModel.reasoning, priorModel.thinkingLevelMap);
+		} catch (error) {
+			failures.push(error);
+		}
 	}
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, "H25 legacy import and cleanup failures");
 }

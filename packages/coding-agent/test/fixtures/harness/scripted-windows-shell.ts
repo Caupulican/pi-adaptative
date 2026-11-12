@@ -1,11 +1,17 @@
 import { EventEmitter } from "node:events";
-import { dirname, isAbsolute, join, resolve } from "node:path";
+import { delimiter, dirname, isAbsolute, join, resolve } from "node:path";
 import { PassThrough, type Readable, Writable } from "node:stream";
 import { isDeepStrictEqual } from "node:util";
 import { getAgentDir, getBundledResourcesDir } from "../../../src/config.ts";
 import { cacheFile, runtimesDir } from "../../../src/core/agent-paths.ts";
 import { withoutHarnessLaunchEnv } from "../../../src/core/harness-environment.ts";
 import { isRecordObject } from "../../../src/core/util/value-guards.ts";
+import {
+	POWERSHELL_ARGS,
+	POWERSHELL_BOOTSTRAP,
+	POWERSHELL_SESSION_READY_MARKER,
+	POWERSHELL_SESSION_STDERR_READY_MARKER,
+} from "../../../src/utils/powershell-session-protocol.ts";
 import { getManagedToolBinaryPath } from "../../../src/utils/tools-manager.ts";
 import type { VirtualFileSystem } from "./virtual-io.ts";
 import type { VirtualChildSignal, VirtualProcessTable } from "./virtual-process-table.ts";
@@ -73,7 +79,7 @@ export interface WindowsShellRequestRecord {
 }
 
 export interface WindowsShellSpawnRecord {
-	readonly kind: "uv-python-find" | "python-version" | "engine-daemon" | "python-tool";
+	readonly kind: "uv-python-find" | "python-version" | "engine-daemon" | "python-tool" | "powershell-floor";
 	readonly pid: number;
 	readonly cwd: string;
 }
@@ -644,6 +650,107 @@ class EngineDaemonChild extends ScriptedChild {
 	}
 }
 
+/** The persistent PowerShell wire, with shell execution delegated to the world's existing script queue. */
+class PowerShellFloorChild extends ScriptedChild {
+	private pending = Buffer.alloc(0);
+	private current: AbortController | undefined;
+	private readonly shell: Pick<VirtualShell, "execProtocol">;
+	private readonly cwd: string;
+	private readonly env: NodeJS.ProcessEnv;
+	private readonly ledger: Array<{ pid: number; command: string; outcome: string }>;
+	constructor(
+		options: ConstructorParameters<typeof ScriptedChild>[0],
+		shell: Pick<VirtualShell, "execProtocol">,
+		cwd: string,
+		env: NodeJS.ProcessEnv,
+		ledger: Array<{ pid: number; command: string; outcome: string }>,
+	) {
+		super(options);
+		this.shell = shell;
+		this.cwd = cwd;
+		this.env = env;
+		this.ledger = ledger;
+	}
+
+	ready(): void {
+		void this.track(
+			new Promise<void>((resolve) =>
+				setImmediate(() => {
+					if (!this.admissionClosed) {
+						this.stderr.write(POWERSHELL_SESSION_STDERR_READY_MARKER);
+						this.stdout.write(POWERSHELL_SESSION_READY_MARKER);
+					}
+					resolve();
+				}),
+			),
+		);
+	}
+
+	protected override acceptInput(chunk: Buffer): void {
+		if (this.pending.length + chunk.length > MAX_REQUEST_BYTES) {
+			this.fail(new Error("PowerShell wire exceeds its bound"));
+			return;
+		}
+		this.pending = Buffer.concat([this.pending, chunk]);
+		const newline = this.pending.indexOf(0x0a);
+		if (newline < 0) return;
+		if (newline !== this.pending.length - 1 || this.current) {
+			this.fail(new Error("PowerShell wire overlaps requests"));
+			return;
+		}
+		const line = this.pending.subarray(0, newline).toString("utf8");
+		this.pending = Buffer.alloc(0);
+		const match = /^([0-9a-f]{16}) ([A-Za-z0-9+/]*={0,2})$/u.exec(line);
+		if (!match) {
+			this.fail(new Error("PowerShell wire has an invalid request"));
+			return;
+		}
+		const decoded = Buffer.from(match[2]!, "base64");
+		if (decoded.toString("base64") !== match[2]) {
+			this.fail(new Error("PowerShell wire has invalid base64"));
+			return;
+		}
+		const command = decoded.toString("utf8");
+		if (!Buffer.from(command, "utf8").equals(decoded)) {
+			this.fail(new Error("PowerShell wire has invalid UTF-8"));
+			return;
+		}
+		const record = { pid: this.pid, command, outcome: "pending" };
+		this.ledger.push(record);
+		const controller = new AbortController();
+		this.current = controller;
+		void this.track(
+			(async () => {
+				const result = await this.shell.execProtocol(command, this.cwd, {
+					env: this.env,
+					signal: controller.signal,
+					onData: (data) => {
+						if (!this.outputCut) this.stdout.write(data);
+					},
+				});
+				this.current = undefined;
+				if (result.kind !== "completed" || result.result.exitCode === null) {
+					record.outcome = result.kind;
+					if (!this.outputCut) throw new Error("PowerShell scripted command did not complete");
+					return;
+				}
+				record.outcome = "completed";
+				if (!this.outputCut) {
+					this.stderr.write(`\x1e${match[1]}:stderr\x1e\n`);
+					this.stdout.write(`\n\x1e${match[1]}:${result.result.exitCode}\x1e`);
+				}
+			})(),
+		);
+	}
+
+	protected override endInput(): void {
+		void this.beginExit(0, null, false);
+	}
+	protected override cancelAdmitted(): void {
+		this.current?.abort();
+	}
+}
+
 /** Keys of the known child environment, compared by name so no value is ever logged. */
 function environmentValue(options: unknown, key: string): string | undefined {
 	if (!isRecordObject(options) || !isRecordObject(options.env)) return undefined;
@@ -655,9 +762,10 @@ export class ScriptedWindowsShellProcesses {
 	/** Refusals of operations on provisioned executables that did not match their exact protocol. */
 	readonly unscripted: string[] = [];
 	readonly spawns: WindowsShellSpawnRecord[] = [];
+	readonly floorRequests: Array<{ pid: number; command: string; outcome: string }> = [];
 	/** Declared real-shaped answers for the lookups the native owners issue (Git discovery, taskkill, icacls, reg). */
 	readonly lookups: Array<{ readonly command: string; readonly arguments: readonly string[] }> = [];
-	private readonly io: Pick<VirtualFileSystem, "seed" | "existsSync">;
+	private readonly io: Pick<VirtualFileSystem, "seed" | "existsSync" | "unlinkSync">;
 	private readonly shell: Pick<VirtualShell, "execProtocol">;
 	private readonly processTable: VirtualProcessTable;
 	private readonly ledger: WindowsShellRequestRecord[] = [];
@@ -672,11 +780,12 @@ export class ScriptedWindowsShellProcesses {
 		readonly handler: ScriptedPythonToolHandler;
 	}> = [];
 	private runtime: ProvisionedWindowsRuntime | undefined;
+	private powerShellPath: string | undefined;
 	private projectCwd = "";
 	private disposed = false;
 
 	constructor(
-		io: Pick<VirtualFileSystem, "seed" | "existsSync">,
+		io: Pick<VirtualFileSystem, "seed" | "existsSync" | "unlinkSync">,
 		shell: Pick<VirtualShell, "execProtocol">,
 		processTable: VirtualProcessTable,
 	) {
@@ -725,6 +834,29 @@ export class ScriptedWindowsShellProcesses {
 		return this.runtime;
 	}
 
+	/** Install a scoped virtual PowerShell candidate; the caller removes the returned fixture file after its owners join. */
+	provisionPowerShell(): string {
+		if (this.powerShellPath) throw new Error("A PowerShell fixture is already provisioned");
+		const directory = (process.env.PATH ?? process.env.Path ?? "")
+			.split(delimiter)
+			.map((entry) => entry.trim().replace(/^"(.*)"$/, "$1"))
+			.find(isAbsolute);
+		if (directory === undefined) throw new Error("A PowerShell fixture needs an absolute PATH directory");
+		const path = join(directory, "pwsh.exe");
+		if (this.io.existsSync(path)) throw new Error("PowerShell fixture path already exists");
+		this.io.seed(path, "virtual PowerShell 7\n");
+		this.powerShellPath = path;
+		return path;
+	}
+
+	releasePowerShell(): void {
+		if (!this.powerShellPath) throw new Error("PowerShell fixture is not provisioned");
+		if (this.spawns.some((spawn) => spawn.kind === "powershell-floor" && this.processTable.isAlive(spawn.pid)))
+			throw new Error("PowerShell fixture still owns a live child");
+		this.io.unlinkSync(this.powerShellPath);
+		this.powerShellPath = undefined;
+	}
+
 	/**
 	 * Answers a process operation the harness guard forwarded. `undefined` means the operation is not this adapter's:
 	 * the caller keeps its other adapters and must reject whatever nobody handles. A provisioned executable with a
@@ -735,6 +867,35 @@ export class ScriptedWindowsShellProcesses {
 		if (typeof file !== "string" || !Array.isArray(argv)) return undefined;
 		const argumentsList: readonly unknown[] = argv;
 		if (operation === "spawn" && this.runtime !== undefined) {
+			if (this.powerShellPath && file.toLowerCase() === this.powerShellPath.toLowerCase()) {
+				if (
+					!isDeepStrictEqual(argumentsList, [...POWERSHELL_ARGS, POWERSHELL_BOOTSTRAP]) ||
+					!isRecordObject(options) ||
+					typeof options.cwd !== "string" ||
+					!isAbsolute(options.cwd) ||
+					!isRecordObject(options.env) ||
+					!isDeepStrictEqual(options.stdio, ["pipe", "pipe", "pipe"]) ||
+					options.detached !== false
+				)
+					this.refuse("PowerShell floor spawn does not match the persistent bootstrap protocol");
+				const child = new PowerShellFloorChild(
+					{
+						table: this.processTable,
+						spawnfile: file,
+						spawnargs: [file, ...argumentsList.map(String)],
+						detached: false,
+						withStdin: true,
+						onFailure: (cause) => this.failures.push({ cause }),
+					},
+					this.shell,
+					options.cwd as string,
+					options.env as NodeJS.ProcessEnv,
+					this.floorRequests,
+				);
+				this.adopt(child, { kind: "powershell-floor", pid: child.pid, cwd: options.cwd as string });
+				child.ready();
+				return { handled: true, value: child };
+			}
 			if (file === this.runtime.uvPath) return { handled: true, value: this.spawnUvFind(argumentsList, options) };
 			if (file === this.runtime.pythonPath) {
 				if (isDeepStrictEqual(argumentsList, [...PYTHON_VERSION_ARGUMENTS])) {

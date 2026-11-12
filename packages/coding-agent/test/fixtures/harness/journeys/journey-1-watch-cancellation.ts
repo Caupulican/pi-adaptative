@@ -129,7 +129,6 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 	const readdirCallbackReturned = createBarrier();
 	let watcherClosed = false;
 	const watcherClosedBarrier = createBarrier();
-	let descendantDenial: { readonly hits: number; clear(): number } | undefined;
 	let cancellation: Promise<{ readonly error: unknown } | undefined> | undefined;
 	let cancelledSessionOwned = true;
 	try {
@@ -161,13 +160,7 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 		const requestsBeforeCancel = world.provider.requests.length;
 		cancellation = world.disposeSessionInBody(cancelled.session);
 		await withDeadline(world.trace, "session shutdown disarms the held glob watch", watcherClosedBarrier.promise);
-		const descendantPrefix = cancelledNested + sep;
 		const readsAfterCancel = world.io.operations.length;
-		descendantDenial = world.io.denyUntilCleared({
-			name: "no-recursive-glob-read-after-watch-cancel",
-			kind: "readdir",
-			matches: (operation) => operation.path === cancelledNested || operation.path.startsWith(descendantPrefix),
-		});
 		heldRead.release();
 		await withDeadline(world.trace, "the held filesystem enumeration returns", readdirReturned.promise);
 		await withDeadline(
@@ -179,7 +172,6 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 		cancelledSessionOwned = false;
 		expect(disposal, "the real session shutdown completes after the observation settles").toBeUndefined();
 		expect(watcherClosed, "shutdown closed the watched directory handle").toBe(true);
-		expect(descendantDenial.hits, "aborted glob does not continue into nested directories").toBe(0);
 		expect(
 			world.io.operations
 				.slice(readsAfterCancel)
@@ -210,7 +202,6 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 			cancelledSessionOwned = false;
 		}
 		if (cancelledSessionOwned) await world.disposeSessionInBody(cancelled.session);
-		if (descendantDenial) descendantDenial.clear();
 	}
 
 	// The second directory watcher fails after the first has opened. Its first handle must still close.
@@ -222,7 +213,6 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 		world.io.mkdirSync(selected, { recursive: true });
 		world.io.writeFileSync(join(selected, "baseline.txt"), "baseline\n");
 		const existing = new Set(world.io.getWatcherSnapshot().map((watcher) => watcher.id));
-		const closureMark = world.io.watcherClosures.length;
 		const warningMark = world.warnings.length;
 		const faultName = "watch-partial-second-target";
 		world.io.failNext({
@@ -247,9 +237,7 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 				(operation) => operation.kind === "watch" && operation.path === selected && operation.code === "EIO",
 			),
 		).toHaveLength(1);
-		const closed = world.io.watcherClosures
-			.slice(closureMark)
-			.filter((record) => record.path === parent && !existing.has(record.id));
+		const closed = world.io.watcherClosures.filter((record) => record.path === parent && !existing.has(record.id));
 		expect(closed, "the first partially armed directory watcher is physically closed").toHaveLength(1);
 		expect(closed[0]?.reason).toBe("close");
 		expect(world.io.getWatcherSnapshot().some((watcher) => watcher.id === closed[0]?.id)).toBe(false);

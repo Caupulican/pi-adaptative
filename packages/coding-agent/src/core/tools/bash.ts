@@ -75,6 +75,7 @@ import {
 	type ShellOutputProjection,
 	type ShellOutputProjectorLike,
 } from "./shell-output-projection.ts";
+import { type ShellPrewarmScheduler, scheduleShellPrewarm } from "./shell-prewarm.ts";
 import { acquirePersistentShellSession, buildBashOneShotWire } from "./shell-session.ts";
 import { classifyShellVerificationCommand } from "./shell-test-command.ts";
 import { TestVerificationOutput } from "./test-verification-output.ts";
@@ -217,6 +218,7 @@ function createLocalShellOperations(
 				const hasWallClock = timeout !== undefined && timeout > 0;
 				const laneKey = await lanes.pool.acquire(signal);
 				try {
+					lanes.pool.assertLeased(laneKey);
 					const result = await acquirePersistentShellSession(laneKey, shellName).exec(command, laneCwd, {
 						onData,
 						signal,
@@ -308,7 +310,10 @@ export function createLocalPlatformShellOperations(
 	// One factory instance is one fallback tenant. Production agent sessions always pass their
 	// stable key; standalone callers that omit it must never collapse into a process-global engine.
 	const engineSessionKey = options.sessionKey ?? `platform-shell-operations:${randomUUID()}`;
-	const engineOperations = createWindowsShellEngineOperations(engineSessionKey, options.engineOptions);
+	const engineOperations =
+		platform === "win32" && pythonEngineEnabled
+			? createWindowsShellEngineOperations(engineSessionKey, options.engineOptions)
+			: undefined;
 	return {
 		async exec(command, cwd, execOptions) {
 			let resolvedCommand = command;
@@ -325,6 +330,7 @@ export function createLocalPlatformShellOperations(
 				resolvedExecOptions = { ...execOptions, env: mergeEffectiveEnv(state, execOptions.env ?? getShellEnv()) };
 				if (route.kind === "python-engine") {
 					try {
+						if (!engineOperations) throw new Error("Windows shell engine is not configured");
 						// The engine owns the state transition and resolves the original host cwd
 						// exactly once. Passing the already state-adjusted cwd here would make the
 						// engine mistake its own `cd` result for a host cwd change on the next call.
@@ -463,6 +469,8 @@ export interface BashToolOptions {
 	windowsShellEngineOptions?: WindowsShellEngineOptions;
 	/** Start the native Windows PowerShell session during runtime initialization. Default: false. */
 	prewarmWindowsShell?: boolean;
+	/** Schedule the best-effort Windows engine warm-up; defaults to the host event loop. */
+	scheduleWarmup?: ShellPrewarmScheduler;
 	/** Test/embedding hook: override the managed directory used for complete command output. */
 	outputDirectory?: string;
 	/**
@@ -720,41 +728,30 @@ function createShellToolDefinition(
 	const routesWindowsContract = contractPlatform === "win32";
 	const pathFlavor = options?.pathFlavor ?? (routesWindowsContract ? "win32" : "posix");
 	const pythonEngineEnabled = options?.windowsShellPythonEngine !== false && options?.operations === undefined;
-	const engineOperations = routesWindowsContract
-		? createWindowsShellEngineOperations(sessionKey, options?.windowsShellEngineOptions)
-		: undefined;
+	const engineOperations =
+		routesWindowsContract && pythonEngineEnabled
+			? createWindowsShellEngineOperations(sessionKey, options?.windowsShellEngineOptions)
+			: undefined;
 	// Warm the tier that will actually run commands. With the engine on it is the engine (every
 	// Windows bash call routes there, and its Python coordinator would otherwise start on the
 	// user's first command); with the engine off it is the PowerShell floor, as before.
-	if (
-		options?.prewarmWindowsShell === true &&
-		process.platform === "win32" &&
-		routesWindowsContract &&
-		options.operations === undefined
-	) {
+	if (options?.prewarmWindowsShell && process.platform === "win32" && routesWindowsContract && !options.operations) {
 		if (pythonEngineEnabled && engineOperations) {
-			setImmediate(() => {
+			scheduleShellPrewarm(options?.scheduleWarmup, async () => {
 				const context = resolveSpawnContext("", cwd, spawnHook, options?.getShellSessionContext);
-				void engineOperations.prewarm(context.env);
+				await engineOperations.prewarm(context.env);
 			});
 		} else if (backendShell === "powershell" && options.shellPath === undefined) {
-			setImmediate(() => {
-				const context = resolveSpawnContext("", cwd, spawnHook, options?.getShellSessionContext);
-				context.env = mergeEffectiveEnv(getOrCreateWindowsShellState(sessionKey), context.env);
-				// Warm the lane every sequential command lands on, through the pool: a session warmed
-				// outside it would be a shell nobody runs on and nobody disposes.
-				void sessionLanes.pool
-					.acquire()
-					.then(async (laneKey) => {
-						try {
-							await acquirePersistentShellSession(laneKey, backendShell).prewarm(context.cwd, context.env);
-						} finally {
-							sessionLanes.pool.release(laneKey);
-						}
-					})
-					.catch(() => {
-						// The first real command retries and surfaces the complete candidate failure.
-					});
+			scheduleShellPrewarm(options?.scheduleWarmup, async () => {
+				const laneKey = await sessionLanes.pool.acquire();
+				try {
+					sessionLanes.pool.assertLeased(laneKey);
+					const context = resolveSpawnContext("", cwd, spawnHook, options?.getShellSessionContext);
+					context.env = mergeEffectiveEnv(getOrCreateWindowsShellState(sessionKey), context.env);
+					await acquirePersistentShellSession(laneKey, backendShell).prewarm(context.cwd, context.env);
+				} finally {
+					sessionLanes.pool.release(laneKey);
+				}
 			});
 		}
 	}

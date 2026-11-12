@@ -1162,8 +1162,9 @@ after the join. The monitor retains observation custody even when watcher setup 
 entry. The composed J1 cancellation phase holds actual glob filesystem enumeration, begins session
 disposal, releases that I/O and checks the joined cancellation and healthy continuation. Its small
 tree establishes cancellation ordering; it is not a matcher stress or maximum-capacity trial.
-The already-issued read and its actual glob callback finish under the recursion guard; logical
-iterator cancellation alone is not treated as evidence that the filesystem callback has returned.
+The already-issued read and its actual glob callback finish before an exact filesystem-operation
+check excludes descendant reads; logical iterator cancellation alone is not treated as evidence
+that the filesystem callback has returned.
 Failed watcher setup closes its partially acquired handles, retains failed closes for shutdown,
 and rejects callbacks from a watch that is no longer armed. The intended one-shot baseline remains
 separate from filesystem-event rearming.
@@ -1208,3 +1209,32 @@ not establish an ingestion failure. The corrected fixtures keep System One enabl
 strict judgment guard and twenty-second deadline, and still require exact-once bodies and legacy
 replay. All 3,021 frozen files remained unchanged during that failed run; its original report is
 preserved rather than promoted to a partial journey pass.
+
+Later ingestion diagnostics found the evaluator decoding every virtual file for each ICM predicate.
+Its snapshot reader now selects the store directory before decoding, preserving the actual file
+ordering and contents. The next frozen run reached the ingestion, replay and legacy checks, then
+failed later watch assertions. That run remains failed: two new-store summary scripts competed with
+the original store's scripts, a closure assertion used an offset into a capped history, and a
+zero-read expectation installed a fault whose global guard requires a hit. The fixtures now give
+the imported store its own summary actor, identify closures by handle and path, and inspect actual
+post-callback reads. The global fault guard and exact-once assertions remain unchanged.
+
+### H-20261112-29 — shell acquisition must retain shutdown custody
+
+The Windows diagnostic CI run on `2cea21aa5` identified a surviving child as an `engine-daemon` in
+`runtimes/pi-shell-engine`. It establishes the process class, not the original caller or exact
+interleaving. Source review independently confirmed that pool acquisition can grant a lane before
+its awaiting caller resumes; disposal in between retires the lane, after which the caller used to
+create a process under its removed key. Engine execution, engine prewarm and PowerShell-floor
+prewarm share that admission boundary. A deferred automatic warmup could also look up a fresh pool
+after its original owner had shut down.
+
+The pool now validates the live lease immediately before resource construction. Deferred warmup
+keeps its original owner, and a small scheduling owner centralizes deferred context resolution and
+best-effort error handling. Its callback is awaitable so the composed journey can join the actual
+warmup after releasing a shutdown barrier. Normal command failures retain their strict behavior.
+The existing J1 shutdown journey includes public root warmup, real delegated-worker automatic
+warmup, disposal between grant and delivery, physical child custody and healthy command execution.
+Windows-specific controls are explicitly platform-scoped; a Linux skip does not establish their
+execution. Final source, cross-platform journey, release and native verdicts remain in the v59
+verification ledger.

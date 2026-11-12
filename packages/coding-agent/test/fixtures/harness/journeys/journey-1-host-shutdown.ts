@@ -32,9 +32,11 @@ import {
 	SIGNAL_RESUME_COMMAND,
 	withDeadline,
 } from "../session-fixture.ts";
+import { runWindowsPrewarmShutdownJourney } from "./journey-1-windows-prewarm-shutdown.ts";
 import { crashCutChecks, expectOwnerWords, LIMITS_PATH } from "./shared.ts";
 
 export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise<void> {
+	await runWindowsPrewarmShutdownJourney(world);
 	const trace = world.trace;
 	// SQLite busy through the real decision ledger store: while its schema exec answers SQLITE_BUSY, every construction throws
 	// node:sqlite's own busy error and disposes the connection it opened, so no attempt leaves a handle. Once the database is free

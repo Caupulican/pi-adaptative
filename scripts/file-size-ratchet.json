@@ -48,7 +48,7 @@
 		"packages/coding-agent/src/core/memory/providers/transcript-recall-processor.ts": 1642,
 		"packages/coding-agent/src/core/collaboration/job-store.ts": 1641,
 		"packages/coding-agent/src/core/tools/goal.ts": 1564,
-		"packages/coding-agent/src/core/tools/bash.ts": 1551,
+		"packages/coding-agent/src/core/tools/bash.ts": 1548,
 		"packages/coding-agent/src/core/worktree-sync/git-engine.ts": 1547,
 		"packages/coding-agent/src/core/context-pipeline.ts": 1530,
 		"packages/coding-agent/src/modes/interactive/auto-learn-controller.ts": 1497,

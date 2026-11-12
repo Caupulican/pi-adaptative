@@ -579,6 +579,16 @@ function acquireWindowsShellEngineSession(
 	return session;
 }
 
+/** Materialize a lane resource only while the pool still owns its acquired lane. */
+function acquireLeasedWindowsShellEngineSession(
+	pool: ShellLanePool<string>,
+	laneKey: string,
+	options: WindowsShellEngineOptions,
+): PersistentWindowsShellEngineSession {
+	pool.assertLeased(laneKey);
+	return acquireWindowsShellEngineSession(laneKey, options);
+}
+
 /**
  * Kill and forget a Python coordinator, together with the lane pool keyed to it. The next call for
  * this key starts clean processes.
@@ -639,7 +649,7 @@ async function execOnEngineLane(
 	const { pool, laneOptions } = acquireEngineLanes(sessionKey, options);
 	const laneKey = await pool.acquire(execOptions.signal);
 	try {
-		return await acquireWindowsShellEngineSession(laneKey, laneOptions).exec(command, cwd, execOptions);
+		return await acquireLeasedWindowsShellEngineSession(pool, laneKey, laneOptions).exec(command, cwd, execOptions);
 	} finally {
 		pool.release(laneKey);
 	}
@@ -682,6 +692,10 @@ export function createWindowsShellEngineOperations(
 	sessionKey: string,
 	options: WindowsShellEngineOptions = {},
 ): WindowsShellEngineOperations {
+	// Prewarm belongs to this operations instance. Capturing the pool prevents a scheduled warm-up
+	// from recreating a lane pool after session teardown. Command execution deliberately resolves the
+	// current pool on every call so a live tool can recover after an explicit engine reset.
+	const prewarmLanes = acquireEngineLanes(sessionKey, options);
 	return {
 		// Resolve through the registry for every command. Session teardown (for example after
 		// credential/environment changes) deletes only this tenant's entry; an already-built tool
@@ -694,12 +708,16 @@ export function createWindowsShellEngineOperations(
 		// through the pool is what registers that lane for disposal instead of leaving a coordinator
 		// nobody owns behind.
 		prewarm: async (env) => {
-			const { pool, laneOptions } = acquireEngineLanes(sessionKey, options);
-			const laneKey = await pool.acquire();
+			const { pool, laneOptions } = prewarmLanes;
+			let laneKey: string | undefined;
 			try {
-				await acquireWindowsShellEngineSession(laneKey, laneOptions).prewarm(env);
+				laneKey = await pool.acquire();
+				await acquireLeasedWindowsShellEngineSession(pool, laneKey, laneOptions).prewarm(env);
+			} catch {
+				// Prewarming is silent by contract. In particular, disposal can reject a scheduled warm-up;
+				// the next real command resolves the current pool and surfaces its own actionable error.
 			} finally {
-				pool.release(laneKey);
+				if (laneKey !== undefined) pool.release(laneKey);
 			}
 		},
 	};

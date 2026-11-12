@@ -144,6 +144,17 @@ export class ShellLanePool<TLane> {
 		this.armRetirement(entry);
 	}
 
+	/**
+	 * Confirm that a caller still owns an acquired lane before materializing its long-lived resource.
+	 * This synchronous admission lets pool disposal retain custody of every process/session created
+	 * for a lane; no await may separate this check from resource registration.
+	 */
+	assertLeased(lane: TLane): void {
+		if (this.disposed || !this.lanes.some((entry) => entry.lane === lane && entry.busy)) {
+			throw disposedError();
+		}
+	}
+
 	/** Dispose every lane and reject every waiter. Resolves once all lane disposals have settled. */
 	async dispose(): Promise<void> {
 		if (!this.disposed) {

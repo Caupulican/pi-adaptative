@@ -7,6 +7,7 @@
 - Updated the runtime HTTP client and filesystem matcher dependencies, preserving separate compatible dependency resolutions and enforcing the required versions through the security gate.
 - Routine shutdown waits for active watch observations as well as scheduler and intake work, including observations whose watcher could not be armed. Failed watcher setup closes partial handles and prevents callbacks from rearming the removed watch.
 - SDK session creation refreshes built-in providers beneath custom registrations, preserving an embedder's configured request routing.
+- Shell lanes recheck their live lease before creating a persistent process, so shutdown during acquisition cannot leave a new shell engine behind. Deferred Windows warmup retains its original pool and cannot reopen a disposed session.
 
 ### Changed
 
