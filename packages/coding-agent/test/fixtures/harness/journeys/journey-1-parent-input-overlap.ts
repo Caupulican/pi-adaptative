@@ -1,4 +1,5 @@
 /** Composed proof of simultaneous owner-note and detached-wake custody for one physical request. */
+import { sep } from "node:path";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import {
@@ -70,48 +71,84 @@ export async function verifyParentInputOverlap(
 	const store = icmContinuousStore(agentDir);
 	const prefixes = [notice.id, result.id].map((id) => `parent:${manager.getSessionId()}:${id}:0:`);
 	const keys = prefixes.map((prefix) => `${prefix}0`);
+	const viewPosition = (path: string): unknown => {
+		try {
+			const raw = world.io.peekFile(path);
+			if (raw === undefined) return "absent";
+			const value = (JSON.parse(raw) as { totalMessages?: unknown }).totalMessages;
+			return typeof value === "number" ? value : "invalid";
+		} catch {
+			return "unreadable";
+		}
+	};
+	const views = () => ({ turn: viewPosition(store.turnViewFile), causal: viewPosition(store.causalViewFile) });
+	const entryViews = views();
+	const operationStart = world.io.operations.length;
+	let predicateChecks = 0;
 	try {
 		await withDeadline(
 			world.trace,
 			"H25 both original deliveries enter continuous chat",
 			world.io.waitForMutation(() => {
+				predicateChecks++;
 				const records = icmReadContinuousRecords(world, store);
 				return keys.every((key) => records.filter((record) => record.sourceKey === key).length === 1);
 			}),
 		);
 	} catch (error) {
-		const records = icmReadContinuousRecords(world, store);
-		const observed = prefixes.map((prefix) => {
-			const counts = new Map<string, number>();
-			for (const record of records) {
-				if (record.sourceKey.startsWith(prefix))
-					counts.set(record.sourceKey, (counts.get(record.sourceKey) ?? 0) + 1);
-			}
-			return { total: [...counts.values()].reduce((sum, count) => sum + count, 0), keys: [...counts].slice(0, 8) };
-		});
-		const rootRaw = world.io.peekFile(store.rootFile);
-		const root = rootRaw === undefined ? undefined : (JSON.parse(rootRaw) as { nextId?: unknown });
-		const diagnostic = {
-			memorySystem: session.getMemorySystem(),
-			cwd: manager.getCwd(),
-			sessionId: manager.getSessionId(),
-			expected: keys,
-			observed,
-			storePresent: world.io.existsSync(store.root),
-			mainPresent: world.io.existsSync(store.mainDir),
-			rootPresent: rootRaw !== undefined,
-			rootNextId: root?.nextId,
-			queue: icmReadScheduler(world, store),
-			totalRecords: records.length,
-			lastSourceKeys: records.slice(-8).map((record) => record.sourceKey),
-			ingestionWarnings: world.warnings
-				.filter((warning) => warning.startsWith("Continuous chat ingestion is waiting to retry:"))
-				.slice(-4)
-				.map((warning) => warning.slice(0, 256)),
-		};
-		throw new Error(`H25 continuous-chat delivery timeout: ${JSON.stringify(diagnostic)}`, {
-			cause: error,
-		});
+		try {
+			const records = icmReadContinuousRecords(world, store);
+			const observed = prefixes.map((prefix) => {
+				const counts = new Map<string, number>();
+				for (const record of records) {
+					if (record.sourceKey.startsWith(prefix))
+						counts.set(record.sourceKey, (counts.get(record.sourceKey) ?? 0) + 1);
+				}
+				return {
+					total: [...counts.values()].reduce((sum, count) => sum + count, 0),
+					keys: [...counts].slice(0, 8),
+				};
+			});
+			const rootRaw = world.io.peekFile(store.rootFile);
+			const root = rootRaw === undefined ? undefined : (JSON.parse(rootRaw) as { nextId?: unknown });
+			const diagnostic = {
+				memorySystem: session.getMemorySystem(),
+				cwd: manager.getCwd(),
+				sessionId: manager.getSessionId(),
+				expected: keys,
+				observed,
+				storePresent: world.io.existsSync(store.root),
+				mainPresent: world.io.existsSync(store.mainDir),
+				rootPresent: rootRaw !== undefined,
+				rootNextId: root?.nextId,
+				queue: icmReadScheduler(world, store),
+				predicateChecks,
+				operations: {
+					start: operationStart,
+					end: world.io.operations.length,
+					lastStoreOperations: world.io.operations
+						.filter(
+							(operation) => operation.path === store.root || operation.path.startsWith(`${store.root}${sep}`),
+						)
+						.slice(-12)
+						.map((operation) => ({ kind: operation.kind, path: operation.path.slice(store.root.length) })),
+				},
+				views: { entry: entryViews, failure: views() },
+				receiptPositions: { owner: entries.indexOf(owner.entry), wake: entries.indexOf(wake.entry) },
+				totalRecords: records.length,
+				lastSourceKeys: records.slice(-8).map((record) => record.sourceKey),
+				ingestionWarnings: world.warnings
+					.filter((warning) => warning.startsWith("Continuous chat ingestion is waiting to retry:"))
+					.slice(-4)
+					.map((warning) => warning.slice(0, 256)),
+			};
+			throw new Error(`H25 continuous-chat delivery timeout: ${JSON.stringify(diagnostic)}`, {
+				cause: error,
+			});
+		} catch (diagnosticError) {
+			if (diagnosticError instanceof Error && diagnosticError.cause === error) throw diagnosticError;
+			throw new AggregateError([error, diagnosticError], "H25 delivery wait and diagnostic failed");
+		}
 	}
 	const records = icmReadContinuousRecords(world, store);
 	for (const [index, original] of [notice, result].entries()) {

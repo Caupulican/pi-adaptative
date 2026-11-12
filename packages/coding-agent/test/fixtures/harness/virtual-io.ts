@@ -661,10 +661,16 @@ export class VirtualFileSystem {
 		this.writeFileSync(path, value);
 	}
 
-	fileEntries(): ReadonlyMap<string, string> {
-		return new Map(
-			[...this.nodes].filter(([, node]) => node.kind === "file").map(([path, node]) => [path, node.data.toString()]),
-		);
+	fileEntries(directory?: string): ReadonlyMap<string, string> {
+		const root = directory === undefined ? undefined : this.path(directory);
+		const prefix = root === undefined ? undefined : root.endsWith(sep) ? root : `${root}${sep}`;
+		const entries = new Map<string, string>();
+		for (const [path, node] of this.nodes) {
+			if (node.kind !== "file") continue;
+			if (prefix !== undefined && !path.startsWith(prefix)) continue;
+			entries.set(path, node.data.toString());
+		}
+		return entries;
 	}
 
 	existsSync(value: unknown): boolean {

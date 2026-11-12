@@ -1510,9 +1510,8 @@ export function icmReadContinuousRecords(
 	world: HarnessWorld,
 	store: ReturnType<typeof icmContinuousStore>,
 ): IcmStoredContinuousRecord[] {
-	const prefix = `${store.mainDir}${sep}`;
-	const segments = [...world.io.fileEntries()]
-		.filter(([path]) => path.startsWith(prefix) && path.endsWith(".jsonl"))
+	const segments = [...world.io.fileEntries(store.mainDir)]
+		.filter(([path]) => path.endsWith(".jsonl"))
 		.sort(([left], [right]) => left.localeCompare(right));
 	const records: IcmStoredContinuousRecord[] = [];
 	for (const [, content] of segments) {
@@ -1529,9 +1528,8 @@ export function icmReadContinuousNodes(
 	world: HarnessWorld,
 	store: ReturnType<typeof icmContinuousStore>,
 ): IcmStoredContinuousNode[] {
-	const prefix = `${store.treeDir}${sep}`;
-	const segments = [...world.io.fileEntries()]
-		.filter(([path]) => path.startsWith(prefix) && path.endsWith(".jsonl"))
+	const segments = [...world.io.fileEntries(store.treeDir)]
+		.filter(([path]) => path.endsWith(".jsonl"))
 		.sort(([left], [right]) => left.localeCompare(right));
 	const nodes: IcmStoredContinuousNode[] = [];
 	for (const [, content] of segments) {
