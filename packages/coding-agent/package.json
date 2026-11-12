@@ -1,6 +1,6 @@
 {
 	"name": "@caupulican/pi-adaptative",
-	"version": "0.104.55",
+	"version": "0.104.56",
 	"private": true,
 	"description": "Reliability-first coding-agent harness with verified tool execution, recovery, and standalone releases",
 	"type": "module",
@@ -86,8 +86,8 @@
 		"eval:plan-graph": "node --conditions=pi-source src/core/system-one/evals/plan-graph-eval-cli.ts"
 	},
 	"dependencies": {
-		"@caupulican/pi-ai": "^0.104.55",
-		"@caupulican/pi-tui": "^0.104.55",
+		"@caupulican/pi-ai": "^0.104.56",
+		"@caupulican/pi-tui": "^0.104.56",
 		"@effect/platform": "0.97.1",
 		"@effect/platform-node": "0.108.1",
 		"@silvia-odwyer/photon-node": "0.3.4",
