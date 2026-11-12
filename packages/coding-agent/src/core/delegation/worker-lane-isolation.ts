@@ -51,6 +51,7 @@ import {
 	createWorkerLane,
 	describeWorkerLane,
 	discardUnusedWorkerLane,
+	findLaneByDirectory,
 	isUnderLaneRoot,
 	releaseWorkerLane,
 	repositoryKeyAt,
@@ -112,6 +113,7 @@ export function relocatedInto(root: string, laneRoot: string, entry: string): st
 interface LaneAt {
 	readonly engine: WorktreeSyncEngineDeps;
 	readonly laneKey: string;
+	readonly worktreePath: string;
 }
 
 export class WorkerLaneIsolation {
@@ -244,8 +246,13 @@ export class WorkerLaneIsolation {
 	private async laneAt(cwd: string): Promise<LaneAt | undefined> {
 		const engine = this.deps.engineDeps(cwd);
 		if (!engine || !isUnderLaneRoot(engine, cwd)) return undefined;
-		const lane = await describeWorkerLane(engine, cwd);
-		return lane ? { engine, laneKey: lane.laneKey } : undefined;
+		const lane = await findLaneByDirectory(engine, cwd);
+		return lane ? { engine, laneKey: lane.laneKey, worktreePath: lane.worktreePath } : undefined;
+	}
+
+	/** The authoritative lane root for a directory in that lane; undefined when the registration cannot be resolved. */
+	async laneRootAt(cwd: string): Promise<string | undefined> {
+		return (await this.laneAt(cwd))?.worktreePath;
 	}
 
 	/** Whether `directory` lies in the area lane worktrees are created in (a cheap check, no git). */
@@ -255,22 +262,28 @@ export class WorkerLaneIsolation {
 	}
 
 	/**
-	 * A request's granted write paths and saved intent, moved into the lane `context` names. The write paths were stated against
-	 * `root`, the session directory the request resolves them from; the saved contract against its own directory. Returns only the
-	 * fields the request carries, so a caller spreads it over the request.
+	 * A request's workspace path, granted write paths and saved intent, moved into the lane `context` names. These request paths
+	 * were stated against `root`, the session directory the request resolves them from; a saved contract is relative to its own
+	 * directory. `laneRoot` stays the same even when `context.cwd` is a nested workspace inside the lane. Returns only the fields
+	 * the request carries, so a caller spreads it over the request.
 	 */
 	relocateRequest(
 		request: Pick<WorkerDelegationRequest, "authority" | "savedIntent">,
 		root: string,
 		context: ExecutionContext,
+		laneRoot = context.cwd,
 	): Pick<WorkerDelegationRequest, "authority" | "savedIntent"> {
+		const path = request.authority?.path;
 		const writePaths = request.authority?.writePaths;
 		return {
-			...(request.authority && writePaths
+			...(request.authority && (path !== undefined || writePaths !== undefined)
 				? {
 						authority: {
 							...request.authority,
-							writePaths: writePaths.map((entry) => relocatedInto(root, context.cwd, entry)),
+							...(path !== undefined ? { path: relocatedInto(root, laneRoot, path) } : {}),
+							...(writePaths !== undefined
+								? { writePaths: writePaths.map((entry) => relocatedInto(root, laneRoot, entry)) }
+								: {}),
 						},
 					}
 				: {}),
@@ -339,7 +352,8 @@ export class WorkerLaneIsolation {
 		const engine = this.deps.engineDeps(directory);
 		if (!engine || !isUnderLaneRoot(engine, directory)) return undefined;
 		try {
-			return await boundLaneRepositoryKey(engine, directory, agentId);
+			const laneRoot = await this.laneRootAt(directory);
+			return laneRoot ? await boundLaneRepositoryKey(engine, laneRoot, agentId) : undefined;
 		} catch {
 			return undefined;
 		}
@@ -353,7 +367,9 @@ export class WorkerLaneIsolation {
 		const engine = this.deps.engineDeps(cwd);
 		if (!engine || !isUnderLaneRoot(engine, cwd)) return;
 		try {
-			const bound = await bindWorkerLaneByPath(engine, cwd, agentId);
+			const laneRoot = await this.laneRootAt(cwd);
+			if (!laneRoot) return;
+			const bound = await bindWorkerLaneByPath(engine, laneRoot, agentId);
 			if (bound && !LANE_KEPT_BY_BIND.has(bound.code)) {
 				this.deps.warn(`Worker ${agentId}'s worktree lane '${bound.laneKey}' could not be bound: [${bound.code}].`);
 			}
@@ -371,7 +387,9 @@ export class WorkerLaneIsolation {
 		const engine = this.deps.engineDeps(cwd);
 		if (!engine || !isUnderLaneRoot(engine, cwd)) return undefined;
 		try {
-			const state = await describeWorkerLane(engine, cwd);
+			const laneRoot = await this.laneRootAt(cwd);
+			if (!laneRoot) return undefined;
+			const state = await describeWorkerLane(engine, laneRoot);
 			if (!state || (state.boundLaneId !== undefined && state.boundLaneId !== agentId)) return undefined;
 			if (!state.facts.dirty && state.facts.aheadOfMain === 0) return undefined;
 			const holds = [
@@ -399,7 +417,9 @@ export class WorkerLaneIsolation {
 	async release(cwd: string, agentId: string, attemptId: string): Promise<ReleaseOutcome> {
 		const engine = this.deps.engineDeps(cwd);
 		if (!engine || !isUnderLaneRoot(engine, cwd)) return { kind: "released" };
-		const released = await releaseWorkerLane(engine, cwd, agentId);
+		const laneRoot = await this.laneRootAt(cwd);
+		if (!laneRoot) return { kind: "released" };
+		const released = await releaseWorkerLane(engine, laneRoot, agentId);
 		if (!released || released.code === "released" || released.code === "lane_not_found") return { kind: "released" };
 		if (released.code === "lane_unlanded_work") {
 			const cause = released.message ?? "it holds work";

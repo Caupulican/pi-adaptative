@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { ProviderRequestSnapshotContext } from "../kernel/index.ts";
+import { messageContentRevision } from "../kernel/message-revision.ts";
 import type { RequestSnapshotEntry } from "../kernel/session/session-entries.ts";
 import type { SessionManager, SessionRequestSnapshotInput } from "../kernel/session/session-manager.ts";
 import { cacheLaneKey } from "./context/cache-observation-recorder.ts";
@@ -20,6 +21,8 @@ const MAX_FINGERPRINT_DEPTH = 16;
 const MAX_FINGERPRINT_ITEMS = 256;
 const MAX_FINGERPRINT_STRING_CHARS = 16 * 1024;
 const MAX_PROVIDER_HISTORY_MESSAGES = 256;
+const MAX_EXACT_PROOF_DEPTH = 64;
+const MAX_EXACT_PROOF_NODES = 100_000;
 export const MAX_LIFECYCLE_ANCESTRY_STEPS = 4096;
 
 interface FingerprintBudget {
@@ -182,6 +185,136 @@ export function messageFingerprint(message: unknown): string {
 	return value;
 }
 
+interface ExactProofBudget {
+	remainingNodes: number;
+	stack: WeakSet<object>;
+}
+
+/**
+ * Hash provider JSON bytes without retaining them. This intentionally preserves enumerable key order:
+ * argument-object key order is visible in serialized tool-call arguments. Unsupported values and
+ * pathological structures fail closed instead of receiving a partial digest.
+ */
+function updateExactProviderJson(
+	hash: ReturnType<typeof createHash>,
+	value: unknown,
+	budget: ExactProofBudget,
+	depth = 0,
+	arrayElement = false,
+): boolean {
+	budget.remainingNodes -= 1;
+	if (budget.remainingNodes < 0 || depth > MAX_EXACT_PROOF_DEPTH) return false;
+	if (value === null) {
+		hash.update("null");
+		return true;
+	}
+	if (typeof value === "string" || typeof value === "boolean") {
+		hash.update(JSON.stringify(value));
+		return true;
+	}
+	if (typeof value === "number") {
+		hash.update(JSON.stringify(Number.isFinite(value) ? value : null));
+		return true;
+	}
+	if (typeof value === "undefined" || typeof value === "function" || typeof value === "symbol") {
+		if (!arrayElement) return false;
+		hash.update("null");
+		return true;
+	}
+	if (typeof value !== "object") return false;
+	if (budget.stack.has(value)) return false;
+	if ("toJSON" in value) return false;
+	if (Array.isArray(value)) {
+		if (Object.getPrototypeOf(value) !== Array.prototype) return false;
+		budget.stack.add(value);
+		hash.update("[");
+		for (let index = 0; index < value.length; index += 1) {
+			if (index > 0) hash.update(",");
+			const descriptor = Object.getOwnPropertyDescriptor(value, String(index));
+			if (!descriptor || !("value" in descriptor)) return false;
+			if (!updateExactProviderJson(hash, descriptor.value, budget, depth + 1, true)) return false;
+		}
+		hash.update("]");
+		budget.stack.delete(value);
+		return true;
+	}
+	const prototype = Object.getPrototypeOf(value);
+	if (prototype !== Object.prototype && prototype !== null) return false;
+	budget.stack.add(value);
+	hash.update("{");
+	let emitted = false;
+	for (const key in value) {
+		if (!Object.hasOwn(value, key)) continue;
+		budget.remainingNodes -= 1;
+		if (budget.remainingNodes < 0) return false;
+		const descriptor = Object.getOwnPropertyDescriptor(value, key);
+		if (!descriptor?.enumerable) continue;
+		if (!("value" in descriptor)) return false;
+		const field = descriptor.value;
+		if (field === undefined || typeof field === "function" || typeof field === "symbol") continue;
+		if (emitted) hash.update(",");
+		emitted = true;
+		hash.update(JSON.stringify(key)).update(":");
+		if (!updateExactProviderJson(hash, field, budget, depth + 1)) return false;
+	}
+	hash.update("}");
+	budget.stack.delete(value);
+	return true;
+}
+
+export function exactProviderFingerprint(value: unknown): string | undefined {
+	const hash = createHash("sha256");
+	try {
+		return updateExactProviderJson(hash, value, { remainingNodes: MAX_EXACT_PROOF_NODES, stack: new WeakSet() })
+			? hash.digest("hex")
+			: undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+let lastExactSystemPromptFingerprint: { readonly prompt: unknown; readonly value: string | undefined } | undefined;
+
+function exactSystemPromptFingerprint(prompt: unknown): string | undefined {
+	if (lastExactSystemPromptFingerprint && lastExactSystemPromptFingerprint.prompt === prompt)
+		return lastExactSystemPromptFingerprint.value;
+	const value = exactProviderFingerprint(prompt);
+	lastExactSystemPromptFingerprint = { prompt, value };
+	return value;
+}
+
+const exactToolFingerprints = new WeakMap<object, string | undefined>();
+
+function exactToolsFingerprint(tools: readonly unknown[]): string | undefined {
+	const hash = createHash("sha256").update(`${tools.length}\0`);
+	for (const tool of tools) {
+		if (!tool || typeof tool !== "object") return undefined;
+		let exact = exactToolFingerprints.get(tool);
+		if (exact === undefined && !exactToolFingerprints.has(tool)) {
+			exact = exactProviderFingerprint(tool);
+			exactToolFingerprints.set(tool, exact);
+		}
+		if (exact === undefined) return undefined;
+		hash.update(`${exact.length}:`).update(exact);
+	}
+	return hash.digest("hex");
+}
+
+const exactMessageFingerprints = new WeakMap<
+	object,
+	{ readonly revision: number; readonly value: string | undefined }
+>();
+
+export function exactMessageFingerprint(message: unknown): string | undefined {
+	if (!message || typeof message !== "object") return exactProviderFingerprint(message);
+	const revision = messageContentRevision(message);
+	const cached = exactMessageFingerprints.get(message);
+	if (cached?.revision === revision) return cached.value;
+	const value = exactProviderFingerprint(message);
+	exactMessageFingerprints.set(message, { revision, value });
+	return value;
+}
+
 /**
  * Fingerprint of a bounded window of the history: the first quarter of the window budget and the
  * newest messages up to it, plus the counts. Each sampled message contributes its own memoized
@@ -207,10 +340,15 @@ export function historyFingerprint(messages: readonly unknown[]): string {
 }
 
 /** What one lane's previous request sent, kept in memory to compare the next request against. */
-interface LaneRequestPrefix {
+export interface LaneRequestPrefix {
 	readonly system: string;
+	readonly exactSystem?: string;
 	readonly tools: string;
+	readonly exactTools?: string;
+	readonly reasoning: string;
 	readonly messages: readonly string[];
+	readonly exactMessages: readonly (string | undefined)[];
+	readonly requestOnlyMessageRange?: { readonly start: number; readonly count: number };
 }
 
 /** Per session log and lane (api, provider, model): the last request's prefix. Process-local by design. */
@@ -220,6 +358,7 @@ export interface RequestPrefixDivergence {
 	readonly prefixIntact: boolean | "unknown";
 	readonly firstDivergentIndex?: number;
 	readonly firstDivergentKind?: string;
+	readonly requestOnlyProjectionReplacement?: true;
 }
 
 function messageKind(message: unknown): string {
@@ -235,24 +374,105 @@ function messageKind(message: unknown): string {
  * The first difference names what broke the cache: the system prompt, the tools, a removed message, or
  * the role (or record kind) of the first rewritten message.
  */
-export function compareRequestPrefix(
+function compareRequestPrefixStrict(
 	previous: LaneRequestPrefix | undefined,
 	current: LaneRequestPrefix,
 	messages: readonly unknown[],
 ): RequestPrefixDivergence {
 	if (!previous) return { prefixIntact: "unknown" };
-	if (previous.system !== current.system)
+	if (
+		previous.exactSystem !== undefined && current.exactSystem !== undefined
+			? previous.exactSystem !== current.exactSystem
+			: previous.system !== current.system
+	)
 		return { prefixIntact: false, firstDivergentIndex: -1, firstDivergentKind: "system" };
-	if (previous.tools !== current.tools)
+	if (
+		previous.exactTools !== undefined && current.exactTools !== undefined
+			? previous.exactTools !== current.exactTools
+			: previous.tools !== current.tools
+	)
 		return { prefixIntact: false, firstDivergentIndex: -1, firstDivergentKind: "tools" };
 	for (let index = 0; index < previous.messages.length; index++) {
 		if (index >= current.messages.length)
 			return { prefixIntact: false, firstDivergentIndex: index, firstDivergentKind: "removed" };
-		if (previous.messages[index] !== current.messages[index]) {
+		const previousExact = previous.exactMessages[index];
+		const currentExact = current.exactMessages[index];
+		const differs =
+			previousExact !== undefined && currentExact !== undefined
+				? previousExact !== currentExact
+				: previous.messages[index] !== current.messages[index];
+		if (differs) {
 			return { prefixIntact: false, firstDivergentIndex: index, firstDivergentKind: messageKind(messages[index]) };
 		}
 	}
 	return { prefixIntact: true };
+}
+
+function rangeIsValid(
+	range: LaneRequestPrefix["requestOnlyMessageRange"],
+	messageCount: number,
+): range is { readonly start: number; readonly count: number } {
+	if (!range) return false;
+	const end = range.start + range.count;
+	return (
+		Number.isSafeInteger(range.start) &&
+		range.start >= 0 &&
+		Number.isSafeInteger(range.count) &&
+		range.count >= 0 &&
+		Number.isSafeInteger(end) &&
+		end <= messageCount
+	);
+}
+
+function requestOnlyProjectionIsOnlyChange(previous: LaneRequestPrefix, current: LaneRequestPrefix): boolean {
+	const previousRange = previous.requestOnlyMessageRange;
+	const currentRange = current.requestOnlyMessageRange;
+	if (
+		previous.exactSystem === undefined ||
+		current.exactSystem === undefined ||
+		previous.exactSystem !== current.exactSystem ||
+		previous.exactTools === undefined ||
+		current.exactTools === undefined ||
+		previous.exactTools !== current.exactTools ||
+		previous.reasoning !== current.reasoning ||
+		!rangeIsValid(previousRange, previous.exactMessages.length) ||
+		!rangeIsValid(currentRange, current.exactMessages.length) ||
+		previousRange.start !== currentRange.start
+	) {
+		return false;
+	}
+	const previousProjection = previous.exactMessages.slice(
+		previousRange.start,
+		previousRange.start + previousRange.count,
+	);
+	const currentProjection = current.exactMessages.slice(currentRange.start, currentRange.start + currentRange.count);
+	if (
+		previousProjection.length === currentProjection.length &&
+		previousProjection.every((value, index) => value === currentProjection[index])
+	)
+		return false;
+	const previousHistory = [
+		...previous.exactMessages.slice(0, previousRange.start),
+		...previous.exactMessages.slice(previousRange.start + previousRange.count),
+	];
+	const currentHistory = [
+		...current.exactMessages.slice(0, currentRange.start),
+		...current.exactMessages.slice(currentRange.start + currentRange.count),
+	];
+	return previousHistory.every((value, index) => value !== undefined && currentHistory[index] === value);
+}
+
+export function compareRequestPrefix(
+	previous: LaneRequestPrefix | undefined,
+	current: LaneRequestPrefix,
+	messages: readonly unknown[],
+): RequestPrefixDivergence {
+	const divergence = compareRequestPrefixStrict(previous, current, messages);
+	return divergence.prefixIntact === false &&
+		previous !== undefined &&
+		requestOnlyProjectionIsOnlyChange(previous, current)
+		? { ...divergence, requestOnlyProjectionReplacement: true }
+		: divergence;
 }
 
 function requestPrefixDivergence(
@@ -327,6 +547,9 @@ export function buildRequestSnapshotInput(
 	const ref = modelRef(model);
 	const systemFingerprint = systemPromptFingerprint(context.context.systemPrompt);
 	const tools = toolsFingerprint(context.context.tools ?? []);
+	const exactSystem = exactSystemPromptFingerprint(context.context.systemPrompt);
+	const exactTools = exactToolsFingerprint(context.context.tools ?? []);
+	const requestOnlyMessageRange = context.requestOnlyMessageRange;
 	return {
 		requestId: context.requestId,
 		reason: requestSnapshotReason(sessionManager, model),
@@ -347,7 +570,16 @@ export function buildRequestSnapshotInput(
 		...requestPrefixDivergence(
 			sessionManager,
 			cacheLaneKey(ref.api, ref.provider, ref.modelId),
-			{ system: systemFingerprint, tools, messages: context.context.messages.map(messageFingerprint) },
+			{
+				system: systemFingerprint,
+				...(exactSystem !== undefined ? { exactSystem } : {}),
+				tools,
+				...(exactTools !== undefined ? { exactTools } : {}),
+				reasoning: fingerprint(context.reasoning),
+				messages: context.context.messages.map(messageFingerprint),
+				exactMessages: context.context.messages.map(exactMessageFingerprint),
+				...(requestOnlyMessageRange ? { requestOnlyMessageRange } : {}),
+			},
 			context.context.messages,
 		),
 		messageCount: context.context.messages.length,

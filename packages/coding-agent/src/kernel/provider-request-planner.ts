@@ -1,6 +1,11 @@
 import type { ToolSchemaDisclosureDecision } from "@caupulican/pi-ai";
 import { resolveModelThinkingLevel } from "@caupulican/pi-ai/models";
-import { materializeProviderRequest, startMaterializedProviderStream, streamSimple } from "@caupulican/pi-ai/stream";
+import {
+	dispatchGuardedProviderRequest,
+	materializeProviderRequest,
+	startMaterializedProviderStream,
+	streamSimple,
+} from "@caupulican/pi-ai/stream";
 import type { Api, Context, Message, Model } from "@caupulican/pi-ai/types";
 import { harnessLog } from "./harness-log.ts";
 import type {
@@ -276,6 +281,14 @@ export interface StartedAgentProviderRequest {
 	usesTextToolProtocol: boolean;
 }
 
+/** A present post-commit predicate must synchronously prove currency; malformed hooks cannot authorize dispatch. */
+export function isContextPlanDispatchCurrent(plan: Pick<AgentContextPlan, "isDispatchCurrent">): boolean {
+	if (plan.isDispatchCurrent === undefined) return true;
+	const current: unknown = plan.isDispatchCurrent();
+	if (typeof current !== "boolean") void Promise.resolve(current).catch(() => undefined);
+	return current === true;
+}
+
 /** Auth and host model preparation share one ordering for planned and direct requests. */
 export async function resolveProviderRequestOptions(
 	config: Parameters<typeof resolveProviderRequestAuthOptions>[0] &
@@ -371,24 +384,15 @@ function detectSentPrefixDisturbance(
 }
 
 /**
- * The portion of a materialized request NOT eligible for the same compaction/GC treatment as the
- * rest - the (usually empty) new-or-changed transient records this specific turn is committing, plus
- * the protocol guard message, plus any host transient `adaptHostTransients` could not durably
- * identify (see `transient-records.ts`). Slicing at `compactableMessageCount` (== `plan.messages`
- * converted, i.e. everything durable) is correct rather than approximate: append-on-change means a
- * PREVIOUSLY-recorded transient is now an ordinary durable message like any other (it flows through
- * `sanitizeToolFailureContext`/`buildContextPlan` untouched, since `analyzeToolFailureContext` never
- * inspects a `role: "custom"` message), so it is already inside `compactableMessageCount` - only a
- * record newly minted THIS call, appended after `compactableMessages` was computed, is not. This
- * boundary was reasoned through explicitly for the append-on-change design, not left as the
- * pre-existing number and adjusted until tests passed - see the caller for the full argument.
- *
- * `headWireCount` leading wire messages of the planned history are a host envelope (`AgentContextPlan.nonCompactableHead`)
- * that no compaction can shrink, so they stay in the non-compactable context too.
+ * The envelope compaction cannot shrink: the protocol guard, the host's carried/frame head, live
+ * request-only projections, and the newly appended transient tail. `historyWireCount` includes the
+ * inserted live projections, while `headWireCount` ends immediately after them. Previously committed
+ * transient records remain ordinary history between those two boundaries. Both counts come from the
+ * same conversion used for dispatch and measurement, rather than from source-message cardinality.
  */
 function nonCompactableProviderContext(
 	context: Context,
-	compactableMessageCount: number,
+	historyWireCount: number,
 	usesTextToolProtocol: boolean,
 	headWireCount: number,
 ): Context {
@@ -396,8 +400,8 @@ function nonCompactableProviderContext(
 	return {
 		...context,
 		messages: [
-			...context.messages.slice(0, protocolGuardCount + Math.min(headWireCount, compactableMessageCount)),
-			...context.messages.slice(protocolGuardCount + compactableMessageCount),
+			...context.messages.slice(0, protocolGuardCount + Math.min(headWireCount, historyWireCount)),
+			...context.messages.slice(protocolGuardCount + historyWireCount),
 		],
 	};
 }
@@ -502,19 +506,23 @@ async function materializeContextPlan(
 	// `convertToLlm` converts message by message, so the head's own conversion is the wire prefix it occupies.
 	const headWireCount =
 		nonCompactableHead === 0 ? 0 : (await config.convertToLlm(plan.messages.slice(0, nonCompactableHead))).length;
+	const requestOnlyWireMessages =
+		hostTransients.requestOnly.length > 0 ? await config.convertToLlm(hostTransients.requestOnly) : [];
 	// `pendingTransientRecords` (this turn's new-or-changed-or-displaced durable records - empty
 	// for informational slots most turns, but see the trailing-pair note above for why it is NOT
 	// typically empty overall) plus `hostTransients.passThrough` (any host transient this module
 	// has no safe durable identity for, appended fresh every request exactly as before this
-	// mechanism existed - see `adaptHostTransients`) are the ONLY things ever appended fresh here, so
-	// `nonCompactableProviderContext` below still slices correctly at `compactableMessages.length`
-	// without adjustment: everything durable, old transients included, is already inside
-	// `compactableMessages`, and everything after it is genuinely this request's own new,
-	// not-yet-committed tail. See that function's doc comment for the full boundary argument.
+	// mechanism existed - see `adaptHostTransients`) form the new tail. Live request-only projections
+	// are separate: they lead compactable history and contribute to both wire boundaries below.
 	const newTransientMessages = [...pendingTransientRecords, ...hostTransients.passThrough];
 	const newTransientWireMessages =
 		newTransientMessages.length > 0 ? await config.convertToLlm(newTransientMessages) : [];
-	const llmMessages: Message[] = [...compactableMessages, ...newTransientWireMessages];
+	// Live knowledge must remain replaceable and absent from durable history. Placing it after the
+	// fixed host head, before growing history, also keeps an unchanged projection at the same wire
+	// position on every tool-loop append. A real correction or withholding still replaces it now.
+	const llmMessages: Message[] = compactableMessages.slice();
+	llmMessages.splice(headWireCount, 0, ...requestOnlyWireMessages);
+	for (const message of newTransientWireMessages) llmMessages.push(message);
 	signal?.throwIfAborted();
 
 	const sourceProviderContext: Context = {
@@ -531,13 +539,18 @@ async function materializeContextPlan(
 			: { ...protocolMaterialized, context: budgeted.context };
 	const nonCompactableContext = nonCompactableProviderContext(
 		materialized.context,
-		compactableMessages.length,
+		compactableMessages.length + requestOnlyWireMessages.length,
 		materialized.usesTextToolProtocol,
-		headWireCount,
+		headWireCount + requestOnlyWireMessages.length,
 	);
+	const requestOnlyMessageRange = {
+		start: (materialized.usesTextToolProtocol && materialized.context.messages.length > 0 ? 1 : 0) + headWireCount,
+		count: requestOnlyWireMessages.length,
+	};
 	return {
 		materialized,
 		nonCompactableContext,
+		requestOnlyMessageRange,
 		pendingTransientRecords,
 		transientDecisions: reconciliation.decisions,
 	};
@@ -644,8 +657,13 @@ export async function startPlannedAgentProviderRequestWithId(
 				continue;
 			}
 
-			const { materialized, nonCompactableContext, pendingTransientRecords, transientDecisions } =
-				await materializeContextPlan(sourceContext, sanitized, ledgerView, plan, config, signal);
+			const {
+				materialized,
+				nonCompactableContext,
+				requestOnlyMessageRange,
+				pendingTransientRecords,
+				transientDecisions,
+			} = await materializeContextPlan(sourceContext, sanitized, ledgerView, plan, config, signal);
 
 			if (plan.isCurrent?.() === false) {
 				stalePlanCount = nextStalePlanCount(stalePlanCount);
@@ -752,6 +770,7 @@ export async function startPlannedAgentProviderRequestWithId(
 					model: config.model,
 					context: materialized.context,
 					nonCompactableContext,
+					requestOnlyMessageRange,
 					// The loop appends the provider reply to its live history after this callback.
 					// Freeze the accepted source extent so cache-lane compaction can identify that reply as newer.
 					sourceContext: { ...sourceContext, messages: sourceContext.messages.slice() },
@@ -771,11 +790,30 @@ export async function startPlannedAgentProviderRequestWithId(
 				{
 					...config,
 					...requestAuth,
+					...(plan.isDispatchCurrent !== undefined
+						? {
+								requestGuard: (model: Model<Api>, dispatchSignal: AbortSignal | undefined): undefined => {
+									requestAuth.requestGuard?.(model, dispatchSignal);
+									if (!isContextPlanDispatchCurrent(plan))
+										throw new Error("Provider request context changed before dispatch; retry the request.");
+									return undefined;
+								},
+							}
+						: {}),
 					maxTokens: requestMaxTokens,
 					reasoning: requestReasoning,
 					signal,
 				},
-				(providerContext, providerOptions) => streamFunction(config.model, providerContext, providerOptions),
+				(providerContext, providerOptions) =>
+					plan.isDispatchCurrent !== undefined
+						? dispatchGuardedProviderRequest(
+								config.model,
+								{ ...providerOptions, providerResponseObserver: undefined },
+								// Later wrappers may await admission or redaction. They must retain the original guard
+								// and observer to recheck freshness and begin accounting at their physical handoff.
+								() => streamFunction(config.model, providerContext, providerOptions),
+							)
+						: streamFunction(config.model, providerContext, providerOptions),
 			)) as Awaited<ReturnType<StreamFn>>;
 			return { requestId, stream, usesTextToolProtocol: materialized.usesTextToolProtocol };
 		} finally {

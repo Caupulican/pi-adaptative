@@ -17,8 +17,11 @@ import {
 	type SessionAppendWriteIdentity,
 } from "../kernel/session/session-append-receipt.ts";
 import type { SessionManager, SessionMessageBatchEntry } from "../kernel/session/session-manager.ts";
-import { ForegroundLifecycleController, type ProviderRetryLifecycleEvent } from "./foreground-lifecycle-controller.ts";
-import type { ModelRouterController } from "./model-router-controller.ts";
+import {
+	ForegroundLifecycleController,
+	type ForegroundLifecycleModelRouterDependency,
+	type ProviderRetryLifecycleEvent,
+} from "./foreground-lifecycle-controller.ts";
 import { type ProviderLimitStore, providerLimitFromFailure } from "./provider-admission/limit-state.ts";
 import { ProviderCompatibilityWarnings } from "./provider-compatibility-warnings.ts";
 import { truncateWithEllipsis } from "./provider-tool-text.ts";
@@ -63,7 +66,7 @@ export class ForegroundLifecycleAdapter {
 	constructor(
 		agent: Agent,
 		sessionManager: SessionManager,
-		modelRouter: ModelRouterController,
+		modelRouter: ForegroundLifecycleModelRouterDependency,
 		getMutationScope?: () => string,
 		getAnnouncer?: () => string,
 		providerLimitStore?: ProviderLimitStore,

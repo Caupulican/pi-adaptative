@@ -44,6 +44,7 @@ import {
 	createToolFailureMemoryTracker,
 	createToolFailureResult,
 	describeOperationOutcome,
+	getToolExecutionKey,
 	getUnresolvedToolFailure,
 	normalizeToolSignature,
 	noteToolFailureInBatch,
@@ -380,20 +381,8 @@ function repeatsToolCallPattern(stallWindow: readonly string[], stallLimit: numb
 	return false;
 }
 
-function textProtocolOperationArguments(toolCall: AgentToolCall): unknown {
-	const args: unknown = toolCall.arguments;
-	if (!args || typeof args !== "object" || Array.isArray(args)) return args ?? null;
-	const record = args as Record<string, unknown>;
-	if ((toolCall.name === "write" || toolCall.name === "edit") && typeof record.path === "string") {
-		return { path: record.path };
-	}
-	return args;
-}
-
 function textProtocolBatchSignature(toolCalls: readonly AgentToolCall[]): string {
-	return normalizeToolSignature(
-		toolCalls.map((toolCall) => [toolCall.name, textProtocolOperationArguments(toolCall)]),
-	);
+	return JSON.stringify(toolCalls.map((toolCall) => getToolExecutionKey(toolCall.name, toolCall.arguments ?? null)));
 }
 
 /** The most-repeated failure key among this turn's results, as the ledger counted it. */
@@ -407,38 +396,6 @@ function mostRepeatedToolFailure(
 		if (occurrence && (!worst || occurrence.occurrence > worst.occurrence)) worst = occurrence;
 	}
 	return worst;
-}
-
-function toolCallRecord(toolCall: AgentToolCall): Record<string, unknown> | undefined {
-	const args: unknown = toolCall.arguments;
-	return args && typeof args === "object" && !Array.isArray(args) ? (args as Record<string, unknown>) : undefined;
-}
-
-function toolResultPhase(result: ToolResultMessage): string | undefined {
-	if (!result.details || typeof result.details !== "object" || Array.isArray(result.details)) return undefined;
-	const phase = (result.details as Record<string, unknown>).phase;
-	return typeof phase === "string" ? phase : undefined;
-}
-
-function repeatsSuccessfulTextProtocolBatch(
-	incomingSignature: string,
-	toolCalls: readonly AgentToolCall[],
-	previous: SuccessfulTextProtocolBatch | undefined,
-): boolean {
-	if (!previous) return false;
-	if (incomingSignature === previous.signature) return true;
-	if (toolCalls.length !== previous.calls.length || toolCalls.length !== previous.messages.length) return false;
-	return toolCalls.every((toolCall, index) => {
-		const previousCall = previous.calls[index];
-		const previousResult = previous.messages[index];
-		if (!previousCall || !previousResult) return false;
-		const currentArgs = toolCallRecord(toolCall);
-		const previousArgs = toolCallRecord(previousCall);
-		if (currentArgs?.path !== previousArgs?.path) return false;
-		const phase = toolResultPhase(previousResult);
-		if (phase === "written") return toolCall.name === "write" && previousCall.name === "write";
-		return phase === "edited" && toolCall.name === "edit" && previousCall.name === "edit";
-	});
 }
 
 /**
@@ -659,8 +616,9 @@ async function runLoop(
 				const incomingBatchSignature = textProtocolBatchSignature(toolCalls);
 				const previousSuccessfulTextProtocolResults =
 					textProtocolBatch &&
-					repeatsSuccessfulTextProtocolBatch(incomingBatchSignature, toolCalls, lastSuccessfulTextProtocolBatch)
-						? lastSuccessfulTextProtocolBatch?.messages
+					(incomingBatchSignature === lastSuccessfulTextProtocolBatch?.signature ||
+						incomingBatchSignature === lastSuccessfulTextProtocolBatch?.modelSignature)
+						? lastSuccessfulTextProtocolBatch?.results
 						: undefined;
 				const executedToolBatch = await executeToolCalls(
 					currentContext,
@@ -705,8 +663,14 @@ async function runLoop(
 						toolResults.every((result) => !result.isError)
 							? {
 									signature: textProtocolBatchSignature(toolCalls),
-									messages: toolResults,
-									calls: toolCalls,
+									modelSignature: incomingBatchSignature,
+									results: toolResults.map((message, index) => ({
+										message,
+										operationKey: getToolExecutionKey(
+											toolCalls[index].name,
+											toolCalls[index].arguments ?? null,
+										),
+									})),
 								}
 							: undefined;
 				}
@@ -989,107 +953,116 @@ async function streamAssistantResponse(
 	const onOuterAbort = (): void => degenerationAbort.abort();
 	if (signal?.aborted) degenerationAbort.abort();
 	else signal?.addEventListener("abort", onOuterAbort, { once: true });
-	const response = await startPlannedAgentProviderRequestWithId(context, config, degenerationAbort.signal, streamFn);
+	try {
+		const response = await startPlannedAgentProviderRequestWithId(
+			context,
+			config,
+			degenerationAbort.signal,
+			streamFn,
+		);
 
-	let partialMessage: AssistantMessage | null = null;
-	let addedPartial = false;
-	let abortedForDegeneration = false;
-	/**
-	 * D1 observability (see AssistantMessage.firstTokenAt in types.ts): stamped on the first event
-	 * that carries actual generated content (`isFirstTokenEvent`: a non-empty `_delta`, never a
-	 * `_start`/`_end` framing event) and left `undefined` if the stream errors or aborts before one
-	 * ever arrives. The perf profile and the interactive live row read the same predicate.
-	 */
-	let firstTokenAt: number | undefined;
+		let partialMessage: AssistantMessage | null = null;
+		let addedPartial = false;
+		let abortedForDegeneration = false;
+		/**
+		 * D1 observability (see AssistantMessage.firstTokenAt in types.ts): stamped on the first event
+		 * that carries actual generated content (`isFirstTokenEvent`: a non-empty `_delta`, never a
+		 * `_start`/`_end` framing event) and left `undefined` if the stream errors or aborts before one
+		 * ever arrives. The perf profile and the interactive live row read the same predicate.
+		 */
+		let firstTokenAt: number | undefined;
 
-	responseEvents: for await (const event of response.stream) {
-		switch (event.type) {
-			case "start":
-				partialMessage = event.partial;
-				context.messages.push(partialMessage);
-				addedPartial = true;
-				await emit({ type: "message_start", message: { ...partialMessage } });
-				break;
-
-			case "text_start":
-			case "text_delta":
-			case "text_end":
-			case "thinking_start":
-			case "thinking_delta":
-			case "thinking_end":
-			case "toolcall_start":
-			case "toolcall_delta":
-			case "toolcall_end":
-				if (firstTokenAt === undefined && isFirstTokenEvent(event)) firstTokenAt = Date.now();
-				if (partialMessage) {
+		responseEvents: for await (const event of response.stream) {
+			switch (event.type) {
+				case "start":
 					partialMessage = event.partial;
-					context.messages[context.messages.length - 1] = partialMessage;
-					await emit({
-						type: "message_update",
-						assistantMessageEvent: event,
-						message: { ...partialMessage },
-					});
-					if (
-						!abortedForDegeneration &&
-						!signal?.aborted &&
-						!partialMessage.content.some((block) => block.type === "toolCall") &&
-						shouldAbortDegenerateStream(assistantMessageText(partialMessage))
-					) {
-						abortedForDegeneration = true;
-						degenerationAbort.abort();
+					context.messages.push(partialMessage);
+					addedPartial = true;
+					await emit({ type: "message_start", message: { ...partialMessage } });
+					break;
+
+				case "text_start":
+				case "text_delta":
+				case "text_end":
+				case "thinking_start":
+				case "thinking_delta":
+				case "thinking_end":
+				case "toolcall_start":
+				case "toolcall_delta":
+				case "toolcall_end":
+					if (firstTokenAt === undefined && isFirstTokenEvent(event)) firstTokenAt = Date.now();
+					if (partialMessage) {
+						partialMessage = event.partial;
+						context.messages[context.messages.length - 1] = partialMessage;
+						await emit({
+							type: "message_update",
+							assistantMessageEvent: event,
+							message: { ...partialMessage },
+						});
+						if (
+							!abortedForDegeneration &&
+							!signal?.aborted &&
+							!partialMessage.content.some((block) => block.type === "toolCall") &&
+							shouldAbortDegenerateStream(assistantMessageText(partialMessage))
+						) {
+							abortedForDegeneration = true;
+							degenerationAbort.abort();
+						}
 					}
-				}
-				break;
+					break;
 
-			case "done":
-			case "error":
-				break responseEvents;
+				case "done":
+				case "error":
+					break responseEvents;
+			}
 		}
-	}
-	// D1 observability (see AssistantMessage.streamEndAt in types.ts): the stream is exhausted the
-	// instant its terminal `done`/`error` event was observed above, not when the message is later
-	// transformed or persisted. Unconditional: every path that reaches here saw a real terminal
-	// event, so this is never fabricated the way a value would be if set before the loop.
-	const streamEndAt = Date.now();
+		// D1 observability (see AssistantMessage.streamEndAt in types.ts): the stream is exhausted the
+		// instant its terminal `done`/`error` event was observed above, not when the message is later
+		// transformed or persisted. Unconditional: every path that reaches here saw a real terminal
+		// event, so this is never fabricated the way a value would be if set before the loop.
+		const streamEndAt = Date.now();
 
-	signal?.removeEventListener("abort", onOuterAbort);
-	const providerMessage = await response.stream.result();
-	let finalMessage = policy?.rejectToolCalls
-		? rejectToolCallsFromToolFreeResponse(providerMessage, policy.withheldTools)
-		: rejectNativeToolProtocolResidue(providerMessage, context.tools ?? [], response.usesTextToolProtocol);
-	if (abortedForDegeneration && !signal?.aborted && finalMessage.stopReason === "aborted") {
-		finalMessage = { ...finalMessage, stopReason: "stop" };
-		delete finalMessage.errorMessage;
-	}
-	if (policy?.verificationObligations) {
-		finalMessage = policy.verificationObligations.enforceTerminalMessage(finalMessage);
-	}
-	const comparisonMessage = finalMessage;
-	finalMessage = collapseDegenerateAssistantMessage(finalMessage, previousAssistant, collapseOptions);
-	// Attached last, after every transform above, so these are never silently dropped by a transform
-	// that constructs a new object without spreading its input (see AssistantMessage.firstTokenAt /
-	// streamEndAt in types.ts).
-	finalMessage = {
-		...finalMessage,
-		...(firstTokenAt !== undefined ? { firstTokenAt } : {}),
-		streamEndAt,
-	};
-	// The provider stream built an aborted message without knowing why; name it here, before
-	// `message_end`, because that event is what the session log persists.
-	if (finalMessage.stopReason === "aborted") {
+		signal?.removeEventListener("abort", onOuterAbort);
+		const providerMessage = await response.stream.result();
+		let finalMessage = policy?.rejectToolCalls
+			? rejectToolCallsFromToolFreeResponse(providerMessage, policy.withheldTools)
+			: rejectNativeToolProtocolResidue(providerMessage, context.tools ?? [], response.usesTextToolProtocol);
+		if (abortedForDegeneration && !signal?.aborted && finalMessage.stopReason === "aborted") {
+			finalMessage = { ...finalMessage, stopReason: "stop" };
+			delete finalMessage.errorMessage;
+		}
+		if (policy?.verificationObligations) {
+			finalMessage = policy.verificationObligations.enforceTerminalMessage(finalMessage);
+		}
+		const comparisonMessage = finalMessage;
+		finalMessage = collapseDegenerateAssistantMessage(finalMessage, previousAssistant, collapseOptions);
+		// Attached last, after every transform above, so these are never silently dropped by a transform
+		// that constructs a new object without spreading its input (see AssistantMessage.firstTokenAt /
+		// streamEndAt in types.ts).
 		finalMessage = {
 			...finalMessage,
-			errorMessage: abortedErrorMessage(finalMessage.errorMessage, true, signal?.reason),
+			...(firstTokenAt !== undefined ? { firstTokenAt } : {}),
+			streamEndAt,
 		};
+		// The provider stream built an aborted message without knowing why; name it here, before
+		// `message_end`, because that event is what the session log persists.
+		if (finalMessage.stopReason === "aborted") {
+			finalMessage = {
+				...finalMessage,
+				errorMessage: abortedErrorMessage(finalMessage.errorMessage, true, signal?.reason),
+			};
+		}
+		if (addedPartial) {
+			context.messages[context.messages.length - 1] = finalMessage;
+		} else {
+			context.messages.push(finalMessage);
+			await emit({ type: "message_start", message: { ...finalMessage } });
+		}
+		await emit({ type: "message_end", message: finalMessage });
+		return { message: finalMessage, comparisonMessage, requestId: response.requestId };
+	} finally {
+		signal?.removeEventListener("abort", onOuterAbort);
 	}
-	if (addedPartial) {
-		context.messages[context.messages.length - 1] = finalMessage;
-	} else {
-		context.messages.push(finalMessage);
-		await emit({ type: "message_start", message: { ...finalMessage } });
-	}
-	await emit({ type: "message_end", message: finalMessage });
-	return { message: finalMessage, comparisonMessage, requestId: response.requestId };
 }
 
 interface ToolExecutionContext {
@@ -1107,7 +1080,7 @@ interface ToolExecutionContext {
 	toolFailureRecoveryGate: ToolFailureRecoveryGate;
 	/** Set while preparing a batch; only an entirely clean tool turn closes validation episodes. */
 	validationBounced: boolean;
-	previousSuccessfulResults?: readonly ToolResultMessage[];
+	previousSuccessfulResults?: readonly SuccessfulTextProtocolResult[];
 	signal?: AbortSignal;
 	emit: AgentEventSink;
 }
@@ -1124,7 +1097,7 @@ async function executeToolCalls(
 	repairTeachTracker: ToolRepairTeachTracker,
 	toolFailureMemory: ToolFailureMemoryTracker,
 	toolFailureRecoveryGate: ToolFailureRecoveryGate,
-	previousSuccessfulTextProtocolResults: readonly ToolResultMessage[] | undefined,
+	previousSuccessfulTextProtocolResults: readonly SuccessfulTextProtocolResult[] | undefined,
 	signal: AbortSignal | undefined,
 	emit: AgentEventSink,
 ): Promise<ExecutedToolCallBatch> {
@@ -1192,9 +1165,11 @@ type ExecutedToolCallBatch = {
 
 type SuccessfulTextProtocolBatch = {
 	signature: string;
-	messages: readonly ToolResultMessage[];
-	calls: readonly AgentToolCall[];
+	modelSignature: string;
+	results: readonly SuccessfulTextProtocolResult[];
 };
+
+type SuccessfulTextProtocolResult = { message: ToolResultMessage; operationKey: string };
 
 type StartedToolCall =
 	| { kind: "finalized"; finalized: FinalizedToolCallOutcome }
@@ -1205,22 +1180,18 @@ async function prepareAndStartToolCall(
 	toolCall: AgentToolCall,
 	index: number,
 ): Promise<StartedToolCall> {
-	const preparation =
-		execCtx.previousSuccessfulResults &&
-		!execCtx.context.tools?.find((tool) => tool.name === toolCall.name)?.bindInvocation
-			? createRepeatedSuccessfulToolCallOutcome(execCtx.previousSuccessfulResults[index])
-			: await prepareToolCall(
-					execCtx.context,
-					execCtx.assistantMessage,
-					toolCall,
-					execCtx.config,
-					execCtx.validationFailureTracker,
-					execCtx.toolFailureMemory,
-					execCtx.toolFailureRecoveryGate,
-					execCtx.signal,
-					execCtx.requestId,
-					execCtx.previousSuccessfulResults?.[index],
-				);
+	const preparation = await prepareToolCall(
+		execCtx.context,
+		execCtx.assistantMessage,
+		toolCall,
+		execCtx.config,
+		execCtx.validationFailureTracker,
+		execCtx.toolFailureMemory,
+		execCtx.toolFailureRecoveryGate,
+		execCtx.signal,
+		execCtx.requestId,
+		execCtx.previousSuccessfulResults?.[index],
+	);
 	if (preparation.kind === "immediate") {
 		if (preparation.validationEvent?.outcome === "bounced") execCtx.validationBounced = true;
 		await emitToolExecutionStart(toolCall, execCtx.emit);
@@ -2088,7 +2059,7 @@ async function prepareToolCall(
 	toolFailureRecoveryGate: ToolFailureRecoveryGate,
 	signal: AbortSignal | undefined,
 	requestId: AgentRequestId,
-	previousSuccessfulResult?: ToolResultMessage,
+	previousSuccessfulResult?: SuccessfulTextProtocolResult,
 ): Promise<PreparedToolCall | ImmediateToolCallOutcome> {
 	let tool = currentContext.tools?.find((candidate) => candidate.name === toolCall.name);
 	if (!tool) {
@@ -2190,13 +2161,13 @@ async function prepareToolCall(
 		if (tool.bindInvocation) binding = await bindToolInvocation(tool, toolCall.id, validatedArgs, signal);
 		if (binding) tool = binding.tool;
 		if (
-			binding &&
 			previousSuccessfulResult &&
-			retainedToolInvocation(previousSuccessfulResult.details)?.executionScope === binding.executionScope
+			previousSuccessfulResult.operationKey === getToolExecutionKey(toolCall.name, validatedArgs) &&
+			retainedToolInvocation(previousSuccessfulResult.message.details)?.executionScope === binding?.executionScope
 		) {
 			return {
-				...createRepeatedSuccessfulToolCallOutcome(previousSuccessfulResult),
-				executionScope: binding.executionScope,
+				...createRepeatedSuccessfulToolCallOutcome(previousSuccessfulResult.message),
+				...(binding ? { executionScope: binding.executionScope } : {}),
 			};
 		}
 		const unresolvedRecord = getUnresolvedToolFailure(

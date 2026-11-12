@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { existsSync, readdirSync, readFileSync, renameSync, statSync, unlinkSync } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
-import { isSessionIdentity } from "../../kernel/session/session-manager.ts";
+import { isSessionIdentity, visitSessionEntriesAsync } from "../../kernel/session/session-manager.ts";
 import type { TypeSafeUsageReceipt, UnresolvedUsageRequest } from "../review/system-one-review-port.ts";
 import {
 	isReceiptCount,
@@ -20,7 +20,13 @@ import {
 	writeFileAtomicSync,
 } from "../util/atomic-file.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
-import type { SemanticUsageLedgerIdentity } from "./session-ledger-port.ts";
+import {
+	normalizedHeaderTimestamp,
+	type SemanticUsageLedgerIdentity,
+	type SemanticUsageLedgerPort,
+	semanticUsageCanonicalDataMatches,
+} from "./session-ledger-port.ts";
+import { SEMANTIC_USAGE_CUSTOM_TYPE, semanticUsageReportOf } from "./usage-records.ts";
 
 /**
  * Bounds of one session's pending usage journal. Upper bound of concurrent evaluations: scan 32 (code-duplicates.ts:310,
@@ -46,6 +52,8 @@ const MAX_SIDECAR_BYTES =
 		SEMANTIC_USAGE_JOURNAL_MAX_RECORD_BYTES +
 	4 * 1024;
 const MAX_SESSION_FILE_CHARS = 4096;
+const MAX_SUMMARY_RECOVERY_JOBS = 256;
+const MAX_ACTIVE_SUMMARY_RECOVERY_SCANS = 2;
 /**
  * Lock policy: at most four attempts, 5/10/20 ms apart, about 35 ms when the lock is held. That bound is POSIX only. On
  * win32 each sidecar write also retries its rename and its lock release (win32-transient-fs.ts: 9 retries, 10 to 200 ms),
@@ -65,7 +73,7 @@ const DOCUMENT_KEYS = [
 	"droppedConflicts",
 	"unresolved",
 ] as const;
-const RECORD_KEYS = ["reportId", "payload", "createdAt"] as const;
+const RECORD_KEYS = ["reportId", "payload", "createdAt", "summarySpendPending", "canonicalConfirmed"] as const;
 const CONFLICT_KEYS = ["reportId", "payload", "seenAt"] as const;
 
 /** A held paid receipt: the record a retained obligation keeps until its identical row is confirmed. */
@@ -73,6 +81,10 @@ export interface JournalRecord {
 	readonly reportId: string;
 	readonly payload: TypeSafeUsageReceipt;
 	readonly createdAt: string;
+	/** Meter-bound summary spend still awaits durable shared-meter acknowledgment. */
+	readonly summarySpendPending?: boolean;
+	/** The matching canonical row was physically confirmed. */
+	readonly canonicalConfirmed?: true;
 }
 
 /** A conflicting payload kept as evidence next to the first record it contradicts. */
@@ -95,10 +107,22 @@ export interface JournalDocument {
 	readonly unresolved?: readonly UnresolvedUsageRequest[];
 }
 
+export type SummarySpendReceiptRead =
+	| {
+			readonly kind: "known";
+			readonly costUsd: number;
+			readonly observedAtMs: number;
+			readonly summarySpendPending: boolean;
+	  }
+	| { readonly kind: "unresolved" | "missing" | "unknown"; readonly reason?: string };
+
 export type { UnresolvedUsageRequest } from "../review/system-one-review-port.ts";
 
 export function parseUnresolvedUsageRequest(value: unknown): UnresolvedUsageRequest | undefined {
-	if (!isPlainRecord(value) || !hasOnlyKeys(value, ["requestId", "provider", "model", "route", "origin", "startedAt"]))
+	if (
+		!isPlainRecord(value) ||
+		!hasOnlyKeys(value, ["requestId", "provider", "model", "route", "origin", "startedAt", "summarySpendPending"])
+	)
 		return undefined;
 	const { requestId, provider, model, route, startedAt } = value;
 	const origin = parseAccountingOrigin(value.origin);
@@ -109,10 +133,20 @@ export function parseUnresolvedUsageRequest(value: unknown): UnresolvedUsageRequ
 		!origin ||
 		!isReceiptText(startedAt) ||
 		!Number.isFinite(Date.parse(startedAt)) ||
-		(route !== undefined && !isSystemOneUsageRoute(route))
+		(route !== undefined && !isSystemOneUsageRoute(route)) ||
+		(value.summarySpendPending !== undefined && value.summarySpendPending !== true) ||
+		(value.summarySpendPending === true && route !== "history_summary")
 	)
 		return undefined;
-	return { requestId, provider, model, ...(route !== undefined ? { route } : {}), origin, startedAt };
+	return {
+		requestId,
+		provider,
+		model,
+		...(route !== undefined ? { route } : {}),
+		origin,
+		startedAt,
+		...(value.summarySpendPending === true ? { summarySpendPending: true } : {}),
+	};
 }
 
 /** The sidecar one session identity owns, and the identity its content must carry. */
@@ -126,6 +160,9 @@ export interface JournalSlot {
 
 /** Maps the current document to the one to write, or `undefined` to remove the sidecar. */
 export type JournalChange = (current: JournalDocument | undefined) => JournalDocument | undefined;
+export interface JournalStandingOutcome {
+	standing?: JournalRecord;
+}
 
 /**
  * Journal storage that cannot be used: `unavailable` when it cannot be read, `corrupt` when its content is invalid or
@@ -151,6 +188,17 @@ const MAX_SIDECAR_NAME_CHARS = 160;
 const MAX_STEM_CHARS = 96;
 /** The kernel reads a session header within 64 KiB (`MAX_SESSION_HEADER_BYTES`), so no session id is longer than that. */
 const SHORT_TOKEN = /^[0-9a-f]{24}$/;
+interface SummaryRecoveryJob {
+	identity: SemanticUsageLedgerIdentity;
+	request: UnresolvedUsageRequest;
+	running: boolean;
+	queued: boolean;
+	failures: number;
+	retryAt: number;
+}
+const summaryRecoveryJobs = new Map<string, SummaryRecoveryJob>();
+const summaryRecoveryQueue: string[] = [];
+let activeSummaryRecoveryScans = 0;
 
 function shortToken(text: string): string {
 	return createHash("sha256").update(text).digest("hex").slice(0, 24);
@@ -185,9 +233,153 @@ export function journalSlotOf(identity: SemanticUsageLedgerIdentity): JournalSlo
 	};
 }
 
+/** Materialize before taking the shared-meter identity, then prove it is still the bound durable journal slot. */
+export function captureSummarySpendIdentity(
+	ledger: SemanticUsageLedgerPort,
+	bound: SemanticUsageLedgerIdentity,
+	disposed: boolean,
+): SemanticUsageLedgerIdentity {
+	ledger.materialize();
+	const identity = ledger.identity();
+	if (
+		disposed ||
+		!identity.persisted ||
+		!journalSlotOf(identity) ||
+		identity.sessionId !== bound.sessionId ||
+		identity.sessionFile !== bound.sessionFile ||
+		identity.headerTimestamp !== bound.headerTimestamp ||
+		identity.persisted !== bound.persisted ||
+		ledger.persistenceUncertain()
+	)
+		throw new Error("Summary spend requires the same durable session identity");
+	return { ...identity, persisted: true };
+}
+
 /** Whether two receipts are the same paid response, compared in their stored (JSON) form: a replay re-presents the same payload. */
 export function samePayload(left: TypeSafeUsageReceipt, right: TypeSafeUsageReceipt): boolean {
 	return isDeepStrictEqual(JSON.parse(JSON.stringify(left)), JSON.parse(JSON.stringify(right)));
+}
+
+export function requestMatchesReceipt(request: UnresolvedUsageRequest, receipt: TypeSafeUsageReceipt): boolean {
+	return (
+		request.provider === receipt.provider &&
+		request.model === receipt.model &&
+		request.route === receipt.route &&
+		isDeepStrictEqual(request.origin, receipt.origin) &&
+		(request.summarySpendPending !== true || receipt.summaryAccounting !== undefined)
+	);
+}
+
+/** Removes one matching receipt and its matching unresolved identity, preserving every other journal obligation. */
+export function withoutRecord(
+	current: JournalDocument,
+	reportId: string,
+	payload: TypeSafeUsageReceipt,
+	updatedAt: string,
+): JournalDocument | undefined {
+	const records = current.records.filter(
+		(record) => record.reportId !== reportId || !samePayload(record.payload, payload),
+	);
+	const unresolved = current.unresolved?.filter(
+		(request) => request.requestId !== reportId || !requestMatchesReceipt(request, payload),
+	);
+	if (!records.length && !current.conflicts.length && !current.droppedConflicts && !unresolved?.length)
+		return undefined;
+	if (records.length === current.records.length && unresolved?.length === current.unresolved?.length) return current;
+	return { ...current, updatedAt, records, ...(unresolved ? { unresolved } : {}) };
+}
+
+export function emptyJournal(slot: JournalSlot, updatedAt: string): JournalDocument {
+	return {
+		version: 1,
+		kind: "semantic-usage-pending",
+		sessionId: slot.sessionId,
+		sessionFile: slot.sessionFile,
+		headerTimestamp: slot.headerTimestamp,
+		updatedAt,
+		records: [],
+		conflicts: [],
+		droppedConflicts: 0,
+	};
+}
+
+export function withConflict(current: JournalDocument, conflict: JournalConflict): JournalDocument {
+	if (current.conflicts.length >= SEMANTIC_USAGE_JOURNAL_MAX_CONFLICTS)
+		return { ...current, updatedAt: conflict.seenAt, droppedConflicts: current.droppedConflicts + 1 };
+	return { ...current, updatedAt: conflict.seenAt, conflicts: [...current.conflicts, conflict] };
+}
+
+/** The one idempotent retain operation; a replay preserves existing canonical and shared-meter proofs. */
+export function retainRecordChange(
+	slot: JournalSlot,
+	record: JournalRecord,
+	outcome: JournalStandingOutcome,
+): JournalChange {
+	return (current) => {
+		const unresolved = current?.unresolved?.find((request) => request.requestId === record.reportId);
+		if (unresolved && !requestMatchesReceipt(unresolved, record.payload))
+			throw new SemanticUsageJournalError(
+				"corrupt",
+				"Usage settlement does not match its dispatched request identity",
+			);
+		if (unresolved && current)
+			current = {
+				...current,
+				unresolved: current.unresolved!.filter((request) => request.requestId !== record.reportId),
+			};
+		const standing = current?.records.find((existing) => existing.reportId === record.reportId);
+		if (current && standing) {
+			if (samePayload(standing.payload, record.payload)) {
+				const summarySpendPending = standing.summarySpendPending ?? record.summarySpendPending;
+				const canonicalConfirmed = standing.canonicalConfirmed === true || record.canonicalConfirmed === true;
+				if (summarySpendPending === false && canonicalConfirmed)
+					return withoutRecord(current, record.reportId, record.payload, record.createdAt);
+				if (
+					summarySpendPending === standing.summarySpendPending &&
+					canonicalConfirmed === (standing.canonicalConfirmed === true)
+				)
+					return current;
+				return {
+					...current,
+					updatedAt: record.createdAt,
+					records: current.records.map((existing) =>
+						existing.reportId === record.reportId
+							? {
+									...existing,
+									...(summarySpendPending !== undefined ? { summarySpendPending } : {}),
+									...(canonicalConfirmed ? { canonicalConfirmed: true as const } : {}),
+								}
+							: existing,
+					),
+				};
+			}
+			outcome.standing = standing;
+			return withConflict(current, { reportId: record.reportId, payload: record.payload, seenAt: record.createdAt });
+		}
+		const base = current ?? emptyJournal(slot, record.createdAt);
+		return { ...base, updatedAt: record.createdAt, records: [...base.records, record] };
+	};
+}
+
+/** Canonical proof removes a record only after spend acknowledgment; otherwise it persists the proof beside it. */
+export function confirmCanonicalSummaryChange(reportId: string, payload: TypeSafeUsageReceipt): JournalChange {
+	return (current) => {
+		const standing = current?.records.find((record) => record.reportId === reportId);
+		if (!current || !standing) return current;
+		if (!samePayload(standing.payload, payload))
+			throw new SemanticUsageJournalError("corrupt", "Canonical summary acknowledgment conflicts with its receipt");
+		const updatedAt = new Date().toISOString();
+		if (standing.summarySpendPending === false) return withoutRecord(current, reportId, payload, updatedAt);
+		return {
+			...current,
+			updatedAt,
+			records: current.records.map((record) =>
+				record.reportId === reportId
+					? { ...record, summarySpendPending: standing.summarySpendPending ?? true, canonicalConfirmed: true }
+					: record,
+			),
+		};
+	};
 }
 
 export function journalRecordBytes(record: JournalRecord): number {
@@ -204,9 +396,25 @@ function validateRecord(value: unknown): JournalRecord | undefined {
 	if (!isPlainRecord(value) || !hasOnlyKeys(value, RECORD_KEYS)) return undefined;
 	const { reportId, payload, createdAt } = value;
 	if (!isReceiptText(reportId) || !isReceiptText(createdAt)) return undefined;
+	if (
+		(value.summarySpendPending !== undefined && typeof value.summarySpendPending !== "boolean") ||
+		(value.canonicalConfirmed !== undefined && value.canonicalConfirmed !== true)
+	)
+		return undefined;
 	const receipt = parseTypeSafeUsageReceipt(payload);
 	if (!receipt || receipt.receiptId !== reportId) return undefined;
-	return { reportId, payload: receipt, createdAt };
+	if (
+		(value.summarySpendPending !== undefined || value.canonicalConfirmed === true) &&
+		(receipt.route !== "history_summary" || receipt.summaryAccounting === undefined)
+	)
+		return undefined;
+	return {
+		reportId,
+		payload: receipt,
+		createdAt,
+		...(value.summarySpendPending !== undefined ? { summarySpendPending: value.summarySpendPending as boolean } : {}),
+		...(value.canonicalConfirmed === true ? { canonicalConfirmed: true } : {}),
+	};
 }
 
 function validateConflict(value: unknown): JournalConflict | undefined {
@@ -351,20 +559,280 @@ export function updateJournal(slot: JournalSlot, change: JournalChange): string 
 				if (!(error instanceof SemanticUsageJournalError) || error.reason !== "corrupt") throw error;
 				movedAside = moveCorruptJournalAside(slot.path);
 			}
-			const next = change(current);
-			if (next === undefined) {
-				try {
-					unlinkSync(slot.path);
-				} catch (error) {
-					if (!isMissingFileError(error)) throw error;
-				}
-			} else {
-				writeFileAtomicSync(slot.path, serializeWithinBounds(next));
-			}
+			persistJournalChange(slot, change(current));
 			return movedAside;
 		},
 		JOURNAL_LOCK_OPTIONS,
 	);
+}
+
+/** Both journal policies publish the same bounded atomic change; their corrupt-input decisions remain separate. */
+function persistJournalChange(slot: JournalSlot, next: JournalDocument | undefined): void {
+	if (next === undefined) {
+		try {
+			unlinkSync(slot.path);
+		} catch (error) {
+			if (!isMissingFileError(error)) throw error;
+		}
+	} else writeFileAtomicSync(slot.path, serializeWithinBounds(next));
+}
+
+/** Strict journal update for the shared-meter ACK path: invalid evidence is returned as an error, never quarantined. */
+function updateJournalStrict(slot: JournalSlot, change: JournalChange): void {
+	withFileLockSync(
+		slot.path,
+		() => {
+			const current = readJournal(slot);
+			persistJournalChange(slot, change(current));
+		},
+		JOURNAL_LOCK_OPTIONS,
+	);
+}
+
+function summarySpendState(
+	document: JournalDocument | undefined,
+	identity: SemanticUsageLedgerIdentity,
+	receiptId: string,
+): SummarySpendReceiptRead {
+	if (!document) return { kind: "missing" };
+	if (document.conflicts.some((conflict) => conflict.reportId === receiptId))
+		return { kind: "unknown", reason: "receipt_conflict" };
+	const record = document.records.find((candidate) => candidate.reportId === receiptId);
+	if (record) {
+		const { payload } = record;
+		if (
+			payload.receiptId !== receiptId ||
+			payload.route !== "history_summary" ||
+			payload.origin?.sessionId !== identity.sessionId ||
+			payload.summaryAccounting === undefined ||
+			typeof record.summarySpendPending !== "boolean"
+		)
+			return { kind: "unknown", reason: "receipt_identity_mismatch" };
+		if (payload.priceKnown !== true) return { kind: "unknown", reason: "summary_price_unavailable" };
+		return {
+			kind: "known",
+			costUsd: payload.usage.cost.total,
+			observedAtMs: payload.summaryAccounting.observedAtMs,
+			summarySpendPending: record.summarySpendPending,
+		};
+	}
+	const unresolved = document.unresolved?.find((request) => request.requestId === receiptId);
+	if (unresolved) {
+		return unresolved.route === "history_summary" &&
+			unresolved.summarySpendPending === true &&
+			unresolved.origin.sessionId === identity.sessionId
+			? { kind: "unresolved" }
+			: { kind: "unknown", reason: "request_identity_mismatch" };
+	}
+	return { kind: "missing" };
+}
+
+/** Read one meter-bound summary receipt without changing or quarantining the sidecar. */
+export function readSummarySpendReceipt(
+	identity: SemanticUsageLedgerIdentity,
+	receiptId: string,
+): SummarySpendReceiptRead {
+	const slot = journalSlotOf(identity);
+	if (!slot || !isReceiptText(receiptId)) return { kind: "unknown", reason: "identity_unavailable" };
+	try {
+		return summarySpendState(readJournal(slot), identity, receiptId);
+	} catch (error) {
+		return {
+			kind: "unknown",
+			reason: error instanceof SemanticUsageJournalError ? error.reason : errorCodeOf(error),
+		};
+	}
+}
+
+async function scanCanonicalSummary(
+	identity: SemanticUsageLedgerIdentity,
+	request: UnresolvedUsageRequest,
+): Promise<TypeSafeUsageReceipt> {
+	const path = identity.sessionFile;
+	if (!identity.persisted || !path) throw new Error("summary session is not persisted");
+	let found: TypeSafeUsageReceipt | undefined;
+	const header = await visitSessionEntriesAsync(
+		path,
+		() => true,
+		(entry) => {
+			if (entry.type !== "custom" || entry.customType !== SEMANTIC_USAGE_CUSTOM_TYPE || !isPlainRecord(entry.data))
+				return;
+			const { reportId, ...data } = entry.data;
+			if (reportId !== request.requestId) return;
+			if (!isReceiptText(entry.id))
+				throw new SemanticUsageJournalError(
+					"corrupt",
+					"canonical summary row has an invalid session entry identity",
+				);
+			const receipt = parseTypeSafeUsageReceipt({ ...data, receiptId: reportId });
+			if (!receipt || !requestMatchesReceipt(request, receipt))
+				throw new SemanticUsageJournalError("corrupt", "canonical summary row conflicts with its reservation");
+			const report = semanticUsageReportOf(receipt);
+			if (!semanticUsageCanonicalDataMatches(entry.data, report))
+				throw new SemanticUsageJournalError("corrupt", "canonical summary row does not match its receipt");
+			if (found && !samePayload(found, receipt))
+				throw new SemanticUsageJournalError("corrupt", "canonical summary rows conflict for this receipt");
+			found = receipt;
+		},
+		{ requireComplete: true },
+	);
+	if (header.id !== identity.sessionId || normalizedHeaderTimestamp(header.timestamp) !== identity.headerTimestamp)
+		throw new SemanticUsageJournalError("corrupt", "canonical summary file belongs to another session identity");
+	if (!found) throw new SemanticUsageJournalError("unavailable", "canonical summary row is not available yet");
+	return found;
+}
+
+async function recoverSummarySpend(
+	identity: SemanticUsageLedgerIdentity,
+	slot: JournalSlot,
+	request: UnresolvedUsageRequest,
+): Promise<void> {
+	const receipt = await scanCanonicalSummary(identity, request);
+	const record: JournalRecord = {
+		reportId: receipt.receiptId,
+		payload: receipt,
+		createdAt: new Date().toISOString(),
+		summarySpendPending: true,
+		canonicalConfirmed: true,
+	};
+	updateJournalStrict(slot, (current) => {
+		if (!current) return current;
+		if (current.conflicts.some((conflict) => conflict.reportId === receipt.receiptId))
+			throw new SemanticUsageJournalError("corrupt", "canonical summary recovery found a receipt conflict");
+		const standing = current.records.find((candidate) => candidate.reportId === receipt.receiptId);
+		const unresolved = current.unresolved?.find((candidate) => candidate.requestId === receipt.receiptId);
+		if (standing && (!samePayload(standing.payload, receipt) || !requestMatchesReceipt(request, standing.payload)))
+			throw new SemanticUsageJournalError(
+				"corrupt",
+				"canonical summary recovery conflicts with the standing receipt",
+			);
+		if (!standing && (!unresolved || !isDeepStrictEqual(unresolved, request))) return current;
+		return retainRecordChange(slot, record, {})(current);
+	});
+}
+
+function drainSummaryRecoveryQueue(): void {
+	while (activeSummaryRecoveryScans < MAX_ACTIVE_SUMMARY_RECOVERY_SCANS && summaryRecoveryQueue.length > 0) {
+		const key = summaryRecoveryQueue.shift()!;
+		const job = summaryRecoveryJobs.get(key);
+		if (!job || job.running || !job.queued) continue;
+		job.queued = false;
+		job.running = true;
+		activeSummaryRecoveryScans += 1;
+		const finish = (): void => {
+			activeSummaryRecoveryScans -= 1;
+			drainSummaryRecoveryQueue();
+		};
+		void recoverSummarySpend(job.identity, journalSlotOf(job.identity)!, job.request).then(
+			() => {
+				summaryRecoveryJobs.delete(key);
+				finish();
+			},
+			() => {
+				job.running = false;
+				job.failures = Math.min(job.failures + 1, 7);
+				job.retryAt = Date.now() + Math.min(1_000 * 2 ** (job.failures - 1), 60_000);
+				finish();
+			},
+		);
+	}
+}
+
+/** Queue one deduplicated recovery; strict scans run at low concurrency and durable state is observed by later reads. */
+export function requestSummarySpendRecovery(identity: SemanticUsageLedgerIdentity, receiptId: string): void {
+	const slot = journalSlotOf(identity);
+	if (!slot || !isReceiptText(receiptId)) return;
+	let request: UnresolvedUsageRequest | undefined;
+	try {
+		request = readJournal(slot)?.unresolved?.find((candidate) => candidate.requestId === receiptId);
+	} catch {
+		return;
+	}
+	if (request?.summarySpendPending !== true || request.route !== "history_summary") return;
+	const key = createHash("sha256")
+		.update(JSON.stringify([slot.path, slot.sessionId, slot.headerTimestamp, receiptId]))
+		.digest("hex");
+	const now = Date.now();
+	const existing = summaryRecoveryJobs.get(key);
+	if (existing?.running || existing?.queued || (existing && existing.retryAt > now)) return;
+	for (const [candidateKey, state] of summaryRecoveryJobs) {
+		if (!state.running && !state.queued && state.retryAt <= now) summaryRecoveryJobs.delete(candidateKey);
+	}
+	const job = existing ?? {
+		identity: { ...identity },
+		request,
+		running: false,
+		queued: false,
+		failures: 0,
+		retryAt: 0,
+	};
+	if (!existing && summaryRecoveryJobs.size >= MAX_SUMMARY_RECOVERY_JOBS) return;
+	job.identity = { ...identity };
+	job.request = request;
+	job.queued = true;
+	job.retryAt = 0;
+	summaryRecoveryJobs.set(key, job);
+	summaryRecoveryQueue.push(key);
+	drainSummaryRecoveryQueue();
+}
+
+/** Acknowledge the exact shared-meter token, retaining the receipt until canonical row confirmation also exists. */
+export function acknowledgeSummarySpend(identity: SemanticUsageLedgerIdentity, receiptId: string): void {
+	const slot = journalSlotOf(identity);
+	if (!slot || !isReceiptText(receiptId)) {
+		throw new SemanticUsageJournalError("corrupt", "summary spend acknowledgment has no valid session identity");
+	}
+	updateJournalStrict(slot, (current) => {
+		if (!current) return undefined;
+		const state = summarySpendState(current, identity, receiptId);
+		if (state.kind === "missing") return current;
+		if (state.kind !== "known") {
+			throw new SemanticUsageJournalError("corrupt", "summary spend acknowledgment does not match a known receipt");
+		}
+		const record = current.records.find((candidate) => candidate.reportId === receiptId)!;
+		if (record.summarySpendPending === false) {
+			return record.canonicalConfirmed === true
+				? withoutRecord(current, receiptId, record.payload, new Date().toISOString())
+				: current;
+		}
+		if (record.canonicalConfirmed === true)
+			return withoutRecord(current, receiptId, record.payload, new Date().toISOString());
+		return {
+			...current,
+			updatedAt: new Date().toISOString(),
+			records: current.records.map((candidate) =>
+				candidate.reportId === receiptId ? { ...candidate, summarySpendPending: false } : candidate,
+			),
+		};
+	});
+}
+
+/** Retire only a meter-bound reservation proven to have had no provider response. */
+export function cancelUndispatchedSummarySpend(identity: SemanticUsageLedgerIdentity, receiptId: string): void {
+	const slot = journalSlotOf(identity);
+	if (!slot || !isReceiptText(receiptId))
+		throw new SemanticUsageJournalError("corrupt", "summary reservation has no valid session identity");
+	updateJournalStrict(slot, (current) => {
+		if (!current) return undefined;
+		if (
+			current.records.some((record) => record.reportId === receiptId) ||
+			current.conflicts.some((conflict) => conflict.reportId === receiptId)
+		)
+			throw new SemanticUsageJournalError("corrupt", "a summary receipt prevents reservation cancellation");
+		const request = current.unresolved?.find((item) => item.requestId === receiptId);
+		if (!request) return current;
+		if (
+			request.route !== "history_summary" ||
+			request.summarySpendPending !== true ||
+			request.origin.sessionId !== identity.sessionId
+		)
+			throw new SemanticUsageJournalError("corrupt", "summary reservation identity does not match");
+		const unresolved = current.unresolved!.filter((item) => item.requestId !== receiptId);
+		if (!current.records.length && !current.conflicts.length && !current.droppedConflicts && !unresolved.length)
+			return undefined;
+		const { unresolved: _removed, ...rest } = current;
+		return { ...rest, updatedAt: new Date().toISOString(), ...(unresolved.length ? { unresolved } : {}) };
+	});
 }
 
 /**

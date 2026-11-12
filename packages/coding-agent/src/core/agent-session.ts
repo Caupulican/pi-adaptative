@@ -1396,12 +1396,12 @@ export class AgentSession {
 			continuousChat: {
 				compaction: createContinuousChatCompactionAdapter({
 					usage: () => this._semanticUsage,
-					timers: config.timers.port("continuous-chat"),
 					complete: (options) => this._reflection.runIsolatedCompletion(options),
 					prefixHead: () => this._continuousChatPrefixHead(),
 					spend: new ContinuousChatSpendMeter(
 						continuousChatSpendFile(this._agentDir),
 						() => readContinuousChatSettings(this.settingsManager).maxUsdPerDay,
+						config.timers.port("continuous-chat"),
 					),
 					summary: () =>
 						validateContinuousChatSummaryModel(readContinuousChatSettings(this.settingsManager), {

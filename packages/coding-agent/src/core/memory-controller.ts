@@ -52,7 +52,7 @@ import {
 	resolveMemoryPromptBudget,
 	shareOfMemoryPromptBudget,
 } from "./context/memory-prompt-budget.ts";
-import type { MemoryPromptPlan } from "./context/memory-prompt-plan.ts";
+import { dispatchCurrentMemoryPlan, type MemoryPromptPlan } from "./context/memory-prompt-plan.ts";
 import {
 	type MemoryProvider as ContextMemoryProvider,
 	DEFAULT_EXTERNAL_MEMORY_EGRESS_POLICY,
@@ -1577,7 +1577,7 @@ export class MemoryController {
 			}
 		}
 		const content = projection?.text || KNOWLEDGE_CONTEXT_CLEARED;
-		return {
+		return dispatchCurrentMemoryPlan({
 			messages: [
 				...messages,
 				createCustomMessage(
@@ -1621,7 +1621,7 @@ export class MemoryController {
 					sourceLabel: "memory:knowledge",
 				};
 			},
-		};
+		});
 	}
 
 	private _knowledgeScope(): KnowledgeScope {

@@ -85,6 +85,45 @@ pass. Why: measured on the owner's sessions a reasoning-only change made a cold 
 likely (47% against a 9% baseline).
 Enforced by: prose only
 
+**A live knowledge replacement authorizes only its own proved wire interval.** The request planner
+marks the exact final provider-message range occupied by request-only projections. A replacement may
+be classified as mandatory only when exact system, tool, reasoning and every previously sent
+non-projection message still agree, with ordinary history append allowed. Missing, malformed or
+incomplete proof never grants an exception. The actual prefix remains broken in cache observations;
+authorization changes its custody classification, never the measured cache fact. Current knowledge
+is still replaced immediately and never committed to durable conversation history.
+Enforced by: packages/coding-agent/src/kernel/provider-request-planner.ts; packages/coding-agent/src/core/request-snapshot-fingerprints.ts; packages/coding-agent/src/core/context/cache-custody.ts; packages/coding-agent/test/request-snapshot-fingerprints.test.ts
+
+**Accepted knowledge stays current through the final dispatch handoff.** A nonconsumptive predicate
+survives plan commit and asynchronous snapshot, redaction and admission work. A present predicate
+must synchronously return true; stale or malformed proof yields a normal terminal refusal before
+physical accounting begins. Consumable reflection and brief validators remain precommit checks.
+Enforced by: packages/coding-agent/src/kernel/provider-request-planner.ts (isContextPlanDispatchCurrent); packages/coding-agent/test/request-dispatch-freshness.test.ts; packages/coding-agent/test/request-dispatch-lifecycle.test.ts
+
+**Summary accounting admission survives the process that dispatched it.** The shared spend owner
+records a fenced physical claim before transport, rechecks the daily limit under that same lock, and
+atomically records available measured cost before releasing the claim. Each exact session and model
+identity has one physical request at a time. A proven-dead reservation is cancelled as undispatched
+before cooldown; an attempted request without recoverable usage remains globally held. Foreign or
+uncertain ownership also fences new spending. Known receipts across all keys replay before the
+shared cap decision. Semantic receipt retention and the meter token remain pinned until canonical
+persistence and exact-token spend acknowledgement both succeed. Holds survive day rollover, and
+unreadable state refuses new paid work. Models require declared prices, including explicit zeros;
+recovery requires explicit price proof. Measured cost from an unhealthy or late response still
+counts once on its physical observation's UTC day; expired-day measured amounts remain archived.
+Enforced by: packages/coding-agent/src/core/memory/continuous-chat-spend.ts; packages/coding-agent/src/core/cost/semantic-usage-journal.ts; packages/coding-agent/test/continuous-chat-restart-cost-witness.test.ts; packages/coding-agent/test/semantic-summary-recovery-races.test.ts
+
+**Summary retries count failed dispositions, not cancelled claims.** Claiming reserves one attempt;
+release or interrupted-claim recovery refunds that reservation exactly once under its claim fence.
+Only failure consumes the retry budget. A configuration-only hold requires a concrete nonblank
+identity matching the current configuration; absent or mismatched identities use ordinary backoff.
+Enforced by: packages/coding-agent/src/core/memory/continuous-chat-scheduler.ts; packages/coding-agent/test/continuous-chat-scheduler-retry-budget.test.ts
+
+**A worker's context allowance excludes only its own in-flight token reservation.** Settled usage
+and sibling reservations still reduce next-request headroom. Aggregate unreserved capacity and
+actual pooled admission count every reservation; fitting context cannot grant extra spending room.
+Enforced by: packages/coding-agent/src/core/delegation/worker-tree-budget-coordinator.ts; packages/coding-agent/src/core/orchestration/capability-gateway.ts; packages/coding-agent/test/worker-knowledge-budget-currency.test.ts
+
 **Every owner message reaches the selected root model.** Greetings, substantive requests and
 toolkit names enter the root's full conversation with its tool surface. The host does not pre-route
 them to a cheap tier or run a toolkit script before the root decides. Internal turns stay on that
@@ -323,6 +362,13 @@ run's signal is aborted finalizes as `aborted` with the abort's name in its text
 mistake, and is not an active failure. Why: a 30-minute hang ended with two killed siblings charged
 to the model as mistakes with no diagnostic.
 Enforced by: prose only
+
+**A successful text-protocol replay compares the whole ordered operation.** The shared execution
+key retains mutation payloads and exact values while treating resource-envelope changes as the same
+operation. Editing the same path with a different patch remains executable; an unchanged successful
+batch is refused only within the same bound execution scope. Coarse runaway signatures do not decide
+whether two successful operations are identical.
+Enforced by: packages/coding-agent/src/kernel/agent-loop.ts; packages/coding-agent/test/text-tool-success-replay.test.ts
 
 **A background command occupies neither the exclusive mutation barrier nor the agent's shell
 session.** `background: true` waits only for the file writes its own message emitted before it,
@@ -594,6 +640,11 @@ fallback and the idle-stall fallback, so an abort-ignoring iterator could keep t
 forever.
 Enforced by: prose only
 
+**The loop releases its abort forwarding listener on every exit.** Provider planning, stream events,
+message transformation and event delivery share one cleanup boundary. A rejection cannot leave a
+listener on the caller's signal; unrelated caller listeners remain owned by the caller.
+Enforced by: packages/coding-agent/src/kernel/agent-loop.ts; packages/coding-agent/test/agent-loop-abort-listener.test.ts
+
 **A tool-loop runaway is evidence.** A repeated tool call, a stagnant tool cycle, or the
 provider-turn limit records a runaway stop, demotes the model to the strong tier for thirty days,
 and the goal continues on a recovery path. An output runaway from the stream guard ends the
@@ -693,6 +744,12 @@ foreground directories cannot block status or cancellation. Why: resolving every
 the launch directory dispatched work into the wrong project; treating the execution directory as
 the grant anchor could silently add a new share.
 Enforced by: prose only
+
+**Worktree relocation distinguishes the lane root from a nested execution directory.** Workspace
+selection and additional write paths use the same root mapping. Reusing a lane preserves its
+registered root, so a nested workspace is not appended twice; external paths remain external for
+the existing containment checks to refuse.
+Enforced by: packages/coding-agent/src/core/delegation/worker-lane-isolation.ts; packages/coding-agent/src/core/worktree-sync/worker-lane.ts; packages/coding-agent/test/worker-lane-isolation-relocation.test.ts
 
 **A fresh, unpinned worker runs on another account than the foreground when one is authenticated,
 and inherits the foreground thinking level one notch down; authored choices are never moved.**

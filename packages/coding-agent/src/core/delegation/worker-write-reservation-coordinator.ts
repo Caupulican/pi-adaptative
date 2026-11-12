@@ -8,10 +8,12 @@ import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
 import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
 import { isLocalProcessAlive, localWorkerProcessOwnerLiveness } from "./worker-process-owner.ts";
 import {
+	validateWorkerWriteReservationScopes,
 	type WorkerWriteReservationConflict,
 	type WorkerWriteReservationLease,
 	type WorkerWriteReservationReleaseResult,
 	type WorkerWriteReservationRequest,
+	WorkerWriteReservationScopeError,
 	WorkerWriteReservationStore,
 	type WorkerWriteReservationWorkspace,
 } from "./worker-write-reservation.ts";
@@ -37,7 +39,26 @@ export interface WorkerWriteReservationBlockDetail {
 export type WorkerWriteReservationAdmission =
 	| { kind: "granted" }
 	| { kind: "blocked"; detail?: WorkerWriteReservationBlockDetail }
-	| { kind: "denied"; reasonCode: "write_reservation_scope_invalid" | "write_reservation_unavailable" };
+	| {
+			kind: "denied";
+			reasonCode: "write_reservation_scope_invalid" | "write_reservation_unavailable";
+			skipReason?: string;
+			detail?: string;
+	  };
+
+function reservationScopesForPlan(
+	plan: Pick<WorkerExecutionPlan, "cwd" | "writeEnabled" | "writePaths" | "writeReservationPaths">,
+): readonly string[] {
+	const scopes = plan.writeReservationPaths ?? plan.writePaths;
+	if (!plan.writeEnabled || scopes.length === 0) return [];
+	const requested = new Set(scopes.map(canonicalPathScopeIdentity));
+	const machineRoots = workerMachinePathRoots(plan.cwd);
+	// Machine-wide authority stays unreserved; reserving every root would serialize the whole worker fleet.
+	return requested.size === machineRoots.length &&
+		machineRoots.every((root) => requested.has(canonicalPathScopeIdentity(root)))
+		? []
+		: scopes;
+}
 
 /** One line a queue view can print for a blocked write admission. */
 export function formatWorkerWriteReservationBlock(detail: WorkerWriteReservationBlockDetail): string {
@@ -141,6 +162,27 @@ export class WorkerWriteReservationCoordinator {
 		});
 	}
 
+	/** Validate the plan at shared admission; the durable store repeats this rule when it acquires the fence. */
+	validateAdmission<
+		T extends
+			| {
+					ok: true;
+					executionPlan: Pick<
+						WorkerExecutionPlan,
+						"cwd" | "writeEnabled" | "writePaths" | "writeReservationPaths"
+					>;
+			  }
+			| { ok: false; skipReason: string },
+	>(admission: T): T | { ok: false; skipReason: string } {
+		if (!admission.ok) return admission;
+		const scopes = reservationScopesForPlan(admission.executionPlan);
+		if (scopes.length === 0) return admission;
+		const validation = validateWorkerWriteReservationScopes(scopes, admission.executionPlan.cwd);
+		return validation.ok
+			? admission
+			: { ok: false, skipReason: `write_reservation_scope_invalid:${validation.detail}` };
+	}
+
 	/** Clone this owner's actual leases, including retained releases; never discover, acquire, release or attach a watcher. */
 	getResourceSnapshot(): WorkerWriteReservationResourceSnapshot {
 		return {
@@ -161,26 +203,15 @@ export class WorkerWriteReservationCoordinator {
 			Partial<Pick<WorkerExecutionPlan, "cwd" | "writeReservationPaths">>,
 	): WorkerWriteReservationAdmission {
 		// Only explicit scopes fence other lanes; a plan's bare cwd default reserves nothing.
-		const reservedPaths = plan.writeReservationPaths ?? plan.writePaths;
-		if (!plan.writeEnabled || reservedPaths.length === 0) {
+		const planCwd = plan.cwd ?? this.options.getCwd();
+		const reservedPaths = reservationScopesForPlan({ ...plan, cwd: planCwd });
+		if (reservedPaths.length === 0) {
 			this.blockedByLocalLaneIds.delete(laneId);
 			return { kind: "granted" };
 		}
 		const fencingToken = (attempt.lease?.fencingToken ?? 0) + 1;
 		const current = this.leases.get(laneId);
 		if (current && current.attemptId === attempt.attemptId && current.fencingToken === fencingToken) {
-			this.blockedByLocalLaneIds.delete(laneId);
-			return { kind: "granted" };
-		}
-		const planCwd = plan.cwd ?? this.options.getCwd();
-		const machineRoots = workerMachinePathRoots(planCwd);
-		const requestedScopes = new Set(reservedPaths.map(canonicalPathScopeIdentity));
-		const machineWide =
-			requestedScopes.size === machineRoots.length &&
-			machineRoots.every((root) => requestedScopes.has(canonicalPathScopeIdentity(root)));
-		// Machine authority is intentionally unreserved: reserving `/` (or every Windows volume)
-		// serializes the swarm globally. Explicit workspace profiles retain collision fencing.
-		if (machineWide) {
 			this.blockedByLocalLaneIds.delete(laneId);
 			return { kind: "granted" };
 		}
@@ -630,7 +661,7 @@ export class WorkerWriteReservationCoordinator {
 			const message = error instanceof Error ? error.message : String(error);
 			this.options.warn(`${warningPrefix}: ${message}`);
 			const reasonCode =
-				classifyScopeFailure && message.includes("within the execution root")
+				classifyScopeFailure && error instanceof WorkerWriteReservationScopeError
 					? "write_reservation_scope_invalid"
 					: "write_reservation_unavailable";
 			harnessLog.warn("workers", "a worker's write reservation was denied", {
@@ -638,7 +669,13 @@ export class WorkerWriteReservationCoordinator {
 				reasonCode,
 				error: error instanceof Error ? error.name : typeof error,
 			});
-			return { kind: "denied", reasonCode };
+			return {
+				kind: "denied",
+				reasonCode,
+				skipReason:
+					reasonCode === "write_reservation_scope_invalid" ? `${reasonCode}:${message.slice(0, 512)}` : reasonCode,
+				...(reasonCode === "write_reservation_scope_invalid" ? { detail: message.slice(0, 512) } : {}),
+			};
 		}
 	}
 

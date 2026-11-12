@@ -7,6 +7,14 @@ export const flag = (name, fallback) => {
 	return at >= 0 && args[at + 1] ? args[at + 1] : fallback;
 };
 
+/** Select known scenario IDs in their declared execution order; a typo can never produce an empty passing gate. */
+export function selectLiveScenarios(scenarios, requested) {
+	const known = new Set(scenarios.map(({ id }) => id));
+	const unknown = requested.filter((id) => !known.has(id));
+	if (unknown.length) throw new Error(`Unknown live scenario IDs: ${unknown.join(", ")}`);
+	return requested.length ? scenarios.filter(({ id }) => requested.includes(id)) : scenarios;
+}
+
 /** The required `--out` directory of an export script; exit 2 with the script's name when it is absent. */
 export const requireOut = (tool) => {
 	const out = flag("out", undefined);

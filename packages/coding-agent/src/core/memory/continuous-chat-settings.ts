@@ -97,6 +97,12 @@ export function validateContinuousChatSummaryModel(
 		};
 	}
 	const reference = `${model.provider}/${model.id}`;
+	if (model.costDefaulted) {
+		return {
+			ok: false,
+			reason: `The ICM chat's summary model ${reference} has no declared price: configure its input, output and cache prices, including explicit zero prices if applicable.`,
+		};
+	}
 	if (!isLocalExecutionModel(model) && !settings.allowExternalSummaryEgress) {
 		return {
 			ok: false,

@@ -57,6 +57,8 @@ export interface UnresolvedUsageRequest {
 	readonly route?: SystemOneUsageRoute;
 	readonly origin: AccountingOrigin;
 	readonly startedAt: string;
+	/** Set only when a shared-meter summary receipt must survive until its exact spend token is acknowledged. */
+	readonly summarySpendPending?: true;
 }
 
 export interface HistoryUsageCall {
@@ -73,6 +75,8 @@ export interface TypeSafeUsageReceipt extends PricedTypeSafeUsage {
 	readonly priceKnown?: true;
 	/** Actual provider response time, preserved across deferred delivery. */
 	readonly responseTimestamp?: string;
+	/** Exact host observation time used to recover a history-summary spend after a crash. */
+	readonly summaryAccounting?: { readonly observedAtMs: number };
 	readonly receiptId: string;
 	readonly provider: string;
 	readonly model: string;

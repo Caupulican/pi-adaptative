@@ -55,7 +55,7 @@ export {
  *   its retry delay.
  * - `continuous-chat`: bounded summary-request transport backoff and the chat's retained work-claim releases. After
  *   request recovery is exhausted, failed summary work retries on a later arrival, never on an alarm. One wall alarm
- *   wakes dispatch when a daily-spend or provider-limit hold may have lifted (next UTC day, provider reset).
+ *   wakes dispatch when a daily-spend, provider-limit, or response-accounting hold may have lifted.
  * - `system-prompt`: the clock the date a system prompt states is read from, pinned at the first build and advanced
  *   only at a cold moment. It arms no alarm.
  * - `channel-poll`: the schedule of a shipped channel transport that polls (Gmail): the wait between quiet polls, its

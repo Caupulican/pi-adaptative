@@ -134,6 +134,20 @@ interface CanonicalWorkspace {
 	isolatedWorktreeId?: string;
 }
 
+export type WorkerWriteReservationScopeValidation =
+	| { ok: true; scopes: string[] }
+	| { ok: false; scopes: string[]; detail: string };
+
+export const WORKER_WRITE_RESERVATION_SCOPE_ERROR_MESSAGE =
+	"Write reservation scopes must be within the execution root.";
+
+export class WorkerWriteReservationScopeError extends TypeError {
+	constructor() {
+		super(WORKER_WRITE_RESERVATION_SCOPE_ERROR_MESSAGE);
+		this.name = "WorkerWriteReservationScopeError";
+	}
+}
+
 function positiveFencingToken(value: number): number {
 	if (!Number.isSafeInteger(value) || value < 1) throw new TypeError("Fencing token must be a positive safe integer.");
 	return value;
@@ -148,6 +162,26 @@ function canonicalRealOrLexicalPath(value: string, label: string): string {
 	const lexical = canonicalPathScopeIdentity(requireBoundedTrimmedText(value, MAX_PATH_CHARS, label));
 	const resolved = safeRealpathSync(lexical);
 	return pathScopesOverlap(lexical, resolved) ? canonicalPathScopeIdentity(resolved) : lexical;
+}
+
+/**
+ * Canonicalize and validate the exact write roots shared by worker admission and the durable reservation store.
+ * Keeping the boundary here makes preflight rejection and the store's fail-closed defense enforce one rule.
+ */
+export function validateWorkerWriteReservationScopes(
+	writeScopes: readonly string[],
+	executionRoot: string,
+): WorkerWriteReservationScopeValidation {
+	const canonicalRoot = canonicalRealOrLexicalPath(executionRoot, "Execution root");
+	const scopes = writeScopes.map((scope) => canonicalRealOrLexicalPath(scope, "Write scope"));
+	if (scopes.some((scope) => !isPathWithinScope(scope, canonicalRoot))) {
+		return {
+			ok: false,
+			scopes,
+			detail: WORKER_WRITE_RESERVATION_SCOPE_ERROR_MESSAGE,
+		};
+	}
+	return { ok: true, scopes };
 }
 
 function canonicalWorkspace(workspace: WorkerWriteReservationWorkspace): CanonicalWorkspace {
@@ -331,12 +365,9 @@ export class WorkerWriteReservationStore {
 			throw new TypeError(`Write reservations require from 1 through ${MAX_SCOPES} write scopes.`);
 		}
 		const workspace = canonicalWorkspace(request.workspace);
-		const writeScopes = [
-			...new Set(request.writeScopes.map((scope) => canonicalRealOrLexicalPath(scope, "Write scope"))),
-		].sort();
-		if (writeScopes.some((scope) => !isPathWithinScope(scope, workspace.executionRoot))) {
-			throw new TypeError("Write reservation scopes must be within the execution root.");
-		}
+		const validatedScopes = validateWorkerWriteReservationScopes(request.writeScopes, workspace.executionRoot);
+		if (!validatedScopes.ok) throw new WorkerWriteReservationScopeError();
+		const writeScopes = [...new Set(validatedScopes.scopes)].sort();
 		const parentSessionId = requireBoundedTrimmedText(
 			request.parentSessionId,
 			MAX_IDENTIFIER_CHARS,

@@ -1645,7 +1645,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 																compactionReserveTokens: options.knowledgeCompactionReserveTokens ?? 0,
 																maxOutputTokens: workerOutputTokenCeiling,
 																remainingTokenAllowance: () =>
-																	options.toolSurface.gateway?.remainingTokenBudget(),
+																	options.toolSurface.gateway?.remainingContextTokenBudget(),
 																signal,
 															});
 															if (fitted.kind === "ready") return fitted.plan;

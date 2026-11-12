@@ -36,6 +36,7 @@ export interface CustodyRequestFacts {
 	readonly conversation?: string;
 	readonly lane: string;
 	readonly prefixIntact?: boolean | "unknown";
+	readonly requestOnlyProjectionReplacement?: true;
 	readonly firstDivergentKind?: string;
 	readonly firstDivergentIndex?: number;
 	readonly reasoning?: string;
@@ -182,6 +183,13 @@ export class CacheCustody {
 		const rewritten = facts.prefixIntact === false;
 		if (!rewritten && !reasoningChanged) return { classification: "append" };
 		if (token) return { classification: "sanctioned", kind: token.kind, reason: token.reason };
+		if (facts.requestOnlyProjectionReplacement === true && !reasoningChanged) {
+			return {
+				classification: "sanctioned",
+				kind: "request-only-projection",
+				reason: "the exact provider prefix differs only inside its replaceable request-only projection",
+			};
+		}
 		return rewritten
 			? {
 					classification: "unsanctioned",

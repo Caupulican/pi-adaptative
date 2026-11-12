@@ -40,7 +40,8 @@ import { connect, createServer } from "node:net";
 import { cpus, homedir, loadavg, tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
-import { args, flag } from "./live-args.mjs";
+import { args, flag, selectLiveScenarios } from "./live-args.mjs";
+import { assertLiveBinaryUnchanged, pinLiveBinary } from "./lib/live-binary-identity.mjs";
 
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const MODEL_A = flag("model-a", "xai/grok-4.7-build-fast");
@@ -51,12 +52,31 @@ const ONLY = flag("only", "")
 const KEEP = args.includes("--keep");
 // `--installed` drives the installed `pi` binary instead of the source build, to validate what a user runs.
 const INSTALLED = args.includes("--installed");
-const PI_COMMAND = INSTALLED ? "pi" : join(REPO, "pi-test.sh");
 
 if (process.env.HERDR_ENV !== "1") {
 	console.error("accept-harness-live: run this inside herdr (HERDR_ENV=1).");
 	process.exit(2);
 }
+
+const requestedBinary = flag("binary", undefined);
+for (const name of ["binary", "release-tag", "release-commit", "only"]) {
+	if (args.includes(`--${name}`) && (!flag(name, undefined) || flag(name, undefined).startsWith("--")))
+		throw new Error(`--${name} requires a value.`);
+}
+if (!INSTALLED && requestedBinary) throw new Error("--binary requires --installed.");
+if (!requestedBinary && (args.includes("--release-tag") || args.includes("--release-commit")))
+	throw new Error("Release identity requires an explicit --binary.");
+const BINARY_IDENTITY = requestedBinary
+	? pinLiveBinary({
+		binaryPath: requestedBinary,
+		releaseTag: flag("release-tag", undefined),
+		releaseCommit: flag("release-commit", undefined),
+		resolveTagCommit: (tag) => execFileSync("git", ["rev-parse", `${tag}^{commit}`], { cwd: REPO, encoding: "utf8" }),
+	})
+	: undefined;
+const PI_COMMAND = BINARY_IDENTITY?.path ?? (INSTALLED ? "pi" : join(REPO, "pi-test.sh"));
+if (BINARY_IDENTITY && (ONLY.length === 0 || ONLY.includes("s10")))
+	throw new Error("Pinned binary acceptance needs an explicit --only scope excluding source-only s10.");
 
 // s9 reads the harness log, so the gate pins the level and categories it reads under: this process, every script it
 // spawns (`process.env`) and every pane (`launch`). The owner's shell cannot then narrow the log the verdict depends on.
@@ -68,7 +88,7 @@ const PANE_ENV = Object.entries(HARNESS_LOG_PIN)
 // The report stamps the binary an `--installed` run drove: the first line of its `--version`. A binary that cannot say
 // its version stops the run before any scenario, because the stamp would then name nothing.
 const installedVersion = () => {
-	const probe = spawnSync("pi", ["--version"], { encoding: "utf8", timeout: 30_000 });
+	const probe = spawnSync(PI_COMMAND, ["--version"], { encoding: "utf8", timeout: 30_000 });
 	const line = (probe.stdout ?? "").split("\n")[0].trim();
 	if (probe.status !== 0 || line === "") {
 		console.error("accept-harness-live: --installed needs `pi --version` to print a version; the report stamps it.");
@@ -76,7 +96,7 @@ const installedVersion = () => {
 	}
 	return line;
 };
-const BINARY = INSTALLED ? installedVersion() : null;
+const BINARY = BINARY_IDENTITY?.version ?? (INSTALLED ? installedVersion() : null);
 
 const RUN_STARTED_MS = Date.now();
 const stamp = new Date(RUN_STARTED_MS).toISOString().replace(/[:.]/g, "-");
@@ -216,6 +236,7 @@ const herdr = (...a) => {
 	return r.stdout;
 };
 const panes = [];
+const shellArgument = (value) => `'${value.replaceAll("'", "'\\''")}'`;
 const openPane = (anchor) => {
 	const out = JSON.parse(herdr("pane", "split", anchor ?? "--current", "--direction", "down"));
 	const id = out.result.pane.pane_id;
@@ -228,7 +249,7 @@ const launch = (pane, cwd, extra = "", agentDir = AGENT) =>
 		"pane",
 		"run",
 		pane,
-		`clear; cd ${cwd} && PI_ADAPTATIVE_CODING_AGENT_DIR=${agentDir} ${PANE_ENV} ${PI_COMMAND} --provider ${MODEL_A.split("/")[0]} --model ${MODEL_A.split("/").slice(1).join("/")} ${extra}`,
+		`clear; cd ${shellArgument(cwd)} && PI_ADAPTATIVE_CODING_AGENT_DIR=${shellArgument(agentDir)} ${PANE_ENV} ${shellArgument(PI_COMMAND)} --provider ${shellArgument(MODEL_A.split("/")[0])} --model ${shellArgument(MODEL_A.split("/").slice(1).join("/"))} ${extra}`,
 	);
 const type = async (pane, text) => {
 	herdr("pane", "send-text", pane, text);
@@ -1044,10 +1065,10 @@ const SCENARIOS = [
 // ---------------------------------------------------------------------------------------------------------------
 // Run and gate.
 // ---------------------------------------------------------------------------------------------------------------
+const SELECTED_SCENARIOS = selectLiveScenarios(SCENARIOS, ONLY);
 console.log(`live gate: ${MODEL_A} + ${MODEL_B}; sandbox ${SANDBOX}; agent dir ${AGENT}\n`);
 let aborted = false;
-for (const s of SCENARIOS) {
-	if (ONLY.length > 0 && !ONLY.includes(s.id)) continue;
+for (const s of SELECTED_SCENARIOS) {
 	if (aborted) {
 		results.push({ id: s.id, title: s.title, status: "skipped", detail: "an earlier scenario this one depends on failed to start" });
 		continue;
@@ -1064,6 +1085,13 @@ for (const s of SCENARIOS) {
 	const last = results[results.length - 1];
 	console.log(`${last.status.padEnd(7)} ${last.id} ${last.title} (${last.seconds ?? 0}s)\n        ${last.detail}`);
 }
+if (BINARY_IDENTITY) {
+	try {
+		assertLiveBinaryUnchanged(BINARY_IDENTITY);
+	} catch (error) {
+		results.push({ id: "binary_identity", title: "Pinned executable identity", status: "FAIL", detail: error.message });
+	}
+}
 const failed = results.filter((r) => r.status === "FAIL");
 const unsure = results.filter((r) => r.status === "INCONCLUSIVE");
 const skipped = results.filter((r) => r.status === "skipped");
@@ -1071,7 +1099,7 @@ const verdict = failed.length > 0 ? "FAIL" : unsure.length > 0 ? "INCONCLUSIVE" 
 // The stamp: the commit this run tested, with its verdict. Written for every verdict, so a stale or failing run is visible too.
 writeFileSync(
 	join(REPORT_DIR, "report.json"),
-	JSON.stringify({ at: stamp, commit: COMMIT, dirty: DIRTY, installed: INSTALLED, binary: BINARY, verdict, modelA: MODEL_A, modelB: MODEL_B, sandbox: SANDBOX, agentDir: AGENT, results }, null, 1),
+	JSON.stringify({ at: stamp, commit: COMMIT, dirty: DIRTY, installed: INSTALLED, binary: BINARY, binaryIdentity: BINARY_IDENTITY ?? null, selectedScenarios: SELECTED_SCENARIOS.map(({ id }) => id), excludedScenarios: SCENARIOS.filter((scenario) => !SELECTED_SCENARIOS.includes(scenario)).map(({ id, title }) => ({ id, title, reason: id === "s10" ? "source-only owner-quota check; outside binary acceptance" : ["s11", "s12"].includes(id) ? "unrelated private integration data; outside selected scope" : "outside selected acceptance scope" })), verdict, modelA: MODEL_A, modelB: MODEL_B, sandbox: SANDBOX, agentDir: AGENT, results }, null, 1),
 );
 if (!KEEP) for (const pane of panes) spawnSync("herdr", ["pane", "close", pane]);
 for (const dir of AGENT_DIRS) {

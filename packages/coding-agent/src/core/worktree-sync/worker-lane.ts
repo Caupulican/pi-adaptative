@@ -117,11 +117,15 @@ interface LaneAt {
 	lane: LaneRegistration;
 }
 
-/** The repository `worktreePath` belongs to and the active lane registered for that worktree, if any. */
-async function resolveLaneAt(deps: WorktreeSyncEngineDeps, worktreePath: string): Promise<LaneAt | undefined> {
+/** The active registered lane for a checkout identity or exact worktree path, if any. */
+async function resolveLaneAt(
+	deps: WorktreeSyncEngineDeps,
+	worktreePath: string,
+	containingCheckout = false,
+): Promise<LaneAt | undefined> {
 	const context = await resolveRepoContext({ ...deps, cwd: worktreePath });
 	if ("code" in context) return undefined;
-	const wanted = canonical(worktreePath);
+	const wanted = canonical(containingCheckout ? context.topLevel : worktreePath);
 	const lane = (await listLanes(context.paths)).find(
 		(entry) => entry.status === "active" && canonical(entry.worktreePath) === wanted,
 	);
@@ -158,6 +162,14 @@ export async function findLaneByPath(
 	worktreePath: string,
 ): Promise<LaneRegistration | undefined> {
 	return (await resolveLaneAt(deps, worktreePath))?.lane;
+}
+
+/** The active lane whose registered worktree contains `directory`, resolved through its git checkout identity. */
+export async function findLaneByDirectory(
+	deps: WorktreeSyncEngineDeps,
+	directory: string,
+): Promise<LaneRegistration | undefined> {
+	return (await resolveLaneAt(deps, directory, true))?.lane;
 }
 
 /** Whether `candidate` lies under the directory lane worktrees are created in (a cheap check, no git). */

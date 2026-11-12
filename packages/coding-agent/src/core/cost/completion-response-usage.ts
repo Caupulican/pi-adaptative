@@ -7,6 +7,28 @@ import type { AccountingOrigin } from "./accounting-evidence.ts";
 import { type RequestSpendBudget, RequestSpendRefusal } from "./request-spend-budget.ts";
 import type { MaintenanceUsageLease, SessionSemanticUsageDelivery } from "./semantic-usage-delivery.ts";
 
+/** A dispatched response whose usage could not be measured and retained. */
+export class CompletionAccountingError extends Error {
+	constructor(cause: unknown) {
+		super(cause instanceof Error ? cause.message : "Completion usage could not be measured and retained.", { cause });
+		this.name = "CompletionAccountingError";
+	}
+}
+
+/** Usage custody could not be reserved before a request was dispatched. */
+export class CompletionAccountingAdmissionError extends Error {
+	constructor(cause: unknown) {
+		super(cause instanceof Error ? cause.message : "Completion usage admission failed.", { cause });
+		this.name = "CompletionAccountingAdmissionError";
+	}
+}
+
+/** Facts from one physical response, independent of its logical caller's lifetime. */
+export interface CompletionAccountingSettlement {
+	readonly error?: CompletionAccountingError;
+	readonly measuredCostUsd?: number;
+}
+
 /** Physical response ownership, independent of whether the caller has a monetary budget. */
 export class CompletionResponseUsage implements ProviderResponseObserver {
 	private readonly owner: SessionSemanticUsageDelivery;
@@ -30,7 +52,11 @@ export class CompletionResponseUsage implements ProviderResponseObserver {
 	) {
 		this.owner = owner;
 		this.origin = Object.freeze({ ...origin });
-		this.lease = owner.beginMaintenance(route, maxResponses, this.origin);
+		try {
+			this.lease = owner.beginMaintenance(route, maxResponses, this.origin);
+		} catch (error) {
+			throw new CompletionAccountingAdmissionError(error);
+		}
 		this.route = route;
 		this.maxResponses = maxResponses;
 		this.spending = spending;
@@ -44,36 +70,57 @@ export class CompletionResponseUsage implements ProviderResponseObserver {
 		if (this.admitting) throw new RequestSpendRefusal("Completion request admission is already in progress.");
 	}
 
-	begin(model: Model<Api>, signal?: AbortSignal): ProviderResponseTicket {
+	begin(
+		model: Model<Api>,
+		signal?: AbortSignal,
+		onSettlement?: (settlement: CompletionAccountingSettlement) => void,
+		summaryAccounting?: { receiptId: string; observedAtMs(): number | undefined; admitPhysical(): void },
+	): ProviderResponseTicket {
 		signal?.throwIfAborted();
 		this.assertAvailable();
-		const receiptId = randomUUID();
+		if (summaryAccounting && model.costDefaulted)
+			throw new CompletionAccountingAdmissionError(new Error("Summary model has no declared price."));
+		const receiptId = summaryAccounting?.receiptId ?? randomUUID();
 		const provider = model.provider;
 		const modelId = model.id;
 		const priceKnown = !model.costDefaulted;
 		this.admitting = true;
 		let reserved = false;
 		try {
-			this.lease.beginRequest({
-				requestId: receiptId,
-				provider,
-				model: modelId,
-				route: this.route,
-				origin: this.origin,
-				startedAt: new Date().toISOString(),
-			});
-			reserved = true;
-			this.lease.assertCurrent();
+			try {
+				this.lease.beginRequest({
+					requestId: receiptId,
+					provider,
+					model: modelId,
+					route: this.route,
+					origin: this.origin,
+					startedAt: new Date().toISOString(),
+					...(summaryAccounting ? { summarySpendPending: true as const } : {}),
+				});
+				reserved = true;
+				this.lease.assertCurrent();
+			} catch (error) {
+				throw new CompletionAccountingAdmissionError(error);
+			}
 			if (this.released) throw new RequestSpendRefusal("Completion ended during request admission.");
 			signal?.throwIfAborted();
 			// The last refusable step: an admission checkpoint it writes always belongs to a request that is dispatched.
 			this.spending?.beginRequest(receiptId);
+			if (summaryAccounting) {
+				try {
+					summaryAccounting.admitPhysical();
+				} catch (error) {
+					throw new CompletionAccountingAdmissionError(error);
+				}
+			}
 			this.pending.add(receiptId);
 		} catch (error) {
 			try {
 				if (reserved) this.lease.cancelUndispatchedRequest(receiptId);
 			} catch (cleanupError) {
-				throw new AggregateError([error, cleanupError], "Completion admission failed to retire its reservation");
+				throw new CompletionAccountingAdmissionError(
+					new AggregateError([error, cleanupError], "Completion admission failed to retire its reservation"),
+				);
 			} finally {
 				this.spending?.endRequest(receiptId);
 			}
@@ -83,10 +130,16 @@ export class CompletionResponseUsage implements ProviderResponseObserver {
 			if (this.released && this.pending.size === 0) this.lease.release();
 		}
 		const attempt = ++this.responses;
-		const failed = (error: unknown): void => {
+		const failed = (error: unknown, measuredCostUsd?: number): void => {
+			const accountingError = new CompletionAccountingError(error);
 			this.spending?.fail("Completion usage could not be measured and retained; further spending is suspended.");
-			this.failure ??= error ?? new Error("The provider response failed without a diagnostic.");
+			this.failure ??= accountingError;
 			this.owner.reportUnresolvedRequest(receiptId);
+			try {
+				onSettlement?.({ error: accountingError, ...(measuredCostUsd !== undefined ? { measuredCostUsd } : {}) });
+			} catch {
+				/* Accounting observation cannot interrupt settlement. */
+			}
 		};
 		const finish = (): void => {
 			this.pending.delete(receiptId);
@@ -96,13 +149,20 @@ export class CompletionResponseUsage implements ProviderResponseObserver {
 		return {
 			complete: (message) => {
 				if (!this.pending.has(receiptId)) return;
+				let measuredCostUsd: number | undefined;
 				try {
 					const usage = validateProviderUsage(message.usage);
 					this.spending?.record(receiptId, usage.cost.total, usage.totalTokens);
 					if (usage.totalTokens === 0 && usage.cost.total === 0)
 						throw new Error("The provider ended without reporting measured usage.");
-					if (message.provider !== provider || message.model !== modelId)
-						failed(new Error("A response does not match its dispatched provider and model."));
+					measuredCostUsd = usage.cost.total;
+					const observedAtMs = summaryAccounting?.observedAtMs();
+					if (
+						summaryAccounting &&
+						(observedAtMs === undefined || !Number.isSafeInteger(observedAtMs) || observedAtMs < 0)
+					)
+						throw new Error("Summary response observation time is unavailable.");
+					const identityMismatch = message.provider !== provider || message.model !== modelId;
 					const outcome = this.lease.record({
 						...priceCompletedUsage(message.provider, message.model, usage),
 						...(priceKnown ? { priceKnown: true as const } : {}),
@@ -113,11 +173,19 @@ export class CompletionResponseUsage implements ProviderResponseObserver {
 						attempt,
 						route: this.route,
 						origin: this.origin,
+						...(summaryAccounting ? { summaryAccounting: { observedAtMs: observedAtMs! } } : {}),
 					});
 					if (outcome.kind === "unretained")
 						throw new Error(`Completion usage could not be retained: ${outcome.cause}`);
+					if (usage.totalTokens === 0) throw new Error("The provider ended without reporting measured usage.");
+					if (identityMismatch) throw new Error("A response does not match its dispatched provider and model.");
+					try {
+						onSettlement?.({ measuredCostUsd });
+					} catch {
+						/* Accounting observation cannot interrupt settlement. */
+					}
 				} catch (error) {
-					failed(error);
+					failed(error, measuredCostUsd);
 				} finally {
 					finish();
 				}

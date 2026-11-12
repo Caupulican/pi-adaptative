@@ -62,6 +62,14 @@ export interface ContinuousChatDispatchHold {
 	readonly retryInMs: number;
 }
 
+/** A request was withheld by the summary accounting circuit; its work remains eligible. */
+export class ContinuousChatAccountingHold extends Error {
+	constructor(cause?: unknown) {
+		super("Memory summaries wait for response usage accounting to recover.", { cause });
+		this.name = "ContinuousChatAccountingHold";
+	}
+}
+
 /**
  * Provider-neutral model port. The tools in the prefix exist only for cache identity: an adapter MUST throw
  * rather than execute a tool call, because a reply is plain text.
@@ -320,6 +328,7 @@ function portFailure(
 ): ContinuousChatCompactionOutcome {
 	if (job.signal?.aborted || job.closing?.aborted) return { status: "cancelled", replies };
 	// A provider that refused to admit the request is a wait, not a failed attempt: the claim is released and the adapter holds new claims until the provider can admit them.
-	if (providerAdmissionRefusalOf(error) !== undefined) return { status: "cancelled", replies };
+	if (error instanceof ContinuousChatAccountingHold || providerAdmissionRefusalOf(error) !== undefined)
+		return { status: "cancelled", replies };
 	return failure("port-error", replies, safeErrorMessage(error, "Continuous-chat port failed."), shortest);
 }

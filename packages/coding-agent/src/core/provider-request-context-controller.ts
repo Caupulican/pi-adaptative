@@ -4,6 +4,7 @@ import type { AgentContextPlan, AgentContextWire } from "../kernel/index.ts";
 import { HOST_TRANSIENT_CLEARED_DETAILS } from "../kernel/index.ts";
 import { createCustomMessage } from "../kernel/messages.ts";
 import { PrefixFirstMatchByFirstItem } from "../kernel/prefix-fold.ts";
+import { isContextPlanDispatchCurrent } from "../kernel/provider-request-planner.ts";
 import { recordedTransientKinds, transientRecordMessageOf } from "../kernel/transient-records.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import {
@@ -673,6 +674,7 @@ export class ProviderRequestContextController {
 			transientMessages,
 			...(carriedRecords === undefined ? {} : { carriedRecords }),
 			isCurrent: dependenciesCurrent,
+			isDispatchCurrent: () => memoryPlan === undefined || isContextPlanDispatchCurrent(memoryPlan),
 			prepareCommit: () => planCurrent(),
 			commit: () => {
 				if (!planCurrent()) {

@@ -21,7 +21,7 @@ const schema = Type.Object(
 			Type.Array(Type.String({ minLength: 1 }), {
 				maxItems: 64,
 				description:
-					"Files or folders the worker may change. Leave out for read-only work (search, review, answer).",
+					"Files or folders inside the worker's execution workspace that the worker may change. Leave out for read-only work (search, review, answer).",
 			}),
 		),
 		deep: Type.Optional(

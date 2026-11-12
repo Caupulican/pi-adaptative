@@ -15,9 +15,11 @@ import type { AgentContext } from "../../kernel/loop-config.ts";
 import { projectToolsForProvider } from "../../kernel/provider-tool-projection.ts";
 import { classifyFailure } from "../../kernel/reliability/classifier.ts";
 import { computeRetryDelayMs, DEFAULT_RETRY_POLICY, sleepAbortable } from "../../kernel/reliability/retry.ts";
+import { safeErrorMessage } from "../../kernel/types.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
-import { CompletionResponseUsage } from "../cost/completion-response-usage.ts";
+import { CompletionAccountingAdmissionError, CompletionResponseUsage } from "../cost/completion-response-usage.ts";
 import type { SessionSemanticUsageDelivery } from "../cost/semantic-usage-delivery.ts";
+import type { SemanticUsageLedgerIdentity } from "../cost/session-ledger-port.ts";
 import {
 	isolatedCompletionError,
 	logProviderLanePark,
@@ -30,10 +32,11 @@ import type {
 	ContinuousChatCompactionPrefix,
 	ContinuousChatDispatchHold,
 } from "./continuous-chat-compaction.ts";
+import { ContinuousChatAccountingHold } from "./continuous-chat-compaction.ts";
 import { renderContinuousChatViewBlocks } from "./continuous-chat-projection.ts";
 import { CONTINUOUS_CHAT_SYSTEM_PROMPT } from "./continuous-chat-prompt.ts";
 import type { ContinuousChatSummaryModelResolution } from "./continuous-chat-settings.ts";
-import type { ContinuousChatSpendMeter } from "./continuous-chat-spend.ts";
+import { ContinuousChatAccountingClaimWriteError, type ContinuousChatSpendMeter } from "./continuous-chat-spend.ts";
 import type { ContinuousChatNodeCoordinate } from "./continuous-chat-tree.ts";
 
 /** The model a request ran on, as far as a provider's prompt cache tells models apart. */
@@ -104,8 +107,6 @@ export interface ContinuousChatCompactionAdapterPort extends ContinuousChatCompa
 }
 
 export interface ContinuousChatCompactionAdapterDeps {
-	/** Transport backoff shares the chat owner's injected clock. */
-	timers?: TimerPort;
 	/** The owner's isolated completion, `ReflectionController.runIsolatedCompletion`. */
 	complete(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	/** The getter the runtime also receives as `prefixHead`, so a compaction and its job agree on the snapshot. */
@@ -115,18 +116,122 @@ export interface ContinuousChatCompactionAdapterDeps {
 	/** Resolved once when a job opens, so physical responses retain their original session owner. */
 	usage(): SessionSemanticUsageDelivery;
 	/** The summaries' daily spend, shared across projects: new claims wait once its limit is reached. */
-	spend?: ContinuousChatSpendMeter;
+	spend: ContinuousChatSpendMeter;
 	/** Notifies the session when a summary model fails at runtime so `summary()` can self-heal onto a healthy model. */
 	onModelFailure?(model: Model<Api>, errorMessage: string | undefined): void;
 }
 
 export class ContinuousChatCompactionAdapter implements ContinuousChatCompactionAdapterPort {
 	private readonly deps: ContinuousChatCompactionAdapterDeps;
+	private readonly timers: TimerPort;
+	/** Settlements whose durable update failed; their persisted in-flight claims keep other owners fenced. */
+	private readonly pendingSettlements = new Map<
+		string,
+		{
+			key: string;
+			token: string;
+			healthy: boolean;
+			physicalAttempted: boolean;
+			measuredCostUsd?: number;
+			observedAtMs?: number;
+			warned?: boolean;
+		}
+	>();
+	private settlementAlarm: unknown;
+	private settlementAlarmScheduled = false;
 	/** Epoch milliseconds before which the provider refused this lane; claims wait for it. */
 	private providerHoldUntil = 0;
 
 	constructor(deps: ContinuousChatCompactionAdapterDeps) {
 		this.deps = deps;
+		this.timers = deps.spend.timers;
+	}
+
+	private accountingKey(model: ContinuousChatPrefixModel, sessionId: string): string {
+		return createHash("sha256")
+			.update(JSON.stringify([sessionId, model.provider, model.id, model.api, model.baseUrl]))
+			.digest("hex");
+	}
+
+	private settleAccounting(
+		key: string,
+		token: string,
+		healthy: boolean,
+		measuredCostUsd?: number,
+		observedAtMs?: number,
+		physicalAttempted = false,
+	): void {
+		this.pendingSettlements.set(token, {
+			key,
+			token,
+			healthy,
+			physicalAttempted,
+			...(measuredCostUsd !== undefined ? { measuredCostUsd } : {}),
+			...(observedAtMs !== undefined ? { observedAtMs } : {}),
+		});
+		this.flushSettlements();
+	}
+
+	private flushSettlements(): void {
+		for (const [token, pending] of this.pendingSettlements) {
+			try {
+				this.deps.spend.settle(
+					pending.key,
+					token,
+					pending.healthy,
+					pending.measuredCostUsd,
+					pending.observedAtMs,
+					pending.physicalAttempted,
+				);
+				this.pendingSettlements.delete(token);
+			} catch (error) {
+				// The persisted claim remains the fence; the next dispatch poll retries the same settlement.
+				if (!pending.warned) {
+					pending.warned = true;
+					harnessLog.warn("memory", "summary accounting settlement is waiting for storage", {
+						reason: safeErrorMessage(error, "Accounting storage is unavailable."),
+					});
+				}
+			}
+		}
+		if (this.pendingSettlements.size === 0) {
+			if (this.settlementAlarmScheduled) this.timers.clearTimeout(this.settlementAlarm);
+			this.settlementAlarmScheduled = false;
+			this.settlementAlarm = undefined;
+		} else if (!this.settlementAlarmScheduled) {
+			// Keep retrying a retained settlement after the logical session stops; this alarm never keeps the process alive.
+			this.settlementAlarmScheduled = true;
+			try {
+				this.settlementAlarm = this.timers.setTimeout(() => {
+					this.settlementAlarmScheduled = false;
+					this.settlementAlarm = undefined;
+					this.flushSettlements();
+				}, DEFAULT_RETRY_POLICY.baseDelayMs);
+			} catch (error) {
+				this.settlementAlarmScheduled = false;
+				harnessLog.warn("memory", "summary accounting retry could not be scheduled", {
+					reason: safeErrorMessage(error, "Accounting timer is unavailable."),
+				});
+			}
+		}
+	}
+
+	private accountingHold(key: string): number {
+		this.flushSettlements();
+		try {
+			return this.deps.spend.accountingWait(key);
+		} catch {
+			return DEFAULT_RETRY_POLICY.maxDelayMs;
+		}
+	}
+
+	private accountingAdmission(key: string, identity: SemanticUsageLedgerIdentity): string {
+		try {
+			return this.deps.spend.claim(key, identity);
+		} catch (error) {
+			if (error instanceof ContinuousChatAccountingClaimWriteError) this.settleAccounting(key, error.token, false);
+			throw new ContinuousChatAccountingHold(error);
+		}
 	}
 
 	validate(): void {
@@ -135,15 +240,32 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 
 	dispatchHold(): ContinuousChatDispatchHold | undefined {
 		const meter = this.deps.spend;
-		const spend = meter?.hold();
-		const providerWaitMs = this.providerHoldUntil - Date.now();
-		if (spend === undefined && providerWaitMs <= 0) return undefined;
+		let spend: string | undefined;
+		try {
+			spend = meter.hold();
+		} catch {
+			return {
+				message: "Memory summaries wait for accounting storage.",
+				retryInMs: DEFAULT_RETRY_POLICY.maxDelayMs,
+			};
+		}
+		const providerWaitMs = this.providerHoldUntil - this.timers.now();
+		const summary = this.deps.summary();
+		const accountingWaitMs = summary.ok
+			? this.accountingHold(this.accountingKey(summary.model, this.deps.usage().captureOrigin().sessionId))
+			: 0;
+		if (spend === undefined && providerWaitMs <= 0 && accountingWaitMs <= 0) return undefined;
 		// The hold lifts when its earliest reason may have: the next UTC day for the limit, the reset for the provider.
 		const wakes: number[] = [];
-		if (meter !== undefined && spend !== undefined) wakes.push(meter.resetsInMs());
+		if (spend !== undefined) wakes.push(meter.resetsInMs());
 		if (providerWaitMs > 0) wakes.push(providerWaitMs);
+		if (accountingWaitMs > 0) wakes.push(accountingWaitMs);
 		return {
-			message: spend ?? "Memory summaries wait for the model provider's limit to reset.",
+			message:
+				spend ??
+				(providerWaitMs > 0
+					? "Memory summaries wait for the model provider's limit to reset."
+					: "Memory summaries wait for response usage accounting to recover."),
 			retryInMs: Math.min(...wakes),
 		};
 	}
@@ -226,12 +348,21 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		const jobId = randomUUID();
 		const usageOwner = this.deps.usage();
 		const capturedOrigin = usageOwner.captureOrigin();
+		let accountingIdentity: SemanticUsageLedgerIdentity;
+		try {
+			accountingIdentity = usageOwner.summarySpendIdentity();
+			if (accountingIdentity.sessionId !== capturedOrigin.sessionId)
+				throw new Error("Summary accounting identity changed before admission.");
+		} catch (error) {
+			throw new ContinuousChatAccountingHold(error);
+		}
 		const node = `node-${target.level}-${target.ordinal}`;
 		// A background node can summarize several tasks. Its execution-time goal is not its billing owner.
 		const origin = { sessionId: capturedOrigin.sessionId, operationId: `${jobId}:${node}` };
 		const head = this.deps.prefixHead();
 		const { model: pinnedModel, thinkingLevel: pinnedThinking } = this.summaryResolution();
 		const pinned: PinnedSummary = { model: pinnedModel, thinkingLevel: pinnedThinking };
+		const accountingKey = this.accountingKey(pinnedModel, capturedOrigin.sessionId);
 		const view: Message = {
 			role: "user",
 			content: renderContinuousChatViewBlocks(prefix.view, prefix.viewCache),
@@ -240,12 +371,22 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 		return {
 			send: async ({ task, correction }, signal) => {
 				signal?.throwIfAborted();
-				const usage = new CompletionResponseUsage(
-					usageOwner,
-					"history_summary",
-					DEFAULT_RETRY_POLICY.maxAttempts,
-					origin,
-				);
+				if (this.accountingHold(accountingKey) > 0) throw new ContinuousChatAccountingHold();
+				let reservedToken: string | undefined = this.accountingAdmission(accountingKey, accountingIdentity);
+				let usage: CompletionResponseUsage;
+				try {
+					usage = new CompletionResponseUsage(
+						usageOwner,
+						"history_summary",
+						DEFAULT_RETRY_POLICY.maxAttempts,
+						origin,
+					);
+				} catch (error) {
+					this.settleAccounting(accountingKey, reservedToken, false);
+					reservedToken = undefined;
+					if (!(error instanceof CompletionAccountingAdmissionError)) throw error;
+					throw new ContinuousChatAccountingHold(error);
+				}
 				try {
 					let attempt = 0;
 					const request: Message[] = [view, userText(task)];
@@ -257,11 +398,14 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 						const systemPrompt = sharesCache ? head.systemPrompt : CONTINUOUS_CHAT_SYSTEM_PROMPT;
 						const activeTools = sharesCache && !toolFree ? [...head.tools] : [];
 						let guardRejected = false;
+						let accountingRejection: ContinuousChatAccountingHold | undefined;
 						const requestGuard = (
 							requestModel: Model<Api>,
 							requestSignal: AbortSignal | undefined,
 						): undefined => {
 							try {
+								if (reservedToken === undefined && this.accountingHold(accountingKey) > 0)
+									throw new ContinuousChatAccountingHold();
 								usage.assertAvailable();
 								this.assertPinned(pinned, requestSignal);
 								if (!sameCacheModel(pinned.model, requestModel)) {
@@ -272,6 +416,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 								}
 								return undefined;
 							} catch (error) {
+								if (error instanceof ContinuousChatAccountingHold) accountingRejection = error;
 								guardRejected = true;
 								throw error;
 							}
@@ -289,18 +434,64 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 								requestPreflight: ({ model: requestModel }, requestSignal) =>
 									requestGuard(requestModel, requestSignal),
 								requestGuard,
-								providerResponseObserver: usage,
+								providerResponseObserver: {
+									begin: (requestModel, requestSignal) => {
+										let token: string | undefined;
+										try {
+											token = reservedToken ?? this.accountingAdmission(accountingKey, accountingIdentity);
+											reservedToken = undefined;
+											const admittedToken = token;
+											let observedAtMs: number | undefined;
+											const ticket = usage.begin(
+												requestModel,
+												requestSignal,
+												(settlement) => {
+													this.settleAccounting(
+														accountingKey,
+														admittedToken,
+														settlement.error === undefined,
+														settlement.measuredCostUsd,
+														observedAtMs,
+														true,
+													);
+												},
+												{
+													receiptId: admittedToken,
+													observedAtMs: () => observedAtMs,
+													admitPhysical: () => this.deps.spend.attempt(accountingKey, admittedToken),
+												},
+											);
+											return {
+												complete: (message) => {
+													// Freeze host observation time before the usage journal performs synchronous I/O.
+													observedAtMs = this.timers.now();
+													ticket.complete(message);
+												},
+												failed: (error) => ticket.failed(error),
+											};
+										} catch (error) {
+											if (token) this.settleAccounting(accountingKey, token, false);
+											if (error instanceof CompletionAccountingAdmissionError) {
+												accountingRejection = new ContinuousChatAccountingHold(error);
+												throw accountingRejection;
+											}
+											if (error instanceof ContinuousChatAccountingHold) accountingRejection = error;
+											throw error;
+										}
+									},
+								},
 								signal,
 							})
 							.catch((error: unknown) => {
 								this.noteProviderRefusal(error);
+								if (accountingRejection) throw accountingRejection;
 								throw error;
 							});
+						if (accountingRejection) throw accountingRejection;
 						this.noteProviderRefusal(completion);
 						if (providerAdmissionRefusalOf(completion))
 							throw isolatedCompletionError(completion, "The provider refused the summary request.");
 						usage.assertHealthy();
-						this.deps.spend?.record(completion.usage.cost.total);
 						const reply = completion.messages?.at(-1);
 						const assistant = reply?.role === "assistant" ? reply : undefined;
 						return { completion, assistant, model, guardRejected, sentTools: activeTools.length > 0 };
@@ -331,7 +522,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 									delayMs,
 									model: summaryModel.id,
 								}));
-								await sleepAbortable(delayMs, signal, this.deps.timers);
+								await sleepAbortable(delayMs, signal, this.timers);
 							} else {
 								this.refuseSubstitution(pinned, nextSummary);
 							}
@@ -361,6 +552,7 @@ export class ContinuousChatCompactionAdapter implements ContinuousChatCompaction
 					}
 					return result.text;
 				} finally {
+					if (reservedToken !== undefined) this.settleAccounting(accountingKey, reservedToken, false);
 					usage.release();
 				}
 			},

@@ -1,5 +1,20 @@
 ## [Unreleased]
 
+### Fixed
+
+- Continuous-chat summaries refuse models without declared prices, and unresolved older receipts are not mistaken for measured zero-cost responses.
+- Continuous-chat summary accounting now retains physical admission across restarts, fences recovery by process owner and request token, and counts measured cost from unhealthy and late replies exactly once. Receipts remain retained until session persistence and shared-spend acknowledgement both succeed, including recovery from closed sessions. Unresolved charges pause new paid summaries across sessions, and daily spend is checked again at dispatch admission.
+- Unchanged request-only knowledge keeps its position as conversation messages append. Corrections and privacy withholding replace it immediately without saving it to session history, and exact interval proof classifies those replacements without hiding simultaneous unrelated request changes.
+- Worker write scopes outside their permitted execution workspace are refused before worker creation, with actionable scope diagnostics and matching tool guidance.
+- Continuous-chat cancellation and interrupted-claim recovery preserve the failure retry budget. Configuration-only holds require a concrete matching identity so missing configuration cannot park work indefinitely.
+- Worktree workers relocate explicit workspace paths with their write scopes and preserve the registered lane root when reusing a nested workspace.
+- Text-protocol replay checks retain the full operation payload, allowing successive different edits to the same path while refusing unchanged successful operations in the same execution scope.
+- Agent-loop abort forwarding listeners are released when request planning or event delivery fails.
+- Current knowledge is rechecked after asynchronous snapshot and stream preparation, with a terminal refusal before transport when the accepted projection becomes stale.
+- Worker context fitting excludes its own pending token reservation from headroom, preventing admitted requests from invalidating themselves while retaining sibling reservations and the pooled spending limit.
+- Prepared worker starts and root-task reruns recheck the current tree attempt limit before persisting another attempt, so concurrent preparation cannot consume capacity judged against an older snapshot.
+- Summary costs keep the UTC day when the physical response was observed, even when storage retries cross midnight; older measured costs remain retained without reducing the next day's allowance.
+
 ## [0.104.54] - 2026-11-11
 
 ### Changed

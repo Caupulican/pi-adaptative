@@ -114,6 +114,7 @@ function fieldsForType(type: string): readonly string[] {
 				"prefixIntact",
 				"firstDivergentIndex",
 				"firstDivergentKind",
+				"requestOnlyProjectionReplacement",
 				"messageCount",
 			];
 		case "provider_request_terminal":
@@ -195,6 +196,12 @@ export function validateSessionLifecycleEntry(value: unknown): asserts value is 
 			}
 			if (record.firstDivergentKind !== undefined)
 				assertBoundedString(record.firstDivergentKind, "firstDivergentKind", 256);
+			if (
+				record.requestOnlyProjectionReplacement !== undefined &&
+				record.requestOnlyProjectionReplacement !== true
+			) {
+				throw lifecycleValidationError("requestOnlyProjectionReplacement", "expected true when present");
+			}
 			break;
 		case "provider_request_terminal":
 			assertExternalId(record.requestId, "requestId");

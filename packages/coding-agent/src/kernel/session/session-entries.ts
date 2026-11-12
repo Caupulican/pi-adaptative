@@ -202,6 +202,8 @@ export interface RequestSnapshotEntry extends SessionEntryBase {
 	firstDivergentIndex?: number;
 	/** What first differs: `system`, `tools`, `removed`, or the message's role (`custom:<type>` for records). */
 	firstDivergentKind?: string;
+	/** Exact bounded proof that only the known replaceable request-only projection changed. */
+	requestOnlyProjectionReplacement?: true;
 	/** How many provider messages the request carried. */
 	messageCount?: number;
 }

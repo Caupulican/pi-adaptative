@@ -3,7 +3,11 @@ import type { Agent } from "../kernel/agent.ts";
 import { createApplicableAssistantUsageFinder } from "../kernel/compaction/compaction.ts";
 import type { AgentContext, AgentContextPlanFn, ProviderRequestAdmissionContext } from "../kernel/index.ts";
 import { estimateProviderRequestTokens } from "../kernel/provider-request-estimator.ts";
-import { composeRequestSystemPrompt, narrowRequestMaxTokens } from "../kernel/provider-request-planner.ts";
+import {
+	composeRequestSystemPrompt,
+	isContextPlanDispatchCurrent,
+	narrowRequestMaxTokens,
+} from "../kernel/provider-request-planner.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { CompactionController } from "./compaction-controller.ts";
 import { projectParentInputs } from "./parent-input-projection.ts";
@@ -180,6 +184,8 @@ export class ProviderRequestRuntimeController {
 					sessionPlan.transientSystemPrompt,
 				),
 				isCurrent: () => basePlan.isCurrent?.() !== false && sessionPlan.isCurrent?.() !== false,
+				isDispatchCurrent: () =>
+					isContextPlanDispatchCurrent(basePlan) && isContextPlanDispatchCurrent(sessionPlan),
 				prepareCommit: () => {
 					if (basePlan.isCurrent?.() === false || sessionPlan.isCurrent?.() === false) return false;
 					return basePlan.prepareCommit?.() !== false && sessionPlan.prepareCommit?.() !== false;

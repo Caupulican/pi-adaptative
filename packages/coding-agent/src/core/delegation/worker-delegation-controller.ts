@@ -84,7 +84,7 @@ import {
 } from "../objective-execution/current-objective-execution.ts";
 import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts";
 import { sharesRepository } from "../objective-execution/repo-delivery-fingerprint.ts";
-import { conversationTurnOrigin } from "../orchestration/attempt-agent-identity.ts";
+import { conversationTurnOrigin, nativeAgentIdForAttempt } from "../orchestration/attempt-agent-identity.ts";
 import { providerUsageFromAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type {
 	AgentBindingContract,
@@ -2302,7 +2302,7 @@ export class WorkerDelegationController {
 						}
 					: {}),
 			});
-		return {
+		return this.writeReservations.validateAdmission({
 			ok: true,
 			instructions,
 			settings,
@@ -2334,7 +2334,7 @@ export class WorkerDelegationController {
 							: "inherited",
 			...(modelPin && !pinnedContract ? { modelPinSource: modelPin.source } : {}),
 			...(modelPinBypass ? { modelPinBypass } : {}),
-		};
+		});
 	}
 
 	private buildVerifierRequest(args: {
@@ -3021,20 +3021,21 @@ export class WorkerDelegationController {
 	}
 
 	private workerTreeAttemptAdmissionSkipReason(request: WorkerDelegationRequest): string | undefined {
-		if (!request.parentAgentId) return undefined;
-		const parent = this.lifecycle.getAgent(request.parentAgentId);
-		if (!parent) return undefined;
-		const rootTurn = this.lifecycle.getAgentTurnDispatch(parent.rootAgentId);
+		if (!request.parentAgentId && !request.attemptOf) return undefined;
+		const snapshot = this.lifecycle.getTaskRuntimeSnapshot();
+		const attemptOf = request.attemptOf && latestTaskAttempt(snapshot, request.attemptOf.taskId);
+		const rootAgentId = request.parentAgentId
+			? this.lifecycle.getAgent(request.parentAgentId)?.rootAgentId
+			: attemptOf
+				? nativeAgentIdForAttempt(attemptOf)
+				: undefined;
+		if (!rootAgentId) return undefined;
+		const rootTurn = request.parentAgentId ? this.lifecycle.getAgentTurnDispatch(rootAgentId) : attemptOf?.dispatch;
 		if (!rootTurn) return undefined;
 		const maxAttempts = rootTurn.executionContract?.worker.authority.budget.maxAttempts;
-		const existingAttempts = collectWorkerTreeBudgetSeeds(
-			this.lifecycle.getTaskRuntimeSnapshot(),
-			parent.rootAgentId,
-			rootTurn.taskId,
-		).length;
-		return workerTreeCanAdmitAttempt(existingAttempts, maxAttempts)
-			? undefined
-			: "worker_tree_attempt_budget_exhausted";
+		const seeds = collectWorkerTreeBudgetSeeds(snapshot, rootAgentId, rootTurn.taskId);
+		if (workerTreeCanAdmitAttempt(seeds.length, maxAttempts)) return undefined;
+		return "worker_tree_attempt_budget_exhausted";
 	}
 
 	private workerContextForkAdmissionSkipReason(
@@ -4326,19 +4327,13 @@ export class WorkerDelegationController {
 		signal?: AbortSignal,
 	): Promise<void> {
 		const cwd = priorDispatch?.executionContract?.worker.authority.cwd;
-		if (!cwd || !this.laneIsolation?.isLaneDirectory(cwd)) return;
+		if (!cwd || !this.laneIsolation) return;
 		try {
-			const executionContext = await this.directories.contextForDirectory(
-				cwd,
-				this.deps.getSessionId(),
-				AbortSignal.any([
-					this.workerAbort.signal,
-					AbortSignal.timeout(WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS),
-					...(signal ? [signal] : []),
-				]),
-			);
-			request.executionContext = executionContext;
-			Object.assign(request, this.laneIsolation.relocateRequest(request, this.deps.getCwd(), executionContext));
+			const laneRoot = await this.laneIsolation.laneRootAt(cwd);
+			if (!laneRoot) return;
+			const executionContext = await this.contextForDirectory(cwd, signal);
+			const relocated = this.laneIsolation.relocateRequest(request, this.deps.getCwd(), executionContext, laneRoot);
+			Object.assign(request, { executionContext }, relocated);
 		} catch {
 			// The lane directory no longer exists or cannot be validated; the caller's directory is kept.
 		}
@@ -4380,17 +4375,8 @@ export class WorkerDelegationController {
 		if (lane.kind !== "isolated") return requested ? refused(lane.message) : shared;
 		let failure: string;
 		try {
-			const boundedSignal = AbortSignal.any([
-				this.workerAbort.signal,
-				AbortSignal.timeout(WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS),
-				...(signal ? [signal] : []),
-			]);
-			const executionContext = await this.directories.contextForDirectory(
-				lane.worktreePath,
-				this.deps.getSessionId(),
-				boundedSignal,
-			);
-			const relocated = isolation.relocateRequest(request, this.deps.getCwd(), executionContext);
+			const executionContext = await this.contextForDirectory(lane.worktreePath, signal);
+			const relocated = isolation.relocateRequest(request, this.deps.getCwd(), executionContext, lane.worktreePath);
 			const admitted = await this.admitWorkerDirectory({ ...request, executionContext, ...relocated }, signal, {
 				freshIdentity: false,
 				selectedBinding: shared.shipment.modelBinding,
@@ -4700,11 +4686,15 @@ export class WorkerDelegationController {
 	}
 
 	/** A validated execution context for a host-chosen worker directory (a lane the host created for the task). */
-	contextForDirectory(cwd: string, signal: AbortSignal): Promise<ExecutionContext> {
+	contextForDirectory(cwd: string, signal?: AbortSignal): Promise<ExecutionContext> {
 		return this.directories.contextForDirectory(
 			cwd,
 			this.deps.getSessionId(),
-			AbortSignal.any([this.workerAbort.signal, AbortSignal.timeout(WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS), signal]),
+			AbortSignal.any([
+				this.workerAbort.signal,
+				AbortSignal.timeout(WORKER_DIRECTORY_PREFLIGHT_TIMEOUT_MS),
+				...(signal ? [signal] : []),
+			]),
 		);
 	}
 
@@ -4837,15 +4827,12 @@ export class WorkerDelegationController {
 		const admission = preparedAdmission ?? this.admitNewWorkerRequest(request, pinnedContract);
 		if (!admission.ok) return { started: false, skipReason: admission.skipReason };
 		const { shipment } = admission;
-		// A prepared admission was judged before the caller's async hop. Concurrent starts each passed
-		// that judgement against the same fleet snapshot, so identity headroom is judged again in this
-		// same synchronous step that persists the agent, never trusted from the earlier snapshot.
+		// Prepared fleet/tree headroom is rechecked synchronously before persistence.
 		if (preparedAdmission) {
-			const fleetSkipReason = this.newWorkerFleetSkipReason(
-				request,
-				this.requiredAgentSlotsForAdmission(request, admission),
-			);
-			if (fleetSkipReason) return { started: false, skipReason: fleetSkipReason };
+			const headroomSkipReason =
+				this.newWorkerFleetSkipReason(request, this.requiredAgentSlotsForAdmission(request, admission)) ??
+				this.workerTreeAttemptAdmissionSkipReason(request);
+			if (headroomSkipReason) return { started: false, skipReason: headroomSkipReason };
 		}
 
 		const contendsWithLocalForeground = this.contendsWithLocalForeground(shipment.model);
@@ -5219,8 +5206,8 @@ export class WorkerDelegationController {
 		if (prepared.attempt.status === "suspended") this.recovery.repairInterruptedToolResults(conversation);
 		const reservation = this.writeReservations.acquire(prepared.record.laneId, prepared.attempt, executionPlan);
 		if (reservation.kind === "denied") {
-			this.cancelAndPublish(lifecycle, prepared.record.laneId, reservation.reasonCode);
-			return { started: false, skipReason: reservation.reasonCode };
+			this.cancelAndPublish(lifecycle, prepared.record.laneId, reservation.reasonCode, reservation.detail);
+			return { started: false, skipReason: reservation.skipReason ?? reservation.reasonCode };
 		}
 		if (reservation.kind === "blocked") {
 			return this.queuePreparedWorkerAttempt(prepared, request, admission, {
@@ -5467,7 +5454,7 @@ export class WorkerDelegationController {
 				model: activeModel,
 				compactionReserveTokens: compactionReserveFor(activeModel),
 				maxOutputTokens: resolveWorkerOutputTokenCeiling(activeModel),
-				remainingTokenAllowance: () => toolSurface.gateway?.remainingTokenBudget(),
+				remainingTokenAllowance: () => toolSurface.gateway?.remainingContextTokenBudget(),
 			});
 		let laneMemoryCapacity = buildLaneMemoryCapacity(model);
 		// A tainted start plans no memory (above); a later taint or a lost lease leaves no owner facts to read (`undefined`, not `[]`).

@@ -95,6 +95,8 @@ export interface SharedCapabilityBudget {
 	getAttemptUsage(): AttemptUsageSnapshot;
 	recordAttemptUsage(usage: GatewayUsageSnapshot, accounting?: AttemptUsageAccounting): void;
 	remainingTokens(): number | undefined;
+	/** Remaining next-request context allowance, excluding this attempt's own in-flight reservation. */
+	remainingContextTokens(): number | undefined;
 	/**
 	 * `request` is the provider request about to be dispatched (its model and materialized context). A budget that bounds
 	 * spend prices it (the priced ports of `WorkerTreeBudgetCoordinator`).
@@ -421,8 +423,16 @@ export class CapabilityGateway {
 	}
 
 	remainingTokenBudget(): number | undefined {
+		return this.intersectRemainingTokens(this.sharedBudget?.remainingTokens());
+	}
+
+	/** A request's own reservation must not invalidate the context that preceded its admission. */
+	remainingContextTokenBudget(): number | undefined {
+		return this.intersectRemainingTokens(this.sharedBudget?.remainingContextTokens());
+	}
+
+	private intersectRemainingTokens(sharedRemaining: number | undefined): number | undefined {
 		const localRemaining = this.remainingAttemptTokenBudget();
-		const sharedRemaining = this.sharedBudget?.remainingTokens();
 		if (localRemaining === undefined) return sharedRemaining;
 		if (sharedRemaining === undefined) return localRemaining;
 		return Math.min(localRemaining, sharedRemaining);

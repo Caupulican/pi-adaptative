@@ -1,4 +1,4 @@
-/** Session transcript file reading: entry line parsing, streamed and offset-indexed entry loading, and session header reads with parent lineage checks. */
+/** Session transcript file reading: entry parsing, bounded strict snapshot recovery, streamed and offset-indexed loading, and header reads with parent lineage checks. */
 import { closeSync, existsSync, fstatSync, openSync, readSync, type Stats, statSync } from "node:fs";
 import { open, stat } from "node:fs/promises";
 import { dirname, resolve } from "node:path";
@@ -185,40 +185,82 @@ export function loadEntriesFromFile(filePath: string, options?: { maxLineChars?:
 	return entries;
 }
 
-/** Read-only projection of selected rows, yielding between bounded I/O chunks. Not a recovery loader. */
+/** Read-only streaming visitor; strict mode validates a complete stable snapshot for bounded recovery. */
+export interface VisitSessionEntriesOptions {
+	/** Recovery mode: every row and the final newline must be valid; malformed rows are not skipped. */
+	readonly requireComplete?: boolean;
+	/** Optional total-file byte ceiling for a one-off recovery scan. */
+	readonly maxBytes?: number;
+	/** Optional per-row ceiling for bounded recovery fixtures; production defaults to the session format maximum. */
+	readonly maxLineChars?: number;
+}
+
 export async function visitSessionEntriesAsync(
 	filePath: string,
 	selectLine: (line: string) => boolean,
 	visit: (entry: SessionEntry) => void,
-): Promise<void> {
+	options?: VisitSessionEntriesOptions,
+): Promise<SessionHeader> {
 	const file = await open(filePath, "r");
 	try {
 		const before = await file.stat();
 		if (!before.isFile()) throw new Error("Session history is not a regular file.");
+		if (
+			options?.maxBytes !== undefined &&
+			(!Number.isSafeInteger(options.maxBytes) || options.maxBytes < 1 || before.size > options.maxBytes)
+		)
+			throw new Error("Session history exceeds its recovery scan bound.");
+		if (
+			options?.maxLineChars !== undefined &&
+			(!Number.isSafeInteger(options.maxLineChars) ||
+				options.maxLineChars < 1 ||
+				options.maxLineChars > MAX_SESSION_LINE_CHARS)
+		)
+			throw new TypeError("Session line limit must be within its format bound.");
+		const maxLineChars = options?.maxLineChars ?? MAX_SESSION_LINE_CHARS;
+		const scanLimit = options?.requireComplete ? before.size : options?.maxBytes;
 		if (!sameFileVersion(before, await stat(filePath)))
 			throw new FileSnapshotChangedError("Session file changed while opening it.");
-		if (!readSessionHeaderFromDescriptor(file.fd, MAX_SESSION_HEADER_BYTES).ok)
-			throw new Error("Session file header is invalid.");
-		const decoder = new StringDecoder("utf8");
-		const lines = new StreamingLineDecoder(MAX_SESSION_LINE_CHARS, { overflow: "skip", lineEndings: "lf" });
+		const headerResult = readSessionHeaderFromDescriptor(file.fd, MAX_SESSION_HEADER_BYTES);
+		if (!headerResult.ok) throw new Error("Session file header is invalid.");
+		const decoder = options?.requireComplete
+			? new TextDecoder("utf-8", { fatal: true, ignoreBOM: true })
+			: new StringDecoder("utf8");
+		const lines = new StreamingLineDecoder(maxLineChars, {
+			overflow: options?.requireComplete ? "throw" : "skip",
+			lineEndings: "lf",
+		});
 		const buffer = Buffer.allocUnsafe(SESSION_READ_BUFFER_SIZE);
 		let position = 0;
 		const consume = (line: string): void => {
-			if (!selectLine(line)) return;
-			const entry = parseSessionEntryLine(line);
-			if (entry && entry.type !== "session") visit(entry);
+			const selected = selectLine(line);
+			if (!selected && !options?.requireComplete) return;
+			const entry = parseSessionEntryLine(line, options?.requireComplete);
+			if (selected && entry && entry.type !== "session") visit(entry);
 		};
 		for (;;) {
-			const { bytesRead } = await file.read(buffer, 0, buffer.length, position);
+			const remaining = scanLimit === undefined ? buffer.length : scanLimit - position + 1;
+			const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, remaining), position);
 			if (bytesRead === 0) break;
+			if (scanLimit !== undefined && position + bytesRead > scanLimit)
+				throw new Error("Session history exceeds its recovery scan bound.");
 			position += bytesRead;
-			for (const line of lines.push(decoder.write(buffer.subarray(0, bytesRead)))) consume(line);
+			const chunk = buffer.subarray(0, bytesRead);
+			for (const line of lines.push(
+				decoder instanceof TextDecoder ? decoder.decode(chunk, { stream: true }) : decoder.write(chunk),
+			))
+				consume(line);
 		}
-		for (const line of lines.push(decoder.end())) consume(line);
+		const decodedTail = decoder instanceof TextDecoder ? decoder.decode() : decoder.end();
+		for (const line of lines.push(decodedTail)) consume(line);
 		const tail = lines.finish();
-		if (tail !== undefined) consume(tail);
+		if (tail !== undefined) {
+			if (options?.requireComplete) throw new Error("Session history ends with an incomplete JSONL record.");
+			consume(tail);
+		}
 		if (!sameFileVersion(before, await file.stat()) || !sameFileVersion(before, await stat(filePath)))
 			throw new FileSnapshotChangedError("Session file changed while reading it; reopen it before retrying.");
+		return headerResult.header;
 	} finally {
 		await file.close();
 	}

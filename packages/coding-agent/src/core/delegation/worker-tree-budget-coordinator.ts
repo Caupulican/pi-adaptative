@@ -182,6 +182,7 @@ export function boundedByRunBudget(tree: SharedCapabilityBudget, run: SharedCapa
 			run.recordAttemptUsage(usage, accounting);
 		},
 		remainingTokens: () => tree.remainingTokens(),
+		remainingContextTokens: () => tree.remainingContextTokens(),
 		reserveProviderBudget: async (requestedMaxTokens, subject, signal, request) => {
 			const treeReservation = await tree.reserveProviderBudget(requestedMaxTokens, subject, signal, request);
 			let runReservation: ProviderBudgetReservation;
@@ -271,12 +272,8 @@ export class WorkerTreeBudgetCoordinator {
 			assertBudgetAvailable: (subject) => this.assertAvailable(tree, subject),
 			getAttemptUsage: () => structuredClone(tree.attempts.get(args.attemptId) ?? EMPTY_ATTEMPT_USAGE),
 			recordAttemptUsage: (usage, accounting) => this.recordAttemptUsage(tree, args.attemptId, usage, accounting),
-			remainingTokens: () => {
-				const maximum = tree.budget.maxTokens;
-				return maximum === undefined
-					? undefined
-					: Math.max(0, maximum - this.budgetedTokens(tree) - this.reservedTokens(tree));
-			},
+			remainingTokens: () => this.tokenHeadroom(tree),
+			remainingContextTokens: () => this.tokenHeadroom(tree, args.attemptId),
 			reserveProviderBudget: (requestedMaxTokens, subject, signal, request) =>
 				this.reserveProviderBudget(tree, args.attemptId, requestedMaxTokens, subject, signal, request),
 		};
@@ -373,10 +370,7 @@ export class WorkerTreeBudgetCoordinator {
 			}
 			if (state.reservations.has(waiter.attemptId)) return;
 			if (serializesReservations(state) && state.reservations.size > 0) return;
-			const availableTokens =
-				state.budget.maxTokens === undefined
-					? waiter.requestedMaxTokens
-					: Math.max(0, state.budget.maxTokens - this.budgetedTokens(state) - this.reservedTokens(state));
+			const availableTokens = this.tokenHeadroom(state) ?? waiter.requestedMaxTokens;
 			if (availableTokens <= 0) return;
 			let grant: ReservationGrant | undefined;
 			try {
@@ -472,8 +466,14 @@ export class WorkerTreeBudgetCoordinator {
 		return [...state.attempts.values()].reduce((total, usage) => total + budgetedTokens(usage), 0);
 	}
 
-	private reservedTokens(state: TreeBudgetState): number {
-		return [...state.reservations.values()].reduce((total, reservation) => total + reservation.maxTokens, 0);
+	private tokenHeadroom(state: TreeBudgetState, exceptAttemptId?: string): number | undefined {
+		const maximum = state.budget.maxTokens;
+		if (maximum === undefined) return undefined;
+		let reserved = 0;
+		for (const [attemptId, reservation] of state.reservations) {
+			if (attemptId !== exceptAttemptId) reserved += reservation.maxTokens;
+		}
+		return Math.max(0, maximum - this.budgetedTokens(state) - reserved);
 	}
 
 	private reservedCostUsd(state: TreeBudgetState): number {

@@ -42,6 +42,11 @@ export function normalizedReport(report: unknown): unknown {
 	return JSON.parse(JSON.stringify(report));
 }
 
+/** Exact canonical-row comparison shared by live delivery and read-only summary recovery. */
+export function semanticUsageCanonicalDataMatches(data: unknown, report: SemanticUsageReport): boolean {
+	return isDeepStrictEqual(data, normalizedReport(report));
+}
+
 /**
  * The header timestamp the journal binds to. The kernel does not validate it, so a missing, empty, non-string or oversized
  * value binds this fixed marker instead: the journal's own record format accepts any value bound this way, and the same
@@ -96,9 +101,8 @@ export function createSessionManagerLedgerPort(manager: SessionManager): Semanti
 		},
 		append: (report) => manager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, report),
 		physicalState: (entryId, report) => {
-			const expected = normalizedReport(report);
 			return classifyCustomEntryPersisted(manager, entryId, SEMANTIC_USAGE_CUSTOM_TYPE, (data) =>
-				isDeepStrictEqual(data, expected),
+				semanticUsageCanonicalDataMatches(data, report),
 			);
 		},
 		onPersisted: (listener) =>

@@ -27,18 +27,22 @@ import type { AccountingOrigin } from "./accounting-evidence.ts";
 import { captureSessionAccountingOrigin } from "./accounting-origin.ts";
 import { pathNotice } from "./path-notice.ts";
 import {
+	captureSummarySpendIdentity,
+	confirmCanonicalSummaryChange,
+	emptyJournal,
 	errorCodeOf,
 	foreignJournalPaths,
 	type JournalChange,
-	type JournalConflict,
 	type JournalDocument,
 	type JournalRecord,
 	type JournalSlot,
+	type JournalStandingOutcome,
 	journalRecordBytes,
 	journalSlotOf,
 	parseUnresolvedUsageRequest,
 	readJournal,
-	SEMANTIC_USAGE_JOURNAL_MAX_CONFLICTS,
+	requestMatchesReceipt,
+	retainRecordChange,
 	SEMANTIC_USAGE_JOURNAL_MAX_RECORD_BYTES,
 	SEMANTIC_USAGE_JOURNAL_MAX_RECORDS,
 	SemanticUsageJournalError,
@@ -46,6 +50,8 @@ import {
 	sessionJournalPaths,
 	type UnresolvedUsageRequest,
 	updateJournal,
+	withConflict,
+	withoutRecord,
 } from "./semantic-usage-journal.ts";
 import {
 	createSessionManagerLedgerPort,
@@ -130,6 +136,8 @@ export interface MaintenanceUsageLease extends SystemOneUsageLease {
 /** One session's usage owner: the reviewer's sink, admission's confirmation, and the session's pending journal. */
 export interface SessionSemanticUsageDelivery extends SystemOneUsageSink {
 	captureOrigin(): AccountingOrigin;
+	/** Materializes and captures the exact persisted identity used by shared-meter summary receipts. */
+	summarySpendIdentity(): SemanticUsageLedgerIdentity;
 	/** Reserve the explicit maximum number of provider responses before maintenance work starts. */
 	beginMaintenance(
 		route: CompletionUsageRoute,
@@ -171,6 +179,8 @@ interface HeldReceipt {
 	retained: boolean;
 	/** False when the receipt has no journal copy by design (the record format or size bound, or an unsafe session id). */
 	readonly journalable: boolean;
+	readonly summarySpendPending?: boolean;
+	readonly canonicalConfirmed?: true;
 	retainFailure?: JournalFailure;
 }
 
@@ -264,93 +274,10 @@ function sameIdentity(left: SemanticUsageLedgerIdentity, right: SemanticUsageLed
 	);
 }
 
-function emptyJournal(slot: JournalSlot, updatedAt: string): JournalDocument {
-	return {
-		version: 1,
-		kind: "semantic-usage-pending",
-		sessionId: slot.sessionId,
-		sessionFile: slot.sessionFile,
-		headerTimestamp: slot.headerTimestamp,
-		updatedAt,
-		records: [],
-		conflicts: [],
-		droppedConflicts: 0,
-	};
-}
-
-/** The record appended for a new identity. A repeated identity is handled by {@link recordChange}, never appended twice. */
-function withRecord(current: JournalDocument | undefined, slot: JournalSlot, record: JournalRecord): JournalDocument {
-	const base = current ?? emptyJournal(slot, record.createdAt);
-	return { ...base, updatedAt: record.createdAt, records: [...base.records, record] };
-}
-
-function requestMatchesReceipt(request: UnresolvedUsageRequest, receipt: TypeSafeUsageReceipt): boolean {
-	return (
-		request.provider === receipt.provider &&
-		request.model === receipt.model &&
-		request.route === receipt.route &&
-		isDeepStrictEqual(request.origin, receipt.origin)
-	);
-}
-
-/**
- * The journal change for one retained record. The first record of an identity stands: the same payload is the same
- * obligation (idempotent, nothing is appended), and a different payload is evidence beside the standing record, which
- * is reported through `outcome` so the caller can adopt it.
- */
-function recordChange(slot: JournalSlot, record: JournalRecord, outcome: { standing?: JournalRecord }): JournalChange {
-	return (current) => {
-		const unresolved = current?.unresolved?.find((request) => request.requestId === record.reportId);
-		if (unresolved && !requestMatchesReceipt(unresolved, record.payload)) {
-			throw new SemanticUsageJournalError(
-				"corrupt",
-				"Usage settlement does not match its dispatched request identity",
-			);
-		}
-		if (unresolved && current)
-			current = {
-				...current,
-				unresolved: current.unresolved!.filter((request) => request.requestId !== record.reportId),
-			};
-		const standing = current?.records.find((existing) => existing.reportId === record.reportId);
-		if (current && standing) {
-			if (samePayload(standing.payload, record.payload)) return current;
-			outcome.standing = standing;
-			return withConflict(current, { reportId: record.reportId, payload: record.payload, seenAt: record.createdAt });
-		}
-		return withRecord(current, slot, record);
-	};
-}
-
 /**
  * Removes the record the payload names. A record of the same identity with another payload is another obligation and
  * stays: an acknowledgement never removes a different receipt's copy.
  */
-function withoutRecord(
-	current: JournalDocument,
-	reportId: string,
-	payload: TypeSafeUsageReceipt,
-	updatedAt: string,
-): JournalDocument | undefined {
-	const records = current.records.filter(
-		(record) => record.reportId !== reportId || !samePayload(record.payload, payload),
-	);
-	const unresolved = current.unresolved?.filter(
-		(request) => request.requestId !== reportId || !requestMatchesReceipt(request, payload),
-	);
-	if (records.length === 0 && current.conflicts.length === 0 && current.droppedConflicts === 0 && !unresolved?.length)
-		return undefined;
-	if (records.length === current.records.length && unresolved?.length === current.unresolved?.length) return current;
-	return { ...current, updatedAt, records, ...(unresolved ? { unresolved } : {}) };
-}
-
-function withConflict(current: JournalDocument, conflict: JournalConflict): JournalDocument {
-	if (current.conflicts.length >= SEMANTIC_USAGE_JOURNAL_MAX_CONFLICTS) {
-		return { ...current, updatedAt: conflict.seenAt, droppedConflicts: current.droppedConflicts + 1 };
-	}
-	return { ...current, updatedAt: conflict.seenAt, conflicts: [...current.conflicts, conflict] };
-}
-
 /**
  * Why a receipt has no journal copy: the journal's record format or size bound. These bounds belong to the journal only, so
  * such a receipt still gets its ledger row appended and verified; it is just never retained.
@@ -372,6 +299,8 @@ function standingEntry(record: JournalRecord): HeldReceipt {
 		createdAt: record.createdAt,
 		retained: true,
 		journalable: true,
+		...(record.summarySpendPending !== undefined ? { summarySpendPending: record.summarySpendPending } : {}),
+		...(record.canonicalConfirmed === true ? { canonicalConfirmed: true as const } : {}),
 	};
 }
 
@@ -561,6 +490,10 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 
 	get disposed(): boolean {
 		return this.isDisposed;
+	}
+
+	summarySpendIdentity(): SemanticUsageLedgerIdentity {
+		return captureSummarySpendIdentity(this.ledger, this.bound, this.isDisposed);
 	}
 
 	/**
@@ -1137,6 +1070,19 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		const request = this.unresolved.get(receipt.receiptId);
 		if (request && !requestMatchesReceipt(request, receipt)) return this.conflict(receipt);
 		const report = semanticUsageReportOf(receipt);
+		if (
+			receipt.summaryAccounting !== undefined &&
+			identity.persisted &&
+			sameIdentity(identity, this.ledger.identity()) &&
+			!this.held.has(receipt.receiptId)
+		) {
+			const canonical = this.ledger.findCanonical(receipt.receiptId);
+			if (canonical) {
+				const state = this.ledger.physicalState(canonical.entryId, report);
+				if (state === "persisted") return { kind: "physically_recorded", scope: "ledger" };
+				if (state === "conflict") return this.conflict(receipt);
+			}
+		}
 		if (!identity.persisted) {
 			return sameIdentity(identity, this.ledger.identity())
 				? this.appendInMemory(report)
@@ -1151,6 +1097,9 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			reportId: receipt.receiptId,
 			payload: receipt,
 			createdAt: new Date().toISOString(),
+			...(receipt.summaryAccounting !== undefined || request?.summarySpendPending === true
+				? { summarySpendPending: true }
+				: {}),
 		};
 		// Why this receipt has no journal copy, if it has none. The ledger row is never refused for it: only retention is skipped.
 		const refusal = journalRefusalOf(receipt, record);
@@ -1189,9 +1138,9 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 
 	/** A late response whose session identity has changed: retained to its own identity's journal only, never delivered here. */
 	private recordForeign(slot: JournalSlot, record: JournalRecord): SemanticUsageOutcome {
-		const outcome: { standing?: JournalRecord } = {};
+		const outcome: JournalStandingOutcome = {};
 		try {
-			const movedAside = updateJournal(slot, recordChange(slot, record, outcome));
+			const movedAside = updateJournal(slot, retainRecordChange(slot, record, outcome));
 			if (movedAside !== undefined) {
 				this.warn(
 					`The session's usage journal was corrupt and is preserved at ${basename(movedAside)}; its reports are not recovered automatically.`,
@@ -1340,10 +1289,16 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			reportId: entry.report.reportId,
 			payload: entry.payload,
 			createdAt: entry.createdAt,
+			...(entry.summarySpendPending !== undefined
+				? { summarySpendPending: entry.summarySpendPending }
+				: entry.payload.summaryAccounting !== undefined
+					? { summarySpendPending: true }
+					: {}),
+			...(entry.canonicalConfirmed === true ? { canonicalConfirmed: true } : {}),
 		};
-		const outcome: { standing?: JournalRecord } = {};
+		const outcome: JournalStandingOutcome = {};
 		try {
-			this.writeJournal("retain", slot, recordChange(slot, record, outcome), entry);
+			this.writeJournal("retain", slot, retainRecordChange(slot, record, outcome), entry);
 		} catch (error) {
 			entry.retainFailure = this.failJournal("retain", error);
 			return "failed";
@@ -1386,7 +1341,10 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		if (slot === undefined || (!entry.retained && !this.unresolved.has(reportId))) return;
 		this.staleCopies.set(reportId, entry.payload);
 		this.clearUnresolved(reportId);
-		if (this.removeReady) this.removeCopy(slot, reportId, entry.payload);
+		if (this.removeReady) {
+			if (entry.payload.summaryAccounting !== undefined) this.confirmCanonicalCopy(slot, reportId, entry.payload);
+			else this.removeCopy(slot, reportId, entry.payload);
+		}
 	}
 
 	private clearUnresolved(reportId: string): void {
@@ -1415,13 +1373,27 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 		}
 	}
 
+	private confirmCanonicalCopy(slot: JournalSlot, reportId: string, payload: TypeSafeUsageReceipt): void {
+		try {
+			this.writeJournal("remove", slot, confirmCanonicalSummaryChange(reportId, payload), undefined);
+			this.staleCopies.delete(reportId);
+		} catch (error) {
+			const failure = this.failJournal("remove", error);
+			this.warnOnce(
+				"remove",
+				`The session's usage journal could not be updated (${failure.cause}); its records are retried.`,
+			);
+		}
+	}
+
 	/** Retries stale copies in order; after a failed removal the rest wait, so a failing journal is not written per copy. */
 	private removeStaleCopies(slot: JournalSlot): void {
 		let attempted = false;
 		for (const [reportId, payload] of [...this.staleCopies]) {
 			if (attempted && !this.removeReady) break;
 			attempted = true;
-			this.removeCopy(slot, reportId, payload);
+			if (payload.summaryAccounting !== undefined) this.confirmCanonicalCopy(slot, reportId, payload);
+			else this.removeCopy(slot, reportId, payload);
 		}
 	}
 
@@ -1613,6 +1585,20 @@ class SemanticUsageDelivery implements SessionSemanticUsageDelivery, LeaseOwner 
 			const receipt = parseTypeSafeUsageReceipt({ ...data, receiptId: reportId });
 			if (!receipt || !requestMatchesReceipt(request, receipt)) continue;
 			if (this.ledger.physicalState(row.entryId, semanticUsageReportOf(receipt)) !== "persisted") continue;
+			if (request.summarySpendPending === true) {
+				const entry: HeldReceipt = {
+					payload: receipt,
+					report: semanticUsageReportOf(receipt),
+					createdAt: new Date().toISOString(),
+					retained: false,
+					journalable: true,
+					summarySpendPending: true,
+					canonicalConfirmed: true,
+				};
+				if (this.retain(entry, slot) === "failed") continue;
+				this.clearUnresolved(id);
+				continue;
+			}
 			this.staleCopies.set(id, receipt);
 			this.clearUnresolved(id);
 			if (this.removeReady) this.removeCopy(slot, id, receipt);

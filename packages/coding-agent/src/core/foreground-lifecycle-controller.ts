@@ -69,10 +69,15 @@ export interface ForegroundLifecycleAgentDependency {
 	resetSanitizerPrefixHorizon: Agent["resetSanitizerPrefixHorizon"];
 }
 
+export type ForegroundLifecycleModelRouterDependency = Pick<
+	ModelRouterController,
+	"commitSessionBuffer" | "commitSessionBufferPrefix"
+>;
+
 interface ForegroundLifecycleControllerDeps {
 	agent: ForegroundLifecycleAgentDependency;
 	sessionManager: SessionManager;
-	modelRouter: ModelRouterController;
+	modelRouter: ForegroundLifecycleModelRouterDependency;
 	emitWarning(message: string): void;
 	observeProviderRequest?(context: ProviderRequestSnapshotContext, deliveredNoteIds: readonly string[]): void;
 	/** Told of a wave of calls before any of them is reserved. Advisory: a throw is reported and the wave proceeds. */

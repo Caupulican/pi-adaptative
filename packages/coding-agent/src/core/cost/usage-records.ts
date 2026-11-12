@@ -117,6 +117,7 @@ export interface SemanticUsageReport {
 	/** Explicit model rates were known before dispatch, including configured models outside the catalog. */
 	readonly priceKnown?: true;
 	readonly responseTimestamp?: string;
+	readonly summaryAccounting?: { readonly observedAtMs: number };
 	readonly origin?: AccountingOrigin;
 	/** One provider response, including a retry response, priced against its exact catalog identity. */
 	usage: Usage;
@@ -163,6 +164,7 @@ export function resolveSemanticUsageEntry(entry: SessionEntry):
 export function semanticUsageReportOf(receipt: {
 	priceKnown?: true;
 	responseTimestamp?: string;
+	summaryAccounting?: { readonly observedAtMs: number };
 	origin?: AccountingOrigin;
 	receiptId: string;
 	provider: string;
@@ -175,6 +177,7 @@ export function semanticUsageReportOf(receipt: {
 	return {
 		...(receipt.priceKnown === true ? { priceKnown: true } : {}),
 		...(receipt.responseTimestamp ? { responseTimestamp: receipt.responseTimestamp } : {}),
+		...(receipt.summaryAccounting ? { summaryAccounting: { ...receipt.summaryAccounting } } : {}),
 		...(receipt.origin ? { origin: { ...receipt.origin } } : {}),
 		reportId: receipt.receiptId,
 		provider: receipt.provider,

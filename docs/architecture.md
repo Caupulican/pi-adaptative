@@ -92,7 +92,7 @@ module; `--check` fails when this file is stale. The words used here are defined
 | `kernel/session/session-entry-evidence-index.ts` | (no header comment) |
 | `kernel/session/session-entry-limits.ts` | Maximum entries visited by a single bounded session traversal. |
 | `kernel/session/session-file-admission.ts` | (no header comment) |
-| `kernel/session/session-file-reading.ts` | Session transcript file reading: entry line parsing, streamed and offset-indexed entry loading, and session header reads with parent lineage checks. |
+| `kernel/session/session-file-reading.ts` | Session transcript file reading: entry parsing, bounded strict snapshot recovery, streamed and offset-indexed loading, and header reads with parent lineage checks. |
 | `kernel/session/session-file-writing.ts` | Transcript file writes under the session file lock: the lock wrapper that shares an active synchronous scope, the append to an existing history, and the full-file write. |
 | `kernel/session/session-header.ts` | (no header comment) |
 | `kernel/session/session-id-generation.ts` | Session and entry id generation: fresh session ids, the auto-learn session id test, and the entry id space that keeps generated ids unique within one transcript. |

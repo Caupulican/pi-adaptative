@@ -19,6 +19,7 @@ const RECEIPT_PAYLOAD_KEYS = [
 	"route",
 	"origin",
 	"responseTimestamp",
+	"summaryAccounting",
 	"priceKnown",
 ] as const;
 const RECEIPT_USAGE_KEYS = ["input", "output", "cacheRead", "cacheWrite", "totalTokens", "cost"] as const;
@@ -57,7 +58,18 @@ export function parseTypeSafeUsageReceipt(value: unknown): TypeSafeUsageReceipt 
 	if (!isPlainRecord(value) || !hasOnlyKeys(value, RECEIPT_PAYLOAD_KEYS)) return undefined;
 	const { receiptId, provider, model, attempt, usage, costStatus, costProvenance, route } = value;
 	const responseTimestamp = value.responseTimestamp;
+	const summaryAccounting = value.summaryAccounting;
 	if (value.priceKnown !== undefined && value.priceKnown !== true) return undefined;
+	if (
+		summaryAccounting !== undefined &&
+		(!isPlainRecord(summaryAccounting) ||
+			!hasOnlyKeys(summaryAccounting, ["observedAtMs"]) ||
+			typeof summaryAccounting.observedAtMs !== "number" ||
+			!Number.isSafeInteger(summaryAccounting.observedAtMs) ||
+			summaryAccounting.observedAtMs < 0 ||
+			value.route !== "history_summary")
+	)
+		return undefined;
 	if (
 		responseTimestamp !== undefined &&
 		(!isReceiptText(responseTimestamp) || !Number.isFinite(Date.parse(responseTimestamp)))
@@ -133,6 +145,9 @@ export function parseTypeSafeUsageReceipt(value: unknown): TypeSafeUsageReceipt 
 		...(route !== undefined ? { route } : {}),
 		...(origin ? { origin } : {}),
 		...(responseTimestamp !== undefined ? { responseTimestamp } : {}),
+		...(summaryAccounting !== undefined
+			? { summaryAccounting: { observedAtMs: summaryAccounting.observedAtMs as number } }
+			: {}),
 		...(value.priceKnown === true ? { priceKnown: true } : {}),
 	};
 }

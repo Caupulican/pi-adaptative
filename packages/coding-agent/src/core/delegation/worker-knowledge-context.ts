@@ -2,6 +2,7 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { AgentContextPlan, AgentContextPlanRequest } from "../../kernel/loop-config.ts";
 import { createCustomMessage } from "../../kernel/messages.ts";
+import { isContextPlanDispatchCurrent } from "../../kernel/provider-request-planner.ts";
 import { HOST_REQUEST_ONLY_DETAILS } from "../../kernel/transient-records.ts";
 import { resolveMemoryPromptBudget } from "../context/memory-prompt-budget.ts";
 import { estimateReplyReserveTokens } from "../context/prompt-headroom.ts";
@@ -39,24 +40,25 @@ export async function appendWorkerKnowledgeContext(input: {
 		Number.isFinite(model.contextWindow) && model.contextWindow > 0
 			? model.contextWindow - reserve
 			: Number.POSITIVE_INFINITY;
-	const compose = (projection: KnowledgeProjection, content = projection.text || KNOWLEDGE_CONTEXT_CLEARED) => ({
-		...plan,
-		transientMessages: [
-			...(plan.transientMessages ?? []),
-			createCustomMessage(
-				KNOWLEDGE_CONTEXT_CUSTOM_TYPE,
-				content,
-				false,
-				HOST_REQUEST_ONLY_DETAILS,
-				"1970-01-01T00:00:00.000Z",
-			),
-		],
-		isCurrent: () =>
-			!signal?.aborted &&
-			(plan.isCurrent?.() ?? true) &&
-			projection.isCurrent() &&
-			remaining === input.remainingTokenAllowance(),
-	});
+	const compose = (projection: KnowledgeProjection, content = projection.text || KNOWLEDGE_CONTEXT_CLEARED) => {
+		const knowledgeCurrent = () =>
+			!signal?.aborted && projection.isCurrent() === true && remaining === input.remainingTokenAllowance();
+		return {
+			...plan,
+			transientMessages: [
+				...(plan.transientMessages ?? []),
+				createCustomMessage(
+					KNOWLEDGE_CONTEXT_CUSTOM_TYPE,
+					content,
+					false,
+					HOST_REQUEST_ONLY_DETAILS,
+					"1970-01-01T00:00:00.000Z",
+				),
+			],
+			isCurrent: () => plan.isCurrent?.() !== false && knowledgeCurrent(),
+			isDispatchCurrent: () => isContextPlanDispatchCurrent(plan) && knowledgeCurrent(),
+		};
+	};
 	try {
 		signal?.throwIfAborted();
 		// Reserve the mandatory supersession notice even when no optional fact can fit.

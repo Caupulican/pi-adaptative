@@ -377,7 +377,7 @@ export class ContinuousChatScheduler {
 					entry.list === "blocked" ? "blocked" : "ready",
 					firstSequence + index,
 					0,
-					entry.list === "blocked" || entry.list === "running" ? 1 : 0,
+					entry.list === "blocked" ? 1 : 0,
 					entry.blocked?.retryAfterGeneration ?? -1,
 					entry.blocked?.reason ?? null,
 					entry.list === "blocked" ? "fail" : null,
@@ -628,11 +628,17 @@ export class ContinuousChatScheduler {
 			if (row.status === "running") {
 				const recoveryIdentity = this.sql("SELECT identity FROM recovery_configuration WHERE id=1").get()?.identity;
 				const waitForRecovery =
-					action.kind === "fail" && action.recoveryOnly === true && action.recoveryKey === recoveryIdentity;
+					action.kind === "fail" &&
+					action.recoveryOnly === true &&
+					action.recoveryKey !== undefined &&
+					action.recoveryKey.trim().length > 0 &&
+					action.recoveryKey === recoveryIdentity;
 				if (waitForRecovery)
 					this.sql("INSERT INTO recovery_only VALUES(?,?) ON CONFLICT DO NOTHING").run(claim.level, claim.ordinal);
+				// A claim reserves one attempt; only a failed disposition spends it. Idempotent replays skip this branch.
+				const attempts = action.kind === "release" ? row.attempts - 1 : row.attempts;
 				this.sql(
-					"UPDATE work SET status=?,sequence=?,retry_after=?,reason=?,last_action=? WHERE level=? AND ordinal=?",
+					"UPDATE work SET status=?,sequence=?,retry_after=?,reason=?,last_action=?,attempts=? WHERE level=? AND ordinal=?",
 				).run(
 					action.kind === "fail" ? "blocked" : "ready",
 					++meta.sequence,
@@ -643,10 +649,11 @@ export class ContinuousChatScheduler {
 							: -1,
 					reason,
 					action.kind,
+					attempts,
 					claim.level,
 					claim.ordinal,
 				);
-				disposed = { attempts: row.attempts, waitsForRecovery: waitForRecovery };
+				disposed = { attempts, waitsForRecovery: waitForRecovery };
 			}
 			meta.revision++;
 			this.save(meta);
@@ -696,9 +703,10 @@ export class ContinuousChatScheduler {
 		let requeued = 0;
 		this.transaction(() => {
 			const meta = this.meta();
+			// Interrupted claims never recorded a failure disposition, so release their reserved attempts once.
 			requeued = changesOf(
 				this.sql(
-					"UPDATE work SET status='ready',retry_after=-1,last_action='release',reason=NULL WHERE status='running'",
+					"UPDATE work SET status='ready',attempts=attempts-1,retry_after=-1,last_action='release',reason=NULL WHERE status='running'",
 				).run(),
 			);
 			meta.revision++;

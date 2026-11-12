@@ -124,6 +124,9 @@ export class CacheLaneGuard {
 			...(conversation ? { conversation } : {}),
 			lane,
 			...(snapshot.prefixIntact !== undefined ? { prefixIntact: snapshot.prefixIntact } : {}),
+			...(snapshot.requestOnlyProjectionReplacement === true
+				? { requestOnlyProjectionReplacement: true as const }
+				: {}),
 			...(snapshot.firstDivergentKind !== undefined ? { firstDivergentKind: snapshot.firstDivergentKind } : {}),
 			...(snapshot.firstDivergentIndex !== undefined ? { firstDivergentIndex: snapshot.firstDivergentIndex } : {}),
 			...(snapshot.reasoning !== undefined ? { reasoning: snapshot.reasoning } : {}),

@@ -439,6 +439,12 @@ export interface AgentContextPlan {
 	/** Cheap freshness check immediately before admission/commit. */
 	isCurrent?: () => boolean;
 	/**
+	 * Nonconsumptive freshness check valid after commit. Rechecked at dispatch, including after
+	 * asynchronous stream wrappers. False refuses the accepted request with a normal error stream;
+	 * it does not replan or repeat commit. Consumable cues must not participate in this check.
+	 */
+	isDispatchCurrent?: () => boolean;
+	/**
 	 * Pure final validation for expensive projections. Return false to discard and replan; do not
 	 * mutate durable state here.
 	 */
@@ -502,6 +508,8 @@ export interface ProviderRequestAdmissionContext extends RequestPreflightContext
 export interface ProviderRequestSnapshotContext extends ProviderRequestAdmissionContext {
 	/** Opaque identity generated only after final plan validation and adoption. */
 	requestId: AgentRequestId;
+	/** Final provider-message interval occupied by replaceable request-only projections; no content is retained. */
+	requestOnlyMessageRange?: { readonly start: number; readonly count: number };
 	/** Non-secret account scope frozen with the API key that this request will transport. */
 	providerAccountKey?: string;
 	/** Request-local reasoning value that will be sent to transport. */

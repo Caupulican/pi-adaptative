@@ -11,6 +11,13 @@ export interface MemoryPromptPlan {
 	messages: AgentMessage[];
 	/** False once the memory generation, content revision, headroom or composed records no longer match. */
 	isCurrent(): boolean;
+	/** Optional nonconsumptive currency check that remains valid after diagnostics are committed. */
+	isDispatchCurrent?(): boolean;
 	/** Publish the inclusion report and admitted-recall record of this plan. Called once, after acceptance. */
 	commit(): void;
+}
+
+/** Mark a memory plan whose commit cannot consume or invalidate its freshness predicate. */
+export function dispatchCurrentMemoryPlan(plan: MemoryPromptPlan): MemoryPromptPlan {
+	return { ...plan, isDispatchCurrent: plan.isCurrent };
 }

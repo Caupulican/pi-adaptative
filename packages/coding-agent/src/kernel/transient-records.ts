@@ -56,7 +56,7 @@ export const TRANSIENT_RECORD_SUPERSEDING_NOTE =
  */
 export const HOST_TRANSIENT_CLEARED_DETAILS = { transientCleared: true } as const;
 
-/** A live projection belongs only to this request, never to durable history or later compactions. */
+/** A live projection leads compactable history on the wire, never entering durable history or later compactions. */
 export const HOST_REQUEST_ONLY_DETAILS = { requestOnly: true } as const;
 
 function isClearedHostTransient(message: AgentMessage): boolean {
@@ -632,12 +632,15 @@ export async function commitTransientRecords(
  * to dedupe against; a message array's POSITION is not safe (a host may contribute a variable number
  * of transients turn to turn as different extensions activate, shifting everything after them - see
  * the investigation note in `provider-request-planner.ts`). Anything not shaped as a `CustomMessage`
- * with string content, or explicitly marked `HOST_REQUEST_ONLY_DETAILS`, is returned in `passThrough`
- * instead: appended fresh to the WIRE payload every
+ * with string content is returned in `passThrough` instead: appended fresh to the WIRE payload every
  * request exactly as before this module existed, never written into durable history. This is
  * correct-but-unoptimized for that shape rather than either dropping it (would silently lose content)
  * or guessing at a durable identity for it (would risk conflating two unrelated host transients that
  * happen to share position).
+ *
+ * Explicit `HOST_REQUEST_ONLY_DETAILS` projections instead occupy a stable head slot on the wire,
+ * after any host frame and before growing history. They never become durable records, so a current
+ * correction, forgetting or privacy withholding replaces their earlier content on the next request.
  *
  * No `clearedText` is synthesized for a host kind that disappears from `transientMessages`: only the
  * host that renders a kind's content knows what, if anything, its disappearance should say, and
@@ -650,9 +653,12 @@ export async function commitTransientRecords(
 export function adaptHostTransients(transientMessages: readonly AgentMessage[]): {
 	slots: TransientRecordSlot[];
 	passThrough: AgentMessage[];
+	/** Explicit live projections occupy a stable head position before the growing conversation. */
+	requestOnly: AgentMessage[];
 } {
 	const slots: TransientRecordSlot[] = [];
 	const passThrough: AgentMessage[] = [];
+	const requestOnly: AgentMessage[] = [];
 	for (const message of transientMessages) {
 		if (
 			message.role === "custom" &&
@@ -660,7 +666,7 @@ export function adaptHostTransients(transientMessages: readonly AgentMessage[]):
 			message.details !== null &&
 			(message.details as { requestOnly?: unknown }).requestOnly === true
 		) {
-			passThrough.push(message);
+			requestOnly.push(message);
 			continue;
 		}
 		const text = customMessageText(message);
@@ -680,7 +686,7 @@ export function adaptHostTransients(transientMessages: readonly AgentMessage[]):
 			passThrough.push(message);
 		}
 	}
-	return { slots, passThrough };
+	return { slots, passThrough, requestOnly };
 }
 
 /**
