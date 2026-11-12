@@ -998,3 +998,18 @@ then read the file and inaccurately described it as one line. No harness rewrite
 requirement was found. The one-line oracle and original prompt remain unchanged. This run did not
 reach S15's subsequent worker-start control or S43's owner-chat negative control; neither is counted
 as covered. Corrected full live acceptance remains pending.
+
+The first staging correction exposed another interacting boundary before bot creation: startup
+migration archives noncanonical files placed directly at the agent root. The observer bytes were
+found intact under `state/legacy-layout/root-files`, so no snapshot could be produced at the supplied
+path. That run was stopped after explicit fresh-observer failures, not treated as an acceptance
+pass; its partial log/evidence remain in `/tmp/pi-v0.104.57-corrected-live-acceptance.log` and
+`/tmp/pi-live-gate-sSVIzZ`. Staging now uses `agent/state/live-acceptance`, which survives the existing
+migration and remains inside the trusted agent root, without automatic extension discovery.
+
+The corrected placement passed the focused native journey `s0,s1,s2,s8` on the pinned published
+`v0.104.57` binary: providers, cold startup, observed main-editor bot creation and a grounded
+repository answer from the second pane. Report:
+`.git/pi-audits/live-validation/2026-11-12T17-53-19-887Z/report.json` (four passes, no selected skips).
+Both pane observations were fresh and error-free after completion, and the staged bytes matched
+the observer source. The full eighteen-scenario run and final corrected source CI remain pending.

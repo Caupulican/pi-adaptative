@@ -32,8 +32,10 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 	const register = (pane, agentDir) => {
 		let extension = agentObservers.get(agentDir);
 		if (!extension) {
-			// Agent-owned instrumentation stays trusted when the working project excludes its own instructions.
-			extension = join(agentDir, "live-session-observer.mjs");
+			// The canonical state root survives startup migration and stays trusted without project instructions.
+			const root = join(agentDir, "state", "live-acceptance");
+			mkdirSync(root, { recursive: true });
+			extension = join(root, "live-session-observer.mjs");
 			writeFileSync(extension, readFileSync(liveObserverSource), { mode: 0o600 });
 			agentObservers.set(agentDir, extension);
 		}
