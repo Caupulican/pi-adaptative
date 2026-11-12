@@ -1,6 +1,12 @@
 /** Composed Mistral transport bounds through the real SDK, provider and root-session owners. */
+
+import { getApiProvider, registerApiProvider, unregisterApiProviders } from "@caupulican/pi-ai";
 import { expect } from "vitest";
-import { MISTRAL_RESPONSE_BOUNDS } from "../../../../../ai/src/providers/mistral.ts";
+import {
+	MISTRAL_RESPONSE_BOUNDS,
+	streamMistral,
+	streamSimpleMistral,
+} from "../../../../../ai/src/providers/mistral.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 
@@ -10,6 +16,28 @@ const BASE = "https://h24-mistral.invalid";
 
 /** Exercise actual SDK responses through the registered model and a durable user-facing root session. */
 export async function runMistralResponseJourney(world: HarnessWorld): Promise<void> {
+	// Real provider functions are loaded before the world installs its virtual filesystem. Its lazy
+	// built-in registration would otherwise perform module I/O inside that guarded filesystem.
+	const previous = getApiProvider("mistral-conversations");
+	registerApiProvider(
+		{ api: "mistral-conversations", stream: streamMistral, streamSimple: streamSimpleMistral },
+		PROVIDER,
+	);
+	try {
+		await runRegisteredMistralResponseJourney(world);
+	} finally {
+		try {
+			world.modelRegistry.unregisterProvider(PROVIDER);
+		} finally {
+			unregisterApiProviders(PROVIDER);
+			expect(getApiProvider("mistral-conversations"), "the composed phase restores the underlying API owner").toBe(
+				previous,
+			);
+		}
+	}
+}
+
+async function runRegisteredMistralResponseJourney(world: HarnessWorld): Promise<void> {
 	const reference = world.provider.model("root");
 	world.modelRegistry.registerProvider(PROVIDER, {
 		api: "mistral-conversations",
@@ -31,17 +59,12 @@ export async function runMistralResponseJourney(world: HarnessWorld): Promise<vo
 	if (!model) throw new Error("The H24 Mistral model was not registered.");
 	const agentDir = `${world.agentDir}-h24-mistral`;
 	const manager = world.createSessionManager(agentDir);
-	const owner = await world
-		.createRootSession("root", {
-			agentDir,
-			model,
-			sessionManager: manager,
-			settings: { retry: { enabled: false } },
-		})
-		.catch((error: unknown) => {
-			world.modelRegistry.unregisterProvider(PROVIDER);
-			throw error;
-		});
+	const owner = await world.createRootSession("root", {
+		agentDir,
+		model,
+		sessionManager: manager,
+		settings: { retry: { enabled: false } },
+	});
 	const previousFetch = world.fetchResponder;
 	const encoder = new TextEncoder();
 	const requests: string[] = [];
@@ -189,8 +212,26 @@ export async function runMistralResponseJourney(world: HarnessWorld): Promise<vo
 		world.systemOne.enterPhase(`h24-${next}`, {});
 		const before = requests.length;
 		await withDeadline(world.trace, `H24 ${next} root turn`, owner.session.prompt(prompt));
-		expect(requests.slice(before)).toEqual([next]);
 		const message = owner.session.messages.at(-1);
+		const diagnostic = JSON.stringify({
+			model: owner.session.model && { provider: owner.session.model.provider, id: owner.session.model.id },
+			assistant: message?.role === "assistant" && {
+				stopReason: message.stopReason,
+				error: message.errorMessage?.slice(0, 4096),
+			},
+			requests: manager
+				.getEntries()
+				.filter((entry) => entry.type === "request_snapshot" || entry.type === "provider_request_terminal")
+				.map((entry) => ({
+					type: entry.type,
+					id: entry.id,
+					requestId: entry.requestId,
+					...(entry.type === "request_snapshot"
+						? { provider: entry.provider, model: entry.modelId }
+						: { outcome: entry.outcome }),
+				})),
+		});
+		expect(requests.slice(before), diagnostic).toEqual([next]);
 		if (message?.role !== "assistant") throw new Error(`H24 ${next} did not produce an assistant terminal.`);
 		const persisted = manager
 			.getBranch()
@@ -257,7 +298,6 @@ export async function runMistralResponseJourney(world: HarnessWorld): Promise<vo
 			expect(await world.disposeSessionInBody(owner.session)).toBeUndefined();
 		} finally {
 			world.fetchResponder = previousFetch;
-			world.modelRegistry.unregisterProvider(PROVIDER);
 		}
 	}
 }
