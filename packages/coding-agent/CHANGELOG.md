@@ -1,15 +1,11 @@
-## [Unreleased]
-
-### Fixed
-
-- Summary spending decisions use one validated UTC day, preventing a clock rollback between checks from bypassing a reached daily limit.
-
 ## [0.104.56] - 2026-11-12
 
 ### Fixed
 
 - A summary waiting for preparation now rechecks shared accounting immediately before transport, so another session’s unresolved receipt or exhausted daily limit cannot be bypassed by an earlier reservation.
 - Interactive startup can capture a read-only runtime tree: snapshot directories receive the owner access needed to copy nested resources without changing the installed files or their permissions.
+
+- Summary spending decisions use one validated UTC day, preventing a clock rollback between checks from bypassing a reached daily limit.
 
 ## [0.104.55] - 2026-11-12
 
