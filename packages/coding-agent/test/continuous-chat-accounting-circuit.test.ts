@@ -2,7 +2,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import type { Api, AssistantMessage, Model, ProviderResponseTicket, Usage } from "@caupulican/pi-ai";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../src/core/agent-session-contracts.ts";
 import type { SessionSemanticUsageDelivery } from "../src/core/cost/semantic-usage-delivery.ts";
 import { ContinuousChatAccountingHold } from "../src/core/memory/continuous-chat-compaction.ts";
@@ -50,6 +50,10 @@ function setup(fs?: FaultableFs) {
 	let returnAdmissionError = false;
 	let returnBeforeBegin = false;
 	let onRecord: (() => void) | undefined;
+	let pauseNext = false;
+	let refuseAck = false;
+	let releasePaused: (() => void) | undefined;
+	const cancelled: string[] = [];
 	const tickets: ProviderResponseTicket[] = [];
 	const finish: Array<(result: IsolatedCompletionResult) => void> = [];
 	const reject: Array<(error: Error) => void> = [];
@@ -79,6 +83,7 @@ function setup(fs?: FaultableFs) {
 				: { kind: "missing" as const };
 		},
 		acknowledge: (_identity: unknown, token: string) => {
+			if (refuseAck) throw new Error("acknowledgement unavailable");
 			const receipt = receipts.get(token);
 			if (receipt) receipt.pending = false;
 		},
@@ -99,7 +104,9 @@ function setup(fs?: FaultableFs) {
 					if (refuseRequest) throw new Error("request journal unavailable");
 				},
 				assertCurrent: () => {},
-				cancelUndispatchedRequest: () => {},
+				cancelUndispatchedRequest: (id: string) => {
+					cancelled.push(id);
+				},
 				record: (receipt: unknown) => {
 					retained.push(receipt);
 					const record = receipt as {
@@ -139,20 +146,27 @@ function setup(fs?: FaultableFs) {
 		summary: () => ({ ok: true, model: current, reference: "test", thinkingLevel: "minimal" }),
 		prefixHead: () => ({ systemPrompt: "", tools: [], model: undefined }),
 		complete: (options: IsolatedCompletionOptions) => {
-			if (returnBeforeBegin) return Promise.resolve({ text: "", usage: missing, stopReason: "error" });
-			let ticket: ProviderResponseTicket;
-			try {
-				options.requestGuard?.(options.model!, options.signal);
-				ticket = options.providerResponseObserver!.begin(options.model!, options.signal);
-			} catch (error) {
-				if (!returnAdmissionError) throw error;
-				return Promise.resolve({ text: "", usage: missing, stopReason: "error" });
-			}
-			tickets.push(ticket);
-			return new Promise((resolve, fail) => {
-				finish.push(resolve);
-				reject.push(fail);
-			});
+			const invoke = (): Promise<IsolatedCompletionResult> => {
+				if (returnBeforeBegin) return Promise.resolve({ text: "", usage: missing, stopReason: "error" });
+				let ticket: ProviderResponseTicket;
+				try {
+					options.requestGuard?.(options.model!, options.signal);
+					ticket = options.providerResponseObserver!.begin(options.model!, options.signal);
+				} catch (error) {
+					if (!returnAdmissionError) throw error;
+					return Promise.resolve({ text: "", usage: missing, stopReason: "error" });
+				}
+				tickets.push(ticket);
+				return new Promise<IsolatedCompletionResult>((resolve, fail) => {
+					finish.push(resolve);
+					reject.push(fail);
+				});
+			};
+			if (!pauseNext) return invoke();
+			pauseNext = false;
+			return new Promise<void>((resolve) => {
+				releasePaused = resolve;
+			}).then(invoke);
 		},
 	});
 	const start = () => adapter.open(prefix, { level: 0, ordinal: 0 }).send({ task: "summarize" });
@@ -189,6 +203,18 @@ function setup(fs?: FaultableFs) {
 		failPhysical: (index: number) => tickets[index]!.failed(new Error("transport failed")),
 		unresolved,
 		retained,
+		cancelled,
+		ticketCount: () => tickets.length,
+		pauseNext: () => {
+			pauseNext = true;
+		},
+		refuseAck: () => {
+			refuseAck = true;
+		},
+		releasePaused: () => {
+			if (!releasePaused) throw new Error("No paused request");
+			releasePaused();
+		},
 		timers,
 		spendFile: join(directory, "spend.json"),
 		runNextTimer: () => {
@@ -226,6 +252,44 @@ function setup(fs?: FaultableFs) {
 }
 
 describe("continuous chat response accounting circuit", () => {
+	it.each(["cap", "unknown", "pending acknowledgement", "healthy"] as const)(
+		"rechecks %s accounting after a reserved request waits",
+		async (outcome) => {
+			const h = setup();
+			h.pauseNext();
+			const first = h.start();
+			const reserved = Object.values(JSON.parse(readFileSync(h.spendFile, "utf8")).circuits) as Array<{
+				status: string;
+				token: string;
+			}>;
+			expect(reserved).toHaveLength(1);
+			expect(reserved[0]!.status).toBe("reserved");
+			h.switchSession("session-b");
+			const second = h.start();
+			if (outcome === "pending acknowledgement") h.refuseAck();
+			if (outcome === "unknown") {
+				h.settle(0, missing);
+				await expect(second).rejects.toThrow("without reporting measured usage");
+			} else {
+				h.settle(0, { ...measured, cost: { ...measured.cost, total: outcome === "cap" ? 10 : 0.25 } });
+				await expect(second).resolves.toBe("summary");
+			}
+			h.releasePaused();
+			if (outcome === "healthy") {
+				await vi.waitFor(() => expect(h.ticketCount()).toBe(2));
+				h.settle(1, measured);
+				await expect(first).resolves.toBe("summary");
+			} else {
+				await expect(first).rejects.toBeInstanceOf(ContinuousChatAccountingHold);
+				expect(h.ticketCount()).toBe(1);
+				expect(h.cancelled).toContain(reserved[0]!.token);
+				const state = JSON.parse(readFileSync(h.spendFile, "utf8"));
+				expect(Object.values(state.circuits)).toContainEqual(
+					expect.objectContaining({ token: reserved[0]!.token, status: "held" }),
+				);
+			}
+		},
+	);
 	it("refuses missing model prices and accepts explicit zero prices", () => {
 		const settings = {
 			summaryModel: "anthropic/test-model",

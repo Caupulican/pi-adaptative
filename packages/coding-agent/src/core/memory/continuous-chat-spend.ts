@@ -486,6 +486,22 @@ export class ContinuousChatSpendMeter {
 		this.reconcile();
 		return this.locked((state) => this.remaining(state, key));
 	}
+	/** Recheck shared account rules under the same lock as each admission transition. */
+	private assertAccountAdmission(state: SpendState): void {
+		if (
+			Object.values(state.circuits).some(
+				(item) =>
+					item.status === "unknown" ||
+					(item.status === "reserved" && (!item.identity || this.owners.judge(item.owner) !== "alive")) ||
+					(item.status === "flight" && (!item.identity || this.owners.judge(item.owner) !== "alive")) ||
+					((item.status === "held" || item.status === "settled") && item.pendingAck),
+			)
+		)
+			throw new ContinuousChatAccountingUnresolved();
+		const limit = this.maxUsdPerDay();
+		if (limit > 0 && state.day === this.today() && state.usd >= limit)
+			throw new ContinuousChatAccountingBusy("The daily memory summary spending limit is reached.");
+	}
 	/** Reserves the physical slot under the shared lock before the provider can be called. */
 	claim(key: string, identity: SemanticUsageLedgerIdentity): string {
 		if (!KEY_PATTERN.test(key)) throw new TypeError("Invalid continuous-chat accounting key.");
@@ -493,19 +509,7 @@ export class ContinuousChatSpendMeter {
 		if (!reference) throw new Error("Memory summary requires a persisted usage ledger identity.");
 		this.reconcile();
 		return this.locked((state) => {
-			if (
-				Object.values(state.circuits).some(
-					(item) =>
-						item.status === "unknown" ||
-						(item.status === "reserved" && (!item.identity || this.owners.judge(item.owner) !== "alive")) ||
-						(item.status === "flight" && (!item.identity || this.owners.judge(item.owner) !== "alive")) ||
-						((item.status === "held" || item.status === "settled") && item.pendingAck),
-				)
-			)
-				throw new ContinuousChatAccountingUnresolved();
-			const limit = this.maxUsdPerDay();
-			if (limit > 0 && state.day === this.today() && state.usd >= limit)
-				throw new ContinuousChatAccountingBusy("The daily memory summary spending limit is reached.");
+			this.assertAccountAdmission(state);
 			if (this.remaining(state, key) > 0) throw new ContinuousChatAccountingBusy();
 			this.ensureRoom(state, key);
 			const token = randomUUID();
@@ -520,9 +524,11 @@ export class ContinuousChatSpendMeter {
 	}
 	/** Fence the exact reservation as potentially sent before crossing the physical transport boundary. */
 	attempt(key: string, token: string): void {
+		this.reconcile();
 		this.locked((state) => {
 			const circuit = state.circuits[key];
 			if (circuit?.status !== "reserved" || circuit.token !== token) throw new ContinuousChatAccountingUnresolved();
+			this.assertAccountAdmission(state);
 			state.circuits[key] = { ...circuit, status: "flight" };
 			this.save(state);
 		});

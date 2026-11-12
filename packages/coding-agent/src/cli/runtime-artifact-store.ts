@@ -138,7 +138,10 @@ export class RuntimeArtifactStore {
 				);
 				links.push(destination);
 			} else if (stat.isDirectory()) {
-				mkdirSync(destination, { recursive: true, mode: stat.mode });
+				// The origin can be a read-only installed release (0555). A snapshot is privately
+				// staged and must still be able to create its descendants, so preserve the source
+				// mode while ensuring the owning process can traverse and populate the copy.
+				mkdirSync(destination, { recursive: true, mode: stat.mode | 0o700 });
 				for (const child of readBoundedDirectoryNamesSync(
 					source,
 					Math.max(1, MAX_RUNTIME_ARTIFACT_ENTRIES - entries),

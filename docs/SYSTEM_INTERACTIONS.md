@@ -599,3 +599,68 @@ combined tree and passed all 136 Vitest and six Node tests, with no skips. Its J
 `/tmp/pi-harness-release-regressions-2026-11-12-catalog-final.json`. The 477-second composed journey
 result above precedes that generated catalog update; exact-tag release CI must verify the final
 combined candidate rather than treating those local results as publication proof.
+
+### Published 0.104.55 and post-release findings
+
+The repaired patch was published at `2026-11-12T06:23:31Z`, tag `v0.104.55`, exact commit
+`f524efb9ab33f0b163df487ef28c2531f6eeff87`. Release workflow `43165615043` and binary workflow
+`43165865098` succeeded. The exact-tag Ubuntu/Windows quality jobs completed their harness-journey,
+provider-regression and dependency-installation steps; native Windows x64/ARM64, Linux benchmark,
+installer, provenance and publication jobs also passed. The nine expected release assets are
+published. JSON evidence is `/tmp/pi-release-v0.104.55-published.json` and
+`/tmp/pi-release-v0.104.55-final-evidence.json`. Runner logs were unavailable through the attempted
+completed-job endpoints. The full workflow log archive subsequently resolved that access gap:
+`/tmp/pi-v0.104.55-release-logs.zip` contains the Ubuntu and Windows runner logs. Each platform
+explicitly reports ten journey tests, 136 harness Vitest tests across 17 files, six Node tests,
+32 AI provider tests and eight existing coding-agent provider tests passing. Extracted evidence is
+`/tmp/pi-v0.104.55-linux-quality-archive.log` and its Windows counterpart.
+
+The downloaded Linux archive matched its published SHA-256
+`cf49905c786ca911b982bb22b88fb29491beae09483c22dbf34776cd68cda83e`.
+Its executable, `/tmp/pi-released-v0.104.55-7v0k9wd0/extracted/pi/pi`, reported `0.104.55` and had
+SHA-256 `62a770944fed00f2812ec43314b73a2b9194d0979278e7cac3b3a040bd4b62ad`.
+The extracted input was made read-only before acceptance. The pinned live report is
+`.git/pi-audits/live-validation/2026-11-12T11-01-26-220Z/report.json`: s0 passed with actual replies
+from both configured providers; s1 failed before the prompt, and the sixteen dependent selected
+scenarios were skipped, not passed. Source-only s10 and private-data s11/s12 remained explicitly
+excluded. This is a failed live gate, not completion. Its preserved task evidence remains at
+`/tmp/pi-live-gate-COX0VX` (the preservation marker prevents automatic deletion by a future run).
+
+**H-20261112-13 — a reserved summary can bypass an intervening shared hold.** The compaction adapter
+reserves before asynchronous request preparation. Reusing that token skipped the ordinary guard,
+and the meter's final reserved-to-flight transition checked only token ownership. A second request
+could establish an unknown charge, pending acknowledgement or reached cap while the first waited,
+and the first could still dispatch. The shared spend owner now applies one account-admission rule
+at both reservation and physical transition, atomically with that transition; cross-store receipt
+reconciliation remains outside the meter lock. Four barrier controls cover a reached cap, unknown
+usage, pending acknowledgement and a healthy dispatch control, including exact undispatched-token
+cleanup and zero refused transport. The focused accounting suite passed 36 tests and independent
+source review found no blocking issue. The narrower concurrent receipt publication interval remains
+within documented outstanding-flight exposure; this is not a prepaid or cross-store atomic cap.
+
+**H-20261112-14 — interactive capture cannot stage a read-only runtime tree.** The controlled
+published-binary startup probe captured `EACCES` creating a nested `bundled-resources/extensions`
+directory inside its runtime generation. `RuntimeArtifactStore` inherited each read-only origin
+directory's mode before creating its children. Provider print-mode calls do not cross this capture
+boundary, explaining why s0 passed. The complete exception is
+`/tmp/pi-v0.104.55-startup-debug-terminal.txt`; the task-owned debug pane was closed after capture.
+The fix belongs to owned snapshot directory construction and must preserve origin contents/modes,
+containment and generation retirement. Its regression owner is included in the release target.
+
+Version 0.104.55 is already published and immutable. These follow-up repairs require a new patch;
+its publication and a complete pinned live run remain required before this goal can finish.
+
+### Follow-up patch verification
+
+The read-only capture repair adds owner access only to privately staged directories. Pool and
+non-pool controls verify nested bytes, traversal/write behavior, launch-target remapping, unchanged
+observed source modes, retirement and pool retention. Exact POSIX permission assertions are
+qualified on Windows while the behavior checks remain active. The owner-focused tests passed
+2/2, and the architect approved the final combined production/test diff without a blocking finding.
+
+The frozen combined regression target passed 142 Vitest tests across 18 files plus six Node tests,
+with no skipped or pending cases. JSON: `/tmp/pi-harness-release-v0.104.56-regressions.json`.
+The full `npm run check` passed, including type checking and unchanged clone coverage:
+2,227/2,257 eligible/owned, 2,128 detection-pass files, zero clones, largest 6,550 lines / 297,557
+bytes. No baseline, sensitivity or file-size ceiling was raised. Exact-tag publication and a new
+pinned live run remain outstanding.

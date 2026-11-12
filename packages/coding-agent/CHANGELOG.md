@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- A summary waiting for preparation now rechecks shared accounting immediately before transport, so another session’s unresolved receipt or exhausted daily limit cannot be bypassed by an earlier reservation.
+- Interactive startup can capture a read-only runtime tree: snapshot directories receive the owner access needed to copy nested resources without changing the installed files or their permissions.
+
 ## [0.104.55] - 2026-11-12
 
 ### Fixed
