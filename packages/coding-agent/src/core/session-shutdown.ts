@@ -6,6 +6,21 @@ export interface SessionShutdownTracker {
 	finish(): Promise<void>;
 }
 
+/** Join every initiated shutdown before running the final lifecycle close, preserving failures from both boundaries. */
+export async function joinShutdownOperations(
+	shutdowns: readonly Promise<unknown>[],
+	finalize: () => void,
+): Promise<void> {
+	const settled = await Promise.allSettled(shutdowns);
+	const failures = settled.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+	try {
+		finalize();
+	} catch (error) {
+		failures.push(error);
+	}
+	if (failures.length > 0) throw new AggregateError(failures, "Session shutdown failed");
+}
+
 /** Aggregates independent session cleanup while preserving failures from required release barriers. */
 export function createSessionShutdownTracker(): SessionShutdownTracker {
 	const shutdowns: Promise<unknown>[] = [];

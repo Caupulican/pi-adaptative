@@ -8,6 +8,7 @@ import { runJourney1HostShutdownPhase } from "./journey-1-host-shutdown.ts";
 import { runJourney1IntentAndBranchingPhase } from "./journey-1-intent-and-branching.ts";
 import { runJourney1KnowledgePhase } from "./journey-1-knowledge.ts";
 import { runJourney1KnowledgeWorkersPhase } from "./journey-1-knowledge-workers.ts";
+import { runMistralResponseJourney } from "./journey-1-mistral-response.ts";
 import { runJourney1OwnerLifecyclePhase } from "./journey-1-owner-lifecycle.ts";
 import { runJourney1PiChatPhase } from "./journey-1-pi-chat.ts";
 import { runJourney1ProactivityPhase } from "./journey-1-proactivity.ts";
@@ -19,6 +20,7 @@ import { runSummaryRecoveryJourney } from "./journey-1-summary-recovery.ts";
 import { runJourney1TastePhase } from "./journey-1-taste.ts";
 import { runJourney1TasteHistoryPhase } from "./journey-1-taste-history.ts";
 import { runJourney1ToolLifecyclePhase } from "./journey-1-tool-lifecycle.ts";
+import { runJourney1WatchCancellationPhase } from "./journey-1-watch-cancellation.ts";
 import { runJourney1WorkerBudgetsPhase } from "./journey-1-worker-budgets.ts";
 import { runJourney1WorkerToolStreamsPhase } from "./journey-1-worker-tool-streams.ts";
 import { runJourney1WriteReservationsPhase } from "./journey-1-write-reservations.ts";
@@ -138,6 +140,7 @@ export async function runJourney1(): Promise<void> {
 		async (world) => {
 			await runSummaryAccountingJourney(world);
 			await runSummaryRecoveryJourney(world);
+			await runMistralResponseJourney(world);
 			await runJourney1OwnerLifecyclePhase(world);
 			await runJourney1FffHostAttributionPhase(world);
 			await runJourney1ToolLifecyclePhase(world);
@@ -152,6 +155,7 @@ export async function runJourney1(): Promise<void> {
 			await runJourney1PiChatPhase(world);
 			await runJourney1ProactivityPhase(world);
 			await runJourney1RoutinesPhase(world);
+			await runJourney1WatchCancellationPhase(world);
 			await runJourney1HostEventsPhase(world);
 			await runJourney1TasteHistoryPhase(world);
 			await runJourney1WorkerToolStreamsPhase(world);

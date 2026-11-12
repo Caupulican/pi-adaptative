@@ -1,3 +1,5 @@
+import { restoreTerminalRawMode } from "@caupulican/pi-tui/terminal-raw-mode";
+
 let held = false;
 
 /**
@@ -17,7 +19,7 @@ export function holdStartupTypeahead(stdin: NodeJS.ReadStream = process.stdin): 
 	if (held) return;
 	held = true;
 	process.once("exit", () => {
-		if (!stdin.destroyed) stdin.setRawMode(false);
+		restoreTerminalRawMode(stdin, false);
 	});
 }
 

@@ -1,4 +1,5 @@
 import {
+	isLegacyHybridConsumption,
 	MAX_PARENT_WAKE_CHARS,
 	PARENT_INPUT_CONSUMED_CUSTOM_TYPE,
 	PARENT_INPUT_SETTLED_CUSTOM_TYPE,
@@ -157,6 +158,49 @@ export async function resolveParentInputConsumption(
 ): Promise<readonly ConsumedParentInput[]> {
 	const consumption = parentInputConsumptionOf(entry) ?? (await retrospective(source, entry, signal));
 	if (!consumption) return [];
+	if (consumption.mode === "turn" && parentInputConsumptionOf(entry)) {
+		const bindingEntry = (await read(source, [consumption.bindingEntryId], signal)).get(consumption.bindingEntryId)!;
+		const binding = parentInputRequestBindingOf(bindingEntry);
+		if (binding?.kind === "owner") {
+			if (!entry.parentId) throw new Error("Legacy parent input projection has no settlement.");
+			const settlementEntry = (await read(source, [entry.parentId], signal)).get(entry.parentId)!;
+			const wake = await retrospective(source, settlementEntry, signal);
+			if (!wake) throw new Error("Legacy parent input projection has no wake proof.");
+			const ownerBindingId = await onlyAncestor(
+				source,
+				settlementEntry.id,
+				{
+					type: "custom",
+					customType: PARENT_NOTE_REQUEST_CUSTOM_TYPE,
+					requestId: consumption.requestId,
+				},
+				signal,
+			);
+			if (ownerBindingId !== bindingEntry.id) throw new Error("Legacy parent note binding is ambiguous.");
+			const note: ParentInputConsumption = {
+				...wake,
+				mode: "next-owner-turn",
+				bindingEntryId: ownerBindingId,
+				authorizationEntryId: binding.ownerEntryId,
+				inputs: binding.inputs,
+			};
+			if (!isLegacyHybridConsumption(entry, settlementEntry, note, wake))
+				throw new Error("Legacy parent input projection does not match the original writer.");
+			const noteInputs = await resolveProjection(entry, note, source, signal, true);
+			const wakeInputs = await resolveProjection(entry, wake, source, signal, false);
+			return [...noteInputs, ...wakeInputs];
+		}
+	}
+	return resolveProjection(entry, consumption, source, signal, false);
+}
+
+async function resolveProjection(
+	entry: SessionEntry,
+	consumption: ParentInputConsumption,
+	source: ParentInputConsumptionSource,
+	signal: AbortSignal | undefined,
+	legacyNote: boolean,
+): Promise<readonly ConsumedParentInput[]> {
 	signal?.throwIfAborted();
 	const entries = await read(
 		source,
@@ -207,7 +251,7 @@ export async function resolveParentInputConsumption(
 			authorization.message.role !== "user" ||
 			binding.ownerEntryId !== authorization.id ||
 			binding.ownerInputId !== authorization.ownerInputId ||
-			entry.parentId !== terminal.id
+			(!legacyNote && entry.parentId !== terminal.id)
 		)
 			throw new Error("Parent note work projection has no matching owner authority.");
 		boundInputs = binding.inputs;

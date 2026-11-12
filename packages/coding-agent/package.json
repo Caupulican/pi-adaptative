@@ -95,7 +95,7 @@
 		"cross-spawn": "7.0.6",
 		"diff": "9.0.0",
 		"effect": "3.22.1",
-		"glob": "13.0.6",
+		"glob": "14.0.2",
 		"highlight.js": "11.12.0",
 		"hosted-git-info": "10.1.1",
 		"htmlparser2": "12.0.0",
@@ -103,11 +103,11 @@
 		"ipaddr.js": "2.5.0",
 		"jiti": "2.7.0",
 		"jscpd": "5.0.15",
-		"minimatch": "10.2.6",
+		"minimatch": "11.0.1",
 		"proper-lockfile": "4.1.2",
 		"turndown": "7.2.4",
 		"typebox": "1.3.25",
-		"undici": "8.10.2",
+		"undici": "8.12.4",
 		"yaml": "2.9.0"
 	},
 	"overrides": {

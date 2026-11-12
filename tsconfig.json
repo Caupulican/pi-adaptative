@@ -68,6 +68,7 @@
 			"@caupulican/pi-adaptative/*": ["./packages/coding-agent/src/*"],
 			"typebox": ["./node_modules/typebox"],
 			"@caupulican/pi-tui": ["./packages/tui/src/index.ts"],
+			"@caupulican/pi-tui/terminal-raw-mode": ["./packages/tui/src/terminal-raw-mode.ts"],
 			"@caupulican/pi-tui/*": ["./packages/tui/src/*"]
 		}
 	},

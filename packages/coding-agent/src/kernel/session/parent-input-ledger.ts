@@ -369,6 +369,38 @@ export interface ParentInputConsumption {
 	readonly inputs: readonly ParentWakeInput[];
 }
 
+/**
+ * Match only the former writer's mixed wake authority and owner binding, on its exact settlement chain.
+ * @deprecated Separate per-mode receipts replace hybrid records; remove after sessions containing mixed-binding receipts are migrated or retired.
+ */
+export function isLegacyHybridConsumption(
+	entry: SessionEntry,
+	settlementEntry: SessionEntry,
+	note: ParentInputConsumption,
+	wake: ParentInputConsumption,
+): boolean {
+	const actual = parentInputConsumptionOf(entry);
+	const settlement = parentWakeSettlementOf(settlementEntry);
+	if (!actual || !settlement || note.mode !== "next-owner-turn" || wake.mode !== "turn") return false;
+	if (
+		entry.parentId !== settlementEntry.id ||
+		settlementEntry.parentId !== wake.terminalEntryId ||
+		note.requestId !== wake.requestId ||
+		note.requestSnapshotEntryId !== wake.requestSnapshotEntryId ||
+		note.terminalEntryId !== wake.terminalEntryId ||
+		note.assistantMessageEntryId !== wake.assistantMessageEntryId ||
+		settlement.requestId !== wake.requestId ||
+		settlement.assistantMessageEntryId !== wake.assistantMessageEntryId ||
+		note.inputs.some((item) =>
+			wake.inputs.some((other) => other.entryId === item.entryId || other.deliveryId === item.deliveryId),
+		)
+	)
+		return false;
+	return (
+		JSON.stringify(actual) === JSON.stringify({ ...wake, bindingEntryId: note.bindingEntryId, inputs: note.inputs })
+	);
+}
+
 /** Reference-only work projection; bodies remain owned by their original accepted inputs. */
 export function parentInputConsumptionOf(entry: SessionEntry): ParentInputConsumption | undefined {
 	if (entry.type !== "custom" || entry.customType !== PARENT_INPUT_CONSUMED_CUSTOM_TYPE) return undefined;
@@ -487,14 +519,20 @@ export class ParentInputIndex {
 	private currentWakeId: string | undefined;
 	private readonly requestWakes = new Map<string, string>();
 	private readonly requestNotes = new Map<string, readonly ParentWakeInput[]>();
-	private readonly requestBindings = new Map<string, { entryId: string; snapshotEntryId: string }>();
+	private readonly requestOwnerBindings = new Map<string, { entryId: string; snapshotEntryId: string }>();
+	private readonly requestWakeBindings = new Map<string, { entryId: string; snapshotEntryId: string }>();
 	private readonly expectedConsumptions = new Map<string, ParentInputConsumption>();
-	private awaitingImmediateConsumption: string | undefined;
+	private awaitingImmediateConsumption: { terminalId: string; mode: ParentInputMode } | undefined;
+	private legacyNote: ParentInputConsumption | undefined;
+	private consumptionKey(terminalId: string, mode: ParentInputMode): string {
+		return `${mode}:${terminalId}`;
+	}
 
 	/** Prepared before the atomic terminal+projection publication; no independent receipt state. */
 	consumption(
 		terminal: SessionEntry,
 		lookup: (id: string) => SessionEntry | undefined,
+		mode: ParentInputMode,
 	): ParentInputConsumption | undefined {
 		if (
 			terminal.type !== "provider_request_terminal" ||
@@ -502,9 +540,14 @@ export class ParentInputIndex {
 			!terminal.assistantMessageEntryId
 		)
 			return undefined;
-		const wakeId = this.requestWakes.get(terminal.requestId);
-		const inputs = this.requestNotes.get(terminal.requestId) ?? (wakeId ? this.wakes.get(wakeId)?.inputs : undefined);
-		const binding = this.requestBindings.get(terminal.requestId);
+		const wakeId = mode === "turn" ? this.requestWakes.get(terminal.requestId) : undefined;
+		const inputs =
+			mode === "turn"
+				? wakeId
+					? this.wakes.get(wakeId)?.inputs
+					: undefined
+				: this.requestNotes.get(terminal.requestId);
+		const binding = (mode === "turn" ? this.requestWakeBindings : this.requestOwnerBindings).get(terminal.requestId);
 		if (!inputs?.length || !binding) return undefined;
 		const answer = lookup(terminal.assistantMessageEntryId);
 		if (
@@ -525,7 +568,7 @@ export class ParentInputIndex {
 		if (!authorizationEntryId) throw new Error("Parent consumption authority is missing.");
 		return {
 			version: 1,
-			mode: wakeId ? "turn" : "next-owner-turn",
+			mode,
 			requestId: terminal.requestId,
 			requestSnapshotEntryId: binding.snapshotEntryId,
 			bindingEntryId: binding.entryId,
@@ -538,21 +581,40 @@ export class ParentInputIndex {
 
 	wakeConsumption(wakeId: string): ParentInputConsumption | undefined {
 		const terminalId = this.wakes.get(wakeId)?.completed?.terminalEntryId;
-		return terminalId ? this.expectedConsumptions.get(terminalId) : undefined;
+		return terminalId ? this.expectedConsumptions.get(this.consumptionKey(terminalId, "turn")) : undefined;
 	}
 
 	apply(entry: SessionEntry, lookup: (id: string) => SessionEntry | undefined): void {
 		const consumption = parentInputConsumptionOf(entry);
-		if (this.awaitingImmediateConsumption && consumption?.terminalEntryId !== this.awaitingImmediateConsumption)
-			this.expectedConsumptions.delete(this.awaitingImmediateConsumption);
+		if (this.awaitingImmediateConsumption) {
+			const { terminalId, mode } = this.awaitingImmediateConsumption;
+			if (consumption?.terminalEntryId !== terminalId || consumption.mode !== mode) {
+				const key = this.consumptionKey(terminalId, mode);
+				const settlement = parentWakeSettlementOf(entry);
+				this.legacyNote =
+					mode === "next-owner-turn" && settlement && entry.parentId === terminalId
+						? this.expectedConsumptions.get(key)
+						: undefined;
+				this.expectedConsumptions.delete(key);
+			}
+		}
 		this.awaitingImmediateConsumption = undefined;
 		if (consumption) {
-			const expected = this.expectedConsumptions.get(consumption.terminalEntryId);
-			if (!expected || JSON.stringify(expected) !== JSON.stringify(consumption))
+			const key = this.consumptionKey(consumption.terminalEntryId, consumption.mode);
+			const expected = this.expectedConsumptions.get(key);
+			const parent = entry.parentId ? lookup(entry.parentId) : undefined;
+			const legacy = !!(
+				expected &&
+				parent &&
+				this.legacyNote &&
+				isLegacyHybridConsumption(entry, parent, this.legacyNote, expected)
+			);
+			if (!expected || (!legacy && JSON.stringify(expected) !== JSON.stringify(consumption)))
 				throw new Error("Consumed parent note projection has no exact terminal proof.");
 			if (consumption.mode === "turn" && this.openWake())
 				throw new Error("Parent wake must settle before its work projection.");
-			this.expectedConsumptions.delete(consumption.terminalEntryId);
+			this.expectedConsumptions.delete(key);
+			this.legacyNote = undefined;
 			return;
 		}
 		const skip = parentInputSkipOf(entry);
@@ -626,7 +688,7 @@ export class ParentInputIndex {
 				if (chars > MAX_PARENT_WAKE_CHARS) throw new Error("Parent note request exceeds its bounded payload.");
 			}
 			this.requestNotes.set(requestBinding.requestId, requestBinding.inputs);
-			this.requestBindings.set(requestBinding.requestId, {
+			this.requestOwnerBindings.set(requestBinding.requestId, {
 				entryId: entry.id,
 				snapshotEntryId: this.currentRequestEntryId!,
 			});
@@ -640,12 +702,13 @@ export class ParentInputIndex {
 			)
 				throw new Error("Parent wake request binding requires inspection.");
 			this.requestWakes.set(requestBinding.requestId, requestBinding.wakeId);
-			this.requestBindings.set(requestBinding.requestId, {
+			this.requestWakeBindings.set(requestBinding.requestId, {
 				entryId: entry.id,
 				snapshotEntryId: this.currentRequestEntryId!,
 			});
 			const current = this.wakes.get(requestBinding.wakeId)!;
-			if (current.completed) this.expectedConsumptions.delete(current.completed.terminalEntryId);
+			if (current.completed)
+				this.expectedConsumptions.delete(this.consumptionKey(current.completed.terminalEntryId, "turn"));
 			const { completed: _completed, ...pendingWake } = current;
 			this.wakes.set(requestBinding.wakeId, pendingWake);
 		}
@@ -668,18 +731,19 @@ export class ParentInputIndex {
 					...current,
 					completed: { requestId: entry.requestId, assistantMessageEntryId: answer.id, terminalEntryId: entry.id },
 				});
-			const consumed = this.consumption(entry, lookup);
-			if (consumed) {
-				this.expectedConsumptions.set(entry.id, consumed);
-				if (consumed.mode === "next-owner-turn") {
-					for (const input of consumed.inputs) this.pending.delete(input.deliveryId);
-					this.awaitingImmediateConsumption = entry.id;
-				}
+			const note = this.consumption(entry, lookup, "next-owner-turn");
+			const wake = this.consumption(entry, lookup, "turn");
+			if (wake) this.expectedConsumptions.set(this.consumptionKey(entry.id, "turn"), wake);
+			if (note) {
+				this.expectedConsumptions.set(this.consumptionKey(entry.id, "next-owner-turn"), note);
+				for (const input of note.inputs) this.pending.delete(input.deliveryId);
+				this.awaitingImmediateConsumption = { terminalId: entry.id, mode: "next-owner-turn" };
 			}
 		}
 		if (entry.type === "provider_request_terminal") {
 			this.requestNotes.delete(entry.requestId);
-			this.requestBindings.delete(entry.requestId);
+			this.requestOwnerBindings.delete(entry.requestId);
+			this.requestWakeBindings.delete(entry.requestId);
 		}
 		const settlement = parentWakeSettlementOf(entry);
 		if (settlement) {
@@ -693,7 +757,7 @@ export class ParentInputIndex {
 			)
 				throw new Error("Parent wake settlement lacks matching provider evidence.");
 			for (const item of current.inputs) this.pending.delete(item.deliveryId);
-			this.awaitingImmediateConsumption = current.completed.terminalEntryId;
+			this.awaitingImmediateConsumption = { terminalId: current.completed.terminalEntryId, mode: "turn" };
 			this.settled.add(current.wakeId);
 			this.currentWakeId = undefined;
 			this.currentRequestId = undefined;

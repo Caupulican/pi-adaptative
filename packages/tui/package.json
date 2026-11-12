@@ -11,6 +11,11 @@
 			"pi-source": "./src/index.ts",
 			"import": "./dist/index.js"
 		},
+		"./terminal-raw-mode": {
+			"pi-source": "./src/terminal-raw-mode.ts",
+			"types": "./dist/terminal-raw-mode.d.ts",
+			"import": "./dist/terminal-raw-mode.js"
+		},
 		"./dist/*": "./dist/*",
 		"./package.json": "./package.json"
 	},

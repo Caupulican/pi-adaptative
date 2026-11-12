@@ -43,6 +43,7 @@ import { fileURLToPath } from "node:url";
 import { args, flag, selectLiveScenarios } from "./live-args.mjs";
 import { assertLiveBinaryUnchanged, pinLiveBinary } from "./lib/live-binary-identity.mjs";
 import { assertSlugifyEdit, createNativeInputDriver } from "./lib/live-native-driver.mjs";
+import { detachedProcessEnd, fatalProcessRecordProblems } from "./lib/live-process-evidence.mjs";
 
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const MODEL_A = flag("model-a", "xai/grok-4.7-build-fast");
@@ -128,6 +129,7 @@ const AGENT_DIRS = [
 	AGENT,
 	join(RUN, "remote-agent"),
 	join(RUN, "default-agent"),
+	join(RUN, "shutdown-agent"),
 	...QUOTA_PERCENTS.map((percent) => join(RUN, `quota-${percent}`, "agent")),
 ];
 const COMMON_DIR = execFileSync("git", ["rev-parse", "--git-common-dir"], { cwd: REPO, encoding: "utf8" }).trim();
@@ -311,7 +313,6 @@ const settleRootPrompt = (input, agentDir, requireWorker = false) =>
 	nativeInput.settleRootPrompt(input, agentDir, requireWorker);
 /** The day's harness log and its rotated copy: `harness-log.ts` renames a full file to `<name>.1` and writes on. */
 const HARNESS_LOG_FILE = /^harness-.*\.jsonl(\.1)?$/;
-const MAX_CRASH_RECORD_BYTES = 64_000; // crash-record.ts retains at most 16,000 Unicode characters per record.
 /**
  * Undeclared state transitions (`kernel/machine-spec.ts`: category `machine`, level warn) logged at or after this run
  * started, in every agent directory the run created.
@@ -332,70 +333,11 @@ const undeclaredProblem = () => {
 		? `${found.length} undeclared state transition(s): ${found.slice(0, 3).map(describeTransition).join("; ")}`
 		: undefined;
 };
-/** Fatal process records are `.txt`; routine exits have their own `.routine.txt` class and are not failures. */
-const crashRecordProblems = () => {
-	const problems = [];
-	for (const dir of AGENT_DIRS) {
-		const root = join(dir, "state", "crashes");
-		const label = relative(RUN, dir) || "agent";
-		let names;
-		try {
-			names = readdirSync(root);
-		} catch (error) {
-			if (error?.code === "ENOENT") continue;
-			problems.push(`${label}: crash-record directory is unreadable`);
-			continue;
-		}
-		const records = names.filter((name) => name.endsWith(".txt") && !name.endsWith(".routine.txt"));
-		if (records.length > 100) {
-			problems.push(`${label}: crash-record count exceeds the 100-record retention bound`);
-			continue;
-		}
-		for (const name of records) {
-			const match = /^(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z-(\d+)-(\d+)\.txt$/.exec(name);
-			if (!match) {
-				problems.push(`${label}: unclassifiable fatal crash record ${name}`);
-				continue;
-			}
-			const at = Date.parse(`${match[1]}:${match[2]}:${match[3]}.${match[4]}Z`);
-			const pid = Number(match[5]);
-			const sequence = Number(match[6]);
-			let record;
-			try {
-				if (statSync(join(root, name)).size > MAX_CRASH_RECORD_BYTES) {
-					problems.push(`${label}: fatal crash record ${name} exceeds the size bound`);
-					continue;
-				}
-				record = readFileSync(join(root, name), "utf8");
-			} catch {
-				problems.push(`${label}: fatal crash record ${name} is unreadable`);
-				continue;
-			}
-			const lines = record.split(/\r?\n/);
-			const recordPid = /^pid (\d+)$/.exec(lines[1] ?? "");
-			const recordAt = /^at (.+)$/.exec(lines[2] ?? "");
-			const bodyAt = recordAt ? Date.parse(recordAt[1]) : Number.NaN;
-			if (
-				!lines[0]?.trim() ||
-				!Number.isFinite(at) ||
-				!Number.isSafeInteger(pid) ||
-				pid < 1 ||
-				!Number.isSafeInteger(sequence) ||
-				sequence < 1 ||
-				!recordPid ||
-				Number(recordPid[1]) !== pid ||
-				!recordAt ||
-				!Number.isFinite(bodyAt) ||
-				Math.abs(bodyAt - at) > 1000
-			) {
-				problems.push(`${label}: malformed fatal crash record ${name}`);
-				continue;
-			}
-			if (at >= RUN_STARTED_MS) problems.push(`${label}: fatal process crash at ${new Date(at).toISOString()} (pid ${pid})`);
-		}
-	}
-	return problems;
-};
+/** Every participating agent uses the same bounded process-end evidence owner. */
+const crashRecordProblems = () => fatalProcessRecordProblems(
+	AGENT_DIRS.map((directory) => ({ directory, label: relative(RUN, directory) || "agent" })),
+	RUN_STARTED_MS,
+);
 const claims = () =>
 	entries()
 		.filter((e) => e.type === "custom" && e.customType === "worker_claim")
@@ -1131,9 +1073,9 @@ const SCENARIOS = [
 		if (stuck.length + stuckBots.length > 0) problems.push("a worker lane is still awaiting its parent after everything finished");
 		if (problems.length > 0) throw new Error(problems.join("; "));
 		if (network.length > 0) throw inconclusive(`${network.length} worker run(s) ended on a provider network failure, which says nothing about the harness`);
-		return "no failed run, no receipt rejection, no bounced routine call, no stuck lane, no undeclared state transition";
+		return "main-agent run, receipt, routine and lane checks passed; no undeclared transition or fatal crash across participating agents";
 	}),
-	// Last on purpose: both ends restart, which replaces this session's transcript for any scenario that reads it.
+	// After transcript-dependent checks: both linked ends restart from their own retained records.
 	scenario("s44", "the join holds across a restart of both ends: hub and joiner each come back linked from the records they kept", async () => {
 		if (!state.remoteAgent || !state.second) return { skipped: "s14 did not link a second machine" };
 		await type(state.second, "/quit");
@@ -1159,6 +1101,37 @@ const SCENARIOS = [
 		const crashes = crashRecordProblems();
 		if (crashes.length > 0) throw new Error(`after the restart, ${crashes.join("; ")}`);
 		return "the hub and the machine restarted and the join held from their own records, with no new token";
+	}),
+	scenario("s45", "a completed owner turn survives terminal detachment without a shutdown crash", async () => {
+		const agentDir = join(RUN, "shutdown-agent");
+		mkdirSync(agentDir, { recursive: true });
+		copyFileSync(join(AGENT, "auth.json"), join(agentDir, "auth.json"));
+		chmodSync(join(agentDir, "auth.json"), 0o600);
+		copyFileSync(join(AGENT, "settings.json"), join(agentDir, "settings.json"));
+		const pane = openPane(state.main);
+		launch(pane, SANDBOX, "", agentDir);
+		await waitFor("the shutdown journey's native prompt", () => /Ask anything/.test(screen(pane, 60)), 90_000, 1000);
+		const input = await submitRootPrompt(pane, "Reply with only READY.");
+		const settled = await settleRootPrompt(input, agentDir);
+		const runtime = settled.runtime;
+		if (!Number.isSafeInteger(runtime?.pid) || runtime.pid <= 1 || runtime.pid === process.pid || runtime.sessionId !== input.sessionId)
+			throw new Error("The settled turn has no identified native runtime");
+		process.kill(runtime.pid, 0);
+		const detachedAt = Date.now();
+		// Close the actual PTY. A graceful quit or a kill signal would bypass the detached-device restoration path.
+		herdr("pane", "close", pane);
+		panes.splice(panes.indexOf(pane), 1);
+		await waitFor("the detached native runtime to exit", () => {
+			try { process.kill(runtime.pid, 0); return false; }
+			catch (error) { if (error.code === "ESRCH") return true; throw error; }
+		}, 30_000, 250);
+		const ended = await waitFor("the identified runtime's declared terminal end", () => detachedProcessEnd(agentDir, runtime.pid, detachedAt), 15_000, 250);
+		if (!jsonl(input.sessionFile).some((entry) => entry.id === settled.finalEntryId && entry.message?.role === "assistant"))
+			throw new Error("The completed answer was lost during terminal detachment");
+		const crashes = crashRecordProblems();
+		if (crashes.length) throw new Error(`after terminal detachment, ${crashes.join("; ")}`);
+		writeFileSync(join(REPORT_DIR, "shutdown-journey.json"), `${JSON.stringify({ pane, runtime, inputEntryId: input.entryId, answerEntryId: settled.finalEntryId, detachedAt, ended }, null, 2)}\n`);
+		return `canonical owner answer persisted; runtime ${runtime.pid} exited as ${ended.reason} after its PTY closed; no fatal crash record`;
 	}),
 ];
 

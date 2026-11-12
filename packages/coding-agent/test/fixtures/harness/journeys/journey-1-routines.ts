@@ -53,7 +53,14 @@ import {
 import { calls, createBarrier, HARNESS_PROVIDER, type ScriptedRequest, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, SCRIPTED_TRACKS, withDeadline } from "../session-fixture.ts";
 import { runJourney1AwayService } from "./journey-1-away-service.ts";
-import { ICM_INTAKE_JUDGMENTS, icmContinuousSettings, knowledgeJudgment, latestBatchResults } from "./shared.ts";
+import { verifyParentInputOverlap } from "./journey-1-parent-input-overlap.ts";
+import {
+	ICM_INTAKE_JUDGMENTS,
+	icmContinuousSettings,
+	knowledgeJudgment,
+	LIMITS_PATH,
+	latestBatchResults,
+} from "./shared.ts";
 
 /** Saved intent, native execution, daemon due-time ownership and one durable parent delivery. */
 export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<void> {
@@ -1440,10 +1447,56 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 				);
 				const settled = wakesSettled(parentInputs().length + 1);
 				const running = command(label, { action: "run", routineId: failingId, expectedRevision: failingRevision });
-				world.provider.enqueue("root", text(`${label}-parent`, `Failing run ${run} is reported.`));
-				await running;
+				const wakeEntered = createBarrier();
+				const wakeRelease = createBarrier();
+				if (run === 5) {
+					world.provider.enqueue(
+						"root",
+						{
+							...calls("h25-wake-read", [
+								{ id: "h25-wake-read", name: "read", arguments: { path: LIMITS_PATH } },
+							]),
+							check: (request) => {
+								expect(JSON.stringify(request.context.messages)).toContain("routine-failing-5 blocked.");
+								wakeEntered.release();
+							},
+							gate: wakeRelease.promise,
+						},
+						{
+							...text("h25-wake-owner-answer", "The failed routine and the owner's request are noted."),
+							check: (request) => {
+								const input = JSON.stringify(request.context.messages);
+								expect(input).toContain("routine-failing-5 blocked.");
+								expect(input).toContain("Routine failing-review was paused");
+								expect(input).toContain("Please acknowledge the pause and the failed result.");
+							},
+						},
+					);
+				} else world.provider.enqueue("root", text(`${label}-parent`, `Failing run ${run} is reported.`));
+				try {
+					await running;
+					if (run === 5) {
+						await withDeadline(world.trace, "H25 real routine wake request is held", wakeEntered.promise);
+						await withDeadline(world.trace, "H25 real paused-routine notice is saved", pauseNoticed.promise);
+						expect(
+							root.sessionManager
+								.getPendingParentInputs("next-owner-turn")
+								.some((item) => item.metadata.mode === "next-owner-turn"),
+						).toBe(true);
+						world.systemOne.enterPhase("h25-authenticated-steer", ICM_INTAKE_JUDGMENTS);
+						const steered = await withDeadline(
+							world.trace,
+							"H25 owner steer",
+							root.session.steer("Please acknowledge the pause and the failed result."),
+						);
+						expect(steered.ended).toBeUndefined();
+					}
+				} finally {
+					wakeRelease.release();
+				}
 				await withDeadline(world.trace, label, settled);
 				await withDeadline(world.trace, `${label} turn ended`, root.session.agent.waitForIdle());
+				if (run === 5) await verifyParentInputOverlap(world, root.sessionManager, agentDir);
 				const failing = store().getRoutine(failingId)!;
 				if (run < 5) {
 					expect(failing.enabled, `${label}: fewer than three failures in a row keep the routine running`).toBe(
@@ -1494,6 +1547,34 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 			schedule: { kind: "interval", intervalMs: 600_000, readyBy: true, readyLeadMs },
 			profileId: profile.profileId,
 		});
+		const nextOwner = root.sessionManager
+			.getEntries()
+			.findLast(
+				(entry) =>
+					entry.type === "message" &&
+					entry.message.role === "user" &&
+					(typeof entry.message.content === "string"
+						? entry.message.content === "Apply the routine-ready-create routine command."
+						: entry.message.content.some(
+								(part) =>
+									part.type === "text" && part.text === "Apply the routine-ready-create routine command.",
+							)),
+			);
+		if (!nextOwner) throw new Error("H25 next owner prompt was not persisted.");
+		const nextRequest = root.sessionManager
+			.getEntries()
+			.findLast((entry) => entry.type === "request_snapshot" && entry.messageEntryIds.includes(nextOwner.id));
+		if (nextRequest?.type !== "request_snapshot") throw new Error("H25 next owner prompt was not admitted.");
+		expect(
+			root.sessionManager
+				.getEntries()
+				.some(
+					(entry) =>
+						entry.type === "provider_request_terminal" &&
+						entry.requestId === nextRequest.requestId &&
+						entry.outcome === "completed",
+				),
+		).toBe(true);
 		await command("routine-ready-control-create", {
 			action: "create",
 			routineId: readyControlId,

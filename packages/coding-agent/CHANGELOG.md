@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Fixed
+
+- A provider request carrying both detached background input and owner notes now retains independent consumption proofs. Existing receipts produced by the former mixed-binding bug recover only from their exact canonical evidence, so later owner input can resume without dropping either delivery.
+- Terminal raw-mode restoration tolerates a detached device during shutdown while preserving errors from an attached terminal. The worker report schema now states the working-directory basis for relative changed-file paths; receipt and path verification remain strict.
+- Updated the runtime HTTP client and filesystem matcher dependencies, preserving separate compatible dependency resolutions and enforcing the required versions through the security gate.
+- Routine shutdown waits for active watch observations as well as scheduler and intake work, including observations whose watcher could not be armed. Failed watcher setup closes partial handles and prevents callbacks from rearming the removed watch.
+
+### Changed
+
+- Composed journeys cover real Mistral transport failures, overlapping routine wakes and owner steering, legacy receipt recovery, replay without duplicate memory ingestion, and cancellation during glob filesystem enumeration. Native acceptance includes an identified runtime's abrupt terminal closure and its recorded shutdown outcome.
+
 ## [0.104.58] - 2026-11-12
 
 ### Fixed

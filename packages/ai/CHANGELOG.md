@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Mistral responses are bounded before SDK buffering and validation, with per-frame SSE limits, bounded non-streaming bodies, backpressure, and cancellation. HTTP status and retry headers survive limit failures. Mistral resolves the patched Zod v4 dependency independently from consumers requiring Zod v3.
+
 ## [0.104.58] - 2026-11-12
 
 ## [0.104.57] - 2026-11-12

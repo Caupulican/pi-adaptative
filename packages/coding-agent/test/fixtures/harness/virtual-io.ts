@@ -63,7 +63,8 @@ export type IoFaultKind =
 	| "open"
 	| "stat"
 	| "readdir"
-	| "mkdir";
+	| "mkdir"
+	| "watch";
 
 export interface IoFault {
 	readonly name: string;
@@ -91,14 +92,14 @@ export interface IoDenial {
 /** A one-shot synchronous observation inside the matching operation: it throws nothing and changes nothing. */
 export interface IoObserver {
 	readonly name: string;
-	readonly kind: IoFaultKind;
+	readonly kind: IoFaultKind | "readdir.callback";
 	readonly phase?: "before" | "after";
 	readonly matches: (operation: IoOperation, data?: Buffer) => boolean;
 	readonly onMatch: (operation: IoOperation, data?: Buffer) => void;
 }
 
 /** The asynchronous operations a scenario can hold at their call: the operation runs, against the state then current, on release. */
-export type IoHoldKind = "readFile" | "mkdir" | "writeFile" | "rename";
+export type IoHoldKind = "readFile" | "readdir" | "mkdir" | "writeFile" | "rename";
 
 export interface IoHold {
 	readonly name: string;
@@ -134,6 +135,7 @@ const FAULT_SYSCALL: Readonly<Record<IoFaultKind, string | undefined>> = {
 	stat: "stat",
 	readdir: "scandir",
 	mkdir: "mkdir",
+	watch: undefined,
 };
 
 const MAX_PENDING_HOLDS = 8;
@@ -905,6 +907,7 @@ export class VirtualFileSystem {
 				};
 			});
 		// A directory syscall has captured its entries before another process's boundary callback can change the namespace.
+		this.log({ kind: "readdir", path });
 		this.observe({ kind: "readdir", path }, "after");
 		return entries;
 	}
@@ -1155,6 +1158,13 @@ export class VirtualFileSystem {
 		}));
 	}
 
+	/** Deliver an error through an existing watched handle, preserving the real listener and close lifecycle. */
+	emitWatcherError(id: number, error: Error): void {
+		const watcher = [...this.watchers].find((record) => record.id === id);
+		if (!watcher) throw new Error(`No active virtual watcher ${id}`);
+		watcher.emitter.emit("error", error);
+	}
+
 	/**
 	 * External transport cutoff ONLY after a scenario proves this exact observer was retained by a failed
 	 * native cleanup. It does not invoke/repair the native disposer or remove any native fence.
@@ -1200,7 +1210,14 @@ export class VirtualFileSystem {
 					this.mkdirSync(path, options),
 				);
 			},
-			readdir: (path: unknown, options?: unknown) => this.settled(() => this.readdirSync(path, options)),
+			readdir: (path: unknown, options?: unknown) => {
+				const target = this.holdPath(path);
+				return this.whenReleased(
+					"readdir",
+					target === undefined ? undefined : { kind: "readdir", path: target },
+					() => this.readdirSync(path, options),
+				);
+			},
 			stat: (path: unknown, options?: unknown) => this.settled(() => this.statSync(path, options)),
 			lstat: (path: unknown, options?: unknown) =>
 				this.settled(() => this.statSync(path, { ...(options as { bigint?: boolean } | undefined), lstat: true })),
@@ -1317,6 +1334,7 @@ export class VirtualFileSystem {
 			},
 			watch: (value: unknown, options?: unknown, listener?: unknown) => {
 				const path = this.realpathSync(value);
+				this.fault({ kind: "watch", path }, "before");
 				if (this.watchers.size >= 256) throw new Error("Virtual watcher admission exceeds bounded capacity");
 				const emitter = new EventEmitter();
 				const record = {
@@ -1344,11 +1362,17 @@ export class VirtualFileSystem {
 			api[name] = (...arguments_: unknown[]) => {
 				const callback = arguments_.pop();
 				if (typeof callback !== "function") throw new TypeError(`fs.${name} requires a callback`);
+				const callbackPath = name === "readdir" ? this.holdPath(arguments_[0]) : undefined;
 				Promise.resolve()
 					.then(() => operation(...arguments_))
 					.then(
 						(result) => {
-							callback(null, result);
+							try {
+								callback(null, result);
+							} finally {
+								if (callbackPath !== undefined)
+									this.observe({ kind: "readdir.callback", path: callbackPath }, "after");
+							}
 						},
 						(error) => {
 							callback(error);

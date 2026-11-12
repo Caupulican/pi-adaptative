@@ -191,17 +191,12 @@ import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController } from "./research/research-lane-controller.ts";
 import { AwayService } from "./routines/away-service.ts";
-import type { RoutineIntake, RoutineIntakeStatus } from "./routines/routine-intake.ts";
-import { RoutineRuntimeAssembly } from "./routines/routine-runtime-assembly.ts";
-import {
-	type RoutineSchedulerController,
-	routineGithubInterests,
-	routineHostEventFeed,
-} from "./routines/routine-scheduler-controller.ts";
-import type { RoutineSessionController } from "./routines/routine-session-controller.ts";
+import type { RoutineIntakeStatus } from "./routines/routine-intake.ts";
+import { type RoutineRuntime, RoutineRuntimeAssembly } from "./routines/routine-runtime-assembly.ts";
+import { routineGithubInterests, routineHostEventFeed } from "./routines/routine-scheduler-controller.ts";
 import { parseRoutineToolInput, type RoutineToolView } from "./routines/routine-tool.ts";
-import type { RoutineWatchMonitor } from "./routines/routine-watch-monitor.ts";
 import { getSessionRole } from "./session-role.ts";
+import { joinShutdownOperations } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
 import { createBotToolDefinition } from "./tools/bot.ts";
 import { createPlanToolDefinition } from "./tools/plan.ts";
@@ -256,14 +251,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Leaf already scanned with no persisted active managed lane. A new leaf rescans. */
 	private _managedLaneAbsenceLeafId: string | null | undefined;
 	private _botTeamStore: PersistentBotTeamStore | undefined;
-	private _routines:
-		| {
-				scheduler: RoutineSchedulerController;
-				session: RoutineSessionController;
-				intake: RoutineIntake;
-				watches: RoutineWatchMonitor;
-		  }
-		| undefined;
+	private _routines: RoutineRuntime | undefined;
 	private routinesStarted = false;
 	private _channelsHostedByDaemon = false;
 	/** The routine revision the daemon was last ensured for: a save moves it, the store's other writes do not. */
@@ -1045,14 +1033,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._leaderRouteOff = undefined;
 			this._leaders?.dispose();
 		});
-		this._runTeardownStep("stop routine watches", () => this._routines?.watches.dispose());
 		let routineShutdown = Promise.resolve();
-		this._runTeardownStep("stop routine scheduler", () => {
-			routineShutdown = this._routines?.scheduler.close() ?? Promise.resolve();
-		});
-		let intakeShutdown = Promise.resolve();
-		this._runTeardownStep("stop routine intake", () => {
-			intakeShutdown = this._routines?.intake.stop() ?? Promise.resolve();
+		this._runTeardownStep("stop routine runtime", () => {
+			routineShutdown = this._routines?.stop() ?? Promise.resolve();
 		});
 		let actAheadShutdown = Promise.resolve();
 		this._runTeardownStep("stop acting ahead", () => {
@@ -1078,9 +1061,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		});
 		// Disposal completes only after the routine and intake passes and their deliveries joined, not merely after they
 		// were told to stop: intake awaits every notice it starts, and stopping aborts a notice still waiting to be saved.
-		return Promise.all([workerShutdown, routineShutdown, intakeShutdown, actAheadShutdown, awayServiceShutdown])
-			.finally(() => this._workerLifecycle?.closeSession())
-			.then(() => undefined);
+		return joinShutdownOperations([workerShutdown, routineShutdown, actAheadShutdown, awayServiceShutdown], () =>
+			this._workerLifecycle?.closeSession(),
+		);
 	}
 
 	private _runTeardownStep(label: string, step: () => void): void {

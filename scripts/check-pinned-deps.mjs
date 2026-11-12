@@ -1,6 +1,9 @@
 import { readdirSync, readFileSync } from "node:fs";
 import { join } from "node:path";
-import { validateRequiredSecurityOverrides } from "./lib/dependency-security-policy.mjs";
+import {
+	validateRequiredSecurityOverrides,
+	validateScopedConsumerSecurityOverrides,
+} from "./lib/dependency-security-policy.mjs";
 
 const dependencySections = ["dependencies", "devDependencies", "optionalDependencies"];
 const exactVersionPattern = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z.-]+)?(?:\+[0-9A-Za-z.-]+)?$/;
@@ -39,14 +42,26 @@ function getVersionSpecifier(specifier) {
 }
 
 const failures = [];
+const rootPackage = JSON.parse(readFileSync("package.json", "utf8"));
+const rootLockfile = JSON.parse(readFileSync("package-lock.json", "utf8"));
 
 collectPackageJsonFiles(".");
 
 failures.push(
 	...validateRequiredSecurityOverrides(
-		JSON.parse(readFileSync("package.json", "utf8")),
-		JSON.parse(readFileSync("package-lock.json", "utf8")),
+		rootPackage,
+		rootLockfile,
 		JSON.parse(readFileSync("packages/coding-agent/package.json", "utf8")),
+	),
+);
+failures.push(
+	...validateScopedConsumerSecurityOverrides(
+		rootPackage,
+		rootLockfile,
+		{
+			mistral: JSON.parse(readFileSync("packages/ai/package.json", "utf8")),
+			sandbox: JSON.parse(readFileSync("packages/coding-agent/examples/extensions/sandbox/package.json", "utf8")),
+		},
 	),
 );
 

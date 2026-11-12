@@ -109,12 +109,17 @@ function watchesOf(
 export class RoutineWatchMonitor {
 	private readonly deps: RoutineWatchMonitorDeps;
 	private readonly armed = new Map<string, ArmedWatch>();
+	/** Watchers retained after arming fails to close, so shutdown still owns their final cleanup attempt. */
+	private readonly retiredWatchers = new Set<ArmedWatch>();
 	/** Keys whose arming failed; they are tried again only when the routine's condition or incarnation changes. */
 	private readonly skipped = new Map<string, string>();
 	/** The reason last warned for each routine's failing submission; a reason warns again only after a success or a change. */
 	private readonly faults = new Map<string, string>();
+	/** Every sampling pass is retained until its sampler continuation settles, including a watch removed after arm fails. */
+	private readonly observations = new Map<ArmedWatch, Set<Promise<void>>>();
 	private unsubscribe: (() => void) | undefined;
 	private disposed = false;
+	private disposeCompletion: Promise<void> | undefined;
 
 	constructor(deps: RoutineWatchMonitorDeps) {
 		this.deps = deps;
@@ -126,13 +131,35 @@ export class RoutineWatchMonitor {
 		this.sync();
 	}
 
-	dispose(): void {
-		if (this.disposed) return;
+	dispose(): Promise<void> {
+		if (this.disposeCompletion) return this.disposeCompletion;
 		this.disposed = true;
-		this.unsubscribe?.();
+		let complete!: () => void;
+		let fail!: (error: unknown) => void;
+		this.disposeCompletion = new Promise<void>((resolve, reject) => {
+			complete = resolve;
+			fail = reject;
+		});
+		const failures: unknown[] = [];
+		const attempt = (operation: () => void): void => {
+			try {
+				operation();
+			} catch (error) {
+				failures.push(error);
+			}
+		};
+		attempt(() => this.unsubscribe?.());
 		this.unsubscribe = undefined;
-		for (const watch of [...this.armed.values()]) this.disarm(watch);
+		for (const watch of new Set([...this.armed.values(), ...this.retiredWatchers, ...this.observations.keys()]))
+			failures.push(...this.release(watch));
 		this.armed.clear();
+		const observations = [...this.observations.values()].flatMap((active) => [...active]);
+		void Promise.allSettled(observations).then((settled) => {
+			failures.push(...settled.flatMap((entry) => (entry.status === "rejected" ? [entry.reason] : [])));
+			if (failures.length === 0) complete();
+			else fail(new AggregateError(failures, "Routine watch disposal or observation failed during shutdown"));
+		});
+		return this.disposeCompletion;
 	}
 
 	private get active(): boolean {
@@ -201,6 +228,9 @@ export class RoutineWatchMonitor {
 			// Without its file-system events the watch still takes its first observation, which sets the baseline or fires
 			// for what changed while the session was closed.
 			this.armed.delete(routine.routineId);
+			const closeFailures = this.closeWatchers(watch);
+			if (closeFailures.length > 0)
+				this.warn(new AggregateError(closeFailures, "Routine watch could not close partially armed watchers"));
 			this.skip(routine.routineId, key, condition, "watcher-failed", error);
 			void this.observe(watch);
 			return;
@@ -236,15 +266,17 @@ export class RoutineWatchMonitor {
 			);
 			watcher.on("error", (error) => {
 				this.disarm(watch);
-				this.armed.delete(watch.routineId);
-				this.skip(watch.routineId, watch.key, watch.condition, "watcher-failed", error);
+				if (this.armed.get(watch.routineId) === watch) {
+					this.armed.delete(watch.routineId);
+					if (this.active) this.skip(watch.routineId, watch.key, watch.condition, "watcher-failed", error);
+				}
 			});
 			watch.watchers.set(key, watcher);
 		}
 	}
 
 	private debounce(watch: ArmedWatch): void {
-		if (!this.active || watch.abort.signal.aborted) return;
+		if (!this.active || watch.abort.signal.aborted || this.armed.get(watch.routineId) !== watch) return;
 		if (watch.timer !== undefined) this.deps.timers.clearTimeout(watch.timer);
 		watch.timer = this.deps.timers.setTimeout(() => {
 			watch.timer = undefined;
@@ -259,12 +291,29 @@ export class RoutineWatchMonitor {
 	}
 
 	/** One observation, then the next on the cadence of a timer-based condition (never overlapping the last). */
-	private async observe(watch: ArmedWatch): Promise<void> {
+	private observe(watch: ArmedWatch): Promise<void> {
 		if (watch.running) {
 			watch.again = true;
-			return;
+			return Promise.resolve();
 		}
 		watch.running = true;
+		const observation = this.observeRunning(watch);
+		const active = this.observations.get(watch) ?? new Set<Promise<void>>();
+		active.add(observation);
+		this.observations.set(watch, active);
+		void observation.then(
+			() => this.forgetObservation(watch, active, observation),
+			() => this.forgetObservation(watch, active, observation),
+		);
+		return observation;
+	}
+
+	private forgetObservation(watch: ArmedWatch, active: Set<Promise<void>>, observation: Promise<void>): void {
+		active.delete(observation);
+		if (active.size === 0 && this.observations.get(watch) === active) this.observations.delete(watch);
+	}
+
+	private async observeRunning(watch: ArmedWatch): Promise<void> {
 		try {
 			let sample: WatchSample | undefined;
 			try {
@@ -371,11 +420,44 @@ export class RoutineWatchMonitor {
 	}
 
 	private disarm(watch: ArmedWatch): void {
-		watch.abort.abort();
-		if (watch.timer !== undefined) this.deps.timers.clearTimeout(watch.timer);
-		watch.timer = undefined;
-		for (const watcher of watch.watchers.values()) watcher.close();
-		watch.watchers.clear();
+		const failures = this.release(watch);
+		if (failures.length > 0)
+			this.warn(new AggregateError(failures, "Routine watch could not close its directory watchers"));
+	}
+
+	/** Abort sampling, clear cadence, and close every owned handle; callers decide how to report captured failures. */
+	private release(watch: ArmedWatch): unknown[] {
+		const failures: unknown[] = [];
+		try {
+			watch.abort.abort();
+		} catch (error) {
+			failures.push(error);
+		}
+		if (watch.timer !== undefined) {
+			try {
+				this.deps.timers.clearTimeout(watch.timer);
+			} catch (error) {
+				failures.push(error);
+			}
+			watch.timer = undefined;
+		}
+		failures.push(...this.closeWatchers(watch));
+		return failures;
+	}
+
+	private closeWatchers(watch: ArmedWatch): unknown[] {
+		const failures: unknown[] = [];
+		for (const [key, watcher] of watch.watchers) {
+			try {
+				watcher.close();
+				watch.watchers.delete(key);
+			} catch (error) {
+				failures.push(error);
+			}
+		}
+		if (watch.watchers.size > 0) this.retiredWatchers.add(watch);
+		else this.retiredWatchers.delete(watch);
+		return failures;
 	}
 
 	private warn(error: unknown): void {

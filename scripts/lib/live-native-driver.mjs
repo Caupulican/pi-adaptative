@@ -458,6 +458,7 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 						!/"failure_code":"file_not_found"/.test(JSON.stringify(row.message.content)),
 				).length;
 				const settled = {
+					runtime: { pid: current.pid, sessionId: current.sessionId },
 					calls: calls.map((call) => call.name),
 					bounced,
 					workerAttempts: [...lanes.keys()],

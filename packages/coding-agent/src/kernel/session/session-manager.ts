@@ -1903,7 +1903,7 @@ export class SessionManager {
 			...(assistantMessageEntryId === undefined ? {} : { assistantMessageEntryId }),
 		};
 		this._validateProviderRequestTerminal(entry);
-		const consumption = this._parentInputIndex().consumption(entry, (id) => this.byId.get(id));
+		const consumption = this._parentInputIndex().consumption(entry, (id) => this.byId.get(id), "next-owner-turn");
 		if (consumption?.mode === "next-owner-turn") {
 			const ids = pendingIdSpace(this.byId);
 			ids.add(entry.id);

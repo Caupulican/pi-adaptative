@@ -5,6 +5,7 @@ import { setKittyProtocolActive } from "./keys.ts";
 import { loadNativeAddon } from "./native-loader.ts";
 import { isNativeModifierPressed } from "./native-modifiers.ts";
 import { StdinBuffer } from "./stdin-buffer.ts";
+import { restoreTerminalRawMode } from "./terminal-raw-mode.ts";
 import { TerminalViewportMode } from "./viewport-mode.ts";
 
 const TERMINAL_PROGRESS_KEEPALIVE_MS = 1000;
@@ -147,7 +148,7 @@ export class InputOnlyTerminal implements Terminal {
 			this.dataHandler = undefined;
 		}
 		this.input.pause();
-		if (this.input.isTTY && this.input.setRawMode) this.input.setRawMode(this.wasRaw);
+		restoreTerminalRawMode(this.input, this.wasRaw);
 	}
 
 	async drainInput(_maxMs?: number, _idleMs?: number): Promise<void> {}
@@ -545,9 +546,7 @@ export class ProcessTerminal implements Terminal {
 		process.stdin.pause();
 
 		// Restore raw mode state
-		if (process.stdin.setRawMode) {
-			process.stdin.setRawMode(this.wasRaw);
-		}
+		restoreTerminalRawMode(process.stdin, this.wasRaw);
 	}
 
 	write(data: string): void {

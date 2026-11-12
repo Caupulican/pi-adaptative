@@ -1103,3 +1103,75 @@ retained the actual partial/rejected facts, returned strict acceptance false, an
 one-line JSDoc and three ES2022 artifact samples. Unspecified package-target compatibility remains
 unproved. That diagnostic is supplemental, not a fresh live pass, and leaves the original report
 unchanged. The previous diagnostic's wrong artifact-path error is recorded with its corrected run.
+
+### H-20261112-24–27 — bounded transport, paired parent inputs, and terminal teardown
+
+Published `v0.104.58` is immutable at `9c1303108bcfbe91ba5379137b3c231336b65afc`.
+Release and all nine binary-workflow jobs passed; Linux and Windows exact-tag journeys passed
+10/10 in both System One modes. Its fresh native report remains a failure: 15 passes, S15/S16/S43
+failed, no selected skips (`.git/pi-audits/live-validation/2026-11-12T20-28-59-479Z/report.json`).
+S15 retained valid report rejections for a wrong workspace-relative path and an unrecorded command;
+the parent interrupted a later attempt after seven calls. The correct artifact does not make those
+claims accepted. Its second explicit worker task was not reached. The report schema now makes the
+existing working-directory path basis explicit; the judge and acceptance limits remain strict.
+
+S16 and S43 exposed H25: an owner-note binding overwrote a detached-wake binding for the same
+provider request. The index combined the note's binding and selected input with the wake's mode and
+authority. Canonical receipt `87c78a0d` on request `01a1d179-0994-70ea-91bb-09200fa065fe`
+proves this exact hybrid. Its strict resolver correctly rejected it, blocking the later owner input
+before canonical admission. The repair keeps separate per-mode request bindings and terminal proof
+slots. Note publication remains atomic with its terminal; wake publication remains atomic with its
+settlement. Exact legacy reconstruction shares one matcher, verifies both actual bindings and the
+terminal-to-settlement-to-receipt chain, and retains original bodies and source keys. Arbitrary
+missing, changed, duplicate, foreign-branch or unsuccessful evidence remains refused. The composed
+J1 flow includes actual routine notices, owner steering, ingestion, reopen, replay and legacy copies.
+
+The final pane cleanup then produced H26: PID 174669 threw `setRawMode failed with errno: 5`
+during process exit after its PTY had disappeared. The startup exit hook still attempted restoration.
+Startup and TUI stop now share a lightweight restoration owner. It classifies synchronous error
+emission inside only that call, checks the live device rather than cached `isTTY`, and preserves an
+error while the terminal remains attached. Enabling raw mode remains strict. Native S45 now adds a
+real canonical turn, identified runtime, direct PTY closure, process disappearance, matching declared
+non-forced end and shared fatal-record scan. The selected core acceptance scope becomes nineteen
+scenarios; earlier eighteen-scenario reports are not relabelled. A temporary mistaken edit of the
+main checkout during the v58 run was restored; the executable and verifier hashes were rechecked.
+That incident and the original failures remain in `.git/pi-audits/releases/v0.104.58/`.
+
+Release logs also generated dependency candidates. The certificate codec is already a source-pinned
+patched fork. The separate Mistral SDK imports Zod v4 and buffers provider responses before Pi sees
+an event; H24 guards raw SSE per frame and bounds other bodies through its HTTP adapter, preserving
+backpressure, cancellation, HTTP metadata and existing error handling. Its composed J1 phase uses the
+actual SDK and root lifecycle, including fragmented delimiters, aggregate streams above one frame's
+limit, overflow, HTTP errors, abort and healthy continuation. It proves canonical request terminals
+and reported usage, not maintenance-accounting receipts or fabricated usage for failed requests.
+
+The dependency policy verifies Mistral's actual workspace resolution to Zod 4.6.6 and keeps sandbox's
+compatible Zod 3 branch distinct. The Pi sandbox extension does not invoke the sandbox CLI's Zod
+config loader; that separate upstream v3 behavior is not claimed repaired. Runtime Undici and
+filesystem matcher pins address the reviewed transport/cancellation advisories. Glob 14.0.2 and
+minimatch 11.0.1 satisfy the configured two-day package-age cutoff; newer suggested patches did not.
+The security gate caught npm retaining old cached consumer resolutions, so only those parent lock
+records were invalidated and npm regenerated them. No replacement integrity/resolution record was
+hand-authored. npm audit is not claimed clean: sandbox graph metadata and development-tooling
+advisories remain distinct from the repaired runtime paths. Tooling advisories are outside this
+runtime repair scope.
+
+Routine shutdown also owns the completion of its active watch observations. The runtime starts
+watch, scheduler and intake stops together, joins their settlements, and reports cleanup failures
+after the join. The monitor retains observation custody even when watcher setup removed its armed
+entry. The composed J1 cancellation phase holds actual glob filesystem enumeration, begins session
+disposal, releases that I/O and checks the joined cancellation and healthy continuation. Its small
+tree establishes cancellation ordering; it is not a matcher stress or maximum-capacity trial.
+The already-issued read and its actual glob callback finish under the recursion guard; logical
+iterator cancellation alone is not treated as evidence that the filesystem callback has returned.
+Failed watcher setup closes its partially acquired handles, retains failed closes for shutdown,
+and rejects callbacks from a watch that is no longer armed. The intended one-shot baseline remains
+separate from filesystem-event rearming.
+The same journey replaces a watch while one old handle refuses closure, delivers that old handle's
+error, and requires the replacement's actual baseline, occurrence and worker terminal to survive.
+
+Source review and isolated dependency bootstrap are recorded separately from execution. The next
+patch's source, release and nineteen-scenario native verdicts belong in
+`.git/pi-audits/releases/v0.104.59/verification.json`; a source review or prior binary's pass does not
+establish them. New regression coverage ships in composed journeys; existing policy-test changes
+only maintain fixture values for the updated required pins.

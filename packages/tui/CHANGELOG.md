@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Startup and terminal teardown share one raw-mode restoration owner that distinguishes a detached device from a live terminal error, including synchronous Node and Bun error events.
+
 ## [0.104.58] - 2026-11-12
 
 ## [0.104.57] - 2026-11-12

@@ -126,7 +126,10 @@ function submitReportSchema(blockerCodes: readonly WorkerDeclarableBlocker[]) {
 				Type.Array(
 					Type.Object(
 						{
-							file: Type.String(),
+							file: Type.String({
+								description:
+									"Use a changed path exactly as listed in the host report request, or its absolute spelling. Relative paths resolve from your working directory.",
+							}),
 							what: Type.String(),
 							serves: Type.Optional(
 								Type.Array(Type.String(), { description: "Requirement ids this change serves." }),

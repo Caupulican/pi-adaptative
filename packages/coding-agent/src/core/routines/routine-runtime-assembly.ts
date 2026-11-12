@@ -1,6 +1,7 @@
 /**
- * Assembly of a session's routine runtime: the scheduler that dispatches saved routines, the session that saves them from the
- * routine tool and the host, automatic intake of the owner's words, and the watch monitor, each wired to the session's ports.
+ * Assembly and joined shutdown owner for a session's routine runtime: the scheduler that dispatches saved routines, the session
+ * that saves them from the routine tool and the host, automatic intake of the owner's words, and the watch monitor, each wired to
+ * the session's ports.
  * A routine's result is delivered to its parent through the same parent-input port as every other note, and its workers start
  * through the worker runtime. The coordinator supplies the runtime and the operator sends through its host port and keeps the
  * routine state and the start of the runtime to itself.
@@ -41,6 +42,7 @@ export interface RoutineRuntime {
 	readonly session: RoutineSessionController;
 	readonly intake: RoutineIntake;
 	readonly watches: RoutineWatchMonitor;
+	stop(): Promise<void>;
 }
 
 /** What the assembly reads from and asks of the coordinator: the worker runtime, the lifecycle and the operator sends. */
@@ -279,6 +281,41 @@ export class RoutineRuntimeAssembly {
 			},
 			warn: (message) => this.host.warn(message),
 		});
-		return { scheduler, session, intake, watches };
+		let shutdown: Promise<void> | undefined;
+		const stop = (): Promise<void> => {
+			if (shutdown) return shutdown;
+			let complete!: () => void;
+			let fail!: (error: unknown) => void;
+			shutdown = new Promise<void>((resolve, reject) => {
+				complete = resolve;
+				fail = reject;
+			});
+			const start = (label: string, operation: () => void | Promise<void>): Promise<void> => {
+				try {
+					return Promise.resolve(operation());
+				} catch (error) {
+					try {
+						this.host.warn(`Failed to ${label}: ${error instanceof Error ? error.message : String(error)}`);
+					} catch {
+						/* Shutdown diagnostics have no lifecycle authority. */
+					}
+					return Promise.resolve().then(() => {
+						throw error;
+					});
+				}
+			};
+			const completions = [
+				start("stop routine watches", () => watches.dispose()),
+				start("stop routine scheduler", () => scheduler.close()),
+				start("stop routine intake", () => intake.stop()),
+			];
+			void Promise.allSettled(completions).then((settled) => {
+				const failures = settled.flatMap((entry) => (entry.status === "rejected" ? [entry.reason] : []));
+				if (failures.length === 0) complete();
+				else fail(new AggregateError(failures, "Routine runtime shutdown failed"));
+			});
+			return shutdown;
+		};
+		return { scheduler, session, intake, watches, stop };
 	}
 }
