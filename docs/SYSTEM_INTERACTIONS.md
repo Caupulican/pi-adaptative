@@ -960,3 +960,11 @@ because extra top-level fields happen to match it. The existing detached-write w
 those fields as well. That final narrow guard is source-reviewed and will be verified by the exact
 source commit's complete Linux/Windows CI before release preparation; it is not counted as covered
 by the preceding local J1 execution.
+
+The first exact-source CI (`43260598691`, commit `410e01f935fd1b5088e7ff773dd9931916f26e63`)
+passed nine Windows journeys but failed J1 because its assertions searched serialized JSON for
+native paths: Windows backslashes are escaped in JSON. The journey now checks decoded journal
+transition paths and the actual parent-facing user handoff text. Its required protected findings,
+clean cold-install claim, rollback and whole-batch retention assertions remain unchanged. This
+fixture correction passed formatting and type checking; the complete corrected Linux/Windows CI
+is still required before release preparation.

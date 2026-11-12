@@ -18,7 +18,7 @@ import {
 } from "../../../../src/utils/fff-node-install.ts";
 import { publishHostFile } from "../../../../src/utils/host-tree-publication.ts";
 import { hostFileIdentity, hostWatchedPathIdentity } from "../../../../src/utils/host-write-transition.ts";
-import { calls, createBarrier } from "../scripted-provider.ts";
+import { calls, createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { ICM_INTAKE_JUDGMENTS, latestBatchResults } from "./shared.ts";
 
@@ -63,6 +63,21 @@ const ORIGINAL = `export function normalizeInput(value: string): string {
 }
 `;
 const UPDATED = CANDIDATE.replace("normalizeValue", "normalizeInput");
+
+/** Read the actual parent-facing handoff text without JSON-escaping native paths. */
+function latestWorkerHandoff(request: ScriptedRequest): string | undefined {
+	return request.context.messages
+		.filter((message) => message.role === "user")
+		.map((message) =>
+			typeof message.content === "string"
+				? message.content
+				: message.content
+						.filter((block) => block.type === "text")
+						.map((block) => block.text)
+						.join("\n"),
+		)
+		.findLast((text) => text.includes("Background worker terminal handoff"));
+}
 
 /** Real worker review, managed publication and durable claim; only npm/module I/O is scripted. */
 export async function runJourney1FffHostAttributionPhase(world: HarnessWorld): Promise<void> {
@@ -315,13 +330,13 @@ export async function runJourney1FffHostAttributionPhase(world: HarnessWorld): P
 			name: "fff-cold-root-handoff",
 			maxRequests: 8,
 			until: (request) => {
-				const found = JSON.stringify(request.context.messages).includes("Background worker terminal handoff");
+				const found = latestWorkerHandoff(request) !== undefined;
 				if (found) coldHandoffSeen.release();
 				return found;
 			},
 			reply: (request) => {
-				const text = JSON.stringify(request.context.messages);
-				if (!text.includes("Background worker terminal handoff"))
+				const text = latestWorkerHandoff(request);
+				if (text === undefined)
 					return { content: [{ type: "text", text: "I am waiting for the cold-install worker handoff." }] };
 				if (text.includes(managedFffDir))
 					throw new Error("clean cold FFF publication was attributed to its worker");
@@ -507,13 +522,13 @@ export async function runJourney1FffHostAttributionPhase(world: HarnessWorld): P
 			name: "fff-root-handoff",
 			maxRequests: 8,
 			until: (request) => {
-				const found = JSON.stringify(request.context.messages).includes("Background worker terminal handoff");
+				const found = latestWorkerHandoff(request) !== undefined;
 				if (found) handoffSeen.release();
 				return found;
 			},
 			reply: (request) => {
-				const text = JSON.stringify(request.context.messages);
-				if (!text.includes("Background worker terminal handoff")) {
+				const text = latestWorkerHandoff(request);
+				if (text === undefined) {
 					return { content: [{ type: "text", text: "I am waiting for the worker handoff." }] };
 				}
 				for (const path of [concurrentPath, commandPath, detachedPath, rollbackPath, racePath]) {
@@ -727,7 +742,18 @@ export async function runJourney1FffHostAttributionPhase(world: HarnessWorld): P
 		const journal = world.io.readFileSync(hostTransitionsFile(world.agentDir), "utf8").toString();
 		expect(journal).toContain("host-path-transition-batch");
 		expect(journal).toContain("malformed-detached-batch");
-		expect(journal).toContain(join(managedFffDir, "node_modules", "@ff-labs", "fff-node", "dist", "index.cjs"));
+		expect(
+			parseHostJournalRows(journal).some(
+				(row) =>
+					row.kind === "host-path-transition-batch" &&
+					row.transitions?.some(
+						(transition) =>
+							transition.path ===
+							join(managedFffDir, "node_modules", "@ff-labs", "fff-node", "dist", "index.cjs"),
+					),
+			),
+			"the durable journal retains the managed module's native path",
+		).toBe(true);
 		const disposal = await world.disposeSessionInBody(session);
 		sessionDisposed = true;
 		expect(disposal, "FFF attribution root settles its session and phase ownership").toBeUndefined();
@@ -939,13 +965,13 @@ async function runSystemOneOffWorker(world: HarnessWorld): Promise<void> {
 			name: "fff-off-handoff",
 			maxRequests: 8,
 			until: (request) => {
-				const found = JSON.stringify(request.context.messages).includes("Background worker terminal handoff");
+				const found = latestWorkerHandoff(request) !== undefined;
 				if (found) handoffSeen.release();
 				return found;
 			},
 			reply: (request) => {
-				const text = JSON.stringify(request.context.messages);
-				if (!text.includes("Background worker terminal handoff"))
+				const text = latestWorkerHandoff(request);
+				if (text === undefined)
 					return { content: [{ type: "text", text: "I am waiting for the worker handoff." }] };
 				if (!text.includes("normalize-off.ts"))
 					throw new Error("System One off parent handoff omitted the completed worker claim");
