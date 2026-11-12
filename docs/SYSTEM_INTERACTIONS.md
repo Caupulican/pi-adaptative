@@ -1072,8 +1072,18 @@ acquire no store lock, the transport stays connected, two equal-timestamp replie
 append order, one preview retry converges to the newer reply after release, and a chat-only reply
 creates no job. Shutdown cancels its pending retry without rearming it. Its only clock seam pins
 the two original synchronous receiver calls and restores the clock immediately. No isolated test
-entry point or fake lock substitutes for this chain. Source review and static checks passed;
-execution of this final journey and the new published patch's native acceptance remain pending.
+entry point or fake lock substitutes for this chain. The first execution exposed an unsupported
+verification claim in the new synthetic reply, which had performed no check. Its distinct factual
+configuration-status reply now avoids that assertion; strict judgment and warning guards remain
+unchanged. The original failure and the separate missing-module-header static failure are preserved.
+
+Frozen source `3884563b8a303b5a88b5ae1a19ae1ae66181f99c` passed all ten composed journeys in
+both System One modes locally (842.04 seconds), and CI `43293168068` passed all ten on Linux
+(611.62 seconds) and Windows (481.19 seconds). Full static checks covered 2,233 eligible production
+files, with zero detected clones, and checked 44 immutable changelog tags. The normal shallow CI
+history subcheck explicitly skipped; it is not counted as a pass. The release workflow's exact-tag
+gates, published-artifact provenance, and fresh native acceptance are tracked separately in
+`.git/pi-audits/releases/v0.104.58/verification.json`, alongside the preserved source logs.
 
 A separate fatal contention record belongs to auditor PID `140642`, not the detached daemon.
 Its lock target/caller is absent from the old vendor-only stack, so it cannot be attributed to the
