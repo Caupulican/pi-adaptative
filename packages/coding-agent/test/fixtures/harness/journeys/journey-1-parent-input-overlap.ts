@@ -66,15 +66,31 @@ export async function verifyParentInputOverlap(
 	expect(owner.entry).toMatchObject({ type: "custom", customType: PARENT_INPUT_CONSUMED_CUSTOM_TYPE });
 	expect(settlement).toMatchObject({ type: "custom", customType: PARENT_INPUT_SETTLED_CUSTOM_TYPE });
 	const store = icmContinuousStore(agentDir);
-	const keys = [notice.id, result.id].map((id) => `parent:${manager.getSessionId()}:${id}:0`);
-	await withDeadline(
-		world.trace,
-		"H25 both original deliveries enter continuous chat",
-		world.io.waitForMutation(() => {
-			const records = icmReadContinuousRecords(world, store);
-			return keys.every((key) => records.filter((record) => record.sourceKey === key).length === 1);
-		}),
-	);
+	const prefixes = [notice.id, result.id].map((id) => `parent:${manager.getSessionId()}:${id}:0:`);
+	const keys = prefixes.map((prefix) => `${prefix}0`);
+	try {
+		await withDeadline(
+			world.trace,
+			"H25 both original deliveries enter continuous chat",
+			world.io.waitForMutation(() => {
+				const records = icmReadContinuousRecords(world, store);
+				return keys.every((key) => records.filter((record) => record.sourceKey === key).length === 1);
+			}),
+		);
+	} catch (error) {
+		const records = icmReadContinuousRecords(world, store);
+		const observed = prefixes.map((prefix) => {
+			const counts = new Map<string, number>();
+			for (const record of records) {
+				if (record.sourceKey.startsWith(prefix))
+					counts.set(record.sourceKey, (counts.get(record.sourceKey) ?? 0) + 1);
+			}
+			return { total: [...counts.values()].reduce((sum, count) => sum + count, 0), keys: [...counts].slice(0, 8) };
+		});
+		throw new Error(`H25 continuous-chat delivery timeout: ${JSON.stringify({ expected: keys, observed })}`, {
+			cause: error,
+		});
+	}
 	const records = icmReadContinuousRecords(world, store);
 	for (const [index, original] of [notice, result].entries()) {
 		const matched = records.filter((record) => record.sourceKey === keys[index]);

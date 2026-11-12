@@ -1199,3 +1199,12 @@ layer and restoration of the latest underlying owner, and preserves body and cle
 together. Its real SDK/root request remains the witness for custom routing across session creation.
 The failed local and Windows runs, diagnostic and source-review evidence remain in the v59 audit
 ledger. Transport, parent-input, watch, release and native verdicts remain pending their final runs.
+
+The next frozen J1 run on `d73144c75` reached the parent-input overlap checks after all six actual
+Mistral request/terminal assertions, but remained a failure. Its new provider phase lacked explicit
+System One owner-intent judgments, and the overlap predicate compared append-command keys with
+persisted unit keys, omitting their final unit index. Both are evaluator defects; the latter does
+not establish an ingestion failure. The corrected fixtures keep System One enabled, retain the
+strict judgment guard and twenty-second deadline, and still require exact-once bodies and legacy
+replay. All 3,021 frozen files remained unchanged during that failed run; its original report is
+preserved rather than promoted to a partial journey pass.

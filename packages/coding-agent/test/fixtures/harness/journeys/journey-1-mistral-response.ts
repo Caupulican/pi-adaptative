@@ -9,6 +9,7 @@ import {
 } from "../../../../../ai/src/providers/mistral.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { ICM_INTAKE_JUDGMENTS } from "./shared.ts";
 
 const PROVIDER = "h24-mistral";
 const MODEL = "h24-model";
@@ -108,6 +109,22 @@ async function runRegisteredMistralResponseJourney(
 		encoder.encode(
 			`data: ${JSON.stringify({ id: "h24-response", model: MODEL, choices: [{ index: 0, delta: { content: answer }, finish_reason: "stop" }], usage: { prompt_tokens: 7, completion_tokens: 3, total_tokens: 10 } })}\r\n\r\n`,
 		);
+	let previousOwnerRequest: string | undefined;
+	const enterPhase = (name: string, previous: string | undefined): void => {
+		world.systemOne.enterPhase(
+			name,
+			previous === undefined ? {} : { ...ICM_INTAKE_JUDGMENTS, carries_0: { kind: "noul", probability: 0.02 } },
+			previous === undefined
+				? {}
+				: {
+						expect: (request) => {
+							const state = request.state as Record<string, unknown>;
+							if ("owner_messages" in state) expect(state.owner_messages).toEqual([previous]);
+							if ("user_request" in state) expect(state.user_request).toBe(previous);
+						},
+					},
+		);
+	};
 	world.fetchResponder = (input, init) => {
 		const url = new URL(typeof input === "string" ? input : input instanceof URL ? input.href : input.url);
 		if (url.origin !== BASE) return previousFetch?.(input, init);
@@ -230,7 +247,7 @@ async function runRegisteredMistralResponseJourney(
 	};
 	const run = async (next: typeof mode, prompt: string) => {
 		mode = next;
-		world.systemOne.enterPhase(`h24-${next}`, {});
+		enterPhase(`h24-${next}`, previousOwnerRequest);
 		const before = requests.length;
 		await withDeadline(world.trace, `H24 ${next} root turn`, owner.session.prompt(prompt));
 		const message = owner.session.messages.at(-1);
@@ -260,6 +277,7 @@ async function runRegisteredMistralResponseJourney(
 		expect(persisted.at(-1)).toMatchObject({
 			message: { role: "assistant", stopReason: message.stopReason, provider: PROVIDER, model: MODEL },
 		});
+		previousOwnerRequest = prompt;
 		return message;
 	};
 	await withCleanup(async () => {
@@ -289,9 +307,10 @@ async function runRegisteredMistralResponseJourney(
 		expect(body.errorMessage).toContain("Provider retry directive: do not retry.");
 		expect(body.errorMessage).not.toContain("x".repeat(1024));
 		mode = "cancel";
-		world.systemOne.enterPhase("h24-cancel", {});
+		const cancelledPrompt = "Report the H24 cancelled response.";
+		enterPhase("h24-cancel", previousOwnerRequest);
 		const before = requests.length;
-		const turn = owner.session.prompt("Report the H24 cancelled response.");
+		const turn = owner.session.prompt(cancelledPrompt);
 		await withDeadline(world.trace, "H24 cancellation reaches the physical stream", cancelRead.promise);
 		const beforeCancel = cancelled;
 		await owner.session.abort("h24 owner cancellation");
@@ -308,6 +327,7 @@ async function runRegisteredMistralResponseJourney(
 				.filter((entry) => entry.type === "message" && entry.message.role === "assistant")
 				.at(-1),
 		).toMatchObject({ message: { stopReason: "aborted", provider: PROVIDER, model: MODEL } });
+		previousOwnerRequest = cancelledPrompt;
 		const healthy = await run("healthy", "Report the H24 healthy status.");
 		expect(healthy.stopReason).toBe("stop");
 		expectTerminal("completed");
