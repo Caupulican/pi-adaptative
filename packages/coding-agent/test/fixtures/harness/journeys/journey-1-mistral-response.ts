@@ -14,30 +14,51 @@ const PROVIDER = "h24-mistral";
 const MODEL = "h24-model";
 const BASE = "https://h24-mistral.invalid";
 
+async function withCleanup(run: () => Promise<void>, cleanup: Array<() => void | Promise<void>>): Promise<void> {
+	const failures: unknown[] = [];
+	try {
+		await run();
+	} catch (error) {
+		failures.push(error);
+	}
+	for (const step of cleanup) {
+		try {
+			await step();
+		} catch (error) {
+			failures.push(error);
+		}
+	}
+	if (failures.length === 1) throw failures[0];
+	if (failures.length > 1) throw new AggregateError(failures, "H24 journey and cleanup failures");
+}
+
 /** Exercise actual SDK responses through the registered model and a durable user-facing root session. */
 export async function runMistralResponseJourney(world: HarnessWorld): Promise<void> {
 	// Real provider functions are loaded before the world installs its virtual filesystem. Its lazy
 	// built-in registration would otherwise perform module I/O inside that guarded filesystem.
-	const previous = getApiProvider("mistral-conversations");
 	registerApiProvider(
 		{ api: "mistral-conversations", stream: streamMistral, streamSimple: streamSimpleMistral },
 		PROVIDER,
 	);
-	try {
-		await runRegisteredMistralResponseJourney(world);
-	} finally {
-		try {
-			world.modelRegistry.unregisterProvider(PROVIDER);
-		} finally {
-			unregisterApiProviders(PROVIDER);
-			expect(getApiProvider("mistral-conversations"), "the composed phase restores the underlying API owner").toBe(
-				previous,
-			);
-		}
-	}
+	const ownedLayer = getApiProvider("mistral-conversations");
+	await withCleanup(
+		() => runRegisteredMistralResponseJourney(world, ownedLayer),
+		[
+			() => world.modelRegistry.unregisterProvider(PROVIDER),
+			() => {
+				unregisterApiProviders(PROVIDER);
+				const restored = getApiProvider("mistral-conversations");
+				expect(restored, "the composed phase retains the underlying API owner").toBeDefined();
+				expect(restored, "the composed phase removes its own API layer").not.toBe(ownedLayer);
+			},
+		],
+	);
 }
 
-async function runRegisteredMistralResponseJourney(world: HarnessWorld): Promise<void> {
+async function runRegisteredMistralResponseJourney(
+	world: HarnessWorld,
+	ownedLayer: ReturnType<typeof getApiProvider>,
+): Promise<void> {
 	const reference = world.provider.model("root");
 	world.modelRegistry.registerProvider(PROVIDER, {
 		api: "mistral-conversations",
@@ -241,7 +262,10 @@ async function runRegisteredMistralResponseJourney(world: HarnessWorld): Promise
 		});
 		return message;
 	};
-	try {
+	await withCleanup(async () => {
+		expect(getApiProvider("mistral-conversations"), "SDK bootstrap preserves the phase provider layer").toBe(
+			ownedLayer,
+		);
 		const aggregate = await run("aggregate", "Report the H24 aggregate status.");
 		expect(crObservedBeforeContinuation, "a CR-delimited frame is delivered before more network data").toBe(true);
 		expect(aggregate.stopReason).toBe("stop");
@@ -291,13 +315,14 @@ async function runRegisteredMistralResponseJourney(world: HarnessWorld): Promise
 		expect(JSON.stringify(healthy.content)).toContain("H24 healthy response.");
 		expect(requests).toEqual(["aggregate", "oversize", "http", "body", "cancel", "healthy"]);
 		world.trace.mark("root", "h24.mistral-response-bounds");
-	} finally {
-		crObserved.release();
-		offEvents();
-		try {
+	}, [
+		() => crObserved.release(),
+		() => offEvents(),
+		async () => {
 			expect(await world.disposeSessionInBody(owner.session)).toBeUndefined();
-		} finally {
+		},
+		() => {
 			world.fetchResponder = previousFetch;
-		}
-	}
+		},
+	]);
 }

@@ -1175,3 +1175,27 @@ patch's source, release and nineteen-scenario native verdicts belong in
 `.git/pi-audits/releases/v0.104.59/verification.json`; a source review or prior binary's pass does not
 establish them. New regression coverage ships in composed journeys; existing policy-test changes
 only maintain fixture values for the updated required pins.
+
+### H-20261112-28 — provider bootstrap must preserve custom routing
+
+The first H24–27 composed run on `15d45cd6e` passed nine journeys and failed J1 before its
+Mistral fetch boundary. The diagnostic captured a canonical request and error terminal: the lazy
+built-in provider loader attempted module I/O inside the virtual filesystem. That is evaluator
+loading evidence, not a provider transport pass. The phase now eagerly imports the real Mistral
+functions and registers them through the actual API registry for its composed session lifetime.
+
+That exposed a separate production interaction: `createAgentSession` refreshes built-in APIs, and
+the former registry put those registrations above an existing custom provider. Actual model
+registrations use named stream owners, so SDK initialization could change their request routing.
+The shared registry now distinguishes explicit base values from ordinary custom layers. Base
+refresh cannot shadow named or anonymous custom registrations; ordinary custom ordering and owner
+retirement remain intact. API bootstrap and OAuth seed/restore paths use that base boundary, while
+explicit reset still clears the registry. Selection and enumeration share one precedence owner.
+
+The attempted fixture repair also demanded the exact old built-in wrapper object after cleanup.
+SDK bootstrap legitimately rebuilds that object, so its identity was not a restoration invariant;
+that assertion masked the body failure. The composed phase instead verifies retirement of its own
+layer and restoration of the latest underlying owner, and preserves body and cleanup failures
+together. Its real SDK/root request remains the witness for custom routing across session creation.
+The failed local and Windows runs, diagnostic and source-review evidence remain in the v59 audit
+ledger. Transport, parent-input, watch, release and native verdicts remain pending their final runs.

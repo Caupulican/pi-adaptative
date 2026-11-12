@@ -1,4 +1,4 @@
-import { clearApiProviders, registerApiProvider } from "../api-registry.ts";
+import { clearApiProviders, registerBaseApiProvider } from "../api-registry.ts";
 import type {
 	Api,
 	AssistantMessage,
@@ -359,66 +359,66 @@ const streamBedrockLazy = createLazyStream(loadBedrockProviderModule, (module) =
 const streamSimpleBedrockLazy = createLazyStream(loadBedrockProviderModule, (module) => module.streamSimple);
 
 export function registerBuiltInApiProviders(): void {
-	registerApiProvider({
+	registerBaseApiProvider({
 		api: "google-antigravity",
 		stream: streamAntigravity,
 		streamSimple: streamSimpleAntigravity,
 	});
-	registerApiProvider({
+	registerBaseApiProvider({
 		api: "anthropic-messages",
 		stream: streamAnthropic,
 		streamSimple: streamSimpleAnthropic,
 	});
 
-	registerApiProvider({
+	registerBaseApiProvider({
 		api: "openai-completions",
 		stream: streamOpenAICompletions,
 		streamSimple: streamSimpleOpenAICompletions,
 	});
 
-	registerApiProvider({
+	registerBaseApiProvider({
 		api: "mistral-conversations",
 		stream: streamMistral,
 		streamSimple: streamSimpleMistral,
 	});
 
-	registerApiProvider({
+	registerBaseApiProvider({
 		api: "openai-responses",
 		stream: streamOpenAIResponses,
 		streamSimple: streamSimpleOpenAIResponses,
 	});
 
-	registerApiProvider({
+	registerBaseApiProvider({
 		api: "azure-openai-responses",
 		stream: streamAzureOpenAIResponses,
 		streamSimple: streamSimpleAzureOpenAIResponses,
 	});
 
-	registerApiProvider({
+	registerBaseApiProvider({
 		api: "openai-codex-responses",
 		stream: streamOpenAICodexResponses,
 		streamSimple: streamSimpleOpenAICodexResponses,
 	});
 
-	registerApiProvider({
+	registerBaseApiProvider({
 		api: "google-generative-ai",
 		stream: streamGoogle,
 		streamSimple: streamSimpleGoogle,
 	});
 
-	registerApiProvider({
+	registerBaseApiProvider({
 		api: "google-vertex",
 		stream: streamGoogleVertex,
 		streamSimple: streamSimpleGoogleVertex,
 	});
 
-	registerApiProvider({
+	registerBaseApiProvider({
 		api: "bedrock-converse-stream",
 		stream: streamBedrockLazy,
 		streamSimple: streamSimpleBedrockLazy,
 	});
 
-	registerApiProvider({
+	registerBaseApiProvider({
 		api: "command-code-generate",
 		stream: streamCommandCode,
 		streamSimple: streamSimpleCommandCode,

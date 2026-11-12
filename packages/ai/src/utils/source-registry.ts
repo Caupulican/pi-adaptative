@@ -1,10 +1,17 @@
-/** Layered registrations: retiring an owner removes even its hidden generations. */
+/** Custom registration layers above explicit base values; retiring an owner removes even its hidden generations. */
 export class SourceRegistry<T> {
+	private readonly bases = new Map<string, T>();
 	private readonly entries = new Map<string, Array<{ value: T; sourceId?: string }>>();
 	private readonly sourceKeys = new Map<string | undefined, Set<string>>();
 
 	get(key: string): T | undefined {
-		return this.entries.get(key)?.at(-1)?.value;
+		const layer = this.entries.get(key)?.at(-1);
+		return layer ? layer.value : this.bases.get(key);
+	}
+
+	/** Refresh a built-in without changing the precedence or lifetime of any custom registration. */
+	setBase(key: string, value: T): void {
+		this.bases.set(key, value);
 	}
 
 	set(key: string, value: T, sourceId?: string): void {
@@ -22,13 +29,11 @@ export class SourceRegistry<T> {
 	}
 
 	values(): T[] {
-		return [...this.entries.values()].flatMap((layers) => {
-			const latest = layers.at(-1);
-			return latest ? [latest.value] : [];
-		});
+		return [...new Set([...this.bases.keys(), ...this.entries.keys()])].map((key) => this.get(key)!);
 	}
 
 	delete(key: string): void {
+		this.bases.delete(key);
 		for (const entry of this.entries.get(key) ?? []) {
 			const keys = this.sourceKeys.get(entry.sourceId);
 			keys?.delete(key);
@@ -38,6 +43,7 @@ export class SourceRegistry<T> {
 	}
 
 	clear(): void {
+		this.bases.clear();
 		this.entries.clear();
 		this.sourceKeys.clear();
 	}

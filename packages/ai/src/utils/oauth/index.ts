@@ -64,7 +64,7 @@ const BUILT_IN_OAUTH_PROVIDERS: OAuthProviderInterface[] = [
 ];
 
 const oauthProviderRegistry = new SourceRegistry<OAuthProviderInterface>();
-for (const provider of BUILT_IN_OAUTH_PROVIDERS) oauthProviderRegistry.set(provider.id, provider);
+for (const provider of BUILT_IN_OAUTH_PROVIDERS) oauthProviderRegistry.setBase(provider.id, provider);
 
 /**
  * Get an OAuth provider by ID
@@ -95,7 +95,7 @@ export function unregisterOAuthProvider(id: string): void {
 	oauthProviderRegistry.delete(id);
 	const builtInProvider = BUILT_IN_OAUTH_PROVIDERS.find((provider) => provider.id === id);
 	if (builtInProvider) {
-		oauthProviderRegistry.set(id, builtInProvider);
+		oauthProviderRegistry.setBase(id, builtInProvider);
 	}
 }
 
@@ -105,7 +105,7 @@ export function unregisterOAuthProvider(id: string): void {
 export function resetOAuthProviders(): void {
 	oauthProviderRegistry.clear();
 	for (const provider of BUILT_IN_OAUTH_PROVIDERS) {
-		oauthProviderRegistry.set(provider.id, provider);
+		oauthProviderRegistry.setBase(provider.id, provider);
 	}
 }
 
