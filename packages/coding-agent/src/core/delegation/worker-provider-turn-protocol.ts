@@ -1,5 +1,5 @@
 import type { Usage } from "@caupulican/pi-ai";
-import type { RequestPreflightContext } from "../../kernel/loop-config.ts";
+import type { RequestPreflightContext, RequestPreflightResult } from "../../kernel/loop-config.ts";
 import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
 import { usageDeltaFromProviderUsage } from "../orchestration/attempt-usage.ts";
 import type { GatewayUsageDelta, ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
@@ -67,7 +67,7 @@ export class WorkerProviderTurnProtocol {
 		this.onFailure = options.onFailure;
 	}
 
-	async requestPreflight(request?: RequestPreflightContext): Promise<{ maxTokens: number }> {
+	async requestPreflight(request?: RequestPreflightContext): Promise<RequestPreflightResult> {
 		if (this.closed || this.inFlight || (this.held && !this.heldConsumed)) {
 			const error = new WorkerCompletionProtocolError(
 				"Worker completion attempted an overlapping or out-of-order provider preflight.",
@@ -96,7 +96,7 @@ export class WorkerProviderTurnProtocol {
 			this.assistantUsageAccounted = false;
 			acquired = undefined;
 			this.successfulPreflights += 1;
-			return { maxTokens: this.held.maxTokens };
+			return { maxTokens: this.held.maxTokens, discardUndispatched: () => this.discardUndispatched(generation) };
 		} catch (error) {
 			this.onFailure(error);
 			acquired?.release();
@@ -105,6 +105,18 @@ export class WorkerProviderTurnProtocol {
 		} finally {
 			this.inFlight = false;
 		}
+	}
+
+	/** Only the plan that acquired this epoch may cancel it before any provider output exists. */
+	private discardUndispatched(generation: number): void {
+		if (this.closed || this.generation !== generation || !this.held) return;
+		if (this.heldConsumed || this.assistantUsageAccounted)
+			this.fail(
+				new WorkerCompletionProtocolError("Worker completion attempted to discard an accounted provider epoch."),
+			);
+		this.generation += 1;
+		this.successfulPreflights -= 1;
+		this.releaseHeldReservation();
 	}
 
 	accountAssistantUsage(usage: Usage): void {

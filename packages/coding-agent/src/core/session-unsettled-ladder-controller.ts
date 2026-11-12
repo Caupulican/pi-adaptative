@@ -28,7 +28,7 @@ import {
 	assistantAnswerText,
 	type ClaimReceiptEvent,
 } from "./system-one/claim-delivery.ts";
-import type { CodeDuplicateReviewer } from "./system-one/code-duplicates.ts";
+import type { CodeDuplicateReviewer, FileLister } from "./system-one/code-duplicates.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import {
 	appendOwnerFollowUp,
@@ -68,6 +68,7 @@ export interface SessionUnsettledLadderControllerDeps {
 		lease: ForegroundSubmissionLease | undefined,
 	): Promise<void>;
 	emitWarning(message: string): void;
+	codeDuplicateFileLister?: FileLister;
 }
 
 export class SessionUnsettledLadderController {
@@ -91,6 +92,7 @@ export class SessionUnsettledLadderController {
 			resolveExpensiveModel: () => this.deps.resolveExpensiveModel(),
 			runIsolatedCompletion: (opts) => this.deps.runIsolatedCompletion(opts),
 			warn: (message) => this.deps.emitWarning(message),
+			lister: this.deps.codeDuplicateFileLister,
 			deliverToOwner: (items) => {
 				this.deliverToOwner(items);
 			},

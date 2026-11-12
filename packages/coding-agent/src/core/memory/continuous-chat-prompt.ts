@@ -46,8 +46,8 @@ The summaries form a binary tree: each message is compressed into a line (a
 short message is its own line), then adjacent lines are merged in pairs, again
 and again. So recent lines cover one message each, and older lines cover more. A
 message not summarized yet shows as "(not summarized yet: zoom it)". Lines that
-are not merged yet show as "(not merged yet: zoom it)", and zoom opens each one
-into its two lines just as it does any other line. A text too long for one
+are not merged yet show as "(not merged yet: zoom it)". Zoom descends through
+missing lines to available summaries or messages. A text too long for one
 message is split over several in a row.
 
 Summary generation runs in the background and never holds up your turn. Pending
@@ -152,7 +152,7 @@ export interface ContinuousChatToolDefinition {
 
 /** What every `zoom` reads: the chat view's lines and messages. */
 export const CONTINUOUS_CHAT_ZOOM_MESSAGE_DESCRIPTION =
-	"Open the line id+n of the view into the two lines of n/2 under it; n = 1 gives the message whole, with its images. n is a power of 2, and id a multiple of n. A long message comes in pages.";
+	"Read n consecutive messages starting at id: aligned summary lines open into their children, and unmerged ranges descend to available summaries or messages. Follow a remaining-range continuation with its id and n. Use n = 1 for the full message and images; long messages use page from 0.";
 
 /** What only the root's `zoom` also reads: an agent's chat log. */
 export const CONTINUOUS_CHAT_ZOOM_AGENT_DESCRIPTION =
@@ -175,8 +175,8 @@ export const CONTINUOUS_CHAT_TOOL_DEFINITIONS: readonly ContinuousChatToolDefini
 						{ type: "string", minLength: 1, maxLength: MAX_WORKER_TRANSCRIPT_REFERENCE_CHARACTERS },
 					],
 				},
-				n: { type: "integer", minimum: 1, description: "Messages covered by the line" },
-				page: { type: "integer", minimum: 0, description: "Page of a long text, from 0" },
+				n: { type: "integer", minimum: 1, description: "Number of consecutive messages from id" },
+				page: { type: "integer", minimum: 0, description: "Page of one message or agent log, from 0" },
 			},
 		},
 	},

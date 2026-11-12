@@ -57,6 +57,7 @@ import type { ResourceLoader } from "./resource-loader.ts";
 import type { ResourceProfileFilterSettings } from "./settings/settings-schema.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
+import type { FileLister } from "./system-one/code-duplicates.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import type { ToolArgumentValidationStats } from "./tool-recovery-stats.ts";
 import type { BashOperations } from "./tools/schemas/bash.ts";
@@ -199,6 +200,8 @@ export interface AgentSessionConfig {
 	localRuntimeDeps?: LocalRuntimeDeps;
 	/** System One semantic control plane controller for Jev semantic validation. */
 	systemOneController?: SystemOneController;
+	/** Optional session-owned source enumerator for semantic duplicate review. */
+	codeDuplicateFileLister?: FileLister;
 	systemOneEnabled?: boolean;
 	/** The one timer source of the session's recovery, retry and watchdog alarms and of the clocks they are due on. */
 	timers: TimerSource;

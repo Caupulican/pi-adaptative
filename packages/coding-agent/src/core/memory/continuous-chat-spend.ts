@@ -326,12 +326,14 @@ export class ContinuousChatSpendMeter {
 		throw new ContinuousChatAccountingUnresolved();
 	}
 
-	/** Reconcile every dead or unsettled receipt before any account-wide admission decision. */
-	private reconcile(): void {
+	/** Reconcile the exact settlement receipt, or every outstanding receipt before account-wide admission. */
+	private reconcile(only?: { readonly key: string; readonly token: string }): void {
+		const includes = (key: string, circuit: Circuit): boolean =>
+			only === undefined || (key === only.key && circuit.token === only.token);
 		// First pass charges newly recovered receipts; the second can acknowledge those same records.
 		const abandoned = this.locked((state) =>
 			Object.entries(state.circuits).flatMap(([key, circuit]) =>
-				circuit.status === "reserved" && this.owners.judge(circuit.owner) === "dead"
+				includes(key, circuit) && circuit.status === "reserved" && this.owners.judge(circuit.owner) === "dead"
 					? [{ key, circuit: structuredClone(circuit) }]
 					: [],
 			),
@@ -360,6 +362,7 @@ export class ContinuousChatSpendMeter {
 		for (let pass = 0; pass < 2; pass++) {
 			const candidates = this.locked((state) =>
 				Object.entries(state.circuits).flatMap(([key, circuit]) => {
+					if (!includes(key, circuit)) return [];
 					if (
 						circuit.status === "unknown" ||
 						circuit.status === "flight" ||
@@ -455,13 +458,15 @@ export class ContinuousChatSpendMeter {
 		const unresolved = this.locked((state) =>
 			Object.entries(state.circuits).some(
 				([key, circuit]) =>
-					circuit.status === "unknown" ||
-					(circuit.status === "reserved" && (!circuit.identity || this.owners.judge(circuit.owner) !== "alive")) ||
-					(circuit.status === "flight" &&
-						(!circuit.identity ||
-							this.owners.judge(circuit.owner) !== "alive" ||
-							unreadable.get(key) === circuit.token)) ||
-					((circuit.status === "held" || circuit.status === "settled") && circuit.pendingAck !== undefined),
+					includes(key, circuit) &&
+					(circuit.status === "unknown" ||
+						(circuit.status === "reserved" &&
+							(!circuit.identity || this.owners.judge(circuit.owner) !== "alive")) ||
+						(circuit.status === "flight" &&
+							(!circuit.identity ||
+								this.owners.judge(circuit.owner) !== "alive" ||
+								unreadable.get(key) === circuit.token)) ||
+						((circuit.status === "held" || circuit.status === "settled") && circuit.pendingAck !== undefined)),
 			),
 		);
 		if (unresolved) throw new ContinuousChatAccountingUnresolved();
@@ -564,10 +569,11 @@ export class ContinuousChatSpendMeter {
 			});
 			if (identity) this.journal.cancelUndispatched(identity, token);
 		}
-		this.locked((state) => {
+		const needsReceiptReconciliation = this.locked((state) => {
 			const circuit = state.circuits[key];
-			if (!circuit || circuit.token !== token || (circuit.status !== "flight" && circuit.status !== "reserved"))
-				return;
+			if (!circuit || circuit.token !== token) return false;
+			if (circuit.status !== "flight" && circuit.status !== "reserved")
+				return (circuit.status === "held" || circuit.status === "settled") && circuit.pendingAck !== undefined;
 			if (circuit.status === "reserved" && physicalAttempted) throw new ContinuousChatAccountingUnresolved();
 			if (measuredCostUsd !== undefined) {
 				if (!circuit.identity) throw new ContinuousChatAccountingUnresolved();
@@ -600,7 +606,11 @@ export class ContinuousChatSpendMeter {
 				};
 			}
 			this.save(state);
+			const settled = state.circuits[key];
+			return (settled?.status === "held" || settled?.status === "settled") && settled.pendingAck !== undefined;
 		});
-		this.reconcile();
+		// Durable unknown usage is a completed local disposition and remains an account-wide admission fence.
+		// Only this token's unfinished receipt/ACK belongs to the adapter's retained storage retry.
+		if (needsReceiptReconciliation) this.reconcile({ key, token });
 	}
 }

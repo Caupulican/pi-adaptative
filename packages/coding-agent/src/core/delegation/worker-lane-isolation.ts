@@ -160,7 +160,9 @@ export class WorkerLaneIsolation {
 		const engine = this.deps.engineDeps(worktreePath);
 		if (!engine || !isUnderLaneRoot(engine, worktreePath)) return;
 		try {
-			const discarded = await discardUnusedWorkerLane(engine, worktreePath);
+			const root = await this.laneRootAt(worktreePath);
+			if (!root) return;
+			const discarded = await discardUnusedWorkerLane(engine, root);
 			if (discarded.code !== "released" && discarded.code !== "lane_not_found" && discarded.code !== "lane_in_use") {
 				this.deps.warn(
 					`Unused worker lane '${discarded.laneKey ?? worktreePath}' was not removed: [${discarded.code}] ${discarded.message ?? ""}`,

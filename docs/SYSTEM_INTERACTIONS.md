@@ -727,3 +727,236 @@ log is `/tmp/pi-v0.104.56-clock-journey.log`. The combined target again passed 1
 type/architecture/immutability checks and unchanged zero-clone coverage. Source review found no
 blocking issue; the scoped change alters fixture time only. The repaired release and published
 binary's complete live scope remain outstanding.
+
+### Published 0.104.56, live findings, and journey coverage correction
+
+Version `0.104.56` was published at `2026-11-12T12:21:44Z`, exact tag commit
+`0e2501baf2ad4906e482faad3c733ab0e5ef793e`. Release workflow `43214220810` and binary
+workflow `43214484078` succeeded. Both platform logs in
+`/tmp/pi-v0.104.56-final-release-logs.zip` explicitly report ten journeys, 145 focused harness
+Vitest cases, six Node cases, 32 AI provider cases and eight coding-agent provider cases passing.
+The Linux archive matched published SHA-256
+`a71879cd9bb9fb2b673d22ffa110b96299e358754380e758d6741d806dfc789b`;
+the extracted immutable executable reported `0.104.56`.
+
+The full selected live run failed: 15 of 18 scenarios passed, with s15, s16 and s43 failing and
+no selected scenario skipped. Report:
+`.git/pi-audits/live-validation/2026-11-12T12-24-07-445Z/report.json`; preserved evidence:
+`/tmp/pi-live-gate-7TP9jX`. Startup on the read-only runtime succeeded, closing the earlier
+capture failure on this published binary. Both configured providers replied. This is not an
+overall live pass. Published 0.104.56 remains immutable; further production fixes need a new patch.
+
+**H-20261112-16 — public zoom ranges force needless navigation.** The root asked for `(0,9)`
+and received a power-of-two refusal. Aligned replacement reads returned only unmerged references,
+requiring thirteen further navigation calls to recover a tiny history. Public contiguous range
+navigation now decomposes into dyadic storage coverage and descends absent summaries within the
+same bounded call. Storage remains binary. Remaining message IDs provide a stable continuation
+while summaries merge and messages arrive. The composed J1 witness must cover root and worker
+results in the next provider request, complete ordered coverage across publication, bounded output,
+single-message clipping/images and cancellation. Focused navigation cases remain diagnostic.
+
+**H-20261112-17 — host FFF provisioning appears as worker protected-path changes.** The worker
+edited only `util.ts`; the host's post-edit duplicate review triggered a cold npm install under
+the agent's `bin/fff-node`. Nine resulting findings contaminated its claim and parent review.
+An initial time-window wrapper was rejected and reverted: root-prefix overlap could also hide
+unrelated, concurrent or later same-run mutations. The repair must publish known staged artifacts
+through exact transition attribution. Its composed worker-to-parent journey must retain those
+negative controls, including no-op staging. No broader path exemption is acceptable.
+
+**H-20261112-18 — live evaluation lacks task and native input boundaries.** s15 counted after
+file presence plus eight seconds, while its first task's worker review was still running. Its
+second count therefore included first-task calls. Neither timed-out s16 nor s43 prompt appears
+in its canonical session, so those runs do not establish routine or remote-ask production defects.
+The driver now passively observes the actual editor and existing canonical busy/queue predicates,
+confirms exact persisted owner input in its owning session, and waits for final owner response plus
+worker claim/outbox settlement before freezing counts. It neither injects via a model API nor
+blindly resends. Missing admission preserves editor, screen, input-event and session evidence.
+Watch creation uses the same settlement boundary. The ordinary `alpha` fixture permits one final
+line ending, and the edited `slugify` module is exercised inside a bounded VM in the native journey.
+
+The first focused native watch run using the observer passed in 331 seconds on the pinned
+published 0.104.56 binary: both event baselines, a 39-second idle interval without watch model
+use, one occurrence per external change, delivered notifications and deletion were verified.
+Report: `.git/pi-audits/live-validation/2026-11-12T13-12-27-677Z/report.json`; preserved evidence:
+`/tmp/pi-live-gate-jhM8MB`. This run precedes the final change from journal-silence settlement
+to canonical settlement. It is one scenario, not a fresh full gate or proof of new production code.
+
+The owner's explicit correction requires **shipped composed journeys** as acceptance evidence.
+Earlier focused counts prove their narrower owner checks; they cannot substitute for interacting
+runtime boundaries. The following is the current integration ledger, not a claim that the expanded
+journeys passed:
+
+| Repair family | Composed acceptance boundary | Current state |
+| --- | --- | --- |
+| Summary accounting, crash/ACK retention, shared admission, UTC cost | J1 summary accounting: actual root turns, physical replies, exact sidecars, meter replacements, virtual process death, next physical dispatch and shared-account peer | Prepared; expanded journey unrun |
+| Validated UTC decision sample | Same J1 paid-cap flow with a fixture clock-read cut, retained cap and forward-day control | Prepared; exact read cut unrun |
+| Contiguous zoom, append/merge, worker budget, images, cancellation | J1 range navigation plus existing J1 clipped n1 and J2 worker post-read revocation | Prepared; expanded journey unrun |
+| Knowledge request custody and dispatch freshness | J1 physical provider context after durable snapshot, privacy withdrawal, request terminal and healthy control | Prepared; expanded journey unrun |
+| Own versus other shared-tree reservation headroom | J7 real leader/child lifecycle and provider preflight reservations | Prepared; expanded journey unrun |
+| Changed mutation payload and exact successful replay | J1 real text tool transport, file mutations, replay/collision receipts in next provider request | Prepared; expanded journey unrun |
+| Abort listener cleanup | J1 actual owner runs: failed planning, failed stream delivery, retained caller listener and healthy cancellation | Prepared; expanded journey unrun |
+| Nested lane relocation and reuse | J9 existing X2 rerun now requests `src`, edits within that workspace and reuses it with unchanged base files | Prepared; expanded journey unrun |
+| Host provisioning attribution | Actual worker edit through duplicate review, installer, watcher, durable claim and root review | Implementation and journey in progress |
+| Read-only runtime capture | Published-binary native startup s1 crosses snapshot capture | Passed on 0.104.56; retain new full-gate check |
+
+Scheduler release/recovery identities now have an explicit J1 summary-recovery phase; omitted custom pricing is exercised through a real models.json registry in J1; final tree-attempt materialization is in J7. The new phases require aggregate execution. The live driver identity/scope negative controls retain their focused diagnostic gates. Keep focused diagnostic gates while closing those gaps. No clone
+sensitivity, coverage cap, test assertion or release gate may be weakened to make this ledger green.
+
+**H-20261112-19 — discarded context plans retain undispatched worker reservations.** The planner
+awaits preflight, then legitimately loops when a sibling reservation changes the accepted knowledge
+headroom. Its rejected-plan cleanup previously discarded only the context plan. The worker protocol
+still held the first preflight reservation, so its next preflight refused an apparent overlap despite
+zero physical transport. The repair gives the planner an exact-epoch undispatched cleanup capability,
+invoked on rejected-plan cleanup and preflight narrowing failure. It preserves the ordinary overlap
+guard, makes stale/duplicate cleanup harmless, refunds the successful-preflight counter exactly once,
+and runs plan cleanup even when reservation cleanup throws. Independent source review found no
+blocker. The literal-sibling J7 witness subsequently passed in both modes; the final aggregate remains pending.
+
+A focused native remote probe failed s14 and skipped s43 in
+`.git/pi-audits/live-validation/2026-11-12T13-21-12-000Z/report.json`.
+Durable link records on both sides said connected, and the remote pane reported the join. The main
+pane was hidden at its 12-row split height: its status output showed only the last line. Activating
+that same pane exposed `Machines: lab connected.` without another join or status command.
+This is a confirmed evaluator viewport failure, not a failed transport. Native typing now activates
+the task-owned pane and observes a fresh snapshot before sending text. The failed evidence is
+preserved at `/tmp/pi-live-gate-XocHx5`; its synthetic panes were closed after capture. A fresh
+s1/s14/s43 probe is running in `/tmp/pi-v0.104.56-native-ask-focused.log`.
+
+The first expanded J1 execution failed before later new phases: it reported one failed journey and
+nine intentionally filtered journeys. The text replay check looked only at the last native
+`toolResult` in the model view; text transport can carry its current receipt in another projected
+message. Its next-provider assertion now inspects the complete physical message context for the
+exact refusal, retaining the filesystem and canonical receipt checks. The fresh expanded J1 run
+is `/tmp/pi-composed-expanded-second.log`; it is not a passing result until it terminates.
+
+The focused native s1/s14/s43 rerun passed all three selected scenarios, with no selected skips:
+`.git/pi-audits/live-validation/2026-11-12T13-31-42-604Z/report.json`. It proves the published
+0.104.56 link, one ask lane with one applied answer/terminal notification, and the negative control
+that owner words in the remote chat create no job or lane. The earlier s43 timeout remains rejected
+as evidence of a remote-ask subsystem defect. Its preserved evidence is `/tmp/pi-live-gate-Qf3fHe`;
+both task-owned panes were closed afterward. This does not replace the next patch's full live gate.
+
+The second and third expanded J1 runs also failed before later memory/accounting phases. The
+native receipt selector and expected collision wording were fixture mismatches: the actual write
+owner retains the new payload and reports `PI_FILE_MUTATION_RETARGET write_collision`, and text
+transport projects the current receipt into its wire messages. The fixture now asserts the canonical
+receipt and that exact collision code in the next physical provider context, preserving file bytes.
+An early terminal assertion prevents a scripted provider failure from cascading into later lifecycle
+phases. Tool-free failed instructions require exact backlog intake judgments on the next owner
+submission; independent source review confirmed those phase scripts and their owner-word binding.
+These evaluator corrections still need execution; no prior failure is counted as a pass.
+
+The focused J7 sibling-reservation journey passed in **both** System One modes (one test passed,
+nine other journeys filtered) in 21.74 seconds. `/tmp/pi-j7-headroom-reviewed.log` is its authoritative
+result. It exercises the real leader and two children, own-reservation exclusion, the other child's
+exact headroom reduction, a stale plan's epoch cleanup/re-preflight, stale cleanup after the new
+epoch, and terminal handoff/teardown. Later H9 tree-attempt controls are added to that journey but
+were not present in this passing run; they need their own refreshed execution.
+
+**H-20261112-20 — a same-lane rerun loses workspace focus.** Extending the existing J9 X2 flow
+to a genuine `src` workspace exposed E14 followed by E14r, rather than the expected successful
+rerun. Initial report evidence also needed to be relative to that workspace; correcting it preserved
+the genuine authority refusal. The actual admission comparison in
+`/tmp/pi-j9-h20-authority-before.log` shows the original profile focused on `lane/src`, with
+read scope `[lane/src]`; reconstruction retains the same cwd but drops focus and compiles read
+scope `[/]`. The authority digest correctly refuses that widening. The reconstruction owner now
+preserves the focus distinction for same-lane retries and retains unfocused behavior. The fresh-lane variant also reproduced focus loss. Reconstruction now resolves the registered lane root, retains the cwd-relative focus and grant offsets, and includes explicit focus and non-root workspace placement in the authority digest. Existing unfocused-root digest material remains unchanged. Historical focused reruns without that provenance fail closed. The focused J9 journey passed both modes in `/tmp/pi-j9-placement-negative-v5.log`, including same-lane and fresh-lane success, a redirected `src` to `other` refusal with equal relative grant shapes, and joined removal of the clean unused lane. The final aggregate remains pending.
+
+**H-20261112-21 — a durable unknown settlement keeps retrying after session disposal.** The
+new accounting journey exposed repeated two-second alarms after an unknown physical response.
+`settle` had saved the exact unknown token, then called all-account reconciliation, whose unresolved
+bill correctly blocks admission but incorrectly makes the adapter retain the completed local
+settlement as a failed storage write. A known peer can finish its acknowledgement and suffer the
+same problem when another key is unknown. The spend owner now uses one reconciliation path with
+an optional exact key/token scope for local receipt/ACK completion; admission retains the full
+account scope and final locked check. A durable unknown completes its local disposition and keeps
+its durable usage evidence/admission fence. Local meter-write and ACK failures still retain retries.
+
+The reviewed H21 journey controls require zero alarms after unknown-owner disposal, one known
+peer charge/ACK while another project remains unknown, a real subsequent long input still blocked,
+and actual local write/ACK retries surviving disposal until storage recovers. Source review approved
+the repair. The first post-repair J1 run still failed in a fixture assumption about global timer
+allocation while two real sessions were active. Accounting now drives its shared quiet clock and
+awaits the actual provider, receipt, log and scheduler boundaries; it does not infer one session's
+quiet alarm from the global handle count. Existing single-owner retry and final zero-alarm checks
+remain strict. Full two-mode J1 acceptance is still pending.
+
+The interim production clone gate covered 2,229/2,259 eligible/owned files and detected one genuine
+predicate clone between `accounting-fragments.ts` and `host-tree-publication.ts`; it failed rather
+than suppressing that clone. File-size ratchets also failed for the added wiring/provisioning in
+`agent-session.ts`, `sdk.ts` and `tools-manager.ts`. The required owner extractions and shared
+nanosecond-accurate file-version comparison are being applied, with no raised ceilings or weakened
+scanner sensitivity. These are blockers until the final static gate passes.
+
+
+The H9 final tree-attempt journey now runs inside J7: real leader dispatch and admission,
+concurrent peer materialization, refusal at the filled cap, and a healthy one-slot control.
+It passed both modes in `/tmp/pi-j7-h9-optional.log` (one journey passed, nine filtered).
+
+The redirected J9 control also identified a source-level cleanup defect: discard received a
+nested workspace cwd but looked up only exact lane roots. It now resolves the registered root
+before applying the existing bound-lane and dirty-lane safety checks. Early cleanup failures
+were fixture artifacts (a shared-directory admission, then synthetic dirty files); they are not
+runtime proof of a leak. The corrected real fresh-lane control removes only its synthetic files,
+awaits actual discard and asserts directory removal. No forced deletion bypasses the safety guard.
+
+The later static clone run passed with 2,231/2,261 eligible/owned production files, 2,132 detection
+files, zero clones, the existing five-line/fifty-token detection floor, independent one-token
+coverage, and unchanged size caps. FFF installation now has a dedicated owner; nanosecond file
+version comparison has one shared implementation. File ceilings were lowered for the extracted
+owners. Final static/type and all-ten-journey gates still need a frozen-tree run.
+
+
+The final allocation review distinguished a live cancellation from crash recovery. New J1
+summary-recovery flows hold a real claimed leaf at its store read, dispose its owner after stop
+begins, assert `running/attempts=1` becomes `ready/attempts=0`, then reopen and require physical
+publication. Another flow captures an absent key while summary settings are invalid, changes the
+actual settings during that read, and receives a measured empty physical response: it must retain
+finite backoff without a recovery-only row and retry after real owner arrivals. The matching-key
+control must remain held with unchanged settings, then publish through a newly selected summary
+model. No direct scheduler call manufactures those transitions. Architect source review found no
+causal blocker; execution is pending.
+
+
+The corrected pre-H22 tree passed all ten composed journeys in both System One modes
+(`/tmp/pi-followup-all-journeys-adapter-fixed.log`, exit 0, 801.56 seconds), together with the full
+static gate (`/tmp/pi-followup-adapter-fixed-static.log`). Earlier failures exposed fixture lifecycle
+and ordering assumptions: actual worker reports needed changed-file evidence; cross-phase request
+counts needed phase boundaries; simulated global crashes needed prior owners joined and certified
+before capture; and retention age scenarios needed final explicit mtimes after marker creation.
+The fixtures retain their strict warning, script-consumption, resource and expected-policy assertions.
+
+**H-20261112-22 — mixed host-journal formats disagree on retention.** The legacy settings appender
+truncated only by line count after crossing the byte cap, while managed publication batches applied
+both limits. A near-cap batch followed by a legacy settings transition could leave the journal above
+2 MiB with fewer than 512 rows; attribution then read it whole. Both formats now share one locked,
+atomic, whole-line compaction owner. Reads use a stable bounded tail, remove partial record boundaries
+before decoding and provide no attribution when the snapshot cannot be proved. Older oversized
+journals can recover through an ordinary successful host write without an unbounded read.
+
+The same review found the batch reader accepted valid subsets of malformed batches. It now shares
+one transition validator with legacy records and accepts a batch only when every entry validates and
+its cardinality is within the publication limit. This preserves format integrity; the journal is
+observational evidence, not protection against a process able to forge an entirely valid record.
+
+J1 adds actual persistent settings writes beside worker B's real FFF publication and protected-path
+watch: recovery of a historical oversized journal, a legacy byte-cap crossing below the line cap,
+whole current-batch/settings-chain retention, and a malformed batch that must not hide the actual
+detached-write finding in the final claim. Atomic journal failure still must reach the exact rename
+boundary and roll the publication back. Source review and type checking pass; H22 journey execution
+and the final release/live gates remain pending.
+
+
+The first H22 aggregate passed the other nine journeys in both modes but failed J1's new recovery
+oracle (`/tmp/pi-h22-all-journeys.log`, exit 1): the fixture inspected immediately after `setPlain`,
+which queues persistence. The corrected flow awaits the real settings `flush` and checks its stored
+errors before inspecting bytes and exact transition identities. J1 then passed in both modes
+(`/tmp/pi-h22-j1-flush-fixed.log`, exit 0, 550.44 seconds; nine other journeys intentionally filtered).
+This is composed evidence from the real settings storage, publisher, worker watch, report and handoff.
+
+The final parser review also requires the known batch discriminator to select batch validation
+before legacy shape matching. A malformed declared batch cannot fall through as a legacy record
+because extra top-level fields happen to match it. The existing detached-write witness now carries
+those fields as well. That final narrow guard is source-reviewed and will be verified by the exact
+source commit's complete Linux/Windows CI before release preparation; it is not counted as covered
+by the preceding local J1 execution.

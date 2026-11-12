@@ -178,7 +178,6 @@ import {
 } from "./learning/auto-learn-proposals.ts";
 import { DURABLE_LEARNING_MEMORY_POLICY_VERSION, DurableLearningState } from "./learning/durable-learning-state.ts";
 import type { LearningAuditRecord } from "./learning/learning-audit.ts";
-import type { DemandSignals, ReflectionResult } from "./learning/reflection-engine.ts";
 import { appendLearningDecisionSnapshot, getLearningDecisionSnapshots } from "./learning/session-learning-decision.ts";
 import { type CurationProposals, SkillCurator } from "./learning/skill-curator.ts";
 import { LocalPrefixWarmController } from "./local-prefix-warm-controller.ts";
@@ -827,6 +826,7 @@ export class AgentSession {
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
 			getExtensionUIContext: () => this._extensionUIContext,
 			getToolArtifactStore: () => this._pipeline.getToolArtifactStore(),
+			codeDuplicateFileLister: config.codeDuplicateFileLister,
 			getSessionImageStore: () => this._getSessionImageStore(),
 			sendOwnerItemsMessage: (items, content, lease) =>
 				this._messageDelivery.deliverCustomMessage(
@@ -5090,17 +5090,7 @@ export class AgentSession {
 	}
 
 	/** Explicit compatibility/application reflection pass. */
-	async runReflectionPass(input: {
-		signals: DemandSignals;
-		recentTurnText: string;
-		model?: Model<Api>;
-		thinkingLevel?: ThinkingLevel;
-		signal?: AbortSignal;
-		/** Stable id so a duplicate scheduling/retry of the same pass can't double-count its cost. */
-		reportId?: string;
-		/** True only when every turn in this pass explicitly asked Pi to remember durable information. */
-		explicitUserMemoryInstruction?: boolean;
-	}): Promise<ReflectionResult | null> {
+	async runReflectionPass(input: Parameters<ReflectionController["runReflectionPass"]>[0]) {
 		return this._reflection.runReflectionPass(input);
 	}
 

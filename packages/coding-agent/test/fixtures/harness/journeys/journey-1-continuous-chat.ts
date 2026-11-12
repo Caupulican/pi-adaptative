@@ -15,6 +15,7 @@ import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture
  * The library's CJS export object is the one production's default import receives, so its functions
  * are rebound in place rather than through an ESM module mock.
  */
+import { verifyRangeJourney } from "./journey-1-range-navigation.ts";
 import {
 	ICM_INTAKE_JUDGMENTS,
 	icmContinuousSettings,
@@ -144,6 +145,7 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 				world.warnings.slice(warningMark).filter((message) => message === warning),
 				`${label}: the refusal is reported once`,
 			).toEqual([warning]);
+			if (label === "icm-missing-summary-model") await verifyRangeJourney(world, created, caseAgentDir, warning);
 			expect(await world.disposeSessionInBody(created.session)).toBeUndefined();
 		};
 		await refusedSummaryCase(
@@ -407,6 +409,16 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 					content: [{ type: "text", text: "tool: zoom(2, 1) page 0; echo: zoom(2, 1) raw clipped source." }],
 				},
 			},
+			{
+				name: "icm-merge-0-8",
+				check: (request) => {
+					if (!JSON.stringify(request.context.messages).includes("Compaction: merge lines 0+4 and 4+4"))
+						throw new Error("worker-c did not receive the expanded root zoom frontier for messages 0 to 7");
+				},
+				reply: {
+					content: [{ type: "text", text: "The owner recorded the retry limit and inspected the summary tree." }],
+				},
+			},
 		);
 		const icmNavOutputs: Record<string, string> = {};
 		let turn2ChatView = "";
@@ -514,8 +526,14 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			"worker-c:icm-merge-8-9-accepted",
 		);
 		await icmWaitForChatIdle(world, icmAgentDir, 13);
+		expect(world.provider.reached.slice(merge89RequestMark)).toContain("worker-c:icm-merge-0-8");
 
 		const icmRecords = icmReadContinuousRecords(world, icmStore);
+		const snapshots = icmRoot.sessionManager.getEntries().filter((entry) => entry.type === "request_snapshot");
+		expect(
+			snapshots.some((entry) => entry.requestOnlyProjectionReplacement === true),
+			"a knowledge-only replacement keeps its exact request-only prefix custody evidence",
+		).toBe(true);
 		expect(JSON.stringify(icmRecords), "knowledge projections are never re-ingested into chat history").not.toContain(
 			"K-CORRECTED-PREFERENCE",
 		);
@@ -563,6 +581,79 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 			date3MatchesRecord: true,
 			merge89RetriedOnWorkerC: true,
 		});
+		// Hold only after the real owner has recorded the accepted snapshot, before its physical provider handoff.
+		const dispatchFact = seed("K-DISPATCH", { text: "K-DISPATCH-PRIVATE" });
+		const snapshotSeen = createBarrier();
+		const releaseSnapshot = createBarrier();
+		const originalSnapshot = icmRoot.session.agent.onProviderRequestSnapshot;
+		let snapshotText = "";
+		let snapshotId = "";
+		const requestMark = world.provider.requests.length;
+		icmRoot.session.agent.onProviderRequestSnapshot = async (snapshot, signal) => {
+			await originalSnapshot?.(snapshot, signal);
+			snapshotId = snapshot.requestId;
+			snapshotText = JSON.stringify(snapshot.context.messages);
+			snapshotSeen.release();
+			await releaseSnapshot.promise;
+		};
+		try {
+			// This turn fails before provider dispatch; its owner-input intake is deferred to the next turn.
+			world.systemOne.enterPhase("icm-dispatch-withdrawal", {});
+			const held = icmRoot.session.prompt("Use the current dispatch preference.");
+			await withDeadline(trace, "ICM dispatch snapshot", snapshotSeen.promise);
+			expect(snapshotText).toContain("K-DISPATCH-PRIVATE");
+			knowledge.forget(
+				dispatchFact.id,
+				1,
+				[
+					{
+						sessionId: "prior-owner",
+						sourceId: "dispatch/forget",
+						quote: "Forget this preference",
+						at: "2023-01-01T00:00:00.000Z",
+					},
+				],
+				() => {},
+			);
+			releaseSnapshot.release();
+			await withDeadline(trace, "ICM withdrawn dispatch settles", held);
+			expect(
+				world.provider.requests.slice(requestMark).filter((request) => request.model.id === "root"),
+			).toHaveLength(0);
+			const last = icmRoot.session.messages.at(-1);
+			expect(last?.role === "assistant" ? last.stopReason : undefined).toBe("error");
+			const entries = icmRoot.sessionManager.getEntries();
+			expect(
+				entries.filter((entry) => entry.type === "request_snapshot" && entry.requestId === snapshotId),
+			).toHaveLength(1);
+			expect(
+				entries.filter((entry) => entry.type === "provider_request_terminal" && entry.requestId === snapshotId),
+			).toMatchObject([{ outcome: "error" }]);
+		} finally {
+			releaseSnapshot.release();
+			icmRoot.session.agent.onProviderRequestSnapshot = originalSnapshot;
+		}
+		world.provider.enqueue("root", {
+			name: "icm-dispatch-withdrawal-control",
+			check: (request) => expect(JSON.stringify(request.context.messages)).not.toContain("K-DISPATCH-PRIVATE"),
+			reply: { content: [{ type: "text", text: "The withdrawn preference is absent." }] },
+		});
+		world.systemOne.enterPhase(
+			"icm-dispatch-withdrawal-control",
+			{ ...ICM_INTAKE_JUDGMENTS, carries_0: { kind: "noul", probability: 0.02 } },
+			{
+				expect: (request) => {
+					const state = request.state as Record<string, unknown>;
+					if ("owner_messages" in state)
+						expect(state.owner_messages).toEqual(["Use the current dispatch preference."]);
+				},
+			},
+		);
+		await withDeadline(
+			trace,
+			"ICM dispatch withdrawal control",
+			icmRoot.session.prompt("Continue with current knowledge."),
+		);
 		world.faultMatrix.witness("R10", { control: false });
 		expect(await world.disposeSessionInBody(icmRoot.session), "the ICM root disposes cleanly").toBeUndefined();
 		await verifyTurnRetrySpacing(world, `${icmAgentDir}-r10s`);
@@ -963,6 +1054,24 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		60_000,
 	);
 	await failuresDisclosed(1);
+	const assertOrdinaryRetry = (attempts: number): void => {
+		const row = world.guard.peekSqlite(
+			store.queueDatabase,
+			"SELECT status, attempts, retry_after FROM work WHERE level = 0 AND ordinal = 1",
+		)?.[0];
+		expect(row).toMatchObject({ status: "blocked", attempts });
+		expect(Number(row?.retry_after), "ordinary transport failure has a finite retry generation").toBeLessThan(
+			Number.MAX_SAFE_INTEGER,
+		);
+		expect(
+			world.guard.peekSqlite(
+				store.queueDatabase,
+				"SELECT level, ordinal FROM recovery_only WHERE level = 0 AND ordinal = 1",
+			),
+			"an ordinary transport failure does not create a recovery-only hold",
+		).toEqual([]);
+	};
+	assertOrdinaryRetry(1);
 	expect(
 		{
 			armed: world.timers.armedDelays("continuous-chat"),
@@ -1123,6 +1232,7 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 			60_000,
 		);
 		await failuresDisclosed(2);
+		assertOrdinaryRetry(2);
 		expect(
 			{
 				armed: world.timers.armedDelays("continuous-chat"),

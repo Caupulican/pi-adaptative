@@ -15,7 +15,7 @@ import { extname, isAbsolute, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { Worker } from "node:worker_threads";
 import { isDecisivelyTrue, type NoulBand, noulBand, settledAnswer } from "../decision/noul.ts";
-import { defaultFffSearchBackend } from "../tools/fff-search-backend.ts";
+import { defaultFffSearchBackend, type FffSearchBackend } from "../tools/fff-search-backend.ts";
 import { resolveManagedSearchTool } from "../tools/managed-search-tool.ts";
 import {
 	type ArenaBuffers,
@@ -245,37 +245,62 @@ function toPosixPath(value: string): string {
 }
 
 /**
- * The harness's resident FFF index when it is already warm (never waiting on an index build, the same
+ * The session's resident FFF index when it is already warm (never waiting on an index build, the same
  * non-blocking acquisition the search tools use), the managed ripgrep file listing otherwise. Both
  * honor .gitignore. This is internal enumeration, read whole; a failure lists nothing.
  */
-export const harnessFileLister: FileLister = async (root, glob, signal) => {
-	try {
-		const finder = defaultFffSearchBackend.peekFinder?.(root);
-		if (finder && !finder.isDestroyed) {
-			const result = finder.glob(globToFffPattern(glob), { pageSize: 100_000 });
-			if (result.ok) return result.value.items.map((item) => toPosixPath(item.relativePath));
+export interface HarnessFileListerProcessIo {
+	resolveRg(): Promise<string>;
+	execFiles(
+		command: string,
+		args: string[],
+		options: { cwd: string; maxBuffer: number; signal?: AbortSignal },
+		callback: (error: Error | null, stdout: string | Buffer) => void,
+	): void;
+}
+
+export function createHarnessFileLister(
+	backend: Pick<FffSearchBackend, "peekFinder">,
+	processIo: HarnessFileListerProcessIo = {
+		resolveRg: () => resolveManagedSearchTool("rg"),
+		execFiles: (command, args, options, callback) => execFile(command, args, options, callback),
+	},
+): FileLister {
+	return async (root, glob, signal) => {
+		try {
+			const finder = backend.peekFinder?.(root);
+			if (finder && !finder.isDestroyed) {
+				const result = finder.glob(globToFffPattern(glob), { pageSize: 100_000 });
+				if (result.ok) return result.value.items.map((item) => toPosixPath(item.relativePath));
+			}
+		} catch {
+			// A broken index is unavailable for this listing, never a failure of the edit.
 		}
-	} catch {
-		// A broken index is unavailable for this listing, never a failure of the edit.
-	}
-	try {
-		const rg = await resolveManagedSearchTool("rg");
-		return await new Promise<string[]>((resolve) => {
-			execFile(rg, ["--files", "-g", glob], { cwd: root, maxBuffer: 64_000_000, signal }, (error, stdout) => {
-				if (error) return resolve([]);
-				resolve(
-					String(stdout)
-						.split("\n")
-						.filter(Boolean)
-						.map((line) => toPosixPath(line)),
+		try {
+			const rg = await processIo.resolveRg();
+			return await new Promise<string[]>((resolve) => {
+				processIo.execFiles(
+					rg,
+					["--files", "-g", glob],
+					{ cwd: root, maxBuffer: 64_000_000, signal },
+					(error, stdout) => {
+						if (error) return resolve([]);
+						resolve(
+							String(stdout)
+								.split("\n")
+								.filter(Boolean)
+								.map((line) => toPosixPath(line)),
+						);
+					},
 				);
 			});
-		});
-	} catch {
-		return [];
-	}
-};
+		} catch {
+			return [];
+		}
+	};
+}
+
+export const harnessFileLister: FileLister = createHarnessFileLister(defaultFffSearchBackend);
 
 export interface DuplicateCandidate {
 	readonly unit: CodeUnit;

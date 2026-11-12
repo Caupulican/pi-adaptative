@@ -8,6 +8,7 @@
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import type { ModelRouterController } from "../model-router-controller.ts";
 import { AnswerClaimChecker } from "./claim-delivery.ts";
+import type { FileLister } from "./code-duplicates.ts";
 import { CodeDuplicateReviewer } from "./code-duplicates.ts";
 import type { SystemOneController } from "./controller.ts";
 import {
@@ -24,6 +25,7 @@ export interface SettlementJudgesDeps {
 	resolveExpensiveModel(): ReturnType<ModelRouterController["resolveExpensiveModel"]>;
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	warn(message: string): void;
+	lister?: FileLister;
 	/** Claims the root's own answer check left open, delivered to the owner; only a session with a root answer has them. */
 	deliverToOwner?(items: readonly string[]): void;
 }
@@ -38,6 +40,7 @@ export class SettlementJudges {
 		this.codeDuplicates = new CodeDuplicateReviewer({
 			getController: () => this.deps.getSystemOneController(),
 			warn: (message) => this.deps.warn(message),
+			lister: this.deps.lister,
 		});
 		const deliverToOwner = deps.deliverToOwner;
 		this.answerClaims = new AnswerClaimChecker({

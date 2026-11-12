@@ -17,13 +17,11 @@ import {
 } from "./continuous-chat-contracts.ts";
 import { truncateContinuousChatUtf8 } from "./continuous-chat-prompt.ts";
 import {
-	CONTINUOUS_CHAT_NOT_MERGED,
-	CONTINUOUS_CHAT_NOT_SUMMARIZED,
 	type ContinuousChatNodeCoordinate,
 	type ContinuousChatTreeNode,
+	continuousChatNodeFirstMessage,
 	continuousChatNodeLabel,
 	continuousChatParentCoordinate,
-	renderContinuousChatPendingLine,
 	renderContinuousChatViewLine,
 } from "./continuous-chat-tree.ts";
 import { assertMemoryReadActive, type MemoryReadContext } from "./memory-read-context.ts";
@@ -42,6 +40,7 @@ export const CONTINUOUS_CHAT_WORKER_NAME_MAX_CHARACTERS = 128;
 
 const DATE_ARGUMENT_KEYS: readonly string[] = ["id"];
 const ZOOM_ARGUMENT_KEYS: readonly string[] = ["id", "n", "page"];
+const ZOOM_RANGE_MAX_READS = 128;
 
 /** Committed tree nodes, logged messages and their images. `ContinuousChatStore` satisfies it structurally. */
 export interface ContinuousChatNavigationSource {
@@ -81,17 +80,15 @@ export type ContinuousChatNavigationCommand =
 /** Why a command was refused. Refusals are returned as data, never thrown. */
 export type ContinuousChatNavigationRejection =
 	| "invalid-arguments"
-	| "not-power-of-two"
-	| "misaligned"
 	| "out-of-range"
 	| "incomplete"
 	| "not-found"
 	| "page-out-of-range"
 	| "worker-log-unavailable";
 
-/** Outcome of a command: two child lines, one message page, a date, or one worker-log page. */
+/** Outcome of a command: a range, one message page, a date, or one worker-log page. */
 export type ContinuousChatNavigationResult =
-	| { status: "children"; id: number; n: number; lines: [string, string] }
+	| { status: "range"; lines: string[]; continuation?: { id: number; n: number } }
 	| {
 			status: "message";
 			id: number;
@@ -226,7 +223,7 @@ export function parseContinuousChatNavigationCommand(
 	const n = args.n;
 	if (!isNonNegativeSafeInteger(n) || n === 0) {
 		return invalidArguments(
-			`zoom with a message id requires n, a positive safe integer (use n: 1 for message ${id}, or a power of two where id is a multiple of n).`,
+			`zoom with a message id requires n, a positive safe integer (use n: 1 for message ${id}).`,
 		);
 	}
 	return { tool: "zoom", kind: "node", id, n, page };
@@ -268,7 +265,7 @@ export class ContinuousChatNavigator {
 		if (command.tool === "date") return this.lookupDate(command.id, context);
 		if (command.kind === "worker") return this.zoomWorker(command.name, command.page, context);
 		if (command.n === 1) return this.zoomMessage(command.id, command.page, context);
-		return this.zoomNode(command.id, command.n, command.page, context);
+		return this.zoomRange(command.id, command.n, command.page, context);
 	}
 
 	private async lookupDate(id: number, context?: MemoryReadContext): Promise<ContinuousChatNavigationResult> {
@@ -319,87 +316,90 @@ export class ContinuousChatNavigator {
 		return message;
 	}
 
-	private async zoomNode(
+	/** Opens a bounded range without making the persisted summary tree non-dyadic. */
+	private async zoomRange(
 		id: number,
 		n: number,
 		page: number,
 		context?: MemoryReadContext,
 	): Promise<ContinuousChatNavigationResult> {
-		const level = Math.round(Math.log2(n));
-		if (2 ** level !== n) {
-			return rejected(
-				"not-power-of-two",
-				`n must be a power of two, got ${n} (use n: 1 for message ${id}, or a power-of-two block where id is a multiple of n).`,
-			);
-		}
-		if (id % n !== 0) {
-			const alignedId = id - (id % n);
-			return rejected(
-				"misaligned",
-				`id ${id} is not a multiple of n ${n} (use id: ${alignedId}, n: ${n} for that block, or id: ${id}, n: 1 for message ${id}).`,
-			);
-		}
-		if (!Number.isSafeInteger(id + n - 1)) {
-			return rejected("out-of-range", `Line ${id}+${n} exceeds the safe message-id range.`);
-		}
-		const coordinate = { level, ordinal: id / n };
-		const label = continuousChatNodeLabel(coordinate);
-		if (page !== 0) return rejected("page-out-of-range", `Line ${label} has no pages; page must be 0.`);
-		const node = await this.source.readNode(coordinate, context);
+		if (n - 1 > Number.MAX_SAFE_INTEGER - id)
+			return rejected("out-of-range", `Range ${id}+${n} exceeds the safe message-id range.`);
+		if (page !== 0)
+			return rejected("page-out-of-range", "Ranges have no numbered pages; use the remaining range instead.");
+		const end = id + (n - 1);
+		const lastDate = await this.source.readMessageDate(end, context);
 		assertMemoryReadActive(context);
-		if (node === undefined) {
-			const lastDate = await this.source.readMessageDate(id + n - 1, context);
+		if (lastDate === undefined) return rejected("out-of-range", `Messages ${id} to ${end} are not all logged.`);
+
+		type Item = { coordinate: ContinuousChatNodeCoordinate; expand: boolean; required: boolean };
+		const cover: Item[] = [];
+		let cursor = id;
+		while (cursor <= end) {
+			const remaining = end - cursor + 1;
+			let level = Math.min(52, Math.floor(Math.log2(remaining)));
+			while (2 ** level > remaining) level--;
+			while (cursor % 2 ** level !== 0) level--;
+			const count = 2 ** level;
+			cover.push({ coordinate: { level, ordinal: cursor / count }, expand: true, required: false });
+			cursor += count;
+		}
+		const pending = cover.reverse();
+		const lines: string[] = [];
+		let reads = 1;
+		let next = id;
+		let bytes = 0;
+		// Reserve enough room for the longest possible safe-integer continuation, including separators.
+		const textBudget = this.pageBytes - 128;
+		if (textBudget < 896)
+			throw new RangeError("Zoom range budget is too small for a bounded summary and continuation.");
+		while (pending.length > 0 && reads < ZOOM_RANGE_MAX_READS) {
+			const item = pending.pop()!;
+			const coordinate = item.coordinate;
+			const first = continuousChatNodeFirstMessage(coordinate);
+			const count = 2 ** coordinate.level;
+			const node = await this.source.readNode(coordinate, context);
+			reads++;
 			assertMemoryReadActive(context);
-			if (lastDate === undefined) {
-				return rejected("out-of-range", `Messages ${id} to ${id + n - 1} are not all logged.`);
+			if (!node && item.required)
+				return rejected("incomplete", `Line ${continuousChatNodeLabel(coordinate)} is missing.`);
+			if (coordinate.level > 0 && (!node || item.expand)) {
+				const left = { level: coordinate.level - 1, ordinal: coordinate.ordinal * 2 };
+				const right = { level: coordinate.level - 1, ordinal: coordinate.ordinal * 2 + 1 };
+				if (node) {
+					const parent = node.children && continuousChatParentCoordinate(node.children[0], node.children[1]);
+					if (!parent || parent.level !== coordinate.level || parent.ordinal !== coordinate.ordinal)
+						return rejected(
+							"incomplete",
+							`Line ${continuousChatNodeLabel(coordinate)} does not cover its two children.`,
+						);
+				}
+				pending.push({ coordinate: right, expand: false, required: !!node });
+				pending.push({ coordinate: left, expand: false, required: !!node });
+				continue;
 			}
-			// Not merged yet: the line still opens into its two children, each a summary or a pending line.
-			return this.unmergedChildren(coordinate, id, n, context);
+			let line: string;
+			if (node) {
+				line = renderContinuousChatViewLine(node);
+				if (coordinate.level === 0) line += ` [full message and images: zoom({id:${first},n:1,page:0})]`;
+			} else {
+				if (reads >= ZOOM_RANGE_MAX_READS) break;
+				const record = await this.source.readMessageById(first, context);
+				reads++;
+				assertMemoryReadActive(context);
+				if (!record) return rejected("not-found", `No message ${first}.`);
+				const reference = `zoom({id:${first},n:1,page:0})`;
+				line = `${first}+1|${record.kind}: ${record.text}${record.images?.length ? ` [images: ${reference}]` : ""}`;
+				if (record.toolClipping || Buffer.byteLength(line, "utf8") > textBudget)
+					line = `${first}+1|${record.toolClipping ? "Clipped tool output" : "Full message"}: ${reference}`;
+			}
+			const lineBytes = Buffer.byteLength(line, "utf8") + (lines.length ? 1 : 0);
+			if (bytes + lineBytes > textBudget) break;
+			lines.push(line);
+			bytes += lineBytes;
+			next = first + count;
 		}
-		const children = node.children;
-		if (children === undefined) return rejected("incomplete", `Line ${label} has no children.`);
-		// The parent of two adjacent aligned siblings is exact: it equals this line only when the children are
-		// {level-1, 2*ordinal} and {level-1, 2*ordinal+1}.
-		const parent = continuousChatParentCoordinate(children[0], children[1]);
-		if (parent === undefined || parent.level !== level || parent.ordinal !== coordinate.ordinal) {
-			return rejected("incomplete", `Line ${label} does not cover its two children.`);
-		}
-		const left = await this.source.readNode(children[0], context);
-		assertMemoryReadActive(context);
-		const right = await this.source.readNode(children[1], context);
-		assertMemoryReadActive(context);
-		if (left === undefined || right === undefined) {
-			return rejected("incomplete", `Line ${label} is missing a child line.`);
-		}
-		return {
-			status: "children",
-			id,
-			n,
-			lines: [renderContinuousChatViewLine(left), renderContinuousChatViewLine(right)],
-		};
-	}
-
-	/** A coordinate with no node opens into its two children: a child's summary, or its pending line while unmerged. */
-	private async unmergedChildren(
-		coordinate: ContinuousChatNodeCoordinate,
-		id: number,
-		n: number,
-		context?: MemoryReadContext,
-	): Promise<ContinuousChatNavigationResult> {
-		const left = { level: coordinate.level - 1, ordinal: coordinate.ordinal * 2 };
-		const right = { level: coordinate.level - 1, ordinal: coordinate.ordinal * 2 + 1 };
-		const lines: [string, string] = [await this.childLine(left, context), await this.childLine(right, context)];
-		return { status: "children", id, n, lines };
-	}
-
-	private async childLine(child: ContinuousChatNodeCoordinate, context?: MemoryReadContext): Promise<string> {
-		const node = await this.source.readNode(child, context);
-		assertMemoryReadActive(context);
-		if (node !== undefined) return renderContinuousChatViewLine(node);
-		return renderContinuousChatPendingLine(
-			child,
-			child.level === 0 ? CONTINUOUS_CHAT_NOT_SUMMARIZED : CONTINUOUS_CHAT_NOT_MERGED,
-		);
+		return { status: "range", lines, ...(next <= end ? { continuation: { id: next, n: end - next + 1 } } : {}) };
 	}
 
 	private async zoomWorker(
@@ -423,8 +423,13 @@ export class ContinuousChatNavigator {
 /** Renders a result as the compact, deterministic text returned to the model. */
 export function renderContinuousChatNavigationResult(result: ContinuousChatNavigationResult): string {
 	switch (result.status) {
-		case "children":
-			return result.lines.join("\n");
+		case "range":
+			return [
+				...result.lines,
+				...(result.continuation
+					? [`Continue: zoom({id:${result.continuation.id},n:${result.continuation.n}})`]
+					: []),
+			].join("\n");
 		case "message": {
 			const lines = [
 				`message ${result.id} (${result.kind}, ${result.date}) page ${result.page + 1}/${result.pageCount}`,

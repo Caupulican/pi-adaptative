@@ -3198,6 +3198,14 @@ class HarnessOwnerTimers implements TimerPort {
 	private readonly armWaiters: Array<(delayMs: number) => void> = [];
 	/** The fixed instant this owner's clock starts at (`PINNED_CLOCK_OWNERS`); the wall clock when undefined. */
 	private readonly pinnedAt: number | undefined;
+	private scriptedRead:
+		| {
+				matches: () => boolean;
+				remaining: number;
+				deltaMs: number;
+				witness: { samples: number; before?: number; after?: number };
+		  }
+		| undefined;
 
 	constructor(wall: boolean, pinnedAt?: number) {
 		this.wall = wall;
@@ -3205,7 +3213,31 @@ class HarnessOwnerTimers implements TimerPort {
 	}
 
 	now(): number {
-		return (this.pinnedAt ?? Date.now()) + this.advancedMs;
+		const value = (this.pinnedAt ?? Date.now()) + this.advancedMs;
+		const script = this.scriptedRead;
+		if (script?.matches()) {
+			script.witness.samples++;
+			if (--script.remaining === 0) {
+				script.witness.before = value;
+				this.advancedMs += script.deltaMs;
+				script.witness.after = value + script.deltaMs;
+				this.scriptedRead = undefined;
+			}
+		}
+		return value;
+	}
+
+	/** Shift immediately after the nth matched clock sample, without running scheduled alarms. */
+	scriptClockShift(
+		matches: () => boolean,
+		nth: number,
+		deltaMs: number,
+	): { samples: number; before?: number; after?: number } {
+		if (this.scriptedRead || !Number.isSafeInteger(nth) || nth < 1 || !Number.isSafeInteger(deltaMs))
+			throw new Error("Invalid or overlapping scripted clock shift");
+		const witness: { samples: number; before?: number; after?: number } = { samples: 0 };
+		this.scriptedRead = { matches, remaining: nth, deltaMs, witness };
+		return witness;
 	}
 
 	setTimeout(callback: () => void, delayMs: number, options?: Parameters<TimerPort["setTimeout"]>[2]): number {
@@ -3299,6 +3331,16 @@ export class HarnessTimers implements TimerSource {
 
 	port(owner: TimerOwner): TimerPort {
 		return this.ownerTimers(owner);
+	}
+
+	/** A deterministic clock discontinuity after a selected read; it never fires timers. */
+	scriptClockShift(
+		owner: TimerOwner,
+		matches: () => boolean,
+		nth: number,
+		deltaMs: number,
+	): { samples: number; before?: number; after?: number } {
+		return this.ownerTimers(owner).scriptClockShift(matches, nth, deltaMs);
 	}
 
 	/** The delay each alarm of `owner` still armed was armed with, in arm order. */
@@ -3573,6 +3615,8 @@ export class HarnessWorld {
 		options: {
 			readonly sessionManager?: SessionManager;
 			readonly agentDir?: string;
+			/** Project directory for this owner; defaults to the world's project. */
+			readonly cwd?: string;
 			/** Caller-owned SDK model metadata; omitted keeps the world's scripted descriptor. */
 			readonly model?: CreateAgentSessionOptions["model"];
 			/** A real SDK registry containing every scripted routing track; omitted keeps the world's registry and metadata. */
@@ -3622,6 +3666,8 @@ export class HarnessWorld {
 			};
 			/** This session's interposition on each worker terminal delivery (the SDK option); unset delivers directly. */
 			readonly workerTerminalDelivery?: CreateAgentSessionOptions["workerTerminalDelivery"];
+			/** Per-session semantic duplicate source enumeration, scoped to this root reviewer. */
+			readonly codeDuplicateFileLister?: CreateAgentSessionOptions["codeDuplicateFileLister"];
 			/** How many terminal background tool tasks this session keeps in memory before the oldest are evicted; unset keeps the SDK default. */
 			readonly maxRetainedTerminalTasks?: number;
 		} = {},
@@ -3632,7 +3678,8 @@ export class HarnessWorld {
 		getExtensionRunner: CreateAgentSessionResult["getExtensionRunner"];
 		extensionsResult: CreateAgentSessionResult["extensionsResult"];
 	}> {
-		const sessionManager = options.sessionManager ?? SessionManager.inMemory(HARNESS_PROJECT_CWD);
+		const cwd = options.cwd ?? HARNESS_PROJECT_CWD;
+		const sessionManager = options.sessionManager ?? SessionManager.inMemory(cwd);
 		const modelRegistry = options.modelRegistry ?? this.modelRegistry;
 		const routerModels = SCRIPTED_TRACKS.map((id) => {
 			if (options.modelRegistry === undefined) return { model: this.provider.model(id) };
@@ -3684,7 +3731,7 @@ export class HarnessWorld {
 		let extensionLoader: DefaultResourceLoader | undefined;
 		if (options.extensionFactories !== undefined || options.extensionReadFailure !== undefined) {
 			extensionLoader = new DefaultResourceLoader({
-				cwd: HARNESS_PROJECT_CWD,
+				cwd,
 				agentDir,
 				settingsManager,
 				extensionFactories: [...(options.extensionFactories ?? [])],
@@ -3705,7 +3752,7 @@ export class HarnessWorld {
 			};
 		}
 		const { session, getExtensionRunner, extensionsResult } = await createAgentSession({
-			cwd: HARNESS_PROJECT_CWD,
+			cwd,
 			agentDir,
 			// Closing warnings (a session's terminal disclosures) reach the world's warnings, not the process's stderr, unless the creation
 			// supplies its own sink (`null`: none).
@@ -3730,6 +3777,9 @@ export class HarnessWorld {
 			...(options.workerTerminalDelivery === undefined
 				? {}
 				: { workerTerminalDelivery: options.workerTerminalDelivery }),
+			...(options.codeDuplicateFileLister === undefined
+				? {}
+				: { codeDuplicateFileLister: options.codeDuplicateFileLister }),
 			...(options.orchestrationProfile === undefined
 				? { model }
 				: {
@@ -3817,8 +3867,8 @@ export class HarnessWorld {
 		}
 	}
 
-	createSessionManager(agentDir = this.agentDir): SessionManager {
-		return SessionManager.create(HARNESS_PROJECT_CWD, agentDir);
+	createSessionManager(agentDir = this.agentDir, cwd = HARNESS_PROJECT_CWD): SessionManager {
+		return SessionManager.create(cwd, agentDir);
 	}
 
 	/** Reopens a session file written earlier in this world, as its owner would after a restart. */
@@ -3875,6 +3925,38 @@ export class HarnessWorld {
 			error:
 				failures.length === 1 ? failures[0] : new AggregateError(failures, "Session disposal in the body failed"),
 		};
+	}
+
+	/** Settle and certify prior owners before creating the owner whose process-wide crash will be captured. */
+	async settleOwnersBeforeCrashCut(): Promise<void> {
+		const failures: unknown[] = [];
+		for (const session of [...this.sessions]) {
+			try {
+				const result = await this.disposeSessionInBody(session);
+				if (result) failures.push(result.error);
+			} catch (error) {
+				failures.push(error);
+			}
+		}
+		try {
+			await this.provider.waitForProducers();
+		} catch (error) {
+			failures.push(error);
+		}
+		for (const session of this.everySession) {
+			if (this.retainedDisposals.has(session)) continue;
+			try {
+				this.certifyDisposedOwner(session, []);
+			} catch (error) {
+				failures.push(error);
+			}
+		}
+		try {
+			this.guard.assertNoOpenSqliteHandles();
+		} catch (error) {
+			failures.push(error);
+		}
+		if (failures.length) throw new AggregateError(failures, "Prior owners did not settle before the crash cut");
 	}
 
 	/**
@@ -3940,6 +4022,11 @@ export class HarnessWorld {
 	}) {
 		const { cut, check, reopen = {} } = input;
 		check.disposed(await this.disposeSessionInBody(input.owner));
+		if (this.sessions.length !== 0) {
+			throw new Error(
+				"A world-wide crash cut requires every other session owner to be closed before rewinding stores and advancing process identity.",
+			);
+		}
 		await this.provider.waitForProducers();
 		check.transport(this.provider.failures);
 		this.certifyDisposedOwner(input.owner, input.retainedClaims);
@@ -5670,7 +5757,7 @@ interface WorkWitnessRun {
 interface WorkPruneScenario {
 	readonly tenant: string;
 	readonly runs: readonly WorkWitnessRun[];
-	/** The witness clock: a leased run is acquired before it, and an unleased run is stamped at its release. */
+	/** The witness clock: final leased ages are stale; final unleased ages are ordered immediately before it. */
 	readonly now: number;
 	/** The clock the prune reads; defaults to the witness clock. */
 	readonly pruneAt?: number;
@@ -5693,9 +5780,8 @@ function tokenizeRunDir<T>(runDir: string, value: T): T {
 }
 
 /**
- * Creates a tenant's runs in order through the production acquisition, each with its artifact files and marker. A leased run keeps the stale stamp
- * it was acquired with. An unleased run is released at once, which stamps it fresh, so the release order (ties broken by the name) is the prune's
- * age order. Returns the leases the runs still hold.
+ * Creates a tenant's runs through production acquisition, each with its artifacts and marker. After all setup writes,
+ * explicit run ages preserve stale held leases and fresh unleased runs in input order. Returns the leases still held.
  */
 function seedWorkTenant(
 	world: HarnessWorld,
@@ -5729,6 +5815,14 @@ function seedWorkTenant(
 				JSON.stringify({ version: 1, hostname: hostname(), pid: run.marker.pid, createdAt: now }),
 			);
 		}
+	}
+	// Directory-entry writes update mtimes, so stamp final ages after all tree construction to keep the scenario's intended order independent
+	// of setup syscall count. Held runs stay stale to prove their live lease blocks age eviction; unleased runs stay fresh unless pruneAt advances.
+	const filesystem = world.io.nodeFsExports() as Pick<typeof import("node:fs"), "utimesSync">;
+	for (const [index, run] of runs.entries()) {
+		const runDir = workWitnessRunDir(world, tenant, run.name);
+		const orderedMtime = new Date((run.leased ? now - WORK_WITNESS_STALE_MS : now - runs.length) + index);
+		filesystem.utimesSync(runDir, orderedMtime, orderedMtime);
 	}
 	return held;
 }

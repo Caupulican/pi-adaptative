@@ -53,13 +53,11 @@ function validateByteLimit(maxBytes: number): void {
 
 /** Compare the filesystem identity and mutation-sensitive metadata captured around a bounded read. */
 export function sameFileVersion(left: Stats | BigIntStats, right: Stats | BigIntStats): boolean {
-	return (
-		left.dev === right.dev &&
-		left.ino === right.ino &&
-		left.size === right.size &&
-		left.mtimeMs === right.mtimeMs &&
-		left.ctimeMs === right.ctimeMs
-	);
+	const sameMutationTimes =
+		"mtimeNs" in left && "mtimeNs" in right
+			? left.mtimeNs === right.mtimeNs && left.ctimeNs === right.ctimeNs
+			: left.mtimeMs === right.mtimeMs && left.ctimeMs === right.ctimeMs;
+	return left.dev === right.dev && left.ino === right.ino && left.size === right.size && sameMutationTimes;
 }
 
 function assertRegularFile(version: Stats, label: string): void {
@@ -230,15 +228,24 @@ export interface BoundedFilePrefix {
 	truncated: boolean;
 }
 
-/** Read one stable file prefix without allocating or reading beyond `maxBytes`. */
-export function readFilePrefixSync(filePath: string, maxBytes: number, label: string): BoundedFilePrefix {
+/** Read one stable bounded slice from the beginning or end of a regular file. */
+function readFileSliceSync(filePath: string, maxBytes: number, label: string, tail: boolean): BoundedFilePrefix {
 	validateByteLimit(maxBytes);
 	return withStableFileDescriptorSync(filePath, label, (fileDescriptor, before) => {
+		if (!Number.isSafeInteger(before.size) || before.size < 0)
+			throw new BoundedReadError(`${label} has an invalid size.`, "limit");
 		const expectedBytes = Math.min(before.size, maxBytes);
+		const position = tail ? before.size - expectedBytes : 0;
 		const content = Buffer.allocUnsafe(expectedBytes);
 		let totalBytes = 0;
 		while (totalBytes < expectedBytes) {
-			const bytesRead = readSync(fileDescriptor, content, totalBytes, expectedBytes - totalBytes, null);
+			const bytesRead = readSync(
+				fileDescriptor,
+				content,
+				totalBytes,
+				expectedBytes - totalBytes,
+				position + totalBytes,
+			);
 			if (bytesRead === 0) break;
 			totalBytes += bytesRead;
 		}
@@ -247,6 +254,16 @@ export function readFilePrefixSync(filePath: string, maxBytes: number, label: st
 		}
 		return { content, truncated: before.size > maxBytes };
 	});
+}
+
+/** Read one stable file prefix without allocating or reading beyond `maxBytes`. */
+export function readFilePrefixSync(filePath: string, maxBytes: number, label: string): BoundedFilePrefix {
+	return readFileSliceSync(filePath, maxBytes, label, false);
+}
+
+/** Read one stable file tail without allocating or reading beyond `maxBytes`. */
+export function readFileTailSync(filePath: string, maxBytes: number, label: string): BoundedFilePrefix {
+	return readFileSliceSync(filePath, maxBytes, label, true);
 }
 
 /** Count text lines with constant memory and reject a file that changes during the scan. */

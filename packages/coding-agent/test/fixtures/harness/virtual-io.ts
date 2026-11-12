@@ -29,6 +29,7 @@ interface VirtualNode {
 	data: Buffer;
 	target?: string;
 	modified: number;
+	changed?: number;
 	identity: number;
 	/** Permission bits a creator or `chmod` gave a file; absent means the default, 0644. */
 	mode?: number;
@@ -54,6 +55,7 @@ export type IoFaultKind =
 	| "write"
 	| "append"
 	| "unlink"
+	| "link"
 	| "rm"
 	| "rename"
 	| "watch.close"
@@ -123,6 +125,7 @@ const FAULT_SYSCALL: Readonly<Record<IoFaultKind, string | undefined>> = {
 	write: "write",
 	append: "write",
 	unlink: "unlink",
+	link: "link",
 	rm: "rm",
 	rename: "rename",
 	"watch.close": undefined,
@@ -579,6 +582,14 @@ export class VirtualFileSystem {
 		return this.lastModified;
 	}
 
+	private touchDirectory(path: string): void {
+		const node = this.nodes.get(path);
+		if (node?.kind !== "directory") return;
+		const stamp = this.stamp();
+		node.modified = stamp;
+		node.changed = stamp;
+	}
+
 	/** The bytes of a file now, for scenario inspection: no ledger entry, no fault, no hold. */
 	peekFile(path: string): string | undefined {
 		const node = this.nodes.get(this.path(path));
@@ -723,7 +734,10 @@ export class VirtualFileSystem {
 	/** The permission bits of a file, as `stat` reports them. Directories keep their fixed mode. */
 	private setMode(path: string, mode: number): void {
 		const node = this.nodes.get(path);
-		if (node?.kind === "file") node.mode = mode & 0o777;
+		if (node?.kind === "file") {
+			node.mode = mode & 0o777;
+			node.changed = this.stamp();
+		}
 	}
 
 	appendFileSync(value: unknown, data: unknown): void {
@@ -742,13 +756,17 @@ export class VirtualFileSystem {
 		if (node) {
 			node.data = data;
 			node.modified = this.stamp();
+			node.changed = node.modified;
 		} else {
+			const stamp = this.stamp();
 			this.nodes.set(path, {
 				kind: "file",
 				data,
-				modified: this.stamp(),
+				modified: stamp,
+				changed: stamp,
 				identity: this.nextIdentity++,
 			});
+			this.touchDirectory(dirname(path));
 		}
 	}
 
@@ -766,12 +784,15 @@ export class VirtualFileSystem {
 			if (!recursive) throw this.failure("mkdir", "ENOENT", parent, "mkdir");
 			this.mkdirSync(parent, { recursive: true });
 		}
+		const stamp = this.stamp();
 		this.nodes.set(path, {
 			kind: "directory",
 			data: Buffer.alloc(0),
-			modified: this.stamp(),
+			modified: stamp,
+			changed: stamp,
 			identity: this.nextIdentity++,
 		});
+		this.touchDirectory(parent);
 		this.note("mkdir", path);
 		return recursive ? path : undefined;
 	}
@@ -817,14 +838,15 @@ export class VirtualFileSystem {
 		const node = descriptor?.node ?? this.nodes.get(path);
 		if (!node) throw this.failure("stat", "ENOENT", path, syscall);
 		this.fault({ kind: "stat", path }, "before");
+		const changed = node.changed ?? node.modified;
 		const snapshot = {
 			size: node.data.length,
 			mtimeMs: node.modified,
-			ctimeMs: node.modified,
+			ctimeMs: changed,
 			birthtimeMs: 1000,
 			atimeMs: node.modified,
 			mtime: new Date(node.modified),
-			ctime: new Date(node.modified),
+			ctime: new Date(changed),
 			birthtime: new Date(1000),
 			atime: new Date(node.modified),
 			mode: node.kind === "directory" ? 0o40755 : 0o100000 | (node.mode ?? 0o644),
@@ -840,6 +862,7 @@ export class VirtualFileSystem {
 		};
 		if ((options as { bigint?: boolean } | undefined)?.bigint) {
 			const modifiedNs = BigInt(Math.trunc(node.modified)) * 1_000_000n;
+			const changedNs = BigInt(Math.trunc(changed)) * 1_000_000n;
 			return {
 				...snapshot,
 				size: BigInt(snapshot.size),
@@ -857,7 +880,7 @@ export class VirtualFileSystem {
 				atimeMs: BigInt(Math.trunc(snapshot.atimeMs)),
 				birthtimeMs: BigInt(snapshot.birthtimeMs),
 				mtimeNs: modifiedNs,
-				ctimeNs: modifiedNs,
+				ctimeNs: changedNs,
 				atimeNs: modifiedNs,
 				birthtimeNs: BigInt(snapshot.birthtimeMs) * 1_000_000n,
 			};
@@ -927,7 +950,10 @@ export class VirtualFileSystem {
 		this.fault({ kind: "unlink", path }, "before");
 		if (!this.nodes.has(path)) throw this.failure("unlink", "ENOENT", path, "unlink");
 		if (this.nodes.get(path)?.kind === "directory") throw this.failure("unlink", "EISDIR", path, "unlink");
+		const node = this.nodes.get(path)!;
 		this.nodes.delete(path);
+		if ([...this.nodes.values()].includes(node)) node.changed = this.stamp();
+		this.touchDirectory(dirname(path));
 		this.note("unlink", path);
 		this.fault({ kind: "unlink", path }, "after");
 	}
@@ -944,6 +970,7 @@ export class VirtualFileSystem {
 		if (children.length && !flags?.recursive) throw this.failure("rm", "ENOTEMPTY", path, syscall);
 		for (const child of children) this.nodes.delete(child);
 		this.nodes.delete(path);
+		this.touchDirectory(dirname(path));
 		this.note("rm", path);
 		this.fault({ kind: "rm", path }, "after");
 	}
@@ -955,11 +982,14 @@ export class VirtualFileSystem {
 		if (!this.nodes.has(from) || !this.nodes.has(dirname(to)))
 			throw this.failure("rename", "ENOENT", from, "rename", to);
 		const entries = [...this.nodes].filter(([path]) => path === from || path.startsWith(`${from}${sep}`));
+		const stamp = this.stamp();
 		for (const [path, node] of entries) {
 			this.nodes.delete(path);
-			node.modified = this.stamp();
+			if (path === from) node.changed = stamp;
 			this.nodes.set(`${to}${path.slice(from.length)}`, node);
 		}
+		this.touchDirectory(dirname(from));
+		if (dirname(to) !== dirname(from)) this.touchDirectory(dirname(to));
 		for (const descriptor of this.descriptors.values()) if (descriptor.path === from) descriptor.path = to;
 		this.log({ kind: "rename", path: from, destination: to });
 		this.note("change", to);
@@ -970,13 +1000,17 @@ export class VirtualFileSystem {
 	linkSync(existing: unknown, created: unknown): void {
 		const from = this.path(existing, "link");
 		const to = this.path(created, "link");
+		this.fault({ kind: "link", path: from, destination: to }, "before");
 		const node = this.nodes.get(from);
 		if (!node || !this.nodes.has(dirname(to))) throw this.failure("link", "ENOENT", from, "link", to);
 		if (node.kind === "directory") throw this.failure("link", "EPERM", from, "link", to);
 		if (this.nodes.has(to)) throw this.failure("link", "EEXIST", to, "link", from);
 		this.nodes.set(to, node);
+		node.changed = this.stamp();
+		this.touchDirectory(dirname(to));
 		this.log({ kind: "link", path: from, destination: to });
 		this.note("change", to);
+		this.fault({ kind: "link", path: from, destination: to }, "after");
 	}
 
 	copyFileSync(source: unknown, destination: unknown, flags = 0): void {
@@ -1418,6 +1452,7 @@ export class VirtualFileSystem {
 		data.copy(replacement, start);
 		node.data = replacement;
 		node.modified = this.stamp();
+		node.changed = node.modified;
 		if (position === null || position === undefined) descriptor.position = start + data.length;
 		this.note(operation, descriptor.path);
 		this.fault({ kind: operation, path: descriptor.path }, "after", data);
@@ -1439,6 +1474,7 @@ export class VirtualFileSystem {
 		this.fault({ kind: "write", path }, "before", replacement);
 		node.data = replacement;
 		node.modified = this.stamp();
+		node.changed = node.modified;
 		this.note("truncate", path);
 		this.fault({ kind: "write", path }, "after", replacement);
 	}
@@ -1453,6 +1489,7 @@ export class VirtualFileSystem {
 		node.data.copy(replacement, 0, 0, length);
 		node.data = replacement;
 		node.modified = this.stamp();
+		node.changed = node.modified;
 		this.note("truncate", descriptor.path);
 	}
 
@@ -1460,7 +1497,9 @@ export class VirtualFileSystem {
 		const path = this.realpathSync(value, "utime", "utimes");
 		const milliseconds = mtime instanceof Date ? mtime.getTime() : Number(mtime) * 1000;
 		if (!Number.isFinite(milliseconds)) throw new TypeError("Virtual utimes requires finite time");
-		this.nodes.get(path)!.modified = milliseconds;
+		const node = this.nodes.get(path)!;
+		node.modified = milliseconds;
+		node.changed = this.stamp();
 		this.note("utimes", path);
 	}
 

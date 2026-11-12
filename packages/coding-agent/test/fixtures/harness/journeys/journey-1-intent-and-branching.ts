@@ -41,6 +41,7 @@ import {
 
 export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
+	const providerStart = world.provider.reached.length;
 	// E2 (uncertainty and standing revoke, on mode only): a standing revoke survives an uncertain tool judgment and a sub-floor
 	// request; only an explicit request above the native floor (hard_gate_auto_confidence .93) lifts it. An uncertain task relation yields an unresolved intent,
 	// which the call-time gate reads as no owner decision (its documented contract, asserted as written, not as approval).
@@ -1435,7 +1436,7 @@ export async function runJourney1IntentAndBranchingPhase(world: HarnessWorld): P
 		m4Session.prompt("List the saved preferences after the reader finished."),
 	);
 	expect(
-		world.provider.reached.filter((name) => name.startsWith("worker-a")),
+		world.provider.reached.slice(providerStart).filter((name) => name.startsWith("worker-a")),
 		"the memory reader ran its two worker steps exactly once",
 	).toEqual(["worker-a:worker-a-read", "worker-a:worker-a-report"]);
 	expect(

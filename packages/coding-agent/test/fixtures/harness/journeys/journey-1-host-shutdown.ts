@@ -1092,6 +1092,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		{ text: PREPARING_WORDS },
 	]);
 	expect(await world.disposeSessionInBody(prepNext.session), "the restoring owner disposes cleanly").toBeUndefined();
+	await withDeadline(trace, "prior owners settle before the crash capture", world.settleOwnersBeforeCrashCut());
 	// The files a crash cut names, as they stand now: one that does not exist is absent.
 	const presentFiles = (paths: readonly string[]): Map<string, string> => {
 		const files = new Map<string, string>();
@@ -1183,6 +1184,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 	// The rules are project-scoped per agent directory, so this owner has its own. Its opening turn carries the control's
 	// directive words pasted: they never become a rule, while the same words typed by the control do.
 	if (!world.systemOne.enabled) {
+		await withDeadline(trace, "prior owners settle before the promoted crash", world.settleOwnersBeforeCrashCut());
 		const promotedDir = `${world.agentDir}-promoted`;
 		const PROMOTED_CONTROL_HOLD = "Owner prompt held while the delivered directive waits.";
 		const PROMOTED_CONTROL_WORDS = "Owner directive delivered after promotion: no TDD in this project.";

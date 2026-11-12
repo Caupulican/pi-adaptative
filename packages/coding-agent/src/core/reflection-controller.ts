@@ -1726,7 +1726,7 @@ export class ReflectionController {
 				};
 				const requestAuth = await resolveProviderRequestOptions(loopConfig, opts.signal);
 				opts.signal?.throwIfAborted();
-				const maxTokens = await resolveRequestPreflightMaxTokens({
+				const { maxTokens } = await resolveRequestPreflightMaxTokens({
 					requestPreflight: opts.requestPreflight,
 					model: requestAuth.model,
 					context: requestContext,

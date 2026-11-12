@@ -2,12 +2,11 @@ import chalk from "chalk";
 import { getAgentDir } from "../config.ts";
 import {
 	ensureFffNodePackage,
-	ensureTool,
 	type FffInstallOutcome,
 	getLastFffInstallOutcome,
 	loadAvailableFffNodePackage,
-	probeVersion,
-} from "../utils/tools-manager.ts";
+} from "../utils/fff-node-install.ts";
+import { ensureTool, probeVersion } from "../utils/tools-manager.ts";
 import { type AgentDirectoryLayoutReport, inspectAgentDirectoryLayout } from "./agent-directory-layout.ts";
 import { checkHerdrInstallation, provisionHerdr } from "./collaboration/herdr-provision.ts";
 import { OllamaRuntime } from "./models/local-runtime.ts";

@@ -97,6 +97,7 @@ import { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts"
 import { isSystemOneEnabled, type SystemOneProviderChoice, systemOneAccessFromSession } from "./system-one/access.ts";
 import { SystemOneJevAdapter } from "./system-one/adapter.ts";
 import { projectCanonicalTruth } from "./system-one/canonical-truth.ts";
+import type { FileLister } from "./system-one/code-duplicates.ts";
 import { createSystemOneConfig } from "./system-one/config.ts";
 import { SystemOneController } from "./system-one/controller.ts";
 import { ExecutionStore } from "./system-one/execution-state.ts";
@@ -245,6 +246,8 @@ export interface CreateAgentSessionOptions {
 	sessionStartEvent?: SessionStartEvent;
 	/** System One semantic control plane controller for Jev semantic validation. */
 	systemOneController?: SystemOneController;
+	/** Optional per-session source enumerator for semantic duplicate review. */
+	codeDuplicateFileLister?: FileLister;
 	/** Execution loop mode for objective execution ('legacy_goal', 'objective_shadow', 'objective_primary'). */
 	executionLoopMode?: ExecutionLoopMode;
 	/** Objective execution controller for deterministic loop authority and route evaluation. */
@@ -319,12 +322,6 @@ export {
 	withFileMutationQueue,
 };
 
-// Helper Functions
-
-function getDefaultAgentDir(): string {
-	return getAgentDir();
-}
-
 /**
  * Create an AgentSession with the specified options.
  *
@@ -364,7 +361,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	// The SDK root: a session is the program for an embedder, so it owns built-in provider registration.
 	registerBuiltInApiProviders();
 	const cwd = resolvePath(options.cwd ?? options.sessionManager?.getCwd() ?? process.cwd());
-	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getDefaultAgentDir();
+	const agentDir = options.agentDir ? resolvePath(options.agentDir) : getAgentDir();
 	let resourceLoader = options.resourceLoader;
 
 	// Use provided or create AuthStorage and ModelRegistry
@@ -948,6 +945,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				privatePathScope: options.privatePathScope,
 				sessionStartEvent: options.sessionStartEvent,
 				systemOneController,
+				codeDuplicateFileLister: options.codeDuplicateFileLister,
 				systemOneEnabled,
 				timers,
 				machineFacts: options.machineFacts,

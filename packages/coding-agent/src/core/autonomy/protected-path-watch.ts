@@ -4,7 +4,7 @@
  * The structural `write`/`edit` tools refuse harness resources (skills, extensions, prompts, profiles, hooks,
  * git config, ...). A worker's `bash`, `python` and `run_process` are host-trust boundaries by design: a shell
  * redirect reaches any file the OS account can write, and no sandbox is available to close that. This module
- * does not try to: it never refuses and never reverts. It fingerprints the protected set (size and mtime,
+ * does not try to: it never refuses and never reverts. It fingerprints the protected set (exact path identity,
  * bounded in entry count and depth) around each process-tool call and again across the whole run, and records
  * every change as a finding that names the worker, the path and the before/after fingerprints. The parent
  * receives the findings through the worker claim (blockers, parent review required), so a change the structural
@@ -14,13 +14,18 @@
  * `sessions/`, `memory/`, ...) and credential/memory files the host rewrites (`auth.json`, `MEMORY.md`,
  * `USER.md`). A baseline over those would flag every check. They stay covered by the structural read/write
  * denials only. A finding says a protected path changed while this worker's command (or run) was in progress;
- * it is evidence for review, not proof of authorship, because the root or another worker may also have written.
+ * it is evidence for review, not proof of authorship, because the root or another worker may also have written. A host
+ * change is discounted only when the bounded transition journal proves the exact path identity chain; timing overlap alone
+ * is never attribution.
  */
 
-import { lstatSync, readdirSync } from "node:fs";
+import { readdirSync } from "node:fs";
 import path from "node:path";
-import { hostExplainsFileChange, hostFileIdentity } from "../../utils/host-write-transition.ts";
-import { hostWroteDuring } from "../../utils/host-write-window.ts";
+import {
+	hostExplainsFileChange,
+	hostFileIdentity,
+	hostWatchedPathIdentity,
+} from "../../utils/host-write-transition.ts";
 import {
 	AGENT_ROOT_DIRECTORY_NAMES,
 	AGENT_ROOT_FILE_NAMES,
@@ -73,7 +78,7 @@ const HOST_WRITTEN_AGENT_ROOT_ENTRIES: ReadonlySet<string> = new Set<string>([
 ]);
 
 const DEFAULT_MAX_ENTRIES = 2_048;
-const DEFAULT_MAX_DEPTH = 5;
+const DEFAULT_MAX_DEPTH = 8;
 const DEFAULT_MAX_FINDINGS = 24;
 
 /**
@@ -95,7 +100,7 @@ export interface ProtectedPathFinding {
 	/** Worker the finding is attributed to (observed while this worker's command or run was in progress). */
 	readonly workerId: string;
 	readonly path: string;
-	/** Fingerprint before: `absent`, `file:<size>:<mtimeMs>`, `dir:<mtimeMs>` or `link:<mtimeMs>`. */
+	/** Fingerprint before: `absent`, exact watched file/directory identity, or symlink identity and target. */
 	readonly before: string;
 	readonly after: string;
 	/** `command`: changed between the start and end of one process-tool call. `run`: changed since the worker started. */
@@ -138,15 +143,7 @@ function fingerprintOf(target: string, explained: ReadonlySet<string>): string {
 		const exact = hostFileIdentity(target);
 		if (exact !== undefined) return exact;
 	}
-	try {
-		const stat = lstatSync(target);
-		const mtime = Math.trunc(stat.mtimeMs);
-		if (stat.isSymbolicLink()) return `link:${mtime}`;
-		if (stat.isDirectory()) return `dir:${mtime}`;
-		return `file:${stat.size}:${mtime}`;
-	} catch {
-		return "absent";
-	}
+	return hostWatchedPathIdentity(target) ?? "absent";
 }
 
 /** Bounded, deterministic depth-first fingerprint of every watched root. Returns whether the bound cut it short. */
@@ -299,11 +296,9 @@ export class ProtectedPathWatch {
 		return this.recorded;
 	}
 
-	/** A change to an explained file is the host's when the journal holds its chain; anything else by the host window. */
+	/** A change is host-owned only when the exact journal chain explains this path's observed identities. */
 	private hostExplains(change: { path: string; before: string; after: string }, from: number, to: number): boolean {
-		return this.explained.has(path.resolve(change.path))
-			? hostExplainsFileChange(change.path, change.before, change.after, from, to, this.options.hostJournal)
-			: hostWroteDuring(change.path, from, to);
+		return hostExplainsFileChange(change.path, change.before, change.after, from, to, this.options.hostJournal);
 	}
 
 	/** Run the end-of-run comparison, then return the host findings for everything recorded. */

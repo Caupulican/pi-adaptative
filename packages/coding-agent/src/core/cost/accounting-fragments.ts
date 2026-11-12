@@ -3,7 +3,7 @@ import { statSync } from "node:fs";
 import { stat } from "node:fs/promises";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { parseSessionEntries } from "../../kernel/session/session-manager.ts";
-import { readBoundedFile, readBoundedFileSync } from "../../kernel/storage/bounded-file.ts";
+import { readBoundedFile, readBoundedFileSync, sameFileVersion } from "../../kernel/storage/bounded-file.ts";
 import { getSessionEntryUsage } from "../../kernel/usage.ts";
 import { validateProviderUsage } from "../orchestration/attempt-usage.ts";
 import { isMissingFileError, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -86,14 +86,7 @@ export async function reconcileAccountingFragment(path: string): Promise<readonl
 	writeFileAtomicSync(accountingFragmentPath(path), marker, {
 		beforeCommit: () => {
 			const after = statSync(path, { bigint: true });
-			if (
-				before.dev !== after.dev ||
-				before.ino !== after.ino ||
-				before.size !== after.size ||
-				before.mtimeNs !== after.mtimeNs ||
-				before.ctimeNs !== after.ctimeNs
-			)
-				throw new Error("Accounting fragment changed before publication.");
+			if (!sameFileVersion(before, after)) throw new Error("Accounting fragment changed before publication.");
 		},
 	});
 	return entries;

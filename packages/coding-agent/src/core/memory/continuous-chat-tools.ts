@@ -62,8 +62,12 @@ function describeTool(name: ContinuousChatNavigationToolName): string {
 	return definition.description;
 }
 
-const ZOOM_N_PARAMETER = Type.Optional(Type.Integer({ minimum: 1, description: "Messages covered by the line" }));
-const ZOOM_PAGE_PARAMETER = Type.Optional(Type.Integer({ minimum: 0, description: "Page of a long text, from 0" }));
+const ZOOM_N_PARAMETER = Type.Optional(
+	Type.Integer({ minimum: 1, description: "Number of consecutive messages from id" }),
+);
+const ZOOM_PAGE_PARAMETER = Type.Optional(
+	Type.Integer({ minimum: 0, description: "Page of one message or agent log, from 0" }),
+);
 const ZOOM_PARAMETERS = Type.Object(
 	{
 		id: Type.Union(

@@ -237,7 +237,7 @@ import {
 	type WorkerDispatchResourceSnapshot,
 	WorkerDispatchScheduler,
 } from "./worker-dispatch-scheduler.ts";
-import { placementOf } from "./worker-escalation.ts";
+import { admittedRerunPlacement, lanePlacementAt } from "./worker-escalation.ts";
 import {
 	buildWorkerExecutionPlan,
 	compileWorkerExecutionGrant,
@@ -734,10 +734,7 @@ export class WorkerDelegationController {
 			materialize: (request, admission) => this.startInternal(request, undefined, admission),
 			admissionModel: (admission) => admission.shipment.model,
 			admittedAuthority: (admission) => admission.executionContract.worker.authority,
-			admittedPlacement: (admission) => {
-				const cwd = admission.executionContract.worker.authority.cwd ?? admission.executionPlan.cwd;
-				return placementOf(cwd, this.deps.getCwd(), this.laneIsolation?.isLaneDirectory(cwd) ?? false);
-			},
+			admittedPlacement: (admission) => admittedRerunPlacement(admission, this.deps.getCwd(), this.laneIsolation),
 			sessionCwd: () => this.deps.getCwd(),
 			laneDirectory: (admission) => admission.executionPlan.cwd,
 			discardLaneDirectory: (cwd) => this.laneIsolation?.discard(cwd),
@@ -767,7 +764,7 @@ export class WorkerDelegationController {
 			goalState: () => this.deps.getGoalStateSnapshot(),
 			cwd: () => this.deps.getCwd(),
 			signal: this.workerAbort.signal,
-			isLaneDirectory: (directory) => this.laneIsolation?.isLaneDirectory(directory) ?? false,
+			laneAt: (directory) => lanePlacementAt(this.laneIsolation, directory),
 			recordCheckProof: (attemptId, requirementId, result) =>
 				this.deps.recordRequirementCheckProof?.(attemptId, requirementId, result),
 		});

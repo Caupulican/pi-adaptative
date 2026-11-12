@@ -492,6 +492,8 @@ export interface RequestPreflightContext {
 /** Request-local limits. A returned output cap can only narrow the current owner/model limit. */
 export interface RequestPreflightResult {
 	maxTokens?: number;
+	/** Release this exact reservation if its plan is discarded before it can reach transport. */
+	discardUndispatched?: () => void;
 }
 
 /** Exact materialization offered to the host-owned compaction/admission gate. */

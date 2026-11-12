@@ -92,7 +92,7 @@ export interface WorkerStartPhasePort<A> {
 	/** The authority a fresh admission runs under: what an escalation's rerun must keep. */
 	admittedAuthority(admission: A): WorkerExecutionAuthorityContract;
 	/** Where a fresh admission runs and in which isolation: compared with an escalation's recorded placement. */
-	admittedPlacement(admission: A): RerunPlacement;
+	admittedPlacement(admission: A): Promise<RerunPlacement | undefined>;
 	/** The verifier a plan verify step runs as, derived from its subject attempt's admitted contract. */
 	planVerifierPreset(subject: {
 		readonly subjectTaskId: string;
@@ -155,16 +155,18 @@ export function workerRequestForDispatch(
 	// the session cwd before `isolateFreshWriter` relocates a fresh lane rerun); a plan step's are relative to the session cwd.
 	const base = pinned
 		? inLane
-			? (pinned.laneDirectory ?? sessionCwd)
+			? (pinned.laneDirectory ?? resolve(sessionCwd, pinned.freshLaneWorkspace ?? "."))
 			: locationBase(pinned.location, sessionCwd)
 		: sessionCwd;
 	const fromBase = (path: string): string => (isAbsolute(path) ? path : resolve(base, path));
 	const writePaths = dispatch.writeScope.map(fromBase);
 	const pinnedPath = inLane
 		? dispatch.escalation?.attemptOfTaskId
-			? undefined
-			: pinned.laneDirectory
-		: pinned && pinned.location !== "."
+			? pinned.workspaceFocused
+				? pinned.laneDirectory
+				: undefined
+			: (pinned.laneDirectory ?? (pinned.workspaceFocused ? base : undefined))
+		: pinned && (pinned.location !== "." || pinned.workspaceFocused)
 			? pinned.location
 			: undefined;
 	const authority = {
@@ -185,7 +187,7 @@ export function workerRequestForDispatch(
 					...(pinned.shellReadOnly ? { shellReadOnly: true } : {}),
 					...(pinned.readScope !== undefined ? { readPaths: pinned.readScope.map(fromBase) } : {}),
 					budget: { ...pinned.budget },
-					// The original's workspace: set for a read-only lane review rerun or non-root shared path; omitted for `attemptOf` lane reruns (adopted via `prior`) and fresh lanes.
+					// Restore explicit focus even when the same lane or the session root supplies the working directory.
 					...(pinnedPath !== undefined ? { path: pinnedPath } : {}),
 				}
 			: {}),
@@ -297,15 +299,32 @@ export class WorkerStartPhases<A> implements FleetLocalStartPort {
 				async (): Promise<{ ok: true } | { ok: false; skipReason: string }> => {
 					const selected = await this.port.prepare(captured, signal);
 					if (selected.kind === "refused") return { ok: false, skipReason: selected.skipReason };
+					let placement: RerunPlacement | undefined;
+					if (selected.kind === "fresh" && dispatch.escalation) {
+						try {
+							placement = await this.port.admittedPlacement(selected.admission);
+						} catch (error) {
+							selected.releaseAllocation?.();
+							this.discard(this.port.laneDirectory(selected.admission));
+							throw error;
+						}
+						if (signal?.aborted || this.port.closed.aborted) {
+							selected.releaseAllocation?.();
+							this.discard(this.port.laneDirectory(selected.admission));
+							return {
+								ok: false,
+								skipReason: this.port.closed.aborted ? "session_disposed" : "worker_start_aborted",
+							};
+						}
+					}
 					// An escalation reruns under the authority its outcome was recorded under. Only the admission made here
 					// knows what the rerun would run under, so the comparison happens before anything is materialized.
 					if (
 						selected.kind === "fresh" &&
 						dispatch.escalation &&
-						authorityDigest(
-							this.port.admittedAuthority(selected.admission),
-							this.port.admittedPlacement(selected.admission),
-						) !== dispatch.escalation.authorityDigest
+						(!placement ||
+							authorityDigest(this.port.admittedAuthority(selected.admission), placement) !==
+								dispatch.escalation.authorityDigest)
 					) {
 						selected.releaseAllocation?.();
 						this.discard(this.port.laneDirectory(selected.admission));

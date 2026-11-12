@@ -42,6 +42,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { args, flag, selectLiveScenarios } from "./live-args.mjs";
 import { assertLiveBinaryUnchanged, pinLiveBinary } from "./lib/live-binary-identity.mjs";
+import { assertSlugifyEdit, createNativeInputDriver, liveObserverExtension } from "./lib/live-native-driver.mjs";
 
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const MODEL_A = flag("model-a", "xai/grok-4.7-build-fast");
@@ -244,19 +245,16 @@ const openPane = (anchor) => {
 	herdr("pane", "zoom", id, "--on");
 	return id;
 };
-const launch = (pane, cwd, extra = "", agentDir = AGENT) =>
-	herdr(
+const launch = (pane, cwd, extra = "", agentDir = AGENT) => {
+	const observer = nativeInput.register(pane);
+	return herdr(
 		"pane",
 		"run",
 		pane,
-		`clear; cd ${shellArgument(cwd)} && PI_ADAPTATIVE_CODING_AGENT_DIR=${shellArgument(agentDir)} ${PANE_ENV} ${shellArgument(PI_COMMAND)} --provider ${shellArgument(MODEL_A.split("/")[0])} --model ${shellArgument(MODEL_A.split("/").slice(1).join("/"))} ${extra}`,
+		`clear; cd ${shellArgument(cwd)} && PI_ADAPTATIVE_CODING_AGENT_DIR=${shellArgument(agentDir)} PI_LIVE_OBSERVER_FILE=${shellArgument(observer)} ${PANE_ENV} ${shellArgument(PI_COMMAND)} --extension ${shellArgument(liveObserverExtension)} --provider ${shellArgument(MODEL_A.split("/")[0])} --model ${shellArgument(MODEL_A.split("/").slice(1).join("/"))} ${extra}`,
 	);
-const type = async (pane, text) => {
-	herdr("pane", "send-text", pane, text);
-	await sleep(300);
-	herdr("pane", "send-keys", pane, "enter");
-	await sleep(400);
 };
+const type = (pane, text) => nativeInput.type(pane, text);
 const screen = (pane, lines = 400) => herdr("pane", "read", pane, "--source", "recent-unwrapped", "--lines", String(lines));
 /** A timeout names the machine's load and, when the wait watches a pane, what that pane showed, so a slow start can be told from a stuck one. */
 const waitFor = async (label, check, timeoutMs, everyMs = 3000, evidence = undefined) => {
@@ -307,6 +305,10 @@ const sessionFiles = (agentDir = AGENT) => {
 	);
 };
 const entries = (agentDir = AGENT) => sessionFiles(agentDir).flatMap(jsonl);
+const nativeInput = createNativeInputDriver({ directory: join(RUN, "observations"), herdr, waitFor, screen, jsonl });
+const submitRootPrompt = (pane, text) => nativeInput.submitRootPrompt(pane, text);
+const settleRootPrompt = (input, agentDir, requireWorker = false) =>
+	nativeInput.settleRootPrompt(input, agentDir, requireWorker);
 /** The day's harness log and its rotated copy: `harness-log.ts` renames a full file to `<name>.1` and writes on. */
 const HARNESS_LOG_FILE = /^harness-.*\.jsonl(\.1)?$/;
 /**
@@ -700,28 +702,33 @@ const SCENARIOS = [
 		const pane = openPane();
 		launch(pane, project, "", freshAgent);
 		await waitFor("the prompt on the default setup", () => /Ask anything|Ready for operator instructions/.test(screen(pane, 60)), 90_000, 2000, () => screen(pane, 20));
-		const sessionCalls = () => {
-			const root = join(freshAgent, "sessions");
-			if (!existsSync(root)) return { calls: [], bounced: 0 };
-			const files = readdirSync(root, { recursive: true }).filter((name) => String(name).endsWith(".jsonl")).map((name) => join(root, String(name)));
-			const rows = files.flatMap((file) => jsonl(file));
-			const calls = rows.flatMap((row) => (row.message?.role === "assistant" ? row.message.content.filter((c) => c.type === "toolCall").map((c) => c.name) : []));
-			// A read of a file that does not exist yet is a probe the model is entitled to make before creating it, not a fight with the harness.
-			const bounced = rows.filter((row) => row.message?.role === "toolResult" && row.message?.isError && /\[harness\]/.test(JSON.stringify(row.message.content)) && !/"failure_code":"file_not_found"/.test(JSON.stringify(row.message.content))).length;
-			return { calls, bounced };
-		};
-		await type(pane, "In util.ts, make slugify also strip punctuation, and add a one-line JSDoc comment above it. Then tell me what you changed.");
+		const edit = await submitRootPrompt(
+			pane,
+			"In util.ts, make slugify also strip punctuation, and add a one-line JSDoc comment above it. Then tell me what you changed.",
+		);
 		await waitFor("the edit", () => /\/\*\*/.test(readFileSync(join(project, "util.ts"), "utf8")), 180_000, 3000);
-		await sleep(8000);
-		const first = sessionCalls();
-		if (first.bounced > 0) throw new Error(`the harness bounced ${first.bounced} call(s) on a plain edit: ${first.calls.join(", ")}`);
-		if (first.calls.length > 6) throw new Error(`a plain edit took ${first.calls.length} tool calls (${first.calls.join(", ")}); the harness should leave read, edit, answer`);
-		await type(pane, "Create one file in this folder, one-a.txt, containing alpha. Use a worker for it, then tell me when it exists.");
-		await waitFor("the worker's file", () => existsSync(join(project, "one-a.txt")), 240_000, 3000);
-		const second = sessionCalls();
-		if (second.bounced > 0) throw new Error(`the harness bounced ${second.bounced} call(s) while starting a worker: ${second.calls.join(", ")}`);
-		if (second.calls.length - first.calls.length > 8) throw new Error(`starting one worker took ${second.calls.length - first.calls.length} tool calls`);
-		return `a plain edit took ${first.calls.length} tool calls and a worker start ${second.calls.length - first.calls.length}, with no bounced call`;
+		const first = await settleRootPrompt(edit, freshAgent);
+		assertSlugifyEdit(readFileSync(join(project, "util.ts"), "utf8"));
+		if (first.bounced > 0)
+			throw new Error(`the harness bounced ${first.bounced} call(s) on a plain edit: ${first.calls.join(", ")}`);
+		if (first.calls.length > 6)
+			throw new Error(
+				`a plain edit took ${first.calls.length} tool calls (${first.calls.join(", ")}); the harness should leave read, edit, answer`,
+			);
+		const create = await submitRootPrompt(
+			pane,
+			"Create one file in this folder, one-a.txt, containing alpha. Use a worker for it, then tell me when it exists.",
+		);
+		const second = await settleRootPrompt(create, freshAgent, true);
+		if (readFileSync(join(project, "one-a.txt"), "utf8").replace(/\r?\n$/, "") !== "alpha")
+			throw new Error("the worker's file does not contain alpha");
+		if (second.bounced > 0)
+			throw new Error(
+				`the harness bounced ${second.bounced} call(s) while starting a worker: ${second.calls.join(", ")}`,
+			);
+		if (second.calls.length > 8)
+			throw new Error(`starting one worker took ${second.calls.length} tool calls (${second.calls.join(", ")})`);
+		return `a settled plain edit took ${first.calls.length} root tool calls and a settled worker start ${second.calls.length}, with no bounced call`;
 	}),
 	scenario("s16", "watch routines: made from plain words, quiet while idle, firing once on the change, no model use before it", async () => {
 		// A watch lives in its owning session: the main pane (or one this scenario starts when it runs alone).
@@ -765,7 +772,7 @@ const SCENARIOS = [
 		const fileWatch = () => fresh().find((routine) => routine.schedule.condition?.type === "file");
 		const portWatch = () => fresh().find((routine) => routine.schedule.condition?.type === "port");
 		const occurrencesOf = (id) => routineOccurrences().filter((occurrence) => occurrence.routineId === id && occurrence.trigger?.kind === "watch");
-		await type(state.main, `Tell me when watched/notes.txt changes, and also tell me when something starts listening on port ${port} on this machine.`);
+		const creating = await submitRootPrompt(state.main, `Tell me when watched/notes.txt changes, and also tell me when something starts listening on port ${port} on this machine.`);
 		await waitFor("a file watch and a port watch in the routine store", () => fileWatch() && portWatch(), 300_000, 4000, () => screen(state.main, 20));
 		// What the model saved is checked against what was asked, from the store the harness wrote.
 		const fileCondition = fileWatch().schedule.condition;
@@ -784,9 +791,8 @@ const SCENARIOS = [
 				const rows = jsonl(file);
 				return rows[0]?.type === "session" && rows[0].id === sessionId ? rows : [];
 			});
-		const lastEntryMs = () => Math.max(0, ...ownEntries().map((entry) => Date.parse(entry.timestamp)).filter(Number.isFinite));
-		await waitFor("the creating turn to end", () => Date.now() - lastEntryMs() > 12_000, 240_000, 3000, () => screen(state.main, 20));
-		const idleFrom = Math.max(baselineAt, lastEntryMs());
+		await settleRootPrompt(creating, AGENT);
+		const idleFrom = Math.max(baselineAt, Date.now());
 		// Idle: nothing changes for a while, and nothing may fire (edge-triggered, no false fire on the baseline).
 		await sleep(25_000);
 		const early = [fileId, portId].filter((id) => occurrencesOf(id).length > 0 || (routineDefinitions().find((routine) => routine.routineId === id)?.cursor?.fires ?? 0) > 0);
@@ -977,7 +983,7 @@ const SCENARIOS = [
 		// 1. The orchestrator asks lab through its bot tool: one ask, placed as one lane.
 		await type(state.main, "/chat root");
 		await sleep(1500);
-		await type(state.main, `Use your bot tool with action ask to ask lab this question, and wait for its answer: "What is 9 times 9? Answer with the number only. (ref ${marker})"`);
+		await submitRootPrompt(state.main, `Use your bot tool with action ask to ask lab this question, and wait for its answer: "What is 9 times 9? Answer with the number only. (ref ${marker})"`);
 		await waitFor("the ask placed as a lane", () => asks()[0], 120_000, 3000, () => screen(state.main, 20));
 		// 2. The lane ends once with lab's answer; the placer applies the end once.
 		const ended = await waitFor("lab's answer applied", () => asks().find((record) => record.appliedAt), 300_000, 4000, () => screen(state.main, 20));

@@ -1,7 +1,11 @@
 import type { Dirent } from "node:fs";
 import { readdir } from "node:fs/promises";
 import path from "node:path";
-import { ensureFffNodePackage, isFffInstallRetryable, loadAvailableFffNodePackage } from "../../utils/tools-manager.ts";
+import {
+	ensureFffNodePackage,
+	isFffInstallRetryable,
+	loadAvailableFffNodePackage,
+} from "../../utils/fff-node-install.ts";
 import type { SearchRouter, SearchToolKind } from "./search-router.ts";
 
 export type FffResult<T> = { ok: true; value: T } | { ok: false; error: string };
@@ -325,13 +329,15 @@ export class DefaultFffSearchBackend implements FffSearchBackend {
 	/** Settled outcomes only, so peekFinder can answer without awaiting creation. */
 	private readonly warmFinders = new Map<string, FffFileFinder | undefined>();
 	private readonly deps: FffFinderDeps;
+	private disposed = false;
+	private disposePromise: Promise<void> | undefined;
 
 	constructor(deps: FffFinderDeps = realFffFinderDeps) {
 		this.deps = deps;
 	}
 
 	async getFinder(basePath: string): Promise<FffFileFinder | undefined> {
-		if (isFffRuntimeDisabled()) return undefined;
+		if (this.disposed || isFffRuntimeDisabled()) return undefined;
 
 		const normalizedBasePath = path.resolve(basePath);
 		const cached = this.finders.get(normalizedBasePath);
@@ -340,7 +346,10 @@ export class DefaultFffSearchBackend implements FffSearchBackend {
 		const created = this.createFinder(normalizedBasePath);
 		void created.then(
 			(finder) => {
-				if (this.finders.get(normalizedBasePath) !== created) return;
+				if (this.disposed || this.finders.get(normalizedBasePath) !== created) {
+					destroyFinder(finder);
+					return;
+				}
 				// A genuine install failure (network hiccup, registry blip, ...) must
 				// not permanently gate FFF out of this basePath for the rest of the
 				// process: drop the cache entry so the NEXT search retries instead of
@@ -361,7 +370,7 @@ export class DefaultFffSearchBackend implements FffSearchBackend {
 	}
 
 	peekFinder(basePath: string): FffFileFinder | undefined {
-		if (isFffRuntimeDisabled()) return undefined;
+		if (this.disposed || isFffRuntimeDisabled()) return undefined;
 		const normalizedBasePath = path.resolve(basePath);
 		if (this.warmFinders.has(normalizedBasePath)) return this.warmFinders.get(normalizedBasePath);
 		// Cold: kick off (or continue) creation in the background and let this call fall
@@ -372,6 +381,19 @@ export class DefaultFffSearchBackend implements FffSearchBackend {
 			() => undefined,
 		);
 		return undefined;
+	}
+
+	/** Stop new lookups and join every in-flight cold load before releasing its finders. */
+	dispose(): Promise<void> {
+		if (this.disposePromise) return this.disposePromise;
+		this.disposed = true;
+		const inFlight = [...this.finders.values()];
+		this.finders.clear();
+		this.warmFinders.clear();
+		this.disposePromise = Promise.allSettled(inFlight.map((finder) => finder.then(destroyFinder))).then(
+			() => undefined,
+		);
+		return this.disposePromise;
 	}
 
 	private evictIfNeeded(): void {

@@ -1,5 +1,16 @@
 ## [Unreleased]
 
+### Fixed
+
+- Continuous-chat zoom accepts contiguous message ranges and follows missing summary branches within bounded replies, with remaining-message continuations that survive new messages and summary publication.
+- Discarded worker context plans release their exact undispatched token reservation so a legitimate replan can proceed. Worker reruns preserve focused workspace placement and read scope across reused or fresh lanes; rejected nested-workspace admissions clean up their unused lane through the registered root.
+- Completed summary settlements retire their local retry even when the account retains an unknown bill. Unknown usage still blocks new summaries; genuine receipt-write and acknowledgement failures keep their recovery retry.
+- Managed tool publication records exact host changes so worker findings can distinguish provisioning from unrelated protected-path changes. Settings and publication records share one bounded atomic journal, and malformed publication batches provide no partial attribution.
+
+### Changed
+
+- Harness regressions ship through composed journeys covering provider admission, durable accounting, restart recovery, worker handoff, memory navigation and protected-path attribution. Native acceptance confirms editor delivery and canonical owner input before checking outcomes, and counts each task after its worker handoff settles.
+
 ## [0.104.56] - 2026-11-12
 
 ### Fixed

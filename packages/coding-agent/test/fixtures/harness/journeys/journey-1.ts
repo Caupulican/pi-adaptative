@@ -2,6 +2,7 @@ import "../builtin-install.ts";
 import { projectPath } from "../session-fixture.ts";
 import { runJourney1CollectionPhase } from "./journey-1-collection.ts";
 import { runJourney1ContinuousChatPhase } from "./journey-1-continuous-chat.ts";
+import { runJourney1FffHostAttributionPhase } from "./journey-1-fff-host-attribution.ts";
 import { runJourney1HostEventsPhase } from "./journey-1-host-events.ts";
 import { runJourney1HostShutdownPhase } from "./journey-1-host-shutdown.ts";
 import { runJourney1IntentAndBranchingPhase } from "./journey-1-intent-and-branching.ts";
@@ -13,8 +14,11 @@ import { runJourney1ProactivityPhase } from "./journey-1-proactivity.ts";
 import { runJourney1ProofAndReturnBriefPhase } from "./journey-1-proof-and-return-brief.ts";
 import { runJourney1RoutinesPhase } from "./journey-1-routines.ts";
 import { verifySessionReplacementTerminalIdentity } from "./journey-1-session-replacement.ts";
+import { runSummaryAccountingJourney } from "./journey-1-summary-accounting.ts";
+import { runSummaryRecoveryJourney } from "./journey-1-summary-recovery.ts";
 import { runJourney1TastePhase } from "./journey-1-taste.ts";
 import { runJourney1TasteHistoryPhase } from "./journey-1-taste-history.ts";
+import { runJourney1ToolLifecyclePhase } from "./journey-1-tool-lifecycle.ts";
 import { runJourney1WorkerBudgetsPhase } from "./journey-1-worker-budgets.ts";
 import { runJourney1WorkerToolStreamsPhase } from "./journey-1-worker-tool-streams.ts";
 import { runJourney1WriteReservationsPhase } from "./journey-1-write-reservations.ts";
@@ -39,6 +43,8 @@ export async function runJourney1(): Promise<void> {
 		{
 			name: "journey-1",
 			journey: 1,
+			// The continuous-chat zoom witness submits one image and verifies its later tool attachment.
+			modelOptions: { root: { input: ["text", "image"] } },
 			// The E2 control's uncertain task relation emits one native warning, counted in its own block (not a broad allowance).
 			// The long-path turn meets an unavailable evaluator on purpose: its owner intent stays unresolved, and only that
 			// classified-as-unavailable warning is allowed.
@@ -130,7 +136,11 @@ export async function runJourney1(): Promise<void> {
 			settings: { edge: { allow: [] } },
 		},
 		async (world) => {
+			await runSummaryAccountingJourney(world);
+			await runSummaryRecoveryJourney(world);
 			await runJourney1OwnerLifecyclePhase(world);
+			await runJourney1FffHostAttributionPhase(world);
+			await runJourney1ToolLifecyclePhase(world);
 			await runJourney1IntentAndBranchingPhase(world);
 			await runJourney1ContinuousChatPhase(world);
 			await runJourney1KnowledgePhase(world);

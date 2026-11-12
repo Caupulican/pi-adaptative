@@ -155,6 +155,10 @@ export interface EscalationPinnedAuthority {
 	 * new attempt of the same worker continuing its conversation there); absent when a fresh worktree lane is isolated instead.
 	 */
 	readonly laneDirectory?: string;
+	/** The original selected its workspace explicitly, including when it equals the session root. */
+	readonly workspaceFocused?: true;
+	/** Original workspace relative to its lane root, used to recreate it in a fresh lane. */
+	readonly freshLaneWorkspace?: string;
 	/** Read roots relative to the original's cwd; absent keeps the default read scope. */
 	readonly readScope?: readonly string[];
 	readonly budget: RiskBudget;

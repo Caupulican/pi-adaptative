@@ -96,6 +96,7 @@ interface ReflectionCueOwner {
 
 export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
+	const providerStart = world.provider.reached.length;
 	let mainSession: AgentSession | undefined;
 	// The operation table captured at module evaluation must reach the virtual tree, not the host.
 	await expect(localFileMutationIntentOperations.access(LIMITS_PATH, constants.R_OK)).resolves.toBeUndefined();
@@ -1993,7 +1994,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		"This reply is never delivered.",
 	);
 	expect(delegateResultTexts(session), "a cancelled root starts no worker").toEqual([]);
-	expect(world.provider.reached.filter((step) => !step.startsWith("root:"))).toEqual([]);
+	expect(world.provider.reached.slice(providerStart).filter((step) => !step.startsWith("root:"))).toEqual([]);
 
 	// The background start turn settles the words a cancelled reader left queued (the owner-message screen); the cleanup turns ask the same question.
 	const backgroundJudgments = {

@@ -1,11 +1,12 @@
 import { spawnSync } from "node:child_process";
-import { chmodSync, copyFileSync, existsSync, mkdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { chmodSync, copyFileSync, existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, statSync } from "node:fs";
 import { createRequire } from "node:module";
 import { arch, platform } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { getBinDir, getPackageDependencyVersion } from "../config.ts";
-import { withHostWrite } from "./host-write-window.ts";
+import { getAgentDir, getBinDir, getPackageDependencyVersion } from "../config.ts";
+import { hostTransitionsFile } from "../core/agent-paths.ts";
+import { publishHostFile } from "./host-tree-publication.ts";
 
 export const JSCPD_VERSION = getPackageDependencyVersion("jscpd");
 
@@ -118,15 +119,12 @@ export function installBundledJscpdBinary(options: InstallBundledJscpdBinaryOpti
 		throw new Error(`Pi requires bundled jscpd ${JSCPD_VERSION}; found ${options.sourceVersion || "unknown"}.`);
 	}
 	const targetPath = join(options.managedBinDir, binaryName(options.targetPlatform));
-	const temporaryPath = join(
-		options.managedBinDir,
-		`.jscpd-${process.pid}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}${
-			options.targetPlatform === "win32" ? ".exe" : ""
-		}`,
-	);
-	mkdirSync(options.managedBinDir, { recursive: true });
+	const agentDir = getAgentDir();
+	const stagingRoot = join(agentDir, "npm");
+	mkdirSync(stagingRoot, { recursive: true });
+	const temporaryDir = mkdtempSync(join(stagingRoot, "jscpd-stage-"));
+	const temporaryPath = join(temporaryDir, binaryName(options.targetPlatform));
 	const probeVersion = options.probeVersion ?? probeJscpdVersion;
-	let promoted = false;
 	try {
 		copyFileSync(options.sourcePath, temporaryPath);
 		if (options.targetPlatform !== "win32") chmodSync(temporaryPath, 0o755);
@@ -136,25 +134,18 @@ export function installBundledJscpdBinary(options: InstallBundledJscpdBinaryOpti
 				`Pi requires bundled jscpd ${JSCPD_VERSION}; installed binary reported ${version ?? "no version"}.`,
 			);
 		}
-		try {
-			renameSync(temporaryPath, targetPath);
-			promoted = true;
-		} catch {
-			// Concurrent sessions converge on the same exact binary. Windows cannot replace an
-			// existing executable with rename, so accept a valid winner without deleting it.
-			if (existsSync(targetPath) && isExactVersion(probeVersion(targetPath))) {
-				rmSync(temporaryPath, { force: true });
-				return targetPath;
-			}
-			rmSync(targetPath, { force: true });
-			renameSync(temporaryPath, targetPath);
-			promoted = true;
-		}
+		const publication = publishHostFile(
+			temporaryPath,
+			targetPath,
+			join(agentDir, "npm"),
+			hostTransitionsFile(agentDir),
+			{ replaceExisting: true },
+		);
+		if (publication.status === "failed") throw new Error(publication.reason);
+		if (!publication.attributed) throw new Error("Published bundled jscpd could not be attributed.");
 		return targetPath;
-	} catch (error) {
-		rmSync(temporaryPath, { force: true });
-		if (promoted && !isExactVersion(probeVersion(targetPath))) rmSync(targetPath, { force: true });
-		throw error;
+	} finally {
+		rmSync(temporaryDir, { recursive: true, force: true });
 	}
 }
 
@@ -177,13 +168,11 @@ export function ensureManagedJscpd(managedBinDir: string = getBinDir()): string 
 			`Bundled jscpd ${JSCPD_VERSION} is unavailable for ${platform()}/${arch()}. Reinstall Pi for this platform.`,
 		);
 	}
-	const installed = withHostWrite(managedBinDir, () =>
-		installBundledJscpdBinary({
-			...source,
-			managedBinDir,
-			targetPlatform: platform(),
-		}),
-	);
+	const installed = installBundledJscpdBinary({
+		...source,
+		managedBinDir,
+		targetPlatform: platform(),
+	});
 	cachedManagedPath = { path: installed, mtimeMs: statSync(installed).mtimeMs };
 	return installed;
 }

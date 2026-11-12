@@ -217,13 +217,26 @@ export async function resolveRequestPreflightMaxTokens(options: {
 	context: RequestPreflightContext["context"];
 	maxTokens?: number;
 	signal?: AbortSignal;
-}): Promise<number | undefined> {
-	if (!options.requestPreflight) return options.maxTokens;
+}): Promise<{ maxTokens: number | undefined; discardUndispatched?: () => void }> {
+	if (!options.requestPreflight) return { maxTokens: options.maxTokens };
 	const preflight = await options.requestPreflight(
 		{ model: options.model, context: options.context, maxTokens: options.maxTokens },
 		options.signal,
 	);
-	return narrowRequestMaxTokens(options.maxTokens, preflight?.maxTokens, options.model.maxTokens, "requestPreflight");
+	try {
+		return {
+			maxTokens: narrowRequestMaxTokens(
+				options.maxTokens,
+				preflight?.maxTokens,
+				options.model.maxTokens,
+				"requestPreflight",
+			),
+			...(preflight?.discardUndispatched ? { discardUndispatched: preflight.discardUndispatched } : {}),
+		};
+	} catch (error) {
+		preflight?.discardUndispatched?.();
+		throw error;
+	}
 }
 
 /**
@@ -650,6 +663,7 @@ export async function startPlannedAgentProviderRequestWithId(
 			if (disturbance) config.onSentPrefixDisturbance(disturbance);
 		}
 		let keepPlan = false;
+		let discardPreflight: (() => void) | undefined;
 		try {
 			signal?.throwIfAborted();
 			if (plan.isCurrent?.() === false) {
@@ -698,13 +712,15 @@ export async function startPlannedAgentProviderRequestWithId(
 				config.model.maxTokens,
 				"admitProviderRequest",
 			);
-			requestMaxTokens = await resolveRequestPreflightMaxTokens({
+			const preflight = await resolveRequestPreflightMaxTokens({
 				requestPreflight: config.requestPreflight,
 				model: config.model,
 				context: materialized.context,
 				maxTokens: requestMaxTokens,
 				signal,
 			});
+			requestMaxTokens = preflight.maxTokens;
+			discardPreflight = preflight.discardUndispatched;
 			signal?.throwIfAborted();
 
 			const conversation = config.conversationId ?? config.sessionId;
@@ -817,7 +833,13 @@ export async function startPlannedAgentProviderRequestWithId(
 			)) as Awaited<ReturnType<StreamFn>>;
 			return { requestId, stream, usesTextToolProtocol: materialized.usesTextToolProtocol };
 		} finally {
-			if (!keepPlan) plan.discard?.();
+			if (!keepPlan) {
+				try {
+					discardPreflight?.();
+				} finally {
+					plan.discard?.();
+				}
+			}
 		}
 	}
 }

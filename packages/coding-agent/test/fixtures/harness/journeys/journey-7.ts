@@ -4,6 +4,8 @@ import { runJourney7LeaderPhase } from "./journey-7-leader.ts";
 import { runJourney7LifecyclePhase } from "./journey-7-lifecycle.ts";
 import { runJourney7OwnerMessagesPhase } from "./journey-7-owner-messages.ts";
 import { runJourney7RootBotPhase } from "./journey-7-root-bot.ts";
+import { runJourney7TreeAttemptAdmission } from "./journey-7-tree-attempt-admission.ts";
+import { runJourney7WorkerHeadroomPhase } from "./journey-7-worker-headroom.ts";
 import { runJourney } from "./shared.ts";
 
 /**
@@ -26,6 +28,8 @@ export async function runJourney7(): Promise<void> {
 			await runJourney7RootBotPhase(world);
 			await runJourney7OwnerMessagesPhase(world);
 			await runJourney7LeaderPhase(world);
+			await runJourney7WorkerHeadroomPhase(world);
+			await runJourney7TreeAttemptAdmission(world);
 			await runJourney7DepthPhase(world);
 			await runJourney7LifecyclePhase(world);
 		},

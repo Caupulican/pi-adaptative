@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { existsSync } from "node:fs";
-import { isAbsolute, relative } from "node:path";
+import { isAbsolute, relative, sep } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import {
 	type EscalationPinnedAuthority,
@@ -30,6 +30,7 @@ import { boundedText } from "../util/bounded-line.ts";
 import { isAdaptiveProfileId } from "./worker-authority-resolver.ts";
 import type { HostRequirementCheck } from "./worker-escalation-facts.ts";
 import { escalationSignature } from "./worker-escalation-policy.ts";
+import type { WorkerLaneIsolation } from "./worker-lane-isolation.ts";
 import type { NextAction, Outcome } from "./worker-outcome-contract.ts";
 
 /** At most 16 KiB of instructions per fleet dispatch. */
@@ -44,14 +45,56 @@ const LOCAL_PLACEMENT: Placement = { kind: "local_worker" };
 export interface RerunPlacement {
 	readonly location: string;
 	readonly isolation: "shared" | "worktree";
+	readonly workspaceFocused: boolean;
+	readonly laneWorkspace?: string;
+}
+
+/** Resolve lane provenance once through its owner, distinguishing a missing registration from a shared checkout. */
+export async function lanePlacementAt(
+	isolation: WorkerLaneIsolation | undefined,
+	directory: string,
+): Promise<{ isLane: boolean; root?: string }> {
+	if (!isolation?.isLaneDirectory(directory)) return { isLane: false };
+	const root = await isolation.laneRootAt(directory);
+	return { isLane: true, ...(root ? { root } : {}) };
+}
+
+/** Build the prepared worker's placement through the same factory as its origin. */
+export async function admittedRerunPlacement(
+	admission: { executionContract: { worker: WorkerProfileExecutionContract }; executionPlan: { cwd: string } },
+	sessionCwd: string,
+	isolation: WorkerLaneIsolation | undefined,
+): Promise<RerunPlacement | undefined> {
+	const worker = admission.executionContract.worker;
+	const cwd = worker.authority.cwd ?? admission.executionPlan.cwd;
+	return placementOf(
+		cwd,
+		sessionCwd,
+		await lanePlacementAt(isolation, cwd),
+		worker.profile.workspacePath !== undefined,
+	);
 }
 
 /** The placement of a worker's cwd: a lane directory is `lane` under `worktree`; any other cwd is `shared` where it sits. */
-export function placementOf(cwd: string, sessionCwd: string, isLaneDirectory: boolean): RerunPlacement {
-	if (isLaneDirectory) return { location: "lane", isolation: "worktree" };
+export function placementOf(
+	cwd: string,
+	sessionCwd: string,
+	lane: { isLane: boolean; root?: string },
+	workspaceFocused: boolean,
+): RerunPlacement | undefined {
+	if (lane.isLane) {
+		if (!lane.root) return undefined;
+		const workspace = relative(lane.root, cwd) || ".";
+		if (workspace === ".." || workspace.startsWith(`..${sep}`) || isAbsolute(workspace)) return undefined;
+		return { location: "lane", isolation: "worktree", laneWorkspace: workspace, workspaceFocused };
+	}
 	const inside = relative(sessionCwd, cwd);
-	if (inside === "") return { location: ".", isolation: "shared" };
-	return { location: inside.startsWith("..") || isAbsolute(inside) ? cwd : inside, isolation: "shared" };
+	if (inside === "") return { location: ".", isolation: "shared", workspaceFocused };
+	return {
+		location: inside.startsWith("..") || isAbsolute(inside) ? cwd : inside,
+		isolation: "shared",
+		workspaceFocused,
+	};
 }
 
 /**
@@ -69,7 +112,14 @@ export function authorityDigest(authority: WorkerExecutionAuthorityContract, pla
 	};
 	const sorted = (values: readonly string[]) => values.map(location).sort();
 	const material = JSON.stringify({
-		placement: { location: placement.location, isolation: placement.isolation },
+		placement: {
+			location: placement.location,
+			isolation: placement.isolation,
+			...(placement.workspaceFocused ? { workspaceFocused: true } : {}),
+			...(placement.laneWorkspace && placement.laneWorkspace !== "."
+				? { laneWorkspace: placement.laneWorkspace }
+				: {}),
+		},
 		capabilities: [...authority.capabilities].sort(),
 		toolNames: [...authority.toolNames].sort(),
 		readPaths: sorted(authority.readPaths),
@@ -96,6 +146,7 @@ function pinnedAuthorityOf(
 	placement: RerunPlacement,
 	originCwd: string,
 	laneDirectory?: string,
+	freshLaneWorkspace?: string,
 ): EscalationPinnedAuthority {
 	const profileId = contract.profile.profileId;
 	const adaptive = isAdaptiveProfileId(profileId);
@@ -114,6 +165,8 @@ function pinnedAuthorityOf(
 		...(contract.profile.shellReadOnly === true ? { shellReadOnly: true } : {}),
 		location: placement.location,
 		...(laneDirectory !== undefined ? { laneDirectory } : {}),
+		...(freshLaneWorkspace !== undefined ? { freshLaneWorkspace } : {}),
+		...(contract.profile.workspacePath !== undefined ? { workspaceFocused: true as const } : {}),
 		...(readPaths !== undefined ? { readScope: relativeToDirectory(originCwd, readPaths) } : {}),
 		budget: { ...contract.profile.budget },
 		// The rerun keeps who wrote its words and where its results go: a third party's taint is never laundered by a rerun.
@@ -165,8 +218,8 @@ export function rungRefusalReasonOf(refusal: FleetRefusal): RungRefusalReason | 
 }
 
 export interface WorkerEscalationDeps {
-	/** Whether a directory is a worktree lane, so a rerun reuses that lane when bound to it or isolates a fresh lane. */
-	isLaneDirectory(directory: string): boolean;
+	/** Classify a lane and resolve its registered root for fresh workspace reconstruction. */
+	laneAt(directory: string): Promise<{ isLane: boolean; root?: string }>;
 	readonly runtime: DurableTaskRuntime;
 	readonly fleet: Pick<FleetScheduler, "prepare" | "admit">;
 	goalState(): GoalState | undefined;
@@ -250,16 +303,16 @@ export class WorkerEscalation {
 		if (!task || this.inFlight.has(key)) return;
 		if (task.escalations?.some((entry) => entry.outcomeId === outcome.outcomeId && entry.rung === action.rung))
 			return;
-		const dispatch = this.dispatchFor(snapshot, outcome, action, key);
-		if (!dispatch) {
-			harnessLog.info("escalation", "an escalation rung has no admitted contract to repeat", {
-				outcomeId: outcome.outcomeId,
-				rung: action.rung,
-			});
-			return;
-		}
 		this.inFlight.add(key);
 		try {
+			const dispatch = await this.dispatchFor(snapshot, outcome, action, key);
+			if (!dispatch || this.deps.signal.aborted) {
+				harnessLog.info("escalation", "an escalation rung has no admitted contract to repeat", {
+					outcomeId: outcome.outcomeId,
+					rung: action.rung,
+				});
+				return;
+			}
 			const prepared = await this.deps.fleet.prepare(dispatch, LOCAL_PLACEMENT, this.deps.signal);
 			if (this.deps.signal.aborted) return;
 			const decision = prepared.kind === "prepared" ? this.deps.fleet.admit(dispatch, LOCAL_PLACEMENT) : prepared;
@@ -317,12 +370,12 @@ export class WorkerEscalation {
 	 * The rung's dispatch: the original attempt's contract and write scope with narrowed instructions. A task whose result
 	 * the runtime already completed cannot take another attempt, so its rung runs as a successor task that supersedes it.
 	 */
-	private dispatchFor(
+	private async dispatchFor(
 		snapshot: TaskRuntimeProjection,
 		outcome: Outcome,
 		action: RerunAction,
 		idempotencyKey: string,
-	): FleetDispatch | undefined {
+	): Promise<FleetDispatch | undefined> {
 		const task = outcome.taskId ? snapshot.tasks[outcome.taskId] : undefined;
 		const attemptId = outcome.attempts.at(-1)?.attemptId;
 		const attempt = attemptId ? snapshot.attempts[attemptId] : undefined;
@@ -345,14 +398,22 @@ export class WorkerEscalation {
 		const origin = snapshot.attempts[firstAttemptId]?.dispatch ?? attempt.dispatch;
 		const originContract = origin.executionContract?.worker ?? contract;
 		const originCwd = originContract.authority.cwd ?? this.deps.cwd();
-		const originInLane = this.deps.isLaneDirectory(originCwd);
+		const lane = await this.deps.laneAt(originCwd);
+		const originInLane = lane.isLane;
 		// A worktree lane is bound to the worker that created it: a read-only check inspecting that lane, or a new attempt of
 		// that same worker continuing its conversation while the lane exists on disk, reuses `originCwd` in place. Any other
 		// lane rerun (a completed writer's successor, an unlinked rerun, or a removed lane) starts in a fresh worktree lane.
 		const reuseOriginLane =
 			originInLane && existsSync(originCwd) && (originContract.profile.readOnly === true || relation === "X2");
 		const freshLane = originInLane && !reuseOriginLane;
-		const placement = placementOf(originCwd, this.deps.cwd(), originInLane);
+		const placement = placementOf(
+			originCwd,
+			this.deps.cwd(),
+			lane,
+			originContract.profile.workspacePath !== undefined,
+		);
+		if (!placement) return undefined;
+		const freshLaneWorkspace = freshLane ? placement.laneWorkspace : undefined;
 		// A fresh worktree lane branches off the base checkout without unlanded edits from the earlier lane, so it carries the
 		// task's full requirement set and omits what only the abandoned lane had already met or touched.
 		const requirementIds =
@@ -396,6 +457,7 @@ export class WorkerEscalation {
 					placement,
 					originCwd,
 					reuseOriginLane ? originCwd : undefined,
+					freshLaneWorkspace,
 				),
 				...(relation === "X1" ? { supersedesTaskId: task.task.taskId } : {}),
 				...(relation === "X2"
