@@ -194,6 +194,112 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 			}
 		return delivered;
 	};
+	/** Prove blocked attempts were superseded by accepted attempts of the same task, not merely the same agent. */
+	const recoveredWorkerTasks = (agentDir, sessionId, lanes, claims) => {
+		const sessions = join(agentDir, "state", "orchestration", "sessions");
+		if (!existsSync(sessions)) return undefined;
+		const owners = readdirSync(sessions).filter((name) => name.startsWith(`${sessionId}-`));
+		if (owners.length !== 1) return undefined;
+		const eventsDir = join(sessions, owners[0], "events", "events");
+		if (!existsSync(eventsDir)) return undefined;
+		const events = readdirSync(eventsDir)
+			.filter((name) => /^\d{16}\.json$/.test(name))
+			.sort()
+			.map((name) => {
+				const event = JSON.parse(readFileSync(join(eventsDir, name), "utf8"));
+				return event.ordinal === Number(name.slice(0, 16)) ? event : undefined;
+			});
+		if (events.some((event, index) => !event || !Number.isSafeInteger(event.ordinal) || event.ordinal < 1 || (index > 0 && event.ordinal <= events[index - 1].ordinal))) return undefined;
+		const owned = (type, predicate) => events.filter((event) => event.type === type && predicate(event.payload, event));
+		const starts = events.filter((event) => event.type === "task.attempt_prepared" || event.type === "attempt.queued");
+		const taskForAttempt = (id) => {
+			const matches = starts.filter((event) => event.payload?.attemptId === id);
+			if (matches.length !== 1) return undefined;
+			const event = matches[0];
+			const taskId = event.payload?.taskId;
+			return typeof taskId === "string" && event.aggregateId === taskId && event.payload?.dispatch?.taskId === taskId
+				? taskId
+				: undefined;
+		};
+		const recovered = [];
+		for (const [attemptId, lane] of lanes) {
+			if (/^(succeeded|completed)$/.test(lane.status)) continue;
+			if (lane.status !== "blocked") return undefined;
+			const taskId = taskForAttempt(attemptId);
+			if (!taskId) return undefined;
+			if (recovered.some((entry) => entry.taskId === taskId)) continue;
+			const taskStarts = starts.filter((event) => event.payload?.taskId === taskId);
+			const first = taskStarts[0];
+			const objectiveId = first?.payload?.task?.objectiveId;
+			if (
+				first?.type !== "task.attempt_prepared" ||
+				first.aggregateId !== taskId ||
+				first.payload?.task?.taskId !== taskId ||
+				objectiveId !== `session:${sessionId}` ||
+				taskStarts.length < 2
+			) return undefined;
+			const ids = taskStarts.map((event) => event.payload?.attemptId);
+			if (new Set(ids).size !== ids.length || ids.some((id) => !lanes.has(id) || taskForAttempt(id) !== taskId))
+				return undefined;
+			const outcomes = owned("task.outcome_recorded", (payload, event) => event.aggregateId === taskId && payload?.outcome?.taskId === taskId);
+			if (outcomes.length !== ids.length) return undefined;
+			const finishes = ids.map((id) => owned("attempt.finished", (payload, event) => event.aggregateId === id && payload?.result?.attemptId === id && payload.result.taskId === taskId));
+			if (finishes.some((matches) => matches.length !== 1)) return undefined;
+			for (let index = 0; index < ids.length; index++) {
+				const id = ids[index];
+				const currentLane = lanes.get(id);
+				const claim = claims.get(id);
+				const finished = finishes[index][0];
+				const outcome = outcomes[index]?.payload?.outcome;
+				const final = index === ids.length - 1;
+				const enqueued = owned("notification.enqueued", (payload, event) => event.aggregateId === objectiveId && payload?.attemptId === id && payload.objectiveId === objectiveId && payload.notificationId === `worker-terminal:${id}`);
+				const delivered = owned("notification.delivered", (payload, event) => event.aggregateId === objectiveId && payload?.notificationId === `worker-terminal:${id}`);
+				if (
+					taskStarts[index].ordinal >= finished.ordinal ||
+					finished.ordinal >= outcomes[index].ordinal ||
+					outcome?.objectiveId !== objectiveId ||
+					outcome.generation !== index + 1 ||
+					JSON.stringify(outcome.attempts?.map((entry) => entry.attemptId)) !== JSON.stringify(ids.slice(0, index + 1)) ||
+					outcome.attempts.some((entry, position) => entry.resultId !== finishes[position][0].payload.result.resultId || entry.laneStatus !== (position === ids.length - 1 ? "succeeded" : "blocked")) ||
+					claim?.requestId !== taskId ||
+					enqueued.length !== 1 || delivered.length !== 1 || enqueued[0].ordinal <= finished.ordinal || delivered[0].ordinal <= enqueued[0].ordinal
+				) return undefined;
+				const result = finished.payload.result;
+				if (final) {
+					if (
+						!/^(succeeded|completed)$/.test(currentLane.status) || claim.status !== "completed" ||
+						claim.blockers?.length || claim.pending?.length || claim.parentReviewRequired || claim.hostVerdict?.verdict !== "accepted" ||
+						result.status !== "completed" || result.receipts?.status !== "captured" || result.receipts?.acceptance?.disposition !== "accepted" ||
+						outcome.status !== "succeeded" || outcome.nextAction?.kind !== "accept" ||
+						typeof result.resultId !== "string" || !result.resultId || !/^[a-f0-9]{64}$/.test(result.receipts.factsDigest ?? "") ||
+						!owned("attempt.receipts_delivered", (payload, event) => event.ordinal > finished.ordinal && event.aggregateId === id && payload?.attemptId === id && payload.acknowledgement?.resultId === result.resultId && payload.acknowledgement?.factsDigest === result.receipts.factsDigest).length
+					) return undefined;
+				} else {
+					const next = ids[index + 1];
+					const escalations = owned("task.escalation_scheduled", (payload, event) => event.aggregateId === taskId && payload?.record?.outcomeId === outcome.outcomeId && payload.record.rung === outcome.nextAction?.rung && payload.record.taskId === taskId && payload.record.attemptId === next && payload.record.supersedesTaskId === undefined);
+					if (
+						currentLane.status !== "blocked" || claim.status !== "blocked" || claim.hostVerdict?.verdict !== "rejected" || result.status !== "blocked" ||
+						result.receipts?.status !== "captured" || result.receipts?.acceptance?.disposition !== "rejected" ||
+						outcome.status !== "blocked" || outcome.nextAction?.kind !== "rerun_uncovered" ||
+						taskStarts[index + 1].type !== "attempt.queued" || escalations.length !== 1 || outcomes[index].ordinal >= taskStarts[index + 1].ordinal || taskStarts[index + 1].ordinal >= escalations[0].ordinal || escalations[0].ordinal >= finishes[index + 1][0].ordinal
+					) return undefined;
+				}
+			}
+			recovered.push({
+				taskId,
+				objectiveId,
+				attempts: ids.map((id, index) => ({
+					attemptId: id,
+					status: lanes.get(id).status,
+					resultId: finishes[index][0].payload.result.resultId,
+					outcomeId: outcomes[index].payload.outcome.outcomeId,
+					generation: outcomes[index].payload.outcome.generation,
+					receiptAcceptance: finishes[index][0].payload.result.receipts.acceptance.disposition,
+				})),
+			});
+		}
+		return recovered;
+	};
 	/** Freeze task counts only after owner answer, worker claims/outbox and canonical work state all settle. */
 	const settleRootPrompt = async (input, agentDir, requireWorker = false) => {
 		let prior;
@@ -248,8 +354,14 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 				);
 				if (requireWorker && lanes.size === 0) return undefined;
 				const delivered = deliveredNotifications(agentDir);
+				const recovered = [...lanes.values()].some((lane) => !/^(succeeded|completed)$/.test(lane.status))
+					? recoveredWorkerTasks(agentDir, input.sessionId, lanes, claims)
+					: [];
+				if (!recovered) return undefined;
+				const recoveredAttempts = new Set(recovered.flatMap((task) => task.attempts.map((attempt) => attempt.attemptId)));
 				for (const [attempt, lane] of lanes) {
 					const claim = claims.get(attempt);
+					if (recoveredAttempts.has(attempt)) continue;
 					if (
 						!/^(succeeded|completed)$/.test(lane.status) ||
 						claim?.status !== "completed" ||
@@ -280,6 +392,7 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 					calls: calls.map((call) => call.name),
 					bounced,
 					workerAttempts: [...lanes.keys()],
+					workerHistory: recovered,
 					finalEntryId: last.id,
 				};
 				writeFileSync(
@@ -294,5 +407,5 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 			() => screen(input.pane, 30),
 		);
 	};
-	return { register, type, submitRootPrompt, settleRootPrompt, deliveredNotifications };
+	return { register, type, submitRootPrompt, settleRootPrompt, deliveredNotifications, inspectRecoveredWorkerTasks: recoveredWorkerTasks };
 }

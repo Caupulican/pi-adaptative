@@ -728,7 +728,7 @@ const SCENARIOS = [
 			);
 		if (second.calls.length > 8)
 			throw new Error(`starting one worker took ${second.calls.length} tool calls (${second.calls.join(", ")})`);
-		return `a settled plain edit took ${first.calls.length} root tool calls and a settled worker start ${second.calls.length}, with no bounced call`;
+		return `a settled plain edit took ${first.calls.length} root tool calls and a settled worker start ${second.calls.length}, with no bounced root call; ${second.workerHistory.length} verified worker recovery chain(s)`;
 	}),
 	scenario("s16", "watch routines: made from plain words, quiet while idle, firing once on the change, no model use before it", async () => {
 		// A watch lives in its owning session: the main pane (or one this scenario starts when it runs alone).

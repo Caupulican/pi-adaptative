@@ -1013,3 +1013,33 @@ repository answer from the second pane. Report:
 `.git/pi-audits/live-validation/2026-11-12T17-53-19-887Z/report.json` (four passes, no selected skips).
 Both pane observations were fresh and error-free after completion, and the staged bytes matched
 the observer source. The full eighteen-scenario run and final corrected source CI remain pending.
+
+The next full published-binary run, with verifier `8a6818dd624575cc69bff3c6486ba060d2f27468`,
+passed 17 scenarios and failed S15's settlement wait, with no selected skips. Report:
+`.git/pi-audits/live-validation/2026-11-12T17-55-14-429Z/report.json`. Observer placement and S43's
+exact terminal/negative-chat controls passed. S15's original one-line JSDoc oracle passed; its
+second root input also performed a successful live `zoom` for `id:8,n:7`.
+
+The alpha worker correctly reached a blocked outcome when it reported file reads/writes as
+command checks, then mismatched a real shell receipt. The host preserved those rejections. The
+same logical task explicitly escalated to a second attempt, whose real command receipts were
+accepted and whose generation-2 outcome was `succeeded/host_verified`; both terminal notifications
+were delivered and the file contained exactly `alpha`. The verifier nevertheless demanded success
+from every historical attempt, so the correctly rejected predecessor made settlement impossible.
+This current-task versus attempt-history mismatch is being repaired in the existing settlement
+owner. Rejected history must remain visible, task/generation lineage and receipt proof must be
+verified, and root-call counts must include the recovery. S15's exact file, zero root-bounce and
+eight-call requirements are unchanged. S9 reads the main agent, so its separate historical-health
+assertions are unaffected by this default-agent finding and remain unchanged.
+
+The corrected recovery proof passed source review and a read-only retrospective assessment through
+the same verifier function over that preserved native journey. It verified task `worker-2`'s ordered
+generation-1 rejected result and generation-2 accepted result, exact receipt acknowledgment and
+terminal deliveries, seven root calls, zero root bounces, exact `alpha` and the original slugify/
+one-line JSDoc contract. Diagnostic: `/tmp/pi-v0.104.57-recovered-journey-inspection.json`.
+This reanalysis is supplemental evidence, not a new live acceptance pass; the original failed report
+is unchanged. A new complete native run is still required.
+
+Release evidence must distinguish the unchanged `v0.104.57` binary from the corrected live verifier
+revision on main. The release tag includes the production fixes and composed harness regressions,
+but predates these live-verifier corrections; checking out that tag alone uses the obsolete verifier.
