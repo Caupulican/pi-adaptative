@@ -968,3 +968,33 @@ transition paths and the actual parent-facing user handoff text. Its required pr
 clean cold-install claim, rollback and whole-batch retention assertions remain unchanged. This
 fixture correction passed formatting and type checking; the complete corrected Linux/Windows CI
 is still required before release preparation.
+
+The corrected source commit `273e8a59da93449a2f5ed91c49e8366b28c123ac` passed all ten journeys
+on Linux and Windows in CI `43263349200`, with none filtered. Release `v0.104.57` at
+`6ed2b76b4bb980cd7f11d04bfafa95f44e0f1a15` then passed the exact-tag journeys and release-only
+provider/dependency gates; all nine binary workflow jobs succeeded. Release preparation checked
+43 immutable changelog tags, compensating for the explicitly skipped history subcheck in normal
+shallow source CI. Published archive and extracted executable hashes were verified independently.
+
+The first full published-binary live run is preserved at
+`.git/pi-audits/live-validation/2026-11-12T17-28-35-249Z/report.json`: 15 passes, three failures,
+no skipped selected scenarios. It found two further H18 verifier boundary defects. Repository-cwd
+launch classified the repository-hosted observer as a project instruction and correctly excluded it
+under the default policy. Observer registration now stages the unchanged passive extension once
+inside each isolated agent directory, an existing trusted instruction root; project instruction
+admission remains unchanged. The remote ask was durably applied with `81`, but the model then held
+an explicit-replies-only inbox wait for 120 seconds. The terminal handoff arrived at the next safe
+boundary, after the verifier's independent 120-second screen deadline. This is evidence of late
+parent delivery, not a lost remote result. The verifier now uses its existing bounded owning-turn
+settlement before requiring exactly one canonical handoff for that lane/attempt, its answer, its
+durable delivery receipt, the succeeded lane and visible reply. All canonical records for that
+identity count before status validation, so a conflicting duplicate cannot be hidden. Existing
+timeouts and the owner-chat negative control are unchanged. The model's unnecessary inbox wait
+remains an observed inefficiency; this correction makes no latency guarantee.
+
+The third failure is retained as a model task failure: the root preserved the one-line JSDoc
+requirement but supplied a contradictory three-line example, which its worker followed. The root
+then read the file and inaccurately described it as one line. No harness rewrite or omitted
+requirement was found. The one-line oracle and original prompt remain unchanged. This run did not
+reach S15's subsequent worker-start control or S43's owner-chat negative control; neither is counted
+as covered. Corrected full live acceptance remains pending.

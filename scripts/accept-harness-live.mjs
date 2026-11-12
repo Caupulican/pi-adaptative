@@ -42,7 +42,7 @@ import { join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { args, flag, selectLiveScenarios } from "./live-args.mjs";
 import { assertLiveBinaryUnchanged, pinLiveBinary } from "./lib/live-binary-identity.mjs";
-import { assertSlugifyEdit, createNativeInputDriver, liveObserverExtension } from "./lib/live-native-driver.mjs";
+import { assertSlugifyEdit, createNativeInputDriver } from "./lib/live-native-driver.mjs";
 
 const REPO = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const MODEL_A = flag("model-a", "xai/grok-4.7-build-fast");
@@ -246,12 +246,12 @@ const openPane = (anchor) => {
 	return id;
 };
 const launch = (pane, cwd, extra = "", agentDir = AGENT) => {
-	const observer = nativeInput.register(pane);
+	const observer = nativeInput.register(pane, agentDir);
 	return herdr(
 		"pane",
 		"run",
 		pane,
-		`clear; cd ${shellArgument(cwd)} && PI_ADAPTATIVE_CODING_AGENT_DIR=${shellArgument(agentDir)} PI_LIVE_OBSERVER_FILE=${shellArgument(observer)} ${PANE_ENV} ${shellArgument(PI_COMMAND)} --extension ${shellArgument(liveObserverExtension)} --provider ${shellArgument(MODEL_A.split("/")[0])} --model ${shellArgument(MODEL_A.split("/").slice(1).join("/"))} ${extra}`,
+		`clear; cd ${shellArgument(cwd)} && PI_ADAPTATIVE_CODING_AGENT_DIR=${shellArgument(agentDir)} PI_LIVE_OBSERVER_FILE=${shellArgument(observer.file)} ${PANE_ENV} ${shellArgument(PI_COMMAND)} --extension ${shellArgument(observer.extension)} --provider ${shellArgument(MODEL_A.split("/")[0])} --model ${shellArgument(MODEL_A.split("/").slice(1).join("/"))} ${extra}`,
 	);
 };
 const type = (pane, text) => nativeInput.type(pane, text);
@@ -983,7 +983,7 @@ const SCENARIOS = [
 		// 1. The orchestrator asks lab through its bot tool: one ask, placed as one lane.
 		await type(state.main, "/chat root");
 		await sleep(1500);
-		await submitRootPrompt(state.main, `Use your bot tool with action ask to ask lab this question, and wait for its answer: "What is 9 times 9? Answer with the number only. (ref ${marker})"`);
+		const askInput = await submitRootPrompt(state.main, `Use your bot tool with action ask to ask lab this question, and wait for its answer: "What is 9 times 9? Answer with the number only. (ref ${marker})"`);
 		await waitFor("the ask placed as a lane", () => asks()[0], 120_000, 3000, () => screen(state.main, 20));
 		// 2. The lane ends once with lab's answer; the placer applies the end once.
 		const ended = await waitFor("lab's answer applied", () => asks().find((record) => record.appliedAt), 300_000, 4000, () => screen(state.main, 20));
@@ -992,9 +992,23 @@ const SCENARIOS = [
 		if (ended.state !== "terminal" || ended.outcome?.status !== "succeeded") throw new Error(`the ask did not succeed: ${JSON.stringify({ state: ended.state, outcome: ended.outcome, refusal: ended.refusal })}`);
 		if (!/81/.test(ended.outcome.summary)) throw new Error(`the answer is not in the lane's end: ${String(ended.outcome.summary).slice(0, 160)}`);
 		// 3. The reply reaches the orchestrator as the lane's one terminal notification, and the lane completes.
+		// A bounded foreground tool may defer the parent handoff until its safe boundary.
+		await settleRootPrompt(askInput, AGENT);
 		await waitFor(
 			"the reply as the lane's terminal notification",
-			() => /81/.test(screen(state.main, 200)) && lanes().some((lane) => lane.laneId === ended.laneId && /^(completed|succeeded)$/.test(String(lane.status))),
+			() => {
+				const terminals = jsonl(askInput.sessionFile)
+					.filter((entry) => entry.type === "custom_message" && entry.customType === "background-worker-completion")
+					.flatMap((entry) => entry.details?.records ?? [])
+					.filter((record) => record.laneId === ended.laneId && record.attemptId === ended.attemptId);
+				if (terminals.length > 1) throw new Error(`the ask delivered ${terminals.length} terminal handoffs`);
+				const terminal = terminals[0];
+				return terminals.length === 1 && /^(completed|succeeded)$/.test(String(terminal.status)) &&
+					terminal.claim?.status === "completed" && /81/.test(terminal.claim.summary) &&
+					nativeInput.deliveredNotifications(AGENT).has(`worker-terminal:${ended.attemptId}`) &&
+					/81/.test(screen(state.main, 200)) && lanes().some((lane) => lane.laneId === ended.laneId &&
+						lane.attemptId === ended.attemptId && /^(completed|succeeded)$/.test(String(lane.status)));
+			},
 			120_000,
 			3000,
 			() => screen(state.main, 30),

@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { runInNewContext } from "node:vm";
 import { transformSync } from "esbuild";
 
-export const liveObserverExtension = fileURLToPath(new URL("./live-session-observer.mjs", import.meta.url));
+const liveObserverSource = fileURLToPath(new URL("./live-session-observer.mjs", import.meta.url));
 
 /** Execute only the synthetic journey's edited module in a context with no process, imports or string code generation. */
 export function assertSlugifyEdit(source) {
@@ -28,10 +28,18 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 	const observations = directory;
 	mkdirSync(observations, { recursive: true });
 	const paneObservers = new Map();
-	const register = (pane) => {
+	const agentObservers = new Map();
+	const register = (pane, agentDir) => {
+		let extension = agentObservers.get(agentDir);
+		if (!extension) {
+			// Agent-owned instrumentation stays trusted when the working project excludes its own instructions.
+			extension = join(agentDir, "live-session-observer.mjs");
+			writeFileSync(extension, readFileSync(liveObserverSource), { mode: 0o600 });
+			agentObservers.set(agentDir, extension);
+		}
 		const file = join(observations, `${pane.replaceAll(/[^a-zA-Z0-9-]/g, "_")}-${Date.now()}.json`);
 		paneObservers.set(pane, file);
-		return file;
+		return { file, extension };
 	};
 	const observation = (pane) => {
 		const file = paneObservers.get(pane);
