@@ -3186,6 +3186,7 @@ class HarnessOwnerTimers implements TimerPort {
 		{
 			readonly callback: () => void;
 			readonly delayMs: number;
+			readonly keepAlive: boolean;
 			readonly dueAt: number;
 			readonly real: ReturnType<typeof setTimeout> | undefined;
 		}
@@ -3203,11 +3204,17 @@ class HarnessOwnerTimers implements TimerPort {
 		return (this.pinnedAt ?? Date.now()) + this.advancedMs;
 	}
 
-	setTimeout(callback: () => void, delayMs: number): number {
+	setTimeout(callback: () => void, delayMs: number, options?: Parameters<TimerPort["setTimeout"]>[2]): number {
 		const handle = this.nextHandle++;
 		// The journey's own run holds the process open; a wall alarm never does.
 		const real = this.wall ? setTimeout(() => this.fire(handle), delayMs).unref() : undefined;
-		this.pending.set(handle, { callback, delayMs, dueAt: this.advancedMs + delayMs, real });
+		this.pending.set(handle, {
+			callback,
+			delayMs,
+			keepAlive: options?.keepAlive === true,
+			dueAt: this.advancedMs + delayMs,
+			real,
+		});
 		for (const resolve of this.armWaiters.splice(0)) resolve(delayMs);
 		return handle;
 	}
@@ -3232,6 +3239,15 @@ class HarnessOwnerTimers implements TimerPort {
 		return [...this.pending.values()].map((entry) => entry.delayMs);
 	}
 
+	armedSnapshot(): Array<{ handle: number; delayMs: number; remainingMs: number; keepAlive: boolean }> {
+		return [...this.pending].map(([handle, entry]) => ({
+			handle,
+			delayMs: entry.delayMs,
+			remainingMs: entry.dueAt - this.advancedMs,
+			keepAlive: entry.keepAlive,
+		}));
+	}
+
 	advance(ms: number): number {
 		this.advancedMs += ms;
 		const due = [...this.pending.entries()]
@@ -3248,9 +3264,23 @@ class HarnessOwnerTimers implements TimerPort {
 		return this.nextArmed();
 	}
 
-	nextArmed(): Promise<number> {
-		return new Promise((resolve) => {
-			this.armWaiters.push(resolve);
+	nextArmed(signal?: AbortSignal): Promise<number> {
+		return new Promise((resolve, reject) => {
+			if (signal?.aborted) {
+				reject(signal.reason);
+				return;
+			}
+			const onAbort = () => {
+				const index = this.armWaiters.indexOf(onArm);
+				if (index >= 0) this.armWaiters.splice(index, 1);
+				reject(signal?.reason);
+			};
+			const onArm = (delayMs: number) => {
+				signal?.removeEventListener("abort", onAbort);
+				resolve(delayMs);
+			};
+			this.armWaiters.push(onArm);
+			signal?.addEventListener("abort", onAbort, { once: true });
 		});
 	}
 }
@@ -3272,6 +3302,12 @@ export class HarnessTimers implements TimerSource {
 		return this.ownerTimers(owner).armedDelays();
 	}
 
+	armedSnapshot(
+		owner: TimerOwner,
+	): Array<{ handle: number; delayMs: number; remainingMs: number; keepAlive: boolean }> {
+		return this.ownerTimers(owner).armedSnapshot();
+	}
+
 	/**
 	 * Moves `owner`'s clock forward by `ms` and fires, once and in due order, every alarm of that owner then due (an alarm
 	 * an earlier callback cleared is skipped; one a callback arms is due no earlier than its delay after the new time).
@@ -3287,8 +3323,8 @@ export class HarnessTimers implements TimerSource {
 	}
 
 	/** The delay of the next alarm `owner` arms after this call, whatever it already holds pending: resolved by that arm itself. */
-	nextArmed(owner: TimerOwner): Promise<number> {
-		return this.ownerTimers(owner).nextArmed();
+	nextArmed(owner: TimerOwner, signal?: AbortSignal): Promise<number> {
+		return this.ownerTimers(owner).nextArmed(signal);
 	}
 
 	private readonly sleptMs: number[] = [];

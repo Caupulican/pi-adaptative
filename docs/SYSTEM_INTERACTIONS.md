@@ -540,3 +540,62 @@ distinguishes ordinary journeys-only CI from an explicitly owner-authorized exac
 
 The final `npm run check` completed successfully after the pricing repair; its clone coverage and
 limits match the preceding report. No guard baseline, scanner sensitivity or size ceiling was raised.
+
+### First release candidate: held-request evaluator mismatch
+
+The authorized repair commit is `dd135c909aad31e5c43a29b0f7fbb2daa9360b70`. Release workflow
+`43160544691` prepared `v0.104.55` at `e1da569a359694dd25238dfa8e0854ea82ff20e0` and dispatched
+binary workflow `43160738528`. No GitHub release was published (the release API returned HTTP 404).
+Standalone build, Linux benchmark, Windows x64/ARM64 native checks and the Windows performance
+gate passed. The Windows exact-tag harness journeys reported nine passes and one failure, so this
+candidate is not green. Required provider checks were skipped after that failure, not passed.
+
+The failing R10s evaluator assumed no scheduler alarm while its retry response was deliberately
+held at the provider. The new exact-key single-flight rule correctly parked further admission and
+armed a two-second accounting poll. Independent source review showed the scripted 503 responses
+already contain 24 measured tokens at explicit zero rates; they are not unknown-cost responses.
+The first investigation hypothesis conflated those states and was rejected. The fixture must
+prove no overlapping physical request during this hold, then preserve the separate two/four-second
+transport-backoff controls after releasing the response. The production accounting fence stays.
+
+Failed evidence is retained in `/tmp/pi-release-v0.104.55-windows-quality.log` and
+`/tmp/pi-release-v0.104.55-initial-evidence.json`. The remaining work in the failed binary run was
+cancelled to prevent an active publisher during same-version recovery. The unpublished tag may be
+freed only after both workflows are inactive; the existing `release.yml target=repair` then owns
+the corrected candidate and tag without another version bump.
+
+The stronger evaluator distinguishes actual transport retry arms from accounting polls using the
+existing `TimerOptions.keepAlive` metadata in the fixture timer adapter, retaining handles and
+remaining deadlines while preserving real callbacks. It yields before negative request assertions
+and requires the exact next provider step at the retry boundary. A source-confirmed detached idle
+helper also needed owned cancellation after timeout; its waiter and driver must end together.
+These are fixture repairs, not changes to production retry timing or accounting admission.
+
+A quiet diagnostic interval was initially suspected to be a disposal hang. Per-step evidence in
+`/tmp/pi-r10-dispose-diagnostic.log` showed final idle, abort, foreground idle and disposal all
+completed; subsequent journey phases were still running. That production-hang candidate is rejected.
+Reporter silence alone is not a timeout or a stalled owner. Final fixture execution and release
+repair remain pending until recorded below.
+
+The diagnostic ran for 242 seconds through the first mode's later journey phases; its reported
+failure was teardown classification of the R10 notice already asserted by that phase. It reported
+one failed test and nine skipped tests; it was not a green journey result or proof of both modes. The final
+fixture consumes only that exact asserted warning occurrence. It adds no journey-wide allowance,
+changes no production rule, and retains the normal warning gate elsewhere. The architect approved
+the scoped timer, cancellation and warning changes with no finding. A fresh final execution uses
+`/tmp/pi-r10-scoped-final.log`; the superseded partial allowance run is not verification evidence.
+
+**Final scoped fixture result:** the standalone composed journey passed in both System One modes
+in 477.08 seconds. The focused command reported one passed test and nine intentionally filtered
+journeys, not ten passes. `/tmp/pi-r10-scoped-final.log` is the authoritative result for the frozen
+scoped-warning version. The refreshed full `npm run check` also passed, including type checking
+and unchanged zero-clone coverage. The evaluator mismatch and fixture lifetime repairs are closed;
+publication and post-release live acceptance still require their own authoritative results.
+
+Before committing the fixture repair, daily catalog commit
+`7fd8b53c6a0d0da47d2028a9c90fb8bc2d936210` landed on main. It was fast-forwarded and preserved;
+it changes only the generated model catalog. The harness regression aggregate was rerun on the
+combined tree and passed all 136 Vitest and six Node tests, with no skips. Its JSON is
+`/tmp/pi-harness-release-regressions-2026-11-12-catalog-final.json`. The 477-second composed journey
+result above precedes that generated catalog update; exact-tag release CI must verify the final
+combined candidate rather than treating those local results as publication proof.

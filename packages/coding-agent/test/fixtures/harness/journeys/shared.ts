@@ -1626,6 +1626,7 @@ export async function icmWaitForChatIdle(
 	// A turn that ended before this wait holds the chat's summaries for the foreground quiet window (see
 	// `icmEndForegroundQuiet`): let it pass whenever it is the first alarm armed, until the chat has settled.
 	let finished = false;
+	const stopDriver = new AbortController();
 	void settled.then(
 		() => {
 			finished = true;
@@ -1634,15 +1635,30 @@ export async function icmWaitForChatIdle(
 			finished = true;
 		},
 	);
-	void (async () => {
-		while (!finished) {
-			if (world.timers.armedDelays("continuous-chat")[0] === CONTINUOUS_CHAT_FOREGROUND_QUIET_MS) {
+	const driver = (async () => {
+		while (!finished && !stopDriver.signal.aborted) {
+			if (world.timers.armedDelays("continuous-chat")[0] === CONTINUOUS_CHAT_FOREGROUND_QUIET_MS)
 				world.timers.advance("continuous-chat", CONTINUOUS_CHAT_FOREGROUND_QUIET_MS);
-			}
-			await Promise.race([world.timers.nextArmed("continuous-chat"), settled.catch(() => undefined)]);
+			await Promise.race([
+				world.timers.nextArmed("continuous-chat", stopDriver.signal),
+				settled.catch(() => undefined),
+			]);
 		}
-	})();
-	await withDeadline(world.trace, `ICM continuous chat idle (${expectedMessages} messages)`, settled, 60_000);
+	})().catch((error: unknown) => {
+		if (!stopDriver.signal.aborted) throw error;
+	});
+	try {
+		await withDeadline(
+			world.trace,
+			`ICM continuous chat idle (${expectedMessages} messages)`,
+			Promise.all([settled, driver]).then(() => undefined),
+			60_000,
+		);
+	} finally {
+		finished = true;
+		stopDriver.abort();
+		await driver;
+	}
 }
 
 /** The newest result of `toolName` in the request's latest tool batch; fails when the batch carried none. */

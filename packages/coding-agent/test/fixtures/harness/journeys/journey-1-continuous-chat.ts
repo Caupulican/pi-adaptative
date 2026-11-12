@@ -505,9 +505,14 @@ export async function runJourney1ContinuousChatPhase(world: HarnessWorld): Promi
 		world.systemOne.enterPhase("icm-turn-2", ICM_INTAKE_JUDGMENTS);
 		await withDeadline(trace, "ICM turn 2", icmRoot.session.prompt("Inspect the summary tree, raw echo, and date."));
 		await icmEndForegroundQuiet(world);
-		await advanceIcmTransportBackoff(world, "ICM merge 8+9", 2000, merge89RequestMark, [
-			"worker-c:icm-merge-8-9-transient-503",
-		]);
+		await advanceIcmTransportBackoff(
+			world,
+			"ICM merge 8+9",
+			2000,
+			merge89RequestMark,
+			["worker-c:icm-merge-8-9-transient-503"],
+			"worker-c:icm-merge-8-9-accepted",
+		);
 		await icmWaitForChatIdle(world, icmAgentDir, 13);
 
 		const icmRecords = icmReadContinuousRecords(world, icmStore);
@@ -628,16 +633,49 @@ async function advanceIcmTransportBackoff(
 	delayMs: number,
 	requestMark: number,
 	expectedSteps: readonly string[],
+	nextStep: string,
+	priorHandles: readonly number[] = [],
 ): Promise<void> {
 	const steps = () => world.provider.reached.slice(requestMark).filter((step) => step.startsWith("worker-c:"));
-	expect(
-		await withDeadline(world.trace, `${label} transport backoff`, world.timers.whenArmed("continuous-chat")),
-		`${label}: the request arms its bounded transport delay`,
-	).toBe(delayMs);
+	// Retry sleeps keep the process alive; the same-key accounting poll does not. Wait for a newly armed
+	// retry handle without mistaking the older poll for the transport boundary.
+	const stopWaiting = new AbortController();
+	try {
+		await withDeadline(
+			world.trace,
+			`${label} transport backoff armed`,
+			(async () => {
+				while (
+					!world.timers
+						.armedSnapshot("continuous-chat")
+						.some((entry) => entry.keepAlive && entry.delayMs === delayMs && !priorHandles.includes(entry.handle))
+				)
+					await world.timers.nextArmed("continuous-chat", stopWaiting.signal);
+			})(),
+		);
+	} finally {
+		stopWaiting.abort();
+	}
 	expect(steps(), `${label}: only the requests before this backoff have run`).toEqual(expectedSteps);
-	expect(world.timers.advance("continuous-chat", delayMs - 1), `${label}: no retry fires before its delay`).toBe(0);
+	const transport = world.timers
+		.armedSnapshot("continuous-chat")
+		.find((entry) => entry.keepAlive && entry.delayMs === delayMs && !priorHandles.includes(entry.handle));
+	expect(transport?.remainingMs, `${label}: the new transport delay has its full interval remaining`).toBe(delayMs);
+	// Same-key accounting polls may share this timer owner with transport retry backoffs. They are allowed to fire,
+	// but must not dispatch a provider request before the transport's own boundary.
+	world.timers.advance("continuous-chat", delayMs - 1);
+	await new Promise<void>((resolve) => setImmediate(resolve));
 	expect(steps(), `${label}: no provider request escapes the delay`).toEqual(expectedSteps);
-	expect(world.timers.advance("continuous-chat", 1), `${label}: exactly one transport retry becomes due`).toBe(1);
+	expect(
+		world.timers.advance("continuous-chat", 1),
+		`${label}: a retry or accounting poll is due at the boundary`,
+	).toBeGreaterThan(0);
+	await withDeadline(world.trace, `${label} retry reached`, world.provider.whenReached(nextStep, requestMark));
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(steps(), `${label}: the transport retry dispatches exactly one next request`).toEqual([
+		...expectedSteps,
+		nextStep,
+	]);
 }
 
 type FrameMessage = ScriptedRequest["context"]["messages"][number];
@@ -860,6 +898,7 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 	const trace = world.trace;
 	const label = "r10s";
 	const failedLine = `Continuous-chat compaction 1+1 failed: ${R10S_STOPPED}`;
+	const accountingHoldLine = "Memory summaries wait for response usage accounting to recover.";
 	const longReply = `R10S-SPACING-${"s".repeat(600)}`;
 	const leafTask = (request: ScriptedRequest): void => {
 		if (!JSON.stringify(request.context.messages).includes("R10S-SPACING-")) {
@@ -898,11 +937,22 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 	world.systemOne.enterPhase(`${label}-turn-a`, {});
 	await withDeadline(trace, "R10s turn A", root.session.prompt("Record the R10s spacing reply."));
 	await icmEndForegroundQuiet(world);
-	await advanceIcmTransportBackoff(world, "R10s idle first retry", 2000, reachedMark, ["worker-c:r10s-idle-a"]);
-	await advanceIcmTransportBackoff(world, "R10s idle second retry", 4000, reachedMark, [
-		"worker-c:r10s-idle-a",
+	await advanceIcmTransportBackoff(
+		world,
+		"R10s idle first retry",
+		2000,
+		reachedMark,
+		["worker-c:r10s-idle-a"],
 		"worker-c:r10s-idle-b",
-	]);
+	);
+	await advanceIcmTransportBackoff(
+		world,
+		"R10s idle second retry",
+		4000,
+		reachedMark,
+		["worker-c:r10s-idle-a", "worker-c:r10s-idle-b"],
+		"worker-c:r10s-idle-c",
+	);
 	await withDeadline(
 		trace,
 		"R10s leaf 1 blocked",
@@ -1005,6 +1055,30 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 			"R10s retry request reached and held",
 			world.provider.whenReached(`worker-c:${label}-arrival-a`, turnMark),
 		);
+		// The request is deliberately held after dispatch. Its per-key accounting slot makes concurrent summary
+		// admission wait once; that 2s poll is separate from the transport backoff after this request is released.
+		await withDeadline(
+			trace,
+			"R10s in-flight summary accounting hold",
+			world.whenWarnings(warningMark, (seen) => seen.includes(accountingHoldLine)),
+		);
+		expect(
+			await withDeadline(trace, "R10s in-flight accounting poll armed", world.timers.whenArmed("continuous-chat")),
+			"the same-key in-flight accounting poll has its bounded 2s delay",
+		).toBe(2000);
+		expect(
+			world.timers.advance("continuous-chat", 2000),
+			"the same-key accounting poll fires while arrival-a remains held",
+		).toBe(1);
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		expect(
+			world.timers.armedDelays("continuous-chat"),
+			"the held request keeps one bounded accounting poll armed",
+		).toEqual([2000]);
+		expect(
+			workerSteps(turnMark),
+			"an accounting poll cannot dispatch a second provider request while arrival-a owns the slot",
+		).toEqual([`worker-c:${label}-arrival-a`]);
 		expect(
 			{
 				waits,
@@ -1012,20 +1086,33 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 				steps: workerSteps(turnMark),
 				warnings: world.warnings.slice(warningMark),
 			},
-			"the root turns were answered while the leaf waited: no wait, no alarm, and the retry is still in flight with no new failure yet",
+			"the root turns were answered while the leaf waited: one same-key accounting poll, no overlapping provider request, and no new failure yet",
 		).toEqual({
 			waits: [],
-			armed: [],
+			armed: [2000],
 			steps: [`worker-c:${label}-arrival-a`],
-			warnings: [failedLine],
+			warnings: [failedLine, accountingHoldLine],
 		});
 		const generationBeforeFailure = generation();
+		const priorHandles = world.timers.armedSnapshot("continuous-chat").map((entry) => entry.handle);
 		retryHeld.release();
-		await advanceIcmTransportBackoff(world, "R10s arrival first retry", 2000, turnMark, ["worker-c:r10s-arrival-a"]);
-		await advanceIcmTransportBackoff(world, "R10s arrival second retry", 4000, turnMark, [
-			"worker-c:r10s-arrival-a",
+		await advanceIcmTransportBackoff(
+			world,
+			"R10s arrival first retry",
+			2000,
+			turnMark,
+			["worker-c:r10s-arrival-a"],
 			"worker-c:r10s-arrival-b",
-		]);
+			priorHandles,
+		);
+		await advanceIcmTransportBackoff(
+			world,
+			"R10s arrival second retry",
+			4000,
+			turnMark,
+			["worker-c:r10s-arrival-a", "worker-c:r10s-arrival-b"],
+			"worker-c:r10s-arrival-c",
+		);
 		await withDeadline(
 			trace,
 			"R10s retry failed",
@@ -1049,7 +1136,7 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 		).toEqual({
 			armed: [],
 			steps: [`worker-c:${label}-arrival-a`, `worker-c:${label}-arrival-b`, `worker-c:${label}-arrival-c`],
-			warnings: [failedLine, failedLine],
+			warnings: [failedLine, accountingHoldLine, failedLine],
 			row: expect.objectContaining({ status: "blocked", attempts: 2, reason: R10S_STOPPED, last_action: "fail" }),
 			dueForRetry: false,
 			generationUnchanged: true,
@@ -1109,9 +1196,13 @@ async function verifyTurnRetrySpacing(world: HarnessWorld, agentDir: string): Pr
 	).toEqual({
 		armed: [],
 		steps: [`worker-c:${label}-recovered`],
-		warnings: [failedLine, failedLine],
+		warnings: [failedLine, accountingHoldLine, failedLine],
 		row: undefined,
 	});
+	// This exact warning was asserted in this scenario; leave unrelated warnings for the world-level gate.
+	const holdWarningIndex = world.warnings.indexOf(accountingHoldLine, warningMark);
+	expect(holdWarningIndex).toBeGreaterThanOrEqual(warningMark);
+	world.warnings.splice(holdWarningIndex, 1);
 	world.faultMatrix.witness("R10s", { control: false });
 	expect(await world.disposeSessionInBody(root.session), "the R10s root disposes cleanly").toBeUndefined();
 	trace.mark("root", "icm.r10s-turn-retry-spacing");
