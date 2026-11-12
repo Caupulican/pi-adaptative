@@ -13,10 +13,16 @@ import { createEmptyUsage } from "@caupulican/pi-ai/usage";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
 import { warmHostIdentity } from "../../kernel/reliability/host-identity.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../../kernel/timer-port.ts";
 import { withHostFileWrite } from "../../utils/host-write-transition.ts";
 import { hostTransitionsFile } from "../agent-paths.ts";
 import type { ManagedLaneView } from "../delegation/managed-lane-views.ts";
-import { type PersistentBotTeamStore, RESERVED_BOT_CREATOR_IDS } from "../delegation/persistent-bot-team-store.ts";
+import {
+	type BotTeamChange,
+	type PersistentBotTeamStore,
+	RESERVED_BOT_CREATOR_IDS,
+} from "../delegation/persistent-bot-team-store.ts";
+import { isFileLockContentionError } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { type HostLock, type LinkHostOwner, linkHostOwner, takeHostLock, watchHostLockRelease } from "./host-lock.ts";
 import { RemoteHub } from "./hub.ts";
@@ -48,8 +54,7 @@ interface HubConfig {
 export interface RemoteHubControllerDeps {
 	readonly agentDir: string;
 	readonly getStore: () => PersistentBotTeamStore;
-	/** A machine arrived or left: its bot is touched so the roster follows. */
-	readonly changed: (machine: string) => void;
+	readonly timers?: TimerPort;
 	/** The session's worker ports for remote work placement; absent, this session neither places nor runs jobs. */
 	readonly jobs?: RemoteJobPorts;
 }
@@ -60,6 +65,12 @@ export class RemoteHubController {
 	private listeningOn: { host: string; port: number } | undefined;
 	private readonly identity: MachineIdentity;
 	private readonly chats: MachineChatLog;
+	private readonly listeners = new Set<(change: BotTeamChange) => void>();
+	private readonly pendingPreviews = new Set<string>();
+	private readonly previewFailures = new Set<string>();
+	private readonly timers: TimerPort;
+	private previewTimer: unknown;
+	private stopped = false;
 	private upSubtree: () => readonly string[] = () => [];
 	private hostLock: HostLock | undefined;
 	private stopWatchingHost: (() => void) | undefined;
@@ -71,17 +82,15 @@ export class RemoteHubController {
 
 	constructor(deps: RemoteHubControllerDeps) {
 		this.deps = deps;
+		this.timers = deps.timers ?? SYSTEM_TIMER_PORT;
 		this.identity = loadIdentity(deps.agentDir);
 		this.chats = new MachineChatLog(deps.agentDir);
 		this.jobs = deps.jobs
 			? new RemoteJobs(
 					deps.agentDir,
 					() => this.identity,
-					deps.jobs,
-					() => {
-						for (const machine of listHubMachines(deps.agentDir))
-							if (!machine.revoked) deps.changed(machine.name);
-					},
+					{ ...deps.jobs, timers: deps.jobs.timers ?? this.timers },
+					() => this.notify("all"),
 				)
 			: undefined;
 		this.withdrawLinkContext = provideLinkContext(deps.agentDir, {
@@ -104,6 +113,7 @@ export class RemoteHubController {
 	 * names the hosting session, and this session takes the hub over when that one lets it go.
 	 */
 	async start(): Promise<string | undefined> {
+		for (const machine of listHubMachines(this.deps.agentDir)) if (!machine.revoked) this.queuePreview(machine.name);
 		const config = this.readConfig();
 		// Placement and the job runner start only on a machine the owner linked (a hub on, a hub joined).
 		if (config?.enabled || RemoteJobs.linked(this.deps.agentDir)) this.jobs?.start();
@@ -127,6 +137,12 @@ export class RemoteHubController {
 
 	/** Ends the session's hub and its job layer (the session is closing). */
 	async stop(): Promise<void> {
+		this.stopped = true;
+		if (this.previewTimer !== undefined) this.timers.clearTimeout(this.previewTimer);
+		this.previewTimer = undefined;
+		this.pendingPreviews.clear();
+		this.previewFailures.clear();
+		this.listeners.clear();
 		const closing = this.closeListening();
 		this.jobs?.dispose();
 		this.withdrawLinkContext();
@@ -233,7 +249,7 @@ export class RemoteHubController {
 			peers: transport,
 			events: {
 				reply: (machine, id, text, final) => this.received(machine, id, text, final),
-				presence: (machine) => this.deps.changed(machine),
+				presence: (machine) => this.notify([machine]),
 			},
 		});
 		let bound: number;
@@ -433,10 +449,67 @@ export class RemoteHubController {
 	private received(machine: string, id: string, text: string, final: boolean | undefined): void {
 		harnessLog.debug("link", "a machine answered", { machine, chars: text.length, interim: final === false });
 		this.chats.append(machine, { at: Date.now(), from: "machine", text, id });
-		this.deps.getStore().upsertBot({ agentId: machine, lastSummary: text, lastMessageAt: Date.now() });
-		if (final === false) return;
-		const machineId = this.jobs?.machines.byName(machine)?.machineId;
-		if (machineId) this.jobs?.client.completeAsk(machineId, id, text);
+		if (final !== false) {
+			const machineId = this.jobs?.machines.byName(machine)?.machineId;
+			if (machineId) this.jobs?.client.completeAsk(machineId, id, text);
+		}
+		this.notify([machine]);
+		this.queuePreview(machine);
+	}
+
+	/** Roster notifications are in-process signals and do not mutate the shared bot store. */
+	subscribe(listener: (change: BotTeamChange) => void): () => void {
+		this.listeners.add(listener);
+		return () => void this.listeners.delete(listener);
+	}
+
+	private notify(change: BotTeamChange): void {
+		for (const listener of this.listeners) {
+			try {
+				listener(change);
+			} catch {
+				/* A roster observer cannot break the link. */
+			}
+		}
+	}
+
+	private queuePreview(machine: string): void {
+		if (this.stopped) return;
+		this.pendingPreviews.add(machine);
+		this.flushPreviews();
+	}
+
+	private flushPreviews(): void {
+		if (this.stopped) return;
+		for (const machine of this.pendingPreviews) {
+			try {
+				this.deps.getStore().projectRemotePreview(machine, () => {
+					if (!listHubMachines(this.deps.agentDir).some((entry) => entry.name === machine && !entry.revoked))
+						return undefined;
+					return this.chats.latestMachineReply(machine);
+				});
+				this.pendingPreviews.delete(machine);
+				this.previewFailures.delete(machine);
+			} catch (error) {
+				if (!isFileLockContentionError(error)) {
+					this.pendingPreviews.delete(machine);
+					if (!this.previewFailures.has(machine)) {
+						this.previewFailures.add(machine);
+						harnessLog.warn("link", "a machine chat preview could not be projected", {
+							machine,
+							reason: error instanceof Error ? error.name : "unknown",
+						});
+					}
+				}
+				// Lock contention leaves the latest durable chat queued for the next bounded retry.
+			}
+		}
+		if (this.pendingPreviews.size > 0 && this.previewTimer === undefined) {
+			this.previewTimer = this.timers.setTimeout(() => {
+				this.previewTimer = undefined;
+				this.flushPreviews();
+			}, 1_000);
+		}
 	}
 
 	private readConfig(): HubConfig | undefined {

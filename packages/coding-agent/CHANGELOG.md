@@ -1,5 +1,14 @@
 ## [Unreleased]
 
+### Fixed
+
+- Linked-machine replies finalize their task before projecting the chat preview. A busy shared bot store now defers and coalesces preview updates without blocking reply delivery; roster refreshes and presence notifications no longer write to that store. Preview recovery follows durable append order, including replies with equal timestamps, and stops with the session.
+- Lock-contention crash records retain the requested lock target and the harness caller while preserving the original error and retry policy.
+
+### Changed
+
+- The linked-machine journey exercises real store contention across sealed reply transport, task completion, parent delivery, chat notifications, preview recovery and shutdown, including equal-timestamp replies. Native health checks inspect fatal crash records across all participating agents. Acceptance distinguishes an operationally settled, reviewed partial result from an accepted worker result and preserves rejected attempt history.
+
 ## [0.104.57] - 2026-11-12
 
 ### Fixed

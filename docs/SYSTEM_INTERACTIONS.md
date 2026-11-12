@@ -1043,3 +1043,53 @@ is unchanged. A new complete native run is still required.
 Release evidence must distinguish the unchanged `v0.104.57` binary from the corrected live verifier
 revision on main. The release tag includes the production fixes and composed harness regressions,
 but predates these live-verifier corrections; checking out that tag alone uses the obsolete verifier.
+
+### H-20261112-23 — remote reply finalization and shared bot-store contention
+
+The next full native run on verifier `b61329baa37b097077c523b95f9208f7fbd60cca` passed 16 of
+18 selected scenarios and failed S15 and S43, with none skipped. Its original report remains at
+`.git/pi-audits/live-validation/2026-11-12T18-19-45-469Z/report.json`. In S43 the remote model
+answered `81` in three seconds and the hub persisted that answer, but the ask stayed accepted
+without an applied outcome. The exact failing branch remains unproved. Independently, source review
+confirmed that the receiver wrote the shared bot preview before completing the ask: contention on
+that lock could throw after chat persistence and prevent finalization. A roster tick also performed
+a persistent bot upsert solely to notify its observers, exposing an unnecessary contention failure.
+
+The hub now completes the ask after durable chat append and before preview projection. Presence,
+roster ticks and durable chat changes publish in-process notifications. The bot store owns a
+conditional projection on existing active remote bots; under its shared lock it reads the newest
+durable chat suffix, so append order resolves equal timestamps and an older pending update cannot
+replace a newer reply. The chat owner bounds this stable tail read and refuses incomplete or
+malformed newer records. Only acquisition errors classified by the kernel lock owner schedule a
+coalesced preview retry; permanent failures are reported and session stop cancels retries before
+yielding. Startup may repair previews from chat, but never invents ask completion from legacy chat
+records that lack a final/interim discriminator. Subscription and memory-file responsibilities were
+extracted into their existing delegation subsystem; file-size ceilings were lowered.
+
+The existing composed J10 now holds the real shared bot-store lock while actual sealed replies,
+task completion, one parent terminal and chat notifications proceed. It checks that roster ticks
+acquire no store lock, the transport stays connected, two equal-timestamp replies retain durable
+append order, one preview retry converges to the newer reply after release, and a chat-only reply
+creates no job. Shutdown cancels its pending retry without rearming it. Its only clock seam pins
+the two original synchronous receiver calls and restores the clock immediately. No isolated test
+entry point or fake lock substitutes for this chain. Source review and static checks passed;
+execution of this final journey and the new published patch's native acceptance remain pending.
+
+A separate fatal contention record belongs to auditor PID `140642`, not the detached daemon.
+Its lock target/caller is absent from the old vendor-only stack, so it cannot be attributed to the
+roster tick as a historical fact. Kernel acquisition failures now retain the original error and
+errno while adding the lock target and harness caller before vendor frames. Native S9 and S44
+inspect bounded fatal-crash records across every participating agent; the old health pass missed
+this process death. The failed report and fatal record are preserved under
+`.git/pi-audits/releases/v0.104.57/latest-failure/`.
+
+S15's first edit retained a reviewed `partial/unverified` outcome with rejected unsettled receipts,
+despite an accepted host report and a cleared parent-review notice. The plain-edit contract checks
+its artifact and root-call budget; it does not require that optional worker to be accepted. The
+verifier now returns operational facts separately from strict accepted-worker proof. The second,
+explicit worker task still requires completed accepted receipts and their durable acknowledgment,
+or the verified same-task recovery chain. A retrospective assessment through these exact owners
+retained the actual partial/rejected facts, returned strict acceptance false, and checked the
+one-line JSDoc and three ES2022 artifact samples. Unspecified package-target compatibility remains
+unproved. That diagnostic is supplemental, not a fresh live pass, and leaves the original report
+unchanged. The previous diagnostic's wrong artifact-path error is recorded with its corrected run.

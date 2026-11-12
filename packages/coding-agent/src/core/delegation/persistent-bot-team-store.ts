@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { existsSync, type FSWatcher, mkdirSync, readFileSync, watch, writeFileSync } from "node:fs";
+import { existsSync, type FSWatcher, mkdirSync, readFileSync, watch } from "node:fs";
 import { basename, dirname, join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { getAgentDir } from "../../config.ts";
@@ -60,6 +60,7 @@ import { parseWatchCondition } from "../routines/watch-contract.ts";
 import { cleanRedactBound } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
+import { appendBoundedFile, createMemoryHeader } from "./bot-memory-files.ts";
 import {
 	type BotDaemonEnd,
 	type BotDaemonReport,
@@ -457,29 +458,6 @@ function parseModelRef(rawRef: string): { provider: string; modelId: string } {
 		provider: "unknown",
 		modelId: trimmed || "default",
 	};
-}
-
-/** A competing initializer or outcome append owns any file that already exists. */
-function createMemoryHeader(filePath: string, header: string): void {
-	try {
-		writeFileSync(filePath, header, { encoding: "utf8", flag: "wx" });
-	} catch (error) {
-		if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
-	}
-}
-
-function appendBoundedFile(filePath: string, line: string, maxLines = 80): void {
-	mkdirSync(dirname(filePath), { recursive: true });
-	withFileLockSync(
-		filePath,
-		() => {
-			let lines = existsSync(filePath) ? readFileSync(filePath, "utf8").split(/\r?\n/) : [];
-			lines.push(line);
-			if (lines.length > maxLines) lines = lines.slice(-maxLines);
-			writeFileAtomicSync(filePath, lines.join("\n"));
-		},
-		{ retries: 0 },
-	);
 }
 
 export class PersistentBotTeamStore {
@@ -1037,6 +1015,19 @@ export class PersistentBotTeamStore {
 
 	upsertBot(input: UpsertPersistentBotInput, nowIso?: string): PersistentBotRecord {
 		return this.mutate(() => this.writeBot(input, nowIso));
+	}
+
+	/** Publish only the latest durable remote chat on an existing, active remote bot. */
+	projectRemotePreview(agentId: string, latest: () => { at: number; text: string } | undefined): void {
+		this.mutate(() => {
+			const bot = this.bots.get(agentId);
+			if (bot?.remote !== true || bot.retired) return;
+			const message = latest();
+			if (!message || !Number.isFinite(message.at)) return;
+			const summary = message.text.trim().slice(0, 500) || undefined;
+			if (bot.lastMessageAt === message.at && bot.lastSummary === summary) return;
+			this.writeBot({ agentId, lastMessageAt: message.at, lastSummary: message.text });
+		});
 	}
 
 	/**

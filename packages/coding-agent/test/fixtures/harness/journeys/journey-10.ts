@@ -1,10 +1,12 @@
 import "../builtin-install.ts";
+import lockfile from "proper-lockfile";
 import { expect } from "vitest";
-import { configFile } from "../../../../src/core/agent-paths.ts";
+import { botTeamStoreFile, configFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import type { PlanNodeSpec } from "../../../../src/core/plan/plan-graph.ts";
 import { placementFor } from "../../../../src/core/plan/plan-placement.ts";
 import { recordPeerDown, recordPeerFacts, recordPeerUp } from "../../../../src/core/remote/fleet-machines.ts";
+import { RemoteHubController } from "../../../../src/core/remote/hub-controller.ts";
 import type { RemoteJobEvent } from "../../../../src/core/remote/job-client.ts";
 import { CAP_FEATURE, JOBS_FEATURE } from "../../../../src/core/remote/job-protocol.ts";
 import {
@@ -31,6 +33,7 @@ import { resolveRepoIdentity } from "../../../../src/core/remote/repo-identity.t
 import { SEALED_FEATURE } from "../../../../src/core/remote/session-keys.ts";
 import { DirectoryWatch } from "../../../../src/core/remote/store-watch.ts";
 import { THIRD_PARTY_MEMORY_WITHHELD } from "../../../../src/core/system-prompt-builder.ts";
+import { acquireFileLockSync, isFileLockContentionError } from "../../../../src/kernel/storage/atomic-file.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 import {
@@ -249,6 +252,7 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
 		sessionManager: hubManager,
 	});
 	const hub = sessionHub.backgroundLanes.getRemoteHub();
+	let hubStopped = false;
 	let sessionJoiner: AgentSession | undefined;
 
 	try {
@@ -795,10 +799,13 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
 		world.systemOne.enterPhase("j10-leg4-ask-and-offline", {});
 		const askQuestion = "What retry ceiling is configured in this checkout?";
 		const askAnswer = "Joiner status: retry ceiling is 3 attempts (250ms backoff).";
+		const newerAnswer = "Joiner status: retry ceiling remains 3 attempts.";
 		const askWake = createBarrier();
+		const releaseAnswer = createBarrier();
 
 		enqueueJoinerChannel(world, {
 			name: "j10-joiner-ask-reply",
+			gate: releaseAnswer.promise,
 			check: (request) => {
 				expect(request.context.systemPrompt).toContain(THIRD_PARTY_MEMORY_WITHHELD);
 				expect(request.context.systemPrompt).not.toContain(JOINER_OWNER_SECRET_MEMORY);
@@ -822,38 +829,247 @@ async function runJourney10Body(world: HarnessWorld): Promise<void> {
 
 		const askJobId = await hub.ask(JOINER_MACHINE_NAME, askQuestion);
 		expect(askJobId.startsWith("ask")).toBe(true);
-		await withDeadline(trace, "J10 leg 4: ask reply wakes hub", askWake.promise);
-		await withDeadline(trace, "J10 leg 4: hub idle after ask", sessionHub.waitForForegroundIdle());
-		await withDeadline(trace, "J10 leg 4: joiner idle after ask", sessionJoiner.agent.waitForIdle());
-		expect(
-			askWakeRequest && currentRequestCarries(askWakeRequest, askJobId),
-			"Hub foreground wakes with compact handoff for the ask lane",
-		).toBe(true);
-		const settledAskRecord = await waitForPlacerJob(
+		await withDeadline(
 			trace,
-			"J10 leg 4: ask placer record applied",
-			agentDirHub,
-			(r) => r.jobId === askJobId && r.appliedAt !== undefined,
+			"J10 leg 4: joiner holds real ask reply",
+			world.provider.whenReached(`${JOINER_CHANNEL_TRACK}:j10-joiner-ask-reply`),
 		);
+		const rosterChanges: unknown[] = [];
+		const offRoster = sessionHub.backgroundLanes.subscribeBotTeamUpdates((change) => rosterChanges.push(change));
+		let releaseStore: (() => void) | undefined;
+		let previewAlarm: number | undefined;
+		const originalLockSync = lockfile.lockSync;
+		const receivedDescriptor = Object.getOwnPropertyDescriptor(RemoteHubController.prototype, "received");
+		if (!receivedDescriptor || typeof receivedDescriptor.value !== "function")
+			throw new Error("The hub receive owner is unavailable.");
+		const received = receivedDescriptor.value as (
+			this: RemoteHubController,
+			machine: string,
+			id: string,
+			text: string,
+			final: boolean | undefined,
+		) => void;
+		const originalNow = Date.now;
+		const replyTime = originalNow();
+		// Pin only these two synchronous real receive calls; transport, durable append and finalization stay unchanged.
+		Object.defineProperty(RemoteHubController.prototype, "received", {
+			...receivedDescriptor,
+			value(this: RemoteHubController, machine: string, id: string, text: string, final: boolean | undefined) {
+				if (this !== hub || (text !== askAnswer && text !== newerAnswer)) {
+					received.call(this, machine, id, text, final);
+					return;
+				}
+				Date.now = () => replyTime;
+				try {
+					received.call(this, machine, id, text, final);
+				} finally {
+					Date.now = originalNow;
+				}
+			},
+		});
+		let storeLockAttempts = 0;
+		const assertStoreContended = () => {
+			let contention: unknown;
+			try {
+				sessionHub.backgroundLanes.getBotTeamStore().upsertBot({ agentId: JOINER_MACHINE_NAME });
+			} catch (error) {
+				contention = error;
+			}
+			expect(isFileLockContentionError(contention), "the actual store rejects a competing writer").toBe(true);
+			expect(contention).toMatchObject({ code: "ELOCKED" });
+			expect(contention).toBeInstanceOf(Error);
+			expect((contention as Error).stack).toContain(
+				`File lock acquisition: ${JSON.stringify(botTeamStoreFile(agentDirHub))}`,
+			);
+		};
+		try {
+			const storePath = botTeamStoreFile(agentDirHub);
+			releaseStore = acquireFileLockSync(storePath, { retries: 0 });
+			assertStoreContended();
+			lockfile.lockSync = (...args) => {
+				if (args[0] === storePath) storeLockAttempts++;
+				return originalLockSync(...args);
+			};
+			const storeBefore = world.io.peekFile(botTeamStoreFile(agentDirHub));
+			const rosterBefore = rosterChanges.length;
+			expect(hub.rosterWords(JOINER_MACHINE_NAME).state).toBe("running");
+			world.timers.advance("orchestration", 60_000);
+			expect(storeLockAttempts, "roster observation and tick do not acquire the bot-store lock").toBe(0);
+			assertStoreContended();
+			storeLockAttempts = 0;
+			expect(rosterChanges.length, "the live roster tick signals while the bot store is locked").toBeGreaterThan(
+				rosterBefore,
+			);
+			const beforeReplyAlarms = new Set(world.timers.armedSnapshot("orchestration").map((alarm) => alarm.handle));
+			releaseAnswer.release();
+			await withDeadline(trace, "J10 leg 4: ask reply wakes hub", askWake.promise);
+			await withDeadline(trace, "J10 leg 4: hub idle after ask", sessionHub.waitForForegroundIdle());
+			await withDeadline(trace, "J10 leg 4: joiner idle after ask", sessionJoiner.agent.waitForIdle());
+			expect(storeLockAttempts, "the reply attempts its preview while the real lock is held").toBeGreaterThan(0);
+			assertStoreContended();
+			const retry = world.timers
+				.armedSnapshot("orchestration")
+				.find((alarm) => !beforeReplyAlarms.has(alarm.handle) && alarm.delayMs === 1_000);
+			expect(retry, "the contended preview has one scheduled retry").toBeDefined();
+			previewAlarm = retry?.handle;
+			expect(
+				askWakeRequest && currentRequestCarries(askWakeRequest, askJobId),
+				"Hub foreground wakes with compact handoff for the ask lane",
+			).toBe(true);
+			const settledAskRecord = await waitForPlacerJob(
+				trace,
+				"J10 leg 4: ask placer record applied",
+				agentDirHub,
+				(r) => r.jobId === askJobId && r.appliedAt !== undefined,
+			);
 
-		expect(settledAskRecord.outcome).toEqual({ status: "succeeded", summary: askAnswer });
-		const chatMessages = hub.chat(JOINER_MACHINE_NAME);
-		expect(
-			chatMessages.map((msg) => ({
-				role: msg.role,
-				text: "content" in msg ? textBlocks(msg.content) : "",
-			})),
-		).toEqual([
-			{ role: "user", text: askQuestion },
-			{ role: "assistant", text: askAnswer },
-		]);
+			expect(settledAskRecord.outcome).toEqual({ status: "succeeded", summary: askAnswer });
+			expect(
+				hub.isOnline(JOINER_MACHINE_NAME),
+				"the authenticated link stays connected under bot-store contention",
+			).toBe(true);
+			expect(
+				world.io.peekFile(botTeamStoreFile(agentDirHub)),
+				"the held store is not mutated by presence or the reply",
+			).toBe(storeBefore);
+			if (!settledAskRecord.attemptId) throw new Error("The placed ask has no durable attempt identity.");
+			const terminalId = `worker-terminal:${settledAskRecord.attemptId}`;
+			expect(sessionHub.backgroundLanes.getTaskRuntimeSnapshot()?.notifications[terminalId]?.status).toBe(
+				"delivered",
+			);
+			expect(
+				hubManager
+					.getBranch()
+					.filter(
+						(entry) =>
+							entry.type === "custom_message" &&
+							entry.customType === "background-worker-completion" &&
+							JSON.stringify(entry.content).includes(askJobId),
+					),
+			).toHaveLength(1);
+			const chatMessages = hub.chat(JOINER_MACHINE_NAME);
+			expect(
+				chatMessages.map((msg) => ({
+					role: msg.role,
+					text: "content" in msg ? textBlocks(msg.content) : "",
+				})),
+			).toEqual([
+				{ role: "user", text: askQuestion },
+				{ role: "assistant", text: askAnswer },
+			]);
+			enqueueJoinerChannel(world, {
+				name: "j10-joiner-newer-contended-reply",
+				reply: { content: [{ type: "text", text: newerAnswer }] },
+			});
+			hub.send(JOINER_MACHINE_NAME, "Confirm the retry ceiling.");
+			await withDeadline(
+				trace,
+				"J10 leg 4: newer real reply is durable under contention",
+				world.io.waitForMutation(() => JSON.stringify(hub.chat(JOINER_MACHINE_NAME)).includes(newerAnswer)),
+			);
+			await withDeadline(trace, "J10 leg 4: joiner idle after newer reply", sessionJoiner.agent.waitForIdle());
+			assertStoreContended();
+			const replies = hub.chat(JOINER_MACHINE_NAME).filter((message) => message.role === "assistant");
+			expect(replies.map((message) => ({ text: textBlocks(message.content), at: message.timestamp }))).toEqual([
+				{ text: askAnswer, at: replyTime },
+				{ text: newerAnswer, at: replyTime },
+			]);
+			expect(world.io.peekFile(storePath), "neither pending reply can update the locked preview").toBe(storeBefore);
+			expect(
+				world.timers
+					.armedSnapshot("orchestration")
+					.filter((alarm) => !beforeReplyAlarms.has(alarm.handle) && alarm.delayMs === 1_000)
+					.map((alarm) => alarm.handle),
+				"the second reply coalesces into the existing retry",
+			).toEqual([previewAlarm]);
+		} finally {
+			Object.defineProperty(RemoteHubController.prototype, "received", receivedDescriptor);
+			lockfile.lockSync = originalLockSync;
+			releaseAnswer.release();
+			releaseStore?.();
+			offRoster();
+		}
+		world.timers.advance("orchestration", 1_000);
+		expect(world.timers.armedSnapshot("orchestration").some((alarm) => alarm.handle === previewAlarm)).toBe(false);
+		await withDeadline(
+			trace,
+			"J10 leg 4: latest preview recovers after lock release",
+			world.io.waitForMutation(() => {
+				const stored = world.io.peekFile(botTeamStoreFile(agentDirHub));
+				if (!stored) return false;
+				const data = JSON.parse(stored) as { bots: Array<{ agentId: string; lastSummary?: string }> };
+				return data.bots.some((bot) => bot.agentId === JOINER_MACHINE_NAME && bot.lastSummary === newerAnswer);
+			}),
+		);
+		world.timers.advance("orchestration", 1_000);
+		const settledStore = JSON.parse(world.io.peekFile(botTeamStoreFile(agentDirHub)) ?? "null") as {
+			bots: Array<{ agentId: string; lastSummary?: string; lastMessageAt?: number }>;
+		};
+		expect(settledStore.bots.find((bot) => bot.agentId === JOINER_MACHINE_NAME)).toMatchObject({
+			lastSummary: newerAnswer,
+			lastMessageAt: replyTime,
+		});
+		// A plain chat reply creates no job. Stop while its preview retry is still pending.
+		const plainAnswer = "Joiner chat-only answer.";
+		const releasePlainAnswer = createBarrier();
+		enqueueJoinerChannel(world, {
+			name: "j10-joiner-chat-only-reply",
+			gate: releasePlainAnswer.promise,
+			reply: { content: [{ type: "text", text: plainAnswer }] },
+		});
+		const jobCount = new JobStore(agentDirHub).out.list().length;
+		hub.send(JOINER_MACHINE_NAME, "A chat-only follow-up.");
+		await withDeadline(
+			trace,
+			"J10 leg 4: joiner holds chat-only reply",
+			world.provider.whenReached(`${JOINER_CHANNEL_TRACK}:j10-joiner-chat-only-reply`),
+		);
+		let releaseSecondLock: (() => void) | undefined;
+		const chatChanges: unknown[] = [];
+		const offChat = sessionHub.backgroundLanes.subscribeBotTeamUpdates((change) => chatChanges.push(change));
+		try {
+			releaseSecondLock = acquireFileLockSync(botTeamStoreFile(agentDirHub), { retries: 0 });
+			assertStoreContended();
+			const beforePlainAlarms = new Set(world.timers.armedSnapshot("orchestration").map((alarm) => alarm.handle));
+			releasePlainAnswer.release();
+			await withDeadline(
+				trace,
+				"J10 leg 4: chat-only reply is durable",
+				world.io.waitForMutation(() => JSON.stringify(hub.chat(JOINER_MACHINE_NAME)).includes(plainAnswer)),
+			);
+			assertStoreContended();
+			expect(chatChanges.some((change) => Array.isArray(change) && change.includes(JOINER_MACHINE_NAME))).toBe(true);
+			expect(new JobStore(agentDirHub).out.list()).toHaveLength(jobCount);
+			const pending = world.timers
+				.armedSnapshot("orchestration")
+				.find((alarm) => !beforePlainAlarms.has(alarm.handle) && alarm.delayMs === 1_000);
+			expect(pending, "the chat-only preview is queued while the store is locked").toBeDefined();
+			const stopping = hub.stop();
+			hubStopped = true;
+			expect(world.timers.armedSnapshot("orchestration").some((alarm) => alarm.handle === pending?.handle)).toBe(
+				false,
+			);
+			await stopping;
+			const stoppedAlarms = new Set(world.timers.armedSnapshot("orchestration").map((alarm) => alarm.handle));
+			world.timers.advance("orchestration", 1_000);
+			expect(
+				world.timers
+					.armedSnapshot("orchestration")
+					.some((alarm) => !stoppedAlarms.has(alarm.handle) && alarm.delayMs === 1_000),
+				"stopping cannot rearm the preview retry",
+			).toBe(false);
+		} finally {
+			offChat();
+			releasePlainAnswer.release();
+			releaseSecondLock?.();
+		}
 		trace.mark("root", "j10.leg4-ask-replied");
 	} finally {
 		if (sessionJoiner) {
 			await sessionJoiner.backgroundLanes.getRemoteHub().stop();
 			expect(await world.disposeSessionInBody(sessionJoiner), "Joiner session disposes cleanly").toBeUndefined();
 		}
-		await hub.stop();
+		if (!hubStopped) await hub.stop();
 		expect(await world.disposeSessionInBody(sessionHub), "Hub session disposes cleanly").toBeUndefined();
 	}
 

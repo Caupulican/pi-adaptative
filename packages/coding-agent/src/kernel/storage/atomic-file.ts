@@ -222,10 +222,17 @@ async function ensureLockDir(filePath: string, lockfilePath?: string): Promise<v
 	await fsPromises.mkdir(lockDirectory(filePath, lockfilePath), { recursive: true });
 }
 
+/** Exact errors classified at lock acquisition; a store-body EPERM is never classified by errno alone. */
+const fileLockContentions = new WeakSet<object>();
+
+/** Whether this storage owner identified `error` as acquisition contention, rather than a data-write failure. */
+export function isFileLockContentionError(error: unknown): boolean {
+	return typeof error === "object" && error !== null && fileLockContentions.has(error);
+}
+
 function isLockedError(err: unknown): boolean {
 	if (typeof err !== "object" || err === null) return false;
 	const code = (err as { code?: string }).code;
-	if (code === "ELOCKED") return true;
 	// On win32, mkdir-ing the lock directory can transiently surface EPERM (rather than the
 	// expected EEXIST) when a previous incarnation of that directory is concurrently being
 	// rmdir'd by the racing releaser — the mkdir lands mid-teardown and the OS reports "operation
@@ -233,8 +240,23 @@ function isLockedError(err: unknown): boolean {
 	// failure, so treat it identically to ELOCKED: retry with the existing backoff rather than
 	// letting it escape as fatal. POSIX platforms don't exhibit this transient and keep surfacing
 	// real EPERM (e.g. an actually unwritable directory) as fatal.
-	if (code === "EPERM" && process.platform === "win32") return true;
-	return false;
+	if (code !== "ELOCKED" && !(code === "EPERM" && process.platform === "win32")) return false;
+	fileLockContentions.add(err);
+	return true;
+}
+
+/** Keep the original error and errno, but put the lock target and host caller ahead of vendor-only stack frames. */
+function addFileLockContext(error: unknown, filePath: string, lockfilePath?: string): void {
+	try {
+		if (!(error instanceof Error)) return;
+		const target = JSON.stringify(filePath);
+		const explicit = lockfilePath === undefined ? "" : `; explicit lock ${JSON.stringify(lockfilePath)}`;
+		const boundary = new Error(`File lock acquisition: ${target}${explicit}`).stack;
+		if (boundary)
+			error.stack = `${error.name}: ${error.message}\n${boundary}\nOriginal contention: ${error.stack ?? error.message}`;
+	} catch {
+		// Diagnostics must never replace the acquisition failure, including a nonwritable stack.
+	}
 }
 
 /**
@@ -373,6 +395,7 @@ export function acquireFileLockSync(filePath: string, options: AtomicFileLockOpt
 				if (err instanceof Error && blockedMs > 0) {
 					err.message = `${err.message} (blocked this thread ${blockedMs} ms over ${attempts} attempts)`;
 				}
+				addFileLockContext(err, filePath, options.lockfilePath);
 				throw err;
 			}
 			const gapMs = retryDelayMs(options, attempt);
@@ -440,9 +463,9 @@ export async function withFileLock<T>(
 				realpath: options?.realpath ?? DEFAULT_REALPATH,
 				stale: options?.stale,
 			};
-			const release =
+			const acquisitionOptions =
 				deadlineAt === undefined && options?.signal === undefined
-					? await lockfile.lock(filePath, {
+					? {
 							...lockOptions,
 							retries: {
 								retries: retryCount(options ?? {}),
@@ -450,8 +473,19 @@ export async function withFileLock<T>(
 								minTimeout: options?.minRetryDelayMs ?? RETRY_MIN_TIMEOUT_MS,
 								maxTimeout: options?.maxRetryDelayMs ?? RETRY_MAX_TIMEOUT_MS,
 							},
-						})
+						}
+					: undefined;
+			let release: () => Promise<void>;
+			try {
+				release = acquisitionOptions
+					? await lockfile.lock(filePath, acquisitionOptions)
 					: await lockWithinLifetime(filePath, lockOptions, options ?? {});
+			} catch (error) {
+				// Lifetime failures include abort reasons; only its inner vendor-acquisition catch may tag them.
+				const contention = acquisitionOptions ? isLockedError(error) : isFileLockContentionError(error);
+				if (contention) addFileLockContext(error, filePath, options?.lockfilePath);
+				throw error;
+			}
 			try {
 				options?.signal?.throwIfAborted();
 				// A lock won after the deadline (an attempt already submitted can complete late) is released by the

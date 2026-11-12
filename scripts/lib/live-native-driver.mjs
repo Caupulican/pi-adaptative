@@ -194,8 +194,8 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 			}
 		return delivered;
 	};
-	/** Prove blocked attempts were superseded by accepted attempts of the same task, not merely the same agent. */
-	const recoveredWorkerTasks = (agentDir, sessionId, lanes, claims) => {
+	/** Read one owning session's durable events; absent or compacted ancestry remains unproved. */
+	const sessionEvents = (agentDir, sessionId) => {
 		const sessions = join(agentDir, "state", "orchestration", "sessions");
 		if (!existsSync(sessions)) return undefined;
 		const owners = readdirSync(sessions).filter((name) => name.startsWith(`${sessionId}-`));
@@ -210,6 +210,12 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 				return event.ordinal === Number(name.slice(0, 16)) ? event : undefined;
 			});
 		if (events.some((event, index) => !event || !Number.isSafeInteger(event.ordinal) || event.ordinal < 1 || (index > 0 && event.ordinal <= events[index - 1].ordinal))) return undefined;
+		return events;
+	};
+	/** Prove blocked attempts were superseded by accepted attempts of the same task, not merely the same agent. */
+	const recoveredWorkerTasks = (agentDir, sessionId, lanes, claims) => {
+		const events = sessionEvents(agentDir, sessionId);
+		if (!events) return undefined;
 		const owned = (type, predicate) => events.filter((event) => event.type === type && predicate(event.payload, event));
 		const starts = events.filter((event) => event.type === "task.attempt_prepared" || event.type === "attempt.queued");
 		const taskForAttempt = (id) => {
@@ -268,7 +274,7 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 				if (final) {
 					if (
 						!/^(succeeded|completed)$/.test(currentLane.status) || claim.status !== "completed" ||
-						claim.blockers?.length || claim.pending?.length || claim.parentReviewRequired || claim.hostVerdict?.verdict !== "accepted" ||
+						claim.blockers?.length || claim.pending?.length || (claim.parentReviewRequired && !claim.parentReviewedAt) || claim.hostVerdict?.verdict !== "accepted" ||
 						result.status !== "completed" || result.receipts?.status !== "captured" || result.receipts?.acceptance?.disposition !== "accepted" ||
 						outcome.status !== "succeeded" || outcome.nextAction?.kind !== "accept" ||
 						typeof result.resultId !== "string" || !result.resultId || !/^[a-f0-9]{64}$/.test(result.receipts.factsDigest ?? "") ||
@@ -299,6 +305,79 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 			});
 		}
 		return recovered;
+	};
+	/** Establish terminal owner-visible state independently from whether that worker result was accepted. */
+	const operationalWorkerTasks = (agentDir, sessionId, lanes, claims) => {
+		if (lanes.size === 0) return [];
+		const events = sessionEvents(agentDir, sessionId);
+		if (!events) return undefined;
+		const starts = events.filter((event) => event.type === "task.attempt_prepared" || event.type === "attempt.queued");
+		const tasks = new Map();
+		for (const [attemptId] of lanes) {
+			const matching = starts.filter((event) => event.payload?.attemptId === attemptId);
+			if (matching.length !== 1) return undefined;
+			const event = matching[0];
+			const taskId = event.payload?.taskId;
+			if (typeof taskId !== "string" || event.aggregateId !== taskId || event.payload?.dispatch?.taskId !== taskId) return undefined;
+			if (!tasks.has(taskId)) tasks.set(taskId, []);
+			tasks.get(taskId).push(attemptId);
+		}
+		const result = [];
+		for (const [taskId, seen] of tasks) {
+			const taskStarts = starts.filter((event) => event.payload?.taskId === taskId);
+			const first = taskStarts[0];
+			const objectiveId = first?.payload?.task?.objectiveId;
+			const ids = taskStarts.map((event) => event.payload?.attemptId);
+			if (first?.type !== "task.attempt_prepared" || first.aggregateId !== taskId || first.payload?.task?.taskId !== taskId || objectiveId !== `session:${sessionId}` || ids.length !== seen.length || new Set(ids).size !== ids.length || ids.some((id) => !seen.includes(id))) return undefined;
+			const finishes = [];
+			for (const [index, id] of ids.entries()) {
+				const finished = events.filter((event) => event.type === "attempt.finished" && event.aggregateId === id && event.payload?.result?.attemptId === id && event.payload.result.taskId === taskId);
+				const enqueued = events.filter((event) => event.type === "notification.enqueued" && event.aggregateId === objectiveId && event.payload?.objectiveId === objectiveId && event.payload.attemptId === id && event.payload.notificationId === `worker-terminal:${id}`);
+				const delivered = events.filter((event) => event.type === "notification.delivered" && event.aggregateId === objectiveId && event.payload?.notificationId === `worker-terminal:${id}`);
+				if (finished.length !== 1 || enqueued.length !== 1 || delivered.length !== 1 || taskStarts[index].ordinal >= finished[0].ordinal || finished[0].ordinal >= enqueued[0].ordinal || enqueued[0].ordinal >= delivered[0].ordinal) return undefined;
+				finishes.push(finished[0]);
+			}
+			const outcomeEvents = events.filter((event) => event.type === "task.outcome_recorded" && event.aggregateId === taskId && event.payload?.outcome?.taskId === taskId);
+			const outcomeEvent = outcomeEvents.at(-1);
+			const outcome = outcomeEvent?.payload?.outcome;
+			const currentId = ids.at(-1);
+			const lane = lanes.get(currentId);
+			const claim = claims.get(currentId);
+			const currentResult = finishes.at(-1).payload.result;
+			if (
+				!outcome || outcomeEvent.ordinal <= finishes.at(-1).ordinal || outcome.objectiveId !== objectiveId ||
+				JSON.stringify(outcome.attempts?.map((attempt) => attempt.attemptId)) !== JSON.stringify(ids) ||
+				outcome.attempts.some((attempt, index) => attempt.resultId !== finishes[index].payload.result.resultId || attempt.laneStatus !== (lanes.get(ids[index]).status === "completed" ? "succeeded" : lanes.get(ids[index]).status)) ||
+				claim?.requestId !== taskId || claim.status !== "completed" || claim.hostVerdict?.verdict !== "accepted" || claim.blockers?.length || claim.pending?.length ||
+				(claim.parentReviewRequired === true && (typeof claim.parentReviewedAt !== "string" || !Number.isFinite(Date.parse(claim.parentReviewedAt)))) ||
+				typeof currentResult.resultId !== "string" || !currentResult.resultId || currentResult.receipts?.status !== "captured" || !["accepted", "rejected"].includes(currentResult.receipts?.acceptance?.disposition) ||
+				!Number.isSafeInteger(outcome.generation) || outcome.generation < 1 || typeof outcome.outcomeId !== "string" ||
+				!(["succeeded", "completed", "partial"].includes(lane.status)) ||
+				(lane.status === "partial" ? currentResult.status !== "partial" || outcome.status !== "partial" : currentResult.status !== "completed" || outcome.status !== "succeeded")
+			) return undefined;
+			result.push({
+				taskId, objectiveId, currentAttemptId: currentId, laneStatus: lane.status, claimStatus: claim.status,
+				parentReviewRequired: claim.parentReviewRequired === true, parentReviewedAt: claim.parentReviewedAt,
+				inconclusive: claim.inconclusive ?? [], blockers: claim.blockers ?? [], pending: claim.pending ?? [], hostVerdict: claim.hostVerdict,
+				outcome: { outcomeId: outcome.outcomeId, generation: outcome.generation, status: outcome.status, blocker: outcome.blocker, assurance: outcome.assurance, nextAction: outcome.nextAction },
+				receiptAcceptance: currentResult.receipts?.acceptance,
+				receiptStatus: currentResult.receipts?.status, resultStatus: currentResult.status,
+				resultId: currentResult.resultId, receiptFactsDigest: currentResult.receipts?.factsDigest, finishedOrdinal: finishes.at(-1).ordinal,
+				attempts: ids.map((id) => ({ attemptId: id, status: lanes.get(id).status })),
+			});
+		}
+		return result;
+	};
+	/** Strict acceptance requires a completed host verdict and the matching durable receipt acknowledgement. */
+	const acceptedWorkerTasks = (agentDir, sessionId, workers, recovered) => {
+		if (workers.length === 0) return false;
+		const events = sessionEvents(agentDir, sessionId);
+		if (!events) return false;
+		return workers.every((worker) => {
+			if (recovered.some((entry) => entry.taskId === worker.taskId)) return true;
+			if (worker.attempts.length !== 1 || !["succeeded", "completed"].includes(worker.laneStatus) || worker.hostVerdict?.verdict !== "accepted" || worker.resultStatus !== "completed" || worker.receiptStatus !== "captured" || worker.outcome.status !== "succeeded" || worker.outcome.nextAction?.kind !== "accept" || worker.receiptAcceptance?.disposition !== "accepted" || !/^[a-f0-9]{64}$/.test(worker.receiptFactsDigest ?? "")) return false;
+			return events.some((event) => event.type === "attempt.receipts_delivered" && event.ordinal > worker.finishedOrdinal && event.aggregateId === worker.currentAttemptId && event.payload?.attemptId === worker.currentAttemptId && event.payload.acknowledgement?.resultId === worker.resultId && event.payload.acknowledgement?.factsDigest === worker.receiptFactsDigest);
+		});
 	};
 	/** Freeze task counts only after owner answer, worker claims/outbox and canonical work state all settle. */
 	const settleRootPrompt = async (input, agentDir, requireWorker = false) => {
@@ -353,25 +432,15 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 						.map((row) => [row.data.claim.terminalAttemptId, row.data.claim]),
 				);
 				if (requireWorker && lanes.size === 0) return undefined;
-				const delivered = deliveredNotifications(agentDir);
-				const recovered = [...lanes.values()].some((lane) => !/^(succeeded|completed)$/.test(lane.status))
-					? recoveredWorkerTasks(agentDir, input.sessionId, lanes, claims)
-					: [];
-				if (!recovered) return undefined;
-				const recoveredAttempts = new Set(recovered.flatMap((task) => task.attempts.map((attempt) => attempt.attemptId)));
-				for (const [attempt, lane] of lanes) {
-					const claim = claims.get(attempt);
-					if (recoveredAttempts.has(attempt)) continue;
-					if (
-						!/^(succeeded|completed)$/.test(lane.status) ||
-						claim?.status !== "completed" ||
-						claim.blockers?.length ||
-						claim.pending?.length ||
-						claim.parentReviewRequired ||
-						!delivered.has(`worker-terminal:${attempt}`)
-					)
-						return undefined;
-				}
+				const workers = operationalWorkerTasks(agentDir, input.sessionId, lanes, claims);
+				if (!workers) return undefined;
+				const retried = workers.filter((worker) => worker.attempts.length > 1);
+				const retryIds = new Set(retried.flatMap((worker) => worker.attempts.map((attempt) => attempt.attemptId)));
+				const retryLanes = new Map([...lanes].filter(([attempt]) => retryIds.has(attempt)));
+				const recovered = retried.length ? recoveredWorkerTasks(agentDir, input.sessionId, retryLanes, claims) : [];
+				if (!recovered || recovered.length !== retried.length) return undefined;
+				const accepted = acceptedWorkerTasks(agentDir, input.sessionId, workers, recovered);
+				if (requireWorker && !accepted) return undefined;
 				// Two fresh observations of the same settled branch cross the observer's next event-loop turn.
 				const stable = prior?.leafId === current.leafId && prior.sequence < current.sequence;
 				prior = current;
@@ -393,6 +462,8 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 					bounced,
 					workerAttempts: [...lanes.keys()],
 					workerHistory: recovered,
+					workerOutcomes: workers,
+					workerAcceptance: { required: requireWorker, accepted },
 					finalEntryId: last.id,
 				};
 				writeFileSync(
@@ -407,5 +478,5 @@ export function createNativeInputDriver({ directory, herdr, waitFor, screen, jso
 			() => screen(input.pane, 30),
 		);
 	};
-	return { register, type, submitRootPrompt, settleRootPrompt, deliveredNotifications, inspectRecoveredWorkerTasks: recoveredWorkerTasks };
+	return { register, type, submitRootPrompt, settleRootPrompt, deliveredNotifications, inspectRecoveredWorkerTasks: recoveredWorkerTasks, inspectOperationalWorkerTasks: operationalWorkerTasks, inspectAcceptedWorkerTasks: acceptedWorkerTasks };
 }

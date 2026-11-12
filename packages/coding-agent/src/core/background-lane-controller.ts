@@ -58,6 +58,7 @@ import { BotOperatorDispatch } from "./delegation/bot-operator-dispatch.ts";
 import type { BotOperatorMessageOptions } from "./delegation/bot-operator-message-options.ts";
 import { BotRuntimeBindings } from "./delegation/bot-runtime-bindings.ts";
 import { DAEMON_STALE_MS, isOlderDaemonBuild, OWN_DAEMON_BUILD } from "./delegation/bot-team-routine-helpers.ts";
+import { subscribeBotTeamUpdates } from "./delegation/bot-team-updates.ts";
 import {
 	createForegroundTranscriptWrites,
 	type ForegroundTranscriptWriteDeps,
@@ -1982,33 +1983,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * event for another agent wakes nobody.
 	 */
 	subscribeBotTeamUpdates(listener: (change: BotTeamChange) => void): () => void {
-		const offStore = this.getBotTeamStore().subscribe(() => listener("all"));
-		const seen = new Map<string, string>();
-		const offLanes = this.subscribeLaneRecords((records) => {
-			const changed: string[] = [];
-			for (const record of records) {
-				const agentId = record.agentId ?? record.laneId;
-				// A turn adds cost, a start or finish changes status or time: each moves this signature.
-				const signature = JSON.stringify([
-					record.status,
-					record.attemptId,
-					record.costUsd,
-					record.startedAt,
-					record.completedAt,
-					record.reasonCode,
-					record.label,
-				]);
-				if (seen.get(agentId) === signature) continue;
-				seen.set(agentId, signature);
-				const alias = this.botBindings.alias(agentId);
-				if (alias) changed.push(alias);
-			}
-			if (changed.length > 0) listener(changed);
-		});
-		return () => {
-			offStore();
-			offLanes();
-		};
+		return subscribeBotTeamUpdates(
+			{
+				store: (notify) => this.getBotTeamStore().subscribe(notify),
+				lanes: (notify) => this.subscribeLaneRecords(notify),
+				remote: (notify) => this.getRemoteHub().subscribe(notify),
+				alias: (agentId) => this.botBindings.alias(agentId),
+			},
+			listener,
+		);
 	}
 
 	listPersistentTeams(): PersistentTeamRecord[] {
@@ -2035,24 +2018,28 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/** This session's hub: the machines joined to it, shown as bots with a remote mark. */
 	getRemoteHub(): RemoteHubController {
-		this._remoteHub ??= new RemoteHubController({
-			agentDir: this.deps.getAgentDir(),
-			getStore: () => this.getBotTeamStore(),
-			// A machine arriving or leaving touches its bot, so the roster follows the same way it follows any bot save.
-			changed: (machine) => this.getBotTeamStore().upsertBot({ agentId: machine }),
-			// Remote work placement runs a placed job through this session's own worker start path and records the jobs
-			// it places as managed lanes; nothing here is read until the owner linked this machine.
-			jobs: {
-				session: this,
-				sessionId: () => this.deps.getSessionId(),
-				cwd: () => this.deps.getCwd(),
-				models: () => this.deps.getModelRegistry().getAvailable(),
-				usesSubscription: (model) => this.deps.getModelRegistry().isUsingOAuth(model),
-				// A job another process ended is settled here too: each session holds its own worker terminals.
-				onJobsChanged: () =>
-					this.acknowledgePlacedJobTerminals(finishedPlacedJobReferences(this.deps.getAgentDir())),
-			},
-		});
+		if (!this._remoteHub) {
+			this._remoteHub = new RemoteHubController({
+				agentDir: this.deps.getAgentDir(),
+				getStore: () => this.getBotTeamStore(),
+				timers: this.deps.getTimers().port("orchestration"),
+				// Remote work placement runs a placed job through this session's own worker start path and records the jobs
+				// it places as managed lanes; nothing here is read until the owner linked this machine.
+				jobs: {
+					session: this,
+					sessionId: () => this.deps.getSessionId(),
+					cwd: () => this.deps.getCwd(),
+					models: () => this.deps.getModelRegistry().getAvailable(),
+					usesSubscription: (model) => this.deps.getModelRegistry().isUsingOAuth(model),
+					// A job another process ended is settled here too: each session holds its own worker terminals.
+					onJobsChanged: () =>
+						this.acknowledgePlacedJobTerminals(finishedPlacedJobReferences(this.deps.getAgentDir())),
+				},
+			});
+			this._remoteHub.subscribe(() => {
+				this._botViews = undefined;
+			});
+		}
 		// A hub made after the fleet exists gives it the room at once; one made before gets it when the fleet is built.
 		if (this._workers) this._remoteHub.jobs?.attachFleet(this._workers.getFleet());
 		return this._remoteHub;

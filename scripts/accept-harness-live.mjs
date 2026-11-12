@@ -38,7 +38,7 @@ import {
 } from "node:fs";
 import { connect, createServer } from "node:net";
 import { cpus, homedir, loadavg, tmpdir } from "node:os";
-import { join, resolve } from "node:path";
+import { join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { args, flag, selectLiveScenarios } from "./live-args.mjs";
 import { assertLiveBinaryUnchanged, pinLiveBinary } from "./lib/live-binary-identity.mjs";
@@ -311,6 +311,7 @@ const settleRootPrompt = (input, agentDir, requireWorker = false) =>
 	nativeInput.settleRootPrompt(input, agentDir, requireWorker);
 /** The day's harness log and its rotated copy: `harness-log.ts` renames a full file to `<name>.1` and writes on. */
 const HARNESS_LOG_FILE = /^harness-.*\.jsonl(\.1)?$/;
+const MAX_CRASH_RECORD_BYTES = 64_000; // crash-record.ts retains at most 16,000 Unicode characters per record.
 /**
  * Undeclared state transitions (`kernel/machine-spec.ts`: category `machine`, level warn) logged at or after this run
  * started, in every agent directory the run created.
@@ -330,6 +331,70 @@ const undeclaredProblem = () => {
 	return found.length > 0
 		? `${found.length} undeclared state transition(s): ${found.slice(0, 3).map(describeTransition).join("; ")}`
 		: undefined;
+};
+/** Fatal process records are `.txt`; routine exits have their own `.routine.txt` class and are not failures. */
+const crashRecordProblems = () => {
+	const problems = [];
+	for (const dir of AGENT_DIRS) {
+		const root = join(dir, "state", "crashes");
+		const label = relative(RUN, dir) || "agent";
+		let names;
+		try {
+			names = readdirSync(root);
+		} catch (error) {
+			if (error?.code === "ENOENT") continue;
+			problems.push(`${label}: crash-record directory is unreadable`);
+			continue;
+		}
+		const records = names.filter((name) => name.endsWith(".txt") && !name.endsWith(".routine.txt"));
+		if (records.length > 100) {
+			problems.push(`${label}: crash-record count exceeds the 100-record retention bound`);
+			continue;
+		}
+		for (const name of records) {
+			const match = /^(\d{4}-\d{2}-\d{2}T\d{2})-(\d{2})-(\d{2})-(\d{3})Z-(\d+)-(\d+)\.txt$/.exec(name);
+			if (!match) {
+				problems.push(`${label}: unclassifiable fatal crash record ${name}`);
+				continue;
+			}
+			const at = Date.parse(`${match[1]}:${match[2]}:${match[3]}.${match[4]}Z`);
+			const pid = Number(match[5]);
+			const sequence = Number(match[6]);
+			let record;
+			try {
+				if (statSync(join(root, name)).size > MAX_CRASH_RECORD_BYTES) {
+					problems.push(`${label}: fatal crash record ${name} exceeds the size bound`);
+					continue;
+				}
+				record = readFileSync(join(root, name), "utf8");
+			} catch {
+				problems.push(`${label}: fatal crash record ${name} is unreadable`);
+				continue;
+			}
+			const lines = record.split(/\r?\n/);
+			const recordPid = /^pid (\d+)$/.exec(lines[1] ?? "");
+			const recordAt = /^at (.+)$/.exec(lines[2] ?? "");
+			const bodyAt = recordAt ? Date.parse(recordAt[1]) : Number.NaN;
+			if (
+				!lines[0]?.trim() ||
+				!Number.isFinite(at) ||
+				!Number.isSafeInteger(pid) ||
+				pid < 1 ||
+				!Number.isSafeInteger(sequence) ||
+				sequence < 1 ||
+				!recordPid ||
+				Number(recordPid[1]) !== pid ||
+				!recordAt ||
+				!Number.isFinite(bodyAt) ||
+				Math.abs(bodyAt - at) > 1000
+			) {
+				problems.push(`${label}: malformed fatal crash record ${name}`);
+				continue;
+			}
+			if (at >= RUN_STARTED_MS) problems.push(`${label}: fatal process crash at ${new Date(at).toISOString()} (pid ${pid})`);
+		}
+	}
+	return problems;
 };
 const claims = () =>
 	entries()
@@ -709,6 +774,16 @@ const SCENARIOS = [
 		await waitFor("the edit", () => /\/\*\*/.test(readFileSync(join(project, "util.ts"), "utf8")), 180_000, 3000);
 		const first = await settleRootPrompt(edit, freshAgent);
 		assertSlugifyEdit(readFileSync(join(project, "util.ts"), "utf8"));
+		const firstWorkerFacts = (first.workerOutcomes ?? []).map(
+			(worker) => {
+				const parentReview = !worker.parentReviewRequired
+					? "not-required"
+					: worker.parentReviewedAt
+						? "reviewed"
+						: "pending";
+				return `lane=${worker.laneStatus}, outcome=${worker.outcome?.status ?? "unknown"}, assurance=${worker.outcome?.assurance ?? "unknown"}, receipt=${worker.receiptAcceptance?.disposition ?? "unknown"}, parentReview=${parentReview}, inconclusive=${worker.inconclusive?.length ?? 0}`;
+			},
+		);
 		if (first.bounced > 0)
 			throw new Error(`the harness bounced ${first.bounced} call(s) on a plain edit: ${first.calls.join(", ")}`);
 		if (first.calls.length > 6)
@@ -720,6 +795,8 @@ const SCENARIOS = [
 			"Create one file in this folder, one-a.txt, containing alpha. Use a worker for it, then tell me when it exists.",
 		);
 		const second = await settleRootPrompt(create, freshAgent, true);
+		if (!second.workerAcceptance?.required || !second.workerAcceptance.accepted)
+			throw new Error("the explicit worker task did not settle with required accepted receipt proof");
 		if (readFileSync(join(project, "one-a.txt"), "utf8").replace(/\r?\n$/, "") !== "alpha")
 			throw new Error("the worker's file does not contain alpha");
 		if (second.bounced > 0)
@@ -728,7 +805,7 @@ const SCENARIOS = [
 			);
 		if (second.calls.length > 8)
 			throw new Error(`starting one worker took ${second.calls.length} tool calls (${second.calls.join(", ")})`);
-		return `a settled plain edit took ${first.calls.length} root tool calls and a settled worker start ${second.calls.length}, with no bounced root call; ${second.workerHistory.length} verified worker recovery chain(s)`;
+		return `a settled plain edit took ${first.calls.length} root tool calls and a settled worker start ${second.calls.length}, with no bounced root call; the edit passed the isolated ES2022 slugify/JSDoc contract check, but package-target compatibility is not established; first-edit worker outcomes are operational observations only, not worker acceptance proof (${firstWorkerFacts.length} outcome(s): ${firstWorkerFacts.join("; ") || "none"}); the second worker has required accepted proof and exact alpha content; ${second.workerHistory.length} verified worker recovery chain(s)`;
 	}),
 	scenario("s16", "watch routines: made from plain words, quiet while idle, firing once on the change, no model use before it", async () => {
 		// A watch lives in its owning session: the main pane (or one this scenario starts when it runs alone).
@@ -1043,6 +1120,7 @@ const SCENARIOS = [
 		if (fixtureDigest() !== FIXTURES_AT_START) problems.push("a fixture (mailbox or Trello export) was modified during the run");
 		const undeclared = undeclaredProblem();
 		if (undeclared) problems.push(undeclared);
+		problems.push(...crashRecordProblems());
 		for (const pane of [state.main, state.repo].filter(Boolean)) {
 			const leak = agentFacingLeak(screen(pane, 600));
 			if (leak) problems.push(`the owner's screen shows machine text: ${leak.slice(0, 220)}`);
@@ -1078,6 +1156,8 @@ const SCENARIOS = [
 		// s9 runs before this restart, so the restarted processes' transitions are checked here.
 		const undeclared = undeclaredProblem();
 		if (undeclared) throw new Error(`after the restart, ${undeclared}`);
+		const crashes = crashRecordProblems();
+		if (crashes.length > 0) throw new Error(`after the restart, ${crashes.join("; ")}`);
 		return "the hub and the machine restarted and the join held from their own records, with no new token";
 	}),
 ];
