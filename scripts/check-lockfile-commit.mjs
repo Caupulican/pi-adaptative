@@ -100,7 +100,7 @@ console.error("Review lockfile changes before committing:");
 console.error("  - confirm every new/updated package is intentional");
 console.error("  - confirm npm age gates were active for resolution");
 console.error("  - review any new lifecycle scripts in the dependency tree");
-console.error("  - confirm the lockfile still represents development/build tooling only");
+console.error("  - confirm every dependency change serves the reviewed runtime or development/build scope");
 
 const summary = changes ? summarizeLockfileChange(changes) : [];
 if (summary.length > 0) {
