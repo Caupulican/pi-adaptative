@@ -7,6 +7,7 @@ import { OrchestrationProfileStore } from "../../../../src/core/orchestration/pr
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 import { CHANGED_FILE_ANSWER_CLAIMS } from "./journey-5-shared.ts";
+import { scriptWatchWake, settleWatchWake } from "./journey-watch-wake.ts";
 import { ICM_INTAKE_JUDGMENTS, latestBatchResults } from "./shared.ts";
 
 const PROFILE_ID = "watch-cancellation-reader";
@@ -407,6 +408,8 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 		});
 		const healthyOccurrences = () =>
 			healthy.session.backgroundLanes.getBotTeamStore().listRoutineOccurrences({ routineId: healthyRoutine });
+		// The worker reports nothing for the owner; the watch's result still wakes the session that armed it.
+		const healthyWake = scriptWatchWake(world, "watch-healthy", healthyRoutine);
 		const fired = world.io.waitForMutation(() => healthyOccurrences().length === 1);
 		world.io.writeFileSync(replacementFile, "changed\n");
 		for (let step = 0; step < 8 && healthyOccurrences().length === 0; step++) {
@@ -437,6 +440,7 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 				);
 			}),
 		);
+		await settleWatchWake(world, healthy.session, "healthy watch", healthyWake);
 		expect(workerTask).toContain("Inspect the watched files and report whether they changed.");
 		expect(workerTask).toContain("a condition the host was watching became true");
 		expect(watchedFileClaimRequests).toBe(world.systemOne.enabled ? 1 : 0);

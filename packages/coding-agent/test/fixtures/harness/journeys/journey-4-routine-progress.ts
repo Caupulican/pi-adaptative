@@ -14,6 +14,7 @@ import { OrchestrationProfileStore } from "../../../../src/core/orchestration/pr
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { scriptRequirementCheckSpawn } from "./journey-9-shared.ts";
+import { scriptWatchWake, settleWatchWake } from "./journey-watch-wake.ts";
 import { INTAKE_JUDGMENTS_WITHOUT_GRANT, latestBatchResults } from "./shared.ts";
 
 const PROFILE_ID = "progress-worker";
@@ -485,6 +486,8 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 		});
 
 		const watchRun1Ack = waitForAcknowledgedCount(WATCH_ROUTINE_ID, 1);
+		world.systemOne.enterPhase("j4-rp-watch-run-1-wake", {});
+		const watchWake1 = scriptWatchWake(world, "j4-rp-watch-run-1", WATCH_ROUTINE_ID);
 		const alert1Sampled = createBarrier();
 		world.shell.enqueue({
 			name: "j4-rp-watch-alert-1",
@@ -498,6 +501,7 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 		await flushWatchTurn();
 		await session.backgroundLanes.tickPersistentRoutines();
 		await withDeadline(trace, "untrusted watch run 1 acknowledged", watchRun1Ack);
+		await settleWatchWake(world, session, "watch run 1", watchWake1);
 
 		const statusAfterWatch1 = await session.autonomyStatus();
 		const watchItem1 =
@@ -543,6 +547,8 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 		});
 
 		const watchRun2Ack = waitForAcknowledgedCount(WATCH_ROUTINE_ID, 2);
+		world.systemOne.enterPhase("j4-rp-watch-run-2-wake", {});
+		const watchWake2 = scriptWatchWake(world, "j4-rp-watch-run-2", WATCH_ROUTINE_ID);
 		const alert2Sampled = createBarrier();
 		world.shell.enqueue({
 			name: "j4-rp-watch-alert-2",
@@ -556,6 +562,7 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 		await flushWatchTurn();
 		await session.backgroundLanes.tickPersistentRoutines();
 		await withDeadline(trace, "untrusted watch run 2 acknowledged", watchRun2Ack);
+		await settleWatchWake(world, session, "watch run 2", watchWake2);
 
 		expect(
 			{

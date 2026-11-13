@@ -4,6 +4,7 @@ import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
+import { scriptWatchWake, settleWatchWake } from "./journey-watch-wake.ts";
 import { latestBatchResults } from "./shared.ts";
 
 const PROFILE_ID = "watch-reader";
@@ -22,8 +23,9 @@ function watchFacts(task: string): unknown {
  * A watch routine: the owner asks to be told when a file changes. The host follows the file in code, with no model
  * call while it waits. The file as it was when the watch was armed fires nothing; each change starts one run of the
  * routine, which is told what was seen as data (the file, what happened, its size then); the same content again is no
- * change; and a run that reports nothing for the owner starts no turn of the root. A file that appears and a file that
- * goes are watches of their own: each fires once, at its own moment, and never for the other.
+ * change; and a run that reports nothing for the owner still wakes the root that armed the watch, once, because its own
+ * work waits on the change. A file that appears and a file that goes are watches of their own: each fires once, at its
+ * own moment, and never for the other.
  */
 export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
@@ -107,9 +109,17 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 			await new Promise<void>((resolve) => setImmediate(resolve));
 		}
 	};
-	/** One run of the routine: its worker reports quietly; resolves with the task text the run was given. */
-	const quietRun = (label: string, summary: string): Promise<string> => {
+	/**
+	 * One run of the routine: its worker reports quietly. `task` resolves with the task text the run was given; `settled`
+	 * waits for the root's wake turn that the quiet result of a watch starts, and for the session to be at rest after it.
+	 */
+	const quietRun = (
+		label: string,
+		summary: string,
+		routineId = ROUTINE_ID,
+	): { readonly task: Promise<string>; readonly settled: () => Promise<void> } => {
 		const ran = createBarrier();
+		const woke = scriptWatchWake(world, label, routineId);
 		let task = "";
 		world.provider.enqueue("worker-a", {
 			...calls(`${label}-report`, [
@@ -130,7 +140,7 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 				ran.release();
 			},
 		});
-		return ran.promise.then(() => task);
+		return { task: ran.promise.then(() => task), settled: () => settleWatchWake(world, session, label, woke) };
 	};
 	const rootRequests = () => world.provider.requests.filter((request) => request.model.id === "root").length;
 	const rootBefore = rootRequests();
@@ -143,8 +153,8 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 	const first = quietRun("j4-watch-first", "notes.txt gained a line.");
 	world.io.writeFileSync(notes, "first line\nsecond line\n");
 	await untilFired(1);
-	const firstTask = await withDeadline(trace, "the change starts one run of the routine", first);
-	await withDeadline(trace, "the session is at rest after the run", session.waitForForegroundIdle());
+	const firstTask = await withDeadline(trace, "the change starts one run of the routine", first.task);
+	await first.settled();
 	expect(
 		{
 			prompt: firstTask.includes(PROMPT),
@@ -160,19 +170,19 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 		runs: 1,
 	});
 
-	// The same content again is no change, and a quiet result wakes nobody.
+	// The same content again is no change, and the one run's quiet result woke the root once, not again.
 	await untilFired(2);
 	expect(
 		{ runs: occurrences().length, rootTurns: rootRequests() - rootBefore },
-		"one change is one run, and its quiet result starts no turn of the root",
-	).toEqual({ runs: 1, rootTurns: 0 });
+		"one change is one run, and its quiet result starts one turn of the root that armed the watch",
+	).toEqual({ runs: 1, rootTurns: 1 });
 
 	// A second change is a second run.
 	const second = quietRun("j4-watch-second", "notes.txt lost a line.");
 	world.io.writeFileSync(notes, "second line\n");
 	await untilFired(2);
-	const secondTask = await withDeadline(trace, "the second change starts a second run", second);
-	await withDeadline(trace, "the session is at rest after the second run", session.waitForForegroundIdle());
+	const secondTask = await withDeadline(trace, "the second change starts a second run", second.task);
+	await second.settled();
 	expect(
 		{ facts: watchFacts(secondTask), runs: occurrences().length },
 		"each change is told with the file as it is then",
@@ -226,11 +236,11 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 			await new Promise<void>((resolve) => setImmediate(resolve));
 		}
 	};
-	const appeared = quietRun("j4-watch-flag-created", "release.flag appeared.");
+	const appeared = quietRun("j4-watch-flag-created", "release.flag appeared.", "flag-created");
 	world.io.writeFileSync(flag, "ready\n");
 	await untilRuns("flag-created", 1);
-	const appearedTask = await withDeadline(trace, "the file's appearance starts one run", appeared);
-	await withDeadline(trace, "the session is at rest after the created run", session.waitForForegroundIdle());
+	const appearedTask = await withDeadline(trace, "the file's appearance starts one run", appeared.task);
+	await appeared.settled();
 	expect(
 		{ facts: watchFacts(appearedTask), created: runsOf("flag-created"), deleted: runsOf("flag-deleted") },
 		"a file that appears fires the created watch only",
@@ -239,11 +249,11 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 		created: 1,
 		deleted: 0,
 	});
-	const gone = quietRun("j4-watch-flag-deleted", "release.flag is gone.");
+	const gone = quietRun("j4-watch-flag-deleted", "release.flag is gone.", "flag-deleted");
 	world.io.unlinkSync(flag);
 	await untilRuns("flag-deleted", 1);
-	const goneTask = await withDeadline(trace, "the file's removal starts one run", gone);
-	await withDeadline(trace, "the session is at rest after the deleted run", session.waitForForegroundIdle());
+	const goneTask = await withDeadline(trace, "the file's removal starts one run", gone.task);
+	await gone.settled();
 	expect(
 		{ facts: watchFacts(goneTask), created: runsOf("flag-created"), deleted: runsOf("flag-deleted") },
 		"a file that goes fires the deleted watch only",
