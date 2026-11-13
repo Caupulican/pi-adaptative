@@ -21,7 +21,7 @@ import type { RoutineRunOpener } from "./routine-provenance.ts";
  */
 export function routineRunOpener(
 	branch: readonly SessionEntry[],
-	goal: Pick<GoalState, "goalId" | "status"> | undefined,
+	goal: Pick<GoalState, "goalId" | "status" | "ownerSourceId"> | undefined,
 ): RoutineRunOpener | undefined {
 	for (let index = branch.length - 1; index >= 0; index--) {
 		const entry = branch[index];
@@ -36,7 +36,11 @@ export function routineRunOpener(
 		if (customType === undefined) continue;
 		if (customType === GOAL_CONTINUATION_TRIGGER_CUSTOM_TYPE)
 			return goal !== undefined && isGoalExecutionActive(goal.status)
-				? { kind: "goal", goalId: goal.goalId }
+				? {
+						kind: "goal",
+						goalId: goal.goalId,
+						...(goal.ownerSourceId ? { ownerSourceId: goal.ownerSourceId } : {}),
+					}
 				: undefined;
 		const wake = parentWakeOf(entry);
 		if (wake) return { kind: "wake", ref: wake.wakeId };

@@ -3,13 +3,13 @@
  * written in the oldest version that holds every field it carries, so a build that predates a field refuses the store instead of
  * dropping the routines it cannot read: 3 is the current shape (a revision counter, no legacy routine key), 4 adds progress, 5
  * arming stamps and wake addresses, 6 a watch saved with its receipt origin and no execution snapshot, 7 a worker's watch
- * scope.
+ * scope, 8 a goal's arming stamp that names the owner source the goal was started from.
  */
 import type { RoutineDefinitionView, RoutineOccurrence } from "./routine-contract.ts";
 import { carriesRoutineArming } from "./routine-provenance.ts";
 
 /** Every store version this build reads; 1 and 2 are the first shapes, which it rewrites in the current one. */
-export const ROUTINE_STORE_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, 6, 7];
+export const ROUTINE_STORE_VERSIONS: readonly number[] = [1, 2, 3, 4, 5, 6, 7, 8];
 
 /** The version to write for these routines and occurrences (an occurrence's frozen definition counts like a routine). */
 export function routineStoreFormatVersion(
@@ -17,6 +17,8 @@ export function routineStoreFormatVersion(
 	occurrences: readonly RoutineOccurrence[],
 ): number {
 	const definitions = [...routines, ...occurrences.map((occurrence) => occurrence.definition)];
+	if (definitions.some((definition) => definition.armedBy?.kind === "goal" && definition.armedBy.ownerSourceId))
+		return 8;
 	if (definitions.some((definition) => definition.workerScope !== undefined)) return 7;
 	if (definitions.some((definition) => definition.receiptOrigin !== undefined)) return 6;
 	if (definitions.some(carriesRoutineArming)) return 5;

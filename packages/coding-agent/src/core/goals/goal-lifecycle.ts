@@ -8,6 +8,7 @@ import {
 	isGoalExecutionActive,
 	isGoalResumableStatus,
 	isGoalUnfinishedStatus,
+	MAX_CONSUMED_RUNAWAY_SIGNATURES,
 	MAX_GOAL_OBJECTIVE_LENGTH,
 } from "./goal-state.ts";
 import { applyGoalAction, type GoalActionFailure, type GoalActionResult } from "./goal-tool-core.ts";
@@ -113,6 +114,40 @@ export function isSystemBlockedGoal(state: GoalState | undefined): boolean {
 export function getAutoResumableReasonPrefix(reason: string | undefined): string | undefined {
 	if (!reason) return undefined;
 	return AUTO_RESUMABLE_SYSTEM_STOP_REASON_PREFIXES.find((prefix) => reason.startsWith(prefix));
+}
+
+/**
+ * The state `current` resumes to from its system stop, read without saving; undefined when no such resume applies. The
+ * owner's own prompt resumes any system stop; an automatic resume (`source: "system"`) applies only to a classified guard
+ * or provider stop (whose prefix must be `requiredPrefix` when one is given) within its recovery allowance.
+ */
+export function planSystemGoalResume(
+	current: GoalState,
+	now: string,
+	source: "system" | "owner",
+	requiredPrefix?: string,
+): GoalState | undefined {
+	if (!(source === "owner" ? isSystemStoppedGoal(current) : isSystemBlockedGoal(current)) || !current.blockedReason)
+		return undefined;
+
+	const prefix = getAutoResumableReasonPrefix(current.blockedReason);
+	if (requiredPrefix !== undefined && prefix !== requiredPrefix) return undefined;
+
+	if (source === "system" && (!prefix || !isAutomaticRecoveryAllowed(current, prefix))) return undefined;
+
+	const resumed = resumeGoal(current, now, source);
+	return resumed.ok ? resumed.state : undefined;
+}
+
+/** A runaway signature resumes once and never once the consumed set is full; a provider failure once per streak. */
+function isAutomaticRecoveryAllowed(current: GoalState, prefix: string): boolean {
+	if (prefix === "runaway_tool_loop:" || prefix === "stagnant_tool_cycle:") {
+		const consumed = current.consumedRunawaySignatures ?? [];
+		if (consumed.includes(current.blockedReason ?? "")) return false;
+		return consumed.length < MAX_CONSUMED_RUNAWAY_SIGNATURES;
+	}
+	// Transient provider failures: exactly one automatic resume per unrecovered streak.
+	return (current.systemFailureStreak ?? 0) <= 1;
 }
 
 /** Minimal durable seam shared by CLI, tools, and in-process session restoration. */

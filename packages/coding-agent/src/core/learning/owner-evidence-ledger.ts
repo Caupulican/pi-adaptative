@@ -155,6 +155,11 @@ export interface OwnerEvidenceDescriptor {
 	readonly complete: boolean;
 }
 
+/** The owner source id of the owner input persisted as `entryId` in session `sessionId`. */
+function ownerSourceIdOf(sessionId: string, entryId: string): string {
+	return `${sessionId}/${entryId}`;
+}
+
 function evidenceTextDigest(text: string): string {
 	return createHash("sha256").update(text, "utf8").digest("hex").slice(0, 16);
 }
@@ -650,7 +655,7 @@ export class OwnerEvidenceLedger {
 	 */
 	private recordOwnerEvidence(entryId: string, original: OwnerWords): boolean {
 		const sessionId = this.deps.getSessionManager().getSessionId();
-		const sourceId = `${sessionId}/${entryId}`;
+		const sourceId = ownerSourceIdOf(sessionId, entryId);
 		// Load before appending: a first read that scans the branch must not see this record twice.
 		const ledger = this.loadOwnerEvidence();
 		if (this.sourceEntries?.has(entryId)) return true;
@@ -722,6 +727,12 @@ export class OwnerEvidenceLedger {
 			};
 		}
 		return undefined;
+	}
+
+	/** The owner source a persisted message entry was recorded as, or undefined when it is not recorded owner input. */
+	sourceOfEntry(entryId: string): string | undefined {
+		const sourceId = ownerSourceIdOf(this.deps.getSessionManager().getSessionId(), entryId);
+		return this.findSource(sourceId) ? sourceId : undefined;
 	}
 
 	/** Resolve a citation against the actual original input, never a reflection preview. */

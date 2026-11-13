@@ -17,6 +17,7 @@ import {
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import { GoalLoopController } from "../goal-loop-controller.ts";
+import type { OwnerEvidenceLedger } from "../learning/owner-evidence-ledger.ts";
 import {
 	assertCurrentGoalObjective,
 	ObjectiveExecutionInterruptedError,
@@ -47,9 +48,7 @@ import {
 	type GoalStateRevision,
 	getAutoResumableReasonPrefix,
 	getGoalStateRevision,
-	isSystemBlockedGoal,
-	isSystemStoppedGoal,
-	resumeGoal,
+	planSystemGoalResume,
 	stopGoalFromSystem,
 } from "./goal-lifecycle.ts";
 import { type ObjectiveTerminalPort, settleObjectiveTerminal } from "./goal-objective-terminal.ts";
@@ -58,12 +57,8 @@ import {
 	type GoalRuntimeSnapshot,
 	type GoalRuntimeSnapshotSettings,
 } from "./goal-runtime-snapshot.ts";
-import {
-	applyGoalEvent,
-	type GoalState,
-	isGoalExecutionActive,
-	MAX_CONSUMED_RUNAWAY_SIGNATURES,
-} from "./goal-state.ts";
+import { applyGoalEvent, type GoalState, isGoalExecutionActive } from "./goal-state.ts";
+import type { GoalStartGrant } from "./goal-tool-core.ts";
 import {
 	type ExplicitChatGoal,
 	type ExplicitGoalStartAuthority,
@@ -89,6 +84,8 @@ export interface GoalSessionControllerDeps {
 	getLaneRecords(): readonly LaneRecord[];
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined;
 	getBackgroundToolTasks(): readonly BackgroundToolTaskRef[];
+	/** The owner evidence a started goal records the owner source it came from in. */
+	getOwnerEvidence(): Pick<OwnerEvidenceLedger, "sourceOfEntry" | "currentTurnSources">;
 	synchronizeGoalState(state: GoalState): void;
 	scheduleGoalAutoContinueFromIdle(): void;
 	prompt(text: string, options?: PromptOptions): Promise<void>;
@@ -166,10 +163,6 @@ interface QueuedOwnerChatGoal {
 	authority: ExplicitGoalStartAuthority;
 }
 
-/**
- * Owns durable goal state, exact continuation accounting, and the raw continuation loop. The
- * AgentSession facade supplies process collaborators but no longer implements goal lifecycle rules.
- */
 /** What a bounded harness guard did to the active goal. */
 export type GoalGuardRecovery = "resumed" | "blocked" | "no_goal";
 
@@ -184,6 +177,10 @@ const PROVIDER_FAILURE_REASONS: ReadonlySet<string> = new Set([
 	"billing_or_quota",
 ]);
 
+/**
+ * Owns durable goal state, exact continuation accounting, and the raw continuation loop. The
+ * AgentSession facade supplies process collaborators but no longer implements goal lifecycle rules.
+ */
 export class GoalSessionController {
 	private readonly deps: GoalSessionControllerDeps;
 	private readonly loop: GoalLoopController;
@@ -371,42 +368,13 @@ export class GoalSessionController {
 		requiredPrefix?: string,
 	): string | undefined {
 		const current = this.getState();
-		const resumed = current && this.planSystemResume(current, now, source, requiredPrefix);
+		const resumed = current && planSystemGoalResume(current, now, source, requiredPrefix);
 		if (!current || !resumed) return undefined;
 		this.saveState(resumed, getGoalStateRevision(current));
 		if (source === "owner") {
 			this.deps.getObjectiveExecutionController?.()?.resetVerificationRecovery(goalObjectiveId(current.goalId));
 		}
 		return resumed.goalId;
-	}
-
-	/** The state `current` resumes to from its system stop, read without saving; undefined when no such resume applies. */
-	private planSystemResume(
-		current: GoalState,
-		now: string,
-		source: "system" | "owner",
-		requiredPrefix?: string,
-	): GoalState | undefined {
-		if (!(source === "owner" ? isSystemStoppedGoal(current) : isSystemBlockedGoal(current)) || !current.blockedReason)
-			return undefined;
-
-		const prefix = getAutoResumableReasonPrefix(current.blockedReason);
-		if (requiredPrefix !== undefined && prefix !== requiredPrefix) return undefined;
-
-		if (source === "system" && (!prefix || !this.isAutomaticRecoveryAllowed(current, prefix))) return undefined;
-
-		const resumed = resumeGoal(current, now, source);
-		return resumed.ok ? resumed.state : undefined;
-	}
-
-	private isAutomaticRecoveryAllowed(current: GoalState, prefix: string): boolean {
-		if (prefix === "runaway_tool_loop:" || prefix === "stagnant_tool_cycle:") {
-			const consumed = current.consumedRunawaySignatures ?? [];
-			if (consumed.includes(current.blockedReason ?? "")) return false;
-			return consumed.length < MAX_CONSUMED_RUNAWAY_SIGNATURES;
-		}
-		// Transient provider failures: exactly one automatic resume per unrecovered streak.
-		return (current.systemFailureStreak ?? 0) <= 1;
 	}
 
 	/**
@@ -418,17 +386,22 @@ export class GoalSessionController {
 		text: string,
 		authority: ExplicitGoalStartAuthority | undefined,
 		messages: readonly { role: string; content?: unknown }[],
+		entryId: string,
 	): ChatGoalAdmission {
-		return this.admitExplicitChatGoal(ownerChatGoal(text, authority, priorUserPromptText(messages, text)));
+		return this.admitExplicitChatGoal(ownerChatGoal(text, authority, priorUserPromptText(messages, text)), entryId);
 	}
 
-	/** `authority`: what the owner's typed words of `text` grant (`parseExplicitGoalStartAuthority`); none starts nothing. */
+	/**
+	 * `authority`: what the owner's typed words of `text` grant (`parseExplicitGoalStartAuthority`); none starts nothing.
+	 * `entryId`: the entry the owner's message was persisted as, whose owner source the goal records.
+	 */
 	startOwnerChatGoal(
 		text: string,
 		authority: ExplicitGoalStartAuthority | undefined,
 		messages: readonly { role: string; content?: unknown }[],
+		entryId: string,
 	): string | undefined {
-		const admission = this.admitOwnerChatGoal(text, authority, messages);
+		const admission = this.admitOwnerChatGoal(text, authority, messages, entryId);
 		if (admission.status === "started") return admission.state.goalId;
 		if (admission.status === "unfinished_goal_exists") {
 			this.deps.emitWarning(
@@ -451,11 +424,14 @@ export class GoalSessionController {
 	 * A queued message was delivered (its user entry persisted): the goal it asked for starts now. A message that is never
 	 * delivered starts nothing; its queued request is dropped with the message.
 	 */
-	activateQueuedOwnerChatGoal(message: AgentMessage, messages: readonly { role: string; content?: unknown }[]): void {
+	activateQueuedOwnerChatGoal(
+		{ message, entryId }: { readonly message: AgentMessage; readonly entryId: string },
+		messages: readonly { role: string; content?: unknown }[],
+	): void {
 		const queued = this.queuedOwnerChatGoals.get(message);
 		if (!queued) return;
 		this.queuedOwnerChatGoals.delete(message);
-		const goalId = this.startOwnerChatGoal(queued.text, queued.authority, messages);
+		const goalId = this.startOwnerChatGoal(queued.text, queued.authority, messages, entryId);
 		if (!goalId) return;
 		this.setStartAuthority(queued.authority);
 		// The submission running the delivery may hold an execution already: it works on the goal from here. Otherwise
@@ -478,8 +454,8 @@ export class GoalSessionController {
 	 * about to begin its own execution; a goal no run holds is picked up by its own continuation. An unfinished goal is
 	 * never replaced, and that is no warning: the judgment ran while the owner's turn did.
 	 */
-	startJudgedOwnerGoal(objective: string): ChatGoalAdmission {
-		const admission = this.admitExplicitChatGoal({ objective });
+	startJudgedOwnerGoal(objective: string, entryId: string): ChatGoalAdmission {
+		const admission = this.admitExplicitChatGoal({ objective }, entryId);
 		if (admission.status !== "started") return admission;
 		const held = this.executionLease;
 		if (held) {
@@ -513,7 +489,7 @@ export class GoalSessionController {
 	): string | undefined {
 		const now = new Date().toISOString();
 		const current = this.getState();
-		const resumed = current && this.planSystemResume(current, now, "owner");
+		const resumed = current && planSystemGoalResume(current, now, "owner");
 		const admission = planExplicitChatGoal(
 			resumed ?? current,
 			ownerChatGoal(text, authority, priorUserPromptText(messages, text)),
@@ -531,9 +507,10 @@ export class GoalSessionController {
 		text: string,
 		authority: ExplicitGoalStartAuthority | undefined,
 		messages: readonly { role: string; content?: unknown }[],
+		entryId: string,
 	): void {
 		const recoveredGoalId = this.resumeSystemBlockedGoal(undefined, "owner");
-		const goalId = this.startOwnerChatGoal(text, authority, messages) ?? recoveredGoalId;
+		const goalId = this.startOwnerChatGoal(text, authority, messages, entryId) ?? recoveredGoalId;
 		const lease = this.executionLease;
 		if (goalId !== undefined && lease) this.bindExecution(lease, goalId);
 	}
@@ -557,9 +534,11 @@ export class GoalSessionController {
 		lease.goalId = goalId;
 	}
 
-	admitExplicitChatGoal(goal: ExplicitChatGoal | undefined, now?: string): ChatGoalAdmission {
+	/** The chat goal the owner's message persisted as `entryId` asked for, recording that message's owner source. */
+	admitExplicitChatGoal(goal: ExplicitChatGoal | undefined, entryId: string): ChatGoalAdmission {
 		const current = this.getState();
-		const admission = planExplicitChatGoal(current, goal, now ?? new Date().toISOString());
+		const ownerSourceId = this.deps.getOwnerEvidence().sourceOfEntry(entryId);
+		const admission = planExplicitChatGoal(current, goal, new Date().toISOString(), ownerSourceId);
 		if (admission.status === "started")
 			this.saveState(admission.state, current ? getGoalStateRevision(current) : undefined);
 		return admission;
@@ -837,8 +816,13 @@ export class GoalSessionController {
 		this.startAuthority = authority;
 	}
 
-	authorizeStartFromTool(_input: { tokenBudget?: number }): number | null {
-		return this.startAuthority?.tokenBudget ?? null;
+	/**
+	 * What the current run grants a goal its model starts: the token budget the owner's typed words set (none drops the
+	 * model's own), and the owner source of the newest owner message the run read, which the goal records.
+	 */
+	authorizeStartFromTool(_input: { tokenBudget?: number }): GoalStartGrant {
+		const ownerSourceId = this.deps.getOwnerEvidence().currentTurnSources().at(-1);
+		return { tokenBudget: this.startAuthority?.tokenBudget ?? null, ...(ownerSourceId ? { ownerSourceId } : {}) };
 	}
 
 	/**

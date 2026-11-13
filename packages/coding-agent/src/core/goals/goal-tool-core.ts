@@ -31,6 +31,15 @@ const MAX_GOAL_URI_LENGTH = 4_096;
 const MIN_AGENT_BLOCK_STALL_TURNS = 3;
 
 /**
+ * What the run a model's goal start executes in grants that start: the token budget it may carry (a number sets it, null
+ * drops the model's own, undefined keeps it) and the owner source of the owner message the goal came from, when one did.
+ */
+export interface GoalStartGrant {
+	readonly tokenBudget: number | null | undefined;
+	readonly ownerSourceId?: string;
+}
+
+/**
  * Agent-facing goal ledger actions.
  *
  * This is the producer half of the goal continuation pipeline: the agent records
@@ -41,7 +50,7 @@ const MIN_AGENT_BLOCK_STALL_TURNS = 3;
  * {@link GoalEvent}, so the durable state model stays the single source of truth.
  */
 export type GoalAction =
-	| { action: "start"; goalId: string; userGoal: string; tokenBudget?: number }
+	| { action: "start"; goalId: string; userGoal: string; tokenBudget?: number; ownerSourceId?: string }
 	| {
 			action: "add_requirement";
 			requirementId: string;
@@ -236,7 +245,8 @@ export function applyGoalAction(
 				newGoalId: goalId,
 			});
 		}
-		return { ok: true, state: createGoalState({ goalId, userGoal, tokenBudget: action.tokenBudget, now }) };
+		const { tokenBudget, ownerSourceId } = action;
+		return { ok: true, state: createGoalState({ goalId, userGoal, tokenBudget, ownerSourceId, now }) };
 	}
 
 	if (!current) {

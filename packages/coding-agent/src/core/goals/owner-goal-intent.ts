@@ -122,25 +122,30 @@ export class OwnerGoalIntent {
 	}
 
 	/**
-	 * The owner's words were delivered. Starts the judgment when the facts call for it, without waiting for it: the owner's
-	 * turn is already running, and a goal the judgment grants is handed to that turn, or to the goal's own continuation
-	 * when the turn has ended.
+	 * The owner's words were delivered, persisted as `entryId`. Starts the judgment when the facts call for it, without
+	 * waiting for it: the owner's turn is already running, and a goal the judgment grants is handed to that turn, or to the
+	 * goal's own continuation when the turn has ended. The goal records the owner source of that entry, captured here: the
+	 * turn the judgment returns to may have read other words by then.
 	 */
-	noteDelivered(words: OwnerWords, previousAnswer: AssistantMessage | undefined): void {
+	noteDelivered(words: OwnerWords, entryId: string, previousAnswer: AssistantMessage | undefined): void {
 		const request = ownerRequestForJudge(words);
 		const objective = objectiveOf(words);
 		if (request === undefined || objective === undefined || statesGoalExplicitly(ownerTypedText(words))) return;
 		if (this.hasUnfinishedGoal()) return;
 		const engine = this.ports.getSemanticDecisionEngine();
 		if (!engine || this.closing.signal.aborted) return;
-		const judgment = this.judgeAndStart(engine, request, objective, assistantAnswerText(previousAnswer)).catch(
-			(error: unknown) => {
-				// Only the admission can throw here (the judgment reports its own outage): the goal could not be started.
-				this.warn(
-					interfaceText().sessions.goal.intentNotStarted(error instanceof Error ? error.message : String(error)),
-				);
-			},
-		);
+		const judgment = this.judgeAndStart(
+			engine,
+			request,
+			objective,
+			entryId,
+			assistantAnswerText(previousAnswer),
+		).catch((error: unknown) => {
+			// Only the admission can throw here (the judgment reports its own outage): the goal could not be started.
+			this.warn(
+				interfaceText().sessions.goal.intentNotStarted(error instanceof Error ? error.message : String(error)),
+			);
+		});
 		this.inFlight.add(judgment);
 		void judgment.finally(() => this.inFlight.delete(judgment));
 	}
@@ -171,6 +176,7 @@ export class OwnerGoalIntent {
 		engine: OperationEffectEngine,
 		request: string,
 		objective: string,
+		entryId: string,
 		previousAnswer: string,
 	): Promise<void> {
 		const exit = await this.judge(engine, request, previousAnswer);
@@ -180,7 +186,7 @@ export class OwnerGoalIntent {
 			this.warn(interfaceText().sessions.goal.intentNotStarted(readiness.issues.join("; ")));
 			return;
 		}
-		const admission = this.ports.goals.startJudgedOwnerGoal(objective);
+		const admission = this.ports.goals.startJudgedOwnerGoal(objective, entryId);
 		if (admission.status !== "started") return;
 		await this.ports
 			.sendCustomMessage(

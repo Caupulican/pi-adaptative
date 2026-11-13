@@ -13,11 +13,15 @@ export type ChatGoalAdmission =
 	| { status: "started"; state: GoalState }
 	| { status: "unfinished_goal_exists"; state: GoalState };
 
-/** What starting `parsed` as a chat goal does against `current`. An unfinished goal is never replaced implicitly. */
+/**
+ * What starting `parsed` as a chat goal does against `current`. An unfinished goal is never replaced implicitly. The goal
+ * records `ownerSourceId`, the owner source of the message that asked for it, when the owner evidence holds one.
+ */
 export function planExplicitChatGoal(
 	current: GoalState | undefined,
 	parsed: ExplicitChatGoal | undefined,
 	admittedAt: string,
+	ownerSourceId?: string,
 ): ChatGoalAdmission {
 	if (!parsed) return { status: "not_explicit" };
 	if (current && isGoalUnfinishedStatus(current.status)) {
@@ -34,6 +38,7 @@ export function planExplicitChatGoal(
 			goalId: `chat-${digest}`,
 			userGoal: parsed.objective,
 			tokenBudget: parsed.tokenBudget,
+			...(ownerSourceId === undefined ? {} : { ownerSourceId }),
 		},
 		admittedAt,
 	);

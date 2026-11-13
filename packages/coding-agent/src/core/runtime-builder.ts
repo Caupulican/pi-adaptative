@@ -116,7 +116,7 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
-import type { OpenTaskStepRef } from "./goals/goal-tool-core.ts";
+import type { GoalStartGrant, OpenTaskStepRef } from "./goals/goal-tool-core.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
 import { runRequirementCheck } from "./goals/requirement-checks.ts";
 import { resolveSessionToolEvidence, resolveSessionUserEvidence } from "./goals/session-goal-evidence.ts";
@@ -544,10 +544,8 @@ export interface RuntimeBuilderDeps {
 		operation: EdgeOperation,
 		signal?: AbortSignal,
 	): Promise<{ authorized: boolean; reason?: string; correction?: string }>;
-	/** Authorize model-facing goal creation and its exact owner-requested token ceiling. */
-	authorizeGoalStartFromTool?(
-		input: Pick<GoalToolInput, "userGoal" | "tokenBudget">,
-	): string | number | null | undefined;
+	/** Authorize model-facing goal creation: its exact owner-requested token ceiling and the owner source it records. */
+	authorizeGoalStartFromTool?(input: Pick<GoalToolInput, "userGoal" | "tokenBudget">): string | GoalStartGrant;
 	/** Native task-step state accessors. */
 	getTaskStepsStateSnapshot(): TaskStepsState | undefined;
 	saveTaskStepsStateSnapshot(state: TaskStepsState): string;
@@ -1937,8 +1935,7 @@ export class RuntimeBuilder {
 							this._taskAutomationAdapter.getCombinedScripts(this.deps.getSettingsManager().getToolkitScripts()),
 							this._taskDirectories.cwd,
 						),
-					authorizeStart: (input) =>
-						this.deps.authorizeGoalStartFromTool ? this.deps.authorizeGoalStartFromTool(input) : null,
+					authorizeStart: (input) => this.deps.authorizeGoalStartFromTool?.(input) ?? { tokenBudget: null },
 					saveGoalState: (state, expected) => {
 						this.deps.saveGoalStateSnapshot(state, expected);
 					},

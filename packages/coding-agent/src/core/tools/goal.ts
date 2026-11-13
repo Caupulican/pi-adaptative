@@ -29,6 +29,7 @@ import {
 	formatGoalRecoveryCatalogs,
 	type GoalAction,
 	type GoalActionName,
+	type GoalStartGrant,
 	type OpenTaskStepRef,
 	summarizeGoalState,
 } from "../goals/goal-tool-core.ts";
@@ -389,8 +390,8 @@ export interface GoalToolDependencies {
 	getBackgroundToolTasks?: () => readonly BackgroundToolTaskRef[];
 	/** Active ICM pipeline run for the complete/increment join. */
 	getActivePipeline?: () => { runId: string; pipelineName: string; goalId?: string; status: string } | undefined;
-	/** Model-facing budget normalization for the current foreground turn. Omitted by direct owner/test callers. */
-	authorizeStart?: (input: Pick<GoalToolInput, "userGoal" | "tokenBudget">) => string | number | null | undefined;
+	/** What the current foreground turn grants a model's start, or why it refuses it. Omitted by direct owner/test callers. */
+	authorizeStart?: (input: Pick<GoalToolInput, "userGoal" | "tokenBudget">) => string | GoalStartGrant;
 	/**
 	 * Trusted verification obligations reconstructed from the active session context. A model-facing
 	 * transition to completed is refused while any remain; ordinary goal and tool actions do not
@@ -517,7 +518,8 @@ function generatedGoalRecordId(prefix: "req" | "ev", value: unknown): string {
 	return `${prefix}-${createHash("sha256").update(JSON.stringify(value)).digest("hex").slice(0, 16)}`;
 }
 
-function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
+/** The ledger action a goal tool call asks for; a start records `ownerSourceId`, granted by the host, never the model. */
+function toGoalAction(input: GoalToolInput, ownerSourceId?: string): GoalAction | { error: string } {
 	switch (input.action) {
 		case "start":
 			return {
@@ -525,6 +527,7 @@ function toGoalAction(input: GoalToolInput): GoalAction | { error: string } {
 				goalId: input.goalId ?? "",
 				userGoal: input.userGoal ?? "",
 				tokenBudget: input.tokenBudget,
+				...(ownerSourceId === undefined ? {} : { ownerSourceId }),
 			};
 		case "add_requirement":
 			return {
@@ -972,23 +975,19 @@ export function createGoalToolDefinition(deps: GoalToolDependencies): GoalToolDe
 			}
 			if (input.action === "grant_edge") return executeGrantEdge(input, deps);
 			if (input.action === "amend_goal") return executeAmendGoal(input, deps, now);
-			let normalizedInput = input;
-			if (input.action === "start" && deps.authorizeStart) {
-				const authority = deps.authorizeStart(input);
-				if (typeof authority === "string") {
-					return {
-						content: [{ type: "text", text: `goal start failed: ${authority}` }],
-						details: { action: "start", applied: false, error: authority },
-						isError: true,
-					};
-				}
-				normalizedInput = {
-					...input,
-					...(typeof authority === "number" ? { tokenBudget: authority } : {}),
+			// A start carries what the turn grants it: the owner's token budget (null drops the model's) and owner source.
+			const grant = input.action === "start" ? deps.authorizeStart?.(input) : undefined;
+			if (typeof grant === "string") {
+				return {
+					content: [{ type: "text", text: `goal start failed: ${grant}` }],
+					details: { action: "start", applied: false, error: grant },
+					isError: true,
 				};
-				if (authority === null) delete normalizedInput.tokenBudget;
 			}
-			const mapped = toGoalAction(normalizedInput);
+			const normalizedInput =
+				typeof grant?.tokenBudget === "number" ? { ...input, tokenBudget: grant.tokenBudget } : { ...input };
+			if (grant?.tokenBudget === null) delete normalizedInput.tokenBudget;
+			const mapped = toGoalAction(normalizedInput, grant?.ownerSourceId);
 			if ("error" in mapped) {
 				return {
 					content: [{ type: "text" as const, text: `goal ${input.action} failed: ${mapped.error}` }],

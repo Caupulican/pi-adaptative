@@ -63,6 +63,8 @@ export function isGoalUnfinishedStatus(status: GoalStatus): status is GoalStoppe
 export interface GoalState {
 	goalId: string;
 	userGoal: string;
+	/** The owner source (`session/entry`) of the owner input the goal was started from; absent when none started it. */
+	ownerSourceId?: string;
 	status: GoalStatus;
 	/** Monotonic state revision used by compare-and-append persistence. Legacy snapshots start at 0. */
 	revision?: number;
@@ -634,6 +636,7 @@ export function isGoalState(value: unknown): value is GoalState {
 	return (
 		typeof value.goalId === "string" &&
 		typeof value.userGoal === "string" &&
+		hasOptionalString(value, "ownerSourceId") &&
 		isGoalStatus(value.status) &&
 		hasOptionalFiniteNumber(value, "revision") &&
 		hasOptionalFiniteNumber(value, "progressRevision") &&
@@ -771,15 +774,13 @@ export function cloneGoalStateForStorage(state: GoalState): GoalState {
 	return cloneGoalState(state);
 }
 
-export function createGoalState(args: {
-	goalId: string;
-	userGoal: string;
-	now: string;
-	tokenBudget?: number;
-}): GoalState {
+export function createGoalState(
+	args: Pick<GoalState, "goalId" | "userGoal" | "tokenBudget" | "ownerSourceId"> & { now: string },
+): GoalState {
 	return {
 		goalId: args.goalId,
 		userGoal: args.userGoal,
+		...(args.ownerSourceId !== undefined ? { ownerSourceId: args.ownerSourceId } : {}),
 		status: "active",
 		revision: 0,
 		progressRevision: 0,

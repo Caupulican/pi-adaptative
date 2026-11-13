@@ -1145,6 +1145,7 @@ export class AgentSession {
 			getLaneRecords: () => this._backgroundLanes.getLaneRecords(),
 			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
 			getBackgroundToolTasks: () => this._backgroundToolTasks.list(),
+			getOwnerEvidence: () => this._reflection.ownerEvidence,
 			synchronizeGoalState: (state) => {
 				this._unsettledLadder.noteGoalState(state); // owner items a paused goal held post on resume; never throws
 				this._backgroundLanes.synchronizeGoalState(state);
@@ -1188,10 +1189,9 @@ export class AgentSession {
 			ownerInputs: this._ownerInputs,
 			onUndeliveredEchoWithdrawn: (message) => this._emit({ type: "user_message_withdrawn", message }),
 		});
-		// A queued message that asked for a goal starts it when it is delivered (its user entry persisted), never when a run
-		// only read it: a message a routed turn dropped unpersisted starts nothing.
-		this._ownerInputs.onDelivered(({ message }) =>
-			this._goals.activateQueuedOwnerChatGoal(message, this.agent.state.messages),
+		// A queued message's goal starts when its user entry persists (with that entry's owner source), never on a mere read.
+		this._ownerInputs.onDelivered((delivery) =>
+			this._goals.activateQueuedOwnerChatGoal(delivery, this.agent.state.messages),
 		);
 		this._queuedInputPersistence.restoreRecordedQueuedInput();
 		this._harnessNotices = new HarnessNoticeController({

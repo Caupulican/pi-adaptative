@@ -315,7 +315,7 @@ export class PromptSubmissionController {
 		this.deps.ownerRules.record(ownerTypedText(words), entryId);
 		// The owner's words reached the session: an operator blocker waited for exactly that.
 		if (this.deps.getOperatorBlocker() !== undefined) this.deps.setOperatorBlocker(undefined);
-		this.ownerGoalIntent.noteDelivered(words, this.deps.findLastAssistantMessage());
+		this.ownerGoalIntent.noteDelivered(words, entryId, this.deps.findLastAssistantMessage());
 	}
 
 	/** A submission's input that ends there without being delivered, and why. */
@@ -952,12 +952,11 @@ export class PromptSubmissionController {
 			this.foregroundPromptLeaseValue = submission.lease;
 
 			if (lifecycle.input) {
-				// The owner's own prompt resumes a system-stopped goal or starts an explicit chat goal when it is delivered (its
-				// user entry persisted), never before: a prompt that ends undelivered changes no goal, and its run works on that
-				// goal only from its delivery. The goal it would own is read now, for the readiness that goal work needs. Only
-				// its typed words start a goal (`goalToolStartAuthority`); the objective is read from the whole text. An
-				// extension's message or an approval turn neither starts nor resumes a goal, though its turn still runs on one;
-				// the owner's words from an owner channel do. Words with no goal phrase are judged at delivery (`OwnerGoalIntent`).
+				// The owner's own prompt resumes a system-stopped goal or starts an explicit chat goal once delivered (its user entry
+				// persisted): an undelivered prompt changes no goal; its run works on that goal from delivery. The goal it would own
+				// is read now, for the readiness goal work needs. Only typed words start one (`goalToolStartAuthority`); the objective
+				// is the whole text. An extension's message or approval turn neither starts nor resumes a goal (its turn still runs on
+				// one); an owner channel's words do. Words with no goal phrase are judged at delivery (`OwnerGoalIntent`).
 				const ownerGoalId = ownerSpoke
 					? this.deps.goals.previewOwnerPromptGoal(
 							ownerGoalText,
@@ -966,11 +965,12 @@ export class PromptSubmissionController {
 						)
 					: undefined;
 				if (ownerSpoke)
-					this.deps.ownerInputs.whenDelivered(lifecycle.input.inputId, () =>
+					this.deps.ownerInputs.whenDelivered(lifecycle.input.inputId, ({ entryId }) =>
 						this.deps.goals.applyDeliveredOwnerPrompt(
 							ownerGoalText,
 							goalToolStartAuthority,
 							this.deps.agent.state.messages,
+							entryId,
 						),
 					);
 				if (ownerGoalId ?? admittedGoalId) this.deps.getAdaptiveReadiness()?.assertReady({ adaptiveEnabled: true });

@@ -17,8 +17,9 @@ const MAX_ARM_TEXT_CHARS = 512;
 /**
  * The authority a routine was armed under, never more than the run that armed it held:
  * - `owner`: the owner spoke in the run; these are the owner sources its context held.
- * - `goal`: a goal continuation opened the run and this goal was active. The goal records no owner source, so none is
- *   claimed; only the goal's id is.
+ * - `goal`: a goal continuation opened the run and this goal was active; `ownerSourceId` is the owner source the goal was
+ *   started from, when the goal records one (a goal the owner's own message started), and the run claims no other. The run
+ *   is still unattended, so the goal's owner source names where the work came from, never words the run read.
  * - `wake`: a routine result, CI event or other host input opened the run; `ref` is that parent input's delivery id (or the
  *   wake's id when it covers several).
  * - `worker`: a worker runtime armed it for its own wait, within the bounds of the session that runs it; `runtimeId` is that
@@ -26,7 +27,7 @@ const MAX_ARM_TEXT_CHARS = 512;
  */
 export type RoutineArmAuthority =
 	| { readonly kind: "owner"; readonly sourceIds: readonly string[] }
-	| { readonly kind: "goal"; readonly goalId: string }
+	| { readonly kind: "goal"; readonly goalId: string; readonly ownerSourceId?: string }
 	| { readonly kind: "wake"; readonly ref: string }
 	| { readonly kind: "worker"; readonly runtimeId: string };
 
@@ -36,8 +37,14 @@ export type RoutineRunOpener = Extract<RoutineArmAuthority, { readonly kind: "go
 /** The stored arming authority; a malformed one makes the whole routine unreadable. */
 export function parseRoutineArmAuthority(value: unknown): RoutineArmAuthority {
 	if (!isPlainRecord(value)) throw new TypeError("Routine arming authority is invalid.");
-	if (value.kind === "goal" && hasOnlyKeys(value, ["kind", "goalId"]))
-		return { kind: "goal", goalId: boundedRoutineText(value.goalId, MAX_ARM_TEXT_CHARS, "arming goal id") };
+	if (value.kind === "goal" && hasOnlyKeys(value, ["kind", "goalId", "ownerSourceId"]))
+		return {
+			kind: "goal",
+			goalId: boundedRoutineText(value.goalId, MAX_ARM_TEXT_CHARS, "arming goal id"),
+			...(value.ownerSourceId === undefined
+				? {}
+				: { ownerSourceId: boundedRoutineText(value.ownerSourceId, MAX_ARM_TEXT_CHARS, "arming goal source id") }),
+		};
 	if (value.kind === "wake" && hasOnlyKeys(value, ["kind", "ref"]))
 		return { kind: "wake", ref: boundedRoutineText(value.ref, MAX_ARM_TEXT_CHARS, "arming delivery id") };
 	if (value.kind === "worker" && hasOnlyKeys(value, ["kind", "runtimeId"]))
