@@ -11,7 +11,7 @@
 
 import type { Container, MarkdownTheme, TUI } from "@caupulican/pi-tui";
 import { getCapabilities, hyperlink, Markdown, Spacer, Text } from "@caupulican/pi-tui";
-import { APP_NAME, getAgentDir, VERSION } from "../../config.ts";
+import { APP_NAME, getAgentDir, isRunningManagedStandaloneRelease, VERSION } from "../../config.ts";
 import type { AgentSession } from "../../core/agent-session.ts";
 import { interfaceText } from "../../core/language/interface-text.ts";
 import { DefaultPackageManager } from "../../core/package-manager.ts";
@@ -24,10 +24,14 @@ import type {
 } from "../../core/settings/settings-schema.ts";
 import { hasProjectTrustInputs } from "../../core/trust-manager.ts";
 import type { SessionManager } from "../../kernel/node.ts";
+import { updateRunningStandaloneRelease } from "../../package-manager-cli.ts";
 import { theme } from "../../presentation/theme-model.ts";
 import { getChangelogPath, getNewEntries, parseChangelog } from "../../utils/changelog.ts";
 import { spawnProcess, waitForChildProcessWithTermination } from "../../utils/child-process.ts";
-import type { LatestPiRelease } from "../../utils/version-check.ts";
+import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
+
+export type { LatestPiRelease };
+
 import { DynamicBorder } from "./components/dynamic-border.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
@@ -235,6 +239,31 @@ export function showNewVersionNotification(host: StartupChecksHost, release: Lat
 	}
 	host.chatContainer.addChild(new Text(changelogLine, 1, 0));
 	finishWarningNotification(host);
+}
+
+/** Install GitHub's latest stable release when this process is a managed standalone binary and that release is newer. */
+export async function applyManagedPiRelease(
+	currentVersion: string,
+	notify: (release: LatestPiRelease) => void,
+	reportUpdated: (version: string) => void,
+): Promise<void> {
+	const release = await checkForNewPiVersion(currentVersion);
+	if (!release) return;
+	if (!isRunningManagedStandaloneRelease()) {
+		notify(release);
+		return;
+	}
+	try {
+		const result = await updateRunningStandaloneRelease();
+		if (result.status === "updated") {
+			reportUpdated(release.version);
+			return;
+		}
+	} catch {
+		notify(release);
+		return;
+	}
+	notify(release);
 }
 
 export function showPackageUpdateNotification(host: StartupChecksHost, packages: string[]): void {

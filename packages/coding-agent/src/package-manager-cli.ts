@@ -8,11 +8,12 @@ import {
 	getStandaloneInstallerCommand,
 	getStandaloneInstallInstruction,
 	type InstallMethod,
+	isRunningManagedStandaloneRelease,
 } from "./config.ts";
 import { DefaultPackageManager } from "./core/package-manager.ts";
 import { SettingsManager } from "./core/settings-manager.ts";
 import { ProjectTrustStore, resolveProjectTrust } from "./core/trust-manager.ts";
-import { spawnProcess, waitForChildProcess } from "./utils/child-process.ts";
+import { spawnProcess, waitForChildProcess, waitForChildProcessWithTermination } from "./utils/child-process.ts";
 
 export type PackageCommand = "install" | "remove" | "update" | "list";
 
@@ -327,6 +328,28 @@ async function runStandaloneInstaller(dependencies: PackageCommandDependencies):
 	if (exitCode !== 0) {
 		throw new Error(`Standalone installer exited with code ${exitCode ?? "unknown"}.`);
 	}
+}
+
+export async function updateRunningStandaloneRelease(): Promise<{ status: "unavailable" } | { status: "updated" }> {
+	if (!isRunningManagedStandaloneRelease()) {
+		return { status: "unavailable" };
+	}
+	const installer = getStandaloneInstallerCommand();
+	if (!installer) {
+		return { status: "unavailable" };
+	}
+	const child = spawnProcess(installer.command, installer.args, { stdio: "pipe" });
+	child.stdout?.resume();
+	child.stderr?.resume();
+	const terminal = await waitForChildProcessWithTermination(child, { timeoutMs: 600_000, killGraceMs: 5_000 });
+	if (terminal.reason !== "exited" || terminal.code !== 0) {
+		throw new Error(
+			terminal.reason === "timeout"
+				? "Standalone installer timed out."
+				: `Standalone installer exited with code ${terminal.code ?? "unknown"}.`,
+		);
+	}
+	return { status: "updated" };
 }
 
 function parseProjectTrustOverride(args: readonly string[]): boolean | undefined {

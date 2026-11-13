@@ -1,5 +1,15 @@
 ## [Unreleased]
 
+### Changed
+
+- A managed standalone Pi install updates itself when GitHub's latest stable release is newer. The session that finds the release keeps the previous binary until the next start. A source checkout does not replace itself.
+- Managed `@ff-labs/fff-node` is pinned to `0.11.0` (was `0.10.6`). The packaged pin is what a release installs; this change does not upgrade an already-present managed install.
+- Managed `fd` is pinned to `10.5.2` (was `10.5.0`).
+- Managed `uv` is pinned to `0.13.8` (was `0.12.9`). Python installs stay on the explicit `3.13` request; uv 0.13's default of Python 3.15 does not apply.
+- Managed `herdr` is pinned to `0.9.5` (was `0.8.2`).
+- Managed Bitwarden CLI (`bw`) is pinned to `2026.10.1` (was `2026.8.0`).
+- Pi replaces a managed fd, ripgrep, uv, jq, herdr, bw, or bws binary when ensure finds a copy whose --version is older than the pin. An equal or newer binary stays, including a newer system binary. Offline mode keeps the older copy. Android keeps the existing binary. A failed refresh keeps the older copy. The download still requires the pinned SHA-256.
+
 ## [0.104.61] - 2026-11-13
 
 ### Fixed

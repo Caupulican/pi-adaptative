@@ -117,7 +117,7 @@
 		}
 	},
 	"optionalDependencies": {
-		"@ff-labs/fff-node": "0.10.6",
+		"@ff-labs/fff-node": "0.11.0",
 		"@mariozechner/clipboard": "0.3.9"
 	},
 	"devDependencies": {

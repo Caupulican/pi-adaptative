@@ -27,6 +27,8 @@ export const COMMAND_CONTROLLER = {
 		createSessionFailed: "Falha ao criar a sessão",
 	},
 	startup: {
+		selfUpdated: (version: string) =>
+			`Atualizado para ${version}. Esta sessão continua na versão anterior até você iniciar o Pi de novo.`,
 		updated: (version: string, command: string) =>
 			`Atualizado para a v${version}. Use ${command} para ver o changelog completo.`,
 		trustWarning:

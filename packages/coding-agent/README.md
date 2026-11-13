@@ -444,6 +444,8 @@ extensions/packages and then updates Pi; `pi update --extensions` updates
 extensions/packages only. npm and Node.js are for source development and third-party
 extension/package workflows, not for end-user CLI installation or updates.
 
+A managed standalone install installs GitHub's latest stable release by itself when that release is newer; the session that finds it keeps the previous binary until the next start; a source checkout does not replace itself.
+
 Packages install to `~/.pi/agent/git/` (git) or `~/.pi/agent/npm/` (npm). Use `-l` for project-local installs (`.pi/git/`, `.pi/npm/`). Git `@ref` values are pinned tags or commits; pinned packages are skipped by `pi update`, so use `pi install git:host/user/repo@new-ref` to move an existing package to a new ref. Git packages install dependencies with `npm install --omit=dev` by default, so runtime deps must be listed under `dependencies`; when `npmCommand` is configured, git packages use plain `install` for compatibility with wrappers. If you use a Node version manager and want package installs to reuse a stable npm context, set `npmCommand` in `settings.json`, for example `["mise", "exec", "node@24", "--", "npm"]`.
 
 Create a package by adding a `pi` key to `package.json`:

@@ -35,6 +35,8 @@ previous release available for rollback. `pi update pi` is an equivalent self-up
 target, and plain `pi update` updates extensions/packages before updating Pi itself.
 Use `pi update --extensions` when you want to update extensions/packages only.
 
+A managed standalone install installs GitHub's latest stable release by itself when that release is newer; the session that finds it keeps the previous binary until the next start; a source checkout does not replace itself.
+
 ### Linux
 
 ```sh

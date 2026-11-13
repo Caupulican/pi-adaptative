@@ -1,6 +1,6 @@
-import { existsSync, readFileSync } from "fs";
+import { existsSync, readFileSync, realpathSync } from "fs";
 import { homedir } from "os";
-import { dirname, join, resolve } from "path";
+import { dirname, isAbsolute, join, relative, resolve } from "path";
 import { fileURLToPath } from "url";
 import { normalizePath } from "./utils/paths.ts";
 import { getProcessWorkRun } from "./utils/work-directory.ts";
@@ -35,6 +35,46 @@ export interface StandaloneInstallerCommand {
 	command: string;
 	args: string[];
 	url: string;
+}
+
+export function getManagedInstallDir(platform: NodeJS.Platform = process.platform): string {
+	const envInstallDir = process.env.PI_INSTALL_DIR?.trim();
+	if (envInstallDir) {
+		return envInstallDir;
+	}
+
+	if (platform === "win32") {
+		const localAppData = process.env.LOCALAPPDATA?.trim();
+		if (localAppData) {
+			return join(localAppData, "PiAdaptative");
+		}
+		const userProfile = process.env.USERPROFILE?.trim();
+		if (userProfile) {
+			return join(userProfile, "AppData", "Local", "PiAdaptative");
+		}
+		return join(homedir(), "AppData", "Local", "PiAdaptative");
+	}
+
+	const xdgDataHome = process.env.XDG_DATA_HOME?.trim();
+	if (xdgDataHome) {
+		return join(xdgDataHome, "pi-adaptative");
+	}
+	return join(homedir(), ".local", "share", "pi-adaptative");
+}
+
+export function isRunningManagedStandaloneRelease(): boolean {
+	if (!isBunBinary || !process.execPath) {
+		return false;
+	}
+	try {
+		const installDir = getManagedInstallDir();
+		const realExecPath = realpathSync(process.execPath);
+		const realInstallDir = realpathSync(installDir);
+		const rel = relative(realInstallDir, realExecPath);
+		return rel === "" || (!rel.startsWith("..") && !isAbsolute(rel));
+	} catch {
+		return false;
+	}
 }
 
 export function getStandaloneInstallerCommand(

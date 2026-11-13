@@ -79,7 +79,6 @@ import {
 import { getEditorTheme, getMarkdownTheme, theme } from "../../presentation/theme-model.ts";
 import { resolvePath } from "../../utils/paths.ts";
 import { ensureTool } from "../../utils/tools-manager.ts";
-import { checkForNewPiVersion, type LatestPiRelease } from "../../utils/version-check.ts";
 import { AuthDialogsController } from "./auth-dialogs-controller.ts";
 import { AutoLearnController, type AutoLearnState } from "./auto-learn-controller.ts";
 import * as autocompleteProvider from "./autocomplete-provider.ts";
@@ -961,11 +960,11 @@ export class InteractiveMode {
 	private startAudienceChecks(): void {
 		this.checkHarnessReadiness();
 		// Start version check asynchronously
-		checkForNewPiVersion(this.version).then((newRelease) => {
-			if (newRelease) {
-				this.showNewVersionNotification(newRelease);
-			}
-		});
+		void startupChecks.applyManagedPiRelease(
+			this.version,
+			(release) => this.showNewVersionNotification(release),
+			(version) => this.showStatus(interfaceText().commandController.startup.selfUpdated(version)),
+		);
 
 		// Start package update check asynchronously
 		this.checkForPackageUpdates()
@@ -2510,7 +2509,7 @@ export class InteractiveMode {
 		this.ui.requestRender();
 	}
 
-	showNewVersionNotification(release: LatestPiRelease): void {
+	showNewVersionNotification(release: startupChecks.LatestPiRelease): void {
 		startupChecks.showNewVersionNotification(this.startupChecksHost(), release);
 	}
 

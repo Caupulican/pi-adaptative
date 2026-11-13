@@ -25,6 +25,8 @@ export const COMMAND_CONTROLLER = {
 		createSessionFailed: "Failed to create session",
 	},
 	startup: {
+		selfUpdated: (version: string) =>
+			`Updated to ${version}. This session stays on the previous release until you start Pi again.`,
 		updated: (version: string, command: string) => `Updated to v${version}. Use ${command} to view full changelog.`,
 		trustWarning:
 			"This project is not trusted. Project instructions (AGENTS.md/CLAUDE.md/GEMINI.md), .pi resources, and project packages are ignored. Use /trust to trust it.",
