@@ -81,7 +81,6 @@ import { materializeRequestAuth } from "./request-auth.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
 import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
-import { SystemOneReviewer } from "./review/typesafe-reviewer.ts";
 import type { RuntimeUpdateController } from "./runtime-update-controller.ts";
 import type { CredentialExposureBoundary } from "./secrets/credential-exposure-guard.ts";
 import { createCredentialTextRedactor, redactCredentialValues } from "./secrets/credential-manager.ts";
@@ -96,13 +95,11 @@ import { SteeringCertificateStore } from "./steering/certificate-store.ts";
 import { DEFAULT_STEERING_POLICY } from "./steering/policy.ts";
 import { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import { isSystemOneEnabled, type SystemOneProviderChoice, systemOneAccessFromSession } from "./system-one/access.ts";
-import { SystemOneJevAdapter } from "./system-one/adapter.ts";
 import { projectCanonicalTruth } from "./system-one/canonical-truth.ts";
 import type { FileLister } from "./system-one/code-duplicates.ts";
-import { createSystemOneConfig } from "./system-one/config.ts";
-import { SystemOneController } from "./system-one/controller.ts";
-import { ExecutionStore } from "./system-one/execution-state.ts";
+import type { SystemOneController } from "./system-one/controller.ts";
 import { IntegrityHookCoordinator } from "./system-one/integrity-hooks.ts";
+import { createSessionSystemOneController, systemOneSourceOf } from "./system-one/session-source.ts";
 import { createSessionWorkEvidenceJournal, readGoalWorkDiff } from "./system-one/session-work-diff.ts";
 import { VERIFICATION_OBLIGATIONS_CUSTOM_TYPE } from "./system-one/verification-obligations.ts";
 import { readWorkRepositoryRoot } from "./system-one/work-diff.ts";
@@ -220,6 +217,8 @@ export interface CreateAgentSessionOptions {
 	worktreeSyncEnginePorts?: WorktreeSyncEnginePorts;
 	/** HTTP transport for System One's decision endpoint; omitted means the global fetch. */
 	systemOneFetch?: typeof fetch;
+	/** Where the session's System One evidence is kept; default: its orchestration directory (a bot's is in its home). */
+	systemOneEvidenceDir?: string;
 	/**
 	 * The one timer source of the session's recovery, retry and watchdog alarms and of the clocks they are due on (one port per
 	 * `TimerOwner` of `util/timer-port.ts`); default: the system clock and the global timers, unreferenced unless the wait
@@ -794,50 +793,16 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					// Existing semantic history or an explicit required/enabled choice never takes this path.
 					systemOneEnabled = false;
 				}
-				if (resolvedAccess.kind === "ready") {
-					const reviewer = new SystemOneReviewer({
+				if (resolvedAccess.kind === "ready")
+					systemOneController = await createSessionSystemOneController({
 						access,
 						fetch: options.systemOneFetch,
 						credentialBoundary: systemOneCredentialBoundary,
 						usage: semanticUsage,
-					});
-					const adapter = new SystemOneJevAdapter(reviewer, createSystemOneConfig({ enabled: true }), {
-						access,
-						getUserKeys: () => access.keys(),
-					});
-
-					let baselineRevision = "unknown";
-					try {
-						baselineRevision =
-							execFileSync("git", ["rev-parse", "HEAD"], {
-								cwd,
-								encoding: "utf-8",
-								stdio: ["ignore", "pipe", "ignore"],
-							}).trim() || "unknown";
-					} catch {
-						// Non-git directory
-					}
-					const store = new ExecutionStore({
-						run_id: sessionManager.getSessionId(),
-						objective: {
-							request: "",
-							normalized_goal: "",
-							acceptance_criteria: [],
-							constraints: [],
-						},
-						repo: {
-							root: cwd,
-							baseline_revision: baselineRevision,
-							current_revision: baselineRevision,
-						},
-					});
-					systemOneController = new SystemOneController({
-						store,
-						adapter,
-						userKeys: await access.keys(),
+						cwd,
+						runId: sessionManager.getSessionId(),
 						hookCoordinator,
 					});
-				}
 			}
 
 			// Routing is judged by System One, so an unset `modelRouter.enabled` follows whether this session has it.
@@ -945,7 +910,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				sessionStartEvent: options.sessionStartEvent,
 				systemOneController,
 				codeDuplicateFileLister: options.codeDuplicateFileLister,
-				systemOneEnabled,
+				systemOne: systemOneSourceOf(options, systemOneEnabled),
 				timers,
 				machineFacts: options.machineFacts,
 				...(options.subscriptionAllowance ? { subscriptionAllowance: options.subscriptionAllowance } : {}),

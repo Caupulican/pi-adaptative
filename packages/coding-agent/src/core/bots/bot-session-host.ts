@@ -8,10 +8,12 @@
  * the worker admission refuses (a metered model the owner did not choose, one the owner's model policy disallows) refuses
  * the message. The bot has an identity of its own: its name and its soul replace the main agent's in the system prompt
  * (the soul is judged again here because a stored record can have been edited by hand). It works in the owner's project
- * directory under a worker's private-path scope. It is a child session (no routines, no memory writes, no channels, no
- * System One), and its tools are the read tools plus a shell, plus the file tools
- * and python when the record grants `canWrite`; a read-only bot's shell runs only commands the read-only shell line
- * admits. Each turn is bounded by the worker spend bound and its usage is reported to the main session's cost view.
+ * directory under a worker's private-path scope, with a settings manager of its own over the main session's settings
+ * storage. It is a child session (no routines, no memory writes, no channels) that runs System One as the main session
+ * does (on or off, provider, transport), keeping its System One evidence in its home; its edge grants are its own
+ * branch's plus the settings'. Its tools are the read tools, System One's tool and a shell, plus the file tools and python
+ * when the record grants `canWrite`; a read-only bot's shell runs only commands the read-only shell line admits. Each turn
+ * is bounded by the worker spend bound and its usage is reported to the main session's cost view.
  * Autonomy (subagents, routines, goals, watches) belongs to a later phase.
  *
  * One process hosts a bot's session at a time (`bots/<id>/host.lock`): a second process is refused, naming the session
@@ -30,7 +32,7 @@ import { findMostRecentSessionInDirs } from "../../kernel/session/session-listin
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { checkSoulText, namedAgentIdentity } from "../agent-identity.ts";
-import { botHomeName, botHostLockFile } from "../agent-paths.ts";
+import { botHomeName, botHostLockFile, botSystemOneEvidenceDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { boundSessionTurnSpend, unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
 import { usageSince } from "../cost/usage-delta.ts";
@@ -48,8 +50,10 @@ import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-gu
 import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { createAgentSession } from "../sdk.ts";
-import { SettingsManager } from "../settings-manager.ts";
+import type { SettingsManager } from "../settings-manager.ts";
 import { deriveSpawnedUsageReportId, hasReportableUsage } from "../spawned-usage.ts";
+import type { SystemOneSessionSource } from "../system-one/session-source.ts";
+import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { toolSurvivesReadOnly } from "../tool-capability-policy.ts";
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
@@ -73,8 +77,10 @@ export interface BotSessionHostPorts {
 	cwd(): string;
 	store(): PersistentBotTeamStore;
 	modelRegistry(): ModelRegistry;
-	/** Whether the owner trusts the project's own settings, as the root session does. */
-	projectTrusted(): boolean;
+	/** A settings manager of the bot's own over the storage the main session reads (`SettingsManager.sibling`). */
+	settings(): SettingsManager;
+	/** The main session's System One choices: a bot's session runs System One as the main session does. */
+	systemOne(): Omit<SystemOneSessionSource, "evidenceDir">;
 	timers(): TimerSource;
 	/** The pi session this process hosts bots for, named to the owner when another process is refused. */
 	hostSessionId(): string;
@@ -115,9 +121,12 @@ interface BotSessionEntry {
 	idleTimer: unknown;
 }
 
-/** The tools of a bot session: the read tools always, the file and process tools only when the bot may write. */
+/**
+ * The tools of a bot session: the read tools and System One's tool always (as a worker holds it; it is registered only
+ * while System One is on), the file and process tools only when the bot may write.
+ */
 export function botSessionToolNames(canWrite: boolean): string[] {
-	const reads = [...READ_TOOL_NAMES, REPO_READ_TOOL_NAME, LOOKUP_TOOL_NAME];
+	const reads = [...READ_TOOL_NAMES, REPO_READ_TOOL_NAME, LOOKUP_TOOL_NAME, SYSTEM_ONE_TOOL_NAME];
 	// A read-only bot keeps what a read-only worker keeps: the shell is judged command by command (`privatePathScope.readOnlyShell`).
 	return canWrite
 		? [...reads, TOOL_SCHEMA_SEARCH_NAME, ...WRITE_TOOL_NAMES, "python", STABLE_SHELL_TOOL_NAME]
@@ -442,7 +451,8 @@ export class BotSessionHost {
 			const sessionManager = newest
 				? SessionManager.open(newest, agentDir, home.sessionsDir, cwd)
 				: SessionManager.create(cwd, agentDir, home.sessionsDir);
-			const settingsManager = SettingsManager.create(cwd, agentDir, { projectTrusted: this.ports.projectTrusted() });
+			const settingsManager = this.ports.settings();
+			const systemOne = this.ports.systemOne();
 			const registry = this.ports.modelRegistry();
 			const resourceLoader = new DefaultResourceLoader({
 				cwd,
@@ -467,9 +477,11 @@ export class BotSessionHost {
 					model,
 					...(isOrchestrationThinkingLevel(profile.thinkingLevel) ? { thinkingLevel: profile.thinkingLevel } : {}),
 					isChildSession: true,
-					// System One's gates over a worker (progress supervision, operation review, claim check) ran in the main
-					// session's engine and evidence; a session of its own has neither yet (phase 4, enforcement).
-					disableSystemOne: true,
+					// System One as the main session runs it (on or off, provider, transport); its evidence stays in the bot's home.
+					systemOneEnabled: systemOne.enabled,
+					systemOneProvider: systemOne.provider,
+					systemOneFetch: systemOne.fetch,
+					systemOneEvidenceDir: botSystemOneEvidenceDir(agentDir, agentId),
 					// Its own name and soul replace the main agent's in the prompt.
 					agentIdentity: namedAgentIdentity(profile.displayName, soul.soul, agentId),
 					tools: botSessionToolNames(profile.canWrite),

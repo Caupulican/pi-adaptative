@@ -487,8 +487,12 @@ export class SettingsManager {
 		agentDir: string = getAgentDir(),
 		options: SettingsManagerCreateOptions = {},
 	): SettingsManager {
-		const storage = new FileSettingsStorage(cwd, agentDir);
-		return SettingsManager.fromStorage(storage, options);
+		return SettingsManager.fromStorage(new FileSettingsStorage(cwd, agentDir), options);
+	}
+
+	/** Another session's own manager over this storage (a bot's session): the same settings, its own runtime state. */
+	sibling(): SettingsManager {
+		return SettingsManager.fromStorage(this.storage, { projectTrusted: this.projectTrusted });
 	}
 
 	/** Create a SettingsManager from an arbitrary storage backend */
@@ -497,17 +501,13 @@ export class SettingsManager {
 		const globalLoad = SettingsManager.tryLoadFromStorage(storage, "global");
 		const projectLoad = SettingsManager.tryLoadFromStorage(storage, "project", projectTrusted);
 		const directoryProfileLoad = SettingsManager.tryLoadDirectoryProfileFromStorage(storage);
-		const initialErrors: SettingsError[] = [];
-		if (globalLoad.error) {
-			initialErrors.push({ scope: "global", error: globalLoad.error });
-		}
-		if (projectLoad.error) {
-			initialErrors.push({ scope: "project", error: projectLoad.error });
-		}
-		if (directoryProfileLoad.error) {
-			initialErrors.push({ scope: "directoryProfile", error: directoryProfileLoad.error });
-		}
-
+		const initialErrors: SettingsError[] = [
+			...(globalLoad.error ? [{ scope: "global" as const, error: globalLoad.error }] : []),
+			...(projectLoad.error ? [{ scope: "project" as const, error: projectLoad.error }] : []),
+			...(directoryProfileLoad.error
+				? [{ scope: "directoryProfile" as const, error: directoryProfileLoad.error }]
+				: []),
+		];
 		return new SettingsManager(
 			storage,
 			globalLoad.settings,

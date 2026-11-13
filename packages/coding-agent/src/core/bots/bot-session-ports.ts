@@ -1,7 +1,9 @@
 /**
- * What a bot's session reads from the main session, as the worker admission reads it: the model rules for an explicitly
- * requested model (one predicate, `worker-authority-resolver`), the spend bound a worker's budget carries, and the cost
- * view the main session keeps for spawned work. Composed here so the lane controller only hands over its dependencies.
+ * What a bot's session reads from the main session: its settings (a manager of the bot's own over the same storage), its
+ * System One choices (on or off, provider, transport), and, as the worker admission reads them, the model rules for an
+ * explicitly requested model (one predicate, `worker-authority-resolver`), the spend bound a worker's budget carries, and
+ * the cost view the main session keeps for spawned work. Composed here so the lane controller only hands over its
+ * dependencies.
  */
 
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
@@ -41,7 +43,12 @@ export function botSessionHostPorts(
 		agentDir: () => deps.getAgentDir(),
 		cwd: () => deps.getCwd(),
 		modelRegistry: () => deps.getModelRegistry(),
-		projectTrusted: () => deps.getSettingsManager().isProjectTrusted(),
+		settings: () => deps.getSettingsManager().sibling(),
+		systemOne: () => ({
+			enabled: deps.systemOne.enabled,
+			provider: deps.systemOne.source?.provider,
+			fetch: deps.systemOne.source?.fetch,
+		}),
 		timers: () => deps.getTimers(),
 		hostSessionId: () => deps.getSessionId(),
 		modelRefusal: (record, model) => botModelRefusal(deps, record, model),

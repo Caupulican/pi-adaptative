@@ -740,7 +740,7 @@ export class AgentSession {
 			isDisposed: () => this._disposed,
 			getSessionManager: () => this.sessionManager,
 			getSystemOneSettings: () => this.settingsManager.getSystemOneSettings(),
-			systemOneEnabled: config.systemOneEnabled,
+			source: config.systemOne,
 			controller: config.systemOneController,
 			steeringPlane: config.steeringPlane,
 		});
@@ -2005,7 +2005,7 @@ export class AgentSession {
 		this._shellOperations = config.shellOperations;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._runtimeBuilder = new RuntimeBuilder({
-			isSystemOneEnabled: () => this.systemOneEnabled,
+			systemOne: this._semanticPlane,
 			getAgent: () => this.agent,
 			getCwd: () => this._cwd,
 			getShellSessionKey: () => this._shellSessionKey,

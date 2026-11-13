@@ -69,11 +69,11 @@ export interface BackgroundLaneControllerDeps
 	markGoalToolUnavailable(): void;
 	/**
 	 * The session's semantic plane: its bound engine, if any (routine intake judges with it before the session model),
-	 * and whether System One is configured without one (`/status`).
+	 * whether System One is configured without one (`/status`), and the choices it runs on, which a bot's session takes.
 	 */
 	readonly systemOne: Pick<
 		SessionSemanticPlaneController,
-		"recordingSemanticEngine" | "semanticDecisionEngine" | "configured"
+		"recordingSemanticEngine" | "semanticDecisionEngine" | "configured" | "enabled" | "source"
 	>;
 	canRunRoutines?(): boolean;
 	getToolInvocationKey(callId: string, toolName: string): string;

@@ -26,7 +26,12 @@ message), and works in your project directory. Its name and its soul replace the
 introduces itself as the main agent. It reads, and writes only when the bot has write access; a read-only bot has a shell whose
 commands are judged one by one, as a read-only worker's are (nothing that edits, creates a file or reaches the network runs,
 in every execution mode). A turn is bounded by `workerDelegation.maxUsd` (and the main session's own ceiling) when one is
-set, and what each turn spends is added to the main session's cost. It has no System One yet: the supervision, operation review and claim check a worker got from the main session's System One come with the later enforcement phase. It is loaded on its first message, kept while a turn runs or input is queued, and closed after ten idle minutes or
+set, and what each turn spends is added to the main session's cost. It reads the settings the main session reads, and runs
+System One as the main session does (on or off, the same provider and connection): your messages to it are judged as your
+messages to the main session are, it holds the `systemone` tool, and its System One evidence is kept in its home
+(`typesafe-reviews/`). Its edge grants are its own conversation's plus your settings'; a grant you typed in the main
+session's conversation does not reach it (a bot running as a worker takes the main session's grants). It is loaded on its first message, kept
+while a turn runs or input is queued, and closed after ten idle minutes or
 when the session that hosts it ends. Its answers are read in its chat (the roster marks them unread); they do not reach the
 orchestrator as a worker's terminal does.
 

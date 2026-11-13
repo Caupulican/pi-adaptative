@@ -25,7 +25,7 @@
  *   logs/harness/harness-<date>.jsonl  the harness's own log (kernel/harness-log.ts)      -- harnessLogDir
  *   collaboration/herdr/config.toml    the collaboration backend's managed config         -- collaborationDir
  *   bots/<id>/                         one bot's home: profile.json, sessions/, memory/,      -- botHomeDir
- *                                      host.lock, host-state.json, history.json
+ *                                      host.lock, host-state.json, history.json, typesafe-reviews/
  *   state/orchestration/sessions/<session-key>/                                             -- one foreground-session-owned
  *                                                                                            control-plane bundle
  *     worker-context-forks/<identity-digest>-<content-digest>.json                         -- immutable birth snapshots
@@ -291,6 +291,11 @@ export function botHostStateFile(agentDir: string, botId: string): string {
 /** `<agentDir>/bots/<id>/history.json` -- the bot's earlier worker conversations, by reference (never copies). */
 export function botHistoryFile(agentDir: string, botId: string): string {
 	return join(botHomeDir(agentDir, botId), "history.json");
+}
+
+/** `<agentDir>/bots/<id>/typesafe-reviews` -- the System One evidence of the bot's own sessions. */
+export function botSystemOneEvidenceDir(agentDir: string, botId: string): string {
+	return join(botHomeDir(agentDir, botId), "typesafe-reviews");
 }
 
 /** `<agentDir>/state/bots/store.json` -- the persistent bots, teams and team transcripts. */

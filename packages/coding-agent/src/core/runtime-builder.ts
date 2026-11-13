@@ -147,7 +147,6 @@ import type { ResourceLoader } from "./resource-loader.ts";
 import type { SystemOneUsageSink } from "./review/system-one-review-port.ts";
 import { TypeSafeEvidenceMaterializer } from "./review/typesafe-evidence-materializer.ts";
 import { TypeSafeEvidenceStore } from "./review/typesafe-evidence-store.ts";
-import { SystemOneReviewer } from "./review/typesafe-reviewer.ts";
 import type { RuleHookRefusal } from "./rule-hooks/rule-hook-delivery.ts";
 import {
 	type RuntimeCandidateAttempt,
@@ -193,12 +192,13 @@ import type { SkillVaultController } from "./skill-vault.ts";
 import { createSyntheticSourceInfo, type SourceInfo } from "./source-info.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import type { SystemOneProviderChoice } from "./system-one/access.ts";
-import { isSystemOneEnabled, systemOneAccessFromSession } from "./system-one/access.ts";
+import { isSystemOneEnabled } from "./system-one/access.ts";
 import type { ClarificationDecisionEngine } from "./system-one/clarification.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import { FileLocator } from "./system-one/locate.ts";
 import { redactSecrets } from "./system-one/projector.ts";
 import type { SemanticUncertaintyPort } from "./system-one/semantic-doubts.ts";
+import { type SystemOneSessionSource, sessionSystemOneReviewer } from "./system-one/session-source.ts";
 import {
 	createSessionStageExecutionScope,
 	createSessionVerificationHost,
@@ -516,8 +516,8 @@ export interface RuntimeBuilderDeps {
 	deliverToOwner?(items: readonly string[]): void;
 	/** System One semantic control plane controller. */
 	getSystemOneController?(): SystemOneController | undefined;
-	/** Configured on/off, independent of a missing credential or unavailable evaluator. */
-	isSystemOneEnabled?(): boolean;
+	/** System One's configured on/off (independent of a missing credential or evaluator) and the choices it runs on. */
+	readonly systemOne?: { readonly enabled: boolean; readonly source?: SystemOneSessionSource };
 	/** Foreground session-root view of active semantic uncertainties and advisory dispositions. */
 	getSemanticUncertainties?(): SemanticUncertaintyPort | undefined;
 	/** System One steering plane driving semantic validation and certification. */
@@ -1067,7 +1067,7 @@ export class RuntimeBuilder {
 	}
 
 	private isSystemOneEnabled(): boolean {
-		return this.deps.isSystemOneEnabled?.() ?? isSystemOneEnabled(this.deps.getSettingsManager());
+		return this.deps.systemOne?.enabled ?? isSystemOneEnabled(this.deps.getSettingsManager());
 	}
 
 	getToolSourceInfo(name: string): SourceInfo | undefined {
@@ -1665,12 +1665,13 @@ export class RuntimeBuilder {
 			this._baseToolDefinitions.set("tool_task", createToolTaskToolDefinition(toolTaskDependencies));
 		}
 		if (!baseToolsOverride) {
+			const source = this.deps.systemOne?.source;
 			const systemOneEvidenceStore =
 				this.isSystemOneEnabled() && this.deps.getSystemOneController?.() && toolAccess.allows(SYSTEM_ONE_TOOL_NAME)
-					? TypeSafeEvidenceStore.file(
+					? TypeSafeEvidenceStore.forSession(
 							this.deps.getAgentDir(),
-							this.deps.getSessionManager().getSessionId(),
-							this.deps.getSessionManager().getSessionLineageIds(),
+							this.deps.getSessionManager(),
+							source?.evidenceDir,
 						)
 					: undefined;
 			if (this.deps.getPeerReviewModels && toolAccess.allows("peer")) {
@@ -1756,13 +1757,10 @@ export class RuntimeBuilder {
 				);
 			}
 			if (systemOneEvidenceStore) {
-				// The same access every System One path uses: one provider's key only ever goes to that
-				// provider, and a provider switch in settings applies to the next review.
-				const reviewer = new SystemOneReviewer({
-					access: systemOneAccessFromSession(
-						this.deps.getSettingsManager(),
-						this.deps.getModelRegistry().authStorage,
-					),
+				const reviewer = sessionSystemOneReviewer({
+					settings: this.deps.getSettingsManager(),
+					credentials: this.deps.getModelRegistry().authStorage,
+					source,
 					credentialBoundary: this._credentialExposureBoundary,
 					// Resolved per review: the session's usage delivery is bound after this builder is built.
 					usage: {

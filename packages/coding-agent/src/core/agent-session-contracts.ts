@@ -61,6 +61,7 @@ import type { SettingsManager } from "./settings-manager.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import type { FileLister } from "./system-one/code-duplicates.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
+import type { SystemOneSessionSource } from "./system-one/session-source.ts";
 import type { ToolArgumentValidationStats } from "./tool-recovery-stats.ts";
 import type { BashOperations } from "./tools/schemas/bash.ts";
 import type { TimerSource } from "./util/timer-port.ts";
@@ -208,7 +209,8 @@ export interface AgentSessionConfig {
 	systemOneController?: SystemOneController;
 	/** Optional session-owned source enumerator for semantic duplicate review. */
 	codeDuplicateFileLister?: FileLister;
-	systemOneEnabled?: boolean;
+	/** The session's System One choices as it resolved them (`createAgentSession`); a session it hosts runs on the same. */
+	systemOne?: SystemOneSessionSource;
 	/** The one timer source of the session's recovery, retry and watchdog alarms and of the clocks they are due on. */
 	timers: TimerSource;
 	/** The machine facts the fleet's room reads; absent reads the real machine (a harness world supplies fixed facts). */

@@ -21,6 +21,7 @@ import {
 	type SemanticPlaneHealth,
 	SemanticPlaneHealthRecorder,
 } from "./system-one/semantic-plane-health.ts";
+import type { SystemOneSessionSource } from "./system-one/session-source.ts";
 
 export interface SessionSemanticPlaneControllerDeps {
 	readonly agentDirForLedger: string;
@@ -28,7 +29,8 @@ export interface SessionSemanticPlaneControllerDeps {
 	/** The plane keys its ledger rows by the session and its directory; it reads nothing else of the session. */
 	getSessionManager(): Pick<SessionManager, "getSessionId" | "getCwd">;
 	getSystemOneSettings(): { enabled?: boolean };
-	readonly systemOneEnabled?: boolean;
+	/** The session's System One choices as it was built with them; a session it hosts (a bot's) runs on the same. */
+	readonly source?: SystemOneSessionSource;
 	readonly controller?: SystemOneController;
 	readonly steeringPlane?: SystemOneSteeringPlane;
 }
@@ -73,7 +75,11 @@ export class SessionSemanticPlaneController {
 	}
 
 	get enabled(): boolean {
-		return isSystemOneEnabled(this.deps, { enabled: this.deps.systemOneEnabled });
+		return isSystemOneEnabled(this.deps, { enabled: this.deps.source?.enabled });
+	}
+
+	get source(): SystemOneSessionSource | undefined {
+		return this.deps.source;
 	}
 
 	/**

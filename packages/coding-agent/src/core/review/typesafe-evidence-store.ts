@@ -51,6 +51,20 @@ export class TypeSafeEvidenceStore {
 		);
 	}
 
+	/**
+	 * A session's store: in `homeDir` when the session keeps its evidence in a home of its own (a bot's, which no session
+	 * bundle's retention reaches, so no bundle admission applies), else in its orchestration directory with its lineage's.
+	 */
+	static forSession(
+		agentDir: string,
+		session: { getSessionId(): string; getSessionLineageIds(): readonly string[] },
+		homeDir?: string,
+	): TypeSafeEvidenceStore {
+		return homeDir
+			? new TypeSafeEvidenceStore(createFileArtifactStore({ baseDir: homeDir }))
+			: TypeSafeEvidenceStore.file(agentDir, session.getSessionId(), session.getSessionLineageIds());
+	}
+
 	save(toolCallId: string, record: Record<string, unknown>): TypeSafeEvidenceRef {
 		return this.admit(() => {
 			const content = JSON.stringify({ version: 1, toolCallId, record });
