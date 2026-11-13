@@ -1,8 +1,8 @@
 /**
  * What a bot session host reads of the bots it does not run: the host that runs one elsewhere (another process, or
  * another host in this one) and the state it publishes, the bot's saved session, and the conversation its home holds.
- * One watch over the bot homes keeps these fresh and tells the host when a bot changed; while no watch runs, each read
- * goes to disk. The host that runs a bot answers for it from memory and never asks here.
+ * The watch over the bot homes (`watchBotHomes`) keeps these fresh and tells the host when a bot changed; while no watch
+ * runs, each read goes to disk. The host that runs a bot answers for it from memory and never asks here.
  */
 import { statSync } from "node:fs";
 import { judgeOwner } from "../../kernel/reliability/owner-identity.ts";
@@ -13,7 +13,7 @@ import type { AgentMessage } from "../../kernel/types.ts";
 import { botHomeName } from "../agent-paths.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
-import type { TimerPort } from "../util/timer-port.ts";
+import type { TimerSource } from "../util/timer-port.ts";
 import { botHomeOf } from "./bot-home.ts";
 import { watchBotHomes } from "./bot-home-watch.ts";
 import { type RemoteBotHost, readRemoteBotHost } from "./bot-host-state.ts";
@@ -48,7 +48,7 @@ export function remoteHostActive(host: RemoteBotHost | undefined): host is Remot
 export interface BotRemoteViewPorts {
 	agentDir(): string;
 	store(): PersistentBotTeamStore;
-	timers(): TimerPort;
+	timers(): TimerSource;
 	warn(message: string): void;
 	/** Whether the host runs the bot itself: the changes its own session writes are not news. */
 	runsLocally(agentId: string): boolean;
@@ -81,7 +81,7 @@ export class BotRemoteView {
 		this.holder = holder;
 	}
 
-	/** Starts the one watch over the bot homes, when a roster or a chat first reads a bot this host does not run. */
+	/** Starts the watch over the bot homes, when a roster or a chat first reads a bot this host does not run. */
 	watch(): void {
 		if (this.homeWatch || this.homeWatchFailed || this.stopped) return;
 		const failed = (reason: string) => {
@@ -94,6 +94,7 @@ export class BotRemoteView {
 		try {
 			this.homeWatch = watchBotHomes(
 				this.ports.agentDir(),
+				this.ports.timers().port("bot-home-watch"),
 				(changes) => {
 					const ids = new Map(
 						this.ports
@@ -179,17 +180,20 @@ export class BotRemoteView {
 	private armRecheck(): void {
 		if (this.recheck !== undefined || this.stopped) return;
 		if (![...this.remote.values()].some((host) => host !== undefined)) return;
-		this.recheck = this.ports.timers().setTimeout(() => {
-			this.recheck = undefined;
-			const changed: string[] = [];
-			for (const [agentId, host] of [...this.remote]) {
-				if (!hostGone(host)) continue;
-				this.remote.set(agentId, readRemoteBotHost(this.ports.agentDir(), agentId, this.holder));
-				changed.push(agentId);
-			}
-			if (changed.length > 0) this.ports.changed(changed);
-			this.armRecheck();
-		}, REMOTE_LIVENESS_MS);
+		this.recheck = this.ports
+			.timers()
+			.port("bot-sessions")
+			.setTimeout(() => {
+				this.recheck = undefined;
+				const changed: string[] = [];
+				for (const [agentId, host] of [...this.remote]) {
+					if (!hostGone(host)) continue;
+					this.remote.set(agentId, readRemoteBotHost(this.ports.agentDir(), agentId, this.holder));
+					changed.push(agentId);
+				}
+				if (changed.length > 0) this.ports.changed(changed);
+				this.armRecheck();
+			}, REMOTE_LIVENESS_MS);
 	}
 
 	/** Ends the watch and the recheck, and drops what was read. After it the view watches nothing again. */
@@ -197,7 +201,7 @@ export class BotRemoteView {
 		this.stopped = true;
 		this.homeWatch?.();
 		this.homeWatch = undefined;
-		if (this.recheck !== undefined) this.ports.timers().clearTimeout(this.recheck);
+		if (this.recheck !== undefined) this.ports.timers().port("bot-sessions").clearTimeout(this.recheck);
 		this.recheck = undefined;
 		this.remote.clear();
 		this.saved.clear();

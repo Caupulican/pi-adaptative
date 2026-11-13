@@ -3202,6 +3202,8 @@ const WALL_CLOCK_OWNERS: ReadonlySet<TimerOwner> = new Set<TimerOwner>([
 	"worker-provider-retry",
 	"branch-summary-retry",
 	"tool-recovery-log",
+	// The bot homes' change notices gather over a real window: the files they report change on the real disk.
+	"bot-home-watch",
 ]);
 
 /**

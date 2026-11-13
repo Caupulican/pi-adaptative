@@ -98,7 +98,8 @@ export type TimerOwner =
 	| "semantic-usage"
 	| "fleet"
 	| "leaders"
-	| "bot-sessions";
+	| "bot-sessions"
+	| "bot-home-watch";
 
 /** The one timer source a session is built with: the port each owner arms its alarms on. */
 export interface TimerSource {

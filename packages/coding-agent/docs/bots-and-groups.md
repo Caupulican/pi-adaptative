@@ -43,7 +43,7 @@ created, messaged or hosts it: the bot list is the bot store, the chat is read f
 on the bot's record in the store (`lastMessageAt`, `lastReadAt`), which every session watches. One process hosts a bot at a
 time (`bots/<id>/host.lock`), and inside a process one host serves every root session on the same agent directory (the last
 root to close stops it); the lock record carries that host's token, so a second host is told apart from the first even in
-one process. The host publishes what the session is doing in `host-state.json`, and one watch over the bot homes
+one process. The host publishes what the session is doing in `host-state.json`, and a watch over the bot homes
 tells every other session's roster and open chat when the conversation, that state or the history changed. A second session
 shows the bot running, queued or idle from that file (trusted only while the lock names a live process, so a killed host
 leaves no stale "running"), and its chat from the session files. Messaging a bot another session hosts is refused with a

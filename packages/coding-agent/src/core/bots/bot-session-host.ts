@@ -19,7 +19,7 @@
  * One process hosts a bot's session at a time (`bots/<id>/host.lock`): a second process is refused, naming the session
  * that hosts the bot, rather than appending to the same file. Every process still sees the bot: its conversation is read
  * from the home's session files, and its state from `host-state.json`, which the hosting process publishes on each change
- * of state. What the host reads of a bot it does not run, with the one watch over the bot homes that tells an open roster
+ * of state. What the host reads of a bot it does not run, with the watch over the bot homes that tells an open roster
  * and an open chat when either changed whichever process wrote it, is `BotRemoteView` (`stateOf`, `readMessages`,
  * `subscribe`). A change of the bot's record rebuilds an idle session on the next message and is refused while a turn
  * runs. A finished turn records its outcome in the store as a worker's did, so the roster's unread mark and summary keep
@@ -194,7 +194,7 @@ export class BotSessionHost {
 			{
 				agentDir: () => ports.agentDir(),
 				store: () => ports.store(),
-				timers: () => this.idleTimers(),
+				timers: () => ports.timers(),
 				warn: (message) => ports.warn(message),
 				runsLocally: (agentId) => this.entries.has(agentId),
 				// A host that let a bot go leaves its watches unsampled until a process opens its session again.
