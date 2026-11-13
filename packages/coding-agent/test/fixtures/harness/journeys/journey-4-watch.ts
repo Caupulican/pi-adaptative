@@ -127,6 +127,7 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 	const workerRequests = () => world.provider.requests.filter((request) => request.model.id === "worker-a").length;
 	const rootRequests = () => world.provider.requests.filter((request) => request.model.id === "root").length;
 	const rootBefore = rootRequests();
+	const workersBeforeWatch = workerRequests();
 
 	// The file as it was when the watch was armed is the starting state: nothing fires for it.
 	await untilFired(1);
@@ -148,7 +149,11 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 	// The same content again is no change, and the one firing woke the root once, not again.
 	await untilFired(2);
 	expect(
-		{ runs: occurrences().length, rootTurns: rootRequests() - rootBefore, workers: workerRequests() },
+		{
+			runs: occurrences().length,
+			rootTurns: rootRequests() - rootBefore,
+			workers: workerRequests() - workersBeforeWatch,
+		},
 		"one change is one wake of the root that armed the watch, and no routine worker ran",
 	).toEqual({ runs: 1, rootTurns: 1, workers: 0 });
 
@@ -233,7 +238,11 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 	await untilRuns("flag-deleted", 1);
 	await gone.settled();
 	expect(
-		{ created: runsOf("flag-created"), deleted: runsOf("flag-deleted"), workers: workerRequests() },
+		{
+			created: runsOf("flag-created"),
+			deleted: runsOf("flag-deleted"),
+			workers: workerRequests() - workersBeforeWatch,
+		},
 		"a file that goes fires the deleted watch only, and no routine worker ran for any of the watches",
 	).toEqual({ created: 1, deleted: 1, workers: 0 });
 	expectDelivered("flag-created", 1);
@@ -282,6 +291,7 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 	const holdTurn = createBarrier();
 	const steerRead = createBarrier();
 	const rootBeforeSteer = rootRequests();
+	const workersBeforeSteer = workerRequests();
 	world.provider.enqueue(
 		"root",
 		{
@@ -320,7 +330,7 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 	await withDeadline(trace, "the owner's turn ends", steerTurn);
 	await withDeadline(trace, "the session is at rest after the steered turn", session.waitForForegroundIdle());
 	expect(
-		{ rootRequests: rootRequests() - rootBeforeSteer, workers: workerRequests() },
+		{ rootRequests: rootRequests() - rootBeforeSteer, workers: workerRequests() - workersBeforeSteer },
 		"the firing joined the running turn (two model steps) and started no turn and no worker of its own",
 	).toEqual({ rootRequests: 2, workers: 0 });
 	expectDelivered("steer-watch", 1);
