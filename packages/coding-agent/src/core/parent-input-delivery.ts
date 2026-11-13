@@ -351,9 +351,24 @@ export class ParentInputDeliveryController {
 			throw new Error("Parent input wake's input is not durable in this session.");
 	}
 
+	/**
+	 * A wake is cut, not failed, when the session closed, an abort cancelled the foreground turn it holds, or another
+	 * submission holds the foreground. Its input stays durable and pending: the drain after the next submission, or the
+	 * reopened session's recovery, delivers it again.
+	 */
+	private wakeCut(lease?: ForegroundSubmissionLease): boolean {
+		return this.closed || (lease !== undefined && (lease.signal.aborted || !this.foreground.ownsSubmission(lease)));
+	}
+
 	private async drain(): Promise<void> {
 		const manager = this.deps.getSessionManager();
-		const lease = await this.foreground.acquireSubmission(this.abort.signal);
+		let lease: ForegroundSubmissionLease;
+		try {
+			lease = await this.foreground.acquireSubmission(this.abort.signal);
+		} catch (error) {
+			if (this.wakeCut()) return;
+			throw error;
+		}
 		let deactivate: (() => void) | undefined;
 		try {
 			const wake = manager.beginParentInputWake();
@@ -391,12 +406,13 @@ export class ParentInputDeliveryController {
 			for (const input of inputs) this.assertCurrent(manager, input, lease);
 			manager.settleParentInputWake(wake.wakeId);
 		} catch (error) {
+			// Blocked until another submission's epoch either way: a cut wake waits for it rather than undoing the owner's abort.
 			this.blockedEpoch = lease.epoch;
 			this.blocked = true;
-			throw error;
+			if (!this.wakeCut(lease)) throw error;
 		} finally {
 			deactivate?.();
-			this.foreground.releaseSubmission(lease);
+			if (this.foreground.ownsSubmission(lease)) this.foreground.releaseSubmission(lease);
 		}
 	}
 
