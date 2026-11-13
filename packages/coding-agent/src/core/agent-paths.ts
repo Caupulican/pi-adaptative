@@ -270,7 +270,12 @@ export function botProfileFile(agentDir: string, botId: string): string {
 
 /** `<agentDir>/bots/<id>/sessions` -- the bot's own root session files. */
 export function botSessionsDir(agentDir: string, botId: string): string {
-	return join(botHomeDir(agentDir, botId), "sessions");
+	return botHomeSessionsDir(botHomeDir(agentDir, botId));
+}
+
+/** `<home>/sessions` -- the session files of the bot whose home is `homeDir`. */
+export function botHomeSessionsDir(homeDir: string): string {
+	return join(homeDir, "sessions");
 }
 
 /** `<agentDir>/bots/<id>/memory` -- the bot's own memory. */

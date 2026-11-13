@@ -2,6 +2,8 @@ import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node
 import { readdir, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
 import {
+	botHomeSessionsDir,
+	botsDir,
 	orchestrationSessionDir,
 	orchestrationSessionsDir,
 	sessionRootMailboxFile,
@@ -31,10 +33,10 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * A bundle is removed only when every gate holds:
  * - no live or resumable process-matrix entry (and not this process's own session) names its session;
  * - its newest file is older than {@link SESSION_BUNDLE_QUIET_FLOOR_MS}, which also protects sessions whose
- *   transcript lives outside `<agentDir>/sessions` or has not been written yet;
- * - its parent session transcript is gone, or both the transcript and the bundle are older than
- *   {@link SESSION_BUNDLE_RESUMABLE_MAX_AGE_MS} (a paused session that can still be resumed keeps its
- *   persistent-worker context for that long);
+ *   transcript lives outside `<agentDir>/sessions` and the bot homes or has not been written yet;
+ * - its parent session transcript (under `<agentDir>/sessions`, or a bot's own under `bots/<id>/sessions`) is
+ *   gone, or both the transcript and the bundle are older than {@link SESSION_BUNDLE_RESUMABLE_MAX_AGE_MS} (a
+ *   paused session that can still be resumed keeps its persistent-worker context for that long);
  * - `WorkerConversationStore.reserveBundleDeletion` (fail-closed: live claim, busy or enrolled
  *   specialist context, unreadable transcript) accepts, and no worker or session-root mailbox owes work;
  * - no durable usage or accepted-worker receipt is waiting for parent delivery.
@@ -156,18 +158,27 @@ async function protectedSessionIds(agentDir: string, currentSessionId: string): 
 /** Session id -> transcript paths, from file names alone (`<timestamp>_<session-id>.jsonl`); undefined when over budget. */
 function indexSessionTranscripts(agentDir: string): Map<string, string[]> | undefined {
 	const index = new Map<string, string[]>();
-	const root = sessionsDir(agentDir);
-	if (!existsSync(root)) return index;
+	const subdirectories = (root: string): string[] =>
+		existsSync(root)
+			? readdirSync(root, { withFileTypes: true }).flatMap((entry) =>
+					entry.isDirectory() ? [join(root, entry.name)] : [],
+				)
+			: [];
+	// A main session's files sit in one directory per working directory; a bot's own session files sit in its home.
+	const directories = [
+		...subdirectories(sessionsDir(agentDir)),
+		...subdirectories(botsDir(agentDir)).map(botHomeSessionsDir),
+	];
 	let names = 0;
-	for (const directory of readdirSync(root, { withFileTypes: true })) {
-		if (!directory.isDirectory()) continue;
-		for (const name of readdirSync(join(root, directory.name))) {
+	for (const directory of directories) {
+		if (!existsSync(directory)) continue;
+		for (const name of readdirSync(directory)) {
 			if (++names > MAX_SESSION_FILE_NAMES) return undefined;
 			const separator = name.indexOf("_");
 			if (separator < 0 || !name.endsWith(SESSION_FILE_SUFFIX)) continue;
 			const id = name.slice(separator + 1, -SESSION_FILE_SUFFIX.length);
 			const paths = index.get(id);
-			const path = join(root, directory.name, name);
+			const path = join(directory, name);
 			if (paths) paths.push(path);
 			else index.set(id, [path]);
 		}
