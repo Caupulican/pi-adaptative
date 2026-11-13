@@ -8,6 +8,7 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
+import { thirdPartyProtectedWritePaths } from "../autonomy/lane-private-paths.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
 import type {
@@ -54,7 +55,7 @@ import {
 import type { TaskWatchPort } from "./task-watch-tool.ts";
 import { WatchAdmission } from "./watch-admission.ts";
 import { WatchSampler } from "./watch-evaluators.ts";
-import { workerRuntimeLive } from "./worker-watch-liveness.ts";
+import { workerRuntimeCarriesThirdPartyWords, workerRuntimeLive } from "./worker-watch-liveness.ts";
 
 /** The routine runtime one session holds: built once, started with the session's inputs, closed when the session disposes. */
 export interface RoutineRuntime {
@@ -117,10 +118,10 @@ export class RoutineRuntimeAssembly {
 	taskWatches(runtime: () => RoutineRuntime | undefined): TaskWatchPort {
 		return {
 			available: () => runtime() !== undefined,
-			arm: async (runtimeId, input, signal) => {
+			arm: async (worker, input, signal) => {
 				const routines = runtime();
 				if (!routines) throw new Error("Routines are unavailable in this session.");
-				return routines.session.armForWorker(runtimeId, input, signal);
+				return routines.session.armForWorker(worker, input, signal);
 			},
 		};
 	}
@@ -349,9 +350,14 @@ export class RoutineRuntimeAssembly {
 			getAgentDir: () => this.deps.getAgentDir(),
 			getCapabilityEnvelope: () => this.deps.getCapabilityEnvelope(),
 			getCredentialExposureBoundary: () => this.deps.getCredentialExposureBoundary?.(),
-			getEdgeGrants: () => this.deps.getEdgeGrants?.() ?? [],
+			getEdgeGrants: (standingOnly) => this.deps.getEdgeGrants?.(standingOnly) ?? [],
 			getEdgeMode: () => this.deps.getSettingsManager().getEdgeSettings().mode,
 			getDenyCommands: () => this.deps.getSettingsManager().getEdgeSettings().deny,
+			localCommitBranch: () => this.deps.localCommitBranch?.(),
+			workerCarriesThirdPartyWords: (runtimeId) =>
+				workerRuntimeCarriesThirdPartyWords(this.host.workerLifecycle().getTaskRuntimeSnapshot(), runtimeId),
+			thirdPartyProtectedWrites: (cwd) =>
+				thirdPartyProtectedWritePaths(cwd, this.deps.getAgentDir(), this.deps.getSessionManager()),
 		});
 		const routineTimers = this.deps.getTimers().port("routines");
 		const watches = new RoutineWatchMonitor({
@@ -372,7 +378,7 @@ export class RoutineRuntimeAssembly {
 			store,
 			scheduler,
 			parentSessionId,
-			admitWatch: (condition) => watchAdmission.admit(condition),
+			admitWatch: (condition, worker) => watchAdmission.admit(condition, worker),
 			capture: (request, signal) => this.host.workerController().captureSavedIntent(request, signal),
 			captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
 			invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),

@@ -2,8 +2,9 @@
  * The bounds on a watch the model arms for its own work, and the count of a session's live watches. A run the owner did
  * not speak in may arm only a finite watch: one-shot, with an end time at most a day ahead, while the session holds fewer
  * than {@link MAX_AGENT_ARMED_WATCHES} such watches. A worker runtime arms under the same bounds, within the session's
- * count and at most {@link MAX_WORKER_ARMED_WATCHES} of its own, and only a condition its own tools could check. These are
- * code facts the routine controller checks; the same predicate counts what the operator bar shows.
+ * count and at most {@link MAX_WORKER_ARMED_WATCHES} of its own; what its condition may run or read is its own scope's
+ * (`worker-watch-scope.ts`). These are code facts the routine controller checks; the same predicate counts what the
+ * operator bar shows.
  */
 
 import {
@@ -12,7 +13,6 @@ import {
 	type RoutineScheduleInput,
 	routineEnded,
 } from "./routine-contract.ts";
-import type { WatchCondition } from "./watch-contract.ts";
 
 /** Watches a session holds that a run armed without the owner's words; a chain of waits stays bounded by this and the deadline. */
 export const MAX_AGENT_ARMED_WATCHES = 8;
@@ -43,20 +43,6 @@ export function agentWatchBoundsRefusal(schedule: WatchScheduleInput, nowMs: num
 	if (expiresAt === undefined || expiresAt <= nowMs || expiresAt > nowMs + MAX_AGENT_WATCH_HORIZON_MS)
 		return `An agent-armed watch needs an end time: send expiresAt (UTC epoch ms) after now and at most ${hours} hours ahead.`;
 	return undefined;
-}
-
-/**
- * Why a worker runtime may not arm this condition: its own tools could not check it. A watch is re-checked at every tick under
- * the session's one admission, which is wider than a worker's (a read-only worker holds a shell its policy restricts, and one
- * without network tools has no fetch). The worker's own gate is built per attempt and lives in memory, while a watch outlives
- * the attempt and a restart, so admitting a worker's command or page check needs a per-routine admission stored with the
- * watch and read by the sampler; until then a worker arms only what needs no command and no page: a path, a managed
- * process, a process id or a port. Undefined when the condition is one of those.
- */
-export function workerWatchConditionRefusal(condition: WatchCondition): string | undefined {
-	return condition.type === "command" || condition.type === "http"
-		? `A worker cannot arm a ${condition.type} check: the host would run it under the session's authority at every tick, wider than the worker's own tools. Arm a file, process, pid or port condition, or report the wait to the session that started you.`
-		: undefined;
 }
 
 /** Whether `routine` is a watch of this session that has not ended: it holds one of the session's watch slots. */

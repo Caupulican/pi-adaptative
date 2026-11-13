@@ -154,6 +154,7 @@ export function createPendingOccurrence(
 		...(definition.origin ? { origin: definition.origin } : {}),
 		...(definition.armedBy ? { armedBy: definition.armedBy } : {}),
 		...(definition.wake ? { wake: definition.wake } : {}),
+		...(definition.workerScope ? { workerScope: definition.workerScope } : {}),
 		createdAt: definition.createdAt,
 		updatedAt: definition.updatedAt,
 	};

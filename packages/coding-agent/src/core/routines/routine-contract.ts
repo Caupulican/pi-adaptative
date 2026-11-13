@@ -39,14 +39,14 @@ import {
 } from "./calendar-schedule.ts";
 import { boundedRoutineText as boundedString } from "./routine-field-guards.ts";
 import { MAX_ROUTINE_PROGRESS_BRIEF_CHARS, parseRoutineProgress, type RoutineProgress } from "./routine-progress.ts";
-import { parseRoutineArmAuthority, type RoutineArmAuthority } from "./routine-provenance.ts";
+import { parseRoutineArmAuthority, type RoutineArmAuthority, routineWakeRefusal } from "./routine-provenance.ts";
 import {
 	parseRoutineSaveOrigin,
 	type RoutineExecutionSnapshot,
 	routineReceiptOrigin,
 	routineSaveOriginRefusal,
 } from "./routine-save-origin.ts";
-import { parseRoutineWakeAddress, type RoutineWakeAddress, wakeAddressSession } from "./routine-wake-address.ts";
+import { parseRoutineWakeAddress, type RoutineWakeAddress } from "./routine-wake-address.ts";
 import { WATCH_LAST_SEEN, type WatchLastSeen } from "./routine-watch-edge.ts";
 import {
 	parseWatchCondition,
@@ -55,6 +55,7 @@ import {
 	type WatchFiredEvent,
 	watchConditionSchema,
 } from "./watch-contract.ts";
+import { parseWorkerWatchScope, type WorkerWatchScope } from "./worker-watch-scope.ts";
 
 export const MIN_ROUTINE_INTERVAL_MS = 10_000;
 export const MAX_ROUTINE_ID_CHARS = 128;
@@ -647,6 +648,8 @@ export interface PersistentRoutineDefinition {
 	readonly armedBy?: RoutineArmAuthority;
 	/** Whom a watch wakes when it fires (`routine-wake-address.ts`); absent on a record saved before it, which wakes its session. */
 	readonly wake?: RoutineWakeAddress;
+	/** The authority a worker's watch is observed under besides the session's (`worker-watch-scope.ts`), fixed at creation. */
+	readonly workerScope?: WorkerWatchScope;
 	readonly createdAt: string;
 	readonly updatedAt: string;
 }
@@ -665,6 +668,8 @@ export interface UpsertPersistentRoutineInput {
 	readonly armedBy?: RoutineArmAuthority;
 	/** Whom a watch created here wakes, stamped once at creation from the saving caller; an update never changes it. */
 	readonly wake?: RoutineWakeAddress;
+	/** A worker's watch's scope, stamped once at creation with its wake address; an update never changes it. */
+	readonly workerScope?: WorkerWatchScope;
 	readonly expectedRevision?: number;
 	readonly createOnly?: boolean;
 	readonly nowMs?: number;
@@ -1791,6 +1796,7 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 			"origin",
 			"armedBy",
 			"wake",
+			"workerScope",
 			"createdAt",
 			"updatedAt",
 		])
@@ -1824,15 +1830,8 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 		// Only the session that owns the source's ledger, or the one a tool call armed it in, can have created it so.
 		if ((origin || armedBy) && target.kind !== "session") return undefined;
 		const wake = value.wake === undefined ? undefined : parseRoutineWakeAddress(value.wake);
-		// Only a watch of a session has an armer to wake, and its armer belongs to that session.
-		if (
-			wake &&
-			(target.kind !== "session" ||
-				schedule.kind !== "event" ||
-				schedule.source !== "watch" ||
-				wakeAddressSession(wake) !== target.parentSessionId)
-		)
-			return undefined;
+		const workerScope = value.workerScope === undefined ? undefined : parseWorkerWatchScope(value.workerScope);
+		if (routineWakeRefusal({ target, schedule, wake, workerScope }) !== undefined) return undefined;
 		return {
 			routineId: value.routineId,
 			incarnationId: value.incarnationId,
@@ -1845,6 +1844,7 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 			...(origin ? { origin } : {}),
 			...(armedBy ? { armedBy } : {}),
 			...(wake ? { wake } : {}),
+			...(workerScope ? { workerScope } : {}),
 			createdAt: value.createdAt,
 			updatedAt: value.updatedAt,
 		};

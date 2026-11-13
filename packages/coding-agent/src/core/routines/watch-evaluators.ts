@@ -17,7 +17,7 @@ import { redactKnownSecrets } from "../security/secret-text.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import { PublicWebClient, PublicWebHttpError, PublicWebRedirectError } from "../web/public-web-client.ts";
 import type { RoutineWatchObservation } from "./routine-watch-edge.ts";
-import { processIsRunning, type WatchAdmission, watchCommandEnvironment } from "./watch-admission.ts";
+import { processIsRunning, type WatchAdmission } from "./watch-admission.ts";
 import {
 	isWatchGlob,
 	MAX_WATCH_EXCERPT_CHARS,
@@ -27,6 +27,7 @@ import {
 	type WatchFiredEvent,
 	watchShortName,
 } from "./watch-contract.ts";
+import type { WorkerWatchAuthority } from "./worker-watch-scope.ts";
 
 export interface WatchSample {
 	readonly observation: RoutineWatchObservation;
@@ -56,7 +57,7 @@ interface PathSnapshot {
 }
 
 export interface WatchSamplerDeps {
-	readonly admission: Pick<WatchAdmission, "authorize" | "cwd" | "readsContent">;
+	readonly admission: Pick<WatchAdmission, "authorize" | "cwd" | "commandEnvironment" | "readsContent" | "webPolicy">;
 	readonly agentDir: () => string;
 	readonly now: () => number;
 	readonly web?: PublicWebClient;
@@ -83,12 +84,19 @@ export class WatchSampler {
 		this.web = deps.web ?? new PublicWebClient();
 	}
 
-	/** Re-authorizes the condition against the session's authority now (a refusal throws) and observes it once. */
-	async sample(condition: WatchCondition, signal: AbortSignal): Promise<WatchSample | undefined> {
-		const admitted = this.deps.admission.authorize(condition);
+	/**
+	 * Re-authorizes the condition against the session's authority now, and a worker's watch against the worker's scope too
+	 * (a refusal throws), and observes it once.
+	 */
+	async sample(
+		condition: WatchCondition,
+		signal: AbortSignal,
+		worker?: WorkerWatchAuthority,
+	): Promise<WatchSample | undefined> {
+		const admitted = this.deps.admission.authorize(condition, worker);
 		switch (admitted.type) {
 			case "file":
-				return this.file(admitted, signal);
+				return this.file(admitted, signal, worker);
 			case "process":
 				return this.process(admitted);
 			case "pid":
@@ -96,9 +104,9 @@ export class WatchSampler {
 			case "port":
 				return this.port(admitted, signal);
 			case "command":
-				return this.command(admitted, signal);
+				return this.command(admitted, signal, worker);
 			case "http":
-				return this.http(admitted, signal);
+				return this.http(admitted, signal, worker);
 		}
 	}
 
@@ -124,10 +132,11 @@ export class WatchSampler {
 	private async file(
 		condition: Extract<WatchCondition, { type: "file" }>,
 		signal: AbortSignal,
+		worker: WorkerWatchAuthority | undefined,
 	): Promise<WatchSample | undefined> {
 		const label = watchShortName(condition.path);
 		const changed = condition.on === "changed";
-		const seen = await this.snapshot(condition.path, changed, signal);
+		const seen = await this.snapshot(condition.path, changed, signal, worker);
 		if (seen === undefined) return undefined;
 		const facts = {
 			...(seen.size === undefined ? {} : { sizeBytes: seen.size }),
@@ -145,10 +154,15 @@ export class WatchSampler {
 
 	/**
 	 * What one path (a file, a folder or a glob pattern) is now. Existence, size and times are metadata, observed for any
-	 * path the process can stat; a file's content is digested only where the session may read it, so elsewhere its size
-	 * and modification time stand for it. An observation that cannot be made is undefined.
+	 * path the process can stat; a file's content is digested only where the session (and a worker's watch's worker) may read
+	 * it, so elsewhere its size and modification time stand for it. An observation that cannot be made is undefined.
 	 */
-	private async snapshot(path: string, wantState: boolean, signal: AbortSignal): Promise<PathSnapshot | undefined> {
+	private async snapshot(
+		path: string,
+		wantState: boolean,
+		signal: AbortSignal,
+		worker: WorkerWatchAuthority | undefined,
+	): Promise<PathSnapshot | undefined> {
 		if (isWatchGlob(path)) {
 			const matches = await this.listMatches(path, signal);
 			return matches === undefined
@@ -174,7 +188,7 @@ export class WatchSampler {
 		}
 		if (!stats.isFile()) return undefined;
 		if (!wantState) return { exists: true, size: stats.size };
-		const hashable = stats.size <= MAX_HASHED_FILE_BYTES && this.deps.admission.readsContent(path);
+		const hashable = stats.size <= MAX_HASHED_FILE_BYTES && this.deps.admission.readsContent(path, worker);
 		const content = hashable ? await this.contentDigest(path, signal) : undefined;
 		if (hashable && content === undefined) return undefined;
 		return {
@@ -314,6 +328,7 @@ export class WatchSampler {
 	private async command(
 		condition: Extract<WatchCondition, { type: "command" }>,
 		signal: AbortSignal,
+		worker: WorkerWatchAuthority | undefined,
 	): Promise<WatchSample | undefined> {
 		const result = await runRequirementCheck(
 			{
@@ -324,12 +339,12 @@ export class WatchSampler {
 					: { outputContains: condition.expect.outputContains }),
 			},
 			{
-				cwd: this.deps.admission.cwd(),
+				cwd: this.deps.admission.cwd(worker),
 				timeoutMs: condition.timeoutMs ?? WATCH_DEFAULT_COMMAND_TIMEOUT_MS,
 				signal,
 				// The command was admitted by `sample` immediately before this run; the requirement line is not applied.
 				admit: () => undefined,
-				env: watchCommandEnvironment(),
+				env: this.deps.admission.commandEnvironment(worker),
 			},
 		);
 		// A command that did not run to an exit (a timeout, a spawn failure, an abort) says nothing about the condition.
@@ -343,6 +358,7 @@ export class WatchSampler {
 	private async http(
 		condition: Extract<WatchCondition, { type: "http" }>,
 		signal: AbortSignal,
+		worker: WorkerWatchAuthority | undefined,
 	): Promise<WatchSample | undefined> {
 		const label = new URL(condition.url).hostname;
 		const statusHolds = (status: number): boolean =>
@@ -353,7 +369,7 @@ export class WatchSampler {
 		try {
 			const page = await this.web.get(condition.url, HTTP_ACCEPT, HTTP_TIMEOUT_SECONDS, signal, {
 				maxBytes: MAX_HTTP_BODY_BYTES,
-				policy: { reach: "ownedServices" },
+				policy: this.deps.admission.webPolicy(worker),
 			});
 			status = page.status;
 			text = page.text;

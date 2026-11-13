@@ -51,7 +51,7 @@ import {
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
 import { parseRoutineProgress, type RoutineRunFacts, withRoutineOwnerNote } from "../routines/routine-progress.ts";
-import { creationProvenance } from "../routines/routine-provenance.ts";
+import { creationProvenance, routineWakeRefusal } from "../routines/routine-provenance.ts";
 import { parseRetiredRoutines, type RetiredRoutineRecord } from "../routines/routine-retired.ts";
 import { parseRoutineSaveOrigin, routineSaveOriginRefusal } from "../routines/routine-save-origin.ts";
 import { ROUTINE_STORE_VERSIONS, routineStoreFormatVersion } from "../routines/routine-store-format.ts";
@@ -1384,13 +1384,13 @@ export class PersistentBotTeamStore {
 				schedule,
 				enabled: input.enabled ?? existing?.enabled ?? true,
 				...parseRoutineSaveOrigin(input),
-				...creationProvenance(existing, intake, input.armedBy, input.wake),
+				...creationProvenance(existing, intake, input.armedBy, input.wake, input.workerScope),
 				createdAt: existing?.createdAt ?? nowIso,
 				updatedAt: nowIso,
 			};
 			if (!definition.prompt || definition.prompt.length > MAX_ROUTINE_PROMPT_CHARS)
 				throw new Error("Routine prompt is invalid.");
-			const originRefusal = routineSaveOriginRefusal(definition);
+			const originRefusal = routineSaveOriginRefusal(definition) ?? routineWakeRefusal(definition);
 			if (originRefusal) throw new Error(originRefusal);
 			const plannedRunAt = nextRoutineAt(schedule, cursor);
 			if (plannedRunAt === undefined && schedule.kind === "interval")

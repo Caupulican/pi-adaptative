@@ -4,6 +4,7 @@ import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { calls, createBarrier, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
+import type { ShellRequest } from "../virtual-shell.ts";
 import {
 	assertWatchWake,
 	latestWatchWakeText,
@@ -14,6 +15,7 @@ import {
 import { latestBatchResults } from "./shared.ts";
 
 const PROFILE_ID = "watch-reader";
+const SHELL_PROFILE_ID = "watch-shell";
 const ROUTINE_ID = "notes-watch";
 const PROMPT = "Read notes.txt and say what changed.";
 
@@ -24,7 +26,9 @@ const PROMPT = "Read notes.txt and say what changed.";
  * worker runs; the same content again is no change. A file that appears and a file that goes are watches of their own:
  * each fires once, at its own moment, and never for the other. A firing while the armer works is read by its running
  * turn at the next model step, with no turn of its own; and a worker that armed a watch for its own wait is the one woken,
- * while the root hears only the worker's report.
+ * while the root hears only the worker's report. A read-only worker with a shell arms a command watch: the command passes
+ * the worker's own gate, runs in the worker's directory with its offline, read-only environment, and the worker is woken
+ * with the command's output fenced as untrusted data.
  */
 export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
@@ -50,6 +54,30 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 			requireIndependentVerification: false,
 			createdAt: "2026-11-05T00:00:00.000Z",
 			updatedAt: "2026-11-05T00:00:00.000Z",
+		},
+		"global",
+	);
+	new OrchestrationProfileStore({ agentDir, cwd: HARNESS_PROJECT_CWD, projectTrusted: false }).save(
+		{
+			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
+			profileId: SHELL_PROFILE_ID,
+			description: "Read-only watch worker with a shell.",
+			role: "explorer",
+			modelPolicy: {
+				mode: "fixed",
+				candidates: [{ provider: "harness-script", modelId: "worker-a", thinkingLevel: "off" }],
+			},
+			capabilityCeiling: ["filesystem.read", "process.exec"],
+			readOnly: true,
+			toolNames: ["read", "bash"],
+			resourceProfileNames: [],
+			dispatchProfileIds: [],
+			budget: {},
+			maxConcurrent: 1,
+			leaseTtlMs: 60_000,
+			requireIndependentVerification: false,
+			createdAt: "2026-11-13T00:00:00.000Z",
+			updatedAt: "2026-11-13T00:00:00.000Z",
 		},
 		"global",
 	);
@@ -454,6 +482,164 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 		"the worker took three model steps (arm, read, report) and its watch fired once",
 	).toEqual({ workerSteps: 3, firings: 1 });
 	expectDelivered("worker-wait", 1);
+
+	// A read-only worker with a shell arms a command watch: its own gate admits the command, every check runs in the
+	// worker's directory with its offline, read-only environment, and the worker is woken with the output fenced as data.
+	const commandPlan = "Report the build status once it reads done.";
+	const statusCommand = "cat build-status.txt";
+	/** The scope the worker armed its watch under, as stored with it. */
+	const storedScope = () => store().getRoutine("build-wait")?.workerScope;
+	/** Each check runs in the stored worker directory, with the worker's offline and read-only command environment. */
+	const checkWorkerShell = (request: ShellRequest): void => {
+		expect(request.cwd, "the watched command runs in the worker's directory").toBe(storedScope()?.cwd);
+		expect(request.environmentNames, "the watched command runs offline and read-only, as the worker's own").toEqual(
+			expect.arrayContaining(["GIT_NO_LAZY_FETCH", "GIT_TERMINAL_PROMPT", "npm_config_update_notifier"]),
+		);
+	};
+	const baselineSampled = createBarrier();
+	world.shell.enqueue({
+		name: "j4-watch-cmd-baseline",
+		command: statusCommand,
+		output: "status: building\n",
+		exitCode: 0,
+		check: checkWorkerShell,
+		effect: () => baselineSampled.release(),
+	});
+	const commandRunning = createBarrier();
+	const holdCommandWorker = createBarrier();
+	const commandWoken = createBarrier();
+	const rootHeardCommandWorker = createBarrier();
+	world.provider.enqueue(
+		"root",
+		calls("j4-watch-cmd-start-call", [
+			{
+				id: "j4-watch-cmd-start",
+				name: "delegate",
+				arguments: {
+					action: "start",
+					profileId: SHELL_PROFILE_ID,
+					instructions: "Wait until build-status.txt reads done with a command watch, then report it.",
+				},
+			},
+		]),
+		{
+			name: "j4-watch-cmd-start-answer",
+			check: (request) => {
+				const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
+				expect(result?.isError, result?.text).toBe(false);
+			},
+			reply: { content: [{ type: "text", text: "A worker waits for the build." }] },
+		},
+		{
+			...text("j4-watch-cmd-report-wake", "The build worker reported."),
+			check: (request) => {
+				const heard = JSON.stringify(request.context.messages);
+				expect(heard, "the root hears the worker's own report").toContain("Background worker terminal handoff:");
+				expect(heard, "the root is not told of the watch the worker armed").not.toContain(
+					"Watch build-wait fired:",
+				);
+				rootHeardCommandWorker.release();
+			},
+		},
+	);
+	world.provider.enqueue(
+		"worker-a",
+		{
+			name: "j4-watch-cmd-arm",
+			check: (request) => {
+				expect(toolNames(request), "the worker holds its shell and the watch tool").toEqual(
+					expect.arrayContaining(["bash", "task_watch"]),
+				);
+			},
+			reply: calls("j4-watch-cmd-arm-call", [
+				{
+					id: "j4-watch-cmd-arm",
+					name: "task_watch",
+					arguments: {
+						routineId: "build-wait",
+						prompt: commandPlan,
+						condition: {
+							type: "command",
+							command: statusCommand,
+							everyMs: 1_000,
+							expect: { outputContains: "done" },
+						},
+						expiresAt: world.timers.port("routines").now() + 3_600_000,
+					},
+				},
+			]).reply,
+		},
+		{
+			name: "j4-watch-cmd-hold",
+			gate: holdCommandWorker.promise,
+			check: (request) => {
+				const result = latestBatchResults(request).find((entry) => entry.toolName === "task_watch");
+				expect(result?.isError, result?.text).toBe(false);
+				expect(result?.text).toContain('"armed":true');
+				commandRunning.release();
+			},
+			reply: calls("j4-watch-cmd-read-call", [{ id: "j4-watch-cmd-read", name: "read", arguments: { path: notes } }])
+				.reply,
+		},
+		{
+			name: "j4-watch-cmd-woken",
+			check: (request) => {
+				assertWatchWake(latestWatchWakeText(request, "build-wait"), {
+					routineId: "build-wait",
+					cause: "A watched command check now passes",
+					plan: commandPlan,
+					planFenced: true,
+					facts: { condition: "command", change: "matched", facts: { exitCode: 0 } },
+					excerpt: { source: "watch:command", text: "status: done" },
+				});
+				commandWoken.release();
+			},
+			reply: calls("j4-watch-cmd-report", [
+				{
+					id: "j4-watch-cmd-report",
+					name: "submit_report",
+					arguments: { status: "completed", summary: "The build status reads done." },
+				},
+			]).reply,
+		},
+	);
+	const commandWorkersBefore = workerRequests();
+	await withDeadline(
+		trace,
+		"the owner's build worker turn",
+		session.prompt("Have a worker wait for the build to be done and report it."),
+	);
+	await withDeadline(trace, "the worker armed its command watch and is running", commandRunning.promise);
+	await withDeadline(trace, "the command watch took its starting state", baselineSampled.promise);
+	expect(
+		{ firings: runsOf("build-wait"), scope: storedScope() },
+		"the watch stores the worker's read-only, offline scope, and the starting state fires nothing",
+	).toEqual({
+		firings: 0,
+		scope: expect.objectContaining({ shellReadOnly: true, readOnly: true, network: false }),
+	});
+	const doneSampled = createBarrier();
+	world.shell.enqueue({
+		name: "j4-watch-cmd-done",
+		command: statusCommand,
+		output: "status: done\n",
+		exitCode: 0,
+		check: checkWorkerShell,
+		effect: () => doneSampled.release(),
+	});
+	world.timers.advance("routines", 1_000);
+	await withDeadline(trace, "the command watch checked again", doneSampled.promise);
+	await untilRuns("build-wait", 1);
+	holdCommandWorker.release();
+	await withDeadline(trace, "the running worker is steered with the command's output", commandWoken.promise);
+	await withDeadline(trace, "the root hears the build worker's report", rootHeardCommandWorker.promise);
+	await withDeadline(trace, "agent idle after the build worker's report", session.agent.waitForIdle());
+	await withDeadline(trace, "the session is at rest after the build worker's report", session.waitForForegroundIdle());
+	expect(
+		{ workerSteps: workerRequests() - commandWorkersBefore, firings: runsOf("build-wait") },
+		"the worker took three model steps (arm, read, report) and its command watch fired once",
+	).toEqual({ workerSteps: 3, firings: 1 });
+	expectDelivered("build-wait", 1);
 
 	expect(await world.disposeSessionInBody(session), "the watch session closes").toBeUndefined();
 	trace.mark("root", "watch.closed");

@@ -173,6 +173,20 @@ function offlineGitEnvironment(env: NodeJS.ProcessEnv): NodeJS.ProcessEnv {
 }
 
 /**
+ * The variables that close what a worker's grant does not hold in a command's environment `env`: npm's registry check
+ * and log file for a worker that edits nothing, git's network and program paths for one that also holds no network.
+ */
+export function workerCommandRestrictions(
+	options: { readonly offline?: boolean; readonly readOnly?: boolean },
+	env: NodeJS.ProcessEnv,
+): NodeJS.ProcessEnv {
+	return {
+		...(options.readOnly ? READ_ONLY_NPM_ENVIRONMENT : {}),
+		...(options.offline ? offlineGitEnvironment(env) : {}),
+	};
+}
+
+/**
  * `onReaped` receives a description of every process still running when the worker ended. Workers are
  * zero-footprint, so those processes are ended, but never silently: the owner is told what was left
  * running and that a durable long-running process belongs to the root's own background runs.
@@ -200,8 +214,7 @@ export function createWorkerRunEnvironment(
 		[PI_PARENT_PID_ENV]: String(process.pid),
 		[WORKER_LABEL_ENV]: workerLabel,
 		...workerCommitterEnvironment(workerLabel),
-		...(options.readOnly ? READ_ONLY_NPM_ENVIRONMENT : {}),
-		...(options.offline ? offlineGitEnvironment(process.env) : {}),
+		...workerCommandRestrictions(options, process.env),
 	};
 	const spawnHook: BashSpawnHook = (context) => {
 		const env: NodeJS.ProcessEnv = { ...context.env };

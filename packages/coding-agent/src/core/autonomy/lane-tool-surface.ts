@@ -1,4 +1,3 @@
-import { homedir } from "node:os";
 import path from "node:path";
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { type Static, Type } from "typebox";
@@ -25,7 +24,6 @@ import {
 	type WorkerMemoryBroker,
 	type WorkerMemoryReadOptions,
 } from "../memory/worker-memory-tools.ts";
-import type { ReadOnlyShellLaneScope } from "../model-router/read-only-shell-policy.ts";
 import {
 	CapabilityGateway,
 	type GatewayInitialUsage,
@@ -39,7 +37,6 @@ import type {
 import type { NormalizedProfile } from "../profile-registry.ts";
 import {
 	type CredentialExposureBoundary,
-	isProtectedCredentialPath,
 	wrapToolWithCredentialExposureGuard,
 } from "../secrets/credential-exposure-guard.ts";
 import { createCredentialPathPolicy } from "../secrets/native-credential-path-probe.ts";
@@ -67,10 +64,10 @@ import { wrapToolDefinition } from "../tools/tool-definition-wrapper.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import { createWriteTool } from "../tools/write.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
-import { projectLaneSettingsPath } from "./lane-private-paths.ts";
+import { type LaneShellFacts, laneReadOnlyShellScope, laneReadRoots, laneRunsOffline } from "./lane-shell-scope.ts";
 import { LaneToolAdmission, type LaneToolAdmissionEvent } from "./lane-tool-admission.ts";
 import { LaneToolUsage } from "./lane-tool-usage.ts";
-import { isPathWithinScope, safeRealpathSync } from "./path-scope.ts";
+import { safeRealpathSync } from "./path-scope.ts";
 import type { ProtectedPathWatch } from "./protected-path-watch.ts";
 import { privatePathBoundary, type SessionReadScope } from "./session-read-scope.ts";
 import { createWorkerRunEnvironment } from "./worker-run-environment.ts";
@@ -166,6 +163,13 @@ export interface LaneToolSurface {
 	network?: "granted" | "offline";
 	/** Per-call path and capability gate for the isolated worker loop. */
 	beforeToolCall: NonNullable<AgentLoopConfig["beforeToolCall"]>;
+	/**
+	 * Whether the lane would run this call now, with every check a call of its own faces (grant, budget, edge, path) and no
+	 * attribution: what the host does on the lane's behalf (a watch it arms) is admitted as the call the lane would make.
+	 */
+	admitHostCall(toolName: string, args: unknown, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined>;
+	/** What the lane's grant fixed about its commands and pages, for what the host keeps doing for it after it ends. */
+	shellFacts: LaneShellFacts;
 	/** Retained fatal admission failures must be checked before accepting a lane result. */
 	assertHealthy(): void;
 	/** Register the owner of execution-admitted mutation and tool-selection attribution. */
@@ -265,21 +269,6 @@ function strictLaneProfilePatterns(profile: NormalizedProfile | undefined): {
 	// Strict UAC: a shipped profile is the complete authority grant. Grant-all must be explicit.
 	if (allow.length === 0 && block.length === 0) return { allow: [], block: ["*"] };
 	return { allow, block };
-}
-
-/**
- * Whether a confined lane's shell may read `target`: the path as written and the file it resolves to both lie inside
- * a read root, so a link inside the project cannot carry a read outside it. A path whose links cannot be resolved is
- * outside.
- */
-function insideReadRoots(target: string, roots: readonly string[]): boolean {
-	let canonical: string;
-	try {
-		canonical = safeRealpathSync(target);
-	} catch {
-		return false;
-	}
-	return [target, canonical].every((candidate) => roots.some((root) => isPathWithinScope(candidate, root)));
 }
 
 function resolveWriteRoots(cwd: string, writePaths: readonly string[]): string[] {
@@ -584,7 +573,15 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		allowedToolSet.has(PROCESS_LANE_TOOL_NAME);
 	// A lane with a read-only shell and no `network.http` reaches no network through git's implicit paths either.
 	const networkGranted = options.grant?.capabilities.includes("network.http") === true;
-	const offline = (options.readOnly === true || options.shellReadOnly === true) && !networkGranted;
+	const shellFacts: LaneShellFacts = {
+		cwd: options.cwd,
+		shellReadOnly: options.shellReadOnly === true,
+		readOnly: options.readOnly === true,
+		network: networkGranted,
+		deniedPaths: options.deniedPaths?.map((entry) => path.resolve(entry)) ?? [],
+		...(options.readScopeRoots ? { readRoots: options.readScopeRoots.map((entry) => path.resolve(entry)) } : {}),
+	};
+	const offline = laneRunsOffline(shellFacts);
 	const runEnvironment = runsProcesses
 		? createWorkerRunEnvironment(
 				options.workerLabel ?? options.shellSessionKey ?? mutationScope,
@@ -605,10 +602,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			})
 		: undefined;
 	const toolUsage = new LaneToolUsage(gateway ? (usage) => gateway.recordUsage(usage) : undefined);
-	const deniedPaths = options.deniedPaths?.map((entry) => path.resolve(entry));
-	// The project's own `.pi/settings.json` stays denied to direct reads, but it is a project file a
-	// recursive project search may pass through; everything else denied is harness storage.
-	const projectSettingsPath = path.resolve(projectLaneSettingsPath(options.cwd));
+	const deniedPaths = options.deniedPaths ? shellFacts.deniedPaths : undefined;
 	// The lane's grep tool skips every protected file a directory search reaches (`excludeFile` above), so the
 	// boundary admits such a search without a file filter; process lanes scope spills to their own scratch directory
 	// and exempt provably observational reads of that scratch directory without exposing `<workRoot>` or sibling lanes.
@@ -666,23 +660,9 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			}
 		: undefined;
 
-	const readScopeRoots = options.readScopeRoots?.flatMap((entry) => {
-		const root = path.resolve(entry);
-		return [...new Set([root, safeRealpathSync(root)])];
-	});
-	const readOnlyShell: ReadOnlyShellLaneScope | undefined = options.shellReadOnly
-		? {
-				network: networkGranted,
-				scratchRoots,
-				homeDir: homedir(),
-				cdPath: (process.env.CDPATH ?? "").split(path.delimiter).filter((entry) => entry.length > 0),
-				harnessStoragePaths: (deniedPaths ?? []).filter((entry) => entry !== projectSettingsPath),
-				confined: readScopeRoots !== undefined,
-				// Scratch is admitted before this is asked; a confined lane reads nothing outside its roots.
-				isDeniedPath: (target) =>
-					isProtectedCredentialPath(target, options.cwd, laneBoundary) ||
-					(readScopeRoots !== undefined && !insideReadRoots(target, readScopeRoots)),
-			}
+	const readScopeRoots = laneReadRoots(options.readScopeRoots);
+	const readOnlyShell = options.shellReadOnly
+		? laneReadOnlyShellScope(shellFacts, scratchRoots, laneBoundary, readScopeRoots)
 		: undefined;
 	// A confined lane's read tools read the roots its shell reads, its scratch directory included (the shell's own
 	// output lives there). Checked in every mode: YOLO removes prompts, not the read scope.
@@ -878,6 +858,8 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			signal?.throwIfAborted();
 			return admission.check(toolCall.name, args);
 		},
+		admitHostCall: (toolName, args, signal) => admission.admitNested(toolName, args, signal),
+		shellFacts,
 		...(gateway ? { gateway } : {}),
 	};
 }

@@ -40,10 +40,10 @@ import {
 	agentWatchBoundsRefusal,
 	agentWatchSlotsRefusal,
 	isWatchSchedule,
-	workerWatchConditionRefusal,
 	workerWatchSlotsRefusal,
 } from "./routine-watch-arming.ts";
 import { describeWatchCondition, parseWatchCondition, type WatchCondition } from "./watch-contract.ts";
+import { routineWorkerAuthority, type WorkerWatchAuthority } from "./worker-watch-scope.ts";
 
 interface RoutineSessionDeps {
 	readonly store: RoutineStorePort;
@@ -57,9 +57,10 @@ interface RoutineSessionDeps {
 	eventAnchor(): RoutineEventAnchor;
 	/**
 	 * The session's admission of a watch condition, the one the monitor applies again at every evaluation: it returns the
-	 * condition in canonical form (a file's absolute path) or throws the reason the session may not watch it.
+	 * condition in canonical form (a file's absolute path) or throws the reason the session (or, for a worker's watch, the
+	 * worker together with the session) may not watch it.
 	 */
-	admitWatch(condition: WatchCondition): WatchCondition;
+	admitWatch(condition: WatchCondition, worker?: WorkerWatchAuthority): WatchCondition;
 	/**
 	 * Owner sources recorded in the current run: the model's context holds every one of them while a tool call of the
 	 * run executes. Empty when the owner said nothing in it (a routine result, CI event or other host input opened it)
@@ -224,16 +225,21 @@ export class RoutineSessionController implements RoutineToolPort {
 	}
 
 	/**
-	 * Arms a watch for a worker runtime's own wait, on the admitted identity its executor holds: under the same bounds as an
-	 * agent-armed watch (one-shot, an end time within a day, a slot in the session's count), only on a condition its own
-	 * tools could check, and woken at the runtime itself (`wake`), never at the session. The runtime id is never an argument.
+	 * Arms a watch for a worker runtime's own wait, on the admitted identity and scope its executor holds: under the same
+	 * bounds as an agent-armed watch (one-shot, an end time within a day, a slot in the session's count), admitted and
+	 * observed under the worker's scope and the session's authority together, and woken at the runtime itself (`wake`),
+	 * never at the session. Neither the runtime id nor the scope is ever an argument.
 	 */
-	async armForWorker(runtimeId: string, input: RoutineToolInput, signal?: AbortSignal): Promise<RoutineToolView> {
+	async armForWorker(
+		worker: WorkerWatchAuthority,
+		input: RoutineToolInput,
+		signal?: AbortSignal,
+	): Promise<RoutineToolView> {
 		this.check(signal);
 		const watch = input.schedule;
 		if (!isWatchSchedule(watch)) throw new Error("A worker can only arm a watch.");
+		const { runtimeId } = worker;
 		const refusal =
-			workerWatchConditionRefusal(parseWatchCondition(watch.condition)) ??
 			agentWatchBoundsRefusal(watch, this.deps.now()) ??
 			workerWatchSlotsRefusal(
 				this.deps.store.listRoutines(),
@@ -253,6 +259,7 @@ export class RoutineSessionController implements RoutineToolPort {
 				enabled: true,
 				armedBy: { kind: "worker", runtimeId },
 				wake: { kind: "worker", parentSessionId: this.deps.parentSessionId, runtimeId },
+				worker,
 			},
 		);
 	}
@@ -392,7 +399,10 @@ export class RoutineSessionController implements RoutineToolPort {
 		this.check(signal);
 		// Counted after the awaits, just before the write, so the slots held are the ones this write finds.
 		if (authority?.armedBy && authority.armedBy.kind !== "owner") this.requireWatchSlot();
+		// An update of a worker's watch is admitted under the scope the worker armed it with, which the store keeps.
+		const worker = prior && routineWorkerAuthority(prior);
 		return this.persist(input, saved, {
+			...(worker ? { worker } : {}),
 			enabled: prior?.enabled ?? true,
 			...(expectedRevision === undefined ? {} : { expectedRevision }),
 			...(prior?.schedule.kind === "calendar" ? { timeZone: prior.schedule.timeZone } : {}),
@@ -445,6 +455,8 @@ export class RoutineSessionController implements RoutineToolPort {
 			readonly toolAnsweredSources?: readonly string[];
 			readonly armedBy?: RoutineArmAuthority;
 			readonly wake?: RoutineWakeAddress;
+			/** A worker's watch: admitted under its scope too, which a creation stores (`worker-watch-scope.ts`). */
+			readonly worker?: WorkerWatchAuthority;
 			readonly intakeOrigin?: RoutineIntakeOrigin;
 			readonly intakeGuard?: () => void;
 		},
@@ -463,7 +475,10 @@ export class RoutineSessionController implements RoutineToolPort {
 				authored.kind === "calendar" && authored.timeZone === undefined
 					? { ...authored, timeZone: extras.timeZone ?? hostTimeZone() }
 					: authored.kind === "event" && authored.source === "watch"
-						? { ...authored, condition: this.deps.admitWatch(parseWatchCondition(authored.condition)) }
+						? {
+								...authored,
+								condition: this.deps.admitWatch(parseWatchCondition(authored.condition), extras.worker),
+							}
 						: authored,
 			enabled: extras.enabled,
 			nowMs: this.deps.now(),
@@ -485,6 +500,7 @@ export class RoutineSessionController implements RoutineToolPort {
 				: { expectedRevision: extras.expectedRevision }),
 			...(extras.toolAnsweredSources === undefined ? {} : { toolAnsweredSources: extras.toolAnsweredSources }),
 			...(extras.armedBy === undefined ? {} : { armedBy: extras.armedBy }),
+			...(extras.worker === undefined ? {} : { workerScope: extras.worker.scope }),
 			// A watch wakes the session that saved it, stamped once at creation from this controller, never from the call's arguments.
 			...(watching
 				? { wake: extras.wake ?? { kind: "session" as const, sessionId: this.deps.parentSessionId } }

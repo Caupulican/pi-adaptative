@@ -1,7 +1,8 @@
 /**
  * The tools the host installs on a worker attempt with the attempt's admitted identity, outside the granted tool surface: the
  * task's event control and the watch the runtime arms for its own wait. Neither takes an identity from the model, neither
- * needs a grant, and neither widens what the worker can do.
+ * needs a grant, and neither widens what the worker can do: a watch's check is admitted by the lane's own gate and kept
+ * inside the lane's scope (`toolSurface.shellFacts`).
  */
 import type { AgentTool } from "../../kernel/index.ts";
 import { TASK_EVENTS_TOOL_NAME } from "../events/host-event-tool-names.ts";
@@ -41,7 +42,16 @@ export function createWorkerHostTools(
 				withEventControl(() => options.agentControl.changeHostEventSubscriptions(input, scope)),
 		},
 	});
-	return options.watches?.available()
-		? [taskEvents, createTaskWatchTool({ runtimeId: options.agentId, port: options.watches })]
-		: [taskEvents];
+	if (!options.watches?.available()) return [taskEvents];
+	const { toolSurface } = options;
+	const caller = {
+		runtimeId: options.agentId,
+		scope: toolSurface.shellFacts,
+		admitCall: (toolName: string, args: unknown, signal?: AbortSignal) => {
+			options.signal?.throwIfAborted();
+			if (admissionClosed()) throw new WorkerCompletionProtocolError("Worker watch admission is closed.");
+			return toolSurface.admitHostCall(toolName, args, signal);
+		},
+	};
+	return [taskEvents, createTaskWatchTool({ caller, port: options.watches })];
 }

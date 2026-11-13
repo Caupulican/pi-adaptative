@@ -20,6 +20,7 @@ import { type RoutineDefinitionView, type RoutineWatchSchedule, routineEnded } f
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import { isWatchGlob, splitWatchPattern, type WatchCondition, watchCadenceMs } from "./watch-contract.ts";
 import type { WatchSample, WatchSampler } from "./watch-evaluators.ts";
+import { routineWorkerAuthority, type WorkerWatchAuthority } from "./worker-watch-scope.ts";
 
 /** Wait after the last file-system event before a file or process is observed, so a burst of writes is one observation. */
 const WATCH_DEBOUNCE_MS = 300;
@@ -53,6 +54,8 @@ interface ArmedWatch {
 	readonly incarnationId: string;
 	readonly key: string;
 	readonly condition: WatchCondition;
+	/** The worker a worker's watch is observed under besides the session (`worker-watch-scope.ts`), fixed with its incarnation. */
+	readonly worker: WorkerWatchAuthority | undefined;
 	readonly abort: AbortController;
 	timer: unknown;
 	/** The directory watchers that report this watch's file-system events, by {@link followKey}. */
@@ -229,6 +232,7 @@ export class RoutineWatchMonitor {
 			incarnationId: routine.incarnationId,
 			key,
 			condition,
+			worker: routineWorkerAuthority(routine),
 			abort: new AbortController(),
 			timer: undefined,
 			watchers: new Map(),
@@ -335,7 +339,7 @@ export class RoutineWatchMonitor {
 		try {
 			let sample: WatchSample | undefined;
 			try {
-				sample = await this.deps.sampler.sample(watch.condition, watch.abort.signal);
+				sample = await this.deps.sampler.sample(watch.condition, watch.abort.signal, watch.worker);
 			} catch (error) {
 				if (watch.abort.signal.aborted || !this.active) return;
 				this.refuse(watch, error);

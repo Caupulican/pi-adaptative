@@ -1,12 +1,14 @@
 /**
  * What a saved routine records about how it came to exist, fixed at creation: the owner-intake origin the host created
- * it from, the authority a model's own `routine` tool call armed it under, and whom a watch wakes. This module owns the
- * stored shape of the arming authority, its parse, and the one place the store stamps all three onto a new routine.
+ * it from, the authority a model's own `routine` tool call armed it under, whom a watch wakes and the scope a worker's watch
+ * is observed under (`worker-watch-scope.ts`). This module owns the stored shape of the arming authority, its parse, the one
+ * place the store stamps all four onto a new routine, and the check that the wake address and scope fit the routine.
  */
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import type { PersistentRoutineDefinition, RoutineIntakeOrigin, RoutineOrigin } from "./routine-contract.ts";
 import { boundedRoutineText } from "./routine-field-guards.ts";
-import type { RoutineWakeAddress } from "./routine-wake-address.ts";
+import { type RoutineWakeAddress, wakeAddressSession } from "./routine-wake-address.ts";
+import type { WorkerWatchScope } from "./worker-watch-scope.ts";
 
 /** Owner sources an arming stamp keeps; the newest stay, so the stamp never names more than the run's context held. */
 export const MAX_ARM_OWNER_SOURCES = 16;
@@ -61,15 +63,16 @@ export function parseRoutineArmAuthority(value: unknown): RoutineArmAuthority {
 
 /**
  * The stamps a routine is created with, fixed at creation: an update, enable or disable never adds, changes or drops
- * either. The intake origin is the host's own (an owner request it turned into a routine); the arming authority is the
- * model tool's.
+ * any. The intake origin is the host's own (an owner request it turned into a routine); the arming authority is the
+ * model tool's; the wake address and a worker's scope are the saving caller's.
  */
 export function creationProvenance(
-	existing: Pick<PersistentRoutineDefinition, "origin" | "armedBy" | "wake"> | undefined,
+	existing: Pick<PersistentRoutineDefinition, "origin" | "armedBy" | "wake" | "workerScope"> | undefined,
 	intake: RoutineIntakeOrigin | undefined,
 	armedBy: RoutineArmAuthority | undefined,
 	wake: RoutineWakeAddress | undefined,
-): Pick<PersistentRoutineDefinition, "origin" | "armedBy" | "wake"> {
+	workerScope: WorkerWatchScope | undefined,
+): Pick<PersistentRoutineDefinition, "origin" | "armedBy" | "wake" | "workerScope"> {
 	const created: RoutineOrigin | undefined = intake && {
 		kind: "owner-intake",
 		sourceId: intake.sourceId,
@@ -79,14 +82,38 @@ export function creationProvenance(
 	const origin = existing?.origin ?? created;
 	const stamp = existing ? existing.armedBy : armedBy;
 	const address = existing ? existing.wake : wake;
+	const scope = existing ? existing.workerScope : workerScope;
 	return {
 		...(origin ? { origin } : {}),
 		...(stamp ? { armedBy: stamp } : {}),
 		...(address ? { wake: address } : {}),
+		...(scope ? { workerScope: scope } : {}),
 	};
 }
 
 /** Whether a stored definition holds an arming stamp or a wake address, which a build that predates them cannot read. */
 export function carriesRoutineArming(definition: Pick<PersistentRoutineDefinition, "armedBy" | "wake">): boolean {
 	return definition.armedBy !== undefined || definition.wake !== undefined;
+}
+
+/**
+ * Why a routine's wake address and worker scope do not fit it, or undefined when they do: only a watch of a session has an
+ * armer to wake, and that armer belongs to the session; only a worker's watch carries a worker's scope, and a worker's
+ * command or page watch must carry the one its runtime armed it under, since nothing else bounds what it runs.
+ */
+export function routineWakeRefusal(
+	definition: Pick<PersistentRoutineDefinition, "target" | "schedule" | "wake" | "workerScope">,
+): string | undefined {
+	const { target, schedule, wake, workerScope } = definition;
+	const watch = schedule.kind === "event" && schedule.source === "watch" ? schedule : undefined;
+	if (wake && (target.kind !== "session" || !watch || wakeAddressSession(wake) !== target.parentSessionId))
+		return "Only a watch of a session wakes an armer, and only one of that session.";
+	if (workerScope && wake?.kind !== "worker") return "Only a worker's watch is observed under a worker's scope.";
+	if (
+		wake?.kind === "worker" &&
+		!workerScope &&
+		(watch?.condition.type === "command" || watch?.condition.type === "http")
+	)
+		return "A worker's command or page watch requires the scope its runtime armed it under.";
+	return undefined;
 }
