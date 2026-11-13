@@ -200,6 +200,9 @@ export class SystemPromptBuilder {
 	 * situation. Empty when no active profile defines a soul.
 	 */
 	private _buildSituationSoulPrompt(): string | undefined {
+		// An agent of its own carries its soul here, where every capability class renders it, and takes no situational one.
+		if (this._agentIdentity?.standalone)
+			return this._agentIdentity.soul ? `SOUL\n${this._agentIdentity.soul}` : undefined;
 		const soul = this.deps.getSettingsManager().getActiveProfileSoul();
 		if (!soul) return undefined;
 		return `SITUATION SOUL\n${soul}`;
@@ -432,7 +435,7 @@ export class SystemPromptBuilder {
 					? [this._buildSelfModificationPrompt(modelCapability)].filter((text): text is string => Boolean(text))
 					: undefined,
 			missingSoulPath: identity?.missingSoulPath,
-			soul: identity?.soul,
+			soul: identity?.standalone ? undefined : identity?.soul,
 		};
 		// A memory allowance is part of the final prompt, not extra capacity on top of it.
 		// Measure the mandatory prefix first, including caller guidance and paths; retain its

@@ -67,11 +67,13 @@ import { wrapToolWithEnvelopeScope } from "./autonomy/envelope-enforcement.ts";
 import { projectLaneSettingsPath } from "./autonomy/lane-private-paths.ts";
 import { type SharedLaneToolOptions, WORKER_WRITE_SCOPE_GUIDANCE } from "./autonomy/lane-tool-surface.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
+import { sessionReadOnlyShellScope, wrapToolWithReadOnlyShell } from "./autonomy/read-only-shell-admission.ts";
 import {
 	buildWorkerSessionDefaultWriteScopeEnvelope,
 	buildWorkerSessionHarnessWriteEnvelope,
 	buildWorkerSessionPrivatePathEnvelope,
 	type SessionPrivatePathScope,
+	WORKER_HARNESS_WRITE_GUIDANCE,
 } from "./autonomy/worker-session-private-scope.ts";
 import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
 import type { CapabilityTierPolicy } from "./capability-tier.ts";
@@ -698,6 +700,7 @@ export class RuntimeBuilder {
 	private readonly _workerSessionPrivatePathEnvelope: CapabilityEnvelope | undefined;
 	private readonly _workerSessionHarnessWriteEnvelope: CapabilityEnvelope | undefined;
 	private readonly _workerSessionDefaultWriteScopeEnvelope: CapabilityEnvelope | undefined;
+	private readonly _sessionReadOnlyShell: ReturnType<typeof sessionReadOnlyShellScope> | undefined;
 	/** Extension tools the launcher explicitly granted this worker process (never a builtin name). */
 	private readonly _workerExtensionToolNames: ReadonlySet<string>;
 	private readonly _taskDirectories: TaskDirectoryRuntime;
@@ -795,6 +798,13 @@ export class RuntimeBuilder {
 			// The harness's own memory, skills and sessions are searchable without a file glob.
 			agentDir: deps.getAgentDir(),
 		};
+		this._sessionReadOnlyShell = privatePathScope?.readOnlyShell
+			? sessionReadOnlyShellScope(
+					deps.getCwd(),
+					this._workerSessionPrivatePathEnvelope?.deniedPaths ?? [],
+					this._credentialExposureBoundary,
+				)
+			: undefined;
 		// The group lock is the worktree's (shared with every session working in it); emission order is per session.
 		this._fileMutationIntents = new FileMutationIntentController({
 			mutationScope: mutationScopeForWorktree(deps.getCwd()),
@@ -1266,25 +1276,15 @@ export class RuntimeBuilder {
 				this.credentialExposureMode(),
 				harnessTools.has(tool),
 			);
-			const privateScoped = this._workerSessionPrivatePathEnvelope
-				? wrapToolWithEnvelopeScope(guarded, this._workerSessionPrivatePathEnvelope, this.deps.getCwd())
-				: guarded;
-			const writeScoped = this._workerSessionDefaultWriteScopeEnvelope
-				? wrapToolWithEnvelopeScope(
-						privateScoped,
-						this._workerSessionDefaultWriteScopeEnvelope,
-						this.deps.getCwd(),
-						WORKER_WRITE_SCOPE_GUIDANCE,
-					)
-				: privateScoped;
-			const scoped = this._workerSessionHarnessWriteEnvelope
-				? wrapToolWithEnvelopeScope(
-						writeScoped,
-						this._workerSessionHarnessWriteEnvelope,
-						this.deps.getCwd(),
-						"Harness resources (skills, extensions, prompts, settings, hooks, git config) are owner-only for a worker. Report the change you want to the parent as a proposal; the parent applies it.",
-					)
-				: writeScoped;
+			let scoped = guarded;
+			for (const [envelope, guidance] of [
+				[this._workerSessionPrivatePathEnvelope, undefined],
+				[this._workerSessionDefaultWriteScopeEnvelope, WORKER_WRITE_SCOPE_GUIDANCE],
+				[this._workerSessionHarnessWriteEnvelope, WORKER_HARNESS_WRITE_GUIDANCE],
+			] as const)
+				if (envelope) scoped = wrapToolWithEnvelopeScope(scoped, envelope, this.deps.getCwd(), guidance);
+			if (this._sessionReadOnlyShell)
+				scoped = wrapToolWithReadOnlyShell(scoped, this._sessionReadOnlyShell, this.deps.getCwd());
 			toolRegistry.set(
 				scoped.name,
 				wrapToolWithVerification(

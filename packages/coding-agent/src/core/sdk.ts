@@ -27,6 +27,7 @@ import {
 	RealScriptRegistry,
 	RealWorkerDispatcher,
 } from "./adaptive/index.ts";
+import type { AgentIdentity } from "./agent-identity.ts";
 import { capabilityArtifactsDir, configFile, steeringCertificatesFile } from "./agent-paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
@@ -201,6 +202,8 @@ export interface CreateAgentSessionOptions {
 	 * (credentials, auth, settings, memory, sessions, state, channels) are denied, plus `deniedPaths`. YOLO keeps it.
 	 */
 	privatePathScope?: SessionPrivatePathScope;
+	/** The identity the system prompt opens with; default: the main agent's (`soul.md`). */
+	agentIdentity?: AgentIdentity;
 	/** Custom tools to register (in addition to built-in tools). */
 	customTools?: ToolDefinition[];
 	/** Shell backend for bash, shared by root and every worker lane; the native host shell is used when unset. */
@@ -335,11 +338,6 @@ export {
  * const { session } = await createAgentSession({
  *   model: getModel('anthropic', 'claude-opus-4-5'),
  *   thinkingLevel: 'high',
- * });
- *
- * // Continue previous session
- * const { session, modelFallbackMessage } = await createAgentSession({
- *   continueSession: true,
  * });
  *
  * // Full control
@@ -943,6 +941,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				isChildSession,
 				orchestrationProfile,
 				privatePathScope: options.privatePathScope,
+				agentIdentity: options.agentIdentity,
 				sessionStartEvent: options.sessionStartEvent,
 				systemOneController,
 				codeDuplicateFileLister: options.codeDuplicateFileLister,

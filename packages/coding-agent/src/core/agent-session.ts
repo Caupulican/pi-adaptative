@@ -1061,7 +1061,7 @@ export class AgentSession {
 			// Self-gated by kill switch and evidence thresholds inside getActiveHints(): a plain always-on pass-through.
 			getToolSelectionHints: () => this._toolSelection.getActiveHints(),
 			getSystemPromptOverride: () => this.ownerSystemPrompt.get(),
-			getAgentIdentity: () => readAgentIdentity(this._agentDir),
+			getAgentIdentity: () => config.agentIdentity ?? readAgentIdentity(this._agentDir),
 			promptClock: config.timers.port("system-prompt"),
 		});
 		this.ownerSystemPrompt = new SessionSystemPromptController({

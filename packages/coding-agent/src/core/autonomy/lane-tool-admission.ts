@@ -1,10 +1,9 @@
 import type { BeforeToolCallResult } from "../../kernel/index.ts";
 import { toolPathSpellings } from "../../kernel/utils/paths.ts";
-import { type ReadOnlyShellLaneScope, readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
+import type { ReadOnlyShellLaneScope } from "../model-router/read-only-shell-policy.ts";
 import { type CapabilityGateway, CapabilityGatewayDeniedError } from "../orchestration/capability-gateway.ts";
 import type { HarnessCapability, ToolCapabilityManifest } from "../orchestration/contracts.ts";
 import {
-	READ_ONLY_SHELL_TOOL_NAMES,
 	requiredEnvelopeCapabilities,
 	resolveToolCallPathAccess,
 	type ToolCallFacts,
@@ -15,6 +14,7 @@ import { classifyYoloBoundary } from "./edge-policy.ts";
 import { extractToolPathArguments } from "./envelope-enforcement.ts";
 import { evaluateToolGate } from "./gates.ts";
 import { findRepositoryGitPaths } from "./path-scope.ts";
+import { readOnlyShellRefusal, WORKER_READ_ONLY_SHELL_VOICE } from "./read-only-shell-admission.ts";
 import { readScopeRefusal, type SessionReadScope } from "./session-read-scope.ts";
 
 /** The same scope guidance accompanies every lane write refusal. */
@@ -131,21 +131,10 @@ export class LaneToolAdmission {
 		options.assertOpen();
 		if (!options.allowedTools.has(toolName))
 			return { block: true, reason: `Lane tool '${toolName}' is outside the materialized UAC surface.` };
-		if (options.readOnlyShell && READ_ONLY_SHELL_TOOL_NAMES.has(toolName.toLowerCase())) {
-			const command = (args as { command?: unknown } | undefined)?.command;
-			const violation =
-				typeof command === "string"
-					? readOnlyShellViolation(command, options.cwd, {
-							lane: options.readOnlyShell,
-							dialect: toolName.toLowerCase() === "powershell" ? "powershell" : "posix",
-						})
-					: undefined;
-			if (violation)
-				return {
-					block: true,
-					reason: `Read-only worker: ${violation}. Read, search and inspect freely; write scratch output only under $TMPDIR (this worker's own scratch directory, removed when it ends); report any change, network access or private file that is needed to the parent instead of reaching it.`,
-				};
-		}
+		const shellRefusal = options.readOnlyShell
+			? readOnlyShellRefusal(options.readOnlyShell, toolName, args, options.cwd, WORKER_READ_ONLY_SHELL_VOICE)
+			: undefined;
+		if (shellRefusal) return { block: true, reason: shellRefusal };
 		if (options.readScope) {
 			const violation = readScopeViolation(
 				toolName,

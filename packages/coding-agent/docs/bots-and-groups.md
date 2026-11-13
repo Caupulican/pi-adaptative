@@ -20,9 +20,13 @@ are in. Its home is `<agent dir>/bots/<id>/`: `profile.json` (written from the b
 made it), `sessions/` (its own session files; it continues the newest one, so it keeps one conversation whichever project you
 message it from) and `memory/`. The record in the bot store stays the index; editing the bot's model, permissions or soul
 refreshes the profile and applies to its session when it starts, so a bot that is working must be stopped first. The session
-runs on the bot's model (a model that is gone or has no credentials refuses the message), carries the bot's soul at the end of
-its system prompt, and works in your project directory. It reads, and writes only when the bot has write access: a read-only bot has
-no shell. It is loaded on its first message, kept while a turn runs or input is queued, and closed after ten idle minutes or
+runs on the bot's model, under the rules a worker's own model is held to (a model that is gone, has no credentials, is paid by
+API key without being the owner's choice while subscription models are usable, or that your model policy disallows refuses the
+message), and works in your project directory. Its name and its soul replace the main agent's in its system prompt, so it never
+introduces itself as the main agent. It reads, and writes only when the bot has write access; a read-only bot has a shell whose
+commands are judged one by one, as a read-only worker's are (nothing that edits, creates a file or reaches the network runs,
+in every execution mode). A turn is bounded by `workerDelegation.maxUsd` (and the main session's own ceiling) when one is
+set, and what each turn spends is added to the main session's cost. The session runs System One as your settings have it. It is loaded on its first message, kept while a turn runs or input is queued, and closed after ten idle minutes or
 when the session that hosts it ends. One process hosts a bot at a time; a second one is told which. The roster shows the bot
 running or queued while its session works, and its chat is that session's conversation, after whatever ran as a worker before.
 Its answers are read in that chat (the roster marks them unread); they do not reach the orchestrator as a worker's terminal does.

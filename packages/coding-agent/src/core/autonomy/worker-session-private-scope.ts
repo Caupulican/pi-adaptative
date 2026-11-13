@@ -53,6 +53,11 @@ export function encodeWorkerSessionAllowedPaths(paths: readonly string[]): strin
 export interface SessionPrivatePathScope {
 	readonly allowedPaths?: readonly string[];
 	readonly deniedPaths?: readonly string[];
+	/**
+	 * The session holds a read-only grant: its shell runs only commands that edit nothing, create no file and reach no
+	 * network (`readOnlyShellRefusal`), in every execution mode. Its tool set carries no file-editing tool.
+	 */
+	readonly readOnlyShell?: boolean;
 }
 
 /**
@@ -107,6 +112,10 @@ export function buildWorkerSessionDefaultWriteScopeEnvelope(
 		allowedPaths: Object.freeze([path.resolve(cwd)]),
 	});
 }
+
+/** What a worker denied a write to a harness resource does next. */
+export const WORKER_HARNESS_WRITE_GUIDANCE =
+	"Harness resources (skills, extensions, prompts, settings, hooks, git config) are owner-only for a worker. Report the change you want to the parent as a proposal; the parent applies it.";
 
 /**
  * Write-only companion to the private path envelope: harness resources (skills, extensions, prompts,

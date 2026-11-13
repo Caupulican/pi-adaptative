@@ -4,12 +4,15 @@
  * `sessions/` directory (one conversation per bot, whatever the working directory), kept while a turn runs or input is
  * queued, and closed after `BOT_SESSION_IDLE_BOUND_MS` of idleness or when the host stops.
  *
- * The session runs on the bot's own model, which is never replaced: a model that is missing or has no credentials
- * refuses the message. The bot's soul is appended to its system prompt as literal text, judged again here because a
- * stored record can have been edited by hand. It works in the owner's project directory under a worker's private-path
- * scope. It is a child session (no routines, no memory writes, no channels, no System One), and its tools are the read
- * tools, plus the file and process tools when the record grants `canWrite`: a session has no read-only shell gate, so a
- * read-only bot has no shell. Autonomy (subagents, routines, goals, watches) belongs to a later phase.
+ * The session runs on the bot's own model, which is never replaced: a model that is missing, has no credentials, or that
+ * the worker admission refuses (a metered model the owner did not choose, one the owner's model policy disallows) refuses
+ * the message. The bot has an identity of its own: its name and its soul replace the main agent's in the system prompt
+ * (the soul is judged again here because a stored record can have been edited by hand). It works in the owner's project
+ * directory under a worker's private-path scope. It is a child session (no routines, no memory writes, no channels), it
+ * runs System One as the owner's settings have it, and its tools are the read tools plus a shell, plus the file tools
+ * and python when the record grants `canWrite`; a read-only bot's shell runs only commands the read-only shell line
+ * admits. Each turn is bounded by the worker spend bound and its usage is reported to the main session's cost view.
+ * Autonomy (subagents, routines, goals, watches) belongs to a later phase.
  *
  * One process hosts a bot's session at a time (`bots/<id>/host.lock`): a second process is refused with the holder's id
  * rather than appending to the same file. A change of the bot's record rebuilds an idle session on the next message
@@ -18,14 +21,16 @@
  */
 
 import { existsSync, statSync } from "node:fs";
-import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
+import { type Api, type Model, TOOL_SCHEMA_SEARCH_NAME, type Usage } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { findMostRecentSessionInDirs } from "../../kernel/session/session-listing.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import { checkSoulText } from "../agent-identity.ts";
+import { checkSoulText, namedAgentIdentity } from "../agent-identity.ts";
 import { botHostLockFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
+import { boundSessionTurnSpend, unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
+import { usageSince } from "../cost/usage-delta.ts";
 import { STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import type { BotOperatorMessageOptions } from "../delegation/bot-operator-message-options.ts";
 import type {
@@ -41,6 +46,7 @@ import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { createAgentSession } from "../sdk.ts";
 import { SettingsManager } from "../settings-manager.ts";
+import { deriveSpawnedUsageReportId, hasReportableUsage } from "../spawned-usage.ts";
 import { toolSurvivesReadOnly } from "../tool-capability-policy.ts";
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
@@ -64,6 +70,22 @@ export interface BotSessionHostPorts {
 	timers(): TimerSource;
 	/** An owner-facing warning (a turn that failed, a session that did not close cleanly). */
 	warn(message: string): void;
+	/** Why the worker admission refuses the bot's model now; undefined when it may run. */
+	modelRefusal(record: PersistentBotRecord, model: Model<Api>): string | undefined;
+	/** The dollars one turn may spend, as a worker's budget bounds it; undefined when nothing bounds it. */
+	turnSpendBoundUsd(): number | undefined;
+	/** Records what a bot's turn spent with the main session's cost view, once per `reportId`. */
+	reportUsage(usage: Usage, report: BotTurnUsageReport): void;
+}
+
+/** One turn's charge, as the main session's ledger takes it. */
+export interface BotTurnUsageReport {
+	readonly agentId: string;
+	readonly reportId: string;
+	/** The bot's own session id. */
+	readonly sessionId: string;
+	readonly provider: string;
+	readonly model: string;
 }
 
 interface BotSessionEntry {
@@ -76,16 +98,18 @@ interface BotSessionEntry {
 	unsubscribe: () => void;
 	/** Prompts submitted and not yet settled. */
 	inFlight: number;
+	/** The session's cumulative usage when the running turn began; absent between turns. */
+	usageBefore: Usage | undefined;
 	idleTimer: unknown;
 }
 
 /** The tools of a bot session: the read tools always, the file and process tools only when the bot may write. */
 export function botSessionToolNames(canWrite: boolean): string[] {
 	const reads = [...READ_TOOL_NAMES, REPO_READ_TOOL_NAME, LOOKUP_TOOL_NAME];
-	// A lane judges each shell command of a read-only worker; a session has no such gate, so a read-only bot has no shell.
+	// A read-only bot keeps what a read-only worker keeps: the shell is judged command by command (`privatePathScope.readOnlyShell`).
 	return canWrite
 		? [...reads, TOOL_SCHEMA_SEARCH_NAME, ...WRITE_TOOL_NAMES, "python", STABLE_SHELL_TOOL_NAME]
-		: [...reads.filter(toolSurvivesReadOnly), TOOL_SCHEMA_SEARCH_NAME];
+		: [...[...reads, STABLE_SHELL_TOOL_NAME].filter(toolSurvivesReadOnly), TOOL_SCHEMA_SEARCH_NAME];
 }
 
 /** What defines a session: the fields a session is built from. A rename or a new description leaves it as it is. */
@@ -177,6 +201,7 @@ export class BotSessionHost {
 		mode: BotOperatorMessageOptions["mode"],
 	): Promise<BotOperatorMessageDispatchResult> {
 		const entry = await this.open(agentId);
+		this.admit(entry);
 		const queued = mode === "queue";
 		const wasRunning = this.isBusy(entry);
 		const continued = entry.session.messages.length > 0;
@@ -220,6 +245,21 @@ export class BotSessionHost {
 			messageId: `bot-msg-${Date.now()}`,
 			modelRef: entry.modelRef,
 		};
+	}
+
+	/**
+	 * Whether the session's model may run this message now: the worker admission's rules for an explicitly requested model
+	 * (read again each message, since the owner's policy changes), and a model that declares a price when a bound applies.
+	 */
+	private admit(entry: BotSessionEntry): void {
+		const record = this.ports.store().getBot(entry.agentId);
+		const { model } = entry.session;
+		const words = interfaceText().botTeam;
+		if (!record || !model) throw new Error(words.botMissing(entry.agentId));
+		const refusal =
+			this.ports.modelRefusal(record, model) ??
+			(this.ports.turnSpendBoundUsd() === undefined ? undefined : unpricedModelRefusal(model));
+		if (refusal) throw new Error(words.botModelRefused(entry.agentId, refusal));
 	}
 
 	/** The bot's loaded session, built or continued as the record defines it. */
@@ -277,8 +317,6 @@ export class BotSessionHost {
 				noSkills: true,
 				noPromptTemplates: true,
 				noThemes: true,
-				// The soul is literal text: a source string would be read as a path when one exists.
-				...(soul.soul ? { appendSystemPromptOverride: (base: string[]) => [...base, soul.soul as string] } : {}),
 			});
 			await resourceLoader.reload();
 			session = (
@@ -293,9 +331,10 @@ export class BotSessionHost {
 					model,
 					...(isOrchestrationThinkingLevel(profile.thinkingLevel) ? { thinkingLevel: profile.thinkingLevel } : {}),
 					isChildSession: true,
-					disableSystemOne: true,
+					// Its own name and soul replace the main agent's in the prompt.
+					agentIdentity: namedAgentIdentity(profile.displayName, soul.soul, agentId),
 					tools: botSessionToolNames(profile.canWrite),
-					privatePathScope: {},
+					privatePathScope: { readOnlyShell: !profile.canWrite },
 					timers: this.ports.timers(),
 					onClosingWarnings: (warnings) => {
 						for (const warning of warnings) this.ports.warn(`Bot ${agentId}: ${warning}`);
@@ -310,10 +349,27 @@ export class BotSessionHost {
 				profileKey: profileKeyOf(record),
 				unsubscribe: () => {},
 				inFlight: 0,
+				usageBefore: undefined,
 				idleTimer: undefined,
 			};
-			entry.unsubscribe = session.subscribe((event) => {
-				if (event.type === "agent_end" && !event.willRetry) this.recordOutcome(entry);
+			const unsubscribeSpend = boundSessionTurnSpend(session, {
+				limitUsd: () => this.ports.turnSpendBoundUsd(),
+				onExceeded: (spentUsd, limitUsd) => {
+					const reason = interfaceText().botTeam.botTurnOverBudget(
+						agentId,
+						spentUsd.toFixed(2),
+						limitUsd.toFixed(2),
+					);
+					this.ports.warn(reason);
+					return reason;
+				},
+			});
+			const unsubscribeEvents = session.subscribe((event) => {
+				if (event.type === "agent_start") entry.usageBefore ??= structuredClone(entry.session.getCumulativeUsage());
+				if (event.type === "agent_end" && !event.willRetry) {
+					this.reportTurnUsage(entry);
+					this.recordOutcome(entry);
+				}
 				if (
 					event.type === "agent_start" ||
 					event.type === "agent_end" ||
@@ -322,6 +378,10 @@ export class BotSessionHost {
 				)
 					this.settle(entry);
 			});
+			entry.unsubscribe = () => {
+				unsubscribeSpend();
+				unsubscribeEvents();
+			};
 			this.entries.set(agentId, entry);
 			this.armIdle(entry);
 			harnessLog.info("bots", "a bot session was loaded", () => ({ agentId, continued: newest !== null }));
@@ -359,6 +419,33 @@ export class BotSessionHost {
 				this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(entry.agentId, errorText(error))),
 			);
 		}, BOT_SESSION_IDLE_BOUND_MS);
+	}
+
+	/** A turn ended: what the session spent since it began goes to the main session's cost view, once. */
+	private reportTurnUsage(entry: BotSessionEntry): void {
+		const { usageBefore, session } = entry;
+		entry.usageBefore = undefined;
+		const model = session.model;
+		if (this.stopped || !usageBefore || !model) return;
+		const usage = usageSince(usageBefore, session.getCumulativeUsage());
+		if (!hasReportableUsage(usage)) return;
+		const sessionId = session.sessionId;
+		try {
+			this.ports.reportUsage(usage, {
+				agentId: entry.agentId,
+				// The turn's identity: the bot's session and what it had spent when the turn began.
+				reportId: deriveSpawnedUsageReportId("bot-session", sessionId, [
+					String(usageBefore.totalTokens),
+					String(usageBefore.cost.total),
+					String(session.messages.length),
+				]),
+				sessionId,
+				provider: model.provider,
+				model: model.id,
+			});
+		} catch (error) {
+			this.ports.warn(`Bot ${entry.agentId}: its turn's spend could not be recorded (${errorText(error)}).`);
+		}
 	}
 
 	/** A turn ended: its last words are the bot's summary in the roster, and its time marks the chat as unread. */

@@ -70,6 +70,10 @@ export const BOT_TEAM = {
 	botSessionsClosing: (agentId: string) =>
 		`O bot ${agentId} não foi iniciado: esta sessão está fechando, e os bots dela fecham junto. Envie a mensagem de novo na próxima sessão.`,
 	botTurnFailed: (agentId: string, reason: string) => `Bot ${agentId}: o turno falhou (${reason}).`,
+	botModelRefused: (agentId: string, reason: string) =>
+		`O bot ${agentId} não recebeu a mensagem: o modelo dele foi recusado (${reason}).`,
+	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string) =>
+		`Bot ${agentId}: o turno foi interrompido no limite de gasto ($${spentUsd} gastos, workerDelegation.maxUsd é $${limitUsd}).`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a sessão não fechou corretamente (${reason}).`,
 	botChangeWhileRunning: (agentId: string) =>

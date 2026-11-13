@@ -14,6 +14,7 @@ import type {
 } from "../kernel/index.ts";
 import type { CompactionResult, SessionManager } from "../kernel/node.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
+import type { AgentIdentity } from "./agent-identity.ts";
 import type { LaneRecord, LaneTerminalStatus } from "./autonomy/lane-tracker.ts";
 import type { SessionPrivatePathScope } from "./autonomy/worker-session-private-scope.ts";
 import type { BackgroundToolTaskLiveView } from "./background-tool-task-controller.ts";
@@ -199,6 +200,8 @@ export interface AgentSessionConfig {
 	orchestrationProfile?: OrchestrationProfile;
 	/** Private path scope of a session that is not a worker process; see `SessionPrivatePathScope`. */
 	privatePathScope?: SessionPrivatePathScope;
+	/** The identity the system prompt opens with; absent, the main agent's (`soul.md`). */
+	agentIdentity?: AgentIdentity;
 	/** Injectable local-runtime I/O dependencies. */
 	localRuntimeDeps?: LocalRuntimeDeps;
 	/** System One semantic control plane controller for Jev semantic validation. */

@@ -36,6 +36,7 @@ import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { channelsDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { AuthStorage } from "../auth-storage.ts";
+import { boundSessionTurnSpend, unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import type { ChannelProvider } from "../gateways/channel-provider.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -79,11 +80,7 @@ function ownerWanted({ name, policy }: AwayChannel): boolean {
 /** The model refusal of a session whose spend is bounded; undefined when it can run. */
 function modelRefusal(session: AgentSession): string | undefined {
 	const model = session.model;
-	return !model
-		? "no model is configured"
-		: model.costDefaulted
-			? `the model ${model.provider}/${model.id} has no price, so its spend cannot be bounded`
-			: undefined;
+	return model ? unpricedModelRefusal(model) : "no model is configured";
 }
 
 /** The transport of a channel the daemon serves; undefined when it has none for that name. */
@@ -531,23 +528,25 @@ export class AwayChannelHosts {
 		const { agentDir, settings } = this.input;
 		const { name, cwd } = channel;
 		const activity = new Set<() => void>();
-		let turnUsd = 0;
-		const unsubscribe = session.subscribe((event) => {
-			if (event.type === "agent_start") turnUsd = 0;
-			else if (event.type === "message_end" && event.message.role === "assistant") {
-				// One turn's spend bound, as one run away's: past it the turn ends and its conversation gets no reply.
-				turnUsd += event.message.usage?.cost?.total ?? 0;
-				const perRun = settings.getRoutineAwaySettings().maxUsdPerRun;
-				if (turnUsd > perRun) {
-					harnessLog.warn("channels", "a channel turn away was stopped at the away spend bound", {
-						channel: name,
-						usd: turnUsd,
-						perRunUsd: perRun,
-					});
-					void session.abort(`a channel turn away spent past routines.away.maxUsdPerRun ($${perRun.toFixed(2)})`);
-				}
-			} else if (event.type === "agent_end") for (const listener of activity) listener();
+		// One turn's spend bound, as one run away's: past it the turn ends and its conversation gets no reply.
+		const unsubscribeSpend = boundSessionTurnSpend(session, {
+			limitUsd: () => settings.getRoutineAwaySettings().maxUsdPerRun,
+			onExceeded: (usd, perRun) => {
+				harnessLog.warn("channels", "a channel turn away was stopped at the away spend bound", {
+					channel: name,
+					usd,
+					perRunUsd: perRun,
+				});
+				return `a channel turn away spent past routines.away.maxUsdPerRun ($${perRun.toFixed(2)})`;
+			},
 		});
+		const unsubscribeActivity = session.subscribe((event) => {
+			if (event.type === "agent_end") for (const listener of activity) listener();
+		});
+		const unsubscribe = () => {
+			unsubscribeSpend();
+			unsubscribeActivity();
+		};
 		// An owner turn's end in the phone session wakes the channels core like a child turn's.
 		const unsubscribeOwner = owner?.session.subscribe((event) => {
 			if (event.type === "agent_end") for (const listener of activity) listener();

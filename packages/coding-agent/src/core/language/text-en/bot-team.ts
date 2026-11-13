@@ -64,6 +64,12 @@ export const BOT_TEAM = {
 	botSessionsClosing: (agentId: string) =>
 		`Bot ${agentId} was not started: this session is closing, and its bots close with it. Message it again in the next session.`,
 	botTurnFailed: (agentId: string, reason: string) => `Bot ${agentId}: its turn failed (${reason}).`,
+	/** The worker admission's rules refused the bot's model for a message. */
+	botModelRefused: (agentId: string, reason: string) =>
+		`Bot ${agentId} did not take the message: its model is refused (${reason}).`,
+	/** A turn went past the worker spend bound and was stopped. */
+	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string) =>
+		`Bot ${agentId}: its turn was stopped at the spend bound ($${spentUsd} spent, workerDelegation.maxUsd is $${limitUsd}).`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session did not close cleanly (${reason}).`,
 	/** A change of what defines a running bot's session. */

@@ -564,6 +564,24 @@ function tokenBudgetFloorFailure(maxTokens: number | undefined): string | undefi
 		: undefined;
 }
 
+/** What the rules for an explicitly requested model read: both a worker's admission and a bot's own session apply them. */
+export type ExplicitModelAdmissionInput = Pick<
+	WorkerAuthorityResolutionInput,
+	| "authority"
+	| "base"
+	| "modelPin"
+	| "modelRegistry"
+	| "foregroundModel"
+	| "accountRouting"
+	| "modelUnusableCause"
+	| "isModelAllowed"
+>;
+
+/** The refusal of a model the owner's model policy disallows, when an explicit request names it. */
+export function modelNotAllowedReason(model: Model<Api>): string {
+	return `worker_model_not_allowed:${model.provider}/${model.id}`;
+}
+
 /**
  * Subscription models are always preferred: an explicit model on a provider paid by API key runs only when the owner
  * chose it. The owner's channels are a pin (never reaches here), `routeProviders` (by provider or `provider/modelId`,
@@ -571,7 +589,7 @@ function tokenBudgetFloorFailure(maxTokens: number | undefined): string | undefi
  * (`authority.modelChosenBy`). Anything else, while an allowed subscription model is usable now, is refused rather
  * than moved: an explicit model is a request, so running another one would be a mislabelled success. Undefined = fine.
  */
-function explicitMeteredModelRefusal(input: WorkerAuthorityResolutionInput): string | undefined {
+export function explicitMeteredModelRefusal(input: ExplicitModelAdmissionInput): string | undefined {
 	const requested = input.authority?.model;
 	if (!requested || input.modelPin || input.authority?.modelChosenBy === "owner") return undefined;
 	const { modelRegistry } = input;
@@ -656,10 +674,7 @@ export function resolveWorkerAuthority(input: WorkerAuthorityResolutionInput): W
 		// An explicit caller model is a request, not a default: running a different model would hide the
 		// refusal behind a mislabelled success, so it fails closed and names the model and its way out.
 		if (!input.modelPin && input.authority?.model !== undefined) {
-			return {
-				ok: false,
-				reason: `worker_model_not_allowed:${boundModel.model.provider}/${boundModel.model.id}`,
-			};
+			return { ok: false, reason: modelNotAllowedReason(boundModel.model) };
 		}
 		fallbacks = [];
 		// The pool may offer none (a fresh setup has no router pool); the session's own model runs, so it is allowed to work.

@@ -38,6 +38,7 @@ import {
 import type { BackgroundLaneControllerDeps, RunningAttemptWaitOutcome } from "./background-lane-deps.ts";
 import { BotRoster } from "./bots/bot-roster.ts";
 import { BotSessionHost } from "./bots/bot-session-host.ts";
+import { botSessionHostPorts } from "./bots/bot-session-ports.ts";
 import {
 	type AwayChannelStatus,
 	awayChannels,
@@ -334,15 +335,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			() => deps.getSessionManager(),
 			() => this.getBotTeamStore(),
 		);
-		this._botSessions = new BotSessionHost({
-			agentDir: () => deps.getAgentDir(),
-			cwd: () => deps.getCwd(),
-			store: () => this.getBotTeamStore(),
-			modelRegistry: () => deps.getModelRegistry(),
-			projectTrusted: () => deps.getSettingsManager().isProjectTrusted(),
-			timers: () => deps.getTimers(),
-			warn: (message) => this._safeWarn(message),
-		});
+		this._botSessions = new BotSessionHost(
+			botSessionHostPorts(deps, { store: () => this.getBotTeamStore(), warn: (message) => this._safeWarn(message) }),
+		);
 		this._botRoster = new BotRoster({
 			store: () => this.getBotTeamStore(),
 			bindings: () => this.botBindings,
