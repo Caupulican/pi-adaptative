@@ -1,9 +1,3 @@
-## [Unreleased]
-
-### Fixed
-
-- Harness journeys answer `--version` for a seeded managed tool with its pinned version, so ensure keeps that binary instead of downloading it again.
-
 ## [0.104.62] - 2026-11-13
 
 ### Changed
@@ -15,6 +9,10 @@
 - Managed `herdr` is pinned to `0.9.5` (was `0.8.2`).
 - Managed Bitwarden CLI (`bw`) is pinned to `2026.10.1` (was `2026.8.0`).
 - Pi replaces a managed fd, ripgrep, uv, jq, herdr, bw, or bws binary when ensure finds a copy whose --version is older than the pin. An equal or newer binary stays, including a newer system binary. Offline mode keeps the older copy. Android keeps the existing binary. A failed refresh keeps the older copy. The download still requires the pinned SHA-256.
+
+### Fixed
+
+- Harness journeys answer `--version` for a seeded managed tool with its pinned version, so ensure keeps that binary instead of downloading it again.
 
 ## [0.104.61] - 2026-11-13
 
