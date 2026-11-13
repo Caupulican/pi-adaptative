@@ -111,9 +111,11 @@ export function drawChatRosterPane(input: ChatRosterPaneInput): ChatRosterPaneDr
 		const glyph = botStateGlyph(bot.state);
 		const unreadBadge = (bot.unreadCount ?? 0) > 0 ? ` ${theme.fg("warning", `●${bot.unreadCount}`)}` : "";
 		const scheduleBadge = (bot.routineCount ?? 0) > 0 ? ` ${theme.fg("accent", `⏱${bot.routineCount}`)}` : "";
+		// Watches are passive state, drawn quiet with the operator bar's dotted ring.
+		const watchBadge = (bot.watchCount ?? 0) > 0 ? ` ${theme.fg("muted", `◌${bot.watchCount}`)}` : "";
 		const leaderBadge = `${bot.leader ? ` ${theme.fg("warning", text.panes.roster.leader)}` : ""}${bot.remote ? ` ${theme.fg("accent", `${REMOTE_MARK} ${text.panes.roster.remote}`)}` : ""}`;
 		add(
-			`${isSelected ? theme.fg("accent", "▸ ") : "  "}${pad}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)}${leaderBadge}${unreadBadge}${scheduleBadge}`,
+			`${isSelected ? theme.fg("accent", "▸ ") : "  "}${pad}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)}${leaderBadge}${unreadBadge}${scheduleBadge}${watchBadge}`,
 			target,
 		);
 		// The row is the bot's name. Its model is a hint on the line below, shown only for the selected bot; the idle state is

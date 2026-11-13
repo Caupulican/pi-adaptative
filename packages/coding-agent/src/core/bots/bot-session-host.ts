@@ -601,6 +601,16 @@ export class BotSessionHost {
 		}, BOT_SESSION_IDLE_BOUND_MS);
 	}
 
+	/**
+	 * The live watches the bot's own session holds, as the store says now: the loaded session's here, else the one its home
+	 * saved last, which another process may be hosting.
+	 */
+	liveWatches(agentId: string): number {
+		const sessionId =
+			this.entries.get(agentId)?.session.sessionId ?? botSessionOnDisk(this.ports.agentDir(), agentId)?.id;
+		return sessionId === undefined ? 0 : liveOwnWatchCount(this.ports.store(), sessionId, this.idleTimers().now());
+	}
+
 	/** Whether the bot session `sessionId` holds a live watch, as the store says now. */
 	private holdsWatches(sessionId: string): boolean {
 		return liveOwnWatchCount(this.ports.store(), sessionId, this.idleTimers().now()) > 0;

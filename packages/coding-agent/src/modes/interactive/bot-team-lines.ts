@@ -21,8 +21,9 @@ export function formatBotList(bots: readonly PersistentBotView[]): string {
 		.map((bot) => {
 			const unread = (bot.unreadCount ?? 0) > 0 ? words.unread(bot.unreadCount ?? 0) : "";
 			const scheduled = (bot.routineCount ?? 0) > 0 ? ` · ⏱${bot.routineCount}` : "";
+			const watching = (bot.watchCount ?? 0) > 0 ? ` · ◌${bot.watchCount}` : "";
 			const role = `${bot.leader ? words.leaderMark : ""}${bot.remote ? words.remoteMark(REMOTE_MARK) : ""}`;
-			return `${bot.agentId}${role} · ${interfaceText().common.botState(bot.state)} · ${bot.modelRef}${unread}${scheduled}`;
+			return `${bot.agentId}${role} · ${interfaceText().common.botState(bot.state)} · ${bot.modelRef}${unread}${scheduled}${watching}`;
 		})
 		.join("\n");
 }

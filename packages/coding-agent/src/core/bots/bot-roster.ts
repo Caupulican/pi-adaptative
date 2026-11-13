@@ -1,9 +1,11 @@
 /**
  * The bot roster as the owner reads it: the store's bots projected with the live state of their workers and lanes, a
  * machine joined over the link speaking for itself, and, for the bots that run as sessions of their own, the state of that
- * session in the owner's direct conversation (a running turn or queued input is working, whatever the worker lanes say).
+ * session in the owner's direct conversation (a running turn or queued input is working, whatever the worker lanes say)
+ * and the watches that session holds.
  * The TUI reads the roster on every render frame, so it is projected once and served until an input reports a change: a
- * bot-store save, a lane or orchestration change, a bot session's state change, or a binding change drops it
+ * bot-store save (a watch armed, fired or ended among them), a lane or orchestration change, a bot session's state change,
+ * or a binding change drops it
  * (`invalidate`). Reading it never constructs the worker runtime for a session that has no worker state.
  */
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
@@ -15,7 +17,7 @@ import {
 } from "../delegation/persistent-bot-team-store.ts";
 import type { WorkerAgentView } from "../delegation/worker-agent-control.ts";
 import type { RemoteRosterWords } from "../remote/remote-jobs.ts";
-import type { BotSessionState } from "./bot-session-host.ts";
+import type { BotSessionHost, BotSessionState } from "./bot-session-host.ts";
 
 /** What the roster reads from the coordinator. */
 export interface BotRosterHost {
@@ -28,8 +30,8 @@ export interface BotRosterHost {
 	laneRecords(): LaneRecord[];
 	/** What a machine joined over the link says of itself (connected, its jobs, its room). */
 	remoteWords(agentId: string): RemoteRosterWords;
-	/** The state of the bot's own loaded session; undefined when it has none. */
-	sessionState(agentId: string): BotSessionState | undefined;
+	/** The bots' own sessions: a bot's session state (`stateOf`) and the live watches its session holds (`liveWatches`). */
+	readonly botSessions: Pick<BotSessionHost, "stateOf" | "liveWatches">;
 }
 
 /** A session's running turn or queued input outranks an idle projection; a worker still running outranks an idle session. */
@@ -38,6 +40,13 @@ function withSessionState(view: PersistentBotView, state: BotSessionState | unde
 	if (state === "running" && view.state !== "running") return { ...view, state };
 	if (state === "queued" && view.state !== "running" && view.state !== "queued") return { ...view, state };
 	return view;
+}
+
+/** The bot's own session: its state here and the watches it holds (a retired bot's watches went with it). */
+function withOwnSession(view: PersistentBotView, host: BotRosterHost): PersistentBotView {
+	const projected = withSessionState(view, host.botSessions.stateOf(view.agentId));
+	const watchCount = view.state === "retired" ? 0 : host.botSessions.liveWatches(view.agentId);
+	return watchCount > 0 ? { ...projected, watchCount } : projected;
 }
 
 export class BotRoster {
@@ -108,7 +117,7 @@ export class BotRoster {
 			view.remote && view.state !== "retired"
 				? { ...view, ...this.host.remoteWords(view.agentId) }
 				: teamId === undefined
-					? withSessionState(view, this.host.sessionState(view.agentId))
+					? withOwnSession(view, this.host)
 					: view,
 		);
 		if (!teamId) this.cached = { defaultModelRef, delegateActive, bindings: revision, views };

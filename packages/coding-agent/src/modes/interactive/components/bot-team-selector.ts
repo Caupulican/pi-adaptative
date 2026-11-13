@@ -111,6 +111,7 @@ export class BotTeamSelectorComponent extends Container {
 				const glyph = botStateMark(bot.state).glyph;
 				const unread = (bot.unreadCount ?? 0) > 0 ? text.unread(bot.unreadCount ?? 0) : "";
 				const schedules = (bot.routineCount ?? 0) > 0 ? ` · ⏱${bot.routineCount}` : "";
+				const watches = (bot.watchCount ?? 0) > 0 ? ` · ◌${bot.watchCount}` : "";
 				const summaryOrDesc = bot.currentSummary
 					? text.descriptionSuffix(bot.currentSummary)
 					: bot.description
@@ -119,7 +120,7 @@ export class BotTeamSelectorComponent extends Container {
 				return {
 					value: `bot:${bot.agentId}`,
 					label: text.botItem(isCurrent ? "✓ " : `${glyph} `, bot.agentId),
-					description: `${bot.modelRef}${bot.thinkingLevel ? ` (${bot.thinkingLevel})` : ""} · ${text.state(bot.state)}${unread}${schedules}${bot.teamIds.length ? text.botTeams(bot.teamIds.join(",")) : ""}${summaryOrDesc}`,
+					description: `${bot.modelRef}${bot.thinkingLevel ? ` (${bot.thinkingLevel})` : ""} · ${text.state(bot.state)}${unread}${schedules}${watches}${bot.teamIds.length ? text.botTeams(bot.teamIds.join(",")) : ""}${summaryOrDesc}`,
 				};
 			}),
 		];

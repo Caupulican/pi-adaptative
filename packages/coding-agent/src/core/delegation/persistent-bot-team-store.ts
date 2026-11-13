@@ -206,6 +206,8 @@ export interface PersistentBotView {
 	readonly lastReadAt?: number;
 	readonly unreadCount?: number;
 	readonly routineCount?: number;
+	/** The live watches the bot's own session holds, wherever it is hosted; the roster sets it, the store does not. */
+	readonly watchCount?: number;
 	readonly memoryFilePath?: string;
 }
 
@@ -2278,19 +2280,12 @@ export class PersistentBotTeamStore {
 			}
 		}
 
-		const liveAgentById = new Map<string, WorkerAgentView>();
-		for (const agent of liveAgents) {
-			liveAgentById.set(agent.agentId, agent);
-		}
+		const liveAgentById = new Map(liveAgents.map((agent): [string, WorkerAgentView] => [agent.agentId, agent]));
 
 		const allAgentIds = new Set<string>();
 		for (const botId of this.bots.keys()) if (isBotId(botId)) allAgentIds.add(botId);
-		for (const agentId of liveAgentById.keys()) {
-			allAgentIds.add(agentId);
-		}
-		for (const agentId of laneByAgentId.keys()) {
-			allAgentIds.add(agentId);
-		}
+		for (const agentId of liveAgentById.keys()) allAgentIds.add(agentId);
+		for (const agentId of laneByAgentId.keys()) allAgentIds.add(agentId);
 
 		const views: PersistentBotView[] = [];
 
