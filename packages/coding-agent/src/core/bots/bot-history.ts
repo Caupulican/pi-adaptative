@@ -16,8 +16,9 @@
 
 import { createReadStream, type Dirent, existsSync, readFileSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
-import { join } from "node:path";
+import { join, resolve } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { orchestrationSessionsDir } from "../../kernel/session/session-bundle-paths.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { workerTranscriptLocation } from "../../kernel/session/worker-storage-identity.ts";
 import {
@@ -121,8 +122,15 @@ function mergeRuns(first: readonly BotHistoryRun[], second: readonly BotHistoryR
 	return [...byReference.values()].sort((a, b) => a.firstAt - b.firstAt).slice(-MAX_HISTORY_RUNS);
 }
 
-/** The run a transcript identity names, with its time range from the file; undefined when the transcript is not on disk. */
-function runOf(agentDir: string, identity: WorkerTranscriptIdentity): BotHistoryRun | undefined {
+/**
+ * The run a transcript identity names, with its time range from the file; undefined when the transcript is not on disk.
+ * `present`, when given, is every worker transcript on disk: a transcript it lacks is not looked for.
+ */
+function runOf(
+	agentDir: string,
+	identity: WorkerTranscriptIdentity,
+	present?: ReadonlySet<string>,
+): BotHistoryRun | undefined {
 	let location: ReturnType<typeof workerTranscriptLocation>;
 	try {
 		location = workerTranscriptLocation(agentDir, identity);
@@ -130,6 +138,7 @@ function runOf(agentDir: string, identity: WorkerTranscriptIdentity): BotHistory
 		// An id that cannot name a transcript location names no transcript.
 		return undefined;
 	}
+	if (present && !present.has(location.sessionFile)) return undefined;
 	const stat = statSync(location.sessionFile, { throwIfNoEntry: false });
 	if (!stat?.isFile()) return undefined;
 	return {
@@ -232,10 +241,36 @@ async function scanLines(
 	if (length > 0 || pieces.length > 0) finish();
 }
 
-/** What one scan of the root session files found: each alias's direct runtimes with their parent root, and every root's id. */
+/**
+ * What one scan of the root session files found: each alias's direct runtimes with their parent root, every root's id,
+ * and every worker transcript on disk (the candidates are matched against it rather than each looked for).
+ */
 interface RootScan {
 	readonly bound: Map<string, WorkerTranscriptIdentity[]>;
 	readonly rootIds: Set<string>;
+	readonly transcripts: ReadonlySet<string>;
+}
+
+/** Every worker transcript file under the orchestration bundles: one listing per bundle. */
+async function listWorkerTranscripts(agentDir: string, signal: AbortSignal): Promise<Set<string>> {
+	const files = new Set<string>();
+	const root = orchestrationSessionsDir(agentDir);
+	const listing = async (dir: string): Promise<Dirent[]> => {
+		try {
+			return await readdir(dir, { withFileTypes: true });
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code === "ENOENT") return [];
+			throw error;
+		}
+	};
+	for (const bundle of await listing(root)) {
+		signal.throwIfAborted();
+		if (!bundle.isDirectory()) continue;
+		const dir = join(root, bundle.name, "worker-conversations");
+		for (const entry of await listing(dir))
+			if (entry.isFile() && entry.name.endsWith(".jsonl")) files.add(resolve(dir, entry.name));
+	}
+	return files;
 }
 
 async function scanRootSessions(
@@ -294,7 +329,7 @@ async function scanRootSessions(
 			);
 		}
 	}
-	return { bound, rootIds };
+	return { bound, rootIds, transcripts: await listWorkerTranscripts(agentDir, signal) };
 }
 
 /** The runs of one bot the scan and its record name that exist on disk. */
@@ -307,7 +342,7 @@ function runsFromScan(agentDir: string, record: PersistentBotRecord, scan: RootS
 	if (last) identities.push(last);
 	const runs: BotHistoryRun[] = [];
 	for (const identity of identities) {
-		const run = runOf(agentDir, identity);
+		const run = runOf(agentDir, identity, scan.transcripts);
 		if (run) runs.push(run);
 	}
 	return mergeRuns([], runs);
