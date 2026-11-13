@@ -4,7 +4,6 @@
  * bound to the bot, and a group send fans out to its members and records the group's message. The branch and disposal
  * guards are checked before each durable write. The coordinator supplies the lanes, workers and roster through its host port.
  */
-import { randomUUID } from "node:crypto";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import type { OrchestrationDelegationLimits, WorkerResultContract } from "../orchestration/contracts.ts";
@@ -12,12 +11,8 @@ import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-gu
 import { botStartModelStance } from "../orchestration/worker-model-pins.ts";
 import type { RemoteHubController } from "../remote/hub-controller.ts";
 import type { BotOperatorMessageOptions } from "./bot-operator-message-options.ts";
-import {
-	assertBotId,
-	type BotRuntimeBindings,
-	type BotRuntimeContext,
-	keyedBotRuntimeId,
-} from "./bot-runtime-bindings.ts";
+import { assertBotId, type BotRuntimeBindings, type BotRuntimeContext } from "./bot-runtime-bindings.ts";
+import { freshBotRuntimeId, keyedBotRuntimeId } from "./bot-runtime-id.ts";
 import {
 	BOT_MEMORY_BLOCK_SEPARATOR,
 	type BotOperatorMessageDispatchResult,
@@ -226,7 +221,7 @@ export class BotOperatorDispatch {
 
 		const preferredAgentId =
 			options?.idempotencyKey === undefined
-				? `bot-${randomUUID()}`
+				? freshBotRuntimeId()
 				: keyedBotRuntimeId(normId, options.idempotencyKey);
 		// Publish the context before execution: recovery never has to guess a group's origin from its name.
 		assertCurrentBranch();

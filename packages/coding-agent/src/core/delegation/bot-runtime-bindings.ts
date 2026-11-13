@@ -1,6 +1,6 @@
-import { createHash } from "node:crypto";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { groupBotRuntimeId, isGeneratedBotRuntimeId } from "./bot-runtime-id.ts";
 import { isGeneratedWorkerLaneId } from "./worker-lane-id.ts";
 
 export const BOT_RUNTIME_BINDINGS_CUSTOM_TYPE = "pi_bot_runtime_bindings";
@@ -9,23 +9,27 @@ const MAX_BINDINGS = 1024;
 
 /**
  * Whether `id` is in the bot id domain. Anything else is not a bot: a managed lane id such as `collaboration:<job>:<agent>`,
- * and the id of a plain delegate worker (`worker-<n>`), which is a child of the session that started it.
+ * the id of a plain delegate worker (`worker-<n>`), which is a child of the session that started it, and a runtime the
+ * harness generated for a bot (`bot-<uuid>`, `bot-<32 hex>`, `group-<32 hex>`, `bot-runtime-id.ts`), which is a bot's
+ * worker and never a bot's name.
  */
 export function isBotId(id: string): boolean {
-	return ID.test(id) && !isGeneratedWorkerLaneId(id);
+	return ID.test(id) && !isGeneratedWorkerLaneId(id) && !isGeneratedBotRuntimeId(id);
 }
 
-/** Refuses a name no bot may take: the id of a delegate worker, which `delegate` manages (status, send, cancel). */
+/**
+ * Refuses a name no bot may take: the id of a delegate worker, which `delegate` manages (status, send, cancel), and the id
+ * of a bot's runtime, which the harness generates for that bot's worker.
+ */
 export function assertBotId(id: string): void {
 	if (isGeneratedWorkerLaneId(id))
 		throw new Error(
 			`"${id}" is a delegate worker, not a bot; manage it with the delegate tool (status, send, cancel). Bots are created with /bot new or the bot tool under another name.`,
 		);
-}
-
-/** The runtime a keyed send to a bot starts: named by its replay key, so a repeated send names the same runtime. */
-export function keyedBotRuntimeId(alias: string, replayKey: string): string {
-	return `bot-${createHash("sha256").update(`operator-message\0${alias}\0${replayKey}`).digest("hex").slice(0, 32)}`;
+	if (isGeneratedBotRuntimeId(id))
+		throw new Error(
+			`"${id}" is the id the harness gives a bot's worker runtime, not a name a bot can take. Bots are created with /bot new or the bot tool under another name.`,
+		);
 }
 
 export interface BotRuntimeContext {
@@ -121,9 +125,7 @@ export class BotRuntimeBindings {
 	}
 
 	preferredId(context: BotRuntimeContext): string {
-		return context.teamId === undefined
-			? context.agentId
-			: `group-${createHash("sha256").update(contextKey(context)).digest("hex").slice(0, 32)}`;
+		return context.teamId === undefined ? context.agentId : groupBotRuntimeId(contextKey(context));
 	}
 
 	runtime(alias: string, teamId?: string, teamIncarnationId?: string): string {
@@ -135,7 +137,7 @@ export class BotRuntimeBindings {
 		return this.read();
 	}
 
-	/** The bot alias a runtime is the current generation of; undefined for a superseded runtime, a delegate worker or a managed lane, none of which is a bot. */
+	/** The bot alias a runtime is the current generation of; undefined for a superseded runtime, a delegate worker, a managed lane or a runtime no bot holds, none of which is a bot. */
 	alias(runtime: string): string | undefined {
 		const context = this.generationContext(runtime);
 		if (!isBotId(context.agentId) || !this.records().getBot(context.agentId)) return undefined;

@@ -4,7 +4,6 @@
  * child under the leader's running goal, stopped or retired. It also builds the message directory a bot's worker uses to
  * reach its own bots. The coordinator supplies the roster, the worker runtime and the leaders through its host port.
  */
-import { createHash } from "node:crypto";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import { interfaceText } from "../language/interface-text.ts";
@@ -19,7 +18,8 @@ import {
 import type { BotMessageDirectory, BotOwnedStartOutcome } from "./bot-message-contract.ts";
 import { createBotMessageDirectory } from "./bot-message-directory.ts";
 import { displayNameFor, suggestBotId } from "./bot-naming.ts";
-import { type BotRuntimeBindings, isBotId } from "./bot-runtime-bindings.ts";
+import type { BotRuntimeBindings } from "./bot-runtime-bindings.ts";
+import { leaderOwnedBotRuntimeId } from "./bot-runtime-id.ts";
 import type { LeaderController } from "./leader-controller.ts";
 import type { DelegationRecord } from "./leader-delegation-ledger.ts";
 import {
@@ -39,6 +39,7 @@ import type {
 	WorkerAgentView,
 } from "./worker-agent-control.ts";
 import type { WorkerDelegationController } from "./worker-delegation-controller.ts";
+import { isGeneratedWorkerLaneId } from "./worker-lane-id.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { contractGrantsChildren } from "./worker-nested-start.ts";
 
@@ -155,10 +156,7 @@ export class BotLifecycleController {
 			};
 		const writable = bot.canWrite === true && envelope.leaderMayWrite && envelope.writePaths.length > 0;
 		// Named by the invocation: a repeated call names the same runtime, and the admission's replay key starts nothing new.
-		const preferredAgentId = `bot-${createHash("sha256")
-			.update(`leader-owned-start\0${invocationId}\0${alias}`)
-			.digest("hex")
-			.slice(0, 32)}`;
+		const preferredAgentId = leaderOwnedBotRuntimeId(invocationId, alias);
 		const memoryCtx = store.composeBotUnifiedMemoryContext(alias);
 		const instructions =
 			memoryCtx.promptBlock.length > 0 ? `${message}${BOT_MEMORY_BLOCK_SEPARATOR}${memoryCtx.promptBlock}` : message;
@@ -344,9 +342,9 @@ export class BotLifecycleController {
 			if (!this.host.getBotTeamStore().getBot(agentId))
 				return {
 					retired: false,
-					detail: isBotId(agentId)
-						? interfaceText().botTeam.botMissing(agentId)
-						: interfaceText().botTeam.notABotWorker(agentId),
+					detail: isGeneratedWorkerLaneId(agentId)
+						? interfaceText().botTeam.notABotWorker(agentId)
+						: interfaceText().botTeam.botMissing(agentId),
 				};
 			// Retiring a leader mid-goal would orphan its goal and its bots: the goal is cancelled first.
 			if (
