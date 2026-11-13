@@ -47,7 +47,10 @@ import { contractGrantsChildren } from "./worker-nested-start.ts";
 /** What the lifecycle reads from and asks of the coordinator: the roster, the worker runtime and the leaders. */
 export interface BotLifecycleHost {
 	/** The bots that run as sessions of their own: a stop reaches their running turn, a retirement or a change their session. */
-	readonly botSessions: Pick<BotSessionHost, "interrupt" | "isActive" | "release" | "recordChanged">;
+	readonly botSessions: Pick<
+		BotSessionHost,
+		"interrupt" | "isActive" | "noteHistoryRun" | "release" | "recordChanged"
+	>;
 	getBotTeamStore(): PersistentBotTeamStore;
 	/** Drops the cached bot roster: a bot changed under it. */
 	invalidateBotViews(): void;
@@ -168,6 +171,8 @@ export class BotLifecycleController {
 		// one built before it would not know which bot it is. After a refused start the binding names a runtime that never
 		// existed, which reads everywhere as a bot that is not running.
 		this.botBindings.bind(alias, preferredAgentId);
+		// The run joins the bot's history in its home, as an owner's start does, so every process reads its conversation.
+		this.host.botSessions.noteHistoryRun(alias, this.deps.getSessionManager().getSessionId(), preferredAgentId);
 		const outcome = await this.host.workerController().admitNested({
 			parentAgentId: leaderAgentId,
 			delegationObjectiveId: goal.objectiveId,

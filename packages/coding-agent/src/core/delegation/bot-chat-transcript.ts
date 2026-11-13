@@ -1,13 +1,13 @@
 /**
- * The chat an operator reads for a bot or a group: a bot's own session conversation with the owner, with the bot's earlier
- * worker conversations (what ran as a worker before the bot had a session of its own, and the sends that still run as
- * workers: the home's history index finds them in any session, the open session's own runtime is read live) shaped into
- * the messages the chat view draws and merged in by time, the remote hub's chat for a machine joined
- * over the link, the lane and group records as the fallback when no conversation exists, and a group's own message log. It
- * reads through the ports the coordinator gives it and never builds a worker, a store or a hub itself.
+ * The chat an operator reads for a bot or a group. A bot's direct chat is read from its home alone, whichever process wrote
+ * it: its own session's conversation with the owner and the worker runs its history index holds (what ran as a worker
+ * before the bot had a session of its own, and the sends that still run as workers, each indexed when it is bound), shaped
+ * into the messages the chat view draws and merged in by time. A machine joined over the link reads the remote hub's chat;
+ * a group's chat is the group's worker conversation with the bot in this session, with the lane and group records as the
+ * fallback when none exists, and a group's own message log. It reads through the ports the coordinator gives it and never
+ * builds a worker, a store or a hub itself.
  */
 import type { AssistantMessage } from "@caupulican/pi-ai";
-import { parseWorkerTranscriptReference } from "../../kernel/session/worker-transcript-reference.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import { isModelFacingText } from "../../presentation/plain-text.ts";
@@ -87,24 +87,18 @@ export class BotChatTranscript {
 	/** The bot's chat with the owner: its own session's conversation, after what ran as a worker before or beside it. */
 	readBotChatMessages(agentId: string, teamId?: string): AgentMessage[] {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
-		if (this.host.getBotTeamStore().getBot(normId)?.remote) return this.host.getRemoteHub().chat(normId);
+		const bot = this.host.getBotTeamStore().getBot(normId);
+		if (bot?.remote) return this.host.getRemoteHub().chat(normId);
 		// A group's chat is the group's own conversation with the bot, still a worker.
-		if (teamId) return this.readWorkerChatMessages(normId, teamId, false);
-		const own = this.host.botSessions.readMessages(normId);
-		const history = this.host.botSessions.readHistory(normId);
-		const earlier = history.runs.reduce<AgentMessage[]>(
-			(all, run) => mergeByTime(all, this.shapeWorkerMessages(run.messages) ?? []),
-			[],
-		);
-		// A runtime the home's index already holds is read from there, not twice.
-		const worker = this.readWorkerChatMessages(
-			normId,
-			undefined,
-			own === undefined && earlier.length === 0,
-			new Set(history.runs.map((run) => run.runtime)),
-		);
-		const before = mergeByTime(earlier, worker);
-		return own ? mergeByTime(before, own) : before;
+		if (teamId) return this.readGroupChatMessages(normId, teamId);
+		// Nothing here resolves through this session's bindings or transcripts: another process reads the same chat.
+		const earlier = this.host.botSessions
+			.readHistory(normId)
+			.runs.reduce<AgentMessage[]>((all, run) => mergeByTime(all, this.shapeWorkerMessages(run.messages) ?? []), []);
+		const chat = mergeByTime(earlier, this.host.botSessions.readMessages(normId) ?? []);
+		return chat.length === 0 && bot?.lastSummary
+			? [this.createSyntheticBotSummaryMessage(bot, bot.lastSummary)]
+			: chat;
 	}
 
 	/**
@@ -165,44 +159,21 @@ export class BotChatTranscript {
 		return shown;
 	}
 
-	/**
-	 * What the bot's worker runtime said, shaped for the chat; the last summary stands in when `withSummary` and nothing else
-	 * exists. A direct conversation's runtime that `indexed` already holds (the history reads it) shows nothing here.
-	 */
-	private readWorkerChatMessages(
-		normId: string,
-		teamId: string | undefined,
-		withSummary: boolean,
-		indexed?: ReadonlySet<string>,
-	): AgentMessage[] {
-		const team = teamId ? this.host.getBotTeamStore().getTeam(teamId) : undefined;
+	/** What the bot said in the group's worker conversation, shaped for the chat; the lane and group records when none exists. */
+	private readGroupChatMessages(normId: string, teamId: string): AgentMessage[] {
+		const team = this.host.getBotTeamStore().getTeam(teamId);
 		const runtime = this.botBindings.runtime(normId, teamId, team ? teamIncarnation(team) : undefined);
-		if (!teamId && indexed?.has(runtime)) return [];
-		let conv = this.host.openWorkerTranscript(runtime);
-		const bot = this.host.getBotTeamStore().getBot(normId);
-		const lastRuntime = bot?.lastTranscriptRef
-			? parseWorkerTranscriptReference(bot.lastTranscriptRef)?.logicalAgentId
-			: undefined;
-		if (!teamId && !conv && bot?.lastTranscriptRef && !(lastRuntime !== undefined && indexed?.has(lastRuntime))) {
-			conv = this.host.openWorkerTranscript(bot.lastTranscriptRef);
-		}
+		const conv = this.host.openWorkerTranscript(runtime);
 		if (conv) {
 			const shown = this.shapeWorkerMessages(conv.getProviderContext().messages);
 			if (shown) return shown;
 		}
 
-		const store = this.host.getBotTeamStore();
-		const memberTeamIds = teamId ? [teamId] : [];
-		const relevantTeamMessages = memberTeamIds.flatMap((tId) =>
-			store.listTeamMessages(tId).filter((m) => m.targetAgentIds.includes(normId)),
-		);
+		const relevantTeamMessages = this.host
+			.getBotTeamStore()
+			.listTeamMessages(teamId)
+			.filter((m) => m.targetAgentIds.includes(normId));
 		const laneRecords = this.host.getLaneRecords().filter((r) => r.agentId === runtime || r.laneId === runtime);
-
-		if (relevantTeamMessages.length === 0 && laneRecords.length === 0) {
-			return withSummary && !teamId && bot?.lastSummary
-				? [this.createSyntheticBotSummaryMessage(bot, bot.lastSummary)]
-				: [];
-		}
 
 		const fallbackMessages: AgentMessage[] = [];
 		for (const record of laneRecords) {
@@ -230,9 +201,6 @@ export class BotChatTranscript {
 				content: [{ type: "text", text: `[Team ${tm.teamId}] ${tm.text}` }],
 				timestamp: tm.timestamp,
 			});
-		}
-		if (withSummary && !teamId && fallbackMessages.length === 0 && bot?.lastSummary) {
-			fallbackMessages.push(this.createSyntheticBotSummaryMessage(bot, bot.lastSummary));
 		}
 		fallbackMessages.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
 		return fallbackMessages;
