@@ -405,6 +405,18 @@ function judgmentAnswer(judgment: ScriptedJudgment, question: JudgeQuestion): Re
 const SYSTEM_ONE_MODELS_URL = "https://api.typesafe.ai/v1/models";
 const SYSTEM_ONE_DECISIONS_URL = "https://api.typesafe.ai/v1/systemone";
 
+/**
+ * The answers to the owner goal intent's questions (`S1-OWNER-GOAL-INTENT`) when a phase declares none: the message sets no
+ * standing outcome, on sufficient evidence. That judgment is a delivery effect, asked once after any goal-less owner message
+ * is delivered while System One is on and no goal is unfinished, detached from the turn, so which phase is open when it is
+ * asked is not the scenario's to script. A phase that scripts a question of it (a goal the owner's words start) overrides
+ * the default and is then declared and consumed like any other judgment.
+ */
+const OWNER_GOAL_INTENT_DEFAULTS: Readonly<Record<string, ScriptedJudgment>> = {
+	sets_standing_outcome: { kind: "noul", probability: 0.02 },
+	message_evidence_sufficient: { kind: "noul", probability: 0.97 },
+};
+
 /** Serialized optional-intent entries by id: the exact bytes a restored session keeps, and the ids an off window may not add to. */
 function optionalIntentSnapshot(manager: SessionManager): Map<string, string> {
 	return new Map(
@@ -454,6 +466,8 @@ export class ScriptedSystemOneTransport {
 	readonly unscripted: string[] = [];
 	/** Every decoded request of the enabled transport, in arrival order, for scenario oracles and negative controls. */
 	readonly decoded: SystemOneDecodedRequest[] = [];
+	/** The requests answered by {@link OWNER_GOAL_INTENT_DEFAULTS}, apart from `decoded` so a phase's own request counts stay exact. */
+	readonly ownerGoalIntent: SystemOneDecodedRequest[] = [];
 	private phase = "unentered";
 	private expected = new Map<string, ScriptedJudgment>();
 	private families = new Map<string, ScriptedJudgment>();
@@ -625,6 +639,26 @@ export class ScriptedSystemOneTransport {
 		const onAdmit = this.onAdmit;
 		const ignoresAbort = this.ignoresAbort;
 		const decoded: SystemOneDecodedRequest = { phase, state: body.state, questions: body.questions };
+		const questionIds = Object.keys(body.questions);
+		if (questionIds.every((id) => OWNER_GOAL_INTENT_DEFAULTS[id] !== undefined && !expected.has(id))) {
+			// Answered at once, outside the phase's gate, outage and request checks: the phase did not ask it.
+			try {
+				const defaults: Record<string, unknown> = {};
+				for (const [id, question] of Object.entries(body.questions)) {
+					defaults[id] = judgmentAnswer(OWNER_GOAL_INTENT_DEFAULTS[id]!, question);
+				}
+				this.ownerGoalIntent.push(decoded);
+				return Response.json({
+					model: body.model,
+					answers: defaults,
+					usage: { input_tokens: 10, output_tokens: 5 },
+				});
+			} catch (error) {
+				const detail = `${phase}: owner goal intent: ${error instanceof Error ? error.message : String(error)}`;
+				this.unscripted.push(detail);
+				throw new Error(detail);
+			}
+		}
 		this.decoded.push(decoded);
 		try {
 			checkInstructionReferences(decoded);
@@ -641,7 +675,7 @@ export class ScriptedSystemOneTransport {
 		for (const [id, question] of Object.entries(body.questions)) {
 			const direct = expected.get(id);
 			const family = direct === undefined ? [...families].find(([prefix]) => id.startsWith(prefix)) : undefined;
-			const judgment = direct ?? family?.[1];
+			const judgment = direct ?? family?.[1] ?? OWNER_GOAL_INTENT_DEFAULTS[id];
 			if (judgment === undefined) {
 				const offered = Object.keys(question.criteria ?? {}).join("|");
 				rejected.push(`${id}:${question.type}[${offered}]`);

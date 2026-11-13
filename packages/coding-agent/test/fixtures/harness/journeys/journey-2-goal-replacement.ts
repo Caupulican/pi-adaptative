@@ -8,6 +8,7 @@ import { createBarrier, text } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { verifyGoalCancellation } from "./journey-2-goal-cancellation.ts";
 import { verifyGoalRetrievalReplacement } from "./journey-2-goal-retrieval-replacement.ts";
+import { verifyOwnerGoalIntent } from "./journey-2-owner-goal-intent.ts";
 import { verifyStageReplacement } from "./journey-2-stage-replacement.ts";
 import { verifyToolHandoffOwnership } from "./journey-2-tool-handoff-ownership.ts";
 
@@ -69,6 +70,7 @@ export async function verifyGoalReplacementDuringRoute(world: HarnessWorld): Pro
 	});
 	await verifyGoalCancellation(world, { active: TURN_JUDGMENTS, replacement: TURN_JUDGMENTS });
 	await verifyToolHandoffOwnership(world, TURN_JUDGMENTS);
+	await verifyOwnerGoalIntent(world);
 }
 
 async function verifyReplacementVariant(
