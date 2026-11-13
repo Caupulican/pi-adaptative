@@ -1535,8 +1535,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		if (!this._channelsHostedByDaemon) this.channels.start();
 		if (!this.deps.isDisposed()) this._getActAhead().start();
 		if (this._hasWorkerState()) this._getRetention().scheduleFromIdle();
-		// A bot's watches are sampled by its own session: one a closed process left holding them is opened here.
-		this._botSessions.openWatching();
+		// Bot sessions holding watches a closed process left are opened here; the daemon's phone session hosts none.
+		if (!this._channelsHostedByDaemon) this._botSessions.openWatching();
 	}
 
 	/** The host's CI source offers its failure evidence while it runs; the returned function withdraws it. */

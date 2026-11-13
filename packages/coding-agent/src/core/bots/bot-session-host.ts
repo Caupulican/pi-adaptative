@@ -28,7 +28,7 @@
 import { existsSync, statSync } from "node:fs";
 import { type Api, type Model, TOOL_SCHEMA_SEARCH_NAME, type Usage } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { readSessionHeader } from "../../kernel/session/session-file-reading.ts";
+import { getSessionHeaderCwd, readSessionHeader } from "../../kernel/session/session-file-reading.ts";
 import { findMostRecentSessionInDirs } from "../../kernel/session/session-listing.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
@@ -136,12 +136,14 @@ export function botSessionToolNames(canWrite: boolean): string[] {
 }
 
 /**
- * The id of the bot's own session as its home holds it: the newest session file, the one its next session continues;
- * undefined while it has none. Another process reads the bot's watches by it, since they target this id.
+ * The bot's own session as its home holds it: the newest session file, the one its next session continues, with the
+ * directory it works in; undefined while it has none. Another process reads the bot's watches by its id, since they
+ * target it.
  */
-export function botSessionIdOnDisk(agentDir: string, agentId: string): string | undefined {
+export function botSessionOnDisk(agentDir: string, agentId: string): { id: string; cwd?: string } | undefined {
 	const file = findMostRecentSessionInDirs([botHomeOf(agentDir, agentId).sessionsDir]);
-	return (file && readSessionHeader(file)?.id) || undefined;
+	const header = file ? readSessionHeader(file) : null;
+	return header ? { id: header.id, cwd: getSessionHeaderCwd(header) } : undefined;
 }
 
 /** What defines a session: the fields a session is built from. A rename or a new description leaves it as it is. */
@@ -606,22 +608,27 @@ export class BotSessionHost {
 
 	/**
 	 * Opens the bot's session when its home's session holds live watches and no process hosts it: a watch is sampled only by
-	 * its own session, so a process that starts, or a session rebuilt on a changed record, takes the waits up again.
+	 * its own session, so a process that starts, or a session rebuilt on a changed record, takes the waits up again. Only a
+	 * process working in the directory the session worked in takes it: a watch's relative path reads against that
+	 * directory. Another process that opened it first is not a failure.
 	 */
 	private openIfWatching(agentId: string): void {
 		const agentDir = this.ports.agentDir();
 		if (this.stopped || this.entries.has(agentId) || readRemoteBotHost(agentDir, agentId)) return;
-		const sessionId = botSessionIdOnDisk(agentDir, agentId);
-		if (sessionId === undefined || !this.holdsWatches(sessionId)) return;
-		void this.open(agentId).catch((error: unknown) =>
-			this.ports.warn(interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error))),
-		);
+		const saved = botSessionOnDisk(agentDir, agentId);
+		if (!saved || saved.cwd !== this.ports.cwd() || !this.holdsWatches(saved.id)) return;
+		void this.open(agentId).catch((error: unknown) => {
+			if (!readRemoteBotHost(agentDir, agentId))
+				this.ports.warn(interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error)));
+		});
 	}
 
 	/** Opens every bot whose own session holds live watches that no process samples (see {@link openIfWatching}). */
 	openWatching(): void {
+		const bots = this.ports.store().listBots();
+		if (bots.length === 0) return;
 		this.ensureHomeWatch();
-		for (const bot of this.ports.store().listBots()) this.openIfWatching(bot.agentId);
+		for (const bot of bots) this.openIfWatching(bot.agentId);
 	}
 
 	/** A turn ended: what the session spent since it began goes to the main session's cost view, once. */
@@ -737,7 +744,7 @@ export class BotSessionHost {
 	release(agentId: string): void {
 		const entry = this.entries.get(agentId);
 		if (entry && this.isBusy(entry)) throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
-		const sessionId = entry?.session.sessionId ?? botSessionIdOnDisk(this.ports.agentDir(), agentId);
+		const sessionId = entry?.session.sessionId ?? botSessionOnDisk(this.ports.agentDir(), agentId)?.id;
 		if (sessionId !== undefined) {
 			const store = this.ports.store();
 			const nowMs = this.idleTimers().now();
