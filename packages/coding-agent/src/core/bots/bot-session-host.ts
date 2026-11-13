@@ -9,32 +9,32 @@
  * the message. The bot has an identity of its own: its name and its soul replace the main agent's in the system prompt
  * (the soul is judged again here because a stored record can have been edited by hand). It works in the owner's project
  * directory under a worker's private-path scope, with a settings manager of its own over the main session's settings
- * storage. It is a child session (no routines, no memory writes, no channels) that runs System One as the main session
- * does (on or off, provider, transport), keeping its System One evidence in its home; its edge grants are its own
- * branch's plus the settings'. Its tools are the read tools, System One's tool and a shell, plus the file tools and python
- * when the record grants `canWrite`; a read-only bot's shell runs only commands the read-only shell line admits. Each turn
- * is bounded by the worker spend bound and its usage is reported to the main session's cost view.
- * Autonomy (subagents, routines, goals, watches) belongs to a later phase.
+ * storage. It is a child session (no memory writes, no channels, and of the routines only the watches it arms itself)
+ * that runs System One as the main session does (on or off, provider, transport), keeping its System One evidence in its
+ * home; its edge grants are its own branch's plus the settings'. Its tools are the read tools, System One's tool and a
+ * shell, plus the file tools and python when the record grants `canWrite`; a read-only bot's shell runs only commands the
+ * read-only shell line admits. Each turn is bounded by the worker spend bound and its usage is reported to the main
+ * session's cost view. Subagents, routines of its own and goals belong to a later phase.
  *
  * One process hosts a bot's session at a time (`bots/<id>/host.lock`): a second process is refused, naming the session
  * that hosts the bot, rather than appending to the same file. Every process still sees the bot: its conversation is read
  * from the home's session files, and its state from `host-state.json`, which the hosting process publishes on each change
- * of state; one watch over the bot homes tells an open roster and an open chat when either changed, whichever process
- * wrote it (`stateOf`, `readMessages`, `subscribe`). A change of the bot's record rebuilds an idle session on the next message
- * and is refused while a turn runs. A finished turn records its outcome in the store as a worker's did, so the roster's
- * unread mark and summary keep working. This host only reads and writes the bot's own home and session.
+ * of state. What the host reads of a bot it does not run, with the one watch over the bot homes that tells an open roster
+ * and an open chat when either changed whichever process wrote it, is `BotRemoteView` (`stateOf`, `readMessages`,
+ * `subscribe`). A change of the bot's record rebuilds an idle session on the next message and is refused while a turn
+ * runs. A finished turn records its outcome in the store as a worker's did, so the roster's unread mark and summary keep
+ * working. This host only reads and writes the bot's own home and session.
  */
 
 import { randomBytes } from "node:crypto";
-import { existsSync, statSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { type Api, type Model, TOOL_SCHEMA_SEARCH_NAME, type Usage } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { getSessionHeaderCwd, readSessionHeader } from "../../kernel/session/session-file-reading.ts";
 import { findMostRecentSessionInDirs } from "../../kernel/session/session-listing.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { checkSoulText, namedAgentIdentity } from "../agent-identity.ts";
-import { botHomeName, botHostLockFile, botSystemOneEvidenceDir } from "../agent-paths.ts";
+import { botHostLockFile, botSystemOneEvidenceDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { boundSessionTurnSpend, unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
 import { usageSince } from "../cost/usage-delta.ts";
@@ -63,17 +63,14 @@ import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, botProfileOf, ensureBotHome } from "./bot-home.ts";
-import { watchBotHomes } from "./bot-home-watch.ts";
-import { BotHostStateWriter, type BotSessionState, type RemoteBotHost, readRemoteBotHost } from "./bot-host-state.ts";
+import { BotHostStateWriter, type BotSessionState, readRemoteBotHost } from "./bot-host-state.ts";
+import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import { BotTurnSupervision } from "./bot-turn-supervision.ts";
 
 /** How long a bot's session stays loaded with no turn running and no input queued. */
 export const BOT_SESSION_IDLE_BOUND_MS = 10 * 60 * 1000;
 
 export type { BotSessionState };
-
-/** How long a remote bot's running or queued state stands before its host is judged again (a killed host publishes nothing). */
-const REMOTE_RECHECK_MS = 30 * 1000;
 
 /** What the host reads from and asks of the coordinator. */
 export interface BotSessionHostPorts {
@@ -138,17 +135,6 @@ export function botSessionToolNames(canWrite: boolean): string[] {
 		: [...[...reads, STABLE_SHELL_TOOL_NAME].filter(toolSurvivesReadOnly), TOOL_SCHEMA_SEARCH_NAME];
 }
 
-/**
- * The bot's own session as its home holds it: the newest session file, the one its next session continues, with the
- * directory it works in; undefined while it has none. Another process reads the bot's watches by its id, since they
- * target it.
- */
-export function botSessionOnDisk(agentDir: string, agentId: string): { id: string; cwd?: string } | undefined {
-	const file = findMostRecentSessionInDirs([botHomeOf(agentDir, agentId).sessionsDir]);
-	const header = file ? readSessionHeader(file) : null;
-	return header ? { id: header.id, cwd: getSessionHeaderCwd(header) } : undefined;
-}
-
 /** What defines a session: the fields a session is built from. A rename or a new description leaves it as it is. */
 function profileKeyOf(record: PersistentBotRecord): string {
 	const { provider, modelId, thinkingLevel, soul, canWrite } = botProfileOf(record);
@@ -185,21 +171,11 @@ export class BotSessionHost {
 	/** Sessions being closed: the next one of that bot opens once the file and the lock are free. */
 	private readonly closing = new Map<string, Promise<void>>();
 	private readonly listeners = new Set<(change: readonly string[]) => void>();
-	/** The transcript of the one bot whose chat was read last while it had no loaded session. */
-	private transcriptCache:
-		| { agentId: string; file: string; mtimeMs: number; size: number; messages: AgentMessage[] }
-		| undefined;
 	private stopped = false;
 	/** This host among any other in its process: the bots' locks and published states name it (`HostLockRecord.holder`). */
 	private readonly holder = randomBytes(8).toString("hex");
-	/** What each bot's other host last said, kept while the home watch keeps it fresh. */
-	private readonly remote = new Map<string, RemoteBotHost | undefined>();
-	/** Each bot's own session as its home holds it (`botSessionOnDisk`), kept while the home watch keeps it fresh. */
-	private readonly saved = new Map<string, ReturnType<typeof botSessionOnDisk>>();
-	private homeWatch: (() => void) | undefined;
-	/** The home watch failed: other processes' changes are read from disk each time instead. */
-	private homeWatchFailed = false;
-	private remoteRecheck: unknown;
+	/** The bots this host does not run, as their homes say (see `BotRemoteView`). */
+	private readonly view: BotRemoteView;
 
 	constructor(ports: BotSessionHostPorts) {
 		this.ports = ports;
@@ -208,6 +184,19 @@ export class BotSessionHost {
 			store: () => ports.store(),
 			warn: (message) => ports.warn(message),
 		});
+		this.view = new BotRemoteView(
+			{
+				agentDir: () => ports.agentDir(),
+				store: () => ports.store(),
+				timers: () => this.idleTimers(),
+				warn: (message) => ports.warn(message),
+				runsLocally: (agentId) => this.entries.has(agentId),
+				// A host that let a bot go leaves its watches unsampled until a process opens its session again.
+				hostChanged: (agentId) => this.openIfWatching(agentId),
+				changed: (agentIds) => this.changedMany(agentIds),
+			},
+			this.holder,
+		);
 	}
 
 	/** The bot's earlier worker conversations, whichever session ran them (see `BotHistory`). */
@@ -243,93 +232,6 @@ export class BotSessionHost {
 		for (const listener of [...this.listeners]) listener(agentIds);
 	}
 
-	/** Starts the one watch over the bot homes, when a roster or a chat first reads another process's bot. */
-	private ensureHomeWatch(): void {
-		if (this.homeWatch || this.homeWatchFailed || this.stopped) return;
-		const failed = (reason: string) => {
-			this.homeWatch = undefined;
-			this.homeWatchFailed = true;
-			this.remote.clear();
-			this.saved.clear();
-			this.ports.warn(interfaceText().botTeam.botHomesNotWatched(reason));
-		};
-		try {
-			this.homeWatch = watchBotHomes(
-				this.ports.agentDir(),
-				(changes) => {
-					const ids = new Map(
-						this.ports
-							.store()
-							.listBots({ includeRetired: true })
-							.map((bot) => [botHomeName(bot.agentId), bot.agentId]),
-					);
-					const changed = new Set<string>();
-					// A home's session files changed: what it saved is read again, before a host's change below opens it.
-					for (const { home, file } of changes) {
-						const agentId = ids.get(home);
-						if (agentId !== undefined && file.startsWith("sessions/")) this.saved.delete(agentId);
-					}
-					for (const { home, file } of changes) {
-						const agentId = ids.get(home);
-						if (agentId === undefined) continue;
-						const hostFile = file === "host-state.json" || file === "host.lock";
-						// This process's own bot sessions announce themselves; a change it wrote is not news.
-						if (this.entries.has(agentId) && (hostFile || file.startsWith("sessions/"))) continue;
-						if (hostFile) this.remote.delete(agentId);
-						// A host that let a bot go leaves its watches unsampled until a process opens its session again.
-						if (hostFile) this.openIfWatching(agentId);
-						changed.add(agentId);
-					}
-					if (changed.size > 0) this.changedMany([...changed]);
-				},
-				(error) => failed(error.message),
-			);
-		} catch (error) {
-			failed(errorText(error));
-		}
-	}
-
-	/** The process other than this one that hosts the bot's session, as its home says now. */
-	private remoteOf(agentId: string): RemoteBotHost | undefined {
-		this.ensureHomeWatch();
-		if (!this.homeWatch) return readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
-		if (this.remote.has(agentId)) return this.remote.get(agentId);
-		const host = readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
-		this.remote.set(agentId, host);
-		this.armRemoteRecheck();
-		return host;
-	}
-
-	/** The bot's own session as its home holds it now (see {@link botSessionOnDisk}). */
-	private savedSessionOf(agentId: string): ReturnType<typeof botSessionOnDisk> {
-		this.ensureHomeWatch();
-		if (!this.homeWatch) return botSessionOnDisk(this.ports.agentDir(), agentId);
-		if (!this.saved.has(agentId)) this.saved.set(agentId, botSessionOnDisk(this.ports.agentDir(), agentId));
-		return this.saved.get(agentId);
-	}
-
-	private remoteActive(host: RemoteBotHost | undefined): boolean {
-		return host?.state === "running" || host?.state === "queued";
-	}
-
-	/** A host that is working but was killed publishes nothing: while one is cached as working, its lock is judged again. */
-	private armRemoteRecheck(): void {
-		if (this.remoteRecheck !== undefined || this.stopped) return;
-		if (![...this.remote.values()].some((host) => this.remoteActive(host))) return;
-		this.remoteRecheck = this.idleTimers().setTimeout(() => {
-			this.remoteRecheck = undefined;
-			const changed: string[] = [];
-			for (const [agentId, host] of [...this.remote]) {
-				if (!this.remoteActive(host)) continue;
-				const now = readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
-				this.remote.set(agentId, now);
-				if (now?.state !== host?.state) changed.push(agentId);
-			}
-			if (changed.length > 0) this.changedMany(changed);
-			this.armRemoteRecheck();
-		}, REMOTE_RECHECK_MS);
-	}
-
 	private localState(entry: BotSessionEntry): BotSessionState {
 		if (this.isRunning(entry)) return "running";
 		return entry.session.deliverablePendingMessageCount > 0 ? "queued" : "idle";
@@ -361,13 +263,13 @@ export class BotSessionHost {
 	stateOf(agentId: string): BotSessionState | undefined {
 		const entry = this.entries.get(agentId);
 		if (entry) return this.localState(entry);
-		return this.remoteOf(agentId)?.state;
+		return this.view.hostOf(agentId)?.state;
 	}
 
 	/** Whether the bot's session, here or in the process hosting it, is running a turn or holds queued input. */
 	isActive(agentId: string): boolean {
 		const entry = this.entries.get(agentId);
-		return entry === undefined ? this.remoteActive(this.remoteOf(agentId)) : this.isBusy(entry);
+		return entry === undefined ? remoteHostActive(this.view.hostOf(agentId)) : this.isBusy(entry);
 	}
 
 	/**
@@ -650,7 +552,7 @@ export class BotSessionHost {
 	 * saved last, which another process may be hosting.
 	 */
 	liveWatches(agentId: string): number {
-		const sessionId = this.entries.get(agentId)?.session.sessionId ?? this.savedSessionOf(agentId)?.id;
+		const sessionId = this.entries.get(agentId)?.session.sessionId ?? this.view.savedSessionOf(agentId)?.id;
 		return sessionId === undefined ? 0 : liveOwnWatchCount(this.ports.store(), sessionId, this.idleTimers().now());
 	}
 
@@ -668,7 +570,7 @@ export class BotSessionHost {
 	private openIfWatching(agentId: string): void {
 		const agentDir = this.ports.agentDir();
 		if (this.stopped || this.entries.has(agentId) || readRemoteBotHost(agentDir, agentId, this.holder)) return;
-		const saved = this.savedSessionOf(agentId);
+		const saved = this.view.savedSessionOf(agentId);
 		if (!saved || saved.cwd !== this.ports.cwd() || !this.holdsWatches(saved.id)) return;
 		void this.open(agentId).catch((error: unknown) => {
 			if (!readRemoteBotHost(agentDir, agentId, this.holder))
@@ -680,7 +582,7 @@ export class BotSessionHost {
 	openWatching(): void {
 		const bots = this.ports.store().listBots();
 		if (bots.length === 0) return;
-		this.ensureHomeWatch();
+		this.view.watch();
 		for (const bot of bots) this.openIfWatching(bot.agentId);
 	}
 
@@ -759,8 +661,8 @@ export class BotSessionHost {
 		const entry = this.entries.get(agentId);
 		if (!entry) {
 			// Another process's turn can only be stopped from the session hosting it.
-			const host = this.remoteOf(agentId);
-			if (host && this.remoteActive(host))
+			const host = this.view.hostOf(agentId);
+			if (remoteHostActive(host))
 				throw new Error(interfaceText().botTeam.botRunsElsewhere(agentId, host.pid, host.hostSessionId));
 			return false;
 		}
@@ -798,7 +700,7 @@ export class BotSessionHost {
 	release(agentId: string): void {
 		const entry = this.entries.get(agentId);
 		if (entry && this.isBusy(entry)) throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
-		const sessionId = entry?.session.sessionId ?? this.savedSessionOf(agentId)?.id;
+		const sessionId = entry?.session.sessionId ?? this.view.savedSessionOf(agentId)?.id;
 		if (sessionId !== undefined) {
 			const store = this.ports.store();
 			const nowMs = this.idleTimers().now();
@@ -817,23 +719,7 @@ export class BotSessionHost {
 	 */
 	readMessages(agentId: string): AgentMessage[] | undefined {
 		const entry = this.entries.get(agentId);
-		if (entry) return [...entry.session.messages];
-		this.ensureHomeWatch();
-		const agentDir = this.ports.agentDir();
-		const file = findMostRecentSessionInDirs([botHomeOf(agentDir, agentId).sessionsDir]);
-		if (!file) return undefined;
-		const stat = statSync(file);
-		const cached = this.transcriptCache;
-		if (
-			cached?.agentId === agentId &&
-			cached.file === file &&
-			cached.mtimeMs === stat.mtimeMs &&
-			cached.size === stat.size
-		)
-			return [...cached.messages];
-		const messages = SessionManager.openReadOnly(file, agentDir).buildSessionContext().messages;
-		this.transcriptCache = { agentId, file, mtimeMs: stat.mtimeMs, size: stat.size, messages };
-		return [...messages];
+		return entry ? [...entry.session.messages] : this.view.readMessages(agentId);
 	}
 
 	/** Closes every session and gives the locks back. After it no session is built. */
@@ -849,14 +735,9 @@ export class BotSessionHost {
 			}
 		}
 		await Promise.all([...this.closing.values()]);
-		this.homeWatch?.();
-		this.homeWatch = undefined;
+		this.view.stop();
 		this.history.stop();
-		if (this.remoteRecheck !== undefined) this.idleTimers().clearTimeout(this.remoteRecheck);
-		this.remoteRecheck = undefined;
-		this.remote.clear();
 		this.listeners.clear();
-		this.transcriptCache = undefined;
 		if (failures.length > 0) throw new AggregateError(failures, "Bot sessions did not close cleanly.");
 	}
 }
