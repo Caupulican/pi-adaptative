@@ -591,7 +591,7 @@ export class BotSessionHost {
 		const { usageBefore, session } = entry;
 		entry.usageBefore = undefined;
 		const model = session.model;
-		if (this.stopped || !usageBefore || !model) return;
+		if (!usageBefore || !model) return;
 		const usage = usageSince(usageBefore, session.getCumulativeUsage());
 		if (!hasReportableUsage(usage)) return;
 		const sessionId = session.sessionId;
@@ -639,6 +639,8 @@ export class BotSessionHost {
 		const closing = runAsyncReleaseSteps(
 			[
 				() => entry.session.abort("bot session closing"),
+				// The aborted turn's spend is reported once, whether or not its end reached the subscription first.
+				() => this.reportTurnUsage(entry),
 				() => entry.unsubscribe(),
 				() => entry.session.disposeAndWait(),
 				() => entry.stateWriter.clear(),
