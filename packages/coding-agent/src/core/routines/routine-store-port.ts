@@ -17,6 +17,7 @@ import type {
 	UpsertPersistentRoutineInput,
 } from "./routine-contract.ts";
 import type { RoutineRunFacts } from "./routine-progress.ts";
+import type { RetiredRoutineRecord } from "./routine-retired.ts";
 
 /** The existing persistent store implements this boundary; scheduling owns no second registry. */
 export interface RoutineStorePort {
@@ -26,6 +27,8 @@ export interface RoutineStorePort {
 	getRoutine(routineId: string): RoutineDefinitionView | undefined;
 	upsertRoutine(input: UpsertPersistentRoutineInput): RoutineDefinitionView;
 	deleteRoutine(routineId: string, expectedRevision?: number, nowMs?: number): boolean;
+	/** The records of the routines `parentSessionId` armed that were retired, newest first. */
+	listRetiredRoutines(parentSessionId: string): readonly RetiredRoutineRecord[];
 	getRoutineIntakeSession(parentSessionId: string): RoutineIntakeSession | undefined;
 	hasRoutineIntakeOrigin(key: string): boolean;
 	recordRoutineIntake(parentSessionId: string, nowMs: number, change: RoutineIntakeChange): void;

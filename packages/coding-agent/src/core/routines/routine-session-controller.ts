@@ -21,12 +21,15 @@ import {
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
 import { describeRoutineProgress, routineProgressLine } from "./routine-progress.ts";
+import type { RetiredRoutineRecord } from "./routine-retired.ts";
 import type { RoutineSchedulerController } from "./routine-scheduler-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import {
 	createRoutineToolDefinition,
 	type RoutineToolInput,
 	type RoutineToolPort,
+	type RoutineToolRetired,
+	type RoutineToolRetiredSummary,
 	type RoutineToolSummary,
 	type RoutineToolView,
 } from "./routine-tool.ts";
@@ -114,6 +117,38 @@ function view(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: nu
 	};
 }
 
+/** The most retired records `list` names after the live routines. */
+const LISTED_RETIRED_ROUTINES = 5;
+
+function retiredView(record: RetiredRoutineRecord): RoutineToolRetired {
+	return {
+		routineId: record.routineId,
+		retired: true,
+		reason: record.reason,
+		retiredAt: record.retiredAt,
+		schedule: routineScheduleInputOf(record.schedule),
+		...(record.schedule.kind === "event" && record.schedule.source === "watch"
+			? { scheduleText: describeWatchCondition(record.schedule.condition, englishText().chat.watch) }
+			: {}),
+		prompt: record.prompt,
+		...(record.lastStatus === undefined ? {} : { lastStatus: record.lastStatus }),
+		...(record.lastRunAt === undefined ? {} : { lastRunAt: record.lastRunAt }),
+		...(record.lastSummary === undefined
+			? {}
+			: { lastSummary: wrapUntrustedText(record.lastSummary, `routine-last-summary:${record.routineId}`) }),
+	};
+}
+
+function retiredSummary(record: RetiredRoutineRecord): RoutineToolRetiredSummary {
+	return {
+		routineId: record.routineId,
+		retired: true,
+		reason: record.reason,
+		retiredAt: record.retiredAt,
+		...(record.lastStatus === undefined ? {} : { lastStatus: record.lastStatus }),
+	};
+}
+
 /** Model-facing commands are scoped here; target identity and compiled authority never come from model arguments. */
 export class RoutineSessionController implements RoutineToolPort {
 	private readonly deps: RoutineSessionDeps;
@@ -130,16 +165,31 @@ export class RoutineSessionController implements RoutineToolPort {
 			.filter((routine) => this.owns(routine) && (after === undefined || routine.routineId > after))
 			.sort((left, right) => (left.routineId < right.routineId ? -1 : left.routineId === right.routineId ? 0 : 1));
 		const page = entries.slice(0, Math.max(1, Math.min(20, limit)));
+		const last = entries.length <= page.length;
+		// Retired records follow the live ones, on the last page only; an id a live routine holds again is not retired here.
+		const live = new Set(this.deps.store.listRoutines().map((routine) => routine.routineId));
+		const retired = last
+			? this.deps.store
+					.listRetiredRoutines(this.deps.parentSessionId)
+					.filter((record) => !live.has(record.routineId))
+					.slice(0, LISTED_RETIRED_ROUTINES)
+					.map(retiredSummary)
+			: [];
 		return {
 			routines: page.map((routine) => summary(routine, this.deps.store, this.deps.now())),
-			...(entries.length > page.length ? { next: page.at(-1)!.routineId } : {}),
+			...(retired.length > 0 ? { retired } : {}),
+			...(last ? {} : { next: page.at(-1)!.routineId }),
 		};
 	}
 
-	async get(routineId: string, signal?: AbortSignal): Promise<RoutineToolView | undefined> {
+	async get(routineId: string, signal?: AbortSignal): Promise<RoutineToolView | RoutineToolRetired | undefined> {
 		this.check(signal);
 		const routine = this.deps.store.getRoutine(routineId);
-		return routine && this.owns(routine) ? view(routine, this.deps.store, this.deps.now()) : undefined;
+		if (routine) return this.owns(routine) ? view(routine, this.deps.store, this.deps.now()) : undefined;
+		const retired = this.deps.store
+			.listRetiredRoutines(this.deps.parentSessionId)
+			.find((record) => record.routineId === routineId.trim());
+		return retired ? retiredView(retired) : undefined;
 	}
 
 	create(input: RoutineToolInput, signal?: AbortSignal): Promise<RoutineToolView> {

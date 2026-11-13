@@ -1,14 +1,18 @@
 /**
- * The routine store state shared with the store by reference (definitions, occurrences, replay tombstones and intake records),
+ * The routine store state shared with the store by reference (definitions, occurrences, replay tombstones, intake records and retired routines' records),
  * the occurrence journal's capacity and per-routine share, and the construction of pending and claimed occurrences. The store
  * keeps the lock and the save; these functions only change the maps they are given.
  */
 import { randomUUID } from "node:crypto";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import {
+	MAX_ROUTINE_INTAKE_ORIGINS,
+	MAX_ROUTINE_INTAKE_SESSIONS,
 	MAX_ROUTINE_OCCURRENCES,
 	MAX_ROUTINE_REPLAY_TOMBSTONES,
 	type PersistentRoutineDefinition,
+	parseRoutineDefinitionView,
+	parseRoutineOccurrence,
 	type RoutineDefinitionView,
 	type RoutineIntakeConsumption,
 	type RoutineIntakeSession,
@@ -17,6 +21,12 @@ import {
 	routineJournalShare,
 	routineOccurrenceReplayKeys,
 } from "../routines/routine-contract.ts";
+import {
+	MAX_RETIRED_ROUTINES,
+	type RetiredRoutineRecord,
+	type RoutineRetiredReason,
+	retiredRoutineRecord,
+} from "../routines/routine-retired.ts";
 import { admittedProgressFields } from "./routine-run-state.ts";
 
 /** The routine state the store owns, shared with these modules by reference (reload clears the maps, never replaces them). */
@@ -26,6 +36,81 @@ export interface RoutineStoreState {
 	readonly replayTombstones: Set<string>;
 	readonly intakeOrigins: Map<string, RoutineIntakeConsumption>;
 	readonly intakeSessions: Map<string, RoutineIntakeSession>;
+	/** Retired routines' records by incarnation, oldest first (`routine-retired.ts`). */
+	readonly retired: Map<string, RetiredRoutineRecord>;
+}
+
+/** A copy of every routine collection, taken before a reload so a malformed file restores what was loaded. */
+export function snapshotRoutineState(state: RoutineStoreState): RoutineStoreState {
+	return {
+		routines: new Map(state.routines),
+		occurrences: new Map(state.occurrences),
+		replayTombstones: new Set(state.replayTombstones),
+		intakeOrigins: new Map(state.intakeOrigins),
+		intakeSessions: new Map(state.intakeSessions),
+		retired: new Map(state.retired),
+	};
+}
+
+export function clearRoutineState(state: RoutineStoreState): void {
+	state.routines.clear();
+	state.occurrences.clear();
+	state.replayTombstones.clear();
+	state.intakeOrigins.clear();
+	state.intakeSessions.clear();
+	state.retired.clear();
+}
+
+/** Puts a snapshot back into the shared collections, which keep their identity. */
+export function restoreRoutineState(state: RoutineStoreState, snapshot: RoutineStoreState): void {
+	clearRoutineState(state);
+	for (const [id, value] of snapshot.routines) state.routines.set(id, value);
+	for (const [id, value] of snapshot.occurrences) state.occurrences.set(id, value);
+	for (const value of snapshot.replayTombstones) state.replayTombstones.add(value);
+	for (const [key, value] of snapshot.intakeOrigins) state.intakeOrigins.set(key, value);
+	for (const [key, value] of snapshot.intakeSessions) state.intakeSessions.set(key, value);
+	for (const [id, value] of snapshot.retired) state.retired.set(id, value);
+}
+
+/** Throws when the shared collections hold more than their bounds or a record the next load would refuse. */
+export function assertRoutineStatePersistable(state: RoutineStoreState): void {
+	if (state.routines.size > MAX_ROUTINE_OCCURRENCES)
+		throw new Error("Routine definition registry exceeds its bounded capacity.");
+	if (
+		state.occurrences.size > MAX_ROUTINE_OCCURRENCES ||
+		state.replayTombstones.size > MAX_ROUTINE_REPLAY_TOMBSTONES ||
+		state.intakeOrigins.size > MAX_ROUTINE_INTAKE_ORIGINS ||
+		state.intakeSessions.size > MAX_ROUTINE_INTAKE_SESSIONS ||
+		state.retired.size > MAX_RETIRED_ROUTINES
+	)
+		throw new Error("Routine occurrence custody exceeds its bounded capacity.");
+	for (const routine of state.routines.values()) {
+		if (!parseRoutineDefinitionView(routine))
+			throw new Error("Refusing to persist an invalid routine definition or cursor.");
+	}
+	for (const occurrence of state.occurrences.values()) {
+		if (!parseRoutineOccurrence(occurrence)) throw new Error("Refusing to persist an invalid routine occurrence.");
+	}
+}
+
+/**
+ * Keeps the record of a session's routine the store removes; it becomes the newest, and the oldest leave once the bound is
+ * passed. A routine that targets a bot or team has no session to read it and leaves none.
+ */
+export function recordRetiredRoutine(
+	state: RoutineStoreState,
+	routine: RoutineDefinitionView,
+	reason: RoutineRetiredReason,
+	nowMs: number,
+): void {
+	if (routine.target.kind !== "session") return;
+	const record = retiredRoutineRecord(routine, routine.target.parentSessionId, reason, nowMs);
+	state.retired.delete(record.incarnationId);
+	state.retired.set(record.incarnationId, record);
+	for (const oldest of state.retired.keys()) {
+		if (state.retired.size <= MAX_RETIRED_ROUTINES) break;
+		state.retired.delete(oldest);
+	}
 }
 
 export function createClaimedOccurrence(

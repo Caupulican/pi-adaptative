@@ -15,8 +15,6 @@ import {
 	type AwayEventDecisionResult,
 	elideDeliveredRoutineEventBodies,
 	initialRoutineCursor,
-	MAX_ROUTINE_INTAKE_ORIGINS,
-	MAX_ROUTINE_INTAKE_SESSIONS,
 	MAX_ROUTINE_OCCURRENCES,
 	MAX_ROUTINE_PROMPT_CHARS,
 	MAX_ROUTINE_REPLAY_TOMBSTONES,
@@ -56,6 +54,7 @@ import {
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
 import { parseRoutineProgress, type RoutineRunFacts, withRoutineOwnerNote } from "../routines/routine-progress.ts";
+import { parseRetiredRoutines, type RetiredRoutineRecord } from "../routines/routine-retired.ts";
 import { parseWatchCondition } from "../routines/watch-contract.ts";
 import { cleanRedactBound } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -101,7 +100,14 @@ import {
 	recordRoutineIntake,
 	recordRoutineToolAnswers,
 } from "./routine-intake-state.ts";
-import type { RoutineStoreState } from "./routine-occurrence-journal.ts";
+import {
+	assertRoutineStatePersistable,
+	clearRoutineState,
+	type RoutineStoreState,
+	recordRetiredRoutine,
+	restoreRoutineState,
+	snapshotRoutineState,
+} from "./routine-occurrence-journal.ts";
 import {
 	cancelUndispatchedRoutineOccurrences,
 	recordRoutineConditionMet,
@@ -473,6 +479,8 @@ export class PersistentBotTeamStore {
 	private readonly routineIntakeOrigins = new Map<string, RoutineIntakeConsumption>();
 	/** Per-session intake state by parent session, least recently written first. */
 	private readonly routineIntakeSessions = new Map<string, RoutineIntakeSession>();
+	/** Records of retired routines by incarnation, oldest first. */
+	private readonly retiredRoutines = new Map<string, RetiredRoutineRecord>();
 	/** The routine state the routine modules read and write: the maps above, shared by reference (reload clears them, never replaces them). */
 	private readonly routineState: RoutineStoreState = {
 		routines: this.routines,
@@ -480,6 +488,7 @@ export class PersistentBotTeamStore {
 		replayTombstones: this.routineReplayTombstones,
 		intakeOrigins: this.routineIntakeOrigins,
 		intakeSessions: this.routineIntakeSessions,
+		retired: this.retiredRoutines,
 	};
 	private routineRevisionCounter = 0;
 	private readonly listeners = new Set<() => void>();
@@ -735,22 +744,7 @@ export class PersistentBotTeamStore {
 			const elided = elideDeliveredRoutineEventBodies(occurrence);
 			if (elided !== occurrence) this.routineOccurrences.set(occurrenceId, elided);
 		}
-		if (this.routines.size > MAX_ROUTINE_OCCURRENCES)
-			throw new Error("Routine definition registry exceeds its bounded capacity.");
-		if (
-			this.routineOccurrences.size > MAX_ROUTINE_OCCURRENCES ||
-			this.routineReplayTombstones.size > MAX_ROUTINE_REPLAY_TOMBSTONES ||
-			this.routineIntakeOrigins.size > MAX_ROUTINE_INTAKE_ORIGINS ||
-			this.routineIntakeSessions.size > MAX_ROUTINE_INTAKE_SESSIONS
-		)
-			throw new Error("Routine occurrence custody exceeds its bounded capacity.");
-		for (const routine of this.routines.values()) {
-			if (!parseRoutineDefinitionView(routine))
-				throw new Error("Refusing to persist an invalid routine definition or cursor.");
-		}
-		for (const occurrence of this.routineOccurrences.values()) {
-			if (!parseRoutineOccurrence(occurrence)) throw new Error("Refusing to persist an invalid routine occurrence.");
-		}
+		assertRoutineStatePersistable(this.routineState);
 		const highestRoutineRevision = this.highestRoutineRevision();
 		if (!Number.isSafeInteger(this.routineRevisionCounter) || this.routineRevisionCounter < highestRoutineRevision)
 			throw new Error("Refusing to persist a stale routine revision counter.");
@@ -774,6 +768,8 @@ export class PersistentBotTeamStore {
 			...(this.routineIntakeSessions.size > 0
 				? { routineIntakeSessions: Array.from(this.routineIntakeSessions.values()) }
 				: {}),
+			// An earlier build ignores this key and drops it on its next write: the records are advisory, never schedule state.
+			...(this.retiredRoutines.size > 0 ? { routineRetired: Array.from(this.retiredRoutines.values()) } : {}),
 		};
 		writeFileAtomicSync(this.filePath, JSON.stringify(data, null, 2));
 		this._cachedTeamList = undefined;
@@ -844,11 +840,7 @@ export class PersistentBotTeamStore {
 			bots: new Map(this.bots),
 			teams: new Map(this.teams),
 			teamMessages: new Map(this.teamMessages),
-			routines: new Map(this.routines),
-			occurrences: new Map(this.routineOccurrences),
-			replayTombstones: new Set(this.routineReplayTombstones),
-			intakeOrigins: new Map(this.routineIntakeOrigins),
-			intakeSessions: new Map(this.routineIntakeSessions),
+			routine: snapshotRoutineState(this.routineState),
 			revisionCounter: this.routineRevisionCounter,
 			loadedDigest: this.loadedDigest,
 			legacyRoutinesExposed: this.legacyRoutinesExposed,
@@ -858,11 +850,7 @@ export class PersistentBotTeamStore {
 		this.bots.clear();
 		this.teams.clear();
 		this.teamMessages.clear();
-		this.routines.clear();
-		this.routineOccurrences.clear();
-		this.routineReplayTombstones.clear();
-		this.routineIntakeOrigins.clear();
-		this.routineIntakeSessions.clear();
+		clearRoutineState(this.routineState);
 		this.routineRevisionCounter = 0;
 		this.loadedDigest = digest;
 		this.legacyRoutinesExposed = isRecordObject(parsed) && Array.isArray(parsed.routines);
@@ -963,6 +951,10 @@ export class PersistentBotTeamStore {
 				for (const session of parseRoutineIntakeSessions(parsed.routineIntakeSessions))
 					this.routineIntakeSessions.set(session.parentSessionId, session);
 			}
+			if (parsed.routineRetired !== undefined) {
+				for (const record of parseRetiredRoutines(parsed.routineRetired))
+					this.retiredRoutines.set(record.incarnationId, record);
+			}
 			const highestRoutineRevision = this.highestRoutineRevision();
 			const storedRevisionCounter = parsed.routineRevisionCounter;
 			if (currentStoreFormat && storedRevisionCounter === undefined)
@@ -981,16 +973,7 @@ export class PersistentBotTeamStore {
 			for (const [id, value] of previousState.teams) this.teams.set(id, value);
 			this.teamMessages.clear();
 			for (const [id, value] of previousState.teamMessages) this.teamMessages.set(id, value);
-			this.routines.clear();
-			for (const [id, value] of previousState.routines) this.routines.set(id, value);
-			this.routineOccurrences.clear();
-			for (const [id, value] of previousState.occurrences) this.routineOccurrences.set(id, value);
-			this.routineReplayTombstones.clear();
-			for (const value of previousState.replayTombstones) this.routineReplayTombstones.add(value);
-			this.routineIntakeOrigins.clear();
-			for (const [key, value] of previousState.intakeOrigins) this.routineIntakeOrigins.set(key, value);
-			this.routineIntakeSessions.clear();
-			for (const [key, value] of previousState.intakeSessions) this.routineIntakeSessions.set(key, value);
+			restoreRoutineState(this.routineState, previousState.routine);
 			this.routineRevisionCounter = previousState.revisionCounter;
 			this.loadedDigest = previousState.loadedDigest;
 			this.legacyRoutinesExposed = previousState.legacyRoutinesExposed;
@@ -1513,10 +1496,18 @@ export class PersistentBotTeamStore {
 			if (expectedRevision !== undefined && existing.revision !== expectedRevision)
 				throw new Error("Routine revision changed; read current state before retrying.");
 			cancelUndispatchedRoutineOccurrences(this.routineState, normalizedId, nowMs);
+			recordRetiredRoutine(this.routineState, existing, "deleted", nowMs);
 			this.routines.delete(normalizedId);
 			this.save();
 			return true;
 		});
+	}
+
+	/** The records of the routines a session armed that were retired, newest first. */
+	listRetiredRoutines(parentSessionId: string): RetiredRoutineRecord[] {
+		return Array.from(this.retiredRoutines.values())
+			.filter((record) => record.parentSessionId === parentSessionId)
+			.reverse();
 	}
 
 	/**

@@ -22,6 +22,7 @@ import {
 	createClaimedOccurrence,
 	createPendingOccurrence,
 	type RoutineStoreState,
+	recordRetiredRoutine,
 	routineHasJournalShare,
 	routineJournalHasRoom,
 } from "./routine-occurrence-journal.ts";
@@ -81,6 +82,7 @@ export function retireEndedRoutines(
 				),
 			);
 		}
+		recordRetiredRoutine(state, routine, ended, input.nowMs);
 		state.routines.delete(routineId);
 		retired.push(routineId);
 	}

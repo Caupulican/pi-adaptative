@@ -22,7 +22,12 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import { rollingDayWindow } from "../proactivity/proactivity-controller.ts";
 import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 import { RoutineIntake } from "./routine-intake.ts";
-import { isCarriedRoutineCompletion, ROUTINE_RESULT_WAKES_HOLD, routineParentInput } from "./routine-parent-input.ts";
+import {
+	isCarriedRoutineCompletion,
+	ROUTINE_RESULT_WAKES_HOLD,
+	routineParentInput,
+	routineResultIsQuiet,
+} from "./routine-parent-input.ts";
 import type { RoutineHostEventPort } from "./routine-scheduler-controller.ts";
 import {
 	RoutineSchedulerController,
@@ -172,7 +177,10 @@ export class RoutineRuntimeAssembly {
 					}
 					return this.deps.deliverParentInput(held ? routineParentInput(delivery, true) : input);
 				},
-				findCarriedQuietResult: (routineId) => this.findCarriedRoutineResult(routineId, "quiet"),
+				findCarriedQuietResult: ({ occurrence, result }) =>
+					routineResultIsQuiet(result, occurrence.trigger)
+						? this.findCarriedRoutineResult(occurrence.routineId, "quiet")
+						: undefined,
 				acknowledgeWorkerNotification: (occurrence) => {
 					if (occurrence.target.kind !== "session" || !occurrence.dispatchKey) return;
 					const intent = occurrence.definition.executionSnapshot?.savedIntent;

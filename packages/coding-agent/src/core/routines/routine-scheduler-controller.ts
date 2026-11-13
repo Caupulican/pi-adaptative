@@ -338,8 +338,11 @@ export interface RoutineHostEventPort {
 /** How finished routine results reach the parent session; only a host with the parent open has it. */
 export interface RoutineResultDelivery {
 	deliver(delivery: RoutineDelivery): Promise<{ entryId: string }>;
-	/** The parent input still carrying an earlier quiet result of this routine to the owner's next turn. */
-	findCarriedQuietResult(routineId: string): { entryId: string } | undefined;
+	/**
+	 * The parent input still carrying an earlier quiet result of this delivery's routine to the owner's next turn, when the
+	 * delivery is itself quiet (a watch's result never is). Absent, the delivery is its own input.
+	 */
+	findCarriedQuietResult(delivery: RoutineDelivery): { entryId: string } | undefined;
 	/** Consume the native notification only after its parent input is physically durable. */
 	acknowledgeWorkerNotification(occurrence: RoutineOccurrence): void;
 	/**
@@ -1206,11 +1209,7 @@ export class RoutineSchedulerController {
 		const { occurrence, result } = pending;
 		// One quiet result per routine waits for the owner; later quiet runs are acknowledged against it and stay in history.
 		const delivery = Promise.resolve()
-			.then(
-				() =>
-					(result.ownerUpdate === "none" ? parent.findCarriedQuietResult(occurrence.routineId) : undefined) ??
-					parent.deliver(pending),
-			)
+			.then(() => parent.findCarriedQuietResult(pending) ?? parent.deliver(pending))
 			.then((receipt) => {
 				if (!this.active) return;
 				if (result.outcome !== "uncertain") parent.acknowledgeWorkerNotification(occurrence);

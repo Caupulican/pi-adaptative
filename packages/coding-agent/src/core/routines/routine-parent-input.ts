@@ -14,16 +14,17 @@ import {
 	type RoutineEventTrigger,
 	type RoutineIntakeNoticeRecord,
 	type RoutineOccurrence,
+	type RoutineResult,
 	routineTriggerEvents,
 } from "./routine-contract.ts";
 import { describeWatchFired } from "./watch-contract.ts";
 
 export const ROUTINE_COMPLETION_TYPE = "routine-completion";
 /** Longest preview of a run's report the owner's history row carries; the model reads the whole fenced report. */
-const MAX_RESULT_PREVIEW_CHARS = 160;
+export const MAX_RESULT_PREVIEW_CHARS = 160;
 
-/** The first words of a run's report on one line, control characters collapsed, for the owner's history row. */
-function resultPreview(summary: string): string | undefined {
+/** The first words of a run's report on one line, control characters collapsed, for the owner's history row and a retired routine's record. */
+export function resultPreview(summary: string): string | undefined {
 	const flat = summary.replace(/[\p{Cc}\s]+/gu, " ").trim();
 	if (flat.length === 0) return undefined;
 	return flat.length > MAX_RESULT_PREVIEW_CHARS ? `${flat.slice(0, MAX_RESULT_PREVIEW_CHARS - 1)}…` : flat;
@@ -79,17 +80,47 @@ function routineEventCause(trigger: RoutineEventTrigger, count: string): string 
 }
 
 /**
+ * Whether a result carries to the owner's next turn because it is quiet. A run's `ownerUpdate: "none"` answers whether
+ * the OWNER needs to hear it, never whether the session that armed the routine wakes: a watch is armed because that
+ * session's own work waits on the change, so its result always starts that session's turn.
+ */
+export function routineResultIsQuiet(
+	result: Pick<RoutineResult, "ownerUpdate">,
+	trigger: Pick<RoutineOccurrence["trigger"], "kind">,
+): boolean {
+	return result.ownerUpdate === "none" && trigger.kind !== "watch";
+}
+
+/**
+ * The words the model reads after a routine's fenced report. A quiet result waits for the owner; a held one waited for the
+ * wake bound; a watch's quiet result wakes the session that armed it, which decides what the owner hears.
+ */
+function routineResultContent(
+	flags: { readonly quiet: boolean; readonly ownerQuiet: boolean; readonly holds: boolean },
+	report: string,
+): string {
+	if (flags.quiet)
+		return `${report}\nNo owner update is needed; mention it only if it bears on what the owner asks next. Later quiet runs before the owner's next turn are recorded but not delivered.`;
+	if (flags.holds)
+		return `${report}\nRoutine results reached the day's bound on parent turns (routines.maxResultWakesPerDay), so this one waited for the owner's turn. Use the saved task and this evidence to decide whether the owner needs an update or further work. Later results of this routine before the owner's next turn are recorded on the routine but not delivered.`;
+	if (flags.ownerQuiet)
+		return `${report}\nThe owner needs no update from this result alone, but you armed this watch because your own work waits on it: continue that work now, or end the turn if none waits.`;
+	return `${report}\nUse the saved task and this evidence to decide whether the owner needs an update or further work.`;
+}
+
+/**
  * Host identity is separate from the worker's untrusted summary. A quiet result rides with the owner's next turn; every
- * other outcome starts a parent turn unless `held`: the routine-result wake bound was reached when it was first saved,
- * so it rides with the owner's next turn too. The caller repeats a saved input's `held`, so a redelivery after restart
- * presents the same identity and payload.
+ * other outcome (a watch's result included, whatever its `ownerUpdate`) starts a parent turn unless `held`: the
+ * routine-result wake bound was reached when it was first saved, so it rides with the owner's next turn too. The caller
+ * repeats a saved input's `held`, so a redelivery after restart presents the same identity and payload.
  */
 export function routineParentInput(delivery: RoutineDelivery, held = false): ParentInputDelivery {
 	const { occurrence, result } = delivery;
 	const trigger = occurrence.trigger;
 	if (trigger.kind === "expiry") return routineExpiryNotice(delivery, trigger.expiresAt);
 	if (trigger.kind === "condition") return routineConditionNotice(delivery, trigger);
-	const quiet = result.ownerUpdate === "none";
+	const ownerQuiet = result.ownerUpdate === "none";
+	const quiet = routineResultIsQuiet(result, trigger);
 	const holds = held && !quiet;
 	const missedCount = trigger.kind === "manual" || trigger.kind === "watch" ? 0 : trigger.missedCount;
 	// A count recorded at its saturation bound stands for that many or more.
@@ -106,14 +137,11 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 	const evidence = wrapUntrustedText(result.summary, `routine-result:${occurrence.occurrenceId}`, {
 		nonce: result.digest,
 	});
+	const head = `Routine ${occurrence.routineId} ended: ${ownerQuiet ? "succeeded with nothing for the owner" : result.outcome}.`;
 	const message = {
 		customType: ROUTINE_COMPLETION_TYPE,
 		display: true,
-		content: quiet
-			? `Routine ${occurrence.routineId} ended: succeeded with nothing for the owner.${missed}\n${evidence}\nNo owner update is needed; mention it only if it bears on what the owner asks next. Later quiet runs before the owner's next turn are recorded but not delivered.`
-			: holds
-				? `Routine ${occurrence.routineId} ended: ${result.outcome}.${missed}\n${evidence}\nRoutine results reached the day's bound on parent turns (routines.maxResultWakesPerDay), so this one waited for the owner's turn. Use the saved task and this evidence to decide whether the owner needs an update or further work. Later results of this routine before the owner's next turn are recorded on the routine but not delivered.`
-				: `Routine ${occurrence.routineId} ended: ${result.outcome}.${missed}\n${evidence}\nUse the saved task and this evidence to decide whether the owner needs an update or further work.`,
+		content: routineResultContent({ quiet, ownerQuiet, holds }, `${head}${missed}\n${evidence}`),
 		details: {
 			occurrenceId: occurrence.occurrenceId,
 			routineId: occurrence.routineId,
@@ -140,7 +168,7 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 						watch: { condition: trigger.event.condition, change: trigger.event.change },
 					}
 				: {}),
-			...(quiet ? { ownerUpdate: "none" as const } : {}),
+			...(ownerQuiet ? { ownerUpdate: "none" as const } : {}),
 			...(holds ? { deliveryHold: ROUTINE_RESULT_WAKES_HOLD } : {}),
 			// The run's report can quote the third party's words: the turn that reads it is a third party's run.
 			...(routineTurnOrigin(occurrence) ? { thirdParty: true as const } : {}),
@@ -275,7 +303,8 @@ export function isCarriedRoutineCompletion(
 	const details = parentInputOriginalDetails(entry);
 	if (typeof details !== "object" || details === null || !("routineId" in details) || details.routineId !== routineId)
 		return false;
+	// A watch's quiet result that the wake bound held carries both marks; it is the held one.
 	return cause === "quiet"
-		? "ownerUpdate" in details && details.ownerUpdate === "none"
+		? "ownerUpdate" in details && details.ownerUpdate === "none" && !("deliveryHold" in details)
 		: "deliveryHold" in details && details.deliveryHold === ROUTINE_RESULT_WAKES_HOLD;
 }
