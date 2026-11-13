@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import type { SemanticEvaluationOccupancy } from "../decision/engine.ts";
 import { noulProbability, readNoul } from "../decision/noul.ts";
 import {
 	noteDecisionTrace,
@@ -74,7 +75,8 @@ export interface DecisionEngine {
 	evaluate(
 		program: DecisionEngineProgram,
 		state?: Record<string, unknown>,
-		options?: { consequence?: string; signal?: AbortSignal },
+		/** `occupancy` passes through to the semantic engine: omitted, the evaluation holds the foreground. */
+		options?: { consequence?: string; signal?: AbortSignal; occupancy?: SemanticEvaluationOccupancy },
 	): Promise<{
 		/** The model that answered, when the engine reports it. */
 		model?: string;

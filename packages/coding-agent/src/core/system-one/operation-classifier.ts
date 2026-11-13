@@ -19,6 +19,7 @@ import { commandFromToolArgs } from "../acquisition/acquisition-boundary.ts";
 import { computeScriptFileHash } from "../automation/task-automation-hash.ts";
 import { classifyAllEdgeOperations, shellInvocations } from "../autonomy/edge-policy.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
+import type { SemanticEvaluationOccupancy } from "../decision/engine.ts";
 import { type NoulReading, noulBand } from "../decision/noul.ts";
 import { programOverOwnerWords } from "../security/owner-paste-boundary.ts";
 import { decideByAuthority, type JudgmentReading } from "./authority-line.ts";
@@ -295,7 +296,7 @@ export interface OperationEffectEngine {
 			readonly decisions: readonly unknown[];
 		},
 		state?: Record<string, unknown>,
-		options?: { consequence?: string; signal?: AbortSignal },
+		options?: { consequence?: string; signal?: AbortSignal; occupancy?: SemanticEvaluationOccupancy },
 	): Promise<OperationEvaluation>;
 	/** Attaches the decision made from an evaluation to its ledger row; absent when nothing records traces. */
 	noteTrace?(evaluationId: string, trace: SemanticDecisionTrace): void;

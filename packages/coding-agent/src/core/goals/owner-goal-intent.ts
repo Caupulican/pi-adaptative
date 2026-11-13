@@ -195,7 +195,12 @@ export class OwnerGoalIntent {
 							}
 						: {}),
 				},
-				{ consequence: "medium", signal: AbortSignal.timeout(OWNER_GOAL_INTENT_TIMEOUT_MS) },
+				// Detached from the turn, so it never holds the foreground: a turn that waits for the session to go idle does not wait for it.
+				{
+					consequence: "medium",
+					signal: AbortSignal.timeout(OWNER_GOAL_INTENT_TIMEOUT_MS),
+					occupancy: "background",
+				},
 			);
 		} catch (error) {
 			// An outage starts no goal, and the owner is told once per session.

@@ -101,6 +101,7 @@ export function createRetentionDecisionEngine(
 				{
 					consequence: (options?.consequence as Consequence | undefined) ?? "medium",
 					signal: options?.signal,
+					...(options?.occupancy === undefined ? {} : { occupancy: options.occupancy }),
 				},
 			);
 
