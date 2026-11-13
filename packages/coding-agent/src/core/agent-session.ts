@@ -2151,7 +2151,7 @@ export class AgentSession {
 			resolveManagedLaneId: (id) => this._backgroundLanes.resolveManagedLaneId(id),
 			runWorkerDelegationOnce: (request) => this.runWorkerDelegationOnce(request),
 			runModelFitness: (args) => this.runModelFitness(args),
-			resolveCurationModelIfFit: () => this._resolveCurationModelIfFit(),
+			resolveCurationModelIfFit: () => this._pipeline.resolveCurationModelIfFit(),
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 			addSpawnedUsage: (usage, opts) => this.addSpawnedUsage(usage, opts),
 			getLaneWorkerRefusal: (selection) => this.getLaunchedWorkerLaneRefusal(selection),
@@ -3251,11 +3251,6 @@ export class AgentSession {
 		return this._pipeline.getPromptPolicyGcCorrelation();
 	}
 
-	/** Reflex/curation call-site delegation to {@link ContextPipeline.resolveCurationModelIfFit}. */
-	private _resolveCurationModelIfFit(): Model<Api> | undefined {
-		return this._pipeline.resolveCurationModelIfFit();
-	}
-
 	/** Compaction call-site delegation to {@link ContextPipeline.buildCompactionPreDigest}. */
 	private _buildCompactionPreDigest(): ((text: string, signal?: AbortSignal) => Promise<string>) | undefined {
 		return this._pipeline.buildCompactionPreDigest((type, data) => this.sessionManager.appendCustomEntry(type, data));
@@ -3655,6 +3650,7 @@ export class AgentSession {
 				settleReflectionTurn: () => this.settleReflectionTurn(),
 				settleCompaction: () => this._compaction.settled(),
 				settleOwnerGoalIntent: () => this._promptSubmission.ownerGoalIntent.settle(),
+				settleRoutineIntake: () => this._backgroundLanes.settleRoutineIntake(),
 				releaseAgentConsumer: () => {
 					safely(() => this._disconnectFromAgent());
 					this._closingConsumerReleased = true;

@@ -169,6 +169,8 @@ export const SESSIONS = {
 			`A compaction did not settle within ${seconds}s of quit; its result is discarded.`,
 		ownerGoalJudgmentUnsettled: (seconds: number) =>
 			`An owner goal judgment did not settle within ${seconds}s of quit; its usage may be recorded late.`,
+		routineIntakeUnsettled: (seconds: number) =>
+			`A routine intake pass did not settle within ${seconds}s of quit; its usage may be recorded late.`,
 	},
 	/** `/session`: the block that opens with the session's own stats. */
 	info: {

@@ -310,6 +310,11 @@ export class RoutineIntake {
 		return this.running ?? Promise.resolve();
 	}
 
+	/** Resolves once the pass in flight ended; stops nothing and starts nothing, so it joins a pass `stop()` already aborted. */
+	settled(): Promise<void> {
+		return this.running ?? Promise.resolve();
+	}
+
 	/** Reads configuration and session spending only; never starts or schedules work. */
 	status(): RoutineIntakeStatus {
 		const config = this.configuration();

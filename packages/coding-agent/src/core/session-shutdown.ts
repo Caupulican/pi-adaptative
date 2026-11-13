@@ -86,6 +86,8 @@ export interface ClosingSessionMemoryPorts {
 	settleCompaction(): Promise<void>;
 	/** Joins the owner goal judgments dispose aborted: a paid one records its usage row before usage delivery closes. */
 	settleOwnerGoalIntent(): Promise<void>;
+	/** Joins the routine intake pass dispose already stopped: a paid judgment records its usage row before usage delivery closes. */
+	settleRoutineIntake(): Promise<void>;
 	releaseAgentConsumer(): void;
 	shutdownMemory(): Promise<void>;
 	disposeSemanticUsage(): void;
@@ -128,6 +130,11 @@ export async function settleClosingSessionMemory(ports: ClosingSessionMemoryPort
 		await settlesWithin(
 			ports.settleOwnerGoalIntent(),
 			interfaceText().sessions.closing.ownerGoalJudgmentUnsettled(CLOSING_RUN_SETTLE_MS / 1000),
+		);
+		// Routine intake was stopped with the background lanes; its pass in flight may still record a paid judgment.
+		await settlesWithin(
+			ports.settleRoutineIntake(),
+			interfaceText().sessions.closing.routineIntakeUnsettled(CLOSING_RUN_SETTLE_MS / 1000),
 		);
 		await ports.shutdownMemory();
 	} finally {

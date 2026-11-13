@@ -310,10 +310,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		}
 	}
 
-	private _recordWorkerTerminal(record: LaneRecord, durableNotificationId: string): void {
-		this._getWorkerNotificationCoordinator().recordTerminal(record, durableNotificationId);
-	}
-
 	constructor(deps: BackgroundLaneControllerDeps) {
 		this.deps = deps;
 		this.channels = new SessionChannels({
@@ -748,7 +744,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._managedLanes ??= new ManagedLaneController(
 			this.deps,
 			this._getWorkerLifecycle(),
-			(record, notificationId) => this._recordWorkerTerminal(record, notificationId),
+			(record, notificationId) => this._getWorkerNotificationCoordinator().recordTerminal(record, notificationId),
 			(message) => this._safeWarn(message),
 			(attemptId, ownerEpoch) =>
 				this._getWorkerNotificationCoordinator().noteAttemptOwnerEpoch(attemptId, ownerEpoch),
@@ -1720,6 +1716,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._routines?.intake.status();
 	}
 
+	/** Joins routine intake's pass in flight without stopping it again: dispose stopped it, and a paid row lands before usage closes. */
+	settleRoutineIntake(): Promise<void> {
+		return this._routines?.intake.settled() ?? Promise.resolve();
+	}
+
 	private createRoutineToolDefinition(): ToolDefinition | undefined {
 		this.getBotTeamStore();
 		return this._routines?.session.tool;
@@ -2199,10 +2200,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		for (const agent of live) this.retireWorkerAgent(agent.agentId, undefined);
 	}
 
-	private closeLeaderSubtree(alias: string, reasonCode: string): void {
-		this._getWorkerController().getFleet().closeShare(this.botBindings.runtime(alias), reasonCode);
-	}
-
 	/**
 	 * The delegation limits a standing leader's runtime is granted: its children are its owned bots, nested up to
 	 * `leaders.maxDepth` levels, and the host ceilings still apply where the runtime is started.
@@ -2282,7 +2279,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			hasPendingDelegatedMessage: (objectiveId) => this.hasPendingDelegatedMessage(objectiveId),
 			openSubtree: (alias, parentAlias) => this.openLeaderSubtree(alias, parentAlias),
 			restartLeaderRuntimeIfLeaf: (alias) => this.restartLeaderRuntimeIfLeaf(alias),
-			closeSubtree: (alias, reasonCode) => this.closeLeaderSubtree(alias, reasonCode),
+			closeSubtree: (alias, reasonCode) =>
+				this._getWorkerController().getFleet().closeShare(this.botBindings.runtime(alias), reasonCode),
 			reconcileDelegatedMessages: (objectiveId) => this.reconcileDelegatedMessages(objectiveId),
 			now: () => this.deps.getTimers().port("orchestration").now(),
 			timers: this.deps.getTimers().port("leaders"),

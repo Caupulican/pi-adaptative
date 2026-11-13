@@ -183,6 +183,8 @@ export const SESSIONS = {
 			`Uma compactação não terminou em ${seconds}s após o encerramento; o resultado dela foi descartado.`,
 		ownerGoalJudgmentUnsettled: (seconds: number) =>
 			`Uma avaliação de objetivo do dono não terminou em ${seconds}s após o encerramento; o uso dela pode ser registrado mais tarde.`,
+		routineIntakeUnsettled: (seconds: number) =>
+			`Uma passada da entrada de rotinas não terminou em ${seconds}s após o encerramento; o uso dela pode ser registrado mais tarde.`,
 	},
 	info: {
 		title: "Informações da sessão",
