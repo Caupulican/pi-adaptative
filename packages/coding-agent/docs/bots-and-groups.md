@@ -13,6 +13,24 @@ and System One. With that gate off, no task-fitness judgment is required at star
 or execution. Authentication, model availability, permissions, capacity, and lifecycle checks remain
 in force. See [Model Router settings](settings.md#model-router).
 
+## A bot is a session of its own
+
+A bot you message directly (`/bot msg`, its roster chat, `@bot`) runs as its own session, not as a worker of the session you
+are in. Its home is `<agent dir>/bots/<id>/`: `profile.json` (written from the bot's record: model, soul, write grant, who
+made it), `sessions/` (its own session files; it continues the newest one, so it keeps one conversation whichever project you
+message it from) and `memory/`. The record in the bot store stays the index; editing the bot's model, permissions or soul
+refreshes the profile and applies to its session when it starts, so a bot that is working must be stopped first. The session
+runs on the bot's model (a model that is gone or has no credentials refuses the message), carries the bot's soul at the end of
+its system prompt, and works in your project directory. It reads, and writes only when the bot has write access: a read-only bot has
+no shell. It is loaded on its first message, kept while a turn runs or input is queued, and closed after ten idle minutes or
+when the session that hosts it ends. One process hosts a bot at a time; a second one is told which. The roster shows the bot
+running or queued while its session works, and its chat is that session's conversation, after whatever ran as a worker before.
+Its answers are read in that chat (the roster marks them unread); they do not reach the orchestrator as a worker's terminal does.
+
+Until later phases move them, these still run as workers of the session that sends them: group messages (the group's
+conversations), the orchestrator's `bot ask`, routine sends, leaders and bots made from a profile, and machines joined over the
+link. A bot's session has no subagents, routines, goals, watches or `bot` tool yet.
+
 ## Bot names
 
 A bot has an id and a display name. The id is the stable handle (`trello-scout`: what you type after `@` and in `/bot msg`);
@@ -65,8 +83,8 @@ goal with the bots it owns; it is never a second orchestrator, and its authority
   each of its bots' last turns, combined as they are, never judged again. A turn belongs to the goal when the goal started
   it: the leader's turns, the orchestrator's brief, updates and answers, and the turns the leader's own messages start on
   its bots. None of them wakes the orchestrator. Your chat with the leader or its bots during the goal is yours, not the
-  goal's, and it reaches the orchestrator as any other bot turn does. The one exception is a leader turn that ends asking for
-  an answer: that question reaches the orchestrator, the goal stays open, and the orchestrator answers with `bot` `action ask`.
+  goal's, and, where they run as workers, it reaches the orchestrator as any other bot turn does. The one exception is a
+  leader turn that ends asking for an answer: that question reaches the orchestrator, the goal stays open, and the orchestrator answers with `bot` `action ask`.
 - The goal ends early when its time runs out, its metered budget is spent, a subscription it uses has no allowance left in
   its usage window, you cancel it, or its leader is gone; the leader and its bots are stopped and the outcome says why.
 - Budgets: `budgetUsd` counts metered spending only. A subscription turn is not metered, so the budget does not count it;

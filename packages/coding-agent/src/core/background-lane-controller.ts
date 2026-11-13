@@ -36,6 +36,8 @@ import {
 	type SessionAutonomyStatus,
 } from "./autonomy-status/autonomy-status.ts";
 import type { BackgroundLaneControllerDeps, RunningAttemptWaitOutcome } from "./background-lane-deps.ts";
+import { BotRoster } from "./bots/bot-roster.ts";
+import { BotSessionHost } from "./bots/bot-session-host.ts";
 import {
 	type AwayChannelStatus,
 	awayChannels,
@@ -86,7 +88,6 @@ import {
 	type PersistentBotView,
 	type PersistentTeamRecord,
 	type TeamOperatorMessageDispatchResult,
-	teamIncarnation,
 	type UpsertPersistentBotInput,
 	type UpsertPersistentTeamInput,
 } from "./delegation/persistent-bot-team-store.ts";
@@ -116,7 +117,6 @@ import type {
 	WorkerAgentRetireResult,
 	WorkerAgentTaskStartOptions,
 	WorkerAgentTranscriptOptions,
-	WorkerAgentView,
 	WorkerAgentWaitMode,
 	WorkerAgentWaitResult,
 	WorkerGrantSummary,
@@ -228,10 +228,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	readonly channels: SessionChannels;
 	private readonly _laneRecordListeners = new Set<(records: readonly LaneRecord[]) => void>();
 	private _laneRecordsNotifyQueued = false;
-	/** The projected bot roster, dropped by every input change. */
-	private _botViews:
-		| { defaultModelRef: string; delegateActive: boolean; bindings: object; views: PersistentBotView[] }
-		| undefined;
+	/** The bot roster, projected once and dropped by every input change; and the bots that run as sessions of their own. */
+	private readonly _botRoster: BotRoster;
+	private readonly _botSessions: BotSessionHost;
 	/** The live managed lanes of the roster, dropped with every lane record change. */
 	private _managedLaneViews: ManagedLaneView[] | undefined;
 	private _unsubscribeLaneRecordStore: (() => void) | undefined;
@@ -335,18 +334,38 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			() => deps.getSessionManager(),
 			() => this.getBotTeamStore(),
 		);
+		this._botSessions = new BotSessionHost({
+			agentDir: () => deps.getAgentDir(),
+			cwd: () => deps.getCwd(),
+			store: () => this.getBotTeamStore(),
+			modelRegistry: () => deps.getModelRegistry(),
+			projectTrusted: () => deps.getSettingsManager().isProjectTrusted(),
+			timers: () => deps.getTimers(),
+			warn: (message) => this._safeWarn(message),
+		});
+		this._botRoster = new BotRoster({
+			store: () => this.getBotTeamStore(),
+			bindings: () => this.botBindings,
+			isDelegateToolActive: () => deps.isDelegateToolActive(),
+			hasWorkerState: () => this._hasWorkerState(),
+			listWorkerAgents: () => this.listWorkerAgents(),
+			laneRecords: () => this._rosterLaneRecords(),
+			remoteWords: (agentId) => this.getRemoteHub().rosterWords(agentId),
+			sessionState: (agentId) => this._botSessions.stateOf(agentId),
+		});
+		this._botSessions.subscribe(() => this._botRoster.invalidate());
 		this._botChat = new BotChatTranscript(this.botBindings, {
 			getBotTeamStore: () => this.getBotTeamStore(),
 			getRemoteHub: () => this.getRemoteHub(),
 			openWorkerTranscript: (agentId) => this.openWorkerTranscript(agentId),
 			getLaneRecords: () => this.getLaneRecords(),
+			readBotSessionMessages: (agentId) => this._botSessions.readMessages(agentId),
 		});
 		this._botDispatch = new BotOperatorDispatch(deps, this.botBindings, {
+			botSessions: this._botSessions,
 			getBotTeamStore: () => this.getBotTeamStore(),
 			getRemoteHub: () => this.getRemoteHub(),
-			invalidateBotViews: () => {
-				this._botViews = undefined;
-			},
+			invalidateBotViews: () => this._botRoster.invalidate(),
 			listWorkerAgents: () => this.listWorkerAgents(),
 			resolveModelSpec: (rawModel) => this.resolveModelSpec(rawModel),
 			getLaneRecords: () => this.getLaneRecords(),
@@ -362,10 +381,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			cancelWorkerAgent: (agentId, reasonCode, scope) => this.cancelWorkerAgent(agentId, reasonCode, scope),
 		});
 		this._botLifecycle = new BotLifecycleController(deps, this.botBindings, {
+			botSessions: this._botSessions,
 			getBotTeamStore: () => this.getBotTeamStore(),
-			invalidateBotViews: () => {
-				this._botViews = undefined;
-			},
+			invalidateBotViews: () => this._botRoster.invalidate(),
 			hasWorkerState: () => this._hasWorkerState(),
 			listWorkerAgents: () => this.listWorkerAgents(),
 			interruptWorkerAgent: (agentId, scope, options) => this.interruptWorkerAgent(agentId, scope, options),
@@ -393,7 +411,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			hostEventFeed: () => this._hostEventFeed(),
 			subscribeStateChanges: (listener) => this.subscribeStateChanges(listener),
 			subscribeOrchestrationStore: (listener) => this.subscribeOrchestrationStore(listener),
-			sendOperatorMessageToBot: (agentId, message) => this.sendOperatorMessageToBot(agentId, message),
+			sendOperatorMessageToBot: (agentId, message, options) =>
+				this.sendOperatorMessageToBot(agentId, message, options),
 			sendOperatorMessageToTeam: (teamId, message) => this.sendOperatorMessageToTeam(teamId, message),
 			resolveLaneModel: (configuredPattern) => this.resolveLaneModel(configuredPattern),
 			warn: (message) => this._safeWarn(message),
@@ -777,7 +796,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _cachedLaneRecords?: LaneRecord[];
 
 	private _laneRecordsChanged(): void {
-		this._botViews = undefined;
+		this._botRoster.invalidate();
 		this._managedLaneViews = undefined;
 		this._cachedLaneRecords = undefined;
 		this._leaderRows = undefined;
@@ -1048,6 +1067,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._runTeardownStep("stop the always-on install", () => {
 			awayServiceShutdown = this._awayService?.close() ?? Promise.resolve();
 		});
+		let botSessionsShutdown = Promise.resolve();
+		this._runTeardownStep("close the bot sessions", () => {
+			botSessionsShutdown = this._botSessions.stop();
+		});
 		const unsubscribeAwayChannelSettings = this._unsubscribeAwayChannelSettings;
 		this._unsubscribeAwayChannelSettings = undefined;
 		this._runTeardownStep("unsubscribe away channel settings", () => unsubscribeAwayChannelSettings?.());
@@ -1064,8 +1087,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		});
 		// Disposal completes only after the routine and intake passes and their deliveries joined, not merely after they
 		// were told to stop: intake awaits every notice it starts, and stopping aborts a notice still waiting to be saved.
-		return joinShutdownOperations([workerShutdown, routineShutdown, actAheadShutdown, awayServiceShutdown], () =>
-			this._workerLifecycle?.closeSession(),
+		return joinShutdownOperations(
+			[workerShutdown, routineShutdown, actAheadShutdown, awayServiceShutdown, botSessionsShutdown],
+			() => this._workerLifecycle?.closeSession(),
 		);
 	}
 
@@ -1454,7 +1478,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		if (!this._botTeamStore) {
 			this._botTeamStore = new PersistentBotTeamStore(this.deps.getAgentDir(), (message) => this._safeWarn(message));
 			this._botTeamStore.subscribe(() => {
-				this._botViews = undefined;
+				this._botRoster.invalidate();
 				// A leader's row names it by its display name: a rename or a retirement changes the rows, not the delegation.
 				this._leaderRows = undefined;
 				// A routine saved by this session or any other process brings the daemon up if nothing runs it.
@@ -1836,63 +1860,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		}
 	}
 
-	/**
-	 * The bot roster. The TUI reads it on every render frame, so it is projected once and served until an input reports a
-	 * change: a bot-store save, a lane-tracker change or an orchestration event drops it (see `_laneRecordsChanged`).
-	 * Reading it never constructs the worker runtime for a session that has no worker state.
-	 */
+	/** The bot roster (see `BotRoster`): projected once, served until an input reports a change. */
 	listPersistentBots(defaultModelRef = this.getRootModelLabel(), teamId?: string): PersistentBotView[] {
-		const delegateActive = this.deps.isDelegateToolActive();
-		const bindings = this.botBindings.revision();
-		const cached = teamId ? undefined : this._botViews;
-		const team = teamId ? this.getBotTeamStore().getTeam(teamId) : undefined;
-		const inContext = (runtime: string) => {
-			const context = this.botBindings.generationContext(runtime);
-			return (
-				context.teamId === teamId &&
-				(!teamId || context.teamIncarnationId === (team ? teamIncarnation(team) : undefined))
-			);
-		};
-		if (
-			cached &&
-			cached.defaultModelRef === defaultModelRef &&
-			cached.delegateActive === delegateActive &&
-			cached.bindings === bindings
-		) {
-			return [...cached.views];
-		}
-		const hasWorkerState = this._hasWorkerState();
-		let liveAgents: WorkerAgentView[] = [];
-		if (hasWorkerState && delegateActive) {
-			try {
-				liveAgents = this.listWorkerAgents();
-			} catch {
-				liveAgents = [];
-			}
-		}
-		const laneRecords = this._rosterLaneRecords();
-		const projected = this.getBotTeamStore().projectBotViews(
-			liveAgents
-				.filter((agent) => inContext(agent.agentId))
-				.flatMap((agent) => {
-					const alias = this.botBindings.alias(agent.agentId);
-					return alias ? [{ ...agent, agentId: alias }] : [];
-				}),
-			laneRecords
-				.filter((record) => inContext(record.agentId ?? record.laneId))
-				.flatMap((record) => {
-					const alias = this.botBindings.alias(record.agentId ?? record.laneId);
-					return alias ? [{ ...record, agentId: alias }] : [];
-				}),
-			defaultModelRef,
-			teamId === undefined,
-		);
-		// A machine joined over the link speaks from facts (connected, its jobs, its room); a local bot's state comes from its lanes.
-		const views = projected.map((view) =>
-			view.remote && view.state !== "retired" ? { ...view, ...this.getRemoteHub().rosterWords(view.agentId) } : view,
-		);
-		if (!teamId) this._botViews = { defaultModelRef, delegateActive, bindings, views };
-		return teamId ? views.filter((view) => team?.memberAgentIds.includes(view.agentId)) : [...views];
+		return this._botRoster.list(defaultModelRef, teamId);
 	}
 
 	/** The bot a worker runtime belongs to, as the store names it; undefined for a delegate worker, a managed lane or a group thread. */
@@ -1976,6 +1946,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				store: (notify) => this.getBotTeamStore().subscribe(notify),
 				lanes: (notify) => this.subscribeLaneRecords(notify),
 				remote: (notify) => this.getRemoteHub().subscribe(notify),
+				sessions: (notify) => this._botSessions.subscribe(notify),
 				alias: (agentId) => this.botBindings.alias(agentId),
 			},
 			listener,
@@ -2024,9 +1995,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 						this.acknowledgePlacedJobTerminals(finishedPlacedJobReferences(this.deps.getAgentDir())),
 				},
 			});
-			this._remoteHub.subscribe(() => {
-				this._botViews = undefined;
-			});
+			this._remoteHub.subscribe(() => this._botRoster.invalidate());
 		}
 		// A hub made after the fleet exists gives it the room at once; one made before gets it when the fleet is built.
 		if (this._workers) this._remoteHub.jobs?.attachFleet(this._workers.getFleet());

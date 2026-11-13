@@ -63,6 +63,7 @@ export {
  * - `channel-expiry`: the one alarm of a channel runtime for the earliest time a held item expires or a bound lifts,
  *   kept apart from `channel-poll` so a day-long expiry never reads as the transport's next scheduled wait. The notices
  *   of the calls waiting on the owner measure a call's age and arm their one alarm on this clock too.
+ * - `bot-sessions`: the idle bound after which a bot's own session, loaded for its owner's messages, is closed.
  * - `semantic-usage`: the retry backoff of a session's System One usage journal (`cost/semantic-usage-delivery.ts`) after a
  *   failed journal write or read: the pending usage report is retried on the session's clock.
  */
@@ -96,7 +97,8 @@ export type TimerOwner =
 	| "channel-expiry"
 	| "semantic-usage"
 	| "fleet"
-	| "leaders";
+	| "leaders"
+	| "bot-sessions";
 
 /** The one timer source a session is built with: the port each owner arms its alarms on. */
 export interface TimerSource {

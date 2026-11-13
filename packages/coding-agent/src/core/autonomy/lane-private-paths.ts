@@ -3,6 +3,7 @@ import path from "node:path";
 import {
 	AGENT_ROOT_DIRECTORY_NAMES,
 	AGENT_ROOT_FILE_NAMES,
+	botsDir,
 	channelsDir,
 	configFile,
 	getWorkRoot,
@@ -70,6 +71,8 @@ export function getPrivateLaneDeniedPaths(cwd: string, agentDir: string): string
 		// The link's secrets (every joined machine's), its joins, chats, job stores and host lock.
 		remoteDir(agentDir),
 		sessionsDir(agentDir),
+		// The bots' own sessions and profiles, private like the sessions above.
+		botsDir(agentDir),
 		stateDir(agentDir),
 		getWorkRoot(agentDir),
 		projectLaneSettingsPath(cwd),

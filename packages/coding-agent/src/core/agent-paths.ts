@@ -24,6 +24,7 @@
  *   npm/ git/ sessions/                                                                    -- npmDir/gitDir/sessionsDir
  *   logs/harness/harness-<date>.jsonl  the harness's own log (kernel/harness-log.ts)      -- harnessLogDir
  *   collaboration/herdr/config.toml    the collaboration backend's managed config         -- collaborationDir
+ *   bots/<id>/                         one bot's home: profile.json, sessions/, memory/       -- botHomeDir
  *   state/orchestration/sessions/<session-key>/                                             -- one foreground-session-owned
  *                                                                                            control-plane bundle
  *     worker-context-forks/<identity-digest>-<content-digest>.json                         -- immutable birth snapshots
@@ -42,6 +43,7 @@
  * `mkdirSync(dirname(filePath), { recursive: true })`), so duplicating that here would be redundant
  * and would blur the "pure function" contract readers rely on.
  */
+import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
 	orchestrationSessionDeletionFile,
@@ -71,6 +73,7 @@ import {
 	getWorkRunDir,
 	getWorkTenantDir,
 	hasActiveWorkRunLease,
+	isPortablePathSegment,
 	pruneWorkTenant,
 	removeWorkRun,
 } from "../utils/work-directory.ts";
@@ -81,6 +84,9 @@ import { getReloadCoordinationDir } from "./reload-blockers.ts";
  * root entry, so the layout report never calls a directory the harness creates itself unexpected.
  */
 export const HARNESS_LOG_ROOT_NAME = "logs";
+
+/** `<agentDir>/bots` -- the homes of the bots that run as sessions of their own. */
+export const BOTS_DIR_NAME = "bots";
 
 /** `<agentDir>/collaboration` -- the collaboration backend's own configuration (`collaboration/herdr/config.toml`). */
 export const COLLABORATION_DIR_NAME = "collaboration";
@@ -132,6 +138,8 @@ export const AGENT_ROOT_DIRECTORY_NAMES = [
 	"worktrees",
 	// Channel tokens and per-channel journals (`channels/<name>.json`).
 	"channels",
+	// One home per bot (`bots/<id>/`): its profile, its own session files and its memory.
+	BOTS_DIR_NAME,
 	// The remote link: this machine's identity, the hub's config and joined machines' secrets, joins, chats and the host lock.
 	"remote",
 	// The harness's own log (`logs/harness/harness-<date>.jsonl`).
@@ -226,6 +234,52 @@ export function steeringCertificatesFile(agentDir: string): string {
 /** `<agentDir>/state/continuous-chat-spend.json` -- the chat summaries' spend for the current day, shared by every project. */
 export function continuousChatSpendFile(agentDir: string): string {
 	return stateFile(agentDir, "continuous-chat-spend.json");
+}
+
+/** `<agentDir>/bots` -- every bot's home: the bots' own session files and profiles, private to the harness like `sessions/`. */
+export function botsDir(agentDir: string): string {
+	return join(agentDir, BOTS_DIR_NAME);
+}
+
+/**
+ * The directory name of a bot's home: the id itself when it is a lowercase portable segment, else a readable slug of it
+ * with a digest of the exact id. Bot ids keep their case and may be longer than a segment, so two ids can differ only
+ * by case: the digest keeps their homes apart on a case-insensitive disk.
+ */
+export function botHomeName(botId: string): string {
+	if (isPortablePathSegment(botId) && !botId.includes(".")) return botId;
+	const slug =
+		botId
+			.toLowerCase()
+			.replace(/[^a-z0-9_-]+/g, "-")
+			.replace(/^[^a-z0-9]+/, "")
+			.slice(0, 40) || "bot";
+	return `${slug}-${createHash("sha256").update(botId).digest("hex").slice(0, 12)}`;
+}
+
+/** `<agentDir>/bots/<name>` -- one bot's home (`botHomeName`). */
+export function botHomeDir(agentDir: string, botId: string): string {
+	return join(botsDir(agentDir), botHomeName(botId));
+}
+
+/** `<agentDir>/bots/<id>/profile.json` -- what defines the bot, written from its store record. */
+export function botProfileFile(agentDir: string, botId: string): string {
+	return join(botHomeDir(agentDir, botId), "profile.json");
+}
+
+/** `<agentDir>/bots/<id>/sessions` -- the bot's own root session files. */
+export function botSessionsDir(agentDir: string, botId: string): string {
+	return join(botHomeDir(agentDir, botId), "sessions");
+}
+
+/** `<agentDir>/bots/<id>/memory` -- the bot's own memory. */
+export function botMemoryDir(agentDir: string, botId: string): string {
+	return join(botHomeDir(agentDir, botId), "memory");
+}
+
+/** `<agentDir>/bots/<id>/host.lock` -- names the one process that hosts the bot's session. */
+export function botHostLockFile(agentDir: string, botId: string): string {
+	return join(botHomeDir(agentDir, botId), "host.lock");
 }
 
 /** `<agentDir>/state/bots/store.json` -- the persistent bots, teams and team transcripts. */

@@ -6,6 +6,7 @@
  */
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
+import type { BotSessionHost } from "../bots/bot-session-host.ts";
 import type { OrchestrationDelegationLimits, WorkerResultContract } from "../orchestration/contracts.ts";
 import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-guard.ts";
 import { botStartModelStance } from "../orchestration/worker-model-pins.ts";
@@ -32,6 +33,8 @@ import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 
 /** What a dispatch reads from and asks of the coordinator: the roster, the lanes and the worker runtime. */
 export interface BotOperatorDispatchHost {
+	/** The bots that run as sessions of their own: the owner's direct words to such a bot go to its session. */
+	readonly botSessions: Pick<BotSessionHost, "deliver">;
 	getBotTeamStore(): PersistentBotTeamStore;
 	getRemoteHub(): Pick<RemoteHubController, "ask" | "send">;
 	/** Drops the cached bot roster: a bot or group changed under it. */
@@ -57,6 +60,28 @@ export interface BotOperatorDispatchHost {
 	leaderDelegationLimits(): OrchestrationDelegationLimits;
 	getWorkerAttemptResult(attemptId: string): WorkerResultContract | undefined;
 	cancelWorkerAgent(agentId: string, reasonCode?: string, scope?: WorkerAgentControlScope): LaneRecord | undefined;
+}
+
+/**
+ * Whether a message is the owner's own direct word to a bot (the roster chat, `/bot msg`, `@bot`). A group's message, the
+ * orchestrator's ask, a routine's send and a leader's brief are not: they still run as workers of this session, until the
+ * phase that moves each (groups: rooms, phase 3; the orchestrator's asks: mail, phase 2; routines and leaders: autonomy,
+ * phase 4).
+ */
+function isOwnerDirect(context: BotRuntimeContext, options: BotOperatorMessageOptions | undefined): boolean {
+	return (
+		context.teamId === undefined &&
+		!options?.fromRoot &&
+		!options?.fromRoutine &&
+		options?.fromLeader === undefined &&
+		options?.delegationObjectiveId === undefined &&
+		options?.idempotencyKey === undefined
+	);
+}
+
+/** Whether the bot runs as a session of its own: a leader and a profile-backed bot still run as workers (autonomy, phase 4). */
+function hasOwnSession(bot: { readonly leader?: boolean; readonly profileId?: string }): boolean {
+	return bot.leader !== true && bot.profileId === undefined;
 }
 
 /** Dispatches operator messages to bots and groups, one send at a time per bot generation. */
@@ -155,6 +180,17 @@ export class BotOperatorDispatch {
 			const messageId =
 				options?.fromRoot || options?.answerInSession ? await hub.ask(normId, message) : hub.send(normId, message);
 			return { agentId: normId, mode: "queued", messageId, modelRef: "link/remote" };
+		}
+		if (isOwnerDirect(context, options)) {
+			// The owner's word to a bot with a session of its own never needs the worker runtime.
+			let sessionBot = store.ensureBotForDispatch(normId, () => this.host.resolveModelSpec());
+			if (hasOwnSession(sessionBot)) {
+				if (sessionBot.retired) sessionBot = store.upsertBot({ agentId: normId, retired: false });
+				assertCurrentBranch();
+				const delivered = await this.host.botSessions.deliver(normId, message, options?.mode);
+				this.host.invalidateBotViews();
+				return delivered;
+			}
 		}
 		const runtime = this.botBindings.runtime(normId, teamId, teamIncarnationId);
 		let liveAgents: WorkerAgentView[] = [];

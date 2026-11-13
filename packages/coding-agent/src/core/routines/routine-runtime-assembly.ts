@@ -11,6 +11,7 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { thirdPartyProtectedWritePaths } from "../autonomy/lane-private-paths.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
+import type { BotOperatorMessageOptions } from "../delegation/bot-operator-message-options.ts";
 import type {
 	BotOperatorMessageDispatchResult,
 	PersistentBotTeamStore,
@@ -75,7 +76,11 @@ export interface RoutineAssemblyHost {
 	hostEventFeed(): RoutineHostEventPort;
 	subscribeStateChanges(listener: () => void): () => void;
 	subscribeOrchestrationStore(listener: () => void): () => void;
-	sendOperatorMessageToBot(agentId: string, message: string): Promise<BotOperatorMessageDispatchResult>;
+	sendOperatorMessageToBot(
+		agentId: string,
+		message: string,
+		options: BotOperatorMessageOptions,
+	): Promise<BotOperatorMessageDispatchResult>;
 	sendOperatorMessageToTeam(teamId: string, message: string): Promise<TeamOperatorMessageDispatchResult>;
 	resolveLaneModel(configuredPattern: string | undefined): Model<Api> | undefined;
 	warn(message: string): void;
@@ -322,6 +327,7 @@ export class RoutineRuntimeAssembly {
 					const result = await this.host.sendOperatorMessageToBot(
 						occurrence.target.agentId,
 						occurrence.definition.prompt,
+						{ fromRoutine: true },
 					);
 					return `Prompt accepted by bot ${occurrence.target.agentId} (${result.mode}); worker completion is tracked separately.`;
 				}

@@ -29,6 +29,7 @@ import {
 import {
 	AGENT_ROOT_DIRECTORY_NAMES,
 	AGENT_ROOT_FILE_NAMES,
+	BOTS_DIR_NAME,
 	COLLABORATION_DIR_NAME,
 	configFile,
 	HARNESS_LOG_ROOT_NAME,
@@ -66,6 +67,8 @@ const HOST_WRITTEN_AGENT_ROOT_ENTRIES: ReadonlySet<string> = new Set<string>([
 	"git",
 	"worktrees",
 	"channels",
+	// A bot's home (profile, session files, host lock) is written by the host while a bot runs.
+	BOTS_DIR_NAME,
 	// The link's directory is watched file by file (see WATCHED_REMOTE_FILE_NAMES): its job stores, chats, host lock and
 	// link state churn while any lane runs.
 	"remote",

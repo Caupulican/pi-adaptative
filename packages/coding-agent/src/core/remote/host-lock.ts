@@ -4,7 +4,8 @@
  * replaced only when its owner is proven gone on this host ({@link judgeOwner} `dead`): a live owner, an owner on
  * another host and an owner that cannot be judged all keep it. Nothing polls: a session that does not host watches the
  * directory and tries again when the lock file goes away. The same mechanism names the one session that runs the jobs
- * peers place here (`remote/jobs/runner.lock`, {@link RUNNER_LOCK}).
+ * peers place here (`remote/jobs/runner.lock`, {@link RUNNER_LOCK}), and the one process that hosts a bot's own session
+ * (`bots/<id>/host.lock`, through {@link takeProcessLock}).
  */
 
 import { randomBytes } from "node:crypto";
@@ -82,7 +83,7 @@ export class HostLock {
 				if (readRecord(this.path)?.token === this.token) rmSync(this.path, { force: true });
 			});
 		} catch (error) {
-			harnessLog.warn("link", "the link host lock could not be released", {
+			harnessLog.warn("link", "a host lock could not be released", {
 				reason: error instanceof Error ? error.name : "unknown",
 			});
 		}
@@ -95,14 +96,18 @@ export class HostLock {
  * is replaced.
  */
 export function takeHostLock(agentDir: string, name = LOCK_FILE): HostLockResult {
-	const path = lockPath(agentDir, name);
+	return takeProcessLock(lockPath(agentDir, name));
+}
+
+/** The same hold on any lock file: one live process names it, and a record whose process is gone is replaced. */
+export function takeProcessLock(path: string): HostLockResult {
 	mkdirSync(dirname(path), { recursive: true });
 	return withFileLockSync(path, (): HostLockResult => {
 		const current = readRecord(path);
 		if (current) {
 			const standing = judgeOwner(current);
 			if (standing !== "dead") return { held: false, owner: { pid: current.pid, standing } };
-			harnessLog.info("link", "a link host lock whose session is gone was replaced", { pid: current.pid });
+			harnessLog.info("link", "a host lock whose process is gone was replaced", { pid: current.pid });
 		}
 		const record: HostLockRecord = {
 			...ownProcessOwner(),

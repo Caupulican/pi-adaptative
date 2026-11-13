@@ -6,6 +6,7 @@
  */
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
+import type { BotSessionHost } from "../bots/bot-session-host.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-guard.ts";
 import { botStartModelStance } from "../orchestration/worker-model-pins.ts";
@@ -45,6 +46,8 @@ import { contractGrantsChildren } from "./worker-nested-start.ts";
 
 /** What the lifecycle reads from and asks of the coordinator: the roster, the worker runtime and the leaders. */
 export interface BotLifecycleHost {
+	/** The bots that run as sessions of their own: a stop reaches their running turn, a retirement or a change their session. */
+	readonly botSessions: Pick<BotSessionHost, "interrupt" | "isActive" | "release" | "recordChanged">;
 	getBotTeamStore(): PersistentBotTeamStore;
 	/** Drops the cached bot roster: a bot changed under it. */
 	invalidateBotViews(): void;
@@ -253,11 +256,16 @@ export class BotLifecycleController {
 			throw new Error(
 				`Retire bot ${input.agentId} (/bot retire ${input.agentId}) before changing its model, profile, permissions, soul or leadership: its live worker keeps the grant and soul it started with, and only a new worker generation gets the new ones.`,
 			);
+		// A bot's own session keeps the model, grant and soul it started with, as a live worker does.
+		if (bindingChanged && this.host.botSessions.isActive(agentId))
+			throw new Error(interfaceText().botTeam.botChangeWhileRunning(agentId));
 		if (input.leader !== undefined)
 			harnessLog.info("bots", input.leader ? "a bot was made a leader" : "a bot stopped being a leader", {
 				agentId,
 			});
-		return store.upsertBot({ ...input, agentId });
+		const saved = store.upsertBot({ ...input, agentId });
+		this.host.botSessions.recordChanged(saved);
+		return saved;
 	}
 
 	/**
@@ -358,10 +366,14 @@ export class BotLifecycleController {
 			const workers = this.host.hasWorkerState()
 				? this.host.listWorkerAgents().filter((agent) => runtimes.has(agent.agentId))
 				: [];
-			if (workers.some((agent) => agent.status !== "retired" && agent.activity !== "idle"))
+			if (
+				this.host.botSessions.isActive(agentId) ||
+				workers.some((agent) => agent.status !== "retired" && agent.activity !== "idle")
+			)
 				throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
 			for (const worker of workers) this.host.retireWorkerAgent(worker.agentId, undefined, { discardPending: true });
 			const bot = this.host.getBotTeamStore().retireBot(agentId);
+			this.host.botSessions.release(agentId);
 			return {
 				retired: bot !== undefined,
 				detail: bot ? interfaceText().botTeam.botRetired(agentId) : interfaceText().botTeam.botMissing(agentId),
@@ -372,10 +384,13 @@ export class BotLifecycleController {
 	}
 
 	stopPersistentBot(agentId: string): { stopped: boolean; detail: string } {
+		// The bot's own session runs the owner's direct conversation: its turn stops first, whatever the worker runtime holds.
+		let sessionStopped = false;
 		try {
 			agentId = normalizeBotOrTeamId(agentId, "agentId");
+			sessionStopped = this.host.botSessions.interrupt(agentId);
 			const runtimes = new Set(this.botBindings.runtimes(agentId));
-			const agents = this.host.listWorkerAgents();
+			const agents = this.host.hasWorkerState() ? this.host.listWorkerAgents() : [];
 			const results = agents
 				.filter((agent) => runtimes.has(agent.agentId))
 				.map((agent) => this.host.interruptWorkerAgent(agent.agentId, undefined, { force: false }));
@@ -398,16 +413,17 @@ export class BotLifecycleController {
 			const res = results.find((result) => result.interrupted) ?? results[0] ?? { interrupted: false };
 			const words = interfaceText().botTeam;
 			return {
-				stopped: res.interrupted || stoppedBots.length > 0,
-				detail: res.interrupted
-					? words.botStopped(agentId, stoppedBots, words.stopMode(res.mode ?? "halt"))
-					: stoppedBots.length > 0
-						? words.botStoppedOwn(agentId, stoppedBots)
-						: (res.reason ?? words.botIdle(agentId)),
+				stopped: res.interrupted || sessionStopped || stoppedBots.length > 0,
+				detail:
+					res.interrupted || sessionStopped
+						? words.botStopped(agentId, stoppedBots, words.stopMode(res.mode ?? "halt"))
+						: stoppedBots.length > 0
+							? words.botStoppedOwn(agentId, stoppedBots)
+							: (res.reason ?? words.botIdle(agentId)),
 			};
 		} catch (error) {
 			return {
-				stopped: false,
+				stopped: sessionStopped,
 				detail: error instanceof Error ? error.message : interfaceText().botTeam.botIdle(agentId),
 			};
 		}

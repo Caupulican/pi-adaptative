@@ -221,14 +221,19 @@ function nonNegativeLimit(value: number | undefined, fallback: number): number {
 	return value !== undefined && Number.isFinite(value) && value >= 0 ? Math.floor(value) : fallback;
 }
 
+/** Whether `value` is a lowercase portable path segment (1-64 characters) that no platform reserves. */
+export function isPortablePathSegment(value: string): boolean {
+	if (!SEGMENT_PATTERN.test(value) || value.endsWith(".")) return false;
+	const stem = value.split(".", 1)[0];
+	return !(stem && WINDOWS_RESERVED_NAMES.has(stem));
+}
+
 export function assertPortablePathSegment(label: string, value: string): void {
+	if (isPortablePathSegment(value)) return;
 	if (!SEGMENT_PATTERN.test(value) || value.endsWith(".")) {
 		throw new Error(`${label} must be a lowercase portable path segment (1-64 characters)`);
 	}
-	const stem = value.split(".", 1)[0];
-	if (stem && WINDOWS_RESERVED_NAMES.has(stem)) {
-		throw new Error(`${label} uses a Windows-reserved path name: ${value}`);
-	}
+	throw new Error(`${label} uses a Windows-reserved path name: ${value}`);
 }
 
 function ensureDirectory(path: string): void {

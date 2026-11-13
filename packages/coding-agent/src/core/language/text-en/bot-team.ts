@@ -51,6 +51,24 @@ export const BOT_TEAM = {
 		`Bot ${agentId} leads an open goal; cancel it first (/lead cancel ${agentId}).`,
 	botHasActiveWork: (agentId: string) =>
 		`Bot ${agentId} still has active team or direct work; run /bot stop ${agentId} first.`,
+	/** A bot's own session cannot start: its model is gone or has no credentials. */
+	botModelUnavailable: (agentId: string, modelRef: string) =>
+		`Bot ${agentId} runs on ${modelRef}, which is not available or has no credentials. Sign in to that provider or change the bot's model, then message it again.`,
+	botSoulRefused: (agentId: string, reason: string) =>
+		`Bot ${agentId} was not started: ${reason}. Edit its soul with /bot soul ${agentId}.`,
+	/** Another process holds the bot's session: two processes would write one conversation. */
+	botSessionHeld: (agentId: string, pid: number) =>
+		`Bot ${agentId} is open in another session (process ${pid}). Message it from there, or close that session first.`,
+	botMessageRefused: (agentId: string, reason: string) => `Bot ${agentId} did not take the message: ${reason}.`,
+	/** A message that came while this session was closing and its bots with it. */
+	botSessionsClosing: (agentId: string) =>
+		`Bot ${agentId} was not started: this session is closing, and its bots close with it. Message it again in the next session.`,
+	botTurnFailed: (agentId: string, reason: string) => `Bot ${agentId}: its turn failed (${reason}).`,
+	botSessionCloseFailed: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its session did not close cleanly (${reason}).`,
+	/** A change of what defines a running bot's session. */
+	botChangeWhileRunning: (agentId: string) =>
+		`Bot ${agentId} is working: its model, permissions and soul apply to its session when it starts, so stop it first (/bot stop ${agentId}).`,
 	/** `bots`: the ids of the bots it owns that were stopped with it. */
 	botStopped: (agentId: string, bots: readonly string[], mode: string) =>
 		`Stopped ${agentId}${bots.length === 0 ? "" : ` and its ${bots.length === 1 ? "bot" : "bots"} ${bots.join(", ")}`} (${mode}).`,

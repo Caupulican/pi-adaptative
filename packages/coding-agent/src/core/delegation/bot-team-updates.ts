@@ -1,4 +1,4 @@
-/** Combines durable team, local lane, and remote presence updates for bot-view subscribers. */
+/** Combines durable team, local lane, bot-session and remote presence updates for bot-view subscribers. */
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BotTeamChange } from "./persistent-bot-team-store.ts";
 
@@ -8,6 +8,8 @@ export function subscribeBotTeamUpdates(
 		store(listener: () => void): () => void;
 		lanes(listener: (records: readonly LaneRecord[]) => void): () => void;
 		remote(listener: (change: BotTeamChange) => void): () => void;
+		/** A bot's own session changed state (a turn started or ended, input queued, the session loaded or closed). */
+		sessions(listener: (change: BotTeamChange) => void): () => void;
 		alias(agentId: string): string | undefined;
 	},
 	listener: (change: BotTeamChange) => void,
@@ -16,6 +18,7 @@ export function subscribeBotTeamUpdates(
 	const seen = new Map<string, string>();
 	let offLanes: (() => void) | undefined;
 	let offRemote: (() => void) | undefined;
+	let offSessions: (() => void) | undefined;
 	try {
 		offLanes = ports.lanes((records) => {
 			const changed: string[] = [];
@@ -38,8 +41,10 @@ export function subscribeBotTeamUpdates(
 			if (changed.length > 0) listener(changed);
 		});
 		offRemote = ports.remote(listener);
+		offSessions = ports.sessions(listener);
 	} catch (error) {
 		offLanes?.();
+		offRemote?.();
 		offStore();
 		throw error;
 	}
@@ -47,5 +52,6 @@ export function subscribeBotTeamUpdates(
 		offStore();
 		offLanes?.();
 		offRemote?.();
+		offSessions?.();
 	};
 }

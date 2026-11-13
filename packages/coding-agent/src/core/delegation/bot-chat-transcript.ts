@@ -1,8 +1,9 @@
 /**
- * The chat an operator reads for a bot or a group: the bot's durable worker conversation shaped into the messages the chat
- * view draws, with the remote hub's chat for a machine joined over the link, the lane and group records as the fallback
- * when no conversation exists, and a group's own message log. It reads through the ports the coordinator gives it and never
- * builds a worker, a store or a hub itself.
+ * The chat an operator reads for a bot or a group: a bot's own session conversation with the owner, with the bot's durable
+ * worker conversation (what ran as a worker before the bot had a session of its own, and the sends that still run as
+ * workers) shaped into the messages the chat view draws and merged in by time, the remote hub's chat for a machine joined
+ * over the link, the lane and group records as the fallback when no conversation exists, and a group's own message log. It
+ * reads through the ports the coordinator gives it and never builds a worker, a store or a hub itself.
  */
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { AgentMessage } from "../../kernel/types.ts";
@@ -28,6 +29,26 @@ export interface BotChatHost {
 	getRemoteHub(): Pick<RemoteHubController, "chat">;
 	openWorkerTranscript(agentId: string): WorkerConversation | undefined;
 	getLaneRecords(): LaneRecord[];
+	/** The bot's own session conversation, loaded or on disk; undefined when the bot has no session of its own yet. */
+	readBotSessionMessages(agentId: string): AgentMessage[] | undefined;
+}
+
+/** The messages of two chronological lists in time order, each list's own order kept (an untimed message keeps its place). */
+function mergeByTime(first: readonly AgentMessage[], second: readonly AgentMessage[]): AgentMessage[] {
+	const timed = (list: readonly AgentMessage[]): number[] => {
+		let last = 0;
+		return list.map((message) => (last = message.timestamp ?? last));
+	};
+	const firstTimes = timed(first);
+	const secondTimes = timed(second);
+	const merged: AgentMessage[] = [];
+	let i = 0;
+	let j = 0;
+	while (i < first.length || j < second.length) {
+		const takeFirst = j >= second.length || (i < first.length && firstTimes[i]! <= secondTimes[j]!);
+		merged.push(takeFirst ? first[i++]! : second[j++]!);
+	}
+	return merged;
 }
 
 /** Reads the chat of a bot (its own generation, or a group's) and the message log of a group. */
@@ -60,9 +81,20 @@ export class BotChatTranscript {
 		};
 	}
 
+	/** The bot's chat with the owner: its own session's conversation, after what ran as a worker before or beside it. */
 	readBotChatMessages(agentId: string, teamId?: string): AgentMessage[] {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
 		if (this.host.getBotTeamStore().getBot(normId)?.remote) return this.host.getRemoteHub().chat(normId);
+		// A group's chat is the group's own conversation with the bot, still a worker.
+		if (teamId) return this.readWorkerChatMessages(normId, teamId, false);
+		const own = this.host.readBotSessionMessages(normId);
+		return own
+			? mergeByTime(this.readWorkerChatMessages(normId, undefined, false), own)
+			: this.readWorkerChatMessages(normId, undefined, true);
+	}
+
+	/** What the bot's worker runtime said, shaped for the chat; the last summary stands in when `withSummary` and nothing else exists. */
+	private readWorkerChatMessages(normId: string, teamId: string | undefined, withSummary: boolean): AgentMessage[] {
 		const team = teamId ? this.host.getBotTeamStore().getTeam(teamId) : undefined;
 		const runtime = this.botBindings.runtime(normId, teamId, team ? teamIncarnation(team) : undefined);
 		let conv = this.host.openWorkerTranscript(runtime);
@@ -135,7 +167,9 @@ export class BotChatTranscript {
 		const laneRecords = this.host.getLaneRecords().filter((r) => r.agentId === runtime || r.laneId === runtime);
 
 		if (relevantTeamMessages.length === 0 && laneRecords.length === 0) {
-			return !teamId && bot?.lastSummary ? [this.createSyntheticBotSummaryMessage(bot, bot.lastSummary)] : [];
+			return withSummary && !teamId && bot?.lastSummary
+				? [this.createSyntheticBotSummaryMessage(bot, bot.lastSummary)]
+				: [];
 		}
 
 		const fallbackMessages: AgentMessage[] = [];
@@ -165,7 +199,7 @@ export class BotChatTranscript {
 				timestamp: tm.timestamp,
 			});
 		}
-		if (!teamId && fallbackMessages.length === 0 && bot?.lastSummary) {
+		if (withSummary && !teamId && fallbackMessages.length === 0 && bot?.lastSummary) {
 			fallbackMessages.push(this.createSyntheticBotSummaryMessage(bot, bot.lastSummary));
 		}
 		fallbackMessages.sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));

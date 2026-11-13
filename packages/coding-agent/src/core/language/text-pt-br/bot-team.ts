@@ -60,6 +60,20 @@ export const BOT_TEAM = {
 		`O bot ${agentId} lidera um objetivo aberto; cancele antes (/lead cancel ${agentId}).`,
 	botHasActiveWork: (agentId: string) =>
 		`O bot ${agentId} ainda está em atendimento direto ou em equipe; pare antes com /bot stop ${agentId}.`,
+	botModelUnavailable: (agentId: string, modelRef: string) =>
+		`O bot ${agentId} roda em ${modelRef}, que não está disponível ou não tem credenciais. Entre nesse provedor ou troque o modelo do bot e envie a mensagem de novo.`,
+	botSoulRefused: (agentId: string, reason: string) =>
+		`O bot ${agentId} não foi iniciado: ${reason}. Edite o soul com /bot soul ${agentId}.`,
+	botSessionHeld: (agentId: string, pid: number) =>
+		`O bot ${agentId} está aberto em outra sessão (processo ${pid}). Envie a mensagem de lá, ou feche aquela sessão antes.`,
+	botMessageRefused: (agentId: string, reason: string) => `O bot ${agentId} não recebeu a mensagem: ${reason}.`,
+	botSessionsClosing: (agentId: string) =>
+		`O bot ${agentId} não foi iniciado: esta sessão está fechando, e os bots dela fecham junto. Envie a mensagem de novo na próxima sessão.`,
+	botTurnFailed: (agentId: string, reason: string) => `Bot ${agentId}: o turno falhou (${reason}).`,
+	botSessionCloseFailed: (agentId: string, reason: string) =>
+		`Bot ${agentId}: a sessão não fechou corretamente (${reason}).`,
+	botChangeWhileRunning: (agentId: string) =>
+		`O bot ${agentId} está trabalhando: modelo, permissões e soul valem para a sessão no início dela, então pare antes (/bot stop ${agentId}).`,
 	botStopped: (agentId: string, bots: readonly string[], mode: string) =>
 		`${agentId} parado${bots.length === 0 ? "" : `, junto com ${bots.length === 1 ? "o bot" : "os bots"} ${bots.join(", ")}`} (${mode}).`,
 	botStoppedOwn: (agentId: string, bots: readonly string[]) =>

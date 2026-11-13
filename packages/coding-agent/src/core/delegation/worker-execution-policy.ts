@@ -33,9 +33,9 @@ import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import { isWorkerProcessToolAllowed } from "../worker-tool-ceiling.ts";
 import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
 
-const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
-const REPO_READ_TOOL_NAME = "repo_read";
-const WRITE_TOOL_NAMES = ["write", "edit"] as const;
+export const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
+export const REPO_READ_TOOL_NAME = "repo_read";
+export const WRITE_TOOL_NAMES = ["write", "edit"] as const;
 /** Adapter tools that read the owner's stored content by name: skill texts, skill audits and packed tool outputs. */
 const READ_BY_NAME_ADAPTER_TOOLS: ReadonlySet<string> = new Set(["skill", "skill_audit", "artifact_retrieve"]);
 
