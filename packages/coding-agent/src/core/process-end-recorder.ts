@@ -75,7 +75,7 @@ export function processEndRecordClass(reason: ProcessEndReason): CrashRecordClas
 
 /**
  * The process's end, owned by the process root. Declaring an end writes its record at once, before any cleanup can touch the
- * terminal or hang, and an end declared again with the same reason is recorded once. A declaration states intent only: the end is
+ * terminal or hang, and the same reason and exit code are recorded once. A declaration states intent only: the end is
  * performed by `exitProcess`, or, for a completed program, by the event loop draining.
  *
  * Once `install` ran (the interactive runtime's entry, never the supervisor parent) every end that was not performed through
@@ -84,6 +84,7 @@ export function processEndRecordClass(reason: ProcessEndReason): CrashRecordClas
  */
 class ProcessEndRecorder {
 	private declared: ProcessEndReason | undefined;
+	private declaredCode: number | undefined;
 	/** Set when the exit now running is the declared one. */
 	private performed = false;
 	private installed = false;
@@ -93,8 +94,9 @@ class ProcessEndRecorder {
 	private uncaught: string | undefined;
 
 	declareExit(reason: ProcessEndReason, detail = "", code?: number): string | undefined {
-		if (reason === this.declared) return undefined;
+		if (reason === this.declared && code === this.declaredCode) return undefined;
 		this.declared = reason;
+		this.declaredCode = code;
 		const recordClass = processEndRecordClass(reason);
 		if (recordClass === "none") return undefined;
 		return writeCrashRecord(recordClass, code === undefined ? reason : `${reason}; exit ${code}`, detail);

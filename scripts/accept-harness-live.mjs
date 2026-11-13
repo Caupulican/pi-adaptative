@@ -1126,11 +1126,47 @@ const SCENARIOS = [
 			catch (error) { if (error.code === "ESRCH") return true; throw error; }
 		}, 30_000, 250);
 		const ended = await waitFor("the identified runtime's declared terminal end", () => detachedProcessEnd(agentDir, runtime.pid, detachedAt), 15_000, 250);
+		// Derive crash-cut controls from this real exit. A newer incomplete or forced record must
+		// never borrow the older performed exit's proof; originals remain untouched.
+		const crashDirectory = join(agentDir, "state", "crashes");
+		const suffix = "-" + runtime.pid + "-" + ended.sequence + ".routine.txt";
+		const sourceNames = readdirSync(crashDirectory).filter((name) => name.endsWith(suffix));
+		if (sourceNames.length !== 1) throw new Error("The completed runtime has ambiguous source exit evidence");
+		const sourceName = sourceNames[0];
+		const stem = sourceName.slice(0, -suffix.length);
+		const laterName = stem + "-" + runtime.pid + "-" + (ended.sequence + 1) + ".routine.txt";
+		const body = "\npid " + runtime.pid + "\nat " + new Date(ended.at).toISOString() + "\n\n";
+		const completedHeader = ended.reason + "; exit " + ended.exitCode;
+		const proofControls = [];
+		for (const [kind, header] of [
+			["provisional", ended.reason],
+			["ambiguous", completedHeader + "; exit 1"],
+			["forced", "signal-forced; exit 129"],
+		]) {
+			const controlAgent = join(RUN, "exit-proof-controls", kind);
+			const records = join(controlAgent, "state", "crashes");
+			mkdirSync(records, { recursive: true });
+			writeFileSync(join(records, sourceName), completedHeader + body);
+			writeFileSync(join(records, laterName), header + body);
+			let result;
+			let refused = false;
+			try {
+				result = detachedProcessEnd(controlAgent, runtime.pid, detachedAt);
+			} catch (error) {
+				const expected = kind === "forced" ? "without cooperative terminal cleanup"
+					: kind === "ambiguous" ? "has a malformed terminal header" : undefined;
+				if (expected === undefined || !String(error?.message).includes(expected)) throw error;
+				refused = true;
+			}
+			if (result !== undefined || (kind !== "provisional" && !refused))
+				throw new Error("A newer " + kind + " record incorrectly used an older completed exit");
+			proofControls.push({ kind, sourceRecord: sourceName, laterRecord: laterName, accepted: false });
+		}
 		if (!jsonl(input.sessionFile).some((entry) => entry.id === settled.finalEntryId && entry.message?.role === "assistant"))
 			throw new Error("The completed answer was lost during terminal detachment");
 		const crashes = crashRecordProblems();
 		if (crashes.length) throw new Error(`after terminal detachment, ${crashes.join("; ")}`);
-		writeFileSync(join(REPORT_DIR, "shutdown-journey.json"), `${JSON.stringify({ pane, runtime, inputEntryId: input.entryId, answerEntryId: settled.finalEntryId, detachedAt, ended }, null, 2)}\n`);
+		writeFileSync(join(REPORT_DIR, "shutdown-journey.json"), `${JSON.stringify({ pane, runtime, inputEntryId: input.entryId, answerEntryId: settled.finalEntryId, detachedAt, ended, proofControls }, null, 2)}\n`);
 		return `canonical owner answer persisted; runtime ${runtime.pid} exited as ${ended.reason} after its PTY closed; no fatal crash record`;
 	}),
 ];

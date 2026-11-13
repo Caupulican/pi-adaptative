@@ -1,5 +1,10 @@
 ## [Unreleased]
 
+### Fixed
+
+- Repeated terminal hangups join the same shutdown cleanup. Explicit termination signals still force an exit during cleanup, and a total shutdown deadline prevents an unresponsive extension or resource from holding the process indefinitely.
+- Process-end records retain the invoked exit code separately from an earlier shutdown declaration. Native terminal-detachment acceptance requires that completed invocation evidence and refuses provisional or forced outcomes.
+
 ## [0.104.59] - 2026-11-13
 
 ### Fixed

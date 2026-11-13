@@ -22,10 +22,11 @@ import {
 import { AccountModelCatalog } from "../../../src/core/model-router/account-models.ts";
 import { ModelAdaptationStore } from "../../../src/core/models/adaptation-store.ts";
 import { TerminalWarnings } from "../../../src/core/terminal-warnings.ts";
+import type { TimerPort } from "../../../src/kernel/timer-port.ts";
 import { FooterComponent } from "../../../src/modes/interactive/components/footer.ts";
 import { EditorOverlayHost } from "../../../src/modes/interactive/editor-overlay-host.ts";
 import { InteractiveMode } from "../../../src/modes/interactive/interactive-mode.ts";
-import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
+import { SIGNAL_SHUTDOWN_DEADLINE_MS, SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
 import { runPrintMode } from "../../../src/modes/print-mode.ts";
 import { initTheme, stopThemeWatcher } from "../../../src/presentation/theme/theme.ts";
 import { trackDetachedChild, untrackDetachedChild } from "../../../src/utils/shell.ts";
@@ -183,6 +184,58 @@ interface Install {
 	removed: boolean;
 }
 
+interface ManualSignalTimer {
+	readonly port: TimerPort;
+	pending(): { readonly delayMs: number; readonly keepAlive: boolean }[];
+	fire(): void;
+	readonly cleared: number;
+	readonly clearAttempts: number;
+}
+
+/** A single owned alarm clock for the signal shutdown; firing it never waits on wall time. */
+function createManualSignalTimer(
+	config: { readonly armFails?: boolean; readonly clearFails?: boolean } = {},
+): ManualSignalTimer {
+	let next = 1;
+	let cleared = 0;
+	let clearAttempts = 0;
+	const pending = new Map<
+		number,
+		{ readonly callback: () => void; readonly delayMs: number; readonly keepAlive: boolean }
+	>();
+	const port: TimerPort = {
+		now: () => Date.now(),
+		setTimeout: (callback, delayMs, timerOptions) => {
+			if (timerOptions?.keepAlive && config.armFails) throw new Error("Mode witness: timer arm failed.");
+			const handle = next++;
+			pending.set(handle, { callback, delayMs, keepAlive: timerOptions?.keepAlive === true });
+			return handle;
+		},
+		clearTimeout: (handle) => {
+			clearAttempts++;
+			if (config.clearFails) throw new Error("Mode witness: timer clear failed.");
+			if (typeof handle === "number" && pending.delete(handle)) cleared++;
+		},
+	};
+	return {
+		port,
+		pending: () => [...pending.values()].map(({ delayMs, keepAlive }) => ({ delayMs, keepAlive })),
+		fire: () => {
+			const entry = pending.entries().next().value as
+				| [number, { readonly callback: () => void; readonly delayMs: number; readonly keepAlive: boolean }]
+				| undefined;
+			if (!entry) throw new Error("Mode witness: no shutdown deadline is armed.");
+			entry[1].callback();
+		},
+		get cleared() {
+			return cleared;
+		},
+		get clearAttempts() {
+			return clearAttempts;
+		},
+	};
+}
+
 /** The listener the lifecycle or the mode armed under `name` last; a missing one is a broken witness, never a silent skip. */
 function armedListener(installs: readonly Install[], name: string): (...args: never[]) => void {
 	const matches = installs.filter((install) => install.name === name && !install.removed);
@@ -201,12 +254,15 @@ interface GuardHost {
 	readonly log: string[];
 	readonly warnings: string[];
 	readonly stderr: string[];
+	readonly stderrAttempts: string[];
 	readonly exits: number[];
+	readonly endCalls: { readonly code: number; readonly reason: string }[];
 	readonly guardsAtDispose: string[];
 	readonly forcesAtDispose: string[];
 	/** Released once the dispose has written its closing warning and is waiting on `hold`. */
 	readonly reached: Barrier;
 	readonly hold: Barrier;
+	readonly timers: ManualSignalTimer;
 }
 
 interface GuardHostOptions {
@@ -215,14 +271,20 @@ interface GuardHostOptions {
 	/** The runtime dispose rejects with this value after it has written its closing warning. */
 	readonly disposeFails?: { readonly thrown: unknown };
 	readonly drainFails?: boolean;
+	readonly timerArmFails?: boolean;
+	readonly timerClearFails?: boolean;
+	readonly stderrFails?: boolean;
 }
 
 function createGuardHost(options: GuardHostOptions): GuardHost {
+	const timers = createManualSignalTimer({ armFails: options.timerArmFails, clearFails: options.timerClearFails });
 	const installs: Install[] = [];
 	const log: string[] = [];
 	const warnings: string[] = [];
 	const stderr: string[] = [];
+	const stderrAttempts: string[] = [];
 	const exits: number[] = [];
+	const endCalls: { code: number; reason: string }[] = [];
 	const guardsAtDispose: string[] = [];
 	const forcesAtDispose: string[] = [];
 	const terminal = new TerminalWarnings((released) => {
@@ -275,10 +337,14 @@ function createGuardHost(options: GuardHostOptions): GuardHost {
 			showError: () => {},
 		},
 		{
-			exit: (code) => {
+			timers: timers.port,
+			exit: (code, reason) => {
 				exits.push(code);
+				endCalls.push({ code, reason });
 			},
 			stderr: (text) => {
+				stderrAttempts.push(text);
+				if (options.stderrFails) throw new Error("Mode witness: stderr write failed.");
 				stderr.push(text);
 			},
 			stdout: () => {},
@@ -288,7 +354,21 @@ function createGuardHost(options: GuardHostOptions): GuardHost {
 			onStreamError: (stream, handler) => install(`${stream}:error`, handler),
 		},
 	);
-	return { lifecycle, installs, log, warnings, stderr, exits, guardsAtDispose, forcesAtDispose, reached, hold };
+	return {
+		lifecycle,
+		installs,
+		log,
+		warnings,
+		stderr,
+		stderrAttempts,
+		exits,
+		endCalls,
+		guardsAtDispose,
+		forcesAtDispose,
+		reached,
+		hold,
+		timers,
+	};
 }
 
 interface GuardRun {
@@ -300,7 +380,12 @@ interface GuardRun {
 	readonly log: readonly string[];
 	readonly warnings: readonly string[];
 	readonly stderr: readonly string[];
+	readonly stderrAttempts: readonly string[];
 	readonly exits: readonly number[];
+	readonly endCalls: readonly { readonly code: number; readonly reason: string }[];
+	readonly exitsAtSignal?: readonly number[];
+	readonly pendingDeadlines: readonly { readonly delayMs: number; readonly keepAlive: boolean }[];
+	readonly deadlinesCleared: number;
 }
 
 function guardRunOf(host: GuardHost): GuardRun {
@@ -314,7 +399,11 @@ function guardRunOf(host: GuardHost): GuardRun {
 		log: [...host.log],
 		warnings: [...host.warnings],
 		stderr: [...host.stderr],
+		stderrAttempts: [...host.stderrAttempts],
 		exits: [...host.exits],
+		endCalls: [...host.endCalls],
+		pendingDeadlines: host.timers.pending(),
+		deadlinesCleared: host.timers.cleared,
 	};
 }
 
@@ -360,22 +449,73 @@ async function runGuardCrash(thrown: unknown, options: { readonly stopFails: boo
 }
 
 /**
- * A second termination signal arrives while the dispose is held: the forced listener kills the tracked children, stops the terminal once
- * and exits with the signal's status. The run is read at that exit.
+ * A second termination signal arrives while the dispose is held. SIGHUP is coalesced while graceful shutdown is in progress; TERM and INT
+ * remain force exits. The held dispose is always released and joined before this witness returns.
  */
 async function runGuardSecondSignal(signal: NodeJS.Signals): Promise<GuardRun> {
 	const host = createGuardHost({ holdDispose: true, stopFails: false });
 	host.lifecycle.registerSignalHandlers();
 	const shutdown = host.lifecycle.shutdown({ fromSignal: true });
+	let exitsAtSignal: readonly number[] = [];
 	try {
 		await host.reached.promise;
 		(armedListener(host.installs, signal) as () => void)();
-		return guardRunOf(host);
+		if (signal === "SIGHUP") (armedListener(host.installs, signal) as () => void)();
+		exitsAtSignal = [...host.exits];
 	} finally {
 		host.hold.release();
 		await shutdown;
 		host.lifecycle.unregisterSignalHandlers();
 	}
+	return { ...guardRunOf(host), exitsAtSignal };
+}
+
+interface DeadlineGuardRun extends GuardRun {
+	readonly alarmAtRuntimeDispose: readonly { readonly delayMs: number; readonly keepAlive: boolean }[];
+	readonly exitsAtDeadline: readonly number[];
+	readonly logAtDeadline: readonly string[];
+	readonly pendingAfterSettlement: readonly { readonly delayMs: number; readonly keepAlive: boolean }[];
+}
+
+/** The total deadline wins over a held dispose; its later rejection cannot advance cleanup or declare another process end. */
+async function runGuardDeadline(): Promise<DeadlineGuardRun> {
+	const host = createGuardHost({
+		holdDispose: true,
+		stopFails: false,
+		disposeFails: { thrown: new Error("late runtime disposal failure") },
+	});
+	host.lifecycle.registerSignalHandlers();
+	const shutdown = host.lifecycle.shutdown({ fromSignal: true });
+	await host.reached.promise;
+	const alarmAtRuntimeDispose = host.timers.pending();
+	host.timers.fire();
+	const exitsAtDeadline = [...host.exits];
+	const logAtDeadline = [...host.log];
+	host.hold.release();
+	await shutdown;
+	host.lifecycle.unregisterSignalHandlers();
+	return {
+		...guardRunOf(host),
+		alarmAtRuntimeDispose,
+		exitsAtDeadline,
+		logAtDeadline,
+		pendingAfterSettlement: host.timers.pending(),
+	};
+}
+
+/** Timer setup or disarm may fail; terminal restoration and one exit still belong to the shutdown owner. */
+async function runGuardTimerFailure(options: { readonly arm: boolean; readonly stderr: boolean }): Promise<GuardRun> {
+	const host = createGuardHost({
+		holdDispose: false,
+		stopFails: false,
+		timerArmFails: options.arm,
+		timerClearFails: !options.arm,
+		stderrFails: options.stderr,
+	});
+	host.lifecycle.registerSignalHandlers();
+	await host.lifecycle.shutdown({ fromSignal: true });
+	host.lifecycle.unregisterSignalHandlers();
+	return guardRunOf(host);
 }
 
 /**
@@ -436,6 +576,8 @@ interface InteractiveHarness {
 	readonly stderr: string[];
 	readonly stdout: string[];
 	readonly exits: number[];
+	readonly endCalls: { readonly code: number; readonly reason: string }[];
+	readonly endDeclarations: { readonly code?: number; readonly detail: string; readonly reason: string }[];
 	readonly installs: Install[];
 	readonly flags: { progressFails: boolean };
 	/** Non-signal guards removed before the runtime dispose started. */
@@ -447,12 +589,18 @@ interface InteractiveHarness {
 	readonly exited: Barrier;
 	/** Released at the exit with status 0: a forced exit or a crash ran first, and the held quit then finished by itself. */
 	readonly quitFinished: Barrier;
+	/** Resolves after the real mode's signal shutdown has removed its force listeners. */
+	readonly signalCleanupFinished: Barrier;
 }
 
 /** A real InteractiveMode on a recording input-only terminal, its runtime from the world, and every listener it arms recorded. */
 async function createInteractiveHarness(
 	world: HarnessWorld,
-	options: { readonly holdDispose: boolean; readonly extensionFactories?: readonly ExtensionFactory[] },
+	options: {
+		readonly holdDispose: boolean;
+		readonly extensionFactories?: readonly ExtensionFactory[];
+		readonly timers?: TimerPort;
+	},
 ): Promise<InteractiveHarness> {
 	initTheme("dark");
 	const calls: string[] = [];
@@ -460,6 +608,8 @@ async function createInteractiveHarness(
 	const stderr: string[] = [];
 	const stdout: string[] = [];
 	const exits: number[] = [];
+	const endCalls: { code: number; reason: string }[] = [];
+	const endDeclarations: { code?: number; detail: string; reason: string }[] = [];
 	const installs: Install[] = [];
 	const removedGuardsAtDispose: string[] = [];
 	const flags = { progressFails: false };
@@ -467,6 +617,8 @@ async function createInteractiveHarness(
 	const hold = createBarrier();
 	const exited = createBarrier();
 	const quitFinished = createBarrier();
+	const signalCleanupFinished = createBarrier();
+	let forceListenersWereArmed = false;
 	const terminal: Terminal = {
 		inputOnly: true,
 		columns: 80,
@@ -541,10 +693,17 @@ async function createInteractiveHarness(
 	// The listeners the mode arms are recorded, not installed: the witness does not own the worker's signals.
 	const install = (name: string, handler: (...args: never[]) => void): (() => void) => {
 		const entry: Install = { name, handler, removed: false };
+		if (isSignalName(name) && installs.some((previous) => previous.name === name && previous.removed))
+			forceListenersWereArmed = true;
 		installs.push(entry);
 		return () => {
 			if (entry.removed) return;
 			entry.removed = true;
+			if (
+				forceListenersWereArmed &&
+				!installs.some((installed) => isSignalName(installed.name) && !installed.removed)
+			)
+				signalCleanupFinished.release();
 			if (!isSignalName(name)) calls.push(`guard.removed:${name}`);
 		};
 	};
@@ -553,8 +712,10 @@ async function createInteractiveHarness(
 		hasHumanAudience: false,
 		terminal,
 		signalIo: {
-			exit: (code) => {
+			exit: (code, reason) => {
 				exits.push(code);
+				endCalls.push({ code, reason });
+				endDeclarations.push({ code, detail: "", reason });
 				exited.release();
 				if (code === 0) quitFinished.release();
 			},
@@ -564,10 +725,14 @@ async function createInteractiveHarness(
 			stdout: (text) => {
 				stdout.push(text);
 			},
-			declareExit: () => "",
+			declareExit: (reason, detail) => {
+				endDeclarations.push({ reason, detail });
+				return "";
+			},
 			recordRejection: () => {},
 			prependListener: install,
 			onStreamError: (stream, handler) => install(`${stream}:error`, handler),
+			timers: options.timers,
 		},
 	});
 	const realDispose = runtime.dispose.bind(runtime);
@@ -589,6 +754,8 @@ async function createInteractiveHarness(
 		stderr,
 		stdout,
 		exits,
+		endCalls,
+		endDeclarations,
 		installs,
 		flags,
 		removedGuardsAtDispose,
@@ -596,7 +763,163 @@ async function createInteractiveHarness(
 		hold,
 		exited,
 		quitFinished,
+		signalCleanupFinished,
 	};
+}
+
+/**
+ * The real host path: InteractiveMode signal handlers drive an actual root AgentSessionRuntime, including its extension shutdown event
+ * and registered session resources. One run proves repeated HUP joins the original cleanup; another lets the owning deadline win while
+ * a real session resource is held, then rejects that late cleanup after the terminal outcome is already fixed.
+ */
+async function runActualHostSignalShutdown(
+	world: HarnessWorld,
+	options: { readonly initialSignal: "SIGHUP" | "SIGTERM"; readonly forceDeadline: boolean },
+): Promise<void> {
+	const timers = createManualSignalTimer();
+	const resourceReached = createBarrier();
+	const resourceHold = createBarrier();
+	let shutdownEvents = 0;
+	let resourceStarts = 0;
+	let resourceStops = 0;
+	const lateResourceFailure = new Error("late registered-resource shutdown failure");
+	const extensionFactory: ExtensionFactory = (pi) => {
+		pi.on("session_shutdown", () => {
+			shutdownEvents++;
+		});
+	};
+	const harness = await createInteractiveHarness(world, {
+		holdDispose: false,
+		extensionFactories: [extensionFactory],
+		timers: timers.port,
+	});
+	let runtimeDisposal: Promise<void> | undefined;
+	let cleanupError: unknown;
+	try {
+		await withDeadline(world.trace, "signal composition: actual InteractiveMode starts", harness.mode.init());
+		const resource = {
+			start: async () => {
+				resourceStarts++;
+			},
+			stop: async () => {
+				resourceStops++;
+				resourceReached.release();
+				await resourceHold.promise;
+				if (options.forceDeadline) throw lateResourceFailure;
+			},
+		};
+		await resource.start();
+		harness.runtime.registerSessionResource(resource);
+		const actualDispose = harness.runtime.dispose.bind(harness.runtime);
+		harness.runtime.dispose = () => {
+			runtimeDisposal ??= actualDispose();
+			return runtimeDisposal;
+		};
+		(armedListener(harness.installs, options.initialSignal) as () => void)();
+		await withDeadline(
+			world.trace,
+			"signal composition: actual session resource reaches its close hold",
+			resourceReached.promise,
+		);
+		expect(resourceStarts, "the actual runtime resource was started before signal shutdown").toBe(1);
+		expect(shutdownEvents, "the real root extension receives one session_shutdown before resource release").toBe(1);
+		expect(resourceStops, "the real root runtime has entered exactly one registered resource stop").toBe(1);
+		expect(timers.pending(), "the real mode's shutdown has one referenced total deadline").toEqual([
+			{ delayMs: SIGNAL_SHUTDOWN_DEADLINE_MS, keepAlive: true },
+		]);
+		if (options.forceDeadline) {
+			timers.fire();
+			expect(harness.endCalls, "the deadline is the first terminal outcome and exits with failure").toEqual([
+				{ code: 1, reason: "shutdown-failed" },
+			]);
+			expect(
+				harness.calls.filter((call) => call === "terminal.stop"),
+				"deadline restores the real mode terminal once",
+			).toHaveLength(1);
+			const callsAtDeadline = [...harness.calls];
+			const declarationsAtDeadline = [...harness.endDeclarations];
+			resourceHold.release();
+			let lateFailureObserved = false;
+			try {
+				await withDeadline(
+					world.trace,
+					"signal composition: late resource rejection settles the real runtime",
+					runtimeDisposal!,
+				);
+			} catch (error) {
+				// Runtime disposal reports the test resource's deliberate late rejection after the deadline already owns process exit.
+				if (error !== lateResourceFailure) throw error;
+				lateFailureObserved = true;
+			}
+			expect(lateFailureObserved, "the held resource rejects after the deadline instead of resolving").toBe(true);
+			await withDeadline(
+				world.trace,
+				"signal composition: the original signal shutdown releases its listeners after late settlement",
+				harness.signalCleanupFinished.promise,
+			);
+			expect(
+				harness.calls,
+				"late disposal cannot run more UI teardown or step through the remaining cleanup list",
+			).toEqual(callsAtDeadline);
+			expect(harness.endDeclarations, "late rejection cannot declare a second terminal outcome").toEqual(
+				declarationsAtDeadline,
+			);
+			expect(harness.endCalls, "late rejection cannot reclassify or repeat exit").toEqual([
+				{ code: 1, reason: "shutdown-failed" },
+			]);
+			expect(timers.pending(), "the deadline is no longer armed after its forced outcome").toEqual([]);
+		} else {
+			const coalescedHup = armedListener(harness.installs, "SIGHUP") as () => void;
+			coalescedHup();
+			coalescedHup();
+			expect(harness.exits, "repeated HUP does not exit while the real resource close remains held").toEqual([]);
+			expect(shutdownEvents, "repeated HUP does not reenter the root extension's shutdown event").toBe(1);
+			expect(resourceStops, "repeated HUP does not call the registered resource twice").toBe(1);
+			expect(
+				harness.calls.filter((call) => call === "terminal.stop"),
+				"HUP waits for resource cleanup before terminal teardown",
+			).toEqual([]);
+			resourceHold.release();
+			await withDeadline(
+				world.trace,
+				"signal composition: original HUP cleanup exits cooperatively",
+				harness.exited.promise,
+			);
+			await withDeadline(world.trace, "signal composition: actual root runtime disposal settles", runtimeDisposal!);
+			await withDeadline(
+				world.trace,
+				"signal composition: cooperative HUP removes its force listeners",
+				harness.signalCleanupFinished.promise,
+			);
+			expect(harness.exits, "coalesced HUP allows the original cleanup to exit once with success").toEqual([0]);
+			expect(harness.endCalls, "the native mode reports one cooperative signal exit").toEqual([
+				{ code: 0, reason: "signal-graceful" },
+			]);
+			expect(shutdownEvents, "the root extension shutdown is still exactly once after exit").toBe(1);
+			expect(resourceStops, "the registered root resource stop is still exactly once after exit").toBe(1);
+			expect(
+				harness.calls.filter((call) => call === "terminal.stop"),
+				"the real TUI restores once after cleanup",
+			).toHaveLength(1);
+			expect(timers.pending(), "cooperative shutdown clears its total deadline").toEqual([]);
+		}
+	} finally {
+		resourceHold.release();
+		if (runtimeDisposal) await runtimeDisposal.catch(() => undefined);
+		else await harness.runtime.dispose().catch(() => undefined);
+		if (harness.calls.every((call) => call !== "terminal.stop")) harness.mode.stop();
+		const cleanup = await world.disposeSessionInBody(harness.runtime.session);
+		cleanupError = cleanup?.error;
+	}
+	if (cleanupError) throw cleanupError;
+}
+
+/** The composed normal-HUP and deadline cases use the real root runtime in both System One modes. */
+async function verifyActualHostSignalShutdownComposition(world: HarnessWorld): Promise<void> {
+	if (process.platform !== "win32") {
+		await runActualHostSignalShutdown(world, { initialSignal: "SIGHUP", forceDeadline: false });
+	}
+	await runActualHostSignalShutdown(world, { initialSignal: "SIGTERM", forceDeadline: true });
 }
 
 /**
@@ -1585,6 +1908,7 @@ export async function verifyModeWitnesses(world: HarnessWorld): Promise<void> {
 
 async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	const signalsArmed = process.platform === "win32" ? ["SIGTERM"] : ["SIGTERM", "SIGHUP"];
+	const forceSignals = [...signalsArmed, "SIGINT"];
 	const shutdownLog = ["dispose", "drain", "stop"];
 
 	const control = await runGuardControl();
@@ -1592,7 +1916,7 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 		GUARD_ARMED,
 	);
 	expect(control.forcesAtDispose, "the second-signal listeners are armed for the signal path's cleanup").toEqual(
-		signalsArmed,
+		forceSignals,
 	);
 	expect(control.log, "a signal shutdown disposes, drains, then stops").toEqual(shutdownLog);
 	expect(control.warnings, "the warning held through the dispose is released by stop").toEqual([
@@ -1601,6 +1925,8 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	expect(control.stderr, "a clean signal shutdown writes nothing to stderr").toEqual([]);
 	expect(control.exits, "a clean signal shutdown exits 0").toEqual([0]);
 	expect(control.forcesAtEnd, "the second-signal listeners are removed on the normal exit path").toEqual([]);
+	expect(control.pendingDeadlines, "normal signal shutdown clears its keepalive deadline").toEqual([]);
+	expect(control.deadlinesCleared, "normal signal shutdown disarms its deadline").toBe(1);
 	expect(control.guardsAtEnd, "the process guards stay armed until the process exits").toEqual(GUARD_ARMED);
 
 	const rejection = await runGuardRejection();
@@ -1658,10 +1984,56 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	expect(sigterm.warnings, "a second SIGTERM releases the held warning").toEqual([GUARD_CLOSING_WARNING]);
 	expect(sigterm.stderr, "a second SIGTERM writes nothing to stderr").toEqual([]);
 	expect(sigterm.exits, "a second SIGTERM exits with 128 + 15").toEqual([143]);
+	expect(sigterm.pendingDeadlines, "a forced SIGTERM clears the shutdown deadline").toEqual([]);
 	if (process.platform !== "win32") {
 		const sighup = await runGuardSecondSignal("SIGHUP");
-		expect(sighup.exits, "a second SIGHUP exits with 128 + 1").toEqual([129]);
+		expect(sighup.exitsAtSignal, "repeated SIGHUPs do not force or duplicate cleanup").toEqual([]);
+		expect(sighup.log, "the held dispose continues once to cooperative terminal cleanup").toEqual(shutdownLog);
+		expect(sighup.exits, "after repeated SIGHUPs, the original shutdown exits normally").toEqual([0]);
+		expect(sighup.pendingDeadlines, "coalesced SIGHUP completion clears the deadline").toEqual([]);
 	}
+	const deadline = await runGuardDeadline();
+	expect(deadline.alarmAtRuntimeDispose, "the shutdown deadline is armed while runtime disposal is held").toEqual([
+		{ delayMs: SIGNAL_SHUTDOWN_DEADLINE_MS, keepAlive: true },
+	]);
+	expect(deadline.exitsAtDeadline, "the total shutdown deadline forces a failure exit").toEqual([1]);
+	expect(deadline.logAtDeadline, "the deadline restores the terminal once while dispose remains held").toEqual([
+		"dispose",
+		"stop",
+	]);
+	expect(deadline.log, "late runtime rejection cannot advance drain or stop after forced terminal outcome").toEqual([
+		"dispose",
+		"stop",
+	]);
+	expect(deadline.stderr, "late runtime rejection cannot reclassify or report after forced exit").toEqual([]);
+	expect(deadline.exits, "late runtime rejection cannot trigger a second process outcome").toEqual([1]);
+	expect(deadline.pendingAfterSettlement, "the deadline alarm is cleared after its outcome is claimed").toEqual([]);
+	expect(deadline.deadlinesCleared, "the fired deadline is disarmed when its terminal outcome is claimed").toBe(1);
+
+	const timerArmFailure = await runGuardTimerFailure({ arm: true, stderr: false });
+	expect(timerArmFailure.log, "a failed deadline arm still restores the terminal").toEqual(["stop"]);
+	expect(timerArmFailure.endCalls, "a failed deadline arm has one explicit failed shutdown outcome").toEqual([
+		{ code: 1, reason: "shutdown-failed" },
+	]);
+	expect(timerArmFailure.stderrAttempts, "a failed deadline arm is reported").toHaveLength(1);
+	expect(timerArmFailure.pendingDeadlines, "a failed deadline arm leaves no timer behind").toEqual([]);
+
+	const timerClearFailure = await runGuardTimerFailure({ arm: false, stderr: true });
+	expect(timerClearFailure.log, "a failed deadline disarm does not skip terminal restoration").toEqual(shutdownLog);
+	expect(timerClearFailure.endCalls, "a failed deadline disarm becomes one shutdown-failed outcome").toEqual([
+		{ code: 1, reason: "shutdown-failed" },
+	]);
+	expect(
+		timerClearFailure.stderrAttempts,
+		"failed reporting does not prevent all cleanup diagnostics from being attempted",
+	).toHaveLength(1);
+	expect(
+		timerClearFailure.stderr,
+		"a failed stderr adapter is observable without escaping the terminal outcome",
+	).toEqual([]);
+	expect(timerClearFailure.pendingDeadlines, "the failing timer adapter leaves its armed deadline visible").toEqual([
+		{ delayMs: SIGNAL_SHUTDOWN_DEADLINE_MS, keepAlive: true },
+	]);
 
 	const twoCauses = await runGuardTwoCauses();
 	expect(twoCauses.log, "every cleanup step runs after the first step fails").toEqual(shutdownLog);
@@ -1853,6 +2225,7 @@ async function verifyModeWitnessesBody(world: HarnessWorld): Promise<void> {
 	await verifyBillingContinuation(world);
 	await verifyPreparedRuntimeResourceCleanup(world);
 	await verifyPrintOwner(world);
+	await verifyActualHostSignalShutdownComposition(world);
 }
 
 /** A setup failure retires unused prepared extensions without constructing a recovery owner or closing the live session. */

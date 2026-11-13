@@ -387,9 +387,12 @@ idle extras retired after a minute; the pool owns the working directory so a `cd
 moves the next command wherever it runs, exported variables reach every lane through the export ledger), and the
 mutation barrier is a group lock: announced command runs hold it together, file mutations hold it
 together, the two groups never overlap, admission is in emission order, and an unannounced run stays
-exclusive. Shutdown starts every independent lane/resource close, waits for all of them to settle,
+exclusive. Orderly shutdown starts every independent lane/resource close, waits for all of them to settle,
 then reports one failure or their aggregate; a fast failed close cannot let session disposal finish
-while a slower sibling still owns a process. Why: one persistent shell plus a FIFO writer lock turned
+while a slower sibling still owns a process. Repeated terminal hangups join that same cleanup.
+Explicit force signals and the total process-cleanup deadline may end the process with work pending,
+but retain a forced or failed outcome and never claim completed cleanup. Why: one persistent shell
+plus a FIFO writer lock turned
 three commands emitted in one message into three sequential waits, and fail-fast cleanup later let a
 session terminal race a sibling shell close.
 Enforced by: prose only

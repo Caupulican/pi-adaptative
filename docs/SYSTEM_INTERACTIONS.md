@@ -1247,3 +1247,51 @@ fixture's verifier profile is explicitly refused. The fixture now uses an explor
 worker, retains the same shell capability, and reports the actual bounded dispatch refusal instead
 of hiding it behind a warmup timeout. The next Windows run must establish the outcome. These are
 evaluator corrections; the admission and claim-check guards remain strict.
+
+### H-20261112-30 — terminal hangups, bounded cleanup and exit evidence
+
+Published `v0.104.59` remains immutable at `934d934b2db443f2586107d9c7178f499419e3e5`,
+whose sole parent is reviewed source `0a8f6a9ce`. Both exact-release quality jobs passed all ten
+composed journeys; provider regressions and fork installation passed on both platforms, and
+dependency hardening passed on Windows. Release preparation checked all 45 prior tags. The shallow
+reusable-CI checkout could not establish that history comparison independently, so main commit
+`012c1a405` gives CI full history. Its two jobs passed all ten journeys and Linux explicitly checked
+all 46 tags. These are distinct evidence paths, not interchangeable gate results.
+
+The fresh nineteen-scenario native run failed S45 after eighteen passes:
+`.git/pi-audits/live-validation/2026-11-13T00-40-08-407Z/report.json`. All 3,023 source hashes
+and the pinned executable stayed unchanged. S15 settled the first edit in six root calls and the
+explicit worker task in five with accepted proof. The first edit's worker report remained partial,
+unverified and rejected; the independent artifact check covers the stated ES2022 examples and
+JSDoc, not unspecified package-target compatibility. Retrospective transcript inspection found
+24 actual zoom calls, all with matching successful tool results and no postprocessing failure;
+bounded/clipped replies retain their ordinary continuation semantics.
+
+The identified S45 runtime, PID 238671, recorded `SIGHUP` starting graceful shutdown at
+`00:52:35.062Z`, then another `SIGHUP` forcing exit 129 two milliseconds later. It wrote no fatal
+crash record. This is evidence of immediate repeated-signal escalation, not a cleanup timeout or
+the former raw-mode crash. Herdr's verified v0.9.5
+[close path](https://github.com/herdrdev/herdr/blob/v0.9.5/src/pane.rs#L1757-L1800) queues
+[PTY shutdown](https://github.com/herdrdev/herdr/blob/v0.9.5/src/pty/actor/unix.rs#L359-L369) and also
+[sends SIGHUP](https://github.com/herdrdev/herdr/blob/v0.9.5/src/platform/linux.rs#L798-L837) to the
+session's processes before later TERM/KILL deadlines. Those overlapping mechanisms
+explain how one close can produce multiple hangups, but the sender of each observed signal is not
+proved. The failed run and its signal records are preserved. Its four owned panes were closed,
+its daemon lease released and post-cleanup fatal health was empty; the original pane was retained.
+
+The repair changes the old repeated-HUP contract explicitly: a hangup during cleanup joins the
+same disconnect operation. TERM and INT retain explicit force behavior. `SignalLifecycle` owns
+the total ten-second asynchronous cleanup deadline, kept alive while cleanup is pending, and one
+terminal outcome. Timeout, force, dead-terminal, crash and success retire the alarm; late cleanup
+cannot start another step or reclassify the result. Deadline expiration remains a failed end.
+This fits the existing lifecycle owner; it does not require a separate shutdown coordinator.
+
+Source review also found a proof gap: the process recorder deduplicated by reason alone, so a
+provisional `signal-graceful` declaration suppressed the later invoked exit-code record. The
+recorder now distinguishes reason and exit code. The native reader requires the latest matching
+record's expected explicit code and refuses a provisional or forced record without falling back
+to an earlier declaration. That establishes exit invocation plus identified process disappearance;
+it does not claim independently observed OS exit status. Composed J1 coverage holds real runtime
+extension cleanup across signals and the deadline; native S45 retains the actual PTY close and
+persisted-answer checks. New execution and publication evidence belongs in
+`.git/pi-audits/releases/v0.104.60/verification.json`; no H30 pass is inferred from source review.

@@ -33,14 +33,19 @@ export function readProcessEndRecord(directory, name) {
 	const pid = Number(match[5]);
 	const sequence = Number(match[6]);
 	const lines = text.split(/\r?\n/);
+	const header = lines[0]?.trim() ?? "";
+	const end = /(?:^|; )exit (\d+)(?:;|$)/.exec(header);
+	const reason = end === null ? header.split(";", 1)[0].trim() : header.slice(0, end.index).replace(/;\s*$/, "").trim();
 	const recordPid = /^pid (\d+)$/.exec(lines[1] ?? "");
 	const recordAt = /^at (.+)$/.exec(lines[2] ?? "");
 	const bodyAt = recordAt ? Date.parse(recordAt[1]) : Number.NaN;
-	if (!lines[0]?.trim() || !Number.isFinite(at) || !Number.isSafeInteger(pid) || pid < 1 ||
+	if (!reason || !Number.isFinite(at) || !Number.isSafeInteger(pid) || pid < 1 ||
 		!Number.isSafeInteger(sequence) || sequence < 1 || !recordPid || Number(recordPid[1]) !== pid ||
 		!Number.isFinite(bodyAt) || Math.abs(bodyAt - at) > 1000)
 		throw new Error(`malformed process-end record ${name}`);
-	return { at, pid, sequence, routine: match[7] !== undefined, reason: lines[0].split(";", 1)[0].trim() };
+	const exitCode = end === null ? undefined : Number(end[1]);
+	if (exitCode !== undefined && !Number.isSafeInteger(exitCode)) throw new Error(`malformed process-end record ${name}`);
+	return { at, pid, sequence, routine: match[7] !== undefined, reason, exitCode, header };
 }
 
 export function fatalProcessRecordProblems(agents, since) {
@@ -87,7 +92,12 @@ export function detachedProcessEnd(directory, pid, since) {
 	const records = names.map((name) => readProcessEndRecord(root, name)).filter((record) => record.at >= since);
 	const latest = records.sort((left, right) => right.sequence - left.sequence)[0];
 	if (!latest) return undefined;
-	if (!latest.routine || latest.pid !== pid || !["dead-terminal", "signal-graceful", "wind-down"].includes(latest.reason))
-		throw new Error(`Detached runtime ${pid} ended without cooperative terminal cleanup: ${latest.reason}`);
+	if (!latest.routine || latest.pid !== pid) throw new Error(`Detached runtime ${pid} has an invalid terminal record`);
+	if (latest.exitCode === undefined) return undefined;
+	if (latest.header !== `${latest.reason}; exit ${latest.exitCode}`)
+		throw new Error(`Detached runtime ${pid} has a malformed terminal header`);
+	const expectedCode = latest.reason === "dead-terminal" ? 129 : ["signal-graceful", "wind-down"].includes(latest.reason) ? 0 : undefined;
+	if (expectedCode === undefined || latest.exitCode !== expectedCode)
+		throw new Error(`Detached runtime ${pid} ended without cooperative terminal cleanup: ${latest.reason}; exit ${latest.exitCode}`);
 	return latest;
 }

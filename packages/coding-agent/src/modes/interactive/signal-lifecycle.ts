@@ -22,6 +22,7 @@ import { interfaceText } from "../../core/language/interface-text.ts";
 import { declareExit, exitProcess, type ProcessEndReason } from "../../core/process-end-recorder.ts";
 import { causeHeadline, describeCause, errorDetail, neutralizeControls } from "../../core/terminal-warnings.ts";
 import { disposeUnclaimedCliPowerShellWarmStart } from "../../core/tools/early-powershell-session.ts";
+import { SYSTEM_TIMER_PORT, type TimerPort } from "../../kernel/timer-port.ts";
 import { killTrackedDetachedChildren } from "../../utils/shell.ts";
 
 const DEAD_TERMINAL_ERROR_CODES = new Set(["EIO", "EPIPE", "ENOTCONN"]);
@@ -68,6 +69,8 @@ type ProcessListener = Parameters<NodeJS.EventEmitter["on"]>[1];
 
 /** The process effects of a shutdown. The defaults are the process itself; a harness supplies its own. */
 export interface SignalLifecycleIo {
+	/** The clock for the process-owned shutdown deadline. */
+	readonly timers: TimerPort;
 	/** Ends the process as the declared end `reason`. */
 	exit(code: number, reason: ProcessEndReason): void;
 	stderr(text: string): void;
@@ -89,6 +92,7 @@ export interface SignalLifecycleIo {
 }
 
 const PROCESS_IO: SignalLifecycleIo = {
+	timers: SYSTEM_TIMER_PORT,
 	exit: (code, reason) => exitProcess(code, reason),
 	stderr: (text) => process.stderr.write(text),
 	stdout: (text) => process.stdout.write(text),
@@ -110,6 +114,7 @@ const PROCESS_IO: SignalLifecycleIo = {
 
 /** Longest rejection detail rendered into the transcript; enough for a stack, short of flooding it. */
 const MAX_REJECTION_DETAIL = 2_000;
+export const SIGNAL_SHUTDOWN_DEADLINE_MS = 10_000;
 
 /**
  * Owns the process-level lifecycle state of an interactive session: whether shutdown has begun and the
@@ -122,6 +127,8 @@ export class SignalLifecycle {
 	private signalListenerCleanup: Array<() => void> = [];
 	private readonly port: SignalLifecyclePort;
 	private readonly io: SignalLifecycleIo;
+	private deadline: unknown;
+	private terminalOutcome = false;
 	/** Set when the port's stop has been started, so no path (cleanup, forced exit, crash during shutdown) runs it a second time. */
 	private stopStarted = false;
 
@@ -129,6 +136,7 @@ export class SignalLifecycle {
 		this.port = port;
 		// Each member resolves on its own: a member given as undefined keeps the process default instead of replacing it.
 		this.io = {
+			timers: io.timers ?? PROCESS_IO.timers,
 			exit: io.exit ?? PROCESS_IO.exit,
 			stderr: io.stderr ?? PROCESS_IO.stderr,
 			stdout: io.stdout ?? PROCESS_IO.stdout,
@@ -141,10 +149,50 @@ export class SignalLifecycle {
 
 	/**
 	 * Ends the process as the declared end `reason`. An end that leaves a record declared it before its cleanup (the record must exist if
-	 * the cleanup hangs or the terminal dies); the same reason at the exit is not recorded again.
+	 * the cleanup hangs or the terminal dies); the exit records its actual code separately.
 	 */
 	private exitProcess(code: number, reason: ProcessEndReason): void {
-		this.io.exit(code, reason);
+		this.finishTerminal(code, reason, []);
+	}
+
+	private finishTerminal(code: number, reason: ProcessEndReason, effects: readonly (() => void)[]): void {
+		if (this.terminalOutcome) return;
+		this.terminalOutcome = true;
+		this.shuttingDown = true;
+		const failures: unknown[] = [];
+		let finalCode = code;
+		let finalReason = reason;
+		try {
+			try {
+				if (this.deadline !== undefined) this.io.timers.clearTimeout(this.deadline);
+			} catch (error) {
+				failures.push(error);
+			}
+			this.deadline = undefined;
+			for (const effect of effects) {
+				try {
+					effect();
+				} catch (error) {
+					failures.push(error);
+				}
+			}
+			if (failures.length > 0 && (reason === "quit" || reason === "signal-graceful")) {
+				finalCode = 1;
+				finalReason = "shutdown-failed";
+				try {
+					this.io.declareExit("shutdown-failed", failures.map(describeCause).join("\n"));
+				} catch (error) {
+					failures.push(error);
+				}
+			}
+			for (const failure of failures) {
+				try {
+					this.io.stderr(`${neutralizeControls(`Terminal cleanup failed: ${describeCause(failure)}`)}\n`);
+				} catch {}
+			}
+		} finally {
+			this.io.exit(finalCode, finalReason);
+		}
 	}
 
 	get isShuttingDown(): boolean {
@@ -158,22 +206,29 @@ export class SignalLifecycle {
 	 * both paths they stay armed until the process exits: `stop()` leaves them to a shutdown in progress.
 	 */
 	async shutdown(options?: { fromSignal?: boolean }): Promise<void> {
-		if (this.shuttingDown) return;
+		if (this.shuttingDown || this.terminalOutcome) return;
+		this.shuttingDown = true;
 		try {
+			this.deadline = this.io.timers.setTimeout(() => this.forceShutdownDeadline(), SIGNAL_SHUTDOWN_DEADLINE_MS, {
+				keepAlive: true,
+			});
 			await this.runShutdown(options);
 		} catch (error: unknown) {
-			this.io.declareExit(
-				"shutdown-failed",
-				`${describeCause(error)}\n\n${errorDetail(asError(error), MAX_REJECTION_DETAIL)}`,
-			);
-			this.io.stderr(`${neutralizeControls(`Shutdown failed: ${describeCause(error)}`)}\n`);
-			this.exitProcess(1, "shutdown-failed");
+			this.finishTerminal(1, "shutdown-failed", [
+				() => {
+					this.io.declareExit(
+						"shutdown-failed",
+						`${describeCause(error)}\n\n${errorDetail(asError(error), MAX_REJECTION_DETAIL)}`,
+					);
+				},
+				() => killTrackedDetachedChildren(),
+				() => this.stopOnce(),
+				() => this.io.stderr(`${neutralizeControls(`Shutdown failed: ${describeCause(error)}`)}\n`),
+			]);
 		}
 	}
 
 	private async runShutdown(options?: { fromSignal?: boolean }): Promise<void> {
-		if (this.shuttingDown) return;
-		this.shuttingDown = true;
 		// Only the termination-signal listeners go: the dead-terminal, uncaught-exception and rejection guards stay armed while the
 		// cleanup steps run, because a terminal that dies during the drain or stop, or a stray rejection during the bounded dispose,
 		// must still reach them (the process ends at the exit below).
@@ -204,6 +259,7 @@ export class SignalLifecycle {
 			} finally {
 				for (const remove of forceRemovals) remove();
 			}
+			if (this.terminalOutcome) return;
 			// The signal that started this path was declared, and recorded, when it arrived (registerSignalHandlers).
 			this.exitProcess(0, "signal-graceful");
 			// An injected exit returns: the interactive quit below must not run after a signal shutdown.
@@ -217,7 +273,7 @@ export class SignalLifecycle {
 		// This prevents escape sequences from leaking to the parent shell over slow SSH.
 		// A failing drain or stop must not skip the runtime dispose, and the resume command is written only when every step succeeded.
 		// The terminal is restored before the dispose, so Ctrl+C there arrives as SIGINT: it is forced like the termination signals.
-		const forceRemovals = this.installForceListeners([...terminationSignals(), "SIGINT"]);
+		const forceRemovals = this.installForceListeners();
 		try {
 			await this.runCleanupSteps([
 				() => disposeUnclaimedCliPowerShellWarmStart(),
@@ -229,6 +285,7 @@ export class SignalLifecycle {
 		} finally {
 			for (const remove of forceRemovals) remove();
 		}
+		if (this.terminalOutcome) return;
 
 		const resumeCommand = this.port.formatResumeCommand();
 		if (resumeCommand) {
@@ -252,9 +309,11 @@ export class SignalLifecycle {
 	private async runCleanupSteps(steps: ReadonlyArray<() => unknown>): Promise<void> {
 		const failures: unknown[] = [];
 		for (const step of steps) {
+			if (this.terminalOutcome) return;
 			try {
 				await step();
 			} catch (error: unknown) {
+				if (this.terminalOutcome) return;
 				failures.push(error);
 			}
 		}
@@ -270,33 +329,43 @@ export class SignalLifecycle {
 	 * without these Node ends the process by default: the terminal stays raw, the held warnings go unwritten and the tracked children live
 	 * on. The forced exit kills the tracked children, restores the terminal and releases the warnings, then exits with the signal's status.
 	 */
-	private installForceListeners(signals: readonly NodeJS.Signals[] = terminationSignals()): Array<() => void> {
+	private installForceListeners(): Array<() => void> {
+		const signals: readonly NodeJS.Signals[] = [...terminationSignals(), "SIGINT"];
 		return signals.map((signal) =>
 			this.io.prependListener(signal, () => {
-				const status = signal === "SIGHUP" ? 129 : signal === "SIGINT" ? 130 : 143;
-				this.io.declareExit("signal-forced", `${signal} during shutdown cleanup; forced exit ${status}`);
-				killTrackedDetachedChildren();
-				try {
-					this.stopOnce();
-				} catch (stopError: unknown) {
-					this.io.stderr(
-						`${neutralizeControls(`Stop failed during forced shutdown: ${describeCause(stopError)}`)}\n`,
-					);
-				}
-				this.exitProcess(status, "signal-forced");
+				if (signal === "SIGHUP") return;
+				const status = signal === "SIGINT" ? 130 : 143;
+				this.finishTerminal(status, "signal-forced", [
+					() => {
+						this.io.declareExit("signal-forced", `${signal} during shutdown cleanup; forced exit ${status}`);
+					},
+					() => killTrackedDetachedChildren(),
+					() => this.stopOnce(),
+				]);
 			}),
 		);
 	}
 
+	private forceShutdownDeadline(): void {
+		this.finishTerminal(1, "shutdown-failed", [
+			() => {
+				this.io.declareExit("shutdown-failed", `Shutdown cleanup exceeded ${SIGNAL_SHUTDOWN_DEADLINE_MS}ms`);
+			},
+			() => killTrackedDetachedChildren(),
+			() => this.stopOnce(),
+		]);
+	}
+
 	emergencyTerminalExit(): void {
+		if (this.terminalOutcome) return;
 		this.shuttingDown = true;
-		// Nothing can be shown on a dead terminal, so the record is the only trace of this exit.
-		this.io.declareExit("dead-terminal", "EIO/EPIPE/ENOTCONN on stdout or stderr; exit 129");
-		this.unregisterSignalHandlers();
-		killTrackedDetachedChildren();
-		// The terminal is gone. Do not run normal shutdown because TUI and
-		// extension cleanup can write restore sequences and re-trigger EIO.
-		this.exitProcess(129, "dead-terminal");
+		this.finishTerminal(129, "dead-terminal", [
+			() => {
+				this.io.declareExit("dead-terminal", "EIO/EPIPE/ENOTCONN on stdout or stderr; exit 129");
+			},
+			() => this.unregisterSignalHandlers(),
+			() => killTrackedDetachedChildren(),
+		]);
 	}
 
 	/**
@@ -306,30 +375,19 @@ export class SignalLifecycle {
 	 * the teardown threw.
 	 */
 	fatalRuntimeError(message: string, detail: string, releaseHost: () => void): void {
-		// Set first: a second fatal failure or a signal now finds the process ending, and stop() leaves the guards armed until the exit.
+		if (this.terminalOutcome) return;
 		this.shuttingDown = true;
-		const recordPath = this.io.declareExit("fatal-runtime-error", detail);
-		try {
-			try {
-				// A termination signal during this teardown must not start a graceful shutdown of a runtime that is already ending.
-				this.unregisterTerminationSignals();
-			} catch {}
-			try {
-				killTrackedDetachedChildren();
-			} catch {}
-			for (const step of [releaseHost, () => this.stopOnce()]) {
-				try {
-					step();
-				} catch (stopError: unknown) {
-					this.io.stderr(
-						`${neutralizeControls(`Stop failed during fatal runtime error: ${describeCause(stopError)}`)}\n`,
-					);
-				}
-			}
-		} finally {
-			this.io.stderr(`${neutralizeControls(message)}\n(record: ${recordPath})\n`);
-			this.exitProcess(1, "fatal-runtime-error");
-		}
+		let recordPath: string | undefined;
+		this.finishTerminal(1, "fatal-runtime-error", [
+			() => {
+				recordPath = this.io.declareExit("fatal-runtime-error", detail);
+			},
+			() => this.unregisterTerminationSignals(),
+			() => killTrackedDetachedChildren(),
+			releaseHost,
+			() => this.stopOnce(),
+			() => this.io.stderr(`${neutralizeControls(message)}\n(record: ${recordPath})\n`),
+		]);
 	}
 
 	/**
@@ -348,6 +406,7 @@ export class SignalLifecycle {
 	 * alternate screen if the process later ends).
 	 */
 	reportUnhandledRejection(reason: unknown): void {
+		if (this.terminalOutcome) return;
 		const error = asError(reason);
 		const detail = errorDetail(error, MAX_REJECTION_DETAIL);
 		this.io.recordRejection(this.shuttingDown ? `during shutdown\n\n${detail}` : detail);
@@ -371,53 +430,35 @@ export class SignalLifecycle {
 	 * paste / Kitty / modifyOtherKeys sequences while releasing held warnings.
 	 */
 	uncaughtCrash(thrown: unknown): void {
-		// Any value can reach uncaughtException (`throw "x"`, `throw null`), and the report reads a stack: a non-Error is wrapped first.
-		const error = asError(thrown);
-		if (this.shuttingDown) {
-			// A throw during an orderly shutdown is still a crash: report it (the orderly path is already unwinding), restore the
-			// terminal if it is not restored yet, and end the process.
-			// port.stop() restores the terminal AND releases the closing warnings held for it (ui.stop alone would drop them).
-			// A stop failure is reported too: it is the only record of a teardown that did not finish.
-			try {
-				this.stopOnce();
-			} catch (stopError: unknown) {
-				this.io.stderr(`${neutralizeControls(`Stop failed during shutdown: ${describeCause(stopError)}`)}\n`);
-			}
-			try {
-				killTrackedDetachedChildren();
-			} catch {}
-			const detail = errorDetail(error, MAX_REJECTION_DETAIL);
-			this.io.declareExit("crash-during-shutdown", detail);
-			this.io.stderr(`${neutralizeControls(`pi exiting due to uncaughtException during shutdown: ${detail}`)}\n`);
-			this.exitProcess(1, "crash-during-shutdown");
-			// An injected exit returns: the crash must not fall through to the non-shutdown path below.
-			return;
-		}
+		if (this.terminalOutcome) return;
+		const reason = this.shuttingDown ? "crash-during-shutdown" : "crash";
 		this.shuttingDown = true;
-		const detail = errorDetail(error, MAX_REJECTION_DETAIL);
-		// The record goes first and synchronously, so a reentrant crash or an exit cannot lose it. The screen report goes AFTER the
-		// terminal is restored: the interactive UI draws on the alternate screen, and leaving it erases what was printed there.
-		const recordPath = this.io.declareExit("crash", detail);
-		try {
-			try {
-				// Fatal cleanup can also reject pending work. Keep the process guards armed until exit,
-				// just as orderly shutdown does, so those failures retain their reporting owner.
-				this.unregisterTerminationSignals();
-			} catch {}
-			try {
-				killTrackedDetachedChildren();
-			} catch {}
-			try {
-				this.stopOnce();
-			} catch (stopError: unknown) {
-				this.io.stderr(`${neutralizeControls(`Stop failed during fatal shutdown: ${describeCause(stopError)}`)}\n`);
-			}
-		} finally {
-			this.io.stderr(
-				`${neutralizeControls(`pi exiting due to uncaughtException: ${detail}\n(record: ${recordPath})`)}\n`,
-			);
-			this.exitProcess(1, "crash");
-		}
+		const detail = errorDetail(asError(thrown), MAX_REJECTION_DETAIL);
+		let recordPath: string | undefined;
+		this.finishTerminal(1, reason, [
+			() => {
+				recordPath = this.io.declareExit(reason, detail);
+			},
+			() => this.unregisterTerminationSignals(),
+			() => killTrackedDetachedChildren(),
+			() => {
+				try {
+					this.stopOnce();
+				} catch (error) {
+					const label =
+						reason === "crash-during-shutdown"
+							? "Stop failed during shutdown"
+							: "Stop failed during fatal shutdown";
+					this.io.stderr(`${neutralizeControls(`${label}: ${describeCause(error)}`)}\n`);
+				}
+			},
+			() =>
+				this.io.stderr(
+					reason === "crash-during-shutdown"
+						? `${neutralizeControls(`pi exiting due to uncaughtException during shutdown: ${detail}`)}\n`
+						: `${neutralizeControls(`pi exiting due to uncaughtException: ${detail}\n(record: ${recordPath})`)}\n`,
+				),
+		]);
 	}
 
 	/** Performs shutdown if the host has requested it. */
