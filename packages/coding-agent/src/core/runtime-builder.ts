@@ -65,16 +65,11 @@ import {
 } from "./autonomy/edge-policy.ts";
 import { wrapToolWithEnvelopeScope } from "./autonomy/envelope-enforcement.ts";
 import { projectLaneSettingsPath } from "./autonomy/lane-private-paths.ts";
-import { type SharedLaneToolOptions, WORKER_WRITE_SCOPE_GUIDANCE } from "./autonomy/lane-tool-surface.ts";
+import type { SharedLaneToolOptions } from "./autonomy/lane-tool-surface.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import { sessionReadOnlyShellScope, wrapToolWithReadOnlyShell } from "./autonomy/read-only-shell-admission.ts";
-import {
-	buildWorkerSessionDefaultWriteScopeEnvelope,
-	buildWorkerSessionHarnessWriteEnvelope,
-	buildWorkerSessionPrivatePathEnvelope,
-	type SessionPrivatePathScope,
-	WORKER_HARNESS_WRITE_GUIDANCE,
-} from "./autonomy/worker-session-private-scope.ts";
+import { buildSessionPathEnvelopes, type SessionPathEnvelopes } from "./autonomy/session-path-envelopes.ts";
+import type { SessionPrivatePathScope } from "./autonomy/worker-session-private-scope.ts";
 import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
 import type { CapabilityTierPolicy } from "./capability-tier.ts";
 import { SELF_COMPACT_TOOL_NAME } from "./compaction/self-compaction.ts";
@@ -697,9 +692,7 @@ export class RuntimeBuilder {
 	private readonly _credentialDiscoveryRoots: readonly string[];
 	private readonly _fileMutationIntents: FileMutationIntentController;
 	private readonly _toolStreamsWorkRun: ReturnType<typeof acquireWorkRun>;
-	private readonly _workerSessionPrivatePathEnvelope: CapabilityEnvelope | undefined;
-	private readonly _workerSessionHarnessWriteEnvelope: CapabilityEnvelope | undefined;
-	private readonly _workerSessionDefaultWriteScopeEnvelope: CapabilityEnvelope | undefined;
+	private readonly _pathEnvelopes: SessionPathEnvelopes;
 	private readonly _sessionReadOnlyShell: ReturnType<typeof sessionReadOnlyShellScope> | undefined;
 	/** Extension tools the launcher explicitly granted this worker process (never a builtin name). */
 	private readonly _workerExtensionToolNames: ReadonlySet<string>;
@@ -733,30 +726,20 @@ export class RuntimeBuilder {
 		const agentDir = deps.getAgentDir();
 		this._toolStreamsWorkRun = acquireWorkRun({ agentDir, category: "outputs", tenant: "tool-streams" });
 		const privatePathScope = deps.getPrivatePathScope?.();
-		this._workerSessionPrivatePathEnvelope =
-			isWorkerSession() || privatePathScope
-				? buildWorkerSessionPrivatePathEnvelope(
-						deps.getCwd(),
-						agentDir,
-						isWorkerSession() ? undefined : (privatePathScope?.allowedPaths ?? []),
-						isWorkerSession() ? undefined : [],
-						privatePathScope?.deniedPaths,
-						[this._toolStreamsWorkRun.path],
-					)
-				: undefined;
-		this._workerSessionHarnessWriteEnvelope = isWorkerSession()
-			? buildWorkerSessionHarnessWriteEnvelope(deps.getCwd(), deps.getAgentDir())
-			: undefined;
-		this._workerSessionDefaultWriteScopeEnvelope = isWorkerSession()
-			? buildWorkerSessionDefaultWriteScopeEnvelope(deps.getCwd())
-			: undefined;
+		this._pathEnvelopes = buildSessionPathEnvelopes({
+			cwd: deps.getCwd(),
+			agentDir,
+			workerProcess: isWorkerSession(),
+			scope: privatePathScope,
+			exemptReadPaths: [this._toolStreamsWorkRun.path],
+		});
 		this._taskDirectories = new TaskDirectoryRuntime({
 			getSessionManager: () => deps.getSessionManager(),
 			getCwd: () => deps.getCwd(),
 			getActiveTaskId: () =>
 				deps.getTaskStepsStateSnapshot()?.steps.find((step) => step.status === "in_progress")?.id,
 			getEnvelopes: () =>
-				[deps.getCapabilityEnvelope?.(), this._workerSessionPrivatePathEnvelope].filter(
+				[deps.getCapabilityEnvelope?.(), this._pathEnvelopes.privatePaths].filter(
 					(envelope): envelope is CapabilityEnvelope => envelope !== undefined,
 				),
 		});
@@ -789,7 +772,7 @@ export class RuntimeBuilder {
 			// only this session's own tool-streams run directory is exempted for read-only inspection.
 			protectedDirectories: [
 				managedSecretEnvDir(deps.getAgentDir()),
-				...(this._workerSessionPrivatePathEnvelope?.deniedPaths ?? []),
+				...(this._pathEnvelopes.privatePaths?.deniedPaths ?? []),
 			],
 			exemptReadDirectories: [this._toolStreamsWorkRun.path],
 			toolStreamsDirectory: this._toolStreamsWorkRun.path,
@@ -801,7 +784,7 @@ export class RuntimeBuilder {
 		this._sessionReadOnlyShell = privatePathScope?.readOnlyShell
 			? sessionReadOnlyShellScope(
 					deps.getCwd(),
-					this._workerSessionPrivatePathEnvelope?.deniedPaths ?? [],
+					this._pathEnvelopes.privatePaths?.deniedPaths ?? [],
 					this._credentialExposureBoundary,
 				)
 			: undefined;
@@ -1277,12 +1260,8 @@ export class RuntimeBuilder {
 				harnessTools.has(tool),
 			);
 			let scoped = guarded;
-			for (const [envelope, guidance] of [
-				[this._workerSessionPrivatePathEnvelope, undefined],
-				[this._workerSessionDefaultWriteScopeEnvelope, WORKER_WRITE_SCOPE_GUIDANCE],
-				[this._workerSessionHarnessWriteEnvelope, WORKER_HARNESS_WRITE_GUIDANCE],
-			] as const)
-				if (envelope) scoped = wrapToolWithEnvelopeScope(scoped, envelope, this.deps.getCwd(), guidance);
+			for (const { envelope, guidance } of this._pathEnvelopes.scopes)
+				scoped = wrapToolWithEnvelopeScope(scoped, envelope, this.deps.getCwd(), guidance);
 			if (this._sessionReadOnlyShell)
 				scoped = wrapToolWithReadOnlyShell(scoped, this._sessionReadOnlyShell, this.deps.getCwd());
 			toolRegistry.set(

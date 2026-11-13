@@ -516,7 +516,8 @@ export class BotSessionHost {
 					// Its own name and soul replace the main agent's in the prompt.
 					agentIdentity: namedAgentIdentity(profile.displayName, soul.soul, agentId),
 					tools: botSessionToolNames(profile.canWrite),
-					privatePathScope: { readOnlyShell: !profile.canWrite },
+					// It writes as a worker writes: inside the project directory, never to a harness resource.
+					privatePathScope: { readOnlyShell: !profile.canWrite, confinedWrites: true },
 					timers: this.ports.timers(),
 					onClosingWarnings: (warnings) => {
 						for (const warning of warnings) this.ports.warn(`Bot ${agentId}: ${warning}`);

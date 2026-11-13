@@ -58,6 +58,12 @@ export interface SessionPrivatePathScope {
 	 * network (`readOnlyShellRefusal`), in every execution mode. Its tool set carries no file-editing tool.
 	 */
 	readonly readOnlyShell?: boolean;
+	/**
+	 * The session writes as a worker does: only inside its working directory (or `allowedPaths`), and never to a harness
+	 * resource (skills, extensions, prompts, settings, hooks, git config). A capability of the session, whatever process
+	 * runs it (`session-path-envelopes.ts`).
+	 */
+	readonly confinedWrites?: boolean;
 }
 
 /**
