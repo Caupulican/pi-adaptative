@@ -60,7 +60,7 @@ import { cleanRedactBound } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import { appendBoundedFile, createMemoryHeader } from "./bot-memory-files.ts";
-import { assertBotId } from "./bot-runtime-bindings.ts";
+import { assertBotId, isBotId } from "./bot-runtime-bindings.ts";
 import {
 	type BotDaemonEnd,
 	type BotDaemonReport,
@@ -984,8 +984,9 @@ export class PersistentBotTeamStore {
 		return true;
 	}
 
+	/** The bots in the bot id domain; a record outside it (a delegate worker's id minted by an earlier build) stays on disk but is not a bot. */
 	listBots(options?: { includeRetired?: boolean }): PersistentBotRecord[] {
-		const all = Array.from(this.bots.values(), (bot) => ({ ...bot }));
+		const all = Array.from(this.bots.values(), (bot) => ({ ...bot })).filter((bot) => isBotId(bot.agentId));
 		if (options?.includeRetired) {
 			return all;
 		}
@@ -2385,9 +2386,7 @@ export class PersistentBotTeamStore {
 		}
 
 		const allAgentIds = new Set<string>();
-		for (const botId of this.bots.keys()) {
-			allAgentIds.add(botId);
-		}
+		for (const botId of this.bots.keys()) if (isBotId(botId)) allAgentIds.add(botId);
 		for (const agentId of liveAgentById.keys()) {
 			allAgentIds.add(agentId);
 		}
