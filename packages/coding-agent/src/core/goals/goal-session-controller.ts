@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import type { AssistantMessage } from "@caupulican/pi-ai";
 import { AgentBusyError } from "../../kernel/agent.ts";
 import { harnessLog } from "../../kernel/harness-log.ts";
@@ -29,6 +28,7 @@ import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { goalObjectiveId } from "../orchestration/work-state-projection.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import { openWorkUnit } from "../work-units.ts";
+import { type ChatGoalAdmission, planExplicitChatGoal } from "./chat-goal-admission.ts";
 import type { RoutedGoalContext } from "./compact-goal-context.ts";
 import { getGoalCompletionRefusal, reopenUnsupportedGoalCompletion } from "./goal-acceptance.ts";
 import {
@@ -62,10 +62,8 @@ import {
 	applyGoalEvent,
 	type GoalState,
 	isGoalExecutionActive,
-	isGoalUnfinishedStatus,
 	MAX_CONSUMED_RUNAWAY_SIGNATURES,
 } from "./goal-state.ts";
-import { applyGoalAction } from "./goal-tool-core.ts";
 import {
 	type ExplicitChatGoal,
 	type ExplicitGoalStartAuthority,
@@ -122,11 +120,6 @@ export class ObjectivePrimaryBindingError extends Error {
 		this.missingBinding = missingBinding;
 	}
 }
-
-export type ChatGoalAdmission =
-	| { status: "not_explicit" }
-	| { status: "started"; state: GoalState }
-	| { status: "unfinished_goal_exists"; state: GoalState };
 
 /**
  * Smallest remaining goal budget worth handing to the provider as one more request's OUTPUT cap.
@@ -479,6 +472,35 @@ export class GoalSessionController {
 	}
 
 	/**
+	 * A goal the owner's words asked for without a goal phrase, which System One judged to set an outcome to pursue
+	 * (`OwnerGoalIntent`): it starts as an explicit chat goal does, with no token budget. Only a run that already holds an
+	 * execution is handed the goal, because the judgment returns after the owner's delivery, when another submission may be
+	 * about to begin its own execution; a goal no run holds is picked up by its own continuation. An unfinished goal is
+	 * never replaced, and that is no warning: the judgment ran while the owner's turn did.
+	 */
+	startJudgedOwnerGoal(objective: string): ChatGoalAdmission {
+		const admission = this.admitExplicitChatGoal({ objective });
+		if (admission.status !== "started") return admission;
+		const held = this.executionLease;
+		if (held) {
+			this.setStartAuthority({});
+			this.bindExecution(held, admission.state.goalId);
+		}
+		// A turn still running schedules the continuation when it ends; one that ended before the judgment returned did that
+		// when the goal did not exist yet. The goal is saved by now, so a scheduling failure is reported, not a failed start.
+		if (this.deps.getForegroundSubmissionEpoch() === undefined) {
+			try {
+				this.deps.scheduleGoalAutoContinueFromIdle();
+			} catch (error) {
+				this.deps.emitWarning(
+					`Goal '${admission.state.goalId}' started, but its continuation could not be scheduled: ${error instanceof Error ? error.message : String(error)}`,
+				);
+			}
+		}
+		return admission;
+	}
+
+	/**
 	 * The goal the owner's own prompt would resume (a system-stopped goal) or start (an explicit chat goal) if it were
 	 * delivered now, read without saving anything: the prompt changes the goal only when it is delivered (see
 	 * {@link applyDeliveredOwnerPrompt}). Only the owner's typed words start a goal: `authority` is what they grant
@@ -492,7 +514,7 @@ export class GoalSessionController {
 		const now = new Date().toISOString();
 		const current = this.getState();
 		const resumed = current && this.planSystemResume(current, now, "owner");
-		const admission = this.planExplicitChatGoal(
+		const admission = planExplicitChatGoal(
 			resumed ?? current,
 			ownerChatGoal(text, authority, priorUserPromptText(messages, text)),
 			now,
@@ -537,38 +559,10 @@ export class GoalSessionController {
 
 	admitExplicitChatGoal(goal: ExplicitChatGoal | undefined, now?: string): ChatGoalAdmission {
 		const current = this.getState();
-		const admission = this.planExplicitChatGoal(current, goal, now ?? new Date().toISOString());
+		const admission = planExplicitChatGoal(current, goal, now ?? new Date().toISOString());
 		if (admission.status === "started")
 			this.saveState(admission.state, current ? getGoalStateRevision(current) : undefined);
 		return admission;
-	}
-
-	/** What starting `parsed` as an explicit chat goal does against `current`, read without saving anything. */
-	private planExplicitChatGoal(
-		current: GoalState | undefined,
-		parsed: ExplicitChatGoal | undefined,
-		admittedAt: string,
-	): ChatGoalAdmission {
-		if (!parsed) return { status: "not_explicit" };
-		if (current && isGoalUnfinishedStatus(current.status)) {
-			return { status: "unfinished_goal_exists", state: current };
-		}
-		const digest = createHash("sha256")
-			.update(`${admittedAt}\0${current?.goalId ?? "none"}\0${parsed.objective}`)
-			.digest("hex")
-			.slice(0, 20);
-		const result = applyGoalAction(
-			current,
-			{
-				action: "start",
-				goalId: `chat-${digest}`,
-				userGoal: parsed.objective,
-				tokenBudget: parsed.tokenBudget,
-			},
-			admittedAt,
-		);
-		if (!result.ok) throw new Error(result.error);
-		return { status: "started", state: result.state };
 	}
 
 	/** Attribute turn/wall-clock telemetry without inferring progress (public/manual accounting seam). */

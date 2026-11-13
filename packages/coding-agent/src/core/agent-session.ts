@@ -800,7 +800,7 @@ export class AgentSession {
 			getRouterCandidatePool: () => this.getRouterCandidatePool(),
 			withTaskDirectoryContext: (fn, signal, onUnavailable) =>
 				this._runtimeBuilder.withTaskDirectoryContext(fn, signal, onUnavailable),
-			noteSystemOneTaskDirectoryUnavailable: (err) => this._noteSystemOneTaskDirectoryUnavailable(err),
+			noteSystemOneTaskDirectoryUnavailable: (err) => this._agentEvents.noteSystemOneTaskDirectoryUnavailable(err),
 			pushPendingNextTurnMessage: (msg) => this._pendingNextTurnMessages.push(msg),
 			setOperatorBlocker: (blocker) => {
 				this._operatorBlocker = blocker;
@@ -2503,6 +2503,8 @@ export class AgentSession {
 			emitQueueUpdate: () => this._emitQueueUpdate(),
 			judgeQueuedOwnerRequest: (words, signal, acceptedOrder) =>
 				this._edgeIntent.judgeOwnerRequest(words, signal, acceptedOrder),
+			getSemanticDecisionEngine: () => this._semanticDecisionEngine(),
+			sendCustomMessage: (message, options) => this.sendCustomMessage(message, options),
 			getOperatorBlocker: () => this._operatorBlocker,
 			setOperatorBlocker: (blocker) => {
 				this._operatorBlocker = blocker;
@@ -2533,7 +2535,8 @@ export class AgentSession {
 			getPipelineRunSnapshot: () => this.getPipelineRunSnapshot(),
 			isSystemPromptCold: (routedTurnModel) => this._cache.isSystemPromptCold(routedTurnModel),
 			atColdMoment: (reason) => this._cache.atColdMoment(reason),
-			noteSystemOneTaskDirectoryUnavailable: (error) => this._noteSystemOneTaskDirectoryUnavailable(error),
+			noteSystemOneTaskDirectoryUnavailable: (error) =>
+				this._agentEvents.noteSystemOneTaskDirectoryUnavailable(error),
 			getSystemOneController: () => this._semanticPlane.controller,
 			announceOwnerFollowUpsWhenPresent: () => this._announceOwnerFollowUpsWhenPresent(),
 			runToolkitHit: (scriptName, messages, signal) => this._runToolkitHit(scriptName, messages, signal),
@@ -3740,10 +3743,6 @@ export class AgentSession {
 	/** Effective cwd inside an admitted task workflow; startup cwd outside one. */
 	get taskCwd(): string {
 		return this._runtimeBuilder.taskCwd;
-	}
-
-	private _noteSystemOneTaskDirectoryUnavailable(error: unknown): void {
-		this._agentEvents.noteSystemOneTaskDirectoryUnavailable(error);
 	}
 
 	/** Build a foreground {@link CapabilityEnvelope} from the live session state (active tools, cwd, cost ceiling). */

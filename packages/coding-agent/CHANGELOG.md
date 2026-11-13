@@ -5,6 +5,10 @@
 - The operator bar marks an unfinished goal as `◎ n/m` (requirements met over all of them), on the accent tone while it runs and the warning tone while it waits; the goal's saved state raises a session event, so the bar and the activity lane update the moment a goal is created, changed or finished. The activity lane names the goal and its stopped status in English and pt-BR.
 - The agent can arm a watch for its own wait in a turn the owner did not speak in (a goal continuation or a delivered result): one-shot, with an end time at most 24 hours ahead, up to eight at once, each stamped with what opened the turn. Recurring schedules and changes to existing routines still need the owner's words. The routine tool tells the agent to arm a watch instead of blocking a turn on `gh run watch` or sleep loops, and the operator bar shows the live watch count as `◌ n`.
 
+### Changed
+
+- A goal now starts from an owner message that asks for an outcome to be pursued until it is reached, whatever its wording, not only from the fixed goal phrases. After the message is delivered, System One answers whether it sets such an outcome and whether it shows enough to tell; a goal starts only when both answers reach 0.90 (no token budget, never over an unfinished goal, never from pasted text). The judgment does not delay the turn: a running turn gets a note to record the owner's end state and ordered steps as requirements, and a turn that already ended is picked up by the goal's own continuation. With System One off, or on an outage (reported once), no goal starts from such a message.
+
 ### Fixed
 
 - A delegate worker (`worker-<n>`) is no longer registered, listed, labelled or retired as a bot: the roster and the bot list show only runtimes with a bot record behind them, a worker's completion handoff reads `Worker: <id>`, no bot can take a worker's id, and `/bot retire` on a worker points at `delegate cancel`. Records the old behaviour created stay on disk but are no longer listed. The ids the harness generates for a bot's own runtimes (`bot-<uuid>`, `bot-<hash>`, `group-<hash>`) are refused as bot names too, so a new bot can no longer adopt another bot's runtime.

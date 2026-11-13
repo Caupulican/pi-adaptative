@@ -77,9 +77,13 @@ goal: ...`, `The goal is to ...`, `Keep working until this is complete: ...`, `t
 <task>`, a follow-up `this is a goal` / `the task is a goal` after a task, `instead of …, I want
 to …`, or `I want to refactor/rewrite/rebuild/redesign …` create the same durable goal record.
 Handover wording (`by the way`, `i'm handing over`, sub-agent or role assignment) is classification
-only; the previous user task is the objective. Pi deliberately does not infer persistence from an
-ordinary multi-step request, and it will not replace an unfinished goal implicitly. Active
-chat-created goals use the normal automatic hidden continuation trigger and survive compaction
+only; the previous user task is the objective. These phrases are the instant path. A message that uses
+none of them still starts a goal when System One reads it as asking for an outcome to be pursued until
+it is reached (`this is your goal, fix the issues ... it is finished when ...`, or ordered steps toward
+a stated end state): the question is asked once the message is delivered, never delays the turn, and
+starts a goal only on a confident answer. A question, a single bounded action or conversation starts
+none, and with System One off no message is judged. Pi will not replace an unfinished goal implicitly.
+Active chat-created goals use the normal automatic hidden continuation trigger and survive compaction
 through one compact active-goal projection.
 
 Reading a session `.jsonl` with `read` returns a labeled transcript (user/assistant/compaction or

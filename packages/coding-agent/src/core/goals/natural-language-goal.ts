@@ -139,8 +139,9 @@ export function parseRequestedTokenBudget(
 }
 
 /**
- * Recognize only explicit persistence language. Ordinary multi-step work and discussion ABOUT goal
- * mechanics deliberately return undefined; those must not silently expand into autonomous work.
+ * Recognize explicit persistence language: the instant path, a code fact that needs no call. Discussion ABOUT goal
+ * mechanics returns undefined here. What these phrases do not recognize is not decided by them: a message that asks for
+ * an outcome to be pursued until it is reached, in any other wording, is judged by System One (`owner-goal-intent.ts`).
  */
 function standaloneGoalRemainder(text: string): string | undefined {
 	for (const pattern of STANDALONE_GOAL_AUTHORITY_PATTERNS) {

@@ -424,7 +424,10 @@ has not been measured live. A message with no typed words is never queued or cla
 System One request. An extension's message (a peer agent's, say) is not the owner's at all: it is never
 classified and grants, hands off, binds or lifts nothing. An explicit chat goal starts only from typed goal
 words, with a token budget only from typed words; its objective is read from the whole message, so "set a
-goal: implement the spec below" keeps the pasted spec. A long paste is shortened inside its fence so the owner's typed words
+goal: implement the spec below" keeps the pasted spec. A message with no goal phrase is judged once it is
+delivered (`S1-OWNER-GOAL-INTENT`: does the message set an outcome to pursue until it is reached, and does it
+show enough to tell) and starts a goal, with no token budget, only when both answers reach 0.90; typed words
+are required, pasted spans are fenced, and the judgment never delays the owner's turn. A long paste is shortened inside its fence so the owner's typed words
 always reach the judgment whole. The same fenced request is what the gates, plan review and owner
 questions read as the turn's request. Paste provenance survives take-back to the editor, a failed send-now,
 a restart (the durable queued-input record keeps it), history recall and the external editor (an edit that

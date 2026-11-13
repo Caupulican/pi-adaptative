@@ -90,6 +90,11 @@ export const SESSIONS = {
 		verbOverridden: "substituído",
 		head: (userGoal: string) => `Objetivo: ${userGoal}`,
 		status: (word: string) => `Estado: ${word}`,
+		intentOutage: (cause: string) =>
+			`O System One não conseguiu avaliar se a sua mensagem define um objetivo (${cause}); nenhum objetivo foi iniciado.`,
+		intentNotStarted: (cause: string) => `Um objetivo pedido pela sua mensagem não foi iniciado: ${cause}`,
+		intentNoteFailed: (cause: string) =>
+			`Um objetivo foi iniciado a partir da sua mensagem, mas o aviso ao agente sobre ele não foi entregue: ${cause}`,
 		statusWords: GOAL_STATUS_WORDS,
 		/**
 		 * Uma frase por ação de objetivo recusada. A ação recusada informa o fato (`goal-refusal.ts`) e tira as palavras

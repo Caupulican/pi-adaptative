@@ -17,6 +17,7 @@ import nodePath from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { getToolExecutionKey } from "../../kernel/tool-failure-memory.ts";
 import { commandFromToolArgs } from "../acquisition/acquisition-boundary.ts";
+import { ACCEPT_ABSENCE_AT, ACCEPT_AT, noulProbability } from "./answer-acceptance.ts";
 import type { OperationEffectEngine } from "./operation-classifier.ts";
 import { OPERATION_JUDGMENT_TIMEOUT_MS } from "./operation-gate.ts";
 import { noteDecisionTrace } from "./semantic-evaluation-ledger.ts";
@@ -25,14 +26,6 @@ import { noteDecisionTrace } from "./semantic-evaluation-ledger.ts";
 const JUDGED_TOOLS: ReadonlySet<string> = new Set(["bash", "run_process", "powershell", "python"]);
 /** Typed writes: the path alone decides. */
 const WRITE_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
-
-/**
- * Where an answer decides: the owner's rule for any acceptance is P >= 0.90 (a yes) or P <= 0.10 (a no), and an
- * evidence-sufficiency answer must reach 0.90 before the judgment it covers counts. No yes/no family carries these
- * cuts, and nothing here has been measured on its own answers, so they stay the rule's own values.
- */
-const ACCEPT_AT = 0.9;
-const ACCEPT_ABSENCE_AT = 0.1;
 
 /** Why a call was or was not refused, in the order the exits are tried. */
 type DelegationExit = "unasked" | "evidence_insufficient" | "task_work" | "not_task_work" | "open";
@@ -83,11 +76,6 @@ export interface DelegationRefusal {
 function isInside(root: string, path: string): boolean {
 	const relative = nodePath.relative(nodePath.resolve(root), path);
 	return relative === "" || (!relative.startsWith("..") && !nodePath.isAbsolute(relative));
-}
-
-function probability(answer: unknown): number | undefined {
-	const noul = (answer as { noul?: unknown } | undefined)?.noul;
-	return typeof noul === "number" && Number.isFinite(noul) && noul >= 0 && noul <= 1 ? noul : undefined;
 }
 
 export class DelegationGate {
@@ -151,8 +139,8 @@ export class DelegationGate {
 				},
 				{ consequence: "high", signal: AbortSignal.any(bounded) },
 			);
-			const taskWork = probability(evaluation.answers?.performs_task_work);
-			const sufficient = probability(evaluation.answers?.command_evidence_sufficient);
+			const taskWork = noulProbability(evaluation.answers?.performs_task_work);
+			const sufficient = noulProbability(evaluation.answers?.command_evidence_sufficient);
 			// Ordered exits: only a sufficiently evidenced, established answer refuses; every other case is open and runs.
 			let exit: DelegationExit;
 			if (taskWork === undefined || sufficient === undefined) exit = "unasked";

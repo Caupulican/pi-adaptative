@@ -28,6 +28,7 @@ import {
 } from "./goals/goal-continuation-prompt.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { type ExplicitGoalStartAuthority, parseExplicitGoalStartAuthority } from "./goals/natural-language-goal.ts";
+import { OwnerGoalIntent, type OwnerGoalIntentPorts } from "./goals/owner-goal-intent.ts";
 import type { OwnerWords } from "./learning/owner-evidence-ledger.ts";
 import type { LocalPrefixWarmController } from "./local-prefix-warm-controller.ts";
 import type { LocalRuntimeController } from "./local-runtime-controller.ts";
@@ -97,7 +98,7 @@ interface SubmissionLifecycle {
 	ownsForeground(): void;
 }
 
-export interface PromptSubmissionControllerDeps {
+export interface PromptSubmissionControllerDeps extends OwnerGoalIntentPorts {
 	readonly agent: Agent;
 	readonly sessionManager: Pick<
 		SessionManager,
@@ -135,6 +136,8 @@ export interface PromptSubmissionControllerDeps {
 		| "beginExecution"
 		| "setStartAuthority"
 		| "assertExecutionGoalCurrent"
+		| "getState"
+		| "startJudgedOwnerGoal"
 	>;
 	readonly costGuard: Pick<CostGuardController, "beginForegroundTurn">;
 	readonly reflection: Pick<ReflectionController, "markOwnerInput" | "queueExternalRootTurnCue" | "ownerEvidence">;
@@ -229,9 +232,11 @@ export class PromptSubmissionController {
 	private foregroundPromptLeaseValue: ForegroundSubmissionLease | undefined;
 	private lastUserRequestValue = "";
 	private ownerSubmissionOrder = 0;
+	private readonly ownerGoalIntent: OwnerGoalIntent;
 
 	constructor(deps: PromptSubmissionControllerDeps) {
 		this.deps = deps;
+		this.ownerGoalIntent = new OwnerGoalIntent(deps);
 	}
 
 	get isPreparingSubmission(): boolean {
@@ -303,13 +308,14 @@ export class PromptSubmissionController {
 		return input;
 	}
 
-	/** The owner's delivered words, persisted as `entryId`. */
+	/** The owner's delivered words, persisted as `entryId`: recorded as a rule and judged for a goal they set. */
 	private noteOwnerSpoke(words: OwnerWords, entryId: string): void {
 		// An owner development directive is policy, not prompt text: it is captured durably here, with the entry that carried
 		// it, before that turn can be compacted away. Only typed words state one: a pasted directive is never the owner's.
 		this.deps.ownerRules.record(ownerTypedText(words), entryId);
 		// The owner's words reached the session: an operator blocker waited for exactly that.
 		if (this.deps.getOperatorBlocker() !== undefined) this.deps.setOperatorBlocker(undefined);
+		this.ownerGoalIntent.noteDelivered(words, this.deps.findLastAssistantMessage());
 	}
 
 	/** A submission's input that ends there without being delivered, and why. */
@@ -941,10 +947,8 @@ export class PromptSubmissionController {
 				return;
 			}
 			lifecycle.ownsForeground();
-			if (lifecycle.input) {
-				// The input was accepted in this history: no navigation rewrites it while its turn is prepared.
-				if (submission.lease) this.deps.foregroundRecovery.beginTurnPreparation(submission.lease);
-			}
+			// The input was accepted in this history: no navigation rewrites it while its turn is prepared.
+			if (lifecycle.input && submission.lease) this.deps.foregroundRecovery.beginTurnPreparation(submission.lease);
 			this.foregroundPromptLeaseValue = submission.lease;
 
 			if (lifecycle.input) {
@@ -952,8 +956,8 @@ export class PromptSubmissionController {
 				// user entry persisted), never before: a prompt that ends undelivered changes no goal, and its run works on that
 				// goal only from its delivery. The goal it would own is read now, for the readiness that goal work needs. Only
 				// its typed words start a goal (`goalToolStartAuthority`); the objective is read from the whole text. An
-				// extension's message (a peer agent's, say) or an approval turn neither starts nor resumes a goal, though its turn
-				// still runs on one; the owner's words from an owner channel do.
+				// extension's message or an approval turn neither starts nor resumes a goal, though its turn still runs on one;
+				// the owner's words from an owner channel do. Words with no goal phrase are judged at delivery (`OwnerGoalIntent`).
 				const ownerGoalId = ownerSpoke
 					? this.deps.goals.previewOwnerPromptGoal(
 							ownerGoalText,
@@ -969,9 +973,7 @@ export class PromptSubmissionController {
 							this.deps.agent.state.messages,
 						),
 					);
-				if ((ownerGoalId ?? admittedGoalId) && this.deps.getAdaptiveReadiness()) {
-					this.deps.getAdaptiveReadiness()!.assertReady({ adaptiveEnabled: true });
-				}
+				if (ownerGoalId ?? admittedGoalId) this.deps.getAdaptiveReadiness()?.assertReady({ adaptiveEnabled: true });
 			}
 
 			// Queued steer/follow-up messages remain in the active turn; only a new submission resets the
@@ -1249,9 +1251,7 @@ export class PromptSubmissionController {
 		// bail below. Either way nothing is left "routing" past this point.
 		if (routingStarted) this.deps.emit({ type: "routing_end" });
 
-		if (!messages) {
-			return;
-		}
+		if (!messages) return;
 
 		// The submission's cancellation point. Listener FIRST, then the `aborted` read: in that order an
 		// abort either arrives later and reaches the live run through the listener, or has already
