@@ -2416,11 +2416,14 @@ export class AgentSession {
 			...this._edgeIntent.rootCallChecks(),
 			localCommitBranch: () => this._edgeIntent.localCommitBranch(),
 			// An admitted outward-facing operation (publish to a remote or a registry) is the delivery
-			// step the projection reports as DELIVER until that call ends.
+			// step the projection reports as DELIVER until that call ends or the gate releases it.
 			noteEdgeOperations: (toolCallId, classes) => {
 				if (!classes.some((edgeClass) => edgeClass === "git.publish" || edgeClass === "package.publish")) return;
-				this._deliveryToolCalls.add(toolCallId);
+				const calls = this._deliveryToolCalls.add(toolCallId);
 				this.setDeliveryState("in_progress");
+				return () => {
+					if (calls.delete(toolCallId) && calls.size === 0) this.setDeliveryState("none");
+				};
 			},
 			checkDirectScriptExecution: (toolName, args, cwd) =>
 				this._runtimeBuilder.checkDirectScriptExecution(toolName, args, cwd),
@@ -4399,9 +4402,7 @@ export class AgentSession {
 		this._compaction.abort();
 	}
 
-	/**
-	 * Cancel in-progress branch summarization.
-	 */
+	/** Cancel in-progress branch summarization. */
 	abortBranchSummary(): void {
 		this._treeNavigator.abort();
 	}
@@ -4634,9 +4635,7 @@ export class AgentSession {
 	// Auto-Retry
 	// =========================================================================
 
-	/**
-	 * Cancel in-progress retry.
-	 */
+	/** Cancel in-progress retry. */
 	abortRetry(): void {
 		this._foregroundRecovery.abortRetry();
 	}

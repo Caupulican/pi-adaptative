@@ -187,8 +187,11 @@ export interface ToolGateControllerDeps {
 	isToolReadOnly?(toolName: string): boolean | undefined;
 	/** Branch this task must commit onto. Set only after System One classifies the request as local commits. */
 	localCommitBranch?(): string | undefined;
-	/** The edge classes an admitted call carries (empty for ordinary work), for the delivery projection. */
-	noteEdgeOperations?(toolCallId: string, classes: readonly EdgeClass[]): void;
+	/**
+	 * The edge classes an admitted call carries (empty for ordinary work), for the delivery projection. What it returns
+	 * ends the note when the call is released: a sub-call has no execution end event of its own.
+	 */
+	noteEdgeOperations?(toolCallId: string, classes: readonly EdgeClass[]): (() => void) | undefined;
 	/**
 	 * Session identity of the group lock this call's announcement belongs to
 	 * (see file-mutation-queue.ts). Omitted retires in the process-wide default scope.
@@ -522,10 +525,11 @@ export class ToolGateController {
 				scopeCwd,
 			});
 			const isOperatorAuthorizedEdge = edgeOperations.length > 0;
-			this.deps.noteEdgeOperations?.(
+			const endEdgeNote = this.deps.noteEdgeOperations?.(
 				toolCall.id,
 				edgeOperations.map((operation) => operation.class),
 			);
+			if (endEdgeNote) registerCleanup?.(endEdgeNote);
 
 			// Operator edge authorization outranks advisory semantic tool gates;
 			// control-plane tools are internal harness operations, not untrusted repo inputs.
