@@ -51,6 +51,7 @@ import { verifierWorkerExecutionContract } from "../orchestration/worker-executi
 import { workerTerminalNotificationId } from "../orchestration/worker-terminal-notification.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { generatedWorkerLaneId, generatedWorkerLaneNumber } from "./worker-lane-id.ts";
 import {
 	ACTIVE_WORKER_ATTEMPT_STATUSES,
 	attemptAwaitsVerification,
@@ -168,10 +169,10 @@ export class WorkerLifecycle {
 		});
 		this.isProcessAlive = options.isProcessAlive ?? isLocalProcessAlive;
 		const snapshot = this.ledger.runtime.getSnapshot();
-		const highest = [...Object.keys(snapshot.tasks), ...Object.keys(snapshot.agents)].reduce((current, id) => {
-			const suffix = /^worker-(\d+)$/.exec(id)?.[1];
-			return suffix ? Math.max(current, Number(suffix)) : current;
-		}, 0);
+		const highest = [...Object.keys(snapshot.tasks), ...Object.keys(snapshot.agents)].reduce(
+			(current, id) => Math.max(current, generatedWorkerLaneNumber(id) ?? 0),
+			0,
+		);
 		this.nextLaneNumber = highest + 1;
 	}
 
@@ -187,9 +188,9 @@ export class WorkerLifecycle {
 			selectedLaneId = this.getNextAvailableLaneIdCandidate();
 		}
 		const attempt = this.ledger.prepare({ ...input, laneId: selectedLaneId });
-		const generatedSuffix = /^worker-(\d+)$/.exec(selectedLaneId)?.[1];
-		if (generatedSuffix) {
-			this.nextLaneNumber = Math.max(this.nextLaneNumber, Number(generatedSuffix) + 1);
+		const generatedNumber = generatedWorkerLaneNumber(selectedLaneId);
+		if (generatedNumber) {
+			this.nextLaneNumber = Math.max(this.nextLaneNumber, generatedNumber + 1);
 		}
 		const record = this.getRecord(selectedLaneId);
 		if (!record) throw new Error(`Durable worker '${selectedLaneId}' was not projected after enqueue.`);
@@ -201,13 +202,13 @@ export class WorkerLifecycle {
 		const snapshot = this.ledger.runtime.getSnapshot();
 		let candidateNumber = this.nextLaneNumber;
 		while (
-			snapshot.tasks[`worker-${candidateNumber}`] ||
-			snapshot.agents[`worker-${candidateNumber}`] ||
-			this.hasRetainedWorkerConversation(`worker-${candidateNumber}`)
+			snapshot.tasks[generatedWorkerLaneId(candidateNumber)] ||
+			snapshot.agents[generatedWorkerLaneId(candidateNumber)] ||
+			this.hasRetainedWorkerConversation(generatedWorkerLaneId(candidateNumber))
 		) {
 			candidateNumber += 1;
 		}
-		return `worker-${candidateNumber}`;
+		return generatedWorkerLaneId(candidateNumber);
 	}
 
 	private hasRetainedWorkerConversation(laneId: string): boolean {

@@ -44,6 +44,9 @@ export const BOT_TEAM = {
 		`${agentId} is now shown as ${name}. Address it as @${agentId} as before.`,
 	botRetired: (agentId: string) => `Bot ${agentId} retired.`,
 	botMissing: (agentId: string) => `Bot ${agentId} does not exist.`,
+	/** A retire that named a delegate worker's id: a worker is not a bot, and `delegate` is what stops it. */
+	notABotWorker: (agentId: string) =>
+		`${agentId} is a delegate worker, not a bot, so it cannot be retired here; cancel it with the delegate tool (cancel ${agentId}).`,
 	botLeadsOpenGoal: (agentId: string) =>
 		`Bot ${agentId} leads an open goal; cancel it first (/lead cancel ${agentId}).`,
 	botHasActiveWork: (agentId: string) =>

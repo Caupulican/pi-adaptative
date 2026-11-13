@@ -48,7 +48,12 @@ import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.
 import { SessionChannels } from "./channels/session-channels.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
 import { BotChatTranscript } from "./delegation/bot-chat-transcript.ts";
-import { type BotCreationRequest, type CreatedBotView, MAX_BOTS_PER_LEADER } from "./delegation/bot-creation.ts";
+import {
+	type BotCreationRequest,
+	botToolListEntry,
+	type CreatedBotView,
+	MAX_BOTS_PER_LEADER,
+} from "./delegation/bot-creation.ts";
 import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./delegation/bot-daemon-launch.ts";
 import { type BotDaemonStopResult, stopDetachedBotDaemon } from "./delegation/bot-daemon-stop.ts";
 import { BotLifecycleController } from "./delegation/bot-lifecycle-controller.ts";
@@ -330,7 +335,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			timers: deps.getTimers().port("channel-poll"),
 			wakeTimers: deps.getTimers().port("channel-expiry"),
 		});
-		this.botBindings = new BotRuntimeBindings(() => deps.getSessionManager());
+		this.botBindings = new BotRuntimeBindings(
+			() => deps.getSessionManager(),
+			() => this.getBotTeamStore(),
+		);
 		this._botChat = new BotChatTranscript(this.botBindings, {
 			getBotTeamStore: () => this.getBotTeamStore(),
 			getRemoteHub: () => this.getRemoteHub(),
@@ -1888,11 +1896,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return teamId ? views.filter((view) => team?.memberAgentIds.includes(view.agentId)) : [...views];
 	}
 
-	/** The bot a worker runtime belongs to, as the store names it; undefined for a managed lane or a group thread. */
+	/** The bot a worker runtime belongs to, as the store names it; undefined for a delegate worker, a managed lane or a group thread. */
 	botOfRuntime(runtime: string): { agentId: string; displayName?: string } | undefined {
-		const context = this.botBindings.generationContext(runtime);
-		const bot = context.teamId === undefined ? this.getBotTeamStore().getBot(context.agentId) : undefined;
-		return bot ? { agentId: bot.agentId, displayName: bot.displayName } : undefined;
+		return this.botBindings.botOf(runtime);
 	}
 
 	/**
@@ -2039,17 +2045,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			},
 			create: (request) => this.createBotFor({ kind: "root" }, request),
 			lead: (request) => this.getLeaders().delegate(request),
-			list: () =>
-				this.getBotTeamStore()
-					.listBots({ includeRetired: true })
-					.map((bot) => ({
-						agentId: bot.agentId,
-						...(bot.displayName ? { displayName: bot.displayName } : {}),
-						modelRef: `${bot.provider}/${bot.modelId}`,
-						leader: bot.leader === true,
-						retired: bot.retired === true,
-						...(bot.createdBy ? { createdBy: bot.createdBy } : {}),
-					})),
+			list: () => this.getBotTeamStore().listBots({ includeRetired: true }).map(botToolListEntry),
 		});
 	}
 

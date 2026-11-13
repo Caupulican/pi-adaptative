@@ -54,6 +54,8 @@ export const BOT_TEAM = {
 		`${agentId} agora aparece como ${name}. O endereço continua @${agentId}.`,
 	botRetired: (agentId: string) => `Bot ${agentId} retirado.`,
 	botMissing: (agentId: string) => `O bot ${agentId} não existe.`,
+	notABotWorker: (agentId: string) =>
+		`${agentId} é um worker de delegação, não um bot, então não pode ser retirado aqui; cancele-o com a ferramenta delegate (cancel ${agentId}).`,
 	botLeadsOpenGoal: (agentId: string) =>
 		`O bot ${agentId} lidera um objetivo aberto; cancele antes (/lead cancel ${agentId}).`,
 	botHasActiveWork: (agentId: string) =>

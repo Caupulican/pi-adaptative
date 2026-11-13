@@ -19,7 +19,7 @@ import {
 import type { BotMessageDirectory, BotOwnedStartOutcome } from "./bot-message-contract.ts";
 import { createBotMessageDirectory } from "./bot-message-directory.ts";
 import { displayNameFor, suggestBotId } from "./bot-naming.ts";
-import type { BotRuntimeBindings } from "./bot-runtime-bindings.ts";
+import { type BotRuntimeBindings, isBotId } from "./bot-runtime-bindings.ts";
 import type { LeaderController } from "./leader-controller.ts";
 import type { DelegationRecord } from "./leader-delegation-ledger.ts";
 import {
@@ -339,6 +339,15 @@ export class BotLifecycleController {
 	retirePersistentBot(agentId: string): { retired: boolean; detail: string } {
 		try {
 			agentId = normalizeBotOrTeamId(agentId, "agentId");
+			// Only a bot record is retired: a delegate worker (or any id the store does not hold) is not a bot, and it is
+			// cancelled with the delegate tool, never through the bot's runtime lookup.
+			if (!this.host.getBotTeamStore().getBot(agentId))
+				return {
+					retired: false,
+					detail: isBotId(agentId)
+						? interfaceText().botTeam.botMissing(agentId)
+						: interfaceText().botTeam.notABotWorker(agentId),
+				};
 			// Retiring a leader mid-goal would orphan its goal and its bots: the goal is cancelled first.
 			if (
 				this.host.hasWorkerState() &&
@@ -354,14 +363,10 @@ export class BotLifecycleController {
 			if (workers.some((agent) => agent.status !== "retired" && agent.activity !== "idle"))
 				throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
 			for (const worker of workers) this.host.retireWorkerAgent(worker.agentId, undefined, { discardPending: true });
-			const hasWorker = workers.length > 0;
 			const bot = this.host.getBotTeamStore().retireBot(agentId);
 			return {
-				retired: hasWorker || bot !== undefined,
-				detail:
-					hasWorker || bot
-						? interfaceText().botTeam.botRetired(agentId)
-						: interfaceText().botTeam.botMissing(agentId),
+				retired: bot !== undefined,
+				detail: bot ? interfaceText().botTeam.botRetired(agentId) : interfaceText().botTeam.botMissing(agentId),
 			};
 		} catch (error) {
 			return { retired: false, detail: error instanceof Error ? error.message : String(error) };

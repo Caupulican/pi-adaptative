@@ -12,7 +12,12 @@ import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-gu
 import { botStartModelStance } from "../orchestration/worker-model-pins.ts";
 import type { RemoteHubController } from "../remote/hub-controller.ts";
 import type { BotOperatorMessageOptions } from "./bot-operator-message-options.ts";
-import { type BotRuntimeBindings, type BotRuntimeContext, keyedBotRuntimeId } from "./bot-runtime-bindings.ts";
+import {
+	assertBotId,
+	type BotRuntimeBindings,
+	type BotRuntimeContext,
+	keyedBotRuntimeId,
+} from "./bot-runtime-bindings.ts";
 import {
 	BOT_MEMORY_BLOCK_SEPARATOR,
 	type BotOperatorMessageDispatchResult,
@@ -84,6 +89,7 @@ export class BotOperatorDispatch {
 		options?: BotOperatorMessageOptions & { teamId?: string; teamIncarnationId?: string },
 	): Promise<BotOperatorMessageDispatchResult> {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
+		assertBotId(normId);
 		const manager = this.deps.getSessionManager();
 		const teamId = options?.teamId ? normalizeBotOrTeamId(options.teamId, "teamId") : undefined;
 		const team = teamId ? this.host.getBotTeamStore().getTeam(teamId) : undefined;

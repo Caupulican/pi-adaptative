@@ -227,7 +227,7 @@ export function buildForegroundWorkerTerminalHandoffContent(
 		outputArtifact?: ArtifactContract;
 		/** Host-written fan-out group line; reason codes inside it are already identifier-sanitized. */
 		fanout?: string;
-		/** The bot this lane is the runtime of, when a persistent bot owns it: the root asked that bot, so it is named. */
+		/** The bot this lane is the runtime of, when a persistent bot owns it: the root asked that bot, so it is named. Absent for a delegate worker. */
 		bot?: { agentId: string; displayName?: string };
 		/** The host's judgment of the claim against the receipts; names the missing proof a follow-up asks for. */
 		hostVerdict?: WorkerHostVerdict;
@@ -264,9 +264,12 @@ export function buildForegroundWorkerTerminalHandoffContent(
 			const reason = record.reasonCode ? ` reason=${handoffReasonCode(record.reasonCode)}` : "";
 			const lines = [`- ${record.laneId}: ${record.status}${reason}`];
 			// The bot's own id is an identifier; its display name is free text the caller chose, so it stays on one line and bounded.
+			// A lane no bot owns is a delegate worker: it is named as the worker it is, never as a bot.
 			if (record.bot) {
 				const name = boundedUtf8Text(record.bot.displayName?.replace(/[\r\n]+/g, " ").trim() ?? "", 80);
 				lines.push(`  Bot: ${record.bot.agentId}${name && name !== record.bot.agentId ? ` (${name})` : ""}`);
+			} else {
+				lines.push(`  Worker: ${record.laneId}`);
 			}
 			if (record.reasonDetail)
 				lines.push(

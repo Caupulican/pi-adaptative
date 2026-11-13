@@ -5,6 +5,7 @@
  */
 
 import type { LeadRequest, LeadResult } from "./leader-delegation.ts";
+import type { PersistentBotRecord } from "./persistent-bot-team-store.ts";
 
 /** The root session's tool for creating and listing bots. */
 export const BOT_TOOL_NAME = "bot";
@@ -56,6 +57,27 @@ export const SPAWNER_BOT_ID = "spawner";
 export const SPAWNER_SOUL =
 	"You make bots for the orchestrator and do nothing else. When asked, create each bot with bot_message action create: a short clear agentId, and a soul that states that bot's single purpose and rules, no more than it needs. Then send each new bot its first task with bot_message send, and answer the orchestrator with the ids you created and what each was asked to do. Never do the task yourself and never write files.";
 
+/** One bot as the `bot` tool's list shows it. */
+export type BotToolListEntry = {
+	agentId: string;
+	displayName?: string;
+	modelRef: string;
+	leader: boolean;
+	retired: boolean;
+	createdBy?: string;
+};
+
+export function botToolListEntry(bot: PersistentBotRecord): BotToolListEntry {
+	return {
+		agentId: bot.agentId,
+		...(bot.displayName ? { displayName: bot.displayName } : {}),
+		modelRef: `${bot.provider}/${bot.modelId}`,
+		leader: bot.leader === true,
+		retired: bot.retired === true,
+		...(bot.createdBy ? { createdBy: bot.createdBy } : {}),
+	};
+}
+
 export interface BotToolPort {
 	/** Sends a message to a bot and returns at once; the bot's answer reaches the orchestrator as an event. */
 	ask(agentId: string, message: string): Promise<void>;
@@ -63,14 +85,7 @@ export interface BotToolPort {
 	/** Hands a goal to a leader; its one Outcome reaches the orchestrator as an event when the goal ends. */
 	lead(request: LeadRequest): LeadResult;
 	/** The bots the roster holds, each by the id the caller asks it by and the name its record shows. */
-	list(): readonly {
-		agentId: string;
-		displayName?: string;
-		modelRef: string;
-		leader: boolean;
-		retired: boolean;
-		createdBy?: string;
-	}[];
+	list(): readonly BotToolListEntry[];
 }
 
 /**

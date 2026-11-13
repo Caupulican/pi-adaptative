@@ -1,14 +1,26 @@
 import { createHash } from "node:crypto";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import { isGeneratedWorkerLaneId } from "./worker-lane-id.ts";
 
 export const BOT_RUNTIME_BINDINGS_CUSTOM_TYPE = "pi_bot_runtime_bindings";
 const ID = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
 const MAX_BINDINGS = 1024;
 
-/** Whether `id` is in the bot id domain; anything else (a managed lane id such as `collaboration:<job>:<agent>`) is not a bot. */
+/**
+ * Whether `id` is in the bot id domain. Anything else is not a bot: a managed lane id such as `collaboration:<job>:<agent>`,
+ * and the id of a plain delegate worker (`worker-<n>`), which is a child of the session that started it.
+ */
 export function isBotId(id: string): boolean {
-	return ID.test(id);
+	return ID.test(id) && !isGeneratedWorkerLaneId(id);
+}
+
+/** Refuses a name no bot may take: the id of a delegate worker, which `delegate` manages (status, send, cancel). */
+export function assertBotId(id: string): void {
+	if (isGeneratedWorkerLaneId(id))
+		throw new Error(
+			`"${id}" is a delegate worker, not a bot; manage it with the delegate tool (status, send, cancel). Bots are created with /bot new or the bot tool under another name.`,
+		);
 }
 
 /** The runtime a keyed send to a bot starts: named by its replay key, so a repeated send names the same runtime. */
@@ -48,17 +60,25 @@ function decodeContext(key: string): BotRuntimeContext {
 	return context;
 }
 
-/** Bot names are durable aliases; each parent branch owns its current worker generations. */
+/** The bot records a runtime's bot is read from: the record of a bot id, undefined for an id no bot holds. */
+export type BotRecords = () => { getBot(agentId: string): { agentId: string; displayName?: string } | undefined };
+
+/**
+ * Bot names are durable aliases; each parent branch owns its current worker generations. A runtime is a bot's only when a
+ * bot record stands behind its alias: a delegate worker, a managed lane or an unowned runtime resolves to no bot.
+ */
 export class BotRuntimeBindings {
 	private readonly manager: () => SessionManager;
+	private readonly records: BotRecords;
 	private cachedEntry: object | undefined;
 	private cachedSession = "";
 	private current = new Map<string, string>();
 	// Unbound runtime IDs are opaque (managed lanes include ':'), not serialized bot binding keys.
 	private readonly generationContexts = new Map<string, BotRuntimeContext>();
 
-	constructor(manager: () => SessionManager) {
+	constructor(manager: () => SessionManager, records: BotRecords) {
 		this.manager = manager;
+		this.records = records;
 	}
 
 	private read(): Map<string, string> {
@@ -115,13 +135,21 @@ export class BotRuntimeBindings {
 		return this.read();
 	}
 
-	/** The bot alias a runtime is the current generation of; undefined for a superseded runtime or a managed lane, which is not a bot. */
+	/** The bot alias a runtime is the current generation of; undefined for a superseded runtime, a delegate worker or a managed lane, none of which is a bot. */
 	alias(runtime: string): string | undefined {
 		const context = this.generationContext(runtime);
-		if (!isBotId(context.agentId)) return undefined;
+		if (!isBotId(context.agentId) || !this.records().getBot(context.agentId)) return undefined;
 		return this.runtime(context.agentId, context.teamId, context.teamIncarnationId) === runtime
 			? context.agentId
 			: undefined;
+	}
+
+	/** The bot a runtime belongs to in any generation, as its record names it; undefined for a group thread, a delegate worker or a managed lane. */
+	botOf(runtime: string): { agentId: string; displayName?: string } | undefined {
+		const context = this.generationContext(runtime);
+		const bot =
+			context.teamId === undefined && isBotId(context.agentId) ? this.records().getBot(context.agentId) : undefined;
+		return bot ? { agentId: bot.agentId, displayName: bot.displayName } : undefined;
 	}
 
 	/** Historical ownership identifies a superseded sender; it never grants reuse of that runtime. */
@@ -153,7 +181,8 @@ export class BotRuntimeBindings {
 	}
 
 	runtimes(alias: string): string[] {
-		const result = new Set([alias]);
+		// A bot started before runtimes were bound ran under its own alias; a delegate worker's id is never a bot's runtime.
+		const result = new Set(isBotId(alias) ? [alias] : []);
 		for (const entry of this.manager().getBranch()) {
 			if (entry.type !== "custom" || entry.customType !== BOT_RUNTIME_BINDINGS_CUSTOM_TYPE) continue;
 			for (const [key, runtime] of this.decode(entry.data))
@@ -171,6 +200,7 @@ export class BotRuntimeBindings {
 	bind(alias: string, runtime: string, teamId?: string, teamIncarnationId?: string): void {
 		this.assertCapacity(alias, teamId, teamIncarnationId);
 		if (!ID.test(alias) || !ID.test(runtime)) throw new Error("Invalid bot runtime binding.");
+		assertBotId(alias);
 		const key = contextKey({ agentId: alias, teamId, teamIncarnationId });
 		decodeContext(key);
 		const bindings = new Map(this.read());

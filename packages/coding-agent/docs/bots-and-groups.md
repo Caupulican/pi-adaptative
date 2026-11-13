@@ -3,6 +3,10 @@
 Bots have persistent identities and model settings. Teams are group chats: each bot has a separate
 conversation and memory in each group. Direct bot chats remain separate from group chats.
 
+A delegate worker (`worker-1`, started by the `delegate` tool) is not a bot: it is a child of the session that started it, has no
+bot record, roster row or chat, and is managed with `delegate` (status, send, cancel). Its id is outside the bot id domain, so no
+bot can take a name like `worker-3`; the `bot` tool, `/bot` and the roster only ever name real bots.
+
 Bot creation by the owner or root uses the selected, configured, or default model. It does not opt in
 to model task-fitness judgments. These judgments require `modelRouter.fitnessGate: true`, the router,
 and System One. With that gate off, no task-fitness judgment is required at startup, queued dispatch,

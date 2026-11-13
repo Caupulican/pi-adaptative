@@ -60,6 +60,7 @@ import { cleanRedactBound } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import { appendBoundedFile, createMemoryHeader } from "./bot-memory-files.ts";
+import { assertBotId } from "./bot-runtime-bindings.ts";
 import {
 	type BotDaemonEnd,
 	type BotDaemonReport,
@@ -1059,6 +1060,7 @@ export class PersistentBotTeamStore {
 		const existing = this.bots.get(agentId);
 		if (!existing && RESERVED_BOT_CREATOR_IDS.has(agentId.toLowerCase()))
 			throw new Error(`"${agentId}" names who created a bot, so no bot can take it; choose another name.`);
+		if (!existing) assertBotId(agentId);
 		const provider = (input.provider !== undefined ? input.provider.trim() : existing?.provider) || "anthropic";
 		const modelId = (input.modelId !== undefined ? input.modelId.trim() : existing?.modelId) || "claude-haiku-5-5";
 
@@ -1117,9 +1119,6 @@ export class PersistentBotTeamStore {
 				...existing,
 				retired: true,
 				updatedAt: now,
-				lastTranscriptRef: existing.lastTranscriptRef,
-				lastSummary: existing.lastSummary,
-				lastMessageAt: existing.lastMessageAt,
 			};
 			this.bots.set(normalizedId, updated);
 			this.save();
