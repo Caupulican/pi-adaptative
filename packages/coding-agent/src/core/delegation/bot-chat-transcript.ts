@@ -12,6 +12,7 @@ import type { AgentMessage } from "../../kernel/types.ts";
 import { workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import { isModelFacingText } from "../../presentation/plain-text.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { BotHistoryRead } from "../bots/bot-history.ts";
 import type { BotSessionHost } from "../bots/bot-session-host.ts";
 import type { RemoteHubController } from "../remote/hub-controller.ts";
 import { botChatOperatorText, botReplyText } from "./bot-chat-text.ts";
@@ -57,6 +58,8 @@ function mergeByTime(first: readonly AgentMessage[], second: readonly AgentMessa
 export class BotChatTranscript {
 	private readonly botBindings: Pick<BotRuntimeBindings, "runtime">;
 	private readonly host: BotChatHost;
+	/** Each history read as the chat draws it: kept while the history returns the same read (nothing it holds changed). */
+	private readonly shapedHistory = new WeakMap<BotHistoryRead, AgentMessage[]>();
 
 	constructor(botBindings: Pick<BotRuntimeBindings, "runtime">, host: BotChatHost) {
 		this.botBindings = botBindings;
@@ -91,9 +94,15 @@ export class BotChatTranscript {
 		// A group's chat is the group's own conversation with the bot, still a worker.
 		if (teamId) return this.readGroupChatMessages(normId, teamId);
 		// Nothing here resolves through this session's bindings or transcripts: another process reads the same chat.
-		const earlier = this.host.botSessions
-			.readHistory(normId)
-			.runs.reduce<AgentMessage[]>((all, run) => mergeByTime(all, this.shapeWorkerMessages(run.messages) ?? []), []);
+		const history = this.host.botSessions.readHistory(normId);
+		let earlier = this.shapedHistory.get(history);
+		if (!earlier) {
+			earlier = history.runs.reduce<AgentMessage[]>(
+				(all, run) => mergeByTime(all, this.shapeWorkerMessages(run.messages) ?? []),
+				[],
+			);
+			this.shapedHistory.set(history, earlier);
+		}
 		const chat = mergeByTime(earlier, this.host.botSessions.readMessages(normId) ?? []);
 		return chat.length === 0 && bot?.lastSummary
 			? [this.createSyntheticBotSummaryMessage(bot, bot.lastSummary)]

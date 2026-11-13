@@ -56,7 +56,8 @@ to the newest 200; nothing is copied). The index is built by one streamed scan o
 drawing path (the chat shows what it has until the scan ends). The scan runs once for the agent directory
 (`state/bots/history-scan.json` marks it done), never again in any process and never for a bot made later; afterwards each
 worker-path start of a bot adds its own run as it is bound. A process of an older build, still running after the scan ran,
-does not add the runs it starts (it has no index to write), so those runs are missing from the chat. The chat shows those earlier conversations in time order with the bot's own session.
+does not add the runs it starts (it has no index to write), so those runs are missing from the chat. The chat shows those earlier conversations in time order with the bot's own session. A chat reads them from disk again only when the index or
+a run transcript it shows changed; otherwise it keeps what it drew.
 
 Until later phases move them, these still run as workers of the session that sends them: group messages (the group's
 conversations), the orchestrator's `bot ask`, routine sends, leaders, the bots a leader made and bots made from a profile, and machines joined over the

@@ -39,8 +39,8 @@ import { ensureBotHome } from "./bot-home.ts";
 export const MAX_HISTORY_RUNS = 200;
 /** Messages one read of a bot's history returns, the newest; older ones are left on disk. */
 export const MAX_HISTORY_MESSAGES = 4000;
-/** Run transcripts whose messages stay cached between reads. */
-const RUN_CACHE_LIMIT = 32;
+/** Bots whose read history stays cached between reads (the chats open last). */
+const HISTORY_CACHE_BOTS = 4;
 /** A session-file line longer than this is not read for bindings (an embedded image, not an entry that binds). */
 const MAX_SCANNED_LINE_BYTES = 64 * 1024 * 1024;
 const SCAN_CHUNK_BYTES = 1024 * 1024;
@@ -65,10 +65,38 @@ interface BotHistoryFile {
 	readonly runs: readonly BotHistoryRun[];
 }
 
-/** What the chat reads: the runs' messages, oldest run first, and whether the index is still being built. */
+/**
+ * What the chat reads: the runs' messages, oldest run first, and whether the index is still being built. The same object
+ * comes back while nothing it was read from changed, so a reader may keep what it derives from it.
+ */
 export interface BotHistoryRead {
-	readonly runs: readonly { readonly runtime: string; readonly messages: AgentMessage[] }[];
+	readonly runs: readonly { readonly runtime: string; readonly messages: readonly AgentMessage[] }[];
 	readonly pending: boolean;
+}
+
+/** A file's state as a read saw it; undefined when it was not on disk. */
+type FileState = { readonly mtimeMs: number; readonly size: number } | undefined;
+
+function fileState(file: string): FileState {
+	const stat = statSync(file, { throwIfNoEntry: false });
+	return stat?.isFile() ? { mtimeMs: stat.mtimeMs, size: stat.size } : undefined;
+}
+
+function sameState(a: FileState, b: FileState): boolean {
+	return a === undefined || b === undefined ? a === b : a.mtimeMs === b.mtimeMs && a.size === b.size;
+}
+
+/** One bot's last read, with the state of every file it was read from: it stands while none of them changed. */
+interface CachedHistory {
+	readonly index: FileState;
+	/** The index as it was read: whether its scan ran, and its runs. */
+	readonly scanned: boolean;
+	readonly indexed: readonly BotHistoryRun[];
+	/** Each run transcript the read went through, newest first, with its state then. */
+	readonly visited: readonly { readonly file: string; readonly state: FileState }[];
+	/** The messages of each run the read kept, by transcript file. */
+	readonly messages: ReadonlyMap<string, { readonly state: FileState; readonly messages: AgentMessage[] }>;
+	readonly read: BotHistoryRead;
 }
 
 /** What the history reads from the coordinator. */
@@ -354,29 +382,62 @@ export class BotHistory {
 	/** The scan in flight, joined by `stop`. */
 	private scan: Promise<void> | undefined;
 	private readonly stopping = new AbortController();
-	private readonly cache = new Map<string, { mtimeMs: number; size: number; messages: AgentMessage[] }>();
+	/** The last read of the bots read last, oldest first. */
+	private readonly cache = new Map<string, CachedHistory>();
 
 	constructor(ports: BotHistoryPorts) {
 		this.ports = ports;
 	}
 
-	/** The bot's earlier conversations, read from disk; starts the one-time scan when the bot has no finished index. */
+	/**
+	 * The bot's earlier conversations, read from disk again only when its index or a run transcript the last read went
+	 * through changed; starts the one-time scan when the bot has no finished index.
+	 */
 	read(agentId: string): BotHistoryRead {
 		const agentDir = this.ports.agentDir();
-		const index = readHistoryFile(agentDir, agentId);
-		const pending = index?.scanned !== true && !rootScanDone(agentDir);
+		const indexState = fileState(botHistoryFile(agentDir, agentId));
+		const cached = this.cache.get(agentId);
+		const kept = cached !== undefined && sameState(cached.index, indexState) ? cached : undefined;
+		const index = kept ? undefined : readHistoryFile(agentDir, agentId);
+		const scanned = kept ? kept.scanned : index?.scanned === true;
+		const indexed = kept ? kept.indexed : (index?.runs ?? []);
+		// The scan's mark can be written while the index stays as it was (a bot it found nothing for).
+		const pending = !scanned && !rootScanDone(agentDir);
 		if (pending) this.requestScan();
+		if (
+			kept &&
+			kept.read.pending === pending &&
+			kept.visited.every(({ file, state }) => sameState(state, fileState(file)))
+		) {
+			this.cache.delete(agentId);
+			this.cache.set(agentId, kept);
+			return kept.read;
+		}
+		const visited: { file: string; state: FileState }[] = [];
+		const messages = new Map<string, { state: FileState; messages: AgentMessage[] }>();
 		const runs: { runtime: string; messages: AgentMessage[] }[] = [];
 		let remaining = MAX_HISTORY_MESSAGES;
-		for (const run of [...(index?.runs ?? [])].reverse()) {
+		for (const run of [...indexed].reverse()) {
 			if (remaining <= 0) break;
-			const messages = this.runMessages(agentDir, run);
-			if (!messages) continue;
-			const kept = messages.length > remaining ? messages.slice(messages.length - remaining) : messages;
-			remaining -= kept.length;
-			runs.unshift({ runtime: run.runtime, messages: kept });
+			const identity = parseWorkerTranscriptReference(run.reference);
+			if (!identity) continue;
+			const { sessionFile } = workerTranscriptLocation(agentDir, identity);
+			const state = fileState(sessionFile);
+			visited.push({ file: sessionFile, state });
+			if (!state) continue;
+			const known = cached?.messages.get(sessionFile);
+			const all = known && sameState(known.state, state) ? known.messages : this.runMessages(sessionFile, agentDir);
+			if (!all) continue;
+			messages.set(sessionFile, { state, messages: all });
+			const shown = all.length > remaining ? all.slice(all.length - remaining) : all;
+			remaining -= shown.length;
+			runs.unshift({ runtime: run.runtime, messages: shown });
 		}
-		return { runs, pending };
+		const read: BotHistoryRead = { runs, pending };
+		this.cache.delete(agentId);
+		this.cache.set(agentId, { index: indexState, scanned, indexed, visited, messages, read });
+		if (this.cache.size > HISTORY_CACHE_BOTS) this.cache.delete(this.cache.keys().next().value!);
+		return read;
 	}
 
 	/** A worker-path start of the bot's direct conversation was bound: its run joins the index. */
@@ -444,27 +505,16 @@ export class BotHistory {
 			});
 	}
 
-	/** The run transcript's messages, read without opening it for writing; undefined when it is not on disk. */
-	private runMessages(agentDir: string, run: BotHistoryRun): AgentMessage[] | undefined {
-		const identity = parseWorkerTranscriptReference(run.reference);
-		if (!identity) return undefined;
-		const { sessionFile } = workerTranscriptLocation(agentDir, identity);
-		const stat = statSync(sessionFile, { throwIfNoEntry: false });
-		if (!stat?.isFile()) return undefined;
-		const cached = this.cache.get(sessionFile);
-		if (cached && cached.mtimeMs === stat.mtimeMs && cached.size === stat.size) return [...cached.messages];
-		let messages: AgentMessage[];
+	/** The run transcript's messages, read without opening it for writing; undefined when it cannot be read. */
+	private runMessages(sessionFile: string, agentDir: string): AgentMessage[] | undefined {
 		try {
-			messages = SessionManager.openReadOnly(sessionFile, agentDir).buildSessionContext().messages;
+			return SessionManager.openReadOnly(sessionFile, agentDir).buildSessionContext().messages;
 		} catch (error) {
 			this.ports.warn(
 				`Bot history: an earlier conversation could not be read (${error instanceof Error ? error.message : String(error)}).`,
 			);
 			return undefined;
 		}
-		if (this.cache.size >= RUN_CACHE_LIMIT) this.cache.delete(this.cache.keys().next().value!);
-		this.cache.set(sessionFile, { mtimeMs: stat.mtimeMs, size: stat.size, messages });
-		return [...messages];
 	}
 
 	/** Stops the scan in flight and resolves once it ended; no scan starts after it. */
