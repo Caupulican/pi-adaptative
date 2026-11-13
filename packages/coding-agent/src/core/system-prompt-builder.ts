@@ -200,9 +200,13 @@ export class SystemPromptBuilder {
 	 * situation. Empty when no active profile defines a soul.
 	 */
 	private _buildSituationSoulPrompt(): string | undefined {
-		// An agent of its own carries its soul here, where every capability class renders it, and takes no situational one.
-		if (this._agentIdentity?.standalone)
-			return this._agentIdentity.soul ? `SOUL\n${this._agentIdentity.soul}` : undefined;
+		// An agent of its own carries its soul and its memory here, where every capability class renders them, and takes no
+		// situational soul.
+		const identity = this._agentIdentity;
+		if (identity?.standalone) {
+			const parts = [identity.soul ? `SOUL\n${identity.soul}` : undefined, identity.memory].filter(Boolean);
+			return parts.length > 0 ? parts.join("\n\n") : undefined;
+		}
 		const soul = this.deps.getSettingsManager().getActiveProfileSoul();
 		if (!soul) return undefined;
 		return `SITUATION SOUL\n${soul}`;

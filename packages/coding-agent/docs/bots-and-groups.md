@@ -18,12 +18,14 @@ in force. See [Model Router settings](settings.md#model-router).
 A bot you message directly (`/bot msg`, its roster chat, `@bot`) runs as its own session, not as a worker of the session you
 are in. Its home is `<agent dir>/bots/<id>/`: `profile.json` (written from the bot's record: model, soul, write grant, who
 made it), `sessions/` (its own session files; it continues the newest one, so it keeps one conversation whichever project you
-message it from) and `memory/`. The record in the bot store stays the index; editing the bot's model, permissions or soul
+message it from). The record in the bot store stays the index; editing the bot's model, permissions or soul
 refreshes the profile and applies to its session when it starts, so a bot that is working must be stopped first. The session
 runs on the bot's model, under the rules a worker's own model is held to (a model that is gone, has no credentials, is paid by
 API key without being the owner's choice while subscription models are usable, or that your model policy disallows refuses the
 message), and works in your project directory. Its name and its soul replace the main agent's in its system prompt, so it never
-introduces itself as the main agent. It reads, and writes only when the bot has write access, and then as a worker writes: its file tools write inside your project directory only, never to a harness resource (skills, extensions, prompts, settings, hooks, git config); a read-only bot has a shell whose
+introduces itself as the main agent. Its memory blackboard (`<agent dir>/memory/bots/<id>.md`, the same file a bot running as
+a worker reads) opens its system prompt under its soul when the session starts; it can read the file, not edit it, and a
+line from each finished turn is appended to it. It reads, and writes only when the bot has write access, and then as a worker writes: its file tools write inside your project directory only, never to a harness resource (skills, extensions, prompts, settings, hooks, git config); a read-only bot has a shell whose
 commands are judged one by one, as a read-only worker's are (nothing that edits, creates a file or reaches the network runs,
 in every execution mode). A turn is bounded by `workerDelegation.maxUsd` (and the main session's own ceiling) when one is
 set, and what each turn spends is added to the main session's cost. It reads the settings the main session reads, and runs

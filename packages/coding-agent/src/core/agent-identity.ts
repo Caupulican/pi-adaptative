@@ -44,6 +44,8 @@ export interface AgentIdentity {
 	readonly missingSoulPath?: string;
 	/** An agent of its own (a persistent bot): the main agent's situational soul is not layered over it. */
 	readonly standalone?: true;
+	/** What an agent of its own remembers (a persistent bot's memory block), shown under its soul. */
+	readonly memory?: string;
 }
 
 /** The body of `soul.md`: everything after the front matter and the name heading. */
@@ -104,15 +106,21 @@ export function checkSoulText(text: string): { ok: true; soul: string | undefine
 }
 
 /**
- * The identity of an agent that is not the main one (a persistent bot): its own name, the one the prompt quotes, and
- * its own soul. `fallbackName` names it when `name` has nothing printable. The soul is judged by {@link checkSoulText}
- * where it is stored, so it is taken as given.
+ * The identity of an agent that is not the main one (a persistent bot): its own name, the one the prompt quotes, its
+ * own soul and its memory block. `fallbackName` names it when `name` has nothing printable. The soul is judged by
+ * {@link checkSoulText} where it is stored, so it is taken as given.
  */
-export function namedAgentIdentity(name: string, soul: string | undefined, fallbackName: string): AgentIdentity {
+export function namedAgentIdentity(
+	name: string,
+	soul: string | undefined,
+	fallbackName: string,
+	memory?: string,
+): AgentIdentity {
 	return {
 		name: cleanName(name) ?? cleanName(fallbackName) ?? DEFAULT_AGENT_NAME,
 		...(soul ? { soul } : {}),
 		standalone: true,
+		...(memory ? { memory } : {}),
 	};
 }
 

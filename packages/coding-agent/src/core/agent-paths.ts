@@ -278,11 +278,6 @@ export function botHomeSessionsDir(homeDir: string): string {
 	return join(homeDir, "sessions");
 }
 
-/** `<agentDir>/bots/<id>/memory` -- the bot's own memory. */
-export function botMemoryDir(agentDir: string, botId: string): string {
-	return join(botHomeDir(agentDir, botId), "memory");
-}
-
 /** `<agentDir>/bots/<id>/host.lock` -- names the one process that hosts the bot's session. */
 export function botHostLockFile(agentDir: string, botId: string): string {
 	return join(botHomeDir(agentDir, botId), "host.lock");

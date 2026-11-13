@@ -513,8 +513,14 @@ export class BotSessionHost {
 					systemOneProvider: systemOne.provider,
 					systemOneFetch: systemOne.fetch,
 					systemOneEvidenceDir: botSystemOneEvidenceDir(agentDir, agentId),
-					// Its own name and soul replace the main agent's in the prompt.
-					agentIdentity: namedAgentIdentity(profile.displayName, soul.soul, agentId),
+					// Its own name, soul and memory block (its blackboard, which the store appends to after each turn) replace
+					// the main agent's in the prompt, as a worker-path start opens on the same block.
+					agentIdentity: namedAgentIdentity(
+						profile.displayName,
+						soul.soul,
+						agentId,
+						this.ports.store().composeBotUnifiedMemoryContext(agentId).promptBlock,
+					),
 					tools: botSessionToolNames(profile.canWrite),
 					// It writes as a worker writes: inside the project directory, never to a harness resource.
 					privatePathScope: { readOnlyShell: !profile.canWrite, confinedWrites: true },
