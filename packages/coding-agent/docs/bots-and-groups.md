@@ -26,13 +26,13 @@ message), and works in your project directory. Its name and its soul replace the
 introduces itself as the main agent. It reads, and writes only when the bot has write access; a read-only bot has a shell whose
 commands are judged one by one, as a read-only worker's are (nothing that edits, creates a file or reaches the network runs,
 in every execution mode). A turn is bounded by `workerDelegation.maxUsd` (and the main session's own ceiling) when one is
-set, and what each turn spends is added to the main session's cost. The session runs System One as your settings have it. It is loaded on its first message, kept while a turn runs or input is queued, and closed after ten idle minutes or
+set, and what each turn spends is added to the main session's cost. It has no System One yet: the supervision, operation review and claim check a worker got from the main session's System One come with the later enforcement phase. It is loaded on its first message, kept while a turn runs or input is queued, and closed after ten idle minutes or
 when the session that hosts it ends. One process hosts a bot at a time; a second one is told which. The roster shows the bot
 running or queued while its session works, and its chat is that session's conversation, after whatever ran as a worker before.
 Its answers are read in that chat (the roster marks them unread); they do not reach the orchestrator as a worker's terminal does.
 
 Until later phases move them, these still run as workers of the session that sends them: group messages (the group's
-conversations), the orchestrator's `bot ask`, routine sends, leaders and bots made from a profile, and machines joined over the
+conversations), the orchestrator's `bot ask`, routine sends, leaders, the bots a leader made and bots made from a profile, and machines joined over the
 link. A bot's session has no subagents, routines, goals, watches or `bot` tool yet.
 
 ## Bot names

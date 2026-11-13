@@ -6,6 +6,8 @@ import { createBarrier, HARNESS_PROVIDER } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
 	agentsOn,
+	botRosterState,
+	botSessionFilesText,
 	carries,
 	chatText,
 	enqueueBot,
@@ -15,6 +17,7 @@ import {
 	TRACK,
 	teamLog,
 	teamMessages,
+	waitForBotRosterState,
 } from "./journey-7-shared.ts";
 
 const READER = "reader-one";
@@ -37,8 +40,9 @@ const OUTSIDER_MENTION = `@${OUTSIDER} Anything to add?`;
 const NOT_A_MEMBER = `Bot ${OUTSIDER} is not a member of group ${TEAM}.`;
 
 /**
- * Leg 2: the owner writes to one bot and then to a group. A send to an idle bot starts its worker; a send while that worker
- * is held is taken by the same bot at its next request boundary, in order. A group send fans out to every member, a
+ * Leg 2: the owner writes to one bot and then to a group. A send to an idle bot starts its own session (no worker stands
+ * for it); a send while that session's turn is held is taken by the same session at its next request boundary, in order,
+ * and both messages and the answer are in the bot's own session files. A group send fans out to every member, a
  * mention narrows it to one, and a mention of a bot outside the group is refused before anything is delivered. None of it
  * starts a root turn: the owner talks to the bots, not through the orchestrator.
  */
@@ -98,7 +102,8 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			name: "j7-reader-first",
 			gate: held.promise,
 			check: (request) => {
-				seen.firstSoul = (request.context.systemPrompt ?? "").includes(READER_SOUL);
+				// The bot's soul stands in its own prompt under its own heading, whatever the model's capability class.
+				seen.firstSoul = (request.context.systemPrompt ?? "").includes(`SOUL\n${READER_SOUL}`);
 				seen.firstCarried = carries(request, DIRECT_ONE);
 				firstTurnReached.release();
 			},
@@ -150,6 +155,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	const first = await session.sendOperatorMessageToBot(READER, DIRECT_ONE);
 	await withDeadline(trace, "J7 leg 2: the bot's first turn reached its request", firstTurnReached.promise);
 	const agentsWhileHeld = agentsOn(session, MODEL_ID.reader).length;
+	const rosterWhileHeld = botRosterState(session, READER);
 	const second = await session.sendOperatorMessageToBot(READER, DIRECT_TWO);
 	held.release();
 	await withDeadline(
@@ -157,6 +163,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		"J7 leg 2: the same bot took the second message",
 		world.provider.whenReached(reached(TRACK.reader, "j7-reader-second")),
 	);
+	await waitForBotRosterState(world, session, READER, "idle");
 
 	expect(
 		{
@@ -164,18 +171,21 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			second: second.mode,
 			agentId: [first.agentId, second.agentId],
 			carried: [seen.firstSoul, seen.firstCarried, seen.secondCarried],
-			// The second message waits for the request in flight: it never starts a second worker for the bot.
+			// The bot is a session of its own: no worker stands for it, while its turn is held or after it.
 			agents: [agentsWhileHeld, agentsOn(session, MODEL_ID.reader).length],
+			// The roster follows the session: running while its turn is held, idle once the turn settled.
+			roster: [rosterWhileHeld, botRosterState(session, READER)],
 			// Taken in order: the first message is still in the conversation before the second.
 			order: seen.order[0] !== -1 && seen.order[0] < seen.order[1],
 		},
-		"a send to an idle bot starts it, a second send while its turn is held is taken by the same bot afterwards, in order",
+		"a send to an idle bot starts its own session, a second send while its turn is held is taken by the same session afterwards, in order, and the roster follows it",
 	).toEqual({
 		first: "started",
 		second: "steered",
 		agentId: [READER, READER],
 		carried: [true, true, true],
-		agents: [1, 1],
+		agents: [0, 0],
+		roster: ["running", "idle"],
 		order: true,
 	});
 
@@ -273,6 +283,16 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			carriesAnswer: chat.includes(READER_ANSWER),
 		},
 		"the bot's chat shows the owner's two messages and the bot's answer",
+	).toEqual({ carriesFirst: true, carriesSecond: true, carriesAnswer: true });
+	// The conversation lives in the bot's own session files, under its home, not in the owner's session.
+	const filesText = botSessionFilesText(world, READER);
+	expect(
+		{
+			carriesFirst: filesText.includes(DIRECT_ONE),
+			carriesSecond: filesText.includes(DIRECT_TWO),
+			carriesAnswer: filesText.includes(READER_ANSWER),
+		},
+		"the bot's own session files hold the owner's two messages and the bot's answer",
 	).toEqual({ carriesFirst: true, carriesSecond: true, carriesAnswer: true });
 	expect(
 		world.provider.requests.filter((request) => request.model.id === MODEL_ID.root).length - rootRequestsBefore,

@@ -9,7 +9,10 @@ import {
 	acceptedJson,
 	agentsOn,
 	botRecord,
+	botRosterState,
+	botSessionFilesText,
 	carries,
+	chatText,
 	delegationOf,
 	enqueueBot,
 	enqueueRoot,
@@ -22,6 +25,7 @@ import {
 	reached,
 	requestJson,
 	TRACK,
+	waitForBotRosterState,
 } from "./journey-7-shared.ts";
 
 const STOP_LEADER = "stop-leader";
@@ -55,8 +59,9 @@ function listPeersCall(id: string): ScriptedReply {
 const OPEN_GOAL = `Bot ${STOP_LEADER} leads an open goal; cancel it first (/lead cancel ${STOP_LEADER}).`;
 
 /**
- * Leg 6: retire and stop. A leader with an open goal cannot be retired; an idle bot is retired with its worker and comes
- * back when the owner writes to it again; stopping a working leader interrupts it and the bots it made, and retires none.
+ * Leg 6: retire and stop. A leader with an open goal cannot be retired; an idle bot runs as a session of its own, is retired
+ * with that session closed and comes back, continuing its conversation, when the owner writes to it again; stopping a
+ * working leader interrupts it and the bots it made, and retires none.
  */
 export async function runJourney7LifecyclePhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -91,6 +96,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 
 	const seen = {
 		stopNotice: [] as string[],
+		idleSecondCarried: { question: false, answer: false, second: false },
 		leaderHeard: {} as Record<string, unknown>,
 		leaderLast: {} as Record<string, unknown>,
 		helperLast: {} as Record<string, unknown>,
@@ -212,6 +218,12 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			check: (request) => {
 				if (!carries(request, TAB_SECOND_QUESTION))
 					throw new Error("the idle bot's second owner message is missing");
+				// The session that came back continues the conversation the closed one had.
+				seen.idleSecondCarried = {
+					question: carries(request, TAB_QUESTION),
+					answer: carries(request, TAB_ANSWER),
+					second: true,
+				};
 			},
 			reply: { content: [{ type: "text", text: TAB_SECOND_ANSWER }] },
 		},
@@ -336,37 +348,62 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		goal: "closed",
 	});
 
-	// An idle bot: retiring it marks the record and retires its worker; a later message brings it back.
+	// An idle bot is a session of its own, so no worker stands for it. Retiring it marks the record and closes that session;
+	// a later message brings it back, and the new session continues the same conversation.
 	const firstSend = await session.sendOperatorMessageToBot(TAB, TAB_QUESTION);
 	await withDeadline(
 		trace,
 		"J7 leg 6: the idle bot answered",
-		session.backgroundLanes.waitForWorkerAgent(onlyAgentOn(session, MODEL_ID.idle).agentId, 60_000),
+		world.provider.whenReached(reached(TRACK.idle, "j7-idle-first")),
 	);
+	await waitForBotRosterState(world, session, TAB, "idle");
+	const answeredBeforeRetire = {
+		chat: chatText(session, TAB).includes(TAB_ANSWER),
+		files: botSessionFilesText(world, TAB).includes(TAB_ANSWER),
+	};
 	const retiredIdle = session.retirePersistentBot(TAB);
 	expect(
 		{
 			firstSend: firstSend.mode,
+			answeredBeforeRetire,
 			retiredIdle,
 			recordRetired: botRecord(session, TAB).retired === true,
-			workerStatuses: agentsOn(session, MODEL_ID.idle).map((agent) => agent.status),
+			workerAgents: agentsOn(session, MODEL_ID.idle).length,
+			roster: botRosterState(session, TAB),
 		},
-		"retiring an idle bot marks its record retired and retires its worker",
+		"retiring an idle bot marks its record retired and closes its session; no worker ever stood for it",
 	).toEqual({
 		firstSend: "started",
+		answeredBeforeRetire: { chat: true, files: true },
 		retiredIdle: { retired: true, detail: `Bot ${TAB} retired.` },
 		recordRetired: true,
-		workerStatuses: ["retired"],
+		workerAgents: 0,
+		roster: "retired",
 	});
 
 	const secondSend = await session.sendOperatorMessageToBot(TAB, TAB_SECOND_QUESTION);
 	expect(
 		{ secondSend: secondSend.mode, recordRetired: botRecord(session, TAB).retired === true },
-		"a message to a retired bot brings it back: the record is no longer retired",
-	).toEqual({ secondSend: "started", recordRetired: false });
+		"a message to a retired bot brings it back, continuing its conversation: the record is no longer retired",
+	).toEqual({ secondSend: "followed_up", recordRetired: false });
 	await withDeadline(
 		trace,
 		"J7 leg 6: the brought-back bot answered",
 		world.provider.whenReached(reached(TRACK.idle, "j7-idle-second")),
 	);
+	await waitForBotRosterState(world, session, TAB, "idle");
+	expect(
+		{
+			carried: seen.idleSecondCarried,
+			answered: chatText(session, TAB).includes(TAB_SECOND_ANSWER),
+			files: botSessionFilesText(world, TAB).includes(TAB_SECOND_ANSWER),
+			workerAgents: agentsOn(session, MODEL_ID.idle).length,
+		},
+		"the brought-back bot's session carries the first question and answer with the second, and the answer is in its own session files",
+	).toEqual({
+		carried: { question: true, answer: true, second: true },
+		answered: true,
+		files: true,
+		workerAgents: 0,
+	});
 }

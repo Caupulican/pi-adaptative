@@ -21,6 +21,7 @@ import {
 	type PersistentBotTeamStore,
 	type PersistentTeamMemberDelivery,
 	type PersistentTeamMessage,
+	RESERVED_BOT_CREATOR_IDS,
 	type TeamOperatorMessageDispatchResult,
 	teamIncarnation,
 } from "./persistent-bot-team-store.ts";
@@ -79,9 +80,21 @@ function isOwnerDirect(context: BotRuntimeContext, options: BotOperatorMessageOp
 	);
 }
 
-/** Whether the bot runs as a session of its own: a leader and a profile-backed bot still run as workers (autonomy, phase 4). */
-function hasOwnSession(bot: { readonly leader?: boolean; readonly profileId?: string }): boolean {
-	return bot.leader !== true && bot.profileId === undefined;
+/**
+ * Whether the bot runs as a session of its own. A leader, a profile-backed bot and a bot a leader made (it works inside
+ * that leader's tree and reaches its leader through `bot_message`, which a session lacks) still run as workers until
+ * leaders fold into ordinary bots (phase 4).
+ */
+function hasOwnSession(bot: {
+	readonly leader?: boolean;
+	readonly profileId?: string;
+	readonly createdBy?: string;
+}): boolean {
+	return (
+		bot.leader !== true &&
+		bot.profileId === undefined &&
+		(bot.createdBy === undefined || RESERVED_BOT_CREATOR_IDS.has(bot.createdBy))
+	);
 }
 
 /** Dispatches operator messages to bots and groups, one send at a time per bot generation. */

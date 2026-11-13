@@ -8,8 +8,8 @@
  * the worker admission refuses (a metered model the owner did not choose, one the owner's model policy disallows) refuses
  * the message. The bot has an identity of its own: its name and its soul replace the main agent's in the system prompt
  * (the soul is judged again here because a stored record can have been edited by hand). It works in the owner's project
- * directory under a worker's private-path scope. It is a child session (no routines, no memory writes, no channels), it
- * runs System One as the owner's settings have it, and its tools are the read tools plus a shell, plus the file tools
+ * directory under a worker's private-path scope. It is a child session (no routines, no memory writes, no channels, no
+ * System One), and its tools are the read tools plus a shell, plus the file tools
  * and python when the record grants `canWrite`; a read-only bot's shell runs only commands the read-only shell line
  * admits. Each turn is bounded by the worker spend bound and its usage is reported to the main session's cost view.
  * Autonomy (subagents, routines, goals, watches) belongs to a later phase.
@@ -331,6 +331,9 @@ export class BotSessionHost {
 					model,
 					...(isOrchestrationThinkingLevel(profile.thinkingLevel) ? { thinkingLevel: profile.thinkingLevel } : {}),
 					isChildSession: true,
+					// System One's gates over a worker (progress supervision, operation review, claim check) ran in the main
+					// session's engine and evidence; a session of its own has neither yet (phase 4, enforcement).
+					disableSystemOne: true,
 					// Its own name and soul replace the main agent's in the prompt.
 					agentIdentity: namedAgentIdentity(profile.displayName, soul.soul, agentId),
 					tools: botSessionToolNames(profile.canWrite),

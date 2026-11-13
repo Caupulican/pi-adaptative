@@ -1,5 +1,8 @@
 import "../builtin-install.ts";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 import { expect } from "vitest";
+import { botSessionsDir } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import type { DelegationRecord } from "../../../../src/core/delegation/leader-delegation-ledger.ts";
 import type {
@@ -8,7 +11,7 @@ import type {
 } from "../../../../src/core/delegation/persistent-bot-team-store.ts";
 import type { WorkerAgentView } from "../../../../src/core/delegation/worker-agent-control.ts";
 import { HARNESS_PROVIDER, type ScriptedRequest, type ScriptStep } from "../scripted-provider.ts";
-import type { HarnessWorld } from "../session-fixture.ts";
+import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { fencedToolOutput, ICM_INTAKE_JUDGMENTS, latestBatchResults, refusalDiagnostic } from "./shared.ts";
 
 const { capabilities_authorized: _capabilities, ...intake } = ICM_INTAKE_JUDGMENTS;
@@ -281,6 +284,38 @@ export function chatText(session: AgentSession, agentId: string): string {
 		}
 	}
 	return parts.join("\n");
+}
+
+/** What the roster shows of a bot now: running, queued, idle or retired. */
+export function botRosterState(session: AgentSession, agentId: string): string | undefined {
+	return session.listPersistentBots().find((bot) => bot.agentId === agentId)?.state;
+}
+
+/** Waits until the roster shows `state` for the bot: its session's turn started, queued or settled. */
+export async function waitForBotRosterState(
+	world: HarnessWorld,
+	session: AgentSession,
+	agentId: string,
+	state: string,
+): Promise<void> {
+	await withDeadline(
+		world.trace,
+		`the roster shows ${agentId} as ${state}`,
+		(async () => {
+			while (botRosterState(session, agentId) !== state) await new Promise<void>((resolve) => setImmediate(resolve));
+		})(),
+	);
+}
+
+/** The text of every file of the bot's own `sessions/` directory: the conversation as the bot's session wrote it. */
+export function botSessionFilesText(world: HarnessWorld, agentId: string): string {
+	const directory = botSessionsDir(world.agentDir, agentId);
+	if (!existsSync(directory)) return "";
+	return readdirSync(directory)
+		.filter((name) => name.endsWith(".jsonl"))
+		.sort()
+		.map((name) => readFileSync(join(directory, name), "utf8"))
+		.join("\n");
 }
 
 /** Fails with `what` unless the value the phase read is the one the product promises. */
