@@ -1,15 +1,18 @@
 /**
- * The chat an operator reads for a bot or a group: a bot's own session conversation with the owner, with the bot's durable
- * worker conversation (what ran as a worker before the bot had a session of its own, and the sends that still run as
- * workers) shaped into the messages the chat view draws and merged in by time, the remote hub's chat for a machine joined
+ * The chat an operator reads for a bot or a group: a bot's own session conversation with the owner, with the bot's earlier
+ * worker conversations (what ran as a worker before the bot had a session of its own, and the sends that still run as
+ * workers: the home's history index finds them in any session, the open session's own runtime is read live) shaped into
+ * the messages the chat view draws and merged in by time, the remote hub's chat for a machine joined
  * over the link, the lane and group records as the fallback when no conversation exists, and a group's own message log. It
  * reads through the ports the coordinator gives it and never builds a worker, a store or a hub itself.
  */
 import type { AssistantMessage } from "@caupulican/pi-ai";
+import { parseWorkerTranscriptReference } from "../../kernel/session/worker-transcript-reference.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import { isModelFacingText } from "../../presentation/plain-text.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
+import type { BotSessionHost } from "../bots/bot-session-host.ts";
 import type { RemoteHubController } from "../remote/hub-controller.ts";
 import type { BotRuntimeBindings } from "./bot-runtime-bindings.ts";
 import {
@@ -29,8 +32,8 @@ export interface BotChatHost {
 	getRemoteHub(): Pick<RemoteHubController, "chat">;
 	openWorkerTranscript(agentId: string): WorkerConversation | undefined;
 	getLaneRecords(): LaneRecord[];
-	/** The bot's own session conversation, loaded or on disk; undefined when the bot has no session of its own yet. */
-	readBotSessionMessages(agentId: string): AgentMessage[] | undefined;
+	/** The bots' own conversations: a bot's session, loaded or on disk, and its earlier worker conversations from its home. */
+	readonly botSessions: Pick<BotSessionHost, "readMessages" | "readHistory">;
 }
 
 /** The messages of two chronological lists in time order, each list's own order kept (an untimed message keeps its place). */
@@ -87,76 +90,105 @@ export class BotChatTranscript {
 		if (this.host.getBotTeamStore().getBot(normId)?.remote) return this.host.getRemoteHub().chat(normId);
 		// A group's chat is the group's own conversation with the bot, still a worker.
 		if (teamId) return this.readWorkerChatMessages(normId, teamId, false);
-		const own = this.host.readBotSessionMessages(normId);
-		return own
-			? mergeByTime(this.readWorkerChatMessages(normId, undefined, false), own)
-			: this.readWorkerChatMessages(normId, undefined, true);
+		const own = this.host.botSessions.readMessages(normId);
+		const history = this.host.botSessions.readHistory(normId);
+		const earlier = history.runs.reduce<AgentMessage[]>(
+			(all, run) => mergeByTime(all, this.shapeWorkerMessages(run.messages) ?? []),
+			[],
+		);
+		// A runtime the home's index already holds is read from there, not twice.
+		const worker = this.readWorkerChatMessages(
+			normId,
+			undefined,
+			own === undefined && earlier.length === 0,
+			new Set(history.runs.map((run) => run.runtime)),
+		);
+		const before = mergeByTime(earlier, worker);
+		return own ? mergeByTime(before, own) : before;
 	}
 
-	/** What the bot's worker runtime said, shaped for the chat; the last summary stands in when `withSummary` and nothing else exists. */
-	private readWorkerChatMessages(normId: string, teamId: string | undefined, withSummary: boolean): AgentMessage[] {
+	/**
+	 * A worker conversation's messages as the chat draws them; undefined when it holds nothing the chat shows. A bot that
+	 * answers through `submit_report` said its summary: the chat shows those words, not the call.
+	 */
+	private shapeWorkerMessages(msgs: readonly AgentMessage[]): AgentMessage[] | undefined {
+		const filtered = msgs.filter((msg) => {
+			if (msg.role !== "user") return true;
+			let text = "";
+			if (typeof msg.content === "string") {
+				text = msg.content;
+			} else if (Array.isArray(msg.content)) {
+				text = msg.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+			}
+			const trimmed = text.trimStart();
+			const isSyntheticBirth =
+				(trimmed.startsWith("<chat>\n") || trimmed.startsWith("<chat>")) &&
+				(trimmed.includes("The view") || trimmed.includes("id+n|"));
+			return !isSyntheticBirth;
+		});
+		if (filtered.length === 0) return undefined;
+		const shown: AgentMessage[] = [];
+		for (const msg of filtered) {
+			if (msg.role === "assistant") {
+				shown.push({
+					...msg,
+					content: msg.content.map((part) => {
+						if (part.type === "text") return { ...part, text: botReplyText(part.text) };
+						if (part.type === "toolCall" && part.name === SUBMIT_REPORT_TOOL_NAME) {
+							const summary: unknown = part.arguments.summary;
+							return { type: "text" as const, text: typeof summary === "string" ? summary : "" };
+						}
+						return part;
+					}),
+				});
+				continue;
+			}
+			if (msg.role === "toolResult" && msg.toolName === SUBMIT_REPORT_TOOL_NAME) continue;
+			if (msg.role !== "user") {
+				shown.push(msg);
+				continue;
+			}
+			const control = workerControlOf(msg);
+			const text = botChatOperatorText(msg, control);
+			if (!control?.body && isModelFacingText(text)) continue;
+			// A follow-up reaches the bot twice, as its wake task and as its mailbox message: one line in the chat.
+			const previous = shown.at(-1);
+			if (previous?.role === "user" && previous.timestamp !== undefined && msg.timestamp !== undefined) {
+				const previousText =
+					typeof previous.content === "string"
+						? previous.content
+						: previous.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
+				if (previousText === text) continue;
+			}
+			shown.push({ ...msg, content: [{ type: "text", text }] });
+		}
+		return shown;
+	}
+
+	/**
+	 * What the bot's worker runtime said, shaped for the chat; the last summary stands in when `withSummary` and nothing else
+	 * exists. A direct conversation's runtime that `indexed` already holds (the history reads it) shows nothing here.
+	 */
+	private readWorkerChatMessages(
+		normId: string,
+		teamId: string | undefined,
+		withSummary: boolean,
+		indexed?: ReadonlySet<string>,
+	): AgentMessage[] {
 		const team = teamId ? this.host.getBotTeamStore().getTeam(teamId) : undefined;
 		const runtime = this.botBindings.runtime(normId, teamId, team ? teamIncarnation(team) : undefined);
+		if (!teamId && indexed?.has(runtime)) return [];
 		let conv = this.host.openWorkerTranscript(runtime);
 		const bot = this.host.getBotTeamStore().getBot(normId);
-		if (!teamId && !conv && bot?.lastTranscriptRef) {
+		const lastRuntime = bot?.lastTranscriptRef
+			? parseWorkerTranscriptReference(bot.lastTranscriptRef)?.logicalAgentId
+			: undefined;
+		if (!teamId && !conv && bot?.lastTranscriptRef && !(lastRuntime !== undefined && indexed?.has(lastRuntime))) {
 			conv = this.host.openWorkerTranscript(bot.lastTranscriptRef);
 		}
 		if (conv) {
-			const msgs = conv.getProviderContext().messages;
-			const filtered = msgs.filter((msg) => {
-				if (msg.role !== "user") return true;
-				let text = "";
-				if (typeof msg.content === "string") {
-					text = msg.content;
-				} else if (Array.isArray(msg.content)) {
-					text = msg.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
-				}
-				const trimmed = text.trimStart();
-				const isSyntheticBirth =
-					(trimmed.startsWith("<chat>\n") || trimmed.startsWith("<chat>")) &&
-					(trimmed.includes("The view") || trimmed.includes("id+n|"));
-				return !isSyntheticBirth;
-			});
-			if (filtered.length > 0) {
-				const shown: AgentMessage[] = [];
-				for (const msg of filtered) {
-					if (msg.role === "assistant") {
-						// A bot that answers through `submit_report` said its summary: the chat shows those words, not the call.
-						shown.push({
-							...msg,
-							content: msg.content.map((part) => {
-								if (part.type === "text") return { ...part, text: botReplyText(part.text) };
-								if (part.type === "toolCall" && part.name === SUBMIT_REPORT_TOOL_NAME) {
-									const summary: unknown = part.arguments.summary;
-									return { type: "text" as const, text: typeof summary === "string" ? summary : "" };
-								}
-								return part;
-							}),
-						});
-						continue;
-					}
-					if (msg.role === "toolResult" && msg.toolName === SUBMIT_REPORT_TOOL_NAME) continue;
-					if (msg.role !== "user") {
-						shown.push(msg);
-						continue;
-					}
-					const control = workerControlOf(msg);
-					const text = botChatOperatorText(msg, control);
-					if (!control?.body && isModelFacingText(text)) continue;
-					// A follow-up reaches the bot twice, as its wake task and as its mailbox message: one line in the chat.
-					const previous = shown.at(-1);
-					if (previous?.role === "user" && previous.timestamp !== undefined && msg.timestamp !== undefined) {
-						const previousText =
-							typeof previous.content === "string"
-								? previous.content
-								: previous.content.map((part) => (part.type === "text" ? part.text : "")).join("\n");
-						if (previousText === text) continue;
-					}
-					shown.push({ ...msg, content: [{ type: "text", text }] });
-				}
-				return shown;
-			}
+			const shown = this.shapeWorkerMessages(conv.getProviderContext().messages);
+			if (shown) return shown;
 		}
 
 		const store = this.host.getBotTeamStore();

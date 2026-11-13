@@ -64,8 +64,12 @@ export const BOT_TEAM = {
 		`O bot ${agentId} roda em ${modelRef}, que não está disponível ou não tem credenciais. Entre nesse provedor ou troque o modelo do bot e envie a mensagem de novo.`,
 	botSoulRefused: (agentId: string, reason: string) =>
 		`O bot ${agentId} não foi iniciado: ${reason}. Edite o soul com /bot soul ${agentId}.`,
-	botSessionHeld: (agentId: string, pid: number) =>
-		`O bot ${agentId} está aberto em outra sessão (processo ${pid}). Envie a mensagem de lá, ou feche aquela sessão antes.`,
+	botSessionHeld: (agentId: string, pid: number, sessionId?: string) =>
+		`O bot ${agentId} está aberto em outra sessão (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}processo ${pid}). Mensagens ainda não atravessam sessões: envie a mensagem de lá, ou feche aquela sessão antes.`,
+	botRunsElsewhere: (agentId: string, pid: number, sessionId?: string) =>
+		`O bot ${agentId} está trabalhando em outra sessão (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}processo ${pid}). Pare por lá.`,
+	botHomesNotWatched: (reason: string) =>
+		`Os bots de outras sessões não são mais observados (${reason}); as mudanças deles aparecem quando esta sessão os lê.`,
 	botMessageRefused: (agentId: string, reason: string) => `O bot ${agentId} não recebeu a mensagem: ${reason}.`,
 	botSessionsClosing: (agentId: string) =>
 		`O bot ${agentId} não foi iniciado: esta sessão está fechando, e os bots dela fecham junto. Envie a mensagem de novo na próxima sessão.`,

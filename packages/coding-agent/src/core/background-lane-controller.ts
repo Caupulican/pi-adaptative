@@ -354,7 +354,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			getRemoteHub: () => this.getRemoteHub(),
 			openWorkerTranscript: (agentId) => this.openWorkerTranscript(agentId),
 			getLaneRecords: () => this.getLaneRecords(),
-			readBotSessionMessages: (agentId) => this._botSessions.readMessages(agentId),
+			botSessions: this._botSessions,
 		});
 		this._botDispatch = new BotOperatorDispatch(deps, this.botBindings, {
 			botSessions: this._botSessions,

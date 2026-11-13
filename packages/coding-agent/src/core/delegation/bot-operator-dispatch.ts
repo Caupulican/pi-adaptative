@@ -35,7 +35,7 @@ import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 /** What a dispatch reads from and asks of the coordinator: the roster, the lanes and the worker runtime. */
 export interface BotOperatorDispatchHost {
 	/** The bots that run as sessions of their own: the owner's direct words to such a bot go to its session. */
-	readonly botSessions: Pick<BotSessionHost, "deliver">;
+	readonly botSessions: Pick<BotSessionHost, "deliver" | "noteHistoryRun">;
 	getBotTeamStore(): PersistentBotTeamStore;
 	getRemoteHub(): Pick<RemoteHubController, "ask" | "send">;
 	/** Drops the cached bot roster: a bot or group changed under it. */
@@ -198,11 +198,18 @@ export class BotOperatorDispatch {
 			// The owner's word to a bot with a session of its own never needs the worker runtime.
 			let sessionBot = store.ensureBotForDispatch(normId, () => this.host.resolveModelSpec());
 			if (hasOwnSession(sessionBot)) {
-				if (sessionBot.retired) sessionBot = store.upsertBot({ agentId: normId, retired: false });
+				const wasRetired = sessionBot.retired === true;
+				if (wasRetired) sessionBot = store.upsertBot({ agentId: normId, retired: false });
 				assertCurrentBranch();
-				const delivered = await this.host.botSessions.deliver(normId, message, options?.mode);
-				this.host.invalidateBotViews();
-				return delivered;
+				try {
+					const delivered = await this.host.botSessions.deliver(normId, message, options?.mode);
+					this.host.invalidateBotViews();
+					return delivered;
+				} catch (error) {
+					// A refused message (another session hosts the bot, its model is refused) leaves a retired bot retired.
+					if (wasRetired) store.retireBot(normId);
+					throw error;
+				}
 			}
 		}
 		const runtime = this.botBindings.runtime(normId, teamId, teamIncarnationId);
@@ -275,6 +282,9 @@ export class BotOperatorDispatch {
 		// Publish the context before execution: recovery never has to guess a group's origin from its name.
 		assertCurrentBranch();
 		this.botBindings.bind(normId, preferredAgentId, teamId, teamIncarnationId);
+		// The run joins the bot's history in its home, so a later session reads this conversation too.
+		if (!teamId)
+			this.host.botSessions.noteHistoryRun(normId, this.deps.getSessionManager().getSessionId(), preferredAgentId);
 		const stance = botStartModelStance(this.deps.getSettingsManager().getWorkerModelPinPolicy(), bot);
 		const started = await this.host.startWorkerDelegation({
 			...stance.flags,

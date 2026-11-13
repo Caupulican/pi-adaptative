@@ -44,6 +44,11 @@ function contextKey(context: BotRuntimeContext): string {
 		: JSON.stringify([context.agentId, context.teamId, context.teamIncarnationId]);
 }
 
+/** The alias a binding key names when it is a direct conversation's key; a group's key names none. */
+export function directBindingAlias(key: string): string | undefined {
+	return ID.test(key) ? key : undefined;
+}
+
 function decodeContext(key: string): BotRuntimeContext {
 	if (ID.test(key)) return { agentId: key };
 	const value: unknown = JSON.parse(key);

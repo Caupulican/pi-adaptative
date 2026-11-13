@@ -57,8 +57,14 @@ export const BOT_TEAM = {
 	botSoulRefused: (agentId: string, reason: string) =>
 		`Bot ${agentId} was not started: ${reason}. Edit its soul with /bot soul ${agentId}.`,
 	/** Another process holds the bot's session: two processes would write one conversation. */
-	botSessionHeld: (agentId: string, pid: number) =>
-		`Bot ${agentId} is open in another session (process ${pid}). Message it from there, or close that session first.`,
+	botSessionHeld: (agentId: string, pid: number, sessionId?: string) =>
+		`Bot ${agentId} is open in another session (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}process ${pid}). Messages do not cross sessions yet: message it from there, or close that session first.`,
+	/** The bot's turn runs in another process; only that session can stop it. */
+	botRunsElsewhere: (agentId: string, pid: number, sessionId?: string) =>
+		`Bot ${agentId} is working in another session (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}process ${pid}). Stop it from there.`,
+	/** The watch over the bot homes failed. */
+	botHomesNotWatched: (reason: string) =>
+		`Bots of other sessions are no longer watched (${reason}); their changes show when this session reads them.`,
 	botMessageRefused: (agentId: string, reason: string) => `Bot ${agentId} did not take the message: ${reason}.`,
 	/** A message that came while this session was closing and its bots with it. */
 	botSessionsClosing: (agentId: string) =>

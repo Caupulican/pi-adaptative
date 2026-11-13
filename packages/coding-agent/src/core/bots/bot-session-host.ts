@@ -14,8 +14,11 @@
  * admits. Each turn is bounded by the worker spend bound and its usage is reported to the main session's cost view.
  * Autonomy (subagents, routines, goals, watches) belongs to a later phase.
  *
- * One process hosts a bot's session at a time (`bots/<id>/host.lock`): a second process is refused with the holder's id
- * rather than appending to the same file. A change of the bot's record rebuilds an idle session on the next message
+ * One process hosts a bot's session at a time (`bots/<id>/host.lock`): a second process is refused, naming the session
+ * that hosts the bot, rather than appending to the same file. Every process still sees the bot: its conversation is read
+ * from the home's session files, and its state from `host-state.json`, which the hosting process publishes on each change
+ * of state; one watch over the bot homes tells an open roster and an open chat when either changed, whichever process
+ * wrote it (`stateOf`, `readMessages`, `subscribe`). A change of the bot's record rebuilds an idle session on the next message
  * and is refused while a turn runs. A finished turn records its outcome in the store as a worker's did, so the roster's
  * unread mark and summary keep working. This host only reads and writes the bot's own home and session.
  */
@@ -27,7 +30,7 @@ import { findMostRecentSessionInDirs } from "../../kernel/session/session-listin
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { checkSoulText, namedAgentIdentity } from "../agent-identity.ts";
-import { botHostLockFile } from "../agent-paths.ts";
+import { botHomeName, botHostLockFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { boundSessionTurnSpend, unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
 import { usageSince } from "../cost/usage-delta.ts";
@@ -50,13 +53,18 @@ import { deriveSpawnedUsageReportId, hasReportableUsage } from "../spawned-usage
 import { toolSurvivesReadOnly } from "../tool-capability-policy.ts";
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
+import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, botProfileOf, ensureBotHome } from "./bot-home.ts";
+import { watchBotHomes } from "./bot-home-watch.ts";
+import { BotHostStateWriter, type BotSessionState, type RemoteBotHost, readRemoteBotHost } from "./bot-host-state.ts";
 
 /** How long a bot's session stays loaded with no turn running and no input queued. */
 export const BOT_SESSION_IDLE_BOUND_MS = 10 * 60 * 1000;
 
-/** What a loaded bot session is doing; a bot with no loaded session has no state here. */
-export type BotSessionState = "running" | "queued" | "idle";
+export type { BotSessionState };
+
+/** How long a remote bot's running or queued state stands before its host is judged again (a killed host publishes nothing). */
+const REMOTE_RECHECK_MS = 30 * 1000;
 
 /** What the host reads from and asks of the coordinator. */
 export interface BotSessionHostPorts {
@@ -68,6 +76,8 @@ export interface BotSessionHostPorts {
 	/** Whether the owner trusts the project's own settings, as the root session does. */
 	projectTrusted(): boolean;
 	timers(): TimerSource;
+	/** The pi session this process hosts bots for, named to the owner when another process is refused. */
+	hostSessionId(): string;
 	/** An owner-facing warning (a turn that failed, a session that did not close cleanly). */
 	warn(message: string): void;
 	/** Why the worker admission refuses the bot's model now; undefined when it may run. */
@@ -92,6 +102,8 @@ interface BotSessionEntry {
 	readonly agentId: string;
 	readonly session: AgentSession;
 	readonly lock: HostLock;
+	/** Publishes the session's state for the other processes. */
+	readonly stateWriter: BotHostStateWriter;
 	readonly modelRef: string;
 	/** The record's defining fields as the session was built from them. */
 	readonly profileKey: string;
@@ -138,6 +150,8 @@ function lastAssistantText(messages: readonly AgentMessage[]): string {
 
 export class BotSessionHost {
 	private readonly ports: BotSessionHostPorts;
+	/** The bot's earlier worker conversations, indexed in its home. */
+	private readonly history: BotHistory;
 	private readonly entries = new Map<string, BotSessionEntry>();
 	/** Sessions being built, so two messages in a row build one. */
 	private readonly loading = new Map<string, Promise<BotSessionEntry>>();
@@ -149,9 +163,35 @@ export class BotSessionHost {
 		| { agentId: string; file: string; mtimeMs: number; size: number; messages: AgentMessage[] }
 		| undefined;
 	private stopped = false;
+	/** What each bot's other host last said, kept while the home watch keeps it fresh. */
+	private readonly remote = new Map<string, RemoteBotHost | undefined>();
+	private homeWatch: (() => void) | undefined;
+	/** The home watch failed: other processes' changes are read from disk each time instead. */
+	private homeWatchFailed = false;
+	private remoteRecheck: unknown;
 
 	constructor(ports: BotSessionHostPorts) {
 		this.ports = ports;
+		this.history = new BotHistory({
+			agentDir: () => ports.agentDir(),
+			store: () => ports.store(),
+			warn: (message) => ports.warn(message),
+		});
+	}
+
+	/** The bot's earlier worker conversations, whichever session ran them (see `BotHistory`). */
+	readHistory(agentId: string): BotHistoryRead {
+		return this.history.read(agentId);
+	}
+
+	/** A worker-path start of the bot's direct conversation was bound: its run joins the bot's history. */
+	noteHistoryRun(agentId: string, parentSessionId: string, runtime: string): void {
+		try {
+			this.history.noteRun(agentId, parentSessionId, runtime);
+		} catch (error) {
+			// The run itself is unaffected; the index is rebuilt by the next scan only if it was never finished.
+			this.ports.warn(`Bot ${agentId}: its run could not be added to its history (${errorText(error)}).`);
+		}
 	}
 
 	private idleTimers(): TimerPort {
@@ -165,7 +205,98 @@ export class BotSessionHost {
 	}
 
 	private changed(agentId: string): void {
-		for (const listener of [...this.listeners]) listener([agentId]);
+		this.changedMany([agentId]);
+	}
+
+	private changedMany(agentIds: readonly string[]): void {
+		for (const listener of [...this.listeners]) listener(agentIds);
+	}
+
+	/** Starts the one watch over the bot homes, when a roster or a chat first reads another process's bot. */
+	private ensureHomeWatch(): void {
+		if (this.homeWatch || this.homeWatchFailed || this.stopped) return;
+		const failed = (reason: string) => {
+			this.homeWatch = undefined;
+			this.homeWatchFailed = true;
+			this.remote.clear();
+			this.ports.warn(interfaceText().botTeam.botHomesNotWatched(reason));
+		};
+		try {
+			this.homeWatch = watchBotHomes(
+				this.ports.agentDir(),
+				(changes) => {
+					const ids = new Map(
+						this.ports
+							.store()
+							.listBots({ includeRetired: true })
+							.map((bot) => [botHomeName(bot.agentId), bot.agentId]),
+					);
+					const changed = new Set<string>();
+					for (const { home, file } of changes) {
+						const agentId = ids.get(home);
+						if (agentId === undefined) continue;
+						const hostFile = file === "host-state.json" || file === "host.lock";
+						// This process's own bot sessions announce themselves; a change it wrote is not news.
+						if (this.entries.has(agentId) && (hostFile || file.startsWith("sessions/"))) continue;
+						if (hostFile) this.remote.delete(agentId);
+						changed.add(agentId);
+					}
+					if (changed.size > 0) this.changedMany([...changed]);
+				},
+				(error) => failed(error.message),
+			);
+		} catch (error) {
+			failed(errorText(error));
+		}
+	}
+
+	/** The process other than this one that hosts the bot's session, as its home says now. */
+	private remoteOf(agentId: string): RemoteBotHost | undefined {
+		this.ensureHomeWatch();
+		if (!this.homeWatch) return readRemoteBotHost(this.ports.agentDir(), agentId);
+		if (this.remote.has(agentId)) return this.remote.get(agentId);
+		const host = readRemoteBotHost(this.ports.agentDir(), agentId);
+		this.remote.set(agentId, host);
+		this.armRemoteRecheck();
+		return host;
+	}
+
+	private remoteActive(host: RemoteBotHost | undefined): boolean {
+		return host?.state === "running" || host?.state === "queued";
+	}
+
+	/** A host that is working but was killed publishes nothing: while one is cached as working, its lock is judged again. */
+	private armRemoteRecheck(): void {
+		if (this.remoteRecheck !== undefined || this.stopped) return;
+		if (![...this.remote.values()].some((host) => this.remoteActive(host))) return;
+		this.remoteRecheck = this.idleTimers().setTimeout(() => {
+			this.remoteRecheck = undefined;
+			const changed: string[] = [];
+			for (const [agentId, host] of [...this.remote]) {
+				if (!this.remoteActive(host)) continue;
+				const now = readRemoteBotHost(this.ports.agentDir(), agentId);
+				this.remote.set(agentId, now);
+				if (now?.state !== host?.state) changed.push(agentId);
+			}
+			if (changed.length > 0) this.changedMany(changed);
+			this.armRemoteRecheck();
+		}, REMOTE_RECHECK_MS);
+	}
+
+	private localState(entry: BotSessionEntry): BotSessionState {
+		if (this.isRunning(entry)) return "running";
+		return entry.session.deliverablePendingMessageCount > 0 ? "queued" : "idle";
+	}
+
+	/** Tells the other processes what the bot's session is doing now. */
+	private publishState(entry: BotSessionEntry): void {
+		try {
+			entry.stateWriter.publish(this.localState(entry));
+		} catch (error) {
+			this.ports.warn(
+				`Bot ${entry.agentId}: its state could not be published for other sessions (${errorText(error)}).`,
+			);
+		}
 	}
 
 	private isRunning(entry: BotSessionEntry): boolean {
@@ -176,18 +307,20 @@ export class BotSessionHost {
 		return this.isRunning(entry) || entry.session.deliverablePendingMessageCount > 0;
 	}
 
-	/** The state of the bot's loaded session; undefined when it has none. */
+	/**
+	 * The state of the bot's session: this process's own, from memory, else what the process hosting it says; undefined when
+	 * no loaded session exists anywhere.
+	 */
 	stateOf(agentId: string): BotSessionState | undefined {
 		const entry = this.entries.get(agentId);
-		if (!entry) return undefined;
-		if (this.isRunning(entry)) return "running";
-		return entry.session.deliverablePendingMessageCount > 0 ? "queued" : "idle";
+		if (entry) return this.localState(entry);
+		return this.remoteOf(agentId)?.state;
 	}
 
-	/** Whether the bot's session is running a turn or holds queued input. */
+	/** Whether the bot's session, here or in the process hosting it, is running a turn or holds queued input. */
 	isActive(agentId: string): boolean {
 		const entry = this.entries.get(agentId);
-		return entry !== undefined && this.isBusy(entry);
+		return entry === undefined ? this.remoteActive(this.remoteOf(agentId)) : this.isBusy(entry);
 	}
 
 	/**
@@ -296,7 +429,10 @@ export class BotSessionHost {
 		const soul = profile.soul === undefined ? { ok: true as const, soul: undefined } : checkSoulText(profile.soul);
 		if (!soul.ok) throw new Error(words.botSoulRefused(agentId, soul.reason));
 		const taken = takeProcessLock(botHostLockFile(agentDir, agentId));
-		if (!taken.held) throw new Error(words.botSessionHeld(agentId, taken.owner.pid));
+		if (!taken.held)
+			throw new Error(
+				words.botSessionHeld(agentId, taken.owner.pid, readRemoteBotHost(agentDir, agentId)?.hostSessionId),
+			);
 		const { lock } = taken;
 		let session: AgentSession | undefined;
 		try {
@@ -348,6 +484,12 @@ export class BotSessionHost {
 				agentId,
 				session,
 				lock,
+				stateWriter: new BotHostStateWriter(agentDir, {
+					agentId,
+					hostKind: "session",
+					hostSessionId: this.ports.hostSessionId(),
+					botSessionId: session.sessionId,
+				}),
 				modelRef: `${profile.provider}/${profile.modelId}`,
 				profileKey: profileKeyOf(record),
 				unsubscribe: () => {},
@@ -386,6 +528,7 @@ export class BotSessionHost {
 				unsubscribeEvents();
 			};
 			this.entries.set(agentId, entry);
+			this.publishState(entry);
 			this.armIdle(entry);
 			harnessLog.info("bots", "a bot session was loaded", () => ({ agentId, continued: newest !== null }));
 			this.changed(agentId);
@@ -402,6 +545,7 @@ export class BotSessionHost {
 		if (this.entries.get(entry.agentId) !== entry) return;
 		if (this.isBusy(entry)) this.touch(entry);
 		else this.armIdle(entry);
+		this.publishState(entry);
 		this.changed(entry.agentId);
 	}
 
@@ -476,7 +620,11 @@ export class BotSessionHost {
 				entry.unsubscribe();
 				await entry.session.disposeAndWait();
 			} finally {
-				entry.lock.release();
+				try {
+					entry.stateWriter.clear();
+				} finally {
+					entry.lock.release();
+				}
 				this.changed(agentId);
 			}
 		})().finally(() => {
@@ -492,7 +640,14 @@ export class BotSessionHost {
 	 */
 	interrupt(agentId: string): boolean {
 		const entry = this.entries.get(agentId);
-		if (!entry || !this.isBusy(entry)) return false;
+		if (!entry) {
+			// Another process's turn can only be stopped from the session hosting it.
+			const host = this.remoteOf(agentId);
+			if (host && this.remoteActive(host))
+				throw new Error(interfaceText().botTeam.botRunsElsewhere(agentId, host.pid, host.hostSessionId));
+			return false;
+		}
+		if (!this.isBusy(entry)) return false;
 		void entry.session
 			.abort("bot stopped by the owner")
 			.catch((error: unknown) => this.ports.warn(interfaceText().botTeam.botTurnFailed(agentId, errorText(error))));
@@ -534,6 +689,7 @@ export class BotSessionHost {
 	readMessages(agentId: string): AgentMessage[] | undefined {
 		const entry = this.entries.get(agentId);
 		if (entry) return [...entry.session.messages];
+		this.ensureHomeWatch();
 		const agentDir = this.ports.agentDir();
 		const file = findMostRecentSessionInDirs([botHomeOf(agentDir, agentId).sessionsDir]);
 		if (!file) return undefined;
@@ -564,6 +720,12 @@ export class BotSessionHost {
 			}
 		}
 		await Promise.all([...this.closing.values()]);
+		this.homeWatch?.();
+		this.homeWatch = undefined;
+		this.history.stop();
+		if (this.remoteRecheck !== undefined) this.idleTimers().clearTimeout(this.remoteRecheck);
+		this.remoteRecheck = undefined;
+		this.remote.clear();
 		this.listeners.clear();
 		this.transcriptCache = undefined;
 		if (failures.length > 0) throw new AggregateError(failures, "Bot sessions did not close cleanly.");

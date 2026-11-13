@@ -43,6 +43,7 @@ export function botSessionHostPorts(
 		modelRegistry: () => deps.getModelRegistry(),
 		projectTrusted: () => deps.getSettingsManager().isProjectTrusted(),
 		timers: () => deps.getTimers(),
+		hostSessionId: () => deps.getSessionId(),
 		modelRefusal: (record, model) => botModelRefusal(deps, record, model),
 		// A worker's budget is the owner's worker bound, intersected with the main session's own ceiling; none set, none applies.
 		turnSpendBoundUsd: () => {

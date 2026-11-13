@@ -119,6 +119,16 @@ export function takeProcessLock(path: string): HostLockResult {
 	});
 }
 
+/** The process holding a lock file and how it stands, as another process reads it; undefined when no live holder is named. */
+export function processLockHolder(
+	path: string,
+): { readonly owner: ProcessOwner; readonly standing: OwnerStanding } | undefined {
+	const record = readRecord(path);
+	if (!record) return undefined;
+	const standing = judgeOwner(record);
+	return standing === "dead" ? undefined : { owner: record, standing };
+}
+
 /** The session hosting the link here, when one other than this process holds the lock. */
 export function linkHostOwner(agentDir: string, name = LOCK_FILE): LinkHostOwner | undefined {
 	const record = readRecord(lockPath(agentDir, name));

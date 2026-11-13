@@ -27,13 +27,31 @@ introduces itself as the main agent. It reads, and writes only when the bot has 
 commands are judged one by one, as a read-only worker's are (nothing that edits, creates a file or reaches the network runs,
 in every execution mode). A turn is bounded by `workerDelegation.maxUsd` (and the main session's own ceiling) when one is
 set, and what each turn spends is added to the main session's cost. It has no System One yet: the supervision, operation review and claim check a worker got from the main session's System One come with the later enforcement phase. It is loaded on its first message, kept while a turn runs or input is queued, and closed after ten idle minutes or
-when the session that hosts it ends. One process hosts a bot at a time; a second one is told which. The roster shows the bot
-running or queued while its session works, and its chat is that session's conversation, after whatever ran as a worker before.
-Its answers are read in that chat (the roster marks them unread); they do not reach the orchestrator as a worker's terminal does.
+when the session that hosts it ends. Its answers are read in its chat (the roster marks them unread); they do not reach the
+orchestrator as a worker's terminal does.
+
+**Every open session sees every bot, and closing a session loses none.** Nothing about a bot depends on the session that
+created, messaged or hosts it: the bot list is the bot store, the chat is read from the bot's home, and the unread mark is
+on the bot's record in the store (`lastMessageAt`, `lastReadAt`), which every session watches. One process hosts a bot at a
+time (`bots/<id>/host.lock`); it publishes what the session is doing in `host-state.json`, and one watch over the bot homes
+tells every other session's roster and open chat when the conversation, that state or the history changed. A second session
+shows the bot running, queued or idle from that file (trusted only while the lock names a live process, so a killed host
+leaves no stale "running"), and its chat from the session files. Messaging a bot another session hosts is refused with a
+line naming that session (messages do not cross sessions until mail arrives), and `/bot stop` of a bot working in another
+session says to stop it there. A session started after every other one closed lists each bot with its whole conversation.
+
+What ran before a bot had a session of its own is part of that conversation. Those worker conversations live under the
+orchestration directory of whichever session messaged the bot, and only that session's own transcript says which runtime
+was whose, so `bots/<id>/history.json` indexes them by reference (a path-free transcript reference and a time range, bounded
+to the newest 200; nothing is copied). The index is built once per bot by one streamed scan of the session files, off the
+screen's drawing path (the chat shows what it has until the scan ends), and afterwards each worker-path start of the bot
+adds its own run as it is bound. The chat shows those earlier conversations in time order with the bot's own session.
 
 Until later phases move them, these still run as workers of the session that sends them: group messages (the group's
 conversations), the orchestrator's `bot ask`, routine sends, leaders, the bots a leader made and bots made from a profile, and machines joined over the
-link. A bot's session has no subagents, routines, goals, watches or `bot` tool yet.
+link. A bot's session has no subagents, routines, goals, watches or `bot` tool yet. A bot that only ever talked through those
+paths has no session of its own: its chat shows its earlier conversations from its history index, in any session, and its
+last summary when none can be read.
 
 ## Bot names
 

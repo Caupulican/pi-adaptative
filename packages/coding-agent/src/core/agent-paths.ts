@@ -24,7 +24,8 @@
  *   npm/ git/ sessions/                                                                    -- npmDir/gitDir/sessionsDir
  *   logs/harness/harness-<date>.jsonl  the harness's own log (kernel/harness-log.ts)      -- harnessLogDir
  *   collaboration/herdr/config.toml    the collaboration backend's managed config         -- collaborationDir
- *   bots/<id>/                         one bot's home: profile.json, sessions/, memory/       -- botHomeDir
+ *   bots/<id>/                         one bot's home: profile.json, sessions/, memory/,      -- botHomeDir
+ *                                      host.lock, host-state.json, history.json
  *   state/orchestration/sessions/<session-key>/                                             -- one foreground-session-owned
  *                                                                                            control-plane bundle
  *     worker-context-forks/<identity-digest>-<content-digest>.json                         -- immutable birth snapshots
@@ -280,6 +281,16 @@ export function botMemoryDir(agentDir: string, botId: string): string {
 /** `<agentDir>/bots/<id>/host.lock` -- names the one process that hosts the bot's session. */
 export function botHostLockFile(agentDir: string, botId: string): string {
 	return join(botHomeDir(agentDir, botId), "host.lock");
+}
+
+/** `<agentDir>/bots/<id>/host-state.json` -- what the hosting process says its session for the bot is doing. */
+export function botHostStateFile(agentDir: string, botId: string): string {
+	return join(botHomeDir(agentDir, botId), "host-state.json");
+}
+
+/** `<agentDir>/bots/<id>/history.json` -- the bot's earlier worker conversations, by reference (never copies). */
+export function botHistoryFile(agentDir: string, botId: string): string {
+	return join(botHomeDir(agentDir, botId), "history.json");
 }
 
 /** `<agentDir>/state/bots/store.json` -- the persistent bots, teams and team transcripts. */
