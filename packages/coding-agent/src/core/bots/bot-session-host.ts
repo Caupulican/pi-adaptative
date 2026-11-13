@@ -25,6 +25,7 @@
  * unread mark and summary keep working. This host only reads and writes the bot's own home and session.
  */
 
+import { randomBytes } from "node:crypto";
 import { existsSync, statSync } from "node:fs";
 import { type Api, type Model, TOOL_SCHEMA_SEARCH_NAME, type Usage } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
@@ -186,6 +187,8 @@ export class BotSessionHost {
 		| { agentId: string; file: string; mtimeMs: number; size: number; messages: AgentMessage[] }
 		| undefined;
 	private stopped = false;
+	/** This host among any other in its process: the bots' locks and published states name it (`HostLockRecord.holder`). */
+	private readonly holder = randomBytes(8).toString("hex");
 	/** What each bot's other host last said, kept while the home watch keeps it fresh. */
 	private readonly remote = new Map<string, RemoteBotHost | undefined>();
 	/** Each bot's own session as its home holds it (`botSessionOnDisk`), kept while the home watch keeps it fresh. */
@@ -286,9 +289,9 @@ export class BotSessionHost {
 	/** The process other than this one that hosts the bot's session, as its home says now. */
 	private remoteOf(agentId: string): RemoteBotHost | undefined {
 		this.ensureHomeWatch();
-		if (!this.homeWatch) return readRemoteBotHost(this.ports.agentDir(), agentId);
+		if (!this.homeWatch) return readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
 		if (this.remote.has(agentId)) return this.remote.get(agentId);
-		const host = readRemoteBotHost(this.ports.agentDir(), agentId);
+		const host = readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
 		this.remote.set(agentId, host);
 		this.armRemoteRecheck();
 		return host;
@@ -315,7 +318,7 @@ export class BotSessionHost {
 			const changed: string[] = [];
 			for (const [agentId, host] of [...this.remote]) {
 				if (!this.remoteActive(host)) continue;
-				const now = readRemoteBotHost(this.ports.agentDir(), agentId);
+				const now = readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
 				this.remote.set(agentId, now);
 				if (now?.state !== host?.state) changed.push(agentId);
 			}
@@ -469,10 +472,14 @@ export class BotSessionHost {
 			throw new Error(words.botModelUnavailable(agentId, `${profile.provider}/${profile.modelId}`));
 		const soul = profile.soul === undefined ? { ok: true as const, soul: undefined } : checkSoulText(profile.soul);
 		if (!soul.ok) throw new Error(words.botSoulRefused(agentId, soul.reason));
-		const taken = takeProcessLock(botHostLockFile(agentDir, agentId));
+		const taken = takeProcessLock(botHostLockFile(agentDir, agentId), this.holder);
 		if (!taken.held)
 			throw new Error(
-				words.botSessionHeld(agentId, taken.owner.pid, readRemoteBotHost(agentDir, agentId)?.hostSessionId),
+				words.botSessionHeld(
+					agentId,
+					taken.owner.pid,
+					readRemoteBotHost(agentDir, agentId, this.holder)?.hostSessionId,
+				),
 			);
 		const { lock } = taken;
 		let session: AgentSession | undefined;
@@ -540,6 +547,7 @@ export class BotSessionHost {
 					hostKind: "session",
 					hostSessionId: this.ports.hostSessionId(),
 					botSessionId: session.sessionId,
+					holder: this.holder,
 				}),
 				modelRef: `${profile.provider}/${profile.modelId}`,
 				profileKey: profileKeyOf(record),
@@ -656,11 +664,11 @@ export class BotSessionHost {
 	 */
 	private openIfWatching(agentId: string): void {
 		const agentDir = this.ports.agentDir();
-		if (this.stopped || this.entries.has(agentId) || readRemoteBotHost(agentDir, agentId)) return;
+		if (this.stopped || this.entries.has(agentId) || readRemoteBotHost(agentDir, agentId, this.holder)) return;
 		const saved = this.savedSessionOf(agentId);
 		if (!saved || saved.cwd !== this.ports.cwd() || !this.holdsWatches(saved.id)) return;
 		void this.open(agentId).catch((error: unknown) => {
-			if (!readRemoteBotHost(agentDir, agentId))
+			if (!readRemoteBotHost(agentDir, agentId, this.holder))
 				this.ports.warn(interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error)));
 		});
 	}

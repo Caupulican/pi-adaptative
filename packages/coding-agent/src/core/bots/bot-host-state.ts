@@ -39,6 +39,8 @@ export interface BotHostState {
 	readonly hostSessionId?: string;
 	/** The bot's own session id. */
 	readonly botSessionId: string;
+	/** The host inside its process that holds the lock (`HostLockRecord.holder`): the file speaks for that host only. */
+	readonly holder: string;
 }
 
 /** The process hosting a bot, as another process sees it. */
@@ -63,7 +65,8 @@ function parseState(text: string): BotHostState | undefined {
 			!isProcessOwnerRecord(value.owner) ||
 			(value.hostKind !== "session" && value.hostKind !== "daemon") ||
 			(value.hostSessionId !== undefined && typeof value.hostSessionId !== "string") ||
-			typeof value.botSessionId !== "string"
+			typeof value.botSessionId !== "string" ||
+			typeof value.holder !== "string"
 		)
 			return undefined;
 		return {
@@ -74,6 +77,7 @@ function parseState(text: string): BotHostState | undefined {
 			hostKind: value.hostKind,
 			...(value.hostSessionId !== undefined ? { hostSessionId: value.hostSessionId } : {}),
 			botSessionId: value.botSessionId,
+			holder: value.holder,
 		};
 	} catch {
 		return undefined;
@@ -81,16 +85,19 @@ function parseState(text: string): BotHostState | undefined {
 }
 
 /**
- * The process, other than this one, hosting the bot's session now. Undefined when the lock names no live process or
- * names this one: a process answers for its own sessions from memory.
+ * The host, other than `ownHolder`, hosting the bot's session now: in another process, or another host in this one.
+ * Undefined when the lock names no live process or names `ownHolder`: a host answers for its own sessions from memory.
  */
-export function readRemoteBotHost(agentDir: string, agentId: string): RemoteBotHost | undefined {
+export function readRemoteBotHost(agentDir: string, agentId: string, ownHolder: string): RemoteBotHost | undefined {
 	const holder = processLockHolder(botHostLockFile(agentDir, agentId));
-	if (!holder || holder.owner.pid === process.pid) return undefined;
+	if (!holder || holder.holder === ownHolder) return undefined;
 	const file = botHostStateFile(agentDir, agentId);
 	const written = existsSync(file) ? parseState(readFileSync(file, "utf8")) : undefined;
-	// A file another process wrote earlier (its host is gone, a new one has not published yet) says nothing of this host.
-	const own = written?.owner.pid === holder.owner.pid && written.agentId === agentId ? written : undefined;
+	// A file another host wrote earlier (it is gone, a new one has not published yet) says nothing of this host.
+	const own =
+		written?.owner.pid === holder.owner.pid && written.holder === holder.holder && written.agentId === agentId
+			? written
+			: undefined;
 	return {
 		pid: holder.owner.pid,
 		standing: holder.standing,
@@ -108,7 +115,7 @@ export class BotHostStateWriter {
 
 	constructor(
 		agentDir: string,
-		base: { agentId: string; hostKind: BotHostKind; hostSessionId?: string; botSessionId: string },
+		base: { agentId: string; hostKind: BotHostKind; hostSessionId?: string; botSessionId: string; holder: string },
 	) {
 		this.file = botHostStateFile(agentDir, base.agentId);
 		this.base = { version: 1, owner: ownProcessOwner(), ...base };

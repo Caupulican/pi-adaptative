@@ -30,6 +30,11 @@ export const RUNNER_LOCK = "jobs/runner.lock";
 interface HostLockRecord extends ProcessOwner {
 	readonly token: string;
 	readonly acquiredAt: string;
+	/**
+	 * Which holder inside the process took the lock, when one process can run more than one: a process tells its own
+	 * hold from another holder's in the same process by it, never by its pid alone.
+	 */
+	readonly holder?: string;
 }
 
 /** The session that hosts the link, as another session describes it. */
@@ -51,8 +56,14 @@ function readRecord(path: string): HostLockRecord | undefined {
 		return isPlainRecord(value) &&
 			isProcessOwnerRecord(value) &&
 			typeof value.token === "string" &&
-			typeof value.acquiredAt === "string"
-			? { ...value, token: value.token, acquiredAt: value.acquiredAt }
+			typeof value.acquiredAt === "string" &&
+			(value.holder === undefined || typeof value.holder === "string")
+			? {
+					...value,
+					token: value.token,
+					acquiredAt: value.acquiredAt,
+					...(typeof value.holder === "string" ? { holder: value.holder } : {}),
+				}
 			: undefined;
 	} catch {
 		return undefined;
@@ -99,8 +110,11 @@ export function takeHostLock(agentDir: string, name = LOCK_FILE): HostLockResult
 	return takeProcessLock(lockPath(agentDir, name));
 }
 
-/** The same hold on any lock file: one live process names it, and a record whose process is gone is replaced. */
-export function takeProcessLock(path: string): HostLockResult {
+/**
+ * The same hold on any lock file: one live process names it, and a record whose process is gone is replaced. `holder`
+ * names the holder inside the process (see {@link HostLockRecord.holder}).
+ */
+export function takeProcessLock(path: string, holder?: string): HostLockResult {
 	mkdirSync(dirname(path), { recursive: true });
 	return withFileLockSync(path, (): HostLockResult => {
 		const current = readRecord(path);
@@ -113,6 +127,7 @@ export function takeProcessLock(path: string): HostLockResult {
 			...ownProcessOwner(),
 			token: randomBytes(16).toString("hex"),
 			acquiredAt: new Date().toISOString(),
+			...(holder !== undefined ? { holder } : {}),
 		};
 		writeFileAtomicSync(path, `${JSON.stringify(record, null, 1)}\n`, { mode: 0o600 });
 		return { held: true, lock: new HostLock(path, record.token) };
@@ -122,11 +137,13 @@ export function takeProcessLock(path: string): HostLockResult {
 /** The process holding a lock file and how it stands, as another process reads it; undefined when no live holder is named. */
 export function processLockHolder(
 	path: string,
-): { readonly owner: ProcessOwner; readonly standing: OwnerStanding } | undefined {
+): { readonly owner: ProcessOwner; readonly standing: OwnerStanding; readonly holder?: string } | undefined {
 	const record = readRecord(path);
 	if (!record) return undefined;
 	const standing = judgeOwner(record);
-	return standing === "dead" ? undefined : { owner: record, standing };
+	return standing === "dead"
+		? undefined
+		: { owner: record, standing, ...(record.holder ? { holder: record.holder } : {}) };
 }
 
 /** The session hosting the link here, when one other than this process holds the lock. */

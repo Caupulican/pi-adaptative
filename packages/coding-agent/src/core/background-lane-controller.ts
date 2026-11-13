@@ -37,8 +37,7 @@ import {
 } from "./autonomy-status/autonomy-status.ts";
 import type { BackgroundLaneControllerDeps, RunningAttemptWaitOutcome } from "./background-lane-deps.ts";
 import { BotRoster } from "./bots/bot-roster.ts";
-import { BotSessionHost } from "./bots/bot-session-host.ts";
-import { botSessionHostPorts } from "./bots/bot-session-ports.ts";
+import { attachBotSessions } from "./bots/bot-session-ports.ts";
 import {
 	type AwayChannelStatus,
 	awayChannels,
@@ -233,7 +232,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _laneRecordsNotifyQueued = false;
 	/** The bot roster, projected once and dropped by every input change; and the bots that run as sessions of their own. */
 	private readonly _botRoster: BotRoster;
-	private readonly _botSessions: BotSessionHost;
+	private readonly _botHost: ReturnType<typeof attachBotSessions>;
 	/** The live managed lanes of the roster, dropped with every lane record change. */
 	private _managedLaneViews: ManagedLaneView[] | undefined;
 	private _unsubscribeLaneRecordStore: (() => void) | undefined;
@@ -336,9 +335,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			() => deps.getSessionManager(),
 			() => this.getBotTeamStore(),
 		);
-		this._botSessions = new BotSessionHost(
-			botSessionHostPorts(deps, { store: () => this.getBotTeamStore(), warn: (message) => this._safeWarn(message) }),
-		);
+		this._botHost = attachBotSessions(deps, {
+			store: () => this.getBotTeamStore(),
+			warn: (message) => this._safeWarn(message),
+		});
 		this._botRoster = new BotRoster({
 			store: () => this.getBotTeamStore(),
 			bindings: () => this.botBindings,
@@ -347,18 +347,18 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			listWorkerAgents: () => this.listWorkerAgents(),
 			laneRecords: () => this._rosterLaneRecords(),
 			remoteWords: (agentId) => this.getRemoteHub().rosterWords(agentId),
-			botSessions: this._botSessions,
+			botSessions: this._botHost.host,
 		});
-		this._botSessions.subscribe(() => this._botRoster.invalidate());
+		this._botHost.subscribe(() => this._botRoster.invalidate());
 		this._botChat = new BotChatTranscript(this.botBindings, {
 			getBotTeamStore: () => this.getBotTeamStore(),
 			getRemoteHub: () => this.getRemoteHub(),
 			openWorkerTranscript: (agentId) => this.openWorkerTranscript(agentId),
 			getLaneRecords: () => this.getLaneRecords(),
-			botSessions: this._botSessions,
+			botSessions: this._botHost.host,
 		});
 		this._botDispatch = new BotOperatorDispatch(deps, this.botBindings, {
-			botSessions: this._botSessions,
+			botSessions: this._botHost.host,
 			getBotTeamStore: () => this.getBotTeamStore(),
 			getRemoteHub: () => this.getRemoteHub(),
 			invalidateBotViews: () => this._botRoster.invalidate(),
@@ -377,7 +377,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			cancelWorkerAgent: (agentId, reasonCode, scope) => this.cancelWorkerAgent(agentId, reasonCode, scope),
 		});
 		this._botLifecycle = new BotLifecycleController(deps, this.botBindings, {
-			botSessions: this._botSessions,
+			botSessions: this._botHost.host,
 			getBotTeamStore: () => this.getBotTeamStore(),
 			invalidateBotViews: () => this._botRoster.invalidate(),
 			hasWorkerState: () => this._hasWorkerState(),
@@ -1067,8 +1067,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			awayServiceShutdown = this._awayService?.close() ?? Promise.resolve();
 		});
 		let botSessionsShutdown = Promise.resolve();
-		this._runTeardownStep("close the bot sessions", () => {
-			botSessionsShutdown = this._botSessions.stop();
+		this._runTeardownStep("leave the bot sessions' host", () => {
+			botSessionsShutdown = this._botHost.detach();
 		});
 		const unsubscribeAwayChannelSettings = this._unsubscribeAwayChannelSettings;
 		this._unsubscribeAwayChannelSettings = undefined;
@@ -1536,7 +1536,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		if (!this.deps.isDisposed()) this._getActAhead().start();
 		if (this._hasWorkerState()) this._getRetention().scheduleFromIdle();
 		// Bot sessions holding watches a closed process left are opened here; the daemon's phone session hosts none.
-		if (!this._channelsHostedByDaemon) this._botSessions.openWatching();
+		if (!this._channelsHostedByDaemon) this._botHost.host.openWatching();
 	}
 
 	/** The host's CI source offers its failure evidence while it runs; the returned function withdraws it. */
@@ -1938,7 +1938,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				store: (notify) => this.getBotTeamStore().subscribe(notify),
 				lanes: (notify) => this.subscribeLaneRecords(notify),
 				remote: (notify) => this.getRemoteHub().subscribe(notify),
-				sessions: (notify) => this._botSessions.subscribe(notify),
+				sessions: (notify) => this._botHost.subscribe(notify),
 				alias: (agentId) => this.botBindings.alias(agentId),
 			},
 			listener,

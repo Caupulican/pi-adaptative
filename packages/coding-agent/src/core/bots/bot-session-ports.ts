@@ -3,7 +3,7 @@
  * System One choices (on or off, provider, transport), and, as the worker admission reads them, the model rules for an
  * explicitly requested model (one predicate, `worker-authority-resolver`), the spend bound a worker's budget carries, and
  * the cost view the main session keeps for spawned work. Composed here so the lane controller only hands over its
- * dependencies.
+ * dependencies, and attaches to its process's bot session host with them (`attachBotSessions`).
  */
 
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
@@ -11,6 +11,7 @@ import type { PersistentBotRecord } from "../delegation/persistent-bot-team-stor
 import { explicitMeteredModelRefusal, modelNotAllowedReason } from "../delegation/worker-authority-resolver.ts";
 import type { SpawnedUsageReporter } from "../spawned-usage.ts";
 import type { BotSessionHostPorts } from "./bot-session-host.ts";
+import { attachBotSessionHost, type BotSessionAttachment } from "./bot-session-registry.ts";
 
 /** Why the worker admission refuses the bot's own model now; undefined when it may run. */
 function botModelRefusal(
@@ -34,7 +35,15 @@ function botModelRefusal(
 	return deps.isModelAllowed && !deps.isModelAllowed(model) ? modelNotAllowedReason(model) : undefined;
 }
 
-export function botSessionHostPorts(
+/** Attaches the session to a bot session host: its process's shared one for a root session, one of its own for a child. */
+export function attachBotSessions(
+	deps: BackgroundLaneControllerDeps,
+	own: Pick<BotSessionHostPorts, "store" | "warn">,
+): BotSessionAttachment {
+	return attachBotSessionHost(botSessionHostPorts(deps, own), !deps.isChildSession());
+}
+
+function botSessionHostPorts(
 	deps: BackgroundLaneControllerDeps,
 	own: Pick<BotSessionHostPorts, "store" | "warn">,
 ): BotSessionHostPorts {
