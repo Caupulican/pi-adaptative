@@ -42,10 +42,13 @@ function withSessionState(view: PersistentBotView, state: BotSessionState | unde
 	return view;
 }
 
-/** The bot's own session: its state here and the watches it holds (a retired bot's watches went with it). */
+/**
+ * The bot's own session: its state here and the watches it holds. Only a saved bot has a home and a session of its own, and
+ * a retired bot's watches went with it.
+ */
 function withOwnSession(view: PersistentBotView, host: BotRosterHost): PersistentBotView {
 	const projected = withSessionState(view, host.botSessions.stateOf(view.agentId));
-	const watchCount = view.state === "retired" ? 0 : host.botSessions.liveWatches(view.agentId);
+	const watchCount = view.persistent && view.state !== "retired" ? host.botSessions.liveWatches(view.agentId) : 0;
 	return watchCount > 0 ? { ...projected, watchCount } : projected;
 }
 

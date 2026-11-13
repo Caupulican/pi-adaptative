@@ -187,6 +187,8 @@ export class BotSessionHost {
 	private stopped = false;
 	/** What each bot's other host last said, kept while the home watch keeps it fresh. */
 	private readonly remote = new Map<string, RemoteBotHost | undefined>();
+	/** Each bot's own session as its home holds it (`botSessionOnDisk`), kept while the home watch keeps it fresh. */
+	private readonly saved = new Map<string, ReturnType<typeof botSessionOnDisk>>();
 	private homeWatch: (() => void) | undefined;
 	/** The home watch failed: other processes' changes are read from disk each time instead. */
 	private homeWatchFailed = false;
@@ -241,6 +243,7 @@ export class BotSessionHost {
 			this.homeWatch = undefined;
 			this.homeWatchFailed = true;
 			this.remote.clear();
+			this.saved.clear();
 			this.ports.warn(interfaceText().botTeam.botHomesNotWatched(reason));
 		};
 		try {
@@ -254,6 +257,11 @@ export class BotSessionHost {
 							.map((bot) => [botHomeName(bot.agentId), bot.agentId]),
 					);
 					const changed = new Set<string>();
+					// A home's session files changed: what it saved is read again, before a host's change below opens it.
+					for (const { home, file } of changes) {
+						const agentId = ids.get(home);
+						if (agentId !== undefined && file.startsWith("sessions/")) this.saved.delete(agentId);
+					}
 					for (const { home, file } of changes) {
 						const agentId = ids.get(home);
 						if (agentId === undefined) continue;
@@ -283,6 +291,14 @@ export class BotSessionHost {
 		this.remote.set(agentId, host);
 		this.armRemoteRecheck();
 		return host;
+	}
+
+	/** The bot's own session as its home holds it now (see {@link botSessionOnDisk}). */
+	private savedSessionOf(agentId: string): ReturnType<typeof botSessionOnDisk> {
+		this.ensureHomeWatch();
+		if (!this.homeWatch) return botSessionOnDisk(this.ports.agentDir(), agentId);
+		if (!this.saved.has(agentId)) this.saved.set(agentId, botSessionOnDisk(this.ports.agentDir(), agentId));
+		return this.saved.get(agentId);
 	}
 
 	private remoteActive(host: RemoteBotHost | undefined): boolean {
@@ -606,8 +622,7 @@ export class BotSessionHost {
 	 * saved last, which another process may be hosting.
 	 */
 	liveWatches(agentId: string): number {
-		const sessionId =
-			this.entries.get(agentId)?.session.sessionId ?? botSessionOnDisk(this.ports.agentDir(), agentId)?.id;
+		const sessionId = this.entries.get(agentId)?.session.sessionId ?? this.savedSessionOf(agentId)?.id;
 		return sessionId === undefined ? 0 : liveOwnWatchCount(this.ports.store(), sessionId, this.idleTimers().now());
 	}
 
@@ -625,7 +640,7 @@ export class BotSessionHost {
 	private openIfWatching(agentId: string): void {
 		const agentDir = this.ports.agentDir();
 		if (this.stopped || this.entries.has(agentId) || readRemoteBotHost(agentDir, agentId)) return;
-		const saved = botSessionOnDisk(agentDir, agentId);
+		const saved = this.savedSessionOf(agentId);
 		if (!saved || saved.cwd !== this.ports.cwd() || !this.holdsWatches(saved.id)) return;
 		void this.open(agentId).catch((error: unknown) => {
 			if (!readRemoteBotHost(agentDir, agentId))
@@ -754,7 +769,7 @@ export class BotSessionHost {
 	release(agentId: string): void {
 		const entry = this.entries.get(agentId);
 		if (entry && this.isBusy(entry)) throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
-		const sessionId = entry?.session.sessionId ?? botSessionOnDisk(this.ports.agentDir(), agentId)?.id;
+		const sessionId = entry?.session.sessionId ?? this.savedSessionOf(agentId)?.id;
 		if (sessionId !== undefined) {
 			const store = this.ports.store();
 			const nowMs = this.idleTimers().now();
