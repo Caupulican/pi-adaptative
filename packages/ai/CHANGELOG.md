@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- `materializeProviderRequest` accepts a tool-activation history, so harness tool-schema disclosure keeps tools activated by messages a request-only view no longer carries.
+
 ## [0.104.60] - 2026-11-13
 
 ## [0.104.59] - 2026-11-13

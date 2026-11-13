@@ -2,7 +2,7 @@
 
 ### Fixed
 
-- Deferred tools activated in an earlier turn stay declared after the continuous-chat view or compaction folds away the search or call that activated them. The model no longer sees a tool it used without its schema, which made some providers fall back to shell commands instead of calling it.
+- Deferred tools activated in an earlier turn stay declared after the continuous-chat view folds away the search or call that activated them. The model no longer sees a tool it used without its schema, which made some providers fall back to shell commands instead of calling it.
 
 ## [0.104.60] - 2026-11-13
 
