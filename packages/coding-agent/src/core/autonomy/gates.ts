@@ -2,6 +2,7 @@ import type { ExecutionPathAuthority } from "../../kernel/index.ts";
 import {
 	resolveToolCallCapabilities,
 	resolveToolCallPathAccess,
+	type ToolCallFacts,
 	toolUsesPathScope,
 } from "../tool-capability-policy.ts";
 import { describeCapabilityRequirementForTool, hasCapabilityPolicyForTool } from "./approval-gate.ts";
@@ -81,6 +82,8 @@ export function extractCandidatePaths(toolName: string, args: unknown): string[]
 export interface EvaluateToolGateInput {
 	toolName: string;
 	args?: unknown;
+	/** What the tool's owner read about this call's target (`ToolCallFacts`), resolved from these args. */
+	facts?: ToolCallFacts;
 	cwd: string;
 	/** Authority roots remain relative to their granting session, not the selected task. */
 	scopeCwd?: string;
@@ -144,9 +147,9 @@ function checkEnvelopeAndToolCapabilities(input: EvaluateToolGateInput): {
 		};
 	}
 
-	const callCapabilities = resolveToolCallCapabilities(envelope.capabilities, input.toolName, input.args);
+	const callCapabilities = resolveToolCallCapabilities(envelope.capabilities, input.toolName, input.args, input.facts);
 	if (!callCapabilities) {
-		const requirement = describeCapabilityRequirementForTool(input.toolName, input.args);
+		const requirement = describeCapabilityRequirementForTool(input.toolName, input.args, input.facts);
 		return {
 			earlyOutcome: {
 				outcome: "block",
@@ -158,7 +161,7 @@ function checkEnvelopeAndToolCapabilities(input: EvaluateToolGateInput): {
 		};
 	}
 
-	const pathAccess = resolveToolCallPathAccess(envelope.capabilities, input.toolName, input.args);
+	const pathAccess = resolveToolCallPathAccess(envelope.capabilities, input.toolName, input.args, input.facts);
 	const paths = pathAccess === "none" ? [] : extractCandidatePaths(input.toolName, input.args);
 	return { paths, ...(pathAccess !== "none" ? { pathAccess } : {}) };
 }

@@ -7,6 +7,7 @@ import {
 	READ_ONLY_SHELL_TOOL_NAMES,
 	requiredEnvelopeCapabilities,
 	resolveToolCallPathAccess,
+	type ToolCallFacts,
 } from "../tool-capability-policy.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { classifyYoloBoundary } from "./edge-policy.ts";
@@ -28,10 +29,11 @@ const WRITE_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
 function readScopeViolation(
 	toolName: string,
 	args: unknown,
+	facts: ToolCallFacts | undefined,
 	capabilities: readonly HarnessCapability[],
 	scope: SessionReadScope,
 ): string | undefined {
-	if (resolveToolCallPathAccess(capabilities, toolName, args) !== "read") return undefined;
+	if (resolveToolCallPathAccess(capabilities, toolName, args, facts) !== "read") return undefined;
 	for (const target of extractToolPathArguments(toolName, args)) {
 		const refusal = readScopeRefusal(scope, target);
 		if (refusal)
@@ -59,6 +61,12 @@ interface LaneToolAdmissionOptions {
 	readonly allowedTools: ReadonlySet<string>;
 	readonly manifests: ReadonlyMap<string, ToolCapabilityManifest>;
 	readonly gateway?: CapabilityGateway;
+	/**
+	 * What a lane tool's owner reads about the target a call names (`ToolCallFacts`), given to every check below so they
+	 * decide as the root's gate does. Only root-only lane tools resolve facts and no lane holds one, so no surface passes
+	 * this today; without it every check keeps the strictest requirement.
+	 */
+	readonly callFacts?: (toolName: string, args: unknown) => ToolCallFacts | undefined;
 	readonly yolo?: boolean;
 	/**
 	 * Present for a `readOnly` grant's shell: its commands are judged by the read/write line plus this lane's
@@ -110,7 +118,11 @@ export class LaneToolAdmission {
 	}
 
 	/** Pure policy diagnostics, shared by preparation and the mandatory execution boundary. */
-	check(toolName: string, args: unknown): BeforeToolCallResult | undefined {
+	check(
+		toolName: string,
+		args: unknown,
+		facts = this.options.callFacts?.(toolName, args),
+	): BeforeToolCallResult | undefined {
 		this.assertHealthy();
 		const options = this.options;
 		options.assertOpen();
@@ -135,8 +147,9 @@ export class LaneToolAdmission {
 			const violation = readScopeViolation(
 				toolName,
 				args,
+				facts,
 				// A tool without a compiled manifest (a YOLO lane keeps every read tool on its surface) is judged by its own policy.
-				options.manifests.get(toolName)?.capabilities ?? requiredEnvelopeCapabilities(toolName, args),
+				options.manifests.get(toolName)?.capabilities ?? requiredEnvelopeCapabilities(toolName, args, facts),
 				options.readScope,
 			);
 			if (violation)
@@ -149,6 +162,7 @@ export class LaneToolAdmission {
 			const protection = evaluateToolGate({
 				toolName,
 				args,
+				facts,
 				cwd: options.cwd,
 				envelope: options.writeProtectionEnvelope,
 			});
@@ -178,6 +192,7 @@ export class LaneToolAdmission {
 				const scope = evaluateToolGate({
 					toolName,
 					args,
+					facts,
 					cwd: options.cwd,
 					envelope: options.yoloWriteScopeEnvelope,
 				});
@@ -191,6 +206,7 @@ export class LaneToolAdmission {
 			const outcome = evaluateToolGate({
 				toolName,
 				args,
+				facts,
 				cwd: options.cwd,
 				envelope: WRITE_TOOLS.has(toolName) ? options.writeEnvelope : options.readEnvelope,
 			});
@@ -213,13 +229,14 @@ export class LaneToolAdmission {
 		signal?: AbortSignal,
 	): Promise<BeforeToolCallResult | undefined> {
 		signal?.throwIfAborted();
-		const structural = this.check(toolName, args);
+		const facts = this.options.callFacts?.(toolName, args);
+		const structural = this.check(toolName, args, facts);
 		if (structural?.block) return structural;
 		const { gateway, manifests, yolo, checkEdge, cwd } = this.options;
 		const manifest = gateway && !yolo ? manifests.get(toolName) : undefined;
 		if (gateway && !yolo) {
 			if (!manifest) return { block: true, reason: `Lane tool '${toolName}' has no compiled capability manifest.` };
-			gateway.checkToolCallEligibility(manifest, toolName, args);
+			gateway.checkToolCallEligibility(manifest, toolName, args, facts);
 			gateway.assertBudgetAvailable(toolName);
 		}
 		const edge = await checkEdge?.(toolName, args, cwd);
@@ -227,7 +244,7 @@ export class LaneToolAdmission {
 		this.assertHealthy();
 		this.options.assertOpen();
 		if (edge?.block) return edge;
-		if (gateway && manifest) gateway.authorizeToolCall(manifest, toolName, args);
+		if (gateway && manifest) gateway.authorizeToolCall(manifest, toolName, args, facts);
 		return undefined;
 	}
 

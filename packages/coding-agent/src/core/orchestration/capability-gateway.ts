@@ -10,6 +10,7 @@ import {
 	resolveCapabilityPathAccess,
 	resolveToolCallCapabilities,
 	resolveToolCallPathAccess,
+	type ToolCallFacts,
 } from "../tool-capability-policy.ts";
 import { attemptUsageFromGatewayUsage, reconcileAttemptUsage, validateAttemptUsageSnapshot } from "./attempt-usage.ts";
 import {
@@ -344,8 +345,8 @@ export class CapabilityGateway {
 	}
 
 	/** Immediate execution authorization; validates again before charging the one admitted call. */
-	authorizeToolCall(manifest: ToolCapabilityManifest, toolName: string, params: unknown): void {
-		this.checkToolCallEligibility(manifest, toolName, params);
+	authorizeToolCall(manifest: ToolCapabilityManifest, toolName: string, params: unknown, facts?: ToolCallFacts): void {
+		this.checkToolCallEligibility(manifest, toolName, params, facts);
 		this.assertBudgetAvailable(toolName);
 		const toolCalls = this.toolCalls + 1;
 		if (!Number.isSafeInteger(toolCalls)) {
@@ -471,8 +472,16 @@ export class CapabilityGateway {
 		};
 	}
 
-	/** Non-metering eligibility check before a caller crosses an asynchronous policy boundary. */
-	checkToolCallEligibility(manifest: ToolCapabilityManifest, toolName: string, params: unknown): void {
+	/**
+	 * Non-metering eligibility check before a caller crosses an asynchronous policy boundary. `facts` are what the tool's
+	 * owner read about the target `params` name (`ToolCallFacts`); absent, the call keeps the tool's strictest requirement.
+	 */
+	checkToolCallEligibility(
+		manifest: ToolCapabilityManifest,
+		toolName: string,
+		params: unknown,
+		facts?: ToolCallFacts,
+	): void {
 		const now = this.currentTime();
 		if (this.grant.expiresAt && Date.parse(this.grant.expiresAt) <= now) {
 			this.deny(toolName, "grant_expired", `Execution grant '${this.grant.grantId}' expired.`);
@@ -487,7 +496,7 @@ export class CapabilityGateway {
 			this.deny(toolName, "capability_not_granted", `Tool '${toolName}' requires an ungranted capability.`);
 		}
 		const callCapabilities = getToolCapabilityPolicy(toolName)
-			? resolveToolCallCapabilities(manifest.capabilities, toolName, params)
+			? resolveToolCallCapabilities(manifest.capabilities, toolName, params, facts)
 			: manifest.capabilities;
 		if (!callCapabilities) {
 			this.deny(
@@ -499,7 +508,7 @@ export class CapabilityGateway {
 		const canonicalPolicy = getToolCapabilityPolicy(toolName);
 		const hasDeclaredPathScope = manifest.enforcements.includes("path-scope");
 		const pathAccess = canonicalPolicy
-			? resolveToolCallPathAccess(manifest.capabilities, toolName, params)
+			? resolveToolCallPathAccess(manifest.capabilities, toolName, params, facts)
 			: hasDeclaredPathScope
 				? (resolveCapabilityPathAccess(callCapabilities) ?? "none")
 				: "none";

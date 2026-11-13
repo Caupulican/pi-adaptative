@@ -2359,7 +2359,7 @@ export class AgentSession {
 			isCandidateAllowed: (toolName) => {
 				const envelope = this.capabilityEnvelope;
 				if (!envelope) return true;
-				return evaluateToolGate({ toolName, args: {}, cwd: this._cwd, envelope }).outcome === "allow";
+				return evaluateToolGate({ toolName, cwd: this._cwd, envelope }).outcome === "allow";
 			},
 		});
 		this._toolGate = new ToolGateController({
@@ -2465,6 +2465,7 @@ export class AgentSession {
 						this._executionCharter?.git.create_tag,
 				),
 			hostRepositoryEffect: (toolName) => this._runtimeBuilder.getToolDefinition(toolName)?.repositoryEffect,
+			toolCallFacts: (toolName, args) => this._backgroundLanes.toolCallFacts(toolName, args),
 		});
 		this._promptSubmission = new PromptSubmissionController({
 			agent: this.agent,
@@ -4393,9 +4394,7 @@ export class AgentSession {
 		})();
 	}
 
-	/**
-	 * Cancel in-progress compaction (manual or auto).
-	 */
+	/** Cancel in-progress compaction (manual or auto). */
 	abortCompaction(): void {
 		this._compaction.abort();
 	}

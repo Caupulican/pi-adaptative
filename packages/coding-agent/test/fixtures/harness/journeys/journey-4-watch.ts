@@ -28,7 +28,8 @@ const PROMPT = "Read notes.txt and say what changed.";
  * turn at the next model step, with no turn of its own; and a worker that armed a watch for its own wait is the one woken,
  * while the root hears only the worker's report. A read-only worker with a shell arms a command watch: the command passes
  * the worker's own gate, runs in the worker's directory with its offline, read-only environment, and the worker is woken
- * with the command's output fenced as untrusted data.
+ * with the command's output fenced as untrusted data. Under an envelope that grants planning and not delegation, a paused
+ * watch resumes and a paused routine that runs workers stays refused at the gate.
  */
 export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
@@ -640,6 +641,72 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 		"the worker took three model steps (arm, read, report) and its command watch fired once",
 	).toEqual({ workerSteps: 3, firings: 1 });
 	expectDelivered("build-wait", 1);
+
+	// Resuming a watch is planning, as arming one is: under an envelope that grants workflow.plan and not workflow.delegate
+	// (a session launched with such a profile), the routine store tells the gate the paused watch runs no worker, so it
+	// resumes; a paused routine that runs workers stays refused at the gate, which names the delegate requirement.
+	const routineCall = async (label: string, args: Record<string, unknown>) => {
+		let outcome = { isError: true, text: "" };
+		world.provider.enqueue("root", calls(`${label}-call`, [{ id: label, name: "routine", arguments: args }]), {
+			...text(`${label}-answer`, "The routine command is recorded."),
+			check: (request) => {
+				const result = latestBatchResults(request).find((entry) => entry.toolName === "routine");
+				outcome = { isError: result?.isError ?? true, text: result?.text ?? "" };
+			},
+		});
+		await withDeadline(trace, label, session.prompt(`Apply the ${label} routine command.`));
+		await withDeadline(trace, `the session is at rest after ${label}`, session.waitForForegroundIdle());
+		return outcome;
+	};
+	const revisionOf = (routineId: string) => store().getRoutine(routineId)!.revision;
+	const INTERVAL_ID = "daily-review";
+	for (const [label, args] of [
+		["j4-plan-pause-watch", { action: "pause", routineId: ROUTINE_ID, expectedRevision: revisionOf(ROUTINE_ID) }],
+		[
+			"j4-plan-interval-create",
+			{
+				action: "create",
+				routineId: INTERVAL_ID,
+				prompt: "Review the notes once a day.",
+				schedule: { kind: "interval", intervalMs: 86_400_000 },
+				profileId: PROFILE_ID,
+			},
+		],
+	] as const) {
+		const outcome = await routineCall(label, args);
+		expect(outcome.isError, outcome.text).toBe(false);
+	}
+	const paused = await routineCall("j4-plan-pause-interval", {
+		action: "pause",
+		routineId: INTERVAL_ID,
+		expectedRevision: revisionOf(INTERVAL_ID),
+	});
+	expect(paused.isError, paused.text).toBe(false);
+	session.capabilityEnvelope = { id: "j4-plan-only", capabilities: ["workflow.plan"] };
+	const watchResumed = await routineCall("j4-plan-resume-watch", {
+		action: "resume",
+		routineId: ROUTINE_ID,
+		expectedRevision: revisionOf(ROUTINE_ID),
+	});
+	expect(watchResumed.isError, watchResumed.text).toBe(false);
+	expect(store().getRoutine(ROUTINE_ID)!.enabled, "the paused watch resumes under workflow.plan alone").toBe(true);
+	const intervalResumed = await routineCall("j4-plan-resume-interval", {
+		action: "resume",
+		routineId: INTERVAL_ID,
+		expectedRevision: revisionOf(INTERVAL_ID),
+	});
+	expect(intervalResumed.isError, "a routine that runs workers stays refused without workflow.delegate").toBe(true);
+	expect(intervalResumed.text).toContain(
+		"Tool execution blocked by autonomy gate [tool_gate]: Tool 'routine' requires workflow.plan and workflow.delegate, which is missing from the active envelope. (missing_capability)",
+	);
+	expect(store().getRoutine(INTERVAL_ID)!.enabled, "the refused resume leaves the routine paused").toBe(false);
+	session.capabilityEnvelope = undefined;
+	const removed = await routineCall("j4-plan-interval-delete", {
+		action: "delete",
+		routineId: INTERVAL_ID,
+		expectedRevision: revisionOf(INTERVAL_ID),
+	});
+	expect(removed.isError, removed.text).toBe(false);
 
 	expect(await world.disposeSessionInBody(session), "the watch session closes").toBeUndefined();
 	trace.mark("root", "watch.closed");

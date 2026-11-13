@@ -721,17 +721,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/**
-	 * Backfills a durable notification for every record about to be flushed, through the SAME
-	 * durable notification store `_getWorkerLifecycle()` already replays from on construction
-	 * (`getPendingTerminalNotifications()` / `markNotificationsDelivered()`) -- not a new
-	 * persistence subsystem. `WorkerLifecycle.getTerminalNotification()` is idempotent (it reuses
-	 * an existing durable entry for the same laneId/attemptId or creates exactly one), so calling
+	 * Backfills a durable notification for every record about to be flushed, through the SAME durable notification store
+	 * `_getWorkerLifecycle()` already replays from on construction (`getPendingTerminalNotifications()` /
+	 * `markNotificationsDelivered()`) -- not a new persistence subsystem. `WorkerLifecycle.getTerminalNotification()` is
+	 * idempotent (it reuses an existing durable entry for the same laneId/attemptId or creates exactly one), so calling
 	 * it for a record that already has a durable notification is a safe no-op. Without this, a
-	 * "transient:<laneId>:<completedAt>" record (recorded without a durableNotificationId — e.g.
-	 * because no attempt was resolvable at record time) has no trace in the durable ledger at all:
-	 * if it's still stuck behind an unresolved notify() when the process restarts, the replay on
-	 * the next construction can only find what was durably enqueued, so it would be lost instead of
-	 * replayed.
+	 * "transient:<laneId>:<completedAt>" record (recorded without a durableNotificationId — e.g. because no attempt was
+	 * resolvable at record time) has no trace in the durable ledger at all: if it's still stuck behind an unresolved
+	 * notify() when the process restarts, the replay on the next construction can only find what was durably enqueued,
+	 * so it would be lost instead of replayed.
 	 */
 	private _ensureDurableNotification(record: Pick<LaneRecord, "laneId" | "attemptId">): string | undefined {
 		// A record that names its generation binds to that generation's outbox entry, never the lane's latest.
@@ -1100,13 +1098,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/**
-	 * Single-flight entry point for EVERY goal-continuation loop invocation — idle autosteer
-	 * ({@link _runScheduledGoalAutoContinue}) AND the manual `/goal start` / `/goal-continue`
-	 * commands (reached through `AgentSession.continueGoalLoop`). Both paths ultimately submit
-	 * continuation prompts through the session's single `prompt()` path, so two loops racing throws
-	 * "Agent is already processing" from whichever submits second. `_isGoalAutoContinuing` is the
-	 * ONE owner of that mutex; `deps.continueGoalLoop` (the raw {@link GoalLoopController} loop)
-	 * must never be called directly outside this method, or the guard is bypassed.
+	 * Single-flight entry point for EVERY goal-continuation loop invocation — idle autosteer ({@link
+	 * _runScheduledGoalAutoContinue}) AND the manual `/goal start` / `/goal-continue` commands (reached through
+	 * `AgentSession.continueGoalLoop`). Both paths ultimately submit continuation prompts through the session's single
+	 * `prompt()` path, so two loops racing throws "Agent is already processing" from whichever submits second.
+	 * `_isGoalAutoContinuing` is the ONE owner of that mutex; `deps.continueGoalLoop` (the raw {@link
+	 * GoalLoopController} loop) must never be called directly outside this method, or the guard is bypassed.
 	 */
 	async continueGoalLoopExclusive(options: GoalContinuationLoopOptions): Promise<GoalContinuationLoopResult> {
 		return this._goalAutoContinue.continueExclusive(options);
@@ -1399,10 +1396,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._getWorkerController().runOnce(request, onStarted, existingRecord);
 	}
 	/**
-	 * Probe a candidate model against the subagent contracts (research/worker/judge/search/
-	 * tool-call surfaces) via {@link runModelFitnessProbe}. The model must resolve and
-	 * authenticate; every probe call runs as an isolated completion on that model, and probe
-	 * spend is reported through spawned-usage accounting.
+	 * Probe a candidate model against the subagent contracts (research/worker/judge/search/ tool-call surfaces) via
+	 * {@link runModelFitnessProbe}. The model must resolve and authenticate; every probe call runs as an isolated
+	 * completion on that model, and probe spend is reported through spawned-usage accounting.
 	 */
 	async runModelFitness(args: {
 		model: string;
@@ -1725,6 +1721,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this.getBotTeamStore();
 		return this._routines?.session.tool;
 	}
+
+	/** What a root-only lane tool's owner reads about a call's target before the gate (`ToolCallFacts`), by tool name. */
+	readonly toolCallFacts = (toolName: string, args: unknown) =>
+		this._routines?.session.tool.name === toolName ? this._routines.session.callFacts(args) : undefined;
 
 	/**
 	 * Saves a routine for this session without the model tool: the tool's validation, saved worker authority capture

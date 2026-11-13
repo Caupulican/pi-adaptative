@@ -248,17 +248,42 @@ function argsSaveWatchSchedule(args: unknown): boolean {
 	);
 }
 
+/**
+ * What a routine's owner read in its store about the routine a call names: whether that routine, at the revision the
+ * call expects, runs workers. A missing, foreign, changed or unreadable target reads as running them.
+ */
+export interface RoutineCallFacts {
+	readonly tool: typeof ROUTINE_TOOL_NAME;
+	readonly targetRunsWorkers: boolean;
+}
+
+/**
+ * Facts about one call's target that its arguments only name, resolved by the tool's owner from its own store before any
+ * gate. Host-internal: only the root-only lane tools resolve them (`BackgroundLaneController.toolCallFacts`, by tool
+ * name), never an extension. Every reader of a call's requirement takes the same facts, so the gate, its approval
+ * description and the observation policy decide alike; absent facts keep the strictest requirement.
+ */
+export type ToolCallFacts = RoutineCallFacts;
+
 export function toolCapabilityRequirementClauses(
 	toolName: string,
 	args?: unknown,
+	facts?: ToolCallFacts,
 ): readonly (readonly HarnessCapability[])[] {
 	const name = toolName.toLowerCase();
 	if (name === ROUTINE_TOOL_NAME && args !== undefined) {
 		const action =
 			args && typeof args === "object" && "action" in args ? (args as { action: unknown }).action : undefined;
-		// A watch runs no worker: its firing wakes the agent that armed it, so saving one is planning, not delegation.
+		// A watch runs no worker: its firing wakes the agent that armed it, so saving or resuming one is planning, not
+		// delegation. Only the store knows what a resumed routine is, so resume relaxes on its owner's facts alone.
 		const savesWatch = (action === "create" || action === "update") && argsSaveWatchSchedule(args);
-		return action === "list" || action === "get" || action === "pause" || action === "delete" || savesWatch
+		const resumesWatch = action === "resume" && facts?.tool === ROUTINE_TOOL_NAME && !facts.targetRunsWorkers;
+		return action === "list" ||
+			action === "get" ||
+			action === "pause" ||
+			action === "delete" ||
+			savesWatch ||
+			resumesWatch
 			? [["workflow.plan"]]
 			: [["workflow.plan"], ["workflow.delegate"]];
 	}
@@ -333,13 +358,17 @@ export function toolCapabilityRequirementClauses(
 	return itemPolicy.capabilityClauses;
 }
 
-export function requiredEnvelopeCapabilities(toolName: string, args?: unknown): readonly HarnessCapability[] {
-	const clauses = toolCapabilityRequirementClauses(toolName, args);
+export function requiredEnvelopeCapabilities(
+	toolName: string,
+	args?: unknown,
+	facts?: ToolCallFacts,
+): readonly HarnessCapability[] {
+	const clauses = toolCapabilityRequirementClauses(toolName, args, facts);
 	return clauses.map((clause) => clause[0]).filter((c): c is HarnessCapability => c !== undefined);
 }
 
-export function formatToolCapabilityRequirement(toolName: string, args?: unknown): string {
-	return toolCapabilityRequirementClauses(toolName, args)
+export function formatToolCapabilityRequirement(toolName: string, args?: unknown, facts?: ToolCallFacts): string {
+	return toolCapabilityRequirementClauses(toolName, args, facts)
 		.map((clause) => (clause.length === 1 ? clause[0] : `(${clause.join(" or ")})`))
 		.filter((clause): clause is string => clause !== undefined)
 		.join(" and ");
@@ -349,8 +378,9 @@ export function envelopeHasToolCapability(
 	capabilities: readonly HarnessCapability[],
 	toolName: string,
 	args?: unknown,
+	facts?: ToolCallFacts,
 ): boolean {
-	return resolveToolCallCapabilities(capabilities, toolName, args) !== undefined;
+	return resolveToolCallCapabilities(capabilities, toolName, args, facts) !== undefined;
 }
 
 /** Resolve the exact alternative selected from every conjunctive clause for one invocation. */
@@ -358,9 +388,10 @@ export function resolveToolCallCapabilities(
 	capabilities: readonly HarnessCapability[],
 	toolName: string,
 	args?: unknown,
+	facts?: ToolCallFacts,
 ): readonly HarnessCapability[] | undefined {
 	if (!getToolCapabilityPolicy(toolName)) return undefined;
-	const clauses = toolCapabilityRequirementClauses(toolName, args);
+	const clauses = toolCapabilityRequirementClauses(toolName, args, facts);
 	if (clauses.length === 0) return [];
 	const resolved: HarnessCapability[] = [];
 	for (const clause of clauses) {
@@ -384,10 +415,11 @@ export function resolveToolCallPathAccess(
 	capabilities: readonly HarnessCapability[],
 	toolName: string,
 	args?: unknown,
+	facts?: ToolCallFacts,
 ): ToolPathAccess {
 	const policy = getToolCapabilityPolicy(toolName);
 	if (!policy?.enforcements.includes("path-scope")) return "none";
-	const selected = resolveToolCallCapabilities(capabilities, toolName, args);
+	const selected = resolveToolCallCapabilities(capabilities, toolName, args, facts);
 	if (!selected) return "none";
 	const name = toolName.toLowerCase();
 	// These tools accept identifiers or natural-language queries, not filesystem paths. Their

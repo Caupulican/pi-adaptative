@@ -20,7 +20,11 @@
  * under path-scope enforcement alone, and a tool the catalogue does not know is opaque.
  */
 import type { HarnessCapability } from "../capability-contract.ts";
-import { getToolCapabilityPolicy, toolCapabilityRequirementClauses } from "../tool-capability-policy.ts";
+import {
+	getToolCapabilityPolicy,
+	type ToolCallFacts,
+	toolCapabilityRequirementClauses,
+} from "../tool-capability-policy.ts";
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 
 export type RepositoryEffect = "typed_owned_write" | "observe" | "none";
@@ -92,6 +96,7 @@ export function toolRepositoryEffect(toolName: string, args?: unknown): Reposito
 export function repositoryEffectForCall(input: {
 	readonly toolName: string;
 	readonly args: unknown;
+	readonly facts?: ToolCallFacts;
 	readonly deliveryActive: boolean;
 	readonly hostEffect?: HostRepositoryEffect;
 }): RepositoryEffect {
@@ -102,7 +107,7 @@ export function repositoryEffectForCall(input: {
 	// A lookup only reads, and each of its requests is observed as the call it is (lookup.ts).
 	if (name === "tool_task" || name === "repo_read" || name === LOOKUP_TOOL_NAME) return "none";
 	if (name === "edit" || name === "write" || name === "edit-diff") return "typed_owned_write";
-	const clauses = toolCapabilityRequirementClauses(name, input.args);
+	const clauses = toolCapabilityRequirementClauses(name, input.args, input.facts);
 	if (clauses.length === 0) return input.deliveryActive ? "observe" : "none";
 	return clauses.flat().some((capability) => CAPABILITY_REPOSITORY_POLICY[capability].observedCall)
 		? "observe"

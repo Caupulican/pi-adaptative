@@ -32,6 +32,7 @@ import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-bound
 import { serialCallHint } from "./serial-call-hint.ts";
 import type { SoulController } from "./soul/soul-controller.ts";
 import type { SystemOneController } from "./system-one/index.ts";
+import type { ToolCallFacts } from "./tool-capability-policy.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import { retireToolCall } from "./tools/file-mutation-queue.ts";
 import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
@@ -238,6 +239,8 @@ export interface ToolGateControllerDeps {
 	getObjectiveId?(): string;
 	deliveryActive?(): boolean;
 	hostRepositoryEffect?(toolName: string): HostRepositoryEffect | undefined;
+	/** What the tool's owner reads about the target these args name (`ToolCallFacts`); undefined for most tools. */
+	toolCallFacts?(toolName: string, args: unknown): ToolCallFacts | undefined;
 }
 
 /** File paths a mutation tool call names in its own arguments. */
@@ -306,6 +309,7 @@ export class ToolGateController {
 		const effect = repositoryEffectForCall({
 			toolName,
 			args,
+			facts: this.deps.toolCallFacts?.(toolName, args),
 			deliveryActive: this.deps.deliveryActive?.() ?? false,
 			hostEffect: this.deps.hostRepositoryEffect?.(toolName),
 		});
@@ -418,6 +422,8 @@ export class ToolGateController {
 			return evaluateToolGateAsync({
 				toolName: toolCall.name,
 				args: currentArgs,
+				// Read per pass: a hook that rewrites the args may name another target.
+				facts: this.deps.toolCallFacts?.(toolCall.name, currentArgs),
 				cwd: executionContext?.cwd ?? scopeCwd,
 				scopeCwd,
 				envelope,

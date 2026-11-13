@@ -6,6 +6,7 @@ import { englishText } from "../language/interface-text.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { strictCanonicalDigest } from "../steering/canonical.ts";
+import type { RoutineCallFacts } from "../tool-capability-policy.ts";
 import { hostTimeZone } from "./calendar-schedule.ts";
 import {
 	nextRoutineAt,
@@ -24,6 +25,7 @@ import {
 import { describeRoutineProgress, routineProgressLine } from "./routine-progress.ts";
 import { MAX_ARM_OWNER_SOURCES, type RoutineArmAuthority, type RoutineRunOpener } from "./routine-provenance.ts";
 import type { RetiredRoutineRecord } from "./routine-retired.ts";
+import { routineRunsWorkers } from "./routine-save-origin.ts";
 import type { RoutineSchedulerController } from "./routine-scheduler-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import {
@@ -35,6 +37,7 @@ import {
 	type RoutineToolSummary,
 	type RoutineToolView,
 } from "./routine-tool.ts";
+import { ROUTINE_TOOL_NAME } from "./routine-tool-names.ts";
 import type { RoutineWakeAddress } from "./routine-wake-address.ts";
 import {
 	agentWatchBoundsRefusal,
@@ -333,6 +336,32 @@ export class RoutineSessionController implements RoutineToolPort {
 		const saved = this.deps.store.resetRoutineProgress({ routineId });
 		harnessLog.info("routines", "a routine's progress was reset", { routineId });
 		return view(saved, this.deps.store, this.deps.now());
+	}
+
+	/**
+	 * What the store holds about the routine a `resume` names, read before any gate (`ToolCallFacts`): resuming restarts
+	 * its standing work, and only the store knows whether that work runs workers. Only this session's routine at the
+	 * revision the call expects may read as one that does not, since the call's write fails on any other revision; a
+	 * missing, foreign, changed or unreadable routine reads as running workers, so the call keeps the delegate requirement.
+	 * Total on raw arguments; undefined for every other action.
+	 */
+	callFacts(args: unknown): RoutineCallFacts | undefined {
+		const call = args && typeof args === "object" ? (args as Record<string, unknown>) : undefined;
+		const { routineId, expectedRevision } = call ?? {};
+		if (call?.action !== "resume" || typeof routineId !== "string" || typeof expectedRevision !== "number") return;
+		return { tool: ROUTINE_TOOL_NAME, targetRunsWorkers: this.targetRunsWorkers(routineId, expectedRevision) };
+	}
+
+	private targetRunsWorkers(routineId: string, expectedRevision: number): boolean {
+		try {
+			if (this.deps.isDisposed()) return true;
+			const routine = this.deps.store.getRoutine(routineId);
+			if (!routine || !this.owns(routine) || routine.revision !== expectedRevision) return true;
+			return routineRunsWorkers(routine.schedule);
+		} catch (error) {
+			harnessLog.warn("routines", "a routine could not be read for its call's capability", { error: String(error) });
+			return true;
+		}
 	}
 
 	/**
