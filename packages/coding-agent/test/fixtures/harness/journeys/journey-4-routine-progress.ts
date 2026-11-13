@@ -24,6 +24,12 @@ const ROUTINE_ID = "shard-audit";
 const WATCH_ROUTINE_ID = "command-alert-watch";
 const WATCH_COMMAND = "cat alert-feed.txt";
 const WATCH_PLAN = "Summarize alert transitions in alert-feed.txt.";
+/**
+ * Why the wake of a watch that carried a command's output may not write the routine's progress: the third-party gate's own
+ * words. That output is a third party's, so the run is refused before the routine tool's own owner-turn check is reached.
+ */
+const THIRD_PARTY_NOTE_REFUSAL =
+	"Refused: routine note changes state beyond reading, which only the owner's own turn decides. This run carries words from an event written by someone else.";
 
 function extractLatestWorkerTask(messages: ReadonlyArray<{ role: string; content: unknown }>): string {
 	const tasks = messages.flatMap((message) =>
@@ -514,9 +520,9 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 		expect(
 			{
 				error: wakeNoteRefusal?.isError,
-				refusal: wakeNoteRefusal?.text.includes("The owner has not spoken in this turn"),
+				refusal: wakeNoteRefusal?.text.includes(THIRD_PARTY_NOTE_REFUSAL),
 			},
-			"the wake of a third party's output cannot write the routine's progress",
+			"the wake of a third party's output cannot write the routine's progress: the third-party gate refuses it",
 		).toEqual({ error: true, refusal: true });
 
 		const statusAfterWatch1 = await session.autonomyStatus();
