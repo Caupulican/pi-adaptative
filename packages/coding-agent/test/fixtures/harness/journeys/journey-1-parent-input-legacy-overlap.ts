@@ -182,7 +182,15 @@ export async function verifyParentInputLegacyOverlap(
 			});
 			active = opened.session;
 			const store = icmContinuousStore(agentDir);
-			await icmWaitForChatIdle(world, agentDir, 1, () => world.io.existsSync(store.migrationFile));
+			const importPhase = pass === 0 ? "first import" : "reopen";
+			world.trace.mark("root", `H25 legacy ${importPhase} ICM migration wait`);
+			await icmWaitForChatIdle(
+				world,
+				agentDir,
+				1,
+				() => world.io.existsSync(store.migrationFile),
+				`H25 legacy ${importPhase}`,
+			);
 			const records = icmReadContinuousRecords(world, store);
 			for (const key of keys) expect(records.filter((record) => record.sourceKey === key)).toHaveLength(1);
 			expect(utf8Text(world.io.readFileSync(path, "utf8"))).toBe(bytes);

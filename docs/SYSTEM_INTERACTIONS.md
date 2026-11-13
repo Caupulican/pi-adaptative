@@ -1317,3 +1317,18 @@ a second successful exit that the single-terminal-outcome rule correctly prevent
 now joins actual runtime disposal and lifecycle listener cleanup, asserts the original sole
 outcome, and releases its virtual children even when an assertion fails. The failed run remains
 preserved; the corrected composed run is separate evidence.
+
+The corrected-quit J1 run on `a8f1b84ab` completed System One enabled and failed later in the
+disabled run while waiting for an ICM store to become idle. Its 3,023 source hashes stayed
+unchanged. The trace narrows the wait to legacy parent-input import/reopen during routines, but
+the old generic timeout does not identify the pass or blocked condition. It does not establish a
+production ingestion defect. The composed wait now records bounded root, scheduler, migration,
+alarm and provider diagnostics while retaining its predicates and sixty-second deadline.
+
+Independent source review confirmed that this fixture selected only the first alarm in insertion
+order. A pre-existing nonquiet alarm could hide an already-armed quiet-delay alarm, leaving the
+driver waiting for a future arm. The driver now selects the matching alarm with the nearest due
+time. Its event-driven wait remains and does not drain arbitrary alarms. It retains the existing
+quiet-delay heuristic; a matching delay alone does not establish an alarm's purpose. This fixes the demonstrated fixture ordering case, while attribution of the
+recorded timeout remains unproved until further evidence. The complete composed journey remains
+the execution boundary for this correction.

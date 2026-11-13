@@ -1608,22 +1608,55 @@ export async function icmWaitForChatIdle(
 	agentDir: string,
 	expectedMessages: number,
 	predicate?: (records: readonly IcmStoredContinuousRecord[], nodes: readonly IcmStoredContinuousNode[]) => boolean,
+	context?: string,
 ): Promise<void> {
 	const store = icmContinuousStore(agentDir);
-	const settled = world.io.waitForMutation(() => {
+	const providerStart = world.provider.requests.length;
+	let lastObservation: Record<string, unknown> = {
+		root: "not observed",
+		scheduler: "not observed",
+		predicate: "not evaluated",
+	};
+	const observe = (): boolean => {
 		const rootRaw = world.io.peekFile(store.rootFile);
-		if (rootRaw === undefined) return false;
+		if (rootRaw === undefined) {
+			lastObservation = {
+				rootNextId: "absent",
+				migrationMarker: world.io.existsSync(store.migrationFile),
+				scheduler: "not evaluated",
+				predicate: "not evaluated",
+			};
+			return false;
+		}
 		const root = JSON.parse(rootRaw) as { readonly nextId: number };
-		if (root.nextId < expectedMessages) return false;
 		const queue = icmReadScheduler(world, store);
+		const migrationMarker = world.io.existsSync(store.migrationFile);
 		// The root file is published before the scheduler is told of the new messages: wait out that gap too.
-		if (queue === undefined || queue.totalMessages !== root.nextId) return false;
-		if (queue.running > 0 || queue.readyLeaves > 0 || queue.readyParents > 0 || queue.blocked > 0) return false;
-		return predicate ? predicate(icmReadContinuousRecords(world, store), icmReadContinuousNodes(world, store)) : true;
-	});
+		if (root.nextId < expectedMessages || queue === undefined || queue.totalMessages !== root.nextId) {
+			lastObservation = {
+				rootNextId: root.nextId,
+				migrationMarker,
+				scheduler: queue ?? "absent-or-migrating",
+				predicate: "not evaluated",
+			};
+			return false;
+		}
+		if (queue.running > 0 || queue.readyLeaves > 0 || queue.readyParents > 0 || queue.blocked > 0) {
+			lastObservation = { rootNextId: root.nextId, migrationMarker, scheduler: queue, predicate: "not evaluated" };
+			return false;
+		}
+		const predicateResult = predicate
+			? predicate(icmReadContinuousRecords(world, store), icmReadContinuousNodes(world, store))
+			: true;
+		lastObservation = { rootNextId: root.nextId, migrationMarker, scheduler: queue, predicate: predicateResult };
+		return predicateResult;
+	};
+	const settled = world.io.waitForMutation(observe);
 	// A turn that ended before this wait holds the chat's summaries for the foreground quiet window (see
-	// `icmEndForegroundQuiet`): let it pass whenever it is the first alarm armed, until the chat has settled.
+	// `icmEndForegroundQuiet`): pass that alarm until the chat settles, even when older retry timers precede it in insertion order.
 	let finished = false;
+	let quietTimerAdvanceCount = 0;
+	const quietTimerAdvances: Array<Record<string, unknown>> = [];
 	const stopDriver = new AbortController();
 	void settled.then(
 		() => {
@@ -1635,8 +1668,25 @@ export async function icmWaitForChatIdle(
 	);
 	const driver = (async () => {
 		while (!finished && !stopDriver.signal.aborted) {
-			if (world.timers.armedDelays("continuous-chat")[0] === CONTINUOUS_CHAT_FOREGROUND_QUIET_MS)
-				world.timers.advance("continuous-chat", CONTINUOUS_CHAT_FOREGROUND_QUIET_MS);
+			const before = world.timers.armedSnapshot("continuous-chat");
+			const quietTimer = before
+				.filter((timer) => timer.delayMs === CONTINUOUS_CHAT_FOREGROUND_QUIET_MS)
+				.sort((left, right) => left.remainingMs - right.remainingMs)[0];
+			if (quietTimer) {
+				const advanceMs = Math.max(0, quietTimer.remainingMs);
+				world.timers.advance("continuous-chat", advanceMs);
+				quietTimerAdvanceCount++;
+				const after = world.timers.armedSnapshot("continuous-chat");
+				quietTimerAdvances.push({
+					selectedHandle: quietTimer.handle,
+					advanceMs,
+					beforeCount: before.length,
+					before: before.slice(0, 8),
+					afterCount: after.length,
+					after: after.slice(0, 8),
+				});
+				if (quietTimerAdvances.length > 8) quietTimerAdvances.shift();
+			}
 			await Promise.race([
 				world.timers.nextArmed("continuous-chat", stopDriver.signal),
 				settled.catch(() => undefined),
@@ -1646,16 +1696,76 @@ export async function icmWaitForChatIdle(
 		if (!stopDriver.signal.aborted) throw error;
 	});
 	try {
-		await withDeadline(
-			world.trace,
-			`ICM continuous chat idle (${expectedMessages} messages)`,
-			Promise.all([settled, driver]).then(() => undefined),
-			60_000,
-		);
+		try {
+			await withDeadline(
+				world.trace,
+				`ICM continuous chat idle (${expectedMessages} messages)`,
+				Promise.all([settled, driver]).then(() => undefined),
+				60_000,
+			);
+		} catch (error) {
+			const providerRequests = world.provider.requests;
+			const providerRequestStart = Math.max(providerStart, providerRequests.length - 5);
+			let predicateAtDeadline: boolean | string;
+			try {
+				predicateAtDeadline = observe();
+			} catch (diagnosticError) {
+				predicateAtDeadline = `observation failed: ${diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError)}`;
+			}
+			let timersDiagnostic: unknown;
+			try {
+				const timers = world.timers.armedSnapshot("continuous-chat");
+				timersDiagnostic = { count: timers.length, first: timers.slice(0, 8) };
+			} catch (diagnosticError) {
+				timersDiagnostic = `unavailable: ${diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError)}`;
+			}
+			let workRows: Record<string, unknown>[] = [];
+			let workRowsFailure: string | undefined;
+			try {
+				workRows =
+					world.guard.peekSqlite(
+						store.queueDatabase,
+						"SELECT level, ordinal, status, retry_after, reason FROM work ORDER BY level, ordinal LIMIT 8",
+					) ?? [];
+			} catch (diagnosticError) {
+				workRowsFailure = diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError);
+			}
+			const diagnostics = {
+				context: context ?? "unspecified ICM caller",
+				agentDir,
+				expectedMessages,
+				...lastObservation,
+				predicateAtDeadline,
+				continuousChatTimers: timersDiagnostic,
+				quietTimerAdvanceCount,
+				recentQuietTimerAdvances: quietTimerAdvances,
+				...(workRowsFailure ? { schedulerRowsFailure: workRowsFailure.slice(0, 240) } : {}),
+				firstSchedulerRows: workRows.map((row) => ({
+					level: row.level,
+					ordinal: row.ordinal,
+					status: row.status,
+					retryAfter: row.retry_after,
+					reason: typeof row.reason === "string" ? row.reason.slice(0, 160) : row.reason,
+				})),
+				recentWarnings: world.warnings.slice(-4).map((warning) => warning.slice(0, 240)),
+				recentProviderRequests: providerRequests.slice(providerRequestStart).map((request) => ({
+					sequence: request.sequence,
+					model: request.model.id,
+					messageCount: request.context.messages.length,
+				})),
+			};
+			throw new Error(
+				`${error instanceof Error ? error.message : String(error)}; ICM diagnostics=${JSON.stringify(diagnostics)}`,
+				{
+					cause: error,
+				},
+			);
+		}
 	} finally {
 		finished = true;
 		stopDriver.abort();
-		await driver;
+		// The bounded wait already joined `driver` through Promise.all; avoid replacing its wrapped failure while cleaning up.
+		await driver.catch(() => undefined);
 	}
 }
 
