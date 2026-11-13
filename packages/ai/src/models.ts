@@ -32,7 +32,7 @@ export function resolveCatalogPricing(provider: string, modelId: string): Model<
 			: modelId.startsWith("claude-")
 				? "anthropic"
 				: "openai";
-		return getModel(upstream, modelId) ?? getModel(upstream, modelId.replace(/-(?:low|medium|high)$/, ""));
+		return getModel(upstream, modelId) ?? getModel(upstream, modelId.replace(/-(?:xhigh|low|medium|high)$/, ""));
 	}
 	if (!Object.hasOwn(MODELS, provider)) return undefined;
 	return getModel(provider as KnownProvider, modelId);

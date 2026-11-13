@@ -43,6 +43,10 @@ export const REVIEWED_ANTIGRAVITY_INSTALLATIONS = Object.freeze([
 		version: "1.5.5",
 		sha256: "89f16bdb87f62e6d07484c52e6bafe76a81b0fd13d740110c77dc3c3c8d8d8b6",
 	}),
+	Object.freeze({
+		version: "1.5.8",
+		sha256: "9db59b6371107b939befa9c507c0a24989fda974e75d81d8529f3689ef7322e5",
+	}),
 ]);
 
 export function antigravityObject(value: unknown): Record<string, unknown> {
@@ -85,36 +89,54 @@ export async function antigravityRequest(
 
 /**
  * Catalog variants are fixed presets. Budget models send their own budget;
- * level models send the catalog level (1=LOW, 2=MEDIUM, 3=HIGH), not a caller-selected scale.
+ * level models send the catalog level (1=LOW, 2=MEDIUM, 3=HIGH, 100=XHIGH), not a caller-selected scale.
  */
+type AntigravityCatalogLevel = 1 | 2 | 3 | 100;
+
+function antigravityCatalogLevel(value: unknown): AntigravityCatalogLevel | undefined {
+	return value === 1 || value === 2 || value === 3 || value === 100 ? value : undefined;
+}
+
+function antigravityCatalogLevelName(value: AntigravityCatalogLevel): "low" | "medium" | "high" | "xhigh" {
+	switch (value) {
+		case 1:
+			return "low";
+		case 2:
+			return "medium";
+		case 3:
+			return "high";
+		case 100:
+			return "xhigh";
+	}
+}
+
+/** Match the longest variant suffix. `-xhigh` also ends in `-high`. */
+function antigravityNamedVariant(id: string): "low" | "medium" | "high" | "xhigh" | undefined {
+	if (id.endsWith("-xhigh")) return "xhigh";
+	if (id.endsWith("-low")) return "low";
+	if (id.endsWith("-medium")) return "medium";
+	if (id.endsWith("-high")) return "high";
+	return undefined;
+}
+
 function antigravityThinkingPreset(
-	preset: { kind: "budget"; value: number } | { kind: "level"; value: 1 | 2 | 3 },
+	preset: { kind: "budget"; value: number } | { kind: "level"; value: AntigravityCatalogLevel },
 	id: string,
 ): {
-	level: "low" | "medium" | "high";
+	level: "low" | "medium" | "high" | "xhigh";
 	thinkingLevelMap: ThinkingLevelMap;
 	thinkingBudgets?: ThinkingBudgets;
 } {
 	// Variant identity is authoritative: GPT-OSS Medium has an 8192-token budget.
-	const namedLevel = id.endsWith("-low")
-		? "low"
-		: id.endsWith("-medium")
-			? "medium"
-			: id.endsWith("-high")
-				? "high"
-				: undefined;
+	const namedLevel = antigravityNamedVariant(id);
 	const level =
 		preset.kind === "level"
-			? preset.value === 1
-				? "low"
-				: preset.value === 2
-					? "medium"
-					: "high"
+			? antigravityCatalogLevelName(preset.value)
 			: (namedLevel ??
 				(preset.value < 0 || preset.value >= 8192 ? "high" : preset.value >= 2048 ? "medium" : "low"));
 	return {
 		level,
-		thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null, [level]: level },
+		thinkingLevelMap: { off: null, minimal: null, low: null, medium: null, high: null, xhigh: null, [level]: level },
 		...(preset.kind === "budget" ? { thinkingBudgets: { [level]: preset.value } } : {}),
 	};
 }
@@ -138,14 +160,14 @@ export function antigravityThinkingBudget(model: Model<"google-antigravity">): n
 	return values.length === 1 ? values[0] : undefined;
 }
 
-export function antigravityThinkingLevel(model: Model<"google-antigravity">): 1 | 2 | 3 | undefined {
+export function antigravityThinkingLevel(model: Model<"google-antigravity">): AntigravityCatalogLevel | undefined {
 	if (!model.reasoning || model.thinkingBudgets || !model.thinkingLevelMap) return undefined;
 	if (Object.values(model.thinkingLevelMap).filter((value) => value != null).length !== 1) return undefined;
 	return toAntigravityThinkingLevel(model.defaultThinkingLevel);
 }
 
 /** One native enum projection for catalog presets and caller-selected Google levels. */
-export function toAntigravityThinkingLevel(level: string | undefined): 1 | 2 | 3 | undefined {
+export function toAntigravityThinkingLevel(level: string | undefined): AntigravityCatalogLevel | undefined {
 	switch (level?.toLowerCase()) {
 		case "low":
 			return 1;
@@ -153,6 +175,8 @@ export function toAntigravityThinkingLevel(level: string | undefined): 1 | 2 | 3
 			return 2;
 		case "high":
 			return 3;
+		case "xhigh":
+			return 100;
 		default:
 			return undefined;
 	}
@@ -176,11 +200,10 @@ export function parseAntigravityModels(raw: unknown): Model<"google-antigravity"
 			reasoning && Number.isSafeInteger(info.thinkingBudget) && (info.thinkingBudget as number) >= -1
 				? (info.thinkingBudget as number)
 				: undefined;
-		const nativeLevel = info.thinkingLevel;
-		// Gemini level presets (including Argon) do not advertise adaptive thinking.
+		const nativeLevel = antigravityCatalogLevel(info.thinkingLevel);
+		// Gemini level presets (including Argon and Hydrogen XHigh) do not advertise adaptive thinking.
 		// The catalog's level is authoritative even when a zero budget is also present.
-		const catalogLevel =
-			reasoning && (nativeLevel === 1 || nativeLevel === 2 || nativeLevel === 3) ? nativeLevel : undefined;
+		const catalogLevel = reasoning ? nativeLevel : undefined;
 		const preset =
 			catalogLevel !== undefined
 				? antigravityThinkingPreset({ kind: "level", value: catalogLevel }, id)
@@ -307,9 +330,10 @@ export function antigravityProjectId(account: Record<string, unknown>): string {
  * field the adapter reads (thinking budgets and backends are version 2): a stored catalog of an older
  * version is refreshed instead of silently running models without what it lacks. Version 3 adds
  * adaptive thinking levels and the discovery client's version. Version 4 retains level-based
- * Gemini presets independently of the adaptive-thinking flag.
+ * Gemini presets independently of the adaptive-thinking flag. Version 5 retains Hydrogen XHigh
+ * catalog level 100; older catalogs omit it.
  */
-export const ANTIGRAVITY_CATALOG_VERSION = 4;
+export const ANTIGRAVITY_CATALOG_VERSION = 5;
 
 export async function discoverAntigravityAccount(
 	token: string,

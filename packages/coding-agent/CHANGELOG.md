@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Changed
+
+- Antigravity model docs name the Gemini 4 Hydrogen aliases. XHigh uses catalog thinking level 100.
+
 ## [0.104.62] - 2026-11-13
 
 ### Changed

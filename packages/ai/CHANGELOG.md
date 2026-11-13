@@ -1,5 +1,13 @@
 ## [Unreleased]
 
+### Fixed
+
+- Antigravity OAuth keeps Gemini 4 Hydrogen XHigh. Discovery retains catalog thinking level 100 for `gemini-4-hydrogen-xhigh` and sends that level. Levels 1, 2, and 3 are unchanged. Catalog format 5 refreshes a stored catalog that omitted level 100. Pricing for an `-xhigh` alias uses the unsuffixed catalog model.
+
+### Changed
+
+- Admitted the reviewed AGY `1.5.8` image and packaged its CLI identity. Consumer OAuth and the fixed-level Carbon catalog path are unchanged.
+
 ## [0.104.62] - 2026-11-13
 
 ## [0.104.61] - 2026-11-13
