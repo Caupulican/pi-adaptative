@@ -7,6 +7,7 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { strictCanonicalDigest } from "../steering/canonical.ts";
 import type { RoutineCallFacts } from "../tool-capability-policy.ts";
+import type { NestedCallAdmitter } from "../tools/nested-tool-call.ts";
 import { hostTimeZone } from "./calendar-schedule.ts";
 import {
 	nextRoutineAt,
@@ -43,10 +44,11 @@ import {
 	agentWatchBoundsRefusal,
 	agentWatchSlotsRefusal,
 	isWatchSchedule,
+	type WatchScheduleInput,
 	workerWatchSlotsRefusal,
 } from "./routine-watch-arming.ts";
 import { describeWatchCondition, parseWatchCondition, type WatchCondition } from "./watch-contract.ts";
-import { routineWorkerAuthority, type WorkerWatchAuthority } from "./worker-watch-scope.ts";
+import { routineWorkerAuthority, type WorkerWatchAuthority, watchCheckCall } from "./worker-watch-scope.ts";
 
 interface RoutineSessionDeps {
 	readonly store: RoutineStorePort;
@@ -64,6 +66,8 @@ interface RoutineSessionDeps {
 	 * worker together with the session) may not watch it.
 	 */
 	admitWatch(condition: WatchCondition, worker?: WorkerWatchAuthority): WatchCondition;
+	/** The session gate's admission of a sub-call of the routine tool call being executed, as any call of its tool faces. */
+	admitSubCall: NestedCallAdmitter;
 	/**
 	 * Owner sources recorded in the current run: the model's context holds every one of them while a tool call of the
 	 * run executes. Empty when the owner said nothing in it (a routine result, CI event or other host input opened it)
@@ -216,15 +220,23 @@ export class RoutineSessionController implements RoutineToolPort {
 		return retired ? retiredView(retired) : undefined;
 	}
 
-	create(input: RoutineToolInput, signal?: AbortSignal): Promise<RoutineToolView> {
-		return this.save(input, undefined, "tool", signal);
+	create(input: RoutineToolInput, invocationId: string, signal?: AbortSignal): Promise<RoutineToolView> {
+		return this.save(input, undefined, invocationId, signal);
 	}
-	update(input: RoutineToolInput, expectedRevision: number, signal?: AbortSignal): Promise<RoutineToolView> {
-		return this.save(input, expectedRevision, "tool", signal);
+	update(
+		input: RoutineToolInput,
+		expectedRevision: number,
+		invocationId: string,
+		signal?: AbortSignal,
+	): Promise<RoutineToolView> {
+		return this.save(input, expectedRevision, invocationId, signal);
 	}
-	/** The embedding host's own creation: no model turn answers it, so no owner turn is required or stamped. */
+	/**
+	 * The embedding host's own creation: no model turn answers it, so no owner turn is required or stamped, and no tool
+	 * call carries it, so a watched command or page is admitted by the watch's own rules alone.
+	 */
 	createForHost(input: RoutineToolInput, signal?: AbortSignal): Promise<RoutineToolView> {
-		return this.save(input, undefined, "host", signal);
+		return this.save(input, undefined, undefined, signal);
 	}
 
 	/**
@@ -411,25 +423,32 @@ export class RoutineSessionController implements RoutineToolPort {
 		}
 	}
 
+	/** `toolCallId` names the routine tool call that saves; the host's own save has none. */
 	private async save(
 		input: RoutineToolInput,
 		expectedRevision: number | undefined,
-		author: "tool" | "host",
+		toolCallId: string | undefined,
 		signal?: AbortSignal,
 	): Promise<RoutineToolView> {
 		this.check(signal);
 		// Read before admission waits: the sources in this call's context, never words the owner sends meanwhile.
-		const authority = author === "tool" ? this.authorizeToolSave(input, expectedRevision) : undefined;
+		const authority = toolCallId === undefined ? undefined : this.authorizeToolSave(input, expectedRevision);
 		const prior = expectedRevision === undefined ? undefined : this.require(input.routineId, expectedRevision);
+		// An update of a worker's watch is admitted under the scope the worker armed it with, which the store keeps.
+		const worker = prior && routineWorkerAuthority(prior);
+		const slotted = authority?.armedBy !== undefined && authority.armedBy.kind !== "owner";
+		if (toolCallId !== undefined && isWatchSchedule(input.schedule)) {
+			// A watch with no slot left is refused before the gate is asked about its check.
+			if (slotted) this.requireWatchSlot();
+			await this.admitWatchedCall(toolCallId, input.schedule.condition, prior, worker, signal);
+		}
 		// A watch runs no worker, so it saves only where it was armed; any other routine saves the worker authority its runs use.
 		const saved: RoutineSave = isWatchSchedule(input.schedule)
 			? { watchOrigin: this.deps.captureOrigin() }
 			: { intent: await this.captureIntent(input, prior, signal) };
 		this.check(signal);
 		// Counted after the awaits, just before the write, so the slots held are the ones this write finds.
-		if (authority?.armedBy && authority.armedBy.kind !== "owner") this.requireWatchSlot();
-		// An update of a worker's watch is admitted under the scope the worker armed it with, which the store keeps.
-		const worker = prior && routineWorkerAuthority(prior);
+		if (slotted) this.requireWatchSlot();
 		return this.persist(input, saved, {
 			...(worker ? { worker } : {}),
 			enabled: prior?.enabled ?? true,
@@ -438,6 +457,39 @@ export class RoutineSessionController implements RoutineToolPort {
 			...(authority?.answeredSources === undefined ? {} : { toolAnsweredSources: authority.answeredSources }),
 			...(authority?.armedBy === undefined ? {} : { armedBy: authority.armedBy }),
 		});
+	}
+
+	/**
+	 * A watched command or page is first the call its check would make, admitted by this session's gate as a sub-call of
+	 * the routine call that arms it, the way a worker's own gate admits its watch's (`task-watch-tool.ts`): every check a
+	 * call of that tool faces applies, the System One operation gate included, and a refused call arms nothing. The watch's
+	 * own rules admit the condition first, so the gate is never asked about a check the watch could not make; the admitted
+	 * call is dropped unstarted, since the monitor makes the checks. An update that keeps the armed check is not asked again.
+	 */
+	private async admitWatchedCall(
+		toolCallId: string,
+		condition: WatchScheduleInput["condition"],
+		prior: RoutineDefinitionView | undefined,
+		worker: WorkerWatchAuthority | undefined,
+		signal?: AbortSignal,
+	): Promise<void> {
+		const admitted = this.deps.admitWatch(parseWatchCondition(condition), worker);
+		const call = watchCheckCall(admitted);
+		if (!call) return;
+		const armed = prior?.schedule.kind === "event" && prior.schedule.source === "watch" ? prior.schedule : undefined;
+		if (armed && isDeepStrictEqual(armed.condition, admitted)) return;
+		const admission = await this.deps.admitSubCall(
+			toolCallId,
+			{ id: `${toolCallId}#watch`, toolName: call.toolName, args: { ...call.args } },
+			signal,
+		);
+		if (admission.kind === "refused") {
+			harnessLog.warn("routines", "a watch was refused: the session's gate refused its check's call", () => ({
+				tool: call.toolName,
+			}));
+			throw new Error(`The check this watch would make was refused: ${admission.reason}`);
+		}
+		admission.abandon();
 	}
 
 	/** The worker authority a routine's runs use: the saved one when nothing it was captured from changed, else captured now. */

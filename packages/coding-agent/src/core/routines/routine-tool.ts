@@ -91,8 +91,14 @@ export interface RoutineToolPort {
 		next?: string;
 	}>;
 	get(routineId: string, signal?: AbortSignal): Promise<RoutineToolView | RoutineToolRetired | undefined>;
-	create(input: RoutineToolInput, signal?: AbortSignal): Promise<RoutineToolView>;
-	update(input: RoutineToolInput, expectedRevision: number, signal?: AbortSignal): Promise<RoutineToolView>;
+	/** `invocationId` is this tool call's id: a watched command or page is admitted as a sub-call of it. */
+	create(input: RoutineToolInput, invocationId: string, signal?: AbortSignal): Promise<RoutineToolView>;
+	update(
+		input: RoutineToolInput,
+		expectedRevision: number,
+		invocationId: string,
+		signal?: AbortSignal,
+	): Promise<RoutineToolView>;
 	setEnabled(
 		routineId: string,
 		expectedRevision: number,
@@ -287,8 +293,8 @@ export function createRoutineToolDefinition(getPort: () => RoutineToolPort | und
 						return result({
 							routine:
 								params.action === "create"
-									? await port.create(input, signal)
-									: await port.update(input, params.expectedRevision, signal),
+									? await port.create(input, invocationId, signal)
+									: await port.update(input, params.expectedRevision, invocationId, signal),
 						});
 					}
 					case "pause":

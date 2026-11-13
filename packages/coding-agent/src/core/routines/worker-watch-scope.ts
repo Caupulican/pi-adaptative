@@ -68,11 +68,12 @@ export function routineWorkerAuthority(routine: {
 }
 
 /**
- * The call a worker's own tools would make to check a condition: its shell for a command, its fetch tool for a page. A
- * worker arms such a watch only when its own gate admits that call, and a runtime carrying a third party's words is judged
- * by it at every observation. A path, a process, a pid or a port needs no tool, so it has none.
+ * The call the armer's own tools would make to check a condition: the shell for a command, the fetch tool for a page. Such
+ * a watch is armed only when the armer's gate admits that call (a worker's own gate, or the session's for a routine save),
+ * and a runtime carrying a third party's words is judged by it at every observation. A path, a process, a pid or a port
+ * needs no tool, so it has none.
  */
-export function workerWatchCall(
+export function watchCheckCall(
 	condition: WatchCondition,
 ): { readonly toolName: string; readonly args: Readonly<Record<string, unknown>> } | undefined {
 	if (condition.type === "command") return { toolName: "bash", args: { command: condition.command } };

@@ -51,7 +51,7 @@ import {
 } from "../secrets/credential-exposure-guard.ts";
 import { assertReachableAddress, type PublicWebPolicy } from "../web/public-web-client.ts";
 import { isWatchGlob, splitWatchPattern, type WatchCondition } from "./watch-contract.ts";
-import { type WorkerWatchAuthority, workerWatchCall } from "./worker-watch-scope.ts";
+import { type WorkerWatchAuthority, watchCheckCall } from "./worker-watch-scope.ts";
 
 export interface WatchAdmissionHost {
 	getCwd(): string;
@@ -156,7 +156,7 @@ export class WatchAdmission {
 			case "http": {
 				if (worker && !worker.scope.network)
 					throw new Error("A watched page was refused: the worker that armed it holds no network.http grant.");
-				const call = workerWatchCall(condition);
+				const call = watchCheckCall(condition);
 				const refusal = worker && call && this.thirdPartyRefusal(worker, call.toolName, call.args);
 				if (refusal) throw new Error(`A watched page was refused. ${refusal}`);
 				return condition;

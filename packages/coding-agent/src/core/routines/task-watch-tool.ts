@@ -2,7 +2,7 @@
  * The one routine action a worker runtime holds: arm a watch for its own wait. The tool is installed by the worker's
  * executor with the runtime's admitted identity and its lane's scope, so neither comes from an argument, and the host
  * decides what may be armed: a command or page is checked first as the call the worker's own tools would make, by its own
- * gate (`workerWatchCall`), then `RoutineSessionController.armForWorker` admits it under the worker's scope and the
+ * gate (`watchCheckCall`), then `RoutineSessionController.armForWorker` admits it under the worker's scope and the
  * session's authority together, one-shot with an end time within a day, inside the session's bound. Every later check runs
  * under both again. When it fires or runs out, the runtime is woken with the event; nothing is polled. The tool lists,
  * reads, changes and deletes nothing, so the routine tool stays on the worker floor.
@@ -14,7 +14,7 @@ import { MAX_ROUTINE_PROMPT_CHARS, routineAuthoringSchema } from "./routine-cont
 import { parseRoutineToolInput, type RoutineToolInput, type RoutineToolView } from "./routine-tool.ts";
 import { TASK_WATCH_TOOL_NAME } from "./routine-tool-names.ts";
 import { parseWatchCondition, watchConditionSchema } from "./watch-contract.ts";
-import { type WorkerWatchAuthority, type WorkerWatchScope, workerWatchCall } from "./worker-watch-scope.ts";
+import { type WorkerWatchAuthority, type WorkerWatchScope, watchCheckCall } from "./worker-watch-scope.ts";
 
 /** What the session's routine runtime does for a worker runtime; the runtime id and scope are the executor's, never the model's. */
 export interface TaskWatchPort {
@@ -66,7 +66,7 @@ export function createTaskWatchTool(options: {
 			const input = args as Static<typeof parameters>;
 			try {
 				// A command or page is first the call this worker's own tools would make: its own gate admits it or the arm stops.
-				const call = workerWatchCall(parseWatchCondition(input.condition));
+				const call = watchCheckCall(parseWatchCondition(input.condition));
 				const refused = call && (await caller.admitCall(call.toolName, call.args, signal));
 				if (refused?.block) throw new Error(refused.reason ?? "this worker's tool policy refused the check's call");
 				const routine = await options.port.arm(

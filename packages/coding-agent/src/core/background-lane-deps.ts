@@ -23,6 +23,7 @@ import type { ModelFitnessControllerDeps } from "./research/model-fitness-contro
 import type { ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
 import type { SessionSemanticPlaneController } from "./session-semantic-plane-controller.ts";
 import type { SettingsManager } from "./settings-manager.ts";
+import type { NestedCallAdmitter } from "./tools/nested-tool-call.ts";
 import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 /** The parent execution context serves worker execution; the other members serve the remaining lanes and routines. */
@@ -76,6 +77,8 @@ export interface BackgroundLaneControllerDeps
 	>;
 	canRunRoutines?(): boolean;
 	getToolInvocationKey(callId: string, toolName: string): string;
+	/** The session gate's admission of a sub-call of an admitted call: a routine save admits its watch's check through it. */
+	admitNestedToolCall: NestedCallAdmitter;
 	deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt>;
 	/** The session's `sendUserMessage`: a channel batch enters as a third party's words under its origin. */
 	sendUserMessage(text: string, options: SendUserMessageOptions): Promise<void>;

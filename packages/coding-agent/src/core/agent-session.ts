@@ -1267,6 +1267,7 @@ export class AgentSession {
 			sendUserMessage: (text, options) => this.sendUserMessage(text, options),
 			ownerChannel: this.ownerChannel,
 			getToolInvocationKey: (callId, toolName) => this._foregroundLifecycle.getStartedToolKey(callId, toolName),
+			admitNestedToolCall: (parentId, call, signal) => this._toolGate.admitNested(parentId, call, signal),
 			getOwnerEvidence: () => this._reflection.ownerEvidence,
 			emitAutonomyTelemetry: (event) => this._emitAutonomyTelemetry(event),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
@@ -4650,9 +4651,7 @@ export class AgentSession {
 		return this.settingsManager.getRetryEnabled();
 	}
 
-	/**
-	 * Toggle auto-retry setting.
-	 */
+	/** Toggle auto-retry setting. */
 	setAutoRetryEnabled(enabled: boolean): void {
 		this._runtimeAdmission.mutateResources("retry settings", () => {
 			this.settingsManager.setRetryEnabled(enabled);

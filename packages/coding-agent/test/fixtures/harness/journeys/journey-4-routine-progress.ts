@@ -17,7 +17,7 @@ import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { scriptRequirementCheckSpawn } from "./journey-9-shared.ts";
 import { scriptWatchWake, settleWatchWake } from "./journey-watch-wake.ts";
-import { INTAKE_JUDGMENTS_WITHOUT_GRANT, latestBatchResults } from "./shared.ts";
+import { INTAKE_JUDGMENTS_WITHOUT_GRANT, latestBatchResults, OPERATION_PROCEED_JUDGMENTS } from "./shared.ts";
 
 const PROFILE_ID = "progress-worker";
 const ROUTINE_ID = "shard-audit";
@@ -462,7 +462,11 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 			},
 		);
 
-		world.systemOne.enterPhase("j4-rp-watch-create", INTAKE_JUDGMENTS_WITHOUT_GRANT);
+		// The watched command is admitted at arming as the shell call its check would make, so the operation gate judges it.
+		world.systemOne.enterPhase("j4-rp-watch-create", {
+			...INTAKE_JUDGMENTS_WITHOUT_GRANT,
+			...OPERATION_PROCEED_JUDGMENTS,
+		});
 		await withDeadline(
 			trace,
 			"the owner arms the command alert watch",
