@@ -568,6 +568,8 @@ async function verifyGuardCauseBounds(): Promise<void> {
 interface InteractiveHarness {
 	readonly mode: InteractiveMode;
 	readonly runtime: AgentSessionRuntime;
+	/** The actual runtime-disposal join started by the quit; forced/crash terminal outcomes need not emit a later zero exit. */
+	readonly runtimeDisposeCompletion: () => Promise<void> | undefined;
 	readonly terminalWarnings: TerminalWarnings;
 	readonly calls: string[];
 	readonly warnings: string[];
@@ -587,8 +589,6 @@ interface InteractiveHarness {
 	readonly hold: Barrier;
 	/** Released at the first exit. */
 	readonly exited: Barrier;
-	/** Released at the exit with status 0: a forced exit or a crash ran first, and the held quit then finished by itself. */
-	readonly quitFinished: Barrier;
 	/** Resolves after the real mode's signal shutdown has removed its force listeners. */
 	readonly signalCleanupFinished: Barrier;
 }
@@ -616,7 +616,6 @@ async function createInteractiveHarness(
 	const reached = createBarrier();
 	const hold = createBarrier();
 	const exited = createBarrier();
-	const quitFinished = createBarrier();
 	const signalCleanupFinished = createBarrier();
 	let forceListenersWereArmed = false;
 	const terminal: Terminal = {
@@ -717,7 +716,6 @@ async function createInteractiveHarness(
 				endCalls.push({ code, reason });
 				endDeclarations.push({ code, detail: "", reason });
 				exited.release();
-				if (code === 0) quitFinished.release();
 			},
 			stderr: (text) => {
 				stderr.push(text);
@@ -736,17 +734,27 @@ async function createInteractiveHarness(
 		},
 	});
 	const realDispose = runtime.dispose.bind(runtime);
-	runtime.dispose = async () => {
-		if (options.holdDispose) {
-			removedGuardsAtDispose.push(...installs.filter((i) => i.removed && !isSignalName(i.name)).map((i) => i.name));
-			reached.release();
-			await hold.promise;
+	let runtimeDisposeCompletion: Promise<void> | undefined;
+	runtime.dispose = () => {
+		if (!runtimeDisposeCompletion) {
+			runtimeDisposeCompletion = (async () => {
+				if (options.holdDispose) {
+					removedGuardsAtDispose.push(
+						...installs.filter((i) => i.removed && !isSignalName(i.name)).map((i) => i.name),
+					);
+					reached.release();
+					await hold.promise;
+				}
+				await realDispose();
+			})();
+			void runtimeDisposeCompletion.catch(() => undefined);
 		}
-		await realDispose();
+		return runtimeDisposeCompletion;
 	};
 	return {
 		mode,
 		runtime,
+		runtimeDisposeCompletion: () => runtimeDisposeCompletion,
 		terminalWarnings,
 		calls,
 		warnings,
@@ -762,7 +770,6 @@ async function createInteractiveHarness(
 		reached,
 		hold,
 		exited,
-		quitFinished,
 		signalCleanupFinished,
 	};
 }
@@ -1043,7 +1050,11 @@ async function runQuitWithHeldDispose(world: HarnessWorld): Promise<QuitRun> {
 	await withDeadline(world.trace, "quit: the runtime dispose is held", harness.reached.promise);
 	(armedListener(harness.installs, "unhandledRejection") as (reason: unknown) => void)(fixedError(REJECTION_STACK));
 	harness.hold.release();
+	// The terminal owner's single completed quit is the lifecycle join; a separate zero-exit-only promise cannot represent forced/crash paths.
 	await withDeadline(world.trace, "quit: the process exits", harness.exited.promise, 60_000);
+	expect(harness.endCalls, "normal quit reaches exactly one successful terminal outcome").toEqual([
+		{ code: 0, reason: "quit" },
+	]);
 	return {
 		removedGuardsAtDispose: harness.removedGuardsAtDispose,
 		stderr: harness.stderr,
@@ -1127,8 +1138,23 @@ async function runQuitSecondSignal(world: HarnessWorld, signal: "SIGTERM" | "SIG
 		};
 	} finally {
 		harness.hold.release();
-		await withDeadline(world.trace, `quit ${signal}: the quit finishes`, harness.quitFinished.promise, 60_000);
-		children.release();
+		try {
+			const disposal = harness.runtimeDisposeCompletion() ?? harness.runtime.dispose();
+			await withDeadline(world.trace, `quit ${signal}: actual runtime cleanup joins`, disposal, 60_000);
+			await withDeadline(
+				world.trace,
+				`quit ${signal}: lifecycle removes its force listeners after cleanup`,
+				harness.signalCleanupFinished.promise,
+				60_000,
+			);
+			const exitCode = signal === "SIGINT" ? 130 : 143;
+			expect(harness.exits, `late cleanup cannot add an exit after forced ${signal}`).toEqual([exitCode]);
+			expect(harness.endCalls, `forced ${signal} remains the sole terminal outcome after actual cleanup`).toEqual([
+				{ code: exitCode, reason: "signal-forced" },
+			]);
+		} finally {
+			children.release();
+		}
 	}
 }
 
@@ -1171,10 +1197,24 @@ async function runQuitCrashAfterStop(world: HarnessWorld): Promise<QuitCrashRun>
 			untrackedChildSignals: children.signalsOfUntracked(),
 		};
 	} finally {
-		// The injected exit returned, so the held quit is still unfinished: release it and join it after the observation above was copied.
+		// The injected exit returned, so the held quit is still unfinished: release it and join actual runtime cleanup after copying the crash evidence.
 		harness.hold.release();
-		await withDeadline(world.trace, "quit crash: the quit finishes", harness.quitFinished.promise, 60_000);
-		children.release();
+		try {
+			const disposal = harness.runtimeDisposeCompletion() ?? harness.runtime.dispose();
+			await withDeadline(world.trace, "quit crash: actual runtime cleanup joins", disposal, 60_000);
+			await withDeadline(
+				world.trace,
+				"quit crash: lifecycle removes its force listeners after cleanup",
+				harness.signalCleanupFinished.promise,
+				60_000,
+			);
+			expect(harness.exits, "late quit cleanup cannot add an exit after the crash outcome").toEqual([1]);
+			expect(harness.endCalls, "the crash remains the sole terminal outcome after actual cleanup").toEqual([
+				{ code: 1, reason: "crash-during-shutdown" },
+			]);
+		} finally {
+			children.release();
+		}
 	}
 }
 
