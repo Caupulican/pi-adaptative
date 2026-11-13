@@ -4,6 +4,8 @@
  * reference promotion to recurring), derived position clearing stale `next` when a run omits `progress`, third-party
  * `reset_progress`, non-owner-turn refusal across both System One modes, and a command watch's firing (a third party's
  * output) waking its armer with the output fenced as untrusted data, with no worker run and no progress of its own.
+ * Untrusted progress (`untrusted: true`, `BRIEF_UNTRUSTED`, remedy suppression) needs a run a third party started: an event
+ * routine's, covered in `journey-1-github-routine-progress.ts`.
  */
 
 import "../builtin-install.ts";
