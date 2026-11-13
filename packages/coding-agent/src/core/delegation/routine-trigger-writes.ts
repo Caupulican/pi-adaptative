@@ -15,6 +15,7 @@ import {
 	routineOccurrenceId,
 	routineOccurrencesSettled,
 } from "../routines/routine-contract.ts";
+import { routineReceiptOrigin } from "../routines/routine-save-origin.ts";
 import {
 	decideWatchObservation,
 	type RoutineWatchObservationInput,
@@ -59,10 +60,7 @@ export function retireEndedRoutines(
 					}
 				: undefined;
 		if (trigger) {
-			const parentOrigin =
-				routine.target.kind === "session"
-					? routine.executionSnapshot?.savedIntent.receiptOrigin
-					: input.receiptOrigin;
+			const parentOrigin = routine.target.kind === "session" ? routineReceiptOrigin(routine) : input.receiptOrigin;
 			if (!parentOrigin || parentOrigin.sessionId !== input.parentSessionId) continue;
 			if (!routineJournalHasRoom(state, input.nowMs)) {
 				journalFull = true;
@@ -131,7 +129,7 @@ export function observeWatch(
 			(occurrence.phase === "pending" || occurrence.phase === "claimed" || occurrence.result?.delivery === "pending")
 		)
 			return "held";
-	const parentOrigin = routine.executionSnapshot?.savedIntent.receiptOrigin;
+	const parentOrigin = routineReceiptOrigin(routine);
 	if (!parentOrigin || parentOrigin.sessionId !== input.parentSessionId) return "stale";
 	if (!routineJournalHasRoom(state, input.nowMs) || !routineHasJournalShare(state, routine.routineId, input.nowMs))
 		return "held";
@@ -217,8 +215,7 @@ export function claimManualRoutineOccurrence(
 	if (existing) return structuredClone(existing);
 	if (state.replayTombstones.has(id))
 		throw new Error("This manual request was already consumed and has expired from the bounded replay journal.");
-	const origin =
-		routine.target.kind === "session" ? routine.executionSnapshot?.savedIntent.receiptOrigin : input.receiptOrigin;
+	const origin = routine.target.kind === "session" ? routineReceiptOrigin(routine) : input.receiptOrigin;
 	if (!origin || (input.parentSessionId && origin.sessionId !== input.parentSessionId))
 		throw new Error("Routine parent receipt origin is unavailable.");
 	if (!routineHasJournalShare(state, routine.routineId, input.nowMs))

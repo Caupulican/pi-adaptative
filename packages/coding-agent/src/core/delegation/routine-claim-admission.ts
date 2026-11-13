@@ -45,6 +45,7 @@ import {
 	routineStartWindow,
 	routineZoneUnsupported,
 } from "../routines/routine-contract.ts";
+import { routineReceiptOrigin } from "../routines/routine-save-origin.ts";
 import {
 	createClaimedOccurrence,
 	createPendingOccurrence,
@@ -112,8 +113,7 @@ export function admitClockRoutine(
 	const schedule = stored.schedule;
 	const unchanged = { changed: false, journalFull: false };
 	if (schedule.kind === "event") return unchanged;
-	const parentOrigin =
-		stored.target.kind === "session" ? stored.executionSnapshot?.savedIntent.receiptOrigin : input.receiptOrigin;
+	const parentOrigin = stored.target.kind === "session" ? routineReceiptOrigin(stored) : input.receiptOrigin;
 	if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId)) return unchanged;
 	const unsupported = routineZoneUnsupported(schedule);
 	if (unsupported !== undefined) {
@@ -323,7 +323,7 @@ export function decideEventRoutine(
 	const carried = fresh.slice(routine.schedule.source === "github" ? -HOST_EVENT_LISTENER_LIMITS.maxBatch : -1);
 	const latest = carried.at(-1);
 	if (latest) {
-		const parentOrigin = routine.executionSnapshot?.savedIntent.receiptOrigin;
+		const parentOrigin = routineReceiptOrigin(routine);
 		if (!parentOrigin || (input.parentSessionId && parentOrigin.sessionId !== input.parentSessionId))
 			return "unchanged";
 		// Without journal room, or with the routine's share held, the attempt stays undecided until results settle.

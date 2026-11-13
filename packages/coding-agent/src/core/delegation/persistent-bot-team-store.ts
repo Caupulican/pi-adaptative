@@ -25,7 +25,6 @@ import {
 	type PersistentRoutineTarget,
 	parseLegacyRoutineDefinition,
 	parseRoutineDefinitionView,
-	parseRoutineExecutionSnapshot,
 	parseRoutineIntakeConsumptions,
 	parseRoutineIntakeSessions,
 	parseRoutineOccurrence,
@@ -52,8 +51,10 @@ import {
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
 import { parseRoutineProgress, type RoutineRunFacts, withRoutineOwnerNote } from "../routines/routine-progress.ts";
-import { carriesRoutineArming, creationProvenance } from "../routines/routine-provenance.ts";
+import { creationProvenance } from "../routines/routine-provenance.ts";
 import { parseRetiredRoutines, type RetiredRoutineRecord } from "../routines/routine-retired.ts";
+import { parseRoutineSaveOrigin, routineSaveOriginRefusal } from "../routines/routine-save-origin.ts";
+import { ROUTINE_STORE_VERSIONS, routineStoreFormatVersion } from "../routines/routine-store-format.ts";
 import type { RoutineWatchObservationInput, RoutineWatchOutcome } from "../routines/routine-watch-edge.ts";
 import { parseWatchCondition } from "../routines/watch-contract.ts";
 import { cleanRedactBound } from "../security/secret-text.ts";
@@ -750,9 +751,8 @@ export class PersistentBotTeamStore {
 		if (!Number.isSafeInteger(this.routineRevisionCounter) || this.routineRevisionCounter < highestRoutineRevision)
 			throw new Error("Refusing to persist a stale routine revision counter.");
 		const data = {
-			// Version 5 holds an arming stamp or a wake address and version 4 progress; a build that predates either refuses the store rather
-			// than dropping the routines it cannot read. A store with neither stays version 3.
-			version: this.storesRoutineArming() ? 5 : this.storesRoutineProgress() ? 4 : 3,
+			// A build that predates a field the routines hold refuses the store rather than dropping what it cannot read.
+			version: routineStoreFormatVersion([...this.routines.values()], [...this.routineOccurrences.values()]),
 			routineRevisionCounter: this.routineRevisionCounter,
 			bots: Array.from(this.bots.values()),
 			teams: Array.from(this.teams.values()),
@@ -776,20 +776,6 @@ export class PersistentBotTeamStore {
 		writeFileAtomicSync(this.filePath, JSON.stringify(data, null, 2));
 		this._cachedTeamList = undefined;
 		this.mutationChanged = true;
-	}
-
-	/** Whether a routine, or an occurrence's frozen definition, carries an arming stamp or a wake address; only then is version 5 written. */
-	private storesRoutineArming(): boolean {
-		const occurrences = [...this.routineOccurrences.values()].map((occurrence) => occurrence.definition);
-		return [...this.routines.values(), ...occurrences].some(carriesRoutineArming);
-	}
-
-	/** Whether the store holds a progress field (a routine's record or an occurrence's brief); only then is version 4 written. */
-	private storesRoutineProgress(): boolean {
-		for (const routine of this.routines.values()) if (routine.progress !== undefined) return true;
-		for (const occurrence of this.routineOccurrences.values())
-			if (occurrence.progressBrief !== undefined || occurrence.progressUntrusted !== undefined) return true;
-		return false;
 	}
 
 	private mutate<T>(action: () => T): T {
@@ -834,7 +820,7 @@ export class PersistentBotTeamStore {
 			if (!isRecordObject(parsed)) throw new Error("Bot and team store is not an object.");
 			if (
 				typeof parsed.version !== "number" ||
-				![1, 2, 3, 4, 5].includes(parsed.version) ||
+				!ROUTINE_STORE_VERSIONS.includes(parsed.version) ||
 				!Array.isArray(parsed.bots) ||
 				!Array.isArray(parsed.teams) ||
 				!isRecordObject(parsed.teamMessages)
@@ -842,7 +828,7 @@ export class PersistentBotTeamStore {
 				throw new Error("Bot and team store has an invalid envelope.");
 			storeVersion = parsed.version;
 		}
-		// Versions 3, 4 and 5 share the current shape (a revision counter, no legacy routine key); 4 adds progress fields, 5 arming stamps.
+		// Versions 3 to 6 share the current shape (a revision counter, no legacy routine key); `routine-store-format.ts` says what each adds.
 		const currentStoreFormat = storeVersion !== undefined && storeVersion >= 3;
 		const previousState = {
 			bots: new Map(this.bots),
@@ -1288,8 +1274,6 @@ export class PersistentBotTeamStore {
 			const keepsSchedule = stored !== undefined && isDeepStrictEqual(input.schedule, stored);
 			const scheduleInput = keepsSchedule ? stored : parseRoutineScheduleInput(input.schedule);
 			const session = input.target.kind === "session";
-			if (session !== (input.executionSnapshot !== undefined))
-				throw new Error("Session routines require a host-admitted execution snapshot.");
 			// The stored side is re-canonicalized: a runtime may spell a stored zone differently than when it was saved.
 			// A zone it cannot read at all is compared as saved; a valid new schedule never equals it.
 			const scheduleChanged =
@@ -1399,21 +1383,15 @@ export class PersistentBotTeamStore {
 				prompt: input.prompt.trim(),
 				schedule,
 				enabled: input.enabled ?? existing?.enabled ?? true,
-				...(input.executionSnapshot
-					? { executionSnapshot: parseRoutineExecutionSnapshot(input.executionSnapshot) }
-					: {}),
+				...parseRoutineSaveOrigin(input),
 				...creationProvenance(existing, intake, input.armedBy, input.wake),
 				createdAt: existing?.createdAt ?? nowIso,
 				updatedAt: nowIso,
 			};
 			if (!definition.prompt || definition.prompt.length > MAX_ROUTINE_PROMPT_CHARS)
 				throw new Error("Routine prompt is invalid.");
-			if (
-				definition.executionSnapshot &&
-				(definition.target.kind !== "session" ||
-					definition.executionSnapshot.parentSessionId !== definition.target.parentSessionId)
-			)
-				throw new Error("Routine snapshot does not match its session target.");
+			const originRefusal = routineSaveOriginRefusal(definition);
+			if (originRefusal) throw new Error(originRefusal);
 			const plannedRunAt = nextRoutineAt(schedule, cursor);
 			if (plannedRunAt === undefined && schedule.kind === "interval")
 				throw new Error("Routine interval has no representable future instant.");

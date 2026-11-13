@@ -150,6 +150,7 @@ export function createPendingOccurrence(
 		schedule: definition.schedule,
 		enabled: definition.enabled,
 		...(definition.executionSnapshot ? { executionSnapshot: definition.executionSnapshot } : {}),
+		...(definition.receiptOrigin ? { receiptOrigin: definition.receiptOrigin } : {}),
 		...(definition.origin ? { origin: definition.origin } : {}),
 		...(definition.armedBy ? { armedBy: definition.armedBy } : {}),
 		...(definition.wake ? { wake: definition.wake } : {}),

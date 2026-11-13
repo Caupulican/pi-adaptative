@@ -47,6 +47,7 @@ import {
 } from "./routine-contract.ts";
 import { routineTurnOrigin } from "./routine-parent-input.ts";
 import { PROMOTED_SNAG_RUNS, promotedRoutineSnags, type RoutineRunFacts } from "./routine-progress.ts";
+import { routineReceiptOrigin } from "./routine-save-origin.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import { WATCH_WAKE_SUMMARY } from "./routine-watch-wake.ts";
 import type { RoutineWorkerExecutor, RoutineWorkerRequest, RoutineWorkerState } from "./routine-worker-executor.ts";
@@ -463,8 +464,8 @@ export class RoutineSchedulerController {
 	run(routineId: string, expectedRevision: number | undefined, commandId: string): string {
 		if (!this.active) throw new Error("Routine scheduler is disposed.");
 		const definition = this.deps.store.getRoutine(routineId);
-		if (definition?.executionSnapshot)
-			this.deps.captureOriginGuard(definition.executionSnapshot.savedIntent.receiptOrigin)();
+		const saved = definition && routineReceiptOrigin(definition);
+		if (saved) this.deps.captureOriginGuard(saved)();
 		const occurrence = this.deps.store.claimManualRoutineOccurrence({
 			routineId,
 			expectedRevision,
@@ -697,13 +698,10 @@ export class RoutineSchedulerController {
 	}
 
 	private eligibleRoutines(): RoutineDefinitionView[] {
-		return this.deps.store
-			.listRoutines()
-			.filter(
-				(routine) =>
-					!routine.executionSnapshot ||
-					this.deps.canUseOrigin(routine.executionSnapshot.savedIntent.receiptOrigin),
-			);
+		return this.deps.store.listRoutines().filter((routine) => {
+			const origin = routineReceiptOrigin(routine);
+			return origin === undefined || this.deps.canUseOrigin(origin);
+		});
 	}
 
 	/**
@@ -1321,15 +1319,15 @@ export class RoutineSchedulerController {
 	 * pinned session clock routine.
 	 */
 	private schedulable(routine: RoutineDefinitionView): boolean {
-		const snapshot = routine.executionSnapshot;
-		if (snapshot && !this.deps.canUseOrigin(snapshot.savedIntent.receiptOrigin)) return false;
+		const origin = routineReceiptOrigin(routine);
+		if (origin && !this.deps.canUseOrigin(origin)) return false;
 		const away = this.deps.away;
 		return (
 			!away ||
-			(snapshot !== undefined &&
+			(routine.executionSnapshot !== undefined &&
 				routine.target.kind === "session" &&
 				routine.schedule.kind !== "event" &&
-				away.refusal(snapshot.savedIntent) === undefined)
+				away.refusal(routine.executionSnapshot.savedIntent) === undefined)
 		);
 	}
 

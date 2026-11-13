@@ -3,7 +3,6 @@ import { isDeepStrictEqual } from "node:util";
 import { StringEnum } from "@caupulican/pi-ai/typebox-helpers";
 import { type Static, Type } from "typebox";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
-import { parseWorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import {
 	CI_TERMINAL_CONCLUSIONS,
 	type CiAttemptTerminalEvent,
@@ -25,7 +24,7 @@ import {
 	type HostEventScopeKey,
 	hostEventListenerRefusal,
 } from "../events/host-event-kinds.ts";
-import { workerReceiptOriginFromValue } from "../orchestration/worker-receipt-origin.ts";
+import { type WorkerReceiptOrigin, workerReceiptOriginFromValue } from "../orchestration/worker-receipt-origin.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import {
 	canonicalCalendarCron,
@@ -41,6 +40,12 @@ import {
 import { boundedRoutineText as boundedString } from "./routine-field-guards.ts";
 import { MAX_ROUTINE_PROGRESS_BRIEF_CHARS, parseRoutineProgress, type RoutineProgress } from "./routine-progress.ts";
 import { parseRoutineArmAuthority, type RoutineArmAuthority } from "./routine-provenance.ts";
+import {
+	parseRoutineSaveOrigin,
+	type RoutineExecutionSnapshot,
+	routineReceiptOrigin,
+	routineSaveOriginRefusal,
+} from "./routine-save-origin.ts";
 import { parseRoutineWakeAddress, type RoutineWakeAddress, wakeAddressSession } from "./routine-wake-address.ts";
 import { WATCH_LAST_SEEN, type WatchLastSeen } from "./routine-watch-edge.ts";
 import {
@@ -362,14 +367,6 @@ export type PersistentRoutineTarget =
 	| { readonly kind: "session"; readonly parentSessionId: string };
 
 /** Session-only execution snapshot created by the host after authority and knowledge admission. */
-export interface RoutineExecutionSnapshot {
-	readonly parentSessionId: string;
-	/** Opaque, bounded parent-branch anchor captured with the routine; never refreshed from a later branch. */
-	readonly parentBranchAnchor: string;
-	readonly profileId?: string;
-	readonly savedIntent: WorkerSavedIntent;
-}
-
 /** Explicit schedule. The cursor is mutable independently of immutable routine revision. */
 export type RoutineSchedule =
 	/**
@@ -643,6 +640,8 @@ export interface PersistentRoutineDefinition {
 	readonly schedule: RoutineSchedule;
 	readonly enabled: boolean;
 	readonly executionSnapshot?: RoutineExecutionSnapshot;
+	/** Where a watch with no execution snapshot was saved in its session (`routine-save-origin.ts`); a snapshot carries its own. */
+	readonly receiptOrigin?: WorkerReceiptOrigin;
 	readonly origin?: RoutineOrigin;
 	/** The authority the model's own tool call armed it under (`routine-provenance.ts`); an occurrence's frozen definition keeps it, so a wake reads its plan under the authority it was written. */
 	readonly armedBy?: RoutineArmAuthority;
@@ -660,6 +659,8 @@ export interface UpsertPersistentRoutineInput {
 	readonly schedule: RoutineScheduleInput;
 	readonly enabled?: boolean;
 	readonly executionSnapshot?: RoutineExecutionSnapshot;
+	/** A watch's save position in its session, in place of an execution snapshot (`routine-save-origin.ts`). */
+	readonly receiptOrigin?: WorkerReceiptOrigin;
 	/** A tool creation's arming authority, stamped once at creation; an update never changes the saved one. */
 	readonly armedBy?: RoutineArmAuthority;
 	/** Whom a watch created here wakes, stamped once at creation from the saving caller; an update never changes it. */
@@ -1774,24 +1775,6 @@ export function rebasedRoutineCursor(
 	};
 }
 
-export function parseRoutineExecutionSnapshot(value: unknown): RoutineExecutionSnapshot {
-	if (
-		!isPlainRecord(value) ||
-		!hasOnlyKeys(value, ["parentSessionId", "parentBranchAnchor", "profileId", "savedIntent"])
-	)
-		throw new TypeError("Routine execution snapshot is invalid.");
-	const parentSessionId = boundedString(value.parentSessionId, 200, "parent session id");
-	const parentBranchAnchor = boundedString(value.parentBranchAnchor, 512, "parent branch anchor");
-	const profileId = value.profileId === undefined ? undefined : boundedString(value.profileId, 256, "profile id");
-	const savedIntent = parseWorkerSavedIntent(value.savedIntent);
-	if (
-		savedIntent.receiptOrigin.sessionId !== parentSessionId ||
-		savedIntent.receiptOrigin.leafId !== parentBranchAnchor
-	)
-		throw new TypeError("Routine execution snapshot does not match its parent session.");
-	return { parentSessionId, parentBranchAnchor, ...(profileId ? { profileId } : {}), savedIntent };
-}
-
 export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinition | undefined {
 	if (
 		!isPlainRecord(value) ||
@@ -1804,6 +1787,7 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 			"schedule",
 			"enabled",
 			"executionSnapshot",
+			"receiptOrigin",
 			"origin",
 			"armedBy",
 			"wake",
@@ -1833,10 +1817,8 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 			return undefined;
 		const target = parseRoutineTarget(value.target);
 		const schedule = parseRoutineSchedule(value.schedule);
-		const executionSnapshot =
-			value.executionSnapshot === undefined ? undefined : parseRoutineExecutionSnapshot(value.executionSnapshot);
-		if ((target.kind === "session") !== (executionSnapshot !== undefined)) return undefined;
-		if (target.kind === "session" && executionSnapshot?.parentSessionId !== target.parentSessionId) return undefined;
+		const saveOrigin = parseRoutineSaveOrigin(value);
+		if (routineSaveOriginRefusal({ target, schedule, ...saveOrigin }) !== undefined) return undefined;
 		const origin = value.origin === undefined ? undefined : parseRoutineOrigin(value.origin);
 		const armedBy = value.armedBy === undefined ? undefined : parseRoutineArmAuthority(value.armedBy);
 		// Only the session that owns the source's ledger, or the one a tool call armed it in, can have created it so.
@@ -1859,7 +1841,7 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 			prompt: value.prompt,
 			schedule,
 			enabled: value.enabled,
-			...(executionSnapshot ? { executionSnapshot } : {}),
+			...saveOrigin,
 			...(origin ? { origin } : {}),
 			...(armedBy ? { armedBy } : {}),
 			...(wake ? { wake } : {}),
@@ -2229,7 +2211,7 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 		if (
 			target.kind === "session" &&
 			(target.parentSessionId !== parentOrigin.sessionId ||
-				!isDeepStrictEqual(definition.executionSnapshot?.savedIntent.receiptOrigin, parentOrigin))
+				!isDeepStrictEqual(routineReceiptOrigin(definition), parentOrigin))
 		)
 			return undefined;
 		let claim: RoutineOccurrence["claim"];

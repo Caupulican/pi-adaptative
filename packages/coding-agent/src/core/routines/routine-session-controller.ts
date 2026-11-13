@@ -3,6 +3,7 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { englishText } from "../language/interface-text.ts";
+import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { strictCanonicalDigest } from "../steering/canonical.ts";
 import { hostTimeZone } from "./calendar-schedule.ts";
@@ -49,6 +50,8 @@ interface RoutineSessionDeps {
 	readonly scheduler: RoutineSchedulerController;
 	readonly parentSessionId: string;
 	capture(request: WorkerDelegationRequest, signal?: AbortSignal): Promise<WorkerSavedIntent>;
+	/** The session's current position, captured for a watch, which saves no worker authority since no worker runs for it. */
+	captureOrigin(): WorkerReceiptOrigin;
 	invocationKey(callId: string): string;
 	/** The session ledger's current position; read only when an event routine is saved. */
 	eventAnchor(): RoutineEventAnchor;
@@ -68,6 +71,12 @@ interface RoutineSessionDeps {
 	now(): number;
 	isDisposed(): boolean;
 }
+
+/**
+ * What a save records of where it was made: a routine that runs workers, the worker authority captured for its runs (which
+ * carries the position); a watch, the position alone (`routine-save-origin.ts`).
+ */
+type RoutineSave = { readonly intent: WorkerSavedIntent } | { readonly watchOrigin: WorkerReceiptOrigin };
 
 /** A host intake creation: the routine, or why the routine owner refused it. Other failures are thrown. */
 export type RoutineIntakeCreation =
@@ -237,16 +246,15 @@ export class RoutineSessionController implements RoutineToolPort {
 			harnessLog.warn("routines", "a worker's watch was refused");
 			throw new Error(refusal);
 		}
-		const savedIntent = await this.deps.capture(
-			{ instructions: input.prompt, knowledge: [], objectiveId: null, reportsProgress: true },
-			signal,
+		return this.persist(
+			input,
+			{ watchOrigin: this.deps.captureOrigin() },
+			{
+				enabled: true,
+				armedBy: { kind: "worker", runtimeId },
+				wake: { kind: "worker", parentSessionId: this.deps.parentSessionId, runtimeId },
+			},
 		);
-		this.check(signal);
-		return this.persist(input, savedIntent, {
-			enabled: true,
-			armedBy: { kind: "worker", runtimeId },
-			wake: { kind: "worker", parentSessionId: this.deps.parentSessionId, runtimeId },
-		});
 	}
 
 	async setEnabled(
@@ -267,6 +275,7 @@ export class RoutineSessionController implements RoutineToolPort {
 			schedule: routineScheduleInputOf(routine.schedule),
 			enabled,
 			executionSnapshot: routine.executionSnapshot,
+			receiptOrigin: routine.receiptOrigin,
 			nowMs: this.deps.now(),
 		});
 		harnessLog.info("routines", enabled ? "a routine was resumed" : "a routine was paused", () => ({
@@ -356,7 +365,7 @@ export class RoutineSessionController implements RoutineToolPort {
 		try {
 			const created = this.persist(
 				{ routineId: routineIntakeRoutineId(origin), prompt: spec.prompt, schedule: spec.schedule, knowledge: [] },
-				savedIntent,
+				{ intent: savedIntent },
 				{ enabled: true, intakeOrigin: origin, intakeGuard: guard },
 			);
 			return { created };
@@ -376,35 +385,48 @@ export class RoutineSessionController implements RoutineToolPort {
 		// Read before admission waits: the sources in this call's context, never words the owner sends meanwhile.
 		const authority = author === "tool" ? this.authorizeToolSave(input, expectedRevision) : undefined;
 		const prior = expectedRevision === undefined ? undefined : this.require(input.routineId, expectedRevision);
-		const sameIntent =
-			prior?.executionSnapshot &&
-			prior.prompt === input.prompt &&
-			prior.executionSnapshot.profileId === input.profileId &&
-			isDeepStrictEqual(prior.executionSnapshot.savedIntent.knowledgeReferences, input.knowledge ?? []) &&
-			// An intent captured before routine runs reported progress is captured again, so its runs keep the section.
-			prior.executionSnapshot.savedIntent.executionContract.worker.profile.reportsProgress === true;
-		const savedIntent = sameIntent
-			? prior.executionSnapshot!.savedIntent
-			: await this.deps.capture(
-					{
-						instructions: input.prompt,
-						profileId: input.profileId,
-						knowledge: input.knowledge ?? [],
-						objectiveId: null,
-						reportsProgress: true,
-					},
-					signal,
-				);
+		// A watch runs no worker, so it saves only where it was armed; any other routine saves the worker authority its runs use.
+		const saved: RoutineSave = isWatchSchedule(input.schedule)
+			? { watchOrigin: this.deps.captureOrigin() }
+			: { intent: await this.captureIntent(input, prior, signal) };
 		this.check(signal);
 		// Counted after the awaits, just before the write, so the slots held are the ones this write finds.
 		if (authority?.armedBy && authority.armedBy.kind !== "owner") this.requireWatchSlot();
-		return this.persist(input, savedIntent, {
+		return this.persist(input, saved, {
 			enabled: prior?.enabled ?? true,
 			...(expectedRevision === undefined ? {} : { expectedRevision }),
 			...(prior?.schedule.kind === "calendar" ? { timeZone: prior.schedule.timeZone } : {}),
 			...(authority?.answeredSources === undefined ? {} : { toolAnsweredSources: authority.answeredSources }),
 			...(authority?.armedBy === undefined ? {} : { armedBy: authority.armedBy }),
 		});
+	}
+
+	/** The worker authority a routine's runs use: the saved one when nothing it was captured from changed, else captured now. */
+	private async captureIntent(
+		input: RoutineToolInput,
+		prior: RoutineDefinitionView | undefined,
+		signal?: AbortSignal,
+	): Promise<WorkerSavedIntent> {
+		const snapshot = prior?.executionSnapshot;
+		if (
+			snapshot &&
+			prior.prompt === input.prompt &&
+			snapshot.profileId === input.profileId &&
+			isDeepStrictEqual(snapshot.savedIntent.knowledgeReferences, input.knowledge ?? []) &&
+			// An intent captured before routine runs reported progress is captured again, so its runs keep the section.
+			snapshot.savedIntent.executionContract.worker.profile.reportsProgress === true
+		)
+			return snapshot.savedIntent;
+		return this.deps.capture(
+			{
+				instructions: input.prompt,
+				profileId: input.profileId,
+				knowledge: input.knowledge ?? [],
+				objectiveId: null,
+				reportsProgress: true,
+			},
+			signal,
+		);
 	}
 
 	/**
@@ -415,7 +437,7 @@ export class RoutineSessionController implements RoutineToolPort {
 	 */
 	private persist(
 		input: RoutineToolInput,
-		savedIntent: WorkerSavedIntent,
+		save: RoutineSave,
 		extras: {
 			readonly enabled: boolean;
 			readonly expectedRevision?: number;
@@ -427,8 +449,8 @@ export class RoutineSessionController implements RoutineToolPort {
 			readonly intakeGuard?: () => void;
 		},
 	): RoutineToolView {
-		if (savedIntent.receiptOrigin.sessionId !== this.deps.parentSessionId)
-			throw new Error("Routine parent changed during admission.");
+		const savedAt = "intent" in save ? save.intent.receiptOrigin : save.watchOrigin;
+		if (savedAt.sessionId !== this.deps.parentSessionId) throw new Error("Routine parent changed during admission.");
 		const authored = input.schedule;
 		const watching = authored.kind === "event" && authored.source === "watch";
 		const saved = this.deps.store.upsertRoutine({
@@ -447,12 +469,17 @@ export class RoutineSessionController implements RoutineToolPort {
 			nowMs: this.deps.now(),
 			// A watch is decided by its monitor and the store, not by the session's host-event ledger: no anchor, no ledger.
 			...(authored.kind === "event" && !watching ? { eventAnchor: this.deps.eventAnchor() } : {}),
-			executionSnapshot: {
-				parentSessionId: this.deps.parentSessionId,
-				parentBranchAnchor: savedIntent.receiptOrigin.leafId,
-				savedIntent,
-				...(input.profileId === undefined ? {} : { profileId: input.profileId }),
-			},
+			// A worker routine keeps the authority its runs use; a watch has no worker, so its worker preferences are not saved.
+			...("intent" in save
+				? {
+						executionSnapshot: {
+							parentSessionId: this.deps.parentSessionId,
+							parentBranchAnchor: savedAt.leafId,
+							savedIntent: save.intent,
+							...(input.profileId === undefined ? {} : { profileId: input.profileId }),
+						},
+					}
+				: { receiptOrigin: save.watchOrigin }),
 			...(extras.expectedRevision === undefined
 				? { createOnly: true }
 				: { expectedRevision: extras.expectedRevision }),

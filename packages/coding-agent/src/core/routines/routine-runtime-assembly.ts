@@ -374,6 +374,7 @@ export class RoutineRuntimeAssembly {
 			parentSessionId,
 			admitWatch: (condition) => watchAdmission.admit(condition),
 			capture: (request, signal) => this.host.workerController().captureSavedIntent(request, signal),
+			captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
 			invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
 			eventAnchor: () => routineEventAnchor(this.host.workerLifecycle().getTaskRuntimeSnapshot()),
 			ownerTurnSources: () => this.deps.getOwnerEvidence().currentTurnSources(),
