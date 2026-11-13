@@ -724,22 +724,22 @@ export class BotSessionHost {
 		return entry ? [...entry.session.messages] : this.view.readMessages(agentId);
 	}
 
-	/** Closes every session and gives the locks back. After it no session is built. */
+	/**
+	 * Closes every session and gives the locks back, all of them whichever fails, then ends the home watch and the history
+	 * scan. After it no session is built.
+	 */
 	async stop(): Promise<void> {
 		this.stopped = true;
-		await Promise.allSettled([...this.loading.values()]);
-		const failures: unknown[] = [];
-		for (const agentId of [...this.entries.keys()]) {
-			try {
-				await this.close(agentId);
-			} catch (error) {
-				failures.push(error);
-			}
+		try {
+			await Promise.allSettled([...this.loading.values()]);
+			const closed = await Promise.allSettled([...this.entries.keys()].map((agentId) => this.close(agentId)));
+			await Promise.allSettled([...this.closing.values()]);
+			const failures = closed.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
+			if (failures.length > 0) throw new AggregateError(failures, "Bot sessions did not close cleanly.");
+		} finally {
+			this.view.stop();
+			this.history.stop();
+			this.listeners.clear();
 		}
-		await Promise.all([...this.closing.values()]);
-		this.view.stop();
-		this.history.stop();
-		this.listeners.clear();
-		if (failures.length > 0) throw new AggregateError(failures, "Bot sessions did not close cleanly.");
 	}
 }
