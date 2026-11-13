@@ -656,23 +656,26 @@ export class BotSessionHost {
 	}
 
 	/**
-	 * Stops the turn the bot's session is running. Returns whether there was one: the session settles the stop itself, and
-	 * a failure to stop reaches the owner as a warning.
+	 * Stops the turn the bot's session is running here. `stopped` says whether there was one: the session settles the stop
+	 * itself, and a failure to stop reaches the owner as a warning. A turn another host runs is stopped only from the
+	 * session hosting it: `elsewhere` names that session, for the owner.
 	 */
-	interrupt(agentId: string): boolean {
+	interrupt(agentId: string): { readonly stopped: boolean; readonly elsewhere?: string } {
 		const entry = this.entries.get(agentId);
 		if (!entry) {
-			// Another process's turn can only be stopped from the session hosting it.
 			const host = this.view.hostOf(agentId);
-			if (remoteHostActive(host))
-				throw new Error(interfaceText().botTeam.botRunsElsewhere(agentId, host.pid, host.hostSessionId));
-			return false;
+			return remoteHostActive(host)
+				? {
+						stopped: false,
+						elsewhere: interfaceText().botTeam.botRunsElsewhere(agentId, host.pid, host.hostSessionId),
+					}
+				: { stopped: false };
 		}
-		if (!this.isBusy(entry)) return false;
+		if (!this.isBusy(entry)) return { stopped: false };
 		void entry.session
 			.abort("bot stopped by the owner")
 			.catch((error: unknown) => this.ports.warn(interfaceText().botTeam.botTurnFailed(agentId, errorText(error))));
-		return true;
+		return { stopped: true };
 	}
 
 	/**

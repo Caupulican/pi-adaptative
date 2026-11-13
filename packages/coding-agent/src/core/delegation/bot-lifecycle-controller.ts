@@ -390,10 +390,12 @@ export class BotLifecycleController {
 
 	stopPersistentBot(agentId: string): { stopped: boolean; detail: string } {
 		// The bot's own session runs the owner's direct conversation: its turn stops first, whatever the worker runtime holds.
+		// A session another host runs is stopped there; this process's runs of the bot stop all the same.
 		let sessionStopped = false;
 		try {
 			agentId = normalizeBotOrTeamId(agentId, "agentId");
-			sessionStopped = this.host.botSessions.interrupt(agentId);
+			const session = this.host.botSessions.interrupt(agentId);
+			sessionStopped = session.stopped;
 			const runtimes = new Set(this.botBindings.runtimes(agentId));
 			const agents = this.host.hasWorkerState() ? this.host.listWorkerAgents() : [];
 			const results = agents
@@ -417,14 +419,18 @@ export class BotLifecycleController {
 			}
 			const res = results.find((result) => result.interrupted) ?? results[0] ?? { interrupted: false };
 			const words = interfaceText().botTeam;
+			const stopped = res.interrupted || sessionStopped || stoppedBots.length > 0;
+			const here =
+				res.interrupted || sessionStopped
+					? words.botStopped(agentId, stoppedBots, words.stopMode(res.mode ?? "halt"))
+					: stoppedBots.length > 0
+						? words.botStoppedOwn(agentId, stoppedBots)
+						: undefined;
 			return {
-				stopped: res.interrupted || sessionStopped || stoppedBots.length > 0,
+				stopped,
 				detail:
-					res.interrupted || sessionStopped
-						? words.botStopped(agentId, stoppedBots, words.stopMode(res.mode ?? "halt"))
-						: stoppedBots.length > 0
-							? words.botStoppedOwn(agentId, stoppedBots)
-							: (res.reason ?? words.botIdle(agentId)),
+					[here, session.elsewhere].filter((line) => line !== undefined).join("\n") ||
+					(res.reason ?? words.botIdle(agentId)),
 			};
 		} catch (error) {
 			return {
