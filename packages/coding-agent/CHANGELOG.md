@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- CI results no longer stay suspended when the retained CI events cover more revisions than one event scope holds (an old parked session pinning events while pushes add new heads). The backlog is delivered in successive scope windows, oldest events first, and drains over consecutive rounds instead of refusing every round.
+
 ## [0.104.64] - 2026-11-13
 
 ## [0.104.63] - 2026-11-13

@@ -723,17 +723,13 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		}
 		const registered = new Set(consumer.subjects.map(ciSubjectKey));
 		const repositories = new Set(consumer.subjects.map((subject) => `${subject.host}/${subject.repositoryId}`));
-		if (
-			pending.some((event) =>
-				isCiEnvelope(event)
-					? !registered.has(ciSubjectKey(ciEventSubject(event.event)))
-					: !repositories.has(`${event.event.repository.host}/${event.event.repository.repositoryId}`),
-			)
-		) {
-			// Another writer retained a subject after the scope was read: widen it first.
-			this.forced = true;
-			return;
-		}
+		// Acknowledgement stays contiguous: delivery stops at the first event outside the registered scope.
+		const blocked = pending.findIndex((event) =>
+			isCiEnvelope(event)
+				? !registered.has(ciSubjectKey(ciEventSubject(event.event)))
+				: !repositories.has(`${event.event.repository.host}/${event.event.repository.repositoryId}`),
+		);
+		const deliverable = blocked < 0 ? pending : pending.slice(0, blocked);
 		const generation = consumer.generation;
 		const catchUp = {
 			sourceId: snapshot.sourceId,
@@ -741,12 +737,19 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			scopeVersion: consumer.scopeVersion,
 			generation,
 		};
-		for (let offset = 0; offset < pending.length; offset += ACCEPT_BATCH) {
-			for (const event of pending.slice(offset, offset + ACCEPT_BATCH)) {
+		for (let offset = 0; offset < deliverable.length; offset += ACCEPT_BATCH) {
+			for (const event of deliverable.slice(offset, offset + ACCEPT_BATCH)) {
 				const receipt = await sink.accept(event, signal);
 				this.store.acknowledge(sink.consumerId, activationId, receipt, generation);
 			}
 			signal.throwIfAborted();
+		}
+		if (blocked >= 0) {
+			// The backlog continues past this scope window, or another writer retained a subject after the scope was
+			// read: the delivered prefix moved the acknowledgement, and the next round scopes from there. No seal claims
+			// the rest delivered.
+			this.forced = true;
+			return;
 		}
 		if (this.fingerprint() !== inputs.fingerprint) {
 			this.forced = true;
@@ -1002,7 +1005,9 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 
 	/**
 	 * HEAD, unacknowledged retained events, live subscriptions and unsettled watcher records.
-	 * Settled historical records are never re-collected.
+	 * Settled historical records are never re-collected. Retained events of more revisions than the subject bound
+	 * are delivered in windows: the scope pins the revisions of the oldest unacknowledged events in sequence order up
+	 * to the bound, so every window delivers at least the oldest event and the backlog drains in successive rounds.
 	 */
 	private scope(
 		repository: CiRepository,
@@ -1012,9 +1017,28 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 	): { subjects: CiSubject[]; required: ReadonlySet<string> } {
 		const scope: CiSubject[] = [];
 		if (inputs.headSha) addSubject(scope, this.subjectOf(repository, inputs.headSha));
-		for (const event of snapshot.events)
-			if (event.sourceSequence > acknowledged && isCiEnvelope(event)) addSubject(scope, ciEventSubject(event.event));
-		const pinned = scope.length;
+		let windowed = false;
+		for (const event of snapshot.events) {
+			if (event.sourceSequence <= acknowledged || !isCiEnvelope(event)) continue;
+			const subject = ciEventSubject(event.event);
+			if (
+				scope.length >= MAX_HOST_EVENT_SUBJECTS &&
+				!scope.some((held) => ciSubjectKey(held) === ciSubjectKey(subject))
+			) {
+				windowed = true;
+				break;
+			}
+			addSubject(scope, subject);
+		}
+		if (windowed) {
+			this.report(
+				"backlog",
+				`Retained CI events cover more revisions than one scope holds (${MAX_HOST_EVENT_SUBJECTS}); they are delivered in successive windows.`,
+			);
+			// The window is full: later subscriptions and unsettled revisions wait for the drain.
+			return { subjects: scope, required: new Set(scope.map(ciSubjectKey)) };
+		}
+		this.reported.delete("backlog");
 		for (const subject of inputs.subscribed) if (this.ownWorkflow(repository, subject)) addSubject(scope, subject);
 		// A delivery can target only these: their observation must be current before a seal.
 		const required = new Set(scope.map(ciSubjectKey));
@@ -1023,8 +1047,6 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 			this.reported.delete("scope");
 			return { subjects: scope, required };
 		}
-		if (pinned > MAX_HOST_EVENT_SUBJECTS)
-			throw new Error("Retained CI events exceed the registered subject bound; they remain retained.");
 		this.report(
 			"scope",
 			`CI events observe ${MAX_HOST_EVENT_SUBJECTS} of ${scope.length} subscribed or unsettled revisions; the rest wait for capacity.`,
