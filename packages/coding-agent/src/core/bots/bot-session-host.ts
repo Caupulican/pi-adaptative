@@ -738,8 +738,8 @@ export class BotSessionHost {
 			if (failures.length > 0) throw new AggregateError(failures, "Bot sessions did not close cleanly.");
 		} finally {
 			this.view.stop();
-			this.history.stop();
 			this.listeners.clear();
+			await this.history.stop();
 		}
 	}
 }

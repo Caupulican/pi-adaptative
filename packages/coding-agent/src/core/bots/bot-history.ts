@@ -184,10 +184,14 @@ async function listSessionFiles(dir: string): Promise<string[]> {
 	return files;
 }
 
-/** Calls `onLine` with each line of the file that holds `marker`, and `onFirst` with the first line, streaming the file. */
+/**
+ * Calls `onLine` with each line of the file that holds `marker`, and `onFirst` with the first line, streaming the file.
+ * An abort ends the read at the next chunk.
+ */
 async function scanLines(
 	file: string,
 	marker: Buffer,
+	signal: AbortSignal,
 	onFirst: (line: string) => void,
 	onLine: (line: string) => void,
 ): Promise<void> {
@@ -207,6 +211,7 @@ async function scanLines(
 		skipping = false;
 	};
 	for await (const chunk of createReadStream(file, { highWaterMark: SCAN_CHUNK_BYTES })) {
+		signal.throwIfAborted();
 		const buffer = chunk as Buffer;
 		let start = 0;
 		for (;;) {
@@ -233,14 +238,20 @@ interface RootScan {
 	readonly rootIds: Set<string>;
 }
 
-async function scanRootSessions(agentDir: string, warn: (message: string) => void): Promise<RootScan> {
+async function scanRootSessions(
+	agentDir: string,
+	warn: (message: string) => void,
+	signal: AbortSignal,
+): Promise<RootScan> {
 	const bound = new Map<string, WorkerTranscriptIdentity[]>();
 	const rootIds = new Set<string>();
 	for (const file of await listSessionFiles(rootSessionsDir(agentDir))) {
+		signal.throwIfAborted();
 		try {
 			await scanLines(
 				file,
 				BINDINGS_MARKER,
+				signal,
 				(line) => {
 					try {
 						const header: unknown = JSON.parse(line);
@@ -277,6 +288,7 @@ async function scanRootSessions(agentDir: string, warn: (message: string) => voi
 				},
 			);
 		} catch (error) {
+			if (signal.aborted) throw error;
 			warn(
 				`Bot history: a session file could not be read (${error instanceof Error ? error.message : String(error)}).`,
 			);
@@ -304,8 +316,9 @@ function runsFromScan(agentDir: string, record: PersistentBotRecord, scan: RootS
 /** Reads and keeps the index of each bot's earlier conversations (see the module comment). */
 export class BotHistory {
 	private readonly ports: BotHistoryPorts;
+	/** The scan in flight, joined by `stop`. */
 	private scan: Promise<void> | undefined;
-	private stopped = false;
+	private readonly stopping = new AbortController();
 	private readonly cache = new Map<string, { mtimeMs: number; size: number; messages: AgentMessage[] }>();
 
 	constructor(ports: BotHistoryPorts) {
@@ -353,7 +366,8 @@ export class BotHistory {
 
 	/** One pass over the root session files builds the index of every local bot that has none. */
 	private requestScan(): void {
-		if (this.scan || this.stopped) return;
+		const { signal } = this.stopping;
+		if (this.scan || signal.aborted) return;
 		const agentDir = this.ports.agentDir();
 		if (rootScanDone(agentDir)) return;
 		const wanted = this.ports
@@ -361,9 +375,9 @@ export class BotHistory {
 			.listBots({ includeRetired: true })
 			.filter((record) => !record.remote && readHistoryFile(agentDir, record.agentId)?.scanned !== true);
 		if (wanted.length === 0) return;
-		this.scan = scanRootSessions(agentDir, (message) => this.ports.warn(message))
+		this.scan = scanRootSessions(agentDir, (message) => this.ports.warn(message), signal)
 			.then((found) => {
-				if (this.stopped) return;
+				if (signal.aborted) return;
 				for (const record of wanted) {
 					const runs = runsFromScan(agentDir, record, found);
 					saveHistory(agentDir, record, (current) => ({
@@ -383,11 +397,15 @@ export class BotHistory {
 				harnessLog.info("bots", "bot histories were indexed", () => ({ bots: wanted.length }));
 			})
 			.catch((error: unknown) => {
-				// The index stays unfinished: the next read of a bot without one scans again.
-				this.scan = undefined;
+				// The index stays unfinished: the next read of a bot without one scans again. A stopped scan is not a failure.
+				if (signal.aborted) return;
 				this.ports.warn(
 					`Bot history could not be indexed (${error instanceof Error ? error.message : String(error)}).`,
 				);
+			})
+			.finally(() => {
+				// A finished scan left its mark (`rootScanDone`); an unfinished one is requested again by the next read.
+				this.scan = undefined;
 			});
 	}
 
@@ -414,8 +432,10 @@ export class BotHistory {
 		return [...messages];
 	}
 
-	stop(): void {
-		this.stopped = true;
+	/** Stops the scan in flight and resolves once it ended; no scan starts after it. */
+	stop(): Promise<void> {
+		this.stopping.abort();
 		this.cache.clear();
+		return this.scan ?? Promise.resolve();
 	}
 }
