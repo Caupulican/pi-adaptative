@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Added
+
+- The operator bar marks an unfinished goal as `◎ n/m` (requirements met over all of them), on the accent tone while it runs and the warning tone while it waits; the goal's saved state raises a session event, so the bar and the activity lane update the moment a goal is created, changed or finished. The activity lane names the goal and its stopped status in English and pt-BR.
+
 ### Fixed
 
 - CI results no longer stay suspended when the retained CI events cover more revisions than one event scope holds (an old parked session pinning events while pushes add new heads). The backlog is delivered in successive scope windows, oldest events first, and drains over consecutive rounds instead of refusing every round.
