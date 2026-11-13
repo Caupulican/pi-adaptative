@@ -2,45 +2,15 @@ import "../builtin-install.ts";
 import { join, sep } from "node:path";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
-import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration/contracts.ts";
-import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
-import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
+import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 import { scriptWatchWake, settleWatchWake } from "./journey-watch-wake.ts";
 import { ICM_INTAKE_JUDGMENTS, latestBatchResults } from "./shared.ts";
 
-const PROFILE_ID = "watch-cancellation-reader";
-
 /** A real routine watch is canceled during its glob scan; shutdown joins it before a later watch runs. */
 export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Promise<void> {
-	const makeProfile = (agentDir: string) =>
-		new OrchestrationProfileStore({ agentDir, cwd: HARNESS_PROJECT_CWD, projectTrusted: false }).save(
-			{
-				schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
-				profileId: PROFILE_ID,
-				description: "Read-only file-watch worker.",
-				role: "explorer",
-				modelPolicy: {
-					mode: "fixed",
-					candidates: [{ provider: "harness-script", modelId: "worker-a", thinkingLevel: "off" }],
-				},
-				capabilityCeiling: ["filesystem.read"],
-				readOnly: true,
-				toolNames: ["read"],
-				resourceProfileNames: [],
-				dispatchProfileIds: [],
-				budget: {},
-				maxConcurrent: 1,
-				leaseTtlMs: 60_000,
-				requireIndependentVerification: false,
-				createdAt: "2026-11-05T00:00:00.000Z",
-				updatedAt: "2026-11-05T00:00:00.000Z",
-			},
-			"global",
-		);
 	const createSession = async (label: string) => {
 		const agentDir = `${world.agentDir}-watch-cancel-${label}`;
-		makeProfile(agentDir);
 		const sessionManager = world.createSessionManager(agentDir);
 		const { session } = await world.createRootSession("root", {
 			agentDir,
@@ -77,7 +47,6 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 							source: "watch",
 							condition: { type: "file", path: pattern, on: "changed" },
 						},
-						profileId: PROFILE_ID,
 					},
 				},
 			]),
@@ -323,7 +292,6 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 							source: "watch",
 							condition: { type: "file", path: join(replacementRoot, "**", "*.txt"), on: "changed" },
 						},
-						profileId: PROFILE_ID,
 					},
 				},
 			]),

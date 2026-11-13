@@ -29,7 +29,8 @@ const PROMPT = "Read notes.txt and say what changed.";
  * while the root hears only the worker's report. A read-only worker with a shell arms a command watch: the command passes
  * the worker's own gate, runs in the worker's directory with its offline, read-only environment, and the worker is woken
  * with the command's output fenced as untrusted data. Under an envelope that grants planning and not delegation, a paused
- * watch resumes and a paused routine that runs workers stays refused at the gate.
+ * watch resumes and a paused routine that runs workers stays refused at the gate. A watch saved with a worker profile is
+ * refused, since no worker runs for it.
  */
 export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> {
 	const { trace } = world;
@@ -110,7 +111,6 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 					routineId: ROUTINE_ID,
 					prompt: PROMPT,
 					schedule: { kind: "event", source: "watch", condition: { type: "file", path: notes, on: "changed" } },
-					profileId: PROFILE_ID,
 				},
 			},
 		]),
@@ -214,7 +214,6 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 					routineId: `flag-${on}`,
 					prompt: `Say that release.flag was ${on}.`,
 					schedule: { kind: "event", source: "watch", condition: { type: "file", path: flag, on } },
-					profileId: PROFILE_ID,
 				},
 			})),
 		),
@@ -297,7 +296,6 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 						source: "watch",
 						condition: { type: "file", path: steerFile, on: "changed" },
 					},
-					profileId: PROFILE_ID,
 				},
 			},
 		]),
@@ -707,6 +705,19 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 		expectedRevision: revisionOf(INTERVAL_ID),
 	});
 	expect(removed.isError, removed.text).toBe(false);
+	// A watch runs no worker, so a save that names a worker profile for one is refused instead of saved without it.
+	const profiled = await routineCall("j4-watch-profile-refused", {
+		action: "create",
+		routineId: "profiled-watch",
+		prompt: "Tell me when the notes change.",
+		schedule: { kind: "event", source: "watch", condition: { type: "file", path: notes, on: "changed" } },
+		profileId: PROFILE_ID,
+	});
+	expect(profiled.isError, "a watch that names a worker profile is refused").toBe(true);
+	expect(profiled.text).toContain(
+		"A watch runs no worker, so it takes no profileId: save it without profileId. Read current state before retrying.",
+	);
+	expect(store().getRoutine("profiled-watch"), "the refused watch is not saved").toBeUndefined();
 
 	expect(await world.disposeSessionInBody(session), "the watch session closes").toBeUndefined();
 	trace.mark("root", "watch.closed");

@@ -447,7 +447,6 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 								expect: { outputContains: "ALERT" },
 							},
 						},
-						profileId: PROFILE_ID,
 					},
 				},
 			]),

@@ -131,6 +131,8 @@ function summary(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs:
 
 function view(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: number): RoutineToolView {
 	const progress = describeRoutineProgress(routineProgressLine(routine.progress), englishText().chat.routineProgress);
+	// A watch runs no worker and a save of one takes no worker preferences, so an older watch's saved ones are not shown.
+	const preferences = routineRunsWorkers(routine.schedule) ? routine.executionSnapshot : undefined;
 	return {
 		...summary(routine, store, nowMs),
 		prompt: routine.prompt,
@@ -140,8 +142,8 @@ function view(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: nu
 		...(progress === undefined
 			? {}
 			: { progress: wrapUntrustedText(progress, `routine-progress:${routine.routineId}`) }),
-		...(routine.executionSnapshot?.profileId === undefined ? {} : { profileId: routine.executionSnapshot.profileId }),
-		knowledge: routine.executionSnapshot?.savedIntent.knowledgeReferences ?? [],
+		...(preferences?.profileId === undefined ? {} : { profileId: preferences.profileId }),
+		knowledge: preferences?.savedIntent.knowledgeReferences ?? [],
 	};
 }
 
