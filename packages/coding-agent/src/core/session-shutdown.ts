@@ -82,6 +82,8 @@ export interface ClosingSessionMemoryPorts {
 	waitForAgentIdle(): Promise<void>;
 	settleReflectionTurn(): Promise<void>;
 	settleCompaction(): Promise<void>;
+	/** Joins the owner goal judgments dispose aborted: a paid one records its usage row before usage delivery closes. */
+	settleOwnerGoalIntent(): Promise<void>;
 	releaseAgentConsumer(): void;
 	shutdownMemory(): Promise<void>;
 	disposeSemanticUsage(): void;
@@ -119,6 +121,11 @@ export async function settleClosingSessionMemory(ports: ClosingSessionMemoryPort
 		await settlesWithin(
 			ports.settleCompaction(),
 			`A compaction did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its result is discarded.`,
+		);
+		// An aborted judgment of the owner's words still ends here, so a request it already paid for is recorded in this session.
+		await settlesWithin(
+			ports.settleOwnerGoalIntent(),
+			`An owner goal judgment did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its usage may be recorded late.`,
 		);
 		await ports.shutdownMemory();
 	} finally {

@@ -4666,9 +4666,23 @@ export interface DiscardScanBoundsWitness {
 	readonly disposal: unknown;
 }
 
+/** Paid usage rows a session manager holds on disk: the rows a discard count can read. */
+function paidRowsOnDisk(manager: SessionManager): number {
+	return manager
+		.getEntries()
+		.filter(
+			(entry) =>
+				entry.type === "custom" &&
+				entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE &&
+				manager.isEntryPersisted(entry.id),
+		).length;
+}
+
 /**
- * A session file of this world with three paid usage rows, read by the discard count as a replacement's file whose copied rows end at byte 0.
- * The seed turn gives the file its first reply, so the rows that follow are written to disk rather than buffered.
+ * A session file of this world with three appended paid usage rows, read by the discard count as a replacement's file whose copied rows end
+ * at byte 0. The seed turn gives the file its first reply, so the rows that follow are written to disk rather than buffered. With System One
+ * on, the owner goal intent judges the seed's delivered words and that paid judgment writes a row of its own: the witness waits for it on
+ * disk before it disposes, because dispose aborts a judgment still in flight and a request that never went out pays nothing.
  */
 export async function runDiscardScanBounds(world: HarnessWorld): Promise<DiscardScanBoundsWitness> {
 	const { trace } = world;
@@ -4683,6 +4697,13 @@ export async function runDiscardScanBounds(world: HarnessWorld): Promise<Discard
 		reply: { content: [{ type: "text", text: "Seeded for the discard scan." }] },
 	});
 	await withDeadline(trace, "discard scan: the seed turn completes", owner.session.prompt("Seed the discard scan."));
+	if (world.systemOne.enabled) {
+		await withDeadline(
+			trace,
+			"discard scan: the seed's owner goal judgment wrote its paid row",
+			world.io.waitForMutation(() => paidRowsOnDisk(owner.sessionManager) === 1),
+		);
+	}
 	const reports = [1, 2, 3].map((index) => ({ reportId: `discard-scan-row-${index}` }));
 	const ids = reports.map((report) => owner.sessionManager.appendCustomEntry(SEMANTIC_USAGE_CUSTOM_TYPE, report));
 	const persisted = ids.map((id, index) =>
@@ -4706,14 +4727,19 @@ export async function runDiscardScanBounds(world: HarnessWorld): Promise<Discard
 	};
 }
 
-/** The exhaustion causes of a discard's count, each bound alone, and the defaults' count of the same three rows. */
-export const DISCARD_SCAN_BOUNDS_EXPECTED = {
-	entriesBound: { unknown: "more than 1 entries" },
-	paidRowsBound: { unknown: "more than 1 paid usage rows" },
-	scanBytesBound: { unknown: "more than 1 bytes appended after the copy" },
-	defaults: { rows: 3 },
-	disposal: undefined,
-};
+/**
+ * The exhaustion causes of a discard's count, each bound alone, and the defaults' count of every paid row the file holds: the three
+ * appended rows, plus the seed's owner goal judgment's row when System One is on.
+ */
+export function discardScanBoundsExpected(systemOneEnabled: boolean): DiscardScanBoundsWitness {
+	return {
+		entriesBound: { unknown: "more than 1 entries" },
+		paidRowsBound: { unknown: "more than 1 paid usage rows" },
+		scanBytesBound: { unknown: "more than 1 bytes appended after the copy" },
+		defaults: { rows: systemOneEnabled ? 4 : 3 },
+		disposal: undefined,
+	};
+}
 
 /** A replacement the runtime rejected at activation, and what its rollback kept and disclosed. */
 export interface DiscardThroughRuntimeWitness {
@@ -4782,6 +4808,15 @@ export async function runDiscardThroughRuntime(world: HarnessWorld): Promise<Dis
 		runtime.session.prompt("Seed the runtime discard."),
 	);
 	const manager = runtime.sessionManager;
+	// With System One on, the seed's owner goal judgment writes a paid row of its own; the fork switches sessions, which
+	// aborts a judgment still in flight, so the witness waits for that row on disk before it forks.
+	if (world.systemOne.enabled) {
+		await withDeadline(
+			trace,
+			"runtime discard: the seed's owner goal judgment wrote its paid row",
+			world.io.waitForMutation(() => paidRowsOnDisk(manager) === 1),
+		);
+	}
 	const originalFile = manager.getSessionFile();
 	if (originalFile === undefined) throw new Error("the runtime discard owner has no file");
 	const rows = [1, 2].map((index) =>

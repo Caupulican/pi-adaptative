@@ -1568,7 +1568,7 @@ export class AgentSession {
 			},
 			refreshAfterCompaction: () => this._refreshAfterCompaction(),
 			getFailureCorpus: () => this._failureCorpus,
-			measureLiveContextTokens: () => this._measureLiveContextTokensForCompaction(),
+			measureLiveContextTokens: () => this._compaction.measureLiveContextTokens(),
 			runAutoCompaction: (reason, willRetry) => this._runAutoCompaction(reason, willRetry),
 			compactWithRetry: (run, signal, provider) => this._compaction.compactWithRetry(run, signal, provider),
 			retryTimers: config.timers.port("compaction-retry"),
@@ -3602,6 +3602,7 @@ export class AgentSession {
 		safely(() => this.agent.abort("session dispose"));
 		// Preparing/postflight submissions and reflection preflight have no agent run to abort.
 		safely(() => this._promptSubmission.abortSubmission("session dispose"));
+		safely(() => this._promptSubmission.ownerGoalIntent.abort());
 		safely(() => this._reflectionTurnLifecycle.abort());
 		safely(() => this._reflectionAbort.abort());
 		safely(() => this._unsubscribeSettingsChanges?.());
@@ -3653,6 +3654,7 @@ export class AgentSession {
 				waitForAgentIdle: () => this.agent.waitForIdle(),
 				settleReflectionTurn: () => this.settleReflectionTurn(),
 				settleCompaction: () => this._compaction.settled(),
+				settleOwnerGoalIntent: () => this._promptSubmission.ownerGoalIntent.settle(),
 				releaseAgentConsumer: () => {
 					safely(() => this._disconnectFromAgent());
 					this._closingConsumerReleased = true;
@@ -4435,10 +4437,6 @@ export class AgentSession {
 
 	private _checkCompaction(assistantMessage: AssistantMessage, skipAbortedCheck = true): Promise<boolean> {
 		return this._compaction.check(assistantMessage, skipAbortedCheck);
-	}
-
-	private _measureLiveContextTokensForCompaction(): number {
-		return this._compaction.measureLiveContextTokens();
 	}
 
 	/**

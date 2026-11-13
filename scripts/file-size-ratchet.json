@@ -3,7 +3,7 @@
 	"limit": 1200,
 	"files": {
 		"packages/coding-agent/src/core/delegation/worker-delegation-controller.ts": 6547,
-		"packages/coding-agent/src/core/agent-session.ts": 5266,
+		"packages/coding-agent/src/core/agent-session.ts": 5264,
 		"packages/coding-agent/src/core/memory/transcript-memory.ts": 3535,
 		"packages/coding-agent/src/kernel/session/session-manager.ts": 3488,
 		"packages/coding-agent/src/modes/interactive/interactive-mode.ts": 3058,

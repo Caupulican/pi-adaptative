@@ -12,7 +12,7 @@ import {
 import { verifyModeWitnesses } from "../mode-witnesses.ts";
 import { calls, createBarrier, text } from "../scripted-provider.ts";
 import {
-	DISCARD_SCAN_BOUNDS_EXPECTED,
+	discardScanBoundsExpected,
 	type HarnessWorld,
 	holdAssistantMessageEnd,
 	holdCompactionSummary,
@@ -1506,7 +1506,7 @@ export async function runJourney1HostShutdownPhase(world: HarnessWorld): Promise
 		"RPC shutdown failed: dispose failed (cleanup a; cleanup b)\n",
 	]);
 	trace.mark("root", "rpc.shutdown");
-	expect(await runDiscardScanBounds(world)).toEqual(DISCARD_SCAN_BOUNDS_EXPECTED);
+	expect(await runDiscardScanBounds(world)).toEqual(discardScanBoundsExpected(world.systemOne.enabled));
 	const runtimeDiscard = await runDiscardThroughRuntime(world);
 	expect(runtimeDiscard).toMatchObject({
 		rejection:

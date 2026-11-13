@@ -108,6 +108,14 @@ function objectiveOf(words: OwnerWords): string | undefined {
 export class OwnerGoalIntent {
 	private readonly ports: OwnerGoalIntentPorts;
 	private outageReported = false;
+	/**
+	 * The judgments still running, owned by the session rather than abandoned: each is detached from the owner's turn, but
+	 * a closing session aborts them all ({@link abort}) and joins them ({@link settle}) before its usage delivery closes,
+	 * so none starts a goal, writes a paid row or warns after the session is gone.
+	 */
+	private readonly inFlight = new Set<Promise<void>>();
+	/** Cancels every judgment in flight, wherever it is: before dispatch it never sends, in flight its request is aborted. */
+	private readonly closing = new AbortController();
 
 	constructor(ports: OwnerGoalIntentPorts) {
 		this.ports = ports;
@@ -124,8 +132,8 @@ export class OwnerGoalIntent {
 		if (request === undefined || objective === undefined || statesGoalExplicitly(ownerTypedText(words))) return;
 		if (this.hasUnfinishedGoal()) return;
 		const engine = this.ports.getSemanticDecisionEngine();
-		if (!engine) return;
-		void this.judgeAndStart(engine, request, objective, assistantAnswerText(previousAnswer)).catch(
+		if (!engine || this.closing.signal.aborted) return;
+		const judgment = this.judgeAndStart(engine, request, objective, assistantAnswerText(previousAnswer)).catch(
 			(error: unknown) => {
 				// Only the admission can throw here (the judgment reports its own outage): the goal could not be started.
 				this.warn(
@@ -133,6 +141,21 @@ export class OwnerGoalIntent {
 				);
 			},
 		);
+		this.inFlight.add(judgment);
+		void judgment.finally(() => this.inFlight.delete(judgment));
+	}
+
+	/** The session is closing: every judgment in flight is aborted, and none starts after it. */
+	abort(): void {
+		this.closing.abort();
+	}
+
+	/**
+	 * Resolves once every judgment in flight has ended, its paid row recorded. Loops because a judgment can end as another
+	 * starts; after {@link abort} none starts, so it cannot spin.
+	 */
+	async settle(): Promise<void> {
+		while (this.inFlight.size > 0) await Promise.all(this.inFlight);
 	}
 
 	private warn(message: string): void {
@@ -198,7 +221,7 @@ export class OwnerGoalIntent {
 				// Detached from the turn, so it never holds the foreground: a turn that waits for the session to go idle does not wait for it.
 				{
 					consequence: "medium",
-					signal: AbortSignal.timeout(OWNER_GOAL_INTENT_TIMEOUT_MS),
+					signal: AbortSignal.any([this.closing.signal, AbortSignal.timeout(OWNER_GOAL_INTENT_TIMEOUT_MS)]),
 					occupancy: "background",
 				},
 			);

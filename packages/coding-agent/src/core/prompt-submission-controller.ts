@@ -232,7 +232,7 @@ export class PromptSubmissionController {
 	private foregroundPromptLeaseValue: ForegroundSubmissionLease | undefined;
 	private lastUserRequestValue = "";
 	private ownerSubmissionOrder = 0;
-	private readonly ownerGoalIntent: OwnerGoalIntent;
+	readonly ownerGoalIntent: OwnerGoalIntent;
 
 	constructor(deps: PromptSubmissionControllerDeps) {
 		this.deps = deps;
