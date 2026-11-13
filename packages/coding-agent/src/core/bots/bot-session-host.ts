@@ -120,6 +120,8 @@ interface BotSessionEntry {
 	inFlight: number;
 	/** The session's cumulative usage when the running turn began; absent between turns. */
 	usageBefore: Usage | undefined;
+	/** When the running turn began: its own messages are the ones written since; absent between turns. */
+	turnStartedAt: number | undefined;
 	idleTimer: unknown;
 }
 
@@ -147,11 +149,15 @@ function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
 }
 
-/** The words of the newest assistant message that has any: the turn's outcome. */
-function lastAssistantText(messages: readonly AgentMessage[]): string {
+/**
+ * The words of the newest assistant message that has any, written at or after `since`: the outcome of the turn that
+ * began then. Read by time, so a compaction during the turn does not hide its answer.
+ */
+function lastAssistantText(messages: readonly AgentMessage[], since: number): string {
 	for (let index = messages.length - 1; index >= 0; index--) {
 		const message = messages[index];
 		if (message?.role !== "assistant") continue;
+		if (message.timestamp < since) return "";
 		const text = message.content
 			.map((part) => (part.type === "text" ? part.text : ""))
 			.join("\n")
@@ -459,6 +465,7 @@ export class BotSessionHost {
 				unsubscribe: () => {},
 				inFlight: 0,
 				usageBefore: undefined,
+				turnStartedAt: undefined,
 				idleTimer: undefined,
 			};
 			const unsubscribeSpend = boundSessionTurnSpend(session, {
@@ -484,7 +491,10 @@ export class BotSessionHost {
 				supervision.observe(event);
 				// The session's own warnings (a turn a watch started that failed, say) reach the owner as the bot's.
 				if (event.type === "warning") this.ports.warn(`Bot ${agentId}: ${event.message}`);
-				if (event.type === "agent_start") entry.usageBefore ??= structuredClone(entry.session.getCumulativeUsage());
+				if (event.type === "agent_start") {
+					entry.usageBefore ??= structuredClone(entry.session.getCumulativeUsage());
+					entry.turnStartedAt ??= Date.now();
+				}
 				if (event.type === "agent_end" && !event.willRetry) {
 					this.reportTurnUsage(entry);
 					this.recordOutcome(entry);
@@ -613,10 +623,15 @@ export class BotSessionHost {
 		}
 	}
 
-	/** A turn ended: its last words are the bot's summary in the roster, and its time marks the chat as unread. */
+	/**
+	 * A turn ended: its last words are the bot's summary in the roster, and its time marks the chat as unread. A turn that
+	 * said nothing (it failed before an answer) records nothing: an earlier turn's answer is not news again.
+	 */
 	private recordOutcome(entry: BotSessionEntry): void {
-		if (this.stopped) return;
-		const summary = lastAssistantText(entry.session.messages);
+		const since = entry.turnStartedAt;
+		entry.turnStartedAt = undefined;
+		if (this.stopped || since === undefined) return;
+		const summary = lastAssistantText(entry.session.messages, since);
 		if (summary.length === 0) return;
 		try {
 			this.ports.store().recordBotTurnOutcome({ agentId: entry.agentId, summary });
