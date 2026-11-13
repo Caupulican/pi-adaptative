@@ -279,6 +279,8 @@ export interface CreateAgentSessionOptions {
 	 * A session created under an AgentSessionRuntime is drained by its runtime instead.
 	 */
 	onClosingWarnings?: (warnings: readonly string[]) => void;
+	/** Refuses a run before it starts, whatever opened it (see `AgentSessionConfig.admitRun`). */
+	admitRun?: () => void;
 }
 
 /** Result from createAgentSession */
@@ -611,12 +613,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		};
 
 		agent = new Agent({
-			initialState: {
-				systemPrompt: "",
-				model,
-				thinkingLevel,
-				tools: [],
-			},
+			initialState: { systemPrompt: "", model, thinkingLevel, tools: [] },
 			convertToLlm: convertToLlmWithBlockImages,
 			// The session decides the variant each request sends (a third party's run withholds the owner's memory).
 			projectSystemPrompt: (systemPrompt) =>
@@ -879,6 +876,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			const session = new AgentSession({
 				agent,
 				onClosingWarnings: options.onClosingWarnings,
+				admitRun: options.admitRun,
 				sessionManager,
 				bundleLease,
 				settingsManager,

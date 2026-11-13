@@ -155,6 +155,11 @@ export interface AgentSessionConfig {
 	agent: Agent;
 	/** Receives the warnings this session still holds when `disposeAndWait()` closes it. Defaults to stderr (see terminal-warnings). */
 	onClosingWarnings?: (warnings: readonly string[]) => void;
+	/**
+	 * The host's admission of every run the session starts, whatever opened it (a prompt, a wake, a continuation): it
+	 * throws the owner-facing reason a run may not start now. Absent, every run is admitted.
+	 */
+	admitRun?: () => void;
 	sessionManager: SessionManager;
 	/** Required for persisted sessions; acquire before construction and transfer once. */
 	bundleLease?: SessionBundleLease;

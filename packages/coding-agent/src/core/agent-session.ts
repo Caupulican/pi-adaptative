@@ -1745,15 +1745,13 @@ export class AgentSession {
 			// Compaction rewrites the history a turn runs on, so it occupies the foreground. A tree navigation's rewrite is
 			// owned by the controller itself (`beginHistoryRewrite`), which also keeps it exclusive with a running turn.
 			isCompacting: () => this._compaction.isRunning(),
-			isExtendedBusy: () => {
-				return (
-					(this._semanticPlane.controller?.isEvaluating ?? false) ||
-					this._semanticPlane.health.hasForegroundEvaluations()
-				);
-			},
+			isExtendedBusy: () =>
+				(this._semanticPlane.controller?.isEvaluating ?? false) ||
+				this._semanticPlane.health.hasForegroundEvaluations(),
 			hasPendingIdleContinuation: () =>
 				!isOwnIdleContinuationAdmission() && this._backgroundLanes.hasPendingIdleContinuation(),
 			prepareRun: async () => {
+				config.admitRun?.();
 				this.agent.state.systemPrompt = this._systemPromptBuilder.enforceSystemPromptBudget(this.systemPrompt);
 				await this._toolProtocol.ensureActiveModelProtocol();
 			},

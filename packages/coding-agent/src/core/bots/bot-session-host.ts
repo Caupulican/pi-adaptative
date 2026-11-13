@@ -289,7 +289,8 @@ export class BotSessionHost {
 		mode: BotOperatorMessageOptions["mode"],
 	): Promise<BotOperatorMessageDispatchResult> {
 		const entry = await this.open(agentId);
-		this.admit(entry);
+		// Admitted here as well as at the run's start: a refusal answers the owner's send itself, not a failed turn.
+		this.admit(agentId, entry.session.model);
 		const queued = mode === "queue";
 		const wasRunning = this.isBusy(entry);
 		const continued = entry.session.messages.length > 0;
@@ -336,18 +337,18 @@ export class BotSessionHost {
 	}
 
 	/**
-	 * Whether the session's model may run this message now: the worker admission's rules for an explicitly requested model
-	 * (read again each message, since the owner's policy changes), and a model that declares a price when a bound applies.
+	 * Whether the bot's model may run now: the worker admission's rules for an explicitly requested model (read again each
+	 * time, since the owner's policy changes), and a model that declares a price when a bound applies. Asked before a
+	 * session is built, and by the session at the start of every run, whatever opened it (the owner, a wake).
 	 */
-	private admit(entry: BotSessionEntry): void {
-		const record = this.ports.store().getBot(entry.agentId);
-		const { model } = entry.session;
+	private admit(agentId: string, model: Model<Api> | undefined): void {
+		const record = this.ports.store().getBot(agentId);
 		const words = interfaceText().botTeam;
-		if (!record || !model) throw new Error(words.botMissing(entry.agentId));
+		if (!record || !model) throw new Error(words.botMissing(agentId));
 		const refusal =
 			this.ports.modelRefusal(record, model) ??
 			(this.ports.turnSpendBoundUsd() === undefined ? undefined : unpricedModelRefusal(model));
-		if (refusal) throw new Error(words.botModelRefused(entry.agentId, refusal));
+		if (refusal) throw new Error(words.botModelRefused(agentId, refusal));
 	}
 
 	/** The bot's loaded session, built or continued as the record defines it. */
@@ -383,6 +384,8 @@ export class BotSessionHost {
 			throw new Error(words.botModelUnavailable(agentId, `${profile.provider}/${profile.modelId}`));
 		const soul = profile.soul === undefined ? { ok: true as const, soul: undefined } : checkSoulText(profile.soul);
 		if (!soul.ok) throw new Error(words.botSoulRefused(agentId, soul.reason));
+		// A model refused now builds no session and takes no lock.
+		this.admit(agentId, model);
 		const taken = takeProcessLock(botHostLockFile(agentDir, agentId), this.holder);
 		if (!taken.held)
 			throw new Error(
@@ -427,6 +430,8 @@ export class BotSessionHost {
 					model,
 					...(isOrchestrationThinkingLevel(profile.thinkingLevel) ? { thinkingLevel: profile.thinkingLevel } : {}),
 					isChildSession: true,
+					// Every run is admitted at its start, whatever opened it: a wake's turn is held to the owner's rules too.
+					admitRun: () => this.admit(agentId, session?.model),
 					// System One as the main session runs it (on or off, provider, transport); its evidence stays in the bot's home.
 					systemOneEnabled: systemOne.enabled,
 					systemOneProvider: systemOne.provider,
