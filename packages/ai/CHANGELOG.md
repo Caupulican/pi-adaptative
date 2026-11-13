@@ -4,6 +4,7 @@
 
 - Command Code's client version is 1.89.0 and the gateway, browser handoff, and plan table are unchanged.
 - Admitted the reviewed Claude Code `2.1.323` image and packaged its CLI identity. The OAuth client, endpoints, and active inference scopes are unchanged. Production leaves `user:privacy_consents:write` inactive.
+- Admitted the reviewed Grok CLI `1.0.85` image and packaged its CLI identity. The consumer client ID, ten consumer scopes, endpoints, and Team split are unchanged.
 
 ## [0.104.63] - 2026-11-13
 
