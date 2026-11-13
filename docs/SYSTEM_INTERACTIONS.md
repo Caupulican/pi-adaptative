@@ -1332,3 +1332,12 @@ time. Its event-driven wait remains and does not drain arbitrary alarms. It reta
 quiet-delay heuristic; a matching delay alone does not establish an alarm's purpose. This fixes the demonstrated fixture ordering case, while attribution of the
 recorded timeout remains unproved until further evidence. The complete composed journey remains
 the execution boundary for this correction.
+
+The complete passive-witness J1 run on `f26131025` passed both System One modes with all
+3,025 source hashes unchanged. The historical timeout's exact cause remains unproved; the
+successful run does not reclassify it. Source review separately confirmed redundant fixture
+notifications: every queued callback re-read the same latest state. Virtual IO now batches those
+notifications into one pending turn, clearing its scheduling flag before evaluating predicates
+so a mutation during evaluation schedules another turn. Waiter error isolation and all journey
+deadlines remain unchanged. This test-side change must pass the normal cross-platform
+journeys separately from the immutable v0.104.60 artifact.

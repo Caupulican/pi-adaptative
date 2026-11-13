@@ -300,6 +300,7 @@ export class VirtualFileSystem {
 		readonly resolve: () => void;
 		readonly reject: (error: unknown) => void;
 	}>();
+	private mutationCheckScheduled = false;
 
 	constructor(cwd = "/harness/project") {
 		this.cwd = resolve(cwd);
@@ -1131,9 +1132,9 @@ export class VirtualFileSystem {
 	}
 
 	/**
-	 * Event-driven wait for durable state: `holds` is evaluated now and then on a later turn after every modeled mutation
-	 * (write, rename, removal) and after every settle batch of the promise exports (a read can move an owner's state too),
-	 * never on a timer. The caller bounds the wait with its own deadline.
+	 * Event-driven wait for durable state: `holds` is evaluated now and then on a later turn after batches of modeled
+	 * mutations and promise-export settlements (a read can move an owner's state too), never on a timer.
+	 * Notifications coalesce because predicates inspect current state. The caller bounds the wait with its own deadline.
 	 */
 	waitForMutation(holds: () => boolean): Promise<void> {
 		if (holds()) return Promise.resolve();
@@ -1534,14 +1535,15 @@ export class VirtualFileSystem {
 	}
 
 	/**
-	 * Re-reads every {@link waitForMutation} condition on a later turn: after a modeled file mutation, and after a RAM
-	 * SQLite statement commits, so a condition on queue rows is read after the write that settles it even when no file
-	 * is written afterwards.
+	 * Re-reads every {@link waitForMutation} condition on a later turn after file or committed RAM SQLite changes.
+	 * Duplicate notifications share that turn; a mutation during evaluation schedules a following turn.
 	 */
 	wakeMutationWaiters(): void {
-		if (this.mutationWaiters.size === 0) return;
+		if (this.mutationWaiters.size === 0 || this.mutationCheckScheduled) return;
+		this.mutationCheckScheduled = true;
 		// A later turn: the owner that wrote finishes its synchronous bookkeeping before the condition is read.
 		setImmediate(() => {
+			this.mutationCheckScheduled = false;
 			for (const waiter of [...this.mutationWaiters]) {
 				try {
 					if (!waiter.holds()) continue;
