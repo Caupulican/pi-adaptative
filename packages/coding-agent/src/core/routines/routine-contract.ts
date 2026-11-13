@@ -38,7 +38,9 @@ import {
 	MAX_CALENDAR_TIME_ZONE_CHARS,
 	nextCalendarSlotAfter,
 } from "./calendar-schedule.ts";
+import { boundedRoutineText as boundedString } from "./routine-field-guards.ts";
 import { MAX_ROUTINE_PROGRESS_BRIEF_CHARS, parseRoutineProgress, type RoutineProgress } from "./routine-progress.ts";
+import { parseRoutineArmAuthority, type RoutineArmAuthority } from "./routine-provenance.ts";
 import {
 	parseWatchCondition,
 	parseWatchFiredEvent,
@@ -640,6 +642,8 @@ export interface PersistentRoutineDefinition {
 	readonly enabled: boolean;
 	readonly executionSnapshot?: RoutineExecutionSnapshot;
 	readonly origin?: RoutineOrigin;
+	/** The authority the model's own tool call armed it under (`routine-provenance.ts`); a run's snapshot does not carry it. */
+	readonly armedBy?: RoutineArmAuthority;
 	readonly createdAt: string;
 	readonly updatedAt: string;
 }
@@ -652,6 +656,8 @@ export interface UpsertPersistentRoutineInput {
 	readonly schedule: RoutineScheduleInput;
 	readonly enabled?: boolean;
 	readonly executionSnapshot?: RoutineExecutionSnapshot;
+	/** A tool creation's arming authority, stamped once at creation; an update never changes the saved one. */
+	readonly armedBy?: RoutineArmAuthority;
 	readonly expectedRevision?: number;
 	readonly createOnly?: boolean;
 	readonly nowMs?: number;
@@ -1834,6 +1840,7 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 			"enabled",
 			"executionSnapshot",
 			"origin",
+			"armedBy",
 			"createdAt",
 			"updatedAt",
 		])
@@ -1865,8 +1872,9 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 		if ((target.kind === "session") !== (executionSnapshot !== undefined)) return undefined;
 		if (target.kind === "session" && executionSnapshot?.parentSessionId !== target.parentSessionId) return undefined;
 		const origin = value.origin === undefined ? undefined : parseRoutineOrigin(value.origin);
-		// Only the session that owns the source's ledger can have created a routine from it.
-		if (origin && target.kind !== "session") return undefined;
+		const armedBy = value.armedBy === undefined ? undefined : parseRoutineArmAuthority(value.armedBy);
+		// Only the session that owns the source's ledger, or the one a tool call armed it in, can have created it so.
+		if ((origin || armedBy) && target.kind !== "session") return undefined;
 		return {
 			routineId: value.routineId,
 			incarnationId: value.incarnationId,
@@ -1877,6 +1885,7 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 			enabled: value.enabled,
 			...(executionSnapshot ? { executionSnapshot } : {}),
 			...(origin ? { origin } : {}),
+			...(armedBy ? { armedBy } : {}),
 			createdAt: value.createdAt,
 			updatedAt: value.updatedAt,
 		};
@@ -2975,18 +2984,6 @@ export function nextRoutineAt(schedule: RoutineSchedule, cursor: RoutineCursor):
 	if (cursor.kind !== "interval") throw new TypeError("Routine cursor does not match its schedule.");
 	const nextAt = schedule.anchorAt + schedule.intervalMs * cursor.nextIndex;
 	return Number.isSafeInteger(nextAt) && nextAt <= MAX_ROUTINE_INSTANT_MS ? nextAt : undefined;
-}
-
-function boundedString(value: unknown, maximum: number, label: string): string {
-	if (
-		typeof value !== "string" ||
-		value.trim().length === 0 ||
-		value.length > maximum ||
-		value.trim() !== value ||
-		value.includes("\0")
-	)
-		throw new TypeError(`Routine ${label} is invalid.`);
-	return value;
 }
 
 function validInstant(value: unknown): value is number {

@@ -17,6 +17,7 @@ import type { KeybindingsManager } from "../../core/keybindings.ts";
 import { interfaceText } from "../../core/language/interface-text.ts";
 import { FlowTrace } from "../../core/operator-projection/flow-trace.ts";
 import { onPullRequestChange, readPullRequestView } from "../../core/pull-request-view.ts";
+import { SessionWatchCount } from "../../core/routines/routine-watch-arming.ts";
 import type { WorkbenchSettings } from "../../core/settings/settings-schema.ts";
 import type { TaskStepStatus } from "../../core/tasks/task-state.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
@@ -130,6 +131,8 @@ export class InteractiveLayout {
 	private workbenchInputCleanup: (() => void) | undefined;
 	/** Unsubscribes every session listener the layout holds; set when the layout mounts or rebinds. */
 	private disposeOperatorProjection: (() => void) | undefined;
+	/** The bound session's live watch count, kept between changes of its saved routines; rebuilt with the session. */
+	private watchCount: SessionWatchCount | undefined;
 	/** Output tokens per second of the session's latest run; the POV bar shows it. */
 	private generationRate = new GenerationRate();
 	/** When the provider's prompt cache for the last request expires; the POV bar counts it down. */
@@ -357,6 +360,17 @@ export class InteractiveLayout {
 		flow.observeLanes(session.getLaneRecords());
 		const unsubscribePullRequest = onPullRequestChange(() => port.ui.requestRender());
 		const unsubscribeCiStatus = port.ciStatus?.subscribeStatus(() => port.ui.requestRender());
+		const lanes = session.backgroundLanes;
+		const watchCount = new SessionWatchCount(
+			{
+				routines: () => lanes.getBotTeamStore().listRoutines(),
+				subscribe: (listener) => lanes.subscribeRoutineDefinitions(listener),
+				parentSessionId: () => port.getSessionManager().getSessionId(),
+				now: () => Date.now(),
+			},
+			() => port.ui.requestRender(),
+		);
+		this.watchCount = watchCount;
 		const unsubscribeLanes = session.onLaneRecordsChanged((records) => {
 			flow.observeLanes(records);
 			this.settleCompletedGoal();
@@ -402,6 +416,8 @@ export class InteractiveLayout {
 			unsubscribeLanes();
 			unsubscribePullRequest();
 			unsubscribeCiStatus?.();
+			watchCount.dispose();
+			if (this.watchCount === watchCount) this.watchCount = undefined;
 			this.stopCacheTicker();
 			port.activityLane?.setExternalClock("decision-graph", false);
 			this.disposeOperatorProjection = undefined;
@@ -468,6 +484,7 @@ export class InteractiveLayout {
 			getSelfCompactionView: () => port.getSession().getSelfCompactionView(),
 			getCiStatus: () => port.ciStatus?.readStatus(),
 			getGoalState: () => port.getSession().getGoalStateSnapshot(),
+			getWatchCount: () => this.watchCount?.read() ?? 0,
 			getTokensPerSecond: () => this.generationRate.tokensPerSecond,
 			getCacheRemainingMs: () => this.cacheClock.remainingMs(),
 			getPeerFindingCount: () => port.getSession().getSemanticVerificationObligations().length,

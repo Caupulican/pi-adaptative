@@ -21,6 +21,7 @@ import {
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
 import { describeRoutineProgress, routineProgressLine } from "./routine-progress.ts";
+import { MAX_ARM_OWNER_SOURCES, type RoutineArmAuthority, type RoutineRunOpener } from "./routine-provenance.ts";
 import type { RetiredRoutineRecord } from "./routine-retired.ts";
 import type { RoutineSchedulerController } from "./routine-scheduler-controller.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
@@ -33,6 +34,7 @@ import {
 	type RoutineToolSummary,
 	type RoutineToolView,
 } from "./routine-tool.ts";
+import { agentWatchBoundsRefusal, agentWatchSlotsRefusal, isWatchSchedule } from "./routine-watch-arming.ts";
 import { describeWatchCondition, parseWatchCondition, type WatchCondition } from "./watch-contract.ts";
 
 interface RoutineSessionDeps {
@@ -54,6 +56,8 @@ interface RoutineSessionDeps {
 	 * or no run is active.
 	 */
 	ownerTurnSources(): readonly string[];
+	/** What opened the current run when the owner did not speak in it: a goal continuation or a delivered host input. */
+	runOpener(): RoutineRunOpener | undefined;
 	now(): number;
 	isDisposed(): boolean;
 }
@@ -324,7 +328,7 @@ export class RoutineSessionController implements RoutineToolPort {
 	): Promise<RoutineToolView> {
 		this.check(signal);
 		// Read before admission waits: the sources in this call's context, never words the owner sends meanwhile.
-		const toolAnsweredSources = author === "tool" ? this.requireOwnerTurn() : undefined;
+		const authority = author === "tool" ? this.authorizeToolSave(input, expectedRevision) : undefined;
 		const prior = expectedRevision === undefined ? undefined : this.require(input.routineId, expectedRevision);
 		const sameIntent =
 			prior?.executionSnapshot &&
@@ -346,11 +350,14 @@ export class RoutineSessionController implements RoutineToolPort {
 					signal,
 				);
 		this.check(signal);
+		// Counted after the awaits, just before the write, so the slots held are the ones this write finds.
+		if (authority?.armedBy && authority.armedBy.kind !== "owner") this.requireWatchSlot();
 		return this.persist(input, savedIntent, {
 			enabled: prior?.enabled ?? true,
 			...(expectedRevision === undefined ? {} : { expectedRevision }),
 			...(prior?.schedule.kind === "calendar" ? { timeZone: prior.schedule.timeZone } : {}),
-			...(toolAnsweredSources === undefined ? {} : { toolAnsweredSources }),
+			...(authority?.answeredSources === undefined ? {} : { toolAnsweredSources: authority.answeredSources }),
+			...(authority?.armedBy === undefined ? {} : { armedBy: authority.armedBy }),
 		});
 	}
 
@@ -368,6 +375,7 @@ export class RoutineSessionController implements RoutineToolPort {
 			readonly expectedRevision?: number;
 			readonly timeZone?: string;
 			readonly toolAnsweredSources?: readonly string[];
+			readonly armedBy?: RoutineArmAuthority;
 			readonly intakeOrigin?: RoutineIntakeOrigin;
 			readonly intakeGuard?: () => void;
 		},
@@ -402,6 +410,7 @@ export class RoutineSessionController implements RoutineToolPort {
 				? { createOnly: true }
 				: { expectedRevision: extras.expectedRevision }),
 			...(extras.toolAnsweredSources === undefined ? {} : { toolAnsweredSources: extras.toolAnsweredSources }),
+			...(extras.armedBy === undefined ? {} : { armedBy: extras.armedBy }),
 			...(extras.intakeOrigin === undefined ? {} : { intakeOrigin: extras.intakeOrigin }),
 			...(extras.intakeGuard === undefined ? {} : { intakeGuard: extras.intakeGuard }),
 		});
@@ -417,16 +426,60 @@ export class RoutineSessionController implements RoutineToolPort {
 	}
 
 	/**
-	 * The owner sources the current run answers. Standing work is created, changed, restarted or run only on the owner's
+	 * What a tool save may do in the current run. Standing work is created, changed, restarted or run only on the owner's
 	 * own words: a run a routine result, CI event or other host input opened cannot extend or re-trigger the automation
-	 * that woke it.
+	 * that woke it. The one exception is a watch the run arms for its own work: a condition edge that is one-shot and ends
+	 * within a day ({@link agentWatchBoundsRefusal}), while the session holds fewer than the most such watches
+	 * ({@link agentWatchSlotsRefusal}), stamped with what opened the run so it never claims owner words it does not have.
+	 * That watch fires once and cannot re-arm itself: its wake is a run like this one and passes the same bounds, so a chain
+	 * of waits is bounded by the slot count and each deadline, and nothing recurring or untimed starts without the owner.
 	 */
+	private authorizeToolSave(
+		input: RoutineToolInput,
+		expectedRevision: number | undefined,
+	): { readonly answeredSources?: readonly string[]; readonly armedBy?: RoutineArmAuthority } {
+		const schedule = input.schedule;
+		const watch = expectedRevision === undefined && isWatchSchedule(schedule) ? schedule : undefined;
+		if (watch && this.deps.ownerTurnSources().length === 0) {
+			const opener = this.deps.runOpener();
+			if (!opener) {
+				harnessLog.warn("routines", "a watch was refused: nothing the harness delivered opened this run");
+				throw new Error(
+					"The owner has not spoken in this turn and no delivered result, event or goal continuation opened it, so no watch can be armed in it. Tell the owner what is waiting.",
+				);
+			}
+			const refusal = agentWatchBoundsRefusal(watch, this.deps.now());
+			if (refusal !== undefined) {
+				harnessLog.warn("routines", "a watch was refused: it is not bounded", { opener: opener.kind });
+				throw new Error(refusal);
+			}
+			return { armedBy: opener };
+		}
+		const sources = this.requireOwnerTurn();
+		return {
+			answeredSources: sources,
+			...(watch ? { armedBy: { kind: "owner" as const, sourceIds: sources.slice(-MAX_ARM_OWNER_SOURCES) } } : {}),
+		};
+	}
+
+	private requireWatchSlot(): void {
+		const refusal = agentWatchSlotsRefusal(
+			this.deps.store.listRoutines(),
+			this.deps.parentSessionId,
+			this.deps.now(),
+		);
+		if (refusal === undefined) return;
+		harnessLog.warn("routines", "a watch was refused: the session holds the most it may");
+		throw new Error(refusal);
+	}
+
+	/** The owner sources the current run answers; the owner's own words are what standing work waits for. */
 	private requireOwnerTurn(): readonly string[] {
 		const sources = this.deps.ownerTurnSources();
 		if (sources.length === 0) {
 			harnessLog.warn("routines", "a routine change was refused: the owner has not spoken in this turn");
 			throw new Error(
-				"The owner has not spoken in this turn (a routine result, CI event or host input started it): create, update, resume, run, note and reset_progress wait for the owner's request; pause and delete still work. Tell the owner what to change.",
+				"The owner has not spoken in this turn (a result or event started it): create, update, resume, run, note and reset_progress need the owner's request. To wait on your own work, arm a watch with stopAfterFirstRun and expiresAt within 24 hours.",
 			);
 		}
 		return sources;

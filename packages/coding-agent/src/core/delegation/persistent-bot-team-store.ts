@@ -54,6 +54,7 @@ import {
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
 import { parseRoutineProgress, type RoutineRunFacts, withRoutineOwnerNote } from "../routines/routine-progress.ts";
+import { creationProvenance } from "../routines/routine-provenance.ts";
 import { parseRetiredRoutines, type RetiredRoutineRecord } from "../routines/routine-retired.ts";
 import { parseWatchCondition } from "../routines/watch-contract.ts";
 import { cleanRedactBound } from "../security/secret-text.ts";
@@ -750,8 +751,9 @@ export class PersistentBotTeamStore {
 		if (!Number.isSafeInteger(this.routineRevisionCounter) || this.routineRevisionCounter < highestRoutineRevision)
 			throw new Error("Refusing to persist a stale routine revision counter.");
 		const data = {
-			// Version 4 holds progress, which a build that predates it refuses; a store without progress stays version 3.
-			version: this.storesRoutineProgress() ? 4 : 3,
+			// Version 5 holds an arming stamp and version 4 progress; a build that predates either refuses the store rather
+			// than dropping the routines it cannot read. A store with neither stays version 3.
+			version: this.storesRoutineArming() ? 5 : this.storesRoutineProgress() ? 4 : 3,
 			routineRevisionCounter: this.routineRevisionCounter,
 			bots: Array.from(this.bots.values()),
 			teams: Array.from(this.teams.values()),
@@ -775,6 +777,12 @@ export class PersistentBotTeamStore {
 		writeFileAtomicSync(this.filePath, JSON.stringify(data, null, 2));
 		this._cachedTeamList = undefined;
 		this.mutationChanged = true;
+	}
+
+	/** Whether a routine carries the arming stamp of a model's own tool call; only then is version 5 written. */
+	private storesRoutineArming(): boolean {
+		for (const routine of this.routines.values()) if (routine.armedBy !== undefined) return true;
+		return false;
 	}
 
 	/** Whether the store holds a progress field (a routine's record or an occurrence's brief); only then is version 4 written. */
@@ -827,7 +835,7 @@ export class PersistentBotTeamStore {
 			if (!isRecordObject(parsed)) throw new Error("Bot and team store is not an object.");
 			if (
 				typeof parsed.version !== "number" ||
-				![1, 2, 3, 4].includes(parsed.version) ||
+				![1, 2, 3, 4, 5].includes(parsed.version) ||
 				!Array.isArray(parsed.bots) ||
 				!Array.isArray(parsed.teams) ||
 				!isRecordObject(parsed.teamMessages)
@@ -835,7 +843,7 @@ export class PersistentBotTeamStore {
 				throw new Error("Bot and team store has an invalid envelope.");
 			storeVersion = parsed.version;
 		}
-		// Versions 3 and 4 share the current shape (a revision counter, no legacy routine key); 4 adds progress fields.
+		// Versions 3, 4 and 5 share the current shape (a revision counter, no legacy routine key); 4 adds progress fields, 5 arming stamps.
 		const currentStoreFormat = storeVersion !== undefined && storeVersion >= 3;
 		const previousState = {
 			bots: new Map(this.bots),
@@ -1395,19 +1403,7 @@ export class PersistentBotTeamStore {
 				...(input.executionSnapshot
 					? { executionSnapshot: parseRoutineExecutionSnapshot(input.executionSnapshot) }
 					: {}),
-				// Fixed at creation: an update, enable or disable never adds, changes or drops it.
-				...(existing?.origin
-					? { origin: existing.origin }
-					: intake
-						? {
-								origin: {
-									kind: "owner-intake" as const,
-									sourceId: intake.sourceId,
-									...(intake.defaults === undefined ? {} : { defaults: intake.defaults }),
-									...(intake.endCondition === undefined ? {} : { endCondition: intake.endCondition }),
-								},
-							}
-						: {}),
+				...creationProvenance(existing, intake, input.armedBy),
 				createdAt: existing?.createdAt ?? nowIso,
 				updatedAt: nowIso,
 			};

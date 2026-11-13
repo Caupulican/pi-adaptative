@@ -28,6 +28,7 @@ import {
 	routineParentInput,
 	routineResultIsQuiet,
 } from "./routine-parent-input.ts";
+import { routineRunOpener } from "./routine-run-opener.ts";
 import type { RoutineHostEventPort } from "./routine-scheduler-controller.ts";
 import {
 	RoutineSchedulerController,
@@ -253,6 +254,7 @@ export class RoutineRuntimeAssembly {
 			invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
 			eventAnchor: () => routineEventAnchor(this.host.workerLifecycle().getTaskRuntimeSnapshot()),
 			ownerTurnSources: () => this.deps.getOwnerEvidence().currentTurnSources(),
+			runOpener: () => routineRunOpener(this.deps.getSessionManager().getBranch(), this.deps.getGoalStateSnapshot()),
 			now: () => this.deps.getTimers().port("routines").now(),
 			isDisposed: () => this.deps.isDisposed(),
 		});

@@ -47,6 +47,8 @@ export interface OperatorPovSource {
 	getCiStatus?(): CiStatusView | undefined;
 	/** The session's goal state; an unfinished goal is marked on the bar with its requirement count. */
 	getGoalState?(): GoalState | undefined;
+	/** The session's live watch routines (armed conditions waiting on a file, process, port, command or page); a cached read. */
+	getWatchCount?(): number;
 	/** Mandatory peer findings, separate from advisory System One doubts. */
 	getPeerFindingCount?(): number;
 	/** Output tokens per second of the latest run that generated any; undefined before the first. */
@@ -69,6 +71,7 @@ export type OperatorPovSegmentId =
 	| "proof"
 	| "ci"
 	| "goal"
+	| "watch"
 	| "ctx";
 
 export interface OperatorPovSegment {
@@ -282,6 +285,20 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 			dropOrder: 50,
 			tone: isGoalExecutionActive(goal.status) ? "accent" : "warning",
 			bare: true,
+		});
+	}
+
+	const watchCount = source.getWatchCount?.() ?? 0;
+	if (watchCount > 0) {
+		// Passive state, drawn quiet and dropped early. The cache clock shares the glyph; its value is a countdown (`◷ 4:12`).
+		const mark = `◷ ${watchCount}`;
+		segments.push({
+			id: "watch",
+			label: operator.watches,
+			value: mark,
+			dropOrder: 11,
+			bare: true,
+			styled: theme.fg("muted", mark),
 		});
 	}
 

@@ -1,0 +1,116 @@
+/**
+ * The bounds on a watch the model arms for its own work, and the count of a session's live watches. A run the owner did
+ * not speak in may arm only a finite watch: one-shot, with an end time at most a day ahead, while the session holds fewer
+ * than {@link MAX_AGENT_ARMED_WATCHES} such watches. These are code facts the routine controller checks; the same
+ * predicate counts what the operator bar shows.
+ */
+import {
+	type RoutineDefinitionView,
+	type RoutineSchedule,
+	type RoutineScheduleInput,
+	routineEnded,
+} from "./routine-contract.ts";
+
+/** Watches a session holds that a run armed without the owner's words; a chain of waits stays bounded by this and the deadline. */
+export const MAX_AGENT_ARMED_WATCHES = 8;
+/** How far ahead an agent-armed watch's end time may be: a day is longer than any CI or deploy wait worth holding a slot for. */
+export const MAX_AGENT_WATCH_HORIZON_MS = 24 * 3_600_000;
+
+/** A watch as the routine tool authors it. */
+export type WatchScheduleInput = Extract<RoutineScheduleInput, { readonly source: "watch" }>;
+
+/** Whether a schedule is a watch condition (an event on a path, process, port, command or page). */
+export function isWatchSchedule(schedule: RoutineScheduleInput): schedule is WatchScheduleInput;
+export function isWatchSchedule(schedule: RoutineSchedule): boolean;
+export function isWatchSchedule(schedule: RoutineSchedule | RoutineScheduleInput): boolean {
+	return schedule.kind === "event" && schedule.source === "watch";
+}
+
+/**
+ * Why a watch may not be armed without the owner's words, in the fields to send; undefined when it is one-shot and ends
+ * within {@link MAX_AGENT_WATCH_HORIZON_MS}.
+ */
+export function agentWatchBoundsRefusal(schedule: WatchScheduleInput, nowMs: number): string | undefined {
+	if (schedule.stopAfterFirstRun !== true)
+		return "An agent-armed watch must be one-shot: send stopAfterFirstRun: true in the schedule.";
+	const hours = MAX_AGENT_WATCH_HORIZON_MS / 3_600_000;
+	const { expiresAt } = schedule;
+	if (expiresAt === undefined || expiresAt <= nowMs || expiresAt > nowMs + MAX_AGENT_WATCH_HORIZON_MS)
+		return `An agent-armed watch needs an end time: send expiresAt (UTC epoch ms) after now and at most ${hours} hours ahead.`;
+	return undefined;
+}
+
+/** Whether `routine` is a watch of this session that has not ended: it holds one of the session's watch slots. */
+function holdsWatchSlot(routine: RoutineDefinitionView, parentSessionId: string, nowMs: number): boolean {
+	return (
+		routine.target.kind === "session" &&
+		routine.target.parentSessionId === parentSessionId &&
+		isWatchSchedule(routine.schedule) &&
+		routineEnded(routine, nowMs) === undefined
+	);
+}
+
+/** The live watches of the session as the operator bar counts them: held and enabled, so a paused watch is not watching. */
+export function liveWatchCount(
+	routines: readonly RoutineDefinitionView[],
+	parentSessionId: string,
+	nowMs: number,
+): number {
+	return routines.filter((routine) => routine.enabled && holdsWatchSlot(routine, parentSessionId, nowMs)).length;
+}
+
+/**
+ * Why one more agent-armed watch may not be armed: the session already holds the most. A paused watch still holds its slot,
+ * so pausing cannot free room for another; a spent watch (its one run taken) does not, so its own wake may arm the next.
+ */
+export function agentWatchSlotsRefusal(
+	routines: readonly RoutineDefinitionView[],
+	parentSessionId: string,
+	nowMs: number,
+): string | undefined {
+	const held = routines.filter(
+		(routine) =>
+			routine.armedBy !== undefined &&
+			routine.armedBy.kind !== "owner" &&
+			holdsWatchSlot(routine, parentSessionId, nowMs),
+	).length;
+	return held >= MAX_AGENT_ARMED_WATCHES
+		? `This session already holds ${MAX_AGENT_ARMED_WATCHES} watches armed without the owner's words, the most it may; delete one or wait for one to fire or end.`
+		: undefined;
+}
+
+/** What {@link SessionWatchCount} reads: the saved routines, their change signal, the session and the clock. */
+export interface SessionWatchCountSource {
+	routines(): readonly RoutineDefinitionView[];
+	subscribe(listener: () => void): () => void;
+	parentSessionId(): string;
+	now(): number;
+}
+
+/**
+ * The live watch count of one session, kept between changes of the saved routines so a render reads a number and never the
+ * store: it is recounted on the first read after a change, and `onChange` tells the display to read again. An end time
+ * that passes retires the routine through a store write, which is that change.
+ */
+export class SessionWatchCount {
+	private readonly source: SessionWatchCountSource;
+	private readonly unsubscribe: () => void;
+	private counted: number | undefined;
+
+	constructor(source: SessionWatchCountSource, onChange: () => void) {
+		this.source = source;
+		this.unsubscribe = source.subscribe(() => {
+			this.counted = undefined;
+			onChange();
+		});
+	}
+
+	read(): number {
+		this.counted ??= liveWatchCount(this.source.routines(), this.source.parentSessionId(), this.source.now());
+		return this.counted;
+	}
+
+	dispose(): void {
+		this.unsubscribe();
+	}
+}
