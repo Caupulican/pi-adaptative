@@ -6,6 +6,7 @@
 
 ### Fixed
 
+- A delegate worker (`worker-<n>`) is no longer registered, listed, labelled or retired as a bot: the roster and the bot list show only runtimes with a bot record behind them, a worker's completion handoff reads `Worker: <id>`, no bot can take a worker's id, and `/bot retire` on a worker points at `delegate cancel`. Records the old behaviour created stay on disk but are no longer listed.
 - A watch routine's result always starts a turn in the session that armed it, also when its run found nothing the owner needs to hear: that session's own work waits on the change, so it continues instead of waiting for the owner's next message (the daily routine-result wake bound still applies). A routine that ends (spent, end met, expired or deleted) leaves a bounded record that `routine get` returns marked retired and `routine list` names after the live routines, instead of "Routine is absent".
 - CI results no longer stay suspended when the retained CI events cover more revisions than one event scope holds (an old parked session pinning events while pushes add new heads). The backlog is delivered in successive scope windows, oldest events first, and drains over consecutive rounds instead of refusing every round.
 
