@@ -1,5 +1,9 @@
 ## [Unreleased]
 
+### Fixed
+
+- Harness journeys answer `--version` for a seeded managed tool with its pinned version, so ensure keeps that binary instead of downloading it again.
+
 ## [0.104.62] - 2026-11-13
 
 ### Changed

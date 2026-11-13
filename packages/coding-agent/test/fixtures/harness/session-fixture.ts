@@ -77,6 +77,7 @@ import {
 	type WorkRunLease,
 } from "../../../src/utils/work-directory.ts";
 import { type FaultMatrixJourney, FaultMatrixMarks } from "./fault-matrix.ts";
+import { answerManagedToolVersionProbe } from "./managed-tool-version-probe.ts";
 import { ScriptedHumanInput } from "./scripted-human-input.ts";
 import {
 	type Barrier,
@@ -2840,6 +2841,8 @@ export class HarnessProcesses {
 		// The Windows runtime answers only its own provisioned executables; every other operation keeps its existing dispatch.
 		const windowsResult = this.windows.tryRun(operation, args);
 		if (windowsResult?.handled) return windowsResult.value;
+		const probeResult = answerManagedToolVersionProbe(operation, args);
+		if (probeResult !== undefined) return probeResult;
 		const [file, argv, options] = args;
 		const serviceAnswer = this.serviceManagerAnswers[0];
 		if (operation === "spawn" && serviceAnswer !== undefined && file === serviceAnswer.file)
