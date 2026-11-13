@@ -4,9 +4,11 @@ import type { SelfCompactionView } from "../../../core/compaction/self-compactio
 import {
 	backgroundCostBreakdown,
 	formatCompactTaskDuration,
+	isTaskExecutionActive,
 	type SessionCostSummary,
 	type TaskExecutionMetrics,
 } from "../../../core/cost/cost-summary.ts";
+import { type GoalState, isGoalExecutionActive, isGoalUnfinishedStatus } from "../../../core/goals/goal-state.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { ForegroundRouteSnapshot } from "../../../core/model-router-controller.ts";
 import { isIdleProjection } from "../../../core/operator-projection/decision-stage-log.ts";
@@ -43,6 +45,8 @@ export interface OperatorPovSource {
 	getSelfCompactionView?(): SelfCompactionView;
 	/** The branch's recorded CI verdict (core/ci-status-view.ts); absent when none is recorded. */
 	getCiStatus?(): CiStatusView | undefined;
+	/** The session's goal state; an unfinished goal is marked on the bar with its requirement count. */
+	getGoalState?(): GoalState | undefined;
 	/** Mandatory peer findings, separate from advisory System One doubts. */
 	getPeerFindingCount?(): number;
 	/** Output tokens per second of the latest run that generated any; undefined before the first. */
@@ -64,6 +68,7 @@ export type OperatorPovSegmentId =
 	| "cost"
 	| "proof"
 	| "ci"
+	| "goal"
 	| "ctx";
 
 export interface OperatorPovSegment {
@@ -264,6 +269,22 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 		});
 	}
 
+	const goal = source.getGoalState?.();
+	if (goal && isGoalUnfinishedStatus(goal.status)) {
+		const satisfied = goal.requirements.filter((requirement) => requirement.status === "satisfied").length;
+		const mark = goal.requirements.length > 0 ? `◎ ${satisfied}/${goal.requirements.length}` : "◎";
+		segments.push({
+			id: "goal",
+			label: operator.goal,
+			value: mark,
+			compact: mark,
+			// Kept as long as a red CI: an unfinished goal is what the whole session is working toward.
+			dropOrder: 50,
+			tone: isGoalExecutionActive(goal.status) ? "accent" : "warning",
+			bare: true,
+		});
+	}
+
 	const tokensPerSecond = source.getTokensPerSecond?.();
 	if (tokensPerSecond !== undefined) {
 		const rate = `${tokensPerSecond.toFixed(tokensPerSecond < 10 ? 1 : 0)} tok/s`;
@@ -289,7 +310,7 @@ export function buildOperatorPovSegments(source: OperatorPovSource): OperatorPov
 			compact: compactTask,
 			dropOrder: 35,
 			bare: true,
-			styled: theme.fg(taskMetrics.status === "active" ? "accent" : "muted", fullTask),
+			styled: theme.fg(isTaskExecutionActive(taskMetrics.status) ? "accent" : "muted", fullTask),
 		});
 	}
 

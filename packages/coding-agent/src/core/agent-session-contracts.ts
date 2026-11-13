@@ -37,6 +37,7 @@ import type { MachineFacts } from "./fleet/capacity/machine-room.ts";
 import type { WorkerTerminalDeliveryInterposer } from "./foreground-terminal-handoff-controller.ts";
 import type { GoalContinuationPrompt } from "./goals/goal-continuation-prompt.ts";
 import type { GoalRuntimeSnapshot } from "./goals/goal-runtime-snapshot.ts";
+import type { GoalState } from "./goals/goal-state.ts";
 import type { OwnerTextRange } from "./learning/owner-evidence-ledger.ts";
 import type { KnowledgeCollectionHandoff, KnowledgeCollectionOutcome } from "./memory/knowledge-collector.ts";
 import type { MemoryActivationEvent } from "./memory-controller.ts";
@@ -93,6 +94,8 @@ export type AgentSessionEvent =
 	/** `severity: "info"` marks routine work flow that is announced but is not a problem (a request to the root). */
 	| { type: "warning"; message: string; severity?: "info" }
 	| { type: "background_tools"; tasks: readonly BackgroundToolTaskLiveView[] }
+	/** The goal's persisted state was saved (created, updated, paused, resumed, finished); `undefined` once none exists. */
+	| { type: "goal_state_changed"; state: GoalState | undefined }
 	| {
 			type: "compaction_end";
 			reason: "manual" | AutoCompactionReason;

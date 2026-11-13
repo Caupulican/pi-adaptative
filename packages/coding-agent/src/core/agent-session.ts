@@ -1145,9 +1145,9 @@ export class AgentSession {
 			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
 			getBackgroundToolTasks: () => this._backgroundToolTasks.list(),
 			synchronizeGoalState: (state) => {
-				// Owner items a paused goal held are posted when it leaves the pause; this never throws.
-				this._unsettledLadder.noteGoalState(state);
+				this._unsettledLadder.noteGoalState(state); // owner items a paused goal held post on resume; never throws
 				this._backgroundLanes.synchronizeGoalState(state);
+				this._emit({ type: "goal_state_changed", state });
 			},
 			scheduleGoalAutoContinueFromIdle: () => this._backgroundLanes.scheduleGoalAutoContinueFromIdle(),
 			describeAutoContinue: (snapshot) => this._backgroundLanes.describeGoalAutoContinue(snapshot),

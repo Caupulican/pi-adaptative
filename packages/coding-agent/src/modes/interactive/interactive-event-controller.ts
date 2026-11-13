@@ -378,6 +378,11 @@ export class InteractiveEventController {
 				this.port.footer.invalidate();
 				break;
 
+			case "goal_state_changed":
+				this.port.refreshActivityLane();
+				this.port.ui.requestRender();
+				break;
+
 			case "background_tools":
 				for (const task of event.tasks) {
 					if (task.toolCallId) this.port.activityLane?.remove(`tool:${task.toolCallId}`);

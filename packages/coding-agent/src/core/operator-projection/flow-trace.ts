@@ -262,6 +262,7 @@ export class FlowTrace {
 		user_message_withdrawn: () => {},
 		session_info_changed: () => {},
 		usage_updated: () => {},
+		goal_state_changed: () => {},
 		proactive_review: () => {},
 		// Collection handoffs are maintenance metadata; their judgments and warnings have their own flow events.
 		knowledge_collection: () => {},

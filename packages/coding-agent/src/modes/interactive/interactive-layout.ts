@@ -467,6 +467,7 @@ export class InteractiveLayout {
 			getSessionWorkState: () => port.getSession().getSessionWorkState(),
 			getSelfCompactionView: () => port.getSession().getSelfCompactionView(),
 			getCiStatus: () => port.ciStatus?.readStatus(),
+			getGoalState: () => port.getSession().getGoalStateSnapshot(),
 			getTokensPerSecond: () => this.generationRate.tokensPerSecond,
 			getCacheRemainingMs: () => this.cacheClock.remainingMs(),
 			getPeerFindingCount: () => port.getSession().getSemanticVerificationObligations().length,

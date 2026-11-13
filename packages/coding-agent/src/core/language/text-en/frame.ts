@@ -4,6 +4,8 @@
  * carry a value or an inflection are functions, so each language decides where the value sits and how it agrees.
  */
 
+import type { GoalStoppedStatus } from "../../goals/goal-state.ts";
+
 export const FRAME = {
 	footer: {
 		/** Shown in place of the model name when no model is selected. */
@@ -36,8 +38,11 @@ export const FRAME = {
 		cancelled: (content: string) => `Cancelled · ${content}`,
 		needsYou: "Needs you",
 		plan: "Plan",
-		/** The goal is unfinished and running. */
-		goalActive: "active",
+		/** A running goal's name; the lane row has no other word for what it is. */
+		goal: "goal",
+		/** A goal that is unfinished but not running, with the word for why. */
+		goalStopped: (status: GoalStoppedStatus) =>
+			`goal ${{ paused: "paused", blocked: "blocked", usage_limited: "usage limited" }[status]}`,
 		goalAchieved: "Goal achieved",
 		goalClosed: "Goal closed",
 		/** What a worker row counts as until it produces work of its own. */
@@ -79,6 +84,7 @@ export const FRAME = {
 		route: "ROUTE",
 		peer: "PEER",
 		systemOne: "S1",
+		goal: "Goal",
 		ci: "CI",
 		tokensPerSecond: "TPS",
 		task: "TASK",

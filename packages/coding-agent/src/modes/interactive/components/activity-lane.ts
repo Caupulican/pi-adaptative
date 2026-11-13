@@ -199,14 +199,15 @@ function projectGoalState(state: GoalState | undefined): ActivityLaneProjection 
 			? ` (${[activeMs > 0 ? formatElapsed(activeMs) : undefined, rounds > 0 ? `${rounds}r` : undefined].filter(Boolean).join(" · ")})`
 			: "";
 	if (isGoalUnfinishedStatus(state.status)) {
-		const goalActive = isGoalExecutionActive(state.status);
+		const activity = interfaceText().frame.activity;
+		const running = isGoalExecutionActive(state.status);
 		return {
 			active: [
 				{
 					id: `goal:${state.goalId}`,
 					kind: "goal",
-					label: `${goalActive ? interfaceText().frame.activity.goalActive : state.status.replaceAll("_", " ")}${metricsSuffix}`,
-					status: goalActive ? "active" : "waiting",
+					label: `${isGoalExecutionActive(state.status) ? activity.goal : activity.goalStopped(state.status)}${metricsSuffix}`,
+					status: running ? "active" : "waiting",
 					...(state.createdAt ? { originAt: state.createdAt } : {}),
 				},
 			],

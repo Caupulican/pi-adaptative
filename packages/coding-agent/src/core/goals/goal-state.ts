@@ -42,9 +42,11 @@ export function isRunawayStopReason(reason: string | undefined): boolean {
 }
 
 /** One shared lifecycle classification for tools, runtime, persistence, and UI. */
-export function isGoalExecutionActive(status: GoalStatus): boolean {
+export function isGoalExecutionActive(status: GoalStatus): status is "active" {
 	return status === "active";
 }
+/** The unfinished statuses that are not running: the goal waits on the owner, a block or a usage limit. */
+export type GoalStoppedStatus = Exclude<GoalStatus, "active" | "completed" | "cancelled" | "budget_limited">;
 export function isGoalResumableStatus(status: GoalStatus): boolean {
 	return status === "paused" || status === "blocked" || status === "usage_limited";
 }
@@ -54,7 +56,7 @@ export function isGoalStoppedStatus(status: GoalStatus): boolean {
 export function isGoalTerminalStatus(status: GoalStatus): boolean {
 	return status === "completed" || status === "cancelled" || status === "budget_limited";
 }
-export function isGoalUnfinishedStatus(status: GoalStatus): boolean {
+export function isGoalUnfinishedStatus(status: GoalStatus): status is GoalStoppedStatus | "active" {
 	return !isGoalTerminalStatus(status);
 }
 

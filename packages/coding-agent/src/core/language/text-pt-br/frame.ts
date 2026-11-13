@@ -5,6 +5,7 @@
  * and present continuous for states. Terms that Brazilian developers keep in English stay in English.
  */
 
+import type { GoalStoppedStatus } from "../../goals/goal-state.ts";
 import type { InterfaceText } from "../interface-text.ts";
 
 export const FRAME = {
@@ -33,7 +34,9 @@ export const FRAME = {
 		needsYou: "Precisa de você",
 		plan: "Plano",
 		/** The goal is "objetivo", so its state agrees in the masculine. */
-		goalActive: "ativo",
+		goal: "objetivo",
+		goalStopped: (status: GoalStoppedStatus) =>
+			`objetivo ${{ paused: "pausado", blocked: "bloqueado", usage_limited: "limitado por uso" }[status]}`,
 		goalAchieved: "Objetivo alcançado",
 		goalClosed: "Objetivo encerrado",
 		managedAgentQueued: "agente gerenciado na fila",
@@ -70,6 +73,7 @@ export const FRAME = {
 		route: "ROTA",
 		peer: "PEER",
 		systemOne: "S1",
+		goal: "Objetivo",
 		ci: "CI",
 		tokensPerSecond: "TPS",
 		task: "TAREFA",
