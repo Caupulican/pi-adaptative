@@ -59,6 +59,7 @@ import type { SystemOneSessionSource } from "../system-one/session-source.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { toolSurvivesReadOnly } from "../tool-capability-policy.ts";
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
+import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, botProfileOf, ensureBotHome } from "./bot-home.ts";
@@ -154,7 +155,9 @@ function profileKeyOf(record: PersistentBotRecord): string {
 	return JSON.stringify([provider, modelId, thinkingLevel, soul, canWrite]);
 }
 
+/** What failed, in its own words: each cause of a failure that gathers several. */
 function errorText(error: unknown): string {
+	if (error instanceof AggregateError) return error.errors.map(errorText).join("; ");
 	return error instanceof Error ? error.message : String(error);
 }
 
@@ -720,27 +723,28 @@ export class BotSessionHost {
 		}
 	}
 
-	/** Closes the bot's session and gives its lock back; the next message builds a new one. */
+	/**
+	 * Closes the bot's session and gives its lock back; the next message builds a new one. Every step runs whatever an
+	 * earlier one threw, in order: the lock is given back only once the session's disposal settled, so no other host
+	 * builds a session of the bot while this one still writes its files.
+	 */
 	private close(agentId: string): Promise<void> {
 		const entry = this.entries.get(agentId);
 		const previous = this.closing.get(agentId);
 		if (!entry) return previous ?? Promise.resolve();
 		this.entries.delete(agentId);
 		this.touch(entry);
-		const closing = (async () => {
-			try {
-				await entry.session.abort("bot session closing");
-				entry.unsubscribe();
-				await entry.session.disposeAndWait();
-			} finally {
-				try {
-					entry.stateWriter.clear();
-				} finally {
-					entry.lock.release();
-				}
-				this.changed(agentId);
-			}
-		})().finally(() => {
+		const closing = runAsyncReleaseSteps(
+			[
+				() => entry.session.abort("bot session closing"),
+				() => entry.unsubscribe(),
+				() => entry.session.disposeAndWait(),
+				() => entry.stateWriter.clear(),
+				() => entry.lock.release(),
+			],
+			"The bot session did not close cleanly.",
+		).finally(() => {
+			this.changed(agentId);
 			if (this.closing.get(agentId) === closing) this.closing.delete(agentId);
 		});
 		this.closing.set(agentId, closing);
