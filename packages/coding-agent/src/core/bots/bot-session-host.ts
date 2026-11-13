@@ -63,6 +63,7 @@ import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, botProfileOf, ensureBotHome } from "./bot-home.ts";
 import { watchBotHomes } from "./bot-home-watch.ts";
 import { BotHostStateWriter, type BotSessionState, type RemoteBotHost, readRemoteBotHost } from "./bot-host-state.ts";
+import { BotTurnSupervision } from "./bot-turn-supervision.ts";
 
 /** How long a bot's session stays loaded with no turn running and no input queued. */
 export const BOT_SESSION_IDLE_BOUND_MS = 10 * 60 * 1000;
@@ -559,7 +560,15 @@ export class BotSessionHost {
 					return reason;
 				},
 			});
+			// Its tool loop is supervised as a worker's is: churn and System One's progress judgment, over its own turn.
+			const supervision = new BotTurnSupervision(session, {
+				agentId,
+				role: profile.canWrite ? "implementer" : "explorer",
+				cwd: this.ports.cwd(),
+				warn: (message) => this.ports.warn(`Bot ${agentId}: ${message}`),
+			});
 			const unsubscribeEvents = session.subscribe((event) => {
+				supervision.observe(event);
 				// The session's own warnings (a turn a watch started that failed, say) reach the owner as the bot's.
 				if (event.type === "warning") this.ports.warn(`Bot ${agentId}: ${event.message}`);
 				if (event.type === "agent_start") entry.usageBefore ??= structuredClone(entry.session.getCumulativeUsage());
@@ -578,6 +587,7 @@ export class BotSessionHost {
 			entry.unsubscribe = () => {
 				unsubscribeSpend();
 				unsubscribeEvents();
+				supervision.stop();
 			};
 			// The session runs the watches it arms and takes their wakes as parent inputs (idle starts a turn, running steers).
 			session.backgroundLanes.hostOwnWatches();

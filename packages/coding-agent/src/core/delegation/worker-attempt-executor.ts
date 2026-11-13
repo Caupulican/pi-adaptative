@@ -33,6 +33,7 @@ import { CapabilityGatewayDeniedError, type ProviderBudgetReservation } from "..
 import type { ArtifactContract, AttemptUsageSnapshot, ExecutionGrant } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
 import type { TaskWatchPort } from "../routines/task-watch-tool.ts";
+import { assistantOutputTail, ProgressObservationWindow } from "../supervision/progress-observation-window.ts";
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
@@ -120,8 +121,6 @@ const WORKER_PROVIDER_RETRY_POLICY: RetryPolicy = {
 	jitterRatio: 0.2,
 };
 
-const RECENT_SUPERVISION_TOOL_WINDOW = 8;
-const CONSECUTIVE_TOOL_FAILURE_THRESHOLD = 3;
 /** Provider/child-loop settlement has no process kill tier; its grace is independent of shell disposal. */
 const WORKER_PHYSICAL_SETTLEMENT_GRACE_MS = 5_000;
 
@@ -315,13 +314,6 @@ export interface WorkerAttemptExecutorOptions {
 		readonly path?: string;
 		readonly cwd: string;
 	}): void;
-}
-
-/** Distinct arguments to the same tool are progress, especially during read-only review. */
-export function isRepeatedWorkerToolInvocation(calls: readonly { name: string; args: unknown }[]): boolean {
-	if (calls.length < 3) return false;
-	const recent = calls.slice(-3);
-	return recent.every((call) => call.name === recent[0]!.name && isDeepStrictEqual(call.args, recent[0]!.args));
 }
 
 function workerCompletionCallbackFailure(error: unknown): Error {
@@ -562,11 +554,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			changedFiles: [...changedFiles],
 			cwd: options.cwd,
 		});
-	const recentToolNames: string[] = [];
-	const recentToolCalls: { name: string; args: unknown }[] = [];
-	const recentToolOutcomes: { name: string; failed: boolean }[] = [];
-	let executedToolCalls = 0;
-	let changedFileCountAtChurnWindowStart = changedFiles.size;
+	const progressWindow = new ProgressObservationWindow(changedFiles.size);
 	/**
 	 * One live supervision observation per executed tool call. The deterministic churn check runs
 	 * first, because repeated broad validation with no new implementation needs no semantic judgment.
@@ -622,34 +610,11 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 	};
 	const observeToolCall = async (toolName: string, args: unknown, isError: boolean): Promise<void> => {
 		if (!options.observeWorkerProgress) return;
-		executedToolCalls++;
-		recentToolNames.push(toolName);
-		if (recentToolNames.length > RECENT_SUPERVISION_TOOL_WINDOW) recentToolNames.shift();
-		recentToolCalls.push({ name: toolName, args });
-		if (recentToolCalls.length > 3) recentToolCalls.shift();
-		recentToolOutcomes.push({ name: toolName, failed: isError });
-		if (recentToolOutcomes.length > RECENT_SUPERVISION_TOOL_WINDOW) recentToolOutcomes.shift();
-		const isRepeating = isRepeatedWorkerToolInvocation(recentToolCalls);
-		const consecutiveToolFailures =
-			recentToolOutcomes.length >= CONSECUTIVE_TOOL_FAILURE_THRESHOLD &&
-			recentToolOutcomes.slice(-CONSECUTIVE_TOOL_FAILURE_THRESHOLD).every((outcome) => outcome.failed);
-		const isStalled =
-			changedFiles.size === 0 &&
-			executedToolCalls >= 4 &&
-			(isRepeating || consecutiveToolFailures || toolIssues.size > 0);
+		const facts = progressWindow.record({ name: toolName, args, isError }, changedFiles, toolIssues);
 		let outputTail = "";
 		try {
 			// Only this attempt's own output: supervision judges the current task, never an earlier one's report.
-			const messages = options.conversation.getRawTranscript().slice(attemptTranscriptStart);
-			for (let index = messages.length - 1; index >= 0; index--) {
-				const message = messages[index];
-				if (message.role !== "assistant" || !("content" in message) || !Array.isArray(message.content)) continue;
-				const text = message.content.flatMap((content) => (content.type === "text" ? [content.text] : [])).join("");
-				if (text) {
-					outputTail = text.slice(-2000);
-					break;
-				}
-			}
+			outputTail = assistantOutputTail(options.conversation.getRawTranscript().slice(attemptTranscriptStart));
 		} catch {
 			outputTail = "";
 		}
@@ -660,24 +625,10 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			attemptId: options.durableHandle.attemptId,
 			role: options.grant.role,
 			mission: options.request.instructions,
-			toolCalls: executedToolCalls,
 			elapsedMs: Date.now() - attemptStartedAt,
-			changedFiles: [...changedFiles],
-			recentFailures: [
-				...toolIssues,
-				...recentToolOutcomes.flatMap((outcome) => (outcome.failed ? [`${outcome.name} failed`] : [])),
-			],
-			recentToolNames: [...recentToolNames],
-			recentToolCalls: [...recentToolCalls],
-			changedFileCountAtWindowStart: changedFileCountAtChurnWindowStart,
-			changedFileCount: changedFiles.size,
 			outputTail,
-			isRepeating,
-			isStalled,
+			...facts,
 		};
-		if (changedFiles.size > changedFileCountAtChurnWindowStart) {
-			changedFileCountAtChurnWindowStart = changedFiles.size;
-		}
 		// Supervision runs beside the worker, never in front of it: the assessment is a System One round trip and
 		// the worker's next tool call does not wait for it. A steer it decides reaches the worker through the
 		// session's worker control at its next turn boundary (or interrupts it now); a verdict that settles after

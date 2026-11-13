@@ -97,7 +97,7 @@ import type { SettingsManager } from "./settings-manager.ts";
 import type { SkillVaultController } from "./skill-vault.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
 import { WorkerSemanticSupervisor } from "./supervision/worker-semantic-supervisor.ts";
-import { WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
+import { type WorkerControlPort, WorkerSupervisionCoordinator } from "./supervision/worker-supervision-coordinator.ts";
 import { sameLaneVerificationDirective } from "./system-one/control-directive.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import type { SystemOneWorkerControl } from "./system-one/worker-control.ts";
@@ -183,18 +183,51 @@ export function createSessionOperatorProjection(deps: SessionOperatorProjectionW
 	});
 }
 
-export interface SessionWorkerSupervisionWiringDeps {
+/** What live supervision reaches in the session that runs it: System One's steering, its notices and its ledger. */
+export interface SupervisionWiringDeps {
 	readonly sessionManager: Pick<SessionManager, "getSessionId">;
 	readonly cwd: string;
 	getSteeringPlane(): SystemOneSteeringPlane | undefined;
-	readonly systemOneWorkerControl: Pick<SystemOneWorkerControl, "steerWorker" | "cancelWorker">;
+	/** The levers over the observed loop: a worker's lane, or a bot session's own turn. */
+	readonly control: WorkerControlPort;
 	emit(event: AgentSessionEvent): void;
 	getOperatorProjection(): Pick<SessionOperatorProjection, "eventBridge">;
 	getDecisionLedger(): Pick<DecisionLedgerStore, "recordSupervisionAction"> | undefined;
+	/** Whether an observed attempt is still running; a verdict that settles after it ended is stale. */
+	isAttemptLive(attemptId: string): boolean;
+}
+
+export interface SessionWorkerSupervisionWiringDeps extends Omit<SupervisionWiringDeps, "control" | "isAttemptLive"> {
+	readonly systemOneWorkerControl: Pick<SystemOneWorkerControl, "steerWorker" | "cancelWorker">;
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined;
 }
 
+/** The session's supervision of its own workers, through System One's worker levers. */
 export function createSessionWorkerSupervision(deps: SessionWorkerSupervisionWiringDeps): WorkerSupervisionCoordinator {
+	return createSupervision({
+		...deps,
+		control: {
+			// The supervisor reaches System One's worker levers and nothing else.
+			steerWorker: (agentId, directive, delivery) =>
+				deps.systemOneWorkerControl.steerWorker(agentId, directive, delivery ?? "queue"),
+			cancelWorker: (agentId, reason) => deps.systemOneWorkerControl.cancelWorker(agentId, reason),
+		},
+		// Stale only when the attempt is known to have ended; an unknown status is not evidence of that.
+		isAttemptLive: (attemptId) => {
+			const status = deps.getTaskRuntimeSnapshot()?.attempts[attemptId]?.status;
+			return (
+				status === undefined ||
+				status === "queued" ||
+				status === "leased" ||
+				status === "running" ||
+				status === "suspended"
+			);
+		},
+	});
+}
+
+/** Live supervision of one kind of observed loop: the same supervisor and coordinator, over the levers `deps` gives. */
+export function createSupervision(deps: SupervisionWiringDeps): WorkerSupervisionCoordinator {
 	return new WorkerSupervisionCoordinator({
 		supervisor: new WorkerSemanticSupervisor({
 			// First-class SteeringPlane checkpoint. The compaction retention adapter is not this bridge.
@@ -216,12 +249,7 @@ export function createSessionWorkerSupervision(deps: SessionWorkerSupervisionWir
 				},
 			},
 		}),
-		control: {
-			// The supervisor reaches System One's worker levers and nothing else.
-			steerWorker: (agentId, directive, delivery) =>
-				deps.systemOneWorkerControl.steerWorker(agentId, directive, delivery ?? "queue"),
-			cancelWorker: (agentId, reason) => deps.systemOneWorkerControl.cancelWorker(agentId, reason),
-		},
+		control: deps.control,
 		onIntervention: (signal) => {
 			if (!signal.summaryEvent) return;
 			// A request to the root (verifier, specialist, capability, external block) is work flowing, not a
@@ -251,17 +279,7 @@ export function createSessionWorkerSupervision(deps: SessionWorkerSupervisionWir
 				decidedAt: Date.now(),
 				...record,
 			}),
-		// Stale only when the attempt is known to have ended; an unknown status is not evidence of that.
-		isAttemptLive: (attemptId) => {
-			const status = deps.getTaskRuntimeSnapshot()?.attempts[attemptId]?.status;
-			return (
-				status === undefined ||
-				status === "queued" ||
-				status === "leased" ||
-				status === "running" ||
-				status === "suspended"
-			);
-		},
+		isAttemptLive: (attemptId) => deps.isAttemptLive(attemptId),
 	});
 }
 

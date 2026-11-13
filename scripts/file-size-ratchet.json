@@ -39,7 +39,7 @@
 		"packages/coding-agent/src/kernel/compaction/compaction.ts": 1991,
 		"packages/coding-agent/src/core/cost/semantic-usage-delivery.ts": 1881,
 		"packages/coding-agent/src/core/memory/continuous-chat-store.ts": 1811,
-		"packages/coding-agent/src/core/delegation/worker-attempt-executor.ts": 1787,
+		"packages/coding-agent/src/core/delegation/worker-attempt-executor.ts": 1738,
 		"packages/coding-agent/src/core/model-router-controller.ts": 1781,
 		"packages/coding-agent/src/core/background-tool-task-controller.ts": 1782,
 		"packages/coding-agent/src/core/system-one/controller.ts": 1774,
