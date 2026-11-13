@@ -99,6 +99,9 @@ export const CONVERSATION = {
 	routineOutcome: (routineId: string, outcome: string) => `Rotina ${routineId}: ${outcome}`,
 	routineOutcomeWithCause: (cause: string, outcome: string) => `${cause} · ${outcome}`,
 	routineNothingForYou: "nada para você",
+	watchWokeArmer: "acionou o agente que a criou",
+	watchFailing: (routineId: string) =>
+		`A espera ${routineId} segue falhando nas verificações; o agente que a criou foi avisado`,
 	routineEndedOutcome: "terminou",
 	routineWaitsForMessage: "espera sua próxima mensagem",
 	routineEarlierSlots: (count: number) => `cobre ${count} ${count === 1 ? "horário anterior" : "horários anteriores"}`,

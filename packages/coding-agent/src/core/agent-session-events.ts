@@ -239,6 +239,7 @@ export class AgentSessionEvents {
 			// final normal poll. agent_end is the fallback before foreground recovery decides whether queued
 			// steering requires one continuation; turn_end is intentionally not a flush.
 			settle(() => this.ports.terminalHandoffs().flushProviderBoundary());
+			settle(() => this.ports.durableCustomMessageTurns().flushParentSteers());
 			if (failures.length === 1) throw failures[0];
 			if (failures.length > 1) {
 				throw new AggregateError(

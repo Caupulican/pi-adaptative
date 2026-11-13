@@ -111,6 +111,9 @@ export const CONVERSATION = {
 	routineOutcome: (routineId: string, outcome: string) => `Routine ${routineId} ${outcome}`,
 	routineOutcomeWithCause: (cause: string, outcome: string) => `${cause} · ${outcome}`,
 	routineNothingForYou: "nothing for you",
+	/** The note after what a watch saw: the agent that armed the watch was woken with it. */
+	watchWokeArmer: "woke the agent that armed it",
+	watchFailing: (routineId: string) => `Watch ${routineId} keeps failing its checks; the agent that armed it was told`,
 	/** The outcome word when the record carries none. */
 	routineEndedOutcome: "ended",
 	routineWaitsForMessage: "waits for your next message",

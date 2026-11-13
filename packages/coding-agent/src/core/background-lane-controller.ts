@@ -199,7 +199,7 @@ import { AwayService } from "./routines/away-service.ts";
 import type { RoutineIntakeStatus } from "./routines/routine-intake.ts";
 import { type RoutineRuntime, RoutineRuntimeAssembly } from "./routines/routine-runtime-assembly.ts";
 import { routineGithubInterests, routineHostEventFeed } from "./routines/routine-scheduler-controller.ts";
-import { parseRoutineToolInput, type RoutineToolView } from "./routines/routine-tool.ts";
+import { parseRoutineToolInput, type RoutineToolFields, type RoutineToolView } from "./routines/routine-tool.ts";
 import { getSessionRole } from "./session-role.ts";
 import { joinShutdownOperations } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
@@ -541,6 +541,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				createBotMessageDirectory: (sender, attempt) => this.createBotMessageDirectory(sender, attempt),
 				// The worker's model decides the account the fleet's allowance term reads, not the foreground's.
 				fleetAllowance: subscriptionAllowancePort(() => this._getAllowance()),
+				taskWatches: this._routineAssembly.taskWatches(() => this._routines),
 			},
 			this._getWorkerNotificationCoordinator(),
 			this._getWorkerLifecycle(),
@@ -1729,10 +1730,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 * and event anchor, owned by the same session controller. The embedding host calls it on its own authority, so it
 	 * needs no owner-opened turn and marks no owner words as answered.
 	 */
-	async createRoutine(
-		spec: Parameters<typeof parseRoutineToolInput>[0],
-		signal?: AbortSignal,
-	): Promise<RoutineToolView> {
+	async createRoutine(spec: RoutineToolFields, signal?: AbortSignal): Promise<RoutineToolView> {
 		this.getBotTeamStore();
 		if (!this._routines) throw new Error("Routines are unavailable in this session.");
 		return this._routines.session.createForHost(parseRoutineToolInput(spec), signal);

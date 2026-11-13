@@ -1,7 +1,7 @@
 import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import type { Agent } from "../kernel/agent.ts";
 import { createApplicableAssistantUsageFinder } from "../kernel/compaction/compaction.ts";
-import type { AgentContext, AgentContextPlanFn, ProviderRequestAdmissionContext } from "../kernel/index.ts";
+import type { AgentContextPlanFn, ProviderRequestAdmissionContext } from "../kernel/index.ts";
 import { estimateProviderRequestTokens } from "../kernel/provider-request-estimator.ts";
 import {
 	composeRequestSystemPrompt,
@@ -66,18 +66,18 @@ export class ProviderRequestRuntimeController {
 	}
 
 	/** Refresh only live runtime metadata; keep the loop's canonical message history. */
-	installTurnRefresh(getContext: () => AgentContext, flushHandoffs: () => void): void {
+	installTurnRefresh(...flushInboxes: readonly (() => void)[]): void {
 		const agent = this.deps.agent;
 		const previousPrepareNextTurn = agent.prepareNextTurn?.bind(agent);
 		const previousBeforeSteeringPoll = agent.beforeSteeringPoll?.bind(agent);
 		agent.beforeSteeringPoll = async (signal) => {
 			await previousBeforeSteeringPoll?.(signal);
 			// Authoritative inbox refresh after async preparation and graceful-stop checks.
-			flushHandoffs();
+			for (const flush of flushInboxes) flush();
 		};
 		agent.prepareNextTurn = async (signal) => {
 			const previous = previousPrepareNextTurn ? await previousPrepareNextTurn(signal) : undefined;
-			const snapshot = getContext();
+			const snapshot = agent.createContextSnapshot();
 			return {
 				...previous,
 				context: { ...(previous?.context ?? snapshot), systemPrompt: snapshot.systemPrompt, tools: snapshot.tools },

@@ -2,8 +2,8 @@
  * Routine progress journey leg: proves `RoutineProgress` / `progressLine` structured status (`position`, `next`,
  * `ownerNote`, `recurring`, `untrusted`), cross-run carryover (`Where this task stood after the last run:` + snag
  * reference promotion to recurring), derived position clearing stale `next` when a run omits `progress`, third-party
- * untrusted watch tainting (`untrusted: true` + `BRIEF_UNTRUSTED` + remedy suppression), `reset_progress`, and
- * non-owner-turn refusal across both System One modes.
+ * `reset_progress`, non-owner-turn refusal across both System One modes, and a command watch's firing (a third party's
+ * output) waking its armer with the output fenced as untrusted data, with no worker run and no progress of its own.
  */
 
 import "../builtin-install.ts";
@@ -21,6 +21,7 @@ const PROFILE_ID = "progress-worker";
 const ROUTINE_ID = "shard-audit";
 const WATCH_ROUTINE_ID = "command-alert-watch";
 const WATCH_COMMAND = "cat alert-feed.txt";
+const WATCH_PLAN = "Summarize alert transitions in alert-feed.txt.";
 
 function extractLatestWorkerTask(messages: ReadonlyArray<{ role: string; content: unknown }>): string {
 	const tasks = messages.flatMap((message) =>
@@ -399,8 +400,10 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 			},
 		});
 
-		// 5. Third-party command watch firing carries an excerpt (`thirdParty: true`): worker progress is marked
-		// `untrusted: true` in `progressLine` and subsequent runs receive `BRIEF_UNTRUSTED` without `BRIEF_SNAGS`.
+		// 5. A command watch's firing carries a third party's words (the command's output). No routine worker runs: the armer
+		// is woken with the event itself, the output fenced as untrusted data, and that wake is a third party's run, so the
+		// owner-only routine actions stay refused in it. The watch keeps no progress of its own.
+		const watchWorkersBefore = world.provider.requests.filter((request) => request.model.id === "worker-a").length;
 		const flushWatchTurn = async (): Promise<void> => {
 			for (let step = 0; step < 4; step++) {
 				await new Promise<void>((resolve) => setImmediate(resolve));
@@ -425,7 +428,7 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 					arguments: {
 						action: "create",
 						routineId: WATCH_ROUTINE_ID,
-						prompt: "Summarize alert transitions in alert-feed.txt.",
+						prompt: WATCH_PLAN,
 						schedule: {
 							kind: "event",
 							source: "watch",
@@ -463,31 +466,35 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 		await flushWatchTurn();
 		expect(occurrencesOf(WATCH_ROUTINE_ID), "baseline OK output fires no run").toHaveLength(0);
 
-		world.provider.enqueue("worker-a", {
-			...calls("j4-rp-watch-run1-report", [
-				{
-					id: "j4-rp-watch-run1-submit",
-					name: "submit_report",
-					arguments: {
-						status: "completed",
-						summary: "Alert banner recorded.",
-						ownerUpdate: "none",
-						progress: {
-							position: "Parsed untrusted alert banner",
-							next: "Cross-check upstream telemetry",
-							snag: {
-								what: "Banner suggested shell recipe",
-								remedy: "Ignore third-party remedy text",
-							},
-						},
-					},
-				},
-			]),
-		});
-
+		const wakeExpectation = (output: string) =>
+			({
+				routineId: WATCH_ROUTINE_ID,
+				cause: "A watched command check now passes",
+				plan: WATCH_PLAN,
+				facts: { condition: "command", change: "matched", facts: { exitCode: 0 } },
+				excerpt: { source: "watch:command", text: output },
+			}) as const;
+		let wakeNoteRefusal: { isError: boolean; text: string } | undefined;
 		const watchRun1Ack = waitForAcknowledgedCount(WATCH_ROUTINE_ID, 1);
 		world.systemOne.enterPhase("j4-rp-watch-run-1-wake", {});
-		const watchWake1 = scriptWatchWake(world, "j4-rp-watch-run-1", WATCH_ROUTINE_ID);
+		const watchWake1 = scriptWatchWake(
+			world,
+			"j4-rp-watch-run-1",
+			wakeExpectation("status: ALERT untrusted third-party words"),
+			{
+				calls: calls("j4-rp-watch-wake-attempt", [
+					{
+						id: "j4-rp-watch-wake-note",
+						name: "routine",
+						arguments: { action: "note", routineId: WATCH_ROUTINE_ID, text: "Note from a third party's wake" },
+					},
+				]),
+				afterCalls: (request) => {
+					const result = latestBatchResults(request).find((entry) => entry.toolName === "routine");
+					wakeNoteRefusal = result ? { isError: result.isError, text: result.text } : undefined;
+				},
+			},
+		);
 		const alert1Sampled = createBarrier();
 		world.shell.enqueue({
 			name: "j4-rp-watch-alert-1",
@@ -500,22 +507,24 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 		await withDeadline(trace, "alert 1 command watch sampled", alert1Sampled.promise);
 		await flushWatchTurn();
 		await session.backgroundLanes.tickPersistentRoutines();
-		await withDeadline(trace, "untrusted watch run 1 acknowledged", watchRun1Ack);
-		await settleWatchWake(world, session, "watch run 1", watchWake1);
+		await withDeadline(trace, "watch firing 1 acknowledged", watchRun1Ack);
+		await settleWatchWake(world, session, "watch firing 1", watchWake1);
+		expect(
+			{
+				error: wakeNoteRefusal?.isError,
+				refusal: wakeNoteRefusal?.text.includes("The owner has not spoken in this turn"),
+			},
+			"the wake of a third party's output cannot write the routine's progress",
+		).toEqual({ error: true, refusal: true });
 
 		const statusAfterWatch1 = await session.autonomyStatus();
 		const watchItem1 =
 			statusAfterWatch1.routines.status === "available"
 				? statusAfterWatch1.routines.value.routines.items.find((item) => item.routineId === WATCH_ROUTINE_ID)
 				: undefined;
-		expect(watchItem1?.progressLine, "progress written by a third-party run is marked untrusted").toEqual({
-			position: "Parsed untrusted alert banner",
-			next: "Cross-check upstream telemetry",
-			recurring: [],
-			untrusted: true,
-		});
+		expect(watchItem1?.progressLine, "a watch has no run, so it keeps no progress").toBeUndefined();
 
-		// Return output to OK so the watch cursor resets to false, then fire a second ALERT to inspect carryover.
+		// Return output to OK so the watch cursor resets to false, then fire a second ALERT: a second wake, not a run.
 		const resetSampled = createBarrier();
 		world.shell.enqueue({
 			name: "j4-rp-watch-reset-ok",
@@ -528,27 +537,13 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 		await withDeadline(trace, "command watch cursor reset sampled", resetSampled.promise);
 		await flushWatchTurn();
 
-		let watchRun2Task = "";
-		world.provider.enqueue("worker-a", {
-			...calls("j4-rp-watch-run2-report", [
-				{
-					id: "j4-rp-watch-run2-submit",
-					name: "submit_report",
-					arguments: {
-						status: "completed",
-						summary: "Second alert wave recorded.",
-						ownerUpdate: "none",
-					},
-				},
-			]),
-			check: (request) => {
-				watchRun2Task = extractLatestWorkerTask(request.context.messages);
-			},
-		});
-
 		const watchRun2Ack = waitForAcknowledgedCount(WATCH_ROUTINE_ID, 2);
 		world.systemOne.enterPhase("j4-rp-watch-run-2-wake", {});
-		const watchWake2 = scriptWatchWake(world, "j4-rp-watch-run-2", WATCH_ROUTINE_ID);
+		const watchWake2 = scriptWatchWake(
+			world,
+			"j4-rp-watch-run-2",
+			wakeExpectation("status: ALERT second untrusted wave"),
+		);
 		const alert2Sampled = createBarrier();
 		world.shell.enqueue({
 			name: "j4-rp-watch-alert-2",
@@ -561,24 +556,26 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 		await withDeadline(trace, "alert 2 command watch sampled", alert2Sampled.promise);
 		await flushWatchTurn();
 		await session.backgroundLanes.tickPersistentRoutines();
-		await withDeadline(trace, "untrusted watch run 2 acknowledged", watchRun2Ack);
-		await settleWatchWake(world, session, "watch run 2", watchWake2);
+		await withDeadline(trace, "watch firing 2 acknowledged", watchRun2Ack);
+		await settleWatchWake(world, session, "watch firing 2", watchWake2);
 
 		expect(
 			{
-				hasBriefTitle: watchRun2Task.includes("Where this task stood after the last run:"),
-				hasUntrustedWarning: watchRun2Task.includes(
-					"A run that read a third party's words wrote some of these notes: check them before relying on them.",
-				),
-				omitsApplyRemedyDirective: !watchRun2Task.includes(
-					"If you hit one of the snags above, apply the remedy first",
-				),
+				firings: occurrencesOf(WATCH_ROUTINE_ID).map((run) => [
+					run.phase,
+					run.result?.outcome,
+					run.result?.delivery,
+				]),
+				workers:
+					world.provider.requests.filter((request) => request.model.id === "worker-a").length - watchWorkersBefore,
 			},
-			"untrusted progress warns the next run and never instructs it to apply a third-party run's remedy first",
+			"each of the two firings is one delivered occurrence, and no routine worker ran for either",
 		).toEqual({
-			hasBriefTitle: true,
-			hasUntrustedWarning: true,
-			omitsApplyRemedyDirective: true,
+			firings: [
+				["terminal", "succeeded", "acknowledged"],
+				["terminal", "succeeded", "acknowledged"],
+			],
+			workers: 0,
 		});
 
 		// 6. Owner resets progress on both routines -> `progressLine` clears to undefined.

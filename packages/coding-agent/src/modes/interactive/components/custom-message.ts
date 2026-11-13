@@ -18,6 +18,7 @@ import {
 } from "../../../core/foreground-terminal-handoff-controller.ts";
 import { harnessNoticeHeadline } from "../../../core/harness-notice.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
+import { describeWatchFired, parseWatchFiredLine } from "../../../core/routines/watch-contract.ts";
 import { isPlainRecord } from "../../../core/util/value-guards.ts";
 import type { CustomMessage } from "../../../kernel/index.ts";
 import { isModelFacingText, plainLabel } from "../../../presentation/plain-text.ts";
@@ -377,6 +378,8 @@ function formatRoutineActivitySummary(message: CustomMessage<unknown>): Backgrou
 	const details = "parentInput" in raw && isPlainRecord(raw.originalDetails) ? raw.originalDetails : raw;
 	const routineId = typeof details.routineId === "string" ? details.routineId : undefined;
 	const text = interfaceText().conversation;
+	const describeFired = (line: NonNullable<ReturnType<typeof parseWatchFiredLine>>): string =>
+		describeWatchFired(line, interfaceText().chat.watch.fired);
 	if (message.customType === "routine-intake") {
 		if (routineId) return { text: text.scheduledRoutine(routineId), status: "success" };
 		const refused = typeof details.refused === "string" ? details.refused : undefined;
@@ -392,6 +395,13 @@ function formatRoutineActivitySummary(message: CustomMessage<unknown>): Backgrou
 	if (message.customType !== "routine-completion" || !routineId) return undefined;
 	if (typeof details.expiresAt === "number") return { text: text.routineExpired(routineId), status: "warning" };
 	if (typeof details.conditionMetBy === "string") return { text: text.routineEnded(routineId), status: "success" };
+	if (details.failing === true) return { text: text.watchFailing(routineId), status: "warning" };
+	// A watch's wake started no run: the row says what the host saw and that the armer was woken with it.
+	const fired = parseWatchFiredLine(details.watch);
+	// A message saved before the firing's line was kept holds its cause as English words.
+	const cause = fired ? describeFired(fired) : typeof details.cause === "string" ? details.cause : undefined;
+	if (details.wake === true && cause)
+		return { text: text.routineOutcomeWithCause(cause, text.watchWokeArmer), status: "success" };
 	const outcome = typeof details.outcome === "string" ? details.outcome : text.routineEndedOutcome;
 	const note = [
 		details.ownerUpdate === "none" ? text.routineNothingForYou : undefined,
@@ -402,7 +412,6 @@ function formatRoutineActivitySummary(message: CustomMessage<unknown>): Backgrou
 		typeof details.resultPreview === "string" ? details.resultPreview : undefined,
 	].filter((part): part is string => part !== undefined);
 	// A watch run leads with what the host saw in plain words ('A watched file changed: notes.txt'), not the routine's id.
-	const cause = typeof details.cause === "string" ? details.cause : undefined;
 	const suffix = note.length > 0 ? ` · ${note.join(" · ")}` : "";
 	return {
 		text: `${cause ? text.routineOutcomeWithCause(cause, outcome) : text.routineOutcome(routineId, outcome)}${suffix}`,

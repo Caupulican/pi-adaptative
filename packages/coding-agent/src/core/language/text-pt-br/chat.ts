@@ -75,6 +75,17 @@ export const CHAT = {
 			`verificando a cada ${every} se a porta ${port}${host === undefined ? "" : ` em ${host}`} ${opens ? "abriu" : "fechou"}`,
 		commandCheck: (every: string) => `rodando uma verificação por comando a cada ${every}`,
 		http: (host: string, every: string) => `verificando ${host} a cada ${every}`,
+		fired: {
+			fileCreated: (label: string) => `Um arquivo acompanhado apareceu${label}`,
+			fileRemoved: (label: string) => `Um arquivo acompanhado foi removido${label}`,
+			fileChanged: (label: string) => `Um arquivo acompanhado mudou${label}`,
+			manyChanged: (label: string) => `Uma pasta ou um padrão de arquivos acompanhado mudou${label}`,
+			processExit: "Um processo acompanhado terminou",
+			port: (opens: boolean, label: string) =>
+				`Uma porta acompanhada agora está ${opens ? "aberta" : "fechada"}${label}`,
+			commandPasses: "Uma verificação por comando acompanhada agora passa",
+			pageMatches: (label: string) => `Uma página acompanhada agora confere${label}`,
+		},
 	},
 	daemonBuildRunning: (build: string | undefined) =>
 		build === undefined ? "build sem identificação (um build anterior)" : `build ${build}`,

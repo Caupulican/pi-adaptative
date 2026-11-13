@@ -3,15 +3,17 @@ import { readdir, stat } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { setImmediate as yieldToEventLoop } from "node:timers/promises";
 import type { Usage } from "@caupulican/pi-ai";
-import { parentInputOf } from "../../kernel/session/parent-input-ledger.ts";
+import { parentInputOf, parentInputOriginalDetails } from "../../kernel/session/parent-input-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { loadEntriesFromFile, visitSessionEntriesAsync } from "../../kernel/session/session-manager.ts";
 import { getSessionEntryUsageComponents } from "../../kernel/usage.ts";
 import { HOST_EVENT_CUSTOM_TYPE } from "../events/host-event-delivery.ts";
+import { steeredDeliveryOf } from "../parent-input-steer.ts";
 import { ACT_AHEAD_CUSTOM_TYPE, actAheadAccount, actAheadRecordOf } from "../proactivity/act-ahead-record.ts";
 import { PROACTIVE_NOTE_CUSTOM_TYPE } from "../proactivity/proactivity-review.ts";
 import { ROUTINE_COMPLETION_TYPE } from "../routines/routine-parent-input.ts";
 import { isMissingFileError } from "../util/atomic-file.ts";
+import { isPlainRecord } from "../util/value-guards.ts";
 import { accountingProjectionPath } from "./accounting-evidence.ts";
 import { accountingFragmentPath } from "./accounting-fragments.ts";
 import {
@@ -263,7 +265,7 @@ interface ActAheadAccountRecord {
 
 type DailyUsageRecord = DailyUsageSpendRecord | ParentWakeRecord | ActAheadAccountRecord;
 
-/** The wake an accepted parent input of this type counts as, if its mode starts a turn. */
+/** The wake an accepted parent input of this type counts as, if its mode starts a turn or steers a running one. */
 const PARENT_WAKE_KINDS: ReadonlyMap<string, ParentWakeRecord["wake"]> = new Map([
 	[PROACTIVE_NOTE_CUSTOM_TYPE, "proactive_note"],
 	[HOST_EVENT_CUSTOM_TYPE, "host_event"],
@@ -285,6 +287,12 @@ function semanticUsageRecord(report: SemanticAccountingReport, timestamp: string
 	};
 }
 
+/** A one-shot watch's wake: its slots and end time bound it, so it counts toward no day's wake bound it is exempt from. */
+function isBoundExemptWake(entry: SessionEntry): boolean {
+	const details = parentInputOriginalDetails(entry);
+	return isPlainRecord(details) && details.oneShotWatch === true;
+}
+
 function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
 	const own = getSessionEntryUsageComponents(entry);
 	if (own.length > 0)
@@ -299,7 +307,9 @@ function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
 		}));
 	const wake = entry.type === "custom_message" ? PARENT_WAKE_KINDS.get(entry.customType) : undefined;
 	if (wake)
-		return parentInputOf(entry)?.metadata.mode === "turn" ? [{ kind: "wake", wake, timestamp: entry.timestamp }] : [];
+		return (parentInputOf(entry)?.metadata.mode === "turn" || steeredDeliveryOf(entry)) && !isBoundExemptWake(entry)
+			? [{ kind: "wake", wake, timestamp: entry.timestamp }]
+			: [];
 	if (entry.type !== "custom") return [];
 	if (entry.customType === ACT_AHEAD_CUSTOM_TYPE) {
 		const record = actAheadRecordOf(entry);

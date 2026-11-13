@@ -81,6 +81,17 @@ export const CHAT = {
 			`checking port ${port}${host === undefined ? "" : ` on ${host}`} every ${every} for it to ${opens ? "open" : "close"}`,
 		commandCheck: (every: string) => `running a command check every ${every}`,
 		http: (host: string, every: string) => `checking ${host} every ${every}`,
+		/** What one firing saw; `label` is the watched thing's name with its colon, or empty. */
+		fired: {
+			fileCreated: (label: string) => `A watched file appeared${label}`,
+			fileRemoved: (label: string) => `A watched file was removed${label}`,
+			fileChanged: (label: string) => `A watched file changed${label}`,
+			manyChanged: (label: string) => `A watched folder or file pattern changed${label}`,
+			processExit: "A watched process exited",
+			port: (opens: boolean, label: string) => `A watched port is now ${opens ? "open" : "closed"}${label}`,
+			commandPasses: "A watched command check now passes",
+			pageMatches: (label: string) => `A watched page now matches${label}`,
+		},
 	},
 	/** The daemon's build beside the session's: what runs, and what this session runs. */
 	daemonBuildRunning: (build: string | undefined) =>

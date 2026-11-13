@@ -15,9 +15,11 @@ import {
 	type RoutineIntakeNoticeRecord,
 	type RoutineOccurrence,
 	type RoutineResult,
+	type RoutineWatchTrigger,
 	routineTriggerEvents,
 } from "./routine-contract.ts";
-import { describeWatchFired } from "./watch-contract.ts";
+import { isOneShotWatch, watchCauseText, watchFiredWakeText, watchTimedOutWakeText } from "./routine-watch-wake.ts";
+import { watchFiredLine } from "./watch-contract.ts";
 
 export const ROUTINE_COMPLETION_TYPE = "routine-completion";
 /** Longest preview of a run's report the owner's history row carries; the model reads the whole fenced report. */
@@ -79,48 +81,35 @@ function routineEventCause(trigger: RoutineEventTrigger, count: string): string 
 	return ` It ran for ${carried} GitHub ${carried === 1 ? "occurrence" : "occurrences"}, the latest a ${trigger.event.kind} by ${trigger.event.author}.${missed}${gap}`;
 }
 
-/**
- * Whether a result carries to the owner's next turn because it is quiet. A run's `ownerUpdate: "none"` answers whether
- * the OWNER needs to hear it, never whether the session that armed the routine wakes: a watch is armed because that
- * session's own work waits on the change, so its result always starts that session's turn.
- */
-export function routineResultIsQuiet(
-	result: Pick<RoutineResult, "ownerUpdate">,
-	trigger: Pick<RoutineOccurrence["trigger"], "kind">,
-): boolean {
-	return result.ownerUpdate === "none" && trigger.kind !== "watch";
+/** Whether a result carries to the owner's next turn because it is quiet: the run reported that the owner needs no update. */
+export function routineResultIsQuiet(result: Pick<RoutineResult, "ownerUpdate">): boolean {
+	return result.ownerUpdate === "none";
 }
 
-/**
- * The words the model reads after a routine's fenced report. A quiet result waits for the owner; a held one waited for the
- * wake bound; a watch's quiet result wakes the session that armed it, which decides what the owner hears.
- */
-function routineResultContent(
-	flags: { readonly quiet: boolean; readonly ownerQuiet: boolean; readonly holds: boolean },
-	report: string,
-): string {
+/** The words the model reads after a routine's fenced report. A quiet result waits for the owner; a held one waited for the wake bound. */
+function routineResultContent(flags: { readonly quiet: boolean; readonly holds: boolean }, report: string): string {
 	if (flags.quiet)
 		return `${report}\nNo owner update is needed; mention it only if it bears on what the owner asks next. Later quiet runs before the owner's next turn are recorded but not delivered.`;
 	if (flags.holds)
 		return `${report}\nRoutine results reached the day's bound on parent turns (routines.maxResultWakesPerDay), so this one waited for the owner's turn. Use the saved task and this evidence to decide whether the owner needs an update or further work. Later results of this routine before the owner's next turn are recorded on the routine but not delivered.`;
-	if (flags.ownerQuiet)
-		return `${report}\nThe owner needs no update from this result alone, but you armed this watch because your own work waits on it: continue that work now, or end the turn if none waits.`;
 	return `${report}\nUse the saved task and this evidence to decide whether the owner needs an update or further work.`;
 }
 
 /**
  * Host identity is separate from the worker's untrusted summary. A quiet result rides with the owner's next turn; every
- * other outcome (a watch's result included, whatever its `ownerUpdate`) starts a parent turn unless `held`: the
- * routine-result wake bound was reached when it was first saved, so it rides with the owner's next turn too. The caller
- * repeats a saved input's `held`, so a redelivery after restart presents the same identity and payload.
+ * other outcome starts a parent turn unless `held`: the routine-result wake bound was reached when it was first saved, so
+ * it rides with the owner's next turn too. A watch firing, and a one-shot watch reaching its end time, wake whoever armed
+ * the watch with the event itself (`routine-watch-wake.ts`), never through a worker's summary. The caller repeats a saved
+ * input's `held`, so a redelivery after restart presents the same identity and payload.
  */
 export function routineParentInput(delivery: RoutineDelivery, held = false): ParentInputDelivery {
 	const { occurrence, result } = delivery;
 	const trigger = occurrence.trigger;
-	if (trigger.kind === "expiry") return routineExpiryNotice(delivery, trigger.expiresAt);
+	if (trigger.kind === "expiry") return routineExpiryNotice(delivery, trigger, held);
 	if (trigger.kind === "condition") return routineConditionNotice(delivery, trigger);
+	if (trigger.kind === "watch" && result.outcome === "succeeded") return routineWatchWake(delivery, trigger, held);
 	const ownerQuiet = result.ownerUpdate === "none";
-	const quiet = routineResultIsQuiet(result, trigger);
+	const quiet = routineResultIsQuiet(result);
 	const holds = held && !quiet;
 	const missedCount = trigger.kind === "manual" || trigger.kind === "watch" ? 0 : trigger.missedCount;
 	// A count recorded at its saturation bound stands for that many or more.
@@ -131,7 +120,7 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 	const count = saturated ? `at least ${missedCount}` : `${missedCount}`;
 	let missed = "";
 	if (trigger.kind === "event") missed = routineEventCause(trigger, count);
-	else if (trigger.kind === "watch") missed = ` It ran because of this: ${describeWatchFired(trigger.event)}.`;
+	else if (trigger.kind === "watch") missed = ` It ran because of this: ${watchCauseText(trigger.event)}.`;
 	else if (missedCount > 0)
 		missed = ` It also covers ${count} earlier scheduled ${missedCount === 1 ? "slot" : "slots"} that did not run.`;
 	const evidence = wrapUntrustedText(result.summary, `routine-result:${occurrence.occurrenceId}`, {
@@ -141,7 +130,7 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 	const message = {
 		customType: ROUTINE_COMPLETION_TYPE,
 		display: true,
-		content: routineResultContent({ quiet, ownerQuiet, holds }, `${head}${missed}\n${evidence}`),
+		content: routineResultContent({ quiet, holds }, `${head}${missed}\n${evidence}`),
 		details: {
 			occurrenceId: occurrence.occurrenceId,
 			routineId: occurrence.routineId,
@@ -164,8 +153,7 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 				: {}),
 			...(trigger.kind === "watch"
 				? {
-						cause: describeWatchFired(trigger.event),
-						watch: { condition: trigger.event.condition, change: trigger.event.change },
+						watch: watchFiredLine(trigger.event),
 					}
 				: {}),
 			...(ownerQuiet ? { ownerUpdate: "none" as const } : {}),
@@ -174,14 +162,14 @@ export function routineParentInput(delivery: RoutineDelivery, held = false): Par
 			...(routineTurnOrigin(occurrence) ? { thirdParty: true as const } : {}),
 		},
 	};
-	return routineCompletionInput({ occurrence, result }, message, quiet || holds);
+	return routineCompletionInput({ occurrence, result }, message, quiet || holds ? "next-owner-turn" : undefined);
 }
 
 /** One stored result's parent input: its identity is the occurrence and result digest, so a redelivery is the same. */
 function routineCompletionInput(
 	{ occurrence, result }: RoutineDelivery,
 	message: ParentInputDelivery["message"],
-	nextOwnerTurn: boolean,
+	mode: ParentInputDelivery["mode"],
 ): ParentInputDelivery {
 	return {
 		deliveryId: `routine:${createHash("sha256")
@@ -190,30 +178,69 @@ function routineCompletionInput(
 		payloadDigest: createHash("sha256").update(JSON.stringify(message)).digest("hex"),
 		message,
 		origin: occurrence.parentOrigin,
-		...(nextOwnerTurn ? { mode: "next-owner-turn" as const } : {}),
+		...(mode ? { mode } : {}),
 	};
 }
 
 /**
- * The host's one notice that a routine reached its end time and was removed. It carries no worker text and rides
- * with the owner's next turn; its identity is the stored occurrence's, so a redelivery after restart is the same input.
+ * The wake of a watch firing: the event, the armer's saved plan and the routine id, as the armer's own input. Its identity
+ * is the stored occurrence's, so a redelivery after restart is the same input; `held` (the wake bound was reached) makes it
+ * ride with the owner's next turn.
  */
-function routineExpiryNotice(delivery: RoutineDelivery, expiresAt: number): ParentInputDelivery {
+function routineWatchWake(delivery: RoutineDelivery, trigger: RoutineWatchTrigger, held: boolean): ParentInputDelivery {
 	const { occurrence, result } = delivery;
 	const message = {
 		customType: ROUTINE_COMPLETION_TYPE,
 		display: true,
-		content: `Routine ${occurrence.routineId} reached the end time it was saved with and was removed; it stopped watching and will not run again. Tell the owner once, briefly, when it bears on what they ask next; they can ask for it again or for a later end.`,
+		content: watchFiredWakeText(occurrence, trigger, held),
 		details: {
 			occurrenceId: occurrence.occurrenceId,
 			routineId: occurrence.routineId,
 			routineRevision: occurrence.routineRevision,
 			outcome: result.outcome,
 			resultDigest: result.digest,
-			expiresAt,
+			wake: true as const,
+			watch: watchFiredLine(trigger.event),
+			...(isOneShotWatch(occurrence.definition.schedule) ? { oneShotWatch: true as const } : {}),
+			...(held ? { deliveryHold: ROUTINE_RESULT_WAKES_HOLD } : {}),
+			// The excerpt is the watched thing's words: the turn that reads it is a third party's run.
+			...(routineTurnOrigin(occurrence) ? { thirdParty: true as const } : {}),
 		},
 	};
-	return routineCompletionInput(delivery, message, true);
+	return routineCompletionInput(delivery, message, held ? "next-owner-turn" : "steer");
+}
+
+/**
+ * The host's one notice that a routine reached its end time and was removed. It carries no worker text. A one-shot watch's
+ * end is an event its armer waits on, so it wakes the armer with what the watch last saw (`held`: with the owner's next
+ * turn); any other routine's notice rides with the owner's next turn. Its identity is the stored occurrence's, so a
+ * redelivery after restart is the same input.
+ */
+function routineExpiryNotice(
+	delivery: RoutineDelivery,
+	trigger: Extract<RoutineOccurrence["trigger"], { kind: "expiry" }>,
+	held: boolean,
+): ParentInputDelivery {
+	const { occurrence, result } = delivery;
+	const wakesArmer = isOneShotWatch(occurrence.definition.schedule);
+	const message = {
+		customType: ROUTINE_COMPLETION_TYPE,
+		display: true,
+		content: wakesArmer
+			? watchTimedOutWakeText(occurrence, trigger.expiresAt, trigger.lastSeen, held)
+			: `Routine ${occurrence.routineId} reached the end time it was saved with and was removed; it stopped watching and will not run again. Tell the owner once, briefly, when it bears on what they ask next; they can ask for it again or for a later end.`,
+		details: {
+			occurrenceId: occurrence.occurrenceId,
+			routineId: occurrence.routineId,
+			routineRevision: occurrence.routineRevision,
+			outcome: result.outcome,
+			resultDigest: result.digest,
+			expiresAt: trigger.expiresAt,
+			...(wakesArmer ? { oneShotWatch: true as const } : {}),
+			...(wakesArmer && held ? { deliveryHold: ROUTINE_RESULT_WAKES_HOLD } : {}),
+		},
+	};
+	return routineCompletionInput(delivery, message, !wakesArmer || held ? "next-owner-turn" : "steer");
 }
 
 /**
@@ -240,7 +267,7 @@ function routineConditionNotice(
 			conditionMetBy: trigger.occurrenceId,
 		},
 	};
-	return routineCompletionInput(delivery, message, true);
+	return routineCompletionInput(delivery, message, "next-owner-turn");
 }
 
 /**

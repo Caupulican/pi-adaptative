@@ -57,6 +57,7 @@ import type { WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts
 import type { WorkerReceiptAnchor, WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ProfileRegistry } from "../profile-registry.ts";
 import type { ResourceLoader } from "../resource-loader.ts";
+import type { TaskWatchPort } from "../routines/task-watch-tool.ts";
 import type { CredentialExposureBoundary } from "../secrets/credential-exposure-guard.ts";
 import type {
 	ModelCapabilitySettings,
@@ -176,6 +177,8 @@ export interface ParentExecutionEnvironment {
 	repositoryObserver?: RepositoryMutationObserver;
 	getSessionCwd?(): string;
 	getObjectiveId?(): string;
+	/** The watch a worker runtime arms for its own wait, from the session's routine runtime; absent where the session holds none. */
+	taskWatches?: TaskWatchPort;
 }
 
 /** The decisions a worker run consults: model availability, System One judges, context planning, memory, skills, edges. */

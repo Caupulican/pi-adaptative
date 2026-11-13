@@ -41,6 +41,8 @@ import {
 import { boundedRoutineText as boundedString } from "./routine-field-guards.ts";
 import { MAX_ROUTINE_PROGRESS_BRIEF_CHARS, parseRoutineProgress, type RoutineProgress } from "./routine-progress.ts";
 import { parseRoutineArmAuthority, type RoutineArmAuthority } from "./routine-provenance.ts";
+import { parseRoutineWakeAddress, type RoutineWakeAddress, wakeAddressSession } from "./routine-wake-address.ts";
+import { WATCH_LAST_SEEN, type WatchLastSeen } from "./routine-watch-edge.ts";
 import {
 	parseWatchCondition,
 	parseWatchFiredEvent,
@@ -642,8 +644,10 @@ export interface PersistentRoutineDefinition {
 	readonly enabled: boolean;
 	readonly executionSnapshot?: RoutineExecutionSnapshot;
 	readonly origin?: RoutineOrigin;
-	/** The authority the model's own tool call armed it under (`routine-provenance.ts`); a run's snapshot does not carry it. */
+	/** The authority the model's own tool call armed it under (`routine-provenance.ts`); an occurrence's frozen definition keeps it, so a wake reads its plan under the authority it was written. */
 	readonly armedBy?: RoutineArmAuthority;
+	/** Whom a watch wakes when it fires (`routine-wake-address.ts`); absent on a record saved before it, which wakes its session. */
+	readonly wake?: RoutineWakeAddress;
 	readonly createdAt: string;
 	readonly updatedAt: string;
 }
@@ -658,6 +662,8 @@ export interface UpsertPersistentRoutineInput {
 	readonly executionSnapshot?: RoutineExecutionSnapshot;
 	/** A tool creation's arming authority, stamped once at creation; an update never changes the saved one. */
 	readonly armedBy?: RoutineArmAuthority;
+	/** Whom a watch created here wakes, stamped once at creation from the saving caller; an update never changes it. */
+	readonly wake?: RoutineWakeAddress;
 	readonly expectedRevision?: number;
 	readonly createOnly?: boolean;
 	readonly nowMs?: number;
@@ -691,10 +697,13 @@ export type RoutineOccurrenceTrigger =
 	 * `bodiesElided`: the run's result was delivered, and the occurrences' bodies were dropped from history.
 	 */
 	| RoutineEventTrigger
-	/** A watch condition became true: `sequence` is the routine's firing count at this firing, which keys the occurrence. */
+	/**
+	 * A watch condition became true: `sequence` is the routine's firing count at this firing, which keys the occurrence. The
+	 * firing is recorded terminal with its own result, pending delivery to the watch's armer (`routine-wake-address.ts`).
+	 */
 	| RoutineWatchTrigger
 	/** The host's notice that the routine reached its `expiresAt` and was removed; recorded terminal, never run. */
-	| { readonly kind: "expiry"; readonly expiresAt: number }
+	| { readonly kind: "expiry"; readonly expiresAt: number; readonly lastSeen?: WatchLastSeen }
 	/**
 	 * The host's notice that a run reported the routine's stated end met and the routine was removed; recorded terminal,
 	 * never run. Keyed by the reporting occurrence, so a replayed retirement writes the same notice.
@@ -1262,50 +1271,6 @@ export function compareRoutineHostEvents(left: RoutineHostEventFact, right: Rout
 	);
 }
 
-/** One observation of a watch condition, as the monitor reports it. Unknown observations are never reported. */
-export interface RoutineWatchObservation {
-	/** Whether a level condition holds now; ignored for a change-style condition (a file's content). */
-	readonly truth: boolean;
-	/** The digest a change-style condition is in now. */
-	readonly state?: string;
-}
-
-export interface RoutineWatchObservationInput {
-	readonly routineId: string;
-	readonly incarnationId: string;
-	readonly parentSessionId: string;
-	readonly nowMs: number;
-	readonly observation: RoutineWatchObservation;
-	/** The firing's bounded fact record, used only when the observation is an edge. */
-	readonly event: WatchFiredEvent;
-}
-
-/**
- * How the store answered an observation: `fired` recorded a pending occurrence; `recorded` moved the baseline or re-armed
- * the edge; `unchanged` changed nothing; `held` is an edge the store could not take yet (an earlier firing is not
- * claimed, the journal is full or the routine's share is held), so the monitor offers it again on the next store change;
- * `stale` means the routine is gone, paused, ended or another incarnation.
- */
-export type RoutineWatchOutcome = "fired" | "recorded" | "unchanged" | "held" | "stale";
-
-/**
- * The edge rule of a watch. A change-style observation (it carries `state`) fires when the state differs from the
- * recorded one; the first observation only records the baseline. A level observation fires on the rising edge
- * (false to true), re-arms when it falls, and the first observation only records the baseline: a condition that
- * already holds when the watch is armed is its starting state. The firing count advances in the same write.
- */
-export function decideWatchObservation(
-	cursor: Extract<RoutineCursor, { kind: "watch" }>,
-	observation: RoutineWatchObservation,
-): { readonly fire: boolean; readonly cursor: Extract<RoutineCursor, { kind: "watch" }> } {
-	if (observation.state !== undefined) {
-		const next = { ...cursor, truth: true, state: observation.state };
-		return { fire: cursor.state !== undefined && cursor.state !== observation.state, cursor: next };
-	}
-	const { state: _state, ...rest } = cursor;
-	return { fire: cursor.truth === false && observation.truth, cursor: { ...rest, truth: observation.truth } };
-}
-
 export interface RoutineOccurrenceListFilter {
 	readonly parentSessionId?: string;
 	readonly routineId?: string;
@@ -1841,6 +1806,7 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 			"executionSnapshot",
 			"origin",
 			"armedBy",
+			"wake",
 			"createdAt",
 			"updatedAt",
 		])
@@ -1875,6 +1841,16 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 		const armedBy = value.armedBy === undefined ? undefined : parseRoutineArmAuthority(value.armedBy);
 		// Only the session that owns the source's ledger, or the one a tool call armed it in, can have created it so.
 		if ((origin || armedBy) && target.kind !== "session") return undefined;
+		const wake = value.wake === undefined ? undefined : parseRoutineWakeAddress(value.wake);
+		// Only a watch of a session has an armer to wake, and its armer belongs to that session.
+		if (
+			wake &&
+			(target.kind !== "session" ||
+				schedule.kind !== "event" ||
+				schedule.source !== "watch" ||
+				wakeAddressSession(wake) !== target.parentSessionId)
+		)
+			return undefined;
 		return {
 			routineId: value.routineId,
 			incarnationId: value.incarnationId,
@@ -1886,6 +1862,7 @@ export function parseRoutineDefinition(value: unknown): PersistentRoutineDefinit
 			...(executionSnapshot ? { executionSnapshot } : {}),
 			...(origin ? { origin } : {}),
 			...(armedBy ? { armedBy } : {}),
+			...(wake ? { wake } : {}),
 			createdAt: value.createdAt,
 			updatedAt: value.updatedAt,
 		};
@@ -2213,7 +2190,11 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 		} else if (
 			isPlainRecord(value.trigger) &&
 			value.trigger.kind === "expiry" &&
-			hasOnlyKeys(value.trigger, ["kind", "expiresAt"]) &&
+			hasOnlyKeys(value.trigger, ["kind", "expiresAt", "lastSeen"]) &&
+			(value.trigger.lastSeen === undefined ||
+				(WATCH_LAST_SEEN.includes(value.trigger.lastSeen as WatchLastSeen) &&
+					definition.schedule.kind === "event" &&
+					definition.schedule.source === "watch")) &&
 			definition.schedule.kind !== "once" &&
 			definition.schedule.expiresAt !== undefined &&
 			value.trigger.expiresAt === definition.schedule.expiresAt &&
@@ -2221,7 +2202,11 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 			value.phase === "terminal" &&
 			value.dispatchKey === undefined
 		) {
-			trigger = { kind: "expiry", expiresAt: definition.schedule.expiresAt };
+			trigger = {
+				kind: "expiry",
+				expiresAt: definition.schedule.expiresAt,
+				...(value.trigger.lastSeen === undefined ? {} : { lastSeen: value.trigger.lastSeen as WatchLastSeen }),
+			};
 		} else if (
 			isPlainRecord(value.trigger) &&
 			value.trigger.kind === "condition" &&
@@ -2299,7 +2284,14 @@ export function parseRoutineOccurrence(value: unknown): RoutineOccurrence | unde
 		if ((value.phase === "terminal" || value.phase === "uncertain") !== (result !== undefined)) return undefined;
 		if (result && (value.phase === "uncertain") !== (result.outcome === "uncertain")) return undefined;
 		if ((value.phase === "uncertain") !== (uncertainty !== undefined)) return undefined;
-		if (result && !dispatchKey && (result.outcome !== "cancelled" || executionRef)) return undefined;
+		// Without a dispatch a result is a cancellation, or a watch firing's own result: the armer was woken, no run was started.
+		if (
+			result &&
+			!dispatchKey &&
+			(executionRef ||
+				(result.outcome !== "cancelled" && !(trigger.kind === "watch" && result.outcome === "succeeded")))
+		)
+			return undefined;
 		// Only a dispatched run of a routine with a stated end can report that end met.
 		if (
 			(result?.conditionMet || priorUncertaintyResult?.conditionMet) &&

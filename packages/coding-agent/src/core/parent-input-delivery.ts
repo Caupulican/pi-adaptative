@@ -10,9 +10,17 @@ import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { type WorkerReceiptOrigin, workerReceiptOriginFromValue } from "./orchestration/worker-receipt-origin.ts";
+import { ParentInputSteerController, type SteeredMessage } from "./parent-input-steer.ts";
 import type { RuntimeWorkLease } from "./runtime-generation-admission.ts";
 import { boundedRedactedDiagnosticText } from "./security/secret-text.ts";
 import { isSessionAppendAnchorCurrent } from "./session-snapshot.ts";
+
+/**
+ * How an input reaches the session. `turn` starts a turn of its own and `next-owner-turn` rides with the owner's next turn
+ * (both durable ledger inputs). `steer` is read by a running turn at its next model step, and starts a turn like `turn` when
+ * none is running.
+ */
+export type ParentInputDeliveryMode = ParentInputMode | "steer";
 
 export interface ParentInputDelivery {
 	readonly deliveryId: string;
@@ -20,7 +28,21 @@ export interface ParentInputDelivery {
 	readonly message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">;
 	readonly origin: WorkerReceiptOrigin;
 	readonly goalId?: string;
-	readonly mode?: ParentInputMode;
+	readonly mode?: ParentInputDeliveryMode;
+}
+
+/** An input as the durable ledger holds it: one of its own modes. */
+type LedgerParentInput = Omit<ParentInputDelivery, "mode"> & { readonly mode?: ParentInputMode };
+
+/** Throws unless `origin` is the manager's own session and an anchor of its current durable branch. */
+function assertOriginCurrent(manager: SessionManager, origin: WorkerReceiptOrigin): void {
+	if (
+		origin.sessionId !== manager.getSessionId() ||
+		(manager.isPersisted() ? origin.sessionFile !== manager.getSessionFile() : origin.sessionFile !== undefined) ||
+		!isSessionAppendAnchorCurrent(manager, origin) ||
+		!manager.isEntryDurableForSession(origin.leafId)
+	)
+		throw new Error("Parent input session or branch changed before acceptance.");
 }
 
 /** Live acceptance authority is never serialized with the durable input. */
@@ -45,6 +67,8 @@ export interface ParentInputDeliveryDeps {
 	warn(message: string): void;
 	onAccepted?(message: CustomMessage<unknown>, receipt: ParentInputReceipt): void;
 	holdLateWork(work: Promise<void>): void;
+	/** Queues a message for the running turn's next model step; absent, a steered input starts a turn like `turn`. */
+	steer?(message: Pick<CustomMessage<unknown>, "customType" | "content" | "display" | "details">): SteeredMessage;
 }
 
 /** One canonical input, followed by a recoverable wake; never a second append to retry inference. */
@@ -56,6 +80,7 @@ export class ParentInputDeliveryController {
 		| ((message: CustomMessage<unknown>, lease: ForegroundSubmissionLease) => Promise<void>)
 		| undefined;
 	private readonly unsubscribe: () => void;
+	private readonly steers: ParentInputSteerController | undefined;
 	private readonly abort = new AbortController();
 	private active = false;
 	private readonly deliveries = new Set<Promise<ParentInputReceipt>>();
@@ -78,7 +103,19 @@ export class ParentInputDeliveryController {
 		this.foreground = foreground;
 		this.goals = goals;
 		this.afterTurn = afterTurn;
+		const steer = deps.steer?.bind(deps);
+		this.steers = steer
+			? new ParentInputSteerController({
+					foreground,
+					getSessionManager: () => deps.getSessionManager(),
+					steer,
+					deliverDurable: (input, options) => this.deliverLedger({ ...input, mode: "turn" }, options),
+					assertAcceptable: (manager, input) =>
+						assertOriginCurrent(manager, workerReceiptOriginFromValue(input.origin)),
+				})
+			: undefined;
 		this.unsubscribe = foreground.subscribeActivity(() => {
+			this.steers?.rerouteIdle();
 			const epoch = foreground.getCurrentSubmissionEpoch();
 			if (this.blocked && epoch !== undefined && epoch !== this.blockedEpoch) this.blocked = false;
 			this.schedule();
@@ -86,7 +123,22 @@ export class ParentInputDeliveryController {
 	}
 
 	deliver(input: ParentInputDelivery, options?: ParentInputDeliveryOptions): Promise<ParentInputReceipt> {
-		const delivery = this.accept(input, options);
+		if (input.mode !== "steer") return this.deliverLedger({ ...input, mode: input.mode }, options);
+		return this.track(
+			this.steers ? this.steers.deliver(input, options) : this.accept({ ...input, mode: "turn" }, options),
+		);
+	}
+
+	/** Called immediately before the running turn polls its steering queue. */
+	flushSteers(): void {
+		this.steers?.flush();
+	}
+
+	private deliverLedger(input: LedgerParentInput, options?: ParentInputDeliveryOptions): Promise<ParentInputReceipt> {
+		return this.track(this.accept(input, options));
+	}
+
+	private track(delivery: Promise<ParentInputReceipt>): Promise<ParentInputReceipt> {
 		this.deliveries.add(delivery);
 		void delivery.then(
 			() => this.deliveries.delete(delivery),
@@ -96,7 +148,7 @@ export class ParentInputDeliveryController {
 	}
 
 	private async accept(
-		input: ParentInputDelivery,
+		input: LedgerParentInput,
 		options: ParentInputDeliveryOptions = {},
 	): Promise<ParentInputReceipt> {
 		if (this.closed) throw new Error("Parent input delivery is closed.");
@@ -120,17 +172,9 @@ export class ParentInputDeliveryController {
 		const assertAcceptance = (): void => {
 			signal.throwIfAborted();
 			assertBranch();
-			if (
-				this.closed ||
-				this.deps.getSessionManager() !== manager ||
-				origin.sessionId !== manager.getSessionId() ||
-				(manager.isPersisted()
-					? origin.sessionFile !== manager.getSessionFile()
-					: origin.sessionFile !== undefined) ||
-				!isSessionAppendAnchorCurrent(manager, origin) ||
-				!manager.isEntryDurableForSession(origin.leafId)
-			)
+			if (this.closed || this.deps.getSessionManager() !== manager)
 				throw new Error("Parent input session or branch changed before acceptance.");
+			assertOriginCurrent(manager, origin);
 		};
 		const lease = await this.foreground.acquireSubmission(signal, {
 			runtimeLease,
@@ -266,6 +310,7 @@ export class ParentInputDeliveryController {
 	shutdown(): void {
 		this.closed = true;
 		this.deferredDisplays.clear();
+		this.steers?.shutdown();
 		this.abort.abort(new Error("Parent input delivery closed."));
 		this.unsubscribe();
 	}

@@ -6,7 +6,7 @@
  * through the worker runtime. The coordinator supplies the runtime and the operator sends through its host port and keeps the
  * routine state and the start of the runtime to itself.
  */
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
@@ -19,11 +19,15 @@ import type { WorkerDelegationController } from "../delegation/worker-delegation
 import type { WorkerLifecycle } from "../delegation/worker-lifecycle.ts";
 import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
+import type { ParentInputDelivery } from "../parent-input-delivery.ts";
+import { findSteeredDelivery } from "../parent-input-steer.ts";
 import { rollingDayWindow } from "../proactivity/proactivity-controller.ts";
 import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
+import type { RoutineDelivery } from "./routine-contract.ts";
 import { RoutineIntake } from "./routine-intake.ts";
 import {
 	isCarriedRoutineCompletion,
+	ROUTINE_COMPLETION_TYPE,
 	ROUTINE_RESULT_WAKES_HOLD,
 	routineParentInput,
 	routineResultIsQuiet,
@@ -37,10 +41,20 @@ import {
 	routineWorkerRequest,
 } from "./routine-scheduler-controller.ts";
 import { RoutineSessionController } from "./routine-session-controller.ts";
-import { RoutineWatchMonitor } from "./routine-watch-monitor.ts";
+import { routineWakeAddress } from "./routine-wake-address.ts";
+import { RoutineWatchMonitor, type WatchFailing } from "./routine-watch-monitor.ts";
+import { isOneShotWatch, routineWakeText, watchFailingWakeText } from "./routine-watch-wake.ts";
 import { RoutineWorkerExecutor } from "./routine-worker-executor.ts";
+import {
+	WORKER_WAKE_PLAN_CHARS,
+	WORKER_WAKE_RETRY_MS,
+	type WorkerWakeHost,
+	wakeWorkerRuntime,
+} from "./routine-worker-wake.ts";
+import type { TaskWatchPort } from "./task-watch-tool.ts";
 import { WatchAdmission } from "./watch-admission.ts";
 import { WatchSampler } from "./watch-evaluators.ts";
+import { workerRuntimeLive } from "./worker-watch-liveness.ts";
 
 /** The routine runtime one session holds: built once, started with the session's inputs, closed when the session disposes. */
 export interface RoutineRuntime {
@@ -53,7 +67,7 @@ export interface RoutineRuntime {
 
 /** What the assembly reads from and asks of the coordinator: the worker runtime, the lifecycle and the operator sends. */
 export interface RoutineAssemblyHost {
-	workerController(): Pick<WorkerDelegationController, "startSavedIntent" | "captureSavedIntent">;
+	workerController(): Pick<WorkerDelegationController, "startSavedIntent" | "captureSavedIntent" | "getAgentControl">;
 	workerLifecycle(): WorkerLifecycle;
 	parentWriteHolds(): ReadonlySet<string>;
 	landRecordedParentWrites(lifecycle: WorkerLifecycle): void;
@@ -99,6 +113,110 @@ export class RoutineRuntimeAssembly {
 		return carried ? { entryId: carried.entryId } : undefined;
 	}
 
+	/** The watch a worker runtime arms through: this session's routine runtime, which holds the worker's bounds and its wake address. */
+	taskWatches(runtime: () => RoutineRuntime | undefined): TaskWatchPort {
+		return {
+			available: () => runtime() !== undefined,
+			arm: async (runtimeId, input, signal) => {
+				const routines = runtime();
+				if (!routines) throw new Error("Routines are unavailable in this session.");
+				return routines.session.armForWorker(runtimeId, input, signal);
+			},
+		};
+	}
+
+	/** What waking a worker runtime reads and asks of the worker runtime: its durable task state and the session root's follow-up. */
+	private workerWakeHost(): WorkerWakeHost {
+		return {
+			snapshot: () => this.host.workerLifecycle().getTaskRuntimeSnapshot(),
+			followUp: (runtimeId, text, idempotencyKey) =>
+				this.host
+					.workerController()
+					.getAgentControl()
+					.followUpSessionRootWorkerAgent(runtimeId, text, { idempotencyKey }),
+		};
+	}
+
+	/**
+	 * One wake of the session itself, as a routine-completion parent input in steer mode (a running turn reads it at its next
+	 * model step, an idle session starts a turn): what a failing watch tells its armer, and what a worker's watch delivers when
+	 * its worker cannot take the wake (the event is not lost).
+	 */
+	private sessionWake(deliveryId: string, content: string, details: unknown): ParentInputDelivery {
+		return {
+			deliveryId,
+			payloadDigest: createHash("sha256").update(content).digest("hex"),
+			message: { customType: ROUTINE_COMPLETION_TYPE, display: true, content, details },
+			origin: captureWorkerReceiptOrigin(this.deps.getSessionManager()),
+			mode: "steer",
+		};
+	}
+
+	private workerUnreachable(runtimeId: string, reason: string): string {
+		return `Worker ${runtimeId} armed this watch but could not be woken by it (${reason}), so it reaches you instead: act on it, or pass it to the worker yourself.`;
+	}
+
+	/**
+	 * Delivers a watch event to the worker runtime that armed it. A runtime that is gone settles without a wake. One that
+	 * does not take it now is retried for {@link WORKER_WAKE_RETRY_MS}, then the session is woken with the event instead, so
+	 * a stuck worker never holds the deliveries behind it and the event is never lost.
+	 */
+	private async deliverToWorker(runtimeId: string, delivery: RoutineDelivery): Promise<{ entryId: string }> {
+		const input = routineParentInput(delivery);
+		const wake = wakeWorkerRuntime(
+			this.workerWakeHost(),
+			runtimeId,
+			routineWakeText(delivery, false, WORKER_WAKE_PLAN_CHARS),
+			input.deliveryId,
+		);
+		if (wake.kind === "sent") return { entryId: `worker-message:${wake.messageId}` };
+		if (wake.kind === "void") return { entryId: `worker-unwoken:${input.deliveryId}` };
+		if (this.deps.getTimers().port("routines").now() - delivery.occurrence.createdAt < WORKER_WAKE_RETRY_MS)
+			throw new Error(`Worker ${runtimeId} could not take the watch wake now (${wake.reason}); it is tried again.`);
+		return this.deps.deliverParentInput(
+			this.sessionWake(
+				`${input.deliveryId}:session`,
+				`${this.workerUnreachable(runtimeId, wake.reason)}\n${routineWakeText(delivery)}`,
+				input.message.details,
+			),
+		);
+	}
+
+	/**
+	 * Tells the armer of a watch that its checks keep failing, as one more wake (a session's parent input, a worker's message).
+	 * The delivery is keyed by the watch's incarnation, its firing count and the words, so a restart that finds the same failure
+	 * tells the armer nothing twice. It is not a routine result, so the day's wake bound does not hold it.
+	 */
+	private reportWatchFailing(store: PersistentBotTeamStore, failing: WatchFailing): void {
+		const routine = store.getRoutine(failing.routineId);
+		const address = routine && routineWakeAddress(routine);
+		if (!routine || !address || routine.incarnationId !== failing.incarnationId) return;
+		const text = watchFailingWakeText(routine, failing.failures, failing.reason);
+		const fires = routine.cursor.kind === "watch" ? routine.cursor.fires : 0;
+		const deliveryId = `watch-failing:${createHash("sha256")
+			.update(JSON.stringify([routine.incarnationId, fires, text]))
+			.digest("hex")}`;
+		const details = { routineId: routine.routineId, routineRevision: routine.revision, failing: true as const };
+		let content = text;
+		if (address.kind === "worker") {
+			const wake = wakeWorkerRuntime(
+				this.workerWakeHost(),
+				address.runtimeId,
+				watchFailingWakeText(routine, failing.failures, failing.reason, WORKER_WAKE_PLAN_CHARS),
+				deliveryId,
+			);
+			if (wake.kind !== "refused") return;
+			content = `${this.workerUnreachable(address.runtimeId, wake.reason)}\n${text}`;
+		}
+		this.deps
+			.deliverParentInput(this.sessionWake(deliveryId, content, details))
+			.catch((error: unknown) =>
+				this.host.warn(
+					`Watch ${routine.routineId} is failing and its armer could not be told: ${error instanceof Error ? error.message : String(error)}`,
+				),
+			);
+	}
+
 	/** Builds the routine runtime of this session's store: the scheduler, the routine tool's session, intake and the watch monitor. */
 	assemble(store: PersistentBotTeamStore): RoutineRuntime {
 		const parentSessionId = this.deps.getSessionId();
@@ -140,9 +258,13 @@ export class RoutineRuntimeAssembly {
 			subscribeExecution: (listener) => this.host.subscribeOrchestrationStore(listener),
 			hostEvents: this.host.hostEventFeed(),
 			subscribeCapacity: (listener) => this.host.subscribeStateChanges(listener),
+			workerRuntimeLive: (runtimeId) =>
+				workerRuntimeLive(this.host.workerLifecycle().getTaskRuntimeSnapshot(), runtimeId),
 			delivery: {
 				deliver: async (delivery) => {
 					const { occurrence } = delivery;
+					const address = routineWakeAddress(occurrence.definition);
+					if (address?.kind === "worker") return this.deliverToWorker(address.runtimeId, delivery);
 					const intent = occurrence.definition.executionSnapshot?.savedIntent;
 					// A run away recorded its claims for this parent; they explain its result, so they land first, and the
 					// result waits while one cannot land yet. A run of this session wrote its claims itself.
@@ -158,11 +280,13 @@ export class RoutineRuntimeAssembly {
 					const input = routineParentInput(delivery);
 					// Quiet results and expiry notices already ride with the owner's next turn and never count as wakes.
 					if (input.mode === "next-owner-turn") return this.deps.deliverParentInput(input);
+					// A one-shot watch is bounded by its slots and its deadline: its wake is never held by the day's bound.
+					if (isOneShotWatch(occurrence.definition.schedule)) return this.deps.deliverParentInput(input);
 					const manager = this.deps.getSessionManager();
-					// A replay repeats the saved mode, so a saved delivery is never measured again.
+					// A replay repeats the saved mode, so a saved or steered delivery is never measured again.
 					const saved = manager.getParentInput(input.deliveryId);
 					let held = saved !== undefined && saved.metadata.mode === "next-owner-turn";
-					if (!saved) {
+					if (!saved && !findSteeredDelivery(manager, input.deliveryId)) {
 						const day = await this.deps.aggregateUsageWindow(rollingDayWindow(Date.now()));
 						const bound = this.deps.getSettingsManager().getRoutinesSettings().maxResultWakesPerDay;
 						held = day.routineResultTurnWakes >= bound;
@@ -179,9 +303,7 @@ export class RoutineRuntimeAssembly {
 					return this.deps.deliverParentInput(held ? routineParentInput(delivery, true) : input);
 				},
 				findCarriedQuietResult: ({ occurrence, result }) =>
-					routineResultIsQuiet(result, occurrence.trigger)
-						? this.findCarriedRoutineResult(occurrence.routineId, "quiet")
-						: undefined,
+					routineResultIsQuiet(result) ? this.findCarriedRoutineResult(occurrence.routineId, "quiet") : undefined,
 				acknowledgeWorkerNotification: (occurrence) => {
 					if (occurrence.target.kind !== "session" || !occurrence.dispatchKey) return;
 					const intent = occurrence.definition.executionSnapshot?.savedIntent;
@@ -240,6 +362,7 @@ export class RoutineRuntimeAssembly {
 				now: () => routineTimers.now(),
 			}),
 			parentSessionId,
+			onFailing: (failing) => this.reportWatchFailing(store, failing),
 			timers: routineTimers,
 			agentDir: () => this.deps.getAgentDir(),
 			isDisposed: () => this.deps.isDisposed(),

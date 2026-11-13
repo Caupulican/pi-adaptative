@@ -1,4 +1,4 @@
-import { type CustomMessage, createCustomMessage } from "../kernel/index.ts";
+import { type Agent, type CustomMessage, createCustomMessage } from "../kernel/index.ts";
 import type { ForegroundRecoveryController, ForegroundSubmissionLease } from "./foreground-recovery-controller.ts";
 import type { GoalSessionController } from "./goals/goal-session-controller.ts";
 import {
@@ -8,6 +8,7 @@ import {
 	type ParentInputDeliveryOptions,
 	type ParentInputReceipt,
 } from "./parent-input-delivery.ts";
+import type { SteeredMessage } from "./parent-input-steer.ts";
 import { CLOSING_RUN_SETTLE_MS, runSettlesWithin } from "./session-shutdown.ts";
 import { runReleaseSteps } from "./util/resource-release.ts";
 
@@ -16,7 +17,8 @@ interface DurableCustomMessageTurnControllerDeps {
 	parentInput?: ParentInputDeliveryDeps;
 	/** A turn's goal execution belongs to its submission and ends when that submission releases the foreground. */
 	goals: Pick<GoalSessionController, "beginExecution">;
-	enqueueSteeringMessage(message: CustomMessage<unknown>): void;
+	/** The agent whose steering queue a running turn reads at each model step. */
+	steering(): Pick<Agent, "steer" | "withdrawQueuedMessage">;
 	/** Commit under the held foreground lease before provider preparation can wait. */
 	appendMessage(message: CustomMessage<unknown>, lease: ForegroundSubmissionLease): Promise<void>;
 	claimCorrection(turnOpening: CustomMessage<unknown>): Promise<string | undefined>;
@@ -36,8 +38,11 @@ export class DurableCustomMessageTurnController {
 	constructor(deps: DurableCustomMessageTurnControllerDeps) {
 		this.deps = deps;
 		this.parentInputs = deps.parentInput
-			? new ParentInputDeliveryController(deps.parentInput, deps.foreground, deps.goals, (opening, lease) =>
-					this.finishTurn(opening, lease),
+			? new ParentInputDeliveryController(
+					{ ...deps.parentInput, steer: (message) => this.steer(message) },
+					deps.foreground,
+					deps.goals,
+					(opening, lease) => this.finishTurn(opening, lease),
 				)
 			: undefined;
 	}
@@ -48,6 +53,11 @@ export class DurableCustomMessageTurnController {
 	): Promise<ParentInputReceipt> {
 		if (!this.parentInputs) throw new Error("Durable parent input delivery is unavailable.");
 		return this.parentInputs.deliver(input, options);
+	}
+
+	/** Immediately before the running turn polls its steering queue: steered parent inputs join it. */
+	flushParentSteers(): void {
+		this.parentInputs?.flushSteers();
 	}
 
 	startParentInputs(): void {
@@ -107,14 +117,31 @@ export class DurableCustomMessageTurnController {
 
 	/** Queue a custom message for the next provider boundary and resolve only after durable append. */
 	async enqueue<T>(message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">): Promise<void> {
+		await this.steer(message).accepted;
+	}
+
+	/** Queue a message for the running turn's next model step; it can be taken back until a run consumes it. */
+	private steer<T>(message: Pick<CustomMessage<T>, "customType" | "content" | "display" | "details">): SteeredMessage {
 		const { appMessage, acceptedPromise } = this.prepare(message);
+		const agent = this.deps.steering();
 		try {
-			this.deps.enqueueSteeringMessage(appMessage);
+			agent.steer(appMessage);
 		} catch (error) {
 			this.pending.delete(appMessage);
 			throw error;
 		}
-		await acceptedPromise;
+		return {
+			accepted: acceptedPromise,
+			withdraw: () => {
+				if (!agent.withdrawQueuedMessage(appMessage)) return false;
+				this.pending.delete(appMessage);
+				return true;
+			},
+			abandon: () => {
+				agent.withdrawQueuedMessage(appMessage);
+				this.pending.delete(appMessage);
+			},
+		};
 	}
 
 	/**

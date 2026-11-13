@@ -26,14 +26,13 @@ import type { LaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import { type LastSentRequest, sessionLaneSummarizerRequest } from "../compaction-support.ts";
 import { frozenPrefixLength } from "../context/prefix-stability.ts";
-import { TASK_EVENTS_TOOL_NAME } from "../events/host-event-tool-names.ts";
-import { createTaskEventsTool } from "../events/task-events-tool.ts";
 import type { WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
 import { type ModelCapabilityProfile, resolveWorkerOutputTokenCeiling } from "../model-capability.ts";
 import { attemptUsageFromGatewayUsage, EMPTY_ATTEMPT_USAGE } from "../orchestration/attempt-usage.ts";
 import { CapabilityGatewayDeniedError, type ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
 import type { ArtifactContract, AttemptUsageSnapshot, ExecutionGrant } from "../orchestration/contracts.ts";
 import type { StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
+import type { TaskWatchPort } from "../routines/task-watch-tool.ts";
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
@@ -51,6 +50,7 @@ import type {
 	WorkerTranscriptMessage,
 } from "./worker-conversation-store.ts";
 import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
+import { createWorkerHostTools, WORKER_HOST_TOOL_NAMES } from "./worker-host-tools.ts";
 import { appendWorkerKnowledgeContext } from "./worker-knowledge-context.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 import { WorkerCompletionProtocolError, WorkerProviderTurnProtocol } from "./worker-provider-turn-protocol.ts";
@@ -254,6 +254,8 @@ export interface WorkerAttemptExecutorOptions {
 	retentionPolicy?: WorkerConversationRetentionPolicy;
 	signal?: AbortSignal;
 	runIsolatedCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
+	/** The watch a runtime may arm for its own wait; absent where the session holds no routine runtime. */
+	watches?: TaskWatchPort;
 	agentControl: Pick<
 		WorkerAgentControlCoordinator,
 		| "acknowledgeMailboxMessage"
@@ -548,26 +550,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 			},
 		}),
 	);
-	const withEventControl = <T>(operation: () => T): T => {
-		options.signal?.throwIfAborted();
-		options.toolSurface.assertHealthy();
-		if (physicalAdmissionClosed) throw new WorkerCompletionProtocolError("Worker event control admission is closed.");
-		return options.conversation.withHostEventControl(options.parentSessionId, operation);
-	};
-	const taskEventsTool = createTaskEventsTool({
-		callerAgentId: options.agentId,
-		taskId: options.durableHandle.taskId,
-		execution: {
-			attemptId: options.durableHandle.attemptId,
-			leaseId: options.durableHandle.leaseId,
-			fencingToken: options.durableHandle.fencingToken,
-		},
-		port: {
-			readHostEvents: (query, scope) => withEventControl(() => options.agentControl.readHostEvents(query, scope)),
-			changeHostEventSubscriptions: (input, scope) =>
-				withEventControl(() => options.agentControl.changeHostEventSubscriptions(input, scope)),
-		},
-	});
+	const hostTools = createWorkerHostTools(options, () => physicalAdmissionClosed);
 	let reportRequests = 0;
 	let emptyReplyRequests = 0;
 	let needsMoreRounds = 0;
@@ -1288,8 +1271,8 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 											availableTokens ?? Number.POSITIVE_INFINITY,
 										),
 										tools: reportHandshake
-											? [...options.toolSurface.tools, submitReportTool, taskEventsTool]
-											: [...options.toolSurface.tools, taskEventsTool],
+											? [...options.toolSurface.tools, submitReportTool, ...hostTools]
+											: [...options.toolSurface.tools, ...hostTools],
 										requestPreflight: (request) => providerTurn.requestPreflight(request),
 										// One durable request_snapshot per accepted provider request, so the worker's
 										// request start and reasoning level survive in its own conversation.
@@ -1336,7 +1319,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 												// The report tool records arguments and ends the run; it is not a granted tool.
 												if (
 													context.toolCall.name === SUBMIT_REPORT_TOOL_NAME ||
-													context.toolCall.name === TASK_EVENTS_TOOL_NAME
+													WORKER_HOST_TOOL_NAMES.has(context.toolCall.name)
 												)
 													return undefined;
 												const decision = await options.toolSurface.beforeToolCall(context, toolSignal);

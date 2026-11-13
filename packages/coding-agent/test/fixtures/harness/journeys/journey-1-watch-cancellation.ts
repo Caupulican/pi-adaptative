@@ -6,24 +6,10 @@ import { ORCHESTRATION_SCHEMA_VERSION } from "../../../../src/core/orchestration
 import { OrchestrationProfileStore } from "../../../../src/core/orchestration/profile-store.ts";
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
-import { CHANGED_FILE_ANSWER_CLAIMS } from "./journey-5-shared.ts";
 import { scriptWatchWake, settleWatchWake } from "./journey-watch-wake.ts";
 import { ICM_INTAKE_JUDGMENTS, latestBatchResults } from "./shared.ts";
 
 const PROFILE_ID = "watch-cancellation-reader";
-const WATCH_OBSERVATION_CLAIMS = {
-	...CHANGED_FILE_ANSWER_CLAIMS,
-	// The worker reports an externally observed file change; it does not claim to have edited workspace files.
-	states_files_changed: { kind: "noul", probability: 0.02 },
-} as const;
-const WATCH_OBSERVATION_QUESTION_IDS = [
-	"states_tests_pass",
-	"states_checks_pass",
-	"states_committed",
-	"states_pushed",
-	"states_published",
-	"states_files_changed",
-] as const;
 
 /** A real routine watch is canceled during its glob scan; shutdown joins it before a later watch runs. */
 export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Promise<void> {
@@ -313,19 +299,14 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 			matches: (operation) => operation.path === healthyRoot,
 		});
 		const replacementWarningMark = world.warnings.length;
-		let watchedFileClaimRequests = 0;
-		world.systemOne.enterPhase(
-			"watch-replacement",
-			{ ...ICM_INTAKE_JUDGMENTS, ...WATCH_OBSERVATION_CLAIMS },
-			{
-				expect: (request) => {
-					if (!("states_tests_pass" in request.questions)) return;
-					watchedFileClaimRequests += 1;
-					expect(Object.keys(request.questions).sort()).toEqual([...WATCH_OBSERVATION_QUESTION_IDS].sort());
-					expect(request.state).toMatchObject({ final_answer: "The watched file changed." });
-				},
-			},
-		);
+		// No worker runs for a watch, so no worker claim is judged: the phase holds the intake judgments only.
+		world.systemOne.enterPhase("watch-replacement", ICM_INTAKE_JUDGMENTS, {
+			expect: (request) =>
+				expect(
+					"states_tests_pass" in request.questions,
+					"a watch's firing starts no worker whose claim is judged",
+				).toBe(false),
+		});
 		world.provider.enqueue(
 			"root",
 			calls("watch-replacement-update", [
@@ -386,30 +367,16 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 			"an old watcher error cannot disarm its replacement",
 		).toBe(true);
 		expect(world.warnings.slice(replacementWarningMark)).not.toContain("Routine watch: h27 stale watcher error");
-		const workerStarted = createBarrier();
-		let workerTask = "";
-		world.provider.enqueue("worker-a", {
-			...calls("watch-healthy-report", [
-				{
-					id: "watch-healthy-report",
-					name: "submit_report",
-					arguments: { status: "completed", summary: "The watched file changed.", ownerUpdate: "none" },
-				},
-			]),
-			check: (request) => {
-				workerTask =
-					request.context.messages
-						.filter((message) => message.role === "user" && typeof message.content === "string")
-						.map((message) => String(message.content))
-						.filter((content) => content.startsWith("TASK\n"))
-						.at(-1) ?? "";
-				workerStarted.release();
-			},
-		});
 		const healthyOccurrences = () =>
 			healthy.session.backgroundLanes.getBotTeamStore().listRoutineOccurrences({ routineId: healthyRoutine });
-		// The worker reports nothing for the owner; the watch's result still wakes the session that armed it.
-		const healthyWake = scriptWatchWake(world, "watch-healthy", healthyRoutine);
+		// The firing wakes the session that armed the watch with the event itself; no routine worker runs.
+		const requestsBeforeFiring = world.provider.requests.length;
+		const healthyWake = scriptWatchWake(world, "watch-healthy", {
+			routineId: healthyRoutine,
+			cause: "A watched folder or file pattern changed: *.txt",
+			plan: "Inspect the watched files and report whether they changed.",
+			facts: { condition: "file", change: "changed", label: "*.txt", facts: { entries: 1 } },
+		});
 		const fired = world.io.waitForMutation(() => healthyOccurrences().length === 1);
 		world.io.writeFileSync(replacementFile, "changed\n");
 		for (let step = 0; step < 8 && healthyOccurrences().length === 0; step++) {
@@ -417,34 +384,16 @@ export async function runJourney1WatchCancellationPhase(world: HarnessWorld): Pr
 			await new Promise<void>((resolve) => setImmediate(resolve));
 		}
 		await withDeadline(world.trace, "the healthy glob watch fires once after cancellation", fired);
-		await withDeadline(world.trace, "the healthy watch starts its real worker request", workerStarted.promise);
-		await withDeadline(
-			world.trace,
-			"the healthy worker has a canonical successful terminal and delivery",
-			world.io.waitForMutation(() => {
-				const occurrence = healthyOccurrences()[0];
-				const attemptId = occurrence?.executionRef?.attemptId;
-				if (
-					!attemptId ||
-					occurrence.phase !== "terminal" ||
-					occurrence.result?.outcome !== "succeeded" ||
-					occurrence.result.delivery !== "acknowledged"
-				)
-					return false;
-				const state = healthy.session.backgroundLanes.getTaskRuntimeSnapshot();
-				return (
-					state?.attempts[attemptId]?.status === "completed" &&
-					Object.values(state.notifications).some(
-						(notification) => notification.attemptId === attemptId && notification.status === "delivered",
-					)
-				);
-			}),
-		);
 		await settleWatchWake(world, healthy.session, "healthy watch", healthyWake);
-		expect(workerTask).toContain("Inspect the watched files and report whether they changed.");
-		expect(workerTask).toContain("a condition the host was watching became true");
-		expect(watchedFileClaimRequests).toBe(world.systemOne.enabled ? 1 : 0);
 		expect(healthyOccurrences(), "the post-cancel watch produced exactly one occurrence").toHaveLength(1);
+		expect(
+			healthyOccurrences().map((run) => [run.phase, run.result?.outcome, run.result?.delivery]),
+			"the firing is one delivered occurrence",
+		).toEqual([["terminal", "succeeded", "acknowledged"]]);
+		expect(
+			world.provider.requests.slice(requestsBeforeFiring).map((request) => request.model.id),
+			"the firing cost one turn of the session that armed the watch and started no worker",
+		).toEqual(["root"]);
 		const healthyDisposal = await world.disposeSessionInBody(healthy.session);
 		healthyOwned = false;
 		expect(healthyDisposal, "the healthy watch session also joins shutdown").toBeUndefined();

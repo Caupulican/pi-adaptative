@@ -16,7 +16,7 @@ import { entryPath, readEntry } from "../process-matrix/store.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import { PublicWebClient, PublicWebHttpError, PublicWebRedirectError } from "../web/public-web-client.ts";
-import type { RoutineWatchObservation } from "./routine-contract.ts";
+import type { RoutineWatchObservation } from "./routine-watch-edge.ts";
 import { processIsRunning, type WatchAdmission, watchCommandEnvironment } from "./watch-admission.ts";
 import {
 	isWatchGlob,

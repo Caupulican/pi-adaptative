@@ -12,12 +12,11 @@ import type {
 	RoutineOccurrenceListFilter,
 	RoutineRetireInput,
 	RoutineTerminalOutcome,
-	RoutineWatchObservationInput,
-	RoutineWatchOutcome,
 	UpsertPersistentRoutineInput,
 } from "./routine-contract.ts";
 import type { RoutineRunFacts } from "./routine-progress.ts";
 import type { RetiredRoutineRecord } from "./routine-retired.ts";
+import type { RoutineWatchObservationInput, RoutineWatchOutcome } from "./routine-watch-edge.ts";
 
 /** The existing persistent store implements this boundary; scheduling owns no second registry. */
 export interface RoutineStorePort {

@@ -487,26 +487,59 @@ export function parseWatchFiredEvent(value: unknown): WatchFiredEvent {
 	};
 }
 
-/** The owner-facing line of a firing: 'A watched file changed: notes.txt'. */
-export function describeWatchFired(event: WatchFiredEvent): string {
-	const label = event.label.length > 0 ? `: ${event.label}` : "";
-	switch (event.condition) {
+/** What the words of one firing need: its closed condition and change, the name of the watched thing, and whether it covered many entries. */
+export interface WatchFiredLine {
+	readonly condition: WatchFiredEvent["condition"];
+	readonly change: WatchFiredEvent["change"];
+	readonly label: string;
+	readonly many: boolean;
+}
+
+/** The line of a firing, as the routine's occurrence and the owner's history row keep it. */
+export function watchFiredLine(event: WatchFiredEvent): WatchFiredLine {
+	return {
+		condition: event.condition,
+		change: event.change,
+		label: event.label,
+		many: event.facts.entries !== undefined,
+	};
+}
+
+/** A line read back from saved details, or undefined when they are not one. */
+export function parseWatchFiredLine(value: unknown): WatchFiredLine | undefined {
+	if (!isPlainRecord(value) || typeof value.label !== "string" || typeof value.many !== "boolean") return undefined;
+	const { condition, change } = value;
+	return WATCH_CONDITION_TYPES.includes(condition as WatchFiredEvent["condition"]) &&
+		WATCH_CHANGES.includes(change as WatchFiredEvent["change"])
+		? {
+				condition: condition as WatchFiredEvent["condition"],
+				change: change as WatchFiredEvent["change"],
+				label: value.label,
+				many: value.many,
+			}
+		: undefined;
+}
+
+/** The line of a firing in plain words: 'A watched file changed: notes.txt'. The caller passes the words of the reader's language. */
+export function describeWatchFired(line: WatchFiredLine, words: InterfaceText["chat"]["watch"]["fired"]): string {
+	const label = line.label.length > 0 ? `: ${line.label}` : "";
+	switch (line.condition) {
 		case "file":
-			return event.change === "created"
-				? `A watched file appeared${label}`
-				: event.change === "deleted"
-					? `A watched file was removed${label}`
-					: event.facts.entries === undefined
-						? `A watched file changed${label}`
-						: `A watched folder or file pattern changed${label}`;
+			return line.change === "created"
+				? words.fileCreated(label)
+				: line.change === "deleted"
+					? words.fileRemoved(label)
+					: line.many
+						? words.manyChanged(label)
+						: words.fileChanged(label);
 		case "process":
 		case "pid":
-			return "A watched process exited";
+			return words.processExit;
 		case "port":
-			return `A watched port is now ${event.change === "open" ? "open" : "closed"}${label}`;
+			return words.port(line.change === "open", label);
 		case "command":
-			return "A watched command check now passes";
+			return words.commandPasses;
 		case "http":
-			return `A watched page now matches${label}`;
+			return words.pageMatches(label);
 	}
 }

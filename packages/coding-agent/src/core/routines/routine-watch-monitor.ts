@@ -28,11 +28,24 @@ export interface RoutineWatchMonitorDeps {
 	readonly store: Pick<RoutineStorePort, "reload" | "subscribe" | "listRoutines" | "observeWatch">;
 	readonly sampler: Pick<WatchSampler, "sample">;
 	readonly parentSessionId: string;
+	/** Tells whoever armed a watch that its checks keep failing; absent where nobody can be told. Called once per failing streak. */
+	onFailing?(failing: WatchFailing): void;
 	readonly timers: TimerPort;
 	/** The directory process-matrix entries live in (a managed process's terminal state is a file change there). */
 	readonly agentDir: () => string;
 	isDisposed(): boolean;
 	warn(message: string): void;
+}
+
+/** Consecutive checks of a watch the session refused before its armer is told: one refused tick is not a failing watch. */
+const WATCH_FAILING_AFTER = 5;
+
+/** A watch whose last `failures` checks the session refused or could not run, with the reason in plain words (redacted and bounded). */
+export interface WatchFailing {
+	readonly routineId: string;
+	readonly incarnationId: string;
+	readonly failures: number;
+	readonly reason: string;
 }
 
 interface ArmedWatch {
@@ -49,6 +62,9 @@ interface ArmedWatch {
 	/** An observation is running; a trigger meanwhile asks for one more after it. */
 	running: boolean;
 	again: boolean;
+	/** Checks in a row that could not be made, and whether the armer was told about this streak. */
+	failures: number;
+	failingReported: boolean;
 }
 
 /** Why a condition is not being followed, as a class for the log; never the condition itself. */
@@ -219,6 +235,8 @@ export class RoutineWatchMonitor {
 			pending: undefined,
 			running: false,
 			again: false,
+			failures: 0,
+			failingReported: false,
 		};
 		this.armed.set(routine.routineId, watch);
 		const cadence = watchCadenceMs(condition);
@@ -321,16 +339,21 @@ export class RoutineWatchMonitor {
 			} catch (error) {
 				if (watch.abort.signal.aborted || !this.active) return;
 				this.refuse(watch, error);
+				this.noteFailure(watch, error instanceof Error ? error.message : String(error));
 				return;
 			}
 			if (!this.active || watch.abort.signal.aborted) return;
-			if (sample === undefined)
+			if (sample === undefined) {
 				harnessLog.debug("routines", "a watch observation was skipped", {
 					routineId: watch.routineId,
 					condition: watch.condition.type,
 					reason: "unknown",
 				});
-			else await this.submit(watch, sample);
+			} else {
+				watch.failures = 0;
+				watch.failingReported = false;
+				await this.submit(watch, sample);
+			}
 		} finally {
 			watch.running = false;
 			if (this.active && !watch.abort.signal.aborted && this.armed.get(watch.routineId) === watch) {
@@ -346,6 +369,28 @@ export class RoutineWatchMonitor {
 					}, cadence);
 				}
 			}
+		}
+	}
+
+	/**
+	 * Counts a check the session refused or could not run: a failure that stays until something is changed. A check with no
+	 * observation (the target is down, a network error, a timeout) is not counted: waiting for a service to come up is what
+	 * a watch is for, and the end time reports what such a watch last saw. The streak's one report tells the armer once
+	 * {@link WATCH_FAILING_AFTER} in a row failed.
+	 */
+	private noteFailure(watch: ArmedWatch, reason: string): void {
+		watch.failures += 1;
+		if (watch.failures < WATCH_FAILING_AFTER || watch.failingReported) return;
+		watch.failingReported = true;
+		try {
+			this.deps.onFailing?.({
+				routineId: watch.routineId,
+				incarnationId: watch.incarnationId,
+				failures: watch.failures,
+				reason: boundedRedactedDiagnosticText(reason) ?? "operation unavailable",
+			});
+		} catch (error) {
+			this.warn(error);
 		}
 	}
 

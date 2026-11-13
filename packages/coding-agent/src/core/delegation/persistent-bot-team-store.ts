@@ -45,8 +45,6 @@ import {
 	type RoutineRetireInput,
 	type RoutineSchedule,
 	type RoutineTerminalOutcome,
-	type RoutineWatchObservationInput,
-	type RoutineWatchOutcome,
 	routineResultDigest,
 	routineScheduleInputOf,
 	routineSlotRule,
@@ -54,8 +52,9 @@ import {
 	type UpsertPersistentRoutineInput,
 } from "../routines/routine-contract.ts";
 import { parseRoutineProgress, type RoutineRunFacts, withRoutineOwnerNote } from "../routines/routine-progress.ts";
-import { creationProvenance } from "../routines/routine-provenance.ts";
+import { carriesRoutineArming, creationProvenance } from "../routines/routine-provenance.ts";
 import { parseRetiredRoutines, type RetiredRoutineRecord } from "../routines/routine-retired.ts";
+import type { RoutineWatchObservationInput, RoutineWatchOutcome } from "../routines/routine-watch-edge.ts";
 import { parseWatchCondition } from "../routines/watch-contract.ts";
 import { cleanRedactBound } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -751,7 +750,7 @@ export class PersistentBotTeamStore {
 		if (!Number.isSafeInteger(this.routineRevisionCounter) || this.routineRevisionCounter < highestRoutineRevision)
 			throw new Error("Refusing to persist a stale routine revision counter.");
 		const data = {
-			// Version 5 holds an arming stamp and version 4 progress; a build that predates either refuses the store rather
+			// Version 5 holds an arming stamp or a wake address and version 4 progress; a build that predates either refuses the store rather
 			// than dropping the routines it cannot read. A store with neither stays version 3.
 			version: this.storesRoutineArming() ? 5 : this.storesRoutineProgress() ? 4 : 3,
 			routineRevisionCounter: this.routineRevisionCounter,
@@ -779,10 +778,10 @@ export class PersistentBotTeamStore {
 		this.mutationChanged = true;
 	}
 
-	/** Whether a routine carries the arming stamp of a model's own tool call; only then is version 5 written. */
+	/** Whether a routine, or an occurrence's frozen definition, carries an arming stamp or a wake address; only then is version 5 written. */
 	private storesRoutineArming(): boolean {
-		for (const routine of this.routines.values()) if (routine.armedBy !== undefined) return true;
-		return false;
+		const occurrences = [...this.routineOccurrences.values()].map((occurrence) => occurrence.definition);
+		return [...this.routines.values(), ...occurrences].some(carriesRoutineArming);
 	}
 
 	/** Whether the store holds a progress field (a routine's record or an occurrence's brief); only then is version 4 written. */
@@ -1403,7 +1402,7 @@ export class PersistentBotTeamStore {
 				...(input.executionSnapshot
 					? { executionSnapshot: parseRoutineExecutionSnapshot(input.executionSnapshot) }
 					: {}),
-				...creationProvenance(existing, intake, input.armedBy),
+				...creationProvenance(existing, intake, input.armedBy, input.wake),
 				createdAt: existing?.createdAt ?? nowIso,
 				updatedAt: nowIso,
 			};

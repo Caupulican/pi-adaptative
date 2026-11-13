@@ -1810,7 +1810,7 @@ export class AgentSession {
 				},
 				warn: (message) => this._emit({ type: "warning", message }),
 			},
-			enqueueSteeringMessage: (message) => this.agent.steer(message),
+			steering: () => this.agent,
 			appendMessage: (message, lease) =>
 				this._foregroundLifecycle.commitCustomPrompt(message, this._handleAgentEvent, () => {
 					if (this._disposed || !this._foregroundRecovery.ownsSubmission(lease))
@@ -2553,8 +2553,8 @@ export class AgentSession {
 		this._installAgentToolHooks();
 		this._providerRequestRuntime.install();
 		this._providerRequestRuntime.installTurnRefresh(
-			() => this.agent.createContextSnapshot(),
 			() => this._terminalHandoffs.flushProviderBoundary(),
+			() => this._durableCustomMessageTurns.flushParentSteers(),
 		);
 
 		this._runtimeBuilder.buildRuntime({

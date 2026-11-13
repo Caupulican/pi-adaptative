@@ -5694,6 +5694,7 @@ export class WorkerDelegationController {
 			"lane",
 			`worker:${startedRecord.laneId}`,
 		);
+		const verificationSubject = request.verificationOfTaskId ?? request.reviewOf?.taskId;
 		const buildExecutor = () =>
 			createWorkerAttemptExecutor({
 				reportCapabilities: reportCapabilitiesOf(prepared.attempt!.dispatch.executionContract?.worker),
@@ -5750,14 +5751,13 @@ export class WorkerDelegationController {
 						: this.deps.getHandoffPersonaGuidance?.();
 					return personaGuidance ? { personaGuidance } : {};
 				})(),
-				...((request.verificationOfTaskId ?? request.reviewOf?.taskId)
-					? { verificationSubjectTaskId: request.verificationOfTaskId ?? request.reviewOf?.taskId }
-					: {}),
+				...(verificationSubject ? { verificationSubjectTaskId: verificationSubject } : {}),
 				...(recoveredTerminal ? { recoveredTerminal } : {}),
 				...(retentionPolicy ? { retentionPolicy } : {}),
 				signal: workerSignal,
 				runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
 				agentControl: this.agentControl,
+				...(this.deps.taskWatches ? { watches: this.deps.taskWatches } : {}),
 				applyActions: workerRequest.envelope.capabilities.includes("filesystem.write")
 					? (actions, actionJournal) =>
 							applyWorkerActions({

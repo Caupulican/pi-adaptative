@@ -62,8 +62,8 @@ export function withResult(
  * only (`applyRoutineRunProgress`): snags from code facts, the run's own report, clean runs resolving snags, and the
  * position of a run that sent no report. Only a worker session's run writes: a bot or team run has no brief to read it
  * back, so its results record nothing (its failure streak and pause still apply). A cancelled result counts nothing;
- * it leaves the stopped position only when the occurrence was dispatched. An expiry or condition notice (which ran no
- * worker) records nothing. Keyed by the run, so a replayed result changes nothing; never moves the revision. A record
+ * it leaves the stopped position only when the occurrence was dispatched. An expiry or condition notice and a watch firing (which ran no
+ * worker) record nothing. Keyed by the run, so a replayed result changes nothing; never moves the revision. A record
  * the codec refuses is not kept: the previous record stands, so a progress record can never fail the result write.
  */
 export function recordRoutineProgress(
@@ -76,7 +76,8 @@ export function recordRoutineProgress(
 	if (
 		occurrence.target.kind !== "session" ||
 		occurrence.trigger.kind === "expiry" ||
-		occurrence.trigger.kind === "condition"
+		occurrence.trigger.kind === "condition" ||
+		occurrence.trigger.kind === "watch"
 	)
 		return;
 	const routine = state.routines.get(occurrence.routineId);

@@ -6,18 +6,22 @@
 import { isDeepStrictEqual } from "node:util";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import {
-	decideWatchObservation,
 	MAX_ROUTINE_COMMAND_ID_CHARS,
 	ROUTINE_JOURNAL_SHARE,
 	type RoutineCursor,
 	type RoutineOccurrence,
 	type RoutineRetireInput,
-	type RoutineWatchObservationInput,
-	type RoutineWatchOutcome,
 	routineEnded,
 	routineOccurrenceId,
 	routineOccurrencesSettled,
 } from "../routines/routine-contract.ts";
+import {
+	decideWatchObservation,
+	type RoutineWatchObservationInput,
+	type RoutineWatchOutcome,
+	watchLastSeen,
+} from "../routines/routine-watch-edge.ts";
+import { WATCH_WAKE_SUMMARY } from "../routines/routine-watch-wake.ts";
 import {
 	createClaimedOccurrence,
 	createPendingOccurrence,
@@ -47,7 +51,12 @@ export function retireEndedRoutines(
 		const trigger: RoutineOccurrence["trigger"] | undefined = met
 			? { kind: "condition", occurrenceId: met.occurrenceId, metAt: met.at }
 			: ended === "expired" && routine.schedule.kind !== "once" && routine.schedule.expiresAt !== undefined
-				? { kind: "expiry", expiresAt: routine.schedule.expiresAt }
+				? {
+						kind: "expiry",
+						expiresAt: routine.schedule.expiresAt,
+						// A watch that timed out says what its last observation was, so the armer is not left to guess.
+						...(routine.cursor.kind === "watch" ? { lastSeen: watchLastSeen(routine.cursor) } : {}),
+					}
 				: undefined;
 		if (trigger) {
 			const parentOrigin =
@@ -115,10 +124,11 @@ export function observeWatch(
 		persist();
 		return "recorded";
 	}
+	// An earlier firing the armer has not received holds the next one, so a burst of changes wakes it once for the latest state.
 	for (const occurrence of state.occurrences.values())
 		if (
 			occurrence.routineId === routine.routineId &&
-			(occurrence.phase === "pending" || occurrence.phase === "claimed")
+			(occurrence.phase === "pending" || occurrence.phase === "claimed" || occurrence.result?.delivery === "pending")
 		)
 			return "held";
 	const parentOrigin = routine.executionSnapshot?.savedIntent.receiptOrigin;
@@ -128,10 +138,20 @@ export function observeWatch(
 	const sequence = routine.cursor.fires + 1;
 	const trigger = { kind: "watch" as const, triggeredAt: input.nowMs, sequence, event: input.event };
 	const occurrenceId = routineOccurrenceId(routine, trigger);
-	// A replay of a firing already journaled advances the cursor past it without a second occurrence.
+	// A replay of a firing already journaled advances the cursor past it without a second occurrence. The firing is its own
+	// result, pending delivery to the armer: no worker runs, so nothing sits between the event and whoever waits for it.
 	const occurrence =
 		state.occurrences.get(occurrenceId) ??
-		createPendingOccurrence(state, routine, occurrenceId, trigger, input.nowMs, parentOrigin);
+		withResult(
+			state,
+			{
+				...createPendingOccurrence(state, routine, occurrenceId, trigger, input.nowMs, parentOrigin),
+				phase: "terminal",
+			},
+			"succeeded",
+			WATCH_WAKE_SUMMARY,
+			parentOrigin.sessionId,
+		);
 	state.occurrences.set(occurrenceId, occurrence);
 	const cursor: RoutineCursor = {
 		...decision.cursor,
@@ -139,7 +159,9 @@ export function observeWatch(
 		// A one-run routine is spent in the write that records its run, so no second edge can start it.
 		...(routine.schedule.stopAfterFirstRun ? { spent: true as const } : {}),
 	};
-	state.routines.set(routine.routineId, { ...withRoutineRunState(routine, occurrence), cursor });
+	// The result's own write may have changed the routine (its failure streak ends): the firing builds on that record.
+	const written = state.routines.get(routine.routineId) ?? routine;
+	state.routines.set(routine.routineId, { ...withRoutineRunState(written, occurrence), cursor });
 	persist();
 	return "fired";
 }

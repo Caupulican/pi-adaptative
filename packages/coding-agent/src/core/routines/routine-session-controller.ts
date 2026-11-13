@@ -34,7 +34,14 @@ import {
 	type RoutineToolSummary,
 	type RoutineToolView,
 } from "./routine-tool.ts";
-import { agentWatchBoundsRefusal, agentWatchSlotsRefusal, isWatchSchedule } from "./routine-watch-arming.ts";
+import type { RoutineWakeAddress } from "./routine-wake-address.ts";
+import {
+	agentWatchBoundsRefusal,
+	agentWatchSlotsRefusal,
+	isWatchSchedule,
+	workerWatchConditionRefusal,
+	workerWatchSlotsRefusal,
+} from "./routine-watch-arming.ts";
 import { describeWatchCondition, parseWatchCondition, type WatchCondition } from "./watch-contract.ts";
 
 interface RoutineSessionDeps {
@@ -207,6 +214,41 @@ export class RoutineSessionController implements RoutineToolPort {
 		return this.save(input, undefined, "host", signal);
 	}
 
+	/**
+	 * Arms a watch for a worker runtime's own wait, on the admitted identity its executor holds: under the same bounds as an
+	 * agent-armed watch (one-shot, an end time within a day, a slot in the session's count), only on a condition its own
+	 * tools could check, and woken at the runtime itself (`wake`), never at the session. The runtime id is never an argument.
+	 */
+	async armForWorker(runtimeId: string, input: RoutineToolInput, signal?: AbortSignal): Promise<RoutineToolView> {
+		this.check(signal);
+		const watch = input.schedule;
+		if (!isWatchSchedule(watch)) throw new Error("A worker can only arm a watch.");
+		const refusal =
+			workerWatchConditionRefusal(parseWatchCondition(watch.condition)) ??
+			agentWatchBoundsRefusal(watch, this.deps.now()) ??
+			workerWatchSlotsRefusal(
+				this.deps.store.listRoutines(),
+				this.deps.parentSessionId,
+				runtimeId,
+				this.deps.now(),
+			) ??
+			agentWatchSlotsRefusal(this.deps.store.listRoutines(), this.deps.parentSessionId, this.deps.now());
+		if (refusal !== undefined) {
+			harnessLog.warn("routines", "a worker's watch was refused");
+			throw new Error(refusal);
+		}
+		const savedIntent = await this.deps.capture(
+			{ instructions: input.prompt, knowledge: [], objectiveId: null, reportsProgress: true },
+			signal,
+		);
+		this.check(signal);
+		return this.persist(input, savedIntent, {
+			enabled: true,
+			armedBy: { kind: "worker", runtimeId },
+			wake: { kind: "worker", parentSessionId: this.deps.parentSessionId, runtimeId },
+		});
+	}
+
 	async setEnabled(
 		routineId: string,
 		expectedRevision: number,
@@ -246,7 +288,11 @@ export class RoutineSessionController implements RoutineToolPort {
 		this.check(signal);
 		// A manual occurrence spends a worker run and its result can open another parent turn: only the owner's words start one.
 		this.requireOwnerTurn();
-		this.require(routineId, expectedRevision);
+		// A watch starts no run: when its condition becomes true it wakes whoever armed it, so there is nothing for a worker to run.
+		if (isWatchSchedule(this.require(routineId, expectedRevision).schedule))
+			throw new Error(
+				"A watch has no run to start: it wakes the agent that armed it when its condition becomes true. Delete it to stop waiting, or arm another.",
+			);
 		const commandId = strictCanonicalDigest({
 			parentSessionId: this.deps.parentSessionId,
 			invocation: this.deps.invocationKey(invocationId),
@@ -376,6 +422,7 @@ export class RoutineSessionController implements RoutineToolPort {
 			readonly timeZone?: string;
 			readonly toolAnsweredSources?: readonly string[];
 			readonly armedBy?: RoutineArmAuthority;
+			readonly wake?: RoutineWakeAddress;
 			readonly intakeOrigin?: RoutineIntakeOrigin;
 			readonly intakeGuard?: () => void;
 		},
@@ -411,6 +458,10 @@ export class RoutineSessionController implements RoutineToolPort {
 				: { expectedRevision: extras.expectedRevision }),
 			...(extras.toolAnsweredSources === undefined ? {} : { toolAnsweredSources: extras.toolAnsweredSources }),
 			...(extras.armedBy === undefined ? {} : { armedBy: extras.armedBy }),
+			// A watch wakes the session that saved it, stamped once at creation from this controller, never from the call's arguments.
+			...(watching
+				? { wake: extras.wake ?? { kind: "session" as const, sessionId: this.deps.parentSessionId } }
+				: {}),
 			...(extras.intakeOrigin === undefined ? {} : { intakeOrigin: extras.intakeOrigin }),
 			...(extras.intakeGuard === undefined ? {} : { intakeGuard: extras.intakeGuard }),
 		});

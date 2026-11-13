@@ -44,7 +44,7 @@ export function awaySettlement(
 /**
  * What a run reads from its routine's progress record when it is claimed to run: the brief, and whether that brief
  * carries a third party's words (`progressUntrusted`). Both are frozen with the run. Only a session run of a clock,
- * manual, event or watch trigger reads a brief; an expiry or condition notice runs no worker. The record is the routine's
+ * manual or event trigger reads a brief; a watch firing wakes its armer with no run, and an expiry or condition notice runs no worker. The record is the routine's
  * current one, but the run's target and the report instruction come from the occurrence's own frozen definition, the one
  * its worker schema was compiled from.
  */
@@ -55,7 +55,8 @@ export function admittedProgressFields(
 	if (
 		occurrence.target.kind !== "session" ||
 		occurrence.trigger.kind === "expiry" ||
-		occurrence.trigger.kind === "condition"
+		occurrence.trigger.kind === "condition" ||
+		occurrence.trigger.kind === "watch"
 	)
 		return {};
 	const reportsProgress =

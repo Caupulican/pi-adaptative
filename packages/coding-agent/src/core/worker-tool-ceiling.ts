@@ -11,7 +11,7 @@ import { TASK_EVENTS_TOOL_NAME } from "./events/host-event-tool-names.ts";
 import { KNOWLEDGE_TOOL_NAME } from "./memory/knowledge-tool.ts";
 import { ROOT_MEMORY_TOOL_NAME, WORKER_MEMORY_BROKER_TOOL_NAMES } from "./memory/worker-memory-tools.ts";
 import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
-import { ROUTINE_TOOL_NAME } from "./routines/routine-tool-names.ts";
+import { ROUTINE_TOOL_NAME, TASK_WATCH_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { hasCataloguedToolCapabilityPolicy } from "./tool-capability-policy.ts";
 import { ASSIGN_TOOL_NAME } from "./tools/assign-tool-name.ts";
@@ -67,6 +67,7 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 export const WORKER_LEAF_LANE_ONLY_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	// Installed only by the task executor with its exact admitted identity, never by a generic tool adapter.
 	TASK_EVENTS_TOOL_NAME,
+	TASK_WATCH_TOOL_NAME,
 	...WORKER_MEMORY_BROKER_TOOL_NAMES,
 	"get_goal",
 	"update_goal",

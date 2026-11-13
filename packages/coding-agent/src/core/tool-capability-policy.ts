@@ -15,7 +15,7 @@ import {
 } from "./memory/worker-memory-tools.ts";
 import type { CapabilityEnforcementKind, OrchestrationProfile } from "./orchestration/contracts.ts";
 import { PROACTIVITY_TOOL_NAME } from "./proactivity/proactivity-tool.ts";
-import { ROUTINE_TOOL_NAME } from "./routines/routine-tool-names.ts";
+import { ROUTINE_TOOL_NAME, TASK_WATCH_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { ASSIGN_TOOL_NAME } from "./tools/assign-tool-name.ts";
 import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
@@ -102,6 +102,8 @@ const TOOL_CAPABILITY_POLICIES = new Map<string, ToolCapabilityPolicy>([
 	["delegate", DELEGATE_POLICY],
 	// An admitted worker may inspect or narrow its own task's subscriptions; it gains no new authority.
 	[TASK_EVENTS_TOOL_NAME, policy([], "control-plane")],
+	// A worker's own wait: one-shot, bounded, on a condition its tools could check; it reads and changes no other routine.
+	[TASK_WATCH_TOOL_NAME, policy([["workflow.plan"]], "control-plane")],
 	["model_fitness", policy([["research.execute"]], "control-plane")],
 	["task_steps", policy([["workflow.plan", "memory.mutate"]], "control-plane")],
 	["task_directory", policy([["workflow.plan", "memory.mutate"]], "control-plane")],
@@ -232,6 +234,20 @@ export function toolUsesPathScope(toolName: string): boolean {
 	return getToolCapabilityPolicy(toolName)?.enforcements.includes("path-scope") ?? false;
 }
 
+/** Whether a routine tool call's schedule is a watch (an event routine on the watch source). */
+function argsSaveWatchSchedule(args: unknown): boolean {
+	const schedule =
+		args && typeof args === "object" && "schedule" in args ? (args as { schedule: unknown }).schedule : undefined;
+	return (
+		typeof schedule === "object" &&
+		schedule !== null &&
+		"kind" in schedule &&
+		schedule.kind === "event" &&
+		"source" in schedule &&
+		schedule.source === "watch"
+	);
+}
+
 export function toolCapabilityRequirementClauses(
 	toolName: string,
 	args?: unknown,
@@ -240,7 +256,9 @@ export function toolCapabilityRequirementClauses(
 	if (name === ROUTINE_TOOL_NAME && args !== undefined) {
 		const action =
 			args && typeof args === "object" && "action" in args ? (args as { action: unknown }).action : undefined;
-		return action === "list" || action === "get" || action === "pause" || action === "delete"
+		// A watch runs no worker: its firing wakes the agent that armed it, so saving one is planning, not delegation.
+		const savesWatch = (action === "create" || action === "update") && argsSaveWatchSchedule(args);
+		return action === "list" || action === "get" || action === "pause" || action === "delete" || savesWatch
 			? [["workflow.plan"]]
 			: [["workflow.plan"], ["workflow.delegate"]];
 	}
