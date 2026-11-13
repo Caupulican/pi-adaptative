@@ -5,6 +5,7 @@
  * goes to disk. The host that runs a bot answers for it from memory and never asks here.
  */
 import { statSync } from "node:fs";
+import { judgeOwner } from "../../kernel/reliability/owner-identity.ts";
 import { getSessionHeaderCwd, readSessionHeader } from "../../kernel/session/session-file-reading.ts";
 import { findMostRecentSessionInDirs } from "../../kernel/session/session-listing.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
@@ -17,8 +18,8 @@ import { botHomeOf } from "./bot-home.ts";
 import { watchBotHomes } from "./bot-home-watch.ts";
 import { type RemoteBotHost, readRemoteBotHost } from "./bot-host-state.ts";
 
-/** How long a remote bot's running or queued state stands before its host is judged again (a killed host publishes nothing). */
-const REMOTE_RECHECK_MS = 30 * 1000;
+/** How often the hosts a view holds are judged alive again: a host that was killed publishes nothing. */
+const REMOTE_LIVENESS_MS = 5 * 1000;
 
 /** The bot's own session as its home saved it: its id and the directory it worked in. */
 export type SavedBotSession = { readonly id: string; readonly cwd?: string };
@@ -32,6 +33,11 @@ export function botSessionOnDisk(agentDir: string, agentId: string): SavedBotSes
 	const file = findMostRecentSessionInDirs([botHomeOf(agentDir, agentId).sessionsDir]);
 	const header = file ? readSessionHeader(file) : null;
 	return header ? { id: header.id, cwd: getSessionHeaderCwd(header) } : undefined;
+}
+
+/** Whether the process of a host the view holds is gone. */
+function hostGone(host: RemoteBotHost | undefined): boolean {
+	return host !== undefined && judgeOwner(host.owner) === "dead";
 }
 
 /** Whether a remote host says the bot is working: running a turn or holding queued input. */
@@ -126,7 +132,9 @@ export class BotRemoteView {
 	hostOf(agentId: string): RemoteBotHost | undefined {
 		this.watch();
 		if (!this.homeWatch) return readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
-		if (this.remote.has(agentId)) return this.remote.get(agentId);
+		const cached = this.remote.get(agentId);
+		// A host held here stands while its process lives, whatever state it said last.
+		if (this.remote.has(agentId) && !hostGone(cached)) return cached;
 		const host = readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
 		this.remote.set(agentId, host);
 		this.armRecheck();
@@ -164,22 +172,24 @@ export class BotRemoteView {
 		return [...messages];
 	}
 
-	/** A host that is working but was killed publishes nothing: while one is cached as working, its lock is judged again. */
+	/**
+	 * A host that was killed publishes nothing, whatever it said last (running, queued or idle): while the view holds any
+	 * host, each is judged alive again, and one that is gone is read again from its home (another may hold the bot now).
+	 */
 	private armRecheck(): void {
 		if (this.recheck !== undefined || this.stopped) return;
-		if (![...this.remote.values()].some(remoteHostActive)) return;
+		if (![...this.remote.values()].some((host) => host !== undefined)) return;
 		this.recheck = this.ports.timers().setTimeout(() => {
 			this.recheck = undefined;
 			const changed: string[] = [];
 			for (const [agentId, host] of [...this.remote]) {
-				if (!remoteHostActive(host)) continue;
-				const now = readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
-				this.remote.set(agentId, now);
-				if (now?.state !== host?.state) changed.push(agentId);
+				if (!hostGone(host)) continue;
+				this.remote.set(agentId, readRemoteBotHost(this.ports.agentDir(), agentId, this.holder));
+				changed.push(agentId);
 			}
 			if (changed.length > 0) this.ports.changed(changed);
 			this.armRecheck();
-		}, REMOTE_RECHECK_MS);
+		}, REMOTE_LIVENESS_MS);
 	}
 
 	/** Ends the watch and the recheck, and drops what was read. After it the view watches nothing again. */

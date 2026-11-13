@@ -46,6 +46,8 @@ export interface BotHostState {
 /** The process hosting a bot, as another process sees it. */
 export interface RemoteBotHost {
 	readonly pid: number;
+	/** The process as its lock names it: judged again to tell a host that was killed, which publishes nothing. */
+	readonly owner: ProcessOwner;
 	readonly standing: OwnerStanding;
 	/** What the host says its session is doing; undefined while the host has not written it yet. */
 	readonly state: BotSessionState | undefined;
@@ -100,6 +102,7 @@ export function readRemoteBotHost(agentDir: string, agentId: string, ownHolder: 
 			: undefined;
 	return {
 		pid: holder.owner.pid,
+		owner: holder.owner,
 		standing: holder.standing,
 		state: own?.state,
 		hostKind: own?.hostKind,
