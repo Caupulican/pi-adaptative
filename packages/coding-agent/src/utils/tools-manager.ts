@@ -843,6 +843,12 @@ async function installTermuxManagedTool(tool: ManagedToolName, silent: boolean):
 	return getToolPath(tool) ?? undefined;
 }
 
+function reportManagedDownloadFailure(name: string, error: unknown, silent: boolean): string {
+	const message = `Failed to download ${name}: ${error instanceof Error ? error.message : String(error)}`;
+	if (!silent) console.log(chalk.yellow(message));
+	return message;
+}
+
 /** Ensure a tool is available while retaining the exact bounded provisioning outcome for callers. */
 export async function ensureToolWithDiagnostics(
 	tool: ManagedToolName,
@@ -911,10 +917,7 @@ export async function ensureToolWithDiagnostics(
 			}
 			return { status: "available", path: existingPath };
 		} catch (e) {
-			const message = `Failed to download ${config.name}: ${e instanceof Error ? e.message : String(e)}`;
-			if (!silent) {
-				console.log(chalk.yellow(message));
-			}
+			reportManagedDownloadFailure(config.name, e, silent);
 			return { status: "available", path: existingPath };
 		}
 	}
@@ -975,10 +978,7 @@ export async function ensureToolWithDiagnostics(
 					message: `${config.name} installation completed but the binary was not found.`,
 				};
 	} catch (e) {
-		const message = `Failed to download ${config.name}: ${e instanceof Error ? e.message : String(e)}`;
-		if (!silent) {
-			console.log(chalk.yellow(message));
-		}
+		const message = reportManagedDownloadFailure(config.name, e, silent);
 		return { status: "unavailable", failureCode: "installation_failed", message };
 	}
 }
