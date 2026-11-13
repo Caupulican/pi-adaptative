@@ -332,20 +332,23 @@ export class ParentInputDeliveryController {
 			});
 	}
 
+	/** Throws, naming which one ended, unless the wake still holds its delivery, its foreground turn, its session and its branch. */
 	private assertCurrent(manager: SessionManager, input: PersistedParentInput, lease: ForegroundSubmissionLease): void {
 		const origin = workerReceiptOriginFromValue(input.metadata.origin);
+		if (this.closed) throw new Error("Parent input wake was stopped: its delivery closed with the session.");
+		if (lease.signal.aborted || !this.foreground.ownsSubmission(lease))
+			throw new Error("Parent input wake lost its foreground turn: it was aborted or replaced.");
 		if (
-			this.closed ||
-			lease.signal.aborted ||
-			!this.foreground.ownsSubmission(lease) ||
 			this.deps.getSessionManager() !== manager ||
 			(manager.isPersisted()
 				? origin.sessionFile !== undefined && origin.sessionFile !== manager.getSessionFile()
-				: origin.sessionFile !== undefined) ||
-			!isSessionAppendAnchorCurrent(manager, origin) ||
-			!manager.isEntryDurableForSession(input.entryId)
+				: origin.sessionFile !== undefined)
 		)
+			throw new Error("Parent input wake lost its original session: the session or its file changed.");
+		if (!isSessionAppendAnchorCurrent(manager, origin))
 			throw new Error("Parent input wake lost its original session branch.");
+		if (!manager.isEntryDurableForSession(input.entryId))
+			throw new Error("Parent input wake's input is not durable in this session.");
 	}
 
 	private async drain(): Promise<void> {
