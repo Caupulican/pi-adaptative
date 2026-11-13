@@ -36,6 +36,7 @@ import {
 	routineStartWindow,
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
+import type { RoutineHolder, RoutineScope } from "./routine-holder.ts";
 import {
 	type RoutineOriginLoss,
 	routineUndeliverableMarker,
@@ -236,6 +237,8 @@ interface RoutineSchedulerDeps {
 	readonly worker: RoutineWorkerExecutor;
 	readonly timers: TimerPort;
 	readonly parentSessionId: string;
+	/** What this runtime holds of the saved routines (`routine-holder.ts`): a bot's own session, only its watches. */
+	readonly scope: RoutineScope;
 	readonly owner: string;
 	isDisposed(): boolean;
 	canDispatch(): boolean;
@@ -276,6 +279,8 @@ export interface RoutineTickResult {
 /** One scheduling owner. Alarms discover due time; execution completion arrives from the task ledger. */
 export class RoutineSchedulerController {
 	private readonly deps: RoutineSchedulerDeps;
+	/** The routines read from the store are only the ones this runtime holds. */
+	private readonly holder: RoutineHolder;
 	private readonly abort = new AbortController();
 	private readonly unsubscribe: readonly (() => void)[];
 	private unsubscribeCapacity: (() => void) | undefined;
@@ -312,6 +317,7 @@ export class RoutineSchedulerController {
 
 	constructor(deps: RoutineSchedulerDeps) {
 		this.deps = deps;
+		this.holder = { sessionId: deps.parentSessionId, scope: deps.scope };
 		this.unsubscribe = [
 			deps.store.subscribe(() => this.wake()),
 			deps.subscribeExecution(() => this.wake()),
@@ -474,7 +480,7 @@ export class RoutineSchedulerController {
 		this.attempt("delivery", () => this.deliverPending());
 		// A fault about an occurrence or routine that no longer exists is forgotten.
 		const present = new Set(this.occurrences().map((entry) => entry.occurrenceId));
-		const routines = new Set(this.deps.store.listRoutines().map((routine) => routine.routineId));
+		const routines = new Set(this.deps.store.listRoutines(this.holder).map((routine) => routine.routineId));
 		for (const unit of this.faults.keys()) {
 			const separator = unit.indexOf("|");
 			if (separator < 0) continue;
@@ -531,9 +537,8 @@ export class RoutineSchedulerController {
 	 */
 	private observeRoutineStates(parent: RoutineResultDelivery): void {
 		const promoted = new Set<string>();
-		for (const routine of this.deps.store.listRoutines()) {
-			if (routine.target.kind !== "session" || routine.target.parentSessionId !== this.deps.parentSessionId)
-				continue;
+		for (const routine of this.deps.store.listRoutines(this.holder)) {
+			if (routine.target.kind !== "session") continue;
 			const pause = routine.failurePause;
 			if (pause) {
 				const key = `${routine.routineId}:${pause.occurrenceId}`;
@@ -603,7 +608,7 @@ export class RoutineSchedulerController {
 	}
 
 	private eligibleRoutines(): RoutineDefinitionView[] {
-		return this.deps.store.listRoutines().filter((routine) => {
+		return this.deps.store.listRoutines(this.holder).filter((routine) => {
 			const origin = routineReceiptOrigin(routine);
 			return origin === undefined || this.deps.canUseOrigin(origin);
 		});
@@ -619,10 +624,7 @@ export class RoutineSchedulerController {
 		const nowMs = this.deps.timers.now();
 		const occurrences = this.occurrences();
 		const ended = this.eligibleRoutines().filter(
-			(routine) =>
-				(routine.target.kind !== "session" || routine.target.parentSessionId === this.deps.parentSessionId) &&
-				routineEnded(routine, nowMs) !== undefined &&
-				routineOccurrencesSettled(occurrences, routine),
+			(routine) => routineEnded(routine, nowMs) !== undefined && routineOccurrencesSettled(occurrences, routine),
 		);
 		if (ended.length === 0) return;
 		const retired = this.deps.store.retireEndedRoutines({
@@ -647,7 +649,7 @@ export class RoutineSchedulerController {
 	private dropWatchesOfEndedWorkers(): void {
 		const live = this.deps.workerRuntimeLive;
 		if (!live) return;
-		for (const routine of this.deps.store.listRoutines()) {
+		for (const routine of this.deps.store.listRoutines(this.holder)) {
 			const { wake } = routine;
 			if (wake?.kind !== "worker" || wake.parentSessionId !== this.deps.parentSessionId) continue;
 			if (live(wake.runtimeId)) continue;
@@ -662,7 +664,7 @@ export class RoutineSchedulerController {
 	private claim(): void {
 		const nowMs = this.deps.timers.now();
 		const away = this.deps.away;
-		const routines = this.deps.store.listRoutines();
+		const routines = this.deps.store.listRoutines(this.holder);
 		const eligibleRoutines = routines.filter((routine) => this.schedulable(routine));
 		const eligibleRoutineIds = eligibleRoutines.map((routine) => routine.routineId);
 		if (away) {
@@ -685,11 +687,7 @@ export class RoutineSchedulerController {
 		// A run that could not run while this session was closed is reported once, before its slot runs here.
 		else
 			for (const routine of routines)
-				if (
-					routine.awayRefusal &&
-					routine.target.kind === "session" &&
-					routine.target.parentSessionId === this.deps.parentSessionId
-				)
+				if (routine.awayRefusal && routine.target.kind === "session")
 					this.report(
 						`away|${routine.routineId}`,
 						`Routine ${routine.routineId} did not run while this session was closed: ${routine.awayRefusal.reason}`,
@@ -700,8 +698,7 @@ export class RoutineSchedulerController {
 				routineEnded(routine, nowMs) === undefined &&
 				routine.schedule.kind === "event" &&
 				routine.schedule.source !== "watch" &&
-				routine.target.kind === "session" &&
-				routine.target.parentSessionId === this.deps.parentSessionId,
+				routine.target.kind === "session",
 		);
 		// Host events are read only while an event routine can be decided; other sessions never load the ledger here.
 		const hostEvents = eventRoutines.length > 0 ? this.deps.hostEvents.feed() : undefined;
@@ -1220,7 +1217,7 @@ export class RoutineSchedulerController {
 		let next = Number.POSITIVE_INFINITY;
 		const previousSlots = new Map<string, number | undefined>();
 		const unfinished = this.unfinishedOccurrences();
-		for (const routine of this.deps.store.listRoutines()) {
+		for (const routine of this.deps.store.listRoutines(this.holder)) {
 			if (!this.schedulable(routine)) {
 				// Away, a routine this host cannot run still wakes it once when due, so its refusal is recorded.
 				const reason = this.awayUnrunnable(routine);
@@ -1228,8 +1225,6 @@ export class RoutineSchedulerController {
 					next = Math.min(next, routineOpensAt(routine, unfinished));
 				continue;
 			}
-			if (routine.target.kind === "session" && routine.target.parentSessionId !== this.deps.parentSessionId)
-				continue;
 			// A routine's end wakes the retire step, paused or not. Once ended it has no alarm: the settlement of its last
 			// run or delivery wakes the pass that removes it.
 			const end = this.deps.away || routine.schedule.kind === "once" ? undefined : routine.schedule.expiresAt;

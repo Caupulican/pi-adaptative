@@ -14,10 +14,9 @@ import { isModelFacingText } from "../../presentation/plain-text.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BotSessionHost } from "../bots/bot-session-host.ts";
 import type { RemoteHubController } from "../remote/hub-controller.ts";
+import { botChatOperatorText, botReplyText } from "./bot-chat-text.ts";
 import type { BotRuntimeBindings } from "./bot-runtime-bindings.ts";
 import {
-	botChatOperatorText,
-	botReplyText,
 	normalizeBotOrTeamId,
 	type PersistentBotRecord,
 	type PersistentBotTeamStore,

@@ -4507,7 +4507,7 @@ export class AgentSession {
 	}
 
 	startBackgroundInputs(): void {
-		if (this._isChildSession) return;
+		if (this._isChildSession && this._backgroundLanes.routineScope() === undefined) return;
 		this._durableCustomMessageTurns.startParentInputs();
 		this._backgroundLanes.startSessionInputs();
 	}

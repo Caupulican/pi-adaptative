@@ -10,6 +10,7 @@ import type { BotSessionHost } from "../bots/bot-session-host.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-guard.ts";
 import { botStartModelStance } from "../orchestration/worker-model-pins.ts";
+import { BOT_MEMORY_BLOCK_SEPARATOR } from "./bot-chat-text.ts";
 import {
 	type BotCreationRequest,
 	type CreatedBotView,
@@ -24,7 +25,6 @@ import { leaderOwnedBotRuntimeId } from "./bot-runtime-id.ts";
 import type { LeaderController } from "./leader-controller.ts";
 import type { DelegationRecord } from "./leader-delegation-ledger.ts";
 import {
-	BOT_MEMORY_BLOCK_SEPARATOR,
 	normalizeBotOrTeamId,
 	normalizeBotSoul,
 	type PersistentBotRecord,

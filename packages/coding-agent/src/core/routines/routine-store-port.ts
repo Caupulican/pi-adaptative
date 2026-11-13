@@ -14,6 +14,7 @@ import type {
 	RoutineTerminalOutcome,
 	UpsertPersistentRoutineInput,
 } from "./routine-contract.ts";
+import type { RoutineHolder } from "./routine-holder.ts";
 import type { RoutineRunFacts } from "./routine-progress.ts";
 import type { RetiredRoutineRecord } from "./routine-retired.ts";
 import type { RoutineWatchObservationInput, RoutineWatchOutcome } from "./routine-watch-edge.ts";
@@ -22,7 +23,8 @@ import type { RoutineWatchObservationInput, RoutineWatchOutcome } from "./routin
 export interface RoutineStorePort {
 	reload(): void;
 	subscribe(listener: () => void): () => void;
-	listRoutines(): readonly RoutineDefinitionView[];
+	/** Every saved routine, or with `holder` only those its runtime holds (`routine-holder.ts`). */
+	listRoutines(holder?: RoutineHolder): readonly RoutineDefinitionView[];
 	getRoutine(routineId: string): RoutineDefinitionView | undefined;
 	upsertRoutine(input: UpsertPersistentRoutineInput): RoutineDefinitionView;
 	deleteRoutine(routineId: string, expectedRevision?: number, nowMs?: number): boolean;

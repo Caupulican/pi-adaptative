@@ -197,10 +197,12 @@ import type { ModelFitnessReport } from "./research/model-fitness.ts";
 import { ModelFitnessController } from "./research/model-fitness-controller.ts";
 import { ResearchLaneController } from "./research/research-lane-controller.ts";
 import { AwayService } from "./routines/away-service.ts";
+import type { RoutineScope } from "./routines/routine-holder.ts";
 import type { RoutineIntakeStatus } from "./routines/routine-intake.ts";
-import { type RoutineRuntime, RoutineRuntimeAssembly } from "./routines/routine-runtime-assembly.ts";
+import { RoutineRuntimeAssembly } from "./routines/routine-runtime-assembly.ts";
 import { routineGithubInterests, routineHostEventFeed } from "./routines/routine-scheduler-controller.ts";
-import { parseRoutineToolInput, type RoutineToolFields, type RoutineToolView } from "./routines/routine-tool.ts";
+import type { RoutineToolFields, RoutineToolView } from "./routines/routine-tool.ts";
+import { SessionRoutines } from "./routines/session-routines.ts";
 import { getSessionRole } from "./session-role.ts";
 import { joinShutdownOperations } from "./session-shutdown.ts";
 import { getActiveSessionBranchEntries } from "./session-snapshot.ts";
@@ -256,8 +258,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** Leaf already scanned with no persisted active managed lane. A new leaf rescans. */
 	private _managedLaneAbsenceLeafId: string | null | undefined;
 	private _botTeamStore: PersistentBotTeamStore | undefined;
-	private _routines: RoutineRuntime | undefined;
-	private routinesStarted = false;
+	private readonly _routines: SessionRoutines;
 	private _channelsHostedByDaemon = false;
 	/** The routine revision the daemon was last ensured for: a save moves it, the store's other writes do not. */
 	private _daemonRevision: number | undefined;
@@ -412,6 +413,12 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			resolveLaneModel: (configuredPattern) => this.resolveLaneModel(configuredPattern),
 			warn: (message) => this._safeWarn(message),
 		});
+		this._routines = new SessionRoutines({
+			isRoot: () => deps.canRunRoutines?.() !== false,
+			isDisposed: () => deps.isDisposed(),
+			store: () => this.getBotTeamStore(),
+			assemble: (store, scope) => this._routineAssembly.assemble(store, scope),
+		});
 		this._terminalReports = new WorkerTerminalReport(deps, this.botBindings, {
 			getBotTeamStore: () => this.getBotTeamStore(),
 			workerTranscriptReference: (record) => this.workerTranscriptReference(record),
@@ -551,7 +558,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				createBotMessageDirectory: (sender, attempt) => this.createBotMessageDirectory(sender, attempt),
 				// The worker's model decides the account the fleet's allowance term reads, not the foreground's.
 				fleetAllowance: subscriptionAllowancePort(() => this._getAllowance()),
-				taskWatches: this._routineAssembly.taskWatches(() => this._routines),
+				taskWatches: this._routineAssembly.taskWatches(() => this._routines.current),
 			},
 			this._getWorkerNotificationCoordinator(),
 			this._getWorkerLifecycle(),
@@ -689,10 +696,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					this._getActAhead().ownsNotification(record, this._getWorkerLifecycle().getTaskRuntimeSnapshot())
 				)
 					return "separate";
-				if (this.deps.canRunRoutines?.() === false) return "coordinator";
-				this.getBotTeamStore();
-				if (!this._routines) throw new Error("Routine notification owner is unavailable.");
-				return this._routines.scheduler.ownsNotification(record) ? "separate" : "coordinator";
+				return this._routines.notificationOwner(record);
 			},
 			notify: (records) => this.deps.notifyWorkerTerminalHandoff(records),
 			warn: (message) => this._safeWarn(message),
@@ -1052,7 +1056,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		});
 		let routineShutdown = Promise.resolve();
 		this._runTeardownStep("stop routine runtime", () => {
-			routineShutdown = this._routines?.stop() ?? Promise.resolve();
+			routineShutdown = this._routines.stop();
 		});
 		let actAheadShutdown = Promise.resolve();
 		this._runTeardownStep("stop acting ahead", () => {
@@ -1477,7 +1481,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				// A leader's row names it by its display name: a rename or a retirement changes the rows, not the delegation.
 				this._leaderRows = undefined;
 				// A routine saved by this session or any other process brings the daemon up if nothing runs it.
-				if (this.routinesStarted && this._botTeamStore?.getRoutineRevision() !== this._daemonRevision)
+				if (this._routines.isStarted && this._botTeamStore?.getRoutineRevision() !== this._daemonRevision)
 					this._ensureBotDaemon();
 				// A routine run away commits its occurrence after recording its parent writes; this store's change is the
 				// cross-process signal, so an open parent lands those writes now, before its scheduler (subscribed after
@@ -1492,21 +1496,19 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 					);
 				}
 			});
-			this._ensureRoutineScheduler();
+			this._routines.ensure(this._botTeamStore);
 		}
 		return this._botTeamStore;
 	}
 
-	private _ensureRoutineScheduler(): void {
-		if (this._routines || !this._botTeamStore || this.deps.isDisposed() || this.deps.canRunRoutines?.() === false)
-			return;
-		const routines = this._routineAssembly.assemble(this._botTeamStore);
-		this._routines = routines;
-		if (this.routinesStarted) {
-			routines.scheduler.start();
-			routines.intake.start();
-			routines.watches.start();
-		}
+	/** The session is a bot's own: its routines are the watches it arms. Its host marks it before the inputs start. */
+	hostOwnWatches(): void {
+		this._routines.hostOwnWatches();
+	}
+
+	/** What the session's routine runtime holds (`routines/routine-holder.ts`); undefined where it holds none. */
+	routineScope(): RoutineScope | undefined {
+		return this._routines.scope();
 	}
 
 	/**
@@ -1523,15 +1525,16 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	startSessionInputs(): void {
 		this.startPersistentRoutines();
-		if (!this.deps.isChildSession())
-			void this.getRemoteHub()
-				.start()
-				.then((problem) => {
-					if (problem) this._safeWarn(problem);
-				});
+		// A child session starts only its routines (a bot's own session, its watches); the rest is the root session's.
+		if (this.deps.isChildSession()) return;
+		void this.getRemoteHub()
+			.start()
+			.then((problem) => {
+				if (problem) this._safeWarn(problem);
+			});
 		if (!this._channelsHostedByDaemon) this.channels.start();
-		if (!this.deps.isDisposed() && !this.deps.isChildSession()) this._getActAhead().start();
-		if (!this.deps.isChildSession() && this._hasWorkerState()) this._getRetention().scheduleFromIdle();
+		if (!this.deps.isDisposed()) this._getActAhead().start();
+		if (this._hasWorkerState()) this._getRetention().scheduleFromIdle();
 	}
 
 	/** The host's CI source offers its failure evidence while it runs; the returned function withdraws it. */
@@ -1604,12 +1607,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	startPersistentRoutines(): void {
-		if (this.deps.isDisposed() || this.deps.canRunRoutines?.() === false) return;
-		this.routinesStarted = true;
-		this.getBotTeamStore();
-		this._routines?.scheduler.start();
-		this._routines?.intake.start();
-		this._routines?.watches.start();
+		// The daemon and the channels served away are the root session's; a bot's own session runs its watches only.
+		if (this._routines.start() !== "session") return;
 		this._ensureBotDaemon();
 		this._unsubscribeAwayChannelSettings ??= this.deps.getSettingsManager().subscribeChanges(() => {
 			if (awayChannelsKey(this.deps.getSettingsManager()) !== this._awayChannelsKey) this._ensureBotDaemon();
@@ -1631,6 +1630,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _ensureBotDaemon(fromAlarm = false): void {
 		const store = this._botTeamStore;
 		if (!store || this.deps.isDisposed() || getSessionRole() === "worker" || this._channelsHostedByDaemon) return;
+		if (this._routines.scope() !== "session") return;
 		this._daemonRevision = store.getRoutineRevision();
 		const clock = this.deps.getTimers().port("routines");
 		let failure: string | undefined;
@@ -1725,42 +1725,37 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._awayService;
 	}
 
-	/** Automatic routine intake of this session; undefined where routines do not run (a child session). */
+	/** Automatic routine intake of this session; undefined where it has none (a child session, a bot's own session). */
 	getRoutineIntakeStatus(): RoutineIntakeStatus | undefined {
-		this.getBotTeamStore();
-		return this._routines?.intake.status();
+		return this._routines.intakeStatus();
 	}
 
 	/** Joins routine intake's pass in flight without stopping it again: dispose stopped it, and a paid row lands before usage closes. */
 	settleRoutineIntake(): Promise<void> {
-		return this._routines?.intake.settled() ?? Promise.resolve();
+		return this._routines.intakeSettled();
 	}
 
 	private createRoutineToolDefinition(): ToolDefinition | undefined {
-		this.getBotTeamStore();
-		return this._routines?.session.tool;
+		return this._routines.tool();
 	}
 
 	/** What a root-only lane tool's owner reads about a call's target before the gate (`ToolCallFacts`), by tool name. */
 	readonly toolCallFacts = (toolName: string, args: unknown) =>
-		this._routines?.session.tool.name === toolName ? this._routines.session.callFacts(args) : undefined;
+		this._routines.current?.session.tool.name === toolName
+			? this._routines.current.session.callFacts(args)
+			: undefined;
 
 	/**
 	 * Saves a routine for this session without the model tool: the tool's validation, saved worker authority capture
 	 * and event anchor, owned by the same session controller. The embedding host calls it on its own authority, so it
 	 * needs no owner-opened turn and marks no owner words as answered.
 	 */
-	async createRoutine(spec: RoutineToolFields, signal?: AbortSignal): Promise<RoutineToolView> {
-		this.getBotTeamStore();
-		if (!this._routines) throw new Error("Routines are unavailable in this session.");
-		return this._routines.session.createForHost(parseRoutineToolInput(spec), signal);
+	createRoutine(spec: RoutineToolFields, signal?: AbortSignal): Promise<RoutineToolView> {
+		return this._routines.createForHost(spec, signal);
 	}
 
-	async tickPersistentRoutines(routineIdFilter?: string): Promise<{ dispatched: string[]; failed: string[] }> {
-		this.getBotTeamStore();
-		if (!this._routines) return { dispatched: [], failed: [] };
-		if (routineIdFilter) this._routines.scheduler.run(routineIdFilter, undefined, randomUUID());
-		return this._routines.scheduler.tick();
+	tickPersistentRoutines(routineIdFilter?: string): Promise<{ dispatched: string[]; failed: string[] }> {
+		return this._routines.tick(routineIdFilter, randomUUID());
 	}
 
 	getPersistentBotDaemonStatus(): PersistentBotDaemonStatus {
@@ -1789,7 +1784,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			usageWindow: () =>
 				this.deps.aggregateUsageWindow(rollingDayWindow(this.deps.getTimers().port("proactivity").now())),
 			routineStore: this._botTeamStore,
-			routineIntake: this._routines?.intake.status(),
+			routineIntake: this._routines.current?.intake?.status(),
 			hostEventLedger: this.getTaskRuntimeSnapshot(),
 			hostEventConnections: () => this.readHostEventConnections(),
 			goalContinuation: () =>

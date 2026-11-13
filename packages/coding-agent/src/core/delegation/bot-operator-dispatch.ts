@@ -11,11 +11,11 @@ import type { OrchestrationDelegationLimits, WorkerResultContract } from "../orc
 import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-guard.ts";
 import { botStartModelStance } from "../orchestration/worker-model-pins.ts";
 import type { RemoteHubController } from "../remote/hub-controller.ts";
+import { BOT_MEMORY_BLOCK_SEPARATOR } from "./bot-chat-text.ts";
 import type { BotOperatorMessageOptions } from "./bot-operator-message-options.ts";
 import { assertBotId, type BotRuntimeBindings, type BotRuntimeContext } from "./bot-runtime-bindings.ts";
 import { freshBotRuntimeId, keyedBotRuntimeId } from "./bot-runtime-id.ts";
 import {
-	BOT_MEMORY_BLOCK_SEPARATOR,
 	type BotOperatorMessageDispatchResult,
 	normalizeBotOrTeamId,
 	type PersistentBotTeamStore,

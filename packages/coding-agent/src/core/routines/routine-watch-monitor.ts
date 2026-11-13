@@ -17,6 +17,7 @@ import { processMatrixDir } from "../process-matrix/store.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import { type RoutineDefinitionView, type RoutineWatchSchedule, routineEnded } from "./routine-contract.ts";
+import type { RoutineHolder } from "./routine-holder.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import { isWatchGlob, splitWatchPattern, type WatchCondition, watchCadenceMs } from "./watch-contract.ts";
 import type { WatchSample, WatchSampler } from "./watch-evaluators.ts";
@@ -28,7 +29,8 @@ const WATCH_DEBOUNCE_MS = 300;
 export interface RoutineWatchMonitorDeps {
 	readonly store: Pick<RoutineStorePort, "reload" | "subscribe" | "listRoutines" | "observeWatch">;
 	readonly sampler: Pick<WatchSampler, "sample">;
-	readonly parentSessionId: string;
+	/** Whose watches this monitor samples: only the ones its session's runtime holds (`routine-holder.ts`). */
+	readonly holder: RoutineHolder;
 	/** Tells whoever armed a watch that its checks keep failing; absent where nobody can be told. Called once per failing streak. */
 	onFailing?(failing: WatchFailing): void;
 	readonly timers: TimerPort;
@@ -199,15 +201,10 @@ export class RoutineWatchMonitor {
 	private sync(): void {
 		const nowMs = this.deps.timers.now();
 		const wanted = new Map<string, RoutineDefinitionView & { schedule: RoutineWatchSchedule }>();
-		for (const routine of this.deps.store.listRoutines()) {
-			if (
-				!watchesOf(routine) ||
-				!routine.enabled ||
-				routine.target.kind !== "session" ||
-				routine.target.parentSessionId !== this.deps.parentSessionId ||
-				routineEnded(routine, nowMs) !== undefined
-			)
-				continue;
+		for (const routine of this.deps.store.listRoutines(this.deps.holder)) {
+			// A watch samples for the session it wakes; a bot or team routine is never sampled here.
+			if (!watchesOf(routine) || routine.target.kind !== "session" || !routine.enabled) continue;
+			if (routineEnded(routine, nowMs) !== undefined) continue;
 			wanted.set(routine.routineId, routine);
 		}
 		for (const watch of [...this.armed.values()]) {
@@ -436,7 +433,7 @@ export class RoutineWatchMonitor {
 			const outcome = this.deps.store.observeWatch({
 				routineId: watch.routineId,
 				incarnationId: watch.incarnationId,
-				parentSessionId: this.deps.parentSessionId,
+				parentSessionId: this.deps.holder.sessionId,
 				nowMs: this.deps.timers.now(),
 				observation: sample.observation,
 				event: sample.event,

@@ -25,6 +25,7 @@ import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { findSteeredDelivery } from "../parent-input-steer.ts";
 import { rollingDayWindow } from "../proactivity/proactivity-controller.ts";
 import type { RoutineDelivery } from "./routine-contract.ts";
+import type { RoutineScope } from "./routine-holder.ts";
 import { RoutineIntake } from "./routine-intake.ts";
 import { routineOriginReach } from "./routine-origin-reach.ts";
 import {
@@ -62,7 +63,8 @@ import { workerRuntimeCarriesThirdPartyWords, workerRuntimeLive } from "./worker
 export interface RoutineRuntime {
 	readonly scheduler: RoutineSchedulerController;
 	readonly session: RoutineSessionController;
-	readonly intake: RoutineIntake;
+	/** Absent in a bot's own session: it holds only the watches it arms, so no owner words become routines there. */
+	readonly intake?: RoutineIntake;
 	readonly watches: RoutineWatchMonitor;
 	stop(): Promise<void>;
 }
@@ -223,8 +225,12 @@ export class RoutineRuntimeAssembly {
 			);
 	}
 
-	/** Builds the routine runtime of this session's store: the scheduler, the routine tool's session, intake and the watch monitor. */
-	assemble(store: PersistentBotTeamStore): RoutineRuntime {
+	/**
+	 * Builds the routine runtime of this session's store: the scheduler, the routine tool's session, intake and the watch
+	 * monitor, over the routines `scope` holds (`routine-holder.ts`). A bot's own session ("own-watches") dispatches no run
+	 * and has no intake: its scheduler only delivers the firings of its watches and retires the ended ones.
+	 */
+	assemble(store: PersistentBotTeamStore, scope: RoutineScope): RoutineRuntime {
 		const parentSessionId = this.deps.getSessionId();
 		const canUseOrigin = (origin: WorkerReceiptOrigin): boolean =>
 			routineOriginReach(this.deps.getSessionManager(), origin) === "usable";
@@ -239,10 +245,11 @@ export class RoutineRuntimeAssembly {
 			store,
 			worker,
 			parentSessionId,
+			scope,
 			owner: randomUUID(),
 			timers: this.deps.getTimers().port("routines"),
 			isDisposed: () => this.deps.isDisposed(),
-			canDispatch: () => this.deps.isDelegateToolActive(),
+			canDispatch: () => scope === "session" && this.deps.isDelegateToolActive(),
 			getReceiptOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
 			canUseOrigin,
 			captureOriginGuard: (origin) =>
@@ -366,7 +373,7 @@ export class RoutineRuntimeAssembly {
 				agentDir: () => this.deps.getAgentDir(),
 				now: () => routineTimers.now(),
 			}),
-			parentSessionId,
+			holder: { sessionId: parentSessionId, scope },
 			onFailing: (failing) => this.reportWatchFailing(store, failing),
 			timers: routineTimers,
 			agentDir: () => this.deps.getAgentDir(),
@@ -390,39 +397,44 @@ export class RoutineRuntimeAssembly {
 			now: () => this.deps.getTimers().port("routines").now(),
 			isDisposed: () => this.deps.isDisposed(),
 		});
-		const intake = new RoutineIntake({
-			parentSessionId,
-			store,
-			routines: session,
-			evidence: this.deps.getOwnerEvidence(),
-			time: this.deps.getTimers().port("routine-intake"),
-			hostInactiveReason: () => {
-				const manager = this.deps.getSessionManager();
-				if (!manager.isPersisted() || !manager.getSessionFile()) return "ephemeral_session";
-				return this.deps.getSettingsManager().getRoutinesSettings().automaticIntake ? undefined : "disabled";
-			},
-			model: () => this.host.resolveLaneModel(undefined),
-			systemOne: () => this.deps.systemOne.recordingSemanticEngine(),
-			usageOwner: () => sessionSemanticUsageOf(this.deps.getSessionManager()),
-			maxEstimatedUsd: () => this.deps.getCapabilityEnvelope()?.maxEstimatedUsd,
-			isForegroundBusy: () => this.deps.isForegroundBusy(),
-			subscribeActivity: (listener) => this.deps.subscribeForegroundActivity(listener),
-			captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
-			captureBranchGuard: () =>
-				this.sessionBranchGuard("Routine intake session changed before its decision was saved."),
-			deliver: (notice, signal) => this.deps.deliverNotes(notice, { signal }),
-			isDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
-			observeHarnessNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read),
-			runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
-			ciWorkflowPaths: () => {
-				const lifecycle = this.host.workerLifecycle();
-				const events = lifecycle.ledger.runtime.hostEvents;
-				return routineCiWorkflowPaths(lifecycle.getTaskRuntimeSnapshot(), (sourceId) =>
-					events.isSourceReady(sourceId),
-				);
-			},
-			warn: (message) => this.host.warn(message),
-		});
+		const intake =
+			scope !== "session"
+				? undefined
+				: new RoutineIntake({
+						parentSessionId,
+						store,
+						routines: session,
+						evidence: this.deps.getOwnerEvidence(),
+						time: this.deps.getTimers().port("routine-intake"),
+						hostInactiveReason: () => {
+							const manager = this.deps.getSessionManager();
+							if (!manager.isPersisted() || !manager.getSessionFile()) return "ephemeral_session";
+							return this.deps.getSettingsManager().getRoutinesSettings().automaticIntake
+								? undefined
+								: "disabled";
+						},
+						model: () => this.host.resolveLaneModel(undefined),
+						systemOne: () => this.deps.systemOne.recordingSemanticEngine(),
+						usageOwner: () => sessionSemanticUsageOf(this.deps.getSessionManager()),
+						maxEstimatedUsd: () => this.deps.getCapabilityEnvelope()?.maxEstimatedUsd,
+						isForegroundBusy: () => this.deps.isForegroundBusy(),
+						subscribeActivity: (listener) => this.deps.subscribeForegroundActivity(listener),
+						captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
+						captureBranchGuard: () =>
+							this.sessionBranchGuard("Routine intake session changed before its decision was saved."),
+						deliver: (notice, signal) => this.deps.deliverNotes(notice, { signal }),
+						isDelivered: (deliveryId) => this.deps.getSessionManager().getParentInput(deliveryId) !== undefined,
+						observeHarnessNotice: (kind, read) => this.deps.observeHarnessNotice?.(kind, read),
+						runIsolatedCompletion: (options) => this.deps.runIsolatedCompletion(options),
+						ciWorkflowPaths: () => {
+							const lifecycle = this.host.workerLifecycle();
+							const events = lifecycle.ledger.runtime.hostEvents;
+							return routineCiWorkflowPaths(lifecycle.getTaskRuntimeSnapshot(), (sourceId) =>
+								events.isSourceReady(sourceId),
+							);
+						},
+						warn: (message) => this.host.warn(message),
+					});
 		let shutdown: Promise<void> | undefined;
 		const stop = (): Promise<void> => {
 			if (shutdown) return shutdown;
@@ -449,7 +461,7 @@ export class RoutineRuntimeAssembly {
 			const completions = [
 				start("stop routine watches", () => watches.dispose()),
 				start("stop routine scheduler", () => scheduler.close()),
-				start("stop routine intake", () => intake.stop()),
+				start("stop routine intake", () => intake?.stop()),
 			];
 			void Promise.allSettled(completions).then((settled) => {
 				const failures = settled.flatMap((entry) => (entry.status === "rejected" ? [entry.reason] : []));

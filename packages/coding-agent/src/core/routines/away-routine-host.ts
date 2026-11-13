@@ -185,6 +185,7 @@ async function openAwayRoutineHost(args: {
 			worker,
 			timers: deps.timers.port("routines"),
 			parentSessionId,
+			scope: "session",
 			owner: randomUUID(),
 			isDisposed: () => context.isClosed(),
 			canDispatch: () => !args.isParentOpen(),
