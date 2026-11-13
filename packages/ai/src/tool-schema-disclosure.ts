@@ -430,6 +430,10 @@ function sameTools(left: readonly Tool[], right: readonly Tool[]): boolean {
  * - each search result is answered with the full schemas of what it loaded, resolved against the plan's deferred set;
  * - a deferred tool a search loaded, the history already called, or `options.forcedToolName` names is appended after
  *   the resident tools in first-activation order, so activation extends the tool list and never reorders it;
+ * - the history activation reads is `options.activationHistory` when given (the conversation's whole transcript), then
+ *   the request's own messages: a bounded projection of the transcript (a folded or packed context view) no longer
+ *   carries the search or call that activated a tool, while the conversation still shows the model it used that tool,
+ *   so activation read from the projection alone would drop a tool the model goes on to call;
  * - with `options.appendActivated` false (a text tool protocol, whose primer sits in the system prompt) activated tools
  *   are not appended: the search result already carries their schemas, and the reply parser accepts every granted tool.
  * A list with nothing to defer is sent eager without the search tool; a native or already disclosed list is unchanged.
@@ -437,7 +441,7 @@ function sameTools(left: readonly Tool[], right: readonly Tool[]): boolean {
 export function discloseToolSchemas(
 	model: ToolSchemaDisclosureModel,
 	context: Context,
-	options: { forcedToolName?: string; appendActivated: boolean },
+	options: { forcedToolName?: string; appendActivated: boolean; activationHistory?: readonly Message[] },
 ): { context: Context; decision: ToolSchemaDisclosureDecision } {
 	const tools = context.tools ?? [];
 	const plan = planToolSchemaDisclosure(model, tools);
@@ -454,16 +458,22 @@ export function discloseToolSchemas(
 	const activate = (name: string): void => {
 		if (plan.deferredToolNames.has(name)) activated.add(name);
 	};
-	let messages: Message[] | undefined;
-	for (const [index, message] of context.messages.entries()) {
+	/** Activates what one message called or loaded; returns the tools a search result loaded, for its rewrite. */
+	const activateFrom = (message: Message): Tool[] | undefined => {
 		if (message.role === "assistant") {
 			for (const block of message.content) if (block.type === "toolCall") activate(block.name);
-			continue;
+			return undefined;
 		}
-		if (message.role !== "toolResult") continue;
+		if (message.role !== "toolResult") return undefined;
 		const matches = searchResultTools(plan, message);
-		if (matches === undefined) continue;
-		for (const tool of matches) activate(tool.name);
+		for (const tool of matches ?? []) activate(tool.name);
+		return matches;
+	};
+	for (const message of options.activationHistory ?? []) activateFrom(message);
+	let messages: Message[] | undefined;
+	for (const [index, message] of context.messages.entries()) {
+		const matches = activateFrom(message);
+		if (matches === undefined || message.role !== "toolResult") continue;
 		const cached = rewrittenSearchResults.get(message);
 		const rewritten: ToolResultMessage =
 			cached && sameTools(cached.matches, matches)

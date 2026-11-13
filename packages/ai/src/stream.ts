@@ -11,6 +11,7 @@ import type {
 	AssistantMessage,
 	AssistantMessageEvent,
 	Context,
+	Message,
 	Model,
 	ProviderStreamOptions,
 	SimpleStreamOptions,
@@ -110,18 +111,22 @@ export interface MaterializedProviderRequest {
  * Resolve provider-visible context once: the tool-schema disclosure for `model` (harness-served when the provider has no
  * native tool search), then the text-only tool primer and synthetic guard message over the tools that remain. Callers
  * may budget/admit `result.context`, then send that same object through {@link startMaterializedProviderStream} without
- * re-rendering it. Without a model every schema stays as given.
+ * re-rendering it. Without a model every schema stays as given. `toolActivationHistory` is the conversation's whole
+ * transcript when `context.messages` is a bounded projection of it: deferred tools the transcript activated stay
+ * declared after the projection folds the search or call that activated them.
  */
 export function materializeProviderRequest(
 	context: Context,
 	options: StreamOptions | undefined,
 	model?: Model<Api>,
+	toolActivationHistory?: readonly Message[],
 ): MaterializedProviderRequest {
 	const protocolOptions = normalizeTextToolProtocolOptions(options?.textToolCallProtocol);
 	const disclosed = model
 		? discloseToolSchemas(model, context, {
 				forcedToolName: forcedToolChoiceName((options as { toolChoice?: unknown } | undefined)?.toolChoice),
 				appendActivated: protocolOptions === undefined,
+				...(toolActivationHistory ? { activationHistory: toolActivationHistory } : {}),
 			})
 		: undefined;
 	const visible = disclosed?.context ?? context;

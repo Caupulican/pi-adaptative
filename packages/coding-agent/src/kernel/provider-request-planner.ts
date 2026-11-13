@@ -439,6 +439,11 @@ function adoptReplannedMessages(target: AgentContext, accepted: AgentContext): v
 	for (const message of messages) target.messages.push(message);
 }
 
+/** A transcript message that can activate a deferred tool: an assistant's tool call or a tool's result. */
+function isToolActivationMessage(message: AgentMessage): message is Message {
+	return message.role === "assistant" || message.role === "toolResult";
+}
+
 /** Materialize one candidate without admission, lifecycle callbacks or durable effects. */
 async function materializeContextPlan(
 	sourceContext: AgentContext,
@@ -544,7 +549,14 @@ async function materializeContextPlan(
 		messages: llmMessages,
 		tools: projectToolsForProvider(sourceContext.tools),
 	};
-	const protocolMaterialized = materializeProviderRequest(sourceProviderContext, config, config.model);
+	// Deferred-tool activation reads the whole transcript, not the planned view: a folded view drops the search or call
+	// that activated a tool while still showing the model it used that tool (see `discloseToolSchemas`).
+	const protocolMaterialized = materializeProviderRequest(
+		sourceProviderContext,
+		config,
+		config.model,
+		sourceContext.messages.filter(isToolActivationMessage),
+	);
 	const budgeted = applyProviderRequestImageBudget(protocolMaterialized.context, config.model);
 	const materialized =
 		budgeted.context === protocolMaterialized.context
