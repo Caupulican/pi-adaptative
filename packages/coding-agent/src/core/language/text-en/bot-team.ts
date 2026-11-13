@@ -78,6 +78,9 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: its turn was stopped at the spend bound ($${spentUsd} spent, workerDelegation.maxUsd is $${limitUsd}).`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session did not close cleanly (${reason}).`,
+	/** A bot's session holds live watches and could not be opened to keep them sampled. */
+	botWatchesNotResumed: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its session holds watches but could not be opened, so they are not checked until it is (${reason}).`,
 	/** A change of what defines a running bot's session. */
 	botChangeWhileRunning: (agentId: string) =>
 		`Bot ${agentId} is working: its model, permissions and soul apply to its session when it starts, so stop it first (/bot stop ${agentId}).`,

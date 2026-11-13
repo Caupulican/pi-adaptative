@@ -80,6 +80,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: o turno foi interrompido no limite de gasto ($${spentUsd} gastos, workerDelegation.maxUsd é $${limitUsd}).`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a sessão não fechou corretamente (${reason}).`,
+	botWatchesNotResumed: (agentId: string, reason: string) =>
+		`Bot ${agentId}: a sessão dele tem esperas ativas mas não pôde ser aberta, então elas não são verificadas até que seja (${reason}).`,
 	botChangeWhileRunning: (agentId: string) =>
 		`O bot ${agentId} está trabalhando: modelo, permissões e soul valem para a sessão no início dela, então pare antes (/bot stop ${agentId}).`,
 	botStopped: (agentId: string, bots: readonly string[], mode: string) =>

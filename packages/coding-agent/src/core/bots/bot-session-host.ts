@@ -28,6 +28,7 @@
 import { existsSync, statSync } from "node:fs";
 import { type Api, type Model, TOOL_SCHEMA_SEARCH_NAME, type Usage } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { readSessionHeader } from "../../kernel/session/session-file-reading.ts";
 import { findMostRecentSessionInDirs } from "../../kernel/session/session-listing.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
@@ -49,6 +50,7 @@ import type { ModelRegistry } from "../model-registry.ts";
 import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-guard.ts";
 import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
+import { liveOwnWatchCount } from "../routines/routine-holder.ts";
 import { createAgentSession } from "../sdk.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { deriveSpawnedUsageReportId, hasReportableUsage } from "../spawned-usage.ts";
@@ -131,6 +133,15 @@ export function botSessionToolNames(canWrite: boolean): string[] {
 	return canWrite
 		? [...reads, TOOL_SCHEMA_SEARCH_NAME, ...WRITE_TOOL_NAMES, "python", STABLE_SHELL_TOOL_NAME]
 		: [...[...reads, STABLE_SHELL_TOOL_NAME].filter(toolSurvivesReadOnly), TOOL_SCHEMA_SEARCH_NAME];
+}
+
+/**
+ * The id of the bot's own session as its home holds it: the newest session file, the one its next session continues;
+ * undefined while it has none. Another process reads the bot's watches by it, since they target this id.
+ */
+export function botSessionIdOnDisk(agentDir: string, agentId: string): string | undefined {
+	const file = findMostRecentSessionInDirs([botHomeOf(agentDir, agentId).sessionsDir]);
+	return (file && readSessionHeader(file)?.id) || undefined;
 }
 
 /** What defines a session: the fields a session is built from. A rename or a new description leaves it as it is. */
@@ -248,6 +259,8 @@ export class BotSessionHost {
 						// This process's own bot sessions announce themselves; a change it wrote is not news.
 						if (this.entries.has(agentId) && (hostFile || file.startsWith("sessions/"))) continue;
 						if (hostFile) this.remote.delete(agentId);
+						// A host that let a bot go leaves its watches unsampled until a process opens its session again.
+						if (hostFile) this.openIfWatching(agentId);
 						changed.add(agentId);
 					}
 					if (changed.size > 0) this.changedMany([...changed]);
@@ -522,6 +535,8 @@ export class BotSessionHost {
 				},
 			});
 			const unsubscribeEvents = session.subscribe((event) => {
+				// The session's own warnings (a turn a watch started that failed, say) reach the owner as the bot's.
+				if (event.type === "warning") this.ports.warn(`Bot ${agentId}: ${event.message}`);
 				if (event.type === "agent_start") entry.usageBefore ??= structuredClone(entry.session.getCumulativeUsage());
 				if (event.type === "agent_end" && !event.willRetry) {
 					this.reportTurnUsage(entry);
@@ -539,6 +554,9 @@ export class BotSessionHost {
 				unsubscribeSpend();
 				unsubscribeEvents();
 			};
+			// The session runs the watches it arms and takes their wakes as parent inputs (idle starts a turn, running steers).
+			session.backgroundLanes.hostOwnWatches();
+			session.startBackgroundInputs();
 			this.entries.set(agentId, entry);
 			this.publishState(entry);
 			this.armIdle(entry);
@@ -572,12 +590,38 @@ export class BotSessionHost {
 		if (this.stopped) return;
 		entry.idleTimer = this.idleTimers().setTimeout(() => {
 			entry.idleTimer = undefined;
-			if (this.entries.get(entry.agentId) !== entry) return;
-			if (this.isBusy(entry)) return;
+			if (this.entries.get(entry.agentId) !== entry || this.isBusy(entry)) return;
+			// Its watches are sampled only while it is loaded: it stays until they fire, end or are dropped.
+			if (this.holdsWatches(entry.session.sessionId)) return this.armIdle(entry);
 			void this.close(entry.agentId).catch((error: unknown) =>
 				this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(entry.agentId, errorText(error))),
 			);
 		}, BOT_SESSION_IDLE_BOUND_MS);
+	}
+
+	/** Whether the bot session `sessionId` holds a live watch, as the store says now. */
+	private holdsWatches(sessionId: string): boolean {
+		return liveOwnWatchCount(this.ports.store(), sessionId, this.idleTimers().now()) > 0;
+	}
+
+	/**
+	 * Opens the bot's session when its home's session holds live watches and no process hosts it: a watch is sampled only by
+	 * its own session, so a process that starts, or a session rebuilt on a changed record, takes the waits up again.
+	 */
+	private openIfWatching(agentId: string): void {
+		const agentDir = this.ports.agentDir();
+		if (this.stopped || this.entries.has(agentId) || readRemoteBotHost(agentDir, agentId)) return;
+		const sessionId = botSessionIdOnDisk(agentDir, agentId);
+		if (sessionId === undefined || !this.holdsWatches(sessionId)) return;
+		void this.open(agentId).catch((error: unknown) =>
+			this.ports.warn(interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error))),
+		);
+	}
+
+	/** Opens every bot whose own session holds live watches that no process samples (see {@link openIfWatching}). */
+	openWatching(): void {
+		this.ensureHomeWatch();
+		for (const bot of this.ports.store().listBots()) this.openIfWatching(bot.agentId);
 	}
 
 	/** A turn ended: what the session spent since it began goes to the main session's cost view, once. */
@@ -675,8 +719,10 @@ export class BotSessionHost {
 		if (!entry && !this.hasHome(record.agentId)) return;
 		ensureBotHome(this.ports.agentDir(), record);
 		if (entry && entry.profileKey !== profileKeyOf(record) && !this.isBusy(entry))
-			void this.close(record.agentId).catch((error: unknown) =>
-				this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(record.agentId, errorText(error))),
+			void this.close(record.agentId).then(
+				() => this.openIfWatching(record.agentId),
+				(error: unknown) =>
+					this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(record.agentId, errorText(error))),
 			);
 	}
 
@@ -684,11 +730,21 @@ export class BotSessionHost {
 		return existsSync(botHomeOf(this.ports.agentDir(), agentId).profileFile);
 	}
 
-	/** Closes the bot's idle session (the bot was retired). Refuses while it works. */
+	/**
+	 * Closes the bot's idle session (the bot was retired) and drops the watches its session armed: a retired bot is never
+	 * woken again, as a worker's watches go with the runtime that armed them. Refuses while it works.
+	 */
 	release(agentId: string): void {
 		const entry = this.entries.get(agentId);
+		if (entry && this.isBusy(entry)) throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
+		const sessionId = entry?.session.sessionId ?? botSessionIdOnDisk(this.ports.agentDir(), agentId);
+		if (sessionId !== undefined) {
+			const store = this.ports.store();
+			const nowMs = this.idleTimers().now();
+			for (const watch of store.listRoutines({ sessionId, scope: "own-watches" }))
+				store.deleteRoutine(watch.routineId, watch.revision, nowMs);
+		}
 		if (!entry) return;
-		if (this.isBusy(entry)) throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
 		void this.close(agentId).catch((error: unknown) =>
 			this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(agentId, errorText(error))),
 		);
