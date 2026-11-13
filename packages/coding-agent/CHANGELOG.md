@@ -3,6 +3,7 @@
 ### Added
 
 - The operator bar marks an unfinished goal as `◎ n/m` (requirements met over all of them), on the accent tone while it runs and the warning tone while it waits; the goal's saved state raises a session event, so the bar and the activity lane update the moment a goal is created, changed or finished. The activity lane names the goal and its stopped status in English and pt-BR.
+- The agent can arm a watch for its own wait in a turn the owner did not speak in (a goal continuation or a delivered result): one-shot, with an end time at most 24 hours ahead, up to eight at once, each stamped with what opened the turn. Recurring schedules and changes to existing routines still need the owner's words. The routine tool tells the agent to arm a watch instead of blocking a turn on `gh run watch` or sleep loops, and the operator bar shows the live watch count as `◌ n`.
 
 ### Fixed
 
