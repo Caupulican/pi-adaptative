@@ -26,8 +26,6 @@ export interface SettlementJudgesDeps {
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	warn(message: string): void;
 	lister?: FileLister;
-	/** Claims the root's own answer check left open, delivered to the owner; only a session with a root answer has them. */
-	deliverToOwner?(items: readonly string[]): void;
 }
 
 export class SettlementJudges {
@@ -42,13 +40,11 @@ export class SettlementJudges {
 			warn: (message) => this.deps.warn(message),
 			lister: this.deps.lister,
 		});
-		const deliverToOwner = deps.deliverToOwner;
 		this.answerClaims = new AnswerClaimChecker({
 			getController: () => this.deps.getSystemOneController(),
 			warn: (message) => this.deps.warn(message),
 			settle: (items, messages, interpretationContext) =>
 				this.settleInconclusive({ items, messages, interpretationContext }),
-			...(deliverToOwner ? { deliverToOwner: (items: readonly string[]) => deliverToOwner(items) } : {}),
 		});
 	}
 

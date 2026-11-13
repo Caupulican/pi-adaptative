@@ -5,8 +5,9 @@
  *
  * Receipts are mechanical facts read from the turn's tool calls and results — never model text.
  * System One answers one atomic question per claim kind ("does the answer state that X?"); code combines
- * each settled answer with the receipt for X. A claim the receipts contradict is corrected before
- * the turn ends; a claim no receipt backs stays visible as a doubt.
+ * each settled answer with the receipt for X. A claim the receipts contradict, and a claim no receipt
+ * backs that the unsettled-item ladder cannot settle, go back to the agent in the one correction turn: it
+ * states what happened, proves the claim with a tool run, or retracts it. Neither is an owner decision.
  */
 
 import { isDeepStrictEqual } from "node:util";
@@ -368,14 +369,29 @@ export function judgeClaims(answers: Record<string, unknown>, receipts: ClaimRec
 	return findings;
 }
 
-/** The one correction turn a contradicted claim buys. */
-export function claimCorrectionPrompt(findings: readonly ClaimFinding[]): string {
-	const lines = findings.filter((f) => f.verdict === "contradicted").map((f) => `- ${f.reason}`);
-	return [
-		"System One checked your last answer against this turn's tool results and found claims they contradict:",
-		...lines,
-		"Correct the answer for the user: state what actually happened, and finish the work if it is still needed.",
-	].join("\n");
+/** One finding the ladder could not settle: what the answer claimed and what evidence would settle it. */
+export interface UnverifiedClaim {
+	readonly reason: string;
+	readonly missing: string;
+}
+
+/** The one correction turn a contradicted or unverifiable claim buys. */
+export function claimCorrectionPrompt(
+	findings: readonly ClaimFinding[],
+	unverified: readonly UnverifiedClaim[] = [],
+): string {
+	const contradicted = findings.filter((f) => f.verdict === "contradicted");
+	const lines = ["System One checked your last answer against this work's tool results."];
+	if (contradicted.length > 0) lines.push("Claims they contradict:", ...contradicted.map((f) => `- ${f.reason}`));
+	if (unverified.length > 0)
+		lines.push(
+			"Claims no tool result confirms or refutes:",
+			...unverified.map((claim) => `- ${claim.reason} (missing: ${claim.missing})`),
+		);
+	lines.push(
+		"Correct the answer for the user: state what actually happened, prove each unconfirmed claim with a tool run, or retract it, and finish the work if it is still needed.",
+	);
+	return lines.join("\n");
 }
 
 /** What each claim kind asserts, as a statement System One can judge against the turn's own results. */
@@ -404,8 +420,6 @@ export interface AnswerClaimCheckerDeps {
 		messages: readonly AgentMessage[],
 		interpretationContext?: string,
 	): Promise<LadderOutcome>;
-	/** Claims nothing settled, delivered to the owner by the host. */
-	deliverToOwner?(items: readonly string[]): void;
 }
 
 /**
@@ -420,23 +434,17 @@ export class AnswerClaimChecker {
 		this.deps = deps;
 	}
 
-	/** Returns the correction prompt when a claim is contradicted; undefined otherwise. */
 	/**
-	 * Every claim finding for an answer against the messages its work produced, or undefined when
-	 * nothing was checked (no controller, no claim vocabulary, or System One unavailable, reported once).
+	 * System One's settled reading of which claims the answer states, or undefined when nothing was checked
+	 * (no controller, no claim vocabulary, or System One unavailable, reported once).
 	 */
-	async findings(
-		finalAnswer: string,
-		messages: readonly AgentMessage[],
-		events?: readonly ClaimReceiptEvent[],
-		verifiedChecks: readonly WorkerCommandReceipt[] = [],
-		scope?: AnswerClaimScope,
-	): Promise<ClaimFinding[] | undefined> {
+	async answers(finalAnswer: string, scope?: AnswerClaimScope): Promise<Record<string, unknown> | undefined> {
 		const controller = this.deps.getController();
 		if (!controller || !finalAnswer.trim() || !mayContainDeliveryClaims(finalAnswer)) return undefined;
-		let answers: Record<string, unknown>;
 		try {
-			answers = await controller.evaluateAnswerClaims(finalAnswer, scope);
+			const answers = await controller.evaluateAnswerClaims(finalAnswer, scope);
+			this.outageReported = false;
+			return answers;
 		} catch (error) {
 			if (!this.outageReported)
 				this.deps.warn(
@@ -445,7 +453,15 @@ export class AnswerClaimChecker {
 			this.outageReported = true;
 			return undefined;
 		}
-		this.outageReported = false;
+	}
+
+	/** The settled readings against the receipts of the work: code facts, no System One call. */
+	judge(
+		answers: Record<string, unknown>,
+		messages: readonly AgentMessage[],
+		events?: readonly ClaimReceiptEvent[],
+		verifiedChecks: readonly WorkerCommandReceipt[] = [],
+	): ClaimFinding[] {
 		return judgeClaims(
 			answers,
 			events ? collectClaimReceiptEvents(events, verifiedChecks) : collectClaimReceipts(messages, verifiedChecks),
@@ -453,25 +469,40 @@ export class AnswerClaimChecker {
 	}
 
 	/**
-	 * Returns the correction prompt when a claim is contradicted; undefined otherwise. A claim no
-	 * receipt backs climbs the ladder over the turn's results: confirmed, it stands; refuted, it is a
-	 * contradiction; still open, it goes to the owner.
+	 * Every claim finding for an answer against the messages its work produced, or undefined when
+	 * nothing was checked.
 	 */
-	async check(
+	async findings(
 		finalAnswer: string,
-		turnMessages: readonly AgentMessage[],
+		messages: readonly AgentMessage[],
 		events?: readonly ClaimReceiptEvent[],
+		verifiedChecks: readonly WorkerCommandReceipt[] = [],
+		scope?: AnswerClaimScope,
+	): Promise<ClaimFinding[] | undefined> {
+		const answers = await this.answers(finalAnswer, scope);
+		return answers ? this.judge(answers, messages, events, verifiedChecks) : undefined;
+	}
+
+	/**
+	 * Returns the correction prompt when a claim is contradicted or cannot be verified; undefined otherwise. A
+	 * claim no receipt backs climbs the ladder over the work's results: confirmed, it stands; refuted, it is a
+	 * contradiction; still open, the agent is asked to prove it or retract it. An open claim is the agent's to
+	 * settle, never an owner decision.
+	 */
+	async resolve(
+		findings: readonly ClaimFinding[],
+		finalAnswer: string,
+		messages: readonly AgentMessage[],
 		scope?: AnswerClaimScope,
 	): Promise<string | undefined> {
-		const findings = await this.findings(finalAnswer, turnMessages, events, [], scope);
-		if (!findings) return undefined;
 		const contradicted = findings.filter((finding) => finding.verdict === "contradicted");
 		const unsupported = findings.filter((finding) => finding.verdict === "unsupported");
+		const unverified: UnverifiedClaim[] = [];
 		if (unsupported.length > 0 && this.deps.settle) {
 			const byStatement = new Map(unsupported.map((finding) => [CLAIM_STATEMENTS[finding.kind], finding]));
 			const outcome = await this.deps.settle(
 				[...byStatement.keys()],
-				turnMessages,
+				messages,
 				JSON.stringify({
 					final_answer: finalAnswer,
 					...(scope ? { work_scope: projectAnswerClaimScope(scope, (text) => text) } : {}),
@@ -486,15 +517,17 @@ export class AnswerClaimChecker {
 						reason: `${finding.reason}, and System One found this turn's results show it did not happen`,
 					});
 			}
-			const open = outcome.unsettled.map(
-				(entry) => `${byStatement.get(entry.item)?.reason ?? entry.item} (missing: ${entry.missing})`,
-			);
-			for (const item of open) this.deps.warn(`Unverified claim: ${item}`);
-			if (open.length > 0) this.deps.deliverToOwner?.(open);
+			for (const entry of outcome.unsettled) {
+				const reason = byStatement.get(entry.item)?.reason ?? entry.item;
+				this.deps.warn(`Unverified claim: ${reason} (missing: ${entry.missing})`);
+				unverified.push({ reason, missing: entry.missing });
+			}
 		} else {
 			for (const finding of unsupported) this.deps.warn(`Unverified claim: ${finding.reason}`);
 		}
-		return contradicted.length > 0 ? claimCorrectionPrompt(contradicted) : undefined;
+		return contradicted.length > 0 || unverified.length > 0
+			? claimCorrectionPrompt(contradicted, unverified)
+			: undefined;
 	}
 
 	/**

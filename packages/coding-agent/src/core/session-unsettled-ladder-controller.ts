@@ -8,6 +8,7 @@ import type { AssistantMessage } from "@caupulican/pi-ai";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../kernel/types.ts";
 import type { IsolatedCompletionOptions, IsolatedCompletionResult } from "./agent-session-contracts.ts";
+import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import type { ArtifactStore } from "./context/context-artifacts.ts";
 import { isDecisivelyTrue } from "./decision/noul.ts";
 import type { ExtensionUIContext } from "./extensions/index.ts";
@@ -26,8 +27,16 @@ import {
 	type AnswerClaimChecker,
 	type AnswerClaimScope,
 	assistantAnswerText,
+	type ClaimFinding,
 	type ClaimReceiptEvent,
 } from "./system-one/claim-delivery.ts";
+import {
+	claimEventMessages,
+	delegatedLaneIds,
+	type HeldClaim,
+	HeldClaims,
+	lanesInFlight,
+} from "./system-one/claim-hold.ts";
 import type { CodeDuplicateReviewer, FileLister } from "./system-one/code-duplicates.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import {
@@ -44,7 +53,13 @@ import {
 import { SettlementJudges } from "./system-one/settlement-judges.ts";
 import { RESERVED_DECISION_KINDS } from "./system-one/unsettled-ladder.ts";
 import { resolveTurnMessages } from "./turn-window.ts";
-import { turnWorkWindow, WORKER_RECEIPTS_CUSTOM_TYPE, workUnitWindow } from "./work-units.ts";
+import {
+	turnWorkWindow,
+	WORKER_RECEIPTS_CUSTOM_TYPE,
+	type WorkWindowEntry,
+	workUnitWindow,
+	workWindowFrom,
+} from "./work-units.ts";
 
 export interface SessionUnsettledLadderControllerDeps {
 	getSessionManager(): SessionManager;
@@ -59,6 +74,8 @@ export interface SessionUnsettledLadderControllerDeps {
 	runIsolatedCompletion(opts: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 	settleLatestOwnerPolicy(signal?: AbortSignal): Promise<void>;
 	getGoalStateSnapshot(): GoalState | undefined;
+	/** The session's lane records; read only while a claim waits on delegated work. */
+	getLaneRecords(): readonly Pick<LaneRecord, "laneId" | "status">[];
 	getExtensionUIContext(): ExtensionUIContext | undefined;
 	getToolArtifactStore(): ArtifactStore;
 	getSessionImageStore(): SessionImageStore | undefined;
@@ -77,6 +94,7 @@ export class SessionUnsettledLadderController {
 	readonly judges: SettlementJudges;
 	readonly codeDuplicates: CodeDuplicateReviewer;
 	readonly answerClaims: AnswerClaimChecker;
+	private readonly heldClaims = new HeldClaims();
 	private pendingOwnerItems: string[] = [];
 	private pendingWorkerItems: { item: string; request: string; sessionId: string }[] = [];
 	private ownerItemsFlush = Promise.resolve();
@@ -93,9 +111,6 @@ export class SessionUnsettledLadderController {
 			runIsolatedCompletion: (opts) => this.deps.runIsolatedCompletion(opts),
 			warn: (message) => this.deps.emitWarning(message),
 			lister: this.deps.codeDuplicateFileLister,
-			deliverToOwner: (items) => {
-				this.deliverToOwner(items);
-			},
 		});
 		this.codeDuplicates = this.judges.codeDuplicates;
 		this.answerClaims = this.judges.answerClaims;
@@ -106,17 +121,101 @@ export class SessionUnsettledLadderController {
 	 * found from its opening message ({@link resolveTurnMessages}), so a compaction inside the turn neither hands the
 	 * check earlier conversation nor drops what survives of the turn. A turn whose opening never entered the
 	 * conversation (its run was closed before it started) has no answer of its own: nothing is checked.
+	 *
+	 * A claim no receipt backs while a worker this work started is still running is held, not judged: that worker's
+	 * receipts are pending evidence. Held claims are judged again here, at the end of the turn a worker's terminal
+	 * handoff opens, once none of their workers is in flight.
 	 */
 	async claimCorrection(turnOpening: AgentMessage): Promise<string | undefined> {
 		const turnMessages = resolveTurnMessages(this.deps.getSessionManager(), turnOpening, this.deps.getMessages());
 		if (turnMessages === undefined) return undefined;
 		const window = this.claimWindow(turnOpening, turnMessages);
-		return this.answerClaims.check(
+		const corrections = await this.rejudgeReleasedClaims();
+		const current = await this.checkAnswerClaims(
 			assistantAnswerText(this.deps.findLastAssistantMessage()),
-			window.messages,
-			window.events,
-			window.scope,
+			window,
+			corrections,
 		);
+		if (current) corrections.push(current);
+		return corrections.length > 0 ? corrections.join("\n\n") : undefined;
+	}
+
+	/** The current answer's claims: judged now, except the unbacked ones a running worker may still back. */
+	private async checkAnswerClaims(
+		finalAnswer: string,
+		window: { messages: readonly AgentMessage[]; events: readonly ClaimReceiptEvent[]; scope: AnswerClaimScope },
+		corrections: string[],
+	): Promise<string | undefined> {
+		const answers = await this.answerClaims.answers(finalAnswer, window.scope);
+		if (!answers) return undefined;
+		let findings = this.answerClaims.judge(answers, window.messages, window.events);
+		const unbacked = findings.filter((finding) => finding.verdict === "unsupported");
+		// A turn boundary with no persisted opening has no window a later check could rebuild.
+		const rebuildable = window.scope.boundary === "work_unit" || window.scope.openingEntryId !== null;
+		const lanes = unbacked.length > 0 && rebuildable ? this.pendingDelegatedLanes(window.events) : new Set<string>();
+		if (lanes.size > 0) {
+			const overflow = this.heldClaims.hold({
+				sessionId: this.deps.getSessionManager().getSessionId(),
+				request: this.deps.getLastUserRequest(),
+				finalAnswer,
+				answers,
+				scope: window.scope,
+				kinds: unbacked.map((finding) => finding.kind),
+				lanes,
+			});
+			for (const claim of overflow) {
+				const correction = await this.rejudgeHeldClaim(claim);
+				if (correction) corrections.push(correction);
+			}
+			findings = findings.filter((finding) => finding.verdict === "contradicted");
+		}
+		return this.answerClaims.resolve(findings, finalAnswer, window.messages, window.scope);
+	}
+
+	private inFlightLaneIds(): Set<string> {
+		return new Set(
+			this.deps
+				.getLaneRecords()
+				.filter((record) => record.status === "queued" || record.status === "running")
+				.map((record) => record.laneId),
+		);
+	}
+
+	/** The lanes this window's own calls started that can still report; the lane records are read only when it started any. */
+	private pendingDelegatedLanes(events: readonly ClaimReceiptEvent[]): Set<string> {
+		const started = delegatedLaneIds(events);
+		return started.size === 0 ? started : lanesInFlight(started, this.inFlightLaneIds());
+	}
+
+	/** Judges the held claims none of whose workers is in flight; the claims of an earlier session or request are dropped. */
+	private async rejudgeReleasedClaims(): Promise<string[]> {
+		if (this.heldClaims.size === 0) return [];
+		const sessionId = this.deps.getSessionManager().getSessionId();
+		const request = this.deps.getLastUserRequest();
+		const ready = this.heldClaims.release(
+			this.inFlightLaneIds(),
+			(claim) => claim.sessionId === sessionId && claim.request === request,
+		);
+		const corrections: string[] = [];
+		for (const claim of ready) {
+			const correction = await this.rejudgeHeldClaim(claim);
+			if (correction) corrections.push(correction);
+		}
+		return corrections;
+	}
+
+	/** A held claim against the receipts now: System One's reading is kept, only the code comparison runs again. */
+	private async rejudgeHeldClaim(claim: HeldClaim): Promise<string | undefined> {
+		const manager = this.deps.getSessionManager();
+		const boundary = claim.scope.openingEntryId;
+		// A boundary that left the active branch is another conversation's work: nothing to judge here.
+		if (boundary !== null && !manager.getBranch().some((entry) => entry.id === boundary)) return undefined;
+		const events = this.receiptEvents(workWindowFrom(manager, WORKER_RECEIPTS_CUSTOM_TYPE, boundary));
+		const messages = claimEventMessages(events);
+		const findings: ClaimFinding[] = this.answerClaims
+			.judge(claim.answers, messages, events)
+			.filter((finding) => claim.kinds.includes(finding.kind));
+		return this.answerClaims.resolve(findings, claim.finalAnswer, messages, claim.scope);
 	}
 
 	/**
@@ -150,6 +249,26 @@ export class SessionUnsettledLadderController {
 				};
 			window = turnWorkWindow(manager, WORKER_RECEIPTS_CUSTOM_TYPE, openingEntryId);
 		}
+		const events = this.receiptEvents(window);
+		const tail: AgentMessage[] = [];
+		let unpersistedToolEvidence = false;
+		for (const message of turnMessages) {
+			if (message.role === "compactionSummary") continue;
+			if (manager.getMessageEntryId(message) !== undefined) {
+				if (unpersistedToolEvidence)
+					throw new Error("Unpersisted claim evidence precedes persisted messages; its branch order is unknown.");
+			} else {
+				tail.push(message);
+				unpersistedToolEvidence ||= message.role === "assistant" || message.role === "toolResult";
+			}
+		}
+		for (const message of tail) events.push({ kind: "message", message });
+		return { messages: claimEventMessages(events), events, scope };
+	}
+
+	/** The window's messages and the receipts of the workers whose accepted reports it holds, in branch order. */
+	private receiptEvents(window: readonly WorkWindowEntry[]): ClaimReceiptEvent[] {
+		const manager = this.deps.getSessionManager();
 		const events: ClaimReceiptEvent[] = [];
 		let malformedPublication = false;
 		for (const entry of window) {
@@ -190,24 +309,7 @@ export class SessionUnsettledLadderController {
 			for (let index = events.length - 1; index >= 0; index--)
 				if (events[index]?.kind === "worker") events.splice(index, 1);
 		}
-		const tail: AgentMessage[] = [];
-		let unpersistedToolEvidence = false;
-		for (const message of turnMessages) {
-			if (message.role === "compactionSummary") continue;
-			if (manager.getMessageEntryId(message) !== undefined) {
-				if (unpersistedToolEvidence)
-					throw new Error("Unpersisted claim evidence precedes persisted messages; its branch order is unknown.");
-			} else {
-				tail.push(message);
-				unpersistedToolEvidence ||= message.role === "assistant" || message.role === "toolResult";
-			}
-		}
-		for (const message of tail) events.push({ kind: "message", message });
-		return {
-			messages: events.flatMap((event) => (event.kind === "message" ? [event.message] : [])),
-			events,
-			scope,
-		};
+		return events;
 	}
 
 	/**

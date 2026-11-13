@@ -824,6 +824,7 @@ export class AgentSession {
 			runIsolatedCompletion: (opts) => this.runIsolatedCompletion(opts),
 			settleLatestOwnerPolicy: (signal) => this._edgeIntent.ownerPolicy.settle("latest", signal),
 			getGoalStateSnapshot: () => this.getGoalStateSnapshot(),
+			getLaneRecords: () => this._backgroundLanes.getLaneRecords(),
 			getExtensionUIContext: () => this._extensionUIContext,
 			getToolArtifactStore: () => this._pipeline.getToolArtifactStore(),
 			codeDuplicateFileLister: config.codeDuplicateFileLister,
@@ -2106,7 +2107,7 @@ export class AgentSession {
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
 			getCompletionRuleRefusal: (toolCallId) => this._ruleHooks.refusalFor("noticed-items", toolCallId),
 			deliverToOwner: (items) => {
-				this._deliverToOwner(items);
+				this._unsettledLadder.deliverToOwner(items);
 			},
 			getSystemOneController: () => this._semanticPlane.controller,
 			getSemanticUncertainties: () => (this._isChildSession ? undefined : this.getSemanticUncertainties()),
@@ -5058,11 +5059,6 @@ export class AgentSession {
 	/** One owner-completion boundary shared by the goal tool and objective-primary loop. */
 	private _resolveGoalCompletionOwnerDecision(input: GoalCompletionOwnerDecisionInput, signal?: AbortSignal) {
 		return this._unsettledLadder.resolveGoalCompletionOwnerDecision(input, signal);
-	}
-
-	/** Items nothing could settle go to the owner by the host. */
-	private _deliverToOwner(items: readonly string[]): string | undefined {
-		return this._unsettledLadder.deliverToOwner(items);
 	}
 
 	/** Post this turn's unsettled items to the owner as one displayed message, then clear them. */

@@ -796,9 +796,22 @@ with `INCONCLUSIVE:` lines in their report; those enter the same parent-review a
 routing in step 3 without the host claiming to have inspected the worker's evidence.
 
 The root agent's own answer climbs the same ladder: a claim no receipt backs (the harness reads
-receipts only from the tools it knows) is judged against the turn's tool results. Confirmed, it
-stands; refuted, it is a contradiction and buys the one correction turn; still open, it goes to the
-owner. What goes to the owner is delivered by the host, never relayed by a model. With the owner
+receipts only from the tools it knows) is judged against the work's tool results. Confirmed, it
+stands; refuted, it is a contradiction and buys the one correction turn; still open, it goes back
+to the agent in that same correction turn, which names what evidence is missing and asks the agent
+to prove the claim with a tool run or retract it. An unverified claim is not an owner decision and
+never reaches the `owner_items` message.
+
+A claim that no receipt backs while a worker the same work started (`assign` or `delegate`) is
+still running is held, not judged: that worker's receipts are pending evidence. The held claim
+keeps System One's reading of the answer, so the question is not asked again. When the worker's
+terminal handoff has been delivered and none of the claim's workers is in flight, the next turn
+end judges the claim again against the receipts the work's window now holds, through the same
+steps as above (a worker that failed or was canceled leaves the claim unbacked). A claim the
+receipts contradict is never held. A held claim is dropped when the session or the owner's request
+has changed or its work window left the active branch. A handoff that wakes no turn leaves the
+claim held until the next turn ends.
+The owner's decisions are delivered by the host, never relayed by a model. With the owner
 present, the turn displays one `owner_items` message. During a full handoff, the host records the
 items in the follow-up document without displaying a question or warning.
 An ungranted irreversible operation during a full handoff is blocked and recorded there too.

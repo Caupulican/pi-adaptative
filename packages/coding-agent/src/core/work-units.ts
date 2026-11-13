@@ -72,7 +72,7 @@ export type WorkWindowEntry =
 function collectWorkWindow(
 	manager: Pick<SessionManager, "getLeafEntry" | "getEntry">,
 	customType: string,
-	openingEntryId?: string,
+	openingEntryId?: string | null,
 ): { entries: WorkWindowEntry[]; startEntryId: string | null; workUnit?: WorkUnitRecord } | undefined {
 	const entries: WorkWindowEntry[] = [];
 	let workUnit: WorkUnitRecord | undefined;
@@ -112,7 +112,7 @@ function collectWorkWindow(
 			break;
 		}
 	}
-	if (openingEntryId !== undefined && !reachedOpening)
+	if (typeof openingEntryId === "string" && !reachedOpening)
 		throw new Error(`Turn opening entry ${openingEntryId} is not on the active branch.`);
 	return startEntryId === undefined
 		? undefined
@@ -141,4 +141,16 @@ export function turnWorkWindow(
 	openingEntryId: string,
 ): WorkWindowEntry[] {
 	return collectWorkWindow(manager, customType, openingEntryId)!.entries;
+}
+
+/**
+ * The same ordered view from an explicit boundary entry (null: the whole branch) to the leaf, for a window whose
+ * boundary an earlier check recorded. A later work unit does not move it. Throws when the entry left the branch.
+ */
+export function workWindowFrom(
+	manager: Pick<SessionManager, "getLeafEntry" | "getEntry">,
+	customType: string,
+	startEntryId: string | null,
+): WorkWindowEntry[] {
+	return collectWorkWindow(manager, customType, startEntryId)!.entries;
 }
