@@ -21,8 +21,10 @@ import { execFileSync, spawn, spawnSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import {
 	appendFileSync,
+	accessSync,
 	chmodSync,
 	copyFileSync,
+	constants as fsConstants,
 	cpSync,
 	existsSync,
 	mkdirSync,
@@ -38,10 +40,21 @@ import {
 } from "node:fs";
 import { connect, createServer } from "node:net";
 import { cpus, homedir, loadavg, tmpdir } from "node:os";
-import { join, relative, resolve } from "node:path";
+import { delimiter, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { args, flag, selectLiveScenarios } from "./live-args.mjs";
 import { assertLiveBinaryUnchanged, pinLiveBinary } from "./lib/live-binary-identity.mjs";
+import {
+	attestOwnedPiSession,
+	cleanupIsolatedSession,
+	cleanupUnattestedPiSession,
+	readTerminalAnchor,
+	readLinuxProcessIdentity,
+	sameLinuxProcessIdentity,
+	spawnOwnedPiSession,
+	signalIsolatedProcess,
+	snapshotIsolatedSession,
+} from "./lib/live-isolated-terminal-child.mjs";
 import { assertSlugifyEdit, createNativeInputDriver } from "./lib/live-native-driver.mjs";
 import { detachedProcessEnd, fatalProcessRecordProblems } from "./lib/live-process-evidence.mjs";
 
@@ -76,7 +89,30 @@ const BINARY_IDENTITY = requestedBinary
 		resolveTagCommit: (tag) => execFileSync("git", ["rev-parse", `${tag}^{commit}`], { cwd: REPO, encoding: "utf8" }),
 	})
 	: undefined;
-const PI_COMMAND = BINARY_IDENTITY?.path ?? (INSTALLED ? "pi" : join(REPO, "pi-test.sh"));
+const resolveExecutable = (command) => {
+	if (isAbsolute(command)) {
+		const path = realpathSync(command);
+		if (!statSync(path).isFile()) throw new Error("Pi executable is not a file");
+		accessSync(path, fsConstants.X_OK);
+		return path;
+	}
+	if (command.includes("/") || command.includes("\\")) throw new Error("Pi executable must be absolute or a PATH command");
+	for (const directory of (process.env.PATH ?? "").split(delimiter)) {
+		if (!directory) continue;
+		try {
+			const path = realpathSync(join(directory, command));
+			if (statSync(path).isFile()) {
+				accessSync(path, fsConstants.X_OK);
+				return path;
+			}
+		} catch (error) {
+			if (error?.code !== "ENOENT" && error?.code !== "ENOTDIR" && error?.code !== "EACCES") throw error;
+		}
+	}
+	throw new Error(`Pi executable ${command} was not found as an executable on PATH`);
+};
+// Resolve once so binary identity checks and every pane launch name the same executable.
+const PI_COMMAND = resolveExecutable(BINARY_IDENTITY?.path ?? (INSTALLED ? "pi" : join(REPO, "pi-test.sh")));
 if (BINARY_IDENTITY && (ONLY.length === 0 || ONLY.includes("s10")))
 	throw new Error("Pinned binary acceptance needs an explicit --only scope excluding source-only s10.");
 
@@ -247,7 +283,17 @@ const openPane = (anchor) => {
 	herdr("pane", "zoom", id, "--on");
 	return id;
 };
-const launch = (pane, cwd, extra = "", agentDir = AGENT) => {
+const launch = (pane, cwd, extra = "", agentDir = AGENT, options = {}) => {
+	if (options.terminalAnchorPath) {
+		if (extra !== "" || !options.terminalAnchorPath.startsWith("/"))
+			throw new Error("Isolated native launch requires empty extra arguments and an absolute anchor path");
+		return herdr(
+			"pane",
+			"run",
+			pane,
+			`clear; cd ${shellArgument(cwd)} && ${[process.execPath, join(REPO, "scripts/lib/live-isolated-terminal-child.mjs"), "--anchor", options.terminalAnchorPath].map(shellArgument).join(" ")}`,
+		);
+	}
 	const observer = nativeInput.register(pane, agentDir);
 	return herdr(
 		"pane",
@@ -270,6 +316,21 @@ const waitFor = async (label, check, timeoutMs, everyMs = 3000, evidence = undef
 		}
 		await sleep(everyMs);
 	}
+};
+const waitForSettlement = async (label, promise, timeoutMs) => {
+	const outcome = { settled: false };
+	Promise.resolve(promise).then(
+		(value) => Object.assign(outcome, { settled: true, value }),
+		(error) => Object.assign(outcome, { settled: true, error }),
+	);
+	await waitFor(label, () => outcome.settled, timeoutMs, 100);
+	if (Object.hasOwn(outcome, "error")) throw outcome.error;
+	return outcome.value;
+};
+const errorDetails = (error, depth = 0) => {
+	const message = error?.message ?? String(error);
+	if (depth >= 3 || !Array.isArray(error?.errors)) return message;
+	return `${message}: ${error.errors.map((nested) => errorDetails(nested, depth + 1)).join("; ")}`;
 };
 
 /** The agent-facing markers that must never reach the owner's screen, with the text around the first one found. */
@@ -1108,66 +1169,201 @@ const SCENARIOS = [
 		copyFileSync(join(AGENT, "auth.json"), join(agentDir, "auth.json"));
 		chmodSync(join(agentDir, "auth.json"), 0o600);
 		copyFileSync(join(AGENT, "settings.json"), join(agentDir, "settings.json"));
+		if (process.platform !== "linux")
+			throw new Error("The isolated terminal shutdown witness currently requires Linux PID/session identity");
+		const executable = PI_COMMAND;
 		const pane = openPane(state.main);
-		launch(pane, SANDBOX, "", agentDir);
-		await waitFor("the shutdown journey's native prompt", () => /Ask anything/.test(screen(pane, 60)), 90_000, 1000);
-		const input = await submitRootPrompt(pane, "Reply with only READY.");
-		const settled = await settleRootPrompt(input, agentDir);
-		const runtime = settled.runtime;
-		if (!Number.isSafeInteger(runtime?.pid) || runtime.pid <= 1 || runtime.pid === process.pid || runtime.sessionId !== input.sessionId)
-			throw new Error("The settled turn has no identified native runtime");
-		process.kill(runtime.pid, 0);
-		const detachedAt = Date.now();
-		// Close the actual PTY. A graceful quit or a kill signal would bypass the detached-device restoration path.
-		herdr("pane", "close", pane);
-		panes.splice(panes.indexOf(pane), 1);
-		await waitFor("the detached native runtime to exit", () => {
-			try { process.kill(runtime.pid, 0); return false; }
-			catch (error) { if (error.code === "ESRCH") return true; throw error; }
-		}, 30_000, 250);
-		const ended = await waitFor("the identified runtime's declared terminal end", () => detachedProcessEnd(agentDir, runtime.pid, detachedAt), 15_000, 250);
+		const anchorPath = join(RUN, "shutdown-terminal-anchor.json");
+		let anchor;
+		let owned;
+		let custody;
+		let sessionSnapshot;
+		let paneClosed = false;
+		let bodyError;
+		let result;
+		const cleanupErrors = [];
+		const cleanupEvidence = { isolatedSessionAttempted: false, helperTerminationAttempted: false, errors: cleanupErrors };
+		try {
+			launch(pane, SANDBOX, "", agentDir, { terminalAnchorPath: anchorPath });
+			anchor = await waitFor("the attested PTY anchor", () => {
+				if (!existsSync(anchorPath)) return undefined;
+				return readTerminalAnchor(anchorPath);
+			}, 15_000, 100);
+			if (!sameLinuxProcessIdentity(anchor.anchor, readLinuxProcessIdentity(anchor.anchor.pid)))
+				throw new Error("The pane terminal anchor identity changed before Pi spawn");
+			const observer = nativeInput.register(pane, agentDir);
+			const childArgs = [
+				"--extension",
+				observer.extension,
+				"--provider",
+				MODEL_A.split("/")[0],
+				"--model",
+				MODEL_A.split("/").slice(1).join("/"),
+			];
+			const childEnv = {
+				...process.env,
+				...HARNESS_LOG_PIN,
+				PI_ADAPTATIVE_CODING_AGENT_DIR: agentDir,
+				PI_LIVE_OBSERVER_FILE: observer.file,
+			};
+			owned = spawnOwnedPiSession(anchor, executable, childArgs, { cwd: SANDBOX, env: childEnv });
+			await waitForSettlement("S45: Pi native spawn", owned.started, 15_000);
+			custody = attestOwnedPiSession(anchor, owned.child);
+			sessionSnapshot = snapshotIsolatedSession(custody);
+			if (!sessionSnapshot.some((member) => sameLinuxProcessIdentity(custody.child, member)))
+				throw new Error("The attested Pi leader is absent from the isolated-session snapshot");
+			const inputPrompt = /Ask anything/;
+			await waitFor("the shutdown journey's native prompt", () => inputPrompt.test(screen(pane, 60)), 90_000, 1000);
+			const input = await submitRootPrompt(pane, "Reply with only READY.");
+			const settled = await settleRootPrompt(input, agentDir);
+			const runtime = settled.runtime;
+			if (!Number.isSafeInteger(runtime?.pid) || runtime.pid <= 1 || runtime.pid === process.pid || runtime.sessionId !== input.sessionId)
+				throw new Error("The settled turn has no identified native runtime");
+			const runtimeIdentity = readLinuxProcessIdentity(runtime.pid);
+			if (!runtimeIdentity || runtimeIdentity.sessionId !== custody.child.sessionId || runtimeIdentity.state === "Z")
+				throw new Error("The observed runtime is outside the attested isolated session");
+			// Keep the post-spawn snapshot for early-failure cleanup, then refresh after the observer
+			// identifies the runtime; supervisors may create that child after the initial snapshot.
+			sessionSnapshot = snapshotIsolatedSession(custody);
+			if (!sessionSnapshot.some((member) => sameLinuxProcessIdentity(runtimeIdentity, member)))
+				throw new Error("The observer runtime identity is absent from the bounded isolated-session snapshot");
+			const detachedAt = Date.now();
+			// Close the real pane/PTY first. S45 then directs HUP only at the observer-correlated process; it does not claim natural HUP delivery.
+			herdr("pane", "close", pane);
+			paneClosed = true;
+			panes.splice(panes.indexOf(pane), 1);
+			await waitFor("the pane anchor to exit after its PTY closes", () => {
+				const current = readLinuxProcessIdentity(anchor.anchor.pid);
+				if (current && !sameLinuxProcessIdentity(anchor.anchor, current)) throw new Error("Pane anchor PID was reused");
+				return !current || current.state === "Z";
+			}, 5000, 100);
+			const signalSent = signalIsolatedProcess(runtimeIdentity, "SIGHUP");
+			const signalEvidence = { signal: "SIGHUP", sent: signalSent, attemptedAt: Date.now(), target: runtimeIdentity };
+			const endPromise = waitFor("the runtime's performed cooperative terminal end", () => {
+				const current = readLinuxProcessIdentity(runtime.pid);
+				if (current && current.state !== "Z" && !sameLinuxProcessIdentity(runtimeIdentity, current))
+					throw new Error("Runtime PID changed identity before terminal settlement");
+				if (current && current.state !== "Z") return undefined;
+				return detachedProcessEnd(agentDir, runtime.pid, detachedAt);
+			}, 10_000, 100);
+			const [ended, childExit] = await Promise.all([
+				endPromise,
+				waitForSettlement("S45: isolated Pi child closes", owned.exited, 10_000),
+			]);
+			if (childExit.error) throw new Error(`Isolated Pi child failed: ${childExit.error.message}`);
+			const remaining = sessionSnapshot.filter((member) => {
+				const current = readLinuxProcessIdentity(member.pid);
+				return sameLinuxProcessIdentity(member, current) && current.state !== "Z";
+			});
+			if (remaining.length > 0)
+				throw new Error(`Owned isolated-session processes remain after shutdown: ${remaining.map((member) => member.pid).join(", ")}`);
 		// Derive crash-cut controls from this real exit. A newer incomplete or forced record must
 		// never borrow the older performed exit's proof; originals remain untouched.
-		const crashDirectory = join(agentDir, "state", "crashes");
-		const suffix = "-" + runtime.pid + "-" + ended.sequence + ".routine.txt";
-		const sourceNames = readdirSync(crashDirectory).filter((name) => name.endsWith(suffix));
-		if (sourceNames.length !== 1) throw new Error("The completed runtime has ambiguous source exit evidence");
-		const sourceName = sourceNames[0];
-		const stem = sourceName.slice(0, -suffix.length);
-		const laterName = stem + "-" + runtime.pid + "-" + (ended.sequence + 1) + ".routine.txt";
-		const body = "\npid " + runtime.pid + "\nat " + new Date(ended.at).toISOString() + "\n\n";
-		const completedHeader = ended.reason + "; exit " + ended.exitCode;
-		const proofControls = [];
-		for (const [kind, header] of [
-			["provisional", ended.reason],
-			["ambiguous", completedHeader + "; exit 1"],
-			["forced", "signal-forced; exit 129"],
-		]) {
-			const controlAgent = join(RUN, "exit-proof-controls", kind);
-			const records = join(controlAgent, "state", "crashes");
-			mkdirSync(records, { recursive: true });
-			writeFileSync(join(records, sourceName), completedHeader + body);
-			writeFileSync(join(records, laterName), header + body);
-			let result;
-			let refused = false;
-			try {
-				result = detachedProcessEnd(controlAgent, runtime.pid, detachedAt);
-			} catch (error) {
-				const expected = kind === "forced" ? "without cooperative terminal cleanup"
-					: kind === "ambiguous" ? "has a malformed terminal header" : undefined;
-				if (expected === undefined || !String(error?.message).includes(expected)) throw error;
-				refused = true;
+			const crashDirectory = join(agentDir, "state", "crashes");
+			const suffix = "-" + runtime.pid + "-" + ended.sequence + ".routine.txt";
+			const sourceNames = readdirSync(crashDirectory).filter((name) => name.endsWith(suffix));
+			if (sourceNames.length !== 1) throw new Error("The completed runtime has ambiguous source exit evidence");
+			const sourceName = sourceNames[0];
+			const stem = sourceName.slice(0, -suffix.length);
+			const laterName = stem + "-" + runtime.pid + "-" + (ended.sequence + 1) + ".routine.txt";
+			const body = "\npid " + runtime.pid + "\nat " + new Date(ended.at).toISOString() + "\n\n";
+			const completedHeader = ended.reason + "; exit " + ended.exitCode;
+			const proofControls = [];
+			for (const [kind, header] of [
+				["provisional", ended.reason],
+				["ambiguous", completedHeader + "; exit 1"],
+				["forced", "signal-forced; exit 129"],
+			]) {
+				const controlAgent = join(RUN, "exit-proof-controls", kind);
+				const records = join(controlAgent, "state", "crashes");
+				mkdirSync(records, { recursive: true });
+				writeFileSync(join(records, sourceName), completedHeader + body);
+				writeFileSync(join(records, laterName), header + body);
+				let controlResult;
+				let refused = false;
+				try {
+					controlResult = detachedProcessEnd(controlAgent, runtime.pid, detachedAt);
+				} catch (error) {
+					const expected = kind === "forced" ? "without cooperative terminal cleanup"
+						: kind === "ambiguous" ? "has a malformed terminal header" : undefined;
+					if (expected === undefined || !String(error?.message).includes(expected)) throw error;
+					refused = true;
+				}
+				if (controlResult !== undefined || (kind !== "provisional" && !refused))
+					throw new Error("A newer " + kind + " record incorrectly used an older completed exit");
+				proofControls.push({ kind, sourceRecord: sourceName, laterRecord: laterName, accepted: false });
 			}
-			if (result !== undefined || (kind !== "provisional" && !refused))
-				throw new Error("A newer " + kind + " record incorrectly used an older completed exit");
-			proofControls.push({ kind, sourceRecord: sourceName, laterRecord: laterName, accepted: false });
+			if (!jsonl(input.sessionFile).some((entry) => entry.id === settled.finalEntryId && entry.message?.role === "assistant"))
+				throw new Error("The completed answer was lost during terminal detachment");
+			const crashes = crashRecordProblems();
+			if (crashes.length) throw new Error(`after terminal detachment, ${crashes.join("; ")}`);
+			result = {
+				pane,
+				executable,
+				runtime,
+				inputEntryId: input.entryId,
+				answerEntryId: settled.finalEntryId,
+				detachedAt,
+				ended,
+				custody,
+				sessionSnapshot,
+				signalEvidence,
+				childExit,
+				proofControls,
+			};
+		} catch (error) {
+			bodyError = error;
 		}
-		if (!jsonl(input.sessionFile).some((entry) => entry.id === settled.finalEntryId && entry.message?.role === "assistant"))
-			throw new Error("The completed answer was lost during terminal detachment");
-		const crashes = crashRecordProblems();
-		if (crashes.length) throw new Error(`after terminal detachment, ${crashes.join("; ")}`);
-		writeFileSync(join(REPORT_DIR, "shutdown-journey.json"), `${JSON.stringify({ pane, runtime, inputEntryId: input.entryId, answerEntryId: settled.finalEntryId, detachedAt, ended, proofControls }, null, 2)}\n`);
-		return `canonical owner answer persisted; runtime ${runtime.pid} exited as ${ended.reason} after its PTY closed; no fatal crash record`;
+		try {
+			if (panes.includes(pane)) {
+				herdr("pane", "close", pane);
+				panes.splice(panes.indexOf(pane), 1);
+				paneClosed = true;
+			}
+		} catch (error) {
+			cleanupErrors.push(`pane close: ${error?.message ?? String(error)}`);
+		}
+		if (!anchor && existsSync(anchorPath)) {
+			try { anchor = readTerminalAnchor(anchorPath); }
+			catch (error) { cleanupErrors.push(`terminal anchor read: ${error?.message ?? String(error)}`); }
+		}
+		if (owned) {
+			if (!custody || !sessionSnapshot) {
+				try { await cleanupUnattestedPiSession(owned); }
+				catch (error) { cleanupErrors.push(`unattested Pi cleanup: ${error?.message ?? String(error)}`); }
+			} else {
+				cleanupEvidence.isolatedSessionAttempted = true;
+				try { await cleanupIsolatedSession(custody, sessionSnapshot); }
+				catch (error) { cleanupErrors.push(`isolated Pi session cleanup: ${error?.message ?? String(error)}`); }
+			}
+			try {
+				const childClose = await waitForSettlement("S45: retained Pi child handle joins", owned.exited, 2000);
+				if (childClose.error) throw childClose.error;
+			}
+			catch (error) { cleanupErrors.push(`Pi child join: ${error?.message ?? String(error)}`); }
+		}
+		if (anchor) {
+			try {
+				const helper = readLinuxProcessIdentity(anchor.anchor.pid);
+				if (helper && sameLinuxProcessIdentity(anchor.anchor, helper) && helper.state !== "Z") {
+					cleanupEvidence.helperTerminationAttempted = true;
+					signalIsolatedProcess(anchor.anchor, "SIGTERM");
+					await waitFor("terminal anchor helper cleanup", () => {
+						const current = readLinuxProcessIdentity(anchor.anchor.pid);
+						if (current && !sameLinuxProcessIdentity(anchor.anchor, current)) throw new Error("Terminal anchor PID was reused");
+						return !current || current.state === "Z";
+					}, 1000, 50);
+				}
+			} catch (error) { cleanupErrors.push(`terminal anchor cleanup: ${error?.message ?? String(error)}`); }
+		}
+		if (bodyError || cleanupErrors.length > 0) {
+			const errors = [bodyError, ...cleanupErrors.map((message) => new Error(message))].filter(Boolean);
+			const details = errors.map((error) => errorDetails(error)).join("; ").slice(0, 3000);
+			throw new AggregateError(errors, `S45 terminal-detachment journey failed: ${details}`);
+		}
+		result.cleanup = { paneClosed, ...cleanupEvidence };
+		writeFileSync(join(REPORT_DIR, "shutdown-journey.json"), `${JSON.stringify(result, null, 2)}\n`);
+		return `canonical owner answer persisted; runtime ${result.runtime.pid} exited as ${result.ended.reason} after PTY close and explicit ${result.signalEvidence.signal}; no fatal crash record`;
 	}),
 ];
 

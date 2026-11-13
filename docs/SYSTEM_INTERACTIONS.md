@@ -1295,3 +1295,25 @@ it does not claim independently observed OS exit status. Composed J1 coverage ho
 extension cleanup across signals and the deadline; native S45 retains the actual PTY close and
 persisted-answer checks. New execution and publication evidence belongs in
 `.git/pi-audits/releases/v0.104.60/verification.json`; no H30 pass is inferred from source review.
+
+The first built Node-source S45 run retained the performed forced-exit record but failed after
+Herdr sent TERM roughly 263 ms after HUP. That host deadline is distinct from Pi's ten-second
+cleanup deadline; the exact blocking cleanup stage was not established. The native fixture now
+uses a pane anchor to attest the real PTY and lets the independent gate spawn and retain Pi in a
+separate OS session. Closing the actual pane removes the PTY, then the gate sends HUP to the
+identified runtime. This covers signal handling against dead terminal I/O; it does not establish
+natural terminal-generated HUP or job-control behavior in the isolated session. The strict
+cooperative performed-exit, persisted-answer and fatal-record checks remain mandatory.
+
+The gate validates PID/start ticks/session identity and PTY device identity before detachment,
+keeps child custody from spawn through physical close, and bounds failure cleanup. Cleanup
+attempts every safely identified member and reports ambiguity rather than signaling an unproven
+process. Linux identity reads and signals are separate operations, so the fixture retains a small
+identity-check-to-signal race without pidfds. Its negative proof controls reject newer provisional,
+ambiguous and forced records even when an older completed record exists.
+
+The first H30 composed J1 run failed an obsolete fixture barrier: forced/crash cleanup waited for
+a second successful exit that the single-terminal-outcome rule correctly prevents. The fixture
+now joins actual runtime disposal and lifecycle listener cleanup, asserts the original sole
+outcome, and releases its virtual children even when an assertion fails. The failed run remains
+preserved; the corrected composed run is separate evidence.
