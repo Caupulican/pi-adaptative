@@ -106,7 +106,7 @@ export interface CommandCodeAccountUsage {
 	usageSummary?: CommandCodeUsageSummary;
 	planId?: string;
 	plan?: string;
-	/** Known monthly included credit cap (USD) for `planId` from Command Code 1.88.5's plan table, when recognized. */
+	/** Known monthly included credit cap (USD) for `planId` from Command Code 1.89.0's plan table, when recognized. */
 	planMonthlyCredits?: number;
 }
 

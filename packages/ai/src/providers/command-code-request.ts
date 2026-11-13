@@ -24,7 +24,7 @@ import { joinTextContent, transformMessages } from "./transform-messages.ts";
 export const COMMAND_CODE_BASE_URL = "https://api.commandcode.ai";
 export const COMMAND_CODE_GENERATE_ROUTE = "/alpha/generate";
 /** The Command Code client release whose wire protocol this adapter speaks. */
-export const COMMAND_CODE_CLIENT_VERSION = "1.88.5";
+export const COMMAND_CODE_CLIENT_VERSION = "1.89.0";
 
 type WireText = { type: "text"; text: string };
 type WireImage = { type: "image"; image: string; mimeType: string };
