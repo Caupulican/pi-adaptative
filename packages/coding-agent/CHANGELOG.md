@@ -10,9 +10,6 @@
 ### Changed
 
 - A watch wakes whoever armed it directly: when its condition becomes true no routine worker runs, and the armer receives the event's facts (a command's output or a page's words fenced as untrusted data), the plan it saved when it armed the watch and the routine id. A session that is running a turn reads the wake at its next model step, and an idle one starts a turn with it; the wake is saved once and never twice (the daily routine-result wake bound holds a recurring watch's wake for the owner's next turn, and never a one-shot watch's). Saving a watch needs the planning capability, not delegation. A one-shot watch that reaches its end time wakes the armer too, with what it last saw, and a watch whose checks the session refuses five times in a row tells the armer once. `routine run` on a watch is refused, since a watch has nothing to run; a watch saved before this change keeps working and wakes its session.
-
-### Changed
-
 - A goal now starts from an owner message that asks for an outcome to be pursued until it is reached, whatever its wording, not only from the fixed goal phrases. After the message is delivered, System One answers whether it sets such an outcome and whether it shows enough to tell; a goal starts only when both answers reach 0.90 (no token budget, never over an unfinished goal, never from pasted text). The judgment does not delay the turn: a running turn gets a note to record the owner's end state and ordered steps as requirements, and a turn that already ended is picked up by the goal's own continuation. With System One off, or on an outage (reported once), no goal starts from such a message.
 
 ### Fixed
