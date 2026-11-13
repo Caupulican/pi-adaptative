@@ -494,6 +494,9 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 		expect(request.environmentNames, "the watched command runs offline and read-only, as the worker's own").toEqual(
 			expect.arrayContaining(["GIT_NO_LAZY_FETCH", "GIT_TERMINAL_PROMPT", "npm_config_update_notifier"]),
 		);
+		expect(request.environmentNames, "the watched command has a scratch directory, as the worker's own").toEqual(
+			expect.arrayContaining(["TMPDIR", "TMP", "TEMP"]),
+		);
 	};
 	const baselineSampled = createBarrier();
 	world.shell.enqueue({

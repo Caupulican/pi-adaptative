@@ -17,7 +17,7 @@ import { redactKnownSecrets } from "../security/secret-text.ts";
 import { boundedText } from "../util/bounded-line.ts";
 import { PublicWebClient, PublicWebHttpError, PublicWebRedirectError } from "../web/public-web-client.ts";
 import type { RoutineWatchObservation } from "./routine-watch-edge.ts";
-import { processIsRunning, type WatchAdmission } from "./watch-admission.ts";
+import { processIsRunning, type WatchAdmission, type WatchCommandScratch } from "./watch-admission.ts";
 import {
 	isWatchGlob,
 	MAX_WATCH_EXCERPT_CHARS,
@@ -57,7 +57,10 @@ interface PathSnapshot {
 }
 
 export interface WatchSamplerDeps {
-	readonly admission: Pick<WatchAdmission, "authorize" | "cwd" | "commandEnvironment" | "readsContent" | "webPolicy">;
+	readonly admission: Pick<
+		WatchAdmission,
+		"authorize" | "commandScratch" | "cwd" | "commandEnvironment" | "readsContent" | "webPolicy"
+	>;
 	readonly agentDir: () => string;
 	readonly now: () => number;
 	readonly web?: PublicWebClient;
@@ -86,14 +89,28 @@ export class WatchSampler {
 
 	/**
 	 * Re-authorizes the condition against the session's authority now, and a worker's watch against the worker's scope too
-	 * (a refusal throws), and observes it once.
+	 * (a refusal throws), and observes it once. A worker's command is admitted and run with a scratch directory of its own,
+	 * removed once the run ended.
 	 */
 	async sample(
 		condition: WatchCondition,
 		signal: AbortSignal,
 		worker?: WorkerWatchAuthority,
 	): Promise<WatchSample | undefined> {
-		const admitted = this.deps.admission.authorize(condition, worker);
+		const scratch = this.deps.admission.commandScratch(condition, worker);
+		try {
+			return await this.observe(this.deps.admission.authorize(condition, worker, scratch), signal, worker, scratch);
+		} finally {
+			scratch?.release();
+		}
+	}
+
+	private async observe(
+		admitted: WatchCondition,
+		signal: AbortSignal,
+		worker: WorkerWatchAuthority | undefined,
+		scratch: WatchCommandScratch | undefined,
+	): Promise<WatchSample | undefined> {
 		switch (admitted.type) {
 			case "file":
 				return this.file(admitted, signal, worker);
@@ -104,7 +121,7 @@ export class WatchSampler {
 			case "port":
 				return this.port(admitted, signal);
 			case "command":
-				return this.command(admitted, signal, worker);
+				return this.command(admitted, signal, worker, scratch);
 			case "http":
 				return this.http(admitted, signal, worker);
 		}
@@ -329,6 +346,7 @@ export class WatchSampler {
 		condition: Extract<WatchCondition, { type: "command" }>,
 		signal: AbortSignal,
 		worker: WorkerWatchAuthority | undefined,
+		scratch: WatchCommandScratch | undefined,
 	): Promise<WatchSample | undefined> {
 		const result = await runRequirementCheck(
 			{
@@ -344,7 +362,7 @@ export class WatchSampler {
 				signal,
 				// The command was admitted by `sample` immediately before this run; the requirement line is not applied.
 				admit: () => undefined,
-				env: this.deps.admission.commandEnvironment(worker),
+				env: this.deps.admission.commandEnvironment(worker, scratch),
 			},
 		);
 		// A command that did not run to an exit (a timeout, a spawn failure, an abort) says nothing about the condition.

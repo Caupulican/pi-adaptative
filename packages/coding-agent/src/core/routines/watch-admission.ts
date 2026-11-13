@@ -9,8 +9,10 @@
  * - a managed process is a process-matrix entry that has not ended yet, and an operating-system process must be running.
  * Ports, pages and the cadence are bounded by the condition's own schema; a page's address is checked again at fetch.
  * A watch a worker runtime armed is admitted under the session's authority and the worker's together
- * ({@link WorkerWatchAuthority}): its commands and relative paths start in the worker's directory, a read-only worker's
- * command passes the worker's read-only shell scope and runs with its environment restrictions, a page needs the worker's
+ * ({@link WorkerWatchAuthority}): its commands and relative paths start in the worker's directory, each run of its command
+ * has a scratch directory of its own as the worker's own bash has (exported as TMPDIR, TMP and TEMP, the one place a
+ * read-only shell may create a file, removed after the run), a read-only worker's command passes the worker's read-only
+ * shell scope and runs with its environment restrictions, a page needs the worker's
  * `network.http` and reaches what its fetch tool reaches, a path's content is digested only inside the worker's read
  * scope, and a runtime that carries a third party's words acts only under the owner's standing grants.
  */
@@ -34,6 +36,7 @@ import {
 	laneReadRoots,
 	laneRunsOffline,
 } from "../autonomy/lane-shell-scope.ts";
+import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import {
 	privatePathBoundary,
 	readScopeRefusal,
@@ -44,6 +47,7 @@ import { workerCommandRestrictions } from "../autonomy/worker-run-environment.ts
 import { readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
 import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts";
 import { readEntrySync } from "../process-matrix/store.ts";
+import { createProcessScratchDirectory, removeProcessScratchDirectory } from "../process-scratch.ts";
 import {
 	type CredentialExposureBoundary,
 	credentialToolBlockReason,
@@ -93,6 +97,19 @@ export function processIsRunning(pid: number): boolean {
 	}
 }
 
+/**
+ * The scratch directory one run of a worker's watched command has, as the worker's own bash has one
+ * (`createWorkerRunEnvironment`): exported to the command as TMPDIR, TMP and TEMP and the one place a read-only shell
+ * may create a file (`roots`: as exported, then canonical). `release` removes it once the run ended.
+ */
+export interface WatchCommandScratch {
+	readonly path: string;
+	readonly roots: readonly string[];
+	release(): void;
+}
+
+const WATCH_SCRATCH_PREFIX = "watch-";
+
 export class WatchAdmission {
 	private readonly host: WatchAdmissionHost;
 
@@ -105,13 +122,31 @@ export class WatchAdmission {
 		return worker?.scope.cwd ?? this.host.getCwd();
 	}
 
-	/** The environment a watched command runs with: the bounded one, closed further where the worker's own commands are. */
-	commandEnvironment(worker?: WorkerWatchAuthority): NodeJS.ProcessEnv {
+	/**
+	 * A scratch directory for one run of a worker's watched command; none for any other condition, or for a session's
+	 * command, which runs as the session's own shell does. The caller releases it once the run ended.
+	 */
+	commandScratch(condition: WatchCondition, worker?: WorkerWatchAuthority): WatchCommandScratch | undefined {
+		if (condition.type !== "command" || !worker) return undefined;
+		const path = createProcessScratchDirectory(WATCH_SCRATCH_PREFIX);
+		return {
+			path,
+			roots: [...new Set([path, safeRealpathSync(path)])],
+			release: () => removeProcessScratchDirectory(path),
+		};
+	}
+
+	/**
+	 * The environment a watched command runs with: the bounded one, closed further where the worker's own commands are,
+	 * with the run's scratch directory as its temporary directory.
+	 */
+	commandEnvironment(worker?: WorkerWatchAuthority, scratch?: WatchCommandScratch): NodeJS.ProcessEnv {
 		const env = watchCommandEnvironment();
 		if (!worker) return env;
 		const { scope } = worker;
 		return {
 			...env,
+			...(scratch ? { TMPDIR: scratch.path, TMP: scratch.path, TEMP: scratch.path } : {}),
 			...workerCommandRestrictions({ offline: laneRunsOffline(scope), readOnly: scope.readOnly }, env),
 		};
 	}
@@ -138,7 +173,7 @@ export class WatchAdmission {
 	 * authority it lacks. This is the part applied at every evaluation: it checks authority only, never whether the
 	 * watched thing still exists, so a file that vanished or a process that ended is an observation, not a refusal.
 	 */
-	authorize(condition: WatchCondition, worker?: WorkerWatchAuthority): WatchCondition {
+	authorize(condition: WatchCondition, worker?: WorkerWatchAuthority, scratch?: WatchCommandScratch): WatchCondition {
 		switch (condition.type) {
 			case "file":
 				return {
@@ -149,7 +184,7 @@ export class WatchAdmission {
 				// A command that cannot start says nothing at every check, so a worker's vanished directory is a refusal.
 				if (worker && !statOrUndefined(worker.scope.cwd)?.isDirectory())
 					throw new Error("The directory of the worker that armed this watched command no longer exists.");
-				const refusal = this.commandRefusal(condition.command, worker);
+				const refusal = this.commandRefusal(condition.command, worker, scratch);
 				if (refusal) throw new Error(`A watched command was refused. ${refusal}`);
 				return condition;
 			}
@@ -168,9 +203,18 @@ export class WatchAdmission {
 		}
 	}
 
-	/** {@link authorize} plus what must hold when a watch is saved: the folder, process or pid exists and has not ended. */
+	/**
+	 * {@link authorize} plus what must hold when a watch is saved: the folder, process or pid exists and has not ended. A
+	 * worker's command is judged as at every run, with a scratch directory of its own.
+	 */
 	admit(condition: WatchCondition, worker?: WorkerWatchAuthority): WatchCondition {
-		const authorized = this.authorize(condition, worker);
+		const scratch = this.commandScratch(condition, worker);
+		let authorized: WatchCondition;
+		try {
+			authorized = this.authorize(condition, worker, scratch);
+		} finally {
+			scratch?.release();
+		}
 		if (authorized.type === "file") {
 			// The harness's own storage changes whenever it works, so a watch there would fire on its own runs.
 			const target = isWatchGlob(authorized.path) ? splitWatchPattern(authorized.path).base : authorized.path;
@@ -227,7 +271,7 @@ export class WatchAdmission {
 	 * watch's cadence. The deterministic parts of the shell's admission apply (the capability envelope, credential
 	 * protection and the edge classes); what needs the owner's answer at the time is refused, because nobody is there.
 	 */
-	commandRefusal(command: string, worker?: WorkerWatchAuthority): string | undefined {
+	commandRefusal(command: string, worker?: WorkerWatchAuthority, scratch?: WatchCommandScratch): string | undefined {
 		const scope = this.scope();
 		const scopeCwd = scope.cwd;
 		const cwd = this.cwd(worker);
@@ -244,7 +288,8 @@ export class WatchAdmission {
 		const credential = credentialToolBlockReason("bash", args, cwd, this.boundary(scope));
 		if (credential) return credential;
 		if (worker) {
-			const refusal = this.workerShellRefusal(command, worker) ?? this.thirdPartyRefusal(worker, "bash", args);
+			const refusal =
+				this.workerShellRefusal(command, worker, scratch) ?? this.thirdPartyRefusal(worker, "bash", args);
 			if (refusal) return refusal;
 		}
 		if (this.host.getEdgeMode?.() === "yolo") {
@@ -264,12 +309,16 @@ export class WatchAdmission {
 			: undefined;
 	}
 
-	/** Why a read-only worker's own shell would refuse `command`: judged by its read-only scope, with no scratch directory. */
-	private workerShellRefusal(command: string, worker: WorkerWatchAuthority): string | undefined {
+	/** Why a read-only worker's own shell would refuse `command`: judged by its read-only scope and the run's scratch directory. */
+	private workerShellRefusal(
+		command: string,
+		worker: WorkerWatchAuthority,
+		scratch: WatchCommandScratch | undefined,
+	): string | undefined {
 		const { scope } = worker;
 		if (!scope.shellReadOnly) return undefined;
 		const boundary = privatePathBoundary(scope.deniedPaths, scope.cwd);
-		const lane = laneReadOnlyShellScope(scope, [], boundary, laneReadRoots(scope.readRoots));
+		const lane = laneReadOnlyShellScope(scope, scratch?.roots ?? [], boundary, laneReadRoots(scope.readRoots));
 		const violation = readOnlyShellViolation(command, scope.cwd, { lane, dialect: "posix" });
 		return violation ? `The worker that armed it has a read-only shell: ${violation}.` : undefined;
 	}
