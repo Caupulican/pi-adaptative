@@ -298,6 +298,11 @@ export function botSystemOneEvidenceDir(agentDir: string, botId: string): string
 	return join(botHomeDir(agentDir, botId), "typesafe-reviews");
 }
 
+/** `<agentDir>/state/bots/history-scan.json` -- the one scan of the root session files for bot histories has run. */
+export function botHistoryScanFile(agentDir: string): string {
+	return stateFile(agentDir, "bots", "history-scan.json");
+}
+
 /** `<agentDir>/state/bots/store.json` -- the persistent bots, teams and team transcripts. */
 export function botTeamStoreFile(agentDir: string): string {
 	return stateFile(agentDir, "bots", "store.json");

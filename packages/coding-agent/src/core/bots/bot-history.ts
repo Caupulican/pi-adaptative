@@ -5,11 +5,13 @@
  * (`pi_bot_runtime_bindings` entries). `bots/<id>/history.json` indexes those runs by reference (a path-free transcript
  * reference plus its time range; nothing is copied), so any later session reads the bot's whole conversation.
  *
- * The index is built once per bot, by one scan of the root session files that finds every bot's direct runtimes in a
- * single pass (streamed, off the render path; the chat shows what it has until the scan is done and the home watch
- * announces the file). After that a worker-path start of the bot adds its own run as it is bound, so the file is
- * refreshed by the writer that creates the run and a finished scan is never repeated. Concurrent writers merge under the
- * file's lock. The index holds at most `MAX_HISTORY_RUNS` runs, the newest.
+ * The index is built by one scan of the root session files that finds every bot's direct runtimes in a single pass
+ * (streamed, off the render path; the chat shows what it has until the scan is done and the home watch announces the
+ * file). The scan is a one-time reading of the conversations bots had before their runs were indexed: once it has run for
+ * the agent directory (`state/bots/history-scan.json`), no process scans again, and a bot made later has nothing in the
+ * root files to find. Every later worker-path start of a bot adds its own run as it is bound, so the file is refreshed by
+ * the writer that creates the run. Concurrent writers merge under the file's lock. The index holds at most
+ * `MAX_HISTORY_RUNS` runs, the newest.
  */
 
 import { createReadStream, type Dirent, existsSync, readFileSync, statSync } from "node:fs";
@@ -25,7 +27,7 @@ import {
 } from "../../kernel/session/worker-transcript-reference.ts";
 import { sessionsDir as rootSessionsDir } from "../../kernel/storage/paths.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import { botHistoryFile } from "../agent-paths.ts";
+import { botHistoryFile, botHistoryScanFile } from "../agent-paths.ts";
 import { BOT_RUNTIME_BINDINGS_CUSTOM_TYPE, directBindingAlias, isBotId } from "../delegation/bot-runtime-bindings.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -97,6 +99,11 @@ function readHistoryFile(agentDir: string, agentId: string): BotHistoryFile | un
 	} catch {
 		return undefined;
 	}
+}
+
+/** The one scan of the root session files has run for this agent directory (see the module comment). */
+function rootScanDone(agentDir: string): boolean {
+	return existsSync(botHistoryScanFile(agentDir));
 }
 
 /** The runs of both lists, one per transcript (the later times win), oldest first, bounded to the newest. */
@@ -309,7 +316,7 @@ export class BotHistory {
 	read(agentId: string): BotHistoryRead {
 		const agentDir = this.ports.agentDir();
 		const index = readHistoryFile(agentDir, agentId);
-		const pending = index?.scanned !== true;
+		const pending = index?.scanned !== true && !rootScanDone(agentDir);
 		if (pending) this.requestScan();
 		const runs: { runtime: string; messages: AgentMessage[] }[] = [];
 		let remaining = MAX_HISTORY_MESSAGES;
@@ -348,6 +355,7 @@ export class BotHistory {
 	private requestScan(): void {
 		if (this.scan || this.stopped) return;
 		const agentDir = this.ports.agentDir();
+		if (rootScanDone(agentDir)) return;
 		const wanted = this.ports
 			.store()
 			.listBots({ includeRetired: true })
@@ -364,6 +372,14 @@ export class BotHistory {
 						runs: mergeRuns(current.runs, runs),
 					}));
 				}
+				// Written after every bot's index: a scan cut short leaves no mark, and the next process scans again.
+				writeFileAtomicSync(
+					botHistoryScanFile(agentDir),
+					`${JSON.stringify({ version: 1, scannedAt: Date.now() })}\n`,
+					{
+						mode: 0o600,
+					},
+				);
 				harnessLog.info("bots", "bot histories were indexed", () => ({ bots: wanted.length }));
 			})
 			.catch((error: unknown) => {

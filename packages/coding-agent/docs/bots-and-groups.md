@@ -48,9 +48,10 @@ session says to stop it there. A session started after every other one closed li
 What ran before a bot had a session of its own is part of that conversation. Those worker conversations live under the
 orchestration directory of whichever session messaged the bot, and only that session's own transcript says which runtime
 was whose, so `bots/<id>/history.json` indexes them by reference (a path-free transcript reference and a time range, bounded
-to the newest 200; nothing is copied). The index is built once per bot by one streamed scan of the session files, off the
-screen's drawing path (the chat shows what it has until the scan ends), and afterwards each worker-path start of the bot
-adds its own run as it is bound. The chat shows those earlier conversations in time order with the bot's own session.
+to the newest 200; nothing is copied). The index is built by one streamed scan of the session files, off the screen's
+drawing path (the chat shows what it has until the scan ends). The scan runs once for the agent directory
+(`state/bots/history-scan.json` marks it done), never again in any process and never for a bot made later; afterwards each
+worker-path start of a bot adds its own run as it is bound. The chat shows those earlier conversations in time order with the bot's own session.
 
 Until later phases move them, these still run as workers of the session that sends them: group messages (the group's
 conversations), the orchestrator's `bot ask`, routine sends, leaders, the bots a leader made and bots made from a profile, and machines joined over the
