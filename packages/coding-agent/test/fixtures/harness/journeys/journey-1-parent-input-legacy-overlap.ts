@@ -9,6 +9,7 @@ import {
 import type { SessionEntry } from "../../../../src/kernel/session/session-entries.ts";
 import type { SessionManager } from "../../../../src/kernel/session/session-manager.ts";
 import type { HarnessWorld } from "../session-fixture.ts";
+import { observeLegacyImportStore, type SummaryTask } from "./journey-1-parent-input-legacy-witness.ts";
 import {
 	icmContinuousSettings,
 	icmContinuousStore,
@@ -147,9 +148,12 @@ export async function verifyParentInputLegacyOverlap(
 	});
 	const priorModel = world.provider.model("worker-b");
 	const beforeRequests = world.provider.requests.filter((request) => request.model.id === "worker-b").length;
+	const providerStart = world.provider.requests.length;
 	const tracks: string[] = [];
+	const summaryTasks: SummaryTask[] = [];
 	const failures: unknown[] = [];
 	let active: AgentSession | undefined;
+	let witness: ReturnType<typeof observeLegacyImportStore> | undefined;
 	try {
 		// This new store can summarize the same dyadic ranges as the still-live original store.
 		// Its own model and bounded scripts keep those two real actors from consuming each other's replies.
@@ -162,6 +166,7 @@ export async function verifyParentInputLegacyOverlap(
 						: `Compaction: merge lines ${first}+${size / 2} and ${first + size / 2}+${size / 2},`;
 				const name = `h25-legacy-compaction-${first}+${size}`;
 				tracks.push(name);
+				summaryTasks.push({ track: name, level: Math.log2(size), ordinal: first / size, text: task });
 				world.provider.enqueueTrack(
 					name,
 					"worker-b",
@@ -173,6 +178,15 @@ export async function verifyParentInputLegacyOverlap(
 					},
 				);
 			}
+		const importStore = icmContinuousStore(agentDir);
+		witness = observeLegacyImportStore(
+			world,
+			importStore.root,
+			importStore.queueDatabase,
+			agentDir,
+			providerStart,
+			summaryTasks,
+		);
 		let firstRequests: number | undefined;
 		for (let pass = 0; pass < 2; pass++) {
 			const opened = await world.createRootSession("root", {
@@ -184,13 +198,10 @@ export async function verifyParentInputLegacyOverlap(
 			const store = icmContinuousStore(agentDir);
 			const importPhase = pass === 0 ? "first import" : "reopen";
 			world.trace.mark("root", `H25 legacy ${importPhase} ICM migration wait`);
-			await icmWaitForChatIdle(
-				world,
-				agentDir,
-				1,
-				() => world.io.existsSync(store.migrationFile),
-				`H25 legacy ${importPhase}`,
-			);
+			await icmWaitForChatIdle(world, agentDir, 1, () => world.io.existsSync(store.migrationFile), {
+				label: `H25 legacy ${importPhase}`,
+				readEvidence: () => witness?.snapshot(),
+			});
 			const records = icmReadContinuousRecords(world, store);
 			for (const key of keys) expect(records.filter((record) => record.sourceKey === key)).toHaveLength(1);
 			expect(utf8Text(world.io.readFileSync(path, "utf8"))).toBe(bytes);
@@ -217,6 +228,8 @@ export async function verifyParentInputLegacyOverlap(
 			joined = true;
 		} catch (error) {
 			failures.push(error);
+			// waitForProducers rejects only after every producer has settled; its failure is an outcome, not an unfinished join.
+			joined = true;
 		}
 		if (joined) {
 			for (const track of tracks) {
@@ -226,6 +239,11 @@ export async function verifyParentInputLegacyOverlap(
 					failures.push(error);
 				}
 			}
+		}
+		try {
+			witness?.restore();
+		} catch (error) {
+			failures.push(error);
 		}
 		try {
 			world.setModelReasoning("worker-b", priorModel.reasoning, priorModel.thinkingLevelMap);

@@ -1550,6 +1550,11 @@ export interface IcmSchedulerState {
 	readonly blocked: number;
 }
 
+export interface IcmWaitFailureContext {
+	readonly label: string;
+	readonly readEvidence?: () => unknown;
+}
+
 /**
  * Reads the durable work queue the way production stores it: `queue.json` is a marker, the state lives in `queue.sqlite`.
  * Absent while the queue does not exist yet, is still a legacy file awaiting migration, or has a transaction open on it.
@@ -1608,8 +1613,9 @@ export async function icmWaitForChatIdle(
 	agentDir: string,
 	expectedMessages: number,
 	predicate?: (records: readonly IcmStoredContinuousRecord[], nodes: readonly IcmStoredContinuousNode[]) => boolean,
-	context?: string,
+	context?: IcmWaitFailureContext,
 ): Promise<void> {
+	const contextLabel = context?.label;
 	const store = icmContinuousStore(agentDir);
 	const providerStart = world.provider.requests.length;
 	let lastObservation: Record<string, unknown> = {
@@ -1731,7 +1737,7 @@ export async function icmWaitForChatIdle(
 				workRowsFailure = diagnosticError instanceof Error ? diagnosticError.message : String(diagnosticError);
 			}
 			const diagnostics = {
-				context: context ?? "unspecified ICM caller",
+				context: contextLabel ?? "unspecified ICM caller",
 				agentDir,
 				expectedMessages,
 				...lastObservation,
@@ -1753,6 +1759,7 @@ export async function icmWaitForChatIdle(
 					model: request.model.id,
 					messageCount: request.context.messages.length,
 				})),
+				...(context?.readEvidence ? { ownerEvidence: readFailureEvidence(context.readEvidence) } : {}),
 			};
 			throw new Error(
 				`${error instanceof Error ? error.message : String(error)}; ICM diagnostics=${JSON.stringify(diagnostics)}`,
@@ -1766,6 +1773,16 @@ export async function icmWaitForChatIdle(
 		stopDriver.abort();
 		// The bounded wait already joined `driver` through Promise.all; avoid replacing its wrapped failure while cleaning up.
 		await driver.catch(() => undefined);
+	}
+}
+
+function readFailureEvidence(read: () => unknown): unknown {
+	try {
+		return read();
+	} catch (error) {
+		return {
+			unavailable: error instanceof Error ? error.message.slice(0, 240) : String(error).slice(0, 240),
+		};
 	}
 }
 
