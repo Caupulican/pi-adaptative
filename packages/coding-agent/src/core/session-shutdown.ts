@@ -1,3 +1,5 @@
+import { interfaceText } from "./language/interface-text.ts";
+
 export interface SessionShutdownTracker {
 	readonly completion: Promise<void>;
 	safely(action: () => void): void;
@@ -107,7 +109,7 @@ export async function settleClosingSessionMemory(ports: ClosingSessionMemoryPort
 		try {
 			await settlesWithin(
 				ports.waitForAgentIdle(),
-				`A run did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its final message may not have been persisted.`,
+				interfaceText().sessions.closing.runUnsettled(CLOSING_RUN_SETTLE_MS / 1000),
 			);
 		} finally {
 			ports.releaseAgentConsumer();
@@ -115,17 +117,17 @@ export async function settleClosingSessionMemory(ports: ClosingSessionMemoryPort
 		// Reflection may be held by an abort-ignoring provider; the same bound keeps memory closable.
 		await settlesWithin(
 			ports.settleReflectionTurn(),
-			`A reflection turn did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its work may not have been persisted.`,
+			interfaceText().sessions.closing.reflectionUnsettled(CLOSING_RUN_SETTLE_MS / 1000),
 		);
 		// Manual and automatic compaction end cancelled, or their outstanding work is disclosed.
 		await settlesWithin(
 			ports.settleCompaction(),
-			`A compaction did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its result is discarded.`,
+			interfaceText().sessions.closing.compactionUnsettled(CLOSING_RUN_SETTLE_MS / 1000),
 		);
 		// An aborted judgment of the owner's words still ends here, so a request it already paid for is recorded in this session.
 		await settlesWithin(
 			ports.settleOwnerGoalIntent(),
-			`An owner goal judgment did not settle within ${CLOSING_RUN_SETTLE_MS / 1000}s of quit; its usage may be recorded late.`,
+			interfaceText().sessions.closing.ownerGoalJudgmentUnsettled(CLOSING_RUN_SETTLE_MS / 1000),
 		);
 		await ports.shutdownMemory();
 	} finally {

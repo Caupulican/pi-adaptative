@@ -159,6 +159,17 @@ export const SESSIONS = {
 		retired: (operation: string) =>
 			`/task ${operation} is no longer available. Ask Pi to delegate the work instead; workers report back when they finish.`,
 	},
+	/** A quitting session's work that did not settle within its bounded wait; `seconds` is the bound. */
+	closing: {
+		runUnsettled: (seconds: number) =>
+			`A run did not settle within ${seconds}s of quit; its final message may not have been persisted.`,
+		reflectionUnsettled: (seconds: number) =>
+			`A reflection turn did not settle within ${seconds}s of quit; its work may not have been persisted.`,
+		compactionUnsettled: (seconds: number) =>
+			`A compaction did not settle within ${seconds}s of quit; its result is discarded.`,
+		ownerGoalJudgmentUnsettled: (seconds: number) =>
+			`An owner goal judgment did not settle within ${seconds}s of quit; its usage may be recorded late.`,
+	},
 	/** `/session`: the block that opens with the session's own stats. */
 	info: {
 		title: "Session Info",

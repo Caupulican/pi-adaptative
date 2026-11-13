@@ -174,6 +174,16 @@ export const SESSIONS = {
 		retired: (operation: string) =>
 			`/task ${operation} não existe mais. Peça ao Pi para delegar o trabalho; os workers relatam quando terminam.`,
 	},
+	closing: {
+		runUnsettled: (seconds: number) =>
+			`Uma execução não terminou em ${seconds}s após o encerramento; a mensagem final dela pode não ter sido gravada.`,
+		reflectionUnsettled: (seconds: number) =>
+			`Um turno de reflexão não terminou em ${seconds}s após o encerramento; o trabalho dele pode não ter sido gravado.`,
+		compactionUnsettled: (seconds: number) =>
+			`Uma compactação não terminou em ${seconds}s após o encerramento; o resultado dela foi descartado.`,
+		ownerGoalJudgmentUnsettled: (seconds: number) =>
+			`Uma avaliação de objetivo do dono não terminou em ${seconds}s após o encerramento; o uso dela pode ser registrado mais tarde.`,
+	},
 	info: {
 		title: "Informações da sessão",
 		name: "Nome:",
