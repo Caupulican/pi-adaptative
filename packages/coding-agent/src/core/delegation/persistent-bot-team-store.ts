@@ -91,6 +91,7 @@ import {
 	parseTeamMessage,
 	parseTeamRecord,
 } from "./persistent-bot-team-codecs.ts";
+import { botLiveState, workerLaneByAgentId } from "./persistent-bot-view-state.ts";
 import {
 	claimDueRoutineOccurrences,
 	clearRoutineAwayRefusals,
@@ -2253,27 +2254,7 @@ export class PersistentBotTeamStore {
 		defaultModelRef: string,
 		includeDirectContinuity = true,
 	): PersistentBotView[] {
-		const workerLanes = laneRecords.filter((lane) => lane.type === "worker" || lane.type === "managed-worker");
-
-		const laneByAgentId = new Map<string, LaneRecord>();
-		for (const lane of workerLanes) {
-			const id = lane.agentId ?? lane.laneId;
-			const existing = laneByAgentId.get(id);
-			if (!existing) {
-				laneByAgentId.set(id, lane);
-			} else if (lane.status === "running") {
-				laneByAgentId.set(id, lane);
-			} else if (lane.status === "queued" && existing.status !== "running") {
-				laneByAgentId.set(id, lane);
-			} else if (existing.status !== "running" && existing.status !== "queued") {
-				const existingTs = existing.completedAt ?? existing.startedAt ?? existing.queuedAt ?? "";
-				const laneTs = lane.completedAt ?? lane.startedAt ?? lane.queuedAt ?? "";
-				if (laneTs >= existingTs) {
-					laneByAgentId.set(id, lane);
-				}
-			}
-		}
-
+		const laneByAgentId = workerLaneByAgentId(laneRecords);
 		const liveAgentById = new Map(liveAgents.map((agent): [string, WorkerAgentView] => [agent.agentId, agent]));
 
 		const allAgentIds = new Set<string>();
@@ -2292,25 +2273,7 @@ export class PersistentBotTeamStore {
 			const liveAgent = liveAgentById.get(agentId);
 			const lane = laneByAgentId.get(agentId);
 
-			let state: PersistentBotLiveState;
-			if (
-				liveAgent?.dispatch === "running" ||
-				lane?.status === "running" ||
-				(liveAgent?.activity === "active" && liveAgent.dispatch !== "queued")
-			) {
-				state = "running";
-			} else if (liveAgent?.dispatch === "queued" || lane?.status === "queued") {
-				state = "queued";
-			} else if (botRecord?.retired || liveAgent?.status === "retired") {
-				state = "retired";
-			} else if (liveAgent?.awaitingParent) {
-				state = "awaiting_parent";
-			} else if (liveAgent?.lastResult?.status === "failed" || lane?.status === "failed") {
-				state = "failed";
-			} else {
-				state = "idle";
-			}
-
+			const state = botLiveState(liveAgent, lane, botRecord);
 			const modelRef =
 				liveAgent?.modelRef ??
 				lane?.modelRef ??
