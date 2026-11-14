@@ -39,6 +39,8 @@ const STOP_TASK = "Add two and five.";
 const STOPPED_LEADER_REPORT = "The goal is dropped.";
 const STOPPED_GOAL_REPORT = "The goal ended with its bot stopped.";
 const STOPPED_HELPER_REPORT = "Stopped.";
+const HELPER_QUESTION = "What is two and five?";
+const HELPER_ANSWER = "Two and five is seven.";
 
 const TAB = "tab-notes";
 const TAB_SOUL = "You answer owner questions about the tab width with one short sentence.";
@@ -61,7 +63,9 @@ const OPEN_GOAL = `Bot ${STOP_LEADER} leads an open goal; cancel it first (/lead
 /**
  * Leg 6: retire and stop. A leader with an open goal cannot be retired; an idle bot runs as a session of its own, is retired
  * with that session closed and comes back, continuing its conversation, when the owner writes to it again; stopping a
- * working leader interrupts it and the bots it made, and retires none.
+ * working leader interrupts it and the bots it made, and retires none. A bot a leader made still runs as a worker: retired
+ * idle, its worker is retired, and the owner's next message brings it back on a worker. A session opened afterwards reads
+ * that worker's conversation back from the bot's history index.
  */
 export async function runJourney7LifecyclePhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -71,7 +75,24 @@ export async function runJourney7LifecyclePhase(world: HarnessWorld): Promise<vo
 	} finally {
 		expect(await world.disposeSessionInBody(session), "the lifecycle session disposes cleanly").toBeUndefined();
 	}
+	await readHistoryInFreshSession(world);
 	trace.mark("root", "j7.lifecycle");
+}
+
+/**
+ * A session opened after the one that ran the bot's workers, with its own bot host, reads their conversation back from
+ * the bot's history index in its home: the chat shows the brought-back worker's answer at the first read, with no scan.
+ */
+async function readHistoryInFreshSession(world: HarnessWorld): Promise<void> {
+	const { session } = await world.createRootSession(MODEL_ID.root, { sessionManager: world.createSessionManager() });
+	try {
+		expect(
+			chatText(session, STOP_HELPER).includes(HELPER_ANSWER),
+			"a fresh session's chat of the bot a leader made shows its worker's answer, read from the bot's history index",
+		).toBe(true);
+	} finally {
+		expect(await world.disposeSessionInBody(session), "the fresh session disposes cleanly").toBeUndefined();
+	}
 }
 
 async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void> {
@@ -199,6 +220,14 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 				seen.helperLast = closingRequest(request);
 			},
 			reply: { content: [{ type: "text", text: STOPPED_HELPER_REPORT }] },
+		},
+		{
+			name: "j7-stop-helper-revived",
+			check: (request) => {
+				if (!carries(request, HELPER_QUESTION))
+					throw new Error("the brought-back leader-made bot's owner message is missing");
+			},
+			reply: { content: [{ type: "text", text: HELPER_ANSWER }] },
 		},
 	);
 	enqueueBot(
@@ -406,4 +435,34 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		files: true,
 		workerAgents: 0,
 	});
+
+	// A bot a leader made works inside that leader's tree, so it still runs as a worker: retiring it while idle retires its
+	// worker, and the owner's next message brings it back on a worker.
+	const retiredHelper = session.retirePersistentBot(STOP_HELPER);
+	expect(
+		{
+			retiredHelper,
+			recordRetired: botRecord(session, STOP_HELPER).retired === true,
+			workerStatuses: agentsOn(session, MODEL_ID.stopHelper).map((agent) => agent.status),
+			roster: botRosterState(session, STOP_HELPER),
+		},
+		"retiring an idle bot a leader made marks its record retired and retires its worker",
+	).toEqual({
+		retiredHelper: { retired: true, detail: `Bot ${STOP_HELPER} retired.` },
+		recordRetired: true,
+		workerStatuses: ["retired"],
+		roster: "retired",
+	});
+	const helperSend = await session.sendOperatorMessageToBot(STOP_HELPER, HELPER_QUESTION);
+	expect(
+		{ helperSend: helperSend.mode, recordRetired: botRecord(session, STOP_HELPER).retired === true },
+		"a message to a retired bot a leader made brings it back on a worker: the record is no longer retired",
+	).toEqual({ helperSend: "started", recordRetired: false });
+	await withDeadline(
+		trace,
+		"J7 leg 6: the brought-back leader-made bot answered on a worker",
+		world.provider.whenReached(reached(TRACK.stopHelper, "j7-stop-helper-revived")),
+	);
+	// Its worker settled, so its answer is in its conversation before the session closes.
+	await waitForBotRosterState(world, session, STOP_HELPER, "idle");
 }
