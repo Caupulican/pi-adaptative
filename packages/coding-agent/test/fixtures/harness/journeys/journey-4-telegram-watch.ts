@@ -101,14 +101,16 @@ export async function runJourney4TelegramWatchPhase(world: HarnessWorld): Promis
 			effect: () => baselineSampled.release(),
 		});
 		// The owner's words from the phone are judged as the owner's typed words are (full authority gives them a
-		// submission order; no grant is standing, so whether they grant one is asked too). System One cannot read what the
-		// project script does, and the request does not settle it.
+		// submission order; no grant is standing, so whether they grant one is asked too). System One cannot read what
+		// the project script does: whether it changes files outside the task or cannot be undone stays unsettled (above
+		// the effect family's 0.5 absence cut, below its 0.8 presence), and the request does not settle it (between 0.2
+		// and 0.8), so the check goes to the owner.
 		world.systemOne.enterPhase("j4-tg-watch-request", {
 			...ICM_INTAKE_JUDGMENTS,
-			leaves_machine: { kind: "noul", probability: 0.5 },
-			cannot_be_undone: { kind: "noul", probability: 0.5 },
-			touches_outside_task: { kind: "noul", probability: 0.5 },
-			acquires_external_code: { kind: "noul", probability: 0.5 },
+			leaves_machine: { kind: "noul", probability: 0.1 },
+			cannot_be_undone: { kind: "noul", probability: 0.6 },
+			touches_outside_task: { kind: "noul", probability: 0.6 },
+			acquires_external_code: { kind: "noul", probability: 0.1 },
 			request_authorizes: { kind: "noul", probability: 0.5 },
 		});
 		const requestAnswered = createBarrier();
@@ -181,7 +183,8 @@ export async function runJourney4TelegramWatchPhase(world: HarnessWorld): Promis
 			);
 			trace.mark("root", "telegram-watch.held");
 
-			// The approval run repeats the routine call. Its effects are remembered; only the owner's request is read again.
+			// The approval run repeats the routine call. Its effects are remembered, so only the request is read
+			// again; still unsettled, the check goes to the owner once more, and the recorded approval admits it.
 			world.systemOne.enterPhase("j4-tg-watch-approval", {
 				request_authorizes: { kind: "noul", probability: 0.5 },
 			});
