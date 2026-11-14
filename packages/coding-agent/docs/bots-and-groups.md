@@ -36,7 +36,9 @@ commands are judged one by one, as a read-only worker's are (nothing that edits,
 in every execution mode). A turn is bounded by `workerDelegation.maxUsd` (and the main session's own ceiling) when one is
 set, and what each turn spends is added to the main session's cost. Its tool loop is supervised as a worker's is: repeated broad validation with no new change is steered back to the work, and a turn System One judges stalled or off its message is steered, redirected or stopped; the directive shows in its chat. It reads the settings the main session reads, again each time the main session changes them, and runs
 System One as the main session does at each use (on or off, the same provider and connection; turning System One off or on in settings turns it off or on for a loaded bot too): your messages to it are judged as your
-messages to the main session are, it holds the `systemone` tool, and its System One evidence is kept in its home
+messages to the main session are, the claims in its answers (files changed, a commit, a passing check) are checked
+against its own turn's tool results as the main session's are, a contradicted or unbacked claim getting the one correction
+turn (on a message or a watch's wake alike), it holds the `systemone` tool, and its System One evidence is kept in its home
 (`typesafe-reviews/`). As a root session it writes the learning stores a worker only reads (model adaptation, fitness and
 outcomes, observations, the failure corpus, tool performance and recovery logs, steering certificates); every write
 takes the store file's lock and works from what the file holds then, so the bot's session and any other session or process
