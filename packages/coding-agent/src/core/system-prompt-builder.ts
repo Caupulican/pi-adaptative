@@ -19,7 +19,7 @@ import { estimateTokensFromChars } from "./context/context-item.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
 import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
-import { ICM_MEMORY_GUIDANCE } from "./memory/providers/icm.ts";
+import { icmGuidance } from "./memory/providers/icm.ts";
 import {
 	enforceModelCapabilitySystemPromptBudget,
 	MODEL_CAPABILITY_TOOL_GUIDELINES_MAX_CHARS,
@@ -86,7 +86,7 @@ export interface SystemPromptBuilderDeps {
 	/** The authoritative profile used by tools, lanes, and stable prompt shaping. */
 	getModelCapabilityProfile(): ModelCapabilityProfile;
 	/** The work lifecycle prompt is for a session conversing with the owner; the director role for one directing workers. */
-	readonly standing: Pick<SessionCapabilities, "ownsWorkLifecycle" | "directsWorkers">;
+	readonly standing: Pick<SessionCapabilities, "ownsWorkLifecycle" | "directsWorkers" | "readsOwnerMemory">;
 	/**
 	 * The owner's replacement for the whole generated prompt, scoped to this session. Read fresh on
 	 * every build so each rebuild path (tool surface change, routed turn, refresh) honors it.
@@ -257,7 +257,10 @@ export class SystemPromptBuilder {
 	private _buildStaticMemoryPrompt(profile: ModelCapabilityProfile, availableChars?: number): string | undefined {
 		// ICM mode: avoid reading legacy MEMORY.md/USER.md/OKF bodies automatically; install frozen ICM catalog.
 		if (this.isIcmMode()) {
-			return this.deps.getMemoryManager?.().freezeSystemPromptBlock?.() || ICM_MEMORY_GUIDANCE;
+			return (
+				this.deps.getMemoryManager?.().freezeSystemPromptBlock?.() ||
+				icmGuidance(this.deps.standing.readsOwnerMemory)
+			);
 		}
 		let budget =
 			profile.class !== "full" && profile.contextWindow !== undefined
