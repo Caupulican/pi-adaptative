@@ -17,7 +17,12 @@ import { StructuredLlmDecisionEngine } from "../decision/engines/structured-llm-
 import type { DecisionEvaluation } from "../decision/evaluation.ts";
 import { readNoul } from "../decision/noul.ts";
 import { createDecisionProgram } from "../decision/program.ts";
-import type { HarnessNotice, HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
+import {
+	type HarnessNoticeKind,
+	type HarnessNoticeObservation,
+	type WordedNotice,
+	wordedNotice,
+} from "../harness-notice.ts";
 import {
 	locateOwnerQuote,
 	normalizeOwnerRanges,
@@ -141,48 +146,27 @@ function isNoticedInactive(
 }
 
 /** The one line the owner reads for an intake state they can act on. */
-export function routineIntakeHarnessNotice(reason: RoutineIntakeNoticeReason): HarnessNotice {
-	const inactive = "Automatic routine intake is inactive:";
-	const unread =
-		"Requests for automatic work in the owner's messages are not read while this lasts; the routine tool still works.";
-	const restate = "Any request for automatic work in it was not scheduled; the owner can restate it";
-	const restateAll = "Any request for automatic work in them was not scheduled; the owner can restate it.";
-	switch (reason) {
-		case "no_model":
-			return { reason, text: `${inactive} no model is available to read the owner's messages. ${unread}` };
-		case "model_unpriced":
-			return {
-				reason,
-				text: `${inactive} the session model declares no prices, so intake cannot bound its spending. ${unread}`,
-			};
-		case "no_engine":
-			return { reason, text: `${inactive} no judge that can bound its spending is available. ${unread}` };
-		case "budget_exhausted":
-			return {
-				reason,
-				text: `${inactive} its spending allowance for this session (at most $${ROUTINE_INTAKE_SESSION_MAX_USD.toFixed(2)}, within the session's cost bound) is spent. ${unread}`,
-			};
-		case "source_not_read:secret":
-			return {
-				reason,
-				text: `Routine intake did not read an owner message that states timing because it contains text that looks like a secret. ${restate} without the secret.`,
-			};
-		case "source_not_read:oversize":
-			return {
-				reason,
-				text: `Routine intake did not read an owner message that states timing because it is longer than the ${MAX_BATCH_CHARS.toLocaleString("en-US")} characters intake reads. ${restate} in a shorter message.`,
-			};
-		case "sources_not_read:failed":
-			return {
-				reason,
-				text: `Routine intake stopped reading the owner's latest messages after repeated failures. ${restateAll}`,
-			};
-		case "sources_not_read:spent":
-			return {
-				reason,
-				text: `Routine intake's spending allowance for the owner's latest messages ran out before they were read. ${restateAll}`,
-			};
-	}
+export function routineIntakeHarnessNotice(reason: RoutineIntakeNoticeReason): WordedNotice {
+	return wordedNotice(reason, ({ notices: { routineIntake: words } }) => {
+		switch (reason) {
+			case "no_model":
+				return words.noModel;
+			case "model_unpriced":
+				return words.modelUnpriced;
+			case "no_engine":
+				return words.noEngine;
+			case "budget_exhausted":
+				return words.budgetExhausted(ROUTINE_INTAKE_SESSION_MAX_USD);
+			case "source_not_read:secret":
+				return words.sourceSecret;
+			case "source_not_read:oversize":
+				return words.sourceOversize(MAX_BATCH_CHARS);
+			case "sources_not_read:failed":
+				return words.sourcesFailed;
+			case "sources_not_read:spent":
+				return words.sourcesSpent;
+		}
+	});
 }
 
 export interface RoutineIntakeOutcome {

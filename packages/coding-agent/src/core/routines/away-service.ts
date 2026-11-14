@@ -41,7 +41,7 @@ import {
 } from "../delegation/bot-team-routine-helpers.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { type ExecResult, execCommand } from "../exec.ts";
-import type { HarnessNoticeObservation } from "../harness-notice.ts";
+import { type HarnessNoticeObservation, wordedNotice } from "../harness-notice.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { getStableSelfLaunchTarget } from "../process-matrix/self-launch-target.ts";
 import type { RoutineAwayAutostart } from "../settings/settings-schema.ts";
@@ -877,9 +877,6 @@ export async function awayServiceStatus(
 	return lines;
 }
 
-const NOTICE_AVAILABLE =
-	'Routines and channels served while no session is open keep running after reboot only if you enable always-on: set `routines.away.autostart` to "on" in your global settings, or run `/bot daemon service install`.';
-
 export interface AwayServiceDeps {
 	readonly store: () => PersistentBotTeamStore;
 	/** The session's directory: its own PATH entries never reach a service definition. */
@@ -938,11 +935,8 @@ export class AwayService {
 			if (record?.noticeToldAt !== undefined) return;
 			const told = this.deps.observeNotice(() =>
 				unavailable === undefined
-					? { reason: "always-on-available", text: NOTICE_AVAILABLE }
-					: {
-							reason: "always-on-unavailable",
-							text: `Routines of closed sessions and channels served while no session is open stop at reboot, and always-on cannot be enabled here: ${unavailable}`,
-						},
+					? wordedNotice("always-on-available", (words) => words.notices.awayService.available)
+					: wordedNotice("always-on-unavailable", (words) => words.notices.awayService.unavailable(unavailable)),
 			);
 			if (told) writeAwayServiceRecord(agentDir, { ...record, version: 1, noticeToldAt: this.deps.clock.now() });
 			return;

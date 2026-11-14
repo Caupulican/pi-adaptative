@@ -18,6 +18,7 @@
  * logged v1 prune keeps its v1 meaning and digest while new prunes emit v2.
  */
 
+import { englishText, type InterfaceText } from "../language/interface-text.ts";
 import { type OrchestrationEvent, toJsonObject } from "./contracts.ts";
 import {
 	assertRetentionPruneWellFormed,
@@ -40,8 +41,9 @@ import {
 } from "./task-runtime-state.ts";
 
 const SESSION_OBJECTIVE_PREFIX = "session:";
-const RELEASE_SENTENCE =
-	"Closed work with nothing in this store holding it is released at the next idle moment: after orchestration.retention.closedObjectiveDays (default 14 days), or at once while the store is nearly full (0 keeps it for the session's life).";
+
+/** The words of the objective limit's text (the notices catalogue's `objectiveLimit`): English unless the owner reads it. */
+type ObjectiveLimitWords = InterfaceText["notices"]["objectiveLimit"];
 
 /** Why a closed objective with no projection hold stays outside the projection: an external hold, or a fact the pass reads. */
 export type ExternalKeep = ExternalHold | "legacy_window" | "agent_message_pending";
@@ -49,32 +51,31 @@ export type ExternalKeep = ExternalHold | "legacy_window" | "agent_message_pendi
 /** Closed objectives counted per external keep. A missing kind counts zero. */
 export type ExternalKeepCounts = Readonly<Partial<Record<ExternalKeep, number>>>;
 
-/** The words each external keep reads as, in the store-full notice and in the refusal texts. */
-const EXTERNAL_KEEP_WORDS: Record<ExternalKeep, string> = {
-	outcome_undelivered: "with an outcome not yet delivered to its parent",
-	delegated_message_pending: "with a delegated message still pending",
-	follower_open: "with a follower still open",
-	current_goal: "that is the current goal",
-	delegation_open_parent: "under an open parent delegation",
-	legacy_window: "inside an open delegation's window",
-	agent_message_pending: "with a message queued for one of its agents",
-};
+/** The external keeps in the order the store-full notice and the refusal texts count them. */
+const EXTERNAL_KEEP_ORDER: readonly ExternalKeep[] = [
+	"outcome_undelivered",
+	"delegated_message_pending",
+	"follower_open",
+	"current_goal",
+	"delegation_open_parent",
+	"legacy_window",
+	"agent_message_pending",
+];
 
 /**
  * The sentence that counts the closed objectives kept outside the store, in the words the store-full notice uses. Empty
  * when no objective is kept outside the store.
  */
-export function keptOutsideSentence(keptOutside: ExternalKeepCounts): string {
+function keptOutsideSentence(keptOutside: ExternalKeepCounts, words: ObjectiveLimitWords): string {
 	const parts: string[] = [];
 	let total = 0;
-	for (const kind of Object.keys(EXTERNAL_KEEP_WORDS) as ExternalKeep[]) {
+	for (const kind of EXTERNAL_KEEP_ORDER) {
 		const count = keptOutside[kind] ?? 0;
 		if (count === 0) continue;
 		total += count;
-		parts.push(`${count} ${EXTERNAL_KEEP_WORDS[kind]}`);
+		parts.push(`${count} ${words.keep(kind)}`);
 	}
-	if (total === 0) return "";
-	return `Of the closed objectives counted above with no hold, ${total} ${total === 1 ? "is" : "are"} kept by delegation state outside the store (${parts.join(", ")}); ${total === 1 ? "it is" : "they are"} not released at idle until that state ends.`;
+	return total === 0 ? "" : words.keptOutside(total, parts);
 }
 
 /** The retained record kinds with a lifetime bound on the hot projection, in the order a shortage is reported. */
@@ -90,22 +91,6 @@ const LIFETIME_BOUNDED_RECORDS = [
 ] as const;
 
 type LifetimeBoundedRecord = (typeof LIFETIME_BOUNDED_RECORDS)[number];
-
-/** Why a closed objective stays, in the words the refusal uses. Every projection hold has one. */
-const HOLD_WORDS: Record<RetentionHold, string> = {
-	unfinished_task: "with an unfinished or unverified task",
-	live_attempt: "with a turn still running",
-	pending_notice: "with a notice not yet delivered",
-	pending_approval: "with an approval pending",
-	open_plan: "under an open plan",
-	receipt_outbox: "with a result or charge not yet received by the parent",
-	awaiting_parent: "whose last result the parent has not yet answered",
-	host_event_custody: "with host events still in flight",
-	resume_basis: "that an active agent resumes from",
-	managed_lane: "whose managed worker is not retired",
-	tree_live: "whose worker tree is still running",
-	referenced: "that retained work depends on",
-};
 
 export type ObjectiveRetention =
 	| { readonly kind: "open" }
@@ -130,7 +115,7 @@ export function classifyObjectives(state: TaskRuntimeProjection): Map<string, Ob
 }
 
 /** The first sentence of the objective refusal: how many objectives the store keeps and what each group is. */
-function objectiveSummary(state: TaskRuntimeProjection): string {
+function objectiveSummary(state: TaskRuntimeProjection, words: ObjectiveLimitWords): string {
 	const classes = classifyObjectives(state);
 	const heldCounts = new Map<RetentionHold, number>();
 	let open = 0;
@@ -144,10 +129,9 @@ function objectiveSummary(state: TaskRuntimeProjection): string {
 	}
 	const held = [...heldCounts.values()].reduce((total, count) => total + count, 0);
 	const heldParts = RETENTION_HOLD_ORDER.filter((hold) => (heldCounts.get(hold) ?? 0) > 0).map(
-		(hold) => `${heldCounts.get(hold)} ${HOLD_WORDS[hold]}`,
+		(hold) => `${heldCounts.get(hold)} ${words.hold(hold)}`,
 	);
-	const heldDetail = held === 0 ? "" : ` (${heldParts.join(", ")})`;
-	return `${classes.size} objectives are kept in this session's store: ${open} open, ${session} session work (which never closes; its finished tasks are released one by one, or with the closed plan that names them),${held} closed and held${heldDetail}, and ${free} closed with no hold.`;
+	return words.summary({ kept: classes.size, open, session, held, free }, heldParts);
 }
 
 /**
@@ -155,23 +139,23 @@ function objectiveSummary(state: TaskRuntimeProjection): string {
  * the count of closed objectives the store holds nothing on but that state outside the store keeps; without it the text
  * says only what the store can see.
  */
-export function describeObjectiveLimit(state: TaskRuntimeProjection, external?: ExternalKeepCounts): string {
+export function describeObjectiveLimit(
+	state: TaskRuntimeProjection,
+	external?: ExternalKeepCounts,
+	words: ObjectiveLimitWords = englishText().notices.objectiveLimit,
+): string {
 	const oldest = retentionUnits(state)
 		.filter((unit) => unit.kind === "objective")
 		.reduce<number | undefined>(
 			(min, unit) => (min === undefined || unit.lastActivityMs < min ? unit.lastActivityMs : min),
 			undefined,
 		);
-	const oldestSentence =
-		oldest === undefined
-			? ""
-			: `The oldest closed objective has been closed since ${new Date(oldest).toISOString().slice(0, 10)}.`;
 	return [
-		objectiveSummary(state),
-		RELEASE_SENTENCE,
-		external === undefined ? "" : keptOutsideSentence(external),
-		oldestSentence,
-		"Held work is released when its hold ends; otherwise start a new session.",
+		objectiveSummary(state, words),
+		words.release,
+		external === undefined ? "" : keptOutsideSentence(external, words),
+		oldest === undefined ? "" : words.oldestClosed(new Date(oldest).toISOString().slice(0, 10)),
+		words.heldReleased,
 	]
 		.filter((sentence) => sentence.length > 0)
 		.join(" ");
@@ -211,8 +195,9 @@ function describeRecordShortfall(
 	external?: ExternalKeepCounts,
 ): string {
 	const counted = record.field === "objectives" || record.field === "attempts";
-	const summary = counted ? ` ${objectiveSummary(state)}` : "";
-	const outside = counted && external !== undefined ? keptOutsideSentence(external) : "";
+	const words = englishText().notices.objectiveLimit;
+	const summary = counted ? ` ${objectiveSummary(state, words)}` : "";
+	const outside = counted && external !== undefined ? keptOutsideSentence(external, words) : "";
 	return `This session's store holds ${capacity.counts[record.field]} of its ${capacity.limits[record.field]} ${record.noun} and ${slots} more ${slots === 1 ? "is" : "are"} needed. Closed work with nothing in this store holding it is released at idle after orchestration.retention.closedObjectiveDays (default 14; 0 keeps it).${summary}${outside.length > 0 ? ` ${outside}` : ""} Lower the setting or start a new session to make room sooner.`;
 }
 

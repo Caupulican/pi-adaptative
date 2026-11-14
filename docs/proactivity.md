@@ -24,8 +24,9 @@ anchored at is missing from it) is settled instead of waiting and told with one 
 routine whose own saved point of the session is lost that way is removed and told the same way. A
 result addressed to a session that was deleted, and a routine that session saved, are settled and removed by
 the next main session's startup cleanup.
-A routine's notice (paused, not schedulable, a recurring snag, a result or the routine lost with its
-origin) is shown to the owner in the interface language, English or pt-BR; the model reads it in English.
+Every harness notice (a routine's state, a proactive review or knowledge collection that paused, routine
+intake, a CI fix ready, CI results not followed, a channel's state) is shown to the owner in the interface
+language, English or pt-BR; the model reads it in English.
 Configure these settings through `/proactivity` or the `proactivity` settings. The model-facing
 preferences tool requires confirmation on the owner's screen before a change.
 

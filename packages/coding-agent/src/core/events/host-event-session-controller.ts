@@ -196,7 +196,11 @@ export class HostEventSessionController {
 				deps.observeNotice("host-event-source", () => ({
 					scope: source,
 					state: connection
-						? { reason: `${connection.state}:${connection.reason}`, text: connection.text }
+						? {
+								reason: `${connection.state}:${connection.reason}`,
+								text: connection.text,
+								...(connection.ownerText === undefined ? {} : { ownerText: connection.ownerText }),
+							}
 						: "clear",
 				}));
 			},

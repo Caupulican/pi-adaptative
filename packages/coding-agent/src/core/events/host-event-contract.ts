@@ -376,8 +376,10 @@ export interface HostEventSourceConnection {
 	readonly state: "waiting" | "suspended";
 	/** Stable class of the cause; one owner notice is told per state and reason. */
 	readonly reason: string;
-	/** One owner-readable line. */
+	/** One line in English: the model reads it, and the source's store keeps it. */
 	readonly text: string;
+	/** The owner's line in the interface language, when the source words one; never stored. */
+	readonly ownerText?: string;
 }
 
 /** The connection a running source last reported: `armed` when its last report cleared its wait. */

@@ -10,6 +10,8 @@ import type { UnansweredReason } from "../../channels/batch-outcome.ts";
 import type { ChannelGapRecord } from "../../channels/channel-journal.ts";
 import type { KnowledgeNoticeReason } from "../../context/memory-diagnostics.ts";
 import type { HostEventReplayGap } from "../../events/host-event-contract.ts";
+import type { ExternalKeep } from "../../orchestration/retention.ts";
+import type { RetentionHold } from "../../orchestration/retention-eligibility.ts";
 import type { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../../system-one/semantic-plane-health.ts";
 import type { TurnOriginRecord } from "../../turn-origin.ts";
 
@@ -20,6 +22,37 @@ const KNOWLEDGE_ACTIONS: Readonly<Record<KnowledgeNoticeReason, string>> = {
 	no_model: " Set autoLearn.model to a configured, signed-in model.",
 	model_unpriced: " Set autoLearn.model to a model with a declared price.",
 	no_engine: "",
+};
+
+/** What a paused routine intake leaves working, as the sentence after its cause. */
+const INTAKE_UNREAD =
+	"Requests for automatic work in the owner's messages are not read while this lasts; the routine tool still works.";
+
+/** Why a closed objective stays, in the words the refusal uses. Every projection hold has one. */
+const HOLD_WORDS: Readonly<Record<RetentionHold, string>> = {
+	unfinished_task: "with an unfinished or unverified task",
+	live_attempt: "with a turn still running",
+	pending_notice: "with a notice not yet delivered",
+	pending_approval: "with an approval pending",
+	open_plan: "under an open plan",
+	receipt_outbox: "with a result or charge not yet received by the parent",
+	awaiting_parent: "whose last result the parent has not yet answered",
+	host_event_custody: "with host events still in flight",
+	resume_basis: "that an active agent resumes from",
+	managed_lane: "whose managed worker is not retired",
+	tree_live: "whose worker tree is still running",
+	referenced: "that retained work depends on",
+};
+
+/** The words each external keep reads as, in the store-full notice and in the refusal texts. */
+const EXTERNAL_KEEP_WORDS: Readonly<Record<ExternalKeep, string>> = {
+	outcome_undelivered: "with an outcome not yet delivered to its parent",
+	delegated_message_pending: "with a delegated message still pending",
+	follower_open: "with a follower still open",
+	current_goal: "that is the current goal",
+	delegation_open_parent: "under an open parent delegation",
+	legacy_window: "inside an open delegation's window",
+	agent_message_pending: "with a message queued for one of its agents",
 };
 
 /** Why CI results never reached a session, by the reason its replay gap records. */
@@ -307,6 +340,69 @@ export const NOTICES = {
 			unverified: (count: number) => `${count} unverified`,
 			burst: (count: number, name: string) => `${count} over channels.${name}.maxPendingPerConversation`,
 		},
+	},
+
+	/** An automatic routine intake state the owner can act on (`routine-intake.ts`). */
+	routineIntake: {
+		noModel: `Automatic routine intake is inactive: no model is available to read the owner's messages. ${INTAKE_UNREAD}`,
+		modelUnpriced: `Automatic routine intake is inactive: the session model declares no prices, so intake cannot bound its spending. ${INTAKE_UNREAD}`,
+		noEngine: `Automatic routine intake is inactive: no judge that can bound its spending is available. ${INTAKE_UNREAD}`,
+		budgetExhausted: (maxUsd: number) =>
+			`Automatic routine intake is inactive: its spending allowance for this session (at most $${maxUsd.toFixed(2)}, within the session's cost bound) is spent. ${INTAKE_UNREAD}`,
+		sourceSecret:
+			"Routine intake did not read an owner message that states timing because it contains text that looks like a secret. Any request for automatic work in it was not scheduled; the owner can restate it without the secret.",
+		sourceOversize: (maxChars: number) =>
+			`Routine intake did not read an owner message that states timing because it is longer than the ${maxChars.toLocaleString("en-US")} characters intake reads. Any request for automatic work in it was not scheduled; the owner can restate it in a shorter message.`,
+		sourcesFailed:
+			"Routine intake stopped reading the owner's latest messages after repeated failures. Any request for automatic work in them was not scheduled; the owner can restate it.",
+		sourcesSpent:
+			"Routine intake's spending allowance for the owner's latest messages ran out before they were read. Any request for automatic work in them was not scheduled; the owner can restate it.",
+	},
+	/** The always-on service for routines and channels while no session is open (`away-service.ts`). */
+	awayService: {
+		available:
+			'Routines and channels served while no session is open keep running after reboot only if you enable always-on: set `routines.away.autostart` to "on" in your global settings, or run `/bot daemon service install`.',
+		/** `why`: the service manager's own words for what is missing. */
+		unavailable: (why: string) =>
+			`Routines of closed sessions and channels served while no session is open stop at reboot, and always-on cannot be enabled here: ${why}`,
+	},
+	/**
+	 * What the orchestration store keeps when it is full (`retention.ts`): the store-full notice, and in English the
+	 * refusal a model reads.
+	 */
+	objectiveLimit: {
+		hold: (hold: RetentionHold): string => HOLD_WORDS[hold],
+		keep: (keep: ExternalKeep): string => EXTERNAL_KEEP_WORDS[keep],
+		/** `heldParts`: the held objectives counted by hold, each a count and `hold`'s words. */
+		summary: (
+			counts: {
+				readonly kept: number;
+				readonly open: number;
+				readonly session: number;
+				readonly held: number;
+				readonly free: number;
+			},
+			heldParts: readonly string[],
+		) =>
+			`${counts.kept} objectives are kept in this session's store: ${counts.open} open, ${counts.session} session work (which never closes; its finished tasks are released one by one, or with the closed plan that names them), ${counts.held} closed and held${heldParts.length === 0 ? "" : ` (${heldParts.join(", ")})`}, and ${counts.free} closed with no hold.`,
+		release:
+			"Closed work with nothing in this store holding it is released at the next idle moment: after orchestration.retention.closedObjectiveDays (default 14 days), or at once while the store is nearly full (0 keeps it for the session's life).",
+		/** `parts`: the objectives kept outside the store, each a count and `keep`'s words. */
+		keptOutside: (total: number, parts: readonly string[]) =>
+			`Of the closed objectives counted above with no hold, ${total} ${total === 1 ? "is" : "are"} kept by delegation state outside the store (${parts.join(", ")}); ${total === 1 ? "it is" : "they are"} not released at idle until that state ends.`,
+		oldestClosed: (date: string) => `The oldest closed objective has been closed since ${date}.`,
+		heldReleased: "Held work is released when its hold ends; otherwise start a new session.",
+	},
+	/** Why the CI source cannot follow results now (`ci-host-event-source.ts`); `error` is the failure's own text. */
+	ciConnection: {
+		commandMissing:
+			"CI results are not followed: the gh command is not installed. They start by themselves once gh is installed and signed in.",
+		repositoryUnavailable: (error: string) =>
+			`CI results are waiting for GitHub: the repository could not be resolved (${error}). They resume by themselves when it answers.`,
+		reconcileFailing: (failures: number, error: string) =>
+			`CI results are suspended after ${failures} failed checks in a row (${error}). They retry by themselves at least once every 30 minutes.`,
+		/** What the away host recorded while the session was closed: `text` is its kept English line, handed in whole. */
+		whileClosed: (since: string, text: string) => `Since ${since}, while this session was closed: ${text}`,
 	},
 
 	/** What a widget the extension drew too tall to keep becomes at the top of its frame. */

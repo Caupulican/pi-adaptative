@@ -5,7 +5,7 @@
  */
 
 import type { TimerPort } from "../../kernel/timer-port.ts";
-import type { HarnessNoticeObservation } from "../harness-notice.ts";
+import { type HarnessNoticeObservation, wordedNotice } from "../harness-notice.ts";
 import { describeObjectiveLimit } from "./retention.ts";
 import {
 	isUnderRetentionPressure,
@@ -131,8 +131,11 @@ export class OrchestrationRetentionController {
 		}
 		if (result.kind !== "nothing") return;
 		const state = passDeps.runtime().getSnapshot();
-		const text = describeObjectiveLimit(state, result.external);
-		this.deps.observeNotice(() => ({ reason: "store-full-held", text }));
+		this.deps.observeNotice(() =>
+			wordedNotice("store-full-held", (words) =>
+				describeObjectiveLimit(state, result.external, words.notices.objectiveLimit),
+			),
+		);
 	}
 
 	/** Reports one text once for the controller's life: a damaged archive or a repeated failure is not repeated. */

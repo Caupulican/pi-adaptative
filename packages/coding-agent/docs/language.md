@@ -32,7 +32,7 @@ A state or a cause that a report shows is worded in the interface language: whet
 
 Text written by you or by a model (a goal's words, a plan step, a bot's name, a session's title) is shown as it was written.
 
-A few values on screen are records or free text someone else wrote, and so are shown as they were written in every language: the notes a routine's runs stored about its progress, its refusal reasons, a daemon's stored reports, and the text of an error. A line that a model also reads keeps its English in the transcript and is drawn in the interface language: the line an aborted request leaves in the conversation is one.
+A few values on screen are records or free text someone else wrote, and so are shown as they were written in every language: the notes a routine's runs stored about its progress, its refusal reasons, a daemon's stored reports, and the text of an error. A line that a model also reads keeps its English in the transcript and is drawn in the interface language: the line an aborted request leaves in the conversation is one. The harness notices are others: a state the harness tells you about by itself (a paused routine, a channel that stopped, CI results that are not followed, a held action) reaches the model in English and is drawn for you in the interface language; a record or error text inside one is kept as written.
 
 The command line outside the interface is English: `pi --help`, print mode (`pi -p`), JSON mode, RPC mode, and the records the harness writes to disk. Those modes, and the workers they run, never follow the language setting.
 

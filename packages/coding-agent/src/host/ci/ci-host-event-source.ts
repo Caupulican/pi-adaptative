@@ -23,6 +23,7 @@ import {
 	HOST_EVENT_KINDS,
 	MAX_OWN_PULL_REQUESTS,
 } from "../../core/events/host-event-kinds.ts";
+import { wordedNotice } from "../../core/harness-notice.ts";
 import type { CiFailureEvidenceReader } from "../../core/proactivity/act-ahead-record.ts";
 import { boundedRedactedDiagnosticText } from "../../core/security/secret-text.ts";
 import { closeWatcher, FS_WATCH_RETRY_DELAY_MS, watchWithErrorHandler } from "../../utils/fs-watch.ts";
@@ -541,22 +542,23 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 					// The footer still reads local records; installing the command resumes events at the next retry.
 					this.connect({
 						state: "waiting",
-						reason: "command-missing",
-						text: "CI results are not followed: the gh command is not installed. They start by themselves once gh is installed and signed in.",
+						...wordedNotice("command-missing", (words) => words.notices.ciConnection.commandMissing),
 					});
 				else if (error instanceof CiRepositoryUnavailableError)
 					this.connect({
 						state: "waiting",
-						reason: "repository-unavailable",
-						text: `CI results are waiting for GitHub: the repository could not be resolved (${errorText(error)}). They resume by themselves when it answers.`,
+						...wordedNotice("repository-unavailable", (words) =>
+							words.notices.ciConnection.repositoryUnavailable(errorText(error)),
+						),
 					});
 				else {
 					this.report("reconcile", `CI events remain pending: ${errorText(error)}`);
 					if (++this.reconcileFailures >= CI_SUSPEND_AFTER_FAILURES)
 						this.connect({
 							state: "suspended",
-							reason: "reconcile-failing",
-							text: `CI results are suspended after ${this.reconcileFailures} failed checks in a row (${errorText(error)}). They retry by themselves at least once every 30 minutes.`,
+							...wordedNotice("reconcile-failing", (words) =>
+								words.notices.ciConnection.reconcileFailing(this.reconcileFailures, errorText(error)),
+							),
 						});
 				}
 			}
@@ -1073,8 +1075,12 @@ class CiHostEventSource implements HostEventSource, CiHostRuntime {
 		if (awayConnection)
 			sink.reportConnection(HOST_EVENT_KINDS["ci-attempt-terminal"].source, {
 				state: awayConnection.state,
-				reason: awayConnection.reason,
-				text: `Since ${new Date(awayConnection.since).toISOString()}, while this session was closed: ${awayConnection.text}`,
+				...wordedNotice(awayConnection.reason, (words) =>
+					words.notices.ciConnection.whileClosed(
+						new Date(awayConnection.since).toISOString(),
+						awayConnection.text,
+					),
+				),
 			});
 		return activationId;
 	}

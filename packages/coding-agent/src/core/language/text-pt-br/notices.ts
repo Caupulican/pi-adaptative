@@ -10,6 +10,8 @@ import type { UnansweredReason } from "../../channels/batch-outcome.ts";
 import type { ChannelGapRecord } from "../../channels/channel-journal.ts";
 import type { KnowledgeNoticeReason } from "../../context/memory-diagnostics.ts";
 import type { HostEventReplayGap } from "../../events/host-event-contract.ts";
+import type { ExternalKeep } from "../../orchestration/retention.ts";
+import type { RetentionHold } from "../../orchestration/retention-eligibility.ts";
 import type { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../../system-one/semantic-plane-health.ts";
 import type { TurnOriginRecord } from "../../turn-origin.ts";
 import type { InterfaceText } from "../interface-text.ts";
@@ -33,6 +35,37 @@ const UNANSWERED_REASONS: Readonly<Record<UnansweredReason, string>> = {
 	aborted: "o turno foi interrompido",
 	empty_answer: "resposta vazia",
 	no_answer: "sem resposta",
+};
+
+/** O que continua funcionando enquanto a leitura automática de rotinas está parada, como a frase depois da causa. */
+const INTAKE_UNREAD =
+	"Pedidos de trabalho automático nas suas mensagens não são lidos enquanto isso durar; a ferramenta de rotinas continua funcionando.";
+
+/** Por que um objetivo fechado fica, nas palavras do aviso. */
+const HOLD_WORDS: Readonly<Record<RetentionHold, string>> = {
+	unfinished_task: "com uma tarefa inacabada ou não verificada",
+	live_attempt: "com um turno ainda em execução",
+	pending_notice: "com um aviso ainda não entregue",
+	pending_approval: "com uma aprovação pendente",
+	open_plan: "sob um plano aberto",
+	receipt_outbox: "com um resultado ou cobrança ainda não recebido pela sessão principal",
+	awaiting_parent: "cujo último resultado a sessão principal ainda não respondeu",
+	host_event_custody: "com eventos do host ainda em trânsito",
+	resume_basis: "a partir do qual um agente ativo retoma",
+	managed_lane: "cujo worker gerenciado não foi aposentado",
+	tree_live: "cuja árvore de workers ainda está rodando",
+	referenced: "do qual depende trabalho retido",
+};
+
+/** O que mantém um objetivo fechado fora do armazenamento, nas palavras do aviso. */
+const EXTERNAL_KEEP_WORDS: Readonly<Record<ExternalKeep, string>> = {
+	outcome_undelivered: "com um resultado ainda não entregue à sessão principal",
+	delegated_message_pending: "com uma mensagem delegada ainda pendente",
+	follower_open: "com um seguidor ainda aberto",
+	current_goal: "que é o objetivo atual",
+	delegation_open_parent: "sob uma delegação principal aberta",
+	legacy_window: "dentro da janela de uma delegação aberta",
+	agent_message_pending: "com uma mensagem na fila para um dos agentes dele",
 };
 
 /** Por que resultados de CI nunca chegaram a uma sessão, pelo motivo que a lacuna registra. */
@@ -272,6 +305,58 @@ export const NOTICES = {
 			unverified: (count: number) => `${count} não verificada(s)`,
 			burst: (count: number, name: string) => `${count} acima de channels.${name}.maxPendingPerConversation`,
 		},
+	},
+
+	routineIntake: {
+		noModel: `A leitura automática de rotinas está inativa: nenhum modelo está disponível para ler as suas mensagens. ${INTAKE_UNREAD}`,
+		modelUnpriced: `A leitura automática de rotinas está inativa: o modelo da sessão não declara preços, então a leitura não consegue limitar o próprio gasto. ${INTAKE_UNREAD}`,
+		noEngine: `A leitura automática de rotinas está inativa: nenhum juiz capaz de limitar o gasto dela está disponível. ${INTAKE_UNREAD}`,
+		budgetExhausted: (maxUsd: number) =>
+			`A leitura automática de rotinas está inativa: a verba dela para esta sessão (no máximo $${maxUsd.toFixed(2).replace(".", ",")}, dentro do limite de custo da sessão) foi gasta. ${INTAKE_UNREAD}`,
+		sourceSecret:
+			"A leitura de rotinas não leu uma mensagem sua que indica um horário porque ela contém texto que parece um segredo. Nenhum pedido de trabalho automático nela foi agendado; você pode repeti-lo sem o segredo.",
+		sourceOversize: (maxChars: number) =>
+			`A leitura de rotinas não leu uma mensagem sua que indica um horário porque ela passa dos ${maxChars.toLocaleString("pt-BR")} caracteres que a leitura aceita. Nenhum pedido de trabalho automático nela foi agendado; você pode repeti-lo numa mensagem mais curta.`,
+		sourcesFailed:
+			"A leitura de rotinas parou de ler as suas últimas mensagens após falhas repetidas. Nenhum pedido de trabalho automático nelas foi agendado; você pode repeti-lo.",
+		sourcesSpent:
+			"A verba da leitura de rotinas para as suas últimas mensagens acabou antes de elas serem lidas. Nenhum pedido de trabalho automático nelas foi agendado; você pode repeti-lo.",
+	},
+	awayService: {
+		available:
+			'Rotinas e canais atendidos enquanto nenhuma sessão está aberta só continuam rodando depois de reiniciar se você ativar o modo sempre ligado: defina `routines.away.autostart` como "on" nas suas configurações globais, ou rode `/bot daemon service install`.',
+		unavailable: (why: string) =>
+			`Rotinas de sessões fechadas e canais atendidos enquanto nenhuma sessão está aberta param ao reiniciar, e o modo sempre ligado não pode ser ativado aqui: ${why}`,
+	},
+	objectiveLimit: {
+		hold: (hold: RetentionHold): string => HOLD_WORDS[hold],
+		keep: (keep: ExternalKeep): string => EXTERNAL_KEEP_WORDS[keep],
+		summary: (
+			counts: {
+				readonly kept: number;
+				readonly open: number;
+				readonly session: number;
+				readonly held: number;
+				readonly free: number;
+			},
+			heldParts: readonly string[],
+		) =>
+			`${counts.kept} objetivos são mantidos no armazenamento desta sessão: ${counts.open} abertos, ${counts.session} de trabalho da sessão (que nunca fecha; as tarefas terminadas dele são liberadas uma a uma, ou com o plano fechado que as nomeia), ${counts.held} fechados e retidos${heldParts.length === 0 ? "" : ` (${heldParts.join(", ")})`} e ${counts.free} fechados sem retenção.`,
+		release:
+			"Trabalho fechado que nada neste armazenamento retém é liberado no próximo momento ocioso: depois de orchestration.retention.closedObjectiveDays (14 dias por padrão), ou na hora enquanto o armazenamento está quase cheio (0 o mantém por toda a vida da sessão).",
+		keptOutside: (total: number, parts: readonly string[]) =>
+			`Dos objetivos fechados contados acima sem retenção, ${total} ${total === 1 ? "é mantido" : "são mantidos"} por estado de delegação fora do armazenamento (${parts.join(", ")}); ${total === 1 ? "ele não é liberado" : "eles não são liberados"} no ócio até esse estado terminar.`,
+		oldestClosed: (date: string) => `O objetivo fechado mais antigo está fechado desde ${date}.`,
+		heldReleased: "Trabalho retido é liberado quando a retenção termina; senão, comece uma nova sessão.",
+	},
+	ciConnection: {
+		commandMissing:
+			"Os resultados de CI não são acompanhados: o comando gh não está instalado. Eles começam sozinhos quando o gh estiver instalado e com login.",
+		repositoryUnavailable: (error: string) =>
+			`Os resultados de CI esperam o GitHub: o repositório não pôde ser resolvido (${error}). Eles voltam sozinhos quando ele responder.`,
+		reconcileFailing: (failures: number, error: string) =>
+			`Os resultados de CI estão suspensos após ${failures} verificações com falha seguidas (${error}). Eles tentam de novo sozinhos pelo menos a cada 30 minutos.`,
+		whileClosed: (since: string, text: string) => `Desde ${since}, enquanto esta sessão estava fechada: ${text}`,
 	},
 
 	widgetTruncated: "... (widget truncado)",
