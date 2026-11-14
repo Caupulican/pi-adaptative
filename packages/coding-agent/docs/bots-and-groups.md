@@ -87,12 +87,14 @@ leaves no stale "running"), and its chat from the session files. A message to a 
 bot's inbox (`bots/<id>/inbox/`, one file per message, at most 32 and 1 MiB waiting); the sender is told it was delivered
 to the host in that session and process, and the bot's chat in every session shows it as waiting. The host that holds the
 lock takes the inbox when its session loads (before the message that loaded it), when the watch over the bot homes sees a
-message written (every 5 seconds while that watch does not run), and before an idle close, giving each message to the
+message written (every 5 seconds while that watch does not run, and every minute beside a watch that runs, which can miss
+what another process writes), and before an idle close, giving each message to the
 bot's session as your words, oldest first; the bot answers in its chat, and that turn's warnings and spend go to the
 host's own session. A message the session refuses (its model moved or cannot run, say) leaves the queue as a refused
 record that the chat shows with the reason (the newest eight are kept), and the host's session is warned. A message that
 waits when the host lets the bot go or dies is taken by the process that opens the bot next, including one working in the
-directory the message was sent from; a bot retired or moved to a worker refuses what waits, with the reason. Delivery is at
+directory the message was sent from: every process lists the inboxes of the bots no process hosts once a minute, so that
+happens without the owner's next message even where the watch over the bot homes does not fire; a bot retired or moved to a worker refuses what waits, with the reason. Delivery is at
 least once: a host killed after its session took a message and before it deleted the file gives it again. Like the session
 files beside it, the inbox is private harness storage: a worker's and a bot session's file and process tools are refused
 the bot homes. `/bot stop` of a bot working in another session says to stop it there. A session started after every other one closed lists each bot with its whole conversation.

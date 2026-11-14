@@ -261,6 +261,7 @@ export class BotSessionHost {
 			modelRefusal: (record, sender) => this.modelRefusal(record, this.define(record, sender)),
 			admissionTimers: () => ports.timers().port("provider-admission"),
 			retake: (agentId) => this.retakeRefused(agentId),
+			takeInbox: (agentId) => this.takeInbox(agentId),
 			sender: () => ports.sender(),
 			senderIn: (cwd) => ports.senderIn(cwd),
 			open: (agentId, sender) => this.open(agentId, sender),
@@ -960,8 +961,12 @@ export class BotSessionHost {
 		return live.count;
 	}
 
-	/** Opens every bot whose own session is owed work that no process takes (see `BotOwedWork.openIfOwed`). */
+	/**
+	 * Opens every bot whose own session is owed work that no process takes (see `BotOwedWork.openIfOwed`), and from then on
+	 * lists the bots' inboxes on a slow cadence (`BotOwedWork.sweepInboxes`).
+	 */
 	openOwed(): void {
+		this.owed.sweepInboxes();
 		const bots = this.ports.store().listBots();
 		if (bots.length === 0) return;
 		this.view.watch();

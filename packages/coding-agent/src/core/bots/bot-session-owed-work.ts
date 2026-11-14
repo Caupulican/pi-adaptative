@@ -14,7 +14,7 @@ import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
-import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
+import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { type BotInboxItem, botInboxWaiting } from "./bot-inbox.ts";
 import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
@@ -105,6 +105,13 @@ export function cancelOtherSessionsWatches(
 	return cancelled;
 }
 
+/**
+ * How often every bot's inbox is listed, beside the watch over the bot homes: where that watch does not fire (a network
+ * home, some WSL mounts), a message left waiting is taken up within this, not at the owner's next send or the session's
+ * idle close.
+ */
+const OWED_INBOX_SWEEP_MS = 60 * 1000;
+
 /** What the opening of owed sessions reads from its host. */
 export interface BotOwedWorkPorts {
 	agentDir(): string;
@@ -134,6 +141,8 @@ export interface BotOwedWorkPorts {
 	admissionTimers(): TimerPort;
 	/** A refusal's cause may have cleared: the host takes the bot's refused work up again. */
 	retake(agentId: string): void;
+	/** Takes the inbox of a bot the host runs. */
+	takeInbox(agentId: string): void;
 	/** The root attached last, and an attached root working in `cwd`. */
 	sender(): BotSender;
 	senderIn(cwd: string): BotSender | undefined;
@@ -161,6 +170,8 @@ export class BotOwedWork {
 	private readonly refusals = new Map<string, RecordedRefusal>();
 	/** The alarm at the recorded end of a bot's model refusal. */
 	private readonly alarms = new Map<string, WallAlarm>();
+	/** The periodic listing of the bots' inboxes (see {@link sweepInboxes}). */
+	private sweep: RepeatingAlarm | undefined;
 
 	constructor(ports: BotOwedWorkPorts) {
 		this.ports = ports;
@@ -200,6 +211,26 @@ export class BotOwedWork {
 	stop(): void {
 		for (const alarm of this.alarms.values()) alarm.stop();
 		this.alarms.clear();
+		this.sweep?.stop();
+		this.sweep = undefined;
+	}
+
+	/**
+	 * Lists every bot's inbox every `OWED_INBOX_SWEEP_MS` until the host stops, whether the watch over the bot homes runs
+	 * or not (a watch that runs can still miss what another process writes): a message waiting for a bot this host runs is
+	 * taken, and a bot no host runs is opened ({@link openIfOwed}). Costs one directory listing per bot when nothing waits;
+	 * no session file is read.
+	 */
+	sweepInboxes(): void {
+		if (this.sweep !== undefined || this.ports.stopped()) return;
+		this.sweep = repeatEvery(this.ports.timers(), OWED_INBOX_SWEEP_MS, () => {
+			const agentDir = this.ports.agentDir();
+			for (const { agentId } of this.ports.store().listBots()) {
+				if (!botInboxWaiting(agentDir, agentId)) continue;
+				if (this.ports.hostedHere(agentId)) this.ports.takeInbox(agentId);
+				else this.openIfOwed(agentId);
+			}
+		});
 	}
 
 	private record(agentId: string, scope: RecordedRefusal["scope"], key: string | undefined, error: unknown): void {
