@@ -11,7 +11,13 @@ export const RISK_BUDGET_LIMIT_FIELDS = [
 
 export type RiskBudgetLimitField = (typeof RISK_BUDGET_LIMIT_FIELDS)[number];
 
-export const RISK_BUDGET_FIELDS = [...RISK_BUDGET_LIMIT_FIELDS, "requireApprovalAboveCostUsd"] as const;
+export const RISK_BUDGET_FIELDS = [...RISK_BUDGET_LIMIT_FIELDS, "maxMeteredCostUsd"] as const;
+
+/**
+ * The legacy name of `maxMeteredCostUsd`, read from profiles and durable records written before the rename and never
+ * written: a budget that sets both names is refused.
+ */
+const LEGACY_METERED_COST_FIELD = "requireApprovalAboveCostUsd";
 
 const DISCRETE_BUDGET_FIELDS: ReadonlySet<(typeof RISK_BUDGET_FIELDS)[number]> = new Set([
 	"maxTokens",
@@ -27,13 +33,16 @@ function assertKnownRiskBudgetFields(budget: Record<string, unknown>, label: str
 	if (unknownField) throw new TypeError(`${label} contains an unsupported field.`);
 }
 
-/** Parse raw durable budget input without cloning untrusted values. */
+/** Parse raw durable budget input without cloning untrusted values; a field under its former name reads under its current one. */
 export function parseRiskBudget(value: unknown, label: string): RiskBudget {
 	if (!isPlainRecord(value)) throw new TypeError(`${label} must be an object.`);
-	assertKnownRiskBudgetFields(value, label);
+	const { [LEGACY_METERED_COST_FIELD]: legacyMetered, ...current } = value;
+	if (legacyMetered !== undefined && current.maxMeteredCostUsd !== undefined)
+		throw new TypeError(`${label} sets both maxMeteredCostUsd and its legacy name ${LEGACY_METERED_COST_FIELD}.`);
+	assertKnownRiskBudgetFields(current, label);
 	const budget: RiskBudget = {};
 	for (const field of RISK_BUDGET_FIELDS) {
-		const candidate = value[field];
+		const candidate = field === "maxMeteredCostUsd" ? (current[field] ?? legacyMetered) : current[field];
 		if (candidate === undefined) continue;
 		if (typeof candidate !== "number") throw new TypeError(`${label}.${field} must be a number.`);
 		budget[field] = candidate;
@@ -70,9 +79,9 @@ export function intersectRiskBudgets(...budgets: readonly RiskBudget[]): RiskBud
 		const values = budgets.map((budget) => budget[field]).filter((value): value is number => value !== undefined);
 		if (values.length > 0) result[field] = Math.min(...values);
 	}
-	const approvalThreshold = result.requireApprovalAboveCostUsd;
-	if (approvalThreshold !== undefined) {
-		result.maxCostUsd = Math.min(result.maxCostUsd ?? approvalThreshold, approvalThreshold);
+	const meteredCeiling = result.maxMeteredCostUsd;
+	if (meteredCeiling !== undefined) {
+		result.maxCostUsd = Math.min(result.maxCostUsd ?? meteredCeiling, meteredCeiling);
 	}
 	return result;
 }

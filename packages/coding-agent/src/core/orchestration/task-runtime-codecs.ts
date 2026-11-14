@@ -86,7 +86,7 @@ import {
 import { DISPATCH_FIELDS } from "./dispatch-request-fields.ts";
 import { orchestrationModelBindingFromValue } from "./profile-registry.ts";
 import { retentionArchiveIdsField } from "./retention-event.ts";
-import { validateRiskBudget } from "./risk-budget.ts";
+import { parseRiskBudget } from "./risk-budget.ts";
 import {
 	assertRecordWithinLimit,
 	assertRetainedProjectionNestedCollections,
@@ -237,12 +237,16 @@ function boolean(value: unknown, label: string): boolean {
 	return value;
 }
 
-export function assertRiskBudget(budget: RiskBudget | undefined, label: string): void {
+function riskBudgetFromValue(value: unknown, label: string): RiskBudget {
 	try {
-		validateRiskBudget(budget ?? {}, label);
+		return parseRiskBudget(value, label);
 	} catch (error) {
 		throw new DurableTaskRuntimeError(error instanceof Error ? error.message : String(error));
 	}
+}
+
+export function assertRiskBudget(budget: RiskBudget | undefined, label: string): void {
+	riskBudgetFromValue(budget ?? {}, label);
 }
 
 function stringArray(value: unknown, label: string): string[] {
@@ -551,8 +555,7 @@ function objectiveFromValue(value: unknown, label: string): ObjectiveContract {
 		};
 	});
 	assertAcceptanceCriteria(acceptanceCriteria);
-	const riskBudget = structuredClone(record(objective.riskBudget, `${label}.riskBudget`)) as RiskBudget;
-	assertRiskBudget(riskBudget, `${label}.riskBudget`);
+	const riskBudget = riskBudgetFromValue(objective.riskBudget, `${label}.riskBudget`);
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		objectiveId: dispatchIdentifier(objective.objectiveId, `${label}.objectiveId`),
@@ -692,8 +695,7 @@ export function taskFromValue(value: unknown, label: string): TaskContract {
 	) {
 		throw new DurableTaskRuntimeError(`${label}.requiredCapabilities must be a bounded capability array.`);
 	}
-	const riskBudget = structuredClone(record(task.riskBudget, `${label}.riskBudget`)) as RiskBudget;
-	assertRiskBudget(riskBudget, `${label}.riskBudget`);
+	const riskBudget = riskBudgetFromValue(task.riskBudget, `${label}.riskBudget`);
 	return {
 		schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
 		taskId: dispatchIdentifier(task.taskId, `${label}.taskId`),
@@ -874,8 +876,7 @@ export function executionGrantFromValue(value: unknown, label: string): Executio
 			source: retainedDescription(decision.source, `${label}.decisionTrace[${index}].source`),
 		};
 	});
-	const budget = structuredClone(record(grant.budget, `${label}.budget`)) as RiskBudget;
-	assertRiskBudget(budget, `${label}.budget`);
+	const budget = riskBudgetFromValue(grant.budget, `${label}.budget`);
 	const issuedAt = isoDate(grant.issuedAt, `${label}.issuedAt`);
 	const expiresAt = grant.expiresAt === undefined ? undefined : isoDate(grant.expiresAt, `${label}.expiresAt`);
 	if (expiresAt && Date.parse(expiresAt) <= Date.parse(issuedAt)) {
@@ -1620,9 +1621,8 @@ function approvalFromValue(value: unknown, label: string): ApprovalRequestContra
 	}
 	const requestedBudget =
 		approval.requestedBudget !== undefined
-			? (structuredClone(record(approval.requestedBudget, `${label}.requestedBudget`)) as RiskBudget)
+			? riskBudgetFromValue(approval.requestedBudget, `${label}.requestedBudget`)
 			: undefined;
-	assertRiskBudget(requestedBudget, `${label}.requestedBudget`);
 	if (capabilities.length === 0 && !requestedBudget) {
 		throw new DurableTaskRuntimeError(`${label} must request capabilities or budget.`);
 	}

@@ -226,7 +226,11 @@ export interface RiskBudget {
 	maxCostUsd?: number;
 	maxAttempts?: number;
 	maxToolCalls?: number;
-	requireApprovalAboveCostUsd?: number;
+	/**
+	 * Dollar ceiling that lowers `maxCostUsd` where budgets intersect. Read from the legacy name
+	 * `requireApprovalAboveCostUsd`; written only under this one.
+	 */
+	maxMeteredCostUsd?: number;
 }
 
 export interface AcceptanceCriterion {
