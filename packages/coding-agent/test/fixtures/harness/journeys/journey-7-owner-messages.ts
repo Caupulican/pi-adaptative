@@ -3,6 +3,7 @@ import { expect } from "vitest";
 import { botHostLockFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { BotHostStateWriter } from "../../../../src/core/bots/bot-host-state.ts";
+import { readBotInbox } from "../../../../src/core/bots/bot-inbox.ts";
 import { takeProcessLock } from "../../../../src/core/remote/host-lock.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
@@ -15,6 +16,7 @@ import {
 	createOwnerBot,
 	enqueueBot,
 	MODEL_ID,
+	modelOf,
 	positionOf,
 	reached,
 	TRACK,
@@ -53,16 +55,15 @@ const HELD_ANSWER = "The cache holds two hundred entries.";
 /** Another bot session host: in another process, or another host in this one, the lock names it the same way. */
 const OTHER_HOST = "j7-other-host";
 const OTHER_HOST_SESSION = "0f1e2d3c-4b5a-4968-8776-655443322110";
-/** The refusal names the session hosting the bot and its process, so the owner knows where to message it. */
-const HELD_ELSEWHERE = `Bot ${HELD} is open in another session (${OTHER_HOST_SESSION.slice(0, 8)}, process ${process.pid}).`;
 
 /**
  * Leg 2: the owner writes to one bot and then to a group. A send to an idle bot starts its own session (no worker stands
  * for it); a send while that session's turn is held is taken by the same session at its next request boundary, in order,
  * and both messages and the answer are in the bot's own session files. A group send fans out to every member, a
  * mention narrows it to one, and a mention of a bot outside the group is refused before anything is delivered. None of it
- * starts a root turn: the owner talks to the bots, not through the orchestrator. A bot another host holds is refused,
- * naming that host's session and process, and leaves nothing behind; once that host lets it go, the bot runs here.
+ * starts a root turn: the owner talks to the bots, not through the orchestrator. A message to a bot another host holds
+ * waits in the bot's inbox, naming that host's session and process, and builds nothing here; once that host gives the bot
+ * back, this host takes the message and the bot answers it here, once.
  */
 export async function runJourney7OwnerMessagesPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -314,11 +315,25 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 
 /**
  * One host runs a bot's session at a time: while another host holds the bot's lock and says what its session is doing, the
- * owner's message here is refused in the product's words, naming that host's session and process, and builds nothing.
- * Once that host gave the bot back, the same message starts the bot's own session here.
+ * owner's message here is not refused and builds nothing here. It waits in the bot's inbox, and the send names that host's
+ * session and process. Once that host gives the bot back, this host takes the inbox on its own (the home watch announces
+ * the host's change): the bot's own session opens here and answers that message, exactly once.
  */
 async function sendToBotHeldElsewhere(world: HarnessWorld, session: AgentSession): Promise<void> {
 	createOwnerBot(session, HELD, MODEL_ID.held, HELD_SOUL);
+	// The bot's soul opens its own system prompt, so a request carrying it is the bot's.
+	const heldRequests = () =>
+		world.provider.requests.filter((request) => (request.context.systemPrompt ?? "").includes(HELD_SOUL));
+	const heldRequestsBefore = heldRequests().length;
+	let askedTimes = -1;
+	enqueueBot(world, TRACK.held, MODEL_ID.held, HELD_SOUL, {
+		name: "j7-held-first",
+		check: (request) => {
+			if (!carries(request, HELD_QUESTION)) throw new Error("the owner's message to the released bot is missing");
+			askedTimes = ownerMessagesCarrying(request.context.messages, HELD_QUESTION);
+		},
+		reply: { content: [{ type: "text", text: HELD_ANSWER }] },
+	});
 	const taken = takeProcessLock(botHostLockFile(world.agentDir, HELD), OTHER_HOST);
 	if (!taken.held) throw new Error("the other host could not take the bot's lock");
 	const otherState = new BotHostStateWriter(world.agentDir, {
@@ -329,43 +344,76 @@ async function sendToBotHeldElsewhere(world: HarnessWorld, session: AgentSession
 		holder: OTHER_HOST,
 	});
 	otherState.publish("idle");
-	// The bot's soul opens its own system prompt, so a request carrying it is the bot's.
-	const heldRequests = () =>
-		world.provider.requests.filter((request) => (request.context.systemPrompt ?? "").includes(HELD_SOUL)).length;
-	const heldRequestsBefore = heldRequests();
 	try {
-		await expect(
-			session.sendOperatorMessageToBot(HELD, HELD_QUESTION),
-			"a bot another host holds is refused, naming that host's session and process",
-		).rejects.toThrow(HELD_ELSEWHERE);
+		const sent = await session.sendOperatorMessageToBot(HELD, HELD_QUESTION);
+		const waiting = readBotInbox(world.agentDir, HELD, (file, reason) => {
+			throw new Error(`the bot's inbox holds an unreadable message ${file}: ${reason}`);
+		});
+		expect(
+			{
+				sent,
+				waiting: waiting.map((item) => ({
+					id: item.message.id,
+					text: item.message.text,
+					from: item.message.from.sessionId,
+				})),
+				files: botSessionFilesText(world, HELD),
+				requests: heldRequests().length - heldRequestsBefore,
+			},
+			"a message to a bot another host holds waits in the bot's inbox, the send naming that host's session and process, and builds no session of the bot here and reaches no model",
+		).toEqual({
+			sent: {
+				agentId: HELD,
+				mode: "queued",
+				messageId: waiting[0]?.message.id,
+				modelRef: modelOf(MODEL_ID.held),
+				deliveredTo: { pid: process.pid, sessionId: OTHER_HOST_SESSION },
+			},
+			waiting: [{ id: sent.messageId, text: HELD_QUESTION, from: session.sessionId }],
+			files: "",
+			requests: 0,
+		});
 	} finally {
+		// The other host gives the bot back: its state is cleared and its lock released.
 		otherState.clear();
 		taken.lock.release();
 	}
-	expect(
-		{
-			files: botSessionFilesText(world, HELD),
-			requests: heldRequests() - heldRequestsBefore,
-		},
-		"the refused message built no session of the bot here and reached no model",
-	).toEqual({ files: "", requests: 0 });
 
-	enqueueBot(world, TRACK.held, MODEL_ID.held, HELD_SOUL, {
-		name: "j7-held-first",
-		check: (request) => {
-			if (!carries(request, HELD_QUESTION)) throw new Error("the owner's message to the released bot is missing");
-		},
-		reply: { content: [{ type: "text", text: HELD_ANSWER }] },
-	});
-	const sent = await session.sendOperatorMessageToBot(HELD, HELD_QUESTION);
 	await withDeadline(
 		world.trace,
-		"J7 leg 2: the bot the other host gave back answered here",
+		"J7 leg 2: this host took the inbox of the bot the other host gave back, and the bot answered here",
 		world.provider.whenReached(reached(TRACK.held, "j7-held-first")),
 	);
 	await waitForBotRosterState(world, session, HELD, "idle");
 	expect(
-		{ sent: sent.mode, files: botSessionFilesText(world, HELD).includes(HELD_ANSWER) },
-		"once the other host gave the bot back, the owner's message starts its own session here",
-	).toEqual({ sent: "started", files: true });
+		{
+			asked: askedTimes,
+			requests: heldRequests().length - heldRequestsBefore,
+			inbox: readBotInbox(world.agentDir, HELD, () => undefined).length,
+			answered: botSessionFilesText(world, HELD).includes(HELD_ANSWER),
+			stored: ownerMessagesCarrying(botSessionMessages(world, HELD), HELD_QUESTION),
+		},
+		"once the other host gave the bot back, this host took the waiting message: the bot's own session opened here and answered it, delivered once and taken out of the inbox",
+	).toEqual({ asked: 1, requests: 1, inbox: 0, answered: true, stored: 1 });
+}
+
+/** How many user messages of a conversation carry `text`: the owner's words delivered once are in one of them. */
+function ownerMessagesCarrying(messages: readonly unknown[], text: string): number {
+	return messages.filter(
+		(message) =>
+			typeof message === "object" &&
+			message !== null &&
+			(message as { role?: unknown }).role === "user" &&
+			JSON.stringify(message).includes(text),
+	).length;
+}
+
+/** The messages the bot's own session files hold, in the order they were written. */
+function botSessionMessages(world: HarnessWorld, agentId: string): unknown[] {
+	return botSessionFilesText(world, agentId)
+		.split("\n")
+		.filter((line) => line.trim().length > 0)
+		.map((line) => JSON.parse(line) as { type?: unknown; message?: unknown })
+		.filter((entry) => entry.type === "message")
+		.map((entry) => entry.message);
 }
