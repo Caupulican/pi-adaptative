@@ -68,7 +68,10 @@ export type BotSessionCompilation =
 			/** The profile's resources as a worker's system prompt carries them; empty when it has none. */
 			readonly resourceSystemPrompt: string;
 			/** How the plan holds its scope: its working directory, whether reads are confined, whether it or its shell edits nothing. */
-			readonly plan: Pick<WorkerExecutionPlan, "cwd" | "readConfined" | "readOnly" | "shellReadOnly">;
+			readonly plan: Pick<
+				WorkerExecutionPlan,
+				"cwd" | "readConfined" | "readScopeNamed" | "readPaths" | "deniedPaths" | "readOnly" | "shellReadOnly"
+			>;
 	  };
 
 type Bound =
@@ -169,6 +172,9 @@ export function compileBotSessionContract(
 		plan: {
 			cwd: plan.cwd,
 			readConfined: plan.readConfined,
+			readScopeNamed: plan.readScopeNamed,
+			readPaths: plan.readPaths,
+			deniedPaths: plan.deniedPaths,
 			readOnly: plan.readOnly,
 			shellReadOnly: plan.shellReadOnly,
 		},

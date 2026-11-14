@@ -52,6 +52,7 @@ import type {
 } from "../delegation/bot-operator-message-options.ts";
 import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import { contextFilesWithinReadScope } from "../delegation/worker-execution-policy.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
@@ -671,10 +672,16 @@ export class BotSessionHost {
 				noSkills: true,
 				noPromptTemplates: true,
 				noThemes: true,
-				// A profile's resources reach the bot's prompt as a worker's carries them.
-				...(definition.resourceSystemPrompt
-					? { appendSystemPromptOverride: (base: string[]) => [...base, definition.resourceSystemPrompt ?? ""] }
-					: {}),
+				// The prompt a worker of the bot carries: the project context files its read scope reaches, a profile's resources
+				// before them, and none of the owner's own system prompt files (SYSTEM.md, APPEND_SYSTEM.md).
+				agentsFilesOverride: (base) => ({
+					agentsFiles: definition.contextFileScope
+						? contextFilesWithinReadScope(base.agentsFiles, definition.contextFileScope)
+						: base.agentsFiles,
+				}),
+				systemPromptOverride: () => undefined,
+				appendSystemPromptOverride: () =>
+					definition.resourceSystemPrompt ? [definition.resourceSystemPrompt] : [],
 			});
 			await resourceLoader.reload();
 			session = (

@@ -23,7 +23,12 @@ import { WORKER_TOOL_ADAPTER_NAMES } from "../autonomy/worker-tool-adapter-regis
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts";
 import { type PersistentBotRecord, RESERVED_BOT_CREATOR_IDS } from "../delegation/persistent-bot-team-store.ts";
-import { READ_TOOL_NAMES, REPO_READ_TOOL_NAME, WRITE_TOOL_NAMES } from "../delegation/worker-execution-policy.ts";
+import {
+	type ContextFileReadScope,
+	READ_TOOL_NAMES,
+	REPO_READ_TOOL_NAME,
+	WRITE_TOOL_NAMES,
+} from "../delegation/worker-execution-policy.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { OrchestrationThinkingLevel, WorkerRole } from "../orchestration/contracts.ts";
@@ -48,8 +53,10 @@ export interface BotSessionDefinition {
 	readonly privatePathScope: SessionPrivatePathScope;
 	readonly capabilityEnvelope?: CapabilityEnvelope;
 	readonly soul?: string;
-	/** A profile's resources, appended to the system prompt as a worker's carries them. */
+	/** A profile's resources, in the system prompt where a worker's role prompt carries them. */
 	readonly resourceSystemPrompt?: string;
+	/** A profile's named read scope: the project context files its prompt carries are those it reaches, as a worker's are. */
+	readonly contextFileScope?: ContextFileReadScope;
 	/** A profile's dollar bound on one turn, beside the owner's worker bound and the main session's. */
 	readonly spendBoundUsd?: number;
 }
@@ -181,6 +188,16 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 		capabilityEnvelope,
 		...(soul !== undefined ? { soul } : {}),
 		...(compiled.resourceSystemPrompt ? { resourceSystemPrompt: compiled.resourceSystemPrompt } : {}),
+		...(plan.readScopeNamed
+			? {
+					contextFileScope: {
+						cwd: plan.cwd,
+						readScopeNamed: true,
+						readPaths: plan.readPaths,
+						deniedPaths: plan.deniedPaths,
+					},
+				}
+			: {}),
 		...(profile.budget.maxCostUsd !== undefined ? { spendBoundUsd: profile.budget.maxCostUsd } : {}),
 	};
 	const { model, ...defining } = definition;

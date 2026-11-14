@@ -32,7 +32,9 @@ command that would is refused before it runs, never run with the values masked. 
 worker's do: without the credential variables of your environment (except those `PI_WORKER_PASS_ENV` names) or the
 credential profile of the project, with `PI_SESSION_ROLE=worker` (a `pi` it starts is a worker, never a root), a temp
 directory of its own, and anything they leave running ended when the session closes, which you are told about. Its name and its soul replace the main agent's in its system prompt, so it never
-introduces itself as the main agent. Its memory blackboard (`<agent dir>/memory/bots/<id>.md`, the same file a bot running as
+introduces itself as the main agent. Its system prompt carries what a worker of the bot carries: the project's context
+files (`AGENTS.md`), only those inside its read scope when its profile names one, and a profile's resources, but never
+your own `SYSTEM.md` or `APPEND_SYSTEM.md`. Its memory blackboard (`<agent dir>/memory/bots/<id>.md`, the same file a bot running as
 a worker reads) opens its system prompt under its soul when the session starts; it can read the file, not edit it, and a
 line from each finished turn is appended to it. It reads, and writes only when the bot has write access, and then as a worker writes: its file tools write inside your project directory only, never to a harness resource (skills, extensions, prompts, settings, hooks, git config); a read-only bot has a shell whose
 commands are judged one by one, as a read-only worker's are (nothing that edits, creates a file or reaches the network runs,

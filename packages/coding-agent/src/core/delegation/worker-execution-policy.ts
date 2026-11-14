@@ -103,13 +103,16 @@ function intersectPathScopes(admittedPaths: readonly string[], currentPaths: rea
 	return [...new Set(intersections.map((entry) => resolveWorkerWorkspacePath(entry, entry)))];
 }
 
+/** What decides the project context files a worker's prompt carries: its named read scope, when it has one. */
+export type ContextFileReadScope = Pick<WorkerExecutionPlan, "cwd" | "readScopeNamed" | "readPaths" | "deniedPaths">;
+
 /**
  * The project context files a worker's prompt may carry. A confined worker is given only those inside its read scope: its
  * prompt is a read the worker makes, so the owner's files outside its scope are not put in front of it. Unconfined, all of them.
  */
 export function contextFilesWithinReadScope<T extends { readonly path: string }>(
 	files: readonly T[],
-	plan: Pick<WorkerExecutionPlan, "cwd" | "readScopeNamed" | "readPaths" | "deniedPaths">,
+	plan: ContextFileReadScope,
 ): T[] {
 	if (!plan.readScopeNamed) return [...files];
 	const scope = { cwd: plan.cwd, readRoots: plan.readPaths, deniedPaths: plan.deniedPaths };
