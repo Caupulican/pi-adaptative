@@ -4,16 +4,9 @@ import {
 	type AgentTool,
 	AgentToolExecutionError,
 	type AgentToolResult,
-	describeThrownToolError,
 	type ExecutionContext,
 	type ExecutionPathAuthority,
-	readAgentToolExecutionError,
 } from "../../kernel/index.ts";
-import {
-	type AgentToolFailureReceipt,
-	readAgentToolFailureReceipt,
-	type ToolReceiptValue,
-} from "../../kernel/tool-failure-receipt.ts";
 import { extractToolPathArguments } from "../autonomy/envelope-enforcement.ts";
 import { redactKnownSecrets } from "../security/secret-text.ts";
 import { type SourceDialect, sourceDialectOf } from "../security/source-scanner.ts";
@@ -43,6 +36,7 @@ import type { CredentialPathPolicy, CredentialPathProbe, CredentialPathProtectio
 import { createExposureMock, type ExposureTextKind, errorMaskFor } from "./exposure-mock.ts";
 import { createCredentialPathPolicy } from "./native-credential-path-probe.ts";
 import { pythonCredentialPathCandidates } from "./python-credential-literals.ts";
+import { redactedThrownToolError } from "./redacted-tool-error.ts";
 import { callPrintsProgramSource, resultHoldsWholeOutput } from "./source-assessment.ts";
 
 /** Tools whose path arguments name the files they read or write. */
@@ -958,28 +952,6 @@ export async function credentialToolBlockReasonAsync(
 		.reason;
 }
 
-/**
- * A failure receipt with every string value run through the same redaction the guard applies to a message, then read back
- * under the receipt bounds: a value the redaction lengthens past a bound drops the whole receipt rather than persisting it.
- * Keys are the tool's own names and are not redacted.
- */
-function redactedFailureReceipt(
-	receipt: AgentToolFailureReceipt | undefined,
-	redact: (text: string) => string,
-): AgentToolFailureReceipt | undefined {
-	if (receipt === undefined) return undefined;
-	return readAgentToolFailureReceipt(redactReceiptStrings(receipt, redact));
-}
-
-function redactReceiptStrings(value: ToolReceiptValue, redact: (text: string) => string): ToolReceiptValue {
-	if (typeof value === "string") return redact(value);
-	if (value === null || typeof value !== "object") return value;
-	if (Array.isArray(value)) return value.map((item: ToolReceiptValue) => redactReceiptStrings(item, redact));
-	return Object.fromEntries(
-		Object.entries(value).map(([key, item]) => [key, redactReceiptStrings(item, redact)] as const),
-	);
-}
-
 /** Known values first (exact), then the shape-preserving mock, which also covers secret-shaped text. */
 function createOutputRedactor(
 	boundary: CredentialExposureBoundary | undefined,
@@ -1082,15 +1054,6 @@ function redactStructuredDetails(
  * lane tools. The default is the fail-closed authority contract; the owner runtime opts into the
  * mock stream explicitly, so a caller that forgets the mode never widens visibility by accident.
  */
-/** Names a thrown non-Error precisely enough to act on: its primitive type, or its constructor. */
-function describeThrownValue(error: unknown): string {
-	if (error === null) return "null";
-	const type = typeof error;
-	if (type !== "object") return type;
-	const name = (error as { constructor?: { name?: unknown } }).constructor?.name;
-	return typeof name === "string" && name.length > 0 ? name : "object";
-}
-
 export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema, TDetails>(
 	tool: AgentTool<TParameters, TDetails>,
 	cwd: string,
@@ -1166,33 +1129,7 @@ export function wrapToolWithCredentialExposureGuard<TParameters extends TSchema,
 				// named abort, thrown verbatim by throwIfAborted) passes through untouched so the loop finalizes
 				// the call as `Operation aborted (<reason>)` without a second line about the guard.
 				if (signal?.aborted || (signal?.reason !== undefined && error === signal.reason)) throw error;
-				const redact = createOutputRedactor(boundary, errorMock, sensitiveValues);
-				const classified = readAgentToolExecutionError(error);
-				if (classified) {
-					throw new AgentToolExecutionError(
-						redact(classified.message),
-						classified.failureCode,
-						classified.outputSignature,
-						classified.errorKind,
-						classified.details,
-						redactedFailureReceipt(classified.receipt, redact),
-					);
-				}
-				// The rebuilt error keeps the facts the tool attached, redacted the way its message is.
-				const { receipt } = describeThrownToolError(error);
-				if (error instanceof Error)
-					throw Object.assign(new Error(redact(error.message)), {
-						receipt: redactedFailureReceipt(receipt, redact),
-					});
-				// A thrown non-Error is the live shape of a cancellation: `signal.throwIfAborted()` throws
-				// the abort REASON, and a named abort's reason is a plain string. Reporting only that the
-				// value was lost left the model, the failure ledger and the operator with no cause at all.
-				throw Object.assign(
-					new Error(
-						`Credential-safe tool execution failed: ${describeThrownValue(error)}: ${redact(String(error))}`,
-					),
-					{ receipt: redactedFailureReceipt(receipt, redact) },
-				);
+				throw redactedThrownToolError(error, createOutputRedactor(boundary, errorMock, sensitiveValues));
 			}
 		},
 	}));
