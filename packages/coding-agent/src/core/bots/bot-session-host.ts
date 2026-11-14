@@ -57,6 +57,7 @@ import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { createAgentSession } from "../sdk.ts";
+import { observeSessionTurns } from "../session-turn-boundary.ts";
 import { boundSessionTurnTime } from "../session-turn-time-bound.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
@@ -85,7 +86,7 @@ import {
 	ownBotSessionKey,
 	profileBotSession,
 } from "./bot-session-profile.ts";
-import { type BotTurnUsageReport, botTurnCharge, lastAssistantText } from "./bot-turn-report.ts";
+import { BotTurnAccounting, type BotTurnUsageReport } from "./bot-turn-report.ts";
 import { BotTurnSupervision } from "./bot-turn-supervision.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
@@ -178,10 +179,8 @@ interface BotSessionEntry {
 	inFlight: number;
 	/** A record change, or a run refused off the session path, came while it worked: applied once it is idle. */
 	recheckWhenIdle: boolean;
-	/** The session's cumulative usage when the running turn began; absent between turns. */
-	usageBefore: Usage | undefined;
-	/** When the running turn began: its own messages are the ones written since; absent between turns. */
-	turnStartedAt: number | undefined;
+	/** Its turns' spend and outcome, each reported once per turn. */
+	readonly turns: BotTurnAccounting;
 	idleTimer: unknown;
 }
 
@@ -778,8 +777,12 @@ export class BotSessionHost {
 				unsubscribe: () => {},
 				inFlight: 0,
 				recheckWhenIdle: false,
-				usageBefore: undefined,
-				turnStartedAt: undefined,
+				turns: new BotTurnAccounting(agentId, session, {
+					charge: (usage, report) => entry.sender.reportUsage(usage, report),
+					chargeNotRecorded: (reason) =>
+						entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(agentId, reason)),
+					outcome: (summary) => this.recordOutcome(agentId, summary),
+				}),
 				idleTimer: undefined,
 			};
 			built = entry;
@@ -816,14 +819,6 @@ export class BotSessionHost {
 				supervision.observe(event);
 				// The session's own warnings (a turn a watch started that failed, say) reach the owner as the bot's.
 				if (event.type === "warning") entry.sender.warn(interfaceText().botTeam.botWarning(agentId, event.message));
-				if (event.type === "agent_start") {
-					entry.usageBefore ??= structuredClone(entry.session.getCumulativeUsage());
-					entry.turnStartedAt ??= Date.now();
-				}
-				if (event.type === "agent_end" && !event.willRetry) {
-					this.reportTurnUsage(entry);
-					this.recordOutcome(entry);
-				}
 				if (
 					event.type === "agent_start" ||
 					event.type === "agent_end" ||
@@ -832,7 +827,10 @@ export class BotSessionHost {
 				)
 					this.settle(entry);
 			});
+			// Its spend and outcome are counted per turn on the boundary its time bound reads.
+			const unsubscribeTurns = observeSessionTurns(session, entry.turns);
 			entry.unsubscribe = () => {
+				unsubscribeTurns();
 				unsubscribeSpend();
 				unsubscribeTime();
 				unsubscribeEvents();
@@ -1008,33 +1006,13 @@ export class BotSessionHost {
 		for (const bot of bots) this.openIfOwed(bot.agentId);
 	}
 
-	/** A turn ended: what the session spent since it began goes to the main session's cost view, once. */
-	private reportTurnUsage(entry: BotSessionEntry): void {
-		const { usageBefore } = entry;
-		entry.usageBefore = undefined;
-		const charge = usageBefore && botTurnCharge(entry.agentId, entry.session, usageBefore);
-		if (!charge) return;
+	/** A turn ended with words: they are the bot's summary in the roster, and its time marks the chat as unread. */
+	private recordOutcome(agentId: string, summary: string): void {
+		if (this.stopped) return;
 		try {
-			entry.sender.reportUsage(charge.usage, charge.report);
+			this.ports.store().recordBotTurnOutcome({ agentId, summary });
 		} catch (error) {
-			entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(entry.agentId, errorText(error)));
-		}
-	}
-
-	/**
-	 * A turn ended: its last words are the bot's summary in the roster, and its time marks the chat as unread. A turn that
-	 * said nothing (it failed before an answer) records nothing: an earlier turn's answer is not news again.
-	 */
-	private recordOutcome(entry: BotSessionEntry): void {
-		const since = entry.turnStartedAt;
-		entry.turnStartedAt = undefined;
-		if (this.stopped || since === undefined) return;
-		const summary = lastAssistantText(entry.session.messages, since);
-		if (summary.length === 0) return;
-		try {
-			this.ports.store().recordBotTurnOutcome({ agentId: entry.agentId, summary });
-		} catch (error) {
-			this.ports.warn(interfaceText().botTeam.botTurnOutcomeNotRecorded(entry.agentId, errorText(error)));
+			this.ports.warn(interfaceText().botTeam.botTurnOutcomeNotRecorded(agentId, errorText(error)));
 		}
 	}
 
@@ -1053,7 +1031,7 @@ export class BotSessionHost {
 			[
 				() => entry.session.abort(interfaceText().botTeam.botTurnAbortReasons.sessionClosing),
 				// The aborted turn's spend is reported once, whether or not its end reached the subscription first.
-				() => this.reportTurnUsage(entry),
+				() => entry.turns.reportCharge(),
 				() => entry.unsubscribe(),
 				() => entry.session.disposeAndWait(),
 				() => entry.releaseSettings(),

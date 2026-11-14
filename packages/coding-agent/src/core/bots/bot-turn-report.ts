@@ -1,6 +1,7 @@
 /**
  * What a finished turn of a bot's own session reports: what the session spent since the turn began, as one charge the
- * main session's cost view takes, and the turn's last words, the bot's summary in the roster.
+ * main session's cost view takes, and the turn's last words, the bot's summary in the roster; and the accounting that
+ * reports both once per turn.
  */
 
 import type { Usage } from "@caupulican/pi-ai";
@@ -66,4 +67,69 @@ export function lastAssistantText(messages: readonly AgentMessage[], since: numb
 		if (text.length > 0) return text;
 	}
 	return "";
+}
+
+/** Where one bot session's turns report: the root's cost view, the store's outcome, and the owner's warnings. */
+export interface BotTurnAccountingPorts {
+	/** Records a turn's charge with the cost view of the root the bot answers now; throws a failure to record it. */
+	charge(usage: Usage, report: BotTurnUsageReport): void;
+	/** A turn's charge was not recorded: the owner is told why. */
+	chargeNotRecorded(reason: string): void;
+	/** Records a turn's last words as the bot's outcome: its roster summary and unread mark. */
+	outcome(summary: string): void;
+}
+
+/**
+ * One bot session's turns as its host counts them, on the turn boundary every per-turn count of the session reads
+ * (`observeSessionTurns`): what the session spent from a turn's start is one charge, and its last words written since are
+ * its outcome, each reported once.
+ */
+export class BotTurnAccounting {
+	private readonly agentId: string;
+	private readonly session: Pick<AgentSession, "model" | "getCumulativeUsage" | "sessionId" | "messages">;
+	private readonly ports: BotTurnAccountingPorts;
+	/** The session's cumulative usage when the running turn began; absent between turns and once its charge was reported. */
+	private usageBefore: Usage | undefined;
+	/** When the running turn began: its own messages are the ones written since; absent between turns. */
+	private startedAt: number | undefined;
+
+	constructor(
+		agentId: string,
+		session: Pick<AgentSession, "model" | "getCumulativeUsage" | "sessionId" | "messages">,
+		ports: BotTurnAccountingPorts,
+	) {
+		this.agentId = agentId;
+		this.session = session;
+		this.ports = ports;
+	}
+
+	/** A turn began. */
+	started(): void {
+		this.usageBefore = structuredClone(this.session.getCumulativeUsage());
+		this.startedAt = Date.now();
+	}
+
+	/** The turn ended: its charge, then its outcome. */
+	ended(): void {
+		this.reportCharge();
+		const since = this.startedAt;
+		this.startedAt = undefined;
+		if (since === undefined) return;
+		const summary = lastAssistantText(this.session.messages, since);
+		// A turn that said nothing (it failed before an answer) records nothing: an earlier turn's answer is not news again.
+		if (summary.length > 0) this.ports.outcome(summary);
+	}
+
+	/** The running turn's spend is reported now (its session closes), once, whether or not its end comes after. */
+	reportCharge(): void {
+		const usageBefore = this.usageBefore;
+		this.usageBefore = undefined;
+		const charge = usageBefore && botTurnCharge(this.agentId, this.session, usageBefore);
+		if (!charge) return;
+		try {
+			this.ports.charge(charge.usage, charge.report);
+		} catch (error) {
+			this.ports.chargeNotRecorded(error instanceof Error ? error.message : String(error));
+		}
+	}
 }
