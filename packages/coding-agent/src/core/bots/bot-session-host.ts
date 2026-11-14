@@ -507,6 +507,7 @@ export class BotSessionHost {
 		const { lock } = taken;
 		let session: AgentSession | undefined;
 		let settings: ReturnType<BotSessionHostPorts["settings"]> | undefined;
+		let built: BotSessionEntry | undefined;
 		try {
 			// The newest session file of the bot, whatever directory it worked in: a bot keeps one conversation.
 			const newest = findMostRecentSessionInDirs([home.sessionsDir]);
@@ -609,6 +610,7 @@ export class BotSessionHost {
 				turnStartedAt: undefined,
 				idleTimer: undefined,
 			};
+			built = entry;
 			const unsubscribeSpend = boundSessionTurnSpend(session, {
 				limit: () => this.spendBound(definition.spendBoundUsd),
 				onExceeded: (spentUsd, limit) => {
@@ -662,9 +664,20 @@ export class BotSessionHost {
 			this.changed(agentId);
 			return entry;
 		} catch (error) {
-			if (session) await session.disposeAndWait().catch(() => undefined);
-			settings?.release();
-			lock.release();
+			// Released as a close releases, in its order and every step whatever an earlier one threw, the lock last: a
+			// session still disposing never loses its lock to the next one built.
+			if (built && this.entries.get(agentId) === built) this.entries.delete(agentId);
+			await runAsyncReleaseSteps(
+				[
+					() => built?.unsubscribe(),
+					() => session?.disposeAndWait(),
+					() => settings?.release(),
+					() => built?.stateWriter.clear(),
+					() => lock.release(),
+				],
+				words.botSessionNotClosed,
+				{ error },
+			);
 			throw error;
 		}
 	}
