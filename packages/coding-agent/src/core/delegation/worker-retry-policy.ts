@@ -22,7 +22,8 @@ import {
  * A subscription model whose plan's usage is used up is not a failure of the work: its limit is the plan's usage window,
  * not money. When the failure states when the usage resets (the provider's own retry-after, or the reset the provider
  * admission gate recorded and refused with), the attempt waits for that reset however long it is and resumes on its own,
- * without spending the attempt ceiling. The same refusal on a metered model stays terminal: that limit is money.
+ * without spending the attempt ceiling when the reset is further off than the ladder's longest backoff; a nearer one is
+ * an ordinary retry no sooner than the reset. The same refusal on a metered model stays terminal: that limit is money.
  */
 export const DEFAULT_WORKER_TASK_ATTEMPTS = 2;
 
@@ -70,27 +71,32 @@ export function evaluateWorkerRetry(args: {
 			classified.reason === "model_unsupported" ||
 			classified.reason === "auth");
 	const resetAfterMs = classified.retryAfterMs;
-	if (
+	const statedUsageReset =
 		!failover &&
 		args.subscription === true &&
 		resetAfterMs !== undefined &&
-		(classified.reason === "billing_or_quota" ||
-			(classified.reason === "rate_limit" && resetAfterMs > WORKER_TASK_RETRY_POLICY.maxDelayMs))
-	) {
-		// A stated reset is rounded (ChatGPT words it in whole minutes, "~0 min" just before it passes): the wait is never
-		// shorter than the ladder's longest backoff, so a reset met slightly early is not asked for again at once.
-		const delayMs = Math.max(resetAfterMs, WORKER_TASK_RETRY_POLICY.maxDelayMs);
-		return { retry: true, reason: "usage_reset", delayMs, usageReset: true };
+		(classified.reason === "billing_or_quota" || classified.reason === "rate_limit");
+	// A reset further off than the ladder's longest backoff is waited out and spends nothing. One stated within it (a
+	// reset worded "~0 min" just before it passes) is an ordinary retry that spends the ceiling, so a refusal that keeps
+	// stating a near reset ends once the ceiling is spent instead of being asked again forever.
+	if (statedUsageReset && resetAfterMs > WORKER_TASK_RETRY_POLICY.maxDelayMs) {
+		return { retry: true, reason: "usage_reset", delayMs: resetAfterMs, usageReset: true };
 	}
 	const attemptsAllowed = args.maxAttempts ?? DEFAULT_WORKER_TASK_ATTEMPTS;
 	const retriesSpent = args.retriesUsed - (args.resetWaits ?? 0);
 	if (!failover && retriesSpent + 1 >= attemptsAllowed) return { retry: false, reason: "attempts_exhausted" };
-	if (!classified.retryable && !failover) return { retry: false, reason: `not_retryable_${classified.reason}` };
-	let delayMs: number;
+	if (!classified.retryable && !failover && !statedUsageReset)
+		return { retry: false, reason: `not_retryable_${classified.reason}` };
+	// A stated delay is waited, never less than the ladder's own backoff: one stated as nothing ("retry after 0 seconds",
+	// a reset worded "~0 min") would retry at once, which the durable suspension refuses as a deadline not in the future.
+	let delayMs = computeRetryDelayMs(WORKER_TASK_RETRY_POLICY, retriesSpent + 1);
 	try {
-		delayMs = computeRetryDelayMs(WORKER_TASK_RETRY_POLICY, retriesSpent + 1, {
-			...(classified.retryAfterMs !== undefined && !failover ? { retryAfterMs: classified.retryAfterMs } : {}),
-		});
+		if (classified.retryAfterMs !== undefined && !failover) {
+			const statedMs = computeRetryDelayMs(WORKER_TASK_RETRY_POLICY, retriesSpent + 1, {
+				retryAfterMs: classified.retryAfterMs,
+			});
+			delayMs = Math.max(delayMs, statedMs);
+		}
 	} catch (error) {
 		if (error instanceof RetryDelayExceededError) return { retry: false, reason: "retry_delay_exceeds_max" };
 		throw error;
