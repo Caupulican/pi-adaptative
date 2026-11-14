@@ -1,5 +1,6 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
+import { ownerOrchestrationHome } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { OrchestrationEventStore } from "../../../../src/core/orchestration/event-store.ts";
 import { readTaskRuntimeProjection } from "../../../../src/core/orchestration/task-runtime-reader.ts";
@@ -292,7 +293,7 @@ export async function runPlanCutPhase(world: HarnessWorld, scenario: PlanCutScen
 						? undefined
 						: readTaskRuntimeProjection(
 								new OrchestrationEventStore({
-									agentDir: world.agentDir,
+									orchestrationHome: ownerOrchestrationHome(world.agentDir),
 									sessionId: owner.sessionManager.getSessionId(),
 								}),
 							).attempts[attemptId];

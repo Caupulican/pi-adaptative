@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
-import { workerAgentMailboxFile } from "../agent-paths.ts";
+import { type OrchestrationHome, workerAgentMailboxFile } from "../agent-paths.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../util/bounded-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
@@ -14,7 +14,7 @@ export interface WorkerMailboxContextReference {
 	sessionFile: string;
 }
 
-export function workerMailboxPath(agentDir: string, parentSessionId: string, agentId: string): string {
+export function workerMailboxPath(home: OrchestrationHome, parentSessionId: string, agentId: string): string {
 	const digest = createHash("sha256")
 		.update("pi-worker-agent-mailbox-v1")
 		.update("\0")
@@ -22,7 +22,7 @@ export function workerMailboxPath(agentDir: string, parentSessionId: string, age
 		.update("\0")
 		.update(agentId)
 		.digest("hex");
-	return workerAgentMailboxFile(agentDir, parentSessionId, digest);
+	return workerAgentMailboxFile(home, parentSessionId, digest);
 }
 
 export function readWorkerMailboxRecord(file: string): {

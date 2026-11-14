@@ -26,9 +26,10 @@
  *   collaboration/herdr/config.toml    the collaboration backend's managed config         -- collaborationDir
  *   bots/<id>/                         one bot's home: profile.json, sessions/, memory/,      -- botHomeDir
  *                                      host.lock, host-state.json, history.json, typesafe-reviews/
- *   state/orchestration/sessions/<session-key>/                                             -- one foreground-session-owned
- *                                                                                            control-plane bundle
- *     worker-context-forks/<identity-digest>-<content-digest>.json                         -- immutable birth snapshots
+ *   state/orchestration/              the owner's orchestration home                         -- ownerOrchestrationHome
+ *     sessions/<session-key>/         one foreground-session-owned control-plane bundle      -- orchestrationSessionDir
+ *       worker-context-forks/<identity-digest>-<content-digest>.json                       -- immutable birth snapshots
+ *     deletions/<session-key>.json    bundle tombstone (+ `.leases.json` lifetime leases)    -- orchestrationSessionDeletionFile
  *   worktrees/<repo-slug>/<laneKey>   durable lane checkouts (core/worktree-sync)           -- worktreesDir
  * ```
  *
@@ -37,7 +38,9 @@
  * `getAgentDir()` internally. Several real callers (stores' `forAgentDir`, test harnesses with a temp
  * agentDir) build paths for a NON-default agentDir; a hidden default would silently resolve the wrong
  * root for those callers instead of failing loudly. Callers operating on the process-wide default pass
- * `getAgentDir()` explicitly at the call site.
+ * `getAgentDir()` explicitly at the call site. The session-bundle builders (`orchestrationSessionDir`
+ * and everything beneath it) take the session's `OrchestrationHome` instead, decided once where the
+ * session is composed; only process-wide readers build the owner's home from an agentDir.
  *
  * These accessors are pure path builders -- no directory creation, no I/O. Every existing writer
  * already creates its parent directory at write time (see `util/atomic-file.ts`'s
@@ -47,17 +50,23 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import {
+	type OrchestrationHome,
 	orchestrationSessionDeletionFile,
 	orchestrationSessionDir,
 	orchestrationSessionsDir,
+	ownerOrchestrationHome,
+	resolvedOrchestrationHome,
 	workerConversationSessionsDir,
 } from "../kernel/session/session-bundle-paths.ts";
 import { sessionsDir, stateDir, stateFile } from "../kernel/storage/paths.ts";
 
 export {
+	type OrchestrationHome,
 	orchestrationSessionDeletionFile,
 	orchestrationSessionDir,
 	orchestrationSessionsDir,
+	ownerOrchestrationHome,
+	resolvedOrchestrationHome,
 	sessionsDir,
 	stateDir,
 	stateFile,
@@ -449,13 +458,13 @@ export function modelsDir(kind: string, agentDir: string): string {
 }
 
 /** Durable review evidence shared by a foreground session and its worker agents. */
-export function typeSafeEvidenceDir(agentDir: string, parentSessionId: string): string {
-	return join(orchestrationSessionDir(agentDir, parentSessionId), "typesafe-reviews");
+export function typeSafeEvidenceDir(home: OrchestrationHome, parentSessionId: string): string {
+	return join(orchestrationSessionDir(home, parentSessionId), "typesafe-reviews");
 }
 
 /**
  * `<agentDir>/state/decision-ledger.sqlite` -- the decision ledger: stage transitions and semantic
- * (Jev) evaluations of every session, keyed by session id and cwd, append-only and never erased.
+ * (System One) evaluations of every session, keyed by session id and cwd, append-only and never erased.
  * One database file so the data stays retrievable for accuracy, model-usage and fitness review, and
  * so System One can read its own history when it looks for mistakes to fix and tests to derive.
  */
@@ -470,13 +479,13 @@ export function workerProjectSpecializationFile(agentDir: string, specialization
 }
 
 /** `<orchestrationSessionDir>/events` -- append-only event tail, snapshot, cursor, and idempotency state. */
-export function orchestrationEventStoreDir(agentDir: string, parentSessionId: string): string {
-	return join(orchestrationSessionDir(agentDir, parentSessionId), "events");
+export function orchestrationEventStoreDir(home: OrchestrationHome, parentSessionId: string): string {
+	return join(orchestrationSessionDir(home, parentSessionId), "events");
 }
 
 /** `<orchestrationSessionDir>/worker-context-forks` -- immutable sanitized worker birth snapshots. */
-export function workerContextForksDir(agentDir: string, parentSessionId: string): string {
-	return join(orchestrationSessionDir(agentDir, parentSessionId), "worker-context-forks");
+export function workerContextForksDir(home: OrchestrationHome, parentSessionId: string): string {
+	return join(orchestrationSessionDir(home, parentSessionId), "worker-context-forks");
 }
 
 /**
@@ -484,7 +493,7 @@ export function workerContextForksDir(agentDir: string, parentSessionId: string)
  * content-addressed sanitized worker birth snapshot.
  */
 export function workerContextForkFile(
-	agentDir: string,
+	home: OrchestrationHome,
 	parentSessionId: string,
 	identityDigest: string,
 	contentDigest: string,
@@ -493,19 +502,19 @@ export function workerContextForkFile(
 		throw new TypeError("Worker context fork identities must be hexadecimal SHA-256 digests.");
 	}
 	return join(
-		workerContextForksDir(agentDir, parentSessionId),
+		workerContextForksDir(home, parentSessionId),
 		`${identityDigest.toLowerCase()}-${contentDigest.toLowerCase()}.json`,
 	);
 }
 
 /** `<orchestrationSessionDir>/worker-output-artifacts` -- lossless terminal worker reports. */
-export function workerOutputArtifactsDir(agentDir: string, parentSessionId: string): string {
-	return join(orchestrationSessionDir(agentDir, parentSessionId), "worker-output-artifacts");
+export function workerOutputArtifactsDir(home: OrchestrationHome, parentSessionId: string): string {
+	return join(orchestrationSessionDir(home, parentSessionId), "worker-output-artifacts");
 }
 
 /** One immutable, content-addressed terminal worker report. */
 export function workerTerminalOutputArtifactFile(
-	agentDir: string,
+	home: OrchestrationHome,
 	parentSessionId: string,
 	attemptDigest: string,
 	contentDigest: string,
@@ -514,18 +523,22 @@ export function workerTerminalOutputArtifactFile(
 		throw new TypeError("Worker output artifact identities must be hexadecimal SHA-256 digests.");
 	}
 	return join(
-		workerOutputArtifactsDir(agentDir, parentSessionId),
+		workerOutputArtifactsDir(home, parentSessionId),
 		`${attemptDigest.toLowerCase()}-${contentDigest.toLowerCase()}.txt`,
 	);
 }
 
 /** `<orchestrationSessionDir>/worker-outcome-digests/<outcome-digest>.json` -- one bounded OutcomeDigest per outcome. */
-export function workerOutcomeDigestFile(agentDir: string, parentSessionId: string, outcomeDigest: string): string {
+export function workerOutcomeDigestFile(
+	home: OrchestrationHome,
+	parentSessionId: string,
+	outcomeDigest: string,
+): string {
 	if (!/^[a-f0-9]{64}$/i.test(outcomeDigest)) {
 		throw new TypeError("Worker outcome digest identities must be hexadecimal SHA-256 digests.");
 	}
 	return join(
-		orchestrationSessionDir(agentDir, parentSessionId),
+		orchestrationSessionDir(home, parentSessionId),
 		"worker-outcome-digests",
 		`${outcomeDigest.toLowerCase()}.json`,
 	);
@@ -536,15 +549,11 @@ export function workerOutcomeDigestFile(agentDir: string, parentSessionId: strin
  * messages for one logical worker. Identity stays hashed so neither agent ids nor project paths
  * become path segments.
  */
-export function workerAgentMailboxFile(agentDir: string, parentSessionId: string, scopeDigest: string): string {
+export function workerAgentMailboxFile(home: OrchestrationHome, parentSessionId: string, scopeDigest: string): string {
 	if (!/^[a-f0-9]{32,64}$/i.test(scopeDigest)) {
 		throw new TypeError("Worker agent mailbox scope digest must be a hexadecimal SHA-256 prefix.");
 	}
-	return join(
-		orchestrationSessionDir(agentDir, parentSessionId),
-		"worker-mailboxes",
-		`${scopeDigest.toLowerCase()}.json`,
-	);
+	return join(orchestrationSessionDir(home, parentSessionId), "worker-mailboxes", `${scopeDigest.toLowerCase()}.json`);
 }
 
 /**
@@ -552,8 +561,8 @@ export function workerAgentMailboxFile(agentDir: string, parentSessionId: string
  * owning foreground session. The parent session identity is already encoded in the enclosing
  * session directory, so this fixed filename cannot collide with another session root.
  */
-export function sessionRootMailboxFile(agentDir: string, parentSessionId: string): string {
-	return join(orchestrationSessionDir(agentDir, parentSessionId), "session-root-mailbox.json");
+export function sessionRootMailboxFile(home: OrchestrationHome, parentSessionId: string): string {
+	return join(orchestrationSessionDir(home, parentSessionId), "session-root-mailbox.json");
 }
 
 /**
@@ -561,15 +570,11 @@ export function sessionRootMailboxFile(agentDir: string, parentSessionId: string
  * intents and receipts for one fenced worker attempt. The opaque digest intentionally keeps task
  * identifiers out of filesystem path segments and works on Windows and WSL.
  */
-export function workerActionJournalFile(agentDir: string, parentSessionId: string, scopeDigest: string): string {
+export function workerActionJournalFile(home: OrchestrationHome, parentSessionId: string, scopeDigest: string): string {
 	if (!/^[a-f0-9]{32,64}$/i.test(scopeDigest)) {
 		throw new TypeError("Worker action journal scope digest must be a hexadecimal SHA-256 prefix.");
 	}
-	return join(
-		orchestrationSessionDir(agentDir, parentSessionId),
-		"worker-actions",
-		`${scopeDigest.toLowerCase()}.json`,
-	);
+	return join(orchestrationSessionDir(home, parentSessionId), "worker-actions", `${scopeDigest.toLowerCase()}.json`);
 }
 
 /** `<agentDir>/npm` -- managed npm package installs. */

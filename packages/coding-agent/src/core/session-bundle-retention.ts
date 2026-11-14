@@ -5,8 +5,10 @@ import { harnessLog } from "../kernel/harness-log.ts";
 import {
 	botHomeSessionsDir,
 	botsDir,
+	type OrchestrationHome,
 	orchestrationSessionDir,
 	orchestrationSessionsDir,
+	ownerOrchestrationHome,
 	sessionRootMailboxFile,
 	sessionsDir,
 } from "./agent-paths.ts";
@@ -15,7 +17,7 @@ import { OBLIGATION_LEDGER_NAME, recordDiscardedObligations } from "./delegation
 import { PersistentBotTeamStore } from "./delegation/persistent-bot-team-store.ts";
 import { SessionRootMailbox, sessionRootMailboxHasMandatoryReply } from "./delegation/session-root-mailbox.ts";
 import { WorkerAgentMailbox, workerMailboxHasOpenObligation } from "./delegation/worker-agent-control.ts";
-import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
+import { reserveWorkerBundleDeletion } from "./delegation/worker-bundle-deletion.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "./delegation/worker-mailbox-record.ts";
 import { interfaceText } from "./language/interface-text.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
@@ -42,7 +44,7 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * - its parent session transcript (under `<agentDir>/sessions`, or a bot's own under `bots/<id>/sessions`) is
  *   gone, or both the transcript and the bundle are older than {@link SESSION_BUNDLE_RESUMABLE_MAX_AGE_MS} (a
  *   paused session that can still be resumed keeps its persistent-worker context for that long);
- * - `WorkerConversationStore.reserveBundleDeletion` (fail-closed: live claim, busy or enrolled
+ * - `reserveWorkerBundleDeletion` (fail-closed: live claim, busy or enrolled
  *   specialist context, unreadable transcript) accepts, and no worker or session-root mailbox owes work;
  * - no durable usage or accepted-worker receipt is waiting for parent delivery;
  * - no bot's history references a run of its session (`historyReferencedSessionIds`): a bot's chat reads its earlier
@@ -242,11 +244,11 @@ function settleRoutinesOfGoneSessions(
 }
 
 /** The directory name is `<readable prefix>-<digest>`; only ids that round-trip exactly can be reserved. */
-function recoverParentSessionId(agentDir: string, bundleName: string): string | undefined {
+function recoverParentSessionId(home: OrchestrationHome, bundleName: string): string | undefined {
 	if (!KEY_DIGEST_SUFFIX.test(bundleName)) return undefined;
 	const candidate = bundleName.slice(0, -KEY_DIGEST_SUFFIX_LENGTH);
 	try {
-		return basename(orchestrationSessionDir(agentDir, candidate)) === bundleName ? candidate : undefined;
+		return basename(orchestrationSessionDir(home, candidate)) === bundleName ? candidate : undefined;
 	} catch {
 		return undefined;
 	}
@@ -258,9 +260,9 @@ function readBoundedJson(file: string): unknown {
 }
 
 /** Fail-closed: anything unreadable, oversized, or unrecognized counts as owing work. */
-function bundleOwesMailboxWork(agentDir: string, parentSessionId: string, bundleDir: string): boolean {
+function bundleOwesMailboxWork(home: OrchestrationHome, parentSessionId: string, bundleDir: string): boolean {
 	try {
-		const rootMailbox = sessionRootMailboxFile(agentDir, parentSessionId);
+		const rootMailbox = sessionRootMailboxFile(home, parentSessionId);
 		if (existsSync(rootMailbox)) {
 			const state = readBoundedJson(rootMailbox);
 			if (!isPlainRecord(state) || !Array.isArray(state.replies)) return true;
@@ -301,6 +303,7 @@ function bundleOwesMailboxWork(agentDir: string, parentSessionId: string, bundle
  */
 function everyOpenObligationExpires(
 	agentDir: string,
+	home: OrchestrationHome,
 	parentSessionId: string,
 	bundleDir: string,
 	now: number,
@@ -308,8 +311,8 @@ function everyOpenObligationExpires(
 	const cutoffMs = now - SESSION_BUNDLE_MAX_AGE_MS;
 	try {
 		if (
-			existsSync(sessionRootMailboxFile(agentDir, parentSessionId)) &&
-			!new SessionRootMailbox({ agentDir, parentSessionId }).expiresEveryMandatoryReply(cutoffMs)
+			existsSync(sessionRootMailboxFile(home, parentSessionId)) &&
+			!new SessionRootMailbox({ orchestrationHome: home, parentSessionId }).expiresEveryMandatoryReply(cutoffMs)
 		)
 			return false;
 		const mailboxDir = join(bundleDir, "worker-mailboxes");
@@ -334,13 +337,15 @@ function everyOpenObligationExpires(
 			)
 				continue;
 			const agentId = mailbox.agentId;
-			if (reference || typeof agentId !== "string" || workerMailboxPath(agentDir, parentSessionId, agentId) !== file)
+			if (reference || typeof agentId !== "string" || workerMailboxPath(home, parentSessionId, agentId) !== file)
 				return false;
 			if (
-				!new WorkerAgentMailbox({ agentDir, parentSessionId, agentId }).settlesEveryOpenObligation(
-					cutoffMs,
-					SESSION_BUNDLE_OBLIGATION_EXPIRED_REASON,
-				)
+				!new WorkerAgentMailbox({
+					agentDir,
+					orchestrationHome: home,
+					parentSessionId,
+					agentId,
+				}).settlesEveryOpenObligation(cutoffMs, SESSION_BUNDLE_OBLIGATION_EXPIRED_REASON)
 			)
 				return false;
 		}
@@ -357,6 +362,7 @@ function everyOpenObligationExpires(
  */
 function settleExpiredObligations(
 	agentDir: string,
+	home: OrchestrationHome,
 	parentSessionId: string,
 	bundleName: string,
 	bundleDir: string,
@@ -379,8 +385,8 @@ function settleExpiredObligations(
 		});
 	let settledCount = 0;
 	try {
-		if (existsSync(sessionRootMailboxFile(agentDir, parentSessionId))) {
-			settledCount += new SessionRootMailbox({ agentDir, parentSessionId }).expireMandatoryReplies(
+		if (existsSync(sessionRootMailboxFile(home, parentSessionId))) {
+			settledCount += new SessionRootMailbox({ orchestrationHome: home, parentSessionId }).expireMandatoryReplies(
 				cutoffMs,
 				SESSION_BUNDLE_OBLIGATION_EXPIRED_REASON,
 				(settled) => record("session_root_mailbox", undefined, settled),
@@ -404,8 +410,13 @@ function settleExpiredObligations(
 				// A project-bound mailbox is mutable only under its specialist context's claim, which retention never holds.
 				if (reference || !isPlainRecord(mailbox) || typeof mailbox.agentId !== "string") continue;
 				const agentId = mailbox.agentId;
-				if (workerMailboxPath(agentDir, parentSessionId, agentId) !== file) continue;
-				settledCount += new WorkerAgentMailbox({ agentDir, parentSessionId, agentId }).expireOpenObligations(
+				if (workerMailboxPath(home, parentSessionId, agentId) !== file) continue;
+				settledCount += new WorkerAgentMailbox({
+					agentDir,
+					orchestrationHome: home,
+					parentSessionId,
+					agentId,
+				}).expireOpenObligations(
 					cutoffMs,
 					SESSION_BUNDLE_OBLIGATION_EXPIRED_REASON,
 					(settled) => record("worker_mailbox", agentId, settled),
@@ -435,6 +446,8 @@ export async function sweepSessionBundles(
 	options: SessionBundleRetentionOptions,
 ): Promise<SessionBundleRetentionResult> {
 	const { agentDir, currentSessionId } = options;
+	// The sweep reads the owner's orchestration home: every session bundle it may remove lives there.
+	const home = ownerOrchestrationHome(agentDir);
 	const now = options.now ?? Date.now();
 	const result: SessionBundleRetentionResult = {
 		inspected: 0,
@@ -459,7 +472,7 @@ export async function sweepSessionBundles(
 			result.settledRoutineResults = settled.settledResults;
 			result.retiredRoutines = settled.retiredRoutines;
 		}
-		const root = orchestrationSessionsDir(agentDir);
+		const root = orchestrationSessionsDir(home);
 		if (!existsSync(root)) return result;
 		const names = (await readdir(root, { withFileTypes: true }))
 			.filter((entry) => entry.isDirectory())
@@ -489,9 +502,9 @@ export async function sweepSessionBundles(
 			await new Promise<void>((resolve) => setImmediate(resolve));
 			result.inspected++;
 			try {
-				const parentSessionId = recoverParentSessionId(agentDir, name);
+				const parentSessionId = recoverParentSessionId(home, name);
 				if (!parentSessionId || protectedIds.has(parentSessionId) || historyHeld.has(parentSessionId)) continue;
-				const resumingDeletion = hasPendingSessionBundleRetention(agentDir, parentSessionId);
+				const resumingDeletion = hasPendingSessionBundleRetention(home, parentSessionId);
 				const sessionMtimeMs = latestMtimeMs(transcripts.get(parentSessionId) ?? []);
 				if (
 					!resumingDeletion &&
@@ -508,8 +521,9 @@ export async function sweepSessionBundles(
 					continue;
 
 				// The tombstone excludes new worker contexts for this session while the checks and removal run.
-				const reservation = WorkerConversationStore.reserveBundleDeletion(
+				const reservation = reserveWorkerBundleDeletion(
 					agentDir,
+					home,
 					parentSessionId,
 					"retention",
 					resumingDeletion,
@@ -520,9 +534,9 @@ export async function sweepSessionBundles(
 					// Refuse before any expiry writes. Unknown evidence is also a deferral: a fresh
 					// tombstone must not prevent the session from resuming to deliver its receipts.
 					outcome = "deferred";
-					const pendingReceipts = withSessionBundleRetention(agentDir, parentSessionId, reservation, () => {
+					const pendingReceipts = withSessionBundleRetention(home, parentSessionId, reservation, () => {
 						const state = readTaskRuntimeProjection(
-							new OrchestrationEventStore({ agentDir, sessionId: parentSessionId }),
+							new OrchestrationEventStore({ orchestrationHome: home, sessionId: parentSessionId }),
 						);
 						return Object.values(state.attempts).some(
 							(attempt) =>
@@ -535,16 +549,17 @@ export async function sweepSessionBundles(
 						continue;
 					}
 					outcome = "retained";
-					if (bundleOwesMailboxWork(agentDir, parentSessionId, bundleDir)) {
+					if (bundleOwesMailboxWork(home, parentSessionId, bundleDir)) {
 						// Obligations older than the retention age can never be answered: settle them, then re-check.
 						// Only when every one of them expires: a bundle that keeps a younger or unsettleable obligation
 						// is refused untouched, because settling part of it would only postpone its removal.
-						if (!everyOpenObligationExpires(agentDir, parentSessionId, bundleDir, now)) {
+						if (!everyOpenObligationExpires(agentDir, home, parentSessionId, bundleDir, now)) {
 							outcome = "deferred";
 							continue;
 						}
 						const settled = settleExpiredObligations(
 							agentDir,
+							home,
 							parentSessionId,
 							name,
 							bundleDir,
@@ -553,7 +568,7 @@ export async function sweepSessionBundles(
 							reservation,
 						);
 						result.expiredObligations += settled;
-						if (settled === 0 || bundleOwesMailboxWork(agentDir, parentSessionId, bundleDir)) {
+						if (settled === 0 || bundleOwesMailboxWork(home, parentSessionId, bundleDir)) {
 							continue;
 						}
 					}
@@ -564,7 +579,7 @@ export async function sweepSessionBundles(
 					}
 					outcome = "removed";
 				} finally {
-					settleSessionBundleDeletion(agentDir, reservation, outcome);
+					settleSessionBundleDeletion(home, reservation, outcome);
 				}
 				result.removed++;
 				result.removedBytes += walk.bytes;

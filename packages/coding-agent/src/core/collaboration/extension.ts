@@ -5,7 +5,7 @@ import { type Static, Type } from "typebox";
 import { Value } from "typebox/value";
 import { getAgentDir, getBundledResourcesDir } from "../../config.ts";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { readSessionLeaseHolders } from "../../kernel/session/session-bundle-lifecycle.ts";
+import { ownerOrchestrationHome, readSessionLeaseHolders } from "../../kernel/session/session-bundle-lifecycle.ts";
 import { canonicalizeWatchDir } from "../../utils/fs-watch.ts";
 import { getProcessWorkRun } from "../../utils/work-directory.ts";
 import {
@@ -280,7 +280,10 @@ export function piCollaborationExtension(pi: ExtensionAPI, options: Collaboratio
 			options.stateDirectory ?? join(getCollaborationDataRoot(), "jobs"),
 			ctx.sessionManager.getSessionId(),
 			options.stateDirectory === undefined
-				? { sessionServers: (sessionId) => readSessionLeaseHolders(getAgentDir(), sessionId) }
+				? {
+						sessionServers: (sessionId) =>
+							readSessionLeaseHolders(ownerOrchestrationHome(getAgentDir()), sessionId),
+					}
 				: {},
 		);
 		const controls = new CollaborationControlHandoffs(store, (notice) =>

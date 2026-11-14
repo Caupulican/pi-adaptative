@@ -64,7 +64,12 @@ import { displayNameFor } from "./delegation/bot-naming.ts";
 import { BotOperatorDispatch } from "./delegation/bot-operator-dispatch.ts";
 import type { BotOperatorMessageOptions } from "./delegation/bot-operator-message-options.ts";
 import { BotRuntimeBindings } from "./delegation/bot-runtime-bindings.ts";
-import { DAEMON_STALE_MS, isOlderDaemonBuild, OWN_DAEMON_BUILD } from "./delegation/bot-team-routine-helpers.ts";
+import {
+	DAEMON_STALE_MS,
+	daemonRecheckAt,
+	isOlderDaemonBuild,
+	OWN_DAEMON_BUILD,
+} from "./delegation/bot-team-routine-helpers.ts";
 import { subscribeBotTeamUpdates } from "./delegation/bot-team-updates.ts";
 import {
 	createForegroundTranscriptWrites,
@@ -213,12 +218,6 @@ import type { WaitStatusEvent } from "./util/wait.ts";
 import type { WorktreeSyncEngineDeps } from "./worktree-sync/git-engine.ts";
 import { WorktreeLaneLifecycle } from "./worktree-sync/lane-lifecycle.ts";
 import { buildWorktreeSyncEngineDeps } from "./worktree-sync/runtime.ts";
-
-/** Slack after a lease's last renewal is due, so a daemon renewing right at the limit is not mistaken for a dead one. */
-const DAEMON_RECHECK_MARGIN_MS = 2_000;
-/** Backoff of the re-ensure after a daemon that could not be brought up. */
-const DAEMON_RECHECK_BASE_BACKOFF_MS = 15_000;
-const DAEMON_RECHECK_MAX_BACKOFF_MS = 600_000;
 
 export type { SessionChannelsView } from "./channels/session-channels.ts";
 export { clampLaneMaxUsd } from "./research/lane-model-resolver.ts";
@@ -487,7 +486,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		const binding = this.nativeWorkerForRecord(record)?.binding;
 		return binding
 			? WorkerConversationStore.transcriptReferenceForBinding(
-					this.deps.getAgentDir(),
+					this.deps.getOrchestrationHome(),
 					this.deps.getSessionId(),
 					binding,
 				)
@@ -596,7 +595,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** The session's store and durable lifecycle, opened once; the retention pass reads it without the worker composition. */
 	private _getOrchestrationCore(): SessionOrchestrationCore {
 		this._orchestrationCore ??= openSessionOrchestrationCore({
-			agentDir: this.deps.getAgentDir(),
+			orchestrationHome: this.deps.getOrchestrationHome(),
 			sessionId: this.deps.getSessionId(),
 			timers: this.deps.getTimers(),
 		});
@@ -1444,7 +1443,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		if (this.deps.isDisposed()) return;
 		if (!this._workerLifecycle) {
 			try {
-				const existing = lstatSync(orchestrationEventStoreDir(this.deps.getAgentDir(), this.deps.getSessionId()));
+				const existing = lstatSync(this._orchestrationStoreDir());
 				if (!existing.isDirectory()) throw new Error("Worker orchestration storage is not a directory.");
 				this._getWorkerLifecycle();
 			} catch (error) {
@@ -1680,15 +1679,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	/** The instant to re-ensure the daemon: when its lease stops being held, or after a backoff when it could not be brought up. */
 	private _nextDaemonCheckAt(nowMs: number, failed: boolean, leaseHeldUntil: number | undefined): number {
 		this._daemonEnsureFailures = failed ? this._daemonEnsureFailures + 1 : 0;
-		if (failed || leaseHeldUntil === undefined)
-			return (
-				nowMs +
-				Math.min(
-					DAEMON_RECHECK_MAX_BACKOFF_MS,
-					DAEMON_RECHECK_BASE_BACKOFF_MS * 2 ** Math.min(this._daemonEnsureFailures, 16),
-				)
-			);
-		return leaseHeldUntil + DAEMON_RECHECK_MARGIN_MS;
+		return daemonRecheckAt(nowMs, failed, this._daemonEnsureFailures, leaseHeldUntil);
 	}
 
 	private _armDaemonRecheck(atMs: number | undefined): void {
@@ -1838,10 +1829,15 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _hasWorkerState(): boolean {
 		if (this._workers || this._workerLifecycle) return true;
 		try {
-			return lstatSync(orchestrationEventStoreDir(this.deps.getAgentDir(), this.deps.getSessionId())).isDirectory();
+			return lstatSync(this._orchestrationStoreDir()).isDirectory();
 		} catch {
 			return false;
 		}
+	}
+
+	/** The session's orchestration event store directory, in the session's orchestration home. */
+	private _orchestrationStoreDir(): string {
+		return orchestrationEventStoreDir(this.deps.getOrchestrationHome(), this.deps.getSessionId());
 	}
 
 	/** The bot roster (see `BotRoster`): projected once, served until an input reports a change. */
@@ -2052,7 +2048,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			engine: () => this.deps.systemOne.semanticDecisionEngine(),
 			goal: () => this.deps.getGoalStateSnapshot(),
 			sessionId: () => this.deps.getSessionId(),
-			agentDir: () => this.deps.getAgentDir(),
+			orchestrationHome: () => this.deps.getOrchestrationHome(),
 			rootEntries: () => this.deps.getSessionManager().getBranch(),
 			// The claim an attempt holds: its outbox write while it is pending, else the transcript's saved claim.
 			workerClaim: (taskId, attemptId) =>
@@ -2112,7 +2108,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			(this._hasWorkerState()
 				? readTaskRuntimeProjection(
 						new OrchestrationEventStore({
-							agentDir: this.deps.getAgentDir(),
+							orchestrationHome: this.deps.getOrchestrationHome(),
 							sessionId: this.deps.getSessionId(),
 						}),
 					)
@@ -2273,6 +2269,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			store: () => this._getOrchestrationCore().store,
 			sessionId: this.deps.getSessionId(),
 			agentDir: this.deps.getAgentDir(),
+			orchestrationHome: this.deps.getOrchestrationHome(),
 			closedObjectiveDays: () =>
 				this.deps.getSettingsManager().getOrchestrationRetentionSettings().closedObjectiveDays,
 			now: () => this.deps.getTimers().port("orchestration").now(),

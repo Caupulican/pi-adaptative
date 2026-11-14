@@ -8,7 +8,7 @@ import "../builtin-install.ts";
 import { join } from "node:path";
 import { crc32, deflateSync } from "node:zlib";
 import { expect } from "vitest";
-import { typeSafeEvidenceDir } from "../../../../src/core/agent-paths.ts";
+import { ownerOrchestrationHome, typeSafeEvidenceDir } from "../../../../src/core/agent-paths.ts";
 import { getManagedToolBinaryPath } from "../../../../src/utils/tools-manager.ts";
 import { calls, createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
@@ -427,7 +427,7 @@ export async function runJourney4SystemOneToolPhase(world: HarnessWorld): Promis
 			evidence?: { id?: string; bytes?: number };
 		};
 		const visionGuardDiag = refusalDiagnostic(results.visionGuard?.text ?? "") ?? "";
-		const evidenceDir = typeSafeEvidenceDir(agentDir, manager.getSessionId());
+		const evidenceDir = typeSafeEvidenceDir(ownerOrchestrationHome(agentDir), manager.getSessionId());
 		const visionGuardRetained = world.io
 			.readdirSync(evidenceDir)
 			.filter((name): name is string => typeof name === "string" && name.endsWith(".payload"))

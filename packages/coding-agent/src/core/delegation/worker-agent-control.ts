@@ -63,7 +63,7 @@ import type {
 	WorkerAgentBroadcastOptions,
 	WorkerAgentMessageOptions,
 } from "./worker-agent-message-options.ts";
-import { WorkerConversationStore } from "./worker-conversation-store.ts";
+import { type WorkerConversationRoots, WorkerConversationStore } from "./worker-conversation-store.ts";
 import type { WorkerDispositionAdvice, WorkerHostVerdictView } from "./worker-disposition.ts";
 import type { FanoutGroupReport } from "./worker-fanout.ts";
 import {
@@ -355,8 +355,7 @@ export type WorkerAgentEnqueueReceipt =
 	| { status: "retained"; messageId: string; message: WorkerAgentMessage; created: boolean }
 	| { status: "completed_replay"; messageId: string; created: false };
 
-export interface WorkerAgentMailboxOptions {
-	agentDir: string;
+export interface WorkerAgentMailboxOptions extends WorkerConversationRoots {
 	parentSessionId: string;
 	agentId: string;
 	projectClaim?: SpecialistContextClaim;
@@ -1611,7 +1610,8 @@ function isPendingOrdinaryTask(message: WorkerAgentMessage): boolean {
  * WorkerConversation. The in-process subscription is a notification edge, not a polling loop.
  */
 export class WorkerAgentMailbox {
-	private readonly agentDir: string;
+	/** Where this mailbox's file and its project conversation live. */
+	private readonly roots: WorkerConversationRoots;
 	private readonly projectClaim?: SpecialistContextClaim;
 	private readonly parentSessionId: string;
 	private readonly agentId: string;
@@ -1620,11 +1620,11 @@ export class WorkerAgentMailbox {
 	private observedProjectReference?: WorkerMailboxContextReference;
 
 	constructor(options: WorkerAgentMailboxOptions) {
-		this.agentDir = options.agentDir;
+		this.roots = { agentDir: options.agentDir, orchestrationHome: options.orchestrationHome };
 		this.projectClaim = options.projectClaim ? structuredClone(options.projectClaim) : undefined;
 		this.parentSessionId = assertIdentity(options.parentSessionId, "parent session id");
 		this.agentId = assertIdentity(options.agentId, "agent id");
-		this.file = workerMailboxPath(options.agentDir, this.parentSessionId, this.agentId);
+		this.file = workerMailboxPath(options.orchestrationHome, this.parentSessionId, this.agentId);
 	}
 
 	getProjectClaim(): SpecialistContextClaim | undefined {
@@ -1648,7 +1648,7 @@ export class WorkerAgentMailbox {
 
 	/** Exclude admission until the owner finishes publishing availability under its transcript lock. */
 	withQuiescentMailbox(release: () => void): boolean {
-		return withSessionBundleFileInspection(this.agentDir, this.parentSessionId, this.file, () => {
+		return withSessionBundleFileInspection(this.roots.orchestrationHome, this.parentSessionId, this.file, () => {
 			if (workerMailboxHasOpenObligation(this.read())) return false;
 			// The callback validates the exact claim under the transcript lock, after the mailbox.
 			release();
@@ -1941,8 +1941,8 @@ export class WorkerAgentMailbox {
 	): void {
 		let changed = false;
 		// Admission excludes deletion; the no-create file inspection never revives an absent mailbox directory.
-		withSessionBundleAdmission(this.agentDir, this.parentSessionId, () =>
-			withSessionBundleFileInspection(this.agentDir, this.parentSessionId, this.file, () => {
+		withSessionBundleAdmission(this.roots.orchestrationHome, this.parentSessionId, () =>
+			withSessionBundleFileInspection(this.roots.orchestrationHome, this.parentSessionId, this.file, () => {
 				const message = this.read().messages.find((candidate) => candidate.messageId === binding.messageId);
 				if (message && (message.task?.kind !== "host_event" || !isDeepStrictEqual(message.task.binding, binding)))
 					throw new WorkerControlIdentityConflictError("Host event transport binding changed.");
@@ -2565,7 +2565,7 @@ export class WorkerAgentMailbox {
 					};
 					if (record.reference)
 						WorkerConversationStore.withProjectMailboxMutation(
-							this.agentDir,
+							this.roots,
 							record.reference,
 							this.parentSessionId,
 							this.projectClaim,
@@ -2576,7 +2576,7 @@ export class WorkerAgentMailbox {
 				// Host-event settlement holds this exact mailbox lock across its transcript proof.
 				{ borrowedScope: currentSynchronousFileLockScope(this.file) },
 			);
-		if (retention) withSessionBundleRetention(this.agentDir, this.parentSessionId, retention, mutate);
-		else withSessionBundleAdmission(this.agentDir, this.parentSessionId, mutate);
+		if (retention) withSessionBundleRetention(this.roots.orchestrationHome, this.parentSessionId, retention, mutate);
+		else withSessionBundleAdmission(this.roots.orchestrationHome, this.parentSessionId, mutate);
 	}
 }

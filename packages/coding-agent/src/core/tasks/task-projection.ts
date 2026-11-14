@@ -1,4 +1,5 @@
 import { escapeRegExp } from "@caupulican/pi-ai";
+import type { OpenTaskStepRef } from "../goals/goal-tool-core.ts";
 import type { TaskStepStatus, TaskStepsState } from "./task-state.ts";
 
 export interface OpenTaskStepProjection {
@@ -69,4 +70,19 @@ export function resolveTaskStepRequirementIds(
 			.map((requirement) => requirement.id),
 		unknownIds: [],
 	};
+}
+
+/**
+ * Goal-tool adapter over the canonical open-task projection: the open steps the goal tools' `getOpenTaskSteps`
+ * cross-visibility reads.
+ */
+export function deriveOpenTaskStepRefs(taskStepsState: TaskStepsState | undefined): OpenTaskStepRef[] {
+	return projectOpenTaskSteps(taskStepsState).map((step) => ({
+		id: step.id,
+		content: step.content,
+		...(step.requirementIds?.length ? { requirementIds: step.requirementIds } : {}),
+		...(step.evidence?.length ? { evidence: step.evidence } : {}),
+		...(step.pipelineRunId ? { pipelineRunId: step.pipelineRunId } : {}),
+		...(step.pipelineStageId ? { pipelineStageId: step.pipelineStageId } : {}),
+	}));
 }

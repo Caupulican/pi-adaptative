@@ -40,7 +40,11 @@ import { boundSessionTurnSpend, unpricedModelRefusal } from "../cost/session-tur
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import type { ChannelProvider } from "../gateways/channel-provider.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import { readSessionLeaseHolders, SessionHeldError } from "../orchestration/session-bundle-lifecycle.ts";
+import {
+	ownerOrchestrationHome,
+	readSessionLeaseHolders,
+	SessionHeldError,
+} from "../orchestration/session-bundle-lifecycle.ts";
 import { isProcessAlive } from "../process-liveness.ts";
 import { isEmergencyStopEngaged, subscribeEmergencyStop } from "../provider-admission/emergency-stop.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
@@ -220,7 +224,7 @@ export class AwayChannelHosts {
 		const recorded = new ChannelJournal(this.input.agentDir, channel.name).read().result.ownerSession;
 		if (!recorded) return "";
 		try {
-			return readSessionLeaseHolders(this.input.agentDir, recorded.sessionId)
+			return readSessionLeaseHolders(ownerOrchestrationHome(this.input.agentDir), recorded.sessionId)
 				.filter((holder) => holder.standing !== "dead")
 				.map((holder) => holder.token)
 				.join(",");
@@ -436,7 +440,7 @@ export class AwayChannelHosts {
 		const recorded = journal.read().result.ownerSession;
 		let sessionManager: SessionManager | undefined;
 		if (recorded) {
-			const open = readSessionLeaseHolders(agentDir, recorded.sessionId).filter(
+			const open = readSessionLeaseHolders(ownerOrchestrationHome(agentDir), recorded.sessionId).filter(
 				(holder) => holder.standing !== "dead" && (holder.role === "session" || holder.role === "channel-host"),
 			);
 			if (open.length > 0)

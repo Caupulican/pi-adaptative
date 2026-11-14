@@ -1,5 +1,6 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
+import { ownerOrchestrationHome } from "../../../../src/core/agent-paths.ts";
 import type { WorkerAgentControlPort } from "../../../../src/core/delegation/worker-agent-control.ts";
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "../../../../src/core/delegation/worker-mailbox-record.ts";
@@ -230,13 +231,18 @@ export async function verifyCancelledWorkerCleanReopen(world: HarnessWorld): Pro
 		expect(attempt.lease).toBeDefined();
 		const bindingOptions = {
 			agentDir,
+			orchestrationHome: ownerOrchestrationHome(agentDir),
 			resumeContext: agent.resumeContext,
 			expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
 		};
 		const beforeBinding = new WorkerConversationStore().getProjectContextBinding(bindingOptions);
 		expect(beforeBinding?.ownership.state).toBe("busy");
 		const queued = owner.session.backgroundLanes.followUpWorkerAgent(agent.agentId, pendingWords);
-		const mailboxFile = workerMailboxPath(agentDir, owner.sessionManager.getSessionId(), agent.agentId);
+		const mailboxFile = workerMailboxPath(
+			ownerOrchestrationHome(agentDir),
+			owner.sessionManager.getSessionId(),
+			agent.agentId,
+		);
 		const pending = readWorkerMailboxRecord(mailboxFile).mailbox;
 		expect(queued).toMatchObject({ started: false, steering: true });
 		expect(queued.skipReason).toBeUndefined();

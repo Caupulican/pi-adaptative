@@ -1,7 +1,7 @@
 import { basename, join } from "node:path";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
-import { configFile } from "../../../../src/core/agent-paths.ts";
+import { configFile, ownerOrchestrationHome } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { outwardDraftStates } from "../../../../src/core/agent-session-edge.ts";
 import { createBuiltInChannelProvider } from "../../../../src/core/channels/built-in-providers.ts";
@@ -1694,7 +1694,9 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 		).toBe("Phone: telegram");
 		expect(phoneText, "the owner's words are in the phone session").toContain(question);
 		expect(phoneText, "a third party's words never reach it").not.toContain(friendWords);
-		const holders = readSessionLeaseHolders(agentDir, sessionId).filter((holder) => holder.standing !== "dead");
+		const holders = readSessionLeaseHolders(ownerOrchestrationHome(agentDir), sessionId).filter(
+			(holder) => holder.standing !== "dead",
+		);
 		expect(
 			holders.map((holder) => holder.role),
 			"the daemon's channel host is the phone session's only holder",
@@ -1721,7 +1723,7 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 			phoneText,
 		);
 		expect(
-			readSessionLeaseHolders(agentDir, sessionId).map((holder) => holder.role),
+			readSessionLeaseHolders(ownerOrchestrationHome(agentDir), sessionId).map((holder) => holder.role),
 			"the refused open holds nothing",
 		).toEqual(["channel-host"]);
 		trace.mark("root", "telegram-daemon.refused");
@@ -1729,7 +1731,10 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 		// Stopping the daemon gives the channel and the phone session up; the terminal then opens the phone session.
 		expect(await withDeadline(trace, "the daemon stops", daemon.stop()), "the daemon exits cleanly").toBe(0);
 		expect(journal().holder, "a stopped daemon serves nothing").toBeUndefined();
-		expect(readSessionLeaseHolders(agentDir, sessionId), "the phone session's hold is released").toEqual([]);
+		expect(
+			readSessionLeaseHolders(ownerOrchestrationHome(agentDir), sessionId),
+			"the phone session's hold is released",
+		).toEqual([]);
 		expect(api.openPolls, "the daemon's held poll is aborted").toBe(0);
 		expect(api.violations, "every poll acknowledged only journaled updates").toEqual([]);
 		// This terminal serves no channel, so the open is its only effect.

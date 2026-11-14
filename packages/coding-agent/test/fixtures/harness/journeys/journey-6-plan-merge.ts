@@ -1,6 +1,7 @@
 import "../builtin-install.ts";
 import { basename, join } from "node:path";
 import { expect } from "vitest";
+import { ownerOrchestrationHome } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { OrchestrationEventStore } from "../../../../src/core/orchestration/event-store.ts";
 import { readTaskRuntimeProjection } from "../../../../src/core/orchestration/task-runtime-reader.ts";
@@ -352,7 +353,9 @@ export async function runJourney6LaneEndPhase(world: HarnessWorld, session: Agen
 	const warningsBefore = world.warnings.length;
 	const mainBefore = world.git.refSha("refs/heads/main");
 	expect(await world.disposeSessionInBody(session), "the root disposes cleanly").toBeUndefined();
-	const stored = readTaskRuntimeProjection(new OrchestrationEventStore({ agentDir: world.agentDir, sessionId }));
+	const stored = readTaskRuntimeProjection(
+		new OrchestrationEventStore({ orchestrationHome: ownerOrchestrationHome(world.agentDir), sessionId }),
+	);
 	expect(
 		{
 			workers: workers.map((agentId) => stored.agents[agentId]?.status),

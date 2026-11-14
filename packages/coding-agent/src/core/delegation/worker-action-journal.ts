@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import path from "node:path";
-import { workerActionJournalFile } from "../agent-paths.ts";
+import { type OrchestrationHome, workerActionJournalFile } from "../agent-paths.ts";
 import { usesWindowsPath } from "../autonomy/path-scope.ts";
 import {
 	withSessionBundleAdmission,
@@ -22,11 +22,15 @@ export type WorkerActionJournalState = "not_started" | "unknown" | "succeeded" |
 
 export interface WorkerActionJournalScope {
 	agentDir: string;
+	orchestrationHome: OrchestrationHome;
 	parentSessionId: string;
 	taskId: string;
 	attemptId: string;
 	fencingToken: number;
 }
+
+/** The scope fields that identify the journal; where it is stored is not part of its identity. */
+type JournalScopeFields = Omit<WorkerActionJournalScope, "agentDir" | "orchestrationHome">;
 
 export interface WorkerActionJournalAction {
 	op: "write" | "edit";
@@ -104,7 +108,7 @@ function safeFencingToken(value: unknown): number {
 	return value;
 }
 
-function validateScope(scope: WorkerActionJournalScope): Omit<WorkerActionJournalScope, "agentDir"> {
+function validateScope(scope: WorkerActionJournalScope): JournalScopeFields {
 	return {
 		parentSessionId: requireBoundedTrimmedText(scope.parentSessionId, MAX_IDENTIFIER_CHARS, "Parent session id"),
 		taskId: requireBoundedTrimmedText(scope.taskId, MAX_IDENTIFIER_CHARS, "Task id"),
@@ -113,7 +117,7 @@ function validateScope(scope: WorkerActionJournalScope): Omit<WorkerActionJourna
 	};
 }
 
-function journalIdentity(scope: Omit<WorkerActionJournalScope, "agentDir">): WorkerActionJournalIdentity {
+function journalIdentity(scope: JournalScopeFields): WorkerActionJournalIdentity {
 	return { parentSessionId: scope.parentSessionId, taskId: scope.taskId };
 }
 
@@ -153,7 +157,7 @@ function actionDigest(input: BeginWorkerActionInput, normalizedTarget: string): 
 	return hash.digest("hex");
 }
 
-function actionId(scope: Omit<WorkerActionJournalScope, "agentDir">, index: number, digest: string): string {
+function actionId(scope: JournalScopeFields, index: number, digest: string): string {
 	return createHash("sha256")
 		.update("pi-worker-action-id-v1")
 		.update("\0")
@@ -255,20 +259,26 @@ function now(): string {
  */
 export class WorkerActionJournal {
 	readonly agentDir: string;
+	private readonly orchestrationHome: OrchestrationHome;
 	readonly filePath: string;
-	private readonly scope: Omit<WorkerActionJournalScope, "agentDir">;
+	private readonly scope: JournalScopeFields;
 	private readonly identity: WorkerActionJournalIdentity;
 
 	constructor(scope: WorkerActionJournalScope) {
 		this.agentDir = requireBoundedTrimmedText(scope.agentDir, MAX_TARGET_CHARS, "Agent directory");
+		this.orchestrationHome = scope.orchestrationHome;
 		this.scope = validateScope(scope);
 		this.identity = journalIdentity(this.scope);
-		this.filePath = workerActionJournalFile(this.agentDir, this.scope.parentSessionId, scopeDigest(this.identity));
+		this.filePath = workerActionJournalFile(
+			this.orchestrationHome,
+			this.scope.parentSessionId,
+			scopeDigest(this.identity),
+		);
 	}
 
 	inspect(actionIdentity: string): WorkerActionJournalInspection {
 		const actionId = requireBoundedTrimmedText(actionIdentity, 128, "Worker action id");
-		return withSessionBundleFileInspection(this.agentDir, this.scope.parentSessionId, this.filePath, () => {
+		return withSessionBundleFileInspection(this.orchestrationHome, this.scope.parentSessionId, this.filePath, () => {
 			const entry = this.readLocked().entries.find((candidate) => candidate.actionId === actionId);
 			if (!entry) return { state: "not_started", actionId };
 			return this.inspectionFor(entry);
@@ -379,7 +389,7 @@ export class WorkerActionJournal {
 	}
 
 	private withMutation<T>(operation: () => T): T {
-		return withSessionBundleAdmission(this.agentDir, this.scope.parentSessionId, () =>
+		return withSessionBundleAdmission(this.orchestrationHome, this.scope.parentSessionId, () =>
 			withFileLockSync(this.filePath, operation),
 		);
 	}

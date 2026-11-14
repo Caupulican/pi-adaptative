@@ -8,6 +8,7 @@ import type { CheckOptions, LockOptions, UnlockOptions } from "proper-lockfile";
 import { expect } from "vitest";
 import {
 	orchestrationSessionDir,
+	ownerOrchestrationHome,
 	stateFile,
 	workerContextForkFile,
 	workerProjectSpecializationFile,
@@ -252,6 +253,7 @@ export function ownedWorkerFiles(
 	const store = new WorkerConversationStore();
 	const options = {
 		agentDir: world.agentDir,
+		orchestrationHome: ownerOrchestrationHome(world.agentDir),
 		resumeContext: agent.resumeContext,
 		expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
 	};
@@ -284,7 +286,10 @@ export function ownedFilesManifest(
 			if (content !== undefined) selected.set(path, content);
 		};
 		take(owner.sessionFile);
-		for (const [path, content] of bundleEntries(entries, orchestrationSessionDir(world.agentDir, owner.sessionId))) {
+		for (const [path, content] of bundleEntries(
+			entries,
+			orchestrationSessionDir(ownerOrchestrationHome(world.agentDir), owner.sessionId),
+		)) {
 			selected.set(path, content);
 		}
 		for (const worker of workers) {
@@ -296,7 +301,7 @@ export function ownedFilesManifest(
 			if (worker.birth !== undefined) {
 				take(
 					workerContextForkFile(
-						world.agentDir,
+						ownerOrchestrationHome(world.agentDir),
 						owner.sessionId,
 						worker.birth.identityDigest,
 						worker.birth.contentDigest,

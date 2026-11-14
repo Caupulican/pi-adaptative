@@ -1,4 +1,4 @@
-import { SessionReplacementCallbackError, SessionReplacementRuntimeError } from "../../core/agent-session-runtime.ts";
+import { SessionReplacementCallbackError, SessionReplacementRuntimeError } from "../../core/session-switch-failures.ts";
 
 export type NonFatalSessionReplacementDisposition = "previous_restored" | "replacement_committed";
 

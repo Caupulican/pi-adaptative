@@ -1,6 +1,7 @@
 /** Host-written control messages in a logical worker's durable transcript: the append-or-reconcile of one control message, and the model-facing projection of a mailbox message. */
 
 import type { UserMessage } from "@caupulican/pi-ai";
+import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import { stampWorkerControl } from "../../kernel/worker-control-stamp.ts";
 import type { AgentBindingContract } from "../orchestration/contracts.ts";
 import type { SpecialistContextClaim } from "../orchestration/specialist-context-ownership.ts";
@@ -10,7 +11,7 @@ import {
 	type WorkerAgentTaskMetadata,
 	workerAgentMessageId,
 } from "./worker-agent-control.ts";
-import type { WorkerConversationStore } from "./worker-conversation-store.ts";
+import { agentConversation, type WorkerConversationStore } from "./worker-conversation-store.ts";
 import { workerHostEventMessage } from "./worker-host-event-transport.ts";
 
 export type MandatoryTranscriptControlInput = {
@@ -24,6 +25,7 @@ export type MandatoryTranscriptControlInput = {
 
 interface WorkerControlTranscriptOptions {
 	readonly agentDir: string;
+	readonly orchestrationHome: OrchestrationHome;
 	readonly parentSessionId: string;
 	getConversationClaim?(agent: AgentBindingContract): SpecialistContextClaim | undefined;
 }
@@ -121,9 +123,7 @@ export class WorkerControlTranscript {
 		}
 		const projected = mailboxMessage(message);
 		const conversation = this.conversations.open({
-			agentDir: this.options.agentDir,
-			resumeContext: target.resumeContext,
-			expectedLogicalAgentId: target.contextOrigin?.logicalAgentId ?? target.agentId,
+			...agentConversation(this.options, target),
 			...(appendIfMissing ? { projectClaim: this.options.getConversationClaim?.(target) } : {}),
 		});
 		if (typeof projected.content !== "string") {

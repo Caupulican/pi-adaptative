@@ -1,6 +1,5 @@
 import { copyFileSync, existsSync, constants as fsConstants, mkdirSync, statSync, unlinkSync } from "node:fs";
 import { basename, join, resolve } from "node:path";
-import { harnessLog } from "../kernel/harness-log.ts";
 import { readSessionHeaderResult } from "../kernel/session/session-header.ts";
 import { SessionManager } from "../kernel/session/session-manager.ts";
 import { resolvePath } from "../utils/paths.ts";
@@ -24,13 +23,14 @@ import type {
 import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { type OwnerTextRange, ownerPasteRestorer } from "./learning/owner-evidence-ledger.ts";
 import {
+	ownerOrchestrationHome,
 	refuseHostedSession,
 	SessionBundleLeaseReleaseError,
-	SessionHostedError,
 	withSessionBundleLeases,
 } from "./orchestration/session-bundle-lifecycle.ts";
 import type { CreateAgentSessionResult } from "./sdk.ts";
 import { assertSessionCwdExists } from "./session-cwd.ts";
+import { SessionReplacementCallbackError, SessionReplacementRuntimeError } from "./session-switch-failures.ts";
 import { writeTerminalWarnings } from "./terminal-warnings.ts";
 
 /**
@@ -324,51 +324,6 @@ interface RestoreFailure {
 	readonly undeliveredWarnings: readonly string[];
 }
 
-/** Owner words for the step a session switch failed in; the phase name itself stays in the debug log. */
-const SWITCH_STEP_WORDS: Readonly<Record<SessionReplacementRuntimeError["phase"], string>> = {
-	admission: "before the old session was closed",
-	teardown: "while closing the old session",
-	activation: "while starting the new session",
-};
-
-/** A teardown or activation failure at the replacement boundary, including rollback outcome. */
-export class SessionReplacementRuntimeError extends Error {
-	readonly phase: "admission" | "teardown" | "activation";
-	readonly recovered: boolean;
-	readonly transitionError: unknown;
-	readonly recoveryError: unknown | undefined;
-	/** Warnings of the discarded session that no live session could take: a failed restore leaves none to show them on. */
-	readonly undeliveredWarnings: readonly string[];
-
-	constructor(
-		phase: "admission" | "teardown" | "activation",
-		transitionError: unknown,
-		recovered: boolean,
-		recoveryError?: unknown,
-		undeliveredWarnings: readonly string[] = [],
-	) {
-		const transitionMessage = transitionError instanceof Error ? transitionError.message : String(transitionError);
-		const warnings = undeliveredWarnings.length > 0 ? `. ${undeliveredWarnings.join(" ")}` : "";
-		harnessLog.debug("ui", "a session switch failed", () => ({ phase, recovered }));
-		super(
-			// A session the bot daemon hosts is refused with its own one message; nothing was opened.
-			phase === "admission" && transitionError instanceof SessionHostedError
-				? transitionMessage
-				: phase === "admission"
-					? `Switching sessions failed ${SWITCH_STEP_WORDS.admission}; the previous session remains active: ${transitionMessage}`
-					: recovered
-						? `Switching sessions failed ${SWITCH_STEP_WORDS[phase]}; the previous session was restored: ${transitionMessage}`
-						: `Switching sessions failed ${SWITCH_STEP_WORDS[phase]}, and the previous session could not be restored safely: ${transitionMessage}${warnings}`,
-		);
-		this.name = "SessionReplacementRuntimeError";
-		this.phase = phase;
-		this.recovered = recovered;
-		this.transitionError = transitionError;
-		this.recoveryError = recoveryError;
-		this.undeliveredWarnings = undeliveredWarnings;
-	}
-}
-
 /**
  * Refuse a session file the bot daemon hosts before it is opened or copied: a recovered admission failure (the previous
  * session stays active) whose message is the hosted one; nothing is written.
@@ -377,23 +332,9 @@ function refuseHostedSessionFile(agentDir: string, path: string): void {
 	const header = readSessionHeaderResult(resolvePath(path));
 	if (!header.ok) return;
 	try {
-		refuseHostedSession(agentDir, header.header.id);
+		refuseHostedSession(ownerOrchestrationHome(agentDir), header.header.id);
 	} catch (error) {
 		throw new SessionReplacementRuntimeError("admission", error, true);
-	}
-}
-
-/** A post-commit extension callback failed; the replacement itself remains the active session. */
-export class SessionReplacementCallbackError extends Error {
-	readonly replacementCommitted = true;
-	readonly callbackError: unknown;
-
-	constructor(callbackError: unknown, stage = "a follow-up step") {
-		const callbackMessage = callbackError instanceof Error ? callbackError.message : String(callbackError);
-		harnessLog.debug("ui", "a follow-up step after a session switch failed", () => ({ stage }));
-		super(`Switching sessions completed, but ${stage} failed: ${callbackMessage}`);
-		this.name = "SessionReplacementCallbackError";
-		this.callbackError = callbackError;
 	}
 }
 
@@ -738,13 +679,14 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		options: SessionReplacementCommitOptions,
 	): Promise<void> {
 		const previous = this.snapshot();
+		const ownerHome = ownerOrchestrationHome(previous.services.agentDir);
 		const heldSessionIds = [previous.sessionManager, prepared.sessionManager]
 			.filter((manager) => manager.isPersisted())
 			.map((manager) => manager.getSessionId());
 		let entered = false;
 		let completed = false;
 		try {
-			return await withSessionBundleLeases(previous.services.agentDir, heldSessionIds, async () => {
+			return await withSessionBundleLeases(ownerHome, heldSessionIds, async () => {
 				entered = true;
 				try {
 					await this.teardownCurrent(options.reason, options.targetSessionFile);

@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
+import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import type { TaskBrief } from "../comms/comms-records.ts";
 import type { WorkerDelegationTaskContext } from "../delegation/worker-delegation-request.ts";
 import { deriveWorkerTaskLabel } from "../delegation/worker-task-label.ts";
@@ -81,7 +82,7 @@ export function ledgerSkip(error: unknown): string {
 }
 
 export interface DelegationLedgerOptions {
-	agentDir: string;
+	orchestrationHome: OrchestrationHome;
 	sessionId: string;
 	now?: () => number;
 	store?: OrchestrationEventStore;
@@ -261,7 +262,7 @@ export class DelegationOrchestrationLedger {
 			store:
 				options.store ??
 				new OrchestrationEventStore({
-					agentDir: options.agentDir,
+					orchestrationHome: options.orchestrationHome,
 					sessionId: options.sessionId,
 					...(options.now ? { now: () => new Date(options.now?.() ?? Date.now()).toISOString() } : {}),
 				}),

@@ -1,7 +1,12 @@
 import { randomUUID } from "node:crypto";
 import { existsSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
-import { orchestrationSessionDeletionFile, workerProjectSpecializationFile } from "../agent-paths.ts";
+import {
+	type OrchestrationHome,
+	orchestrationSessionDeletionFile,
+	ownerOrchestrationHome,
+	workerProjectSpecializationFile,
+} from "../agent-paths.ts";
 import { isAgentIdentity } from "../orchestration/agent-resume.ts";
 import type {
 	SpecialistContextOwner,
@@ -48,11 +53,15 @@ export type WorkerProjectAdmission =
  */
 export class WorkerProjectDirectory {
 	private readonly agentDir: string;
+	private readonly orchestrationHome: OrchestrationHome;
 	private readonly conversations: WorkerConversationStore;
 	private preparationScope?: { allocation: WorkerProjectAllocation; lock: SynchronousFileLockScope };
 
 	constructor(agentDir: string, conversations: WorkerConversationStore) {
 		this.agentDir = agentDir;
+		// The directory is shared by every session under agentDir and enrolls the owner's sessions: the bundles its
+		// references name live in the owner's orchestration home.
+		this.orchestrationHome = ownerOrchestrationHome(agentDir);
 		this.conversations = conversations;
 	}
 
@@ -66,7 +75,7 @@ export class WorkerProjectDirectory {
 		return withFileLockSync(file, () => {
 			const entries = this.read(file);
 			if (!input.independent) {
-				const recovery = new WorkerProjectSetupRecovery(this.agentDir, this.conversations);
+				const recovery = new WorkerProjectSetupRecovery(this.agentDir, this.orchestrationHome, this.conversations);
 				for (const entry of [...entries]) {
 					try {
 						const allocation = {
@@ -96,10 +105,12 @@ export class WorkerProjectDirectory {
 						continue;
 					}
 					const reference = entry.reference!;
-					if (existsSync(orchestrationSessionDeletionFile(this.agentDir, reference.parentSessionId))) continue;
+					if (existsSync(orchestrationSessionDeletionFile(this.orchestrationHome, reference.parentSessionId)))
+						continue;
 					try {
 						const ownership = this.conversations.inspectProjectContext(
 							this.agentDir,
+							this.orchestrationHome,
 							reference,
 							input.specializationKey,
 						);
@@ -116,6 +127,7 @@ export class WorkerProjectDirectory {
 					try {
 						const conversation = this.conversations.claimProjectContext({
 							agentDir: this.agentDir,
+							orchestrationHome: this.orchestrationHome,
 							resumeContext: reference.resumeContext,
 							expectedLogicalAgentId: reference.logicalAgentId,
 							owner: input.owner,
@@ -193,6 +205,7 @@ export class WorkerProjectDirectory {
 			if (!entry.reference) throw new Error("Worker allocation has no birth identity.");
 			const ownership = this.conversations.inspectProjectContext(
 				this.agentDir,
+				this.orchestrationHome,
 				entry.reference,
 				allocation.specializationKey,
 			);
@@ -226,7 +239,13 @@ export class WorkerProjectDirectory {
 			}
 			sessionId = entry.reference.resumeContext.sessionId;
 			this.conversations.settleCancelledProjectSetup(
-				{ agentDir: this.agentDir, reference: entry.reference, ...allocation, withQuiescence },
+				{
+					agentDir: this.agentDir,
+					orchestrationHome: this.orchestrationHome,
+					reference: entry.reference,
+					...allocation,
+					withQuiescence,
+				},
 				(enrolled) => save(this.settledSetupEntry(entry, enrolled)),
 			);
 		});
@@ -237,7 +256,7 @@ export class WorkerProjectDirectory {
 		if (entry.reference || entry.phase !== "allocating")
 			throw new Error("Bound worker allocation requires reconciliation.");
 		if (entry.preparation === undefined) throw new Error("Worker preparation evidence is missing.");
-		new WorkerProjectSetupRecovery(this.agentDir, this.conversations).settleUnbound(
+		new WorkerProjectSetupRecovery(this.agentDir, this.orchestrationHome, this.conversations).settleUnbound(
 			allocation,
 			entry.preparation,
 			"preparation_failed",

@@ -1,11 +1,11 @@
 import { spawnSync } from "node:child_process";
 import { lstat, rm, unlink } from "node:fs/promises";
 import { readSessionHeaderResult } from "../kernel/session/session-manager.ts";
-import { orchestrationSessionDir } from "./agent-paths.ts";
+import { type OrchestrationHome, orchestrationSessionDir } from "./agent-paths.ts";
 import { accountingProjectionPath } from "./cost/accounting-evidence.ts";
 import { accountingFragmentPath } from "./cost/accounting-fragments.ts";
 import { sessionJournalPaths } from "./cost/semantic-usage-journal.ts";
-import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
+import { canDeleteReservedWorkerBundle } from "./delegation/worker-bundle-deletion.ts";
 import { reserveSessionBundleDeletion, settleSessionBundleDeletion } from "./orchestration/session-bundle-lifecycle.ts";
 import { isMissingFileError } from "./util/atomic-file.ts";
 
@@ -32,6 +32,8 @@ export interface ForegroundSessionBundleDeletion {
 
 export interface DeleteForegroundSessionBundleOptions {
 	agentDir: string;
+	/** The home holding the session's orchestration bundle. */
+	orchestrationHome: OrchestrationHome;
 	parentSessionId: string;
 	sessionPath: string;
 	removePath?: (path: string) => Promise<SessionArtifactPathDeletion>;
@@ -114,7 +116,7 @@ export async function deleteForegroundSessionBundle(
 ): Promise<ForegroundSessionBundleDeletion> {
 	const removePath = options.removePath ?? removePathWithTrashFallback;
 	const reservation = reserveSessionBundleDeletion(
-		options.agentDir,
+		options.orchestrationHome,
 		options.parentSessionId,
 		"permanent",
 		(existingPolicy) => {
@@ -141,7 +143,7 @@ export async function deleteForegroundSessionBundle(
 		};
 	}
 
-	const workerArtifactsPath = orchestrationSessionDir(options.agentDir, options.parentSessionId);
+	const workerArtifactsPath = orchestrationSessionDir(options.orchestrationHome, options.parentSessionId);
 	let outcome: "removed" | "retained" = "retained";
 	const failures: unknown[] = [];
 	let result: ForegroundSessionBundleDeletion | undefined;
@@ -156,7 +158,7 @@ export async function deleteForegroundSessionBundle(
 					complete: false,
 				};
 			const journal = await removeJournalSidecars(options.sessionPath, removePath);
-			if (!WorkerConversationStore.canDeleteReservedBundle(options.agentDir, reservation))
+			if (!canDeleteReservedWorkerBundle(options.agentDir, options.orchestrationHome, reservation))
 				return { foreground, journal, workerArtifacts: { ok: false, method: "preserved" }, complete: false };
 			const exists = await lstat(workerArtifactsPath).then(
 				() => true,
@@ -177,7 +179,7 @@ export async function deleteForegroundSessionBundle(
 		failures.push(error);
 	}
 	try {
-		settleSessionBundleDeletion(options.agentDir, reservation, outcome);
+		settleSessionBundleDeletion(options.orchestrationHome, reservation, outcome);
 	} catch (settlementError) {
 		failures.push(settlementError);
 	}

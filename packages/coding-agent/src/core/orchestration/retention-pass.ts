@@ -27,7 +27,7 @@ import {
 } from "./retention-eligibility.ts";
 import { RetentionPlanStaleError, type RetentionPrunedPayload, retentionArchiveId } from "./retention-event.ts";
 import { delegatedMessagesPending, hasPendingControlMessages } from "./retention-readers.ts";
-import { withSessionBundleMaintenance } from "./session-bundle-lifecycle.ts";
+import { type OrchestrationHome, withSessionBundleMaintenance } from "./session-bundle-lifecycle.ts";
 import type { DurableTaskRuntime } from "./task-runtime.ts";
 import type { OrchestrationProjectionCapacity, TaskRuntimeProjection } from "./task-runtime-state.ts";
 
@@ -43,6 +43,7 @@ export interface RetentionPassDeps {
 	readonly store: () => OrchestrationEventStore;
 	readonly sessionId: string;
 	readonly agentDir: string;
+	readonly orchestrationHome: OrchestrationHome;
 	readonly closedObjectiveDays: () => number;
 	/** The orchestration clock: the store stamps `occurredAt` on it, and the reducer compares the cutoff with that stamp. */
 	readonly now: () => number;
@@ -121,7 +122,7 @@ function externalHolds(state: TaskRuntimeProjection, deps: RetentionPassDeps): E
 			const delivered = record.outcomeDeliveredToParent || deps.hasDelivered(`leader-outcome:${record.objectiveId}`);
 			if (record.outcome !== undefined && !delivered) hold(record.objectiveId, "outcome_undelivered");
 			if (openFollowed.has(record.objectiveId)) hold(record.objectiveId, "follower_open");
-			delegatedPending ??= delegatedMessagesPending(deps.agentDir, deps.sessionId, state, deps.warn);
+			delegatedPending ??= delegatedMessagesPending(deps, state);
 			if (delegatedPending(record.objectiveId)) hold(record.objectiveId, "delegated_message_pending");
 		} else if (!record.filedByObjective && record.dispatchedAt !== undefined) {
 			// The legacy turnBelongsTo attributes an attempt to an open delegation by time window.
@@ -143,7 +144,7 @@ function externalHolds(state: TaskRuntimeProjection, deps: RetentionPassDeps): E
 	}
 	const agents = new Set<string>();
 	for (const agentId of agentIds) {
-		if (hasPendingControlMessages(deps.agentDir, deps.sessionId, agentId, deps.warn)) agents.add(agentId);
+		if (hasPendingControlMessages(deps, agentId)) agents.add(agentId);
 	}
 	return { objectives, attempts, agents };
 }
@@ -181,7 +182,7 @@ export function runRetentionPass(deps: RetentionPassDeps): RetentionPassResult {
 	const days = deps.closedObjectiveDays();
 	if (days === 0) return { kind: "disabled" };
 	const archiveDir = retentionArchiveDir(deps.store().rootDir);
-	const admitted = withSessionBundleMaintenance(deps.agentDir, deps.sessionId, (): RetentionPassResult => {
+	const admitted = withSessionBundleMaintenance(deps.orchestrationHome, deps.sessionId, (): RetentionPassResult => {
 		const runtime = deps.runtime();
 		const state = runtime.getSnapshot();
 		const now = deps.now();

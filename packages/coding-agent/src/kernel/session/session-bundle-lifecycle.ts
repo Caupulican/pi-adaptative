@@ -1,6 +1,5 @@
 import { randomUUID } from "node:crypto";
 import { lstatSync, unlinkSync } from "node:fs";
-import { resolve } from "node:path";
 import { judgeOwner, type OwnerStanding, ownProcessOwner, type ProcessOwner } from "../reliability/owner-identity.ts";
 import { isPositiveSafePid } from "../reliability/process-tree.ts";
 import {
@@ -13,7 +12,15 @@ import {
 } from "../storage/atomic-file.ts";
 import { readOptionalBoundedTextFileSync } from "../storage/bounded-file.ts";
 import { isPlainRecord } from "../utils/value-guards.ts";
-import { orchestrationSessionDeletionFile, orchestrationSessionDir } from "./session-bundle-paths.ts";
+import {
+	type OrchestrationHome,
+	orchestrationSessionDeletionFile,
+	orchestrationSessionDir,
+	resolvedOrchestrationHome,
+} from "./session-bundle-paths.ts";
+
+/** Every operation here addresses a bundle inside an orchestration home; callers name the home they mean. */
+export { type OrchestrationHome, ownerOrchestrationHome } from "./session-bundle-paths.ts";
 
 export type SessionBundleDeletionPolicy = "retention" | "permanent";
 
@@ -47,8 +54,8 @@ const PROCESS_INSTANCE_ID = randomUUID();
 const activeOperations = new Set<string>();
 const admittedBundles = new Map<string, SynchronousFileLockScope>();
 
-export function hasCurrentSessionBundleAdmission(agentDir: string, parentSessionId: string): boolean {
-	const file = orchestrationSessionDeletionFile(agentDir, parentSessionId);
+export function hasCurrentSessionBundleAdmission(home: OrchestrationHome, parentSessionId: string): boolean {
+	const file = orchestrationSessionDeletionFile(home, parentSessionId);
 	const scope = currentSynchronousFileLockScope(file);
 	return scope !== undefined && admittedBundles.get(scope.lockfilePath) === scope;
 }
@@ -137,7 +144,7 @@ function parseRecordedOwner(record: Record<string, unknown>, legacy: boolean): P
 }
 
 interface BundleLeaseState {
-	readonly agentDir: string;
+	readonly home: OrchestrationHome;
 	readonly parentSessionId: string;
 	readonly holder: BundleHolder;
 	claimed: boolean;
@@ -273,8 +280,8 @@ export interface SessionLeaseHolder {
  * replaced atomically, so a reader always sees one whole snapshot). A session that is not persisted, or that no
  * process holds, has no holders. A registry that cannot be parsed throws; a caller must treat that as unknown.
  */
-export function readSessionLeaseHolders(agentDir: string, parentSessionId: string): SessionLeaseHolder[] {
-	const file = `${orchestrationSessionDeletionFile(resolve(agentDir), parentSessionId)}.leases.json`;
+export function readSessionLeaseHolders(home: OrchestrationHome, parentSessionId: string): SessionLeaseHolder[] {
+	const file = `${orchestrationSessionDeletionFile(resolvedOrchestrationHome(home), parentSessionId)}.leases.json`;
 	return readHolders(file, parentSessionId).map((holder) => ({
 		token: holder.token,
 		owner: holder.owner,
@@ -286,8 +293,8 @@ export function readSessionLeaseHolders(agentDir: string, parentSessionId: strin
 }
 
 /** The channel host holding the session that is not proven dead, if any; read-only like {@link readSessionLeaseHolders}. */
-export function sessionChannelHost(agentDir: string, parentSessionId: string): SessionLeaseHolder | undefined {
-	return readSessionLeaseHolders(agentDir, parentSessionId).find(
+export function sessionChannelHost(home: OrchestrationHome, parentSessionId: string): SessionLeaseHolder | undefined {
+	return readSessionLeaseHolders(home, parentSessionId).find(
 		(holder) => holder.role === "channel-host" && holder.standing !== "dead",
 	);
 }
@@ -296,14 +303,14 @@ export function sessionChannelHost(agentDir: string, parentSessionId: string): S
  * Refuse, before anything is opened or written, to open a session the bot daemon hosts: the check the AgentSession
  * acquire makes ({@link acquireSessionBundleLease} with `refuseHosted`), read-only. An unreadable registry throws.
  */
-export function refuseHostedSession(agentDir: string, parentSessionId: string): void {
-	const host = sessionChannelHost(agentDir, parentSessionId);
+export function refuseHostedSession(home: OrchestrationHome, parentSessionId: string): void {
+	const host = sessionChannelHost(home, parentSessionId);
 	if (host) throw new SessionHostedError(holderRef(host));
 }
 
 function releaseBundleLease(state: BundleLeaseState): void {
 	if (state.status === "released") return;
-	const tombstone = orchestrationSessionDeletionFile(state.agentDir, state.parentSessionId);
+	const tombstone = orchestrationSessionDeletionFile(state.home, state.parentSessionId);
 	const file = `${tombstone}.leases.json`;
 	withFileLockSync(tombstone, () => {
 		const holders = readHolders(file, state.parentSessionId);
@@ -321,13 +328,13 @@ function releaseBundleLease(state: BundleLeaseState): void {
 }
 
 export function acquireSessionBundleLease(
-	agentDir: string,
+	home: OrchestrationHome,
 	parentSessionId: string,
 	/** `refuseHosted`: a `session` hold is refused while a channel host holds the session (the AgentSession open path). */
 	options: { role?: SessionLeaseRole; refuseHosted?: boolean } = {},
 ): SessionBundleLease {
-	const directory = resolve(agentDir);
-	const tombstone = orchestrationSessionDeletionFile(directory, parentSessionId);
+	const resolvedHome = resolvedOrchestrationHome(home);
+	const tombstone = orchestrationSessionDeletionFile(resolvedHome, parentSessionId);
 	const file = `${tombstone}.leases.json`;
 	const holder: BundleHolder = {
 		token: randomUUID(),
@@ -335,11 +342,11 @@ export function acquireSessionBundleLease(
 		processInstanceId: PROCESS_INSTANCE_ID,
 		role: options.role ?? "session",
 	};
-	withSessionBundleAdmission(directory, parentSessionId, () => {
+	withSessionBundleAdmission(resolvedHome, parentSessionId, () => {
 		const holders = liveHolders(file, parentSessionId);
 		writeHolders(file, parentSessionId, admitHolder(parentSessionId, holders, holder, options.refuseHosted === true));
 	});
-	const state: BundleLeaseState = { agentDir: directory, parentSessionId, holder, claimed: false, status: "held" };
+	const state: BundleLeaseState = { home: resolvedHome, parentSessionId, holder, claimed: false, status: "held" };
 	const lease: SessionBundleLease = Object.freeze({
 		release() {
 			if (state.claimed) throw new Error("The session owns this bundle lease; close the session to release it.");
@@ -363,7 +370,7 @@ export function sessionBundleLeaseToken(lease: SessionBundleLease): string {
 /** Direct construction must transfer a real, unclaimed hold for this exact persisted session. */
 export function claimSessionBundleLease(
 	lease: SessionBundleLease | undefined,
-	agentDir: string,
+	home: OrchestrationHome,
 	parentSessionId: string,
 	persisted: boolean,
 ): SessionBundleLease | undefined {
@@ -372,7 +379,7 @@ export function claimSessionBundleLease(
 	if (
 		state?.status !== "held" ||
 		state.claimed ||
-		state.agentDir !== resolve(agentDir) ||
+		state.home.root !== resolvedOrchestrationHome(home).root ||
 		state.parentSessionId !== parentSessionId
 	)
 		throw new Error("Persisted AgentSession construction requires its own live session bundle lease.");
@@ -391,7 +398,7 @@ export class SessionBundleLeaseReleaseError extends AggregateError {
 
 /** Bridge retirement and activation, retaining both sessions through rollback and unwinding partial acquisition. */
 export async function withSessionBundleLeases<T>(
-	agentDir: string,
+	home: OrchestrationHome,
 	sessionIds: readonly string[],
 	operation: () => Promise<T>,
 ): Promise<T> {
@@ -400,7 +407,7 @@ export async function withSessionBundleLeases<T>(
 	let operationFailure: { error: unknown } | undefined;
 	let result: T | undefined;
 	try {
-		for (const id of new Set(sessionIds)) leases.push(acquireSessionBundleLease(agentDir, id));
+		for (const id of new Set(sessionIds)) leases.push(acquireSessionBundleLease(home, id));
 		result = await operation();
 	} catch (error) {
 		operationFailure = { error };
@@ -479,10 +486,8 @@ function canRecoverOperation(operation: DeletionOperation): boolean {
 }
 
 /** A retained cleanup already passed age admission; its own partial writes do not restart that age. */
-export function hasPendingSessionBundleRetention(agentDir: string, parentSessionId: string): boolean {
-	return (
-		readMarker(orchestrationSessionDeletionFile(agentDir, parentSessionId), parentSessionId)?.policy === "retention"
-	);
+export function hasPendingSessionBundleRetention(home: OrchestrationHome, parentSessionId: string): boolean {
+	return readMarker(orchestrationSessionDeletionFile(home, parentSessionId), parentSessionId)?.policy === "retention";
 }
 
 export type SessionBundleLockOptions = Pick<
@@ -494,35 +499,35 @@ type BundleAdmissionResult<T> = { admitted: false } | { admitted: true; value: T
 
 /** Lock order is bundle admission, then transcript. No filesystem lock spans asynchronous removal. */
 export function withSessionBundleAdmission<T>(
-	agentDir: string,
+	home: OrchestrationHome,
 	parentSessionId: string,
 	operation: () => T,
 	options?: SessionBundleLockOptions,
 ): T {
-	const result = admitSessionBundle(agentDir, parentSessionId, operation, options, true);
+	const result = admitSessionBundle(home, parentSessionId, operation, options, true);
 	if (!result.admitted) throw new Error("Worker session bundle deletion has been reserved.");
 	return result.value;
 }
 
 /** Optional storage maintenance never revives or writes through a deletion reservation. */
 export function withSessionBundleMaintenance<T>(
-	agentDir: string,
+	home: OrchestrationHome,
 	parentSessionId: string,
 	operation: () => T,
 	options?: SessionBundleLockOptions,
 ): BundleAdmissionResult<T> {
-	return admitSessionBundle(agentDir, parentSessionId, operation, options, false);
+	return admitSessionBundle(home, parentSessionId, operation, options, false);
 }
 
 function admitSessionBundle<T>(
-	agentDir: string,
+	home: OrchestrationHome,
 	parentSessionId: string,
 	operation: () => T,
 	options: SessionBundleLockOptions | undefined,
 	recoverCompletedRetention: boolean,
 ): BundleAdmissionResult<T> {
-	const tombstone = orchestrationSessionDeletionFile(agentDir, parentSessionId);
-	if (hasCurrentSessionBundleAdmission(agentDir, parentSessionId)) return { admitted: true, value: operation() };
+	const tombstone = orchestrationSessionDeletionFile(home, parentSessionId);
+	if (hasCurrentSessionBundleAdmission(home, parentSessionId)) return { admitted: true, value: operation() };
 	return withFileLockSync(
 		tombstone,
 		() => {
@@ -532,7 +537,7 @@ function admitSessionBundle<T>(
 				let removalConfirmed = false;
 				if (marker.policy === "retention" && (!marker.operation || canRecoverOperation(marker.operation))) {
 					try {
-						lstatSync(orchestrationSessionDir(agentDir, parentSessionId));
+						lstatSync(orchestrationSessionDir(home, parentSessionId));
 					} catch (error) {
 						if (!isMissingFileError(error)) throw error;
 						removalConfirmed = true;
@@ -565,8 +570,12 @@ function admitSessionBundle<T>(
 }
 
 /** Serialize inspection and existing claim settlement without admitting creation into a deleted bundle. */
-export function withSessionBundleInspection<T>(agentDir: string, parentSessionId: string, operation: () => T): T {
-	const tombstone = orchestrationSessionDeletionFile(agentDir, parentSessionId);
+export function withSessionBundleInspection<T>(
+	home: OrchestrationHome,
+	parentSessionId: string,
+	operation: () => T,
+): T {
+	const tombstone = orchestrationSessionDeletionFile(home, parentSessionId);
 	return withFileLockSync(tombstone, operation, {
 		borrowedScope: currentSynchronousFileLockScope(tombstone),
 	});
@@ -574,12 +583,12 @@ export function withSessionBundleInspection<T>(agentDir: string, parentSessionId
 
 /** Inspect a possibly absent bundle file without recreating its parent or bypassing concurrent writers. */
 export function withSessionBundleFileInspection<T>(
-	agentDir: string,
+	home: OrchestrationHome,
 	parentSessionId: string,
 	file: string,
 	operation: () => T,
 ): T {
-	return withSessionBundleInspection(agentDir, parentSessionId, () => {
+	return withSessionBundleInspection(home, parentSessionId, () => {
 		let acquired = false;
 		try {
 			return withFileLockSync(
@@ -601,14 +610,14 @@ export function withSessionBundleFileInspection<T>(
 
 /** Reserve before any removal. Refused admission must not publish new destructive intent. */
 export function reserveSessionBundleDeletion(
-	agentDir: string,
+	home: OrchestrationHome,
 	parentSessionId: string,
 	policy: SessionBundleDeletionPolicy,
 	canDelete: (existingPolicy: SessionBundleDeletionPolicy | undefined) => boolean,
 	/** A caller that bypassed age checks must not acquire a fresh deletion after a stale hint. */
 	requireExistingRetention = false,
 ): SessionBundleDeletionReservation | undefined {
-	const tombstone = orchestrationSessionDeletionFile(agentDir, parentSessionId);
+	const tombstone = orchestrationSessionDeletionFile(home, parentSessionId);
 	return withFileLockSync(tombstone, () => {
 		const marker = readMarker(tombstone, parentSessionId);
 		if (requireExistingRetention && marker?.policy !== "retention") return undefined;
@@ -637,32 +646,32 @@ export function reserveSessionBundleDeletion(
 
 /** Inspect artifact eligibility only while this exact permanent remover still owns the bundle. */
 export function withPermanentSessionBundleDeletion<T>(
-	agentDir: string,
+	home: OrchestrationHome,
 	reservation: SessionBundleDeletionReservation,
 	operation: () => T,
 ): T {
-	return withReservedSessionBundleDeletion(agentDir, reservation, "permanent", operation);
+	return withReservedSessionBundleDeletion(home, reservation, "permanent", operation);
 }
 
 /** Expiry may settle existing obligations only for this exact active retention reservation. */
 export function withSessionBundleRetention<T>(
-	agentDir: string,
+	home: OrchestrationHome,
 	parentSessionId: string,
 	reservation: SessionBundleDeletionReservation,
 	operation: () => T,
 ): T {
 	if (reservation.parentSessionId !== parentSessionId)
 		throw new Error("Session bundle retention belongs to another session.");
-	return withReservedSessionBundleDeletion(agentDir, reservation, "retention", operation);
+	return withReservedSessionBundleDeletion(home, reservation, "retention", operation);
 }
 
 function withReservedSessionBundleDeletion<T>(
-	agentDir: string,
+	home: OrchestrationHome,
 	reservation: SessionBundleDeletionReservation,
 	policy: SessionBundleDeletionPolicy,
 	operation: () => T,
 ): T {
-	const tombstone = orchestrationSessionDeletionFile(agentDir, reservation.parentSessionId);
+	const tombstone = orchestrationSessionDeletionFile(home, reservation.parentSessionId);
 	return withFileLockSync(tombstone, () => {
 		const marker = readMarker(tombstone, reservation.parentSessionId);
 		if (
@@ -677,11 +686,11 @@ function withReservedSessionBundleDeletion<T>(
 
 /** Settle only after physical removal ends. A failed/partial removal keeps the admission barrier. */
 export function settleSessionBundleDeletion(
-	agentDir: string,
+	home: OrchestrationHome,
 	reservation: SessionBundleDeletionReservation,
 	outcome: "removed" | "deferred" | "retained",
 ): void {
-	const tombstone = orchestrationSessionDeletionFile(agentDir, reservation.parentSessionId);
+	const tombstone = orchestrationSessionDeletionFile(home, reservation.parentSessionId);
 	try {
 		withFileLockSync(tombstone, () => {
 			const marker = readMarker(tombstone, reservation.parentSessionId);

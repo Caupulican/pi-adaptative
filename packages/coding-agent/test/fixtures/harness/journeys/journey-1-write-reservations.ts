@@ -1,7 +1,7 @@
 import "../builtin-install.ts";
 import { dirname } from "node:path";
 import { expect } from "vitest";
-import { orchestrationSessionDir } from "../../../../src/core/agent-paths.ts";
+import { orchestrationSessionDir, ownerOrchestrationHome } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { canonicalPathScopeIdentity } from "../../../../src/core/autonomy/path-scope.ts";
 import { type PathAliasTable, rewriteText } from "../../../../src/core/context/path-alias-table.ts";
@@ -2430,6 +2430,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	expect(
 		new WorkerConversationStore().getProjectContextBinding({
 			agentDir: world.agentDir,
+			orchestrationHome: ownerOrchestrationHome(world.agentDir),
 			resumeContext: vuVerifierAgent.resumeContext,
 			expectedLogicalAgentId: vuAgentId,
 		}),
@@ -2440,6 +2441,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		if (agent === undefined) throw new Error(`no binding for ${agentId}`);
 		return new WorkerConversationStore().open({
 			agentDir: world.agentDir,
+			orchestrationHome: ownerOrchestrationHome(world.agentDir),
 			resumeContext: agent.resumeContext,
 			expectedLogicalAgentId: agentId,
 		});
@@ -2471,7 +2473,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 		take(vuAuxFile);
 		for (const [path, content] of bundleEntries(
 			entries,
-			orchestrationSessionDir(world.agentDir, vuOwnerCreated.sessionManager.getSessionId()),
+			orchestrationSessionDir(ownerOrchestrationHome(world.agentDir), vuOwnerCreated.sessionManager.getSessionId()),
 		)) {
 			selected.set(path, content);
 		}
@@ -2531,6 +2533,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	expect(
 		new WorkerConversationStore().getProjectContextBinding({
 			agentDir: world.agentDir,
+			orchestrationHome: ownerOrchestrationHome(world.agentDir),
 			resumeContext: vuResumed?.agents[vuAgentId]?.resumeContext ?? vuVerifierAgent.resumeContext,
 			expectedLogicalAgentId: vuAgentId,
 		}),

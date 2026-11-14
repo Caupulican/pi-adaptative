@@ -48,7 +48,11 @@ import {
 	resolveModelScopeWithDiagnostics,
 } from "../../core/model-resolver.ts";
 import { routerPoolModelRefs } from "../../core/model-router/candidate-pool.ts";
-import { refuseHostedSession, SessionHostedError } from "../../core/orchestration/session-bundle-lifecycle.ts";
+import {
+	ownerOrchestrationHome,
+	refuseHostedSession,
+	SessionHostedError,
+} from "../../core/orchestration/session-bundle-lifecycle.ts";
 import { MissingSessionCwdError } from "../../core/session-cwd.ts";
 import type { ModelFavorite } from "../../core/settings/settings-schema.ts";
 import { parseTaskCommand } from "../../core/tasks/task-command.ts";
@@ -524,7 +528,7 @@ export function showSessionSelector(host: SessionFlowHost): void {
 					// A session the bot daemon hosts is never written from here (`SessionHostedError`).
 					const header = readSessionHeaderResult(sessionFilePath);
 					try {
-						if (header.ok) refuseHostedSession(agentDir, header.header.id);
+						if (header.ok) refuseHostedSession(ownerOrchestrationHome(agentDir), header.header.id);
 					} catch (error) {
 						if (!(error instanceof SessionHostedError)) throw error;
 						host.showError(error.message);

@@ -1,7 +1,7 @@
 import "../builtin-install.ts";
 import { join } from "node:path";
 import { expect } from "vitest";
-import { orchestrationEventStoreDir } from "../../../../src/core/agent-paths.ts";
+import { orchestrationEventStoreDir, ownerOrchestrationHome } from "../../../../src/core/agent-paths.ts";
 import { evaluateNewWorkerAdmission } from "../../../../src/core/delegation/worker-fleet-limits.ts";
 import { createGoalState } from "../../../../src/core/goals/goal-state.ts";
 import { appendGoalStateSnapshot } from "../../../../src/core/goals/session-goal-state.ts";
@@ -174,7 +174,7 @@ export async function runJourney8OrchestrationRetentionPhase(world: HarnessWorld
 		const firstStart = startOf(delegateReceipts(firstSession)[0]!);
 		expect(firstStart.agentId, "the first worker mints worker-1").toBe("worker-1");
 
-		const worker1Location = workerTranscriptLocation(world.agentDir, {
+		const worker1Location = workerTranscriptLocation(ownerOrchestrationHome(world.agentDir), {
 			parentSessionId: sessionId,
 			logicalAgentId: "worker-1",
 		});
@@ -264,7 +264,9 @@ export async function runJourney8OrchestrationRetentionPhase(world: HarnessWorld
 
 		const prunedSnapshot = firstSession.backgroundLanes.getTaskRuntimeSnapshot();
 		if (!prunedSnapshot) throw new Error("expected task runtime snapshot after retention pass");
-		const archiveDir = retentionArchiveDir(orchestrationEventStoreDir(world.agentDir, sessionId));
+		const archiveDir = retentionArchiveDir(
+			orchestrationEventStoreDir(ownerOrchestrationHome(world.agentDir), sessionId),
+		);
 		const archiveRead = readRetentionArchives(archiveDir);
 		const archive = archiveRead.archives[0];
 		expect(
@@ -332,7 +334,7 @@ export async function runJourney8OrchestrationRetentionPhase(world: HarnessWorld
 		await withDeadline(trace, "J8E reopened worker request", secondWorkerReached.promise);
 		await withDeadline(trace, "J8E reopened worker handoff", secondWake.promise);
 		await withDeadline(trace, "J8E reopened handoff settles", reopenedSession.waitForForegroundIdle());
-		const worker2Location = workerTranscriptLocation(world.agentDir, {
+		const worker2Location = workerTranscriptLocation(ownerOrchestrationHome(world.agentDir), {
 			parentSessionId: sessionId,
 			logicalAgentId: "worker-2",
 		});

@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import { open, readdir, stat } from "node:fs/promises";
 import { join } from "node:path";
 import type { Usage } from "@caupulican/pi-ai";
+import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { isValidSessionId } from "../../kernel/session/session-identity.ts";
 import { visitSessionEntriesAsync } from "../../kernel/session/session-manager.ts";
@@ -215,7 +216,7 @@ async function readTranscript(
  * Reading the existing store never creates a runtime, publishes receipts or compacts its history.
  */
 export async function collectWorkerAccountingEvidence(
-	agentDir: string,
+	home: OrchestrationHome,
 	sessionId: string,
 	entries: readonly SessionEntry[],
 ): Promise<AccountingEvidenceGroup[]> {
@@ -231,10 +232,9 @@ export async function collectWorkerAccountingEvidence(
 		owned.push(entry);
 		byOrigin.set(parent, owned);
 	}
-	const groups = await collectSessionWorkerEvidence(agentDir, sessionId, byOrigin.get(sessionId) ?? [], true);
+	const groups = await collectSessionWorkerEvidence(home, sessionId, byOrigin.get(sessionId) ?? [], true);
 	for (const [parent, inherited] of byOrigin) {
-		if (parent !== sessionId)
-			groups.push(...(await collectSessionWorkerEvidence(agentDir, parent, inherited, false)));
+		if (parent !== sessionId) groups.push(...(await collectSessionWorkerEvidence(home, parent, inherited, false)));
 	}
 	const grouped = new Set(groups.flatMap((group) => group.reportIds));
 	for (const entry of entries) {
@@ -255,7 +255,7 @@ export async function collectWorkerAccountingEvidence(
 }
 
 async function collectSessionWorkerEvidence(
-	agentDir: string,
+	home: OrchestrationHome,
 	sessionId: string,
 	entries: readonly SessionEntry[],
 	includePending: boolean,
@@ -271,7 +271,7 @@ async function collectSessionWorkerEvidence(
 		if (previous && !sameTotals(previous, parsed)) throw new Error("Conflicting historical worker usage identity.");
 		reports.set(reportId, parsed);
 	}
-	const store = new OrchestrationEventStore({ agentDir, sessionId });
+	const store = new OrchestrationEventStore({ orchestrationHome: home, sessionId });
 	const paths = await eventSourcePaths(store);
 	const sources: Source[] = [];
 	let state: HistoricalWorkerAccountingState;
@@ -333,7 +333,7 @@ async function collectSessionWorkerEvidence(
 		let transcriptSource: Source | undefined;
 		let diagnostic = "No retained worker transcript identity for this attempt.";
 		if (context?.provider === "pi" && context.sessionFile) {
-			const file = assertWorkerConversationFile(agentDir, context.sessionFile, context.sessionId);
+			const file = assertWorkerConversationFile(home, context.sessionFile, context.sessionId);
 			let transcript = transcripts.get(file);
 			if (!transcript) {
 				transcript = await readTranscript(file, context.sessionId, context.cwd);

@@ -1,6 +1,7 @@
 import "../builtin-install.ts";
 import { basename } from "node:path";
 import { expect } from "vitest";
+import { ownerOrchestrationHome } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { canonicalPathScopeIdentity } from "../../../../src/core/autonomy/path-scope.ts";
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
@@ -889,7 +890,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	};
 	const readerWarnings: string[] = [];
 	const readerLifecycle = new WorkerLifecycle({
-		agentDir: world.agentDir,
+		orchestrationHome: ownerOrchestrationHome(world.agentDir),
 		sessionId: created.sessionManager.getSessionId(),
 	});
 	const readerCoordinator = new WorkerRecoveryCoordinator({
@@ -907,6 +908,7 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	});
 	const adverseConversation = new WorkerConversationStore().open({
 		agentDir: world.agentDir,
+		orchestrationHome: ownerOrchestrationHome(world.agentDir),
 		resumeContext: adverseBinding.resumeContext,
 		expectedLogicalAgentId: adverseBinding.contextOrigin?.logicalAgentId ?? adverseBinding.agentId,
 	});

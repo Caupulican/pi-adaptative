@@ -2,6 +2,7 @@ import "../builtin-install.ts";
 import { expect } from "vitest";
 import {
 	orchestrationSessionDir,
+	ownerOrchestrationHome,
 	sessionRootMailboxFile,
 	workerContextForkFile,
 } from "../../../../src/core/agent-paths.ts";
@@ -242,6 +243,7 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 			if (agent === undefined) throw new Error(`no binding for ${agentId}`);
 			const options = {
 				agentDir: world.agentDir,
+				orchestrationHome: ownerOrchestrationHome(world.agentDir),
 				resumeContext: agent.resumeContext,
 				expectedLogicalAgentId: agentId,
 			};
@@ -287,7 +289,7 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 		);
 		if (native.birth !== undefined) {
 			const forkFile = workerContextForkFile(
-				world.agentDir,
+				ownerOrchestrationHome(world.agentDir),
 				e7Owner.sessionManager.getSessionId(),
 				native.birth.identityDigest,
 				native.birth.contentDigest,
@@ -461,8 +463,8 @@ export async function runJourney2QueuedRecoveryPhase(world: HarnessWorld): Promi
 	// that target fault has fired. The reply throws both causes in order; root bytes and the source acknowledgement are inspected from the
 	// raw records before any active getter, and the native listing then repairs the source outbox before B is released.
 	const e7SessionId = e7Fresh.sessionManager.getSessionId();
-	const e7RootMailbox = sessionRootMailboxFile(world.agentDir, e7SessionId);
-	const e7SourceMailbox = workerMailboxPath(world.agentDir, e7SessionId, e7StartB.agentId);
+	const e7RootMailbox = sessionRootMailboxFile(ownerOrchestrationHome(world.agentDir), e7SessionId);
+	const e7SourceMailbox = workerMailboxPath(ownerOrchestrationHome(world.agentDir), e7SessionId, e7StartB.agentId);
 	const e7ReplyId = sessionRootReplyMessageId(e7SessionId, e7StartB.agentId, e7FollowUp.messageId);
 	// Held-boundary failure safety: whatever throws inside the boundary, B's reply is repaired and acked only on its exact admitted lineage,
 	// B's gate is released, and B's foreground tail is joined while this owner is live. The primary and every cleanup error are thrown.
@@ -1169,7 +1171,10 @@ async function workerHandoffAcrossRestart(world: HarnessWorld): Promise<void> {
 	world.faultMatrix.witness("R34", { control: true });
 	const auxFile = aux.sessionManager.getSessionFile();
 	if (auxFile === undefined) throw new Error("the R34 root has no session file");
-	const orchestrationDir = orchestrationSessionDir(world.agentDir, aux.sessionManager.getSessionId());
+	const orchestrationDir = orchestrationSessionDir(
+		ownerOrchestrationHome(world.agentDir),
+		aux.sessionManager.getSessionId(),
+	);
 	const ownedFiles = (): Map<string, string> => {
 		const entries = world.io.fileEntries();
 		const files = new Map(bundleEntries(entries, orchestrationDir));

@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { type MachineObserver, observeMachine, registerMachine } from "../../kernel/machine-spec.ts";
-import { workerOutcomeDigestFile } from "../agent-paths.ts";
+import { type OrchestrationHome, workerOutcomeDigestFile } from "../agent-paths.ts";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneStatus } from "../autonomy/lane-tracker.ts";
 import { withSessionBundleAdmission } from "../orchestration/session-bundle-lifecycle.ts";
@@ -66,14 +66,19 @@ function releaseSessionOutcomeObserver(sessionId: string): void {
  */
 export class WorkerOutcomeRecorder {
 	private readonly runtime: DurableTaskRuntime;
-	private readonly agentDir: string;
+	private readonly orchestrationHome: OrchestrationHome;
 	private readonly sessionId: string;
 	private readonly now: () => number;
 	private ladder: OutcomeLadderContext | undefined;
 
-	constructor(options: { runtime: DurableTaskRuntime; agentDir: string; sessionId: string; now?: () => number }) {
+	constructor(options: {
+		runtime: DurableTaskRuntime;
+		orchestrationHome: OrchestrationHome;
+		sessionId: string;
+		now?: () => number;
+	}) {
 		this.runtime = options.runtime;
-		this.agentDir = options.agentDir;
+		this.orchestrationHome = options.orchestrationHome;
 		this.sessionId = options.sessionId;
 		this.now = options.now ?? Date.now;
 	}
@@ -183,11 +188,11 @@ export class WorkerOutcomeRecorder {
 		}
 		try {
 			const filePath = workerOutcomeDigestFile(
-				this.agentDir,
+				this.orchestrationHome,
 				this.sessionId,
 				createHash("sha256").update(outcome.outcomeId).digest("hex"),
 			);
-			return withSessionBundleAdmission(this.agentDir, this.sessionId, () => {
+			return withSessionBundleAdmission(this.orchestrationHome, this.sessionId, () => {
 				const directory = dirname(filePath);
 				mkdirSync(directory, { recursive: true, mode: 0o700 });
 				if (process.platform !== "win32") chmodSync(directory, 0o700);

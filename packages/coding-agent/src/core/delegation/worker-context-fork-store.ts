@@ -2,7 +2,7 @@ import { createHash } from "node:crypto";
 import { unlinkSync } from "node:fs";
 import { basename, join } from "node:path";
 import type { AssistantMessage, TextContent, Usage, UserMessage } from "@caupulican/pi-ai";
-import { workerContextForkFile, workerContextForksDir } from "../agent-paths.ts";
+import { type OrchestrationHome, workerContextForkFile, workerContextForksDir } from "../agent-paths.ts";
 import {
 	MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 	MAX_ORCHESTRATION_MODEL_ID_LENGTH,
@@ -598,19 +598,20 @@ function errorCode(error: unknown): string | undefined {
  * continue the existing transcript and cannot install a second birth context.
  */
 export class WorkerContextForkStore {
-	private readonly agentDir: string;
+	private readonly orchestrationHome: OrchestrationHome;
 	private readonly parentSessionId: string;
 	private readonly directory: string;
 	private readonly lockFile: string;
 
-	constructor(options: { agentDir: string; parentSessionId: string }) {
-		this.agentDir = requireBoundedTrimmedText(options.agentDir, MAX_PATH_CHARS, "Agent directory");
+	constructor(options: { orchestrationHome: OrchestrationHome; parentSessionId: string }) {
+		requireBoundedTrimmedText(options.orchestrationHome.root, MAX_PATH_CHARS, "Orchestration home");
+		this.orchestrationHome = options.orchestrationHome;
 		this.parentSessionId = requireBoundedTrimmedText(
 			options.parentSessionId,
 			MAX_ORCHESTRATION_IDENTIFIER_LENGTH,
 			"Parent session id",
 		);
-		this.directory = workerContextForksDir(this.agentDir, this.parentSessionId);
+		this.directory = workerContextForksDir(this.orchestrationHome, this.parentSessionId);
 		this.lockFile = join(this.directory, "capture-index");
 	}
 
@@ -649,7 +650,7 @@ export class WorkerContextForkStore {
 	}
 
 	private withCaptureAdmission<T>(operation: () => T): T {
-		return withSessionBundleAdmission(this.agentDir, this.parentSessionId, () =>
+		return withSessionBundleAdmission(this.orchestrationHome, this.parentSessionId, () =>
 			withFileLockSync(this.lockFile, operation),
 		);
 	}
@@ -677,7 +678,7 @@ export class WorkerContextForkStore {
 			);
 		}
 		const filePath = workerContextForkFile(
-			this.agentDir,
+			this.orchestrationHome,
 			this.parentSessionId,
 			reference.identityDigest,
 			reference.contentDigest,
@@ -704,7 +705,7 @@ export class WorkerContextForkStore {
 			messageBytes: normalized.byteLength,
 		};
 		const targetFile = workerContextForkFile(
-			this.agentDir,
+			this.orchestrationHome,
 			this.parentSessionId,
 			reference.identityDigest,
 			reference.contentDigest,

@@ -12,13 +12,20 @@
  * root files to find. Every later worker-path start of a bot adds its own run as it is bound, so the file is refreshed by
  * the writer that creates the run. Concurrent writers merge under the file's lock. The index holds at most
  * `MAX_HISTORY_RUNS` runs, the newest.
+ *
+ * Those runtimes ran under the owner's root sessions, so every transcript the index names lives in the owner's
+ * orchestration home (`ownerOrchestrationHome`).
  */
 
 import { createReadStream, type Dirent, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { orchestrationSessionsDir } from "../../kernel/session/session-bundle-paths.ts";
+import {
+	type OrchestrationHome,
+	orchestrationSessionsDir,
+	ownerOrchestrationHome,
+} from "../../kernel/session/session-bundle-paths.ts";
 import { workerTranscriptLocation } from "../../kernel/session/worker-storage-identity.ts";
 import {
 	encodeWorkerTranscriptReference,
@@ -189,13 +196,13 @@ function mergeRuns(first: readonly BotHistoryRun[], second: readonly BotHistoryR
  * `present`, when given, is every worker transcript on disk: a transcript it lacks is not looked for.
  */
 function runOf(
-	agentDir: string,
+	home: OrchestrationHome,
 	identity: WorkerTranscriptIdentity,
 	present?: ReadonlySet<string>,
 ): BotHistoryRun | undefined {
 	let location: ReturnType<typeof workerTranscriptLocation>;
 	try {
-		location = workerTranscriptLocation(agentDir, identity);
+		location = workerTranscriptLocation(home, identity);
 	} catch {
 		// An id that cannot name a transcript location names no transcript.
 		return undefined;
@@ -314,9 +321,9 @@ interface RootScan {
 }
 
 /** Every worker transcript file under the orchestration bundles: one listing per bundle. */
-async function listWorkerTranscripts(agentDir: string, signal: AbortSignal): Promise<Set<string>> {
+async function listWorkerTranscripts(home: OrchestrationHome, signal: AbortSignal): Promise<Set<string>> {
 	const files = new Set<string>();
-	const root = orchestrationSessionsDir(agentDir);
+	const root = orchestrationSessionsDir(home);
 	const listing = async (dir: string): Promise<Dirent[]> => {
 		try {
 			return await readdir(dir, { withFileTypes: true });
@@ -389,11 +396,11 @@ async function scanRootSessions(
 			warn(interfaceText().botTeam.botHistoryFileUnreadable(error instanceof Error ? error.message : String(error)));
 		}
 	}
-	return { bound, rootIds, transcripts: await listWorkerTranscripts(agentDir, signal) };
+	return { bound, rootIds, transcripts: await listWorkerTranscripts(ownerOrchestrationHome(agentDir), signal) };
 }
 
 /** The runs of one bot the scan and its record name that exist on disk. */
-function runsFromScan(agentDir: string, record: PersistentBotRecord, scan: RootScan): BotHistoryRun[] {
+function runsFromScan(home: OrchestrationHome, record: PersistentBotRecord, scan: RootScan): BotHistoryRun[] {
 	const identities: WorkerTranscriptIdentity[] = [...(scan.bound.get(record.agentId) ?? [])];
 	// A bot started before runtimes were bound ran under its own alias.
 	if (isBotId(record.agentId))
@@ -402,7 +409,7 @@ function runsFromScan(agentDir: string, record: PersistentBotRecord, scan: RootS
 	if (last) identities.push(last);
 	const runs: BotHistoryRun[] = [];
 	for (const identity of identities) {
-		const run = runOf(agentDir, identity, scan.transcripts);
+		const run = runOf(home, identity, scan.transcripts);
 		if (run) runs.push(run);
 	}
 	return mergeRuns([], runs);
@@ -453,7 +460,7 @@ export class BotHistory {
 			if (remaining <= 0) break;
 			const identity = parseWorkerTranscriptReference(run.reference);
 			if (!identity) continue;
-			const { sessionFile } = workerTranscriptLocation(agentDir, identity);
+			const { sessionFile } = workerTranscriptLocation(ownerOrchestrationHome(agentDir), identity);
 			const state = fileState(sessionFile);
 			visited.push({ file: sessionFile, state });
 			if (!state) continue;
@@ -507,7 +514,7 @@ export class BotHistory {
 			.then((found) => {
 				if (signal.aborted) return;
 				for (const record of wanted) {
-					const runs = runsFromScan(agentDir, record, found);
+					const runs = runsFromScan(ownerOrchestrationHome(agentDir), record, found);
 					saveHistory(agentDir, record, (current) => ({
 						...current,
 						scanned: true,

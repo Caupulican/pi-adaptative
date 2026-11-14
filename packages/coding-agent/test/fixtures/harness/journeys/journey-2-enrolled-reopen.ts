@@ -1,5 +1,6 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
+import { ownerOrchestrationHome } from "../../../../src/core/agent-paths.ts";
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "../../../../src/core/delegation/worker-mailbox-record.ts";
 import { isPlainRecord } from "../../../../src/core/util/value-guards.ts";
@@ -177,6 +178,7 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 		const workerFile = agent.resumeContext.sessionFile;
 		const binding = new WorkerConversationStore().getProjectContextBinding({
 			agentDir,
+			orchestrationHome: ownerOrchestrationHome(agentDir),
 			resumeContext: agent.resumeContext,
 			expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agentId,
 		});
@@ -193,7 +195,7 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 			const queued = owner.session.backgroundLanes.followUpWorkerAgent(agentId, pendingWords);
 			pendingMessageId = queued.messageId;
 			const native = readWorkerMailboxRecord(
-				workerMailboxPath(agentDir, owner.sessionManager.getSessionId(), agentId),
+				workerMailboxPath(ownerOrchestrationHome(agentDir), owner.sessionManager.getSessionId(), agentId),
 			);
 			observations.pending = { queued, native };
 			pendingMailbox = native.mailbox;
@@ -251,6 +253,7 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 		expect(suspended?.attempts[attempt.attemptId]?.dispatch).toEqual(attempt.dispatch);
 		const handoff = new WorkerConversationStore().getProjectContextBinding({
 			agentDir,
+			orchestrationHome: ownerOrchestrationHome(agentDir),
 			resumeContext: agent.resumeContext,
 			expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agentId,
 		});
@@ -258,7 +261,7 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 		expect(handoff?.ownership).toEqual({ ...binding.ownership, state: "handoff" });
 		if (pendingFollowUp) {
 			const native = readWorkerMailboxRecord(
-				workerMailboxPath(agentDir, owner.sessionManager.getSessionId(), agentId),
+				workerMailboxPath(ownerOrchestrationHome(agentDir), owner.sessionManager.getSessionId(), agentId),
 			);
 			observations.pendingAfterClose = native.reference;
 			expect(native.mailbox, `${label}: close preserves the exact undelivered intent and acknowledgements`).toEqual(
@@ -359,6 +362,7 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 			if (!foreignAgent) throw new Error(`${label}: missing foreign runtime binding`);
 			const foreignBinding = new WorkerConversationStore().getProjectContextBinding({
 				agentDir,
+				orchestrationHome: ownerOrchestrationHome(agentDir),
 				resumeContext: foreignAgent.resumeContext,
 				expectedLogicalAgentId: foreignAgent.contextOrigin?.logicalAgentId ?? foreignAgentId,
 			});
@@ -429,12 +433,15 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 			).toHaveLength(1);
 			const reserved = new WorkerConversationStore().getProjectContextBinding({
 				agentDir,
+				orchestrationHome: ownerOrchestrationHome(agentDir),
 				resumeContext: agent.resumeContext,
 				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agentId,
 			});
 			expect(reserved).toEqual(handoff);
 			expect(
-				readWorkerMailboxRecord(workerMailboxPath(agentDir, owner.sessionManager.getSessionId(), agentId)).mailbox,
+				readWorkerMailboxRecord(
+					workerMailboxPath(ownerOrchestrationHome(agentDir), owner.sessionManager.getSessionId(), agentId),
+				).mailbox,
 			).toEqual(pendingMailbox);
 		}
 		world.systemOne.enterPhase(`${label}-resume`, {});
@@ -540,6 +547,7 @@ export async function verifyEnrolledWorkerCleanReopen(world: HarnessWorld, pendi
 		const resumed = fresh.session.backgroundLanes.getTaskRuntimeSnapshot();
 		const acquired = new WorkerConversationStore().getProjectContextBinding({
 			agentDir,
+			orchestrationHome: ownerOrchestrationHome(agentDir),
 			resumeContext: agent.resumeContext,
 			expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agentId,
 		});

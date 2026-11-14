@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
-import { existsSync, opendirSync, statSync } from "node:fs";
-import { dirname, join, resolve } from "node:path";
+import { existsSync } from "node:fs";
+import { dirname, resolve } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import type { AssistantMessageDiagnostic, Message, Usage } from "@caupulican/pi-ai";
 import {
@@ -32,7 +32,6 @@ import {
 } from "../../kernel/session/session-file-admission.ts";
 import {
 	assertValidSessionId,
-	loadEntriesFromFile,
 	MAX_SESSION_ENTRY_VISIT_COUNT,
 	type ReadonlySessionManager,
 	type SessionContext,
@@ -67,7 +66,7 @@ import {
 	type WorkerControlRecord,
 	workerControlOf,
 } from "../../kernel/worker-control-stamp.ts";
-import { workerConversationSessionsDir } from "../agent-paths.ts";
+import type { OrchestrationHome } from "../agent-paths.ts";
 import {
 	type HostEventDeliveryBinding,
 	HostEventError,
@@ -86,13 +85,7 @@ import type {
 	AttemptUsageSnapshot,
 	ResourcePointer,
 } from "../orchestration/contracts.ts";
-import {
-	reserveSessionBundleDeletion,
-	type SessionBundleDeletionPolicy,
-	type SessionBundleDeletionReservation,
-	withPermanentSessionBundleDeletion,
-	withSessionBundleAdmission,
-} from "../orchestration/session-bundle-lifecycle.ts";
+import { withSessionBundleAdmission } from "../orchestration/session-bundle-lifecycle.ts";
 import {
 	acquireSpecialistContext,
 	assertSpecialistContextClaim,
@@ -135,7 +128,7 @@ import { projectWorkerTranscriptForInspection } from "./worker-transcript-projec
 import { encodeWorkerTranscriptReference, parseWorkerTranscriptReference } from "./worker-transcript-reference.ts";
 
 export const WORKER_CHANGED_FILE_CUSTOM_TYPE = "worker-changed-file";
-const EXISTING_WORKER_FILE_LOCK_OPTIONS = Object.freeze({ createParentDirectories: false });
+export const EXISTING_WORKER_FILE_LOCK_OPTIONS = Object.freeze({ createParentDirectories: false });
 export const WORKER_ATTEMPT_USAGE_BOUNDARY_CUSTOM_TYPE = "worker-attempt-usage-boundary";
 const MAX_PERSISTED_WORKER_DIAGNOSTICS = 8;
 const MAX_WORKER_CONTROL_ENTRY_PREFIX_BYTES = 16 * 1024;
@@ -174,6 +167,8 @@ interface WorkerControlTranscriptReconciliation {
 
 export interface CreateWorkerConversationOptions {
 	agentDir: string;
+	/** The parent session's orchestration home: the worker's transcript lives in its bundle there. */
+	orchestrationHome: OrchestrationHome;
 	parentSessionId: string;
 	/** Durable logical identity for the worker/lane. It never becomes a path segment directly. */
 	logicalAgentId: string;
@@ -187,11 +182,29 @@ export interface CreateWorkerConversationOptions {
 	projectClaim?: SpecialistContextClaim;
 }
 
-interface OpenWorkerConversationOptions {
-	agentDir: string;
+export interface OpenWorkerConversationOptions extends WorkerConversationRoots {
 	resumeContext: AgentResumeContext;
 	expectedLogicalAgentId?: string;
 	projectClaim?: SpecialistContextClaim;
+}
+
+/** Where a worker conversation's files live: the agent directory and the owning session's orchestration home. */
+export interface WorkerConversationRoots {
+	readonly agentDir: string;
+	readonly orchestrationHome: OrchestrationHome;
+}
+
+/** Open options for a registered agent's own transcript: its resume context, checked against its logical identity. */
+export function agentConversation(
+	roots: WorkerConversationRoots,
+	agent: Pick<AgentBindingContract, "agentId" | "contextOrigin" | "resumeContext">,
+): OpenWorkerConversationOptions {
+	return {
+		agentDir: roots.agentDir,
+		orchestrationHome: roots.orchestrationHome,
+		resumeContext: agent.resumeContext,
+		expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+	};
 }
 
 /**
@@ -245,6 +258,7 @@ interface WorkerConversationMetadataState {
 interface WorkerConversationMetadataBinding extends WorkerConversationMetadataState {
 	file: string;
 	agentDir: string;
+	orchestrationHome: OrchestrationHome;
 }
 
 interface WorkerConversationCore {
@@ -300,6 +314,7 @@ interface CachedWorkerConversationCore {
 	resumeContext: AgentResumeContext;
 	metadataFile: string;
 	agentDir: string;
+	orchestrationHome: OrchestrationHome;
 }
 
 type WorkerSessionEntry = ReturnType<SessionManager["getEntries"]>[number];
@@ -587,7 +602,7 @@ function differingFields(left: WorkerTranscriptMessage, right: WorkerTranscriptM
 }
 
 function expectedResumeContext(options: CreateWorkerConversationOptions): AgentResumeContext {
-	const location = workerTranscriptLocation(options.agentDir, options);
+	const location = workerTranscriptLocation(options.orchestrationHome, options);
 	if (!options.cwd.trim()) throw new TypeError("A worker conversation working directory is required.");
 	return {
 		provider: "pi",
@@ -623,9 +638,10 @@ function cloneWorkerConversationMetadataState(
 function bindWorkerConversationMetadata(
 	file: string,
 	agentDir: string,
+	orchestrationHome: OrchestrationHome,
 	state: WorkerConversationMetadataState,
 ): WorkerConversationMetadataBinding {
-	return { file, agentDir, ...cloneWorkerConversationMetadataState(state) };
+	return { file, agentDir, orchestrationHome, ...cloneWorkerConversationMetadataState(state) };
 }
 
 function assertCachedWorkerConversationMetadata(
@@ -725,12 +741,12 @@ function assertProjectConversationAccess(
 }
 
 function openWorkerBirthContext(
-	agentDir: string,
+	orchestrationHome: OrchestrationHome,
 	parentSessionId: string,
 	logicalAgentId: string,
 	reference: WorkerContextForkReference,
 ): WorkerContextForkSnapshot {
-	return new WorkerContextForkStore({ agentDir, parentSessionId }).open({ logicalAgentId, reference });
+	return new WorkerContextForkStore({ orchestrationHome, parentSessionId }).open({ logicalAgentId, reference });
 }
 
 /**
@@ -912,6 +928,7 @@ export class WorkerConversation {
 	private readonly core: WorkerConversationCore;
 	private readonly resumeContext: AgentResumeContext;
 	private readonly agentDir?: string;
+	private readonly orchestrationHome?: OrchestrationHome;
 	private readonly metadataFile?: string;
 	private readonly projectClaim?: SpecialistContextClaim;
 
@@ -931,6 +948,7 @@ export class WorkerConversation {
 		};
 		this.resumeContext = cloneResumeContext(resumeContext);
 		this.agentDir = metadata?.agentDir;
+		this.orchestrationHome = metadata?.orchestrationHome;
 		this.metadataFile = metadata?.file;
 		this.projectClaim = projectClaim ? structuredClone(projectClaim) : undefined;
 	}
@@ -1500,9 +1518,9 @@ export class WorkerConversation {
 
 	/** The transcript lock and runtime lock jointly fence physical append, receipt recovery and rebind. */
 	withHostEventControl<T>(parentSessionId: string, operation: () => T): T {
-		if (!this.agentDir)
+		if (!this.orchestrationHome)
 			throw new WorkerConversationOwnershipError("Host event control requires a durable worker conversation.");
-		return withSessionBundleAdmission(this.agentDir, parentSessionId, () =>
+		return withSessionBundleAdmission(this.orchestrationHome, parentSessionId, () =>
 			this.withCanonicalSessionLock(() => operation()),
 		);
 	}
@@ -1522,12 +1540,12 @@ export class WorkerConversation {
 			createHash("sha256").update(message.content).digest("hex") !== binding.contentDigest ||
 			this.resumeContext.sessionId !== binding.execution.sessionId ||
 			this.resumeContext.sessionFile !== binding.execution.sessionFile ||
-			!this.agentDir
+			!this.orchestrationHome
 		)
 			throw new TypeError("Host event does not belong to this exact worker transcript.");
 		if (mode === "consume" && !isDeepStrictEqual(this.projectClaim, binding.execution.contextClaim))
 			throw new WorkerConversationOwnershipError("Host event specialist context claim changed.");
-		const agentDir = this.agentDir;
+		const orchestrationHome = this.orchestrationHome;
 		const transcriptReceipt = (entryId: string): HostEventTranscriptReceipt => ({
 			sessionId: binding.execution.sessionId,
 			sessionFile: binding.execution.sessionFile,
@@ -1538,7 +1556,7 @@ export class WorkerConversation {
 			contentDigest: binding.contentDigest,
 			bindingDigest: binding.bindingDigest,
 		});
-		return withSessionBundleAdmission(agentDir, hostEvents.parentSessionId, () =>
+		return withSessionBundleAdmission(orchestrationHome, hostEvents.parentSessionId, () =>
 			this.withCanonicalSessionLock(
 				(sessionManager) => {
 					const boundary = attemptUsageBoundaryIndex(sessionManager, binding.execution.attemptId);
@@ -1892,8 +1910,8 @@ export class WorkerConversation {
 	): Result {
 		const sessionFile = this.resumeContext.sessionFile;
 		if (!sessionFile) return operation(this.sessionManager);
-		const agentDir = this.agentDir;
-		if (!agentDir) {
+		const { agentDir, orchestrationHome } = this;
+		if (!agentDir || !orchestrationHome) {
 			throw new Error("Worker conversation cannot lock a persisted transcript without its agent directory.");
 		}
 		const run = () => {
@@ -1927,7 +1945,7 @@ export class WorkerConversation {
 		if (intent === "mutation" && !this.projectClaim) {
 			const parent = readWorkerConversationMetadata(this.metadataFile!).metadata.parentSessionId;
 			if (!parent) throw new Error("Worker mutation requires its birth parent identity.");
-			return withSessionBundleAdmission(agentDir, parent, run);
+			return withSessionBundleAdmission(orchestrationHome, parent, run);
 		}
 		return run();
 	}
@@ -2064,7 +2082,7 @@ export class WorkerConversationStore {
 
 	/** Projects an existing native binding without opening, creating or claiming its transcript. */
 	static transcriptReferenceForBinding(
-		agentDir: string,
+		orchestrationHome: OrchestrationHome,
 		parentSessionId: string,
 		binding: Pick<AgentBindingContract, "agentId" | "contextOrigin" | "resumeContext">,
 	): string | undefined {
@@ -2073,7 +2091,7 @@ export class WorkerConversationStore {
 		const identity = binding.contextOrigin ?? { parentSessionId, logicalAgentId: binding.agentId };
 		try {
 			const reference = encodeWorkerTranscriptReference(identity);
-			const location = workerTranscriptLocation(agentDir, identity);
+			const location = workerTranscriptLocation(orchestrationHome, identity);
 			if (!matchesWorkerTranscriptLocation(context, location)) return undefined;
 			return reference;
 		} catch {
@@ -2088,13 +2106,13 @@ export class WorkerConversationStore {
 
 	/** Mailbox mutations and ownership transfer serialize on this same transcript lock. */
 	static withProjectMailboxMutation<T>(
-		agentDir: string,
+		{ agentDir, orchestrationHome }: WorkerConversationRoots,
 		reference: WorkerMailboxContextReference,
 		parentSessionId: string,
 		claim: SpecialistContextClaim | undefined,
 		operation: () => T,
 	): T {
-		const file = assertWorkerConversationFile(agentDir, reference.sessionFile, reference.sessionId);
+		const file = assertWorkerConversationFile(orchestrationHome, reference.sessionFile, reference.sessionId);
 		return withFileLockSync(
 			file,
 			() => {
@@ -2120,13 +2138,14 @@ export class WorkerConversationStore {
 	}
 
 	bindProjectMailbox(
-		agentDir: string,
+		roots: WorkerConversationRoots,
 		parentSessionId: string,
 		agentId: string,
 		conversation: WorkerConversation,
 	): void {
+		const { orchestrationHome } = roots;
 		const context = conversation.getResumeContext();
-		const binding = this.getProjectContextBinding({ agentDir, resumeContext: context });
+		const binding = this.getProjectContextBinding({ ...roots, resumeContext: context });
 		if (!binding || !context.sessionFile) throw new Error("Worker project binding is missing.");
 		const reference = {
 			parentSessionId: binding.reference.parentSessionId,
@@ -2134,11 +2153,11 @@ export class WorkerConversationStore {
 			sessionId: context.sessionId,
 			sessionFile: context.sessionFile,
 		};
-		const mailbox = workerMailboxPath(agentDir, parentSessionId, agentId);
-		withSessionBundleAdmission(agentDir, parentSessionId, () =>
+		const mailbox = workerMailboxPath(orchestrationHome, parentSessionId, agentId);
+		withSessionBundleAdmission(orchestrationHome, parentSessionId, () =>
 			withFileLockSync(mailbox, () =>
 				WorkerConversationStore.withProjectMailboxMutation(
-					agentDir,
+					roots,
 					reference,
 					parentSessionId,
 					conversation.getProjectClaim(),
@@ -2155,7 +2174,11 @@ export class WorkerConversationStore {
 		| undefined {
 		const context = options.resumeContext;
 		if (!context.sessionFile) return undefined;
-		const sessionFile = assertWorkerConversationFile(options.agentDir, context.sessionFile, context.sessionId);
+		const sessionFile = assertWorkerConversationFile(
+			options.orchestrationHome,
+			context.sessionFile,
+			context.sessionId,
+		);
 		return withFileLockSync(
 			sessionFile,
 			() => {
@@ -2186,11 +2209,13 @@ export class WorkerConversationStore {
 
 	inspectProjectContext(
 		agentDir: string,
+		orchestrationHome: OrchestrationHome,
 		reference: WorkerProjectContextReference,
 		specializationKey: string,
 	): SpecialistContextOwnership {
 		const binding = this.getProjectContextBinding({
 			agentDir,
+			orchestrationHome,
 			resumeContext: reference.resumeContext,
 			expectedLogicalAgentId: reference.logicalAgentId,
 		});
@@ -2207,6 +2232,7 @@ export class WorkerConversationStore {
 	settleCancelledProjectSetup(
 		input: {
 			agentDir: string;
+			orchestrationHome: OrchestrationHome;
 			reference: WorkerProjectContextReference;
 			specializationKey: string;
 			owner: SpecialistContextOwner;
@@ -2215,11 +2241,11 @@ export class WorkerConversationStore {
 		},
 		operation: (enrolled: boolean) => void,
 	): void {
-		const { agentDir, reference } = input;
+		const { agentDir, orchestrationHome, reference } = input;
 		const context = reference.resumeContext;
 		if (!context.sessionFile) throw new Error("Worker allocation transcript identity is missing.");
-		const file = assertWorkerConversationFile(agentDir, context.sessionFile, context.sessionId);
-		withSessionBundleAdmission(agentDir, reference.parentSessionId, () => {
+		const file = assertWorkerConversationFile(orchestrationHome, context.sessionFile, context.sessionId);
+		withSessionBundleAdmission(orchestrationHome, reference.parentSessionId, () => {
 			const settled = input.withQuiescence(() =>
 				withFileLockSync(file, () => {
 					const metadataFile = workerConversationMetadataFile(file);
@@ -2237,7 +2263,12 @@ export class WorkerConversationStore {
 						throw new Error("Worker allocation enrollment cannot be reconciled.");
 					if (existsSync(file)) {
 						conversation = this.openExisting(
-							{ agentDir, resumeContext: context, expectedLogicalAgentId: reference.logicalAgentId },
+							{
+								agentDir,
+								orchestrationHome,
+								resumeContext: context,
+								expectedLogicalAgentId: reference.logicalAgentId,
+							},
 							{ parentSessionId: reference.parentSessionId, recoverBirthContextPrefix: false },
 						);
 						if (conversation.hasActiveTranscriptCommit())
@@ -2263,95 +2294,6 @@ export class WorkerConversationStore {
 		});
 	}
 
-	/** Bounded, fail-closed claim inspection before removing a birth parent's artifact bundle. */
-	static reserveBundleDeletion(
-		agentDir: string,
-		parentSessionId: string,
-		policy: SessionBundleDeletionPolicy,
-		requireExistingRetention = false,
-	): SessionBundleDeletionReservation | undefined {
-		return reserveSessionBundleDeletion(
-			agentDir,
-			parentSessionId,
-			policy,
-			() => WorkerConversationStore.canDeleteBundleArtifacts(agentDir, parentSessionId),
-			requireExistingRetention,
-		);
-	}
-
-	/** Explicit deletion can remove foreground history while retaining busy worker artifacts. */
-	static canDeleteReservedBundle(agentDir: string, reservation: SessionBundleDeletionReservation): boolean {
-		return withPermanentSessionBundleDeletion(agentDir, reservation, () =>
-			WorkerConversationStore.canDeleteBundleArtifacts(agentDir, reservation.parentSessionId),
-		);
-	}
-
-	private static canDeleteBundleArtifacts(agentDir: string, parentSessionId: string): boolean {
-		const directory = workerConversationSessionsDir(agentDir, parentSessionId);
-		if (!existsSync(directory)) return true;
-		try {
-			const entries = opendirSync(directory);
-			let inspectedBytes = 0;
-			try {
-				for (let count = 0; count < 4096; count++) {
-					const entry = entries.readSync();
-					if (!entry) return true;
-					if (entry.name.endsWith(".jsonl")) {
-						if (!entry.isFile()) return false;
-						const sessionFile = join(directory, entry.name);
-						if (!existsSync(workerConversationMetadataFile(sessionFile))) {
-							inspectedBytes += statSync(sessionFile).size;
-							if (inspectedBytes > 32 * 1024 * 1024) return false;
-							// Read-only parsing: opening a SessionManager may repair a partial tail.
-							const enrolled = withFileLockSync(
-								sessionFile,
-								() =>
-									loadEntriesFromFile(sessionFile).some(
-										(record) =>
-											record.type === "custom" &&
-											record.customType === WORKER_PROJECT_ENROLLMENT_CUSTOM_TYPE,
-									),
-								EXISTING_WORKER_FILE_LOCK_OPTIONS,
-							);
-							if (enrolled) return false;
-						}
-					}
-					if (!entry.name.endsWith(".worker.json")) continue;
-					if (!entry.isFile()) return false;
-					const metadataFile = join(directory, entry.name);
-					const sessionFile = metadataFile.slice(0, -".worker.json".length);
-					const deletable = withFileLockSync(
-						sessionFile,
-						() => {
-							const { metadata } = readWorkerConversationMetadata(metadataFile);
-							if (metadata.parentSessionId !== parentSessionId) return false;
-							if (
-								metadata.projectContext?.ownership.state === "busy" ||
-								metadata.projectContext?.ownership.state === "handoff"
-							)
-								return false;
-							if (!existsSync(sessionFile)) return !metadata.projectContext;
-							inspectedBytes += statSync(sessionFile).size;
-							if (inspectedBytes > 32 * 1024 * 1024) return false;
-							scanWorkerSessionFile(sessionFile, metadata.resumeContext.sessionId, metadata.resumeContext.cwd);
-							return (
-								projectEnrollmentKey(SessionManager.openReadOnly(sessionFile, agentDir)) ===
-								metadata.projectContext?.specializationKey
-							);
-						},
-						EXISTING_WORKER_FILE_LOCK_OPTIONS,
-					);
-					if (!deletable) return false;
-				}
-				return false;
-			} finally {
-				entries.closeSync();
-			}
-		} catch {
-			return false;
-		}
-	}
-
 	/** Caller has positively admitted the specialization; transfer and writes share the transcript lock. */
 	claimProjectContext(
 		options: OpenWorkerConversationOptions & {
@@ -2364,7 +2306,11 @@ export class WorkerConversationStore {
 		const context = options.resumeContext;
 		if (!context.sessionFile || !/^[a-f0-9]{64}$/.test(options.specializationKey))
 			throw new Error("Invalid project context claim.");
-		const sessionFile = assertWorkerConversationFile(options.agentDir, context.sessionFile, context.sessionId);
+		const sessionFile = assertWorkerConversationFile(
+			options.orchestrationHome,
+			context.sessionFile,
+			context.sessionId,
+		);
 		const birthMetadata = assertExactConversationMetadata(
 			workerConversationMetadataFile(sessionFile),
 			context,
@@ -2372,8 +2318,8 @@ export class WorkerConversationStore {
 		);
 		const birthParent = birthMetadata.parentSessionId;
 		if (!birthParent) throw new Error("Worker project birth parent is missing.");
-		const mailbox = workerMailboxPath(options.agentDir, birthParent, birthMetadata.logicalAgentId);
-		return withSessionBundleAdmission(options.agentDir, birthParent, () =>
+		const mailbox = workerMailboxPath(options.orchestrationHome, birthParent, birthMetadata.logicalAgentId);
+		return withSessionBundleAdmission(options.orchestrationHome, birthParent, () =>
 			withFileLockSync(mailbox, () =>
 				withFileLockSync(
 					sessionFile,
@@ -2460,8 +2406,12 @@ export class WorkerConversationStore {
 		const claim = options.projectClaim;
 		if (!context.sessionFile || !claim || claim.parentSessionId !== options.parentSessionId)
 			throw new Error("Worker handoff claim is missing or foreign.");
-		const sessionFile = assertWorkerConversationFile(options.agentDir, context.sessionFile, context.sessionId);
-		const mailbox = workerMailboxPath(options.agentDir, options.parentSessionId, options.agentId);
+		const sessionFile = assertWorkerConversationFile(
+			options.orchestrationHome,
+			context.sessionFile,
+			context.sessionId,
+		);
+		const mailbox = workerMailboxPath(options.orchestrationHome, options.parentSessionId, options.agentId);
 		withFileLockSync(
 			mailbox,
 			() =>
@@ -2545,7 +2495,7 @@ export class WorkerConversationStore {
 	create(options: CreateWorkerConversationOptions): WorkerConversation {
 		const resumeContext = expectedResumeContext(options);
 		const sessionFile = resumeContext.sessionFile!;
-		return withSessionBundleAdmission(options.agentDir, options.parentSessionId, () =>
+		return withSessionBundleAdmission(options.orchestrationHome, options.parentSessionId, () =>
 			withFileLockSync(sessionFile, () => this.createLocked(options, resumeContext)),
 		);
 	}
@@ -2563,7 +2513,7 @@ export class WorkerConversationStore {
 		if (options.birthContextForkReference) {
 			// Validate the content-addressed snapshot before publishing either conversation file.
 			openWorkerBirthContext(
-				options.agentDir,
+				options.orchestrationHome,
 				options.parentSessionId,
 				options.logicalAgentId,
 				options.birthContextForkReference,
@@ -2596,7 +2546,12 @@ export class WorkerConversationStore {
 			}
 			const reference = options.birthContextForkReference ?? metadata.birthContextForkReference;
 			if (reference) {
-				openWorkerBirthContext(options.agentDir, options.parentSessionId, options.logicalAgentId, reference);
+				openWorkerBirthContext(
+					options.orchestrationHome,
+					options.parentSessionId,
+					options.logicalAgentId,
+					reference,
+				);
 			}
 			writeWorkerConversationMetadata(metadataFile, {
 				...metadata,
@@ -2635,6 +2590,7 @@ export class WorkerConversationStore {
 		return this.openExisting(
 			{
 				agentDir: options.agentDir,
+				orchestrationHome: options.orchestrationHome,
 				resumeContext,
 				expectedLogicalAgentId: options.logicalAgentId,
 				projectClaim: options.projectClaim,
@@ -2651,7 +2607,7 @@ export class WorkerConversationStore {
 	ensure(options: CreateWorkerConversationOptions): WorkerConversation {
 		const resumeContext = expectedResumeContext(options);
 		const sessionFile = resumeContext.sessionFile!;
-		return withSessionBundleAdmission(options.agentDir, options.parentSessionId, () =>
+		return withSessionBundleAdmission(options.orchestrationHome, options.parentSessionId, () =>
 			withFileLockSync(sessionFile, () => {
 				if (!existsSync(sessionFile)) return this.createLocked(options, resumeContext);
 				return this.recoverBirthContextLocked(options, resumeContext);
@@ -2665,7 +2621,11 @@ export class WorkerConversationStore {
 			return this.openExisting(options, { recoverBirthContextPrefix: false });
 		}
 		assertValidSessionId(context.sessionId);
-		const sessionFile = assertWorkerConversationFile(options.agentDir, context.sessionFile, context.sessionId);
+		const sessionFile = assertWorkerConversationFile(
+			options.orchestrationHome,
+			context.sessionFile,
+			context.sessionId,
+		);
 		return withFileLockSync(
 			sessionFile,
 			() => this.openExisting(options, { recoverBirthContextPrefix: false }),
@@ -2688,7 +2648,11 @@ export class WorkerConversationStore {
 		if (!context.cwd.trim()) throw new TypeError("A worker conversation working directory is required.");
 		assertValidSessionId(context.sessionId);
 
-		const sessionFile = assertWorkerConversationFile(options.agentDir, context.sessionFile, context.sessionId);
+		const sessionFile = assertWorkerConversationFile(
+			options.orchestrationHome,
+			context.sessionFile,
+			context.sessionId,
+		);
 		if (!existsSync(sessionFile)) throw new Error(`Worker conversation session file does not exist: ${sessionFile}`);
 		const sessionDir = dirname(sessionFile);
 		if (context.sessionDir && resolve(context.sessionDir) !== sessionDir) {
@@ -2737,7 +2701,7 @@ export class WorkerConversationStore {
 				const parentSessionId = birthContext.parentSessionId;
 				if (!parentSessionId) throw new Error("Worker conversation birth context parent session is missing.");
 				const snapshot = openWorkerBirthContext(
-					options.agentDir,
+					options.orchestrationHome,
 					parentSessionId,
 					metadataState.logicalAgentId,
 					requestedReference,
@@ -2826,7 +2790,7 @@ export class WorkerConversationStore {
 				const parentSessionId = metadataState.parentSessionId;
 				if (!parentSessionId) throw new Error("Worker conversation birth context parent session is missing.");
 				const snapshot = openWorkerBirthContext(
-					options.agentDir,
+					options.orchestrationHome,
 					parentSessionId,
 					metadataState.logicalAgentId,
 					reference,
@@ -2869,7 +2833,12 @@ export class WorkerConversationStore {
 			const conversation = new WorkerConversation(
 				cached.core.sessionManager,
 				{ ...context, sessionDir, sessionFile, cwd: cached.core.sessionManager.getCwd() },
-				bindWorkerConversationMetadata(cached.metadataFile, cached.agentDir, metadataState),
+				bindWorkerConversationMetadata(
+					cached.metadataFile,
+					cached.agentDir,
+					cached.orchestrationHome,
+					metadataState,
+				),
 				cached.core,
 				options.projectClaim,
 			);
@@ -2921,7 +2890,7 @@ export class WorkerConversationStore {
 		const expectedSnapshot =
 			expectedReference && expectedParentSessionId
 				? openWorkerBirthContext(
-						options.agentDir,
+						options.orchestrationHome,
 						expectedParentSessionId,
 						metadata.logicalAgentId,
 						expectedReference,
@@ -2969,7 +2938,7 @@ export class WorkerConversationStore {
 			const snapshot =
 				expectedSnapshot && isDeepStrictEqual(reference, expectedReference)
 					? expectedSnapshot
-					: openWorkerBirthContext(options.agentDir, parentSessionId, metadata.logicalAgentId, reference);
+					: openWorkerBirthContext(options.orchestrationHome, parentSessionId, metadata.logicalAgentId, reference);
 			verifyWorkerBirthContextPrefix(sessionManager, snapshot, birthContext.recoverBirthContextPrefix);
 		}
 
@@ -3011,7 +2980,7 @@ export class WorkerConversationStore {
 				sessionFile,
 				cwd: sessionManager.getCwd(),
 			},
-			bindWorkerConversationMetadata(metadataFile, options.agentDir, metadataState),
+			bindWorkerConversationMetadata(metadataFile, options.agentDir, options.orchestrationHome, metadataState),
 			core,
 			options.projectClaim,
 		);
@@ -3020,16 +2989,18 @@ export class WorkerConversationStore {
 			resumeContext: cloneResumeContext(context),
 			metadataFile,
 			agentDir: options.agentDir,
+			orchestrationHome: options.orchestrationHome,
 		});
 		harnessLog.debug("workers", "a worker conversation was loaded into the cache", { sessionId: context.sessionId });
 		return conversation;
 	}
 
 	/** Opens one exact birth transcript. Names, execution directories and modification times never select history. */
-	openTranscriptReference(agentDir: string, reference: string): WorkerConversation | undefined {
+	openTranscriptReference(roots: WorkerConversationRoots, reference: string): WorkerConversation | undefined {
+		const { agentDir, orchestrationHome } = roots;
 		const identity = parseWorkerTranscriptReference(reference);
 		if (identity === undefined) return undefined;
-		const location = workerTranscriptLocation(agentDir, identity);
+		const location = workerTranscriptLocation(orchestrationHome, identity);
 		const { sessionFile } = location;
 		if (!existsSync(sessionFile)) return undefined;
 		return withFileLockSync(
@@ -3047,7 +3018,7 @@ export class WorkerConversationStore {
 					);
 				}
 				return this.openExisting(
-					{ agentDir, resumeContext: context, expectedLogicalAgentId: identity.logicalAgentId },
+					{ agentDir, orchestrationHome, resumeContext: context, expectedLogicalAgentId: identity.logicalAgentId },
 					{ parentSessionId: identity.parentSessionId, recoverBirthContextPrefix: false },
 				);
 			},

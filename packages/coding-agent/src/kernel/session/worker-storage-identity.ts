@@ -1,7 +1,11 @@
 import { createHash } from "node:crypto";
 import { basename, isAbsolute, relative, resolve } from "node:path";
 import type { AgentResumeContext } from "./agent-identity.ts";
-import { orchestrationSessionsDir, workerConversationSessionsDir } from "./session-bundle-paths.ts";
+import {
+	type OrchestrationHome,
+	orchestrationSessionsDir,
+	workerConversationSessionsDir,
+} from "./session-bundle-paths.ts";
 import { assertValidSessionId } from "./session-identity.ts";
 import type { WorkerTranscriptIdentity } from "./worker-transcript-reference.ts";
 
@@ -19,8 +23,8 @@ function stableWorkerSessionId(parentSessionId: string, logicalAgentId: string):
 	return `worker-${digest}`;
 }
 
-export function workerTranscriptLocation(agentDir: string, identity: WorkerTranscriptIdentity) {
-	const sessionDir = workerConversationSessionsDir(agentDir, identity.parentSessionId);
+export function workerTranscriptLocation(home: OrchestrationHome, identity: WorkerTranscriptIdentity) {
+	const sessionDir = workerConversationSessionsDir(home, identity.parentSessionId);
 	const sessionId = stableWorkerSessionId(identity.parentSessionId, identity.logicalAgentId);
 	assertValidSessionId(sessionId);
 	return { sessionDir, sessionId, sessionFile: joinWorkerSessionFile(sessionDir, sessionId) };
@@ -40,8 +44,8 @@ export function matchesWorkerTranscriptLocation(
 	);
 }
 
-export function assertWorkerConversationFile(agentDir: string, sessionFile: string, sessionId: string): string {
-	const workersRoot = resolve(orchestrationSessionsDir(agentDir));
+export function assertWorkerConversationFile(home: OrchestrationHome, sessionFile: string, sessionId: string): string {
+	const workersRoot = resolve(orchestrationSessionsDir(home));
 	const resolvedFile = resolve(sessionFile);
 	const fileRelativeToWorkersRoot = relative(workersRoot, resolvedFile);
 	if (

@@ -10,6 +10,7 @@ import {
 	truncateToWidth,
 	visibleWidth,
 } from "@caupulican/pi-tui";
+import { ownerOrchestrationHome } from "../../../core/agent-paths.ts";
 import { KeybindingsManager } from "../../../core/keybindings.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
 import { deleteForegroundSessionBundle } from "../../../core/session-artifact-bundle.ts";
@@ -808,6 +809,8 @@ export class SessionSelectorComponent extends Container implements Focusable {
 			try {
 				const result = await deleteForegroundSessionBundle({
 					agentDir: options.agentDir,
+					// The picker lists the owner's sessions: their bundles live in the owner's home.
+					orchestrationHome: ownerOrchestrationHome(options.agentDir),
 					parentSessionId: selected.id,
 					sessionPath,
 				});

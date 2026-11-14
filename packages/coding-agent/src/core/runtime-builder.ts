@@ -42,6 +42,7 @@ import {
 	acquireWorkRun,
 	bitwardenSecretsManagerCoordinationFile,
 	managedSecretEnvDir,
+	type OrchestrationHome,
 	removeWorkRun,
 	resourceDir,
 	secretVaultFile,
@@ -121,7 +122,7 @@ import { emitSessionShutdownEvent } from "./extensions/runner.ts";
 import { recordObjectiveClarification } from "./goals/goal-clarification-log.ts";
 import type { GoalStateRevision } from "./goals/goal-lifecycle.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
-import type { GoalStartGrant, OpenTaskStepRef } from "./goals/goal-tool-core.ts";
+import type { GoalStartGrant } from "./goals/goal-tool-core.ts";
 import { GOAL_LIFECYCLE_TOOL_NAMES, LEGACY_GOAL_TOOL_NAME } from "./goals/goal-tool-names.ts";
 import { runRequirementCheck } from "./goals/requirement-checks.ts";
 import { resolveSessionToolEvidence, resolveSessionUserEvidence } from "./goals/session-goal-evidence.ts";
@@ -209,7 +210,7 @@ import {
 import { SYSTEM_ONE_TOOL_NAME } from "./system-one/tool-names.ts";
 import { COMPLETION_FINDING_SOURCE, PEER_REVIEW_EVIDENCE_SOURCE } from "./system-one/verification-coordinator.ts";
 import { TaskDirectoryRuntime } from "./tasks/task-directory-runtime.ts";
-import { projectOpenTaskSteps } from "./tasks/task-projection.ts";
+import { deriveOpenTaskStepRefs } from "./tasks/task-projection.ts";
 import type { TaskStepsState } from "./tasks/task-state.ts";
 import { getToolCapabilityPolicy } from "./tool-capability-policy.ts";
 import { resolveCurrentToolRepairSettings } from "./tool-repair-settings.ts";
@@ -303,21 +304,6 @@ interface ToolDefinitionEntry {
 	sourceInfo: SourceInfo;
 }
 
-/**
- * Goal-tool adapter over the canonical open-task projection. Exported (pure, no `this`) so the
- * production `getOpenTaskSteps` wiring below remains directly testable without another filter.
- */
-export function deriveOpenTaskStepRefs(taskStepsState: TaskStepsState | undefined): OpenTaskStepRef[] {
-	return projectOpenTaskSteps(taskStepsState).map((step) => ({
-		id: step.id,
-		content: step.content,
-		...(step.requirementIds?.length ? { requirementIds: step.requirementIds } : {}),
-		...(step.evidence?.length ? { evidence: step.evidence } : {}),
-		...(step.pipelineRunId ? { pipelineRunId: step.pipelineRunId } : {}),
-		...(step.pipelineStageId ? { pipelineStageId: step.pipelineStageId } : {}),
-	}));
-}
-
 /** Bind goal-selected requirement identity as runtime metadata, outside the model-facing delegate schema. */
 export function createGoalWorkerDelegationRequest(args: {
 	requirementId: string;
@@ -370,6 +356,8 @@ export interface RuntimeBuilderDeps {
 	getCapabilityTierPolicy(): CapabilityTierPolicy;
 	/** Agent state root, including the host-keyed fitness store. */
 	getAgentDir(): string;
+	/** Where the session's orchestration bundle lives: the System One tool's evidence store is built from it. */
+	getOrchestrationHome(): OrchestrationHome;
 	/** Session log, passed to the extension runner. */
 	getSessionManager(): SessionManager;
 	/** The session's System One usage delivery: the root systemone reviewer records its paid responses through it. */
@@ -1647,7 +1635,7 @@ export class RuntimeBuilder {
 			const systemOneEvidenceStore =
 				this.isSystemOneEnabled() && this.deps.getSystemOneController?.() && toolAccess.allows(SYSTEM_ONE_TOOL_NAME)
 					? TypeSafeEvidenceStore.forSession(
-							this.deps.getAgentDir(),
+							this.deps.getOrchestrationHome(),
 							this.deps.getSessionManager(),
 							source?.evidenceDir,
 						)

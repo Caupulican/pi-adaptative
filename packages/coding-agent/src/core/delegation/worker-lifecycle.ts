@@ -5,7 +5,7 @@ import {
 	workerConversationMetadataFile,
 	workerTranscriptLocation,
 } from "../../kernel/session/worker-storage-identity.ts";
-import { orchestrationEventStoreDir } from "../agent-paths.ts";
+import { type OrchestrationHome, orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { laneSubtreeId } from "../fleet/fleet-types.ts";
@@ -139,14 +139,14 @@ export interface ManagedLaneBinding {
 
 export class WorkerLifecycle {
 	readonly ledger: DelegationOrchestrationLedger;
-	private readonly agentDir: string;
+	private readonly orchestrationHome: OrchestrationHome;
 	private readonly sessionId: string;
 	private readonly outcomes: WorkerOutcomeRecorder;
 	private nextLaneNumber: number;
 	private readonly isProcessAlive: (pid: number) => boolean;
 
 	constructor(options: {
-		agentDir: string;
+		orchestrationHome: OrchestrationHome;
 		sessionId: string;
 		isProcessAlive?: (pid: number) => boolean;
 		now?: () => number;
@@ -158,12 +158,12 @@ export class WorkerLifecycle {
 		 */
 		store?: OrchestrationEventStore;
 	}) {
-		this.agentDir = options.agentDir;
+		this.orchestrationHome = options.orchestrationHome;
 		this.sessionId = options.sessionId;
 		this.ledger = new DelegationOrchestrationLedger(options);
 		this.outcomes = new WorkerOutcomeRecorder({
 			runtime: this.ledger.runtime,
-			agentDir: options.agentDir,
+			orchestrationHome: options.orchestrationHome,
 			sessionId: options.sessionId,
 			...(options.now ? { now: options.now } : {}),
 		});
@@ -212,7 +212,7 @@ export class WorkerLifecycle {
 	}
 
 	private hasRetainedWorkerConversation(laneId: string): boolean {
-		const { sessionFile } = workerTranscriptLocation(this.agentDir, {
+		const { sessionFile } = workerTranscriptLocation(this.orchestrationHome, {
 			parentSessionId: this.sessionId,
 			logicalAgentId: laneId,
 		});
@@ -280,7 +280,7 @@ export class WorkerLifecycle {
 		if (live.length > 0 || !snapshot.retentionArchiveIds?.length) return live;
 		const committed = new Set(snapshot.retentionArchiveIds);
 		const archiveRead = readRetentionArchives(
-			retentionArchiveDir(orchestrationEventStoreDir(this.agentDir, this.sessionId)),
+			retentionArchiveDir(orchestrationEventStoreDir(this.orchestrationHome, this.sessionId)),
 		);
 		const archived: AgentBindingContract["status"][] = [];
 		for (const archive of archiveRead.archives) {

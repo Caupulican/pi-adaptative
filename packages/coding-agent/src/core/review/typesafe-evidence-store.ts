@@ -1,5 +1,5 @@
 import { createHash } from "node:crypto";
-import { typeSafeEvidenceDir } from "../agent-paths.ts";
+import { type OrchestrationHome, typeSafeEvidenceDir } from "../agent-paths.ts";
 import { type ArtifactStore, createFileArtifactStore, isMissingArtifactMarker } from "../context/context-artifacts.ts";
 import { withSessionBundleAdmission } from "../orchestration/session-bundle-lifecycle.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
@@ -41,13 +41,17 @@ export class TypeSafeEvidenceStore {
 		this.inherited = inherited;
 	}
 
-	static file(agentDir: string, parentSessionId: string, lineageIds: readonly string[] = []): TypeSafeEvidenceStore {
+	static file(
+		home: OrchestrationHome,
+		parentSessionId: string,
+		lineageIds: readonly string[] = [],
+	): TypeSafeEvidenceStore {
 		return new TypeSafeEvidenceStore(
-			createFileArtifactStore({ baseDir: typeSafeEvidenceDir(agentDir, parentSessionId) }),
-			(operation) => withSessionBundleAdmission(agentDir, parentSessionId, operation),
+			createFileArtifactStore({ baseDir: typeSafeEvidenceDir(home, parentSessionId) }),
+			(operation) => withSessionBundleAdmission(home, parentSessionId, operation),
 			[...new Set(lineageIds)]
 				.filter((id) => id !== parentSessionId)
-				.map((id) => TypeSafeEvidenceStore.file(agentDir, id)),
+				.map((id) => TypeSafeEvidenceStore.file(home, id)),
 		);
 	}
 
@@ -56,13 +60,13 @@ export class TypeSafeEvidenceStore {
 	 * bundle's retention reaches, so no bundle admission applies), else in its orchestration directory with its lineage's.
 	 */
 	static forSession(
-		agentDir: string,
+		home: OrchestrationHome,
 		session: { getSessionId(): string; getSessionLineageIds(): readonly string[] },
 		homeDir?: string,
 	): TypeSafeEvidenceStore {
 		return homeDir
 			? new TypeSafeEvidenceStore(createFileArtifactStore({ baseDir: homeDir }))
-			: TypeSafeEvidenceStore.file(agentDir, session.getSessionId(), session.getSessionLineageIds());
+			: TypeSafeEvidenceStore.file(home, session.getSessionId(), session.getSessionLineageIds());
 	}
 
 	save(toolCallId: string, record: Record<string, unknown>): TypeSafeEvidenceRef {

@@ -3,7 +3,7 @@ import { existsSync, lstatSync, type Stats, statSync } from "node:fs";
 import { join } from "node:path";
 import { isDeepStrictEqual } from "node:util";
 import { harnessLog } from "../../kernel/harness-log.ts";
-import { orchestrationEventStoreDir } from "../agent-paths.ts";
+import { type OrchestrationHome, orchestrationEventStoreDir } from "../agent-paths.ts";
 import type { JsonObject } from "../autonomy/contracts.ts";
 import {
 	type AtomicFileLockOptions,
@@ -121,7 +121,7 @@ interface VerifiedSnapshotBaseline {
 }
 
 export interface OrchestrationEventStoreOptions {
-	agentDir: string;
+	orchestrationHome: OrchestrationHome;
 	sessionId: string;
 	now?: () => string;
 	createEventId?: () => string;
@@ -463,7 +463,7 @@ function positiveSafeInteger(value: number | undefined, fallback: number, maximu
  * new verified snapshot authoritative; ordinals never reset.
  */
 export class OrchestrationEventStore {
-	private readonly agentDir: string;
+	private readonly orchestrationHome: OrchestrationHome;
 	readonly sessionId: string;
 	readonly rootDir: string;
 	readonly eventsDir: string;
@@ -487,9 +487,9 @@ export class OrchestrationEventStore {
 	private transactionActive = false;
 
 	constructor(options: OrchestrationEventStoreOptions) {
-		this.agentDir = options.agentDir;
+		this.orchestrationHome = options.orchestrationHome;
 		this.sessionId = options.sessionId;
-		this.rootDir = orchestrationEventStoreDir(options.agentDir, options.sessionId);
+		this.rootDir = orchestrationEventStoreDir(options.orchestrationHome, options.sessionId);
 		this.eventsDir = join(this.rootDir, "events");
 		this.idempotencyDir = join(this.rootDir, "idempotency");
 		this.cursorPath = join(this.rootDir, "cursor.json");
@@ -540,7 +540,7 @@ export class OrchestrationEventStore {
 		const lockOptions = this.withLockSleep(options);
 		try {
 			return withSessionBundleAdmission(
-				this.agentDir,
+				this.orchestrationHome,
 				this.sessionId,
 				() =>
 					withFileLockSync(
@@ -767,7 +767,7 @@ export class OrchestrationEventStore {
 		}
 		const policy = this.withLockSleep(lockOptions);
 		const maintenance = withSessionBundleMaintenance(
-			this.agentDir,
+			this.orchestrationHome,
 			this.sessionId,
 			() => {
 				try {

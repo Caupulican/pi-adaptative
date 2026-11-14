@@ -19,7 +19,7 @@ import { dirname, join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { observeMachine, registerMachine } from "../../kernel/machine-spec.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../../kernel/timer-port.ts";
-import { orchestrationSessionDir } from "../agent-paths.ts";
+import { type OrchestrationHome, orchestrationSessionDir } from "../agent-paths.ts";
 import type { WorkerClaim } from "../autonomy/contracts.ts";
 import { renderCommsStateLine } from "../comms/comms-records.ts";
 import type { WorkerLaneIsolationDeps } from "../delegation/worker-lane-isolation.ts";
@@ -111,7 +111,7 @@ export interface PlanExecutorDeps {
 	readonly engine: () => OperationEffectEngine | undefined;
 	readonly goal: () => GoalState | undefined;
 	readonly sessionId: () => string;
-	readonly agentDir: () => string;
+	readonly orchestrationHome: () => OrchestrationHome;
 	/** The root's session branch, root to leaf (the J4 excerpt and the request a plan answers). */
 	readonly rootEntries: () => readonly unknown[];
 	readonly captureOrigin: () => WorkerReceiptOrigin;
@@ -705,7 +705,7 @@ export class PlanExecutor implements PlanExecutorPort {
 	private joinIdentity(plan: PlanRuntimeState, planId: string, nodeId: string): JoinIdentity {
 		const n = (plan.nodes[nodeId]?.join?.n ?? 0) + 1;
 		const relative = joinArtifactPath(planId, nodeId, n);
-		const absolute = join(orchestrationSessionDir(this.deps.agentDir(), this.deps.sessionId()), relative);
+		const absolute = join(orchestrationSessionDir(this.deps.orchestrationHome(), this.deps.sessionId()), relative);
 		return {
 			outcomeId: joinOutcomeId(planId, nodeId, n),
 			generation: n,
@@ -854,7 +854,7 @@ export class PlanExecutor implements PlanExecutorPort {
 		const path = result.artifact;
 		if (path.startsWith("/") || /^[A-Za-z]:/.test(path)) {
 			try {
-				withSessionBundleAdmission(this.deps.agentDir(), this.deps.sessionId(), () => {
+				withSessionBundleAdmission(this.deps.orchestrationHome(), this.deps.sessionId(), () => {
 					mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
 					writeFileAtomicSync(path, text, { mode: 0o600 });
 				});

@@ -1,5 +1,6 @@
 /** Turns a logical worker's pending task-bearing mailbox messages into scheduled attempts, one message at a time in durable order, with bounded settlement and runtime-generation waits. */
 
+import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { AgentBindingContract } from "../orchestration/contracts.ts";
@@ -9,7 +10,7 @@ import type { AttemptRuntimeState } from "../orchestration/task-runtime.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import type { WorkerAgentActivity, WorkerAgentMailbox, WorkerAgentMessage } from "./worker-agent-control.ts";
 import type { WorkerControlTranscript } from "./worker-control-transcript.ts";
-import type { WorkerConversationStore } from "./worker-conversation-store.ts";
+import { agentConversation, type WorkerConversationStore } from "./worker-conversation-store.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 import type { WorkerDispatchScheduler } from "./worker-dispatch-scheduler.ts";
 import type { WorkerLifecycle } from "./worker-lifecycle.ts";
@@ -22,6 +23,7 @@ export type TaskBearingReconciliation = {
 
 interface WorkerTaskReconcilerOptions {
 	readonly agentDir: string;
+	readonly orchestrationHome: OrchestrationHome;
 	getLifecycle(): WorkerLifecycle;
 	scheduler: Pick<WorkerDispatchScheduler, "enqueue" | "drain">;
 	recoveredRequest(attempt: AttemptRuntimeState): WorkerDelegationRequest;
@@ -394,9 +396,7 @@ export class WorkerTaskReconciler {
 		if (!agent.resumeContext.sessionFile) return;
 		this.conversations
 			.open({
-				agentDir: this.options.agentDir,
-				resumeContext: agent.resumeContext,
-				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+				...agentConversation(this.options, agent),
 				projectClaim: this.options.getConversationClaim?.(agent),
 			})
 			.enableAttemptUsageBoundaries();

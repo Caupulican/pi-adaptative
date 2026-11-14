@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import { sessionRootMailboxFile } from "../agent-paths.ts";
+import { type OrchestrationHome, sessionRootMailboxFile } from "../agent-paths.ts";
 import {
 	type SessionBundleDeletionReservation,
 	withSessionBundleAdmission,
@@ -99,7 +99,7 @@ export type SessionRootReplyAcceptance =
 	| { status: "completed_replay"; messageId: string; created: false };
 
 export interface SessionRootMailboxOptions {
-	agentDir: string;
+	orchestrationHome: OrchestrationHome;
 	parentSessionId: string;
 }
 
@@ -520,7 +520,7 @@ function abortReason(signal: AbortSignal): unknown {
 
 /** Bounded durable inbox for accepted worker replies addressed to one foreground session root. */
 export class SessionRootMailbox {
-	private readonly agentDir: string;
+	private readonly orchestrationHome: OrchestrationHome;
 	private readonly parentSessionId: string;
 	private readonly file: string;
 	/**
@@ -537,9 +537,9 @@ export class SessionRootMailbox {
 	private parsed: { readonly text: string; readonly state: SessionRootMailboxState } | undefined;
 
 	constructor(options: SessionRootMailboxOptions) {
-		this.agentDir = options.agentDir;
+		this.orchestrationHome = options.orchestrationHome;
 		this.parentSessionId = requiredIdentity(options.parentSessionId, "parent session id");
-		this.file = sessionRootMailboxFile(options.agentDir, this.parentSessionId);
+		this.file = sessionRootMailboxFile(options.orchestrationHome, this.parentSessionId);
 	}
 
 	/** Validate and size one canonical reply without mutating durable inbox state. */
@@ -861,7 +861,7 @@ export class SessionRootMailbox {
 					this.parsed = { text, state: next };
 				}
 			});
-		if (retention) withSessionBundleRetention(this.agentDir, this.parentSessionId, retention, mutate);
-		else withSessionBundleAdmission(this.agentDir, this.parentSessionId, mutate);
+		if (retention) withSessionBundleRetention(this.orchestrationHome, this.parentSessionId, retention, mutate);
+		else withSessionBundleAdmission(this.orchestrationHome, this.parentSessionId, mutate);
 	}
 }

@@ -14,6 +14,7 @@
 import type { Api, AssistantMessage, Message, Model, Usage } from "@caupulican/pi-ai";
 import type { AgentContextPlan, AgentContextWire, AgentMessage, AgentTool } from "../../kernel/index.ts";
 import type { SessionManager } from "../../kernel/node.ts";
+import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import type { SessionRequestSnapshotInput } from "../../kernel/session/session-manager.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type {
@@ -156,6 +157,8 @@ export interface ParentExecutionEnvironment {
 	getSessionId(): string;
 	getCwd(): string;
 	getAgentDir(): string;
+	/** Where the parent session's orchestration bundle lives: every bundle path of its workers is built from it. */
+	getOrchestrationHome(): OrchestrationHome;
 	/** The parent's transcript, read-only to worker execution. */
 	getSessionManager(): ParentSessionReader;
 	getSettingsManager(): ParentExecutionSettingsSource;

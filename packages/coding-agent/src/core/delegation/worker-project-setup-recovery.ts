@@ -1,5 +1,6 @@
 import { existsSync } from "node:fs";
 import { isDeepStrictEqual } from "node:util";
+import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { WorkerAgentMailbox } from "./worker-agent-control.ts";
 import type { WorkerConversationStore, WorkerProjectContextReference } from "./worker-conversation-store.ts";
@@ -16,10 +17,12 @@ interface PreparedSetup {
 /** Reconcile only interrupted initial setup. A leased task or registered agent has another lifecycle. */
 export class WorkerProjectSetupRecovery {
 	private readonly agentDir: string;
+	private readonly orchestrationHome: OrchestrationHome;
 	private readonly conversations: WorkerConversationStore;
 
-	constructor(agentDir: string, conversations: WorkerConversationStore) {
+	constructor(agentDir: string, orchestrationHome: OrchestrationHome, conversations: WorkerConversationStore) {
 		this.agentDir = agentDir;
+		this.orchestrationHome = orchestrationHome;
 		this.conversations = conversations;
 	}
 
@@ -34,6 +37,7 @@ export class WorkerProjectSetupRecovery {
 		if (reference.resumeContext.sessionFile && existsSync(reference.resumeContext.sessionFile)) {
 			const binding = this.conversations.getProjectContextBinding({
 				agentDir: this.agentDir,
+				orchestrationHome: this.orchestrationHome,
 				resumeContext: reference.resumeContext,
 				expectedLogicalAgentId: reference.logicalAgentId,
 			});
@@ -46,12 +50,14 @@ export class WorkerProjectSetupRecovery {
 		const attempt = setup.attempt;
 		const mailbox = new WorkerAgentMailbox({
 			agentDir: this.agentDir,
+			orchestrationHome: this.orchestrationHome,
 			parentSessionId: reference.parentSessionId,
 			agentId: reference.logicalAgentId,
 		});
 		this.conversations.settleCancelledProjectSetup(
 			{
 				agentDir: this.agentDir,
+				orchestrationHome: this.orchestrationHome,
 				reference,
 				...allocation,
 				withQuiescence: (operation) => mailbox.withQuiescentMailbox(operation),
@@ -92,6 +98,7 @@ export class WorkerProjectSetupRecovery {
 			throw new Error("Worker preparation cannot be proven quiescent for its exact command.");
 		const mailbox = new WorkerAgentMailbox({
 			agentDir: this.agentDir,
+			orchestrationHome: this.orchestrationHome,
 			parentSessionId: allocation.owner.parentSessionId,
 			agentId: preparation.logicalAgentId,
 		});
@@ -112,7 +119,7 @@ export class WorkerProjectSetupRecovery {
 		logicalAgentId: string,
 		reference?: WorkerProjectContextReference,
 	): PreparedSetup | undefined {
-		const lifecycle = new WorkerLifecycle({ agentDir: this.agentDir, sessionId: parentSessionId });
+		const lifecycle = new WorkerLifecycle({ orchestrationHome: this.orchestrationHome, sessionId: parentSessionId });
 		const snapshot = lifecycle.getTaskRuntimeSnapshot();
 		const task = snapshot.tasks[logicalAgentId];
 		if ((task && task.attemptIds.length !== 1) || (!task && reference)) return;

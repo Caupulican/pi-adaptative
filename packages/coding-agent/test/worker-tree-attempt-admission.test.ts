@@ -2,6 +2,7 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import path from "node:path";
 import { describe, expect, it } from "vitest";
+import { ownerOrchestrationHome } from "../src/core/agent-paths.ts";
 import { WorkerDelegationController } from "../src/core/delegation/worker-delegation-controller.ts";
 import { WorkerLifecycle } from "../src/core/delegation/worker-lifecycle.ts";
 import { createWorkerExecutionContract } from "../src/core/orchestration/worker-execution-contract.ts";
@@ -51,7 +52,11 @@ function executionContract(maxAttempts: number) {
 function lifecycleFor(maxAttempts: number): { lifecycle: WorkerLifecycle; directory: string } {
 	const directory = mkdtempSync(path.join(tmpdir(), "pi-worker-tree-admission-"));
 	const sessionId = "tree-admission-session";
-	const lifecycle = new WorkerLifecycle({ agentDir: directory, sessionId, now: () => Date.parse(now) });
+	const lifecycle = new WorkerLifecycle({
+		orchestrationHome: ownerOrchestrationHome(directory),
+		sessionId,
+		now: () => Date.parse(now),
+	});
 	const resumeContext = {
 		provider: "pi" as const,
 		sessionId,

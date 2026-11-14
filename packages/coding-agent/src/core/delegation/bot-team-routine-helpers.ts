@@ -109,6 +109,28 @@ export interface BotDaemonEnd {
 
 /** How long after its last renewal a daemon lease stops being held; a session re-ensures the daemon at that instant. */
 export const DAEMON_STALE_MS = 60_000;
+/** Slack after a lease's last renewal is due, so a daemon renewing right at the limit is not mistaken for a dead one. */
+const DAEMON_RECHECK_MARGIN_MS = 2_000;
+/** Backoff of the re-ensure after a daemon that could not be brought up. */
+const DAEMON_RECHECK_BASE_BACKOFF_MS = 15_000;
+const DAEMON_RECHECK_MAX_BACKOFF_MS = 600_000;
+
+/**
+ * The instant a session re-ensures the daemon: when its lease stops being held, or, after `failures` consecutive
+ * failures to bring it up (or with no lease known), after a doubling backoff.
+ */
+export function daemonRecheckAt(
+	nowMs: number,
+	failed: boolean,
+	failures: number,
+	leaseHeldUntil: number | undefined,
+): number {
+	if (failed || leaseHeldUntil === undefined)
+		return (
+			nowMs + Math.min(DAEMON_RECHECK_MAX_BACKOFF_MS, DAEMON_RECHECK_BASE_BACKOFF_MS * 2 ** Math.min(failures, 16))
+		);
+	return leaseHeldUntil + DAEMON_RECHECK_MARGIN_MS;
+}
 /** Reports kept in the lease record; older ones are dropped first. */
 const MAX_DAEMON_REPORTS = 20;
 const MAX_DAEMON_REPORT_CHARS = 500;

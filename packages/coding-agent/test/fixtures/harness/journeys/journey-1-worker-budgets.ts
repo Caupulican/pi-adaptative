@@ -1,6 +1,7 @@
 import "../builtin-install.ts";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
+import { ownerOrchestrationHome } from "../../../../src/core/agent-paths.ts";
 import { appendLaneRecordSnapshot } from "../../../../src/core/autonomy/session-lane-record.ts";
 import { WorkerConversationStore } from "../../../../src/core/delegation/worker-conversation-store.ts";
 import {
@@ -591,6 +592,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	const e8uPersistedErrors = new WorkerConversationStore()
 		.open({
 			agentDir: world.agentDir,
+			orchestrationHome: ownerOrchestrationHome(world.agentDir),
 			resumeContext: e8uBinding.resumeContext,
 			expectedLogicalAgentId: e8uAgentId,
 		})

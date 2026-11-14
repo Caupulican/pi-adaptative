@@ -3,7 +3,7 @@ import { chmodSync, mkdirSync } from "node:fs";
 import { dirname } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DEFAULT_MAX_BYTES } from "../../kernel/utils/truncate.ts";
-import { workerTerminalOutputArtifactFile } from "../agent-paths.ts";
+import { type OrchestrationHome, workerTerminalOutputArtifactFile } from "../agent-paths.ts";
 import type { ArtifactContract, WorkerResultContract } from "../orchestration/contracts.ts";
 import { withSessionBundleAdmission } from "../orchestration/session-bundle-lifecycle.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
@@ -12,7 +12,7 @@ import { readBoundedTextFileSync } from "../util/bounded-file.ts";
 export const WORKER_TERMINAL_OUTPUT_INLINE_BYTES = DEFAULT_MAX_BYTES;
 
 export interface CaptureWorkerTerminalOutputArtifactInput {
-	agentDir: string;
+	orchestrationHome: OrchestrationHome;
 	parentSessionId: string;
 	attemptId: string;
 	text: string;
@@ -41,12 +41,12 @@ export function captureWorkerTerminalOutputArtifact(
 	const attemptDigest = createHash("sha256").update(input.attemptId).digest("hex");
 	const contentDigest = createHash("sha256").update(input.text).digest("hex");
 	const filePath = workerTerminalOutputArtifactFile(
-		input.agentDir,
+		input.orchestrationHome,
 		input.parentSessionId,
 		attemptDigest,
 		contentDigest,
 	);
-	return withSessionBundleAdmission(input.agentDir, input.parentSessionId, () => {
+	return withSessionBundleAdmission(input.orchestrationHome, input.parentSessionId, () => {
 		const artifactDirectory = dirname(filePath);
 		mkdirSync(artifactDirectory, { recursive: true, mode: 0o700 });
 		if (process.platform !== "win32") chmodSync(artifactDirectory, 0o700);

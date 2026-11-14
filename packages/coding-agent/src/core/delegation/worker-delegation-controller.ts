@@ -225,7 +225,12 @@ import {
 	laneCompactionReserveTokens,
 	workerConversationRetentionPolicy,
 } from "./worker-conversation-compaction-policy.ts";
-import { type WorkerConversation, WorkerConversationStore } from "./worker-conversation-store.ts";
+import {
+	agentConversation,
+	type WorkerConversation,
+	type WorkerConversationRoots,
+	WorkerConversationStore,
+} from "./worker-conversation-store.ts";
 import {
 	isOAuthCredentialUnusableText,
 	WorkerCredentialHealth,
@@ -588,7 +593,7 @@ export class WorkerDelegationController {
 		this.laneIsolation = laneIsolation;
 		this.projectDirectory = new WorkerProjectDirectory(this.deps.getAgentDir(), this.conversations);
 		this.contextForks = new WorkerContextForkStore({
-			agentDir: this.deps.getAgentDir(),
+			orchestrationHome: this.deps.getOrchestrationHome(),
 			parentSessionId: this.deps.getSessionId(),
 		});
 		this.fleet = new SessionFleetScheduler({
@@ -808,6 +813,7 @@ export class WorkerDelegationController {
 		});
 		this.agentControl = new WorkerAgentControlCoordinator({
 			agentDir: this.deps.getAgentDir(),
+			orchestrationHome: this.deps.getOrchestrationHome(),
 			parentSessionId: this.deps.getSessionId(),
 			processOwnerId: createLocalWorkerProcessOwnerId(process.pid, randomUUID()),
 			conversationStore: this.conversations,
@@ -1386,9 +1392,7 @@ export class WorkerDelegationController {
 						publish: (agent, claim, assertUnchanged) =>
 							this.agentControl.handoffSettledContext(agent.agentId, claim, (assertMailboxSettled) =>
 								this.conversations.handoffProjectContext({
-									agentDir: this.deps.getAgentDir(),
-									resumeContext: agent.resumeContext,
-									expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+									...agentConversation(this.conversationRoots(), agent),
 									projectClaim: claim,
 									parentSessionId: claim.parentSessionId,
 									agentId: agent.agentId,
@@ -2918,18 +2922,19 @@ export class WorkerDelegationController {
 		return { provider: parent.provider, model: parent.id };
 	}
 
+	/** Where this session's worker conversations live: the agent directory and the session's orchestration home. */
+	private conversationRoots(): WorkerConversationRoots {
+		return { agentDir: this.deps.getAgentDir(), orchestrationHome: this.deps.getOrchestrationHome() };
+	}
+
 	/** Exact historical reference or current-session alias. A historical name alone never selects a transcript. */
 	openWorkerTranscript(agentId: string): WorkerConversation | undefined {
 		if (agentId.startsWith(WORKER_TRANSCRIPT_REFERENCE_PREFIX)) {
-			return this.conversations.openTranscriptReference(this.deps.getAgentDir(), agentId);
+			return this.conversations.openTranscriptReference(this.conversationRoots(), agentId);
 		}
 		const agent = this.lifecycle.getAgent(agentId);
 		if (!agent) return undefined;
-		return this.conversations.open({
-			agentDir: this.deps.getAgentDir(),
-			resumeContext: agent.resumeContext,
-			expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
-		});
+		return this.conversations.open(agentConversation(this.conversationRoots(), agent));
 	}
 
 	/**
@@ -2958,11 +2963,7 @@ export class WorkerDelegationController {
 		}
 		const parent = this.lifecycle.getAgent(request.parentAgentId);
 		if (!parent) throw new Error("Worker parent logical agent is missing.");
-		const conversation = this.conversations.open({
-			agentDir: this.deps.getAgentDir(),
-			resumeContext: parent.resumeContext,
-			expectedLogicalAgentId: parent.contextOrigin?.logicalAgentId ?? parent.agentId,
-		});
+		const conversation = this.conversations.open(agentConversation(this.conversationRoots(), parent));
 		return { model, messages: conversation.getProviderContext().messages };
 	}
 
@@ -3352,7 +3353,7 @@ export class WorkerDelegationController {
 			if (!birth) throw new Error("Project worker birth context is missing.");
 			const value = prepare(birth, laneId);
 			this.conversations.bindProjectMailbox(
-				this.deps.getAgentDir(),
+				this.conversationRoots(),
 				this.deps.getSessionId(),
 				laneId,
 				imported.conversation,
@@ -3518,9 +3519,7 @@ export class WorkerDelegationController {
 		const existing = prepared.lifecycle.getAgent(agentId);
 		if (existing) {
 			const conversation = this.conversations.open({
-				agentDir: this.deps.getAgentDir(),
-				resumeContext: existing.resumeContext,
-				expectedLogicalAgentId: existing.contextOrigin?.logicalAgentId ?? existing.agentId,
+				...agentConversation(this.conversationRoots(), existing),
 				projectClaim: this.claimAgentProjectContext(existing),
 			});
 			if (!isDeepStrictEqual(conversation.getBirthContextForkReference(), birthContextForkReference)) {
@@ -3540,6 +3539,7 @@ export class WorkerDelegationController {
 		if (!materialized.ok) throw new Error(`worker_resource_materialization_${materialized.code}`);
 		const conversationOptions = {
 			agentDir: this.deps.getAgentDir(),
+			orchestrationHome: this.deps.getOrchestrationHome(),
 			parentSessionId: this.deps.getSessionId(),
 			logicalAgentId: agentId,
 			cwd: prepared.executionPlan.cwd,
@@ -3560,6 +3560,7 @@ export class WorkerDelegationController {
 		if (selection?.kind === "allocated") {
 			conversation = this.conversations.claimProjectContext({
 				agentDir: this.deps.getAgentDir(),
+				orchestrationHome: this.deps.getOrchestrationHome(),
 				resumeContext: conversation.getResumeContext(),
 				expectedLogicalAgentId: agentId,
 				owner: selection.allocation.owner,
@@ -3659,9 +3660,7 @@ export class WorkerDelegationController {
 				const current =
 					conversation ??
 					this.conversations.open({
-						agentDir: this.deps.getAgentDir(),
-						resumeContext: agent.resumeContext,
-						expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
+						...agentConversation(this.conversationRoots(), agent),
 						projectClaim: claim,
 					});
 				const released = this.agentControl.releaseQuiescentContext(agentId, () => {
@@ -3690,11 +3689,7 @@ export class WorkerDelegationController {
 			this.retainedReleases.delete(`project:${agent.agentId}`);
 			return retained;
 		}
-		const options = {
-			agentDir: this.deps.getAgentDir(),
-			resumeContext: agent.resumeContext,
-			expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
-		};
+		const options = agentConversation(this.conversationRoots(), agent);
 		const binding = this.conversations.getProjectContextBinding(options);
 		if (!binding) return undefined;
 		const claimed = this.conversations.claimProjectContext({
@@ -3720,11 +3715,9 @@ export class WorkerDelegationController {
 		const agent = this.lifecycle.getAgent(attempt?.agentId ?? attempt?.dispatch.logicalLaneId ?? laneId);
 		if (!agent) return true;
 		try {
-			const binding = this.conversations.getProjectContextBinding({
-				agentDir: this.deps.getAgentDir(),
-				resumeContext: agent.resumeContext,
-				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
-			});
+			const binding = this.conversations.getProjectContextBinding(
+				agentConversation(this.conversationRoots(), agent),
+			);
 			if (binding)
 				assertSpecialistContextClaim(binding.ownership, this.projectClaims.get(agent.resumeContext.sessionId));
 			return true;
@@ -3749,11 +3742,7 @@ export class WorkerDelegationController {
 		agent: Pick<AgentBindingContract, "agentId" | "resumeContext" | "contextOrigin">,
 	): boolean {
 		try {
-			this.conversations.open({
-				agentDir: this.deps.getAgentDir(),
-				resumeContext: agent.resumeContext,
-				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
-			});
+			this.conversations.open(agentConversation(this.conversationRoots(), agent));
 			return true;
 		} catch (error) {
 			this.safeWarn(
@@ -3907,7 +3896,7 @@ export class WorkerDelegationController {
 							try {
 								const forks = agent?.contextOrigin
 									? new WorkerContextForkStore({
-											agentDir: this.deps.getAgentDir(),
+											orchestrationHome: this.deps.getOrchestrationHome(),
 											parentSessionId: agent.contextOrigin.parentSessionId,
 										})
 									: this.contextForks;
@@ -3968,7 +3957,7 @@ export class WorkerDelegationController {
 							ownership.claim.parentSessionId === sessionId
 								? this.lifecycle
 								: new WorkerLifecycle({
-										agentDir: this.deps.getAgentDir(),
+										orchestrationHome: this.deps.getOrchestrationHome(),
 										sessionId: ownership.claim.parentSessionId,
 									});
 						const bindingStatuses = ownerLifecycle.getProjectOwnerBindingStatuses(reference.resumeContext);
@@ -3993,6 +3982,7 @@ export class WorkerDelegationController {
 									this.conversations
 										.open({
 											agentDir: this.deps.getAgentDir(),
+											orchestrationHome: this.deps.getOrchestrationHome(),
 											resumeContext: reference.resumeContext,
 											expectedLogicalAgentId: reference.logicalAgentId,
 										})
@@ -4004,13 +3994,14 @@ export class WorkerDelegationController {
 						if (forkMode.kind === "none") return true;
 						const conversation = this.conversations.open({
 							agentDir: this.deps.getAgentDir(),
+							orchestrationHome: this.deps.getOrchestrationHome(),
 							resumeContext: reference.resumeContext,
 							expectedLogicalAgentId: reference.logicalAgentId,
 						});
 						const birthReference = conversation.getBirthContextForkReference();
 						if (!birthReference) return false;
 						const birth = new WorkerContextForkStore({
-							agentDir: this.deps.getAgentDir(),
+							orchestrationHome: this.deps.getOrchestrationHome(),
 							parentSessionId: reference.parentSessionId,
 						}).open({ logicalAgentId: reference.logicalAgentId, reference: birthReference });
 						if (birth.declaration) return birth.declaration.forkMode === forkRequest;
@@ -5296,7 +5287,7 @@ export class WorkerDelegationController {
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === SYSTEM_ONE_TOOL_NAME)) {
 			adapterSources.systemOne = {
 				evidenceStore: TypeSafeEvidenceStore.file(
-					this.deps.getAgentDir(),
+					this.deps.getOrchestrationHome(),
 					this.deps.getSessionId(),
 					this.deps.getSessionManager().getSessionLineageIds(),
 				),
@@ -5670,6 +5661,7 @@ export class WorkerDelegationController {
 				durableHandle,
 				parentSessionId: this.deps.getSessionId(),
 				agentDir: this.deps.getAgentDir(),
+				orchestrationHome: this.deps.getOrchestrationHome(),
 				cwd: executionPlan.cwd,
 				model,
 				thinkingLevel: modelBinding.thinkingLevel,

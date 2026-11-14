@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { join } from "node:path";
 import { expect } from "vitest";
-import { configFile } from "../../../../src/core/agent-paths.ts";
+import { configFile, ownerOrchestrationHome } from "../../../../src/core/agent-paths.ts";
 import { resolveSemanticUsageEntry } from "../../../../src/core/cost/usage-records.ts";
 import { GH_CREDENTIAL_NAMES, parseDaemonGhCredentials } from "../../../../src/core/daemon-environment.ts";
 import { BOT_DAEMON_COMMAND } from "../../../../src/core/delegation/bot-daemon-command.ts";
@@ -764,10 +764,10 @@ export async function runJourney1RoutinesPhase(world: HarnessWorld): Promise<voi
 		expect(attemptClaims(awayManager), "the foreground port saved the recovered run's claim exactly once").toBe(1);
 		const orchestrationClock = world.timers.port("orchestration");
 		const awayRuntime = new WorkerLifecycle({
-			agentDir,
+			orchestrationHome: ownerOrchestrationHome(agentDir),
 			sessionId: awayManager.getSessionId(),
 			store: new OrchestrationEventStore({
-				agentDir,
+				orchestrationHome: ownerOrchestrationHome(agentDir),
 				sessionId: awayManager.getSessionId(),
 				now: () => new Date(orchestrationClock.now()).toISOString(),
 				sleepSync: (delayMs) => world.timers.sleepSync(delayMs),

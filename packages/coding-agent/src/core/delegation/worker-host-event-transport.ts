@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { isDeepStrictEqual } from "node:util";
 import type { UserMessage } from "@caupulican/pi-ai";
+import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import { stampWorkerControl, workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import { type HostEventDeliveryBinding, HostEventError } from "../events/host-event-contract.ts";
 import { hostEventEvidenceText } from "../events/host-event-delivery.ts";
@@ -16,6 +17,7 @@ import type { WorkerLifecycle } from "./worker-lifecycle.ts";
 
 interface WorkerHostEventTransportPort {
 	readonly agentDir: string;
+	readonly orchestrationHome: OrchestrationHome;
 	readonly conversations: WorkerConversationStore;
 	lifecycle(): WorkerLifecycle;
 	mailbox(agentId: string): WorkerAgentMailbox;
@@ -272,6 +274,7 @@ export class WorkerHostEventTransport {
 		if (!agent) throw new HostEventError("missing", "Host event original worker binding is missing.");
 		const conversation = this.port.conversations.open({
 			agentDir: this.port.agentDir,
+			orchestrationHome: this.port.orchestrationHome,
 			resumeContext: {
 				...agent.resumeContext,
 				sessionId: binding.execution.sessionId,

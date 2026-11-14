@@ -1,8 +1,11 @@
-import type { Usage } from "@caupulican/pi-ai";
+import { isDeepStrictEqual } from "node:util";
+import type { AssistantMessage, Usage } from "@caupulican/pi-ai";
 import type { RequestPreflightContext, RequestPreflightResult } from "../../kernel/loop-config.ts";
 import { addUsage, createEmptyUsage } from "../../kernel/usage.ts";
+import type { IsolatedCompletionResult } from "../agent-session-contracts.ts";
 import { usageDeltaFromProviderUsage } from "../orchestration/attempt-usage.ts";
 import type { GatewayUsageDelta, ProviderBudgetReservation } from "../orchestration/capability-gateway.ts";
+import type { WorkerTranscriptMessage } from "./worker-conversation-store.ts";
 
 export class WorkerCompletionProtocolError extends Error {
 	constructor(message: string) {
@@ -269,4 +272,83 @@ export class WorkerProviderTurnProtocol {
 		this.onFailure(error);
 		throw error;
 	}
+}
+
+/** Verifies a completion against the messages its callbacks durably emitted: the exact suffix and its terminal assistant. */
+export function callbackEvidencedCompletion(
+	result: IsolatedCompletionResult,
+	historyLength: number,
+	emittedMessages: readonly WorkerTranscriptMessage[],
+	endToolName?: string,
+): { completion: IsolatedCompletionResult; suffix: WorkerTranscriptMessage[] } {
+	if (result.messages !== undefined && result.messages.length < historyLength)
+		throw new WorkerCompletionProtocolError(
+			"Worker completion protocol returned fewer messages than its input history.",
+		);
+	// `result.messages` is declared `Message[]` (IsolatedCompletionResult, agent-session-contracts.ts)
+	// but a child loop that committed a transient record (the kernel's step-3 host-gap hook) makes
+	// it genuinely WorkerTranscriptMessage[] at runtime - widening here, not narrowing, so this
+	// assignment needs no cast; only reflection-controller.ts's construction of `result.messages`
+	// itself still does, where a wide value is forced into that narrower declared field. See
+	// worker-conversation-store.ts's `WorkerTranscriptMessage` doc comment.
+	let suffix: WorkerTranscriptMessage[];
+	if (result.messages !== undefined) {
+		suffix = result.messages.slice(historyLength);
+		if (!isDeepStrictEqual(suffix, emittedMessages)) {
+			throw new WorkerCompletionProtocolError(
+				"Worker completion protocol returned a suffix without exact callback evidence.",
+			);
+		}
+	} else {
+		suffix = [...emittedMessages];
+	}
+	if (suffix.length === 0)
+		throw new WorkerCompletionProtocolError("Worker completion protocol returned no durable message suffix.");
+	if (!suffix.some((message) => message.role === "assistant"))
+		throw new WorkerCompletionProtocolError(
+			"Worker completion protocol returned no assistant in its durable suffix.",
+		);
+	const assistants = emittedMessages.filter((message): message is AssistantMessage => message.role === "assistant");
+	const finalMessage = assistants.at(-1);
+	// A run ends on its last assistant message, or on the results of the tool calls that assistant made when
+	// one of them is the end tool (`submit_report`): the call and its result are both durable, nothing else
+	// may follow it.
+	const trailing = finalMessage ? emittedMessages.slice(emittedMessages.lastIndexOf(finalMessage) + 1) : [];
+	const endedOnEndTool =
+		finalMessage !== undefined &&
+		endToolName !== undefined &&
+		trailing.length > 0 &&
+		finalMessage.content.some((content) => content.type === "toolCall" && content.name === endToolName) &&
+		trailing.every(
+			(message) =>
+				message.role === "toolResult" &&
+				finalMessage.content.some((content) => content.type === "toolCall" && content.id === message.toolCallId),
+		);
+	if (finalMessage === undefined || (trailing.length > 0 && !endedOnEndTool)) {
+		throw new WorkerCompletionProtocolError(
+			"Worker completion protocol did not durably emit an assistant as its terminal message.",
+		);
+	}
+	const usage = createEmptyUsage();
+	for (const assistant of assistants) addUsage(usage, assistant.usage);
+	const text = finalMessage.content.flatMap((content) => (content.type === "text" ? [content.text] : [])).join("");
+	if (
+		result.text !== text ||
+		result.stopReason !== finalMessage.stopReason ||
+		!isDeepStrictEqual(result.usage, usage) ||
+		result.errorMessage !== finalMessage.errorMessage
+	) {
+		throw new WorkerCompletionProtocolError(
+			"Worker completion result disagrees with its durable callback-evidenced terminal assistant.",
+		);
+	}
+	return {
+		suffix,
+		completion: {
+			text,
+			usage,
+			stopReason: finalMessage.stopReason,
+			...(finalMessage.errorMessage ? { errorMessage: finalMessage.errorMessage } : {}),
+		},
+	};
 }

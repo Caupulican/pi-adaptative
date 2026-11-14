@@ -28,7 +28,7 @@ import {
 	RealWorkerDispatcher,
 } from "./adaptive/index.ts";
 import type { AgentIdentity } from "./agent-identity.ts";
-import { capabilityArtifactsDir, configFile, steeringCertificatesFile } from "./agent-paths.ts";
+import { capabilityArtifactsDir, configFile, ownerOrchestrationHome, steeringCertificatesFile } from "./agent-paths.ts";
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
@@ -422,7 +422,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 
 	// An AgentSession never opens a session the bot daemon hosts (`SessionHostedError`); the daemon's own hold is `channel-host`.
 	const bundleLease = sessionManager.isPersisted()
-		? acquireSessionBundleLease(agentDir, sessionManager.getSessionId(), {
+		? acquireSessionBundleLease(ownerOrchestrationHome(agentDir), sessionManager.getSessionId(), {
 				role: options.bundleLeaseRole ?? "session",
 				refuseHosted: true,
 			})
@@ -946,7 +946,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const adaptationStore = ModelAdaptationStore.forAgentDir(agentDir);
 				const orchestrationClock = timers.port("orchestration");
 				const orchestrationStore = new OrchestrationEventStore({
-					agentDir,
+					orchestrationHome: ownerOrchestrationHome(agentDir),
 					sessionId: sessionManager.getSessionId(),
 					now: () => new Date(orchestrationClock.now()).toISOString(),
 					sleepSync: (delayMs) => timers.sleepSync(delayMs),

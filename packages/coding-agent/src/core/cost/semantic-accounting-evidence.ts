@@ -6,7 +6,7 @@ import { getModel } from "@caupulican/pi-ai/models";
 import { indexSessionLifecycle } from "../../kernel/session/lifecycle-ledger.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { createEmptyUsage, getSessionEntryUsage } from "../../kernel/usage.ts";
-import { typeSafeEvidenceDir } from "../agent-paths.ts";
+import { type OrchestrationHome, typeSafeEvidenceDir } from "../agent-paths.ts";
 import { getEvaluationUsage } from "../review/typesafe-contract.ts";
 import { parseTypeSafeUsageReceipt } from "../review/typesafe-usage-receipt-codec.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
@@ -175,13 +175,13 @@ function directToolEvidence(
 
 /** Recover only exact paid-receipt links. Artifact timestamps and evaluation IDs never imply ownership. */
 export function readSemanticAccountingEvidence(options: {
-	agentDir: string;
+	orchestrationHome: OrchestrationHome;
 	sessionId: string;
 	reports: readonly SemanticUsageReport[];
 	entries?: readonly SessionEntry[];
 }): AccountingEvidenceGroup[] {
 	const directGroups = recordedDirectToolEvidence(options.entries ?? [], options.sessionId);
-	const directory = typeSafeEvidenceDir(options.agentDir, options.sessionId);
+	const directory = typeSafeEvidenceDir(options.orchestrationHome, options.sessionId);
 	try {
 		const stat = lstatSync(directory);
 		if (!stat.isDirectory() || stat.isSymbolicLink()) throw new Error("Semantic evidence path is not a directory.");

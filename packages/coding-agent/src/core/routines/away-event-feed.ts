@@ -19,6 +19,7 @@
  *   event routines as their away refusal, once per reason, and cleared when it is followed again.
  */
 
+import { ownerOrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import { type ReadonlySessionManager, SessionManager } from "../../kernel/session/session-manager.ts";
 import { type CiSubject, HostEventError, type HostEventSource } from "../events/host-event-contract.ts";
 import { DeliveryLane, HostEventSessionController } from "../events/host-event-session-controller.ts";
@@ -168,7 +169,8 @@ export class AwayEventFeed {
 		const clock = input.timers.port("orchestration");
 		const runtime = new DurableTaskRuntime({
 			store: new OrchestrationEventStore({
-				agentDir: input.agentDir,
+				// The away feed follows one of the owner's closed sessions: its ledger lives in the owner's home.
+				orchestrationHome: ownerOrchestrationHome(input.agentDir),
 				sessionId: input.parentSessionId,
 				now: () => new Date(clock.now()).toISOString(),
 				sleepSync: (delayMs) => input.timers.sleepSync(delayMs),

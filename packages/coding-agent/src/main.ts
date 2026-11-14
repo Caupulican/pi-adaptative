@@ -5,7 +5,6 @@
  * createAgentSession() options. The SDK does the heavy lifting.
  */
 
-import { createInterface } from "node:readline";
 import { type ImageContent, modelsAreEqual } from "@caupulican/pi-ai";
 import type { Api, Model } from "@caupulican/pi-ai/types";
 import { applyTerminalSettings, ProcessTerminal, setKeybindings, TUI } from "@caupulican/pi-tui";
@@ -20,12 +19,12 @@ import { applyLaunchEnvironment, isSupervisedInteractiveLaunch, isTruthyEnvFlag 
 import { runLfm3Cli } from "./cli/lfm3-command.ts";
 import { listModels } from "./cli/list-models.ts";
 import { readPipedInput } from "./cli/piped-stdin.ts";
+import { promptConfirm } from "./cli/prompt-confirm.ts";
 import { runAccountingReconcileCommand } from "./cli/reconcile-accounting.ts";
 import { initializeRuntimeChildChannel } from "./cli/runtime-channel.ts";
 import { applyRuntimeRestartArgs, bindInteractiveRuntimeRestart } from "./cli/runtime-restart.ts";
 import { superviseInteractiveRuntime } from "./cli/runtime-supervision.ts";
 import { selectSession } from "./cli/session-picker.ts";
-import { resumeStartupTypeahead } from "./cli/startup-typeahead.ts";
 import { ENV_SESSION_DIR, expandTildePath, getAgentDir, VERSION } from "./config.ts";
 import {
 	type AgentSessionRuntime,
@@ -65,7 +64,11 @@ import type { OrchestrationProfile } from "./core/orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./core/orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts";
 import { envelopeCostCeilings } from "./core/orchestration/risk-budget.ts";
-import { refuseHostedSession, SessionHostedError } from "./core/orchestration/session-bundle-lifecycle.ts";
+import {
+	ownerOrchestrationHome,
+	refuseHostedSession,
+	SessionHostedError,
+} from "./core/orchestration/session-bundle-lifecycle.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import { exitProcess, type ProcessEndReason, thrownDetail } from "./core/process-end-recorder.ts";
 import { getOrchestrationAgentId } from "./core/process-identity.ts";
@@ -261,33 +264,6 @@ async function resolveSessionPath(sessionArg: string, cwd: string, sessionDir?: 
 
 	// Not found anywhere
 	return { type: "not_found", arg: sessionArg };
-}
-
-/** Prompt user for yes/no confirmation. Non-interactive callers fail closed instead of waiting on stdin. */
-export async function promptConfirm(message: string): Promise<boolean> {
-	if (!process.stdin.isTTY || !process.stdout.isTTY) return false;
-	return new Promise((resolve) => {
-		const rl = createInterface({
-			input: process.stdin,
-			output: process.stdout,
-		});
-		let settled = false;
-		const finish = (confirmed: boolean) => {
-			if (settled) return;
-			settled = true;
-			rl.removeListener("close", onClose);
-			rl.close();
-			// readline leaves the terminal cooked on close; startup still holds typed keys raw.
-			resumeStartupTypeahead();
-			resolve(confirmed);
-		};
-		const onClose = () => finish(false);
-		rl.once("close", onClose);
-		rl.question(`${message} [y/N] `, (answer) => {
-			const normalized = answer.trim().toLowerCase();
-			finish(normalized === "y" || normalized === "yes");
-		});
-	});
 }
 
 function collectSessionModeConflicts(parsed: Args): string[] {
@@ -804,7 +780,8 @@ export async function main(args: string[], options?: MainOptions) {
 	}
 	// A session the bot daemon hosts is refused with its one message before `--name` or the session writes to it.
 	try {
-		if (sessionManager.isPersisted()) refuseHostedSession(agentDir, sessionManager.getSessionId());
+		if (sessionManager.isPersisted())
+			refuseHostedSession(ownerOrchestrationHome(agentDir), sessionManager.getSessionId());
 	} catch (error) {
 		if (error instanceof SessionHostedError) refuseInvocation(error.message);
 		throw error;

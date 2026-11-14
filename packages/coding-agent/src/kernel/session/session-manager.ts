@@ -77,7 +77,7 @@ import {
 	type SessionAppendReceipt,
 	SessionAppendUncertainError,
 } from "./session-append-receipt.ts";
-import { sessionChannelHost } from "./session-bundle-lifecycle.ts";
+import { ownerOrchestrationHome, sessionChannelHost } from "./session-bundle-lifecycle.ts";
 import {
 	buildSessionContext,
 	cloneSessionContext,
@@ -3303,7 +3303,7 @@ export class SessionManager {
 		// The phone session the bot daemon hosts is skipped: opening it here is refused while the daemon holds it.
 		const hosted = (id: string): boolean => {
 			try {
-				return sessionChannelHost(agentDir, id) !== undefined;
+				return sessionChannelHost(ownerOrchestrationHome(agentDir), id) !== undefined;
 			} catch {
 				return false; // An unreadable registry is reported by the open's own lease acquisition.
 			}

@@ -1,7 +1,7 @@
 import { createHash } from "node:crypto";
 import { statSync } from "node:fs";
 import { stat } from "node:fs/promises";
-import { withSessionBundleAdmission } from "../../kernel/session/session-bundle-lifecycle.ts";
+import { ownerOrchestrationHome, withSessionBundleAdmission } from "../../kernel/session/session-bundle-lifecycle.ts";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { parseSessionEntries } from "../../kernel/session/session-manager.ts";
 import { FileSnapshotChangedError, readBoundedFile, readBoundedFileSync } from "../../kernel/storage/bounded-file.ts";
@@ -263,6 +263,8 @@ export async function reconcileSessionAccounting(
 	if (previous && (previous.sessionId !== header.id || !matchesBytes(previous.source, raw, true)))
 		throw new FileSnapshotChangedError("Parent accounting source changed before reconciliation.");
 	const entries = loaded.filter((entry): entry is SessionEntry => entry.type !== "session");
+	// Historical accounting reads the owner's sessions: their bundles live in the owner's orchestration home.
+	const home = ownerOrchestrationHome(agentDir);
 	const reports = entries.flatMap((entry) =>
 		entry.type === "custom" && entry.customType === SEMANTIC_USAGE_CUSTOM_TYPE
 			? [entry.data as SemanticUsageReport]
@@ -270,8 +272,8 @@ export async function reconcileSessionAccounting(
 	);
 	let groups: AccountingEvidenceGroup[] = (
 		await Promise.all([
-			collectWorkerAccountingEvidence(agentDir, header.id, entries),
-			readSemanticAccountingEvidence({ agentDir, sessionId: header.id, reports, entries }),
+			collectWorkerAccountingEvidence(home, header.id, entries),
+			readSemanticAccountingEvidence({ orchestrationHome: home, sessionId: header.id, reports, entries }),
 		])
 	).flat();
 	const publicationSources = revisions({
@@ -322,7 +324,7 @@ export async function reconcileSessionAccounting(
 	const serialized = JSON.stringify(projection);
 	if (Buffer.byteLength(serialized) > MAX_ACCOUNTING_BYTES)
 		throw new Error("Accounting projection exceeds its size limit.");
-	withSessionBundleAdmission(agentDir, header.id, () => {
+	withSessionBundleAdmission(home, header.id, () => {
 		const current = statSync(sessionFile, { bigint: true });
 		if (
 			current.dev !== before.dev ||

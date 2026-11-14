@@ -1,6 +1,7 @@
 import { isDeepStrictEqual } from "node:util";
 import type { UserMessage } from "@caupulican/pi-ai";
 import type { AgentHaltRequest } from "../../kernel/index.ts";
+import type { OrchestrationHome } from "../../kernel/session/session-bundle-paths.ts";
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import { workerControlOf } from "../../kernel/worker-control-stamp.ts";
 import type { WorkerDelegationRunOutcome } from "../agent-session-contracts.ts";
@@ -80,6 +81,7 @@ import {
 	WorkerControlTranscript,
 } from "./worker-control-transcript.ts";
 import {
+	agentConversation,
 	MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES,
 	type WorkerConversation,
 	WorkerConversationStore,
@@ -110,6 +112,7 @@ export { buildWorkerTerminalHandoffContent };
 
 export interface WorkerAgentControlCoordinatorOptions {
 	agentDir: string;
+	orchestrationHome: OrchestrationHome;
 	parentSessionId: string;
 	processOwnerId: string;
 	/** Controller-owned composition dependency; standalone coordinators receive a private default. */
@@ -245,11 +248,12 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		this.conversations = options.conversationStore ?? new WorkerConversationStore();
 		this.sessionRootAddress = sessionRootAddress(options.parentSessionId);
 		this.sessionRootMailbox = new SessionRootMailbox({
-			agentDir: options.agentDir,
+			orchestrationHome: options.orchestrationHome,
 			parentSessionId: options.parentSessionId,
 		});
 		this.hostEventTransport = new WorkerHostEventTransport({
 			agentDir: options.agentDir,
+			orchestrationHome: options.orchestrationHome,
 			conversations: this.conversations,
 			lifecycle: () => options.getLifecycle(),
 			mailbox: (agentId) => this.getMailbox(agentId),
@@ -469,18 +473,12 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 				`Worker transcript page size must be from 1 through ${MAX_WORKER_TRANSCRIPT_PAGE_MESSAGES} messages.`,
 			);
 		}
-		const page = this.conversations
-			.open({
-				agentDir: this.options.agentDir,
-				resumeContext: agent.resumeContext,
-				expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
-			})
-			.getRawTranscriptPage({
-				projection: "inspection",
-				cursor,
-				maxMessages,
-				...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
-			});
+		const page = this.conversations.open(agentConversation(this.options, agent)).getRawTranscriptPage({
+			projection: "inspection",
+			cursor,
+			maxMessages,
+			...(options.maxBytes !== undefined ? { maxBytes: options.maxBytes } : {}),
+		});
 		return {
 			agentId: agent.agentId,
 			...page,
@@ -1322,11 +1320,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		// An older lane's words are not this lane's: only the agent's latest task is read.
 		if (attempt?.taskId !== laneId) return undefined;
 		const agent = this.requireControllableAgent(agentId, scope);
-		const conversation = this.conversations.open({
-			agentDir: this.options.agentDir,
-			resumeContext: agent.resumeContext,
-			expectedLogicalAgentId: agent.contextOrigin?.logicalAgentId ?? agent.agentId,
-		});
+		const conversation = this.conversations.open(agentConversation(this.options, agent));
 		// The attempt's own boundary bounds the search: nothing before it belongs to this lane.
 		const latest = conversation.latestAttemptAssistantText();
 		if (latest.versioned) return latest.text;
@@ -1823,6 +1817,7 @@ export class WorkerAgentControlCoordinator implements WorkerAgentControlPort {
 		if (!mailbox || !isDeepStrictEqual(mailbox.getProjectClaim(), projectClaim)) {
 			mailbox = new WorkerAgentMailbox({
 				agentDir: this.options.agentDir,
+				orchestrationHome: this.options.orchestrationHome,
 				parentSessionId: this.options.parentSessionId,
 				agentId,
 				projectClaim,

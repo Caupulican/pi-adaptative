@@ -10,7 +10,7 @@ import {
 import { readOptionalBoundedTextFileSync, sameFileVersion } from "../storage/bounded-file.ts";
 import { isPlainRecord } from "../utils/value-guards.ts";
 import { hasCurrentSessionBundleAdmission, withSessionBundleAdmission } from "./session-bundle-lifecycle.ts";
-import { orchestrationSessionsDir } from "./session-bundle-paths.ts";
+import { type OrchestrationHome, orchestrationSessionsDir, ownerOrchestrationHome } from "./session-bundle-paths.ts";
 import { readSessionHeaderResult } from "./session-header.ts";
 import type { ReadonlySessionManager } from "./session-manager.ts";
 import { assertSpecialistContextClaim, type SpecialistContextClaim } from "./specialist-context-ownership.ts";
@@ -26,6 +26,8 @@ import {
 export type SessionFileMutationKind = "create" | "initialize" | "append" | "rewrite" | { enrollmentKey: string };
 
 interface FileOwner {
+	/** The orchestration home holding the bundle the file's mutations are admitted against. */
+	home: OrchestrationHome;
 	parentSessionId: string;
 	metadata?: WorkerConversationMetadata;
 }
@@ -128,20 +130,22 @@ function assertCanonicalWritePath(file: string): void {
 function fileOwner(agentDir: string, file: string, sessionId: string): FileOwner {
 	assertCanonicalWritePath(resolve(agentDir));
 	assertCanonicalWritePath(file);
-	const inside = relative(resolve(orchestrationSessionsDir(agentDir)), file);
+	// Every session that writes through this boundary is rooted in the owner's orchestration home.
+	const home = ownerOrchestrationHome(agentDir);
+	const inside = relative(resolve(orchestrationSessionsDir(home)), file);
 	const isWorker =
 		inside !== "" &&
 		inside !== ".." &&
 		!inside.startsWith(`..${process.platform === "win32" ? "\\" : "/"}`) &&
 		!isAbsolute(inside);
-	if (!isWorker) return { parentSessionId: sessionId };
-	assertWorkerConversationFile(agentDir, file, sessionId);
+	if (!isWorker) return { home, parentSessionId: sessionId };
+	assertWorkerConversationFile(home, file, sessionId);
 	const metadata = readWorkerConversationMetadata(workerConversationMetadataFile(file)).metadata;
 	if (
 		!metadata.parentSessionId ||
 		!matchesWorkerTranscriptLocation(
 			metadata.resumeContext,
-			workerTranscriptLocation(agentDir, {
+			workerTranscriptLocation(home, {
 				parentSessionId: metadata.parentSessionId,
 				logicalAgentId: metadata.logicalAgentId,
 			}),
@@ -151,7 +155,7 @@ function fileOwner(agentDir: string, file: string, sessionId: string): FileOwner
 	) {
 		throw new Error("Worker transcript birth identity is missing or does not match its canonical location.");
 	}
-	return { parentSessionId: metadata.parentSessionId, metadata };
+	return { home, parentSessionId: metadata.parentSessionId, metadata };
 }
 
 function assertExistingHeader(file: string, sessionId: string): void {
@@ -180,7 +184,7 @@ export function withWorkerTranscriptContinuation<T>(
 	const enrollment = projectEnrollmentKey(session);
 	if (
 		enrolling
-			? enrollment !== undefined || !hasCurrentSessionBundleAdmission(agentDir, owner.parentSessionId)
+			? enrollment !== undefined || !hasCurrentSessionBundleAdmission(owner.home, owner.parentSessionId)
 			: enrollment !== project.specializationKey
 	) {
 		throw new Error("Worker continuation enrollment does not match its claim.");
@@ -250,10 +254,10 @@ export function withSessionFileMutation<T>(
 	const owner = fileOwner(agentDir, file, sessionId);
 	if (owner.metadata?.projectContext)
 		throw new Error("Enrolled worker mutation requires the calling owner's exact claim.");
-	if (currentSynchronousFileLockScope(file) && !hasCurrentSessionBundleAdmission(agentDir, owner.parentSessionId)) {
+	if (currentSynchronousFileLockScope(file) && !hasCurrentSessionBundleAdmission(owner.home, owner.parentSessionId)) {
 		throw new Error("Session bundle admission must precede its transcript lock.");
 	}
-	return withSessionBundleAdmission(agentDir, owner.parentSessionId, () => {
+	return withSessionBundleAdmission(owner.home, owner.parentSessionId, () => {
 		const borrowedScope = currentSynchronousFileLockScope(file);
 		return withFileLockSync(
 			file,

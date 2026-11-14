@@ -25,6 +25,7 @@ import { join } from "node:path";
 import type { Api, Model } from "@caupulican/pi-ai";
 import {
 	acquireSessionBundleLease,
+	ownerOrchestrationHome,
 	type SessionBundleLease,
 	sessionBundleLeaseToken,
 } from "../../kernel/session/session-bundle-lifecycle.ts";
@@ -147,6 +148,8 @@ function fileStamp(path: string): string {
  */
 export async function openAwayParentContext(input: AwayParentContextInput): Promise<AwayParentContext> {
 	const { agentDir, parentSessionId, sessionFile } = input;
+	// The away host opens one of the owner's closed sessions: its bundle lives in the owner's orchestration home.
+	const orchestrationHome = ownerOrchestrationHome(agentDir);
 	let current: { reader: ReadonlySessionManager; stamp: string };
 	try {
 		const stamp = fileStamp(sessionFile);
@@ -178,7 +181,9 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 		return current.reader;
 	};
 
-	const hold: SessionBundleLease = acquireSessionBundleLease(agentDir, parentSessionId, { role: "away-host" });
+	const hold: SessionBundleLease = acquireSessionBundleLease(orchestrationHome, parentSessionId, {
+		role: "away-host",
+	});
 	const holdToken = sessionBundleLeaseToken(hold);
 	let ephemeral: AgentSession | undefined;
 	let closed = false;
@@ -290,13 +295,13 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 
 		const orchestrationClock = input.timers.port("orchestration");
 		const store = new OrchestrationEventStore({
-			agentDir,
+			orchestrationHome,
 			sessionId: parentSessionId,
 			now: () => new Date(orchestrationClock.now()).toISOString(),
 			sleepSync: (delayMs) => input.timers.sleepSync(delayMs),
 		});
 		const lifecycle = new WorkerLifecycle({
-			agentDir,
+			orchestrationHome,
 			sessionId: parentSessionId,
 			store,
 			now: () => orchestrationClock.now(),
@@ -347,6 +352,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 				getSessionId: () => parentSessionId,
 				getCwd: () => cwd,
 				getAgentDir: () => agentDir,
+				getOrchestrationHome: () => orchestrationHome,
 				getSessionManager: () => readerNow(),
 				getSettingsManager: () => settingsSource,
 				getResourceLoader: () => resourceLoader,

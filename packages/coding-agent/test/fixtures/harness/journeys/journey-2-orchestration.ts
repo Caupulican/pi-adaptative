@@ -5,7 +5,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { createEmptyUsage } from "@caupulican/pi-ai";
 import { expect } from "vitest";
-import { orchestrationEventStoreDir } from "../../../../src/core/agent-paths.ts";
+import { orchestrationEventStoreDir, ownerOrchestrationHome } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import {
 	type BackgroundToolTaskRecord,
@@ -422,7 +422,11 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	// Durable receipt, read from the persisted mailbox file rather than from scripted claims: the follow-up the operator sent
 	// to the blocked agent is delivered, and its control receipt is recorded in that agent's mailbox on disk.
 	if (blockedAgentId === undefined) throw new Error("the blocked agent's follow-up was never sent");
-	const mailboxFile = workerMailboxPath(world.agentDir, created.sessionManager.getSessionId(), blockedAgentId);
+	const mailboxFile = workerMailboxPath(
+		ownerOrchestrationHome(world.agentDir),
+		created.sessionManager.getSessionId(),
+		blockedAgentId,
+	);
 	expect(world.io.existsSync(mailboxFile), "the worker mailbox is written to the virtual tree").toBe(true);
 	const { mailbox } = readWorkerMailboxRecord(mailboxFile);
 	const followUp = mailboxMessagesOf(mailbox).find((message) => message.content === "The confirmed retry count is 5.");
@@ -668,7 +672,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		"exactly one worker turn ran for the two admissions",
 	).toBe(1);
 	const replayMailbox = readWorkerMailboxRecord(
-		workerMailboxPath(world.agentDir, created.sessionManager.getSessionId(), blockedAgentId),
+		workerMailboxPath(ownerOrchestrationHome(world.agentDir), created.sessionManager.getSessionId(), blockedAgentId),
 	).mailbox;
 	expect(
 		mailboxMessagesOf(replayMailbox).filter((message) => message.messageId === firstAdmission.messageId),
@@ -2446,6 +2450,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		const e11Transcript = new WorkerConversationStore()
 			.open({
 				agentDir: world.agentDir,
+				orchestrationHome: ownerOrchestrationHome(world.agentDir),
 				resumeContext: e11Binding.resumeContext,
 				expectedLogicalAgentId: e11WorkerId,
 			})
@@ -2856,7 +2861,10 @@ async function heldOrchestrationStoreLock(
 ): Promise<void> {
 	const trace = world.trace;
 	const HELD_GAPS = 3;
-	const cursorPath = join(orchestrationEventStoreDir(world.agentDir, sessionId), "cursor.json");
+	const cursorPath = join(
+		orchestrationEventStoreDir(ownerOrchestrationHome(world.agentDir), sessionId),
+		"cursor.json",
+	);
 	const lockDir = `${cursorPath}.lock`;
 	expect(world.io.existsSync(cursorPath), "the auxiliary root's orchestration store has committed events").toBe(true);
 	expect(world.timers.sleptGaps(), "every earlier store lock was free: no gap was asked for").toEqual([]);
@@ -2923,7 +2931,10 @@ async function retainedRetryReadFault(world: HarnessWorld, session: AgentSession
 	const R30_REPORT = "The flaky worker report is ready.";
 	const R30_TRANSIENT = "503 service unavailable (scripted transient)";
 	const R30_BACKOFF_MS = 1_000;
-	const cursorPath = join(orchestrationEventStoreDir(world.agentDir, sessionId), "cursor.json");
+	const cursorPath = join(
+		orchestrationEventStoreDir(ownerOrchestrationHome(world.agentDir), sessionId),
+		"cursor.json",
+	);
 	const wake = createBarrier();
 	const retryFailures = (): string[] =>
 		world.warnings.filter((message) => message.includes("retry durable read failed"));

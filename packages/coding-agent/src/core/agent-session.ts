@@ -21,7 +21,7 @@ import { screenAcquisition } from "./acquisition/acquisition-boundary.ts";
 import type { ExternalCapabilityAcquisitionGate } from "./acquisition/external-capability-acquisition-gate.ts";
 import type { AdaptiveRuntimeReadiness } from "./adaptive/adaptive-runtime-readiness.ts";
 import { readAgentIdentity } from "./agent-identity.ts";
-import { continuousChatSpendFile, resourceDir, stateFile } from "./agent-paths.ts";
+import { continuousChatSpendFile, ownerOrchestrationHome, resourceDir, stateFile } from "./agent-paths.ts";
 import {
 	type AgentSessionAgentHookPorts,
 	installSessionRequestHooks,
@@ -711,13 +711,13 @@ export class AgentSession {
 	private readonly _systemSwitchAvailability = new IndependentObserverSet<() => void>();
 	private _systemSwitchAvailabilityQueued = false;
 
-	private readonly _agentDirForLedger: string;
-
 	constructor(config: AgentSessionConfig) {
 		this._caps = config.capabilities;
+		const agentDir = config.agentDir ?? getAgentDir();
+		const orchestrationHome = ownerOrchestrationHome(agentDir);
 		const bundleLease = claimSessionBundleLease(
 			config.bundleLease,
-			config.agentDir ?? getAgentDir(),
+			orchestrationHome,
 			config.sessionManager.getSessionId(),
 			config.sessionManager.isPersisted(),
 		);
@@ -736,9 +736,8 @@ export class AgentSession {
 			});
 		this._executionLoopMode = config.executionLoopMode;
 		this._objectiveExecutionController = config.objectiveExecutionController;
-		this._agentDirForLedger = config.agentDir ?? getAgentDir();
 		this._semanticPlane = new SessionSemanticPlaneController({
-			agentDirForLedger: this._agentDirForLedger,
+			agentDirForLedger: agentDir,
 			isDisposed: () => this._disposed,
 			getSessionManager: () => this.sessionManager,
 			getSystemOneSettings: () => this.settingsManager.getSystemOneSettings(),
@@ -748,7 +747,7 @@ export class AgentSession {
 		});
 		this._adaptiveReadiness = config.adaptiveReadiness;
 		this._ownerRules = new DurableOwnerRuleStore({
-			agentDir: config.agentDir ?? getAgentDir(),
+			agentDir,
 			projectKey: config.cwd,
 		});
 		this._cache = new SessionCacheController({
@@ -893,7 +892,6 @@ export class AgentSession {
 		});
 		// The provider stream chain (perf profile, idle watchdog, machine-wide admission) is built and
 		// installed exactly once, here; see session-stream-chain.ts.
-		const agentDir = config.agentDir ?? getAgentDir();
 		// Perf samples (one per provider stream) are deferred; everything else persists at once.
 		const modelAdaptationStore = ModelAdaptationStore.forAgentDir(agentDir, { deferPerfSamples: true });
 		this._modelAdaptationStore = modelAdaptationStore;
@@ -1222,6 +1220,7 @@ export class AgentSession {
 			getSessionId: () => this.sessionId,
 			getCwd: () => this._cwd,
 			getAgentDir: () => this._agentDir,
+			getOrchestrationHome: () => orchestrationHome,
 			getSessionManager: () => this.sessionManager,
 			getSettingsManager: () => this.settingsManager,
 			getWorktreeSyncEnginePorts: () => this._worktreeSyncEnginePorts,
@@ -2007,6 +2006,7 @@ export class AgentSession {
 			getShellSessionKey: () => this._shellSessionKey,
 			getCapabilityTierPolicy: () => this.getCapabilityTierPolicy(),
 			getAgentDir: () => this._agentDir,
+			getOrchestrationHome: () => orchestrationHome,
 			getSessionManager: () => this.sessionManager,
 			getSemanticUsage: () => this._semanticUsage,
 			getSettingsManager: () => this.settingsManager,
