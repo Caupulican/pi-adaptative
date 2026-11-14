@@ -81,15 +81,19 @@ export async function runJourney7LifecyclePhase(world: HarnessWorld): Promise<vo
 
 /**
  * A session opened after the one that ran the bot's workers, with its own bot host, reads their conversation back from
- * the bot's history index in its home: the chat shows the brought-back worker's answer at the first read, with no scan.
+ * the bot's history index in its home: the chat shows the brought-back worker's conversation at the first read, with no
+ * scan.
  */
 async function readHistoryInFreshSession(world: HarnessWorld): Promise<void> {
 	const { session } = await world.createRootSession(MODEL_ID.root, { sessionManager: world.createSessionManager() });
 	try {
+		// The owner's question is in the worker's conversation alone: a chat with nothing to show falls back to the bot's last
+		// summary, which carries only the answer.
+		const chat = chatText(session, STOP_HELPER);
 		expect(
-			chatText(session, STOP_HELPER).includes(HELPER_ANSWER),
-			"a fresh session's chat of the bot a leader made shows its worker's answer, read from the bot's history index",
-		).toBe(true);
+			{ question: chat.includes(HELPER_QUESTION), answer: chat.includes(HELPER_ANSWER) },
+			"a fresh session's chat of the bot a leader made shows its worker's conversation, read from the bot's history index",
+		).toEqual({ question: true, answer: true });
 	} finally {
 		expect(await world.disposeSessionInBody(session), "the fresh session disposes cleanly").toBeUndefined();
 	}
