@@ -13,8 +13,8 @@ export interface RuleHookDeliveryDeps {
 	 * windowing is `continuousChatRequestHistory`), so a rule delivered in an earlier turn is not in context any more.
 	 */
 	getMessages(): readonly AgentMessage[];
-	/** A worker session receives only the rules that are not `rootOnly`. */
-	isRootSession(): boolean;
+	/** Only a session that directs workers receives the `rootOnly` rules (session-standing.ts). */
+	directsWorkers(): boolean;
 	/** Whether a tool is active now; a rule that `requiresTool` is delivered only when this says so. */
 	isToolActive?(toolName: string): boolean;
 	/** The harness package directory; defaults to the directory of the installed README. */
@@ -153,7 +153,7 @@ export class RuleHookDelivery {
 
 	/** Whether this session may receive the rule: its role, and the tool the rule is about. */
 	private deliversTo(hook: RuleHook): boolean {
-		if (hook.rootOnly && !this.deps.isRootSession()) return false;
+		if (hook.rootOnly && !this.deps.directsWorkers()) return false;
 		return hook.requiresTool === undefined || this.deps.isToolActive?.(hook.requiresTool) === true;
 	}
 

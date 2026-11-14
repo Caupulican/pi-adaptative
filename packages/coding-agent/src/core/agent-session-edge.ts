@@ -41,6 +41,7 @@ import type { OwnerDraftView } from "./channels/owner-channel-types.ts";
 import { type HarnessNotice, wordedNotice } from "./harness-notice.ts";
 import { englishText } from "./language/interface-text.ts";
 import { boundedRedactedDiagnosticText, MAX_RETAINED_DIAGNOSTIC_CHARS } from "./security/secret-text.ts";
+import type { SessionCapabilities } from "./session-standing.ts";
 import { isNestedCallPurpose, type NestedCallPurpose } from "./tools/nested-tool-call.ts";
 import {
 	entryTurnOrigin,
@@ -62,7 +63,8 @@ export interface SessionEdgeDeps {
 	getDenyCommands?(): readonly string[];
 	appendCustomEntry(customType: string, data: unknown): void;
 	getCwd(): string;
-	isChildSession(): boolean;
+	/** Whether the session may ask the owner live, and keeps owner follow-ups for what it refuses. */
+	readonly standing: Pick<SessionCapabilities, "asksOwnerLive" | "keepsOwnerFollowUps">;
 	getConfirmation(): EdgeConfirmationHandler | undefined;
 	deferOwnerOperation?(operation: EdgeOperation): string | undefined;
 	/**
@@ -1023,9 +1025,9 @@ export async function enforceSessionEdgeOperation(
 	if (isEdgeOperationGranted(operation, grants)) {
 		return { authorized: true };
 	}
-	const handler = deps.isChildSession() ? undefined : deps.getConfirmation();
+	const handler = deps.standing.asksOwnerLive ? deps.getConfirmation() : undefined;
 	if (!handler) {
-		const followUp = deps.isChildSession() ? undefined : deps.deferOwnerOperation?.(operation);
+		const followUp = deps.standing.keepsOwnerFollowUps ? deps.deferOwnerOperation?.(operation) : undefined;
 		return {
 			authorized: false,
 			reason: `${edgeBlockReason(operation, false)}${followUp ? ` Owner follow-up: ${followUp}.` : ""}`,
@@ -1134,7 +1136,7 @@ async function enforceEdgeRules(
 		});
 		if (!boundary) return undefined;
 		if (boundary.kind === "block") return { block: true, reason: `YOLO hardline: ${boundary.reason}` };
-		const handler = deps.isChildSession() ? undefined : deps.getConfirmation();
+		const handler = deps.standing.asksOwnerLive ? deps.getConfirmation() : undefined;
 		if (!handler) return { block: true, reason: `Owner approval required: ${boundary.reason}` };
 		const decision = await handler(
 			{

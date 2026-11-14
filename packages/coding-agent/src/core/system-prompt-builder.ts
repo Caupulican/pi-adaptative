@@ -30,6 +30,7 @@ import { buildProjectInstructionIsolationPrompt } from "./project-instruction-is
 import { CHAT_WORK_LIFECYCLE_SYSTEM_RULE } from "./provider-prompt-contracts.ts";
 import { normalizeProviderPromptGuidelines, normalizeProviderPromptSnippet } from "./provider-tool-text.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
+import type { SessionCapabilities } from "./session-standing.ts";
 import type { MemorySystem, ResolvedWorkerDelegationSettings } from "./settings/settings-schema.ts";
 import { buildSystemPrompt, promptDate } from "./system-prompt.ts";
 import { formatToolSelectionHints, type ToolSelectionHint } from "./tool-selection/promotion.ts";
@@ -84,8 +85,8 @@ export interface SystemPromptBuilderDeps {
 	getActiveExtensions(): ReadonlyArray<Extension>;
 	/** The authoritative profile used by tools, lanes, and stable prompt shaping. */
 	getModelCapabilityProfile(): ModelCapabilityProfile;
-	/** Child/worker sessions never receive root autonomy or reflection instructions. */
-	isChildSession(): boolean;
+	/** The work lifecycle prompt is for a session conversing with the owner; the director role for one directing workers. */
+	readonly standing: Pick<SessionCapabilities, "conversesWithOwner" | "directsWorkers">;
 	/**
 	 * The owner's replacement for the whole generated prompt, scoped to this session. Read fresh on
 	 * every build so each rebuild path (tool surface change, routed turn, refresh) honors it.
@@ -365,7 +366,7 @@ export class SystemPromptBuilder {
 	}
 
 	private _buildWorkLifecyclePrompt(): string | undefined {
-		if (this.deps.isChildSession()) return undefined;
+		if (!this.deps.standing.conversesWithOwner) return undefined;
 		const capabilityClass = this.deps.getModelCapabilityProfile().class;
 		if (capabilityClass === "chat") return CHAT_WORK_LIFECYCLE_SYSTEM_RULE;
 		if (capabilityClass === "minimal") return `WORK LIFECYCLE\n- ${CHAT_WORK_LIFECYCLE_SYSTEM_RULE}`;
@@ -430,7 +431,7 @@ export class SystemPromptBuilder {
 			steStrictness: this.deps.getSettingsManager().getSteStrictness?.(),
 			directorRole:
 				modelCapability.class === "full" &&
-				!this.deps.isChildSession() &&
+				this.deps.standing.directsWorkers &&
 				validToolNames.includes("delegate") &&
 				this.deps.getSettingsManager().getWorkerDelegationSettings().enabled,
 			agentName: identity?.name,

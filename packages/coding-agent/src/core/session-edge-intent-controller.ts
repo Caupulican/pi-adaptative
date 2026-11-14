@@ -201,7 +201,7 @@ export interface SessionEdgeIntentControllerDeps {
 	getModelRegistry(): ModelRegistry;
 	getCwd(): string;
 	getAgentDir(): string;
-	isChildSession(): boolean;
+	readonly standing: SessionEdgeDeps["standing"] & { readonly directsWorkers: boolean };
 	/** A worker can be started: the `delegate` tool is active. */
 	isDelegateToolActive(): boolean;
 	isDisposed(): boolean;
@@ -501,7 +501,7 @@ export class SessionEdgeIntentController {
 	get delegationGate(): DelegationGate {
 		this.delegationGateInstance ??= new DelegationGate({
 			isActive: () =>
-				!this.deps.isChildSession() &&
+				this.deps.standing.directsWorkers &&
 				this.deps.getSettingsManager().getOrchestratorSettings().delegationGate &&
 				this.deps.isDelegateToolActive(),
 			getEngine: () => this.gateEngine(),
@@ -577,10 +577,10 @@ export class SessionEdgeIntentController {
 				thirdPartyProtectedWritePaths(this.deps.getCwd(), this.deps.getAgentDir(), this.deps.getSessionManager()),
 			appendCustomEntry: (customType, data) => this.deps.getSessionManager().appendCustomEntry(customType, data),
 			getCwd: () => this.deps.getCwd(),
-			isChildSession: () => this.deps.isChildSession(),
+			standing: this.deps.standing,
 			getConfirmation: () => (this.handoffValue ? undefined : this.edgeConfirmation),
 			deferOwnerOperation: (operation) => {
-				if (!this.handoffValue || this.deps.isChildSession()) return undefined;
+				if (!this.handoffValue || !this.deps.standing.keepsOwnerFollowUps) return undefined;
 				return appendOwnerFollowUp(
 					ownerFollowUpPath(this.deps.getAgentDir(), this.deps.getSessionManager().getSessionId()),
 					{

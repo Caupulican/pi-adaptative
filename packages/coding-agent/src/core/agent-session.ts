@@ -436,7 +436,7 @@ export class AgentSession {
 	private readonly _toolGate: ToolGateController;
 	private readonly _ruleHooks = new RuleHookDelivery({
 		getMessages: () => this._memory.requestHistory(this.agent.state.messages),
-		isRootSession: () => this._caps.directsWorkers,
+		directsWorkers: () => this._caps.directsWorkers,
 		isToolActive: (name) => this.getActiveToolNames().includes(name),
 	});
 	private readonly _mutationLedger = new ObjectiveMutationLedger();
@@ -785,7 +785,7 @@ export class AgentSession {
 			getModelRegistry: () => this._modelRegistry,
 			getCwd: () => this._cwd,
 			getAgentDir: () => this._agentDir,
-			isChildSession: () => this._caps.routineScope !== "session",
+			standing: this._caps,
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
 			isDisposed: () => this._disposed,
 			getReflectionAbortSignal: () => this._reflectionAbort.signal,
@@ -816,7 +816,7 @@ export class AgentSession {
 		this._unsettledLadder = new SessionUnsettledLadderController({
 			getSessionManager: () => this.sessionManager,
 			getAgentDir: () => this._agentDir,
-			isChildSession: () => this._caps.routineScope !== "session",
+			keepsOwnerFollowUps: () => this._caps.keepsOwnerFollowUps,
 			isHandoff: () => this._edgeIntent.handoff,
 			getLastUserRequest: () => this._promptSubmission?.lastUserRequest ?? "",
 			getMessages: () => this.agent.state.messages,
@@ -1058,7 +1058,7 @@ export class AgentSession {
 			getModelAdaptationRules: () => this._toolProtocol.getAdaptationRulesForPrompt(),
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
-			isChildSession: () => this._caps.routineScope !== "session",
+			standing: this._caps,
 			// Self-gated by kill switch and evidence thresholds inside getActiveHints(): a plain always-on pass-through.
 			getToolSelectionHints: () => this._toolSelection.getActiveHints(),
 			getSystemPromptOverride: () => this.ownerSystemPrompt.get(),

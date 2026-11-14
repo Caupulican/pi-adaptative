@@ -64,7 +64,7 @@ import {
 export interface SessionUnsettledLadderControllerDeps {
 	getSessionManager(): SessionManager;
 	getAgentDir(): string;
-	isChildSession(): boolean;
+	keepsOwnerFollowUps(): boolean;
 	isHandoff(): boolean;
 	getLastUserRequest(): string;
 	getMessages(): readonly AgentMessage[];
@@ -348,7 +348,7 @@ export class SessionUnsettledLadderController {
 	}
 
 	announceOwnerFollowUpsWhenPresent(): void {
-		if (this.deps.isChildSession() || this.deps.isHandoff()) return;
+		if (!this.deps.keepsOwnerFollowUps() || this.deps.isHandoff()) return;
 		const sessionId = this.deps.getSessionManager().getSessionId();
 		const path = ownerFollowUpPath(this.deps.getAgentDir(), sessionId);
 		let bytes: number;
