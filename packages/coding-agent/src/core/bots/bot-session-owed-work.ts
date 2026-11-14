@@ -14,8 +14,9 @@ import { realPathIdentity } from "../autonomy/path-scope.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
-import type { TimerPort } from "../util/timer-port.ts";
+import { alarmAt, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { type BotInboxItem, botInboxWaiting } from "./bot-inbox.ts";
+import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
 
@@ -48,12 +49,10 @@ export function unrunWakes(file: string, agentDir: string): readonly string[] {
 /**
  * What the host knows of the wakes each bot's session file holds unrun (see {@link unrunWakes}): the ids it read, read
  * again only once the file's size or modification time changed, so an idle bot's whole transcript is not parsed at every
- * attach and host change (the ids alone are kept, one record per bot); and the wakes a run of the session was refused at
- * its start while holding, with the definition it ran on, so a refusal is not what opens the session again.
+ * attach and host change (the ids alone are kept, one record per bot).
  */
 export class UnrunWakeLedger {
 	private readonly reads = new Map<string, { file: string; size: number; mtimeMs: number; ids: string }>();
-	private readonly refusals = new Map<string, string>();
 
 	/** The ids of the wakes the bot's session file holds unrun, joined by spaces; empty when none. */
 	read(agentId: string, file: string, agentDir: string): string {
@@ -66,32 +65,22 @@ export class UnrunWakeLedger {
 		return ids;
 	}
 
-	/** A run of the bot's session, built on `key`, was refused at its start while `manager` held these wakes. */
-	refused(agentId: string, key: string, manager: Pick<SessionManager, "getPendingParentInputs">): void {
-		const ids = manager.getPendingParentInputs("turn").map((input) => input.metadata.deliveryId);
-		if (ids.length > 0) this.refusals.set(agentId, `${key} ${ids.join(" ")}`);
-	}
-
-	/** Whether the wakes `ids` were refused on the definition `key` already: nothing changed that lets them run. */
-	refusedAlready(agentId: string, key: string | undefined, ids: string): boolean {
-		return this.refusals.get(agentId) === `${key} ${ids}`;
-	}
-
-	/** An open of the bot's session failed: it refused no wake, so the next change asks again. */
-	openFailed(agentId: string): void {
-		this.refusals.delete(agentId);
-	}
-
-	/** The bot's session loaded: its file is read again when next asked, after the session wrote it. */
-	loaded(agentId: string): void {
+	/** The bot's session loaded, or the bot was released: its file is read again when next asked. */
+	forget(agentId: string): void {
 		this.reads.delete(agentId);
 	}
+}
 
-	/** The bot was released (retired, or off the session path): nothing of it is kept. */
-	released(agentId: string): void {
-		this.reads.delete(agentId);
-		this.refusals.delete(agentId);
-	}
+/**
+ * Why the bot's session was last refused, with the definition it was refused on: a run refused at its start while it held
+ * wakes (`run`), which is what stops those wakes from opening it again, or an open refused before it took the lock
+ * (`open`), which stops every owed work from opening it. `cause` is the model refusal's reason, undefined for a refusal
+ * of the definition itself (an outdated compile), which only a changed definition lifts.
+ */
+interface RecordedRefusal {
+	readonly scope: "run" | "open";
+	readonly key: string | undefined;
+	readonly cause: string | undefined;
 }
 
 /**
@@ -139,6 +128,12 @@ export interface BotOwedWorkPorts {
 	definedCwd(record: PersistentBotRecord, sender: BotSender): string;
 	/** What defines the record's session for `sender` now; undefined when it cannot run as one. */
 	currentKey(record: PersistentBotRecord, sender: BotSender): string | undefined;
+	/** Why the model of the record's session for `sender` may not run now; undefined when it may. */
+	modelRefusal(record: PersistentBotRecord, sender: BotSender): BotModelRefusal | undefined;
+	/** The provider admission's timers: a model refusal's end is due on their clock. */
+	admissionTimers(): TimerPort;
+	/** A refusal's cause may have cleared: the host takes the bot's refused work up again. */
+	retake(agentId: string): void;
 	/** The root attached last, and an attached root working in `cwd`. */
 	sender(): BotSender;
 	senderIn(cwd: string): BotSender | undefined;
@@ -152,33 +147,98 @@ function errorText(error: unknown): string {
 
 /**
  * Opens the session of a bot owed work that no process hosts (see {@link BotOwedWork.openIfOwed}), and tells the owner,
- * once for each cause, what the work waits on when it cannot be taken up here.
+ * once for each cause, what the work waits on when it cannot be taken up here. A refusal is kept with its cause, and the
+ * work it held back is taken up again once the cause no longer holds: read again at every ask, and at the time a model
+ * refusal's recorded end comes (a quota exhaustion's reset), on the provider admission clock, never by polling the model.
  */
 export class BotOwedWork {
 	private readonly ports: BotOwedWorkPorts;
 	/** Bots whose owed work waits on something (no root works where it does, its session did not open), with what the owner was told. */
 	private readonly told = new Map<string, string>();
-	/** The wakes the bots' session files hold unrun, and the ones a run was refused while holding. */
+	/** The wakes the bots' session files hold unrun. */
 	private readonly wakes = new UnrunWakeLedger();
+	/** Why each bot's session was last refused, while no run of it was admitted since. */
+	private readonly refusals = new Map<string, RecordedRefusal>();
+	/** The alarm at the recorded end of a bot's model refusal. */
+	private readonly alarms = new Map<string, WallAlarm>();
 
 	constructor(ports: BotOwedWorkPorts) {
 		this.ports = ports;
 	}
 
-	/** A run of the bot's session, built on `key`, was refused at its start while `manager` held these wakes. */
-	refused(agentId: string, key: string, manager: Pick<SessionManager, "getPendingParentInputs">): void {
-		this.wakes.refused(agentId, key, manager);
+	/**
+	 * A run of the bot's session, built on `key`, was refused at its start with `error` while `manager` held wakes: they
+	 * do not open the session again until the definition or the cause changes.
+	 */
+	refused(
+		agentId: string,
+		key: string,
+		manager: Pick<SessionManager, "getPendingParentInputs">,
+		error: unknown,
+	): void {
+		if (manager.getPendingParentInputs("turn").length > 0) this.record(agentId, "run", key, error);
+	}
+
+	/** A run of the bot's session was admitted: no refusal holds its work back any more. */
+	admitted(agentId: string): void {
+		this.forgetRefusal(agentId);
 	}
 
 	/** The bot's session loaded: what it was owed is its own now, and its file is read again when next asked. */
 	loaded(agentId: string): void {
 		this.told.delete(agentId);
-		this.wakes.loaded(agentId);
+		this.wakes.forget(agentId);
 	}
 
 	/** The bot was released (retired, or off the session path): nothing of it is kept. */
 	released(agentId: string): void {
-		this.wakes.released(agentId);
+		this.wakes.forget(agentId);
+		this.forgetRefusal(agentId);
+	}
+
+	/** The host stopped: no alarm takes work up after it. */
+	stop(): void {
+		for (const alarm of this.alarms.values()) alarm.stop();
+		this.alarms.clear();
+	}
+
+	private record(agentId: string, scope: RecordedRefusal["scope"], key: string | undefined, error: unknown): void {
+		const refusal = error instanceof BotModelRefusedError ? error.refusal : undefined;
+		this.refusals.set(agentId, { scope, key, cause: refusal?.reason });
+		this.armRetake(agentId, refusal?.clearsAt);
+	}
+
+	private forgetRefusal(agentId: string): void {
+		this.refusals.delete(agentId);
+		this.armRetake(agentId, undefined);
+	}
+
+	/** Takes the bot's refused work up again at `clearsAt`, when the cause is known to end then; any earlier alarm ends. */
+	private armRetake(agentId: string, clearsAt: number | undefined): void {
+		this.alarms.get(agentId)?.stop();
+		this.alarms.delete(agentId);
+		if (clearsAt === undefined || this.ports.stopped()) return;
+		this.alarms.set(
+			agentId,
+			alarmAt(this.ports.admissionTimers(), clearsAt, () => {
+				this.alarms.delete(agentId);
+				this.ports.retake(agentId);
+			}),
+		);
+	}
+
+	/**
+	 * Whether the refusal recorded for the bot still holds back what it is owed: the same definition, refused for the same
+	 * cause now. When it does, the retake is armed at the cause's end as recorded now (a reset can be recorded later).
+	 */
+	private stillRefused(agentId: string, record: PersistentBotRecord, sender: BotSender, onlyWakes: boolean): boolean {
+		const recorded = this.refusals.get(agentId);
+		if (!recorded || (recorded.scope === "run" && !onlyWakes)) return false;
+		const key = this.ports.currentKey(record, sender);
+		const now = key === undefined ? undefined : this.ports.modelRefusal(record, sender);
+		if (recorded.key !== key || recorded.cause !== now?.reason) return false;
+		this.armRetake(agentId, now?.clearsAt);
+		return true;
 	}
 
 	/**
@@ -233,12 +293,13 @@ export class BotOwedWork {
 			this.tellWaits(agentId, interfaceText().botTeam.botOwedWorkNoRoot(agentId, where));
 			return;
 		}
-		// Owed only wakes its session refused at a run's start on what defines it now: not opened again until either changes.
-		const onlyWakes = !watching && waiting.length === 0;
-		if (onlyWakes && this.wakes.refusedAlready(agentId, ports.currentKey(record, sender), unrun)) return;
+		// Refused on what defines it now, for a cause that still holds: not opened again until either changes.
+		if (this.stillRefused(agentId, record, sender, !watching && waiting.length === 0)) return;
+		const key = ports.currentKey(record, sender);
 		void ports.open(agentId, sender).catch((error: unknown) => {
-			// An open that failed refused no wake: the next change asks again.
-			this.wakes.openFailed(agentId);
+			// A model refused before the lock is kept with its cause; any other failure is asked again at the next change.
+			if (error instanceof BotModelRefusedError) this.record(agentId, "open", key, error);
+			else this.forgetRefusal(agentId);
 			if (!ports.heldElsewhere(agentId)) notResumed(error);
 		});
 	}

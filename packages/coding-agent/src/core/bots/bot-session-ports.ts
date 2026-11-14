@@ -6,21 +6,44 @@
  * dependencies, and attaches to its process's bot session host with them (`attachBotSessions`).
  */
 
+import { join } from "node:path";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
+import { ExhaustedProviderRegistry } from "../billing-failover-controller.ts";
 import { botWorkerStart } from "../delegation/bot-worker-start.ts";
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import { meteredModelRefusalFacts } from "../delegation/worker-authority-resolver.ts";
 import type { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import { providerAdmissionDir } from "../provider-admission/ledger.ts";
 import type { SpawnedUsageReporter } from "../spawned-usage.ts";
+import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { attachBotSessionHost, type BotSessionAttachment, type BotSessionRootPorts } from "./bot-session-registry.ts";
 
-/** Why the worker admission refuses the bot's own model now, in the owner's words; undefined when it may run. */
+/**
+ * When the recorded quota exhaustion of `model` resets, on the provider admission clock: read from the store every process
+ * shares (`state/provider-admission/exhausted/`), where an exhaustion with a reset time is recorded; undefined when none
+ * is (an exhaustion with no reset time lasts for the process that met it).
+ */
+function exhaustionReset(
+	deps: BackgroundLaneControllerDeps,
+	model: { provider: string; id: string },
+): number | undefined {
+	const clock = deps.getTimers().port("provider-admission");
+	const registry = new ExhaustedProviderRegistry(join(providerAdmissionDir(deps.getAgentDir()), "exhausted"), () =>
+		clock.now(),
+	);
+	return registry.exhaustion(`${model.provider}/${model.id}`)?.until;
+}
+
+/**
+ * Why the worker admission refuses the bot's own model now, in the owner's words, with when the refusal ends when that is
+ * known (a quota exhaustion's recorded reset); undefined when it may run.
+ */
 function botModelRefusal(
 	deps: BackgroundLaneControllerDeps,
 	record: PersistentBotRecord,
 	model: Parameters<BotSessionRootPorts["modelRefusal"]>[1],
-): string | undefined {
+): BotModelRefusal | undefined {
 	const words = interfaceText().botTeam;
 	const metered = meteredModelRefusalFacts({
 		authority: {
@@ -34,12 +57,18 @@ function botModelRefusal(
 		modelUnusableCause: (candidate) => deps.modelUnusableCause(candidate),
 		...(deps.isModelAllowed ? { isModelAllowed: (candidate) => deps.isModelAllowed?.(candidate) === true } : {}),
 	});
-	if (metered) return words.botModelMetered(metered.ref, metered.alternatives, metered.provider);
+	if (metered) return { reason: words.botModelMetered(metered.ref, metered.alternatives, metered.provider) };
 	// Out of quota or refused for the account: the bot waits for its own model, never moved to another.
 	const unusable = deps.modelUnusableCause(model);
-	if (unusable) return words.botModelUnusable(`${model.provider}/${model.id}`, unusable);
+	if (unusable) {
+		const clearsAt = unusable === "model_quota_exhausted" ? exhaustionReset(deps, model) : undefined;
+		return {
+			reason: words.botModelUnusable(`${model.provider}/${model.id}`, unusable),
+			...(clearsAt !== undefined ? { clearsAt } : {}),
+		};
+	}
 	return deps.isModelAllowed && !deps.isModelAllowed(model)
-		? words.botModelNotAllowed(`${model.provider}/${model.id}`)
+		? { reason: words.botModelNotAllowed(`${model.provider}/${model.id}`) }
 		: undefined;
 }
 

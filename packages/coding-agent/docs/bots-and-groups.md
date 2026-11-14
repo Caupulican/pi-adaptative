@@ -26,7 +26,10 @@ runs on the bot's model, under the rules a worker's own model is held to (a mode
 API key without being the owner's choice while subscription models are usable, or that your model policy disallows refuses the
 message, and every turn is held to them when it starts, a turn a watch's wake opens included; a refused model loads no session).
 It never leaves that model: a model out of quota or refused for the account is not replaced by the account's default or a
-failover model; the turn is refused with the reason and the bot answers again once its model can run. The session works in
+failover model; the turn is refused with the reason and the bot answers again once its model can run. A watch's wake
+refused that way is kept: it is taken up again when anything asks (a session that starts or attaches, another host letting
+the bot go, a record change) and finds the refusal's cause gone, and, for a quota exhaustion with a recorded reset, at that
+reset (the bot's idle session is closed and opened again so its recovery runs the wake). The session works in
 your project directory. Like a worker, it never reaches an owner credential file (`.env`, keys): a read or a
 command that would is refused before it runs, never run with the values masked. Its commands (shell, python) run as a
 worker's do: without the credential variables of your environment (except those `PI_WORKER_PASS_ENV` names) or the

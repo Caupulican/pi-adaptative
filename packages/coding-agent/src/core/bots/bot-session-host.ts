@@ -76,6 +76,7 @@ import {
 	takeBotInboxMessage,
 } from "./bot-inbox.ts";
 import { BotInboxDrain } from "./bot-inbox-drain.ts";
+import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import { BotOwedWork, cancelOtherSessionsWatches, owesWatchWork } from "./bot-session-owed-work.ts";
 import {
@@ -110,8 +111,8 @@ export interface BotSessionHostPorts {
 	timers(): TimerSource;
 	/** An owner-facing warning that no bot turn's sender owns (a session that did not close cleanly, a lost watch). */
 	warn(message: string): void;
-	/** Why the worker admission refuses the bot's model now; undefined when it may run. */
-	modelRefusal(record: PersistentBotRecord, model: Model<Api>): string | undefined;
+	/** Why the worker admission refuses the bot's model now, with when that ends when known; undefined when it may run. */
+	modelRefusal(record: PersistentBotRecord, model: Model<Api>): BotModelRefusal | undefined;
 	/**
 	 * The dollars one turn may spend, as a worker's budget bounds it, with the bound that sets it (the owner's worker bound
 	 * or the main session's autonomy bound, the lower); undefined when nothing bounds it.
@@ -257,6 +258,9 @@ export class BotSessionHost {
 			runsAsSession: (record) => this.runsAsSession(record),
 			definedCwd: (record, sender) => this.define(record, sender).cwd,
 			currentKey: (record, sender) => this.currentKey(record, sender),
+			modelRefusal: (record, sender) => this.modelRefusal(record, this.define(record, sender)),
+			admissionTimers: () => ports.timers().port("provider-admission"),
+			retake: (agentId) => this.retakeRefused(agentId),
 			sender: () => ports.sender(),
 			senderIn: (cwd) => ports.senderIn(cwd),
 			open: (agentId, sender) => this.open(agentId, sender),
@@ -549,10 +553,21 @@ export class BotSessionHost {
 					`${defined.model.provider}/${defined.model.id}`,
 				),
 			);
-		const refusal =
-			(record.profileId === undefined ? this.ports.modelRefusal(record, model) : undefined) ??
-			(this.spendBound(built.spendBoundUsd) === undefined ? undefined : unpricedModelRefusal(model));
-		if (refusal) throw new Error(words.botModelRefused(agentId, refusal));
+		const refusal = this.modelRefusal(record, { model, spendBoundUsd: built.spendBoundUsd });
+		if (refusal) throw new BotModelRefusedError(agentId, refusal);
+	}
+
+	/** Why the model may not run now under the record's rules and the bound that applies; undefined when it may. */
+	private modelRefusal(
+		record: PersistentBotRecord,
+		{ model, spendBoundUsd }: Pick<BotSessionDefinition, "model" | "spendBoundUsd">,
+	): BotModelRefusal | undefined {
+		if (record.profileId === undefined) {
+			const refused = this.ports.modelRefusal(record, model);
+			if (refused) return refused;
+		}
+		const unpriced = this.spendBound(spendBoundUsd) === undefined ? undefined : unpricedModelRefusal(model);
+		return unpriced === undefined ? undefined : { reason: unpriced };
 	}
 
 	/** The lower of the owner's and the main session's bounds on one turn and the bot's profile's own. */
@@ -745,10 +760,11 @@ export class BotSessionHost {
 						try {
 							this.admit(agentId, session?.model, definition, sender);
 						} catch (error) {
-							// The wakes it holds are refused with this run, so they are not what reopens it on the same definition.
-							this.owed.refused(agentId, definition.key, sessionManager);
+							// The wakes it holds are refused with this run, for this cause: they are taken up again once it clears.
+							this.owed.refused(agentId, definition.key, sessionManager, error);
 							throw error;
 						}
+						this.owed.admitted(agentId);
 					},
 					// System One as the main session runs it; its evidence stays in the bot's home.
 					systemOneHost,
@@ -1054,6 +1070,21 @@ export class BotSessionHost {
 		}
 	}
 
+	/**
+	 * The cause a run of the bot was refused for may have cleared (its model's quota reset): a closed session is opened
+	 * again, and an idle one closed first, for its reopening's recovery runs the wakes it holds. A busy one ran since.
+	 */
+	private retakeRefused(agentId: string): void {
+		const entry = this.entries.get(agentId);
+		if (!entry) this.owed.openIfOwed(agentId);
+		else if (!this.isBusy(entry))
+			void this.close(agentId).then(
+				() => this.owed.openIfOwed(agentId),
+				(error: unknown) =>
+					this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(agentId, errorText(error))),
+			);
+	}
+
 	private hasHome(agentId: string): boolean {
 		return existsSync(botHomeOf(this.ports.agentDir(), agentId).profileFile);
 	}
@@ -1114,6 +1145,7 @@ export class BotSessionHost {
 			if (failures.length > 0) throw new AggregateError(failures, words.botSessionsNotClosed);
 		} finally {
 			this.inbox.stop();
+			this.owed.stop();
 			this.view.stop();
 			this.watchExpiry.stop();
 			this.listeners.clear();
