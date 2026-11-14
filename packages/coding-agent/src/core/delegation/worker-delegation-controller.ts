@@ -147,8 +147,9 @@ import { RuntimeGenerationAdmissionError, runtimeGenerationAdmission } from "../
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
 import type { ResolvedWorkerDelegationSettings } from "../settings/settings-schema.ts";
-import { isSystemOneEnabled, systemOneAccessFromSession } from "../system-one/access.ts";
+import { isSystemOneEnabled } from "../system-one/access.ts";
 import { collectWorkerReportClaimReceipts } from "../system-one/claim-delivery.ts";
+import { sessionSystemOneReviewerDeps } from "../system-one/session-source.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { executeToolkitScript } from "../toolkit/script-runner.ts";
 import { disposeShellExecutionSessionAndWait } from "../tools/shell-execution-session.ts";
@@ -5321,20 +5322,19 @@ export class WorkerDelegationController {
 			});
 		}
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === SYSTEM_ONE_TOOL_NAME)) {
-			const credentialBoundary = this.deps.getCredentialExposureBoundary?.();
 			adapterSources.systemOne = {
 				evidenceStore: TypeSafeEvidenceStore.file(
 					this.deps.getAgentDir(),
 					this.deps.getSessionId(),
 					this.deps.getSessionManager().getSessionLineageIds(),
 				),
-				// Workers review through the session's System One access: the same provider, key and
-				// pinned version as the root, switched with it.
-				access: systemOneAccessFromSession(
-					this.deps.getSettingsManager(),
-					this.deps.getModelRegistry().authStorage,
-				),
-				...(credentialBoundary ? { credentialBoundary } : {}),
+				// Workers review through the root's own System One access: its provider pin, keys and transport.
+				...sessionSystemOneReviewerDeps({
+					settings: this.deps.getSettingsManager(),
+					credentials: this.deps.getModelRegistry().authStorage,
+					source: this.deps.systemOne?.source,
+					credentialBoundary: this.deps.getCredentialExposureBoundary?.(),
+				}),
 			};
 		}
 		if (executionPlan.toolManifests.some((manifest) => manifest.toolName === "artifact_retrieve")) {

@@ -77,6 +77,7 @@ import type {
 import type { ResolvedWorkerOutcomeSettings } from "../settings/worker-outcome-settings.ts";
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import type { SystemOneProviderChoice } from "../system-one/access.ts";
+import type { SystemOneSessionSource } from "../system-one/session-source.ts";
 import type { ToolkitScript } from "../toolkit/script-registry.ts";
 import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import type { ReadOnlySkillBroker } from "../tools/skill.ts";
@@ -191,6 +192,8 @@ export interface ParentExecutionPolicy {
 	/** The session's existing System One owner; admission never creates a separate reviewer. */
 	getRouteChoiceJudge?(): RouteChoiceJudge | undefined;
 	isSystemOneEnabled?(): boolean;
+	/** The choices the session's System One runs on (the provider it was told to use, its transport); its workers review on them. */
+	readonly systemOne?: { readonly source?: SystemOneSessionSource };
 	/**
 	 * Plan a worker request's context with root's request-context controller on the worker's lane:
 	 * context GC priced on the worker's model and retention trigger, path aliases, the authority context.

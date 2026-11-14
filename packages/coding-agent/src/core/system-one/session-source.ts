@@ -65,22 +65,29 @@ export function systemOneSourceOf(
 }
 
 /**
- * A reviewer over the session's own access and transport, for the session's `systemone` tool: one provider's key only
+ * What a reviewer over the session's own access and transport is built from: the provider the session was told to use
+ * (read at each review) else its settings' choice, its keys, and its transport. The session's `systemone` tool and every
+ * worker it delegates to review through these, so a worker follows the root's provider pin; one provider's key only
  * ever goes to that provider, and a provider switch in settings applies to the next review unless the session names one.
  */
-export function sessionSystemOneReviewer(input: {
+export function sessionSystemOneReviewerDeps(input: {
 	readonly settings: Parameters<typeof systemOneAccessFromSession>[0];
 	readonly credentials: Parameters<typeof systemOneAccessFromSession>[1];
 	readonly source: SystemOneSessionSource | undefined;
 	readonly credentialBoundary: SystemOneReviewerDeps["credentialBoundary"];
-	readonly usage: SystemOneReviewerDeps["usage"];
-}): SystemOneReviewer {
-	return new SystemOneReviewer({
+	readonly usage?: SystemOneReviewerDeps["usage"];
+}): SystemOneReviewerDeps {
+	return {
 		access: systemOneAccessFromSession(input.settings, input.credentials, () => input.source?.provider),
 		fetch: input.source?.fetch,
 		credentialBoundary: input.credentialBoundary,
 		usage: input.usage,
-	});
+	};
+}
+
+/** The session's `systemone` tool reviewer, over {@link sessionSystemOneReviewerDeps}. */
+export function sessionSystemOneReviewer(input: Parameters<typeof sessionSystemOneReviewerDeps>[0]): SystemOneReviewer {
+	return new SystemOneReviewer(sessionSystemOneReviewerDeps(input));
 }
 
 /** The repository revision the session starts at; "unknown" outside a git work tree. */
