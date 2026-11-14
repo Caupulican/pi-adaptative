@@ -2000,6 +2000,7 @@ export class AgentSession {
 		this._shellOperations = config.shellOperations;
 		this._sessionStartEvent = config.sessionStartEvent ?? { type: "session_start", reason: "startup" };
 		this._runtimeBuilder = new RuntimeBuilder({
+			standing: this._caps,
 			systemOne: this._semanticPlane,
 			getAgent: () => this.agent,
 			getCwd: () => this._cwd,
@@ -4429,9 +4430,7 @@ export class AgentSession {
 		return this._compaction.runAuto(reason, willRetry);
 	}
 
-	/**
-	 * Toggle auto-compaction setting.
-	 */
+	/** Toggle auto-compaction setting. */
 	setAutoCompactionEnabled(enabled: boolean): void {
 		this._runtimeAdmission.mutateResources("compaction settings", () => {
 			this.settingsManager.setCompactionEnabled(enabled);

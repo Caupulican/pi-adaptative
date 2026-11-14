@@ -175,7 +175,7 @@ import { CredentialManager } from "./secrets/credential-manager.ts";
 import { resolveCredentialProject } from "./secrets/credential-project.ts";
 import { discoverCredentialMigrationSources } from "./secrets/credential-source-discovery.ts";
 import type { SessionImageStore } from "./session-image-store.ts";
-import { getSessionRole, isWorkerSession } from "./session-role.ts";
+import { isWorkerSession } from "./session-role.ts";
 import { matchesResourceProfilePattern } from "./settings/settings-rules.ts";
 import type {
 	AutoLearnSettings,
@@ -358,6 +358,8 @@ interface ReloadRuntimeSnapshot {
 }
 
 export interface RuntimeBuilderDeps {
+	/** The standing's reads: `zoom`/`date` beside `memory` (ownsHistory), the skill tool's `repair` (curatesOwnerSkills). */
+	readonly standing: Readonly<Record<"ownsHistory" | "curatesOwnerSkills", boolean>>;
 	/** Live agent — the snapshot/doctor read and restore its `state.tools` / `state.systemPrompt`. */
 	getAgent(): Agent;
 	/** Workspace root, passed to the tool-definition factory and the extension runner. */
@@ -830,8 +832,7 @@ export class RuntimeBuilder {
 	 * placing an already-created definition in the live registry.
 	 */
 	private _createToolAccessPolicy(): RuntimeToolAccessPolicy {
-		const role = getSessionRole();
-		const isRootSession = role !== "worker" && !this.deps.getOrchestrationProfile?.();
+		const historyCompanions = this.deps.standing.ownsHistory && !this.deps.getOrchestrationProfile?.();
 		const grantedExtensionTools = this._workerExtensionToolNames;
 		const configuredExcludedToolNames = this.deps.getExcludedToolNames();
 		const excludedToolNames = configuredExcludedToolNames
@@ -841,7 +842,7 @@ export class RuntimeBuilder {
 		const allowedToolNames = configuredAllowedToolNames
 			? new Set(mapToolNamesForPlatform([...configuredAllowedToolNames]))
 			: undefined;
-		if (isRootSession && allowedToolNames?.has("memory") && !excludedToolNames?.has("memory")) {
+		if (historyCompanions && allowedToolNames?.has("memory") && !excludedToolNames?.has("memory")) {
 			if (!excludedToolNames?.has("zoom")) allowedToolNames.add("zoom");
 			if (!excludedToolNames?.has("date")) allowedToolNames.add("date");
 		}
@@ -860,9 +861,9 @@ export class RuntimeBuilder {
 		const refusal = (name: string): ToolDecisionReason | undefined => {
 			// Strict worker UAC ceiling wins over every explicit grant: a worker process holds only the
 			// allow-listed surface, so catalogue and extension tools are never inherited by default.
-			if (role === "worker" && !isWorkerProcessToolAllowed(name, grantedExtensionTools))
+			if (isWorkerSession() && !isWorkerProcessToolAllowed(name, grantedExtensionTools))
 				return { code: "capability-ceiling", owner: "worker tool ceiling", detail: "outside the worker surface" };
-			const isRootMemoryCompanion = isRootSession && (name === "zoom" || name === "date");
+			const isRootMemoryCompanion = historyCompanions && (name === "zoom" || name === "date");
 			if (allowedToolNames && !allowedToolNames.has(name))
 				return selection("allowed tool names", "not among the session's allowed tools");
 			if (excludedToolNames?.has(name) || (isRootMemoryCompanion && excludedToolNames?.has("memory"))) {
@@ -1025,9 +1026,7 @@ export class RuntimeBuilder {
 		return this._toolPromptGuidelines.get(name);
 	}
 
-	/**
-	 * Get all configured tools with name, description, parameter schema, prompt guidelines, and source metadata.
-	 */
+	/** Get all configured tools with name, description, parameter schema, prompt guidelines, and source metadata. */
 	getAllTools(): ToolInfo[] {
 		return Array.from(this._toolDefinitions.values()).map(({ definition, sourceInfo }) => ({
 			name: definition.name,
@@ -1325,10 +1324,10 @@ export class RuntimeBuilder {
 		const explicitAllowPatterns = toolProfileFilter?.allow.filter((pattern) => pattern !== "*") ?? [];
 		if (explicitAllowPatterns.length > 0) {
 			const boundPatterns = new Set<string>();
-			const isRootSession = getSessionRole() !== "worker" && !this.deps.getOrchestrationProfile?.();
+			const historyCompanions = this.deps.standing.ownsHistory && !this.deps.getOrchestrationProfile?.();
 			for (const toolName of this._toolRegistry.keys()) {
 				if (!isAllowedTool(toolName)) continue;
-				const isRootMemoryCompanion = isRootSession && (toolName === "zoom" || toolName === "date");
+				const isRootMemoryCompanion = historyCompanions && (toolName === "zoom" || toolName === "date");
 				for (const pattern of explicitAllowPatterns) {
 					if (
 						matchesResourceProfilePattern(toolName, [pattern]) ||
@@ -1808,10 +1807,10 @@ export class RuntimeBuilder {
 			this._applyBackgroundLaneTools(toolAccess);
 			if (toolAccess.allows("skill")) {
 				const skillOptions = { getSettingsManager: () => this.deps.getSettingsManager() };
-				// Skill sources are the owner's: a worker session's tool schema carries no `repair`.
-				const definition = isWorkerSession()
-					? createWorkerSkillVaultToolDefinition(this.deps.getSkillVault(), skillOptions)
-					: createSkillVaultToolDefinition(this.deps.getSkillVault(), skillOptions);
+				// Skill sources are the owner's: only a session that curates them carries `repair` in its schema.
+				const definition = this.deps.standing.curatesOwnerSkills
+					? createSkillVaultToolDefinition(this.deps.getSkillVault(), skillOptions)
+					: createWorkerSkillVaultToolDefinition(this.deps.getSkillVault(), skillOptions);
 				this._baseToolDefinitions.set(definition.name, definition);
 			}
 			if (toolAccess.allows("run_process")) {
