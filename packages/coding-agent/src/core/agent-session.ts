@@ -2030,7 +2030,7 @@ export class AgentSession {
 			getCustomTools: () => this._customTools,
 			getRuntimeUpdateTool: () => (this._caps.ownsProcessSingletons ? this.runtimeUpdates.createTool() : undefined),
 			getSelfCompactTool: () =>
-				this._caps.conversesWithOwner ? createSelfCompactToolDefinition(() => this._selfCompaction) : undefined,
+				this._caps.compactsOwnContext ? createSelfCompactToolDefinition(() => this._selfCompaction) : undefined,
 			getProactivityTool: () =>
 				this._caps.writesOwnerSettings ? createProactivityToolDefinition(() => this.settingsManager) : undefined,
 			getBackgroundLaneTools: () => this._backgroundLanes.createBackgroundLaneTools(),
@@ -2106,7 +2106,7 @@ export class AgentSession {
 			getCompletionRuleRefusal: (toolCallId) => this._ruleHooks.refusalFor("noticed-items", toolCallId),
 			deliverToOwner: (items) => this._unsettledLadder.deliverToOwner(items),
 			getSystemOneController: () => this._semanticPlane.controller,
-			getSemanticUncertainties: () => (this._caps.conversesWithOwner ? this.getSemanticUncertainties() : undefined),
+			getSemanticUncertainties: () => (this._caps.holdsOwnDoubts ? this.getSemanticUncertainties() : undefined),
 			getSteeringPlane: () => this._semanticPlane.steeringPlane,
 			getSemanticDecisionEngine: () => this._semanticDecisionEngine(),
 			askQuestionRouting: () => ({

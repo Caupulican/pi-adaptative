@@ -114,6 +114,13 @@ export interface SelfCompactionView {
 		readonly noteChars: number | null;
 		readonly lastError: string | null;
 		readonly ownerRequested: boolean;
+		/**
+		 * Whether an idle checkpoint runs the saved note's handoff: the note is active and the session neither awaits the
+		 * owner nor is disposed. A run that ends this way is the first part of a turn the handoff continues.
+		 */
+		readonly continues: boolean;
+		/** Whether the run starting or running now is the handoff's own (the note delivered, or the turn continued after it). */
+		readonly hosting: boolean;
 	};
 }
 
@@ -163,6 +170,8 @@ export class SelfCompactionController {
 	private readonly deps: SelfCompactionControllerDeps;
 	private readonly scan = new SelfCompactionStateScan();
 	private running: Promise<void> | undefined;
+	/** The handoff's own run is being started or run (`hostTurn`). */
+	private hosting = false;
 	private announcedLevel: SelfCompactionLevel = "idle";
 	private renderedGuidance: { key: string; text: string | undefined } | undefined;
 	private readonly activityListeners = new IndependentObserverSet<() => void>();
@@ -362,6 +371,8 @@ export class SelfCompactionController {
 				noteChars: state.request && isActiveSelfCompactionStatus(state.status) ? state.request.note.length : null,
 				lastError: state.lastError ?? null,
 				ownerRequested: state.ownerRequested,
+				continues: this.continues(state.status),
+				hosting: this.hosting,
 			},
 		};
 	}
@@ -554,10 +565,13 @@ export class SelfCompactionController {
 		);
 	}
 
+	private continues(status: SelfCompactionState["status"]): boolean {
+		return !this.deps.isDisposed() && !this.deps.isAwaitingOwner() && isActiveSelfCompactionStatus(status);
+	}
+
 	schedule(): boolean {
 		if (this.running) return true;
-		if (this.deps.isDisposed() || this.deps.isAwaitingOwner()) return false;
-		if (!isActiveSelfCompactionStatus(this.state().status)) return false;
+		if (!this.continues(this.state().status)) return false;
 		const run: Promise<void> = this.run().then((settled) => {
 			if (this.running === run) this.running = undefined;
 			this.notifyActivity();
@@ -656,12 +670,15 @@ export class SelfCompactionController {
 	}
 
 	private async hostTurn(turn: () => Promise<void>): Promise<boolean> {
+		this.hosting = true;
 		try {
 			await turn();
 			return true;
 		} catch (error) {
 			if (error instanceof AgentBusyError) return false;
 			throw error;
+		} finally {
+			this.hosting = false;
 		}
 	}
 

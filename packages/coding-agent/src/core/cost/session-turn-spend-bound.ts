@@ -1,8 +1,10 @@
 /**
- * The dollar bound of one turn of a headless session (a channel away, a persistent bot): the cost of the turn's priced
- * assistant messages is summed from its start, on the turn boundary `observeSessionTurns` draws (an automatic retry's
- * attempts are the same turn), and past the bound the turn is aborted. A bound can only be kept on a model
- * that declares a price.
+ * The dollar bound of one turn of a headless session (a channel away, a persistent bot): on the turn boundary
+ * `observeSessionTurns` draws (an automatic retry's attempts and a self-compaction handoff's run are the same turn), a
+ * turn's spend is its priced assistant messages and the compactions that ran for it, a compaction before its first run
+ * (the threshold check a prompt makes) and one between its runs (self-compaction) included, summed from the end of the
+ * turn before. Past the bound the turn is aborted, at a priced message or at the start of a run the turn continues
+ * with. A bound can only be kept on a model that declares a price.
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
@@ -29,17 +31,21 @@ export interface SessionTurnSpendBound<Limit extends SpendLimit> {
 
 /** Bounds each turn of `session`; returns the unsubscribe. */
 export function boundSessionTurnSpend<Limit extends SpendLimit>(
-	session: Pick<AgentSession, "subscribe" | "abort">,
+	session: Pick<AgentSession, "subscribe" | "abort" | "getSelfCompactionView" | "nativeActivity">,
 	bound: SessionTurnSpendBound<Limit>,
 ): () => void {
 	let turnUsd = 0;
-	const unsubscribeTurns = observeSessionTurns(session, { started: () => (turnUsd = 0), ended: () => {} });
+	const unsubscribeTurns = observeSessionTurns(session, { started: () => {}, ended: () => (turnUsd = 0) });
+	const enforce = () => {
+		const limit = bound.limit();
+		if (limit !== undefined && turnUsd > limit.usd) void session.abort(bound.onExceeded(turnUsd, limit));
+	};
 	const unsubscribeSpend = session.subscribe((event) => {
 		if (event.type === "message_end" && event.message.role === "assistant") {
 			turnUsd += event.message.usage?.cost?.total ?? 0;
-			const limit = bound.limit();
-			if (limit !== undefined && turnUsd > limit.usd) void session.abort(bound.onExceeded(turnUsd, limit));
-		}
+			enforce();
+		} else if (event.type === "compaction_end") turnUsd += event.result?.usage?.cost?.total ?? 0;
+		else if (event.type === "agent_start") enforce();
 	});
 	return () => {
 		unsubscribeTurns();

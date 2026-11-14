@@ -1,5 +1,5 @@
 /**
- * What a finished turn of a bot's own session reports: what the session spent since the turn began, as one charge the
+ * What a finished turn of a bot's own session reports: what the session spent since the last charge, as one charge the
  * main session's cost view takes, and the turn's last words, the bot's summary in the roster; and the accounting that
  * reports both once per turn.
  */
@@ -21,7 +21,7 @@ export interface BotTurnUsageReport {
 }
 
 /**
- * The charge of the turn that began when the session had spent `usageBefore`: undefined when the session has no model or
+ * The charge of a turn, the session's spend since it had spent `usageBefore`: undefined when the session has no model or
  * spent nothing reportable since.
  */
 export function botTurnCharge(
@@ -38,7 +38,7 @@ export function botTurnCharge(
 		usage,
 		report: {
 			agentId,
-			// The turn's identity: the bot's session and what it had spent when the turn began.
+			// The charge's identity: the bot's session and what it had spent at the charge before.
 			reportId: deriveSpawnedUsageReportId("bot-session", sessionId, [
 				String(usageBefore.totalTokens),
 				String(usageBefore.cost.total),
@@ -81,15 +81,16 @@ export interface BotTurnAccountingPorts {
 
 /**
  * One bot session's turns as its host counts them, on the turn boundary every per-turn count of the session reads
- * (`observeSessionTurns`): what the session spent from a turn's start is one charge, and its last words written since are
- * its outcome, each reported once.
+ * (`observeSessionTurns`): what the session spent since the last charge is the turn's charge, so spend between runs (a
+ * compaction a prompt runs before its run, or one a self-compaction handoff runs) is charged with the turn it ran for or
+ * at the session's close; the turn's last words written since its start are its outcome. Each is reported once.
  */
 export class BotTurnAccounting {
 	private readonly agentId: string;
 	private readonly session: Pick<AgentSession, "model" | "getCumulativeUsage" | "sessionId" | "messages">;
 	private readonly ports: BotTurnAccountingPorts;
-	/** The session's cumulative usage when the running turn began; absent between turns and once its charge was reported. */
-	private usageBefore: Usage | undefined;
+	/** The session's cumulative usage at the last charge (or when the session was loaded): the next charge starts there. */
+	private usageCharged: Usage;
 	/** When the running turn began: its own messages are the ones written since; absent between turns. */
 	private startedAt: number | undefined;
 
@@ -101,15 +102,18 @@ export class BotTurnAccounting {
 		this.agentId = agentId;
 		this.session = session;
 		this.ports = ports;
+		this.usageCharged = structuredClone(session.getCumulativeUsage());
 	}
 
 	/** A turn began. */
 	started(): void {
-		this.usageBefore = structuredClone(this.session.getCumulativeUsage());
 		this.startedAt = Date.now();
 	}
 
-	/** The turn ended (or its session closes with it open): its charge, then its outcome; nothing when none is open. */
+	/**
+	 * The turn ended (or its session closes, a turn open or not): the spend since the last charge, then the turn's outcome
+	 * when one was open.
+	 */
 	ended(): void {
 		this.reportCharge();
 		const since = this.startedAt;
@@ -120,11 +124,10 @@ export class BotTurnAccounting {
 		if (summary.length > 0) this.ports.outcome(summary);
 	}
 
-	/** The running turn's spend is reported, once. */
+	/** The spend since the last charge is reported, once. */
 	private reportCharge(): void {
-		const usageBefore = this.usageBefore;
-		this.usageBefore = undefined;
-		const charge = usageBefore && botTurnCharge(this.agentId, this.session, usageBefore);
+		const charge = botTurnCharge(this.agentId, this.session, this.usageCharged);
+		this.usageCharged = structuredClone(this.session.getCumulativeUsage());
 		if (!charge) return;
 		try {
 			this.ports.charge(charge.usage, charge.report);

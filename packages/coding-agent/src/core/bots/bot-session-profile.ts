@@ -20,6 +20,7 @@ import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { laneCapabilityEnvelope } from "../autonomy/lane-envelope.ts";
 import type { SessionPrivatePathScope } from "../autonomy/worker-session-private-scope.ts";
 import { WORKER_TOOL_ADAPTER_NAMES } from "../autonomy/worker-tool-adapter-registry.ts";
+import { SELF_COMPACT_TOOL_NAME } from "../compaction/self-compaction.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts";
 import { type PersistentBotRecord, RESERVED_BOT_CREATOR_IDS } from "../delegation/persistent-bot-team-store.ts";
@@ -64,19 +65,18 @@ export interface BotSessionDefinition {
 
 /**
  * The tools of a bot of its own: the read tools, System One's tool (as a worker holds it; it is registered only while
- * System One is on) and `task_watch` for its own waits always, the file and process tools only when the bot may write.
+ * System One is on), `task_watch` for its own waits and `self_compact` for its own context always, the file and process
+ * tools only when the bot may write.
  */
 export function botSessionToolNames(canWrite: boolean): string[] {
 	const reads = [...READ_TOOL_NAMES, REPO_READ_TOOL_NAME, LOOKUP_TOOL_NAME, SYSTEM_ONE_TOOL_NAME];
 	// A read-only bot keeps what a read-only worker keeps: the shell is judged command by command (`privatePathScope.readOnlyShell`),
-	// and so is a watched command, at arming and at every check (`WatchAdmission`), so `task_watch` widens nothing.
+	// and so is a watched command, at arming and at every check (`WatchAdmission`), so `task_watch` widens nothing;
+	// `self_compact` touches only the session's own context.
+	const own = [TOOL_SCHEMA_SEARCH_NAME, TASK_WATCH_TOOL_NAME, SELF_COMPACT_TOOL_NAME];
 	return canWrite
-		? [...reads, TOOL_SCHEMA_SEARCH_NAME, TASK_WATCH_TOOL_NAME, ...WRITE_TOOL_NAMES, "python", STABLE_SHELL_TOOL_NAME]
-		: [
-				...[...reads, STABLE_SHELL_TOOL_NAME].filter(toolSurvivesReadOnly),
-				TOOL_SCHEMA_SEARCH_NAME,
-				TASK_WATCH_TOOL_NAME,
-			];
+		? [...reads, ...own, ...WRITE_TOOL_NAMES, "python", STABLE_SHELL_TOOL_NAME]
+		: [...[...reads, STABLE_SHELL_TOOL_NAME].filter(toolSurvivesReadOnly), ...own];
 }
 
 /**
@@ -134,6 +134,7 @@ const SESSION_HOSTED_TOOL_NAMES: ReadonlySet<string> = new Set([
 	LOOKUP_TOOL_NAME,
 	SYSTEM_ONE_TOOL_NAME,
 	TASK_WATCH_TOOL_NAME,
+	SELF_COMPACT_TOOL_NAME,
 ]);
 
 function sessionHolds(toolName: string): boolean {
@@ -167,8 +168,9 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 	// session bounds its turns by cost alone.
 	const workerLimits = WORKER_COUNTED_LIMITS.filter((field) => profile.budget[field] !== undefined);
 	if (workerLimits.length > 0) return { route: "worker", reason: `limits_need_worker:${workerLimits.join(",")}` };
-	// It arms its own waits as a worker's host does, outside the granted surface.
-	const tools = [...new Set([...planned.filter(sessionHolds), TASK_WATCH_TOOL_NAME])];
+	// It arms its own waits as a worker's host does, and compacts its own context, outside the granted surface.
+	const own = [TASK_WATCH_TOOL_NAME, SELF_COMPACT_TOOL_NAME];
+	const tools = [...new Set([...planned.filter(sessionHolds), ...own])];
 	// The dollar ceilings hold the session as they hold a worker of the profile on the same model: `maxMeteredCostUsd` too
 	// when its spend is metered, `maxCostUsd` alone on a subscription.
 	const laneCeilingUsd = costCeilingUsd(worker.authority.budget, compiled.metered);
@@ -180,7 +182,7 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 		id: `bot-profile:${profile.profileId}`,
 		profileId: profile.profileId,
 		capabilities: [
-			...new Set([...worker.authority.capabilities, ...requiredEnvelopeCapabilities(TASK_WATCH_TOOL_NAME)]),
+			...new Set([...worker.authority.capabilities, ...own.flatMap((name) => requiredEnvelopeCapabilities(name))]),
 		],
 		allowedTools: tools,
 		...(laneCeilingUsd !== undefined ? { maxUsd: laneCeilingUsd } : {}),

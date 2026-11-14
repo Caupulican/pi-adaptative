@@ -55,8 +55,10 @@ export interface SessionCapabilities {
 	readonly runsProactiveLanes: boolean;
 	/** Carries the owner's work from survey to delivery: the work lifecycle prompt and its rule. */
 	readonly ownsWorkLifecycle: boolean;
-	/** Converses with the owner: `self_compact`, its semantic doubts journal. */
-	readonly conversesWithOwner: boolean;
+	/** Compacts its own context by a note it writes: `self_compact`, and the self-monitoring lines that ask for the note. */
+	readonly compactsOwnContext: boolean;
+	/** Holds semantic doubts of its own: the System One uncertainties journal its `system_one` tool lists and dispositions. */
+	readonly holdsOwnDoubts: boolean;
 	/** May ask the owner live: an edge operation without a grant gets the confirmation handler instead of a refusal. */
 	readonly asksOwnerLive: boolean;
 	/** Keeps owner follow-ups: a refused handoff operation is deferred to the owner, and announced when the session starts. */
@@ -97,7 +99,8 @@ const FLAGS: Readonly<Record<FlagCapability, Row>> = {
 	directsWorkers: [true, false, false, false],
 	runsProactiveLanes: [true, false, false, false],
 	ownsWorkLifecycle: [true, false, false, false],
-	conversesWithOwner: [true, false, false, false],
+	compactsOwnContext: [true, false, true, false],
+	holdsOwnDoubts: [true, false, false, false],
 	asksOwnerLive: [true, false, false, false],
 	keepsOwnerFollowUps: [true, false, false, false],
 	liveOwnerTurns: [true, false, false, false],
