@@ -7,7 +7,7 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { strictCanonicalDigest } from "../steering/canonical.ts";
 import type { RoutineCallFacts } from "../tool-capability-policy.ts";
-import type { NestedCallAdmitter } from "../tools/nested-tool-call.ts";
+import type { NestedCallAdmission, NestedCallAdmitter } from "../tools/nested-tool-call.ts";
 import { hostTimeZone } from "./calendar-schedule.ts";
 import {
 	nextRoutineAt,
@@ -441,36 +441,55 @@ export class RoutineSessionController implements RoutineToolPort {
 		// An update of a worker's watch is admitted under the scope the worker armed it with, which the store keeps.
 		const worker = prior && routineWorkerAuthority(prior);
 		const slotted = authority?.armedBy !== undefined && authority.armedBy.kind !== "owner";
+		let check: NestedCallAdmission | undefined;
 		if (toolCallId !== undefined && isWatchSchedule(input.schedule)) {
 			// A watch with no slot left is refused before the gate is asked about its check.
 			if (slotted) this.requireWatchSlot();
-			await this.admitWatchedCall(toolCallId, input.routineId, input.schedule.condition, prior, worker, signal);
+			check = await this.admitWatchedCall(
+				toolCallId,
+				input.routineId,
+				input.schedule.condition,
+				prior,
+				worker,
+				signal,
+			);
 		}
-		// A watch runs no worker, so it saves only where it was armed; any other routine saves the worker authority its runs use.
-		const saved: RoutineSave = isWatchSchedule(input.schedule)
-			? { watchOrigin: this.deps.captureOrigin() }
-			: { intent: await this.captureIntent(input, prior, signal) };
-		this.check(signal);
-		// Counted after the awaits, just before the write, so the slots held are the ones this write finds.
-		if (slotted) this.requireWatchSlot();
-		return this.persist(input, saved, {
-			...(worker ? { worker } : {}),
-			enabled: prior?.enabled ?? true,
-			...(expectedRevision === undefined ? {} : { expectedRevision }),
-			...(prior?.schedule.kind === "calendar" ? { timeZone: prior.schedule.timeZone } : {}),
-			...(authority?.answeredSources === undefined ? {} : { toolAnsweredSources: authority.answeredSources }),
-			...(authority?.armedBy === undefined ? {} : { armedBy: authority.armedBy }),
-		});
+		let persisted: RoutineToolView;
+		try {
+			// A watch runs no worker, so it saves only where it was armed; any other routine saves its runs' worker authority.
+			const saved: RoutineSave = isWatchSchedule(input.schedule)
+				? { watchOrigin: this.deps.captureOrigin() }
+				: { intent: await this.captureIntent(input, prior, signal) };
+			this.check(signal);
+			// Counted after the awaits, just before the write, so the slots held are the ones this write finds.
+			if (slotted) this.requireWatchSlot();
+			persisted = this.persist(input, saved, {
+				...(worker ? { worker } : {}),
+				enabled: prior?.enabled ?? true,
+				...(expectedRevision === undefined ? {} : { expectedRevision }),
+				...(prior?.schedule.kind === "calendar" ? { timeZone: prior.schedule.timeZone } : {}),
+				...(authority?.answeredSources === undefined ? {} : { toolAnsweredSources: authority.answeredSources }),
+				...(authority?.armedBy === undefined ? {} : { armedBy: authority.armedBy }),
+			});
+		} catch (error) {
+			// Nothing was armed: an owner approval the check claimed is freed, not spent.
+			check?.abandon();
+			throw error;
+		}
+		// The watch is saved: what its check's admission claimed is spent arming it.
+		check?.consume();
+		return persisted;
 	}
 
 	/**
 	 * A watched command or page is first the call its check would make, admitted by this session's gate as a sub-call of
 	 * the routine call that arms it, the way a worker's own gate admits its watch's (`task-watch-tool.ts`): every check a
 	 * call of that tool faces applies, the System One operation gate included, and a refused call arms nothing. The watch's
-	 * own rules admit the condition first, so the gate is never asked about a check the watch could not make; the admitted
-	 * call is consumed unstarted, since the monitor makes the checks: an owner approval it claimed is spent arming the
-	 * watch, whose checks then run on its cadence. A session that does not hold the check's tool arms nothing. An update
-	 * that keeps the armed check is not asked again.
+	 * own rules admit the condition first, so the gate is never asked about a check the watch could not make. The admitted
+	 * call never starts, since the monitor makes the checks: the caller consumes it once the watch is saved (an owner
+	 * approval it claimed is spent arming the watch, whose checks then run on its cadence) and abandons it when the save
+	 * fails. A session that does not hold the check's tool arms nothing. An update that keeps the armed check is not
+	 * asked again.
 	 */
 	private async admitWatchedCall(
 		toolCallId: string,
@@ -479,12 +498,12 @@ export class RoutineSessionController implements RoutineToolPort {
 		prior: RoutineDefinitionView | undefined,
 		worker: WorkerWatchAuthority | undefined,
 		signal?: AbortSignal,
-	): Promise<void> {
+	): Promise<NestedCallAdmission | undefined> {
 		const admitted = this.deps.admitWatch(parseWatchCondition(condition), worker);
 		const call = watchCheckCall(admitted);
-		if (!call) return;
+		if (!call) return undefined;
 		const armed = prior?.schedule.kind === "event" && prior.schedule.source === "watch" ? prior.schedule : undefined;
-		if (armed && isDeepStrictEqual(armed.condition, admitted)) return;
+		if (armed && isDeepStrictEqual(armed.condition, admitted)) return undefined;
 		// Arming never widens what the session can run: a check needs the tool the session itself would call.
 		if (!this.deps.holdsTool(call.toolName)) {
 			harnessLog.warn("routines", "a watch was refused: the session does not hold its check's tool", () => ({
@@ -510,7 +529,7 @@ export class RoutineSessionController implements RoutineToolPort {
 			}));
 			throw new Error(`The check this watch would make was refused: ${admission.reason}`);
 		}
-		admission.consume();
+		return admission;
 	}
 
 	/** The worker authority a routine's runs use: the saved one when nothing it was captured from changed, else captured now. */
