@@ -242,9 +242,8 @@ export async function runJourney4TelegramPhase(world: HarnessWorld): Promise<voi
 			? (JSON.parse(String(world.io.readFileSync(journalPath))) as TelegramJournal)
 			: { pending: [], seen: [], held: [], drafts: [] };
 	const api = new FakeBotApi(() => journal().seen.map((entry) => entry.d));
-	world.fetchResponder = (input, init) => api.respond(input, init);
 	const warningsBefore = world.warnings.length;
-	try {
+	await withFakeBotApi(world, api, async () => {
 		const firstPoll = api.nextPoll(undefined);
 		const manager = world.createSessionManager(agentDir);
 		const created = await world.createRootSession("root", {
@@ -379,9 +378,35 @@ export async function runJourney4TelegramPhase(world: HarnessWorld): Promise<voi
 			"the transport ran without a warning",
 		).toEqual([]);
 		trace.mark("root", "telegram.closed");
+	});
+}
+
+/**
+ * Runs one Telegram leg with `api` answering the world's fetch port. Whatever the leg opened that reaches the Bot API
+ * (its sessions, the bot daemons it launched) and did not close, because it failed first, is closed before the port is
+ * released: a late send or poll then still reaches `api`, never the System One route behind it, so a leg's failure is
+ * not followed by a false unscripted judgment request. What a passing leg left open is closed here too, and a closing
+ * that fails then fails the leg.
+ */
+export async function withFakeBotApi(world: HarnessWorld, api: FakeBotApi, leg: () => Promise<void>): Promise<void> {
+	const sessionsBefore = new Set(world.sessions);
+	const daemonsBefore = new Set(world.processes.liveBotDaemons());
+	world.fetchResponder = (input, init) => api.respond(input, init);
+	let passed = false;
+	const failures: unknown[] = [];
+	try {
+		await leg();
+		passed = true;
 	} finally {
+		for (const session of world.sessions.filter((open) => !sessionsBefore.has(open))) {
+			const disposal = await world.disposeSessionInBody(session).catch((error: unknown) => ({ error }));
+			if (disposal) failures.push(disposal.error);
+		}
+		for (const daemon of world.processes.liveBotDaemons().filter((open) => !daemonsBefore.has(open)))
+			await daemon.stop().catch((error: unknown) => failures.push(error));
 		world.fetchResponder = undefined;
 	}
+	if (passed && failures.length > 0) throw new AggregateError(failures, "The Telegram leg's teardown failed");
 }
 
 const FRIEND_ID = 555000111;
@@ -480,12 +505,11 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 			: { seen: [], drafts: [] };
 	const seen = (updateId: number) => journal().seen.filter((entry) => entry.d === digest(`tg:${updateId}`)).length;
 	const api = new FakeBotApi(() => journal().seen.map((entry) => entry.d));
-	world.fetchResponder = (input, init) => api.respond(input, init);
 	const warningsBefore = world.warnings.length;
 	const ownerChat = String(OWNER_ID);
 	const ownerHeader = "Owner message on channel telegram (verified private chat, 1 message";
 	const fence = 'source=\\"channel:telegram\\"';
-	try {
+	await withFakeBotApi(world, api, async () => {
 		const firstPoll = api.nextPoll(undefined);
 		const manager = world.createSessionManager(agentDir);
 		const created = await world.createRootSession("root", {
@@ -946,9 +970,7 @@ export async function runJourney4TelegramOwnerPhase(world: HarnessWorld): Promis
 			"the owner leg ran without a Telegram warning",
 		).toEqual([]);
 		trace.mark("root", "telegram-owner.closed");
-	} finally {
-		world.fetchResponder = undefined;
-	}
+	});
 }
 
 interface BoundsLegJournal {
@@ -988,12 +1010,11 @@ export async function runJourney4TelegramBoundsPhase(world: HarnessWorld): Promi
 	const journalHolds = (holds: (state: BoundsLegJournal) => boolean) =>
 		world.io.waitForMutation(() => holds(journal()));
 	const api = new FakeBotApi(() => journal().seen.map((entry) => entry.d));
-	world.fetchResponder = (input, init) => api.respond(input, init);
 	const warningsBefore = world.warnings.length;
 	const ownerChat = String(OWNER_ID);
 	const ownerHeader = "Owner message on channel telegram (verified private chat, 1 message";
 	const terminalOf = (sequence: number) => world.provider.terminals.find((terminal) => terminal.sequence === sequence);
-	try {
+	await withFakeBotApi(world, api, async () => {
 		const firstPoll = api.nextPoll(undefined);
 		const manager = world.createSessionManager(agentDir);
 		const created = await world.createRootSession("root", {
@@ -1284,9 +1305,7 @@ export async function runJourney4TelegramBoundsPhase(world: HarnessWorld): Promi
 			"the bounds leg ran without a Telegram warning",
 		).toEqual([]);
 		trace.mark("root", "telegram-bounds.closed");
-	} finally {
-		world.fetchResponder = undefined;
-	}
+	});
 }
 
 interface QuotaLegJournal {
@@ -1324,7 +1343,6 @@ export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promis
 	const journalHolds = (holds: (state: QuotaLegJournal) => boolean) =>
 		world.io.waitForMutation(() => holds(journal()));
 	const api = new FakeBotApi(() => journal().seen.map((entry) => entry.d));
-	world.fetchResponder = (input, init) => api.respond(input, init);
 	const warningsBefore = world.warnings.length;
 	const ownerHeader = "Owner message on channel telegram (verified private chat, 1 message";
 	let allowance:
@@ -1350,7 +1368,7 @@ export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promis
 			},
 		},
 	});
-	try {
+	await withFakeBotApi(world, api, async () => {
 		const firstPoll = api.nextPoll(undefined);
 		const manager = world.createSessionManager(agentDir);
 		const created = await world.createRootSession("root", {
@@ -1485,9 +1503,7 @@ export async function runJourney4TelegramQuotaPhase(world: HarnessWorld): Promis
 			"the quota leg ran without a Telegram warning",
 		).toEqual([]);
 		trace.mark("root", "telegram-quota.closed");
-	} finally {
-		world.fetchResponder = undefined;
-	}
+	});
 }
 
 interface DaemonLegJournal {
@@ -1557,11 +1573,10 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 	const journalHolds = (holds: (state: DaemonLegJournal) => boolean) =>
 		world.io.waitForMutation(() => holds(journal()));
 	const api = new FakeBotApi(() => journal().seen.map((entry) => entry.d));
-	world.fetchResponder = (input, init) => api.respond(input, init);
 	const warningsBefore = world.warnings.length;
 	const ownerHeader = "Owner message on channel telegram (verified private chat, 1 message";
 	const fence = 'source=\\"channel:telegram\\"';
-	try {
+	await withFakeBotApi(world, api, async () => {
 		// A session start launches the daemon; while it is open, that session serves the channel itself.
 		const launched = world.processes.runNextBotDaemon({ channelProviders: createBuiltInChannelProvider });
 		const firstPoll = api.nextPoll(undefined);
@@ -1744,9 +1759,7 @@ export async function runJourney4TelegramDaemonPhase(world: HarnessWorld): Promi
 			"the daemon leg ran without a Telegram warning",
 		).toEqual([]);
 		trace.mark("root", "telegram-daemon.closed");
-	} finally {
-		world.fetchResponder = undefined;
-	}
+	});
 }
 
 interface WaitingLegJournal {
@@ -1788,7 +1801,6 @@ export async function runJourney4TelegramWaitingPhase(world: HarnessWorld): Prom
 			? (JSON.parse(String(world.io.readFileSync(journalPath))) as WaitingLegJournal)
 			: { seen: [] };
 	const api = new FakeBotApi(() => journal().seen.map((entry) => entry.d));
-	world.fetchResponder = (input, init) => api.respond(input, init);
 	const warningsBefore = world.warnings.length;
 	const ownerChat = String(OWNER_ID);
 	const notice = `Waiting on you in ${basename(HARNESS_PROJECT_CWD)}: Action held for your approval: bash`;
@@ -1825,7 +1837,7 @@ export async function runJourney4TelegramWaitingPhase(world: HarnessWorld): Prom
 	/** The session's turn, and what follows it by itself (the reply's routing, its notice), are over. */
 	const settle = (target: AgentSession) =>
 		withDeadline(trace, "the session is at rest", target.waitForForegroundIdle());
-	try {
+	await withFakeBotApi(world, api, async () => {
 		const firstPoll = api.nextPoll(undefined);
 		const manager = world.createSessionManager(agentDir);
 		const { session } = await world.createRootSession("root", {
@@ -1976,7 +1988,5 @@ export async function runJourney4TelegramWaitingPhase(world: HarnessWorld): Prom
 			"the waiting leg ran without a channel warning",
 		).toEqual([]);
 		trace.mark("root", "telegram-waiting.closed");
-	} finally {
-		world.fetchResponder = undefined;
-	}
+	});
 }

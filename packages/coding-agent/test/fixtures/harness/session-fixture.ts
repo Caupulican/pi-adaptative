@@ -2865,10 +2865,15 @@ export class HarnessProcesses {
 			this.serviceManagerAnswers.length = 0;
 		}
 		// A daemon a journey left running is stopped as its process would be at shutdown, and joined.
-		for (const daemon of [...this.runningBotDaemons]) await daemon.stop();
+		for (const daemon of this.liveBotDaemons()) await daemon.stop();
 		await Promise.allSettled([...this.settling]);
 		if (this.causes.length > 0)
 			throw new AggregateError([...this.causes], "Virtual process children failed to settle");
+	}
+
+	/** The bot daemons running now, in launch order. */
+	liveBotDaemons(): readonly HarnessBotDaemon[] {
+		return [...this.runningBotDaemons];
 	}
 
 	run(operation: string, args: readonly unknown[]): unknown {
