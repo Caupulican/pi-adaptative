@@ -9,7 +9,7 @@
  * session are not held by anyone.
  */
 import type { RoutineDefinitionView } from "./routine-contract.ts";
-import { isWatchSchedule, liveWatchCount } from "./routine-watch-arming.ts";
+import { isWatchSchedule, liveWatches } from "./routine-watch-arming.ts";
 
 export type RoutineScope = "session" | "own-watches";
 
@@ -30,11 +30,18 @@ export function holdsRoutine(
 	);
 }
 
-/** The live watches a bot's own session holds now, read from the store: what keeps it loaded and what the roster shows. */
-export function liveOwnWatchCount(
+/**
+ * The live watches a bot's own session holds now, read from the store (what keeps it loaded and what the roster shows):
+ * how many, and when the first of them expires (undefined when none has an end), since an expiry writes nothing.
+ */
+export function liveOwnWatches(
 	store: { listRoutines(holder?: RoutineHolder): readonly RoutineDefinitionView[] },
 	sessionId: string,
 	nowMs: number,
-): number {
-	return liveWatchCount(store.listRoutines({ sessionId, scope: "own-watches" }), sessionId, nowMs);
+): { readonly count: number; readonly firstExpiresAt?: number } {
+	const live = liveWatches(store.listRoutines({ sessionId, scope: "own-watches" }), sessionId, nowMs);
+	const ends = live.flatMap(({ schedule }) =>
+		schedule.kind !== "once" && schedule.expiresAt !== undefined ? [schedule.expiresAt] : [],
+	);
+	return ends.length === 0 ? { count: live.length } : { count: live.length, firstExpiresAt: Math.min(...ends) };
 }

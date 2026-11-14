@@ -52,7 +52,7 @@ import type { ModelRegistry } from "../model-registry.ts";
 import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-guard.ts";
 import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
-import { liveOwnWatchCount } from "../routines/routine-holder.ts";
+import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { createAgentSession } from "../sdk.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { deriveSpawnedUsageReportId, hasReportableUsage } from "../spawned-usage.ts";
@@ -67,6 +67,7 @@ import { botHomeOf, botProfileOf, ensureBotHome } from "./bot-home.ts";
 import { BotHostStateWriter, type BotSessionState, readRemoteBotHost } from "./bot-host-state.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import { BotTurnSupervision } from "./bot-turn-supervision.ts";
+import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
 /** How long a bot's session stays loaded with no turn running and no input queued. */
 export const BOT_SESSION_IDLE_BOUND_MS = 10 * 60 * 1000;
@@ -191,6 +192,11 @@ export class BotSessionHost {
 	private readonly holder = randomBytes(8).toString("hex");
 	/** The bots this host does not run, as their homes say (see `BotRemoteView`). */
 	private readonly view: BotRemoteView;
+	/** Announces a bot whose first live watch ended, which nothing writes (see `BotWatchExpiry`). */
+	private readonly watchExpiry = new BotWatchExpiry(
+		() => this.idleTimers(),
+		(agentIds) => this.changedMany(agentIds),
+	);
 
 	constructor(ports: BotSessionHostPorts) {
 		this.ports = ports;
@@ -592,16 +598,19 @@ export class BotSessionHost {
 
 	/**
 	 * The live watches the bot's own session holds, as the store says now: the loaded session's here, else the one its home
-	 * saved last, which another process may be hosting.
+	 * saved last, which another process may be hosting. The bot is announced again when the first of them expires.
 	 */
 	liveWatches(agentId: string): number {
 		const sessionId = this.entries.get(agentId)?.session.sessionId ?? this.view.savedSessionOf(agentId)?.id;
-		return sessionId === undefined ? 0 : liveOwnWatchCount(this.ports.store(), sessionId, this.idleTimers().now());
+		if (sessionId === undefined) return 0;
+		const live = liveOwnWatches(this.ports.store(), sessionId, this.idleTimers().now());
+		if (live.firstExpiresAt !== undefined) this.watchExpiry.note(agentId, live.firstExpiresAt);
+		return live.count;
 	}
 
 	/** Whether the bot session `sessionId` holds a live watch, as the store says now. */
 	private holdsWatches(sessionId: string): boolean {
-		return liveOwnWatchCount(this.ports.store(), sessionId, this.idleTimers().now()) > 0;
+		return liveOwnWatches(this.ports.store(), sessionId, this.idleTimers().now()).count > 0;
 	}
 
 	/**
@@ -796,6 +805,7 @@ export class BotSessionHost {
 			if (failures.length > 0) throw new AggregateError(failures, words.botSessionsNotClosed);
 		} finally {
 			this.view.stop();
+			this.watchExpiry.stop();
 			this.listeners.clear();
 			await this.history.stop();
 		}

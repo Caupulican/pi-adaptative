@@ -56,12 +56,21 @@ function holdsWatchSlot(routine: RoutineDefinitionView, parentSessionId: string,
 }
 
 /** The live watches of the session as the operator bar counts them: held and enabled, so a paused watch is not watching. */
+export function liveWatches(
+	routines: readonly RoutineDefinitionView[],
+	parentSessionId: string,
+	nowMs: number,
+): RoutineDefinitionView[] {
+	return routines.filter((routine) => routine.enabled && holdsWatchSlot(routine, parentSessionId, nowMs));
+}
+
+/** How many {@link liveWatches} the session holds. */
 export function liveWatchCount(
 	routines: readonly RoutineDefinitionView[],
 	parentSessionId: string,
 	nowMs: number,
 ): number {
-	return routines.filter((routine) => routine.enabled && holdsWatchSlot(routine, parentSessionId, nowMs)).length;
+	return liveWatches(routines, parentSessionId, nowMs).length;
 }
 
 /**
