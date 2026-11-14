@@ -76,7 +76,8 @@ What ran before a bot had a session of its own is part of that conversation. Tho
 orchestration directory of whichever session messaged the bot, and only that session's own transcript says which runtime
 was whose, so `bots/<id>/history.json` indexes them by reference (a path-free transcript reference and a time range, bounded
 to the newest 200; nothing is copied), and the startup cleanup of old session directories keeps any directory holding a run
-an index references. The index is built by one streamed scan of the session files, off the screen's
+an index references; an index that exists but cannot be read stops that cleanup (with a startup warning naming the bot)
+until it is written again, since what it holds is unknown. The index is built by one streamed scan of the session files, off the screen's
 drawing path (the chat shows what it has until the scan ends). The scan runs once for the agent directory
 (`state/bots/history-scan.json` marks it done), never again in any process and never for a bot made later; afterwards each
 worker-path start of a bot adds its own run as it is bound. A process of an older build, still running after the scan ran,

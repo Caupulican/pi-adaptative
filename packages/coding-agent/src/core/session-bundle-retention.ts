@@ -15,6 +15,7 @@ import { SessionRootMailbox, sessionRootMailboxHasMandatoryReply } from "./deleg
 import { WorkerAgentMailbox, workerMailboxHasOpenObligation } from "./delegation/worker-agent-control.ts";
 import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
 import { readWorkerMailboxRecord, workerMailboxPath } from "./delegation/worker-mailbox-record.ts";
+import { interfaceText } from "./language/interface-text.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import {
 	hasPendingSessionBundleRetention,
@@ -42,7 +43,8 @@ import { isPlainRecord } from "./util/value-guards.ts";
  *   specialist context, unreadable transcript) accepts, and no worker or session-root mailbox owes work;
  * - no durable usage or accepted-worker receipt is waiting for parent delivery;
  * - no bot's history references a run of its session (`historyReferencedSessionIds`): a bot's chat reads its earlier
- *   worker conversations from the bundle.
+ *   worker conversations from the bundle. A bot index that exists but does not read skips the whole run (reported),
+ *   since the sessions it holds are unknown.
  *
  * An obligation older than {@link SESSION_BUNDLE_MAX_AGE_MS} can never be answered, because the session that
  * owed it is long gone. Before a bundle is refused for one, it is settled as failed with
@@ -406,7 +408,12 @@ export async function sweepSessionBundles(
 		const start = names.length > 0 ? Math.floor(now / 1000) % names.length : 0;
 		const bundles = [...names.slice(start), ...names.slice(0, start)].slice(0, MAX_BUNDLES_INSPECTED);
 		const protectedIds = await protectedSessionIds(agentDir, currentSessionId);
-		const historyHeld = historyReferencedSessionIds(agentDir);
+		const history = historyReferencedSessionIds(agentDir);
+		if (history.unreadable.length > 0) {
+			for (const agentId of history.unreadable) report(interfaceText().botTeam.botHistoryIndexUnreadable(agentId));
+			return result;
+		}
+		const historyHeld = history.sessionIds;
 		const transcripts = indexSessionTranscripts(agentDir);
 		if (!transcripts) {
 			report("session bundle retention skipped: the session transcript index exceeded its bound");

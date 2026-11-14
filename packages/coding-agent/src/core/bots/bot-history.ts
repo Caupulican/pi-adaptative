@@ -120,34 +120,48 @@ function isRun(value: unknown): value is BotHistoryRun {
 }
 
 function readHistoryFile(agentDir: string, agentId: string): BotHistoryFile | undefined {
-	return readHistoryAt(botHistoryFile(agentDir, agentId), agentId);
+	const index = readHistoryAt(botHistoryFile(agentDir, agentId), agentId);
+	return index.state === "read" ? index.history : undefined;
 }
 
-function readHistoryAt(file: string, agentId: string): BotHistoryFile | undefined {
-	if (!existsSync(file)) return undefined;
+/** A bot's index on disk: no file, a file that does not read as an index, or its runs. */
+type HistoryIndex = { state: "absent" } | { state: "unreadable" } | { state: "read"; history: BotHistoryFile };
+
+function readHistoryAt(file: string, agentId: string): HistoryIndex {
+	if (!existsSync(file)) return { state: "absent" };
 	try {
 		const value: unknown = JSON.parse(readFileSync(file, "utf8"));
-		if (!isPlainRecord(value) || value.version !== 1 || !Array.isArray(value.runs)) return undefined;
-		return { version: 1, agentId, scanned: value.scanned === true, runs: value.runs.filter(isRun) };
+		if (!isPlainRecord(value) || value.version !== 1 || !Array.isArray(value.runs)) return { state: "unreadable" };
+		const runs = value.runs.filter(isRun);
+		return { state: "read", history: { version: 1, agentId, scanned: value.scanned === true, runs } };
 	} catch {
-		return undefined;
+		return { state: "unreadable" };
 	}
+}
+
+/** The sessions bots' histories hold, and the bots whose index could not be read (whose holds are unknown). */
+export interface HistoryReferences {
+	readonly sessionIds: Set<string>;
+	readonly unreadable: readonly string[];
 }
 
 /**
  * The root sessions whose orchestration bundles hold a run some bot's history references: retention keeps those bundles,
- * since a bot's chat reads its earlier conversations from them (only the newest runs stay indexed, so the hold ends).
+ * since a bot's chat reads its earlier conversations from them (only the newest runs stay indexed, so the hold ends). A
+ * bot whose index exists but does not read is named in `unreadable`: what it holds is unknown, so retention must not run.
  */
-export function historyReferencedSessionIds(agentDir: string): Set<string> {
-	const ids = new Set<string>();
+export function historyReferencedSessionIds(agentDir: string): HistoryReferences {
+	const sessionIds = new Set<string>();
+	const unreadable: string[] = [];
 	const dir = botsDir(agentDir);
-	if (!existsSync(dir)) return ids;
+	if (!existsSync(dir)) return { sessionIds, unreadable };
 	for (const home of readdirSync(dir, { withFileTypes: true })) {
 		if (!home.isDirectory()) continue;
-		const history = readHistoryAt(join(dir, home.name, "history.json"), home.name);
-		for (const run of history?.runs ?? []) ids.add(run.parentSessionId);
+		const index = readHistoryAt(join(dir, home.name, "history.json"), home.name);
+		if (index.state === "unreadable") unreadable.push(home.name);
+		else if (index.state === "read") for (const run of index.history.runs) sessionIds.add(run.parentSessionId);
 	}
-	return ids;
+	return { sessionIds, unreadable };
 }
 
 /** The one scan of the root session files has run for this agent directory (see the module comment). */

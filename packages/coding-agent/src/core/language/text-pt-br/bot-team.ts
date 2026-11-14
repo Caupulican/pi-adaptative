@@ -102,6 +102,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: o resultado do turno não pôde ser registrado (${reason}).`,
 	botHistoryFileUnreadable: (reason: string) =>
 		`Histórico dos bots: um arquivo de sessão não pôde ser lido (${reason}).`,
+	botHistoryIndexUnreadable: (agentId: string) =>
+		`Bot ${agentId}: o índice do histórico não pode ser lido, então os pacotes de sessão antigos não são limpos até ele ser gravado de novo.`,
 	botHistoryNotIndexed: (reason: string) => `O histórico dos bots não pôde ser indexado (${reason}).`,
 	botHistoryRunUnreadable: (reason: string) =>
 		`Histórico dos bots: uma conversa anterior não pôde ser lida (${reason}).`,

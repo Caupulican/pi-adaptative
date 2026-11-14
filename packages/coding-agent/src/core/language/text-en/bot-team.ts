@@ -103,6 +103,8 @@ export const BOT_TEAM = {
 	botTurnOutcomeNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its turn outcome could not be recorded (${reason}).`,
 	botHistoryFileUnreadable: (reason: string) => `Bot history: a session file could not be read (${reason}).`,
+	botHistoryIndexUnreadable: (agentId: string) =>
+		`Bot ${agentId}: its history index cannot be read, so old session bundles are not cleaned up until it is written again.`,
 	botHistoryNotIndexed: (reason: string) => `Bot history could not be indexed (${reason}).`,
 	botHistoryRunUnreadable: (reason: string) => `Bot history: an earlier conversation could not be read (${reason}).`,
 	/** The owner's model policy (`isModelAllowed`) refuses the bot's model. */
