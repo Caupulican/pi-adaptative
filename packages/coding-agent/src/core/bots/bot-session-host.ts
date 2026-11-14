@@ -940,28 +940,30 @@ export class BotSessionHost {
 	 * only by its own session, and an inbox is taken only by the host of the session, so a process that starts, sees a host
 	 * let the bot go or die, or rebuilds a session on a changed record takes them up again. A session with watches is opened
 	 * only by a process working in the directory it worked in (a watch's relative path reads against it); one owed only its
-	 * inbox, also by a process working where a waiting message was sent from. Another process that opened it first is not a
-	 * failure.
+	 * inbox (a bot whose session never ran is owed nothing else), also by a process working where a waiting message was
+	 * sent from. Another process that opened it first is not a failure.
 	 */
 	private openIfOwed(agentId: string): void {
 		const agentDir = this.ports.agentDir();
 		if (this.stopped || this.entries.has(agentId) || readRemoteBotHost(agentDir, agentId, this.holder)) return;
-		const saved = this.view.savedSessionOf(agentId);
 		const record = this.ports.store().getBot(agentId);
-		if (!saved?.cwd || !record || record.retired || !this.runsAsSession(record)) return;
+		if (!record || record.retired || !this.runsAsSession(record)) return;
+		// A bot whose session never ran (no file, or one naming no directory) holds no watch: it is owed only its inbox.
+		const saved = this.view.savedSessionOf(agentId);
+		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
 		const notResumed = (error: unknown) =>
 			this.tellOwedWorkWaits(agentId, interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error)));
-		const watching = owesWatchWork(this.ports.store(), saved.id, this.idleTimers().now());
+		const watching = worked !== undefined && owesWatchWork(this.ports.store(), worked.id, this.idleTimers().now());
 		let unrun = "";
 		try {
 			// The file, only when the store owes nothing; a file it cannot read leaves the rest of what it is owed.
-			if (!watching) unrun = this.wakeLedger.read(agentId, saved.file, agentDir);
+			if (worked && !watching) unrun = this.wakeLedger.read(agentId, worked.file, agentDir);
 		} catch (error) {
 			notResumed(error);
 		}
 		const waiting = !watching && botInboxWaiting(agentDir, agentId) ? this.readInbox(agentId).waiting : [];
 		if (!watching && !unrun && waiting.length === 0) return;
-		const cwds = [saved.cwd, ...waiting.map((item) => item.message.from.cwd)];
+		const cwds = [...(worked ? [worked.cwd] : []), ...waiting.map((item) => item.message.from.cwd)];
 		// It opens for a root its session works in one of those directories for: a bot of its own works where that root works,
 		// a profile's where its profile compiles to for that root.
 		let sender: BotSender | undefined;
