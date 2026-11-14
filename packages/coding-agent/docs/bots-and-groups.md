@@ -102,15 +102,17 @@ a run transcript it shows changed; otherwise it keeps what it drew.
 
 Until later phases move them, these still run as workers of the session that sends them: group messages (the group's
 conversations), the orchestrator's `bot ask`, routine sends, leaders, the bots a leader made and machines joined over the
-link. A bot made from a worker profile runs as a session of its own too, on what the worker admission compiles for that
-profile at every run: the admitted model and thinking, the plan's tools, its working directory, its read roots (a profile
+link. A bot made from a worker profile runs as a session of its own too, on the contract its profile compiles to at every
+run, by the resolution a fresh worker of it takes (the owner's pin for its role, the bot's model stance, read-only grant
+and soul, the model rules and the execution plan), without a worker run's admission gates (whether the session delegates
+now, the worker fleet), since no worker runs: the resolved model and thinking, the plan's tools, its working directory, its read roots (a profile
 that confines reads confines the read tools, `repo_read`, `lookup`, the read-only shell and its watches to them), its write
 roots and read-only grant, a capability ceiling of the plan's capabilities held by the session's tool gate, the soul and
 resources a worker of it carries, and a turn bound of the profile's cost budget when it is lower than the worker and
 session bounds. A run on a session built from an older compile (the profile, a model pin or the worker policy changed
 since) is refused and the idle session is rebuilt. A profile that needs an independent verifier of each claim, names a
 tool a session does not hold, or sets a token, wall-clock, attempt or tool-call limit (which only a worker's run counts)
-keeps the bot a worker; a profile the admission refuses refuses the message in the owner's words. One predicate decides it
+keeps the bot a worker; a profile the resolution refuses refuses the message in the owner's words. One predicate decides it
 for the message and for the bot's host alike: a bot whose record leaves the session path (it becomes a leader, a leader's,
 or its profile now needs a worker) has its idle session closed and its watches dropped, and no session of it is opened
 again, so it never answers in two conversations at once. A bot's session has no subagents, routines, goals or `bot` tool yet (its only routine tool is `task_watch`). A bot that only ever talked through those

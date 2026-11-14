@@ -121,7 +121,12 @@ import {
 	verifierWorkerExecutionContract,
 	workerPromptSoul,
 } from "../orchestration/worker-execution-contract.ts";
-import { isPinBypass, resolveWorkerModelPin, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
+import {
+	isPinBypass,
+	pinnedModelSkipReason,
+	resolveWorkerModelPin,
+	type WorkerModelPinPolicy,
+} from "../orchestration/worker-model-pins.ts";
 import {
 	assertWorkerReceiptAdmission,
 	inheritWorkerReceiptAdmission,
@@ -155,7 +160,7 @@ import {
 } from "../util/resource-release.ts";
 import { BOT_MESSAGE_TOOL_NAME, type BotMessageDirectory } from "./bot-message-contract.ts";
 import { createBotMessageBroker } from "./bot-message-directory.ts";
-import type { BotSessionCompilation } from "./bot-worker-start.ts";
+import { type BotSessionCompilation, compileBotSessionContract } from "./bot-session-compile.ts";
 import { importRecordedParentWrites } from "./foreground-parent-writes.ts";
 import { unmetGoalDependencyReason } from "./goal-dependency-gate.ts";
 import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
@@ -338,11 +343,6 @@ import {
 	type WorkerWriteReservationResourceSnapshot,
 	type WorkerWriteReservationWaitYield,
 } from "./worker-write-reservation-coordinator.ts";
-
-/** An owner pin that cannot run keeps the refusal causes its resolver reported: `...:<role>:<causes>`. */
-function pinnedModelSkipReason(role: string, refusal: string): string {
-	return `worker_model_pin_unavailable:${role}:${refusal.slice(refusal.indexOf(":") + 1)}`;
-}
 
 /** The owner's own authority a worker whose words came from a third party is not given at a tool call (see the resolver's `thirdParty`). */
 const THIRD_PARTY_WITHHELD_TOOL_NAMES: ReadonlySet<string> = new Set([PROACTIVITY_TOOL_NAME, BOT_MESSAGE_TOOL_NAME]);
@@ -1917,28 +1917,21 @@ export class WorkerDelegationController {
 		return admission.ok ? { ready: true } : { ready: false, reason: admission.skipReason };
 	}
 
-	/**
-	 * A bot made from a profile, compiled for a session of its own by the admission a fresh worker for the same start
-	 * passes (`botWorkerStart`): the profile with the owner's pin for its role, the bot's authority and soul over it, the
-	 * model rules and the execution plan; its resources become the system prompt a worker's carries.
-	 */
+	/** A bot made from a profile, compiled for a session of its own by the resolution a fresh worker of it takes (`bot-session-compile.ts`). */
 	compileBotSession(request: WorkerDelegationRequest & { readonly profileId: string }): BotSessionCompilation {
-		const preset = this.resolveWorkerPreset(request, this.deps.getSettingsManager().getWorkerDelegationSettings());
-		if (!preset.ok) return preset;
-		const admission = this.resolveWorkerAdmission(request);
-		if (!admission.ok) return admission;
-		const selected = selectWorkerResourcePointers(admission.shipment.resourcePointers, admission.resourcePointerIds);
-		if (!selected.ok) return { ok: false, skipReason: selected.reason };
-		const materialized = materializeWorkerResourceBundle(selected.pointers);
-		if (!materialized.ok) return { ok: false, skipReason: `worker_resource_materialization_${materialized.code}` };
-		const { shipment, executionPlan: plan } = admission;
-		return {
-			ok: true,
-			profile: preset.preset.profile,
-			shipment,
-			plan,
-			resourceSystemPrompt: materialized.systemPrompt,
-		};
+		return compileBotSessionContract(
+			{
+				resolver: () => this.getWorkerProfileResolver(),
+				settings: () => this.deps.getSettingsManager().getWorkerDelegationSettings(),
+				modelPinPolicy: () => this.deps.getSettingsManager().getWorkerModelPinPolicy(),
+				resolveAuthority: (input) => this.resolveWorkerAuthority(input),
+				isModelAllowed: (model) => this.deps.isModelAllowed?.(model) !== false,
+				requiredVerifier: (profile, policy) => this.resolveRequiredVerifier(profile, policy),
+				plan: (profile, settings) => this.buildWorkerExecutionPlan(profile, settings),
+				systemPromptMaxChars: (model) => this.laneCapabilityProfile(model).systemPromptMaxChars,
+			},
+			request,
+		);
 	}
 
 	private resolveWorkerAdmission(

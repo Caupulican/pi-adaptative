@@ -4,8 +4,8 @@
  * A bot of its own runs on its record (`ownBotSession`): its model and thinking, the read tools with the file and process
  * tools when it may write, a worker's private-path scope in the owner's project directory, and its soul.
  *
- * A bot made from a worker profile runs on what the worker admission compiled for it (`profileBotSession`, from
- * `BotSessionCompilation`): the admitted model and thinking, the plan's tools a session holds plus the watch it arms for
+ * A bot made from a worker profile runs on the contract its profile compiled to (`profileBotSession`, from
+ * `BotSessionCompilation`): the resolved model and thinking, the plan's tools a session holds plus the watch it arms for
  * its own waits, the plan's working directory, its read roots (when the plan confines reads), write roots, private paths
  * and read-only grant as the session's private path scope, a capability ceiling of the plan's capabilities and cost bound
  * held by the session's tool gate, the soul a worker of it would carry and its resources as a system prompt. A profile
@@ -19,7 +19,7 @@ import { checkSoulText } from "../agent-identity.ts";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import type { SessionPrivatePathScope } from "../autonomy/worker-session-private-scope.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
-import type { BotSessionCompilation } from "../delegation/bot-worker-start.ts";
+import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts";
 import { type PersistentBotRecord, RESERVED_BOT_CREATOR_IDS } from "../delegation/persistent-bot-team-store.ts";
 import { READ_TOOL_NAMES, REPO_READ_TOOL_NAME, WRITE_TOOL_NAMES } from "../delegation/worker-execution-policy.ts";
 import { interfaceText } from "../language/interface-text.ts";
@@ -127,12 +127,13 @@ export type ProfileBotSession =
 	/** Why only a worker's run can hold the bot, as a reason code. */
 	| { readonly route: "worker"; readonly reason: string };
 
-/** The session a bot made from a profile runs as, from what the worker admission compiled for it. */
+/** The session a bot made from a profile runs as, from the contract its profile compiled to (`bot-session-compile.ts`). */
 export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok: true }>): ProfileBotSession {
-	const { profile, shipment, plan } = compiled;
+	const { profile, plan } = compiled;
+	const { worker } = compiled.contract;
 	if (profile.requireIndependentVerification === true)
 		return { route: "worker", reason: "independent_verification_required" };
-	const planned = plan.toolManifests.map((manifest) => manifest.toolName);
+	const planned = worker.authority.toolNames;
 	// A tool the profile names that a session does not hold (a worker's brokered tools) needs a worker's run; a tool the
 	// plan adds on its own (YOLO's surface) is not the profile's to require.
 	const named = new Set(mapToolNamesForPlatform(profile.toolNames));
@@ -147,23 +148,27 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 	const capabilityEnvelope: CapabilityEnvelope = {
 		id: `bot-profile:${profile.profileId}`,
 		profileId: profile.profileId,
-		capabilities: [...new Set([...plan.requiredCapabilities, ...requiredEnvelopeCapabilities(TASK_WATCH_TOOL_NAME)])],
+		capabilities: [
+			...new Set([...worker.authority.capabilities, ...requiredEnvelopeCapabilities(TASK_WATCH_TOOL_NAME)]),
+		],
 		allowedTools: tools,
-		...(plan.budget.maxCostUsd !== undefined ? { maxEstimatedUsd: plan.budget.maxCostUsd } : {}),
+		...(worker.authority.budget.maxCostUsd !== undefined
+			? { maxEstimatedUsd: worker.authority.budget.maxCostUsd }
+			: {}),
 	};
 	const privatePathScope: SessionPrivatePathScope = {
 		readOnlyShell: plan.readOnly || plan.shellReadOnly,
 		confinedWrites: true,
 		credentialExposure: "deny",
-		...(plan.writePaths.length > 0 ? { writeRoots: plan.writePaths } : {}),
-		...(plan.readConfined ? { readRoots: plan.readPaths } : {}),
-		...(plan.deniedPaths.length > 0 ? { deniedPaths: plan.deniedPaths } : {}),
+		...(worker.authority.writePaths.length > 0 ? { writeRoots: worker.authority.writePaths } : {}),
+		...(plan.readConfined ? { readRoots: worker.authority.readPaths } : {}),
+		...(worker.authority.deniedPaths.length > 0 ? { deniedPaths: worker.authority.deniedPaths } : {}),
 	};
-	const soul = workerPromptSoul(shipment);
+	const soul = workerPromptSoul(worker);
 	const definition = {
-		model: shipment.model,
-		thinkingLevel: shipment.modelBinding.thinkingLevel,
-		role: shipment.profile.role,
+		model: compiled.model,
+		thinkingLevel: worker.modelBinding.thinkingLevel,
+		role: worker.profile.role,
 		cwd: plan.cwd,
 		tools,
 		privatePathScope,

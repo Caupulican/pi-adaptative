@@ -267,6 +267,11 @@ function clonePin(pin: ResolvedWorkerModelPin): ResolvedWorkerModelPin {
 	return { binding: cloneBinding(pin.binding), source: pin.source, tier: pin.tier };
 }
 
+/** An owner pin that cannot run keeps the refusal causes its resolver reported: `...:<role>:<causes>`. */
+export function pinnedModelSkipReason(role: string, refusal: string): string {
+	return `worker_model_pin_unavailable:${role}:${refusal.slice(refusal.indexOf(":") + 1)}`;
+}
+
 /** The leader runtime pin of an active policy, cloned; undefined when no layer sets `leader`. */
 export function resolveLeaderModelPin(policy: WorkerModelPinPolicy): ResolvedWorkerModelPin | undefined {
 	return policy.status === "active" && policy.leader ? clonePin(policy.leader) : undefined;

@@ -14,8 +14,8 @@
  * home; it is a session of its own, so its edge grants are its own conversation's plus the settings', never another
  * session's. Its tools are the read tools, System One's tool and a
  * shell, plus the file tools and python when the record grants `canWrite`; a read-only bot's shell runs only commands the
- * read-only shell line admits. A bot made from a worker profile runs on what the worker admission compiles for it, again
- * at every run (`bot-session-profile.ts`): the admitted model, the plan's tools, read and write roots and read-only grant,
+ * read-only shell line admits. A bot made from a worker profile runs on the contract its profile compiles to, again at
+ * every run, by the resolution a fresh worker of it takes and none of a worker run's admission gates (`bot-session-profile.ts`): the resolved model, the plan's tools, read and write roots and read-only grant,
  * a capability ceiling held by the session's tool gate, the profile's soul and resources; a profile that needs what only
  * a worker's run has keeps it a worker (`runsAsSession`). Each turn is bounded by the worker spend bound (and the
  * profile's cost budget, when lower) and its usage is reported to the main session's cost view. Subagents, routines of
@@ -50,7 +50,7 @@ import type {
 	BotOperatorMessageDispatchResult,
 	BotOperatorMessageOptions,
 } from "../delegation/bot-operator-message-options.ts";
-import type { BotSessionCompilation } from "../delegation/bot-worker-start.ts";
+import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -114,7 +114,7 @@ export interface BotSessionHostPorts {
 	warn(message: string): void;
 	/** Why the worker admission refuses the bot's model now; undefined when it may run. */
 	modelRefusal(record: PersistentBotRecord, model: Model<Api>): string | undefined;
-	/** What the worker admission compiles a bot made from a profile to, exactly as it would admit a worker of it. */
+	/** What a bot made from a profile compiles to, by the resolution a fresh worker of it takes (`bot-session-compile.ts`). */
 	compileProfile(record: PersistentBotRecord & { readonly profileId: string }): BotSessionCompilation;
 	/**
 	 * The dollars one turn may spend, as a worker's budget bounds it, with the bound that sets it (the owner's worker bound
@@ -558,7 +558,7 @@ export class BotSessionHost {
 
 	/**
 	 * The session the record defines now: a bot of its own on its record, a bot made from a profile on what the worker
-	 * admission compiles for it. Throws the owner's words when it cannot run as a session.
+	 * resolution compiles for it. Throws the owner's words when it cannot run as a session.
 	 */
 	private define(record: PersistentBotRecord, cwd = this.ports.sender().cwd()): BotSessionDefinition {
 		const { profileId } = record;
@@ -579,7 +579,7 @@ export class BotSessionHost {
 
 	/**
 	 * Whether the bot answers in a session of its own: never a leader or a bot a leader made (`botMayRunAsSession`), and a
-	 * bot made from a profile unless its profile needs what only a worker's run has (an independent verifier, a tool a session does not hold). A profile the admission refuses is
+	 * bot made from a profile unless its profile needs what only a worker's run has (an independent verifier, a tool a session does not hold). A profile the resolution refuses is
 	 * refused by the session, in the owner's words.
 	 */
 	runsAsSession(record: PersistentBotRecord): boolean {

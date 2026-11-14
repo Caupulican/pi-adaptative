@@ -1,7 +1,7 @@
 /**
  * What a bot's session reads from the main session: its settings manager (the bot's follows the same storage), its System One as it is now (on or off, provider, transport), and, as the
  * worker admission reads them, the model rules for an explicitly requested model (one predicate,
- * `worker-authority-resolver`), a profile compiled by that admission (`compileBotSession`), the spend bound a worker's budget carries, and the cost view the main session keeps for
+ * `worker-authority-resolver`), a profile compiled by the resolution a fresh worker of it takes (`compileBotSession`), the spend bound a worker's budget carries, and the cost view the main session keeps for
  * spawned work. Composed here so the lane controller only hands over its
  * dependencies, and attaches to its process's bot session host with them (`attachBotSessions`).
  */
@@ -43,7 +43,7 @@ function botModelRefusal(
 		: undefined;
 }
 
-/** What the lane controller hands over of its own: the bot store, its warnings and its worker admission. */
+/** What the lane controller hands over of its own: the bot store, its warnings and its worker profile resolution. */
 interface BotSessionOwnPorts extends Pick<BotSessionRootPorts, "store" | "warn"> {
 	workerController(): Pick<WorkerDelegationController, "compileBotSession">;
 }
@@ -57,7 +57,7 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 	const { workerController, ...ownPorts } = own;
 	return {
 		...ownPorts,
-		// A bot made from a profile is compiled by the admission a worker of it would pass, from the same start request.
+		// A bot made from a profile is compiled by the resolution a worker of it takes, from the same start request.
 		compileProfile: (record) =>
 			workerController().compileBotSession({
 				...botWorkerStart(deps.getSettingsManager().getWorkerModelPinPolicy(), record),

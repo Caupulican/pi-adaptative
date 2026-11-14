@@ -1,16 +1,13 @@
 /**
  * A bot's start as the worker admission takes it, whatever then runs the bot: its model stance, soul, profile and
  * authority (`botWorkerStart`), for a worker started for it and for the session a bot made from a profile is compiled to
- * by the same admission (`BotSessionCompilation`).
+ * by the same resolution (`bot-session-compile.ts`).
  */
 
-import type { OrchestrationProfile } from "../orchestration/contracts.ts";
 import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-guard.ts";
 import { botStartModelStance, type WorkerModelPinPolicy } from "../orchestration/worker-model-pins.ts";
 import type { PersistentBotRecord } from "./persistent-bot-team-store.ts";
 import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
-import type { WorkerExecutionPlan } from "./worker-execution-policy.ts";
-import type { ResolvedWorkerProfile } from "./worker-profile-resolver.ts";
 
 export function botWorkerStart(
 	policy: WorkerModelPinPolicy,
@@ -37,18 +34,3 @@ export function botWorkerStart(
 		},
 	};
 }
-
-/** What the worker admission compiles a bot made from a profile to, for a session of its own; or why it refused. */
-export type BotSessionCompilation =
-	| { readonly ok: false; readonly skipReason: string }
-	| {
-			readonly ok: true;
-			/** The profile as its owner wrote it: the tools it names, and whether each claim needs an independent verifier. */
-			readonly profile: OrchestrationProfile;
-			/** The admitted worker: model and binding, compiled profile, soul (the bot's with the profile's). */
-			readonly shipment: ResolvedWorkerProfile;
-			/** What it may do: tools, read and write roots, read-only grant and budget. */
-			readonly plan: WorkerExecutionPlan;
-			/** The profile's resources as a worker's system prompt carries them; empty when it has none. */
-			readonly resourceSystemPrompt: string;
-	  };
