@@ -1,6 +1,7 @@
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { readdir, rm } from "node:fs/promises";
 import { basename, join } from "node:path";
+import { harnessLog } from "../kernel/harness-log.ts";
 import {
 	botHomeSessionsDir,
 	botsDir,
@@ -11,6 +12,7 @@ import {
 } from "./agent-paths.ts";
 import { historyReferencedSessionIds } from "./bots/bot-history.ts";
 import { OBLIGATION_LEDGER_NAME, recordDiscardedObligations } from "./delegation/obligation-ledger.ts";
+import { PersistentBotTeamStore } from "./delegation/persistent-bot-team-store.ts";
 import { SessionRootMailbox, sessionRootMailboxHasMandatoryReply } from "./delegation/session-root-mailbox.ts";
 import { WorkerAgentMailbox, workerMailboxHasOpenObligation } from "./delegation/worker-agent-control.ts";
 import { WorkerConversationStore } from "./delegation/worker-conversation-store.ts";
@@ -26,6 +28,7 @@ import {
 import { readTaskRuntimeProjection } from "./orchestration/task-runtime-reader.ts";
 import { workerReceiptPublicationPending } from "./orchestration/worker-receipt-publication.ts";
 import { listEntries } from "./process-matrix/store.ts";
+import { settleGoneSessionRoutineResults } from "./routines/routine-origin-settlement.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
 
 /**
@@ -54,6 +57,10 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * write: when one obligation is younger than the age, or one cannot be settled (a project-bound mailbox,
  * an unreadable one), the whole bundle is untouched and refused. A partial settlement would write the
  * mailboxes, refresh the bundle's newest file time and postpone its removal by the full retention age.
+ *
+ * Before the bundles, the same run settles the routine results addressed to a session that was deleted (its transcript
+ * gone and no process holding it) as undeliverable, since that session never opens again to settle them itself
+ * (`settleGoneSessionRoutineResults`); it needs the transcript index, so an index over its bound skips it too.
  *
  * Work per run is bounded by the constants below; the remainder is left for the next startup, which starts
  * its scan at a different bundle so permanently refused bundles cannot starve later ones. Failures are
@@ -102,6 +109,8 @@ export interface SessionBundleRetentionResult {
 	removedBytes: number;
 	/** Obligations older than {@link SESSION_BUNDLE_MAX_AGE_MS} settled as expired this run. */
 	expiredObligations: number;
+	/** Routine results addressed to a deleted session settled undeliverable this run (`settleGoneSessionRoutineResults`). */
+	settledRoutineResults: number;
 	/** At most {@link MAX_DIAGNOSTICS} short messages; empty when nothing went wrong. */
 	diagnostics: string[];
 }
@@ -189,6 +198,30 @@ function indexSessionTranscripts(agentDir: string): Map<string, string[]> | unde
 		}
 	}
 	return index;
+}
+
+/**
+ * Settles the routine results addressed to deleted sessions, which never open again to settle them. Its own step: a
+ * routine store that cannot be read is logged and leaves the bundle retention to run.
+ */
+function settleRoutineResultsOfGoneSessions(
+	agentDir: string,
+	protectedIds: ReadonlySet<string>,
+	transcripts: ReadonlyMap<string, readonly string[]>,
+	nowMs: number,
+): number {
+	const warn = (message: string): void => harnessLog.warn("routines", message);
+	try {
+		return settleGoneSessionRoutineResults({
+			store: new PersistentBotTeamStore(agentDir, warn),
+			protectedSessionIds: protectedIds,
+			sessionFiles: (sessionId) => transcripts.get(sessionId) ?? [],
+			nowMs,
+		});
+	} catch (error) {
+		warn(`routine results of deleted sessions were not settled: ${describe(error)}`);
+		return 0;
+	}
 }
 
 /** The directory name is `<readable prefix>-<digest>`; only ids that round-trip exactly can be reserved. */
@@ -391,12 +424,17 @@ export async function sweepSessionBundles(
 		removed: 0,
 		removedBytes: 0,
 		expiredObligations: 0,
+		settledRoutineResults: 0,
 		diagnostics: [],
 	};
 	const report = (message: string): void => {
 		if (result.diagnostics.length < MAX_DIAGNOSTICS) result.diagnostics.push(message.slice(0, MAX_DIAGNOSTIC_CHARS));
 	};
 	try {
+		const protectedIds = await protectedSessionIds(agentDir, currentSessionId);
+		const transcripts = indexSessionTranscripts(agentDir);
+		if (transcripts)
+			result.settledRoutineResults = settleRoutineResultsOfGoneSessions(agentDir, protectedIds, transcripts, now);
 		const root = orchestrationSessionsDir(agentDir);
 		if (!existsSync(root)) return result;
 		const names = (await readdir(root, { withFileTypes: true }))
@@ -407,14 +445,12 @@ export async function sweepSessionBundles(
 		// bundles that stay refused at the head of the order cannot starve the ones behind them.
 		const start = names.length > 0 ? Math.floor(now / 1000) % names.length : 0;
 		const bundles = [...names.slice(start), ...names.slice(0, start)].slice(0, MAX_BUNDLES_INSPECTED);
-		const protectedIds = await protectedSessionIds(agentDir, currentSessionId);
 		const history = historyReferencedSessionIds(agentDir);
 		if (history.unreadable.length > 0) {
 			for (const agentId of history.unreadable) report(interfaceText().botTeam.botHistoryIndexUnreadable(agentId));
 			return result;
 		}
 		const historyHeld = history.sessionIds;
-		const transcripts = indexSessionTranscripts(agentDir);
 		if (!transcripts) {
 			report("session bundle retention skipped: the session transcript index exceeded its bound");
 			return result;

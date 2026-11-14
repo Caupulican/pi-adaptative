@@ -65,8 +65,8 @@ export function latestUndeliverableResults(
 	return latest;
 }
 
-/** Whether `path` provably does not exist. An unreadable path is not proof: it may be readable again. */
-function fileMissing(path: string): boolean {
+/** Whether the session file `path` provably does not exist. An unreadable path is not proof: it may be readable again. */
+export function sessionFileGone(path: string): boolean {
 	try {
 		statSync(path);
 		return false;
@@ -102,7 +102,9 @@ export function routineOriginReach(manager: SessionManager, origin: WorkerReceip
 		? Boolean(sessionFile) && (origin.sessionFile === undefined || origin.sessionFile === sessionFile)
 		: origin.sessionFile === undefined;
 	if (!sameFile)
-		return origin.sessionFile !== undefined && origin.sessionFile !== sessionFile && fileMissing(origin.sessionFile)
+		return origin.sessionFile !== undefined &&
+			origin.sessionFile !== sessionFile &&
+			sessionFileGone(origin.sessionFile)
 			? "session-file-gone"
 			: "waiting";
 	if (

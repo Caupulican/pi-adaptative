@@ -21,7 +21,8 @@ harness saves one notice that is shown with the owner's next turn and names the 
 It starts no turn and calls no model, and the same state is not reported twice. A routine result
 that can never reach its session (the session file it was addressed to is gone, or the entry it was
 anchored at is missing from it) is settled instead of waiting and told with one such notice; a
-routine whose own saved point of the session is lost that way is removed and told the same way.
+routine whose own saved point of the session is lost that way is removed and told the same way. A
+result addressed to a session that was deleted is settled by the next main session's startup cleanup.
 Configure these settings through `/proactivity` or the `proactivity` settings. The model-facing
 preferences tool requires confirmation on the owner's screen before a change.
 

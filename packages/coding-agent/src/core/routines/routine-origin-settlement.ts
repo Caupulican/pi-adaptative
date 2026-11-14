@@ -4,11 +4,17 @@
  * saved origin is lost is handed to the store, which settles its undispatched runs (none could ever be dispatched) and
  * retires it once none of its dispatched runs still runs or waits for delivery. The owner is told
  * by the session's notices, read from the markers and records these writes leave (`routine-state-notices.ts`).
+ *
+ * A session that was deleted never opens again to settle its own: the main session's startup sweep
+ * (`session-bundle-retention.ts`) settles, store-wide, each pending result addressed to a session no process holds whose
+ * session file is gone and of which no other session file remains (`settleGoneSessionRoutineResults`).
  */
+import { readdirSync } from "node:fs";
+import { basename, dirname } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { MAX_ROUTINE_OCCURRENCES, type RoutineDefinitionView, type RoutineOccurrence } from "./routine-contract.ts";
-import { type RoutineOriginLoss, routineUndeliverableMarker } from "./routine-origin-reach.ts";
+import { type RoutineOriginLoss, routineUndeliverableMarker, sessionFileGone } from "./routine-origin-reach.ts";
 import { routineReceiptOrigin } from "./routine-save-origin.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 
@@ -78,4 +84,73 @@ export function lostOriginRoutines(
 		const loss = origin && originLoss(origin);
 		return loss ? [{ routineId: routine.routineId, loss }] : [];
 	});
+}
+
+export interface GoneSessionSettlementInput {
+	readonly store: Pick<RoutineStorePort, "listRoutineOccurrences" | "acknowledgeRoutineDelivery">;
+	/** Sessions a process still holds (this one, live or resumable peers): each settles its own results. */
+	readonly protectedSessionIds: ReadonlySet<string>;
+	/** The session files the agent directory holds for a session id (`<timestamp>_<id>.jsonl` names). */
+	sessionFiles(sessionId: string): readonly string[];
+	readonly nowMs: number;
+}
+
+/**
+ * Whether no file of session `sessionId` remains: the one `sessionFile` names is provably gone, the agent directory's
+ * session files name none for it, and its own directory holds no other. A directory that cannot be read proves nothing.
+ */
+function sessionGone(sessionId: string, sessionFile: string, known: readonly string[]): boolean {
+	if (!sessionFileGone(sessionFile) || known.length > 0) return false;
+	try {
+		return !readdirSync(dirname(sessionFile)).some((name) => name.endsWith(`_${sessionId}.jsonl`));
+	} catch (error) {
+		return (error as NodeJS.ErrnoException).code === "ENOENT";
+	}
+}
+
+/**
+ * Settles, across the store, each pending result addressed to a session that can never open again (its session file gone
+ * and no other file of it left, no process holding it), with the `session-file-gone` marker its own session would have
+ * written, so it stops holding a place in the routine journal. Returns how many were settled; a result a session settled
+ * or delivered meanwhile is left to it.
+ */
+export function settleGoneSessionRoutineResults(input: GoneSessionSettlementInput): number {
+	const gone = new Map<string, boolean>();
+	const marker = routineUndeliverableMarker("session-file-gone");
+	let settled = 0;
+	for (const occurrence of input.store.listRoutineOccurrences({ limit: MAX_ROUTINE_OCCURRENCES })) {
+		const { sessionId, sessionFile } = occurrence.parentOrigin;
+		if (sessionFile === undefined || input.protectedSessionIds.has(sessionId)) continue;
+		const results = [occurrence.priorUncertaintyResult, occurrence.result].filter(
+			(result) => result?.delivery === "pending" && result.recipient === sessionId,
+		);
+		if (results.length === 0) continue;
+		const key = `${sessionId}\0${sessionFile}`;
+		if (!gone.has(key)) gone.set(key, sessionGone(sessionId, sessionFile, input.sessionFiles(sessionId)));
+		if (!gone.get(key)) continue;
+		for (const result of results) {
+			if (!result) continue;
+			try {
+				input.store.acknowledgeRoutineDelivery({
+					occurrenceId: occurrence.occurrenceId,
+					recipient: sessionId,
+					resultDigest: result.digest,
+					deliveryMarker: marker,
+					nowMs: Math.max(input.nowMs, occurrence.updatedAt),
+				});
+				settled++;
+				harnessLog.warn("routines", "a routine result addressed to a deleted session was settled undeliverable", {
+					routineId: occurrence.routineId,
+					occurrenceId: occurrence.occurrenceId,
+					session: basename(sessionFile),
+				});
+			} catch (error) {
+				harnessLog.warn("routines", "a routine result addressed to a deleted session could not be settled", {
+					occurrenceId: occurrence.occurrenceId,
+					error: error instanceof Error ? error.message : String(error),
+				});
+			}
+		}
+	}
+	return settled;
 }
