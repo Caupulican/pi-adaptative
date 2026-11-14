@@ -109,7 +109,7 @@ export class BotTurnAccounting {
 		this.startedAt = Date.now();
 	}
 
-	/** The turn ended: its charge, then its outcome. */
+	/** The turn ended (or its session closes with it open): its charge, then its outcome; nothing when none is open. */
 	ended(): void {
 		this.reportCharge();
 		const since = this.startedAt;
@@ -120,8 +120,8 @@ export class BotTurnAccounting {
 		if (summary.length > 0) this.ports.outcome(summary);
 	}
 
-	/** The running turn's spend is reported now (its session closes), once, whether or not its end comes after. */
-	reportCharge(): void {
+	/** The running turn's spend is reported, once. */
+	private reportCharge(): void {
 		const usageBefore = this.usageBefore;
 		this.usageBefore = undefined;
 		const charge = usageBefore && botTurnCharge(this.agentId, this.session, usageBefore);

@@ -1031,8 +1031,9 @@ export class BotSessionHost {
 		const closing = runAsyncReleaseSteps(
 			[
 				() => entry.session.abort(interfaceText().botTeam.botTurnAbortReasons.sessionClosing),
-				// The aborted turn's spend is reported once, whether or not its end reached the subscription first.
-				() => entry.turns.reportCharge(),
+				// A turn still open ends here: its spend, then its answer, once, whether or not its end reached the subscription
+				// first (a run end that announced a retry that never began leaves it open).
+				() => entry.turns.ended(),
 				() => entry.unsubscribe(),
 				() => entry.session.disposeAndWait(),
 				() => entry.releaseSettings(),
