@@ -210,6 +210,7 @@ export class BotOwedWork {
 
 	/** The bot was released (retired, or off the session path): nothing of it is kept. */
 	released(agentId: string): void {
+		this.told.delete(agentId);
 		this.wakes.forget(agentId);
 		this.forgetRefusal(agentId);
 		this.failedOpens.delete(agentId);
