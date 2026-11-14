@@ -277,13 +277,7 @@ export interface UpsertPersistentTeamInput {
 	readonly lastReadAt?: number;
 }
 
-export interface BotOperatorMessageDispatchResult {
-	readonly agentId: string;
-	readonly mode: "started" | "followed_up" | "steered" | "queued";
-	readonly messageId?: string;
-	readonly laneId?: string;
-	readonly modelRef: string;
-}
+export type { BotOperatorMessageDispatchResult } from "./bot-operator-message-options.ts";
 
 export interface TeamOperatorMessageDispatchResult {
 	readonly teamId: string;

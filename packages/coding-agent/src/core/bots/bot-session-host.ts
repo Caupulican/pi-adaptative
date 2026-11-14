@@ -46,13 +46,12 @@ import { botHostLockFile, botSystemOneEvidenceDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { boundSessionTurnSpend, unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
 import { usageSince } from "../cost/usage-delta.ts";
-import type { BotOperatorMessageOptions } from "../delegation/bot-operator-message-options.ts";
-import type { BotSessionCompilation } from "../delegation/bot-worker-start.ts";
 import type {
 	BotOperatorMessageDispatchResult,
-	PersistentBotRecord,
-	PersistentBotTeamStore,
-} from "../delegation/persistent-bot-team-store.ts";
+	BotOperatorMessageOptions,
+} from "../delegation/bot-operator-message-options.ts";
+import type { BotSessionCompilation } from "../delegation/bot-worker-start.ts";
+import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
@@ -67,6 +66,17 @@ import type { TimerPort, TimerSource } from "../util/timer-port.ts";
 import { BotHistory, type BotHistoryRead } from "./bot-history.ts";
 import { botHomeOf, ensureBotHome } from "./bot-home.ts";
 import { BotHostStateWriter, type BotSessionState, readRemoteBotHost } from "./bot-host-state.ts";
+import {
+	type BotInboxItem,
+	type BotInboxRefusal,
+	botInboxWaiting,
+	enqueueBotInbox,
+	readBotInbox,
+	readBotInboxRefusals,
+	refuseBotInboxMessage,
+	takeBotInboxMessage,
+} from "./bot-inbox.ts";
+import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import {
 	type BotSessionDefinition,
@@ -119,7 +129,7 @@ export interface BotSessionHostPorts {
  */
 export interface BotSender {
 	cwd(): string;
-	/** The pi session that hosts the bot, named to the owner when another process is refused. */
+	/** The pi session that hosts the bot, named to the owner of a message another process sends it. */
 	hostSessionId(): string;
 	/** An owner-facing warning of the bot's turn (a turn that failed, a spend bound reached). */
 	warn(message: string): void;
@@ -177,6 +187,11 @@ interface BotSessionEntry {
 	idleTimer: unknown;
 }
 
+/** Another host holds the bot's lock: a message goes to the bot's inbox for it instead (`sendToHost`). */
+class BotSessionHeldError extends Error {
+	override readonly name = "BotSessionHeldError";
+}
+
 /** What failed, in its own words: each cause of a failure that gathers several. */
 function errorText(error: unknown): string {
 	if (error instanceof AggregateError) return error.errors.map(errorText).join("; ");
@@ -224,6 +239,8 @@ export class BotSessionHost {
 
 	/** The stop of the host this one replaced in its process, which no session is built before. */
 	private readonly previousStop: Promise<void>;
+	/** Takes the inboxes of the bots this host runs: the owner's messages sent from other processes. */
+	private readonly inbox: BotInboxDrain;
 
 	constructor(ports: BotSessionHostPorts, previousStop?: Promise<void>) {
 		this.ports = ports;
@@ -240,12 +257,53 @@ export class BotSessionHost {
 				timers: () => ports.timers(),
 				warn: (message) => ports.warn(message),
 				runsLocally: (agentId) => this.entries.has(agentId),
-				// A host that let a bot go leaves its watches unsampled until a process opens its session again.
-				hostChanged: (agentId) => this.openIfWatching(agentId),
+				// A host that let a bot go leaves its watches and its inbox to no one until a process opens its session again.
+				hostChanged: (agentId) => this.openIfOwed(agentId),
 				changed: (agentIds) => this.changedMany(agentIds),
+				inboxChanged: (agentId) => this.takeInbox(agentId),
 			},
 			this.holder,
 		);
+		this.inbox = new BotInboxDrain({
+			agentDir: () => ports.agentDir(),
+			timers: () => this.idleTimers(),
+			watching: () => this.view.watching(),
+			hosted: () => [...this.entries.keys()],
+			give: async (agentId, message) => {
+				const entry = this.entries.get(agentId);
+				if (!entry || this.stopped) return false;
+				await this.give(entry, message.text, message.mode);
+				return true;
+			},
+			warn: (message) => ports.warn(message),
+			changed: (agentId) => this.changed(agentId),
+		});
+	}
+
+	/** Takes the messages written to the inbox of a bot this host runs; a failure reaches the owner as a warning. */
+	private takeInbox(agentId: string): void {
+		void this.inbox
+			.drain(agentId)
+			.catch((error: unknown) =>
+				this.ports.warn(interfaceText().botTeam.botInboxNotTaken(agentId, errorText(error))),
+			);
+	}
+
+	/**
+	 * What waits in the bot's inbox for the host of its session, and what that session refused of it, oldest first: every
+	 * session's chat shows both.
+	 */
+	readInbox(agentId: string): {
+		readonly waiting: readonly BotInboxItem[];
+		readonly refused: readonly BotInboxItem<BotInboxRefusal>[];
+	} {
+		const agentDir = this.ports.agentDir();
+		const unreadable = (file: string, reason: string) =>
+			this.ports.warn(interfaceText().botTeam.botInboxUnreadable(agentId, file, reason));
+		return {
+			waiting: readBotInbox(agentDir, agentId, unreadable),
+			refused: readBotInboxRefusals(agentDir, agentId, unreadable),
+		};
 	}
 
 	/** The bot's earlier worker conversations, whichever session ran them (see `BotHistory`). */
@@ -330,8 +388,75 @@ export class BotSessionHost {
 		mode: BotOperatorMessageOptions["mode"],
 		sender: BotSender = this.ports.sender(),
 	): Promise<BotOperatorMessageDispatchResult> {
-		const entry = await this.open(agentId, sender);
+		let entry: BotSessionEntry;
+		try {
+			entry = await this.open(agentId, sender);
+		} catch (error) {
+			if (!(error instanceof BotSessionHeldError)) throw error;
+			return this.sendToHost(agentId, message, mode, sender);
+		}
 		entry.sender = sender;
+		return this.give(entry, message, mode);
+	}
+
+	/**
+	 * Another host runs the bot's session: the words go to the bot's inbox, which that host takes and answers in the bot's
+	 * chat. A host that let the bot go between the refused lock and the write would leave them to no one, so the bot is then
+	 * opened here, which takes the inbox first (this message included); a refusal of that open takes the message back and is
+	 * the send's own.
+	 */
+	private async sendToHost(
+		agentId: string,
+		message: string,
+		mode: BotOperatorMessageOptions["mode"],
+		sender: BotSender,
+	): Promise<BotOperatorMessageDispatchResult> {
+		const agentDir = this.ports.agentDir();
+		const record = this.ports.store().getBot(agentId);
+		const modelRef = record ? `${record.provider}/${record.modelId}` : "";
+		const item = enqueueBotInbox(agentDir, {
+			agentId,
+			text: message,
+			...(mode !== undefined ? { mode } : {}),
+			from: { pid: process.pid, sessionId: sender.hostSessionId(), cwd: sender.cwd() },
+			at: Date.now(),
+		});
+		this.changed(agentId);
+		let host = readRemoteBotHost(agentDir, agentId, this.holder);
+		if (!host) {
+			try {
+				await this.open(agentId, sender);
+				return { agentId, mode: "queued", messageId: item.message.id, modelRef };
+			} catch (error) {
+				if (!(error instanceof BotSessionHeldError)) {
+					takeBotInboxMessage(item);
+					this.changed(agentId);
+					throw error;
+				}
+				host = readRemoteBotHost(agentDir, agentId, this.holder);
+			}
+		}
+		return {
+			agentId,
+			mode: "queued",
+			messageId: item.message.id,
+			modelRef,
+			...(host
+				? { deliveredTo: { pid: host.pid, ...(host.hostSessionId ? { sessionId: host.hostSessionId } : {}) } }
+				: {}),
+		};
+	}
+
+	/**
+	 * Gives the words to the bot's loaded session: an idle one starts a turn, a running one takes them as a steer, or behind
+	 * the turn when `mode` is `queue`. Returns once the session accepted them; throws its refusal.
+	 */
+	private async give(
+		entry: BotSessionEntry,
+		message: string,
+		mode: BotOperatorMessageOptions["mode"],
+	): Promise<BotOperatorMessageDispatchResult> {
+		const { agentId } = entry;
 		// Admitted here as well as at the run's start: a refusal answers the owner's send itself, not a failed turn.
 		this.admit(agentId, entry.session.model, { key: entry.profileKey, spendBoundUsd: entry.spendBoundUsd });
 		const queued = mode === "queue";
@@ -501,14 +626,10 @@ export class BotSessionHost {
 		// A model refused now builds no session and takes no lock.
 		this.admit(agentId, model, definition);
 		const taken = takeProcessLock(botHostLockFile(agentDir, agentId), this.holder);
-		if (!taken.held)
-			throw new Error(
-				words.botSessionHeld(
-					agentId,
-					taken.owner.pid,
-					readRemoteBotHost(agentDir, agentId, this.holder)?.hostSessionId,
-				),
-			);
+		if (!taken.held) {
+			const sessionId = readRemoteBotHost(agentDir, agentId, this.holder)?.hostSessionId;
+			throw new BotSessionHeldError(words.botSessionHeld(agentId, taken.owner.pid, sessionId));
+		}
 		const { lock } = taken;
 		let session: AgentSession | undefined;
 		let settings: ReturnType<BotSessionHostPorts["settings"]> | undefined;
@@ -668,6 +789,13 @@ export class BotSessionHost {
 			this.armIdle(entry);
 			harnessLog.info("bots", "a bot session was loaded", () => ({ agentId, continued: newest !== null }));
 			this.changed(agentId);
+			// What other processes sent while another host held the bot is given first, before the message that opened it;
+			// the home watch announces the next ones (the timer reads them while it does not run).
+			this.view.watch();
+			this.inbox.arm();
+			await this.inbox
+				.drain(agentId)
+				.catch((error: unknown) => this.ports.warn(words.botInboxNotTaken(agentId, errorText(error))));
 			return entry;
 		} catch (error) {
 			// Released as a close releases, in its order and every step whatever an earlier one threw, the lock last: a
@@ -706,9 +834,16 @@ export class BotSessionHost {
 	private armIdle(entry: BotSessionEntry): void {
 		this.touch(entry);
 		if (this.stopped) return;
+		// A home watch that failed since the session loaded leaves the inbox to the timer.
+		this.inbox.arm();
 		entry.idleTimer = this.idleTimers().setTimeout(() => {
 			entry.idleTimer = undefined;
 			if (this.entries.get(entry.agentId) !== entry || this.isBusy(entry)) return;
+			// A message another process sent is given before the session may close (the watch may have missed it).
+			if (botInboxWaiting(this.ports.agentDir(), entry.agentId)) {
+				this.takeInbox(entry.agentId);
+				return this.armIdle(entry);
+			}
 			// Its watches are sampled and their wakes taken only while it is loaded: it stays until they are woken, end or are dropped.
 			if (this.owesWatchWork(entry.session.sessionId)) return this.armIdle(entry);
 			void this.close(entry.agentId).catch((error: unknown) =>
@@ -760,27 +895,29 @@ export class BotSessionHost {
 	}
 
 	/**
-	 * Opens the bot's session when its home's session holds live watches or a fired watch's wake not yet taken, and no process
-	 * hosts it: a watch is sampled and its wake delivered only by its own session, so a process that starts, or a session
-	 * rebuilt on a changed record, takes the waits and the wakes up again. Only a
-	 * process working in the directory the session worked in takes it: a watch's relative path reads against that
-	 * directory. Another process that opened it first is not a failure.
+	 * Opens the bot's session when no process hosts it and it is owed: its home's session holds live watches or a fired
+	 * watch's wake not yet taken, or its inbox holds messages another process sent. A watch is sampled and its wake delivered
+	 * only by its own session, and an inbox is taken only by the host of the session, so a process that starts, sees a host
+	 * let the bot go or die, or rebuilds a session on a changed record takes them up again. A session with watches is opened
+	 * only by a process working in the directory it worked in (a watch's relative path reads against it); one owed only its
+	 * inbox, also by a process working where a waiting message was sent from. Another process that opened it first is not a
+	 * failure.
 	 */
-	private openIfWatching(agentId: string): void {
+	private openIfOwed(agentId: string): void {
 		const agentDir = this.ports.agentDir();
 		if (this.stopped || this.entries.has(agentId) || readRemoteBotHost(agentDir, agentId, this.holder)) return;
 		const saved = this.view.savedSessionOf(agentId);
 		const record = this.ports.store().getBot(agentId);
-		if (!saved?.cwd || !record || !this.runsAsSession(record) || !this.owesWatchWork(saved.id)) return;
+		if (!saved?.cwd || !record || record.retired || !this.runsAsSession(record)) return;
+		const watching = this.owesWatchWork(saved.id);
+		const waiting = !watching && botInboxWaiting(agentDir, agentId) ? this.readInbox(agentId).waiting : [];
+		if (!watching && waiting.length === 0) return;
+		const cwds = [saved.cwd, ...(watching ? [] : waiting.map((item) => item.message.from.cwd))];
 		// A bot of its own works where the root it opens for works; a profile's, where its profile compiles to.
 		let sender: BotSender | undefined;
 		try {
-			sender =
-				record.profileId === undefined
-					? this.ports.senderIn(saved.cwd)
-					: this.define(record).cwd === saved.cwd
-						? this.ports.sender()
-						: undefined;
+			if (record.profileId === undefined) sender = cwds.map((cwd) => this.ports.senderIn(cwd)).find(Boolean);
+			else if (cwds.includes(this.define(record).cwd)) sender = this.ports.sender();
 		} catch (error) {
 			this.ports.warn(interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error)));
 			return;
@@ -792,12 +929,12 @@ export class BotSessionHost {
 		});
 	}
 
-	/** Opens every bot whose own session has watch work that no process takes (see {@link openIfWatching}). */
-	openWatching(): void {
+	/** Opens every bot whose own session is owed work that no process takes (see {@link openIfOwed}). */
+	openOwed(): void {
 		const bots = this.ports.store().listBots();
 		if (bots.length === 0) return;
 		this.view.watch();
-		for (const bot of bots) this.openIfWatching(bot.agentId);
+		for (const bot of bots) this.openIfOwed(bot.agentId);
 	}
 
 	/** A turn ended: what the session spent since it began goes to the main session's cost view, once. */
@@ -914,7 +1051,7 @@ export class BotSessionHost {
 		}
 		if (entry && !this.isBusy(entry) && entry.profileKey !== this.currentKey(record))
 			void this.close(record.agentId).then(
-				() => this.openIfWatching(record.agentId),
+				() => this.openIfOwed(record.agentId),
 				(error: unknown) =>
 					this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(record.agentId, errorText(error))),
 			);
@@ -935,7 +1072,8 @@ export class BotSessionHost {
 
 	/**
 	 * Closes the bot's idle session (the bot was retired, or left the session path) and drops the watches its session armed:
-	 * it is never woken there again, as a worker's watches go with the runtime that armed them. Refuses while it works.
+	 * it is never woken there again, as a worker's watches go with the runtime that armed them. The messages waiting in its
+	 * inbox are refused with the reason, which its chat shows: no session of it takes them now. Refuses while it works.
 	 */
 	release(agentId: string): void {
 		const entry = this.entries.get(agentId);
@@ -947,6 +1085,11 @@ export class BotSessionHost {
 			for (const watch of store.listRoutines({ sessionId, scope: "own-watches" }))
 				store.deleteRoutine(watch.routineId, watch.revision, nowMs);
 		}
+		const agentDir = this.ports.agentDir();
+		const waiting = this.readInbox(agentId).waiting;
+		for (const item of waiting)
+			refuseBotInboxMessage(agentDir, item, interfaceText().botTeam.botInboxReleased(agentId), Date.now());
+		if (waiting.length > 0) this.changed(agentId);
 		if (!entry) return;
 		void this.close(agentId).catch((error: unknown) =>
 			this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(agentId, errorText(error))),
@@ -981,6 +1124,7 @@ export class BotSessionHost {
 			);
 			if (failures.length > 0) throw new AggregateError(failures, words.botSessionsNotClosed);
 		} finally {
+			this.inbox.stop();
 			this.view.stop();
 			this.watchExpiry.stop();
 			this.listeners.clear();

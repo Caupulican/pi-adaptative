@@ -28,6 +28,8 @@ export const CHAT = {
 	sentSteered: "sent while it works",
 	sentQueued: "queued for it",
 	sentToBot: (agentId: string, how: string, modelRef: string) => `Sent to ${agentId}: ${how} (${modelRef}).`,
+	sentToHost: (agentId: string, pid: number, sessionId?: string) =>
+		`Delivered to ${agentId}'s host in another session (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}process ${pid}); it answers in the bot's chat.`,
 	/** `failed` counts the members a delivery did not reach; they are never counted as delivered. */
 	sentToTeam: (teamId: string, delivered: number, failed: number) =>
 		`Sent to team ${teamId} (${delivered} member deliveries${failed === 0 ? "" : `, ${failed} failed`}).`,

@@ -75,6 +75,8 @@ export interface BotRemoteViewPorts {
 	hostChanged(agentId: string): void;
 	/** Bots whose remote state, saved session or conversation changed. */
 	changed(agentIds: readonly string[]): void;
+	/** A message was written to the inbox of a bot the host runs: it takes it (`bot-inbox.ts`). */
+	inboxChanged(agentId: string): void;
 }
 
 export class BotRemoteView {
@@ -131,6 +133,12 @@ export class BotRemoteView {
 						const agentId = ids.get(home);
 						if (agentId === undefined) continue;
 						const hostFile = file === "host-state.json" || file === "host.lock";
+						// A message for a bot this host runs is taken here; every session's chat shows what waits.
+						if (file.startsWith("inbox/")) {
+							if (this.ports.runsLocally(agentId)) this.ports.inboxChanged(agentId);
+							changed.add(agentId);
+							continue;
+						}
 						// The host's own bot sessions announce themselves; a change it wrote is not news.
 						if (this.ports.runsLocally(agentId) && (hostFile || file.startsWith("sessions/"))) continue;
 						if (hostFile) {
@@ -146,6 +154,12 @@ export class BotRemoteView {
 		} catch (error) {
 			failed(error instanceof Error ? error.message : String(error));
 		}
+	}
+
+	/** Whether the home watch runs: while it does not, the host reads the inboxes of the bots it runs on a timer. */
+	watching(): boolean {
+		this.watch();
+		return this.homeWatch !== undefined;
 	}
 
 	/** The host other than this one that runs the bot's session, as its home says now. */

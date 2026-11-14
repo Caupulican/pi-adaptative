@@ -293,6 +293,11 @@ export function botHistoryFile(agentDir: string, botId: string): string {
 	return join(botHomeDir(agentDir, botId), "history.json");
 }
 
+/** `<agentDir>/bots/<id>/inbox` -- the owner's messages to a bot another process hosts, one file each (`bots/bot-inbox.ts`). */
+export function botInboxDir(agentDir: string, botId: string): string {
+	return join(botHomeDir(agentDir, botId), "inbox");
+}
+
 /** `<agentDir>/bots/<id>/typesafe-reviews` -- the System One evidence of the bot's own sessions. */
 export function botSystemOneEvidenceDir(agentDir: string, botId: string): string {
 	return join(botHomeDir(agentDir, botId), "typesafe-reviews");

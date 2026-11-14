@@ -2,7 +2,7 @@
  * The change watch over every bot home, so a process that does not host a bot still learns when its conversation, its
  * host's state or its history changed on disk. Every watch is on one directory, never recursive (a recursive watch is not
  * dependable on every platform and runtime): one on the bots directory, which sees homes come and go, and one on each home
- * and on its `sessions/` directory, added when they appear. A directory is watched rather than a file because an atomic
+ * and on its `sessions/` and `inbox/` directories, added when they appear. A directory is watched rather than a file because an atomic
  * replace changes the file's inode, so a watch on one file would lose it. The watches are not persistent, coalesce the
  * changes of a short window into one notice, and end together on the first error (the caller falls back to reading the
  * disk each time). A change names the home directory and the file inside it; the caller maps a home directory to its bot
@@ -24,9 +24,21 @@ export interface BotHomeChange {
 	readonly file: string;
 }
 
-/** The files of a home whose change another process cares about: the conversation, the host's state and lock, the history. */
+/** The directories of a home watched on their own: the conversation's files and the messages waiting for its host. */
+const WATCHED_SUBDIRS = ["sessions", "inbox"] as const;
+
+/**
+ * The files of a home whose change another process cares about: the conversation, the host's state and lock, the history,
+ * and the inbox's messages (an atomic write's temporary file is not one).
+ */
 function isObservedHomeFile(file: string): boolean {
-	return file === "host-state.json" || file === "host.lock" || file === "history.json" || file.startsWith("sessions/");
+	return (
+		file === "host-state.json" ||
+		file === "host.lock" ||
+		file === "history.json" ||
+		file.startsWith("sessions/") ||
+		(file.startsWith("inbox/") && file.endsWith(".json"))
+	);
 }
 
 function isDirectory(path: string): boolean {
@@ -45,7 +57,7 @@ export function watchBotHomes(
 ): () => void {
 	const dir = botsDir(agentDir);
 	mkdirSync(dir, { recursive: true });
-	const homes = new Map<string, { home: FSWatcher; sessions?: FSWatcher }>();
+	const homes = new Map<string, { home: FSWatcher; subdirs: Map<string, FSWatcher> }>();
 	let pending = new Map<string, BotHomeChange>();
 	let flushTimer: unknown;
 	let closed = false;
@@ -58,7 +70,7 @@ export function watchBotHomes(
 		root?.close();
 		for (const watchers of homes.values()) {
 			watchers.home.close();
-			watchers.sessions?.close();
+			for (const watcher of watchers.subdirs.values()) watcher.close();
 		}
 		homes.clear();
 	};
@@ -91,22 +103,25 @@ export function watchBotHomes(
 		const watchers = homes.get(home);
 		homes.delete(home);
 		watchers?.home.close();
-		watchers?.sessions?.close();
+		for (const watcher of watchers?.subdirs.values() ?? []) watcher.close();
 	};
-	/** Watches the home's `sessions/` once it exists; `announce` reports the files it already holds. */
-	const watchSessions = (home: string, announce: boolean) => {
+	/** Watches the home's `subdir` once it exists; `announce` reports the files it already holds. */
+	const watchSubdir = (home: string, subdir: string, announce: boolean) => {
 		const watchers = homes.get(home);
-		const sessions = join(dir, home, "sessions");
-		if (!watchers || watchers.sessions || !isDirectory(sessions)) return;
-		watchers.sessions = watchDir(
-			sessions,
-			(name) => note(home, `sessions/${name}`),
-			() => {
-				watchers.sessions?.close();
-				watchers.sessions = undefined;
-			},
+		const path = join(dir, home, subdir);
+		if (!watchers || watchers.subdirs.has(subdir) || !isDirectory(path)) return;
+		watchers.subdirs.set(
+			subdir,
+			watchDir(
+				path,
+				(name) => note(home, `${subdir}/${name}`),
+				() => {
+					watchers.subdirs.get(subdir)?.close();
+					watchers.subdirs.delete(subdir);
+				},
+			),
 		);
-		if (announce) for (const name of readdirSync(sessions)) note(home, `sessions/${name}`);
+		if (announce) for (const name of readdirSync(path)) note(home, `${subdir}/${name}`);
 	};
 	/**
 	 * Watches a home that appeared. `announce` reports what it already holds: a home made while the watch runs can be
@@ -119,14 +134,15 @@ export function watchBotHomes(
 			home: watchDir(
 				path,
 				(name) => {
-					if (name === "sessions") watchSessions(home, true);
+					if ((WATCHED_SUBDIRS as readonly string[]).includes(name)) watchSubdir(home, name, true);
 					note(home, name);
 				},
 				() => dropHome(home),
 			),
+			subdirs: new Map(),
 		});
 		if (announce) for (const name of readdirSync(path)) note(home, name);
-		watchSessions(home, announce);
+		for (const subdir of WATCHED_SUBDIRS) watchSubdir(home, subdir, announce);
 	};
 
 	try {

@@ -22,3 +22,14 @@ export interface BotOperatorMessageOptions {
 	/** The alias of the leader whose words these are (a nested goal's outcome or question, a parent's update); absent for the orchestrator. */
 	fromLeader?: string;
 }
+
+/** What one operator-to-bot message became: the turn kind it took, and where it went. */
+export interface BotOperatorMessageDispatchResult {
+	readonly agentId: string;
+	readonly mode: "started" | "followed_up" | "steered" | "queued";
+	readonly messageId?: string;
+	readonly laneId?: string;
+	readonly modelRef: string;
+	/** Another process hosts the bot's session: the message waits in the bot's inbox for that host (`bots/bot-inbox.ts`). */
+	readonly deliveredTo?: { readonly pid: number; readonly sessionId?: string };
+}

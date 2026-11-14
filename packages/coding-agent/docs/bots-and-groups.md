@@ -74,9 +74,19 @@ loaded by a message works in the sending session's directory, with its turns' wa
 one process. The host publishes what the session is doing in `host-state.json`, and a watch over the bot homes
 tells every other session's roster and open chat when the conversation, that state or the history changed. A second session
 shows the bot running, queued or idle from that file (trusted only while the lock names a live process, so a killed host
-leaves no stale "running"), and its chat from the session files. Messaging a bot another session hosts is refused with a
-line naming that session (messages do not cross sessions until mail arrives), and `/bot stop` of a bot working in another
-session says to stop it there. A session started after every other one closed lists each bot with its whole conversation.
+leaves no stale "running"), and its chat from the session files. A message to a bot another process hosts goes to the
+bot's inbox (`bots/<id>/inbox/`, one file per message, at most 32 and 1 MiB waiting); the sender is told it was delivered
+to the host in that session and process, and the bot's chat in every session shows it as waiting. The host that holds the
+lock takes the inbox when its session loads (before the message that loaded it), when the watch over the bot homes sees a
+message written (every 5 seconds while that watch does not run), and before an idle close, giving each message to the
+bot's session as your words, oldest first; the bot answers in its chat, and that turn's warnings and spend go to the
+host's own session. A message the session refuses (its model moved or cannot run, say) leaves the queue as a refused
+record that the chat shows with the reason (the newest eight are kept), and the host's session is warned. A message that
+waits when the host lets the bot go or dies is taken by the process that opens the bot next, including one working in the
+directory the message was sent from; a bot retired or moved to a worker refuses what waits, with the reason. Delivery is at
+least once: a host killed after its session took a message and before it deleted the file gives it again. Like the session
+files beside it, the inbox is private harness storage: a worker's and a bot session's file and process tools are refused
+the bot homes. `/bot stop` of a bot working in another session says to stop it there. A session started after every other one closed lists each bot with its whole conversation.
 
 What ran before a bot had a session of its own is part of that conversation. Those worker conversations live under the
 orchestration directory of whichever session messaged the bot, and only that session's own transcript says which runtime

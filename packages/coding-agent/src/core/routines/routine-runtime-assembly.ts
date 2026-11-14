@@ -11,9 +11,11 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { thirdPartyProtectedWritePaths } from "../autonomy/lane-private-paths.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
-import type { BotOperatorMessageOptions } from "../delegation/bot-operator-message-options.ts";
 import type {
 	BotOperatorMessageDispatchResult,
+	BotOperatorMessageOptions,
+} from "../delegation/bot-operator-message-options.ts";
+import type {
 	PersistentBotTeamStore,
 	TeamOperatorMessageDispatchResult,
 } from "../delegation/persistent-bot-team-store.ts";

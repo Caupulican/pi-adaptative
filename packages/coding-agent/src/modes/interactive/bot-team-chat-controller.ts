@@ -4,9 +4,9 @@ import { SPAWNER_BOT_ID, SPAWNER_SOUL } from "../../core/delegation/bot-creation
 import { type BotDaemonLaunchResult, describeBotDaemonLaunch } from "../../core/delegation/bot-daemon-launch.ts";
 import { type BotDaemonStopResult, describeBotDaemonStop } from "../../core/delegation/bot-daemon-stop.ts";
 import { displayNameFor } from "../../core/delegation/bot-naming.ts";
+import type { BotOperatorMessageDispatchResult } from "../../core/delegation/bot-operator-message-options.ts";
 import {
 	type ActiveChatTarget,
-	type BotOperatorMessageDispatchResult,
 	type BotTeamChange,
 	normalizeBotOrTeamId,
 	type PersistentBotDaemonStatus,
@@ -42,6 +42,7 @@ import { runRemoteCommand } from "./remote-commands.ts";
 function sentToBotText(agentId: string, result: BotOperatorMessageDispatchResult): string {
 	const text = interfaceText().chat;
 	if (result.modelRef === "link/remote") return text.sentRemote(agentId);
+	if (result.deliveredTo) return text.sentToHost(agentId, result.deliveredTo.pid, result.deliveredTo.sessionId);
 	const how: Record<BotOperatorMessageDispatchResult["mode"], string> = {
 		started: text.sentStarted,
 		followed_up: text.sentFollowedUp,

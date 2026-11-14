@@ -14,6 +14,7 @@ import { isModelFacingText } from "../../presentation/plain-text.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BotHistoryRead } from "../bots/bot-history.ts";
 import type { BotSessionHost } from "../bots/bot-session-host.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { RemoteHubController } from "../remote/hub-controller.ts";
 import { botChatOperatorText, botReplyText } from "./bot-chat-text.ts";
 import type { BotRuntimeBindings } from "./bot-runtime-bindings.ts";
@@ -32,8 +33,11 @@ export interface BotChatHost {
 	getRemoteHub(): Pick<RemoteHubController, "chat">;
 	openWorkerTranscript(agentId: string): WorkerConversation | undefined;
 	getLaneRecords(): LaneRecord[];
-	/** The bots' own conversations: a bot's session, loaded or on disk, and its earlier worker conversations from its home. */
-	readonly botSessions: Pick<BotSessionHost, "readMessages" | "readHistory">;
+	/**
+	 * The bots' own conversations: a bot's session, loaded or on disk, its earlier worker conversations from its home, and
+	 * what waits in its inbox for the host of its session (or was refused by it).
+	 */
+	readonly botSessions: Pick<BotSessionHost, "readMessages" | "readHistory" | "readInbox">;
 }
 
 /** The messages of two chronological lists in time order, each list's own order kept (an untimed message keeps its place). */
@@ -103,10 +107,33 @@ export class BotChatTranscript {
 			);
 			this.shapedHistory.set(history, earlier);
 		}
-		const chat = mergeByTime(earlier, this.host.botSessions.readMessages(normId) ?? []);
+		const chat = mergeByTime(
+			mergeByTime(earlier, this.host.botSessions.readMessages(normId) ?? []),
+			this.inboxMessages(normId),
+		);
 		return chat.length === 0 && bot?.lastSummary
 			? [this.createSyntheticBotSummaryMessage(bot, bot.lastSummary)]
 			: chat;
+	}
+
+	/**
+	 * What the bot's inbox holds, drawn in its chat and never sent to a model: each message another session sent that waits
+	 * for the session hosting the bot, and each one that session refused, with its reason.
+	 */
+	private inboxMessages(agentId: string): AgentMessage[] {
+		const words = interfaceText().botTeam;
+		const { waiting, refused } = this.host.botSessions.readInbox(agentId);
+		const line = (content: string, timestamp: number): AgentMessage => ({
+			role: "custom",
+			customType: "bot-inbox",
+			content,
+			display: true,
+			timestamp,
+		});
+		return [
+			...refused.map(({ message }) => line(words.botInboxRefusedLine(message.reason, message.text), message.at)),
+			...waiting.map(({ message }) => line(words.botInboxWaitingLine(message.text), message.at)),
+		].sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
 	}
 
 	/**

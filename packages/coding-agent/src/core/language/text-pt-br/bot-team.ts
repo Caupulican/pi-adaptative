@@ -83,7 +83,19 @@ export const BOT_TEAM = {
 	botSoulRefused: (agentId: string, reason: string) =>
 		`O bot ${agentId} não foi iniciado: ${reason}. Edite o soul com /bot soul ${agentId}.`,
 	botSessionHeld: (agentId: string, pid: number, sessionId?: string) =>
-		`O bot ${agentId} está aberto em outra sessão (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}processo ${pid}). Mensagens ainda não atravessam sessões: envie a mensagem de lá, ou feche aquela sessão antes.`,
+		`O bot ${agentId} está aberto em outra sessão (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}processo ${pid}).`,
+	botInboxFull: (agentId: string, max: number) =>
+		`Bot ${agentId}: ${max} mensagens já esperam pela sessão que o hospeda; envie de novo quando ela as tiver recebido.`,
+	botInboxUnreadable: (agentId: string, file: string, reason: string) =>
+		`Bot ${agentId}: uma mensagem da caixa de entrada não pôde ser lida e foi separada como ${file}.unreadable (${reason}).`,
+	botInboxRefused: (agentId: string, reason: string) =>
+		`Bot ${agentId}: uma mensagem enviada de outra sessão não foi recebida (${reason}).`,
+	botInboxNotTaken: (agentId: string, reason: string) =>
+		`Bot ${agentId}: as mensagens enviadas de outras sessões não puderam ser recebidas (${reason}).`,
+	botInboxReleased: (agentId: string) =>
+		`o bot ${agentId} não roda mais como sessão própria (aposentado, ou suas mensagens agora vão para um worker); envie de novo`,
+	botInboxWaitingLine: (text: string) => `Esperando a sessão que hospeda o bot: ${text}`,
+	botInboxRefusedLine: (reason: string, text: string) => `Não entregue (${reason}): ${text}`,
 	botRunsElsewhere: (agentId: string, pid: number, sessionId?: string) =>
 		`O bot ${agentId} está trabalhando em outra sessão (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}processo ${pid}). Pare por lá.`,
 	botHomesNotWatched: (reason: string) =>

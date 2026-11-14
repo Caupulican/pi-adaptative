@@ -78,9 +78,28 @@ export const BOT_TEAM = {
 	},
 	botSoulRefused: (agentId: string, reason: string) =>
 		`Bot ${agentId} was not started: ${reason}. Edit its soul with /bot soul ${agentId}.`,
-	/** Another process holds the bot's session: two processes would write one conversation. */
+	/** Another process holds the bot's session: two processes would write one conversation (a message goes to its inbox). */
 	botSessionHeld: (agentId: string, pid: number, sessionId?: string) =>
-		`Bot ${agentId} is open in another session (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}process ${pid}). Messages do not cross sessions yet: message it from there, or close that session first.`,
+		`Bot ${agentId} is open in another session (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}process ${pid}).`,
+	/** The bot's inbox holds as many messages as it takes: its host is not taking them. */
+	botInboxFull: (agentId: string, max: number) =>
+		`Bot ${agentId}: ${max} messages already wait for the session hosting it; send again once it has taken them.`,
+	/** A file in the bot's inbox did not read as a message; it was set aside beside itself. */
+	botInboxUnreadable: (agentId: string, file: string, reason: string) =>
+		`Bot ${agentId}: an inbox message could not be read and was set aside as ${file}.unreadable (${reason}).`,
+	/** The bot's session refused a message another session sent; the chat shows it with the reason. */
+	botInboxRefused: (agentId: string, reason: string) =>
+		`Bot ${agentId}: a message sent from another session was not taken (${reason}).`,
+	/** The bot's inbox could not be taken. */
+	botInboxNotTaken: (agentId: string, reason: string) =>
+		`Bot ${agentId}: the messages sent from other sessions could not be taken (${reason}).`,
+	/** Why a waiting message was refused when the bot stopped running as a session. */
+	botInboxReleased: (agentId: string) =>
+		`bot ${agentId} no longer runs as a session of its own (retired, or its messages now go to a worker); send it again`,
+	/** A message waiting in the bot's inbox, as the chat shows it. */
+	botInboxWaitingLine: (text: string) => `Waiting for the session hosting the bot: ${text}`,
+	/** A message the bot's session refused, as the chat shows it. */
+	botInboxRefusedLine: (reason: string, text: string) => `Not delivered (${reason}): ${text}`,
 	/** The bot's turn runs in another process; only that session can stop it. */
 	botRunsElsewhere: (agentId: string, pid: number, sessionId?: string) =>
 		`Bot ${agentId} is working in another session (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}process ${pid}). Stop it from there.`,
