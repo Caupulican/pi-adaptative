@@ -387,6 +387,7 @@ export class RoutineRuntimeAssembly {
 			eventAnchor: () => routineEventAnchor(this.host.workerLifecycle().getTaskRuntimeSnapshot()),
 			ownerTurnSources: () => this.deps.getOwnerEvidence().currentTurnSources(),
 			runOpener: () => routineRunOpener(this.deps.getSessionManager().getBranch(), this.deps.getGoalStateSnapshot()),
+			warnOwner: (message) => this.host.warn(message),
 			now: () => this.deps.getTimers().port("routines").now(),
 			isDisposed: () => this.deps.isDisposed(),
 		});

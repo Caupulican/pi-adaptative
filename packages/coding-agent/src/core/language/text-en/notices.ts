@@ -78,6 +78,9 @@ export const NOTICES = {
 	/** The two frames the host puts in front of a failure that ended the session. */
 	failedToCreateSession: "Failed to create session",
 	failedToForkSession: "Failed to fork session",
+	/** A watch saved on your approval whose use could not be recorded, and whose save could not be undone either. */
+	watchArmedApprovalUnrecorded: (watchId: string, cause: string) =>
+		`Watch "${watchId}" is armed, but the use of your approval of its check could not be recorded and undoing the save failed too (${cause}). The approval is not marked as used; delete the watch if it should not run.`,
 
 	/** What a widget the extension drew too tall to keep becomes at the top of its frame. */
 	widgetTruncated: "... (widget truncated)",

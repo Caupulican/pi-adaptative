@@ -73,6 +73,11 @@ export type RoutineToolRetiredSummary = Pick<
 /** Complete authored values for read-before-edit, without compiled authority or parent identity. */
 export interface RoutineToolView extends RoutineToolSummary {
 	readonly prompt: string;
+	/**
+	 * Only on the save that armed this watch: the use of the owner's approval its check was admitted on could not be
+	 * recorded and the save could not be undone, so the watch runs with that approval unrecorded. What to report.
+	 */
+	readonly approvalUnrecorded?: string;
 	/** The last finished run's worker summary, inside an untrusted-content boundary. */
 	readonly lastSummary?: string;
 	/** Where the task stood after the last run, in plain words, inside an untrusted-content boundary. */

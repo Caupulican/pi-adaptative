@@ -1,8 +1,9 @@
 import { isDeepStrictEqual } from "node:util";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { readAgentToolPolicyDeniedError } from "../../kernel/index.ts";
 import type { WorkerDelegationRequest } from "../delegation/worker-delegation-request.ts";
 import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
-import { englishText } from "../language/interface-text.ts";
+import { englishText, interfaceText } from "../language/interface-text.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { strictCanonicalDigest } from "../steering/canonical.ts";
@@ -83,6 +84,8 @@ interface RoutineSessionDeps {
 	ownerTurnSources(): readonly string[];
 	/** What opened the current run when the owner did not speak in it: a goal continuation or a delivered host input. */
 	runOpener(): RoutineRunOpener | undefined;
+	/** Shows the owner a warning in the session (owner-facing text, in the interface language). */
+	warnOwner(message: string): void;
 	now(): number;
 	isDisposed(): boolean;
 }
@@ -460,6 +463,7 @@ export class RoutineSessionController implements RoutineToolPort {
 			);
 		}
 		let persisted: RoutineToolView;
+		let replaced: RoutineDefinitionView | undefined;
 		try {
 			// A watch runs no worker, so it saves only where it was armed; any other routine saves its runs' worker authority.
 			const saved: RoutineSave = isWatchSchedule(input.schedule)
@@ -468,6 +472,8 @@ export class RoutineSessionController implements RoutineToolPort {
 			this.check(signal);
 			// Counted after the awaits, just before the write, so the slots held are the ones this write finds.
 			if (slotted) this.requireWatchSlot();
+			// What an armed watch's save replaces, read after the awaits (the check above reloaded), so an undo restores it.
+			if (check && expectedRevision !== undefined) replaced = this.require(input.routineId, expectedRevision);
 			persisted = this.persist(input, saved, {
 				...(worker ? { worker } : {}),
 				enabled: prior?.enabled ?? true,
@@ -482,8 +488,53 @@ export class RoutineSessionController implements RoutineToolPort {
 			throw error;
 		}
 		// The watch is saved: what its check's admission claimed is spent arming it.
-		check?.consume();
-		return persisted;
+		return check ? this.spendArming(check, persisted, replaced) : persisted;
+	}
+
+	/**
+	 * Spends what a saved watch's check admission claimed (an owner approval is recorded as used). A spend that cannot be
+	 * recorded undoes the save (the created watch removed, an updated one restored to `replaced`), so nothing is armed
+	 * and no approval stays reusable while a watch it armed runs; the call is then refused as its check's would be. When
+	 * the undo fails too, the watch stays armed with its approval unrecorded: the result says so and the owner is warned.
+	 */
+	private spendArming(
+		check: NestedCallAdmission,
+		saved: RoutineToolView,
+		replaced: RoutineDefinitionView | undefined,
+	): RoutineToolView {
+		try {
+			check.consume();
+			return saved;
+		} catch (error) {
+			const cause = error instanceof Error ? error.message : String(error);
+			try {
+				this.deps.store.revertRoutineSave({
+					routineId: saved.routineId,
+					savedRevision: saved.revision,
+					...(replaced ? { prior: replaced } : {}),
+				});
+			} catch (revertError) {
+				const undo = revertError instanceof Error ? revertError.message : String(revertError);
+				harnessLog.warn("routines", "a watch stays armed with its approval unrecorded", () => ({
+					routineId: saved.routineId,
+					cause,
+					undo,
+				}));
+				this.deps.warnOwner(interfaceText().notices.watchArmedApprovalUnrecorded(saved.routineId, undo));
+				return {
+					...saved,
+					approvalUnrecorded: `Watch "${saved.routineId}" is armed, but the use of the owner's approval that admitted its check could not be recorded, and undoing the save failed (${undo}). The owner was warned; report it, and delete the watch if it should not run.`,
+				};
+			}
+			harnessLog.warn("routines", "a watch's save was undone: its approval's use could not be recorded", () => ({
+				routineId: saved.routineId,
+				cause,
+			}));
+			const denial = readAgentToolPolicyDeniedError(error);
+			if (denial)
+				throw watchCheckRefusal(saved.routineId, { reason: denial.message, correction: denial.correction });
+			throw error;
+		}
 	}
 
 	/**

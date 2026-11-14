@@ -67,6 +67,9 @@ export const NOTICES = {
 
 	failedToCreateSession: "Falha ao criar a sessão",
 	failedToForkSession: "Falha ao fazer fork da sessão",
+	/** Uma espera salva com a sua aprovação cujo uso não pôde ser registrado, e cujo salvamento também não pôde ser desfeito. */
+	watchArmedApprovalUnrecorded: (watchId: string, cause: string) =>
+		`A espera "${watchId}" está armada, mas o uso da sua aprovação da verificação dela não pôde ser registrado e desfazer o salvamento também falhou (${cause}). A aprovação não consta como usada; apague a espera se ela não deve rodar.`,
 
 	widgetTruncated: "... (widget truncado)",
 	/** O aviso de cobrança de uma sessão autenticada com uma chave de assinatura. */

@@ -26,6 +26,15 @@ export interface RoutineStorePort {
 	getRoutine(routineId: string): RoutineDefinitionView | undefined;
 	upsertRoutine(input: UpsertPersistentRoutineInput): RoutineDefinitionView;
 	deleteRoutine(routineId: string, expectedRevision?: number, nowMs?: number): boolean;
+	/**
+	 * Undoes a save while the revision it wrote is the stored one: a created routine is removed, an updated one restored
+	 * to `prior`, the routine as it stood just before the save. Throws when the routine changed since.
+	 */
+	revertRoutineSave(input: {
+		readonly routineId: string;
+		readonly savedRevision: number;
+		readonly prior?: RoutineDefinitionView;
+	}): void;
 	/** The records of the routines `parentSessionId` armed that were retired, newest first. */
 	listRetiredRoutines(parentSessionId: string): readonly RetiredRoutineRecord[];
 	getRoutineIntakeSession(parentSessionId: string): RoutineIntakeSession | undefined;

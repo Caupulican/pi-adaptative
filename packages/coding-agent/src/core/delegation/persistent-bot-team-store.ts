@@ -118,6 +118,7 @@ import {
 	withResult,
 } from "./routine-result-writes.ts";
 import { awaySettlement, resultSummaryText } from "./routine-run-state.ts";
+import { type RoutineSaveRevertInput, revertRoutineSave, routineViewAfterSave } from "./routine-save-writes.ts";
 import { claimManualRoutineOccurrence, observeWatch, retireEndedRoutines } from "./routine-trigger-writes.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
 
@@ -1398,34 +1399,7 @@ export class PersistentBotTeamStore {
 			if (plannedRunAt === undefined && schedule.kind === "calendar" && scheduleChanged)
 				throw new Error("Calendar rule never matches a date.");
 			const nextRunAt = plannedRunAt ?? ROUTINE_NO_NEXT_RUN_AT;
-			const view: RoutineDefinitionView = {
-				...definition,
-				cursor,
-				nextRunAt,
-				...(existing?.lastRunAt === undefined ? {} : { lastRunAt: existing.lastRunAt }),
-				...(existing?.lastStatus ? { lastStatus: existing.lastStatus } : {}),
-				...(existing?.lastSummary ? { lastSummary: existing.lastSummary } : {}),
-				// A write that leaves the routine paused keeps why; the owner's write that enables it starts the count again.
-				...(definition.enabled || existing?.failureStreak === undefined
-					? {}
-					: { failureStreak: existing.failureStreak }),
-				...(definition.enabled || !existing?.failurePause ? {} : { failurePause: existing.failurePause }),
-				// A reported end stands while the end the owner stated stands; a write that changes or drops it clears it.
-				...(existing?.conditionMet &&
-				existing.incarnationId === definition.incarnationId &&
-				existing.origin?.endCondition !== undefined &&
-				definition.origin?.endCondition === existing.origin.endCondition
-					? { conditionMet: existing.conditionMet }
-					: {}),
-				// Measured runs derive the lead only while the schedule takes a derived one.
-				...(existing?.runDurations && schedule.kind !== "event" && schedule.readyBy && !schedule.readyLeadMs
-					? { runDurations: existing.runDurations }
-					: {}),
-				// Where the task stood is run state of this incarnation: an owner write keeps it; only a reset drops it.
-				...(existing?.progress && existing.incarnationId === definition.incarnationId
-					? { progress: existing.progress }
-					: {}),
-			};
+			const view = routineViewAfterSave(definition, cursor, nextRunAt, existing);
 			if (!parseRoutineDefinitionView(view)) throw new Error("Routine definition is invalid for durable storage.");
 			this.routines.set(normalizedId, view);
 			if (intake) consumeRoutineIntake(this.routineState, intake, normalizedId, input.nowMs ?? Date.now());
@@ -1474,6 +1448,11 @@ export class PersistentBotTeamStore {
 			this.save();
 			return true;
 		});
+	}
+
+	/** Undoes a save while the revision it wrote is current (`routine-save-writes.ts`). */
+	revertRoutineSave(input: RoutineSaveRevertInput): void {
+		this.mutate(() => revertRoutineSave(this.routineState, input, () => this.save()));
 	}
 
 	/** The records of the routines a session armed that were retired, newest first. */
