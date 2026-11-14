@@ -43,7 +43,7 @@ import type { AgentMessage } from "../../kernel/types.ts";
 import { namedAgentIdentity } from "../agent-identity.ts";
 import { botHostLockFile, botSystemOneEvidenceDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
-import { boundSessionTurnSpend, unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
+import { unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
 import type {
 	BotOperatorMessageDispatchResult,
 	BotOperatorMessageOptions,
@@ -57,8 +57,6 @@ import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { createAgentSession } from "../sdk.ts";
-import { observeSessionTurns } from "../session-turn-boundary.ts";
-import { boundSessionTurnTime } from "../session-turn-time-bound.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
@@ -88,8 +86,8 @@ import {
 	ownBotSessionKey,
 	profileBotSession,
 } from "./bot-session-profile.ts";
+import { type BotTurnSpendBound, observeBotSessionTurns } from "./bot-session-turns.ts";
 import { BotTurnAccounting, type BotTurnUsageReport } from "./bot-turn-report.ts";
-import { BotTurnSupervision } from "./bot-turn-supervision.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
 /** How long a bot's session stays loaded with no turn running and no input queued. */
@@ -153,12 +151,6 @@ export interface BotSessionDelivery extends Pick<BotSessionHost, "noteHistoryRun
 		message: string,
 		mode: BotOperatorMessageOptions["mode"],
 	): Promise<BotOperatorMessageDispatchResult>;
-}
-
-/** One turn's dollar bound, with the bound that sets it: the owner's worker bound, the main session's, or the bot's profile's. */
-export interface BotTurnSpendBound {
-	readonly usd: number;
-	readonly bound: "worker" | "session" | "profile";
 }
 
 interface BotSessionEntry {
@@ -844,64 +836,16 @@ export class BotSessionHost {
 				idleTimer: undefined,
 			};
 			built = entry;
-			const unsubscribeSpend = boundSessionTurnSpend(session, {
-				limit: () => this.spendBound(definition.model, definition.spendBoundUsd),
-				onExceeded: (spentUsd, limit) => {
-					const reason = interfaceText().botTeam.botTurnOverBudget(
-						agentId,
-						spentUsd.toFixed(2),
-						limit.usd.toFixed(2),
-						limit.bound,
-					);
-					this.notify(agentId, reason);
-					return reason;
-				},
-			});
-			// A turn is bounded in time as a worker's run is, by the owner's workerDelegation.maxWallClockMs as it is now.
-			const unsubscribeTime = boundSessionTurnTime(session, this.idleTimers(), {
-				limitMs: () => settingsManager.getWorkerDelegationSettings().maxWallClockMs,
-				onExceeded: (limitMs) => {
-					const reason = interfaceText().botTeam.botTurnOverTime(agentId, String(Math.ceil(limitMs / 1000)));
-					this.notify(agentId, reason);
-					return reason;
-				},
-			});
-			// Its tool loop is supervised as a worker's is: churn and System One's progress judgment, over its own turn.
-			const supervision = new BotTurnSupervision(session, {
+			entry.unsubscribe = observeBotSessionTurns(session, entry.turns, {
 				agentId,
 				role: definition.role,
 				cwd,
-				warn: (message) => this.notify(agentId, interfaceText().botTeam.botWarning(agentId, message)),
+				timers: this.idleTimers(),
+				spendBound: () => this.spendBound(definition.model, definition.spendBoundUsd),
+				maxWallClockMs: () => settingsManager.getWorkerDelegationSettings().maxWallClockMs,
+				notify: (text, mark) => this.notify(agentId, text, mark),
+				settle: () => this.settle(entry),
 			});
-			const unsubscribeEvents = session.subscribe((event) => {
-				supervision.observe(event);
-				// The session's own warnings (a turn a watch started that failed, say) reach the owner in the bot's chat; an
-				// informational one marks nothing unread.
-				if (event.type === "warning")
-					this.notify(
-						agentId,
-						interfaceText().botTeam.botWarning(agentId, event.message),
-						event.severity !== "info",
-					);
-				if (
-					event.type === "agent_start" ||
-					event.type === "agent_end" ||
-					event.type === "queue_update" ||
-					(event.type === "message_end" && event.message.role === "assistant")
-				)
-					this.settle(entry);
-			});
-			// Its spend and outcome are counted per turn on the boundary its time bound reads.
-			const unsubscribeTurns = observeSessionTurns(session, entry.turns);
-			const unsubscribeSupervisedTurns = observeSessionTurns(session, supervision);
-			entry.unsubscribe = () => {
-				unsubscribeTurns();
-				unsubscribeSupervisedTurns();
-				unsubscribeSpend();
-				unsubscribeTime();
-				unsubscribeEvents();
-				supervision.stop();
-			};
 			session.startBackgroundInputs();
 			this.entries.set(agentId, entry);
 			this.owed.loaded(agentId);
