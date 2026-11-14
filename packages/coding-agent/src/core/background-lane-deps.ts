@@ -79,6 +79,8 @@ export interface BackgroundLaneControllerDeps
 	getToolInvocationKey(callId: string, toolName: string): string;
 	/** The session gate's admission of a sub-call of an admitted call: a routine save admits its watch's check through it. */
 	admitNestedToolCall: NestedCallAdmitter;
+	/** The session's own tool surface: a routine save arms a watch's check only with a tool the session holds. */
+	getForegroundToolNames(): readonly string[];
 	deliverParentInput(input: ParentInputDelivery): Promise<ParentInputReceipt>;
 	/** The session's `sendUserMessage`: a channel batch enters as a third party's words under its origin. */
 	sendUserMessage(text: string, options: SendUserMessageOptions): Promise<void>;

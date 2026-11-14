@@ -68,6 +68,8 @@ interface RoutineSessionDeps {
 	admitWatch(condition: WatchCondition, worker?: WorkerWatchAuthority): WatchCondition;
 	/** The session gate's admission of a sub-call of the routine tool call being executed, as any call of its tool faces. */
 	admitSubCall: NestedCallAdmitter;
+	/** Whether the session's own tool surface holds a tool: a watch checks only with a tool its session could call. */
+	holdsTool(toolName: string): boolean;
 	/**
 	 * Owner sources recorded in the current run: the model's context holds every one of them while a tool call of the
 	 * run executes. Empty when the owner said nothing in it (a routine result, CI event or other host input opened it)
@@ -466,7 +468,8 @@ export class RoutineSessionController implements RoutineToolPort {
 	 * the routine call that arms it, the way a worker's own gate admits its watch's (`task-watch-tool.ts`): every check a
 	 * call of that tool faces applies, the System One operation gate included, and a refused call arms nothing. The watch's
 	 * own rules admit the condition first, so the gate is never asked about a check the watch could not make; the admitted
-	 * call is dropped unstarted, since the monitor makes the checks. An update that keeps the armed check is not asked again.
+	 * call is dropped unstarted, since the monitor makes the checks. A session that does not hold the check's tool arms
+	 * nothing. An update that keeps the armed check is not asked again.
 	 */
 	private async admitWatchedCall(
 		toolCallId: string,
@@ -480,6 +483,15 @@ export class RoutineSessionController implements RoutineToolPort {
 		if (!call) return;
 		const armed = prior?.schedule.kind === "event" && prior.schedule.source === "watch" ? prior.schedule : undefined;
 		if (armed && isDeepStrictEqual(armed.condition, admitted)) return;
+		// Arming never widens what the session can run: a check needs the tool the session itself would call.
+		if (!this.deps.holdsTool(call.toolName)) {
+			harnessLog.warn("routines", "a watch was refused: the session does not hold its check's tool", () => ({
+				tool: call.toolName,
+			}));
+			throw new Error(
+				`This watch's check runs ${call.toolName}, a tool this session does not hold, so it is not armed.`,
+			);
+		}
 		const admission = await this.deps.admitSubCall(
 			toolCallId,
 			{ id: `${toolCallId}#watch`, toolName: call.toolName, args: { ...call.args } },

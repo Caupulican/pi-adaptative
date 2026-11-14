@@ -380,6 +380,7 @@ export class RoutineRuntimeAssembly {
 			parentSessionId,
 			admitWatch: (condition, worker) => watchAdmission.admit(condition, worker),
 			admitSubCall: (parentId, call, signal) => this.deps.admitNestedToolCall(parentId, call, signal),
+			holdsTool: (toolName) => this.deps.getForegroundToolNames().includes(toolName),
 			capture: (request, signal) => this.host.workerController().captureSavedIntent(request, signal),
 			captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),
 			invocationKey: (callId) => this.deps.getToolInvocationKey(callId, "routine"),
