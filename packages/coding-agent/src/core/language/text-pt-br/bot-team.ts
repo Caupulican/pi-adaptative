@@ -70,6 +70,8 @@ export const BOT_TEAM = {
 		`${modelRef} não pode rodar agora (${cause}); o bot roda só no próprio modelo, então envie a mensagem de novo quando esse modelo puder ser usado ou troque o modelo do bot`,
 	botSessionOutdated: (agentId: string) =>
 		`Bot ${agentId}: o que define a sessão dele mudou desde que ela foi criada (o registro, o perfil, um modelo fixado ou a política de workers), então esta execução não foi iniciada na sessão antiga. A sessão é refeita quando ficar ociosa; envie a mensagem de novo.`,
+	botRunsAsWorker: (agentId: string) =>
+		`O bot ${agentId} roda como worker (um líder, um bot que um líder criou ou um perfil que só a execução de um worker comporta), não numa sessão própria.`,
 	botSoulRefused: (agentId: string, reason: string) =>
 		`O bot ${agentId} não foi iniciado: ${reason}. Edite o soul com /bot soul ${agentId}.`,
 	botSessionHeld: (agentId: string, pid: number, sessionId?: string) =>

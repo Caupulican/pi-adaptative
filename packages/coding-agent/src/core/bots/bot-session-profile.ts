@@ -20,7 +20,7 @@ import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import type { SessionPrivatePathScope } from "../autonomy/worker-session-private-scope.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import type { BotSessionCompilation } from "../delegation/bot-worker-start.ts";
-import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
+import { type PersistentBotRecord, RESERVED_BOT_CREATOR_IDS } from "../delegation/persistent-bot-team-store.ts";
 import { READ_TOOL_NAMES, REPO_READ_TOOL_NAME, WRITE_TOOL_NAMES } from "../delegation/worker-execution-policy.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -67,6 +67,15 @@ export function botSessionToolNames(canWrite: boolean): string[] {
 				TOOL_SCHEMA_SEARCH_NAME,
 				TASK_WATCH_TOOL_NAME,
 			];
+}
+
+/**
+ * Whether the record may answer in a session of its own at all: a leader and a bot a leader made (it works inside that
+ * leader's tree and reaches its leader through `bot_message`, which a session lacks) run as workers until leaders fold
+ * into ordinary bots (phase 4). A bot made from a profile also asks its profile (`profileBotSession`).
+ */
+export function botMayRunAsSession(record: Pick<PersistentBotRecord, "leader" | "createdBy">): boolean {
+	return record.leader !== true && (record.createdBy === undefined || RESERVED_BOT_CREATOR_IDS.has(record.createdBy));
 }
 
 /** What defines a bot of its own: the fields its session is built from. A rename or a new description leaves it as it is. */

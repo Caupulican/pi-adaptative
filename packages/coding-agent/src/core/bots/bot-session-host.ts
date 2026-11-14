@@ -70,6 +70,7 @@ import { BotHostStateWriter, type BotSessionState, readRemoteBotHost } from "./b
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import {
 	type BotSessionDefinition,
+	botMayRunAsSession,
 	ownBotSession,
 	ownBotSessionKey,
 	profileBotSession,
@@ -448,12 +449,13 @@ export class BotSessionHost {
 	}
 
 	/**
-	 * Whether the bot answers in a session of its own: a bot made from a profile does unless its profile needs what only a
-	 * worker's run has (an independent verifier, a tool a session does not hold). A profile the admission refuses is
+	 * Whether the bot answers in a session of its own: never a leader or a bot a leader made (`botMayRunAsSession`), and a
+	 * bot made from a profile unless its profile needs what only a worker's run has (an independent verifier, a tool a session does not hold). A profile the admission refuses is
 	 * refused by the session, in the owner's words.
 	 */
 	runsAsSession(record: PersistentBotRecord): boolean {
 		const { profileId } = record;
+		if (!botMayRunAsSession(record)) return false;
 		if (profileId === undefined) return true;
 		const compiled = this.ports.compileProfile({ ...record, profileId });
 		return !compiled.ok || profileBotSession(compiled).route === "session";
@@ -468,6 +470,8 @@ export class BotSessionHost {
 		if (this.stopped) throw stopped();
 		const record = this.ports.store().getBot(agentId);
 		if (!record || record.retired) throw new Error(interfaceText().botTeam.botMissing(agentId));
+		// The one predicate the dispatch routes by: a bot it sends to a worker has no session here to diverge from it.
+		if (!this.runsAsSession(record)) throw new Error(interfaceText().botTeam.botRunsAsWorker(agentId));
 		const existing = this.entries.get(agentId);
 		if (existing) {
 			// A record changed since the session was built (by another process, say): an idle session is rebuilt on it.
@@ -740,7 +744,7 @@ export class BotSessionHost {
 		if (this.stopped || this.entries.has(agentId) || readRemoteBotHost(agentDir, agentId, this.holder)) return;
 		const saved = this.view.savedSessionOf(agentId);
 		const record = this.ports.store().getBot(agentId);
-		if (!saved?.cwd || !record || !this.holdsWatches(saved.id)) return;
+		if (!saved?.cwd || !record || !this.runsAsSession(record) || !this.holdsWatches(saved.id)) return;
 		// A bot of its own works where the root it opens for works; a profile's, where its profile compiles to.
 		let sender: BotSender | undefined;
 		try {
@@ -869,12 +873,18 @@ export class BotSessionHost {
 
 	/**
 	 * The bot's record changed: its profile follows it, and an idle session is closed so the next message builds one on the
-	 * new record. A change of what defines the session while it works is refused, as it is for a worker.
+	 * new record. A change of what defines the session while it works is refused, as it is for a worker. A record that left
+	 * the session path (it became a leader's, a leader, or a profile only a worker's run holds) releases its session and
+	 * the watches it armed: its messages now go to a worker, and two conversations of one bot never run side by side.
 	 */
 	recordChanged(record: PersistentBotRecord): void {
 		const entry = this.entries.get(record.agentId);
 		if (!entry && !this.hasHome(record.agentId)) return;
 		ensureBotHome(this.ports.agentDir(), record);
+		if (!this.runsAsSession(record)) {
+			if (!entry || !this.isBusy(entry)) this.release(record.agentId);
+			return;
+		}
 		if (entry && !this.isBusy(entry) && entry.profileKey !== this.currentKey(record))
 			void this.close(record.agentId).then(
 				() => this.openIfWatching(record.agentId),
@@ -897,8 +907,8 @@ export class BotSessionHost {
 	}
 
 	/**
-	 * Closes the bot's idle session (the bot was retired) and drops the watches its session armed: a retired bot is never
-	 * woken again, as a worker's watches go with the runtime that armed them. Refuses while it works.
+	 * Closes the bot's idle session (the bot was retired, or left the session path) and drops the watches its session armed:
+	 * it is never woken there again, as a worker's watches go with the runtime that armed them. Refuses while it works.
 	 */
 	release(agentId: string): void {
 		const entry = this.entries.get(agentId);

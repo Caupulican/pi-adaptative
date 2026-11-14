@@ -20,7 +20,6 @@ import {
 	type PersistentBotTeamStore,
 	type PersistentTeamMemberDelivery,
 	type PersistentTeamMessage,
-	RESERVED_BOT_CREATOR_IDS,
 	type TeamOperatorMessageDispatchResult,
 	teamIncarnation,
 } from "./persistent-bot-team-store.ts";
@@ -77,15 +76,6 @@ function isOwnerDirect(context: BotRuntimeContext, options: BotOperatorMessageOp
 		options?.delegationObjectiveId === undefined &&
 		options?.idempotencyKey === undefined
 	);
-}
-
-/**
- * Whether the bot may run as a session of its own. A leader and a bot a leader made (it works inside that leader's tree
- * and reaches its leader through `bot_message`, which a session lacks) still run as workers until leaders fold into
- * ordinary bots (phase 4); a bot made from a profile also asks its profile (`BotSessionDelivery.runsAsSession`).
- */
-function hasOwnSession(bot: { readonly leader?: boolean; readonly createdBy?: string }): boolean {
-	return bot.leader !== true && (bot.createdBy === undefined || RESERVED_BOT_CREATOR_IDS.has(bot.createdBy));
 }
 
 /** Dispatches operator messages to bots and groups, one send at a time per bot generation. */
@@ -188,7 +178,8 @@ export class BotOperatorDispatch {
 		if (isOwnerDirect(context, options)) {
 			// The owner's word to a bot with a session of its own never needs the worker runtime.
 			let sessionBot = store.ensureBotForDispatch(normId, () => this.host.resolveModelSpec());
-			if (hasOwnSession(sessionBot) && this.host.botSessions.runsAsSession(sessionBot)) {
+			// The one predicate the bot's host opens and keeps its session by: never a leader's, nor one only a worker holds.
+			if (this.host.botSessions.runsAsSession(sessionBot)) {
 				const wasRetired = sessionBot.retired === true;
 				if (wasRetired) sessionBot = store.upsertBot({ agentId: normId, retired: false });
 				assertCurrentBranch();

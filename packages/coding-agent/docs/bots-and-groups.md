@@ -93,7 +93,10 @@ resources a worker of it carries, and a turn bound of the profile's cost budget 
 session bounds. A run on a session built from an older compile (the profile, a model pin or the worker policy changed
 since) is refused and the idle session is rebuilt. A profile that needs an independent verifier of each claim, names a
 tool a session does not hold, or sets a token, wall-clock, attempt or tool-call limit (which only a worker's run counts)
-keeps the bot a worker; a profile the admission refuses refuses the message in the owner's words. A bot's session has no subagents, routines, goals or `bot` tool yet (its only routine tool is `task_watch`). A bot that only ever talked through those
+keeps the bot a worker; a profile the admission refuses refuses the message in the owner's words. One predicate decides it
+for the message and for the bot's host alike: a bot whose record leaves the session path (it becomes a leader, a leader's,
+or its profile now needs a worker) has its idle session closed and its watches dropped, and no session of it is opened
+again, so it never answers in two conversations at once. A bot's session has no subagents, routines, goals or `bot` tool yet (its only routine tool is `task_watch`). A bot that only ever talked through those
 paths has no session of its own: its chat shows its earlier conversations from its history index, in any session, and its
 last summary when none can be read.
 
