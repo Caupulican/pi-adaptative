@@ -32,8 +32,11 @@ export interface AutonomyRoutineLine {
 	readonly awayRefusal?: string;
 	/** The pause clause a failed run left behind, when the host paused the routine; it starts with its own separator. */
 	readonly pause?: string;
-	/** The clause of the latest result settled undeliverable, when the journal holds one; it starts with its own separator. */
-	readonly undeliverable?: string;
+	/**
+	 * The clause of the latest run settled because its origin is lost (its result undelivered, or the run unstarted), when the
+	 * journal holds one; it starts with its own separator.
+	 */
+	readonly originLoss?: string;
 	readonly progress?: string;
 }
 
@@ -221,11 +224,17 @@ export const AUTONOMY_STATUS = {
 		/** The status of a routine's last run, keyed by the identifier the record holds. */
 		lastStatus: (status: NonNullable<RoutineDefinitionView["lastStatus"]>): string => status,
 		line: (line: AutonomyRoutineLine) =>
-			`${line.routineId}: ${line.state}${line.ended === undefined ? "" : ` (${line.ended})`}, ${line.schedule}, next ${line.next}${line.startsFrom === undefined ? "" : ` (starts from ${line.startsFrom})`}, last ${line.lastStatus}${line.awayRefusal === undefined ? "" : `, away refused: ${line.awayRefusal}`}${line.pause ?? ""}${line.undeliverable ?? ""}${line.progress === undefined ? "" : `; where it stood: ${line.progress}`}`,
+			`${line.routineId}: ${line.state}${line.ended === undefined ? "" : ` (${line.ended})`}, ${line.schedule}, next ${line.next}${line.startsFrom === undefined ? "" : ` (starts from ${line.startsFrom})`}, last ${line.lastStatus}${line.awayRefusal === undefined ? "" : `, away refused: ${line.awayRefusal}`}${line.pause ?? ""}${line.originLoss ?? ""}${line.progress === undefined ? "" : `; where it stood: ${line.progress}`}`,
 		pausedAfterFailures: (after: number, reason: string | undefined) =>
 			`; paused after ${after} failed runs${reason === undefined ? "" : `: ${reason}`}`,
-		/** The latest result settled undeliverable: when, and why it can never reach the session (`notices.routineOriginLoss`). */
-		undeliverable: (at: string, why: string) => `; a result could not be delivered (${at}): ${why}`,
+		/**
+		 * The latest run settled because its origin is lost: its result not delivered, or the run cancelled before it started;
+		 * when, and why (`notices.routineOriginLoss`).
+		 */
+		originLoss: (run: "undelivered" | "unstarted", at: string, why: string): string =>
+			run === "undelivered"
+				? `; a result could not be delivered (${at}): ${why}`
+				: `; a run was cancelled before it started (${at}): ${why}`,
 	},
 
 	awayDaemon: {

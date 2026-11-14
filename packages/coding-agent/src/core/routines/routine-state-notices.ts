@@ -12,7 +12,7 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import type { HarnessNotice } from "../harness-notice.ts";
 import { englishText, type InterfaceText, interfaceText } from "../language/interface-text.ts";
 import { type RoutineDefinitionView, type RoutineOccurrence, routineZoneUnsupported } from "./routine-contract.ts";
-import { latestUndeliverableResults } from "./routine-origin-reach.ts";
+import { latestOriginSettlements } from "./routine-origin-reach.ts";
 import { PROMOTED_SNAG_RUNS, promotedRoutineSnags } from "./routine-progress.ts";
 import type { RetiredRoutineRecord } from "./routine-retired.ts";
 
@@ -54,7 +54,8 @@ function routineNotice(reason: string, line: (words: RoutineStateWords) => strin
  */
 function originLostNotices(facts: RoutineNoticeFacts): Map<string, HarnessNotice> {
 	const notices = new Map<string, { readonly at: number; readonly notice: HarnessNotice }>();
-	for (const result of latestUndeliverableResults(facts.occurrences).values())
+	// A run cancelled before it started is told by its routine's removal.
+	for (const result of latestOriginSettlements(facts.occurrences, "undelivered").values())
 		notices.set(result.routineId, {
 			at: result.settledAt,
 			notice: routineNotice(`result:${result.occurrenceId}:${result.loss}`, (words) =>

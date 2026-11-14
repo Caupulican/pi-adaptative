@@ -24,7 +24,7 @@ import {
 	routineStartWindow,
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
-import { latestUndeliverableResults } from "./routine-origin-reach.ts";
+import { latestOriginSettlements } from "./routine-origin-reach.ts";
 import { describeRoutineProgress, routineProgressLine } from "./routine-progress.ts";
 import { MAX_ARM_OWNER_SOURCES, type RoutineArmAuthority, type RoutineRunOpener } from "./routine-provenance.ts";
 import type { RetiredRoutineRecord } from "./routine-retired.ts";
@@ -149,7 +149,7 @@ function summary(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs:
 
 function view(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: number): RoutineToolView {
 	const progress = describeRoutineProgress(routineProgressLine(routine.progress), englishText().chat.routineProgress);
-	const undeliverable = latestUndeliverableResults(
+	const originLoss = latestOriginSettlements(
 		store
 			.listRoutineOccurrences({ routineId: routine.routineId })
 			.filter((occurrence) => occurrence.definition.incarnationId === routine.incarnationId),
@@ -165,9 +165,9 @@ function view(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: nu
 		...(progress === undefined
 			? {}
 			: { progress: wrapUntrustedText(progress, `routine-progress:${routine.routineId}`) }),
-		...(undeliverable === undefined
+		...(originLoss === undefined
 			? {}
-			: { lastUndeliverable: { loss: undeliverable.loss, settledAt: undeliverable.settledAt } }),
+			: { lastOriginLoss: { run: originLoss.run, loss: originLoss.loss, settledAt: originLoss.settledAt } }),
 		...(preferences?.profileId === undefined ? {} : { profileId: preferences.profileId }),
 		knowledge: preferences?.savedIntent.knowledgeReferences ?? [],
 	};

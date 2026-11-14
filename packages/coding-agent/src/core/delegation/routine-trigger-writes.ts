@@ -14,7 +14,7 @@ import {
 	routineOccurrenceId,
 	routineOccurrencesSettled,
 } from "../routines/routine-contract.ts";
-import { routineUndeliverableMarker } from "../routines/routine-origin-reach.ts";
+import { routineUnstartedMarker } from "../routines/routine-origin-reach.ts";
 import type { RoutineRetireInput } from "../routines/routine-retired.ts";
 import { routineReceiptOrigin } from "../routines/routine-save-origin.ts";
 import {
@@ -37,8 +37,8 @@ import { withRoutineRunState } from "./routine-run-state.ts";
 
 /**
  * Retires the session's ended routines among `routineIds` (`retireEndedRoutines` in the store) and its routines whose
- * saved origin is lost (`lostOrigins`). A lost routine can dispatch nothing more: its undispatched runs are settled in this
- * write with the loss as their delivery marker, and it is removed, without an end notice that could never be delivered
+ * saved origin is lost (`lostOrigins`). A lost routine can dispatch nothing more: its undispatched runs are cancelled in
+ * this write with an `unstarted:` marker naming the loss, and it is removed, without an end notice that could never be delivered
  * either, once its dispatched runs are settled.
  */
 export function retireEndedRoutines(
@@ -57,7 +57,7 @@ export function retireEndedRoutines(
 		const loss = losses.get(routineId);
 		if (loss !== undefined) {
 			if (routine.target.kind !== "session") continue;
-			const marker = routineUndeliverableMarker(loss);
+			const marker = routineUnstartedMarker(loss);
 			const summary = "The routine's origin in its session can never be reached; this run was never dispatched.";
 			settled = cancelUndispatchedRoutineOccurrences(state, routineId, input.nowMs, summary, marker) || settled;
 			if (!routineOccurrencesSettled(state.occurrences.values(), routine)) continue;

@@ -47,7 +47,11 @@ import {
 	routineOpensAt,
 } from "../routines/routine-contract.ts";
 import type { RoutineIntakeStatus } from "../routines/routine-intake.ts";
-import { latestUndeliverableResults, type RoutineOriginLoss } from "../routines/routine-origin-reach.ts";
+import {
+	latestOriginSettlements,
+	type RoutineOriginLoss,
+	type RoutineOriginSettledRun,
+} from "../routines/routine-origin-reach.ts";
 import {
 	describeRoutineProgress,
 	type RoutineProgressLine,
@@ -117,8 +121,12 @@ export interface RoutineStatusItem {
 	readonly lastStatus?: RoutineDefinitionView["lastStatus"];
 	readonly awayRefusal?: { readonly reason: string; readonly at: number };
 	readonly failurePause?: { readonly after: number; readonly at: number; readonly lastError?: string };
-	/** The latest run of this routine whose result can never reach the session and was settled undeliverable. */
-	readonly undeliverable?: { readonly loss: RoutineOriginLoss; readonly at: number };
+	/** The latest run of this routine settled because its origin in the session is lost: its result undelivered, or the run unstarted. */
+	readonly originLoss?: {
+		readonly run: RoutineOriginSettledRun;
+		readonly loss: RoutineOriginLoss;
+		readonly at: number;
+	};
 	/** Where its task stood after the last run, in plain words (position, next step, owner's note, recurring snags). */
 	readonly progress?: string;
 	/** The same facts unworded: the report says them in the interface language. */
@@ -490,7 +498,7 @@ function routineItem(
 	// Only a worker session's run records where its task stood; a bot or team routine shows none.
 	const progressLine = routine.target.kind === "session" ? routineProgressLine(routine.progress) : undefined;
 	const progress = text(describeRoutineProgress(progressLine, englishText().chat.routineProgress));
-	const undeliverable = latestUndeliverableResults(
+	const originLoss = latestOriginSettlements(
 		occurrences.filter((occurrence) => occurrence.definition.incarnationId === routine.incarnationId),
 	).get(routine.routineId);
 	return {
@@ -515,7 +523,7 @@ function routineItem(
 					},
 				}
 			: {}),
-		...(undeliverable ? { undeliverable: { loss: undeliverable.loss, at: undeliverable.settledAt } } : {}),
+		...(originLoss ? { originLoss: { run: originLoss.run, loss: originLoss.loss, at: originLoss.settledAt } } : {}),
 		...(progress ? { progress } : {}),
 		...(progressLine ? { progressLine } : {}),
 	};

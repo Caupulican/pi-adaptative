@@ -136,12 +136,13 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 					lastStatus: routine.lastStatus === undefined ? "-" : words.routines.lastStatus(routine.lastStatus),
 					awayRefusal: routine.awayRefusal?.reason,
 					pause: routine.failurePause ? pausedAfterFailures(routine.failurePause) : undefined,
-					undeliverable:
-						routine.undeliverable === undefined
+					originLoss:
+						routine.originLoss === undefined
 							? undefined
-							: words.routines.undeliverable(
-									at(routine.undeliverable.at),
-									interfaceText().notices.routineOriginLoss(routine.undeliverable.loss),
+							: words.routines.originLoss(
+									routine.originLoss.run,
+									at(routine.originLoss.at),
+									interfaceText().notices.routineOriginLoss(routine.originLoss.loss),
 								),
 					progress: progressWords(routine.progressLine),
 				}),

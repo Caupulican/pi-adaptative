@@ -17,48 +17,69 @@ export type RoutineOriginLoss = "session-file-gone" | "origin-entry-absent";
 
 export type RoutineOriginReach = "usable" | "waiting" | RoutineOriginLoss;
 
-const UNDELIVERABLE_MARKER_PREFIX = "undeliverable:";
+/**
+ * How a run was settled because its origin is lost: `undelivered`, its result was settled undeliverable in place of its
+ * delivery; `unstarted`, it was cancelled before dispatch because its routine's own origin is lost.
+ */
+export type RoutineOriginSettledRun = "undelivered" | "unstarted";
+
+const ORIGIN_SETTLEMENT_PREFIXES: Readonly<Record<RoutineOriginSettledRun, string>> = {
+	undelivered: "undeliverable:",
+	unstarted: "unstarted:",
+};
 
 /** The delivery marker of a result settled because its origin is lost: the run's stored result keeps why it was not delivered. */
 export function routineUndeliverableMarker(loss: RoutineOriginLoss): string {
-	return `${UNDELIVERABLE_MARKER_PREFIX}${loss}`;
+	return `${ORIGIN_SETTLEMENT_PREFIXES.undelivered}${loss}`;
 }
 
-/** The loss a delivery marker names when its result was settled undeliverable; undefined for a delivered result's marker. */
-export function routineUndeliverableLoss(marker: string | undefined): RoutineOriginLoss | undefined {
-	const loss = marker?.startsWith(UNDELIVERABLE_MARKER_PREFIX)
-		? marker.slice(UNDELIVERABLE_MARKER_PREFIX.length)
-		: undefined;
-	return loss === "session-file-gone" || loss === "origin-entry-absent" ? loss : undefined;
+/** The delivery marker of a run cancelled before dispatch because its routine's own origin is lost. */
+export function routineUnstartedMarker(loss: RoutineOriginLoss): string {
+	return `${ORIGIN_SETTLEMENT_PREFIXES.unstarted}${loss}`;
 }
 
-/** A run whose result was settled undeliverable: which run, why, and when the settlement was written. */
-export interface RoutineUndeliverableResult {
+/** A run settled because its origin is lost: which run, how, why, and when the settlement was written. */
+export interface RoutineOriginSettlement {
 	readonly routineId: string;
 	readonly occurrenceId: string;
+	readonly run: RoutineOriginSettledRun;
 	readonly loss: RoutineOriginLoss;
 	readonly settledAt: number;
 }
 
+/** How and why a delivery marker says its run was settled for a lost origin; undefined for a delivered result's marker. */
+function originSettlement(marker: string | undefined): Pick<RoutineOriginSettlement, "run" | "loss"> | undefined {
+	if (marker === undefined) return undefined;
+	for (const run of ["undelivered", "unstarted"] as const) {
+		const prefix = ORIGIN_SETTLEMENT_PREFIXES[run];
+		if (!marker.startsWith(prefix)) continue;
+		const loss = marker.slice(prefix.length);
+		return loss === "session-file-gone" || loss === "origin-entry-absent" ? { run, loss } : undefined;
+	}
+	return undefined;
+}
+
 /**
- * Per routine id, the latest of `occurrences` whose result (or the uncertainty result before it) was settled undeliverable,
- * read from the delivery markers the journal keeps while it holds the run.
+ * Per routine id, the latest of `occurrences` settled because its origin is lost (its result, or the uncertainty result
+ * before it), read from the delivery markers the journal keeps while it holds the run; only runs settled as `run` when
+ * given.
  */
-export function latestUndeliverableResults(
+export function latestOriginSettlements(
 	occurrences: Iterable<RoutineOccurrence>,
-): ReadonlyMap<string, RoutineUndeliverableResult> {
-	const latest = new Map<string, RoutineUndeliverableResult>();
+	run?: RoutineOriginSettledRun,
+): ReadonlyMap<string, RoutineOriginSettlement> {
+	const latest = new Map<string, RoutineOriginSettlement>();
 	for (const occurrence of occurrences) {
-		const loss =
-			routineUndeliverableLoss(occurrence.result?.deliveryMarker) ??
-			routineUndeliverableLoss(occurrence.priorUncertaintyResult?.deliveryMarker);
-		if (loss === undefined) continue;
+		const settled =
+			originSettlement(occurrence.result?.deliveryMarker) ??
+			originSettlement(occurrence.priorUncertaintyResult?.deliveryMarker);
+		if (settled === undefined || (run !== undefined && settled.run !== run)) continue;
 		const known = latest.get(occurrence.routineId);
 		if (known && known.settledAt >= occurrence.updatedAt) continue;
 		latest.set(occurrence.routineId, {
 			routineId: occurrence.routineId,
 			occurrenceId: occurrence.occurrenceId,
-			loss,
+			...settled,
 			settledAt: occurrence.updatedAt,
 		});
 	}
