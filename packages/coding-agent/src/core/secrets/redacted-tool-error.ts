@@ -39,17 +39,18 @@ export function redactedThrownToolError(error: unknown, redact: (text: string) =
 			redactedFailureReceipt(classified.receipt, redact),
 		);
 	}
-	// The rebuilt error keeps the facts the tool attached, redacted the way its message is.
-	const { receipt } = describeThrownToolError(error);
-	if (error instanceof Error) {
-		return Object.assign(new Error(redact(error.message)), { receipt: redactedFailureReceipt(receipt, redact) });
-	}
+	// The rebuilt error keeps the facts the tool attached, redacted the way its message is, and the class the loop reads
+	// as its error class (a failure with no code of its own is classified by it), so a guarded tool's failure is
+	// classified as the same throw would be unguarded.
+	const { receipt, errorClass } = describeThrownToolError(error);
+	const kept = { name: redact(errorClass), receipt: redactedFailureReceipt(receipt, redact) };
+	if (error instanceof Error) return Object.assign(new Error(redact(error.message)), kept);
 	// A thrown non-Error is the live shape of a cancellation: `signal.throwIfAborted()` throws
 	// the abort REASON, and a named abort's reason is a plain string. Reporting only that the
 	// value was lost left the model, the failure ledger and the operator with no cause at all.
 	return Object.assign(
 		new Error(`Credential-safe tool execution failed: ${describeThrownValue(error)}: ${redact(String(error))}`),
-		{ receipt: redactedFailureReceipt(receipt, redact) },
+		kept,
 	);
 }
 
