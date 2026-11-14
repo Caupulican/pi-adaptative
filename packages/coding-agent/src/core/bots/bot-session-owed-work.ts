@@ -81,6 +81,8 @@ interface RecordedRefusal {
 	readonly scope: "run" | "open";
 	readonly key: string | undefined;
 	readonly cause: string | undefined;
+	/** When the cause is recorded to end (a quota exhaustion's reset): the retake alarm is armed then. */
+	readonly clearsAt: number | undefined;
 }
 
 /**
@@ -244,7 +246,7 @@ export class BotOwedWork {
 
 	private record(agentId: string, scope: RecordedRefusal["scope"], key: string | undefined, error: unknown): void {
 		const refusal = error instanceof BotModelRefusedError ? error.refusal : undefined;
-		this.refusals.set(agentId, { scope, key, cause: refusal?.reason });
+		this.refusals.set(agentId, { scope, key, cause: refusal?.reason, clearsAt: refusal?.clearsAt });
 		this.armRetake(agentId, refusal?.clearsAt);
 	}
 
@@ -269,7 +271,8 @@ export class BotOwedWork {
 
 	/**
 	 * Whether the refusal recorded for the bot still holds back what it is owed: the same definition, refused for the same
-	 * cause now. When it does, the retake is armed at the cause's end as recorded now (a reset can be recorded later).
+	 * cause now. When it does and the cause's end as recorded now differs from the one armed (a reset can be recorded
+	 * later), the retake is armed again at it; the same end keeps its alarm.
 	 */
 	private stillRefused(agentId: string, record: PersistentBotRecord, sender: BotSender, onlyWakes: boolean): boolean {
 		const recorded = this.refusals.get(agentId);
@@ -277,7 +280,10 @@ export class BotOwedWork {
 		const key = this.ports.currentKey(record, sender);
 		const now = key === undefined ? undefined : this.ports.modelRefusal(record, sender);
 		if (recorded.key !== key || recorded.cause !== now?.reason) return false;
-		this.armRetake(agentId, now?.clearsAt);
+		if (recorded.clearsAt !== now?.clearsAt) {
+			this.refusals.set(agentId, { ...recorded, clearsAt: now?.clearsAt });
+			this.armRetake(agentId, now?.clearsAt);
+		}
 		return true;
 	}
 
