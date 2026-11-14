@@ -1,4 +1,5 @@
 import { createHash } from "node:crypto";
+import type { SessionCapabilities } from "../session-standing.ts";
 import { RULE_HOOKS } from "./rule-hook-rules.ts";
 
 /**
@@ -44,11 +45,14 @@ export type RuleHookTrigger =
 	  }
 	| { readonly kind: "preflight" };
 
+/** The capabilities a rule can be for: the work lifecycle's, or directing workers. */
+export type RuleHookStanding = keyof Pick<SessionCapabilities, "ownsWorkLifecycle" | "directsWorkers">;
+
 export interface RuleHookSource {
 	readonly topic: string;
 	readonly trigger: RuleHookTrigger;
-	/** Delivered to the root session only; a worker session never receives it. */
-	readonly rootOnly?: boolean;
+	/** Delivered only to a session whose standing holds this capability (session-standing.ts). */
+	readonly standing?: RuleHookStanding;
 	/** Delivered only while this tool is active: a rule about a tool is never sent to a session that lacks it. */
 	readonly requiresTool?: string;
 	/**
@@ -85,7 +89,7 @@ function normalizeBody(topic: string, text: string): string {
 
 /** Validates one rule; an invalid constant is a programming error and fails the first delivery loudly. */
 export function buildRuleHook(source: RuleHookSource): RuleHook {
-	const { topic, trigger, rootOnly, requiresTool } = source;
+	const { topic, trigger, standing, requiresTool } = source;
 	if (!TOPIC_PATTERN.test(topic)) throw new Error(`Rule hook topic ${topic} must be kebab-case.`);
 	if (trigger.kind === "tool-call") {
 		const { tools } = trigger;
@@ -107,7 +111,7 @@ export function buildRuleHook(source: RuleHookSource): RuleHook {
 		id: ruleHookId(topic, template),
 		template,
 		render: (context) => normalizeBody(topic, typeof body === "string" ? body : body(context)),
-		...(rootOnly ? { rootOnly } : {}),
+		...(standing !== undefined ? { standing } : {}),
 		...(requiresTool !== undefined ? { requiresTool } : {}),
 	};
 }

@@ -4,7 +4,13 @@ import { getReadmePath } from "../../config.ts";
 import type { AgentMessage } from "../../kernel/index.ts";
 import { RULE_IDS_DETAIL_KEY } from "../../kernel/session/message-retention.ts";
 import { isRecordObject, isStringArray } from "../util/value-guards.ts";
-import { formatRuleHook, loadRuleHooks, RULE_MARKER_PREFIX, type RuleHook } from "./rule-hook-catalog.ts";
+import {
+	formatRuleHook,
+	loadRuleHooks,
+	RULE_MARKER_PREFIX,
+	type RuleHook,
+	type RuleHookStanding,
+} from "./rule-hook-catalog.ts";
 
 export interface RuleHookDeliveryDeps {
 	/**
@@ -13,8 +19,8 @@ export interface RuleHookDeliveryDeps {
 	 * windowing is `continuousChatRequestHistory`), so a rule delivered in an earlier turn is not in context any more.
 	 */
 	getMessages(): readonly AgentMessage[];
-	/** Only a session that directs workers receives the `rootOnly` rules (session-standing.ts). */
-	directsWorkers(): boolean;
+	/** The session's standing capabilities a rule can be for (`RuleHookSource.standing`, session-standing.ts). */
+	standing(): Readonly<Record<RuleHookStanding, boolean>>;
 	/** Whether a tool is active now; a rule that `requiresTool` is delivered only when this says so. */
 	isToolActive?(toolName: string): boolean;
 	/** The harness package directory; defaults to the directory of the installed README. */
@@ -153,7 +159,7 @@ export class RuleHookDelivery {
 
 	/** Whether this session may receive the rule: its role, and the tool the rule is about. */
 	private deliversTo(hook: RuleHook): boolean {
-		if (hook.rootOnly && !this.deps.directsWorkers()) return false;
+		if (hook.standing !== undefined && !this.deps.standing()[hook.standing]) return false;
 		return hook.requiresTool === undefined || this.deps.isToolActive?.(hook.requiresTool) === true;
 	}
 

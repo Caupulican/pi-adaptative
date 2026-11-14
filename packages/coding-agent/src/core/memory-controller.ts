@@ -969,19 +969,19 @@ export class MemoryController {
 		);
 	}
 
-	/**
-	 * Whether `generation` serves history reads, in either memory system: it is the current, settled generation
-	 * of an active memory system in a root session. A child session keeps no history index; its workers read
-	 * through the parent's broker. Retrieval policy is applied by each reader, zoom and lookup.
-	 */
-	private _historyAvailable(generation: number): boolean {
+	/** Whether `generation` is the current, settled generation of an active memory system. */
+	private _generationLive(generation: number): boolean {
 		return (
 			generation === this._memoryGeneration &&
 			!this._transitioning &&
 			!this._initializationFailed &&
-			this._activeMemorySystem !== undefined &&
-			this.deps.standing.ownsHistory
+			this._activeMemorySystem !== undefined
 		);
+	}
+
+	/** Whether `generation` serves history reads (either system): live, in a session that owns the owner's history. */
+	private _historyAvailable(generation: number): boolean {
+		return this._generationLive(generation) && this.deps.standing.ownsHistory;
 	}
 
 	/** The live memory manager. Callers reach prefetch / tool-definitions / markers / shutdown through it. */
@@ -1684,7 +1684,7 @@ export class MemoryController {
 	getKnowledgeAdmission(request?: Pick<DecisionOptions, "budget" | "origin">): KnowledgeAdmissionPort | undefined {
 		const store = this._knowledgeStore;
 		const host = this._knowledgeHost;
-		if (!store || !host || !this._currentKnowledgeReader()) return undefined;
+		if (!store || !host || !this._currentKnowledgeReader() || !this.deps.standing.ownsMemoryWrites) return undefined;
 		const generation = this._memoryGeneration;
 		const guard = host.captureGuard();
 		const engine = host.engine();
@@ -1782,7 +1782,7 @@ export class MemoryController {
 	}
 
 	private _currentKnowledgeReader(): KnowledgeProjectionReader | undefined {
-		return this._historyAvailable(this._memoryGeneration) && this._activeMemorySystem === "icm"
+		return this._generationLive(this._memoryGeneration) && this._activeMemorySystem === "icm"
 			? this._knowledgeReader
 			: undefined;
 	}
@@ -1820,7 +1820,7 @@ export class MemoryController {
 	private _startKnowledgeCollector(generation: number): void {
 		const store = this._knowledgeStore;
 		const host = this._knowledgeHost;
-		if (!store || !host || !this._currentKnowledgeReader()) return;
+		if (!store || !host || !this._currentKnowledgeReader() || !this.deps.standing.ownsMemoryWrites) return;
 		if (this._knowledgeCollector) throw new Error("Prior knowledge collection has not stopped.");
 		const scope = this._knowledgeScope();
 		const collector = host.createCollector({

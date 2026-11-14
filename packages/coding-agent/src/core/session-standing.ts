@@ -18,31 +18,41 @@ export type SessionStanding =
 	| { readonly kind: "vehicle" };
 
 export interface SessionCapabilities {
-	/** Holds the process-wide singletons: runtime update, the shared bot session host, the remote hub, the placed-job route. */
+	/**
+	 * Holds the process-wide singletons: runtime update, the shared bot session host (and reopening the bots owed work on
+	 * it), the remote hub and its placed-job route.
+	 */
 	readonly ownsProcessSingletons: boolean;
-	/** Does the host's duties: serves channels and `channel_reply`, reconciles the always-on service, reopens bots owed work. */
+	/** Does the host's duties: serves channels and `channel_reply`, reconciles the always-on service. */
 	readonly ownsHostDuties: boolean;
-	/** Reads the owner's memory into its prompt: the knowledge prompt and reader, the USER.md persona, the file-store block. */
+	/** Reads the owner's memory: the knowledge store, prompt, reader and tool, the USER.md persona, the file-store block. */
 	readonly readsOwnerMemory: boolean;
-	/** Writes the owner's memory: MEMORY.md and USER.md, the memory tool, provider writes, knowledge collection, the switch. */
+	/**
+	 * Writes the owner's memory: MEMORY.md and USER.md, the memory tool, provider writes, knowledge admission and
+	 * collection, the memory recovery that rebuilds its stores.
+	 */
 	readonly ownsMemoryWrites: boolean;
 	/** Owns the owner's history: the ICM project chat and its wire, history recall, `zoom`/`date`, the transcript hierarchy. */
 	readonly ownsHistory: boolean;
-	/** Owns the agentDir's learning: durable learning state, reflection and learner writes, skill curation. */
+	/** Owns the agentDir's learning: durable learning state, reflection passes and learner writes. */
 	readonly ownsLearning: boolean;
+	/** Curates the owner's skills: archives stale ones at start, and `skill` repairs their sources. */
+	readonly curatesOwnerSkills: boolean;
 	/** Holds the soul gate: writes to the owner's soul.md are held and reviewed through this session. */
 	readonly reviewsSoulWrites: boolean;
-	/** Edits the owner's proactivity settings (the `proactivity` tool). */
+	/** Edits the owner's settings: the `proactivity` tool, the memory system switch it persists. */
 	readonly writesOwnerSettings: boolean;
 	/** Answers for its checkout: pins the GitHub origin and acts ahead on the checkout's failing CI. */
 	readonly answersForCheckout: boolean;
 	/** Manages bots: the `bot` tool, leaders and their terminal route, the retire-leader refusal. */
 	readonly managesBots: boolean;
-	/** Directs workers: the delegation gate, director prompt and root work hooks, the plan tool and executor, retention. */
+	/** Directs workers: the delegation gate, director prompt, delegation and plan rules, plan tool and executor, retention. */
 	readonly directsWorkers: boolean;
 	/** Runs the proactive lanes: proactive review and the research lane. */
 	readonly runsProactiveLanes: boolean;
-	/** Converses with the owner: keeps harness notices, the work lifecycle prompt, `self_compact`, semantic uncertainties. */
+	/** Carries the owner's work from survey to delivery: the work lifecycle prompt and its rule. */
+	readonly ownsWorkLifecycle: boolean;
+	/** Converses with the owner: keeps harness notices, `self_compact`, its semantic doubts journal. */
 	readonly conversesWithOwner: boolean;
 	/** May ask the owner live: an edge operation without a grant gets the confirmation handler instead of a refusal. */
 	readonly asksOwnerLive: boolean;
@@ -68,12 +78,14 @@ const FLAGS: Readonly<Record<FlagCapability, Row>> = {
 	ownsMemoryWrites: [true, false, false, false],
 	ownsHistory: [true, false, false, false],
 	ownsLearning: [true, false, false, false],
+	curatesOwnerSkills: [true, false, false, false],
 	reviewsSoulWrites: [true, false, false, false],
 	writesOwnerSettings: [true, false, false, false],
 	answersForCheckout: [true, false, false, false],
 	managesBots: [true, false, false, false],
 	directsWorkers: [true, false, false, false],
 	runsProactiveLanes: [true, false, false, false],
+	ownsWorkLifecycle: [true, false, false, false],
 	conversesWithOwner: [true, false, false, false],
 	asksOwnerLive: [true, false, false, false],
 	keepsOwnerFollowUps: [true, false, false, false],

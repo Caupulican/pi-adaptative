@@ -1530,9 +1530,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				});
 		if (standing.ownsHostDuties && !this._channelsHostedByDaemon) this.channels.start();
 		if (standing.answersForCheckout && !this.deps.isDisposed()) this._getActAhead().start();
-		if (standing.directsWorkers && this._hasWorkerState()) this._getRetention().scheduleFromIdle();
+		this._getRetention().scheduleFromIdle();
 		// Bot sessions holding watches a closed process left are opened here; the daemon's phone session hosts none.
-		if (standing.ownsHostDuties && !this._channelsHostedByDaemon) this._botHost.host.openOwed();
+		if (standing.ownsProcessSingletons && !this._channelsHostedByDaemon) this._botHost.host.openOwed();
 	}
 
 	/** The host's CI source offers its failure evidence while it runs; the returned function withdraws it. */
@@ -1563,7 +1563,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _getActAhead(): ActAheadController {
 		this._actAhead ??= new ActAheadController({
 			getSessionManager: () => this.deps.getSessionManager(),
-			answersForCheckout: () => this.deps.standing.answersForCheckout,
 			isDisposed: () => this.deps.isDisposed(),
 			canDispatch: () => this.deps.isDelegateToolActive(),
 			isForegroundBusy: () => this.deps.isForegroundBusy(),
@@ -2020,11 +2019,11 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	createBackgroundLaneTools(): ToolDefinition[] {
 		const routine = this.createRoutineToolDefinition();
-		const { managesBots, ownsHostDuties, directsWorkers } = this.deps.standing;
+		const { managesBots, directsWorkers } = this.deps.standing;
 		return [
 			routine,
 			managesBots ? this.createBotToolDefinition() : undefined,
-			ownsHostDuties ? this.createChannelReplyToolDefinition() : undefined,
+			this.createChannelReplyToolDefinition(),
 			directsWorkers ? this.createPlanToolDefinition() : undefined,
 		].filter((definition): definition is ToolDefinition => definition !== undefined);
 	}

@@ -165,7 +165,7 @@ export interface ReflectionControllerDeps {
 	getContextGeneration?(): number;
 	/** Agent dir — reflection-promoted skills are written under `<agentDir>/skills/`. */
 	getAgentDir(): string;
-	readonly standing: Pick<SessionCapabilities, "ownsLearning" | "ownsMemoryWrites">;
+	readonly standing: Pick<SessionCapabilities, "ownsLearning">;
 	/** Disposal short-circuits: no completion, no writes against a dead session. */
 	isDisposed(): boolean;
 	/** Session-lifetime abort signal — aborts an in-flight reflection completion on dispose. */
@@ -554,7 +554,6 @@ export class ReflectionController {
 			ephemeral,
 			createCollector: (binding) => {
 				const manager = this.deps.getSessionManager();
-				if (!this.deps.standing.ownsMemoryWrites) return undefined;
 				if (ephemeral()) {
 					if (autoLearn().enabled)
 						this.warnOnce(

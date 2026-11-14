@@ -86,7 +86,7 @@ export interface SystemPromptBuilderDeps {
 	/** The authoritative profile used by tools, lanes, and stable prompt shaping. */
 	getModelCapabilityProfile(): ModelCapabilityProfile;
 	/** The work lifecycle prompt is for a session conversing with the owner; the director role for one directing workers. */
-	readonly standing: Pick<SessionCapabilities, "conversesWithOwner" | "directsWorkers">;
+	readonly standing: Pick<SessionCapabilities, "ownsWorkLifecycle" | "directsWorkers">;
 	/**
 	 * The owner's replacement for the whole generated prompt, scoped to this session. Read fresh on
 	 * every build so each rebuild path (tool surface change, routed turn, refresh) honors it.
@@ -366,7 +366,7 @@ export class SystemPromptBuilder {
 	}
 
 	private _buildWorkLifecyclePrompt(): string | undefined {
-		if (!this.deps.standing.conversesWithOwner) return undefined;
+		if (!this.deps.standing.ownsWorkLifecycle) return undefined;
 		const capabilityClass = this.deps.getModelCapabilityProfile().class;
 		if (capabilityClass === "chat") return CHAT_WORK_LIFECYCLE_SYSTEM_RULE;
 		if (capabilityClass === "minimal") return `WORK LIFECYCLE\n- ${CHAT_WORK_LIFECYCLE_SYSTEM_RULE}`;

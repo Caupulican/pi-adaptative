@@ -49,7 +49,7 @@ export const RULE_HOOKS: readonly RuleHookSource[] = [
 	{
 		topic: "work-lifecycle",
 		trigger: ROOT_WORK_TRIGGER,
-		rootOnly: true,
+		standing: "ownsWorkLifecycle",
 		body: `- Phases: Survey → Contract → Plan/Route → Execute → Prove/Deliver; scale them to the outcome.
 - Owners: goal outcome/contract, task_steps plan, delegate workers, evidence acceptance; no parallel workflow state.
 - Survey: bounded and read-only first.
@@ -60,7 +60,7 @@ export const RULE_HOOKS: readonly RuleHookSource[] = [
 	{
 		topic: "delegation",
 		trigger: ROOT_WORK_TRIGGER,
-		rootOnly: true,
+		standing: "directsWorkers",
 		// One owner per rule: the root prompt's director role holds the identity and the decision to delegate, the delegate
 		// tool text holds the mechanics (reuse, event-driven handoffs, never poll, forkTurns default none, parallelWork,
 		// slices, race, interrupt/cancel/retire), and this holds the policy for how to delegate well.
@@ -79,7 +79,7 @@ export const RULE_HOOKS: readonly RuleHookSource[] = [
 	{
 		topic: "plan",
 		trigger: ROOT_WORK_TRIGGER,
-		rootOnly: true,
+		standing: "directsWorkers",
 		// The director role says that plan exists; this says when a plan beats single assignments and how to shape one.
 		requiresTool: PLAN_TOOL_NAME,
 		body: `- Use plan when the goal has three or more parts or any part can run beside another; use assign for one task.

@@ -436,7 +436,7 @@ export class AgentSession {
 	private readonly _toolGate: ToolGateController;
 	private readonly _ruleHooks = new RuleHookDelivery({
 		getMessages: () => this._memory.requestHistory(this.agent.state.messages),
-		directsWorkers: () => this._caps.directsWorkers,
+		standing: () => this._caps,
 		isToolActive: (name) => this.getActiveToolNames().includes(name),
 	});
 	private readonly _mutationLedger = new ObjectiveMutationLedger();
@@ -1348,7 +1348,7 @@ export class AgentSession {
 			acquireSystemSwitchLease: (scope) => {
 				if (
 					this._disposed ||
-					!this._caps.ownsMemoryWrites ||
+					!(scope === "switch" ? this._caps.writesOwnerSettings : this._caps.ownsMemoryWrites) ||
 					this.isRetrying ||
 					this._reflectionTurnLifecycle.inFlight ||
 					!isSessionSettled(this, this._hasPendingIdleContinuation()) ||
@@ -2953,7 +2953,7 @@ export class AgentSession {
 	 * child sessions and when `curator.autoArchive` is disabled. Restorable via `/curate restore`.
 	 */
 	async runStartupSkillCuration(): Promise<string[]> {
-		if (!this._caps.ownsLearning) return [];
+		if (!this._caps.curatesOwnerSkills) return [];
 		const settings = this.settingsManager.getCuratorSettings();
 		if (!settings.autoArchive) return [];
 		return this._skillCurator.autoArchiveStale(Date.now(), { staleDays: settings.staleDays });

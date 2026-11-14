@@ -63,9 +63,10 @@ export interface SessionEdgeDeps {
 	getDenyCommands?(): readonly string[];
 	appendCustomEntry(customType: string, data: unknown): void;
 	getCwd(): string;
-	/** Whether the session may ask the owner live, and keeps owner follow-ups for what it refuses. */
-	readonly standing: Pick<SessionCapabilities, "asksOwnerLive" | "keepsOwnerFollowUps">;
+	/** Whether the session may ask the owner live. */
+	readonly standing: Pick<SessionCapabilities, "asksOwnerLive">;
 	getConfirmation(): EdgeConfirmationHandler | undefined;
+	/** Writes the refused operation's owner follow-up where the session keeps them (`keepsOwnerFollowUps`); its id or undefined. */
 	deferOwnerOperation?(operation: EdgeOperation): string | undefined;
 	/**
 	 * Whether the worktree currently holds changes at paths this session never wrote. Resolves the
@@ -1027,7 +1028,7 @@ export async function enforceSessionEdgeOperation(
 	}
 	const handler = deps.standing.asksOwnerLive ? deps.getConfirmation() : undefined;
 	if (!handler) {
-		const followUp = deps.standing.keepsOwnerFollowUps ? deps.deferOwnerOperation?.(operation) : undefined;
+		const followUp = deps.deferOwnerOperation?.(operation);
 		return {
 			authorized: false,
 			reason: `${edgeBlockReason(operation, false)}${followUp ? ` Owner follow-up: ${followUp}.` : ""}`,

@@ -201,7 +201,7 @@ export interface SessionEdgeIntentControllerDeps {
 	getModelRegistry(): ModelRegistry;
 	getCwd(): string;
 	getAgentDir(): string;
-	readonly standing: SessionEdgeDeps["standing"] & { readonly directsWorkers: boolean };
+	readonly standing: SessionEdgeDeps["standing"] & Readonly<Record<"directsWorkers" | "keepsOwnerFollowUps", boolean>>;
 	/** A worker can be started: the `delegate` tool is active. */
 	isDelegateToolActive(): boolean;
 	isDisposed(): boolean;

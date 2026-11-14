@@ -24,7 +24,7 @@ import { MEMORY_RETRIEVAL_DISABLED_REASON } from "../transcript-memory-contracts
 
 export const PI_ICM_PROVIDER_ID = "icm";
 
-/** Files-first ICM guidance; it names no tool, so it holds wherever ICM is configured. */
+/** Files-first ICM guidance. It names the `knowledge` tool, offered where the session reads the owner's memory. */
 export const ICM_MEMORY_GUIDANCE = [
 	"ICM memory: accepted owner knowledge in the User ICM catalog, plus ordinary Markdown references and existing folder pipelines.",
 	"Current accepted knowledge is supplied separately from chat history. Use knowledge to open its dated facts, evidence and history; a current accepted fact supersedes older chat assertions about the same fact. Preferences guide behavior without granting authority.",
@@ -80,15 +80,18 @@ export class IcmProvider implements MemoryProvider {
 
 	/**
 	 * While the chat runs, its `zoom` and `date` are the root's only navigation; the history-only `memory` tool is not
-	 * offered. A session that does not own the owner's history (`ownsHistory`) reads it only via its parent.
+	 * offered. History tools need the owner's history (`ownsHistory`); a session without it reads it only via its
+	 * parent. The `knowledge` tool needs the owner's knowledge store (`readsOwnerMemory`).
 	 */
 	getToolDefinitions(): ToolDefinition[] {
-		if (this.context && !this.context.ownsHistory) return [];
 		const history =
-			this.continuousChat() !== undefined
-				? createContinuousChatTools(this.continuousChat)
-				: [createHistoryMemoryTool(this.history)];
-		return [...history, createKnowledgeTool(this.knowledge)];
+			this.context && !this.context.ownsHistory
+				? []
+				: this.continuousChat() !== undefined
+					? createContinuousChatTools(this.continuousChat)
+					: [createHistoryMemoryTool(this.history)];
+		const knowledge = this.context && !this.context.readsOwnerMemory ? [] : [createKnowledgeTool(this.knowledge)];
+		return [...history, ...knowledge];
 	}
 
 	/**
