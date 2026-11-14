@@ -55,7 +55,7 @@ export interface SessionCapabilities {
 	readonly runsProactiveLanes: boolean;
 	/** Carries the owner's work from survey to delivery: the work lifecycle prompt and its rule. */
 	readonly ownsWorkLifecycle: boolean;
-	/** Converses with the owner: keeps harness notices, `self_compact`, its semantic doubts journal. */
+	/** Converses with the owner: `self_compact`, its semantic doubts journal. */
 	readonly conversesWithOwner: boolean;
 	/** May ask the owner live: an edge operation without a grant gets the confirmation handler instead of a refusal. */
 	readonly asksOwnerLive: boolean;
@@ -67,9 +67,17 @@ export interface SessionCapabilities {
 	readonly interactiveAuth: boolean;
 	/** What its routine runtime holds; undefined where it holds none. */
 	readonly routineScope: RoutineScope | undefined;
+	/**
+	 * Where its harness notices go (`harness-notice.ts`): its own transcript, or the owner line its host keeps (a bot's
+	 * chat); undefined where it keeps none, and a state the owner hears of in any session arrives as a warning.
+	 */
+	readonly noticeDestination: NoticeDestination | undefined;
 }
 
-type FlagCapability = Exclude<keyof SessionCapabilities, "routineScope">;
+/** Where a standing's harness notices go: its transcript, or the owner line its host keeps. */
+export type NoticeDestination = "transcript" | "owner-line";
+
+type FlagCapability = Exclude<keyof SessionCapabilities, "routineScope" | "noticeDestination">;
 
 type Row = readonly [root: boolean, worker: boolean, bot: boolean, vehicle: boolean];
 
@@ -103,12 +111,23 @@ const ROUTINE_SCOPES: Readonly<Record<SessionStanding["kind"], RoutineScope | un
 	vehicle: undefined,
 };
 
+const NOTICE_DESTINATIONS: Readonly<Record<SessionStanding["kind"], NoticeDestination | undefined>> = {
+	root: "transcript",
+	worker: undefined,
+	bot: "owner-line",
+	vehicle: undefined,
+};
+
 const COLUMNS = { root: 0, worker: 1, bot: 2, vehicle: 3 } as const;
 
 function capabilitiesOf(kind: SessionStanding["kind"]): SessionCapabilities {
 	const column = COLUMNS[kind];
 	const flags = Object.fromEntries(Object.entries(FLAGS).map(([name, row]) => [name, row[column]]));
-	return Object.freeze({ ...(flags as Record<FlagCapability, boolean>), routineScope: ROUTINE_SCOPES[kind] });
+	return Object.freeze({
+		...(flags as Record<FlagCapability, boolean>),
+		routineScope: ROUTINE_SCOPES[kind],
+		noticeDestination: NOTICE_DESTINATIONS[kind],
+	});
 }
 
 const CAPABILITIES: Readonly<Record<SessionStanding["kind"], SessionCapabilities>> = {

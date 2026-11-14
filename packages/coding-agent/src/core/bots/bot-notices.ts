@@ -8,12 +8,12 @@
  */
 import { randomUUID } from "node:crypto";
 import { join } from "node:path";
-import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
 import { botNoticesDir } from "../agent-paths.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import type { OwnerNoticeLine } from "../harness-notice.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
-import { type BotHomeRecord, keepNewestHomeRecords, readHomeRecords } from "./bot-home-records.ts";
+import { type BotHomeRecord, keepNewestHomeRecords, parseHomeRecordHead, readHomeRecords } from "./bot-home-records.ts";
 
 /** Notices kept, the newest: what the chat shows of what the bot's session told the owner. */
 const MAX_NOTICES_KEPT = 16;
@@ -34,19 +34,16 @@ export interface BotNotice {
 	/** The owner-facing words, in the owner's language when it was written. */
 	readonly text: string;
 	readonly at: number;
+	/** A harness notice's delivery id (`harness-notice.ts`), so the bot's reopened session finds an episode it told. */
+	readonly deliveryId?: string;
 }
 
 function parseNotice(value: unknown, agentId: string): BotNotice | undefined {
-	if (
-		!isPlainRecord(value) ||
-		value.version !== 1 ||
-		typeof value.id !== "string" ||
-		value.agentId !== agentId ||
-		typeof value.text !== "string" ||
-		typeof value.at !== "number"
-	)
-		return undefined;
-	return { version: 1, id: value.id, agentId, text: value.text, at: value.at };
+	const parsed = parseHomeRecordHead(value, agentId);
+	if (!parsed) return undefined;
+	const { deliveryId } = parsed.record;
+	if (deliveryId !== undefined && typeof deliveryId !== "string") return undefined;
+	return { ...parsed.head, ...(deliveryId === undefined ? {} : { deliveryId }) };
 }
 
 /** The notices kept for the bot, oldest first. */
@@ -63,6 +60,21 @@ export interface BotNoticeInput {
 	readonly agentId: string;
 	readonly text: string;
 	readonly at: number;
+	readonly deliveryId?: string | undefined;
+}
+
+/**
+ * The bot's chat as its own session's notice destination (`OwnerNoticeLine`): `read` the notices kept, `keep` one with
+ * its delivery id (marked unread), true when it is kept.
+ */
+export function botNoticeLine(
+	read: () => readonly BotNotice[],
+	keep: (text: string, deliveryId: string) => boolean,
+): OwnerNoticeLine {
+	return {
+		heldIds: () => new Set(read().flatMap(({ deliveryId }) => (deliveryId ? [deliveryId] : []))),
+		keep: ({ deliveryId, text }) => keep(text, deliveryId),
+	};
 }
 
 /**
@@ -70,7 +82,14 @@ export interface BotNoticeInput {
  * notice could not be written.
  */
 function writeBotNotice(agentDir: string, input: BotNoticeInput): void {
-	const notice: BotNotice = { version: 1, id: randomUUID(), agentId: input.agentId, text: input.text, at: input.at };
+	const notice: BotNotice = {
+		version: 1,
+		id: randomUUID(),
+		agentId: input.agentId,
+		text: input.text,
+		at: input.at,
+		...(input.deliveryId === undefined ? {} : { deliveryId: input.deliveryId }),
+	};
 	const dir = botNoticesDir(agentDir, input.agentId);
 	writeFileAtomicSync(
 		join(dir, `${String(input.at).padStart(15, "0")}-${notice.id}.json`),

@@ -78,7 +78,7 @@ import {
 } from "./bot-inbox.ts";
 import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
-import { type BotNotice, keepBotNotice, readBotNotices } from "./bot-notices.ts";
+import { type BotNotice, botNoticeLine, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import { BotOwedWork, cancelOtherSessionsWatches, owesWatchWork } from "./bot-session-owed-work.ts";
 import {
@@ -319,11 +319,14 @@ export class BotSessionHost {
 		).map(({ message }) => message);
 	}
 
-	/** Tells the owner what the bot's own session raised for them, in the bot's chat (see `keepBotNotice`). */
-	private notify(agentId: string, text: string, mark = true): void {
-		const notice = { agentId, text, at: Date.now() };
-		if (keepBotNotice(this.ports.agentDir(), this.ports.store(), notice, mark, (message) => this.ports.warn(message)))
-			this.changed(agentId);
+	/** Tells the owner what the bot's own session raised for them, in the bot's chat (see `keepBotNotice`); true when kept. */
+	private notify(agentId: string, text: string, mark = true, deliveryId?: string): boolean {
+		const notice = { agentId, text, at: Date.now(), deliveryId };
+		const kept = keepBotNotice(this.ports.agentDir(), this.ports.store(), notice, mark, (line) =>
+			this.ports.warn(line),
+		);
+		if (kept) this.changed(agentId);
+		return kept;
 	}
 
 	/** The bot's earlier worker conversations, whichever session ran them (see `BotHistory`). */
@@ -774,6 +777,11 @@ export class BotSessionHost {
 					// A bot's own session: it runs the watches it arms and takes their wakes as parent inputs (idle starts a
 					// turn, running steers).
 					standing: { kind: "bot", agentId },
+					// Its notices (a lost watch, System One without an engine) reach the owner in the bot's chat.
+					ownerNoticeLine: botNoticeLine(
+						() => this.readNotices(agentId),
+						(text, deliveryId) => this.notify(agentId, text, true, deliveryId),
+					),
 					// Every run is admitted at its start, whatever opened it: a wake's turn is held to the owner's rules too.
 					admitRun: () => {
 						try {

@@ -330,7 +330,7 @@ export async function runJourney1PiChatPhase(world: HarnessWorld): Promise<void>
 		expect(results, "the push is prepared, not run").toContain(`Prepared, not run: ${pushCommand} (git.publish`);
 		expect(results, "the result names the peer").toContain("a peer agent on pi-chat");
 		expect(results, "the result says how the owner releases it").toContain("asks for it in their own turn");
-		expect(results, "the result says the owner is told").toContain("The owner is told with their next turn");
+		expect(results, "the result says the owner is told").toContain("The owner is told of it");
 	});
 	expectStatus(
 		await callTool(sessionA, "agent_send", {

@@ -91,10 +91,39 @@ export type HarnessNoticeObservation =
 	| "clear"
 	| { readonly scope: string; readonly state: HarnessNotice | "clear" };
 
+/**
+ * A line a host keeps for the owner of a session that is not theirs to read (a bot's own session: its chat, in every
+ * session). It holds the owner's words only, never a notice's evidence, and is never sent to a model.
+ */
+export interface OwnerNoticeLine {
+	/** The delivery ids of the notices on the line, so a reopened session finds an episode it already told. */
+	heldIds(): ReadonlySet<string>;
+	/** Puts one notice's owner line on it; false when it could not be kept (the host reports why). */
+	keep(notice: { readonly deliveryId: string; readonly kind: HarnessNoticeKind; readonly text: string }): boolean;
+}
+
+/**
+ * Where a session keeps its notices, decided by its standing (`session-standing.ts` `noticeDestination`): its own
+ * transcript, which the owner reads and the model takes with the owner's next turn (a root), or the owner's line its
+ * host keeps (a bot). A session with neither keeps none.
+ */
+export type HarnessNoticeDestination =
+	| { readonly kind: "transcript" }
+	| { readonly kind: "owner-line"; readonly line: OwnerNoticeLine };
+
+/** The destination a standing's `noticeDestination` names, given the owner's line its host supplied, if any. */
+export function harnessNoticeDestination(
+	kind: "transcript" | "owner-line" | undefined,
+	line: OwnerNoticeLine | undefined,
+): HarnessNoticeDestination | undefined {
+	if (kind === "transcript") return { kind };
+	return kind === "owner-line" && line ? { kind, line } : undefined;
+}
+
 export interface HarnessNoticeDeps {
 	getSessionManager(): SessionManager;
-	/** Whether the session keeps notices: one that converses with the owner (session-standing.ts). */
-	keepsNotices(): boolean;
+	/** Where the session keeps its notices; undefined: it keeps none. */
+	readonly destination: HarnessNoticeDestination | undefined;
 	/** The session's durable parent-input owner; `next-owner-turn` inputs never start a turn. */
 	deliver(input: ParentInputDelivery): Promise<ParentInputReceipt>;
 	warn(message: string): void;
@@ -120,6 +149,8 @@ interface PendingNotice {
 	readonly deliveryId: string;
 	readonly payloadDigest: string;
 	readonly message: ParentInputDelivery["message"];
+	/** The owner's line: what an owner line keeps (the headline in the interface language). */
+	readonly ownerLine: string;
 	failures: number;
 	/** The observers told when this notice is dropped unsaved; emptied once told. */
 	readonly lost: (() => void)[];
@@ -235,8 +266,9 @@ export function transcriptKeepsNotices(
 }
 
 /**
- * Tells the owner once, with their next turn, that an automatic capability stopped for a reason they can act on. It
- * never wakes a turn and never calls a model. Each (session, kind, reason) episode has one durable notice: a second
+ * Tells the owner once, at the session's destination (`HarnessNoticeDestination`: with their next turn in its
+ * transcript, or on the owner line its host keeps), that an automatic capability stopped for a reason they can act on.
+ * It never wakes a turn and never calls a model. Each (session, kind, reason) episode has one durable notice: a second
  * detection or a replay finds the saved input and adds nothing. A new notice for the same reason needs this runtime to
  * have observed the state end (clear or another reason) and return, and the previous notice to have reached the owner.
  * An observed notice is kept in memory until it is saved: a later clear does not drop it, and a session whose first
@@ -270,12 +302,12 @@ export class HarnessNoticeController {
 	 * the owner is told about). Delivery is deferred past the caller's stack, and a state or notice that cannot be read
 	 * or saved is reported, never thrown into the capability that observed it. Returns whether the owner is told of the
 	 * observed state: its notice is being saved or waits for the session's next saved entry, or one already saved tells
-	 * it. False where no notice can be kept (a child session, a session that is not persisted, a closed runtime), and
-	 * for a clear. `onLost` is called once if a notice this call reports kept is dropped before it is saved; never
-	 * when this returns false.
+	 * it. False where no notice can be kept (a session without a destination, a closed runtime), and for a clear.
+	 * `onLost` is called once if a notice this call reports kept is dropped before it is saved; never when this returns
+	 * false.
 	 */
 	observe(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined, onLost?: () => void): boolean {
-		if (this.closed || !this.deps.keepsNotices()) return false;
+		if (this.closed || !this.deps.destination) return false;
 		try {
 			const observation = read();
 			return observation === undefined ? false : this.record(kind, observation, onLost);
@@ -283,6 +315,22 @@ export class HarnessNoticeController {
 			this.report(kind, error);
 			return false;
 		}
+	}
+
+	/**
+	 * {@link observe}, for a state the owner hears of in any session: where the session keeps no notices (a worker, a
+	 * vehicle), an observed notice's owner line arrives as a warning instead. The capability tells each episode once.
+	 */
+	observeOrWarn(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean {
+		if (this.closed || this.deps.destination) return this.observe(kind, read);
+		try {
+			const observation = read();
+			const notice = typeof observation === "object" && "scope" in observation ? observation.state : observation;
+			if (typeof notice === "object") this.deps.warn(notice.ownerText ?? notice.text);
+		} catch (error) {
+			this.report(kind, error);
+		}
+		return false;
 	}
 
 	/**
@@ -365,18 +413,23 @@ export class HarnessNoticeController {
 			return true;
 		}
 		state.covered = undefined;
+		const saved = this.savedLookup(manager);
 		let latest = -1;
 		while (latest + 1 < MAX_NOTICE_GENERATIONS) {
-			if (!manager.getParentInput(harnessNoticeDeliveryId(sessionId, kind, reason, latest + 1))) break;
+			if (!saved(harnessNoticeDeliveryId(sessionId, kind, reason, latest + 1))) break;
 			latest++;
 		}
 		const latestId = latest >= 0 ? harnessNoticeDeliveryId(sessionId, kind, reason, latest) : undefined;
-		// The saved notice already tells this state: after restart (no observed end), or while it still waits for the owner.
+		// The saved notice already tells this state: after restart (no observed end), or while it still waits for the owner
+		// in the transcript (an owner line has no waiting: what is on it is told).
 		if (
 			latestId &&
 			(!recurred ||
 				this.inFlight.has(latestId) ||
-				manager.getPendingParentInputs("next-owner-turn").some((input) => input.metadata.deliveryId === latestId))
+				(this.deps.destination?.kind === "transcript" &&
+					manager
+						.getPendingParentInputs("next-owner-turn")
+						.some((input) => input.metadata.deliveryId === latestId)))
 		) {
 			state.covered = reason;
 			return true;
@@ -408,12 +461,32 @@ export class HarnessNoticeController {
 					observation.evidence === undefined ? undefined : boundedRedactedNoticeEvidence(observation.evidence),
 			});
 			const payloadDigest = createHash("sha256").update(JSON.stringify(message)).digest("hex");
-			notice = { sessionId, kind, key, reason, deliveryId, payloadDigest, message, failures: 0, lost: [] };
+			const ownerLine = ownerHeadline ?? text;
+			notice = {
+				sessionId,
+				kind,
+				key,
+				reason,
+				deliveryId,
+				payloadDigest,
+				message,
+				ownerLine,
+				failures: 0,
+				lost: [],
+			};
 			this.keep(notice);
 		}
 		if (onLost) notice.lost.push(onLost);
 		this.save(notice);
 		return true;
+	}
+
+	/** Whether a notice with a delivery id is kept at the session's destination: one read per observation. */
+	private savedLookup(manager: SessionManager): (deliveryId: string) => boolean {
+		const destination = this.deps.destination;
+		if (destination?.kind !== "owner-line") return (deliveryId) => manager.getParentInput(deliveryId) !== undefined;
+		const held = destination.line.heldIds();
+		return (deliveryId) => held.has(deliveryId);
 	}
 
 	private keep(notice: PendingNotice): void {
@@ -493,30 +566,39 @@ export class HarnessNoticeController {
 			return;
 		}
 		// Saved already (a replay, or another runtime of this session).
-		if (manager.getParentInput(notice.deliveryId)) {
+		if (this.savedLookup(manager)(notice.deliveryId)) {
 			this.drop(notice);
 			return;
 		}
-		// Until the transcript keeps it, the notice waits.
-		if (!transcriptKeepsNotices(manager)) return;
+		const destination = this.deps.destination;
+		// Until the transcript keeps it, the notice waits; an owner line keeps it whatever the transcript holds.
+		if (destination?.kind === "transcript" && !transcriptKeepsNotices(manager)) return;
 		this.inFlight.add(notice.deliveryId);
 		void Promise.resolve()
-			.then<ParentInputReceipt | false>(() => {
+			.then<boolean>(async () => {
 				// A closed runtime or a switched session has no owner left for this episode.
-				if (this.closed || this.deps.getSessionManager() !== manager) return false;
-				return this.deps.deliver({
+				if (this.closed || !destination || this.deps.getSessionManager() !== manager) return false;
+				if (destination.kind === "owner-line") {
+					return destination.line.keep({
+						deliveryId: notice.deliveryId,
+						kind: notice.kind,
+						text: notice.ownerLine,
+					});
+				}
+				await this.deps.deliver({
 					deliveryId: notice.deliveryId,
 					payloadDigest: notice.payloadDigest,
 					message: notice.message,
 					origin: captureWorkerReceiptOrigin(manager),
 					mode: "next-owner-turn",
 				});
+				return true;
 			})
 			.then(
-				(receipt: ParentInputReceipt | false) => {
+				(kept: boolean) => {
 					this.inFlight.delete(notice.deliveryId);
 					this.drop(notice);
-					if (receipt !== false) return;
+					if (kept) return;
 					this.reopen(notice);
 					this.lose(notice);
 				},

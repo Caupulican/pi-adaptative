@@ -40,7 +40,7 @@ import { thirdPartyProtectedWritePaths } from "./autonomy/lane-private-paths.ts"
 import type { WorkerEdgeSource } from "./delegation/worker-edge-policy.ts";
 import type { ToolInfo } from "./extensions/index.ts";
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
-import { type HarnessNoticeKind, type HarnessNoticeObservation, wordedNotice } from "./harness-notice.ts";
+import { type HarnessNoticeController, wordedNotice } from "./harness-notice.ts";
 import { englishText } from "./language/interface-text.ts";
 import type { OwnerWords } from "./learning/owner-evidence-ledger.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -229,8 +229,8 @@ export interface SessionEdgeIntentControllerDeps {
 	emitWarning(message: string): void;
 	/** The foreground run in progress: its decisive origin (`RunTurnOrigin`) and its tool manifest. */
 	getForegroundRun(): Pick<ForegroundRecoveryController, "turnOrigin" | "toolManifests">;
-	/** Tells the owner once, with their next turn; returns whether they are told (`HarnessNoticeController.observe`). */
-	observeHarnessNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
+	/** The session's notice owner: tells the owner once, at the session's notice destination (`observeOrWarn`: or a warning). */
+	getHarnessNotices(): Pick<HarnessNoticeController, "observe" | "observeOrWarn">;
 	/**
 	 * The owner-channel plane's answers for a run opened from an owner channel: whether the channel still holds the
 	 * owner's authority, and its full authority, the presentation of a held draft, the opener's sender digest. Absent: such
@@ -478,7 +478,7 @@ export class SessionEdgeIntentController {
 	/**
 	 * The engine both gates judge with, read where a gate meets a call. System One configured with none bound leaves the
 	 * call to the deterministic gates, as when it is off (System One is a quality plane, never an execution dependency),
-	 * and the owner is told once per episode: a `system-one-engine` notice, or a warning where no notice can be kept.
+	 * and the owner is told once per episode: a `system-one-engine` notice, or a warning where the session keeps none.
 	 * The episode ends (`clear`) when a later call finds an engine bound or System One no longer configured.
 	 */
 	private gateEngine(): ReturnType<SessionEdgeIntentControllerDeps["systemOne"]["semanticDecisionEngine"]> {
@@ -487,14 +487,14 @@ export class SessionEdgeIntentController {
 		if (engine || !this.deps.systemOne.configured) {
 			if (this.gateEngineFaultToldIn === sessionId) {
 				this.gateEngineFaultToldIn = undefined;
-				this.deps.observeHarnessNotice("system-one-engine", () => "clear");
+				this.deps.getHarnessNotices().observeOrWarn("system-one-engine", () => "clear");
 			}
 			return engine;
 		}
 		if (this.gateEngineFaultToldIn === sessionId) return engine;
 		this.gateEngineFaultToldIn = sessionId;
 		const notice = wordedNotice("no-engine", (words) => words.notices.systemOneNoEngine(SYSTEM_ONE_NO_ENGINE_CAUSE));
-		if (!this.deps.observeHarnessNotice("system-one-engine", () => notice)) this.deps.emitWarning(notice.ownerText);
+		this.deps.getHarnessNotices().observeOrWarn("system-one-engine", () => notice);
 		return engine;
 	}
 
@@ -600,7 +600,7 @@ export class SessionEdgeIntentController {
 				const held = keepOutwardDraft(this.deps.getSessionManager(), draft);
 				// One notice per kept draft (its id names the request and the action, so a repeat adds nothing), and one when
 				// the pending drafts are full.
-				const told = this.deps.observeHarnessNotice("outward-action-prepared", () =>
+				const told = this.deps.getHarnessNotices().observe("outward-action-prepared", () =>
 					held.kept
 						? { scope: held.id, state: held.notice }
 						: {

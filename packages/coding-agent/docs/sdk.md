@@ -726,6 +726,8 @@ Without `standing`, the deprecated `isChildSession: true` makes a worker. When n
 
 `sessionCapabilities(standing)` returns the table's row for a standing (`SessionCapabilities`). A caller that builds `AgentSession` directly passes it as `AgentSessionConfig.capabilities`.
 
+Harness notices (a lost watch, System One without an engine, a held outward action) go where the row's `noticeDestination` says: a root keeps them in its transcript, where the owner reads them and the model takes them with the owner's next turn; a bot's session puts the owner's line on the `ownerNoticeLine` its host passes to `createAgentSession` (`OwnerNoticeLine`: the bot's chat, marked unread, never sent to a model), and keeps none without one. A worker or a vehicle keeps none; the states the owner hears of in any session (System One without an engine, a held soul review) reach them there as a warning.
+
 ### Session Management
 
 Sessions use a tree structure with `id`/`parentId` linking, enabling in-place branching.

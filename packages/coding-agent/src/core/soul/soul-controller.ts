@@ -46,8 +46,8 @@ export interface SoulControllerDeps {
 	};
 	/** Owner-visible warning. */
 	emitWarning(message: string): void;
-	/** The session's once-per-episode owner notices; false when no notice can be kept (no transcript). */
-	observeHarnessNotice(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean;
+	/** The session's once-per-episode owner notices, a warning where it keeps none (`HarnessNoticeController.observeOrWarn`). */
+	observeHarnessNoticeOrWarn(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): void;
 }
 
 /** Evaluations one identical candidate gets: the first, and one retry after an unsettled answer. */
@@ -1054,13 +1054,12 @@ export class SoulController {
 		}
 	}
 
-	/** One owner notice per episode and scope; a session that keeps no notices gets the line as a warning. */
+	/** One owner notice per episode and scope; where the session keeps no notices the port warns with the line. */
 	private tell(scope: SoulNoticeScope, reason: string, line: SoulNoticeLine): void {
 		if (this.told.get(scope) === reason) return;
 		this.told.set(scope, reason);
 		const state = wordedNotice(reason, (catalogue) => line(catalogue.notices.soul, catalogue));
-		if (!this.deps.observeHarnessNotice("soul-review", () => ({ scope, state })))
-			this.deps.emitWarning(state.ownerText);
+		this.deps.observeHarnessNoticeOrWarn("soul-review", () => ({ scope, state }));
 	}
 
 	/**

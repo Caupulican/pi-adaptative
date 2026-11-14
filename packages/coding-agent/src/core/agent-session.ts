@@ -165,7 +165,7 @@ import type { GoalRuntimeSnapshot, GoalRuntimeSnapshotSettings } from "./goals/g
 import { GoalSessionController } from "./goals/goal-session-controller.ts";
 import { type GoalState, isGoalExecutionActive } from "./goals/goal-state.ts";
 import { hasGoalContinuationControl } from "./goals/goal-tool-names.ts";
-import { HarnessNoticeController } from "./harness-notice.ts";
+import { HarnessNoticeController, harnessNoticeDestination } from "./harness-notice.ts";
 import { HostTurnReasoningController } from "./host-turn-reasoning.ts";
 import { getResumableHumanInputSnapshot } from "./human-input.ts";
 import { subscribeHumanInputActivity } from "./human-input-activity.ts";
@@ -808,7 +808,7 @@ export class AgentSession {
 			},
 			emitWarning: (msg) => this._emit({ type: "warning", message: msg }),
 			getForegroundRun: () => this._foregroundRecovery,
-			observeHarnessNotice: (kind, read) => this._harnessNotices.observe(kind, read),
+			getHarnessNotices: () => this._harnessNotices,
 			ownerChannel: this.ownerChannel,
 			holdsAgainAtExecution: (call) => this._runtimeBuilder.holdsAgainAtExecution(call),
 		});
@@ -1081,7 +1081,7 @@ export class AgentSession {
 			agentDir: this._agentDir,
 			systemOne: this._semanticPlane,
 			emitWarning: (message) => this._emit({ type: "warning", message }),
-			observeHarnessNotice: (kind, read) => this._harnessNotices.observe(kind, read),
+			observeHarnessNoticeOrWarn: (kind, read) => this._harnessNotices.observeOrWarn(kind, read),
 		});
 		this._autonomyTelemetry = new AutonomyTelemetry({
 			getSessionManager: () => this.sessionManager,
@@ -1208,7 +1208,7 @@ export class AgentSession {
 		this._queuedInputPersistence.restoreRecordedQueuedInput();
 		this._harnessNotices = new HarnessNoticeController({
 			getSessionManager: () => this.sessionManager,
-			keepsNotices: () => this._caps.conversesWithOwner,
+			destination: harnessNoticeDestination(this._caps.noticeDestination, config.ownerNoticeLine),
 			deliver: (input) => this._durableCustomMessageTurns.deliverParentInput(input),
 			warn: (message) => this._emit({ type: "warning", message }),
 		});

@@ -40,6 +40,7 @@ import type { WorkerTerminalDeliveryInterposer } from "./foreground-terminal-han
 import type { GoalContinuationPrompt } from "./goals/goal-continuation-prompt.ts";
 import type { GoalRuntimeSnapshot } from "./goals/goal-runtime-snapshot.ts";
 import type { GoalState } from "./goals/goal-state.ts";
+import type { OwnerNoticeLine } from "./harness-notice.ts";
 import type { OwnerTextRange } from "./learning/owner-evidence-ledger.ts";
 import type { KnowledgeCollectionHandoff, KnowledgeCollectionOutcome } from "./memory/knowledge-collector.ts";
 import type { MemoryActivationEvent } from "./memory-controller.ts";
@@ -162,6 +163,8 @@ export interface AgentSessionConfig {
 	 * throws the owner-facing reason a run may not start now. Absent, every run is admitted.
 	 */
 	admitRun?: () => void;
+	/** The owner line a bot's host keeps for its notices (`harness-notice.ts`); read only where the standing sends them there. */
+	ownerNoticeLine?: OwnerNoticeLine;
 	sessionManager: SessionManager;
 	/** Required for persisted sessions; acquire before construction and transfer once. */
 	bundleLease?: SessionBundleLease;

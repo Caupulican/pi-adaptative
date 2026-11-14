@@ -668,7 +668,7 @@ function prepareOutward(
 					? "No draft was kept: the session's pending drafts are full."
 					: "This session keeps no drafts.",
 			prepared?.told
-				? "The owner is told with their next turn; report it in your answer and continue with the rest."
+				? "The owner is told of it; report it in your answer and continue with the rest."
 				: "No owner notice can be saved in this session: report the held action in your answer.",
 		].join(" "),
 	};

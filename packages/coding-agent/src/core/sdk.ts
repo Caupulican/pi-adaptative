@@ -29,7 +29,7 @@ import {
 } from "./adaptive/index.ts";
 import type { AgentIdentity } from "./agent-identity.ts";
 import { capabilityArtifactsDir, configFile, ownerOrchestrationHome, steeringCertificatesFile } from "./agent-paths.ts";
-import { AgentSession } from "./agent-session.ts";
+import { AgentSession, type AgentSessionConfig } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
 import type { CapabilityEnvelope } from "./autonomy/contracts.ts";
@@ -126,7 +126,8 @@ import type { BashOperations } from "./tools/schemas/bash.ts";
 import { SYSTEM_TIMER_SOURCE, type TimerSource } from "./util/timer-port.ts";
 import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
-export interface CreateAgentSessionOptions {
+/** `admitRun` refuses a run before it starts; `ownerNoticeLine` keeps a bot's notices (see `AgentSessionConfig`). */
+export interface CreateAgentSessionOptions extends Pick<AgentSessionConfig, "admitRun" | "ownerNoticeLine"> {
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
 	/** Global config directory. Default: ~/.pi/agent */
@@ -297,8 +298,6 @@ export interface CreateAgentSessionOptions {
 	 * A session created under an AgentSessionRuntime is drained by its runtime instead.
 	 */
 	onClosingWarnings?: (warnings: readonly string[]) => void;
-	/** Refuses a run before it starts, whatever opened it (see `AgentSessionConfig.admitRun`). */
-	admitRun?: () => void;
 }
 
 /** Result from createAgentSession */
@@ -870,6 +869,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				agent,
 				onClosingWarnings: options.onClosingWarnings,
 				admitRun: options.admitRun,
+				ownerNoticeLine: options.ownerNoticeLine,
 				sessionManager,
 				bundleLease,
 				settingsManager,

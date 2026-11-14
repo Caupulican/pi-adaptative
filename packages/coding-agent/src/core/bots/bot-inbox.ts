@@ -19,7 +19,13 @@ import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
 import { botInboxDir } from "../agent-paths.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
-import { type BotHomeRecord, homeRecordNames, keepNewestHomeRecords, readHomeRecords } from "./bot-home-records.ts";
+import {
+	type BotHomeRecord,
+	homeRecordNames,
+	keepNewestHomeRecords,
+	parseHomeRecordHead,
+	readHomeRecords,
+} from "./bot-home-records.ts";
 
 /** Most messages waiting at once: a host that does not take them is not given an unbounded queue. */
 export const MAX_BOT_INBOX_MESSAGES = 32;
@@ -70,27 +76,13 @@ function parseSender(value: unknown): BotInboxSender | undefined {
 }
 
 function parseMessage(value: unknown, agentId: string): BotInboxMessage | undefined {
-	if (
-		!isPlainRecord(value) ||
-		value.version !== 1 ||
-		typeof value.id !== "string" ||
-		value.agentId !== agentId ||
-		typeof value.text !== "string" ||
-		typeof value.at !== "number" ||
-		(value.mode !== undefined && value.mode !== "follow_up" && value.mode !== "queue" && value.mode !== "start")
-	)
-		return undefined;
-	const from = parseSender(value.from);
+	const parsed = parseHomeRecordHead(value, agentId);
+	if (!parsed) return undefined;
+	const { mode } = parsed.record;
+	if (mode !== undefined && mode !== "follow_up" && mode !== "queue" && mode !== "start") return undefined;
+	const from = parseSender(parsed.record.from);
 	if (!from) return undefined;
-	return {
-		version: 1,
-		id: value.id,
-		agentId,
-		text: value.text,
-		at: value.at,
-		from,
-		...(value.mode !== undefined ? { mode: value.mode as BotInboxMode } : {}),
-	};
+	return { ...parsed.head, from, ...(mode !== undefined ? { mode: mode as BotInboxMode } : {}) };
 }
 
 function parseRefusal(value: unknown, agentId: string): BotInboxRefusal | undefined {

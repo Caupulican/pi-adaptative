@@ -5,6 +5,33 @@
  */
 import { existsSync, readdirSync, readFileSync, renameSync, rmSync } from "node:fs";
 import { join } from "node:path";
+import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
+
+/** The fields every inbox message and notice opens with: version 1, its id, the bot it is for, its words and time. */
+export interface BotHomeRecordHead {
+	readonly version: 1;
+	readonly id: string;
+	readonly agentId: string;
+	readonly text: string;
+	readonly at: number;
+}
+
+/** The head of a parsed record for `agentId` with the fields every kind shares, and the record; undefined when it lacks one. */
+export function parseHomeRecordHead(
+	value: unknown,
+	agentId: string,
+): { readonly head: BotHomeRecordHead; readonly record: Record<string, unknown> } | undefined {
+	if (
+		!isPlainRecord(value) ||
+		value.version !== 1 ||
+		typeof value.id !== "string" ||
+		value.agentId !== agentId ||
+		typeof value.text !== "string" ||
+		typeof value.at !== "number"
+	)
+		return undefined;
+	return { head: { version: 1, id: value.id, agentId, text: value.text, at: value.at }, record: value };
+}
 
 /** A record as its directory holds it: the file it is in and what it says. */
 export interface BotHomeRecord<T> {
