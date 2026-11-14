@@ -44,6 +44,17 @@ while a turn runs or input is queued, and closed after ten idle minutes or
 when the session that hosts it ends. Its answers are read in its chat (the roster marks them unread); they do not reach the
 orchestrator as a worker's terminal does.
 
+A bot waits on its own work with `task_watch`, the tool a worker holds for it: a one-shot watch on a file, a managed
+process, a process id, a port, a command or a page, with an end time at most 24 hours ahead, at most eight at a time
+whatever armed them (the bot can change or delete none). A command or page is first admitted as the call its own shell or
+fetch tool would make, by its own gate (System One's operation judgment included), so a bot without that tool arms
+nothing, and a read-only bot's command is held to its read-only shell at arming and at every check. The bot's own session
+samples its watches and wakes it with the event (a running turn is steered, an idle bot starts a turn); no other session
+samples or delivers them. While it holds a live watch its session stays loaded past the idle close, a process that starts
+or sees its host let it go opens it again (only where it works in the directory that session worked in; the phone session
+never does), and retiring the bot drops its watches. The roster shows each bot's live watch count with the operator bar's
+ring (`◌n`), read from the store in every session.
+
 **Every open session sees every bot, and closing a session loses none.** Nothing about a bot depends on the session that
 created, messaged or hosts it: the bot list is the bot store, the chat is read from the bot's home, and the unread mark is
 on the bot's record in the store (`lastMessageAt`, `lastReadAt`), which every session watches. One process hosts a bot at a
@@ -69,7 +80,7 @@ a run transcript it shows changed; otherwise it keeps what it drew.
 
 Until later phases move them, these still run as workers of the session that sends them: group messages (the group's
 conversations), the orchestrator's `bot ask`, routine sends, leaders, the bots a leader made and bots made from a profile, and machines joined over the
-link. A bot's session has no subagents, routines, goals, watches or `bot` tool yet. A bot that only ever talked through those
+link. A bot's session has no subagents, routines, goals or `bot` tool yet (its only routine tool is `task_watch`). A bot that only ever talked through those
 paths has no session of its own: its chat shows its earlier conversations from its history index, in any session, and its
 last summary when none can be read.
 

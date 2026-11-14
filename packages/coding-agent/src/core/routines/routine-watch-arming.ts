@@ -93,6 +93,21 @@ export function agentWatchSlotsRefusal(
 		: undefined;
 }
 
+/**
+ * Why one more watch may not be armed by a session that arms watches only for its own wait (a bot's own session): it
+ * already holds the most, whatever armed them, since it can change or delete none of them.
+ */
+export function ownWatchSlotsRefusal(
+	routines: readonly RoutineDefinitionView[],
+	parentSessionId: string,
+	nowMs: number,
+): string | undefined {
+	const held = routines.filter((routine) => holdsWatchSlot(routine, parentSessionId, nowMs)).length;
+	return held >= MAX_AGENT_ARMED_WATCHES
+		? `This session already holds ${MAX_AGENT_ARMED_WATCHES} watches, the most it may; wait for one to fire or end.`
+		: undefined;
+}
+
 /** Why one more watch may not be armed for this worker runtime: it already holds its share of the session's slots. */
 export function workerWatchSlotsRefusal(
 	routines: readonly RoutineDefinitionView[],

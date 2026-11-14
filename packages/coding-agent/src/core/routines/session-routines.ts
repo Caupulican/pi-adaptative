@@ -14,6 +14,7 @@ import type { RoutineIntakeStatus } from "./routine-intake.ts";
 import type { RoutineRuntime } from "./routine-runtime-assembly.ts";
 import type { RoutineTickResult } from "./routine-scheduler-controller.ts";
 import { parseRoutineToolInput, type RoutineToolFields, type RoutineToolView } from "./routine-tool.ts";
+import { createSessionTaskWatchTool } from "./task-watch-tool.ts";
 
 export interface SessionRoutinesPorts {
 	/** What the session's runtime holds, fixed when the session was built; undefined where it holds nothing. */
@@ -28,6 +29,8 @@ export class SessionRoutines {
 	private readonly ports: SessionRoutinesPorts;
 	private runtime: RoutineRuntime | undefined;
 	private started = false;
+	/** A bot's own session's `task_watch`: it reads the runtime at each call, since the runtime is built with the store. */
+	private readonly ownWatchTool = createSessionTaskWatchTool(() => this.loaded()?.session);
 
 	constructor(ports: SessionRoutinesPorts) {
 		this.ports = ports;
@@ -96,9 +99,11 @@ export class SessionRoutines {
 		return this.runtime?.intake?.settled() ?? Promise.resolve();
 	}
 
-	/** The routine tool: only a root session saves routines with it; a bot's own session arms watches with its own tool. */
+	/** The session's routine tool: a root session's `routine`; a bot's own session's `task_watch`, for its own waits. */
 	tool(): ToolDefinition | undefined {
-		return this.scope() === "session" ? this.loaded()?.session.tool : undefined;
+		const scope = this.scope();
+		if (scope === "session") return this.loaded()?.session.tool;
+		return scope === "own-watches" ? this.ownWatchTool : undefined;
 	}
 
 	/** What the gate reads about a call's target when the call is the routine tool's (`ToolCallFacts`); else undefined. */

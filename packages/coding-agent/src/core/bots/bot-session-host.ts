@@ -55,6 +55,7 @@ import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-gu
 import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
+import { TASK_WATCH_TOOL_NAME } from "../routines/routine-tool-names.ts";
 import { createAgentSession } from "../sdk.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { deriveSpawnedUsageReportId, hasReportableUsage } from "../spawned-usage.ts";
@@ -138,15 +139,20 @@ interface BotSessionEntry {
 }
 
 /**
- * The tools of a bot session: the read tools and System One's tool always (as a worker holds it; it is registered only
- * while System One is on), the file and process tools only when the bot may write.
+ * The tools of a bot session: the read tools, System One's tool (as a worker holds it; it is registered only while System
+ * One is on) and `task_watch` for its own waits always, the file and process tools only when the bot may write.
  */
 export function botSessionToolNames(canWrite: boolean): string[] {
 	const reads = [...READ_TOOL_NAMES, REPO_READ_TOOL_NAME, LOOKUP_TOOL_NAME, SYSTEM_ONE_TOOL_NAME];
-	// A read-only bot keeps what a read-only worker keeps: the shell is judged command by command (`privatePathScope.readOnlyShell`).
+	// A read-only bot keeps what a read-only worker keeps: the shell is judged command by command (`privatePathScope.readOnlyShell`),
+	// and so is a watched command, at arming and at every check (`WatchAdmission`), so `task_watch` widens nothing.
 	return canWrite
-		? [...reads, TOOL_SCHEMA_SEARCH_NAME, ...WRITE_TOOL_NAMES, "python", STABLE_SHELL_TOOL_NAME]
-		: [...[...reads, STABLE_SHELL_TOOL_NAME].filter(toolSurvivesReadOnly), TOOL_SCHEMA_SEARCH_NAME];
+		? [...reads, TOOL_SCHEMA_SEARCH_NAME, TASK_WATCH_TOOL_NAME, ...WRITE_TOOL_NAMES, "python", STABLE_SHELL_TOOL_NAME]
+		: [
+				...[...reads, STABLE_SHELL_TOOL_NAME].filter(toolSurvivesReadOnly),
+				TOOL_SCHEMA_SEARCH_NAME,
+				TASK_WATCH_TOOL_NAME,
+			];
 }
 
 /** What defines a session: the fields a session is built from. A rename or a new description leaves it as it is. */

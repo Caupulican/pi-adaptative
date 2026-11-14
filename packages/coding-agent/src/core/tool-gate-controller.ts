@@ -27,7 +27,7 @@ import type {
 	RepositoryMutationObserver,
 	RepositoryObservationToken,
 } from "./objective-execution/repository-mutation-observer.ts";
-import { ROUTINE_TOOL_NAME } from "./routines/routine-tool-names.ts";
+import { ROUTINE_TOOL_NAME, TASK_WATCH_TOOL_NAME } from "./routines/routine-tool-names.ts";
 import { detailsWithRuleIds, type RuleHookDelivery } from "./rule-hooks/rule-hook-delivery.ts";
 import { classifyToolTrust, wrapUntrustedText } from "./security/untrusted-boundary.ts";
 import { serialCallHint } from "./serial-call-hint.ts";
@@ -59,10 +59,15 @@ export const CONTROL_PLANE_TOOL_NAMES: ReadonlySet<string> = new Set([
  */
 const NESTED_ADMISSION_TOOL_NAMES: ReadonlySet<string> = new Set([LOOKUP_TOOL_NAME, "python"]);
 /**
- * Calls whose context the gate keeps for sub-calls: the carrying tools above, and a routine save, whose watched command or
- * page is admitted as the call its check would make before the watch is armed (`RoutineSessionController`).
+ * Calls whose context the gate keeps for sub-calls: the carrying tools above, and a routine save or a session's own
+ * `task_watch`, whose watched command or page is admitted as the call its check would make before the watch is armed
+ * (`RoutineSessionController`).
  */
-const NESTED_PARENT_TOOL_NAMES: ReadonlySet<string> = new Set([...NESTED_ADMISSION_TOOL_NAMES, ROUTINE_TOOL_NAME]);
+const NESTED_PARENT_TOOL_NAMES: ReadonlySet<string> = new Set([
+	...NESTED_ADMISSION_TOOL_NAMES,
+	ROUTINE_TOOL_NAME,
+	TASK_WATCH_TOOL_NAME,
+]);
 
 /** What an admitted parent call's sub-calls are admitted under: the real context of that parent. */
 interface NestedParentContext {

@@ -2013,17 +2013,22 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/**
-	 * Every root-only lane tool, the one list the runtime builder offers: routine, bot, channel reply and plan. A child
-	 * session gets none, and a lane whose tool is not open (no routine store, no channel policy) is left out.
+	 * Every lane tool, the one list the runtime builder offers: a root session's routine, bot, channel reply and plan, and a
+	 * child session's routine tool alone where it has one (a bot's own `task_watch`). A lane whose tool is not open (no
+	 * routine store, no channel policy) is left out.
 	 */
 	createBackgroundLaneTools(): ToolDefinition[] {
-		if (this.deps.isChildSession()) return [];
-		return [
-			this.createRoutineToolDefinition(),
-			this.createBotToolDefinition(),
-			this.createChannelReplyToolDefinition(),
-			this.createPlanToolDefinition(),
-		].filter((definition): definition is ToolDefinition => definition !== undefined);
+		const routine = this.createRoutineToolDefinition();
+		return (
+			this.deps.isChildSession()
+				? [routine]
+				: [
+						routine,
+						this.createBotToolDefinition(),
+						this.createChannelReplyToolDefinition(),
+						this.createPlanToolDefinition(),
+					]
+		).filter((definition): definition is ToolDefinition => definition !== undefined);
 	}
 
 	private createPlanToolDefinition(): ToolDefinition {
