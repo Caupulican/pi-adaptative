@@ -393,8 +393,7 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 
 		const taken = new Set(lanes.filter((lane) => lane.status !== "released").map((lane) => lane.laneKey));
 		const isFree = async (candidate: string): Promise<boolean> => {
-			if (taken.has(candidate)) return false;
-			if (await revParseBranch(deps, ctx.topLevel, laneBranch(candidate))) return false;
+			if (taken.has(candidate) || (await revParseBranch(deps, ctx.topLevel, laneBranch(candidate)))) return false;
 			return !fileExists(deps, join(deps.worktreesBaseDir, ctx.slug, candidate));
 		};
 
@@ -753,8 +752,8 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 		});
 	}
 
-	// Lane worktrees git knows but the registry does not: rebuild identity from git facts, unless a session registered
-	// (or released) that key since the listing.
+	// Lane worktrees git knows but the registry does not: rebuild identity from git facts (its source checkout, unknown,
+	// as this session's: `findLaneCheckout`), unless a session registered (or released) that key since the listing.
 	for (const { laneKey, path } of unregisteredWorktrees) {
 		const registeredNow = await withFileLock(ctx.paths.lifecycleLockFile, async () => {
 			if (await readLane(ctx.paths, laneKey)) return true;
@@ -764,6 +763,7 @@ export async function reconcile(deps: WorktreeSyncEngineDeps): Promise<Reconcile
 					laneKey,
 					branch: `${LANE_BRANCH_PREFIX}${laneKey}`,
 					worktreePath: path,
+					sourceCheckout: ctx.topLevel,
 					status: "active",
 					createdAt: at,
 					updatedAt: at,

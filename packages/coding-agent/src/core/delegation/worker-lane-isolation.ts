@@ -53,6 +53,7 @@ import {
 	createWorkerLane,
 	describeWorkerLane,
 	discardUnusedWorkerLane,
+	findLaneByDirectory,
 	findLaneCheckout,
 	isUnderLaneRoot,
 	laneWorktreeOf,
@@ -102,21 +103,41 @@ function isWithin(base: string, target: string): boolean {
 }
 
 /**
+ * `target`'s real path (`safeRealpathSync`: symlinks followed, a not-yet-created tail kept), or undefined when it is not
+ * resolvable (a symlink loop, more hops than it follows).
+ */
+function realPathOf(target: string): string | undefined {
+	try {
+		return safeRealpathSync(target);
+	} catch {
+		return undefined;
+	}
+}
+
+/** Whether `target` is `base` or inside it by path text, or else by real path when both are resolvable. */
+function placedWithin(base: string, target: string): boolean {
+	if (isWithin(base, target)) return true;
+	const [realBase, realTarget] = [realPathOf(base), realPathOf(target)];
+	return realBase !== undefined && realTarget !== undefined && isWithin(realBase, realTarget);
+}
+
+/**
  * The path `entry` names inside the lane at `laneRoot` when it lies under `root`, the top of the checkout the lane was made
  * from: the same place in the lane. A relative `entry` is stated against `base` (`root` unless given). Places are compared
- * by path text first, then, when the text places it in neither, by real path (`safeRealpathSync`: symlinks followed, a
- * not-yet-created tail kept), so a path spelled through a symlink to the checkout or the lane keeps its place. A path
- * already inside the lane, or outside `root`, is returned unchanged. Every move of a worker into its lane uses this one
- * translation: a saved contract, a request's write paths, the grants derived from them and the parent's ceiling.
+ * by path text first, then, when the text places it in neither, by real path (`realPathOf`), so a path spelled through a
+ * symlink to the checkout or the lane keeps its place; a path whose real path is not resolvable keeps the text answer. A
+ * path already inside the lane, or outside `root`, is returned unchanged. Every move of a worker into its lane uses this
+ * one translation: a saved contract, a request's write paths, the grants derived from them and the parent's ceiling.
  */
 export function relocatedInto(root: string, laneRoot: string, entry: string, base = root): string {
 	const resolved = resolve(base, entry);
 	if (isWithin(laneRoot, resolved)) return resolved;
 	if (isWithin(root, resolved)) return resolve(laneRoot, relative(root, resolved));
-	const real = safeRealpathSync(resolved);
-	if (isWithin(safeRealpathSync(laneRoot), real)) return resolved;
-	const top = safeRealpathSync(root);
-	return isWithin(top, real) ? resolve(laneRoot, relative(top, real)) : entry;
+	if (placedWithin(laneRoot, resolved)) return resolved;
+	const [top, real] = [realPathOf(root), realPathOf(resolved)];
+	return top !== undefined && real !== undefined && isWithin(top, real)
+		? resolve(laneRoot, relative(top, real))
+		: entry;
 }
 
 /** Where a worker is placed in a lane (`WorkerLaneIsolation.placementAt`). */
@@ -133,8 +154,6 @@ interface LaneAt {
 	readonly engine: WorktreeSyncEngineDeps;
 	readonly laneKey: string;
 	readonly worktreePath: string;
-	/** The checkout the lane was made from (`findLaneCheckout`); undefined when it is not known. */
-	readonly checkout: string | undefined;
 }
 
 /**
@@ -150,8 +169,9 @@ function placementIn(laneRoot: string, checkout: string, sessionCwd: string): Wo
 export class WorkerLaneIsolation {
 	private readonly deps: WorkerLaneIsolationDeps;
 	/**
-	 * The checkout each lane resolved in this process was made from, by the lane's real root: what `laneOf` places a
-	 * parent's ceiling by, read from the same resolution that placed the worker (`laneAt`).
+	 * The checkout each lane placed in this process moves the session's paths from, by the lane's real root read while
+	 * the lane exists (`sourceKey`): what `laneOf` places a parent's ceiling by, from the resolution that placed the worker
+	 * (`placementAt`). A placement that resolves no checkout removes the entry, and so does the lane's discard or release.
 	 */
 	private readonly laneSources = new Map<string, { readonly laneRoot: string; readonly checkout: string }>();
 
@@ -196,10 +216,12 @@ export class WorkerLaneIsolation {
 		const engine = this.deps.engineDeps(worktreePath);
 		if (!engine || !isUnderLaneRoot(engine, worktreePath)) return;
 		try {
+			const key = this.sourceKey(engine, worktreePath);
 			const root = await this.laneRootAt(worktreePath);
 			if (!root) return;
 			const discarded = await discardUnusedWorkerLane(engine, root);
-			if (discarded.code === "released") this.laneSources.delete(canonical(root));
+			if (key && (discarded.code === "released" || discarded.code === "lane_not_found"))
+				this.laneSources.delete(key);
 			if (discarded.code !== "released" && discarded.code !== "lane_not_found" && discarded.code !== "lane_in_use") {
 				this.deps.warn(
 					`Unused worker lane '${discarded.laneKey ?? worktreePath}' was not removed: [${discarded.code}] ${discarded.message ?? ""}`,
@@ -285,21 +307,32 @@ export class WorkerLaneIsolation {
 	private async laneAt(cwd: string): Promise<LaneAt | undefined> {
 		const engine = this.deps.engineDeps(cwd);
 		if (!engine || !isUnderLaneRoot(engine, cwd)) return undefined;
-		const found = await findLaneCheckout(engine, cwd);
-		if (!found) return undefined;
-		const { lane, checkout } = found;
-		if (checkout) this.laneSources.set(canonical(lane.worktreePath), { laneRoot: lane.worktreePath, checkout });
-		return { engine, laneKey: lane.laneKey, worktreePath: lane.worktreePath, checkout };
+		const lane = await findLaneByDirectory(engine, cwd);
+		return lane ? { engine, laneKey: lane.laneKey, worktreePath: lane.worktreePath } : undefined;
+	}
+
+	/** The key of the lane `directory` lies in among `laneSources`: its real root, read while the lane exists. */
+	private sourceKey(engine: WorktreeSyncEngineDeps, directory: string): string | undefined {
+		const laneRoot = laneWorktreeOf(engine, directory);
+		return laneRoot && canonical(laneRoot);
 	}
 
 	/**
 	 * Where a worker started from `sessionCwd` is placed in the lane `directory` lies in (`placementIn`), from the lane's
-	 * registration: its root and the checkout it was made from (`findLaneCheckout`). Undefined when `directory` is in no
-	 * lane or its checkout is not known: the worker is then not moved into the lane.
+	 * registration: its root and the checkout the session's paths move from (`findLaneCheckout`). Undefined when
+	 * `directory` is in no lane or no checkout is known: the worker is then not moved into the lane.
 	 */
 	async placementAt(directory: string, sessionCwd: string): Promise<WorkerLanePlacementAt | undefined> {
-		const found = await this.laneAt(directory);
-		return found?.checkout ? placementIn(found.worktreePath, found.checkout, sessionCwd) : undefined;
+		const engine = this.deps.engineDeps(directory);
+		const key = engine && isUnderLaneRoot(engine, directory) ? this.sourceKey(engine, directory) : undefined;
+		if (!engine || !key) return undefined;
+		const found = await findLaneCheckout(engine, directory, sessionCwd);
+		if (!found?.checkout) {
+			this.laneSources.delete(key);
+			return undefined;
+		}
+		this.laneSources.set(key, { laneRoot: found.lane.worktreePath, checkout: found.checkout });
+		return placementIn(found.lane.worktreePath, found.checkout, sessionCwd);
 	}
 
 	/**
@@ -329,7 +362,7 @@ export class WorkerLaneIsolation {
 
 	/**
 	 * The mover of the session's paths into the lane `directory` lies in, which places a worker's parent ceiling: from the
-	 * checkout the lane was made from, as `laneAt` resolved it when it placed the worker (`relocatedInto`, a path keeps its
+	 * checkout `placementAt` resolved when it placed the worker (`relocatedInto`, a path keeps its
 	 * place relative to the checkout's top); none to make for a session working in that lane itself. Synchronous, no git.
 	 * Undefined when `directory` is in no lane; "unplaced" when this process has not resolved the lane's checkout (a worker
 	 * admitted again after a restart before its lane was read).
@@ -337,9 +370,10 @@ export class WorkerLaneIsolation {
 	laneOf(directory: string, sessionCwd: string): ((entry: string) => string) | "unplaced" | undefined {
 		const engine = this.deps.engineDeps(directory);
 		const laneRoot = engine && laneWorktreeOf(engine, directory);
-		if (!laneRoot) return undefined;
-		if (isWithin(safeRealpathSync(laneRoot), safeRealpathSync(sessionCwd))) return (entry) => entry;
-		const source = this.laneSources.get(canonical(laneRoot));
+		if (!engine || !laneRoot) return undefined;
+		if (placedWithin(laneRoot, sessionCwd)) return (entry) => entry;
+		const key = this.sourceKey(engine, directory);
+		const source = key ? this.laneSources.get(key) : undefined;
 		return source ? (entry) => relocatedInto(source.checkout, source.laneRoot, entry) : "unplaced";
 	}
 
@@ -521,10 +555,13 @@ export class WorkerLaneIsolation {
 	async release(cwd: string, agentId: string, attemptId: string): Promise<ReleaseOutcome> {
 		const engine = this.deps.engineDeps(cwd);
 		if (!engine || !isUnderLaneRoot(engine, cwd)) return { kind: "released" };
+		const key = this.sourceKey(engine, cwd);
 		const laneRoot = await this.laneRootAt(cwd);
-		if (!laneRoot) return { kind: "released" };
-		const released = await releaseWorkerLane(engine, laneRoot, agentId);
-		if (!released || released.code === "released" || released.code === "lane_not_found") return { kind: "released" };
+		const released = laneRoot ? await releaseWorkerLane(engine, laneRoot, agentId) : undefined;
+		if (!released || released.code === "released" || released.code === "lane_not_found") {
+			if (key) this.laneSources.delete(key);
+			return { kind: "released" };
+		}
 		if (released.code === "lane_unlanded_work") {
 			const cause = released.message ?? "it holds work";
 			this.deps.notifyParent(

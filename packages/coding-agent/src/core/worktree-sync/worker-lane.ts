@@ -174,18 +174,24 @@ export async function findLaneByDirectory(
 }
 
 /**
- * The active lane whose registered worktree contains `directory`, with the checkout it was made from: the registration's
- * `sourceCheckout`. A registration written before that was recorded was made by `createWorkerLane`, which makes a lane
- * only from the hub (the worktree holding main, its `--show-toplevel` checked equal to the hub's): its checkout is read
- * as the hub of the repository's current context. `checkout` is undefined when neither is known (main is checked out
- * nowhere); the lane is still returned. Undefined when `directory` is in no lane.
+ * The active lane whose registered worktree contains `directory`, with the checkout a session at `sessionCwd` moves its
+ * paths into it from: the registration's `sourceCheckout`. A registration without one (written before it was recorded)
+ * names no checkout, and the hub it was made from may have moved since or be checked out nowhere now: the session's own
+ * checkout is read instead when it belongs to the lane's repository (the same git common dir), since the paths moved are
+ * the session's; else the hub of the repository's current context. `checkout` is undefined when none is known; the lane
+ * is still returned. Undefined when `directory` is in no lane.
  */
 export async function findLaneCheckout(
 	deps: WorktreeSyncEngineDeps,
 	directory: string,
+	sessionCwd: string,
 ): Promise<{ lane: LaneRegistration; checkout: string | undefined } | undefined> {
 	const found = await resolveLaneAt(deps, directory, true);
-	return found && { lane: found.lane, checkout: found.lane.sourceCheckout ?? found.context.hubPath };
+	if (!found || found.lane.sourceCheckout) return found && { lane: found.lane, checkout: found.lane.sourceCheckout };
+	const session = await resolveRepoContext({ ...deps, cwd: sessionCwd });
+	const sameRepository =
+		!("code" in session) && canonical(session.gitCommonDir) === canonical(found.context.gitCommonDir);
+	return { lane: found.lane, checkout: sameRepository ? session.topLevel : found.context.hubPath };
 }
 
 /** Whether `candidate` lies under the directory lane worktrees are created in (a cheap check, no git). */
