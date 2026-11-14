@@ -55,7 +55,6 @@ import {
 	orchestrationSessionDir,
 	orchestrationSessionsDir,
 	ownerOrchestrationHome,
-	resolvedOrchestrationHome,
 	workerConversationSessionsDir,
 } from "../kernel/session/session-bundle-paths.ts";
 import { sessionsDir, stateDir, stateFile } from "../kernel/storage/paths.ts";
@@ -66,7 +65,6 @@ export {
 	orchestrationSessionDir,
 	orchestrationSessionsDir,
 	ownerOrchestrationHome,
-	resolvedOrchestrationHome,
 	sessionsDir,
 	stateDir,
 	stateFile,
