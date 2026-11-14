@@ -4,7 +4,7 @@
  * (the lock record names the host that holds it, not only the process). What is the process's answers from any attached
  * root (the store, model rules, spend bound, System One, clock): the root attached last that is still attached. A message
  * carries the root it came from as its sender (`BotSender`): the directory a bot it loads works in, what a profile compiles
- * to and the settings storage a bot reads there, and where its turns' warnings and spend go; once that root detaches, the
+ * to and the settings storage a bot reads there, and where its turns' spend goes; once that root detaches, the
  * root attached last answers. A bot's settings read their storage again after a change any attached root announces and when
  * a root attaches, so a root that replaces the one the bot loaded from (a new or resumed session) is followed from its
  * attach, and no root's detach leaves them stale; a root working in the bot's directory also hands it its project trust.

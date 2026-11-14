@@ -112,6 +112,10 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: o gasto do turno não pôde ser registrado (${reason}).`,
 	botTurnOutcomeNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: o resultado do turno não pôde ser registrado (${reason}).`,
+	botNoticeNotRecorded: (agentId: string, text: string, reason: string) =>
+		`Bot ${agentId}: um aviso não pôde ser guardado no chat dele (${reason}): ${text}`,
+	botNoticeUnreadable: (agentId: string, file: string, reason: string) =>
+		`Bot ${agentId}: um aviso do chat dele não pôde ser lido e foi separado como ${file}.unreadable (${reason}).`,
 	botHistoryFileUnreadable: (reason: string) =>
 		`Histórico dos bots: um arquivo de sessão não pôde ser lido (${reason}).`,
 	botHistoryIndexUnreadable: (agentId: string) =>

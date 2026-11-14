@@ -2,7 +2,7 @@
  * The change watch over every bot home, so a process that does not host a bot still learns when its conversation, its
  * host's state or its history changed on disk. Every watch is on one directory, never recursive (a recursive watch is not
  * dependable on every platform and runtime): one on the bots directory, which sees homes come and go, and one on each home
- * and on its `sessions/` and `inbox/` directories, added when they appear. A directory is watched rather than a file because an atomic
+ * and on its `sessions/`, `inbox/` and `notices/` directories, added when they appear. A directory is watched rather than a file because an atomic
  * replace changes the file's inode, so a watch on one file would lose it. The watches are not persistent, coalesce the
  * changes of a short window into one notice, and end together on the first error (the caller falls back to reading the
  * disk each time). A change names the home directory and the file inside it; the caller maps a home directory to its bot
@@ -24,12 +24,15 @@ export interface BotHomeChange {
 	readonly file: string;
 }
 
-/** The directories of a home watched on their own: the conversation's files and the messages waiting for its host. */
-const WATCHED_SUBDIRS = ["sessions", "inbox"] as const;
+/**
+ * The directories of a home watched on their own: the conversation's files, the messages waiting for its host and what its
+ * session told the owner.
+ */
+const WATCHED_SUBDIRS = ["sessions", "inbox", "notices"] as const;
 
 /**
  * The files of a home whose change another process cares about: the conversation, the host's state and lock, the history,
- * and the inbox's messages (an atomic write's temporary file is not one).
+ * the inbox's messages and the notices (an atomic write's temporary file is not one).
  */
 function isObservedHomeFile(file: string): boolean {
 	return (
@@ -37,7 +40,7 @@ function isObservedHomeFile(file: string): boolean {
 		file === "host.lock" ||
 		file === "history.json" ||
 		file.startsWith("sessions/") ||
-		(file.startsWith("inbox/") && file.endsWith(".json"))
+		((file.startsWith("inbox/") || file.startsWith("notices/")) && file.endsWith(".json"))
 	);
 }
 

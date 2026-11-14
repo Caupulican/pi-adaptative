@@ -81,7 +81,7 @@ root to close stops it). Inside that host, a bot's settings follow a change any 
 again when a root session opens (a new or resumed session replacing the one the bot loaded from), and a root session in
 the bot's directory hands it your project trust decision (`/trust`); a settings file edited outside a session reaches a
 loaded bot when a root session reads it again (`/reload`), as it reaches that session. A bot
-loaded by a message works in the sending session's directory, with its turns' warnings and spend going to that session
+loaded by a message works in the sending session's directory, with its turns' spend going to that session
 (to another open root session once it closes); the lock record carries that host's token, so a second host is told apart from the first even in
 one process. The host publishes what the session is doing in `host-state.json`, and a watch over the bot homes
 tells every other session's roster and open chat when the conversation, that state or the history changed. A second session
@@ -92,8 +92,11 @@ to the host in that session and process, and the bot's chat in every session sho
 lock takes the inbox when its session loads (before the message that loaded it), when the watch over the bot homes sees a
 message written (every 5 seconds while that watch does not run, and every minute beside a watch that runs, which can miss
 what another process writes), and before an idle close, giving each message to the
-bot's session as your words, oldest first; the bot answers in its chat, and that turn's warnings and spend go to the
-host's own session. A message the session refuses (its model moved or cannot run, say) leaves the queue as a refused
+bot's session as your words, oldest first; the bot answers in its chat, and that turn's spend goes to the host's own
+session. What a bot's own session raises for you (a warning, such as a routine result it could not deliver, a turn that
+failed, a turn stopped at its spend or time bound) is a notice in the bot's chat (`bots/<id>/notices/`, the newest sixteen
+kept), which every session shows and which marks the bot unread in the roster until you read it; an informational one
+marks nothing. Only a notice that could not be written is a warning of the process that hosts the bot, with its words. A message the session refuses (its model moved or cannot run, say) leaves the queue as a refused
 record that the chat shows with the reason (the newest eight are kept), and the host's session is warned. A message that
 waits when the host lets the bot go or dies is taken by the process that opens the bot next, including one working in the
 directory the message was sent from: every process lists the inboxes of the bots no process hosts once a minute, so that

@@ -298,6 +298,11 @@ export function botInboxDir(agentDir: string, botId: string): string {
 	return join(botHomeDir(agentDir, botId), "inbox");
 }
 
+/** `<agentDir>/bots/<id>/notices` -- what the bot's own session told the owner, one file each (`bots/bot-notices.ts`). */
+export function botNoticesDir(agentDir: string, botId: string): string {
+	return join(botHomeDir(agentDir, botId), "notices");
+}
+
 /** `<agentDir>/bots/<id>/typesafe-reviews` -- the System One evidence of the bot's own sessions. */
 export function botSystemOneEvidenceDir(agentDir: string, botId: string): string {
 	return join(botHomeDir(agentDir, botId), "typesafe-reviews");

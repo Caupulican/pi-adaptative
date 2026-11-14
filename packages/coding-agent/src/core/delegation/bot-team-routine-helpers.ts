@@ -27,6 +27,23 @@ import {
 	teamIncarnation,
 } from "./persistent-bot-team-store.ts";
 
+/** What the roster and the inbox keep of a bot's latest notice to the owner: when, and its words. */
+export interface BotNoticeMark {
+	readonly at: number;
+	readonly text: string;
+}
+
+/** When the bot last had news for the owner: its last answer or its last notice. */
+export function botLastNewsAt(bot: PersistentBotRecord): number {
+	return Math.max(bot.lastMessageAt ?? 0, bot.lastNotice?.at ?? 0);
+}
+
+/** Whether the owner has not read the bot's last answer or its last notice. */
+export function botUnread(bot: PersistentBotRecord): boolean {
+	const readAt = bot.lastReadAt ?? 0;
+	return ((bot.lastMessageAt ?? 0) > readAt && Boolean(bot.lastSummary)) || (bot.lastNotice?.at ?? 0) > readAt;
+}
+
 export interface PersistentBotInboxEntry {
 	readonly id: string;
 	readonly kind: "bot" | "team";
@@ -164,6 +181,16 @@ export function collectBotInboxEntries(
 			unread: bot.lastMessageAt > readAt,
 		});
 	}
+	if (bot?.lastNotice)
+		entries.push({
+			id: `bot-notice:${normId}:${bot.lastNotice.at}`,
+			kind: "bot",
+			targetId: normId,
+			sender: normId,
+			text: bot.lastNotice.text,
+			timestamp: bot.lastNotice.at,
+			unread: bot.lastNotice.at > readAt,
+		});
 	for (const team of teams) {
 		if (!team.memberAgentIds.includes(normId)) continue;
 		entries.push(

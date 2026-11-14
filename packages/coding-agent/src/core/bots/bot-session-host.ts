@@ -28,7 +28,8 @@
  * and an open chat when either changed whichever process wrote it, is `BotRemoteView` (`stateOf`, `readMessages`,
  * `subscribe`). A change of the bot's record rebuilds an idle session on the next message and is refused while a turn
  * runs. A finished turn records its outcome in the store as a worker's did, so the roster's unread mark and summary keep
- * working. This host only reads and writes the bot's own home and session.
+ * working; what its session raises for the owner (a warning, a failed turn, a turn stopped at its bound) is a notice in the
+ * bot's chat that marks it unread. This host only reads and writes the bot's own home and session.
  */
 
 import { randomBytes } from "node:crypto";
@@ -77,6 +78,7 @@ import {
 } from "./bot-inbox.ts";
 import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
+import { type BotNotice, readBotNotices, writeBotNotice } from "./bot-notices.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import { BotOwedWork, cancelOtherSessionsWatches, owesWatchWork } from "./bot-session-owed-work.ts";
 import {
@@ -122,8 +124,9 @@ export interface BotSessionHostPorts {
 
 /**
  * The root session a bot's message came from: the owner's project directory a bot it loads works in, what a bot made from
- * a profile compiles to and the settings a bot reads there, the pi session named as its host, and where its turns'
- * warnings and spend go. Once that root detaches, the root attached last answers.
+ * a profile compiles to and the settings a bot reads there, the pi session named as its host, and where its turns' spend
+ * goes. Once that root detaches, the root attached last answers. What the bot's own session raises for the owner goes to
+ * the bot's chat instead (`bot-notices.ts`).
  */
 export interface BotSender {
 	cwd(): string;
@@ -136,7 +139,7 @@ export interface BotSender {
 	settings(): { readonly settings: SettingsManager; release(): void };
 	/** The pi session that hosts the bot, named to the owner of a message another process sends it. */
 	hostSessionId(): string;
-	/** An owner-facing warning of the bot's turn (a turn that failed, a spend bound reached). */
+	/** An owner-facing warning about this root's own record of the bot's turn (its spend could not be recorded). */
 	warn(message: string): void;
 	/** Records what a bot's turn spent with the root session's cost view, once per `reportId`. */
 	reportUsage(usage: Usage, report: BotTurnUsageReport): void;
@@ -166,7 +169,7 @@ interface BotSessionEntry {
 	/** Publishes the session's state for the other processes. */
 	readonly stateWriter: BotHostStateWriter;
 	readonly modelRef: string;
-	/** The root its last message came from: its turns' warnings and spend go there. */
+	/** The root its last message came from: its turns' spend goes there. */
 	sender: BotSender;
 	/** The root it was built for: what defines it is compiled, and its settings read, as that root's (another root's message does not rebuild it). */
 	readonly builtFor: BotSender;
@@ -306,6 +309,28 @@ export class BotSessionHost {
 			waiting: readBotInbox(agentDir, agentId, unreadable),
 			refused: readBotInboxRefusals(agentDir, agentId, unreadable),
 		};
+	}
+
+	/** What the bot's own session told the owner, oldest first (the newest few): every session's chat shows it. */
+	readNotices(agentId: string): readonly BotNotice[] {
+		return readBotNotices(this.ports.agentDir(), agentId, (file, reason) =>
+			this.ports.warn(interfaceText().botTeam.botNoticeUnreadable(agentId, file, reason)),
+		).map(({ message }) => message);
+	}
+
+	/**
+	 * Tells the owner what the bot's own session raised for them, in the bot's chat every session reads, which marks the bot
+	 * unread unless `mark` is false (an informational notice). Only a notice that could not be written reaches the owner as
+	 * this process's warning, with its words.
+	 */
+	private notify(agentId: string, text: string, mark = true): void {
+		try {
+			writeBotNotice(this.ports.agentDir(), this.ports.store(), { agentId, text, at: Date.now(), mark });
+		} catch (error) {
+			this.ports.warn(interfaceText().botTeam.botNoticeNotRecorded(agentId, text, errorText(error)));
+			return;
+		}
+		this.changed(agentId);
 	}
 
 	/** The bot's earlier worker conversations, whichever session ran them (see `BotHistory`). */
@@ -492,7 +517,7 @@ export class BotSessionHost {
 				() => accept(false),
 				(error: unknown) => {
 					// Before acceptance the refusal is the send's own error; after it the turn failed and the owner is told.
-					if (wasAccepted) entry.sender.warn(interfaceText().botTeam.botTurnFailed(agentId, errorText(error)));
+					if (wasAccepted) this.notify(agentId, interfaceText().botTeam.botTurnFailed(agentId, errorText(error)));
 					else accept(false, errorText(error));
 				},
 			)
@@ -784,7 +809,8 @@ export class BotSessionHost {
 					...(definition.capabilityEnvelope ? { capabilityEnvelope: definition.capabilityEnvelope } : {}),
 					timers: this.ports.timers(),
 					onClosingWarnings: (warnings) => {
-						for (const warning of warnings) this.ports.warn(interfaceText().botTeam.botWarning(agentId, warning));
+						for (const warning of warnings)
+							this.notify(agentId, interfaceText().botTeam.botWarning(agentId, warning));
 					},
 				})
 			).session;
@@ -826,7 +852,7 @@ export class BotSessionHost {
 						limit.usd.toFixed(2),
 						limit.bound,
 					);
-					entry.sender.warn(reason);
+					this.notify(agentId, reason);
 					return reason;
 				},
 			});
@@ -835,7 +861,7 @@ export class BotSessionHost {
 				limitMs: () => settingsManager.getWorkerDelegationSettings().maxWallClockMs,
 				onExceeded: (limitMs) => {
 					const reason = interfaceText().botTeam.botTurnOverTime(agentId, String(Math.ceil(limitMs / 1000)));
-					entry.sender.warn(reason);
+					this.notify(agentId, reason);
 					return reason;
 				},
 			});
@@ -844,12 +870,18 @@ export class BotSessionHost {
 				agentId,
 				role: definition.role,
 				cwd,
-				warn: (message) => entry.sender.warn(interfaceText().botTeam.botWarning(agentId, message)),
+				warn: (message) => this.notify(agentId, interfaceText().botTeam.botWarning(agentId, message)),
 			});
 			const unsubscribeEvents = session.subscribe((event) => {
 				supervision.observe(event);
-				// The session's own warnings (a turn a watch started that failed, say) reach the owner as the bot's.
-				if (event.type === "warning") entry.sender.warn(interfaceText().botTeam.botWarning(agentId, event.message));
+				// The session's own warnings (a turn a watch started that failed, say) reach the owner in the bot's chat; an
+				// informational one marks nothing unread.
+				if (event.type === "warning")
+					this.notify(
+						agentId,
+						interfaceText().botTeam.botWarning(agentId, event.message),
+						event.severity !== "info",
+					);
 				if (
 					event.type === "agent_start" ||
 					event.type === "agent_end" ||

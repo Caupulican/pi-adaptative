@@ -34,10 +34,10 @@ export interface BotChatHost {
 	openWorkerTranscript(agentId: string): WorkerConversation | undefined;
 	getLaneRecords(): LaneRecord[];
 	/**
-	 * The bots' own conversations: a bot's session, loaded or on disk, its earlier worker conversations from its home, and
-	 * what waits in its inbox for the host of its session (or was refused by it).
+	 * The bots' own conversations: a bot's session, loaded or on disk, its earlier worker conversations from its home, what
+	 * waits in its inbox for the host of its session (or was refused by it), and what its session told the owner.
 	 */
-	readonly botSessions: Pick<BotSessionHost, "readMessages" | "readHistory" | "readInbox">;
+	readonly botSessions: Pick<BotSessionHost, "readMessages" | "readHistory" | "readInbox" | "readNotices">;
 }
 
 /** The messages of two chronological lists in time order, each list's own order kept (an untimed message keeps its place). */
@@ -118,7 +118,8 @@ export class BotChatTranscript {
 
 	/**
 	 * What the bot's inbox holds, drawn in its chat and never sent to a model: each message another session sent that waits
-	 * for the session hosting the bot, and each one that session refused, with its reason.
+	 * for the session hosting the bot, each one that session refused, with its reason, and each notice its session raised
+	 * for the owner (a warning, a turn that failed or was stopped at its bound).
 	 */
 	private inboxMessages(agentId: string): AgentMessage[] {
 		const words = interfaceText().botTeam;
@@ -133,6 +134,7 @@ export class BotChatTranscript {
 		return [
 			...refused.map(({ message }) => line(words.botInboxRefusedLine(message.reason, message.text), message.at)),
 			...waiting.map(({ message }) => line(words.botInboxWaitingLine(message.text), message.at)),
+			...this.host.botSessions.readNotices(agentId).map((notice) => line(notice.text, notice.at)),
 		].sort((a, b) => (a.timestamp ?? 0) - (b.timestamp ?? 0));
 	}
 

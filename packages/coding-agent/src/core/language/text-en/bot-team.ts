@@ -121,6 +121,11 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: its turn's spend could not be recorded (${reason}).`,
 	botTurnOutcomeNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its turn outcome could not be recorded (${reason}).`,
+	/** What the bot's session told the owner could not be kept in its chat; the words follow. */
+	botNoticeNotRecorded: (agentId: string, text: string, reason: string) =>
+		`Bot ${agentId}: a notice could not be kept in its chat (${reason}): ${text}`,
+	botNoticeUnreadable: (agentId: string, file: string, reason: string) =>
+		`Bot ${agentId}: a notice in its chat could not be read and was set aside as ${file}.unreadable (${reason}).`,
 	botHistoryFileUnreadable: (reason: string) => `Bot history: a session file could not be read (${reason}).`,
 	botHistoryIndexUnreadable: (agentId: string) =>
 		`Bot ${agentId}: its history index cannot be read, so old session bundles are not cleaned up until it is written again.`,

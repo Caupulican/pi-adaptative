@@ -13,12 +13,13 @@
  * process tools are refused the bot homes.
  */
 import { randomUUID } from "node:crypto";
-import { existsSync, readdirSync, readFileSync, renameSync, rmSync, statSync } from "node:fs";
+import { rmSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { isPlainRecord } from "../../kernel/utils/value-guards.ts";
 import { botInboxDir } from "../agent-paths.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { writeFileAtomicSync } from "../util/atomic-file.ts";
+import { type BotHomeRecord, homeRecordNames, keepNewestHomeRecords, readHomeRecords } from "./bot-home-records.ts";
 
 /** Most messages waiting at once: a host that does not take them is not given an unbounded queue. */
 export const MAX_BOT_INBOX_MESSAGES = 32;
@@ -56,10 +57,7 @@ export interface BotInboxRefusal extends BotInboxMessage {
 }
 
 /** A message as the inbox holds it: the file it is in and what it says. */
-export interface BotInboxItem<T extends BotInboxMessage = BotInboxMessage> {
-	readonly file: string;
-	readonly message: T;
-}
+export type BotInboxItem<T extends BotInboxMessage = BotInboxMessage> = BotHomeRecord<T>;
 
 function parseSender(value: unknown): BotInboxSender | undefined {
 	if (!isPlainRecord(value) || !Number.isInteger(value.pid) || typeof value.cwd !== "string") return undefined;
@@ -102,58 +100,13 @@ function parseRefusal(value: unknown, agentId: string): BotInboxRefusal | undefi
 	return { ...message, refusedAt: value.refusedAt, reason: value.reason };
 }
 
-function names(dir: string, pattern: RegExp): string[] {
-	if (!existsSync(dir)) return [];
-	return readdirSync(dir)
-		.filter((name) => pattern.test(name))
-		.sort();
-}
-
-/**
- * Reads the files `pattern` names, oldest first. A file that does not read as a message is set aside (renamed
- * `.unreadable`) and reported through `unreadable`: it would otherwise hold the queue, or be counted, forever.
- */
-function readItems<T extends BotInboxMessage>(
-	agentDir: string,
-	agentId: string,
-	pattern: RegExp,
-	parse: (value: unknown, agentId: string) => T | undefined,
-	unreadable: (file: string, reason: string) => void,
-): BotInboxItem<T>[] {
-	const dir = botInboxDir(agentDir, agentId);
-	const items: BotInboxItem<T>[] = [];
-	for (const name of names(dir, pattern)) {
-		const file = join(dir, name);
-		let message: T | undefined;
-		let reason = "not a message";
-		try {
-			message = parse(JSON.parse(readFileSync(file, "utf8")), agentId);
-		} catch (error) {
-			// Taken (deleted) by its host while it was listed: it is gone, not unreadable.
-			if (!existsSync(file)) continue;
-			reason = error instanceof Error ? error.message : String(error);
-		}
-		if (message) {
-			items.push({ file, message });
-			continue;
-		}
-		try {
-			renameSync(file, `${file}.unreadable`);
-		} catch {
-			if (!existsSync(file)) continue;
-		}
-		unreadable(file, reason);
-	}
-	return items;
-}
-
 /** The messages waiting for the bot's session, oldest first. */
 export function readBotInbox(
 	agentDir: string,
 	agentId: string,
 	unreadable: (file: string, reason: string) => void,
 ): BotInboxItem[] {
-	return readItems(agentDir, agentId, WAITING, parseMessage, unreadable);
+	return readHomeRecords(botInboxDir(agentDir, agentId), WAITING, (value) => parseMessage(value, agentId), unreadable);
 }
 
 /** The messages the bot's session refused, oldest first (the newest {@link MAX_REFUSED_KEPT}). */
@@ -162,12 +115,12 @@ export function readBotInboxRefusals(
 	agentId: string,
 	unreadable: (file: string, reason: string) => void,
 ): BotInboxItem<BotInboxRefusal>[] {
-	return readItems(agentDir, agentId, REFUSED, parseRefusal, unreadable);
+	return readHomeRecords(botInboxDir(agentDir, agentId), REFUSED, (value) => parseRefusal(value, agentId), unreadable);
 }
 
 /** Whether a message waits for the bot's session; read from the names alone. */
 export function botInboxWaiting(agentDir: string, agentId: string): boolean {
-	return names(botInboxDir(agentDir, agentId), WAITING).length > 0;
+	return homeRecordNames(botInboxDir(agentDir, agentId), WAITING).length > 0;
 }
 
 /**
@@ -179,7 +132,7 @@ export function enqueueBotInbox(
 	input: { agentId: string; text: string; mode?: BotInboxMode; from: BotInboxSender; at: number },
 ): BotInboxItem {
 	const dir = botInboxDir(agentDir, input.agentId);
-	const waiting = names(dir, WAITING).map((name) => join(dir, name));
+	const waiting = homeRecordNames(dir, WAITING).map((name) => join(dir, name));
 	const message: BotInboxMessage = {
 		version: 1,
 		id: randomUUID(),
@@ -208,8 +161,5 @@ export function refuseBotInboxMessage(agentDir: string, item: BotInboxItem, reas
 	const refusal: BotInboxRefusal = { ...item.message, refusedAt, reason };
 	writeFileAtomicSync(item.file.replace(/\.json$/, ".refused.json"), `${JSON.stringify(refusal)}\n`, { mode: 0o600 });
 	rmSync(item.file, { force: true });
-	const dir = botInboxDir(agentDir, item.message.agentId);
-	const refused = names(dir, REFUSED);
-	for (const name of refused.slice(0, Math.max(0, refused.length - MAX_REFUSED_KEPT)))
-		rmSync(join(dir, name), { force: true });
+	keepNewestHomeRecords(botInboxDir(agentDir, item.message.agentId), REFUSED, MAX_REFUSED_KEPT);
 }

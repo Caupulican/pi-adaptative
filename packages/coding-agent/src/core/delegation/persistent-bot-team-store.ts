@@ -67,6 +67,9 @@ import { assertBotId, isBotId } from "./bot-runtime-bindings.ts";
 import {
 	type BotDaemonEnd,
 	type BotDaemonReport,
+	type BotNoticeMark,
+	botLastNewsAt,
+	botUnread,
 	claimDaemonLeaseFile,
 	collectBotInboxEntries,
 	collectTeamInboxEntries,
@@ -91,7 +94,7 @@ import {
 	parseTeamMessage,
 	parseTeamRecord,
 } from "./persistent-bot-team-codecs.ts";
-import { botLiveState, workerLaneByAgentId } from "./persistent-bot-view-state.ts";
+import { botLiveState, compareBotViews, teamIdsOf, workerLaneByAgentId } from "./persistent-bot-view-state.ts";
 import {
 	claimDueRoutineOccurrences,
 	clearRoutineAwayRefusals,
@@ -179,6 +182,8 @@ export interface PersistentBotRecord {
 	readonly lastSummary?: string;
 	readonly lastMessageAt?: number;
 	readonly lastReadAt?: number;
+	/** The latest notice the bot's own session raised for the owner (`bots/bot-notices.ts`); never in a prompt. */
+	readonly lastNotice?: BotNoticeMark;
 }
 
 export interface PersistentBotView {
@@ -1037,6 +1042,7 @@ export class PersistentBotTeamStore {
 				input.lastReadAt !== undefined && Number.isFinite(input.lastReadAt)
 					? input.lastReadAt
 					: existing?.lastReadAt,
+			lastNotice: existing?.lastNotice,
 		};
 
 		this.bots.set(agentId, record);
@@ -1767,14 +1773,11 @@ export class PersistentBotTeamStore {
 		const normId = normalizeBotOrTeamId(agentId, "agentId");
 		const current = this.bots.get(normId);
 		if (!current) return undefined;
-		if ((current.lastReadAt ?? 0) >= (current.lastMessageAt ?? 0)) return { ...current };
+		if ((current.lastReadAt ?? 0) >= botLastNewsAt(current)) return { ...current };
 		return this.mutate(() => {
 			const bot = this.bots.get(normId);
 			if (!bot) return undefined;
-			const updated: PersistentBotRecord = {
-				...bot,
-				lastReadAt: Math.max(readAt, bot.lastMessageAt ?? 0),
-			};
+			const updated: PersistentBotRecord = { ...bot, lastReadAt: Math.max(readAt, botLastNewsAt(bot)) };
 			this.bots.set(normId, updated);
 			this.save();
 			return { ...updated };
@@ -1815,8 +1818,8 @@ export class PersistentBotTeamStore {
 		return this.mutate(() => {
 			let cleared = 0;
 			for (const [id, bot] of this.bots.entries()) {
-				if ((bot.lastMessageAt ?? 0) > (bot.lastReadAt ?? 0)) {
-					this.bots.set(id, { ...bot, lastReadAt: Math.max(readAt, bot.lastMessageAt ?? 0) });
+				if (botLastNewsAt(bot) > (bot.lastReadAt ?? 0)) {
+					this.bots.set(id, { ...bot, lastReadAt: Math.max(readAt, botLastNewsAt(bot)) });
 					cleared++;
 				}
 			}
@@ -2066,6 +2069,16 @@ export class PersistentBotTeamStore {
 		return filePath;
 	}
 
+	/** A notice the bot's own session raised for the owner: the roster marks the bot unread and its inbox shows the words. */
+	recordBotNotice(agentId: string, notice: BotNoticeMark): void {
+		this.mutate(() => {
+			const bot = this.bots.get(normalizeBotOrTeamId(agentId, "agentId"));
+			if (!bot) return;
+			this.bots.set(bot.agentId, { ...bot, lastNotice: { at: notice.at, text: notice.text } });
+			this.save();
+		});
+	}
+
 	recordBotTurnOutcome(input: {
 		agentId: string;
 		summary: string;
@@ -2295,12 +2308,7 @@ export class PersistentBotTeamStore {
 				liveAgent?.lastResult?.reasonCode ??
 				botRecord?.lastSummary;
 
-			const teamIds: string[] = [];
-			for (const team of this.teams.values()) {
-				if (team.memberAgentIds.includes(agentId)) {
-					teamIds.push(team.teamId);
-				}
-			}
+			const teamIds = teamIdsOf(this.teams.values(), agentId);
 
 			const persistent = botRecord !== undefined;
 			const controllable = liveAgent?.controllable ?? !botRecord?.retired;
@@ -2313,8 +2321,7 @@ export class PersistentBotTeamStore {
 				botRecord?.updatedAt ??
 				new Date().toISOString();
 
-			const unreadCount =
-				(botRecord?.lastMessageAt ?? 0) > (botRecord?.lastReadAt ?? 0) && Boolean(botRecord?.lastSummary) ? 1 : 0;
+			const unreadCount = botRecord && botUnread(botRecord) ? 1 : 0;
 			const routineCount = Array.from(this.routines.values()).filter(
 				(r) =>
 					r.enabled &&
@@ -2352,17 +2359,7 @@ export class PersistentBotTeamStore {
 			});
 		}
 
-		views.sort((a, b) => {
-			const aActive = a.state === "running" || a.state === "queued";
-			const bActive = b.state === "running" || b.state === "queued";
-			if (aActive !== bActive) {
-				return aActive ? -1 : 1;
-			}
-			if (a.persistent !== b.persistent) {
-				return a.persistent ? -1 : 1;
-			}
-			return b.updatedAt.localeCompare(a.updatedAt);
-		});
+		views.sort(compareBotViews);
 
 		return views;
 	}

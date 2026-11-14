@@ -1,10 +1,15 @@
 /**
  * What the roster shows of a bot's run, derived from the worker lanes and the live worker agents a session holds: the lane
- * that speaks for each bot (a running one, else a queued one, else the latest finished) and the live state its view
- * carries. Pure: the bot store's view projection (`projectBotViews`) reads both.
+ * that speaks for each bot (a running one, else a queued one, else the latest finished), the live state its view carries,
+ * the groups it is in and the roster's order. Pure: the bot store's view projection (`projectBotViews`) reads them.
  */
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
-import type { PersistentBotLiveState, PersistentBotRecord } from "./persistent-bot-team-store.ts";
+import type {
+	PersistentBotLiveState,
+	PersistentBotRecord,
+	PersistentBotView,
+	PersistentTeamRecord,
+} from "./persistent-bot-team-store.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
 
 /** The worker lane that speaks for each bot (keyed by its agent id, else its lane id). */
@@ -48,4 +53,20 @@ export function botLiveState(
 	if (liveAgent?.awaitingParent) return "awaiting_parent";
 	if (liveAgent?.lastResult?.status === "failed" || lane?.status === "failed") return "failed";
 	return "idle";
+}
+
+/** The groups the bot is a member of. */
+export function teamIdsOf(teams: Iterable<PersistentTeamRecord>, agentId: string): string[] {
+	const teamIds: string[] = [];
+	for (const team of teams) if (team.memberAgentIds.includes(agentId)) teamIds.push(team.teamId);
+	return teamIds;
+}
+
+/** The roster's order: running or queued bots first, then the persistent ones, then the most recently updated. */
+export function compareBotViews(a: PersistentBotView, b: PersistentBotView): number {
+	const aActive = a.state === "running" || a.state === "queued";
+	const bActive = b.state === "running" || b.state === "queued";
+	if (aActive !== bActive) return aActive ? -1 : 1;
+	if (a.persistent !== b.persistent) return a.persistent ? -1 : 1;
+	return b.updatedAt.localeCompare(a.updatedAt);
 }

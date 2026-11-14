@@ -47,6 +47,7 @@ export function parseBotRecord(value: unknown): PersistentBotRecord | undefined 
 		lastSummary,
 		lastMessageAt,
 		lastReadAt,
+		lastNotice,
 	} = value;
 	// Records written before the soul concept stored the same text under `instructions`; the next save writes `soul`.
 	const soul = storedSoul ?? legacyInstructions;
@@ -83,6 +84,13 @@ export function parseBotRecord(value: unknown): PersistentBotRecord | undefined 
 		lastSummary: typeof lastSummary === "string" ? lastSummary : undefined,
 		lastMessageAt: typeof lastMessageAt === "number" && Number.isFinite(lastMessageAt) ? lastMessageAt : undefined,
 		lastReadAt: typeof lastReadAt === "number" && Number.isFinite(lastReadAt) ? lastReadAt : undefined,
+		lastNotice:
+			isRecordObject(lastNotice) &&
+			typeof lastNotice.at === "number" &&
+			Number.isFinite(lastNotice.at) &&
+			typeof lastNotice.text === "string"
+				? { at: lastNotice.at, text: lastNotice.text }
+				: undefined,
 	};
 }
 
