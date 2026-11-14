@@ -8,23 +8,61 @@
  */
 import { statSync } from "node:fs";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
-import { interfaceText } from "../language/interface-text.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
+import type { RoutineOccurrence } from "./routine-contract.ts";
 
 /** Why an origin can never pass: the session file it names is gone, or its anchor entry is absent from the session file. */
 export type RoutineOriginLoss = "session-file-gone" | "origin-entry-absent";
 
 export type RoutineOriginReach = "usable" | "waiting" | RoutineOriginLoss;
 
+const UNDELIVERABLE_MARKER_PREFIX = "undeliverable:";
+
 /** The delivery marker of a result settled because its origin is lost: the run's stored result keeps why it was not delivered. */
 export function routineUndeliverableMarker(loss: RoutineOriginLoss): string {
-	return `undeliverable:${loss}`;
+	return `${UNDELIVERABLE_MARKER_PREFIX}${loss}`;
 }
 
-/** The owner's one warning when a result is settled undeliverable, in the interface language. */
-export function routineUndeliverableWarning(routineId: string, loss: RoutineOriginLoss): string {
-	return interfaceText().notices.routineResultUndeliverable(routineId, loss);
+/** The loss a delivery marker names when its result was settled undeliverable; undefined for a delivered result's marker. */
+export function routineUndeliverableLoss(marker: string | undefined): RoutineOriginLoss | undefined {
+	const loss = marker?.startsWith(UNDELIVERABLE_MARKER_PREFIX)
+		? marker.slice(UNDELIVERABLE_MARKER_PREFIX.length)
+		: undefined;
+	return loss === "session-file-gone" || loss === "origin-entry-absent" ? loss : undefined;
+}
+
+/** A run whose result was settled undeliverable: which run, why, and when the settlement was written. */
+export interface RoutineUndeliverableResult {
+	readonly routineId: string;
+	readonly occurrenceId: string;
+	readonly loss: RoutineOriginLoss;
+	readonly settledAt: number;
+}
+
+/**
+ * Per routine id, the latest of `occurrences` whose result (or the uncertainty result before it) was settled undeliverable,
+ * read from the delivery markers the journal keeps while it holds the run.
+ */
+export function latestUndeliverableResults(
+	occurrences: Iterable<RoutineOccurrence>,
+): ReadonlyMap<string, RoutineUndeliverableResult> {
+	const latest = new Map<string, RoutineUndeliverableResult>();
+	for (const occurrence of occurrences) {
+		const loss =
+			routineUndeliverableLoss(occurrence.result?.deliveryMarker) ??
+			routineUndeliverableLoss(occurrence.priorUncertaintyResult?.deliveryMarker);
+		if (loss === undefined) continue;
+		const known = latest.get(occurrence.routineId);
+		if (known && known.settledAt >= occurrence.updatedAt) continue;
+		latest.set(occurrence.routineId, {
+			routineId: occurrence.routineId,
+			occurrenceId: occurrence.occurrenceId,
+			loss,
+			settledAt: occurrence.updatedAt,
+		});
+	}
+	return latest;
 }
 
 /** Whether `path` provably does not exist. An unreadable path is not proof: it may be readable again. */

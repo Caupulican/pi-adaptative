@@ -297,9 +297,10 @@ export const AUTONOMY_STATUS = {
 		schedule: (kind: RoutineStatusItem["schedule"]) => SCHEDULE_KIND[kind],
 		lastStatus: (status: NonNullable<RoutineDefinitionView["lastStatus"]>) => RUN_STATUS[status],
 		line: (line: AutonomyRoutineLine) =>
-			`${line.routineId}: ${line.state}${line.ended === undefined ? "" : ` (${line.ended})`}, ${line.schedule}, próxima ${line.next}${line.startsFrom === undefined ? "" : ` (a partir de ${line.startsFrom})`}, última ${line.lastStatus}${line.awayRefusal === undefined ? "" : `, ausência recusada: ${line.awayRefusal}`}${line.pause ?? ""}${line.progress === undefined ? "" : `; onde parou: ${line.progress}`}`,
+			`${line.routineId}: ${line.state}${line.ended === undefined ? "" : ` (${line.ended})`}, ${line.schedule}, próxima ${line.next}${line.startsFrom === undefined ? "" : ` (a partir de ${line.startsFrom})`}, última ${line.lastStatus}${line.awayRefusal === undefined ? "" : `, ausência recusada: ${line.awayRefusal}`}${line.pause ?? ""}${line.undeliverable ?? ""}${line.progress === undefined ? "" : `; onde parou: ${line.progress}`}`,
 		pausedAfterFailures: (after: number, reason: string | undefined) =>
 			`; pausada após ${after} ${after === 1 ? "falha" : "falhas"}${reason === undefined ? "" : `: ${reason}`}`,
+		undeliverable: (at: string, why: string) => `; um resultado não pôde ser entregue (${at}): ${why}`,
 	},
 
 	awayDaemon: {

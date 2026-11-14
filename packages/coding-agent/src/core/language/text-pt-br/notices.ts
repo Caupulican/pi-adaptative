@@ -70,9 +70,11 @@ export const NOTICES = {
 	/** Uma espera salva com a sua aprovação cujo uso não pôde ser registrado, e cujo salvamento também não pôde ser desfeito. */
 	watchArmedApprovalUnrecorded: (watchId: string, cause: string) =>
 		`A espera "${watchId}" está armada, mas o uso da sua aprovação da verificação dela não pôde ser registrado e desfazer o salvamento também falhou (${cause}). A aprovação não consta como usada; apague a espera se ela não deve rodar.`,
-	/** Um resultado de rotina que nunca poderá chegar a esta sessão, encerrado como não entregável em vez de esperar para sempre. */
-	routineResultUndeliverable: (routineId: string, loss: "session-file-gone" | "origin-entry-absent") =>
-		`Um resultado da rotina "${routineId}" nunca poderá chegar a esta sessão, então deixou de esperar pela entrega: ${loss === "session-file-gone" ? "o arquivo de sessão ao qual ele se destinava não existe mais" : "o ponto desta conversa ao qual ele se destinava não está no arquivo da sessão, por exemplo perdido numa queda antes de ser gravado"}.`,
+	/** Por que um resultado de rotina nunca poderá chegar à sessão à qual se destinava (`routine-origin-reach.ts`). */
+	routineOriginLoss: (loss: "session-file-gone" | "origin-entry-absent"): string =>
+		loss === "session-file-gone"
+			? "o arquivo de sessão ao qual ele se destinava não existe mais"
+			: "o ponto desta conversa ao qual ele se destinava não está no arquivo da sessão, por exemplo perdido numa queda antes de ser gravado",
 
 	widgetTruncated: "... (widget truncado)",
 	/** O aviso de cobrança de uma sessão autenticada com uma chave de assinatura. */

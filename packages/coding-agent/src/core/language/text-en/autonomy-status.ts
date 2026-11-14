@@ -32,6 +32,8 @@ export interface AutonomyRoutineLine {
 	readonly awayRefusal?: string;
 	/** The pause clause a failed run left behind, when the host paused the routine; it starts with its own separator. */
 	readonly pause?: string;
+	/** The clause of the latest result settled undeliverable, when the journal holds one; it starts with its own separator. */
+	readonly undeliverable?: string;
 	readonly progress?: string;
 }
 
@@ -219,9 +221,11 @@ export const AUTONOMY_STATUS = {
 		/** The status of a routine's last run, keyed by the identifier the record holds. */
 		lastStatus: (status: NonNullable<RoutineDefinitionView["lastStatus"]>): string => status,
 		line: (line: AutonomyRoutineLine) =>
-			`${line.routineId}: ${line.state}${line.ended === undefined ? "" : ` (${line.ended})`}, ${line.schedule}, next ${line.next}${line.startsFrom === undefined ? "" : ` (starts from ${line.startsFrom})`}, last ${line.lastStatus}${line.awayRefusal === undefined ? "" : `, away refused: ${line.awayRefusal}`}${line.pause ?? ""}${line.progress === undefined ? "" : `; where it stood: ${line.progress}`}`,
+			`${line.routineId}: ${line.state}${line.ended === undefined ? "" : ` (${line.ended})`}, ${line.schedule}, next ${line.next}${line.startsFrom === undefined ? "" : ` (starts from ${line.startsFrom})`}, last ${line.lastStatus}${line.awayRefusal === undefined ? "" : `, away refused: ${line.awayRefusal}`}${line.pause ?? ""}${line.undeliverable ?? ""}${line.progress === undefined ? "" : `; where it stood: ${line.progress}`}`,
 		pausedAfterFailures: (after: number, reason: string | undefined) =>
 			`; paused after ${after} failed runs${reason === undefined ? "" : `: ${reason}`}`,
+		/** The latest result settled undeliverable: when, and why it can never reach the session (`notices.routineOriginLoss`). */
+		undeliverable: (at: string, why: string) => `; a result could not be delivered (${at}): ${why}`,
 	},
 
 	awayDaemon: {

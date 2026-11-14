@@ -18,7 +18,9 @@ reached spending limit or wake bound, a model that does not resolve or has no de
 invalid limits, a routine paused after three failed runs in a row, a routine time zone the runtime
 does not support), the
 harness saves one notice that is shown with the owner's next turn and names the setting to change.
-It starts no turn and calls no model, and the same state is not reported twice.
+It starts no turn and calls no model, and the same state is not reported twice. A routine result
+that can never reach its session (the session file it was addressed to is gone, or the entry it was
+anchored at is missing from it) is settled instead of waiting and told with one such notice.
 Configure these settings through `/proactivity` or the `proactivity` settings. The model-facing
 preferences tool requires confirmation on the owner's screen before a change.
 

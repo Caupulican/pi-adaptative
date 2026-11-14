@@ -5,7 +5,6 @@ import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { ciEventSubject, ciSubjectKey, hostEventHash, isCiEnvelope } from "../events/host-event-contract.ts";
 import type { GithubThreadInterest } from "../events/host-event-kinds.ts";
 import { hostEventIsCurrent } from "../events/host-event-reducer.ts";
-import type { HarnessNotice } from "../harness-notice.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import { boundedRedactedDiagnosticText, cleanRedactBound } from "../security/secret-text.ts";
@@ -37,15 +36,12 @@ import {
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
 import type { RoutineHolder, RoutineScope } from "./routine-holder.ts";
-import {
-	type RoutineOriginLoss,
-	routineUndeliverableMarker,
-	routineUndeliverableWarning,
-} from "./routine-origin-reach.ts";
+import { type RoutineOriginLoss, routineUndeliverableMarker } from "./routine-origin-reach.ts";
 import { routineTurnOrigin } from "./routine-parent-input.ts";
-import { PROMOTED_SNAG_RUNS, promotedRoutineSnags, type RoutineRunFacts } from "./routine-progress.ts";
+import type { RoutineRunFacts } from "./routine-progress.ts";
 import { routineInstructions } from "./routine-run-brief.ts";
 import { routineReceiptOrigin } from "./routine-save-origin.ts";
+import { type RoutineNoticePort, RoutineStateNotices } from "./routine-state-notices.ts";
 import type { RoutineStorePort } from "./routine-store-port.ts";
 import { WATCH_WAKE_SUMMARY } from "./routine-watch-wake.ts";
 import type { RoutineWorkerExecutor, RoutineWorkerRequest, RoutineWorkerState } from "./routine-worker-executor.ts";
@@ -222,14 +218,11 @@ export interface RoutineResultDelivery {
 	originLoss(origin: WorkerReceiptOrigin): RoutineOriginLoss | undefined;
 	/**
 	 * Tells the owner once, with their next turn, that one of this session's routines is paused after failed runs,
-	 * cannot be scheduled here, or keeps stumbling on the same snag; `undefined` observes that the state ended. `scope`
-	 * is the subject holding the state on its own: the routine id, or one snag of it.
+	 * cannot be scheduled here, keeps stumbling on the same snag, or had a result that can never reach this session
+	 * (`routine-state-notices.ts`); `undefined` observes that the state ended. `scope` is the subject holding the state
+	 * on its own: the routine id, or one snag of it.
 	 */
-	noticeRoutineState(
-		kind: "routine-paused" | "routine-unschedulable" | "routine-snag",
-		scope: string,
-		notice: HarnessNotice | undefined,
-	): void;
+	noticeRoutineState: RoutineNoticePort["noticeRoutineState"];
 }
 
 interface RoutineSchedulerDeps {
@@ -310,10 +303,8 @@ export class RoutineSchedulerController {
 	private awayHeld: ReadonlySet<string> = new Set();
 	/** `routinePreviousSlot` of each routine cursor seen by the last schedule read, so a cursor is evaluated once. */
 	private previousSlots = new Map<string, number | undefined>();
-	/** Pauses already logged by this process, keyed by routine and the occurrence whose failure paused it. */
-	private readonly announcedPauses = new Set<string>();
-	/** Snag scopes this runtime observed as promoted, so one that stops being promoted is observed clear. */
-	private readonly noticedSnags = new Set<string>();
+	/** The owner notices of this session's routine states, read from the store at the end of every pass. */
+	private readonly notices = new RoutineStateNotices();
 
 	constructor(deps: RoutineSchedulerDeps) {
 		this.deps = deps;
@@ -526,85 +517,14 @@ export class RoutineSchedulerController {
 		}
 		this.attempt("delivery", () => this.deliverPending());
 		const parent = this.deps.delivery;
-		if (parent) this.attempt("notices", () => this.observeRoutineStates(parent));
+		if (parent)
+			this.attempt("notices", () =>
+				this.notices.observe(parent, {
+					routines: this.deps.store.listRoutines(this.holder),
+					occurrences: this.occurrences(),
+				}),
+			);
 		return result;
-	}
-
-	/**
-	 * Observes, for each routine of this session, the kept states the owner acts on: a pause after failed runs (from its
-	 * durable record, so a restart finds the notice already saved), a time zone this runtime cannot place, and each snag
-	 * its progress record counts at least {@link PROMOTED_SNAG_RUNS} times while unresolved (one notice per snag episode).
-	 */
-	private observeRoutineStates(parent: RoutineResultDelivery): void {
-		const promoted = new Set<string>();
-		for (const routine of this.deps.store.listRoutines(this.holder)) {
-			if (routine.target.kind !== "session") continue;
-			const pause = routine.failurePause;
-			if (pause) {
-				const key = `${routine.routineId}:${pause.occurrenceId}`;
-				if (!this.announcedPauses.has(key)) {
-					this.announcedPauses.add(key);
-					harnessLog.warn("routines", "a routine was paused after failed runs", {
-						routineId: routine.routineId,
-						after: pause.after,
-					});
-				}
-			}
-			parent.noticeRoutineState(
-				"routine-paused",
-				routine.routineId,
-				pause && {
-					reason: `${routine.routineId}:${pause.occurrenceId}`,
-					text: `Routine ${routine.routineId} was paused after ${pause.after} failed runs in a row and stays paused until the owner resumes it.`,
-					// The failed run's own words: the model reads them fenced as data, the owner's line does not carry them.
-					evidence: `The last run reported:\n${pause.lastError}`,
-				},
-			);
-			const schedule = routine.schedule;
-			parent.noticeRoutineState(
-				"routine-unschedulable",
-				routine.routineId,
-				schedule.kind === "calendar" && routineZoneUnsupported(schedule) !== undefined
-					? {
-							reason: `${routine.routineId}:${routine.incarnationId}:${schedule.timeZone}`,
-							text: `Routine ${routine.routineId} cannot be scheduled: time zone ${JSON.stringify(schedule.timeZone)} is not supported by this runtime, so it does not run until the owner changes the zone or a runtime that supports it opens the session.`,
-						}
-					: undefined,
-			);
-			for (const snag of promotedRoutineSnags(routine.progress)) {
-				const scope = `${routine.routineId}:snag:${snag.signature}`;
-				promoted.add(scope);
-				this.noticedSnags.add(scope);
-				// A paused or off routine runs nothing: the headline says so first, and its
-				// reason changes with that state, so the notice is told again when the state changes.
-				const held =
-					routine.failurePause !== undefined
-						? "paused until the owner resumes it"
-						: !routine.enabled
-							? "off until the owner enables it"
-							: undefined;
-				const stumbling = `keeps stumbling on the same thing (${snag.seenCount} runs so far).`;
-				// The snag's own words, as the run wrote them: fenced for the model, never part of the owner's line.
-				const evidence = [
-					`Where the run stumbled: ${snag.what}`,
-					...(snag.remedy ? [`The last remedy tried: ${snag.remedy}`] : []),
-				].join("\n");
-				parent.noticeRoutineState("routine-snag", scope, {
-					reason: `${routine.routineId}:${snag.signature}:${snag.firstSeenAt}:${held === undefined ? "active" : "held"}`,
-					text:
-						held === undefined
-							? `Routine ${routine.routineId} ${stumbling} A note through the routine tool reaches its next run.`
-							: `Routine ${routine.routineId} is ${held}; a note through the routine tool reaches its first run after that. It ${stumbling}`,
-					evidence,
-				});
-			}
-		}
-		// A snag that resolved, was reset or left with its routine ends its notice.
-		for (const scope of this.noticedSnags) {
-			if (promoted.has(scope)) continue;
-			this.noticedSnags.delete(scope);
-			parent.noticeRoutineState("routine-snag", scope, undefined);
-		}
 	}
 
 	private eligibleRoutines(): RoutineDefinitionView[] {
@@ -1099,8 +1019,8 @@ export class RoutineSchedulerController {
 
 	/**
 	 * Settles each pending result whose origin can never pass here ({@link RoutineResultDelivery.originLoss}) as a delivery
-	 * settles it, with an `undeliverable:` marker naming the loss in place of a parent input, and warns the owner once the
-	 * settlement is durable. A result whose origin may still pass (another branch, not yet durable) keeps waiting.
+	 * settles it, with an `undeliverable:` marker naming the loss in place of a parent input; the pass's notices tell the
+	 * owner from that marker. A result whose origin may still pass (another branch, not yet durable) keeps waiting.
 	 */
 	private settleUndeliverable(): void {
 		const parent = this.deps.delivery;
@@ -1121,12 +1041,12 @@ export class RoutineSchedulerController {
 					deliveryMarker: routineUndeliverableMarker(loss),
 					nowMs: this.deps.timers.now(),
 				});
+				// The owner is told by the pass's notices, read from this durable marker.
 				harnessLog.warn("routines", "a routine result can never be delivered and was settled undeliverable", {
 					routineId: occurrence.routineId,
 					occurrenceId: occurrence.occurrenceId,
 					loss,
 				});
-				this.deps.warn(routineUndeliverableWarning(occurrence.routineId, loss));
 			});
 		}
 	}

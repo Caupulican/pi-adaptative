@@ -24,6 +24,7 @@ import {
 	routineStartWindow,
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
+import { latestUndeliverableResults } from "./routine-origin-reach.ts";
 import { describeRoutineProgress, routineProgressLine } from "./routine-progress.ts";
 import { MAX_ARM_OWNER_SOURCES, type RoutineArmAuthority, type RoutineRunOpener } from "./routine-provenance.ts";
 import type { RetiredRoutineRecord } from "./routine-retired.ts";
@@ -148,6 +149,11 @@ function summary(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs:
 
 function view(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: number): RoutineToolView {
 	const progress = describeRoutineProgress(routineProgressLine(routine.progress), englishText().chat.routineProgress);
+	const undeliverable = latestUndeliverableResults(
+		store
+			.listRoutineOccurrences({ routineId: routine.routineId })
+			.filter((occurrence) => occurrence.definition.incarnationId === routine.incarnationId),
+	).get(routine.routineId);
 	// A watch runs no worker and a save of one takes no worker preferences, so an older watch's saved ones are not shown.
 	const preferences = routineRunsWorkers(routine.schedule) ? routine.executionSnapshot : undefined;
 	return {
@@ -159,6 +165,9 @@ function view(routine: RoutineDefinitionView, store: RoutineStorePort, nowMs: nu
 		...(progress === undefined
 			? {}
 			: { progress: wrapUntrustedText(progress, `routine-progress:${routine.routineId}`) }),
+		...(undeliverable === undefined
+			? {}
+			: { lastUndeliverable: { loss: undeliverable.loss, settledAt: undeliverable.settledAt } }),
 		...(preferences?.profileId === undefined ? {} : { profileId: preferences.profileId }),
 		knowledge: preferences?.savedIntent.knowledgeReferences ?? [],
 	};

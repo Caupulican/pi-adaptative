@@ -81,9 +81,11 @@ export const NOTICES = {
 	/** A watch saved on your approval whose use could not be recorded, and whose save could not be undone either. */
 	watchArmedApprovalUnrecorded: (watchId: string, cause: string) =>
 		`Watch "${watchId}" is armed, but the use of your approval of its check could not be recorded and undoing the save failed too (${cause}). The approval is not marked as used; delete the watch if it should not run.`,
-	/** A routine run's result that can never reach this session, settled undeliverable instead of waiting forever. */
-	routineResultUndeliverable: (routineId: string, loss: "session-file-gone" | "origin-entry-absent") =>
-		`A result of routine "${routineId}" can never reach this session, so it no longer waits for delivery: ${loss === "session-file-gone" ? "the session file it was addressed to no longer exists" : "the point of this conversation it was addressed to is missing from the session file, for example lost in a crash before it was written"}.`,
+	/** Why a routine result can never reach the session it was addressed to (`routine-origin-reach.ts`). */
+	routineOriginLoss: (loss: "session-file-gone" | "origin-entry-absent"): string =>
+		loss === "session-file-gone"
+			? "the session file it was addressed to no longer exists"
+			: "the point of this conversation it was addressed to is missing from the session file, for example lost in a crash before it was written",
 
 	/** What a widget the extension drew too tall to keep becomes at the top of its frame. */
 	widgetTruncated: "... (widget truncated)",
