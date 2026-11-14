@@ -77,7 +77,10 @@ ring (`◌n`), read from the store in every session.
 created, messaged or hosts it: the bot list is the bot store, the chat is read from the bot's home, and the unread mark is
 on the bot's record in the store (`lastMessageAt`, `lastReadAt`), which every session watches. One process hosts a bot at a
 time (`bots/<id>/host.lock`), and inside a process one host serves every root session on the same agent directory (the last
-root to close stops it). Inside that host, a bot's settings follow a change any of those root sessions makes, and a bot
+root to close stops it). Inside that host, a bot's settings follow a change any of those root sessions makes and are read
+again when a root session opens (a new or resumed session replacing the one the bot loaded from), and a root session in
+the bot's directory hands it your project trust decision (`/trust`); a settings file edited outside a session reaches a
+loaded bot when a root session reads it again (`/reload`), as it reaches that session. A bot
 loaded by a message works in the sending session's directory, with its turns' warnings and spend going to that session
 (to another open root session once it closes); the lock record carries that host's token, so a second host is told apart from the first even in
 one process. The host publishes what the session is doing in `host-state.json`, and a watch over the bot homes

@@ -5,9 +5,11 @@
  * root (the store, model rules, spend bound, System One, clock): the root attached last that is still attached. A message
  * carries the root it came from as its sender (`BotSender`): the directory a bot it loads works in, what a profile compiles
  * to and the settings storage a bot reads there, and where its turns' warnings and spend go; once that root detaches, the
- * root attached last answers. A bot's settings read their storage again after a change any attached root announces, a
- * root attached later included, so no root's detach leaves them stale. The last root to detach stops the host. A child session (a bot's own session, a worker) hosts
- * no bots: it gets a host of its own that no other session shares.
+ * root attached last answers. A bot's settings read their storage again after a change any attached root announces and when
+ * a root attaches, so a root that replaces the one the bot loaded from (a new or resumed session) is followed from its
+ * attach, and no root's detach leaves them stale; a root working in the bot's directory also hands it its project trust.
+ * The last root to detach stops the host. A child session (a bot's own session, a worker) hosts no bots: it gets a host of
+ * its own that no other session shares.
  */
 import { resolve } from "node:path";
 import { realPathIdentity } from "../autonomy/path-scope.ts";
@@ -31,6 +33,8 @@ export interface BotSessionRootPorts
 /** A bot's settings manager, with its subscription to each attached root's changes. */
 interface SettingsFollower {
 	readonly settings: SettingsManager;
+	/** The directory whose project settings it reads (the path identity of the cwd of the root it was made from). */
+	readonly place: string;
 	readonly subscriptions: Map<BotSessionRootPorts, () => void>;
 }
 
@@ -72,8 +76,10 @@ function senderOf(shared: AttachedRoots, root: BotSessionRootPorts): BotSender {
 		cwd: () => current().cwd(),
 		compileProfile: (record) => current().compileProfile(record),
 		settings: () => {
+			const source = current();
 			const follower: SettingsFollower = {
-				settings: current().settingsManager().sibling(),
+				settings: source.settingsManager().sibling(),
+				place: realPathIdentity(source.cwd()),
 				subscriptions: new Map(),
 			};
 			for (const attached of shared.roots) follow(follower, attached);
@@ -94,18 +100,24 @@ function senderOf(shared: AttachedRoots, root: BotSessionRootPorts): BotSender {
 }
 
 /**
- * Reads the storage again after each change `root`'s manager announces. A change is announced before its write is
- * queued, so the write is awaited from the next microtask, then the settings are read from the storage it reached. A
- * write or a read that fails leaves the bots on the settings they had, and the owner is told.
+ * Reads the storage again after each change `root`'s manager announces; returns that reread. A change is announced
+ * before its write is queued, so the write is awaited from the next microtask, then the settings are read from the
+ * storage it reached. A root working in the follower's directory holds the owner's trust decision for its project
+ * settings (`/trust` changes it without a write the storage shows), so the follower takes it first. A write or a read that
+ * fails leaves the bots on the settings they had, and the owner is told.
  */
-function follow(follower: SettingsFollower, root: BotSessionRootPorts): void {
+function follow(follower: SettingsFollower, root: BotSessionRootPorts): () => void {
 	const main = root.settingsManager();
 	const reread = () =>
 		queueMicrotask(
 			() =>
 				void main
 					.flush()
-					.then(() => follower.settings.reload())
+					.then(() => {
+						if (realPathIdentity(root.cwd()) === follower.place)
+							follower.settings.setProjectTrusted(main.isProjectTrusted());
+						return follower.settings.reload();
+					})
 					.catch((error: unknown) =>
 						root.warn(
 							interfaceText().botTeam.botSettingsNotReread(
@@ -115,6 +127,7 @@ function follow(follower: SettingsFollower, root: BotSessionRootPorts): void {
 					),
 		);
 	follower.subscriptions.set(root, main.subscribeChanges(reread));
+	return reread;
 }
 
 /** The process's ports, answered by the root attached last; a host never outlives its last root, which answers its stop. */
@@ -159,7 +172,8 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 	const attached = shared;
 	const { host, roots, followers } = attached;
 	roots.push(ports);
-	for (const follower of followers) follow(follower, ports);
+	// What the attaching root's manager holds may be newer than what a loaded bot read: it is read now, not at the next change.
+	for (const follower of followers) follow(follower, ports)();
 	const sender = senderOf(attached, ports);
 	const listeners = new Set<() => void>();
 	let detached = false;
