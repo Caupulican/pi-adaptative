@@ -205,8 +205,8 @@ export class BotSessionHost {
 	private readonly loading = new Map<string, Promise<BotSessionEntry>>();
 	/** Bots whose owed work waits on something (no root works where it does, its session did not open), with what the owner was told. */
 	private readonly owedWorkTold = new Map<string, string>();
-	/** Bots opened for wakes their session refused, with what defined it then and those wakes (see `openIfOwed`). */
-	private readonly unrunRetried = new Map<string, string>();
+	/** Bots whose session refused a run at its start while it held wakes: what defined it and those wakes (see `openIfOwed`). */
+	private readonly refusedWakes = new Map<string, string>();
 	/** Sessions being closed: the next one of that bot opens once the file and the lock are free. */
 	private readonly closing = new Map<string, Promise<void>>();
 	private readonly listeners = new Set<(change: readonly string[]) => void>();
@@ -728,7 +728,18 @@ export class BotSessionHost {
 					// It runs the watches it arms and takes their wakes as parent inputs (idle starts a turn, running steers).
 					holdsOwnWatches: true,
 					// Every run is admitted at its start, whatever opened it: a wake's turn is held to the owner's rules too.
-					admitRun: () => this.admit(agentId, session?.model, definition, sender),
+					admitRun: () => {
+						try {
+							this.admit(agentId, session?.model, definition, sender);
+						} catch (error) {
+							// The wakes it holds are refused with this run, so they are not what reopens it on the same definition.
+							const wakes = sessionManager
+								.getPendingParentInputs("turn")
+								.map((input) => input.metadata.deliveryId);
+							if (wakes.length > 0) this.refusedWakes.set(agentId, `${definition.key} ${wakes.join(" ")}`);
+							throw error;
+						}
+					},
 					// System One as the main session runs it; its evidence stays in the bot's home.
 					systemOneHost,
 					systemOneEvidenceDir: botSystemOneEvidenceDir(agentDir, agentId),
@@ -973,11 +984,12 @@ export class BotSessionHost {
 			this.tellOwedWorkWaits(agentId, interfaceText().botTeam.botOwedWorkNoRoot(agentId, where));
 			return;
 		}
-		// Owed only wakes its session refused: opened once for what defines it now, not again at each idle close and host change.
-		const retry = !watching && waiting.length === 0 ? `${this.currentKey(record, sender)} ${unrun}` : undefined;
-		if (retry !== undefined && this.unrunRetried.get(agentId) === retry) return;
-		if (retry !== undefined) this.unrunRetried.set(agentId, retry);
+		// Owed only wakes its session refused at a run's start on what defines it now: not opened again until either changes.
+		const owed = !watching && waiting.length === 0 ? `${this.currentKey(record, sender)} ${unrun}` : undefined;
+		if (owed !== undefined && this.refusedWakes.get(agentId) === owed) return;
 		void this.open(agentId, sender).catch((error: unknown) => {
+			// An open that failed refused no wake: the next change asks again.
+			this.refusedWakes.delete(agentId);
 			if (!readRemoteBotHost(agentDir, agentId, this.holder)) notResumed(error);
 		});
 	}
