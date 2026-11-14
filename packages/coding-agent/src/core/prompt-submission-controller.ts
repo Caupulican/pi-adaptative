@@ -99,6 +99,8 @@ interface SubmissionLifecycle {
 }
 
 export interface PromptSubmissionControllerDeps extends OwnerGoalIntentPorts {
+	/** The session builds goal tools: only then is an owner's message judged for a goal it sets (`OwnerGoalIntent`). */
+	readonly buildsGoalTools: boolean;
 	readonly agent: Agent;
 	readonly sessionManager: Pick<
 		SessionManager,
@@ -232,11 +234,11 @@ export class PromptSubmissionController {
 	private foregroundPromptLeaseValue: ForegroundSubmissionLease | undefined;
 	private lastUserRequestValue = "";
 	private ownerSubmissionOrder = 0;
-	readonly ownerGoalIntent: OwnerGoalIntent;
+	readonly ownerGoalIntent: OwnerGoalIntent | undefined;
 
 	constructor(deps: PromptSubmissionControllerDeps) {
 		this.deps = deps;
-		this.ownerGoalIntent = new OwnerGoalIntent(deps);
+		this.ownerGoalIntent = deps.buildsGoalTools ? new OwnerGoalIntent(deps) : undefined;
 	}
 
 	get isPreparingSubmission(): boolean {
@@ -315,7 +317,7 @@ export class PromptSubmissionController {
 		this.deps.ownerRules.record(ownerTypedText(words), entryId);
 		// The owner's words reached the session: an operator blocker waited for exactly that.
 		if (this.deps.getOperatorBlocker() !== undefined) this.deps.setOperatorBlocker(undefined);
-		this.ownerGoalIntent.noteDelivered(words, entryId, this.deps.findLastAssistantMessage());
+		this.ownerGoalIntent?.noteDelivered(words, entryId, this.deps.findLastAssistantMessage());
 	}
 
 	/** A submission's input that ends there without being delivered, and why. */
@@ -721,9 +723,8 @@ export class PromptSubmissionController {
 		let routedTurnRouteDecision: RouteDecision | undefined;
 		// An exact toolkit hit the harness runs itself, with no model (see `runToolkitHit`).
 		let toolkitHit: string | undefined;
-		// Built and painted early (see below) so a later throw in this try block — e.g. no model
-		// selected/authenticated — can un-register it from earlyDisplayedUserMessages instead of
-		// leaking the reference forever.
+		// Built and painted early (see below) so a later throw in this try block (no model selected or authenticated) can
+		// un-register it from earlyDisplayedUserMessages instead of leaking the reference forever.
 		let userMessage: AgentMessage | undefined;
 		let promptMessage: AgentMessage | undefined;
 		let routingStarted = false;
@@ -755,9 +756,8 @@ export class PromptSubmissionController {
 				if (submissionSignal?.aborted || ("cancelled" in classified && classified.cancelled)) return;
 				this.noteJudged(lifecycle);
 			}
-			// Handle extension commands first. Programmatic extension messages may opt
-			// into command handling; if the agent is currently streaming, queue the
-			// command for the end of the run instead of sending it to the model.
+			// Handle extension commands first. Programmatic extension messages may opt into command handling; while the
+			// agent streams, the command is queued for the end of the run instead of being sent to the model.
 			if (processSlashCommands && text.startsWith("/")) {
 				if (this.deps.isStreaming() && options?.source === "extension" && options?.streamingBehavior) {
 					const commandName = this.deps.pendingQueue.parseCommandName(text);

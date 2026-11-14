@@ -1040,6 +1040,12 @@ export class RuntimeBuilder {
 		return this._toolDefinitions.get(name)?.definition;
 	}
 
+	/** Whether the session builds goal tools, the only way a goal it holds is followed and closed: none under a base override. */
+	buildsGoalTools({ allows } = this._createToolAccessPolicy()): boolean {
+		if (this.deps.getBaseToolsOverride()) return false;
+		return allows(LEGACY_GOAL_TOOL_NAME) || GOAL_LIFECYCLE_TOOL_NAMES.some(allows);
+	}
+
 	getPeerReviewController(): PeerReviewController | undefined {
 		return !this._mutationAdmissionClosed &&
 			!isWorkerSession() &&
@@ -1523,11 +1529,9 @@ export class RuntimeBuilder {
 		// A new generation decides its own omissions; names an earlier generation decided do not linger.
 		this._accessOmissions.clear();
 		const toolAccess = this._createToolAccessPolicy();
-		// Artifact-producing tools must not emit a "Full output: artifact tool-output:<id>" handle
-		// that nothing can resolve. If artifact_retrieve is explicitly excluded/blocked/outside
-		// an active allowlist, don't hand grep/find/run_toolkit_script an artifact store at all:
-		// they fall back to their bounded preview/truncation behavior, with no payload/meta files
-		// ever written and no retrieval promise made.
+		// Artifact-producing tools must not emit a "Full output: artifact tool-output:<id>" handle nothing can resolve: when
+		// artifact_retrieve is excluded, blocked or outside an allowlist, grep/find/run_toolkit_script get no artifact store
+		// and fall back to their bounded preview, with no payload or meta file written and no retrieval promised.
 		const toolArtifactStore =
 			!baseToolsOverride && toolAccess.allows("artifact_retrieve") ? this.deps.getToolArtifactStore() : undefined;
 		const resourceLoader = this.deps.getResourceLoader();
@@ -1842,10 +1846,8 @@ export class RuntimeBuilder {
 					this._baseToolDefinitions.set(definition.name, definition);
 				}
 			}
-			// Hoisted above the goal-tool registration (rather than declared only inside the
-			// worktreeSync-enabled block further below) so the SAME settings/deps factory backs both
-			// the goal->herdr lane-first dispatch dep (`createLaneWorktree`, immediately below) and the
-			// `worktree_sync` tool registration later in this method -- one source of truth, no drift.
+			// Declared above the goal tools so one settings/deps factory backs both the goal's lane-first dispatch
+			// (`createLaneWorktree`, below) and the `worktree_sync` tool registered later in this method.
 			const worktreeSyncSettings =
 				toolAccess.allows(LEGACY_GOAL_TOOL_NAME) || toolAccess.allows("worktree_sync")
 					? settingsManager.getWorktreeSyncSettings()
@@ -1859,9 +1861,7 @@ export class RuntimeBuilder {
 					integrationBranch: () => this.deps.integrationBranch?.() || undefined,
 					ports: this.deps.getWorktreeSyncEnginePorts(),
 				});
-			const shouldBuildGoalExecutor =
-				toolAccess.allows(LEGACY_GOAL_TOOL_NAME) || GOAL_LIFECYCLE_TOOL_NAMES.some(toolAccess.allows);
-			if (shouldBuildGoalExecutor) {
+			if (this.buildsGoalTools(toolAccess)) {
 				const goalClock = this.deps.goalClock;
 				const goalToolDefinition = createGoalToolDefinition({
 					getGoalState: () => this.deps.getGoalStateSnapshot(),
