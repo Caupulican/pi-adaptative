@@ -618,7 +618,8 @@ export class BotSessionHost {
 		if (existing) {
 			// A record changed since the session was built (by another process, say): an idle session is rebuilt on it.
 			if (this.isBusy(existing) || existing.profileKey === this.keyOf(record, existing.builtFor)) return existing;
-			await this.close(agentId);
+			// The close is waited for, failure included, where every close is: under the bound of the next open.
+			void this.close(agentId);
 			return this.open(agentId, sender);
 		}
 		const pending = this.loading.get(agentId);
