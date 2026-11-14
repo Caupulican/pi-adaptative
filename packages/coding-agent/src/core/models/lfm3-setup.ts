@@ -241,6 +241,8 @@ export async function setupLfm3(options: Lfm3SetupOptions): Promise<void> {
 			scopedModels: scoped,
 			routerPool: { source: "sdk_models", models: scoped },
 			systemOneEnabled: true,
+			// The trial only measures models (isolated completions and tool-call probes); it does none of the owner's duties.
+			standing: { kind: "vehicle" },
 		});
 		session = made.session;
 		const trialPool = session.getRouterCandidatePool();

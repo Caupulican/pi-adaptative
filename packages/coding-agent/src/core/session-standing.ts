@@ -1,5 +1,5 @@
 /**
- * Session standing: what one session is (a root, a worker, a bot's own session or an in-memory vehicle) and the one
+ * Session standing: what one session is (a root, a worker, a bot's own session or a vehicle) and the one
  * code-owned table of what each standing may do. session-role.ts answers the process question (is this process a
  * worker); this module answers the per-session one. Every session-scoped gate reads a named capability from
  * `sessionCapabilities`, so two sessions answer differently only through the table below.
@@ -14,7 +14,10 @@ export type SessionStanding =
 	| { readonly kind: "worker" }
 	/** A bot's own session. `agentId` is reserved for its per-bot state roots; no capability reads it yet. */
 	| { readonly kind: "bot"; readonly agentId: string }
-	/** An in-memory session another host drives: an away channel's third-party turn, an away parent's model calls. */
+	/**
+	 * A session a host drives for its own work, with no owner duty: an away channel's third-party turn, an away
+	 * parent's model calls, a model fitness trial (`lfm3-setup.ts`).
+	 */
 	| { readonly kind: "vehicle" };
 
 export interface SessionCapabilities {

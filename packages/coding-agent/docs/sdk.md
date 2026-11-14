@@ -718,7 +718,7 @@ await createAgentSession({ standing: { kind: "worker" } });
 // A bot's own session: holds its own watches (routine scope "own-watches"), nothing of the root's
 await createAgentSession({ standing: { kind: "bot", agentId: "reviewer" } });
 
-// An in-memory session another host drives (an away channel's turn)
+// A session a host drives for its own work, with no owner duty (an away channel's turn, a model fitness trial)
 await createAgentSession({ standing: { kind: "vehicle" } });
 ```
 

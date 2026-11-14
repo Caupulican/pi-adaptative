@@ -30,6 +30,7 @@
 
 ### Fixed
 
+- The LFM3 setup's fitness trial session no longer runs as the owner's root session: it opened the owner's learning state and the owner's memory as a root does (the history index, and under ICM the knowledge store and the project chat) and reported the checkout's GitHub origin pin, though it only measures models (isolated completions and tool-call probes). It is now a vehicle (`standing: { kind: "vehicle" }`), which does none of the owner's duties.
 - The autonomy status of a bot's own session no longer says routines do not run in it (a bot runs the watches it arms): a session without a routine store reports the store as not loaded unless it holds no routines at all (a worker), which it now says in those words, in English and pt-BR. The reasons that called a session a "child session" (knowledge collection, history recall, the history hierarchy, a worker's memory read) now name what the session lacks, the owner's memory or history; the reason codes are unchanged.
 - A bot's work held back because its model could not run is no longer opened again (and refused again) when you switch the interface language: the recorded refusal was compared by its words in the owner's language, so the same cause read as cleared. It is now compared by the rule that refused it.
 - A bot notice that reached its chat but whose unread mark could not be written no longer warns that it "could not be kept in its chat": that warning now says the roster could not mark it unread, and every open chat still redraws with the notice.
