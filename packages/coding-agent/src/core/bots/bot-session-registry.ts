@@ -10,6 +10,7 @@
  * no bots: it gets a host of its own that no other session shares.
  */
 import { resolve } from "node:path";
+import { interfaceText } from "../language/interface-text.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import {
 	type BotSender,
@@ -72,11 +73,25 @@ function senderOf(shared: AttachedRoots, root: BotSessionRootPorts): BotSender {
 
 /**
  * Reads the storage again after each change `root`'s manager announces. A change is announced before its write is
- * queued, so the write is awaited from the next microtask, then the settings are read from the storage it reached.
+ * queued, so the write is awaited from the next microtask, then the settings are read from the storage it reached. A
+ * write or a read that fails leaves the bots on the settings they had, and the owner is told.
  */
 function follow(follower: SettingsFollower, root: BotSessionRootPorts): void {
 	const main = root.settingsManager();
-	const reread = () => queueMicrotask(() => void main.flush().then(() => follower.settings.reload()));
+	const reread = () =>
+		queueMicrotask(
+			() =>
+				void main
+					.flush()
+					.then(() => follower.settings.reload())
+					.catch((error: unknown) =>
+						root.warn(
+							interfaceText().botTeam.botSettingsNotReread(
+								error instanceof Error ? error.message : String(error),
+							),
+						),
+					),
+		);
 	follower.subscriptions.set(root, main.subscribeChanges(reread));
 }
 

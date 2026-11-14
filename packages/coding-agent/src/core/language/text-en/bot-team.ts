@@ -67,6 +67,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: what defines its session changed since it was built (its record, its profile, a model pin or the worker policy), so this run was not started on the old one. Its session is rebuilt once it is idle; message it again.`,
 	botRunsAsWorker: (agentId: string) =>
 		`Bot ${agentId} runs as a worker (a leader, a bot a leader made, or a profile only a worker's run holds), not in a session of its own.`,
+	botSettingsNotReread: (reason: string) =>
+		`A settings change did not reach the bots' sessions (${reason}); they keep the settings they had until the next change.`,
 	botSoulRefused: (agentId: string, reason: string) =>
 		`Bot ${agentId} was not started: ${reason}. Edit its soul with /bot soul ${agentId}.`,
 	/** Another process holds the bot's session: two processes would write one conversation. */

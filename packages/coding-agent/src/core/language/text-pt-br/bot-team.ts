@@ -72,6 +72,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: o que define a sessão dele mudou desde que ela foi criada (o registro, o perfil, um modelo fixado ou a política de workers), então esta execução não foi iniciada na sessão antiga. A sessão é refeita quando ficar ociosa; envie a mensagem de novo.`,
 	botRunsAsWorker: (agentId: string) =>
 		`O bot ${agentId} roda como worker (um líder, um bot que um líder criou ou um perfil que só a execução de um worker comporta), não numa sessão própria.`,
+	botSettingsNotReread: (reason: string) =>
+		`Uma mudança nas configurações não chegou às sessões dos bots (${reason}); elas mantêm as configurações que tinham até a próxima mudança.`,
 	botSoulRefused: (agentId: string, reason: string) =>
 		`O bot ${agentId} não foi iniciado: ${reason}. Edite o soul com /bot soul ${agentId}.`,
 	botSessionHeld: (agentId: string, pid: number, sessionId?: string) =>
