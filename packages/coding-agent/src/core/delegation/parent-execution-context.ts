@@ -241,6 +241,11 @@ export interface ParentExecutionPolicy {
 	/** Record a model a worker ran out of quota, where root's billing failover records its own. */
 	markModelExhausted?(model: Model<Api>, retryAfterMs?: number): void;
 	/**
+	 * Whether this session lends its workers memory reads: it holds the owner's history or the owner's memory. A
+	 * worker of a session that holds neither is offered no memory read.
+	 */
+	servesLaneMemory(): boolean;
+	/**
 	 * A fresh read-only memory port for one lane; the handles it admits never reach another lane. Reads are
 	 * sized against `capacity`: the receiving lane's own request, never the root model's.
 	 */

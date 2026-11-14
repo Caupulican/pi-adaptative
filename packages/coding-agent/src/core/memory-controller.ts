@@ -57,7 +57,6 @@ import {
 	type MemoryProvider as ContextMemoryProvider,
 	DEFAULT_EXTERNAL_MEMORY_EGRESS_POLICY,
 	DEFAULT_LOCAL_MEMORY_EGRESS_POLICY,
-	type MemorySearchResult,
 } from "./context/memory-provider-contract.ts";
 import { type MemoryRetrievalReport, retrieveMemoryForContext } from "./context/memory-retrieval.ts";
 import {
@@ -127,6 +126,33 @@ import type { KnowledgeScope } from "./memory/knowledge-record.ts";
 import { KnowledgeStore } from "./memory/knowledge-store.ts";
 import type { KnowledgeReadSource } from "./memory/knowledge-tool.ts";
 import { type LaneKnowledgeSelection, projectLaneKnowledge } from "./memory/lane-knowledge-view.ts";
+import {
+	LANE_CHAT_OVER_ROOM_TEXT,
+	LANE_EXPANSION_OVER_ROOM_TEXT,
+	LANE_FRONTIER_BUDGET_SHARE,
+	LANE_FRONTIER_HEADING,
+	LANE_HANDLE_HINT,
+	LANE_MEMORY_UNAVAILABLE_TEXT,
+	LANE_MIN_SOURCE_PAGE_BYTES,
+	LANE_NO_HISTORY_TEXT,
+	LANE_NO_MEMORY_TEXT,
+	LANE_RECORD_SEPARATOR,
+	LANE_SOURCE_OVER_ROOM_TEXT,
+	LANE_STANDING_BUDGET_SHARE,
+	LANE_STANDING_NOTE,
+	LANE_SUMMARY_SOURCE_LABEL,
+	LANE_WRAPPER,
+	type LaneMemoryCandidate,
+	laneCandidate,
+	laneConstraintText,
+	laneHistoryStatus,
+	laneOmissionNote,
+	laneRecordReserve,
+	laneSourceRefusal,
+	laneSummaryCandidate,
+	MAX_ADMITTED_LANE_SOURCES,
+	TRANSCRIPT_SOURCE_LABEL,
+} from "./memory/lane-memory-records.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
 import type { MemoryStanding } from "./memory/memory-provider.ts";
 import {
@@ -171,14 +197,12 @@ import {
 	utf8ByteLength,
 } from "./memory/transcript-memory-contracts.ts";
 import {
-	describeSummaryReference,
 	expandTranscriptNode,
 	openTranscriptSource,
 	reasonSentence,
 	TRANSCRIPT_SOURCE_PAGE_BYTES,
 	type TranscriptNodeExpander,
 	type TranscriptSummaryLookup,
-	type TranscriptSummaryReference,
 } from "./memory/transcript-source-tools.ts";
 import { TranscriptSummaryStore } from "./memory/transcript-summary-store.ts";
 import type {
@@ -329,54 +353,6 @@ interface TurnRetrieval {
 	report: MemoryRetrievalReport;
 }
 
-/** The tier-composer source label of a transcript candidate (`memory:<providerId>`). */
-const TRANSCRIPT_SOURCE_LABEL = `memory:${TRANSCRIPT_MEMORY_PROVIDER_ID}`;
-
-/**
- * Why a delegated lane's conversation history could not be searched, or "" when it could (including with no
- * hit). A failure is stated, never rendered as an empty page; hits themselves are admitted as whole records.
- */
-function laneHistoryStatus(report: MemoryRetrievalReport): string {
-	const providerReport = report.providerReports.find((entry) => entry.providerId === TRANSCRIPT_MEMORY_PROVIDER_ID);
-	// The provider's own wording, bounded to the cap every other recall diagnostic reason carries.
-	const bounded = (text: string) => boundedTextPreview(text, TRANSCRIPT_RECALL_MAX_ERROR_CHARS);
-	if (providerReport?.status === "failed") {
-		return `Conversation history was not searched (${bounded(providerReport.error ?? "unknown failure")}).`;
-	}
-	if (providerReport?.status === "blocked") {
-		return `Conversation history was not searched (blocked: ${bounded(providerReport.rejectionReasons.join(", "))}).`;
-	}
-	return "";
-}
-
-/** The stated reason a delegated lane's memory read attached nothing, from the budget owner's own reason code. */
-function laneConstraintText(reason: string | undefined, capacityKnown: boolean): string {
-	const detail =
-		!capacityKnown || reason === "missing_context_window"
-			? "this worker's request capacity is unknown (it has sent no request yet, or its model declares no context window)"
-			: reason === "no_token_allowance"
-				? "this worker has no token allowance left"
-				: reason === "no_context_headroom"
-					? "this worker's request has no room left in its context window"
-					: reason === "memory_block_cannot_fit_minimum_line"
-						? "the room this worker has left cannot hold one memory line"
-						: `the memory budget is disabled (${reason ?? "unspecified"})`;
-	return `Memory is constrained: ${detail}, so no memory was attached. Read project files directly, or call memory_read again when the worker has more room.`;
-}
-
-/** What one whole record takes out of a lane's allowance: its text, the blank line that joins it, and its lines. */
-function laneRecordReserve(text: string): { bytes: number; estimatedTokens: number; lines: number } {
-	return {
-		bytes: utf8ByteLength(text) + utf8ByteLength(LANE_RECORD_SEPARATOR),
-		estimatedTokens: estimateTokensFromText(text),
-		lines: estimateLineCount(text) + 1,
-	};
-}
-
-function laneOmissionNote(parts: readonly string[]): string {
-	return `[Not attached, over this worker's remaining context room: ${parts.join("; ")}. Call memory_read again with a narrower query.]`;
-}
-
 function emptyMemoryRetrievalReport(maxResults: number): MemoryRetrievalReport {
 	return { request: { query: "", maxResults }, providerReports: [], results: [], contextItems: [] };
 }
@@ -390,42 +366,6 @@ const ENABLED_EXTERNAL_MEMORY_EGRESS_POLICY = {
 
 const MAX_PRE_COMPRESS_MEMORY_CHARS = 4_000;
 const MAX_REFLECTION_OKF_CHARS = 12_000;
-/** Share of a delegated lane's memory allowance standing memory may take; the query-relevant records get the rest. */
-const LANE_STANDING_BUDGET_SHARE = 0.5;
-/** Share of what remains after standing memory that the history frontier may take. */
-const LANE_FRONTIER_BUDGET_SHARE = 0.5;
-const LANE_FRONTIER_HEADING =
-	"History frontier (summaries of earlier conversation; pass a txn: handle as ref to expand one):";
-const LANE_HANDLE_HINT =
-	"Pass a bracketed handle back as ref: a tx: handle opens that source's exact text, a txn: handle expands that summary one level.";
-const LANE_STANDING_NOTE = "[Read-only snapshot for a delegated worker.]";
-const LANE_WRAPPER = wrapUntrustedText("", "worker-memory", { nonce: "0".repeat(32) });
-const LANE_RECORD_SEPARATOR = "\n\n";
-const LANE_NO_MEMORY_TEXT = "No relevant standing memory was found.";
-const LANE_NO_HISTORY_TEXT = "No matching conversation history was found.";
-const LANE_MEMORY_UNAVAILABLE_TEXT =
-	"Memory is not available in this session (it does not hold the owner's history, or memory failed to initialize or has shut down). Read project files directly.";
-/**
- * A worker source read's refusal: the typed `memory_source_<status>` token unchanged, the reason rendered by the
- * one history refusal renderer, so a worker refusal reads like the root's.
- */
-function laneSourceRefusal(status: string, reason: string): WorkerMemorySourceAnswer {
-	return { ok: false, status, text: `memory_source_${status}: ${reasonSentence(reason)}` };
-}
-
-/** The tier-composer source label of an approved summary covering a lane's history hits. */
-const LANE_SUMMARY_SOURCE_LABEL = "memory:history-summary";
-/** Transcript sources one delegated lane may hold open at a time; the oldest admission is dropped first. */
-const MAX_ADMITTED_LANE_SOURCES = 512;
-/** The smallest source page worth delivering to a lane; below it the lane is told it has no room instead. */
-const LANE_MIN_SOURCE_PAGE_BYTES = 256;
-const LANE_SOURCE_OVER_ROOM_TEXT =
-	"[Not attached: even a minimal page of this source does not fit this worker's remaining context room. Call memory_read with this ref again when the worker has more room.]";
-const LANE_EXPANSION_OVER_ROOM_TEXT =
-	"[Not attached: this summary's expansion does not fit this worker's remaining context room. Call memory_read with this ref again when the worker has more room.]";
-const LANE_CHAT_OVER_ROOM_TEXT =
-	"[Not attached: this chat page does not fit this worker's remaining context room. Call memory_read with this zoom again when the worker has more room.]";
-
 /**
  * History reads, zooms and summary lookups under disabled memory retrieval: a typed policy refusal, never an
  * empty success, and the history backend is never touched (no demand start, no read, no egress).
@@ -442,27 +382,6 @@ const POLICY_BLOCKED_HISTORY_EXPANDER: TranscriptNodeExpander = {
 const POLICY_BLOCKED_SUMMARY_LOOKUP: TranscriptSummaryLookup = {
 	summariesFor: async () => ({ status: "forbidden", reason: MEMORY_RETRIEVAL_DISABLED_REASON }),
 };
-
-/**
- * One approved summary covering a lane's history hits, as a whole record: the full approved text, or, when that
- * cannot fit the lane's room, its handle and coverage alone (still expandable). Ranked with the best hit it covers.
- */
-function laneSummaryCandidate(
-	summary: TranscriptSummaryReference,
-	hitScores: ReadonlyMap<string, number>,
-): LaneMemoryCandidate {
-	// The root's own heading for the record, so a root read and a worker read report it the same way.
-	const heading = describeSummaryReference(summary);
-	return {
-		id: summary.handle,
-		sourceHandles: [summary.handle, ...summary.covers],
-		tier: "evidence_pointer",
-		sourceLabel: LANE_SUMMARY_SOURCE_LABEL,
-		summary: `${heading}\n${summary.text}`,
-		pointerSummary: `${heading} (summary text omitted: over this worker's remaining room; pass the handle as ref to expand it)`,
-		score: Math.max(0, ...summary.covers.map((handle) => hitScores.get(handle) ?? 0)),
-	};
-}
 
 /** The pre-compression handoff: each provider's insight is a whole record; one that does not fit is left out and counted. */
 function boundPreCompressMemory(insights: readonly string[]): string {
@@ -613,10 +532,6 @@ interface LaneMemorySourceRead {
 	readonly summaries: { candidates: LaneMemoryCandidate[]; status: string };
 	readonly evidence: readonly MemoryReadEvidence[];
 	readonly standing: FileStoreReadSnapshot | undefined;
-}
-
-interface LaneMemoryCandidate extends MemoryTierCandidate {
-	readonly sourceHandles: readonly string[];
 }
 
 /** A memory mutation or lifecycle transition invalidated a delegated read before it could be used. */
@@ -982,6 +897,16 @@ export class MemoryController {
 	/** Whether `generation` serves history reads (either system): live, in a session that owns the owner's history. */
 	private _historyAvailable(generation: number): boolean {
 		return this._generationLive(generation) && this.deps.standing.ownsHistory;
+	}
+
+	/** Whether this session lends its workers memory reads: it holds the owner's history or the owner's memory. */
+	servesLaneMemory(): boolean {
+		return this.deps.standing.ownsHistory || this.deps.standing.readsOwnerMemory;
+	}
+
+	/** Whether `generation` serves a lane's memory read: live, in a session that lends its workers memory reads. */
+	private _laneMemoryServed(generation: number): boolean {
+		return this._generationLive(generation) && this.servesLaneMemory();
 	}
 
 	/** The live memory manager. Callers reach prefetch / tool-definitions / markers / shutdown through it. */
@@ -2257,8 +2182,11 @@ export class MemoryController {
 	 * and checks its own request revision. Completed reads are discarded, so a later call observes fresh external
 	 * state. A lane whose capacity is unknown or exhausted gets a stated constraint, never an assumption of room.
 	 * OKF lanes also get standing memory, extension recall and the frontier; an ICM lane gets the history query
-	 * and the approved summaries covering its hits. `deadlineAt` belongs to this consumer; each physical source
-	 * flight has its own fixed deadline. Native-only reads exclude opaque extension callbacks.
+	 * and the approved summaries covering its hits. Each source is read by its own standing: OKF's and selected
+	 * knowledge where the session reads the owner's memory, history where it holds the owner's history; a session
+	 * that holds neither (`servesLaneMemory`) states that memory is unavailable. `deadlineAt` belongs to this
+	 * consumer; each physical source flight has its own fixed deadline. Native-only reads exclude opaque extension
+	 * callbacks.
 	 */
 	readMemorySnapshotForLane(
 		query: string,
@@ -2270,7 +2198,7 @@ export class MemoryController {
 		assertMemoryReadActive({ signal: options.signal, deadlineAt });
 		const generation = this._memoryGeneration;
 		const revision = this._memoryContentRevision;
-		if (!this._historyAvailable(generation)) {
+		if (!this._laneMemoryServed(generation)) {
 			// A memory switch in progress is a read to retry once it settles, not an absence of memory.
 			if (this._transitioning && this._shutdownPromise === undefined) {
 				return Promise.reject(new LaneMemorySnapshotStaleError());
@@ -2280,7 +2208,7 @@ export class MemoryController {
 					generation,
 					revision,
 					LANE_MEMORY_UNAVAILABLE_TEXT,
-					() => !this._historyAvailable(generation),
+					() => !this._laneMemoryServed(generation),
 				),
 			);
 		}
@@ -2306,7 +2234,7 @@ export class MemoryController {
 					revision,
 					laneConstraintText(budget.reason, lane !== undefined),
 					() =>
-						this._historyAvailable(generation) &&
+						this._laneMemoryServed(generation) &&
 						legacy === this._legacyMemoryEnabled() &&
 						isDeepStrictEqual(this._laneMemoryBudget(settings.maxResults, capacity()), budget),
 				),
@@ -2377,8 +2305,11 @@ export class MemoryController {
 			const oldest = admitted.keys().next().value;
 			if (oldest !== undefined) admitted.delete(oldest);
 		};
-		const current = (admission: Admission): boolean =>
-			this._historyAvailable(admission.generation) && admission.policy === this._retrievalPolicyKey();
+		// A search stays current while the session lends memory reads; a history source or zoom while it holds history.
+		const current = (admission: Admission, kind: "search" | "source" | "navigation" = "source"): boolean =>
+			(kind === "search"
+				? this._laneMemoryServed(admission.generation)
+				: this._historyAvailable(admission.generation)) && admission.policy === this._retrievalPolicyKey();
 		// A source page or an expansion is delivered only as a whole record inside the receiving lane's allowance,
 		// resolved by the same budget owner as the snapshot; what cannot fit is a stated constraint, never cut text.
 		const laneBudget = () =>
@@ -2407,7 +2338,7 @@ export class MemoryController {
 					text,
 					evidence,
 					disposition,
-					isCurrent: () => current(admission),
+					isCurrent: () => current(admission, kind),
 					flights: this._laneMemoryReads,
 				}),
 			);
@@ -2902,6 +2833,11 @@ export class MemoryController {
 		await host.dispose();
 	}
 
+	/** Whether an OKF lane read reads OKF's sources (recall, documents, standing memory): the owner's memory, not history. */
+	private _laneReadsOkf(legacy: boolean): boolean {
+		return legacy && this.deps.standing.readsOwnerMemory;
+	}
+
 	/** Source freshness never depends on a consuming lane's later provider request or capacity. */
 	private _laneSourceCurrent(input: {
 		generation: number;
@@ -2910,7 +2846,7 @@ export class MemoryController {
 		legacy: boolean;
 	}): boolean {
 		return (
-			this._historyAvailable(input.generation) &&
+			this._laneMemoryServed(input.generation) &&
 			input.legacy === this._legacyMemoryEnabled() &&
 			input.revision === this._memoryContentRevision &&
 			input.policy === this._retrievalPolicyKey()
@@ -2930,24 +2866,6 @@ export class MemoryController {
 		if (!this._laneSourceCurrent(input) || input.capacity()?.revision !== input.laneRevision) return false;
 		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
 		return isDeepStrictEqual(this._laneMemoryBudget(settings.maxResults, input.capacity()), input.budget);
-	}
-
-	/** A delegated lane's search hit as a composer candidate; OKF documents also carry a whole pointer form. */
-	private _laneCandidate(result: MemorySearchResult, tier: MemoryTierCandidate["tier"]): LaneMemoryCandidate {
-		const { item } = result;
-		const heading = `[OKF ${item.title ?? item.id}] ${item.summary}`;
-		const okf = tier !== "evidence_pointer";
-		return {
-			id: item.id,
-			sourceHandles: item.providerId === TRANSCRIPT_MEMORY_PROVIDER_ID ? item.refs.map((ref) => ref.itemId) : [],
-			tier,
-			sourceLabel: `memory:${item.providerId}`,
-			summary: okf ? `${heading}\n${item.content ?? ""}` : item.summary,
-			...(okf ? { pointerSummary: `${heading} (full document omitted: over this worker's remaining room)` } : {}),
-			score: result.score,
-			...(item.stale !== undefined ? { stale: item.stale } : {}),
-			...(item.conflict !== undefined ? { conflict: item.conflict } : {}),
-		};
 	}
 
 	/** Raw local acquisition is the only shared work; composition and grants belong to individual consumers. */
@@ -2970,6 +2888,7 @@ export class MemoryController {
 		if (!this._laneSourceCurrent(input)) throw new LaneMemorySnapshotStaleError();
 		const evidence: MemoryReadEvidence[] = [];
 		const readContext = { ...context, observe: (item: MemoryReadEvidence) => evidence.push(item) };
+		const readsOkf = this._laneReadsOkf(input.legacy);
 		const retrievalOptions = {
 			createdAtTurn: input.turnIndex,
 			maxResults: input.maxResults,
@@ -2977,8 +2896,8 @@ export class MemoryController {
 			readContext,
 		};
 		const tasks = await Promise.allSettled([
-			input.legacy && input.admission !== "native-only" ? this.prefetchRecall(input.query) : Promise.resolve(""),
-			input.legacy
+			readsOkf && input.admission !== "native-only" ? this.prefetchRecall(input.query) : Promise.resolve(""),
+			readsOkf
 				? retrieveMemoryForContext(
 						[this._getMemoryOkfProvider()],
 						{ query: input.query, maxResults: input.maxResults },
@@ -2990,7 +2909,7 @@ export class MemoryController {
 				{ query: input.query, maxResults: input.maxResults },
 				retrievalOptions,
 			),
-			input.legacy && input.admission === "native-only"
+			readsOkf && input.admission === "native-only"
 				? this._fileStoreWriter?.readSystemPromptSnapshot(readContext)
 				: Promise.resolve(undefined),
 		] as const);
@@ -3006,7 +2925,7 @@ export class MemoryController {
 			: await this._laneSummaryReferences(input.generation, history.value, input.maxResults, readContext);
 		assertMemoryReadActive(context);
 		if (!this._laneSourceCurrent(input)) throw new LaneMemorySnapshotStaleError();
-		if (input.legacy && input.admission !== "native-only") {
+		if (readsOkf && input.admission !== "native-only") {
 			// Opaque extension callbacks retain their ordinary behavior but cannot certify native read provenance.
 			evidence.push(INCOMPLETE_MEMORY_READ);
 		}
@@ -3093,10 +3012,10 @@ export class MemoryController {
 		assertMemoryReadActive(context);
 		if (!this._laneReadCurrent(input)) throw new LaneMemorySnapshotStaleError();
 		const evidence = [...sourceEvidence];
-
+		const readsOkf = this._laneReadsOkf(input.legacy);
 		const candidates: LaneMemoryCandidate[] = [
-			...(okfReport?.results ?? []).map((result) => this._laneCandidate(result, "long_term")),
-			...historyReport.results.map((result) => this._laneCandidate(result, "evidence_pointer")),
+			...(okfReport?.results ?? []).map((result) => laneCandidate(result, "long_term")),
+			...historyReport.results.map((result) => laneCandidate(result, "evidence_pointer")),
 			...summaries.candidates,
 		];
 		const lifecycleText = lifecycleRecall.trim();
@@ -3125,7 +3044,7 @@ export class MemoryController {
 			lines: 2,
 		});
 		const worstOmissionNote = laneOmissionNote([
-			...(input.legacy ? ["standing memory"] : []),
+			...(readsOkf ? ["standing memory"] : []),
 			...(input.knowledgeReferences.length ? ["selected knowledge"] : []),
 			`${candidates.length} retrieved record(s)`,
 		]);
@@ -3169,7 +3088,7 @@ export class MemoryController {
 		else if (input.knowledgeReferences.length > 0) omitted.push("selected knowledge");
 		// Standing memory takes at most half of the allowance, and only as the whole block the provider fitted.
 		const standingBudget = shareOfMemoryPromptBudget(remaining, LANE_STANDING_BUDGET_SHARE);
-		const standingRaw = input.legacy
+		const standingRaw = readsOkf
 			? (input.options.admission === "native-only"
 					? (standing?.render(standingBudget.enabled ? standingBudget : remaining) ?? "")
 					: this._memoryManager.buildSystemPromptBlockFresh(standingBudget.enabled ? standingBudget : remaining)
@@ -3248,7 +3167,7 @@ export class MemoryController {
 			return this._laneMemorySnapshot(
 				input.generation,
 				input.revision,
-				input.legacy ? LANE_NO_MEMORY_TEXT : LANE_NO_HISTORY_TEXT,
+				readsOkf ? LANE_NO_MEMORY_TEXT : LANE_NO_HISTORY_TEXT,
 				() => this._laneReadCurrent(input) && knowledge.isCurrent(),
 				evidence,
 			);

@@ -154,21 +154,33 @@ export function capabilitiesUnderCeiling(
 
 /**
  * What the session that starts a worker lends where its plan is built: the private harness paths every worker is denied,
- * the host's read root and the session's ceiling.
+ * the host's read root, the session's ceiling and whether it lends memory reads (retrieval on, in a session that holds
+ * the owner's history or memory).
  */
 export interface WorkerHostScope {
 	readonly deniedPaths: readonly string[];
 	readonly readRoot?: string;
 	readonly parentCeiling: WorkerCeiling;
+	readonly memoryEnabled: boolean;
+}
+
+/** The members of the session that starts a worker its host scope is read from (`ParentExecutionContext` members). */
+export interface WorkerScopeHost {
+	getCwd(): string;
+	getAgentDir(): string;
+	workerReadRoot?(): string;
+	workerCeiling(): WorkerCeiling;
+	servesLaneMemory(): boolean;
+	getSettingsManager(): { getMemoryRetrievalSettings(): { enabled: boolean } };
 }
 
 /**
  * The host's scope over a worker that runs in `executionCwd`: the private paths denied to every lane, the read root a host
- * confines every worker to and the ceiling of the session that starts it, read now and moved into the worker's lane when
- * `lanes` places it in one.
+ * confines every worker to, the ceiling of the session that starts it, read now and moved into the worker's lane when
+ * `lanes` places it in one, and its memory lending.
  */
 export function workerHostScope(
-	host: { getCwd(): string; getAgentDir(): string; workerReadRoot?(): string; workerCeiling(): WorkerCeiling },
+	host: WorkerScopeHost,
 	executionCwd: string | undefined,
 	lanes: WorkerLanePlacement | undefined,
 ): WorkerHostScope {
@@ -179,5 +191,6 @@ export function workerHostScope(
 		deniedPaths: getPrivateLaneDeniedPaths(host.getCwd(), host.getAgentDir()),
 		...(host.workerReadRoot ? { readRoot: host.workerReadRoot() } : {}),
 		parentCeiling: move && ceiling !== "unbounded" ? ceilingInLane(ceiling, move) : ceiling,
+		memoryEnabled: host.getSettingsManager().getMemoryRetrievalSettings().enabled && host.servesLaneMemory(),
 	};
 }

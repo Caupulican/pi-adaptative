@@ -129,6 +129,7 @@ import {
 import type { WorkerResponseObservation } from "./delegation/worker-attempt-executor.ts";
 import type { WorkerDelegationRequest } from "./delegation/worker-delegation-request.ts";
 import { createWorkerEdgePolicy } from "./delegation/worker-edge-policy.ts";
+import { createWorkerMemoryAccess } from "./delegation/worker-memory-access.ts";
 import type { WorkerTerminalHandoffRecord } from "./delegation/worker-notification-coordinator.ts";
 import { createWorkerRequestPlanner } from "./delegation/worker-request-planner.ts";
 import { createWorkerSettlementPolicy } from "./delegation/worker-settlement-policy.ts";
@@ -1304,9 +1305,7 @@ export class AgentSession {
 			subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
 			notifyParentSession: (customType, text, origin) =>
 				this._messageDelivery.steerSessionNotice(customType, text, origin?.parentWriteId),
-			createLaneMemoryBroker: (capacity, references) => this._memory.createLaneMemoryBroker(capacity, references),
-			captureKnowledgeGrant: (references) => this._memory.captureKnowledgeGrant(references),
-			getHandoffPersonaGuidance: () => this._memory.getHandoffPersonaGuidance(),
+			...createWorkerMemoryAccess(() => this._memory),
 			getContextGcStoreDir: () => this._pipeline.contextGcStorageDir(),
 			getArtifactStore: () => this._getToolArtifactStore(),
 			...createWorkerSkillAccess(this._skillVault),

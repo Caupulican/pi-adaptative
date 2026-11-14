@@ -368,6 +368,8 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 					),
 				// System One is off away: no route judge, reviews or settlement, and no fitness gate.
 				isSystemOneEnabled: () => false,
+				// Its parent is the root, which lends memory reads; a run that reads it waits for its session (below).
+				servesLaneMemory: () => true,
 				createLaneMemoryBroker: () => {
 					throw new AwayParentWriteRefusal(
 						"A parent opened away has no memory: a run that needs it waits for its session.",

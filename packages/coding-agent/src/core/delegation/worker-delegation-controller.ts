@@ -3094,7 +3094,6 @@ export class WorkerDelegationController {
 			cwd: this.deps.getCwd(),
 			executionCwd,
 			foregroundBudget: envelopeCostBudget(this.deps.getCapabilityEnvelope()),
-			memoryEnabled: this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
 			workerToolAdapterNames: this.workerToolAdapterNames(),
 			...workerHostScope(this.deps, executionCwd, this.laneIsolation),
 		});
