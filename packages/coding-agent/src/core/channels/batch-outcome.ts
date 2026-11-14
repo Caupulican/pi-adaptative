@@ -23,7 +23,6 @@ function messageText(message: AgentMessage): string | undefined {
 	return texts.join("\n");
 }
 
-/** How a delivered batch's turn ended, read from the session branch. */
 /** Why a delivered conversation got no reply: never delivered, a decisive turn of someone else came first, or no answer. */
 export type UnansweredReason =
 	| "not_delivered"
@@ -34,6 +33,7 @@ export type UnansweredReason =
 	| "empty_answer"
 	| "no_answer";
 
+/** How a delivered batch's turn ended, read from the session branch. */
 export type BatchOutcome =
 	| { readonly kind: "waiting"; readonly usd: number }
 	| { readonly kind: "answered"; readonly text: string; readonly usd: number }
