@@ -3,7 +3,7 @@ import { interfaceText } from "./language/interface-text.ts";
 export type BillingClass = "subscription" | "metered";
 
 export type BillingFailoverAction =
-	| { action: "failover"; to: { provider: string; modelId: string }; notice: string }
+	| { action: "failover"; to: { provider: string; modelId: string } }
 	| { action: "halt_ask"; notice: string };
 
 export interface BillingFailoverInput {
@@ -36,20 +36,12 @@ export function decideBillingFailover(input: BillingFailoverInput): BillingFailo
 		input.hopResolvesWithAuth &&
 		!input.hopExhausted
 	) {
-		return {
-			action: "failover",
-			to: { provider: failedModel.provider, modelId: providerDefaultModelId },
-			notice: notices.switched(failedModel.id, `${failedModel.provider}/${providerDefaultModelId}`),
-		};
+		return { action: "failover", to: { provider: failedModel.provider, modelId: providerDefaultModelId } };
 	}
 	// A subscription that ran out has no spend to protect: the work moves to the router's choice. A metered
 	// balance still halts, because moving it to another paid model is a spending decision the owner makes.
 	if (input.billingClass === "subscription" && subscriptionHop && input.fallback) {
-		return {
-			action: "failover",
-			to: input.fallback,
-			notice: notices.switched(failedModel.id, `${input.fallback.provider}/${input.fallback.modelId}`),
-		};
+		return { action: "failover", to: input.fallback };
 	}
 	return { action: "halt_ask", notice: notices.halted(failedRef) };
 }

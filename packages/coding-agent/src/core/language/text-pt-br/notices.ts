@@ -82,7 +82,6 @@ export const NOTICES = {
 	sessionProcessesStopped: (count: number, detail: string) =>
 		`Esta sessão fechou com ${count} processo(s) iniciado(s) pelos comandos dela ainda em execução; eles foram encerrados (${detail}). Os comandos dela não deixam nada rodando depois que ela fecha.`,
 	billingFailover: {
-		switched: (failed: string, model: string) => `${failed} atingiu a cota — trocado para ${model}`,
 		continuing: (failed: string, model: string) => `${failed} atingiu a cota — seguindo em ${model}`,
 		halted: (model: string) =>
 			`O provedor atingiu a cota/limite de ${model}: troque de modelo (/model), espere a janela do limite ou reenvie para tentar de novo`,

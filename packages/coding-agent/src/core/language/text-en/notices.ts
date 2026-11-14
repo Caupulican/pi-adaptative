@@ -98,7 +98,6 @@ export const NOTICES = {
 	 * a `provider/model` reference.
 	 */
 	billingFailover: {
-		switched: (failed: string, model: string) => `${failed} quota reached — switched to ${model}`,
 		continuing: (failed: string, model: string) => `${failed} quota reached — continuing on ${model}`,
 		halted: (model: string) =>
 			`Provider quota/limit reached for ${model}: switch models (/model), wait for the limit window, or re-send to retry`,
