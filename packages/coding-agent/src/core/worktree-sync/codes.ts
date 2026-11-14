@@ -77,6 +77,11 @@ export interface LaneRegistration {
 	laneKey: string;
 	branch: string;
 	worktreePath: string;
+	/**
+	 * The checkout the lane was made from: `createLane`'s `git rev-parse --show-toplevel` (for a worker lane, the hub, the
+	 * worktree holding main). Absent from a registration written before it was recorded (`findLaneCheckout` says how it reads).
+	 */
+	sourceCheckout?: string;
 	status: "active" | "released" | "orphaned";
 	createdAt: string;
 	updatedAt: string;

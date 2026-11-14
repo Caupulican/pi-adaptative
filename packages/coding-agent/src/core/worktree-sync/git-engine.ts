@@ -395,8 +395,7 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 		const isFree = async (candidate: string): Promise<boolean> => {
 			if (taken.has(candidate)) return false;
 			if (await revParseBranch(deps, ctx.topLevel, laneBranch(candidate))) return false;
-			if (fileExists(deps, join(deps.worktreesBaseDir, ctx.slug, candidate))) return false;
-			return true;
+			return !fileExists(deps, join(deps.worktreesBaseDir, ctx.slug, candidate));
 		};
 
 		let laneKey: string;
@@ -430,6 +429,7 @@ export async function createLane(deps: WorktreeSyncEngineDeps, args: CreateLaneA
 			laneKey,
 			branch,
 			worktreePath,
+			sourceCheckout: ctx.topLevel,
 			status: "active",
 			createdAt: at,
 			updatedAt: at,

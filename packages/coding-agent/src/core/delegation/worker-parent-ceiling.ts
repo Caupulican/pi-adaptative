@@ -108,11 +108,13 @@ const NARROWER_ALTERNATIVES: Partial<Record<HarnessCapability, readonly HarnessC
  */
 function heldCapabilities(toolNames: readonly string[], network: boolean): HarnessCapability[] {
 	const held = new Set<HarnessCapability>(
+		// A granted extension's tool or an uncatalogued one lends nothing (`toolChangesFiles`): its effect cannot be judged.
 		toolNames.flatMap((name) =>
-			(getToolCapabilityPolicy(name)?.capabilityClauses ?? []).flatMap(([primary, ...alternatives]) =>
-				primary === undefined
-					? []
-					: [primary, ...alternatives.filter((entry) => NARROWER_ALTERNATIVES[primary]?.includes(entry))],
+			(isGrantedExtensionToolName(name) ? [] : (getToolCapabilityPolicy(name)?.capabilityClauses ?? [])).flatMap(
+				([primary, ...alternatives]) =>
+					primary === undefined
+						? []
+						: [primary, ...alternatives.filter((entry) => NARROWER_ALTERNATIVES[primary]?.includes(entry))],
 			),
 		),
 	);
@@ -153,10 +155,11 @@ export function workerCeilingOf(
 /** Where a worker's directory lies among the worktree lanes (`WorkerLaneIsolation`). */
 export interface WorkerLanePlacement {
 	/**
-	 * The mover of absolute paths in the checkout the lane `directory` lies in was made from to their copy in that lane;
-	 * undefined when `directory` is in no lane, or its checkout cannot be read.
+	 * The mover of absolute paths in the checkout the lane `directory` lies in was made from to their copy in that lane,
+	 * placed for a session at `sessionCwd` as its worker was; undefined when `directory` is in no lane, or the lane's
+	 * placement is not known.
 	 */
-	laneOf(directory: string): ((entry: string) => string) | undefined;
+	laneOf(directory: string, sessionCwd: string): ((entry: string) => string) | undefined;
 }
 
 /**
@@ -255,7 +258,8 @@ export function workerHostScope(
 	lanes: WorkerLanePlacement | undefined,
 ): WorkerHostScope {
 	const ceiling = host.workerCeiling();
-	const move = ceiling !== "unbounded" && executionCwd !== undefined ? lanes?.laneOf(executionCwd) : undefined;
+	const move =
+		ceiling !== "unbounded" && executionCwd !== undefined ? lanes?.laneOf(executionCwd, host.getCwd()) : undefined;
 	return {
 		deniedPaths: getPrivateLaneDeniedPaths(host.getCwd(), host.getAgentDir()),
 		...(host.workerReadRoot ? { readRoot: host.workerReadRoot() } : {}),

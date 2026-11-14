@@ -45,7 +45,8 @@ export type WorkerLaneCreation =
 	| { kind: "isolated"; laneKey: string; worktreePath: string }
 	| { kind: "shared"; reason: WorkerLaneIneligibleReason | string; message: string };
 
-function canonical(target: string): string {
+/** `target`'s real path, or its resolved path when it does not exist. */
+export function canonical(target: string): string {
 	try {
 		return realpathSync(target);
 	} catch {
@@ -173,18 +174,18 @@ export async function findLaneByDirectory(
 }
 
 /**
- * The active lane whose registered worktree contains `directory`, with the main checkout it was made from: the checkout
- * that holds the repository's git dir, which `createWorkerLane` makes every lane from. Resolved through git; undefined
- * when `directory` is in no lane or the repository's git dir is not a checkout's `.git`.
+ * The active lane whose registered worktree contains `directory`, with the checkout it was made from: the registration's
+ * `sourceCheckout`. A registration written before that was recorded was made by `createWorkerLane`, which makes a lane
+ * only from the hub (the worktree holding main, its `--show-toplevel` checked equal to the hub's): its checkout is read
+ * as the hub of the repository's current context. `checkout` is undefined when neither is known (main is checked out
+ * nowhere); the lane is still returned. Undefined when `directory` is in no lane.
  */
 export async function findLaneCheckout(
 	deps: WorktreeSyncEngineDeps,
 	directory: string,
-): Promise<{ lane: LaneRegistration; checkout: string } | undefined> {
+): Promise<{ lane: LaneRegistration; checkout: string | undefined } | undefined> {
 	const found = await resolveLaneAt(deps, directory, true);
-	if (!found) return undefined;
-	const common = resolve(directory, found.context.gitCommonDir);
-	return basename(common) === ".git" ? { lane: found.lane, checkout: dirname(common) } : undefined;
+	return found && { lane: found.lane, checkout: found.lane.sourceCheckout ?? found.context.hubPath };
 }
 
 /** Whether `candidate` lies under the directory lane worktrees are created in (a cheap check, no git). */

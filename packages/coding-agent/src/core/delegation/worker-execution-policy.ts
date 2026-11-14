@@ -219,6 +219,8 @@ export function narrowWorkerExecutionPlan(
 		readOnly: current.readOnly,
 		shellReadOnly: current.shellReadOnly,
 		budget: intersectRiskBudgets(admitted.budget, current.budget),
+		// The admitted contract records no bound; the bound is the starting session's standing (`lendsOwnerReach`), fixed
+		// for the session's life, and the contracts narrowed here were admitted by the same session.
 		parentBound: current.parentBound,
 	};
 }

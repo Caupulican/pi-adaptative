@@ -34,7 +34,6 @@ import type {
 	WorkerProfileExecutionContract,
 } from "../orchestration/contracts.ts";
 import { parseWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
-import { mainCheckoutOfLinkedWorktree } from "../settings/settings-rules.ts";
 import { quotedSpan } from "../util/bounded-line.ts";
 import type { ReleaseOutcome } from "../util/resource-release.ts";
 import type { AbortSyncResult, SyncLaneResult } from "../worktree-sync/codes.ts";
@@ -49,10 +48,10 @@ import { type LaneLanding, landingOutcome } from "../worktree-sync/lane-landing.
 import {
 	bindWorkerLaneByPath,
 	boundLaneRepositoryKey,
+	canonical,
 	createWorkerLane,
 	describeWorkerLane,
 	discardUnusedWorkerLane,
-	findLaneByDirectory,
 	findLaneCheckout,
 	isUnderLaneRoot,
 	laneWorktreeOf,
@@ -116,7 +115,7 @@ export function relocatedInto(root: string, laneRoot: string, entry: string, bas
 /** Where a worker is placed in a lane (`WorkerLaneIsolation.placementAt`). */
 export interface WorkerLanePlacementAt {
 	readonly laneRoot: string;
-	/** The top of the main checkout the lane was made from: the root request and contract paths are moved from. */
+	/** The top of the checkout the lane was made from, spelled as the session spells its directory: the root paths move from. */
 	readonly checkout: string;
 	/** The directory the worker works in: the session directory's place in the lane. */
 	readonly directory: string;
@@ -127,10 +126,32 @@ interface LaneAt {
 	readonly engine: WorktreeSyncEngineDeps;
 	readonly laneKey: string;
 	readonly worktreePath: string;
+	/** The checkout the lane was made from (`findLaneCheckout`); undefined when it is not known. */
+	readonly checkout: string | undefined;
+}
+
+/**
+ * Where a worker started from `sessionCwd` is placed in the lane at `laneRoot` made from `checkout`. The session and the
+ * checkout are compared by real path, so a session directory reached through a symlink keeps its place; the checkout is
+ * then spelled as the session spells its directory, so the session's own paths move by text. A session in repo/sub works in
+ * lane/sub; one at the checkout's top, or outside it, works at the lane's root.
+ */
+function placementIn(laneRoot: string, checkout: string, sessionCwd: string): WorkerLanePlacementAt {
+	const session = canonical(sessionCwd);
+	const top = canonical(checkout);
+	const offset = relative(top, session);
+	if (offset !== "" && !isWithin(top, session)) return { laneRoot, checkout, directory: laneRoot };
+	const spelled = resolve(sessionCwd, relative(session, top));
+	return { laneRoot, checkout: spelled, directory: offset === "" ? laneRoot : join(laneRoot, offset) };
 }
 
 export class WorkerLaneIsolation {
 	private readonly deps: WorkerLaneIsolationDeps;
+	/**
+	 * The checkout each lane resolved in this process was made from, by the lane's real root: what `laneOf` places a
+	 * parent's ceiling by, read from the same resolution that placed the worker (`laneAt`).
+	 */
+	private readonly laneSources = new Map<string, { readonly laneRoot: string; readonly checkout: string }>();
 
 	constructor(deps: WorkerLaneIsolationDeps) {
 		this.deps = deps;
@@ -176,6 +197,7 @@ export class WorkerLaneIsolation {
 			const root = await this.laneRootAt(worktreePath);
 			if (!root) return;
 			const discarded = await discardUnusedWorkerLane(engine, root);
+			if (discarded.code === "released") this.laneSources.delete(canonical(root));
 			if (discarded.code !== "released" && discarded.code !== "lane_not_found" && discarded.code !== "lane_in_use") {
 				this.deps.warn(
 					`Unused worker lane '${discarded.laneKey ?? worktreePath}' was not removed: [${discarded.code}] ${discarded.message ?? ""}`,
@@ -261,26 +283,21 @@ export class WorkerLaneIsolation {
 	private async laneAt(cwd: string): Promise<LaneAt | undefined> {
 		const engine = this.deps.engineDeps(cwd);
 		if (!engine || !isUnderLaneRoot(engine, cwd)) return undefined;
-		const lane = await findLaneByDirectory(engine, cwd);
-		return lane ? { engine, laneKey: lane.laneKey, worktreePath: lane.worktreePath } : undefined;
+		const found = await findLaneCheckout(engine, cwd);
+		if (!found) return undefined;
+		const { lane, checkout } = found;
+		if (checkout) this.laneSources.set(canonical(lane.worktreePath), { laneRoot: lane.worktreePath, checkout });
+		return { engine, laneKey: lane.laneKey, worktreePath: lane.worktreePath, checkout };
 	}
 
 	/**
-	 * Where a worker started from `sessionCwd` is placed in the lane `directory` lies in, resolved through git: the lane's
-	 * root, the main checkout the lane was made from (`findLaneCheckout`), and the directory the worker works in, which is
-	 * `sessionCwd`'s place relative to that checkout's top (a session in repo/sub works in lane/sub). A session at the
-	 * checkout's top, or outside it, works at the lane's root. Undefined when `directory` is in no lane or its checkout
-	 * cannot be resolved: the worker is then not moved into the lane.
+	 * Where a worker started from `sessionCwd` is placed in the lane `directory` lies in (`placementIn`), from the lane's
+	 * registration: its root and the checkout it was made from (`findLaneCheckout`). Undefined when `directory` is in no
+	 * lane or its checkout is not known: the worker is then not moved into the lane.
 	 */
 	async placementAt(directory: string, sessionCwd: string): Promise<WorkerLanePlacementAt | undefined> {
-		const engine = this.deps.engineDeps(directory);
-		if (!engine || !isUnderLaneRoot(engine, directory)) return undefined;
-		const found = await findLaneCheckout(engine, directory);
-		if (!found) return undefined;
-		const offset = relative(found.checkout, sessionCwd);
-		const nested = offset !== "" && isWithin(found.checkout, sessionCwd);
-		const laneRoot = found.lane.worktreePath;
-		return { laneRoot, checkout: found.checkout, directory: nested ? join(laneRoot, offset) : laneRoot };
+		const found = await this.laneAt(directory);
+		return found?.checkout ? placementIn(found.worktreePath, found.checkout, sessionCwd) : undefined;
 	}
 
 	/**
@@ -309,17 +326,18 @@ export class WorkerLaneIsolation {
 	}
 
 	/**
-	 * The mover of absolute paths in the checkout the lane `directory` lies in was made from into that lane: a path keeps its
-	 * place relative to the checkout's top, so a session directory in a subdirectory maps to the same subdirectory of the lane.
-	 * A lane is a linked worktree of the main checkout it was made from (`createWorkerLane` makes lanes only from it), read
-	 * from the lane's own git metadata, no git process. Undefined when `directory` is in no lane or its checkout cannot be
-	 * read. It places a worker's parent ceiling.
+	 * The mover of paths of the checkout the lane `directory` lies in was made from into that lane, placed for a session at
+	 * `sessionCwd` as its worker was (`placementIn`, from the source `laneAt` resolved when it placed the worker): a path
+	 * keeps its place relative to the checkout's top. Synchronous, no git. Undefined when `directory` is in no lane or this
+	 * process has not resolved the lane's checkout. It places a worker's parent ceiling.
 	 */
-	laneOf(directory: string): ((entry: string) => string) | undefined {
+	laneOf(directory: string, sessionCwd: string): ((entry: string) => string) | undefined {
 		const engine = this.deps.engineDeps(directory);
 		const laneRoot = engine && laneWorktreeOf(engine, directory);
-		const checkout = laneRoot && mainCheckoutOfLinkedWorktree(laneRoot);
-		return laneRoot && checkout ? (entry) => relocatedInto(checkout, laneRoot, entry) : undefined;
+		const source = laneRoot ? this.laneSources.get(canonical(laneRoot)) : undefined;
+		if (!source) return undefined;
+		const placed = placementIn(source.laneRoot, source.checkout, sessionCwd);
+		return (entry) => relocatedInto(placed.checkout, placed.laneRoot, entry);
 	}
 
 	/** Whether `directory` lies in the area lane worktrees are created in (a cheap check, no git). */

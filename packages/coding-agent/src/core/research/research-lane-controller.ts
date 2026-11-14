@@ -15,6 +15,7 @@ import { appendLaneRecordSnapshot, getLaneRecordSnapshots } from "../autonomy/se
 import { composeSubagentSystemPrompt } from "../autonomy/subagent-prompt.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES, type AutonomyTelemetryEvent } from "../autonomy/telemetry-events.ts";
 import type { PathAliasTable } from "../context/path-alias-table.ts";
+import { type WorkerCeilingSource, workerCeilingOf } from "../delegation/worker-parent-ceiling.ts";
 import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import type { NormalizedProfile } from "../profile-registry.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
@@ -37,9 +38,9 @@ export interface ResearchLaneControllerSettingsSource {
 	subscribeChanges(listener: () => void): () => void;
 }
 
-export interface ResearchLaneControllerDeps {
+export interface ResearchLaneControllerDeps extends WorkerCeilingSource {
 	isDisposed(): boolean;
-	readonly standing: Pick<SessionCapabilities, "runsProactiveLanes">;
+	readonly standing: Pick<SessionCapabilities, "runsProactiveLanes" | "lendsOwnerReach">;
 	getSessionId(): string;
 	getCwd(): string;
 	getAgentDir(): string;
@@ -235,12 +236,23 @@ export class ResearchLaneController {
 					settings.maxUsd,
 					this.models.envelopeCeilingUsd(this.deps.getCapabilityEnvelope(), model),
 				);
+				// An explicit run (`/autonomy research`) has no standing gate: a session that holds its workers to its own reach
+				// holds its research lane there too, as a worker's lane (`yoloGrantBound`, its read roots and denied paths).
+				const ceiling = workerCeilingOf(this.deps.standing, this.deps);
+				const bounded = ceiling === "unbounded" ? undefined : ceiling;
 				const activeToolSurface = createLaneToolSurface({
 					yolo: this.deps.getSettingsManager().getEdgeSettings().mode === "yolo",
 					denyCommands: this.deps.getSettingsManager().getEdgeSettings().deny,
 					cwd: this.deps.getCwd(),
 					profile: laneProfile,
-					deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
+					...(bounded
+						? { yoloGrantBound: true, readOnly: bounded.readOnly, shellReadOnly: bounded.shellReadOnly }
+						: {}),
+					...(bounded?.readRoots ? { readScopeRoots: bounded.readRoots } : {}),
+					deniedPaths: [
+						...getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
+						...(bounded?.deniedPaths ?? []),
+					],
 					...(this.deps.getPathAliasTable ? { getPathAliasTable: this.deps.getPathAliasTable } : {}),
 				});
 				toolSurface = activeToolSurface;
