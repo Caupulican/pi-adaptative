@@ -585,7 +585,7 @@ export class BotSessionHost {
 			if (refused) return refused;
 		}
 		const unpriced = this.spendBound(spendBoundUsd) === undefined ? undefined : unpricedModelRefusal(model);
-		return unpriced === undefined ? undefined : { reason: unpriced };
+		return unpriced === undefined ? undefined : { cause: "model_unpriced", reason: unpriced };
 	}
 
 	/** The lower of the owner's and the main session's bounds on one turn and the bot's profile's own. */

@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- A bot's work held back because its model could not run is no longer opened again (and refused again) when you switch the interface language: the recorded refusal was compared by its words in the owner's language, so the same cause read as cleared. It is now compared by the rule that refused it.
 - A bot notice that reached its chat but whose unread mark could not be written no longer warns that it "could not be kept in its chat": that warning now says the roster could not mark it unread, and every open chat still redraws with the notice.
 - A bot's turn left open when its session closes (a run end that announced a retry that never began) now records its answer as well as its spend: the close reported only the charge, so the bot's last words never reached the roster's summary and unread mark.
 - A bot's or an away channel's per-turn dollar bound now counts an automatic retry's attempts as the same turn: the spend restarted from zero at every attempt, so a turn could spend up to its bound once per attempt. A bot turn's supervision likewise watches the whole turn in one window instead of opening a new one at every retry attempt.

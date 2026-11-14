@@ -16,7 +16,7 @@ import { interfaceText } from "../language/interface-text.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { alarmAt, type RepeatingAlarm, repeatEvery, type TimerPort, type WallAlarm } from "../util/timer-port.ts";
 import { type BotInboxItem, botInboxWaiting } from "./bot-inbox.ts";
-import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
+import { type BotModelRefusal, type BotModelRefusalCause, BotModelRefusedError } from "./bot-model-refusal.ts";
 import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
 import type { BotSender } from "./bot-session-host.ts";
 
@@ -80,7 +80,7 @@ export class UnrunWakeLedger {
 interface RecordedRefusal {
 	readonly scope: "run" | "open";
 	readonly key: string | undefined;
-	readonly cause: string | undefined;
+	readonly cause: BotModelRefusalCause | undefined;
 	/** When the cause is recorded to end (a quota exhaustion's reset): the retake alarm is armed then. */
 	readonly clearsAt: number | undefined;
 }
@@ -246,7 +246,7 @@ export class BotOwedWork {
 
 	private record(agentId: string, scope: RecordedRefusal["scope"], key: string | undefined, error: unknown): void {
 		const refusal = error instanceof BotModelRefusedError ? error.refusal : undefined;
-		this.refusals.set(agentId, { scope, key, cause: refusal?.reason, clearsAt: refusal?.clearsAt });
+		this.refusals.set(agentId, { scope, key, cause: refusal?.cause, clearsAt: refusal?.clearsAt });
 		this.armRetake(agentId, refusal?.clearsAt);
 	}
 
@@ -279,7 +279,7 @@ export class BotOwedWork {
 		if (!recorded || (recorded.scope === "run" && !onlyWakes)) return false;
 		const key = this.ports.currentKey(record, sender);
 		const now = key === undefined ? undefined : this.ports.modelRefusal(record, sender);
-		if (recorded.key !== key || recorded.cause !== now?.reason) return false;
+		if (recorded.key !== key || recorded.cause !== now?.cause) return false;
 		if (recorded.clearsAt !== now?.clearsAt) {
 			this.refusals.set(agentId, { ...recorded, clearsAt: now?.clearsAt });
 			this.armRetake(agentId, now?.clearsAt);

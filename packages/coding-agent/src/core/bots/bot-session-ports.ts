@@ -57,18 +57,23 @@ function botModelRefusal(
 		modelUnusableCause: (candidate) => deps.modelUnusableCause(candidate),
 		...(deps.isModelAllowed ? { isModelAllowed: (candidate) => deps.isModelAllowed?.(candidate) === true } : {}),
 	});
-	if (metered) return { reason: words.botModelMetered(metered.ref, metered.alternatives, metered.provider) };
+	if (metered)
+		return {
+			cause: "model_metered",
+			reason: words.botModelMetered(metered.ref, metered.alternatives, metered.provider),
+		};
 	// Out of quota or refused for the account: the bot waits for its own model, never moved to another.
 	const unusable = deps.modelUnusableCause(model);
 	if (unusable) {
 		const clearsAt = unusable === "model_quota_exhausted" ? exhaustionReset(deps, model) : undefined;
 		return {
+			cause: unusable,
 			reason: words.botModelUnusable(`${model.provider}/${model.id}`, unusable),
 			...(clearsAt !== undefined ? { clearsAt } : {}),
 		};
 	}
 	return deps.isModelAllowed && !deps.isModelAllowed(model)
-		? { reason: words.botModelNotAllowed(`${model.provider}/${model.id}`) }
+		? { cause: "model_not_allowed", reason: words.botModelNotAllowed(`${model.provider}/${model.id}`) }
 		: undefined;
 }
 
