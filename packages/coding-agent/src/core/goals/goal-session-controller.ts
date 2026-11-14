@@ -45,6 +45,7 @@ import {
 	ObjectiveRootTurnInterruptedError,
 } from "./goal-execution-errors.ts";
 import {
+	type GoalResumeSource,
 	type GoalStateRevision,
 	getAutoResumableReasonPrefix,
 	getGoalStateRevision,
@@ -56,6 +57,7 @@ import {
 	buildGoalRuntimeSnapshot,
 	type GoalRuntimeSnapshot,
 	type GoalRuntimeSnapshotSettings,
+	goalHasInFlightWork,
 } from "./goal-runtime-snapshot.ts";
 import { applyGoalEvent, type GoalState, isGoalExecutionActive } from "./goal-state.ts";
 import type { GoalStartGrant } from "./goal-tool-core.ts";
@@ -353,8 +355,15 @@ export class GoalSessionController {
 	 * prompt: it always resumes a system block and the reducer restarts the allowance. Only the owner
 	 * prompt path may pass it; automatic callers never impersonate owner intent.
 	 */
-	resumeSystemBlockedGoal(now = new Date().toISOString(), source: "system" | "owner" = "system"): string | undefined {
+	resumeSystemBlockedGoal(now = new Date().toISOString(), source: GoalResumeSource = "system"): string | undefined {
 		return this.resumeMatchingSystemBlockedGoal(now, source);
+	}
+
+	/** Resume and continue the goal its subscription's used-up usage stopped, once the usage reset; whether one was. */
+	resumeUsageLimitedGoal(): boolean {
+		if (this.resumeMatchingSystemBlockedGoal(new Date().toISOString(), "usage_reset") === undefined) return false;
+		this.deps.scheduleGoalAutoContinueFromIdle();
+		return true;
 	}
 
 	/** Resume only the capability-loss block once the permanent foreground surface restores control. */
@@ -364,7 +373,7 @@ export class GoalSessionController {
 
 	private resumeMatchingSystemBlockedGoal(
 		now: string,
-		source: "system" | "owner",
+		source: GoalResumeSource,
 		requiredPrefix?: string,
 	): string | undefined {
 		const current = this.getState();
@@ -1282,23 +1291,6 @@ export class GoalSessionController {
 		return resumedGoalId !== undefined;
 	}
 
-	private hasInFlightWorkForGoal(state: GoalState): boolean {
-		const laneRecords = this.deps.getLaneRecords();
-		const inFlightLanes = new Set(
-			laneRecords
-				.filter((r) => r.goalId === state.goalId && (r.status === "queued" || r.status === "running"))
-				.map((r) => r.laneId),
-		);
-		if (state.requirements.some((r) => r.boundLaneId !== undefined && inFlightLanes.has(r.boundLaneId))) {
-			return true;
-		}
-		const bgTasks = this.deps.getBackgroundToolTasks();
-		if (bgTasks.some((t) => t.goalId === state.goalId && t.status === "running")) {
-			return true;
-		}
-		return false;
-	}
-
 	/** `goalId` names the goal whose work failed. A failure never stops a goal that replaced it. */
 	private recordContinuationFailure(error: unknown, goalId: string): void {
 		const state = this.getState();
@@ -1315,7 +1307,11 @@ export class GoalSessionController {
 		}
 
 		const isTransient = classified.retryable || getAutoResumableReasonPrefix(reason) !== undefined;
-		const hasInFlightWork = this.hasInFlightWorkForGoal(state);
+		const hasInFlightWork = goalHasInFlightWork(
+			state,
+			this.deps.getLaneRecords(),
+			this.deps.getBackgroundToolTasks(),
+		);
 		const currentStreak = state.systemFailureStreak ?? 0;
 
 		if (!this.stopActiveGoal("blocked", reason)) return;

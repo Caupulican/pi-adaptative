@@ -95,6 +95,21 @@ export interface GoalRuntimeSnapshot {
 	autoContinue?: GoalAutoContinueState;
 }
 
+/** Whether work dispatched for `state` still runs: a worker bound to one of its requirements, or a background tool task of the goal. */
+export function goalHasInFlightWork(
+	state: GoalState,
+	laneRecords: readonly LaneRecord[],
+	backgroundToolTasks: readonly BackgroundToolTaskRef[],
+): boolean {
+	const inFlightLanes = new Set(
+		laneRecords
+			.filter((r) => r.goalId === state.goalId && (r.status === "queued" || r.status === "running"))
+			.map((r) => r.laneId),
+	);
+	if (state.requirements.some((r) => r.boundLaneId !== undefined && inFlightLanes.has(r.boundLaneId))) return true;
+	return backgroundToolTasks.some((t) => t.goalId === state.goalId && t.status === "running");
+}
+
 /**
  * Branch-scoped: every resolver here reads from ONE source (the active branch), so the goal
  * state, evidence bundle, worker claims, learning decisions, and open task steps in the

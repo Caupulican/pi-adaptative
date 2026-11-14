@@ -5,14 +5,7 @@
 
 import { randomUUID } from "node:crypto";
 import { basename } from "node:path";
-import {
-	type Api,
-	type AssistantMessage,
-	listOpenAICodexRateLimitResetCredits,
-	type Message,
-	type Model,
-	planToolSchemaDisclosure,
-} from "@caupulican/pi-ai";
+import { type Api, type Message, type Model, planToolSchemaDisclosure } from "@caupulican/pi-ai";
 import type { Agent } from "../kernel/agent.ts";
 import { projectToolsForProvider } from "../kernel/provider-tool-projection.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
@@ -546,59 +539,6 @@ export function attachSessionAdaptiveRuntime(
 	}
 	if (stack.adaptiveCapabilities) {
 		stack.adaptiveCapabilities.setAdaptationSink((adaptation) => deps.setAdaptationProjection(adaptation));
-	}
-}
-
-export interface SessionSubscriptionResetDeps {
-	readonly subscriptionResetOffered: Set<string>;
-	readonly subscriptionResetChecking: Set<string>;
-	readonly modelRegistry: {
-		find(provider: string, modelId: string): Model<Api> | undefined;
-		getApiKeyForProvider(provider: string): Promise<string | undefined>;
-		readonly authStorage: {
-			getOAuthRequestHeaders(provider: string, accessToken: string): Record<string, string> | undefined;
-		};
-	};
-	emit(event: AgentSessionEvent): void;
-}
-
-export async function offerCodexSubscriptionReset(
-	deps: SessionSubscriptionResetDeps,
-	message: AssistantMessage,
-): Promise<void> {
-	const provider = message.provider;
-	if (
-		provider !== "openai-codex" ||
-		deps.subscriptionResetOffered.has(provider) ||
-		deps.subscriptionResetChecking.has(provider)
-	)
-		return;
-	// Only a notice the owner actually received uses up the episode; a check that found no reset or
-	// could not complete is made again on the next limit answer.
-	deps.subscriptionResetChecking.add(provider);
-	const codex = deps.modelRegistry.find(message.provider, message.model);
-	try {
-		const accessToken = await deps.modelRegistry.getApiKeyForProvider(message.provider);
-		if (!accessToken) return;
-		const summary = await listOpenAICodexRateLimitResetCredits({
-			accessToken,
-			credentialHeaders: deps.modelRegistry.authStorage.getOAuthRequestHeaders(message.provider, accessToken),
-			baseUrl: codex?.baseUrl,
-			signal: AbortSignal.timeout(15_000),
-		});
-		if (summary.availableCount === 0) return;
-		deps.subscriptionResetOffered.add(provider);
-		deps.emit({
-			type: "warning",
-			message: `OpenAI Codex usage limit reached. ${summary.availableCount} usage ${summary.availableCount === 1 ? "reset is" : "resets are"} available: /usage, then Redeem usage limit reset.`,
-		});
-	} catch (error) {
-		deps.emit({
-			type: "warning",
-			message: `OpenAI Codex usage limit reached; checking for usage resets failed: ${error instanceof Error ? error.message : String(error)}`,
-		});
-	} finally {
-		deps.subscriptionResetChecking.delete(provider);
 	}
 }
 

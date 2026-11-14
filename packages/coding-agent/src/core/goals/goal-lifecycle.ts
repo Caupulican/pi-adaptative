@@ -116,17 +116,29 @@ export function getAutoResumableReasonPrefix(reason: string | undefined): string
 	return AUTO_RESUMABLE_SYSTEM_STOP_REASON_PREFIXES.find((prefix) => reason.startsWith(prefix));
 }
 
+/** Who resumes a system-stopped goal: the system's own recovery, the owner's prompt, or a subscription's usage reset. */
+export type GoalResumeSource = "system" | "owner" | "usage_reset";
+
 /**
  * The state `current` resumes to from its system stop, read without saving; undefined when no such resume applies. The
  * owner's own prompt resumes any system stop; an automatic resume (`source: "system"`) applies only to a classified guard
- * or provider stop (whose prefix must be `requiredPrefix` when one is given) within its recovery allowance.
+ * or provider stop (whose prefix must be `requiredPrefix` when one is given) within its recovery allowance. A usage reset
+ * (`source: "usage_reset"`) resumes only a goal a usage or rate limit stopped (`usage_limited`, or a system block for a
+ * rate limit), whatever its recovery allowance: the reset is the provider's own word that the limit is over.
  */
 export function planSystemGoalResume(
 	current: GoalState,
 	now: string,
-	source: "system" | "owner",
+	source: GoalResumeSource,
 	requiredPrefix?: string,
 ): GoalState | undefined {
+	if (source === "usage_reset") {
+		const limited =
+			current.status === "usage_limited" ||
+			(isSystemStoppedGoal(current) && current.blockedReason?.startsWith("rate_limit:") === true);
+		const resumed = limited ? resumeGoal(current, now, "system") : undefined;
+		return resumed?.ok ? resumed.state : undefined;
+	}
 	if (!(source === "owner" ? isSystemStoppedGoal(current) : isSystemBlockedGoal(current)) || !current.blockedReason)
 		return undefined;
 

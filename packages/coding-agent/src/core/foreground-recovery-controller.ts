@@ -130,8 +130,8 @@ export interface ForegroundRecoveryControllerDeps
 	checkCompaction(message: AssistantMessage): Promise<boolean>;
 	/** The provider refused the model for this account: move the turn to a replacement, returning its ref. */
 	replaceUnsupportedModel?(message: AssistantMessage): Promise<string | undefined>;
-	/** The provider answered that the account's usage limit is reached (billing or quota). */
-	onUsageLimitReached?(message: AssistantMessage): void;
+	/** The run ends on a classified provider failure no retry took (a usage limit, a rate limit past the retry wait). */
+	onRunStopped?(message: AssistantMessage, classified: ClassifiedError): void;
 	onSuccessfulAssistant(): void;
 	prepareRun(): Promise<void>;
 	afterRun(beginRuntimeHandoff: () => RuntimeMutationHandoff, signal: AbortSignal): Promise<void>;
@@ -1388,7 +1388,7 @@ export class ForegroundRecoveryController {
 			if (replacement && this.retry.prepareModelSwitchRetry(message, `Continuing on ${replacement}.`))
 				return "recover";
 		}
-		if (classified?.reason === "billing_or_quota") this.deps.onUsageLimitReached?.(message);
+		if (classified) this.deps.onRunStopped?.(message, classified);
 		const billing = await this.billingFailover.handleAssistantError(message, classified);
 		// A quota the work moved off continues at once on the model it moved to, like an unsupported model.
 		if (billing.continuedOn && this.retry.prepareModelSwitchRetry(message, `Continuing on ${billing.continuedOn}.`))

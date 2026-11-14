@@ -376,6 +376,9 @@ export const NOTICES = {
 	usageReset: {
 		workerWaits: (laneId: string, at: string) =>
 			`Worker ${laneId}: o uso da assinatura dele acabou; ele retoma sozinho quando o uso for renovado (${at}).`,
+		sessionWaits: (at: string) =>
+			`O uso da assinatura acabou; esta sessão continua sozinha quando o uso for renovado (${at}).`,
+		sessionResumeFailed: (error: string) => `A sessão não conseguiu continuar depois da renovação do uso: ${error}`,
 	},
 	/** O que a extensão de colaboração relata quando os próprios passos falham: o texto do erro vem em seguida. */
 	collaboration: {

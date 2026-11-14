@@ -429,6 +429,9 @@ export const NOTICES = {
 	usageReset: {
 		workerWaits: (laneId: string, at: string) =>
 			`Worker ${laneId}: its subscription's usage is used up; it resumes on its own when the usage resets (${at}).`,
+		sessionWaits: (at: string) =>
+			`The subscription's usage is used up; this session continues on its own when the usage resets (${at}).`,
+		sessionResumeFailed: (error: string) => `The session could not continue after the usage reset: ${error}`,
 	},
 	/** What the collaboration extension reports when its own steps fail: the error text follows. */
 	collaboration: {

@@ -4,6 +4,7 @@ import {
 	RetryDelayExceededError,
 	type RetryPolicy,
 } from "../../kernel/reliability/index.ts";
+import { statedUsageResetMs, usageResetWaitMs } from "../provider-admission/usage-reset.ts";
 
 /**
  * Restart-durable, host-owned attempt ladder policy for delegated workers.
@@ -22,8 +23,8 @@ import {
  * A subscription model whose plan's usage is used up is not a failure of the work: its limit is the plan's usage window,
  * not money. When the failure states when the usage resets (the provider's own retry-after, or the reset the provider
  * admission gate recorded and refused with), the attempt waits for that reset however long it is and resumes on its own,
- * without spending the attempt ceiling when the reset is further off than the ladder's longest backoff; a nearer one is
- * an ordinary retry no sooner than the reset. The same refusal on a metered model stays terminal: that limit is money.
+ * without spending the attempt ceiling when the reset is further off than a minute (`provider-admission/usage-reset.ts`,
+ * the rule a root session's stopped turn reads too); a nearer one is an ordinary retry no sooner than the reset. The same refusal on a metered model stays terminal: that limit is money.
  */
 export const DEFAULT_WORKER_TASK_ATTEMPTS = 2;
 
@@ -70,18 +71,12 @@ export function evaluateWorkerRetry(args: {
 		(classified.reason === "billing_or_quota" ||
 			classified.reason === "model_unsupported" ||
 			classified.reason === "auth");
-	const resetAfterMs = classified.retryAfterMs;
-	const statedUsageReset =
-		!failover &&
-		args.subscription === true &&
-		resetAfterMs !== undefined &&
-		(classified.reason === "billing_or_quota" || classified.reason === "rate_limit");
-	// A reset further off than the ladder's longest backoff is waited out and spends nothing. One stated within it (a
-	// reset worded "~0 min" just before it passes) is an ordinary retry that spends the ceiling, so a refusal that keeps
-	// stating a near reset ends once the ceiling is spent instead of being asked again forever.
-	if (statedUsageReset && resetAfterMs > WORKER_TASK_RETRY_POLICY.maxDelayMs) {
-		return { retry: true, reason: "usage_reset", delayMs: resetAfterMs, usageReset: true };
-	}
+	const subscription = !failover && args.subscription === true;
+	// A usage reset is waited out and spends nothing. A nearer stated reset (a reset worded "~0 min" just before it passes)
+	// is an ordinary retry that spends the ceiling, so a refusal that keeps stating a near reset ends once it is spent.
+	const resetWaitMs = usageResetWaitMs(classified, subscription);
+	if (resetWaitMs !== undefined) return { retry: true, reason: "usage_reset", delayMs: resetWaitMs, usageReset: true };
+	const statedUsageReset = statedUsageResetMs(classified, subscription) !== undefined;
 	const attemptsAllowed = args.maxAttempts ?? DEFAULT_WORKER_TASK_ATTEMPTS;
 	const retriesSpent = args.retriesUsed - (args.resetWaits ?? 0);
 	if (!failover && retriesSpent + 1 >= attemptsAllowed) return { retry: false, reason: "attempts_exhausted" };

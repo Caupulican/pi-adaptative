@@ -37,7 +37,6 @@ import {
 	createSessionProjectRules,
 	createSessionProviderRequestContext,
 	createSessionWorkerSupervision,
-	offerCodexSubscriptionReset,
 	runToolkitHit,
 	type SessionAdaptiveRuntimeStack,
 } from "./agent-session-composition.ts";
@@ -351,6 +350,7 @@ import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
 import { checkedExtensionMessage } from "./turn-origin.ts";
+import { UsageResetResume } from "./usage-reset-resume.ts";
 import type { TimerPort } from "./util/timer-port.ts";
 import type { WaitStatusEvent } from "./util/wait.ts";
 import { currentWorkUnit, openWorkUnit } from "./work-units.ts";
@@ -684,9 +684,8 @@ export class AgentSession {
 	private _baseSystemPrompt = "";
 	private readonly _pathAliasWrappedTools = new WeakSet<AgentTool>();
 	private readonly _accountModels: AccountModelCatalog;
-	/** Providers whose usage-limit episode already told the owner about redeemable resets. */
-	private readonly _subscriptionResetOffered = new Set<string>();
-	private readonly _subscriptionResetChecking = new Set<string>();
+	/** A run its subscription's used-up usage stopped continues on its own at the usage reset. */
+	private readonly _usageReset: UsageResetResume;
 	private _executionLoopMode?: ExecutionLoopMode;
 	private _objectiveExecutionController?: ObjectiveExecutionController;
 	private _adaptiveReadiness?: AdaptiveRuntimeReadiness;
@@ -1100,6 +1099,17 @@ export class AgentSession {
 		});
 		this._modelRegistry = config.modelRegistry;
 		this._subscriptionAllowance = openSubscriptionAllowance(config, () => this.model);
+		this._usageReset = new UsageResetResume({
+			clock: config.timers.port("provider-admission"),
+			modelRegistry: config.modelRegistry,
+			modelExhaustion: (ref) => this._foregroundRecovery.modelExhaustion(ref),
+			lastMessage: () => this.agent.state.messages.at(-1),
+			waitForIdle: () => this._foregroundRecovery.waitForIdle(),
+			isDisposed: () => this._disposed,
+			resumeUsageLimitedGoal: () => this._goals.resumeUsageLimitedGoal(),
+			continueTurn: () => this._continueAfterErrors(),
+			emit: (event) => this._emit(event),
+		});
 		this.hostTurnReasoning = new HostTurnReasoningController(() => this.settingsManager.getCheapTurnSettings());
 		this._costGuard = new CostGuardController({
 			getSettings: () => this.settingsManager.getCostGuardSettings(),
@@ -1622,17 +1632,7 @@ export class AgentSession {
 			compact: (customInstructions) => this.compact(customInstructions),
 			deliverNote: (message) => this.sendCustomMessage(message, { triggerTurn: true }),
 			askForHandoff: (message) => this.sendCustomMessage(message, { triggerTurn: true }),
-			continueFromHandoff: () =>
-				this._durableCustomMessageTurns.continue(async () => {
-					let messages = this.agent.state.messages;
-					while (
-						messages.at(-1)?.role === "assistant" &&
-						(messages.at(-1) as AssistantMessage).stopReason === "error"
-					) {
-						messages = messages.slice(0, -1);
-					}
-					if (messages !== this.agent.state.messages) this.agent.state.messages = messages;
-				}, this._goals.getOwnershipGoalId()),
+			continueFromHandoff: () => this._continueAfterErrors(),
 			isForegroundBusy: () => this._isForegroundPhaseBusy(),
 			waitForForegroundIdle: () => this._foregroundRecovery.waitForIdle(),
 			isDisposed: () => this._disposed,
@@ -1729,7 +1729,7 @@ export class AgentSession {
 			},
 			checkCompaction: (message) => this._checkCompaction(message),
 			replaceUnsupportedModel: (message) => this._modelAccess.replaceUnsupportedModel(message),
-			onUsageLimitReached: (message) => void this._offerSubscriptionReset(message),
+			onRunStopped: (message, classified) => this._usageReset.runStopped(message, classified),
 			onSuccessfulAssistant: () => this._compaction.resetOverflowRecovery(),
 			settleRuntimeUpdate: (signal, beginRuntimeHandoff) => this.runtimeUpdates.settle(signal, beginRuntimeHandoff),
 			holdUndeliveredQueue: () => {
@@ -2875,23 +2875,17 @@ export class AgentSession {
 			"usage_window",
 			"rate_limit",
 		]);
-		this._subscriptionResetOffered.delete(provider);
+		this._usageReset.noteUsageReset(provider);
 	}
 
-	/**
-	 * Codex answered that the subscription's usage limit is reached: say whether the account holds a
-	 * usage reset it can redeem (`/usage`); once told, not again this session until a reset is redeemed.
-	 */
-	private async _offerSubscriptionReset(message: AssistantMessage): Promise<void> {
-		return offerCodexSubscriptionReset(
-			{
-				subscriptionResetOffered: this._subscriptionResetOffered,
-				subscriptionResetChecking: this._subscriptionResetChecking,
-				modelRegistry: this._modelRegistry,
-				emit: (event) => this._emit(event),
-			},
-			message,
-		);
+	/** Continue the history from where it stopped, its trailing provider errors dropped, for the goal the session serves. */
+	private _continueAfterErrors(): Promise<void> {
+		return this._durableCustomMessageTurns.continue(async () => {
+			let messages = this.agent.state.messages;
+			while (messages.at(-1)?.role === "assistant" && (messages.at(-1) as AssistantMessage).stopReason === "error")
+				messages = messages.slice(0, -1);
+			if (messages !== this.agent.state.messages) this.agent.state.messages = messages;
+		}, this._goals.getOwnershipGoalId());
 	}
 
 	/**
@@ -3564,6 +3558,7 @@ export class AgentSession {
 		trackRequired(async () => this._providerAdmissionLedger.releaseAll());
 
 		safely(() => this._backgroundLanes.clearGoalAutoContinueTimer());
+		safely(() => this._usageReset.dispose());
 		safely(() => this._backgroundLanes.clearResearchLaneTimer());
 		safely(() => this._unsubscribeIdleOccupancy?.());
 		this._unsubscribeIdleOccupancy = undefined;
