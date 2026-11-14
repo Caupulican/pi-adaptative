@@ -59,6 +59,7 @@ import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { createAgentSession } from "../sdk.ts";
+import { boundSessionTurnTime } from "../session-turn-time-bound.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
@@ -784,6 +785,15 @@ export class BotSessionHost {
 					return reason;
 				},
 			});
+			// A turn is bounded in time as a worker's run is, by the owner's workerDelegation.maxWallClockMs as it is now.
+			const unsubscribeTime = boundSessionTurnTime(session, this.idleTimers(), {
+				limitMs: () => settingsManager.getWorkerDelegationSettings().maxWallClockMs,
+				onExceeded: (limitMs) => {
+					const reason = interfaceText().botTeam.botTurnOverTime(agentId, String(Math.ceil(limitMs / 1000)));
+					entry.sender.warn(reason);
+					return reason;
+				},
+			});
 			// Its tool loop is supervised as a worker's is: churn and System One's progress judgment, over its own turn.
 			const supervision = new BotTurnSupervision(session, {
 				agentId,
@@ -813,6 +823,7 @@ export class BotSessionHost {
 			});
 			entry.unsubscribe = () => {
 				unsubscribeSpend();
+				unsubscribeTime();
 				unsubscribeEvents();
 				supervision.stop();
 			};

@@ -144,6 +144,9 @@ export const BOT_TEAM = {
 	/** A turn went past the spend bound and was stopped; `bound` names the one that applied (the lower of the two). */
 	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session" | "profile") =>
 		`Bot ${agentId}: its turn was stopped at the spend bound ($${spentUsd} spent; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "its profile's cost budget" : "this session's autonomy spend bound"} is $${limitUsd}).`,
+	/** A turn ran past the owner's time bound on a worker's run, and was stopped. */
+	botTurnOverTime: (agentId: string, limitSeconds: string) =>
+		`Bot ${agentId}: its turn was stopped at the time bound (workerDelegation.maxWallClockMs is ${limitSeconds} s).`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session did not close cleanly (${reason}).`,
 	botSessionNotClosed: "The bot session did not close cleanly.",
