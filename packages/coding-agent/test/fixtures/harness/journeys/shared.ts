@@ -1442,6 +1442,19 @@ export const ICM_INTAKE_JUDGMENTS = {
 	capabilities_authorized: { kind: "noul", probability: 0.02 },
 } as const;
 
+/**
+ * The answer claim check's readings for a final answer that claims no delivery (`claim-delivery.ts`): its questions are
+ * asked of every final answer whose words could name one (a check, a test, a push), and here none is stated.
+ */
+export const NO_DELIVERY_CLAIMS = {
+	states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+	states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
+	states_committed: { kind: "noul", probability: 0.02 },
+	states_pushed: { kind: "noul", probability: 0.02 },
+	states_published: { kind: "noul", probability: 0.02 },
+	states_files_changed: { kind: "noul", probability: 0.02 },
+} as const;
+
 /** Valid ICM settings for the Pi-adaptative-memory continuous chat with a reasoning summary model. */
 export function icmContinuousSettings(summaryTrack = "worker-c", extra?: Partial<Settings>): Partial<Settings> {
 	return {

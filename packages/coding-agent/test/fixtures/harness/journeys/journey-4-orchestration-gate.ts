@@ -3,7 +3,7 @@ import { join } from "node:path";
 import { expect } from "vitest";
 import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
-import { ICM_INTAKE_JUDGMENTS, LIMITS_PATH, latestBatchResults } from "./shared.ts";
+import { ICM_INTAKE_JUDGMENTS, LIMITS_PATH, latestBatchResults, NO_DELIVERY_CLAIMS } from "./shared.ts";
 
 /** The intake judgments a plain prompt consumes here: a start without a profile asks no capability question. */
 const { capabilities_authorized: _capabilities, ...INTAKE_JUDGMENTS } = ICM_INTAKE_JUDGMENTS;
@@ -11,16 +11,6 @@ const { capabilities_authorized: _capabilities, ...INTAKE_JUDGMENTS } = ICM_INTA
 /** The text the delegation gate's refusal opens with; the refused call's result carries it. */
 const REFUSAL = "The root orchestrates and does not carry out task work itself";
 const ORIGINAL_LIMITS = "export const MAX_RETRIES = 3;\n";
-
-/** What a final answer is checked for once a work unit is open: nothing in these answers claims a delivery. */
-const NO_DELIVERY_CLAIMS = {
-	states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-	states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-	states_committed: { kind: "noul", probability: 0.02 },
-	states_pushed: { kind: "noul", probability: 0.02 },
-	states_published: { kind: "noul", probability: 0.02 },
-	states_files_changed: { kind: "noul", probability: 0.02 },
-} as const;
 
 /**
  * Orchestration enabled (`orchestrator.delegationGate`): the root orchestrates and its workers carry out the work.

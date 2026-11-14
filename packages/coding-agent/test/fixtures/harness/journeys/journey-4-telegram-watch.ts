@@ -6,7 +6,13 @@ import { calls, createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { deliveryWith, FakeBotApi, OWNER_ID, ownerLegUpdate, TOKEN, withFakeBotApi } from "./journey-4-telegram.ts";
 import { scriptRequirementCheckSpawn } from "./journey-9-shared.ts";
-import { ICM_INTAKE_JUDGMENTS, latestBatchResults, refusalDiagnostic, refusalNextAction } from "./shared.ts";
+import {
+	ICM_INTAKE_JUDGMENTS,
+	latestBatchResults,
+	NO_DELIVERY_CLAIMS,
+	refusalDiagnostic,
+	refusalNextAction,
+} from "./shared.ts";
 
 /** At most eight characters: a held line never shortens it, so the hold names it whole. */
 const WATCH_ID = "release";
@@ -104,9 +110,11 @@ export async function runJourney4TelegramWatchPhase(world: HarnessWorld): Promis
 			// submission order; no grant is standing, so whether they grant one is asked too). System One cannot read
 			// what the project script does: whether it changes files outside the task or cannot be undone stays
 			// unsettled (above the effect family's 0.5 absence cut, below its 0.8 presence), and the request does not
-			// settle it (between 0.2 and 0.8), so the check goes to the owner.
+			// settle it (between 0.2 and 0.8), so the check goes to the owner. The held run's answer names the watch's check,
+			// a word the answer claim check reads for, and claims nothing delivered; the approval run's answer names no such word.
 			world.systemOne.enterPhase("j4-tg-watch-request", {
 				...ICM_INTAKE_JUDGMENTS,
+				...NO_DELIVERY_CLAIMS,
 				leaves_machine: { kind: "noul", probability: 0.1 },
 				cannot_be_undone: { kind: "noul", probability: 0.6 },
 				touches_outside_task: { kind: "noul", probability: 0.6 },
