@@ -5,6 +5,7 @@ import { OrchestrationProfileStore } from "../../../../src/core/orchestration/pr
 import { calls, createBarrier, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 import type { ShellRequest } from "../virtual-shell.ts";
+import { scriptRequirementCheckSpawn } from "./journey-9-shared.ts";
 import {
 	assertWatchWake,
 	latestWatchWakeText,
@@ -498,150 +499,162 @@ export async function runJourney4WatchPhase(world: HarnessWorld): Promise<void> 
 			expect.arrayContaining(["TMPDIR", "TMP", "TEMP"]),
 		);
 	};
-	const baselineSampled = createBarrier();
-	world.shell.enqueue({
-		name: "j4-watch-cmd-baseline",
-		command: statusCommand,
-		output: "status: building\n",
-		exitCode: 0,
-		check: checkWorkerShell,
-		effect: () => baselineSampled.release(),
-	});
-	const commandRunning = createBarrier();
-	const holdCommandWorker = createBarrier();
-	const commandWoken = createBarrier();
-	const rootHeardCommandWorker = createBarrier();
-	world.provider.enqueue(
-		"root",
-		calls("j4-watch-cmd-start-call", [
-			{
-				id: "j4-watch-cmd-start",
-				name: "delegate",
-				arguments: {
-					action: "start",
-					profileId: SHELL_PROFILE_ID,
-					instructions: "Wait until build-status.txt reads done with a command watch, then report it.",
-				},
-			},
-		]),
-		{
-			name: "j4-watch-cmd-start-answer",
-			check: (request) => {
-				const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
-				expect(result?.isError, result?.text).toBe(false);
-			},
-			reply: { content: [{ type: "text", text: "A worker waits for the build." }] },
-		},
-		{
-			...text("j4-watch-cmd-report-wake", "The build worker reported."),
-			check: (request) => {
-				const heard = JSON.stringify(request.context.messages);
-				expect(heard, "the root hears the worker's own report").toContain("Background worker terminal handoff:");
-				expect(heard, "the root is not told of the watch the worker armed").not.toContain(
-					"Watch build-wait fired:",
-				);
-				rootHeardCommandWorker.release();
-			},
-		},
-	);
-	world.provider.enqueue(
-		"worker-a",
-		{
-			name: "j4-watch-cmd-arm",
-			check: (request) => {
-				expect(toolNames(request), "the worker holds its shell and the watch tool").toEqual(
-					expect.arrayContaining(["bash", "task_watch"]),
-				);
-			},
-			reply: calls("j4-watch-cmd-arm-call", [
+	// Each check of the watched command is a requirement-check process, as a session watch's is: the world's shell
+	// answers that exact command line for the length of this leg.
+	const scriptedCheck = scriptRequirementCheckSpawn(world, statusCommand);
+	try {
+		const baselineSampled = createBarrier();
+		world.shell.enqueue({
+			name: "j4-watch-cmd-baseline",
+			command: statusCommand,
+			output: "status: building\n",
+			exitCode: 0,
+			check: checkWorkerShell,
+			effect: () => baselineSampled.release(),
+		});
+		const commandRunning = createBarrier();
+		const holdCommandWorker = createBarrier();
+		const commandWoken = createBarrier();
+		const rootHeardCommandWorker = createBarrier();
+		world.provider.enqueue(
+			"root",
+			calls("j4-watch-cmd-start-call", [
 				{
-					id: "j4-watch-cmd-arm",
-					name: "task_watch",
+					id: "j4-watch-cmd-start",
+					name: "delegate",
 					arguments: {
-						routineId: "build-wait",
-						prompt: commandPlan,
-						condition: {
-							type: "command",
-							command: statusCommand,
-							everyMs: 1_000,
-							expect: { outputContains: "done" },
-						},
-						expiresAt: world.timers.port("routines").now() + 3_600_000,
+						action: "start",
+						profileId: SHELL_PROFILE_ID,
+						instructions: "Wait until build-status.txt reads done with a command watch, then report it.",
 					},
 				},
-			]).reply,
-		},
-		{
-			name: "j4-watch-cmd-hold",
-			gate: holdCommandWorker.promise,
-			check: (request) => {
-				const result = latestBatchResults(request).find((entry) => entry.toolName === "task_watch");
-				expect(result?.isError, result?.text).toBe(false);
-				expect(result?.text).toContain('"armed":true');
-				commandRunning.release();
-			},
-			reply: calls("j4-watch-cmd-read-call", [{ id: "j4-watch-cmd-read", name: "read", arguments: { path: notes } }])
-				.reply,
-		},
-		{
-			name: "j4-watch-cmd-woken",
-			check: (request) => {
-				assertWatchWake(latestWatchWakeText(request, "build-wait"), {
-					routineId: "build-wait",
-					cause: "A watched command check now passes",
-					plan: commandPlan,
-					planFenced: true,
-					facts: { condition: "command", change: "matched", facts: { exitCode: 0 } },
-					excerpt: { source: "watch:command", text: "status: done" },
-				});
-				commandWoken.release();
-			},
-			reply: calls("j4-watch-cmd-report", [
-				{
-					id: "j4-watch-cmd-report",
-					name: "submit_report",
-					arguments: { status: "completed", summary: "The build status reads done." },
+			]),
+			{
+				name: "j4-watch-cmd-start-answer",
+				check: (request) => {
+					const result = latestBatchResults(request).find((entry) => entry.toolName === "delegate");
+					expect(result?.isError, result?.text).toBe(false);
 				},
-			]).reply,
-		},
-	);
-	const commandWorkersBefore = workerRequests();
-	await withDeadline(
-		trace,
-		"the owner's build worker turn",
-		session.prompt("Have a worker wait for the build to be done and report it."),
-	);
-	await withDeadline(trace, "the worker armed its command watch and is running", commandRunning.promise);
-	await withDeadline(trace, "the command watch took its starting state", baselineSampled.promise);
-	expect(
-		{ firings: runsOf("build-wait"), scope: storedScope() },
-		"the watch stores the worker's read-only, offline scope, and the starting state fires nothing",
-	).toEqual({
-		firings: 0,
-		scope: expect.objectContaining({ shellReadOnly: true, readOnly: true, network: false }),
-	});
-	const doneSampled = createBarrier();
-	world.shell.enqueue({
-		name: "j4-watch-cmd-done",
-		command: statusCommand,
-		output: "status: done\n",
-		exitCode: 0,
-		check: checkWorkerShell,
-		effect: () => doneSampled.release(),
-	});
-	world.timers.advance("routines", 1_000);
-	await withDeadline(trace, "the command watch checked again", doneSampled.promise);
-	await untilRuns("build-wait", 1);
-	holdCommandWorker.release();
-	await withDeadline(trace, "the running worker is steered with the command's output", commandWoken.promise);
-	await withDeadline(trace, "the root hears the build worker's report", rootHeardCommandWorker.promise);
-	await withDeadline(trace, "agent idle after the build worker's report", session.agent.waitForIdle());
-	await withDeadline(trace, "the session is at rest after the build worker's report", session.waitForForegroundIdle());
-	expect(
-		{ workerSteps: workerRequests() - commandWorkersBefore, firings: runsOf("build-wait") },
-		"the worker took three model steps (arm, read, report) and its command watch fired once",
-	).toEqual({ workerSteps: 3, firings: 1 });
-	expectDelivered("build-wait", 1);
+				reply: { content: [{ type: "text", text: "A worker waits for the build." }] },
+			},
+			{
+				...text("j4-watch-cmd-report-wake", "The build worker reported."),
+				check: (request) => {
+					const heard = JSON.stringify(request.context.messages);
+					expect(heard, "the root hears the worker's own report").toContain("Background worker terminal handoff:");
+					expect(heard, "the root is not told of the watch the worker armed").not.toContain(
+						"Watch build-wait fired:",
+					);
+					rootHeardCommandWorker.release();
+				},
+			},
+		);
+		world.provider.enqueue(
+			"worker-a",
+			{
+				name: "j4-watch-cmd-arm",
+				check: (request) => {
+					expect(toolNames(request), "the worker holds its shell and the watch tool").toEqual(
+						expect.arrayContaining(["bash", "task_watch"]),
+					);
+				},
+				reply: calls("j4-watch-cmd-arm-call", [
+					{
+						id: "j4-watch-cmd-arm",
+						name: "task_watch",
+						arguments: {
+							routineId: "build-wait",
+							prompt: commandPlan,
+							condition: {
+								type: "command",
+								command: statusCommand,
+								everyMs: 1_000,
+								expect: { outputContains: "done" },
+							},
+							expiresAt: world.timers.port("routines").now() + 3_600_000,
+						},
+					},
+				]).reply,
+			},
+			{
+				name: "j4-watch-cmd-hold",
+				gate: holdCommandWorker.promise,
+				check: (request) => {
+					const result = latestBatchResults(request).find((entry) => entry.toolName === "task_watch");
+					expect(result?.isError, result?.text).toBe(false);
+					expect(result?.text).toContain('"armed":true');
+					commandRunning.release();
+				},
+				reply: calls("j4-watch-cmd-read-call", [
+					{ id: "j4-watch-cmd-read", name: "read", arguments: { path: notes } },
+				]).reply,
+			},
+			{
+				name: "j4-watch-cmd-woken",
+				check: (request) => {
+					assertWatchWake(latestWatchWakeText(request, "build-wait"), {
+						routineId: "build-wait",
+						cause: "A watched command check now passes",
+						plan: commandPlan,
+						planFenced: true,
+						facts: { condition: "command", change: "matched", facts: { exitCode: 0 } },
+						excerpt: { source: "watch:command", text: "status: done" },
+					});
+					commandWoken.release();
+				},
+				reply: calls("j4-watch-cmd-report", [
+					{
+						id: "j4-watch-cmd-report",
+						name: "submit_report",
+						arguments: { status: "completed", summary: "The build status reads done." },
+					},
+				]).reply,
+			},
+		);
+		const commandWorkersBefore = workerRequests();
+		await withDeadline(
+			trace,
+			"the owner's build worker turn",
+			session.prompt("Have a worker wait for the build to be done and report it."),
+		);
+		await withDeadline(trace, "the worker armed its command watch and is running", commandRunning.promise);
+		await withDeadline(trace, "the command watch took its starting state", baselineSampled.promise);
+		expect(
+			{ firings: runsOf("build-wait"), scope: storedScope() },
+			"the watch stores the worker's read-only, offline scope, and the starting state fires nothing",
+		).toEqual({
+			firings: 0,
+			scope: expect.objectContaining({ shellReadOnly: true, readOnly: true, network: false }),
+		});
+		const doneSampled = createBarrier();
+		world.shell.enqueue({
+			name: "j4-watch-cmd-done",
+			command: statusCommand,
+			output: "status: done\n",
+			exitCode: 0,
+			check: checkWorkerShell,
+			effect: () => doneSampled.release(),
+		});
+		world.timers.advance("routines", 1_000);
+		await withDeadline(trace, "the command watch checked again", doneSampled.promise);
+		await untilRuns("build-wait", 1);
+		holdCommandWorker.release();
+		await withDeadline(trace, "the running worker is steered with the command's output", commandWoken.promise);
+		await withDeadline(trace, "the root hears the build worker's report", rootHeardCommandWorker.promise);
+		await withDeadline(trace, "agent idle after the build worker's report", session.agent.waitForIdle());
+		await withDeadline(
+			trace,
+			"the session is at rest after the build worker's report",
+			session.waitForForegroundIdle(),
+		);
+		expect(
+			{ workerSteps: workerRequests() - commandWorkersBefore, firings: runsOf("build-wait") },
+			"the worker took three model steps (arm, read, report) and its command watch fired once",
+		).toEqual({ workerSteps: 3, firings: 1 });
+		expectDelivered("build-wait", 1);
+	} finally {
+		scriptedCheck.restore();
+	}
 
 	// Resuming a watch is planning, as arming one is: under an envelope that grants workflow.plan and not workflow.delegate
 	// (a session launched with such a profile), the routine store tells the gate the paused watch runs no worker, so it
