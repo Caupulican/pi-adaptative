@@ -5,10 +5,12 @@
  * to can never come back.
  * Read from durable records, a notice survives the process that wrote the state: a restart or a session reopened in the
  * background observes it again, and a notice already saved in the session is found and not repeated.
+ * Each line is one sentence of the notices catalogue (`routineStates`): the model reads it in English, the owner in the
+ * interface language.
  */
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { HarnessNotice } from "../harness-notice.ts";
-import { englishText } from "../language/interface-text.ts";
+import { englishText, type InterfaceText, interfaceText } from "../language/interface-text.ts";
 import { type RoutineDefinitionView, type RoutineOccurrence, routineZoneUnsupported } from "./routine-contract.ts";
 import { latestUndeliverableResults } from "./routine-origin-reach.ts";
 import { PROMOTED_SNAG_RUNS, promotedRoutineSnags } from "./routine-progress.ts";
@@ -31,6 +33,21 @@ export interface RoutineNoticeFacts {
 	readonly retired: readonly RetiredRoutineRecord[];
 }
 
+type RoutineStateWords = InterfaceText["notices"];
+
+/**
+ * A routine state notice whose line one formatter words: in English for the model, in the interface language for the
+ * owner (`ownerText`).
+ */
+function routineNotice(reason: string, line: (words: RoutineStateWords) => string, evidence?: string): HarnessNotice {
+	return {
+		reason,
+		text: line(englishText().notices),
+		ownerText: line(interfaceText().notices),
+		...(evidence === undefined ? {} : { evidence }),
+	};
+}
+
 /**
  * Per routine, the latest loss of its saved origin the owner is told: a result settled undeliverable, or the routine's
  * removal because its own origin is lost, whichever came last (the removal on a tie: it ends the routine).
@@ -40,10 +57,9 @@ function originLostNotices(facts: RoutineNoticeFacts): Map<string, HarnessNotice
 	for (const result of latestUndeliverableResults(facts.occurrences).values())
 		notices.set(result.routineId, {
 			at: result.settledAt,
-			notice: {
-				reason: `result:${result.occurrenceId}:${result.loss}`,
-				text: `A result of routine ${result.routineId} can never reach this session, so it no longer waits for delivery: ${englishText().notices.routineOriginLoss(result.loss)}.`,
-			},
+			notice: routineNotice(`result:${result.occurrenceId}:${result.loss}`, (words) =>
+				words.routineStates.resultUndeliverable(result.routineId, words.routineOriginLoss(result.loss)),
+			),
 		});
 	for (const record of facts.retired) {
 		if (record.reason !== "origin-lost") continue;
@@ -51,10 +67,9 @@ function originLostNotices(facts: RoutineNoticeFacts): Map<string, HarnessNotice
 		if (known && known.at > record.retiredAt) continue;
 		notices.set(record.routineId, {
 			at: record.retiredAt,
-			notice: {
-				reason: `retired:${record.incarnationId}`,
-				text: `Routine ${record.routineId} was removed: the point of this session it was saved at can never be reached again (its session file is gone, or its entry is missing from the session file), so none of its runs could ever report here. Save it again to keep it running.`,
-			},
+			notice: routineNotice(`retired:${record.incarnationId}`, (words) =>
+				words.routineStates.removedOriginLost(record.routineId),
+			),
 		});
 	}
 	return new Map([...notices].map(([routineId, { notice }]) => [routineId, notice]));
@@ -82,10 +97,9 @@ export class RoutineStateNotices {
 				"routine-unschedulable",
 				routine.routineId,
 				schedule.kind === "calendar" && routineZoneUnsupported(schedule) !== undefined
-					? {
-							reason: `${routine.routineId}:${routine.incarnationId}:${schedule.timeZone}`,
-							text: `Routine ${routine.routineId} cannot be scheduled: time zone ${JSON.stringify(schedule.timeZone)} is not supported by this runtime, so it does not run until the owner changes the zone or a runtime that supports it opens the session.`,
-						}
+					? routineNotice(`${routine.routineId}:${routine.incarnationId}:${schedule.timeZone}`, (words) =>
+							words.routineStates.unschedulable(routine.routineId, schedule.timeZone),
+						)
 					: undefined,
 			);
 			for (const scope of this.observeSnags(port, routine)) promoted.add(scope);
@@ -116,12 +130,13 @@ export class RoutineStateNotices {
 		port.noticeRoutineState(
 			"routine-paused",
 			routine.routineId,
-			pause && {
-				reason: `${routine.routineId}:${pause.occurrenceId}`,
-				text: `Routine ${routine.routineId} was paused after ${pause.after} failed runs in a row and stays paused until the owner resumes it.`,
-				// The failed run's own words: the model reads them fenced as data, the owner's line does not carry them.
-				evidence: `The last run reported:\n${pause.lastError}`,
-			},
+			pause &&
+				routineNotice(
+					`${routine.routineId}:${pause.occurrenceId}`,
+					(words) => words.routineStates.paused(routine.routineId, pause.after),
+					// The failed run's own words: the model reads them fenced as data, the owner's line does not carry them.
+					`The last run reported:\n${pause.lastError}`,
+				),
 		);
 	}
 
@@ -134,26 +149,21 @@ export class RoutineStateNotices {
 			this.noticedSnags.add(scope);
 			// A paused or off routine runs nothing: the headline says so first, and its
 			// reason changes with that state, so the notice is told again when the state changes.
-			const held =
-				routine.failurePause !== undefined
-					? "paused until the owner resumes it"
-					: !routine.enabled
-						? "off until the owner enables it"
-						: undefined;
-			const stumbling = `keeps stumbling on the same thing (${snag.seenCount} runs so far).`;
+			const held = routine.failurePause !== undefined ? "paused" : !routine.enabled ? "off" : undefined;
 			// The snag's own words, as the run wrote them: fenced for the model, never part of the owner's line.
 			const evidence = [
 				`Where the run stumbled: ${snag.what}`,
 				...(snag.remedy ? [`The last remedy tried: ${snag.remedy}`] : []),
 			].join("\n");
-			port.noticeRoutineState("routine-snag", scope, {
-				reason: `${routine.routineId}:${snag.signature}:${snag.firstSeenAt}:${held === undefined ? "active" : "held"}`,
-				text:
-					held === undefined
-						? `Routine ${routine.routineId} ${stumbling} A note through the routine tool reaches its next run.`
-						: `Routine ${routine.routineId} is ${held}; a note through the routine tool reaches its first run after that. It ${stumbling}`,
-				evidence,
-			});
+			port.noticeRoutineState(
+				"routine-snag",
+				scope,
+				routineNotice(
+					`${routine.routineId}:${snag.signature}:${snag.firstSeenAt}:${held === undefined ? "active" : "held"}`,
+					(words) => words.routineStates.snag(routine.routineId, snag.seenCount, held),
+					evidence,
+				),
+			);
 		}
 		return scopes;
 	}

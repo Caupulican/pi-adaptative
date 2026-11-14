@@ -75,6 +75,24 @@ export const NOTICES = {
 		loss === "session-file-gone"
 			? "o arquivo de sessão ao qual ele se destinava não existe mais"
 			: "o ponto desta conversa ao qual ele se destinava não está no arquivo da sessão, por exemplo perdido numa queda antes de ser gravado",
+	/** Os estados de rotina que o agendador de uma sessão conta como avisos do harness (`routine-state-notices.ts`). */
+	routineStates: {
+		paused: (routineId: string, after: number) =>
+			`A rotina ${routineId} foi pausada após ${after} execuções com falha seguidas e fica pausada até você retomá-la.`,
+		unschedulable: (routineId: string, timeZone: string) =>
+			`A rotina ${routineId} não pode ser agendada: o fuso horário ${JSON.stringify(timeZone)} não é suportado por este runtime, então ela não roda até você mudar o fuso ou um runtime que o suporte abrir a sessão.`,
+		snag: (routineId: string, seenCount: number, held: "paused" | "off" | undefined): string => {
+			const stumbling = `continua tropeçando na mesma coisa (${seenCount} execuções até agora).`;
+			if (held === undefined)
+				return `A rotina ${routineId} ${stumbling} Uma nota pela ferramenta de rotinas chega à próxima execução dela.`;
+			const state = held === "paused" ? "pausada até você retomá-la" : "desligada até você ativá-la";
+			return `A rotina ${routineId} está ${state}; uma nota pela ferramenta de rotinas chega à primeira execução depois disso. Ela ${stumbling}`;
+		},
+		resultUndeliverable: (routineId: string, why: string) =>
+			`Um resultado da rotina ${routineId} nunca poderá chegar a esta sessão, então ele não espera mais pela entrega: ${why}.`,
+		removedOriginLost: (routineId: string) =>
+			`A rotina ${routineId} foi removida: o ponto desta sessão em que ela foi salva nunca mais poderá ser alcançado (o arquivo da sessão não existe mais, ou a entrada dela falta no arquivo da sessão), então nenhuma execução dela poderia informar aqui. Salve-a de novo para que continue rodando.`,
+	},
 
 	widgetTruncated: "... (widget truncado)",
 	/** O aviso de cobrança de uma sessão autenticada com uma chave de assinatura. */

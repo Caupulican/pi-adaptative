@@ -1,7 +1,8 @@
 /**
  * The English notices the host writes on screen: the error and warning lines it wraps around a failure, what a
  * compaction and a retry say as they start, end and fall back, and the one-line notices of the start-up checks. Nothing
- * here reaches a model: a message that a tool or a provider wrote is handed in whole and keeps its own words.
+ * here reaches a model, except the routine state sentences a harness notice carries in English to the model while the owner
+ * reads them in the interface language: a message that a tool or a provider wrote is handed in whole and keeps its own words.
  */
 
 export const NOTICES = {
@@ -86,6 +87,29 @@ export const NOTICES = {
 		loss === "session-file-gone"
 			? "the session file it was addressed to no longer exists"
 			: "the point of this conversation it was addressed to is missing from the session file, for example lost in a crash before it was written",
+	/**
+	 * The routine states a session's scheduler tells as harness notices (`routine-state-notices.ts`): one sentence each, the
+	 * model's line worded with the English catalogue and the owner's with the interface language.
+	 */
+	routineStates: {
+		paused: (routineId: string, after: number) =>
+			`Routine ${routineId} was paused after ${after} failed runs in a row and stays paused until the owner resumes it.`,
+		unschedulable: (routineId: string, timeZone: string) =>
+			`Routine ${routineId} cannot be scheduled: time zone ${JSON.stringify(timeZone)} is not supported by this runtime, so it does not run until the owner changes the zone or a runtime that supports it opens the session.`,
+		/** `held`: the routine runs nothing now (paused after failed runs, or off), so the note reaches its first run after that. */
+		snag: (routineId: string, seenCount: number, held: "paused" | "off" | undefined): string => {
+			const stumbling = `keeps stumbling on the same thing (${seenCount} runs so far).`;
+			if (held === undefined)
+				return `Routine ${routineId} ${stumbling} A note through the routine tool reaches its next run.`;
+			const state = held === "paused" ? "paused until the owner resumes it" : "off until the owner enables it";
+			return `Routine ${routineId} is ${state}; a note through the routine tool reaches its first run after that. It ${stumbling}`;
+		},
+		/** `why`: the loss, worded by `routineOriginLoss` of the same catalogue. */
+		resultUndeliverable: (routineId: string, why: string) =>
+			`A result of routine ${routineId} can never reach this session, so it no longer waits for delivery: ${why}.`,
+		removedOriginLost: (routineId: string) =>
+			`Routine ${routineId} was removed: the point of this session it was saved at can never be reached again (its session file is gone, or its entry is missing from the session file), so none of its runs could ever report here. Save it again to keep it running.`,
+	},
 
 	/** What a widget the extension drew too tall to keep becomes at the top of its frame. */
 	widgetTruncated: "... (widget truncated)",

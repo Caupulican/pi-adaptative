@@ -23,6 +23,8 @@ that can never reach its session (the session file it was addressed to is gone, 
 anchored at is missing from it) is settled instead of waiting and told with one such notice; a
 routine whose own saved point of the session is lost that way is removed and told the same way. A
 result addressed to a session that was deleted is settled by the next main session's startup cleanup.
+A routine's notice (paused, not schedulable, a recurring snag, a result or the routine lost with its
+origin) is shown to the owner in the interface language, English or pt-BR; the model reads it in English.
 Configure these settings through `/proactivity` or the `proactivity` settings. The model-facing
 preferences tool requires confirmation on the owner's screen before a change.
 

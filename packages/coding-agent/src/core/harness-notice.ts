@@ -50,12 +50,15 @@ export type HarnessNoticeKind =
 	| "orchestration-capacity";
 
 /**
- * One owner-actionable state: `reason` is its stable identity, `text` the one line the owner reads. `evidence` is optional
- * worker-written detail the model reads fenced as data; the owner's surface never shows it, and it is not part of `reason`.
+ * One owner-actionable state: `reason` is its stable identity, `text` its one line in English, which the model reads and
+ * the owner too unless `ownerText` words it in the interface language (the same sentence's formatter, given the interface
+ * catalogue's words). `evidence` is optional worker-written detail the model reads fenced as data; the owner's surface never
+ * shows it, and it is not part of `reason`.
  */
 export interface HarnessNotice {
 	readonly reason: string;
 	readonly text: string;
+	readonly ownerText?: string;
 	readonly evidence?: string;
 }
 
@@ -146,6 +149,8 @@ function harnessNoticeMessage(input: {
 	readonly reason: string;
 	readonly generation: number;
 	readonly headline: string;
+	/** The owner's line in the interface language, when it is not the model's headline. */
+	readonly ownerHeadline: string | undefined;
 	readonly evidence: string | undefined;
 }): ParentInputDelivery["message"] {
 	const fence =
@@ -164,13 +169,17 @@ function harnessNoticeMessage(input: {
 			...fence,
 			"The owner sees this notice directly; mention it only if it bears on what they ask.",
 		].join("\n"),
-		// The headline rides in details only when evidence follows it: without evidence the content IS the headline, so a
-		// notice saved without evidence keeps the details it always had.
+		// The owner's line rides in details when it is not the content alone: an owner line in another language, or a
+		// headline evidence follows. Otherwise the content IS the headline, and the notice keeps the details it always had.
 		details: {
 			kind: input.kind,
 			reason: input.reason,
 			generation: input.generation,
-			...(input.evidence === undefined ? {} : { headline: input.headline }),
+			...(input.ownerHeadline !== undefined
+				? { headline: input.ownerHeadline }
+				: input.evidence === undefined
+					? {}
+					: { headline: input.headline }),
 		},
 	};
 }
@@ -359,6 +368,8 @@ export class HarnessNoticeController {
 			return true;
 		}
 		const text = boundedRedactedNoticeHeadline(observation.text);
+		const ownerHeadline =
+			observation.ownerText === undefined ? undefined : boundedRedactedNoticeHeadline(observation.ownerText);
 		if (!text) {
 			state.unsaved = recurred;
 			return false;
@@ -373,6 +384,7 @@ export class HarnessNoticeController {
 				reason,
 				generation,
 				headline: text,
+				ownerHeadline: ownerHeadline === text ? undefined : ownerHeadline,
 				evidence:
 					observation.evidence === undefined ? undefined : boundedRedactedNoticeEvidence(observation.evidence),
 			});
