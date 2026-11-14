@@ -709,8 +709,8 @@ export class BotSessionHost {
 		entry.idleTimer = this.idleTimers().setTimeout(() => {
 			entry.idleTimer = undefined;
 			if (this.entries.get(entry.agentId) !== entry || this.isBusy(entry)) return;
-			// Its watches are sampled only while it is loaded: it stays until they fire, end or are dropped.
-			if (this.holdsWatches(entry.session.sessionId)) return this.armIdle(entry);
+			// Its watches are sampled and their wakes taken only while it is loaded: it stays until they are woken, end or are dropped.
+			if (this.owesWatchWork(entry.session.sessionId)) return this.armIdle(entry);
 			void this.close(entry.agentId).catch((error: unknown) =>
 				this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(entry.agentId, errorText(error))),
 			);
@@ -747,14 +747,22 @@ export class BotSessionHost {
 		if (cancelled > 0) this.ports.warn(interfaceText().botTeam.botWatchesCancelled(agentId, cancelled));
 	}
 
-	/** Whether the bot session `sessionId` holds a live watch, as the store says now. */
-	private holdsWatches(sessionId: string): boolean {
-		return liveOwnWatches(this.ports.store(), sessionId, this.idleTimers().now()).count > 0;
+	/**
+	 * Whether the bot session `sessionId` has watch work, as the store says now: a live watch to sample, or a firing whose wake
+	 * it has not yet taken (a one-shot that fired is no longer live, and its wake is delivered only by its own session).
+	 */
+	private owesWatchWork(sessionId: string): boolean {
+		const store = this.ports.store();
+		return (
+			liveOwnWatches(store, sessionId, this.idleTimers().now()).count > 0 ||
+			store.listPendingRoutineDeliveries(sessionId, 1).length > 0
+		);
 	}
 
 	/**
-	 * Opens the bot's session when its home's session holds live watches and no process hosts it: a watch is sampled only by
-	 * its own session, so a process that starts, or a session rebuilt on a changed record, takes the waits up again. Only a
+	 * Opens the bot's session when its home's session holds live watches or a fired watch's wake not yet taken, and no process
+	 * hosts it: a watch is sampled and its wake delivered only by its own session, so a process that starts, or a session
+	 * rebuilt on a changed record, takes the waits and the wakes up again. Only a
 	 * process working in the directory the session worked in takes it: a watch's relative path reads against that
 	 * directory. Another process that opened it first is not a failure.
 	 */
@@ -763,7 +771,7 @@ export class BotSessionHost {
 		if (this.stopped || this.entries.has(agentId) || readRemoteBotHost(agentDir, agentId, this.holder)) return;
 		const saved = this.view.savedSessionOf(agentId);
 		const record = this.ports.store().getBot(agentId);
-		if (!saved?.cwd || !record || !this.runsAsSession(record) || !this.holdsWatches(saved.id)) return;
+		if (!saved?.cwd || !record || !this.runsAsSession(record) || !this.owesWatchWork(saved.id)) return;
 		// A bot of its own works where the root it opens for works; a profile's, where its profile compiles to.
 		let sender: BotSender | undefined;
 		try {
@@ -784,7 +792,7 @@ export class BotSessionHost {
 		});
 	}
 
-	/** Opens every bot whose own session holds live watches that no process samples (see {@link openIfWatching}). */
+	/** Opens every bot whose own session has watch work that no process takes (see {@link openIfWatching}). */
 	openWatching(): void {
 		const bots = this.ports.store().listBots();
 		if (bots.length === 0) return;

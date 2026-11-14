@@ -56,7 +56,8 @@ whatever armed them (the bot can change or delete none). A command or page is fi
 fetch tool would make, by its own gate (System One's operation judgment included), so a bot without that tool arms
 nothing, and a read-only bot's command is held to its read-only shell at arming and at every check. The bot's own session
 samples its watches and wakes it with the event (a running turn is steered, an idle bot starts a turn); no other session
-samples or delivers them. While it holds a live watch its session stays loaded past the idle close, a process that starts
+samples or delivers them. While it holds a live watch, or a fired watch's wake it has not taken yet (a one-shot that fired
+is no longer live), its session stays loaded past the idle close, a process that starts
 or sees its host let it go or die opens it again (only where it works in the directory that session worked in; the phone session
 never does), and retiring the bot drops its watches. The roster shows each bot's live watch count with the operator bar's
 ring (`◌n`), read from the store in every session.

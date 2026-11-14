@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- A bot's watch that fired while its session was closing or its host died no longer loses its wake: a one-shot that fired stops counting as live, so nothing opened the session again to deliver it. A bot's session now stays loaded, and is opened again by a process working in its directory, while a fired watch's wake waits for it as well as while it holds a live watch.
 - Steering certificates persisted by one session are no longer dropped by another: every session (root, bot session, another process) rewrote the shared certificate file from its own store without a lock, so the last writer erased what the others had persisted since they loaded. A persist now takes the file's lock and keeps what the file holds.
 - A bot history index that exists but cannot be read no longer lets the startup cleanup remove the session directories it held: the cleanup is skipped while it stays unreadable, with a startup warning naming the bot in English and pt-BR.
 - A routine result addressed to a point of the conversation that can never come back no longer waits forever: when the session file it was addressed to is gone, or the entry it was anchored at is missing from the session file (for example lost in a crash before it was written), the session settles it as undeliverable, marks the run's stored result undeliverable with the reason and warns the owner once in English or pt-BR. It no longer holds the routine's next watch firing or a place in the routine journal. A result anchored on another branch or at an entry not yet written still waits.
