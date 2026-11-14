@@ -17,7 +17,7 @@ import { calls, createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { scriptRequirementCheckSpawn } from "./journey-9-shared.ts";
 import { scriptWatchWake, settleWatchWake } from "./journey-watch-wake.ts";
-import { INTAKE_JUDGMENTS_WITHOUT_GRANT, latestBatchResults, OPERATION_PROCEED_JUDGMENTS } from "./shared.ts";
+import { INTAKE_JUDGMENTS_WITHOUT_GRANT, latestBatchResults } from "./shared.ts";
 
 const PROFILE_ID = "progress-worker";
 const ROUTINE_ID = "shard-audit";
@@ -461,11 +461,10 @@ export async function runJourney4RoutineProgressPhase(world: HarnessWorld): Prom
 			},
 		);
 
-		// The watched command is admitted at arming as the shell call its check would make, so the operation gate judges it.
-		world.systemOne.enterPhase("j4-rp-watch-create", {
-			...INTAKE_JUDGMENTS_WITHOUT_GRANT,
-			...OPERATION_PROCEED_JUDGMENTS,
-		});
+		// The watched command is admitted at arming as the shell call its check would make. This session keeps the default
+		// edge.allow, which grants operation.irreversible, so the operation gate lets that call through under the owner's
+		// grant and asks System One nothing about it.
+		world.systemOne.enterPhase("j4-rp-watch-create", INTAKE_JUDGMENTS_WITHOUT_GRANT);
 		await withDeadline(
 			trace,
 			"the owner arms the command alert watch",

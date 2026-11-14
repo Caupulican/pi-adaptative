@@ -1434,18 +1434,6 @@ export const INTAKE_JUDGMENTS_WITHOUT_GRANT = {
 } as const;
 
 /**
- * The System One operation gate's questions for a shell call that has no effect beyond the task and that the owner's
- * request covers: it proceeds.
- */
-export const OPERATION_PROCEED_JUDGMENTS = {
-	leaves_machine: { kind: "noul", probability: 0.02 },
-	cannot_be_undone: { kind: "noul", probability: 0.02 },
-	touches_outside_task: { kind: "noul", probability: 0.02 },
-	acquires_external_code: { kind: "noul", probability: 0.02 },
-	request_authorizes: { kind: "noul", probability: 0.02 },
-} as const;
-
-/**
  * The judgments a plain owner request that leads to a tool call consumes (the E4 set): the intake questions and the
  * capability question, which is asked only while a grant is pending.
  */
