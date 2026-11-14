@@ -206,12 +206,10 @@ export interface CreateAgentSessionOptions {
 	 * (credentials, auth, settings, memory, sessions, state, channels) are denied, plus `deniedPaths`. YOLO keeps it.
 	 */
 	privatePathScope?: SessionPrivatePathScope;
-	/**
-	 * The capability ceiling the session's tool gate holds every call to, from its first turn: the tools it may call, the
-	 * capabilities a call may use and its cost bound (a bot made from a worker profile holds the profile's). YOLO skips it,
-	 * as it skips every envelope prompt; the path scopes above still apply.
-	 */
+	/** The capability ceiling its tool gate holds every call to from its first turn (a profile bot's); YOLO skips it. */
 	capabilityEnvelope?: CapabilityEnvelope;
+	/** The session never leaves its model (no account default, failover or replacement); its host refuses a turn it cannot run. */
+	pinnedModel?: boolean;
 	/** The identity the system prompt opens with; default: the main agent's (`soul.md`). */
 	agentIdentity?: AgentIdentity;
 	/** Custom tools to register (in addition to built-in tools). */
@@ -900,6 +898,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				orchestrationProfile,
 				privatePathScope: options.privatePathScope,
 				capabilityEnvelope: options.capabilityEnvelope,
+				pinnedModel: options.pinnedModel,
 				agentIdentity: options.agentIdentity,
 				sessionStartEvent: options.sessionStartEvent,
 				systemOneController,

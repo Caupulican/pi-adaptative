@@ -57,9 +57,14 @@ export const BOT_TEAM = {
 	/** A bot made from a profile cannot run as the worker admission compiles that profile now. */
 	botProfileRefused: (agentId: string, profileId: string, reason: string) =>
 		`Bot ${agentId} was not started: its profile ${profileId} does not admit it now (${reason}). Fix the profile or the worker policy, then message it again.`,
-	/** A run of a profile bot's session built before its profile, a pin or the worker policy changed what it compiles to. */
-	botProfileChanged: (agentId: string, profileId: string) =>
-		`Bot ${agentId}: its profile ${profileId} now compiles to a different session (the profile, a model pin or the worker policy changed), so this run was not started on the old one. Its session is rebuilt once it is idle; message it again.`,
+	botModelMoved: (agentId: string, running: string, defined: string) =>
+		`Bot ${agentId}: its session is on ${running}, not on ${defined}, the model the bot is defined on, so this run was not started.`,
+	/** The bot's own model cannot run now (`cause`: out of quota, refused or unlisted for the account). */
+	botModelUnusable: (modelRef: string, cause: string) =>
+		`${modelRef} cannot run now (${cause}); the bot runs only on its own model, so message it again when that model is usable or change the bot's model`,
+	/** A run of a bot's session built before its record or profile changed what defines it. */
+	botSessionOutdated: (agentId: string) =>
+		`Bot ${agentId}: what defines its session changed since it was built (its record, its profile, a model pin or the worker policy), so this run was not started on the old one. Its session is rebuilt once it is idle; message it again.`,
 	botSoulRefused: (agentId: string, reason: string) =>
 		`Bot ${agentId} was not started: ${reason}. Edit its soul with /bot soul ${agentId}.`,
 	/** Another process holds the bot's session: two processes would write one conversation. */

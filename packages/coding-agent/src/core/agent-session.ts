@@ -724,6 +724,7 @@ export class AgentSession {
 		this.agent = config.agent;
 		this.settingsManager = config.settingsManager;
 		this.capabilityEnvelope = config.capabilityEnvelope;
+		this._modelAccess.pinned = config.pinnedModel === true;
 		this._onClosingWarnings = config.onClosingWarnings ?? writeTerminalWarnings;
 		// Without a checked catalog nothing is known up front, but a provider's refusal is still recorded.
 		this._accountModels =
@@ -1705,15 +1706,7 @@ export class AgentSession {
 			agent: this.agent,
 			timers: config.timers,
 			chatTurns: () => this._memory.continuousChatHost()?.turns,
-			applyFailoverModel: (failed, hop) => {
-				// Same rule as an unsupported model: a routed turn's model stays inside that turn.
-				if (this._modelRouter.isRoutedTurnOn(failed))
-					return this._modelRouter.replaceRefusedRoutedModel(failed, hop);
-				this.agent.state.model = hop;
-				this.sessionManager.appendModelChange(hop.provider, hop.id);
-				this._modelAccess.moveTalker(hop, `${failed.provider}/${failed.id} out of quota`);
-				return hop;
-			},
+			applyFailoverModel: (failed, hop) => this._modelAccess.applyFailoverModel(failed, hop),
 			resolveFallbackModel: (failed) =>
 				this._modelRouter.resolveQuotaFallbackModel(failed, {
 					hasImages: false,
@@ -2293,6 +2286,7 @@ export class AgentSession {
 			},
 		});
 		this._modelSelection = new ModelSelectionController({
+			isModelPinned: () => this._modelAccess.pinned,
 			getAgent: () => this.agent,
 			getModel: () => this.model,
 			getThinkingLevel: () => this.thinkingLevel,

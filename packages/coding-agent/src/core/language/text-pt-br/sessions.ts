@@ -39,6 +39,8 @@ export const SESSIONS = {
 		defaultChosen: (modelId: string) => `Modelo padrão: ${modelId}`,
 		noneAvailable: "Nenhum modelo disponível",
 		selectionSaved: "Seleção de modelos salva nas configurações",
+		pinned: (current: string, requested: string) =>
+			`Esta sessão roda só em ${current}; ela não muda para ${requested}.`,
 	},
 	thinking: {
 		unsupported: "O modelo atual não aceita raciocínio",

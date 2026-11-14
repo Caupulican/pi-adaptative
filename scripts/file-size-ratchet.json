@@ -3,7 +3,7 @@
 	"limit": 1200,
 	"files": {
 		"packages/coding-agent/src/core/delegation/worker-delegation-controller.ts": 6527,
-		"packages/coding-agent/src/core/agent-session.ts": 5253,
+		"packages/coding-agent/src/core/agent-session.ts": 5247,
 		"packages/coding-agent/src/core/memory/transcript-memory.ts": 3535,
 		"packages/coding-agent/src/kernel/session/session-manager.ts": 3488,
 		"packages/coding-agent/src/modes/interactive/interactive-mode.ts": 3058,
@@ -62,7 +62,7 @@
 		"packages/coding-agent/src/core/process-matrix/runtime.ts": 1455,
 		"packages/coding-agent/src/core/routines/routine-scheduler-controller.ts": 1384,
 		"packages/coding-agent/src/core/chat/mesh.ts": 1434,
-		"packages/coding-agent/src/core/sdk.ts": 1358,
+		"packages/coding-agent/src/core/sdk.ts": 1357,
 		"packages/coding-agent/src/core/foreground-recovery-controller.ts": 1423,
 		"packages/tui/src/keys.ts": 1416,
 		"packages/coding-agent/src/core/pending-input-queue-controller.ts": 1310,

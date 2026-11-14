@@ -12,6 +12,8 @@ export const SESSIONS = {
 		defaultChosen: (modelId: string) => `Default model: ${modelId}`,
 		noneAvailable: "No models available",
 		selectionSaved: "Model selection saved to settings",
+		pinned: (current: string, requested: string) =>
+			`This session runs only on ${current}; it does not move to ${requested}.`,
 	},
 	thinking: {
 		unsupported: "Current model does not support thinking",

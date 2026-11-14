@@ -211,6 +211,8 @@ export interface AgentSessionConfig {
 	privatePathScope?: SessionPrivatePathScope;
 	/** The capability ceiling the session's tool gate holds every call to from its first turn; see `capabilityEnvelope` on the sdk. */
 	capabilityEnvelope?: CapabilityEnvelope;
+	/** The session never leaves its model; see `pinnedModel` on the sdk. */
+	pinnedModel?: boolean;
 	/** The identity the system prompt opens with; absent, the main agent's (`soul.md`). */
 	agentIdentity?: AgentIdentity;
 	/** Injectable local-runtime I/O dependencies. */

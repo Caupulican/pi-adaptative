@@ -24,8 +24,10 @@ those watches are cancelled and you are told. The record in the bot store stays 
 refreshes the profile and applies to its session when it starts, so a bot that is working must be stopped first. The session
 runs on the bot's model, under the rules a worker's own model is held to (a model that is gone, has no credentials, is paid by
 API key without being the owner's choice while subscription models are usable, or that your model policy disallows refuses the
-message, and every turn is held to them when it starts, a turn a watch's wake opens included; a refused model loads no session),
-and works in your project directory. Like a worker, it never reaches an owner credential file (`.env`, keys): a read or a
+message, and every turn is held to them when it starts, a turn a watch's wake opens included; a refused model loads no session).
+It never leaves that model: a model out of quota or refused for the account is not replaced by the account's default or a
+failover model; the turn is refused with the reason and the bot answers again once its model can run. The session works in
+your project directory. Like a worker, it never reaches an owner credential file (`.env`, keys): a read or a
 command that would is refused before it runs, never run with the values masked. Its name and its soul replace the main agent's in its system prompt, so it never
 introduces itself as the main agent. Its memory blackboard (`<agent dir>/memory/bots/<id>.md`, the same file a bot running as
 a worker reads) opens its system prompt under its soul when the session starts; it can read the file, not edit it, and a

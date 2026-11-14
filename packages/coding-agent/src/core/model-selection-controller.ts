@@ -17,6 +17,7 @@ import type { SessionManager } from "../kernel/node.ts";
 import type { AgentSessionEvent, ModelCycleResult } from "./agent-session-contracts.ts";
 import { DEFAULT_THINKING_LEVEL } from "./defaults.ts";
 import type { ExtensionRunner } from "./extensions/index.ts";
+import { interfaceText } from "./language/interface-text.ts";
 import type { ModelCapabilityProfile } from "./model-capability.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import { ANTIGRAVITY_EFFORT_ORDER, antigravityGeminiEffortFamily } from "./models/antigravity-effort.ts";
@@ -37,6 +38,8 @@ export interface ModelSelectionControllerSettingsSource {
 const THINKING_LEVELS: ThinkingLevel[] = ["off", "minimal", "low", "medium", "high"];
 
 export interface ModelSelectionControllerDeps {
+	/** The session never leaves its model (`pinnedModel`): a change to another model is refused. */
+	isModelPinned?(): boolean;
 	getAgent(): Agent;
 	getModel(): Model<Api> | undefined;
 	getThinkingLevel(): ThinkingLevel;
@@ -95,12 +98,19 @@ export class ModelSelectionController {
 		options: { persistSettings?: boolean } = {},
 		assertCurrent?: () => void,
 	): Promise<void> {
+		const previousModel = this.deps.getModel();
+		if (this.deps.isModelPinned?.() && previousModel && !modelsAreEqual(previousModel, model))
+			throw new Error(
+				interfaceText().sessions.model.pinned(
+					`${previousModel.provider}/${previousModel.id}`,
+					`${model.provider}/${model.id}`,
+				),
+			);
 		if (!this.deps.getModelRegistry().hasConfiguredAuth(model)) {
 			throw new Error(`No API key for ${model.provider}/${model.id}`);
 		}
 
 		const persistSettings = options.persistSettings ?? true;
-		const previousModel = this.deps.getModel();
 		const thinkingLevel = this._getThinkingLevelForModelSwitch();
 		this.deps.getAgent().state.model = model;
 		this.deps.getSessionManager().appendModelChange(model.provider, model.id);

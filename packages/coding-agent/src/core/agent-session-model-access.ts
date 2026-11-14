@@ -37,6 +37,8 @@ export interface AgentSessionModelAccessPorts {
 
 export class AgentSessionModelAccess {
 	private readonly ports: AgentSessionModelAccessPorts;
+	/** The session never leaves its model (`pinnedModel`): an unusable model is its host's to refuse, never replaced. */
+	pinned = false;
 
 	constructor(ports: AgentSessionModelAccessPorts) {
 		this.ports = ports;
@@ -61,6 +63,7 @@ export class AgentSessionModelAccess {
 		const refused = this.ports.modelRegistry().find(message.provider, message.model) ?? this.ports.model();
 		if (!refused) return undefined;
 		this.ports.accountModels().markRefused(refused, message.errorMessage ?? "model not supported");
+		if (this.pinned) return undefined;
 		const from = `${refused.provider}/${refused.id}`;
 		// A routed turn's model is the turn's, never the session's: its replacement stays inside the
 		// routed turn, whose end restores the owner's model; the session model is never changed from here.
@@ -92,6 +95,7 @@ export class AgentSessionModelAccess {
 	 */
 	async leaveUnavailableSessionModel(): Promise<string | undefined> {
 		const current = this.ports.model();
+		if (this.pinned) return undefined;
 		if (!current || this.ports.accountModels().availability(current) !== "unavailable") return undefined;
 		const from = `${current.provider}/${current.id}`;
 		const why = this.ports.accountModels().unavailableReason(current) ?? "unavailable";
@@ -176,6 +180,20 @@ export class AgentSessionModelAccess {
 	 * A hard failure (quota, an account that no longer offers the model) carries a chosen talker to the
 	 * model the session moved to; before the opening there is no talker to carry.
 	 */
+	/**
+	 * A quota failover moves the session to `hop`: a routed turn's model stays inside that turn (as an unsupported model's
+	 * does), and a pinned session stays on its model. Returns where the work continues, or undefined.
+	 */
+	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): Model<Api> | undefined {
+		if (this.pinned) return undefined;
+		if (this.ports.modelRouter().isRoutedTurnOn(failed))
+			return this.ports.modelRouter().replaceRefusedRoutedModel(failed, hop);
+		this.ports.agent().state.model = hop;
+		this.ports.sessionManager().appendModelChange(hop.provider, hop.id);
+		this.moveTalker(hop, `${failed.provider}/${failed.id} out of quota`);
+		return hop;
+	}
+
 	moveTalker(model: Model<Api>, reason: string): void {
 		if (this.ports.sessionManager().getLatestCustomEntryOnBranch(CONVERSATION_TALKER_CUSTOM_TYPE) === undefined)
 			return;

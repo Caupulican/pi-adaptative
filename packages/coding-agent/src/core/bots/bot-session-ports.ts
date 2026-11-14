@@ -38,6 +38,9 @@ function botModelRefusal(
 		...(deps.isModelAllowed ? { isModelAllowed: (candidate) => deps.isModelAllowed?.(candidate) === true } : {}),
 	});
 	if (metered) return words.botModelMetered(metered.ref, metered.alternatives, metered.provider);
+	// Out of quota or refused for the account: the bot waits for its own model, never moved to another.
+	const unusable = deps.modelUnusableCause(model);
+	if (unusable) return words.botModelUnusable(`${model.provider}/${model.id}`, unusable);
 	return deps.isModelAllowed && !deps.isModelAllowed(model)
 		? words.botModelNotAllowed(`${model.provider}/${model.id}`)
 		: undefined;

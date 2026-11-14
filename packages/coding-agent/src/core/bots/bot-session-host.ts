@@ -35,6 +35,7 @@ import { randomBytes } from "node:crypto";
 import { existsSync, readdirSync } from "node:fs";
 import { join } from "node:path";
 import type { Api, Model, Usage } from "@caupulican/pi-ai";
+import { modelsAreEqual } from "@caupulican/pi-ai/models";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { readSessionHeader } from "../../kernel/session/session-file-reading.ts";
 import { findMostRecentSessionInDirs } from "../../kernel/session/session-listing.ts";
@@ -358,8 +359,9 @@ export class BotSessionHost {
 	 * Whether the bot's model may run now: the worker admission's rules for an explicitly requested model (read again each
 	 * time, since the owner's policy changes), and a model that declares a price when a bound applies. Asked before a
 	 * session is built, and by the session at the start of every run, whatever opened it (the owner, a wake). A bot made
-	 * from a profile is compiled again: a run on a session built from an older compile (a profile, pin or policy that
-	 * changed since, which no record change announces) is refused, and the idle session is rebuilt on the new one.
+	 * from a profile is compiled again: a run on a session built from an older definition (a profile, pin or policy that
+	 * changed since, which no record change announces) is refused, and the idle session is rebuilt on the new one. A run
+	 * on another model than the one the bot is defined on is refused, and so is one on a model that cannot run now.
 	 */
 	private admit(
 		agentId: string,
@@ -369,10 +371,20 @@ export class BotSessionHost {
 		const record = this.ports.store().getBot(agentId);
 		const words = interfaceText().botTeam;
 		if (!record || !model) throw new Error(words.botMissing(agentId));
-		if (record.profileId !== undefined && this.define(record).key !== built.key) {
+		const defined = this.define(record);
+		if (defined.key !== built.key) {
 			queueMicrotask(() => this.recordChanged(record));
-			throw new Error(words.botProfileChanged(agentId, record.profileId));
+			throw new Error(words.botSessionOutdated(agentId));
 		}
+		// The session never leaves its model (`pinnedModel`); a run on any other is refused, never moved.
+		if (!modelsAreEqual(model, defined.model))
+			throw new Error(
+				words.botModelMoved(
+					agentId,
+					`${model.provider}/${model.id}`,
+					`${defined.model.provider}/${defined.model.id}`,
+				),
+			);
 		const refusal =
 			(record.profileId === undefined ? this.ports.modelRefusal(record, model) : undefined) ??
 			(this.spendBound(built.spendBoundUsd) === undefined ? undefined : unpricedModelRefusal(model));
@@ -513,6 +525,7 @@ export class BotSessionHost {
 				await createAgentSession({
 					cwd,
 					agentDir,
+					pinnedModel: true,
 					authStorage: registry.authStorage,
 					modelRegistry: registry,
 					settingsManager,

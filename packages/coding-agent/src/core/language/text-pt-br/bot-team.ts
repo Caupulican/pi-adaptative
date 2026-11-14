@@ -64,8 +64,12 @@ export const BOT_TEAM = {
 		`O bot ${agentId} roda em ${modelRef}, que não está disponível ou não tem credenciais. Entre nesse provedor ou troque o modelo do bot e envie a mensagem de novo.`,
 	botProfileRefused: (agentId: string, profileId: string, reason: string) =>
 		`O bot ${agentId} não foi iniciado: o perfil ${profileId} não o admite agora (${reason}). Corrija o perfil ou a política de workers e envie a mensagem de novo.`,
-	botProfileChanged: (agentId: string, profileId: string) =>
-		`Bot ${agentId}: o perfil ${profileId} agora resulta em outra sessão (o perfil, um modelo fixado ou a política de workers mudou), então esta execução não foi iniciada na sessão antiga. A sessão é refeita quando ficar ociosa; envie a mensagem de novo.`,
+	botModelMoved: (agentId: string, running: string, defined: string) =>
+		`Bot ${agentId}: a sessão dele está em ${running}, não em ${defined}, o modelo em que o bot é definido, então esta execução não foi iniciada.`,
+	botModelUnusable: (modelRef: string, cause: string) =>
+		`${modelRef} não pode rodar agora (${cause}); o bot roda só no próprio modelo, então envie a mensagem de novo quando esse modelo puder ser usado ou troque o modelo do bot`,
+	botSessionOutdated: (agentId: string) =>
+		`Bot ${agentId}: o que define a sessão dele mudou desde que ela foi criada (o registro, o perfil, um modelo fixado ou a política de workers), então esta execução não foi iniciada na sessão antiga. A sessão é refeita quando ficar ociosa; envie a mensagem de novo.`,
 	botSoulRefused: (agentId: string, reason: string) =>
 		`O bot ${agentId} não foi iniciado: ${reason}. Edite o soul com /bot soul ${agentId}.`,
 	botSessionHeld: (agentId: string, pid: number, sessionId?: string) =>
