@@ -74,6 +74,12 @@ export interface NestedCallAdmission {
 	): Promise<{ content: AgentToolResult<unknown>["content"]; isError: boolean }>;
 	/** Drops an admitted call whose body never started. */
 	abandon(): void;
+	/**
+	 * Closes an admitted call its parent uses in place of running it (a watch arms the check it admitted): what the
+	 * admission spent stays spent, as at a start (an owner approval it claimed is recorded as used), then its cleanups run.
+	 * A policy refusal throws.
+	 */
+	consume(): void;
 }
 
 export interface NestedCallRefusal {

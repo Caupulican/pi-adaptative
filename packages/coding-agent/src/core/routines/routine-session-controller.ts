@@ -468,8 +468,9 @@ export class RoutineSessionController implements RoutineToolPort {
 	 * the routine call that arms it, the way a worker's own gate admits its watch's (`task-watch-tool.ts`): every check a
 	 * call of that tool faces applies, the System One operation gate included, and a refused call arms nothing. The watch's
 	 * own rules admit the condition first, so the gate is never asked about a check the watch could not make; the admitted
-	 * call is dropped unstarted, since the monitor makes the checks. A session that does not hold the check's tool arms
-	 * nothing. An update that keeps the armed check is not asked again.
+	 * call is consumed unstarted, since the monitor makes the checks: an owner approval it claimed is spent arming the
+	 * watch, whose checks then run on its cadence. A session that does not hold the check's tool arms nothing. An update
+	 * that keeps the armed check is not asked again.
 	 */
 	private async admitWatchedCall(
 		toolCallId: string,
@@ -509,7 +510,7 @@ export class RoutineSessionController implements RoutineToolPort {
 			}));
 			throw new Error(`The check this watch would make was refused: ${admission.reason}`);
 		}
-		admission.abandon();
+		admission.consume();
 	}
 
 	/** The worker authority a routine's runs use: the saved one when nothing it was captured from changed, else captured now. */

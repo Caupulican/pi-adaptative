@@ -775,6 +775,13 @@ export class ToolGateController {
 				}
 			},
 			abandon: release,
+			consume: () => {
+				try {
+					for (const onStart of starts.splice(0)) onStart();
+				} finally {
+					release();
+				}
+			},
 		};
 	};
 

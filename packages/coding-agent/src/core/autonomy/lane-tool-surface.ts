@@ -760,6 +760,8 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 				},
 				finish: async (result, isError) => ({ content: result.content, isError }),
 				abandon() {},
+				// A lane's admission claims nothing a start would spend.
+				consume() {},
 			};
 		},
 	};

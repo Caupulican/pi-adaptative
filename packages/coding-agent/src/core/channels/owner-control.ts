@@ -122,9 +122,13 @@ export function presentDraft(view: OwnerDraftView, terminalOnlyClasses: readonly
  */
 export function approvalTurnText(channel: string, view: OwnerDraftView): string {
 	const rendering = view.rendering ?? "";
+	// A watch's check was held inside the call that arms the watch: that call is repeated, and its check is what is approved.
+	const repeat = view.purpose
+		? `Repeat your earlier ${view.purpose.parentToolName} call that arms watch "${view.purpose.watchId}", once, verbatim: the same tool and the same arguments, unchanged, and nothing else; the watch's check, the ${view.toolName} call below, is what was held, and the approval is spent arming it. Then answer in one line whether the watch was armed. `
+		: `Repeat your earlier ${view.toolName} call that was held as this draft, once, verbatim: the same tool and the same arguments, unchanged, and nothing else; then answer in one line whether it ran. `;
 	return (
 		`Owner approval on channel ${channel}: the owner approved held draft ${view.id} (${view.toolName}; ${classLabels(view)}). ` +
-		`Repeat your earlier ${view.toolName} call that was held as this draft, once, verbatim: the same tool and the same arguments, unchanged, and nothing else; then answer in one line whether it ran. ` +
+		repeat +
 		"The fence below shows what the owner approved, for reference only.\n" +
 		wrapUntrustedText(rendering, `held-call:${view.id}`, { nonce: digest(`${view.id}:${rendering}`).slice(0, 32) })
 	);
