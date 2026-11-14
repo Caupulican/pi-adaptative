@@ -8,9 +8,10 @@
  * next turn only when that turn's run starts in the submission the compaction ran in (the threshold check before a
  * prompt's run, a recovery before the run that continues it), and otherwise toward no turn's bound (a threshold check
  * after a turn's last run, before the next third party's turn): it is still in the session's usage, and in a bot's
- * charge. A summary prepared while the session idled is paid then, outside any compaction and any turn. Past the bound
- * the turn is stopped (`stopSessionTurn`), at a priced message or at the start of a run the turn continues with. A bound
- * can only be kept on a model that declares a price.
+ * charge. A summary prepared while the session idled is paid then, outside any compaction and any turn. The host says
+ * what spend the bound holds (`spent`): the turn's own, or a wider spend the turn's adds to (a bot's request with its
+ * workers). Past the bound the turn is stopped (`stopSessionTurn`), at a priced message or at the start of a run the turn
+ * continues with. A bound can only be kept on a model that declares a price.
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
@@ -31,7 +32,12 @@ export interface SpendLimit {
 export interface SessionTurnSpendBound<Limit extends SpendLimit> {
 	/** The bound now; undefined when no bound applies. Read at every priced message. */
 	limit(): Limit | undefined;
-	/** A turn went past `limit`, the bound read for its last priced message: the owner-facing reason its turn is aborted with. */
+	/**
+	 * The spend held to the bound, given the turn's spend so far (`turnUsd`) and what was just added to it (`addedUsd`,
+	 * told once each, zero when the bound is only checked again).
+	 */
+	spent(turnUsd: number, addedUsd: number): number;
+	/** The spend went past `limit`, the bound read for the turn's last priced message: the reason its turn is aborted with. */
 	onExceeded(spentUsd: number, limit: Limit): string;
 }
 
@@ -59,7 +65,8 @@ export function boundSessionTurnSpend<Limit extends SpendLimit>(
 	const unsubscribeTurns = observeSessionTurns(session, {
 		started: () => {
 			const submission = foreground.getCurrentSubmissionEpoch();
-			turnUsd = between?.submission !== undefined && between.submission === submission ? between.usd : 0;
+			turnUsd = 0;
+			if (between?.submission !== undefined && between.submission === submission) count(between.usd);
 			between = undefined;
 			open = true;
 		},
@@ -67,14 +74,18 @@ export function boundSessionTurnSpend<Limit extends SpendLimit>(
 			open = false;
 		},
 	});
-	const enforce = () => {
+	// Adds spend to the turn and returns the spend held to the bound.
+	function count(addedUsd: number): number {
+		turnUsd += addedUsd;
+		return bound.spent(turnUsd, addedUsd);
+	}
+	const enforce = (spentUsd: number) => {
 		const limit = bound.limit();
-		if (limit !== undefined && turnUsd > limit.usd) void stopSessionTurn(session, bound.onExceeded(turnUsd, limit));
+		if (limit !== undefined && spentUsd > limit.usd) void stopSessionTurn(session, bound.onExceeded(spentUsd, limit));
 	};
 	const unsubscribeSpend = session.subscribe((event) => {
 		if (event.type === "message_end" && event.message.role === "assistant") {
-			turnUsd += event.message.usage?.cost?.total ?? 0;
-			enforce();
+			enforce(count(event.message.usage?.cost?.total ?? 0));
 		} else if (event.type === "compaction_start") {
 			compaction = {
 				usd: session.getRecordedCompactionUsd(),
@@ -82,13 +93,13 @@ export function boundSessionTurnSpend<Limit extends SpendLimit>(
 			};
 		} else if (event.type === "compaction_end" && compaction !== undefined) {
 			const usd = session.getRecordedCompactionUsd() - compaction.usd;
-			if (open) turnUsd += usd;
+			if (open) count(usd);
 			else {
 				const carried = between !== undefined && between.submission === compaction.submission ? between.usd : 0;
 				between = { usd: carried + usd, submission: compaction.submission };
 			}
 			compaction = undefined;
-		} else if (event.type === "agent_start") enforce();
+		} else if (event.type === "agent_start") enforce(count(0));
 	});
 	return () => {
 		unsubscribeTurns();

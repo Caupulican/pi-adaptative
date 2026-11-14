@@ -21,6 +21,7 @@ import type { SessionPrivatePathScope } from "./autonomy/worker-session-private-
 import type { BackgroundToolTaskLiveView } from "./background-tool-task-controller.ts";
 import type { OwnerChannelOrigin } from "./channels/owner-channel-types.ts";
 import type { AutoCompactionReason } from "./compaction-controller.ts";
+import type { ParentExecutionPolicy } from "./delegation/parent-execution-context.ts";
 import type { WorkerRunOutcome } from "./delegation/worker-runner.ts";
 import type {
 	ContextUsage,
@@ -166,6 +167,11 @@ export interface AgentSessionConfig {
 	admitRun?: () => void;
 	/** The owner line a bot's host keeps for its notices (`harness-notice.ts`); read only where the standing sends them there. */
 	ownerNoticeLine?: OwnerNoticeLine;
+	/**
+	 * The host's bound on each run of the session's workers (`ParentExecutionPolicy.runCostBound`): a bot's host holds the
+	 * workers serving one request to that request's spend bound. Absent, a worker is held to its own budgets only.
+	 */
+	workerRunCostBound?: ParentExecutionPolicy["runCostBound"];
 	sessionManager: SessionManager;
 	/** Required for persisted sessions; acquire before construction and transfer once. */
 	bundleLease?: SessionBundleLease;

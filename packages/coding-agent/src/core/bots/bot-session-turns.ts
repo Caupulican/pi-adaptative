@@ -1,7 +1,8 @@
 /**
  * The per-turn owners of a loaded bot session, wired on the one turn boundary they all read (`observeSessionTurns`): its
  * outcome and its spend's charges (`BotTurnAccounting`, which also charges whenever the session records spawned usage and
- * resumes from its watermark when wired), its dollar bound (`boundSessionTurnSpend`), its time bound
+ * resumes from its watermark when wired), its dollar bound (`boundSessionTurnSpend`, held by the spend of the request
+ * the turn serves, its workers' included: `BotSpendWindows`), its time bound
  * (`boundSessionTurnTime`), and the supervision of its tool loop (`BotTurnSupervision`). The session's own warnings reach
  * the owner in the bot's chat, and every event that can change what the session is doing is handed to the host
  * (`settle`). The host composes them once per loaded session and ends them all with the returned unsubscribe.
@@ -48,8 +49,10 @@ export interface BotSessionTurnPorts {
 	readonly cwd: string;
 	/** The host's timers: the time bound arms its alarm on them. */
 	readonly timers: TimerPort;
-	/** The dollars one turn may spend now, with the bound that sets it; undefined when nothing bounds it. */
+	/** The dollars one request may spend now, with the bound that sets it; undefined when nothing bounds it. */
 	spendBound(): BotTurnSpendBound | undefined;
+	/** Counts `addedUsd` the turn just spent to the request it serves; returns that request's spend, its workers' included. */
+	spent(turnUsd: number, addedUsd: number): number;
 	/** How long one turn may run now (the owner's `workerDelegation.maxWallClockMs` as it is now). */
 	maxWallClockMs(): number | undefined;
 	/** Tells the owner in the bot's chat; `mark` false keeps the bot read (an informational notice). */
@@ -68,6 +71,7 @@ export function observeBotSessionTurns(
 	const words = () => interfaceText().botTeam;
 	const unsubscribeSpend = boundSessionTurnSpend(session, {
 		limit: () => ports.spendBound(),
+		spent: (turnUsd, addedUsd) => ports.spent(turnUsd, addedUsd),
 		onExceeded: (spentUsd, limit) => {
 			const reason = words().botTurnOverBudget(agentId, spentUsd.toFixed(2), limit.usd.toFixed(2), limit.bound);
 			ports.notify(reason);

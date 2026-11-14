@@ -310,6 +310,11 @@ export function botNoticesDir(agentDir: string, botId: string): string {
 	return join(botHomeDir(agentDir, botId), "notices");
 }
 
+/** `<agentDir>/bots/<id>/spend-windows.json` -- the bot's spend per outside input it served (`bots/bot-spend-window.ts`). */
+export function botSpendWindowsFile(agentDir: string, botId: string): string {
+	return join(botHomeDir(agentDir, botId), "spend-windows.json");
+}
+
 /** `<agentDir>/bots/<id>/typesafe-reviews` -- the System One evidence of the bot's own sessions. */
 export function botSystemOneEvidenceDir(agentDir: string, botId: string): string {
 	return join(botHomeDir(agentDir, botId), "typesafe-reviews");

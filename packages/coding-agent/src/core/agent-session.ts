@@ -105,6 +105,7 @@ import {
 } from "./context/memory-diagnostics.ts";
 import type { MemoryProvider as ContextMemoryProvider } from "./context/memory-provider-contract.ts";
 import type { MemoryRetrievalReport } from "./context/memory-retrieval.ts";
+import { latestAssistantMessage } from "./context/message-text.ts";
 import type { PathAliasTable } from "./context/path-alias-table.ts";
 import { estimatePromptHeadroom } from "./context/prompt-headroom.ts";
 import type { ContextGcReport } from "./context-gc.ts";
@@ -1271,6 +1272,7 @@ export class AgentSession {
 				}),
 			}),
 			getCapabilityEnvelope: () => this.capabilityEnvelope,
+			runCostBound: config.workerRunCostBound,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 			emit: (event) => this._emit(event),
 			notifyWorkerTerminalHandoff: (records) => {
@@ -3447,14 +3449,7 @@ export class AgentSession {
 
 	/** Find the last assistant message in agent state (including aborted ones) */
 	private _findLastAssistantMessage(): AssistantMessage | undefined {
-		const messages = this.agent.state.messages;
-		for (let i = messages.length - 1; i >= 0; i--) {
-			const msg = messages[i];
-			if (msg.role === "assistant") {
-				return msg as AssistantMessage;
-			}
-		}
-		return undefined;
+		return latestAssistantMessage(this.agent.state.messages);
 	}
 
 	/**

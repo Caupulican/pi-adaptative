@@ -45,6 +45,15 @@ export function latestUserPromptText(messages: readonly AgentMessage[], maxChars
 	return "";
 }
 
+/** The latest assistant message, an aborted one included, without copying or reversing session history. */
+export function latestAssistantMessage(messages: readonly AgentMessage[]): AssistantMessage | undefined {
+	for (let index = messages.length - 1; index >= 0; index--) {
+		const message = messages[index];
+		if (message?.role === "assistant") return message;
+	}
+	return undefined;
+}
+
 /** Project the latest non-empty assistant response without copying or reversing session history. */
 export function latestAssistantText(messages: readonly AgentMessage[]): string | undefined {
 	let message: AssistantMessage | undefined;

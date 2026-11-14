@@ -116,6 +116,10 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: um aviso não pôde ser guardado no chat dele (${reason}): ${text}`,
 	botNoticeNotMarked: (agentId: string, reason: string) =>
 		`Bot ${agentId}: há um aviso no chat dele, mas a lista não pôde marcá-lo como não lido (${reason}).`,
+	botSpendWindowsNotRead: (agentId: string, reason: string) =>
+		`Bot ${agentId}: o registro de gasto por pedido não pôde ser lido (${reason}); o gasto do pedido atual conta a partir de agora.`,
+	botSpendWindowsNotWritten: (agentId: string, reason: string) =>
+		`Bot ${agentId}: o registro de gasto por pedido não pôde ser gravado (${reason}); ele é gravado de novo no próximo gasto.`,
 	botNoticeDeliveriesNotKept: (agentId: string, reason: string) =>
 		`Bot ${agentId}: o registro dos avisos que a sessão dele já deu não pôde ser lido ou gravado (${reason}); algum pode ser dado de novo.`,
 	botNoticeUnreadable: (agentId: string, file: string, reason: string) =>
@@ -138,7 +142,7 @@ export const BOT_TEAM = {
 	botModelRefused: (agentId: string, reason: string) =>
 		`O bot ${agentId} não recebeu a mensagem: o modelo dele foi recusado (${reason}).`,
 	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session" | "profile") =>
-		`Bot ${agentId}: o turno foi interrompido no limite de gasto ($${spentUsd} gastos; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "o orçamento de custo do perfil dele" : "o limite de gasto da autonomia desta sessão"} é $${limitUsd}).`,
+		`Bot ${agentId}: o turno foi interrompido no limite de gasto ($${spentUsd} gastos neste pedido, com os workers dele; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "o orçamento de custo do perfil dele" : "o limite de gasto da autonomia desta sessão"} é $${limitUsd}).`,
 	botTurnOverTime: (agentId: string, limitSeconds: string) =>
 		`Bot ${agentId}: o turno foi interrompido no limite de tempo (workerDelegation.maxWallClockMs é ${limitSeconds} s).`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>

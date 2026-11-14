@@ -41,7 +41,7 @@ import { findMostRecentSessionInDirs } from "../../kernel/session/session-listin
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { namedAgentIdentity } from "../agent-identity.ts";
-import { botHostLockFile, botSystemOneEvidenceDir } from "../agent-paths.ts";
+import { botHostLockFile, botSpendWindowsFile, botSystemOneEvidenceDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
 import type {
@@ -88,6 +88,7 @@ import {
 	profileBotSession,
 } from "./bot-session-profile.ts";
 import { type BotTurnSpendBound, botSpendBound, observeBotSessionTurns } from "./bot-session-turns.ts";
+import { BotSpendWindows } from "./bot-spend-window.ts";
 import { BotTurnAccounting, type BotTurnUsageReport } from "./bot-turn-report.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
@@ -115,11 +116,11 @@ export interface BotSessionHostPorts {
 	/** Why the worker admission refuses the bot's model now, with when that ends when known; undefined when it may run. */
 	modelRefusal(record: PersistentBotRecord, model: Model<Api>): BotModelRefusal | undefined;
 	/**
-	 * The dollars one turn on `model` may spend, as a worker's budget bounds it, with the bound that sets it (the owner's
+	 * The dollars spend on `model` may reach, as a worker's budget bounds it, with the bound that sets it (the owner's
 	 * worker bound or the main session's autonomy bound, which holds metered spend to its metered ceiling too, the lower);
-	 * undefined when nothing bounds it.
+	 * undefined when nothing bounds it. A model the registry does not know (undefined) is held as metered spend.
 	 */
-	turnSpendBound(model: Model<Api>): BotTurnSpendBound | undefined;
+	turnSpendBound(model: Model<Api> | undefined): BotTurnSpendBound | undefined;
 }
 
 /**
@@ -585,9 +586,12 @@ export class BotSessionHost {
 		return unpriced === undefined ? undefined : { cause: "model_unpriced", reason: unpriced };
 	}
 
-	/** The bound on spend made on `model`: the owner's and the main session's, and the bot's own ceilings on that spend. */
+	/**
+	 * The bound on spend made on `model`: the owner's and the main session's, and the bot's own ceilings on that spend. A
+	 * model the registry does not know (undefined) is held as metered spend, which is never laxer.
+	 */
 	private spendBound(
-		model: Model<Api>,
+		model: Model<Api> | undefined,
 		spendBudget: BotSessionDefinition["spendBudget"],
 	): BotTurnSpendBound | undefined {
 		return botSpendBound(
@@ -736,6 +740,13 @@ export class BotSessionHost {
 				},
 			};
 			const registry = this.ports.modelRegistry();
+			// The bot's spend per request it serves: its turns and the runs of the workers they start share one bound.
+			const windows = new BotSpendWindows(botSpendWindowsFile(agentDir, agentId), sessionManager, {
+				snapshot: () => session?.backgroundLanes.getTaskRuntimeSnapshot(),
+				now: () => this.idleTimers().now(),
+				notRead: (reason) => this.ports.warn(interfaceText().botTeam.botSpendWindowsNotRead(agentId, reason)),
+				notWritten: (reason) => this.ports.warn(interfaceText().botTeam.botSpendWindowsNotWritten(agentId, reason)),
+			});
 			const resourceLoader = new DefaultResourceLoader({
 				cwd,
 				agentDir,
@@ -772,6 +783,14 @@ export class BotSessionHost {
 					// A bot's own session: it runs the watches it arms and takes their wakes as parent inputs (idle starts a
 					// turn, running steers).
 					standing: { kind: "bot", agentId },
+					// A worker's run is held to the bound on its own model's spend, less what the bot's turns spent on the
+					// request it serves; the request's workers share it. No bound on that model, none: its usage windows hold it.
+					workerRunCostBound: (attempt, snapshot) => {
+						const binding = attempt.runningModel ?? attempt.dispatch.executionContract?.worker.modelBinding;
+						const attemptModel = binding && registry.find(binding.provider, binding.modelId);
+						const bound = this.spendBound(attemptModel, definition.spendBudget);
+						return windows.runCostBound(attempt, snapshot, bound?.usd);
+					},
 					// Its notices (a lost watch, System One without an engine) reach the owner in the bot's chat.
 					ownerNoticeLine: botNoticeLine(this.ports.agentDir(), agentId, {
 						keep: (text, deliveryId) => this.notify(agentId, text, true, deliveryId),
@@ -845,6 +864,7 @@ export class BotSessionHost {
 				cwd,
 				timers: this.idleTimers(),
 				spendBound: () => this.spendBound(definition.model, definition.spendBudget),
+				spent: (turnUsd, addedUsd) => windows.count(turnUsd, addedUsd),
 				maxWallClockMs: () => settingsManager.getWorkerDelegationSettings().maxWallClockMs,
 				notify: (text, mark) => this.notify(agentId, text, mark),
 				settle: () => this.settle(entry),

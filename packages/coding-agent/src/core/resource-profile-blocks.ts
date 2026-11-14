@@ -1,4 +1,5 @@
 import type {
+	ProfileDefinitionInput,
 	ResourceProfileFilterSettings,
 	ResourceProfileKind,
 	ResourceProfileSettings,
@@ -150,4 +151,40 @@ export function parseResourceProfileInput(input: string): ParseResourceProfileBl
 
 export function stripResourceProfileBlocks(content: string): string {
 	return content.replace(RESOURCE_PROFILE_TAG_RE, "").trim();
+}
+
+/** A session's one-shot resource-profile options, never persisted (see `CreateAgentSessionOptions`). */
+export interface ResourceProfileOptions {
+	readonly resourceProfileDefinitions?: Record<string, ResourceProfileSettings | ProfileDefinitionInput>;
+	readonly resourceProfileJson?: string | string[];
+	readonly resourceProfiles?: string[];
+}
+
+/**
+ * Applies a session's one-shot resource-profile options to its settings: the inline definitions, then the definitions
+ * parsed from JSON or `<resource-profile>` text, are added, and the named profiles become the runtime's unless an
+ * orchestration profile chose them (`orchestrated`). Returns whether the session's resources must be reloaded to take
+ * them: any option given, or an orchestration profile.
+ */
+export function applyResourceProfileOptions(
+	settings: {
+		addInlineResourceProfileDefinitions(
+			profiles: Record<string, ResourceProfileSettings | ProfileDefinitionInput>,
+		): void;
+		setRuntimeResourceProfiles(profileNames: string[]): void;
+	},
+	options: ResourceProfileOptions,
+	orchestrated: boolean,
+): boolean {
+	const { resourceProfileDefinitions, resourceProfileJson, resourceProfiles } = options;
+	if (resourceProfileDefinitions) settings.addInlineResourceProfileDefinitions(resourceProfileDefinitions);
+	const inputs = resourceProfileJson ? [resourceProfileJson].flat() : [];
+	for (const input of inputs) settings.addInlineResourceProfileDefinitions(parseResourceProfileInput(input).profiles);
+	if (!orchestrated && resourceProfiles !== undefined) settings.setRuntimeResourceProfiles(resourceProfiles);
+	return (
+		orchestrated ||
+		resourceProfileDefinitions !== undefined ||
+		resourceProfileJson !== undefined ||
+		resourceProfiles !== undefined
+	);
 }

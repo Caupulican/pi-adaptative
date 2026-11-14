@@ -535,6 +535,8 @@ export class AwayChannelHosts {
 		// One turn's spend bound, as one run away's: past it the turn ends and its conversation gets no reply.
 		const unsubscribeSpend = boundSessionTurnSpend(session, {
 			limit: () => ({ usd: settings.getRoutineAwaySettings().maxUsdPerRun }),
+			// The turn's own spend: a channel turn away is its own run.
+			spent: (turnUsd) => turnUsd,
 			onExceeded: (usd, { usd: perRun }) => {
 				harnessLog.warn("channels", "a channel turn away was stopped at the away spend bound", {
 					channel: name,

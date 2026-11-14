@@ -126,6 +126,11 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: a notice could not be kept in its chat (${reason}): ${text}`,
 	botNoticeNotMarked: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a notice is in its chat, but the roster could not mark it unread (${reason}).`,
+	/** The record of the bot's spend per request (`bots/<id>/spend-windows.json`) could not be read; it starts over. */
+	botSpendWindowsNotRead: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its spend per request could not be read (${reason}); its current request's spend counts from now.`,
+	botSpendWindowsNotWritten: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its spend per request could not be written (${reason}); it is written again with its next spend.`,
 	botNoticeDeliveriesNotKept: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the record of the notices its session already told could not be read or written (${reason}); one may be told again.`,
 	botNoticeUnreadable: (agentId: string, file: string, reason: string) =>
@@ -152,7 +157,7 @@ export const BOT_TEAM = {
 		`Bot ${agentId} did not take the message: its model is refused (${reason}).`,
 	/** A turn went past the spend bound and was stopped; `bound` names the one that applied (the lower of the two). */
 	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session" | "profile") =>
-		`Bot ${agentId}: its turn was stopped at the spend bound ($${spentUsd} spent; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "its profile's cost budget" : "this session's autonomy spend bound"} is $${limitUsd}).`,
+		`Bot ${agentId}: its turn was stopped at the spend bound ($${spentUsd} spent on this request, its workers included; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "its profile's cost budget" : "this session's autonomy spend bound"} is $${limitUsd}).`,
 	/** A turn ran past the owner's time bound on a worker's run, and was stopped. */
 	botTurnOverTime: (agentId: string, limitSeconds: string) =>
 		`Bot ${agentId}: its turn was stopped at the time bound (workerDelegation.maxWallClockMs is ${limitSeconds} s).`,

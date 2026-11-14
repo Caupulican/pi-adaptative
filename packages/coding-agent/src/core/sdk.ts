@@ -84,7 +84,7 @@ import { getAttributionHeaders } from "./provider-attribution-headers.ts";
 import { materializeRequestAuth } from "./request-auth.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
 import { DefaultResourceLoader } from "./resource-loader.ts";
-import { parseResourceProfileInput } from "./resource-profile-blocks.ts";
+import { applyResourceProfileOptions } from "./resource-profile-blocks.ts";
 import type { RuntimeUpdateController } from "./runtime-update-controller.ts";
 import type { CredentialExposureBoundary } from "./secrets/credential-exposure-guard.ts";
 import { createCredentialTextRedactor, redactCredentialValues } from "./secrets/credential-manager.ts";
@@ -126,8 +126,12 @@ import type { BashOperations } from "./tools/schemas/bash.ts";
 import { SYSTEM_TIMER_SOURCE, type TimerSource } from "./util/timer-port.ts";
 import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
-/** `admitRun` refuses a run before it starts; `ownerNoticeLine` keeps a bot's notices (see `AgentSessionConfig`). */
-export interface CreateAgentSessionOptions extends Pick<AgentSessionConfig, "admitRun" | "ownerNoticeLine"> {
+/**
+ * `admitRun` refuses a run before it starts; `ownerNoticeLine` keeps a bot's notices; `workerRunCostBound` bounds each run
+ * of the session's workers (see `AgentSessionConfig`).
+ */
+export interface CreateAgentSessionOptions
+	extends Pick<AgentSessionConfig, "admitRun" | "ownerNoticeLine" | "workerRunCostBound"> {
 	/** Working directory for project-local discovery. Default: process.cwd() */
 	cwd?: string;
 	/** Global config directory. Default: ~/.pi/agent */
@@ -397,25 +401,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		assertOrchestrationProfileOwnsOptions(orchestrationProfile, options);
 		settingsManager.setRuntimeResourceProfiles([...orchestrationProfile.resourceProfileNames]);
 	}
-	const needsProfileReload =
-		options.resourceProfileDefinitions !== undefined ||
-		options.resourceProfileJson !== undefined ||
-		options.resourceProfiles !== undefined ||
-		orchestrationProfile !== undefined;
-	if (options.resourceProfileDefinitions) {
-		settingsManager.addInlineResourceProfileDefinitions(options.resourceProfileDefinitions);
-	}
-	if (options.resourceProfileJson) {
-		const inputs = Array.isArray(options.resourceProfileJson)
-			? options.resourceProfileJson
-			: [options.resourceProfileJson];
-		for (const input of inputs) {
-			settingsManager.addInlineResourceProfileDefinitions(parseResourceProfileInput(input).profiles);
-		}
-	}
-	if (!orchestrationProfile && options.resourceProfiles !== undefined) {
-		settingsManager.setRuntimeResourceProfiles(options.resourceProfiles);
-	}
+	const needsProfileReload = applyResourceProfileOptions(settingsManager, options, orchestrationProfile !== undefined);
 	const sessionManager =
 		options.sessionManager ?? SessionManager.create(cwd, agentDir, getDefaultSessionDir(cwd, agentDir));
 
@@ -870,6 +856,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				onClosingWarnings: options.onClosingWarnings,
 				admitRun: options.admitRun,
 				ownerNoticeLine: options.ownerNoticeLine,
+				workerRunCostBound: options.workerRunCostBound,
 				sessionManager,
 				bundleLease,
 				settingsManager,
