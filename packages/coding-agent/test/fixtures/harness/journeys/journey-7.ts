@@ -1,4 +1,5 @@
 import "../builtin-install.ts";
+import { runJourney7BotWatchPhase } from "./journey-7-bot-watch.ts";
 import { runJourney7DepthPhase } from "./journey-7-depth.ts";
 import { runJourney7LeaderPhase } from "./journey-7-leader.ts";
 import { runJourney7LifecyclePhase } from "./journey-7-lifecycle.ts";
@@ -9,9 +10,9 @@ import { runJourney7WorkerHeadroomPhase } from "./journey-7-worker-headroom.ts";
 import { runJourney } from "./shared.ts";
 
 /**
- * Bots and leaders: one world in which the root creates and asks a bot, the owner writes to a bot and to a group, a standing
- * leader runs a subtree of its own, a bot that is not a leader is refused a bot of its own, the leader depth limit holds,
- * and retirement and stopping keep their promises. Each leg group runs its own root session and leaves nothing running.
+ * Bots and leaders: one world in which the root creates and asks a bot, the owner writes to a bot and to a group, a bot
+ * waits on its own work with a watch its own session holds, a standing leader runs a subtree of its own, a bot that is not
+ * a leader is refused a bot of its own, the leader depth limit holds, and retirement and stopping keep their promises. Each leg group runs its own root session and leaves nothing running.
  */
 export async function runJourney7(): Promise<void> {
 	await runJourney(
@@ -27,6 +28,7 @@ export async function runJourney7(): Promise<void> {
 		async (world) => {
 			await runJourney7RootBotPhase(world);
 			await runJourney7OwnerMessagesPhase(world);
+			await runJourney7BotWatchPhase(world);
 			await runJourney7LeaderPhase(world);
 			await runJourney7WorkerHeadroomPhase(world);
 			await runJourney7TreeAttemptAdmission(world);

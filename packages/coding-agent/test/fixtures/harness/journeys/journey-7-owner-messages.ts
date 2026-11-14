@@ -3,9 +3,8 @@ import { expect } from "vitest";
 import { botHostLockFile } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { BotHostStateWriter } from "../../../../src/core/bots/bot-host-state.ts";
-import { displayNameFor } from "../../../../src/core/delegation/bot-naming.ts";
 import { takeProcessLock } from "../../../../src/core/remote/host-lock.ts";
-import { createBarrier, HARNESS_PROVIDER } from "../scripted-provider.ts";
+import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
 	agentsOn,
@@ -13,6 +12,7 @@ import {
 	botSessionFilesText,
 	carries,
 	chatText,
+	createOwnerBot,
 	enqueueBot,
 	MODEL_ID,
 	positionOf,
@@ -75,24 +75,13 @@ export async function runJourney7OwnerMessagesPhase(world: HarnessWorld): Promis
 	trace.mark("root", "j7.owner-messages");
 }
 
-function createBot(session: AgentSession, agentId: string, modelId: string, soul: string): void {
-	session.upsertPersistentBot({
-		agentId,
-		displayName: displayNameFor(agentId),
-		provider: HARNESS_PROVIDER,
-		modelId,
-		soul,
-		createdBy: "owner",
-	});
-}
-
 async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void> {
 	const trace = world.trace;
-	createBot(session, READER, MODEL_ID.reader, READER_SOUL);
-	createBot(session, TEAM_ONE, MODEL_ID.teamOne, TEAM_ONE_SOUL);
-	createBot(session, TEAM_TWO, MODEL_ID.teamTwo, TEAM_TWO_SOUL);
+	createOwnerBot(session, READER, MODEL_ID.reader, READER_SOUL);
+	createOwnerBot(session, TEAM_ONE, MODEL_ID.teamOne, TEAM_ONE_SOUL);
+	createOwnerBot(session, TEAM_TWO, MODEL_ID.teamTwo, TEAM_TWO_SOUL);
 	// The outsider exists as a bot, so the mention reaches the group's membership check rather than a missing bot.
-	createBot(session, OUTSIDER, MODEL_ID.teamOne, "You answer questions nobody asks with one short sentence.");
+	createOwnerBot(session, OUTSIDER, MODEL_ID.teamOne, "You answer questions nobody asks with one short sentence.");
 	session.getBotTeamStore().upsertTeam({
 		teamId: TEAM,
 		name: "Retry group",
@@ -329,7 +318,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
  * Once that host gave the bot back, the same message starts the bot's own session here.
  */
 async function sendToBotHeldElsewhere(world: HarnessWorld, session: AgentSession): Promise<void> {
-	createBot(session, HELD, MODEL_ID.held, HELD_SOUL);
+	createOwnerBot(session, HELD, MODEL_ID.held, HELD_SOUL);
 	const taken = takeProcessLock(botHostLockFile(world.agentDir, HELD), OTHER_HOST);
 	if (!taken.held) throw new Error("the other host could not take the bot's lock");
 	const otherState = new BotHostStateWriter(world.agentDir, {

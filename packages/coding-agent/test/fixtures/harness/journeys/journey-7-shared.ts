@@ -4,6 +4,7 @@ import { join } from "node:path";
 import { expect } from "vitest";
 import { botSessionsDir } from "../../../../src/core/agent-paths.ts";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { displayNameFor } from "../../../../src/core/delegation/bot-naming.ts";
 import type { DelegationRecord } from "../../../../src/core/delegation/leader-delegation-ledger.ts";
 import type {
 	PersistentBotRecord,
@@ -29,6 +30,7 @@ export const MODEL_ID = {
 	retry: "worker-a",
 	reader: "worker-a",
 	held: "worker-a",
+	watcher: "worker-c",
 	leader: "worker-a",
 	teamOne: "worker-b",
 	teamTwo: "worker-c",
@@ -39,6 +41,18 @@ export const MODEL_ID = {
 	/** An appointed goal leader runs on the session's own model, so it shares the root's model and is told apart by its soul. */
 	goalLeader: "root",
 } as const;
+
+/** Creates a bot the owner made, with its own soul on its own scripted model: a bot the owner messages runs as its own session. */
+export function createOwnerBot(session: AgentSession, agentId: string, modelId: string, soul: string): void {
+	session.upsertPersistentBot({
+		agentId,
+		displayName: displayNameFor(agentId),
+		provider: HARNESS_PROVIDER,
+		modelId,
+		soul,
+		createdBy: "owner",
+	});
+}
 
 /** The provider/model reference a bot is created with. */
 export function modelOf(id: (typeof MODEL_ID)[keyof typeof MODEL_ID]): string {
@@ -51,6 +65,7 @@ export const TRACK = {
 	retry: "j7-retry",
 	reader: "j7-reader",
 	held: "j7-held",
+	watcher: "j7-watcher",
 	teamOne: "j7-team-one",
 	teamTwo: "j7-team-two",
 	leader: "j7-leader",
