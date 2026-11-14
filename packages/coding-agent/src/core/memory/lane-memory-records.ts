@@ -6,6 +6,11 @@
  */
 
 import { estimateLineCount, estimateTokensFromText } from "../context/context-item.ts";
+import {
+	LANE_READ_MAX_ESTIMATED_TOKENS,
+	type MemoryPromptBudget,
+	resolveMemoryPromptBudget,
+} from "../context/memory-prompt-budget.ts";
 import type { MemorySearchResult } from "../context/memory-provider-contract.ts";
 import type { MemoryRetrievalReport } from "../context/memory-retrieval.ts";
 import type { MemoryTierCandidate } from "../context/memory-tier-composer.ts";
@@ -19,7 +24,7 @@ import {
 	reasonSentence,
 	type TranscriptSummaryReference,
 } from "./transcript-source-tools.ts";
-import type { WorkerMemorySourceAnswer } from "./worker-memory-tools.ts";
+import type { LaneMemoryCapacity, WorkerMemorySourceAnswer } from "./worker-memory-tools.ts";
 
 export interface LaneMemoryCandidate extends MemoryTierCandidate {
 	readonly sourceHandles: readonly string[];
@@ -86,6 +91,9 @@ export const LANE_WRAPPER = wrapUntrustedText("", "worker-memory", { nonce: "0".
 export const LANE_RECORD_SEPARATOR = "\n\n";
 export const LANE_NO_MEMORY_TEXT = "No relevant standing memory was found.";
 export const LANE_NO_HISTORY_TEXT = "No matching conversation history was found.";
+/** A chat zoom in a session that lends memory reads but does not hold the owner's history: a stated refusal. */
+export const LANE_HISTORY_NOT_HELD_TEXT =
+	"Conversation history is not available in this session (it does not hold the owner's history), so there is no chat to zoom. Use memory_read without a zoom, or read project files directly.";
 export const LANE_MEMORY_UNAVAILABLE_TEXT =
 	"Memory is not available in this session (it holds neither the owner's history nor the owner's memory, or memory failed to initialize or has shut down). Read project files directly.";
 /**
@@ -146,4 +154,25 @@ export function laneCandidate(result: MemorySearchResult, tier: MemoryTierCandid
 		...(item.stale !== undefined ? { stale: item.stale } : {}),
 		...(item.conflict !== undefined ? { conflict: item.conflict } : {}),
 	};
+}
+
+/** The allowance a delegated lane's read may fill, resolved by the one budget owner on the lane's own request. */
+export function laneMemoryBudget(
+	configuredMaxResults: number,
+	lane: LaneMemoryCapacity | undefined,
+): MemoryPromptBudget {
+	return resolveMemoryPromptBudget({
+		contextWindow: lane?.contextWindow,
+		configuredMaxResults,
+		ceilingTokens: LANE_READ_MAX_ESTIMATED_TOKENS,
+		...(lane
+			? {
+					currentPromptTokens: lane.currentPromptTokens,
+					reservedTokens: lane.reservedTokens,
+					...(lane.remainingTokenAllowance !== undefined
+						? { remainingTokenAllowance: lane.remainingTokenAllowance }
+						: {}),
+				}
+			: {}),
+	});
 }

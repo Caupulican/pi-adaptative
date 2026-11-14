@@ -44,7 +44,6 @@ import {
 } from "./context/memory-diagnostics.ts";
 import {
 	charBoundedMemoryPromptBudget,
-	LANE_READ_MAX_ESTIMATED_TOKENS,
 	type MemoryPromptBudget,
 	memoryShareAllowanceBytes,
 	memoryTextFitsBudget,
@@ -132,6 +131,7 @@ import {
 	LANE_FRONTIER_BUDGET_SHARE,
 	LANE_FRONTIER_HEADING,
 	LANE_HANDLE_HINT,
+	LANE_HISTORY_NOT_HELD_TEXT,
 	LANE_MEMORY_UNAVAILABLE_TEXT,
 	LANE_MIN_SOURCE_PAGE_BYTES,
 	LANE_NO_HISTORY_TEXT,
@@ -146,6 +146,7 @@ import {
 	laneCandidate,
 	laneConstraintText,
 	laneHistoryStatus,
+	laneMemoryBudget,
 	laneOmissionNote,
 	laneRecordReserve,
 	laneSourceRefusal,
@@ -211,7 +212,6 @@ import type {
 	UserPreferenceLearningPort,
 } from "./memory/user-preference-metadata.ts";
 import type {
-	LaneMemoryCapacity,
 	LaneMemoryCapacitySource,
 	WorkerMemoryBroker,
 	WorkerMemoryReadOptions,
@@ -2226,7 +2226,7 @@ export class MemoryController {
 		const legacy = this._legacyMemoryEnabled();
 		const normalizedQuery = query.trim();
 		const lane = capacity();
-		const budget = this._laneMemoryBudget(settings.maxResults, lane);
+		const budget = laneMemoryBudget(settings.maxResults, lane);
 		if (!budget.enabled) {
 			return Promise.resolve(
 				this._laneMemorySnapshot(
@@ -2236,7 +2236,7 @@ export class MemoryController {
 					() =>
 						this._laneMemoryServed(generation) &&
 						legacy === this._legacyMemoryEnabled() &&
-						isDeepStrictEqual(this._laneMemoryBudget(settings.maxResults, capacity()), budget),
+						isDeepStrictEqual(laneMemoryBudget(settings.maxResults, capacity()), budget),
 				),
 			);
 		}
@@ -2258,24 +2258,6 @@ export class MemoryController {
 			deadlineAt,
 			knowledgeReferences,
 			options,
-		});
-	}
-
-	/** The allowance a delegated lane's read may fill, resolved by the one budget owner on the lane's own request. */
-	private _laneMemoryBudget(configuredMaxResults: number, lane: LaneMemoryCapacity | undefined): MemoryPromptBudget {
-		return resolveMemoryPromptBudget({
-			contextWindow: lane?.contextWindow,
-			configuredMaxResults,
-			ceilingTokens: LANE_READ_MAX_ESTIMATED_TOKENS,
-			...(lane
-				? {
-						currentPromptTokens: lane.currentPromptTokens,
-						reservedTokens: lane.reservedTokens,
-						...(lane.remainingTokenAllowance !== undefined
-							? { remainingTokenAllowance: lane.remainingTokenAllowance }
-							: {}),
-					}
-				: {}),
 		});
 	}
 
@@ -2313,7 +2295,7 @@ export class MemoryController {
 		// A source page or an expansion is delivered only as a whole record inside the receiving lane's allowance,
 		// resolved by the same budget owner as the snapshot; what cannot fit is a stated constraint, never cut text.
 		const laneBudget = () =>
-			this._laneMemoryBudget(this.deps.getSettingsManager().getMemoryRetrievalSettings().maxResults, capacity());
+			laneMemoryBudget(this.deps.getSettingsManager().getMemoryRetrievalSettings().maxResults, capacity());
 		const checkDelivery = (
 			admission: Admission,
 			budget: MemoryPromptBudget,
@@ -2549,6 +2531,10 @@ export class MemoryController {
 					const reason = reasonSentence(MEMORY_RETRIEVAL_DISABLED_REASON);
 					observe("navigation", reason, [], admission, options, "refused");
 					return memoryFailure("memory_retrieval_disabled", reason, laneDetails);
+				}
+				if (!this.deps.standing.ownsHistory) {
+					observe("navigation", LANE_HISTORY_NOT_HELD_TEXT, [], admission, options, "unavailable");
+					return memoryFailure("memory_history_unavailable", LANE_HISTORY_NOT_HELD_TEXT, laneDetails);
 				}
 				if (!current(admission)) throw new LaneMemorySnapshotStaleError();
 				const laneRevision = capacity()?.revision;
@@ -2865,7 +2851,7 @@ export class MemoryController {
 	}): boolean {
 		if (!this._laneSourceCurrent(input) || input.capacity()?.revision !== input.laneRevision) return false;
 		const settings = this.deps.getSettingsManager().getMemoryRetrievalSettings();
-		return isDeepStrictEqual(this._laneMemoryBudget(settings.maxResults, input.capacity()), input.budget);
+		return isDeepStrictEqual(laneMemoryBudget(settings.maxResults, input.capacity()), input.budget);
 	}
 
 	/** Raw local acquisition is the only shared work; composition and grants belong to individual consumers. */
@@ -2904,11 +2890,13 @@ export class MemoryController {
 						retrievalOptions,
 					)
 				: Promise.resolve(undefined),
-			retrieveMemoryForContext(
-				[this._getTranscriptMemoryProvider(input.generation, !input.legacy)],
-				{ query: input.query, maxResults: input.maxResults },
-				retrievalOptions,
-			),
+			this.deps.standing.ownsHistory
+				? retrieveMemoryForContext(
+						[this._getTranscriptMemoryProvider(input.generation, !input.legacy)],
+						{ query: input.query, maxResults: input.maxResults },
+						retrievalOptions,
+					)
+				: Promise.resolve(emptyMemoryRetrievalReport(input.maxResults)),
 			readsOkf && input.admission === "native-only"
 				? this._fileStoreWriter?.readSystemPromptSnapshot(readContext)
 				: Promise.resolve(undefined),
