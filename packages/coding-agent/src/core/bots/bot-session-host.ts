@@ -103,11 +103,6 @@ export interface BotSessionHostPorts {
 	senderIn(cwd: string): BotSender | undefined;
 	store(): PersistentBotTeamStore;
 	modelRegistry(): ModelRegistry;
-	/**
-	 * A settings manager of the bot's own over the storage the main session reads (`SettingsManager.sibling`), reading
-	 * again each change the main session's manager makes until `release`.
-	 */
-	settings(): { readonly settings: SettingsManager; release(): void };
 	/** The main session's System One as it is now: a bot's session follows it at each use, as the main session runs it. */
 	systemOne(): SystemOneHostSource;
 	timers(): TimerSource;
@@ -115,8 +110,6 @@ export interface BotSessionHostPorts {
 	warn(message: string): void;
 	/** Why the worker admission refuses the bot's model now; undefined when it may run. */
 	modelRefusal(record: PersistentBotRecord, model: Model<Api>): string | undefined;
-	/** What a bot made from a profile compiles to, by the resolution a fresh worker of it takes (`bot-session-compile.ts`). */
-	compileProfile(record: PersistentBotRecord & { readonly profileId: string }): BotSessionCompilation;
 	/**
 	 * The dollars one turn may spend, as a worker's budget bounds it, with the bound that sets it (the owner's worker bound
 	 * or the main session's autonomy bound, the lower); undefined when nothing bounds it.
@@ -125,11 +118,19 @@ export interface BotSessionHostPorts {
 }
 
 /**
- * The root session a bot's message came from: the owner's project directory a bot it loads works in, the pi session named
- * as its host, and where its turns' warnings and spend go. Once that root detaches, the root attached last answers.
+ * The root session a bot's message came from: the owner's project directory a bot it loads works in, what a bot made from
+ * a profile compiles to and the settings a bot reads there, the pi session named as its host, and where its turns'
+ * warnings and spend go. Once that root detaches, the root attached last answers.
  */
 export interface BotSender {
 	cwd(): string;
+	/** What a bot made from a profile compiles to for this root, by the resolution a fresh worker of it takes (`bot-session-compile.ts`). */
+	compileProfile(record: PersistentBotRecord & { readonly profileId: string }): BotSessionCompilation;
+	/**
+	 * A settings manager of the bot's own over the storage this root reads (`SettingsManager.sibling`), reading again each
+	 * change an attached root's manager makes until `release`.
+	 */
+	settings(): { readonly settings: SettingsManager; release(): void };
 	/** The pi session that hosts the bot, named to the owner of a message another process sends it. */
 	hostSessionId(): string;
 	/** An owner-facing warning of the bot's turn (a turn that failed, a spend bound reached). */
@@ -174,6 +175,8 @@ interface BotSessionEntry {
 	readonly modelRef: string;
 	/** The root its last message came from: its turns' warnings and spend go there. */
 	sender: BotSender;
+	/** The root it was built for: what defines it is compiled, and its settings read, as that root's (another root's message does not rebuild it). */
+	readonly builtFor: BotSender;
 	/** What defined the session when it was built (`BotSessionDefinition.key`). */
 	readonly profileKey: string;
 	/** Its profile's dollar bound on one turn, for a bot made from a profile. */
@@ -461,7 +464,12 @@ export class BotSessionHost {
 	): Promise<BotOperatorMessageDispatchResult> {
 		const { agentId } = entry;
 		// Admitted here as well as at the run's start: a refusal answers the owner's send itself, not a failed turn.
-		this.admit(agentId, entry.session.model, { key: entry.profileKey, spendBoundUsd: entry.spendBoundUsd });
+		this.admit(
+			agentId,
+			entry.session.model,
+			{ key: entry.profileKey, spendBoundUsd: entry.spendBoundUsd },
+			entry.builtFor,
+		);
 		const queued = mode === "queue";
 		const wasRunning = this.isBusy(entry);
 		const continued = entry.session.messages.length > 0;
@@ -525,11 +533,12 @@ export class BotSessionHost {
 		agentId: string,
 		model: Model<Api> | undefined,
 		built: Pick<BotSessionDefinition, "key" | "spendBoundUsd">,
+		builtFor: BotSender,
 	): void {
 		const record = this.ports.store().getBot(agentId);
 		const words = interfaceText().botTeam;
 		if (!record || !model) throw new Error(words.botMissing(agentId));
-		const defined = this.route(record);
+		const defined = this.route(record, builtFor);
 		// A record that left the session path (a leader's, a leader, a profile only a worker's run holds) runs here no more:
 		// the session is released once its work settles, and its messages go to a worker.
 		if (defined === "worker") {
@@ -570,11 +579,11 @@ export class BotSessionHost {
 	 * what the worker resolution compiles for it), or a worker's run (`runsAsSession` false). Throws the owner's words when
 	 * it would run as a session and cannot.
 	 */
-	private route(record: PersistentBotRecord, cwd = this.ports.sender().cwd()): BotSessionDefinition | "worker" {
+	private route(record: PersistentBotRecord, sender: BotSender): BotSessionDefinition | "worker" {
 		if (!botMayRunAsSession(record)) return "worker";
 		const { profileId } = record;
-		if (profileId === undefined) return ownBotSession(record, cwd, this.ports.modelRegistry());
-		const compiled = this.ports.compileProfile({ ...record, profileId });
+		if (profileId === undefined) return ownBotSession(record, sender.cwd(), this.ports.modelRegistry());
+		const compiled = sender.compileProfile({ ...record, profileId });
 		if (!compiled.ok)
 			throw new Error(interfaceText().botTeam.botProfileRefused(record.agentId, profileId, compiled.skipReason));
 		const session = profileBotSession(compiled);
@@ -582,28 +591,37 @@ export class BotSessionHost {
 	}
 
 	/** The session the record defines now; throws the owner's words when it cannot run as one. */
-	private define(record: PersistentBotRecord, cwd?: string): BotSessionDefinition {
-		const defined = this.route(record, cwd);
+	private define(record: PersistentBotRecord, sender: BotSender): BotSessionDefinition {
+		const defined = this.route(record, sender);
 		if (defined === "worker") throw new Error(interfaceText().botTeam.botRunsAsWorker(record.agentId));
 		return defined;
 	}
 
 	/** What defines the bot's session now; a bot of its own's is read from its record alone. */
-	private keyOf(record: PersistentBotRecord): string {
-		return record.profileId === undefined ? ownBotSessionKey(record) : this.define(record).key;
+	private keyOf(record: PersistentBotRecord, sender: BotSender): string {
+		return record.profileId === undefined ? ownBotSessionKey(record) : this.define(record, sender).key;
 	}
 
 	/**
 	 * Whether the bot answers in a session of its own: never a leader or a bot a leader made (`botMayRunAsSession`), and a
-	 * bot made from a profile unless its profile needs what only a worker's run has (an independent verifier, a tool a session does not hold). A profile the resolution refuses is
+	 * bot made from a profile unless its profile, compiled for the root its session is defined for (`senderFor`), needs what
+	 * only a worker's run has (an independent verifier, a tool a session does not hold). A profile the resolution refuses is
 	 * refused by the session, in the owner's words.
 	 */
-	runsAsSession(record: PersistentBotRecord): boolean {
+	runsAsSession(record: PersistentBotRecord, sender?: BotSender): boolean {
 		const { profileId } = record;
 		if (!botMayRunAsSession(record)) return false;
 		if (profileId === undefined) return true;
-		const compiled = this.ports.compileProfile({ ...record, profileId });
+		const compiled = this.senderFor(record.agentId, sender).compileProfile({ ...record, profileId });
 		return !compiled.ok || profileBotSession(compiled).route === "session";
+	}
+
+	/**
+	 * The root a bot's session is defined for: the one its loaded session was built for, else `sender` (a message's), else
+	 * the root attached last.
+	 */
+	private senderFor(agentId: string, sender?: BotSender): BotSender {
+		return this.entries.get(agentId)?.builtFor ?? sender ?? this.ports.sender();
 	}
 
 	/** The bot's loaded session, built or continued as the record defines it. */
@@ -617,11 +635,11 @@ export class BotSessionHost {
 		const record = this.ports.store().getBot(agentId);
 		if (!record || record.retired) throw new Error(interfaceText().botTeam.botMissing(agentId));
 		// The one predicate the dispatch routes by: a bot it sends to a worker has no session here to diverge from it.
-		if (!this.runsAsSession(record)) throw new Error(interfaceText().botTeam.botRunsAsWorker(agentId));
 		const existing = this.entries.get(agentId);
+		if (!this.runsAsSession(record, sender)) throw new Error(interfaceText().botTeam.botRunsAsWorker(agentId));
 		if (existing) {
 			// A record changed since the session was built (by another process, say): an idle session is rebuilt on it.
-			if (this.isBusy(existing) || existing.profileKey === this.keyOf(record)) return existing;
+			if (this.isBusy(existing) || existing.profileKey === this.keyOf(record, existing.builtFor)) return existing;
 			await this.close(agentId);
 			return this.open(agentId, sender);
 		}
@@ -637,10 +655,10 @@ export class BotSessionHost {
 		const { agentId } = record;
 		const words = interfaceText().botTeam;
 		const { home, profile } = ensureBotHome(agentDir, record);
-		const definition = this.define(record, sender.cwd());
+		const definition = this.define(record, sender);
 		const { model, cwd } = definition;
 		// A model refused now builds no session and takes no lock.
-		this.admit(agentId, model, definition);
+		this.admit(agentId, model, definition, sender);
 		const taken = takeProcessLock(botHostLockFile(agentDir, agentId), this.holder);
 		if (!taken.held) {
 			const sessionId = readRemoteBotHost(agentDir, agentId, this.holder)?.hostSessionId;
@@ -648,7 +666,7 @@ export class BotSessionHost {
 		}
 		const { lock } = taken;
 		let session: AgentSession | undefined;
-		let settings: ReturnType<BotSessionHostPorts["settings"]> | undefined;
+		let settings: ReturnType<BotSender["settings"]> | undefined;
 		let built: BotSessionEntry | undefined;
 		try {
 			// The newest session file of the bot, whatever directory it worked in: a bot keeps one conversation.
@@ -662,7 +680,7 @@ export class BotSessionHost {
 				sessionManager.getSessionId(),
 				this.idleTimers().now(),
 			);
-			settings = this.ports.settings();
+			settings = sender.settings();
 			const settingsManager = settings.settings;
 			const ports = this.ports;
 			// System One as the main session runs it now, read at each use: on or off, provider, transport.
@@ -715,7 +733,7 @@ export class BotSessionHost {
 					// It runs the watches it arms and takes their wakes as parent inputs (idle starts a turn, running steers).
 					holdsOwnWatches: true,
 					// Every run is admitted at its start, whatever opened it: a wake's turn is held to the owner's rules too.
-					admitRun: () => this.admit(agentId, session?.model, definition),
+					admitRun: () => this.admit(agentId, session?.model, definition, sender),
 					// System One as the main session runs it; its evidence stays in the bot's home.
 					systemOneHost,
 					systemOneEvidenceDir: botSystemOneEvidenceDir(agentDir, agentId),
@@ -751,6 +769,7 @@ export class BotSessionHost {
 				}),
 				modelRef: `${model.provider}/${model.id}`,
 				sender,
+				builtFor: sender,
 				profileKey: definition.key,
 				spendBoundUsd: definition.spendBoundUsd,
 				unsubscribe: () => {},
@@ -947,11 +966,15 @@ export class BotSessionHost {
 		const waiting = !watching && botInboxWaiting(agentDir, agentId) ? this.readInbox(agentId).waiting : [];
 		if (!watching && waiting.length === 0) return;
 		const cwds = [saved.cwd, ...(watching ? [] : waiting.map((item) => item.message.from.cwd))];
-		// A bot of its own works where the root it opens for works; a profile's, where its profile compiles to.
+		// It opens for a root its session works in one of those directories for: a bot of its own works where that root works,
+		// a profile's where its profile compiles to for that root.
 		let sender: BotSender | undefined;
 		try {
-			if (record.profileId === undefined) sender = cwds.map((cwd) => this.ports.senderIn(cwd)).find(Boolean);
-			else if (cwds.includes(this.define(record).cwd)) sender = this.ports.sender();
+			const candidates = [...cwds.map((cwd) => this.ports.senderIn(cwd)), this.ports.sender()];
+			sender = candidates.find(
+				(candidate): candidate is BotSender =>
+					candidate !== undefined && cwds.includes(this.define(record, candidate).cwd),
+			);
 		} catch (error) {
 			this.ports.warn(interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error)));
 			return;
@@ -1088,7 +1111,7 @@ export class BotSessionHost {
 			this.release(record.agentId);
 			return;
 		}
-		if (entry && entry.profileKey !== this.currentKey(record))
+		if (entry && entry.profileKey !== this.currentKey(record, entry.builtFor))
 			void this.close(record.agentId).then(
 				() => this.openIfOwed(record.agentId),
 				(error: unknown) =>
@@ -1097,9 +1120,9 @@ export class BotSessionHost {
 	}
 
 	/** What defines the bot's session now; undefined when its profile no longer admits it as one (it is refused when opened). */
-	private currentKey(record: PersistentBotRecord): string | undefined {
+	private currentKey(record: PersistentBotRecord, sender: BotSender): string | undefined {
 		try {
-			return this.keyOf(record);
+			return this.keyOf(record, sender);
 		} catch {
 			return undefined;
 		}

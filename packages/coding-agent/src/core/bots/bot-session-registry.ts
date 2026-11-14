@@ -2,11 +2,11 @@
  * One bot session host per process and agent directory. Every root session of the process attaches to the same host, so
  * two roots in one process never run two sessions of one bot, nor refuse each other a bot as if another process ran it
  * (the lock record names the host that holds it, not only the process). What is the process's answers from any attached
- * root (the store, model rules, spend bound, System One, clock): the root attached last that is still attached. A bot's
- * settings read the shared settings storage again after a change any attached root announces, a root attached later
- * included, so no root's detach leaves them stale. A message carries the root it came from as its sender (`BotSender`):
- * the directory a bot it loads works in and where its turns' warnings and spend go; once that root detaches, the root
- * attached last answers. The last root to detach stops the host. A child session (a bot's own session, a worker) hosts
+ * root (the store, model rules, spend bound, System One, clock): the root attached last that is still attached. A message
+ * carries the root it came from as its sender (`BotSender`): the directory a bot it loads works in, what a profile compiles
+ * to and the settings storage a bot reads there, and where its turns' warnings and spend go; once that root detaches, the
+ * root attached last answers. A bot's settings read their storage again after a change any attached root announces, a
+ * root attached later included, so no root's detach leaves them stale. The last root to detach stops the host. A child session (a bot's own session, a worker) hosts
  * no bots: it gets a host of its own that no other session shares.
  */
 import { resolve } from "node:path";
@@ -20,7 +20,9 @@ import {
 } from "./bot-session-host.ts";
 
 /** What one root session hands its process's host: the process's ports, read from it while it answers, and its own sender. */
-export interface BotSessionRootPorts extends Omit<BotSessionHostPorts, "sender" | "senderIn" | "settings">, BotSender {
+export interface BotSessionRootPorts
+	extends Omit<BotSessionHostPorts, "sender" | "senderIn">,
+		Omit<BotSender, "settings"> {
 	/** The root's settings manager: a bot's settings read the same storage and follow the changes it announces. */
 	settingsManager(): SettingsManager;
 }
@@ -67,6 +69,23 @@ function senderOf(shared: AttachedRoots, root: BotSessionRootPorts): BotSender {
 	const current = () => (shared.roots.includes(root) ? root : answering(shared));
 	return {
 		cwd: () => current().cwd(),
+		compileProfile: (record) => current().compileProfile(record),
+		settings: () => {
+			const follower: SettingsFollower = {
+				settings: current().settingsManager().sibling(),
+				subscriptions: new Map(),
+			};
+			for (const attached of shared.roots) follow(follower, attached);
+			shared.followers.add(follower);
+			return {
+				settings: follower.settings,
+				release: () => {
+					shared.followers.delete(follower);
+					for (const unsubscribe of follower.subscriptions.values()) unsubscribe();
+					follower.subscriptions.clear();
+				},
+			};
+		},
 		hostSessionId: () => current().hostSessionId(),
 		warn: (message) => current().warn(message),
 		reportUsage: (usage, report) => current().reportUsage(usage, report),
@@ -109,24 +128,10 @@ function relayPorts(shared: AttachedRoots): BotSessionHostPorts {
 		},
 		store: () => root().store(),
 		modelRegistry: () => root().modelRegistry(),
-		settings: () => {
-			const follower: SettingsFollower = { settings: root().settingsManager().sibling(), subscriptions: new Map() };
-			for (const attached of shared.roots) follow(follower, attached);
-			shared.followers.add(follower);
-			return {
-				settings: follower.settings,
-				release: () => {
-					shared.followers.delete(follower);
-					for (const unsubscribe of follower.subscriptions.values()) unsubscribe();
-					follower.subscriptions.clear();
-				},
-			};
-		},
 		systemOne: () => root().systemOne(),
 		timers: () => root().timers(),
 		warn: (message) => root().warn(message),
 		modelRefusal: (record, model) => root().modelRefusal(record, model),
-		compileProfile: (record) => root().compileProfile(record),
 		turnSpendBound: () => root().turnSpendBound(),
 	};
 }
@@ -161,7 +166,7 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 		delivery: {
 			deliver: (agentId, message, mode) => host.deliver(agentId, message, mode, sender),
 			noteHistoryRun: (agentId, parentSessionId, runtime) => host.noteHistoryRun(agentId, parentSessionId, runtime),
-			runsAsSession: (record) => host.runsAsSession(record),
+			runsAsSession: (record) => host.runsAsSession(record, sender),
 		},
 		subscribe(listener) {
 			const unsubscribe = host.subscribe(listener);
