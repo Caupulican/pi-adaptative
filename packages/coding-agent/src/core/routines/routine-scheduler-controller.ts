@@ -36,7 +36,8 @@ import {
 	routineZoneUnsupported,
 } from "./routine-contract.ts";
 import type { RoutineHolder, RoutineScope } from "./routine-holder.ts";
-import { type RoutineOriginLoss, routineUndeliverableMarker } from "./routine-origin-reach.ts";
+import type { RoutineOriginLoss } from "./routine-origin-reach.ts";
+import { lostOriginRoutines, settleUndeliverableResults } from "./routine-origin-settlement.ts";
 import { routineTurnOrigin } from "./routine-parent-input.ts";
 import type { RoutineRunFacts } from "./routine-progress.ts";
 import { routineInstructions } from "./routine-run-brief.ts";
@@ -522,6 +523,7 @@ export class RoutineSchedulerController {
 				this.notices.observe(parent, {
 					routines: this.deps.store.listRoutines(this.holder),
 					occurrences: this.occurrences(),
+					retired: this.deps.store.listRetiredRoutines(this.deps.parentSessionId),
 				}),
 			);
 		return result;
@@ -535,8 +537,9 @@ export class RoutineSchedulerController {
 	}
 
 	/**
-	 * Hands this session's ended routines whose runs are all delivered to the store for removal. A routine still
-	 * waiting on a run or a delivery is left: that settlement wakes a later pass.
+	 * Hands this session's ended routines whose runs are all delivered, and its routines whose saved origin can never pass
+	 * here (`lostOriginRoutines`), to the store for removal. A routine still waiting on a run or a delivery is left: that
+	 * settlement wakes a later pass.
 	 */
 	private retire(): void {
 		// Away, the closed parent's ended routines are retired when it opens: their notice needs its receipt origin.
@@ -546,7 +549,11 @@ export class RoutineSchedulerController {
 		const ended = this.eligibleRoutines().filter(
 			(routine) => routineEnded(routine, nowMs) !== undefined && routineOccurrencesSettled(occurrences, routine),
 		);
-		if (ended.length === 0) return;
+		const parent = this.active ? this.deps.delivery : undefined;
+		const lostOrigins = parent
+			? lostOriginRoutines(this.deps.store.listRoutines(this.holder), (origin) => parent.originLoss(origin))
+			: [];
+		if (ended.length === 0 && lostOrigins.length === 0) return;
 		const retired = this.deps.store.retireEndedRoutines({
 			nowMs,
 			owner: this.deps.owner,
@@ -554,9 +561,13 @@ export class RoutineSchedulerController {
 			parentSessionId: this.deps.parentSessionId,
 			receiptOrigin: this.deps.getReceiptOrigin(),
 			routineIds: ended.map((routine) => routine.routineId),
+			lostOrigins,
 		});
+		const lost = new Set(lostOrigins.map((routine) => routine.routineId));
 		for (const routineId of retired.retired)
-			harnessLog.info("routines", "an ended routine was removed", { routineId });
+			if (lost.has(routineId))
+				harnessLog.warn("routines", "a routine whose origin is lost was removed", { routineId });
+			else harnessLog.info("routines", "an ended routine was removed", { routineId });
 		if (retired.journalFull)
 			this.report(
 				"retire-journal",
@@ -1017,38 +1028,16 @@ export class RoutineSchedulerController {
 		}
 	}
 
-	/**
-	 * Settles each pending result whose origin can never pass here ({@link RoutineResultDelivery.originLoss}) as a delivery
-	 * settles it, with an `undeliverable:` marker naming the loss in place of a parent input; the pass's notices tell the
-	 * owner from that marker. A result whose origin may still pass (another branch, not yet durable) keeps waiting.
-	 */
+	/** Settles each pending result whose origin can never pass here (`routine-origin-settlement.ts`). */
 	private settleUndeliverable(): void {
 		const parent = this.deps.delivery;
 		if (!parent || !this.active) return;
-		for (const { occurrence, result } of this.deps.store.listPendingRoutineDeliveries(
-			this.deps.parentSessionId,
-			2 * MAX_ROUTINE_OCCURRENCES,
-		)) {
-			if (this.deliveries.has(occurrence.occurrenceId)) continue;
-			const loss = parent.originLoss(occurrence.parentOrigin);
-			if (!loss) continue;
-			this.attempt(`undeliverable|${occurrence.occurrenceId}`, () => {
-				if (result.outcome !== "uncertain") parent.acknowledgeWorkerNotification(occurrence);
-				this.deps.store.acknowledgeRoutineDelivery({
-					occurrenceId: occurrence.occurrenceId,
-					recipient: result.recipient,
-					resultDigest: result.digest,
-					deliveryMarker: routineUndeliverableMarker(loss),
-					nowMs: this.deps.timers.now(),
-				});
-				// The owner is told by the pass's notices, read from this durable marker.
-				harnessLog.warn("routines", "a routine result can never be delivered and was settled undeliverable", {
-					routineId: occurrence.routineId,
-					occurrenceId: occurrence.occurrenceId,
-					loss,
-				});
-			});
-		}
+		const { store, parentSessionId, timers } = this.deps;
+		settleUndeliverableResults(
+			{ store, parent, parentSessionId, now: () => timers.now() },
+			(occurrenceId) => this.deliveries.has(occurrenceId),
+			(unit, step) => this.attempt(unit, step),
+		);
 	}
 
 	private deliverPending(): void {

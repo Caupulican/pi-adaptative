@@ -40,7 +40,6 @@ import {
 	type RoutineOccurrence,
 	type RoutineOccurrenceClaimInput,
 	type RoutineOccurrenceListFilter,
-	type RoutineRetireInput,
 	type RoutineSchedule,
 	type RoutineTerminalOutcome,
 	routineResultDigest,
@@ -52,6 +51,7 @@ import {
 import { holdsRoutine, type RoutineHolder } from "../routines/routine-holder.ts";
 import { parseRoutineProgress, type RoutineRunFacts, withRoutineOwnerNote } from "../routines/routine-progress.ts";
 import { creationProvenance, routineWakeRefusal } from "../routines/routine-provenance.ts";
+import type { RoutineRetireInput } from "../routines/routine-retired.ts";
 import { parseRetiredRoutines, type RetiredRoutineRecord } from "../routines/routine-retired.ts";
 import { parseRoutineSaveOrigin, routineSaveOriginRefusal } from "../routines/routine-save-origin.ts";
 import { ROUTINE_STORE_VERSIONS, routineStoreFormatVersion } from "../routines/routine-store-format.ts";
@@ -1407,10 +1407,10 @@ export class PersistentBotTeamStore {
 
 	/**
 	 * Removes the session's ended routines among `routineIds` once every run of their incarnation is past dispatch and
-	 * delivered. A spent one-run routine leaves quietly: its run's result was the last word. An expired routine, and one a
-	 * run reported its stated end met for, leaves a terminal notice occurrence, written in the same store write as the
-	 * removal, so the owner is told exactly once even across a crash. `journalFull`: such a routine stays until delivered
-	 * results make room for its notice.
+	 * delivered, and its `lostOrigins` (`routine-trigger-writes.ts`). A spent one-run routine leaves quietly. An expired
+	 * routine, and one a run reported its stated end met for, leaves a terminal notice occurrence, written in the same
+	 * store write as the removal, so the owner is told exactly once even across a crash. `journalFull`: such a routine
+	 * stays until delivered results make room for its notice.
 	 */
 	retireEndedRoutines(input: RoutineRetireInput): {
 		readonly retired: readonly string[];

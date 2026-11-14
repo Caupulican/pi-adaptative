@@ -178,12 +178,19 @@ export function recordRoutineFailureStreak(
 	);
 }
 
+/**
+ * Cancels the routine's runs not yet dispatched (pending or claimed). With `settledAs`, a delivery marker, each cancelled
+ * result is recorded already settled with it: a run whose parent can never receive it waits for no delivery. Returns
+ * whether any run was cancelled.
+ */
 export function cancelUndispatchedRoutineOccurrences(
 	state: RoutineStoreState,
 	routineId: string,
 	nowMs: number,
 	summary = "Routine was paused or deleted before dispatch.",
-): void {
+	settledAs?: string,
+): boolean {
+	let cancelledAny = false;
 	for (const item of state.occurrences.values()) {
 		if (item.routineId !== routineId || (item.phase !== "pending" && item.phase !== "claimed")) continue;
 		const cancelled = withResult(
@@ -193,6 +200,14 @@ export function cancelUndispatchedRoutineOccurrences(
 			summary,
 			item.parentOrigin.sessionId,
 		);
-		state.occurrences.set(item.occurrenceId, cancelled);
+		const result = cancelled.result;
+		state.occurrences.set(
+			item.occurrenceId,
+			settledAs === undefined || result === undefined
+				? cancelled
+				: { ...cancelled, result: { ...result, delivery: "acknowledged", deliveryMarker: settledAs } },
+		);
+		cancelledAny = true;
 	}
+	return cancelledAny;
 }

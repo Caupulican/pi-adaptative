@@ -1,7 +1,8 @@
 /**
  * The owner notices a session's routine scheduler keeps (`harness-notice.ts`), each read at every pass from the routine
  * store's durable records: a routine paused after failed runs, a time zone this runtime cannot place, a snag its runs keep
- * meeting, and a result settled undeliverable because the point of the session it was addressed to can never come back.
+ * meeting, and a result settled undeliverable, or a routine removed, because the point of the session it was addressed
+ * to can never come back.
  * Read from durable records, a notice survives the process that wrote the state: a restart or a session reopened in the
  * background observes it again, and a notice already saved in the session is found and not repeated.
  */
@@ -11,6 +12,7 @@ import { englishText } from "../language/interface-text.ts";
 import { type RoutineDefinitionView, type RoutineOccurrence, routineZoneUnsupported } from "./routine-contract.ts";
 import { latestUndeliverableResults } from "./routine-origin-reach.ts";
 import { PROMOTED_SNAG_RUNS, promotedRoutineSnags } from "./routine-progress.ts";
+import type { RetiredRoutineRecord } from "./routine-retired.ts";
 
 /** The notice kinds a routine state is told under; each subject (`scope`) holds its own episodes. */
 export type RoutineNoticeKind = "routine-paused" | "routine-unschedulable" | "routine-snag" | "routine-origin-lost";
@@ -25,6 +27,37 @@ export interface RoutineNoticeFacts {
 	readonly routines: readonly RoutineDefinitionView[];
 	/** The session's runs in the journal, settled ones included. */
 	readonly occurrences: readonly RoutineOccurrence[];
+	/** The session's kept records of removed routines. */
+	readonly retired: readonly RetiredRoutineRecord[];
+}
+
+/**
+ * Per routine, the latest loss of its saved origin the owner is told: a result settled undeliverable, or the routine's
+ * removal because its own origin is lost, whichever came last (the removal on a tie: it ends the routine).
+ */
+function originLostNotices(facts: RoutineNoticeFacts): Map<string, HarnessNotice> {
+	const notices = new Map<string, { readonly at: number; readonly notice: HarnessNotice }>();
+	for (const result of latestUndeliverableResults(facts.occurrences).values())
+		notices.set(result.routineId, {
+			at: result.settledAt,
+			notice: {
+				reason: `result:${result.occurrenceId}:${result.loss}`,
+				text: `A result of routine ${result.routineId} can never reach this session, so it no longer waits for delivery: ${englishText().notices.routineOriginLoss(result.loss)}.`,
+			},
+		});
+	for (const record of facts.retired) {
+		if (record.reason !== "origin-lost") continue;
+		const known = notices.get(record.routineId);
+		if (known && known.at > record.retiredAt) continue;
+		notices.set(record.routineId, {
+			at: record.retiredAt,
+			notice: {
+				reason: `retired:${record.incarnationId}`,
+				text: `Routine ${record.routineId} was removed: the point of this session it was saved at can never be reached again (its session file is gone, or its entry is missing from the session file), so none of its runs could ever report here. Save it again to keep it running.`,
+			},
+		});
+	}
+	return new Map([...notices].map(([routineId, { notice }]) => [routineId, notice]));
 }
 
 /** Observes the routine states of one session for the owner; keeps only which episodes this runtime already logged. */
@@ -37,7 +70,7 @@ export class RoutineStateNotices {
 	/**
 	 * Observes, for each routine of the session, the kept states the owner acts on: a pause after failed runs, a time zone
 	 * this runtime cannot place, and each snag its progress record counts at least {@link PROMOTED_SNAG_RUNS} times while
-	 * unresolved (one notice per snag episode); then, per routine, its latest result settled undeliverable.
+	 * unresolved (one notice per snag episode); then, per routine, the latest loss of its saved origin.
 	 */
 	observe(port: RoutineNoticePort, facts: RoutineNoticeFacts): void {
 		const promoted = new Set<string>();
@@ -63,11 +96,8 @@ export class RoutineStateNotices {
 			this.noticedSnags.delete(scope);
 			port.noticeRoutineState("routine-snag", scope, undefined);
 		}
-		for (const result of latestUndeliverableResults(facts.occurrences).values())
-			port.noticeRoutineState("routine-origin-lost", result.routineId, {
-				reason: `result:${result.occurrenceId}:${result.loss}`,
-				text: `A result of routine ${result.routineId} can never reach this session, so it no longer waits for delivery: ${englishText().notices.routineOriginLoss(result.loss)}.`,
-			});
+		for (const [routineId, notice] of originLostNotices(facts))
+			port.noticeRoutineState("routine-origin-lost", routineId, notice);
 	}
 
 	/** A pause after failed runs, from its durable record, so a restart finds the notice already saved. */

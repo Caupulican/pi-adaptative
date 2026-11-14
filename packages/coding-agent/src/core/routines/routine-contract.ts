@@ -1177,17 +1177,6 @@ export interface AwayEventDecisionResult {
 	readonly shareFull: readonly string[];
 }
 
-/** The ended routines one session asks the store to remove; the store rechecks each under its lock. */
-export interface RoutineRetireInput {
-	readonly nowMs: number;
-	readonly owner: string;
-	readonly leaseMs: number;
-	readonly parentSessionId: string;
-	/** The parent anchor a bot or team routine's expiry notice is delivered at; session routines use their own. */
-	readonly receiptOrigin: WorkerSavedIntent["receiptOrigin"];
-	readonly routineIds: readonly string[];
-}
-
 export interface RoutineClaimResult {
 	readonly claimed: readonly RoutineOccurrence[];
 	/**

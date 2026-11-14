@@ -10,11 +10,12 @@ import {
 	ROUTINE_JOURNAL_SHARE,
 	type RoutineCursor,
 	type RoutineOccurrence,
-	type RoutineRetireInput,
 	routineEnded,
 	routineOccurrenceId,
 	routineOccurrencesSettled,
 } from "../routines/routine-contract.ts";
+import { routineUndeliverableMarker } from "../routines/routine-origin-reach.ts";
+import type { RoutineRetireInput } from "../routines/routine-retired.ts";
 import { routineReceiptOrigin } from "../routines/routine-save-origin.ts";
 import {
 	decideWatchObservation,
@@ -31,9 +32,15 @@ import {
 	routineHasJournalShare,
 	routineJournalHasRoom,
 } from "./routine-occurrence-journal.ts";
-import { withResult } from "./routine-result-writes.ts";
+import { cancelUndispatchedRoutineOccurrences, withResult } from "./routine-result-writes.ts";
 import { withRoutineRunState } from "./routine-run-state.ts";
 
+/**
+ * Retires the session's ended routines among `routineIds` (`retireEndedRoutines` in the store) and its routines whose
+ * saved origin is lost (`lostOrigins`). A lost routine can dispatch nothing more: its undispatched runs are settled in this
+ * write with the loss as their delivery marker, and it is removed, without an end notice that could never be delivered
+ * either, once its dispatched runs are settled.
+ */
 export function retireEndedRoutines(
 	state: RoutineStoreState,
 	input: RoutineRetireInput,
@@ -41,10 +48,24 @@ export function retireEndedRoutines(
 ): { readonly retired: readonly string[]; readonly journalFull: boolean } {
 	const retired: string[] = [];
 	let journalFull = false;
-	for (const routineId of new Set(input.routineIds)) {
+	let settled = false;
+	const losses = new Map((input.lostOrigins ?? []).map((lost) => [lost.routineId, lost.loss]));
+	for (const routineId of new Set([...input.routineIds, ...losses.keys()])) {
 		const routine = state.routines.get(routineId);
 		if (!routine || input.nowMs < Date.parse(routine.updatedAt)) continue;
 		if (routine.target.kind === "session" && routine.target.parentSessionId !== input.parentSessionId) continue;
+		const loss = losses.get(routineId);
+		if (loss !== undefined) {
+			if (routine.target.kind !== "session") continue;
+			const marker = routineUndeliverableMarker(loss);
+			const summary = "The routine's origin in its session can never be reached; this run was never dispatched.";
+			settled = cancelUndispatchedRoutineOccurrences(state, routineId, input.nowMs, summary, marker) || settled;
+			if (!routineOccurrencesSettled(state.occurrences.values(), routine)) continue;
+			recordRetiredRoutine(state, state.routines.get(routineId) ?? routine, "origin-lost", input.nowMs);
+			state.routines.delete(routineId);
+			retired.push(routineId);
+			continue;
+		}
 		const ended = routineEnded(routine, input.nowMs);
 		if (!ended || !routineOccurrencesSettled(state.occurrences.values(), routine)) continue;
 		const met = ended === "condition" ? routine.conditionMet : undefined;
@@ -93,7 +114,7 @@ export function retireEndedRoutines(
 		state.routines.delete(routineId);
 		retired.push(routineId);
 	}
-	if (retired.length > 0) persist();
+	if (retired.length > 0 || settled) persist();
 	return { retired, journalFull };
 }
 

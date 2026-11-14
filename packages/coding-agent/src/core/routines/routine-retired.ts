@@ -1,8 +1,10 @@
 /**
- * The record a routine leaves when it is retired (its one run done, its end time reached, its stated end met, or the
- * owner's delete), so a session that armed it can still read what it was and how it ended instead of finding it absent.
- * The record is bounded, keeps the first words of the last result only, and never moves any routine's revision.
+ * The record a routine leaves when it is retired (its one run done, its end time reached, its stated end met, the
+ * owner's delete, or the point of its session it was saved at lost for good), so a session that armed it can still read
+ * what it was and how it ended instead of finding it absent. The record is bounded, keeps the first words of the last
+ * result only, and never moves any routine's revision. The retire request a session hands the store is defined here too.
  */
+import type { WorkerSavedIntent } from "../delegation/worker-saved-intent.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import {
 	isRoutineId,
@@ -12,6 +14,7 @@ import {
 	type RoutineDefinitionView,
 	type RoutineSchedule,
 } from "./routine-contract.ts";
+import type { RoutineOriginLoss } from "./routine-origin-reach.ts";
 import { MAX_RESULT_PREVIEW_CHARS, resultPreview } from "./routine-parent-input.ts";
 
 /** Retired records one store keeps, shared by every session of the agent directory; the oldest leaves first. */
@@ -20,8 +23,29 @@ export const MAX_RETIRED_ROUTINES = 64;
 export const MAX_RETIRED_PROMPT_CHARS = 500;
 const MAX_RETIRED_ID_CHARS = 200;
 
-export const ROUTINE_RETIRED_REASONS = ["spent", "condition", "expired", "deleted"] as const;
+/**
+ * `origin-lost`: the routine's saved origin can never pass in its session (`routine-origin-reach.ts`), so it could run and
+ * report nothing there again.
+ */
+export const ROUTINE_RETIRED_REASONS = ["spent", "condition", "expired", "deleted", "origin-lost"] as const;
 export type RoutineRetiredReason = (typeof ROUTINE_RETIRED_REASONS)[number];
+
+/** What one session asks the store to retire; the store rechecks each routine under its lock. */
+export interface RoutineRetireInput {
+	readonly nowMs: number;
+	readonly owner: string;
+	readonly leaseMs: number;
+	readonly parentSessionId: string;
+	/** The parent anchor a bot or team routine's expiry notice is delivered at; session routines use their own. */
+	readonly receiptOrigin: WorkerSavedIntent["receiptOrigin"];
+	/** Ended routines, removed once their runs are delivered. */
+	readonly routineIds: readonly string[];
+	/**
+	 * Session routines whose saved origin the session found lost, with why: their undispatched runs are settled with the
+	 * loss as their delivery marker, and each is removed with no end notice once its dispatched runs are settled.
+	 */
+	readonly lostOrigins?: readonly { readonly routineId: string; readonly loss: RoutineOriginLoss }[];
+}
 
 export interface RetiredRoutineRecord {
 	readonly routineId: string;
