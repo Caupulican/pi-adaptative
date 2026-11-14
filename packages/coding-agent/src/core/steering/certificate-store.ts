@@ -3,10 +3,10 @@
  * Implements S1A-002..S1A-007, S1A-170, PH-020..PH-028.
  */
 
-import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname } from "node:path";
 import { isWorkerSession } from "../session-role.ts";
+import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { canonicalJson } from "./canonical.ts";
 import type { CertificateLookupQuery, SteeringCertificate } from "./types.ts";
 
@@ -67,43 +67,46 @@ export class SteeringCertificateStore {
 	private loadFromDisk(): void {
 		if (!this.persistentPath) return;
 		try {
-			const content = readFileSync(this.persistentPath, "utf8");
-			const parsed = JSON.parse(content);
-			if (Array.isArray(parsed)) {
-				for (const item of parsed) {
-					if (isValidCertificateRecord(item)) {
-						this.certificatesById.set(item.certificate_id, item);
-					}
-				}
-				this.evictBeyondBound();
-			}
+			for (const item of this.readDisk(this.persistentPath)) this.certificatesById.set(item.certificate_id, item);
+			this.evictBeyondBound();
 		} catch (err) {
 			throw new SteeringCertificateStoreError(`Failed to load certificates from ${this.persistentPath}`, err);
 		}
 	}
 
+	private readDisk(path: string): SteeringCertificate[] {
+		const parsed: unknown = JSON.parse(readFileSync(path, "utf8"));
+		return Array.isArray(parsed) ? parsed.filter(isValidCertificateRecord) : [];
+	}
+
+	/**
+	 * Rewrites the file under its lock from what it holds now plus this store's certificates: every session (a root, a
+	 * bot's session, another process) keeps its own store on the one file, so a rewrite from this store alone would drop
+	 * what the others persisted since it loaded. A file that does not parse is replaced (a certificate is a cache: a lost
+	 * one is evaluated again).
+	 */
 	private saveToDisk(): void {
-		if (!this.persistentPath || this.readOnly) return;
-		const dir = dirname(this.persistentPath);
-		if (!existsSync(dir)) {
-			mkdirSync(dir, { recursive: true });
-		}
-		const all = Array.from(this.certificatesById.values());
-		const serialized = canonicalJson(all);
-		const tempPath = `${this.persistentPath}.tmp.${Date.now()}.${randomUUID().slice(0, 8)}`;
+		const path = this.persistentPath;
+		if (!path || this.readOnly) return;
+		const dir = dirname(path);
+		if (!existsSync(dir)) mkdirSync(dir, { recursive: true });
 		try {
-			writeFileSync(tempPath, serialized, "utf8");
-			renameSync(tempPath, this.persistentPath);
+			withFileLockSync(path, () => {
+				let onDisk: SteeringCertificate[] = [];
+				try {
+					if (existsSync(path)) onDisk = this.readDisk(path);
+				} catch {
+					onDisk = [];
+				}
+				const merged = new Map(onDisk.map((cert) => [cert.certificate_id, cert] as const));
+				for (const [id, cert] of this.certificatesById) merged.set(id, cert);
+				this.certificatesById.clear();
+				for (const [id, cert] of merged) this.certificatesById.set(id, cert);
+				this.evictBeyondBound();
+				writeFileAtomicSync(path, canonicalJson(Array.from(this.certificatesById.values())));
+			});
 		} catch (err) {
-			try {
-				if (existsSync(tempPath)) unlinkSync(tempPath);
-			} catch {
-				// ignore cleanup error
-			}
-			throw new SteeringCertificateStoreError(
-				`Failed atomic persistence of steering certificates to ${this.persistentPath}`,
-				err,
-			);
+			throw new SteeringCertificateStoreError(`Failed atomic persistence of steering certificates to ${path}`, err);
 		}
 	}
 

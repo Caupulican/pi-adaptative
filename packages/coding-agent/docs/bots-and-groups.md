@@ -37,7 +37,10 @@ in every execution mode). A turn is bounded by `workerDelegation.maxUsd` (and th
 set, and what each turn spends is added to the main session's cost. Its tool loop is supervised as a worker's is: repeated broad validation with no new change is steered back to the work, and a turn System One judges stalled or off its message is steered, redirected or stopped; the directive shows in its chat. It reads the settings the main session reads, again each time the main session changes them, and runs
 System One as the main session does at each use (on or off, the same provider and connection; turning System One off or on in settings turns it off or on for a loaded bot too): your messages to it are judged as your
 messages to the main session are, it holds the `systemone` tool, and its System One evidence is kept in its home
-(`typesafe-reviews/`). A bot is a session of its own, so its edge grants are its own conversation's plus your settings'; no other session's
+(`typesafe-reviews/`). As a root session it writes the learning stores a worker only reads (model adaptation, fitness and
+outcomes, observations, the failure corpus, tool performance and recovery logs, steering certificates); every write
+takes the store file's lock and works from what the file holds then, so the bot's session and any other session or process
+sharing the agent directory never drop each other's records. A bot is a session of its own, so its edge grants are its own conversation's plus your settings'; no other session's
 conversation counts, the main session's included (a bot running as a worker takes the main session's grants). To give
 a bot standing authority, grant the class in settings (`edge.allow`, which stands for every session and every bot); to
 authorize one action, say so in the bot's chat, where System One reads your words as it does in the main session (such a
