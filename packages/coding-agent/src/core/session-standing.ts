@@ -12,7 +12,7 @@ export type SessionStanding =
 	| { readonly kind: "root" }
 	/** A worker reporting to a parent: a worker process, `PI_CHILD_SESSION=1`, or an SDK child. */
 	| { readonly kind: "worker" }
-	/** A bot's own session; the bot's state roots derive from its agent id. */
+	/** A bot's own session. `agentId` is reserved for its per-bot state roots; no capability reads it yet. */
 	| { readonly kind: "bot"; readonly agentId: string }
 	/** An in-memory session another host drives: an away channel's third-party turn, an away parent's model calls. */
 	| { readonly kind: "vehicle" };

@@ -704,6 +704,28 @@ const { session } = await createAgentSession({ resourceLoader: loader });
 
 > See [examples/sdk/08-prompt-templates.ts](../examples/sdk/08-prompt-templates.ts)
 
+### Session Standing
+
+`standing` says what the session is, and so what it may do. Every session-scoped gate (owner memory and history, learning, host duties, bots, workers, owner questions, the fast tier) reads one capability table in `core/session-standing.ts`.
+
+```typescript
+// The owner's own session (the default)
+await createAgentSession({ standing: { kind: "root" } });
+
+// A worker reporting to a parent: no owner memory writes, no host duties, background requests
+await createAgentSession({ standing: { kind: "worker" } });
+
+// A bot's own session: holds its own watches (routine scope "own-watches"), nothing of the root's
+await createAgentSession({ standing: { kind: "bot", agentId: "reviewer" } });
+
+// An in-memory session another host drives (an away channel's turn)
+await createAgentSession({ standing: { kind: "vehicle" } });
+```
+
+Without `standing`, the deprecated `isChildSession: true` (or `PI_CHILD_SESSION=1`) makes a worker. In a worker process a root becomes a worker; a bot or a vehicle keeps its standing. `holdsOwnWatches` is removed: pass `standing: { kind: "bot", agentId }`.
+
+`sessionCapabilities(standing)` returns the table's row for a standing (`SessionCapabilities`). A caller that builds `AgentSession` directly passes it as `AgentSessionConfig.capabilities`.
+
 ### Session Management
 
 Sessions use a tree structure with `id`/`parentId` linking, enabling in-place branching.
@@ -1187,6 +1209,9 @@ defineTool
 SessionManager
 SettingsManager
 
+// Session standing
+sessionCapabilities
+
 // Tool factories
 createCodingTools
 createReadOnlyTools
@@ -1196,6 +1221,8 @@ createGrepTool, createFindTool, createLsTool
 // Types
 type CreateAgentSessionOptions
 type CreateAgentSessionResult
+type SessionStanding
+type SessionCapabilities
 type CreateAgentSessionRuntimeFactory
 type PreparedAgentSessionRuntime
 type ExtensionFactory

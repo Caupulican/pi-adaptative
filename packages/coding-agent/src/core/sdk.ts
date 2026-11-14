@@ -151,10 +151,11 @@ export interface CreateAgentSessionOptions {
 	isExplicitModel?: boolean;
 	/** Whether `thinkingLevel` came from an explicit flag (see isExplicitModel). */
 	isExplicitThinking?: boolean;
-	/** What this session is (`session-standing.ts`); resolved with `isChildSession` and the process role. Default: a root. */
+	/** What this session is (`session-standing.ts`; docs/sdk.md "Session Standing"). Default: a root. */
 	standing?: SessionStanding;
 	/** @deprecated Pass `standing`. True makes the session a worker (`{ kind: "worker" }`), false a root. */
 	isChildSession?: boolean;
+	/** Removed: pass `standing: { kind: "bot", agentId }`. */ holdsOwnWatches?: never;
 	/** The role of the session's lifetime lease; default `session`. The bot daemon's phone session holds `channel-host`. */
 	bundleLeaseRole?: SessionLeaseRole;
 	/**
@@ -389,8 +390,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	configureHarnessLog(agentDir, settingsManager);
 	bindSavedBedrockScope(settingsManager, modelRegistry);
-	const standing = resolveSessionStanding(options);
-	const capabilities = sessionCapabilities(standing);
+	const capabilities = sessionCapabilities(resolveSessionStanding(options));
 	const defaultServiceTier = options.serviceTier;
 	const orchestrationProfile = options.orchestrationProfile;
 	if (orchestrationProfile) {

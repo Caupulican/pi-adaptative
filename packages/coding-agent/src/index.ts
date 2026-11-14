@@ -444,6 +444,7 @@ export {
 	resolveCredentialMigrationSources,
 } from "./core/secrets/credential-migration-source.ts";
 export { createPortableGitProjectKey, resolveCredentialProject } from "./core/secrets/credential-project.ts";
+export { type SessionCapabilities, type SessionStanding, sessionCapabilities } from "./core/session-standing.ts";
 export type { TreeNavigationResult } from "./core/session-tree-navigator.ts";
 export { getDirectoryResourceProfileInfo, matchesResourceProfilePattern } from "./core/settings/settings-rules.ts";
 export type {
