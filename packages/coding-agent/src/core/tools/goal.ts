@@ -7,6 +7,7 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 import { type GoalFileEvidenceResolver, resolveNativeGoalFileEvidence } from "../goals/file-evidence.ts";
+import { completionGateSet, type GoalCompletionEvidence } from "../goals/goal-completion-record.ts";
 import {
 	type GoalStateRevision,
 	getGoalStateRevision,
@@ -14,8 +15,6 @@ import {
 } from "../goals/goal-lifecycle.ts";
 import {
 	applyGoalEvent,
-	completionGateSet,
-	type GoalCompletionEvidence,
 	type GoalEvidenceKind,
 	type GoalEvidenceOutcome,
 	type GoalState,

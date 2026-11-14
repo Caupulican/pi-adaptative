@@ -576,7 +576,7 @@ const rows: readonly FaultMatrixRow[] = [
 		owner: "core/provider-admission/gate.ts",
 		journey: 2,
 		phase: "orchestration E aux",
-		fault: "a worker request meets a model quota exhaustion recorded with a reset (the foreground has no usage-limit wait: a foreground quota refusal stops its run and holds queued input, R45u)",
+		fault: "a worker request meets a model quota exhaustion recorded with a reset (the foreground is not held at the gate: a foreground quota refusal stops its run and holds queued input, R45u, and a subscription refusal that states its reset then waits for it and continues, core/usage-reset-resume.ts)",
 		witness: "the passed reset ends the wait, satisfied by the reset alarm",
 		control: "the worker request before the record (the handoff reader, on worker-c) passed admission with no wait",
 		estSeconds: 2,

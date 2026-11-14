@@ -47,6 +47,7 @@ import {
 import {
 	type GoalResumeSource,
 	type GoalStateRevision,
+	type GoalSystemStop,
 	getAutoResumableReasonPrefix,
 	getGoalStateRevision,
 	planSystemGoalResume,
@@ -59,7 +60,7 @@ import {
 	type GoalRuntimeSnapshotSettings,
 	goalHasInFlightWork,
 } from "./goal-runtime-snapshot.ts";
-import { applyGoalEvent, type GoalState, isGoalExecutionActive } from "./goal-state.ts";
+import { applyGoalEvent, type GoalState, type GoalStopModel, isGoalExecutionActive } from "./goal-state.ts";
 import type { GoalStartGrant } from "./goal-tool-core.ts";
 import {
 	type ExplicitChatGoal,
@@ -82,7 +83,7 @@ export interface GoalSessionControllerDeps {
 	 * This controller's own event stamps and the lease's wall-clock accounting stay on the system clock.
 	 */
 	timers: TimerSource;
-	getModelProvider(): string | undefined;
+	getModel(): GoalStopModel | undefined;
 	getLaneRecords(): readonly LaneRecord[];
 	getTaskRuntimeSnapshot(): TaskRuntimeProjection | undefined;
 	getBackgroundToolTasks(): readonly BackgroundToolTaskRef[];
@@ -236,7 +237,7 @@ export class GoalSessionController {
 			// the goal resumable exactly as before.
 			const classified = classifyFailure({
 				message: lastAssistant.errorMessage,
-				provider: this.deps.getModelProvider(),
+				provider: this.deps.getModel()?.provider,
 			});
 			if (PROVIDER_FAILURE_REASONS.has(classified.reason)) {
 				return { outcome: "errored", errorMessage: lastAssistant.errorMessage };
@@ -1296,32 +1297,30 @@ export class GoalSessionController {
 		const state = this.getState();
 		if (!state || !isGoalExecutionActive(state.status) || state.goalId !== goalId) return;
 		const message = error instanceof Error ? error.message : String(error);
-		const classified = classifyFailure({ message, provider: this.deps.getModelProvider() });
+		const model = this.deps.getModel();
+		const classified = classifyFailure({ message, provider: model?.provider });
 		const status = classified.reason === "billing_or_quota" ? "usage_limited" : "blocked";
+		const refusedBy = PROVIDER_FAILURE_REASONS.has(classified.reason) ? model : undefined;
 		const reason = `${classified.reason}: ${message}`;
 		harnessLog.warn("goals", "a goal continuation failed", { goalId, failure: classified.reason, stop: status });
 
 		if (status === "usage_limited") {
-			this.stopActiveGoal("usage_limited", reason);
+			this.stopActiveGoal("usage_limited", reason, refusedBy);
 			return;
 		}
 
 		const isTransient = classified.retryable || getAutoResumableReasonPrefix(reason) !== undefined;
-		const hasInFlightWork = goalHasInFlightWork(
-			state,
-			this.deps.getLaneRecords(),
-			this.deps.getBackgroundToolTasks(),
-		);
+		const inFlight = goalHasInFlightWork(state, this.deps.getLaneRecords(), this.deps.getBackgroundToolTasks());
 		const currentStreak = state.systemFailureStreak ?? 0;
 
-		if (!this.stopActiveGoal("blocked", reason)) return;
+		if (!this.stopActiveGoal("blocked", reason, refusedBy)) return;
 
 		// Background work running for this goal: a classified recoverable stop (a bounded guard or a
 		// transient provider failure within its streak allowance) resumes in place so those workers
 		// finish against an active goal. Any other reason (auth, unknown, unsupported model) stays
 		// blocked for the owner, whose next prompt resumes a system stop: unclassified failures never
 		// retry automatically.
-		if (hasInFlightWork) {
+		if (inFlight) {
 			this.resumeSystemBlockedGoal();
 			return;
 		}
@@ -1343,9 +1342,9 @@ export class GoalSessionController {
 		return this.stopActiveGoal("blocked", reason);
 	}
 
-	private stopActiveGoal(status: "blocked" | "usage_limited" | "budget_limited", reason: string): boolean {
+	private stopActiveGoal(status: GoalSystemStop["status"], reason: string, refusedBy?: GoalStopModel): boolean {
 		const state = this.getState();
-		const stopped = stopGoalFromSystem(state, { status, reason }, new Date().toISOString());
+		const stopped = stopGoalFromSystem(state, { status, reason, refusedBy }, new Date().toISOString());
 		if (!stopped.ok || !state) return false;
 		this.saveState(stopped.state, getGoalStateRevision(state));
 		return true;

@@ -431,6 +431,8 @@ export const NOTICES = {
 			`Worker ${laneId}: its subscription's usage is used up; it resumes on its own when the usage resets (${at}).`,
 		sessionWaits: (at: string) =>
 			`The subscription's usage is used up; this session continues on its own when the usage resets (${at}).`,
+		sessionContinuesNow: () =>
+			"The subscription's usage that stopped this session has reset; the session continues now.",
 		sessionResumeFailed: (error: string) => `The session could not continue after the usage reset: ${error}`,
 		codexResetsAvailable: (count: number) =>
 			`OpenAI Codex usage limit reached. ${count === 1 ? "1 usage reset is" : `${count} usage resets are`} available: open /usage and press x to redeem one.`,

@@ -350,7 +350,7 @@ import { mutationScopeForWorktree } from "./tools/file-mutation-queue.ts";
 import type { BashOperations, BashResult } from "./tools/schemas/bash.ts";
 import { disposeShellExecutionSessionAndWait } from "./tools/shell-execution-session.ts";
 import { checkedExtensionMessage } from "./turn-origin.ts";
-import { UsageResetResume } from "./usage-reset-resume.ts";
+import { type RestoredUsageWait, UsageResetResume } from "./usage-reset-resume.ts";
 import type { TimerPort } from "./util/timer-port.ts";
 import type { WaitStatusEvent } from "./util/wait.ts";
 import { currentWorkUnit, openWorkUnit } from "./work-units.ts";
@@ -1110,7 +1110,7 @@ export class AgentSession {
 			isDisposed: () => this._disposed,
 			resumeUsageLimitedGoal: () => this._goals.resumeUsageLimitedGoal(),
 			continueTurn: () => this._continueAfterErrors(),
-			emit: (event) => this._emit(event),
+			warn: (message) => this._foregroundLifecycle.warn(message),
 		});
 		this.hostTurnReasoning = new HostTurnReasoningController(() => this.settingsManager.getCheapTurnSettings());
 		this._costGuard = new CostGuardController({
@@ -1155,7 +1155,7 @@ export class AgentSession {
 		this._goals = new GoalSessionController({
 			getSessionManager: () => this.sessionManager,
 			timers: config.timers,
-			getModelProvider: () => this.model?.provider,
+			getModel: () => this.model,
 			getLaneRecords: () => this._backgroundLanes.getLaneRecords(),
 			getTaskRuntimeSnapshot: () => this._backgroundLanes.getTaskRuntimeSnapshot(),
 			getBackgroundToolTasks: () => this._backgroundToolTasks.list(),
@@ -4771,11 +4771,11 @@ export class AgentSession {
 		this._goals.recordContinuationTelemetry(pass);
 	}
 
-	/** Restore runtime intent: reopen goals stopped by bounded system guards, and wait again for a usage limit's kept reset. */
-	restoreGoalRuntimeAfterResume(): { readonly resumed: boolean; readonly waitsForUsageReset: boolean } {
-		const resumed = this._goals.restoreAfterResume();
-		const waitsForUsageReset = this._usageReset.restoreWait(this.getGoalStateSnapshot(), this.model);
-		return { resumed, waitsForUsageReset };
+	/** Restore runtime intent: wait again for a usage limit's kept reset, else reopen goals stopped by bounded system guards. */
+	restoreGoalRuntimeAfterResume(): { readonly resumed: boolean; readonly usageWait?: RestoredUsageWait } {
+		const usageWait = this._usageReset.restoreWait(this.getGoalStateSnapshot());
+		// A goal waiting for its usage reset resumes at the reset, never now against the limit that stopped it.
+		return { resumed: !usageWait?.goal && this._goals.restoreAfterResume(), ...(usageWait ? { usageWait } : {}) };
 	}
 
 	/** Save native task-step state to the active session log. */

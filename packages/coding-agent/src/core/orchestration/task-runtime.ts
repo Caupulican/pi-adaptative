@@ -62,13 +62,13 @@ import {
 	approvalFromPayload,
 	assertAcceptanceCriteria,
 	assertReferencedAcceptanceCriteriaRetained,
-	assertRiskBudget,
 	checkpointSummary,
 	dispatchFromValue,
 	dispatchIdentifier,
 	dispatchIdentifierArray,
 	executionGrantFromValue,
 	MAX_DATE_EPOCH_MS,
+	parseInputRiskBudget,
 	taskFromValue,
 	usageFromPayload,
 	usageGenerationIdentityFromValue,
@@ -269,7 +269,7 @@ export class DurableTaskRuntime {
 			evidence.map((item) => item.evidenceId),
 		);
 		this.assertProjectionHeadroom({ objectives: current ? 0 : 1, evidence: requiredEvidence });
-		assertRiskBudget(input.riskBudget, "objective.riskBudget");
+		const riskBudget = parseInputRiskBudget(input.riskBudget, "objective.riskBudget");
 		const acceptanceCriteria = structuredClone(input.acceptanceCriteria ?? []);
 		assertAcceptanceCriteria(acceptanceCriteria);
 		const title = input.title.trim();
@@ -283,7 +283,7 @@ export class DurableTaskRuntime {
 					description,
 					constraints: [...(input.constraints ?? [])],
 					acceptanceCriteria,
-					riskBudget: { ...(input.riskBudget ?? {}) },
+					riskBudget,
 					updatedAt: now,
 				}
 			: {
@@ -294,7 +294,7 @@ export class DurableTaskRuntime {
 					status: "active",
 					constraints: [...(input.constraints ?? [])],
 					acceptanceCriteria,
-					riskBudget: { ...(input.riskBudget ?? {}) },
+					riskBudget,
 					createdAt: now,
 					updatedAt: now,
 				};
@@ -399,7 +399,7 @@ export class DurableTaskRuntime {
 
 	createObjective(input: CreateObjectiveInput): ObjectiveContract {
 		this.refresh();
-		assertRiskBudget(input.riskBudget, "objective.riskBudget");
+		const riskBudget = parseInputRiskBudget(input.riskBudget, "objective.riskBudget");
 		const now = this.nowIso();
 		const objective: ObjectiveContract = {
 			schemaVersion: ORCHESTRATION_SCHEMA_VERSION,
@@ -409,7 +409,7 @@ export class DurableTaskRuntime {
 			status: "active",
 			constraints: [...(input.constraints ?? [])],
 			acceptanceCriteria: structuredClone(input.acceptanceCriteria ?? []),
-			riskBudget: { ...(input.riskBudget ?? {}) },
+			riskBudget,
 			createdAt: now,
 			updatedAt: now,
 		};
@@ -437,7 +437,7 @@ export class DurableTaskRuntime {
 		this.refresh();
 		const current = this.state.objectives[input.objectiveId];
 		if (!current) return this.createObjective(input);
-		assertRiskBudget(input.riskBudget, "objective.riskBudget");
+		const riskBudget = parseInputRiskBudget(input.riskBudget, "objective.riskBudget");
 		const acceptanceCriteria = structuredClone(input.acceptanceCriteria ?? []);
 		assertAcceptanceCriteria(acceptanceCriteria);
 		const nextFields = {
@@ -445,7 +445,7 @@ export class DurableTaskRuntime {
 			description: input.description.trim(),
 			constraints: [...(input.constraints ?? [])],
 			acceptanceCriteria,
-			riskBudget: { ...(input.riskBudget ?? {}) },
+			riskBudget,
 		};
 		if (!nextFields.title || !nextFields.description) {
 			throw new DurableTaskRuntimeError("Objective title and description are required.");
@@ -1388,7 +1388,7 @@ export class DurableTaskRuntime {
 		if (input.verificationOfTaskId && !input.verificationOfAttemptId) {
 			throw new DurableTaskRuntimeError("A new verifier requires an exact subject attempt.");
 		}
-		assertRiskBudget(input.riskBudget, "task.riskBudget");
+		const riskBudget = parseInputRiskBudget(input.riskBudget, "task.riskBudget");
 		const objectiveState = this.state.objectives[input.objectiveId];
 		if (!objectiveState) throw new DurableTaskRuntimeError(`Unknown objective '${input.objectiveId}'.`);
 		if (objectiveState.objective.status !== "active") {
@@ -1411,7 +1411,7 @@ export class DurableTaskRuntime {
 				acceptanceCriterionIds,
 				...(input.verificationOfTaskId ? { verificationOfTaskId: input.verificationOfTaskId } : {}),
 				...(input.verificationOfAttemptId ? { verificationOfAttemptId: input.verificationOfAttemptId } : {}),
-				riskBudget: { ...(input.riskBudget ?? {}) },
+				riskBudget,
 				createdAt: now,
 				updatedAt: now,
 			},

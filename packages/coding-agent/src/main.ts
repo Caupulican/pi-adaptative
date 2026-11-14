@@ -1082,8 +1082,8 @@ export async function main(args: string[], options?: MainOptions) {
 	const { settingsManager, modelRegistry, resourceLoader } = services;
 	configureHttpDispatcher(settingsManager.getHttpIdleTimeoutMs());
 	if (parsed.resume || parsed.continue || parsed.session !== undefined) {
-		// Restoring a session must not mutate owner intent. Active goals may resume their runtime;
-		// paused/blocked/limited goals remain stopped until an explicit owner action.
+		// Restoring keeps owner intent (a paused goal stays paused); a bounded system guard's stop reopens, and a usage
+		// limit's kept reset is waited for again, the stopped goal or turn continuing at the reset without a question.
 		session.restoreGoalRuntimeAfterResume();
 	}
 

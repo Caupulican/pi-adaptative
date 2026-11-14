@@ -21,14 +21,15 @@ function getBoundInFlightRequirements(
 
 /**
  * When every bound in-flight requirement's wait ends. A requirement's deadline is `maxWorkerWaitMs` after its binding, or
- * after its worker's suspended attempt may run again when that is later (`retryRemainingMs`, keyed by the bound lane): a
- * worker waiting out a subscription's usage reset is waiting correctly, and its full wait counts from its resumption.
+ * after its worker's attempt may run again when that is later (`retryOffsetMs`, keyed by the bound lane, negative once
+ * the retry passed): a worker waiting out a subscription's usage reset is waiting correctly, and its full wait counts from
+ * its resumption, while it is suspended and once it runs again.
  */
 function workerWaitTiming(
 	requirements: readonly Requirement[],
 	now: string | undefined,
 	maxWorkerWaitMs: number | undefined,
-	retryRemainingMs: ReadonlyMap<string, number> | undefined,
+	retryOffsetMs: ReadonlyMap<string, number> | undefined,
 ): { timedOut: boolean; resumeAt?: string } {
 	if (now === undefined || maxWorkerWaitMs === undefined) return { timedOut: false };
 	const nowMs = Date.parse(now);
@@ -37,8 +38,7 @@ function workerWaitTiming(
 	for (const requirement of requirements) {
 		if (requirement.boundAt === undefined) return { timedOut: false };
 		const boundAtMs = Date.parse(requirement.boundAt);
-		const retryMs =
-			requirement.boundLaneId === undefined ? undefined : retryRemainingMs?.get(requirement.boundLaneId);
+		const retryMs = requirement.boundLaneId === undefined ? undefined : retryOffsetMs?.get(requirement.boundLaneId);
 		const waitFromMs = retryMs === undefined ? boundAtMs : Math.max(boundAtMs, nowMs + retryMs);
 		const deadlineMs = waitFromMs + maxWorkerWaitMs;
 		if (!Number.isFinite(deadlineMs)) return { timedOut: false };
@@ -124,16 +124,11 @@ function boundWorkerContinuation(args: {
 	baseDecision: GoalContinuationBaseDecision;
 	now: string | undefined;
 	maxWorkerWaitMs: number | undefined;
-	retryRemainingMs: ReadonlyMap<string, number> | undefined;
+	retryOffsetMs: ReadonlyMap<string, number> | undefined;
 	waitingMessage: string;
 }): GoalContinuationDecision | undefined {
 	if (args.boundInFlightRequirements.length === 0) return undefined;
-	const timing = workerWaitTiming(
-		args.boundInFlightRequirements,
-		args.now,
-		args.maxWorkerWaitMs,
-		args.retryRemainingMs,
-	);
+	const timing = workerWaitTiming(args.boundInFlightRequirements, args.now, args.maxWorkerWaitMs, args.retryOffsetMs);
 	if (timing.timedOut && args.maxWorkerWaitMs !== undefined) {
 		return {
 			...args.baseDecision,
@@ -217,11 +212,12 @@ export function evaluateGoalContinuation(args: {
 	 */
 	maxWorkerWaitMs?: number;
 	/**
-	 * Bound lanes (`Requirement.boundLaneId`) whose worker attempt is suspended until a later retry, with the milliseconds
-	 * left before it may run, measured on the orchestration clock that stamped the retry. The worker wait of such a lane
-	 * counts from that point instead of from its binding, so a worker waiting out a usage reset is not given up on.
+	 * Bound lanes (`Requirement.boundLaneId`) whose in-flight worker attempt was given a later retry (suspended for it, or
+	 * leased and running after it), with the retry's offset from now in milliseconds (negative once it passed), measured
+	 * on the orchestration clock that stamped the retry. The worker wait of such a lane counts from that retry instead of
+	 * from its binding when later, so a worker waiting out a usage reset is not given up on, nor once it runs again.
 	 */
-	workerRetryRemainingMs?: ReadonlyMap<string, number>;
+	workerRetryOffsetMs?: ReadonlyMap<string, number>;
 	/**
 	 * Bound lanes (`Requirement.boundLaneId` -- SAME id-space as `inFlightGoalLaneIds`, not the raw
 	 * worktree-sync `laneKey`) whose worktree-sync lane has a rebase stopped on conflicts
@@ -341,7 +337,7 @@ export function evaluateGoalContinuation(args: {
 			baseDecision,
 			now: args.now,
 			maxWorkerWaitMs: args.maxWorkerWaitMs,
-			retryRemainingMs: args.workerRetryRemainingMs,
+			retryOffsetMs: args.workerRetryOffsetMs,
 			waitingMessage:
 				"A system interruption occurred, but a worker is dispatched against an open requirement; waiting for it before stopping.",
 		});
@@ -534,7 +530,7 @@ export function evaluateGoalContinuation(args: {
 		baseDecision,
 		now: args.now,
 		maxWorkerWaitMs: args.maxWorkerWaitMs,
-		retryRemainingMs: args.workerRetryRemainingMs,
+		retryOffsetMs: args.workerRetryOffsetMs,
 		waitingMessage: "A worker is dispatched against an open requirement; waiting for it to finish before continuing.",
 	});
 	if (workerContinuation) return workerContinuation;

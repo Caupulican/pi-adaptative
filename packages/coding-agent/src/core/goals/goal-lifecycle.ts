@@ -5,6 +5,7 @@ import {
 	applyGoalEvent,
 	type GoalEvent,
 	type GoalState,
+	type GoalStopModel,
 	isGoalExecutionActive,
 	isGoalResumableStatus,
 	isGoalUnfinishedStatus,
@@ -252,9 +253,16 @@ export function replaceGoal(
 	return applyGoalAction(undefined, { action: "start", ...args }, now);
 }
 
+/** A stop the system makes on an active goal: its status, why, and the model whose refusal stopped it, if one did. */
+export interface GoalSystemStop {
+	readonly status: "blocked" | "usage_limited" | "budget_limited";
+	readonly reason: string;
+	readonly refusedBy?: GoalStopModel;
+}
+
 export function stopGoalFromSystem(
 	current: GoalState | undefined,
-	args: { status: "blocked" | "usage_limited" | "budget_limited"; reason: string },
+	args: GoalSystemStop,
 	now: string,
 ): GoalActionResult {
 	if (!current) return missingGoal("stop");
@@ -267,7 +275,16 @@ export function stopGoalFromSystem(
 	}
 	const reason = args.reason.trim();
 	if (!reason) return refuseGoalAction({ kind: "system_stop_reason_empty" });
-	return { ok: true, state: applyGoalEvent(current, { type: "system_stop_goal", ...args, reason, now }) };
+	// The refusing model is kept by its provider and id only, whatever model record the caller holds.
+	const refusedBy = args.refusedBy && { provider: args.refusedBy.provider, id: args.refusedBy.id };
+	const event = {
+		type: "system_stop_goal" as const,
+		status: args.status,
+		reason,
+		...(refusedBy ? { refusedBy } : {}),
+		now,
+	};
+	return { ok: true, state: applyGoalEvent(current, event) };
 }
 
 export function pausePersistedGoal(host: PersistedGoalStateHost, now = new Date().toISOString()): GoalActionResult {

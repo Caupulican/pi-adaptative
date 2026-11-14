@@ -1,4 +1,14 @@
 import { isPlainRecord } from "../util/value-guards.ts";
+import {
+	copyCompletionFindings,
+	type GoalCompletionEvidence,
+	type GoalCompletionFinding,
+	hasCompletionEvidence,
+	isCompletionFindings,
+	isGateSet,
+	MAX_COMPLETION_FINDINGS,
+	sameGateSet,
+} from "./goal-completion-record.ts";
 
 export type GoalStatus =
 	| "active"
@@ -166,87 +176,6 @@ export interface GoalCompletionRejection {
 	count: number;
 }
 
-const MAX_GATE_SET_IDS = 16;
-const MAX_GATE_ID_CHARS = 200;
-
-/** The set of failed gate ids a completion refusal is counted under: sorted, unique and bounded. */
-export function completionGateSet(failedGates: readonly { readonly id: string }[]): string[] {
-	return [...new Set(failedGates.map((gate) => gate.id.slice(0, MAX_GATE_ID_CHARS)))]
-		.sort()
-		.slice(0, MAX_GATE_SET_IDS);
-}
-
-function isGateSet(value: unknown): boolean {
-	return (
-		isStringArray(value) && value.length <= MAX_GATE_SET_IDS && value.every((id) => id.length <= MAX_GATE_ID_CHARS)
-	);
-}
-
-function sameGateSet(left: readonly string[] | undefined, right: readonly string[] | undefined): boolean {
-	return left !== undefined && right !== undefined && left.join("\n") === right.join("\n");
-}
-
-export interface GoalCompletionFinding {
-	id: string;
-	reason: string;
-	required_next_proof?: string;
-	/** The full field values are in the retained evidence, never inferred from this preview. */
-	truncated?: true;
-}
-
-export interface GoalCompletionEvidence {
-	id: string;
-	sha256: string;
-	bytes: number;
-}
-
-const MAX_COMPLETION_FINDINGS = 12;
-
-function copyCompletionFindings(findings: readonly GoalCompletionFinding[]): GoalCompletionFinding[] {
-	return findings.slice(0, MAX_COMPLETION_FINDINGS).map((finding) => ({
-		id: finding.id.slice(0, 128),
-		reason: finding.reason.slice(0, 500),
-		...(finding.required_next_proof ? { required_next_proof: finding.required_next_proof.slice(0, 1000) } : {}),
-		...(finding.truncated ||
-		finding.id.length > 128 ||
-		finding.reason.length > 500 ||
-		(finding.required_next_proof?.length ?? 0) > 1000
-			? { truncated: true as const }
-			: {}),
-	}));
-}
-
-function isCompletionFindings(value: unknown): value is readonly GoalCompletionFinding[] {
-	return (
-		Array.isArray(value) &&
-		value.length <= MAX_COMPLETION_FINDINGS &&
-		value.every(
-			(finding) =>
-				isPlainRecord(finding) &&
-				typeof finding.id === "string" &&
-				finding.id.length <= 128 &&
-				typeof finding.reason === "string" &&
-				finding.reason.length <= 500 &&
-				(finding.required_next_proof === undefined ||
-					(typeof finding.required_next_proof === "string" && finding.required_next_proof.length <= 1000)) &&
-				(finding.truncated === undefined || finding.truncated === true),
-		)
-	);
-}
-
-function hasCompletionEvidence(value: Record<string, unknown>): boolean {
-	if (value.evidence === undefined) return true;
-	return (
-		isPlainRecord(value.evidence) &&
-		typeof value.evidence.id === "string" &&
-		/^[a-f0-9]{24}$/.test(value.evidence.id) &&
-		typeof value.evidence.sha256 === "string" &&
-		/^[a-f0-9]{64}$/.test(value.evidence.sha256) &&
-		Number.isSafeInteger(value.evidence.bytes) &&
-		Number(value.evidence.bytes) >= 0
-	);
-}
-
 /** One owner question correlated to this objective, and the owner's own answer to it. */
 export interface GoalClarification {
 	requestId: string;
@@ -318,6 +247,12 @@ export interface GoalEvidenceRef {
 	/** Host-observed operation outcome; verifying a failure receipt does not turn it into a success. */
 	outcome?: GoalEvidenceOutcome;
 	createdAt: string;
+}
+
+/** A provider model by its provider and id, as the model registry finds it. */
+export interface GoalStopModel {
+	readonly provider: string;
+	readonly id: string;
 }
 
 export type GoalEvent =
@@ -412,7 +347,14 @@ export type GoalEvent =
 	| { type: "block_goal"; reason: string; now: string }
 	| { type: "pause_goal"; now: string }
 	| { type: "resume_goal"; source?: "owner" | "system"; now: string }
-	| { type: "system_stop_goal"; status: "blocked" | "usage_limited" | "budget_limited"; reason: string; now: string }
+	| {
+			type: "system_stop_goal";
+			status: "blocked" | "usage_limited" | "budget_limited";
+			reason: string;
+			/** The model whose refusal stopped the goal, when a provider refused its turn. */
+			refusedBy?: GoalStopModel;
+			now: string;
+	  }
 	| { type: "cancel_goal"; now: string };
 
 function isStringArray(value: unknown): value is readonly string[] {
@@ -530,6 +472,10 @@ function isRequirement(value: unknown): value is Requirement {
 	);
 }
 
+function isGoalStopModel(value: unknown): value is GoalStopModel {
+	return isPlainRecord(value) && typeof value.provider === "string" && typeof value.id === "string";
+}
+
 function isGoalEvidenceRef(value: unknown): value is GoalEvidenceRef {
 	if (!isPlainRecord(value)) return false;
 	return (
@@ -606,7 +552,8 @@ export function isGoalEvent(value: unknown): value is GoalEvent {
 		case "system_stop_goal":
 			return (
 				(value.status === "blocked" || value.status === "usage_limited" || value.status === "budget_limited") &&
-				typeof value.reason === "string"
+				typeof value.reason === "string" &&
+				(value.refusedBy === undefined || isGoalStopModel(value.refusedBy))
 			);
 		case "completion_rejected":
 			return hasCompletionRejectionFields(value);
@@ -733,6 +680,7 @@ function cloneGoalEvent(event: GoalEvent): GoalEvent {
 				: {}),
 			...(event.evidence ? { evidence: { ...event.evidence } } : {}),
 		};
+	if (event.type === "system_stop_goal" && event.refusedBy) return { ...event, refusedBy: { ...event.refusedBy } };
 	return { ...event };
 }
 

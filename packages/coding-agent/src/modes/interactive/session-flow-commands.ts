@@ -564,7 +564,7 @@ async function offerRestoredGoalResume(host: SessionFlowHost): Promise<boolean> 
 			return true;
 		}
 		// A goal waiting for its subscription's usage reset resumes on its own at the reset: nothing is asked.
-		if (restored.waitsForUsageReset) return false;
+		if (restored.usageWait?.goal) return false;
 	}
 	if (!state || (state.status !== "paused" && state.status !== "blocked" && state.status !== "usage_limited")) {
 		host.session.restoreGoalRuntimeAfterResume();

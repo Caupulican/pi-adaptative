@@ -243,8 +243,8 @@ function riskBudgetFromValue(value: unknown, label: string): RiskBudget {
 	}
 }
 
-export function assertRiskBudget(budget: RiskBudget | undefined, label: string): void {
-	riskBudgetFromValue(budget ?? {}, label);
+export function parseInputRiskBudget(budget: RiskBudget | undefined, label: string): RiskBudget {
+	return riskBudgetFromValue(budget ?? {}, label);
 }
 
 function stringArray(value: unknown, label: string): string[] {

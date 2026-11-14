@@ -6,6 +6,7 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundToolTaskRef } from "../background-tool-task-controller.ts";
 import { getWorkerClaimSnapshots } from "../delegation/session-worker-claim.ts";
 import { getLearningDecisionSnapshots } from "../learning/session-learning-decision.ts";
+import type { AttemptStatus } from "../orchestration/contracts.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime.ts";
 import { projectSessionWorkState, type SessionWorkStateProjection } from "../orchestration/work-state-projection.ts";
 import { activeRootPlan, planLastActivityAt } from "../plan/plan-view.ts";
@@ -94,6 +95,9 @@ export interface GoalRuntimeSnapshot {
 	 */
 	autoContinue?: GoalAutoContinueState;
 }
+
+/** An attempt that carries its retry while it waits for it and once it runs again after it. */
+const RETRY_IN_FLIGHT_STATUSES: ReadonlySet<AttemptStatus> = new Set<AttemptStatus>(["suspended", "leased", "running"]);
 
 /** Whether work dispatched for `state` still runs: a worker bound to one of its requirements, or a background tool task of the goal. */
 export function goalHasInFlightWork(
@@ -240,18 +244,19 @@ export function buildGoalRuntimeSnapshot(args: {
 	const now = (args.now ?? (() => new Date().toISOString()))();
 	const maxWorkerWaitMs = args.maxWorkerWaitMs ?? DEFAULT_GOAL_WORKER_WAIT_MS;
 	const orchestrationNow = args.planNow ?? (() => Date.now());
-	// A goal worker whose attempt is suspended until a later retry (a subscription's usage reset, a backoff) is waiting
-	// correctly: its wait counts from that retry. What is left of it is measured on the orchestration clock that stamped it.
-	let workerRetryRemainingMs: Map<string, number> | undefined;
+	// A goal worker whose attempt was given a later retry (a subscription's usage reset, a backoff) waits correctly until
+	// it, and its wait counts from that retry: while it is suspended for it, and once it is leased and running again after
+	// it. The retry's offset from now is measured on the orchestration clock that stamped it; a passed retry's is negative.
+	let workerRetryOffsetMs: Map<string, number> | undefined;
 	if (inFlightGoalLaneIds && args.laneRecords && args.taskRuntime) {
 		for (const record of args.laneRecords) {
 			if (!inFlightGoalLaneIds.has(record.laneId) || record.attemptId === undefined) continue;
 			const attempt = args.taskRuntime.attempts[record.attemptId];
-			if (attempt?.status !== "suspended" || attempt.retry === undefined) continue;
-			const remainingMs = Date.parse(attempt.retry.notBefore) - orchestrationNow();
-			if (!(remainingMs > 0)) continue;
-			workerRetryRemainingMs ??= new Map();
-			workerRetryRemainingMs.set(record.laneId, remainingMs);
+			if (attempt?.retry === undefined || !RETRY_IN_FLIGHT_STATUSES.has(attempt.status)) continue;
+			const offsetMs = Date.parse(attempt.retry.notBefore) - orchestrationNow();
+			if (!Number.isFinite(offsetMs)) continue;
+			workerRetryOffsetMs ??= new Map();
+			workerRetryOffsetMs.set(record.laneId, offsetMs);
 		}
 	}
 	const inFlightToolTaskIds = new Set(workState.runningToolTaskIds);
@@ -286,7 +291,7 @@ export function buildGoalRuntimeSnapshot(args: {
 		inFlightGoalLaneIds,
 		now,
 		maxWorkerWaitMs,
-		...(workerRetryRemainingMs !== undefined ? { workerRetryRemainingMs } : {}),
+		...(workerRetryOffsetMs !== undefined ? { workerRetryOffsetMs } : {}),
 		laneSyncConflictLaneKeys: laneSyncConflictLaneKeys.size > 0 ? laneSyncConflictLaneKeys : undefined,
 		syncRequiredLaneKeys: syncRequiredLaneKeys.size > 0 ? syncRequiredLaneKeys : undefined,
 		...(inFlightToolTaskIds.size > 0 ? { inFlightToolTaskIds } : {}),
