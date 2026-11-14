@@ -5,12 +5,19 @@
  * never changes what the mode decides.
  */
 
+import type { NestedCallPurpose } from "../../tools/nested-tool-call.ts";
+
 export const INTERACTIVE = {
 	/** The three answers an ungranted edge operation offers; the code compares the identifier, never the label. */
 	allowOnce: "Allow once",
 	allowForSession: "Allow for this session",
 	deny: "Deny",
 	edgeTitle: (edgeClass: string, operation: string, reason: string) => `Edge · ${edgeClass}\n${operation}\n${reason}`,
+	/** A held operation as the operator reads it: a watch's check names the watch and the call that arms it first. */
+	edgeOperation: ({ operation, purpose }: { operation: string; purpose?: NestedCallPurpose }) =>
+		purpose
+			? `The check watch "${purpose.watchId}" would run, armed by a ${purpose.parentToolName} call: ${operation}`
+			: operation,
 
 	/** The hints under the logo, the first line of help, and the model scope the start says once. */
 	startup: {

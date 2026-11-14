@@ -42,6 +42,7 @@ import type { WorkerEdgeSource } from "./delegation/worker-edge-policy.ts";
 import type { ToolInfo } from "./extensions/index.ts";
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
 import type { HarnessNoticeKind, HarnessNoticeObservation } from "./harness-notice.ts";
+import { englishText } from "./language/interface-text.ts";
 import type { OwnerWords } from "./learning/owner-evidence-ledger.ts";
 import type { ModelRegistry } from "./model-registry.ts";
 import type { RouterCandidatePool } from "./model-router/candidate-pool.ts";
@@ -100,11 +101,10 @@ import { isRemoteOwnerOrigin, isThirdPartyOrigin } from "./turn-origin.ts";
 import { shareTextBudget } from "./util/text-budget.ts";
 
 /**
- * Abort reason of an owner intent classification replaced by a newer owner request. The newer request
- * owns the optional-tool intent chain, so that JUDGMENT is stale; the request it was judging is still the
- * owner's input, is still admitted, and its owner policy is still judged, alone, where the owner-policy
- * queue settles it. Any other abort (the owner's interrupt, disposal, the caller's signal) cancels the
- * submission itself.
+ * Abort reason of an owner intent classification replaced by a newer owner request. The newer request owns the
+ * optional-tool intent chain, so that JUDGMENT is stale; the request it was judging is still the owner's input, is still
+ * admitted, and its owner policy is still judged, alone, where the owner-policy queue settles it. Any other abort (the
+ * owner's interrupt, disposal, the caller's signal) cancels the submission itself.
  */
 export const OWNER_INTENT_SUPERSEDED = new Error(
 	"Owner intent classification was superseded by a newer owner request.",
@@ -379,13 +379,13 @@ export class SessionEdgeIntentController {
 				args: unknown,
 				cwd: string | undefined,
 				signal: AbortSignal | undefined,
+				purpose?: OperationCaller["purpose"],
 			) => {
-				if (!this.runsRemoteOwner())
-					return this.operationGate.check(tool, args, cwd ?? this.deps.getCwd(), this.rootCaller(), signal);
+				const check = (gate: OperationGate) =>
+					gate.check(tool, args, cwd ?? this.deps.getCwd(), this.rootCaller(purpose), signal);
+				if (!this.runsRemoteOwner()) return check(this.operationGate);
 				if (typeof args === "object" && args !== null && this.approvedCalls.has(args)) return undefined;
-				return this.remoteOwnerCall.run({ toolName: tool, args }, () =>
-					this.remoteOwnerOperationGate.check(tool, args, cwd ?? this.deps.getCwd(), this.rootCaller(), signal),
-				);
+				return this.remoteOwnerCall.run({ toolName: tool, args }, () => check(this.remoteOwnerOperationGate));
 			},
 			runsOutsideOwnerTerminal: () =>
 				this.deps.getForegroundRun().turnOrigin.authority() !== "owner" && !this.runsFullOwner(),
@@ -449,8 +449,8 @@ export class SessionEdgeIntentController {
 		};
 	}
 
-	private rootCaller(): OperationCaller {
-		return { actor: "root", thirdParty: this.runsThirdParty() };
+	private rootCaller(purpose?: OperationCaller["purpose"]): OperationCaller {
+		return { actor: "root", thirdParty: this.runsThirdParty(), ...(purpose ? { purpose } : {}) };
 	}
 
 	/** Whether the run in progress carries a third party's words (`RunTurnOrigin`). */
@@ -586,7 +586,7 @@ export class SessionEdgeIntentController {
 				return appendOwnerFollowUp(
 					ownerFollowUpPath(this.deps.getAgentDir(), this.deps.getSessionManager().getSessionId()),
 					{
-						question: `Authorize ${operation.class}: ${operation.operation}?`,
+						question: `Authorize ${operation.class}: ${englishText().interactive.edgeOperation(operation)}?`,
 						reason: operation.reason,
 						request: this.deps.getLastUserRequest(),
 						at: new Date().toISOString(),

@@ -37,7 +37,7 @@ import type { ToolCallFacts } from "./tool-capability-policy.ts";
 import type { ToolSelectionController } from "./tool-selection/tool-selection-controller.ts";
 import { retireToolCall } from "./tools/file-mutation-queue.ts";
 import { LOOKUP_TOOL_NAME } from "./tools/lookup-tool-name.ts";
-import type { NestedCall, NestedCallAdmitter } from "./tools/nested-tool-call.ts";
+import type { NestedCall, NestedCallAdmitter, NestedCallPurpose } from "./tools/nested-tool-call.ts";
 
 export const CONTROL_PLANE_TOOL_NAMES: ReadonlySet<string> = new Set([
 	"task_steps",
@@ -153,6 +153,8 @@ export interface ToolGateControllerDeps {
 		args: unknown,
 		executionCwd: string | undefined,
 		signal: AbortSignal | undefined,
+		/** What a sub-call is made for, named to the operator if the call is held. */
+		purpose?: NestedCallPurpose,
 	): Promise<BeforeToolCallResult | undefined>;
 	/**
 	 * Whether the run in progress is not the owner's own terminal run (it carries a third party's words, or it was opened
@@ -301,6 +303,8 @@ export class ToolGateController {
 	private readonly admittedInvocations = new WeakMap<AgentToolCall, AdmittedToolInvocation>();
 	/** Admitted parent calls that run sub-calls, by call id, until the parent call is finalized or dropped. */
 	private readonly nestedParents = new Map<string, NestedParentContext>();
+	/** What each admitted sub-call is made for, by its call object, while the gate holds it. */
+	private readonly nestedPurposes = new WeakMap<AgentToolCall, NestedCallPurpose>();
 
 	constructor(deps: ToolGateControllerDeps) {
 		this.deps = deps;
@@ -517,7 +521,13 @@ export class ToolGateController {
 			const operation =
 				yolo && !this.deps.runsOutsideOwnerTerminal?.()
 					? undefined
-					: await this.deps.checkOperation?.(toolCall.name, args, executionContext?.cwd, signal);
+					: await this.deps.checkOperation?.(
+							toolCall.name,
+							args,
+							executionContext?.cwd,
+							signal,
+							this.nestedPurposes.get(toolCall),
+						);
 			if (operation) return blockedCall(toolCall.name, "operation", operation);
 			const soulWrite = await this.deps.soulGate?.checkWrite(toolCall, args, effectiveCwd, signal, registerCleanup);
 			if (soulWrite) return blockedCall(toolCall.name, "soul", soulWrite);
@@ -695,6 +705,7 @@ export class ToolGateController {
 			name: child.toolName,
 			arguments: child.args,
 		};
+		if (child.purpose) this.nestedPurposes.set(toolCall, child.purpose);
 		const cleanups: (() => void)[] = [];
 		const starts: (() => void)[] = [];
 		let released = false;

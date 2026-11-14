@@ -444,7 +444,7 @@ export class RoutineSessionController implements RoutineToolPort {
 		if (toolCallId !== undefined && isWatchSchedule(input.schedule)) {
 			// A watch with no slot left is refused before the gate is asked about its check.
 			if (slotted) this.requireWatchSlot();
-			await this.admitWatchedCall(toolCallId, input.schedule.condition, prior, worker, signal);
+			await this.admitWatchedCall(toolCallId, input.routineId, input.schedule.condition, prior, worker, signal);
 		}
 		// A watch runs no worker, so it saves only where it was armed; any other routine saves the worker authority its runs use.
 		const saved: RoutineSave = isWatchSchedule(input.schedule)
@@ -473,6 +473,7 @@ export class RoutineSessionController implements RoutineToolPort {
 	 */
 	private async admitWatchedCall(
 		toolCallId: string,
+		watchId: string,
 		condition: WatchScheduleInput["condition"],
 		prior: RoutineDefinitionView | undefined,
 		worker: WorkerWatchAuthority | undefined,
@@ -494,7 +495,12 @@ export class RoutineSessionController implements RoutineToolPort {
 		}
 		const admission = await this.deps.admitSubCall(
 			toolCallId,
-			{ id: `${toolCallId}#watch`, toolName: call.toolName, args: { ...call.args } },
+			{
+				id: `${toolCallId}#watch`,
+				toolName: call.toolName,
+				args: { ...call.args },
+				purpose: { kind: "watch_check", watchId, parentToolName: ROUTINE_TOOL_NAME },
+			},
 			signal,
 		);
 		if (admission.kind === "refused") {

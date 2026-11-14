@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { getToolExecutionKey } from "../../kernel/tool-failure-memory.ts";
 import type { EdgeOperation } from "../autonomy/edge-policy.ts";
+import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import {
 	askOperation,
 	askOperationBatch,
@@ -72,6 +73,8 @@ export interface OperationGateDecisionRecord {
 export interface OperationCaller {
 	readonly actor: "root" | "worker";
 	readonly thirdParty: boolean;
+	/** What the call is made for when another call makes it (a watch's check): the operator question names it. */
+	readonly purpose?: NestedCallPurpose;
 }
 
 export interface OperationGateDeps {
@@ -205,7 +208,12 @@ export class OperationGate {
 			edgeClass: "operation.irreversible",
 		}));
 		const answer = await this.deps.askOperator(
-			{ class: "operation.irreversible", operation: triage.operation, reason: verdict.finding },
+			{
+				class: "operation.irreversible",
+				operation: triage.operation,
+				reason: verdict.finding,
+				...(caller.purpose ? { purpose: caller.purpose } : {}),
+			},
 			signal,
 		);
 		if (answer.authorized) {

@@ -5,6 +5,7 @@
  * identificador no código, para um rótulo traduzido nunca mudar o que o modo decide.
  */
 
+import type { NestedCallPurpose } from "../../tools/nested-tool-call.ts";
 import type { InterfaceText } from "../interface-text.ts";
 
 /** Os nomes dos níveis de raciocínio: o nível é um identificador no dado, então a palavra é escrita aqui. */
@@ -25,6 +26,10 @@ export const INTERACTIVE = {
 	deny: "Negar",
 	edgeTitle: (edgeClass: string, operation: string, reason: string) =>
 		`Fronteira · ${edgeClass}\n${operation}\n${reason}`,
+	edgeOperation: ({ operation, purpose }: { operation: string; purpose?: NestedCallPurpose }) =>
+		purpose
+			? `A verificação que a espera "${purpose.watchId}" faria, armada por uma chamada ${purpose.parentToolName}: ${operation}`
+			: operation,
 
 	startup: {
 		toInterrupt: "para interromper",

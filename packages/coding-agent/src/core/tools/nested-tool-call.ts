@@ -17,6 +17,16 @@ import { type BoundToolInvocation, bindToolInvocation } from "../../kernel/tool-
  * settles as a refusal; it is never run unadmitted.
  */
 
+/**
+ * What a sub-call is made for, named to the operator when the call is held: the check a watch would make, by the watch
+ * (its routine id) and the call that arms it.
+ */
+export interface NestedCallPurpose {
+	readonly kind: "watch_check";
+	readonly watchId: string;
+	readonly parentToolName: string;
+}
+
 /** One sub-call a carrying tool asks its surface to admit. */
 export interface NestedCall {
 	/** Unique within the parent call (`<parent id>#<n>`). */
@@ -27,6 +37,8 @@ export interface NestedCall {
 	/** The sub-call's own binding, as its tool acquired it. */
 	readonly executionContext?: ExecutionContext;
 	readonly pathAuthority?: ExecutionPathAuthority;
+	/** What the parent makes this call for, when the operator would not tell it from the call alone. */
+	readonly purpose?: NestedCallPurpose;
 }
 
 /** An admitted sub-call: start it right before its body, finish it with the body's result. */

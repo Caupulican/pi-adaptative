@@ -7,6 +7,7 @@ import { MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS } from "../../kernel/tool-failure-mem
 import { interfaceText } from "../language/interface-text.ts";
 import { argvExecutions, type ShellExecutions, shellExecutions } from "../model-router/read-only-shell-policy.ts";
 import { matchToolkitScript, type ToolkitScript } from "../toolkit/script-registry.ts";
+import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import { expandPath } from "../tools/path-utils.ts";
 import type { ShellCommandDialect } from "../tools/shell-command-parser.ts";
 
@@ -77,6 +78,8 @@ export interface EdgeOperation {
 	condition?: EdgeCondition;
 	/** No grant covers it: only the owner's own turn performs it (a third-party run writing the session store). */
 	ungrantable?: true;
+	/** What the call is made for when another call makes it: the operator is told which watch a check serves. */
+	purpose?: NestedCallPurpose;
 }
 
 export interface ClassifyEdgeOptions {
@@ -1083,9 +1086,8 @@ export type ParsedEdgeScope =
 	| { valid: false };
 
 /**
- * Validate and parse a narrow or broad edge scope key.
- * Undefined is valid broad. Non-empty string is valid narrow (trimmed).
- * Empty string, whitespace-only, and non-string values are invalid.
+ * Validate and parse a narrow or broad edge scope key. Undefined is valid broad. Non-empty string is valid narrow
+ * (trimmed). Empty string, whitespace-only, and non-string values are invalid.
  */
 export function parseEdgeScope(value: unknown): ParsedEdgeScope {
 	if (value === undefined) {
@@ -1206,12 +1208,10 @@ export function collectEdgeGrants(
 
 export type EdgeDecision = "allow-once" | "allow-session" | "deny";
 
-export interface EdgeConfirmationRequest {
-	class: EdgeClass;
-	operation: string;
-	reason: string;
+/** The operation the operator is asked about, with the tool whose call holds it. */
+export interface EdgeConfirmationRequest
+	extends Pick<EdgeOperation, "class" | "operation" | "reason" | "scopeKey" | "purpose"> {
 	toolName: string;
-	scopeKey?: string;
 }
 
 export type EdgeConfirmationHandler = (request: EdgeConfirmationRequest, signal?: AbortSignal) => Promise<EdgeDecision>;

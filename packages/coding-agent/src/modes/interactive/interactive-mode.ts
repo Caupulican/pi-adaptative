@@ -671,7 +671,7 @@ export class InteractiveMode {
 			const words = interfaceText().interactive;
 			const choices = [words.allowOnce, words.allowForSession, words.deny];
 			const choice = await this.extensionUiHost.showExtensionSelector(
-				words.edgeTitle(request.class, request.operation, request.reason),
+				words.edgeTitle(request.class, words.edgeOperation(request), request.reason),
 				choices,
 				signal ? { signal } : undefined,
 			);
