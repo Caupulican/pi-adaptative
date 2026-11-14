@@ -14,7 +14,7 @@
  * `MAX_HISTORY_RUNS` runs, the newest.
  */
 
-import { createReadStream, type Dirent, existsSync, readFileSync, statSync } from "node:fs";
+import { createReadStream, type Dirent, existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
@@ -28,7 +28,7 @@ import {
 } from "../../kernel/session/worker-transcript-reference.ts";
 import { sessionsDir as rootSessionsDir } from "../../kernel/storage/paths.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
-import { botHistoryFile, botHistoryScanFile } from "../agent-paths.ts";
+import { botHistoryFile, botHistoryScanFile, botsDir } from "../agent-paths.ts";
 import { BOT_RUNTIME_BINDINGS_CUSTOM_TYPE, directBindingAlias, isBotId } from "../delegation/bot-runtime-bindings.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../language/interface-text.ts";
@@ -120,7 +120,10 @@ function isRun(value: unknown): value is BotHistoryRun {
 }
 
 function readHistoryFile(agentDir: string, agentId: string): BotHistoryFile | undefined {
-	const file = botHistoryFile(agentDir, agentId);
+	return readHistoryAt(botHistoryFile(agentDir, agentId), agentId);
+}
+
+function readHistoryAt(file: string, agentId: string): BotHistoryFile | undefined {
 	if (!existsSync(file)) return undefined;
 	try {
 		const value: unknown = JSON.parse(readFileSync(file, "utf8"));
@@ -129,6 +132,22 @@ function readHistoryFile(agentDir: string, agentId: string): BotHistoryFile | un
 	} catch {
 		return undefined;
 	}
+}
+
+/**
+ * The root sessions whose orchestration bundles hold a run some bot's history references: retention keeps those bundles,
+ * since a bot's chat reads its earlier conversations from them (only the newest runs stay indexed, so the hold ends).
+ */
+export function historyReferencedSessionIds(agentDir: string): Set<string> {
+	const ids = new Set<string>();
+	const dir = botsDir(agentDir);
+	if (!existsSync(dir)) return ids;
+	for (const home of readdirSync(dir, { withFileTypes: true })) {
+		if (!home.isDirectory()) continue;
+		const history = readHistoryAt(join(dir, home.name, "history.json"), home.name);
+		for (const run of history?.runs ?? []) ids.add(run.parentSessionId);
+	}
+	return ids;
 }
 
 /** The one scan of the root session files has run for this agent directory (see the module comment). */

@@ -9,6 +9,7 @@ import {
 	sessionRootMailboxFile,
 	sessionsDir,
 } from "./agent-paths.ts";
+import { historyReferencedSessionIds } from "./bots/bot-history.ts";
 import { OBLIGATION_LEDGER_NAME, recordDiscardedObligations } from "./delegation/obligation-ledger.ts";
 import { SessionRootMailbox, sessionRootMailboxHasMandatoryReply } from "./delegation/session-root-mailbox.ts";
 import { WorkerAgentMailbox, workerMailboxHasOpenObligation } from "./delegation/worker-agent-control.ts";
@@ -39,7 +40,9 @@ import { isPlainRecord } from "./util/value-guards.ts";
  *   paused session that can still be resumed keeps its persistent-worker context for that long);
  * - `WorkerConversationStore.reserveBundleDeletion` (fail-closed: live claim, busy or enrolled
  *   specialist context, unreadable transcript) accepts, and no worker or session-root mailbox owes work;
- * - no durable usage or accepted-worker receipt is waiting for parent delivery.
+ * - no durable usage or accepted-worker receipt is waiting for parent delivery;
+ * - no bot's history references a run of its session (`historyReferencedSessionIds`): a bot's chat reads its earlier
+ *   worker conversations from the bundle.
  *
  * An obligation older than {@link SESSION_BUNDLE_MAX_AGE_MS} can never be answered, because the session that
  * owed it is long gone. Before a bundle is refused for one, it is settled as failed with
@@ -403,6 +406,7 @@ export async function sweepSessionBundles(
 		const start = names.length > 0 ? Math.floor(now / 1000) % names.length : 0;
 		const bundles = [...names.slice(start), ...names.slice(0, start)].slice(0, MAX_BUNDLES_INSPECTED);
 		const protectedIds = await protectedSessionIds(agentDir, currentSessionId);
+		const historyHeld = historyReferencedSessionIds(agentDir);
 		const transcripts = indexSessionTranscripts(agentDir);
 		if (!transcripts) {
 			report("session bundle retention skipped: the session transcript index exceeded its bound");
@@ -419,7 +423,7 @@ export async function sweepSessionBundles(
 			result.inspected++;
 			try {
 				const parentSessionId = recoverParentSessionId(agentDir, name);
-				if (!parentSessionId || protectedIds.has(parentSessionId)) continue;
+				if (!parentSessionId || protectedIds.has(parentSessionId) || historyHeld.has(parentSessionId)) continue;
 				const resumingDeletion = hasPendingSessionBundleRetention(agentDir, parentSessionId);
 				const sessionMtimeMs = latestMtimeMs(transcripts.get(parentSessionId) ?? []);
 				if (
