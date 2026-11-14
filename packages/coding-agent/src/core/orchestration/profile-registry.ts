@@ -104,6 +104,34 @@ export function parseOrchestrationDispatchRequest(value: unknown): Orchestration
 	};
 }
 
+/** The session options an orchestration profile owns: its model, thinking, tools and resources. */
+const PROFILE_OWNED_SESSION_OPTIONS = [
+	"thinkingLevel",
+	"scopedModels",
+	"tools",
+	"noTools",
+	"excludeTools",
+	"toolProfileFilter",
+	"resourceProfiles",
+] as const;
+
+/** A session created for an orchestration profile takes none of the options the profile owns from its caller. */
+export function assertOrchestrationProfileOwnsOptions(
+	profile: OrchestrationProfile,
+	options: { readonly model?: unknown } & {
+		readonly [name in (typeof PROFILE_OWNED_SESSION_OPTIONS)[number]]?: unknown;
+	},
+): void {
+	const conflicting = [
+		...(options.model ? ["model"] : []),
+		...PROFILE_OWNED_SESSION_OPTIONS.filter((name) => options[name] !== undefined),
+	];
+	if (conflicting.length > 0)
+		throw new TypeError(
+			`Orchestration profile '${profile.profileId}' owns model, thinking, tools, and resources; remove conflicting SDK options: ${conflicting.join(", ")}.`,
+		);
+}
+
 export function validateOrchestrationProfile(profile: OrchestrationProfile): void {
 	if (profile.schemaVersion !== ORCHESTRATION_SCHEMA_VERSION) {
 		throw new OrchestrationProfileError(`Profile '${profile.profileId}' has an unsupported schema version.`);

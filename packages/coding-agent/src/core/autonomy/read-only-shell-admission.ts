@@ -10,7 +10,7 @@ import type { CredentialExposureBoundary } from "../secrets/credential-exposure-
 import { READ_ONLY_SHELL_TOOL_NAMES } from "../tool-capability-policy.ts";
 import { wrapToolExecution } from "../tools/tool-execution-wrapper.ts";
 import type { EnvelopeScopedTool } from "./envelope-enforcement.ts";
-import { laneReadOnlyShellScope } from "./lane-shell-scope.ts";
+import { laneReadOnlyShellScope, laneReadRoots } from "./lane-shell-scope.ts";
 
 /** What a refusal calls the read-only holder, and what it tells it to do instead. */
 export interface ReadOnlyShellVoice {
@@ -32,16 +32,17 @@ const SESSION_READ_ONLY_SHELL_VOICE: ReadOnlyShellVoice = {
 
 /**
  * The shell scope of a session that holds a read-only grant, built as a lane's is (`laneReadOnlyShellScope`): no network,
- * no scratch directory (it creates no file), and the session's private harness roots out of reach; reads are not confined
- * beyond them.
+ * no scratch directory (it creates no file), and the session's private harness roots out of reach; a session with a read
+ * scope (`readRoots`) reads nothing outside it.
  */
 export function sessionReadOnlyShellScope(
 	cwd: string,
 	deniedPaths: readonly string[],
 	boundary: CredentialExposureBoundary,
+	readRoots: readonly string[] | undefined,
 ): ReadOnlyShellLaneScope {
 	const facts = { cwd, shellReadOnly: true, readOnly: true, network: false, deniedPaths };
-	return laneReadOnlyShellScope(facts, [], boundary, undefined);
+	return laneReadOnlyShellScope(facts, [], boundary, laneReadRoots(readRoots));
 }
 
 /** Why a shell tool call is refused for a read-only holder; undefined when the tool is not a shell or the command only reads. */

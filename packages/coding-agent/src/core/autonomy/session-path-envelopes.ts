@@ -1,11 +1,14 @@
 /**
  * The path envelopes a session's file tools are scoped by. A worker process is confined by its role; any other session is
  * confined by the private path scope it was created with (`SessionPrivatePathScope`), never by the process it runs in:
- * a scope denies the private harness roots, and a scope with `confinedWrites` also writes as a worker does (inside its
- * working directory or its allowed roots, never to a harness resource). A session with neither keeps host-wide access.
+ * a scope denies the private harness roots, a scope with `confinedWrites` also writes as a worker does (inside its
+ * working directory or its write roots, never to a harness resource), and a scope with `readRoots` reads only inside them
+ * (`readScope`, applied by `wrapToolWithReadScope`). A session with neither keeps host-wide access.
  */
+import { resolve } from "node:path";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { WORKER_WRITE_SCOPE_GUIDANCE } from "./lane-tool-admission.ts";
+import type { SessionReadScope } from "./session-read-scope.ts";
 import {
 	buildWorkerSessionDefaultWriteScopeEnvelope,
 	buildWorkerSessionHarnessWriteEnvelope,
@@ -33,6 +36,8 @@ export interface SessionPathEnvelopes {
 	readonly privatePaths?: CapabilityEnvelope;
 	/** Every envelope a file tool call is checked against, in order. */
 	readonly scopes: readonly SessionPathEnvelope[];
+	/** The roots a session with `readRoots` reads in, with its private paths still denied; unset reads host-wide. */
+	readonly readScope?: SessionReadScope;
 }
 
 export function buildSessionPathEnvelopes(options: {
@@ -58,7 +63,13 @@ export function buildSessionPathEnvelopes(options: {
 	);
 	const scopes: SessionPathEnvelope[] = [{ envelope: privatePaths }];
 	if (workerProcess || scope?.confinedWrites) {
-		const writeScope = buildWorkerSessionDefaultWriteScopeEnvelope(cwd, allowedPaths);
+		const writeScope = scope?.writeRoots?.length
+			? {
+					id: "session-write-roots",
+					capabilities: ["filesystem.write" as const],
+					allowedPaths: scope.writeRoots.map((root) => resolve(cwd, root)),
+				}
+			: buildWorkerSessionDefaultWriteScopeEnvelope(cwd, allowedPaths);
 		if (writeScope)
 			scopes.push({
 				envelope: writeScope,
@@ -69,5 +80,12 @@ export function buildSessionPathEnvelopes(options: {
 			guidance: workerProcess ? WORKER_HARNESS_WRITE_GUIDANCE : OWNER_SESSION_HARNESS_WRITE_GUIDANCE,
 		});
 	}
-	return { privatePaths, scopes };
+	// The session's own tool-stream run directory stays readable: its truncated tool output lives there.
+	const readScope = scope?.readRoots && {
+		cwd,
+		readRoots: [...scope.readRoots.map((root) => resolve(cwd, root)), ...options.exemptReadPaths],
+		deniedPaths: privatePaths.deniedPaths ?? [],
+		exemptReadPaths: options.exemptReadPaths,
+	};
+	return { privatePaths, scopes, ...(readScope ? { readScope } : {}) };
 }

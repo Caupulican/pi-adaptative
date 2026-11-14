@@ -38,6 +38,7 @@ import {
 	laneRunsOffline,
 } from "../autonomy/lane-shell-scope.ts";
 import { safeRealpathSync } from "../autonomy/path-scope.ts";
+import type { SessionConfinement } from "../autonomy/session-confinement.ts";
 import {
 	privatePathBoundary,
 	readScopeRefusal,
@@ -45,7 +46,7 @@ import {
 	sessionReadScope,
 } from "../autonomy/session-read-scope.ts";
 import { workerCommandRestrictions } from "../autonomy/worker-run-environment.ts";
-import { type ReadOnlyShellLaneScope, readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
+import { readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
 import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts";
 import { readEntrySync } from "../process-matrix/store.ts";
 import { createProcessScratchDirectory, removeProcessScratchDirectory } from "../process-scratch.ts";
@@ -64,10 +65,10 @@ export interface WatchAdmissionHost {
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	getCredentialExposureBoundary?(): CredentialExposureBoundary | undefined;
 	/**
-	 * The read-only line the session's own shell is held to, when its shell edits nothing (a read-only bot's session): its
-	 * shell calls are judged by it when they run, and a watched command is judged by it at arming and at every run.
+	 * What confines the session's own tools (a confined bot's session): the read-only line its shell is held to, which
+	 * judges a watched command at arming and at every run, and the roots it reads in, which a watched path's content stays in.
 	 */
-	getSessionReadOnlyShell?(): ReadOnlyShellLaneScope | undefined;
+	getSessionConfinement?(): SessionConfinement | undefined;
 	/**
 	 * The session's edge grants, as the owner's own shell calls read them: what was allowed ahead, never a prompt answered
 	 * for one call; `standingOnly` keeps the owner's standing grants alone, all a run carrying a third party's words may use.
@@ -163,6 +164,8 @@ export class WatchAdmission {
 	}
 
 	private scope(): SessionReadScope {
+		const confined = this.host.getSessionConfinement?.()?.readScope;
+		if (confined) return confined;
 		return sessionReadScope({
 			cwd: this.host.getCwd(),
 			agentDir: this.host.getAgentDir(),
@@ -293,7 +296,7 @@ export class WatchAdmission {
 		}
 		const credential = credentialToolBlockReason("bash", args, cwd, this.boundary(scope));
 		if (credential) return credential;
-		const sessionShell = this.host.getSessionReadOnlyShell?.();
+		const sessionShell = this.host.getSessionConfinement?.()?.readOnlyShell;
 		const sessionViolation =
 			sessionShell && readOnlyShellViolation(command, cwd, { lane: sessionShell, dialect: "posix" });
 		if (sessionViolation) return `This session has a read-only shell: ${sessionViolation}.`;

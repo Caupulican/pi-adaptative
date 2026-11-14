@@ -32,6 +32,7 @@ import { capabilityArtifactsDir, configFile, steeringCertificatesFile } from "./
 import { AgentSession } from "./agent-session.ts";
 import { formatNoModelsAvailableMessage } from "./auth-guidance.ts";
 import { AuthStorage } from "./auth-storage.ts";
+import type { CapabilityEnvelope } from "./autonomy/contracts.ts";
 import { compileExecutionCharter, type ExecutionCharter } from "./autonomy/execution-charter.ts";
 import type { SessionPrivatePathScope } from "./autonomy/worker-session-private-scope.ts";
 import {
@@ -65,7 +66,10 @@ import { SessionObjectiveRuntime } from "./objective-execution/session-objective
 import type { OrchestrationProfile } from "./orchestration/contracts.ts";
 import { OrchestrationEventStore } from "./orchestration/event-store.ts";
 import { resolveConfiguredOrchestrationModel } from "./orchestration/model-binding.ts";
-import { validateOrchestrationProfile } from "./orchestration/profile-registry.ts";
+import {
+	assertOrchestrationProfileOwnsOptions,
+	validateOrchestrationProfile,
+} from "./orchestration/profile-registry.ts";
 import { acquireSessionBundleLease, type SessionLeaseRole } from "./orchestration/session-bundle-lifecycle.ts";
 import {
 	SESSION_TASK_PROFILE_CUSTOM_TYPE,
@@ -202,6 +206,12 @@ export interface CreateAgentSessionOptions {
 	 * (credentials, auth, settings, memory, sessions, state, channels) are denied, plus `deniedPaths`. YOLO keeps it.
 	 */
 	privatePathScope?: SessionPrivatePathScope;
+	/**
+	 * The capability ceiling the session's tool gate holds every call to, from its first turn: the tools it may call, the
+	 * capabilities a call may use and its cost bound (a bot made from a worker profile holds the profile's). YOLO skips it,
+	 * as it skips every envelope prompt; the path scopes above still apply.
+	 */
+	capabilityEnvelope?: CapabilityEnvelope;
 	/** The identity the system prompt opens with; default: the main agent's (`soul.md`). */
 	agentIdentity?: AgentIdentity;
 	/** Custom tools to register (in addition to built-in tools). */
@@ -386,21 +396,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const orchestrationProfile = options.orchestrationProfile;
 	if (orchestrationProfile) {
 		validateOrchestrationProfile(orchestrationProfile);
-		const conflictingOptions = [
-			...(options.model ? ["model"] : []),
-			...(options.thinkingLevel !== undefined ? ["thinkingLevel"] : []),
-			...(options.scopedModels !== undefined ? ["scopedModels"] : []),
-			...(options.tools !== undefined ? ["tools"] : []),
-			...(options.noTools !== undefined ? ["noTools"] : []),
-			...(options.excludeTools !== undefined ? ["excludeTools"] : []),
-			...(options.toolProfileFilter !== undefined ? ["toolProfileFilter"] : []),
-			...(options.resourceProfiles !== undefined ? ["resourceProfiles"] : []),
-		];
-		if (conflictingOptions.length > 0) {
-			throw new TypeError(
-				`Orchestration profile '${orchestrationProfile.profileId}' owns model, thinking, tools, and resources; remove conflicting SDK options: ${conflictingOptions.join(", ")}.`,
-			);
-		}
+		assertOrchestrationProfileOwnsOptions(orchestrationProfile, options);
 		settingsManager.setRuntimeResourceProfiles([...orchestrationProfile.resourceProfileNames]);
 	}
 	const needsProfileReload =
@@ -903,6 +899,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				holdsOwnWatches: options.holdsOwnWatches,
 				orchestrationProfile,
 				privatePathScope: options.privatePathScope,
+				capabilityEnvelope: options.capabilityEnvelope,
 				agentIdentity: options.agentIdentity,
 				sessionStartEvent: options.sessionStartEvent,
 				systemOneController,

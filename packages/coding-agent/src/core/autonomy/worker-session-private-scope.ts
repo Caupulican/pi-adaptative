@@ -64,6 +64,13 @@ export interface SessionPrivatePathScope {
 	 * runs it (`session-path-envelopes.ts`).
 	 */
 	readonly confinedWrites?: boolean;
+	/**
+	 * The session reads only inside these roots (its private paths still denied): its read tools, `repo_read` with the
+	 * git directory it reads, `lookup` through them, its read-only shell and its watches. Unset reads host-wide.
+	 */
+	readonly readRoots?: readonly string[];
+	/** With `confinedWrites`, the roots it writes in instead of its working directory alone. */
+	readonly writeRoots?: readonly string[];
 }
 
 /**

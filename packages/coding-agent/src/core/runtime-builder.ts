@@ -67,7 +67,11 @@ import { wrapToolWithEnvelopeScope } from "./autonomy/envelope-enforcement.ts";
 import { projectLaneSettingsPath } from "./autonomy/lane-private-paths.ts";
 import type { SharedLaneToolOptions } from "./autonomy/lane-tool-surface.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
-import { sessionReadOnlyShellScope, wrapToolWithReadOnlyShell } from "./autonomy/read-only-shell-admission.ts";
+import {
+	buildSessionConfinement,
+	type SessionConfinement,
+	wrapToolWithSessionConfinement,
+} from "./autonomy/session-confinement.ts";
 import { buildSessionPathEnvelopes, type SessionPathEnvelopes } from "./autonomy/session-path-envelopes.ts";
 import type { SessionPrivatePathScope } from "./autonomy/worker-session-private-scope.ts";
 import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
@@ -693,8 +697,8 @@ export class RuntimeBuilder {
 	private readonly _fileMutationIntents: FileMutationIntentController;
 	private readonly _toolStreamsWorkRun: ReturnType<typeof acquireWorkRun>;
 	private readonly _pathEnvelopes: SessionPathEnvelopes;
-	/** The read-only line this session's own shell is held to (`privatePathScope.readOnlyShell`); its watches are held to it too. */
-	readonly sessionReadOnlyShell: ReturnType<typeof sessionReadOnlyShellScope> | undefined;
+	/** The read-only line this session's own shell is held to and the roots it reads in (`privatePathScope`); its watches are held to both. */
+	readonly sessionConfinement: SessionConfinement;
 	/** Extension tools the launcher explicitly granted this worker process (never a builtin name). */
 	private readonly _workerExtensionToolNames: ReadonlySet<string>;
 	private readonly _taskDirectories: TaskDirectoryRuntime;
@@ -782,13 +786,8 @@ export class RuntimeBuilder {
 			// The harness's own memory, skills and sessions are searchable without a file glob.
 			agentDir: deps.getAgentDir(),
 		};
-		this.sessionReadOnlyShell = privatePathScope?.readOnlyShell
-			? sessionReadOnlyShellScope(
-					deps.getCwd(),
-					this._pathEnvelopes.privatePaths?.deniedPaths ?? [],
-					this._credentialExposureBoundary,
-				)
-			: undefined;
+		const boundary = this._credentialExposureBoundary;
+		this.sessionConfinement = buildSessionConfinement(deps.getCwd(), privatePathScope, this._pathEnvelopes, boundary);
 		// The group lock is the worktree's (shared with every session working in it); emission order is per session.
 		this._fileMutationIntents = new FileMutationIntentController({
 			mutationScope: mutationScopeForWorktree(deps.getCwd()),
@@ -1268,8 +1267,7 @@ export class RuntimeBuilder {
 			let scoped = guarded;
 			for (const { envelope, guidance } of this._pathEnvelopes.scopes)
 				scoped = wrapToolWithEnvelopeScope(scoped, envelope, this.deps.getCwd(), guidance);
-			if (this.sessionReadOnlyShell)
-				scoped = wrapToolWithReadOnlyShell(scoped, this.sessionReadOnlyShell, this.deps.getCwd());
+			scoped = wrapToolWithSessionConfinement(scoped, this.sessionConfinement, this.deps.getCwd());
 			toolRegistry.set(
 				scoped.name,
 				wrapToolWithVerification(

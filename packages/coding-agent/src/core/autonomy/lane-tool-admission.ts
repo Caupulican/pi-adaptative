@@ -1,55 +1,21 @@
 import type { BeforeToolCallResult } from "../../kernel/index.ts";
-import { toolPathSpellings } from "../../kernel/utils/paths.ts";
 import type { ReadOnlyShellLaneScope } from "../model-router/read-only-shell-policy.ts";
 import { type CapabilityGateway, CapabilityGatewayDeniedError } from "../orchestration/capability-gateway.ts";
-import type { HarnessCapability, ToolCapabilityManifest } from "../orchestration/contracts.ts";
-import {
-	requiredEnvelopeCapabilities,
-	resolveToolCallPathAccess,
-	type ToolCallFacts,
-} from "../tool-capability-policy.ts";
+import type { ToolCapabilityManifest } from "../orchestration/contracts.ts";
+import { requiredEnvelopeCapabilities, type ToolCallFacts } from "../tool-capability-policy.ts";
 import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { classifyYoloBoundary } from "./edge-policy.ts";
-import { extractToolPathArguments } from "./envelope-enforcement.ts";
 import { evaluateToolGate } from "./gates.ts";
-import { findRepositoryGitPaths } from "./path-scope.ts";
 import { readOnlyShellRefusal, WORKER_READ_ONLY_SHELL_VOICE } from "./read-only-shell-admission.ts";
-import { readScopeRefusal, type SessionReadScope } from "./session-read-scope.ts";
+import { readScopeViolation } from "./read-scope-admission.ts";
+import type { SessionReadScope } from "./session-read-scope.ts";
 
 /** The same scope guidance accompanies every lane write refusal. */
 export const WORKER_WRITE_SCOPE_GUIDANCE =
 	"A worker writes only inside its working directory plus the roots its dispatcher granted with writePaths. Do not route around this: finish what is in scope and report to the parent the absolute path you need to write and why, so it can start a new worker with writePaths for it (a worker's own write scope cannot be widened).";
 
 const WRITE_TOOLS: ReadonlySet<string> = new Set(["write", "edit"]);
-
-/**
- * The first path a read tool opens outside the lane's read scope, with why; undefined when every path it opens lies inside.
- * The paths are the tool's own path arguments (a search with none opens `.`), so a read the tool would make is judged.
- */
-function readScopeViolation(
-	toolName: string,
-	args: unknown,
-	facts: ToolCallFacts | undefined,
-	capabilities: readonly HarnessCapability[],
-	scope: SessionReadScope,
-): string | undefined {
-	if (resolveToolCallPathAccess(capabilities, toolName, args, facts) !== "read") return undefined;
-	for (const target of extractToolPathArguments(toolName, args)) {
-		const refusal = readScopeRefusal(scope, target);
-		if (refusal)
-			return `${target} is ${refusal === "denied" ? "a private path" : "outside this worker's read scope"}`;
-		// git reads the whole repository it runs in, including a linked worktree's shared common directory.
-		if (toolName !== "repo_read") continue;
-		for (const spelled of toolPathSpellings(target, scope.cwd) ?? []) {
-			for (const gitDir of findRepositoryGitPaths(spelled)?.gitDirs ?? []) {
-				const gitRefusal = readScopeRefusal(scope, gitDir);
-				if (gitRefusal) return `the repository's git directory ${gitDir} is outside this worker's read scope`;
-			}
-		}
-	}
-	return undefined;
-}
 
 export interface LaneToolAdmissionEvent {
 	readonly toolCallId: string;
@@ -143,6 +109,7 @@ export class LaneToolAdmission {
 				// A tool without a compiled manifest (a YOLO lane keeps every read tool on its surface) is judged by its own policy.
 				options.manifests.get(toolName)?.capabilities ?? requiredEnvelopeCapabilities(toolName, args, facts),
 				options.readScope,
+				"worker",
 			);
 			if (violation)
 				return {

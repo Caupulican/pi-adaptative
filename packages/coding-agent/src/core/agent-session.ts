@@ -723,6 +723,7 @@ export class AgentSession {
 		);
 		this.agent = config.agent;
 		this.settingsManager = config.settingsManager;
+		this.capabilityEnvelope = config.capabilityEnvelope;
 		this._onClosingWarnings = config.onClosingWarnings ?? writeTerminalWarnings;
 		// Without a checked catalog nothing is known up front, but a provider's refusal is still recorded.
 		this._accountModels =
@@ -1217,7 +1218,7 @@ export class AgentSession {
 			getActiveOrchestrationProfile: () => config.orchestrationProfile,
 			getModelRegistry: () => this._modelRegistry,
 			getCredentialExposureBoundary: () => this._runtimeBuilder.credentialExposureBoundary,
-			getSessionReadOnlyShell: () => this._runtimeBuilder.sessionReadOnlyShell,
+			getSessionConfinement: () => this._runtimeBuilder.sessionConfinement,
 			// Workers pick only models that can take work: quota left and offered to the owner's account.
 			isModelExhausted: (model) => this._modelAccess.isUnusable(model),
 			modelUnusableCause: (model) => this._modelAccess.unusableCause(model),
@@ -2355,11 +2356,9 @@ export class AgentSession {
 						parameters: tool.parameters,
 					}));
 			},
-			isCandidateAllowed: (toolName) => {
-				const envelope = this.capabilityEnvelope;
-				if (!envelope) return true;
-				return evaluateToolGate({ toolName, cwd: this._cwd, envelope }).outcome === "allow";
-			},
+			// With no envelope the gate allows every candidate.
+			isCandidateAllowed: (toolName) =>
+				evaluateToolGate({ toolName, cwd: this._cwd, envelope: this.capabilityEnvelope }).outcome === "allow",
 		});
 		this._toolGate = new ToolGateController({
 			settleOwnerPolicy: (signal) => this._edgeIntent.ownerPolicy.settle("latest", signal),
