@@ -187,6 +187,11 @@ export interface LaneToolSurface {
 export interface LaneToolSurfaceOptions {
 	/** Bypass harness tool, path and edge permission gates for this lane; private state stays denied. */
 	yolo?: boolean;
+	/**
+	 * A YOLO lane held to the ceiling of the session that started it (`WorkerExecutionPlan.parentBound`): its tools and
+	 * calls follow the compiled grant and manifests as a guarded lane's do, and YOLO removes permission prompts only.
+	 */
+	yoloGrantBound?: boolean;
 	denyCommands?: readonly string[];
 	/**
 	 * A `readOnly` grant: the lane keeps only the tools a read-only grant keeps, in every mode. Independent of
@@ -473,8 +478,10 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	// with the parent's command runs and writes (a lane's write waits for the parent's running
 	// build), while a lane in its own worktree shares nothing (see tools/file-mutation-queue.ts).
 	const mutationScope = mutationScopeForWorktree(options.cwd);
-	// YOLO widens a lane to every tool except where the lane is read-only: that is the parent's promise.
-	const yoloWrites = options.yolo === true && options.readOnly !== true;
+	// YOLO widens a lane to every tool except where the lane is read-only (the parent's promise) or its parent's ceiling
+	// bounds it to the compiled grant (`yoloGrantBound`).
+	const yoloSurface = options.yolo === true && options.yoloGrantBound !== true;
+	const yoloWrites = yoloSurface && options.readOnly !== true;
 	const writeCapable = yoloWrites || (options.writeEnabled === true && (options.writePaths?.length ?? 0) > 0);
 	const pythonCapable =
 		yoloWrites || options.toolManifests?.some((manifest) => manifest.toolName === PYTHON_LANE_TOOL_NAME) === true;
@@ -506,7 +513,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 	// edits nothing) keeps only what a read-only grant keeps, whatever the mode.
 	const readOnlyDropped =
 		options.readOnly === true ? candidateNames.filter((name) => !toolSurvivesReadOnly(name)) : [];
-	const deniedTools = options.yolo
+	const deniedTools = yoloSurface
 		? readOnlyDropped
 		: candidateNames.filter(
 				(name) =>
@@ -514,12 +521,12 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 					(options.grant ? !compiledToolNames.has(name) : matchesResourceProfilePattern(name, patterns.block)),
 			);
 	const unboundAllowPatterns =
-		options.yolo || options.grant
+		yoloSurface || options.grant
 			? []
 			: patterns.allow.filter(
 					(pattern) => !candidateNames.some((name) => matchesResourceProfilePattern(name, [pattern])),
 				);
-	const allowedTools = options.yolo
+	const allowedTools = yoloSurface
 		? candidateNames.filter((name) => !readOnlyDropped.includes(name))
 		: options.grant
 			? candidateNames.filter((name) => compiledToolNames.has(name) && !readOnlyDropped.includes(name))
@@ -561,7 +568,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		),
 	];
 	const manifestsByName = new Map(options.toolManifests?.map((manifest) => [manifest.toolName, manifest]) ?? []);
-	if (!options.yolo && options.grant?.allowedTools.some((name) => !manifestsByName.has(name))) {
+	if (!yoloSurface && options.grant?.allowedTools.some((name) => !manifestsByName.has(name))) {
 		throw new Error("Compiled lane grant references a tool without a capability manifest.");
 	}
 	const fileMutationIntents = new FileMutationIntentController({
@@ -689,6 +696,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 		manifests: manifestsByName,
 		gateway,
 		yolo: options.yolo,
+		grantBound: options.yoloGrantBound,
 		readOnlyShell,
 		readScope,
 		denyCommands: options.denyCommands,

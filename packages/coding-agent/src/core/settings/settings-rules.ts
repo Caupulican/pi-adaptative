@@ -535,7 +535,7 @@ export function toPosixPath(p: string): string {
  * `<common>/worktrees/<name>`, whose `commondir` file points back at `<common>`; a submodule has no `commondir` and a
  * bare or unreadable layout stays its own directory.
  */
-function mainCheckoutOfLinkedWorktree(root: string): string | undefined {
+export function mainCheckoutOfLinkedWorktree(root: string): string | undefined {
 	try {
 		const pointer = /^gitdir:\s*(.+?)\s*$/m.exec(readFileSync(join(root, ".git"), "utf8"))?.[1];
 		if (!pointer) return undefined;

@@ -23,6 +23,7 @@ import {
 	isGrantedExtensionToolName,
 	READ_ONLY_SHELL_TOOL_NAMES,
 	resolveCapabilityPathAccess,
+	toolSurvivesReadOnly,
 } from "../tool-capability-policy.ts";
 
 /** What a session that holds its workers to its own reach lends them. */
@@ -60,14 +61,15 @@ function runsProcesses(toolName: string): boolean {
 
 /**
  * Whether a held tool lets the session change files: the shell unless it is held to the read-only line, any other tool
- * that runs processes (an interpreter or a script is not judged command by command), a tool that needs a write path
- * capability, and a granted extension's tool or an uncatalogued one (what its code writes cannot be judged). A control
- * tool (a watch, a plan, a judgment, a message) changes no file, whatever a read-only grant keeps.
+ * that runs processes (an interpreter or a script is not judged command by command) and a tool that needs a write path
+ * capability. A control tool (a watch, a plan, a judgment, a message) changes no file, whatever a read-only grant keeps.
+ * A granted extension's tool or an uncatalogued one has an effect the harness cannot judge: an unknown effect lends a
+ * worker nothing, so it counts as no file change here (the session's own use of it is its own grant's to bound).
  */
 function toolChangesFiles(toolName: string, shellReadOnly: boolean): boolean {
 	if (READ_ONLY_SHELL_TOOL_NAMES.has(toolName.toLowerCase())) return !shellReadOnly;
 	const policy = getToolCapabilityPolicy(toolName);
-	if (!policy || isGrantedExtensionToolName(toolName)) return true;
+	if (!policy || isGrantedExtensionToolName(toolName)) return false;
 	return (
 		runsProcesses(toolName) ||
 		policy.capabilityClauses.some((clause) => resolveCapabilityPathAccess(clause) === "write")
@@ -86,10 +88,17 @@ function reachesNetwork(toolNames: readonly string[], confinement: SessionConfin
 	);
 }
 
-/** The capabilities a session without an envelope holds: every one its held tools may need, and the network its commands reach. */
+/**
+ * The capabilities a session without an envelope holds: for each clause of each held tool, the clause's primary capability
+ * (its first alternative, the one the tool is classified by: `fetch` holds `network.http`, not `service.mcp`; `edit`
+ * holds `filesystem.write`, not `worktree.mutate`; the shell holds `process.exec`, not `tests.execute`), and the network
+ * its commands reach. An alternative the session could satisfy a clause with is not one it holds.
+ */
 function heldCapabilities(toolNames: readonly string[], network: boolean): HarnessCapability[] {
 	const held = new Set<HarnessCapability>(
-		toolNames.flatMap((name) => getToolCapabilityPolicy(name)?.capabilityClauses.flat() ?? []),
+		toolNames.flatMap((name) =>
+			(getToolCapabilityPolicy(name)?.capabilityClauses ?? []).flatMap((clause) => clause.slice(0, 1)),
+		),
 	);
 	if (network) held.add("network.http");
 	return [...held];
@@ -128,19 +137,64 @@ export function workerCeilingOf(
 /** Where a worker's directory lies among the worktree lanes (`WorkerLaneIsolation`). */
 export interface WorkerLanePlacement {
 	/**
-	 * The mover of paths stated against the session's directory `root` into the lane `directory` lies in, as a request's
-	 * own paths are moved there; undefined when `directory` is in no lane.
+	 * The mover of absolute paths in the checkout the lane `directory` lies in was made from to their copy in that lane;
+	 * undefined when `directory` is in no lane, or its checkout cannot be read.
 	 */
-	laneOf(directory: string, root: string): ((entry: string) => string) | undefined;
+	laneOf(directory: string): ((entry: string) => string) | undefined;
 }
 
-/** The ceiling as a worker in a worktree lane is held to it: its roots moved into the lane by `move`. */
+/**
+ * The ceiling as a worker in a worktree lane is held to it: its roots moved into the lane by `move`, and its denied paths
+ * denied both where they are and at their copy in the lane (the worker may still read the checkout the lane came from).
+ */
 function ceilingInLane(ceiling: WorkerParentCeiling, move: (entry: string) => string): WorkerParentCeiling {
 	return {
 		...ceiling,
 		...(ceiling.readRoots ? { readRoots: ceiling.readRoots.map(move) } : {}),
 		...(ceiling.writeRoots ? { writeRoots: ceiling.writeRoots.map(move) } : {}),
+		deniedPaths: [...new Set([...ceiling.deniedPaths, ...ceiling.deniedPaths.map(move)])],
 	};
+}
+
+/**
+ * Whether a worker under `ceiling` may hold `toolName` on its parent's shell line: a parent held to the read-only line
+ * lends no process tool a read-only grant drops (an interpreter, a launcher, a script), only the shell held to that line.
+ */
+export function toolUnderShellLine(toolName: string, ceiling: WorkerParentCeiling | undefined): boolean {
+	return ceiling?.shellReadOnly !== true || !runsProcesses(toolName) || toolSurvivesReadOnly(toolName);
+}
+
+/**
+ * What a starting session's ceiling withheld from a worker's request, in English for the parent that asked for it: the
+ * writes it asked for and was not lent (the reason it runs read-only, or the roots its writes were narrowed to) and the
+ * process tools held back by the session's read-only shell line. Empty when the ceiling withheld nothing asked for.
+ */
+export function describeCeilingHolds(input: {
+	readonly ceiling: WorkerParentCeiling;
+	readonly writeRequested: boolean;
+	readonly requestedWriteScopes: readonly string[];
+	readonly writeScopes: readonly string[];
+	readonly shellLineWithheld: readonly string[];
+}): string[] {
+	const { ceiling, writeScopes } = input;
+	const kept = new Set(writeScopes);
+	const writes = !input.writeRequested
+		? undefined
+		: ceiling.readOnly
+			? "the starting session changes no files, so this worker is read-only"
+			: writeScopes.length === 0
+				? `its workspace and write paths lie outside the starting session's write roots (${(ceiling.writeRoots ?? []).join(", ")}), so this worker is read-only`
+				: input.requestedWriteScopes.some((scope) => !kept.has(scope))
+					? `its writes are narrowed to the starting session's write roots: ${writeScopes.join(", ")}`
+					: undefined;
+	return [
+		...(writes ? [writes] : []),
+		...(input.shellLineWithheld.length > 0
+			? [
+					`${input.shellLineWithheld.join(", ")} withheld: the starting session's shell is held to the read-only line`,
+				]
+			: []),
+	];
 }
 
 /** The capabilities a worker under `ceiling` may hold out of `capabilities`. */
@@ -185,8 +239,7 @@ export function workerHostScope(
 	lanes: WorkerLanePlacement | undefined,
 ): WorkerHostScope {
 	const ceiling = host.workerCeiling();
-	const move =
-		ceiling !== "unbounded" && executionCwd !== undefined ? lanes?.laneOf(executionCwd, host.getCwd()) : undefined;
+	const move = ceiling !== "unbounded" && executionCwd !== undefined ? lanes?.laneOf(executionCwd) : undefined;
 	return {
 		deniedPaths: getPrivateLaneDeniedPaths(host.getCwd(), host.getAgentDir()),
 		...(host.workerReadRoot ? { readRoot: host.workerReadRoot() } : {}),

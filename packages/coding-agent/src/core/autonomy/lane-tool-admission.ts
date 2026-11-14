@@ -36,6 +36,11 @@ interface LaneToolAdmissionOptions {
 	readonly callFacts?: (toolName: string, args: unknown) => ToolCallFacts | undefined;
 	readonly yolo?: boolean;
 	/**
+	 * A YOLO lane held to its parent's ceiling: every call still passes the grant's eligibility, budget and path checks
+	 * below, as a guarded lane's does; YOLO keeps only its own boundary and drops permission prompts.
+	 */
+	readonly grantBound?: boolean;
+	/**
 	 * Present for a `readOnly` grant's shell: its commands are judged by the read/write line plus this lane's
 	 * network grant, scratch directory and private paths (`readOnlyShellViolation`).
 	 */
@@ -192,9 +197,10 @@ export class LaneToolAdmission {
 		const facts = this.options.callFacts?.(toolName, args);
 		const structural = this.check(toolName, args, facts);
 		if (structural?.block) return structural;
-		const { gateway, manifests, yolo, checkEdge, cwd } = this.options;
-		const manifest = gateway && !yolo ? manifests.get(toolName) : undefined;
-		if (gateway && !yolo) {
+		const { gateway, manifests, yolo, grantBound, checkEdge, cwd } = this.options;
+		const checksGrant = gateway !== undefined && (!yolo || grantBound === true);
+		const manifest = checksGrant ? manifests.get(toolName) : undefined;
+		if (gateway && checksGrant) {
 			if (!manifest) return { block: true, reason: `Lane tool '${toolName}' has no compiled capability manifest.` };
 			gateway.checkToolCallEligibility(manifest, toolName, args, facts);
 			gateway.assertBudgetAvailable(toolName);

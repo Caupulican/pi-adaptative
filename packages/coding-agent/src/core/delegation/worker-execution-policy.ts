@@ -32,7 +32,13 @@ import {
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import { isWorkerProcessToolAllowed } from "../worker-tool-ceiling.ts";
 import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
-import { capabilitiesUnderCeiling, type WorkerCeiling, type WorkerParentCeiling } from "./worker-parent-ceiling.ts";
+import {
+	capabilitiesUnderCeiling,
+	describeCeilingHolds,
+	toolUnderShellLine,
+	type WorkerCeiling,
+	type WorkerParentCeiling,
+} from "./worker-parent-ceiling.ts";
 
 export const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 export const REPO_READ_TOOL_NAME = "repo_read";
@@ -91,6 +97,13 @@ export interface WorkerExecutionPlan {
 	 */
 	shellReadOnly: boolean;
 	budget: RiskBudget;
+	/**
+	 * The session that starts the worker holds it to its ceiling (`worker-parent-ceiling.ts`): the worker's lane holds the
+	 * compiled grant's tools and passes its checks in every mode, YOLO included (YOLO then removes permission prompts only).
+	 */
+	parentBound: boolean;
+	/** What the starting session's ceiling withheld from what the request asked for, said to the parent; absent when nothing. */
+	parentCeilingHolds?: readonly string[];
 }
 
 function intersectPathScopes(admittedPaths: readonly string[], currentPaths: readonly string[]): string[] {
@@ -206,6 +219,7 @@ export function narrowWorkerExecutionPlan(
 		readOnly: current.readOnly,
 		shellReadOnly: current.shellReadOnly,
 		budget: intersectRiskBudgets(admitted.budget, current.budget),
+		parentBound: current.parentBound,
 	};
 }
 
@@ -272,7 +286,8 @@ export function buildWorkerExecutionPlan(args: {
 	// A parent with write roots bounds its worker's: a place outside them is not the worker's to write.
 	const underParentWrites = (paths: readonly string[]) =>
 		ceiling?.writeRoots ? intersectPathScopes(paths, ceiling.writeRoots) : [...paths];
-	const writeScopes = underParentWrites([...new Set([cwd, ...grantedWriteRoots])]);
+	const requestedWriteScopes = [...new Set([cwd, ...grantedWriteRoots])];
+	const writeScopes = underParentWrites(requestedWriteScopes);
 	// Only an explicit workspace or granted root fences other lanes; the bare cwd default does not.
 	const writeReservationScopes = profile.workspacePath ? writeScopes : underParentWrites(grantedWriteRoots);
 	// A readOnly grant stays read-only in YOLO too: YOLO removes permission prompts, not the parent's
@@ -288,7 +303,8 @@ export function buildWorkerExecutionPlan(args: {
 			REPO_READ_TOOL_NAME,
 			LOOKUP_TOOL_NAME,
 			TOOL_SCHEMA_SEARCH_NAME,
-			...(readOnly ? [] : [...WRITE_TOOL_NAMES, "python"]),
+			// A parent held to the read-only shell line lends no interpreter (`toolUnderShellLine`).
+			...(readOnly ? [] : [...WRITE_TOOL_NAMES, ...(ceiling?.shellReadOnly ? [] : ["python"])]),
 			STABLE_SHELL_TOOL_NAME,
 		])
 			profileToolNames.add(name);
@@ -309,7 +325,7 @@ export function buildWorkerExecutionPlan(args: {
 		args.yolo ||
 		profile.capabilityCeiling.includes("process.exec") ||
 		profile.capabilityCeiling.includes("tests.execute");
-	const enabledProcessToolNames = processEligible
+	const processToolNames = processEligible
 		? [
 				...(profileToolNames.has("python") ? (["python"] as const) : []),
 				...(profile.executionPolicy && profileToolNames.has("run_process") ? (["run_process"] as const) : []),
@@ -318,12 +334,15 @@ export function buildWorkerExecutionPlan(args: {
 		: [];
 	// A confined worker is not given the tools that read the owner's stored content by name (skills, skill audits, packed
 	// outputs), in YOLO too: its reads are the named scope, and those stores are not in it.
-	const enabledAdapterToolNames = (args.workerToolAdapterNames ?? []).filter(
+	const adapterToolNames = (args.workerToolAdapterNames ?? []).filter(
 		(name) =>
 			(args.yolo || profileToolNames.has(name)) &&
 			(!readOnly || toolSurvivesReadOnly(name)) &&
 			!(readConfined && READ_BY_NAME_ADAPTER_TOOLS.has(name)),
 	);
+	// A parent held to the read-only shell line holds its workers to it: no process tool past that line, in every mode.
+	const enabledProcessToolNames = processToolNames.filter((name) => toolUnderShellLine(name, ceiling));
+	const enabledAdapterToolNames = adapterToolNames.filter((name) => toolUnderShellLine(name, ceiling));
 	const enabledZeroAuthorityToolNames = profileToolNames.has(TOOL_SCHEMA_SEARCH_NAME) ? [TOOL_SCHEMA_SEARCH_NAME] : [];
 	// The batch lookup holds no authority of its own; it is enabled beside the read tools it runs requests through, and
 	// each request still needs the grant of its own tool.
@@ -387,7 +406,29 @@ export function buildWorkerExecutionPlan(args: {
 		readOnly,
 		shellReadOnly: processEnabled && (readOnly || profile.shellReadOnly === true || ceiling?.shellReadOnly === true),
 		budget,
+		parentBound: ceiling !== undefined,
+		...(ceiling
+			? ceilingHoldsField(
+					describeCeilingHolds({
+						ceiling,
+						writeRequested:
+							args.profile.readOnly !== true &&
+							(args.yolo === true ||
+								(args.settings.writeEnabled && args.profile.capabilityCeiling.some(isWriteCapability))),
+						requestedWriteScopes,
+						writeScopes,
+						shellLineWithheld: [...processToolNames, ...adapterToolNames].filter(
+							(name) => !toolUnderShellLine(name, ceiling),
+						),
+					}),
+				)
+			: {}),
 	};
+}
+
+/** The plan's `parentCeilingHolds`, present only when the ceiling withheld something. */
+function ceilingHoldsField(holds: readonly string[]): Pick<WorkerExecutionPlan, "parentCeilingHolds"> {
+	return holds.length > 0 ? { parentCeilingHolds: holds } : {};
 }
 
 export function compileWorkerExecutionGrant(args: {

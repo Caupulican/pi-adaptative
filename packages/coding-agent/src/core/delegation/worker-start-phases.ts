@@ -71,6 +71,8 @@ export type QueuedWorkerAttemptOutcome =
 			similarLaneIds?: string[];
 			/** Moves the worker already made off its admitted model while its start credentials settled. */
 			modelMoves?: readonly WorkerModelMove[];
+			/** What the starting session's ceiling withheld from the request (`WorkerExecutionPlan.parentCeilingHolds`). */
+			parentCeilingHolds?: readonly string[];
 	  };
 
 /** What the phases read from, and ask of, the worker controller. `A` is the controller's fresh admission. */
@@ -100,6 +102,8 @@ export interface WorkerStartPhasePort<A> {
 	}): { ok: true; resolved: ResolvedWorkerProfilePreset } | { ok: false; reason: string };
 	/** The fresh lane directory a start that never ran leaves behind, removed by `discardLaneDirectory`. */
 	laneDirectory(admission: A): string;
+	/** What the starting session's ceiling withheld from a fresh admission's request, said to the parent; undefined when nothing. */
+	parentCeilingHolds(admission: A): readonly string[] | undefined;
 	discardLaneDirectory(cwd: string): Promise<void> | undefined;
 	fanoutHeadroomSkipReason(request: WorkerDelegationRequest, remaining: number): string | undefined;
 	similarLaneIds(request: WorkerDelegationRequest): readonly string[];
@@ -432,11 +436,13 @@ export class WorkerStartPhases<A> implements FleetLocalStartPort {
 				)
 			: undefined;
 		const record = (modelMoves ? this.port.currentRecord(started.record.laneId) : undefined) ?? started.record;
+		const parentCeilingHolds = this.port.parentCeilingHolds(selected.admission);
 		return {
 			...started,
 			record: this.port.withWaitReason(record),
 			...(similar.length > 0 ? { similarLaneIds: [...similar] } : {}),
 			...(modelMoves && modelMoves.length > 0 ? { modelMoves } : {}),
+			...(parentCeilingHolds ? { parentCeilingHolds } : {}),
 		};
 	}
 

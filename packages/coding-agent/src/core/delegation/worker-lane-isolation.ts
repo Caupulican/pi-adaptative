@@ -34,6 +34,7 @@ import type {
 	WorkerProfileExecutionContract,
 } from "../orchestration/contracts.ts";
 import { parseWorkerExecutionContract } from "../orchestration/worker-execution-contract.ts";
+import { mainCheckoutOfLinkedWorktree } from "../settings/settings-rules.ts";
 import { quotedSpan } from "../util/bounded-line.ts";
 import type { ReleaseOutcome } from "../util/resource-release.ts";
 import type { AbortSyncResult, SyncLaneResult } from "../worktree-sync/codes.ts";
@@ -259,13 +260,17 @@ export class WorkerLaneIsolation {
 	}
 
 	/**
-	 * The mover of paths stated against the session directory `root` into the lane `directory` lies in, as `relocateRequest`
-	 * moves a request's; undefined when `directory` is in no lane (a cheap check, no git). It places a worker's parent ceiling.
+	 * The mover of absolute paths in the checkout the lane `directory` lies in was made from into that lane: a path keeps its
+	 * place relative to the checkout's top, so a session directory in a subdirectory maps to the same subdirectory of the lane.
+	 * A lane is a linked worktree of the main checkout it was made from (`createWorkerLane` makes lanes only from it), read
+	 * from the lane's own git metadata, no git process. Undefined when `directory` is in no lane or its checkout cannot be
+	 * read. It places a worker's parent ceiling.
 	 */
-	laneOf(directory: string, root: string): ((entry: string) => string) | undefined {
+	laneOf(directory: string): ((entry: string) => string) | undefined {
 		const engine = this.deps.engineDeps(directory);
 		const laneRoot = engine && laneWorktreeOf(engine, directory);
-		return laneRoot === undefined ? undefined : (entry) => relocatedInto(root, laneRoot, entry);
+		const checkout = laneRoot && mainCheckoutOfLinkedWorktree(laneRoot);
+		return laneRoot && checkout ? (entry) => relocatedInto(checkout, laneRoot, entry) : undefined;
 	}
 
 	/** Whether `directory` lies in the area lane worktrees are created in (a cheap check, no git). */

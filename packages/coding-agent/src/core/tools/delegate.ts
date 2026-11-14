@@ -1399,6 +1399,7 @@ type DelegateStartOutcome =
 			modelPinBypass?: string;
 			similarLaneIds?: string[];
 			modelMoves?: readonly WorkerModelMove[];
+			parentCeilingHolds?: readonly string[];
 	  };
 
 export interface DelegateToolDependencies {
@@ -1435,14 +1436,12 @@ function queuedWaitLine(record: LaneRecord | undefined): string | undefined {
 }
 
 /**
- * First line of a start result. The model chose the worker's tools, model, and path; this is the
- * host's answer to what it actually compiled, plus why a queued lane is not running yet.
+ * First line of a start result. The model chose the worker's tools, model, and path; this is the host's answer to what it
+ * actually compiled, what the starting session's ceiling withheld (never narrowed silently), and why a queued lane waits.
  */
 function describeStartedWorker(
-	record: LaneRecord,
+	{ record, similarLaneIds, modelMoves, parentCeilingHolds }: Extract<DelegateStartOutcome, { started: true }>,
 	grant: WorkerGrantSummary | undefined,
-	similarLaneIds?: readonly string[],
-	modelMoves?: readonly WorkerModelMove[],
 ): string {
 	const parts = [
 		`delegate started (${record.status}) — stable agentId ${record.agentId ?? record.laneId}, task laneId ${record.laneId}`,
@@ -1458,6 +1457,7 @@ function describeStartedWorker(
 			`budget: wall clock ${grant.budget?.maxWallClockMs ? formatWallClockCap(grant.budget.maxWallClockMs) : "unbounded"}, usd ${grant.budget?.maxCostUsd ? grant.budget.maxCostUsd.toFixed(2) : "unbounded"}`,
 		);
 	}
+	if (parentCeilingHolds?.length) parts.push(`parent ceiling: ${parentCeilingHolds.join("; ")}`);
 	const waiting = queuedWaitLine(record);
 	if (waiting) parts.push(waiting);
 	if (similarLaneIds?.length) {
@@ -3204,7 +3204,7 @@ export function createDelegateToolDefinition(deps: DelegateToolDependencies): To
 							{
 								type: "text" as const,
 								text: withStateLine(
-									`${describeStartedWorker(started.record, deps.describeWorkerGrant?.(started.record.laneId), started.similarLaneIds, started.modelMoves)}; the owning parent will receive its terminal handoff, then read the report with delegate status (transcript pages on demand)${idleHint ? `\n${idleHint}` : ""}`,
+									`${describeStartedWorker(started, deps.describeWorkerGrant?.(started.record.laneId))}; the owning parent will receive its terminal handoff, then read the report with delegate status (transcript pages on demand)${idleHint ? `\n${idleHint}` : ""}`,
 									started.record.status === "queued" ? ["QUEUED"] : [],
 								),
 							},

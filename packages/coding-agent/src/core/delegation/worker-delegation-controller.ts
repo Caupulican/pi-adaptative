@@ -727,6 +727,7 @@ export class WorkerDelegationController {
 			admittedPlacement: (admission) => admittedRerunPlacement(admission, this.deps.getCwd(), this.laneIsolation),
 			sessionCwd: () => this.deps.getCwd(),
 			laneDirectory: (admission) => admission.executionPlan.cwd,
+			parentCeilingHolds: (admission) => admission.executionPlan.parentCeilingHolds,
 			discardLaneDirectory: (cwd) => this.laneIsolation?.discard(cwd),
 			fanoutHeadroomSkipReason: (request, remaining) => this.fanoutHeadroomSkipReason(request, remaining),
 			similarLaneIds: (request) =>
@@ -5326,18 +5327,14 @@ export class WorkerDelegationController {
 					const thirdParty = this.carriesThirdPartyWords(durableHandle.attemptId);
 					if (!thirdParty && this.deps.getSettingsManager().getEdgeSettings().mode === "yolo")
 						return { authorized: true };
-					if (!request.script.danger) {
-						return { authorized: true };
-					}
+					if (!request.script.danger) return { authorized: true };
 					const operation = buildToolkitScriptOperation({
 						cwd: executionPlan.cwd,
 						script: request.script,
 						args: request.args,
 					});
 					const parentGrants = this.deps.getEdgeGrants?.(thirdParty) ?? [];
-					if (isEdgeOperationGranted(operation, parentGrants)) {
-						return { authorized: true };
-					}
+					if (isEdgeOperationGranted(operation, parentGrants)) return { authorized: true };
 					return thirdParty
 						? { authorized: false, ...thirdPartyEdgeRefusal([operation]) }
 						: { authorized: false, reason: edgeBlockReason(operation, false) };
@@ -5401,6 +5398,7 @@ export class WorkerDelegationController {
 			...(protectedPathWatch ? { protectedPathWatch } : {}),
 			yolo: this.deps.getSettingsManager().getEdgeSettings().mode === "yolo",
 			denyCommands: this.deps.getSettingsManager().getEdgeSettings().deny,
+			yoloGrantBound: executionPlan.parentBound,
 			readOnly: executionPlan.readOnly,
 			shellReadOnly: executionPlan.shellReadOnly,
 			...(executionPlan.readConfined ? { readScopeRoots: executionPlan.readPaths } : {}),
