@@ -38,6 +38,7 @@ export const REPORTS = {
 		state: "Estado:",
 		settingsRejected: (error: string) => `desativada porque as configurações foram rejeitadas (${error})`,
 		unavailable: "indisponível (sem gatilho de compactação nem janela de contexto)",
+		toolInactive: "indisponível (esta sessão não tem a ferramenta self_compact)",
 		disabled: "desativada",
 		gauge: "Medidor:",
 		unknown: "desconhecido",

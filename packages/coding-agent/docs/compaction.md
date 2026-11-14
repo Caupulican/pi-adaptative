@@ -491,4 +491,4 @@ Guidance never enters the conversation as a user message. It is a transient host
 
 Placeholders: `used_tokens`, `used_percent`, `context_window`, `notice_tokens`, `warning_tokens`, `forced_tokens`, `hard_tokens`, `early_tokens`, `tokens_until_warning`, `tokens_until_forced`, `cycle`, `note_max_chars`. A notice or warning prompt is rendered when its line is first crossed and kept until the level changes, so live numbers do not churn the cache. An unknown placeholder rejects the settings.
 
-Workers do not get `self_compact`: their compaction runs inline in their own request planning with no idle checkpoint.
+Self-monitoring runs only while `self_compact` is among the session's active tools. A session without it (a bot's own session, a worker process, a root whose tool selection leaves it out) has no notice, warning or forced line, no guidance and no refused tool; automatic compaction compacts it at the hard trigger. In-process workers do not get `self_compact`: their compaction runs inline in their own request planning with no idle checkpoint.

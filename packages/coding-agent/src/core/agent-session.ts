@@ -1623,6 +1623,7 @@ export class AgentSession {
 		this._selfCompaction = new SelfCompactionController({
 			getSessionManager: () => this.sessionManager,
 			getSettings: () => this.settingsManager.getSelfCompactionSettings(),
+			isToolActive: (name) => this.getActiveToolNames().includes(name),
 			getContextUsage: () => this.getContextUsage(),
 			getCachedTokens: () => latestCachedReadTokens(this.agent.state.messages),
 			getHardTriggerTokens: () => this._compactionSupport.getHardTriggerTokens(),
@@ -2103,9 +2104,7 @@ export class AgentSession {
 			goalClock: config.timers.port("goal-continuation"),
 			getActiveVerificationIds: () => this._getActiveVerificationIds(),
 			getCompletionRuleRefusal: (toolCallId) => this._ruleHooks.refusalFor("noticed-items", toolCallId),
-			deliverToOwner: (items) => {
-				this._unsettledLadder.deliverToOwner(items);
-			},
+			deliverToOwner: (items) => this._unsettledLadder.deliverToOwner(items),
 			getSystemOneController: () => this._semanticPlane.controller,
 			getSemanticUncertainties: () => (this._caps.conversesWithOwner ? this.getSemanticUncertainties() : undefined),
 			getSteeringPlane: () => this._semanticPlane.steeringPlane,

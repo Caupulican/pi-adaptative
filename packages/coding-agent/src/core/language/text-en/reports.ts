@@ -39,6 +39,7 @@ export const REPORTS = {
 		state: "State:",
 		settingsRejected: (error: string) => `disabled because its settings were rejected (${error})`,
 		unavailable: "unavailable (no compaction trigger or context window)",
+		toolInactive: "unavailable (this session does not hold the self_compact tool)",
 		disabled: "disabled",
 		gauge: "Gauge:",
 		unknown: "unknown",

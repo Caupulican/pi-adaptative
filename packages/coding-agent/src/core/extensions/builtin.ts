@@ -266,7 +266,10 @@ function formatSelfCompactionLine(view: SelfCompactionView): string {
 		harnessLog.debug("ui", "self-compaction settings were rejected", () => ({ settingsError: view.settingsError }));
 		return "self-compaction: disabled because one of its settings is invalid; check the compaction settings in settings.json";
 	}
-	if (!view.thresholds) return `self-compaction: ${view.enabled ? "unavailable (no compaction trigger)" : "disabled"}`;
+	if (!view.thresholds) {
+		if (!view.enabled) return "self-compaction: disabled";
+		return `self-compaction: unavailable (${view.toolActive ? "no compaction trigger" : "this session does not hold the self_compact tool"})`;
+	}
 	const t = view.thresholds;
 	const handoff =
 		view.handoff.status === "none" ? "" : `, handoff ${view.handoff.status} (attempts ${view.handoff.attempts})`;

@@ -119,7 +119,8 @@ export function formatSelfCompactionInfo(session: Pick<AgentSession, "getSelfCom
 	if (view.settingsError) {
 		lines.push(`${label(text.state)} ${text.settingsRejected(view.settingsError)}`);
 	} else if (!view.thresholds) {
-		lines.push(`${label(text.state)} ${view.enabled ? text.unavailable : text.disabled}`);
+		const state = !view.enabled ? text.disabled : view.toolActive ? text.unavailable : text.toolInactive;
+		lines.push(`${label(text.state)} ${state}`);
 	} else {
 		const t = view.thresholds;
 		const gauge = selfCompactionGauge(view);

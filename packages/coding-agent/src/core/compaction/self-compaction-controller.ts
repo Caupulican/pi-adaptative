@@ -46,6 +46,12 @@ import {
 export interface SelfCompactionControllerDeps {
 	getSessionManager(): SessionManager;
 	getSettings(): SelfCompactionSettings;
+	/**
+	 * Whether a tool is among the session's active tools. Self-compaction runs only while self_compact is: without it the
+	 * session cannot write a note, so no line asks for one or refuses a tool, and the hard auto-compaction trigger
+	 * compacts the session like any other.
+	 */
+	isToolActive(name: string): boolean;
 	getContextUsage(): ContextUsage | undefined;
 	getCachedTokens(): number | null;
 	getHardTriggerTokens(): number | undefined;
@@ -86,6 +92,8 @@ export type SelfCompactionPhase =
 
 export interface SelfCompactionView {
 	readonly enabled: boolean;
+	/** Whether self_compact is among the session's active tools; without it self-compaction has no lines. */
+	readonly toolActive: boolean;
 	readonly settingsError: string | null;
 	readonly level: SelfCompactionLevel;
 	readonly phase: SelfCompactionPhase;
@@ -164,6 +172,7 @@ export class SelfCompactionController {
 	}
 
 	thresholds(usage = this.deps.getContextUsage()): SelfCompactionThresholds | undefined {
+		if (!this.offersTool()) return undefined;
 		const settings = this.deps.getSettings();
 		return resolveSelfCompactionThresholds(
 			usage?.contextWindow ?? 0,
@@ -171,6 +180,10 @@ export class SelfCompactionController {
 			this.deps.getEarlyTriggerTokens(),
 			settings,
 		);
+	}
+
+	private offersTool(): boolean {
+		return this.deps.isToolActive(SELF_COMPACT_TOOL_NAME);
 	}
 
 	level(): SelfCompactionLevel {
@@ -329,6 +342,7 @@ export class SelfCompactionController {
 		const toolsLocked = thresholds ? this.toolsLocked(state, level, thresholds) : false;
 		return {
 			enabled: settings.enabled,
+			toolActive: this.offersTool(),
 			settingsError: settings.error ?? null,
 			level,
 			phase: this.phase(thresholds, state, level, toolsLocked),
@@ -380,17 +394,20 @@ export class SelfCompactionController {
 			: summary;
 	}
 
+	/** Why self-compaction has no lines in this session, when {@link thresholds} is undefined. */
+	private unavailableReason(): string {
+		if (!this.offersTool()) {
+			return `self-compaction is not available: this session does not hold the ${SELF_COMPACT_TOOL_NAME} tool`;
+		}
+		const error = this.deps.getSettings().error;
+		return error
+			? `self-compaction is disabled because its settings were rejected: ${error}`
+			: "self-compaction is not available: compaction is disabled or the model has no known context window";
+	}
+
 	async compactNow(): Promise<SelfCompactionNowOutcome> {
 		const thresholds = this.thresholds();
-		if (!thresholds) {
-			const error = this.deps.getSettings().error;
-			return {
-				kind: "refused",
-				reason: error
-					? `self-compaction is disabled because its settings were rejected: ${error}`
-					: "self-compaction is not available: compaction is disabled or the model has no known context window",
-			};
-		}
+		if (!thresholds) return { kind: "refused", reason: this.unavailableReason() };
 		const state = this.state();
 		if (isActiveSelfCompactionStatus(state.status) && state.request) {
 			if (!this.schedule()) {
@@ -419,12 +436,8 @@ export class SelfCompactionController {
 	): { reason: string } | { note: string; level: SelfCompactionLevel; state: SelfCompactionState } {
 		const thresholds = this.thresholds();
 		if (!thresholds) {
-			const error = this.deps.getSettings().error;
-			return {
-				reason: error
-					? `Self-compaction is disabled because its settings were rejected: ${error}.`
-					: "Self-compaction is not available: compaction is disabled or the model has no known context window.",
-			};
+			const reason = this.unavailableReason();
+			return { reason: `${reason.charAt(0).toUpperCase()}${reason.slice(1)}.` };
 		}
 		const validation = validateSelfCompactionNote(note);
 		if (!validation.ok) return { reason: validation.reason };
