@@ -46,8 +46,6 @@ export interface BotTurnSupervisionOptions {
 interface SupervisedTurn {
 	readonly attemptId: string;
 	readonly startedAt: number;
-	/** Where the turn's own messages begin: its output is judged, never an earlier turn's. */
-	readonly transcriptStart: number;
 	/** The words that opened the turn (the owner's message, a wake), set by its first input. */
 	mission: string;
 	readonly window: ProgressObservationWindow;
@@ -97,7 +95,6 @@ export class BotTurnSupervision implements SessionTurnObserver {
 		this.turn = {
 			attemptId: `bot-turn:${this.session.sessionId}:${++this.turns}`,
 			startedAt: Date.now(),
-			transcriptStart: this.session.messages.length,
 			mission: "",
 			window: new ProgressObservationWindow(0),
 			changedFiles: new Set(),
@@ -149,7 +146,11 @@ export class BotTurnSupervision implements SessionTurnObserver {
 			role: this.options.role,
 			mission: turn.mission,
 			elapsedMs: Date.now() - turn.startedAt,
-			outputTail: assistantOutputTail(this.session.messages.slice(turn.transcriptStart)),
+			// The turn's own output, read by time: a compaction during the turn (a self-compaction handoff's included)
+			// shortens the transcript, and an earlier turn's output is never judged.
+			outputTail: assistantOutputTail(
+				this.session.messages.filter((message) => message.timestamp >= turn.startedAt),
+			),
 			...facts,
 		};
 		// Supervision runs beside the turn, never in front of it, and never fails it.

@@ -566,7 +566,7 @@ export class SelfCompactionController {
 	}
 
 	private continues(status: SelfCompactionState["status"]): boolean {
-		return !this.deps.isDisposed() && !this.deps.isAwaitingOwner() && isActiveSelfCompactionStatus(status);
+		return isActiveSelfCompactionStatus(status) && !this.deps.isDisposed() && !this.deps.isAwaitingOwner();
 	}
 
 	schedule(): boolean {
@@ -635,7 +635,9 @@ export class SelfCompactionController {
 					}
 					continue;
 				}
-				if (state.status === "compacted") {
+				// One handoff run per checkpoint: a run that ended before the note was kept (an abort, a bound) is not
+				// started again here; the next idle checkpoint delivers the note.
+				if (state.status === "compacted" && !continued) {
 					if (
 						await this.hostTurn(() =>
 							this.deps.deliverNote({

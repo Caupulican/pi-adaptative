@@ -431,7 +431,7 @@ Response:
 
 #### get_self_compaction
 
-Read the self-monitoring compaction state without a model turn: the same view the `self_compact` tool returns (usage, lines, phase, tools lock, handoff status, completed cycles), the resolved settings, where each prompt comes from, the saved note while a handoff is active, and whether the handoff runner is active. This is the RPC form of the interactive `/self-compact-info`.
+Read the self-monitoring compaction state without a model turn: the same view the `self_compact` tool returns (usage, lines, phase, tools lock, handoff status, completed cycles), the resolved settings, where each prompt comes from, the saved note while a handoff is active, and whether the handoff runner is active. `handoff.continues` says an idle checkpoint runs the saved note's handoff (the note is active and the session does not await the owner), and `handoff.hosting` that the run starting or running now is the handoff's own. This is the RPC form of the interactive `/self-compact-info`.
 
 ```json
 {"type": "get_self_compaction"}
@@ -444,7 +444,7 @@ Response:
   "command": "get_self_compaction",
   "success": true,
   "data": {
-    "view": {"phase": "warning", "level": "warning", "cycles": 1, "usedTokens": 110000, "toolsLocked": false, "handoff": {"status": "none", "attempts": 0, "noteChars": null, "lastError": null, "ownerRequested": false}},
+    "view": {"phase": "warning", "level": "warning", "cycles": 1, "usedTokens": 110000, "toolsLocked": false, "handoff": {"status": "none", "attempts": 0, "noteChars": null, "lastError": null, "ownerRequested": false, "continues": false, "hosting": false}},
     "settings": {"enabled": true, "notice": 0.7, "warning": 0.85, "forced": 0.95, "prompts": {}},
     "promptSources": {"notice": "built-in", "warning": "built-in", "summary": "built-in"},
     "note": null,
