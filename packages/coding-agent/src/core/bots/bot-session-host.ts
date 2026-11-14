@@ -93,8 +93,11 @@ export interface BotSessionHostPorts {
 	warn(message: string): void;
 	/** Why the worker admission refuses the bot's model now; undefined when it may run. */
 	modelRefusal(record: PersistentBotRecord, model: Model<Api>): string | undefined;
-	/** The dollars one turn may spend, as a worker's budget bounds it; undefined when nothing bounds it. */
-	turnSpendBoundUsd(): number | undefined;
+	/**
+	 * The dollars one turn may spend, as a worker's budget bounds it, with the bound that sets it (the owner's worker bound
+	 * or the main session's autonomy bound, the lower); undefined when nothing bounds it.
+	 */
+	turnSpendBound(): { readonly usd: number; readonly bound: "worker" | "session" } | undefined;
 	/** Records what a bot's turn spent with the main session's cost view, once per `reportId`. */
 	reportUsage(usage: Usage, report: BotTurnUsageReport): void;
 }
@@ -221,7 +224,7 @@ export class BotSessionHost {
 			this.history.noteRun(agentId, parentSessionId, runtime);
 		} catch (error) {
 			// The run itself is unaffected; the index is rebuilt by the next scan only if it was never finished.
-			this.ports.warn(`Bot ${agentId}: its run could not be added to its history (${errorText(error)}).`);
+			this.ports.warn(interfaceText().botTeam.botHistoryRunNotRecorded(agentId, errorText(error)));
 		}
 	}
 
@@ -253,9 +256,7 @@ export class BotSessionHost {
 		try {
 			entry.stateWriter.publish(this.localState(entry));
 		} catch (error) {
-			this.ports.warn(
-				`Bot ${entry.agentId}: its state could not be published for other sessions (${errorText(error)}).`,
-			);
+			this.ports.warn(interfaceText().botTeam.botStateNotPublished(entry.agentId, errorText(error)));
 		}
 	}
 
@@ -331,8 +332,14 @@ export class BotSessionHost {
 				this.settle(entry);
 			});
 		const outcome = await accepted;
-		if (!outcome.accepted)
-			throw new Error(interfaceText().botTeam.botMessageRefused(agentId, outcome.reason ?? "not accepted"));
+		if (!outcome.accepted) {
+			const words = interfaceText().botTeam;
+			throw new Error(
+				outcome.reason === undefined
+					? words.botMessageNotTaken(agentId)
+					: words.botMessageRefused(agentId, outcome.reason),
+			);
+		}
 		return {
 			agentId,
 			mode: wasRunning ? (queued ? "queued" : "steered") : queued ? "queued" : continued ? "followed_up" : "started",
@@ -352,7 +359,7 @@ export class BotSessionHost {
 		if (!record || !model) throw new Error(words.botMissing(agentId));
 		const refusal =
 			this.ports.modelRefusal(record, model) ??
-			(this.ports.turnSpendBoundUsd() === undefined ? undefined : unpricedModelRefusal(model));
+			(this.ports.turnSpendBound() === undefined ? undefined : unpricedModelRefusal(model));
 		if (refusal) throw new Error(words.botModelRefused(agentId, refusal));
 	}
 
@@ -467,7 +474,7 @@ export class BotSessionHost {
 					privatePathScope: { readOnlyShell: !profile.canWrite, confinedWrites: true },
 					timers: this.ports.timers(),
 					onClosingWarnings: (warnings) => {
-						for (const warning of warnings) this.ports.warn(`Bot ${agentId}: ${warning}`);
+						for (const warning of warnings) this.ports.warn(interfaceText().botTeam.botWarning(agentId, warning));
 					},
 				})
 			).session;
@@ -492,12 +499,13 @@ export class BotSessionHost {
 				idleTimer: undefined,
 			};
 			const unsubscribeSpend = boundSessionTurnSpend(session, {
-				limitUsd: () => this.ports.turnSpendBoundUsd(),
-				onExceeded: (spentUsd, limitUsd) => {
+				limit: () => this.ports.turnSpendBound(),
+				onExceeded: (spentUsd, limit) => {
 					const reason = interfaceText().botTeam.botTurnOverBudget(
 						agentId,
 						spentUsd.toFixed(2),
-						limitUsd.toFixed(2),
+						limit.usd.toFixed(2),
+						limit.bound,
 					);
 					this.ports.warn(reason);
 					return reason;
@@ -508,12 +516,12 @@ export class BotSessionHost {
 				agentId,
 				role: profile.canWrite ? "implementer" : "explorer",
 				cwd: this.ports.cwd(),
-				warn: (message) => this.ports.warn(`Bot ${agentId}: ${message}`),
+				warn: (message) => this.ports.warn(interfaceText().botTeam.botWarning(agentId, message)),
 			});
 			const unsubscribeEvents = session.subscribe((event) => {
 				supervision.observe(event);
 				// The session's own warnings (a turn a watch started that failed, say) reach the owner as the bot's.
-				if (event.type === "warning") this.ports.warn(`Bot ${agentId}: ${event.message}`);
+				if (event.type === "warning") this.ports.warn(interfaceText().botTeam.botWarning(agentId, event.message));
 				if (event.type === "agent_start") {
 					entry.usageBefore ??= structuredClone(entry.session.getCumulativeUsage());
 					entry.turnStartedAt ??= Date.now();
@@ -643,7 +651,7 @@ export class BotSessionHost {
 				model: model.id,
 			});
 		} catch (error) {
-			this.ports.warn(`Bot ${entry.agentId}: its turn's spend could not be recorded (${errorText(error)}).`);
+			this.ports.warn(interfaceText().botTeam.botTurnSpendNotRecorded(entry.agentId, errorText(error)));
 		}
 	}
 
@@ -660,7 +668,7 @@ export class BotSessionHost {
 		try {
 			this.ports.store().recordBotTurnOutcome({ agentId: entry.agentId, summary });
 		} catch (error) {
-			this.ports.warn(`Bot ${entry.agentId}: its turn outcome could not be recorded (${errorText(error)}).`);
+			this.ports.warn(interfaceText().botTeam.botTurnOutcomeNotRecorded(entry.agentId, errorText(error)));
 		}
 	}
 
@@ -686,7 +694,7 @@ export class BotSessionHost {
 				() => entry.stateWriter.clear(),
 				() => entry.lock.release(),
 			],
-			"The bot session did not close cleanly.",
+			interfaceText().botTeam.botSessionNotClosed,
 		).finally(() => {
 			this.changed(agentId);
 			if (this.closing.get(agentId) === closing) this.closing.delete(agentId);
@@ -775,10 +783,16 @@ export class BotSessionHost {
 		this.stopped = true;
 		try {
 			await Promise.allSettled([...this.loading.values()]);
-			const closed = await Promise.allSettled([...this.entries.keys()].map((agentId) => this.close(agentId)));
+			const ids = [...this.entries.keys()];
+			const closed = await Promise.allSettled(ids.map((agentId) => this.close(agentId)));
 			await Promise.allSettled([...this.closing.values()]);
-			const failures = closed.flatMap((result) => (result.status === "rejected" ? [result.reason] : []));
-			if (failures.length > 0) throw new AggregateError(failures, "Bot sessions did not close cleanly.");
+			const words = interfaceText().botTeam;
+			const failures = closed.flatMap((result, index) =>
+				result.status === "rejected"
+					? [new Error(words.botSessionCloseFailed(ids[index] ?? "", errorText(result.reason)))]
+					: [],
+			);
+			if (failures.length > 0) throw new AggregateError(failures, words.botSessionsNotClosed);
 		} finally {
 			this.view.stop();
 			this.listeners.clear();

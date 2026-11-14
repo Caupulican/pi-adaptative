@@ -44,7 +44,7 @@ function relayPorts(roots: readonly BotSessionHostPorts[]): BotSessionHostPorts 
 		hostSessionId: () => root().hostSessionId(),
 		warn: (message) => root().warn(message),
 		modelRefusal: (record, model) => root().modelRefusal(record, model),
-		turnSpendBoundUsd: () => root().turnSpendBoundUsd(),
+		turnSpendBound: () => root().turnSpendBound(),
 		reportUsage: (usage, report) => root().reportUsage(usage, report),
 	};
 }

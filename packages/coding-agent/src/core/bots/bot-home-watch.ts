@@ -12,6 +12,7 @@
 import { type FSWatcher, mkdirSync, readdirSync, statSync, watch } from "node:fs";
 import { join } from "node:path";
 import { botsDir } from "../agent-paths.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 
 /** How long changes gather before one notice carries them: a turn being written changes its file many times a second. */
@@ -135,7 +136,7 @@ export function watchBotHomes(
 				if (isDirectory(join(dir, home))) addHome(home, true);
 				else dropHome(home);
 			},
-			() => fail(new Error(`${dir} was removed`)),
+			() => fail(new Error(interfaceText().botTeam.botHomesRemoved(dir))),
 		);
 		for (const entry of readdirSync(dir, { withFileTypes: true }))
 			if (entry.isDirectory()) addHome(entry.name, false);

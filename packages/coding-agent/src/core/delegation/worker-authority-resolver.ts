@@ -590,6 +590,16 @@ export function modelNotAllowedReason(model: Model<Api>): string {
  * than moved: an explicit model is a request, so running another one would be a mislabelled success. Undefined = fine.
  */
 export function explicitMeteredModelRefusal(input: ExplicitModelAdmissionInput): string | undefined {
+	const refused = meteredModelRefusalFacts(input);
+	return refused
+		? `worker_model_metered:${refused.ref}:${refused.ref} is paid by API key and the owner has not chosen it for workers while subscription models are usable. Use a subscription model such as ${refused.alternatives.join(", ")}, or add ${refused.provider} to workerDelegation.routeProviders.`
+		: undefined;
+}
+
+/** The facts of `explicitMeteredModelRefusal`'s refusal (the model, the usable subscription models), for a caller's own words. */
+export function meteredModelRefusalFacts(
+	input: ExplicitModelAdmissionInput,
+): { readonly ref: string; readonly provider: string; readonly alternatives: readonly string[] } | undefined {
 	const requested = input.authority?.model;
 	if (!requested || input.modelPin || input.authority?.modelChosenBy === "owner") return undefined;
 	const { modelRegistry } = input;
@@ -620,7 +630,7 @@ export function explicitMeteredModelRefusal(input: ExplicitModelAdmissionInput):
 		model: ref,
 		subscriptionProviders: new Set(usable.map((candidate) => candidate.provider)).size,
 	}));
-	return `worker_model_metered:${ref}:${ref} is paid by API key and the owner has not chosen it for workers while subscription models are usable. Use a subscription model such as ${alternatives.join(", ")}, or add ${model.provider} to workerDelegation.routeProviders.`;
+	return { ref, provider: model.provider, alternatives };
 }
 
 /** Materialize free-form model choices as one immutable profile-shaped execution snapshot. */

@@ -19,4 +19,6 @@ export const COMMON = {
 	botState: (state: string) => BOT_STATE[state] ?? state,
 	/** A failure whose text nobody wrote: the owner reads this, the code keeps its own message. */
 	unknownError: "Unknown error",
+	/** Why a model cannot run under a dollar bound: it declares no price. */
+	modelUnpriced: (modelRef: string) => `the model ${modelRef} has no price, so its spend cannot be bounded`,
 };

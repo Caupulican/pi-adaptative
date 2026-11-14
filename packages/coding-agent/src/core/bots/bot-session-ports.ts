@@ -9,19 +9,21 @@
 
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
-import { explicitMeteredModelRefusal, modelNotAllowedReason } from "../delegation/worker-authority-resolver.ts";
+import { meteredModelRefusalFacts } from "../delegation/worker-authority-resolver.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SpawnedUsageReporter } from "../spawned-usage.ts";
 import type { BotSessionHostPorts } from "./bot-session-host.ts";
 import { attachBotSessionHost, type BotSessionAttachment } from "./bot-session-registry.ts";
 
-/** Why the worker admission refuses the bot's own model now; undefined when it may run. */
+/** Why the worker admission refuses the bot's own model now, in the owner's words; undefined when it may run. */
 function botModelRefusal(
 	deps: BackgroundLaneControllerDeps,
 	record: PersistentBotRecord,
 	model: Parameters<BotSessionHostPorts["modelRefusal"]>[1],
 ): string | undefined {
-	const metered = explicitMeteredModelRefusal({
+	const words = interfaceText().botTeam;
+	const metered = meteredModelRefusalFacts({
 		authority: {
 			model: { provider: record.provider, modelId: record.modelId },
 			// The owner's own choice of this bot's model is honoured as given; a root's or a leader's is held to the subscription rule.
@@ -33,8 +35,10 @@ function botModelRefusal(
 		modelUnusableCause: (candidate) => deps.modelUnusableCause(candidate),
 		...(deps.isModelAllowed ? { isModelAllowed: (candidate) => deps.isModelAllowed?.(candidate) === true } : {}),
 	});
-	if (metered) return metered;
-	return deps.isModelAllowed && !deps.isModelAllowed(model) ? modelNotAllowedReason(model) : undefined;
+	if (metered) return words.botModelMetered(metered.ref, metered.alternatives, metered.provider);
+	return deps.isModelAllowed && !deps.isModelAllowed(model)
+		? words.botModelNotAllowed(`${model.provider}/${model.id}`)
+		: undefined;
 }
 
 /** Attaches the session to a bot session host: its process's shared one for a root session, one of its own for a child. */
@@ -76,13 +80,15 @@ function botSessionHostPorts(
 		hostSessionId: () => deps.getSessionId(),
 		modelRefusal: (record, model) => botModelRefusal(deps, record, model),
 		// A worker's budget is the owner's worker bound, intersected with the main session's own ceiling; none set, none applies.
-		turnSpendBoundUsd: () => {
+		turnSpendBound: () => {
 			const bounds = [
-				deps.getSettingsManager().getWorkerDelegationSettings().maxUsd,
-				deps.getCapabilityEnvelope()?.maxEstimatedUsd,
-			];
-			const set = bounds.filter((usd): usd is number => usd !== undefined && usd > 0);
-			return set.length > 0 ? Math.min(...set) : undefined;
+				{ usd: deps.getSettingsManager().getWorkerDelegationSettings().maxUsd, bound: "worker" as const },
+				{ usd: deps.getCapabilityEnvelope()?.maxEstimatedUsd, bound: "session" as const },
+			].filter((entry): entry is { usd: number; bound: "worker" | "session" } => (entry.usd ?? 0) > 0);
+			return bounds.reduce<(typeof bounds)[number] | undefined>(
+				(lowest, entry) => (lowest === undefined || entry.usd < lowest.usd ? entry : lowest),
+				undefined,
+			);
 		},
 		reportUsage: (usage, report) => {
 			// The session's own usage ledger takes spawned work by report id, as it takes a worker's.

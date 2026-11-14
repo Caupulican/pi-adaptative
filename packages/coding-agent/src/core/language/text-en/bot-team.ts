@@ -65,7 +65,29 @@ export const BOT_TEAM = {
 	/** The watch over the bot homes failed. */
 	botHomesNotWatched: (reason: string) =>
 		`Bots of other sessions are no longer watched (${reason}); their changes show when this session reads them.`,
+	/** Why the watch over the bot homes ended: their directory was removed. */
+	botHomesRemoved: (dir: string) => `${dir} was removed`,
 	botMessageRefused: (agentId: string, reason: string) => `Bot ${agentId} did not take the message: ${reason}.`,
+	/** The bot's session ended the message's turn before taking it, giving no reason. */
+	botMessageNotTaken: (agentId: string) => `Bot ${agentId} did not take the message.`,
+	/** A warning of the bot's own session (its turn, its supervision, its close), forwarded as the bot's. */
+	botWarning: (agentId: string, message: string) => `Bot ${agentId}: ${message}`,
+	botHistoryRunNotRecorded: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its run could not be added to its history (${reason}).`,
+	botStateNotPublished: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its state could not be published for other sessions (${reason}).`,
+	botTurnSpendNotRecorded: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its turn's spend could not be recorded (${reason}).`,
+	botTurnOutcomeNotRecorded: (agentId: string, reason: string) =>
+		`Bot ${agentId}: its turn outcome could not be recorded (${reason}).`,
+	botHistoryFileUnreadable: (reason: string) => `Bot history: a session file could not be read (${reason}).`,
+	botHistoryNotIndexed: (reason: string) => `Bot history could not be indexed (${reason}).`,
+	botHistoryRunUnreadable: (reason: string) => `Bot history: an earlier conversation could not be read (${reason}).`,
+	/** The owner's model policy (`isModelAllowed`) refuses the bot's model. */
+	botModelNotAllowed: (modelRef: string) => `your model policy does not allow ${modelRef}`,
+	/** A bot a root or a leader made runs on an API-key model the owner did not choose while subscription models are usable. */
+	botModelMetered: (modelRef: string, alternatives: readonly string[], provider: string) =>
+		`${modelRef} is paid by API key and you have not chosen it for workers while subscription models are usable; use a subscription model such as ${alternatives.join(", ")}, or add ${provider} to workerDelegation.routeProviders`,
 	/** A message that came while this session was closing and its bots with it. */
 	botSessionsClosing: (agentId: string) =>
 		`Bot ${agentId} was not started: this session is closing, and its bots close with it. Message it again in the next session.`,
@@ -73,11 +95,13 @@ export const BOT_TEAM = {
 	/** The worker admission's rules refused the bot's model for a message. */
 	botModelRefused: (agentId: string, reason: string) =>
 		`Bot ${agentId} did not take the message: its model is refused (${reason}).`,
-	/** A turn went past the worker spend bound and was stopped. */
-	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string) =>
-		`Bot ${agentId}: its turn was stopped at the spend bound ($${spentUsd} spent, workerDelegation.maxUsd is $${limitUsd}).`,
+	/** A turn went past the spend bound and was stopped; `bound` names the one that applied (the lower of the two). */
+	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session") =>
+		`Bot ${agentId}: its turn was stopped at the spend bound ($${spentUsd} spent; ${bound === "worker" ? "workerDelegation.maxUsd" : "this session's autonomy spend bound"} is $${limitUsd}).`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session did not close cleanly (${reason}).`,
+	botSessionNotClosed: "The bot session did not close cleanly.",
+	botSessionsNotClosed: "Bot sessions did not close cleanly.",
 	/** A bot's session holds live watches and could not be opened to keep them sampled. */
 	botWatchesNotResumed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session holds watches but could not be opened, so they are not checked until it is (${reason}).`,

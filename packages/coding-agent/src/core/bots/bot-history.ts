@@ -31,6 +31,7 @@ import type { AgentMessage } from "../../kernel/types.ts";
 import { botHistoryFile, botHistoryScanFile } from "../agent-paths.ts";
 import { BOT_RUNTIME_BINDINGS_CUSTOM_TYPE, directBindingAlias, isBotId } from "../delegation/bot-runtime-bindings.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { ensureBotHome } from "./bot-home.ts";
@@ -352,9 +353,7 @@ async function scanRootSessions(
 			);
 		} catch (error) {
 			if (signal.aborted) throw error;
-			warn(
-				`Bot history: a session file could not be read (${error instanceof Error ? error.message : String(error)}).`,
-			);
+			warn(interfaceText().botTeam.botHistoryFileUnreadable(error instanceof Error ? error.message : String(error)));
 		}
 	}
 	return { bound, rootIds, transcripts: await listWorkerTranscripts(agentDir, signal) };
@@ -496,7 +495,7 @@ export class BotHistory {
 				// The index stays unfinished: the next read of a bot without one scans again. A stopped scan is not a failure.
 				if (signal.aborted) return;
 				this.ports.warn(
-					`Bot history could not be indexed (${error instanceof Error ? error.message : String(error)}).`,
+					interfaceText().botTeam.botHistoryNotIndexed(error instanceof Error ? error.message : String(error)),
 				);
 			})
 			.finally(() => {
@@ -511,7 +510,7 @@ export class BotHistory {
 			return SessionManager.openReadOnly(sessionFile, agentDir).buildSessionContext().messages;
 		} catch (error) {
 			this.ports.warn(
-				`Bot history: an earlier conversation could not be read (${error instanceof Error ? error.message : String(error)}).`,
+				interfaceText().botTeam.botHistoryRunUnreadable(error instanceof Error ? error.message : String(error)),
 			);
 			return undefined;
 		}

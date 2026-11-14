@@ -21,4 +21,5 @@ export const COMMON = {
 	botState: (state: string) => BOT_STATE[state] ?? state,
 	/** Uma falha sem texto escrito por ninguém: o dono lê isto, o código guarda a mensagem dele. */
 	unknownError: "erro desconhecido",
+	modelUnpriced: (modelRef: string) => `o modelo ${modelRef} não tem preço, então o gasto dele não pode ser limitado`,
 } satisfies InterfaceText["common"];

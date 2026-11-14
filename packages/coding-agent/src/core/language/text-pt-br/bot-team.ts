@@ -70,16 +70,37 @@ export const BOT_TEAM = {
 		`O bot ${agentId} está trabalhando em outra sessão (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}processo ${pid}). Pare por lá.`,
 	botHomesNotWatched: (reason: string) =>
 		`Os bots de outras sessões não são mais observados (${reason}); as mudanças deles aparecem quando esta sessão os lê.`,
+	botHomesRemoved: (dir: string) => `${dir} foi removido`,
 	botMessageRefused: (agentId: string, reason: string) => `O bot ${agentId} não recebeu a mensagem: ${reason}.`,
+	botMessageNotTaken: (agentId: string) => `O bot ${agentId} não recebeu a mensagem.`,
+	botWarning: (agentId: string, message: string) => `Bot ${agentId}: ${message}`,
+	botHistoryRunNotRecorded: (agentId: string, reason: string) =>
+		`Bot ${agentId}: a execução não pôde entrar no histórico dele (${reason}).`,
+	botStateNotPublished: (agentId: string, reason: string) =>
+		`Bot ${agentId}: o estado dele não pôde ser publicado para as outras sessões (${reason}).`,
+	botTurnSpendNotRecorded: (agentId: string, reason: string) =>
+		`Bot ${agentId}: o gasto do turno não pôde ser registrado (${reason}).`,
+	botTurnOutcomeNotRecorded: (agentId: string, reason: string) =>
+		`Bot ${agentId}: o resultado do turno não pôde ser registrado (${reason}).`,
+	botHistoryFileUnreadable: (reason: string) =>
+		`Histórico dos bots: um arquivo de sessão não pôde ser lido (${reason}).`,
+	botHistoryNotIndexed: (reason: string) => `O histórico dos bots não pôde ser indexado (${reason}).`,
+	botHistoryRunUnreadable: (reason: string) =>
+		`Histórico dos bots: uma conversa anterior não pôde ser lida (${reason}).`,
+	botModelNotAllowed: (modelRef: string) => `sua política de modelos não permite ${modelRef}`,
+	botModelMetered: (modelRef: string, alternatives: readonly string[], provider: string) =>
+		`${modelRef} é cobrado por chave de API e você não o escolheu para workers enquanto há modelos de assinatura disponíveis; use um modelo de assinatura como ${alternatives.join(", ")}, ou adicione ${provider} a workerDelegation.routeProviders`,
 	botSessionsClosing: (agentId: string) =>
 		`O bot ${agentId} não foi iniciado: esta sessão está fechando, e os bots dela fecham junto. Envie a mensagem de novo na próxima sessão.`,
 	botTurnFailed: (agentId: string, reason: string) => `Bot ${agentId}: o turno falhou (${reason}).`,
 	botModelRefused: (agentId: string, reason: string) =>
 		`O bot ${agentId} não recebeu a mensagem: o modelo dele foi recusado (${reason}).`,
-	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string) =>
-		`Bot ${agentId}: o turno foi interrompido no limite de gasto ($${spentUsd} gastos, workerDelegation.maxUsd é $${limitUsd}).`,
+	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session") =>
+		`Bot ${agentId}: o turno foi interrompido no limite de gasto ($${spentUsd} gastos; ${bound === "worker" ? "workerDelegation.maxUsd" : "o limite de gasto da autonomia desta sessão"} é $${limitUsd}).`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a sessão não fechou corretamente (${reason}).`,
+	botSessionNotClosed: "A sessão do bot não fechou corretamente.",
+	botSessionsNotClosed: "As sessões dos bots não fecharam corretamente.",
 	botWatchesNotResumed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a sessão dele tem esperas ativas mas não pôde ser aberta, então elas não são verificadas até que seja (${reason}).`,
 	botChangeWhileRunning: (agentId: string) =>
