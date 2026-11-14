@@ -1690,16 +1690,16 @@ export class SessionChannels {
 	}
 
 	/**
-	 * Deliver one owner turn (the owner's words, or an approval) and keep its run: `live` and the spend observer while
-	 * it runs. `onAccepted` records it; its answer is routed like any batch's. A turn whose `live` already answers false
-	 * when accepted is aborted at once.
+	 * Deliver one owner turn (the owner's words, or the approval of the draft `approval`, whose request the run answers)
+	 * and keep its run: `live` and the spend observer while it runs. `onAccepted` records it; its answer is routed like
+	 * any batch's. A turn whose `live` already answers false when accepted is aborted at once.
 	 */
 	private deliverOwnerTurn(
 		name: string,
 		origin: OwnerChannelOrigin,
 		text: string,
 		live: () => boolean,
-		approval: boolean,
+		approval: false | Pick<OwnerDraftView, "requestEntryId">,
 		onAccepted: (accepted: boolean) => boolean,
 	): void {
 		const delivery = this.deps.ownerDelivery;
@@ -1716,7 +1716,7 @@ export class SessionChannels {
 		const accept = (accepted: boolean) => {
 			if (answered) return;
 			answered = true;
-			const fields = { channel: name, ref: origin.ref, approval };
+			const fields = { channel: name, ref: origin.ref, approval: approval !== false };
 			if (accepted) harnessLog.info("channels", "an owner turn started", fields);
 			else harnessLog.warn("channels", "an owner turn was not accepted", fields);
 			if (!onAccepted(accepted)) {
@@ -1743,7 +1743,7 @@ export class SessionChannels {
 			this.scheduleWork();
 		};
 		try {
-			if (approval) delivery.deliverApproval(text, origin, guarded, accept);
+			if (approval) delivery.deliverApproval(text, origin, guarded, accept, approval.requestEntryId);
 			else delivery.deliver(text, origin, guarded, accept);
 		} catch (error) {
 			this.deps.warn(
@@ -2220,7 +2220,7 @@ export class SessionChannels {
 			origin,
 			approvalTurnText(name, view),
 			this.ownerLive(name, by.senderDigest, policy),
-			true,
+			view,
 			(accepted) => {
 				if (!accepted) {
 					reply(

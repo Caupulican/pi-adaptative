@@ -399,9 +399,8 @@ export class PromptSubmissionController {
 				options.pasted !== undefined)
 		)
 			throw new TypeError("An owner-channel submission names no other origin, source, kept input or pasted range.");
-		// The owner's words from an owner channel are the owner's, though not typed at the terminal: never owner policy or an
-		// owner rule (typed only), so they take no submission order, unless the channel holds the owner's full authority
-		// (`OwnerChannelSubmission.full`). An approval turn is accepted on the untrusted path.
+		// Owner-channel words are the owner's but not typed: no submission order (owner policy, owner rules) unless the
+		// channel holds full authority (`OwnerChannelSubmission.full`). An approval turn takes the untrusted path.
 		const channelWords = ownerChannel !== undefined && !ownerChannel.approval;
 		const fullChannelWords = channelWords && ownerChannel.full?.() === true;
 		const untrusted = options?.source === "extension" || ownerChannel?.approval === true;
@@ -431,6 +430,11 @@ export class PromptSubmissionController {
 			this.deps.ownerInputs.whenDelivered(input.inputId, ownerChannel.onDelivered);
 		if (input && ownerChannel?.onUndelivered)
 			this.deps.ownerInputs.whenUndelivered(input.inputId, ownerChannel.onUndelivered);
+		// An approval turn answers the owner request its approved call was held in, once its message persists.
+		const answers = ownerChannel?.approval === true ? ownerChannel.answers : undefined;
+		const evidence = this.deps.reflection.ownerEvidence;
+		if (input && answers)
+			this.deps.ownerInputs.whenDelivered(input.inputId, () => evidence.answerInCurrentTurn(answers));
 		// What the queued record keeps of an owner-channel input: the owner's words, as the owner sees and takes them back.
 		const recordedText = channelWords ? ownerChannel.ownerText : text;
 		const busyAtSubmission = this.deps.getSessionWorkState().busy;
@@ -983,10 +987,9 @@ export class PromptSubmissionController {
 			// Flush any pending bash messages before the new prompt
 			this.deps.flushPendingBashMessages();
 
-			// Build the user message now — before the router judge — and paint it to the UI
-			// immediately via a synthetic message_start. The judge is a real bounded LLM completion
-			// (seconds), not a regex; awaiting it first made the prompt appear to hang. The
-			// authoritative message_start emitted later for this SAME object is suppressed in
+			// Build the user message now — before the router judge — and paint it to the UI immediately via a synthetic
+			// message_start. The judge is a real bounded LLM completion (seconds), not a regex; awaiting it first made the
+			// prompt appear to hang. The authoritative message_start emitted later for this SAME object is suppressed in
 			// _handleAgentEvent (see earlyDisplayedUserMessages) so it is still shown exactly once.
 			if (options?.internalContextType) {
 				if (currentImages && currentImages.length > 0) {
@@ -1020,11 +1023,10 @@ export class PromptSubmissionController {
 				this.deps.emit({ type: "message_start", message: userMessage });
 			}
 
-			// Bracket the routing/prep phase (judge, model/auth checks, compaction, ...) so the UI can
-			// show general "working" feedback for it — otherwise the user stares at their own echoed
-			// prompt with nothing happening for however long the judge takes. routing_end is emitted
-			// exactly once below: either in the catch block (this phase failed) or right after the try
-			// block (this phase succeeded, whether or not it produced a turn to run).
+			// Bracket the routing/prep phase (judge, model/auth checks, compaction, ...) so the UI can show general
+			// "working" feedback for it — otherwise the user stares at their own echoed prompt with nothing happening for
+			// however long the judge takes. routing_end is emitted exactly once below: either in the catch block (this
+			// phase failed) or right after the try block (this phase succeeded, whether or not it produced a turn to run).
 			routingStarted = true;
 			this.deps.emit({ type: "routing_start" });
 
@@ -1253,15 +1255,14 @@ export class PromptSubmissionController {
 
 		if (!messages) return;
 
-		// The submission's cancellation point. Listener FIRST, then the `aborted` read: in that order an
-		// abort either arrives later and reaches the live run through the listener, or has already
-		// arrived and is caught by the read — there is no gap between them for one to fall into. Reversed,
-		// an abort landing between the read and the attach would be dropped and the turn would run anyway.
-		// The listener is the same edge as `abort()`: a run in flight is unwound by its own controller, and
-		// a retry backoff in flight is cut rather than waited out. What the listener cannot reach is a run
-		// that does not exist yet — the drive loop still has its own preparation to await before entering
-		// one — so the signal also rides into `runRoutedTurn` and is read once more immediately before the
-		// run starts (see ForegroundRecoveryController.runAgentExecution). That read is the closing gate.
+		// The submission's cancellation point. Listener FIRST, then the `aborted` read: in that order an abort either
+		// arrives later and reaches the live run through the listener, or has already arrived and is caught by the read —
+		// there is no gap between them for one to fall into. Reversed, an abort landing between the read and the attach
+		// would be dropped and the turn would run anyway. The listener is the same edge as `abort()`: a run in flight is
+		// unwound by its own controller, and a retry backoff in flight is cut rather than waited out. What the listener
+		// cannot reach is a run that does not exist yet — the drive loop still has its own preparation to await before
+		// entering one — so the signal also rides into `runRoutedTurn` and is read once more immediately before the run
+		// starts (see ForegroundRecoveryController.runAgentExecution). That read is the closing gate.
 		let releaseSubmissionSignal: (() => void) | undefined;
 		if (submissionSignal)
 			releaseSubmissionSignal = this.deps.foregroundRecovery.bindSubmissionSignal(submissionSignal);
@@ -1308,14 +1309,13 @@ export class PromptSubmissionController {
 				// authority (otherwise they have no submission order); an approval turn is neither.
 				if (ownerSpoke) {
 					this.lastUserRequestValue = fenceOwnerPaste(userRequest);
-					// The owner's words are classified where their outcome is read (see OwnerPolicyQueue): a
-					// turn that uses no tool never waits for, or pays for, the classification. A queued input
-					// that became this turn was judged before it ran: its judgment is applied, never asked again
-					// (one a newer request superseded has its owner policy judged alone where the queue settles).
-					// They join the owner-policy queue when this turn delivers them (its user entry is persisted),
-					// exactly once, and never when the turn ends before that. Delivered words stay registered until
-					// an optional-tool intent covers them: a queued input judged before this turn's first tool call
-					// reads them into its staged judgment.
+					// The owner's words are classified where their outcome is read (see OwnerPolicyQueue): a turn that uses
+					// no tool never waits for, or pays for, the classification. A queued input that became this turn was
+					// judged before it ran: its judgment is applied, never asked again (one a newer request superseded has
+					// its owner policy judged alone where the queue settles). They join the owner-policy queue when this
+					// turn delivers them (its user entry is persisted), exactly once, and never when the turn ends before
+					// that. Delivered words stay registered until an optional-tool intent covers them: a queued input judged
+					// before this turn's first tool call reads them into its staged judgment.
 					const input = lifecycle.input;
 					if (input?.acceptedOrder !== undefined)
 						this.deps.ownerInputs.whenDelivered(input.inputId, () => {

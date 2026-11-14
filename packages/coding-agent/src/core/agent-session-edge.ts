@@ -520,6 +520,7 @@ export function ownerDraftView(view: Pick<OutwardDraftStateView, "record" | "sta
 		toolName: record.toolName,
 		rendering: record.callDigest !== undefined ? record.rendering : undefined,
 		...(isNestedCallPurpose(record.purpose) ? { purpose: record.purpose } : {}),
+		...(record.requestEntryId !== undefined ? { requestEntryId: record.requestEntryId } : {}),
 		origin: record.origin,
 		state: view.state,
 		preparedAt: record.preparedAt,

@@ -628,6 +628,16 @@ export class OwnerEvidenceLedger {
 	}
 
 	/**
+	 * The current run answers the owner request persisted at `requestEntryId`: the owner approved a call held in that
+	 * request's run, so the request's source joins the current turn's, as if stated in it. Nothing joins when the entry
+	 * is not recorded owner evidence (a third party's message, or a request this branch no longer holds).
+	 */
+	answerInCurrentTurn(requestEntryId: string): void {
+		const sourceId = this.sourceOfEntry(requestEntryId);
+		if (sourceId !== undefined) this.currentTurn.add(sourceId);
+	}
+
+	/**
 	 * The session admitted `message` as the operator's own input; `originalText` is what they submitted and `pasted` the
 	 * ranges of it the editor recorded as pasted rather than typed.
 	 */

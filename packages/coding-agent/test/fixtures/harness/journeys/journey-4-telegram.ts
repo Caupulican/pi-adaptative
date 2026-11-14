@@ -38,8 +38,8 @@ import { icmLatestResult, latestBatchResults } from "./shared.ts";
 
 const API_ORIGIN = "https://api.telegram.org";
 /** A token-shaped sentinel (joined from parts so no source line matches a secret scanner): it must reach the Bot API's URL and nothing else. */
-const TOKEN = ["918273645", "SentinelTokenForTheJourney_0123456789"].join(":");
-const OWNER_ID = 424242424;
+export const TOKEN = ["918273645", "SentinelTokenForTheJourney_0123456789"].join(":");
+export const OWNER_ID = 424242424;
 const STRANGER_ID = 777000111;
 
 interface SentMessage {
@@ -78,7 +78,7 @@ function privatePress(updateId: number, userId: number, data: string): Record<st
  * until the journey hands one over, refuses it, or the transport aborts it. Each poll's `offset` is checked against the
  * channel journal at that moment: an update is acknowledged only once the journal holds it.
  */
-class FakeBotApi {
+export class FakeBotApi {
 	readonly sent: SentMessage[] = [];
 	/** The presses the transport told Telegram it received (`answerCallbackQuery`), by press id. */
 	readonly acknowledged: string[] = [];
@@ -391,7 +391,7 @@ const ROUTINE_PROFILE_ID = "telegram-owner-reader";
  * An update of the owner leg: a private text message dated a minute ahead (admission clamps it to the moment it is
  * admitted, so an approval is never dated before the presentation it answers), with `extra` message fields.
  */
-function ownerLegUpdate(
+export function ownerLegUpdate(
 	updateId: number,
 	userId: number,
 	text: string,
@@ -415,7 +415,7 @@ function ownerLegUpdate(
  * last user message: host context the request projects after it (the authority record of the session's grants) also
  * reaches the model in the user role.
  */
-function deliveryWith(request: ScriptedRequest, words: string): string {
+export function deliveryWith(request: ScriptedRequest, words: string): string {
 	const message = request.context.messages.findLast(
 		(entry) => entry.role === "user" && JSON.stringify(entry.content).includes(words),
 	);

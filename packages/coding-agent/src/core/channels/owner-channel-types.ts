@@ -42,12 +42,16 @@ export interface OwnerChannelDelivery {
 		live: () => boolean,
 		onAccepted: (accepted: boolean) => void,
 	): void;
-	/** The turn that carries a recorded approval: the same owner-channel stamp, a non-owner input source. */
+	/**
+	 * The turn that carries a recorded approval: the same owner-channel stamp, a non-owner input source. The run answers
+	 * `requestEntryId`, the approved draft's request (`OwnerDraftView.requestEntryId`), once its message persists.
+	 */
 	deliverApproval(
 		text: string,
 		origin: OwnerChannelOrigin,
 		live: () => boolean,
 		onAccepted: (accepted: boolean) => void,
+		requestEntryId: string | undefined,
 	): void;
 	/** Reports the cost of the run that `ref` opened as it grows; returns the unsubscribe. */
 	observeRunUsage(ref: string, onUsd: (usd: number) => void): () => void;
@@ -85,6 +89,8 @@ export interface OwnerDraftView {
 	readonly rendering: string | undefined;
 	/** What the held call was made for (a watch's check): the head line names the watch and the call that arms it. */
 	readonly purpose?: NestedCallPurpose;
+	/** The entry of the owner channel's message whose run held the call: the request an approval of it answers. */
+	readonly requestEntryId?: string;
 	readonly origin: TurnOriginRecord;
 	readonly state: "pending" | "approved" | "released" | "denied" | "dismissed" | "expired";
 	readonly preparedAt: string;

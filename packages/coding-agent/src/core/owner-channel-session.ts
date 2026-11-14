@@ -145,8 +145,9 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 		origin: OwnerChannelOrigin,
 		live: () => boolean,
 		onAccepted: (accepted: boolean) => void,
+		requestEntryId: string | undefined,
 	): void {
-		this.submit(text, "", true, origin, live, onAccepted);
+		this.submit(text, "", { requestEntryId }, origin, live, onAccepted);
 	}
 
 	observeRunUsage(ref: string, onUsd: (usd: number) => void): () => void {
@@ -220,7 +221,7 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 	private submit(
 		text: string,
 		ownerText: string,
-		approval: boolean,
+		approval: false | { readonly requestEntryId: string | undefined },
 		origin: OwnerChannelOrigin,
 		live: () => boolean,
 		onAccepted: (accepted: boolean) => void,
@@ -255,7 +256,8 @@ export class OwnerChannelSession implements OwnerChannelDelivery {
 				ownerChannel: {
 					origin,
 					ownerText,
-					approval,
+					approval: approval !== false,
+					...(approval && approval.requestEntryId !== undefined ? { answers: approval.requestEntryId } : {}),
 					onDelivered: settleDelivered,
 					onUndelivered: drop,
 					...(run.full ? { full: () => answersLive(live) } : {}),

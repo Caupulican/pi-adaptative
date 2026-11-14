@@ -244,13 +244,19 @@ export interface ExtensionBindings {
 /**
  * An owner-channel submission. Its words (`approval` false) are the owner's, though not typed at the terminal: owner
  * evidence, the request and a goal's start, never owner policy or an owner rule, unless `full` answers true. An approval
- * turn carries the stamp only: it is accepted on the untrusted path and decides nothing of the owner's.
+ * turn carries the stamp only: it is accepted on the untrusted path and states nothing of the owner's; it answers the
+ * request its approved draft was held in (`answers`).
  */
 export interface OwnerChannelSubmission {
 	readonly origin: OwnerChannelOrigin;
 	/** The owner's own words within the submitted text (the channel's header line precedes them). */
 	readonly ownerText: string;
 	readonly approval: boolean;
+	/**
+	 * An approval turn only: the entry of the owner's message whose run held the approved call. Once the turn's message
+	 * persists, that message's owner source, when it is recorded owner evidence, is one the current run answers.
+	 */
+	readonly answers?: string;
 	/** The input was delivered: its user entry is persisted. */
 	readonly onDelivered?: () => void;
 	/** The input ended without being delivered (withdrawn, held, cancelled or refused). */
