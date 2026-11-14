@@ -9,9 +9,9 @@ import { readdirSync } from "node:fs";
 import { join } from "node:path";
 import { ParentInputIndex } from "../../kernel/session/parent-input-ledger.ts";
 import { readSessionHeader } from "../../kernel/session/session-file-reading.ts";
-import { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
+import { readSessionSnapshot } from "./bot-remote-view.ts";
 
 type WatchStore = Pick<PersistentBotTeamStore, "listRoutines" | "listPendingRoutineDeliveries" | "deleteRoutine">;
 
@@ -26,16 +26,17 @@ export function owesWatchWork(store: WatchStore, sessionId: string, nowMs: numbe
 }
 
 /**
- * Whether the session file holds a wake it accepted and never ran: the store counts a fired watch's result delivered once
- * the session saved it, and a turn refused at its start (an outdated compile, an unusable model) leaves it pending in the
- * file, where only the session's own recovery, when it opens, runs it. Reads the whole file.
+ * The delivery ids of the wakes the session file holds accepted and never ran: the store counts a fired watch's result
+ * delivered once the session saved it, and a turn refused at its start (an outdated compile, an unusable model) leaves it
+ * pending in the file, where only the session's own recovery, when it opens, runs it. Reads the whole file.
  */
-export function holdsUnrunWake(file: string, agentDir: string): boolean {
-	const view = SessionManager.openReadOnly(file, agentDir);
-	// The session's own reading of its branch (`getPendingParentInputs`), on a view that opens nothing for writing.
-	const index = new ParentInputIndex();
-	for (const entry of view.getBranch()) index.apply(entry, (id) => view.getEntry(id));
-	return index.pendingInputs("turn").length > 0;
+export function unrunWakes(file: string, agentDir: string): readonly string[] {
+	return readSessionSnapshot(file, agentDir, (view) => {
+		// The session's own reading of its branch (`getPendingParentInputs`), on a view that opens nothing for writing.
+		const index = new ParentInputIndex();
+		for (const entry of view.getBranch()) index.apply(entry, (id) => view.getEntry(id));
+		return index.pendingInputs("turn").map((input) => input.metadata.deliveryId);
+	});
 }
 
 /**

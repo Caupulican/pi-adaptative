@@ -8,7 +8,7 @@ import { statSync } from "node:fs";
 import { judgeOwner } from "../../kernel/reliability/owner-identity.ts";
 import { getSessionHeaderCwd, readSessionHeader } from "../../kernel/session/session-file-reading.ts";
 import { findMostRecentSessionInDirs } from "../../kernel/session/session-listing.ts";
-import { SessionManager } from "../../kernel/session/session-manager.ts";
+import { type ReadonlySessionManager, SessionManager } from "../../kernel/session/session-manager.ts";
 import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { botHomeName } from "../agent-paths.ts";
@@ -39,15 +39,20 @@ export function botSessionOnDisk(agentDir: string, agentId: string): SavedBotSes
 /** How many times a transcript read is opened again when a write changed the file under it. */
 const SNAPSHOT_READS = 3;
 
-/**
- * A session transcript's messages, read without opening it for writing. A record still being written at its end is not
- * read; a write that lands while the file is read makes the read open it again (the file then holds the write whole), a
- * few times at most, after which the change is reported as the failure it is.
- */
+/** A session transcript's messages, read without opening it for writing (see {@link readSessionSnapshot}). */
 export function readTranscriptMessages(file: string, agentDir: string): AgentMessage[] {
+	return readSessionSnapshot(file, agentDir, (view) => view.buildSessionContext().messages);
+}
+
+/**
+ * What `read` finds in a session file opened without writing. A record still being written at its end is not read; a
+ * write that lands while the file is read makes the read open it again (the file then holds the write whole), a few
+ * times at most, after which the change is reported as the failure it is.
+ */
+export function readSessionSnapshot<T>(file: string, agentDir: string, read: (view: ReadonlySessionManager) => T): T {
 	for (let attempt = 1; ; attempt++) {
 		try {
-			return SessionManager.openReadOnly(file, agentDir).buildSessionContext().messages;
+			return read(SessionManager.openReadOnly(file, agentDir));
 		} catch (error) {
 			if (!(error instanceof FileSnapshotChangedError) || attempt >= SNAPSHOT_READS) throw error;
 		}
