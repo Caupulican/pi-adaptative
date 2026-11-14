@@ -291,20 +291,29 @@ export function botRosterState(session: AgentSession, agentId: string): string |
 	return session.listPersistentBots().find((bot) => bot.agentId === agentId)?.state;
 }
 
-/** Waits until the roster shows `state` for the bot: its session's turn started, queued or settled. */
+/**
+ * Waits until the roster shows `state` for the bot: its session's turn started, queued or settled. The poll ends with the
+ * wait, whether the state came or the deadline passed, so a failed wait leaves nothing spinning behind it.
+ */
 export async function waitForBotRosterState(
 	world: HarnessWorld,
 	session: AgentSession,
 	agentId: string,
 	state: string,
 ): Promise<void> {
-	await withDeadline(
-		world.trace,
-		`the roster shows ${agentId} as ${state}`,
-		(async () => {
-			while (botRosterState(session, agentId) !== state) await new Promise<void>((resolve) => setImmediate(resolve));
-		})(),
-	);
+	let ended = false;
+	try {
+		await withDeadline(
+			world.trace,
+			`the roster shows ${agentId} as ${state}`,
+			(async () => {
+				while (!ended && botRosterState(session, agentId) !== state)
+					await new Promise<void>((resolve) => setImmediate(resolve));
+			})(),
+		);
+	} finally {
+		ended = true;
+	}
 }
 
 /** The text of every file of the bot's own `sessions/` directory: the conversation as the bot's session wrote it. */
