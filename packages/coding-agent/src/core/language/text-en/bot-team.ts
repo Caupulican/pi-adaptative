@@ -151,6 +151,9 @@ export const BOT_TEAM = {
 	/** A bot's session holds live watches and could not be opened to keep them sampled. */
 	botWatchesNotResumed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session holds watches but could not be opened, so they are not checked until it is (${reason}).`,
+	/** The bot's session is owed watch work or waiting messages, and no open root session works where it does. */
+	botOwedWorkNoRoot: (agentId: string, directories: string) =>
+		`Bot ${agentId}: its session has watches or waiting messages, but no open session works in ${directories}, where it works; they wait until a session opens there.`,
 	/** Watches an earlier conversation of the bot armed, cancelled when it continues another (a watch is checked only by its own). */
 	botWatchesCancelled: (agentId: string, count: number) =>
 		`Bot ${agentId}: ${count} ${count === 1 ? "watch" : "watches"} armed in an earlier conversation of its ${count === 1 ? "was" : "were"} cancelled; it continues its newest conversation, and a watch is checked only by the conversation that armed it.`,

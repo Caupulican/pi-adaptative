@@ -44,6 +44,7 @@ import type { AgentMessage } from "../../kernel/types.ts";
 import { namedAgentIdentity } from "../agent-identity.ts";
 import { botHostLockFile, botSystemOneEvidenceDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
+import { realPathIdentity } from "../autonomy/path-scope.ts";
 import { boundSessionTurnSpend, unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
 import type {
 	BotOperatorMessageDispatchResult,
@@ -202,6 +203,8 @@ export class BotSessionHost {
 	private readonly entries = new Map<string, BotSessionEntry>();
 	/** Sessions being built, so two messages in a row build one. */
 	private readonly loading = new Map<string, Promise<BotSessionEntry>>();
+	/** Bots whose owed work no attached root can take up, with the directories the owner was told it waits on. */
+	private readonly unreachableTold = new Map<string, string>();
 	/** Sessions being closed: the next one of that bot opens once the file and the lock are free. */
 	private readonly closing = new Map<string, Promise<void>>();
 	private readonly listeners = new Set<(change: readonly string[]) => void>();
@@ -958,16 +961,26 @@ export class BotSessionHost {
 		// a profile's where its profile compiles to for that root.
 		let sender: BotSender | undefined;
 		try {
+			// The same directory however it was written (a symlink, a trailing separator, the case of a Windows drive).
+			const places = new Set(cwds.map(realPathIdentity));
 			const candidates = [...cwds.map((cwd) => this.ports.senderIn(cwd)), this.ports.sender()];
 			sender = candidates.find(
 				(candidate): candidate is BotSender =>
-					candidate !== undefined && cwds.includes(this.define(record, candidate).cwd),
+					candidate !== undefined && places.has(realPathIdentity(this.define(record, candidate).cwd)),
 			);
 		} catch (error) {
 			this.ports.warn(interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error)));
 			return;
 		}
-		if (!sender) return;
+		if (!sender) {
+			// Told once for the directories it waits on: every attach and every other host's change asks again.
+			const where = [...new Set(cwds)].join(", ");
+			if (this.unreachableTold.get(agentId) !== where)
+				this.ports.warn(interfaceText().botTeam.botOwedWorkNoRoot(agentId, where));
+			this.unreachableTold.set(agentId, where);
+			return;
+		}
+		this.unreachableTold.delete(agentId);
 		void this.open(agentId, sender).catch((error: unknown) => {
 			if (!readRemoteBotHost(agentDir, agentId, this.holder))
 				this.ports.warn(interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error)));

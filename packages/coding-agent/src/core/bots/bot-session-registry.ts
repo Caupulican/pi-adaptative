@@ -10,6 +10,7 @@
  * no bots: it gets a host of its own that no other session shares.
  */
 import { resolve } from "node:path";
+import { realPathIdentity } from "../autonomy/path-scope.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import {
@@ -123,7 +124,8 @@ function relayPorts(shared: AttachedRoots): BotSessionHostPorts {
 		agentDir: () => root().agentDir(),
 		sender: () => senderOf(shared, root()),
 		senderIn: (cwd) => {
-			const found = shared.roots.findLast((candidate) => candidate.cwd() === cwd);
+			const place = realPathIdentity(cwd);
+			const found = shared.roots.findLast((candidate) => realPathIdentity(candidate.cwd()) === place);
 			return found && senderOf(shared, found);
 		},
 		store: () => root().store(),

@@ -137,6 +137,8 @@ export const BOT_TEAM = {
 	botSessionsNotClosed: "As sessões dos bots não fecharam corretamente.",
 	botWatchesNotResumed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a sessão dele tem esperas ativas mas não pôde ser aberta, então elas não são verificadas até que seja (${reason}).`,
+	botOwedWorkNoRoot: (agentId: string, directories: string) =>
+		`Bot ${agentId}: a sessão dele tem esperas ou mensagens aguardando, mas nenhuma sessão aberta trabalha em ${directories}, onde ele trabalha; elas aguardam até uma sessão abrir ali.`,
 	botWatchesCancelled: (agentId: string, count: number) =>
 		`Bot ${agentId}: ${count} ${count === 1 ? "espera armada numa conversa anterior dele foi cancelada" : "esperas armadas numa conversa anterior dele foram canceladas"}; ele continua a conversa mais recente, e uma espera só é verificada pela conversa que a armou.`,
 	botChangeWhileRunning: (agentId: string) =>

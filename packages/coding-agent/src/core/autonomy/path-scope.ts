@@ -97,6 +97,11 @@ export function canonicalPathScopeIdentity(value: string): string {
 	return canonicalPathScopeIdentityWithApi(value, lexicalPathApi(value));
 }
 
+/** The identity of what a path reaches: its real path (symlinks followed), compared as {@link canonicalPathScopeIdentity}. */
+export function realPathIdentity(value: string): string {
+	return canonicalPathScopeIdentity(safeRealpathSync(value));
+}
+
 /**
  * Boundary-safe lexical containment for already-resolved paths and portable scope planning.
  * Windows drive and UNC paths compare case-insensitively; native POSIX paths remain case-sensitive.
