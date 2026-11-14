@@ -42,7 +42,6 @@ import type { AgentMessage } from "../../kernel/types.ts";
 import { namedAgentIdentity } from "../agent-identity.ts";
 import { botHostLockFile, botSystemOneEvidenceDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
-import { realPathIdentity } from "../autonomy/path-scope.ts";
 import { boundSessionTurnSpend, unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
 import type {
 	BotOperatorMessageDispatchResult,
@@ -78,7 +77,7 @@ import {
 } from "./bot-inbox.ts";
 import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
-import { cancelOtherSessionsWatches, owesWatchWork, UnrunWakeLedger } from "./bot-session-owed-work.ts";
+import { BotOwedWork, cancelOtherSessionsWatches, owesWatchWork } from "./bot-session-owed-work.ts";
 import {
 	type BotSessionDefinition,
 	botMayRunAsSession,
@@ -202,10 +201,8 @@ export class BotSessionHost {
 	private readonly entries = new Map<string, BotSessionEntry>();
 	/** Sessions being built, so two messages in a row build one. */
 	private readonly loading = new Map<string, Promise<BotSessionEntry>>();
-	/** Bots whose owed work waits on something (no root works where it does, its session did not open), with what the owner was told. */
-	private readonly owedWorkTold = new Map<string, string>();
-	/** The wakes the bots' session files hold unrun, and the ones a run was refused while holding (see `openIfOwed`). */
-	private readonly wakeLedger = new UnrunWakeLedger();
+	/** Opens the session of a bot owed work that no process hosts. */
+	private readonly owed: BotOwedWork;
 	/** Sessions being closed: the next one of that bot opens once the file and the lock are free. */
 	private readonly closing = new Map<string, Promise<void>>();
 	private readonly listeners = new Set<(change: readonly string[]) => void>();
@@ -241,12 +238,29 @@ export class BotSessionHost {
 				warn: (message) => ports.warn(message),
 				runsLocally: (agentId) => this.entries.has(agentId),
 				// A host that let a bot go leaves its watches and its inbox to no one until a process opens its session again.
-				hostChanged: (agentId) => this.openIfOwed(agentId),
+				hostChanged: (agentId) => this.owed.openIfOwed(agentId),
 				changed: (agentIds) => this.changedMany(agentIds),
 				inboxChanged: (agentId) => this.takeInbox(agentId),
 			},
 			this.holder,
 		);
+		this.owed = new BotOwedWork({
+			agentDir: () => ports.agentDir(),
+			store: () => ports.store(),
+			timers: () => this.idleTimers(),
+			warn: (message) => ports.warn(message),
+			stopped: () => this.stopped,
+			hostedHere: (agentId) => this.entries.has(agentId),
+			heldElsewhere: (agentId) => readRemoteBotHost(ports.agentDir(), agentId, this.holder) !== undefined,
+			savedSessionOf: (agentId) => this.view.savedSessionOf(agentId),
+			waiting: (agentId) => this.readInbox(agentId).waiting,
+			runsAsSession: (record) => this.runsAsSession(record),
+			definedCwd: (record, sender) => this.define(record, sender).cwd,
+			currentKey: (record, sender) => this.currentKey(record, sender),
+			sender: () => ports.sender(),
+			senderIn: (cwd) => ports.senderIn(cwd),
+			open: (agentId, sender) => this.open(agentId, sender),
+		});
 		this.inbox = new BotInboxDrain({
 			agentDir: () => ports.agentDir(),
 			timers: () => this.idleTimers(),
@@ -732,7 +746,7 @@ export class BotSessionHost {
 							this.admit(agentId, session?.model, definition, sender);
 						} catch (error) {
 							// The wakes it holds are refused with this run, so they are not what reopens it on the same definition.
-							this.wakeLedger.refused(agentId, definition.key, sessionManager);
+							this.owed.refused(agentId, definition.key, sessionManager);
 							throw error;
 						}
 					},
@@ -838,8 +852,7 @@ export class BotSessionHost {
 			};
 			session.startBackgroundInputs();
 			this.entries.set(agentId, entry);
-			this.owedWorkTold.delete(agentId);
-			this.wakeLedger.loaded(agentId);
+			this.owed.loaded(agentId);
 			this.publishState(entry);
 			this.armIdle(entry);
 			harnessLog.info("bots", "a bot session was loaded", () => ({ agentId, continued: newest !== null }));
@@ -931,79 +944,12 @@ export class BotSessionHost {
 		return live.count;
 	}
 
-	/**
-	 * Opens the bot's session when no process hosts it and it is owed: its home's session holds live watches or a fired
-	 * watch's wake not yet taken, its file holds a wake it accepted and never ran (a turn refused at its start: only its own
-	 * recovery runs it), or its inbox holds messages another process sent. A watch is sampled and its wake delivered
-	 * only by its own session, and an inbox is taken only by the host of the session, so a process that starts, sees a host
-	 * let the bot go or die, or rebuilds a session on a changed record takes them up again. A session with watches is opened
-	 * only by a process working in the directory it worked in (a watch's relative path reads against it); one owed only its
-	 * inbox (a bot whose session never ran is owed nothing else), also by a process working where a waiting message was
-	 * sent from. Another process that opened it first is not a failure.
-	 */
-	private openIfOwed(agentId: string): void {
-		const agentDir = this.ports.agentDir();
-		if (this.stopped || this.entries.has(agentId) || readRemoteBotHost(agentDir, agentId, this.holder)) return;
-		const record = this.ports.store().getBot(agentId);
-		if (!record || record.retired || !this.runsAsSession(record)) return;
-		// A bot whose session never ran (no file, or one naming no directory) holds no watch: it is owed only its inbox.
-		const saved = this.view.savedSessionOf(agentId);
-		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
-		const notResumed = (error: unknown) =>
-			this.tellOwedWorkWaits(agentId, interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error)));
-		const watching = worked !== undefined && owesWatchWork(this.ports.store(), worked.id, this.idleTimers().now());
-		let unrun = "";
-		try {
-			// The file, only when the store owes nothing; a file it cannot read leaves the rest of what it is owed.
-			if (worked && !watching) unrun = this.wakeLedger.read(agentId, worked.file, agentDir);
-		} catch (error) {
-			notResumed(error);
-		}
-		const waiting = !watching && botInboxWaiting(agentDir, agentId) ? this.readInbox(agentId).waiting : [];
-		if (!watching && !unrun && waiting.length === 0) return;
-		const cwds = [...(worked ? [worked.cwd] : []), ...waiting.map((item) => item.message.from.cwd)];
-		// It opens for a root its session works in one of those directories for: a bot of its own works where that root works,
-		// a profile's where its profile compiles to for that root.
-		let sender: BotSender | undefined;
-		try {
-			// The same directory however it was written (a symlink, a trailing separator, the case of a Windows drive).
-			const places = new Set(cwds.map(realPathIdentity));
-			const candidates = [...cwds.map((cwd) => this.ports.senderIn(cwd)), this.ports.sender()];
-			sender = candidates.find(
-				(candidate): candidate is BotSender =>
-					candidate !== undefined && places.has(realPathIdentity(this.define(record, candidate).cwd)),
-			);
-		} catch (error) {
-			notResumed(error);
-			return;
-		}
-		if (!sender) {
-			const where = [...new Set(cwds)].join(", ");
-			this.tellOwedWorkWaits(agentId, interfaceText().botTeam.botOwedWorkNoRoot(agentId, where));
-			return;
-		}
-		// Owed only wakes its session refused at a run's start on what defines it now: not opened again until either changes.
-		const onlyWakes = !watching && waiting.length === 0;
-		if (onlyWakes && this.wakeLedger.refusedAlready(agentId, this.currentKey(record, sender), unrun)) return;
-		void this.open(agentId, sender).catch((error: unknown) => {
-			// An open that failed refused no wake: the next change asks again.
-			this.wakeLedger.openFailed(agentId);
-			if (!readRemoteBotHost(agentDir, agentId, this.holder)) notResumed(error);
-		});
-	}
-
-	/** The owner is told once what the bot's owed work waits on: every attach and every other host's change asks again. */
-	private tellOwedWorkWaits(agentId: string, message: string): void {
-		if (this.owedWorkTold.get(agentId) !== message) this.ports.warn(message);
-		this.owedWorkTold.set(agentId, message);
-	}
-
-	/** Opens every bot whose own session is owed work that no process takes (see {@link openIfOwed}). */
+	/** Opens every bot whose own session is owed work that no process takes (see `BotOwedWork.openIfOwed`). */
 	openOwed(): void {
 		const bots = this.ports.store().listBots();
 		if (bots.length === 0) return;
 		this.view.watch();
-		for (const bot of bots) this.openIfOwed(bot.agentId);
+		for (const bot of bots) this.owed.openIfOwed(bot.agentId);
 	}
 
 	/** A turn ended with words: they are the bot's summary in the roster, and its time marks the chat as unread. */
@@ -1091,12 +1037,12 @@ export class BotSessionHost {
 		}
 		if (entry && entry.profileKey !== this.currentKey(record, entry.builtFor))
 			void this.close(record.agentId).then(
-				() => this.openIfOwed(record.agentId),
+				() => this.owed.openIfOwed(record.agentId),
 				(error: unknown) =>
 					this.ports.warn(interfaceText().botTeam.botSessionCloseFailed(record.agentId, errorText(error))),
 			);
 		// A closed session owed work the old record could not run (a wake refused at its start) is taken up on the new one.
-		else if (!entry) this.openIfOwed(record.agentId);
+		else if (!entry) this.owed.openIfOwed(record.agentId);
 	}
 
 	/** What defines the bot's session now; undefined when its profile no longer admits it as one (it is refused when opened). */
@@ -1120,7 +1066,7 @@ export class BotSessionHost {
 	release(agentId: string): void {
 		const entry = this.entries.get(agentId);
 		if (entry && this.isBusy(entry)) throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
-		this.wakeLedger.released(agentId);
+		this.owed.released(agentId);
 		const sessionId = entry?.session.sessionId ?? this.view.savedSessionOf(agentId)?.id;
 		if (sessionId !== undefined) {
 			const store = this.ports.store();

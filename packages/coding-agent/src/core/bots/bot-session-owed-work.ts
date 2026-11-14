@@ -1,8 +1,8 @@
 /**
  * What a bot's own session is owed, read from the store and its file without loading it: a live watch to sample, a firing
- * whose wake it has not taken, or a wake it accepted and never ran (a turn refused at its start). And the one rule that
- * keeps watches with the session that holds them: the watches the home's other sessions armed are cancelled when the bot
- * continues one session.
+ * whose wake it has not taken, or a wake it accepted and never ran (a turn refused at its start); and the opening of the
+ * session of a bot owed work that no process hosts (`BotOwedWork`). And the one rule that keeps watches with the session
+ * that holds them: the watches the home's other sessions armed are cancelled when the bot continues one session.
  */
 
 import { readdirSync, statSync } from "node:fs";
@@ -10,9 +10,14 @@ import { join } from "node:path";
 import { ParentInputIndex } from "../../kernel/session/parent-input-ledger.ts";
 import { readSessionHeader } from "../../kernel/session/session-file-reading.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
-import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import { realPathIdentity } from "../autonomy/path-scope.ts";
+import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
-import { readSessionSnapshot } from "./bot-remote-view.ts";
+import type { TimerPort } from "../util/timer-port.ts";
+import { type BotInboxItem, botInboxWaiting } from "./bot-inbox.ts";
+import { readSessionSnapshot, type SavedBotSession } from "./bot-remote-view.ts";
+import type { BotSender } from "./bot-session-host.ts";
 
 type WatchStore = Pick<PersistentBotTeamStore, "listRoutines" | "listPendingRoutineDeliveries" | "deleteRoutine">;
 
@@ -109,4 +114,138 @@ export function cancelOtherSessionsWatches(
 		for (const routine of store.listRoutines({ sessionId: other, scope: "own-watches" }))
 			if (store.deleteRoutine(routine.routineId, undefined, nowMs)) cancelled++;
 	return cancelled;
+}
+
+/** What the opening of owed sessions reads from its host. */
+export interface BotOwedWorkPorts {
+	agentDir(): string;
+	store(): PersistentBotTeamStore;
+	/** The host's timers: the store's watches are read on its clock. */
+	timers(): TimerPort;
+	warn(message: string): void;
+	/** Whether the host stopped: it opens nothing after. */
+	stopped(): boolean;
+	/** Whether the host runs the bot's session itself. */
+	hostedHere(agentId: string): boolean;
+	/** Whether another host holds the bot's lock now. */
+	heldElsewhere(agentId: string): boolean;
+	/** The bot's own session as its home saved it last. */
+	savedSessionOf(agentId: string): SavedBotSession | undefined;
+	/** The messages waiting in the bot's inbox, oldest first. */
+	waiting(agentId: string): readonly BotInboxItem[];
+	/** Whether the record answers in a session of its own (`BotSessionHost.runsAsSession`). */
+	runsAsSession(record: PersistentBotRecord): boolean;
+	/** The directory the record's session works in for `sender`; throws the owner's words when it cannot run as one. */
+	definedCwd(record: PersistentBotRecord, sender: BotSender): string;
+	/** What defines the record's session for `sender` now; undefined when it cannot run as one. */
+	currentKey(record: PersistentBotRecord, sender: BotSender): string | undefined;
+	/** The root attached last, and an attached root working in `cwd`. */
+	sender(): BotSender;
+	senderIn(cwd: string): BotSender | undefined;
+	/** Opens the bot's session for `sender`. */
+	open(agentId: string, sender: BotSender): Promise<unknown>;
+}
+
+function errorText(error: unknown): string {
+	return error instanceof Error ? error.message : String(error);
+}
+
+/**
+ * Opens the session of a bot owed work that no process hosts (see {@link BotOwedWork.openIfOwed}), and tells the owner,
+ * once for each cause, what the work waits on when it cannot be taken up here.
+ */
+export class BotOwedWork {
+	private readonly ports: BotOwedWorkPorts;
+	/** Bots whose owed work waits on something (no root works where it does, its session did not open), with what the owner was told. */
+	private readonly told = new Map<string, string>();
+	/** The wakes the bots' session files hold unrun, and the ones a run was refused while holding. */
+	private readonly wakes = new UnrunWakeLedger();
+
+	constructor(ports: BotOwedWorkPorts) {
+		this.ports = ports;
+	}
+
+	/** A run of the bot's session, built on `key`, was refused at its start while `manager` held these wakes. */
+	refused(agentId: string, key: string, manager: Pick<SessionManager, "getPendingParentInputs">): void {
+		this.wakes.refused(agentId, key, manager);
+	}
+
+	/** The bot's session loaded: what it was owed is its own now, and its file is read again when next asked. */
+	loaded(agentId: string): void {
+		this.told.delete(agentId);
+		this.wakes.loaded(agentId);
+	}
+
+	/** The bot was released (retired, or off the session path): nothing of it is kept. */
+	released(agentId: string): void {
+		this.wakes.released(agentId);
+	}
+
+	/**
+	 * Opens the bot's session when no process hosts it and it is owed: its home's session holds live watches or a fired
+	 * watch's wake not yet taken, its file holds a wake it accepted and never ran (a turn refused at its start: only its own
+	 * recovery runs it), or its inbox holds messages another process sent. A watch is sampled and its wake delivered
+	 * only by its own session, and an inbox is taken only by the host of the session, so a process that starts, sees a host
+	 * let the bot go or die, or rebuilds a session on a changed record takes them up again. A session with watches is opened
+	 * only by a process working in the directory it worked in (a watch's relative path reads against it); one owed only its
+	 * inbox (a bot whose session never ran is owed nothing else), also by a process working where a waiting message was
+	 * sent from. Another process that opened it first is not a failure.
+	 */
+	openIfOwed(agentId: string): void {
+		const { ports } = this;
+		const agentDir = ports.agentDir();
+		if (ports.stopped() || ports.hostedHere(agentId) || ports.heldElsewhere(agentId)) return;
+		const record = ports.store().getBot(agentId);
+		if (!record || record.retired || !ports.runsAsSession(record)) return;
+		// A bot whose session never ran (no file, or one naming no directory) holds no watch: it is owed only its inbox.
+		const saved = ports.savedSessionOf(agentId);
+		const worked = saved?.cwd === undefined ? undefined : { ...saved, cwd: saved.cwd };
+		const notResumed = (error: unknown) =>
+			this.tellWaits(agentId, interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error)));
+		const watching = worked !== undefined && owesWatchWork(ports.store(), worked.id, ports.timers().now());
+		let unrun = "";
+		try {
+			// The file, only when the store owes nothing; a file it cannot read leaves the rest of what it is owed.
+			if (worked && !watching) unrun = this.wakes.read(agentId, worked.file, agentDir);
+		} catch (error) {
+			notResumed(error);
+		}
+		const waiting = !watching && botInboxWaiting(agentDir, agentId) ? ports.waiting(agentId) : [];
+		if (!watching && !unrun && waiting.length === 0) return;
+		const cwds = [...(worked ? [worked.cwd] : []), ...waiting.map((item) => item.message.from.cwd)];
+		// It opens for a root its session works in one of those directories for: a bot of its own works where that root works,
+		// a profile's where its profile compiles to for that root.
+		let sender: BotSender | undefined;
+		try {
+			// The same directory however it was written (a symlink, a trailing separator, the case of a Windows drive).
+			const places = new Set(cwds.map(realPathIdentity));
+			const candidates = [...cwds.map((cwd) => ports.senderIn(cwd)), ports.sender()];
+			sender = candidates.find(
+				(candidate): candidate is BotSender =>
+					candidate !== undefined && places.has(realPathIdentity(ports.definedCwd(record, candidate))),
+			);
+		} catch (error) {
+			notResumed(error);
+			return;
+		}
+		if (!sender) {
+			const where = [...new Set(cwds)].join(", ");
+			this.tellWaits(agentId, interfaceText().botTeam.botOwedWorkNoRoot(agentId, where));
+			return;
+		}
+		// Owed only wakes its session refused at a run's start on what defines it now: not opened again until either changes.
+		const onlyWakes = !watching && waiting.length === 0;
+		if (onlyWakes && this.wakes.refusedAlready(agentId, ports.currentKey(record, sender), unrun)) return;
+		void ports.open(agentId, sender).catch((error: unknown) => {
+			// An open that failed refused no wake: the next change asks again.
+			this.wakes.openFailed(agentId);
+			if (!ports.heldElsewhere(agentId)) notResumed(error);
+		});
+	}
+
+	/** The owner is told once what the bot's owed work waits on: every attach and every other host's change asks again. */
+	private tellWaits(agentId: string, message: string): void {
+		if (this.told.get(agentId) !== message) this.ports.warn(message);
+		this.told.set(agentId, message);
+	}
 }
