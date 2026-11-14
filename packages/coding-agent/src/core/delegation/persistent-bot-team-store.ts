@@ -61,6 +61,7 @@ import { cleanRedactBound } from "../security/secret-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isRecordObject } from "../util/value-guards.ts";
 import { BOT_MEMORY_BLOCK_HEADER } from "./bot-chat-text.ts";
+import { type BotMemoryRuntime, botMemoryClosingWords } from "./bot-memory-closing.ts";
 import { appendBoundedFile, createMemoryHeader } from "./bot-memory-files.ts";
 import { assertBotId, isBotId } from "./bot-runtime-bindings.ts";
 import {
@@ -2135,6 +2136,7 @@ export class PersistentBotTeamStore {
 		agentId: string,
 		teamId?: string,
 		teamIncarnationId?: string,
+		runtime: BotMemoryRuntime = "worker",
 	): {
 		promptBlock: string;
 		memoryDir: string;
@@ -2234,9 +2236,7 @@ export class PersistentBotTeamStore {
 			);
 		}
 
-		lines.push(
-			"\nRead your memory blackboard and your team blackboards for continuity; they are outside your workspace, so you cannot edit them. Put what should be remembered in your final report. You can also use `zoom` to inspect root <chat> message IDs if needed.",
-		);
+		lines.push(botMemoryClosingWords(runtime));
 
 		return {
 			promptBlock: lines.join("\n"),

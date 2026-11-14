@@ -582,7 +582,8 @@ export class BotSessionHost {
 						profile.displayName,
 						definition.soul,
 						agentId,
-						this.ports.store().composeBotUnifiedMemoryContext(agentId).promptBlock,
+						this.ports.store().composeBotUnifiedMemoryContext(agentId, undefined, undefined, "session")
+							.promptBlock,
 					),
 					tools: [...definition.tools],
 					privatePathScope: definition.privatePathScope,
