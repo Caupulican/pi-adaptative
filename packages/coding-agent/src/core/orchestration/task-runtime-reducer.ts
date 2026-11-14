@@ -22,6 +22,7 @@ import type { PlanRuntimeState } from "../plan/plan-graph.ts";
 import { reducePlanEvent } from "../plan/plan-reducer.ts";
 import { assertAttemptAgentBinding, nativeAgentIdForAttempt } from "./attempt-agent-identity.ts";
 import { selectedTaskAttempt } from "./attempt-ordering.ts";
+import { nextRetryStateFromValue } from "./attempt-retry-state.ts";
 import { attemptUsageIncrease, EMPTY_ATTEMPT_USAGE } from "./attempt-usage.ts";
 import {
 	type AttemptUsageAccounting,
@@ -74,7 +75,6 @@ import {
 	number,
 	objectiveFromPayload,
 	resultFromPayload,
-	retryStateFromValue,
 	runningModelFromValue,
 	string,
 	taskFromPayload,
@@ -1795,10 +1795,7 @@ export function reduceOrchestrationEvent(
 			const retry =
 				event.payload.retry === undefined
 					? undefined
-					: retryStateFromValue(event.payload.retry, "attempt.suspended.retry");
-			if (retry && retry.retriesUsed !== (attempt.retry?.retriesUsed ?? 0) + 1) {
-				throw new DurableTaskRuntimeError(`Attempt '${attemptId}' retry count is not monotonic.`);
-			}
+					: nextRetryStateFromValue(event.payload.retry, attempt.retry, attemptId);
 			if (retry && Date.parse(retry.notBefore) <= Date.parse(event.occurredAt)) {
 				throw new DurableTaskRuntimeError("Retry not-before deadline must be after the suspension event.");
 			}

@@ -506,6 +506,11 @@ export interface AttemptRetryState {
 	retriesUsed: number;
 	/** Earliest instant at which the suspended attempt may receive a fresh lease. */
 	notBefore: string;
+	/**
+	 * Of `retriesUsed`, the retries that waited out a subscription's usage reset; absent when none did. They do not spend
+	 * the attempt ceiling: the work did not fail, its plan's usage window was used up.
+	 */
+	resetWaits?: number;
 }
 
 /** Complete cumulative active usage for one execution attempt. Restart downtime is never included. */

@@ -6009,6 +6009,7 @@ export class WorkerDelegationController {
 					}
 					const retry = this.recovery.scheduleAttemptRetry({
 						...(failover ? { failover: true } : {}),
+						subscription: this.deps.getModelRegistry().isUsingSubscription(model),
 						laneId: startedRecord.laneId,
 						agentId,
 						ownerId: this.agentControl.getProcessOwnerId(),

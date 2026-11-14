@@ -18,6 +18,11 @@ import {
  * Retries are deliberately evidence-gated: only failures whose recorded detail classifies as
  * transient (network, 5xx, rate limits) are retried. A missing detail or an unknown
  * classification never retries — an undiagnosed failure repeated is spend without evidence.
+ *
+ * A subscription model whose plan's usage is used up is not a failure of the work: its limit is the plan's usage window,
+ * not money. When the failure states when the usage resets (the provider's own retry-after, or the reset the provider
+ * admission gate recorded and refused with), the attempt waits for that reset however long it is and resumes on its own,
+ * without spending the attempt ceiling. The same refusal on a metered model stays terminal: that limit is money.
  */
 export const DEFAULT_WORKER_TASK_ATTEMPTS = 2;
 
@@ -28,7 +33,9 @@ export const WORKER_TASK_RETRY_POLICY: RetryPolicy = {
 	jitterRatio: 0.2,
 };
 
-export type WorkerRetryDecision = { retry: true; reason: string; delayMs: number } | { retry: false; reason: string };
+export type WorkerRetryDecision =
+	/** `usageReset`: the delay waits out a subscription's usage reset and does not spend the attempt ceiling. */
+	{ retry: true; reason: string; delayMs: number; usageReset?: true } | { retry: false; reason: string };
 
 export function evaluateWorkerRetry(args: {
 	laneStatus: string;
@@ -37,6 +44,10 @@ export function evaluateWorkerRetry(args: {
 	provider: string;
 	/** Restart-durable ladder retries already consumed for this attempt. */
 	retriesUsed: number;
+	/** Of `retriesUsed`, the ones that waited out a usage reset; they do not count against `maxAttempts`. */
+	resetWaits?: number;
+	/** The attempt's model is reached through a subscription, whose limit is its plan's usage windows. */
+	subscription?: boolean;
 	/** Grant budget ceiling for total attempts; defaults to {@link DEFAULT_WORKER_TASK_ATTEMPTS}. */
 	maxAttempts?: number;
 	/**
@@ -58,12 +69,23 @@ export function evaluateWorkerRetry(args: {
 		(classified.reason === "billing_or_quota" ||
 			classified.reason === "model_unsupported" ||
 			classified.reason === "auth");
+	const resetAfterMs = classified.retryAfterMs;
+	if (
+		!failover &&
+		args.subscription === true &&
+		resetAfterMs !== undefined &&
+		(classified.reason === "billing_or_quota" ||
+			(classified.reason === "rate_limit" && resetAfterMs > WORKER_TASK_RETRY_POLICY.maxDelayMs))
+	) {
+		return { retry: true, reason: "usage_reset", delayMs: resetAfterMs, usageReset: true };
+	}
 	const attemptsAllowed = args.maxAttempts ?? DEFAULT_WORKER_TASK_ATTEMPTS;
-	if (!failover && args.retriesUsed + 1 >= attemptsAllowed) return { retry: false, reason: "attempts_exhausted" };
+	const retriesSpent = args.retriesUsed - (args.resetWaits ?? 0);
+	if (!failover && retriesSpent + 1 >= attemptsAllowed) return { retry: false, reason: "attempts_exhausted" };
 	if (!classified.retryable && !failover) return { retry: false, reason: `not_retryable_${classified.reason}` };
 	let delayMs: number;
 	try {
-		delayMs = computeRetryDelayMs(WORKER_TASK_RETRY_POLICY, args.retriesUsed + 1, {
+		delayMs = computeRetryDelayMs(WORKER_TASK_RETRY_POLICY, retriesSpent + 1, {
 			...(classified.retryAfterMs !== undefined && !failover ? { retryAfterMs: classified.retryAfterMs } : {}),
 		});
 	} catch (error) {

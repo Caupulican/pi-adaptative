@@ -76,7 +76,7 @@ const PROVIDER_NO_RETRY = /Provider retry directive:\s*do not retry\./i;
 const WATCHDOG_WRAPPER = /stream (?:ended without terminal event|aborted before terminal event): ([\s\S]+)$/;
 
 const RETRY_DELAY_TEXT =
-	/(?:retry(?:\s+your\s+request)?|try(?:\s+your\s+request)?\s+again)\s+(?:after|in)\s+((?:\d+(?:\.\d+)?\s*(?:milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\s*)+)/gi;
+	/(?:retry(?:\s+your\s+request)?|try(?:\s+your\s+request)?\s+again)\s+(?:after|in)\s+~?\s*((?:\d+(?:\.\d+)?\s*(?:milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)\s*)+)/gi;
 const RETRY_DELAY_JSON = /"retryDelay"\s*:\s*"([^"]+)"/gi;
 const RETRY_DURATION_COMPONENT =
 	/(\d+(?:\.\d+)?)\s*(milliseconds?|ms|seconds?|secs?|s|minutes?|mins?|m|hours?|hrs?|h)(?![A-Za-z])/gi;

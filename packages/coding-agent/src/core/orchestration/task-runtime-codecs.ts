@@ -17,6 +17,7 @@ import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { contextOriginFromValue, optionalPrunedTurns } from "./agent-binding-carry-codec.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
 import { assertAttemptAgentBinding } from "./attempt-agent-identity.ts";
+import { retryStateFromValue } from "./attempt-retry-state.ts";
 import { addAttemptUsage, EMPTY_ATTEMPT_USAGE, validateAttemptUsageSnapshot } from "./attempt-usage.ts";
 import {
 	type AttemptUsageAccounting,
@@ -24,7 +25,7 @@ import {
 	type AttemptUsageGenerationIdentity,
 	totalAttemptGenerationUsage,
 } from "./attempt-usage-generations.ts";
-import { dispatchIdentifier, number, string } from "./codec-primitives.ts";
+import { dispatchIdentifier, MAX_DATE_EPOCH_MS, number, string } from "./codec-primitives.ts";
 import {
 	type AcceptanceCriterion,
 	AGENT_BINDING_STATUSES,
@@ -35,7 +36,6 @@ import {
 	ATTEMPT_STATUSES,
 	type AttemptCheckpoint,
 	type AttemptLease,
-	type AttemptRetryState,
 	type AttemptStatus,
 	type AttemptUsageSnapshot,
 	dispatchTextStatesBrief,
@@ -124,9 +124,7 @@ import {
 } from "./worker-receipt-publication.ts";
 import { decodeWorkerResultReceipts } from "./worker-result-receipts.ts";
 
-export { dispatchIdentifier, number, string } from "./codec-primitives.ts";
-
-export const MAX_DATE_EPOCH_MS = 8_640_000_000_000_000;
+export { dispatchIdentifier, MAX_DATE_EPOCH_MS, number, string } from "./codec-primitives.ts";
 
 export function projectionFromSnapshot(projection: JsonObject, throughOrdinal: number): TaskRuntimeProjection {
 	const label = "orchestration projection snapshot";
@@ -1062,26 +1060,6 @@ export function runningModelFromValue(value: unknown, label: string): Orchestrat
 	} catch {
 		throw new DurableTaskRuntimeError(`${label} is invalid.`);
 	}
-}
-
-export function retryStateFromValue(value: unknown, label: string): AttemptRetryState {
-	const retry = record(value, label);
-	const unsupportedField = Object.keys(retry).find((field) => field !== "retriesUsed" && field !== "notBefore");
-	if (unsupportedField) throw new DurableTaskRuntimeError(`${label}.${unsupportedField} is unsupported.`);
-	const retriesUsed = number(retry.retriesUsed, `${label}.retriesUsed`);
-	if (!Number.isSafeInteger(retriesUsed) || retriesUsed < 1) {
-		throw new DurableTaskRuntimeError(`${label}.retriesUsed must be a positive safe integer.`);
-	}
-	const notBefore = string(retry.notBefore, `${label}.notBefore`);
-	const notBeforeMs = Date.parse(notBefore);
-	if (
-		!Number.isFinite(notBeforeMs) ||
-		Math.abs(notBeforeMs) > MAX_DATE_EPOCH_MS ||
-		new Date(notBeforeMs).toISOString() !== notBefore
-	) {
-		throw new DurableTaskRuntimeError(`${label}.notBefore is invalid.`);
-	}
-	return { retriesUsed, notBefore };
 }
 
 export function checkpointFromPayload(payload: JsonObject): AttemptCheckpoint {

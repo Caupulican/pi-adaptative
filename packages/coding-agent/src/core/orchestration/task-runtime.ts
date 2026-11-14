@@ -20,6 +20,7 @@ import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { AtomicFileLockOptions } from "../util/atomic-file.ts";
 import { deepFreeze } from "../util/deep-freeze.ts";
 import { createAgentIdentity } from "./agent-resume.ts";
+import { nextRetryStateFromValue } from "./attempt-retry-state.ts";
 import { beginAttemptUsageGeneration, recordAttemptGenerationUsage } from "./attempt-usage-generations.ts";
 import {
 	type AgentBindingContract,
@@ -68,7 +69,6 @@ import {
 	dispatchIdentifierArray,
 	executionGrantFromValue,
 	MAX_DATE_EPOCH_MS,
-	retryStateFromValue,
 	taskFromValue,
 	usageFromPayload,
 	usageGenerationIdentityFromValue,
@@ -1114,14 +1114,9 @@ export class DurableTaskRuntime {
 			throw new DurableTaskRuntimeError(`Attempt '${args.attemptId}' lease or fencing token is stale.`);
 		}
 		if (!args.reasonCode.trim()) throw new DurableTaskRuntimeError("Suspension reason is required.");
-		const retry = args.retry ? retryStateFromValue(args.retry, "attempt.suspended.retry") : undefined;
-		if (retry) {
-			if (retry.retriesUsed !== (attempt.retry?.retriesUsed ?? 0) + 1) {
-				throw new DurableTaskRuntimeError(`Attempt '${args.attemptId}' retry count is not monotonic.`);
-			}
-			if (Date.parse(retry.notBefore) <= this.now()) {
-				throw new DurableTaskRuntimeError("Retry not-before deadline must be in the future.");
-			}
+		const retry = args.retry ? nextRetryStateFromValue(args.retry, attempt.retry, args.attemptId) : undefined;
+		if (retry && Date.parse(retry.notBefore) <= this.now()) {
+			throw new DurableTaskRuntimeError("Retry not-before deadline must be in the future.");
 		}
 		this.commit({
 			type: "attempt.suspended",

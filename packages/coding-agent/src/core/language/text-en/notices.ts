@@ -425,6 +425,11 @@ export const NOTICES = {
 		haltedPinned: (model: string) =>
 			`Provider quota/limit reached for ${model}: this session stays on its model; wait for the limit window, or re-send to retry`,
 	},
+	/** A subscription's usage is used up: the work waits for the recorded reset (`at`, an ISO instant) and resumes on its own. */
+	usageReset: {
+		workerWaits: (laneId: string, at: string) =>
+			`Worker ${laneId}: its subscription's usage is used up; it resumes on its own when the usage resets (${at}).`,
+	},
 	/** What the collaboration extension reports when its own steps fail: the error text follows. */
 	collaboration: {
 		controlHandoffFailed: (error: string) => `Collaboration control handoff failed: ${error}`,

@@ -7,6 +7,9 @@
 import { MAX_ORCHESTRATION_IDENTIFIER_LENGTH } from "./contracts.ts";
 import { DurableTaskRuntimeError } from "./task-runtime-state.ts";
 
+/** The largest epoch milliseconds a JavaScript Date holds; a durable instant past it is invalid. */
+export const MAX_DATE_EPOCH_MS = 8_640_000_000_000_000;
+
 export function string(value: unknown, label: string): string {
 	if (typeof value !== "string" || value.length === 0) throw new DurableTaskRuntimeError(`${label} is required.`);
 	return value;

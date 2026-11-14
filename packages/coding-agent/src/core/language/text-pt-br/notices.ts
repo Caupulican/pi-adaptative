@@ -373,6 +373,10 @@ export const NOTICES = {
 		haltedPinned: (model: string) =>
 			`O provedor atingiu a cota/limite de ${model}: esta sessão fica no modelo dela; espere a janela do limite ou reenvie para tentar de novo`,
 	},
+	usageReset: {
+		workerWaits: (laneId: string, at: string) =>
+			`Worker ${laneId}: o uso da assinatura dele acabou; ele retoma sozinho quando o uso for renovado (${at}).`,
+	},
 	/** O que a extensão de colaboração relata quando os próprios passos falham: o texto do erro vem em seguida. */
 	collaboration: {
 		controlHandoffFailed: (error: string) => `Falha no handoff de controle da colaboração: ${error}`,

@@ -6,6 +6,7 @@ import { retainedToolInvocation } from "../../kernel/tool-invocation-receipt.ts"
 import type { WorkerCommandReceipt } from "../autonomy/contracts.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import { isPathWithinScope } from "../autonomy/path-scope.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { reconcileAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { AttemptUsageSnapshot, ExecutionGrant, ResourcePointer, RiskBudget } from "../orchestration/contracts.ts";
 import { planReviewAnchorOfTask } from "../orchestration/plan-review-subjects.ts";
@@ -323,20 +324,25 @@ export class WorkerRecoveryCoordinator {
 		maxAttempts?: number;
 		/** The attempt's contract has another usable candidate for a quota failure (see evaluateWorkerRetry). */
 		failover?: boolean;
+		/** The attempt's model is reached through a subscription (see evaluateWorkerRetry). */
+		subscription?: boolean;
 	}): WorkerRetryScheduleResult {
 		if (this.disposed) return { scheduled: false, reason: "disposed" };
 		const attempt = this.options.lifecycle.getActiveAttempt(args.laneId);
 		const record = this.options.lifecycle.getRecord(args.laneId);
 		if (!attempt || !record) return { scheduled: false, reason: "attempt_missing" };
 		const retriesUsed = attempt.retry?.retriesUsed ?? 0;
+		const resetWaits = attempt.retry?.resetWaits ?? 0;
 		const decision = evaluateWorkerRetry({
 			laneStatus: args.outcome.laneStatus,
 			reasonCode: args.outcome.reasonCode,
 			...(args.outcome.reasonDetail ? { reasonDetail: args.outcome.reasonDetail } : {}),
 			provider: args.provider,
 			retriesUsed,
+			resetWaits,
 			...(args.maxAttempts !== undefined ? { maxAttempts: args.maxAttempts } : {}),
 			...(args.failover ? { failover: true } : {}),
+			...(args.subscription ? { subscription: true } : {}),
 		});
 		if (!decision.retry) return { scheduled: false, reason: decision.reason };
 		if (decision.reason === "rate_limit" || decision.reason === "overloaded") {
@@ -353,6 +359,7 @@ export class WorkerRecoveryCoordinator {
 		}
 		if (this.disposed) return { scheduled: false, reason: "disposed" };
 		const nextRetriesUsed = retriesUsed + 1;
+		const nextResetWaits = resetWaits + (decision.usageReset ? 1 : 0);
 		const notBefore = new Date(this.now() + decision.delayMs).toISOString();
 		let suspended: AttemptRuntimeState;
 		try {
@@ -361,7 +368,11 @@ export class WorkerRecoveryCoordinator {
 				agentId: args.agentId,
 				ownerId: args.ownerId,
 				reasonCode: `retry_scheduled:${decision.reason}`,
-				retry: { retriesUsed: nextRetriesUsed, notBefore },
+				retry: {
+					retriesUsed: nextRetriesUsed,
+					notBefore,
+					...(nextResetWaits > 0 ? { resetWaits: nextResetWaits } : {}),
+				},
 			});
 		} catch (error) {
 			this.warnBestEffort(
@@ -370,7 +381,9 @@ export class WorkerRecoveryCoordinator {
 			return { scheduled: false, reason: "retry_suspension_failed" };
 		}
 		this.warnBestEffort(
-			`Worker ${args.laneId} failed (${decision.reason}); retrying from the persisted transcript in ${Math.ceil(decision.delayMs / 1000)}s (attempt ${nextRetriesUsed + 1}).`,
+			decision.usageReset
+				? interfaceText().notices.usageReset.workerWaits(args.laneId, notBefore)
+				: `Worker ${args.laneId} failed (${decision.reason}); retrying from the persisted transcript in ${Math.ceil(decision.delayMs / 1000)}s (attempt ${nextRetriesUsed + 1}).`,
 		);
 		this.enqueueOrDeferRetry(record, suspended, args.request, args.request.verificationOfTaskId !== undefined);
 		return { scheduled: true, record, retriesUsed: nextRetriesUsed, notBefore };
