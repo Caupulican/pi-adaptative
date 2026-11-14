@@ -11,7 +11,8 @@
  * directory under a worker's private-path scope, with a settings manager of its own over the main session's settings
  * storage. It is a child session (no memory writes, no channels, and of the routines only the watches it arms itself)
  * that runs System One as the main session does (on or off, provider, transport), keeping its System One evidence in its
- * home; its edge grants are its own branch's plus the settings'. Its tools are the read tools, System One's tool and a
+ * home; it is a session of its own, so its edge grants are its own conversation's plus the settings', never another
+ * session's. Its tools are the read tools, System One's tool and a
  * shell, plus the file tools and python when the record grants `canWrite`; a read-only bot's shell runs only commands the
  * read-only shell line admits. Each turn is bounded by the worker spend bound and its usage is reported to the main
  * session's cost view. Subagents, routines of its own and goals belong to a later phase.

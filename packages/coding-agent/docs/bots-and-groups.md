@@ -32,8 +32,12 @@ in every execution mode). A turn is bounded by `workerDelegation.maxUsd` (and th
 set, and what each turn spends is added to the main session's cost. Its tool loop is supervised as a worker's is: repeated broad validation with no new change is steered back to the work, and a turn System One judges stalled or off its message is steered, redirected or stopped; the directive shows in its chat. It reads the settings the main session reads, again each time the main session changes them, and runs
 System One as the main session does at each use (on or off, the same provider and connection; turning System One off or on in settings turns it off or on for a loaded bot too): your messages to it are judged as your
 messages to the main session are, it holds the `systemone` tool, and its System One evidence is kept in its home
-(`typesafe-reviews/`). Its edge grants are its own conversation's plus your settings'; a grant you typed in the main
-session's conversation does not reach it (a bot running as a worker takes the main session's grants). It is loaded on its first message, kept
+(`typesafe-reviews/`). A bot is a session of its own, so its edge grants are its own conversation's plus your settings'; no other session's
+conversation counts, the main session's included (a bot running as a worker takes the main session's grants). To give
+a bot standing authority, grant the class in settings (`edge.allow`, which stands for every session and every bot); to
+authorize one action, say so in the bot's chat, where System One reads your words as it does in the main session (such a
+grant is not standing). `/edge allow` is a command of the main session: typed while a bot's chat is open, it still grants
+the main session's conversation, since a bot's chat takes no slash command. It is loaded on its first message, kept
 while a turn runs or input is queued, and closed after ten idle minutes or
 when the session that hosts it ends. Its answers are read in its chat (the roster marks them unread); they do not reach the
 orchestrator as a worker's terminal does.
