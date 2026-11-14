@@ -77,6 +77,7 @@ export const SMALL_COMMANDS = {
 			external: "parece texto externo copiado",
 			identity: "não é uma descrição de quem é o assistente",
 		},
+		unsettledReason: "a revisão não conseguiu decidir sobre o texto",
 	},
 	systemPrompt: {
 		usage: "Uso: /sysprompt [default|reset]",

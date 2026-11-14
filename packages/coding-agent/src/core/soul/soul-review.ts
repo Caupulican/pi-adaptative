@@ -4,7 +4,7 @@ import { DecisionEngineRouter } from "../decision/engine-router.ts";
 import { settledBoolean } from "../decision/evaluation.ts";
 import type { NoulDirection } from "../decision/noul.ts";
 import { createDecisionProgram } from "../decision/program.ts";
-import { interfaceText } from "../language/interface-text.ts";
+import { type InterfaceText, interfaceText } from "../language/interface-text.ts";
 import {
 	SOUL_ADVERSE_CLAUSES,
 	SOUL_REVIEW_UNSETTLED_REASON,
@@ -140,15 +140,29 @@ export async function reviewSoulText(
 }
 
 /**
- * Why a review rejected the text, as the agent is told it when its write is refused: the clause of each adverse
- * decision, joined. A model reads this, so it never follows the interface language.
+ * Why a review rejected the text: the clause of each adverse decision, joined. In English by default, as the agent is
+ * told it when its write is refused; the owner's notice of a rejected held write words it per catalogue
+ * ({@link soulWriteRejected}).
  */
-export function soulReviewAdverseClauses(outcome: SoulReviewOutcome): string {
-	if (outcome.kind !== "adverse") return SOUL_REVIEW_UNSETTLED_REASON;
+export function soulReviewAdverseClauses(
+	outcome: SoulReviewOutcome,
+	words: Pick<InterfaceText["smallCommands"]["soul"], "adverseClauses" | "unsettledReason"> = {
+		adverseClauses: SOUL_ADVERSE_CLAUSES,
+		unsettledReason: SOUL_REVIEW_UNSETTLED_REASON,
+	},
+): string {
+	if (outcome.kind !== "adverse") return words.unsettledReason;
 	return outcome.findings
 		.filter((finding) => finding.answer === "adverse")
-		.map((finding) => SOUL_ADVERSE_CLAUSES[finding.id])
+		.map((finding) => words.adverseClauses[finding.id])
 		.join("; ");
+}
+
+/** The soul notice of a held write the review rejected, its clauses worded by the same catalogue as the sentence. */
+export function soulWriteRejected(
+	outcome: SoulReviewOutcome,
+): (words: InterfaceText["notices"]["soul"], text: InterfaceText) => string {
+	return (words, text) => words.writeRejected(soulReviewAdverseClauses(outcome, text.smallCommands.soul));
 }
 
 /** One line per decision for the owner-facing review listing. */

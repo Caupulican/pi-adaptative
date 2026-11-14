@@ -4,7 +4,7 @@
  * tier names, the command names and the words the owner wrote into the soul are the same in every language.
  */
 
-import { SOUL_ADVERSE_CLAUSES } from "../../soul/soul-review-clauses.ts";
+import { SOUL_ADVERSE_CLAUSES, SOUL_REVIEW_UNSETTLED_REASON } from "../../soul/soul-review-clauses.ts";
 
 export const SMALL_COMMANDS = {
 	fastMode: {
@@ -72,6 +72,8 @@ export const SMALL_COMMANDS = {
 			identity: "Self-description",
 		},
 		adverseClauses: SOUL_ADVERSE_CLAUSES,
+		/** Why a review that settled nothing rejected the text, where an adverse review gives its clauses. */
+		unsettledReason: SOUL_REVIEW_UNSETTLED_REASON,
 	},
 	systemPrompt: {
 		usage: "Usage: /sysprompt [default|reset]",

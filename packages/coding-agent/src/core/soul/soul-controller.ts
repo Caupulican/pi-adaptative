@@ -26,7 +26,7 @@ import {
 	soulSha256,
 } from "./soul-history.ts";
 import { clearSoulHold, readSoulHold, type SoulHold, type SoulHoldRead, writeSoulHold } from "./soul-hold.ts";
-import { reviewSoulText, type SoulReviewOutcome, soulReviewAdverseClauses } from "./soul-review.ts";
+import { reviewSoulText, type SoulReviewOutcome, soulReviewAdverseClauses, soulWriteRejected } from "./soul-review.ts";
 import { type SoulRevision, SoulWatch } from "./soul-watch.ts";
 
 /**
@@ -129,8 +129,8 @@ const CLOSE_LOCK_WARNING =
 	"The soul.md change no review settled could not be reverted at close because the soul lock is held elsewhere; it stays on disk unreviewed.";
 
 type SoulNoticeScope = "write" | "change";
-/** One sentence of the soul notices, worded by the catalogue it is given (`notices.soul`). */
-type SoulNoticeLine = (words: InterfaceText["notices"]["soul"]) => string;
+/** One sentence of the soul notices, worded by the catalogue it is given (`notices.soul`, and the rest of `catalogue`). */
+type SoulNoticeLine = (words: InterfaceText["notices"]["soul"], catalogue: InterfaceText) => string;
 
 /** The deterministic screen and the soul review of a document already on disk. */
 type SoulVerdict =
@@ -995,7 +995,7 @@ export class SoulController {
 			return;
 		}
 		this.record(held.bytes, "block");
-		this.endHeld(held, "write-rejected", (words) => words.writeRejected(soulReviewAdverseClauses(outcome)), false);
+		this.endHeld(held, "write-rejected", soulWriteRejected(outcome), false);
 	}
 
 	/**
@@ -1058,7 +1058,7 @@ export class SoulController {
 	private tell(scope: SoulNoticeScope, reason: string, line: SoulNoticeLine): void {
 		if (this.told.get(scope) === reason) return;
 		this.told.set(scope, reason);
-		const state = wordedNotice(reason, (words) => line(words.notices.soul));
+		const state = wordedNotice(reason, (catalogue) => line(catalogue.notices.soul, catalogue));
 		if (!this.deps.observeHarnessNotice("soul-review", () => ({ scope, state })))
 			this.deps.emitWarning(state.ownerText);
 	}

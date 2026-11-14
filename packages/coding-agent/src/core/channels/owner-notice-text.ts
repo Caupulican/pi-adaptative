@@ -146,6 +146,6 @@ export function nameableSenderId(
 	senderIds: ChannelSenderIds | undefined,
 ): string | undefined {
 	if (senderIds?.assignedBy !== "platform" || !PLAIN_SENDER_ID.test(senderId)) return undefined;
-	const notice = senderNotice("", name, senderId);
-	return Math.max(notice.text.length, notice.ownerText.length) <= MAX_RETAINED_DIAGNOSTIC_CHARS ? senderId : undefined;
+	// Decided on the model's English line alone, so the interface language never changes what the model is told.
+	return senderNotice("", name, senderId).text.length <= MAX_RETAINED_DIAGNOSTIC_CHARS ? senderId : undefined;
 }
