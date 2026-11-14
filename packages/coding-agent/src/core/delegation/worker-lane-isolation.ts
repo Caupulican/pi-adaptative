@@ -24,7 +24,7 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { isAbsolute, relative, resolve, sep } from "node:path";
+import { isAbsolute, join, relative, resolve, sep } from "node:path";
 import type { ExecutionContext } from "../../kernel/index.ts";
 import type { WorkerHostFinding } from "../autonomy/contracts.ts";
 import { hostFinding } from "../autonomy/host-findings.ts";
@@ -53,6 +53,7 @@ import {
 	describeWorkerLane,
 	discardUnusedWorkerLane,
 	findLaneByDirectory,
+	findLaneCheckout,
 	isUnderLaneRoot,
 	laneWorktreeOf,
 	releaseWorkerLane,
@@ -101,14 +102,24 @@ function isWithin(base: string, target: string): boolean {
 }
 
 /**
- * The path `entry` names inside the lane at `laneRoot` when it lies under `root`, the directory it was stated against: the same
- * place in the lane. A path already inside the lane, or outside `root`, is returned unchanged. Every move of a worker into its
- * lane uses this one translation: a saved contract, a request's write paths and the grants derived from them.
+ * The path `entry` names inside the lane at `laneRoot` when it lies under `root`, the top of the checkout the lane was made
+ * from: the same place in the lane. A relative `entry` is stated against `base` (`root` unless given). A path already inside
+ * the lane, or outside `root`, is returned unchanged. Every move of a worker into its lane uses this one translation: a
+ * saved contract, a request's write paths, the grants derived from them and the parent's ceiling.
  */
-export function relocatedInto(root: string, laneRoot: string, entry: string): string {
-	const resolved = resolve(root, entry);
+export function relocatedInto(root: string, laneRoot: string, entry: string, base = root): string {
+	const resolved = resolve(base, entry);
 	if (isWithin(laneRoot, resolved)) return resolved;
 	return isWithin(root, resolved) ? resolve(laneRoot, relative(root, resolved)) : entry;
+}
+
+/** Where a worker is placed in a lane (`WorkerLaneIsolation.placementAt`). */
+export interface WorkerLanePlacementAt {
+	readonly laneRoot: string;
+	/** The top of the main checkout the lane was made from: the root request and contract paths are moved from. */
+	readonly checkout: string;
+	/** The directory the worker works in: the session directory's place in the lane. */
+	readonly directory: string;
 }
 
 /** The lane directory's engine deps and lane key; undefined when `cwd` is not a lane. */
@@ -254,6 +265,44 @@ export class WorkerLaneIsolation {
 		return lane ? { engine, laneKey: lane.laneKey, worktreePath: lane.worktreePath } : undefined;
 	}
 
+	/**
+	 * Where a worker started from `sessionCwd` is placed in the lane `directory` lies in, resolved through git: the lane's
+	 * root, the main checkout the lane was made from (`findLaneCheckout`), and the directory the worker works in, which is
+	 * `sessionCwd`'s place relative to that checkout's top (a session in repo/sub works in lane/sub). A session at the
+	 * checkout's top, or outside it, works at the lane's root. Undefined when `directory` is in no lane or its checkout
+	 * cannot be resolved: the worker is then not moved into the lane.
+	 */
+	async placementAt(directory: string, sessionCwd: string): Promise<WorkerLanePlacementAt | undefined> {
+		const engine = this.deps.engineDeps(directory);
+		if (!engine || !isUnderLaneRoot(engine, directory)) return undefined;
+		const found = await findLaneCheckout(engine, directory);
+		if (!found) return undefined;
+		const offset = relative(found.checkout, sessionCwd);
+		const nested = offset !== "" && isWithin(found.checkout, sessionCwd);
+		const laneRoot = found.lane.worktreePath;
+		return { laneRoot, checkout: found.checkout, directory: nested ? join(laneRoot, offset) : laneRoot };
+	}
+
+	/**
+	 * A request moved into the lane `laneDirectory` lies in (`placementAt`): its execution context, at the session
+	 * directory's place in the lane (at `laneDirectory` itself when `keepDirectory`, a prior worker's own directory), and its
+	 * paths relocated relative to the checkout's top (`relocateRequest`). Throws when the lane or its checkout cannot be
+	 * resolved: the request is then not moved, and its caller keeps the shared checkout or refuses the start.
+	 */
+	async placeRequest(
+		request: Pick<WorkerDelegationRequest, "authority" | "savedIntent">,
+		sessionCwd: string,
+		laneDirectory: string,
+		contextFor: (directory: string) => Promise<ExecutionContext>,
+		keepDirectory = false,
+	): Promise<Pick<WorkerDelegationRequest, "authority" | "savedIntent" | "executionContext">> {
+		const placed = await this.placementAt(laneDirectory, sessionCwd);
+		if (!placed) throw new Error("the lane, or the checkout it was made from, cannot be resolved");
+		const executionContext = await contextFor(keepDirectory ? laneDirectory : placed.directory);
+		const moved = this.relocateRequest(request, placed.checkout, executionContext, placed.laneRoot, sessionCwd);
+		return { executionContext, ...moved };
+	}
+
 	/** The authoritative lane root for a directory in that lane; undefined when the registration cannot be resolved. */
 	async laneRootAt(cwd: string): Promise<string | undefined> {
 		return (await this.laneAt(cwd))?.worktreePath;
@@ -280,16 +329,19 @@ export class WorkerLaneIsolation {
 	}
 
 	/**
-	 * A request's workspace path, granted write paths and saved intent, moved into the lane `context` names. These request paths
-	 * were stated against `root`, the session directory the request resolves them from; a saved contract is relative to its own
-	 * directory. `laneRoot` stays the same even when `context.cwd` is a nested workspace inside the lane. Returns only the fields
-	 * the request carries, so a caller spreads it over the request.
+	 * A request's workspace path, granted write paths and saved intent, moved into the lane `context` names. Every path keeps
+	 * its place relative to `root`, the top of the checkout the lane was made from (`placementAt`), so a path under the
+	 * session's subdirectory lands under the same subdirectory of the lane. A relative request path is stated against `base`,
+	 * the session directory the request resolves it from (`root` unless given); a saved contract's against its own directory.
+	 * `laneRoot` stays the same even when `context.cwd` is a nested workspace inside the lane. Returns only the fields the
+	 * request carries, so a caller spreads it over the request.
 	 */
 	relocateRequest(
 		request: Pick<WorkerDelegationRequest, "authority" | "savedIntent">,
 		root: string,
 		context: ExecutionContext,
 		laneRoot = context.cwd,
+		base = root,
 	): Pick<WorkerDelegationRequest, "authority" | "savedIntent"> {
 		const path = request.authority?.path;
 		const writePaths = request.authority?.writePaths;
@@ -298,9 +350,9 @@ export class WorkerLaneIsolation {
 				? {
 						authority: {
 							...request.authority,
-							...(path !== undefined ? { path: relocatedInto(root, laneRoot, path) } : {}),
+							...(path !== undefined ? { path: relocatedInto(root, laneRoot, path, base) } : {}),
 							...(writePaths !== undefined
-								? { writePaths: writePaths.map((entry) => relocatedInto(root, laneRoot, entry)) }
+								? { writePaths: writePaths.map((entry) => relocatedInto(root, laneRoot, entry, base)) }
 								: {}),
 						},
 					}
@@ -309,19 +361,32 @@ export class WorkerLaneIsolation {
 				? {
 						savedIntent: {
 							...request.savedIntent,
-							executionContract: this.relocateContract(request.savedIntent.executionContract, context),
+							executionContract: this.relocateContract(
+								request.savedIntent.executionContract,
+								context,
+								root,
+								laneRoot,
+							),
 						},
 					}
 				: {}),
 		};
 	}
 
-	/** Translate an admitted workspace into the lane the host created for it, preserving all other grants. */
-	relocateContract(contract: WorkerExecutionContract, context: ExecutionContext): WorkerExecutionContract {
+	/**
+	 * Translate an admitted workspace into the lane the host created for it, preserving all other grants: each path keeps
+	 * its place relative to `root`, the top of the checkout the lane at `laneRoot` was made from.
+	 */
+	relocateContract(
+		contract: WorkerExecutionContract,
+		context: ExecutionContext,
+		root: string,
+		laneRoot: string,
+	): WorkerExecutionContract {
 		const original = contract.worker.authority.cwd;
 		if (!original || !this.isLaneDirectory(context.cwd))
 			throw new Error("Worker lane relocation lacks a managed destination.");
-		const translate = (entry: string): string => relocatedInto(original, context.cwd, entry);
+		const translate = (entry: string): string => relocatedInto(root, laneRoot, entry, original);
 		const move = (profile: WorkerProfileExecutionContract): WorkerProfileExecutionContract => {
 			const cwd = profile.authority.cwd;
 			if (!cwd || translate(cwd) === cwd) return profile;

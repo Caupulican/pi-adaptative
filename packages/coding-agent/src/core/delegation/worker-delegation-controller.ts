@@ -4278,11 +4278,8 @@ export class WorkerDelegationController {
 		const cwd = priorDispatch?.executionContract?.worker.authority.cwd;
 		if (!cwd || !this.laneIsolation) return;
 		try {
-			const laneRoot = await this.laneIsolation.laneRootAt(cwd);
-			if (!laneRoot) return;
-			const executionContext = await this.contextForDirectory(cwd, signal);
-			const relocated = this.laneIsolation.relocateRequest(request, this.deps.getCwd(), executionContext, laneRoot);
-			Object.assign(request, { executionContext }, relocated);
+			const into = (directory: string) => this.contextForDirectory(directory, signal);
+			Object.assign(request, await this.laneIsolation.placeRequest(request, this.deps.getCwd(), cwd, into, true));
 		} catch {
 			// The lane directory no longer exists or cannot be validated; the caller's directory is kept.
 		}
@@ -4324,9 +4321,9 @@ export class WorkerDelegationController {
 		if (lane.kind !== "isolated") return requested ? refused(lane.message) : shared;
 		let failure: string;
 		try {
-			const executionContext = await this.contextForDirectory(lane.worktreePath, signal);
-			const relocated = isolation.relocateRequest(request, this.deps.getCwd(), executionContext, lane.worktreePath);
-			const admitted = await this.admitWorkerDirectory({ ...request, executionContext, ...relocated }, signal, {
+			const into = (directory: string) => this.contextForDirectory(directory, signal);
+			const moved = await isolation.placeRequest(request, this.deps.getCwd(), lane.worktreePath, into);
+			const admitted = await this.admitWorkerDirectory({ ...request, ...moved }, signal, {
 				freshIdentity: false,
 				selectedBinding: shared.shipment.modelBinding,
 			});
@@ -4345,8 +4342,7 @@ export class WorkerDelegationController {
 				// The root granted write roots outside the lane: it means this worker to write the shared checkout.
 				failure = "the worker's workspace or granted write roots are outside the lane";
 			} else {
-				request.executionContext = executionContext;
-				Object.assign(request, relocated);
+				Object.assign(request, moved);
 				return preserveWorkerAdmissionRoute(admitted, shared);
 			}
 		} catch (error) {

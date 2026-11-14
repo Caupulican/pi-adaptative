@@ -172,6 +172,21 @@ export async function findLaneByDirectory(
 	return (await resolveLaneAt(deps, directory, true))?.lane;
 }
 
+/**
+ * The active lane whose registered worktree contains `directory`, with the main checkout it was made from: the checkout
+ * that holds the repository's git dir, which `createWorkerLane` makes every lane from. Resolved through git; undefined
+ * when `directory` is in no lane or the repository's git dir is not a checkout's `.git`.
+ */
+export async function findLaneCheckout(
+	deps: WorktreeSyncEngineDeps,
+	directory: string,
+): Promise<{ lane: LaneRegistration; checkout: string } | undefined> {
+	const found = await resolveLaneAt(deps, directory, true);
+	if (!found) return undefined;
+	const common = resolve(directory, found.context.gitCommonDir);
+	return basename(common) === ".git" ? { lane: found.lane, checkout: dirname(common) } : undefined;
+}
+
 /** Whether `candidate` lies under the directory lane worktrees are created in (a cheap check, no git). */
 export function isUnderLaneRoot(deps: WorktreeSyncEngineDeps, candidate: string): boolean {
 	return isInside(deps.worktreesBaseDir, candidate) && canonical(candidate) !== canonical(deps.worktreesBaseDir);
