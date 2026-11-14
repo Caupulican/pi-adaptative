@@ -14,6 +14,7 @@ import type { PersistentBotRecord } from "../delegation/persistent-bot-team-stor
 import { meteredModelRefusalFacts } from "../delegation/worker-authority-resolver.ts";
 import type { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import { envelopeCeilingUsd } from "../orchestration/risk-budget.ts";
 import { providerAdmissionDir } from "../provider-admission/ledger.ts";
 import type { SpawnedUsageReporter } from "../spawned-usage.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
@@ -111,11 +112,15 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 		timers: () => deps.getTimers(),
 		hostSessionId: () => deps.getSessionId(),
 		modelRefusal: (record, model) => botModelRefusal(deps, record, model),
-		// A worker's budget is the owner's worker bound, intersected with the main session's own ceiling; none set, none applies.
-		turnSpendBound: () => {
+		// A worker's budget is the owner's worker bound, intersected with the main session's own ceiling (its metered ceiling
+		// too when the bot's model is metered: a subscription's limit is its usage windows); none set, none applies.
+		turnSpendBound: (model) => {
 			const bounds = [
 				{ usd: deps.getSettingsManager().getWorkerDelegationSettings().maxUsd, bound: "worker" as const },
-				{ usd: deps.getCapabilityEnvelope()?.maxEstimatedUsd, bound: "session" as const },
+				{
+					usd: envelopeCeilingUsd(deps.getCapabilityEnvelope(), model, deps.getModelRegistry()),
+					bound: "session" as const,
+				},
 			].filter((entry): entry is { usd: number; bound: "worker" | "session" } => (entry.usd ?? 0) > 0);
 			return bounds.reduce<(typeof bounds)[number] | undefined>(
 				(lowest, entry) => (lowest === undefined || entry.usd < lowest.usd ? entry : lowest),

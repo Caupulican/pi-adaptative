@@ -116,10 +116,11 @@ export interface BotSessionHostPorts {
 	/** Why the worker admission refuses the bot's model now, with when that ends when known; undefined when it may run. */
 	modelRefusal(record: PersistentBotRecord, model: Model<Api>): BotModelRefusal | undefined;
 	/**
-	 * The dollars one turn may spend, as a worker's budget bounds it, with the bound that sets it (the owner's worker bound
-	 * or the main session's autonomy bound, the lower); undefined when nothing bounds it.
+	 * The dollars one turn on `model` may spend, as a worker's budget bounds it, with the bound that sets it (the owner's
+	 * worker bound or the main session's autonomy bound, which holds metered spend to its metered ceiling too, the lower);
+	 * undefined when nothing bounds it.
 	 */
-	turnSpendBound(): BotTurnSpendBound | undefined;
+	turnSpendBound(model: Model<Api>): BotTurnSpendBound | undefined;
 }
 
 /**
@@ -584,13 +585,13 @@ export class BotSessionHost {
 			const refused = this.ports.modelRefusal(record, model);
 			if (refused) return refused;
 		}
-		const unpriced = this.spendBound(spendBoundUsd) === undefined ? undefined : unpricedModelRefusal(model);
+		const unpriced = this.spendBound(model, spendBoundUsd) === undefined ? undefined : unpricedModelRefusal(model);
 		return unpriced === undefined ? undefined : { cause: "model_unpriced", reason: unpriced };
 	}
 
 	/** The lower of the owner's and the main session's bounds on one turn and the bot's profile's own. */
-	private spendBound(profileBoundUsd: number | undefined): BotTurnSpendBound | undefined {
-		const bound = this.ports.turnSpendBound();
+	private spendBound(model: Model<Api>, profileBoundUsd: number | undefined): BotTurnSpendBound | undefined {
+		const bound = this.ports.turnSpendBound(model);
 		return profileBoundUsd !== undefined &&
 			profileBoundUsd > 0 &&
 			(bound === undefined || profileBoundUsd < bound.usd)
@@ -836,7 +837,7 @@ export class BotSessionHost {
 			};
 			built = entry;
 			const unsubscribeSpend = boundSessionTurnSpend(session, {
-				limit: () => this.spendBound(definition.spendBoundUsd),
+				limit: () => this.spendBound(definition.model, definition.spendBoundUsd),
 				onExceeded: (spentUsd, limit) => {
 					const reason = interfaceText().botTeam.botTurnOverBudget(
 						agentId,
