@@ -77,6 +77,8 @@ export interface OwnerGoalIntentPorts {
 	/** The session's batched-question engine; absent while System One is off or has none bound. */
 	getSemanticDecisionEngine(): OperationEffectEngine | undefined;
 	readonly goals: Pick<GoalSessionController, "getState" | "startJudgedOwnerGoal">;
+	/** Whether the session's tools hold a goal tool now, the only way a goal it starts is followed and closed. */
+	holdsGoalTools(): boolean;
 	/** The adaptive runtime's readiness a goal needs, when one is configured. */
 	getAdaptiveReadiness(): Pick<AdaptiveRuntimeReadiness, "getStatus"> | undefined;
 	/** Gives the running turn, or the next one, a note the model reads and the owner does not see. */
@@ -131,7 +133,8 @@ export class OwnerGoalIntent {
 		const request = ownerRequestForJudge(words);
 		const objective = objectiveOf(words);
 		if (request === undefined || objective === undefined || statesGoalExplicitly(ownerTypedText(words))) return;
-		if (this.hasUnfinishedGoal()) return;
+		// Read at each message: the tool access a goal needs can change while the session lives (a tool profile switch).
+		if (!this.ports.holdsGoalTools() || this.hasUnfinishedGoal()) return;
 		const engine = this.ports.getSemanticDecisionEngine();
 		if (!engine || this.closing.signal.aborted) return;
 		const judgment = this.judgeAndStart(

@@ -1041,10 +1041,9 @@ export class RuntimeBuilder {
 		return this._toolDefinitions.get(name)?.definition;
 	}
 
-	/** Whether the session builds goal tools, the only way a goal it holds is followed and closed: none under a base override. */
-	buildsGoalTools({ allows } = this._createToolAccessPolicy()): boolean {
-		if (this.deps.getBaseToolsOverride()) return false;
-		return allows(LEGACY_GOAL_TOOL_NAME) || GOAL_LIFECYCLE_TOOL_NAMES.some(allows);
+	/** Whether the current tool generation holds a goal tool, the only way a goal the session holds is followed and closed. */
+	holdsGoalTools(): boolean {
+		return [LEGACY_GOAL_TOOL_NAME, ...GOAL_LIFECYCLE_TOOL_NAMES].some((name) => this._toolDefinitions.has(name));
 	}
 
 	getPeerReviewController(): PeerReviewController | undefined {
@@ -1862,7 +1861,7 @@ export class RuntimeBuilder {
 					integrationBranch: () => this.deps.integrationBranch?.() || undefined,
 					ports: this.deps.getWorktreeSyncEnginePorts(),
 				});
-			if (this.buildsGoalTools(toolAccess)) {
+			if (toolAccess.allows(LEGACY_GOAL_TOOL_NAME) || GOAL_LIFECYCLE_TOOL_NAMES.some(toolAccess.allows)) {
 				const goalClock = this.deps.goalClock;
 				const goalToolDefinition = createGoalToolDefinition({
 					getGoalState: () => this.deps.getGoalStateSnapshot(),

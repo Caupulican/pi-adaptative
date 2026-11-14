@@ -2470,7 +2470,7 @@ export class AgentSession {
 			toolCallFacts: (toolName, args) => this._backgroundLanes.toolCallFacts(toolName, args),
 		});
 		this._promptSubmission = new PromptSubmissionController({
-			buildsGoalTools: this._runtimeBuilder.buildsGoalTools(),
+			holdsGoalTools: () => this._runtimeBuilder.holdsGoalTools(),
 			agent: this.agent,
 			sessionManager: this.sessionManager,
 			pendingQueue: this._pendingQueue,
@@ -3599,7 +3599,7 @@ export class AgentSession {
 		safely(() => this.agent.abort("session dispose"));
 		// Preparing/postflight submissions and reflection preflight have no agent run to abort.
 		safely(() => this._promptSubmission.abortSubmission("session dispose"));
-		safely(() => this._promptSubmission.ownerGoalIntent?.abort());
+		safely(() => this._promptSubmission.ownerGoalIntent.abort());
 		safely(() => this._reflectionTurnLifecycle.abort());
 		safely(() => this._reflectionAbort.abort());
 		safely(() => this._unsubscribeSettingsChanges?.());
@@ -3651,7 +3651,7 @@ export class AgentSession {
 				waitForAgentIdle: () => this.agent.waitForIdle(),
 				settleReflectionTurn: () => this.settleReflectionTurn(),
 				settleCompaction: () => this._compaction.settled(),
-				settleOwnerGoalIntent: async () => this._promptSubmission.ownerGoalIntent?.settle(),
+				settleOwnerGoalIntent: () => this._promptSubmission.ownerGoalIntent.settle(),
 				settleRoutineIntake: () => this._backgroundLanes.settleRoutineIntake(),
 				releaseAgentConsumer: () => {
 					safely(() => this._disconnectFromAgent());

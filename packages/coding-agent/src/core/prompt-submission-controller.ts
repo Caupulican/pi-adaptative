@@ -99,8 +99,6 @@ interface SubmissionLifecycle {
 }
 
 export interface PromptSubmissionControllerDeps extends OwnerGoalIntentPorts {
-	/** The session builds goal tools: only then is an owner's message judged for a goal it sets (`OwnerGoalIntent`). */
-	readonly buildsGoalTools: boolean;
 	readonly agent: Agent;
 	readonly sessionManager: Pick<
 		SessionManager,
@@ -234,11 +232,11 @@ export class PromptSubmissionController {
 	private foregroundPromptLeaseValue: ForegroundSubmissionLease | undefined;
 	private lastUserRequestValue = "";
 	private ownerSubmissionOrder = 0;
-	readonly ownerGoalIntent: OwnerGoalIntent | undefined;
+	readonly ownerGoalIntent: OwnerGoalIntent;
 
 	constructor(deps: PromptSubmissionControllerDeps) {
 		this.deps = deps;
-		this.ownerGoalIntent = deps.buildsGoalTools ? new OwnerGoalIntent(deps) : undefined;
+		this.ownerGoalIntent = new OwnerGoalIntent(deps);
 	}
 
 	get isPreparingSubmission(): boolean {
@@ -317,7 +315,7 @@ export class PromptSubmissionController {
 		this.deps.ownerRules.record(ownerTypedText(words), entryId);
 		// The owner's words reached the session: an operator blocker waited for exactly that.
 		if (this.deps.getOperatorBlocker() !== undefined) this.deps.setOperatorBlocker(undefined);
-		this.ownerGoalIntent?.noteDelivered(words, entryId, this.deps.findLastAssistantMessage());
+		this.ownerGoalIntent.noteDelivered(words, entryId, this.deps.findLastAssistantMessage());
 	}
 
 	/** A submission's input that ends there without being delivered, and why. */
