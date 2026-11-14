@@ -89,7 +89,10 @@ export interface OwnerDraftView {
 	readonly rendering: string | undefined;
 	/** What the held call was made for (a watch's check): the head line names the watch and the call that arms it. */
 	readonly purpose?: NestedCallPurpose;
-	/** The entry of the owner channel's message whose run held the call: the request an approval of it answers. */
+	/**
+	 * The entry of the message (the owner channel's or a third party's) whose run held the call; an approval answers it
+	 * as the owner's request only when it is recorded owner evidence.
+	 */
 	readonly requestEntryId?: string;
 	readonly origin: TurnOriginRecord;
 	readonly state: "pending" | "approved" | "released" | "denied" | "dismissed" | "expired";
