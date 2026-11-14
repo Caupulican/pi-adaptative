@@ -155,18 +155,23 @@ export function workerCeilingOf(
 /** Where a worker's directory lies among the worktree lanes (`WorkerLaneIsolation`). */
 export interface WorkerLanePlacement {
 	/**
-	 * The mover of absolute paths in the checkout the lane `directory` lies in was made from to their copy in that lane,
-	 * placed for a session at `sessionCwd` as its worker was; undefined when `directory` is in no lane, or the lane's
-	 * placement is not known.
+	 * The mover of the paths of a session at `sessionCwd` to their copy in the lane `directory` lies in; undefined when
+	 * `directory` is in no lane, "unplaced" when the lane's placement is not known.
 	 */
-	laneOf(directory: string, sessionCwd: string): ((entry: string) => string) | undefined;
+	laneOf(directory: string, sessionCwd: string): ((entry: string) => string) | "unplaced" | undefined;
 }
 
 /**
  * The ceiling as a worker in a worktree lane is held to it: its roots moved into the lane by `move`, and its denied paths
  * denied both where they are and at their copy in the lane (the worker may still read the checkout the lane came from).
+ * Roots and denied paths that name the shared checkout, not the lane's copies, would leave those copies open: a lane whose
+ * placement is unknown ("unplaced") holds the worker to nothing (no read root, no write root).
  */
-function ceilingInLane(ceiling: WorkerParentCeiling, move: (entry: string) => string): WorkerParentCeiling {
+function ceilingInLane(
+	ceiling: WorkerParentCeiling,
+	move: ((entry: string) => string) | "unplaced",
+): WorkerParentCeiling {
+	if (move === "unplaced") return { ...ceiling, readOnly: true, writeRoots: [], readRoots: [] };
 	return {
 		...ceiling,
 		...(ceiling.readRoots ? { readRoots: ceiling.readRoots.map(move) } : {}),

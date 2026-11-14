@@ -24,10 +24,11 @@
  */
 
 import { randomUUID } from "node:crypto";
-import { isAbsolute, join, relative, resolve, sep } from "node:path";
+import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExecutionContext } from "../../kernel/index.ts";
 import type { WorkerHostFinding } from "../autonomy/contracts.ts";
 import { hostFinding } from "../autonomy/host-findings.ts";
+import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import type {
 	OrchestrationProfile,
 	WorkerExecutionContract,
@@ -102,20 +103,26 @@ function isWithin(base: string, target: string): boolean {
 
 /**
  * The path `entry` names inside the lane at `laneRoot` when it lies under `root`, the top of the checkout the lane was made
- * from: the same place in the lane. A relative `entry` is stated against `base` (`root` unless given). A path already inside
- * the lane, or outside `root`, is returned unchanged. Every move of a worker into its lane uses this one translation: a
- * saved contract, a request's write paths, the grants derived from them and the parent's ceiling.
+ * from: the same place in the lane. A relative `entry` is stated against `base` (`root` unless given). Places are compared
+ * by path text first, then, when the text places it in neither, by real path (`safeRealpathSync`: symlinks followed, a
+ * not-yet-created tail kept), so a path spelled through a symlink to the checkout or the lane keeps its place. A path
+ * already inside the lane, or outside `root`, is returned unchanged. Every move of a worker into its lane uses this one
+ * translation: a saved contract, a request's write paths, the grants derived from them and the parent's ceiling.
  */
 export function relocatedInto(root: string, laneRoot: string, entry: string, base = root): string {
 	const resolved = resolve(base, entry);
 	if (isWithin(laneRoot, resolved)) return resolved;
-	return isWithin(root, resolved) ? resolve(laneRoot, relative(root, resolved)) : entry;
+	if (isWithin(root, resolved)) return resolve(laneRoot, relative(root, resolved));
+	const real = safeRealpathSync(resolved);
+	if (isWithin(safeRealpathSync(laneRoot), real)) return resolved;
+	const top = safeRealpathSync(root);
+	return isWithin(top, real) ? resolve(laneRoot, relative(top, real)) : entry;
 }
 
 /** Where a worker is placed in a lane (`WorkerLaneIsolation.placementAt`). */
 export interface WorkerLanePlacementAt {
 	readonly laneRoot: string;
-	/** The top of the checkout the lane was made from, spelled as the session spells its directory: the root paths move from. */
+	/** The top of the checkout the lane was made from: the root request and contract paths are moved from. */
 	readonly checkout: string;
 	/** The directory the worker works in: the session directory's place in the lane. */
 	readonly directory: string;
@@ -131,18 +138,13 @@ interface LaneAt {
 }
 
 /**
- * Where a worker started from `sessionCwd` is placed in the lane at `laneRoot` made from `checkout`. The session and the
- * checkout are compared by real path, so a session directory reached through a symlink keeps its place; the checkout is
- * then spelled as the session spells its directory, so the session's own paths move by text. A session in repo/sub works in
- * lane/sub; one at the checkout's top, or outside it, works at the lane's root.
+ * Where a worker started from `sessionCwd` is placed in the lane at `laneRoot` made from `checkout`: the session's place
+ * relative to the checkout's top, as `relocatedInto` moves a path (a session in repo/sub works in lane/sub). A session at
+ * the checkout's top, or outside it, works at the lane's root.
  */
 function placementIn(laneRoot: string, checkout: string, sessionCwd: string): WorkerLanePlacementAt {
-	const session = canonical(sessionCwd);
-	const top = canonical(checkout);
-	const offset = relative(top, session);
-	if (offset !== "" && !isWithin(top, session)) return { laneRoot, checkout, directory: laneRoot };
-	const spelled = resolve(sessionCwd, relative(session, top));
-	return { laneRoot, checkout: spelled, directory: offset === "" ? laneRoot : join(laneRoot, offset) };
+	const moved = relocatedInto(checkout, laneRoot, sessionCwd);
+	return { laneRoot, checkout, directory: moved === sessionCwd ? laneRoot : moved };
 }
 
 export class WorkerLaneIsolation {
@@ -326,18 +328,19 @@ export class WorkerLaneIsolation {
 	}
 
 	/**
-	 * The mover of paths of the checkout the lane `directory` lies in was made from into that lane, placed for a session at
-	 * `sessionCwd` as its worker was (`placementIn`, from the source `laneAt` resolved when it placed the worker): a path
-	 * keeps its place relative to the checkout's top. Synchronous, no git. Undefined when `directory` is in no lane or this
-	 * process has not resolved the lane's checkout. It places a worker's parent ceiling.
+	 * The mover of the session's paths into the lane `directory` lies in, which places a worker's parent ceiling: from the
+	 * checkout the lane was made from, as `laneAt` resolved it when it placed the worker (`relocatedInto`, a path keeps its
+	 * place relative to the checkout's top); none to make for a session working in that lane itself. Synchronous, no git.
+	 * Undefined when `directory` is in no lane; "unplaced" when this process has not resolved the lane's checkout (a worker
+	 * admitted again after a restart before its lane was read).
 	 */
-	laneOf(directory: string, sessionCwd: string): ((entry: string) => string) | undefined {
+	laneOf(directory: string, sessionCwd: string): ((entry: string) => string) | "unplaced" | undefined {
 		const engine = this.deps.engineDeps(directory);
 		const laneRoot = engine && laneWorktreeOf(engine, directory);
-		const source = laneRoot ? this.laneSources.get(canonical(laneRoot)) : undefined;
-		if (!source) return undefined;
-		const placed = placementIn(source.laneRoot, source.checkout, sessionCwd);
-		return (entry) => relocatedInto(placed.checkout, placed.laneRoot, entry);
+		if (!laneRoot) return undefined;
+		if (isWithin(safeRealpathSync(laneRoot), safeRealpathSync(sessionCwd))) return (entry) => entry;
+		const source = this.laneSources.get(canonical(laneRoot));
+		return source ? (entry) => relocatedInto(source.checkout, source.laneRoot, entry) : "unplaced";
 	}
 
 	/** Whether `directory` lies in the area lane worktrees are created in (a cheap check, no git). */
