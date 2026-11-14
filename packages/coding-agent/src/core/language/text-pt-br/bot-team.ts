@@ -62,6 +62,10 @@ export const BOT_TEAM = {
 		`O bot ${agentId} ainda está em atendimento direto ou em equipe; pare antes com /bot stop ${agentId}.`,
 	botModelUnavailable: (agentId: string, modelRef: string) =>
 		`O bot ${agentId} roda em ${modelRef}, que não está disponível ou não tem credenciais. Entre nesse provedor ou troque o modelo do bot e envie a mensagem de novo.`,
+	botProfileRefused: (agentId: string, profileId: string, reason: string) =>
+		`O bot ${agentId} não foi iniciado: o perfil ${profileId} não o admite agora (${reason}). Corrija o perfil ou a política de workers e envie a mensagem de novo.`,
+	botProfileChanged: (agentId: string, profileId: string) =>
+		`Bot ${agentId}: o perfil ${profileId} agora resulta em outra sessão (o perfil, um modelo fixado ou a política de workers mudou), então esta execução não foi iniciada na sessão antiga. A sessão é refeita quando ficar ociosa; envie a mensagem de novo.`,
 	botSoulRefused: (agentId: string, reason: string) =>
 		`O bot ${agentId} não foi iniciado: ${reason}. Edite o soul com /bot soul ${agentId}.`,
 	botSessionHeld: (agentId: string, pid: number, sessionId?: string) =>
@@ -95,8 +99,8 @@ export const BOT_TEAM = {
 	botTurnFailed: (agentId: string, reason: string) => `Bot ${agentId}: o turno falhou (${reason}).`,
 	botModelRefused: (agentId: string, reason: string) =>
 		`O bot ${agentId} não recebeu a mensagem: o modelo dele foi recusado (${reason}).`,
-	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session") =>
-		`Bot ${agentId}: o turno foi interrompido no limite de gasto ($${spentUsd} gastos; ${bound === "worker" ? "workerDelegation.maxUsd" : "o limite de gasto da autonomia desta sessão"} é $${limitUsd}).`,
+	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session" | "profile") =>
+		`Bot ${agentId}: o turno foi interrompido no limite de gasto ($${spentUsd} gastos; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "o orçamento de custo do perfil dele" : "o limite de gasto da autonomia desta sessão"} é $${limitUsd}).`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a sessão não fechou corretamente (${reason}).`,
 	botSessionNotClosed: "A sessão do bot não fechou corretamente.",

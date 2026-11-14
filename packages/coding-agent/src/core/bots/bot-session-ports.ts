@@ -2,14 +2,16 @@
  * What a bot's session reads from the main session: its settings (a manager of the bot's own over the same storage, read
  * again on each change of the main session's), its System One as it is now (on or off, provider, transport), and, as the
  * worker admission reads them, the model rules for an explicitly requested model (one predicate,
- * `worker-authority-resolver`), the spend bound a worker's budget carries, and the cost view the main session keeps for
+ * `worker-authority-resolver`), a profile compiled by that admission (`compileBotSession`), the spend bound a worker's budget carries, and the cost view the main session keeps for
  * spawned work. Composed here so the lane controller only hands over its
  * dependencies, and attaches to its process's bot session host with them (`attachBotSessions`).
  */
 
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
+import { botWorkerStart } from "../delegation/bot-worker-start.ts";
 import type { PersistentBotRecord } from "../delegation/persistent-bot-team-store.ts";
 import { meteredModelRefusalFacts } from "../delegation/worker-authority-resolver.ts";
+import type { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import type { SpawnedUsageReporter } from "../spawned-usage.ts";
@@ -41,11 +43,13 @@ function botModelRefusal(
 		: undefined;
 }
 
+/** What the lane controller hands over of its own: the bot store, its warnings and its worker admission. */
+interface BotSessionOwnPorts extends Pick<BotSessionHostPorts, "store" | "warn"> {
+	workerController(): Pick<WorkerDelegationController, "compileBotSession">;
+}
+
 /** Attaches the session to a bot session host: its process's shared one for a root session, one of its own for a child. */
-export function attachBotSessions(
-	deps: BackgroundLaneControllerDeps,
-	own: Pick<BotSessionHostPorts, "store" | "warn">,
-): BotSessionAttachment {
+export function attachBotSessions(deps: BackgroundLaneControllerDeps, own: BotSessionOwnPorts): BotSessionAttachment {
 	return attachBotSessionHost(botSessionHostPorts(deps, own), !deps.isChildSession());
 }
 
@@ -60,12 +64,17 @@ function followSettings(main: SettingsManager): ReturnType<BotSessionHostPorts["
 	return { settings, release: main.subscribeChanges(reread) };
 }
 
-function botSessionHostPorts(
-	deps: BackgroundLaneControllerDeps,
-	own: Pick<BotSessionHostPorts, "store" | "warn">,
-): BotSessionHostPorts {
+function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSessionOwnPorts): BotSessionHostPorts {
+	const { workerController, ...ownPorts } = own;
 	return {
-		...own,
+		...ownPorts,
+		// A bot made from a profile is compiled by the admission a worker of it would pass, from the same start request.
+		compileProfile: (record) =>
+			workerController().compileBotSession({
+				...botWorkerStart(deps.getSettingsManager().getWorkerModelPinPolicy(), record),
+				instructions: `Answer the owner as bot ${record.agentId} in a session of its own.`,
+				profileId: record.profileId,
+			}),
 		agentDir: () => deps.getAgentDir(),
 		cwd: () => deps.getCwd(),
 		modelRegistry: () => deps.getModelRegistry(),

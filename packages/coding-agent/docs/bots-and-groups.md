@@ -79,8 +79,16 @@ does not add the runs it starts (it has no index to write), so those runs are mi
 a run transcript it shows changed; otherwise it keeps what it drew.
 
 Until later phases move them, these still run as workers of the session that sends them: group messages (the group's
-conversations), the orchestrator's `bot ask`, routine sends, leaders, the bots a leader made and bots made from a profile, and machines joined over the
-link. A bot's session has no subagents, routines, goals or `bot` tool yet (its only routine tool is `task_watch`). A bot that only ever talked through those
+conversations), the orchestrator's `bot ask`, routine sends, leaders, the bots a leader made and machines joined over the
+link. A bot made from a worker profile runs as a session of its own too, on what the worker admission compiles for that
+profile at every run: the admitted model and thinking, the plan's tools, its working directory, its read roots (a profile
+that confines reads confines the read tools, `repo_read`, `lookup`, the read-only shell and its watches to them), its write
+roots and read-only grant, a capability ceiling of the plan's capabilities held by the session's tool gate, the soul and
+resources a worker of it carries, and a turn bound of the profile's cost budget when it is lower than the worker and
+session bounds. A run on a session built from an older compile (the profile, a model pin or the worker policy changed
+since) is refused and the idle session is rebuilt. A profile that needs an independent verifier of each claim, names a
+tool a session does not hold, or sets a token, wall-clock, attempt or tool-call limit (which only a worker's run counts)
+keeps the bot a worker; a profile the admission refuses refuses the message in the owner's words. A bot's session has no subagents, routines, goals or `bot` tool yet (its only routine tool is `task_watch`). A bot that only ever talked through those
 paths has no session of its own: its chat shows its earlier conversations from its history index, in any session, and its
 last summary when none can be read.
 

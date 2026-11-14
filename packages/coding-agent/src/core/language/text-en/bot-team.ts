@@ -54,6 +54,12 @@ export const BOT_TEAM = {
 	/** A bot's own session cannot start: its model is gone or has no credentials. */
 	botModelUnavailable: (agentId: string, modelRef: string) =>
 		`Bot ${agentId} runs on ${modelRef}, which is not available or has no credentials. Sign in to that provider or change the bot's model, then message it again.`,
+	/** A bot made from a profile cannot run as the worker admission compiles that profile now. */
+	botProfileRefused: (agentId: string, profileId: string, reason: string) =>
+		`Bot ${agentId} was not started: its profile ${profileId} does not admit it now (${reason}). Fix the profile or the worker policy, then message it again.`,
+	/** A run of a profile bot's session built before its profile, a pin or the worker policy changed what it compiles to. */
+	botProfileChanged: (agentId: string, profileId: string) =>
+		`Bot ${agentId}: its profile ${profileId} now compiles to a different session (the profile, a model pin or the worker policy changed), so this run was not started on the old one. Its session is rebuilt once it is idle; message it again.`,
 	botSoulRefused: (agentId: string, reason: string) =>
 		`Bot ${agentId} was not started: ${reason}. Edit its soul with /bot soul ${agentId}.`,
 	/** Another process holds the bot's session: two processes would write one conversation. */
@@ -96,8 +102,8 @@ export const BOT_TEAM = {
 	botModelRefused: (agentId: string, reason: string) =>
 		`Bot ${agentId} did not take the message: its model is refused (${reason}).`,
 	/** A turn went past the spend bound and was stopped; `bound` names the one that applied (the lower of the two). */
-	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session") =>
-		`Bot ${agentId}: its turn was stopped at the spend bound ($${spentUsd} spent; ${bound === "worker" ? "workerDelegation.maxUsd" : "this session's autonomy spend bound"} is $${limitUsd}).`,
+	botTurnOverBudget: (agentId: string, spentUsd: string, limitUsd: string, bound: "worker" | "session" | "profile") =>
+		`Bot ${agentId}: its turn was stopped at the spend bound ($${spentUsd} spent; ${bound === "worker" ? "workerDelegation.maxUsd" : bound === "profile" ? "its profile's cost budget" : "this session's autonomy spend bound"} is $${limitUsd}).`,
 	botSessionCloseFailed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session did not close cleanly (${reason}).`,
 	botSessionNotClosed: "The bot session did not close cleanly.",

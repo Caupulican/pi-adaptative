@@ -8,9 +8,15 @@
 
 import { isAbsolute, relative } from "node:path";
 
-import type { OrchestrationDelegationLimits, WorkerExecutionContract } from "../orchestration/contracts.ts";
+import { isDeepStrictEqual } from "node:util";
+import type {
+	OrchestrationDelegationLimits,
+	ResourcePointer,
+	WorkerExecutionContract,
+} from "../orchestration/contracts.ts";
 import type { WorkerDelegationAuthorityRequest } from "./worker-delegation-request.ts";
-import { resolveWorkerFleetLimits } from "./worker-fleet-limits.ts";
+import { intersectWorkerDelegationLimits, resolveWorkerFleetLimits } from "./worker-fleet-limits.ts";
+import type { ResolvedWorkerProfile } from "./worker-profile-resolver.ts";
 
 /**
  * What a leader asks the controller to start as its child. Host-owned: no field here reaches the model-facing schemas.
@@ -94,4 +100,47 @@ export function pathWithinRoots(path: string, roots: readonly string[]): boolean
 		const inside = relative(root, path);
 		return inside === "" || (!inside.startsWith("..") && !isAbsolute(inside));
 	});
+}
+
+/**
+ * A child cannot widen its parent's contract, whether a leader starts it now or a recovered nested dispatch
+ * returns with another routing profile. Pointer ids alone are insufficient authority: retain only pointers whose
+ * complete metadata matches, require the parent's exact profile soul (a bot's own soul is not inherited and is
+ * not compared), keep write paths inside the parent's write roots and intersect the lineage limits.
+ */
+export function narrowWorkerShipmentContext(
+	shipment: ResolvedWorkerProfile,
+	boundary: WorkerExecutionContract["worker"],
+): { ok: true; shipment: ResolvedWorkerProfile } | { ok: false; skipReason: string } {
+	const boundaryPointers = new Map(boundary.resourcePointers.map((pointer) => [pointer.id, pointer]));
+	const resourcePointers: ResourcePointer[] = [];
+	for (const pointer of shipment.resourcePointers) {
+		const inherited = boundaryPointers.get(pointer.id);
+		if (!inherited || !isDeepStrictEqual(inherited, pointer)) {
+			return { ok: false, skipReason: "orchestration_context_authority_exceeded" };
+		}
+		resourcePointers.push(structuredClone(inherited));
+	}
+	if (shipment.soul !== undefined && shipment.soul !== boundary.soul) {
+		return { ok: false, skipReason: "orchestration_context_authority_exceeded" };
+	}
+	// A child may name write paths only inside the parent's write roots: the parent's envelope grant is never widened.
+	const roots = childWriteRoots(boundary);
+	if (shipment.profile.writePaths?.some((path) => !pathWithinRoots(path, roots)))
+		return { ok: false, skipReason: "orchestration_context_authority_exceeded" };
+	const delegationLimits = intersectWorkerDelegationLimits(
+		shipment.profile.delegationLimits,
+		boundary.profile.delegationLimits,
+	);
+	return {
+		ok: true,
+		shipment: {
+			...shipment,
+			profile: {
+				...shipment.profile,
+				...(delegationLimits ? { delegationLimits } : {}),
+			},
+			resourcePointers,
+		},
+	};
 }

@@ -155,6 +155,7 @@ import {
 } from "../util/resource-release.ts";
 import { BOT_MESSAGE_TOOL_NAME, type BotMessageDirectory } from "./bot-message-contract.ts";
 import { createBotMessageBroker } from "./bot-message-directory.ts";
+import type { BotSessionCompilation } from "./bot-worker-start.ts";
 import { importRecordedParentWrites } from "./foreground-parent-writes.ts";
 import { unmetGoalDependencyReason } from "./goal-dependency-gate.ts";
 import { LaneMemoryCapacityTracker } from "./lane-memory-capacity.ts";
@@ -265,7 +266,6 @@ import {
 	DEFAULT_WORKER_FLEET_LIMITS,
 	evaluateNewWorkerAdmission,
 	evaluateReusableWorkerTaskAdmission,
-	intersectWorkerDelegationLimits,
 	pendingVerifierSubjectTaskIds,
 	resolveWorkerFleetLimits,
 } from "./worker-fleet-limits.ts";
@@ -279,11 +279,10 @@ import {
 import { WorkerLeaseHeartbeat } from "./worker-lease-heartbeat.ts";
 import { type PendingVerificationRecovery, WorkerLifecycle } from "./worker-lifecycle.ts";
 import {
-	childWriteRoots,
 	contractGrantsChildren,
 	type NestedWorkerStart,
 	type NestedWorkerStartOutcome,
-	pathWithinRoots,
+	narrowWorkerShipmentContext,
 } from "./worker-nested-start.ts";
 import type { WorkerNotificationCoordinator } from "./worker-notification-coordinator.ts";
 import { WorkerOutcomeFollowUp } from "./worker-outcome-follow-up.ts";
@@ -1859,49 +1858,6 @@ export class WorkerDelegationController {
 			: { ok: false, skipReason: `independent_verifier_unavailable:${admitted.reason}` };
 	}
 
-	/**
-	 * A child cannot widen its parent's contract, whether a leader starts it now or a recovered nested dispatch
-	 * returns with another routing profile. Pointer ids alone are insufficient authority: retain only pointers whose
-	 * complete metadata matches, require the parent's exact profile soul (a bot's own soul is not inherited and is
-	 * not compared), keep write paths inside the parent's write roots and intersect the lineage limits.
-	 */
-	private narrowWorkerShipmentContext(
-		shipment: ResolvedWorkerProfile,
-		boundary: WorkerExecutionContract["worker"],
-	): { ok: true; shipment: ResolvedWorkerProfile } | { ok: false; skipReason: string } {
-		const boundaryPointers = new Map(boundary.resourcePointers.map((pointer) => [pointer.id, pointer]));
-		const resourcePointers: ResourcePointer[] = [];
-		for (const pointer of shipment.resourcePointers) {
-			const inherited = boundaryPointers.get(pointer.id);
-			if (!inherited || !isDeepStrictEqual(inherited, pointer)) {
-				return { ok: false, skipReason: "orchestration_context_authority_exceeded" };
-			}
-			resourcePointers.push(structuredClone(inherited));
-		}
-		if (shipment.soul !== undefined && shipment.soul !== boundary.soul) {
-			return { ok: false, skipReason: "orchestration_context_authority_exceeded" };
-		}
-		// A child may name write paths only inside the parent's write roots: the parent's envelope grant is never widened.
-		const roots = childWriteRoots(boundary);
-		if (shipment.profile.writePaths?.some((path) => !pathWithinRoots(path, roots)))
-			return { ok: false, skipReason: "orchestration_context_authority_exceeded" };
-		const delegationLimits = intersectWorkerDelegationLimits(
-			shipment.profile.delegationLimits,
-			boundary.profile.delegationLimits,
-		);
-		return {
-			ok: true,
-			shipment: {
-				...shipment,
-				profile: {
-					...shipment.profile,
-					...(delegationLimits ? { delegationLimits } : {}),
-				},
-				resourcePointers,
-			},
-		};
-	}
-
 	private hasExactRecoveredLineageCycle(parentAgentId: string, instructions: string, profileId: string): boolean {
 		const normalizedInstructions = instructions.trim();
 		const visited = new Set<string>();
@@ -1959,6 +1915,30 @@ export class WorkerDelegationController {
 			reason: admission.ok ? undefined : admission.skipReason,
 		}));
 		return admission.ok ? { ready: true } : { ready: false, reason: admission.skipReason };
+	}
+
+	/**
+	 * A bot made from a profile, compiled for a session of its own by the admission a fresh worker for the same start
+	 * passes (`botWorkerStart`): the profile with the owner's pin for its role, the bot's authority and soul over it, the
+	 * model rules and the execution plan; its resources become the system prompt a worker's carries.
+	 */
+	compileBotSession(request: WorkerDelegationRequest & { readonly profileId: string }): BotSessionCompilation {
+		const preset = this.resolveWorkerPreset(request, this.deps.getSettingsManager().getWorkerDelegationSettings());
+		if (!preset.ok) return preset;
+		const admission = this.resolveWorkerAdmission(request);
+		if (!admission.ok) return admission;
+		const selected = selectWorkerResourcePointers(admission.shipment.resourcePointers, admission.resourcePointerIds);
+		if (!selected.ok) return { ok: false, skipReason: selected.reason };
+		const materialized = materializeWorkerResourceBundle(selected.pointers);
+		if (!materialized.ok) return { ok: false, skipReason: `worker_resource_materialization_${materialized.code}` };
+		const { shipment, executionPlan: plan } = admission;
+		return {
+			ok: true,
+			profile: preset.preset.profile,
+			shipment,
+			plan,
+			resourceSystemPrompt: materialized.systemPrompt,
+		};
 	}
 
 	private resolveWorkerAdmission(
@@ -2127,7 +2107,7 @@ export class WorkerDelegationController {
 			return { ok: false, skipReason: "worker_model_disallowed" };
 		}
 		if (parentContract) {
-			const narrowed = this.narrowWorkerShipmentContext(shipment, parentContract.worker);
+			const narrowed = narrowWorkerShipmentContext(shipment, parentContract.worker);
 			if (!narrowed.ok) return narrowed;
 			shipment = narrowed.shipment;
 		}
@@ -2159,7 +2139,7 @@ export class WorkerDelegationController {
 		}
 		if (verifierShipment && parentContract) {
 			const verifierBoundary = parentContract.verifier ?? parentContract.worker;
-			const narrowed = this.narrowWorkerShipmentContext(verifierShipment, verifierBoundary);
+			const narrowed = narrowWorkerShipmentContext(verifierShipment, verifierBoundary);
 			if (!narrowed.ok) return narrowed;
 			verifierShipment = narrowed.shipment;
 		}

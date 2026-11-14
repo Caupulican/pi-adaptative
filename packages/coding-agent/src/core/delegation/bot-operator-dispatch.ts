@@ -8,13 +8,12 @@ import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
 import type { BotSessionHost } from "../bots/bot-session-host.ts";
 import type { OrchestrationDelegationLimits, WorkerResultContract } from "../orchestration/contracts.ts";
-import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-guard.ts";
-import { botStartModelStance } from "../orchestration/worker-model-pins.ts";
 import type { RemoteHubController } from "../remote/hub-controller.ts";
 import { BOT_MEMORY_BLOCK_SEPARATOR } from "./bot-chat-text.ts";
 import type { BotOperatorMessageOptions } from "./bot-operator-message-options.ts";
 import { assertBotId, type BotRuntimeBindings, type BotRuntimeContext } from "./bot-runtime-bindings.ts";
 import { freshBotRuntimeId, keyedBotRuntimeId } from "./bot-runtime-id.ts";
+import { botWorkerStart } from "./bot-worker-start.ts";
 import {
 	type BotOperatorMessageDispatchResult,
 	normalizeBotOrTeamId,
@@ -35,7 +34,7 @@ import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 /** What a dispatch reads from and asks of the coordinator: the roster, the lanes and the worker runtime. */
 export interface BotOperatorDispatchHost {
 	/** The bots that run as sessions of their own: the owner's direct words to such a bot go to its session. */
-	readonly botSessions: Pick<BotSessionHost, "deliver" | "noteHistoryRun">;
+	readonly botSessions: Pick<BotSessionHost, "deliver" | "noteHistoryRun" | "runsAsSession">;
 	getBotTeamStore(): PersistentBotTeamStore;
 	getRemoteHub(): Pick<RemoteHubController, "ask" | "send">;
 	/** Drops the cached bot roster: a bot or group changed under it. */
@@ -81,20 +80,12 @@ function isOwnerDirect(context: BotRuntimeContext, options: BotOperatorMessageOp
 }
 
 /**
- * Whether the bot runs as a session of its own. A leader, a profile-backed bot and a bot a leader made (it works inside
- * that leader's tree and reaches its leader through `bot_message`, which a session lacks) still run as workers until
- * leaders fold into ordinary bots (phase 4).
+ * Whether the bot may run as a session of its own. A leader and a bot a leader made (it works inside that leader's tree
+ * and reaches its leader through `bot_message`, which a session lacks) still run as workers until leaders fold into
+ * ordinary bots (phase 4); a bot made from a profile also asks its profile (`BotSessionHost.runsAsSession`).
  */
-function hasOwnSession(bot: {
-	readonly leader?: boolean;
-	readonly profileId?: string;
-	readonly createdBy?: string;
-}): boolean {
-	return (
-		bot.leader !== true &&
-		bot.profileId === undefined &&
-		(bot.createdBy === undefined || RESERVED_BOT_CREATOR_IDS.has(bot.createdBy))
-	);
+function hasOwnSession(bot: { readonly leader?: boolean; readonly createdBy?: string }): boolean {
+	return bot.leader !== true && (bot.createdBy === undefined || RESERVED_BOT_CREATOR_IDS.has(bot.createdBy));
 }
 
 /** Dispatches operator messages to bots and groups, one send at a time per bot generation. */
@@ -197,7 +188,7 @@ export class BotOperatorDispatch {
 		if (isOwnerDirect(context, options)) {
 			// The owner's word to a bot with a session of its own never needs the worker runtime.
 			let sessionBot = store.ensureBotForDispatch(normId, () => this.host.resolveModelSpec());
-			if (hasOwnSession(sessionBot)) {
+			if (hasOwnSession(sessionBot) && this.host.botSessions.runsAsSession(sessionBot)) {
 				const wasRetired = sessionBot.retired === true;
 				if (wasRetired) sessionBot = store.upsertBot({ agentId: normId, retired: false });
 				assertCurrentBranch();
@@ -257,8 +248,6 @@ export class BotOperatorDispatch {
 		if (bot.retired) {
 			bot = store.upsertBot({ agentId: normId, retired: false });
 		}
-		// Use the current record returned by the locked mutation, including another parent's edits.
-		const spec = { provider: bot.provider, modelId: bot.modelId };
 
 		// Fresh worker start with preferredAgentId so lane and worker identity match the persistent bot
 		// The memory block follows the task: the lane label, the roster line and the chat open on what the operator sent.
@@ -285,23 +274,10 @@ export class BotOperatorDispatch {
 		// The run joins the bot's history in its home, so a later session reads this conversation too.
 		if (!teamId)
 			this.host.botSessions.noteHistoryRun(normId, this.deps.getSessionManager().getSessionId(), preferredAgentId);
-		const stance = botStartModelStance(this.deps.getSettingsManager().getWorkerModelPinPolicy(), bot);
 		const started = await this.host.startWorkerDelegation({
-			...stance.flags,
+			// The current record returned by the locked mutation, including another parent's edits.
+			...botWorkerStart(this.deps.getSettingsManager().getWorkerModelPinPolicy(), bot),
 			instructions: fullInstructions,
-			// The soul is admitted into the worker's contract, so every turn of this worker generation carries it.
-			...(bot.soul ? { botSoul: bot.soul } : {}),
-			...(bot.profileId ? { profileId: bot.profileId } : {}),
-			authority: {
-				...(stance.ownModel ? { model: { provider: spec.provider, modelId: spec.modelId } } : {}),
-				// The owner's own choice of this bot's model is honoured as given; a root's or a leader's is held to the subscription rule.
-				...(bot.createdBy === "owner" ? { modelChosenBy: "owner" as const } : {}),
-				// A chat bot answers in plain text, which only a read-only worker may do; a write-capable one reports in the claim envelope.
-				readOnly: bot.canWrite !== true,
-				...(stance.ownModel && isOrchestrationThinkingLevel(bot.thinkingLevel)
-					? { thinkingLevel: bot.thinkingLevel }
-					: {}),
-			},
 			preferredAgentId,
 			// A leader's brief to a bot that has no live worker starts it under the delegation, not the foreground goal.
 			...(options?.delegationObjectiveId ? { delegationObjectiveId: options.delegationObjectiveId } : {}),
@@ -359,7 +335,7 @@ export class BotOperatorDispatch {
 			mode: "started",
 			agentId: normId,
 			laneId: started.record.laneId,
-			modelRef: started.record.modelRef ?? `${spec.provider}/${spec.modelId}`,
+			modelRef: started.record.modelRef ?? `${bot.provider}/${bot.modelId}`,
 			messageId: `bot-msg-${Date.now()}`,
 		};
 	}

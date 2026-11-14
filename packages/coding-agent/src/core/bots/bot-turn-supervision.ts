@@ -10,6 +10,7 @@ import type { AgentMessage } from "../../kernel/index.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { createSupervision } from "../agent-session-composition.ts";
 import type { AgentSessionEvent } from "../agent-session-contracts.ts";
+import type { WorkerRole } from "../orchestration/contracts.ts";
 import { assistantOutputTail, ProgressObservationWindow } from "../supervision/progress-observation-window.ts";
 import type { WorkerSupervisionCoordinator } from "../supervision/worker-supervision-coordinator.ts";
 
@@ -33,7 +34,7 @@ type SupervisedSession = Pick<
 export interface BotTurnSupervisionOptions {
 	readonly agentId: string;
 	/** What the bot's turns are for, as a worker's role says it: a bot that writes builds, one that reads explores. */
-	readonly role: "implementer" | "explorer";
+	readonly role: WorkerRole;
 	readonly cwd: string;
 	warn(message: string): void;
 }

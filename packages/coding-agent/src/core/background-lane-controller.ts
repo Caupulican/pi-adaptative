@@ -273,7 +273,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _awayChannelsKey: string | undefined;
 	private _unsubscribeAwayChannelSettings: (() => void) | undefined;
 	private _awayService: AwayService | undefined;
-	private readonly botBindings: BotRuntimeBindings;
+	private readonly botBindings = new BotRuntimeBindings(
+		() => this.deps.getSessionManager(),
+		() => this.getBotTeamStore(),
+	);
 	/** Lazily materialized so a UAC surface without `delegate` allocates no worker runtime state. */
 	private _workers: WorkerDelegationController | undefined;
 	/** One durable lifecycle shared by every worker execution adapter. */
@@ -331,13 +334,10 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			timers: deps.getTimers().port("channel-poll"),
 			wakeTimers: deps.getTimers().port("channel-expiry"),
 		});
-		this.botBindings = new BotRuntimeBindings(
-			() => deps.getSessionManager(),
-			() => this.getBotTeamStore(),
-		);
 		this._botHost = attachBotSessions(deps, {
 			store: () => this.getBotTeamStore(),
 			warn: (message) => this._safeWarn(message),
+			workerController: () => this._getWorkerController(),
 		});
 		this._botRoster = new BotRoster({
 			store: () => this.getBotTeamStore(),
