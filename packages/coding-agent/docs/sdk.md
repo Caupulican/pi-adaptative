@@ -722,7 +722,7 @@ await createAgentSession({ standing: { kind: "bot", agentId: "reviewer" } });
 await createAgentSession({ standing: { kind: "vehicle" } });
 ```
 
-Without `standing`, the deprecated `isChildSession: true` (or `PI_CHILD_SESSION=1`) makes a worker. In a worker process a root becomes a worker; a bot or a vehicle keeps its standing. `holdsOwnWatches` is removed: pass `standing: { kind: "bot", agentId }`.
+Without `standing`, the deprecated `isChildSession: true` makes a worker. When neither is given, the environment variable `PI_CHILD_SESSION=1` makes a worker: a marker for a launcher that starts Pi as a child of its own (an SDK host, or the CLI, which builds its session the same way). Pi never sets it, and an explicit `standing` or `isChildSession` wins over it. In a worker process a root becomes a worker; a bot or a vehicle keeps its standing. A worker standing outside a worker process (an SDK child, or `PI_CHILD_SESSION=1`) answers every capability as a worker, including the skill tool without `repair` (it holds no `zoom`/`date`, as the ICM provider offers them only where the session owns the history); the worker process ceilings (its tool surface, its zero-footprint stores) and the usage-reset wait, which a worker process's attempt ladder owns, still follow the process, not the standing. `holdsOwnWatches` is removed: pass `standing: { kind: "bot", agentId }`.
 
 `sessionCapabilities(standing)` returns the table's row for a standing (`SessionCapabilities`). A caller that builds `AgentSession` directly passes it as `AgentSessionConfig.capabilities`.
 
