@@ -78,7 +78,7 @@ import {
 } from "./bot-inbox.ts";
 import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { type BotModelRefusal, BotModelRefusedError } from "./bot-model-refusal.ts";
-import { type BotNotice, readBotNotices, writeBotNotice } from "./bot-notices.ts";
+import { type BotNotice, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
 import { BotOwedWork, cancelOtherSessionsWatches, owesWatchWork } from "./bot-session-owed-work.ts";
 import {
@@ -318,19 +318,11 @@ export class BotSessionHost {
 		).map(({ message }) => message);
 	}
 
-	/**
-	 * Tells the owner what the bot's own session raised for them, in the bot's chat every session reads, which marks the bot
-	 * unread unless `mark` is false (an informational notice). Only a notice that could not be written reaches the owner as
-	 * this process's warning, with its words.
-	 */
+	/** Tells the owner what the bot's own session raised for them, in the bot's chat (see `keepBotNotice`). */
 	private notify(agentId: string, text: string, mark = true): void {
-		try {
-			writeBotNotice(this.ports.agentDir(), this.ports.store(), { agentId, text, at: Date.now(), mark });
-		} catch (error) {
-			this.ports.warn(interfaceText().botTeam.botNoticeNotRecorded(agentId, text, errorText(error)));
-			return;
-		}
-		this.changed(agentId);
+		const notice = { agentId, text, at: Date.now() };
+		if (keepBotNotice(this.ports.agentDir(), this.ports.store(), notice, mark, (message) => this.ports.warn(message)))
+			this.changed(agentId);
 	}
 
 	/** The bot's earlier worker conversations, whichever session ran them (see `BotHistory`). */

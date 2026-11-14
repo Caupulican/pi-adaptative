@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- A bot notice that reached its chat but whose unread mark could not be written no longer warns that it "could not be kept in its chat": that warning now says the roster could not mark it unread, and every open chat still redraws with the notice.
 - A bot's turn left open when its session closes (a run end that announced a retry that never began) now records its answer as well as its spend: the close reported only the charge, so the bot's last words never reached the roster's summary and unread mark.
 - A bot's or an away channel's per-turn dollar bound now counts an automatic retry's attempts as the same turn: the spend restarted from zero at every attempt, so a turn could spend up to its bound once per attempt. A bot turn's supervision likewise watches the whole turn in one window instead of opening a new one at every retry attempt.
 - A bot whose session fails to open for another reason than its model (an unreadable session file, a directory gone, a stale lock) is no longer loaded again every minute by the inbox listing, each attempt taking and writing its lock and waking every other process: the listing tries it again only once a new message waits in its inbox or what defines it changed; a process start, another host's change or a record change still tries it at once.
