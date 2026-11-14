@@ -793,8 +793,8 @@ export class RuntimeBuilder {
 			// The harness's own memory, skills and sessions are searchable without a file glob.
 			agentDir: deps.getAgentDir(),
 		};
-		const boundary = this._credentialExposureBoundary;
-		this.sessionConfinement = buildSessionConfinement(deps.getCwd(), privatePathScope, this._pathEnvelopes, boundary);
+		const held = { boundary: this._credentialExposureBoundary, commands: this._commandEnvironment };
+		this.sessionConfinement = buildSessionConfinement(deps.getCwd(), privatePathScope, this._pathEnvelopes, held);
 		// The group lock is the worktree's (shared with every session working in it); emission order is per session.
 		this._fileMutationIntents = new FileMutationIntentController({
 			mutationScope: mutationScopeForWorktree(deps.getCwd()),

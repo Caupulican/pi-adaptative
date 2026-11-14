@@ -111,6 +111,8 @@ export interface WorkerRunEnvironment {
 	readonly attributionEnvironment: Readonly<NodeJS.ProcessEnv>;
 	/** Shell spawn hook that applies scratch, secret stripping, ownership marker and role. */
 	readonly spawnHook: BashSpawnHook;
+	/** A command's environment built on `base` as the spawn hook builds it: secrets stripped, then the attribution and restrictions. */
+	commandEnvironment(base: NodeJS.ProcessEnv): NodeJS.ProcessEnv;
 	/** End every process still carrying the marker, then remove the scratch directory. */
 	dispose(): void;
 }
@@ -232,21 +234,20 @@ export function createWorkerRunEnvironment(
 		...workerCommitterEnvironment(workerLabel),
 		...workerCommandRestrictions(options, process.env),
 	};
-	const spawnHook: BashSpawnHook = (context) => {
-		const env: NodeJS.ProcessEnv = { ...context.env };
+	const commandEnvironment = (base: NodeJS.ProcessEnv): NodeJS.ProcessEnv => {
+		const env: NodeJS.ProcessEnv = { ...base };
 		const stripped = new Set(omittedEnvironmentNames(env));
 		for (const name of Object.keys(env)) if (stripped.has(name)) delete env[name];
-		return {
-			...context,
-			env: { ...env, ...attributionEnvironment, ...(options.offline ? offlineGitEnvironment(env) : {}) },
-		};
+		return { ...env, ...attributionEnvironment, ...(options.offline ? offlineGitEnvironment(env) : {}) };
 	};
+	const spawnHook: BashSpawnHook = (context) => ({ ...context, env: commandEnvironment(context.env) });
 	return {
 		marker,
 		scratchDirectory,
 		omittedEnvironmentVariables: omittedEnvironmentNames(process.env),
 		attributionEnvironment,
 		spawnHook,
+		commandEnvironment,
 		dispose: () => {
 			try {
 				const reaped = reapMarkedProcesses(marker);

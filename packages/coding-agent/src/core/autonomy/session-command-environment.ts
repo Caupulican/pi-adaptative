@@ -35,6 +35,12 @@ export interface SessionCommandEnvironment {
 		readonly attributionEnvironment?: Readonly<NodeJS.ProcessEnv>;
 	};
 	/**
+	 * A command the session's watch runs, built on the watch's own bounded environment `base` as the session's own commands
+	 * are built (role, run marker, scratch directory, and its offline and read-only restrictions); absent where the session's
+	 * commands carry none of their own, so the watch's environment stays `base`.
+	 */
+	readonly watchedCommandEnvironment?: (base: NodeJS.ProcessEnv) => NodeJS.ProcessEnv;
+	/**
 	 * End what the session's commands left running and remove their scratch directory; `holdWarning` receives the owner's
 	 * notice of the processes that were ended.
 	 */
@@ -82,6 +88,7 @@ export function createSessionCommandEnvironment(
 			omitEnvironmentVariables: [...new Set([VAULT_SESSION_VARIABLE, ...(run?.omittedEnvironmentVariables ?? [])])],
 		},
 		runProcess: { environment: added, ...(run ? { attributionEnvironment: run.attributionEnvironment } : {}) },
+		...(run ? { watchedCommandEnvironment: run.commandEnvironment } : {}),
 		dispose: (holdWarning) => {
 			run?.dispose();
 			if (stopped.length === 0) return;

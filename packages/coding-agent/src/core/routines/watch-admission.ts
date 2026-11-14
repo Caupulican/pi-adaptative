@@ -6,7 +6,7 @@
  * - a command passes the admission the owner's own shell calls pass (the capability envelope, credential protection,
  *   edge classification against the session's edge grants, and the read-only line of a session whose shell edits
  *   nothing), non-interactively: whatever would ask the owner is refused, since a watch cannot ask. It runs with a
- *   bounded environment;
+ *   bounded environment, closed further as the session's own commands are where they carry restrictions (a bot's session);
  * - a managed process is a process-matrix entry that has not ended yet, and an operating-system process must be running.
  * Ports, pages and the cadence are bounded by the condition's own schema; a page's address is checked again at fetch.
  * A watch a worker runtime armed is admitted under the session's authority and the worker's together
@@ -66,7 +66,8 @@ export interface WatchAdmissionHost {
 	getCredentialExposureBoundary?(): CredentialExposureBoundary | undefined;
 	/**
 	 * What confines the session's own tools (a confined bot's session): the read-only line its shell is held to, which
-	 * judges a watched command at arming and at every run, and the roots it reads in, which a watched path's content stays in.
+	 * judges a watched command at arming and at every run, the roots it reads in, which a watched path's content stays in,
+	 * and the environment its own commands run in, which a watched command runs in.
 	 */
 	getSessionConfinement?(): SessionConfinement | undefined;
 	/**
@@ -145,11 +146,12 @@ export class WatchAdmission {
 
 	/**
 	 * The environment a watched command runs with: the bounded one, closed further where the worker's own commands are,
-	 * with the run's scratch directory as its temporary directory.
+	 * with the run's scratch directory as its temporary directory, or, for the session's own watch, as the session's own
+	 * commands are (a bot's session: worker role, run marker, scratch, offline and read-only variables).
 	 */
 	commandEnvironment(worker?: WorkerWatchAuthority, scratch?: WatchCommandScratch): NodeJS.ProcessEnv {
 		const env = watchCommandEnvironment();
-		if (!worker) return env;
+		if (!worker) return this.host.getSessionConfinement?.()?.commandEnvironment?.(env) ?? env;
 		const { scope } = worker;
 		return {
 			...env,
