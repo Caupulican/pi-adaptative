@@ -1,6 +1,5 @@
 /**
- * What a bot's session reads from the main session: its settings (a manager of the bot's own over the same storage, read
- * again on each change of the main session's), its System One as it is now (on or off, provider, transport), and, as the
+ * What a bot's session reads from the main session: its settings manager (the bot's follows the same storage), its System One as it is now (on or off, provider, transport), and, as the
  * worker admission reads them, the model rules for an explicitly requested model (one predicate,
  * `worker-authority-resolver`), a profile compiled by that admission (`compileBotSession`), the spend bound a worker's budget carries, and the cost view the main session keeps for
  * spawned work. Composed here so the lane controller only hands over its
@@ -13,16 +12,14 @@ import type { PersistentBotRecord } from "../delegation/persistent-bot-team-stor
 import { meteredModelRefusalFacts } from "../delegation/worker-authority-resolver.ts";
 import type { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
 import { interfaceText } from "../language/interface-text.ts";
-import type { SettingsManager } from "../settings-manager.ts";
 import type { SpawnedUsageReporter } from "../spawned-usage.ts";
-import type { BotSessionHostPorts } from "./bot-session-host.ts";
-import { attachBotSessionHost, type BotSessionAttachment } from "./bot-session-registry.ts";
+import { attachBotSessionHost, type BotSessionAttachment, type BotSessionRootPorts } from "./bot-session-registry.ts";
 
 /** Why the worker admission refuses the bot's own model now, in the owner's words; undefined when it may run. */
 function botModelRefusal(
 	deps: BackgroundLaneControllerDeps,
 	record: PersistentBotRecord,
-	model: Parameters<BotSessionHostPorts["modelRefusal"]>[1],
+	model: Parameters<BotSessionRootPorts["modelRefusal"]>[1],
 ): string | undefined {
 	const words = interfaceText().botTeam;
 	const metered = meteredModelRefusalFacts({
@@ -47,7 +44,7 @@ function botModelRefusal(
 }
 
 /** What the lane controller hands over of its own: the bot store, its warnings and its worker admission. */
-interface BotSessionOwnPorts extends Pick<BotSessionHostPorts, "store" | "warn"> {
+interface BotSessionOwnPorts extends Pick<BotSessionRootPorts, "store" | "warn"> {
 	workerController(): Pick<WorkerDelegationController, "compileBotSession">;
 }
 
@@ -56,18 +53,7 @@ export function attachBotSessions(deps: BackgroundLaneControllerDeps, own: BotSe
 	return attachBotSessionHost(botSessionHostPorts(deps, own), !deps.isChildSession());
 }
 
-/**
- * A settings manager of the bot's own over the main session's storage that reads it again after each change the main
- * session's manager makes. A change is announced before its write is queued, so the write is awaited from the next
- * microtask, then the settings are read from the storage it reached.
- */
-function followSettings(main: SettingsManager): ReturnType<BotSessionHostPorts["settings"]> {
-	const settings = main.sibling();
-	const reread = () => queueMicrotask(() => void main.flush().then(() => settings.reload()));
-	return { settings, release: main.subscribeChanges(reread) };
-}
-
-function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSessionOwnPorts): BotSessionHostPorts {
+function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSessionOwnPorts): BotSessionRootPorts {
 	const { workerController, ...ownPorts } = own;
 	return {
 		...ownPorts,
@@ -81,7 +67,7 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 		agentDir: () => deps.getAgentDir(),
 		cwd: () => deps.getCwd(),
 		modelRegistry: () => deps.getModelRegistry(),
-		settings: () => followSettings(deps.getSettingsManager()),
+		settingsManager: () => deps.getSettingsManager(),
 		// Whether the main session has System One at all (its settings turn it off and on again live, the bot's with them),
 		// the provider it names and its transport: never its on/off of this moment, which would outlive a settings change.
 		systemOne: () => {

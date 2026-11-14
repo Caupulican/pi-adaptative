@@ -1,18 +1,43 @@
 /**
  * One bot session host per process and agent directory. Every root session of the process attaches to the same host, so
  * two roots in one process never run two sessions of one bot, nor refuse each other a bot as if another process ran it
- * (the lock record names the host that holds it, not only the process). The host reads the ports of the root attached
- * last that is still attached (its settings, model rules, spend bound, cost view, clock and warnings); the last root to
- * detach stops it. A child session (a bot's own session, a worker) hosts no bots: it gets a host of its own that no
- * other session shares.
+ * (the lock record names the host that holds it, not only the process). What is the process's answers from any attached
+ * root (the store, model rules, spend bound, System One, clock): the root attached last that is still attached. A bot's
+ * settings read the shared settings storage again after a change any attached root announces, a root attached later
+ * included, so no root's detach leaves them stale. A message carries the root it came from as its sender (`BotSender`):
+ * the directory a bot it loads works in and where its turns' warnings and spend go; once that root detaches, the root
+ * attached last answers. The last root to detach stops the host. A child session (a bot's own session, a worker) hosts
+ * no bots: it gets a host of its own that no other session shares.
  */
 import { resolve } from "node:path";
-import { BotSessionHost, type BotSessionHostPorts } from "./bot-session-host.ts";
+import type { SettingsManager } from "../settings-manager.ts";
+import {
+	type BotSender,
+	type BotSessionDelivery,
+	BotSessionHost,
+	type BotSessionHostPorts,
+} from "./bot-session-host.ts";
 
-interface SharedHost {
+/** What one root session hands its process's host: the process's ports, read from it while it answers, and its own sender. */
+export interface BotSessionRootPorts extends Omit<BotSessionHostPorts, "sender" | "senderIn" | "settings">, BotSender {
+	/** The root's settings manager: a bot's settings read the same storage and follow the changes it announces. */
+	settingsManager(): SettingsManager;
+}
+
+/** A bot's settings manager, with its subscription to each attached root's changes. */
+interface SettingsFollower {
+	readonly settings: SettingsManager;
+	readonly subscriptions: Map<BotSessionRootPorts, () => void>;
+}
+
+interface AttachedRoots {
+	/** The attached roots' ports, in attach order; the last one answers for the process. */
+	readonly roots: BotSessionRootPorts[];
+	readonly followers: Set<SettingsFollower>;
+}
+
+interface SharedHost extends AttachedRoots {
 	readonly host: BotSessionHost;
-	/** The attached roots' ports, in attach order; the last one answers. */
-	readonly roots: BotSessionHostPorts[];
 }
 
 const hosts = new Map<string, SharedHost>();
@@ -20,33 +45,72 @@ const hosts = new Map<string, SharedHost>();
 /** One root session's attachment to its process's bot session host. */
 export interface BotSessionAttachment {
 	readonly host: BotSessionHost;
+	/** The host as this root's message dispatch reaches it: each delivery carries this root as its sender. */
+	readonly delivery: BotSessionDelivery;
 	/** Observes the bots' session changes while this root stays attached (see `BotSessionHost.subscribe`). */
 	subscribe(listener: (change: readonly string[]) => void): () => void;
 	/** Detaches the root; the last root's detach stops the host and resolves once its sessions closed. */
 	detach(): Promise<void>;
 }
 
-/** Ports that answer from the root attached last; a host never outlives its last root, which answers its stop. */
-function relayPorts(roots: readonly BotSessionHostPorts[]): BotSessionHostPorts {
-	const root = (): BotSessionHostPorts => {
-		const current = roots.at(-1);
-		if (!current) throw new Error("No root session is attached to the bot session host.");
-		return current;
+function answering(shared: AttachedRoots): BotSessionRootPorts {
+	const current = shared.roots.at(-1);
+	if (!current) throw new Error("No root session is attached to the bot session host.");
+	return current;
+}
+
+/** `root` as a message's sender while it stays attached, the root attached last afterwards. */
+function senderOf(shared: AttachedRoots, root: BotSessionRootPorts): BotSender {
+	const current = () => (shared.roots.includes(root) ? root : answering(shared));
+	return {
+		cwd: () => current().cwd(),
+		hostSessionId: () => current().hostSessionId(),
+		warn: (message) => current().warn(message),
+		reportUsage: (usage, report) => current().reportUsage(usage, report),
 	};
+}
+
+/**
+ * Reads the storage again after each change `root`'s manager announces. A change is announced before its write is
+ * queued, so the write is awaited from the next microtask, then the settings are read from the storage it reached.
+ */
+function follow(follower: SettingsFollower, root: BotSessionRootPorts): void {
+	const main = root.settingsManager();
+	const reread = () => queueMicrotask(() => void main.flush().then(() => follower.settings.reload()));
+	follower.subscriptions.set(root, main.subscribeChanges(reread));
+}
+
+/** The process's ports, answered by the root attached last; a host never outlives its last root, which answers its stop. */
+function relayPorts(shared: AttachedRoots): BotSessionHostPorts {
+	const root = () => answering(shared);
 	return {
 		agentDir: () => root().agentDir(),
-		cwd: () => root().cwd(),
+		sender: () => senderOf(shared, root()),
+		senderIn: (cwd) => {
+			const found = shared.roots.findLast((candidate) => candidate.cwd() === cwd);
+			return found && senderOf(shared, found);
+		},
 		store: () => root().store(),
 		modelRegistry: () => root().modelRegistry(),
-		settings: () => root().settings(),
+		settings: () => {
+			const follower: SettingsFollower = { settings: root().settingsManager().sibling(), subscriptions: new Map() };
+			for (const attached of shared.roots) follow(follower, attached);
+			shared.followers.add(follower);
+			return {
+				settings: follower.settings,
+				release: () => {
+					shared.followers.delete(follower);
+					for (const unsubscribe of follower.subscriptions.values()) unsubscribe();
+					follower.subscriptions.clear();
+				},
+			};
+		},
 		systemOne: () => root().systemOne(),
 		timers: () => root().timers(),
-		hostSessionId: () => root().hostSessionId(),
 		warn: (message) => root().warn(message),
 		modelRefusal: (record, model) => root().modelRefusal(record, model),
 		compileProfile: (record) => root().compileProfile(record),
 		turnSpendBound: () => root().turnSpendBound(),
-		reportUsage: (usage, report) => root().reportUsage(usage, report),
 	};
 }
 
@@ -54,20 +118,28 @@ function relayPorts(roots: readonly BotSessionHostPorts[]): BotSessionHostPorts 
  * Attaches a session to a bot session host: a root session to the one of its process and agent directory, built on the
  * first attach; a child session to one of its own.
  */
-export function attachBotSessionHost(ports: BotSessionHostPorts, root: boolean): BotSessionAttachment {
+export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean): BotSessionAttachment {
 	const key = resolve(ports.agentDir());
 	let shared = root ? hosts.get(key) : undefined;
 	if (!shared) {
-		const roots: BotSessionHostPorts[] = [];
-		shared = { roots, host: new BotSessionHost(relayPorts(roots)) };
+		const attachedRoots: AttachedRoots = { roots: [], followers: new Set() };
+		shared = { ...attachedRoots, host: new BotSessionHost(relayPorts(attachedRoots)) };
 		if (root) hosts.set(key, shared);
 	}
-	const { host, roots } = shared;
+	const attached = shared;
+	const { host, roots, followers } = attached;
 	roots.push(ports);
+	for (const follower of followers) follow(follower, ports);
+	const sender = senderOf(attached, ports);
 	const listeners = new Set<() => void>();
 	let detached = false;
 	return {
 		host,
+		delivery: {
+			deliver: (agentId, message, mode) => host.deliver(agentId, message, mode, sender),
+			noteHistoryRun: (agentId, parentSessionId, runtime) => host.noteHistoryRun(agentId, parentSessionId, runtime),
+			runsAsSession: (record) => host.runsAsSession(record),
+		},
 		subscribe(listener) {
 			const unsubscribe = host.subscribe(listener);
 			listeners.add(unsubscribe);
@@ -81,6 +153,10 @@ export function attachBotSessionHost(ports: BotSessionHostPorts, root: boolean):
 			detached = true;
 			for (const unsubscribe of listeners) unsubscribe();
 			listeners.clear();
+			for (const follower of followers) {
+				follower.subscriptions.get(ports)?.();
+				follower.subscriptions.delete(ports);
+			}
 			if (roots.length > 1) {
 				roots.splice(roots.indexOf(ports), 1);
 				return;

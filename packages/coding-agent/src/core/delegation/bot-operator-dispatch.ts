@@ -6,7 +6,7 @@
  */
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { BackgroundLaneControllerDeps } from "../background-lane-deps.ts";
-import type { BotSessionHost } from "../bots/bot-session-host.ts";
+import type { BotSessionDelivery } from "../bots/bot-session-host.ts";
 import type { OrchestrationDelegationLimits, WorkerResultContract } from "../orchestration/contracts.ts";
 import type { RemoteHubController } from "../remote/hub-controller.ts";
 import { BOT_MEMORY_BLOCK_SEPARATOR } from "./bot-chat-text.ts";
@@ -34,7 +34,7 @@ import type { WorkerDelegationRequest } from "./worker-delegation-request.ts";
 /** What a dispatch reads from and asks of the coordinator: the roster, the lanes and the worker runtime. */
 export interface BotOperatorDispatchHost {
 	/** The bots that run as sessions of their own: the owner's direct words to such a bot go to its session. */
-	readonly botSessions: Pick<BotSessionHost, "deliver" | "noteHistoryRun" | "runsAsSession">;
+	readonly botSessions: BotSessionDelivery;
 	getBotTeamStore(): PersistentBotTeamStore;
 	getRemoteHub(): Pick<RemoteHubController, "ask" | "send">;
 	/** Drops the cached bot roster: a bot or group changed under it. */
@@ -82,7 +82,7 @@ function isOwnerDirect(context: BotRuntimeContext, options: BotOperatorMessageOp
 /**
  * Whether the bot may run as a session of its own. A leader and a bot a leader made (it works inside that leader's tree
  * and reaches its leader through `bot_message`, which a session lacks) still run as workers until leaders fold into
- * ordinary bots (phase 4); a bot made from a profile also asks its profile (`BotSessionHost.runsAsSession`).
+ * ordinary bots (phase 4); a bot made from a profile also asks its profile (`BotSessionDelivery.runsAsSession`).
  */
 function hasOwnSession(bot: { readonly leader?: boolean; readonly createdBy?: string }): boolean {
 	return bot.leader !== true && (bot.createdBy === undefined || RESERVED_BOT_CREATOR_IDS.has(bot.createdBy));

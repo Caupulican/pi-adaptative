@@ -85,8 +85,10 @@ export type { BotSessionState };
 /** What the host reads from and asks of the coordinator. */
 export interface BotSessionHostPorts {
 	agentDir(): string;
-	/** The owner's project directory: a bot works there. */
-	cwd(): string;
+	/** The root session a bot works for when no delivery names one (a wake, a stop): the one attached last. */
+	sender(): BotSender;
+	/** An attached root session working in `cwd`, which a bot whose session worked there is opened again for. */
+	senderIn(cwd: string): BotSender | undefined;
 	store(): PersistentBotTeamStore;
 	modelRegistry(): ModelRegistry;
 	/**
@@ -97,9 +99,7 @@ export interface BotSessionHostPorts {
 	/** The main session's System One as it is now: a bot's session follows it at each use, as the main session runs it. */
 	systemOne(): SystemOneHostSource;
 	timers(): TimerSource;
-	/** The pi session this process hosts bots for, named to the owner when another process is refused. */
-	hostSessionId(): string;
-	/** An owner-facing warning (a turn that failed, a session that did not close cleanly). */
+	/** An owner-facing warning that no bot turn's sender owns (a session that did not close cleanly, a lost watch). */
 	warn(message: string): void;
 	/** Why the worker admission refuses the bot's model now; undefined when it may run. */
 	modelRefusal(record: PersistentBotRecord, model: Model<Api>): string | undefined;
@@ -110,8 +110,29 @@ export interface BotSessionHostPorts {
 	 * or the main session's autonomy bound, the lower); undefined when nothing bounds it.
 	 */
 	turnSpendBound(): BotTurnSpendBound | undefined;
-	/** Records what a bot's turn spent with the main session's cost view, once per `reportId`. */
+}
+
+/**
+ * The root session a bot's message came from: the owner's project directory a bot it loads works in, the pi session named
+ * as its host, and where its turns' warnings and spend go. Once that root detaches, the root attached last answers.
+ */
+export interface BotSender {
+	cwd(): string;
+	/** The pi session that hosts the bot, named to the owner when another process is refused. */
+	hostSessionId(): string;
+	/** An owner-facing warning of the bot's turn (a turn that failed, a spend bound reached). */
+	warn(message: string): void;
+	/** Records what a bot's turn spent with the root session's cost view, once per `reportId`. */
 	reportUsage(usage: Usage, report: BotTurnUsageReport): void;
+}
+
+/** What a root session's message dispatch asks of the host: its deliveries carry that root as their sender. */
+export interface BotSessionDelivery extends Pick<BotSessionHost, "noteHistoryRun" | "runsAsSession"> {
+	deliver(
+		agentId: string,
+		message: string,
+		mode: BotOperatorMessageOptions["mode"],
+	): Promise<BotOperatorMessageDispatchResult>;
 }
 
 /** One turn's dollar bound, with the bound that sets it: the owner's worker bound, the main session's, or the bot's profile's. */
@@ -139,6 +160,8 @@ interface BotSessionEntry {
 	/** Publishes the session's state for the other processes. */
 	readonly stateWriter: BotHostStateWriter;
 	readonly modelRef: string;
+	/** The root its last message came from: its turns' warnings and spend go there. */
+	sender: BotSender;
 	/** What defined the session when it was built (`BotSessionDefinition.key`). */
 	readonly profileKey: string;
 	/** Its profile's dollar bound on one turn, for a bot made from a profile. */
@@ -300,8 +323,10 @@ export class BotSessionHost {
 		agentId: string,
 		message: string,
 		mode: BotOperatorMessageOptions["mode"],
+		sender: BotSender = this.ports.sender(),
 	): Promise<BotOperatorMessageDispatchResult> {
-		const entry = await this.open(agentId);
+		const entry = await this.open(agentId, sender);
+		entry.sender = sender;
 		// Admitted here as well as at the run's start: a refusal answers the owner's send itself, not a failed turn.
 		this.admit(agentId, entry.session.model, { key: entry.profileKey, spendBoundUsd: entry.spendBoundUsd });
 		const queued = mode === "queue";
@@ -330,7 +355,7 @@ export class BotSessionHost {
 				() => accept(false),
 				(error: unknown) => {
 					// Before acceptance the refusal is the send's own error; after it the turn failed and the owner is told.
-					if (wasAccepted) this.ports.warn(interfaceText().botTeam.botTurnFailed(agentId, errorText(error)));
+					if (wasAccepted) entry.sender.warn(interfaceText().botTeam.botTurnFailed(agentId, errorText(error)));
 					else accept(false, errorText(error));
 				},
 			)
@@ -405,9 +430,9 @@ export class BotSessionHost {
 	 * The session the record defines now: a bot of its own on its record, a bot made from a profile on what the worker
 	 * admission compiles for it. Throws the owner's words when it cannot run as a session.
 	 */
-	private define(record: PersistentBotRecord): BotSessionDefinition {
+	private define(record: PersistentBotRecord, cwd = this.ports.sender().cwd()): BotSessionDefinition {
 		const { profileId } = record;
-		if (profileId === undefined) return ownBotSession(record, this.ports.cwd(), this.ports.modelRegistry());
+		if (profileId === undefined) return ownBotSession(record, cwd, this.ports.modelRegistry());
 		const words = interfaceText().botTeam;
 		const compiled = this.ports.compileProfile({ ...record, profileId });
 		if (!compiled.ok) throw new Error(words.botProfileRefused(record.agentId, profileId, compiled.skipReason));
@@ -435,7 +460,7 @@ export class BotSessionHost {
 	}
 
 	/** The bot's loaded session, built or continued as the record defines it. */
-	private async open(agentId: string): Promise<BotSessionEntry> {
+	private async open(agentId: string, sender: BotSender): Promise<BotSessionEntry> {
 		const stopped = () => new Error(interfaceText().botTeam.botSessionsClosing(agentId));
 		if (this.stopped) throw stopped();
 		await this.closing.get(agentId);
@@ -448,21 +473,21 @@ export class BotSessionHost {
 			// A record changed since the session was built (by another process, say): an idle session is rebuilt on it.
 			if (this.isBusy(existing) || existing.profileKey === this.keyOf(record)) return existing;
 			await this.close(agentId);
-			return this.open(agentId);
+			return this.open(agentId, sender);
 		}
 		const pending = this.loading.get(agentId);
 		if (pending) return pending;
-		const built = this.load(record).finally(() => this.loading.delete(agentId));
+		const built = this.load(record, sender).finally(() => this.loading.delete(agentId));
 		this.loading.set(agentId, built);
 		return built;
 	}
 
-	private async load(record: PersistentBotRecord): Promise<BotSessionEntry> {
+	private async load(record: PersistentBotRecord, sender: BotSender): Promise<BotSessionEntry> {
 		const agentDir = this.ports.agentDir();
 		const { agentId } = record;
 		const words = interfaceText().botTeam;
 		const { home, profile } = ensureBotHome(agentDir, record);
-		const definition = this.define(record);
+		const definition = this.define(record, sender.cwd());
 		const { model, cwd } = definition;
 		// A model refused now builds no session and takes no lock.
 		this.admit(agentId, model, definition);
@@ -566,11 +591,12 @@ export class BotSessionHost {
 				stateWriter: new BotHostStateWriter(agentDir, {
 					agentId,
 					hostKind: "session",
-					hostSessionId: this.ports.hostSessionId(),
+					hostSessionId: sender.hostSessionId(),
 					botSessionId: session.sessionId,
 					holder: this.holder,
 				}),
 				modelRef: `${model.provider}/${model.id}`,
+				sender,
 				profileKey: definition.key,
 				spendBoundUsd: definition.spendBoundUsd,
 				unsubscribe: () => {},
@@ -588,7 +614,7 @@ export class BotSessionHost {
 						limit.usd.toFixed(2),
 						limit.bound,
 					);
-					this.ports.warn(reason);
+					entry.sender.warn(reason);
 					return reason;
 				},
 			});
@@ -597,12 +623,12 @@ export class BotSessionHost {
 				agentId,
 				role: definition.role,
 				cwd,
-				warn: (message) => this.ports.warn(interfaceText().botTeam.botWarning(agentId, message)),
+				warn: (message) => entry.sender.warn(interfaceText().botTeam.botWarning(agentId, message)),
 			});
 			const unsubscribeEvents = session.subscribe((event) => {
 				supervision.observe(event);
 				// The session's own warnings (a turn a watch started that failed, say) reach the owner as the bot's.
-				if (event.type === "warning") this.ports.warn(interfaceText().botTeam.botWarning(agentId, event.message));
+				if (event.type === "warning") entry.sender.warn(interfaceText().botTeam.botWarning(agentId, event.message));
 				if (event.type === "agent_start") {
 					entry.usageBefore ??= structuredClone(entry.session.getCumulativeUsage());
 					entry.turnStartedAt ??= Date.now();
@@ -714,16 +740,22 @@ export class BotSessionHost {
 		if (this.stopped || this.entries.has(agentId) || readRemoteBotHost(agentDir, agentId, this.holder)) return;
 		const saved = this.view.savedSessionOf(agentId);
 		const record = this.ports.store().getBot(agentId);
-		if (!saved || !record || !this.holdsWatches(saved.id)) return;
-		let cwd: string;
+		if (!saved?.cwd || !record || !this.holdsWatches(saved.id)) return;
+		// A bot of its own works where the root it opens for works; a profile's, where its profile compiles to.
+		let sender: BotSender | undefined;
 		try {
-			cwd = record.profileId === undefined ? this.ports.cwd() : this.define(record).cwd;
+			sender =
+				record.profileId === undefined
+					? this.ports.senderIn(saved.cwd)
+					: this.define(record).cwd === saved.cwd
+						? this.ports.sender()
+						: undefined;
 		} catch (error) {
 			this.ports.warn(interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error)));
 			return;
 		}
-		if (saved.cwd !== cwd) return;
-		void this.open(agentId).catch((error: unknown) => {
+		if (!sender) return;
+		void this.open(agentId, sender).catch((error: unknown) => {
 			if (!readRemoteBotHost(agentDir, agentId, this.holder))
 				this.ports.warn(interfaceText().botTeam.botWatchesNotResumed(agentId, errorText(error)));
 		});
@@ -747,7 +779,7 @@ export class BotSessionHost {
 		if (!hasReportableUsage(usage)) return;
 		const sessionId = session.sessionId;
 		try {
-			this.ports.reportUsage(usage, {
+			entry.sender.reportUsage(usage, {
 				agentId: entry.agentId,
 				// The turn's identity: the bot's session and what it had spent when the turn began.
 				reportId: deriveSpawnedUsageReportId("bot-session", sessionId, [
@@ -760,7 +792,7 @@ export class BotSessionHost {
 				model: model.id,
 			});
 		} catch (error) {
-			this.ports.warn(interfaceText().botTeam.botTurnSpendNotRecorded(entry.agentId, errorText(error)));
+			entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(entry.agentId, errorText(error)));
 		}
 	}
 
