@@ -523,7 +523,8 @@ export class TranscriptHierarchyHost {
 		const settings = this.deps.getHistorySettings();
 		let reason: string | undefined;
 		if (!reader) reason = NOT_ATTACHED_REASON;
-		else if (!this.deps.ownsHistory()) reason = "Child sessions do not build a history hierarchy.";
+		else if (!this.deps.ownsHistory())
+			reason = "This session does not hold the owner's history, so it builds no history hierarchy.";
 		else if (!settings.hierarchy) reason = HIERARCHY_OFF_REASON;
 		else if (!this.deps.isRetrievalEnabled()) reason = MEMORY_RETRIEVAL_DISABLED_REASON;
 		let summarizer: ReturnType<typeof resolveTranscriptSummarizer> | undefined;

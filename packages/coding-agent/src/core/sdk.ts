@@ -654,8 +654,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					if (options?.signal?.aborted) throw new Error("Request was aborted");
 				}
 				const serviceTiers = accountModels.serviceTiers(model);
-				// Fast mode buys latency, which only the owner's live turn waits on: a worker's, an isolated completion's
-				// or a child session's request runs at standard processing whatever the provider's saved preference.
+				// Fast mode buys latency, which only the owner's live turn waits on: a session without live owner turns
+				// (a worker, a bot, a vehicle) or a background request runs at standard processing whatever the saved tier.
 				const requestLane = currentProviderLane();
 				const foregroundRequest =
 					capabilities.liveOwnerTurns &&

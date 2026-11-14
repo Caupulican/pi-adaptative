@@ -79,7 +79,7 @@ export const OWNER_DECISIONS_LIST_LIMIT = 10;
 export type StatusUnavailableCause =
 	/** The routine store is not loaded, so neither the routines, the daemon status nor the GitHub interests are read. */
 	| "routine_store"
-	/** A child session owns no routines, and holds no routine store to list them from. */
+	/** The session holds no routines (a worker or vehicle session: no routine scope), so it has none to list. */
 	| "child_session"
 	/** The always-on service is read from the routine store, so a session without one reads no service. */
 	| "service_routine_store"
@@ -390,7 +390,8 @@ type UsageWindow = Pick<
 export interface AutonomyStatusSources {
 	readonly nowMs: number;
 	readonly sessionId: string;
-	readonly childSession: boolean;
+	/** Whether the session holds routines at all (`routineScope`: a root's own, a bot's own watches). */
+	readonly holdsRoutines: boolean;
 	readonly sessionManager: Pick<
 		SessionManager,
 		"getBranch" | "getEntry" | "getPendingParentInputs" | "isPersistenceStateUncertain"
@@ -570,8 +571,8 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 		section<RoutinesStatus>(async () => {
 			if (!store)
 				return unavailable(
-					sources.childSession ? "child_session" : "routine_store",
-					sources.childSession ? "routines do not run in a child session" : NO_STORE,
+					sources.holdsRoutines ? "routine_store" : "child_session",
+					sources.holdsRoutines ? NO_STORE : "this session holds no routines",
 				);
 			const wakes = (await day()).routineResultTurnWakes;
 			return available({

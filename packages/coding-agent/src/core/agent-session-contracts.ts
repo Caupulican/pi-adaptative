@@ -195,7 +195,7 @@ export interface AgentSessionConfig {
 	isExplicitModel?: boolean;
 	/** Preserve an explicit launch-time thinking level across profile reloads. */
 	isExplicitThinking?: boolean;
-	/** What the session's standing may do, resolved once by `createAgentSession`; every session-scoped gate reads it. */
+	/** What the standing may do, resolved once by `createAgentSession`; the worker tool ceiling stays the process's. */
 	capabilities: SessionCapabilities;
 	/** Alternate base tool instances for embedded/custom runtimes. */
 	baseToolsOverride?: Record<string, AgentTool>;

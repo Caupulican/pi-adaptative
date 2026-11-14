@@ -1772,7 +1772,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return readSessionAutonomyStatus({
 			nowMs,
 			sessionId: this.deps.getSessionId(),
-			childSession: this.deps.routineScope() !== "session",
+			holdsRoutines: this.deps.routineScope() !== undefined,
 			sessionManager: this.deps.getSessionManager(),
 			settings: this.deps.getSettingsManager(),
 			usageWindow: () =>

@@ -404,7 +404,7 @@ const LANE_RECORD_SEPARATOR = "\n\n";
 const LANE_NO_MEMORY_TEXT = "No relevant standing memory was found.";
 const LANE_NO_HISTORY_TEXT = "No matching conversation history was found.";
 const LANE_MEMORY_UNAVAILABLE_TEXT =
-	"Memory is not available in this session (a child session, or memory failed to initialize or has shut down). Read project files directly.";
+	"Memory is not available in this session (it does not hold the owner's history, or memory failed to initialize or has shut down). Read project files directly.";
 /**
  * A worker source read's refusal: the typed `memory_source_<status>` token unchanged, the reason rendered by the
  * one history refusal renderer, so a worker refusal reads like the root's.
@@ -2064,7 +2064,7 @@ export class MemoryController {
 				: !enabled || health !== undefined
 					? undefined
 					: !this.deps.standing.ownsHistory
-						? "this is a child session: it keeps no history index of its own; history is read through the parent session"
+						? "this session does not hold the owner's history: it keeps no history index of its own"
 						: this._initializationFailed
 							? "the memory system failed to initialize"
 							: this._shutdownPromise !== undefined

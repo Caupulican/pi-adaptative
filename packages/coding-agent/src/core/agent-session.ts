@@ -2949,9 +2949,9 @@ export class AgentSession {
 	}
 
 	/**
-	 * Session-start auto-curation (#32, default ON): archive stale reflection-promoted skills in one
-	 * locked batch and return the names archived so the host can ANNOUNCE it (never silent). Skipped in
-	 * child sessions and when `curator.autoArchive` is disabled. Restorable via `/curate restore`.
+	 * Session-start auto-curation (#32, default ON): archive stale reflection-promoted skills in one locked batch and
+	 * return the names archived so the host can ANNOUNCE it (never silent). Only where the session curates the owner's
+	 * skills and `curator.autoArchive` is on; restorable via `/curate restore`.
 	 */
 	async runStartupSkillCuration(): Promise<string[]> {
 		if (!this._caps.curatesOwnerSkills) return [];
@@ -4445,8 +4445,8 @@ export class AgentSession {
 	/**
 	 * The ICM projection that owns this session's provider wire: the chat, or the fail-closed block while the chat is
 	 * unavailable. Read from the projection memory installed, never from the selected setting, which leads it while a
-	 * memory-mode change applies. A child session has no project chat (an activation failure installs the block without
-	 * checking for one), so its wire is always its own history and its compaction stays session-wide.
+	 * memory-mode change applies. A session without the owner's history has no project chat (an activation failure
+	 * installs the block without checking), so its wire is its own history and its compaction stays session-wide.
 	 */
 	private _continuousChatWire(): ContinuousChatWire | undefined {
 		return this._caps.ownsHistory ? this._memory.continuousChatWire() : undefined;

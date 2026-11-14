@@ -649,7 +649,7 @@ const KNOWLEDGE_INACTIVE_SENTENCES: Readonly<Record<KnowledgeCollectionInactiveR
 	budget_exhausted: "the knowledge spending limit for this session is reached",
 	accounting_unresolved: "earlier knowledge spending is not settled yet",
 	ephemeral_session: "the session is not persisted",
-	child_session: "child sessions do not collect knowledge",
+	child_session: "this session does not write the owner's memory",
 	memory_unavailable: "ICM memory is not active",
 };
 

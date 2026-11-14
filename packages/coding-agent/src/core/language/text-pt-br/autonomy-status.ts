@@ -49,7 +49,7 @@ const INACTIVE_REASON: Readonly<Record<KnowledgeCollectionInactiveReason | Routi
 	budget_exhausted: "orçamento esgotado",
 	accounting_unresolved: "os gastos ainda não fecharam",
 	ephemeral_session: "a sessão não é salva",
-	child_session: "a coleta não roda numa sessão filha",
+	child_session: "esta sessão não grava a memória do dono",
 	memory_unavailable: "a memória não está disponível",
 };
 
@@ -178,7 +178,7 @@ const MACHINE_STATE: Readonly<Record<string, Readonly<Record<string, string>>>> 
 /** Por que uma seção não traz o que o relatório pede: a frase em inglês continua ao lado do código, na própria seção. */
 const UNAVAILABLE_CAUSE: Readonly<Record<StatusUnavailableCause, string>> = {
 	routine_store: "o armazenamento de rotinas não está carregado nesta sessão",
-	child_session: "as rotinas não rodam numa sessão filha",
+	child_session: "esta sessão não guarda rotinas",
 	service_routine_store: "o armazenamento de rotinas não está carregado, então o serviço não é lido",
 	away_parents: "o daemon de ausência não registra as sessões pai que hospeda",
 	worker_ledger: "o registro de workers não está carregado nesta sessão",
