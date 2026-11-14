@@ -9,8 +9,7 @@
  * interface language.
  */
 import { harnessLog } from "../../kernel/harness-log.ts";
-import type { HarnessNotice } from "../harness-notice.ts";
-import { englishText, type InterfaceText, interfaceText } from "../language/interface-text.ts";
+import { type HarnessNotice, wordedNotice } from "../harness-notice.ts";
 import { type RoutineDefinitionView, type RoutineOccurrence, routineZoneUnsupported } from "./routine-contract.ts";
 import { latestOriginSettlements } from "./routine-origin-reach.ts";
 import { PROMOTED_SNAG_RUNS, promotedRoutineSnags } from "./routine-progress.ts";
@@ -33,21 +32,6 @@ export interface RoutineNoticeFacts {
 	readonly retired: readonly RetiredRoutineRecord[];
 }
 
-type RoutineStateWords = InterfaceText["notices"];
-
-/**
- * A routine state notice whose line one formatter words: in English for the model, in the interface language for the
- * owner (`ownerText`).
- */
-function routineNotice(reason: string, line: (words: RoutineStateWords) => string, evidence?: string): HarnessNotice {
-	return {
-		reason,
-		text: line(englishText().notices),
-		ownerText: line(interfaceText().notices),
-		...(evidence === undefined ? {} : { evidence }),
-	};
-}
-
 /**
  * Per routine, the latest loss of its saved origin the owner is told: a result settled undeliverable, or the routine's
  * removal because its own origin is lost, whichever came last (the removal on a tie: it ends the routine).
@@ -58,8 +42,11 @@ function originLostNotices(facts: RoutineNoticeFacts): Map<string, HarnessNotice
 	for (const result of latestOriginSettlements(facts.occurrences, "undelivered").values())
 		notices.set(result.routineId, {
 			at: result.settledAt,
-			notice: routineNotice(`result:${result.occurrenceId}:${result.loss}`, (words) =>
-				words.routineStates.resultUndeliverable(result.routineId, words.routineOriginLoss(result.loss)),
+			notice: wordedNotice(`result:${result.occurrenceId}:${result.loss}`, (words) =>
+				words.notices.routineStates.resultUndeliverable(
+					result.routineId,
+					words.notices.routineOriginLoss(result.loss),
+				),
 			),
 		});
 	for (const record of facts.retired) {
@@ -68,8 +55,8 @@ function originLostNotices(facts: RoutineNoticeFacts): Map<string, HarnessNotice
 		if (known && known.at > record.retiredAt) continue;
 		notices.set(record.routineId, {
 			at: record.retiredAt,
-			notice: routineNotice(`retired:${record.incarnationId}`, (words) =>
-				words.routineStates.removedOriginLost(record.routineId),
+			notice: wordedNotice(`retired:${record.incarnationId}`, (words) =>
+				words.notices.routineStates.removedOriginLost(record.routineId),
 			),
 		});
 	}
@@ -98,8 +85,8 @@ export class RoutineStateNotices {
 				"routine-unschedulable",
 				routine.routineId,
 				schedule.kind === "calendar" && routineZoneUnsupported(schedule) !== undefined
-					? routineNotice(`${routine.routineId}:${routine.incarnationId}:${schedule.timeZone}`, (words) =>
-							words.routineStates.unschedulable(routine.routineId, schedule.timeZone),
+					? wordedNotice(`${routine.routineId}:${routine.incarnationId}:${schedule.timeZone}`, (words) =>
+							words.notices.routineStates.unschedulable(routine.routineId, schedule.timeZone),
 						)
 					: undefined,
 			);
@@ -132,9 +119,9 @@ export class RoutineStateNotices {
 			"routine-paused",
 			routine.routineId,
 			pause &&
-				routineNotice(
+				wordedNotice(
 					`${routine.routineId}:${pause.occurrenceId}`,
-					(words) => words.routineStates.paused(routine.routineId, pause.after),
+					(words) => words.notices.routineStates.paused(routine.routineId, pause.after),
 					// The failed run's own words: the model reads them fenced as data, the owner's line does not carry them.
 					`The last run reported:\n${pause.lastError}`,
 				),
@@ -159,9 +146,9 @@ export class RoutineStateNotices {
 			port.noticeRoutineState(
 				"routine-snag",
 				scope,
-				routineNotice(
+				wordedNotice(
 					`${routine.routineId}:${snag.signature}:${snag.firstSeenAt}:${held === undefined ? "active" : "held"}`,
-					(words) => words.routineStates.snag(routine.routineId, snag.seenCount, held),
+					(words) => words.notices.routineStates.snag(routine.routineId, snag.seenCount, held),
 					evidence,
 				),
 			);

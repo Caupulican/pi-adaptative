@@ -1,11 +1,34 @@
 /**
  * Os avisos em português do Brasil que o host escreve na tela: as linhas de erro e de aviso em volta de uma falha, o
  * que uma compactação e uma nova tentativa dizem ao começar, terminar e cair para a alternativa, e os avisos de uma
- * linha das checagens de início. Nada daqui chega a um modelo: uma mensagem que uma ferramenta ou um provedor escreveu
- * é entregue inteira e mantém as próprias palavras.
+ * linha das checagens de início, e as frases dos avisos do harness que o dono lê (o modelo as lê em inglês). Nada daqui
+ * chega a um modelo: uma mensagem que uma ferramenta ou um provedor escreveu é entregue inteira e mantém as próprias
+ * palavras.
  */
 
+import type { KnowledgeNoticeReason } from "../../context/memory-diagnostics.ts";
+import type { HostEventReplayGap } from "../../events/host-event-contract.ts";
+import type { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../../system-one/semantic-plane-health.ts";
+import type { TurnOriginRecord } from "../../turn-origin.ts";
 import type { InterfaceText } from "../interface-text.ts";
+
+/** Por que a coleta de conhecimento parou e o que você pode fazer, pelo motivo que ela informa. */
+const KNOWLEDGE_PAUSED: Readonly<Record<KnowledgeNoticeReason, string>> = {
+	invalid_settings:
+		"os limites de conhecimento do autoLearn são inválidos. Corrija autoLearn.knowledgeMaxUsd, knowledgeSessionMaxUsd, knowledgeIdleDelayMs ou knowledgeMaxSourcesPerPass.",
+	no_model: "o modelo do autoLearn não resolve. Defina autoLearn.model como um modelo configurado e com login.",
+	model_unpriced:
+		"o modelo da coleta não tem preço declarado, então nenhuma requisição limitada pode ser admitida. Defina autoLearn.model como um modelo com preço declarado.",
+	no_engine: "nenhum juiz semântico está disponível.",
+};
+
+/** Por que resultados de CI nunca chegaram a uma sessão, pelo motivo que a lacuna registra. */
+const GAP_CAUSES: Readonly<Record<HostEventReplayGap["reason"], string>> = {
+	consumer_expired: "a custódia de eventos desta sessão expirou depois que ela ficou fechada por 7 dias",
+	consumer_evicted:
+		"a custódia de eventos desta sessão foi removida enquanto ela estava fechada, para abrir espaço a sessões ativas",
+	consumer_inactive: "a posição de eventos salva desta sessão é mais antiga que o histórico que a fonte guarda",
+};
 
 export const NOTICES = {
 	earendilJoined: "O pi entrou na Earendil",
@@ -93,6 +116,101 @@ export const NOTICES = {
 		removedOriginLost: (routineId: string) =>
 			`A rotina ${routineId} foi removida: o ponto desta sessão em que ela foi salva nunca mais poderá ser alcançado (o arquivo da sessão não existe mais, ou a entrada dela falta no arquivo da sessão), então nenhuma execução dela poderia informar aqui. Salve-a de novo para que continue rodando.`,
 	},
+
+	knowledgeCollection: {
+		paused: (reason: KnowledgeNoticeReason, _cause: string): string =>
+			`A coleta automática de conhecimento está pausada porque ${KNOWLEDGE_PAUSED[reason]}`,
+		sessionSpent: (_cause: string): string =>
+			"A coleta automática de conhecimento está pausada porque o limite de gasto com conhecimento desta sessão foi atingido (autoLearn.knowledgeSessionMaxUsd). Aumente autoLearn.knowledgeSessionMaxUsd para retomá-la nesta sessão.",
+		sourceUnpaid:
+			"A coleta automática de conhecimento está pausada porque autoLearn.knowledgeMaxUsd é zero, então nenhuma fonte pode ser paga. Aumente autoLearn.knowledgeMaxUsd para retomá-la.",
+		capReached:
+			"A coleta automática de conhecimento está pausada porque o teto de custo estimado desta sessão não permite mais gasto.",
+	},
+	proactiveReview: {
+		spendReached:
+			"A revisão proativa está pausada porque o gasto com revisões nas últimas 24 horas, somando as sessões deste agente, atingiu proactivity.maxUsdPerDay. As revisões voltam quando o gasto mais antigo sai do dia móvel, ou antes se essa configuração for aumentada.",
+		modelUnresolved: (model: string) =>
+			`A revisão proativa está pausada porque proactivity.model ${JSON.stringify(model)} não resolve para um modelo disponível. Defina proactivity.model como um modelo configurado e com login, ou remova-o para usar o modelo da sessão.`,
+		modelTooSmall:
+			"A revisão proativa está pausada porque a faixa de capacidade do modelo dela não permite trilhas em segundo plano. Defina proactivity.model como um modelo com janela de contexto maior.",
+	},
+	reviewBacklog: (waiting: number) =>
+		`${waiting} resultados prontos esperam a sua revisão: trabalho novo se acumula mais rápido do que é revisado. Considere apertar as verificações ou pausar novas ramificações até pôr a revisão em dia; nada foi retido.`,
+	routineResultWakesHeld: (bound: number) =>
+		`Resultados de rotinas iniciaram ${bound} turnos da sessão principal nas últimas 24 horas, o limite routines.maxResultWakesPerDay; os próximos resultados esperam o seu próximo turno até o dia ter espaço. Aumentar a configuração deixa mais deles iniciarem turnos.`,
+	workerLogin: {
+		expiredMoved: (name: string, provider: string) =>
+			`O seu login em ${name} expirou, então os workers usam outro modelo de assinatura. Rode /login ${provider} para entrar de novo.`,
+		expiredUnstarted: (name: string, provider: string) =>
+			`O seu login em ${name} expirou, então um worker nele não pôde iniciar. Rode /login ${provider} para entrar de novo.`,
+	},
+	actAhead: {
+		readyReproduced: (sha: string, where: string, files: number, command: string) =>
+			`O CI falhou em ${sha}, reproduzido localmente: uma correção está pronta em ${where}, ${files} arquivo(s); \`${command}\` passa com ela. Diga "aplique" para aplicá-la.`,
+		readyDiagnosed: (sha: string, where: string, files: number, command: string) =>
+			`O CI falhou em ${sha}: uma correção diagnosticada pelo log do CI (a etapa que falhou não roda de novo localmente) está pronta em ${where}, ${files} arquivo(s); \`${command}\` passa com ela. Diga "aplique" para aplicá-la.`,
+	},
+	systemOneNoEngine: (_cause: typeof SYSTEM_ONE_NO_ENGINE_CAUSE) =>
+		"O System One está configurado para esta sessão, mas nenhum motor de decisão foi fornecido, então as chamadas de ferramenta rodam só sob as travas determinísticas, sem a revisão dos efeitos delas pelo System One.",
+	ciResults: {
+		gap: (count: number, reason: HostEventReplayGap["reason"]) =>
+			`Até ${count} ${count === 1 ? "resultado de CI nunca foi entregue" : "resultados de CI nunca foram entregues"} a esta sessão: ${GAP_CAUSES[reason]}. Consulte o CI diretamente para ver os resultados desse período.`,
+		journalReplaced:
+			"Resultados de CI que esta sessão ainda não tinha recebido foram descartados: o diário de eventos do CI foi substituído porque estava ilegível ou outra versão começou um novo. Consulte o CI diretamente para ver os resultados de antes de agora.",
+	},
+
+	soul: {
+		holdUnreadable:
+			"Uma sessão anterior deixou uma retenção de revisão do soul.md que não pôde ser lida; o soul.md foi aceito como está.",
+		holdResumedDeleted:
+			"Uma sessão anterior terminou enquanto uma exclusão do soul.md esperava para ser desfeita. Ele foi restaurado.",
+		holdResumedChanged:
+			"Uma sessão anterior terminou antes de o System One revisar uma mudança no soul.md. A mudança fica no disco, mas não é aceita até o System One revisá-la; ela é revertida se a revisão a rejeitar.",
+		writeUnsupported: (error: string) =>
+			`As escritas do agente no soul.md são recusadas: ${error}. Configure um motor do System One capaz de rodar a revisão do soul.`,
+		writeHeld: (error: string) =>
+			`O System One não conseguiu revisar a escrita do agente no soul.md (${error}). Ela está retida, não escrita: o harness a escreve quando o System One a revisar e permitir.`,
+		writeReplaced:
+			"A escrita retida do soul.md foi descartada: uma escrita mais nova do soul.md foi revisada, permitida e escrita. O texto dela fica no histórico do /soul.",
+		writeDropped:
+			"A escrita retida do soul.md foi descartada em favor de uma escrita mais nova permitida que não chegou ao fim. O texto dela fica no histórico do /soul.",
+		changeHeld: (error: string, attempts: number) =>
+			`O soul.md foi alterado durante uma chamada de ferramenta enquanto o System One não conseguia revisá-lo (${error}). A mudança fica no disco, mas não é aceita até o System One revisá-la; ela é revertida após ${attempts} revisões com falha.`,
+		changeReplaced:
+			"A mudança do soul.md retida para revisão do System One foi substituída por uma mudança mais nova antes de ser revisada.",
+		changeAccepted: "O System One revisou e permitiu a mudança retida do soul.md; ela foi aceita.",
+		changeAcceptedUnreviewed:
+			"A mudança retida do soul.md foi aceita sem revisão: o System One não está mais configurado.",
+		changeReverted: (reason: string) => `A mudança retida do soul.md não foi aceita (${reason}); ela foi revertida.`,
+		changeWithheld: (attempts: number) =>
+			`O System One não conseguiu revisar a mudança retida do soul.md em ${attempts} tentativas; ela foi revertida e o texto dela fica no histórico do /soul.`,
+		writeStale:
+			"A escrita retida do soul.md não foi escrita: o soul.md mudou desde que ela foi proposta. O texto dela fica no histórico do /soul.",
+		writeWithheld: (attempts: number) =>
+			`O System One não conseguiu revisar a escrita retida do soul.md em ${attempts} tentativas; ela não foi escrita e o texto dela fica no histórico do /soul.`,
+		heldUnsupported: (error: string) =>
+			`A escrita retida do soul.md não foi escrita: ${error}. O texto dela fica no histórico do /soul.`,
+		writeRejected: (clauses: string) =>
+			`O System One rejeitou a escrita retida do soul.md (${clauses}); ela não foi escrita.`,
+		writeApplied: "O System One revisou e permitiu a escrita retida do soul.md; o harness a escreveu.",
+		writeAppliedUnreviewed:
+			"A escrita retida do soul.md foi escrita sem revisão: o System One não está mais configurado.",
+		writeLocked:
+			"A escrita retida do soul.md foi permitida, mas não escrita: o soul.md continuou bloqueado por outra sessão. O texto dela fica no histórico do /soul.",
+	},
+
+	heldActionOrigin: (origin: TurnOriginRecord): string => {
+		if (origin.k === "peer-agent") return `um agente par em ${origin.channel ?? "a malha de chat"}`;
+		if (origin.k === "host-event") return "um evento escrito por outra pessoa";
+		return origin.channel ? `o canal ${origin.channel}` : "uma fonte cuja origem não pôde ser lida";
+	},
+	heldDraft: (classes: string, origin: string, grants: string) => ({
+		head: "Retida, não executada: ",
+		tail: ` (${classes}), pedida por ${origin}. Ela roda se você mesmo pedir${grants === "" ? "" : `; ${grants} permite que execuções assim a façam`}.`,
+	}),
+	heldDraftsFull: (origin: string, max: number) =>
+		`Retidas, não executadas: ações pedidas por ${origin}; ${max} ações retidas já esperam por você, então nenhuma outra é registrada. Elas rodam se você mesmo pedir.`,
 
 	widgetTruncated: "... (widget truncado)",
 	/** O aviso de cobrança de uma sessão autenticada com uma chave de assinatura. */

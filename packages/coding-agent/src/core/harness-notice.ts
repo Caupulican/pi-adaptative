@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { captureWorkerReceiptOrigin } from "./delegation/worker-receipt-origin.ts";
+import { englishText, type InterfaceText, interfaceText } from "./language/interface-text.ts";
 import type { ParentInputDelivery, ParentInputReceipt } from "./parent-input-delivery.ts";
 import { boundedRedactedDiagnosticText, cleanRedactBound } from "./security/secret-text.ts";
 import { wrapUntrustedText } from "./security/untrusted-boundary.ts";
@@ -60,6 +61,24 @@ export interface HarnessNotice {
 	readonly text: string;
 	readonly ownerText?: string;
 	readonly evidence?: string;
+}
+
+/**
+ * A notice whose line one formatter of the catalogue words (the notices area, with the words it names): in English for the
+ * model (`text`), in the interface language for the owner (`ownerText`). The same formatter, given each catalogue, so the
+ * two never drift.
+ */
+export function wordedNotice(
+	reason: string,
+	line: (words: InterfaceText) => string,
+	evidence?: string,
+): HarnessNotice & { readonly ownerText: string } {
+	return {
+		reason,
+		text: line(englishText()),
+		ownerText: line(interfaceText()),
+		...(evidence === undefined ? {} : { evidence }),
+	};
 }
 
 /**

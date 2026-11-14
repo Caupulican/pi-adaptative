@@ -8,7 +8,7 @@
  */
 
 import type { SessionEntry } from "../../kernel/node.ts";
-import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
+import { type HarnessNoticeKind, type HarnessNoticeObservation, wordedNotice } from "../harness-notice.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import { ownerOriginKind, stampedHistoryStart } from "../turn-origin.ts";
 import { type ProofSheetRecord, readProofSheetRecords } from "./proof-sheet.ts";
@@ -63,10 +63,7 @@ export function reviewGaugeStatusLine(waiting: number): string | undefined {
 /** The notice observation for a count: one notice past the threshold, cleared once the count drops back under it. */
 export function reviewGaugeNotice(waiting: number, noticeAt: number): HarnessNoticeObservation {
 	if (noticeAt <= 0 || waiting < noticeAt) return "clear";
-	return {
-		reason: "review-backlog",
-		text: `${waiting} finished results are waiting for your review: new work is piling up faster than it is reviewed. Consider tightening the checks or pausing new fan-out until you catch up; nothing was held.`,
-	};
+	return wordedNotice("review-backlog", (words) => words.notices.reviewBacklog(waiting));
 }
 
 export interface ReviewGaugeObservationDeps {

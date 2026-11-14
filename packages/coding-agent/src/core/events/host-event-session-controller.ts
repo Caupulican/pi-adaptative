@@ -1,5 +1,5 @@
 import { expectedSessionAppendDurability } from "../../kernel/session/session-append-receipt.ts";
-import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
+import { type HarnessNoticeKind, type HarnessNoticeObservation, wordedNotice } from "../harness-notice.ts";
 import type { DurableTaskRuntime } from "../orchestration/task-runtime.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery, ParentInputDeliveryOptions, ParentInputReceipt } from "../parent-input-delivery.ts";
@@ -56,31 +56,21 @@ export interface HostEventSessionControllerDeps {
 	retired?(controller: HostEventSessionController): void;
 }
 
-const GAP_CAUSES: Readonly<Record<HostEventReplayGap["reason"], string>> = {
-	consumer_expired: "this session's event custody expired after it stayed closed for 7 days",
-	consumer_evicted: "this session's event custody was removed while it was closed to make room for live sessions",
-	consumer_inactive: "this session's saved event position is older than the source's retained history",
-};
-
 function replayGapNotice(gap: HostEventReplayGap): HarnessNoticeObservation {
 	const count = gap.throughSequence - gap.afterSequence;
 	return {
 		scope: `gap:${gap.sourceId}`,
-		state: {
-			// The notice id omits the scope: the source and range make each gap's notice its own.
-			reason: `${gap.reason}:${gap.sourceId}:${gap.afterSequence}-${gap.throughSequence}`,
-			text: `Up to ${count} CI ${count === 1 ? "result was" : "results were"} never delivered to this session: ${GAP_CAUSES[gap.reason]}. Check CI directly for results from that period.`,
-		},
+		// The notice id omits the scope: the source and range make each gap's notice its own.
+		state: wordedNotice(`${gap.reason}:${gap.sourceId}:${gap.afterSequence}-${gap.throughSequence}`, (words) =>
+			words.notices.ciResults.gap(count, gap.reason),
+		),
 	};
 }
 
 function endedSourceNotice(sourceId: string, reason: HostEventSourceEndReason): HarnessNoticeObservation {
 	return {
 		scope: `ended:${sourceId}`,
-		state: {
-			reason: `${reason}:${sourceId}`,
-			text: "CI results this session had not yet received were dropped: the CI event journal was replaced because it was unreadable or another release started a new one. Check CI directly for results from before now.",
-		},
+		state: wordedNotice(`${reason}:${sourceId}`, (words) => words.notices.ciResults.journalReplaced),
 	};
 }
 

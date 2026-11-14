@@ -5,7 +5,7 @@
  * action does, so a long id never pushes the command or page out of the line.
  */
 
-import { englishText } from "../language/interface-text.ts";
+import { englishText, type InterfaceText } from "../language/interface-text.ts";
 import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import { boundedActionLine, type EdgeOperation } from "./edge-policy.ts";
 
@@ -30,7 +30,8 @@ export function describedOperation(operation: EdgeOperation): string {
 /**
  * One line of at most `bound` characters naming the held `actions` between `head` and `tail` (`boundedActionLine`).
  * When the line would not fit, a watch's id is shortened first (to no fewer than {@link MIN_HELD_WATCH_ID_CHARS}
- * characters), and only then the actions.
+ * characters), and only then the actions. `words` name the action: English for a line the model reads, the interface
+ * language for the owner's line of a notice, each line fitted in its own words.
  */
 export function boundedHeldLine(
 	head: string,
@@ -38,10 +39,11 @@ export function boundedHeldLine(
 	actions: readonly string[],
 	tail: string,
 	bound: number,
+	words: InterfaceText = englishText(),
 ): string {
 	const operation = actions.join("; ");
 	const named = (shown: NestedCallPurpose | undefined) =>
-		englishText().interactive.edgeOperation({ operation, purpose: shown });
+		words.interactive.edgeOperation({ operation, purpose: shown });
 	let action = named(purpose);
 	const excess = head.length + action.length + tail.length - bound;
 	if (purpose && excess > 0 && purpose.watchId.length > MIN_HELD_WATCH_ID_CHARS) {

@@ -10,7 +10,12 @@ import { sessionSemanticUsageOf } from "../cost/semantic-usage-delivery.ts";
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
 import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
 import type { GoalState } from "../goals/goal-state.ts";
-import type { HarnessNotice, HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
+import {
+	type HarnessNotice,
+	type HarnessNoticeKind,
+	type HarnessNoticeObservation,
+	wordedNotice,
+} from "../harness-notice.ts";
 import type { ParentInputDelivery, ParentInputDeliveryOptions, ParentInputReceipt } from "../parent-input-delivery.ts";
 import { truncateWithEllipsis } from "../provider-tool-text.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
@@ -87,25 +92,17 @@ export function proactiveReviewNotice(
 	skipReason: string,
 	settings: Pick<ResolvedProactivitySettings, "model">,
 ): HarnessNotice | undefined {
-	const paused = "Proactive review paused because";
 	switch (skipReason) {
 		case "max_usd_per_day_reached":
-			return {
-				reason: skipReason,
-				text: `${paused} review spend over the last 24 hours, across this agent's sessions, reached proactivity.maxUsdPerDay. Reviews start again once older spend leaves the rolling day, or sooner if that setting is raised.`,
-			};
-		case "no_proactivity_model":
-			return settings.model === undefined
+			return wordedNotice(skipReason, (words) => words.notices.proactiveReview.spendReached);
+		case "no_proactivity_model": {
+			const model = settings.model;
+			return model === undefined
 				? undefined
-				: {
-						reason: skipReason,
-						text: `${paused} proactivity.model ${JSON.stringify(settings.model)} does not resolve to an available model. Set proactivity.model to a configured, signed-in model, or remove it to use the session model.`,
-					};
+				: wordedNotice(skipReason, (words) => words.notices.proactiveReview.modelUnresolved(model));
+		}
 		case "model_proactivity_unsupported":
-			return {
-				reason: skipReason,
-				text: `${paused} its model's capability tier allows no background lanes. Set proactivity.model to a model with a larger context window.`,
-			};
+			return wordedNotice(skipReason, (words) => words.notices.proactiveReview.modelTooSmall);
 		default:
 			return undefined;
 	}

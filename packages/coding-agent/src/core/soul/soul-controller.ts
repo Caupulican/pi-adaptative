@@ -6,7 +6,8 @@ import { checkSoulText, DEFAULT_AGENT_NAME, SOUL_FILE_NAME } from "../agent-iden
 import { configFile, soulLockFile } from "../agent-paths.ts";
 import { canonicalPathScopeIdentity, safeRealpathSync } from "../autonomy/path-scope.ts";
 import type { SemanticDecisionEngine } from "../decision/engine.ts";
-import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
+import { type HarnessNoticeKind, type HarnessNoticeObservation, wordedNotice } from "../harness-notice.ts";
+import type { InterfaceText } from "../language/interface-text.ts";
 import type { SemanticEvaluationRecord } from "../system-one/semantic-evaluation-ledger.ts";
 import { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../system-one/semantic-plane-health.ts";
 import {
@@ -128,6 +129,8 @@ const CLOSE_LOCK_WARNING =
 	"The soul.md change no review settled could not be reverted at close because the soul lock is held elsewhere; it stays on disk unreviewed.";
 
 type SoulNoticeScope = "write" | "change";
+/** One sentence of the soul notices, worded by the catalogue it is given (`notices.soul`). */
+type SoulNoticeLine = (words: InterfaceText["notices"]["soul"]) => string;
 
 /** The deterministic screen and the soul review of a document already on disk. */
 type SoulVerdict =
@@ -240,7 +243,7 @@ export class SoulController {
 	/** What `<agentDir>/state/soul/held.json` holds now (serialized), so an unchanged hold writes nothing. */
 	private persistedHold: string | undefined;
 	/** The owner's words about a hold an earlier session left, told at the first tool admission. */
-	private restartNotice: { readonly reason: string; readonly text: string } | undefined;
+	private restartNotice: { readonly reason: string; readonly line: SoulNoticeLine } | undefined;
 	/** The held review in flight; one at a time. */
 	private retrying: Promise<void> | undefined;
 	private lastRetryAt = 0;
@@ -342,7 +345,7 @@ export class SoulController {
 			clearSoulHold(this.deps.agentDir);
 			this.restartNotice = {
 				reason: "hold-unreadable",
-				text: "An earlier session left a soul.md review hold that could not be read; soul.md was accepted as it is.",
+				line: (words) => words.holdUnreadable,
 			};
 			return;
 		}
@@ -380,10 +383,7 @@ export class SoulController {
 		});
 		this.restartNotice = {
 			reason: "hold-resumed",
-			text:
-				observed.text === undefined
-					? "An earlier session ended while a deletion of soul.md was waiting to be undone. It is put back."
-					: "An earlier session ended before System One reviewed a change to soul.md. The change stays on disk but is not accepted until System One reviews it; it is reverted if the review rejects it.",
+			line: (words) => (observed.text === undefined ? words.holdResumedDeleted : words.holdResumedChanged),
 		};
 	}
 
@@ -452,7 +452,7 @@ export class SoulController {
 		const now = Date.now();
 		const restart = this.restartNotice;
 		this.restartNotice = undefined;
-		if (restart) this.tell("change", restart.reason, restart.text);
+		if (restart) this.tell("change", restart.reason, restart.line);
 		for (const [other, admittedAt] of this.running) {
 			if (now - admittedAt > MAX_CALL_RUN_MS) this.running.delete(other);
 		}
@@ -576,11 +576,7 @@ export class SoulController {
 	 */
 	private refuseUnsupported(text: string, error: string): BeforeToolCallResult {
 		this.record(text, "block");
-		this.tell(
-			"write",
-			"write-unsupported",
-			`The agent's soul.md writes are refused: ${error}. Configure a System One engine that can run the soul review.`,
-		);
+		this.tell("write", "write-unsupported", (words) => words.writeUnsupported(error));
 		return block(`soul.md write refused: ${error}.`);
 	}
 
@@ -599,11 +595,7 @@ export class SoulController {
 		this.heldWrite = { bytes, basedOn, ownerMark: this.ownerChanges, failures: 0 };
 		this.lastRetryAt = Date.now();
 		this.syncSubscription();
-		this.tell(
-			"write",
-			"write-held",
-			`System One could not review the agent's soul.md write (${error}). It is held, not written: the harness writes it once System One reviews and allows it.`,
-		);
+		this.tell("write", "write-held", (words) => words.writeHeld(error));
 		return {
 			block: true,
 			reason: `soul.md write held: System One could not review it (${error})`.slice(0, MAX_BLOCK_REASON_CHARS),
@@ -681,12 +673,8 @@ export class SoulController {
 
 	/** The notice for a held write a newer allowed write replaced, told once that write's fate is known. */
 	private tellReplaced(landed: boolean): void {
-		this.tell(
-			"write",
-			landed ? "write-replaced" : "write-dropped",
-			landed
-				? "The held soul.md write was dropped: a newer soul.md write was reviewed, allowed and written. Its text is kept in /soul history."
-				: "The held soul.md write was dropped for a newer allowed write that did not complete. Its text is kept in /soul history.",
+		this.tell("write", landed ? "write-replaced" : "write-dropped", (words) =>
+			landed ? words.writeReplaced : words.writeDropped,
 		);
 	}
 
@@ -827,11 +815,7 @@ export class SoulController {
 		};
 		this.lastRetryAt = Date.now();
 		this.syncSubscription();
-		this.tell(
-			"change",
-			"change-held",
-			`soul.md was changed during a tool call while System One could not review it (${error}). The change stays on disk but is not accepted until System One reviews it; it is reverted after ${MAX_HELD_REVIEW_FAILURES} failed reviews.`,
-		);
+		this.tell("change", "change-held", (words) => words.changeHeld(error, MAX_HELD_REVIEW_FAILURES));
 		return "soul.md changed while System One could not review it: the change is held for review and is reverted if the review rejects it.";
 	}
 
@@ -843,11 +827,7 @@ export class SoulController {
 	private dropAwaiting(): void {
 		this.awaitingReview = undefined;
 		this.syncSubscription();
-		this.tell(
-			"change",
-			"change-replaced",
-			"The soul.md change held for System One review was replaced by a newer change before it was reviewed.",
-		);
+		this.tell("change", "change-replaced", (words) => words.changeReplaced);
 	}
 
 	/**
@@ -915,12 +895,7 @@ export class SoulController {
 			this.adoptOwner();
 		}
 		if (this.ownerChanges !== held.ownerMark || this.watch.known !== held.basedOn) {
-			this.endHeld(
-				held,
-				"write-stale",
-				"The held soul.md write was not written: soul.md changed since it was proposed. Its text is kept in /soul history.",
-				true,
-			);
+			this.endHeld(held, "write-stale", (words) => words.writeStale, true);
 			return "done";
 		}
 		return "ready";
@@ -964,25 +939,13 @@ export class SoulController {
 		if (outcome.kind === "deferred") return;
 		this.carriedNotice = joinNotices(this.carriedNotice, outcome.notice);
 		if (verdict.kind === "accept") {
-			this.tell(
-				"change",
-				"change-accepted",
-				verdict.reviewer === "allow"
-					? "System One reviewed and allowed the held soul.md change; it is accepted."
-					: "The held soul.md change was accepted without review: System One is no longer configured.",
+			this.tell("change", "change-accepted", (words) =>
+				verdict.reviewer === "allow" ? words.changeAccepted : words.changeAcceptedUnreviewed,
 			);
 		} else if (verdict.kind === "reject") {
-			this.tell(
-				"change",
-				"change-reverted",
-				`The held soul.md change was not accepted (${verdict.reason}); it was reverted.`,
-			);
+			this.tell("change", "change-reverted", (words) => words.changeReverted(verdict.reason));
 		} else {
-			this.tell(
-				"change",
-				"change-withheld",
-				`System One could not review the held soul.md change in ${MAX_HELD_REVIEW_FAILURES} attempts; it was reverted and its text is kept in /soul history.`,
-			);
+			this.tell("change", "change-withheld", (words) => words.changeWithheld(MAX_HELD_REVIEW_FAILURES));
 		}
 	}
 
@@ -1023,31 +986,16 @@ export class SoulController {
 			held.failures += 1;
 			this.lastFailedRetryAt = Date.now();
 			if (held.failures >= MAX_HELD_REVIEW_FAILURES) {
-				this.endHeld(
-					held,
-					"write-withheld",
-					`System One could not review the held soul.md write in ${MAX_HELD_REVIEW_FAILURES} attempts; it was not written and its text is kept in /soul history.`,
-					true,
-				);
+				this.endHeld(held, "write-withheld", (words) => words.writeWithheld(MAX_HELD_REVIEW_FAILURES), true);
 			}
 			return;
 		}
 		if (outcome.kind === "unsupported") {
-			this.endHeld(
-				held,
-				"write-unsupported",
-				`The held soul.md write was not written: ${outcome.error}. Its text is kept in /soul history.`,
-				true,
-			);
+			this.endHeld(held, "write-unsupported", (words) => words.heldUnsupported(outcome.error), true);
 			return;
 		}
 		this.record(held.bytes, "block");
-		this.endHeld(
-			held,
-			"write-rejected",
-			`System One rejected the held soul.md write (${soulReviewAdverseClauses(outcome)}); it was not written.`,
-			false,
-		);
+		this.endHeld(held, "write-rejected", (words) => words.writeRejected(soulReviewAdverseClauses(outcome)), false);
 	}
 
 	/**
@@ -1063,9 +1011,7 @@ export class SoulController {
 			this.endHeld(
 				held,
 				"write-applied",
-				allowed.reviewer === "allow"
-					? "System One reviewed and allowed the held soul.md write; the harness wrote it."
-					: "The held soul.md write was written without review: System One is no longer configured.",
+				(words) => (allowed.reviewer === "allow" ? words.writeApplied : words.writeAppliedUnreviewed),
 				false,
 			);
 			return;
@@ -1075,12 +1021,7 @@ export class SoulController {
 		allowed.lockRefusals += 1;
 		this.lastFailedRetryAt = Date.now();
 		if (allowed.lockRefusals >= MAX_DEFERRED_ATTEMPTS || Date.now() - allowed.at > DEFERRED_TTL_MS) {
-			this.endHeld(
-				held,
-				"write-locked",
-				"The held soul.md write was allowed but not written: soul.md stayed locked by another session. Its text is kept in /soul history.",
-				true,
-			);
+			this.endHeld(held, "write-locked", (words) => words.writeLocked, true);
 		}
 	}
 
@@ -1092,11 +1033,11 @@ export class SoulController {
 	}
 
 	/** The held write is done with; a text no review settled is kept as a `withheld` entry the owner can restore. */
-	private endHeld(held: HeldWrite, reason: string, text: string, keepText: boolean): void {
+	private endHeld(held: HeldWrite, reason: string, line: SoulNoticeLine, keepText: boolean): void {
 		this.heldWrite = undefined;
 		if (keepText) this.recordWithheld(held.bytes);
 		this.syncSubscription();
-		this.tell("write", reason, text);
+		this.tell("write", reason, line);
 	}
 
 	/** Listens for System One's settled answers only while something is held; a settled answer retries the held review. */
@@ -1114,12 +1055,12 @@ export class SoulController {
 	}
 
 	/** One owner notice per episode and scope; a session that keeps no notices gets the line as a warning. */
-	private tell(scope: SoulNoticeScope, reason: string, text: string): void {
+	private tell(scope: SoulNoticeScope, reason: string, line: SoulNoticeLine): void {
 		if (this.told.get(scope) === reason) return;
 		this.told.set(scope, reason);
-		if (!this.deps.observeHarnessNotice("soul-review", () => ({ scope, state: { reason, text } }))) {
-			this.deps.emitWarning(text);
-		}
+		const state = wordedNotice(reason, (words) => line(words.notices.soul));
+		if (!this.deps.observeHarnessNotice("soul-review", () => ({ scope, state })))
+			this.deps.emitWarning(state.ownerText);
 	}
 
 	/**

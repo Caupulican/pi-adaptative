@@ -58,7 +58,7 @@
 		"packages/coding-agent/src/core/goals/goal-session-controller.ts": 1357,
 		"packages/coding-agent/src/core/session-edge-intent-controller.ts": 1472,
 		"packages/coding-agent/src/modes/interactive/components/workbench.ts": 1334,
-		"packages/coding-agent/src/core/soul/soul-controller.ts": 1456,
+		"packages/coding-agent/src/core/soul/soul-controller.ts": 1397,
 		"packages/coding-agent/src/core/process-matrix/runtime.ts": 1455,
 		"packages/coding-agent/src/core/routines/routine-scheduler-controller.ts": 1288,
 		"packages/coding-agent/src/core/chat/mesh.ts": 1434,

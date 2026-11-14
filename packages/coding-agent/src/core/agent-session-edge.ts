@@ -38,6 +38,8 @@ import { boundedHeldLine, describedOperation, heldPurpose, withPurpose } from ".
 import { ownerCallDigest, renderOwnerDraftCall } from "./autonomy/owner-draft-rendering.ts";
 import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
 import type { OwnerDraftView } from "./channels/owner-channel-types.ts";
+import { type HarnessNotice, wordedNotice } from "./harness-notice.ts";
+import { englishText } from "./language/interface-text.ts";
 import { boundedRedactedDiagnosticText, MAX_RETAINED_DIAGNOSTIC_CHARS } from "./security/secret-text.ts";
 import { isNestedCallPurpose, type NestedCallPurpose } from "./tools/nested-tool-call.ts";
 import {
@@ -275,10 +277,9 @@ export function effectiveEdgeGrants(
 	return remote ? remoteOwnerRunGrants(deps, remote) : sessionEdgeGrants(deps);
 }
 
+/** Where a run's words came from, in English for the model's lines (the notices catalogue's `heldActionOrigin`). */
 export function originLabel(origin: TurnOriginRecord): string {
-	if (origin.k === "peer-agent") return `a peer agent on ${origin.channel ?? "the chat mesh"}`;
-	if (origin.k === "host-event") return "an event written by someone else";
-	return origin.channel ? `the ${origin.channel} channel` : "a source whose origin could not be read";
+	return englishText().notices.heldActionOrigin(origin);
 }
 
 export const OUTWARD_DRAFT_CUSTOM_TYPE = "pi_outward_draft";
@@ -535,7 +536,7 @@ export function ownerDraftView(view: Pick<OutwardDraftStateView, "record" | "sta
 export function keepOutwardDraft(
 	manager: Pick<SessionManager, "getBranch" | "appendCustomEntry">,
 	draft: OutwardDraftInput,
-): { id: string; notice: string; kept: boolean; added?: OutwardDraftRecord; state?: OutwardDraftState } {
+): { id: string; notice: HarnessNotice; kept: boolean; added?: OutwardDraftRecord; state?: OutwardDraftState } {
 	const operations = draft.operations.map((operation) => ({
 		class: operation.class,
 		operation: boundedRedactedDiagnosticText(operation.operation) ?? draft.toolName,
@@ -583,21 +584,22 @@ export function keepOutwardDraft(
 		};
 		manager.appendCustomEntry(OUTWARD_DRAFT_CUSTOM_TYPE, added);
 	}
-	const classes = [...new Set(operations.map((operation) => operation.class))];
-	const grantable = grantableEdgeClasses(operations);
-	// One bounded line (`MAX_RETAINED_DIAGNOSTIC_CHARS`): a watch id, then the action, is shortened, never origin or release.
+	const classes = [...new Set(operations.map((operation) => operation.class))].join(", ");
+	const grants = grantableEdgeClasses(operations)
+		.map((edgeClass) => `/edge allow ${edgeClass}`)
+		.join(", ");
+	const actions = operations.map((operation) => operation.operation);
+	// One bounded line (`MAX_RETAINED_DIAGNOSTIC_CHARS`) in each language: a watch id, then the action, is shortened, never
+	// origin or release.
 	return {
 		id,
 		kept,
 		...(added ? { added } : {}),
 		...(existing ? { state: existing.state } : {}),
-		notice: boundedHeldLine(
-			"Held, not run: ",
-			purpose,
-			operations.map((operation) => operation.operation),
-			` (${classes.join(", ")}), asked by ${originLabel(draft.origin)}. It runs if you ask for it yourself${grantable.length > 0 ? `; ${grantable.map((edgeClass) => `/edge allow ${edgeClass}`).join(", ")} lets such runs do it` : ""}.`,
-			MAX_RETAINED_DIAGNOSTIC_CHARS,
-		),
+		notice: wordedNotice(id, (words) => {
+			const frame = words.notices.heldDraft(classes, words.notices.heldActionOrigin(draft.origin), grants);
+			return boundedHeldLine(frame.head, purpose, actions, frame.tail, MAX_RETAINED_DIAGNOSTIC_CHARS, words);
+		}),
 	};
 }
 

@@ -22,6 +22,7 @@ import type {
 import type { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
 import type { WorkerLifecycle } from "../delegation/worker-lifecycle.ts";
 import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
+import { wordedNotice } from "../harness-notice.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { findSteeredDelivery } from "../parent-input-steer.ts";
@@ -295,10 +296,9 @@ export class RoutineRuntimeAssembly {
 						const bound = this.deps.getSettingsManager().getRoutinesSettings().maxResultWakesPerDay;
 						held = day.routineResultTurnWakes >= bound;
 						if (held) {
-							this.deps.observeHarnessNotice?.("routine-result-wakes", () => ({
-								reason: ROUTINE_RESULT_WAKES_HOLD,
-								text: `Routine results started ${bound} parent turns in the last 24 hours, the routines.maxResultWakesPerDay bound; later results wait for the owner's next turn until the day has room. Raising the setting lets more start turns.`,
-							}));
+							this.deps.observeHarnessNotice?.("routine-result-wakes", () =>
+								wordedNotice(ROUTINE_RESULT_WAKES_HOLD, (words) => words.notices.routineResultWakesHeld(bound)),
+							);
 							// One held result of a routine is carried at a time; later ones are recorded against it.
 							const carried = this.findCarriedRoutineResult(delivery.occurrence.routineId, "held");
 							if (carried) return carried;

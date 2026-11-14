@@ -11,7 +11,7 @@
  * allow-list cannot leak a field it was never told to copy.
  */
 
-import type { HarnessNoticeObservation } from "../harness-notice.ts";
+import { type HarnessNoticeObservation, wordedNotice } from "../harness-notice.ts";
 import { resolveAutoLearnSettings } from "../learning/auto-learn-settings.ts";
 import type { KnowledgeCollectionInactiveReason, KnowledgeCollectionStatus } from "../memory/knowledge-collector.ts";
 import { MEMORY_RETRIEVAL_DISABLED_REASON, type TranscriptCoverage } from "../memory/transcript-memory-contracts.ts";
@@ -654,16 +654,17 @@ const KNOWLEDGE_INACTIVE_SENTENCES: Readonly<Record<KnowledgeCollectionInactiveR
 };
 
 /**
- * What the owner can change for each inactive reason the harness tells them about by itself. Every other reason is the
- * owner's own switch (`disabled`), transient (`accounting_unresolved`) or not applicable to this session.
+ * The inactive reasons the harness tells the owner about by itself, each with what the owner can change (the notices
+ * catalogue's `knowledgeCollection.paused`). Every other reason is the owner's own switch (`disabled`), transient
+ * (`accounting_unresolved`) or not applicable to this session.
  */
-const KNOWLEDGE_NOTICE_ACTIONS: Readonly<Partial<Record<KnowledgeCollectionInactiveReason, string>>> = {
-	invalid_settings:
-		" Fix autoLearn.knowledgeMaxUsd, knowledgeSessionMaxUsd, knowledgeIdleDelayMs or knowledgeMaxSourcesPerPass.",
-	no_model: " Set autoLearn.model to a configured, signed-in model.",
-	model_unpriced: " Set autoLearn.model to a model with a declared price.",
-	no_engine: "",
-};
+export type KnowledgeNoticeReason = "invalid_settings" | "no_model" | "model_unpriced" | "no_engine";
+
+function isKnowledgeNoticeReason(reason: KnowledgeCollectionInactiveReason): reason is KnowledgeNoticeReason {
+	return (
+		reason === "invalid_settings" || reason === "no_model" || reason === "model_unpriced" || reason === "no_engine"
+	);
+}
 
 /**
  * The owner notice for one collection status: `clear` when collection is active, undefined for a reason the owner is
@@ -678,36 +679,27 @@ export function knowledgeCollectionNotice(
 	},
 ): HarnessNoticeObservation | undefined {
 	if (status.state === "active") return "clear";
-	const paused = "Automatic knowledge collection paused because";
-	if (status.reason === "budget_exhausted") {
+	const reason = status.reason;
+	if (reason === "budget_exhausted") {
 		if (
 			status.spentUsd !== undefined &&
 			status.sessionMaxUsd !== undefined &&
 			status.sessionMaxUsd - status.spentUsd <= 0
 		)
-			return {
-				reason: "budget_exhausted:session",
-				text: `${paused} ${KNOWLEDGE_INACTIVE_SENTENCES.budget_exhausted} (autoLearn.knowledgeSessionMaxUsd). Raise autoLearn.knowledgeSessionMaxUsd to resume it in this session.`,
-			};
+			return wordedNotice("budget_exhausted:session", (words) =>
+				words.notices.knowledgeCollection.sessionSpent(KNOWLEDGE_INACTIVE_SENTENCES.budget_exhausted),
+			);
 		if (
 			resolveAutoLearnSettings(settings.getAutonomySettings().mode, settings.getAutoLearnSettings())
 				.knowledgeMaxUsd <= 0
 		)
-			return {
-				reason: "budget_exhausted:source",
-				text: `${paused} autoLearn.knowledgeMaxUsd is zero, so no source can be paid for. Raise autoLearn.knowledgeMaxUsd to resume it.`,
-			};
-		return {
-			reason: "budget_exhausted:cap",
-			text: `${paused} this session's estimated cost cap allows no further spend.`,
-		};
+			return wordedNotice("budget_exhausted:source", (words) => words.notices.knowledgeCollection.sourceUnpaid);
+		return wordedNotice("budget_exhausted:cap", (words) => words.notices.knowledgeCollection.capReached);
 	}
-	const action = status.reason === undefined ? undefined : KNOWLEDGE_NOTICE_ACTIONS[status.reason];
-	if (status.reason === undefined || action === undefined) return undefined;
-	return {
-		reason: status.reason,
-		text: `${paused} ${KNOWLEDGE_INACTIVE_SENTENCES[status.reason]}.${action}`,
-	};
+	if (reason === undefined || !isKnowledgeNoticeReason(reason)) return undefined;
+	return wordedNotice(reason, (words) =>
+		words.notices.knowledgeCollection.paused(reason, KNOWLEDGE_INACTIVE_SENTENCES[reason]),
+	);
 }
 
 /** One safe line for context_audit and `/memory knowledge`: state, judge, spending and the last pass. */

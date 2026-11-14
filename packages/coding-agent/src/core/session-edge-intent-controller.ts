@@ -20,7 +20,6 @@ import {
 	enforceSessionEdgeOperation,
 	keepOutwardDraft,
 	MAX_OUTWARD_DRAFTS,
-	originLabel,
 	ownerDraftView,
 	recordEdgeGrant,
 	recordEdgeRevoke,
@@ -41,7 +40,7 @@ import { thirdPartyProtectedWritePaths } from "./autonomy/lane-private-paths.ts"
 import type { WorkerEdgeSource } from "./delegation/worker-edge-policy.ts";
 import type { ToolInfo } from "./extensions/index.ts";
 import type { ForegroundRecoveryController } from "./foreground-recovery-controller.ts";
-import type { HarnessNoticeKind, HarnessNoticeObservation } from "./harness-notice.ts";
+import { type HarnessNoticeKind, type HarnessNoticeObservation, wordedNotice } from "./harness-notice.ts";
 import { englishText } from "./language/interface-text.ts";
 import type { OwnerWords } from "./learning/owner-evidence-ledger.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -494,9 +493,8 @@ export class SessionEdgeIntentController {
 		}
 		if (this.gateEngineFaultToldIn === sessionId) return engine;
 		this.gateEngineFaultToldIn = sessionId;
-		const text = `${SYSTEM_ONE_NO_ENGINE_CAUSE}, so tool calls run under the deterministic gates only, without System One's review of their effects.`;
-		if (!this.deps.observeHarnessNotice("system-one-engine", () => ({ reason: "no-engine", text })))
-			this.deps.emitWarning(text);
+		const notice = wordedNotice("no-engine", (words) => words.notices.systemOneNoEngine(SYSTEM_ONE_NO_ENGINE_CAUSE));
+		if (!this.deps.observeHarnessNotice("system-one-engine", () => notice)) this.deps.emitWarning(notice.ownerText);
 		return engine;
 	}
 
@@ -604,13 +602,15 @@ export class SessionEdgeIntentController {
 				// the pending drafts are full.
 				const told = this.deps.observeHarnessNotice("outward-action-prepared", () =>
 					held.kept
-						? { scope: held.id, state: { reason: held.id, text: held.notice } }
+						? { scope: held.id, state: held.notice }
 						: {
 								scope: "full",
-								state: {
-									reason: "full",
-									text: `Held, not run: actions asked by ${originLabel(draft.origin)}; ${MAX_OUTWARD_DRAFTS} held actions already wait for you, so no more are recorded. They run if you ask for them yourself.`,
-								},
+								state: wordedNotice("full", (words) =>
+									words.notices.heldDraftsFull(
+										words.notices.heldActionOrigin(draft.origin),
+										MAX_OUTWARD_DRAFTS,
+									),
+								),
 							},
 				);
 				// A draft held on a remote-owner run is also shown on the owner's phone, once, when it is first kept.

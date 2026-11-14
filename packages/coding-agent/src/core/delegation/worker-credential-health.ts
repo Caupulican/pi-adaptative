@@ -1,7 +1,7 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { AuthStorage } from "../auth-storage.ts";
-import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
+import { type HarnessNoticeKind, type HarnessNoticeObservation, wordedNotice } from "../harness-notice.ts";
 
 /** Why a worker left the model it was started on: the class the root model and the owner read, never a raw error. */
 export type WorkerModelMoveReason = "login_expired" | "quota_exhausted" | "model_unavailable" | "credential_rejected";
@@ -91,14 +91,15 @@ export class WorkerCredentialHealth {
 			}));
 		}
 		const name = this.deps.getProviderDisplayName(provider);
-		const text = moved
-			? `Your ${name} login has expired, so workers use another subscription model. Run /login ${provider} to sign in again.`
-			: `Your ${name} login has expired, so a worker on it could not start. Run /login ${provider} to sign in again.`;
 		// The delivery id is (session, kind, reason, generation) without the scope, so the reason names the provider: a
 		// second provider's expired login is its own episode, not covered by the first provider's saved notice.
 		this.deps.observeNotice?.(LOGIN_NOTICE_KIND, () => ({
 			scope: provider,
-			state: { reason: `login-expired:${provider}`, text },
+			state: wordedNotice(`login-expired:${provider}`, (words) =>
+				moved
+					? words.notices.workerLogin.expiredMoved(name, provider)
+					: words.notices.workerLogin.expiredUnstarted(name, provider),
+			),
 		}));
 	}
 

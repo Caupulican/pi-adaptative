@@ -1,9 +1,31 @@
 /**
  * The English notices the host writes on screen: the error and warning lines it wraps around a failure, what a
  * compaction and a retry say as they start, end and fall back, and the one-line notices of the start-up checks. Nothing
- * here reaches a model, except the routine state sentences a harness notice carries in English to the model while the owner
- * reads them in the interface language: a message that a tool or a provider wrote is handed in whole and keeps its own words.
+ * here reaches a model, except the harness notice sentences (`wordedNotice` in `harness-notice.ts`), which the model reads
+ * in English while the owner reads them in the interface language: a message that a tool or a provider wrote is handed in
+ * whole and keeps its own words.
  */
+
+import type { KnowledgeNoticeReason } from "../../context/memory-diagnostics.ts";
+import type { HostEventReplayGap } from "../../events/host-event-contract.ts";
+import type { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../../system-one/semantic-plane-health.ts";
+import type { TurnOriginRecord } from "../../turn-origin.ts";
+
+/** What the owner can do about a paused knowledge collection, as the sentence after its cause. */
+const KNOWLEDGE_ACTIONS: Readonly<Record<KnowledgeNoticeReason, string>> = {
+	invalid_settings:
+		" Fix autoLearn.knowledgeMaxUsd, knowledgeSessionMaxUsd, knowledgeIdleDelayMs or knowledgeMaxSourcesPerPass.",
+	no_model: " Set autoLearn.model to a configured, signed-in model.",
+	model_unpriced: " Set autoLearn.model to a model with a declared price.",
+	no_engine: "",
+};
+
+/** Why CI results never reached a session, by the reason its replay gap records. */
+const GAP_CAUSES: Readonly<Record<HostEventReplayGap["reason"], string>> = {
+	consumer_expired: "this session's event custody expired after it stayed closed for 7 days",
+	consumer_evicted: "this session's event custody was removed while it was closed to make room for live sessions",
+	consumer_inactive: "this session's saved event position is older than the source's retained history",
+};
 
 export const NOTICES = {
 	/** The announcement a command draws: its headline and the line above the link it carries. */
@@ -110,6 +132,121 @@ export const NOTICES = {
 		removedOriginLost: (routineId: string) =>
 			`Routine ${routineId} was removed: the point of this session it was saved at can never be reached again (its session file is gone, or its entry is missing from the session file), so none of its runs could ever report here. Save it again to keep it running.`,
 	},
+
+	/**
+	 * The knowledge collection's paused states (`memory-diagnostics.ts`). `cause` is the domain's English sentence for the
+	 * reason, which the English line keeps.
+	 */
+	knowledgeCollection: {
+		paused: (reason: KnowledgeNoticeReason, cause: string): string =>
+			`Automatic knowledge collection paused because ${cause}.${KNOWLEDGE_ACTIONS[reason]}`,
+		sessionSpent: (cause: string): string =>
+			`Automatic knowledge collection paused because ${cause} (autoLearn.knowledgeSessionMaxUsd). Raise autoLearn.knowledgeSessionMaxUsd to resume it in this session.`,
+		sourceUnpaid:
+			"Automatic knowledge collection paused because autoLearn.knowledgeMaxUsd is zero, so no source can be paid for. Raise autoLearn.knowledgeMaxUsd to resume it.",
+		capReached:
+			"Automatic knowledge collection paused because this session's estimated cost cap allows no further spend.",
+	},
+	/** A proactive review that did not start for a cause the owner can act on (`proactivity-controller.ts`). */
+	proactiveReview: {
+		spendReached:
+			"Proactive review paused because review spend over the last 24 hours, across this agent's sessions, reached proactivity.maxUsdPerDay. Reviews start again once older spend leaves the rolling day, or sooner if that setting is raised.",
+		modelUnresolved: (model: string) =>
+			`Proactive review paused because proactivity.model ${JSON.stringify(model)} does not resolve to an available model. Set proactivity.model to a configured, signed-in model, or remove it to use the session model.`,
+		modelTooSmall:
+			"Proactive review paused because its model's capability tier allows no background lanes. Set proactivity.model to a model with a larger context window.",
+	},
+	/** Finished results past the owner's review threshold (`review-gauge.ts`). */
+	reviewBacklog: (waiting: number) =>
+		`${waiting} finished results are waiting for your review: new work is piling up faster than it is reviewed. Consider tightening the checks or pausing new fan-out until you catch up; nothing was held.`,
+	/** Routine results held for the owner's next turn by the day's wake bound (`routine-runtime-assembly.ts`). */
+	routineResultWakesHeld: (bound: number) =>
+		`Routine results started ${bound} parent turns in the last 24 hours, the routines.maxResultWakesPerDay bound; later results wait for the owner's next turn until the day has room. Raising the setting lets more start turns.`,
+	/** A worker model's provider login expired and could not be refreshed (`worker-credential-health.ts`). */
+	workerLogin: {
+		expiredMoved: (name: string, provider: string) =>
+			`Your ${name} login has expired, so workers use another subscription model. Run /login ${provider} to sign in again.`,
+		expiredUnstarted: (name: string, provider: string) =>
+			`Your ${name} login has expired, so a worker on it could not start. Run /login ${provider} to sign in again.`,
+	},
+	/** A CI fix act-ahead prepared (`act-ahead-controller.ts`); the basis and the patch path come first. */
+	actAhead: {
+		readyReproduced: (sha: string, where: string, files: number, command: string) =>
+			`CI failed on ${sha}, reproduced locally: a fix is ready at ${where}, ${files} file(s); \`${command}\` passes with it. Say "apply it" to apply it.`,
+		readyDiagnosed: (sha: string, where: string, files: number, command: string) =>
+			`CI failed on ${sha}: a fix diagnosed from the CI log (the failing step is not re-run locally) is ready at ${where}, ${files} file(s); \`${command}\` passes with it. Say "apply it" to apply it.`,
+	},
+	/** System One is configured but has no engine (`session-edge-intent-controller.ts`); its English cause is the domain's own. */
+	systemOneNoEngine: (cause: typeof SYSTEM_ONE_NO_ENGINE_CAUSE) =>
+		`${cause}, so tool calls run under the deterministic gates only, without System One's review of their effects.`,
+	/** CI results a session never received (`host-event-session-controller.ts`). */
+	ciResults: {
+		gap: (count: number, reason: HostEventReplayGap["reason"]) =>
+			`Up to ${count} CI ${count === 1 ? "result was" : "results were"} never delivered to this session: ${GAP_CAUSES[reason]}. Check CI directly for results from that period.`,
+		journalReplaced:
+			"CI results this session had not yet received were dropped: the CI event journal was replaced because it was unreadable or another release started a new one. Check CI directly for results from before now.",
+	},
+
+	/**
+	 * The soul review's notices (`soul-controller.ts`): a held or refused soul.md write or change and how it ended.
+	 * `error` and `reason` are System One's words, handed in whole.
+	 */
+	soul: {
+		holdUnreadable:
+			"An earlier session left a soul.md review hold that could not be read; soul.md was accepted as it is.",
+		holdResumedDeleted:
+			"An earlier session ended while a deletion of soul.md was waiting to be undone. It is put back.",
+		holdResumedChanged:
+			"An earlier session ended before System One reviewed a change to soul.md. The change stays on disk but is not accepted until System One reviews it; it is reverted if the review rejects it.",
+		writeUnsupported: (error: string) =>
+			`The agent's soul.md writes are refused: ${error}. Configure a System One engine that can run the soul review.`,
+		writeHeld: (error: string) =>
+			`System One could not review the agent's soul.md write (${error}). It is held, not written: the harness writes it once System One reviews and allows it.`,
+		writeReplaced:
+			"The held soul.md write was dropped: a newer soul.md write was reviewed, allowed and written. Its text is kept in /soul history.",
+		writeDropped:
+			"The held soul.md write was dropped for a newer allowed write that did not complete. Its text is kept in /soul history.",
+		changeHeld: (error: string, attempts: number) =>
+			`soul.md was changed during a tool call while System One could not review it (${error}). The change stays on disk but is not accepted until System One reviews it; it is reverted after ${attempts} failed reviews.`,
+		changeReplaced:
+			"The soul.md change held for System One review was replaced by a newer change before it was reviewed.",
+		changeAccepted: "System One reviewed and allowed the held soul.md change; it is accepted.",
+		changeAcceptedUnreviewed:
+			"The held soul.md change was accepted without review: System One is no longer configured.",
+		changeReverted: (reason: string) => `The held soul.md change was not accepted (${reason}); it was reverted.`,
+		changeWithheld: (attempts: number) =>
+			`System One could not review the held soul.md change in ${attempts} attempts; it was reverted and its text is kept in /soul history.`,
+		writeStale:
+			"The held soul.md write was not written: soul.md changed since it was proposed. Its text is kept in /soul history.",
+		writeWithheld: (attempts: number) =>
+			`System One could not review the held soul.md write in ${attempts} attempts; it was not written and its text is kept in /soul history.`,
+		heldUnsupported: (error: string) =>
+			`The held soul.md write was not written: ${error}. Its text is kept in /soul history.`,
+		writeRejected: (clauses: string) =>
+			`System One rejected the held soul.md write (${clauses}); it was not written.`,
+		writeApplied: "System One reviewed and allowed the held soul.md write; the harness wrote it.",
+		writeAppliedUnreviewed: "The held soul.md write was written without review: System One is no longer configured.",
+		writeLocked:
+			"The held soul.md write was allowed but not written: soul.md stayed locked by another session. Its text is kept in /soul history.",
+	},
+
+	/** Where the words of a run that asked a held action came from (`originLabel` in `agent-session-edge.ts`). */
+	heldActionOrigin: (origin: TurnOriginRecord): string => {
+		if (origin.k === "peer-agent") return `a peer agent on ${origin.channel ?? "the chat mesh"}`;
+		if (origin.k === "host-event") return "an event written by someone else";
+		return origin.channel ? `the ${origin.channel} channel` : "a source whose origin could not be read";
+	},
+	/**
+	 * A held action kept as a draft, as the frame around its bounded action (`keepOutwardDraft`): `classes` its edge
+	 * classes, `origin` worded by `heldActionOrigin`, `grants` the `/edge allow` commands that let such runs do it, or "".
+	 */
+	heldDraft: (classes: string, origin: string, grants: string) => ({
+		head: "Held, not run: ",
+		tail: ` (${classes}), asked by ${origin}. It runs if you ask for it yourself${grants === "" ? "" : `; ${grants} lets such runs do it`}.`,
+	}),
+	/** No more held actions are recorded: `max` of them already wait for the owner. */
+	heldDraftsFull: (origin: string, max: number) =>
+		`Held, not run: actions asked by ${origin}; ${max} held actions already wait for you, so no more are recorded. They run if you ask for them yourself.`,
 
 	/** What a widget the extension drew too tall to keep becomes at the top of its frame. */
 	widgetTruncated: "... (widget truncated)",

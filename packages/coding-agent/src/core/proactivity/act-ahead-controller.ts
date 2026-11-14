@@ -27,7 +27,7 @@ import {
 	ciSubjectKey,
 	ciThreadKey,
 } from "../events/host-event-contract.ts";
-import type { HarnessNoticeKind, HarnessNoticeObservation } from "../harness-notice.ts";
+import { type HarnessNoticeKind, type HarnessNoticeObservation, wordedNotice } from "../harness-notice.ts";
 import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { RoutineHostEventFact, RoutineHostEventFeed } from "../routines/routine-contract.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
@@ -438,14 +438,15 @@ export class ActAheadController {
 		const command = check.length > 60 ? `${check.slice(0, 59)}…` : check;
 		const sha = base.headSha.slice(0, 10);
 		// A notice keeps its first 240 characters: the basis and the patch path come first, so a long path cuts the tail.
-		const text =
-			basis === "reproduced"
-				? `CI failed on ${sha}, reproduced locally: a fix is ready at ${where}, ${final.files.length} file(s); \`${command}\` passes with it. Say "apply it" to apply it.`
-				: `CI failed on ${sha}: a fix diagnosed from the CI log (the failing step is not re-run locally) is ready at ${where}, ${final.files.length} file(s); \`${command}\` passes with it. Say "apply it" to apply it.`;
+		const files = final.files.length;
 		// A notice's id is its session, kind and reason (not its scope): the episode in the reason makes each fix its own.
 		this.deps.observeNotice("act-ahead", () => ({
 			scope: base.episode,
-			state: { reason: `ready:${base.episode}`, text },
+			state: wordedNotice(`ready:${base.episode}`, (words) =>
+				basis === "reproduced"
+					? words.notices.actAhead.readyReproduced(sha, where, files, command)
+					: words.notices.actAhead.readyDiagnosed(sha, where, files, command),
+			),
 		}));
 		return undefined;
 	}
