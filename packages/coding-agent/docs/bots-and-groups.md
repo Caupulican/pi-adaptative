@@ -41,12 +41,21 @@ your own `SYSTEM.md` or `APPEND_SYSTEM.md`. Its memory blackboard (`<agent dir>/
 a worker reads) opens its system prompt under its soul when the session starts; it can read the file, not edit it, and a
 line from each finished turn is appended to it. It reads, and writes only when the bot has write access, and then as a worker writes: its file tools write inside your project directory only, never to a harness resource (skills, extensions, prompts, settings, hooks, git config); a read-only bot has a shell whose
 commands are judged one by one, as a read-only worker's are (nothing that edits or creates a file runs, nor anything that
-reaches the network unless its profile grants `network.http`, in every execution mode). A turn is bounded by `workerDelegation.maxUsd` (and the main session's own ceiling, with its metered-only ceiling when the bot's model is metered) when one is
-set, and in time by `workerDelegation.maxWallClockMs` when that is set, as a worker's run is; what each turn spends is added
-to the main session's cost. A turn's spend counts, with its model calls, the compactions that serve it: one while it runs
-or between its runs, and one just before its first run in the same submission (the threshold check before your message's
-run). A compaction after a turn's last run counts toward no turn's bound; what the session spends between turns is charged
-with the next turn or when the session closes. The bot compacts its own context with `self_compact` as the main session
+reaches the network unless its profile grants `network.http`, in every execution mode). Its spend is bounded per request:
+each outside input it serves (your message, a message its inbox took, a watch's wake) opens a spend window, and the turns
+serving it, the handoff turns its workers' results open and those workers' runs share one dollar bound, the lowest of
+`workerDelegation.maxUsd` and the main session's own ceiling (with its metered-only ceiling when the spend is metered)
+when one is set. A turn is stopped once the window's spend (its own and its workers', from the delegation ledger) passes
+the bound on the bot's model; each worker run is held to the bound on its own model less what the bot's turns spent in
+the window, shared with the window's other workers. On a model no bound applies to (a subscription with no ceiling set)
+its workers get no dollar bound: the plan's usage windows hold them, and a worker whose usage is used up waits for the
+reset and continues on its own. The windows are kept in `bots/<id>/spend-windows.json` (the newest 64). A turn is bounded
+in time by `workerDelegation.maxWallClockMs` when that is set, as a worker's run is. What the bot's session spends is added
+to the main session's cost at each turn's end and each time a worker's usage reaches it, from a watermark kept in its
+transcript, so a reopen or a crash charges no range twice and loses none. A turn's spend counts, with its model calls, the
+compactions that serve it: one while it runs or between its runs, and one just before its first run in the same
+submission (the threshold check before your message's run). A compaction after a turn's last run counts toward no turn's
+bound; it is charged with the session's next charge. The bot compacts its own context with `self_compact` as the main session
 does (`docs/compaction.md`): the note it saves ends its run, the session compacts, and the note's handoff continues the
 same turn, under the same spend and time bound. A turn stopped at either bound releases the saved note, so no later run
 continues the stopped work, and a note the bot's session left saved when it closed is handed off when it loads again. Its tool loop is supervised as a worker's is: repeated broad validation with no new change is steered back to the work, and a turn System One judges stalled or off its message is steered, redirected or stopped; the directive shows in its chat. It reads the settings the main session reads, again each time the main session changes them, and runs
@@ -133,9 +142,9 @@ and soul, the model rules and the execution plan), without a worker run's admiss
 now, the worker fleet), since no worker runs: the resolved model and thinking, the plan's tools, its working directory, its read roots (a profile
 that confines reads confines the read tools, `repo_read`, `lookup`, the read-only shell and its watches to them), its write
 roots and read-only grant, a capability ceiling of the plan's capabilities held by the session's tool gate, the soul and
-resources a worker of it carries, and a turn bound of the profile's cost budget (`maxCostUsd`, and `maxMeteredCostUsd`
-too when the bot's model is reached with an API key rather than a subscription) when it is lower than the worker and
-session bounds. A run on a session built from an older compile (the profile, a model pin or the worker policy changed
+resources a worker of it carries, and a spend bound of the profile's cost budget (`maxCostUsd`, and `maxMeteredCostUsd`
+too on spend made on a model reached with an API key rather than a subscription, each spend judged on the model that
+makes it, a worker's on its own) when it is lower than the worker and session bounds. A run on a session built from an older compile (the profile, a model pin or the worker policy changed
 since) is refused and the idle session is rebuilt. A profile that needs an independent verifier of each claim, names a
 tool a session does not hold, or sets a token, wall-clock, attempt or tool-call limit (which only a worker's run counts)
 keeps the bot a worker; a profile the resolution refuses refuses the message in the owner's words. One predicate decides it
