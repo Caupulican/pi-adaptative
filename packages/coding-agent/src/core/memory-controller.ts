@@ -128,6 +128,7 @@ import { KnowledgeStore } from "./memory/knowledge-store.ts";
 import type { KnowledgeReadSource } from "./memory/knowledge-tool.ts";
 import { type LaneKnowledgeSelection, projectLaneKnowledge } from "./memory/lane-knowledge-view.ts";
 import { MemoryManager } from "./memory/memory-manager.ts";
+import type { MemoryStanding } from "./memory/memory-provider.ts";
 import {
 	assertMemoryReadActive,
 	INCOMPLETE_MEMORY_READ,
@@ -523,8 +524,7 @@ export interface MemoryControllerDeps {
 	 * index registers it so a first explicit read sees its committed history. Absent in narrow hosts.
 	 */
 	getSessionFile?(): string | undefined;
-	/** Child sessions gate durable memory writes; passed to provider initialization. */
-	isChildSession(): boolean;
+	readonly standing: MemoryStanding;
 	/** Re-derive the tool registry after (re)init so the newly-surfaced memory tools take effect. */
 	refreshToolRegistry(): void;
 	/**
@@ -724,7 +724,7 @@ export class MemoryController {
 				getAgentDir: () => deps.getAgentDir(),
 				getSessionId: () => deps.getSessionId(),
 				projectId: () => this._projectId(),
-				isChildSession: () => deps.isChildSession(),
+				ownsHistory: () => deps.standing.ownsHistory,
 				getHistorySettings: () => this._historySettings(),
 				isRetrievalEnabled: () => deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
 				emitWarning: (message) => deps.emitWarning(message),
@@ -749,7 +749,7 @@ export class MemoryController {
 	 * port's own receiver: a detached `validate` throws on every call, which would read as a refused summary model.
 	 */
 	private _reconcileContinuousChat(): void {
-		if (this.deps.isChildSession() || this._shutdownPromise !== undefined || this._transitioning) return;
+		if (!this.deps.standing.ownsHistory || this._shutdownPromise !== undefined || this._transitioning) return;
 		if (this.deps.getSettingsManager().getMemorySystem() !== "icm") return;
 		const compaction = this.deps.continuousChat?.compaction;
 		if (!compaction) return;
@@ -980,7 +980,7 @@ export class MemoryController {
 			!this._transitioning &&
 			!this._initializationFailed &&
 			this._activeMemorySystem !== undefined &&
-			!this.deps.isChildSession()
+			this.deps.standing.ownsHistory
 		);
 	}
 
@@ -991,7 +991,7 @@ export class MemoryController {
 
 	/** The bundled file-store writer, for operator recovery commands; undefined in child sessions or before init. */
 	getFileStoreWriter(): FileStoreProvider | undefined {
-		return !this._legacyMemoryEnabled() || this.deps.isChildSession() ? undefined : this._fileStoreWriter;
+		return !this._legacyMemoryEnabled() || !this.deps.standing.ownsMemoryWrites ? undefined : this._fileStoreWriter;
 	}
 
 	/** Queue one completed turn for provider-owned durable synchronization. Raw tool output is excluded by the caller. */
@@ -1505,7 +1505,7 @@ export class MemoryController {
 	): MemoryPromptPlan {
 		const generation = this._memoryGeneration;
 		const usesKnowledge = () =>
-			!this.deps.isChildSession() && this.deps.getSettingsManager().getMemorySystem() === "icm";
+			this.deps.standing.readsOwnerMemory && this.deps.getSettingsManager().getMemorySystem() === "icm";
 		if (usesKnowledge()) return this._appendKnowledgePrompt(messages, wireMessages);
 		if (!this._legacyMemoryEnabled()) {
 			// A temporarily unavailable OKF generation is not an ICM generation.
@@ -1591,7 +1591,7 @@ export class MemoryController {
 			isCurrent: () =>
 				context.isCurrent() &&
 				(this.deps.isThirdPartyRun?.() === true) === withheld &&
-				!this.deps.isChildSession() &&
+				this.deps.standing.readsOwnerMemory &&
 				this.deps.getSettingsManager().getMemorySystem() === "icm" &&
 				!this._legacyMemoryEnabled() &&
 				isDeepStrictEqual(
@@ -1773,7 +1773,7 @@ export class MemoryController {
 		// A collector that is still stopping belongs to a memory transition, not to an unpersisted session.
 		return {
 			state: "inactive",
-			reason: this.deps.isChildSession()
+			reason: !this.deps.standing.ownsMemoryWrites
 				? "child_session"
 				: this._knowledgeHost?.ephemeral() && this._currentKnowledgeReader()
 					? "ephemeral_session"
@@ -2063,7 +2063,7 @@ export class MemoryController {
 				? health.reason
 				: !enabled || health !== undefined
 					? undefined
-					: this.deps.isChildSession()
+					: !this.deps.standing.ownsHistory
 						? "this is a child session: it keeps no history index of its own; history is read through the parent session"
 						: this._initializationFailed
 							? "the memory system failed to initialize"
@@ -2734,7 +2734,7 @@ export class MemoryController {
 	 * messages, otherwise (a child session, or no chat projection) all of them. See `continuousChatRequestHistory`.
 	 */
 	requestHistory(messages: readonly AgentMessage[]): readonly AgentMessage[] {
-		const wire = this.deps.isChildSession() ? undefined : this._continuousChatWire;
+		const wire = this.deps.standing.ownsHistory ? this._continuousChatWire : undefined;
 		return continuousChatRequestHistory({ wire, host: this.continuousChatHost() }, messages);
 	}
 
@@ -3345,7 +3345,7 @@ export class MemoryController {
 		write: StructuredReflectionWrite,
 		signal?: AbortSignal,
 	): Promise<StructuredReflectionApplyResult> {
-		if (!this._legacyMemoryEnabled() || this.deps.isChildSession() || this._fileStoreWriter === undefined) {
+		if (!this._legacyMemoryEnabled() || !this.deps.standing.ownsMemoryWrites || this._fileStoreWriter === undefined) {
 			return { applied: false, created: false, error: "Structured memory writes are unavailable." };
 		}
 		return this._fileStoreWriter.applyStructuredReflectionWrite(write, signal);
@@ -3356,7 +3356,7 @@ export class MemoryController {
 		rollback: StructuredReflectionRollback,
 		signal?: AbortSignal,
 	): Promise<boolean> {
-		if (!this._legacyMemoryEnabled() || this.deps.isChildSession() || this._fileStoreWriter === undefined)
+		if (!this._legacyMemoryEnabled() || !this.deps.standing.ownsMemoryWrites || this._fileStoreWriter === undefined)
 			return false;
 		return this._fileStoreWriter.rollbackStructuredReflectionWrite(rollback, signal);
 	}
@@ -3446,7 +3446,7 @@ export class MemoryController {
 			knowledgeStopped,
 		]);
 		// Until this generation installs its own chat, provider requests fail closed rather than carrying durable history.
-		if (system === "icm" && keptChat === undefined && !this.deps.isChildSession()) {
+		if (system === "icm" && keptChat === undefined && this.deps.standing.ownsHistory) {
 			this._setContinuousChatWire({ kind: "blocked", reason: "its activation is in progress" });
 		}
 		this._releaseTranscriptRecall();
@@ -3485,7 +3485,7 @@ export class MemoryController {
 					// eager start while retrieval is enabled; otherwise (ICM, or retrieval disabled) the backend is
 					// bound and the first admitted history request starts it, so a disabled policy never scans.
 					const eager = system !== "icm" && this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled;
-					const transcriptRecall = this.deps.isChildSession()
+					const transcriptRecall = !this.deps.standing.ownsHistory
 						? undefined
 						: new TranscriptRecallProvider({
 								...(eager ? { start: "eager" as const } : {}),
@@ -3545,7 +3545,7 @@ export class MemoryController {
 					await manager.initializeAll(this.deps.getSessionId(), {
 						agentDir: this.deps.getAgentDir(),
 						cwd: this.deps.getCwd(),
-						isChildSession: this.deps.isChildSession(),
+						...this.deps.standing,
 					});
 					const required = system === "icm" ? "icm" : "file-store";
 					if (!manager.isProviderActive(required)) {
@@ -3557,7 +3557,7 @@ export class MemoryController {
 						return;
 					}
 					this._activeMemorySystem = system;
-					if (system === "icm" && !this.deps.isChildSession()) {
+					if (system === "icm" && this.deps.standing.readsOwnerMemory) {
 						this._knowledgeHost = this.deps.knowledge?.();
 						const host = this._knowledgeHost;
 						this._knowledgeStore = KnowledgeStore.open(
@@ -3569,7 +3569,7 @@ export class MemoryController {
 					}
 					this._fileStoreWriter = writer;
 					this._transcriptRecall = transcriptRecall;
-					if (system === "icm" && !this.deps.isChildSession()) {
+					if (system === "icm" && this.deps.standing.ownsHistory) {
 						if (keptChat !== undefined && this._continuousChat === keptChat) this._keepContinuousChat(keptChat);
 						else await this._openContinuousChat(generation, activation.signal);
 					}
@@ -3654,7 +3654,7 @@ export class MemoryController {
 	 */
 	private _reportManagedNotices(writer: FileStoreProvider): void {
 		const notices = writer.drainManagedNotices();
-		if (this.deps.isChildSession()) return;
+		if (!this.deps.standing.ownsMemoryWrites) return;
 		for (const notice of notices) {
 			const key = `${notice.target}:${notice.kind}`;
 			if (this._reportedManagedNotices.get(key) === notice.revision) continue;

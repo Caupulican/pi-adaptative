@@ -899,7 +899,7 @@ export class FileStoreProvider implements MemoryProvider {
 	 * budget omitted the block). Cached reads with another budget never call this.
 	 */
 	onSystemPromptBlockFrozen(renderedBlock: string): void {
-		if (this.ctx?.isChildSession) return;
+		if (this.ctx && !this.ctx.readsOwnerMemory) return;
 		const selection = this.selectApplicablePreferenceLines();
 		const usr = this.renderUserMemory();
 		let coverage: FrozenUserCoverage = "full";
@@ -944,7 +944,7 @@ export class FileStoreProvider implements MemoryProvider {
 	 * sessions have no persona projection.
 	 */
 	userPersonaProjection(budget?: MemoryPromptBudget): UserPersonaProjection | undefined {
-		if (!this.ctx || this.ctx.isChildSession) return undefined;
+		if (!this.ctx?.readsOwnerMemory) return undefined;
 		const selection = this.selectApplicablePreferenceLines();
 		const currentLines = selection.kept;
 		const current = selection.text;
@@ -1166,7 +1166,7 @@ export class FileStoreProvider implements MemoryProvider {
 	 * bound. Unverified and single-observation inferred lines stay out of a handoff.
 	 */
 	getHandoffPersonaGuidance(): string | undefined {
-		if (!this.ctx || this.ctx.isChildSession) return undefined;
+		if (!this.ctx?.readsOwnerMemory) return undefined;
 		const lines = this.applicablePreferences()
 			.filter(
 				({ parsed }) =>
@@ -1464,7 +1464,7 @@ export class FileStoreProvider implements MemoryProvider {
 		user: UserPromptSnapshot,
 		budget?: MemoryPromptBudget,
 	): string {
-		if (this.ctx?.isChildSession) return "";
+		if (this.ctx && !this.ctx.readsOwnerMemory) return "";
 		const mem = FileStoreProvider.capMemory(FileStoreProvider.sanitizeMemory(memory), {
 			enabled: true,
 			compact: false,
@@ -1939,7 +1939,7 @@ export class FileStoreProvider implements MemoryProvider {
 	}
 
 	public getToolDefinitions(): ToolDefinition[] {
-		if (this.ctx?.isChildSession) return [];
+		if (this.ctx && !this.ctx.ownsMemoryWrites) return [];
 		return [
 			{
 				name: ROOT_MEMORY_TOOL_NAME,

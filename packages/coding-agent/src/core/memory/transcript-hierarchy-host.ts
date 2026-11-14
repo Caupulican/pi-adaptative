@@ -60,7 +60,7 @@ export interface TranscriptHierarchyHostDeps {
 	getSessionId(): string;
 	/** The project identity the derived state and every handle are scoped to. */
 	projectId(): string;
-	isChildSession(): boolean;
+	ownsHistory(): boolean;
 	getHistorySettings(): TranscriptHistorySettings;
 	isRetrievalEnabled(): boolean;
 	summarizer: TranscriptSummarizerDeps;
@@ -523,7 +523,7 @@ export class TranscriptHierarchyHost {
 		const settings = this.deps.getHistorySettings();
 		let reason: string | undefined;
 		if (!reader) reason = NOT_ATTACHED_REASON;
-		else if (this.deps.isChildSession()) reason = "Child sessions do not build a history hierarchy.";
+		else if (!this.deps.ownsHistory()) reason = "Child sessions do not build a history hierarchy.";
 		else if (!settings.hierarchy) reason = HIERARCHY_OFF_REASON;
 		else if (!this.deps.isRetrievalEnabled()) reason = MEMORY_RETRIEVAL_DISABLED_REASON;
 		let summarizer: ReturnType<typeof resolveTranscriptSummarizer> | undefined;

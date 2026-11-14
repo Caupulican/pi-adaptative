@@ -113,6 +113,7 @@ import { runtimeGenerationAdmission } from "./runtime-generation-admission.ts";
 import { redactKnownSecrets } from "./security/secret-text.ts";
 import { classifyCustomEntryPersisted } from "./session-entry-persistence.ts";
 import { checkSkillEvolutionEligibility } from "./session-skill-policy.ts";
+import type { SessionCapabilities } from "./session-standing.ts";
 import type {
 	AutoLearnSettings,
 	AutonomySettings,
@@ -164,8 +165,7 @@ export interface ReflectionControllerDeps {
 	getContextGeneration?(): number;
 	/** Agent dir — reflection-promoted skills are written under `<agentDir>/skills/`. */
 	getAgentDir(): string;
-	/** Child sessions must not learn — the pass returns null for them. */
-	isChildSession(): boolean;
+	readonly standing: Pick<SessionCapabilities, "ownsLearning" | "ownsMemoryWrites">;
 	/** Disposal short-circuits: no completion, no writes against a dead session. */
 	isDisposed(): boolean;
 	/** Session-lifetime abort signal — aborts an in-flight reflection completion on dispose. */
@@ -457,7 +457,7 @@ export class ReflectionController {
 			settingsManager.getAutonomySettings().mode,
 			settingsManager.getAutoLearnSettings(),
 		);
-		return isCurrentSessionReflectionEnabled(settings) && !this.deps.isChildSession() && !this.deps.isDisposed();
+		return isCurrentSessionReflectionEnabled(settings) && this.deps.standing.ownsLearning && !this.deps.isDisposed();
 	}
 
 	/** Latest durable cue snapshot on the active session branch; custom state never enters model context. */
@@ -554,7 +554,7 @@ export class ReflectionController {
 			ephemeral,
 			createCollector: (binding) => {
 				const manager = this.deps.getSessionManager();
-				if (this.deps.isChildSession()) return undefined;
+				if (!this.deps.standing.ownsMemoryWrites) return undefined;
 				if (ephemeral()) {
 					if (autoLearn().enabled)
 						this.warnOnce(
@@ -1800,7 +1800,7 @@ export class ReflectionController {
 		/** True only when every turn in this pass explicitly asked Pi to remember durable information. */
 		explicitUserMemoryInstruction?: boolean;
 	}): Promise<ReflectionResult | null> {
-		if (this.deps.isChildSession() || this.deps.isDisposed()) return null;
+		if (!this.deps.standing.ownsLearning || this.deps.isDisposed()) return null;
 		const guard = this.captureLearningContext();
 		const signal = input.signal
 			? AbortSignal.any([input.signal, this.deps.getReflectionSignal()])
@@ -1814,7 +1814,7 @@ export class ReflectionController {
 			runtimeLease.assertCurrent();
 			// ICM mode: zero legacy MEMORY.md/USER.md/OKF reads/writes and no automatic reflection jobs.
 			if (this.isIcmMode()) return null;
-			if (this.deps.isChildSession() || this.deps.isDisposed()) return null;
+			if (!this.deps.standing.ownsLearning || this.deps.isDisposed()) return null;
 			const plan = decideDemand(input.signals);
 			if (plan.act === "skip") return null;
 
@@ -2146,7 +2146,7 @@ export class ReflectionController {
 		| { applied: false; reason: "icm_memory_offline" | "child_session" | "session_disposed" }
 	> {
 		if (this.isIcmMode()) return { applied: false, reason: "icm_memory_offline" };
-		if (this.deps.isChildSession()) return { applied: false, reason: "child_session" };
+		if (!this.deps.standing.ownsLearning) return { applied: false, reason: "child_session" };
 		if (this.deps.isDisposed()) return { applied: false, reason: "session_disposed" };
 		const guard = options.guard ?? this.captureLearningContext();
 		const existingMemory = [
@@ -2286,7 +2286,7 @@ export class ReflectionController {
 		explicit?: boolean,
 		guard?: LearningApplicationGuard,
 	): Promise<ReflectionApplyResult> {
-		if (this.deps.isDisposed() || this.deps.isChildSession() || signal?.aborted || guard?.())
+		if (this.deps.isDisposed() || !this.deps.standing.ownsLearning || signal?.aborted || guard?.())
 			return { applied: false };
 		// ICM mode: zero legacy MEMORY.md/USER.md/OKF reads/writes. Promote_skill still lands
 		// under the skills dir (ICM reference), never OKF bookkeeping.

@@ -80,10 +80,10 @@ export class IcmProvider implements MemoryProvider {
 
 	/**
 	 * While the chat runs, its `zoom` and `date` are the root's only navigation; the history-only `memory` tool is not
-	 * offered. A child session reads history only via its parent.
+	 * offered. A session that does not own the owner's history (`ownsHistory`) reads it only via its parent.
 	 */
 	getToolDefinitions(): ToolDefinition[] {
-		if (this.context?.isChildSession) return [];
+		if (this.context && !this.context.ownsHistory) return [];
 		const history =
 			this.continuousChat() !== undefined
 				? createContinuousChatTools(this.continuousChat)
@@ -96,7 +96,7 @@ export class IcmProvider implements MemoryProvider {
 	 * keyed by a digest of the user's instructions, so the block is its own cache token.
 	 */
 	systemPromptBlockKey(): string {
-		if (this.context?.isChildSession) return "child";
+		if (this.context && !this.context.ownsHistory) return "child";
 		const chat = this.continuousChat();
 		if (chat !== undefined) {
 			return `continuous:${createHash("sha256")
@@ -114,12 +114,12 @@ export class IcmProvider implements MemoryProvider {
 			`Pipelines: ${JSON.stringify(resourceDir("pipelines", this.context.agentDir))}`,
 		].join("\n");
 		// The chat prompt is the contract for the view and its tools, not recalled content: the memory budget never drops it.
-		const chat = this.context.isChildSession ? undefined : this.continuousChat();
+		const chat = this.context.ownsHistory ? this.continuousChat() : undefined;
 		if (chat !== undefined) {
 			return `${renderContinuousChatSystemPrompt(chat.userInstructions())}\n\n${ICM_MEMORY_GUIDANCE}\n${paths}`;
 		}
 		const block = [
-			this.context.isChildSession || this.isRetrievalEnabled()
+			!this.context.ownsHistory || this.isRetrievalEnabled()
 				? ICM_MEMORY_GUIDANCE
 				: `${ICM_MEMORY_GUIDANCE} ${ICM_HISTORY_DISABLED_GUIDANCE}`,
 			paths,

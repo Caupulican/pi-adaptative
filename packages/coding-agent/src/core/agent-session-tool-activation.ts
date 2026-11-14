@@ -19,7 +19,7 @@ import type { SystemPromptBuilder } from "./system-prompt-builder.ts";
 
 export interface AgentSessionToolActivationPorts {
 	runtimeAdmission(): SessionRuntimeAdmissionController;
-	isChildSession(): boolean;
+	ownsHistory(): boolean;
 	getModelCapabilityProfile(): ModelCapabilityProfile;
 	model(): Model<Api> | undefined;
 	runtimeBuilder(): RuntimeBuilder;
@@ -54,7 +54,7 @@ export class AgentSessionToolActivation {
 				if (requested.includes("skill")) {
 					requested.push("skillify", "skill_audit");
 				}
-				if (!this.ports.isChildSession() && requested.includes("memory")) {
+				if (this.ports.ownsHistory() && requested.includes("memory")) {
 					requested.push("zoom", "date");
 				}
 				const capability = partitionToolNamesForCapability(

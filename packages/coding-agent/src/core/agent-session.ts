@@ -606,7 +606,7 @@ export class AgentSession {
 	});
 	private readonly _toolActivation = new AgentSessionToolActivation({
 		runtimeAdmission: () => this._runtimeAdmission,
-		isChildSession: () => this._caps.routineScope !== "session",
+		ownsHistory: () => this._caps.ownsHistory,
 		getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 		model: () => this.model,
 		runtimeBuilder: () => this._runtimeBuilder,
@@ -714,6 +714,7 @@ export class AgentSession {
 	private readonly _agentDirForLedger: string;
 
 	constructor(config: AgentSessionConfig) {
+		this._caps = config.capabilities;
 		const bundleLease = claimSessionBundleLease(
 			config.bundleLease,
 			config.agentDir ?? getAgentDir(),
@@ -981,7 +982,6 @@ export class AgentSession {
 			bundleLease,
 		);
 		this._runtimeMutationWaitClock = config.timers.port("foreground");
-		this._caps = config.capabilities;
 		const pinHost = { isDisposed: () => this._disposed, warn: (message: string) => this.emitHostWarning(message) };
 		if (this._caps.answersForCheckout) void reportGithubOriginPinForSession(this._cwd, this.sessionManager, pinHost);
 		this._durableLearningState = this._caps.ownsLearning ? DurableLearningState.forAgentDir(agentDir) : undefined;
@@ -1372,7 +1372,7 @@ export class AgentSession {
 			getCwd: () => this._cwd,
 			getSessionId: () => this.sessionManager.getSessionId(),
 			getSessionFile: () => this.sessionManager.getSessionFile(),
-			isChildSession: () => this._caps.routineScope !== "session",
+			standing: this._caps,
 			refreshToolRegistry: () => this._runtimeBuilder.refreshToolRegistry(),
 			getContextWindow: () => this.model?.contextWindow,
 			getPromptHeadroom: (messages) =>
@@ -1950,7 +1950,7 @@ export class AgentSession {
 			warn: (message) => this._emit({ type: "warning", message }),
 			getCwd: () => this._cwd,
 			getSkillsForAudit: () => this._resourceLoader.getActiveSkills(),
-			isChildSession: () => this._caps.routineScope !== "session",
+			standing: this._caps,
 			isDisposed: () => this._disposed,
 			getReflectionSignal: () => this._reflectionAbort.signal,
 			resolveTextToolCallProtocol: (model) => this._resolveModelToolProtocol(model).protocol,

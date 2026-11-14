@@ -8,7 +8,7 @@ import type { MemoryProvider, ToolDefinition } from "../extensions/types.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { causeHeadline, neutralizeControls } from "../terminal-warnings.ts";
-import type { MemoryLifecycleContext } from "./memory-provider.ts";
+import { type MemoryLifecycleContext, type MemoryLifecycleInput, memoryLifecycleContext } from "./memory-provider.ts";
 
 export interface MemoryPrefetchOptions {
 	externalEgressPolicy?: MemoryEgressPolicy;
@@ -225,7 +225,8 @@ export class MemoryManager {
 		this.providers.push(p);
 	}
 
-	public async initializeAll(sessionId: string, ctx: MemoryLifecycleContext): Promise<void> {
+	public async initializeAll(sessionId: string, input: MemoryLifecycleInput): Promise<void> {
+		const ctx = memoryLifecycleContext(input);
 		this.ctx = ctx;
 		this.activeProviders.clear();
 		this.systemPromptBlockCache = undefined;
@@ -392,8 +393,8 @@ export class MemoryManager {
 	}
 
 	public async syncTurn(user: string, assistant: string): Promise<void> {
-		if (this.ctx?.isChildSession) {
-			return; // Write-gated: skip writes in child sessions
+		if (this.ctx && !this.ctx.ownsMemoryWrites) {
+			return; // Write-gated: a session that does not own the owner's memory writes nothing
 		}
 
 		for (const p of this.providers) {
@@ -420,8 +421,8 @@ export class MemoryManager {
 	}
 
 	public async onSessionEnd(): Promise<void> {
-		if (this.ctx?.isChildSession) {
-			return; // Write-gated: skip writes in child sessions
+		if (this.ctx && !this.ctx.ownsMemoryWrites) {
+			return; // Write-gated: a session that does not own the owner's memory writes nothing
 		}
 
 		for (const p of this.providers) {
