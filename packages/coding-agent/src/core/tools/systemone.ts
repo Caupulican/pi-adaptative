@@ -139,7 +139,7 @@ export function createSystemOneToolDefinition(
 ) {
 	const uncertaintyClause = uncertainties
 		? "At turn entry and before delivery, inspect active uncertainties with uncertainties (advisory questions); resolve_uncertainty records a disposition (conservative_path or evidence_based_decision) with reason and evidence, after an extra reasoning round over the task and evidence. For worker_task_fit:<fingerprint> questions record workerTaskFit adequate or inadequate; only an explicit adequate outcome settles that exact task/model fitness on retry. No disposition is System One verification, certificate proof or an execution grant, and mandatory same-lane verification stays required. Reject stale questions and questions scoped to a foreign root session."
-		: "Workers cannot disposition session-owner uncertainties: recheck your mandatory findings in this lane and report unresolved advisory questions and evidence to the parent.";
+		: "This session keeps no semantic uncertainties of its own: recheck your mandatory findings in this session and report unresolved advisory questions and evidence in your answer.";
 	return {
 		name: SYSTEM_ONE_TOOL_NAME,
 		label: "System One",
@@ -174,7 +174,7 @@ export function createSystemOneToolDefinition(
 						return {
 							isError: true,
 							content: [
-								{ type: "text" as const, text: "Only the session owner can list semantic uncertainties." },
+								{ type: "text" as const, text: "This session keeps no semantic uncertainties to list." },
 							],
 							details: { advisoryOnly: true },
 						};
@@ -193,7 +193,7 @@ export function createSystemOneToolDefinition(
 							content: [
 								{
 									type: "text" as const,
-									text: "Only the session owner can disposition semantic uncertainties.",
+									text: "This session keeps no semantic uncertainties to disposition.",
 								},
 							],
 							details: { advisoryOnly: true },
