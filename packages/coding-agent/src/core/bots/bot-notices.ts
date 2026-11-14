@@ -1,12 +1,14 @@
 /**
  * What a bot's own session told the owner (a warning its session raised, a turn that failed or was stopped at its bound):
- * `bots/<id>/notices/`, one file per notice, the newest few kept. The bot's chat in every session draws them, the watch
- * over the bot homes tells every session when one is written, and a notice that asks for the owner's attention marks the
- * bot unread in the store every session reads (`PersistentBotTeamStore.recordBotNotice`). Never sent to a model.
+ * `bots/<id>/notices/`, one file per notice, the newest few kept, and the delivery ids of the notices told kept apart.
+ * The bot's chat in every session draws them, the watch over the bot homes tells every session when one is written, and
+ * a notice that asks for the owner's attention marks the bot unread in the store every session reads
+ * (`PersistentBotTeamStore.recordBotNotice`). Never sent to a model.
  *
  * The directory is private harness storage like the rest of the bot's home.
  */
 import { randomUUID } from "node:crypto";
+import { existsSync, readFileSync, renameSync } from "node:fs";
 import { join } from "node:path";
 import { botNoticesDir } from "../agent-paths.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
@@ -17,6 +19,14 @@ import { type BotHomeRecord, keepNewestHomeRecords, parseHomeRecordHead, readHom
 
 /** Notices kept, the newest: what the chat shows of what the bot's session told the owner. */
 const MAX_NOTICES_KEPT = 16;
+
+/**
+ * The delivery ids of the notices told, kept apart from the notices shown (`notices/delivered.json`, newest last): a
+ * reopened session finds an episode it told after its notice left the chat. The newest are kept, one per episode told; an
+ * episode past them is told again when the state it names is observed again.
+ */
+const DELIVERED_FILE = "delivered.json";
+const MAX_DELIVERIES_KEPT = 512;
 
 function errorText(error: unknown): string {
 	return error instanceof Error ? error.message : String(error);
@@ -64,17 +74,68 @@ export interface BotNoticeInput {
 }
 
 /**
- * The bot's chat as its own session's notice destination (`OwnerNoticeLine`): `read` the notices kept, `keep` one with
- * its delivery id (marked unread), true when it is kept.
+ * The bot's chat as its own session's notice destination (`OwnerNoticeLine`): the delivery ids it told
+ * (`readBotNoticeDeliveries`, a record that does not read reported through `warn`), and `keep`, which keeps a notice with
+ * its delivery id (marked unread) and is true when it is kept.
  */
 export function botNoticeLine(
-	read: () => readonly BotNotice[],
-	keep: (text: string, deliveryId: string) => boolean,
+	agentDir: string,
+	agentId: string,
+	port: { keep(text: string, deliveryId: string): boolean; warn(message: string): void },
 ): OwnerNoticeLine {
 	return {
-		heldIds: () => new Set(read().flatMap(({ deliveryId }) => (deliveryId ? [deliveryId] : []))),
-		keep: ({ deliveryId, text }) => keep(text, deliveryId),
+		heldIds: () => readBotNoticeDeliveries(agentDir, agentId, (message) => port.warn(message)),
+		keep: ({ deliveryId, text }) => port.keep(text, deliveryId),
 	};
+}
+
+/**
+ * The delivery ids kept apart from the chat, oldest first; none before the first is kept. A record that does not read
+ * is set aside (renamed `.unreadable`) and thrown, so it is reported once and the next notice told starts a new one.
+ */
+function readDeliveries(agentDir: string, agentId: string): string[] {
+	const file = join(botNoticesDir(agentDir, agentId), DELIVERED_FILE);
+	if (!existsSync(file)) return [];
+	try {
+		const value: unknown = JSON.parse(readFileSync(file, "utf8"));
+		if (Array.isArray(value) && value.every((id) => typeof id === "string")) return value;
+		throw new Error("not a list of delivery ids");
+	} catch (error) {
+		renameSync(file, `${file}.unreadable`);
+		throw new Error(`${file} was set aside as ${file}.unreadable: ${errorText(error)}`);
+	}
+}
+
+/**
+ * The delivery ids the bot's session told: those kept apart from the chat, and those of the notices the chat shows (a
+ * notice kept before the ids were kept apart). An unreadable record is reported through `warn`; the notices shown still
+ * count.
+ */
+function readBotNoticeDeliveries(
+	agentDir: string,
+	agentId: string,
+	warn: (message: string) => void,
+): ReadonlySet<string> {
+	const ids = new Set<string>();
+	try {
+		for (const id of readDeliveries(agentDir, agentId)) ids.add(id);
+	} catch (error) {
+		warn(interfaceText().botTeam.botNoticeDeliveriesNotKept(agentId, errorText(error)));
+	}
+	const unreadable = (file: string, reason: string) =>
+		warn(interfaceText().botTeam.botNoticeUnreadable(agentId, file, reason));
+	for (const { message } of readBotNotices(agentDir, agentId, unreadable))
+		if (message.deliveryId) ids.add(message.deliveryId);
+	return ids;
+}
+
+/** Adds a told notice's delivery id to the ids kept apart from the chat, dropping the oldest beyond the kept many. */
+function recordDelivery(agentDir: string, agentId: string, deliveryId: string): void {
+	const kept = readDeliveries(agentDir, agentId);
+	const ids = [...kept.filter((id) => id !== deliveryId), deliveryId].slice(-MAX_DELIVERIES_KEPT);
+	writeFileAtomicSync(join(botNoticesDir(agentDir, agentId), DELIVERED_FILE), `${JSON.stringify(ids)}\n`, {
+		mode: 0o600,
+	});
 }
 
 /**
@@ -132,6 +193,11 @@ export function keepBotNotice(
 	} catch (error) {
 		warn(words.botNoticeNotRecorded(notice.agentId, notice.text, errorText(error)));
 		return false;
+	}
+	try {
+		if (notice.deliveryId !== undefined) recordDelivery(agentDir, notice.agentId, notice.deliveryId);
+	} catch (error) {
+		warn(words.botNoticeDeliveriesNotKept(notice.agentId, errorText(error)));
 	}
 	try {
 		if (mark) markBotNotice(store, notice);

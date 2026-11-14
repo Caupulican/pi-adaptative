@@ -778,10 +778,10 @@ export class BotSessionHost {
 					// turn, running steers).
 					standing: { kind: "bot", agentId },
 					// Its notices (a lost watch, System One without an engine) reach the owner in the bot's chat.
-					ownerNoticeLine: botNoticeLine(
-						() => this.readNotices(agentId),
-						(text, deliveryId) => this.notify(agentId, text, true, deliveryId),
-					),
+					ownerNoticeLine: botNoticeLine(this.ports.agentDir(), agentId, {
+						keep: (text, deliveryId) => this.notify(agentId, text, true, deliveryId),
+						warn: (line) => this.ports.warn(line),
+					}),
 					// Every run is admitted at its start, whatever opened it: a wake's turn is held to the owner's rules too.
 					admitRun: () => {
 						try {

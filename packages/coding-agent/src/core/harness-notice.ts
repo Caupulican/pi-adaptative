@@ -318,11 +318,12 @@ export class HarnessNoticeController {
 	}
 
 	/**
-	 * {@link observe}, for a state the owner hears of in any session: where the session keeps no notices (a worker, a
-	 * vehicle), an observed notice's owner line arrives as a warning instead. The capability tells each episode once.
+	 * {@link observe}, for a state the owner hears of in any session: where no notice can be kept (a session without a
+	 * destination, a worker's or a vehicle's, and a closed runtime) an observed notice's owner line arrives as a warning
+	 * instead. The capability tells each episode once.
 	 */
 	observeOrWarn(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined): boolean {
-		if (this.closed || this.deps.destination) return this.observe(kind, read);
+		if (!this.closed && this.deps.destination) return this.observe(kind, read);
 		try {
 			const observation = read();
 			const notice = typeof observation === "object" && "scope" in observation ? observation.state : observation;

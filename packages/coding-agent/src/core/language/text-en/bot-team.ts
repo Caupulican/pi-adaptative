@@ -126,6 +126,8 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: a notice could not be kept in its chat (${reason}): ${text}`,
 	botNoticeNotMarked: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a notice is in its chat, but the roster could not mark it unread (${reason}).`,
+	botNoticeDeliveriesNotKept: (agentId: string, reason: string) =>
+		`Bot ${agentId}: the record of the notices its session already told could not be read or written (${reason}); one may be told again.`,
 	botNoticeUnreadable: (agentId: string, file: string, reason: string) =>
 		`Bot ${agentId}: a notice in its chat could not be read and was set aside as ${file}.unreadable (${reason}).`,
 	botHistoryFileUnreadable: (reason: string) => `Bot history: a session file could not be read (${reason}).`,
