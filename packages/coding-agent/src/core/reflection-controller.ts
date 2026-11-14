@@ -534,7 +534,7 @@ export class ReflectionController {
 			},
 			usageOwner: () => sessionSemanticUsageOf(this.deps.getSessionManager()),
 			autoLearn,
-			maxEstimatedUsd: () => runtime.maxEstimatedUsd(),
+			maxEstimatedUsd: (model) => runtime.maxEstimatedUsd(model),
 			runIsolatedCompletion: (options) => this.runIsolatedCompletion(options),
 		});
 		// One selection, re-read on every call: a bound System One always wins and never falls back.
@@ -556,10 +556,7 @@ export class ReflectionController {
 				const manager = this.deps.getSessionManager();
 				if (this.deps.isChildSession()) return undefined;
 				if (ephemeral()) {
-					const settings = this.deps.getSettingsManager();
-					if (
-						resolveAutoLearnSettings(settings.getAutonomySettings().mode, settings.getAutoLearnSettings()).enabled
-					)
+					if (autoLearn().enabled)
 						this.warnOnce(
 							"knowledge-ephemeral-session",
 							"Automatic knowledge collection requires a persisted session; no collection requests will start.",
@@ -579,6 +576,8 @@ export class ReflectionController {
 					...binding,
 					...runtime,
 					engine,
+					// A bound System One wins as the engine (`engine` above): its spend is no model's own, so it is metered.
+					maxEstimatedUsd: (model) => runtime.maxEstimatedUsd(runtime.engine() ? undefined : model),
 					evidence: this.ownerEvidence,
 					settings: this.deps.getSettingsManager(),
 					usageOwner: sessionSemanticUsageOf(manager),

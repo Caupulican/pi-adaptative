@@ -1,9 +1,11 @@
 import type { Api, Model } from "@caupulican/pi-ai";
 import { getSupportedThinkingLevels } from "@caupulican/pi-ai/models";
+import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { deriveModelCapabilityProfile, type ModelCapabilityProfile } from "../model-capability.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import { resolveCliModel } from "../model-resolver.ts";
 import { isLocalExecutionModel } from "../models/model-endpoint.ts";
+import { envelopeCeilingUsd, isMeteredSpend } from "../orchestration/risk-budget.ts";
 import type { NormalizedProfile, ProfileRegistry } from "../profile-registry.ts";
 import type { ModelCapabilitySettings } from "../settings/settings-schema.ts";
 
@@ -38,6 +40,16 @@ export class LaneModelResolver {
 
 	constructor(deps: LaneModelResolverDeps) {
 		this.deps = deps;
+	}
+
+	/** Whether spend on `model` is metered, read from the billing kind of its credential (`isMeteredSpend`). */
+	isMeteredSpend(model: Model<Api> | undefined): boolean {
+		return isMeteredSpend(model, this.deps.getModelRegistry());
+	}
+
+	/** The session envelope's dollar ceiling on spend made on `model`, by the billing of its credential (`envelopeCeilingUsd`). */
+	envelopeCeilingUsd(envelope: CapabilityEnvelope | undefined, model: Model<Api> | undefined): number | undefined {
+		return envelopeCeilingUsd(envelope, model, this.deps.getModelRegistry());
 	}
 
 	capabilityProfile(model: Model<Api>): ModelCapabilityProfile {

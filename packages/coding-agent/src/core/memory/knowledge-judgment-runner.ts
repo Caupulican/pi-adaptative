@@ -123,7 +123,8 @@ export interface SessionKnowledgeJudgeDeps {
 	model(): Model<Api> | undefined;
 	usageOwner(): SessionSemanticUsageDelivery;
 	autoLearn(): Required<AutoLearnSettings>;
-	maxEstimatedUsd(): number | undefined;
+	/** The session's dollar ceiling on spend whose model is `model` (`KnowledgeCollectionRuntime.maxEstimatedUsd`). */
+	maxEstimatedUsd(model: Model<Api> | undefined): number | undefined;
 	runIsolatedCompletion(options: IsolatedCompletionOptions): Promise<IsolatedCompletionResult>;
 }
 
@@ -174,7 +175,7 @@ export class SessionKnowledgeJudge {
 		const remaining = Math.min(
 			settings.knowledgeMaxUsd,
 			settings.knowledgeSessionMaxUsd - spending.totalUsd,
-			this.deps.maxEstimatedUsd() ?? Number.POSITIVE_INFINITY,
+			this.deps.maxEstimatedUsd(this.deps.model()) ?? Number.POSITIVE_INFINITY,
 		);
 		if (!(remaining > 0))
 			throw new RequestSpendRefusal("The knowledge spending allowance for this session is exhausted.");

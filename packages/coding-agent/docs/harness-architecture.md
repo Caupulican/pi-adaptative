@@ -152,10 +152,11 @@ deadline; recovery reconstructs eligibility from that deadline and transcript in
 process-local backoff counter.
 
 Policy is a mandatory pre-lease gate. An attempt cannot lease without a compiled execution grant.
-When compilation crosses owner authority or budget, the gate persists a typed approval request and
-an owner notification; approval and rejection replay as durable human decisions. Approval alone is
-never authority: an approved attempt remains unleaseable until policy compiles and binds a new grant
-under the expanded owner authorization. Pausing an objective blocks lease, start, and agent resume;
+A worker's grant is compiled with its plan's budget as both the requested and the authority budget, so
+compilation never crosses budget; a required capability outside the owner's authority refuses the
+start with the compiler's reason codes. No approval is requested, persisted or replayed, and no spend
+is put to the owner: dollar ceilings are limits (`maxCostUsd` on all spend, `maxMeteredCostUsd` on
+metered spend only; see worker-profiles.md). Pausing an objective blocks lease, start, and agent resume;
 queued and suspended attempts remain nonterminal until an objective-resume event drains them.
 Cancellation remains a replayable terminal transition across its open tasks and attempts.
 

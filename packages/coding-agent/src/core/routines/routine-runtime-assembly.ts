@@ -23,6 +23,7 @@ import type { WorkerDelegationController } from "../delegation/worker-delegation
 import type { WorkerLifecycle } from "../delegation/worker-lifecycle.ts";
 import { captureWorkerReceiptOrigin } from "../delegation/worker-receipt-origin.ts";
 import { wordedNotice } from "../harness-notice.ts";
+import { envelopeCeilingUsd } from "../orchestration/risk-budget.ts";
 import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { findSteeredDelivery } from "../parent-input-steer.ts";
@@ -419,7 +420,15 @@ export class RoutineRuntimeAssembly {
 						model: () => this.host.resolveLaneModel(undefined),
 						systemOne: () => this.deps.systemOne.recordingSemanticEngine(),
 						usageOwner: () => sessionSemanticUsageOf(this.deps.getSessionManager()),
-						maxEstimatedUsd: () => this.deps.getCapabilityEnvelope()?.maxEstimatedUsd,
+						// The same selection the intake makes: a bound System One judges, otherwise the lane model does.
+						maxEstimatedUsd: () =>
+							envelopeCeilingUsd(
+								this.deps.getCapabilityEnvelope(),
+								this.deps.systemOne.recordingSemanticEngine()
+									? undefined
+									: this.host.resolveLaneModel(undefined),
+								this.deps.getModelRegistry(),
+							),
 						isForegroundBusy: () => this.deps.isForegroundBusy(),
 						subscribeActivity: (listener) => this.deps.subscribeForegroundActivity(listener),
 						captureOrigin: () => captureWorkerReceiptOrigin(this.deps.getSessionManager()),

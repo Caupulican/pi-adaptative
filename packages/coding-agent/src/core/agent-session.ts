@@ -1387,7 +1387,7 @@ export class AgentSession {
 					time: config.timers.port("knowledge-collection"),
 					isForegroundBusy: () => this._foregroundRecovery.isBusy,
 					subscribeForegroundActivity: (listener) => this._foregroundRecovery.subscribeActivity(listener),
-					maxEstimatedUsd: () => this.capabilityEnvelope?.maxEstimatedUsd,
+					maxEstimatedUsd: (model) => historyModels.envelopeCeilingUsd(this.capabilityEnvelope, model),
 					...knowledgeSessionHooks(this.settingsManager, this._emit.bind(this), this._cwd, () =>
 						this._observeKnowledgeCollection(),
 					),

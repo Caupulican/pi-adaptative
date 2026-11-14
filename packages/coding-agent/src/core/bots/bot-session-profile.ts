@@ -32,6 +32,7 @@ import {
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
 import type { OrchestrationThinkingLevel, WorkerRole } from "../orchestration/contracts.ts";
+import { costCeilingUsd } from "../orchestration/risk-budget.ts";
 import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-guard.ts";
 import { workerPromptSoul } from "../orchestration/worker-execution-contract.ts";
 import { TASK_WATCH_TOOL_NAME } from "../routines/routine-tool-names.ts";
@@ -168,6 +169,10 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 	if (workerLimits.length > 0) return { route: "worker", reason: `limits_need_worker:${workerLimits.join(",")}` };
 	// It arms its own waits as a worker's host does, outside the granted surface.
 	const tools = [...new Set([...planned.filter(sessionHolds), TASK_WATCH_TOOL_NAME])];
+	// The dollar ceilings hold the session as they hold a worker of the profile on the same model: `maxMeteredCostUsd` too
+	// when its spend is metered, `maxCostUsd` alone on a subscription.
+	const laneCeilingUsd = costCeilingUsd(worker.authority.budget, compiled.metered);
+	const spendBoundUsd = costCeilingUsd(profile.budget, compiled.metered);
 	// The ceiling a worker lane of the profile runs under, built as the lane builds it. Its paths are the session's path
 	// envelopes' (`privatePathScope`): denied paths with the session's own readable exemptions, writes in its write roots,
 	// reads in its read roots.
@@ -178,7 +183,7 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 			...new Set([...worker.authority.capabilities, ...requiredEnvelopeCapabilities(TASK_WATCH_TOOL_NAME)]),
 		],
 		allowedTools: tools,
-		...(worker.authority.budget.maxCostUsd !== undefined ? { maxUsd: worker.authority.budget.maxCostUsd } : {}),
+		...(laneCeilingUsd !== undefined ? { maxUsd: laneCeilingUsd } : {}),
 	});
 	const privatePathScope: SessionPrivatePathScope = {
 		readOnlyShell: plan.readOnly || plan.shellReadOnly,
@@ -210,7 +215,7 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 					},
 				}
 			: {}),
-		...(profile.budget.maxCostUsd !== undefined ? { spendBoundUsd: profile.budget.maxCostUsd } : {}),
+		...(spendBoundUsd !== undefined ? { spendBoundUsd } : {}),
 	};
 	const { model, ...defining } = definition;
 	return {

@@ -84,6 +84,8 @@ export interface CapabilityEnvelope {
 	 */
 	exemptReadPaths?: readonly string[];
 	maxEstimatedUsd?: number;
+	/** A ceiling on metered spend only, beside `maxEstimatedUsd` (see `RiskBudget.maxMeteredCostUsd`). */
+	maxMeteredEstimatedUsd?: number;
 	createdAt?: string;
 }
 

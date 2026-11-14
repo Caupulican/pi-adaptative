@@ -64,6 +64,7 @@ import { collectModelRouterConfigDiagnostics } from "./core/model-router/config-
 import type { OrchestrationProfile } from "./core/orchestration/contracts.ts";
 import { resolveConfiguredOrchestrationModel } from "./core/orchestration/model-binding.ts";
 import { OrchestrationProfileStore } from "./core/orchestration/profile-store.ts";
+import { envelopeCostCeilings } from "./core/orchestration/risk-budget.ts";
 import { refuseHostedSession, SessionHostedError } from "./core/orchestration/session-bundle-lifecycle.ts";
 import { restoreStdout, takeOverStdout } from "./core/output-guard.ts";
 import { exitProcess, type ProcessEndReason, thrownDetail } from "./core/process-end-recorder.ts";
@@ -1034,9 +1035,7 @@ export async function main(args: string[], options?: MainOptions) {
 								)
 									? { allowedPaths: [cwd] }
 									: {}),
-								...(orchestrationProfile.budget.maxCostUsd !== undefined
-									? { maxEstimatedUsd: orchestrationProfile.budget.maxCostUsd }
-									: {}),
+								...envelopeCostCeilings(orchestrationProfile.budget),
 								createdAt: new Date().toISOString(),
 							};
 						}

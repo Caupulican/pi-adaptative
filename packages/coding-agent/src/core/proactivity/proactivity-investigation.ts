@@ -13,6 +13,7 @@ import { affordableOutputTokenLimit } from "../cost-guard.ts";
 import { LaneMemoryCapacityTracker } from "../delegation/lane-memory-capacity.ts";
 import type { MemoryReadReceipt, WorkerMemoryReadOptions } from "../memory/worker-memory-tools.ts";
 import { usageDeltaFromProviderUsage } from "../orchestration/attempt-usage.ts";
+import { costCeilingUsd } from "../orchestration/risk-budget.ts";
 import {
 	createReadOperationFactory,
 	LOCAL_READ_DEADLINE_MS,
@@ -31,6 +32,8 @@ const NOTE_RESULT_RESERVE_BYTES = 512;
 
 interface InvestigationOptions {
 	model: Model<Api>;
+	/** Whether spend on `model` is metered (`isMeteredSpend`): the grant's `maxMeteredCostUsd` then holds it too. */
+	metered: boolean;
 	maxOutputTokens: number;
 	signal: AbortSignal;
 	assertCurrent(): void;
@@ -310,7 +313,7 @@ export class ProactivityInvestigation {
 			request.maxTokens ?? request.model.maxTokens,
 			remaining === undefined ? Infinity : remaining - inputTokens,
 		);
-		const maxCostUsd = this.authority.grant.budget.maxCostUsd;
+		const maxCostUsd = costCeilingUsd(this.authority.grant.budget, this.options.metered);
 		if (maxCostUsd !== undefined)
 			maxTokens = affordableOutputTokenLimit({
 				inputTokens,

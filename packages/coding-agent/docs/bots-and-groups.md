@@ -127,7 +127,8 @@ and soul, the model rules and the execution plan), without a worker run's admiss
 now, the worker fleet), since no worker runs: the resolved model and thinking, the plan's tools, its working directory, its read roots (a profile
 that confines reads confines the read tools, `repo_read`, `lookup`, the read-only shell and its watches to them), its write
 roots and read-only grant, a capability ceiling of the plan's capabilities held by the session's tool gate, the soul and
-resources a worker of it carries, and a turn bound of the profile's cost budget when it is lower than the worker and
+resources a worker of it carries, and a turn bound of the profile's cost budget (`maxCostUsd`, and `maxMeteredCostUsd`
+too when the bot's model is reached with an API key rather than a subscription) when it is lower than the worker and
 session bounds. A run on a session built from an older compile (the profile, a model pin or the worker policy changed
 since) is refused and the idle session is rebuilt. A profile that needs an independent verifier of each claim, names a
 tool a session does not hold, or sets a token, wall-clock, attempt or tool-call limit (which only a worker's run counts)

@@ -216,7 +216,8 @@ export function buildWorkerExecutionPlan(args: {
 	deniedPaths: readonly string[];
 	/** Fresh caller task cwd. Does not re-anchor profile paths or change an admitted grant. */
 	executionCwd?: string;
-	foregroundMaxCostUsd?: number;
+	/** The foreground session's dollar ceilings (`envelopeCostBudget`), inherited as worker budget ceilings. */
+	foregroundBudget?: Pick<RiskBudget, "maxCostUsd" | "maxMeteredCostUsd">;
 	memoryEnabled: boolean;
 	workerToolAdapterNames?: readonly string[];
 	/** The host confines every worker's reads to this directory (`ParentExecutionPolicy.workerReadRoot`). */
@@ -337,7 +338,7 @@ export function buildWorkerExecutionPlan(args: {
 	const budget = intersectRiskBudgets(
 		args.profile.budget,
 		...(args.settings.maxUsd > 0 ? [{ maxCostUsd: args.settings.maxUsd }] : []),
-		...(args.foregroundMaxCostUsd !== undefined ? [{ maxCostUsd: args.foregroundMaxCostUsd }] : []),
+		...(args.foregroundBudget ? [args.foregroundBudget] : []),
 		...(args.settings.maxWallClockMs > 0 ? [{ maxWallClockMs: args.settings.maxWallClockMs }] : []),
 	);
 	return {

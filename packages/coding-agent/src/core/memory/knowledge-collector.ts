@@ -90,7 +90,8 @@ export interface KnowledgeCollectionRuntime {
 	engine(): SemanticDecisionEngine | undefined;
 	isForegroundBusy(): boolean;
 	subscribeForegroundActivity(listener: () => void): () => void;
-	maxEstimatedUsd(): number | undefined;
+	/** The session's dollar ceiling on collection spend whose model is `model` (`LaneModelResolver.envelopeCeilingUsd`). */
+	maxEstimatedUsd(model: Model<Api> | undefined): number | undefined;
 	/** Persist the bounded handoff and notify the parent, even after cancellation. */
 	onTerminal(
 		outcome: KnowledgeCollectionOutcome,
@@ -312,7 +313,7 @@ export class KnowledgeCollector {
 				: Math.min(
 							config.settings.knowledgeMaxUsd,
 							config.settings.knowledgeSessionMaxUsd - spending.totalUsd,
-							this.deps.maxEstimatedUsd() ?? Number.POSITIVE_INFINITY,
+							this.deps.maxEstimatedUsd(config.model) ?? Number.POSITIVE_INFINITY,
 						) <= 0
 					? "budget_exhausted"
 					: undefined);
@@ -347,7 +348,7 @@ export class KnowledgeCollector {
 		);
 		const model = this.deps.models.resolveModel(settings.model === "active" ? undefined : settings.model);
 		const engine = this.deps.engine();
-		const cap = this.deps.maxEstimatedUsd();
+		const cap = this.deps.maxEstimatedUsd(model);
 		const valid =
 			Number.isFinite(settings.knowledgeMaxUsd) &&
 			settings.knowledgeMaxUsd >= 0 &&
@@ -578,7 +579,7 @@ export class KnowledgeCollector {
 		const remaining = Math.min(
 			config.settings.historyMaxUsd - spending.operationUsd,
 			config.settings.knowledgeSessionMaxUsd - spending.totalUsd,
-			this.deps.maxEstimatedUsd() ?? Number.POSITIVE_INFINITY,
+			this.deps.maxEstimatedUsd(model) ?? Number.POSITIVE_INFINITY,
 		);
 		if (remaining <= 0) {
 			this.historyDecided = true;
@@ -733,7 +734,7 @@ export class KnowledgeCollector {
 			const remaining = Math.min(
 				config.settings.knowledgeMaxUsd - spending.operationUsd,
 				config.settings.knowledgeSessionMaxUsd - spending.totalUsd,
-				this.deps.maxEstimatedUsd() ?? Number.POSITIVE_INFINITY,
+				this.deps.maxEstimatedUsd(config.model) ?? Number.POSITIVE_INFINITY,
 			);
 			if (spending.unresolved) {
 				hold("accounting:unresolved");

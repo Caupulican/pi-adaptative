@@ -100,6 +100,7 @@ import type {
 	WorkerRole,
 } from "../orchestration/contracts.ts";
 import { ledgerSkip, RungRefusedError, type StartedDelegationAttempt } from "../orchestration/delegation-ledger.ts";
+import { costCeilingUsd, envelopeCostBudget, isMeteredSpend } from "../orchestration/risk-budget.ts";
 import { SessionTaskProfileStore } from "../orchestration/session-task-profile-store.ts";
 import {
 	assertSpecialistContextClaim,
@@ -332,14 +333,7 @@ import {
 	type WorkerTerminalHandoffDelivery,
 } from "./worker-terminal-handoff-coordinator.ts";
 import { WORKER_TRANSCRIPT_REFERENCE_PREFIX } from "./worker-transcript-reference.ts";
-import {
-	collectWorkerTreeBudgetSeeds,
-	cumulativeWorkerTreeBudget,
-	WorkerTreeBudgetCoordinator,
-	workerTreeBudgetKey,
-	workerTreeCanAdmitAttempt,
-	workerTreeTaskId,
-} from "./worker-tree-budget-coordinator.ts";
+import { collectWorkerTreeBudgetSeeds, workerTreeCanAdmitAttempt } from "./worker-tree-budget-coordinator.ts";
 import { boundHostFindings, WorkerWriteOverlapTracker } from "./worker-write-overlap.ts";
 import {
 	WorkerWriteReservationCoordinator,
@@ -563,7 +557,6 @@ export class WorkerDelegationController {
 	private readonly projectClaims = new Map<string, SpecialistContextClaim>();
 	private readonly contextForks: WorkerContextForkStore;
 	private readonly terminalHandoffs: WorkerTerminalHandoffCoordinator;
-	private readonly treeBudgets = new WorkerTreeBudgetCoordinator();
 	/** The cost bounds each attempt's provider requests are priced against: its run's and its budgeted delegations'. */
 	private readonly costBounds: RequestCostBounds;
 	private readonly writeReservations: WorkerWriteReservationCoordinator;
@@ -1922,6 +1915,7 @@ export class WorkerDelegationController {
 				modelPinPolicy: () => this.deps.getSettingsManager().getWorkerModelPinPolicy(),
 				resolveAuthority: (input) => this.resolveWorkerAuthority(input),
 				isModelAllowed: (model) => this.deps.isModelAllowed?.(model) !== false,
+				isMetered: (model) => isMeteredSpend(model, this.deps.getModelRegistry()),
 				requiredVerifier: (profile, policy) => this.resolveRequiredVerifier(profile, policy),
 				plan: (profile, settings) => this.buildWorkerExecutionPlan(profile, settings),
 				systemPromptMaxChars: (model) => this.laneCapabilityProfile(model).systemPromptMaxChars,
@@ -2855,15 +2849,17 @@ export class WorkerDelegationController {
 
 	/** Effective tool and capability grant of a lane's selected attempt, for the parent's start/status views. */
 	getWorkerGrant(laneId: string): WorkerGrantSummary | undefined {
-		const authority =
-			this.getWorkerLifecycle().getActiveAttempt(laneId)?.dispatch.executionContract?.worker.authority;
-		if (!authority) return undefined;
+		const attempt = this.getWorkerLifecycle().getActiveAttempt(laneId);
+		const authority = attempt?.dispatch.executionContract?.worker.authority;
+		if (!attempt || !authority) return undefined;
+		// The dollar cap the attempt's model is held to: the metered ceiling too when its spend is metered.
+		const maxCostUsd = costCeilingUsd(authority.budget, this.costBounds.isMeteredAttempt(attempt));
 		return {
 			toolNames: [...authority.toolNames],
 			capabilities: [...authority.capabilities],
 			budget: {
 				...(authority.budget.maxWallClockMs ? { maxWallClockMs: authority.budget.maxWallClockMs } : {}),
-				...(authority.budget.maxCostUsd ? { maxCostUsd: authority.budget.maxCostUsd } : {}),
+				...(maxCostUsd ? { maxCostUsd } : {}),
 			},
 		};
 	}
@@ -3100,7 +3096,7 @@ export class WorkerDelegationController {
 			cwd: this.deps.getCwd(),
 			executionCwd,
 			deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
-			foregroundMaxCostUsd: this.deps.getCapabilityEnvelope()?.maxEstimatedUsd,
+			foregroundBudget: envelopeCostBudget(this.deps.getCapabilityEnvelope()),
 			memoryEnabled: this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
 			workerToolAdapterNames: this.workerToolAdapterNames(),
 			...(this.deps.workerReadRoot ? { readRoot: this.deps.workerReadRoot() } : {}),
@@ -5267,48 +5263,24 @@ export class WorkerDelegationController {
 			// The shutdown barrier still owns this admission and releases its reservation strictly.
 			return { started: true, record: lifecycle.getRecord(startedRecord.laneId) ?? startedRecord };
 		}
-		const maxUsd = grant.budget.maxCostUsd;
+		const maxUsd = this.costBounds.costCeilingUsd(grant.budget, model);
 		const executionPolicy = orchestrationProfile.executionPolicy;
 		const agentBinding = lifecycle.getAgent(agentId);
 		if (!agentBinding) {
 			this.cancelAndPublish(lifecycle, prepared.record.laneId, "orchestration_agent_missing");
 			return { started: false, skipReason: "orchestration_agent_missing" };
 		}
-		const rootTurn = lifecycle.getAgentTurnDispatch(agentBinding.rootAgentId);
-		const rootBudget = cumulativeWorkerTreeBudget(
-			rootTurn?.executionContract?.worker.authority.budget ?? grant.budget,
-			(rootTurn?.executionContract?.worker.profile ?? orchestrationProfile).budget,
-		);
-		const treeTaskId = workerTreeTaskId({
-			agentId: agentBinding.agentId,
-			rootAgentId: agentBinding.rootAgentId,
-			attemptTaskId: prepared.attempt.taskId,
-			rootAttempt: rootTurn,
-		});
-		const treeSeeds = collectWorkerTreeBudgetSeeds(
-			lifecycle.getTaskRuntimeSnapshot(),
-			agentBinding.rootAgentId,
-			treeTaskId,
-		);
-		harnessLog.debug("delegation", "a worker tree budget was seeded from its own task", {
-			taskId: treeTaskId,
+		const sharedBudget = this.costBounds.compose({
 			attemptId: durableHandle.attemptId,
-			seeds: treeSeeds.length,
-		});
-		const treeBudget = this.treeBudgets.createPort({
-			treeKey: workerTreeBudgetKey(treeTaskId),
-			attemptId: durableHandle.attemptId,
-			budget: rootBudget,
-			seeds: treeSeeds,
 			initialUsage,
-		});
-		const sharedBudget = this.costBounds.compose(
-			durableHandle.attemptId,
-			initialUsage,
-			lifecycle.getTaskRuntimeSnapshot(),
+			snapshot: lifecycle.getTaskRuntimeSnapshot(),
 			model,
-			treeBudget,
-		);
+			agent: agentBinding,
+			attemptTaskId: prepared.attempt.taskId,
+			rootTurn: lifecycle.getAgentTurnDispatch(agentBinding.rootAgentId),
+			grantBudget: grant.budget,
+			profileBudget: orchestrationProfile.budget,
+		});
 		const shellGranted = executionPlan.toolManifests.some((manifest) => manifest.toolName === STABLE_SHELL_TOOL_NAME);
 		const shellSessionKey = shellGranted ? `worker:${this.deps.getSessionId()}:${agentId}` : undefined;
 		const adapterSources: WorkerToolAdapterSources = {};

@@ -227,8 +227,9 @@ export interface RiskBudget {
 	maxAttempts?: number;
 	maxToolCalls?: number;
 	/**
-	 * Dollar ceiling that lowers `maxCostUsd` where budgets intersect. Read from the legacy name
-	 * `requireApprovalAboveCostUsd`; written only under this one.
+	 * Dollar ceiling for metered spend only: work on a model whose credential is metered (an API key) is held to it as to
+	 * `maxCostUsd`; a subscription model is bounded by its plan's usage windows instead (`costCeilingUsd`). Read from the
+	 * legacy name `requireApprovalAboveCostUsd`; written only under this one.
 	 */
 	maxMeteredCostUsd?: number;
 }

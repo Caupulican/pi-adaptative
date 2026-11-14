@@ -1007,7 +1007,7 @@ export function createWorkerAttemptExecutor(options: WorkerAttemptExecutorOption
 				const rawOutcome = await runWorker({
 					request: options.request,
 					earlierSession: earlierSession !== undefined && earlierSession !== options.parentSessionId,
-					maxUsd: options.grant.budget.maxCostUsd,
+					maxUsd: options.request.maxEstimatedUsd,
 					maxWallClockMs: options.grant.budget.maxWallClockMs ?? 0,
 					usageReportId: options.usageReportId,
 					sealChangedFiles,

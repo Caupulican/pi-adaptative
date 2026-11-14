@@ -1,3 +1,4 @@
+import type { Api, Model } from "@caupulican/pi-ai";
 import { isPlainRecord } from "../util/value-guards.ts";
 import type { RiskBudget } from "./contracts.ts";
 
@@ -7,11 +8,12 @@ export const RISK_BUDGET_LIMIT_FIELDS = [
 	"maxCostUsd",
 	"maxAttempts",
 	"maxToolCalls",
+	"maxMeteredCostUsd",
 ] as const;
 
 export type RiskBudgetLimitField = (typeof RISK_BUDGET_LIMIT_FIELDS)[number];
 
-export const RISK_BUDGET_FIELDS = [...RISK_BUDGET_LIMIT_FIELDS, "maxMeteredCostUsd"] as const;
+export const RISK_BUDGET_FIELDS = RISK_BUDGET_LIMIT_FIELDS;
 
 /**
  * The legacy name of `maxMeteredCostUsd`, read from profiles and durable records written before the rename and never
@@ -79,9 +81,66 @@ export function intersectRiskBudgets(...budgets: readonly RiskBudget[]): RiskBud
 		const values = budgets.map((budget) => budget[field]).filter((value): value is number => value !== undefined);
 		if (values.length > 0) result[field] = Math.min(...values);
 	}
-	const meteredCeiling = result.maxMeteredCostUsd;
-	if (meteredCeiling !== undefined) {
-		result.maxCostUsd = Math.min(result.maxCostUsd ?? meteredCeiling, meteredCeiling);
-	}
 	return result;
+}
+
+/** The billing kind of a model's credential: a subscription (a plan with usage windows) or metered (an API key). */
+export interface ModelBilling {
+	isUsingSubscription(model: Model<Api>): boolean;
+}
+
+/**
+ * Whether spend on `model` is metered, read from the billing kind of the model's credential. Spend that is no model's own
+ * (`model` undefined: a System One request) is metered.
+ */
+export function isMeteredSpend(model: Model<Api> | undefined, billing: ModelBilling): boolean {
+	return model === undefined || !billing.isUsingSubscription(model);
+}
+
+/**
+ * The dollar ceiling spend is held to: `maxCostUsd`, and also `maxMeteredCostUsd` when the spend is metered
+ * (`isMeteredSpend`). A subscription's limit is its plan's usage windows, so the metered ceiling never stops it. Undefined
+ * when neither ceiling applies.
+ */
+export function costCeilingUsd(
+	budget: Pick<RiskBudget, "maxCostUsd" | "maxMeteredCostUsd">,
+	metered: boolean,
+): number | undefined {
+	const ceilings = [budget.maxCostUsd, metered ? budget.maxMeteredCostUsd : undefined].filter(
+		(ceiling): ceiling is number => ceiling !== undefined,
+	);
+	return ceilings.length > 0 ? Math.min(...ceilings) : undefined;
+}
+
+/** The dollar ceilings a session's capability envelope sets, as the budget `costCeilingUsd` reads. */
+export function envelopeCostBudget(
+	envelope: { readonly maxEstimatedUsd?: number; readonly maxMeteredEstimatedUsd?: number } | undefined,
+): Pick<RiskBudget, "maxCostUsd" | "maxMeteredCostUsd"> {
+	return {
+		...(envelope?.maxEstimatedUsd !== undefined ? { maxCostUsd: envelope.maxEstimatedUsd } : {}),
+		...(envelope?.maxMeteredEstimatedUsd !== undefined ? { maxMeteredCostUsd: envelope.maxMeteredEstimatedUsd } : {}),
+	};
+}
+
+/** A budget's dollar ceilings as a capability envelope carries them, read back by `envelopeCostBudget`. */
+export function envelopeCostCeilings(budget: Pick<RiskBudget, "maxCostUsd" | "maxMeteredCostUsd">): {
+	maxEstimatedUsd?: number;
+	maxMeteredEstimatedUsd?: number;
+} {
+	return {
+		...(budget.maxCostUsd !== undefined ? { maxEstimatedUsd: budget.maxCostUsd } : {}),
+		...(budget.maxMeteredCostUsd !== undefined ? { maxMeteredEstimatedUsd: budget.maxMeteredCostUsd } : {}),
+	};
+}
+
+/**
+ * A session envelope's dollar ceiling on spend made on `model` (`costCeilingUsd` of `envelopeCostBudget`): its metered
+ * ceiling too when the spend is metered (`isMeteredSpend`; `model` undefined is System One spend).
+ */
+export function envelopeCeilingUsd(
+	envelope: { readonly maxEstimatedUsd?: number; readonly maxMeteredEstimatedUsd?: number } | undefined,
+	model: Model<Api> | undefined,
+	billing: ModelBilling,
+): number | undefined {
+	return costCeilingUsd(envelopeCostBudget(envelope), isMeteredSpend(model, billing));
 }

@@ -375,7 +375,7 @@ export class ProactivityController {
 		const goal = structuredClone(this.deps.getGoalStateSnapshot());
 		const envelope = structuredClone(this.deps.getCapabilityEnvelope());
 		const memory = this.deps.captureReviewContext(MAX_REVIEW_PROFILE_CHARS);
-		const maxUsd = clampLaneMaxUsd(settings.maxUsd, envelope?.maxEstimatedUsd);
+		const maxUsd = clampLaneMaxUsd(settings.maxUsd, this.models.envelopeCeilingUsd(envelope, model));
 		const usageOwner = sessionSemanticUsageOf(manager);
 		const runAbort = new AbortController();
 		const signal = AbortSignal.any([this.abortController.signal, runAbort.signal]);
@@ -485,6 +485,7 @@ export class ProactivityController {
 			const capture: { raised: ProactiveNote[] } = { raised: [] };
 			const reviewInvestigation = new ProactivityInvestigation(this.deps, {
 				model,
+				metered: this.models.isMeteredSpend(model),
 				maxOutputTokens: capability.laneMaxOutputTokens,
 				signal,
 				assertCurrent,

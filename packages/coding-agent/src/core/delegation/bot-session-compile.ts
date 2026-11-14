@@ -44,6 +44,8 @@ export interface BotSessionCompilePorts {
 		modelPin?: ResolvedWorkerModelPin["binding"];
 	}): WorkerAuthorityResolution;
 	isModelAllowed(model: Model<Api>): boolean;
+	/** Whether spend on a model is metered, read from its credential (`isMeteredSpend`). */
+	isMetered(model: Model<Api>): boolean;
 	/** The verifier the profile requires, admitted as a fresh verifier is; none when it requires none. */
 	requiredVerifier(
 		profile: OrchestrationProfile,
@@ -65,6 +67,8 @@ export type BotSessionCompilation =
 			readonly contract: WorkerExecutionContract;
 			/** The resolved worker side's model, as the registry knows it now. */
 			readonly model: Model<Api>;
+			/** Whether that model's spend is metered now (an API key, not a subscription): the profile's metered ceiling holds it. */
+			readonly metered: boolean;
 			/** The profile's resources as a worker's system prompt carries them; empty when it has none. */
 			readonly resourceSystemPrompt: string;
 			/** How the plan holds its scope: its working directory, whether reads are confined, whether it or its shell edits nothing. */
@@ -168,6 +172,7 @@ export function compileBotSessionContract(
 		profile: bound.written,
 		contract,
 		model: shipment.model,
+		metered: ports.isMetered(shipment.model),
 		resourceSystemPrompt: materialized.systemPrompt,
 		plan: {
 			cwd: plan.cwd,
