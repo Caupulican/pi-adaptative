@@ -1,5 +1,6 @@
 import * as path from "node:path";
 import { emergencyStopPath } from "../provider-admission/emergency-stop.ts";
+import type { CredentialExposureMode } from "../secrets/credential-exposure-guard.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { getHarnessWriteProtectedPaths, getPrivateLaneDeniedPaths } from "./lane-private-paths.ts";
 
@@ -71,6 +72,11 @@ export interface SessionPrivatePathScope {
 	readonly readRoots?: readonly string[];
 	/** With `confinedWrites`, the roots it writes in instead of its working directory alone. */
 	readonly writeRoots?: readonly string[];
+	/**
+	 * How the session meets an owner credential file (`.env`, keys): `deny` refuses a read or a command that reaches one
+	 * before it runs, as for a worker; unset masks the values in what the tool returns, as for the owner's own session.
+	 */
+	readonly credentialExposure?: CredentialExposureMode;
 }
 
 /**

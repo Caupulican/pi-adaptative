@@ -915,9 +915,9 @@ export class RuntimeBuilder {
 		this._routedOmissions = [...withheld];
 	}
 
-	/** Owner sessions see mocked values; a worker lane is kept out of owner-private files entirely. */
+	/** Owner sessions see mocked values; a worker, and a session whose private path scope says so, is kept out entirely. */
 	private credentialExposureMode(): CredentialExposureMode {
-		return isWorkerSession() ? "deny" : "mock";
+		return isWorkerSession() ? "deny" : (this.deps.getPrivatePathScope?.()?.credentialExposure ?? "mock");
 	}
 
 	private async _runContextScout(

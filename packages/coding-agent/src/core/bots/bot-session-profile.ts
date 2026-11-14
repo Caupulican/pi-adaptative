@@ -92,8 +92,9 @@ export function ownBotSession(record: PersistentBotRecord, cwd: string, registry
 		role: profile.canWrite ? "implementer" : "explorer",
 		cwd,
 		tools: botSessionToolNames(profile.canWrite),
-		// It writes as a worker writes: inside the project directory, never to a harness resource.
-		privatePathScope: { readOnlyShell: !profile.canWrite, confinedWrites: true },
+		// It writes as a worker writes (inside the project directory, never to a harness resource) and, as a worker, never
+		// reaches an owner credential file: a call that would is refused before it runs.
+		privatePathScope: { readOnlyShell: !profile.canWrite, confinedWrites: true, credentialExposure: "deny" },
 		...(soul.soul !== undefined ? { soul: soul.soul } : {}),
 	};
 }
@@ -144,6 +145,7 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 	const privatePathScope: SessionPrivatePathScope = {
 		readOnlyShell: plan.readOnly || plan.shellReadOnly,
 		confinedWrites: true,
+		credentialExposure: "deny",
 		...(plan.writePaths.length > 0 ? { writeRoots: plan.writePaths } : {}),
 		...(plan.readConfined ? { readRoots: plan.readPaths } : {}),
 		...(plan.deniedPaths.length > 0 ? { deniedPaths: plan.deniedPaths } : {}),
