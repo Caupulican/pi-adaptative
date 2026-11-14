@@ -10,6 +10,7 @@ import type { AgentMessage } from "../../kernel/index.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { createSupervision } from "../agent-session-composition.ts";
 import type { AgentSessionEvent } from "../agent-session-contracts.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import type { WorkerRole } from "../orchestration/contracts.ts";
 import { assistantOutputTail, ProgressObservationWindow } from "../supervision/progress-observation-window.ts";
 import type { WorkerSupervisionCoordinator } from "../supervision/worker-supervision-coordinator.ts";
@@ -76,7 +77,7 @@ export class BotTurnSupervision {
 			getSteeringPlane: () => session.steeringPlane,
 			control: {
 				steerWorker: (_agentId, directive, delivery) => this.steer(directive, delivery ?? "queue"),
-				cancelWorker: (_agentId) => session.abort("system one stopped the turn"),
+				cancelWorker: (_agentId) => session.abort(interfaceText().botTeam.botTurnAbortReasons.systemOneStopped),
 			},
 			emit: (event) => {
 				if (event.type === "warning") options.warn(event.message);
@@ -150,7 +151,7 @@ export class BotTurnSupervision {
 		const message = { customType: BOT_SUPERVISION_STEER_CUSTOM_TYPE, content: directive, display: true };
 		if (delivery === "now" && this.session.isStreaming) {
 			// Interrupt, then open the next turn on the directive, as a worker is interrupted and resumed on it.
-			await this.session.abort("system one redirected the turn");
+			await this.session.abort(interfaceText().botTeam.botTurnAbortReasons.systemOneRedirected);
 			await this.session.sendCustomMessage(message, { triggerTurn: true });
 			return;
 		}

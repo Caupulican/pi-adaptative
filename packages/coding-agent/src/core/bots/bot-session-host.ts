@@ -848,7 +848,7 @@ export class BotSessionHost {
 		this.touch(entry);
 		const closing = runAsyncReleaseSteps(
 			[
-				() => entry.session.abort("bot session closing"),
+				() => entry.session.abort(interfaceText().botTeam.botTurnAbortReasons.sessionClosing),
 				// The aborted turn's spend is reported once, whether or not its end reached the subscription first.
 				() => this.reportTurnUsage(entry),
 				() => entry.unsubscribe(),
@@ -884,7 +884,7 @@ export class BotSessionHost {
 		}
 		if (!this.isBusy(entry)) return { stopped: false };
 		void entry.session
-			.abort("bot stopped by the owner")
+			.abort(interfaceText().botTeam.botTurnAbortReasons.ownerStopped)
 			.catch((error: unknown) => this.ports.warn(interfaceText().botTeam.botTurnFailed(agentId, errorText(error))));
 		return { stopped: true };
 	}

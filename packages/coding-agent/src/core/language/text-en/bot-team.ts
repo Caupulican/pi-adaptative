@@ -69,6 +69,13 @@ export const BOT_TEAM = {
 		`Bot ${agentId} runs as a worker (a leader, a bot a leader made, or a profile only a worker's run holds), not in a session of its own.`,
 	botSettingsNotReread: (reason: string) =>
 		`A settings change did not reach the bots' sessions (${reason}); they keep the settings they had until the next change.`,
+	/** Why a bot's turn was stopped, as its aborted message keeps it in the bot's conversation. */
+	botTurnAbortReasons: {
+		sessionClosing: "bot session closing",
+		ownerStopped: "bot stopped by the owner",
+		systemOneStopped: "System One stopped the turn",
+		systemOneRedirected: "System One redirected the turn",
+	},
 	botSoulRefused: (agentId: string, reason: string) =>
 		`Bot ${agentId} was not started: ${reason}. Edit its soul with /bot soul ${agentId}.`,
 	/** Another process holds the bot's session: two processes would write one conversation. */
