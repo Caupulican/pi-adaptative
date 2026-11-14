@@ -99,6 +99,7 @@ import { projectCanonicalTruth } from "./system-one/canonical-truth.ts";
 import type { FileLister } from "./system-one/code-duplicates.ts";
 import type { SystemOneController } from "./system-one/controller.ts";
 import { IntegrityHookCoordinator } from "./system-one/integrity-hooks.ts";
+import type { SystemOneHostSource } from "./system-one/session-source.ts";
 import { createSessionSystemOneController, systemOneSourceOf } from "./system-one/session-source.ts";
 import { createSessionWorkEvidenceJournal, readGoalWorkDiff } from "./system-one/session-work-diff.ts";
 import { VERIFICATION_OBLIGATIONS_CUSTOM_TYPE } from "./system-one/verification-obligations.ts";
@@ -219,6 +220,11 @@ export interface CreateAgentSessionOptions {
 	systemOneFetch?: typeof fetch;
 	/** Where the session's System One evidence is kept; default: its orchestration directory (a bot's is in its home). */
 	systemOneEvidenceDir?: string;
+	/**
+	 * The System One of the session hosting this one (a bot's host), followed in place of the options above: its on/off
+	 * decides the controller (not this session's settings at this moment) and is read with its provider at each use.
+	 */
+	systemOneHost?: SystemOneHostSource;
 	/**
 	 * The one timer source of the session's recovery, retry and watchdog alarms and of the clocks they are due on (one port per
 	 * `TimerOwner` of `util/timer-port.ts`); default: the system clock and the global timers, unreferenced unless the wait
@@ -748,10 +754,10 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		});
 
 		const systemOneSettings = settingsManager.getSystemOneSettings();
-		let systemOneEnabled = isSystemOneEnabled(settingsManager, {
-			enabled: options.systemOneEnabled,
-			disabled: options.disableSystemOne,
-		});
+		const systemOneHost = options.systemOneHost;
+		let systemOneEnabled =
+			systemOneHost?.enabled ??
+			isSystemOneEnabled(settingsManager, { enabled: options.systemOneEnabled, disabled: options.disableSystemOne });
 		let systemOneController = systemOneEnabled ? options.systemOneController : undefined;
 
 		const hookCoordinator =
@@ -773,13 +779,14 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		let constructed: AgentSession | undefined;
 		try {
 			if (!systemOneController && systemOneEnabled) {
-				const access = systemOneAccessFromSession(settingsManager, authStorage, options.systemOneProvider);
+				const choice = () => systemOneHost?.provider ?? options.systemOneProvider;
+				const access = systemOneAccessFromSession(settingsManager, authStorage, choice);
 				// A session without any System One key starts without System One, as before; with one, every
 				// evaluation resolves provider, model and key anew, so a provider switch needs no restart.
 				const resolvedAccess = await access.resolve();
 				if (
 					resolvedAccess.kind === "missing_key" &&
-					options.systemOneEnabled !== true &&
+					(systemOneHost?.enabled ?? options.systemOneEnabled) !== true &&
 					settingsManager.settings.systemOne?.enabled !== true &&
 					systemOneSettings.completionProfile !== "system_one_required" &&
 					!options.steeringPlane &&
@@ -793,7 +800,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				if (resolvedAccess.kind === "ready")
 					systemOneController = await createSessionSystemOneController({
 						access,
-						fetch: options.systemOneFetch,
+						fetch: systemOneHost?.fetch ?? options.systemOneFetch,
 						credentialBoundary: systemOneCredentialBoundary,
 						usage: semanticUsage,
 						cwd,
@@ -802,6 +809,13 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					});
 			}
 
+			// System One's integrity hooks see the session start or resume, read-only.
+			const runSessionHook = async (hook: "resume" | "session_start") => {
+				const id = sessionManager.getSessionId();
+				const context = { schema_version: "1.0", run_id: id, session_id: id, hook, impact: "read_only" } as const;
+				if (systemOneController?.hookCoordinator?.hasExtensions())
+					await systemOneController.hookCoordinator.runHook(hook, context);
+			};
 			// Routing is judged by System One, so an unset `modelRouter.enabled` follows whether this session has it.
 			settingsManager.setModelRouterDefaultEnabled(systemOneController !== undefined);
 
@@ -828,15 +842,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					} catch {
 						// Non-git directory
 					}
-					if (systemOneController.hookCoordinator?.hasExtensions()) {
-						await systemOneController.hookCoordinator.runHook("resume", {
-							schema_version: "1.0",
-							run_id: sessionManager.getSessionId(),
-							session_id: sessionManager.getSessionId(),
-							hook: "resume",
-							impact: "read_only",
-						});
-					}
+					await runSessionHook("resume");
 				}
 			} else {
 				// Save initial model and thinking level for new sessions so they can be restored on resume
@@ -844,15 +850,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					sessionManager.appendModelChange(model.provider, model.id);
 				}
 				sessionManager.appendThinkingLevelChange(thinkingLevel);
-				if (systemOneController?.hookCoordinator?.hasExtensions()) {
-					await systemOneController.hookCoordinator.runHook("session_start", {
-						schema_version: "1.0",
-						run_id: sessionManager.getSessionId(),
-						session_id: sessionManager.getSessionId(),
-						hook: "session_start",
-						impact: "read_only",
-					});
-				}
+				await runSessionHook("session_start");
 			}
 
 			let steeringPlane = systemOneEnabled ? options.steeringPlane : undefined;

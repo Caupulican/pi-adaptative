@@ -29,8 +29,8 @@ a worker reads) opens its system prompt under its soul when the session starts; 
 line from each finished turn is appended to it. It reads, and writes only when the bot has write access, and then as a worker writes: its file tools write inside your project directory only, never to a harness resource (skills, extensions, prompts, settings, hooks, git config); a read-only bot has a shell whose
 commands are judged one by one, as a read-only worker's are (nothing that edits, creates a file or reaches the network runs,
 in every execution mode). A turn is bounded by `workerDelegation.maxUsd` (and the main session's own ceiling) when one is
-set, and what each turn spends is added to the main session's cost. Its tool loop is supervised as a worker's is: repeated broad validation with no new change is steered back to the work, and a turn System One judges stalled or off its message is steered, redirected or stopped; the directive shows in its chat. It reads the settings the main session reads, and runs
-System One as the main session does (on or off, the same provider and connection): your messages to it are judged as your
+set, and what each turn spends is added to the main session's cost. Its tool loop is supervised as a worker's is: repeated broad validation with no new change is steered back to the work, and a turn System One judges stalled or off its message is steered, redirected or stopped; the directive shows in its chat. It reads the settings the main session reads, again each time the main session changes them, and runs
+System One as the main session does at each use (on or off, the same provider and connection; turning System One off or on in settings turns it off or on for a loaded bot too): your messages to it are judged as your
 messages to the main session are, it holds the `systemone` tool, and its System One evidence is kept in its home
 (`typesafe-reviews/`). Its edge grants are its own conversation's plus your settings'; a grant you typed in the main
 session's conversation does not reach it (a bot running as a worker takes the main session's grants). It is loaded on its first message, kept

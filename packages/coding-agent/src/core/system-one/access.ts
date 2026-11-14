@@ -138,17 +138,17 @@ export function sessionSystemOneAccess(input: {
 
 /**
  * The session's System One access from its settings and credential store: the provider choice from
- * `systemOne.provider` (unless `choice` pins one), stored keys without the custom-provider fallback.
+ * `systemOne.provider` (unless `choice`, read at each resolve, pins one), stored keys without the custom-provider fallback.
  */
 export function systemOneAccessFromSession(
 	settings: { getSystemOneSettings(): { provider: SystemOneProviderChoice; enabled?: boolean } },
 	credentials: {
 		getApiKey(provider: string, options: { includeFallback: false }): Promise<string | undefined>;
 	},
-	choice?: SystemOneProviderChoice,
+	choice?: () => SystemOneProviderChoice | undefined,
 ): SystemOneAccessResolver & { keys(): Promise<string[]> } {
 	return sessionSystemOneAccess({
-		getChoice: () => choice ?? settings.getSystemOneSettings().provider,
+		getChoice: () => choice?.() ?? settings.getSystemOneSettings().provider,
 		isEnabled: () => isSystemOneEnabled(settings),
 		getStoredKey: (provider) => credentials.getApiKey(provider, { includeFallback: false }),
 	});

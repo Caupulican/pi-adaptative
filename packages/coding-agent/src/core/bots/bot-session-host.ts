@@ -55,7 +55,7 @@ import { liveOwnWatchCount } from "../routines/routine-holder.ts";
 import { createAgentSession } from "../sdk.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { deriveSpawnedUsageReportId, hasReportableUsage } from "../spawned-usage.ts";
-import type { SystemOneSessionSource } from "../system-one/session-source.ts";
+import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { SYSTEM_ONE_TOOL_NAME } from "../system-one/tool-names.ts";
 import { toolSurvivesReadOnly } from "../tool-capability-policy.ts";
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
@@ -79,10 +79,13 @@ export interface BotSessionHostPorts {
 	cwd(): string;
 	store(): PersistentBotTeamStore;
 	modelRegistry(): ModelRegistry;
-	/** A settings manager of the bot's own over the storage the main session reads (`SettingsManager.sibling`). */
-	settings(): SettingsManager;
-	/** The main session's System One choices: a bot's session runs System One as the main session does. */
-	systemOne(): Omit<SystemOneSessionSource, "evidenceDir">;
+	/**
+	 * A settings manager of the bot's own over the storage the main session reads (`SettingsManager.sibling`), reading
+	 * again each change the main session's manager makes until `release`.
+	 */
+	settings(): { readonly settings: SettingsManager; release(): void };
+	/** The main session's System One as it is now: a bot's session follows it at each use, as the main session runs it. */
+	systemOne(): SystemOneHostSource;
 	timers(): TimerSource;
 	/** The pi session this process hosts bots for, named to the owner when another process is refused. */
 	hostSessionId(): string;
@@ -110,6 +113,8 @@ interface BotSessionEntry {
 	readonly agentId: string;
 	readonly session: AgentSession;
 	readonly lock: HostLock;
+	/** Ends the following of the main session's settings. */
+	readonly releaseSettings: () => void;
 	/** Publishes the session's state for the other processes. */
 	readonly stateWriter: BotHostStateWriter;
 	readonly modelRef: string;
@@ -397,6 +402,7 @@ export class BotSessionHost {
 			);
 		const { lock } = taken;
 		let session: AgentSession | undefined;
+		let settings: ReturnType<BotSessionHostPorts["settings"]> | undefined;
 		try {
 			const cwd = this.ports.cwd();
 			// The newest session file of the bot, whatever directory it worked in: a bot keeps one conversation.
@@ -404,8 +410,21 @@ export class BotSessionHost {
 			const sessionManager = newest
 				? SessionManager.open(newest, agentDir, home.sessionsDir, cwd)
 				: SessionManager.create(cwd, agentDir, home.sessionsDir);
-			const settingsManager = this.ports.settings();
-			const systemOne = this.ports.systemOne();
+			settings = this.ports.settings();
+			const settingsManager = settings.settings;
+			const ports = this.ports;
+			// System One as the main session runs it now, read at each use: on or off, provider, transport.
+			const systemOneHost: SystemOneHostSource = {
+				get enabled() {
+					return ports.systemOne().enabled;
+				},
+				get provider() {
+					return ports.systemOne().provider;
+				},
+				get fetch() {
+					return ports.systemOne().fetch;
+				},
+			};
 			const registry = this.ports.modelRegistry();
 			const resourceLoader = new DefaultResourceLoader({
 				cwd,
@@ -432,10 +451,8 @@ export class BotSessionHost {
 					isChildSession: true,
 					// Every run is admitted at its start, whatever opened it: a wake's turn is held to the owner's rules too.
 					admitRun: () => this.admit(agentId, session?.model),
-					// System One as the main session runs it (on or off, provider, transport); its evidence stays in the bot's home.
-					systemOneEnabled: systemOne.enabled,
-					systemOneProvider: systemOne.provider,
-					systemOneFetch: systemOne.fetch,
+					// System One as the main session runs it; its evidence stays in the bot's home.
+					systemOneHost,
 					systemOneEvidenceDir: botSystemOneEvidenceDir(agentDir, agentId),
 					// Its own name, soul and memory block (its blackboard, which the store appends to after each turn) replace
 					// the main agent's in the prompt, as a worker-path start opens on the same block.
@@ -458,6 +475,7 @@ export class BotSessionHost {
 				agentId,
 				session,
 				lock,
+				releaseSettings: settings.release,
 				stateWriter: new BotHostStateWriter(agentDir, {
 					agentId,
 					hostKind: "session",
@@ -528,6 +546,7 @@ export class BotSessionHost {
 			return entry;
 		} catch (error) {
 			if (session) await session.disposeAndWait().catch(() => undefined);
+			settings?.release();
 			lock.release();
 			throw error;
 		}
@@ -663,6 +682,7 @@ export class BotSessionHost {
 				() => this.reportTurnUsage(entry),
 				() => entry.unsubscribe(),
 				() => entry.session.disposeAndWait(),
+				() => entry.releaseSettings(),
 				() => entry.stateWriter.clear(),
 				() => entry.lock.release(),
 			],

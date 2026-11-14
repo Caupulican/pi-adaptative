@@ -1,8 +1,8 @@
 /**
  * What a session's System One runs on beyond its settings, and the controller a session builds from it. A session keeps
  * the choices it was built with (on or off as it resolved them, the provider it was told to use, the transport its
- * requests take, where its evidence is kept), so a session it hosts (a bot's) runs System One exactly as it does: the same
- * engine choices and the same transport, with the hosted session's own evidence home.
+ * requests take, where its evidence is kept); a session it hosts (a bot's) follows them as they are at each use, so it runs
+ * System One exactly as its host does, with its own evidence home.
  */
 
 import { execFileSync } from "node:child_process";
@@ -25,20 +25,42 @@ export interface SystemOneSessionSource {
 	readonly evidenceDir?: string;
 }
 
-/** The source of a session built with these options, once its on/off is resolved. */
+/** What a hosted session (a bot's) follows of its host's System One: everything but the evidence home, which is its own. */
+export type SystemOneHostSource = Omit<SystemOneSessionSource, "evidenceDir">;
+
+/**
+ * The source of a session built with these options, once its on/off is resolved. A hosted session's source reads its
+ * host's at each use (`systemOneHost`), so its on/off, provider and transport are the host's now, never a copy.
+ */
 export function systemOneSourceOf(
 	options: {
+		systemOneHost?: SystemOneHostSource;
 		systemOneProvider?: SystemOneProviderChoice;
 		systemOneFetch?: typeof fetch;
 		systemOneEvidenceDir?: string;
 	},
 	enabled: boolean,
 ): SystemOneSessionSource {
+	const evidence = options.systemOneEvidenceDir ? { evidenceDir: options.systemOneEvidenceDir } : {};
+	const host = options.systemOneHost;
+	if (host)
+		return {
+			get enabled() {
+				return host.enabled;
+			},
+			get provider() {
+				return host.provider;
+			},
+			get fetch() {
+				return host.fetch;
+			},
+			...evidence,
+		};
 	return {
 		enabled,
 		...(options.systemOneProvider ? { provider: options.systemOneProvider } : {}),
 		...(options.systemOneFetch ? { fetch: options.systemOneFetch } : {}),
-		...(options.systemOneEvidenceDir ? { evidenceDir: options.systemOneEvidenceDir } : {}),
+		...evidence,
 	};
 }
 
@@ -54,7 +76,7 @@ export function sessionSystemOneReviewer(input: {
 	readonly usage: SystemOneReviewerDeps["usage"];
 }): SystemOneReviewer {
 	return new SystemOneReviewer({
-		access: systemOneAccessFromSession(input.settings, input.credentials, input.source?.provider),
+		access: systemOneAccessFromSession(input.settings, input.credentials, () => input.source?.provider),
 		fetch: input.source?.fetch,
 		credentialBoundary: input.credentialBoundary,
 		usage: input.usage,
