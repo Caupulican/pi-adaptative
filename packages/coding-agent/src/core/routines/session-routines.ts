@@ -7,6 +7,7 @@
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import type { WorkerTerminalHandoffRecord } from "../delegation/worker-notification-coordinator.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
+import type { ToolCallFacts } from "../tool-capability-policy.ts";
 import type { RoutineScope } from "./routine-holder.ts";
 import type { RoutineIntakeStatus } from "./routine-intake.ts";
 import type { RoutineRuntime } from "./routine-runtime-assembly.ts";
@@ -107,6 +108,12 @@ export class SessionRoutines {
 	/** The routine tool: only a root session saves routines with it; a bot's own session arms watches with its own tool. */
 	tool(): ToolDefinition | undefined {
 		return this.scope() === "session" ? this.loaded()?.session.tool : undefined;
+	}
+
+	/** What the gate reads about a call's target when the call is the routine tool's (`ToolCallFacts`); else undefined. */
+	callFacts(toolName: string, args: unknown): ToolCallFacts | undefined {
+		const session = this.runtime?.session;
+		return session?.tool.name === toolName ? session.callFacts(args) : undefined;
 	}
 
 	/** Saves a routine on the embedding host's own authority (see `BackgroundLaneController.createRoutine`). */

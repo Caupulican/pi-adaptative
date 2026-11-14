@@ -1742,10 +1742,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/** What a root-only lane tool's owner reads about a call's target before the gate (`ToolCallFacts`), by tool name. */
-	readonly toolCallFacts = (toolName: string, args: unknown) =>
-		this._routines.current?.session.tool.name === toolName
-			? this._routines.current.session.callFacts(args)
-			: undefined;
+	readonly toolCallFacts = (toolName: string, args: unknown) => this._routines.callFacts(toolName, args);
 
 	/**
 	 * Saves a routine for this session without the model tool: the tool's validation, saved worker authority capture
