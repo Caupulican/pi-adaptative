@@ -78,17 +78,14 @@ export interface BotLifecycleHost {
 export class BotLifecycleController {
 	private readonly deps: Pick<
 		BackgroundLaneControllerDeps,
-		"getSessionManager" | "isChildSession" | "isDisposed" | "getSettingsManager"
+		"getSessionManager" | "standing" | "isDisposed" | "getSettingsManager"
 	>;
 	private readonly botBindings: BotRuntimeBindings;
 	private readonly host: BotLifecycleHost;
 	private readonly ownedBotStarts = new Map<string, Promise<unknown>>();
 
 	constructor(
-		deps: Pick<
-			BackgroundLaneControllerDeps,
-			"getSessionManager" | "isChildSession" | "isDisposed" | "getSettingsManager"
-		>,
+		deps: Pick<BackgroundLaneControllerDeps, "getSessionManager" | "standing" | "isDisposed" | "getSettingsManager">,
 		botBindings: BotRuntimeBindings,
 		host: BotLifecycleHost,
 	) {
@@ -362,7 +359,7 @@ export class BotLifecycleController {
 			// Retiring a leader mid-goal would orphan its goal and its bots: the goal is cancelled first.
 			if (
 				this.host.hasWorkerState() &&
-				!this.deps.isChildSession() &&
+				this.deps.standing.managesBots &&
 				this.host.getLeaders().leadsOpenDelegation(agentId)
 			)
 				throw new Error(interfaceText().botTeam.botLeadsOpenGoal(agentId));

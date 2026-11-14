@@ -22,6 +22,7 @@ import { registerInFlightWork } from "../reload-blockers.ts";
 import { clampLaneMaxUsd, type LaneModelResolver } from "../research/lane-model-resolver.ts";
 import { type RuntimeWorkLease, runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
 import { getActiveSessionBranchEntries } from "../session-snapshot.ts";
+import type { SessionCapabilities } from "../session-standing.ts";
 import type { ResolvedProactivityFeedbackSettings, ResolvedProactivitySettings } from "../settings/settings-schema.ts";
 import { strictCanonicalDigest } from "../steering/canonical.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
@@ -136,7 +137,7 @@ export interface ProactivityFeedbackView {
 
 export interface ProactivityControllerDeps extends ProactivityInvestigationHost {
 	isDisposed(): boolean;
-	isChildSession(): boolean;
+	readonly standing: Pick<SessionCapabilities, "runsProactiveLanes">;
 	/** True while the owner's turn (or its retry or follow-up) holds the session. */
 	isForegroundBusy(): boolean;
 	getSessionId(): string;
@@ -248,7 +249,7 @@ export class ProactivityController {
 
 	/** Arms the review when every gate holds; otherwise records the first gate that did not and arms nothing. */
 	scheduleFromIdle(): void {
-		if (this._isRunning || this._aborted || this.deps.isDisposed() || this.deps.isChildSession()) return;
+		if (this._isRunning || this._aborted || this.deps.isDisposed() || !this.deps.standing.runsProactiveLanes) return;
 		// The prompt tail can schedule while its outer submission still owns the foreground.
 		// Subscribe lazily: the composition root constructs lanes before the foreground owner.
 		this._unsubscribeActivity ??= this.deps.subscribeForegroundActivity(() => {
@@ -275,7 +276,7 @@ export class ProactivityController {
 	}
 
 	private gate(): string | undefined {
-		if (this.deps.isChildSession()) return "child_session";
+		if (!this.deps.standing.runsProactiveLanes) return "child_session";
 		if (this.deps.isForegroundBusy()) return "foreground_busy";
 		const settings = this.deps.getSettingsManager().getProactivitySettings();
 		if (!settings.enabled) return "proactivity_disabled";

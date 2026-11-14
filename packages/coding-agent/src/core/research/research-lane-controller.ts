@@ -19,6 +19,7 @@ import { type GoalState, isGoalExecutionActive } from "../goals/goal-state.ts";
 import type { NormalizedProfile } from "../profile-registry.ts";
 import { registerInFlightWork } from "../reload-blockers.ts";
 import { runtimeGenerationAdmission } from "../runtime-generation-admission.ts";
+import type { SessionCapabilities } from "../session-standing.ts";
 import type {
 	AutonomySettings,
 	ResolvedEdgeSettings,
@@ -38,7 +39,7 @@ export interface ResearchLaneControllerSettingsSource {
 
 export interface ResearchLaneControllerDeps {
 	isDisposed(): boolean;
-	isChildSession(): boolean;
+	readonly standing: Pick<SessionCapabilities, "runsProactiveLanes">;
 	getSessionId(): string;
 	getCwd(): string;
 	getAgentDir(): string;
@@ -127,7 +128,7 @@ export class ResearchLaneController {
 	}
 
 	scheduleFromIdle(): void {
-		if (this._isRunning || this._aborted || this.deps.isDisposed() || this.deps.isChildSession()) return;
+		if (this._isRunning || this._aborted || this.deps.isDisposed() || !this.deps.standing.runsProactiveLanes) return;
 		const settingsManager = this.deps.getSettingsManager();
 		const research = settingsManager.getResearchLaneSettings();
 		const { mode } = settingsManager.getAutonomySettings();

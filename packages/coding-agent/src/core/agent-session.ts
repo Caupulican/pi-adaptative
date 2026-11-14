@@ -1217,7 +1217,7 @@ export class AgentSession {
 		this._backgroundLanes = new BackgroundLaneController({
 			refreshToolRegistry: () => this._runtimeBuilder.refreshToolRegistry(),
 			isDisposed: () => this._disposed,
-			isChildSession: () => this._caps.routineScope !== "session",
+			standing: this._caps,
 			observeHarnessNotice: (kind, read, onLost) => this._harnessNotices.observe(kind, read, onLost),
 			getSessionId: () => this.sessionId,
 			getCwd: () => this._cwd,
@@ -1679,7 +1679,7 @@ export class AgentSession {
 			sessionManager: this.sessionManager,
 			acquireUpdateQuiescence: async (signal) => this._memory.continuousChatHost()?.runtime.pauseAndDrain(signal),
 			getMessages: () => this.agent.state.messages,
-			isRoot: () => this._caps.ownsProcessSingletons,
+			ownsProcessSingletons: () => this._caps.ownsProcessSingletons,
 			onStopped: () => this._goals.markTerminalToolFailureBlocked("runtime_update"),
 			resume: (prepare) => this._durableCustomMessageTurns.continue(prepare, this._goals.getOwnershipGoalId()),
 			reload: async (path, ownerHandoff) => {

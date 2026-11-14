@@ -37,7 +37,7 @@ export interface RetentionControllerDeps {
 	/** The `retention` owner's port: its idle delay and the throttle clock. */
 	readonly timers: TimerPort;
 	readonly isDisposed: () => boolean;
-	readonly isChildSession: () => boolean;
+	readonly directsWorkers: () => boolean;
 	readonly isForegroundBusy: () => boolean;
 	readonly hasWorkerState: () => boolean;
 	readonly closedObjectiveDays: () => number;
@@ -64,7 +64,7 @@ export class OrchestrationRetentionController {
 	/** Arms one idle run unless one is armed or running; the run re-checks every gate when it fires. */
 	scheduleFromIdle(): void {
 		if (this._timer !== undefined || this._running) return;
-		if (this.deps.isDisposed() || this.deps.isChildSession() || !this.deps.hasWorkerState()) return;
+		if (this.deps.isDisposed() || !this.deps.directsWorkers() || !this.deps.hasWorkerState()) return;
 		if (this.deps.closedObjectiveDays() === 0) return;
 		this.arm(RETENTION_IDLE_DELAY_MS);
 	}
@@ -103,7 +103,7 @@ export class OrchestrationRetentionController {
 	private run(): RetentionPassResult | undefined {
 		const continuing = this._continuing;
 		this._continuing = false;
-		if (this.deps.isDisposed() || this.deps.isChildSession() || this.deps.isForegroundBusy()) return undefined;
+		if (this.deps.isDisposed() || !this.deps.directsWorkers() || this.deps.isForegroundBusy()) return undefined;
 		if (!this.deps.hasWorkerState() || this.deps.closedObjectiveDays() === 0) return undefined;
 		const capacity = this.deps.capacity();
 		if (capacity === undefined) return undefined;

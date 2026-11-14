@@ -58,7 +58,7 @@ export interface RuntimeUpdateControllerDeps {
 	/** This is the transactional runtime reload, NOT session/history reconstruction. */
 	reload(extensionPath?: string, ownerHandoff?: RuntimeMutationHandoff): Promise<void>;
 	appendNotice(content: string): Promise<void>;
-	isRoot(): boolean;
+	ownsProcessSingletons(): boolean;
 	/** Pause background producers and drain paid work; release resumes them after an update. */
 	acquireUpdateQuiescence?(signal: AbortSignal): Promise<(() => void) | undefined>;
 	onStopped?(): void;
@@ -112,7 +112,7 @@ export class RuntimeUpdateController {
 	getExtensionVerificationTarget(): { toolName: string; extensionPath: string } | undefined {
 		this.refreshState();
 		if (
-			!this.deps.isRoot() ||
+			!this.deps.ownsProcessSingletons() ||
 			this.cancellation.signal.aborted ||
 			this.state?.status !== "verifying" ||
 			this.state.mode !== "reload" ||
@@ -184,7 +184,7 @@ export class RuntimeUpdateController {
 			promptSnippet: "Reload extensions or restart core",
 			parameters: toolSchema,
 			execute: async (toolCallId, input, signal) => {
-				if (!this.deps.isRoot()) throw new Error("Only the root session may update its runtime.");
+				if (!this.deps.ownsProcessSingletons()) throw new Error("Only the root session may update its runtime.");
 				if (signal?.aborted) throw new Error("Runtime update cancelled.");
 				this.refreshState();
 				if (input.action === "complete") {
@@ -390,7 +390,7 @@ export class RuntimeUpdateController {
 
 	/** Ordinary session restoration repairs uncertain updates automatically; it never replays a mutation. */
 	async resumeInterrupted(): Promise<boolean> {
-		if (!this.deps.isRoot() || !this.isActive() || !this.deps.resume) return false;
+		if (!this.deps.ownsProcessSingletons() || !this.isActive() || !this.deps.resume) return false;
 		await this.deps.resume(() => this.prepareInterruptedRepair());
 		return true;
 	}
@@ -398,7 +398,7 @@ export class RuntimeUpdateController {
 	/** Exact handoff only: a later ordinary --resume never repeats a core restart. */
 	async acceptRestart(id: string, rollbackError?: string): Promise<void> {
 		if (
-			!this.deps.isRoot() ||
+			!this.deps.ownsProcessSingletons() ||
 			this.state?.id !== id ||
 			this.state.mode !== "restart" ||
 			(!rollbackError && this.state.status !== "restarting")

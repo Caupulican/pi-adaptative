@@ -23,6 +23,7 @@ import type { ModelFitnessControllerDeps } from "./research/model-fitness-contro
 import type { ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
 import type { RoutineScope } from "./routines/routine-holder.ts";
 import type { SessionSemanticPlaneController } from "./session-semantic-plane-controller.ts";
+import type { SessionCapabilities } from "./session-standing.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { NestedCallAdmitter } from "./tools/nested-tool-call.ts";
 import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
@@ -78,6 +79,16 @@ export interface BackgroundLaneControllerDeps
 	>;
 	/** What the session's routine runtime holds (`routine-holder.ts`): undefined for a child session that holds none. */
 	routineScope(): RoutineScope | undefined;
+	/** The session standing's capabilities the lanes read (session-standing.ts). */
+	readonly standing: Pick<
+		SessionCapabilities,
+		| "ownsProcessSingletons"
+		| "ownsHostDuties"
+		| "answersForCheckout"
+		| "managesBots"
+		| "directsWorkers"
+		| "runsProactiveLanes"
+	>;
 	getToolInvocationKey(callId: string, toolName: string): string;
 	/** The session gate's admission of a sub-call of an admitted call: a routine save admits its watch's check through it. */
 	admitNestedToolCall: NestedCallAdmitter;

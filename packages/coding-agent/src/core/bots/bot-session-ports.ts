@@ -83,9 +83,9 @@ interface BotSessionOwnPorts extends Pick<BotSessionRootPorts, "store" | "warn">
 	workerController(): Pick<WorkerDelegationController, "compileBotSession">;
 }
 
-/** Attaches the session to a bot session host: its process's shared one for a root session, one of its own for a child. */
+/** Attaches the session to a bot session host: its process's shared one where it owns the process singletons, else one of its own. */
 export function attachBotSessions(deps: BackgroundLaneControllerDeps, own: BotSessionOwnPorts): BotSessionAttachment {
-	return attachBotSessionHost(botSessionHostPorts(deps, own), !deps.isChildSession());
+	return attachBotSessionHost(botSessionHostPorts(deps, own), deps.standing.ownsProcessSingletons);
 }
 
 function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSessionOwnPorts): BotSessionRootPorts {

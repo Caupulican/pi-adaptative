@@ -329,7 +329,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			observeNotice: (kind, read, onLost) => deps.observeHarnessNotice?.(kind, read, onLost) ?? false,
 			warn: (message) => this._safeWarn(message),
 			isDisposed: () => deps.isDisposed(),
-			isChildSession: () => deps.isChildSession(),
+			isChildSession: () => !deps.standing.ownsHostDuties,
 			refreshTools: () => deps.refreshToolRegistry(),
 			timers: deps.getTimers().port("channel-poll"),
 			wakeTimers: deps.getTimers().port("channel-expiry"),
@@ -634,21 +634,21 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._parentWriteHolds = this._importParentWrites(lifecycle);
 		// A delegation's leader turns are its own input: the claim must stand before the outbox replays, and the controller
 		// adopts every open delegation the last process left once the replay is done.
-		if (!this.deps.isChildSession()) {
-			this._composePlanExecutor(lifecycle, store);
-			const leaders = this._getLeaders();
+		if (this.deps.standing.directsWorkers) this._composePlanExecutor(lifecycle, store);
+		const leaders = this.deps.standing.managesBots ? this._getLeaders() : undefined;
+		if (leaders)
 			this._leaderRouteOff ??= this.registerTerminalRoute("leader_controller", (record) =>
 				leaders.claimsTerminal(record),
 			);
-			// A worker that runs a job a peer placed here reports to that peer through the job runner, never to this session's chat.
-			if (!this._jobRouteOff)
-				this._jobRouteOff = this.registerTerminalRoute("job_runner", (record) =>
-					this._placedJobAcks.routeOwns(record.attemptId),
-				);
+		// A worker that runs a job a peer placed here reports to that peer through the job runner, never to this session's chat.
+		if (this.deps.standing.ownsProcessSingletons && !this._jobRouteOff)
+			this._jobRouteOff = this.registerTerminalRoute("job_runner", (record) =>
+				this._placedJobAcks.routeOwns(record.attemptId),
+			);
+		if (leaders)
 			queueMicrotask(() => {
 				if (!this.deps.isDisposed()) leaders.start();
 			});
-		}
 		this._replayPendingTerminals(lifecycle, () => true);
 		return lifecycle;
 	}
@@ -692,7 +692,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 				if (this._terminalRouting.route(record)) return "separate";
 				// An acting-ahead worker's completion is that episode's own input; it never wakes the owner.
 				if (
-					!this.deps.isChildSession() &&
+					this.deps.standing.answersForCheckout &&
 					this._getActAhead().ownsNotification(record, this._getWorkerLifecycle().getTaskRuntimeSnapshot())
 				)
 					return "separate";
@@ -1520,18 +1520,19 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	startSessionInputs(): void {
 		this.startPersistentRoutines();
-		// A child session starts only its routines (a bot's own session, its watches); the rest is the root session's.
-		if (this.deps.isChildSession()) return;
-		void this.getRemoteHub()
-			.start()
-			.then((problem) => {
-				if (problem) this._safeWarn(problem);
-			});
-		if (!this._channelsHostedByDaemon) this.channels.start();
-		if (!this.deps.isDisposed()) this._getActAhead().start();
-		if (this._hasWorkerState()) this._getRetention().scheduleFromIdle();
+		// The rest follow the standing: a bot's own session starts only its routines (its watches).
+		const { standing } = this.deps;
+		if (standing.ownsProcessSingletons)
+			void this.getRemoteHub()
+				.start()
+				.then((problem) => {
+					if (problem) this._safeWarn(problem);
+				});
+		if (standing.ownsHostDuties && !this._channelsHostedByDaemon) this.channels.start();
+		if (standing.answersForCheckout && !this.deps.isDisposed()) this._getActAhead().start();
+		if (standing.directsWorkers && this._hasWorkerState()) this._getRetention().scheduleFromIdle();
 		// Bot sessions holding watches a closed process left are opened here; the daemon's phone session hosts none.
-		if (!this._channelsHostedByDaemon) this._botHost.host.openOwed();
+		if (standing.ownsHostDuties && !this._channelsHostedByDaemon) this._botHost.host.openOwed();
 	}
 
 	/** The host's CI source offers its failure evidence while it runs; the returned function withdraws it. */
@@ -1562,7 +1563,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	private _getActAhead(): ActAheadController {
 		this._actAhead ??= new ActAheadController({
 			getSessionManager: () => this.deps.getSessionManager(),
-			isChildSession: () => this.deps.isChildSession(),
+			answersForCheckout: () => this.deps.standing.answersForCheckout,
 			isDisposed: () => this.deps.isDisposed(),
 			canDispatch: () => this.deps.isDelegateToolActive(),
 			isForegroundBusy: () => this.deps.isForegroundBusy(),
@@ -1598,7 +1599,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/** The owner's release of channel reply drafts; offered only while a channel has an explicit policy and this session serves its channels. */
 	private createChannelReplyToolDefinition(): ToolDefinition | undefined {
-		return !this.deps.isChildSession() && !this._channelsHostedByDaemon && this.channels.hasExplicitPolicy()
+		return this.deps.standing.ownsHostDuties && !this._channelsHostedByDaemon && this.channels.hasExplicitPolicy()
 			? createChannelReplyToolDefinition(this.channels)
 			: undefined;
 	}
@@ -1669,7 +1670,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		);
 		if (fromAlarm) return;
 		try {
-			if (!this.deps.isChildSession()) this.getAwayService().reconcile(awayWork);
+			if (this.deps.standing.ownsHostDuties) this.getAwayService().reconcile(awayWork);
 		} catch (error) {
 			this._safeWarn(
 				`Always-on routines could not be checked: ${error instanceof Error ? error.message : String(error)}`,
@@ -1772,7 +1773,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return readSessionAutonomyStatus({
 			nowMs,
 			sessionId: this.deps.getSessionId(),
-			childSession: this.deps.isChildSession(),
+			childSession: this.deps.routineScope() !== "session",
 			sessionManager: this.deps.getSessionManager(),
 			settings: this.deps.getSettingsManager(),
 			usageWindow: () =>
@@ -2019,16 +2020,13 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	createBackgroundLaneTools(): ToolDefinition[] {
 		const routine = this.createRoutineToolDefinition();
-		return (
-			this.deps.isChildSession()
-				? [routine]
-				: [
-						routine,
-						this.createBotToolDefinition(),
-						this.createChannelReplyToolDefinition(),
-						this.createPlanToolDefinition(),
-					]
-		).filter((definition): definition is ToolDefinition => definition !== undefined);
+		const { managesBots, ownsHostDuties, directsWorkers } = this.deps.standing;
+		return [
+			routine,
+			managesBots ? this.createBotToolDefinition() : undefined,
+			ownsHostDuties ? this.createChannelReplyToolDefinition() : undefined,
+			directsWorkers ? this.createPlanToolDefinition() : undefined,
+		].filter((definition): definition is ToolDefinition => definition !== undefined);
 	}
 
 	private createPlanToolDefinition(): ToolDefinition {
@@ -2037,7 +2035,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/** The root's plan executor; reaching it builds the worker runtime that composes it. */
 	private _getPlanExecutor(): PlanExecutorPort | undefined {
-		if (this.deps.isChildSession() || this.deps.isDisposed()) return undefined;
+		if (!this.deps.standing.directsWorkers || this.deps.isDisposed()) return undefined;
 		this._getWorkerLifecycle();
 		return this._planExecutor;
 	}
@@ -2098,7 +2096,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/** The root's delegations to leaders; building it builds the worker runtime, which registers its terminal claim. */
 	getLeaders(): LeaderController {
-		if (this.deps.isChildSession()) throw new Error("Only the orchestrator hands goals to leaders.");
+		if (!this.deps.standing.managesBots) throw new Error("Only the orchestrator hands goals to leaders.");
 		this._getWorkerLifecycle();
 		return this._getLeaders();
 	}
@@ -2109,7 +2107,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	leaderDelegations(): DelegationRecord[] {
 		if (this._leaders) return this._leaders.snapshot();
-		if (this.deps.isChildSession()) return [];
+		if (!this.deps.standing.managesBots) return [];
 		const snapshot =
 			this._workerLifecycle?.getTaskRuntimeSnapshot() ??
 			(this._hasWorkerState()
@@ -2187,7 +2185,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 
 	/** The delegation a leader is running right now: the orchestrator's words to that leader are that goal's input. */
 	private runningDelegationOf(alias: string): string | undefined {
-		if (this.deps.isChildSession()) return undefined;
+		if (!this.deps.standing.managesBots) return undefined;
 		const record = this.getLeaders().currentFor(alias);
 		return record?.state === "running" ? record.objectiveId : undefined;
 	}
@@ -2254,7 +2252,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		this._retention ??= new OrchestrationRetentionController({
 			timers: this.deps.getTimers().port("retention"),
 			isDisposed: () => this.deps.isDisposed(),
-			isChildSession: () => this.deps.isChildSession(),
+			directsWorkers: () => this.deps.standing.directsWorkers,
 			isForegroundBusy: () => this.deps.isForegroundBusy(),
 			hasWorkerState: () => this._hasWorkerState(),
 			closedObjectiveDays: () =>

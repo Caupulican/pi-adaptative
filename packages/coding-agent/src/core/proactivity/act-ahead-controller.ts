@@ -69,7 +69,7 @@ const HOST_EVENT_ORIGIN: TurnOriginRecord = { v: 1, k: "host-event", thirdParty:
 
 export interface ActAheadControllerDeps {
 	getSessionManager(): SessionManager;
-	isChildSession(): boolean;
+	answersForCheckout(): boolean;
 	isDisposed(): boolean;
 	/** Whether this session may start a delegated worker (its tool surface has `delegate`). */
 	canDispatch(): boolean;
@@ -151,7 +151,7 @@ export class ActAheadController {
 
 	/** Starts following CI failures; earlier episodes left mid-way by a restart are finished or abandoned first. */
 	start(): void {
-		if (this.started || this.deps.isChildSession()) return;
+		if (this.started || !this.deps.answersForCheckout()) return;
 		this.started = true;
 		const wake = () => this.schedule();
 		this.unsubscribe.push(
