@@ -10,8 +10,11 @@
  * after a turn's last run, before the next third party's turn): it is still in the session's usage, and in a bot's
  * charge. A summary prepared while the session idled is paid then, outside any compaction and any turn. The host says
  * what spend the bound holds (`spent`): the turn's own, or a wider spend the turn's adds to (a bot's request with its
- * workers). Past the bound the turn is stopped (`stopSessionTurn`), at a priced message or at the start of a run the turn
- * continues with. A bound can only be kept on a model that declares a price.
+ * workers). It is told each addition once, where the transcript already holds the turn's own entries: at a priced
+ * message's end, at the start of a run the turn continues with, and at the turn's end. The turn's first run starts before
+ * the input that opened it is written, so that start is checked on the turn's own spend, which the wider spend includes.
+ * Past the bound the turn is stopped (`stopSessionTurn`), at a priced message or at the start of a run. A bound can only
+ * be kept on a model that declares a price.
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
@@ -57,7 +60,11 @@ export function boundSessionTurnSpend<Limit extends SpendLimit>(
 ): () => void {
 	const { foreground } = session.nativeActivity;
 	let turnUsd = 0;
+	// Spend added to the turn and not yet told to the host.
+	let untoldUsd = 0;
 	let open = false;
+	// The turn has just started: its first run's start is checked on the turn's own spend.
+	let opening = false;
 	// The running compaction: the session's recorded compaction spend when it started, and its submission.
 	let compaction: SubmissionSpend | undefined;
 	// Compaction spend that ended between turns, for the next turn when it starts in the same submission.
@@ -65,27 +72,35 @@ export function boundSessionTurnSpend<Limit extends SpendLimit>(
 	const unsubscribeTurns = observeSessionTurns(session, {
 		started: () => {
 			const submission = foreground.getCurrentSubmissionEpoch();
-			turnUsd = 0;
-			if (between?.submission !== undefined && between.submission === submission) count(between.usd);
+			turnUsd = between?.submission !== undefined && between.submission === submission ? between.usd : 0;
+			untoldUsd = turnUsd;
 			between = undefined;
 			open = true;
+			opening = true;
 		},
 		ended: () => {
+			if (untoldUsd > 0) tell();
 			open = false;
 		},
 	});
-	// Adds spend to the turn and returns the spend held to the bound.
-	function count(addedUsd: number): number {
-		turnUsd += addedUsd;
+	const add = (usd: number) => {
+		turnUsd += usd;
+		untoldUsd += usd;
+	};
+	// Tells the host the spend not yet told and returns the spend held to the bound.
+	const tell = (): number => {
+		const addedUsd = untoldUsd;
+		untoldUsd = 0;
 		return bound.spent(turnUsd, addedUsd);
-	}
+	};
 	const enforce = (spentUsd: number) => {
 		const limit = bound.limit();
 		if (limit !== undefined && spentUsd > limit.usd) void stopSessionTurn(session, bound.onExceeded(spentUsd, limit));
 	};
 	const unsubscribeSpend = session.subscribe((event) => {
 		if (event.type === "message_end" && event.message.role === "assistant") {
-			enforce(count(event.message.usage?.cost?.total ?? 0));
+			add(event.message.usage?.cost?.total ?? 0);
+			enforce(tell());
 		} else if (event.type === "compaction_start") {
 			compaction = {
 				usd: session.getRecordedCompactionUsd(),
@@ -93,13 +108,18 @@ export function boundSessionTurnSpend<Limit extends SpendLimit>(
 			};
 		} else if (event.type === "compaction_end" && compaction !== undefined) {
 			const usd = session.getRecordedCompactionUsd() - compaction.usd;
-			if (open) count(usd);
+			if (open) add(usd);
 			else {
 				const carried = between !== undefined && between.submission === compaction.submission ? between.usd : 0;
 				between = { usd: carried + usd, submission: compaction.submission };
 			}
 			compaction = undefined;
-		} else if (event.type === "agent_start") enforce(count(0));
+		} else if (event.type === "agent_start") {
+			// The turn's started() runs first, on the same event (its boundary subscribed first).
+			if (opening) enforce(turnUsd);
+			else enforce(tell());
+			opening = false;
+		}
 	});
 	return () => {
 		unsubscribeTurns();
