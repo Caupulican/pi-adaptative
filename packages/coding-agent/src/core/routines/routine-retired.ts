@@ -99,12 +99,16 @@ function boundedText(value: unknown, maximum: number): string {
 	return value;
 }
 
-/** The persisted retired records, oldest first; one invalid or repeated entry rejects the whole list. */
+/**
+ * The persisted retired records, oldest first; one invalid or repeated entry rejects the whole list. A record retired for
+ * a reason this build does not know was written by a later build: the records are advisory, so it is left out (and
+ * dropped at this build's next write) instead of refusing the store.
+ */
 export function parseRetiredRoutines(value: unknown): RetiredRoutineRecord[] {
 	if (!Array.isArray(value) || value.length > MAX_RETIRED_ROUTINES)
 		throw new TypeError("Retired routine records have an invalid size.");
 	const incarnations = new Set<string>();
-	return value.map((entry: unknown) => {
+	return value.flatMap((entry: unknown): RetiredRoutineRecord[] => {
 		if (
 			!isPlainRecord(entry) ||
 			!hasOnlyKeys(entry, [
@@ -125,27 +129,30 @@ export function parseRetiredRoutines(value: unknown): RetiredRoutineRecord[] {
 			(entry.lastRunAt !== undefined && !validInstant(entry.lastRunAt)) ||
 			(entry.lastStatus !== undefined &&
 				!(ROUTINE_LAST_STATUSES as readonly unknown[]).includes(entry.lastStatus)) ||
-			!(ROUTINE_RETIRED_REASONS as readonly unknown[]).includes(entry.reason)
+			typeof entry.reason !== "string"
 		)
 			throw new TypeError("Retired routine record is invalid.");
 		const incarnationId = boundedText(entry.incarnationId, MAX_RETIRED_ID_CHARS);
 		if (incarnations.has(incarnationId)) throw new TypeError("Retired routine records repeat an incarnation.");
 		incarnations.add(incarnationId);
-		return {
-			routineId: entry.routineId,
-			incarnationId,
-			parentSessionId: boundedText(entry.parentSessionId, MAX_RETIRED_ID_CHARS),
-			prompt: boundedText(entry.prompt, MAX_RETIRED_PROMPT_CHARS),
-			schedule: parseRoutineSchedule(entry.schedule),
-			...(entry.lastStatus === undefined
-				? {}
-				: { lastStatus: entry.lastStatus as RetiredRoutineRecord["lastStatus"] }),
-			...(entry.lastRunAt === undefined ? {} : { lastRunAt: entry.lastRunAt }),
-			...(entry.lastSummary === undefined
-				? {}
-				: { lastSummary: boundedText(entry.lastSummary, MAX_RESULT_PREVIEW_CHARS) }),
-			reason: entry.reason as RoutineRetiredReason,
-			retiredAt: entry.retiredAt,
-		};
+		if (!(ROUTINE_RETIRED_REASONS as readonly string[]).includes(entry.reason)) return [];
+		return [
+			{
+				routineId: entry.routineId,
+				incarnationId,
+				parentSessionId: boundedText(entry.parentSessionId, MAX_RETIRED_ID_CHARS),
+				prompt: boundedText(entry.prompt, MAX_RETIRED_PROMPT_CHARS),
+				schedule: parseRoutineSchedule(entry.schedule),
+				...(entry.lastStatus === undefined
+					? {}
+					: { lastStatus: entry.lastStatus as RetiredRoutineRecord["lastStatus"] }),
+				...(entry.lastRunAt === undefined ? {} : { lastRunAt: entry.lastRunAt }),
+				...(entry.lastSummary === undefined
+					? {}
+					: { lastSummary: boundedText(entry.lastSummary, MAX_RESULT_PREVIEW_CHARS) }),
+				reason: entry.reason as RoutineRetiredReason,
+				retiredAt: entry.retiredAt,
+			},
+		];
 	});
 }
