@@ -3,7 +3,9 @@
  * executes (`ProgressObservationWindow`), judged by the same coordinator and supervisor (`createSupervision`), with the
  * session's own turn as the levers. A steer reaches the running turn at its next model step ("queue"), or interrupts it
  * and opens the next turn on the directive ("now"); a stop ends the turn. A verdict that settles after its turn ended is
- * stale and applies nothing. The host feeds the session's events in (`observe`) and stops it when the session closes.
+ * stale and applies nothing. A turn is the one `observeSessionTurns` draws (an automatic retry's attempts are the same
+ * turn, observed in one window): the host has it observe the session's turns (`started`, `ended`), feeds the events inside
+ * a turn in (`observe`) and stops it when the session closes.
  */
 import * as path from "node:path";
 import type { AgentMessage } from "../../kernel/index.ts";
@@ -12,6 +14,7 @@ import { createSupervision } from "../agent-session-composition.ts";
 import type { AgentSessionEvent } from "../agent-session-contracts.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { WorkerRole } from "../orchestration/contracts.ts";
+import type { SessionTurnObserver } from "../session-turn-boundary.ts";
 import { assistantOutputTail, ProgressObservationWindow } from "../supervision/progress-observation-window.ts";
 import type { WorkerSupervisionCoordinator } from "../supervision/worker-supervision-coordinator.ts";
 
@@ -61,7 +64,7 @@ function inputText(message: AgentMessage): string {
 	return content.flatMap((part) => (part.type === "text" ? [part.text] : [])).join("\n");
 }
 
-export class BotTurnSupervision {
+export class BotTurnSupervision implements SessionTurnObserver {
 	private readonly session: SupervisedSession;
 	private readonly options: BotTurnSupervisionOptions;
 	private readonly coordinator: WorkerSupervisionCoordinator;
@@ -88,28 +91,34 @@ export class BotTurnSupervision {
 		});
 	}
 
-	/** One event of the bot's session: a turn opens and ends, and each tool call it executes is observed. */
+	/** A turn of the bot's session began: it is supervised from here. */
+	started(): void {
+		this.endTurn();
+		this.turn = {
+			attemptId: `bot-turn:${this.session.sessionId}:${++this.turns}`,
+			startedAt: Date.now(),
+			transcriptStart: this.session.messages.length,
+			mission: "",
+			window: new ProgressObservationWindow(0),
+			changedFiles: new Set(),
+			argsByCall: new Map(),
+			ended: new AbortController(),
+		};
+	}
+
+	/** The turn ended: no verdict on it applies any more. */
+	ended(): void {
+		this.endTurn();
+	}
+
+	/** One event inside the bot's turn: its first input is its mission, and each tool call it executes is observed. */
 	observe(event: AgentSessionEvent): void {
-		if (event.type === "agent_start") {
-			this.turn = {
-				attemptId: `bot-turn:${this.session.sessionId}:${++this.turns}`,
-				startedAt: Date.now(),
-				transcriptStart: this.session.messages.length,
-				mission: "",
-				window: new ProgressObservationWindow(0),
-				changedFiles: new Set(),
-				argsByCall: new Map(),
-				ended: new AbortController(),
-			};
-			return;
-		}
 		const turn = this.turn;
 		if (!turn) return;
 		if (event.type === "message_start" && turn.mission.length === 0) turn.mission = inputText(event.message).trim();
 		else if (event.type === "tool_execution_start") turn.argsByCall.set(event.toolCallId, event.args);
 		else if (event.type === "tool_execution_end")
 			this.observeCall(turn, event.toolCallId, event.toolName, event.isError);
-		else if (event.type === "agent_end" && !event.willRetry) this.endTurn();
 	}
 
 	/** The session closes: the turn in flight ends and no verdict on it applies. */

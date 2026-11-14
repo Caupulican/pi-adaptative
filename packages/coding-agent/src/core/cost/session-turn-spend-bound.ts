@@ -1,12 +1,14 @@
 /**
  * The dollar bound of one turn of a headless session (a channel away, a persistent bot): the cost of the turn's priced
- * assistant messages is summed from its start, and past the bound the turn is aborted. A bound can only be kept on a model
+ * assistant messages is summed from its start, on the turn boundary `observeSessionTurns` draws (an automatic retry's
+ * attempts are the same turn), and past the bound the turn is aborted. A bound can only be kept on a model
  * that declares a price.
  */
 
 import type { Api, Model } from "@caupulican/pi-ai";
 import type { AgentSession } from "../agent-session.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import { observeSessionTurns } from "../session-turn-boundary.ts";
 
 /** Why a model cannot run under a dollar bound, in the owner's words; undefined when it declares a price. */
 export function unpricedModelRefusal(model: Pick<Model<Api>, "provider" | "id" | "costDefaulted">): string | undefined {
@@ -29,14 +31,18 @@ export interface SessionTurnSpendBound<Limit extends SpendLimit> {
 export function boundSessionTurnSpend<Limit extends SpendLimit>(
 	session: Pick<AgentSession, "subscribe" | "abort">,
 	bound: SessionTurnSpendBound<Limit>,
-) {
+): () => void {
 	let turnUsd = 0;
-	return session.subscribe((event) => {
-		if (event.type === "agent_start") turnUsd = 0;
-		else if (event.type === "message_end" && event.message.role === "assistant") {
+	const unsubscribeTurns = observeSessionTurns(session, { started: () => (turnUsd = 0), ended: () => {} });
+	const unsubscribeSpend = session.subscribe((event) => {
+		if (event.type === "message_end" && event.message.role === "assistant") {
 			turnUsd += event.message.usage?.cost?.total ?? 0;
 			const limit = bound.limit();
 			if (limit !== undefined && turnUsd > limit.usd) void session.abort(bound.onExceeded(turnUsd, limit));
 		}
 	});
+	return () => {
+		unsubscribeTurns();
+		unsubscribeSpend();
+	};
 }

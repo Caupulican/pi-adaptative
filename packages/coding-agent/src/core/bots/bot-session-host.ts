@@ -892,8 +892,10 @@ export class BotSessionHost {
 			});
 			// Its spend and outcome are counted per turn on the boundary its time bound reads.
 			const unsubscribeTurns = observeSessionTurns(session, entry.turns);
+			const unsubscribeSupervisedTurns = observeSessionTurns(session, supervision);
 			entry.unsubscribe = () => {
 				unsubscribeTurns();
+				unsubscribeSupervisedTurns();
 				unsubscribeSpend();
 				unsubscribeTime();
 				unsubscribeEvents();
