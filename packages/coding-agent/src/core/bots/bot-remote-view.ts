@@ -9,6 +9,7 @@ import { judgeOwner } from "../../kernel/reliability/owner-identity.ts";
 import { getSessionHeaderCwd, readSessionHeader } from "../../kernel/session/session-file-reading.ts";
 import { findMostRecentSessionInDirs } from "../../kernel/session/session-listing.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
+import { FileSnapshotChangedError } from "../../kernel/storage/bounded-file.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { botHomeName } from "../agent-paths.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
@@ -33,6 +34,24 @@ export function botSessionOnDisk(agentDir: string, agentId: string): SavedBotSes
 	const file = findMostRecentSessionInDirs([botHomeOf(agentDir, agentId).sessionsDir]);
 	const header = file ? readSessionHeader(file) : null;
 	return header ? { id: header.id, cwd: getSessionHeaderCwd(header) } : undefined;
+}
+
+/** How many times a transcript read is opened again when a write changed the file under it. */
+const SNAPSHOT_READS = 3;
+
+/**
+ * A session transcript's messages, read without opening it for writing. A record still being written at its end is not
+ * read; a write that lands while the file is read makes the read open it again (the file then holds the write whole), a
+ * few times at most, after which the change is reported as the failure it is.
+ */
+export function readTranscriptMessages(file: string, agentDir: string): AgentMessage[] {
+	for (let attempt = 1; ; attempt++) {
+		try {
+			return SessionManager.openReadOnly(file, agentDir).buildSessionContext().messages;
+		} catch (error) {
+			if (!(error instanceof FileSnapshotChangedError) || attempt >= SNAPSHOT_READS) throw error;
+		}
+	}
 }
 
 /** Whether the process of a host the view holds is gone. */
@@ -168,7 +187,7 @@ export class BotRemoteView {
 			cached.size === stat.size
 		)
 			return [...cached.messages];
-		const messages = SessionManager.openReadOnly(file, agentDir).buildSessionContext().messages;
+		const messages = readTranscriptMessages(file, agentDir);
 		this.transcriptCache = { agentId, file, mtimeMs: stat.mtimeMs, size: stat.size, messages };
 		return [...messages];
 	}

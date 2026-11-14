@@ -19,7 +19,6 @@ import { readdir } from "node:fs/promises";
 import { join, resolve } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { orchestrationSessionsDir } from "../../kernel/session/session-bundle-paths.ts";
-import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { workerTranscriptLocation } from "../../kernel/session/worker-storage-identity.ts";
 import {
 	encodeWorkerTranscriptReference,
@@ -35,6 +34,7 @@ import { interfaceText } from "../language/interface-text.ts";
 import { withFileLockSync, writeFileAtomicSync } from "../util/atomic-file.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
 import { ensureBotHome } from "./bot-home.ts";
+import { readTranscriptMessages } from "./bot-remote-view.ts";
 
 /** Runs one bot's index keeps, the newest. */
 export const MAX_HISTORY_RUNS = 200;
@@ -526,7 +526,7 @@ export class BotHistory {
 	/** The run transcript's messages, read without opening it for writing; undefined when it cannot be read. */
 	private runMessages(sessionFile: string, agentDir: string): AgentMessage[] | undefined {
 		try {
-			return SessionManager.openReadOnly(sessionFile, agentDir).buildSessionContext().messages;
+			return readTranscriptMessages(sessionFile, agentDir);
 		} catch (error) {
 			this.ports.warn(
 				interfaceText().botTeam.botHistoryRunUnreadable(error instanceof Error ? error.message : String(error)),
