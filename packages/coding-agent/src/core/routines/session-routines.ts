@@ -1,8 +1,9 @@
 /**
  * The routine runtime one session holds, by the scope its role gives it (`routine-holder.ts`): built once the session's
  * store is loaded, started with the session's inputs, stopped and joined when the session disposes. A root session holds
- * its own routines and the bot and team routines. A bot's own session holds only the watches it arms, once its host marks
- * it so (`hostOwnWatches`, before it starts the session's inputs). Any other child session holds none.
+ * its own routines and the bot and team routines. A bot's own session (built with `holdsOwnWatches`) holds only the
+ * watches it arms. Any other child session holds none. The scope is fixed when the session is built, so the tool surface
+ * built with it offers the session's routine tool from the start.
  */
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import type { WorkerTerminalHandoffRecord } from "../delegation/worker-notification-coordinator.ts";
@@ -15,8 +16,8 @@ import type { RoutineTickResult } from "./routine-scheduler-controller.ts";
 import { parseRoutineToolInput, type RoutineToolFields, type RoutineToolView } from "./routine-tool.ts";
 
 export interface SessionRoutinesPorts {
-	/** Whether the session is a root session (it holds its own routines); a child session holds only what its host marks. */
-	isRoot(): boolean;
+	/** What the session's runtime holds, fixed when the session was built; undefined where it holds nothing. */
+	scope(): RoutineScope | undefined;
 	isDisposed(): boolean;
 	/** The session's store, loaded on first use; loading it builds the runtime through {@link SessionRoutines.ensure}. */
 	store(): PersistentBotTeamStore;
@@ -27,7 +28,6 @@ export class SessionRoutines {
 	private readonly ports: SessionRoutinesPorts;
 	private runtime: RoutineRuntime | undefined;
 	private started = false;
-	private ownWatches = false;
 
 	constructor(ports: SessionRoutinesPorts) {
 		this.ports = ports;
@@ -35,13 +35,7 @@ export class SessionRoutines {
 
 	/** What the session's runtime holds; undefined where it holds nothing (a worker or another child session). */
 	scope(): RoutineScope | undefined {
-		if (this.ports.isRoot()) return "session";
-		return this.ownWatches ? "own-watches" : undefined;
-	}
-
-	/** The session is a bot's own session: its runtime holds the watches it arms. Its host calls this before the inputs start. */
-	hostOwnWatches(): void {
-		this.ownWatches = true;
+		return this.ports.scope();
 	}
 
 	/** The built runtime; undefined until the store is loaded, or where the session holds no routines. */
@@ -78,10 +72,7 @@ export class SessionRoutines {
 		runtime.watches.start();
 	}
 
-	/**
-	 * The runtime over the session's store, loading the store and building the runtime first: a bot's own session loads its
-	 * store before its host marks it, so its runtime is built here, not when the store loads.
-	 */
+	/** The runtime over the session's store, loading the store (which builds the runtime) first. */
 	private loaded(): RoutineRuntime | undefined {
 		this.ensure(this.ports.store());
 		return this.runtime;

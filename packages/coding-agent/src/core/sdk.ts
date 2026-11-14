@@ -148,6 +148,8 @@ export interface CreateAgentSessionOptions {
 	isExplicitThinking?: boolean;
 	/** True when this session is a spawned subagent/child — gates durable memory writes. */
 	isChildSession?: boolean;
+	/** A child session that is a bot's own session and holds the watches it arms (see `AgentSessionConfig`). */
+	holdsOwnWatches?: boolean;
 	/** The role of the session's lifetime lease; default `session`. The bot daemon's phone session holds `channel-host`. */
 	bundleLeaseRole?: SessionLeaseRole;
 	/**
@@ -517,8 +519,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				: settingsManager.getDefaultThinkingLevel();
 		}
 
-		// Resolve preference, model metadata, harness fallback, and capability clamping through the
-		// same contract used by CLI startup and isolated lanes.
+		// Preference, metadata, harness fallback and capability clamping resolve as CLI startup and lanes resolve them.
 		if (!model) {
 			thinkingLevel = "off";
 		} else {
@@ -647,8 +648,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				const requestApiKey = options?.apiKey;
 				const providerRetrySettings = settingsManager.getProviderRetrySettings();
 				const httpIdleTimeoutMs = settingsManager.getHttpIdleTimeoutMs();
-				// SDKs treat timeout=0 as 0ms (immediate timeout), not "no timeout".
-				// Use max int32 to effectively disable the timeout.
+				// SDKs read timeout=0 as an immediate timeout, not "no timeout": max int32 disables it.
 				const effectiveTimeoutMs = httpIdleTimeoutMs === 0 ? 2147483647 : httpIdleTimeoutMs;
 				const timeoutMs = options?.timeoutMs ?? providerRetrySettings.timeoutMs ?? effectiveTimeoutMs;
 				const websocketConnectTimeoutMs =
@@ -900,6 +900,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					? true
 					: (options.isExplicitThinking ?? options.thinkingLevel !== undefined),
 				isChildSession,
+				holdsOwnWatches: options.holdsOwnWatches,
 				orchestrationProfile,
 				privatePathScope: options.privatePathScope,
 				agentIdentity: options.agentIdentity,
@@ -1116,8 +1117,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					getOwnerRules,
 				});
 
-				// Synthesized capability artifacts are agent runtime state keyed to the session that built
-				// them, so a synthesis never shows up as a project change.
+				// Synthesized capability artifacts are runtime state of the session that built them, never a project change.
 				const capabilityArtifactRoot = capabilityArtifactsDir(agentDir, sessionManager.getSessionId());
 
 				const capabilityBuilder = new RealCapabilityBuilder({

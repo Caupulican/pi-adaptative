@@ -21,6 +21,7 @@ import type { ProactivityControllerDeps } from "./proactivity/proactivity-contro
 import type { LaneModelResolverDeps } from "./research/lane-model-resolver.ts";
 import type { ModelFitnessControllerDeps } from "./research/model-fitness-controller.ts";
 import type { ResearchLaneControllerDeps } from "./research/research-lane-controller.ts";
+import type { RoutineScope } from "./routines/routine-holder.ts";
 import type { SessionSemanticPlaneController } from "./session-semantic-plane-controller.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { NestedCallAdmitter } from "./tools/nested-tool-call.ts";
@@ -75,7 +76,8 @@ export interface BackgroundLaneControllerDeps
 		SessionSemanticPlaneController,
 		"recordingSemanticEngine" | "semanticDecisionEngine" | "configured" | "enabled" | "source"
 	>;
-	canRunRoutines?(): boolean;
+	/** What the session's routine runtime holds (`routine-holder.ts`): undefined for a child session that holds none. */
+	routineScope(): RoutineScope | undefined;
 	getToolInvocationKey(callId: string, toolName: string): string;
 	/** The session gate's admission of a sub-call of an admitted call: a routine save admits its watch's check through it. */
 	admitNestedToolCall: NestedCallAdmitter;

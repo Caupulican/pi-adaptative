@@ -471,6 +471,8 @@ export class BotSessionHost {
 					model,
 					...(isOrchestrationThinkingLevel(profile.thinkingLevel) ? { thinkingLevel: profile.thinkingLevel } : {}),
 					isChildSession: true,
+					// It runs the watches it arms and takes their wakes as parent inputs (idle starts a turn, running steers).
+					holdsOwnWatches: true,
 					// Every run is admitted at its start, whatever opened it: a wake's turn is held to the owner's rules too.
 					admitRun: () => this.admit(agentId, session?.model),
 					// System One as the main session runs it; its evidence stays in the bot's home.
@@ -558,8 +560,6 @@ export class BotSessionHost {
 				unsubscribeEvents();
 				supervision.stop();
 			};
-			// The session runs the watches it arms and takes their wakes as parent inputs (idle starts a turn, running steers).
-			session.backgroundLanes.hostOwnWatches();
 			session.startBackgroundInputs();
 			this.entries.set(agentId, entry);
 			this.publishState(entry);

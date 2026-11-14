@@ -195,6 +195,8 @@ export interface AgentSessionConfig {
 	isExplicitThinking?: boolean;
 	/** Child sessions receive the worker UAC and write ceilings. */
 	isChildSession?: boolean;
+	/** A child session that is a bot's own session: its routine runtime holds the watches it arms (`routine-holder.ts`). */
+	holdsOwnWatches?: boolean;
 	/** Alternate base tool instances for embedded/custom runtimes. */
 	baseToolsOverride?: Record<string, AgentTool>;
 	/** Mutable bridge used by the agent loop to reach the current extension generation. */

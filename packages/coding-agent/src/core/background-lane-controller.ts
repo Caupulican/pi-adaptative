@@ -414,7 +414,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			warn: (message) => this._safeWarn(message),
 		});
 		this._routines = new SessionRoutines({
-			isRoot: () => deps.canRunRoutines?.() !== false,
+			scope: () => deps.routineScope(),
 			isDisposed: () => deps.isDisposed(),
 			store: () => this.getBotTeamStore(),
 			assemble: (store, scope) => this._routineAssembly.assemble(store, scope),
@@ -1499,11 +1499,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			this._routines.ensure(this._botTeamStore);
 		}
 		return this._botTeamStore;
-	}
-
-	/** The session is a bot's own: its routines are the watches it arms. Its host marks it before the inputs start. */
-	hostOwnWatches(): void {
-		this._routines.hostOwnWatches();
 	}
 
 	/** What the session's routine runtime holds (`routines/routine-holder.ts`); undefined where it holds none. */

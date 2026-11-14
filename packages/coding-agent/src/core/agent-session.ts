@@ -1262,7 +1262,7 @@ export class AgentSession {
 				}
 				return this._terminalHandoffs.notifyWorkers(records);
 			},
-			canRunRoutines: () => !this._isChildSession,
+			routineScope: () => (!this._isChildSession ? "session" : config.holdsOwnWatches ? "own-watches" : undefined),
 			deliverParentInput: (input) => this._durableCustomMessageTurns.deliverParentInput(input),
 			sendUserMessage: (text, options) => this.sendUserMessage(text, options),
 			ownerChannel: this.ownerChannel,
