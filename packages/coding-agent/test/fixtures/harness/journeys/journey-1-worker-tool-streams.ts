@@ -7,7 +7,7 @@ import { routeShellContract } from "../../../../src/core/tools/shell-contract-ro
 import { getWorkRoot, getWorkTenantDir } from "../../../../src/utils/work-directory.ts";
 import { calls, type ScriptedRequest } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
-import { dynamicCalls, ICM_INTAKE_JUDGMENTS, refusalDiagnostic } from "./shared.ts";
+import { dynamicCalls, ICM_INTAKE_JUDGMENTS, NO_DELIVERY_CLAIMS, refusalDiagnostic } from "./shared.ts";
 
 const { optional_tool_0: _workerNoOptionalTool, ...WORKER_INTAKE_JUDGMENTS } = ICM_INTAKE_JUDGMENTS;
 
@@ -17,15 +17,6 @@ const OPERATION_PROCEED_JUDGMENTS = {
 	touches_outside_task: { kind: "noul", probability: 0.02 },
 	acquires_external_code: { kind: "noul", probability: 0.02 },
 	request_authorizes: { kind: "noul", probability: 0.02 },
-} as const;
-
-const NO_DELIVERY_CLAIMS = {
-	states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-	states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-	states_committed: { kind: "noul", probability: 0.02 },
-	states_pushed: { kind: "noul", probability: 0.02 },
-	states_published: { kind: "noul", probability: 0.02 },
-	states_files_changed: { kind: "noul", probability: 0.02 },
 } as const;
 
 const SPILL_COMMAND = "echo l6-spill";

@@ -79,6 +79,7 @@ import {
 	lastToolResultDetails,
 	latestBatchResults,
 	legendAliasFor,
+	NO_DELIVERY_CLAIMS,
 	ORIGINAL_LIMITS,
 	ownerInputCapture,
 	REFLECTION_CHECKPOINT_MARKER,
@@ -2010,12 +2011,7 @@ export async function runJourney1OwnerLifecyclePhase(world: HarnessWorld): Promi
 		touches_outside_task: { kind: "noul", probability: 0.02 },
 		acquires_external_code: { kind: "noul", probability: 0.02 },
 		request_authorizes: { kind: "noul", probability: 0.02 },
-		states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-		states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-		states_committed: { kind: "noul", probability: 0.02 },
-		states_pushed: { kind: "noul", probability: 0.02 },
-		states_published: { kind: "noul", probability: 0.02 },
-		states_files_changed: { kind: "noul", probability: 0.02 },
+		...NO_DELIVERY_CLAIMS,
 	} as const;
 	// A new session's first prompt asks the task questions as well, so the cleanup turns carry the full set.
 	const cleanupJudgments = {

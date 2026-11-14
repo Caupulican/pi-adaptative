@@ -1,17 +1,10 @@
 import { expect } from "vitest";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
+import { NO_DELIVERY_CLAIMS } from "./shared.ts";
 
 /** Lifecycle-created callbacks use their settled originating runtime, including terminal delivery verdicts. */
 export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld): Promise<void> {
-	const noDeliveryClaims = {
-		states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-		states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-		states_committed: { kind: "noul", probability: 0.02 },
-		states_pushed: { kind: "noul", probability: 0.02 },
-		states_published: { kind: "noul", probability: 0.02 },
-		states_files_changed: { kind: "noul", probability: 0.02 },
-	} as const;
 	for (const outcome of ["startup", "committed", "rolled-back"] as const) {
 		const label = `h2-callback-${outcome}`;
 		const words = `Answer the callback input from ${label}.`;
@@ -148,7 +141,7 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 			)
 				customSettled.release();
 		});
-		world.systemOne.enterPhase(`${label}-baseline`, outcome === "committed" ? noDeliveryClaims : {});
+		world.systemOne.enterPhase(`${label}-baseline`, outcome === "committed" ? NO_DELIVERY_CLAIMS : {});
 		world.provider.enqueue("root", {
 			name: `${label}-baseline`,
 			reply: { content: [{ type: "text", text: `The ${label} baseline is ready.` }] },
@@ -230,7 +223,7 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 			outcome === "rolled-back"
 				? {}
 				: {
-						...(outcome === "committed" ? noDeliveryClaims : {}),
+						...(outcome === "committed" ? NO_DELIVERY_CLAIMS : {}),
 						// The prior text-only owner greeting is screened aside at this turn's backlog boundary.
 						carries_0: { kind: "noul", probability: 0.97 },
 						// Extension input is not the owner's: it asks no owner-policy question (one asked here is unscripted and
@@ -336,7 +329,7 @@ export async function runRuntimeCallbackLifetimeInteraction(world: HarnessWorld)
 			const ownerResponse = `${label}: the waiting owner received a response.`;
 			const readBeforeSecondReload = owner.session.getToolDefinition("read");
 			const requestsBeforeSecondReload = world.provider.reached.length;
-			world.systemOne.enterPhase(`${label}-second-reload`, noDeliveryClaims);
+			world.systemOne.enterPhase(`${label}-second-reload`, NO_DELIVERY_CLAIMS);
 			world.provider.enqueue("root", {
 				name: `${label}-second-reload-answer`,
 				check: (request) => {

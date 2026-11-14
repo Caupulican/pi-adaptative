@@ -41,6 +41,7 @@ import {
 	failureText,
 	ICM_INTAKE_JUDGMENTS,
 	latestBatchResults,
+	NO_DELIVERY_CLAIMS,
 	requestTexts,
 } from "./shared.ts";
 
@@ -2384,12 +2385,7 @@ export async function runJourney1WriteReservationsPhase(world: HarnessWorld): Pr
 	});
 	const vuJudgments = {
 		...e4Judgments,
-		states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-		states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-		states_committed: { kind: "noul", probability: 0.02 },
-		states_pushed: { kind: "noul", probability: 0.02 },
-		states_published: { kind: "noul", probability: 0.02 },
-		states_files_changed: { kind: "noul", probability: 0.02 },
+		...NO_DELIVERY_CLAIMS,
 		leaves_machine: { kind: "noul", probability: 0.02 },
 		cannot_be_undone: { kind: "noul", probability: 0.02 },
 		touches_outside_task: { kind: "noul", probability: 0.02 },

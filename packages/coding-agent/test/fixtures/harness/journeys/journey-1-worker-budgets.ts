@@ -20,7 +20,13 @@ import { runRuntimeGenerationReloadInteraction } from "./journey-1-runtime-gener
  * The library's CJS export object is the one production's default import receives, so its functions
  * are rebound in place rather than through an ESM module mock.
  */
-import { ICM_INTAKE_JUDGMENTS, LIMITS_PATH, latestBatchResults, refusalDiagnostic } from "./shared.ts";
+import {
+	ICM_INTAKE_JUDGMENTS,
+	LIMITS_PATH,
+	latestBatchResults,
+	NO_DELIVERY_CLAIMS,
+	refusalDiagnostic,
+} from "./shared.ts";
 
 const e4Judgments = ICM_INTAKE_JUDGMENTS;
 
@@ -744,12 +750,7 @@ export async function runJourney1WorkerBudgetsPhase(world: HarnessWorld): Promis
 	});
 	world.systemOne.enterPhase("hb-held", {
 		...e4Judgments,
-		states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-		states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-		states_committed: { kind: "noul", probability: 0.02 },
-		states_pushed: { kind: "noul", probability: 0.02 },
-		states_published: { kind: "noul", probability: 0.02 },
-		states_files_changed: { kind: "noul", probability: 0.02 },
+		...NO_DELIVERY_CLAIMS,
 	});
 	let hbOutcome: unknown;
 	const hbPrompt = hbSession.prompt("Run the held read-only check.").catch((error: unknown) => error);

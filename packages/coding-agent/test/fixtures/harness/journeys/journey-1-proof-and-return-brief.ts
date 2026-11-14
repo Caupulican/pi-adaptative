@@ -16,7 +16,7 @@ import { TRANSIENT_RECORD_SUPERSEDING_NOTE } from "../../../../src/kernel/index.
 import { handleQuizCommand } from "../../../../src/modes/interactive/quiz-commands.ts";
 import { calls, createBarrier, text } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
-import { ICM_INTAKE_JUDGMENTS, latestBatchResults, requestTexts } from "./shared.ts";
+import { ICM_INTAKE_JUDGMENTS, latestBatchResults, NO_DELIVERY_CLAIMS, requestTexts } from "./shared.ts";
 
 const OPERATION_PROCEED_JUDGMENTS = {
 	leaves_machine: { kind: "noul", probability: 0.02 },
@@ -24,15 +24,6 @@ const OPERATION_PROCEED_JUDGMENTS = {
 	touches_outside_task: { kind: "noul", probability: 0.02 },
 	acquires_external_code: { kind: "noul", probability: 0.02 },
 	request_authorizes: { kind: "noul", probability: 0.02 },
-} as const;
-
-const NO_DELIVERY_CLAIMS = {
-	states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-	states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-	states_committed: { kind: "noul", probability: 0.02 },
-	states_pushed: { kind: "noul", probability: 0.02 },
-	states_published: { kind: "noul", probability: 0.02 },
-	states_files_changed: { kind: "noul", probability: 0.02 },
 } as const;
 
 const TOKEN_VERIFY_REL = "src/auth/token-verify.ts";

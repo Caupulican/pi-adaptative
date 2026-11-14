@@ -5,7 +5,7 @@ import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { runManagedReloadRecoveryInteraction } from "./journey-1-managed-reload.ts";
 import { runQueuedReloadInteraction } from "./journey-1-queued-reload.ts";
 import { runRuntimeCallbackLifetimeInteraction } from "./journey-1-runtime-callbacks.ts";
-import { ICM_INTAKE_JUDGMENTS } from "./shared.ts";
+import { ICM_INTAKE_JUDGMENTS, NO_DELIVERY_CLAIMS } from "./shared.ts";
 
 /** Extends E4 through the real loader, extension lifecycle, owner ingress, provider and durable branch. */
 export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld): Promise<void> {
@@ -121,16 +121,7 @@ export async function runRuntimeGenerationReloadInteraction(world: HarnessWorld)
 			// The second owner prompt settles the first text-only turn's delivered words.
 			carries_0: { kind: "noul", probability: 0.02 },
 			// The runtime-disposition label reaches claim screening; it claims no git or verification result.
-			...(outcome === "committed"
-				? {
-						states_tests_pass: { kind: "choice" as const, choice: "no_current_success", confidence: 0.97 },
-						states_checks_pass: { kind: "choice" as const, choice: "no_current_success", confidence: 0.97 },
-						states_committed: { kind: "noul" as const, probability: 0.02 },
-						states_pushed: { kind: "noul" as const, probability: 0.02 },
-						states_published: { kind: "noul" as const, probability: 0.02 },
-						states_files_changed: { kind: "noul" as const, probability: 0.02 },
-					}
-				: {}),
+			...(outcome === "committed" ? NO_DELIVERY_CLAIMS : {}),
 		});
 		world.provider.enqueue("root", {
 			name: `${label}-baseline`,

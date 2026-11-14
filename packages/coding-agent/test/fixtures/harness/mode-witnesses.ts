@@ -30,6 +30,7 @@ import { SIGNAL_SHUTDOWN_DEADLINE_MS, SignalLifecycle } from "../../../src/modes
 import { runPrintMode } from "../../../src/modes/print-mode.ts";
 import { initTheme, stopThemeWatcher } from "../../../src/presentation/theme/theme.ts";
 import { trackDetachedChild, untrackDetachedChild } from "../../../src/utils/shell.ts";
+import { NO_DELIVERY_CLAIMS } from "./journeys/shared.ts";
 import {
 	type Barrier,
 	connectError,
@@ -2943,22 +2944,14 @@ async function verifyAccountPreflightAbort(world: HarnessWorld, agentDir: string
 			world.provider.enqueue("worker-a", text("account-preflight-control", reply));
 		}
 		const preflightResults: boolean[] = [];
-		const claimJudgments = {
-			states_tests_pass: { kind: "choice" as const, choice: "no_current_success", confidence: 0.97 },
-			states_checks_pass: { kind: "choice" as const, choice: "no_current_success", confidence: 0.97 },
-			states_committed: { kind: "noul" as const, probability: 0.02 },
-			states_pushed: { kind: "noul" as const, probability: 0.02 },
-			states_published: { kind: "noul" as const, probability: 0.02 },
-			states_files_changed: { kind: "noul" as const, probability: 0.02 },
-		};
 		const claimPhase = `mode-account-preflight-${closeFirst ? "closed" : "control"}`;
 		const claimRequestMark = world.systemOne.decoded.length;
 		const controlPrompt = "Run the account preflight control.";
-		world.systemOne.enterPhase(claimPhase, closeFirst ? {} : claimJudgments, {
+		world.systemOne.enterPhase(claimPhase, closeFirst ? {} : NO_DELIVERY_CLAIMS, {
 			expect: ({ state, questions }) => {
 				expect(closeFirst, "the closed preflight publishes no answer to judge").toBe(false);
 				expect(Object.keys(questions).sort(), "the live preflight reaches the real claim question pack").toEqual(
-					Object.keys(claimJudgments).sort(),
+					Object.keys(NO_DELIVERY_CLAIMS).sort(),
 				);
 				const ownerEntries = created.sessionManager
 					.getBranch()

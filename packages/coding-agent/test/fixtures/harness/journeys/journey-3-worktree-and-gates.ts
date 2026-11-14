@@ -61,6 +61,7 @@ import {
 	legendLinesOf,
 	legendPath,
 	matchedSubmitReceipt,
+	NO_DELIVERY_CLAIMS,
 	OWNER_DRAFT_DIRTY,
 	requirementIdOf,
 	toolOutcomes,
@@ -596,15 +597,6 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 	let lateLane: string | undefined;
 	let lateLaneBefore: string | undefined;
 	let lateRepairTaskId: string | undefined;
-	// Claim-delivery judgments: System One asks for these only while a worker's claim is delivered, so only late-attempt declares them.
-	const lateClaimJudgments = {
-		states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-		states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-		states_committed: { kind: "noul", probability: 0.02 },
-		states_pushed: { kind: "noul", probability: 0.02 },
-		states_published: { kind: "noul", probability: 0.02 },
-		states_files_changed: { kind: "noul", probability: 0.02 },
-	} as const;
 	const lateJudgments = {
 		changes_model_pools: { kind: "noul", probability: 0.02 },
 		local_commits_only: { kind: "noul", probability: 0.02 },
@@ -631,7 +623,8 @@ export async function runJourney3WorktreeAndGatesPhase(world: HarnessWorld): Pro
 		"late-attempt",
 		{
 			...lateJudgments,
-			...lateClaimJudgments,
+			// Claim-delivery judgments: System One asks for these only while a worker's claim is delivered, so only late-attempt declares them.
+			...NO_DELIVERY_CLAIMS,
 		},
 		{ expect: ownerWords("Start a late worker on a third lane.") },
 	);
