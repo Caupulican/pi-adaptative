@@ -89,15 +89,31 @@ function reachesNetwork(toolNames: readonly string[], confinement: SessionConfin
 }
 
 /**
+ * The narrower capabilities a wider one covers: running tests is running a process, reading a worktree is reading files,
+ * querying memory is less than changing it. A clause alternative that is not narrower than its primary is a different
+ * authority (`service.mcp` beside `network.http`, `worktree.mutate` beside `filesystem.write`).
+ */
+const NARROWER_ALTERNATIVES: Partial<Record<HarnessCapability, readonly HarnessCapability[]>> = {
+	"process.exec": ["tests.execute"],
+	"filesystem.read": ["worktree.read"],
+	"memory.mutate": ["memory.query"],
+};
+
+/**
  * The capabilities a session without an envelope holds: for each clause of each held tool, the clause's primary capability
  * (its first alternative, the one the tool is classified by: `fetch` holds `network.http`, not `service.mcp`; `edit`
- * holds `filesystem.write`, not `worktree.mutate`; the shell holds `process.exec`, not `tests.execute`), and the network
- * its commands reach. An alternative the session could satisfy a clause with is not one it holds.
+ * holds `filesystem.write`, not `worktree.mutate`) with the clause's alternatives narrower than it (the shell holds
+ * `process.exec` and `tests.execute`), and the network its commands reach. A wider or different alternative the session
+ * could satisfy a clause with is not one it holds.
  */
 function heldCapabilities(toolNames: readonly string[], network: boolean): HarnessCapability[] {
 	const held = new Set<HarnessCapability>(
 		toolNames.flatMap((name) =>
-			(getToolCapabilityPolicy(name)?.capabilityClauses ?? []).flatMap((clause) => clause.slice(0, 1)),
+			(getToolCapabilityPolicy(name)?.capabilityClauses ?? []).flatMap(([primary, ...alternatives]) =>
+				primary === undefined
+					? []
+					: [primary, ...alternatives.filter((entry) => NARROWER_ALTERNATIVES[primary]?.includes(entry))],
+			),
 		),
 	);
 	if (network) held.add("network.http");
