@@ -1707,6 +1707,7 @@ export class AgentSession {
 			timers: config.timers,
 			chatTurns: () => this._memory.continuousChatHost()?.turns,
 			applyFailoverModel: (failed, hop) => this._modelAccess.applyFailoverModel(failed, hop),
+			isModelPinned: () => this._modelAccess.pinned,
 			resolveFallbackModel: (failed) =>
 				this._modelRouter.resolveQuotaFallbackModel(failed, {
 					hasImages: false,
@@ -3598,9 +3599,8 @@ export class AgentSession {
 		// settlement; the outer tracker is never extended after finish captures its work.
 		trackRequired(async () => {
 			await humanInputPreparation;
-			if (this._runtimeBuilder.hasPendingMutation) {
+			if (this._runtimeBuilder.hasPendingMutation)
 				await this._runtimeBuilder.settleMutations((event) => this._emit(event), this._runtimeMutationWaitClock);
-			}
 			await this._durableCustomMessageTurns.closeParentInputsBefore(() => this._disposeRuntimeDependencies());
 		});
 		void finish();

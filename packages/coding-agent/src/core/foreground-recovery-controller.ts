@@ -1,4 +1,4 @@
-import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
+import type { AssistantMessage } from "@caupulican/pi-ai";
 import { isContextOverflow } from "@caupulican/pi-ai/overflow";
 import { type Agent, AgentBusyError } from "../kernel/agent.ts";
 import {
@@ -13,6 +13,7 @@ import {
 import type { SessionEntry } from "../kernel/session/session-entries.ts";
 import type { AgentEvent, AgentMessage } from "../kernel/types.ts";
 import { RunToolManifests } from "./autonomy-status/tool-manifest.ts";
+import type { BillingFailoverControllerDeps } from "./billing-failover-controller.ts";
 import { BillingFailoverController, ExhaustedProviderRegistry } from "./billing-failover-controller.ts";
 import type { FailureCorpusRecorder } from "./failure-corpus.ts";
 import type { IcmTurnCoordinator, IcmTurnHandle } from "./memory/continuous-chat-turn-coordinator.ts";
@@ -104,7 +105,9 @@ export interface ForegroundRecoveryResourceSnapshot {
 	readonly retrying: boolean;
 }
 
-export interface ForegroundRecoveryControllerDeps {
+/** The model moves of a quota failure (see `BillingFailoverControllerDeps`). */
+export interface ForegroundRecoveryControllerDeps
+	extends Pick<BillingFailoverControllerDeps, "applyFailoverModel" | "resolveFallbackModel" | "isModelPinned"> {
 	agent: Agent;
 	runtimeAdmission: RuntimeGenerationAdmission;
 	/**
@@ -115,10 +118,6 @@ export interface ForegroundRecoveryControllerDeps {
 	timers?: TimerSource;
 	/** The ICM chat's turns, undefined while no chat runs. Every provider run begins one, as its own, and ends it. */
 	chatTurns?(): Pick<IcmTurnCoordinator, "begin" | "end"> | undefined;
-	/** See `BillingFailoverControllerDeps.applyFailoverModel`. */
-	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): Model<Api> | undefined;
-	/** See `BillingFailoverControllerDeps.resolveFallbackModel`. */
-	resolveFallbackModel?(failed: Model<Api>): Model<Api> | undefined;
 	settingsManager: ForegroundRecoveryControllerSettingsSource;
 	modelRegistry: ModelRegistry;
 	failureCorpus: FailureCorpusRecorder;
@@ -228,6 +227,7 @@ export class ForegroundRecoveryController {
 			agent: deps.agent,
 			applyFailoverModel: (failed, hop) => deps.applyFailoverModel(failed, hop),
 			resolveFallbackModel: (failed) => deps.resolveFallbackModel?.(failed),
+			isModelPinned: () => deps.isModelPinned?.() === true,
 			modelRegistry: deps.modelRegistry,
 			// On the admission gate's clock: the gate waits out a model's recorded reset on that port's alarms.
 			exhausted: new ExhaustedProviderRegistry(deps.exhaustedStoreDir, () => admissionClock.now()),

@@ -1,3 +1,5 @@
+import { interfaceText } from "./language/interface-text.ts";
+
 export type BillingClass = "subscription" | "metered";
 
 export type BillingFailoverAction =
@@ -11,6 +13,8 @@ export interface BillingFailoverInput {
 	hopResolvesWithAuth: boolean;
 	hopExhausted: boolean;
 	subscriptionHop?: boolean;
+	/** The session never leaves its model (`pinnedModel`): no other model takes its work. */
+	pinned?: boolean;
 	/**
 	 * The router's usable model for the work when there is no usable same-provider hop: the configured
 	 * tiers, strongest first, bounded by the owner's pool and policy and skipping exhausted models.
@@ -18,12 +22,11 @@ export interface BillingFailoverInput {
 	fallback?: { provider: string; modelId: string };
 }
 
-function haltNotice(provider: string, modelId: string): string {
-	return `Provider quota/limit reached for ${provider}/${modelId}: switch models (/model), wait for the limit window, or re-send to retry`;
-}
-
 export function decideBillingFailover(input: BillingFailoverInput): BillingFailoverAction {
 	const { failedModel, providerDefaultModelId } = input;
+	const notices = interfaceText().notices.billingFailover;
+	const failedRef = `${failedModel.provider}/${failedModel.id}`;
+	if (input.pinned) return { action: "halt_ask", notice: notices.haltedPinned(failedRef) };
 	const subscriptionHop = input.subscriptionHop ?? true;
 	if (
 		input.billingClass === "subscription" &&
@@ -36,7 +39,7 @@ export function decideBillingFailover(input: BillingFailoverInput): BillingFailo
 		return {
 			action: "failover",
 			to: { provider: failedModel.provider, modelId: providerDefaultModelId },
-			notice: `${failedModel.id} quota reached — switched to ${failedModel.provider}/${providerDefaultModelId}`,
+			notice: notices.switched(failedModel.id, `${failedModel.provider}/${providerDefaultModelId}`),
 		};
 	}
 	// A subscription that ran out has no spend to protect: the work moves to the router's choice. A metered
@@ -45,8 +48,8 @@ export function decideBillingFailover(input: BillingFailoverInput): BillingFailo
 		return {
 			action: "failover",
 			to: input.fallback,
-			notice: `${failedModel.id} quota reached — switched to ${input.fallback.provider}/${input.fallback.modelId}`,
+			notice: notices.switched(failedModel.id, `${input.fallback.provider}/${input.fallback.modelId}`),
 		};
 	}
-	return { action: "halt_ask", notice: haltNotice(failedModel.provider, failedModel.id) };
+	return { action: "halt_ask", notice: notices.halted(failedRef) };
 }

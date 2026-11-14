@@ -4,6 +4,7 @@ import type { Api, AssistantMessage, Model } from "@caupulican/pi-ai";
 import type { Agent } from "../kernel/agent.ts";
 import { type ClassifiedError, classifyFailure } from "../kernel/reliability/index.ts";
 import { decideBillingFailover } from "./billing-failover.ts";
+import { interfaceText } from "./language/interface-text.ts";
 import type { ModelRouterFailoverStatus } from "./model-router/status.ts";
 import { writeFileAtomicSync } from "./util/atomic-file.ts";
 
@@ -151,6 +152,8 @@ export interface BillingFailoverControllerDeps {
 	applyFailoverModel(failed: Model<Api>, hop: Model<Api>): Model<Api> | undefined;
 	/** The router's usable model for the work when there is no same-provider hop (see `BillingFailoverInput.fallback`). */
 	resolveFallbackModel?(failed: Model<Api>): Model<Api> | undefined;
+	/** The session never leaves its model (`pinnedModel`): its quota failure halts instead of moving the work. */
+	isModelPinned?(): boolean;
 	modelRegistry: BillingFailoverControllerModelSource;
 	emit(event: { type: "warning"; message: string }): void;
 	exhausted: ExhaustedProviderRegistry;
@@ -220,11 +223,13 @@ export class BillingFailoverController {
 			expiryFromRetryAfter(classified.retryAfterMs, this.deps.exhausted.now()),
 		);
 
+		const pinned = this.deps.isModelPinned?.() === true;
 		const defaultModelId = DEFAULT_MODEL_PER_PROVIDER[failedModel.provider];
 		const hop = defaultModelId ? this.deps.modelRegistry.find(failedModel.provider, defaultModelId) : undefined;
 		// Resolved after the failed model is marked exhausted, so the router never hands it back.
-		const fallback = this.deps.resolveFallbackModel?.(failedModel);
+		const fallback = pinned ? undefined : this.deps.resolveFallbackModel?.(failedModel);
 		const action = decideBillingFailover({
+			pinned,
 			failedModel: { provider: failedModel.provider, id: failedModel.id },
 			billingClass: this.deps.modelRegistry.isUsingSubscription(failedModel) ? "subscription" : "metered",
 			providerDefaultModelId: defaultModelId,
@@ -239,10 +244,13 @@ export class BillingFailoverController {
 			continuedOn = target ? this.deps.applyFailoverModel(failedModel, target) : undefined;
 		}
 		// The notice names where the work actually continues: inside a routed turn that is the turn's own
-		// replacement, not necessarily the model the decision proposed.
+		// replacement, not necessarily the model the decision proposed. A move nothing took halts the work.
+		const notices = interfaceText().notices.billingFailover;
 		const notice = continuedOn
-			? `${failedModel.id} quota reached — continuing on ${continuedOn.provider}/${continuedOn.id}`
-			: action.notice;
+			? notices.continuing(failedModel.id, `${continuedOn.provider}/${continuedOn.id}`)
+			: action.action === "failover"
+				? notices.halted(failedRef)
+				: action.notice;
 		this.lastNotice = notice;
 		this.deps.emit({ type: "warning", message: notice });
 		return continuedOn

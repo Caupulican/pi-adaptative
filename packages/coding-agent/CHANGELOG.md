@@ -19,6 +19,7 @@
 
 ### Fixed
 
+- A session pinned to its model (a bot's own session) that ran out of quota no longer reports that it "switched to" another model while it stays on its own: the failover decision now reads the pin and stops the work with a notice that the session stays on its model (wait for the limit window or re-send). A failover that no model took (a routed turn with no replacement) reports the stop instead of the switch it proposed. The quota notices are shown in the interface language (English and pt-BR)
 - A bot's watch that fired while its session was closing or its host died no longer loses its wake: a one-shot that fired stops counting as live, so nothing opened the session again to deliver it. A bot's session now stays loaded, and is opened again by a process working in its directory, while a fired watch's wake waits for it as well as while it holds a live watch.
 - Steering certificates persisted by one session are no longer dropped by another: every session (root, bot session, another process) rewrote the shared certificate file from its own store without a lock, so the last writer erased what the others had persisted since they loaded. A persist now takes the file's lock and keeps what the file holds.
 - A bot history index that exists but cannot be read no longer lets the startup cleanup remove the session directories it held: the cleanup is skipped while it stays unreadable, with a startup warning naming the bot in English and pt-BR.

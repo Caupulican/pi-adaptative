@@ -78,9 +78,18 @@ export const NOTICES = {
 	/** O aviso de cobrança de uma sessão autenticada com uma chave de assinatura. */
 	anthropicSubscriptionAuth:
 		"A autenticação por assinatura da Anthropic está ativa. O uso por harnesses de terceiros é descontado do uso extra e cobrado por token, fora dos limites do seu plano Claude. Gerencie o uso extra em https://claude.ai/settings/usage.",
-	/** O que a extensão de colaboração relata quando os próprios passos falham: o texto do erro vem em seguida. */
+	/** Uma sessão cujos comandos rodam como os de um worker fechou com alguns deles ainda rodando: foram encerrados. */
 	sessionProcessesStopped: (count: number, detail: string) =>
 		`Esta sessão fechou com ${count} processo(s) iniciado(s) pelos comandos dela ainda em execução; eles foram encerrados (${detail}). Os comandos dela não deixam nada rodando depois que ela fecha.`,
+	billingFailover: {
+		switched: (failed: string, model: string) => `${failed} atingiu a cota — trocado para ${model}`,
+		continuing: (failed: string, model: string) => `${failed} atingiu a cota — seguindo em ${model}`,
+		halted: (model: string) =>
+			`O provedor atingiu a cota/limite de ${model}: troque de modelo (/model), espere a janela do limite ou reenvie para tentar de novo`,
+		haltedPinned: (model: string) =>
+			`O provedor atingiu a cota/limite de ${model}: esta sessão fica no modelo dela; espere a janela do limite ou reenvie para tentar de novo`,
+	},
+	/** O que a extensão de colaboração relata quando os próprios passos falham: o texto do erro vem em seguida. */
 	collaboration: {
 		controlHandoffFailed: (error: string) => `Falha no handoff de controle da colaboração: ${error}`,
 		cleanupExhausted: (jobId: string, agentId: string, error: string) =>

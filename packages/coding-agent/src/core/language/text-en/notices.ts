@@ -90,10 +90,23 @@ export const NOTICES = {
 	/** The billing notice under a session signed in with a subscription key. */
 	anthropicSubscriptionAuth:
 		"Anthropic subscription auth is active. Third-party harness usage draws from extra usage and is billed per token, not your Claude plan limits. Manage extra usage at https://claude.ai/settings/usage.",
-	/** What the collaboration extension reports when its own steps fail: the error text follows. */
 	/** A session whose commands run as a worker's closed while some of them still ran: they were ended. */
 	sessionProcessesStopped: (count: number, detail: string) =>
 		`This session closed with ${count} process(es) its commands started still running; they were stopped (${detail}). Its commands leave nothing running after it closes.`,
+	/**
+	 * A model ran out of quota or credit: where the work continues, or why it stopped. `failed` is the model's id, `model`
+	 * a `provider/model` reference.
+	 */
+	billingFailover: {
+		switched: (failed: string, model: string) => `${failed} quota reached — switched to ${model}`,
+		continuing: (failed: string, model: string) => `${failed} quota reached — continuing on ${model}`,
+		halted: (model: string) =>
+			`Provider quota/limit reached for ${model}: switch models (/model), wait for the limit window, or re-send to retry`,
+		/** The session is pinned to its model, so no other model takes the work. */
+		haltedPinned: (model: string) =>
+			`Provider quota/limit reached for ${model}: this session stays on its model; wait for the limit window, or re-send to retry`,
+	},
+	/** What the collaboration extension reports when its own steps fail: the error text follows. */
 	collaboration: {
 		controlHandoffFailed: (error: string) => `Collaboration control handoff failed: ${error}`,
 		cleanupExhausted: (jobId: string, agentId: string, error: string) =>
