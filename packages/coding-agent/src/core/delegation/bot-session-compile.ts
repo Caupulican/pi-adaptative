@@ -94,14 +94,23 @@ function bindProfile(
 	if (!preset.ok) return { ok: false, skipReason: preset.reason };
 	const role = authority?.role ?? preset.resolved.profile.role;
 	const pin = resolveWorkerModelPin(policy, role, request);
+	// A refusal names the pin that refused, as a worker's admission names it.
+	const pinLabel = pin?.tier === "leader" ? "leader" : role;
 	const bound = ports.resolver().bindPreset(preset.resolved, pin?.binding);
-	if (!bound.ok) return { ok: false, skipReason: pin ? pinnedModelSkipReason(role, bound.reason) : bound.reason };
+	if (!bound.ok) return { ok: false, skipReason: pin ? pinnedModelSkipReason(pinLabel, bound.reason) : bound.reason };
 	const held = ports.resolveAuthority({
 		...(authority ? { authority } : {}),
 		base: bound.resolved,
 		...(pin ? { modelPin: pin.binding } : {}),
 	});
-	if (!held.ok) return { ok: false, skipReason: held.reason };
+	if (!held.ok)
+		return {
+			ok: false,
+			skipReason:
+				pin && held.reason.startsWith("orchestration_model_unavailable:")
+					? pinnedModelSkipReason(pinLabel, held.reason)
+					: held.reason,
+		};
 	if (!ports.isModelAllowed(held.shipment.model)) return { ok: false, skipReason: "worker_model_disallowed" };
 	return { ok: true, written: preset.resolved.profile, shipment: held.shipment };
 }
@@ -117,6 +126,8 @@ export function compileBotSessionContract(
 	const settings = ports.settings();
 	const verifier = ports.requiredVerifier(bound.shipment.profile, policy);
 	if (!verifier.ok) return verifier;
+	if (verifier.shipment && !ports.isModelAllowed(verifier.shipment.model))
+		return { ok: false, skipReason: "independent_verifier_unavailable:worker_model_disallowed" };
 	const plan = ports.plan(bound.shipment.profile, settings);
 	let shipment = bindCompiledToolSurface(
 		bound.shipment,

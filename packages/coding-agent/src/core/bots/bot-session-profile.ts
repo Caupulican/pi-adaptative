@@ -19,6 +19,7 @@ import { checkSoulText } from "../agent-identity.ts";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
 import { laneCapabilityEnvelope } from "../autonomy/lane-envelope.ts";
 import type { SessionPrivatePathScope } from "../autonomy/worker-session-private-scope.ts";
+import { WORKER_TOOL_ADAPTER_NAMES } from "../autonomy/worker-tool-adapter-registry.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts";
 import { type PersistentBotRecord, RESERVED_BOT_CREATOR_IDS } from "../delegation/persistent-bot-team-store.ts";
@@ -135,10 +136,13 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 	if (profile.requireIndependentVerification === true)
 		return { route: "worker", reason: "independent_verification_required" };
 	const planned = worker.authority.toolNames;
-	// A tool the profile names that a session does not hold (a worker's brokered tools) needs a worker's run; a tool the
-	// plan adds on its own (YOLO's surface) is not the profile's to require.
-	const named = new Set(mapToolNamesForPlatform(profile.toolNames));
-	const unheld = planned.filter((name) => named.has(name) && !sessionHolds(name));
+	// A tool the profile names that a session does not hold needs a worker's run: a worker's brokered tool the plan granted,
+	// and a worker tool adapter whether or not it is active now (an inactive one refuses the worker's start with its reason,
+	// so the route never follows which adapters the main session runs). A tool the plan adds on its own (YOLO's surface) is
+	// not the profile's to require.
+	const unheld = [...new Set(mapToolNamesForPlatform(profile.toolNames))].filter(
+		(name) => !sessionHolds(name) && (WORKER_TOOL_ADAPTER_NAMES.has(name) || planned.includes(name)),
+	);
 	if (unheld.length > 0) return { route: "worker", reason: `tools_need_worker:${unheld.join(",")}` };
 	// A limit the profile sets that only a worker's run counts (its capability gateway and attempt tree) needs that run; a
 	// session bounds its turns by cost alone.
