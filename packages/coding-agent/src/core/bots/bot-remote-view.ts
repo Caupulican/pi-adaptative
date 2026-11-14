@@ -158,6 +158,8 @@ export class BotRemoteView {
 		const host = readRemoteBotHost(this.ports.agentDir(), agentId, this.holder);
 		this.remote.set(agentId, host);
 		this.armRecheck();
+		// A host held here was killed: it publishes nothing, so this is when the bot's waits are taken up again.
+		if (cached !== undefined) this.ports.hostChanged(agentId);
 		return host;
 	}
 
@@ -194,7 +196,8 @@ export class BotRemoteView {
 
 	/**
 	 * A host that was killed publishes nothing, whatever it said last (running, queued or idle): while the view holds any
-	 * host, each is judged alive again, and one that is gone is read again from its home (another may hold the bot now).
+	 * host, each is judged alive again, and one that is gone is read again from its home (another may hold the bot now)
+	 * and announced as a host change, so its watches are taken up.
 	 */
 	private armRecheck(): void {
 		if (this.recheck !== undefined || this.stopped) return;
@@ -210,6 +213,8 @@ export class BotRemoteView {
 					this.remote.set(agentId, readRemoteBotHost(this.ports.agentDir(), agentId, this.holder));
 					changed.push(agentId);
 				}
+				// A killed host's watches are sampled by no one until a process takes the bot up (`hostChanged`).
+				for (const agentId of changed) this.ports.hostChanged(agentId);
 				if (changed.length > 0) this.ports.changed(changed);
 				this.armRecheck();
 			}, REMOTE_LIVENESS_MS);
