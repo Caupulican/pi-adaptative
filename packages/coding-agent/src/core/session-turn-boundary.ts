@@ -9,8 +9,10 @@
  * A run that ends because the model saved a self-compaction note (self_compact) is the first part of its turn: the
  * session compacts and the handoff's own run continues the same turn, so the turn holds the compaction and that run.
  * A run end the handoff will not continue (an interrupted run, a session awaiting the owner) ends the turn. A held turn
- * ends when the session settles with no handoff run started (its compaction failed or the note was released), or at
- * the next run start that is not the handoff's own.
+ * ends once the foreground is idle with no handoff checkpoint scheduled, the fact the run's end decides (it schedules
+ * the checkpoint unless the run was aborted): the run's submission ended without one, or the checkpoint finished without
+ * starting the handoff's run (its compaction failed, the note was released). It also ends at the next run start that is
+ * not the handoff's own.
  */
 
 import type { AgentSession } from "./agent-session.ts";
@@ -25,7 +27,7 @@ export interface SessionTurnObserver {
 
 /** Observes the turns of `session`; returns the unsubscribe. */
 export function observeSessionTurns(
-	session: Pick<AgentSession, "subscribe" | "getSelfCompactionView" | "nativeActivity">,
+	session: Pick<AgentSession, "subscribe" | "selfCompactionHandoff" | "nativeActivity">,
 	observer: SessionTurnObserver,
 ): () => void {
 	// An automatic retry announced its attempt: the run it starts continues the same turn.
@@ -33,6 +35,7 @@ export function observeSessionTurns(
 	// The run ended to compact the context and the self-compaction handoff continues the turn.
 	let held = false;
 	let open = false;
+	const handoff = session.selfCompactionHandoff;
 	const end = () => {
 		held = false;
 		if (!open) return;
@@ -41,7 +44,7 @@ export function observeSessionTurns(
 	};
 	const unsubscribeEvents = session.subscribe((event) => {
 		if (event.type === "agent_start") {
-			if (!retrying && !(held && session.getSelfCompactionView().handoff.hosting)) {
+			if (!retrying && !(held && handoff.state().hosting)) {
 				end();
 				open = true;
 				observer.started();
@@ -56,16 +59,31 @@ export function observeSessionTurns(
 			retrying = false;
 			const last = event.messages.findLast((message) => message.role === "assistant");
 			const interrupted = last?.role === "assistant" && isInterruptedAssistantStopReason(last.stopReason);
-			if (open && !interrupted && session.getSelfCompactionView().handoff.continues) held = true;
+			if (open && !interrupted && handoff.state().continues) held = true;
 			else end();
 		}
 	});
-	const activity = session.nativeActivity;
-	const unsubscribeActivity = activity.subscribePendingContinuation(() => {
-		if (held && activity.isSettled()) end();
-	});
+	const { foreground, subscribePendingContinuation } = session.nativeActivity;
+	const settle = () => {
+		if (held && !foreground.isBusy && !handoff.state().scheduled) end();
+	};
+	const unsubscribeHandoff = subscribePendingContinuation(settle);
+	const unsubscribeForeground = foreground.subscribeActivity(settle);
 	return () => {
 		unsubscribeEvents();
-		unsubscribeActivity();
+		unsubscribeHandoff();
+		unsubscribeForeground();
 	};
+}
+
+/**
+ * Stops the turn at a bound: its self-compaction handoff ends first (the saved note is released), then the run is
+ * aborted with `reason`, so the stop is not a pause a later run of any origin continues under a fresh budget.
+ */
+export function stopSessionTurn(
+	session: Pick<AgentSession, "abort" | "selfCompactionHandoff">,
+	reason: string,
+): Promise<void> {
+	session.selfCompactionHandoff.stop(reason);
+	return session.abort(reason);
 }

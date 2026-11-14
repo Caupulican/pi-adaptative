@@ -234,8 +234,17 @@ export function selfCompactionGuidance(
 	}
 }
 
-export const SELF_COMPACTION_GUIDANCE_CLEARED_TEXT =
-	"[self-compaction] Context is below the notice line; no self-compaction action is needed.";
+/** Why a request carries no self-compaction guidance after an earlier request did. */
+export type SelfCompactionClearedCause = "below-notice" | "usage-unknown" | "handoff" | "off" | "tool-not-offered";
+
+/** The record that replaces the last guidance, worded by why the request carries none. */
+export const SELF_COMPACTION_GUIDANCE_CLEARED_TEXTS: Readonly<Record<SelfCompactionClearedCause, string>> = {
+	"below-notice": "[self-compaction] Context is below the notice line; no self-compaction action is needed.",
+	"usage-unknown": "[self-compaction] The context's size is not known yet; no self-compaction action is needed.",
+	handoff: "[self-compaction] Your saved note is being handed off; no other self-compaction action is needed.",
+	off: "[self-compaction] Self-compaction is off; no self-compaction action is needed.",
+	"tool-not-offered": `[self-compaction] ${SELF_COMPACT_TOOL_NAME} is not offered in this request; no self-compaction action is needed.`,
+};
 
 export const SELF_COMPACTION_SUMMARY_INSTRUCTIONS =
 	"The agent wrote its own note_to_self before this compaction. The note is delivered verbatim as the next message after this summary; do not reproduce or replace it. Summarize everything else the agent needs to continue, keeping pending work pending.";

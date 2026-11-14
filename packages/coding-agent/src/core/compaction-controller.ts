@@ -40,6 +40,12 @@ import type { AgentMessage, ThinkingLevel } from "../kernel/types.ts";
 import { combineUsage } from "../kernel/usage.ts";
 import { MaintenanceUsageRetentionError, type UsageComponent } from "../kernel/usage-components.ts";
 import { formatNoModelSelectedMessage } from "./auth-guidance.ts";
+import { compactionCallOrigin } from "./compaction/compaction-spend.ts";
+import {
+	compactionCauseWords,
+	compactionFailureWords,
+	EARLY_COMPACTION_DEFERRAL_WORDS,
+} from "./compaction/compaction-words.ts";
 import {
 	type CompactionEconomicsInput,
 	type CompactionEconomicsVerdict,
@@ -183,37 +189,6 @@ export interface EarlyCompactionFeedback {
 }
 
 type CompactionLifecycleOutcome = "success" | "failure" | "cancelled" | "fallback";
-
-/** The owner's clause for a checkpoint cause (the loop's closed cause codes); the raw code stays in the harness log. */
-const COMPACTION_CAUSE_WORDS: Partial<Record<string, string>> = {
-	"auth-failed": "the summary model had no usable credentials or quota",
-	"gate-failed": "the summary failed its quality check",
-	"length-stop": "the summary ran past its length limit",
-	"input-overflow": "the history was too large for the summary model",
-	"provider-failure": "the summary model returned an error",
-	"deterministic-required": "the summary would not fit the space reserved for it",
-	"effect-not-restored": "the compaction did not free enough room",
-	"unknown-failure": "the summary failed for an unknown reason",
-	"deterministic-only": "the run was set to skip the written summary",
-	"max-llm-cycles": "the written summary was tried as many times as allowed",
-};
-
-function compactionCauseWords(cause: string): string {
-	return COMPACTION_CAUSE_WORDS[cause] ?? "the summary could not be written";
-}
-
-/** The owner's clause for a retry ladder that ended without a checkpoint; the raw reason stays in the harness log. */
-function compactionFailureWords(reason: string): string {
-	if (reason === "exhausted-compaction-cycles") return "the summary could not be made to fit after several attempts";
-	if (reason.startsWith("effect-not-restored")) return "the compaction did not free enough room";
-	return "the run could not be finished";
-}
-
-/** The owner's clause for why an early compaction waits (the economics verdict's closed reasons). */
-const EARLY_COMPACTION_DEFERRAL_WORDS: Readonly<Record<"insufficient_evidence" | "insufficient_savings", string>> = {
-	insufficient_evidence: "early compaction waits until its cost can be measured",
-	insufficient_savings: "early compaction waits because resuming costs less for now",
-};
 
 /** The one line that opens a compaction the controller admits: what triggered it and its token counts, never text. */
 function logCompactionTriggered(
@@ -845,7 +820,7 @@ export class CompactionController {
 			...(structuredRequest ? { structuredRequest } : {}),
 			...(this.deps.recordMaintenanceUsage ? { usageReceiptOwned: true as const } : {}),
 			onUsage: (component: UsageComponent) => {
-				this.deps.recordMaintenanceUsage?.(component, "compaction", origin);
+				this.deps.recordMaintenanceUsage?.(component, "compaction", compactionCallOrigin(origin, component));
 				usageComponents?.push(component);
 			},
 		};

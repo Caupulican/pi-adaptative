@@ -75,12 +75,15 @@ import { BashExecutionController } from "./bash-execution-controller.ts";
 import { type CapabilityTierPolicy, capabilityTierPolicy, resolveCapabilityTier } from "./capability-tier.ts";
 import { DEFAULT_OWNER_QUOTA_MAX_USED_PERCENT } from "./channels/channel-policy.ts";
 import type { NativePiActivityPort } from "./collaboration/native-pi-activity.ts";
+import { compactionEntryDetails } from "./compaction/compaction-entry-details.ts";
+import { recordedCompactionUsd } from "./compaction/compaction-spend.ts";
 import { RETENTION_AUDIT_CUSTOM_TYPE } from "./compaction/evidence-retention-projection.ts";
 import type { createRetentionDecisionEngine } from "./compaction/retention-decision-engine.ts";
 import {
 	createSelfCompactToolDefinition,
 	latestCachedReadTokens,
 	SelfCompactionController,
+	type SelfCompactionHandoff,
 	type SelfCompactionInfo,
 	type SelfCompactionNowOutcome,
 	type SelfCompactionView,
@@ -1575,7 +1578,8 @@ export class AgentSession {
 			estimateCurrentContextTokens: (messages) => this._pipeline.estimateCurrentContextTokens(messages),
 			buildPreDigest: () => this._buildCompactionPreDigest(),
 			getMemoryPreCompressInsight: () => this._memory.onPreCompress(),
-			decorateCompactionDetails: (details) => this._decorateCompactionDetails(details),
+			decorateCompactionDetails: (details) =>
+				compactionEntryDetails(details, this.agent.state.messages, this._selfCompaction),
 			getActiveTask: () => {
 				const goal = this.getGoalStateSnapshot();
 				return goal && isGoalExecutionActive(goal.status) ? goal.userGoal : undefined;
@@ -3106,19 +3110,6 @@ export class AgentSession {
 
 	getSkillVault(): SkillVaultController {
 		return this._skillVault;
-	}
-
-	/** Preserve active verification identities and setup-repair proof inside the compaction checkpoint. */
-	private _decorateCompactionDetails(details: unknown): unknown {
-		const snapshot = new VerificationObligationTracker(this.agent.state.messages).createSnapshotDetails();
-		const selfCompaction = this._selfCompaction.state();
-		const handoff =
-			selfCompaction.status === "pending" && selfCompaction.request
-				? { selfCompaction: { handoffId: selfCompaction.request.id } }
-				: undefined;
-		if (!snapshot && !handoff) return details;
-		const base = !details || typeof details !== "object" || Array.isArray(details) ? {} : details;
-		return { ...base, ...snapshot, ...handoff };
 	}
 
 	private _scheduleIdleWork(options: PromptOptions | undefined, allowHandoff: boolean): void {
@@ -5094,6 +5085,14 @@ export class AgentSession {
 
 	getSelfCompactionView(): SelfCompactionView {
 		return this._selfCompaction.view();
+	}
+	/** What this session's compactions recorded so far, every summary call of each (`recordedCompactionUsd`). */
+	getRecordedCompactionUsd(): number {
+		return recordedCompactionUsd(this._semanticUsage);
+	}
+	/** The saved note's handoff as a headless session's turn boundary and bounds read and stop it. */
+	get selfCompactionHandoff(): SelfCompactionHandoff {
+		return this._selfCompaction.handoff;
 	}
 	resumeSelfCompaction(): boolean {
 		return this._selfCompaction.schedule();

@@ -43,11 +43,13 @@ line from each finished turn is appended to it. It reads, and writes only when t
 commands are judged one by one, as a read-only worker's are (nothing that edits or creates a file runs, nor anything that
 reaches the network unless its profile grants `network.http`, in every execution mode). A turn is bounded by `workerDelegation.maxUsd` (and the main session's own ceiling, with its metered-only ceiling when the bot's model is metered) when one is
 set, and in time by `workerDelegation.maxWallClockMs` when that is set, as a worker's run is; what each turn spends is added
-to the main session's cost. A turn's spend counts the compactions run for it (one before its first run, one between its
-runs) with its model calls, and what the session spends between turns is charged with the next turn or when the session
-closes. The bot compacts its own context with `self_compact` as the main session does (`docs/compaction.md`): the note it
-saves ends its run, the session compacts, and the note's handoff continues the same turn, under the same spend and time
-bound. Its tool loop is supervised as a worker's is: repeated broad validation with no new change is steered back to the work, and a turn System One judges stalled or off its message is steered, redirected or stopped; the directive shows in its chat. It reads the settings the main session reads, again each time the main session changes them, and runs
+to the main session's cost. A turn's spend counts, with its model calls, the compactions that serve it: one while it runs
+or between its runs, and one just before its first run in the same submission (the threshold check before your message's
+run). A compaction after a turn's last run counts toward no turn's bound; what the session spends between turns is charged
+with the next turn or when the session closes. The bot compacts its own context with `self_compact` as the main session
+does (`docs/compaction.md`): the note it saves ends its run, the session compacts, and the note's handoff continues the
+same turn, under the same spend and time bound. A turn stopped at either bound releases the saved note, so no later run
+continues the stopped work, and a note the bot's session left saved when it closed is handed off when it loads again. Its tool loop is supervised as a worker's is: repeated broad validation with no new change is steered back to the work, and a turn System One judges stalled or off its message is steered, redirected or stopped; the directive shows in its chat. It reads the settings the main session reads, again each time the main session changes them, and runs
 System One as the main session does at each use (on or off, the same provider and connection; turning System One off or on in settings turns it off or on for a loaded bot too): your messages to it are judged as your
 messages to the main session are, the claims in its answers (files changed, a commit, a passing check) are checked
 against its own turn's tool results as the main session's are, a contradicted or unbacked claim getting the one correction

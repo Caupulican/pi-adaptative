@@ -906,6 +906,8 @@ export class BotSessionHost {
 			this.entries.set(agentId, entry);
 			this.owed.loaded(agentId);
 			this.publishState(entry);
+			// A saved note an earlier holder left (pending or compacted) is handed off now, on the bounds and relay above.
+			session.resumeSelfCompaction();
 			this.armIdle(entry);
 			harnessLog.info("bots", "a bot session was loaded", () => ({ agentId, continued: newest !== null }));
 			this.changed(agentId);

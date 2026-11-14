@@ -19,7 +19,7 @@ import {
 	resolveSelfCompactionThresholds,
 	SELF_COMPACT_TOOL_NAME,
 	SELF_COMPACTION_ABANDONED_CUSTOM_TYPE,
-	SELF_COMPACTION_GUIDANCE_CLEARED_TEXT,
+	SELF_COMPACTION_GUIDANCE_CLEARED_TEXTS,
 	SELF_COMPACTION_HANDOFF_CUSTOM_TYPE,
 	SELF_COMPACTION_MAX_ATTEMPTS,
 	SELF_COMPACTION_NOTE_MAX_CHARS,
@@ -29,6 +29,7 @@ import {
 	SELF_COMPACTION_RELEASED_CUSTOM_TYPE,
 	SELF_COMPACTION_REQUEST_CUSTOM_TYPE,
 	SELF_COMPACTION_SUMMARY_INSTRUCTIONS,
+	type SelfCompactionClearedCause,
 	type SelfCompactionLevel,
 	type SelfCompactionPromptKind,
 	type SelfCompactionRequestRecord,
@@ -124,6 +125,20 @@ export interface SelfCompactionView {
 	};
 }
 
+/**
+ * The saved note's handoff as a headless session's turn boundary and bounds read it (`observeSessionTurns`), without
+ * the full view.
+ */
+export interface SelfCompactionHandoff {
+	/** What `SelfCompactionView.handoff` reports as `continues` and `hosting`, and whether an idle checkpoint is scheduled now. */
+	state(): { readonly continues: boolean; readonly hosting: boolean; readonly scheduled: boolean };
+	/**
+	 * A bound stopped the turn: the active note is released (`SELF_COMPACTION_ABANDONED_CUSTOM_TYPE`, with `reason`), so no
+	 * later run of any origin continues the stopped work. The bound tells the owner why; this adds no warning.
+	 */
+	stop(reason: string): void;
+}
+
 export interface SelfCompactionInfo {
 	readonly view: SelfCompactionView;
 	readonly settings: SelfCompactionSettings;
@@ -175,6 +190,18 @@ export class SelfCompactionController {
 	private announcedLevel: SelfCompactionLevel = "idle";
 	private renderedGuidance: { key: string; text: string | undefined } | undefined;
 	private readonly activityListeners = new IndependentObserverSet<() => void>();
+	readonly handoff: SelfCompactionHandoff = {
+		state: () => ({
+			continues: this.continues(this.state().status),
+			hosting: this.hosting,
+			scheduled: this.running !== undefined,
+		}),
+		stop: (reason) => {
+			const state = this.state();
+			if (state.request && isActiveSelfCompactionStatus(state.status))
+				this.release(state.request, `its turn was stopped: ${reason}`);
+		},
+	};
 
 	constructor(deps: SelfCompactionControllerDeps) {
 		this.deps = deps;
@@ -249,8 +276,21 @@ export class SelfCompactionController {
 		return this.renderedGuidance.text;
 	}
 
+	/**
+	 * The record that replaces earlier guidance when this request carries none, worded by why: a routed turn or a run with
+	 * no tool route withholds the tool, a saved note's handoff is under way, or the context is below the notice line.
+	 */
 	guidanceClearedText(): string {
-		return SELF_COMPACTION_GUIDANCE_CLEARED_TEXT;
+		return SELF_COMPACTION_GUIDANCE_CLEARED_TEXTS[this.clearedCause()];
+	}
+
+	private clearedCause(): SelfCompactionClearedCause {
+		if (!this.offersTool()) return "tool-not-offered";
+		const usage = this.deps.getContextUsage();
+		const thresholds = this.thresholds(usage);
+		if (!thresholds) return "off";
+		if (isActiveSelfCompactionStatus(this.state().status)) return "handoff";
+		return selfCompactionLevel(usage?.tokens, thresholds) === "unknown" ? "usage-unknown" : "below-notice";
 	}
 
 	private announce(level: SelfCompactionLevel, blocked: string | undefined): void {
@@ -537,6 +577,14 @@ export class SelfCompactionController {
 		return undefined;
 	}
 
+	/** The details a compaction run for the pending note carries, by which the state machine finds its handoff. */
+	compactionDetails(): { readonly selfCompaction: { readonly handoffId: string } } | undefined {
+		const state = this.state();
+		return state.status === "pending" && state.request
+			? { selfCompaction: { handoffId: state.request.id } }
+			: undefined;
+	}
+
 	/** The tool's confirmation text for a saved note. */
 	savedNoteText(noteChars: number, at: string, replaced: boolean): string {
 		return `Note saved (${noteChars.toLocaleString("en-US")} chars) at ${at}${replaced ? ", replacing the earlier saved note" : ""}. Stop now: ${this.releaseText()} and your note comes back verbatim.`;
@@ -684,15 +732,20 @@ export class SelfCompactionController {
 		}
 	}
 
-	private abandon(request: SelfCompactionRequestRecord, why: string): void {
+	/** Ends the note's handoff: the abandoned entry the state machine reads, and the log line. */
+	private release(request: SelfCompactionRequestRecord, why: string): void {
 		this.deps.getSessionManager().appendCustomEntry(SELF_COMPACTION_ABANDONED_CUSTOM_TYPE, {
 			handoffId: request.id,
 			reason: why,
 		});
-		harnessLog.warn("compaction", "a self-compaction note was released without compacting", () => ({
+		harnessLog.warn("compaction", "a self-compaction note was released without its handoff", () => ({
 			noteChars: request.note.length,
 			reason: why.slice(0, 200),
 		}));
+	}
+
+	private abandon(request: SelfCompactionRequestRecord, why: string): void {
+		this.release(request, why);
 		this.deps.warn(
 			`self-compaction: the saved note (${request.note.length.toLocaleString("en-US")} chars) was released because ${why}. Tools are no longer refused; the host's own compaction still protects the context.`,
 		);
