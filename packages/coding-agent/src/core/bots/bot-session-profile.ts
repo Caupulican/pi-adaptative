@@ -182,6 +182,7 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 	});
 	const privatePathScope: SessionPrivatePathScope = {
 		readOnlyShell: plan.readOnly || plan.shellReadOnly,
+		...(worker.authority.capabilities.includes("network.http") ? { network: true } : {}),
 		confinedWrites: true,
 		credentialExposure: "deny",
 		...(worker.authority.writePaths.length > 0 ? { writeRoots: worker.authority.writePaths } : {}),

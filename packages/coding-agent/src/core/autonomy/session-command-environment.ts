@@ -62,7 +62,10 @@ export function createSessionCommandEnvironment(
 					(processes) => {
 						stopped = processes;
 					},
-					{ offline: laneRunsOffline({ readOnly, shellReadOnly: readOnly, network: false }), readOnly },
+					{
+						offline: laneRunsOffline({ readOnly, shellReadOnly: readOnly, network: scope?.network === true }),
+						readOnly,
+					},
 				)
 			: undefined;
 	const added = (cwd: string): NodeJS.ProcessEnv => (denied ? {} : (credentialEnvironment(cwd) ?? {}));

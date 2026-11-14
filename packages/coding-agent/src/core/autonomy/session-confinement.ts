@@ -28,7 +28,15 @@ export function buildSessionConfinement(
 	const deniedPaths = envelopes.privatePaths?.deniedPaths ?? [];
 	return {
 		...(scope?.readOnlyShell
-			? { readOnlyShell: sessionReadOnlyShellScope(cwd, deniedPaths, boundary, readScope?.readRoots) }
+			? {
+					readOnlyShell: sessionReadOnlyShellScope(
+						cwd,
+						deniedPaths,
+						boundary,
+						readScope?.readRoots,
+						scope.network === true,
+					),
+				}
 			: {}),
 		...(readScope ? { readScope } : {}),
 	};

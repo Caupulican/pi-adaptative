@@ -37,8 +37,8 @@ files (`AGENTS.md`), only those inside its read scope when its profile names one
 your own `SYSTEM.md` or `APPEND_SYSTEM.md`. Its memory blackboard (`<agent dir>/memory/bots/<id>.md`, the same file a bot running as
 a worker reads) opens its system prompt under its soul when the session starts; it can read the file, not edit it, and a
 line from each finished turn is appended to it. It reads, and writes only when the bot has write access, and then as a worker writes: its file tools write inside your project directory only, never to a harness resource (skills, extensions, prompts, settings, hooks, git config); a read-only bot has a shell whose
-commands are judged one by one, as a read-only worker's are (nothing that edits, creates a file or reaches the network runs,
-in every execution mode). A turn is bounded by `workerDelegation.maxUsd` (and the main session's own ceiling) when one is
+commands are judged one by one, as a read-only worker's are (nothing that edits or creates a file runs, nor anything that
+reaches the network unless its profile grants `network.http`, in every execution mode). A turn is bounded by `workerDelegation.maxUsd` (and the main session's own ceiling) when one is
 set, and what each turn spends is added to the main session's cost. Its tool loop is supervised as a worker's is: repeated broad validation with no new change is steered back to the work, and a turn System One judges stalled or off its message is steered, redirected or stopped; the directive shows in its chat. It reads the settings the main session reads, again each time the main session changes them, and runs
 System One as the main session does at each use (on or off, the same provider and connection; turning System One off or on in settings turns it off or on for a loaded bot too): your messages to it are judged as your
 messages to the main session are, the claims in its answers (files changed, a commit, a passing check) are checked

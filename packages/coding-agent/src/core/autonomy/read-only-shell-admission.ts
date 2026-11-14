@@ -24,24 +24,29 @@ export const WORKER_READ_ONLY_SHELL_VOICE: ReadOnlyShellVoice = {
 		"Read, search and inspect freely; write scratch output only under $TMPDIR (this worker's own scratch directory, removed when it ends); report any change, network access or private file that is needed to the parent instead of reaching it.",
 };
 
-const SESSION_READ_ONLY_SHELL_VOICE: ReadOnlyShellVoice = {
-	subject: "bot",
-	advice:
-		"Read, search and inspect freely; this bot creates no file and reaches no network. Report any change, network access or private file that is needed to the owner instead of reaching it.",
-};
+/** What a refusal tells a read-only session to do instead, as its network grant allows. */
+function sessionReadOnlyShellVoice(network: boolean): ReadOnlyShellVoice {
+	return {
+		subject: "bot",
+		advice: network
+			? "Read, search and inspect freely; this bot creates no file. Report any change or private file that is needed to the owner instead of reaching it."
+			: "Read, search and inspect freely; this bot creates no file and reaches no network. Report any change, network access or private file that is needed to the owner instead of reaching it.",
+	};
+}
 
 /**
- * The shell scope of a session that holds a read-only grant, built as a lane's is (`laneReadOnlyShellScope`): no network,
- * no scratch directory (it creates no file), and the session's private harness roots out of reach; a session with a read
- * scope (`readRoots`) reads nothing outside it.
+ * The shell scope of a session that holds a read-only grant, built as a lane's is (`laneReadOnlyShellScope`): the network
+ * only with the session's grant (`network`), no scratch directory (it creates no file), and the session's private harness
+ * roots out of reach; a session with a read scope (`readRoots`) reads nothing outside it.
  */
 export function sessionReadOnlyShellScope(
 	cwd: string,
 	deniedPaths: readonly string[],
 	boundary: CredentialExposureBoundary,
 	readRoots: readonly string[] | undefined,
+	network: boolean,
 ): ReadOnlyShellLaneScope {
-	const facts = { cwd, shellReadOnly: true, readOnly: true, network: false, deniedPaths };
+	const facts = { cwd, shellReadOnly: true, readOnly: true, network, deniedPaths };
 	return laneReadOnlyShellScope(facts, [], boundary, laneReadRoots(readRoots));
 }
 
@@ -79,7 +84,7 @@ export function wrapToolWithReadOnlyShell<T extends EnvelopeScopedTool>(
 				tool.name,
 				args[1],
 				executionContext?.cwd ?? cwd,
-				SESSION_READ_ONLY_SHELL_VOICE,
+				sessionReadOnlyShellVoice(lane.network),
 			);
 			if (reason === undefined) return executor.execute(...args) as ReturnType<Execute>;
 			return Promise.resolve({

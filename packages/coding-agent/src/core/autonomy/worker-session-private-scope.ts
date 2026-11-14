@@ -60,6 +60,11 @@ export interface SessionPrivatePathScope {
 	 */
 	readonly readOnlyShell?: boolean;
 	/**
+	 * The session holds `network.http`: its read-only shell may reach the network, and its commands keep git's and npm's
+	 * implicit network paths. Unset, a read-only session's commands reach no network.
+	 */
+	readonly network?: boolean;
+	/**
 	 * The session writes as a worker does: only inside its working directory (or `allowedPaths`), and never to a harness
 	 * resource (skills, extensions, prompts, settings, hooks, git config). A capability of the session, whatever process
 	 * runs it (`session-path-envelopes.ts`).
