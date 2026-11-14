@@ -59,7 +59,7 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * mailboxes, refresh the bundle's newest file time and postpone its removal by the full retention age.
  *
  * Before the bundles, the same run settles the routine results addressed to a session that was deleted (its transcript
- * gone and no process holding it) as undeliverable, since that session never opens again to settle them itself
+ * gone, no process holding it, quiet for {@link SESSION_BUNDLE_QUIET_FLOOR_MS}) as undeliverable, since that session never opens again to settle them itself
  * (`settleGoneSessionRoutineResults`); it needs the transcript index, so an index over its bound skips it too.
  *
  * Work per run is bounded by the constants below; the remainder is left for the next startup, which starts
@@ -217,6 +217,7 @@ function settleRoutineResultsOfGoneSessions(
 			protectedSessionIds: protectedIds,
 			sessionFiles: (sessionId) => transcripts.get(sessionId) ?? [],
 			nowMs,
+			quietFloorMs: SESSION_BUNDLE_QUIET_FLOOR_MS,
 		});
 	} catch (error) {
 		warn(`routine results of deleted sessions were not settled: ${describe(error)}`);

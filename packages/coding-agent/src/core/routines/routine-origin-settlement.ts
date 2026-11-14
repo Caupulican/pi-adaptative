@@ -93,6 +93,11 @@ export interface GoneSessionSettlementInput {
 	/** The session files the agent directory holds for a session id (`<timestamp>_<id>.jsonl` names). */
 	sessionFiles(sessionId: string): readonly string[];
 	readonly nowMs: number;
+	/**
+	 * A result written less than this long ago is left: a session whose process is not registered (process tracking off)
+	 * or whose first entries are not on disk yet is indistinguishable from a deleted one until it has been quiet that long.
+	 */
+	readonly quietFloorMs: number;
 }
 
 /**
@@ -110,7 +115,7 @@ function sessionGone(sessionId: string, sessionFile: string, known: readonly str
 
 /**
  * Settles, across the store, each pending result addressed to a session that can never open again (its session file gone
- * and no other file of it left, no process holding it), with the `session-file-gone` marker its own session would have
+ * and no other file of it left, no process holding it, the result quiet for `quietFloorMs`), with the `session-file-gone` marker its own session would have
  * written, so it stops holding a place in the routine journal. Returns how many were settled; a result a session settled
  * or delivered meanwhile is left to it.
  */
@@ -121,6 +126,7 @@ export function settleGoneSessionRoutineResults(input: GoneSessionSettlementInpu
 	for (const occurrence of input.store.listRoutineOccurrences({ limit: MAX_ROUTINE_OCCURRENCES })) {
 		const { sessionId, sessionFile } = occurrence.parentOrigin;
 		if (sessionFile === undefined || input.protectedSessionIds.has(sessionId)) continue;
+		if (input.nowMs - occurrence.updatedAt < input.quietFloorMs) continue;
 		const results = [occurrence.priorUncertaintyResult, occurrence.result].filter(
 			(result) => result?.delivery === "pending" && result.recipient === sessionId,
 		);
