@@ -827,7 +827,7 @@ export class BotSessionHost {
 				unsubscribe: () => {},
 				inFlight: 0,
 				recheckWhenIdle: false,
-				turns: new BotTurnAccounting(agentId, session, {
+				turns: new BotTurnAccounting(agentId, session, sessionManager, {
 					charge: (usage, report) => entry.sender.reportUsage(usage, report),
 					chargeNotRecorded: (reason) =>
 						entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(agentId, reason)),

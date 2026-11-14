@@ -90,6 +90,7 @@ export type AgentSessionEvent =
 	| { type: "user_message_withdrawn"; message: AgentMessage }
 	| { type: "compaction_start"; reason: "manual" | AutoCompactionReason }
 	| { type: "session_info_changed"; name: string | undefined }
+	/** The session's usage changed: it recorded spawned usage, or a refresh of its daily usage settled. */
 	| { type: "usage_updated" }
 	/** One proactive review ended: `raised` delivered notes, `quiet` found nothing to raise, `failed` did not complete. */
 	| { type: "proactive_review"; outcome: "raised" | "quiet" | "failed"; noteCount: number }

@@ -1,6 +1,7 @@
 /**
  * The per-turn owners of a loaded bot session, wired on the one turn boundary they all read (`observeSessionTurns`): its
- * spend and outcome (`BotTurnAccounting`), its dollar bound (`boundSessionTurnSpend`), its time bound
+ * outcome and its spend's charges (`BotTurnAccounting`, which also charges whenever the session records spawned usage and
+ * resumes from its watermark when wired), its dollar bound (`boundSessionTurnSpend`), its time bound
  * (`boundSessionTurnTime`), and the supervision of its tool loop (`BotTurnSupervision`). The session's own warnings reach
  * the owner in the bot's chat, and every event that can change what the session is doing is handed to the host
  * (`settle`). The host composes them once per loaded session and ends them all with the returned unsubscribe.
@@ -85,11 +86,17 @@ export function observeBotSessionTurns(
 		)
 			ports.settle();
 	});
-	// Its spend and outcome are counted per turn on the boundary its time bound reads.
+	// Its outcome is counted per turn on the boundary its time bound reads; its spend is charged at each turn's end and
+	// whenever the session records spawned usage, from the watermark a reopen resumes.
 	const unsubscribeTurns = observeSessionTurns(session, turns);
+	const unsubscribeUsage = session.subscribe((event) => {
+		if (event.type === "usage_updated") turns.charge();
+	});
+	turns.resume();
 	const unsubscribeSupervisedTurns = observeSessionTurns(session, supervision);
 	return () => {
 		unsubscribeTurns();
+		unsubscribeUsage();
 		unsubscribeSupervisedTurns();
 		unsubscribeSpend();
 		unsubscribeTime();

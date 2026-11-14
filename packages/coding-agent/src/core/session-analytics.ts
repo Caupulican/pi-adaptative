@@ -103,6 +103,7 @@ export interface SessionAnalyticsDeps {
 	getState(): AgentState;
 	/** All messages (agent state view) — used for context-window estimation and last-assistant text. */
 	getMessages(): AgentMessage[];
+	/** The session's usage changed: spawned usage was recorded, or a daily usage refresh settled. */
 	onDailyUsageUpdated?(): void;
 	isDisposed?(): boolean;
 	onDailyUsageError?(error: unknown): void;
@@ -445,6 +446,8 @@ export class SessionAnalytics {
 		};
 		const entryId = this.deps.getSessionManager().appendCustomEntry(SPAWNED_USAGE_CUSTOM_TYPE, report);
 		if (reportId) this.getRawSpawnedReportIds();
+		// The session's usage grew: its views redraw, and a bot's host charges what its session spent (`BotTurnAccounting`).
+		this.deps.onDailyUsageUpdated?.();
 		return entryId;
 	}
 

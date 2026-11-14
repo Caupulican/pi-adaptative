@@ -13,7 +13,8 @@ import {
 	type SpawnedUsageReport,
 } from "./usage-records.ts";
 
-function isUsage(value: unknown): value is Usage {
+/** Whether a persisted value is a whole `Usage` record: every token count and every cost field a number. */
+export function isUsage(value: unknown): value is Usage {
 	if (!value || typeof value !== "object") return false;
 	const usage = value as Partial<Usage>;
 	const cost = usage.cost as Partial<Usage["cost"]> | undefined;
