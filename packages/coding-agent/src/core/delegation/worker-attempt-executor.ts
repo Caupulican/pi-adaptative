@@ -158,12 +158,12 @@ export async function runProviderCompletionWithBackoff(args: {
 			) {
 				throw error;
 			}
-			const classified = classifyFailure({
-				message: error instanceof Error ? error.message : String(error),
-				provider: args.provider,
-			});
-			if (!classified.retryable || attempt >= WORKER_PROVIDER_RETRY_POLICY.maxAttempts) {
-				const message = error instanceof Error ? error.message : String(error);
+			const message = error instanceof Error ? error.message : String(error);
+			const classified = classifyFailure({ message, provider: args.provider });
+			// A stated delay longer than this loop waits (a recorded reset) is the attempt ladder's to wait out.
+			const statedTooLong =
+				classified.retryAfterMs !== undefined && classified.retryAfterMs > WORKER_PROVIDER_RETRY_POLICY.maxDelayMs;
+			if (!classified.retryable || statedTooLong || attempt >= WORKER_PROVIDER_RETRY_POLICY.maxAttempts) {
 				throw new BoundedCompletionFailureError("failed", "completion_error", message, error);
 			}
 			const delayMs = computeRetryDelayMs(WORKER_PROVIDER_RETRY_POLICY, attempt, {

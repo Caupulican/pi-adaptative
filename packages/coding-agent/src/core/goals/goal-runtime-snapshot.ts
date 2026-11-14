@@ -121,9 +121,9 @@ export function buildGoalRuntimeSnapshot(args: {
 	 */
 	now?: () => string;
 	/**
-	 * Current epoch milliseconds on the orchestration clock: the clock that stamps a running plan's movements. The plan
-	 * wait's remaining time is measured on it, so the same clock that stamped the plan decides its deadline. Defaults to
-	 * the system clock.
+	 * Current epoch milliseconds on the orchestration clock: the clock that stamps a running plan's movements and a
+	 * suspended worker attempt's retry. The plan wait's remaining time and a suspended goal worker's time to its retry are
+	 * measured on it, so the same clock that stamped each decides its deadline. Defaults to the system clock.
 	 */
 	planNow?: () => number;
 	/**
@@ -224,6 +224,21 @@ export function buildGoalRuntimeSnapshot(args: {
 
 	const now = (args.now ?? (() => new Date().toISOString()))();
 	const maxWorkerWaitMs = args.maxWorkerWaitMs ?? DEFAULT_GOAL_WORKER_WAIT_MS;
+	const orchestrationNow = args.planNow ?? (() => Date.now());
+	// A goal worker whose attempt is suspended until a later retry (a subscription's usage reset, a backoff) is waiting
+	// correctly: its wait counts from that retry. What is left of it is measured on the orchestration clock that stamped it.
+	let workerRetryRemainingMs: Map<string, number> | undefined;
+	if (inFlightGoalLaneIds && args.laneRecords && args.taskRuntime) {
+		for (const record of args.laneRecords) {
+			if (!inFlightGoalLaneIds.has(record.laneId) || record.attemptId === undefined) continue;
+			const attempt = args.taskRuntime.attempts[record.attemptId];
+			if (attempt?.status !== "suspended" || attempt.retry === undefined) continue;
+			const remainingMs = Date.parse(attempt.retry.notBefore) - orchestrationNow();
+			if (!(remainingMs > 0)) continue;
+			workerRetryRemainingMs ??= new Map();
+			workerRetryRemainingMs.set(record.laneId, remainingMs);
+		}
+	}
 	const inFlightToolTaskIds = new Set(workState.runningToolTaskIds);
 	const plan = args.taskRuntime ? activeRootPlan(args.taskRuntime) : undefined;
 	// A step the plan moves by itself counts: one that runs, one that is starting, and one that is ready, which the plan is
@@ -241,9 +256,7 @@ export function buildGoalRuntimeSnapshot(args: {
 	const planActivityAt =
 		plan && args.taskRuntime && planStepsInFlight > 0 ? planLastActivityAt(args.taskRuntime, plan.planId) : undefined;
 	const planRemainingMs =
-		planActivityAt === undefined
-			? undefined
-			: planActivityAt + maxWorkerWaitMs - (args.planNow ?? (() => Date.now()))();
+		planActivityAt === undefined ? undefined : planActivityAt + maxWorkerWaitMs - orchestrationNow();
 
 	// Obligations live on the branch's own transcript, the same source the goal-completion gate reads.
 	const activeVerificationIds = new VerificationObligationTracker(
@@ -258,6 +271,7 @@ export function buildGoalRuntimeSnapshot(args: {
 		inFlightGoalLaneIds,
 		now,
 		maxWorkerWaitMs,
+		...(workerRetryRemainingMs !== undefined ? { workerRetryRemainingMs } : {}),
 		laneSyncConflictLaneKeys: laneSyncConflictLaneKeys.size > 0 ? laneSyncConflictLaneKeys : undefined,
 		syncRequiredLaneKeys: syncRequiredLaneKeys.size > 0 ? syncRequiredLaneKeys : undefined,
 		...(inFlightToolTaskIds.size > 0 ? { inFlightToolTaskIds } : {}),

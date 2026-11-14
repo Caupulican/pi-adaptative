@@ -77,7 +77,10 @@ export function evaluateWorkerRetry(args: {
 		(classified.reason === "billing_or_quota" ||
 			(classified.reason === "rate_limit" && resetAfterMs > WORKER_TASK_RETRY_POLICY.maxDelayMs))
 	) {
-		return { retry: true, reason: "usage_reset", delayMs: resetAfterMs, usageReset: true };
+		// A stated reset is rounded (ChatGPT words it in whole minutes, "~0 min" just before it passes): the wait is never
+		// shorter than the ladder's longest backoff, so a reset met slightly early is not asked for again at once.
+		const delayMs = Math.max(resetAfterMs, WORKER_TASK_RETRY_POLICY.maxDelayMs);
+		return { retry: true, reason: "usage_reset", delayMs, usageReset: true };
 	}
 	const attemptsAllowed = args.maxAttempts ?? DEFAULT_WORKER_TASK_ATTEMPTS;
 	const retriesSpent = args.retriesUsed - (args.resetWaits ?? 0);
