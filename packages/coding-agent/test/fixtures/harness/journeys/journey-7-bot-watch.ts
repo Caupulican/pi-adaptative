@@ -140,9 +140,28 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	// watch makes no call, so nothing else is asked.
 	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-bot-watch", PHASE_JUDGMENTS);
 
+	// The roster's count follows the store through the home watch: it is polled, and the poll ends with the wait, whether the
+	// count reached `count` or the deadline passed.
+	const untilRosterWatches = async (count: number, label: string): Promise<void> => {
+		let ended = false;
+		try {
+			await withDeadline(
+				trace,
+				label,
+				(async () => {
+					while (!ended && rosterWatches(session, WATCHER) !== count)
+						await new Promise<void>((resolve) => setImmediate(resolve));
+				})(),
+			);
+		} finally {
+			ended = true;
+		}
+	};
+
 	const sent = await session.sendOperatorMessageToBot(WATCHER, WATCH_REQUEST);
 	await withDeadline(trace, "J7 bot watch: the bot armed its watches", armed.promise);
 	await waitForBotRosterState(world, session, WATCHER, "idle");
+	await untilRosterWatches(1, "J7 bot watch: the roster shows the armed watch");
 	const [refused, accepted] = seen.results;
 	expect(
 		{
@@ -181,20 +200,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		world.provider.whenReached(reached(TRACK.watcher, "j7-watcher-woken")),
 	);
 	await waitForBotRosterState(world, session, WATCHER, "idle");
-	// The poll ends with the wait, whether the count fell or the deadline passed.
-	let ended = false;
-	try {
-		await withDeadline(
-			trace,
-			"J7 bot watch: the spent watch left the roster",
-			(async () => {
-				while (!ended && rosterWatches(session, WATCHER) !== 0)
-					await new Promise<void>((resolve) => setImmediate(resolve));
-			})(),
-		);
-	} finally {
-		ended = true;
-	}
+	await untilRosterWatches(0, "J7 bot watch: the spent watch left the roster");
 	expect(
 		{
 			runs: occurrences().map((run) => [run.phase, run.result?.outcome, run.result?.delivery]),
