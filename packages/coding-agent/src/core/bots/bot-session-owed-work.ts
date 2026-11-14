@@ -5,10 +5,11 @@
  * continues one session.
  */
 
-import { readdirSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { ParentInputIndex } from "../../kernel/session/parent-input-ledger.ts";
 import { readSessionHeader } from "../../kernel/session/session-file-reading.ts";
+import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { readSessionSnapshot } from "./bot-remote-view.ts";
@@ -37,6 +38,55 @@ export function unrunWakes(file: string, agentDir: string): readonly string[] {
 		for (const entry of view.getBranch()) index.apply(entry, (id) => view.getEntry(id));
 		return index.pendingInputs("turn").map((input) => input.metadata.deliveryId);
 	});
+}
+
+/**
+ * What the host knows of the wakes each bot's session file holds unrun (see {@link unrunWakes}): the ids it read, read
+ * again only once the file's size or modification time changed, so an idle bot's whole transcript is not parsed at every
+ * attach and host change (the ids alone are kept, one record per bot); and the wakes a run of the session was refused at
+ * its start while holding, with the definition it ran on, so a refusal is not what opens the session again.
+ */
+export class UnrunWakeLedger {
+	private readonly reads = new Map<string, { file: string; size: number; mtimeMs: number; ids: string }>();
+	private readonly refusals = new Map<string, string>();
+
+	/** The ids of the wakes the bot's session file holds unrun, joined by spaces; empty when none. */
+	read(agentId: string, file: string, agentDir: string): string {
+		// Taken before the read: a write landing during it leaves a size or time the next ask finds changed.
+		const { size, mtimeMs } = statSync(file);
+		const known = this.reads.get(agentId);
+		if (known?.file === file && known.size === size && known.mtimeMs === mtimeMs) return known.ids;
+		const ids = unrunWakes(file, agentDir).join(" ");
+		this.reads.set(agentId, { file, size, mtimeMs, ids });
+		return ids;
+	}
+
+	/** A run of the bot's session, built on `key`, was refused at its start while `manager` held these wakes. */
+	refused(agentId: string, key: string, manager: Pick<SessionManager, "getPendingParentInputs">): void {
+		const ids = manager.getPendingParentInputs("turn").map((input) => input.metadata.deliveryId);
+		if (ids.length > 0) this.refusals.set(agentId, `${key} ${ids.join(" ")}`);
+	}
+
+	/** Whether the wakes `ids` were refused on the definition `key` already: nothing changed that lets them run. */
+	refusedAlready(agentId: string, key: string | undefined, ids: string): boolean {
+		return this.refusals.get(agentId) === `${key} ${ids}`;
+	}
+
+	/** An open of the bot's session failed: it refused no wake, so the next change asks again. */
+	openFailed(agentId: string): void {
+		this.refusals.delete(agentId);
+	}
+
+	/** The bot's session loaded: its file is read again when next asked, after the session wrote it. */
+	loaded(agentId: string): void {
+		this.reads.delete(agentId);
+	}
+
+	/** The bot was released (retired, or off the session path): nothing of it is kept. */
+	released(agentId: string): void {
+		this.reads.delete(agentId);
+		this.refusals.delete(agentId);
+	}
 }
 
 /**

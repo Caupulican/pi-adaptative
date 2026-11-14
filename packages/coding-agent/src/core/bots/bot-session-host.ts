@@ -77,7 +77,7 @@ import {
 } from "./bot-inbox.ts";
 import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { BotRemoteView, remoteHostActive } from "./bot-remote-view.ts";
-import { cancelOtherSessionsWatches, owesWatchWork, unrunWakes } from "./bot-session-owed-work.ts";
+import { cancelOtherSessionsWatches, owesWatchWork, UnrunWakeLedger } from "./bot-session-owed-work.ts";
 import {
 	type BotSessionDefinition,
 	botMayRunAsSession,
@@ -205,8 +205,8 @@ export class BotSessionHost {
 	private readonly loading = new Map<string, Promise<BotSessionEntry>>();
 	/** Bots whose owed work waits on something (no root works where it does, its session did not open), with what the owner was told. */
 	private readonly owedWorkTold = new Map<string, string>();
-	/** Bots whose session refused a run at its start while it held wakes: what defined it and those wakes (see `openIfOwed`). */
-	private readonly refusedWakes = new Map<string, string>();
+	/** The wakes the bots' session files hold unrun, and the ones a run was refused while holding (see `openIfOwed`). */
+	private readonly wakeLedger = new UnrunWakeLedger();
 	/** Sessions being closed: the next one of that bot opens once the file and the lock are free. */
 	private readonly closing = new Map<string, Promise<void>>();
 	private readonly listeners = new Set<(change: readonly string[]) => void>();
@@ -733,10 +733,7 @@ export class BotSessionHost {
 							this.admit(agentId, session?.model, definition, sender);
 						} catch (error) {
 							// The wakes it holds are refused with this run, so they are not what reopens it on the same definition.
-							const wakes = sessionManager
-								.getPendingParentInputs("turn")
-								.map((input) => input.metadata.deliveryId);
-							if (wakes.length > 0) this.refusedWakes.set(agentId, `${definition.key} ${wakes.join(" ")}`);
+							this.wakeLedger.refused(agentId, definition.key, sessionManager);
 							throw error;
 						}
 					},
@@ -844,6 +841,7 @@ export class BotSessionHost {
 			session.startBackgroundInputs();
 			this.entries.set(agentId, entry);
 			this.owedWorkTold.delete(agentId);
+			this.wakeLedger.loaded(agentId);
 			this.publishState(entry);
 			this.armIdle(entry);
 			harnessLog.info("bots", "a bot session was loaded", () => ({ agentId, continued: newest !== null }));
@@ -956,8 +954,8 @@ export class BotSessionHost {
 		const watching = owesWatchWork(this.ports.store(), saved.id, this.idleTimers().now());
 		let unrun = "";
 		try {
-			// The file, read whole, only when the store owes nothing; a file it cannot read leaves the rest of what it is owed.
-			if (!watching) unrun = unrunWakes(saved.file, agentDir).join(" ");
+			// The file, only when the store owes nothing; a file it cannot read leaves the rest of what it is owed.
+			if (!watching) unrun = this.wakeLedger.read(agentId, saved.file, agentDir);
 		} catch (error) {
 			notResumed(error);
 		}
@@ -985,11 +983,11 @@ export class BotSessionHost {
 			return;
 		}
 		// Owed only wakes its session refused at a run's start on what defines it now: not opened again until either changes.
-		const owed = !watching && waiting.length === 0 ? `${this.currentKey(record, sender)} ${unrun}` : undefined;
-		if (owed !== undefined && this.refusedWakes.get(agentId) === owed) return;
+		const onlyWakes = !watching && waiting.length === 0;
+		if (onlyWakes && this.wakeLedger.refusedAlready(agentId, this.currentKey(record, sender), unrun)) return;
 		void this.open(agentId, sender).catch((error: unknown) => {
 			// An open that failed refused no wake: the next change asks again.
-			this.refusedWakes.delete(agentId);
+			this.wakeLedger.openFailed(agentId);
 			if (!readRemoteBotHost(agentDir, agentId, this.holder)) notResumed(error);
 		});
 	}
@@ -1142,6 +1140,7 @@ export class BotSessionHost {
 	release(agentId: string): void {
 		const entry = this.entries.get(agentId);
 		if (entry && this.isBusy(entry)) throw new Error(interfaceText().botTeam.botHasActiveWork(agentId));
+		this.wakeLedger.released(agentId);
 		const sessionId = entry?.session.sessionId ?? this.view.savedSessionOf(agentId)?.id;
 		if (sessionId !== undefined) {
 			const store = this.ports.store();
