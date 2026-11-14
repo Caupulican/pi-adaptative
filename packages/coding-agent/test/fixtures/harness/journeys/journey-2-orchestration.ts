@@ -47,6 +47,7 @@ import {
 	delegateResultTexts,
 	dynamicCalls,
 	expectOwnerWords,
+	FILES_CHANGED_CLAIMS,
 	goalCompletionFacts,
 	handoffFor,
 	LIMITS_PATH,
@@ -780,14 +781,6 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		acquires_external_code: { kind: "noul", probability: 0.02 },
 		request_authorizes: { kind: "noul", probability: 0.02 },
 	} as const;
-	const completionStates = {
-		states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-		states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-		states_committed: { kind: "noul", probability: 0.02 },
-		states_pushed: { kind: "noul", probability: 0.02 },
-		states_published: { kind: "noul", probability: 0.02 },
-		states_files_changed: { kind: "noul", probability: 0.97 },
-	} as const;
 	const completionJudgments = {
 		outcomes_achieved: { kind: "noul", probability: 0.97 },
 		required_behavior_unverified: { kind: "noul", probability: 0.02 },
@@ -833,7 +826,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		{
 			...verifyJudgments,
 			...operationClasses,
-			...completionStates,
+			...FILES_CHANGED_CLAIMS,
 			// The setup answer reports the passing run as recorded evidence: a current-work success claim.
 			states_tests_pass: { kind: "choice", choice: "current_success", confidence: 0.97 },
 		},
@@ -888,7 +881,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		"verify-revision",
 		{
 			...verifyJudgments,
-			...completionStates,
+			...FILES_CHANGED_CLAIMS,
 		},
 		{ expect: ownerWords("Revise the limit to 4, run the test, and start the checks.") },
 	);
@@ -953,7 +946,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	// The other lane completed; the held lane is still running, so completion is refused by the goal-owned lane.
 	world.systemOne.enterPhase(
 		"verify-refused",
-		{ ...verifyJudgments, ...completionStates },
+		{ ...verifyJudgments, ...FILES_CHANGED_CLAIMS },
 		{ expect: ownerWords("Check whether the goal can complete now.") },
 	);
 	world.provider.enqueue(
@@ -973,7 +966,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		throw new Error("the held worker reported before the owner released it");
 	}
 	// The held lane is released: it reads, reports, and its handoff starts a root turn.
-	world.systemOne.enterPhase("verify-held", completionStates);
+	world.systemOne.enterPhase("verify-held", FILES_CHANGED_CLAIMS);
 	world.provider.enqueue("root", {
 		name: "held-handoff",
 		check: (request) => {
@@ -993,7 +986,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		"verify-obligation",
 		{
 			...verifyJudgments,
-			...completionStates,
+			...FILES_CHANGED_CLAIMS,
 			states_tests_pass: { kind: "choice", choice: "historical_only", confidence: 0.97 },
 			states_checks_pass: { kind: "choice", choice: "historical_only", confidence: 0.97 },
 		},
@@ -1154,7 +1147,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 	// failure opened in the project directory must survive it; only the recheck from the project directory clears it.
 	world.systemOne.enterPhase(
 		"verify-elsewhere",
-		{ ...verifyJudgments, ...operationClasses, ...completionStates },
+		{ ...verifyJudgments, ...operationClasses, ...FILES_CHANGED_CLAIMS },
 		{ expect: ownerWords("Run the check from another directory, then check completion.") },
 	);
 	world.provider.enqueue(
@@ -1736,7 +1729,7 @@ export async function runJourney2OrchestrationPhase(world: HarnessWorld): Promis
 		lifts_delivery_block: { kind: "noul", probability: 0.02 },
 		full_handoff: { kind: "noul", probability: 0.02 },
 		optional_tool_0: { kind: "choice", choice: "unchanged", confidence: 0.97 },
-		...completionStates,
+		...FILES_CHANGED_CLAIMS,
 		shows_true_0: { kind: "noul", probability: 0.97 },
 		shows_false_0: { kind: "noul", probability: 0.02 },
 	} as const;

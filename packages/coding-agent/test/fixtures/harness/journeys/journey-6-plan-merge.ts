@@ -8,7 +8,6 @@ import { createBarrier, type ScriptStep } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { TIMEOUTS_PATH } from "./journey-5-plan-verify-rejected.ts";
 import {
-	CHANGED_FILE_ANSWER_CLAIMS,
 	deliveredLines,
 	enqueueRoot,
 	enqueueStepWorker,
@@ -19,7 +18,7 @@ import {
 	reportStep,
 	stepTaskLines,
 } from "./journey-5-shared.ts";
-import { currentRequestCarries, LIMITS_PATH, latestBatchResults } from "./shared.ts";
+import { currentRequestCarries, FILES_CHANGED_CLAIMS, LIMITS_PATH, latestBatchResults } from "./shared.ts";
 
 const TITLE = "Raise the retry limit and the request timeout, each in its own lane, and land both";
 const GATE = "npm run check";
@@ -210,7 +209,7 @@ export async function runJourney6PlanMergePhase(world: HarnessWorld, session: Ag
 	const mainBefore = world.git.refSha("refs/heads/main");
 	world.systemOne.enterPhase("j6-merge", {
 		...PLAN_CALL_JUDGMENTS,
-		...CHANGED_FILE_ANSWER_CLAIMS,
+		...FILES_CHANGED_CLAIMS,
 		needs_output_of: { kind: "noul", probability: 0.02 },
 		pair_evidence_sufficient: { kind: "noul", probability: 0.97 },
 	});

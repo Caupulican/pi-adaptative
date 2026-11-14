@@ -20,16 +20,11 @@ import { publishHostFile } from "../../../../src/utils/host-tree-publication.ts"
 import { hostFileIdentity, hostWatchedPathIdentity } from "../../../../src/utils/host-write-transition.ts";
 import { calls, createBarrier, type ScriptedRequest } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
-import { ICM_INTAKE_JUDGMENTS, latestBatchResults } from "./shared.ts";
+import { FILES_CHANGED_CLAIMS, ICM_INTAKE_JUDGMENTS, latestBatchResults } from "./shared.ts";
 
 const FFF_BASE_JUDGMENTS = {
 	...ICM_INTAKE_JUDGMENTS,
-	states_tests_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-	states_checks_pass: { kind: "choice", choice: "no_current_success", confidence: 0.97 },
-	states_committed: { kind: "noul", probability: 0.02 },
-	states_pushed: { kind: "noul", probability: 0.02 },
-	states_published: { kind: "noul", probability: 0.02 },
-	states_files_changed: { kind: "noul", probability: 0.97 },
+	...FILES_CHANGED_CLAIMS,
 } as const;
 const FFF_FORCE_JUDGMENTS = {
 	...FFF_BASE_JUDGMENTS,

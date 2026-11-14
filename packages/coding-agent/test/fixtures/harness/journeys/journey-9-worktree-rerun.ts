@@ -12,7 +12,6 @@ import { appendGoalStateSnapshot } from "../../../../src/core/goals/session-goal
 import { createBarrier, HARNESS_PROVIDER, type ScriptedRequest, type ScriptStep } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { ORIGINAL_TIMEOUTS, TIMEOUTS_PATH } from "./journey-5-plan-verify-rejected.ts";
-import { CHANGED_FILE_ANSWER_CLAIMS } from "./journey-5-shared.ts";
 import {
 	carriesTask,
 	delegateStart,
@@ -21,7 +20,7 @@ import {
 	recordedOutcome,
 	scriptRequirementCheckSpawn,
 } from "./journey-9-shared.ts";
-import { LIMITS_PATH, latestBatchResults, ORIGINAL_LIMITS } from "./shared.ts";
+import { FILES_CHANGED_CLAIMS, LIMITS_PATH, latestBatchResults, ORIGINAL_LIMITS } from "./shared.ts";
 
 const X2_PROMPT = "Start a worktree writer to update both limits and timeouts.";
 const X2_TASK =
@@ -253,7 +252,7 @@ async function runSameWorktreeLaneAttemptRerunSubleg(world: HarnessWorld): Promi
 	world.systemOne.enterPhase("j9-l6-x2", {
 		...J9_ROOT_JUDGMENTS,
 		...GOAL_STEP_JUDGMENTS,
-		...CHANGED_FILE_ANSWER_CLAIMS,
+		...FILES_CHANGED_CLAIMS,
 	});
 	try {
 		const { session } = await world.createRootSession("root", {
@@ -606,7 +605,7 @@ async function runFreshWorktreeLaneSupersedesRerunSubleg(
 	world.systemOne.enterPhase("j9-l6-x1", {
 		...J9_ROOT_JUDGMENTS,
 		...GOAL_STEP_JUDGMENTS,
-		...CHANGED_FILE_ANSWER_CLAIMS,
+		...FILES_CHANGED_CLAIMS,
 	});
 	try {
 		const { session } = await world.createRootSession("root", {

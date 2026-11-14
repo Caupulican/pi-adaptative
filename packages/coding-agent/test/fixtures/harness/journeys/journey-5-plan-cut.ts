@@ -7,7 +7,6 @@ import type { SessionManager } from "../../../../src/kernel/session/session-mana
 import { createBarrier, type ScriptStep } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
-	CHANGED_FILE_ANSWER_CLAIMS,
 	deliveredLines,
 	enqueueRoot,
 	enqueueStepWorker,
@@ -24,7 +23,7 @@ import {
 	stepWriteAuthority,
 	whenPlanState,
 } from "./journey-5-shared.ts";
-import { latestBatchResults } from "./shared.ts";
+import { FILES_CHANGED_CLAIMS, latestBatchResults } from "./shared.ts";
 
 /**
  * A plan cut mid-way and taken up again. One step changes a file, a verify step checks the change, a third step lists the
@@ -91,7 +90,7 @@ export type PlanCut = (
  */
 const PLAN_CUT_JUDGMENTS = {
 	...PLAN_CALL_JUDGMENTS,
-	...CHANGED_FILE_ANSWER_CLAIMS,
+	...FILES_CHANGED_CLAIMS,
 	needs_output_of: { kind: "noul", probability: 0.02 },
 	pair_evidence_sufficient: { kind: "noul", probability: 0.97 },
 } as const;

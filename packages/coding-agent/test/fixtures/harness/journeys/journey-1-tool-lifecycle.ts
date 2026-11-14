@@ -3,8 +3,7 @@ import { getEventListeners } from "node:events";
 import { expect } from "vitest";
 import { createBarrier, type ScriptStep, text } from "../scripted-provider.ts";
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
-import { CHANGED_FILE_ANSWER_CLAIMS } from "./journey-5-shared.ts";
-import { ICM_INTAKE_JUDGMENTS } from "./shared.ts";
+import { FILES_CHANGED_CLAIMS, ICM_INTAKE_JUDGMENTS } from "./shared.ts";
 
 /** Actual text transport, file mutation admission, replay memory and next-provider receipt in one owner turn. */
 export async function runJourney1ToolLifecyclePhase(world: HarnessWorld): Promise<void> {
@@ -78,7 +77,7 @@ export async function runJourney1ToolLifecyclePhase(world: HarnessWorld): Promis
 			expect(JSON.stringify(request.context.messages)).toContain("gamma");
 		}),
 	);
-	world.systemOne.enterPhase("text-mutation-replay", { ...ICM_INTAKE_JUDGMENTS, ...CHANGED_FILE_ANSWER_CLAIMS });
+	world.systemOne.enterPhase("text-mutation-replay", { ...ICM_INTAKE_JUDGMENTS, ...FILES_CHANGED_CLAIMS });
 	await withDeadline(
 		world.trace,
 		"text mutation replay owner turn",

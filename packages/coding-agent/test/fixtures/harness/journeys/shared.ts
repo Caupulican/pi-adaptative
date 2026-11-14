@@ -1455,6 +1455,12 @@ export const NO_DELIVERY_CLAIMS = {
 	states_files_changed: { kind: "noul", probability: 0.02 },
 } as const;
 
+/** What the final answer of a worker that changed a file is read for: it states the change, and claims nothing else delivered. */
+export const FILES_CHANGED_CLAIMS = {
+	...NO_DELIVERY_CLAIMS,
+	states_files_changed: { kind: "noul", probability: 0.97 },
+} as const;
+
 /** Valid ICM settings for the Pi-adaptative-memory continuous chat with a reasoning summary model. */
 export function icmContinuousSettings(summaryTrack = "worker-c", extra?: Partial<Settings>): Partial<Settings> {
 	return {

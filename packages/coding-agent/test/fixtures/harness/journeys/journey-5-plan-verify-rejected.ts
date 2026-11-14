@@ -4,7 +4,6 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { createBarrier, type ScriptStep } from "../scripted-provider.ts";
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 import {
-	CHANGED_FILE_ANSWER_CLAIMS,
 	deliveredLines,
 	enqueueRoot,
 	enqueueStepWorker,
@@ -16,7 +15,7 @@ import {
 	reportStep,
 	stepTrack,
 } from "./journey-5-shared.ts";
-import { latestBatchResults } from "./shared.ts";
+import { FILES_CHANGED_CLAIMS, latestBatchResults } from "./shared.ts";
 
 /** The file this phase changes; the journey's world holds it beside the limits module. */
 export const TIMEOUTS_PATH = projectPath("src", "timeouts.ts");
@@ -195,7 +194,7 @@ export async function runJourney5PlanVerifyRejectedPhase(world: HarnessWorld, se
 		planUpdateStep("j5-reject-accepted", "JOIN_DONE", () => accepted.release()),
 		planUpdateStep("j5-reject-wake", "PLAN_DONE", () => done.release()),
 	);
-	world.systemOne.enterPhase("j5-reject", { ...PLAN_CALL_JUDGMENTS, ...CHANGED_FILE_ANSWER_CLAIMS });
+	world.systemOne.enterPhase("j5-reject", { ...PLAN_CALL_JUDGMENTS, ...FILES_CHANGED_CLAIMS });
 	await withDeadline(
 		trace,
 		"J5 reject turn",

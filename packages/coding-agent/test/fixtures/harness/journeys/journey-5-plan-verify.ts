@@ -3,7 +3,6 @@ import { expect } from "vitest";
 import { createBarrier } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
-	CHANGED_FILE_ANSWER_CLAIMS,
 	deliveredLines,
 	enqueueRoot,
 	enqueueStepWorker,
@@ -21,6 +20,7 @@ import {
 } from "./journey-5-shared.ts";
 import {
 	assertCompletionRuleRefusal,
+	FILES_CHANGED_CLAIMS,
 	goalCompletionFacts,
 	LIMITS_PATH,
 	latestBatchResults,
@@ -318,7 +318,7 @@ export async function runJourney5PlanVerifyAcceptedPhase(world: HarnessWorld): P
 	world.systemOne.enterPhase("j5-verify", {
 		...PLAN_CALL_JUDGMENTS,
 		...GOAL_STEP_JUDGMENTS,
-		...CHANGED_FILE_ANSWER_CLAIMS,
+		...FILES_CHANGED_CLAIMS,
 		...COMPLETION_JUDGMENTS,
 	});
 	await withDeadline(
