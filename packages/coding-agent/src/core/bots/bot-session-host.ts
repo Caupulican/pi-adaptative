@@ -45,7 +45,6 @@ import { namedAgentIdentity } from "../agent-identity.ts";
 import { botHostLockFile, botSystemOneEvidenceDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import { boundSessionTurnSpend, unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
-import { usageSince } from "../cost/usage-delta.ts";
 import type {
 	BotOperatorMessageDispatchResult,
 	BotOperatorMessageOptions,
@@ -60,7 +59,6 @@ import { DefaultResourceLoader } from "../resource-loader.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
 import { createAgentSession } from "../sdk.ts";
 import type { SettingsManager } from "../settings-manager.ts";
-import { deriveSpawnedUsageReportId, hasReportableUsage } from "../spawned-usage.ts";
 import type { SystemOneHostSource } from "../system-one/session-source.ts";
 import { runAsyncReleaseSteps } from "../util/resource-release.ts";
 import type { TimerPort, TimerSource } from "../util/timer-port.ts";
@@ -86,11 +84,14 @@ import {
 	ownBotSessionKey,
 	profileBotSession,
 } from "./bot-session-profile.ts";
+import { type BotTurnUsageReport, botTurnCharge, lastAssistantText } from "./bot-turn-report.ts";
 import { BotTurnSupervision } from "./bot-turn-supervision.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
 /** How long a bot's session stays loaded with no turn running and no input queued. */
 export const BOT_SESSION_IDLE_BOUND_MS = 10 * 60 * 1000;
+/** How long a message waits for an earlier session of its bot, or the stop of the host this one replaced, to end. */
+export const BOT_SESSION_CLOSE_WAIT_MS = 30 * 1000;
 
 export type { BotSessionState };
 
@@ -154,16 +155,6 @@ export interface BotTurnSpendBound {
 	readonly bound: "worker" | "session" | "profile";
 }
 
-/** One turn's charge, as the main session's ledger takes it. */
-export interface BotTurnUsageReport {
-	readonly agentId: string;
-	readonly reportId: string;
-	/** The bot's own session id. */
-	readonly sessionId: string;
-	readonly provider: string;
-	readonly model: string;
-}
-
 interface BotSessionEntry {
 	readonly agentId: string;
 	readonly session: AgentSession;
@@ -202,24 +193,6 @@ class BotSessionHeldError extends Error {
 function errorText(error: unknown): string {
 	if (error instanceof AggregateError) return error.errors.map(errorText).join("; ");
 	return error instanceof Error ? error.message : String(error);
-}
-
-/**
- * The words of the newest assistant message that has any, written at or after `since`: the outcome of the turn that
- * began then. Read by time, so a compaction during the turn does not hide its answer.
- */
-function lastAssistantText(messages: readonly AgentMessage[], since: number): string {
-	for (let index = messages.length - 1; index >= 0; index--) {
-		const message = messages[index];
-		if (message?.role !== "assistant") continue;
-		if (message.timestamp < since) return "";
-		const text = message.content
-			.map((part) => (part.type === "text" ? part.text : ""))
-			.join("\n")
-			.trim();
-		if (text.length > 0) return text;
-	}
-	return "";
 }
 
 export class BotSessionHost {
@@ -628,8 +601,9 @@ export class BotSessionHost {
 	private async open(agentId: string, sender: BotSender): Promise<BotSessionEntry> {
 		const stopped = () => new Error(interfaceText().botTeam.botSessionsClosing(agentId));
 		if (this.stopped) throw stopped();
-		await this.previousStop;
-		await this.closing.get(agentId);
+		// A close that never ends (a disposal that hangs) refuses the message instead of holding it, and every later one, forever.
+		if (!(await this.endedWithinCloseWait([this.previousStop, this.closing.get(agentId)])))
+			throw new Error(interfaceText().botTeam.botSessionStillClosing(agentId));
 		// A stop that came while the previous session closed has already counted the sessions it must close: none is built now.
 		if (this.stopped) throw stopped();
 		const record = this.ports.store().getBot(agentId);
@@ -648,6 +622,20 @@ export class BotSessionHost {
 		const built = this.load(record, sender).finally(() => this.loading.delete(agentId));
 		this.loading.set(agentId, built);
 		return built;
+	}
+
+	/** Whether `closes` all ended within `BOT_SESSION_CLOSE_WAIT_MS` on the host's timers; a close that failed rejects. */
+	private async endedWithinCloseWait(closes: readonly (Promise<void> | undefined)[]): Promise<boolean> {
+		const timers = this.idleTimers();
+		let alarm: unknown;
+		const expired = new Promise<false>((resolve) => {
+			alarm = timers.setTimeout(() => resolve(false), BOT_SESSION_CLOSE_WAIT_MS);
+		});
+		try {
+			return await Promise.race([Promise.all(closes).then(() => true), expired]);
+		} finally {
+			timers.clearTimeout(alarm);
+		}
 	}
 
 	private async load(record: PersistentBotRecord, sender: BotSender): Promise<BotSessionEntry> {
@@ -996,26 +984,12 @@ export class BotSessionHost {
 
 	/** A turn ended: what the session spent since it began goes to the main session's cost view, once. */
 	private reportTurnUsage(entry: BotSessionEntry): void {
-		const { usageBefore, session } = entry;
+		const { usageBefore } = entry;
 		entry.usageBefore = undefined;
-		const model = session.model;
-		if (!usageBefore || !model) return;
-		const usage = usageSince(usageBefore, session.getCumulativeUsage());
-		if (!hasReportableUsage(usage)) return;
-		const sessionId = session.sessionId;
+		const charge = usageBefore && botTurnCharge(entry.agentId, entry.session, usageBefore);
+		if (!charge) return;
 		try {
-			entry.sender.reportUsage(usage, {
-				agentId: entry.agentId,
-				// The turn's identity: the bot's session and what it had spent when the turn began.
-				reportId: deriveSpawnedUsageReportId("bot-session", sessionId, [
-					String(usageBefore.totalTokens),
-					String(usageBefore.cost.total),
-					String(session.messages.length),
-				]),
-				sessionId,
-				provider: model.provider,
-				model: model.id,
-			});
+			entry.sender.reportUsage(charge.usage, charge.report);
 		} catch (error) {
 			entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(entry.agentId, errorText(error)));
 		}

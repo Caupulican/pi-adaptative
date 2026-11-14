@@ -134,6 +134,9 @@ export const BOT_TEAM = {
 	/** A message that came while this session was closing and its bots with it. */
 	botSessionsClosing: (agentId: string) =>
 		`Bot ${agentId} was not started: this session is closing, and its bots close with it. Message it again in the next session.`,
+	/** An earlier close the bot's session waits for did not end within its bound. */
+	botSessionStillClosing: (agentId: string) =>
+		`Bot ${agentId} was not started: an earlier session of it, or the bot sessions of a session that closed in this process, did not finish closing. Message it again in a moment; if this repeats, restart pi.`,
 	botTurnFailed: (agentId: string, reason: string) => `Bot ${agentId}: its turn failed (${reason}).`,
 	/** The worker admission's rules refused the bot's model for a message. */
 	botModelRefused: (agentId: string, reason: string) =>

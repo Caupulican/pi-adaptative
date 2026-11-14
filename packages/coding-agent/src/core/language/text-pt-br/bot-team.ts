@@ -124,6 +124,8 @@ export const BOT_TEAM = {
 		`${modelRef} é cobrado por chave de API e você não o escolheu para workers enquanto há modelos de assinatura disponíveis; use um modelo de assinatura como ${alternatives.join(", ")}, ou adicione ${provider} a workerDelegation.routeProviders`,
 	botSessionsClosing: (agentId: string) =>
 		`O bot ${agentId} não foi iniciado: esta sessão está fechando, e os bots dela fecham junto. Envie a mensagem de novo na próxima sessão.`,
+	botSessionStillClosing: (agentId: string) =>
+		`O bot ${agentId} não foi iniciado: uma sessão anterior dele, ou as sessões de bots de uma sessão que fechou neste processo, não terminaram de fechar. Envie a mensagem de novo daqui a pouco; se isso se repetir, reinicie o pi.`,
 	botTurnFailed: (agentId: string, reason: string) => `Bot ${agentId}: o turno falhou (${reason}).`,
 	botModelRefused: (agentId: string, reason: string) =>
 		`O bot ${agentId} não recebeu a mensagem: o modelo dele foi recusado (${reason}).`,
