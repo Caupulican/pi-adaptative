@@ -13,6 +13,7 @@ import {
 	buildWorkerSessionDefaultWriteScopeEnvelope,
 	buildWorkerSessionHarnessWriteEnvelope,
 	buildWorkerSessionPrivatePathEnvelope,
+	buildWorkerSessionWriteRootsEnvelope,
 	type SessionPrivatePathScope,
 	WORKER_HARNESS_WRITE_GUIDANCE,
 } from "./worker-session-private-scope.ts";
@@ -64,11 +65,7 @@ export function buildSessionPathEnvelopes(options: {
 	const scopes: SessionPathEnvelope[] = [{ envelope: privatePaths }];
 	if (workerProcess || scope?.confinedWrites) {
 		const writeScope = scope?.writeRoots?.length
-			? {
-					id: "session-write-roots",
-					capabilities: ["filesystem.write" as const],
-					allowedPaths: scope.writeRoots.map((root) => resolve(cwd, root)),
-				}
+			? buildWorkerSessionWriteRootsEnvelope(cwd, scope.writeRoots)
 			: buildWorkerSessionDefaultWriteScopeEnvelope(cwd, allowedPaths);
 		if (writeScope)
 			scopes.push({

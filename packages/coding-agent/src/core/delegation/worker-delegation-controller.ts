@@ -23,6 +23,7 @@ import {
 	thirdPartyEdgeRefusal,
 } from "../autonomy/edge-policy.ts";
 import { hostFindingBlockerLine } from "../autonomy/host-findings.ts";
+import { laneCapabilityEnvelope } from "../autonomy/lane-envelope.ts";
 import {
 	getHarnessWriteProtectedPaths,
 	getPrivateLaneDeniedPaths,
@@ -5603,19 +5604,17 @@ export class WorkerDelegationController {
 				reasonCode: "profile_worker",
 				reasons: [writeGranted ? "Path-scoped worker delegation" : "Read-only worker delegation"],
 			},
-			envelope: {
+			envelope: laneCapabilityEnvelope({
 				id: `worker-${this.deps.getSessionId()}-${startedRecord.laneId}`,
 				profileId: orchestrationProfile.profileId,
-				// filesystem.write requires BOTH the opt-in AND an explicit non-empty path scope —
-				// an unscoped write grant is refused here, not discovered at validation time.
-				capabilities: [...grant.capabilities],
-				...(writeGranted ? { allowedPaths: [...grant.writePaths] } : {}),
-				deniedPaths: [...grant.deniedPaths],
-				allowedTools: [...toolSurface.allowedTools],
-				deniedTools: [...toolSurface.deniedTools],
-				...(maxUsd !== undefined ? { maxEstimatedUsd: maxUsd } : {}),
+				capabilities: grant.capabilities,
+				...(writeGranted ? { writePaths: grant.writePaths } : {}),
+				deniedPaths: grant.deniedPaths,
+				allowedTools: toolSurface.allowedTools,
+				deniedTools: toolSurface.deniedTools,
+				...(maxUsd !== undefined ? { maxUsd } : {}),
 				createdAt: new Date().toISOString(),
-			},
+			}),
 			...(maxUsd !== undefined ? { maxEstimatedUsd: maxUsd } : {}),
 			createdAt: new Date().toISOString(),
 		};

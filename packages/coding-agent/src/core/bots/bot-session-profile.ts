@@ -17,6 +17,7 @@ import type { Api, Model } from "@caupulican/pi-ai";
 import { TOOL_SCHEMA_SEARCH_NAME } from "@caupulican/pi-ai";
 import { checkSoulText } from "../agent-identity.ts";
 import type { CapabilityEnvelope } from "../autonomy/contracts.ts";
+import { laneCapabilityEnvelope } from "../autonomy/lane-envelope.ts";
 import type { SessionPrivatePathScope } from "../autonomy/worker-session-private-scope.ts";
 import { mapToolNamesForPlatform, STABLE_SHELL_TOOL_NAME } from "../default-tool-surface.ts";
 import type { BotSessionCompilation } from "../delegation/bot-session-compile.ts";
@@ -145,17 +146,18 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 	if (workerLimits.length > 0) return { route: "worker", reason: `limits_need_worker:${workerLimits.join(",")}` };
 	// It arms its own waits as a worker's host does, outside the granted surface.
 	const tools = [...new Set([...planned.filter(sessionHolds), TASK_WATCH_TOOL_NAME])];
-	const capabilityEnvelope: CapabilityEnvelope = {
+	// The ceiling a worker lane of the profile runs under, built as the lane builds it. Its paths are the session's path
+	// envelopes' (`privatePathScope`): denied paths with the session's own readable exemptions, writes in its write roots,
+	// reads in its read roots.
+	const capabilityEnvelope = laneCapabilityEnvelope({
 		id: `bot-profile:${profile.profileId}`,
 		profileId: profile.profileId,
 		capabilities: [
 			...new Set([...worker.authority.capabilities, ...requiredEnvelopeCapabilities(TASK_WATCH_TOOL_NAME)]),
 		],
 		allowedTools: tools,
-		...(worker.authority.budget.maxCostUsd !== undefined
-			? { maxEstimatedUsd: worker.authority.budget.maxCostUsd }
-			: {}),
-	};
+		...(worker.authority.budget.maxCostUsd !== undefined ? { maxUsd: worker.authority.budget.maxCostUsd } : {}),
+	});
 	const privatePathScope: SessionPrivatePathScope = {
 		readOnlyShell: plan.readOnly || plan.shellReadOnly,
 		confinedWrites: true,

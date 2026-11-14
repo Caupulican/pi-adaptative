@@ -132,6 +132,19 @@ export function buildWorkerSessionDefaultWriteScopeEnvelope(
 	});
 }
 
+/**
+ * Write scope of a session given write roots (`SessionPrivatePathScope.writeRoots`, a profile's granted roots): its writes
+ * stay inside them while its reads are left to its read scope. A worker process's granted roots confine its private path
+ * envelope instead (`PI_WORKER_ALLOWED_PATHS`).
+ */
+export function buildWorkerSessionWriteRootsEnvelope(cwd: string, writeRoots: readonly string[]): CapabilityEnvelope {
+	return Object.freeze({
+		id: "session-write-roots",
+		capabilities: Object.freeze(["filesystem.write"] as const),
+		allowedPaths: Object.freeze(writeRoots.map((root) => path.resolve(cwd, root))),
+	});
+}
+
 /** What a worker denied a write to a harness resource does next. */
 export const WORKER_HARNESS_WRITE_GUIDANCE =
 	"Harness resources (skills, extensions, prompts, settings, hooks, git config) are owner-only for a worker. Report the change you want to the parent as a proposal; the parent applies it.";

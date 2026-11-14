@@ -2,7 +2,7 @@
 	"description": "Ratchet for TypeScript source over the line limit. Each value is the file line count when it was last checked; a listed file may only shrink. Lower a value when a split lands; never raise one. Enforced by scripts/check-file-size.mjs (in check:static). The agent-session.ts coordinator ceiling is enforced by scripts/check-coordinator-boundaries.mjs.",
 	"limit": 1200,
 	"files": {
-		"packages/coding-agent/src/core/delegation/worker-delegation-controller.ts": 6520,
+		"packages/coding-agent/src/core/delegation/worker-delegation-controller.ts": 6519,
 		"packages/coding-agent/src/core/agent-session.ts": 5247,
 		"packages/coding-agent/src/core/memory/transcript-memory.ts": 3535,
 		"packages/coding-agent/src/kernel/session/session-manager.ts": 3488,
