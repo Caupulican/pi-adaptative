@@ -28,7 +28,7 @@ import {
 import { readTaskRuntimeProjection } from "./orchestration/task-runtime-reader.ts";
 import { workerReceiptPublicationPending } from "./orchestration/worker-receipt-publication.ts";
 import { listEntries } from "./process-matrix/store.ts";
-import { settleGoneSessionRoutineResults } from "./routines/routine-origin-settlement.ts";
+import { type GoneSessionSettlement, settleGoneSessionRoutines } from "./routines/routine-origin-settlement.ts";
 import { isPlainRecord } from "./util/value-guards.ts";
 
 /**
@@ -58,9 +58,10 @@ import { isPlainRecord } from "./util/value-guards.ts";
  * an unreadable one), the whole bundle is untouched and refused. A partial settlement would write the
  * mailboxes, refresh the bundle's newest file time and postpone its removal by the full retention age.
  *
- * Before the bundles, the same run settles the routine results addressed to a session that was deleted (its transcript
- * gone, no process holding it, quiet for {@link SESSION_BUNDLE_QUIET_FLOOR_MS}) as undeliverable, since that session never opens again to settle them itself
- * (`settleGoneSessionRoutineResults`); it needs the transcript index, so an index over its bound skips it too.
+ * Before the bundles, the same run settles the routine work of a session that was deleted (its transcript gone, no
+ * process holding it, quiet for {@link SESSION_BUNDLE_QUIET_FLOOR_MS}), since that session never opens again to settle it
+ * itself: its pending results are settled undeliverable and its routines retired as `origin-lost`
+ * (`settleGoneSessionRoutines`). It needs the transcript index, so an index over its bound skips it too.
  *
  * Work per run is bounded by the constants below; the remainder is left for the next startup, which starts
  * its scan at a different bundle so permanently refused bundles cannot starve later ones. Failures are
@@ -109,8 +110,10 @@ export interface SessionBundleRetentionResult {
 	removedBytes: number;
 	/** Obligations older than {@link SESSION_BUNDLE_MAX_AGE_MS} settled as expired this run. */
 	expiredObligations: number;
-	/** Routine results addressed to a deleted session settled undeliverable this run (`settleGoneSessionRoutineResults`). */
+	/** Routine results addressed to a deleted session settled undeliverable this run (`settleGoneSessionRoutines`). */
 	settledRoutineResults: number;
+	/** Routines of a deleted session retired as `origin-lost` this run. */
+	retiredRoutines: number;
 	/** At most {@link MAX_DIAGNOSTICS} short messages; empty when nothing went wrong. */
 	diagnostics: string[];
 }
@@ -201,18 +204,18 @@ function indexSessionTranscripts(agentDir: string): Map<string, string[]> | unde
 }
 
 /**
- * Settles the routine results addressed to deleted sessions, which never open again to settle them. Its own step: a
- * routine store that cannot be read is logged and leaves the bundle retention to run.
+ * Settles the routine work of deleted sessions, which never open again to settle it. Its own step: a routine store that
+ * cannot be read is logged and leaves the bundle retention to run.
  */
-function settleRoutineResultsOfGoneSessions(
+function settleRoutinesOfGoneSessions(
 	agentDir: string,
 	protectedIds: ReadonlySet<string>,
 	transcripts: ReadonlyMap<string, readonly string[]>,
 	nowMs: number,
-): number {
+): GoneSessionSettlement {
 	const warn = (message: string): void => harnessLog.warn("routines", message);
 	try {
-		return settleGoneSessionRoutineResults({
+		return settleGoneSessionRoutines({
 			store: new PersistentBotTeamStore(agentDir, warn),
 			protectedSessionIds: protectedIds,
 			sessionFiles: (sessionId) => transcripts.get(sessionId) ?? [],
@@ -220,8 +223,8 @@ function settleRoutineResultsOfGoneSessions(
 			quietFloorMs: SESSION_BUNDLE_QUIET_FLOOR_MS,
 		});
 	} catch (error) {
-		warn(`routine results of deleted sessions were not settled: ${describe(error)}`);
-		return 0;
+		warn(`the routine work of deleted sessions was not settled: ${describe(error)}`);
+		return { settledResults: 0, retiredRoutines: 0 };
 	}
 }
 
@@ -426,6 +429,7 @@ export async function sweepSessionBundles(
 		removedBytes: 0,
 		expiredObligations: 0,
 		settledRoutineResults: 0,
+		retiredRoutines: 0,
 		diagnostics: [],
 	};
 	const report = (message: string): void => {
@@ -434,8 +438,11 @@ export async function sweepSessionBundles(
 	try {
 		const protectedIds = await protectedSessionIds(agentDir, currentSessionId);
 		const transcripts = indexSessionTranscripts(agentDir);
-		if (transcripts)
-			result.settledRoutineResults = settleRoutineResultsOfGoneSessions(agentDir, protectedIds, transcripts, now);
+		if (transcripts) {
+			const settled = settleRoutinesOfGoneSessions(agentDir, protectedIds, transcripts, now);
+			result.settledRoutineResults = settled.settledResults;
+			result.retiredRoutines = settled.retiredRoutines;
+		}
 		const root = orchestrationSessionsDir(agentDir);
 		if (!existsSync(root)) return result;
 		const names = (await readdir(root, { withFileTypes: true }))

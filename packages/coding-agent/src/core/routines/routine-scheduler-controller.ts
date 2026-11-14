@@ -550,17 +550,17 @@ export class RoutineSchedulerController {
 			(routine) => routineEnded(routine, nowMs) !== undefined && routineOccurrencesSettled(occurrences, routine),
 		);
 		const parent = this.active ? this.deps.delivery : undefined;
-		const lostOrigins = parent
-			? lostOriginRoutines(this.deps.store.listRoutines(this.holder), (origin) => parent.originLoss(origin))
-			: [];
+		const lostOrigins = lostOriginRoutines(this.deps.store.listRoutines(this.holder), parent);
 		if (ended.length === 0 && lostOrigins.length === 0) return;
 		const retired = this.deps.store.retireEndedRoutines({
 			nowMs,
-			owner: this.deps.owner,
-			leaseMs: CLAIM_LEASE_MS,
 			parentSessionId: this.deps.parentSessionId,
-			receiptOrigin: this.deps.getReceiptOrigin(),
-			routineIds: ended.map((routine) => routine.routineId),
+			ended: {
+				owner: this.deps.owner,
+				leaseMs: CLAIM_LEASE_MS,
+				receiptOrigin: this.deps.getReceiptOrigin(),
+				routineIds: ended.map((routine) => routine.routineId),
+			},
 			lostOrigins,
 		});
 		const lost = new Set(lostOrigins.map((routine) => routine.routineId));

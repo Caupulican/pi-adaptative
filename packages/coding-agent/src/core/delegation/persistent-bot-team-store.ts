@@ -1406,7 +1406,7 @@ export class PersistentBotTeamStore {
 	}
 
 	/**
-	 * Removes the session's ended routines among `routineIds` once every run of their incarnation is past dispatch and
+	 * Removes the session's ended routines among `ended.routineIds` once every run of their incarnation is past dispatch and
 	 * delivered, and its `lostOrigins` (`routine-trigger-writes.ts`). A spent one-run routine leaves quietly. An expired
 	 * routine, and one a run reported its stated end met for, leaves a terminal notice occurrence, written in the same
 	 * store write as the removal, so the owner is told exactly once even across a crash. `journalFull`: such a routine

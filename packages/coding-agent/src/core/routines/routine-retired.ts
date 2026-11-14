@@ -30,19 +30,26 @@ const MAX_RETIRED_ID_CHARS = 200;
 export const ROUTINE_RETIRED_REASONS = ["spent", "condition", "expired", "deleted", "origin-lost"] as const;
 export type RoutineRetiredReason = (typeof ROUTINE_RETIRED_REASONS)[number];
 
-/** What one session asks the store to retire; the store rechecks each routine under its lock. */
+/**
+ * What is asked of the store to retire for one session (its own scheduler, or the startup cleanup for a deleted one); the
+ * store rechecks each routine under its lock.
+ */
 export interface RoutineRetireInput {
 	readonly nowMs: number;
-	readonly owner: string;
-	readonly leaseMs: number;
 	readonly parentSessionId: string;
-	/** The parent anchor a bot or team routine's expiry notice is delivered at; session routines use their own. */
-	readonly receiptOrigin: WorkerSavedIntent["receiptOrigin"];
-	/** Ended routines, removed once their runs are delivered. */
-	readonly routineIds: readonly string[];
+	/** Ended routines, removed once their runs are delivered; only the session's own scheduler asks for them. */
+	readonly ended?: {
+		/** Who claims the end notice an expired or end-met routine leaves, and for how long. */
+		readonly owner: string;
+		readonly leaseMs: number;
+		/** The parent anchor a bot or team routine's expiry notice is delivered at; session routines use their own. */
+		readonly receiptOrigin: WorkerSavedIntent["receiptOrigin"];
+		readonly routineIds: readonly string[];
+	};
 	/**
-	 * Session routines whose saved origin the session found lost, with why: their undispatched runs are settled with the
-	 * loss as their delivery marker, and each is removed with no end notice once its dispatched runs are settled.
+	 * Session routines whose saved origin is lost (found by the session, or by the startup cleanup for a deleted session),
+	 * with why: their undispatched runs are cancelled with an `unstarted:` marker naming the loss, and each is removed
+	 * with no end notice once its dispatched runs are settled.
 	 */
 	readonly lostOrigins?: readonly { readonly routineId: string; readonly loss: RoutineOriginLoss }[];
 }

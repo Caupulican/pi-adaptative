@@ -36,7 +36,7 @@ import { cancelUndispatchedRoutineOccurrences, withResult } from "./routine-resu
 import { withRoutineRunState } from "./routine-run-state.ts";
 
 /**
- * Retires the session's ended routines among `routineIds` (`retireEndedRoutines` in the store) and its routines whose
+ * Retires the session's ended routines among `ended.routineIds` (`retireEndedRoutines` in the store) and its routines whose
  * saved origin is lost (`lostOrigins`). A lost routine can dispatch nothing more: its undispatched runs are cancelled in
  * this write with an `unstarted:` marker naming the loss, and it is removed, without an end notice that could never be delivered
  * either, once its dispatched runs are settled.
@@ -50,7 +50,7 @@ export function retireEndedRoutines(
 	let journalFull = false;
 	let settled = false;
 	const losses = new Map((input.lostOrigins ?? []).map((lost) => [lost.routineId, lost.loss]));
-	for (const routineId of new Set([...input.routineIds, ...losses.keys()])) {
+	for (const routineId of new Set([...(input.ended?.routineIds ?? []), ...losses.keys()])) {
 		const routine = state.routines.get(routineId);
 		if (!routine || input.nowMs < Date.parse(routine.updatedAt)) continue;
 		if (routine.target.kind === "session" && routine.target.parentSessionId !== input.parentSessionId) continue;
@@ -66,8 +66,9 @@ export function retireEndedRoutines(
 			retired.push(routineId);
 			continue;
 		}
-		const ended = routineEnded(routine, input.nowMs);
-		if (!ended || !routineOccurrencesSettled(state.occurrences.values(), routine)) continue;
+		const ask = input.ended;
+		const ended = ask && routineEnded(routine, input.nowMs);
+		if (!ask || !ended || !routineOccurrencesSettled(state.occurrences.values(), routine)) continue;
 		const met = ended === "condition" ? routine.conditionMet : undefined;
 		if (met && input.nowMs < met.at) continue;
 		const trigger: RoutineOccurrence["trigger"] | undefined = met
@@ -81,7 +82,7 @@ export function retireEndedRoutines(
 					}
 				: undefined;
 		if (trigger) {
-			const parentOrigin = routine.target.kind === "session" ? routineReceiptOrigin(routine) : input.receiptOrigin;
+			const parentOrigin = routine.target.kind === "session" ? routineReceiptOrigin(routine) : ask.receiptOrigin;
 			if (!parentOrigin || parentOrigin.sessionId !== input.parentSessionId) continue;
 			if (!routineJournalHasRoom(state, input.nowMs)) {
 				journalFull = true;
@@ -92,8 +93,8 @@ export function retireEndedRoutines(
 				routine,
 				routineOccurrenceId(routine, trigger),
 				trigger,
-				input.owner,
-				input.leaseMs,
+				ask.owner,
+				ask.leaseMs,
 				input.nowMs,
 				parentOrigin,
 			);

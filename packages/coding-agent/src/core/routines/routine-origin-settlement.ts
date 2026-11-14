@@ -1,13 +1,13 @@
 /**
  * What a session's routine scheduler does with routine work whose origin can never pass in that session
  * (`routine-origin-reach.ts`): a pending result is settled undeliverable in place of its delivery, and a routine whose own
- * saved origin is lost is handed to the store, which settles its undispatched runs (none could ever be dispatched) and
+ * saved origin is lost is handed to the store, which cancels its undispatched runs (none could ever be dispatched) and
  * retires it once none of its dispatched runs still runs or waits for delivery. The owner is told
  * by the session's notices, read from the markers and records these writes leave (`routine-state-notices.ts`).
  *
  * A session that was deleted never opens again to settle its own: the main session's startup sweep
- * (`session-bundle-retention.ts`) settles, store-wide, each pending result addressed to a session no process holds whose
- * session file is gone and of which no other session file remains (`settleGoneSessionRoutineResults`).
+ * (`session-bundle-retention.ts`) settles, store-wide, the pending results and retires the routines of each session no
+ * process holds whose session file is gone and of which no other session file remains (`settleGoneSessionRoutines`).
  */
 import { readdirSync } from "node:fs";
 import { basename, dirname } from "node:path";
@@ -71,30 +71,34 @@ export function settleUndeliverableResults(
 }
 
 /**
- * The session routines among `routines` whose own saved origin can never pass here, with why. The store retires each in
- * one write once its dispatched runs are settled (`retireEndedRoutines`). A routine whose origin is only waiting (another
- * branch, not yet durable) is never among them.
+ * The session routines among `routines` whose own saved origin can never pass where `parent` delivers, with why; none
+ * without a parent delivery. The store retires each in one write once its dispatched runs are settled
+ * (`retireEndedRoutines`). A routine whose origin is only waiting (another branch, not yet durable) is never among them.
  */
 export function lostOriginRoutines(
 	routines: readonly RoutineDefinitionView[],
-	originLoss: (origin: WorkerReceiptOrigin) => RoutineOriginLoss | undefined,
+	parent: Pick<RoutineOriginSettlementParent, "originLoss"> | undefined,
 ): { readonly routineId: string; readonly loss: RoutineOriginLoss }[] {
+	if (!parent) return [];
 	return routines.flatMap((routine) => {
 		const origin = routine.target.kind === "session" ? routineReceiptOrigin(routine) : undefined;
-		const loss = origin && originLoss(origin);
+		const loss = origin && parent.originLoss(origin);
 		return loss ? [{ routineId: routine.routineId, loss }] : [];
 	});
 }
 
 export interface GoneSessionSettlementInput {
-	readonly store: Pick<RoutineStorePort, "listRoutineOccurrences" | "acknowledgeRoutineDelivery">;
+	readonly store: Pick<
+		RoutineStorePort,
+		"listRoutineOccurrences" | "acknowledgeRoutineDelivery" | "listRoutines" | "retireEndedRoutines"
+	>;
 	/** Sessions a process still holds (this one, live or resumable peers): each settles its own results. */
 	readonly protectedSessionIds: ReadonlySet<string>;
 	/** The session files the agent directory holds for a session id (`<timestamp>_<id>.jsonl` names). */
 	sessionFiles(sessionId: string): readonly string[];
 	readonly nowMs: number;
 	/**
-	 * A result written less than this long ago is left: a session whose process is not registered (process tracking off)
+	 * A result or routine written less than this long ago is left: a session whose process is not registered (process tracking off)
 	 * or whose first entries are not on disk yet is indistinguishable from a deleted one until it has been quiet that long.
 	 */
 	readonly quietFloorMs: number;
@@ -113,14 +117,39 @@ function sessionGone(sessionId: string, sessionFile: string, known: readonly str
 	}
 }
 
+/** What the startup cleanup did for deleted sessions (`settleGoneSessionRoutines`). */
+export interface GoneSessionSettlement {
+	/** Pending results settled undeliverable. */
+	readonly settledResults: number;
+	/** Routines retired as `origin-lost`. */
+	readonly retiredRoutines: number;
+}
+
 /**
- * Settles, across the store, each pending result addressed to a session that can never open again (its session file gone
- * and no other file of it left, no process holding it, the result quiet for `quietFloorMs`), with the `session-file-gone` marker its own session would have
- * written, so it stops holding a place in the routine journal. Returns how many were settled; a result a session settled
- * or delivered meanwhile is left to it.
+ * Settles, across the store, the routine work of sessions that can never open again (the session file it names gone and
+ * no other file of the session left, no process holding it, the work quiet for `quietFloorMs`): each pending result is
+ * settled undeliverable with the `session-file-gone` marker its own session would have written, then each routine the
+ * session saved is handed to the store's retire write as `origin-lost`, which cancels its runs that never started and
+ * removes it once its dispatched runs are settled. Work a session settled or changed meanwhile is left to it.
  */
-export function settleGoneSessionRoutineResults(input: GoneSessionSettlementInput): number {
+export function settleGoneSessionRoutines(input: GoneSessionSettlementInput): GoneSessionSettlement {
 	const gone = new Map<string, boolean>();
+	const isGone = (sessionId: string, sessionFile: string): boolean => {
+		const key = `${sessionId}\0${sessionFile}`;
+		let known = gone.get(key);
+		if (known === undefined) {
+			known = sessionGone(sessionId, sessionFile, input.sessionFiles(sessionId));
+			gone.set(key, known);
+		}
+		return known;
+	};
+	return { settledResults: settleGoneResults(input, isGone), retiredRoutines: retireGoneRoutines(input, isGone) };
+}
+
+function settleGoneResults(
+	input: GoneSessionSettlementInput,
+	isGone: (sessionId: string, sessionFile: string) => boolean,
+): number {
 	const marker = routineUndeliverableMarker("session-file-gone");
 	let settled = 0;
 	for (const occurrence of input.store.listRoutineOccurrences({ limit: MAX_ROUTINE_OCCURRENCES })) {
@@ -130,10 +159,7 @@ export function settleGoneSessionRoutineResults(input: GoneSessionSettlementInpu
 		const results = [occurrence.priorUncertaintyResult, occurrence.result].filter(
 			(result) => result?.delivery === "pending" && result.recipient === sessionId,
 		);
-		if (results.length === 0) continue;
-		const key = `${sessionId}\0${sessionFile}`;
-		if (!gone.has(key)) gone.set(key, sessionGone(sessionId, sessionFile, input.sessionFiles(sessionId)));
-		if (!gone.get(key)) continue;
+		if (results.length === 0 || !isGone(sessionId, sessionFile)) continue;
 		for (const result of results) {
 			if (!result) continue;
 			try {
@@ -159,4 +185,38 @@ export function settleGoneSessionRoutineResults(input: GoneSessionSettlementInpu
 		}
 	}
 	return settled;
+}
+
+/** Hands each deleted session's routines to the store's retire write as `origin-lost`, one write per session. */
+function retireGoneRoutines(
+	input: GoneSessionSettlementInput,
+	isGone: (sessionId: string, sessionFile: string) => boolean,
+): number {
+	const bySession = new Map<string, { readonly routineId: string; readonly loss: RoutineOriginLoss }[]>();
+	for (const routine of input.store.listRoutines()) {
+		const origin = routine.target.kind === "session" ? routineReceiptOrigin(routine) : undefined;
+		if (origin?.sessionFile === undefined || routine.target.kind !== "session") continue;
+		const sessionId = routine.target.parentSessionId;
+		if (origin.sessionId !== sessionId || input.protectedSessionIds.has(sessionId)) continue;
+		if (input.nowMs - Date.parse(routine.updatedAt) < input.quietFloorMs) continue;
+		if (!isGone(sessionId, origin.sessionFile)) continue;
+		const lost = bySession.get(sessionId) ?? [];
+		lost.push({ routineId: routine.routineId, loss: "session-file-gone" });
+		bySession.set(sessionId, lost);
+	}
+	let retired = 0;
+	for (const [parentSessionId, lostOrigins] of bySession) {
+		try {
+			const removed = input.store.retireEndedRoutines({ nowMs: input.nowMs, parentSessionId, lostOrigins }).retired;
+			retired += removed.length;
+			for (const routineId of removed)
+				harnessLog.warn("routines", "a routine of a deleted session was removed", { routineId });
+		} catch (error) {
+			harnessLog.warn("routines", "the routines of a deleted session could not be removed", {
+				routineIds: lostOrigins.map((lost) => lost.routineId).join(","),
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+	return retired;
 }
