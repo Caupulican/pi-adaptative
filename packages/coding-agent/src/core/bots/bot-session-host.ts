@@ -222,8 +222,12 @@ export class BotSessionHost {
 		(agentIds) => this.changedMany(agentIds),
 	);
 
-	constructor(ports: BotSessionHostPorts) {
+	/** The stop of the host this one replaced in its process, which no session is built before. */
+	private readonly previousStop: Promise<void>;
+
+	constructor(ports: BotSessionHostPorts, previousStop?: Promise<void>) {
 		this.ports = ports;
+		this.previousStop = previousStop ?? Promise.resolve();
 		this.history = new BotHistory({
 			agentDir: () => ports.agentDir(),
 			store: () => ports.store(),
@@ -465,6 +469,7 @@ export class BotSessionHost {
 	private async open(agentId: string, sender: BotSender): Promise<BotSessionEntry> {
 		const stopped = () => new Error(interfaceText().botTeam.botSessionsClosing(agentId));
 		if (this.stopped) throw stopped();
+		await this.previousStop;
 		await this.closing.get(agentId);
 		// A stop that came while the previous session closed has already counted the sessions it must close: none is built now.
 		if (this.stopped) throw stopped();

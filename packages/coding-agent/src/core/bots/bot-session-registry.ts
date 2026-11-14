@@ -39,6 +39,8 @@ interface AttachedRoots {
 
 interface SharedHost extends AttachedRoots {
 	readonly host: BotSessionHost;
+	/** The host's stop, once its last root detached: it stays registered until its sessions closed and their locks are free. */
+	stopping?: Promise<void>;
 }
 
 const hosts = new Map<string, SharedHost>();
@@ -136,9 +138,15 @@ function relayPorts(shared: AttachedRoots): BotSessionHostPorts {
 export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean): BotSessionAttachment {
 	const key = resolve(ports.agentDir());
 	let shared = root ? hosts.get(key) : undefined;
-	if (!shared) {
+	if (!shared || shared.stopping) {
 		const attachedRoots: AttachedRoots = { roots: [], followers: new Set() };
-		shared = { ...attachedRoots, host: new BotSessionHost(relayPorts(attachedRoots)) };
+		// A root attached while the previous host stops gets a new one that builds no session before that stop ended: the
+		// locks the stopping host still holds are free by then.
+		const host = new BotSessionHost(
+			relayPorts(attachedRoots),
+			shared?.stopping?.catch(() => undefined),
+		);
+		shared = { ...attachedRoots, host };
 		if (root) hosts.set(key, shared);
 	}
 	const attached = shared;
@@ -176,12 +184,15 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 				roots.splice(roots.indexOf(ports), 1);
 				return;
 			}
-			// The last root answers the host's stop (its warnings, its cost view), then leaves.
-			if (hosts.get(key)?.host === host) hosts.delete(key);
+			// The last root answers the host's stop (its warnings, its cost view), then leaves; the host stays registered
+			// until it stopped, so a root attached meanwhile waits for it.
+			const stopping = host.stop();
+			attached.stopping = stopping;
 			try {
-				await host.stop();
+				await stopping;
 			} finally {
 				roots.length = 0;
+				if (hosts.get(key) === attached) hosts.delete(key);
 			}
 		},
 	};
