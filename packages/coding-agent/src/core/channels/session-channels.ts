@@ -286,7 +286,7 @@ export interface SessionChannelsDeps extends SessionChannelsOwnerDeps {
 	): boolean;
 	warn(message: string): void;
 	isDisposed(): boolean;
-	isChildSession(): boolean;
+	servesChannels(): boolean;
 	/** Rebuild the session's tools: the release tool is offered only while a channel has an explicit policy. */
 	refreshTools?(): void;
 	now?(): number;
@@ -568,9 +568,9 @@ export class SessionChannels {
 		return false;
 	}
 
-	/** Start serving the session's channels: hands-off, called once the session binds; a child session has none. */
+	/** Start serving the session's channels, hands-off, once it binds; only a session that serves channels starts them. */
 	start(): void {
-		if (this.started || this.deps.isChildSession() || this.deps.isDisposed()) return;
+		if (this.started || !this.deps.servesChannels() || this.deps.isDisposed()) return;
 		this.started = true;
 		this.startedAt = this.now();
 		this.toolsOfferRelease = this.hasExplicitPolicy();

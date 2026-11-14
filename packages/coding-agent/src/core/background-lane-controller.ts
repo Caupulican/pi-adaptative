@@ -329,7 +329,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			observeNotice: (kind, read, onLost) => deps.observeHarnessNotice?.(kind, read, onLost) ?? false,
 			warn: (message) => this._safeWarn(message),
 			isDisposed: () => deps.isDisposed(),
-			isChildSession: () => !deps.standing.ownsHostDuties,
+			servesChannels: () => deps.standing.ownsHostDuties,
 			refreshTools: () => deps.refreshToolRegistry(),
 			timers: deps.getTimers().port("channel-poll"),
 			wakeTimers: deps.getTimers().port("channel-expiry"),

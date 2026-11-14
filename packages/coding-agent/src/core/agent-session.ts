@@ -1210,7 +1210,7 @@ export class AgentSession {
 		this._queuedInputPersistence.restoreRecordedQueuedInput();
 		this._harnessNotices = new HarnessNoticeController({
 			getSessionManager: () => this.sessionManager,
-			isChildSession: () => this._caps.routineScope !== "session",
+			keepsNotices: () => this._caps.conversesWithOwner,
 			deliver: (input) => this._durableCustomMessageTurns.deliverParentInput(input),
 			warn: (message) => this._emit({ type: "warning", message }),
 		});

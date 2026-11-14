@@ -93,7 +93,8 @@ export type HarnessNoticeObservation =
 
 export interface HarnessNoticeDeps {
 	getSessionManager(): SessionManager;
-	isChildSession(): boolean;
+	/** Whether the session keeps notices: one that converses with the owner (session-standing.ts). */
+	keepsNotices(): boolean;
 	/** The session's durable parent-input owner; `next-owner-turn` inputs never start a turn. */
 	deliver(input: ParentInputDelivery): Promise<ParentInputReceipt>;
 	warn(message: string): void;
@@ -274,7 +275,7 @@ export class HarnessNoticeController {
 	 * when this returns false.
 	 */
 	observe(kind: HarnessNoticeKind, read: () => HarnessNoticeObservation | undefined, onLost?: () => void): boolean {
-		if (this.closed || this.deps.isChildSession()) return false;
+		if (this.closed || !this.deps.keepsNotices()) return false;
 		try {
 			const observation = read();
 			return observation === undefined ? false : this.record(kind, observation, onLost);
