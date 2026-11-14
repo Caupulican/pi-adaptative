@@ -60,7 +60,7 @@
 		"packages/coding-agent/src/modes/interactive/components/workbench.ts": 1334,
 		"packages/coding-agent/src/core/soul/soul-controller.ts": 1456,
 		"packages/coding-agent/src/core/process-matrix/runtime.ts": 1455,
-		"packages/coding-agent/src/core/routines/routine-scheduler-controller.ts": 1445,
+		"packages/coding-agent/src/core/routines/routine-scheduler-controller.ts": 1384,
 		"packages/coding-agent/src/core/chat/mesh.ts": 1434,
 		"packages/coding-agent/src/core/sdk.ts": 1401,
 		"packages/coding-agent/src/core/foreground-recovery-controller.ts": 1423,

@@ -23,9 +23,9 @@ import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { findSteeredDelivery } from "../parent-input-steer.ts";
 import { rollingDayWindow } from "../proactivity/proactivity-controller.ts";
-import { isSessionAppendAnchorCurrent } from "../session-snapshot.ts";
 import type { RoutineDelivery } from "./routine-contract.ts";
 import { RoutineIntake } from "./routine-intake.ts";
+import { routineOriginReach } from "./routine-origin-reach.ts";
 import {
 	isCarriedRoutineCompletion,
 	ROUTINE_COMPLETION_TYPE,
@@ -221,19 +221,8 @@ export class RoutineRuntimeAssembly {
 	/** Builds the routine runtime of this session's store: the scheduler, the routine tool's session, intake and the watch monitor. */
 	assemble(store: PersistentBotTeamStore): RoutineRuntime {
 		const parentSessionId = this.deps.getSessionId();
-		const canUseOrigin = (origin: WorkerReceiptOrigin): boolean => {
-			const manager = this.deps.getSessionManager();
-			return (
-				origin.sessionId === manager.getSessionId() &&
-				(manager.isPersisted()
-					? Boolean(manager.getSessionFile()) &&
-						(origin.sessionFile === undefined || origin.sessionFile === manager.getSessionFile())
-					: origin.sessionFile === undefined) &&
-				!manager.isPersistenceStateUncertain() &&
-				isSessionAppendAnchorCurrent(manager, origin) &&
-				Boolean(origin.leafId && manager.isEntryDurableForSession(origin.leafId))
-			);
-		};
+		const canUseOrigin = (origin: WorkerReceiptOrigin): boolean =>
+			routineOriginReach(this.deps.getSessionManager(), origin) === "usable";
 		const worker = new RoutineWorkerExecutor({
 			getSnapshot: () => {
 				this.host.workerController();
@@ -320,6 +309,10 @@ export class RoutineRuntimeAssembly {
 						if (notification.status === "pending") ids.push(notification.notificationId);
 					}
 					lifecycle.markNotificationsDelivered(ids);
+				},
+				originLoss: (origin) => {
+					const reach = routineOriginReach(this.deps.getSessionManager(), origin);
+					return reach === "usable" || reach === "waiting" ? undefined : reach;
 				},
 				noticeRoutineState: (kind, routineId, notice) =>
 					this.deps.observeHarnessNotice?.(kind, () => ({ scope: routineId, state: notice ?? "clear" })),
