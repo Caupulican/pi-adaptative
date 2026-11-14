@@ -1100,8 +1100,10 @@ export class AgentSession {
 		this._modelRegistry = config.modelRegistry;
 		this._subscriptionAllowance = openSubscriptionAllowance(config, () => this.model);
 		this._usageReset = new UsageResetResume({
+			enabled: !isWorkerSession(),
 			clock: config.timers.port("provider-admission"),
 			modelRegistry: config.modelRegistry,
+			inRunRetryMaxMs: () => this.settingsManager.getProviderRetrySettings().maxRetryDelayMs,
 			modelExhaustion: (ref) => this._foregroundRecovery.modelExhaustion(ref),
 			lastMessage: () => this.agent.state.messages.at(-1),
 			waitForIdle: () => this._foregroundRecovery.waitForIdle(),
@@ -4769,9 +4771,11 @@ export class AgentSession {
 		this._goals.recordContinuationTelemetry(pass);
 	}
 
-	/** Restore runtime intent, automatically reopening only goals stopped by bounded system guards. */
+	/** Restore runtime intent: reopen goals stopped by bounded system guards, and wait again for a usage limit's recorded reset. */
 	restoreGoalRuntimeAfterResume(): boolean {
-		return this._goals.restoreAfterResume();
+		const resumed = this._goals.restoreAfterResume();
+		this._usageReset.restoreGoalWait(this.getGoalStateSnapshot(), this.model);
+		return resumed;
 	}
 
 	/** Save native task-step state to the active session log. */

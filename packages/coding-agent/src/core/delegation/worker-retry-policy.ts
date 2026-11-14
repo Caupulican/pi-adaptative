@@ -76,11 +76,14 @@ export function evaluateWorkerRetry(args: {
 	// is an ordinary retry that spends the ceiling, so a refusal that keeps stating a near reset ends once it is spent.
 	const resetWaitMs = usageResetWaitMs(classified, subscription);
 	if (resetWaitMs !== undefined) return { retry: true, reason: "usage_reset", delayMs: resetWaitMs, usageReset: true };
-	const statedUsageReset = statedUsageResetMs(classified, subscription) !== undefined;
+	// A quota is never retryable by its class; one that states a near reset is retried once it passes. A rate limit keeps
+	// its class's verdict, so a provider's own "do not retry" still ends it.
+	const quotaReset =
+		classified.reason === "billing_or_quota" && statedUsageResetMs(classified, subscription) !== undefined;
 	const attemptsAllowed = args.maxAttempts ?? DEFAULT_WORKER_TASK_ATTEMPTS;
 	const retriesSpent = args.retriesUsed - (args.resetWaits ?? 0);
 	if (!failover && retriesSpent + 1 >= attemptsAllowed) return { retry: false, reason: "attempts_exhausted" };
-	if (!classified.retryable && !failover && !statedUsageReset)
+	if (!classified.retryable && !failover && !quotaReset)
 		return { retry: false, reason: `not_retryable_${classified.reason}` };
 	// A stated delay is waited, never less than the ladder's own backoff: one stated as nothing ("retry after 0 seconds",
 	// a reset worded "~0 min") would retry at once, which the durable suspension refuses as a deadline not in the future.
