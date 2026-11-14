@@ -18,7 +18,9 @@ in force. See [Model Router settings](settings.md#model-router).
 A bot you message directly (`/bot msg`, its roster chat, `@bot`) runs as its own session, not as a worker of the session you
 are in. Its home is `<agent dir>/bots/<id>/`: `profile.json` (written from the bot's record: model, soul, write grant, who
 made it), `sessions/` (its own session files; it continues the newest one, so it keeps one conversation whichever project you
-message it from). The record in the bot store stays the index; editing the bot's model, permissions or soul
+message it from). A watch belongs to the conversation that armed it and is checked only by it, so the one place a bot's
+session is chosen (when it loads) keeps that true: if it continues another conversation than the one its watches target,
+those watches are cancelled and you are told. The record in the bot store stays the index; editing the bot's model, permissions or soul
 refreshes the profile and applies to its session when it starts, so a bot that is working must be stopped first. The session
 runs on the bot's model, under the rules a worker's own model is held to (a model that is gone, has no credentials, is paid by
 API key without being the owner's choice while subscription models are usable, or that your model policy disallows refuses the

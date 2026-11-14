@@ -105,6 +105,9 @@ export const BOT_TEAM = {
 	/** A bot's session holds live watches and could not be opened to keep them sampled. */
 	botWatchesNotResumed: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its session holds watches but could not be opened, so they are not checked until it is (${reason}).`,
+	/** Watches an earlier conversation of the bot armed, cancelled when it continues another (a watch is checked only by its own). */
+	botWatchesCancelled: (agentId: string, count: number) =>
+		`Bot ${agentId}: ${count} ${count === 1 ? "watch" : "watches"} armed in an earlier conversation of its ${count === 1 ? "was" : "were"} cancelled; it continues its newest conversation, and a watch is checked only by the conversation that armed it.`,
 	/** A change of what defines a running bot's session. */
 	botChangeWhileRunning: (agentId: string) =>
 		`Bot ${agentId} is working: its model, permissions and soul apply to its session when it starts, so stop it first (/bot stop ${agentId}).`,

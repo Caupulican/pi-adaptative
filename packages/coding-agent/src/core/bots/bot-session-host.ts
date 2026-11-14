@@ -28,9 +28,11 @@
  */
 
 import { randomBytes } from "node:crypto";
-import { existsSync } from "node:fs";
+import { existsSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { type Api, type Model, TOOL_SCHEMA_SEARCH_NAME, type Usage } from "@caupulican/pi-ai";
 import { harnessLog } from "../../kernel/harness-log.ts";
+import { readSessionHeader } from "../../kernel/session/session-file-reading.ts";
 import { findMostRecentSessionInDirs } from "../../kernel/session/session-listing.ts";
 import { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
@@ -424,6 +426,12 @@ export class BotSessionHost {
 			const sessionManager = newest
 				? SessionManager.open(newest, agentDir, home.sessionsDir, cwd)
 				: SessionManager.create(cwd, agentDir, home.sessionsDir);
+			this.cancelOtherSessionsWatches(
+				agentId,
+				home.sessionsDir,
+				sessionManager.getSessionId(),
+				this.idleTimers().now(),
+			);
 			settings = this.ports.settings();
 			const settingsManager = settings.settings;
 			const ports = this.ports;
@@ -606,6 +614,24 @@ export class BotSessionHost {
 		const live = liveOwnWatches(this.ports.store(), sessionId, this.idleTimers().now());
 		if (live.firstExpiresAt !== undefined) this.watchExpiry.note(agentId, live.firstExpiresAt);
 		return live.count;
+	}
+
+	/**
+	 * The invariant of the one place a bot's session id is chosen (`load`): the bot's watches target that id. A watch is held
+	 * by the runtime of the session it targets, so a watch another session of the bot's home armed would be held by none
+	 * once the bot continues another: such watches are cancelled here, and the owner told.
+	 */
+	private cancelOtherSessionsWatches(agentId: string, sessionsDir: string, sessionId: string, nowMs: number): void {
+		const store = this.ports.store();
+		const others = readdirSync(sessionsDir)
+			.filter((name) => name.endsWith(".jsonl"))
+			.flatMap((name) => readSessionHeader(join(sessionsDir, name))?.id ?? [])
+			.filter((id) => id !== sessionId);
+		let cancelled = 0;
+		for (const other of others)
+			for (const routine of store.listRoutines({ sessionId: other, scope: "own-watches" }))
+				if (store.deleteRoutine(routine.routineId, undefined, nowMs)) cancelled++;
+		if (cancelled > 0) this.ports.warn(interfaceText().botTeam.botWatchesCancelled(agentId, cancelled));
 	}
 
 	/** Whether the bot session `sessionId` holds a live watch, as the store says now. */
