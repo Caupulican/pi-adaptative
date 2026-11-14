@@ -753,6 +753,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 			systemOneHost?.enabled ??
 			isSystemOneEnabled(settingsManager, { enabled: options.systemOneEnabled, disabled: options.disableSystemOne });
 		let systemOneController = systemOneEnabled ? options.systemOneController : undefined;
+		const systemOneSource = systemOneSourceOf(options, () => systemOneEnabled);
 
 		const hookCoordinator =
 			options.hookCoordinator ??
@@ -773,8 +774,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 		let constructed: AgentSession | undefined;
 		try {
 			if (!systemOneController && systemOneEnabled) {
-				const choice = () => systemOneHost?.provider ?? options.systemOneProvider;
-				const access = systemOneAccessFromSession(settingsManager, authStorage, choice);
+				const access = systemOneAccessFromSession(settingsManager, authStorage, () => systemOneSource.provider);
 				// A session without any System One key starts without System One, as before; with one, every
 				// evaluation resolves provider, model and key anew, so a provider switch needs no restart.
 				const resolvedAccess = await access.resolve();
@@ -794,7 +794,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				if (resolvedAccess.kind === "ready")
 					systemOneController = await createSessionSystemOneController({
 						access,
-						fetch: systemOneHost?.fetch ?? options.systemOneFetch,
+						fetch: systemOneSource.fetch,
 						credentialBoundary: systemOneCredentialBoundary,
 						usage: semanticUsage,
 						cwd,
@@ -903,7 +903,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				sessionStartEvent: options.sessionStartEvent,
 				systemOneController,
 				codeDuplicateFileLister: options.codeDuplicateFileLister,
-				systemOne: systemOneSourceOf(options, systemOneEnabled),
+				systemOne: systemOneSource,
 				timers,
 				machineFacts: options.machineFacts,
 				...(options.subscriptionAllowance ? { subscriptionAllowance: options.subscriptionAllowance } : {}),

@@ -29,8 +29,10 @@ export interface SystemOneSessionSource {
 export type SystemOneHostSource = Omit<SystemOneSessionSource, "evidenceDir">;
 
 /**
- * The source of a session built with these options, once its on/off is resolved. A hosted session's source reads its
- * host's at each use (`systemOneHost`), so its on/off, provider and transport are the host's now, never a copy.
+ * The source of a session built with these options: the one resolution of its provider and transport, which its
+ * controller, its `systemone` tool and its workers all read. A hosted session's source reads its host's at each use
+ * (`systemOneHost`), so its on/off, provider and transport are the host's now, never a copy; any other session's on/off
+ * is `enabled` as the session resolves it.
  */
 export function systemOneSourceOf(
 	options: {
@@ -39,7 +41,7 @@ export function systemOneSourceOf(
 		systemOneFetch?: typeof fetch;
 		systemOneEvidenceDir?: string;
 	},
-	enabled: boolean,
+	enabled: () => boolean,
 ): SystemOneSessionSource {
 	const evidence = options.systemOneEvidenceDir ? { evidenceDir: options.systemOneEvidenceDir } : {};
 	const host = options.systemOneHost;
@@ -57,7 +59,9 @@ export function systemOneSourceOf(
 			...evidence,
 		};
 	return {
-		enabled,
+		get enabled() {
+			return enabled();
+		},
 		...(options.systemOneProvider ? { provider: options.systemOneProvider } : {}),
 		...(options.systemOneFetch ? { fetch: options.systemOneFetch } : {}),
 		...evidence,
