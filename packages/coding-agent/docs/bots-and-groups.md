@@ -100,7 +100,9 @@ marks nothing. Only a notice that could not be written is a warning of the proce
 record that the chat shows with the reason (the newest eight are kept), and the host's session is warned. A message that
 waits when the host lets the bot go or dies is taken by the process that opens the bot next, including one working in the
 directory the message was sent from: every process lists the inboxes of the bots no process hosts once a minute, so that
-happens without the owner's next message even where the watch over the bot homes does not fire; a bot retired or moved to a worker refuses what waits, with the reason. Delivery is at
+happens without the owner's next message even where the watch over the bot homes does not fire (a bot whose session
+failed to open for another reason than its model, such as an unreadable session file, is tried again by that listing only
+once a new message waits or its record changed; a process start or another host's change tries it at once); a bot retired or moved to a worker refuses what waits, with the reason. Delivery is at
 least once: a host killed after its session took a message and before it deleted the file gives it again. Like the session
 files beside it, the inbox is private harness storage: a worker's and a bot session's file and process tools are refused
 the bot homes. `/bot stop` of a bot working in another session says to stop it there. A session started after every other one closed lists each bot with its whole conversation.

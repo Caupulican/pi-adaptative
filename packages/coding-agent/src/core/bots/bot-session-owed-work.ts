@@ -170,6 +170,12 @@ export class BotOwedWork {
 	private readonly refusals = new Map<string, RecordedRefusal>();
 	/** The alarm at the recorded end of a bot's model refusal. */
 	private readonly alarms = new Map<string, WallAlarm>();
+	/**
+	 * An open that failed for another reason than its model (an unreadable session file, a directory gone): what defined it
+	 * and the inbox files it was opened for. The periodic listing does not open it again while both are the same; an attach,
+	 * a host change or a record change does.
+	 */
+	private readonly failedOpens = new Map<string, { readonly key: string | undefined; readonly inbox: string }>();
 	/** The periodic listing of the bots' inboxes (see {@link sweepInboxes}). */
 	private sweep: RepeatingAlarm | undefined;
 
@@ -199,12 +205,14 @@ export class BotOwedWork {
 	loaded(agentId: string): void {
 		this.told.delete(agentId);
 		this.wakes.forget(agentId);
+		this.failedOpens.delete(agentId);
 	}
 
 	/** The bot was released (retired, or off the session path): nothing of it is kept. */
 	released(agentId: string): void {
 		this.wakes.forget(agentId);
 		this.forgetRefusal(agentId);
+		this.failedOpens.delete(agentId);
 	}
 
 	/** The host stopped: no alarm takes work up after it. */
@@ -218,8 +226,8 @@ export class BotOwedWork {
 	/**
 	 * Lists every bot's inbox every `OWED_INBOX_SWEEP_MS` until the host stops, whether the watch over the bot homes runs
 	 * or not (a watch that runs can still miss what another process writes): a message waiting for a bot this host runs is
-	 * taken, and a bot no host runs is opened ({@link openIfOwed}). Costs one directory listing per bot when nothing waits;
-	 * no session file is read.
+	 * taken, and a bot no host runs is opened ({@link openIfOwed}), unless its last open failed on the same definition and
+	 * inbox. Costs one directory listing per bot when nothing waits; no session file is read.
 	 */
 	sweepInboxes(): void {
 		if (this.sweep !== undefined || this.ports.stopped()) return;
@@ -228,7 +236,7 @@ export class BotOwedWork {
 			for (const { agentId } of this.ports.store().listBots()) {
 				if (!botInboxWaiting(agentDir, agentId)) continue;
 				if (this.ports.hostedHere(agentId)) this.ports.takeInbox(agentId);
-				else this.openIfOwed(agentId);
+				else this.openIfOwed(agentId, true);
 			}
 		});
 	}
@@ -280,9 +288,10 @@ export class BotOwedWork {
 	 * let the bot go or die, or rebuilds a session on a changed record takes them up again. A session with watches is opened
 	 * only by a process working in the directory it worked in (a watch's relative path reads against it); one owed only its
 	 * inbox (a bot whose session never ran is owed nothing else), also by a process working where a waiting message was
-	 * sent from. Another process that opened it first is not a failure.
+	 * sent from. Another process that opened it first is not a failure. `swept` (the periodic listing asks) skips a bot
+	 * whose last open failed on what defines it now and the inbox files waiting now.
 	 */
-	openIfOwed(agentId: string): void {
+	openIfOwed(agentId: string, swept = false): void {
 		const { ports } = this;
 		const agentDir = ports.agentDir();
 		if (ports.stopped() || ports.hostedHere(agentId) || ports.heldElsewhere(agentId)) return;
@@ -327,11 +336,19 @@ export class BotOwedWork {
 		// Refused on what defines it now, for a cause that still holds: not opened again until either changes.
 		if (this.stillRefused(agentId, record, sender, !watching && waiting.length === 0)) return;
 		const key = ports.currentKey(record, sender);
+		// What waits in the inbox, read here too when the bot is owed its watches (the listing above skipped it then).
+		const inbox = (watching ? ports.waiting(agentId) : waiting).map((item) => item.file).join("\n");
+		const failed = this.failedOpens.get(agentId);
+		if (swept && failed !== undefined && failed.key === key && failed.inbox === inbox) return;
 		void ports.open(agentId, sender).catch((error: unknown) => {
-			// A model refused before the lock is kept with its cause; any other failure is asked again at the next change.
+			// A model refused before the lock is kept with its cause; any other failure is asked again at the next change, and
+			// by the periodic listing only once what defines the bot or what waits in its inbox changed.
+			this.failedOpens.delete(agentId);
 			if (error instanceof BotModelRefusedError) this.record(agentId, "open", key, error);
 			else this.forgetRefusal(agentId);
-			if (!ports.heldElsewhere(agentId)) notResumed(error);
+			if (ports.heldElsewhere(agentId)) return;
+			if (!(error instanceof BotModelRefusedError)) this.failedOpens.set(agentId, { key, inbox });
+			notResumed(error);
 		});
 	}
 
