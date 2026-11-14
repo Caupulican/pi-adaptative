@@ -557,12 +557,14 @@ async function switchSession(
 
 async function offerRestoredGoalResume(host: SessionFlowHost): Promise<boolean> {
 	const state = host.session.getGoalStateSnapshot();
-	if (state && isSystemBlockedGoal(state)) {
-		const resumed = host.session.restoreGoalRuntimeAfterResume();
-		if (resumed) {
+	if (state && (isSystemBlockedGoal(state) || state.status === "usage_limited")) {
+		const restored = host.session.restoreGoalRuntimeAfterResume();
+		if (restored.resumed) {
 			host.refreshAutonomyFooterStatus();
 			return true;
 		}
+		// A goal waiting for its subscription's usage reset resumes on its own at the reset: nothing is asked.
+		if (restored.waitsForUsageReset) return false;
 	}
 	if (!state || (state.status !== "paused" && state.status !== "blocked" && state.status !== "usage_limited")) {
 		host.session.restoreGoalRuntimeAfterResume();

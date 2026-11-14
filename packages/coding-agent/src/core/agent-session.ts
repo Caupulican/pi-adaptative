@@ -4771,11 +4771,11 @@ export class AgentSession {
 		this._goals.recordContinuationTelemetry(pass);
 	}
 
-	/** Restore runtime intent: reopen goals stopped by bounded system guards, and wait again for a usage limit's recorded reset. */
-	restoreGoalRuntimeAfterResume(): boolean {
+	/** Restore runtime intent: reopen goals stopped by bounded system guards, and wait again for a usage limit's kept reset. */
+	restoreGoalRuntimeAfterResume(): { readonly resumed: boolean; readonly waitsForUsageReset: boolean } {
 		const resumed = this._goals.restoreAfterResume();
-		this._usageReset.restoreGoalWait(this.getGoalStateSnapshot(), this.model);
-		return resumed;
+		const waitsForUsageReset = this._usageReset.restoreWait(this.getGoalStateSnapshot(), this.model);
+		return { resumed, waitsForUsageReset };
 	}
 
 	/** Save native task-step state to the active session log. */

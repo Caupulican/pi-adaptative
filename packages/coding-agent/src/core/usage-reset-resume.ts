@@ -12,9 +12,10 @@
  * A metered (API-key) model's refusal, one that states no reset, one whose reset is too near to be a usage reset, and a
  * rate limit the turn's own retry waits out (its stated delay within the retry's limit, whose backoff the owner may cancel)
  * arm nothing: those stop as before. A worker process's session arms nothing: its attempt ladder waits for it. The alarm
- * lives in this process; after a restart a goal the limit stopped waits again for the reset its stop recorded
- * (`restoreGoalWait`), and a plain stopped turn is left for the owner. A Codex usage limit also says whether the account
- * holds a usage reset to redeem (`/usage`); a redeemed reset ends the wait at once.
+ * lives in this process; after a restart or a switch to the session (`restoreWait`) the wait is armed again from what the
+ * session kept: a goal the limit stopped waits for the reset its stop recorded, otherwise a transcript still ending on the
+ * refusal waits for the reset that refusal stated, counted from when it arrived. A Codex usage limit also says whether
+ * the account holds a usage reset to redeem (`/usage`); a redeemed reset ends the wait at once.
  */
 
 import { type Api, type AssistantMessage, listOpenAICodexRateLimitResetCredits, type Model } from "@caupulican/pi-ai";
@@ -85,16 +86,43 @@ export class UsageResetResume {
 	}
 
 	/**
-	 * After a restart or a switch to this session: a goal a usage or rate limit stopped waits for the reset its stop stated,
-	 * read from the goal's own record (the stop's time and the refusal it kept), when it runs on a subscription `model`; a
-	 * reset already passed resumes it at once. A stop that states no reset is left for the owner.
+	 * After a restart or a switch to this session, the wait its stop would have armed, from what the session kept. A goal a
+	 * usage or rate limit stopped waits for the reset its stop stated, read from the goal's own record (the stop's time and
+	 * the refusal it kept), when it runs on a subscription `model`. Otherwise a transcript ending on a refusal waits for the
+	 * reset that refusal stated, counted from its arrival, and the turn is continued at the reset as when the stop armed it.
+	 * The same rule decides both: a stop with no stated reset, a metered model's and a near reset arm nothing. A reset already
+	 * passed continues at once. Whether the session now waits for a usage reset.
 	 */
-	restoreGoalWait(goal: GoalState | undefined, model: Model<Api> | undefined): void {
+	restoreWait(goal: GoalState | undefined, model: Model<Api> | undefined): boolean {
+		if (this.pending) return true;
+		const restored = this.restoredStop(goal, model);
+		if (restored) this.arm(restored.resume, restored.at);
+		return restored !== undefined;
+	}
+
+	/** The wait a kept stop calls for: the goal's recorded stop first, else the refusal the transcript ends on. */
+	private restoredStop(
+		goal: GoalState | undefined,
+		model: Model<Api> | undefined,
+	): { readonly resume: Omit<PendingResume, "handle">; readonly at: number } | undefined {
 		const stop = goal && model ? goalUsageStop(goal) : undefined;
-		if (!stop || !model || this.pending) return;
-		const resetMs = this.resetWaitMs(classifyFailure({ message: stop.refusal, provider: model.provider }), model);
-		if (resetMs === undefined) return;
-		this.arm({ ref: `${model.provider}/${model.id}`, provider: model.provider }, stop.at + resetMs);
+		if (stop && model) {
+			const resetMs = this.resetWaitMs(classifyFailure({ message: stop.refusal, provider: model.provider }), model);
+			if (resetMs !== undefined)
+				return {
+					resume: { ref: `${model.provider}/${model.id}`, provider: model.provider },
+					at: stop.at + resetMs,
+				};
+		}
+		const refusal = this.deps.lastMessage();
+		if (refusal?.role !== "assistant" || refusal.stopReason !== "error" || !refusal.errorMessage) return undefined;
+		const refusalModel = this.deps.modelRegistry.find(refusal.provider, refusal.model);
+		if (!refusalModel) return undefined;
+		const classified = classifyFailure({ message: refusal.errorMessage, provider: refusal.provider });
+		const resetMs = this.resetWaitMs(classified, refusalModel);
+		if (resetMs === undefined) return undefined;
+		const resume = { ref: `${refusal.provider}/${refusal.model}`, provider: refusal.provider, refusal };
+		return { resume, at: refusal.timestamp + resetMs };
 	}
 
 	/** The owner redeemed a usage reset for `provider`: a wait on it ends now, and a later limit is offered again. */
@@ -187,12 +215,14 @@ export class UsageResetResume {
 			this.resetOffered.add(provider);
 			this.deps.emit({
 				type: "warning",
-				message: `OpenAI Codex usage limit reached. ${summary.availableCount} usage ${summary.availableCount === 1 ? "reset is" : "resets are"} available: /usage, then Redeem usage limit reset.`,
+				message: interfaceText().notices.usageReset.codexResetsAvailable(summary.availableCount),
 			});
 		} catch (error) {
 			this.deps.emit({
 				type: "warning",
-				message: `OpenAI Codex usage limit reached; checking for usage resets failed: ${error instanceof Error ? error.message : String(error)}`,
+				message: interfaceText().notices.usageReset.codexResetCheckFailed(
+					error instanceof Error ? error.message : String(error),
+				),
 			});
 		} finally {
 			this.resetChecking.delete(provider);

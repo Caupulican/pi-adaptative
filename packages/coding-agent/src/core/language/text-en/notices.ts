@@ -432,6 +432,10 @@ export const NOTICES = {
 		sessionWaits: (at: string) =>
 			`The subscription's usage is used up; this session continues on its own when the usage resets (${at}).`,
 		sessionResumeFailed: (error: string) => `The session could not continue after the usage reset: ${error}`,
+		codexResetsAvailable: (count: number) =>
+			`OpenAI Codex usage limit reached. ${count === 1 ? "1 usage reset is" : `${count} usage resets are`} available: open /usage and press x to redeem one.`,
+		codexResetCheckFailed: (error: string) =>
+			`OpenAI Codex usage limit reached; checking for usage resets failed: ${error}`,
 	},
 	/** What the collaboration extension reports when its own steps fail: the error text follows. */
 	collaboration: {

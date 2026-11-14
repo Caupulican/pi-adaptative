@@ -379,6 +379,10 @@ export const NOTICES = {
 		sessionWaits: (at: string) =>
 			`O uso da assinatura acabou; esta sessão continua sozinha quando o uso for renovado (${at}).`,
 		sessionResumeFailed: (error: string) => `A sessão não conseguiu continuar depois da renovação do uso: ${error}`,
+		codexResetsAvailable: (count: number) =>
+			`Limite de uso do OpenAI Codex atingido. ${count === 1 ? "1 renovação de uso está disponível" : `${count} renovações de uso estão disponíveis`}: abra /usage e pressione x para resgatar uma.`,
+		codexResetCheckFailed: (error: string) =>
+			`Limite de uso do OpenAI Codex atingido; a verificação de renovações de uso falhou: ${error}`,
 	},
 	/** O que a extensão de colaboração relata quando os próprios passos falham: o texto do erro vem em seguida. */
 	collaboration: {
