@@ -90,14 +90,16 @@ export function botNoticeLine(
 }
 
 /**
- * The delivery ids kept apart from the chat, oldest first; none before the first is kept. A record that does not read
- * is set aside (renamed `.unreadable`) and thrown, so it is reported once and the next notice told starts a new one.
+ * The delivery ids kept apart from the chat, oldest first; none before the first is kept. A record that is not a list of
+ * ids is set aside (renamed `.unreadable`) and thrown, so it is reported once and the next notice told starts a new one;
+ * a file that cannot be read is thrown and kept.
  */
 function readDeliveries(agentDir: string, agentId: string): string[] {
 	const file = join(botNoticesDir(agentDir, agentId), DELIVERED_FILE);
 	if (!existsSync(file)) return [];
+	const text = readFileSync(file, "utf8");
 	try {
-		const value: unknown = JSON.parse(readFileSync(file, "utf8"));
+		const value: unknown = JSON.parse(text);
 		if (Array.isArray(value) && value.every((id) => typeof id === "string")) return value;
 		throw new Error("not a list of delivery ids");
 	} catch (error) {

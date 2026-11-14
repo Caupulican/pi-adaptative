@@ -1,8 +1,9 @@
 /**
  * The spend of a session's compactions as its usage owner keeps it. Every summary call a compaction makes is retained
- * under the `compaction:` operation family (a failed attempt's, a retry's and an idle preparation's calls included), so
- * the family's total is what the session's compactions cost and never another plane's spend recorded meanwhile (System
- * One's, a turn's own messages).
+ * under the `compaction:` operation family (a failed attempt's, a retry's and an idle preparation's calls included)
+ * wherever the compaction captures its usage origin, as an `AgentSession` always does, so the family's total is what the
+ * session's compactions cost and never another plane's spend recorded meanwhile (System One's, a turn's own messages).
+ * Without a captured origin a call keeps its bare source id as its operation and is not in the family.
  */
 import type { UsageComponent } from "../../kernel/usage-components.ts";
 import type { AccountingOrigin } from "../cost/accounting-evidence.ts";
