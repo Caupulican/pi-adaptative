@@ -9,6 +9,7 @@ import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
 	agentsOn,
+	BOT_SESSION_JUDGMENTS,
 	botRosterState,
 	botSessionFilesText,
 	carries,
@@ -24,10 +25,6 @@ import {
 	teamMessages,
 	waitForBotRosterState,
 } from "./journey-7-shared.ts";
-import { INTAKE_JUDGMENTS_WITHOUT_GRANT } from "./shared.ts";
-
-/** The owner-policy questions of a queued owner message in a session with no optional tool, no rule and every grant. */
-const { optional_tool_0: _optionalTool, ...STEER_JUDGMENTS } = INTAKE_JUDGMENTS_WITHOUT_GRANT;
 
 const READER = "reader-one";
 const READER_SOUL = "You answer owner questions about the retry limit with one short sentence.";
@@ -160,7 +157,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	// words are never judged; the second, written while that turn runs, is a steer judged in full when it is queued: the
 	// owner-policy questions alone, since every edge class is granted, no rule is written and no optional tool is offered.
 	// No group member is a session, and no answer names a claim kind, so nothing else is asked.
-	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-owner-messages", STEER_JUDGMENTS);
+	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-owner-messages", BOT_SESSION_JUDGMENTS);
 
 	// One bot, two owner messages: the second is written while the first turn is held at its request.
 	const first = await session.sendOperatorMessageToBot(READER, DIRECT_ONE);

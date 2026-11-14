@@ -24,6 +24,16 @@ const { capabilities_authorized: _capabilities, ...intake } = ICM_INTAKE_JUDGMEN
  */
 export const PHASE_JUDGMENTS = intake;
 
+const { optional_tool_0: _optionalTool, ...ownerPolicy } = intake;
+
+/**
+ * The judgments the owner's words ask in a bot's own session with System One on: the owner-policy questions alone. A
+ * bot's session holds no optional tool (`botSessionToolNames` offers no `secret_store`, the main session's one optional
+ * tool, which no worker holds either), so no optional-tool question is asked; every edge class is granted and no rule is
+ * written, so nothing else is.
+ */
+export const BOT_SESSION_JUDGMENTS = ownerPolicy;
+
 /** The scripted model id of each actor: the bot's model is chosen when it is created, and the track carries it. */
 export const MODEL_ID = {
 	root: "root",

@@ -5,13 +5,13 @@ import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, projectPath, withDeadline } from "../session-fixture.ts";
 import {
 	agentsOn,
+	BOT_SESSION_JUDGMENTS,
 	botSessionFilesText,
 	chatText,
 	createOwnerBot,
 	enqueueBot,
 	MODEL_ID,
 	offeredTools,
-	PHASE_JUDGMENTS,
 	reached,
 	TRACK,
 	waitForBotRosterState,
@@ -135,10 +135,11 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		},
 	);
 
-	// The owner's message starts a turn that calls a tool, so its words are judged as an owner request that calls a tool is.
-	// The refused watch is refused by the watch's own rules before the bot's gate is asked about its command, and a file
-	// watch makes no call, so nothing else is asked.
-	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-bot-watch", PHASE_JUDGMENTS);
+	// The owner's message starts a turn that calls a tool, so its words are judged as an owner request that calls a tool is
+	// in a bot's own session: the owner-policy questions, and no optional-tool question, since the bot holds no optional
+	// tool. The refused watch is refused by the watch's own rules before the bot's gate is asked about its command, and a
+	// file watch makes no call, so nothing else is asked.
+	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-bot-watch", BOT_SESSION_JUDGMENTS);
 
 	// The roster's count follows the store through the home watch: it is polled, and the poll ends with the wait, whether the
 	// count reached `count` or the deadline passed.
