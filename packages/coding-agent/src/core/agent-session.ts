@@ -1217,6 +1217,7 @@ export class AgentSession {
 			getActiveOrchestrationProfile: () => config.orchestrationProfile,
 			getModelRegistry: () => this._modelRegistry,
 			getCredentialExposureBoundary: () => this._runtimeBuilder.credentialExposureBoundary,
+			getSessionReadOnlyShell: () => this._runtimeBuilder.sessionReadOnlyShell,
 			// Workers pick only models that can take work: quota left and offered to the owner's account.
 			isModelExhausted: (model) => this._modelAccess.isUnusable(model),
 			modelUnusableCause: (model) => this._modelAccess.unusableCause(model),
@@ -1227,8 +1228,7 @@ export class AgentSession {
 			isSystemOneEnabled: () => this.systemOneEnabled,
 			getForegroundToolNames: () => this.getActiveToolNames(),
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
-			// Live worker supervision: one observation per executed worker tool call, applied through
-			// the root's existing worker-agent control surface.
+			// Live worker supervision: one observation per executed worker tool call, through root's worker-agent control.
 			observeWorkerProgress: (observation, signal) => this._workerSupervision.observe(observation, signal),
 			// Worker conversations plan with root's own context pipeline on their own lane and pass the same cache guard.
 			...createWorkerRequestPlanner({

@@ -356,6 +356,7 @@ export class RoutineRuntimeAssembly {
 			getAgentDir: () => this.deps.getAgentDir(),
 			getCapabilityEnvelope: () => this.deps.getCapabilityEnvelope(),
 			getCredentialExposureBoundary: () => this.deps.getCredentialExposureBoundary?.(),
+			getSessionReadOnlyShell: () => this.deps.getSessionReadOnlyShell?.(),
 			getEdgeGrants: (standingOnly) => this.deps.getEdgeGrants?.(standingOnly) ?? [],
 			getEdgeMode: () => this.deps.getSettingsManager().getEdgeSettings().mode,
 			getDenyCommands: () => this.deps.getSettingsManager().getEdgeSettings().deny,

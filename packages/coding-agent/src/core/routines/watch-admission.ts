@@ -4,8 +4,9 @@
  * - a path (a file, a folder or a glob pattern) is observed through its metadata, which needs no read authority; its
  *   content is digested only where the session's read scope and the credential policy allow reading it;
  * - a command passes the admission the owner's own shell calls pass (the capability envelope, credential protection,
- *   edge classification against the session's edge grants), non-interactively: whatever would ask the owner is
- *   refused, since a watch cannot ask. It runs with a bounded environment;
+ *   edge classification against the session's edge grants, and the read-only line of a session whose shell edits
+ *   nothing), non-interactively: whatever would ask the owner is refused, since a watch cannot ask. It runs with a
+ *   bounded environment;
  * - a managed process is a process-matrix entry that has not ended yet, and an operating-system process must be running.
  * Ports, pages and the cadence are bounded by the condition's own schema; a page's address is checked again at fetch.
  * A watch a worker runtime armed is admitted under the session's authority and the worker's together
@@ -44,7 +45,7 @@ import {
 	sessionReadScope,
 } from "../autonomy/session-read-scope.ts";
 import { workerCommandRestrictions } from "../autonomy/worker-run-environment.ts";
-import { readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
+import { type ReadOnlyShellLaneScope, readOnlyShellViolation } from "../model-router/read-only-shell-policy.ts";
 import { refuseLocalPush } from "../objective-execution/local-commit-delivery.ts";
 import { readEntrySync } from "../process-matrix/store.ts";
 import { createProcessScratchDirectory, removeProcessScratchDirectory } from "../process-scratch.ts";
@@ -62,6 +63,11 @@ export interface WatchAdmissionHost {
 	getAgentDir(): string;
 	getCapabilityEnvelope(): CapabilityEnvelope | undefined;
 	getCredentialExposureBoundary?(): CredentialExposureBoundary | undefined;
+	/**
+	 * The read-only line the session's own shell is held to, when its shell edits nothing (a read-only bot's session): its
+	 * shell calls are judged by it when they run, and a watched command is judged by it at arming and at every run.
+	 */
+	getSessionReadOnlyShell?(): ReadOnlyShellLaneScope | undefined;
 	/**
 	 * The session's edge grants, as the owner's own shell calls read them: what was allowed ahead, never a prompt answered
 	 * for one call; `standingOnly` keeps the owner's standing grants alone, all a run carrying a third party's words may use.
@@ -287,6 +293,10 @@ export class WatchAdmission {
 		}
 		const credential = credentialToolBlockReason("bash", args, cwd, this.boundary(scope));
 		if (credential) return credential;
+		const sessionShell = this.host.getSessionReadOnlyShell?.();
+		const sessionViolation =
+			sessionShell && readOnlyShellViolation(command, cwd, { lane: sessionShell, dialect: "posix" });
+		if (sessionViolation) return `This session has a read-only shell: ${sessionViolation}.`;
 		if (worker) {
 			const refusal =
 				this.workerShellRefusal(command, worker, scratch) ?? this.thirdPartyRefusal(worker, "bash", args);

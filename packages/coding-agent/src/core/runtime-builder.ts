@@ -693,7 +693,8 @@ export class RuntimeBuilder {
 	private readonly _fileMutationIntents: FileMutationIntentController;
 	private readonly _toolStreamsWorkRun: ReturnType<typeof acquireWorkRun>;
 	private readonly _pathEnvelopes: SessionPathEnvelopes;
-	private readonly _sessionReadOnlyShell: ReturnType<typeof sessionReadOnlyShellScope> | undefined;
+	/** The read-only line this session's own shell is held to (`privatePathScope.readOnlyShell`); its watches are held to it too. */
+	readonly sessionReadOnlyShell: ReturnType<typeof sessionReadOnlyShellScope> | undefined;
 	/** Extension tools the launcher explicitly granted this worker process (never a builtin name). */
 	private readonly _workerExtensionToolNames: ReadonlySet<string>;
 	private readonly _taskDirectories: TaskDirectoryRuntime;
@@ -781,7 +782,7 @@ export class RuntimeBuilder {
 			// The harness's own memory, skills and sessions are searchable without a file glob.
 			agentDir: deps.getAgentDir(),
 		};
-		this._sessionReadOnlyShell = privatePathScope?.readOnlyShell
+		this.sessionReadOnlyShell = privatePathScope?.readOnlyShell
 			? sessionReadOnlyShellScope(
 					deps.getCwd(),
 					this._pathEnvelopes.privatePaths?.deniedPaths ?? [],
@@ -1268,8 +1269,8 @@ export class RuntimeBuilder {
 			let scoped = guarded;
 			for (const { envelope, guidance } of this._pathEnvelopes.scopes)
 				scoped = wrapToolWithEnvelopeScope(scoped, envelope, this.deps.getCwd(), guidance);
-			if (this._sessionReadOnlyShell)
-				scoped = wrapToolWithReadOnlyShell(scoped, this._sessionReadOnlyShell, this.deps.getCwd());
+			if (this.sessionReadOnlyShell)
+				scoped = wrapToolWithReadOnlyShell(scoped, this.sessionReadOnlyShell, this.deps.getCwd());
 			toolRegistry.set(
 				scoped.name,
 				wrapToolWithVerification(
@@ -1980,8 +1981,7 @@ export class RuntimeBuilder {
 							args,
 						),
 					cwd: () => this._taskDirectories.cwd,
-					// Reuses the already branch-scoped getTaskStepsStateSnapshot dep -- no new
-					// SessionManager access needed for the cross-visibility nudge.
+					// Reuses the branch-scoped getTaskStepsStateSnapshot dep: the cross-visibility nudge needs no new read.
 					getOpenTaskSteps: () => deriveOpenTaskStepRefs(this.deps.getTaskStepsStateSnapshot()),
 					getBackgroundToolTasks: () => this.deps.getToolTaskDependencies?.().list() ?? [],
 					getActivePipeline: () => {

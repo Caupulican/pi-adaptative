@@ -44,6 +44,7 @@ import type { KnowledgeGrant, KnowledgeGrantReference } from "../memory/knowledg
 import type { LaneKnowledgeSelection } from "../memory/lane-knowledge-view.ts";
 import type { LaneMemoryCapacitySource, WorkerMemoryBroker } from "../memory/worker-memory-tools.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import type { ReadOnlyShellLaneScope } from "../model-router/read-only-shell-policy.ts";
 import type { RepositoryMutationObserver } from "../objective-execution/repository-mutation-observer.ts";
 import type { OrchestrationProfile, OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
 import type { OrchestrationModelUnusableCause } from "../orchestration/model-binding.ts";
@@ -166,6 +167,8 @@ export interface ParentExecutionEnvironment {
 	readMachine?(): MachineFacts;
 	/** Parent session's canonical credential source; worker evidence and reviewer calls share it. */
 	getCredentialExposureBoundary?(): CredentialExposureBoundary;
+	/** The read-only line the session's own shell is held to, when its shell edits nothing (a read-only bot's session). */
+	getSessionReadOnlyShell?(): ReadOnlyShellLaneScope | undefined;
 	/** Root's tool mechanics (output reduction, encodings, shell engine, packing), shared with every lane. */
 	getSharedLaneToolOptions?(): SharedLaneToolOptions;
 	/** Session-owned artifact store broker; worker adapters receive fresh retrieval tools only. */
