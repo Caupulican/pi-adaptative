@@ -22,8 +22,8 @@ import { type RemoteBotHost, readRemoteBotHost } from "./bot-host-state.ts";
 /** How often the hosts a view holds are judged alive again: a host that was killed publishes nothing. */
 const REMOTE_LIVENESS_MS = 5 * 1000;
 
-/** The bot's own session as its home saved it: its id and the directory it worked in. */
-export type SavedBotSession = { readonly id: string; readonly cwd?: string };
+/** The bot's own session as its home saved it: its id, its file and the directory it worked in. */
+export type SavedBotSession = { readonly id: string; readonly file: string; readonly cwd?: string };
 
 /**
  * The bot's own session as its home holds it: the newest session file, the one its next session continues, with the
@@ -33,7 +33,7 @@ export type SavedBotSession = { readonly id: string; readonly cwd?: string };
 export function botSessionOnDisk(agentDir: string, agentId: string): SavedBotSession | undefined {
 	const file = findMostRecentSessionInDirs([botHomeOf(agentDir, agentId).sessionsDir]);
 	const header = file ? readSessionHeader(file) : null;
-	return header ? { id: header.id, cwd: getSessionHeaderCwd(header) } : undefined;
+	return file && header ? { id: header.id, file, cwd: getSessionHeaderCwd(header) } : undefined;
 }
 
 /** How many times a transcript read is opened again when a write changed the file under it. */

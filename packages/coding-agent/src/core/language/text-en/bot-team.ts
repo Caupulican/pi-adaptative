@@ -151,9 +151,9 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: its session did not close cleanly (${reason}).`,
 	botSessionNotClosed: "The bot session did not close cleanly.",
 	botSessionsNotClosed: "Bot sessions did not close cleanly.",
-	/** A bot's session holds live watches and could not be opened to keep them sampled. */
+	/** A bot's session is owed watch work or waiting messages and could not be opened (or its file read) to take them up. */
 	botWatchesNotResumed: (agentId: string, reason: string) =>
-		`Bot ${agentId}: its session holds watches but could not be opened, so they are not checked until it is (${reason}).`,
+		`Bot ${agentId}: its session is owed watch work or waiting messages but could not be opened, so they wait until it is (${reason}).`,
 	/** The bot's session is owed watch work or waiting messages, and no open root session works where it does. */
 	botOwedWorkNoRoot: (agentId: string, directories: string) =>
 		`Bot ${agentId}: its session has watches or waiting messages, but no open session works in ${directories}, where it works; they wait until a session opens there.`,
