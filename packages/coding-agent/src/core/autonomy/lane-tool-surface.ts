@@ -53,7 +53,7 @@ import { createGrepTool, type GrepToolOptions } from "../tools/grep.ts";
 import { createLookupToolDefinition } from "../tools/lookup.ts";
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import { createLsTool, type LsToolOptions } from "../tools/ls.ts";
-import type { NestedCallHost } from "../tools/nested-tool-call.ts";
+import type { NestedCallHost, NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import { createPythonTool, type PythonToolOptions } from "../tools/python.ts";
 import { createReadTool, type ReadToolOptions } from "../tools/read.ts";
 import { createRepoReadTool, type RepoReadToolOptions } from "../tools/repo-read.ts";
@@ -167,7 +167,12 @@ export interface LaneToolSurface {
 	 * Whether the lane would run this call now, with every check a call of its own faces (grant, budget, edge, path) and no
 	 * attribution: what the host does on the lane's behalf (a watch it arms) is admitted as the call the lane would make.
 	 */
-	admitHostCall(toolName: string, args: unknown, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined>;
+	admitHostCall(
+		toolName: string,
+		args: unknown,
+		signal?: AbortSignal,
+		purpose?: NestedCallPurpose,
+	): Promise<BeforeToolCallResult | undefined>;
 	/** What the lane's grant fixed about its commands and pages, for what the host keeps doing for it after it ends. */
 	shellFacts: LaneShellFacts;
 	/** Retained fatal admission failures must be checked before accepting a lane result. */
@@ -251,6 +256,8 @@ export interface LaneToolSurfaceOptions {
 		toolName: string,
 		args: unknown,
 		cwd: string,
+		/** What a host call is made for (a watch's check), for the operation gate's notice. */
+		purpose?: NestedCallPurpose,
 	) => Promise<BeforeToolCallResult | undefined> | BeforeToolCallResult | undefined;
 	/** Host-owned path alias table getter for expanding alias tokens in tool arguments. */
 	getPathAliasTable?: () => PathAliasTable;
@@ -860,7 +867,7 @@ export function createLaneToolSurface(options: LaneToolSurfaceOptions): LaneTool
 			signal?.throwIfAborted();
 			return admission.check(toolCall.name, args);
 		},
-		admitHostCall: (toolName, args, signal) => admission.admitNested(toolName, args, signal),
+		admitHostCall: (toolName, args, signal, purpose) => admission.admitNested(toolName, args, signal, purpose),
 		shellFacts,
 		...(gateway ? { gateway } : {}),
 	};

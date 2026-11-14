@@ -77,6 +77,7 @@ import type { ResolvedWorkerOutcomeSettings } from "../settings/worker-outcome-s
 import type { WorkerProgressObservation } from "../supervision/worker-supervision-coordinator.ts";
 import type { SystemOneProviderChoice } from "../system-one/access.ts";
 import type { ToolkitScript } from "../toolkit/script-registry.ts";
+import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import type { ReadOnlySkillBroker } from "../tools/skill.ts";
 import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
 import type { TimerSource } from "../util/timer-port.ts";
@@ -264,6 +265,8 @@ export interface ParentExecutionPolicy {
 		args: unknown,
 		cwd: string,
 		thirdParty: boolean,
+		/** What the call is made for (a watch's check), named by the gate's notice. */
+		purpose?: NestedCallPurpose,
 	): Promise<{ block: true; reason: string } | undefined>;
 	/** Set when the parent task is bound to local commits. Workers refuse git push on this branch. */
 	localCommitBranch?(): string | undefined;

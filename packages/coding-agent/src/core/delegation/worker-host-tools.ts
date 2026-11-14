@@ -9,6 +9,7 @@ import { TASK_EVENTS_TOOL_NAME } from "../events/host-event-tool-names.ts";
 import { createTaskEventsTool } from "../events/task-events-tool.ts";
 import { TASK_WATCH_TOOL_NAME } from "../routines/routine-tool-names.ts";
 import { createTaskWatchTool, type TaskWatchPort } from "../routines/task-watch-tool.ts";
+import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import type { WorkerAttemptExecutorOptions } from "./worker-attempt-executor.ts";
 import { WorkerCompletionProtocolError } from "./worker-provider-turn-protocol.ts";
 
@@ -47,10 +48,10 @@ export function createWorkerHostTools(
 	const caller = {
 		runtimeId: options.agentId,
 		scope: toolSurface.shellFacts,
-		admitCall: (toolName: string, args: unknown, signal?: AbortSignal) => {
+		admitCall: (toolName: string, args: unknown, signal?: AbortSignal, purpose?: NestedCallPurpose) => {
 			options.signal?.throwIfAborted();
 			if (admissionClosed()) throw new WorkerCompletionProtocolError("Worker watch admission is closed.");
-			return toolSurface.admitHostCall(toolName, args, signal);
+			return toolSurface.admitHostCall(toolName, args, signal, purpose);
 		},
 	};
 	return [taskEvents, createTaskWatchTool({ caller, port: options.watches })];

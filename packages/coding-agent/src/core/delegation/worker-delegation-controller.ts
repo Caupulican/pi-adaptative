@@ -5512,7 +5512,7 @@ export class WorkerDelegationController {
 			grant,
 			toolManifests: executionPlan.toolManifests,
 			...(workerToolAdapters ? { workerToolAdapters } : {}),
-			checkEdge: async (toolName, args, executionCwd) => {
+			checkEdge: async (toolName, args, executionCwd, purpose) => {
 				await this.deps.settleOwnerPolicy?.();
 				// A local-commit branch is the owner's integration setup, not a permission prompt: YOLO keeps it.
 				const refusedPush = refuseLocalPush(
@@ -5574,7 +5574,7 @@ export class WorkerDelegationController {
 						});
 						return { block: true, ...thirdPartyEdgeRefusal(ungranted) };
 					}
-					return this.deps.checkOperation?.(toolName, args, executionCwd, true);
+					return this.deps.checkOperation?.(toolName, args, executionCwd, true, purpose);
 				}
 				if (this.deps.getSettingsManager().getEdgeSettings().mode === "yolo") return undefined;
 				const parentGrants = this.deps.getEdgeGrants?.() ?? [];
@@ -5585,7 +5585,7 @@ export class WorkerDelegationController {
 					scopeCwd: this.deps.getCwd(),
 				}).find((candidate) => !isEdgeOperationGranted(candidate, parentGrants));
 				if (operation) return { block: true, reason: edgeBlockReason(operation, false) };
-				return this.deps.checkOperation?.(toolName, args, executionCwd, false);
+				return this.deps.checkOperation?.(toolName, args, executionCwd, false, purpose);
 			},
 			initialUsage,
 			sharedBudget,

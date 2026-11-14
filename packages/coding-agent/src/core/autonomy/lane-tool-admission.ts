@@ -9,6 +9,7 @@ import {
 	resolveToolCallPathAccess,
 	type ToolCallFacts,
 } from "../tool-capability-policy.ts";
+import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import type { CapabilityEnvelope } from "./contracts.ts";
 import { classifyYoloBoundary } from "./edge-policy.ts";
 import { extractToolPathArguments } from "./envelope-enforcement.ts";
@@ -84,10 +85,12 @@ interface LaneToolAdmissionOptions {
 	readonly writeProtectionEnvelope?: CapabilityEnvelope;
 	readonly yoloWriteScopeEnvelope?: CapabilityEnvelope;
 	assertOpen(): void;
+	/** `purpose` names what a host call is made for (a watch's check), for the operation gate's notice. */
 	checkEdge?(
 		toolName: string,
 		args: unknown,
 		cwd: string,
+		purpose?: NestedCallPurpose,
 	): Promise<BeforeToolCallResult | undefined> | BeforeToolCallResult | undefined;
 }
 
@@ -227,6 +230,7 @@ export class LaneToolAdmission {
 		toolName: string,
 		args: unknown,
 		signal?: AbortSignal,
+		purpose?: NestedCallPurpose,
 	): Promise<BeforeToolCallResult | undefined> {
 		signal?.throwIfAborted();
 		const facts = this.options.callFacts?.(toolName, args);
@@ -239,7 +243,7 @@ export class LaneToolAdmission {
 			gateway.checkToolCallEligibility(manifest, toolName, args, facts);
 			gateway.assertBudgetAvailable(toolName);
 		}
-		const edge = await checkEdge?.(toolName, args, cwd);
+		const edge = await checkEdge?.(toolName, args, cwd, purpose);
 		signal?.throwIfAborted();
 		this.assertHealthy();
 		this.options.assertOpen();
@@ -267,9 +271,14 @@ export class LaneToolAdmission {
 	 * A sub-call the lane admitted makes (a `lookup` request, a python tool call): the checks of a standalone call, with no
 	 * attribution of its own. Nested calls run every grant and edge check their tool would face on its own.
 	 */
-	async admitNested(toolName: string, args: unknown, signal?: AbortSignal): Promise<BeforeToolCallResult | undefined> {
+	async admitNested(
+		toolName: string,
+		args: unknown,
+		signal?: AbortSignal,
+		purpose?: NestedCallPurpose,
+	): Promise<BeforeToolCallResult | undefined> {
 		try {
-			return await this.authorize(toolName, args, signal);
+			return await this.authorize(toolName, args, signal, purpose);
 		} catch (error) {
 			return this.projectFailure(error, signal);
 		}
