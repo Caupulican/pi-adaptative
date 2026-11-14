@@ -17,8 +17,9 @@
  * Read-only here, apart from `createLane` (the engine's own call). Nothing in this module deletes anything.
  */
 
-import { existsSync, realpathSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { basename, dirname, join, relative, resolve, sep } from "node:path";
+import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import type { LaneFacts, LaneRegistration } from "./codes.ts";
 import {
 	bindLaneWorker,
@@ -45,13 +46,22 @@ export type WorkerLaneCreation =
 	| { kind: "isolated"; laneKey: string; worktreePath: string }
 	| { kind: "shared"; reason: WorkerLaneIneligibleReason | string; message: string };
 
-/** `target`'s real path, or its resolved path when it does not exist. */
-export function canonical(target: string): string {
+/**
+ * `target`'s real path through the operating system's resolver (`safeRealpathSync` native: symlinks followed, Windows
+ * 8.3 short names expanded, a not-yet-created tail kept), or undefined when it is not resolvable (a symlink loop, more
+ * hops than it follows). Never throws.
+ */
+export function nativeRealPath(target: string): string | undefined {
 	try {
-		return realpathSync(target);
+		return safeRealpathSync(target, { native: true });
 	} catch {
-		return resolve(target);
+		return undefined;
 	}
+}
+
+/** `target`'s real path (`nativeRealPath`), or its resolved path when that is not resolvable. */
+export function canonical(target: string): string {
+	return nativeRealPath(target) ?? resolve(target);
 }
 
 /** Whether `target` is `root` or inside it, on canonical paths. */

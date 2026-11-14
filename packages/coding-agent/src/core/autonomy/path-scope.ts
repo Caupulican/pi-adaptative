@@ -12,18 +12,20 @@ const MAX_SYMLINK_HOPS = 32;
  * Resolves the real path of a target. If the target does not exist, it recursively
  * resolves the deepest existing parent directory and then appends the non-existent
  * remainder, ensuring that any symlinks in the existing path prefix are expanded.
+ * `native` resolves existing paths through the operating system (`fs.realpathSync.native`), which on Windows also
+ * expands 8.3 short names (`RUNNER~1`) and spells a path as the disk does.
  */
-export function safeRealpathSync(targetPath: string): string {
-	return resolveSafely(path.resolve(targetPath), 0);
+export function safeRealpathSync(targetPath: string, options: { readonly native?: boolean } = {}): string {
+	return resolveSafely(path.resolve(targetPath), 0, options.native ? fs.realpathSync.native : fs.realpathSync);
 }
 
-function resolveSafely(absolutePath: string, hops: number): string {
+function resolveSafely(absolutePath: string, hops: number, realpath: (target: string) => string): string {
 	if (hops > MAX_SYMLINK_HOPS) {
 		throw new Error(`safeRealpathSync: exceeded ${MAX_SYMLINK_HOPS} symlink hops resolving "${absolutePath}"`);
 	}
 
 	if (fs.existsSync(absolutePath)) {
-		return fs.realpathSync(absolutePath);
+		return realpath(absolutePath);
 	}
 
 	// existsSync FOLLOWS symlinks, so it reports false for a DANGLING link (the link exists but
@@ -42,11 +44,11 @@ function resolveSafely(absolutePath: string, hops: number): string {
 
 	if (lstat?.isSymbolicLink()) {
 		const linkTarget = fs.readlinkSync(absolutePath);
-		const resolvedParent = resolveSafely(path.dirname(absolutePath), hops + 1);
+		const resolvedParent = resolveSafely(path.dirname(absolutePath), hops + 1, realpath);
 		const resolvedTarget = path.isAbsolute(linkTarget)
 			? path.resolve(linkTarget)
 			: path.resolve(resolvedParent, linkTarget);
-		return resolveSafely(resolvedTarget, hops + 1);
+		return resolveSafely(resolvedTarget, hops + 1, realpath);
 	}
 
 	const parent = path.dirname(absolutePath);
@@ -55,7 +57,7 @@ function resolveSafely(absolutePath: string, hops: number): string {
 		return absolutePath;
 	}
 
-	const resolvedParent = resolveSafely(parent, hops + 1);
+	const resolvedParent = resolveSafely(parent, hops + 1, realpath);
 	return path.join(resolvedParent, path.basename(absolutePath));
 }
 

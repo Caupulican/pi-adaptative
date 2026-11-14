@@ -28,7 +28,6 @@ import { isAbsolute, relative, resolve, sep } from "node:path";
 import type { ExecutionContext } from "../../kernel/index.ts";
 import type { WorkerHostFinding } from "../autonomy/contracts.ts";
 import { hostFinding } from "../autonomy/host-findings.ts";
-import { safeRealpathSync } from "../autonomy/path-scope.ts";
 import type {
 	OrchestrationProfile,
 	WorkerExecutionContract,
@@ -57,6 +56,7 @@ import {
 	findLaneCheckout,
 	isUnderLaneRoot,
 	laneWorktreeOf,
+	nativeRealPath,
 	releaseWorkerLane,
 	repositoryKeyAt,
 	type WorkerLaneCreation,
@@ -102,30 +102,18 @@ function isWithin(base: string, target: string): boolean {
 	return offset === "" || (offset !== ".." && !offset.startsWith(`..${sep}`) && !isAbsolute(offset));
 }
 
-/**
- * `target`'s real path (`safeRealpathSync`: symlinks followed, a not-yet-created tail kept), or undefined when it is not
- * resolvable (a symlink loop, more hops than it follows).
- */
-function realPathOf(target: string): string | undefined {
-	try {
-		return safeRealpathSync(target);
-	} catch {
-		return undefined;
-	}
-}
-
 /** Whether `target` is `base` or inside it by path text, or else by real path when both are resolvable. */
 function placedWithin(base: string, target: string): boolean {
 	if (isWithin(base, target)) return true;
-	const [realBase, realTarget] = [realPathOf(base), realPathOf(target)];
+	const [realBase, realTarget] = [nativeRealPath(base), nativeRealPath(target)];
 	return realBase !== undefined && realTarget !== undefined && isWithin(realBase, realTarget);
 }
 
 /**
  * The path `entry` names inside the lane at `laneRoot` when it lies under `root`, the top of the checkout the lane was made
  * from: the same place in the lane. A relative `entry` is stated against `base` (`root` unless given). Places are compared
- * by path text first, then, when the text places it in neither, by real path (`realPathOf`), so a path spelled through a
- * symlink to the checkout or the lane keeps its place; a path whose real path is not resolvable keeps the text answer. A
+ * by path text first, then, when the text places it in neither, by real path (`nativeRealPath`), so a path spelled through a
+ * symlink, or a Windows 8.3 short name (`RUNNER~1`), to the checkout or the lane keeps its place; a path whose real path is not resolvable keeps the text answer. A
  * path already inside the lane, or outside `root`, is returned unchanged. Every move of a worker into its lane uses this
  * one translation: a saved contract, a request's write paths, the grants derived from them and the parent's ceiling.
  */
@@ -134,7 +122,7 @@ export function relocatedInto(root: string, laneRoot: string, entry: string, bas
 	if (isWithin(laneRoot, resolved)) return resolved;
 	if (isWithin(root, resolved)) return resolve(laneRoot, relative(root, resolved));
 	if (placedWithin(laneRoot, resolved)) return resolved;
-	const [top, real] = [realPathOf(root), realPathOf(resolved)];
+	const [top, real] = [nativeRealPath(root), nativeRealPath(resolved)];
 	return top !== undefined && real !== undefined && isWithin(top, real)
 		? resolve(laneRoot, relative(top, real))
 		: entry;
