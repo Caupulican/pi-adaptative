@@ -28,7 +28,10 @@ message, and every turn is held to them when it starts, a turn a watch's wake op
 It never leaves that model: a model out of quota or refused for the account is not replaced by the account's default or a
 failover model; the turn is refused with the reason and the bot answers again once its model can run. The session works in
 your project directory. Like a worker, it never reaches an owner credential file (`.env`, keys): a read or a
-command that would is refused before it runs, never run with the values masked. Its name and its soul replace the main agent's in its system prompt, so it never
+command that would is refused before it runs, never run with the values masked. Its commands (shell, python) run as a
+worker's do: without the credential variables of your environment (except those `PI_WORKER_PASS_ENV` names) or the
+credential profile of the project, with `PI_SESSION_ROLE=worker` (a `pi` it starts is a worker, never a root), a temp
+directory of its own, and anything they leave running ended when the session closes, which you are told about. Its name and its soul replace the main agent's in its system prompt, so it never
 introduces itself as the main agent. Its memory blackboard (`<agent dir>/memory/bots/<id>.md`, the same file a bot running as
 a worker reads) opens its system prompt under its soul when the session starts; it can read the file, not edit it, and a
 line from each finished turn is appended to it. It reads, and writes only when the bot has write access, and then as a worker writes: its file tools write inside your project directory only, never to a harness resource (skills, extensions, prompts, settings, hooks, git config); a read-only bot has a shell whose

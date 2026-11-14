@@ -23,7 +23,7 @@ import { PI_PARENT_PID_ENV } from "../process-identity.ts";
 import { createProcessScratchDirectory, removeProcessScratchDirectory } from "../process-scratch.ts";
 import { PI_SESSION_ROLE_ENV } from "../session-role.ts";
 import type { BashSpawnHook } from "../tools/bash.ts";
-import { boundedText, quotedSpan } from "../util/bounded-line.ts";
+import { boundedLine, boundedText, quotedSpan } from "../util/bounded-line.ts";
 import { sanitizeWorkerLabel, WORKER_LABEL_ENV, workerCommitterEnvironment } from "./worker-git-identity.ts";
 
 /** Per-run ownership marker exported to every command a worker runs. */
@@ -70,9 +70,25 @@ export function secretEnvironmentNames(env: NodeJS.ProcessEnv = process.env): st
  */
 const ARGUMENT_STEERING_VARIABLES = ["RIPGREP_CONFIG_PATH"];
 
-/** The names in `env` a worker's commands do not inherit: credentials (minus the grant) and argument steering. */
+/** The owner's own credential vault session: never a worker's, whatever the owner's grant names. */
+const OWNER_CONTROL_PLANE_VARIABLES = ["BW_SESSION"];
+
+/** The names in `env` a worker's commands do not inherit: credentials (minus the grant), the vault session, argument steering. */
 function omittedEnvironmentNames(env: NodeJS.ProcessEnv): string[] {
-	return [...secretEnvironmentNames(env), ...ARGUMENT_STEERING_VARIABLES.filter((name) => name in env)];
+	const fixed = [...OWNER_CONTROL_PLANE_VARIABLES, ...ARGUMENT_STEERING_VARIABLES].filter((name) => name in env);
+	return [...new Set([...secretEnvironmentNames(env), ...fixed])];
+}
+
+const REAPED_PROCESSES_MAX_LISTED = 5;
+const REAPED_PROCESS_MAX_CHARS = 160;
+
+/** The processes a run's disposal ended, as a notice lists them: the first few, each bounded, and how many more. */
+export function listReapedProcesses(processes: readonly string[]): string {
+	const listed = processes
+		.slice(0, REAPED_PROCESSES_MAX_LISTED)
+		.map((entry) => boundedLine(entry, REAPED_PROCESS_MAX_CHARS));
+	const omitted = processes.length - listed.length;
+	return `${listed.join("; ")}${omitted > 0 ? `; and ${omitted} more` : ""}`;
 }
 
 /**

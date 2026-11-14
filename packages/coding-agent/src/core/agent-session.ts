@@ -3555,18 +3555,12 @@ export class AgentSession {
 		this._runtimeBuilder.closeMutationAdmission();
 		this._runtimeAdmission.close();
 		// The first releases are required ones: a failure in any of them is kept for `disposeAndWait()` and never skips the releases below.
-		trackRequired(async () => {
-			this._compaction.cancelIdlePreparation();
-		});
+		trackRequired(async () => this._compaction.cancelIdlePreparation());
 		// Queued input not yet handed to the agent belongs to this session and is never handed on after it.
-		trackRequired(async () => {
-			this._pendingQueue.close();
-		});
+		trackRequired(async () => this._pendingQueue.close());
 		// Every in-flight admission entry this session still owns is released; a sibling process
 		// would otherwise count it until the heartbeat went stale.
-		trackRequired(async () => {
-			this._providerAdmissionLedger.releaseAll();
-		});
+		trackRequired(async () => this._providerAdmissionLedger.releaseAll());
 
 		safely(() => this._backgroundLanes.clearGoalAutoContinueTimer());
 		safely(() => this._backgroundLanes.clearResearchLaneTimer());
@@ -3615,10 +3609,19 @@ export class AgentSession {
 	private _disposeRuntimeDependencies(): Promise<void> {
 		const { safely, track, trackRequired, finish } = createSessionShutdownTracker();
 		safely(() => this._skillVault.unload());
-		trackRequired(() => disposeShellExecutionSessionAndWait(this._shellSessionKey));
+		// The runtime ends after the shell and the background tasks: what the session's commands still run then is what they
+		// left behind, ended and told to the owner (`session-command-environment.ts`).
+		const processesEnded = [
+			disposeShellExecutionSessionAndWait(this._shellSessionKey),
+			this._backgroundToolTasks.shutdown(),
+		];
+		for (const ended of processesEnded) trackRequired(() => ended);
 		track(() => this._backgroundLanes.channels.stop());
-		trackRequired(() => this._backgroundToolTasks.shutdown());
-		track(() => this._runtimeBuilder.dispose());
+		track(() =>
+			Promise.allSettled(processesEnded).then(() =>
+				this._runtimeBuilder.dispose((message) => this._holdUnlistenedWarning(message)),
+			),
+		);
 		safely(() => this._localRuntimeController.dispose());
 		safely(() => this._reflection.dispose());
 		trackRequired(() => this._backgroundLanes.abortInFlightLanes());
@@ -3634,9 +3637,7 @@ export class AgentSession {
 		// The decision ledger holds an open SQLite handle under the agent directory; Windows refuses to
 		// remove that directory while it is open, and the rows are already durable. A close failure is a
 		// required release failure: it rejects `disposeAndWait()` instead of being discarded.
-		trackRequired(async () => {
-			this._semanticPlane.closeDecisionLedger();
-		});
+		trackRequired(async () => this._semanticPlane.closeDecisionLedger());
 		track(() => this._resourceLoader.dispose?.() ?? Promise.resolve());
 		this._eventListeners = [];
 		trackRequired(() =>
@@ -3661,9 +3662,7 @@ export class AgentSession {
 		// Final sweep of grep/find artifacts already released (reference count zero) but not yet reclaimed, e.g. after a
 		// transient cleanup() failure. It never releases a still-referenced artifact (a short session leaves its artifact
 		// resolvable on resume) and never touches OTHER sessions' directories. Failures reject `disposeAndWait()`.
-		trackRequired(async () => {
-			this._pipeline.cleanupToolArtifactStoreOnDispose();
-		});
+		trackRequired(async () => this._pipeline.cleanupToolArtifactStoreOnDispose());
 		trackRequired(async () => this._pipeline.clearWorkerContextPolicyLanes());
 		return finish();
 	}

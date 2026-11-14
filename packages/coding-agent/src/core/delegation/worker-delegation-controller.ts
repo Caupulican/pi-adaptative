@@ -37,6 +37,7 @@ import {
 	protectedPathHostOptions,
 } from "../autonomy/protected-path-watch.ts";
 import { AUTONOMY_TELEMETRY_EVENT_TYPES } from "../autonomy/telemetry-events.ts";
+import { listReapedProcesses } from "../autonomy/worker-run-environment.ts";
 import {
 	createWorkerToolAdapterRegistry,
 	WORKER_TOOL_ADAPTER_NAMES,
@@ -347,17 +348,10 @@ import {
 
 /** The owner's own authority a worker whose words came from a third party is not given at a tool call (see the resolver's `thirdParty`). */
 const THIRD_PARTY_WITHHELD_TOOL_NAMES: ReadonlySet<string> = new Set([PROACTIVITY_TOOL_NAME, BOT_MESSAGE_TOOL_NAME]);
-const REAPED_PROCESS_NOTICE_MAX_LISTED = 5;
-const REAPED_PROCESS_NOTICE_MAX_ENTRY_CHARS = 160;
 
 /** Bounded, worker-attributed description of processes stopped when a worker ended. */
 function describeReapedWorkerProcesses(laneId: string, processes: readonly string[]): string {
-	const listed = processes
-		.slice(0, REAPED_PROCESS_NOTICE_MAX_LISTED)
-		.map((entry) => boundedLine(entry, REAPED_PROCESS_NOTICE_MAX_ENTRY_CHARS));
-	const omitted = processes.length - listed.length;
-	const detail = `${listed.join("; ")}${omitted > 0 ? `; and ${omitted} more` : ""}`;
-	return `Worker ${laneId} ended with ${processes.length} process(es) still running; they were stopped (${detail}). A worker leaves nothing behind: start a durable long-running process from the root (bash with background: true; tool_task inspects it), or have the worker report that it needs one.`;
+	return `Worker ${laneId} ended with ${processes.length} process(es) still running; they were stopped (${listReapedProcesses(processes)}). A worker leaves nothing behind: start a durable long-running process from the root (bash with background: true; tool_task inspects it), or have the worker report that it needs one.`;
 }
 
 export interface WorkerDelegationControllerDeps extends ParentExecutionContext {

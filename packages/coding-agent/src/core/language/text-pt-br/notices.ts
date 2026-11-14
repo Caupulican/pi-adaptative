@@ -79,6 +79,8 @@ export const NOTICES = {
 	anthropicSubscriptionAuth:
 		"A autenticação por assinatura da Anthropic está ativa. O uso por harnesses de terceiros é descontado do uso extra e cobrado por token, fora dos limites do seu plano Claude. Gerencie o uso extra em https://claude.ai/settings/usage.",
 	/** O que a extensão de colaboração relata quando os próprios passos falham: o texto do erro vem em seguida. */
+	sessionProcessesStopped: (count: number, detail: string) =>
+		`Esta sessão fechou com ${count} processo(s) iniciado(s) pelos comandos dela ainda em execução; eles foram encerrados (${detail}). Os comandos dela não deixam nada rodando depois que ela fecha.`,
 	collaboration: {
 		controlHandoffFailed: (error: string) => `Falha no handoff de controle da colaboração: ${error}`,
 		cleanupExhausted: (jobId: string, agentId: string, error: string) =>

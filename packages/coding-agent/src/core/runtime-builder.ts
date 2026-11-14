@@ -68,6 +68,10 @@ import { projectLaneSettingsPath } from "./autonomy/lane-private-paths.ts";
 import type { SharedLaneToolOptions } from "./autonomy/lane-tool-surface.ts";
 import type { LaneRecord } from "./autonomy/lane-tracker.ts";
 import {
+	createSessionCommandEnvironment,
+	type SessionCommandEnvironment,
+} from "./autonomy/session-command-environment.ts";
+import {
 	buildSessionConfinement,
 	type SessionConfinement,
 	wrapToolWithSessionConfinement,
@@ -160,7 +164,6 @@ import { resolveScoutModel } from "./scout-model-admission.ts";
 import { BitwardenCredentialStorageRouter } from "./secrets/bitwarden-credential-storage-router.ts";
 import {
 	type CredentialExposureBoundary,
-	type CredentialExposureMode,
 	wrapToolWithCredentialExposureGuard,
 } from "./secrets/credential-exposure-guard.ts";
 import {
@@ -691,6 +694,7 @@ export class RuntimeBuilder {
 	private _mutationAdmissionClosed = false;
 	private _activeMutation: { writer: RuntimeMutationLease; completion: Promise<void> } | undefined;
 	private readonly _credentialManager: CredentialManager;
+	private readonly _commandEnvironment: SessionCommandEnvironment;
 	private readonly _credentialExposureBoundary: CredentialExposureBoundary;
 	private readonly _credentialBootstrapFiles: readonly string[];
 	private readonly _credentialDiscoveryRoots: readonly string[];
@@ -765,6 +769,9 @@ export class RuntimeBuilder {
 				disposeShellExecutionSession(sessionKey);
 			},
 		});
+		this._commandEnvironment = createSessionCommandEnvironment(privatePathScope, deps.getShellSessionKey(), (cwd) =>
+			this._credentialManager.getEnvironmentForCwd(cwd),
+		);
 		this._credentialExposureBoundary = {
 			redactSensitiveText: (text, additionalValues) =>
 				this._credentialManager.redactSensitiveText(text, additionalValues),
@@ -915,11 +922,6 @@ export class RuntimeBuilder {
 		this._routedOmissions = [...withheld];
 	}
 
-	/** Owner sessions see mocked values; a worker, and a session whose private path scope says so, is kept out entirely. */
-	private credentialExposureMode(): CredentialExposureMode {
-		return isWorkerSession() ? "deny" : (this.deps.getPrivatePathScope?.()?.credentialExposure ?? "mock");
-	}
-
 	private async _runContextScout(
 		query: string,
 		maxTurns: number | undefined,
@@ -939,7 +941,7 @@ export class RuntimeBuilder {
 				this.deps.getSettingsManager().getEdgeSettings().mode === "yolo"
 					? undefined
 					: deriveCompositeChildEnvelope("context_scout", ["read", "grep", "find"], envelope);
-			const exposureMode = this.credentialExposureMode();
+			const exposureMode = this._commandEnvironment.credentialExposure;
 			const controller = new ScoutController({
 				resolveScoutModel: async () =>
 					resolveScoutModel(
@@ -1066,8 +1068,8 @@ export class RuntimeBuilder {
 		return this._credentialManager;
 	}
 
-	/** Release session-owned mutation payload, task directory, and tool-stream leases. */
-	async dispose(): Promise<void> {
+	/** Release the session's mutation payload, task directory, tool-stream leases and command run (notices to `holdWarning`). */
+	async dispose(holdWarning?: (message: string) => void): Promise<void> {
 		this.assertCanAwaitDisposal();
 		this.closeMutationAdmission();
 		if (this.hasPendingMutation) await this.settleMutations();
@@ -1077,6 +1079,7 @@ export class RuntimeBuilder {
 				() => this._fileMutationIntents.dispose(),
 				() => this._taskDirectories.dispose(),
 				() => removeWorkRun(this._toolStreamsWorkRun),
+				() => this._commandEnvironment.dispose(holdWarning),
 			],
 			"Runtime resource disposal failed",
 		);
@@ -1261,7 +1264,7 @@ export class RuntimeBuilder {
 				bound,
 				this.deps.getCwd(),
 				this._credentialExposureBoundary,
-				this.credentialExposureMode(),
+				this._commandEnvironment.credentialExposure,
 				harnessTools.has(tool),
 			);
 			let scoped = guarded;
@@ -1566,16 +1569,11 @@ export class RuntimeBuilder {
 						getSessionManager: () => this.deps.getSessionManager(),
 						getSettingsManager: () => this.deps.getSettingsManager(),
 					}),
-				spawnHook: (context) => {
-					const env = { ...context.env, ...this._credentialManager.getEnvironmentForCwd(context.cwd) };
-					delete env.BW_SESSION;
-					return { ...context, env };
-				},
+				spawnHook: this._commandEnvironment.spawnHook,
 			},
 			python: {
 				outputReduction,
-				environment: (cwd) => this._credentialManager.getEnvironmentForCwd(cwd) ?? {},
-				omitEnvironmentVariables: ["BW_SESSION"],
+				...this._commandEnvironment.python,
 				mutationScope: mutationScopeForWorktree(this.deps.getCwd()),
 				mutationAnnouncer: this.deps.getShellSessionKey(),
 				...(scriptToolBridge ? { toolBridge: scriptToolBridge } : {}),
@@ -1826,7 +1824,7 @@ export class RuntimeBuilder {
 							createRunProcessToolDefinition(cwd, {
 								policy,
 								maxWallClockMs: orchestrationProfile.budget.maxWallClockMs ?? 0,
-								environment: (toolCwd) => this._credentialManager.getEnvironmentForCwd(toolCwd) ?? {},
+								...this._commandEnvironment.runProcess,
 							}),
 						),
 					);
