@@ -10,7 +10,6 @@ import { type BeforeToolCallResult, MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS } from "..
 import type { SessionEntry } from "../kernel/node.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import {
-	boundedActionLine,
 	classifyAllEdgeOperations,
 	classifyOutwardEdgeOperations,
 	classifyYoloBoundary,
@@ -35,10 +34,10 @@ import {
 	remoteOwnerUnclassifiedAction,
 	thirdPartyReleaseLine,
 } from "./autonomy/edge-policy.ts";
+import { boundedHeldLine, describedOperation, heldPurpose, withPurpose } from "./autonomy/held-action-line.ts";
 import { ownerCallDigest, renderOwnerDraftCall } from "./autonomy/owner-draft-rendering.ts";
 import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
 import type { OwnerDraftView } from "./channels/owner-channel-types.ts";
-import { englishText } from "./language/interface-text.ts";
 import { boundedRedactedDiagnosticText, MAX_RETAINED_DIAGNOSTIC_CHARS } from "./security/secret-text.ts";
 import { isNestedCallPurpose, type NestedCallPurpose } from "./tools/nested-tool-call.ts";
 import {
@@ -560,7 +559,7 @@ export function keepOutwardDraft(
 		.update(JSON.stringify([requestEntryId ?? null, callDigest ?? operationsDigest]))
 		.digest("hex")
 		.slice(0, 16)}`;
-	const purpose = draft.operations.find((operation) => operation.purpose)?.purpose;
+	const purpose = heldPurpose(draft.operations);
 	const states = outwardDraftStates(branch, false);
 	const existing = states.find(({ record }) => record.id === id);
 	let kept = existing !== undefined;
@@ -585,19 +584,16 @@ export function keepOutwardDraft(
 	}
 	const classes = [...new Set(operations.map((operation) => operation.class))];
 	const grantable = grantableEdgeClasses(operations);
-	// A notice is one bounded line (`MAX_RETAINED_DIAGNOSTIC_CHARS`): the action is shortened, never its origin or release.
-	const action = heldAction(
-		draft.operations,
-		operations.map((operation) => operation.operation),
-	);
+	// One bounded line (`MAX_RETAINED_DIAGNOSTIC_CHARS`): a watch id, then the action, is shortened, never origin or release.
 	return {
 		id,
 		kept,
 		...(added ? { added } : {}),
 		...(existing ? { state: existing.state } : {}),
-		notice: boundedActionLine(
+		notice: boundedHeldLine(
 			"Held, not run: ",
-			action,
+			purpose,
+			operations.map((operation) => operation.operation),
 			` (${classes.join(", ")}), asked by ${originLabel(draft.origin)}. It runs if you ask for it yourself${grantable.length > 0 ? `; ${grantable.map((edgeClass) => `/edge allow ${edgeClass}`).join(", ")} lets such runs do it` : ""}.`,
 			MAX_RETAINED_DIAGNOSTIC_CHARS,
 		),
@@ -636,21 +632,6 @@ interface ThirdPartyRefusal {
 	readonly correction: string;
 }
 
-/** The held operations' `actions` as one; a watch's check names its watch first (`edgeOperation`, `withPurpose`). */
-function heldAction(operations: readonly EdgeOperation[], actions: readonly string[]): string {
-	const purpose = operations.find((operation) => operation.purpose)?.purpose;
-	return englishText().interactive.edgeOperation({ operation: actions.join("; "), purpose });
-}
-
-function describedOperation(operation: EdgeOperation): string {
-	return `${operation.operation} (${operation.class}: ${operation.reason})`;
-}
-
-/** A call's operations with what the call is made for (a watch's check), which a hold names and a draft keeps. */
-function withPurpose(operations: EdgeOperation[], purpose: NestedCallPurpose | undefined): EdgeOperation[] {
-	return purpose ? operations.map((operation) => ({ ...operation, purpose })) : operations;
-}
-
 /**
  * The prepared form of operations a run carrying a third party's words may not run: one durable draft and one owner
  * notice (`prepareOutward`), and a tool result that says what was held and from whom (the bounded diagnostic) and how
@@ -665,9 +646,10 @@ function prepareOutward(
 	const prepared = deps.prepareOutward?.({ toolName, operations, origin });
 	const classes = [...new Set(operations.map((operation) => operation.class))];
 	return {
-		reason: boundedActionLine(
+		reason: boundedHeldLine(
 			"Prepared, not run: ",
-			heldAction(operations, operations.map(describedOperation)),
+			heldPurpose(operations),
+			operations.map(describedOperation),
 			`, asked by ${originLabel(origin)}; no standing grant of the owner covers ${classes.join(", ")}.`,
 			MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS,
 		),
@@ -868,9 +850,10 @@ function holdForOwner(
 		detail: final ? `draft ${prepared?.state}` : `no grant covers ${classes.join(", ")}`,
 	});
 	return {
-		reason: boundedActionLine(
+		reason: boundedHeldLine(
 			final ? "Not run: " : "Held for your approval: ",
-			heldAction(operations, operations.map(describedOperation)),
+			heldPurpose(operations),
+			operations.map(describedOperation),
 			`, asked from ${originLabel(origin)}; no grant of the owner covers ${classes.join(", ")}.`,
 			MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS,
 		),
