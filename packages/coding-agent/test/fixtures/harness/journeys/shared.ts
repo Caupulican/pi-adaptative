@@ -1808,11 +1808,19 @@ export function fencedToolOutput(text: string): string {
  * refusal reads with its separators escaped in the raw text and is compared only after the record is parsed.
  */
 export function refusalDiagnostic(text: string): string | undefined {
+	return refusalField(text, "diagnostic");
+}
+
+/** The next action a refused call's `[harness]` failure record carries (the gate's correction), once parsed. */
+export function refusalNextAction(text: string): string | undefined {
+	return refusalField(text, "next_action");
+}
+
+function refusalField(text: string, field: "diagnostic" | "next_action"): string | undefined {
 	if (!text.startsWith("[harness] ")) return undefined;
 	const record: unknown = JSON.parse(text.slice("[harness] ".length));
-	const diagnostic =
-		typeof record === "object" && record !== null ? (record as { diagnostic?: unknown }).diagnostic : undefined;
-	return typeof diagnostic === "string" ? diagnostic : undefined;
+	const value = typeof record === "object" && record !== null ? (record as Record<string, unknown>)[field] : undefined;
+	return typeof value === "string" ? value : undefined;
 }
 
 /** One answer of the session-model knowledge judge, in the fixed submission shape every program uses. */

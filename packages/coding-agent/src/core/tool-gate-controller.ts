@@ -748,9 +748,8 @@ export class ToolGateController {
 			release();
 			return {
 				kind: "refused",
-				reason: [decision.reason ?? "blocked by the session's tool policy", decision.correction]
-					.filter((part): part is string => part !== undefined && part.length > 0)
-					.join(" "),
+				reason: decision.reason || "blocked by the session's tool policy",
+				...(decision.correction ? { correction: decision.correction } : {}),
 			};
 		}
 		return {

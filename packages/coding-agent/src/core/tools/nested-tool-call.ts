@@ -84,7 +84,10 @@ export interface NestedCallAdmission {
 
 export interface NestedCallRefusal {
 	readonly kind: "refused";
+	/** What stopped the call, as a standalone call's refusal reads it (bounded where its gate bounds it). */
 	readonly reason: string;
+	/** The gate's next action, apart from the reason (a held call's draft and how it is released). */
+	readonly correction?: string;
 }
 
 /**
@@ -205,7 +208,11 @@ export async function startNestedCall(
 	}
 	if (admission.kind === "refused") {
 		binding?.release();
-		return { settled: refusedNestedOutcome(admission.reason) };
+		return {
+			settled: refusedNestedOutcome(
+				admission.correction ? `${admission.reason} ${admission.correction}` : admission.reason,
+			),
+		};
 	}
 	const executor = binding?.tool ?? tool;
 	return {

@@ -6,7 +6,7 @@ import { calls, createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { deliveryWith, FakeBotApi, OWNER_ID, ownerLegUpdate, TOKEN } from "./journey-4-telegram.ts";
 import { scriptRequirementCheckSpawn } from "./journey-9-shared.ts";
-import { ICM_INTAKE_JUDGMENTS, latestBatchResults } from "./shared.ts";
+import { ICM_INTAKE_JUDGMENTS, latestBatchResults, refusalDiagnostic, refusalNextAction } from "./shared.ts";
 
 /** At most eight characters: a held line never shortens it, so the hold names it whole. */
 const WATCH_ID = "release";
@@ -159,15 +159,24 @@ export async function runJourney4TelegramWatchPhase(world: HarnessWorld): Promis
 			trace.mark("root", "telegram-watch.armed");
 		} else {
 			// The check is held for the owner; the watch is not armed and nothing ran.
-			expect(firstResult?.isError, "the routine call reports the held check").toBe(true);
-			expect(firstResult?.text).toContain("The check this watch would make was refused: Held for your approval: ");
-			expect(firstResult?.text, "the hold names the watch").toContain(`The check watch "${WATCH_ID}" would run`);
-			expect(firstResult?.text).toContain("It is kept as draft draft-");
 			expect(store().getRoutine(WATCH_ID), "no watch is armed while its check is held").toBeUndefined();
 			const draft = watchDraft();
 			expect(draft?.state, "the check waits for the owner").toBe("pending");
 			expect(draft?.record.requestEntryId, "the draft names the request it was held in").toBe(request?.id);
 			const draftId = draft?.record.id ?? "";
+			// The routine call reads the hold as the check's own call would: the held line whole, its tail included,
+			// then that nothing was armed and the draft the owner approves.
+			expect(firstResult?.isError, "the routine call reports the held check").toBe(true);
+			const heldLine = refusalDiagnostic(firstResult?.text ?? "");
+			expect(heldLine, "the hold names the watch").toContain(
+				`Held for your approval: The check watch "${WATCH_ID}" would run, armed by a routine call: `,
+			);
+			expect(heldLine, "the held line keeps its tail").toContain(
+				", asked from the telegram channel; no grant of the owner covers operation.irreversible.",
+			);
+			expect(refusalNextAction(firstResult?.text ?? ""), "the routine call names its draft").toContain(
+				`Watch "${WATCH_ID}" is not armed: its check's call was refused. It is kept as draft ${draftId}: the owner approves it from the owner channel`,
+			);
 			// The presentation and the run's answer, the presentation marked shown once its send resolved.
 			await withDeadline(trace, "the presentation and the answer reach the chat", api.untilSent(2));
 			await withDeadline(

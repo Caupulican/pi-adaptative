@@ -1,6 +1,7 @@
 import { StringEnum } from "@caupulican/pi-ai";
 import { Type } from "typebox";
 import { Value } from "typebox/value";
+import { readAgentToolPolicyDeniedError } from "../../kernel/index.ts";
 import { MAX_PROGRESS_LINE_CHARS } from "../delegation/worker-report-progress.ts";
 import { defineTool, type ToolDefinition } from "../extensions/types.ts";
 import {
@@ -341,6 +342,8 @@ export function createRoutineToolDefinition(getPort: () => RoutineToolPort | und
 						return result({ routine: await port.resetProgress(params.routineId, signal) });
 				}
 			} catch (error) {
+				// A policy refusal (a watch's refused check) is this call's own, read as a standalone call's would be.
+				if (readAgentToolPolicyDeniedError(error)) throw error;
 				const diagnostic = boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error));
 				// The reasons are sentences of their own; one without an end gets its period here.
 				const reason =

@@ -8,6 +8,7 @@
  * alone; so is a worker's watch saved before the scope existed, which could watch only a path, a process, a pid or a port.
  */
 import path from "node:path";
+import { AgentToolPolicyDeniedError } from "../../kernel/index.ts";
 import type { LaneShellFacts } from "../autonomy/lane-shell-scope.ts";
 import { hasOnlyKeys, isPlainRecord } from "../util/value-guards.ts";
 import { boundedRoutineText } from "./routine-field-guards.ts";
@@ -79,4 +80,21 @@ export function watchCheckCall(
 	if (condition.type === "command") return { toolName: "bash", args: { command: condition.command } };
 	if (condition.type === "http") return { toolName: "webfetch", args: { url: condition.url } };
 	return undefined;
+}
+
+/**
+ * The refusal of the call that arms watch `watchId` when the armer's gate refused its check's call: the gate's reason as
+ * a standalone call's refusal reads it, never wrapped or bounded again (a held line keeps its tail), and its next action
+ * (a held call's draft and how it is released) after the words that nothing was armed. Thrown from the arming tool, it
+ * is that call's policy refusal, so it reads as the check's own call would.
+ */
+export function watchCheckRefusal(
+	watchId: string,
+	refusal: { readonly reason?: string; readonly correction?: string },
+): AgentToolPolicyDeniedError {
+	return new AgentToolPolicyDeniedError(
+		refusal.reason || "The armer's tool policy refused the call this watch's check would make.",
+		undefined,
+		`Watch "${watchId}" is not armed: its check's call was refused. ${refusal.correction || "Arm it with a check that policy admits, or ask the owner for the authority it needs."}`,
+	);
 }

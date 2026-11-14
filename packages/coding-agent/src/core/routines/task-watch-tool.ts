@@ -8,14 +8,19 @@
  * reads, changes and deletes nothing, so the routine tool stays on the worker floor.
  */
 import { type Static, Type } from "typebox";
-import type { AgentTool, BeforeToolCallResult } from "../../kernel/index.ts";
+import { type AgentTool, type BeforeToolCallResult, readAgentToolPolicyDeniedError } from "../../kernel/index.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import { MAX_ROUTINE_PROMPT_CHARS, routineAuthoringSchema } from "./routine-contract.ts";
 import { parseRoutineToolInput, type RoutineToolInput, type RoutineToolView } from "./routine-tool.ts";
 import { TASK_WATCH_TOOL_NAME } from "./routine-tool-names.ts";
 import { parseWatchCondition, watchConditionSchema } from "./watch-contract.ts";
-import { type WorkerWatchAuthority, type WorkerWatchScope, watchCheckCall } from "./worker-watch-scope.ts";
+import {
+	type WorkerWatchAuthority,
+	type WorkerWatchScope,
+	watchCheckCall,
+	watchCheckRefusal,
+} from "./worker-watch-scope.ts";
 
 /** What the session's routine runtime does for a worker runtime; the runtime id and scope are the executor's, never the model's. */
 export interface TaskWatchPort {
@@ -80,7 +85,7 @@ export function createTaskWatchTool(options: {
 					parentToolName: TASK_WATCH_TOOL_NAME,
 				} as const;
 				const refused = call && (await caller.admitCall(call.toolName, call.args, signal, purpose));
-				if (refused?.block) throw new Error(refused.reason ?? "this worker's tool policy refused the check's call");
+				if (refused?.block) throw watchCheckRefusal(input.routineId, refused);
 				const routine = await options.port.arm(
 					{ runtimeId: caller.runtimeId, scope: caller.scope },
 					parseRoutineToolInput({
@@ -99,6 +104,8 @@ export function createTaskWatchTool(options: {
 				const details = { routineId: routine.routineId, revision: routine.revision, armed: true };
 				return { content: [{ type: "text", text: JSON.stringify(details) }], details };
 			} catch (error) {
+				// A refused check is this call's policy refusal, read as the check's own call's would be.
+				if (readAgentToolPolicyDeniedError(error)) throw error;
 				const diagnostic = boundedRedactedDiagnosticText(error instanceof Error ? error.message : String(error));
 				return {
 					content: [{ type: "text", text: `Watch was not armed: ${diagnostic ?? "unavailable"}.` }],

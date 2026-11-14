@@ -48,7 +48,12 @@ import {
 	workerWatchSlotsRefusal,
 } from "./routine-watch-arming.ts";
 import { describeWatchCondition, parseWatchCondition, type WatchCondition } from "./watch-contract.ts";
-import { routineWorkerAuthority, type WorkerWatchAuthority, watchCheckCall } from "./worker-watch-scope.ts";
+import {
+	routineWorkerAuthority,
+	type WorkerWatchAuthority,
+	watchCheckCall,
+	watchCheckRefusal,
+} from "./worker-watch-scope.ts";
 
 interface RoutineSessionDeps {
 	readonly store: RoutineStorePort;
@@ -527,7 +532,7 @@ export class RoutineSessionController implements RoutineToolPort {
 			harnessLog.warn("routines", "a watch was refused: the session's gate refused its check's call", () => ({
 				tool: call.toolName,
 			}));
-			throw new Error(`The check this watch would make was refused: ${admission.reason}`);
+			throw watchCheckRefusal(watchId, admission);
 		}
 		return admission;
 	}
