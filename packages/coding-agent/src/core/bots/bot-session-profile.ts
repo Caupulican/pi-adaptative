@@ -87,10 +87,21 @@ export function botMayRunAsSession(record: Pick<PersistentBotRecord, "leader" | 
 	return record.leader !== true && (record.createdBy === undefined || RESERVED_BOT_CREATOR_IDS.has(record.createdBy));
 }
 
-/** What defines a bot of its own: the fields its session is built from. A rename or a new description leaves it as it is. */
+/**
+ * What defines a bot of its own: the fields its session is built from and the facts that route it to one
+ * (`botMayRunAsSession`). A rename or a new description leaves it as it is.
+ */
 export function ownBotSessionKey(record: PersistentBotRecord): string {
 	const { provider, modelId, thinkingLevel, soul, canWrite } = botProfileOf(record);
-	return JSON.stringify([provider, modelId, thinkingLevel, soul, canWrite]);
+	return JSON.stringify([
+		provider,
+		modelId,
+		thinkingLevel,
+		soul,
+		canWrite,
+		record.leader === true,
+		record.createdBy ?? null,
+	]);
 }
 
 /** A bot of its own, on its record and its model as the registry knows it now; throws the owner's words when it cannot run. */

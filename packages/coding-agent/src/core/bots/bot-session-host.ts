@@ -181,6 +181,8 @@ interface BotSessionEntry {
 	unsubscribe: () => void;
 	/** Prompts submitted and not yet settled. */
 	inFlight: number;
+	/** A record change, or a run refused off the session path, came while it worked: applied once it is idle. */
+	recheckWhenIdle: boolean;
 	/** The session's cumulative usage when the running turn began; absent between turns. */
 	usageBefore: Usage | undefined;
 	/** When the running turn began: its own messages are the ones written since; absent between turns. */
@@ -527,7 +529,13 @@ export class BotSessionHost {
 		const record = this.ports.store().getBot(agentId);
 		const words = interfaceText().botTeam;
 		if (!record || !model) throw new Error(words.botMissing(agentId));
-		const defined = this.define(record);
+		const defined = this.route(record);
+		// A record that left the session path (a leader's, a leader, a profile only a worker's run holds) runs here no more:
+		// the session is released once its work settles, and its messages go to a worker.
+		if (defined === "worker") {
+			queueMicrotask(() => this.recordChanged(record));
+			throw new Error(words.botRunsAsWorker(agentId));
+		}
 		if (defined.key !== built.key) {
 			queueMicrotask(() => this.recordChanged(record));
 			throw new Error(words.botSessionOutdated(agentId));
@@ -558,19 +566,26 @@ export class BotSessionHost {
 	}
 
 	/**
-	 * The session the record defines now: a bot of its own on its record, a bot made from a profile on what the worker
-	 * resolution compiles for it. Throws the owner's words when it cannot run as a session.
+	 * Where the record answers now: the session it defines (a bot of its own on its record, a bot made from a profile on
+	 * what the worker resolution compiles for it), or a worker's run (`runsAsSession` false). Throws the owner's words when
+	 * it would run as a session and cannot.
 	 */
-	private define(record: PersistentBotRecord, cwd = this.ports.sender().cwd()): BotSessionDefinition {
+	private route(record: PersistentBotRecord, cwd = this.ports.sender().cwd()): BotSessionDefinition | "worker" {
+		if (!botMayRunAsSession(record)) return "worker";
 		const { profileId } = record;
 		if (profileId === undefined) return ownBotSession(record, cwd, this.ports.modelRegistry());
-		const words = interfaceText().botTeam;
 		const compiled = this.ports.compileProfile({ ...record, profileId });
-		if (!compiled.ok) throw new Error(words.botProfileRefused(record.agentId, profileId, compiled.skipReason));
+		if (!compiled.ok)
+			throw new Error(interfaceText().botTeam.botProfileRefused(record.agentId, profileId, compiled.skipReason));
 		const session = profileBotSession(compiled);
-		if (session.route === "worker")
-			throw new Error(words.botProfileRefused(record.agentId, profileId, session.reason));
-		return session.definition;
+		return session.route === "worker" ? "worker" : session.definition;
+	}
+
+	/** The session the record defines now; throws the owner's words when it cannot run as one. */
+	private define(record: PersistentBotRecord, cwd?: string): BotSessionDefinition {
+		const defined = this.route(record, cwd);
+		if (defined === "worker") throw new Error(interfaceText().botTeam.botRunsAsWorker(record.agentId));
+		return defined;
 	}
 
 	/** What defines the bot's session now; a bot of its own's is read from its record alone. */
@@ -740,6 +755,7 @@ export class BotSessionHost {
 				spendBoundUsd: definition.spendBoundUsd,
 				unsubscribe: () => {},
 				inFlight: 0,
+				recheckWhenIdle: false,
 				usageBefore: undefined,
 				turnStartedAt: undefined,
 				idleTimer: undefined,
@@ -830,6 +846,16 @@ export class BotSessionHost {
 		else this.armIdle(entry);
 		this.publishState(entry);
 		this.changed(entry.agentId);
+		this.recheckIfIdle(entry);
+	}
+
+	/** Applies a record change, or a refusal off the session path, that came while the session worked, once it is idle. */
+	private recheckIfIdle(entry: BotSessionEntry): boolean {
+		if (!entry.recheckWhenIdle || this.isBusy(entry) || this.entries.get(entry.agentId) !== entry) return false;
+		entry.recheckWhenIdle = false;
+		const record = this.ports.store().getBot(entry.agentId);
+		if (record) this.recordChanged(record);
+		return true;
 	}
 
 	private touch(entry: BotSessionEntry): void {
@@ -851,6 +877,7 @@ export class BotSessionHost {
 				this.takeInbox(entry.agentId);
 				return this.armIdle(entry);
 			}
+			if (this.recheckIfIdle(entry)) return;
 			// Its watches are sampled and their wakes taken only while it is loaded: it stays until they are woken, end or are dropped.
 			if (this.owesWatchWork(entry.session.sessionId)) return this.armIdle(entry);
 			void this.close(entry.agentId).catch((error: unknown) =>
@@ -1044,19 +1071,24 @@ export class BotSessionHost {
 
 	/**
 	 * The bot's record changed: its profile follows it, and an idle session is closed so the next message builds one on the
-	 * new record. A change of what defines the session while it works is refused, as it is for a worker. A record that left
-	 * the session path (it became a leader's, a leader, or a profile only a worker's run holds) releases its session and
-	 * the watches it armed: its messages now go to a worker, and two conversations of one bot never run side by side.
+	 * new record. A change while the session works is applied when it is idle; meanwhile a run on what no longer defines it
+	 * is refused (`admit`), as it is for a worker. A record that left the session path (it became a leader's, a leader, or
+	 * a profile only a worker's run holds) releases its session and the watches it armed: its messages now go to a worker,
+	 * and two conversations of one bot never run side by side.
 	 */
 	recordChanged(record: PersistentBotRecord): void {
 		const entry = this.entries.get(record.agentId);
 		if (!entry && !this.hasHome(record.agentId)) return;
 		ensureBotHome(this.ports.agentDir(), record);
-		if (!this.runsAsSession(record)) {
-			if (!entry || !this.isBusy(entry)) this.release(record.agentId);
+		if (entry && this.isBusy(entry)) {
+			entry.recheckWhenIdle = true;
 			return;
 		}
-		if (entry && !this.isBusy(entry) && entry.profileKey !== this.currentKey(record))
+		if (!this.runsAsSession(record)) {
+			this.release(record.agentId);
+			return;
+		}
+		if (entry && entry.profileKey !== this.currentKey(record))
 			void this.close(record.agentId).then(
 				() => this.openIfOwed(record.agentId),
 				(error: unknown) =>
