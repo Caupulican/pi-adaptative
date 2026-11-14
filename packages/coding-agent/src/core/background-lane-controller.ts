@@ -59,7 +59,6 @@ import {
 import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./delegation/bot-daemon-launch.ts";
 import { type BotDaemonStopResult, stopDetachedBotDaemon } from "./delegation/bot-daemon-stop.ts";
 import { BotLifecycleController } from "./delegation/bot-lifecycle-controller.ts";
-import type { BotMessageDirectory } from "./delegation/bot-message-contract.ts";
 import { displayNameFor } from "./delegation/bot-naming.ts";
 import { BotOperatorDispatch } from "./delegation/bot-operator-dispatch.ts";
 import type { BotOperatorMessageOptions } from "./delegation/bot-operator-message-options.ts";
@@ -137,6 +136,7 @@ import { isManagedWorkerAttempt } from "./delegation/worker-lane-projection.ts";
 import type { ManagedLaneBinding, WorkerLifecycle } from "./delegation/worker-lifecycle.ts";
 import { contractGrantsChildren } from "./delegation/worker-nested-start.ts";
 import { WorkerNotificationCoordinator } from "./delegation/worker-notification-coordinator.ts";
+import { workerCeilingOf } from "./delegation/worker-parent-ceiling.ts";
 import { WorkerReceiptDelivery } from "./delegation/worker-receipt-delivery.ts";
 import { captureWorkerReceiptOrigin } from "./delegation/worker-receipt-origin.ts";
 import { WorkerTerminalReport } from "./delegation/worker-terminal-report.ts";
@@ -554,7 +554,9 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			{
 				...this.deps,
 				...this._getTranscriptWrites(),
-				createBotMessageDirectory: (sender, attempt) => this.createBotMessageDirectory(sender, attempt),
+				workerCeiling: () => workerCeilingOf(this.deps.standing, this.deps),
+				createBotMessageDirectory: (sender, attempt) =>
+					this._botLifecycle.createBotMessageDirectory(sender, attempt),
 				// The worker's model decides the account the fleet's allowance term reads, not the foreground's.
 				fleetAllowance: subscriptionAllowancePort(() => this._getAllowance()),
 				taskWatches: this._routineAssembly.taskWatches(() => this._routines.current),
@@ -1819,10 +1821,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	 */
 	stopPersistentBotDaemon(): BotDaemonStopResult {
 		return stopDetachedBotDaemon(this.getBotTeamStore(), this.deps.getTimers().port("routines"));
-	}
-
-	private createBotMessageDirectory(sender: string, attemptId: string): BotMessageDirectory {
-		return this._botLifecycle.createBotMessageDirectory(sender, attemptId);
 	}
 
 	/** True once this session has a worker runtime or a persisted orchestration store: only then can workers or managed lanes exist. */

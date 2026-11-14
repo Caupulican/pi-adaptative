@@ -24,11 +24,7 @@ import {
 } from "../autonomy/edge-policy.ts";
 import { hostFindingBlockerLine } from "../autonomy/host-findings.ts";
 import { laneCapabilityEnvelope } from "../autonomy/lane-envelope.ts";
-import {
-	getHarnessWriteProtectedPaths,
-	getPrivateLaneDeniedPaths,
-	thirdPartyProtectedWritePaths,
-} from "../autonomy/lane-private-paths.ts";
+import { getHarnessWriteProtectedPaths, thirdPartyProtectedWritePaths } from "../autonomy/lane-private-paths.ts";
 import { createLaneToolSurface } from "../autonomy/lane-tool-surface.ts";
 import { isLaneTerminalStatus, type LaneRecord } from "../autonomy/lane-tracker.ts";
 import {
@@ -300,6 +296,7 @@ import {
 } from "./worker-nested-start.ts";
 import type { WorkerNotificationCoordinator } from "./worker-notification-coordinator.ts";
 import { WorkerOutcomeFollowUp } from "./worker-outcome-follow-up.ts";
+import { workerHostScope } from "./worker-parent-ceiling.ts";
 import { createLocalWorkerProcessOwnerId } from "./worker-process-owner.ts";
 import {
 	type ResolvedWorkerProfile,
@@ -3096,11 +3093,10 @@ export class WorkerDelegationController {
 			settings,
 			cwd: this.deps.getCwd(),
 			executionCwd,
-			deniedPaths: getPrivateLaneDeniedPaths(this.deps.getCwd(), this.deps.getAgentDir()),
 			foregroundBudget: envelopeCostBudget(this.deps.getCapabilityEnvelope()),
 			memoryEnabled: this.deps.getSettingsManager().getMemoryRetrievalSettings().enabled,
 			workerToolAdapterNames: this.workerToolAdapterNames(),
-			...(this.deps.workerReadRoot ? { readRoot: this.deps.workerReadRoot() } : {}),
+			...workerHostScope(this.deps, executionCwd, this.laneIsolation),
 		});
 	}
 

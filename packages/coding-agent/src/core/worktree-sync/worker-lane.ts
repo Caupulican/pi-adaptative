@@ -18,7 +18,7 @@
  */
 
 import { existsSync, realpathSync } from "node:fs";
-import { basename, dirname, join, resolve, sep } from "node:path";
+import { basename, dirname, join, relative, resolve, sep } from "node:path";
 import type { LaneFacts, LaneRegistration } from "./codes.ts";
 import {
 	bindLaneWorker,
@@ -175,6 +175,16 @@ export async function findLaneByDirectory(
 /** Whether `candidate` lies under the directory lane worktrees are created in (a cheap check, no git). */
 export function isUnderLaneRoot(deps: WorktreeSyncEngineDeps, candidate: string): boolean {
 	return isInside(deps.worktreesBaseDir, candidate) && canonical(candidate) !== canonical(deps.worktreesBaseDir);
+}
+
+/**
+ * The lane worktree `candidate` lies in, by the layout lanes are created in (`<worktreesBaseDir>/<repository slug>/<lane
+ * key>`, git-engine.ts `createLane`): a cheap check, no git. Undefined outside that layout.
+ */
+export function laneWorktreeOf(deps: WorktreeSyncEngineDeps, candidate: string): string | undefined {
+	if (!isUnderLaneRoot(deps, candidate)) return undefined;
+	const [slug, laneKey] = relative(canonical(deps.worktreesBaseDir), canonical(candidate)).split(sep);
+	return slug && laneKey ? join(deps.worktreesBaseDir, slug, laneKey) : undefined;
 }
 
 /** Record which worker owns the lane at `worktreePath`. Idempotent; a lane already bound elsewhere is left alone. */

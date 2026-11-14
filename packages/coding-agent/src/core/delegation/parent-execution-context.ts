@@ -86,6 +86,7 @@ import type { SkillAuditToolOptions } from "../tools/skill-audit.ts";
 import type { TimerSource } from "../util/timer-port.ts";
 import type { WorkerResponseObservation, WorkerToolSelection } from "./worker-attempt-executor.ts";
 import type { WorkerTerminalHandoffRecord } from "./worker-notification-coordinator.ts";
+import type { WorkerCeiling } from "./worker-parent-ceiling.ts";
 import type { WorkerTerminalHandoff } from "./worker-terminal-handoff-coordinator.ts";
 
 /** The settings worker execution reads, declared here; the composition root passes the SettingsManager. */
@@ -171,7 +172,7 @@ export interface ParentExecutionEnvironment {
 	readMachine?(): MachineFacts;
 	/** Parent session's canonical credential source; worker evidence and reviewer calls share it. */
 	getCredentialExposureBoundary?(): CredentialExposureBoundary;
-	/** The read-only line the session's own shell is held to and the roots it reads in (a confined bot's session). */
+	/** The read-only line the session's own shell is held to, the roots it reads and writes in and its denied paths. */
 	getSessionConfinement?(): SessionConfinement | undefined;
 	/** Root's tool mechanics (output reduction, encodings, shell engine, packing), shared with every lane. */
 	getSharedLaneToolOptions?(): SharedLaneToolOptions;
@@ -334,6 +335,11 @@ export interface ParentExecutionPolicy {
 	 * nothing outside it but its own scratch directory. Absent, a worker reads what its profile and mode grant.
 	 */
 	workerReadRoot?(): string;
+	/**
+	 * The ceiling the session holds over every worker it starts, read at each worker plan (`worker-parent-ceiling.ts`):
+	 * "unbounded" where it lends the owner's reach, else its own reach, in every mode.
+	 */
+	workerCeiling(): WorkerCeiling;
 	/** The owner's live model policy; a worker bound to a model it disallows is reallocated. */
 	isModelAllowed?(model: Model<Api>): boolean;
 	/** The best model the policy allows, for a worker whose own binding it disallows. */

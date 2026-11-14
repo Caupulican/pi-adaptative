@@ -53,6 +53,7 @@ import {
 	discardUnusedWorkerLane,
 	findLaneByDirectory,
 	isUnderLaneRoot,
+	laneWorktreeOf,
 	releaseWorkerLane,
 	repositoryKeyAt,
 	type WorkerLaneCreation,
@@ -255,6 +256,16 @@ export class WorkerLaneIsolation {
 	/** The authoritative lane root for a directory in that lane; undefined when the registration cannot be resolved. */
 	async laneRootAt(cwd: string): Promise<string | undefined> {
 		return (await this.laneAt(cwd))?.worktreePath;
+	}
+
+	/**
+	 * The mover of paths stated against the session directory `root` into the lane `directory` lies in, as `relocateRequest`
+	 * moves a request's; undefined when `directory` is in no lane (a cheap check, no git). It places a worker's parent ceiling.
+	 */
+	laneOf(directory: string, root: string): ((entry: string) => string) | undefined {
+		const engine = this.deps.engineDeps(directory);
+		const laneRoot = engine && laneWorktreeOf(engine, directory);
+		return laneRoot === undefined ? undefined : (entry) => relocatedInto(root, laneRoot, entry);
 	}
 
 	/** Whether `directory` lies in the area lane worktrees are created in (a cheap check, no git). */

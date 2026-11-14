@@ -386,6 +386,8 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 				runsControlMessage: (controlMessageId) => awayRunKeyOf(controlMessageId) !== undefined,
 				runCostBound,
 				workerReadRoot: () => cwd,
+				// The parent opened away is the owner's session: it lends its workers the owner's reach, bounded by the read root.
+				workerCeiling: () => "unbounded",
 				getModel: () => parentModel ?? modelCalls.model,
 				isDelegateToolActive: () => true,
 				getCapabilityEnvelope: () => undefined,

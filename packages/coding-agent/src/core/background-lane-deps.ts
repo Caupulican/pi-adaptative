@@ -5,6 +5,7 @@
  */
 import type { SessionManager } from "../kernel/node.ts";
 import type { GoalContinuationLoopOptions, GoalContinuationLoopResult } from "./agent-session-contracts.ts";
+import type { SessionConfinement } from "./autonomy/session-confinement.ts";
 import type { OwnerChannelControl, OwnerChannelDelivery } from "./channels/owner-channel-types.ts";
 import type {
 	ForegroundTranscriptWriteDeps,
@@ -30,7 +31,7 @@ import type { WorktreeSyncEnginePorts } from "./worktree-sync/runtime.ts";
 
 /** The parent execution context serves worker execution; the other members serve the remaining lanes and routines. */
 export interface BackgroundLaneControllerDeps
-	extends Omit<ParentExecutionContext, keyof ForegroundTranscriptWrites | "getSessionManager">,
+	extends Omit<ParentExecutionContext, keyof ForegroundTranscriptWrites | "getSessionManager" | "workerCeiling">,
 		Pick<ForegroundTranscriptWriteDeps, "reportWorkerTerminal">,
 		ResearchLaneControllerDeps,
 		ModelFitnessControllerDeps,
@@ -88,7 +89,10 @@ export interface BackgroundLaneControllerDeps
 		| "managesBots"
 		| "directsWorkers"
 		| "runsProactiveLanes"
+		| "lendsOwnerReach"
 	>;
+	/** The session's confinement: with its tools and envelope, the ceiling it holds its workers to (`worker-parent-ceiling.ts`). */
+	getSessionConfinement(): SessionConfinement;
 	getToolInvocationKey(callId: string, toolName: string): string;
 	/** The session gate's admission of a sub-call of an admitted call: a routine save admits its watch's check through it. */
 	admitNestedToolCall: NestedCallAdmitter;

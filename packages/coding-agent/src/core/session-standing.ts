@@ -28,6 +28,11 @@ export interface SessionCapabilities {
 	readonly ownsProcessSingletons: boolean;
 	/** Does the host's duties: serves channels and `channel_reply`, reconciles the always-on service. */
 	readonly ownsHostDuties: boolean;
+	/**
+	 * Lends its workers the owner's reach: a worker it starts is bounded by its profile, the edge mode and the session's
+	 * envelope reads alone. Any other session holds its workers to its own reach (`worker-parent-ceiling.ts`).
+	 */
+	readonly lendsOwnerReach: boolean;
 	/** Reads the owner's memory: the knowledge store, prompt, reader and tool, the USER.md persona, the file-store block. */
 	readonly readsOwnerMemory: boolean;
 	/**
@@ -87,6 +92,7 @@ type Row = readonly [root: boolean, worker: boolean, bot: boolean, vehicle: bool
 const FLAGS: Readonly<Record<FlagCapability, Row>> = {
 	ownsProcessSingletons: [true, false, false, false],
 	ownsHostDuties: [true, false, false, false],
+	lendsOwnerReach: [true, false, false, false],
 	readsOwnerMemory: [true, false, false, false],
 	ownsMemoryWrites: [true, false, false, false],
 	ownsHistory: [true, false, false, false],

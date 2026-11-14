@@ -39,6 +39,11 @@ export interface SessionPathEnvelopes {
 	readonly scopes: readonly SessionPathEnvelope[];
 	/** The roots a session with `readRoots` reads in, with its private paths still denied; unset reads host-wide. */
 	readonly readScope?: SessionReadScope;
+	/**
+	 * The roots a session that writes as a worker does writes in: its write roots, else its allowed paths, else its working
+	 * directory. Unset writes host-wide. Its confinement and the ceiling it holds over its workers read this one value.
+	 */
+	readonly writeRoots?: readonly string[];
 }
 
 export function buildSessionPathEnvelopes(options: {
@@ -63,10 +68,13 @@ export function buildSessionPathEnvelopes(options: {
 		options.exemptReadPaths,
 	);
 	const scopes: SessionPathEnvelope[] = [{ envelope: privatePaths }];
+	let writeRoots: readonly string[] | undefined;
 	if (workerProcess || scope?.confinedWrites) {
 		const writeScope = scope?.writeRoots?.length
 			? buildWorkerSessionWriteRootsEnvelope(cwd, scope.writeRoots)
 			: buildWorkerSessionDefaultWriteScopeEnvelope(cwd, allowedPaths);
+		// Without a write scope of its own the session writes only where its allowed paths confine it.
+		writeRoots = (writeScope ?? privatePaths).allowedPaths?.map((root) => resolve(cwd, root));
 		if (writeScope)
 			scopes.push({
 				envelope: writeScope,
@@ -84,5 +92,5 @@ export function buildSessionPathEnvelopes(options: {
 		deniedPaths: privatePaths.deniedPaths ?? [],
 		exemptReadPaths: options.exemptReadPaths,
 	};
-	return { privatePaths, scopes, ...(readScope ? { readScope } : {}) };
+	return { privatePaths, scopes, ...(readScope ? { readScope } : {}), ...(writeRoots ? { writeRoots } : {}) };
 }

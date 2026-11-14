@@ -32,6 +32,7 @@ import {
 import { LOOKUP_TOOL_NAME } from "../tools/lookup-tool-name.ts";
 import { isWorkerProcessToolAllowed } from "../worker-tool-ceiling.ts";
 import { resolveWorkerWorkspacePath, workerMachinePathRoots } from "./worker-machine-scope.ts";
+import { capabilitiesUnderCeiling, type WorkerCeiling, type WorkerParentCeiling } from "./worker-parent-ceiling.ts";
 
 export const READ_TOOL_NAMES = ["read", "grep", "find", "ls"] as const;
 export const REPO_READ_TOOL_NAME = "repo_read";
@@ -208,6 +209,14 @@ export function narrowWorkerExecutionPlan(
 	};
 }
 
+/** The capabilities a YOLO worker's tools are classified under: no write capability when it is read-only, its parent's ceiling. */
+function yoloCapabilities(readOnly: boolean, ceiling: WorkerParentCeiling | undefined): readonly HarnessCapability[] {
+	const capabilities = readOnly
+		? YOLO_WORKER_CAPABILITIES.filter((capability) => !isWriteCapability(capability))
+		: YOLO_WORKER_CAPABILITIES;
+	return ceiling ? capabilitiesUnderCeiling(capabilities, ceiling) : capabilities;
+}
+
 export function buildWorkerExecutionPlan(args: {
 	yolo?: boolean;
 	profile: OrchestrationProfile;
@@ -222,10 +231,17 @@ export function buildWorkerExecutionPlan(args: {
 	workerToolAdapterNames?: readonly string[];
 	/** The host confines every worker's reads to this directory (`ParentExecutionPolicy.workerReadRoot`). */
 	readRoot?: string;
+	/** The ceiling the session that starts the worker holds over it (`worker-parent-ceiling.ts`), in every mode. */
+	parentCeiling: WorkerCeiling;
 }): WorkerExecutionPlan {
+	const ceiling = args.parentCeiling === "unbounded" ? undefined : args.parentCeiling;
+	// The worker holds no capability its parent's ceiling does not: the profile's ceiling is narrowed before any tool is enabled.
+	const profile: OrchestrationProfile = ceiling
+		? { ...args.profile, capabilityCeiling: capabilitiesUnderCeiling(args.profile.capabilityCeiling, ceiling) }
+		: args.profile;
 	const parentCwd = resolveWorkerWorkspacePath(args.cwd, args.cwd);
-	const cwd = args.profile.workspacePath
-		? resolveWorkerWorkspacePath(parentCwd, args.profile.workspacePath)
+	const cwd = profile.workspacePath
+		? resolveWorkerWorkspacePath(parentCwd, profile.workspacePath)
 		: resolveWorkerWorkspacePath(parentCwd, args.executionCwd ?? parentCwd);
 	// Reads keep the host's machine scope unless an explicit workspace focuses them, or the host confines them (in YOLO
 	// too: YOLO removes permission prompts, never the host's scope). Writes never default to the machine: a worker
@@ -234,31 +250,37 @@ export function buildWorkerExecutionPlan(args: {
 	// A named read scope (`readPaths`) is the whole read scope in every mode, YOLO included, and within the host's root
 	// when the host confines reads. It is not widened by the cwd: an empty one reads nothing.
 	const hostReadRoot = args.readRoot === undefined ? undefined : resolveWorkerWorkspacePath(parentCwd, args.readRoot);
-	const namedReadScope = args.profile.readPaths?.map((entry) => resolveWorkerWorkspacePath(cwd, entry));
-	const readScopes =
+	const namedReadScope = profile.readPaths?.map((entry) => resolveWorkerWorkspacePath(cwd, entry));
+	const hostReadScopes =
 		namedReadScope !== undefined
 			? hostReadRoot === undefined
 				? [...new Set(namedReadScope)]
 				: intersectPathScopes(namedReadScope, [hostReadRoot])
 			: hostReadRoot !== undefined
 				? [...new Set([hostReadRoot, cwd])]
-				: args.yolo || !args.profile.workspacePath
+				: args.yolo || !profile.workspacePath
 					? workerMachinePathRoots(parentCwd)
 					: [cwd];
-	// The read scope is confined by a named scope or by the host's read root. A workspace focus keeps its reads as they were:
-	// the read tools follow the focus through the gateway, and the shell reads the machine scope.
-	const readConfined = namedReadScope !== undefined || hostReadRoot !== undefined;
+	// A parent with read roots bounds its worker's reads: the worker reads no root its parent does not.
+	const readScopes = ceiling?.readRoots ? intersectPathScopes(hostReadScopes, ceiling.readRoots) : hostReadScopes;
+	// The read scope is confined by a named scope, the host's read root or the parent's read roots. A workspace focus keeps
+	// its reads as they were: the read tools follow the focus through the gateway, and the shell reads the machine scope.
+	const readConfined = namedReadScope !== undefined || hostReadRoot !== undefined || ceiling?.readRoots !== undefined;
 	// A confined scope with no root reads nothing: its read tools and `repo_read` are not granted at all.
 	const readScopeNone = readConfined && readScopes.length === 0;
-	const grantedWriteRoots = (args.profile.writePaths ?? []).map((entry) => resolveWorkerWorkspacePath(cwd, entry));
-	const writeScopes = [...new Set([cwd, ...grantedWriteRoots])];
+	const grantedWriteRoots = (profile.writePaths ?? []).map((entry) => resolveWorkerWorkspacePath(cwd, entry));
+	// A parent with write roots bounds its worker's: a place outside them is not the worker's to write.
+	const underParentWrites = (paths: readonly string[]) =>
+		ceiling?.writeRoots ? intersectPathScopes(paths, ceiling.writeRoots) : [...paths];
+	const writeScopes = underParentWrites([...new Set([cwd, ...grantedWriteRoots])]);
 	// Only an explicit workspace or granted root fences other lanes; the bare cwd default does not.
-	const writeReservationScopes = args.profile.workspacePath ? writeScopes : grantedWriteRoots;
+	const writeReservationScopes = profile.workspacePath ? writeScopes : underParentWrites(grantedWriteRoots);
 	// A readOnly grant stays read-only in YOLO too: YOLO removes permission prompts, not the parent's
-	// promise that this worker edits nothing.
-	const readOnly = args.profile.readOnly === true;
+	// promise that this worker edits nothing. A parent that edits nothing, or whose write roots leave the worker no place
+	// to write, makes it read-only as well.
+	const readOnly = profile.readOnly === true || ceiling?.readOnly === true || writeScopes.length === 0;
 	const profileToolNames = new Set(
-		mapToolNamesForPlatform(args.profile.toolNames).filter((name) => !WORKER_ROOT_MEMORY_TOOL_NAMES.has(name)),
+		mapToolNamesForPlatform(profile.toolNames).filter((name) => !WORKER_ROOT_MEMORY_TOOL_NAMES.has(name)),
 	);
 	if (args.yolo)
 		for (const name of [
@@ -273,24 +295,24 @@ export function buildWorkerExecutionPlan(args: {
 	const grantsRead =
 		!readScopeNone &&
 		(args.yolo ||
-			args.profile.capabilityCeiling.includes("filesystem.read") ||
-			args.profile.capabilityCeiling.includes("worktree.read"));
-	const grantsRepoRead = !readScopeNone && (args.yolo || args.profile.capabilityCeiling.includes("repo.read"));
-	const writeEligible = args.yolo
-		? !readOnly
-		: args.settings.writeEnabled && args.profile.capabilityCeiling.some(isWriteCapability);
+			profile.capabilityCeiling.includes("filesystem.read") ||
+			profile.capabilityCeiling.includes("worktree.read"));
+	const grantsRepoRead = !readScopeNone && (args.yolo || profile.capabilityCeiling.includes("repo.read"));
+	const writeEligible =
+		(args.yolo ? !readOnly : args.settings.writeEnabled && profile.capabilityCeiling.some(isWriteCapability)) &&
+		!(ceiling && readOnly);
 	const memoryEligible =
 		args.memoryEnabled &&
 		WORKER_MEMORY_BROKER_TOOL_NAMES.some((name) => profileToolNames.has(name)) &&
-		args.profile.capabilityCeiling.includes("memory.query");
+		profile.capabilityCeiling.includes("memory.query");
 	const processEligible =
 		args.yolo ||
-		args.profile.capabilityCeiling.includes("process.exec") ||
-		args.profile.capabilityCeiling.includes("tests.execute");
+		profile.capabilityCeiling.includes("process.exec") ||
+		profile.capabilityCeiling.includes("tests.execute");
 	const enabledProcessToolNames = processEligible
 		? [
 				...(profileToolNames.has("python") ? (["python"] as const) : []),
-				...(args.profile.executionPolicy && profileToolNames.has("run_process") ? (["run_process"] as const) : []),
+				...(profile.executionPolicy && profileToolNames.has("run_process") ? (["run_process"] as const) : []),
 				...(profileToolNames.has(STABLE_SHELL_TOOL_NAME) ? [STABLE_SHELL_TOOL_NAME] : []),
 			].filter((name) => !readOnly || toolSurvivesReadOnly(name))
 		: [];
@@ -318,13 +340,11 @@ export function buildWorkerExecutionPlan(args: {
 	const toolManifests = buildLaneToolManifests(
 		args.yolo
 			? {
-					...args.profile,
-					toolNames: [...new Set([...args.profile.toolNames, ...enabledToolNames])],
-					capabilityCeiling: readOnly
-						? YOLO_WORKER_CAPABILITIES.filter((capability) => !isWriteCapability(capability))
-						: YOLO_WORKER_CAPABILITIES,
+					...profile,
+					toolNames: [...new Set([...profile.toolNames, ...enabledToolNames])],
+					capabilityCeiling: yoloCapabilities(readOnly, ceiling),
 				}
-			: args.profile,
+			: profile,
 		enabledToolNames,
 	);
 	const grantedTools = new Set(toolManifests.map((manifest) => manifest.toolName));
@@ -336,7 +356,7 @@ export function buildWorkerExecutionPlan(args: {
 		grantedTools.has(STABLE_SHELL_TOOL_NAME) ||
 		grantedTools.has("run_toolkit_script");
 	const budget = intersectRiskBudgets(
-		args.profile.budget,
+		profile.budget,
 		...(args.settings.maxUsd > 0 ? [{ maxCostUsd: args.settings.maxUsd }] : []),
 		...(args.foregroundBudget ? [args.foregroundBudget] : []),
 		...(args.settings.maxWallClockMs > 0 ? [{ maxWallClockMs: args.settings.maxWallClockMs }] : []),
@@ -354,16 +374,18 @@ export function buildWorkerExecutionPlan(args: {
 		// file, which guarded mode protects as settings authority, opens up.
 		deniedPaths: [
 			...new Set(
-				[...args.deniedPaths, ...(args.yolo ? [] : [join(cwd, ".pi", "settings.json")])].map((entry) =>
-					resolveWorkerWorkspacePath(cwd, entry),
-				),
+				[
+					...args.deniedPaths,
+					...(ceiling?.deniedPaths ?? []),
+					...(args.yolo ? [] : [join(cwd, ".pi", "settings.json")]),
+				].map((entry) => resolveWorkerWorkspacePath(cwd, entry)),
 			),
 		],
 		readMemory: memoryEligible && WORKER_MEMORY_BROKER_TOOL_NAMES.some((name) => grantedTools.has(name)),
 		writeEnabled,
 		processEnabled,
 		readOnly,
-		shellReadOnly: processEnabled && (readOnly || args.profile.shellReadOnly === true),
+		shellReadOnly: processEnabled && (readOnly || profile.shellReadOnly === true || ceiling?.shellReadOnly === true),
 		budget,
 	};
 }
