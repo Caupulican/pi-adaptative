@@ -90,10 +90,20 @@ export function lostOriginRoutines(
 export interface GoneSessionSettlementInput {
 	readonly store: Pick<
 		RoutineStorePort,
-		"listRoutineOccurrences" | "acknowledgeRoutineDelivery" | "listRoutines" | "retireEndedRoutines"
+		| "listRoutineOccurrences"
+		| "acknowledgeRoutineDelivery"
+		| "listRoutines"
+		| "retireEndedRoutines"
+		| "markRoutineUncertain"
 	>;
-	/** Sessions a process still holds (this one, live or resumable peers): each settles its own results. */
+	/** Sessions a process still holds (this one, live or resumable peers, a worker's parent): each settles its own. */
 	readonly protectedSessionIds: ReadonlySet<string>;
+	/**
+	 * Whether processes register in the process matrix here (this process's own session has a live entry), so a session
+	 * absent from `protectedSessionIds` is held by no process and none of its workers runs. Without that proof a dispatched
+	 * run of a deleted session is left as it is.
+	 */
+	readonly processTracked: boolean;
 	/** The session files the agent directory holds for a session id (`<timestamp>_<id>.jsonl` names). */
 	sessionFiles(sessionId: string): readonly string[];
 	readonly nowMs: number;
@@ -119,6 +129,8 @@ function sessionGone(sessionId: string, sessionFile: string, known: readonly str
 
 /** What the startup cleanup did for deleted sessions (`settleGoneSessionRoutines`). */
 export interface GoneSessionSettlement {
+	/** Dispatched runs no process could still be running, settled as uncertain. */
+	readonly uncertainRuns: number;
 	/** Pending results settled undeliverable. */
 	readonly settledResults: number;
 	/** Routines retired as `origin-lost`. */
@@ -127,8 +139,9 @@ export interface GoneSessionSettlement {
 
 /**
  * Settles, across the store, the routine work of sessions that can never open again (the session file it names gone and
- * no other file of the session left, no process holding it, the work quiet for `quietFloorMs`): each pending result is
- * settled undeliverable with the `session-file-gone` marker its own session would have written, then each routine the
+ * no other file of the session left, no process holding it, the work quiet for `quietFloorMs`): each run it dispatched
+ * that no process can still be running is settled as uncertain (as its own scheduler's recovery does once it finds no
+ * execution), each pending result is settled undeliverable with the `session-file-gone` marker its own session would have written, then each routine the
  * session saved is handed to the store's retire write as `origin-lost`, which cancels its runs that never started and
  * removes it once its dispatched runs are settled. Work a session settled or changed meanwhile is left to it.
  */
@@ -143,19 +156,72 @@ export function settleGoneSessionRoutines(input: GoneSessionSettlementInput): Go
 		}
 		return known;
 	};
-	return { settledResults: settleGoneResults(input, isGone), retiredRoutines: retireGoneRoutines(input, isGone) };
+	const uncertain = settleGoneRuns(input, isGone);
+	return {
+		uncertainRuns: uncertain.size,
+		settledResults: settleGoneResults(input, isGone, uncertain),
+		retiredRoutines: retireGoneRoutines(input, isGone),
+	};
 }
 
+/**
+ * Settles as uncertain each run a deleted session dispatched (its claim lease past, quiet for `quietFloorMs`) when the
+ * process matrix proves no process holds the session or runs its workers, so its exact execution can never be found and
+ * finish it; a run dispatched away is left to the away host that reconciles it. Returns the runs settled.
+ */
+function settleGoneRuns(
+	input: GoneSessionSettlementInput,
+	isGone: (sessionId: string, sessionFile: string) => boolean,
+): Set<string> {
+	const settled = new Set<string>();
+	if (!input.processTracked) return settled;
+	for (const occurrence of input.store.listRoutineOccurrences({
+		phases: ["dispatching", "running"],
+		limit: MAX_ROUTINE_OCCURRENCES,
+	})) {
+		const { sessionId, sessionFile } = occurrence.parentOrigin;
+		const claim = occurrence.claim;
+		if (!claim || claim.leaseUntil > input.nowMs || occurrence.executor === "away") continue;
+		if (sessionFile === undefined || input.protectedSessionIds.has(sessionId)) continue;
+		if (input.nowMs - occurrence.updatedAt < input.quietFloorMs || !isGone(sessionId, sessionFile)) continue;
+		try {
+			input.store.markRoutineUncertain({
+				occurrenceId: occurrence.occurrenceId,
+				claimToken: claim.token,
+				reason:
+					"The session that dispatched this run was deleted and no process holds it or runs its workers; its outcome is unknown and it was not repeated.",
+				recipient: sessionId,
+				nowMs: input.nowMs,
+				facts: { reasonCode: "session_deleted" },
+			});
+			settled.add(occurrence.occurrenceId);
+			harnessLog.warn("routines", "a routine run of a deleted session was settled as uncertain", {
+				routineId: occurrence.routineId,
+				occurrenceId: occurrence.occurrenceId,
+			});
+		} catch (error) {
+			harnessLog.warn("routines", "a routine run of a deleted session could not be settled", {
+				occurrenceId: occurrence.occurrenceId,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+	return settled;
+}
+
+/** `justSettled`: runs this cleanup settled as uncertain, already found quiet, whose uncertainty result is new. */
 function settleGoneResults(
 	input: GoneSessionSettlementInput,
 	isGone: (sessionId: string, sessionFile: string) => boolean,
+	justSettled: ReadonlySet<string>,
 ): number {
 	const marker = routineUndeliverableMarker("session-file-gone");
 	let settled = 0;
 	for (const occurrence of input.store.listRoutineOccurrences({ limit: MAX_ROUTINE_OCCURRENCES })) {
 		const { sessionId, sessionFile } = occurrence.parentOrigin;
 		if (sessionFile === undefined || input.protectedSessionIds.has(sessionId)) continue;
-		if (input.nowMs - occurrence.updatedAt < input.quietFloorMs) continue;
+		if (!justSettled.has(occurrence.occurrenceId) && input.nowMs - occurrence.updatedAt < input.quietFloorMs)
+			continue;
 		const results = [occurrence.priorUncertaintyResult, occurrence.result].filter(
 			(result) => result?.delivery === "pending" && result.recipient === sessionId,
 		);

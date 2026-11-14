@@ -60,7 +60,8 @@ import { isPlainRecord } from "./util/value-guards.ts";
  *
  * Before the bundles, the same run settles the routine work of a session that was deleted (its transcript gone, no
  * process holding it, quiet for {@link SESSION_BUNDLE_QUIET_FLOOR_MS}), since that session never opens again to settle it
- * itself: its pending results are settled undeliverable and its routines retired as `origin-lost`
+ * itself: its dispatched runs are settled as uncertain when the process matrix proves nothing runs them, its pending
+ * results are settled undeliverable and its routines retired as `origin-lost`
  * (`settleGoneSessionRoutines`). It needs the transcript index, so an index over its bound skips it too.
  *
  * Work per run is bounded by the constants below; the remainder is left for the next startup, which starts
@@ -114,6 +115,8 @@ export interface SessionBundleRetentionResult {
 	settledRoutineResults: number;
 	/** Routines of a deleted session retired as `origin-lost` this run. */
 	retiredRoutines: number;
+	/** Dispatched routine runs of a deleted session settled as uncertain this run. */
+	uncertainRoutineRuns: number;
 	/** At most {@link MAX_DIAGNOSTICS} short messages; empty when nothing went wrong. */
 	diagnostics: string[];
 }
@@ -161,15 +164,24 @@ function walkBundle(root: string): BundleWalk {
 	return walk;
 }
 
-/** Sessions that a live, winding-down, or resumable process-matrix entry still refers to. */
-async function protectedSessionIds(agentDir: string, currentSessionId: string): Promise<Set<string>> {
+/**
+ * Sessions that a live, winding-down, or resumable process-matrix entry still refers to. `tracked`: this process's own
+ * session has a live entry, so processes register here and a session no entry names is held by no process and runs no
+ * worker (process tracking off, or this process's registration failed, proves nothing).
+ */
+async function protectedSessionIds(
+	agentDir: string,
+	currentSessionId: string,
+): Promise<{ readonly ids: Set<string>; readonly tracked: boolean }> {
 	const protectedIds = new Set<string>([currentSessionId]);
+	let tracked = false;
 	for (const entry of await listEntries(agentDir)) {
 		if (entry.status === "closed") continue;
 		protectedIds.add(entry.agent.resumeContext.sessionId);
 		if (entry.parentSessionId) protectedIds.add(entry.parentSessionId);
+		if (entry.agent.resumeContext.sessionId === currentSessionId) tracked = true;
 	}
-	return protectedIds;
+	return { ids: protectedIds, tracked };
 }
 
 /** Session id -> transcript paths, from file names alone (`<timestamp>_<session-id>.jsonl`); undefined when over budget. */
@@ -209,7 +221,7 @@ function indexSessionTranscripts(agentDir: string): Map<string, string[]> | unde
  */
 function settleRoutinesOfGoneSessions(
 	agentDir: string,
-	protectedIds: ReadonlySet<string>,
+	matrix: { readonly ids: ReadonlySet<string>; readonly tracked: boolean },
 	transcripts: ReadonlyMap<string, readonly string[]>,
 	nowMs: number,
 ): GoneSessionSettlement {
@@ -217,14 +229,15 @@ function settleRoutinesOfGoneSessions(
 	try {
 		return settleGoneSessionRoutines({
 			store: new PersistentBotTeamStore(agentDir, warn),
-			protectedSessionIds: protectedIds,
+			protectedSessionIds: matrix.ids,
+			processTracked: matrix.tracked,
 			sessionFiles: (sessionId) => transcripts.get(sessionId) ?? [],
 			nowMs,
 			quietFloorMs: SESSION_BUNDLE_QUIET_FLOOR_MS,
 		});
 	} catch (error) {
 		warn(`the routine work of deleted sessions was not settled: ${describe(error)}`);
-		return { settledResults: 0, retiredRoutines: 0 };
+		return { uncertainRuns: 0, settledResults: 0, retiredRoutines: 0 };
 	}
 }
 
@@ -430,16 +443,19 @@ export async function sweepSessionBundles(
 		expiredObligations: 0,
 		settledRoutineResults: 0,
 		retiredRoutines: 0,
+		uncertainRoutineRuns: 0,
 		diagnostics: [],
 	};
 	const report = (message: string): void => {
 		if (result.diagnostics.length < MAX_DIAGNOSTICS) result.diagnostics.push(message.slice(0, MAX_DIAGNOSTIC_CHARS));
 	};
 	try {
-		const protectedIds = await protectedSessionIds(agentDir, currentSessionId);
+		const matrix = await protectedSessionIds(agentDir, currentSessionId);
+		const protectedIds = matrix.ids;
 		const transcripts = indexSessionTranscripts(agentDir);
 		if (transcripts) {
-			const settled = settleRoutinesOfGoneSessions(agentDir, protectedIds, transcripts, now);
+			const settled = settleRoutinesOfGoneSessions(agentDir, matrix, transcripts, now);
+			result.uncertainRoutineRuns = settled.uncertainRuns;
 			result.settledRoutineResults = settled.settledResults;
 			result.retiredRoutines = settled.retiredRoutines;
 		}
