@@ -6,6 +6,8 @@
  * whole and keeps its own words.
  */
 
+import type { UnansweredReason } from "../../channels/batch-outcome.ts";
+import type { ChannelGapRecord } from "../../channels/channel-journal.ts";
 import type { KnowledgeNoticeReason } from "../../context/memory-diagnostics.ts";
 import type { HostEventReplayGap } from "../../events/host-event-contract.ts";
 import type { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../../system-one/semantic-plane-health.ts";
@@ -247,6 +249,65 @@ export const NOTICES = {
 	/** No more held actions are recorded: `max` of them already wait for the owner. */
 	heldDraftsFull: (origin: string, max: number) =>
 		`Held, not run: actions asked by ${origin}; ${max} held actions already wait for you, so no more are recorded. They run if you ask for them yourself.`,
+
+	/**
+	 * A channel's notices (`owner-notice-text.ts`, `session-channels.ts`): its state, a held sender, a gap, a reply that
+	 * did not happen and what the daemon's host left. `detail` and a draft's `reason` are the transport's or the record's
+	 * own words, handed in whole.
+	 */
+	channels: {
+		notConfigured: (name: string) =>
+			`Channel ${name} is registered but not started: no channels.${name} policy in the global or directory-profile settings.`,
+		invalid: (name: string, detail: string | undefined) =>
+			`Channel ${name} is not started: ${detail ?? "its policy cannot be read"}.`,
+		servedElsewhere: (name: string) =>
+			`Channel ${name} is not started in this session: another open session serves it.`,
+		connectionLost: (name: string, detail: string) => `Channel ${name} is not receiving messages: ${detail}.`,
+		/** `builtIn`: the transport is a shipped one, which a session start tries again. */
+		startFailed: (name: string, detail: string | undefined, builtIn: boolean) =>
+			`Channel ${name} did not start (${detail ?? "start failed"}); it is tried again when settings change or ${builtIn ? "a session starts" : "the provider registers again"}.`,
+		capped: (name: string, detail: string | undefined) =>
+			`Channel ${name} holds new messages: ${detail ?? "its daily bound is reached"}. They wait up to 24 hours.`,
+		senderHeld: (name: string, senderId: string) =>
+			`Channel ${name} held a message from sender ${senderId}, who is not in channels.${name}.allowedSenders. To let them start turns, add "${senderId}" to that list.`,
+		senderHeldUnnamed: (name: string) =>
+			`Channel ${name} held a verified sender not in channels.${name}.allowedSenders; the channel_reply list action shows its id.`,
+		gap: (name: string, reason: ChannelGapRecord["reason"], count: number): string =>
+			reason === "expired"
+				? `Channel ${name}: ${count} message(s) waited more than 24 hours and were dropped undelivered.`
+				: reason === "unanswered"
+					? `Channel ${name}: ${count} delivered conversation(s) got no reply (the turn ended without an answer for them, or the session that served them closed).`
+					: `Channel ${name}: its journal could not be read and was replaced; messages and drafts it held are not delivered.`,
+		full: (name: string, max: number) =>
+			`Channel ${name} refuses new messages: ${max} wait undelivered. The provider is asked to deliver them again later.`,
+		unanswered: (name: string, reason: UnansweredReason) =>
+			`Channel ${name}: a delivered conversation got no reply (${reason.replaceAll("_", " ")}).`,
+		ownerUnanswered: (name: string, reason: UnansweredReason) =>
+			`Channel ${name}: an owner message got no reply (${reason.replaceAll("_", " ")}).`,
+		draftWaits: (name: string, draftId: string, reason: string) =>
+			`Channel ${name}: a reply waits as draft ${draftId} (${reason}). The channel_reply tool sends or dismisses it.`,
+		ownerUnverifiable: (name: string) =>
+			`Channel ${name}: owner senders listed but the transport cannot verify them; owner authority is off.`,
+		ownerUnhostable: (name: string) =>
+			`Channel ${name}: owner senders listed but this session cannot host owner turns; owner authority is off.`,
+		/** What the daemon's host left: `served` joins the parts, each a count and what it counts. */
+		away: {
+			served: (name: string, parts: readonly string[]) =>
+				`While the daemon served channel ${name}: ${parts.join("; ")}.`,
+			/** `listed`: the drafts named by id and reason, with `more` at their end. */
+			drafts: (count: number, listed: readonly string[]) =>
+				`${count} reply draft(s) wait for channel_reply${listed.length > 0 ? ` (${listed.join(", ")})` : ""}`,
+			more: (count: number) => `and ${count} more`,
+			expired: (count: number) => `${count} message(s) expired after 24 hours`,
+			unanswered: (count: number) => `${count} delivered conversation(s) got no reply`,
+			/** `kinds`: the held messages by reason, or undefined when the line has no room for them. */
+			held: (count: number, kinds: readonly string[] | undefined) =>
+				`${count} message(s) held${kinds ? ` (${kinds.join(", ")})` : ""}`,
+			notAllowed: (count: number, name: string) => `${count} not in channels.${name}.allowedSenders`,
+			unverified: (count: number) => `${count} unverified`,
+			burst: (count: number, name: string) => `${count} over channels.${name}.maxPendingPerConversation`,
+		},
+	},
 
 	/** What a widget the extension drew too tall to keep becomes at the top of its frame. */
 	widgetTruncated: "... (widget truncated)",

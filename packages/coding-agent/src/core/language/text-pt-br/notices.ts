@@ -6,6 +6,8 @@
  * palavras.
  */
 
+import type { UnansweredReason } from "../../channels/batch-outcome.ts";
+import type { ChannelGapRecord } from "../../channels/channel-journal.ts";
 import type { KnowledgeNoticeReason } from "../../context/memory-diagnostics.ts";
 import type { HostEventReplayGap } from "../../events/host-event-contract.ts";
 import type { SYSTEM_ONE_NO_ENGINE_CAUSE } from "../../system-one/semantic-plane-health.ts";
@@ -20,6 +22,17 @@ const KNOWLEDGE_PAUSED: Readonly<Record<KnowledgeNoticeReason, string>> = {
 	model_unpriced:
 		"o modelo da coleta não tem preço declarado, então nenhuma requisição limitada pode ser admitida. Defina autoLearn.model como um modelo com preço declarado.",
 	no_engine: "nenhum juiz semântico está disponível.",
+};
+
+/** Por que uma conversa entregue ficou sem resposta, pelo motivo que o canal registra. */
+const UNANSWERED_REASONS: Readonly<Record<UnansweredReason, string>> = {
+	not_delivered: "não foi entregue",
+	owner_steered: "o dono interveio",
+	owner_channel_joined: "o dono entrou pelo canal",
+	mixed: "outra origem entrou no turno",
+	aborted: "o turno foi interrompido",
+	empty_answer: "resposta vazia",
+	no_answer: "sem resposta",
 };
 
 /** Por que resultados de CI nunca chegaram a uma sessão, pelo motivo que a lacuna registra. */
@@ -211,6 +224,55 @@ export const NOTICES = {
 	}),
 	heldDraftsFull: (origin: string, max: number) =>
 		`Retidas, não executadas: ações pedidas por ${origin}; ${max} ações retidas já esperam por você, então nenhuma outra é registrada. Elas rodam se você mesmo pedir.`,
+
+	channels: {
+		notConfigured: (name: string) =>
+			`O canal ${name} está registrado, mas não foi iniciado: não há política channels.${name} nas configurações globais nem nas do perfil do diretório.`,
+		invalid: (name: string, detail: string | undefined) =>
+			`O canal ${name} não foi iniciado: ${detail ?? "a política dele não pode ser lida"}.`,
+		servedElsewhere: (name: string) => `O canal ${name} não foi iniciado nesta sessão: outra sessão aberta o atende.`,
+		connectionLost: (name: string, detail: string) => `O canal ${name} não está recebendo mensagens: ${detail}.`,
+		startFailed: (name: string, detail: string | undefined, builtIn: boolean) =>
+			`O canal ${name} não iniciou (${detail ?? "a inicialização falhou"}); ele é tentado de novo quando as configurações mudam ou ${builtIn ? "uma sessão começa" : "o provedor se registra de novo"}.`,
+		capped: (name: string, detail: string | undefined) =>
+			`O canal ${name} retém mensagens novas: ${detail ?? "o limite diário dele foi atingido"}. Elas esperam até 24 horas.`,
+		senderHeld: (name: string, senderId: string) =>
+			`O canal ${name} reteve uma mensagem do remetente ${senderId}, que não está em channels.${name}.allowedSenders. Para deixá-lo iniciar turnos, adicione "${senderId}" a essa lista.`,
+		senderHeldUnnamed: (name: string) =>
+			`O canal ${name} reteve um remetente verificado que não está em channels.${name}.allowedSenders; a ação list do channel_reply mostra o id dele.`,
+		gap: (name: string, reason: ChannelGapRecord["reason"], count: number): string =>
+			reason === "expired"
+				? `Canal ${name}: ${count} mensagem(ns) esperaram mais de 24 horas e foram descartadas sem entrega.`
+				: reason === "unanswered"
+					? `Canal ${name}: ${count} conversa(s) entregue(s) ficaram sem resposta (o turno terminou sem responder a elas, ou a sessão que as atendia fechou).`
+					: `Canal ${name}: o diário dele não pôde ser lido e foi substituído; mensagens e rascunhos que ele guardava não são entregues.`,
+		full: (name: string, max: number) =>
+			`O canal ${name} recusa mensagens novas: ${max} esperam sem entrega. O provedor é chamado a entregá-las de novo mais tarde.`,
+		unanswered: (name: string, reason: UnansweredReason) =>
+			`Canal ${name}: uma conversa entregue ficou sem resposta (${UNANSWERED_REASONS[reason]}).`,
+		ownerUnanswered: (name: string, reason: UnansweredReason) =>
+			`Canal ${name}: uma mensagem do dono ficou sem resposta (${UNANSWERED_REASONS[reason]}).`,
+		draftWaits: (name: string, draftId: string, reason: string) =>
+			`Canal ${name}: uma resposta espera como rascunho ${draftId} (${reason}). A ferramenta channel_reply a envia ou descarta.`,
+		ownerUnverifiable: (name: string) =>
+			`Canal ${name}: há remetentes donos listados, mas o transporte não consegue verificá-los; a autoridade do dono está desligada.`,
+		ownerUnhostable: (name: string) =>
+			`Canal ${name}: há remetentes donos listados, mas esta sessão não pode hospedar turnos do dono; a autoridade do dono está desligada.`,
+		away: {
+			served: (name: string, parts: readonly string[]) =>
+				`Enquanto o daemon atendia o canal ${name}: ${parts.join("; ")}.`,
+			drafts: (count: number, listed: readonly string[]) =>
+				`${count} rascunho(s) de resposta esperam pelo channel_reply${listed.length > 0 ? ` (${listed.join(", ")})` : ""}`,
+			more: (count: number) => `e mais ${count}`,
+			expired: (count: number) => `${count} mensagem(ns) expiraram após 24 horas`,
+			unanswered: (count: number) => `${count} conversa(s) entregue(s) ficaram sem resposta`,
+			held: (count: number, kinds: readonly string[] | undefined) =>
+				`${count} mensagem(ns) retida(s)${kinds ? ` (${kinds.join(", ")})` : ""}`,
+			notAllowed: (count: number, name: string) => `${count} fora de channels.${name}.allowedSenders`,
+			unverified: (count: number) => `${count} não verificada(s)`,
+			burst: (count: number, name: string) => `${count} acima de channels.${name}.maxPendingPerConversation`,
+		},
+	},
 
 	widgetTruncated: "... (widget truncado)",
 	/** O aviso de cobrança de uma sessão autenticada com uma chave de assinatura. */

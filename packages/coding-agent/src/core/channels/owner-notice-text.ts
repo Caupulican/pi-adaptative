@@ -1,13 +1,27 @@
 /**
- * The owner-facing words a channel session writes about a channel's state, a held sender and the subscription
- * allowance: pure text builders with no session state, so the notice rules (one bounded line, an id named only when the
- * platform assigned it) live in one place next to their bounds.
+ * The owner-facing words a channel session writes about a channel's state, a held sender, what the daemon's host left
+ * and the subscription allowance: pure builders with no session state, so the notice rules (one bounded line, an id
+ * named only when the platform assigned it) live in one place next to their bounds. A notice's sentences are the notices
+ * catalogue's (`notices.channels`): the model reads them in English, the owner in the interface language.
  */
 
 import type { ChannelSenderIds } from "../gateways/channel-provider.ts";
+import { type HarnessNotice, type WordedNotice, wordedNotice } from "../harness-notice.ts";
+import type { InterfaceText } from "../language/interface-text.ts";
 import { MAX_RETAINED_DIAGNOSTIC_CHARS } from "../security/secret-text.ts";
+import { type ChannelAwayUntold, heldCount } from "./channel-journal.ts";
 import type { ResolvedChannelPolicy } from "./channel-policy.ts";
 import type { OwnerQuotaAllowance } from "./owner-channel-types.ts";
+
+/** The daemon's drafts one summary of what it left names by id and reason; the rest are counted. */
+const MAX_NAMED_AWAY_DRAFTS = 3;
+
+/** What the daemon's host left, counted: messages it dropped, conversations it left unanswered, messages it held. */
+interface AwayCounts {
+	readonly expired: number;
+	readonly unanswered: number;
+	readonly held: number;
+}
 
 /**
  * A sender id the owner is told verbatim: one the platform assigned (`ChannelSenderIds`), plain and short, never prose
@@ -43,38 +57,86 @@ export function channelStateNotice(
 	state: string,
 	detail: string | undefined,
 	facts: { readonly connectionLost: boolean; readonly builtIn: boolean },
-): { readonly reason: string; readonly text: string } | undefined {
+): HarnessNotice | undefined {
 	const reason = `${name}:${state}:${detail ?? ""}`;
 	switch (state) {
 		case "not_configured":
-			return {
-				reason,
-				text: `Channel ${name} is registered but not started: no channels.${name} policy in the global or directory-profile settings.`,
-			};
+			return wordedNotice(reason, (words) => words.notices.channels.notConfigured(name));
 		case "invalid":
-			return { reason, text: `Channel ${name} is not started: ${detail ?? "its policy cannot be read"}.` };
+			return wordedNotice(reason, (words) => words.notices.channels.invalid(name, detail));
 		case "served_elsewhere":
-			return { reason, text: `Channel ${name} is not started in this session: another open session serves it.` };
+			return wordedNotice(reason, (words) => words.notices.channels.servedElsewhere(name));
 		case "suspended":
-			if (facts.connectionLost) return { reason, text: `Channel ${name} is not receiving messages: ${detail}.` };
-			return {
-				reason,
-				text: `Channel ${name} did not start (${detail ?? "start failed"}); it is tried again when settings change or ${facts.builtIn ? "a session starts" : "the provider registers again"}.`,
-			};
+			return wordedNotice(reason, (words) =>
+				facts.connectionLost && detail !== undefined
+					? words.notices.channels.connectionLost(name, detail)
+					: words.notices.channels.startFailed(name, detail, facts.builtIn),
+			);
 		case "capped":
-			return {
-				reason,
-				text: `Channel ${name} holds new messages: ${detail ?? "its daily bound is reached"}. They wait up to 24 hours.`,
-			};
+			return wordedNotice(reason, (words) => words.notices.channels.capped(name, detail));
 		default:
 			return undefined;
 	}
 }
 
-export function senderNoticeText(name: string, namedId: string | undefined): string {
-	return namedId !== undefined
-		? `Channel ${name} held a message from sender ${namedId}, who is not in channels.${name}.allowedSenders. To let them start turns, add "${namedId}" to that list.`
-		: `Channel ${name} held a verified sender not in channels.${name}.allowedSenders; the channel_reply list action shows its id.`;
+/** The notice of a held sender: naming the sender's id when `namedId` is given (`nameableSenderId`). */
+export function senderNotice(reason: string, name: string, namedId: string | undefined): WordedNotice {
+	return wordedNotice(reason, (words) =>
+		namedId !== undefined
+			? words.notices.channels.senderHeld(name, namedId)
+			: words.notices.channels.senderHeldUnnamed(name),
+	);
+}
+
+/**
+ * The line of what the daemon's host left, in one catalogue's words: its drafts by id and reason, the messages it
+ * dropped and the conversations it left unanswered, and the messages it held, counted by reason. The most detail that
+ * fits `MAX_RETAINED_DIAGNOSTIC_CHARS` in these words; the least is cut at the line's bound by the notice itself.
+ */
+function awayLine(
+	words: InterfaceText["notices"]["channels"]["away"],
+	name: string,
+	away: ChannelAwayUntold,
+	{ expired, unanswered, held }: AwayCounts,
+): string {
+	const kinds = [
+		...(away.held.not_allowed ? [words.notAllowed(away.held.not_allowed, name)] : []),
+		...(away.held.unverified ? [words.unverified(away.held.unverified)] : []),
+		...(away.held.burst ? [words.burst(away.held.burst, name)] : []),
+	];
+	const compose = (named: number, heldDetail: boolean): string => {
+		const parts: string[] = [];
+		if (away.drafts.length > 0) {
+			const listed = away.drafts.slice(0, named).map((draft) => `${draft.id}: ${draft.reason}`);
+			const more = away.drafts.length - listed.length;
+			if (more > 0 && listed.length > 0) listed.push(words.more(more));
+			parts.push(words.drafts(away.drafts.length, listed));
+		}
+		if (expired > 0) parts.push(words.expired(expired));
+		if (unanswered > 0) parts.push(words.unanswered(unanswered));
+		if (held > 0) parts.push(words.held(held, heldDetail ? kinds : undefined));
+		return words.served(name, parts);
+	};
+	for (let named = Math.min(MAX_NAMED_AWAY_DRAFTS, away.drafts.length); named >= 0; named--)
+		for (const heldDetail of [true, false]) {
+			const candidate = compose(named, heldDetail);
+			if (candidate.length <= MAX_RETAINED_DIAGNOSTIC_CHARS) return candidate;
+		}
+	return compose(0, false);
+}
+
+/** The notice of what the daemon's host left, or none when it left nothing to tell; each language fitted on its own. */
+export function channelAwayNotice(reason: string, name: string, away: ChannelAwayUntold): HarnessNotice | undefined {
+	const summed = (kind: "expired" | "unanswered") =>
+		away.gaps.filter((gap) => gap.reason === kind).reduce((sum, gap) => sum + gap.count, 0);
+	const counts: AwayCounts = {
+		expired: summed("expired"),
+		unanswered: summed("unanswered"),
+		held: heldCount(away.held),
+	};
+	if (away.drafts.length === 0 && counts.expired === 0 && counts.unanswered === 0 && counts.held === 0)
+		return undefined;
+	return wordedNotice(reason, (words) => awayLine(words.notices.channels.away, name, away, counts));
 }
 
 /** The id a held-sender notice names: a plain platform-assigned id whose notice fits its line, else none. */
@@ -84,5 +146,6 @@ export function nameableSenderId(
 	senderIds: ChannelSenderIds | undefined,
 ): string | undefined {
 	if (senderIds?.assignedBy !== "platform" || !PLAIN_SENDER_ID.test(senderId)) return undefined;
-	return senderNoticeText(name, senderId).length <= MAX_RETAINED_DIAGNOSTIC_CHARS ? senderId : undefined;
+	const notice = senderNotice("", name, senderId);
+	return Math.max(notice.text.length, notice.ownerText.length) <= MAX_RETAINED_DIAGNOSTIC_CHARS ? senderId : undefined;
 }

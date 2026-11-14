@@ -31,13 +31,14 @@ import {
 	type JobSchedulerProvider,
 	type LifecycleOutcome,
 } from "../gateways/channel-provider.ts";
-import { type HarnessNoticeKind, type HarnessNoticeObservation, transcriptKeepsNotices } from "../harness-notice.ts";
-import { isProcessAlive } from "../process-liveness.ts";
 import {
-	boundedRedactedDiagnosticText,
-	hasMaskableSecretText,
-	MAX_RETAINED_DIAGNOSTIC_CHARS,
-} from "../security/secret-text.ts";
+	type HarnessNoticeKind,
+	type HarnessNoticeObservation,
+	transcriptKeepsNotices,
+	wordedNotice,
+} from "../harness-notice.ts";
+import { isProcessAlive } from "../process-liveness.ts";
+import { boundedRedactedDiagnosticText, hasMaskableSecretText } from "../security/secret-text.ts";
 import { SYSTEM_TIMER_PORT, type TimerPort } from "../util/timer-port.ts";
 import { type ChannelServedBy, channelServedBy } from "./away-channels.ts";
 import { type BatchOutcome, readBatchOutcome } from "./batch-outcome.ts";
@@ -54,7 +55,6 @@ import {
 	channelDayUsage,
 	DAY_MS,
 	digest,
-	heldCount,
 	isDraftOpen,
 	isUntoldEmpty,
 	MAX_OWNER_CONVERSATIONS,
@@ -104,13 +104,17 @@ import {
 	parseOwnerControl,
 	presentDraft,
 } from "./owner-control.ts";
-import { channelStateNotice, nameableSenderId, quotaStatusLine, senderNoticeText } from "./owner-notice-text.ts";
+import {
+	channelAwayNotice,
+	channelStateNotice,
+	nameableSenderId,
+	quotaStatusLine,
+	senderNotice,
+} from "./owner-notice-text.ts";
 import { OwnerPush } from "./owner-push.ts";
 import { OwnerWaitingNotices, waitingStatusLine } from "./owner-waiting-notices.ts";
 import { sendReplyParts } from "./reply-parts.ts";
 
-/** The daemon's drafts one summary of what it left names by id and reason; the rest are counted. */
-const MAX_NAMED_AWAY_DRAFTS = 3;
 /** Pending drafts per channel; past it the channel delivers nothing new until the owner sends or dismisses some. */
 const MAX_PENDING_DRAFTS = 32;
 /** New senders per channel the owner is told about in 24 hours, each once. */
@@ -914,17 +918,10 @@ export class SessionChannels {
 	}
 
 	private noticeGap(name: string, gap: ChannelGapRecord, onLost?: () => void): boolean {
-		const text =
-			gap.reason === "expired"
-				? `Channel ${name}: ${gap.count} message(s) waited more than 24 hours and were dropped undelivered.`
-				: gap.reason === "unanswered"
-					? `Channel ${name}: ${gap.count} delivered conversation(s) got no reply (the turn ended without an answer for them, or the session that served them closed).`
-					: `Channel ${name}: its journal could not be read and was replaced; messages and drafts it held are not delivered.`;
-		return this.deps.observeNotice(
-			"channel-gap",
-			() => ({ scope: `${name}:${gap.id}`, state: { reason: `gap:${name}:${gap.id}`, text } }),
-			onLost,
+		const state = wordedNotice(`gap:${name}:${gap.id}`, (words) =>
+			words.notices.channels.gap(name, gap.reason, gap.count),
 		);
+		return this.deps.observeNotice("channel-gap", () => ({ scope: `${name}:${gap.id}`, state }), onLost);
 	}
 
 	/**
@@ -939,51 +936,11 @@ export class SessionChannels {
 		now: number,
 		onLost: () => void,
 	): boolean {
-		const summed = (reason: ChannelGapRecord["reason"]) =>
-			away.gaps.filter((gap) => gap.reason === reason).reduce((sum, gap) => sum + gap.count, 0);
-		const expired = summed("expired");
-		const unanswered = summed("unanswered");
-		const held = heldCount(away.held);
-		const heldKinds = (
-			[
-				[away.held.not_allowed, `not in channels.${name}.allowedSenders`],
-				[away.held.unverified, "unverified"],
-				[away.held.burst, `over channels.${name}.maxPendingPerConversation`],
-			] as const
-		).flatMap(([count, kind]) => (count ? [`${count} ${kind}`] : []));
-		if (away.drafts.length === 0 && expired === 0 && unanswered === 0 && held === 0) return true;
-		const compose = (named: number, heldDetail: boolean): string => {
-			const parts: string[] = [];
-			if (away.drafts.length > 0) {
-				const listed = away.drafts.slice(0, named).map((draft) => `${draft.id}: ${draft.reason}`);
-				const more = away.drafts.length - listed.length;
-				if (more > 0 && listed.length > 0) listed.push(`and ${more} more`);
-				parts.push(
-					`${away.drafts.length} reply draft(s) wait for channel_reply${listed.length > 0 ? ` (${listed.join(", ")})` : ""}`,
-				);
-			}
-			if (expired > 0) parts.push(`${expired} message(s) expired after 24 hours`);
-			if (unanswered > 0) parts.push(`${unanswered} delivered conversation(s) got no reply`);
-			if (held > 0) parts.push(`${held} message(s) held${heldDetail ? ` (${heldKinds.join(", ")})` : ""}`);
-			return `While the daemon served channel ${name}: ${parts.join("; ")}.`;
-		};
-		// The most detail that fits; the least is cut at the line's bound by the notice itself.
-		const fitting = () => {
-			for (let named = Math.min(MAX_NAMED_AWAY_DRAFTS, away.drafts.length); named >= 0; named--)
-				for (const heldDetail of [true, false]) {
-					const candidate = compose(named, heldDetail);
-					if (candidate.length <= MAX_RETAINED_DIAGNOSTIC_CHARS) return candidate;
-				}
-			return compose(0, false);
-		};
-		const text = fitting();
 		const told = [...away.gaps.map((gap) => gap.id), ...away.drafts.map((draft) => draft.id)].join(",");
 		const id = digest(`${name}:away:${sessionId}:${now}:${told}:${JSON.stringify(away.held)}`).slice(0, 16);
-		return this.deps.observeNotice(
-			"channel-gap",
-			() => ({ scope: `${name}:away:${id}`, state: { reason: `away:${name}:${id}`, text } }),
-			onLost,
-		);
+		const notice = channelAwayNotice(`away:${name}:${id}`, name, away);
+		if (!notice) return true;
+		return this.deps.observeNotice("channel-gap", () => ({ scope: `${name}:away:${id}`, state: notice }), onLost);
 	}
 
 	/**
@@ -1343,10 +1300,7 @@ export class SessionChannels {
 			});
 			this.deps.observeNotice("channel-state", () => ({
 				scope: name,
-				state: {
-					reason: `${name}:full`,
-					text: `Channel ${name} refuses new messages: ${MAX_PENDING_MESSAGES} wait undelivered. The provider is asked to deliver them again later.`,
-				},
+				state: wordedNotice(`${name}:full`, (words) => words.notices.channels.full(name, MAX_PENDING_MESSAGES)),
 			}));
 			throw new Error(`Channel ${name} journal is full.`);
 		}
@@ -1365,10 +1319,7 @@ export class SessionChannels {
 		const sender = digest(senderId).slice(0, 16);
 		this.deps.observeNotice("channel-sender", () => ({
 			scope: `${name}:${sender}`,
-			state: {
-				reason: `sender:${name}:${sender}:${at}`,
-				text: senderNoticeText(name, namedId),
-			},
+			state: senderNotice(`sender:${name}:${sender}:${at}`, name, namedId),
 		}));
 	}
 
@@ -1861,10 +1812,9 @@ export class SessionChannels {
 				if (!this.settleBatch(name, batch.id, "unanswered", outcome.usd, undefined)) continue;
 				this.deps.observeNotice("channel-reply", () => ({
 					scope: `${name}:${batch.id}`,
-					state: {
-						reason: `unanswered:${name}:${batch.id}`,
-						text: `Channel ${name}: a delivered conversation got no reply (${outcome.reason.replaceAll("_", " ")}).`,
-					},
+					state: wordedNotice(`unanswered:${name}:${batch.id}`, (words) =>
+						words.notices.channels.unanswered(name, outcome.reason),
+					),
 				}));
 				continue;
 			}
@@ -1944,10 +1894,9 @@ export class SessionChannels {
 			if (!this.settleBatch(name, batch.id, "unanswered", outcome.usd, undefined)) return;
 			this.deps.observeNotice("channel-reply", () => ({
 				scope: `${name}:${batch.id}`,
-				state: {
-					reason: `unanswered:${name}:${batch.id}`,
-					text: `Channel ${name}: an owner message got no reply (${outcome.reason.replaceAll("_", " ")}).`,
-				},
+				state: wordedNotice(`unanswered:${name}:${batch.id}`, (words) =>
+					words.notices.channels.ownerUnanswered(name, outcome.reason),
+				),
 			}));
 			// An aborted turn was stopped by its bound, a kill switch or `stop`: each tells the chat itself. A turn an
 			// approval turn of the same channel joined goes on in that turn, whose answer the chat gets.
@@ -2041,10 +1990,9 @@ export class SessionChannels {
 		else harnessLog.info("channels", "a reply waits as a draft", fields);
 		this.deps.observeNotice("channel-reply", () => ({
 			scope: `${name}:${batch.id}`,
-			state: {
-				reason: `draft:${name}:${draft.id}`,
-				text: `Channel ${name}: a reply waits as draft ${draft.id} (${reason}). The channel_reply tool sends or dismisses it.`,
-			},
+			state: wordedNotice(`draft:${name}:${draft.id}`, (words) =>
+				words.notices.channels.draftWaits(name, draft.id, reason),
+			),
 		}));
 	}
 
@@ -2054,20 +2002,23 @@ export class SessionChannels {
 	 * or the list is emptied; an unchanged state observes nothing.
 	 */
 	private ownerNotice(name: string, policy: ResolvedChannelPolicy | undefined): void {
-		const text =
+		const off =
 			policy === undefined || policy.ownerSenders.length === 0
 				? undefined
 				: !ownerAuthority(this.registry.getChannel(name), policy)
-					? `Channel ${name}: owner senders listed but the transport cannot verify them; owner authority is off.`
+					? "ownerUnverifiable"
 					: !this.ownerWired()
-						? `Channel ${name}: owner senders listed but this session cannot host owner turns; owner authority is off.`
+						? "ownerUnhostable"
 						: undefined;
+		// The episode is named by the model's English line, so a change of the interface language tells nothing again.
+		const notice = off === undefined ? undefined : wordedNotice("", (words) => words.notices.channels[off](name));
+		const text = notice?.text;
 		if ((this.ownerNotices.get(name) ?? "") === (text ?? "")) return;
 		if (text) this.ownerNotices.set(name, text);
 		else this.ownerNotices.delete(name);
 		this.deps.observeNotice("channel-state", () => ({
 			scope: `${name}:owner`,
-			state: text ? { reason: `${name}:owner:${text}`, text } : "clear",
+			state: notice ? { ...notice, reason: `${name}:owner:${notice.text}` } : "clear",
 		}));
 	}
 

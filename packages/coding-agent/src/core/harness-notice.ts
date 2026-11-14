@@ -63,16 +63,15 @@ export interface HarnessNotice {
 	readonly evidence?: string;
 }
 
+/** A notice worded in both languages: the model's English line and the owner's line in the interface language. */
+export type WordedNotice = HarnessNotice & { readonly ownerText: string };
+
 /**
  * A notice whose line one formatter of the catalogue words (the notices area, with the words it names): in English for the
  * model (`text`), in the interface language for the owner (`ownerText`). The same formatter, given each catalogue, so the
  * two never drift.
  */
-export function wordedNotice(
-	reason: string,
-	line: (words: InterfaceText) => string,
-	evidence?: string,
-): HarnessNotice & { readonly ownerText: string } {
+export function wordedNotice(reason: string, line: (words: InterfaceText) => string, evidence?: string): WordedNotice {
 	return {
 		reason,
 		text: line(englishText()),

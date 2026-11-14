@@ -24,10 +24,20 @@ function messageText(message: AgentMessage): string | undefined {
 }
 
 /** How a delivered batch's turn ended, read from the session branch. */
+/** Why a delivered conversation got no reply: never delivered, a decisive turn of someone else came first, or no answer. */
+export type UnansweredReason =
+	| "not_delivered"
+	| "owner_steered"
+	| "owner_channel_joined"
+	| "mixed"
+	| "aborted"
+	| "empty_answer"
+	| "no_answer";
+
 export type BatchOutcome =
 	| { readonly kind: "waiting"; readonly usd: number }
 	| { readonly kind: "answered"; readonly text: string; readonly usd: number }
-	| { readonly kind: "unanswered"; readonly reason: string; readonly usd: number };
+	| { readonly kind: "unanswered"; readonly reason: UnansweredReason; readonly usd: number };
 
 /**
  * How a batch's turn ended, with what its assistant messages cost so far. Its user entry is the one whose origin
