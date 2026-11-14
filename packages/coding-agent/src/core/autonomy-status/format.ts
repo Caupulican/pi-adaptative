@@ -233,7 +233,7 @@ export function formatSessionAutonomyStatus(status: SessionAutonomyStatus): stri
 			),
 			...list(value.pending, (draft) =>
 				words.outwardDrafts.draft(
-					draft.toolName,
+					interfaceText().interactive.edgeOperation({ operation: draft.toolName, purpose: draft.purpose }),
 					draft.classes.join(", "),
 					words.authority.origin(draft.origin),
 					draft.preparedAt,

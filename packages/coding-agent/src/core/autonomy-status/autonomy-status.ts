@@ -57,6 +57,7 @@ import type { WatchCondition } from "../routines/watch-contract.ts";
 import { boundedRedactedDiagnosticText } from "../security/secret-text.ts";
 import type { SessionSemanticPlaneController } from "../session-semantic-plane-controller.ts";
 import type { SettingsManager } from "../settings-manager.ts";
+import { isNestedCallPurpose, type NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import type { TurnAuthority, TurnOriginKind } from "../turn-origin.ts";
 import type { RunToolManifest } from "./tool-manifest.ts";
 
@@ -231,6 +232,8 @@ export interface OutwardDraftsStatus {
 		readonly id: string;
 		readonly toolName: string;
 		readonly classes: readonly EdgeClass[];
+		/** What the held call was made for (a watch's check): the line names the watch and the call that arms it. */
+		readonly purpose?: NestedCallPurpose;
 		readonly origin: TurnOriginKind;
 		readonly preparedAt: string;
 	}>;
@@ -718,6 +721,7 @@ export async function readSessionAutonomyStatus(sources: AutonomyStatusSources):
 						id: record.id,
 						toolName: record.toolName,
 						classes: [...new Set(record.operations.map((operation) => operation.class))],
+						...(isNestedCallPurpose(record.purpose) ? { purpose: record.purpose } : {}),
 						origin: record.origin.k,
 						preparedAt: record.preparedAt,
 					})),
