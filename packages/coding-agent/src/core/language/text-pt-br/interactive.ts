@@ -30,6 +30,14 @@ export const INTERACTIVE = {
 		purpose
 			? `A verificação que a espera "${purpose.watchId}" faria, armada por uma chamada ${purpose.parentToolName}: ${operation}`
 			: operation,
+	systemOneOperation: {
+		subject: (operation: string, worker: boolean) => (worker ? `${operation} (de um worker)` : operation),
+		runs: (subject: string, finding: string) => `System One: ${subject}: ${finding}; a operação segue.`,
+		runsUnderGrant: (subject: string, finding: string) =>
+			`System One: ${subject}: ${finding}; a operação segue sob sua permissão operation.irreversible.`,
+		stopped: (refused: boolean, subject: string, finding: string) =>
+			`O System One ${refused ? "recusou" : "reteve"}: ${subject}: ${finding}.`,
+	},
 
 	startup: {
 		toInterrupt: "para interromper",

@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { getToolExecutionKey } from "../../kernel/tool-failure-memory.ts";
 import type { EdgeOperation } from "../autonomy/edge-policy.ts";
+import { englishText, type InterfaceText, interfaceText } from "../language/interface-text.ts";
 import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 import {
 	askOperation,
@@ -171,9 +172,20 @@ export class OperationGate {
 			this.verdicts.set(key, verdict);
 		}
 		const shown = triage.operation.replace(/\s+/g, " ").trim();
-		const subject = `${actor === "worker" ? "a worker's " : ""}${shown.length <= 160 ? shown : `${shown.slice(0, 159)}…`}`;
+		// One sentence in the operator's language for the notice, in English for the model; a watch's check names the watch.
+		const told = (text: InterfaceText) =>
+			text.interactive.edgeOperation({
+				operation: text.interactive.systemOneOperation.subject(
+					shown.length <= 160 ? shown : `${shown.slice(0, 159)}…`,
+					actor === "worker",
+				),
+				purpose: caller.purpose,
+			});
 		if (verdict.action === "proceed") {
-			if (verdict.notable) this.deps.notify(`System One: ${subject}: ${verdict.finding}; it runs.`);
+			if (verdict.notable) {
+				const text = interfaceText();
+				this.deps.notify(text.interactive.systemOneOperation.runs(told(text), verdict.finding));
+			}
 			return undefined;
 		}
 		if (this.deps.isGranted(thirdParty)) {
@@ -183,12 +195,13 @@ export class OperationGate {
 				edgeClass: "operation.irreversible",
 				action: verdict.action,
 			}));
-			this.deps.notify(
-				`System One: ${subject}: ${verdict.finding}; it runs under your operation.irreversible grant.`,
-			);
+			const text = interfaceText();
+			this.deps.notify(text.interactive.systemOneOperation.runsUnderGrant(told(text), verdict.finding));
 			return undefined;
 		}
-		const refusal = `System One ${verdict.action === "refuse" ? "refused" : "held"} ${subject}: ${verdict.finding}.`;
+		const stopped = (text: InterfaceText) =>
+			text.interactive.systemOneOperation.stopped(verdict.action === "refuse", told(text), verdict.finding);
+		const refusal = stopped(englishText());
 		if (verdict.action === "refuse" || actor === "worker" || !this.deps.askOperator) {
 			harnessLog.debug("edge", "an operation was stopped without asking the operator", () => ({
 				tool: toolName,
@@ -196,7 +209,7 @@ export class OperationGate {
 				edgeClass: "operation.irreversible",
 				action: verdict.action,
 			}));
-			this.deps.notify(refusal);
+			this.deps.notify(stopped(interfaceText()));
 			return {
 				block: true,
 				reason: `${refusal} ${actor === "worker" ? "Report the unresolved boundary to the parent or do the work another way." : "Ask the owner before running it, or do the work another way."}`,

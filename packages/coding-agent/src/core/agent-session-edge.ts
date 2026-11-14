@@ -38,7 +38,9 @@ import {
 import { ownerCallDigest, renderOwnerDraftCall } from "./autonomy/owner-draft-rendering.ts";
 import type { ToolDecision } from "./autonomy-status/tool-manifest.ts";
 import type { OwnerDraftView } from "./channels/owner-channel-types.ts";
+import { englishText } from "./language/interface-text.ts";
 import { boundedRedactedDiagnosticText, MAX_RETAINED_DIAGNOSTIC_CHARS } from "./security/secret-text.ts";
+import { isNestedCallPurpose, type NestedCallPurpose } from "./tools/nested-tool-call.ts";
 import {
 	entryTurnOrigin,
 	isRemoteOwnerOrigin,
@@ -325,6 +327,8 @@ export interface OutwardDraftRecord {
 	readonly rendering?: string;
 	/** The sender digest of the owner identity that opened the run: only it approves the draft from a channel. */
 	readonly ownerSender?: string;
+	/** What the held call was made for (a watch's check), named wherever the draft is shown; never part of its id. */
+	readonly purpose?: NestedCallPurpose;
 }
 
 /** Who decided on a draft from an owner channel: the channel, the sender's digest, the delivery ref, the event's digest. */
@@ -516,6 +520,7 @@ export function ownerDraftView(view: Pick<OutwardDraftStateView, "record" | "sta
 		classes: [...new Set(record.operations.map((operation) => operation.class))],
 		toolName: record.toolName,
 		rendering: record.callDigest !== undefined ? record.rendering : undefined,
+		...(isNestedCallPurpose(record.purpose) ? { purpose: record.purpose } : {}),
 		origin: record.origin,
 		state: view.state,
 		preparedAt: record.preparedAt,
@@ -555,6 +560,7 @@ export function keepOutwardDraft(
 		.update(JSON.stringify([requestEntryId ?? null, callDigest ?? operationsDigest]))
 		.digest("hex")
 		.slice(0, 16)}`;
+	const purpose = draft.operations.find((operation) => operation.purpose)?.purpose;
 	const states = outwardDraftStates(branch, false);
 	const existing = states.find(({ record }) => record.id === id);
 	let kept = existing !== undefined;
@@ -573,13 +579,17 @@ export function keepOutwardDraft(
 			...(callDigest !== undefined ? { callDigest } : {}),
 			...(rendering !== undefined ? { rendering } : {}),
 			...(remoteOwner && draft.ownerSender ? { ownerSender: draft.ownerSender } : {}),
+			...(purpose ? { purpose } : {}),
 		};
 		manager.appendCustomEntry(OUTWARD_DRAFT_CUSTOM_TYPE, added);
 	}
 	const classes = [...new Set(operations.map((operation) => operation.class))];
 	const grantable = grantableEdgeClasses(operations);
 	// A notice is one bounded line (`MAX_RETAINED_DIAGNOSTIC_CHARS`): the action is shortened, never its origin or release.
-	const action = operations.map((operation) => operation.operation).join("; ");
+	const action = heldAction(
+		draft.operations,
+		operations.map((operation) => operation.operation),
+	);
 	return {
 		id,
 		kept,
@@ -626,6 +636,21 @@ interface ThirdPartyRefusal {
 	readonly correction: string;
 }
 
+/** The held operations' `actions` as one; a watch's check names its watch first (`edgeOperation`, `withPurpose`). */
+function heldAction(operations: readonly EdgeOperation[], actions: readonly string[]): string {
+	const purpose = operations.find((operation) => operation.purpose)?.purpose;
+	return englishText().interactive.edgeOperation({ operation: actions.join("; "), purpose });
+}
+
+function describedOperation(operation: EdgeOperation): string {
+	return `${operation.operation} (${operation.class}: ${operation.reason})`;
+}
+
+/** A call's operations with what the call is made for (a watch's check), which a hold names and a draft keeps. */
+function withPurpose(operations: EdgeOperation[], purpose: NestedCallPurpose | undefined): EdgeOperation[] {
+	return purpose ? operations.map((operation) => ({ ...operation, purpose })) : operations;
+}
+
 /**
  * The prepared form of operations a run carrying a third party's words may not run: one durable draft and one owner
  * notice (`prepareOutward`), and a tool result that says what was held and from whom (the bounded diagnostic) and how
@@ -638,12 +663,11 @@ function prepareOutward(
 	operations: readonly EdgeOperation[],
 ): ThirdPartyRefusal {
 	const prepared = deps.prepareOutward?.({ toolName, operations, origin });
-	const actions = operations.map((operation) => `${operation.operation} (${operation.class}: ${operation.reason})`);
 	const classes = [...new Set(operations.map((operation) => operation.class))];
 	return {
 		reason: boundedActionLine(
 			"Prepared, not run: ",
-			actions.join("; "),
+			heldAction(operations, operations.map(describedOperation)),
 			`, asked by ${originLabel(origin)}; no standing grant of the owner covers ${classes.join(", ")}.`,
 			MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS,
 		),
@@ -674,6 +698,7 @@ async function enforceThirdPartyEdge(
 	args: unknown,
 	executionCwd: string | undefined,
 	signal: AbortSignal | undefined,
+	purpose?: NestedCallPurpose,
 ): Promise<BeforeToolCallResult | undefined> {
 	const ownerOnly = ownerOnlyToolCallReason(toolName, args);
 	if (ownerOnly) {
@@ -698,7 +723,7 @@ async function enforceThirdPartyEdge(
 		protectedWrites: deps.getProtectedWritePaths?.(),
 	});
 	if (classified.length === 0) return undefined;
-	const operations = await resolveEdgeConditions(deps, classified, signal);
+	const operations = withPurpose(await resolveEdgeConditions(deps, classified, signal), purpose);
 	const grants = effectiveEdgeGrants(deps);
 	const ungranted = operations.filter((operation) => !isEdgeOperationGranted(operation, grants));
 	if (ungranted.length === 0) return undefined;
@@ -845,7 +870,7 @@ function holdForOwner(
 	return {
 		reason: boundedActionLine(
 			final ? "Not run: " : "Held for your approval: ",
-			operations.map((operation) => `${operation.operation} (${operation.class}: ${operation.reason})`).join("; "),
+			heldAction(operations, operations.map(describedOperation)),
 			`, asked from ${originLabel(origin)}; no grant of the owner covers ${classes.join(", ")}.`,
 			MAX_TOOL_FAILURE_DIAGNOSTIC_CHARS,
 		),
@@ -885,6 +910,7 @@ async function enforceRemoteOwnerEdge(
 	args: unknown,
 	executionCwd: string | undefined,
 	signal: AbortSignal | undefined,
+	purpose?: NestedCallPurpose,
 ): Promise<BeforeToolCallResult | undefined> {
 	const ended = remoteOwnerEnded(deps, origin, toolName);
 	if (ended) return { block: true, ...ended };
@@ -941,7 +967,7 @@ async function enforceRemoteOwnerEdge(
 			ungrantable: true,
 		});
 	if (classified.length === 0) return undefined;
-	const operations = await resolveEdgeConditions(deps, classified, signal);
+	const operations = withPurpose(await resolveEdgeConditions(deps, classified, signal), purpose);
 	// The condition read may have waited: the owner channel's authority is read again before anything is admitted.
 	const endedMeanwhile = remoteOwnerEnded(deps, origin, toolName);
 	if (endedMeanwhile) return { block: true, ...endedMeanwhile };
@@ -1076,17 +1102,18 @@ export async function enforceSessionEdge(
 	args: unknown,
 	executionCwd: string | undefined,
 	signal: AbortSignal | undefined,
+	purpose?: NestedCallPurpose,
 ): Promise<BeforeToolCallResult | undefined> {
 	const origin = thirdPartyRunOrigin(deps);
 	if (origin) {
-		const prepared = await enforceThirdPartyEdge(deps, origin, toolName, args, executionCwd, signal);
-		return prepared ?? enforceEdgeRules(deps, toolName, args, executionCwd, signal);
+		const prepared = await enforceThirdPartyEdge(deps, origin, toolName, args, executionCwd, signal, purpose);
+		return prepared ?? enforceEdgeRules(deps, toolName, args, executionCwd, signal, purpose);
 	}
 	// A run opened from an owner channel is decided by its own gate alone: YOLO, the confirmation handler and the
 	// owner's terminal release stand for the owner at the terminal.
 	const remote = remoteOwnerRunOrigin(deps);
-	if (remote) return enforceRemoteOwnerEdge(deps, remote, toolName, args, executionCwd, signal);
-	const decided = await enforceEdgeRules(deps, toolName, args, executionCwd, signal);
+	if (remote) return enforceRemoteOwnerEdge(deps, remote, toolName, args, executionCwd, signal, purpose);
+	const decided = await enforceEdgeRules(deps, toolName, args, executionCwd, signal, purpose);
 	if (!decided?.block && deps.releaseOutward) {
 		const scopeCwd = deps.getCwd();
 		deps.releaseOutward(toolName, () =>
@@ -1108,6 +1135,7 @@ async function enforceEdgeRules(
 	args: unknown,
 	executionCwd: string | undefined,
 	signal: AbortSignal | undefined,
+	purpose?: NestedCallPurpose,
 ): Promise<BeforeToolCallResult | undefined> {
 	const scopeCwd = deps.getCwd();
 	if (deps.getMode?.() === "yolo") {
@@ -1128,6 +1156,7 @@ async function enforceEdgeRules(
 				operation: String((args as { command?: unknown })?.command ?? toolName),
 				reason: boundary.reason,
 				toolName,
+				...(purpose ? { purpose } : {}),
 			},
 			signal,
 		);
@@ -1139,7 +1168,7 @@ async function enforceEdgeRules(
 		{ includeConditional: true },
 	);
 	if (classified.length === 0) return undefined;
-	const operations = await resolveEdgeConditions(deps, classified, signal);
+	const operations = withPurpose(await resolveEdgeConditions(deps, classified, signal), purpose);
 	if (operations.length === 0) return undefined;
 	const grants = sessionEdgeGrants(deps);
 	const ungranted = operations.filter((op) => !isEdgeOperationGranted(op, grants));

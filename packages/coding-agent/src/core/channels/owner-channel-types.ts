@@ -7,6 +7,7 @@
 
 import type { TurnOriginRecord } from "../../kernel/turn-origin-stamp.ts";
 import type { EdgeClass } from "../autonomy/edge-policy.ts";
+import type { NestedCallPurpose } from "../tools/nested-tool-call.ts";
 
 /** The longest rendering of a held call a phone message carries; a call that does not fit is released at the terminal. */
 export const OWNER_DRAFT_RENDERING_MAX_CHARS = 2000;
@@ -82,6 +83,8 @@ export interface OwnerDraftView {
 	readonly classes: readonly EdgeClass[];
 	readonly toolName: string;
 	readonly rendering: string | undefined;
+	/** What the held call was made for (a watch's check): the head line names the watch and the call that arms it. */
+	readonly purpose?: NestedCallPurpose;
 	readonly origin: TurnOriginRecord;
 	readonly state: "pending" | "approved" | "released" | "denied" | "dismissed" | "expired";
 	readonly preparedAt: string;

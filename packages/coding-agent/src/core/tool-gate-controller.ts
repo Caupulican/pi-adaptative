@@ -137,6 +137,8 @@ export interface ToolGateControllerDeps {
 		args: unknown,
 		executionCwd: string | undefined,
 		signal: AbortSignal | undefined,
+		/** What a sub-call is made for, named to the operator and kept with a draft if the call is held. */
+		purpose?: NestedCallPurpose,
 	): Promise<BeforeToolCallResult | undefined>;
 	/**
 	 * Soul gate of a root session: `checkWrite` screens and has System One review the root agent's write or edit of
@@ -512,7 +514,8 @@ export class ToolGateController {
 			if (deniedAfterHook) return deniedAfterHook;
 
 			// 4. Single edge authorization on the actual final operation
-			const edge = await this.deps.checkEdge?.(toolCall.name, args, executionContext?.cwd, signal);
+			const purpose = this.nestedPurposes.get(toolCall);
+			const edge = await this.deps.checkEdge?.(toolCall.name, args, executionContext?.cwd, signal, purpose);
 			if (edge) return blockedCall(toolCall.name, "edge", edge);
 			const delegation = await this.deps.checkDelegation?.(toolCall.name, args, executionContext?.cwd, signal);
 			if (delegation) return blockedCall(toolCall.name, "delegation", delegation);
@@ -521,13 +524,7 @@ export class ToolGateController {
 			const operation =
 				yolo && !this.deps.runsOutsideOwnerTerminal?.()
 					? undefined
-					: await this.deps.checkOperation?.(
-							toolCall.name,
-							args,
-							executionContext?.cwd,
-							signal,
-							this.nestedPurposes.get(toolCall),
-						);
+					: await this.deps.checkOperation?.(toolCall.name, args, executionContext?.cwd, signal, purpose);
 			if (operation) return blockedCall(toolCall.name, "operation", operation);
 			const soulWrite = await this.deps.soulGate?.checkWrite(toolCall, args, effectiveCwd, signal, registerCleanup);
 			if (soulWrite) return blockedCall(toolCall.name, "soul", soulWrite);

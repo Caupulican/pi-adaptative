@@ -2413,7 +2413,7 @@ export class AgentSession {
 					: undefined;
 			},
 			getToolSelectionController: () => this._toolSelection,
-			checkEdge: (tool, args, cwd, signal) => enforceSessionEdge(this._edgeDeps(), tool, args, cwd, signal),
+			checkEdge: (...call) => enforceSessionEdge(this._edgeDeps(), ...call),
 			...this._edgeIntent.rootCallChecks(),
 			localCommitBranch: () => this._edgeIntent.localCommitBranch(),
 			// An admitted outward-facing operation (publish to a remote or a registry) is the delivery

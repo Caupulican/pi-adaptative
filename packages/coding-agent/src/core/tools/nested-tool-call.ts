@@ -27,6 +27,23 @@ export interface NestedCallPurpose {
 	readonly parentToolName: string;
 }
 
+/** An identifier a purpose names (a routine id, a tool name): letters, digits, `_`, `.` and `-`, as both are made. */
+const PURPOSE_IDENTIFIER = /^[A-Za-z0-9][A-Za-z0-9_.-]{0,127}$/;
+
+/** A stored purpose a reader may name to the owner: a malformed one is not read. */
+export function isNestedCallPurpose(value: unknown): value is NestedCallPurpose {
+	if (typeof value !== "object" || value === null) return false;
+	const watchId: unknown = Reflect.get(value, "watchId");
+	const parentToolName: unknown = Reflect.get(value, "parentToolName");
+	return (
+		Reflect.get(value, "kind") === "watch_check" &&
+		typeof watchId === "string" &&
+		PURPOSE_IDENTIFIER.test(watchId) &&
+		typeof parentToolName === "string" &&
+		PURPOSE_IDENTIFIER.test(parentToolName)
+	);
+}
+
 /** One sub-call a carrying tool asks its surface to admit. */
 export interface NestedCall {
 	/** Unique within the parent call (`<parent id>#<n>`). */

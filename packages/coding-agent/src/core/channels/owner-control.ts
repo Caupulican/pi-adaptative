@@ -7,6 +7,7 @@
 
 import type { EdgeClass } from "../autonomy/edge-policy.ts";
 import type { ChannelChoice } from "../gateways/channel-provider.ts";
+import { englishText } from "../language/interface-text.ts";
 import { hasMaskableSecretText } from "../security/secret-text.ts";
 import { wrapUntrustedText } from "../security/untrusted-boundary.ts";
 import { digest } from "./channel-journal.ts";
@@ -47,7 +48,8 @@ export function draftInScope(
 }
 
 function headLine(view: OwnerDraftView): string {
-	return `Held for your decision: ${view.toolName} (${classLabels(view)}), draft ${view.id}.`;
+	const held = englishText().interactive.edgeOperation({ operation: view.toolName, purpose: view.purpose });
+	return `Held for your decision: ${held} (${classLabels(view)}), draft ${view.id}.`;
 }
 
 /** The phone presentation with the complete call fenced; undefined when the call has no complete rendering. */

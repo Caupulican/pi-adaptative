@@ -18,6 +18,19 @@ export const INTERACTIVE = {
 		purpose
 			? `The check watch "${purpose.watchId}" would run, armed by a ${purpose.parentToolName} call: ${operation}`
 			: operation,
+	/**
+	 * What System One decided about an operation it judged, as the operator is told and the model reads it: the operation
+	 * as `edgeOperation` names it, then System One's finding, which stays in English.
+	 */
+	systemOneOperation: {
+		/** The judged operation, a worker's said to be one. */
+		subject: (operation: string, worker: boolean) => (worker ? `a worker's ${operation}` : operation),
+		runs: (subject: string, finding: string) => `System One: ${subject}: ${finding}; it runs.`,
+		runsUnderGrant: (subject: string, finding: string) =>
+			`System One: ${subject}: ${finding}; it runs under your operation.irreversible grant.`,
+		stopped: (refused: boolean, subject: string, finding: string) =>
+			`System One ${refused ? "refused" : "held"}: ${subject}: ${finding}.`,
+	},
 
 	/** The hints under the logo, the first line of help, and the model scope the start says once. */
 	startup: {
