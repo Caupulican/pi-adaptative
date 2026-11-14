@@ -1,7 +1,7 @@
 /**
  * The routine runtime one session holds, by the scope its role gives it (`routine-holder.ts`): built once the session's
  * store is loaded, started with the session's inputs, stopped and joined when the session disposes. A root session holds
- * its own routines and the bot and team routines. A bot's own session (built with `holdsOwnWatches`) holds only the
+ * its own routines and the bot and team routines. A bot's own session (standing `bot`, session-standing.ts) holds only the
  * watches it arms. Any other child session holds none. The scope is fixed when the session is built, so the tool surface
  * built with it offers the session's routine tool from the start.
  */

@@ -23,11 +23,11 @@ export function githubOriginPinDiagnostic(result: GithubOriginPinResult): string
 /**
  * Pins the origin without blocking the caller: each git child costs tens of milliseconds on Windows,
  * and the session must answer its first request without waiting for them. A completed pin that is
- * not a failure records nothing; a failure is appended only while the session is still live.
+ * not a failure records nothing; a failure is appended only while the session is still live. Its caller is the session
+ * that answers for the checkout (`answersForCheckout`, session-standing.ts).
  */
 export async function reportGithubOriginPinForSession(
 	cwd: string,
-	isChildSession: boolean,
 	sessionManager: {
 		appendCustomMessageEntry(
 			customType: string,
@@ -39,7 +39,6 @@ export async function reportGithubOriginPinForSession(
 	host: { isDisposed: () => boolean; warn: (message: string) => void },
 	git?: GithubOriginGitRunner,
 ): Promise<void> {
-	if (isChildSession) return;
 	try {
 		const pin = await pinGithubOriginForSession(cwd, git);
 		const diagnostic = githubOriginPinDiagnostic(pin);

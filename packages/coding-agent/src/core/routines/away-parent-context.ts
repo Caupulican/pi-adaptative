@@ -226,7 +226,7 @@ export async function openAwayParentContext(input: AwayParentContextInput): Prom
 				settingsManager: ephemeralSettings,
 				resourceLoader: ephemeralLoader,
 				sessionManager: SessionManager.inMemory(cwd),
-				isChildSession: true,
+				standing: { kind: "vehicle" },
 				disableSystemOne: true,
 				noTools: "all",
 				...(parentModel ? { model: parentModel } : {}),

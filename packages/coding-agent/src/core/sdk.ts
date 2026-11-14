@@ -89,6 +89,7 @@ import type { RuntimeUpdateController } from "./runtime-update-controller.ts";
 import type { CredentialExposureBoundary } from "./secrets/credential-exposure-guard.ts";
 import { createCredentialTextRedactor, redactCredentialValues } from "./secrets/credential-manager.ts";
 import { isWorkerSession } from "./session-role.ts";
+import { resolveSessionStanding, type SessionStanding, sessionCapabilities } from "./session-standing.ts";
 import type {
 	ProfileDefinitionInput,
 	ResourceProfileFilterSettings,
@@ -150,10 +151,10 @@ export interface CreateAgentSessionOptions {
 	isExplicitModel?: boolean;
 	/** Whether `thinkingLevel` came from an explicit flag (see isExplicitModel). */
 	isExplicitThinking?: boolean;
-	/** True when this session is a spawned subagent/child — gates durable memory writes. */
+	/** What this session is (`session-standing.ts`); resolved with `isChildSession` and the process role. Default: a root. */
+	standing?: SessionStanding;
+	/** @deprecated Pass `standing`. True makes the session a worker (`{ kind: "worker" }`), false a root. */
 	isChildSession?: boolean;
-	/** A child session that is a bot's own session and holds the watches it arms (see `AgentSessionConfig`). */
-	holdsOwnWatches?: boolean;
 	/** The role of the session's lifetime lease; default `session`. The bot daemon's phone session holds `channel-host`. */
 	bundleLeaseRole?: SessionLeaseRole;
 	/**
@@ -388,8 +389,8 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 	const settingsManager = options.settingsManager ?? SettingsManager.create(cwd, agentDir);
 	configureHarnessLog(agentDir, settingsManager);
 	bindSavedBedrockScope(settingsManager, modelRegistry);
-	const isChildSession = options.isChildSession ?? process.env.PI_CHILD_SESSION === "1";
-	const forceBackgroundRequests = isChildSession || isWorkerSession();
+	const standing = resolveSessionStanding(options);
+	const capabilities = sessionCapabilities(standing);
 	const defaultServiceTier = options.serviceTier;
 	const orchestrationProfile = options.orchestrationProfile;
 	if (orchestrationProfile) {
@@ -657,7 +658,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				// or a child session's request runs at standard processing whatever the provider's saved preference.
 				const requestLane = currentProviderLane();
 				const foregroundRequest =
-					!forceBackgroundRequests &&
+					capabilities.liveOwnerTurns &&
 					requestLane === "foreground" &&
 					(options?.interactionMode ?? "user") !== "background";
 				const fastModeServiceTier = foregroundRequest
@@ -691,7 +692,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 					...options,
 					serviceTier,
 					...(bedrockScope ? { region: bedrockScope.region, profile: bedrockScope.profile } : {}),
-					interactionMode: forceBackgroundRequests ? "background" : (options?.interactionMode ?? "user"),
+					interactionMode: capabilities.interactiveAuth ? (options?.interactionMode ?? "user") : "background",
 					onInteractiveAuthRecovery: options?.onInteractiveAuthRecovery ?? recoverBedrockSsoAuthentication,
 					apiKey: requestApiKey,
 					onAuthRejection:
@@ -893,8 +894,7 @@ export async function createAgentSession(options: CreateAgentSessionOptions = {}
 				isExplicitThinking: orchestrationProfile
 					? true
 					: (options.isExplicitThinking ?? options.thinkingLevel !== undefined),
-				isChildSession,
-				holdsOwnWatches: options.holdsOwnWatches,
+				capabilities,
 				orchestrationProfile,
 				privatePathScope: options.privatePathScope,
 				capabilityEnvelope: options.capabilityEnvelope,

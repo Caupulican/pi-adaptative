@@ -771,9 +771,9 @@ export class BotSessionHost {
 					sessionManager,
 					model,
 					...(definition.thinkingLevel ? { thinkingLevel: definition.thinkingLevel } : {}),
-					isChildSession: true,
-					// It runs the watches it arms and takes their wakes as parent inputs (idle starts a turn, running steers).
-					holdsOwnWatches: true,
+					// A bot's own session: it runs the watches it arms and takes their wakes as parent inputs (idle starts a
+					// turn, running steers).
+					standing: { kind: "bot", agentId },
 					// Every run is admitted at its start, whatever opened it: a wake's turn is held to the owner's rules too.
 					admitRun: () => {
 						try {

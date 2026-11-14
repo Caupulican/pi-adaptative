@@ -380,7 +380,7 @@ export class AwayChannelHosts {
 			session = (
 				await createAgentSession({
 					...this.sessionOptions(cwd, settingsManager, resourceLoader, sessionManager, `Channel ${name} away`),
-					isChildSession: true,
+					standing: { kind: "vehicle" },
 					disableSystemOne: true,
 					tools: AWAY_CHANNEL_TOOLS,
 					// A third party's turn reads the working directory only, never the harness's own storage (credentials,

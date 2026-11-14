@@ -57,6 +57,7 @@ import type { SubscriptionAllowancePort } from "./provider-admission/subscriptio
 import type { ResearchRunResult } from "./research/research-runner.ts";
 import type { collectWorkspaceSources } from "./research/workspace-collector.ts";
 import type { ResourceLoader } from "./resource-loader.ts";
+import type { SessionCapabilities } from "./session-standing.ts";
 import type { ResourceProfileFilterSettings } from "./settings/settings-schema.ts";
 import type { SettingsManager } from "./settings-manager.ts";
 import type { SystemOneSteeringPlane } from "./steering/system-one-steering-plane.ts";
@@ -194,10 +195,8 @@ export interface AgentSessionConfig {
 	isExplicitModel?: boolean;
 	/** Preserve an explicit launch-time thinking level across profile reloads. */
 	isExplicitThinking?: boolean;
-	/** Child sessions receive the worker UAC and write ceilings. */
-	isChildSession?: boolean;
-	/** A child session that is a bot's own session: its routine runtime holds the watches it arms (`routine-holder.ts`). */
-	holdsOwnWatches?: boolean;
+	/** What the session's standing may do, resolved once by `createAgentSession`; every session-scoped gate reads it. */
+	capabilities: SessionCapabilities;
 	/** Alternate base tool instances for embedded/custom runtimes. */
 	baseToolsOverride?: Record<string, AgentTool>;
 	/** Mutable bridge used by the agent loop to reach the current extension generation. */

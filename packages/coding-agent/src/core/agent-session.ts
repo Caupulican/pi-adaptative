@@ -436,7 +436,7 @@ export class AgentSession {
 	private readonly _toolGate: ToolGateController;
 	private readonly _ruleHooks = new RuleHookDelivery({
 		getMessages: () => this._memory.requestHistory(this.agent.state.messages),
-		isRootSession: () => !this._isChildSession,
+		isRootSession: () => this._caps.directsWorkers,
 		isToolActive: (name) => this.getActiveToolNames().includes(name),
 	});
 	private readonly _mutationLedger = new ObjectiveMutationLedger();
@@ -606,7 +606,7 @@ export class AgentSession {
 	});
 	private readonly _toolActivation = new AgentSessionToolActivation({
 		runtimeAdmission: () => this._runtimeAdmission,
-		isChildSession: () => this._isChildSession,
+		isChildSession: () => this._caps.routineScope !== "session",
 		getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
 		model: () => this.model,
 		runtimeBuilder: () => this._runtimeBuilder,
@@ -654,7 +654,7 @@ export class AgentSession {
 		goals: () => this._goals,
 		isDisposed: () => this._disposed,
 	});
-	private readonly _isChildSession: boolean;
+	private readonly _caps: AgentSessionConfig["capabilities"];
 	private _baseToolsOverride?: Record<string, AgentTool>;
 	private readonly _worktreeSyncEnginePorts?: WorktreeSyncEnginePorts;
 	private readonly _shellOperations?: BashOperations;
@@ -784,7 +784,7 @@ export class AgentSession {
 			getModelRegistry: () => this._modelRegistry,
 			getCwd: () => this._cwd,
 			getAgentDir: () => this._agentDir,
-			isChildSession: () => this._isChildSession,
+			isChildSession: () => this._caps.routineScope !== "session",
 			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
 			isDisposed: () => this._disposed,
 			getReflectionAbortSignal: () => this._reflectionAbort.signal,
@@ -815,7 +815,7 @@ export class AgentSession {
 		this._unsettledLadder = new SessionUnsettledLadderController({
 			getSessionManager: () => this.sessionManager,
 			getAgentDir: () => this._agentDir,
-			isChildSession: () => this._isChildSession,
+			isChildSession: () => this._caps.routineScope !== "session",
 			isHandoff: () => this._edgeIntent.handoff,
 			getLastUserRequest: () => this._promptSubmission?.lastUserRequest ?? "",
 			getMessages: () => this.agent.state.messages,
@@ -981,10 +981,10 @@ export class AgentSession {
 			bundleLease,
 		);
 		this._runtimeMutationWaitClock = config.timers.port("foreground");
-		this._isChildSession = (config.isChildSession ?? process.env.PI_CHILD_SESSION === "1") || isWorkerSession();
+		this._caps = config.capabilities;
 		const pinHost = { isDisposed: () => this._disposed, warn: (message: string) => this.emitHostWarning(message) };
-		void reportGithubOriginPinForSession(this._cwd, this._isChildSession, this.sessionManager, pinHost);
-		this._durableLearningState = this._isChildSession ? undefined : DurableLearningState.forAgentDir(agentDir);
+		if (this._caps.answersForCheckout) void reportGithubOriginPinForSession(this._cwd, this.sessionManager, pinHost);
+		this._durableLearningState = this._caps.ownsLearning ? DurableLearningState.forAgentDir(agentDir) : undefined;
 		this._skillVault = new SkillVaultController({
 			getSkills: () => skillsForSessionRole(this._resourceLoader.getActiveSkills()),
 			getFullSkills: () => skillsForSessionRole(this._resourceLoader.getSkills().skills),
@@ -1058,7 +1058,7 @@ export class AgentSession {
 			getModelAdaptationRules: () => this._toolProtocol.getAdaptationRulesForPrompt(),
 			getActiveExtensions: () => this._extensionRunner.activeExtensions,
 			getModelCapabilityProfile: () => this.getModelCapabilityProfile(),
-			isChildSession: () => this._isChildSession,
+			isChildSession: () => this._caps.routineScope !== "session",
 			// Self-gated by kill switch and evidence thresholds inside getActiveHints(): a plain always-on pass-through.
 			getToolSelectionHints: () => this._toolSelection.getActiveHints(),
 			getSystemPromptOverride: () => this.ownerSystemPrompt.get(),
@@ -1210,14 +1210,14 @@ export class AgentSession {
 		this._queuedInputPersistence.restoreRecordedQueuedInput();
 		this._harnessNotices = new HarnessNoticeController({
 			getSessionManager: () => this.sessionManager,
-			isChildSession: () => this._isChildSession,
+			isChildSession: () => this._caps.routineScope !== "session",
 			deliver: (input) => this._durableCustomMessageTurns.deliverParentInput(input),
 			warn: (message) => this._emit({ type: "warning", message }),
 		});
 		this._backgroundLanes = new BackgroundLaneController({
 			refreshToolRegistry: () => this._runtimeBuilder.refreshToolRegistry(),
 			isDisposed: () => this._disposed,
-			isChildSession: () => this._isChildSession,
+			isChildSession: () => this._caps.routineScope !== "session",
 			observeHarnessNotice: (kind, read, onLost) => this._harnessNotices.observe(kind, read, onLost),
 			getSessionId: () => this.sessionId,
 			getCwd: () => this._cwd,
@@ -1276,7 +1276,7 @@ export class AgentSession {
 				}
 				return this._terminalHandoffs.notifyWorkers(records);
 			},
-			routineScope: () => (!this._isChildSession ? "session" : config.holdsOwnWatches ? "own-watches" : undefined),
+			routineScope: () => this._caps.routineScope,
 			deliverParentInput: (input) => this._durableCustomMessageTurns.deliverParentInput(input),
 			sendUserMessage: (text, options) => this.sendUserMessage(text, options),
 			ownerChannel: this.ownerChannel,
@@ -1348,7 +1348,7 @@ export class AgentSession {
 			acquireSystemSwitchLease: (scope) => {
 				if (
 					this._disposed ||
-					this._isChildSession ||
+					!this._caps.ownsMemoryWrites ||
 					this.isRetrying ||
 					this._reflectionTurnLifecycle.inFlight ||
 					!isSessionSettled(this, this._hasPendingIdleContinuation()) ||
@@ -1372,7 +1372,7 @@ export class AgentSession {
 			getCwd: () => this._cwd,
 			getSessionId: () => this.sessionManager.getSessionId(),
 			getSessionFile: () => this.sessionManager.getSessionFile(),
-			isChildSession: () => this._isChildSession,
+			isChildSession: () => this._caps.routineScope !== "session",
 			refreshToolRegistry: () => this._runtimeBuilder.refreshToolRegistry(),
 			getContextWindow: () => this.model?.contextWindow,
 			getPromptHeadroom: (messages) =>
@@ -1679,7 +1679,7 @@ export class AgentSession {
 			sessionManager: this.sessionManager,
 			acquireUpdateQuiescence: async (signal) => this._memory.continuousChatHost()?.runtime.pauseAndDrain(signal),
 			getMessages: () => this.agent.state.messages,
-			isRoot: () => !this._isChildSession,
+			isRoot: () => this._caps.ownsProcessSingletons,
 			onStopped: () => this._goals.markTerminalToolFailureBlocked("runtime_update"),
 			resume: (prepare) => this._durableCustomMessageTurns.continue(prepare, this._goals.getOwnershipGoalId()),
 			reload: async (path, ownerHandoff) => {
@@ -1950,7 +1950,7 @@ export class AgentSession {
 			warn: (message) => this._emit({ type: "warning", message }),
 			getCwd: () => this._cwd,
 			getSkillsForAudit: () => this._resourceLoader.getActiveSkills(),
-			isChildSession: () => this._isChildSession,
+			isChildSession: () => this._caps.routineScope !== "session",
 			isDisposed: () => this._disposed,
 			getReflectionSignal: () => this._reflectionAbort.signal,
 			resolveTextToolCallProtocol: (model) => this._resolveModelToolProtocol(model).protocol,
@@ -2026,11 +2026,11 @@ export class AgentSession {
 				this._baseSystemPrompt = prompt;
 			},
 			getCustomTools: () => this._customTools,
-			getRuntimeUpdateTool: () => (this._isChildSession ? undefined : this.runtimeUpdates.createTool()),
+			getRuntimeUpdateTool: () => (this._caps.ownsProcessSingletons ? this.runtimeUpdates.createTool() : undefined),
 			getSelfCompactTool: () =>
-				this._isChildSession ? undefined : createSelfCompactToolDefinition(() => this._selfCompaction),
+				this._caps.conversesWithOwner ? createSelfCompactToolDefinition(() => this._selfCompaction) : undefined,
 			getProactivityTool: () =>
-				this._isChildSession ? undefined : createProactivityToolDefinition(() => this.settingsManager),
+				this._caps.writesOwnerSettings ? createProactivityToolDefinition(() => this.settingsManager) : undefined,
 			getBackgroundLaneTools: () => this._backgroundLanes.createBackgroundLaneTools(),
 			getBaseToolsOverride: () => this._baseToolsOverride,
 			getShellOperations: () => this._shellOperations,
@@ -2106,7 +2106,7 @@ export class AgentSession {
 				this._unsettledLadder.deliverToOwner(items);
 			},
 			getSystemOneController: () => this._semanticPlane.controller,
-			getSemanticUncertainties: () => (this._isChildSession ? undefined : this.getSemanticUncertainties()),
+			getSemanticUncertainties: () => (this._caps.conversesWithOwner ? this.getSemanticUncertainties() : undefined),
 			getSteeringPlane: () => this._semanticPlane.steeringPlane,
 			getSemanticDecisionEngine: () => this._semanticDecisionEngine(),
 			askQuestionRouting: () => ({
@@ -2446,7 +2446,7 @@ export class AgentSession {
 			reviewPlan: ({ toolName, args }) => this._reviewPublishedPlan(toolName, args),
 			validateMutationAcceptance: (input) =>
 				this._projectRules.acceptMutation(input, this._edgeIntent.ruleAuthority),
-			soulGate: this._isChildSession ? undefined : this.soul,
+			soulGate: this._caps.reviewsSoulWrites ? this.soul : undefined,
 			noteOwnedWrites: (paths, cwd) => {
 				const objectiveId = this.objectiveMutationId();
 				for (const filePath of paths) this._mutationLedger.recordOwnedWrite(objectiveId, cwd, filePath);
@@ -2953,7 +2953,7 @@ export class AgentSession {
 	 * child sessions and when `curator.autoArchive` is disabled. Restorable via `/curate restore`.
 	 */
 	async runStartupSkillCuration(): Promise<string[]> {
-		if (this._isChildSession) return [];
+		if (!this._caps.ownsLearning) return [];
 		const settings = this.settingsManager.getCuratorSettings();
 		if (!settings.autoArchive) return [];
 		return this._skillCurator.autoArchiveStale(Date.now(), { staleDays: settings.staleDays });
@@ -4450,7 +4450,7 @@ export class AgentSession {
 	 * checking for one), so its wire is always its own history and its compaction stays session-wide.
 	 */
 	private _continuousChatWire(): ContinuousChatWire | undefined {
-		return this._isChildSession ? undefined : this._memory.continuousChatWire();
+		return this._caps.ownsHistory ? this._memory.continuousChatWire() : undefined;
 	}
 
 	/** Whether an ICM projection, the chat or its block, owns this session's provider wire. */
@@ -4493,7 +4493,7 @@ export class AgentSession {
 	}
 
 	startBackgroundInputs(): void {
-		if (this._isChildSession && this._backgroundLanes.routineScope() === undefined) return;
+		if (this._caps.routineScope === undefined) return;
 		this._durableCustomMessageTurns.startParentInputs();
 		this._backgroundLanes.startSessionInputs();
 	}
