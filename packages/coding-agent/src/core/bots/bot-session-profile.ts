@@ -32,7 +32,7 @@ import {
 } from "../delegation/worker-execution-policy.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
-import type { OrchestrationThinkingLevel, WorkerRole } from "../orchestration/contracts.ts";
+import type { OrchestrationThinkingLevel, RiskBudget, WorkerRole } from "../orchestration/contracts.ts";
 import { costCeilingUsd } from "../orchestration/risk-budget.ts";
 import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-guard.ts";
 import { workerPromptSoul } from "../orchestration/worker-execution-contract.ts";
@@ -59,8 +59,12 @@ export interface BotSessionDefinition {
 	readonly resourceSystemPrompt?: string;
 	/** A profile's named read scope: the project context files its prompt carries are those it reaches, as a worker's are. */
 	readonly contextFileScope?: ContextFileReadScope;
-	/** A profile's dollar bound on one turn, beside the owner's worker bound and the main session's. */
-	readonly spendBoundUsd?: number;
+	/**
+	 * The bot's own dollar ceilings (a profile's budget; none for a bot of its own), beside the owner's worker bound and
+	 * the main session's: decided for each spend on the model that spends it (`botSpendBound`), its metered ceiling too
+	 * when that spend is metered.
+	 */
+	readonly spendBudget: Pick<RiskBudget, "maxCostUsd" | "maxMeteredCostUsd">;
 }
 
 /**
@@ -126,6 +130,7 @@ export function ownBotSession(record: PersistentBotRecord, cwd: string, registry
 		// reaches an owner credential file: a call that would is refused before it runs.
 		privatePathScope: { readOnlyShell: !profile.canWrite, confinedWrites: true, credentialExposure: "deny" },
 		...(soul.soul !== undefined ? { soul: soul.soul } : {}),
+		spendBudget: {},
 	};
 }
 
@@ -172,9 +177,10 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 	const own = [TASK_WATCH_TOOL_NAME, SELF_COMPACT_TOOL_NAME];
 	const tools = [...new Set([...planned.filter(sessionHolds), ...own])];
 	// The dollar ceilings hold the session as they hold a worker of the profile on the same model: `maxMeteredCostUsd` too
-	// when its spend is metered, `maxCostUsd` alone on a subscription.
+	// when its spend is metered, `maxCostUsd` alone on a subscription. The profile's own ceilings are kept whole: each spend
+	// is held to them on the model that spends it (a worker of the bot can run on another model than the bot's).
 	const laneCeilingUsd = costCeilingUsd(worker.authority.budget, compiled.metered);
-	const spendBoundUsd = costCeilingUsd(profile.budget, compiled.metered);
+	const { maxCostUsd, maxMeteredCostUsd } = profile.budget;
 	// The ceiling a worker lane of the profile runs under, built as the lane builds it. Its paths are the session's path
 	// envelopes' (`privatePathScope`): denied paths with the session's own readable exemptions, writes in its write roots,
 	// reads in its read roots.
@@ -217,7 +223,10 @@ export function profileBotSession(compiled: Extract<BotSessionCompilation, { ok:
 					},
 				}
 			: {}),
-		...(spendBoundUsd !== undefined ? { spendBoundUsd } : {}),
+		spendBudget: {
+			...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
+			...(maxMeteredCostUsd !== undefined ? { maxMeteredCostUsd } : {}),
+		},
 	};
 	const { model, ...defining } = definition;
 	return {

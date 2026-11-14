@@ -53,6 +53,7 @@ import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/
 import { contextFilesWithinReadScope } from "../delegation/worker-execution-policy.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { ModelRegistry } from "../model-registry.ts";
+import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import { type HostLock, takeProcessLock } from "../remote/host-lock.ts";
 import { DefaultResourceLoader } from "../resource-loader.ts";
 import { liveOwnWatches } from "../routines/routine-holder.ts";
@@ -86,7 +87,7 @@ import {
 	ownBotSessionKey,
 	profileBotSession,
 } from "./bot-session-profile.ts";
-import { type BotTurnSpendBound, observeBotSessionTurns } from "./bot-session-turns.ts";
+import { type BotTurnSpendBound, botSpendBound, observeBotSessionTurns } from "./bot-session-turns.ts";
 import { BotTurnAccounting, type BotTurnUsageReport } from "./bot-turn-report.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 
@@ -168,8 +169,8 @@ interface BotSessionEntry {
 	readonly builtFor: BotSender;
 	/** What defined the session when it was built (`BotSessionDefinition.key`). */
 	readonly profileKey: string;
-	/** Its profile's dollar bound on one turn, for a bot made from a profile. */
-	readonly spendBoundUsd: number | undefined;
+	/** The bot's own dollar ceilings (`BotSessionDefinition.spendBudget`). */
+	readonly spendBudget: BotSessionDefinition["spendBudget"];
 	unsubscribe: () => void;
 	/** Prompts submitted and not yet settled. */
 	inFlight: number;
@@ -476,7 +477,7 @@ export class BotSessionHost {
 		this.admit(
 			agentId,
 			entry.session.model,
-			{ key: entry.profileKey, spendBoundUsd: entry.spendBoundUsd },
+			{ key: entry.profileKey, spendBudget: entry.spendBudget },
 			entry.builtFor,
 		);
 		const queued = mode === "queue";
@@ -541,7 +542,7 @@ export class BotSessionHost {
 	private admit(
 		agentId: string,
 		model: Model<Api> | undefined,
-		built: Pick<BotSessionDefinition, "key" | "spendBoundUsd">,
+		built: Pick<BotSessionDefinition, "key" | "spendBudget">,
 		builtFor: BotSender,
 	): void {
 		const record = this.ports.store().getBot(agentId);
@@ -567,31 +568,33 @@ export class BotSessionHost {
 					`${defined.model.provider}/${defined.model.id}`,
 				),
 			);
-		const refusal = this.modelRefusal(record, { model, spendBoundUsd: built.spendBoundUsd });
+		const refusal = this.modelRefusal(record, { model, spendBudget: built.spendBudget });
 		if (refusal) throw new BotModelRefusedError(agentId, refusal);
 	}
 
 	/** Why the model may not run now under the record's rules and the bound that applies; undefined when it may. */
 	private modelRefusal(
 		record: PersistentBotRecord,
-		{ model, spendBoundUsd }: Pick<BotSessionDefinition, "model" | "spendBoundUsd">,
+		{ model, spendBudget }: Pick<BotSessionDefinition, "model" | "spendBudget">,
 	): BotModelRefusal | undefined {
 		if (record.profileId === undefined) {
 			const refused = this.ports.modelRefusal(record, model);
 			if (refused) return refused;
 		}
-		const unpriced = this.spendBound(model, spendBoundUsd) === undefined ? undefined : unpricedModelRefusal(model);
+		const unpriced = this.spendBound(model, spendBudget) === undefined ? undefined : unpricedModelRefusal(model);
 		return unpriced === undefined ? undefined : { cause: "model_unpriced", reason: unpriced };
 	}
 
-	/** The lower of the owner's and the main session's bounds on one turn and the bot's profile's own. */
-	private spendBound(model: Model<Api>, profileBoundUsd: number | undefined): BotTurnSpendBound | undefined {
-		const bound = this.ports.turnSpendBound(model);
-		return profileBoundUsd !== undefined &&
-			profileBoundUsd > 0 &&
-			(bound === undefined || profileBoundUsd < bound.usd)
-			? { usd: profileBoundUsd, bound: "profile" }
-			: bound;
+	/** The bound on spend made on `model`: the owner's and the main session's, and the bot's own ceilings on that spend. */
+	private spendBound(
+		model: Model<Api>,
+		spendBudget: BotSessionDefinition["spendBudget"],
+	): BotTurnSpendBound | undefined {
+		return botSpendBound(
+			this.ports.turnSpendBound(model),
+			spendBudget,
+			isMeteredSpend(model, this.ports.modelRegistry()),
+		);
 	}
 
 	/**
@@ -823,7 +826,7 @@ export class BotSessionHost {
 				sender,
 				builtFor: sender,
 				profileKey: definition.key,
-				spendBoundUsd: definition.spendBoundUsd,
+				spendBudget: definition.spendBudget,
 				unsubscribe: () => {},
 				inFlight: 0,
 				recheckWhenIdle: false,
@@ -841,7 +844,7 @@ export class BotSessionHost {
 				role: definition.role,
 				cwd,
 				timers: this.idleTimers(),
-				spendBound: () => this.spendBound(definition.model, definition.spendBoundUsd),
+				spendBound: () => this.spendBound(definition.model, definition.spendBudget),
 				maxWallClockMs: () => settingsManager.getWorkerDelegationSettings().maxWallClockMs,
 				notify: (text, mark) => this.notify(agentId, text, mark),
 				settle: () => this.settle(entry),

@@ -10,7 +10,8 @@
 import type { AgentSession } from "../agent-session.ts";
 import { boundSessionTurnSpend } from "../cost/session-turn-spend-bound.ts";
 import { interfaceText } from "../language/interface-text.ts";
-import type { WorkerRole } from "../orchestration/contracts.ts";
+import type { RiskBudget, WorkerRole } from "../orchestration/contracts.ts";
+import { costCeilingUsd } from "../orchestration/risk-budget.ts";
 import { observeSessionTurns } from "../session-turn-boundary.ts";
 import { boundSessionTurnTime } from "../session-turn-time-bound.ts";
 import type { TimerPort } from "../util/timer-port.ts";
@@ -21,6 +22,22 @@ import { BotTurnSupervision } from "./bot-turn-supervision.ts";
 export interface BotTurnSpendBound {
 	readonly usd: number;
 	readonly bound: "worker" | "session" | "profile";
+}
+
+/**
+ * The bound on spend made on one model: the lowest of the root's (`root`, the owner's worker bound and the main session's
+ * ceiling on that model) and the bot's own ceilings on that spend (`costCeilingUsd`: its metered ceiling too when the
+ * spend is `metered`). A ceiling of zero or less sets no bound, as the root's do not.
+ */
+export function botSpendBound(
+	root: BotTurnSpendBound | undefined,
+	spendBudget: Pick<RiskBudget, "maxCostUsd" | "maxMeteredCostUsd">,
+	metered: boolean,
+): BotTurnSpendBound | undefined {
+	const own = costCeilingUsd(spendBudget, metered);
+	return own !== undefined && own > 0 && (root === undefined || own < root.usd)
+		? { usd: own, bound: "profile" }
+		: root;
 }
 
 /** What the per-turn owners read from, and tell, the bot's host. */
