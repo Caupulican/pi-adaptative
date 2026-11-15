@@ -43,11 +43,13 @@ line from each finished turn is appended to it. It reads, and writes only when t
 commands are judged one by one, as a read-only worker's are (nothing that edits or creates a file runs, nor anything that
 reaches the network unless its profile grants `network.http`, in every execution mode). Its spend is bounded per request:
 each outside input it serves (your message, a message its inbox took, a watch's wake) opens a spend window, and the turns
-serving it, the handoff turns its workers' results open and those workers' runs share one dollar bound, the lowest of
-`workerDelegation.maxUsd` and the main session's own ceiling (with its metered-only ceiling when the spend is metered)
-when one is set. A turn is stopped once the window's spend (its own and its workers', from the delegation ledger) passes
-the bound on the bot's model; each worker run is held to the bound on its own model less what the bot's turns spent in
-the window, shared with the window's other workers. On a model no bound applies to (a subscription with no ceiling set)
+serving it, the handoff turns its workers' results open and those workers' runs share its dollar ceilings, each when set:
+`workerDelegation.maxUsd`, the main session's own ceiling and a profile's `maxCostUsd` on all of the window's spend, and
+the main session's metered-only ceiling and a profile's `maxMeteredCostUsd` on the part of it made on metered models. A
+turn is stopped once the window's spend (its own and its workers', from the delegation ledger) passes a ceiling that
+holds the bot's model; the window's workers share each ceiling less what the bot's turns spent in the window on the
+spend it counts (a metered worker the metered-only ones too, so a subscription bot's own turns never use up the metered
+ceiling of its metered workers), and a remainder at or below zero refuses a worker's next request. On a model no bound applies to (a subscription with no ceiling set)
 its workers get no dollar bound: the plan's usage windows hold them, and a worker whose usage is used up waits for the
 reset and continues on its own. The windows are kept in the bot's spend ledger, `bots/<id>/spend.json` (the newest 64). A turn is bounded
 in time by `workerDelegation.maxWallClockMs` when that is set, as a worker's run is. What the bot's session spends is added
@@ -143,9 +145,9 @@ and soul, the model rules and the execution plan), without a worker run's admiss
 now, the worker fleet), since no worker runs: the resolved model and thinking, the plan's tools, its working directory, its read roots (a profile
 that confines reads confines the read tools, `repo_read`, `lookup`, the read-only shell and its watches to them), its write
 roots and read-only grant, a capability ceiling of the plan's capabilities held by the session's tool gate, the soul and
-resources a worker of it carries, and a spend bound of the profile's cost budget (`maxCostUsd`, and `maxMeteredCostUsd`
-too on spend made on a model reached with an API key rather than a subscription, each spend judged on the model that
-makes it, a worker's on its own) when it is lower than the worker and session bounds. A run on a session built from an older compile (the profile, a model pin or the worker policy changed
+resources a worker of it carries, and the profile's cost budget as ceilings over its spend per request (`maxCostUsd` on
+all of it, `maxMeteredCostUsd` on the part made on a model reached with an API key rather than a subscription, each
+spend judged on the model that makes it, a worker's on its own), beside the worker and session bounds. A run on a session built from an older compile (the profile, a model pin or the worker policy changed
 since) is refused and the idle session is rebuilt. A profile that needs an independent verifier of each claim, names a
 tool a session does not hold, or sets a token, wall-clock, attempt or tool-call limit (which only a worker's run counts)
 keeps the bot a worker; a profile the resolution refuses refuses the message in the owner's words. One predicate decides it

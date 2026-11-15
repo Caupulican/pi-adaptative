@@ -9,10 +9,11 @@
  * prompt's run, a recovery before the run that continues it), and otherwise toward no turn's bound (a threshold check
  * after a turn's last run, before the next third party's turn): it is still in the session's usage, and in a bot's
  * charge. A summary prepared while the session idled is paid then, outside any compaction and any turn. The host says
- * what spend the bound holds (`spent`): the turn's own, or a wider spend the turn's adds to (a bot's request with its
- * workers). It is told each addition once, where the transcript already holds the turn's own entries: at a priced
- * message's end, at the start of a run the turn continues with, and at the turn's end. The turn's first run starts before
- * the input that opened it is written, so that start is checked on the turn's own spend, which the wider spend includes.
+ * what spend its bounds hold (`exceeded`): the turn's own, or a wider spend the turn's adds to (a bot's request with its
+ * workers, each of its ceilings on the spend it counts). It is told each addition once, where the transcript already holds
+ * the turn's own entries: at a priced message's end, at the start of a run the turn continues with, and at the turn's
+ * end. The turn's first run starts before the input that opened it is written, so that start is checked on the turn's
+ * own spend against the lowest bound on it (`limit`), which every wider spend includes.
  * Past the bound the turn is stopped (`stopSessionTurn`), at a priced message or at the start of a run. A bound can only
  * be kept on a model that declares a price.
  */
@@ -32,16 +33,31 @@ export interface SpendLimit {
 	readonly usd: number;
 }
 
+/** A spend past its bound, with that bound. */
+export interface SpendExcess<Limit extends SpendLimit> {
+	readonly spentUsd: number;
+	readonly limit: Limit;
+}
+
 export interface SessionTurnSpendBound<Limit extends SpendLimit> {
-	/** The bound now; undefined when no bound applies. Read at every priced message. */
+	/** The lowest bound on the turn's own spend now; undefined when no bound applies. */
 	limit(): Limit | undefined;
 	/**
-	 * The spend held to the bound, given the turn's spend so far (`turnUsd`) and what was just added to it (`addedUsd`,
-	 * told once each, zero when the bound is only checked again).
+	 * The spend the host holds past one of its bounds, with that bound, given the turn's spend so far (`turnUsd`) and what
+	 * was just added to it (`addedUsd`, told once each, zero when the bounds are only checked again); undefined while it is
+	 * within every bound.
 	 */
-	spent(turnUsd: number, addedUsd: number): number;
-	/** The spend went past `limit`, the bound read for the turn's last priced message: the reason its turn is aborted with. */
+	exceeded(turnUsd: number, addedUsd: number): SpendExcess<Limit> | undefined;
+	/** The spend went past `limit`: the reason its turn is aborted with. */
 	onExceeded(spentUsd: number, limit: Limit): string;
+}
+
+/** The turn's own spend past `limit`; undefined within it, or when no bound applies. */
+export function turnSpendExcess<Limit extends SpendLimit>(
+	turnUsd: number,
+	limit: Limit | undefined,
+): SpendExcess<Limit> | undefined {
+	return limit !== undefined && turnUsd > limit.usd ? { spentUsd: turnUsd, limit } : undefined;
 }
 
 /** Compaction spend and the foreground submission it ran in (undefined when it ran outside one). */
@@ -87,15 +103,14 @@ export function boundSessionTurnSpend<Limit extends SpendLimit>(
 		turnUsd += usd;
 		untoldUsd += usd;
 	};
-	// Tells the host the spend not yet told and returns the spend held to the bound.
-	const tell = (): number => {
+	// Tells the host the spend not yet told and returns the spend past one of its bounds.
+	const tell = (): SpendExcess<Limit> | undefined => {
 		const addedUsd = untoldUsd;
 		untoldUsd = 0;
-		return bound.spent(turnUsd, addedUsd);
+		return bound.exceeded(turnUsd, addedUsd);
 	};
-	const enforce = (spentUsd: number) => {
-		const limit = bound.limit();
-		if (limit !== undefined && spentUsd > limit.usd) void stopSessionTurn(session, bound.onExceeded(spentUsd, limit));
+	const enforce = (excess: SpendExcess<Limit> | undefined) => {
+		if (excess) void stopSessionTurn(session, bound.onExceeded(excess.spentUsd, excess.limit));
 	};
 	const unsubscribeSpend = session.subscribe((event) => {
 		if (event.type === "message_end" && event.message.role === "assistant") {
@@ -116,7 +131,7 @@ export function boundSessionTurnSpend<Limit extends SpendLimit>(
 			compaction = undefined;
 		} else if (event.type === "agent_start") {
 			// The turn's started() runs first, on the same event (its boundary subscribed first).
-			if (opening) enforce(turnUsd);
+			if (opening) enforce(turnSpendExcess(turnUsd, bound.limit()));
 			else enforce(tell());
 			opening = false;
 		}

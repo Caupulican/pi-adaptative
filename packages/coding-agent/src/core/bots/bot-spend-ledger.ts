@@ -30,6 +30,8 @@ export interface SpendWindowRecord {
 	readonly kind: string;
 	/** The session's own spend while serving it, in dollars. */
 	foregroundUsd: number;
+	/** The part of it made on a metered model (`isMeteredSpend`): what a metered-only ceiling counts of it. */
+	meteredForegroundUsd: number;
 	/** The attempts found to serve it (their spend is read from the delegation ledger, never kept here). */
 	attemptIds: string[];
 	/** When it last changed (ms since the epoch): the oldest windows are dropped first. */
@@ -76,12 +78,13 @@ function errorText(error: unknown): string {
 
 function parseWindow(value: unknown): SpendWindowRecord | undefined {
 	if (!isPlainRecord(value)) return undefined;
-	const { id, input, kind, foregroundUsd, attemptIds, updatedAt } = value;
+	const { id, input, kind, foregroundUsd, meteredForegroundUsd, attemptIds, updatedAt } = value;
 	if (typeof id !== "string" || typeof input !== "string" || typeof kind !== "string") return undefined;
-	if (typeof foregroundUsd !== "number" || !Number.isFinite(foregroundUsd) || foregroundUsd < 0) return undefined;
+	const dollars = (usd: unknown): usd is number => typeof usd === "number" && Number.isFinite(usd) && usd >= 0;
+	if (!dollars(foregroundUsd) || !dollars(meteredForegroundUsd)) return undefined;
 	if (typeof updatedAt !== "number" || !Array.isArray(attemptIds)) return undefined;
 	if (!attemptIds.every((attemptId) => typeof attemptId === "string")) return undefined;
-	return { id, input, kind, foregroundUsd, attemptIds: [...attemptIds], updatedAt };
+	return { id, input, kind, foregroundUsd, meteredForegroundUsd, attemptIds: [...attemptIds], updatedAt };
 }
 
 function parseCharge(value: unknown): BotCharge | undefined {

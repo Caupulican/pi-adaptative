@@ -1,6 +1,6 @@
 /**
  * The budget an attempt's provider requests are checked and priced against: its task tree's, and the cost bounds over it,
- * its run's (`runCostBound`), each budgeted delegation on its ancestry (`charter.envelope.budgetUsd`) and the tree's metered
+ * its run's (`runCostBound`: the run's whole spend, and its metered spend for a metered attempt), each budgeted delegation on its ancestry (`charter.envelope.budgetUsd`) and the tree's metered
  * ceiling (`maxMeteredCostUsd`). This owner composes them and decides which of an attempt's spend is metered. A
  * subscription model has no metered or delegation dollar bound: its spend is bounded by the plan's usage windows.
  */
@@ -57,6 +57,8 @@ export class RequestCostBounds {
 	private readonly deps: RequestCostBoundsDeps;
 	/** Budgets shared by every attempt of one bounded run, keyed by run. */
 	private readonly runBudgets = new WorkerTreeBudgetCoordinator();
+	/** Budgets shared by the metered attempts of one bounded run over their spend (`maxMeteredCostUsd`), keyed by run. */
+	private readonly meteredRunBudgets = new WorkerTreeBudgetCoordinator();
 	/** Budgets shared by every attempt under one budgeted delegation, keyed by `delegation:<objectiveId>`. */
 	private readonly delegationBudgets = new WorkerTreeBudgetCoordinator();
 	/** Each task tree's cumulative budget, keyed by `workerTreeBudgetKey`. */
@@ -119,10 +121,8 @@ export class RequestCostBounds {
 			initialUsage,
 		});
 		const attempt = snapshot.attempts[attemptId];
-		const ports: SharedCapabilityBudget[] = [];
-		const run = this.runBudgetPort(attempt, attemptId, initialUsage, snapshot);
-		if (run) ports.push(run);
 		const metered = isMeteredSpend(model, this.billing);
+		const ports: SharedCapabilityBudget[] = this.runBudgetPorts(attempt, attemptId, initialUsage, snapshot, metered);
 		const meteredTree = metered && this.meteredTreePort(treeKey, treeBudget.maxMeteredCostUsd, treeSeeds, input);
 		if (meteredTree) ports.push(meteredTree);
 		if (attempt && metered) {
@@ -174,32 +174,51 @@ export class RequestCostBounds {
 	}
 
 	/**
-	 * The budget the attempt's run shares with its other attempts (`runCostBound`), seeded from every durable attempt of
-	 * that run; undefined when the host bounds no run.
+	 * The budgets the attempt's run shares with its other attempts (`runCostBound`): its whole spend, seeded from every
+	 * durable attempt of the run, and for a metered attempt its metered spend, seeded from the run's metered attempts. None
+	 * when the host bounds no run.
 	 */
-	private runBudgetPort(
+	private runBudgetPorts(
 		attempt: AttemptRuntimeState | undefined,
 		attemptId: string,
 		initialUsage: AttemptUsageSnapshot,
 		snapshot: TaskRuntimeProjection,
-	): SharedCapabilityBudget | undefined {
+		metered: boolean,
+	): SharedCapabilityBudget[] {
 		const runCostBound = this.deps.runCostBound;
-		if (!runCostBound) return undefined;
-		const bound = attempt ? runCostBound(attempt, snapshot) : undefined;
-		if (!bound) return undefined;
-		const seeds = Object.values(snapshot.attempts)
-			.filter((candidate) => runCostBound(candidate, snapshot)?.runId === bound.runId)
-			.map((candidate) => ({
+		const bound = runCostBound && attempt ? runCostBound(attempt, snapshot) : undefined;
+		if (!runCostBound || !bound) return [];
+		const runAttempts = Object.values(snapshot.attempts).filter(
+			(candidate) => runCostBound(candidate, snapshot)?.runId === bound.runId,
+		);
+		const seedsOf = (attempts: readonly AttemptRuntimeState[]) =>
+			attempts.map((candidate) => ({
 				attemptId: candidate.attemptId,
 				usage: projectAttemptUsage(candidate, snapshot.checkpoints) ?? EMPTY_ATTEMPT_USAGE,
 			}));
-		return this.runBudgets.createPort({
-			treeKey: bound.runId,
-			attemptId,
-			budget: { maxCostUsd: bound.maxCostUsd },
-			pricesRequests: true,
-			seeds,
-			initialUsage,
-		});
+		const ports: SharedCapabilityBudget[] = [];
+		if (bound.maxCostUsd !== undefined)
+			ports.push(
+				this.runBudgets.createPort({
+					treeKey: bound.runId,
+					attemptId,
+					budget: { maxCostUsd: bound.maxCostUsd },
+					pricesRequests: true,
+					seeds: seedsOf(runAttempts),
+					initialUsage,
+				}),
+			);
+		if (metered && bound.maxMeteredCostUsd !== undefined)
+			ports.push(
+				this.meteredRunBudgets.createPort({
+					treeKey: bound.runId,
+					attemptId,
+					budget: { maxCostUsd: bound.maxMeteredCostUsd },
+					pricesRequests: true,
+					seeds: seedsOf(runAttempts.filter((candidate) => this.isMeteredAttempt(candidate))),
+					initialUsage,
+				}),
+			);
+		return ports;
 	}
 }

@@ -17,8 +17,8 @@
  * read-only shell line admits. A bot made from a worker profile runs on the contract its profile compiles to, again at
  * every run, by the resolution a fresh worker of it takes and none of a worker run's admission gates (`bot-session-profile.ts`): the resolved model, the plan's tools, read and write roots and read-only grant,
  * a capability ceiling held by the session's tool gate, the profile's soul and resources; a profile that needs what only
- * a worker's run has keeps it a worker (`runsAsSession`). Each turn is bounded by the worker spend bound (and the
- * profile's cost budget, when lower) and its usage is reported to the main session's cost view. Subagents, routines of
+ * a worker's run has keeps it a worker (`runsAsSession`). Its spend per request it serves, its workers' included,
+ * is held to the worker, session and profile ceilings, and charged to the main session's cost view (`bot-session-spend.ts`). Subagents, routines of
  * its own and goals belong to a later phase.
  *
  * One process hosts a bot's session at a time (`bots/<id>/host.lock`): a second process is refused, naming the session
@@ -83,8 +83,8 @@ import {
 	ownBotSessionKey,
 	profileBotSession,
 } from "./bot-session-profile.ts";
-import { BotSessionSpend, botSpendBoundOn } from "./bot-session-spend.ts";
-import { type BotTurnSpendBound, observeBotSessionTurns } from "./bot-session-turns.ts";
+import { BotSessionSpend, botSpendCeilingsOn } from "./bot-session-spend.ts";
+import { type BotSpendCeiling, observeBotSessionTurns } from "./bot-session-turns.ts";
 import type { BotChargeReport } from "./bot-spend-ledger.ts";
 import type { BotTurnAccounting } from "./bot-turn-report.ts";
 import { BotWatchExpiry } from "./bot-watch-expiry.ts";
@@ -113,11 +113,10 @@ export interface BotSessionHostPorts {
 	/** Why the worker admission refuses the bot's model now, with when that ends when known; undefined when it may run. */
 	modelRefusal(record: PersistentBotRecord, model: Model<Api>): BotModelRefusal | undefined;
 	/**
-	 * The dollars spend on `model` may reach, as a worker's budget bounds it, with the bound that sets it (the owner's
-	 * worker bound or the main session's autonomy bound, which holds metered spend to its metered ceiling too, the lower);
-	 * undefined when nothing bounds it. A model the registry does not know (undefined) is held as metered spend.
+	 * The root's dollar ceilings over spend, as a worker's budget holds it: the owner's worker bound and the main session's
+	 * autonomy bound on all spend, and its metered-only ceiling; empty when none is set.
 	 */
-	turnSpendBound(model: Model<Api> | undefined): BotTurnSpendBound | undefined;
+	spendCeilings(): readonly BotSpendCeiling[];
 }
 
 /**
@@ -541,13 +540,8 @@ export class BotSessionHost {
 			const refused = this.ports.modelRefusal(record, model);
 			if (refused) return refused;
 		}
-		const bound = botSpendBoundOn(
-			(on) => this.ports.turnSpendBound(on),
-			model,
-			spendBudget,
-			this.ports.modelRegistry(),
-		);
-		const unpriced = bound === undefined ? undefined : unpricedModelRefusal(model);
+		const bounded = botSpendCeilingsOn(this.ports.spendCeilings(), spendBudget, model, this.ports.modelRegistry());
+		const unpriced = bounded.length === 0 ? undefined : unpricedModelRefusal(model);
 		return unpriced === undefined ? undefined : { cause: "model_unpriced", reason: unpriced };
 	}
 
@@ -679,7 +673,7 @@ export class BotSessionHost {
 			const registry = this.ports.modelRegistry();
 			// The bot's spend per request it serves: its turns and the runs of the workers they start share one bound.
 			const spend = new BotSessionSpend(agentId, agentDir, sessionManager, definition, registry, {
-				rootBound: (on) => this.ports.turnSpendBound(on),
+				rootCeilings: () => this.ports.spendCeilings(),
 				snapshot: () => session?.backgroundLanes.getTaskRuntimeSnapshot(),
 				now: () => this.idleTimers().now(),
 				warn: (message) => this.ports.warn(message),

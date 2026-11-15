@@ -147,7 +147,7 @@ function relayPorts(shared: AttachedRoots): BotSessionHostPorts {
 		timers: () => root().timers(),
 		warn: (message) => root().warn(message),
 		modelRefusal: (record, model) => root().modelRefusal(record, model),
-		turnSpendBound: (model) => root().turnSpendBound(model),
+		spendCeilings: () => root().spendCeilings(),
 	};
 }
 

@@ -9,36 +9,27 @@
  */
 
 import type { AgentSession } from "../agent-session.ts";
-import { boundSessionTurnSpend } from "../cost/session-turn-spend-bound.ts";
+import { boundSessionTurnSpend, type SpendExcess } from "../cost/session-turn-spend-bound.ts";
 import { interfaceText } from "../language/interface-text.ts";
-import type { RiskBudget, WorkerRole } from "../orchestration/contracts.ts";
-import { costCeilingUsd } from "../orchestration/risk-budget.ts";
+import type { WorkerRole } from "../orchestration/contracts.ts";
 import { observeSessionTurns } from "../session-turn-boundary.ts";
 import { boundSessionTurnTime } from "../session-turn-time-bound.ts";
 import type { TimerPort } from "../util/timer-port.ts";
 import type { BotTurnAccounting } from "./bot-turn-report.ts";
 import { BotTurnSupervision } from "./bot-turn-supervision.ts";
 
-/** One turn's dollar bound, with the bound that sets it: the owner's worker bound, the main session's, or the bot's profile's. */
+/** One dollar bound on a bot's spend, with the setting that sets it: the owner's worker bound, the main session's, or the bot's profile's. */
 export interface BotTurnSpendBound {
 	readonly usd: number;
 	readonly bound: "worker" | "session" | "profile";
 }
 
 /**
- * The bound on spend made on one model: the lowest of the root's (`root`, the owner's worker bound and the main session's
- * ceiling on that model) and the bot's own ceilings on that spend (`costCeilingUsd`: its metered ceiling too when the
- * spend is `metered`). A ceiling of zero or less sets no bound, as the root's do not.
+ * One dollar ceiling over a bot's spend per request: on all of it, or (`meteredOnly`) on the part of it made on metered
+ * models, which a subscription's spend never reaches (its limit is its plan's usage windows).
  */
-export function botSpendBound(
-	root: BotTurnSpendBound | undefined,
-	spendBudget: Pick<RiskBudget, "maxCostUsd" | "maxMeteredCostUsd">,
-	metered: boolean,
-): BotTurnSpendBound | undefined {
-	const own = costCeilingUsd(spendBudget, metered);
-	return own !== undefined && own > 0 && (root === undefined || own < root.usd)
-		? { usd: own, bound: "profile" }
-		: root;
+export interface BotSpendCeiling extends BotTurnSpendBound {
+	readonly meteredOnly: boolean;
 }
 
 /** What the per-turn owners read from, and tell, the bot's host. */
@@ -49,10 +40,13 @@ export interface BotSessionTurnPorts {
 	readonly cwd: string;
 	/** The host's timers: the time bound arms its alarm on them. */
 	readonly timers: TimerPort;
-	/** The dollars one request may spend now, with the bound that sets it; undefined when nothing bounds it. */
+	/** The lowest bound on the bot's own spend now; undefined when nothing bounds it. */
 	spendBound(): BotTurnSpendBound | undefined;
-	/** Counts `addedUsd` the turn just spent to the request it serves; returns that request's spend, its workers' included. */
-	spent(turnUsd: number, addedUsd: number): number;
+	/**
+	 * Counts `addedUsd` the turn just spent to the request it serves; returns that request's spend (its workers' included)
+	 * past one of its bounds, with that bound, or undefined within them all.
+	 */
+	exceeded(turnUsd: number, addedUsd: number): SpendExcess<BotTurnSpendBound> | undefined;
 	/** How long one turn may run now (the owner's `workerDelegation.maxWallClockMs` as it is now). */
 	maxWallClockMs(): number | undefined;
 	/** Tells the owner in the bot's chat; `mark` false keeps the bot read (an informational notice). */
@@ -71,7 +65,7 @@ export function observeBotSessionTurns(
 	const words = () => interfaceText().botTeam;
 	const unsubscribeSpend = boundSessionTurnSpend(session, {
 		limit: () => ports.spendBound(),
-		spent: (turnUsd, addedUsd) => ports.spent(turnUsd, addedUsd),
+		exceeded: (turnUsd, addedUsd) => ports.exceeded(turnUsd, addedUsd),
 		onExceeded: (spentUsd, limit) => {
 			const reason = words().botTurnOverBudget(agentId, spentUsd.toFixed(2), limit.usd.toFixed(2), limit.bound);
 			ports.notify(reason);

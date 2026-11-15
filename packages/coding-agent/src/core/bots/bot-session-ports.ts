@@ -15,10 +15,10 @@ import type { PersistentBotRecord } from "../delegation/persistent-bot-team-stor
 import { meteredModelRefusalFacts } from "../delegation/worker-authority-resolver.ts";
 import type { WorkerDelegationController } from "../delegation/worker-delegation-controller.ts";
 import { interfaceText } from "../language/interface-text.ts";
-import { envelopeCeilingUsd } from "../orchestration/risk-budget.ts";
 import { providerAdmissionDir } from "../provider-admission/ledger.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { attachBotSessionHost, type BotSessionAttachment, type BotSessionRootPorts } from "./bot-session-registry.ts";
+import type { BotSpendCeiling } from "./bot-session-turns.ts";
 
 /**
  * When the recorded quota exhaustion of `model` resets, on the provider admission clock: read from the store every process
@@ -112,20 +112,20 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 		timers: () => deps.getTimers(),
 		hostSessionId: () => deps.getSessionId(),
 		modelRefusal: (record, model) => botModelRefusal(deps, record, model),
-		// A worker's budget is the owner's worker bound, intersected with the main session's own ceiling (its metered ceiling
-		// too when the bot's model is metered: a subscription's limit is its usage windows); none set, none applies.
-		turnSpendBound: (model) => {
-			const bounds = [
-				{ usd: deps.getSettingsManager().getWorkerDelegationSettings().maxUsd, bound: "worker" as const },
+		// A worker's budget is the owner's worker bound, intersected with the main session's own ceilings: on all spend, and
+		// on metered spend (a subscription's limit is its usage windows). None set, none applies.
+		spendCeilings: () => {
+			const envelope = deps.getCapabilityEnvelope();
+			const ceilings: BotSpendCeiling[] = [
 				{
-					usd: envelopeCeilingUsd(deps.getCapabilityEnvelope(), model, deps.getModelRegistry()),
-					bound: "session" as const,
+					usd: deps.getSettingsManager().getWorkerDelegationSettings().maxUsd,
+					bound: "worker",
+					meteredOnly: false,
 				},
-			].filter((entry): entry is { usd: number; bound: "worker" | "session" } => (entry.usd ?? 0) > 0);
-			return bounds.reduce<(typeof bounds)[number] | undefined>(
-				(lowest, entry) => (lowest === undefined || entry.usd < lowest.usd ? entry : lowest),
-				undefined,
-			);
+				{ usd: envelope?.maxEstimatedUsd ?? 0, bound: "session", meteredOnly: false },
+				{ usd: envelope?.maxMeteredEstimatedUsd ?? 0, bound: "session", meteredOnly: true },
+			];
+			return ceilings.filter((ceiling) => ceiling.usd > 0);
 		},
 		// The session's own usage ledger takes a bot's charge by report id, as it takes a worker's usage receipt: persisted
 		// only once read back from its file.

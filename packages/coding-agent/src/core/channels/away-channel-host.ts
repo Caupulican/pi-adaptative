@@ -36,7 +36,7 @@ import { SessionManager } from "../../kernel/session/session-manager.ts";
 import { channelsDir } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
 import type { AuthStorage } from "../auth-storage.ts";
-import { boundSessionTurnSpend, unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
+import { boundSessionTurnSpend, turnSpendExcess, unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
 import type { MachineFacts } from "../fleet/capacity/machine-room.ts";
 import type { ChannelProvider } from "../gateways/channel-provider.ts";
 import type { ModelRegistry } from "../model-registry.ts";
@@ -533,10 +533,11 @@ export class AwayChannelHosts {
 		const { name, cwd } = channel;
 		const activity = new Set<() => void>();
 		// One turn's spend bound, as one run away's: past it the turn ends and its conversation gets no reply.
+		const limit = () => ({ usd: settings.getRoutineAwaySettings().maxUsdPerRun });
 		const unsubscribeSpend = boundSessionTurnSpend(session, {
-			limit: () => ({ usd: settings.getRoutineAwaySettings().maxUsdPerRun }),
+			limit,
 			// The turn's own spend: a channel turn away is its own run.
-			spent: (turnUsd) => turnUsd,
+			exceeded: (turnUsd) => turnSpendExcess(turnUsd, limit()),
 			onExceeded: (usd, { usd: perRun }) => {
 				harnessLog.warn("channels", "a channel turn away was stopped at the away spend bound", {
 					channel: name,

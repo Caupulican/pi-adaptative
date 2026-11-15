@@ -190,6 +190,13 @@ export interface ParentExecutionEnvironment {
 	taskWatches?: TaskWatchPort;
 }
 
+/** One run's shared dollar bounds (`ParentExecutionPolicy.runCostBound`): on all its spend, and on its metered spend. */
+export interface RunCostBound {
+	readonly runId: string;
+	readonly maxCostUsd?: number;
+	readonly maxMeteredCostUsd?: number;
+}
+
 /** The decisions a worker run consults: model availability, System One judges, context planning, memory, skills, edges. */
 export interface ParentExecutionPolicy {
 	modelUnusableCause(model: Model<Api>): OrchestrationModelUnusableCause | undefined;
@@ -327,13 +334,12 @@ export interface ParentExecutionPolicy {
 	runsControlMessage?(controlMessageId: string): boolean;
 	/**
 	 * Present on a host that bounds one run's whole spend: every attempt of the run (subject, retries and verifier) that
-	 * returns the same `runId` shares one cost budget of `maxCostUsd`, checked before each provider request on top of
-	 * the attempt's own agent tree budget. Absent, or undefined for an attempt, only the agent tree budget applies.
+	 * returns the same `runId` shares one cost budget of `maxCostUsd`, and every metered attempt of it one of
+	 * `maxMeteredCostUsd` over the run's metered spend (a subscription attempt is not held to it: its plan's usage windows
+	 * are), each checked before each provider request on top of the attempt's own agent tree budget. Absent, undefined
+	 * for an attempt, or a ceiling left out, only the agent tree budget applies in its place.
 	 */
-	runCostBound?(
-		attempt: AttemptRuntimeState,
-		snapshot: TaskRuntimeProjection,
-	): { readonly runId: string; readonly maxCostUsd: number } | undefined;
+	runCostBound?(attempt: AttemptRuntimeState, snapshot: TaskRuntimeProjection): RunCostBound | undefined;
 	/**
 	 * Present on a host whose workers must read inside one directory (a parent opened away: the parent's own): every
 	 * worker's read scope is that directory, whatever its profile or the edge mode, and a read-only worker's shell reads

@@ -2,7 +2,8 @@
  * A bot's spend windows: one per outside input that woke its session (the owner's message, a message its inbox took, a
  * watch's wake, a host event), holding what the session spent itself (its foreground: its priced answers and the
  * compactions its turns ran) and naming the workers it started while serving that input. The bot's turns and its workers'
- * runs share the window's dollar bound, so a request's whole spend is held to one bound however many handoffs it takes.
+ * runs share the window's dollar bounds, so a request's whole spend is held to one bound however many handoffs it takes:
+ * a ceiling on all spend counts all of it, a metered-only ceiling the part of it made on metered models.
  *
  * Which window an entry of the transcript belongs to is read from the transcript itself, walking back from the entry to
  * the input that opened its window. A turn a worker's handoff opened belongs to the window of the attempt that woke it,
@@ -18,10 +19,12 @@
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import type { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { TurnOriginKind } from "../../kernel/turn-origin-stamp.ts";
+import type { RunCostBound } from "../delegation/parent-execution-context.ts";
 import { projectAttemptUsage } from "../orchestration/attempt-usage.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import { entryTurnOrigin } from "../turn-origin.ts";
 import { isPlainRecord } from "../util/value-guards.ts";
+import type { BotSpendCeiling } from "./bot-session-turns.ts";
 import type { BotSpendLedger, SpendWindowRecord } from "./bot-spend-ledger.ts";
 
 /** Windows kept, the newest: the current request's, and enough before it for a late worker's handoff to find its own. */
@@ -60,7 +63,15 @@ function deliveredAttemptIds(entry: SessionEntry): string[] {
 export interface BotSpendWindowPorts {
 	/** The delegation ledger's projection of the session's workers; undefined before the session started any. */
 	snapshot(): TaskRuntimeProjection | undefined;
+	/** Whether an attempt's spend is metered (`RequestCostBounds.isMeteredAttempt`, as its run budget reads it). */
+	attemptMetered(attempt: AttemptRuntimeState): boolean;
 	now(): number;
+}
+
+/** A window's spend: all of it, and the part of it made on metered models. */
+export interface WindowSpend {
+	readonly usd: number;
+	readonly meteredUsd: number;
 }
 
 /** The bot's spend windows over its session's transcript (see the module comment). */
@@ -89,54 +100,71 @@ export class BotSpendWindows {
 	}
 
 	/**
-	 * Counts `addedUsd` the session just spent to the window its transcript is in now and returns that window's whole
-	 * spend: its foreground and every worker serving it. `turnUsd` (the turn's own spend) is the answer only while the
-	 * transcript holds nothing yet.
+	 * Counts `addedUsd` the session just spent (on a metered model when `metered`) to the window its transcript is in now
+	 * and returns that window's spend: its foreground and every worker serving it. Undefined while the transcript holds
+	 * nothing yet.
 	 */
-	count(turnUsd: number, addedUsd: number): number {
+	count(addedUsd: number, metered: boolean): WindowSpend | undefined {
 		const leafId = this.transcript.getLeafId();
 		const snapshot = this.ports.snapshot();
 		const windowId = leafId === null ? undefined : this.windowOfEntry(leafId, snapshot);
-		if (windowId === undefined) return turnUsd;
+		if (windowId === undefined) return undefined;
 		const window = this.windowFor(windowId);
 		if (addedUsd > 0) {
 			window.foregroundUsd += addedUsd;
+			if (metered) window.meteredForegroundUsd += addedUsd;
 			window.updatedAt = this.ports.now();
 			this.ledger.touch();
 		}
-		const spentUsd = window.foregroundUsd + this.workerSpend(window, snapshot);
+		const workers = this.workerSpend(window, snapshot);
 		this.flush();
-		return spentUsd;
+		return {
+			usd: window.foregroundUsd + workers.usd,
+			meteredUsd: window.meteredForegroundUsd + workers.meteredUsd,
+		};
 	}
 
 	/**
-	 * The bound of one run of the window `attempt` serves: `boundUsd` (the bound on its model's spend) less what the
-	 * session itself spent in that window, never below zero. The window's workers share it as one run (`runId`), whose
-	 * spend the run budget counts from their own usage. Undefined when the attempt serves no window of this session or no
-	 * bound applies to its model.
+	 * The bounds of one run of the window `attempt` serves, which the window's workers share as one run (`runId`, whose
+	 * spend the run budgets count from the workers' own usage): the lowest of `ceilings` on all spend less the session's
+	 * own spend in that window (`maxCostUsd`), and the lowest of the metered-only ones less the session's own metered spend
+	 * there (`maxMeteredCostUsd`, which holds the run's metered attempts only). A remainder at or below zero is zero: the
+	 * run's next request is refused as a run whose bound is spent. The attempt is counted to its window first, whatever
+	 * bounds apply. Undefined when it serves no window of this session or no ceiling applies.
 	 */
 	runCostBound(
 		attempt: AttemptRuntimeState,
 		snapshot: TaskRuntimeProjection,
-		boundUsd: number | undefined,
-	): { readonly runId: string; readonly maxCostUsd: number } | undefined {
-		if (boundUsd === undefined) return undefined;
+		ceilings: readonly BotSpendCeiling[],
+	): RunCostBound | undefined {
 		const windowId = this.windowOfAttempt(attempt, snapshot);
-		if (windowId === undefined) return undefined;
-		const foregroundUsd = this.windows.get(windowId)?.foregroundUsd ?? 0;
 		this.flush();
-		return { runId: windowId, maxCostUsd: Math.max(0, boundUsd - foregroundUsd) };
+		if (windowId === undefined || ceilings.length === 0) return undefined;
+		const window = this.windowFor(windowId);
+		const remainder = (meteredOnly: boolean, spentUsd: number): number | undefined => {
+			const usd = ceilings.filter((ceiling) => ceiling.meteredOnly === meteredOnly).map((ceiling) => ceiling.usd);
+			return usd.length === 0 ? undefined : Math.max(0, Math.min(...usd) - spentUsd);
+		};
+		const maxCostUsd = remainder(false, window.foregroundUsd);
+		const maxMeteredCostUsd = remainder(true, window.meteredForegroundUsd);
+		return {
+			runId: windowId,
+			...(maxCostUsd !== undefined ? { maxCostUsd } : {}),
+			...(maxMeteredCostUsd !== undefined ? { maxMeteredCostUsd } : {}),
+		};
 	}
 
 	/** The spend of the workers serving `window`, as the delegation ledger counts each attempt's usage. */
-	private workerSpend(window: SpendWindowRecord, snapshot: TaskRuntimeProjection | undefined): number {
-		if (!snapshot) return 0;
+	private workerSpend(window: SpendWindowRecord, snapshot: TaskRuntimeProjection | undefined): WindowSpend {
 		let usd = 0;
-		for (const attempt of Object.values(snapshot.attempts)) {
-			if (this.windowOfAttempt(attempt, snapshot) !== window.id) continue;
-			usd += projectAttemptUsage(attempt, snapshot.checkpoints)?.costUsd ?? 0;
+		let meteredUsd = 0;
+		for (const attempt of Object.values(snapshot?.attempts ?? {})) {
+			if (!snapshot || this.windowOfAttempt(attempt, snapshot) !== window.id) continue;
+			const costUsd = projectAttemptUsage(attempt, snapshot.checkpoints)?.costUsd ?? 0;
+			usd += costUsd;
+			if (this.ports.attemptMetered(attempt)) meteredUsd += costUsd;
 		}
-		return usd;
+		return { usd, meteredUsd };
 	}
 
 	/** The window an attempt serves: the one its receipt origin's leaf belongs to, when that leaf is this session's. */
@@ -152,7 +180,7 @@ export class BotSpendWindows {
 				? this.windowOfEntry(origin.leafId, snapshot)
 				: undefined;
 		this.attemptWindows.set(attempt.attemptId, windowId ?? null);
-		const window = windowId === undefined ? undefined : this.windows.get(windowId);
+		const window = windowId === undefined ? undefined : this.windowFor(windowId);
 		if (window && !window.attemptIds.includes(attempt.attemptId)) {
 			window.attemptIds.push(attempt.attemptId);
 			this.ledger.touch();
@@ -235,6 +263,7 @@ export class BotSpendWindows {
 			input: ownerInputId ?? entryId,
 			kind: (entry && entryTurnOrigin(entry)?.k) ?? "transcript",
 			foregroundUsd: 0,
+			meteredForegroundUsd: 0,
 			attemptIds: [],
 			updatedAt: this.ports.now(),
 		};

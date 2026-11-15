@@ -61,8 +61,8 @@ export interface BotSessionDefinition {
 	readonly contextFileScope?: ContextFileReadScope;
 	/**
 	 * The bot's own dollar ceilings (a profile's budget; none for a bot of its own), beside the owner's worker bound and
-	 * the main session's: decided for each spend on the model that spends it (`botSpendBound`), its metered ceiling too
-	 * when that spend is metered.
+	 * the main session's, over its spend per request (`bot-session-spend.ts`): `maxCostUsd` on all of it, `maxMeteredCostUsd`
+	 * on the part made on metered models.
 	 */
 	readonly spendBudget: Pick<RiskBudget, "maxCostUsd" | "maxMeteredCostUsd">;
 }
