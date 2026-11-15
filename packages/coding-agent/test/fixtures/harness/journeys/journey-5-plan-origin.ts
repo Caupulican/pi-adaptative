@@ -1,6 +1,8 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
+import { PLAN_UPDATE_CUSTOM_TYPE } from "../../../../src/core/plan/plan-update.ts";
+import { turnOriginOf } from "../../../../src/core/turn-origin.ts";
 import { createBarrier } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import {
@@ -175,6 +177,19 @@ export async function runJourney5PlanOriginPhase(world: HarnessWorld, session: A
 		],
 		closed: "settled",
 	});
+	// The plan's result reports the owner's workers: a worker result, with no third party's words, the teammate's turn beside it.
+	const updateOrigins = session.messages
+		.filter(
+			(message) =>
+				message.role === "custom" &&
+				message.customType === PLAN_UPDATE_CUSTOM_TYPE &&
+				typeof message.content === "string" &&
+				message.content.includes(`Plan "${TITLE}"`),
+		)
+		.map((message) => turnOriginOf(message));
+	expect(updateOrigins, "the plan's update is read as the owner's workers' result, not a third party's").toEqual([
+		{ v: 1, k: "worker-result" },
+	]);
 	const reached = world.provider.reached.slice(mark);
 	expect(
 		{ root: reached.filter((key) => key.startsWith(`${ROOT_TRACK}:`)), updates },

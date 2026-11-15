@@ -11,6 +11,8 @@ import { harnessLog } from "../../kernel/harness-log.ts";
 import { renderCommsStateLine, type TaskBrief } from "../comms/comms-records.ts";
 import type { Outcome } from "../delegation/worker-outcome-contract.ts";
 import { describeOutcomeForHandoff } from "../delegation/worker-outcome-words.ts";
+import { conversationTurnOrigin } from "../orchestration/attempt-agent-identity.ts";
+import type { TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { buildPlanProofSheet } from "../proof/plan-proof-sheet.ts";
 import {
@@ -23,6 +25,7 @@ import type { ProofStakesLevel } from "../proof/stakes-levels.ts";
 import type { CommsStateCode } from "../provider-prompt-contracts.ts";
 import type { JoinResult } from "./joins.ts";
 import { joinReadsAsReport } from "./joins.ts";
+import { planTaskChain } from "./plan-reducer.ts";
 import type { PlanNodeView, PlanView } from "./plan-view.ts";
 
 /** The customType of a plan update; defined with the proof-sheet carriers, re-exported here for its producers. */
@@ -129,11 +132,42 @@ export function planUpdateDeliveryId(
 	return `plan-update:${planId}:${input.kind}:${input.nodeId ?? "plan"}:${version}${input.sequence}`;
 }
 
-/** The plan-update parent input; `origin` is the receipt origin the root transcript records the input under. */
+/** What an update reads of the delegation ledger: the plan's steps, their tasks and the attempts that ran them. */
+export type PlanUpdateLedger = Pick<TaskRuntimeProjection, "plans" | "tasks" | "attempts" | "agents">;
+
+/**
+ * Whether a third party's words reached a worker of the plan: any attempt of a task the plan released, for its current
+ * steps and for the ones a revision replaced, through each task's successors, whose conversation carries a third-party
+ * origin (an admitted steer or follow-up, `conversationTurnOrigin`). An update repeats its steps' outcomes, gaps, conflicts
+ * and held details, so it carries what any of them carries.
+ */
+function planReachedByThirdParty(ledger: PlanUpdateLedger, planId: string): boolean {
+	const plan = ledger.plans[planId];
+	if (!plan) throw new Error(`A plan update names plan ${planId}, which the delegation ledger does not hold.`);
+	const released = [
+		...Object.values(plan.nodes).flatMap((runtime) => (runtime.release ? [runtime.release.taskId] : [])),
+		...plan.retired.map((entry) => entry.taskId),
+	];
+	return released.some((origin) =>
+		[...planTaskChain(ledger, origin)].some((taskId) =>
+			(ledger.tasks[taskId]?.attemptIds ?? []).some((attemptId) => {
+				const attempt = ledger.attempts[attemptId];
+				return attempt !== undefined && conversationTurnOrigin(ledger, attempt)?.thirdParty === true;
+			}),
+		),
+	);
+}
+
+/**
+ * The plan-update parent input; `origin` is the receipt origin the root transcript records the input under, and `ledger`
+ * the delegation ledger the view was read from. An update about a plan a third party's words reached says so
+ * (`details.thirdParty: true`), so the turn it opens is read as third-party (`entryTurnOrigin`).
+ */
 export function planUpdateDelivery(
 	view: PlanView,
 	input: PlanUpdateInput,
 	origin: ParentInputDelivery["origin"],
+	ledger: PlanUpdateLedger,
 ): ParentInputDelivery {
 	const result = input.result;
 	// The plain step a plan finished on, read only when no combined result exists.
@@ -219,6 +253,7 @@ export function planUpdateDelivery(
 			kind: input.kind,
 			...(input.nodeId ? { nodeId: input.nodeId } : {}),
 			...(proofSheet ? { [PROOF_SHEET_DETAILS_KEY]: proofSheet } : {}),
+			...(planReachedByThirdParty(ledger, view.planId) ? { thirdParty: true } : {}),
 		},
 	};
 	return {

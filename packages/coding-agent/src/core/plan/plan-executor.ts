@@ -1127,6 +1127,7 @@ export class PlanExecutor implements PlanExecutorPort {
 					...(joinStakes ? { stakes: joinStakes } : {}),
 				},
 				this.deps.captureOrigin(),
+				snapshot,
 			);
 			this.delivering.add(deliveryId);
 			this.deps
