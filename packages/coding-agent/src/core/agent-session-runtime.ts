@@ -594,12 +594,15 @@ export class AgentSessionRuntime implements ActiveSessionContext {
 		options: SessionReplacementCommitOptions,
 	): Promise<void> {
 		const previous = this.snapshot();
+		// Only the session being opened is refused while a channel or bot host holds it.
 		const held = [previous.sessionManager, prepared.sessionManager]
-			.filter((manager) => manager.isPersisted())
-			.map((manager) => ({
+			.map((manager) => ({ manager, refuseHosted: manager === prepared.sessionManager }))
+			.filter(({ manager }) => manager.isPersisted())
+			.map(({ manager, refuseHosted }) => ({
 				home: manager.getStorageRoots().orchestrationHome,
 				sessionId: manager.getSessionId(),
 				homeNow: managerSessionHomeNow(manager),
+				refuseHosted,
 			}));
 		let entered = false;
 		let completed = false;

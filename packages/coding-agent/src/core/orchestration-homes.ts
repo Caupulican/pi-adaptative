@@ -27,10 +27,10 @@ import { safeRealpathSync } from "./autonomy/path-scope.ts";
 import { sessionHomeChangeOf } from "./session-switch-failures.ts";
 
 /**
- * The homes a batch of by-id lookups asks, read once: the owner's, and the home of every bot directory that has an
- * orchestration directory (with or without a profile: a home whose profile is gone still holds its sessions' state). A
- * missing `bots/` holds none; one that could not be listed is kept as `unreadable`, so the owner's home still answers
- * for a session it holds ({@link sessionHomeHolding}).
+ * The homes a batch of by-id lookups asks, read once: the owner's, and the home of every bot directory (or symlink to
+ * one) that has an orchestration directory (with or without a profile: a home whose profile is gone still holds its
+ * sessions' state), the same homes a lookup by path finds. A missing `bots/` holds none; one that could not be listed
+ * is kept as `unreadable`, and every lookup among them throws what the listing threw ({@link sessionHomeHolding}).
  */
 export interface SessionHomes {
 	readonly owner: OrchestrationHome;
@@ -48,7 +48,8 @@ export function sessionHomes(agentDir: string): SessionHomes {
 		return { owner, bots: isMissingFileError(error) ? { homes: [] } : { unreadable: error } };
 	}
 	const homes = entries
-		.filter((entry) => entry.isDirectory())
+		// A symlinked bot directory is a home as a lookup by path finds it; one that names no directory has no orchestration.
+		.filter((entry) => entry.isDirectory() || entry.isSymbolicLink())
 		.sort((a, b) => a.name.localeCompare(b.name))
 		.map((entry) => botHomeOrchestrationHome(join(bots, entry.name)))
 		.filter((home) => existsSync(home.root));
@@ -91,14 +92,12 @@ function botHomeAt(bots: string, botsPath: string, dirPath: string, spelled: str
 
 /**
  * The home among `homes` that holds anything of session `sessionId`: a bot's first, then the owner's; undefined when
- * none does. While `bots/` cannot be listed, the owner's answers for a session it holds and any other lookup throws what
- * the listing threw: the reader cannot know whether a bot's home holds it.
+ * none does. While `bots/` cannot be listed, every lookup throws what the listing threw, the owner's sessions' too: a
+ * bot's home may hold the session while the owner's still has a copy (one a move left there, `in-both-homes`, or a
+ * piece a move cut short did not carry yet), and only the listing tells them apart. The caller asks again once it reads.
  */
 export function sessionHomeHolding(homes: SessionHomes, sessionId: string): OrchestrationHome | undefined {
-	if ("unreadable" in homes.bots) {
-		if (orchestrationHomeHoldsSession(homes.owner, sessionId)) return homes.owner;
-		throw homes.bots.unreadable;
-	}
+	if ("unreadable" in homes.bots) throw homes.bots.unreadable;
 	const bot = homes.bots.homes.find((home) => orchestrationHomeHoldsSession(home, sessionId));
 	return bot ?? (orchestrationHomeHoldsSession(homes.owner, sessionId) ? homes.owner : undefined);
 }

@@ -523,16 +523,21 @@ export class SessionBundleLeaseReleaseError extends AggregateError {
 }
 
 /**
- * Bridge retirement and activation, retaining both sessions through rollback and unwinding partial acquisition. Each
- * hold refuses a session a channel or bot host holds (`SessionHostedError`), as the AgentSession open it bridges does,
- * so the refusal comes before the current session is closed.
+ * Bridge retirement and activation, retaining both sessions through rollback and unwinding partial acquisition. The
+ * hold of a session asking `refuseHosted` (the one being opened) refuses it while a channel or bot host holds it
+ * (`SessionHostedError`), as the AgentSession open it bridges does, so the refusal comes before the current session is
+ * closed; the session being left is held as it is.
  */
 export async function withSessionBundleLeases<T>(
-	/** Each session in the home its manager's roots name, with that home derived again (`homeNow`); one held twice is leased once. */
+	/**
+	 * Each session in the home its manager's roots name, with that home derived again (`homeNow`); one held twice is
+	 * leased once, refusing a hosted session when either asks.
+	 */
 	sessions: readonly {
 		readonly home: OrchestrationHome;
 		readonly sessionId: string;
 		readonly homeNow: SessionHomeNow;
+		readonly refuseHosted: boolean;
 	}[],
 	operation: () => Promise<T>,
 ): Promise<T> {
@@ -541,13 +546,14 @@ export async function withSessionBundleLeases<T>(
 	let operationFailure: { error: unknown } | undefined;
 	let result: T | undefined;
 	try {
-		const held = new Set<string>();
-		for (const { home, sessionId, homeNow } of sessions) {
-			const key = orchestrationSessionDeletionFile(resolvedOrchestrationHome(home), sessionId);
-			if (held.has(key)) continue;
-			held.add(key);
-			leases.push(await acquireSessionBundleLease(home, sessionId, { refuseHosted: true, homeNow }));
+		const held = new Map<string, (typeof sessions)[number]>();
+		for (const session of sessions) {
+			const key = orchestrationSessionDeletionFile(resolvedOrchestrationHome(session.home), session.sessionId);
+			const first = held.get(key);
+			held.set(key, first ? { ...first, refuseHosted: first.refuseHosted || session.refuseHosted } : session);
 		}
+		for (const { home, sessionId, homeNow, refuseHosted } of held.values())
+			leases.push(await acquireSessionBundleLease(home, sessionId, { refuseHosted, homeNow }));
 		result = await operation();
 	} catch (error) {
 		operationFailure = { error };
