@@ -13,9 +13,6 @@ import type { LeaderBotView } from "./leader-delegation.ts";
 import type { LeaderLedgerRuntime } from "./leader-delegation-ledger.ts";
 import type { WorkerAgentView } from "./worker-agent-control.ts";
 
-/** Who appoints a goal leader: the orchestrator, or the leader whose goal hands a part on. */
-export type LeaderAppointer = { readonly kind: "root" } | { readonly kind: "leader"; readonly agentId: string };
-
 export interface LeaderControllerDeps {
 	/** The root session's durable task runtime: the one store the delegation record lives in. */
 	runtime(): LeaderLedgerRuntime;
@@ -24,8 +21,8 @@ export interface LeaderControllerDeps {
 	subscribe(listener: () => void): () => void;
 	/** Every bot, retired ones included. */
 	bots(): readonly LeaderBotView[];
-	/** Creates a goal leader for one goal, appointed by the orchestrator or by the leader whose goal hands a part on. */
-	createGoalLeader(request: BotCreationRequest, appointer?: LeaderAppointer): CreatedBotView;
+	/** Creates a goal leader for one goal the orchestrator delegates; only the orchestrator appoints one. */
+	createGoalLeader(request: BotCreationRequest): CreatedBotView;
 	/** The bot a runtime is a direct (not group) generation of; undefined for any other worker. */
 	directBotOf(runtimeAgentId: string): string | undefined;
 	/** Every runtime a bot has had, its current one included. */

@@ -1,7 +1,8 @@
 /**
  * The bot messaging directory one bot runtime reads and writes through: which bots and groups it may reach, the
- * conversation's group admission, and the leader moves a leader bot may make (create a bot, ask the root, start an owned
- * bot, hand a part of its goal to a leader, update a leader it handed a goal to). It is built per attempt from a host of
+ * conversation's group admission, and the leader moves a leader bot may make (ask the root, start an owned bot, hand a
+ * part of its goal to a standing leader, update a leader it handed a goal to). No bot creates a bot here: only the
+ * orchestrator does, through its own `bot` tool. It is built per attempt from a host of
  * the coordinator's ports; the coordinator's private members are reached through arrow functions in its own method, never
  * through a cast. `createBotMessageBroker` turns the directory into the broker the bot_message tool calls.
  *
@@ -10,7 +11,6 @@
  */
 
 import type { SessionManager } from "../../kernel/node.ts";
-import type { BotCreationRequest, CreatedBotView } from "./bot-creation.ts";
 import type { BotMessageBroker, BotMessageDirectory, BotOwnedStartOutcome } from "./bot-message-contract.ts";
 import type { BotRuntimeBindings } from "./bot-runtime-bindings.ts";
 import type { LeaderController } from "./leader-controller.ts";
@@ -30,10 +30,6 @@ export interface BotMessageDirectoryHost {
 	getBotTeamStore(): PersistentBotTeamStore;
 	invalidateBotViews(): void;
 	listWorkerAgents(): WorkerAgentView[];
-	createBotFor(
-		creator: { readonly kind: "root" } | { readonly kind: "leader"; readonly agentId: string },
-		request: BotCreationRequest,
-	): CreatedBotView;
 	getLeaders(): LeaderController;
 	/** Every delegation to a leader, read without building the leader controller. */
 	leaderDelegations(): DelegationRecord[];
@@ -78,7 +74,6 @@ export function createSessionScopedBotMessageDirectory(
 	return {
 		sessionRootOnly: true,
 		assertCurrent,
-		leaderIds: () => [],
 		ownLeader: () => undefined,
 		list: () => {
 			assertCurrent();
@@ -142,11 +137,6 @@ export function createBotMessageDirectory(
 			throw new Error("Bot messaging sender alias has been rebound.");
 		requireGroup();
 	};
-	const leaderIds = () =>
-		store
-			.listBots()
-			.filter((bot) => bot.leader === true)
-			.map((bot) => bot.agentId);
 	const senderRecord = sourceAlias ? store.getBot(sourceAlias) : undefined;
 	const senderIsLeader = senderRecord?.leader === true && senderRecord.retired !== true;
 	// A leader hands a part of its goal on only while that goal runs and its envelope still allows a nested leader.
@@ -160,12 +150,9 @@ export function createBotMessageDirectory(
 	};
 	return {
 		assertCurrent,
-		leaderIds,
 		ownLeader,
 		...(senderIsLeader && sourceAlias
 			? {
-					createBot: (request: BotCreationRequest) =>
-						host.createBotFor({ kind: "leader", agentId: sourceAlias }, request),
 					askRoot: (question: string) => host.getLeaders().askRoot(sourceAlias, question),
 					startOwnedBot: (agentId: string, message: string, invocationId: string) =>
 						host.startOwnedBotAsChild(sender, sourceAlias, agentId, message, invocationId),
@@ -294,7 +281,7 @@ export interface BotMessageBrokerPorts {
  * through the coordinator, and each leader-only move present only where the directory offers it.
  */
 export function createBotMessageBroker(directory: BotMessageDirectory, ports: BotMessageBrokerPorts): BotMessageBroker {
-	const { createBot, askRoot, startOwnedBot, lead, sendToSubLeader, sessionRootOnly } = directory;
+	const { askRoot, startOwnedBot, lead, sendToSubLeader, sessionRootOnly } = directory;
 	return {
 		...(sessionRootOnly ? { sessionRootOnly } : {}),
 		list: (teamId) => directory.list(teamId),
@@ -317,16 +304,7 @@ export function createBotMessageBroker(directory: BotMessageDirectory, ports: Bo
 				directory.authorizeReply(request.threadId, request.senderAgentId, teamId),
 			);
 		},
-		leaderIds: () => directory.leaderIds(),
 		ownLeader: () => directory.ownLeader(),
-		...(createBot
-			? {
-					create: (request: BotCreationRequest) => {
-						directory.assertCurrent();
-						return createBot(request);
-					},
-				}
-			: {}),
 		...(askRoot
 			? {
 					askRoot: (question: string) => {

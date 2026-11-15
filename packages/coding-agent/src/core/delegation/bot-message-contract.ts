@@ -1,4 +1,3 @@
-import type { BotCreationRequest, CreatedBotView } from "./bot-creation.ts";
 import type { LeadRequest, LeadResult } from "./leader-delegation.ts";
 import type { WorkerAgentControlPort, WorkerAgentReplyResult } from "./worker-agent-control.ts";
 
@@ -41,8 +40,6 @@ export interface BotMessageDirectory {
 	threadId(teamId?: string): string | undefined;
 	authorizeReply(threadId: string | undefined, sender: string | undefined, teamId?: string): void;
 	recordSent(messageId: string, target: string, message: string): void;
-	/** Present only for a leader: creates a bot on the leader's authority. */
-	createBot?(request: BotCreationRequest): CreatedBotView;
 	/** Present only for a leader: asks the orchestrator a question in the middle of its goal; the goal stays open. */
 	askRoot?(question: string): Promise<BotAskRootResult>;
 	/** Present only for a leader: starts one of its own bots with no live runtime as the leader's child. */
@@ -51,8 +48,6 @@ export interface BotMessageDirectory {
 	lead?(request: LeadRequest): LeadResult;
 	/** Present only for a leader: sends to a leader it handed a goal to, as an update to that goal. False when that leader is not one of its goals. */
 	sendToSubLeader?(agentId: string, message: string): Promise<boolean>;
-	/** Ids of the leaders, for the answer a bot gets when it may not create one. */
-	leaderIds(): readonly string[];
 	/** The live leader that created the sender, when one did: the one it asks first. */
 	ownLeader(): string | undefined;
 }
@@ -70,8 +65,6 @@ export interface BotMessageBroker {
 		teamId?: string,
 	): ReturnType<WorkerAgentControlPort["followUpWorkerAgent"]>;
 	reply(messageId: string, message: string, teamId?: string): WorkerAgentReplyResult;
-	/** Present only for a leader. */
-	create?(request: BotCreationRequest): CreatedBotView;
 	/** Present only for a leader: the orchestrator is asked now; its answer arrives as the leader's next turn. */
 	askRoot?(question: string): Promise<BotAskRootResult>;
 	/** Present only for a leader: starts one of its own bots with no live runtime as the leader's child. */
@@ -80,6 +73,5 @@ export interface BotMessageBroker {
 	lead?(request: LeadRequest): LeadResult;
 	/** Present only for a leader: sends to a leader it handed a goal to, as an update to that goal. False when that leader is not one of its goals. */
 	sendToSubLeader?(agentId: string, message: string): Promise<boolean>;
-	leaderIds(): readonly string[];
 	ownLeader(): string | undefined;
 }

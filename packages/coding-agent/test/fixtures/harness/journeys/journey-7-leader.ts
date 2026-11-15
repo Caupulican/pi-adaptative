@@ -1,14 +1,12 @@
 import "../builtin-install.ts";
 import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
-import { mayNotCreateBotsText } from "../../../../src/core/delegation/bot-creation.ts";
 import { displayNameFor } from "../../../../src/core/delegation/bot-naming.ts";
 import { createBarrier, HARNESS_PROVIDER } from "../scripted-provider.ts";
 import { type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { deliveredLines } from "./journey-5-shared.ts";
 import {
 	acceptedJson,
-	allBots,
 	assertSeen,
 	botRecord,
 	carries,
@@ -23,7 +21,6 @@ import {
 	onlyAgentOn,
 	PHASE_JUDGMENTS,
 	reached,
-	refusalOf,
 	TRACK,
 } from "./journey-7-shared.ts";
 
@@ -33,9 +30,13 @@ const LEADER_FRAGMENT = "split it into parts, and report once at the end";
 const GOAL = "Report the retry limit and the request timeout.";
 
 const HELPER_SOUL = "You answer arithmetic questions with one short sentence.";
-/** The leader names its new bot by purpose; the harness derives the id from this line. */
+/** The root names the leader's new bot by purpose; the harness derives the id from this line. */
 const HELPER_DESCRIPTION = "Answers arithmetic questions";
+/** What the leader asks the orchestrator for: only the orchestrator creates bots, a leader's included. */
+const HELPER_REQUEST = "I need a bot that answers arithmetic questions.";
+/** The orchestrator's answer to the leader, after it created the bot for it. */
 const HELPER = "answers-arithmetic-questions";
+const ROOT_ANSWER = `Your bot ${HELPER} is ready.`;
 const HELPER_TASK = "How many days are in a week?";
 const HELPER_ANSWER = "Seven.";
 const LEADER_REPORT = "Both answers are in: the retry limit is three and the request timeout is two.";
@@ -44,17 +45,19 @@ const HELPER_SECOND_TASK = "Ask the leader for a bot that reads time zones.";
 const HELPER_ASK = "Can I have a bot that reads time zones?";
 /** What the owner writes the leader before its bot calls: it keeps the leader's runtime live for the bot's message. */
 const LEADER_AWAKE = "Stay with your bot's questions.";
-/** What the harness answers a bot that is not a leader when it asks for one: the exact sentence, naming its leader. */
-const MAY_NOT_CREATE = mayNotCreateBotsText([LEADER], LEADER);
+/** What the bot_message tool tells a bot that is not a leader about new bots: the exact sentence, naming its leader. */
+const ASK_YOUR_LEADER = `You cannot create bots: for a new one, ask your leader ${LEADER} with bot_message.`;
 
 const WAITING = "Waiting.";
 /** What the leader answers its bot's question with; the root reads it in the handoff of that turn. */
 const LEADER_NOTED = "The question is noted.";
 
 /**
- * Legs 3, 4 and 5a: the owner marks a bot a standing leader, the root hands it a goal, and the leader runs a subtree of its
- * own under that goal while the root hears nothing. At the end the root is told once, by the goal's outcome notice. Then
- * the bot the leader made asks for a bot of its own and is refused, and tells its leader instead.
+ * Legs 3, 4 and 5a: the owner marks a bot a standing leader, the root hands it a goal, and the leader asks the root for a
+ * bot with ask_root and ends its turn; the goal stays open, the root creates the bot for the leader (`bot create`
+ * forLeader) and tells it so, and the leader runs that bot under the goal while the root hears nothing more. At the end
+ * the root is told once, by the goal's outcome notice. Then the leader's bot, which is offered no way to create a bot and
+ * is told to ask its leader, tells its leader instead.
  */
 export async function runJourney7LeaderPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -86,13 +89,15 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		brief: {} as Record<string, unknown>,
 		actionNames: [] as string[],
 		helperCreated: {} as Record<string, unknown>,
+		asked: {} as Record<string, unknown>,
+		leaderToldOfBot: false,
+		rootAsk: {} as Record<string, unknown>,
 		leaderSend: undefined as Record<string, unknown> | undefined,
 		helperSent: {} as Record<string, unknown>,
 		helperId: "",
 		reportCarriedAnswer: false,
-		refusal: {} as Record<string, unknown>,
-		botsBeforeAsk: 0,
-		botsAfterAsk: 0,
+		helperActions: [] as string[],
+		helperToldToAskLeader: false,
 		leaderHeard: {} as Record<string, unknown>,
 		wakeLines: [] as string[],
 	};
@@ -121,46 +126,46 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 					offersDelegation: brief.includes("You may hand a part of the goal to a leader of your own"),
 				};
 			},
+			// The question is put once the root's turn that handed the goal over has its result, so it starts a turn of its own.
+			gate: world.provider.whenReached(reached(TRACK.root, "j7-lead-result")),
 			reply: {
 				content: [
 					{
 						type: "toolCall",
-						id: "j7-chief-create-1",
+						id: "j7-chief-ask-1",
 						name: "bot_message",
-						arguments: {
-							action: "create",
-							description: HELPER_DESCRIPTION,
-							soul: HELPER_SOUL,
-							model: modelOf(MODEL_ID.helper),
-						},
+						arguments: { action: "ask_root", message: HELPER_REQUEST },
 					},
 				],
 				stopReason: "toolUse",
 			},
 		},
 		{
-			name: "j7-chief-create",
+			// The leader ends its turn with the question open: the goal waits for the answer, not settled by this end.
+			name: "j7-chief-asked",
 			check: (request) => {
-				seen.helperCreated = acceptedJson(request, "bot_message");
-				seen.helperId = String(seen.helperCreated.agentId ?? "");
+				const asked = acceptedJson(request, "bot_message");
+				seen.asked = { askId: typeof asked.askId === "string", goalOpen: delegationOf(session, LEADER).state };
 			},
-			reply: (request) => {
-				const created = acceptedJson(request, "bot_message");
-				return {
-					content: [
-						{
-							type: "toolCall" as const,
-							id: "j7-chief-send-1",
-							name: "bot_message",
-							arguments: {
-								action: "send",
-								agentId: String(created.agentId),
-								message: HELPER_TASK,
-							},
-						},
-					],
-					stopReason: "toolUse" as const,
-				};
+			reply: { content: [{ type: "text", text: WAITING }] },
+		},
+		{
+			name: "j7-chief-told",
+			// The answer is sent once the root's own turn has the ask's result, so the goal's end cannot reach that turn.
+			gate: world.provider.whenReached(reached(TRACK.root, "j7-root-asked")),
+			check: (request) => {
+				seen.leaderToldOfBot = carries(request, ROOT_ANSWER);
+			},
+			reply: {
+				content: [
+					{
+						type: "toolCall",
+						id: "j7-chief-send-1",
+						name: "bot_message",
+						arguments: { action: "send", agentId: HELPER, message: HELPER_TASK },
+					},
+				],
+				stopReason: "toolUse",
 			},
 		},
 		{
@@ -209,32 +214,12 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			reply: { content: [{ type: "text", text: HELPER_ANSWER }] },
 		},
 		{
-			name: "j7-helper-ask-create",
-			check: () => {
-				seen.botsBeforeAsk = allBots(session).length;
-			},
-			reply: {
-				content: [
-					{
-						type: "toolCall",
-						id: "j7-helper-create-1",
-						name: "bot_message",
-						arguments: {
-							action: "create",
-							description: "Reads time zones",
-							soul: "You answer questions about time zones with one short sentence.",
-						},
-					},
-				],
-				stopReason: "toolUse",
-			},
-		},
-		{
 			name: "j7-helper-send-ask",
 			check: (request) => {
-				// The sentence the harness answers a bot that is not a leader, naming the leader it must ask instead.
-				seen.refusal = refusalOf(request, "bot_message");
-				seen.botsAfterAsk = allBots(session).length;
+				// A bot that is not a leader is offered no way to make a bot, and its tool names the leader it asks instead.
+				const tool = (request.context.tools ?? []).find((candidate) => candidate.name === "bot_message");
+				seen.helperActions = offeredActions(request, "bot_message");
+				seen.helperToldToAskLeader = tool?.description.includes(ASK_YOUR_LEADER) === true;
 			},
 			reply: {
 				content: [
@@ -293,12 +278,62 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			reply: { content: [{ type: "text", text: "The goal is running." }] },
 		},
 		{
+			// The leader's question starts a turn of the root's own: the root creates the bot for that leader.
+			name: "j7-root-hears-ask",
+			check: (request) => {
+				if (!carries(request, HELPER_REQUEST))
+					throw new Error("the root's turn does not carry the leader's question");
+			},
+			reply: {
+				content: [
+					{
+						type: "toolCall",
+						id: "j7-root-create-1",
+						name: "bot",
+						arguments: {
+							action: "create",
+							description: HELPER_DESCRIPTION,
+							soul: HELPER_SOUL,
+							model: modelOf(MODEL_ID.helper),
+							forLeader: LEADER,
+						},
+					},
+				],
+				stopReason: "toolUse",
+			},
+		},
+		{
+			name: "j7-root-create",
+			check: (request) => {
+				seen.helperCreated = acceptedJson(request, "bot");
+				seen.helperId = String(seen.helperCreated.agentId ?? "");
+			},
+			reply: {
+				content: [
+					{
+						type: "toolCall",
+						id: "j7-root-ask-1",
+						name: "bot",
+						arguments: { action: "ask", agentId: LEADER, message: ROOT_ANSWER },
+					},
+				],
+				stopReason: "toolUse",
+			},
+		},
+		{
+			name: "j7-root-asked",
+			check: (request) => {
+				seen.rootAsk = acceptedJson(request, "bot");
+			},
+			reply: { content: [{ type: "text", text: "The leader has its bot." }] },
+		},
+		{
 			name: "j7-lead-outcome",
 			maxRequests: 8,
-			until: (request) => deliveredLines(request).some((line) => line.startsWith("Leader ")),
+			until: (request) => deliveredLines(request).some((line) => /^Leader \S+ finished /.test(line)),
 			reply: (request) => {
 				const lines = deliveredLines(request);
-				if (!lines.some((line) => line.startsWith("Leader "))) {
+				if (!lines.some((line) => /^Leader \S+ finished /.test(line))) {
 					return { content: [{ type: "text", text: "Nothing to read yet." }] };
 				}
 				seen.wakeLines = lines;
@@ -370,7 +405,15 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	expect(
 		seen.actionNames,
 		"at the default depth the leader's bot_message tool offers no lead action: the goal cannot be handed on",
-	).toEqual(["list", "send", "reply", "create", "ask_root"]);
+	).toEqual(["list", "send", "reply", "ask_root"]);
+	expect(
+		{ asked: seen.asked, leaderToldOfBot: seen.leaderToldOfBot, rootAsk: seen.rootAsk },
+		"the leader asks the orchestrator for a bot and ends its turn with the goal still running; the orchestrator's answer is the leader's next turn",
+	).toEqual({
+		asked: { askId: true, goalOpen: "running" },
+		leaderToldOfBot: true,
+		rootAsk: { sent: true, agentId: LEADER },
+	});
 
 	const helper = botRecord(session, HELPER);
 	expect(
@@ -385,8 +428,9 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			opensWithOwnSoul: seen.helperCreated.opensWithOwnSoul,
 			carriesLeaderSoul: seen.helperCreated.carriesLeaderSoul,
 			created: seen.helperCreated.agentId,
+			createdFor: seen.helperCreated.createdBy,
 		},
-		"the bot the leader made records the leader as its creator, is a read-only bot and not a leader, and runs on its own soul without its leader's",
+		"the bot the orchestrator made for the leader records the leader as its creator, is a read-only bot and not a leader, and runs on its own soul without its leader's",
 	).toEqual({
 		agentId: HELPER,
 		createdBy: LEADER,
@@ -398,6 +442,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		opensWithOwnSoul: true,
 		carriesLeaderSoul: false,
 		created: HELPER,
+		createdFor: LEADER,
 	});
 	expect(seen.leaderSend, "the leader's send to its own bot starts it under the goal and says so").toEqual({
 		sent: true,
@@ -406,8 +451,9 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		detail: `${HELPER} started under ${LEADER}; its answer reaches your next turn.`,
 	});
 
-	// The root heard nothing while the subtree worked: its own requests in this session are the tool's loading, the call,
-	// its result, and the turn the outcome starts, in that order.
+	// The root heard nothing while the subtree worked but the leader's question: its own requests in this session are the
+	// tool's loading, the call, its result, the turn the question starts with its create and ask results, and the turn the
+	// outcome starts, in that order.
 	const rootRequests = world.provider.requests
 		.filter((request) => request.model.id === MODEL_ID.root)
 		.slice(rootRequestsBefore);
@@ -424,7 +470,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		},
 		"the root is told once, by the goal's outcome notice, which names the goal and quotes the leader's words as a report",
 	).toEqual({
-		rootRequests: 4,
+		rootRequests: 7,
 		answerCarried: true,
 		outcome: `Leader ${displayNameFor(LEADER)} finished the goal "${GOAL}": Done. Next: use the result.`,
 		reportMarked: true,
@@ -438,8 +484,8 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		"the objective the goal ran under is closed as settled",
 	).toEqual({ state: "closed", closeReason: "settled" });
 
-	// Leg 4: the bot the leader made asks for a bot of its own. The refusal names its leader and stores nothing; its message
-	// reaches the leader's next turn instead. The owner wakes the leader first, so the bot's message has a live peer to reach.
+	// Leg 4: the leader's bot wants a bot of its own. It is offered no way to make one and is told to ask its leader, so its
+	// message reaches the leader's next turn. The owner wakes the leader first, so the bot's message has a live peer to reach.
 	const leaderRuntime = onlyAgentOn(session, MODEL_ID.leader).agentId;
 	await session.sendOperatorMessageToBot(LEADER, LEADER_AWAKE);
 	await withDeadline(
@@ -457,15 +503,9 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	await withDeadline(trace, "J7 leg 4: the end of the leader's turn reached the root", rootToldOfLeaderTurn.promise);
 	await withDeadline(trace, "J7 leg 4: the root is idle", session.waitForForegroundIdle());
 	assertSeen(
-		{
-			sentence: seen.refusal.sentence,
-			tool: seen.refusal.tool,
-			gained: seen.botsAfterAsk - seen.botsBeforeAsk,
-			botsAfter: seen.botsAfterAsk,
-			helperId: seen.helperId,
-		},
-		"a bot that is not a leader is refused its own bot in one sentence naming its leader, and the store gains no bot",
-		{ sentence: MAY_NOT_CREATE, tool: "bot_message", gained: 0, botsAfter: seen.botsBeforeAsk, helperId: HELPER },
+		{ actions: seen.helperActions, toldToAskLeader: seen.helperToldToAskLeader, helperId: seen.helperId },
+		"a bot that is not a leader is offered no bot creation, and its tool names the leader it asks for one",
+		{ actions: ["list", "send", "reply", "ask_root"], toldToAskLeader: true, helperId: HELPER },
 	);
 	expect(
 		seen.helperSent,

@@ -10,15 +10,7 @@ import { OrchestrationProfileStore } from "../../../../src/core/orchestration/pr
 import { createBarrier, HARNESS_PROVIDER } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { deliveredLines } from "./journey-5-shared.ts";
-import {
-	acceptedJson,
-	enqueueBot,
-	enqueueRoot,
-	loadBotToolStep,
-	MODEL_ID,
-	modelOf,
-	PHASE_JUDGMENTS,
-} from "./journey-7-shared.ts";
+import { enqueueBot, enqueueRoot, loadBotToolStep, MODEL_ID, PHASE_JUDGMENTS } from "./journey-7-shared.ts";
 import { latestBatchResults } from "./shared.ts";
 
 const LEADER = "tree-budget-chief";
@@ -123,37 +115,23 @@ async function runTreeAttemptCase(world: HarnessWorld, maxAttempts: 2 | 3): Prom
 			createdBy: "owner",
 		});
 		session.upsertPersistentBot({ agentId: LEADER, leader: true });
+		// The leader's bot, as the orchestrator makes it for it: the leader is its creator.
+		session.upsertPersistentBot({
+			agentId: CHILD,
+			displayName: displayNameFor(CHILD),
+			provider: HARNESS_PROVIDER,
+			modelId: MODEL_ID.helper,
+			soul: CHILD_SOUL,
+			profileId: `${profile.profileId}-child`,
+			createdBy: LEADER,
+		});
 		enqueueBot(
 			world,
 			track,
 			MODEL_ID.leader,
 			LEADER_SOUL,
 			{
-				name: "tree-create-child",
-				reply: {
-					content: [
-						{
-							type: "toolCall",
-							id: "tree-create",
-							name: "bot_message",
-							arguments: {
-								action: "create",
-								agentId: CHILD,
-								description: "Held tree budget worker",
-								soul: CHILD_SOUL,
-								model: modelOf(MODEL_ID.helper),
-							},
-						},
-					],
-					stopReason: "toolUse",
-				},
-			},
-			{
 				name: "tree-send-held",
-				check: (request) => {
-					expect(acceptedJson(request, "bot_message").agentId).toBe(CHILD);
-					session.upsertPersistentBot({ agentId: CHILD, profileId: `${profile.profileId}-child` });
-				},
 				reply: {
 					content: [
 						{

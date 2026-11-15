@@ -1,7 +1,7 @@
 import { Type } from "typebox";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { BOT_TOOL_NAME, type BotToolPort, botCreationRequestFrom } from "../delegation/bot-creation.ts";
-import { LEAD_FIELDS, LEAD_LIMITS, leadRequestFrom } from "../delegation/leader-delegation.ts";
+import { LEAD_LIMITS, leadRequestFrom, refuseLeadFieldsOutsideLead } from "../delegation/leader-delegation.ts";
 import type { ToolDefinition } from "../extensions/types.ts";
 
 /** The `lead` fields of the bot tool; the bot_message tool's `lead` action takes the same fields. */
@@ -78,7 +78,7 @@ const schema = Type.Object(
 				minLength: 1,
 				maxLength: 128,
 				description:
-					"For create: a leader's id (bot list marks leaders). The new bot is that leader's own: its record names the leader as creator, it writes only when the leader can, and the leader's message to it starts it under the leader's goal. Leave it out for a bot of your own.",
+					"For create: the id of the leader that asked for the bot (bot list marks leaders). The new bot is that leader's own: its record names the leader as creator, it writes only when the leader can, and the leader's message to it starts it under the leader's goal. Leave it out for a bot of your own.",
 			}),
 		),
 		message: Type.Optional(Type.String({ minLength: 1, description: "For ask: what to tell the bot." })),
@@ -95,14 +95,12 @@ export function createBotToolDefinition(port: BotToolPort): ToolDefinition<typeo
 		name: BOT_TOOL_NAME,
 		label: "Bots",
 		description:
-			"Create a persistent bot on the fly for a purpose (action create: agentId, soul, optional model; read-only unless canWrite; forLeader makes it a leader's own bot), list the bots (action list), message a bot (action ask: agentId, message; its answer arrives as an event), or hand a whole goal to a leader (action lead: goal, optional requirements, constraints, files, budgetUsd, minutes, context, and agentId of a leader; without agentId a goal leader is appointed for this goal). A leader splits the goal among the bots it owns and you hear back once, with one outcome, when the goal ends, or earlier only when it needs your answer (answer with ask). Only the owner makes a standing leader; a leader creates bots too, and every other bot asks a leader or you for one. For many bots at once, ask the spawner bot if the owner made one.",
+			"Create a persistent bot on the fly for a purpose (action create: agentId, soul, optional model; read-only unless canWrite; forLeader makes it a leader's own bot), list the bots (action list), message a bot (action ask: agentId, message; its answer arrives as an event), or hand a whole goal to a leader (action lead: goal, optional requirements, constraints, files, budgetUsd, minutes, context, and agentId of a leader; without agentId a goal leader is appointed for this goal). A leader splits the goal among the bots it owns and you hear back once, with one outcome, when the goal ends, or earlier only when it needs your answer (answer with ask). Only the owner makes a standing leader. Only you create bots: a leader asks you for a bot of its own with a question (create it with forLeader naming that leader, then tell the leader its id with ask), and every other bot asks its leader or you. For many bots at once, ask the spawner bot if the owner made one.",
 		promptSnippet: "Create, list or message bots, or hand a goal to a leader",
 		parameters: schema,
 		async execute(_toolCallId, input, signal) {
 			if (signal?.aborted) throw signal.reason;
-			const leadFields = LEAD_FIELDS.filter((field) => input[field] !== undefined);
-			if (input.action !== "lead" && leadFields.length > 0)
-				throw new Error(`${leadFields.join(", ")} belong to action lead.`);
+			refuseLeadFieldsOutsideLead(input);
 			if (input.action === "lead") {
 				const createFields = CREATE_FIELDS.filter((field) => input[field] !== undefined);
 				if (createFields.length > 0 || input.message !== undefined)

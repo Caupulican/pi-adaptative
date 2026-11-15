@@ -10,16 +10,7 @@ import { OrchestrationProfileStore } from "../../../../src/core/orchestration/pr
 import { createBarrier, HARNESS_PROVIDER } from "../scripted-provider.ts";
 import { HARNESS_PROJECT_CWD, type HarnessWorld, withDeadline } from "../session-fixture.ts";
 import { deliveredLines } from "./journey-5-shared.ts";
-import {
-	acceptedJson,
-	carries,
-	enqueueBot,
-	enqueueRoot,
-	loadBotToolStep,
-	MODEL_ID,
-	modelOf,
-	PHASE_JUDGMENTS,
-} from "./journey-7-shared.ts";
+import { carries, enqueueBot, enqueueRoot, loadBotToolStep, MODEL_ID, PHASE_JUDGMENTS } from "./journey-7-shared.ts";
 
 const LEADER = "headroom-chief";
 const LEADER_SOUL = "Lead the shared headroom journey and collect the child answer.";
@@ -123,8 +114,7 @@ export async function runJourney7WorkerHeadroomPhase(world: HarnessWorld): Promi
 		if ((request?.context.systemPrompt ?? "").includes(LEADER_SOUL)) {
 			const context = JSON.stringify(request?.context.messages);
 			if (context.includes("headroom-send-sibling-call")) await siblingReserved.promise;
-			else if (context.includes("headroom-send-call") && !context.includes("headroom-create-sibling-call"))
-				await childReserved.promise;
+			else if (context.includes("headroom-send-call")) await childReserved.promise;
 		}
 		const result = await originalPreflight.call(this, request);
 		if ((request?.context.systemPrompt ?? "").includes(CHILD_SOUL)) {
@@ -153,38 +143,32 @@ export async function runJourney7WorkerHeadroomPhase(world: HarnessWorld): Promi
 			createdBy: "owner",
 		});
 		session.upsertPersistentBot({ agentId: LEADER, leader: true });
+		// The leader's two bots, as the orchestrator makes them for it: the leader is their creator.
+		session.upsertPersistentBot({
+			agentId: CHILD,
+			displayName: displayNameFor(CHILD),
+			provider: HARNESS_PROVIDER,
+			modelId: MODEL_ID.helper,
+			soul: CHILD_SOUL,
+			profileId: "journey-headroom-child",
+			createdBy: LEADER,
+		});
+		session.upsertPersistentBot({
+			agentId: SIBLING,
+			displayName: displayNameFor(SIBLING),
+			provider: HARNESS_PROVIDER,
+			modelId: MODEL_ID.teamTwo,
+			soul: SIBLING_SOUL,
+			profileId: "journey-headroom-sibling",
+			createdBy: LEADER,
+		});
 		enqueueBot(
 			world,
 			"j7-headroom-leader",
 			MODEL_ID.leader,
 			LEADER_SOUL,
 			{
-				name: "headroom-create",
-				reply: {
-					content: [
-						{
-							type: "toolCall",
-							id: "headroom-create-call",
-							name: "bot_message",
-							arguments: {
-								action: "create",
-								agentId: CHILD,
-								description: "Reads the headroom question",
-								soul: CHILD_SOUL,
-								model: modelOf(MODEL_ID.helper),
-							},
-						},
-					],
-					stopReason: "toolUse",
-				},
-			},
-			{
 				name: "headroom-send",
-				check: (request) => {
-					const created = acceptedJson(request, "bot_message");
-					expect(created.agentId).toBe(CHILD);
-					session.upsertPersistentBot({ agentId: CHILD, profileId: "journey-headroom-child" });
-				},
 				reply: {
 					content: [
 						{
@@ -198,33 +182,8 @@ export async function runJourney7WorkerHeadroomPhase(world: HarnessWorld): Promi
 				},
 			},
 			{
-				name: "headroom-create-sibling",
-				gate: childReserved.promise,
-				reply: {
-					content: [
-						{
-							type: "toolCall",
-							id: "headroom-create-sibling-call",
-							name: "bot_message",
-							arguments: {
-								action: "create",
-								agentId: SIBLING,
-								description: "Reads the second headroom question",
-								soul: SIBLING_SOUL,
-								model: modelOf(MODEL_ID.teamTwo),
-							},
-						},
-					],
-					stopReason: "toolUse",
-				},
-			},
-			{
 				name: "headroom-send-sibling",
-				check: (request) => {
-					const created = acceptedJson(request, "bot_message");
-					expect(created.agentId).toBe(SIBLING);
-					session.upsertPersistentBot({ agentId: SIBLING, profileId: "journey-headroom-sibling" });
-				},
+				gate: childReserved.promise,
 				reply: {
 					content: [
 						{

@@ -17,6 +17,7 @@ import {
 	offeredActions,
 	PHASE_JUDGMENTS,
 	reached,
+	refusalOf,
 	TRACK,
 } from "./journey-7-shared.ts";
 
@@ -25,13 +26,17 @@ const LEADER_SOUL = "You lead a goal for the orchestrator, split it into parts, 
 const LEADER_FRAGMENT = "split it into parts, and report once at the end";
 const GOAL = "Report how many days a week holds.";
 const PART_GOAL = "Count the days in one week.";
-const CHIEF_REPORT = "The part is in: seven.";
+const TOP_REPORT = "The part is in: seven.";
 const PART_REPORT = "The count is seven.";
+/** What a leader handing a part on without naming a standing leader is told: the exact sentence. */
+const NAME_A_LEADER =
+	"A leader hands a part on only to a standing leader: name one with agentId (bot_message list marks them). Only the orchestrator appoints a goal leader or creates a bot; for a leader you do not have, ask it with ask_root.";
 
 /**
- * Leg 5, second half: with `leaders.maxDepth` raised to two, a leader's goal may hand a part to a leader of its own. The
- * second objective names the first as its parent, the part's leader reports to the leader that handed it on, and the first
- * closes only after the second.
+ * Leg 5, second half: with `leaders.maxDepth` raised to two, a leader's goal may hand a part to a standing leader. The root
+ * appoints a goal leader for its goal; that leader's hand-on without naming a standing leader is refused and opens nothing,
+ * since only the orchestrator appoints; named, the standing leader takes the part. The second objective names the first as
+ * its parent, the part's leader reports to the leader that handed it on, and the first closes only after the second.
  */
 export async function runJourney7DepthPhase(world: HarnessWorld): Promise<void> {
 	const trace = world.trace;
@@ -64,17 +69,20 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		leadResult: {} as Record<string, unknown>,
 		briefOffersDelegation: false,
 		actionNames: [] as string[],
+		refusal: {} as Record<string, unknown>,
+		goalsAtRefusal: 0,
 		partResult: {} as Record<string, unknown>,
 		partHeardPartGoal: false,
 		handedOnLine: false,
 		wakeLines: [] as string[],
 	};
 
+	// A goal leader appointed by the root runs on the session's model, so it is told apart by the soul it was created with.
 	enqueueBot(
 		world,
-		TRACK.leaderDepth,
-		MODEL_ID.leader,
-		LEADER_FRAGMENT,
+		TRACK.goalLeader,
+		MODEL_ID.goalLeader,
+		GOAL_LEADER_OPENING,
 		{
 			name: "j7-depth-brief",
 			check: (request) => {
@@ -88,9 +96,27 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 				content: [
 					{
 						type: "toolCall",
-						id: "j7-depth-lead-1",
+						id: "j7-depth-lead-unnamed-1",
 						name: "bot_message",
 						arguments: { action: "lead", goal: PART_GOAL },
+					},
+				],
+				stopReason: "toolUse",
+			},
+		},
+		{
+			name: "j7-depth-refused",
+			check: (request) => {
+				seen.refusal = refusalOf(request, "bot_message");
+				seen.goalsAtRefusal = delegationsOf(session).length;
+			},
+			reply: {
+				content: [
+					{
+						type: "toolCall",
+						id: "j7-depth-lead-1",
+						name: "bot_message",
+						arguments: { action: "lead", goal: PART_GOAL, agentId: LEADER },
 					},
 				],
 				stopReason: "toolUse",
@@ -110,12 +136,11 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			reply: (request) => {
 				if (!carries(request, "you handed on")) return { content: [{ type: "text", text: "Waiting." }] };
 				seen.handedOnLine = true;
-				return { content: [{ type: "text", text: CHIEF_REPORT }] };
+				return { content: [{ type: "text", text: TOP_REPORT }] };
 			},
 		},
 	);
-	// A goal leader appointed by a leader runs on the session's model, so it is told apart by the soul it was created with.
-	enqueueBot(world, TRACK.goalLeader, MODEL_ID.goalLeader, GOAL_LEADER_OPENING, {
+	enqueueBot(world, TRACK.leaderDepth, MODEL_ID.leader, LEADER_FRAGMENT, {
 		name: "j7-part-brief",
 		check: (request) => {
 			seen.partHeardPartGoal = carries(request, PART_GOAL);
@@ -133,7 +158,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 						type: "toolCall",
 						id: "j7-depth-call-1",
 						name: "bot",
-						arguments: { action: "lead", goal: GOAL, agentId: LEADER },
+						arguments: { action: "lead", goal: GOAL },
 					},
 				],
 				stopReason: "toolUse",
@@ -162,7 +187,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	);
 	if (world.systemOne.enabled) world.systemOne.enterPhase("j7-depth", PHASE_JUDGMENTS);
 
-	await withDeadline(trace, "J7 leg 5: the root hands a goal to the leader", session.prompt(GOAL));
+	await withDeadline(trace, "J7 leg 5: the root appoints a goal leader for its goal", session.prompt(GOAL));
 	await withDeadline(
 		trace,
 		"J7 leg 5: the goal's outcome reached the root",
@@ -170,44 +195,53 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 	);
 	await withDeadline(trace, "J7 leg 5: the root is idle", session.waitForForegroundIdle());
 
+	expect(
+		{ refusal: seen.refusal, goals: seen.goalsAtRefusal },
+		"a leader handing a part on without naming a standing leader is refused in one sentence, and no goal is opened for it",
+	).toEqual({ refusal: { tool: "bot_message", sentence: NAME_A_LEADER }, goals: 1 });
+
 	const rootEnvelope = seen.leadResult.envelope as Record<string, unknown> | undefined;
 	const partEnvelope = seen.partResult.envelope as Record<string, unknown> | undefined;
 	expect(
 		{
+			rootGoalLeader: seen.leadResult.goalLeader,
 			rootDepth: rootEnvelope?.remainingDepth,
 			rootCapabilities: rootEnvelope?.capabilities,
-			// The leader's own goal may hand a part on, and its tool says so.
+			// The goal leader's own goal may hand a part on, and its tool says so.
 			briefOffersDelegation: seen.briefOffersDelegation,
 			offersLeadAction: seen.actionNames.includes("lead"),
 			partDelegated: seen.partResult.delegated,
+			partLeader: seen.partResult.leader,
 			partGoalLeader: seen.partResult.goalLeader,
 			partDepth: partEnvelope?.remainingDepth,
 			partCapabilities: partEnvelope?.capabilities,
 			partHeardPartGoal: seen.partHeardPartGoal,
 		},
-		"at depth two the root's leader may hand a part on, appoints a goal leader for it that is read-only, and that leader reads the part's goal",
+		"at depth two the root's goal leader may hand a part on to the standing leader it names, read-only, and that leader reads the part's goal",
 	).toEqual({
+		rootGoalLeader: true,
 		rootDepth: 1,
 		rootCapabilities: ["read", "create_bots", "delegate"],
 		briefOffersDelegation: true,
 		offersLeadAction: true,
 		partDelegated: true,
-		partGoalLeader: true,
+		partLeader: LEADER,
+		partGoalLeader: false,
 		partDepth: 0,
 		partCapabilities: ["read", "create_bots"],
 		partHeardPartGoal: true,
 	});
 
 	const records = delegationsOf(session);
-	const first = records.find((record) => record.charter.leader === LEADER);
-	if (first === undefined) throw new Error(`no delegation was led by ${LEADER}`);
-	const part = records.find((record) => record.charter.parentObjectiveId === first.objectiveId);
-	if (part === undefined) throw new Error("no delegation names the first as its parent");
+	const part = records.find((record) => record.charter.leader === LEADER);
+	if (part === undefined) throw new Error(`no delegation was led by ${LEADER}`);
+	const first = records.find((record) => record.objectiveId === part.charter.parentObjectiveId);
+	if (first === undefined) throw new Error("the part names no delegation as its parent");
 	const outcomeLine = seen.wakeLines.find((line) => line.startsWith("Leader "));
 	expect(
 		{
-			parent: part.charter.parentObjectiveId === first.objectiveId,
-			partLeader: part.charter.leader !== LEADER,
+			firstIsRoot: first.charter.parentObjectiveId === undefined,
+			firstAppointedBy: first.charter.appointedBy,
 			partAppointedBy: part.charter.appointedBy,
 			chain: part.charter.envelope.chain.map((hop) => hop.objectiveId),
 			partSettled: [part.state, part.closeReason],
@@ -218,13 +252,13 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 			handedOnLine: seen.handedOnLine,
 			toldOnce: seen.wakeLines.filter((line) => /^Leader \S+ finished /.test(line)).length,
 			goalInOutcome: outcomeLine?.includes(`the goal "${GOAL}"`),
-			reportsChief: seen.wakeLines.join("\n").includes(CHIEF_REPORT),
+			reportsTop: seen.wakeLines.join("\n").includes(TOP_REPORT),
 		},
 		"the second objective names the first as its parent and closes first, and the root is told once, of the first, with its leader's report",
 	).toEqual({
-		parent: true,
-		partLeader: true,
-		partAppointedBy: "root",
+		firstIsRoot: true,
+		firstAppointedBy: "root",
+		partAppointedBy: "owner",
 		chain: [first.objectiveId, part.objectiveId],
 		partSettled: ["closed", "settled"],
 		firstSettled: ["closed", "settled"],
@@ -232,6 +266,6 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		handedOnLine: true,
 		toldOnce: 1,
 		goalInOutcome: true,
-		reportsChief: true,
+		reportsTop: true,
 	});
 }

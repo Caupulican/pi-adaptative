@@ -1,7 +1,8 @@
 /**
- * Who may create a persistent bot. The orchestrator (the root session) and the bots the owner made leaders create bots on
- * the fly; every other bot cannot, and asks a leader or its parent. Only the owner makes a standing leader; the
- * orchestrator may appoint a goal leader for one goal (`bot lead` without agentId).
+ * Who may create a persistent bot. Only the orchestrator (the root session) creates bots on the fly, its own or a leader's
+ * (`bot create` with `forLeader`, when the leader asks it); no bot creates one: a leader asks the orchestrator, and every
+ * other bot asks its leader, a leader or its parent. Only the owner makes a standing leader; the orchestrator may appoint a
+ * goal leader for one goal (`bot lead` without agentId).
  */
 
 import type { LeadRequest, LeadResult } from "./leader-delegation.ts";
@@ -10,7 +11,7 @@ import type { PersistentBotRecord } from "./persistent-bot-team-store.ts";
 /** The root session's tool for creating and listing bots. */
 export const BOT_TOOL_NAME = "bot";
 
-/** How many live bots one leader may have created; the orchestrator is bounded by the owner's attention, not a count. */
+/** How many live bots one leader may keep; the orchestrator's own are bounded by the owner's attention, not a count. */
 export const MAX_BOTS_PER_LEADER = 12;
 
 export interface BotCreationRequest {
@@ -22,7 +23,7 @@ export interface BotCreationRequest {
 	/** `<provider>/<model>`; the session's current model when omitted. */
 	readonly model?: string;
 	readonly thinkingLevel?: string;
-	/** A bot edits files only when asked to; a leader can grant it only when the leader can write itself. */
+	/** A bot edits files only when asked to; a leader's bot is granted it only when that leader can write itself. */
 	readonly canWrite?: boolean;
 }
 
@@ -87,16 +88,4 @@ export interface BotToolPort {
 	lead(request: LeadRequest): LeadResult;
 	/** The bots the roster holds, each by the id the caller asks it by and the name its record shows. */
 	list(): readonly BotToolListEntry[];
-}
-
-/**
- * The text a bot that cannot create bots gets when it tries: where to ask instead. A bot a leader made asks that leader
- * first; any other bot asks one of the leaders, or its parent.
- */
-export function mayNotCreateBotsText(leaderIds: readonly string[], ownLeader?: string): string {
-	if (ownLeader)
-		return `Only the orchestrator and leaders create bots. Ask your leader (${ownLeader}) with bot_message for the bot you need.`;
-	return leaderIds.length > 0
-		? `Only the orchestrator and leaders create bots. Ask a leader (${leaderIds.join(", ")}) with bot_message, or ask your parent in your report.`
-		: "Only the orchestrator and leaders create bots, and no leader is set. Ask your parent in your report for the bot you need.";
 }

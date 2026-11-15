@@ -18,7 +18,6 @@ import {
 	enqueueRoot,
 	loadBotToolStep,
 	MODEL_ID,
-	modelOf,
 	offeredTools,
 	onlyAgentOn,
 	PHASE_JUDGMENTS,
@@ -110,6 +109,16 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		createdBy: "owner",
 	});
 	session.upsertPersistentBot({ agentId: STOP_LEADER, leader: true });
+	// The leader's bot, as the orchestrator makes it for it: the leader is its creator, and it runs on a model of its own.
+	session.upsertPersistentBot({
+		agentId: STOP_HELPER,
+		displayName: displayNameFor(STOP_HELPER),
+		description: STOP_HELPER_DESCRIPTION,
+		provider: HARNESS_PROVIDER,
+		modelId: MODEL_ID.stopHelper,
+		soul: STOP_HELPER_SOUL,
+		createdBy: STOP_LEADER,
+	});
 	session.upsertPersistentBot({
 		agentId: TAB,
 		displayName: displayNameFor(TAB),
@@ -140,43 +149,17 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		MODEL_ID.stopLeader,
 		STOP_LEADER_FRAGMENT,
 		{
-			name: "j7-stop-create",
+			name: "j7-stop-send",
 			reply: {
 				content: [
 					{
 						type: "toolCall",
-						id: "j7-stop-create-1",
+						id: "j7-stop-send-1",
 						name: "bot_message",
-						arguments: {
-							action: "create",
-							description: STOP_HELPER_DESCRIPTION,
-							soul: STOP_HELPER_SOUL,
-							// A bot made without a model runs on the default worker model; this one is told apart by its own.
-							model: modelOf(MODEL_ID.stopHelper),
-						},
+						arguments: { action: "send", agentId: STOP_HELPER, message: STOP_TASK },
 					},
 				],
 				stopReason: "toolUse",
-			},
-		},
-		{
-			name: "j7-stop-send",
-			check: (request) => {
-				acceptedJson(request, "bot_message");
-			},
-			reply: (request) => {
-				const created = acceptedJson(request, "bot_message");
-				return {
-					content: [
-						{
-							type: "toolCall" as const,
-							id: "j7-stop-send-1",
-							name: "bot_message",
-							arguments: { action: "send", agentId: String(created.agentId), message: STOP_TASK },
-						},
-					],
-					stopReason: "toolUse" as const,
-				};
 			},
 		},
 		{

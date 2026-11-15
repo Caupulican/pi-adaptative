@@ -50,7 +50,7 @@ export const WORKER_FORBIDDEN_TOOLS: ReadonlySet<string> = new Set([
 	SELF_COMPACT_TOOL_NAME,
 	PROACTIVITY_TOOL_NAME,
 	ROUTINE_TOOL_NAME,
-	// Bots are created by the orchestrator and by leaders (through bot_message), never by a worker's own tool.
+	// Bots are created by the orchestrator alone (its bot tool, a leader's bots included), never by a worker's own tool.
 	BOT_TOOL_NAME,
 	// Workers never launch workers: `assign` starts one, as `delegate` does, and `plan` starts many.
 	ASSIGN_TOOL_NAME,

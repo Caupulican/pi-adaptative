@@ -59,7 +59,7 @@ export const BOT_TEAM = {
 	spawnerReady: (agentId: string) =>
 		`${agentId} está pronto. O orquestrador pode entregar a ele a criação de muitos bots de uma vez; ele cria cada um e passa o brief.`,
 	leaderOn: (agentId: string) =>
-		`${agentId} agora é líder permanente: pode criar bots, e os outros bots pedem um bot a ele ou ao orquestrador. Vale a partir do próximo início de worker do bot. Os objetivos que o orquestrador entrega a ele aparecem e são alterados em /lead, não aqui.`,
+		`${agentId} agora é líder permanente: recebe bots próprios do orquestrador, e os outros bots pedem um bot a ele ou ao orquestrador. Vale a partir do próximo início de worker do bot. Os objetivos que o orquestrador entrega a ele aparecem e são alterados em /lead, não aqui.`,
 	leaderOff: (agentId: string) =>
 		`${agentId} não é mais líder permanente. Vale a partir do próximo início de worker do bot. Um objetivo que ele já lidera continua: /lead mostra o objetivo e /lead cancel ${agentId} o interrompe.`,
 	botRenamed: (agentId: string, name: string) =>

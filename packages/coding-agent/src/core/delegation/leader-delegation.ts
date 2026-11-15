@@ -32,6 +32,15 @@ export const LEADER_MAX_DEPTH_CEILING = 2;
 export const LOCAL_MACHINE_ID = "local";
 /** The `bot lead` fields besides the action and the leader id; the one list both the orchestrator's and a leader's tool read. */
 export const LEAD_FIELDS = ["goal", "requirements", "constraints", "files", "budgetUsd", "minutes", "context"] as const;
+
+/** Refuses the `bot lead` fields on any other action: both tools take them only with action lead. */
+export function refuseLeadFieldsOutsideLead(
+	input: { readonly action: string } & { readonly [Field in (typeof LEAD_FIELDS)[number]]?: unknown },
+): void {
+	if (input.action === "lead") return;
+	const present = LEAD_FIELDS.filter((field) => input[field] !== undefined);
+	if (present.length > 0) throw new Error(`${present.join(", ")} belong to action lead.`);
+}
 /** The cap on a leader report or question quoted in a notice. */
 export const MAX_REPORT_CHARS = 2000;
 
@@ -350,10 +359,10 @@ export function renderLeaderBrief(input: {
 		"Subscription turns cost nothing in metered terms, so the budget does not count them; the goal also stops when a subscription it uses has no allowance left.",
 		...(input.clipped.length > 0 ? ["", "Held back:", ...input.clipped.map((text) => `- ${text}`)] : []),
 		"",
-		"How to lead: split the goal into parts, give each part to a bot with bot_message (create one with action create when none of yours fits), collect their replies, and end with one report of what was done, what is proven and what is left. Ask the orchestrator in your report only when you cannot go on without its answer; it answers you with a new message.",
+		"How to lead: split the goal into parts, give each part to a bot with bot_message (when none of yours fits, ask the orchestrator for one with bot_message action ask_root, naming its purpose: only the orchestrator creates bots, and it makes the bot yours), collect their replies, and end with one report of what was done, what is proven and what is left. Ask the orchestrator in your report only when you cannot go on without its answer; it answers you with a new message.",
 		...(envelope.capabilities.includes("delegate")
 			? [
-					"You may hand a part of the goal to a leader of your own with bot_message action lead (the same goal fields; agentId names a standing leader, and leaving it out appoints a goal leader for that part). It reports back to you once; a message you send to it reaches it as an update.",
+					"You may hand a part of the goal to a leader of your own with bot_message action lead (the same goal fields, and agentId naming a standing leader that is free). It reports back to you once; a message you send to it reaches it as an update.",
 				]
 			: []),
 	].join("\n");
@@ -414,9 +423,9 @@ export function leaderBotViewOf(bot: {
 	};
 }
 
-/** The standing instructions of a goal leader the orchestrator (or a leader) appoints; it exists for one goal. */
+/** The standing instructions of a goal leader the orchestrator appoints; it exists for one goal. */
 export const GOAL_LEADER_SOUL =
-	"You lead one goal for the orchestrator and nothing else. Split it into parts, give each part to a bot with bot_message (create the bots you need with action create), collect their replies, and end with one report of what was done, what is proven and what is left. You and your bots never change files. Ask the orchestrator in your report only when you cannot go on without its answer.";
+	"You lead one goal for the orchestrator and nothing else. Split it into parts, give each part to a bot with bot_message (ask the orchestrator for each bot you need with bot_message action ask_root, naming its purpose), collect their replies, and end with one report of what was done, what is proven and what is left. You and your bots never change files. Ask the orchestrator in your report only when you cannot go on without its answer.";
 
 /** The request a goal leader for one goal is created with: a read-only bot, described by the goal's first line. */
 export function goalLeaderRequest(lead: LeadRequest): BotCreationRequest {
@@ -435,13 +444,19 @@ export function briefBotsOwnedBy(bots: Iterable<LeaderBotView>, leader: string):
 }
 
 /** Why a named leader cannot lead a goal, in the words the orchestrator reads; undefined when it can. */
-export function namedLeaderRefusal(named: LeaderBotView | undefined, agentId: string): string | undefined {
+export function namedLeaderRefusal(
+	named: LeaderBotView | undefined,
+	agentId: string,
+	mayAppoint: boolean,
+): string | undefined {
+	// Only the orchestrator's own delegation may leave agentId out; a leader handing a part on names a standing leader.
+	const instead = mayAppoint ? ", or leave agentId out to appoint a goal leader." : ".";
 	if (!named || named.retired)
-		return `There is no bot named ${agentId}. Name a leader (bot list marks them), or leave agentId out to appoint a goal leader.`;
+		return `There is no bot named ${agentId}. Name a leader (${mayAppoint ? "bot" : "bot_message"} list marks them)${instead}`;
 	if (!named.leader)
-		return `${named.displayName} is not a standing leader. Only the owner makes one, with /bot lead ${named.agentId} (not /lead, which shows goals). Name a leader, or leave agentId out to appoint a goal leader.`;
+		return `${named.displayName} is not a standing leader. Only the owner makes one, with /bot lead ${named.agentId} (not /lead, which shows goals). Name a leader${instead}`;
 	if (named.remote)
-		return `${named.displayName} works on another machine, which cannot lead a goal from here yet. Name a leader on this machine, or leave agentId out.`;
+		return `${named.displayName} works on another machine, which cannot lead a goal from here yet. Name a leader on this machine${instead}`;
 	return undefined;
 }
 

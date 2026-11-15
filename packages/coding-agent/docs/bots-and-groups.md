@@ -250,7 +250,7 @@ last summary when none can be read.
 
 A bot has an id and a display name. The id is the stable handle (`trello-scout`: what you type after `@` and in `/bot msg`);
 the display name is what the roster shows (`Trello Scout`). A bot made on the fly with no id (the orchestrator's `bot`
-tool, a leader's `bot_message create`) is named from its purpose, its description or soul (`release-notes-writer`), and a
+tool) is named from its purpose, its description or soul (`release-notes-writer`), and a
 taken name gets a number (`release-notes-writer-2`); the answer says which id it chose. `/bot rename <id> <name...>` changes
 the display name only. The roster row shows the name and its badges; the selected bot's model appears as a hint on the line
 below. A bot created without a model runs on what a worker would (the worker profile, else the subscription-routed efficient
@@ -265,15 +265,18 @@ Bots are created on the fly, for whatever purpose you have:
   `agentId`, a `soul` (the bot's standing instructions), an optional `model` and `canWrite`. With `forLeader` (a leader's
   id) the bot is that leader's own: the store names the leader as its creator, and the leader's message starts it under the
   leader's goal.
-- A **leader** creates one with `bot_message` `action create`, with the same fields. Only you make a bot a leader:
-  `/bot lead <id>` and `/bot unlead <id>` (they take effect from the bot's next worker start; `/bot list` marks a leader).
 
-Every other bot cannot create bots. It asks a leader (leaders are marked in its `bot_message` peer list) or its parent in its
-report. Bounds that always hold: a leader cannot make a standing leader, grants `canWrite` only when it can write itself, and keeps
-at most 12 bots it created; a bot name that exists, retired or not, is refused. The store records who created each bot
-(`owner`, `root` or the leader's id). A bot a leader made is told to ask that leader, by name, for any bot it needs. With
-`leaders.maxDepth` set to 2, a leader that works a goal may hand a part of it to a leader of its own (`bot_message` `action lead`);
-that part's outcome goes back to the leader that handed it on, and the goal ends only after its parts have.
+No other bot creates bots, a leader included. A **leader** that needs a bot of its own asks the orchestrator in the middle
+of its goal (`bot_message` `action ask_root`, naming the bot's purpose); the goal stays open until the orchestrator's answer
+starts the leader's next turn, and the orchestrator creates the bot with `forLeader` and tells the leader its id. Every
+other bot asks its leader (leaders are marked in its `bot_message` peer list) or its parent in its report. Only you make a
+bot a leader: `/bot lead <id>` and `/bot unlead <id>` (they take effect from the bot's next worker start; `/bot list` marks a
+leader). Bounds that always hold: a leader's bot writes only when the leader can, and a leader keeps at most 12 bots of its
+own; a bot name that exists, retired or not, is refused. The store records who created each bot (`owner`, `root` or, for a
+leader's own bot, the leader's id). A leader's bot is told to ask that leader, by name, for any bot it needs. With
+`leaders.maxDepth` set to 2, a leader that works a goal may hand a part of it to a standing leader it names
+(`bot_message` `action lead` with `agentId`; only the orchestrator appoints a goal leader, so a hand-on without `agentId` is
+refused); that part's outcome goes back to the leader that handed it on, and the goal ends only after its parts have.
 
 ## Leaders lead goals
 

@@ -659,7 +659,7 @@ const SCENARIOS = [
 		if (!new RegExp(`(^|\\D)${count}(\\D|$)`).test(claimText(claim))) throw new Error(`the answer does not give the real count ${count}: ${claimText(claim).slice(0, 200)}`);
 		return `the real mailbox export holds ${count} mail(s) and the bot counted them without acting on them`;
 	}),
-	scenario("s13", "leaders and the orchestrator create bots on the fly; any other bot asks for one", async () => {
+	scenario("s13", "only the orchestrator creates bots on the fly, a leader's own included; any other bot asks for one", async () => {
 		const botRecord = (id) => {
 			const bots = botStore().bots;
 			return (Array.isArray(bots) ? bots : Object.values(bots ?? {})).find((b) => b.agentId === id);
@@ -671,13 +671,12 @@ const SCENARIOS = [
 		await type(state.main, "/bot lead chief");
 		await waitFor("chief marked as leader", () => botRecord("chief")?.leader === true, 30_000, 1000);
 		if (botRecord("clerk")?.leader === true) throw new Error("clerk became a leader without the owner asking");
-		const leaderPrompt = 'Leader task: use your bot_message tool with action "create" to make a bot named "scribe" whose soul is "You write short release notes." Then say done.';
+		const leaderPrompt = 'Leader task: make a bot named "rogue-chief" whose soul is "You write short release notes." If you cannot, say who you would ask instead.';
 		await type(state.main, `/bot msg chief ${leaderPrompt}`);
-		await claimFor(leaderPrompt, (c) => c.status === "completed");
-		const scribe = botRecord("scribe");
-		if (!scribe) throw new Error("the leader did not create the bot");
-		if (scribe.createdBy !== "chief" || scribe.leader === true) throw new Error(`scribe's record is wrong: createdBy=${scribe.createdBy} leader=${scribe.leader}`);
-		const clerkPrompt = 'Clerk task: use your bot_message tool with action "create" to make a bot named "rogue". If you cannot, say who you would ask instead.';
+		const leaderRefused = await claimFor(leaderPrompt);
+		if (botRecord("rogue-chief")) throw new Error("a leader created a bot itself");
+		if (!/orchestrator|root|owner/i.test(claimText(leaderRefused))) throw new Error(`the leader did not say who to ask: ${claimText(leaderRefused).slice(0, 240)}`);
+		const clerkPrompt = 'Clerk task: make a bot named "rogue". If you cannot, say who you would ask instead.';
 		await type(state.main, `/bot msg clerk ${clerkPrompt}`);
 		const refused = await claimFor(clerkPrompt);
 		if (botRecord("rogue")) throw new Error("a bot that is not a leader created a bot");
@@ -685,9 +684,12 @@ const SCENARIOS = [
 		// `/bot new` and `/bot msg` leave a bot's chat open: plain text goes to the orchestrator only from its own chat.
 		await type(state.main, "/chat root");
 		await sleep(2000);
+		await type(state.main, 'Use your bot tool to create a bot named "scribe" for the leader chief (forLeader "chief") whose soul is "You write short release notes." Then say done.');
+		const scribe = await waitFor("the leader's bot", () => botRecord("scribe"), 180_000, 3000);
+		if (scribe.createdBy !== "chief" || scribe.leader === true) throw new Error(`scribe's record is wrong: createdBy=${scribe.createdBy} leader=${scribe.leader}`);
 		await type(state.main, 'Use your bot tool to create a bot named "helper" whose soul is "You help with small chores." Then say done.');
 		await waitFor("the orchestrator's bot", () => botRecord("helper")?.createdBy === "root", 180_000, 3000);
-		return "chief (leader) created scribe, clerk (not a leader) created nothing and named who to ask, the orchestrator created helper";
+		return "chief (leader) and clerk (not a leader) created nothing and named who to ask; the orchestrator created scribe for chief and helper of its own";
 	}),
 	scenario("s14", "a machine joins a hub as a bot with a remote mark and answers", async () => {
 		// A second pi with its own agent directory is the other machine; the link runs over localhost, whichever machine this is.

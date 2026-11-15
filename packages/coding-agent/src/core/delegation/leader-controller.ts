@@ -29,7 +29,7 @@ import type { ParentInputDelivery } from "../parent-input-delivery.ts";
 import { strictCanonicalDigest, withoutUndefinedMembers } from "../steering/canonical.ts";
 import type { BotAskRootResult } from "./bot-message-contract.ts";
 import { ACTIVE_ATTEMPT_STATUSES, delegationBudgetLeftUsd, delegationBudgetStop } from "./delegation-spend.ts";
-import type { LeaderAppointer, LeaderControllerDeps } from "./leader-controller-ports.ts";
+import type { LeaderControllerDeps } from "./leader-controller-ports.ts";
 import {
 	admitChain,
 	briefBotsOwnedBy,
@@ -196,12 +196,12 @@ export class LeaderController {
 
 	/** Opens a delegation for the orchestrator; dispatch follows as soon as the leader is free. */
 	delegate(lead: LeadRequest): LeadResult {
-		return this.open(lead, { envelope: rootLeaderEnvelope(this.deps.maxDepth()), appointer: { kind: "root" } });
+		return this.open(lead, { envelope: rootLeaderEnvelope(this.deps.maxDepth()) });
 	}
 
 	/**
-	 * Opens a nested delegation: a running leader that may delegate hands a part of its goal to a leader of its own. The
-	 * part's envelope is its parent's narrowed, and its Outcome goes to the parent leader.
+	 * Opens a nested delegation: a running leader that may delegate hands a part of its goal to a standing leader it names.
+	 * The part's envelope is its parent's narrowed, and its Outcome goes to the parent leader.
 	 */
 	delegateFrom(parentLeader: string, lead: LeadRequest): LeadResult {
 		const parent = this.requireCurrent(parentLeader);
@@ -218,32 +218,33 @@ export class LeaderController {
 		return this.open(lead, {
 			envelope: leaderEnvelopeFromRecord(parent, remaining),
 			record: parent,
-			appointer: { kind: "leader", agentId: parentLeader },
 		});
 	}
 
 	/**
-	 * Opens a delegation under a parent envelope: the leader is the named standing leader or a goal leader appointed for it;
-	 * the chain is admitted (no cycle, not too deep) and the envelope narrowed. A nested delegation is refused when its leader
-	 * already leads a goal; a root delegation queues behind it.
+	 * Opens a delegation under a parent envelope: the leader is the named standing leader or, for the orchestrator's own
+	 * delegation only, a goal leader appointed for it (only the orchestrator creates bots); the chain is admitted (no
+	 * cycle, not too deep) and the envelope narrowed. A nested delegation is refused when it names no standing leader or
+	 * its leader already leads a goal; a root delegation queues behind it.
 	 */
-	private open(
-		lead: LeadRequest,
-		parent: { envelope: LeaderEnvelope; record?: DelegationRecord; appointer: LeaderAppointer },
-	): LeadResult {
+	private open(lead: LeadRequest, parent: { envelope: LeaderEnvelope; record?: DelegationRecord }): LeadResult {
 		const bots = this.deps.bots();
 		let leader: LeaderBotView;
 		let appointedBy: "owner" | "root";
 		let goalLeader = false;
 		if (lead.agentId !== undefined) {
 			const named = bots.find((bot) => bot.agentId === lead.agentId);
-			const refusal = namedLeaderRefusal(named, lead.agentId);
+			const refusal = namedLeaderRefusal(named, lead.agentId, parent.record === undefined);
 			if (!named || refusal !== undefined) throw new Error(refusal);
 			leader = named;
 			const madeByLeader = bots.some((bot) => bot.leader && bot.agentId === named.createdBy);
 			appointedBy = named.createdBy === "root" || madeByLeader ? "root" : "owner";
+		} else if (parent.record) {
+			throw new Error(
+				"A leader hands a part on only to a standing leader: name one with agentId (bot_message list marks them). Only the orchestrator appoints a goal leader or creates a bot; for a leader you do not have, ask it with ask_root.",
+			);
 		} else {
-			const created = this.deps.createGoalLeader(goalLeaderRequest(lead), parent.appointer);
+			const created = this.deps.createGoalLeader(goalLeaderRequest(lead));
 			const found = this.deps.bots().find((bot) => bot.agentId === created.agentId);
 			if (!found) throw new Error(`The goal leader ${created.agentId} was not saved.`);
 			leader = found;
@@ -272,9 +273,7 @@ export class LeaderController {
 		});
 		const ahead = this.currentFor(leader.agentId);
 		if (parent.record && ahead)
-			throw new Error(
-				`${leader.displayName} already leads a goal; name a leader that is free, or leave agentId out to appoint a goal leader.`,
-			);
+			throw new Error(`${leader.displayName} already leads a goal; name a standing leader that is free.`);
 		try {
 			this.ledger.open(objectiveId, {
 				v: 1,
@@ -334,7 +333,10 @@ export class LeaderController {
 	 */
 	async askRoot(leader: string, question: string): Promise<BotAskRootResult> {
 		const record = this.currentFor(leader);
-		if (record?.state !== "running") throw new Error(`${leader} has no goal running to ask about.`);
+		if (record?.state !== "running")
+			throw new Error(
+				`${leader} has no goal running to ask about; outside a goal, name the bot you need in your answer.`,
+			);
 		assertMayAsk(record);
 		const askId = `${record.objectiveId}:ask:${randomUUID().replace(/-/g, "").slice(0, 16)}`;
 		const deliveryId = `leader-ask:${askId}`;

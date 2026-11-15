@@ -1,7 +1,8 @@
 /**
- * Bot lifecycle on the authority of the root, a leader or the owner: a bot is created (its id, model, soul and write grant
- * checked against the creator), upserted (a binding change is refused while its worker is live), started as a leader's
- * child under the leader's running goal, stopped or retired. It also builds the message directory a bot's worker uses to
+ * Bot lifecycle on the authority of the root or the owner: a bot is created by the orchestrator alone (its id, model,
+ * soul and write grant checked against the bot's owner, the orchestrator or the leader it is made for), upserted (a
+ * binding change is refused while its worker is live), started as a leader's child under the leader's running goal,
+ * stopped or retired. It also builds the message directory a bot's worker uses to
  * reach its own bots. The coordinator supplies the roster, the worker runtime and the leaders through its host port.
  */
 import { harnessLog } from "../../kernel/harness-log.ts";
@@ -11,12 +12,7 @@ import { interfaceText } from "../language/interface-text.ts";
 import { isOrchestrationThinkingLevel } from "../orchestration/thinking-level-guard.ts";
 import { botStartModelStance } from "../orchestration/worker-model-pins.ts";
 import { BOT_MEMORY_BLOCK_SEPARATOR } from "./bot-chat-text.ts";
-import {
-	type BotCreationRequest,
-	type CreatedBotView,
-	MAX_BOTS_PER_LEADER,
-	mayNotCreateBotsText,
-} from "./bot-creation.ts";
+import { type BotCreationRequest, type CreatedBotView, MAX_BOTS_PER_LEADER } from "./bot-creation.ts";
 import type { BotMessageDirectory, BotOwnedStartOutcome } from "./bot-message-contract.ts";
 import { createBotMessageDirectory, createSessionScopedBotMessageDirectory } from "./bot-message-directory.ts";
 import { displayNameFor, suggestBotId } from "./bot-naming.ts";
@@ -226,7 +222,6 @@ export class BotLifecycleController {
 					this.host.invalidateBotViews();
 				},
 				listWorkerAgents: () => this.host.listWorkerAgents(),
-				createBotFor: (creator, request) => this.createBotFor(creator, request),
 				getLeaders: () => this.host.getLeaders(),
 				leaderDelegations: () => this.host.leaderDelegations(),
 				startOwnedBotAsChild: (leaderAgentId, leaderAlias, alias, message, invocationId) =>
@@ -307,45 +302,18 @@ export class BotLifecycleController {
 		);
 	}
 
-	/**
-	 * Creates a bot on the authority of the orchestrator or of a leader (the owner's `/bot new` is the third way). A leader
-	 * cannot make a standing leader, grants write access only when it can write itself, and has a bound on the bots it keeps.
-	 * A goal leader (`bot lead` without agentId, appointed by the orchestrator or by a leader) is created a leader, for its one goal.
-	 */
-	createBotFor(
-		creator: { readonly kind: "root" } | { readonly kind: "leader"; readonly agentId: string },
-		request: BotCreationRequest,
-		options?: { readonly goalLeader?: boolean },
-	): CreatedBotView {
+	/** The goal leader the orchestrator appoints for one goal (`bot lead` without agentId): a leader, for that goal only. */
+	createGoalLeader(request: BotCreationRequest): CreatedBotView {
 		const store = this.host.getBotTeamStore();
 		store.reload();
-		let createdBy = "root";
-		let mayWrite = true;
-		if (creator.kind === "leader") {
-			const leader = store.getBot(creator.agentId);
-			if (leader?.leader !== true || leader.retired === true)
-				throw new Error(
-					mayNotCreateBotsText(
-						store
-							.listBots()
-							.filter((bot) => bot.leader === true)
-							.map((bot) => bot.agentId),
-					),
-				);
-			createdBy = leader.agentId;
-			mayWrite = leader.canWrite === true;
-		}
-		return this.saveNewBot(
-			store,
-			request,
-			{ createdBy, mayWrite, ...(creator.kind === "leader" ? { max: MAX_BOTS_PER_LEADER } : {}) },
-			options?.goalLeader === true,
-		);
+		return this.saveNewBot(store, request, { createdBy: "root", mayWrite: true }, true);
 	}
 
 	/**
-	 * Saves a new bot for its owner, read from a reloaded store: `createdBy` names it on the record, `mayWrite` whether the
-	 * bot may be granted write access, and `max` bounds the live bots that owner keeps.
+	 * The one place a bot is created on a model's word, and only where the session manages bots (the orchestrator): no
+	 * other session, and no bot, creates one. The owner's `/bot new` writes its record directly. The store was reloaded
+	 * by the caller: `createdBy` names the bot's owner on its record, `mayWrite` whether it may be granted write access,
+	 * and `max` bounds the live bots that owner keeps.
 	 */
 	private saveNewBot(
 		store: PersistentBotTeamStore,
@@ -353,6 +321,7 @@ export class BotLifecycleController {
 		owner: { readonly createdBy: string; readonly mayWrite: boolean; readonly max?: number },
 		goalLeader: boolean,
 	): CreatedBotView {
+		if (!this.deps.standing.managesBots) throw new Error("Only the orchestrator creates bots.");
 		const { createdBy } = owner;
 		const agentId = normalizeBotOrTeamId(
 			request.agentId ??

@@ -50,12 +50,7 @@ import { createChannelReplyToolDefinition } from "./channels/channel-reply-tool.
 import { SessionChannels } from "./channels/session-channels.ts";
 import { deliverSpawnedUsageReceipt } from "./cost/spawned-usage-receipt.ts";
 import { BotChatTranscript } from "./delegation/bot-chat-transcript.ts";
-import {
-	type BotCreationRequest,
-	botToolListEntry,
-	type CreatedBotView,
-	MAX_BOTS_PER_LEADER,
-} from "./delegation/bot-creation.ts";
+import { botToolListEntry, MAX_BOTS_PER_LEADER } from "./delegation/bot-creation.ts";
 import { type BotDaemonLaunchResult, launchDetachedBotDaemon } from "./delegation/bot-daemon-launch.ts";
 import { type BotDaemonStopResult, stopDetachedBotDaemon } from "./delegation/bot-daemon-stop.ts";
 import { BotLifecycleController } from "./delegation/bot-lifecycle-controller.ts";
@@ -1936,14 +1931,6 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 		return this._botLifecycle.upsertPersistentBot(rawInput);
 	}
 
-	createBotFor(
-		creator: { readonly kind: "root" } | { readonly kind: "leader"; readonly agentId: string },
-		request: BotCreationRequest,
-		options?: { readonly goalLeader?: boolean },
-	): CreatedBotView {
-		return this._botLifecycle.createBotFor(creator, request, options);
-	}
-
 	private _remoteHub: RemoteHubController | undefined;
 
 	/** This session's hub: the machines joined to it, shown as bots with a remote mark. */
@@ -2194,8 +2181,7 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 			snapshot: () => this._getWorkerLifecycle().getTaskRuntimeSnapshot(),
 			subscribe: (listener) => this.subscribeOrchestrationStore(listener),
 			bots: () => store().listBots({ includeRetired: true }).map(leaderBotViewOf),
-			createGoalLeader: (request, appointer) =>
-				this.createBotFor(appointer ?? { kind: "root" }, request, { goalLeader: true }),
+			createGoalLeader: (request) => this._botLifecycle.createGoalLeader(request),
 			directBotOf: (runtime) => this.botOfRuntime(runtime)?.agentId,
 			runtimesOf: (alias) => this.botBindings.runtimes(alias),
 			workers: () => this.listWorkerAgents(),

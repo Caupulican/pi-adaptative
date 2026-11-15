@@ -812,7 +812,7 @@ export class BotTeamChatController {
 		this.host.showStatus(interfaceText().botTeam.spawnerReady(SPAWNER_BOT_ID));
 	}
 
-	/** `/bot lead <id>` and `/bot unlead <id>`: only the owner makes a bot a leader; a leader creates bots on the fly. */
+	/** `/bot lead <id>` and `/bot unlead <id>`: only the owner makes a bot a leader; its bots come from the orchestrator. */
 	private setBotLeader(rest: string, leader: boolean, port: BotTeamChatSessionPort): void {
 		const bot = this.namedPersistentBot(rest, `/bot ${leader ? "lead" : "unlead"} <id>`, port);
 		if (!bot) return;

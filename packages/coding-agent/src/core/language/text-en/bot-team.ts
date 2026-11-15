@@ -49,7 +49,7 @@ export const BOT_TEAM = {
 	spawnerReady: (agentId: string) =>
 		`${agentId} is ready. The orchestrator can hand it the making of many bots at once; it creates them and briefs each.`,
 	leaderOn: (agentId: string) =>
-		`${agentId} is now a standing leader: it can create bots, and other bots ask it or the orchestrator for one. It takes effect from the bot's next worker start. Its goals, handed to it by the orchestrator, are shown and overridden with /lead, not here.`,
+		`${agentId} is now a standing leader: it gets bots of its own from the orchestrator, and other bots ask it or the orchestrator for one. It takes effect from the bot's next worker start. Its goals, handed to it by the orchestrator, are shown and overridden with /lead, not here.`,
 	leaderOff: (agentId: string) =>
 		`${agentId} is no longer a standing leader. It takes effect from the bot's next worker start. A goal it already leads keeps running: /lead shows it, and /lead cancel ${agentId} stops it.`,
 	botRenamed: (agentId: string, name: string) =>

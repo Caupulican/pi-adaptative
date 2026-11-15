@@ -170,7 +170,7 @@ export interface PersistentBotRecord {
 	readonly profileId?: string;
 	/** A bot edits files only when asked to: its replies are then structured reports, not chat. */
 	readonly canWrite?: boolean;
-	/** Only the owner makes a bot a leader. A leader creates bots; any other bot asks a leader or the orchestrator for one. */
+	/** Only the owner makes a bot a leader. A leader gets bots from the orchestrator; any other bot asks a leader or it. */
 	readonly leader?: boolean;
 	/** Who created the bot: `owner`, `root`, or the leader's agent id. Set once, when the bot is created. */
 	readonly createdBy?: string;
@@ -976,7 +976,7 @@ export class PersistentBotTeamStore {
 				).length;
 				if (made >= limit.max)
 					throw new Error(
-						`${limit.createdBy} already has ${made} bots it created; retire one or ask the owner before creating more.`,
+						`${limit.createdBy} already keeps ${made} bots of its own; retire one before creating another for it.`,
 					);
 			}
 			return this.writeBot({ ...input, agentId }, nowIso);
