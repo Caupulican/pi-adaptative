@@ -56,12 +56,22 @@ export interface ManagedLaneDispatch {
 	knowledgeReferences?: readonly KnowledgeGrantReference[];
 	/** Lease duration for this externally supervised turn. */
 	leaseTtlMs: number;
-	/**
-	 * The placement key of a placed job this lane runs for, set by the placer that wrote the job. Host-written by the placer, never
-	 * a claim of a third-party process; absent on every other lane. It names the plan a stop of that job belongs to.
-	 */
-	placement?: ManagedLanePlacement;
 }
+
+/**
+ * What the host itself knows of a managed lane's report, never a claim of the process that reports it: an extension's
+ * `reportManagedLane` carries none (`NO_MANAGED_LANE_HOST_FACTS`), and only the host's own placer of a remote job supplies them.
+ */
+export interface ManagedLaneHostFacts {
+	/**
+	 * On a dispatch, the placement key of the placed job the lane runs for, set by the placer that wrote the job; absent on every
+	 * other lane. It names the plan a stop of that job belongs to.
+	 */
+	readonly placement?: ManagedLanePlacement;
+}
+
+/** The host facts of a report the host's placer did not make: an extension's, or an end the host records itself. */
+export const NO_MANAGED_LANE_HOST_FACTS: ManagedLaneHostFacts = Object.freeze({});
 
 export const MAX_MANAGED_LANE_SUMMARY_BYTES = 8 * 1024;
 

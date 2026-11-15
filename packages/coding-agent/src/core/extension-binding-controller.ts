@@ -42,7 +42,11 @@ import type {
 	ShutdownHandler,
 	ToolInfo,
 } from "./extensions/index.ts";
-import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
+import {
+	type ManagedLaneEvent,
+	type ManagedLaneHostFacts,
+	NO_MANAGED_LANE_HOST_FACTS,
+} from "./extensions/managed-lane-records.ts";
 import type { MemoryProvider } from "./extensions/types.ts";
 import { blockedKnowledgeHandoff, type HandoffKnowledgePort } from "./memory/knowledge-projection.ts";
 import type { ModelRegistry } from "./model-registry.ts";
@@ -102,7 +106,7 @@ export interface ExtensionBindingControllerDeps {
 		usage: Usage,
 		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
 	): string | undefined;
-	recordManagedLane(event: ManagedLaneEvent): void;
+	recordManagedLane(event: ManagedLaneEvent, host: ManagedLaneHostFacts): void;
 	/** Owner preferences and exact granted knowledge for a handoff an extension starts; absent in minimal hosts. */
 	handoffKnowledge?: HandoffKnowledgePort;
 	isForegroundBusy(): boolean;
@@ -422,7 +426,8 @@ export class ExtensionBindingController {
 					this.deps.addSpawnedUsage(usage, extensionUsageReport(opts));
 				},
 				reportManagedLane: (event) => {
-					this.deps.recordManagedLane(event);
+					// An extension's report is its claim: the host facts (a placed job's placement) are never taken from it.
+					this.deps.recordManagedLane(event, NO_MANAGED_LANE_HOST_FACTS);
 				},
 				getHandoffPersonaGuidance: () => this.deps.handoffKnowledge?.getHandoffPersonaGuidance(),
 				projectKnowledgeForHandoff: (references, maxBytes) =>

@@ -15,7 +15,11 @@
 import { harnessLog } from "../../kernel/harness-log.ts";
 import type { LaneRecord } from "../autonomy/lane-tracker.ts";
 import type { ManagedLaneBinding } from "../delegation/worker-lifecycle.ts";
-import type { ManagedLaneEvent } from "../extensions/managed-lane-records.ts";
+import {
+	type ManagedLaneEvent,
+	type ManagedLaneHostFacts,
+	NO_MANAGED_LANE_HOST_FACTS,
+} from "../extensions/managed-lane-records.ts";
 import type { JobCancelReason } from "./job-protocol.ts";
 import { endingOfCancel, type JobStore, placedRecordName } from "./job-store.ts";
 
@@ -35,7 +39,7 @@ export const remoteJobLaneId = (jobId: string): string => `${REMOTE_LANE_PREFIX}
 export const remoteJobAuthorization = (machineId: string): string => `${REMOTE_JOB_AUTHORIZATION_PREFIX}${machineId}`;
 
 export interface RemotePlacementSession {
-	recordManagedLane(event: ManagedLaneEvent): LaneRecord | undefined;
+	recordManagedLane(event: ManagedLaneEvent, host: ManagedLaneHostFacts): LaneRecord | undefined;
 	/**
 	 * The durable attempts of the managed lanes, by lane id: a replayed dispatch of a durable lane reads its attempt back here, and
 	 * a restart finds the placer-side lanes a predecessor left open.
@@ -119,14 +123,17 @@ export function endAbandonedPlacement(
 ): boolean {
 	try {
 		return (
-			session.recordManagedLane({
-				laneId,
-				phase: "terminal",
-				dispatchSequence,
-				status: "canceled",
-				reasonCode: PLACEMENT_ABANDONED,
-				summary: "The placement was not recorded, so the job was never offered to its machine.",
-			}) !== undefined
+			session.recordManagedLane(
+				{
+					laneId,
+					phase: "terminal",
+					dispatchSequence,
+					status: "canceled",
+					reasonCode: PLACEMENT_ABANDONED,
+					summary: "The placement was not recorded, so the job was never offered to its machine.",
+				},
+				NO_MANAGED_LANE_HOST_FACTS,
+			) !== undefined
 		);
 	} catch (error) {
 		harnessLog.warn("placement", "an abandoned placement lane could not be ended", {
@@ -154,15 +161,18 @@ export function endMarkedPlacement(
 	const ending = endingOfCancel(reason);
 	try {
 		return (
-			session.recordManagedLane({
-				laneId,
-				phase: "terminal",
-				dispatchSequence: binding.dispatchSequence,
-				status: ending === "remote_deadline" ? "timeout" : "canceled",
-				// A plan's stop names the plan's own reason, as a readable record's ending does.
-				reasonCode: ending === "plan_stopped" ? reason : ending,
-				summary: MARKED_SUMMARY,
-			}) !== undefined
+			session.recordManagedLane(
+				{
+					laneId,
+					phase: "terminal",
+					dispatchSequence: binding.dispatchSequence,
+					status: ending === "remote_deadline" ? "timeout" : "canceled",
+					// A plan's stop names the plan's own reason, as a readable record's ending does.
+					reasonCode: ending === "plan_stopped" ? reason : ending,
+					summary: MARKED_SUMMARY,
+				},
+				NO_MANAGED_LANE_HOST_FACTS,
+			) !== undefined
 		);
 	} catch (error) {
 		harnessLog.warn("placement", "a placed job's stop could not be recorded on its lane", {

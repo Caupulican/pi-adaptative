@@ -12,7 +12,7 @@ import { createHash, randomUUID } from "node:crypto";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { alarmAt, SYSTEM_TIMER_PORT, type TimerPort, type WallAlarm } from "../../kernel/timer-port.ts";
 import type { ManagedLaneBinding } from "../delegation/worker-lifecycle.ts";
-import { ManagedLaneRuntimeAdmissionError } from "../extensions/managed-lane-records.ts";
+import { ManagedLaneRuntimeAdmissionError, NO_MANAGED_LANE_HOST_FACTS } from "../extensions/managed-lane-records.ts";
 import type { FleetDispatch } from "../fleet/fleet-types.ts";
 import type { RemoteRefusalCode } from "../fleet/remote-admit.ts";
 import type { Placement } from "../placement/placement-types.ts";
@@ -661,26 +661,28 @@ export class RemoteJobClient {
 		const now = this.timers.now();
 		const laneId = remoteJobLaneId(jobId);
 		const holdMs = loadLinkSettings(this.agentDir).offlineHoldMs;
-		this.session.recordManagedLane({
-			laneId,
-			phase: "dispatch",
-			...(input.goalId ? { goalId: input.goalId } : {}),
-			dispatch: {
-				// The lane is dispatched at the job's turn: a replay of the turn is the same dispatch, and an ended lane answers the write
-				// below as refused (its dispatch is not repeated).
-				sequence: turn,
-				instructions: offer.instructions,
-				profileId: "remote-job",
-				provider: "link",
-				authorizationId: remoteJobAuthorization(machine.machineId),
-				authorizationKind: "profile-derived",
-				allowedTools: REMOTE_JOB_LANE_TOOLS,
-				writePaths: [],
-				leaseTtlMs: deadlineMs + PLACER_GRACE_MS + holdMs + PLACER_GRACE_MS,
-				// The key the record is written under: a plan's stop finds this job through its lane when the record cannot be read.
-				...(input.placement ? { placement: input.placement } : {}),
+		this.session.recordManagedLane(
+			{
+				laneId,
+				phase: "dispatch",
+				...(input.goalId ? { goalId: input.goalId } : {}),
+				dispatch: {
+					// The lane is dispatched at the job's turn: a replay of the turn is the same dispatch, and an ended lane answers the write
+					// below as refused (its dispatch is not repeated).
+					sequence: turn,
+					instructions: offer.instructions,
+					profileId: "remote-job",
+					provider: "link",
+					authorizationId: remoteJobAuthorization(machine.machineId),
+					authorizationKind: "profile-derived",
+					allowedTools: REMOTE_JOB_LANE_TOOLS,
+					writePaths: [],
+					leaseTtlMs: deadlineMs + PLACER_GRACE_MS + holdMs + PLACER_GRACE_MS,
+				},
 			},
-		});
+			// The key the record is written under: a plan's stop finds this job through its lane when the record cannot be read.
+			input.placement ? { placement: input.placement } : NO_MANAGED_LANE_HOST_FACTS,
+		);
 		const written = this.session.managedLaneBindings().get(laneId);
 		if (!written) throw new Error("remote_job_lane_unrecorded");
 		// The turn is raised once its lane exists and before its record or offer: every turn that can have an offer is then on the ledger, so a
@@ -983,14 +985,17 @@ export class RemoteJobClient {
 		let failed = false;
 		const dispatchSequence = this.session.managedLaneBindings().get(record.laneId)?.dispatchSequence;
 		void runtimeRetry(() =>
-			this.session.recordManagedLane({
-				laneId: record.laneId,
-				phase: "terminal",
-				...(dispatchSequence !== undefined ? { dispatchSequence } : {}),
-				status: terminal.status,
-				summary: terminal.summary,
-				...(terminal.reasonCode ? { reasonCode: terminal.reasonCode } : {}),
-			}),
+			this.session.recordManagedLane(
+				{
+					laneId: record.laneId,
+					phase: "terminal",
+					...(dispatchSequence !== undefined ? { dispatchSequence } : {}),
+					status: terminal.status,
+					summary: terminal.summary,
+					...(terminal.reasonCode ? { reasonCode: terminal.reasonCode } : {}),
+				},
+				NO_MANAGED_LANE_HOST_FACTS,
+			),
 		)
 			// Nothing returned means the lane had already ended (this terminal replayed after a crash, or its lease ran out):
 			// the lane is closed either way, so the end counts as applied. An unknown lane throws and is retried.

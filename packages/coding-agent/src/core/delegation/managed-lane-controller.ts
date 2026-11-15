@@ -15,6 +15,7 @@ import {
 	MAX_MANAGED_LANE_SUMMARY_BYTES,
 	type ManagedLaneDispatch,
 	type ManagedLaneEvent,
+	type ManagedLaneHostFacts,
 	ManagedLaneRuntimeAdmissionError,
 } from "../extensions/managed-lane-records.ts";
 import type { GoalState } from "../goals/goal-state.ts";
@@ -174,7 +175,7 @@ export class ManagedLaneController {
 			// Runs once per controller, before this process dispatches anything: placer orphans in this lane book end here.
 			endAbandonedPlacements(
 				{
-					recordManagedLane: (event) => this.record(event),
+					recordManagedLane: (event, host) => this.record(event, host),
 					managedLaneBindings: () => this.lifecycle.getManagedBindings(),
 				},
 				new JobStore(this.deps.getAgentDir()),
@@ -248,7 +249,8 @@ export class ManagedLaneController {
 		return record && (record.status === "queued" || record.status === "running") ? callerLaneId : undefined;
 	}
 
-	record(event: ManagedLaneEvent): LaneRecord | undefined {
+	/** Records a lane's report; `host` holds what only the host knows of it, never read from the report itself. */
+	record(event: ManagedLaneEvent, host: ManagedLaneHostFacts): LaneRecord | undefined {
 		if (this.deps.isDisposed()) throw new Error("Cannot record a managed lane after its owning session is disposed.");
 		this.ensureHydrated();
 		if (event.phase === "dispatch") {
@@ -276,7 +278,7 @@ export class ManagedLaneController {
 							: {}),
 						...(knowledgeReferences.length ? { knowledgeReferences } : {}),
 						...(runOrigin?.thirdParty ? { turnOrigin: runOrigin } : {}),
-						...(event.dispatch.placement ? { placement: event.dispatch.placement } : {}),
+						...(host.placement ? { placement: host.placement } : {}),
 					},
 					() => {
 						const runtime = runtimeGenerationAdmission(this.deps.getAgentDir());

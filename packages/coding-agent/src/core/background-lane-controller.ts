@@ -150,7 +150,7 @@ import type {
 	HostEventSubscriptionChange,
 } from "./events/host-event-control.ts";
 import { HostEventSessionController } from "./events/host-event-session-controller.ts";
-import type { ManagedLaneEvent } from "./extensions/managed-lane-records.ts";
+import type { ManagedLaneEvent, ManagedLaneHostFacts } from "./extensions/managed-lane-records.ts";
 import type { ToolDefinition } from "./extensions/types.ts";
 import { subscriptionAllowancePort } from "./fleet/capacity/allowance-room.ts";
 import { GoalAutoContinueController } from "./goals/goal-auto-continue-controller.ts";
@@ -987,8 +987,8 @@ export class BackgroundLaneController implements WorkerAgentControlPort {
 	}
 
 	/** Delegate the out-of-process dispatch/terminal claim to its single lifecycle owner. */
-	recordManagedLane(event: ManagedLaneEvent): LaneRecord | undefined {
-		return this._getManagedLaneController().record(event);
+	recordManagedLane(event: ManagedLaneEvent, host: ManagedLaneHostFacts): LaneRecord | undefined {
+		return this._getManagedLaneController().record(event, host);
 	}
 
 	/** The durable attempts of every managed lane, by lane id: id, turn, dispatch authorization and whether each has ended. */
