@@ -135,6 +135,9 @@ export const BOT_TEAM = {
 	/** The owner's stop could not be written to the bot's home: no process takes it, and it is not tried again. */
 	botStopNotRecorded: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be recorded (${reason}); it reaches no other process and is not tried again, so send it again.`,
+	/** The owner's words to a bot whose waiting stop could not be taken yet: they wait in its inbox behind the stop. */
+	botWordsWaitBehindStop: (agentId: string) =>
+		`Bot ${agentId}'s stop waits and could not be applied yet; your words reach the bot once it is.`,
 	/** The owner's stop could not be applied: it still waits and is tried again, and the work it stops stays held. */
 	botStopNotApplied: (agentId: string, reason: string) =>
 		`Bot ${agentId}: the owner's stop could not be applied and still waits; the work it stops is held until it is (${reason}).`,

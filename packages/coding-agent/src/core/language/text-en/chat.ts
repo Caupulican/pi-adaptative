@@ -28,9 +28,9 @@ export const CHAT = {
 	sentSteered: "sent while it works",
 	sentQueued: "queued for it",
 	sentToBot: (agentId: string, how: string, modelRef: string) => `Sent to ${agentId}: ${how} (${modelRef}).`,
-	/** The bot's session opens later; `reason` says why, already in the owner's words. */
+	/** The words wait in the bot's inbox until its session can take them (it opens later, or a stop of it waits); `reason` says why, already in the owner's words. */
 	sentWaiting: (agentId: string, reason: string) =>
-		`Left in ${agentId}'s inbox: its session opens once it can (${reason}).`,
+		`Left in ${agentId}'s inbox until its session can take it (${reason}).`,
 	sentToHost: (agentId: string, pid: number, sessionId?: string) =>
 		`Delivered to ${agentId}'s host in another session (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}process ${pid}); it answers in the bot's chat.`,
 	/** `failed` counts the members a delivery did not reach; they are never counted as delivered. */

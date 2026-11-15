@@ -74,7 +74,7 @@ import {
 	requestBotStop,
 } from "./bot-inbox.ts";
 import { BotInboxDrain } from "./bot-inbox-drain.ts";
-import { BotSessionHeldError, sendToBotHost } from "./bot-inbox-send.ts";
+import { BotSessionHeldError, queueBehindBotStop, sendToBotHost } from "./bot-inbox-send.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { type BotNotice, botNoticeLine, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { BotOpenRetries, botOpenFailure, storeFailure } from "./bot-open-retry.ts";
@@ -514,6 +514,14 @@ export class BotSessionHost {
 			);
 		}
 		entry.sender = sender;
+		// The owner's words never start a turn while a stop of the bot waits: it is taken first, or they wait behind it.
+		const agentDir = this.ports.agentDir();
+		if (botInboxStopWaiting(agentDir, agentId) && !this.takeStops(agentId)) {
+			const from = { sessionId: sender.hostSessionId(), cwd: sender.cwd() };
+			const result = queueBehindBotStop(agentDir, agentId, message, mode, from, entry.modelRef);
+			this.changed(agentId);
+			return result;
+		}
 		return this.give(entry, message, mode);
 	}
 

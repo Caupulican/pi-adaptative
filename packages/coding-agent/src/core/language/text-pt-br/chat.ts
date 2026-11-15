@@ -28,7 +28,7 @@ export const CHAT = {
 	sentQueued: "na fila para ele",
 	sentToBot: (agentId: string, how: string, modelRef: string) => `Enviado para ${agentId}: ${how} (${modelRef}).`,
 	sentWaiting: (agentId: string, reason: string) =>
-		`Deixado na caixa de entrada de ${agentId}: a sessão dele abre assim que puder (${reason}).`,
+		`Deixado na caixa de entrada de ${agentId} até a sessão dele poder recebê-lo (${reason}).`,
 	sentToHost: (agentId: string, pid: number, sessionId?: string) =>
 		`Entregue ao hospedeiro de ${agentId} em outra sessão (${sessionId ? `${sessionId.slice(0, 8)}, ` : ""}processo ${pid}); ele responde no chat do bot.`,
 	sentToTeam: (teamId: string, delivered: number, failed: number) =>

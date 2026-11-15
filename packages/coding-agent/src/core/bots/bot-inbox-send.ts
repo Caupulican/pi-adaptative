@@ -11,6 +11,7 @@ import type {
 	BotOperatorMessageOptions,
 } from "../delegation/bot-operator-message-options.ts";
 import type { PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
+import { interfaceText } from "../language/interface-text.ts";
 import { botFailureText } from "./bot-failure-words.ts";
 import { readRemoteBotHost } from "./bot-host-state.ts";
 import { enqueueBotInbox, takeBotInboxMessage } from "./bot-inbox.ts";
@@ -35,6 +36,46 @@ export interface BotInboxSendPorts {
 	openLater(agentId: string, error: unknown): boolean;
 }
 
+/**
+ * The owner's words to a bot this host runs, while a stop of it waits that could not be taken: no turn starts on them
+ * before the stop is applied, so they wait in the bot's inbox, which the host takes only behind its waiting stops (taken
+ * again on the stop's retry), and the owner is told why (`waitsFor`).
+ */
+export function queueBehindBotStop(
+	agentDir: string,
+	agentId: string,
+	message: string,
+	mode: BotOperatorMessageOptions["mode"],
+	from: { readonly sessionId: string; readonly cwd: string },
+	modelRef: string,
+): BotOperatorMessageDispatchResult {
+	const item = enqueueOwnerWords(agentDir, agentId, message, mode, from);
+	return {
+		agentId,
+		mode: "queued",
+		messageId: item.message.id,
+		modelRef,
+		waitsFor: interfaceText().botTeam.botWordsWaitBehindStop(agentId),
+	};
+}
+
+/** Writes the owner's words, sent from `from` in this process, to the bot's inbox. */
+function enqueueOwnerWords(
+	agentDir: string,
+	agentId: string,
+	message: string,
+	mode: BotOperatorMessageOptions["mode"],
+	from: { readonly sessionId: string; readonly cwd: string },
+): ReturnType<typeof enqueueBotInbox> {
+	return enqueueBotInbox(agentDir, {
+		agentId,
+		text: message,
+		...(mode !== undefined ? { mode } : {}),
+		from: { pid: process.pid, sessionId: from.sessionId, cwd: from.cwd },
+		at: Date.now(),
+	});
+}
+
 /** Sends the owner's words to the bot's inbox for the host that runs its session (see the module comment). */
 export async function sendToBotHost(
 	ports: BotInboxSendPorts,
@@ -46,13 +87,7 @@ export async function sendToBotHost(
 	const { agentDir, holder } = ports;
 	const record = ports.store().getBot(agentId);
 	const modelRef = record ? `${record.provider}/${record.modelId}` : "";
-	const item = enqueueBotInbox(agentDir, {
-		agentId,
-		text: message,
-		...(mode !== undefined ? { mode } : {}),
-		from: { pid: process.pid, sessionId: from.sessionId, cwd: from.cwd },
-		at: Date.now(),
-	});
+	const item = enqueueOwnerWords(agentDir, agentId, message, mode, from);
 	ports.changed(agentId);
 	let host = readRemoteBotHost(agentDir, agentId, holder);
 	let waitsFor: string | undefined;
