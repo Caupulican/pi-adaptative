@@ -20,7 +20,11 @@ are in. Its home is `<agent dir>/bots/<id>/`: `profile.json` (written from the b
 made it), `sessions/` (its own session files), `session.json` (which of them it continues, so it keeps one conversation
 whichever project you message it from; the first time a bot loads without it, its newest session file is chosen and recorded)
 and `orchestration/` (its sessions' bundles, leases and worker transcripts; state an earlier version kept in the main
-session's home is moved there the first time the bot loads). A watch belongs to the conversation that armed it and is checked only by it, so the one place a bot's
+session's home is moved there the first time the bot loads). While a session or another host holds the bot's
+conversation and is not proven dead (alive, on another machine or not yet judgeable), the bot's host stays out and opens
+it again on a backoff while the bot is owed work; you are told once which kind of holder keeps it out. A `session.json`
+or session file that is a symbolic link is not followed: the bot's load stops and tells you why, and the link must be
+replaced by the file (a symlinked `bots/<id>` directory is fine). A watch belongs to the conversation that armed it and is checked only by it, so the one place a bot's
 session is chosen (when it loads) keeps that true: if it continues another conversation than the one its watches target,
 those watches are cancelled and you are told. The record in the bot store stays the index; editing the bot's model, permissions or soul
 refreshes the profile and applies to its session when it starts, so a bot that is working must be stopped first. The session
