@@ -79,7 +79,6 @@ import {
 	type ToolArgumentValidationStats,
 } from "./tool-recovery-stats.ts";
 
-/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export type { SpawnedUsageOptions };
 
 /** A session's recorded cumulative usage, and whether its historical accounting is settled so the reading is all of it. */
@@ -88,6 +87,7 @@ export interface DurableUsageReading {
 	readonly settled: boolean;
 }
 
+/** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
 export interface SessionAnalyticsSettingsSource {
 	getTheme(): string | undefined;
 }
