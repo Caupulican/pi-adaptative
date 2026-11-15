@@ -786,6 +786,9 @@ export class BotSessionHost {
 				settle: () => this.settle(entry),
 			});
 			session.startBackgroundInputs();
+			// What its saved session waits for resumes in it now: a usage limit's kept reset, and its queued workers.
+			session.restoreGoalRuntimeAfterResume();
+			session.backgroundLanes.drainQueuedWorkerDelegations();
 			this.entries.set(agentId, entry);
 			this.owed.loaded(agentId);
 			this.publishState(entry);
@@ -972,7 +975,8 @@ export class BotSessionHost {
 	 * The owner's stop of the bot's session (`bot-stop.ts`), written to its home dated now (`requestBotStop`) and taken by
 	 * whichever process can: here when this host runs it (its turn and workers stopped; `stopped` says whether it was
 	 * working), else by this process while no process hosts it, else by the process hosting it, which `elsewhere` names
-	 * for the owner. A bot that runs as no session of its own is not written to. A failed write throws.
+	 * for the owner. A bot that runs as no session of its own is not written to. A stop that could not be written is told to
+	 * the owner, and the turn this host runs stops all the same.
 	 */
 	interrupt(agentId: string): { readonly stopped: boolean; readonly elsewhere?: string } {
 		const entry = this.entries.get(agentId);
@@ -980,12 +984,26 @@ export class BotSessionHost {
 		if (!entry && (!record || record.retired || !this.runsAsSession(record))) return { stopped: false };
 		const sender = this.ports.sender();
 		const from = { pid: process.pid, sessionId: sender.hostSessionId(), cwd: sender.cwd() };
-		requestBotStop(this.ports.agentDir(), { agentId, reasonCode: OWNER_STOPPED_REASON, from, at: Date.now() });
-		if (entry) {
-			const stopped = this.isBusy(entry);
-			this.takeInbox(agentId);
-			return { stopped };
+		let written = true;
+		try {
+			requestBotStop(this.ports.agentDir(), { agentId, reasonCode: OWNER_STOPPED_REASON, from, at: Date.now() });
+		} catch (error) {
+			written = false;
+			this.ports.warn(interfaceText().botTeam.botStopNotApplied(agentId, errorText(error)));
 		}
+		if (entry) {
+			const working = this.isBusy(entry);
+			// The turn it runs stops at once, whether or not the stop was written and taken (a stop not taken is tried again).
+			if (!(written && this.takeStops(agentId)) && working)
+				void entry.session
+					.abort(interfaceText().botTeam.botTurnAbortReasons.ownerStopped)
+					.catch((error: unknown) =>
+						this.ports.warn(interfaceText().botTeam.botTurnFailed(agentId, errorText(error))),
+					);
+			this.takeInbox(agentId);
+			return { stopped: working };
+		}
+		if (!written) return { stopped: false };
 		// Applied here while no process hosts it (then opened for the owner's words sent after it); its host takes it.
 		this.owed.openIfOwed(agentId);
 		this.changed(agentId);
