@@ -37,6 +37,11 @@ export interface SpawnedUsageReport {
 	costBasis?: "response";
 	sourceSessionId?: string;
 	/**
+	 * The source session's cumulative usage the report's range starts at, beside `through`: a reader sums the reports of
+	 * one source that carry both as the union of their ranges (`ChargedRanges`), so a range recorded twice counts once.
+	 */
+	from?: Usage;
+	/**
 	 * The source session's cumulative usage the report's range ends at, for a source that charges ranges of its cumulative
 	 * usage (a bot's session, `BotTurnAccounting`): how far the parent holds its charges, read back when the source's own
 	 * record of them is lost.

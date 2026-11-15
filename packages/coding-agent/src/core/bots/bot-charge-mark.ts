@@ -34,8 +34,11 @@ function sameReading(a: Usage, b: Usage): boolean {
 /** The bot session's charge mark (see the module comment), read from its transcript once per session file. */
 export class BotChargeMark {
 	private readonly transcript: Pick<SessionManager, "getEntries" | "getSessionId" | "appendCustomEntry">;
-	/** The session the reach was read for, and how far its marks reach (undefined: it holds none). */
-	private read: { readonly sessionId: string; reach: Usage | undefined } | undefined;
+	/**
+	 * The session the reach was read for, how far its marks reach and when the last was written (ms since the epoch;
+	 * undefined: it holds none).
+	 */
+	private read: { readonly sessionId: string; reach: Usage | undefined; at: number | undefined } | undefined;
 
 	constructor(transcript: BotChargeMark["transcript"]) {
 		this.transcript = transcript;
@@ -43,24 +46,42 @@ export class BotChargeMark {
 
 	/** How far the transcript's marks reach together, field by field; undefined when it holds none. */
 	reach(): Usage | undefined {
+		return this.marks().reach;
+	}
+
+	/**
+	 * When the transcript's last mark was written (ms since the epoch); undefined when it holds none. A root's file not
+	 * written since holds no charge past `reach` the roots held then.
+	 */
+	markedAt(): number | undefined {
+		return this.marks().at;
+	}
+
+	private marks(): { readonly sessionId: string; reach: Usage | undefined; at: number | undefined } {
 		const sessionId = this.transcript.getSessionId();
-		if (this.read?.sessionId === sessionId) return this.read.reach;
+		if (this.read?.sessionId === sessionId) return this.read;
 		let reach: Usage | undefined;
+		let at: number | undefined;
 		for (const entry of this.transcript.getEntries()) {
 			if (entry.type !== "custom" || entry.customType !== BOT_CHARGE_MARK_CUSTOM_TYPE) continue;
 			if (!isPlainRecord(entry.data) || !isUsage(entry.data.through)) continue;
 			reach = reach ? usageReach(reach, entry.data.through) : entry.data.through;
+			const written = Date.parse(entry.timestamp);
+			if (Number.isFinite(written)) at = Math.max(at ?? written, written);
 		}
-		this.read = { sessionId, reach };
-		return reach;
+		this.read = { sessionId, reach, at };
+		return this.read;
 	}
 
 	/** Records that the roots hold the session's charges through `through`, when that reaches past the mark. */
 	advance(through: Usage): void {
-		const reach = this.reach();
+		const read = this.marks();
+		const reach = read.reach;
 		const next = reach ? usageReach(reach, through) : through;
 		if (reach && sameReading(reach, next)) return;
+		const at = Date.now();
 		this.transcript.appendCustomEntry(BOT_CHARGE_MARK_CUSTOM_TYPE, { through: structuredClone(next) });
-		if (this.read) this.read.reach = next;
+		read.reach = next;
+		read.at = at;
 	}
 }

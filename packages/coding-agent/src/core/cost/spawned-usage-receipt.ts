@@ -27,8 +27,8 @@ function matchesSpawnedUsageReceipt(data: unknown, usage: Usage, options: Spawne
 		(data.model === undefined || data.model === options.model) &&
 		(data.goalId === undefined || data.goalId === options.goalId) &&
 		isDeepStrictEqual(data.usageComponents, options.usageComponents) &&
+		isDeepStrictEqual(data.from, options.from) &&
 		isDeepStrictEqual(data.through, options.through) &&
-		data.recordedAt === options.recordedAt &&
 		isDeepStrictEqual(data.usage, usage)
 	);
 }

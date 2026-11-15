@@ -5,6 +5,7 @@ import * as fs from "node:fs";
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { addUsage, createEmptyUsage, getSessionEntryUsage } from "../../kernel/usage.ts";
+import { type ChargedRange, ChargedRanges } from "./charged-ranges.ts";
 import {
 	SEMANTIC_USAGE_CUSTOM_TYPE,
 	type SemanticAccountingReport,
@@ -33,6 +34,13 @@ export function isUsage(value: unknown): value is Usage {
 	);
 }
 
+/** The range a spawned report charges, when it names one: both ends, its source, and no per-model components (`ChargedRanges`). */
+export function chargedRangeOf(report: SpawnedUsageReport | undefined): ChargedRange | undefined {
+	if (!report || report.usageComponents !== undefined || typeof report.sourceSessionId !== "string") return undefined;
+	const { from, through } = report;
+	return isUsage(from) && isUsage(through) ? { source: report.sourceSessionId, from, through } : undefined;
+}
+
 export function readAutoLearnSessionIdFromFile(filePath: string): string | undefined {
 	let fd: number | undefined;
 	try {
@@ -58,7 +66,8 @@ export function readAutoLearnSessionIdFromFile(filePath: string): string | undef
 
 /**
  * Whole-session spend, including direct entry charges and already-rolled-up descendants. `pending` are held semantic
- * reports the ledger does not carry yet; a report already in `entries` is counted once, from its row.
+ * reports the ledger does not carry yet; a report already in `entries` is counted once, from its row. Spawned reports
+ * that charge a range count as the union of their ranges (`ChargedRanges`), any other once by report id.
  */
 export function aggregateCumulativeUsageFromSessionEntries(
 	entries: readonly SessionEntry[],
@@ -68,6 +77,7 @@ export function aggregateCumulativeUsageFromSessionEntries(
 	const total = createEmptyUsage();
 	const seenSpawnedReportIds = new Set<string>();
 	const seenSemanticReportIds = new Set<string>();
+	const ranges = new ChargedRanges();
 	for (const entry of entries) {
 		const usage = getSessionEntryUsage(entry);
 		if (usage && isUsage(usage)) {
@@ -75,6 +85,12 @@ export function aggregateCumulativeUsageFromSessionEntries(
 		} else if (entry.type === "custom" && entry.customType === SPAWNED_USAGE_CUSTOM_TYPE) {
 			const data = entry.data as SpawnedUsageReport | undefined;
 			if (!data?.usage || !isUsage(data.usage)) continue;
+			const range = chargedRangeOf(data);
+			if (range) {
+				const open = ranges.take(range, data.usage);
+				if (open) addUsage(total, open);
+				continue;
+			}
 			if (data.reportId) {
 				if (seenSpawnedReportIds.has(data.reportId)) continue;
 				seenSpawnedReportIds.add(data.reportId);

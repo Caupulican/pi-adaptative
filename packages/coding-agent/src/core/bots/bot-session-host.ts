@@ -145,8 +145,8 @@ export interface BotSender {
 	 */
 	reportUsage(usage: Usage, report: BotChargeReport): SpawnedUsageReceiptDisposition;
 	/**
-	 * How far the root sessions of the process hold the charges of bot session `sessionId`, which began at `since`, and
-	 * the charges they hold unwritten (`botChargesHeld`).
+	 * How far the root sessions of the process hold the charges of bot session `sessionId` in the files changed since
+	 * `since`, and the charges they hold unwritten (`botChargesHeld`).
 	 */
 	chargesHeld(sessionId: string, since: number): Promise<BotChargesHeld>;
 	/**
@@ -754,8 +754,8 @@ export class BotSessionHost {
 					chargesHeld: (sessionId, since) => entry.sender.chargesHeld(sessionId, since),
 					chargesPersisted: (listener) => entry.sender.chargesPersisted(listener),
 					rootSessionId: () => entry.sender.hostSessionId(),
-					chargeNotRecorded: (reason) =>
-						entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(agentId, reason)),
+					chargeNotRecorded: (reason, file) =>
+						entry.sender.warn(interfaceText().botTeam.botTurnSpendNotRecorded(agentId, reason, file)),
 					markNotKept: (reason) =>
 						entry.sender.warn(interfaceText().botTeam.botChargeMarkNotKept(agentId, reason)),
 					outcome: (summary) => this.recordOutcome(agentId, summary),

@@ -1,7 +1,9 @@
 import type { Usage } from "@caupulican/pi-ai";
 import type { SessionEntry } from "../../kernel/session/session-entries.ts";
 import { getSessionEntryUsageComponents } from "../../kernel/usage.ts";
+import { ChargedRanges } from "./charged-ranges.ts";
 import type { DailyUsageTotals, DailyUsageWindow } from "./daily-usage.ts";
+import { chargedRangeOf } from "./session-usage.ts";
 import {
 	hasUnknownUsageModel,
 	resolveEffectiveEntryCost,
@@ -33,6 +35,8 @@ export interface CurrentSessionCostTotals {
 export interface CurrentSessionCostAccumulator extends CurrentSessionCostTotals {
 	seenSubagentReportIds: Set<string>;
 	seenSemanticReportIds: Set<string>;
+	/** The ranges spawned reports that charge one have taken: each counts as the union of them (`ChargedRanges`). */
+	chargedRanges: ChargedRanges;
 }
 
 export interface SessionCostSummary extends CurrentSessionCostTotals {
@@ -86,6 +90,7 @@ export function createCurrentSessionCostAccumulator(): CurrentSessionCostAccumul
 		currentCost: 0,
 		seenSubagentReportIds: new Set<string>(),
 		seenSemanticReportIds: new Set<string>(),
+		chargedRanges: new ChargedRanges(),
 	};
 }
 
@@ -134,12 +139,16 @@ export function accumulateCurrentSessionCostsFromEntries(
 		}
 
 		if (entry.type !== "custom" || entry.customType !== SPAWNED_USAGE_CUSTOM_TYPE) continue;
-		const report = entry.data as SpawnedUsageReport | undefined;
-		if (!report) continue;
-		if (report?.reportId) {
-			if (accumulator.seenSubagentReportIds.has(report.reportId)) continue;
-			accumulator.seenSubagentReportIds.add(report.reportId);
+		const recorded = entry.data as SpawnedUsageReport | undefined;
+		if (!recorded) continue;
+		const range = chargedRangeOf(recorded);
+		const open = range ? accumulator.chargedRanges.take(range, recorded.usage) : recorded.usage;
+		if (!open) continue;
+		if (!range && recorded.reportId) {
+			if (accumulator.seenSubagentReportIds.has(recorded.reportId)) continue;
+			accumulator.seenSubagentReportIds.add(recorded.reportId);
 		}
+		const report = open === recorded.usage ? recorded : { ...recorded, usage: open };
 		for (const { part, cost: resolved } of resolveSpawnedUsageComponents(report, entry.timestamp)) {
 			accumulator.subagentCost += resolved.total;
 			accumulator.reportedSubagentCost = (accumulator.reportedSubagentCost ?? 0) + resolved.reportedTotal;
@@ -157,6 +166,7 @@ export function aggregateCurrentSessionCostsFromEntries(entries: readonly Sessio
 	const {
 		seenSubagentReportIds: _seenSubagentReportIds,
 		seenSemanticReportIds: _seenSemanticReportIds,
+		chargedRanges: _chargedRanges,
 		...totals
 	} = accumulateCurrentSessionCostsFromEntries(createCurrentSessionCostAccumulator(), entries);
 	return totals;

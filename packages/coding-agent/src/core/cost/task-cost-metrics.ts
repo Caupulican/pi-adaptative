@@ -10,6 +10,8 @@ import {
 } from "../goals/session-goal-state.ts";
 import { WORK_UNIT_CUSTOM_TYPE, type WorkUnitRecord } from "../work-units.ts";
 import type { AccountingOrigin } from "./accounting-evidence.ts";
+import { ChargedRanges } from "./charged-ranges.ts";
+import { chargedRangeOf } from "./session-usage.ts";
 import { measureTaskExecutionTiming } from "./task-execution-timing.ts";
 import {
 	hasUnknownUsageModel,
@@ -220,6 +222,8 @@ export function computeSessionTaskAndModelMetrics(options: {
 		}
 	>();
 	const seenSpawned = new Set<string>();
+	// Spawned reports that charge a range count as the union of their ranges.
+	const chargedRanges = new ChargedRanges();
 	const seenSemantic = new Set<string>();
 	let systemOneCostUsd = 0;
 	let systemOneReports = 0;
@@ -416,12 +420,16 @@ export function computeSessionTaskAndModelMetrics(options: {
 		}
 
 		if (entry.type === "custom" && entry.customType === SPAWNED_USAGE_CUSTOM_TYPE) {
-			const report = entry.data as SpawnedUsageReport | undefined;
-			if (!report) continue;
-			if (report.reportId) {
-				if (seenSpawned.has(report.reportId)) continue;
-				seenSpawned.add(report.reportId);
+			const recorded = entry.data as SpawnedUsageReport | undefined;
+			if (!recorded) continue;
+			const range = chargedRangeOf(recorded);
+			const open = range ? chargedRanges.take(range, recorded.usage) : recorded.usage;
+			if (!open) continue;
+			if (!range && recorded.reportId) {
+				if (seenSpawned.has(recorded.reportId)) continue;
+				seenSpawned.add(recorded.reportId);
 			}
+			const report = open === recorded.usage ? recorded : { ...recorded, usage: open };
 			const owner = receiptOwner(report.origin, report.goalId, Date.parse(entry.timestamp));
 			for (const { part, cost: resolved } of resolveSpawnedUsageComponents(report, entry.timestamp)) {
 				const tok = part.usage.input + part.usage.output + part.usage.cacheRead + part.usage.cacheWrite;

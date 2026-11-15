@@ -449,6 +449,7 @@ export class SessionAnalytics {
 			provider: opts?.provider,
 			model: opts?.model,
 			goalId: opts?.goalId,
+			from: opts?.from,
 			through: opts?.through,
 			recordedAt: opts?.recordedAt,
 			reportId,

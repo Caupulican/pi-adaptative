@@ -201,6 +201,17 @@ export interface VisitSessionEntriesOptions {
 	readonly maxBytes?: number;
 	/** Optional per-row ceiling for bounded recovery fixtures; production defaults to the session format maximum. */
 	readonly maxLineChars?: number;
+	/**
+	 * Reads the file as it was when opened, and a file that only grows meanwhile (the same file, no shorter: rows a writer
+	 * appends) is no change: the rows appended are not read. A session file is rewritten by a rename onto it, never in
+	 * place, so any other change is one; ignored with `requireComplete`.
+	 */
+	readonly prefixOfGrowing?: boolean;
+}
+
+/** Whether `after` is the file `before` was, grown or not: the same file, no shorter. */
+function grownFrom(before: Stats, after: Stats): boolean {
+	return after.dev === before.dev && after.ino === before.ino && after.size >= before.size;
 }
 
 export async function visitSessionEntriesAsync(
@@ -227,6 +238,8 @@ export async function visitSessionEntriesAsync(
 			throw new TypeError("Session line limit must be within its format bound.");
 		const maxLineChars = options?.maxLineChars ?? MAX_SESSION_LINE_CHARS;
 		const scanLimit = options?.requireComplete ? before.size : options?.maxBytes;
+		const prefix = options?.prefixOfGrowing === true && !options.requireComplete;
+		const unchanged = (after: Stats): boolean => (prefix ? grownFrom(before, after) : sameFileVersion(before, after));
 		if (!sameFileVersion(before, await stat(filePath)))
 			throw new FileSnapshotChangedError("Session file changed while opening it.");
 		const headerResult = readSessionHeaderFromDescriptor(file.fd, MAX_SESSION_HEADER_BYTES);
@@ -247,7 +260,12 @@ export async function visitSessionEntriesAsync(
 			if (selected && entry && entry.type !== "session") visit(entry);
 		};
 		for (;;) {
-			const remaining = scanLimit === undefined ? buffer.length : scanLimit - position + 1;
+			const remaining = prefix
+				? before.size - position
+				: scanLimit === undefined
+					? buffer.length
+					: scanLimit - position + 1;
+			if (remaining <= 0) break;
 			const { bytesRead } = await file.read(buffer, 0, Math.min(buffer.length, remaining), position);
 			if (bytesRead === 0) break;
 			if (scanLimit !== undefined && position + bytesRead > scanLimit)
@@ -266,7 +284,7 @@ export async function visitSessionEntriesAsync(
 			if (options?.requireComplete) throw new Error("Session history ends with an incomplete JSONL record.");
 			consume(tail);
 		}
-		if (!sameFileVersion(before, await file.stat()) || !sameFileVersion(before, await stat(filePath)))
+		if (!unchanged(await file.stat()) || !unchanged(await stat(filePath)))
 			throw new FileSnapshotChangedError("Session file changed while reading it; reopen it before retrying.");
 		return headerResult.header;
 	} finally {

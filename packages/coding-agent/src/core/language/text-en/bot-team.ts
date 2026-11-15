@@ -117,8 +117,9 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: its run could not be added to its history (${reason}).`,
 	botStateNotPublished: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its state could not be published for other sessions (${reason}).`,
-	botTurnSpendNotRecorded: (agentId: string, reason: string) =>
-		`Bot ${agentId}: its turn's spend could not be recorded (${reason}).`,
+	/** `file`: the main session's file that could not be read back, when that is why. */
+	botTurnSpendNotRecorded: (agentId: string, reason: string, file: string | undefined) =>
+		`Bot ${agentId}: its turn's spend could not be recorded (${file === undefined ? reason : `${file} could not be read: ${reason}`}).`,
 	botChargeMarkNotKept: (agentId: string, reason: string) =>
 		`Bot ${agentId}: how far the main session holds its spend could not be marked in its transcript (${reason}); if its spend record is lost, that is read back from the main session's files alone.`,
 	botTurnOutcomeNotRecorded: (agentId: string, reason: string) =>

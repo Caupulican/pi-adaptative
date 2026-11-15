@@ -21,6 +21,8 @@ import {
 	readProjectedSessionEntries,
 	readProjectedSessionEntriesSync,
 } from "./accounting-history.ts";
+import { type ChargedRange, sweepChargedRanges } from "./charged-ranges.ts";
+import { chargedRangeOf } from "./session-usage.ts";
 import {
 	getSpawnedUsageComponents,
 	hasUnknownUsageModel,
@@ -112,28 +114,60 @@ function addUsage(
 	if (usage.cost.estimate === "base-rates") totals.costEstimate = "base-rates";
 }
 
-function addDailyUsageFromEntries(
+/**
+ * What counts once in one aggregation: spawned and semantic report ids, and the part of each spawned report that charges a
+ * range that counts, swept over every record read so each covered stretch counts on the earliest day a charge covering
+ * it was recorded (`sweepChargedRanges`).
+ */
+interface DailyUsageSeen {
+	readonly spawned: Set<string>;
+	readonly semantic: Set<string>;
+	readonly ranged: ReadonlyMap<DailyUsageRecord, Usage | undefined>;
+}
+
+function dailyUsageSeen(records: Iterable<DailyUsageRecord>): DailyUsageSeen {
+	return {
+		spawned: new Set(),
+		semantic: new Set(),
+		ranged: sweepChargedRanges(records, (record) =>
+			record.kind === "spawned" && record.range
+				? { range: record.range, usage: record.usage, at: Date.parse(record.timestamp) }
+				: undefined,
+		),
+	};
+}
+
+/** The records one session file (or the live session) holds, and what it counts as when any of them counts. */
+interface DailyUsageSource {
+	readonly records: readonly DailyUsageRecord[];
+	readonly counts: "session" | "fragment" | undefined;
+}
+
+function countSource(totals: DailyUsageTotals, counts: DailyUsageSource["counts"]): void {
+	if (counts === "fragment") totals.fragments = (totals.fragments ?? 0) + 1;
+	else if (counts === "session") totals.sessions++;
+}
+
+/** Counts the sources' records in the window, each charge once (`DailyUsageSeen`), and the sources any of them counted for. */
+function addDailyUsageSources(
 	totals: DailyUsageTotals,
-	entries: readonly SessionEntry[],
+	sources: readonly DailyUsageSource[],
 	window: DailyUsageWindow,
-	seenSpawnedReportIds: Set<string>,
-	seenSemanticReportIds: Set<string>,
-): boolean {
-	let hasUsage = false;
-	for (const entry of entries) {
-		for (const record of usageRecords(entry)) {
-			if (addDailyUsageRecord(totals, record, window, seenSpawnedReportIds, seenSemanticReportIds)) hasUsage = true;
-		}
+): DailyUsageTotals {
+	const seen = dailyUsageSeen(sources.flatMap((source) => source.records));
+	for (const source of sources) {
+		let used = false;
+		for (const record of source.records) if (addDailyUsageRecord(totals, record, window, seen)) used = true;
+		if (used) countSource(totals, source.counts);
 	}
-	return hasUsage;
+	return finishTotals(totals);
 }
 
 function addDailyUsageRecord(
 	totals: DailyUsageTotals,
 	record: DailyUsageRecord,
 	window: DailyUsageWindow,
-	spawned: Set<string>,
-	semantic: Set<string>,
+	seen: DailyUsageSeen,
 ): boolean {
 	if (!isInsideWindow(Date.parse(record.timestamp), window)) return false;
 	// A wake is an event, not spend: it does not make its session one that spent in the window.
@@ -149,9 +183,19 @@ function addDailyUsageRecord(
 		totals.actAheadUsd += record.usd;
 		return false;
 	}
-	const seen = record.kind === "spawned" ? spawned : record.kind === "semantic" ? semantic : undefined;
-	if (record.reportId && seen?.has(record.reportId)) return false;
-	const resolved = resolveEffectiveEntryCost(record.usage, {
+	// A charged range counts the part of it no earlier-dated charge covers; any other report counts once by report id.
+	const ranged = record.kind === "spawned" && record.range !== undefined;
+	const usage = ranged ? seen.ranged.get(record) : record.usage;
+	if (!usage) return false;
+	const ids = ranged
+		? undefined
+		: record.kind === "spawned"
+			? seen.spawned
+			: record.kind === "semantic"
+				? seen.semantic
+				: undefined;
+	if (record.reportId && ids?.has(record.reportId)) return false;
+	const resolved = resolveEffectiveEntryCost(usage, {
 		model: record.model,
 		provider: record.provider,
 		kind: record.kind,
@@ -159,9 +203,9 @@ function addDailyUsageRecord(
 		costStatus: record.costStatus,
 	});
 	if (!resolved) return false;
-	if (record.reportId) seen?.add(record.reportId);
-	if (hasUnknownUsageModel(record.usage, record.provider, record.model)) {
-		totals.modelUnknownTokens = (totals.modelUnknownTokens ?? 0) + record.usage.totalTokens;
+	if (record.reportId) ids?.add(record.reportId);
+	if (hasUnknownUsageModel(usage, record.provider, record.model)) {
+		totals.modelUnknownTokens = (totals.modelUnknownTokens ?? 0) + usage.totalTokens;
 		totals.modelUnknownOperations = (totals.modelUnknownOperations ?? 0) + 1;
 		totals.apiEquivalentPartial = true;
 	}
@@ -174,7 +218,7 @@ function addDailyUsageRecord(
 	if (record.historySummary) totals.historySummaryCost += costTotal;
 	if (record.proactivity) totals.proactivityCost += costTotal;
 	if (resolved?.estimated) totals.costEstimate = "base-rates";
-	addUsage(totals, record.usage);
+	addUsage(totals, usage);
 	return true;
 }
 
@@ -207,16 +251,9 @@ export function aggregateDailyUsageFromEntries(
 	window: DailyUsageWindow,
 	pending: readonly SemanticUsageReport[] = [],
 ): DailyUsageTotals {
-	const totals = createZeroTotals();
-	const semantic = new Set<string>();
-	let hasUsage = addDailyUsageFromEntries(totals, entries, window, new Set(), semantic);
-	for (const report of pending)
-		if (
-			addDailyUsageRecord(totals, semanticUsageRecord(report, new Date().toISOString()), window, new Set(), semantic)
-		)
-			hasUsage = true;
-	totals.sessions = hasUsage ? 1 : 0;
-	return finishTotals(totals);
+	const now = new Date().toISOString();
+	const records = [...entries.flatMap(usageRecords), ...pending.map((report) => semanticUsageRecord(report, now))];
+	return addDailyUsageSources(createZeroTotals(), [{ records, counts: "session" }], window);
 }
 
 export interface LiveSessionDailyUsageSource {
@@ -244,6 +281,8 @@ interface DailyUsageSpendRecord {
 	provider?: string;
 	perResponse?: boolean;
 	reportId?: string;
+	/** The range a spawned report charges (`chargedRangeOf`): it counts as the union of the ranges, not by report id. */
+	range?: ChargedRange;
 	historySummary: boolean;
 	proactivity: boolean;
 }
@@ -328,6 +367,7 @@ function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
 		typeof data.recordedAt === "string" && Number.isFinite(Date.parse(data.recordedAt))
 			? data.recordedAt
 			: entry.timestamp;
+	const range = chargedRangeOf(data);
 	if (data.usageComponents !== undefined)
 		return getSpawnedUsageComponents(data, recordedAt).map((part) => ({
 			timestamp: part.timestamp,
@@ -349,6 +389,7 @@ function usageRecords(entry: SessionEntry): DailyUsageRecord[] {
 			...(typeof data.provider === "string" ? { provider: data.provider } : {}),
 			...(data.costBasis === "response" ? { perResponse: true } : {}),
 			reportId: data.reportId,
+			...(range ? { range } : {}),
 			historySummary: false,
 			proactivity: false,
 		},
@@ -433,8 +474,7 @@ export async function aggregateDailyUsageAsync(
 	pending: readonly SemanticUsageReport[] = [],
 ): Promise<DailyUsageTotals> {
 	const totals = createZeroTotals();
-	const spawned = new Set<string>();
-	const semantic = new Set<string>();
+	const sources: DailyUsageSource[] = [];
 	let liveCounted = false;
 	const directories = root
 		? (await readSessionDirectory(scope))
@@ -488,26 +528,27 @@ export async function aggregateDailyUsageAsync(
 					await retainUsageRecords(filePath, key, records, materialized);
 				}
 			}
-			let used = false;
-			for (let index = 0; index < records.length; index++) {
-				if (index % 256 === 0) await yieldToEventLoop();
-				const record = records[index]!;
-				if (addDailyUsageRecord(totals, record, window, spawned, semantic)) used = true;
-			}
-			if (used) {
-				if (fragmentRevision) totals.fragments = (totals.fragments ?? 0) + 1;
-				else totals.sessions++;
-			}
+			sources.push({ records, counts: fragmentRevision ? "fragment" : "session" });
 		}
 	}
-	let liveUsed = false;
-	if (liveSession && !liveCounted)
-		for (const record of await liveUsageRecords(liveSession))
-			if (addDailyUsageRecord(totals, record, window, spawned, semantic)) liveUsed = true;
-	for (const report of pending)
-		if (addDailyUsageRecord(totals, semanticUsageRecord(report, new Date().toISOString()), window, spawned, semantic))
-			liveUsed = true;
-	if (liveUsed && !liveCounted) totals.sessions++;
+	const now = new Date().toISOString();
+	sources.push({
+		records: [
+			...(liveSession && !liveCounted ? await liveUsageRecords(liveSession) : []),
+			...pending.map((report) => semanticUsageRecord(report, now)),
+		],
+		counts: liveCounted ? undefined : "session",
+	});
+	// Every file is read before any record counts: a charged range counts on the earliest day any file records it.
+	const seen = dailyUsageSeen(sources.flatMap((source) => source.records));
+	for (const source of sources) {
+		let used = false;
+		for (let index = 0; index < source.records.length; index++) {
+			if (index % 256 === 0) await yieldToEventLoop();
+			if (addDailyUsageRecord(totals, source.records[index]!, window, seen)) used = true;
+		}
+		if (used) countSource(totals, source.counts);
+	}
 	return finishTotals(totals);
 }
 
@@ -520,18 +561,18 @@ async function liveUsageRecords(liveSession: LiveSessionDailyUsageSource): Promi
 	return records;
 }
 
-function addDailyUsageFile(
-	totals: DailyUsageTotals,
+function dailyUsageFile(
 	filePath: string,
 	window: DailyUsageWindow,
-	spawned: Set<string>,
-	semantic: Set<string>,
 	liveSession?: LiveSessionDailyUsageSource,
-): void {
-	if (!shouldReadSessionFile(filePath, window)) return;
-	if (!addDailyUsageFromEntries(totals, getSessionEntries(filePath, liveSession), window, spawned, semantic)) return;
-	if (existsSync(accountingFragmentPath(filePath))) totals.fragments = (totals.fragments ?? 0) + 1;
-	else totals.sessions++;
+): DailyUsageSource[] {
+	if (!shouldReadSessionFile(filePath, window)) return [];
+	return [
+		{
+			records: getSessionEntries(filePath, liveSession).flatMap(usageRecords),
+			counts: existsSync(accountingFragmentPath(filePath)) ? "fragment" : "session",
+		},
+	];
 }
 
 export function aggregateDailyUsageFromSessionFiles(
@@ -541,14 +582,10 @@ export function aggregateDailyUsageFromSessionFiles(
 ): DailyUsageTotals {
 	const totals = createZeroTotals();
 	if (!sessionDir || !existsSync(sessionDir)) return totals;
-	const seenSpawnedReportIds = new Set<string>();
-	const seenSemanticReportIds = new Set<string>();
-	for (const name of readdirSync(sessionDir)) {
-		if (!name.endsWith(".jsonl")) continue;
-		const filePath = join(sessionDir, name);
-		addDailyUsageFile(totals, filePath, window, seenSpawnedReportIds, seenSemanticReportIds, liveSession);
-	}
-	return finishTotals(totals);
+	const sources = readdirSync(sessionDir)
+		.filter((name) => name.endsWith(".jsonl"))
+		.flatMap((name) => dailyUsageFile(join(sessionDir, name), window, liveSession));
+	return addDailyUsageSources(totals, sources, window);
 }
 
 export function aggregateDailyUsageFromSessionRoot(
@@ -558,18 +595,16 @@ export function aggregateDailyUsageFromSessionRoot(
 ): DailyUsageTotals {
 	const totals = createZeroTotals();
 	if (!sessionRoot || !existsSync(sessionRoot)) return totals;
-	const seenSpawnedReportIds = new Set<string>();
-	const seenSemanticReportIds = new Set<string>();
+	const sources: DailyUsageSource[] = [];
 	for (const name of readdirSync(sessionRoot)) {
 		const dir = join(sessionRoot, name);
 		if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;
 		for (const fileName of readdirSync(dir)) {
 			if (!fileName.endsWith(".jsonl")) continue;
-			const filePath = join(dir, fileName);
-			addDailyUsageFile(totals, filePath, window, seenSpawnedReportIds, seenSemanticReportIds, liveSession);
+			sources.push(...dailyUsageFile(join(dir, fileName), window, liveSession));
 		}
 	}
-	return finishTotals(totals);
+	return addDailyUsageSources(totals, sources, window);
 }
 
 export function formatDailyUsageBreakdown(

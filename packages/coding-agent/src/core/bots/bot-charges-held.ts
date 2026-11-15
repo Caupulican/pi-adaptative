@@ -6,13 +6,17 @@
  * range only once every earlier one reached a root, so the furthest end held covers every range before it.
  *
  * Only a session file holds a charge for good. The session files are read as they were written (an accounting projection
- * overlays a file without changing it, and may show a grouped charge under another type), only those changed since the
- * bot session began (`since`): a file not written since holds none of its charges. A live root's file is not read: its
+ * overlays a file without changing it, and may show a grouped charge under another type), only those changed since
+ * `since` (when the bot session began, or its transcript's last charge mark): a file not written since holds none of its
+ * charges past what the mark holds. A live root's file is not read: its
  * entries are, each charge counted held once the root's file holds it exactly (`persisted`), and the ones it holds
- * unwritten are taken back as charges still to deliver (`unwritten`), since a root that ends unwritten drops them. A file
- * that changes while it is read is read again; one that is no session file (no valid header) holds no charge; one removed
- * since it was listed holds none any more. A charge an earlier build reported without a range end counts as its usage,
- * once by report id, all of them together reaching as far as their sum.
+ * unwritten are taken back as charges still to deliver (`unwritten`), since a root that ends unwritten drops them; one
+ * held unwritten that does not name its whole range is counted neither: its range is charged again, and the readers take
+ * an overlapping range once (`ChargedRanges`). A file that only grows while it is read (a writer appending) is read as
+ * it was when opened; one that changes otherwise is read again; one that is no session file (no valid header) holds no
+ * charge; one removed since it was listed holds none any more; any other that cannot be read fails the read-back naming
+ * it (`BotChargeFileUnreadable`). A charge an earlier build reported without a range end counts as its usage, once by
+ * report id, all of them together reaching as far as their sum.
  */
 
 import { readdir, stat } from "node:fs/promises";
@@ -63,6 +67,7 @@ export interface UnwrittenBotCharge {
 	readonly reportId: string;
 	readonly provider: string;
 	readonly model: string;
+	readonly from: Usage;
 	readonly through: Usage;
 	readonly recordedAt: string;
 }
@@ -71,6 +76,17 @@ export interface UnwrittenBotCharge {
 export interface BotChargesHeld {
 	readonly through: Usage;
 	readonly unwritten: readonly UnwrittenBotCharge[];
+}
+
+/** A root's session file that could not be read: the read-back fails, naming it. */
+export class BotChargeFileUnreadable extends Error {
+	readonly file: string;
+
+	constructor(file: string, cause: unknown) {
+		super(cause instanceof Error ? cause.message : String(cause));
+		this.name = "BotChargeFileUnreadable";
+		this.file = file;
+	}
 }
 
 /** The names in `directory`; none when it does not exist yet. */
@@ -98,7 +114,10 @@ async function directoriesOf(holders: readonly BotChargeHolder[]): Promise<strin
 	return [...directories.values()];
 }
 
-/** Reads one session file's charge lines; false when it holds none (removed since it was listed, or no session file). */
+/**
+ * Reads one session file's charge lines, as it was when opened; false when it holds none (removed since it was listed, or
+ * no session file). Throws `BotChargeFileUnreadable` when it cannot be read.
+ */
 async function readFileCharges(file: string, sessionId: string, take: (entry: SessionEntry) => void): Promise<boolean> {
 	for (let read = 1; ; read++) {
 		const taken: SessionEntry[] = [];
@@ -107,11 +126,12 @@ async function readFileCharges(file: string, sessionId: string, take: (entry: Se
 				file,
 				(line) => line.includes(sessionId),
 				(entry) => taken.push(entry),
+				{ prefixOfGrowing: true },
 			);
 		} catch (error) {
 			if (isMissingFileError(error) || error instanceof InvalidSessionHeaderError) return false;
 			if (error instanceof FileSnapshotChangedError && read < MAX_FILE_READS) continue;
-			throw error;
+			throw new BotChargeFileUnreadable(file, error);
 		}
 		for (const entry of taken) take(entry);
 		return true;
@@ -128,16 +148,16 @@ function chargeOf(entry: SessionEntry, sessionId: string): Record<string, unknow
 
 /** A charge a live root holds unwritten, when it names everything its delivery is matched by. */
 function unwrittenOf(data: Record<string, unknown>): UnwrittenBotCharge | undefined {
-	const { usage, reportId, provider, model, through, recordedAt } = data;
-	if (!isUsage(usage) || !isUsage(through)) return undefined;
+	const { usage, reportId, provider, model, from, through, recordedAt } = data;
+	if (!isUsage(usage) || !isUsage(from) || !isUsage(through)) return undefined;
 	if (typeof reportId !== "string" || typeof provider !== "string" || typeof model !== "string") return undefined;
 	if (typeof recordedAt !== "string") return undefined;
-	return { usage, reportId, provider, model, through, recordedAt };
+	return { usage, reportId, provider, model, from, through, recordedAt };
 }
 
 /**
- * How far the roots `holders` hold the charges of bot session `sessionId`, which began at `since` (ms since the epoch),
- * and the charges they hold unwritten (see the module comment).
+ * How far the roots `holders` hold the charges of bot session `sessionId` in the files changed since `since` (ms since
+ * the epoch), and the charges they hold unwritten (see the module comment).
  */
 export async function botChargesHeld(
 	holders: readonly BotChargeHolder[],
@@ -173,10 +193,14 @@ export async function botChargesHeld(
 		for (const entry of root.entries) {
 			const data = chargeOf(entry, sessionId);
 			if (!data) continue;
-			const charge = root.persisted(entry) ? undefined : unwrittenOf(data);
-			if (charge) {
-				if (!unwritten.has(charge.reportId)) unwritten.set(charge.reportId, charge);
-			} else held(data);
+			if (root.persisted(entry)) {
+				held(data);
+				continue;
+			}
+			// A live root holds unwritten only charges this process delivered, each naming its range: one that does not is
+			// counted neither (see the module comment).
+			const charge = unwrittenOf(data);
+			if (charge && !unwritten.has(charge.reportId)) unwritten.set(charge.reportId, charge);
 		}
 	return { through: usageReach(reach, combineUsage(...unranged.values())), unwritten: [...unwritten.values()] };
 }

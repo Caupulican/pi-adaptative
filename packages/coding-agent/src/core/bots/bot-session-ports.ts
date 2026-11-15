@@ -131,18 +131,22 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 			return ceilings.filter((ceiling) => ceiling.usd > 0);
 		},
 		// The session's own usage ledger takes a bot's charge by report id, as it takes a worker's usage receipt: persisted
-		// only once read back from its file.
-		reportUsage: (usage, report) =>
-			deliverSpawnedUsageReceipt(deps.getSessionManager(), deps, usage, {
+		// only once read back from its file. A session that keeps no file holds it for its life at once: no write settles it.
+		reportUsage: (usage, report) => {
+			const session = deps.getSessionManager();
+			const disposition = deliverSpawnedUsageReceipt(session, deps, usage, {
 				parentSessionId: deps.getSessionId(),
 				label: "bot-session",
 				sourceSessionId: report.sessionId,
 				reportId: report.reportId,
 				provider: report.provider,
 				model: report.model,
+				from: structuredClone(report.from),
 				through: structuredClone(report.through),
 				recordedAt: report.recordedAt,
-			}),
+			});
+			return disposition === "pending" && !session.isPersisted() ? "persisted" : disposition;
+		},
 		// Where its charges are read back: the session files of every project (or the custom session directory) and the live
 		// session's entries, each held once its file holds it exactly.
 		chargeHolder: () => {
@@ -153,15 +157,17 @@ function botSessionHostPorts(deps: BackgroundLaneControllerDeps, own: BotSession
 				live: {
 					file: session.getSessionFile(),
 					entries: session.getEntries(),
-					// The row its file holds is the entry as it was written: the same JSON.
+					// The row its file holds is the entry as it was written: the same JSON. A session that keeps no file holds
+					// its entries for its life.
 					persisted: (entry) =>
-						entry.type === "custom" &&
-						classifyCustomEntryPersisted(
-							session,
-							entry.id,
-							entry.customType,
-							(data) => JSON.stringify(data) === JSON.stringify(entry.data),
-						) === "persisted",
+						!session.isPersisted() ||
+						(entry.type === "custom" &&
+							classifyCustomEntryPersisted(
+								session,
+								entry.id,
+								entry.customType,
+								(data) => JSON.stringify(data) === JSON.stringify(entry.data),
+							) === "persisted"),
 				},
 			};
 		},
