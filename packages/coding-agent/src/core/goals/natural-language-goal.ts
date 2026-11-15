@@ -9,6 +9,27 @@ export interface ExplicitGoalStartAuthority {
 	tokenBudget?: number;
 }
 
+/** A pt-BR infinitive: an -ar, -er or -ir verb, or pôr and its compounds (compor, propor, repor). */
+const PT_BR_INFINITIVE = String.raw`(?:[a-zà-ú]+(?:ar|er|ir)|[a-zà-ú]+p[ôo]r|pôr)`;
+/** pt-BR articles, determiners, pronouns and prepositions that open a verb's object and are not English words. */
+const PT_BR_OBJECT_OPENERS =
+	"o|os|uma|umas|uns|de|da|dos|das|em|na|nos|nas|num|numa|com|para|pra|por|pelo|pela|pelos|pelas|que|todo|toda|todos|todas|cada|este|esta|estes|estas|esse|essa|esses|essas|isso|isto|aquele|aquela|aquilo|meu|minha|meus|minhas|nosso|nossa|nossos|nossas|seu|sua|seus|suas";
+/** pt-BR object openers that are English words too ("render a page", "save as", "never do"). */
+const OPENERS_SHARED_WITH_ENGLISH = "a|as|do|no|um";
+/** Every pt-BR object opener: after a phrase whose own words are pt-BR, the language is already told. */
+const PT_BR_ALL_OBJECT_OPENERS = `${PT_BR_OBJECT_OPENERS}|${OPENERS_SHARED_WITH_ENGLISH}`;
+
+/**
+ * The objective a pt-BR "meta" phrase names, captured to the end of the text: an infinitive and the first word of its
+ * object, one of `openers`. pt-BR marks an infinitive with no word as English "to" does, so the verb's form and the pt-BR
+ * word after it are what tell a goal ("meta: refatorar o parser", "minha meta é reescrever a fila") from a predicate
+ * ("minha meta é melhor") or from English ("meta: render a page", where only pt-BR words outside English may open the
+ * object, as nothing before them is pt-BR). A goal worded otherwise is not decided here: System One judges it.
+ */
+function ptBrObjective(openers: string): string {
+	return String.raw`(${PT_BR_INFINITIVE}\s+(?:${openers})(?=[\s,.:;!?]|$).*)$`;
+}
+
 const EXPLICIT_GOAL_PATTERNS = [
 	/^\s*set\s+(?:this\s+as\s+)?a\s+(?:persistent\s+)?goal\s*(?::|to\s+)\s*(.+)$/is,
 	/^\s*my\s+persistent\s+goal\s+is\s+to\s+(.+)$/is,
@@ -18,11 +39,14 @@ const EXPLICIT_GOAL_PATTERNS = [
 	/^\s*keep\s+working\s+until\s+this\s+is\s+(?:complete|done)\s*:\s*(.+)$/is,
 	/^\s*instead of .+,\s*i want to (.+)$/is,
 	/^\s*i want to ((?:refactor|rewrite|rebuild|redesign)\b.+)$/is,
-	// The same statements in pt-BR. Where English reads "is to <verb>", the pt-BR form reads "é <infinitive>".
+	// The same statements in pt-BR. Where English reads "is to <verb>", the pt-BR form reads "é <infinitive> <object>".
 	/^\s*(?:defina|definir|estabele[çc]a)\s+(?:isso\s+como\s+)?uma\s+meta(?:\s+persistente)?\s*:\s*(.+)$/is,
-	/^\s*meta\s*:\s*(.+)$/is,
-	/^\s*minha\s+meta\s+(?:persistente\s+)?é\s+([a-zà-ú]+(?:ar|er|ir|or)\b.*)$/is,
-	/^\s*(?:a|nossa)\s+meta\s+(?:persistente\s+)?é\s+([a-zà-ú]+(?:ar|er|ir|or)\b.*)$/is,
+	new RegExp(String.raw`^\s*meta\s*:\s*${ptBrObjective(PT_BR_OBJECT_OPENERS)}`, "is"),
+	new RegExp(String.raw`^\s*minha\s+meta\s+(?:persistente\s+)?é\s+${ptBrObjective(PT_BR_ALL_OBJECT_OPENERS)}`, "is"),
+	new RegExp(
+		String.raw`^\s*(?:a|nossa)\s+meta\s+(?:persistente\s+)?é\s+${ptBrObjective(PT_BR_ALL_OBJECT_OPENERS)}`,
+		"is",
+	),
 	/^\s*trate\s+isso\s+como\s+(?:minha|uma)\s+meta(?:\s+persistente)?\s*:\s*(.+)$/is,
 	/^\s*(?:eu\s+)?quero\s+isso\s+como\s+(?:minha\s+|uma\s+)?meta(?:\s+persistente)?\s*:\s*(.+)$/is,
 	/^\s*continue\s+trabalhando\s+até\s+(?:isso|isto)\s+(?:estar|ficar)\s+(?:completo|conclu[íi]do|pronto)\s*:\s*(.+)$/is,
@@ -255,7 +279,7 @@ function matchExplicitChatGoal(
 		const rawObjective = match?.[1];
 		const objective = rawObjective?.trim();
 		if (!match || !objective || objective.length > MAX_GOAL_OBJECTIVE_LENGTH) continue;
-		// rawObjective is always a suffix of match[0] (every pattern ends in `(.+)$`), so its start
+		// rawObjective is always a suffix of match[0] (every pattern's first group runs to `$`), so its start
 		// offset in `text` is match[0]'s length minus its own length.
 		const objectiveSpan = {
 			start: match.index + (match[0].length - (rawObjective?.length ?? 0)),
