@@ -67,6 +67,7 @@ import { CURRENT_SESSION_VERSION, SessionManager } from "../../../src/kernel/ses
 import { SignalLifecycle } from "../../../src/modes/interactive/signal-lifecycle.ts";
 import { type RpcModeIo, runRpcMode } from "../../../src/modes/rpc/rpc-mode.ts";
 import type { TerminationSignalHandler } from "../../../src/modes/termination-signals.ts";
+import { initTheme } from "../../../src/presentation/theme/theme.ts";
 import {
 	acquireWorkRun,
 	getWorkRunDir,
@@ -3166,6 +3167,9 @@ export async function runHarnessWorld(
 	const hostIdentity = HOST_IDENTITY_ENV.map((name) => [name, process.env[name]] as const);
 	for (const name of HOST_IDENTITY_ENV) delete process.env[name];
 	resetRepoIdentityCache();
+	// What a session draws (the operator bar's styled segments) reads the theme the interactive mode loads before it draws:
+	// every world loads the same one first, so no leg depends on whether an earlier one loaded it.
+	initTheme("dark");
 	try {
 		const world = new HarnessWorld(options);
 		let bodyFailure: { readonly error: unknown } | undefined;
