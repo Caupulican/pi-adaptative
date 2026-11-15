@@ -82,7 +82,7 @@ export const MODEL_ID = {
 	readOnlyDelegator: "worker-a",
 	/** The owner's bot that directs a worker under the main session's worker bound; its soul tells it apart on the shared model. */
 	boundedDelegator: "worker-b",
-	/** The workers the delegating bots start, each told apart by the marker its task carries. */
+	/** The workers the delegating bots and the owner's session start, each told apart by the marker its task carries. */
 	delegateWorker: "worker-c",
 	/**
 	 * The owner's read-only bot that plans; its soul tells it apart on the shared model, and its plan steps' workers, which run
@@ -130,6 +130,7 @@ export const TRACK = {
 	readOnlyDelegator: "j7-read-only-delegator",
 	delegateWorker: "j7-delegate-worker",
 	heldDelegateWorker: "j7-held-delegate-worker",
+	rootDelegateWorker: "j7-root-delegate-worker",
 	readOnlyDelegateWorker: "j7-read-only-delegate-worker",
 	boundedDelegator: "j7-bounded-delegator",
 	boundedDelegateWorker: "j7-bounded-delegate-worker",

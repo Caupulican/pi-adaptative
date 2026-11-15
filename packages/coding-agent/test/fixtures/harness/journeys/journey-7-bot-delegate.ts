@@ -4,6 +4,7 @@ import { expect } from "vitest";
 import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { botOrchestrationHome } from "../../../../src/core/bots/bot-home.ts";
 import { displayNameFor } from "../../../../src/core/delegation/bot-naming.ts";
+import { OWNER_STOPPED_REASON } from "../../../../src/core/delegation/worker-fleet-stop.ts";
 import { OrchestrationEventStore } from "../../../../src/core/orchestration/event-store.ts";
 import { readTaskRuntimeProjection } from "../../../../src/core/orchestration/task-runtime-reader.ts";
 import { workerTerminalNotificationId } from "../../../../src/core/orchestration/worker-terminal-notification.ts";
@@ -56,6 +57,9 @@ const FIRST_MARKER = "[j7-delegate-first]";
 const HELD_MARKER = "[j7-delegate-held]";
 const READ_ONLY_MARKER = "[j7-delegate-read-only]";
 const BOUNDED_MARKER = "[j7-delegate-bounded]";
+const ROOT_MARKER = "[j7-delegate-root]";
+/** The owner's message to the root's worker by its id: it asks what a bot would be asked. */
+const ROOT_WORKER_MESSAGE = "How many requests wait for a connection?";
 const FIRST_REPORT = "The pool holds eight connections.";
 const FIRST_ANSWER = "The worker read that the pool holds eight connections.";
 const READ_ONLY_REPORT = "The oldest idle connection is closed first.";
@@ -134,11 +138,12 @@ function requestsOf(world: HarnessWorld, soul: string): number {
  * `delegate`, `assign`, `plan` and `task_watch`, starts a worker, and the worker's terminal handoff opens the
  * bot's next turn, in which it answers. The worker's conversation lies in the bot's home, under the bot's session, and
  * nothing of that session is in the owner's orchestration home; the worker's spend reaches the main session as the bot
- * session's charge. While a worker runs it is no bot: the roster lists no entry for it, and a message naming it is refused
- * with the product's sentence and leaves no bot record. The owner's stop of the bot while a second worker runs cancels that worker, and its end opens no turn
+ * session's charge. The owner's stop of the bot while a second worker runs cancels that worker, and its end opens no turn
  * of the bot. A read-only bot's worker is planned read-only: the bot changes no file, so neither does its worker. Under
  * the main session's worker bound (`workerDelegation.maxUsd`), a bot's request is held to it with its worker's spend: the
- * bot's answer to its worker's handoff that takes the request past it is stopped with the product's sentence.
+ * bot's answer to its worker's handoff that takes the request past it is stopped with the product's sentence. A delegate
+ * worker of the owner's own session is never a bot: while it runs the roster lists no entry for it, and a message naming
+ * it is refused with the product's sentence and leaves no bot record.
  */
 export async function runJourney7BotDelegatePhase(world: HarnessWorld): Promise<void> {
 	const { session, rootFile } = await createChargedRoot(world, "bot-delegate");
@@ -179,7 +184,6 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 	const seen = {
 		offered: [] as string[],
 		firstAgent: undefined as string | undefined,
-		heldAgent: undefined as string | undefined,
 		heldEnd: undefined as string | undefined,
 	};
 	const firstAgent = (): string => {
@@ -223,9 +227,6 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 		},
 		{
 			name: "j7-delegator-second-started",
-			check: (request) => {
-				seen.heldAgent = startedAgentId(request);
-			},
 			reply: { content: [{ type: "text", text: SECOND_STARTED }] },
 		},
 	);
@@ -322,19 +323,6 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 			"ended the turn that told the owner of its second worker",
 			(view) => view?.lastSummary === SECOND_STARTED,
 		);
-		// The running worker is no bot: the roster the owner sees lists no entry for it, a message naming it is refused with
-		// the product's sentence, and the refusal leaves no bot record behind.
-		const heldAgent = seen.heldAgent;
-		if (heldAgent === undefined) throw new Error("the second worker's id was not read from its start result");
-		const rostered = session.listPersistentBots().some((bot) => bot.agentId === heldAgent);
-		const refusal = await session.sendOperatorMessageToBot(heldAgent, SECOND_QUESTION).then(
-			(result) => `sent: ${result.mode}`,
-			(error: unknown) => (error instanceof Error ? error.message : String(error)),
-		);
-		expect(
-			{ rostered, refusal, stored: session.getBotTeamStore().getBot(heldAgent) !== undefined },
-			"a running delegate worker is not listed as a bot, a message naming it is refused with the product's sentence, and no bot record is written for it",
-		).toEqual({ rostered: false, refusal: notABot(heldAgent), stored: false });
 		const stopped = session.stopPersistentBot(DELEGATOR);
 		const requestsAtStop = requestsOf(world, DELEGATOR_SOUL);
 		await withDeadline(trace, "J7 bot delegate: the stopped worker's request ended", heldWorkerEnded.promise);
@@ -384,6 +372,7 @@ async function runLeg(world: HarnessWorld, session: AgentSession, rootFile: stri
 	}
 
 	await runReadOnlyStep(world, session);
+	await runRootWorkerStep(world, session);
 }
 
 /** Step 6: a read-only bot's worker, started without `readOnly`, is planned read-only: its parent changes no file. */
@@ -453,6 +442,72 @@ async function runReadOnlyStep(world: HarnessWorld, session: AgentSession): Prom
 		},
 		"a read-only bot's worker reads and is offered no write or edit tool, as its start result's grant says",
 	).toEqual({ sent: "started", workerReads: true, workerWrites: false, grantReads: true, grantWrites: false });
+}
+
+/**
+ * Step 6b: a delegate worker of the owner's own session is never a bot. While it runs, the roster the owner sees, which
+ * projects the session's own workers and lanes onto the bots bound to them, holds the bots it held before the start and
+ * no entry for the worker; a message naming the worker is refused with the product's sentence, and the bot store holds no
+ * record for it after the refusal. The owner's stop then ends the worker, and its end wakes no turn.
+ */
+async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Promise<void> {
+	const { trace } = world;
+	const workerGate = createBarrier();
+	const workerEnded = createBarrier();
+	let workerEnd: string | undefined;
+	const rosterIds = () => session.listPersistentBots().map((bot) => bot.agentId);
+	const rosterBefore = rosterIds();
+	world.provider.enqueueTrack(TRACK.rootDelegateWorker, MODEL_ID.delegateWorker, carriesMarker(ROOT_MARKER), {
+		name: "j7-root-delegate-worker",
+		// Held until the owner's stop cancels the worker: the cancel aborts the request.
+		gate: workerGate.promise,
+		onTerminal: (_request, message) => {
+			workerEnd = message.stopReason;
+			workerEnded.release();
+		},
+		reply: submitReport("j7-root-delegate-worker-report-1", "The pool queues four waiting requests."),
+	});
+	try {
+		const started = await session.backgroundLanes.startWorkerDelegation({
+			instructions: `${ROOT_MARKER} Read the pool settings and report how many requests wait for a connection.`,
+			authority: { model: { provider: HARNESS_PROVIDER, modelId: MODEL_ID.delegateWorker }, readOnly: true },
+		});
+		if (!started.started) throw new Error(`the root's worker start was refused: ${started.skipReason}`);
+		const workerId = started.record.agentId ?? started.record.laneId;
+		await withDeadline(
+			trace,
+			"J7 bot delegate: the root's worker is working",
+			world.provider.whenReached(reached(TRACK.rootDelegateWorker, "j7-root-delegate-worker")),
+		);
+		const roster = rosterIds();
+		const refusal = await session.sendOperatorMessageToBot(workerId, ROOT_WORKER_MESSAGE).then(
+			(result) => `sent: ${result.mode}`,
+			(error: unknown) => (error instanceof Error ? error.message : String(error)),
+		);
+		const stored = session.getBotTeamStore().getBot(workerId) !== undefined;
+		const stop = session.backgroundLanes.cancelOwnFleet(OWNER_STOPPED_REASON);
+		await withDeadline(trace, "J7 bot delegate: the root's stopped worker's request ended", workerEnded.promise);
+		expect(
+			{
+				roster,
+				rostered: roster.includes(workerId),
+				refusal,
+				stored,
+				stopped: stop.stopped,
+				workerEnd,
+			},
+			"a running delegate worker of the owner's session is not listed as a bot, a message naming it is refused with the product's sentence, no bot record is written for it, and the owner's stop ends it",
+		).toEqual({
+			roster: rosterBefore,
+			rostered: false,
+			refusal: notABot(workerId),
+			stored: false,
+			stopped: 1,
+			workerEnd: "aborted",
+		});
+	} finally {
+		workerGate.release();
+	}
 }
 
 /**
