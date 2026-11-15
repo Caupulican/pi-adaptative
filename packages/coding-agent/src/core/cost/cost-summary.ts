@@ -142,13 +142,15 @@ export function accumulateCurrentSessionCostsFromEntries(
 		const recorded = entry.data as SpawnedUsageReport | undefined;
 		if (!recorded) continue;
 		const range = chargedRangeOf(recorded);
-		const open = range ? accumulator.chargedRanges.take(range, recorded.usage) : recorded.usage;
-		if (!open) continue;
-		if (!range && recorded.reportId) {
+		let report = recorded;
+		if (range) {
+			const open = accumulator.chargedRanges.take(range, recorded.usage);
+			if (!open) continue;
+			if (open !== recorded.usage) report = { ...recorded, usage: open };
+		} else if (recorded.reportId) {
 			if (accumulator.seenSubagentReportIds.has(recorded.reportId)) continue;
 			accumulator.seenSubagentReportIds.add(recorded.reportId);
 		}
-		const report = open === recorded.usage ? recorded : { ...recorded, usage: open };
 		for (const { part, cost: resolved } of resolveSpawnedUsageComponents(report, entry.timestamp)) {
 			accumulator.subagentCost += resolved.total;
 			accumulator.reportedSubagentCost = (accumulator.reportedSubagentCost ?? 0) + resolved.reportedTotal;

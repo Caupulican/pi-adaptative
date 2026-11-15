@@ -116,51 +116,73 @@ function addUsage(
 
 /**
  * What counts once in one aggregation: spawned and semantic report ids, and the part of each spawned report that charges a
- * range that counts, swept over every record read so each covered stretch counts on the earliest day a charge covering
- * it was recorded (`sweepChargedRanges`).
+ * range that counts (`sweepChargedRanges`, once every source is read).
  */
 interface DailyUsageSeen {
 	readonly spawned: Set<string>;
 	readonly semantic: Set<string>;
-	readonly ranged: ReadonlyMap<DailyUsageRecord, Usage | undefined>;
+	ranged: ReadonlyMap<DailyUsageRecord, Usage | undefined>;
 }
 
-function dailyUsageSeen(records: Iterable<DailyUsageRecord>): DailyUsageSeen {
-	return {
-		spawned: new Set(),
-		semantic: new Set(),
-		ranged: sweepChargedRanges(records, (record) =>
-			record.kind === "spawned" && record.range
-				? { range: record.range, usage: record.usage, at: Date.parse(record.timestamp) }
-				: undefined,
-		),
-	};
-}
+/** What one session file (or the live session) counts as when any of its records counts. */
+type DailyUsageSourceKind = "session" | "fragment" | undefined;
 
-/** The records one session file (or the live session) holds, and what it counts as when any of them counts. */
-interface DailyUsageSource {
-	readonly records: readonly DailyUsageRecord[];
-	readonly counts: "session" | "fragment" | undefined;
-}
-
-function countSource(totals: DailyUsageTotals, counts: DailyUsageSource["counts"]): void {
+function countSource(totals: DailyUsageTotals, counts: DailyUsageSourceKind): void {
 	if (counts === "fragment") totals.fragments = (totals.fragments ?? 0) + 1;
 	else if (counts === "session") totals.sessions++;
 }
 
-/** Counts the sources' records in the window, each charge once (`DailyUsageSeen`), and the sources any of them counted for. */
-function addDailyUsageSources(
-	totals: DailyUsageTotals,
-	sources: readonly DailyUsageSource[],
-	window: DailyUsageWindow,
-): DailyUsageTotals {
-	const seen = dailyUsageSeen(sources.flatMap((source) => source.records));
-	for (const source of sources) {
-		let used = false;
-		for (const record of source.records) if (addDailyUsageRecord(totals, record, window, seen)) used = true;
-		if (used) countSource(totals, source.counts);
+/**
+ * One aggregation's count, source by source. A record counts as its source is read, each report once by id, but a spawned
+ * report that charges a range: those are held, with their source, until every source is read, then counted as the union
+ * of their ranges, each covered stretch on the earliest day a charge covering it was recorded, whichever file holds it.
+ * Only the ranged records are held across sources.
+ */
+class DailyUsageCount {
+	private readonly totals: DailyUsageTotals;
+	private readonly window: DailyUsageWindow;
+	private readonly seen: DailyUsageSeen = { spawned: new Set(), semantic: new Set(), ranged: new Map() };
+	private readonly held: { readonly records: readonly DailyUsageRecord[]; readonly counts: DailyUsageSourceKind }[] =
+		[];
+	private ranged: DailyUsageRecord[] = [];
+	private used = false;
+
+	constructor(totals: DailyUsageTotals, window: DailyUsageWindow) {
+		this.totals = totals;
+		this.window = window;
 	}
-	return finishTotals(totals);
+
+	/** Counts one record of the source being read; one that charges a range waits for `finish`. */
+	record(record: DailyUsageRecord): void {
+		if (record.kind === "spawned" && record.range) this.ranged.push(record);
+		else if (addDailyUsageRecord(this.totals, record, this.window, this.seen)) this.used = true;
+	}
+
+	/** The source being read ended: it counts as `counts` once any of its records counted, now or at `finish`. */
+	sourceEnded(counts: DailyUsageSourceKind): void {
+		if (this.used) countSource(this.totals, counts);
+		if (this.ranged.length > 0) this.held.push({ records: this.ranged, counts: this.used ? undefined : counts });
+		this.ranged = [];
+		this.used = false;
+	}
+
+	/** Counts the held ranged records, then the totals are final. */
+	finish(): DailyUsageTotals {
+		this.seen.ranged = sweepChargedRanges(
+			this.held.flatMap((source) => source.records),
+			(record) =>
+				record.kind === "spawned" && record.range
+					? { range: record.range, usage: record.usage, at: Date.parse(record.timestamp) }
+					: undefined,
+		);
+		for (const source of this.held) {
+			let used = false;
+			for (const record of source.records)
+				if (addDailyUsageRecord(this.totals, record, this.window, this.seen)) used = true;
+			if (used) countSource(this.totals, source.counts);
+		}
+		return finishTotals(this.totals);
+	}
 }
 
 function addDailyUsageRecord(
@@ -251,9 +273,12 @@ export function aggregateDailyUsageFromEntries(
 	window: DailyUsageWindow,
 	pending: readonly SemanticUsageReport[] = [],
 ): DailyUsageTotals {
+	const count = new DailyUsageCount(createZeroTotals(), window);
+	for (const entry of entries) for (const record of usageRecords(entry)) count.record(record);
 	const now = new Date().toISOString();
-	const records = [...entries.flatMap(usageRecords), ...pending.map((report) => semanticUsageRecord(report, now))];
-	return addDailyUsageSources(createZeroTotals(), [{ records, counts: "session" }], window);
+	for (const report of pending) count.record(semanticUsageRecord(report, now));
+	count.sourceEnded("session");
+	return count.finish();
 }
 
 export interface LiveSessionDailyUsageSource {
@@ -474,7 +499,7 @@ export async function aggregateDailyUsageAsync(
 	pending: readonly SemanticUsageReport[] = [],
 ): Promise<DailyUsageTotals> {
 	const totals = createZeroTotals();
-	const sources: DailyUsageSource[] = [];
+	const count = new DailyUsageCount(totals, window);
 	let liveCounted = false;
 	const directories = root
 		? (await readSessionDirectory(scope))
@@ -528,28 +553,18 @@ export async function aggregateDailyUsageAsync(
 					await retainUsageRecords(filePath, key, records, materialized);
 				}
 			}
-			sources.push({ records, counts: fragmentRevision ? "fragment" : "session" });
+			for (let index = 0; index < records.length; index++) {
+				if (index % 256 === 0) await yieldToEventLoop();
+				count.record(records[index]!);
+			}
+			count.sourceEnded(fragmentRevision ? "fragment" : "session");
 		}
 	}
+	if (liveSession && !liveCounted) for (const record of await liveUsageRecords(liveSession)) count.record(record);
 	const now = new Date().toISOString();
-	sources.push({
-		records: [
-			...(liveSession && !liveCounted ? await liveUsageRecords(liveSession) : []),
-			...pending.map((report) => semanticUsageRecord(report, now)),
-		],
-		counts: liveCounted ? undefined : "session",
-	});
-	// Every file is read before any record counts: a charged range counts on the earliest day any file records it.
-	const seen = dailyUsageSeen(sources.flatMap((source) => source.records));
-	for (const source of sources) {
-		let used = false;
-		for (let index = 0; index < source.records.length; index++) {
-			if (index % 256 === 0) await yieldToEventLoop();
-			if (addDailyUsageRecord(totals, source.records[index]!, window, seen)) used = true;
-		}
-		if (used) countSource(totals, source.counts);
-	}
-	return finishTotals(totals);
+	for (const report of pending) count.record(semanticUsageRecord(report, now));
+	count.sourceEnded(liveCounted ? undefined : "session");
+	return count.finish();
 }
 
 async function liveUsageRecords(liveSession: LiveSessionDailyUsageSource): Promise<DailyUsageRecord[]> {
@@ -561,18 +576,16 @@ async function liveUsageRecords(liveSession: LiveSessionDailyUsageSource): Promi
 	return records;
 }
 
-function dailyUsageFile(
+function addDailyUsageFile(
+	count: DailyUsageCount,
 	filePath: string,
 	window: DailyUsageWindow,
 	liveSession?: LiveSessionDailyUsageSource,
-): DailyUsageSource[] {
-	if (!shouldReadSessionFile(filePath, window)) return [];
-	return [
-		{
-			records: getSessionEntries(filePath, liveSession).flatMap(usageRecords),
-			counts: existsSync(accountingFragmentPath(filePath)) ? "fragment" : "session",
-		},
-	];
+): void {
+	if (!shouldReadSessionFile(filePath, window)) return;
+	for (const entry of getSessionEntries(filePath, liveSession))
+		for (const record of usageRecords(entry)) count.record(record);
+	count.sourceEnded(existsSync(accountingFragmentPath(filePath)) ? "fragment" : "session");
 }
 
 export function aggregateDailyUsageFromSessionFiles(
@@ -582,10 +595,12 @@ export function aggregateDailyUsageFromSessionFiles(
 ): DailyUsageTotals {
 	const totals = createZeroTotals();
 	if (!sessionDir || !existsSync(sessionDir)) return totals;
-	const sources = readdirSync(sessionDir)
-		.filter((name) => name.endsWith(".jsonl"))
-		.flatMap((name) => dailyUsageFile(join(sessionDir, name), window, liveSession));
-	return addDailyUsageSources(totals, sources, window);
+	const count = new DailyUsageCount(totals, window);
+	for (const name of readdirSync(sessionDir)) {
+		if (!name.endsWith(".jsonl")) continue;
+		addDailyUsageFile(count, join(sessionDir, name), window, liveSession);
+	}
+	return count.finish();
 }
 
 export function aggregateDailyUsageFromSessionRoot(
@@ -595,16 +610,16 @@ export function aggregateDailyUsageFromSessionRoot(
 ): DailyUsageTotals {
 	const totals = createZeroTotals();
 	if (!sessionRoot || !existsSync(sessionRoot)) return totals;
-	const sources: DailyUsageSource[] = [];
+	const count = new DailyUsageCount(totals, window);
 	for (const name of readdirSync(sessionRoot)) {
 		const dir = join(sessionRoot, name);
 		if (!existsSync(dir) || !statSync(dir).isDirectory()) continue;
 		for (const fileName of readdirSync(dir)) {
 			if (!fileName.endsWith(".jsonl")) continue;
-			sources.push(...dailyUsageFile(join(dir, fileName), window, liveSession));
+			addDailyUsageFile(count, join(dir, fileName), window, liveSession);
 		}
 	}
-	return addDailyUsageSources(totals, sources, window);
+	return count.finish();
 }
 
 export function formatDailyUsageBreakdown(

@@ -423,13 +423,15 @@ export function computeSessionTaskAndModelMetrics(options: {
 			const recorded = entry.data as SpawnedUsageReport | undefined;
 			if (!recorded) continue;
 			const range = chargedRangeOf(recorded);
-			const open = range ? chargedRanges.take(range, recorded.usage) : recorded.usage;
-			if (!open) continue;
-			if (!range && recorded.reportId) {
+			let report = recorded;
+			if (range) {
+				const open = chargedRanges.take(range, recorded.usage);
+				if (!open) continue;
+				if (open !== recorded.usage) report = { ...recorded, usage: open };
+			} else if (recorded.reportId) {
 				if (seenSpawned.has(recorded.reportId)) continue;
 				seenSpawned.add(recorded.reportId);
 			}
-			const report = open === recorded.usage ? recorded : { ...recorded, usage: open };
 			const owner = receiptOwner(report.origin, report.goalId, Date.parse(entry.timestamp));
 			for (const { part, cost: resolved } of resolveSpawnedUsageComponents(report, entry.timestamp)) {
 				const tok = part.usage.input + part.usage.output + part.usage.cacheRead + part.usage.cacheWrite;

@@ -240,7 +240,7 @@ export async function visitSessionEntriesAsync(
 		const scanLimit = options?.requireComplete ? before.size : options?.maxBytes;
 		const prefix = options?.prefixOfGrowing === true && !options.requireComplete;
 		const unchanged = (after: Stats): boolean => (prefix ? grownFrom(before, after) : sameFileVersion(before, after));
-		if (!sameFileVersion(before, await stat(filePath)))
+		if (!unchanged(await stat(filePath)))
 			throw new FileSnapshotChangedError("Session file changed while opening it.");
 		const headerResult = readSessionHeaderFromDescriptor(file.fd, MAX_SESSION_HEADER_BYTES);
 		if (!headerResult.ok) throw new InvalidSessionHeaderError();
