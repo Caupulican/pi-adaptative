@@ -6,7 +6,7 @@
  * session, or whose live host's session, cannot be told is marked with why, so the sweep only resumes what an earlier
  * run reserved there. Each home is named to the owner by its profile's display name, or its directory name without one.
  */
-import { type Dirent, readdirSync } from "node:fs";
+import { type Dirent, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { harnessLog } from "../../kernel/harness-log.ts";
 import { isMissingFileError } from "../../kernel/storage/atomic-file.ts";
@@ -30,6 +30,8 @@ export type BotHomeHold = {
 	readonly home: BotHome;
 	/** The session the bot keeps its conversation in; undefined when the home has none yet or it cannot be told. */
 	readonly currentSessionId: string | undefined;
+	/** The session a pointer the host will set aside still names (its file holds another session); held until it does. */
+	readonly setAsideSessionId: string | undefined;
 	/** The session a live host holds, as far as it is known; undefined when no live host holds the home's lock. */
 	readonly liveSessionId: string | undefined;
 } & (
@@ -46,19 +48,20 @@ export type BotHomeHold = {
 export interface BotSessionHolds {
 	/** Every home, in directory name order. */
 	readonly homes: readonly BotHomeHold[];
-	/** Each home's current session and each live host's session, as far as they are known. */
+	/** Each home's current session, the session a pointer to be set aside names, and each live host's session. */
 	readonly heldSessionIds: ReadonlySet<string>;
 }
 
 type CurrentSession =
-	| { readonly ok: true; readonly sessionId: string | undefined }
+	| { readonly ok: true; readonly sessionId: string | undefined; readonly setAsideSessionId: string | undefined }
 	| { readonly ok: false; readonly unknown: BotHomeUnknown };
 
 /**
  * The session the bot keeps its conversation in: the recorded one, else the newest file the host's first load chooses.
- * Judging which session the home holds only reads, so a symlinked pointer or session file is followed to what it names;
- * a pointer, file or tombstone that could not be read leaves the session unknown, since the pointer may still name the
- * session the bot keeps.
+ * A pointer that does not count (`setAside`: not a pointer, not its session's file) is content the host sets aside, not a
+ * reason the session is unknown: the newest file is then the one it chooses. A pointer, file or tombstone that could not
+ * be read leaves the session unknown, since the pointer may still name the session the bot keeps. Judging which session
+ * the home holds only reads, so a symlinked pointer or session file is followed to what it names.
  */
 function currentSession(agentDir: string, home: BotHome): CurrentSession {
 	let choice: BotSessionChoice;
@@ -69,15 +72,19 @@ function currentSession(agentDir: string, home: BotHome): CurrentSession {
 		harnessLog.warn("bots", "a bot's session pointer does not read", { home: home.dir, detail });
 		return { ok: false, unknown: { kind: "current-session-unknown" } };
 	}
-	if (choice.kind === "recorded") return { ok: true, sessionId: choice.pointer.sessionId };
-	return { ok: true, sessionId: choice.newest?.sessionId };
+	if (choice.kind === "recorded")
+		return { ok: true, sessionId: choice.pointer.sessionId, setAsideSessionId: undefined };
+	// A pointer to a file that holds another session still names the session the bot recorded: held until set aside.
+	const setAsideSessionId = choice.setAside?.kind === "other-session" ? choice.setAside.sessionId : undefined;
+	return { ok: true, sessionId: choice.newest?.sessionId, setAsideSessionId };
 }
 
 function holdOf(agentDir: string, name: string, home: BotHome): BotHomeHold {
 	const displayName = readBotProfileDisplayName(home) ?? name;
 	const current = currentSession(agentDir, home);
 	const currentSessionId = current.ok ? current.sessionId : undefined;
-	const known = { name, displayName, home, currentSessionId };
+	const setAsideSessionId = current.ok ? current.setAsideSessionId : undefined;
+	const known = { name, displayName, home, currentSessionId, setAsideSessionId };
 	let live: { readonly botSessionId: string | undefined } | undefined;
 	try {
 		live = readBotHomeHost(home.dir);
@@ -116,12 +123,16 @@ export function readBotSessionHolds(agentDir: string): BotSessionHolds {
 	}
 	const homes: BotHomeHold[] = [];
 	for (const entry of entries.sort((a, b) => a.name.localeCompare(b.name))) {
-		if (entry.isDirectory()) homes.push(holdOf(agentDir, entry.name, botHomeAt(join(bots, entry.name))));
+		// A symlinked bot directory is a home, as `sessionHomes` counts it; a link that names no directory is not.
+		const dir = join(bots, entry.name);
+		if (entry.isDirectory() || (entry.isSymbolicLink() && statSync(dir, { throwIfNoEntry: false })?.isDirectory()))
+			homes.push(holdOf(agentDir, entry.name, botHomeAt(dir)));
 	}
 	const heldSessionIds = new Set<string>();
 	for (const hold of homes) {
 		if (hold.currentSessionId !== undefined) heldSessionIds.add(hold.currentSessionId);
 		if (hold.liveSessionId !== undefined) heldSessionIds.add(hold.liveSessionId);
+		if (hold.setAsideSessionId !== undefined) heldSessionIds.add(hold.setAsideSessionId);
 	}
 	return { homes, heldSessionIds };
 }
