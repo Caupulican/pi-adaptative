@@ -448,7 +448,9 @@ async function runReadOnlyStep(world: HarnessWorld, session: AgentSession): Prom
  * Step 6b: a delegate worker of the owner's own session is never a bot. While it runs, the roster the owner sees, which
  * projects the session's own workers and lanes onto the bots bound to them, holds the bots it held before the start and
  * no entry for the worker; a message naming the worker is refused with the product's sentence, and the bot store holds no
- * record for it after the refusal. The owner's stop then ends the worker, and its end wakes no turn.
+ * record for it after the refusal. The session's fleet stop then ends the worker (`cancelOwnFleet` for `owner_stopped`, the stop
+ * `/bot stop` applies to a bot's own session: the owner's session runs no owner's stop of its own workers), and its end
+ * wakes no turn.
  */
 async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Promise<void> {
 	const { trace } = world;
@@ -459,7 +461,7 @@ async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Pr
 	const rosterBefore = rosterIds();
 	world.provider.enqueueTrack(TRACK.rootDelegateWorker, MODEL_ID.delegateWorker, carriesMarker(ROOT_MARKER), {
 		name: "j7-root-delegate-worker",
-		// Held until the owner's stop cancels the worker: the cancel aborts the request.
+		// Held until the fleet stop cancels the worker: the cancel aborts the request.
 		gate: workerGate.promise,
 		onTerminal: (_request, message) => {
 			workerEnd = message.stopReason;
@@ -490,8 +492,7 @@ async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Pr
 		const requestsAtStop = world.provider.requests.length;
 		const stop = session.backgroundLanes.cancelOwnFleet(OWNER_STOPPED_REASON);
 		await withDeadline(trace, "J7 bot delegate: the root's stopped worker's request ended", workerEnded.promise);
-		// An end the owner's stop made is recorded delivered at once and wakes no one: once it is, a turn it opened would
-		// already have been asked for.
+		// An end the fleet stop made for `owner_stopped` is recorded delivered at once and wakes no one.
 		const attempts = () => {
 			const projection = session.backgroundLanes.getTaskRuntimeSnapshot();
 			return Object.values(projection?.attempts ?? {}).map((attempt) => ({
@@ -506,6 +507,16 @@ async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Pr
 				attempts().some((attempt) => attempt.status === "cancelled" && attempt.end === "delivered"),
 			),
 		);
+		// A turn the delivered end woke is queued, running or done once the session is at rest: nothing queued for its
+		// foreground, no lane or turn busy, and its foreground idle; the requests are counted then.
+		await withDeadline(
+			trace,
+			"J7 bot delegate: the root's session is at rest after its worker's end",
+			world.io.waitForMutation(
+				() => !session.getSessionWorkState().busy && session.deliverablePendingMessageCount === 0,
+			),
+		);
+		await withDeadline(trace, "J7 bot delegate: the root's foreground is idle", session.waitForForegroundIdle());
 		expect(
 			{
 				roster,
@@ -517,7 +528,7 @@ async function runRootWorkerStep(world: HarnessWorld, session: AgentSession): Pr
 				attempts: attempts(),
 				requests: world.provider.requests.length - requestsAtStop,
 			},
-			"a running delegate worker of the owner's session is not listed as a bot, a message naming it is refused with the product's sentence, no bot record is written for it, and the owner's stop ends it, its delivered end waking no turn",
+			"a running delegate worker of the owner's session is not listed as a bot, a message naming it is refused with the product's sentence, no bot record is written for it, and the session's fleet stop for owner_stopped ends it, its delivered end waking no turn once the session is at rest",
 		).toEqual({
 			roster: rosterBefore,
 			rostered: false,
