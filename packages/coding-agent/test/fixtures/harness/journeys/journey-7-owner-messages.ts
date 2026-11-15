@@ -1,6 +1,6 @@
 import "../builtin-install.ts";
 import { randomUUID } from "node:crypto";
-import { existsSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { expect } from "vitest";
 import { botHostLockFile, botInboxDir } from "../../../../src/core/agent-paths.ts";
@@ -320,8 +320,8 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 }
 
 /**
- * An inbox file of a bot hosted here that neither reads nor can be set aside (a directory stands where its `.unreadable`
- * name goes) is told once however often the inbox is read, is not counted as waiting, and holds back none of the owner's
+ * An inbox file of a bot hosted here that neither reads nor can be set aside (its rename to `.unreadable` refused, as a
+ * directory the process may not write refuses it) is told once however often the inbox is read, is not counted as waiting, and holds back none of the owner's
  * words; it is read again on its backoff, told nothing more when that read fails too, and read again at once, told as a
  * new one, when the file changes.
  */
@@ -347,8 +347,12 @@ async function leftoverInInbox(world: HarnessWorld, session: AgentSession): Prom
 	const FIRST_TEXT = "not a message";
 	const SECOND_TEXT = "still not a message";
 	writeFileSync(file, FIRST_TEXT);
-	mkdirSync(`${file}.unreadable`);
-	writeFileSync(join(`${file}.unreadable`, "kept"), "");
+	const keptInPlace = world.io.denyUntilCleared({
+		name: "j7-leftover-not-set-aside",
+		kind: "rename",
+		matches: (operation) => operation.path === file,
+		code: "EACCES",
+	});
 	const mark = world.warnings.length;
 	let answered = false;
 	enqueueBot(world, TRACK.held, MODEL_ID.held, HELD_SOUL, {
@@ -409,7 +413,7 @@ async function leftoverInInbox(world: HarnessWorld, session: AgentSession): Prom
 			warnings: [told(FIRST_TEXT), told(SECOND_TEXT)],
 		});
 	} finally {
-		rmSync(`${file}.unreadable`, { recursive: true, force: true });
+		keptInPlace.clear();
 		rmSync(file, { force: true });
 	}
 	expect(botInboxWaiting(world.agentDir, HELD), "the leftover removed, nothing waits").toBe(false);
