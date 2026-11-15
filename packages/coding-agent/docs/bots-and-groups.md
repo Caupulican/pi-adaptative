@@ -164,8 +164,8 @@ samples its watches and wakes it with the event (a running turn is steered, an i
 samples or delivers them. While it holds a live watch, or a fired watch's wake it has not taken yet (a one-shot that fired
 is no longer live), its session stays loaded past the idle close, a process that starts
 or sees its host let it go or die opens it again (only where it works in the directory that session worked in; the phone session
-never does), and retiring the bot drops its watches. The roster shows each bot's live watch count with the operator bar's
-ring (`◌n`), read from the store in every session.
+never does), and retiring the bot drops its watches. The roster shows each bot's live watch count in the operator bar's
+words (`watching n`; the ring `◌n` only where the row has no room), read from the store in every session.
 
 **Every open session sees every bot, and closing a session loses none.** Nothing about a bot depends on the session that
 created, messaged or hosts it: the bot list is the bot store, the chat is read from the bot's home, and the unread mark is

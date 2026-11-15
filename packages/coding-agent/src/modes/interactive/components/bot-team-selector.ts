@@ -6,7 +6,7 @@ import type {
 } from "../../../core/delegation/persistent-bot-team-store.ts";
 import { interfaceText } from "../../../core/language/interface-text.ts";
 import { getSelectListTheme, theme } from "../../../presentation/theme-model.ts";
-import { botStateMark } from "./bot-state-mark.ts";
+import { botStateMark, botWatchCount } from "./bot-state-mark.ts";
 import { DynamicBorder } from "./dynamic-border.ts";
 
 const BOT_TEAM_SELECT_LIST_LAYOUT: SelectListLayoutOptions = {
@@ -111,8 +111,7 @@ export class BotTeamSelectorComponent extends Container {
 				const glyph = botStateMark(bot.state).glyph;
 				const unread = (bot.unreadCount ?? 0) > 0 ? text.unread(bot.unreadCount ?? 0) : "";
 				const schedules = (bot.routineCount ?? 0) > 0 ? ` · ⏱${bot.routineCount}` : "";
-				const watches =
-					(bot.watchCount ?? 0) > 0 ? ` · ${interfaceText().common.watching(bot.watchCount ?? 0)}` : "";
+				const watches = (bot.watchCount ?? 0) > 0 ? ` · ${botWatchCount(bot.watchCount ?? 0)}` : "";
 				const summaryOrDesc = bot.currentSummary
 					? text.descriptionSuffix(bot.currentSummary)
 					: bot.description

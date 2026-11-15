@@ -12,7 +12,7 @@ import { nextRoutineAt, type RoutineDefinitionView } from "../../core/routines/r
 import { describeRoutineProgress, routineProgressLine } from "../../core/routines/routine-progress.ts";
 import { boundedLine } from "../../core/util/bounded-line.ts";
 import { routineScheduleLabel } from "./chat-routines.ts";
-import { REMOTE_MARK } from "./components/bot-state-mark.ts";
+import { botWatchCount, REMOTE_MARK } from "./components/bot-state-mark.ts";
 
 /** The bots this session knows, one line each: its id, its roles, its state, its model and what waits for it. */
 export function formatBotList(bots: readonly PersistentBotView[]): string {
@@ -22,7 +22,7 @@ export function formatBotList(bots: readonly PersistentBotView[]): string {
 		.map((bot) => {
 			const unread = (bot.unreadCount ?? 0) > 0 ? words.unread(bot.unreadCount ?? 0) : "";
 			const scheduled = (bot.routineCount ?? 0) > 0 ? ` · ⏱${bot.routineCount}` : "";
-			const watching = (bot.watchCount ?? 0) > 0 ? ` · ${interfaceText().common.watching(bot.watchCount ?? 0)}` : "";
+			const watching = (bot.watchCount ?? 0) > 0 ? ` · ${botWatchCount(bot.watchCount ?? 0)}` : "";
 			const role = `${bot.leader ? words.leaderMark : ""}${bot.remote ? words.remoteMark(REMOTE_MARK) : ""}`;
 			return `${bot.agentId}${role} · ${interfaceText().common.botState(bot.state)} · ${bot.modelRef}${unread}${scheduled}${watching}`;
 		})

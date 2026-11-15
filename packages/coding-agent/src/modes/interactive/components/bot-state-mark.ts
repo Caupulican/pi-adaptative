@@ -1,9 +1,18 @@
-/** A persistent bot's live state as one glyph and the tone it is drawn in; every bot list draws the same one. */
+/**
+ * A persistent bot's live state as one glyph and the tone it is drawn in, and its live watch count in words; every bot
+ * list draws the same ones.
+ */
 import type { PersistentBotView } from "../../../core/delegation/persistent-bot-team-store.ts";
+import { interfaceText } from "../../../core/language/interface-text.ts";
 import { type ThemeColor, theme } from "../../../presentation/theme-model.ts";
 
 /** The one definition of the remote mark lives in core/remote; the bot views read it from here. */
 export { REMOTE_MARK } from "../../../core/remote/remote-jobs.ts";
+
+/** A bot's live watch count as the operator bar draws its own: its label word, then the count ("watching 2"). */
+export function botWatchCount(count: number): string {
+	return `${interfaceText().frame.operator.watching.toLowerCase()} ${count}`;
+}
 
 export interface BotStateMark {
 	readonly glyph: string;

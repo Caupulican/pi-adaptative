@@ -1,6 +1,6 @@
 /**
- * Words more than one surface draws: what a bot's state is called wherever a bot is listed, how many watches it holds,
- * and the way a team with no members is described. A state is an identifier in the data, so the word the owner reads for it is written here.
+ * Words more than one surface draws: what a bot's state is called wherever a bot is listed, and the way a team with no
+ * members is described. A state is an identifier in the data, so the word the owner reads for it is written here.
  */
 
 /** The owner's word for a bot, by its state. */
@@ -17,8 +17,6 @@ const BOT_STATE: Readonly<Record<string, string>> = {
 export const COMMON = {
 	noMembers: "no members",
 	botState: (state: string) => BOT_STATE[state] ?? state,
-	/** A bot's live watch count where it is listed, in the operator bar's word: "watching 2". */
-	watching: (count: number) => `watching ${count}`,
 	/** A failure whose text nobody wrote: the owner reads this, the code keeps its own message. */
 	unknownError: "Unknown error",
 	/** Why a model cannot run under a dollar bound: it declares no price. */

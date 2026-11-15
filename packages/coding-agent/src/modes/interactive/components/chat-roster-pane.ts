@@ -14,7 +14,7 @@ import type {
 import { interfaceText } from "../../../core/language/interface-text.ts";
 import type { WorkbenchGraphView } from "../../../core/settings/settings-schema.ts";
 import { theme } from "../../../presentation/theme-model.ts";
-import { botStateGlyph, REMOTE_MARK } from "./bot-state-mark.ts";
+import { botStateGlyph, botWatchCount, REMOTE_MARK } from "./bot-state-mark.ts";
 import type { WorkbenchPane, WorkbenchPaneTitleButton } from "./workbench-pane.ts";
 
 /** The live facts behind the Chats & Teams roster: the active target, the Brain's state, every bot and team. */
@@ -117,7 +117,7 @@ export function drawChatRosterPane(input: ChatRosterPaneInput): ChatRosterPaneDr
 			`${isSelected ? theme.fg("accent", "▸ ") : "  "}${pad}${glyph} ${isSelected ? theme.bold(theme.fg("accent", name)) : theme.fg("text", name)}${leaderBadge}${unreadBadge}${scheduleBadge}${watchBadge}`;
 		// Watches are passive state, drawn quiet: "watching n" where the row has room, a bare ring only where it has not.
 		const watches = bot.watchCount ?? 0;
-		const labelled = row(watches > 0 ? ` ${theme.fg("muted", text.common.watching(watches))}` : "");
+		const labelled = row(watches > 0 ? ` ${theme.fg("muted", botWatchCount(watches))}` : "");
 		add(
 			watches === 0 || visibleWidth(labelled) <= width - 2 ? labelled : row(` ${theme.fg("muted", `◌${watches}`)}`),
 			target,
