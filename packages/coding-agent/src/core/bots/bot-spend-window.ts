@@ -8,7 +8,7 @@
  * Which window an entry of the transcript belongs to is read from the transcript itself, walking back from the entry to
  * the input that opened its window. A turn a worker's handoff opened belongs to the window of the attempt that woke it,
  * and an attempt belongs to the window of the transcript leaf it was dispatched from (its receipt origin, which its
- * retries, its verifier and the children it starts carry). An entry that is no outside input (a continuation, a host
+ * retries, its verifier and the children it starts carry; a plan step's is the leaf of the plan call that stated it). An entry that is no outside input (a continuation, a host
  * steer, a notice) belongs to the window before it; the transcript's first entry opens one when nothing later did.
  *
  * Kept in the bot's spend ledger (`BotSpendLedger`, `bots/<id>/spend.json`): a reopened session resumes a window's

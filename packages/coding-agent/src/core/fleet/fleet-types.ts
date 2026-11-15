@@ -94,6 +94,11 @@ export interface FleetDispatch {
 	model?: { provider: string; modelId: string };
 	plan?: { planId: string; version: number; nodeId: string };
 	/**
+	 * A plan step: the input the version that stated it serves (`planNodeOrigin`), so the step's attempts serve it rather
+	 * than the transcript leaf the step happens to be released at. Absent for every other dispatch.
+	 */
+	receiptOrigin?: WorkerReceiptOrigin;
+	/**
 	 * An escalation rung's rerun. `writeScope` and `pinned` are relative to the original attempt's own cwd (the cwd entry
 	 * itself is ".") and are rebuilt against the session cwd when the rerun is requested.
 	 */

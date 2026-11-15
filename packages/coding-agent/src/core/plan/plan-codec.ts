@@ -23,6 +23,7 @@ import {
 } from "../orchestration/contracts.ts";
 import { exactRecord, record } from "../orchestration/task-runtime-projection.ts";
 import { DurableTaskRuntimeError } from "../orchestration/task-runtime-state.ts";
+import { workerReceiptOriginFromValue } from "../orchestration/worker-receipt-origin.ts";
 import type { Placement, PlacementPin } from "../placement/placement-types.ts";
 import { PROOF_STAKES_LEVELS, type ProofStakesLevel } from "../proof/stakes-levels.ts";
 import {
@@ -50,6 +51,7 @@ import {
 	type PlanRetiredTask,
 	type PlanRuntimeState,
 	type PlanSubgraphOf,
+	type PlanVersionOrigin,
 	type StoredPlanRecord,
 } from "./plan-graph.ts";
 
@@ -361,6 +363,18 @@ const RECORD_FIELDS = [
 	"revisedAt",
 ] as const;
 const RECORD_FIELDS_V2 = [...RECORD_FIELDS, "fanout"] as const;
+const RECORD_FIELDS_V3 = [...RECORD_FIELDS_V2, "origins"] as const;
+
+function versionOriginFromValue(value: unknown, label: string): PlanVersionOrigin {
+	const input = exactRecord(value, label, ["version", "origin"]);
+	let origin: PlanVersionOrigin["origin"];
+	try {
+		origin = workerReceiptOriginFromValue(input.origin);
+	} catch {
+		return fail(`${label}.origin`, "is not a receipt origin");
+	}
+	return { version: positive(input.version, `${label}.version`, PLAN_LIMITS.versions), origin };
+}
 
 function fanoutFromValue(value: unknown, label: string): PlanFanout {
 	const input = exactRecord(value, label, ["groupId", "kind", "toolCallId"]);
@@ -390,7 +404,7 @@ export function planRecordFromValue(value: unknown, label: string): StoredPlanRe
 	const v = input.v;
 	if (typeof v !== "number" || !Number.isSafeInteger(v) || v < 1) return fail(`${label}.v`, "is invalid");
 	if (!(PLAN_DECODABLE_VERSIONS as readonly number[]).includes(v)) return newerPlan(input, v);
-	exactRecord(input, label, v === 1 ? RECORD_FIELDS : RECORD_FIELDS_V2);
+	exactRecord(input, label, v === 1 ? RECORD_FIELDS : v === 2 ? RECORD_FIELDS_V2 : RECORD_FIELDS_V3);
 	const planId = text(input.planId, 11, `${label}.planId`);
 	if (!/^pl-[0-9a-f]{8}$/.test(planId)) fail(`${label}.planId`, "is not a plan id");
 	if (typeof input.unjudged !== "boolean") fail(`${label}.unjudged`, "must be true or false");
@@ -414,7 +428,14 @@ export function planRecordFromValue(value: unknown, label: string): StoredPlanRe
 		createdAt: id(input.createdAt, `${label}.createdAt`),
 		revisedAt: id(input.revisedAt, `${label}.revisedAt`),
 		...(input.fanout !== undefined ? { fanout: fanoutFromValue(input.fanout, `${label}.fanout`) } : {}),
+		...(input.origins !== undefined
+			? { origins: entries(input.origins, PLAN_LIMITS.nodes, `${label}.origins`, versionOriginFromValue) }
+			: {}),
 	};
+	const originVersions = (decoded.origins ?? []).map((entry) => entry.version);
+	if (new Set(originVersions).size !== originVersions.length) fail(`${label}.origins`, "name a version twice");
+	if (originVersions.some((version) => !decoded.nodes.some((node) => node.since === version)))
+		fail(`${label}.origins`, "name a version no step names");
 	if (decoded.nodes.some((node) => node.since > decoded.version)) fail(`${label}.nodes`, "name a later version");
 	if (!decoded.nodes.some((node) => node.id === decoded.final)) fail(`${label}.final`, "names no step of the plan");
 	return decoded;

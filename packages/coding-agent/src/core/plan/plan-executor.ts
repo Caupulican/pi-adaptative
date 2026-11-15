@@ -67,6 +67,8 @@ import {
 	type PlanRecord,
 	type PlanRuntimeState,
 	planCriticalPath,
+	planNodeOrigin,
+	planVersionOrigins,
 } from "./plan-graph.ts";
 import {
 	MergeLandings,
@@ -349,6 +351,8 @@ export class PlanExecutor implements PlanExecutorPort {
 		const plan = snapshot.plans[planId];
 		const current = plan && !isPlanFromNewerBuild(plan.record) ? { record: plan.record, runtime: plan } : undefined;
 		const goal = this.deps.goal();
+		// The input this call serves is read before acceptance awaits: the steps it states serve it, released when they may.
+		const origin = this.deps.captureOrigin();
 		const accepted = await acceptPlanCall(input, {
 			planId,
 			objectiveId: goal ? goalObjectiveId(goal.goalId) : `session:${this.deps.sessionId()}`,
@@ -359,6 +363,7 @@ export class PlanExecutor implements PlanExecutorPort {
 			engine: this.deps.engine(),
 			entries: this.deps.rootEntries(),
 			now: nowIso,
+			origin,
 			...(context.signal ? { signal: context.signal } : {}),
 		});
 		if (!accepted.ok) {
@@ -704,12 +709,16 @@ export class PlanExecutor implements PlanExecutorPort {
 			harnessLog.info("plan", "a host revision does not fit; the step is held", { planId, nodeId, what });
 			return false;
 		}
+		// The steps a host revision states serve the input the step it revises for served.
+		const served = record.nodes.find((node) => node.id === nodeId);
+		const origin = served ? planNodeOrigin(record, served) : undefined;
 		runtime.recordPlan({
 			...record,
 			version,
 			nodes: facts.nodes,
 			final: built.final,
 			revisedAt: new Date(this.now()).toISOString(),
+			origins: planVersionOrigins(record.origins, facts.nodes, version, origin),
 		});
 		harnessLog.info("plan", "a plan is revised by the host", { planId, nodeId, what, version });
 		return true;

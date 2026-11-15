@@ -196,6 +196,8 @@ export function workerRequestForDispatch(
 				}
 			: {}),
 	};
+	// A rerun answers the original's parent; a plan step serves the input its version was stated for.
+	const receiptOrigin = pinned?.receiptOrigin ?? dispatch.receiptOrigin;
 	return {
 		instructions: dispatch.instructions,
 		...(dispatch.brief ? { brief: dispatch.brief } : {}),
@@ -222,7 +224,7 @@ export function workerRequestForDispatch(
 		...(pinned?.parentAgentId !== undefined ? { parentAgentId: pinned.parentAgentId } : {}),
 		...(pinned?.botSoul !== undefined ? { botSoul: pinned.botSoul } : {}),
 		...(pinned?.turnOrigin !== undefined ? { turnOrigin: pinned.turnOrigin } : {}),
-		...(pinned?.receiptOrigin !== undefined ? { receiptOrigin: pinned.receiptOrigin } : {}),
+		...(receiptOrigin !== undefined ? { receiptOrigin } : {}),
 		...(pinned
 			? { isolation: freshPinnedLane ? ("worktree" as const) : ("shared" as const) }
 			: dispatch.isolation === "worktree"

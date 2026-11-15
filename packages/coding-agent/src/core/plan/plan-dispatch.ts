@@ -27,6 +27,7 @@ import {
 	type PlanRecord,
 	type PlanRuntimeState,
 	planNodeEdges,
+	planNodeOrigin,
 } from "./plan-graph.ts";
 import { needsOwnWorktree } from "./plan-merge.ts";
 import { planNodeOutcome } from "./plan-view.ts";
@@ -213,6 +214,7 @@ export function buildPlanDispatch(
 	const sections = [...head, ...tail];
 	const rank = planNodeRank(node, criticalPath);
 	const writeScope = node.kind === "verify" ? [] : node.writeScope;
+	const receiptOrigin = planNodeOrigin(record, node);
 	return {
 		idempotencyKey: planReleaseKey(record.planId, node.id, node.since),
 		demand: {
@@ -232,6 +234,7 @@ export function buildPlanDispatch(
 		dependsOnTaskIds: dependencyTaskIds(projection, plan, record, node),
 		thinking: node.effort === "deep" ? "raise_one" : "inherit",
 		plan: { planId: record.planId, version: node.since, nodeId: node.id },
+		...(receiptOrigin ? { receiptOrigin } : {}),
 		...(anchor
 			? {
 					verification: {

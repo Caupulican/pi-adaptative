@@ -19,6 +19,7 @@
 
 import { MAX_TASK_GOAL_CHARS, MAX_TASK_NOTE_CHARS } from "../comms/comms-records.ts";
 import type { GoalState } from "../goals/goal-state.ts";
+import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { OperationEffectEngine } from "../system-one/operation-classifier.ts";
 import { type PlanGraphReview, reviewPlanGraph } from "../system-one/plan-graph-review.ts";
 import { lastUserRequest, rootTurnsExcerpt } from "./plan-dispatch.ts";
@@ -33,6 +34,7 @@ import {
 	type PlanRecord,
 	type PlanRuntimeState,
 	planRecordBytes,
+	planVersionOrigins,
 } from "./plan-graph.ts";
 import { reservedLandIdProblems } from "./plan-merge.ts";
 import {
@@ -67,6 +69,8 @@ export interface PlanAcceptanceContext {
 	/** The root's session branch, root to leaf. */
 	readonly entries: readonly unknown[];
 	readonly now: string;
+	/** The input the call serves (its receipt origin, taken before acceptance awaits): the steps it states serve it too. */
+	readonly origin?: WorkerReceiptOrigin;
 	readonly signal?: AbortSignal;
 }
 
@@ -243,6 +247,7 @@ export async function acceptPlanCall(input: PlanToolInput, context: PlanAcceptan
 		judgments: [...(current?.judgments ?? []), ...review.judgments].slice(-PLAN_LIMITS.judgments),
 		createdAt: current?.createdAt ?? context.now,
 		revisedAt: context.now,
+		origins: planVersionOrigins(current?.origins, nodes, version, context.origin),
 	};
 	if (planRecordBytes(record) > PLAN_LIMITS.recordBytes) {
 		return { ok: false, problems: ["the plan is too large to keep; use fewer or shorter steps"] };

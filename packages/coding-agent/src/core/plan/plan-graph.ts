@@ -12,6 +12,7 @@ import type { StoredOutcome } from "../delegation/worker-outcome-contract.ts";
 import type { HostEventSubscriptionInput } from "../events/host-event-contract.ts";
 import type { KnowledgeGrantReference } from "../memory/knowledge-grant.ts";
 import type { OrchestrationThinkingLevel } from "../orchestration/contracts.ts";
+import type { WorkerReceiptOrigin } from "../orchestration/worker-receipt-origin.ts";
 import type { Placement, PlacementPin } from "../placement/placement-types.ts";
 import type { ProofStakesLevel } from "../proof/stakes-levels.ts";
 
@@ -32,12 +33,13 @@ export interface PlanNodeDemand {
 
 /**
  * The record version this build writes. Version 2 adds optional fields (step doubts, authority and text digest, join
- * criteria, the fan-out marker); an older build reads a version-2 record as unsupported, never as a malformed one.
+ * criteria, the fan-out marker); version 3 adds the input each version was stated for (`origins`). An older build reads
+ * a record of a later version as unsupported, never as a malformed one.
  */
-export const PLAN_RECORD_VERSION = 2 as const;
+export const PLAN_RECORD_VERSION = 3 as const;
 
-/** Record versions this build decodes field by field: v1 records decode unchanged; v2 adds optional fields. */
-export const PLAN_DECODABLE_VERSIONS = [1, 2] as const;
+/** Record versions this build decodes field by field: v1 records decode unchanged; v2 and v3 add optional fields. */
+export const PLAN_DECODABLE_VERSIONS = [1, 2, 3] as const;
 
 export const PLAN_NODE_KINDS = ["work", "collect", "reduce", "merge", "vote", "race", "verify"] as const;
 export type PlanNodeKind = (typeof PLAN_NODE_KINDS)[number];
@@ -241,6 +243,46 @@ export interface PlanRecord {
 	readonly revisedAt: string;
 	/** Set only on a fan-out group (`delegate` slices or race); its retention class is separate from the plans'. */
 	readonly fanout?: PlanFanout;
+	/**
+	 * The input each version a step still names was stated for (`planVersionOrigins`): a step's attempts serve it (its
+	 * spend window, where its receipt is delivered), however much later the step is released.
+	 */
+	readonly origins?: readonly PlanVersionOrigin[];
+}
+
+/**
+ * The input one plan version was stated for: the receipt origin of the plan call that stated it, or, for a host revision,
+ * that of the step the revision serves.
+ */
+export interface PlanVersionOrigin {
+	readonly version: number;
+	readonly origin: WorkerReceiptOrigin;
+}
+
+/**
+ * The origins a record of `version` keeps: `origin` for `version` itself, and of `prior` only the versions a node of
+ * `nodes` still names (`since`), so the list never outgrows the steps.
+ */
+export function planVersionOrigins(
+	prior: readonly PlanVersionOrigin[] | undefined,
+	nodes: readonly Pick<PlanNodeSpec, "since">[],
+	version: number,
+	origin: WorkerReceiptOrigin | undefined,
+): PlanVersionOrigin[] {
+	const named = new Set(nodes.map((node) => node.since));
+	const kept = (prior ?? []).filter((entry) => entry.version !== version && named.has(entry.version));
+	return origin && named.has(version) ? [...kept, { version, origin }] : kept;
+}
+
+/**
+ * The input a step serves: the origin of the version that last stated it. Undefined for a version an earlier build
+ * recorded (before version 3), whose step takes the transcript leaf it is released at.
+ */
+export function planNodeOrigin(
+	record: Pick<PlanRecord, "origins">,
+	node: Pick<PlanNodeSpec, "since">,
+): WorkerReceiptOrigin | undefined {
+	return record.origins?.find((entry) => entry.version === node.since)?.origin;
 }
 
 /** A record written by a newer build: kept by identity, never refused, never executed by this build. */
