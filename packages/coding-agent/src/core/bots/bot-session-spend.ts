@@ -21,7 +21,7 @@ import type { ModelRegistry } from "../model-registry.ts";
 import { isMeteredSpend } from "../orchestration/risk-budget.ts";
 import type { AttemptRuntimeState, TaskRuntimeProjection } from "../orchestration/task-runtime-state.ts";
 import type { BotSessionDefinition } from "./bot-session-profile.ts";
-import type { BotSessionTurnPorts, BotSpendCeiling, BotTurnSpendBound } from "./bot-session-turns.ts";
+import type { BotSessionTurnPorts, BotSpendCeiling } from "./bot-session-turns.ts";
 import { BotSpendLedger } from "./bot-spend-ledger.ts";
 import { BotSpendWindows, type WindowSpend } from "./bot-spend-window.ts";
 import { BotTurnAccounting, type BotTurnAccountingPorts } from "./bot-turn-report.ts";
@@ -56,10 +56,10 @@ export function botSpendCeilingsOn(
 	return botSpendCeilings(root, spendBudget).filter((ceiling) => metered || !ceiling.meteredOnly);
 }
 
-/** The lowest of `ceilings`, named as the bound that sets it; undefined when there is none. */
-function lowest(ceilings: readonly BotSpendCeiling[]): BotTurnSpendBound | undefined {
-	return ceilings.reduce<BotTurnSpendBound | undefined>(
-		(low, { usd, bound }) => (low === undefined || usd < low.usd ? { usd, bound } : low),
+/** The lowest of `ceilings`; undefined when there is none. */
+function lowest(ceilings: readonly BotSpendCeiling[]): BotSpendCeiling | undefined {
+	return ceilings.reduce<BotSpendCeiling | undefined>(
+		(low, ceiling) => (low === undefined || ceiling.usd < low.usd ? ceiling : low),
 		undefined,
 	);
 }
@@ -148,18 +148,18 @@ export class BotSessionSpend {
 	 * of those that hold the bot's own spend, each on the spend it counts. Before the transcript holds the turn's input,
 	 * the turn's own spend is the window's.
 	 */
-	private exceeded(turnUsd: number, addedUsd: number): SpendExcess<BotTurnSpendBound> | undefined {
+	private exceeded(turnUsd: number, addedUsd: number): SpendExcess<BotSpendCeiling> | undefined {
 		const { model, spendBudget } = this.definition;
 		const metered = isMeteredSpend(model, this.registry);
 		const spend: WindowSpend = this.windows.count(addedUsd, metered) ?? {
 			usd: turnUsd,
 			meteredUsd: metered ? turnUsd : 0,
 		};
-		let excess: SpendExcess<BotTurnSpendBound> | undefined;
+		let excess: SpendExcess<BotSpendCeiling> | undefined;
 		for (const ceiling of botSpendCeilingsOn(this.ports.rootCeilings(), spendBudget, model, this.registry)) {
 			const spentUsd = ceiling.meteredOnly ? spend.meteredUsd : spend.usd;
 			if (spentUsd > ceiling.usd && (excess === undefined || ceiling.usd < excess.limit.usd))
-				excess = { spentUsd, limit: { usd: ceiling.usd, bound: ceiling.bound } };
+				excess = { spentUsd, limit: ceiling };
 		}
 		return excess;
 	}

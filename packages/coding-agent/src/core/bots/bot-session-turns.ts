@@ -18,17 +18,14 @@ import type { TimerPort } from "../util/timer-port.ts";
 import type { BotTurnAccounting } from "./bot-turn-report.ts";
 import { BotTurnSupervision } from "./bot-turn-supervision.ts";
 
-/** One dollar bound on a bot's spend, with the setting that sets it: the owner's worker bound, the main session's, or the bot's profile's. */
-export interface BotTurnSpendBound {
+/**
+ * One dollar ceiling over a bot's spend per request, with the setting that sets it (the owner's worker bound, the main
+ * session's, or the bot's profile's): on all of it, or (`meteredOnly`) on the part of it made on metered models, which a
+ * subscription's spend never reaches (its limit is its plan's usage windows).
+ */
+export interface BotSpendCeiling {
 	readonly usd: number;
 	readonly bound: "worker" | "session" | "profile";
-}
-
-/**
- * One dollar ceiling over a bot's spend per request: on all of it, or (`meteredOnly`) on the part of it made on metered
- * models, which a subscription's spend never reaches (its limit is its plan's usage windows).
- */
-export interface BotSpendCeiling extends BotTurnSpendBound {
 	readonly meteredOnly: boolean;
 }
 
@@ -41,12 +38,12 @@ export interface BotSessionTurnPorts {
 	/** The host's timers: the time bound arms its alarm on them. */
 	readonly timers: TimerPort;
 	/** The lowest bound on the bot's own spend now; undefined when nothing bounds it. */
-	spendBound(): BotTurnSpendBound | undefined;
+	spendBound(): BotSpendCeiling | undefined;
 	/**
 	 * Counts `addedUsd` the turn just spent to the request it serves; returns that request's spend (its workers' included)
 	 * past one of its bounds, with that bound, or undefined within them all.
 	 */
-	exceeded(turnUsd: number, addedUsd: number): SpendExcess<BotTurnSpendBound> | undefined;
+	exceeded(turnUsd: number, addedUsd: number): SpendExcess<BotSpendCeiling> | undefined;
 	/** How long one turn may run now (the owner's `workerDelegation.maxWallClockMs` as it is now). */
 	maxWallClockMs(): number | undefined;
 	/** Tells the owner in the bot's chat; `mark` false keeps the bot read (an informational notice). */
@@ -67,7 +64,13 @@ export function observeBotSessionTurns(
 		limit: () => ports.spendBound(),
 		exceeded: (turnUsd, addedUsd) => ports.exceeded(turnUsd, addedUsd),
 		onExceeded: (spentUsd, limit) => {
-			const reason = words().botTurnOverBudget(agentId, spentUsd.toFixed(2), limit.usd.toFixed(2), limit.bound);
+			const reason = words().botTurnOverBudget(
+				agentId,
+				spentUsd.toFixed(2),
+				limit.usd.toFixed(2),
+				limit.bound,
+				limit.meteredOnly,
+			);
 			ports.notify(reason);
 			return reason;
 		},
