@@ -7,6 +7,7 @@
 
 import type { BotPointerSetAsideReason } from "../../bots/bot-session-pointer.ts";
 import type { ChannelServedBy } from "../../channels/away-channels.ts";
+import type { HolderPlace } from "./sessions.ts";
 
 /** Why a bot's session pointer did not count, as the sentence that tells it was set aside says it. */
 const POINTER_SET_ASIDE: {
@@ -98,9 +99,9 @@ export const BOT_TEAM = {
 	botSessionHolderSession: (pid: number) => `a session of yours (process ${pid})`,
 	botSessionHolderPhone: (pid: number) => `the phone session's daemon (process ${pid})`,
 	botSessionHolderBotHost: (pid: number) => `another bot host (process ${pid})`,
-	/** A holder (one of the three above) on another machine, which this one cannot see end. */
-	botSessionHolderOnMachine: (holder: string, machine: string) =>
-		`${holder} on ${machine}, released when it closes the conversation or, if it ended without letting go, when pi on that machine opens it`,
+	/** A holder (one of the three above) elsewhere (`sessions.hosted` place words), which this system cannot see end. */
+	botSessionHolderElsewhere: (holder: string, place: HolderPlace) =>
+		`${holder} ${place.at}, released when it closes the conversation or, if it ended without letting go, when pi ${place.there} opens it`,
 	/** The bot's session pointer, or the session file it loads, is a symbolic link: the load stops until it is replaced. */
 	botSessionFileLinked: (path: string) =>
 		`the bot session file ${path} is a symbolic link, which bot sessions do not follow (a write would replace the link with a copy); replace the link with the file itself`,

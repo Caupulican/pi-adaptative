@@ -8,6 +8,7 @@
 import type { BotPointerSetAsideReason } from "../../bots/bot-session-pointer.ts";
 import type { ChannelServedBy } from "../../channels/away-channels.ts";
 import type { InterfaceText } from "../interface-text.ts";
+import type { HolderPlace } from "../text-en/sessions.ts";
 
 /** Por que o ponteiro de sessão de um bot não contou, como a frase que diz que ele foi separado o diz. */
 const POINTER_SET_ASIDE: {
@@ -100,8 +101,8 @@ export const BOT_TEAM = {
 	botSessionHolderSession: (pid: number) => `uma sessão sua (processo ${pid})`,
 	botSessionHolderPhone: (pid: number) => `o daemon da sessão do telefone (processo ${pid})`,
 	botSessionHolderBotHost: (pid: number) => `outro hospedeiro de bot (processo ${pid})`,
-	botSessionHolderOnMachine: (holder: string, machine: string) =>
-		`${holder} em ${machine}, liberada quando esse processo a fechar ou, se ele terminou sem liberá-la, quando o pi naquela máquina a abrir`,
+	botSessionHolderElsewhere: (holder: string, place: HolderPlace) =>
+		`${holder} ${place.at}, liberada quando esse processo a fechar ou, se ele terminou sem liberá-la, quando o pi ${place.there} a abrir`,
 	botSessionFileLinked: (path: string) =>
 		`o arquivo de sessão de bot ${path} é um link simbólico, que as sessões de bot não seguem (uma escrita trocaria o link por uma cópia); troque o link pelo próprio arquivo`,
 	botSessionHomeChanged: (agentId: string) =>

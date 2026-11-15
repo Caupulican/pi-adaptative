@@ -9,10 +9,12 @@ import { readSessionHeaderResult } from "../kernel/session/session-header.ts";
 import type { SessionManager } from "../kernel/session/session-manager.ts";
 import { resolvePath } from "../utils/paths.ts";
 import { interfaceText } from "./language/interface-text.ts";
+import type { HolderPlace } from "./language/text-en/sessions.ts";
 import {
 	refuseHostedSession,
 	SessionHomeChangedError,
 	SessionHostedError,
+	type SessionLeaseHolderRef,
 	type SessionStorageRoots,
 } from "./orchestration/session-bundle-lifecycle.ts";
 
@@ -85,8 +87,18 @@ export function hostedSessionRefusal(error: SessionHostedError): string {
 	const words = interfaceText().sessions.hosted;
 	const { pid, role, elsewhere } = error.holder;
 	if (!elsewhere) return role === "bot-host" ? words.bot(pid) : words.phone(pid);
-	const machine = elsewhere.hostname ?? words.otherMachine;
-	return role === "bot-host" ? words.botOnMachine(pid, machine) : words.phoneOnMachine(pid, machine);
+	const place = holderPlace(elsewhere);
+	return role === "bot-host" ? words.botElsewhere(pid, place) : words.phoneElsewhere(pid, place);
+}
+
+/**
+ * The owner's words for where a holder on another machine runs: another system on this computer when its record names
+ * this computer's hostname, else that machine by its hostname (or as another machine, when its record names none).
+ */
+export function holderPlace(elsewhere: NonNullable<SessionLeaseHolderRef["elsewhere"]>): HolderPlace {
+	const words = interfaceText().sessions.hosted;
+	if (elsewhere.thisComputer) return words.otherSystem;
+	return words.onMachine(elsewhere.hostname ?? words.otherMachine);
 }
 
 /**

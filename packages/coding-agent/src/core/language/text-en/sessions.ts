@@ -6,6 +6,12 @@
  * its label from here.
  */
 
+/** Where a session's holder runs when it is not on this system: the phrase that places it, and the one that refers back. */
+export interface HolderPlace {
+	readonly at: string;
+	readonly there: string;
+}
+
 export const SESSIONS = {
 	/** A session another process hosts is refused here: by the daemon as the phone session, or by its bot's host. */
 	hosted: {
@@ -13,13 +19,17 @@ export const SESSIONS = {
 			`This is the phone session; the background daemon (pid ${pid}) is hosting it. Stop the daemon to open it here (\`/bot daemon stop\`).`,
 		bot: (pid: number) =>
 			`This session is a bot's own conversation; its host (pid ${pid}) runs it. Talk to the bot in its chat (\`/bot open <id>\`), or stop that process to open the session here.`,
-		/** The host runs on another machine (`machine`: its name, or `otherMachine`): this one cannot see it end. */
-		phoneOnMachine: (pid: number, machine: string) =>
-			`This is the phone session; the background daemon on ${machine} (pid ${pid}) is hosting it. Stop it on that machine to open the session here; a daemon that ended there without letting go is released when pi on that machine opens the session.`,
-		botOnMachine: (pid: number, machine: string) =>
-			`This session is a bot's own conversation; its host on ${machine} (pid ${pid}) runs it. Talk to the bot in its chat (\`/bot open <id>\`), or stop that process on that machine to open the session here; a host that ended there without letting go is released when pi on that machine opens the session.`,
+		/** The host runs elsewhere (`place`: `onMachine` or `otherSystem`): this system cannot see it end. */
+		phoneElsewhere: (pid: number, place: HolderPlace) =>
+			`This is the phone session; the background daemon ${place.at} (pid ${pid}) is hosting it. Stop it ${place.there} to open the session here; a daemon that ended there without letting go is released when pi ${place.there} opens the session.`,
+		botElsewhere: (pid: number, place: HolderPlace) =>
+			`This session is a bot's own conversation; its host ${place.at} (pid ${pid}) runs it. Talk to the bot in its chat (\`/bot open <id>\`), or stop that process ${place.there} to open the session here; a host that ended there without letting go is released when pi ${place.there} opens the session.`,
+		/** A holder on another machine, named by its hostname or by `otherMachine`. */
+		onMachine: (machine: string): HolderPlace => ({ at: `on ${machine}`, there: "on that machine" }),
 		/** A holder's machine whose record names no hostname (only a machine id). */
 		otherMachine: "another machine",
+		/** A holder whose record names this computer's hostname under another machine id (Windows and WSL on one PC). */
+		otherSystem: { at: "in another system on this computer", there: "in that system" } satisfies HolderPlace,
 	},
 	/** A fleet queue file under the name an earlier build gave a session's away runs' was not theirs to adopt. */
 	awayFleetQueueSetAside: (path: string) =>

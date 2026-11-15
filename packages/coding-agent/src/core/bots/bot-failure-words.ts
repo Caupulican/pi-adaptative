@@ -15,6 +15,7 @@ import {
 import { FileLockDeadlineError, isFileLockContentionError } from "../../kernel/storage/atomic-file.ts";
 import { RoutineRevisionChangedError } from "../delegation/routine-revision.ts";
 import { interfaceText } from "../language/interface-text.ts";
+import { holderPlace } from "../session-switch-failures.ts";
 import { BotBundleSplitError } from "./bot-bundle-move.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 
@@ -42,8 +43,7 @@ function causeChain(error: unknown): string[] {
 }
 
 function holderWords(holder: SessionLeaseHolderRef): string {
-	const text = interfaceText();
-	const words = text.botTeam;
+	const words = interfaceText().botTeam;
 	const process =
 		holder.role === "channel-host"
 			? words.botSessionHolderPhone(holder.pid)
@@ -51,7 +51,7 @@ function holderWords(holder: SessionLeaseHolderRef): string {
 				? words.botSessionHolderBotHost(holder.pid)
 				: words.botSessionHolderSession(holder.pid);
 	if (!holder.elsewhere) return process;
-	return words.botSessionHolderOnMachine(process, holder.elsewhere.hostname ?? text.sessions.hosted.otherMachine);
+	return words.botSessionHolderElsewhere(process, holderPlace(holder.elsewhere));
 }
 
 /** The owner's words for `error` when this module words it, else undefined (see the module comment). */

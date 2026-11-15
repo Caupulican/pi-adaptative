@@ -2,6 +2,7 @@ import { randomUUID } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, unlinkSync } from "node:fs";
 import { join } from "node:path";
 import { harnessLog } from "../harness-log.ts";
+import { readHostIdentity } from "../reliability/host-identity.ts";
 import { judgeOwner, type OwnerStanding, ownProcessOwner, type ProcessOwner } from "../reliability/owner-identity.ts";
 import { isPositiveSafePid } from "../reliability/process-tree.ts";
 import {
@@ -122,9 +123,10 @@ export interface SessionLeaseHolderRef {
 	/**
 	 * Set when the holder runs on another machine (`judgeOwner`: `foreign`): its pid names no process here, and only a
 	 * process on that machine can prove it gone. `hostname` is the name its record carries, absent on a record that names
-	 * only a machine id. Built in memory from the holder's record, never written to it.
+	 * only a machine id. `thisComputer`: that name is this computer's own, under another machine id (another system on
+	 * this computer, such as Windows and WSL on one PC). Built in memory from the holder's record, never written to it.
 	 */
-	readonly elsewhere: { readonly hostname: string | undefined } | undefined;
+	readonly elsewhere: { readonly hostname: string | undefined; readonly thisComputer: boolean } | undefined;
 }
 
 /** The refusal's name for a holder judged `standing`. */
@@ -135,13 +137,24 @@ export function sessionLeaseHolderRef(
 	return {
 		pid: holder.owner.pid,
 		role: holder.role,
-		elsewhere: standing === "foreign" ? { hostname: holder.owner.hostname } : undefined,
+		elsewhere:
+			standing === "foreign"
+				? {
+						hostname: holder.owner.hostname,
+						thisComputer:
+							holder.owner.hostname !== undefined && holder.owner.hostname === readHostIdentity().hostname,
+					}
+				: undefined,
 	};
 }
 
-/** Where a holder runs, in the kernel's English: "pid N", or "pid N on <machine>" for one on another machine. */
+/**
+ * Where a holder runs, in the kernel's English: "pid N", "pid N on <machine>" for one on another machine, or "pid N in
+ * another system on this computer".
+ */
 function holderProcess(holder: SessionLeaseHolderRef): string {
 	if (!holder.elsewhere) return `pid ${holder.pid}`;
+	if (holder.elsewhere.thisComputer) return `pid ${holder.pid} in another system on this computer`;
 	return `pid ${holder.pid} on ${holder.elsewhere.hostname ?? "another machine"}`;
 }
 
@@ -201,7 +214,7 @@ export class SessionHostedError extends Error {
 			holder.role === "bot-host"
 				? `This session is a bot's own conversation; its host (${holderProcess(holder)}) runs it.`
 				: holder.elsewhere
-					? `This is the phone session; the background daemon (${holderProcess(holder)}) is hosting it. Stop it on that machine to open it here.`
+					? `This is the phone session; the background daemon (${holderProcess(holder)}) is hosting it. Stop it ${holder.elsewhere.thisComputer ? "in that system" : "on that machine"} to open it here.`
 					: `This is the phone session; the background daemon (pid ${holder.pid}) is hosting it. Stop the daemon to open it here (\`/bot daemon stop\`).`,
 		);
 		this.name = "SessionHostedError";

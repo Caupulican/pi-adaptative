@@ -6,6 +6,7 @@
  */
 
 import type { InterfaceText } from "../interface-text.ts";
+import type { HolderPlace } from "../text-en/sessions.ts";
 
 /** A palavra do dono para cada estado do objetivo, indexada pelo identificador que o registro do objetivo guarda. */
 const GOAL_STATUS_WORDS = {
@@ -39,11 +40,13 @@ export const SESSIONS = {
 			`Esta é a sessão do telefone; o daemon em segundo plano (pid ${pid}) a hospeda. Pare o daemon para abri-la aqui (\`/bot daemon stop\`).`,
 		bot: (pid: number) =>
 			`Esta sessão é a conversa do próprio bot; o host dele (pid ${pid}) a executa. Fale com o bot no chat dele (\`/bot open <id>\`), ou pare esse processo para abrir a sessão aqui.`,
-		phoneOnMachine: (pid: number, machine: string) =>
-			`Esta é a sessão do telefone; o daemon em segundo plano em ${machine} (pid ${pid}) a hospeda. Pare-o naquela máquina para abrir a sessão aqui; um daemon que terminou lá sem liberá-la é liberado quando o pi naquela máquina abrir a sessão.`,
-		botOnMachine: (pid: number, machine: string) =>
-			`Esta sessão é a conversa do próprio bot; o host dele em ${machine} (pid ${pid}) a executa. Fale com o bot no chat dele (\`/bot open <id>\`), ou pare esse processo naquela máquina para abrir a sessão aqui; um host que terminou lá sem liberá-la é liberado quando o pi naquela máquina abrir a sessão.`,
+		phoneElsewhere: (pid: number, place: HolderPlace) =>
+			`Esta é a sessão do telefone; o daemon em segundo plano ${place.at} (pid ${pid}) a hospeda. Pare-o ${place.there} para abrir a sessão aqui; um daemon que terminou lá sem liberá-la é liberado quando o pi ${place.there} abrir a sessão.`,
+		botElsewhere: (pid: number, place: HolderPlace) =>
+			`Esta sessão é a conversa do próprio bot; o host dele ${place.at} (pid ${pid}) a executa. Fale com o bot no chat dele (\`/bot open <id>\`), ou pare esse processo ${place.there} para abrir a sessão aqui; um host que terminou lá sem liberá-la é liberado quando o pi ${place.there} abrir a sessão.`,
+		onMachine: (machine: string): HolderPlace => ({ at: `em ${machine}`, there: "naquela máquina" }),
 		otherMachine: "outra máquina",
+		otherSystem: { at: "em outro sistema deste computador", there: "naquele sistema" } satisfies HolderPlace,
 	},
 	awayFleetQueueSetAside: (path: string) =>
 		`Um arquivo de fila deixado por uma sessão anterior foi separado, não adotado: ${path}.`,
