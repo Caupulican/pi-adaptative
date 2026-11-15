@@ -3,7 +3,8 @@
  * reason (a loaded session's fleet and the jobs its home's other sessions placed, or a closed session's work under its host
  * lock), the watches its session armed dropped, and the messages waiting in its inbox refused; a loaded session is closed
  * once its workers ended. What a release could not finish stays owed and runs whole again after a backoff, the owner told
- * once, until it is done or the bot is back on the session path.
+ * once, until it is done or the bot is back on the session path; what it told of the work left behind a symbolic link is
+ * told once for the release however often it runs (`LinkedSessionNotices`).
  */
 import type { AgentSession } from "../agent-session.ts";
 import type { PersistentBotRecord, PersistentBotTeamStore } from "../delegation/persistent-bot-team-store.ts";
@@ -13,6 +14,7 @@ import type { TimerPort } from "../util/timer-port.ts";
 import { errorText } from "./bot-error-text.ts";
 import { botFailureText } from "./bot-failure-words.ts";
 import { type BotInboxItem, refuseBotInboxMessage } from "./bot-inbox.ts";
+import { type LinkedSessionNotices, RELEASE_OPERATION } from "./bot-link-notices.ts";
 import { BotOpenRetries } from "./bot-open-retry.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import type { SavedBotSession } from "./bot-remote-view.ts";
@@ -27,6 +29,8 @@ export interface BotReleasePorts {
 	/** Whether the host stopped: no release runs again after it. */
 	stopped(): boolean;
 	warn(message: string): void;
+	/** What the owner was told of the work a release left behind a symbolic link, kept for the process. */
+	readonly links: LinkedSessionNotices;
 	/**
 	 * The bot's session this process has loaded, with whether its work holds it loaded (`busy`: the idleness its idle close
 	 * reads, so a release waits on what a close waits on); undefined when none is loaded here.
@@ -101,6 +105,7 @@ export class BotRelease {
 			if (record && !record.retired && this.ports.runsAsSession(record)) {
 				this.owed.delete(agentId);
 				this.retries.forget(agentId);
+				this.ports.links.done(agentId, "release");
 				return;
 			}
 			this.release(agentId);
@@ -142,9 +147,7 @@ export class BotRelease {
 			// Its workers end first, for the owner's reason: no session of it resumes them. It closes only once they did.
 			const session = loaded ? ports.loaded(agentId)?.session : undefined;
 			if (session)
-				warnLeft(
-					endLoadedBotWork(agentDir, agentId, session, OWNER_STOPPED_REASON, (message) => ports.warn(message)),
-				);
+				warnLeft(endLoadedBotWork(agentDir, agentId, session, OWNER_STOPPED_REASON, RELEASE_OPERATION, ports));
 			fleetEnded = true;
 			const store = ports.store();
 			const nowMs = ports.timers().now();
@@ -161,11 +164,12 @@ export class BotRelease {
 						agentId,
 						readClosedBotSession(() => ports.closedSessionOf(agentId)),
 						OWNER_STOPPED_REASON,
-						(message) => ports.warn(message),
+						ports,
 					),
 				);
 			this.owed.delete(agentId);
 			this.retries.forget(agentId);
+			ports.links.done(agentId, "release");
 		} catch (error) {
 			this.owe(agentId, error);
 		}

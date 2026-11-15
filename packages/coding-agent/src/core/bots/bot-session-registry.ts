@@ -17,7 +17,9 @@ import { realPathIdentity } from "../autonomy/path-scope.ts";
 import { interfaceText } from "../language/interface-text.ts";
 import type { SettingsManager } from "../settings-manager.ts";
 import { type BotChargeHolder, botChargesHeld } from "./bot-charges-held.ts";
+import { LinkedSessionNotices } from "./bot-link-notices.ts";
 import {
+	type BotHostProcessKeeps,
 	type BotSender,
 	type BotSessionDelivery,
 	BotSessionHost,
@@ -58,11 +60,21 @@ interface SharedHost extends AttachedRoots {
 const hosts = new Map<string, SharedHost>();
 
 /**
- * The owner's stops each agent directory's hosts in this process could not record (`UnrecordedBotStops`): a root's host and
- * the one that replaces it (a new, resumed or forked session detaches the old root before the new one attaches) hold the
- * same stops, kept while one is held or a host is registered.
+ * What each agent directory's hosts in this process keep across one another (`BotHostProcessKeeps`): the owner's stops the
+ * process could not record, and what the owner was told of the work a stop or release left behind a symbolic link. A
+ * root's host and the one that replaces it (a new, resumed or forked session detaches the old root before the new one
+ * attaches) hold the same, kept for the process, so a replaced host neither loses a stop nor tells a notice again.
  */
-const heldStops = new Map<string, UnrecordedBotStops>();
+const processKeeps = new Map<string, BotHostProcessKeeps>();
+
+/** What the hosts of agent directory `key` keep in this process: a root's are shared, a child host's are its own. */
+function keepsFor(key: string, root: boolean): BotHostProcessKeeps {
+	const kept = root ? processKeeps.get(key) : undefined;
+	if (kept) return kept;
+	const keeps = { unrecorded: new UnrecordedBotStops(key), links: new LinkedSessionNotices() };
+	if (root) processKeeps.set(key, keeps);
+	return keeps;
+}
 
 /** One root session's attachment to its process's bot session host. */
 export interface BotSessionAttachment {
@@ -187,15 +199,10 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 		const attachedRoots: AttachedRoots = { roots: [], followers: new Set() };
 		// A root attached while the previous host stops gets a new one that builds no session before that stop ended: the
 		// locks the stopping host still holds are free by then.
-		// A child's host holds its own; a root's those of its process and agent directory.
-		let stops = root ? heldStops.get(key) : undefined;
-		if (!stops) {
-			stops = new UnrecordedBotStops(key);
-			if (root) heldStops.set(key, stops);
-		}
+		// A child's host keeps its own; a root's those of its process and agent directory.
 		const host = new BotSessionHost(
 			relayPorts(attachedRoots),
-			stops,
+			keepsFor(key, root),
 			shared?.stopping?.catch(() => undefined),
 		);
 		shared = { ...attachedRoots, host };
@@ -246,8 +253,6 @@ export function attachBotSessionHost(ports: BotSessionRootPorts, root: boolean):
 			} finally {
 				roots.length = 0;
 				if (hosts.get(key) === attached) hosts.delete(key);
-				// The stops still held wait for the next root's host in this process.
-				if (!hosts.has(key) && heldStops.get(key)?.isEmpty()) heldStops.delete(key);
 			}
 		},
 	};

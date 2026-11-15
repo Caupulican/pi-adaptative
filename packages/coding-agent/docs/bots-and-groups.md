@@ -206,7 +206,7 @@ of two seconds doubling to five minutes, or at once when the file changes. Like 
 files beside it, the inbox is private harness storage: a worker's and a bot session's file and process tools are refused
 the bot homes. `/bot stop` ends everything of the bot's running when it is taken: its turn in flight, its plans, the attempts and queued
 work of its worker tasks and the jobs its sessions placed on other machines (a session file in its home that is a
-symbolic link is skipped, and you are told). Your words sent after it never start a turn before it is applied: while a
+symbolic link is skipped, and you are told once for that stop, however often its take is tried again). Your words sent after it never start a turn before it is applied: while a
 stop waits unapplied they wait in the bot's inbox behind it, and you are told so. It reaches the bot
 wherever it is: the stop is written to the bot's home and taken by the process that hosts the bot (you are told which, or that it could not be read),
 or applied in place when no process does. It does not drop the bot's own armed watches (a stopped worker's watches end

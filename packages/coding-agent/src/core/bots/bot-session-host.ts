@@ -72,6 +72,7 @@ import {
 } from "./bot-inbox.ts";
 import { BotInboxDrain } from "./bot-inbox-drain.ts";
 import { BotSessionHeldError, queueInBotInbox, sendToBotHost } from "./bot-inbox-send.ts";
+import { type LinkedSessionNotices, stopOperation } from "./bot-link-notices.ts";
 import type { BotModelRefusal } from "./bot-model-refusal.ts";
 import { type BotNotice, keepBotNotice, readBotNotices } from "./bot-notices.ts";
 import { BotOpenRetries, botOpenFailure } from "./bot-open-retry.ts";
@@ -97,6 +98,17 @@ import { BotWatchExpiry } from "./bot-watch-expiry.ts";
 export const BOT_SESSION_IDLE_BOUND_MS = 10 * 60 * 1000;
 /** How long a message waits for an earlier session of its bot, or the stop of the host this one replaced, to end. */
 export const BOT_SESSION_CLOSE_WAIT_MS = 30 * 1000;
+
+/**
+ * What a process keeps for an agent directory across the bot session hosts that replace one another there
+ * (`bot-session-registry.ts`: a new, resumed or forked root session stops the old host before the next one starts).
+ */
+export interface BotHostProcessKeeps {
+	/** The owner's stops the process could not record. */
+	readonly unrecorded: UnrecordedBotStops;
+	/** What the owner was told of the work a stop or a release left behind a symbolic link. */
+	readonly links: LinkedSessionNotices;
+}
 
 export type { BotSessionState };
 
@@ -214,12 +226,16 @@ export class BotSessionHost {
 	/** Builds the bots' sessions this host loads. */
 	private readonly loader: BotSessionLoader;
 
+	/** What the host keeps for its process and agent directory, across the hosts that replace it there. */
+	private readonly keeps: BotHostProcessKeeps;
+
 	/**
-	 * `unrecorded` holds the owner's stops its process could not record, kept for the process and agent directory across
-	 * its hosts (`bot-session-registry.ts`).
+	 * `keeps` is what its process keeps for the agent directory across its hosts (`bot-session-registry.ts`): the owner's
+	 * stops it could not record, and what the owner was told of the work a stop or release left behind a symbolic link.
 	 */
-	constructor(ports: BotSessionHostPorts, unrecorded: UnrecordedBotStops, previousStop?: Promise<void>) {
+	constructor(ports: BotSessionHostPorts, keeps: BotHostProcessKeeps, previousStop?: Promise<void>) {
 		this.ports = ports;
+		this.keeps = keeps;
 		this.previousStop = previousStop ?? Promise.resolve();
 		this.admission = new BotSessionAdmission({
 			store: () => ports.store(),
@@ -271,8 +287,9 @@ export class BotSessionHost {
 				senderIn: (cwd) => ports.senderIn(cwd),
 				open: (agentId, sender) => this.open(agentId, sender),
 				usageRules: () => ports.usageRules(),
+				stopPorts: () => this.stopPorts(),
 			},
-			unrecorded,
+			keeps.unrecorded,
 		);
 		this.inbox = new BotInboxDrain({
 			agentDir: () => ports.agentDir(),
@@ -295,6 +312,7 @@ export class BotSessionHost {
 			timers: () => this.idleTimers(),
 			stopped: () => this.stopped,
 			warn: (message) => ports.warn(message),
+			links: keeps.links,
 			loaded: (agentId) => {
 				const entry = this.entries.get(agentId);
 				return entry && { session: entry.session, busy: this.holdsLoaded(entry) };
@@ -370,11 +388,15 @@ export class BotSessionHost {
 			);
 	}
 
-	/** What applying a stop reads: the owner's warnings, and the provider admission clock a usage wait is dated on. */
+	/**
+	 * What applying a stop reads: the owner's warnings, the provider admission clock a usage wait is dated on, and what the
+	 * owner was told of the work a stop left behind a symbolic link.
+	 */
 	private stopPorts(): BotStopPorts {
 		return {
 			warn: (message) => this.ports.warn(message),
 			now: () => this.ports.timers().port("provider-admission").now(),
+			links: this.keeps.links,
 		};
 	}
 
@@ -881,7 +903,9 @@ export class BotSessionHost {
 		const memory = taken?.stop || taken?.failure ? undefined : stop;
 		const [dir, end] = [this.ports.agentDir(), () => this.stopTurn(entry)];
 		// What a failed take ended before it failed counts with what the fallback ends after it.
-		const rest = taken?.stop ? undefined : endUnrecordedStopWork(dir, agentId, entry, end, memory, this.stopPorts());
+		const rest = taken?.stop
+			? undefined
+			: endUnrecordedStopWork(dir, agentId, entry, end, memory, stopOperation(stop.at), this.stopPorts());
 		if (unwritten !== undefined) this.ports.warn(interfaceText().botTeam.botStopNotRecordedHere(agentId, unwritten));
 		this.takeInbox(agentId);
 		return { stopped: turn || (taken?.outcome.stopped ?? 0) + (rest?.stopped ?? 0) > 0 };

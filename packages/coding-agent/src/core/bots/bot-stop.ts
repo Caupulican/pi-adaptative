@@ -47,15 +47,28 @@ import {
 	requestBotStop,
 	takeBotInboxStop,
 } from "./bot-inbox.ts";
+import {
+	type LinkedSessionNotices,
+	type LinkedSessionOperation,
+	RELEASE_OPERATION,
+	stopOperation,
+} from "./bot-link-notices.ts";
 import { BotOwnerError } from "./bot-owner-error.ts";
 import { botSessionOnDisk, type SavedBotSession } from "./bot-remote-view.ts";
 import { BotSessionLinkError } from "./bot-session-pointer.ts";
 
-/** What applying a stop needs besides the bot's files: the owner's notices, and the provider admission clock's time. */
+/**
+ * What applying a stop needs besides the bot's files: the owner's notices, the provider admission clock's time, and what
+ * the owner was told of the work a stop or a release left behind a symbolic link, kept for the process (`LinkedSessionNotices`).
+ */
 export interface BotStopPorts {
 	warn(message: string): void;
 	now(): number;
+	readonly links: LinkedSessionNotices;
 }
+
+/** What ending the jobs a bot's home placed tells the owner through: its notices, and what they were told of its links. */
+export type LinkNoticePorts = Pick<BotStopPorts, "warn" | "links">;
 
 /** The live session of a hosted bot, as its stop reaches it. */
 export interface HostedBotStopSession {
@@ -113,7 +126,8 @@ export function takeHostedBotStops(
 				agentId,
 				(ids) => ids.filter((id) => id !== sessionId),
 				stop.reasonCode,
-				ports.warn,
+				stopOperation(stop.at),
+				ports,
 			),
 		ports,
 		memory,
@@ -123,49 +137,62 @@ export function takeHostedBotStops(
 /**
  * Ends the jobs the sessions of bot `agentId`'s home placed on other machines, for `reasonCode` (no client of theirs runs:
  * the caller holds the bot): the home listed now ({@link homeSessionIds}), `placedBy` choosing which of its sessions (the
- * one the caller ended through its live client left out, a closed session's own added). It runs after the bot's own work
- * ended and never holds that back: a failure is told to the owner with its cause, and the stop or release goes on.
+ * one the caller ended through its live client left out, a closed session's own added), for `operation` (the stop or the
+ * release that ends them). It runs after the bot's own work ended and never holds that back: a failure is told to the
+ * owner with its cause, and the stop or release goes on.
  */
 function endHomePlacedJobs(
 	agentDir: string,
 	agentId: string,
 	placedBy: (homeSessionIds: readonly string[]) => readonly string[],
 	reasonCode: string,
-	warn: (message: string) => void,
+	operation: LinkedSessionOperation,
+	ports: LinkNoticePorts,
 ): void {
 	try {
-		const sessions = new Set(placedBy(homeSessionIds(agentDir, agentId, warn)));
+		const sessions = new Set(placedBy(homeSessionIds(agentDir, agentId, operation, ports)));
 		endPlacedJobsOfSessions(agentDir, sessions, jobCancelReasonOf(reasonCode));
 	} catch (error) {
-		warn(interfaceText().botTeam.botPlacedJobsNotEnded(agentId, botFailureText(agentId, error)));
+		ports.warn(interfaceText().botTeam.botPlacedJobsNotEnded(agentId, botFailureText(agentId, error)));
 	}
 }
 
 /**
  * The sessions bot `agentId`'s home holds as files of its own, whose placed jobs are the bot's to end: a session file that
- * is a symbolic link is skipped (the jobs of whatever session it names are not the bot's), and the owner told which.
+ * is a symbolic link is skipped (the jobs of whatever session it names are not the bot's), and the owner told which, once
+ * for `operation` and those links however often it runs again (`LinkedSessionNotices`).
  */
-function homeSessionIds(agentDir: string, agentId: string, warn: (message: string) => void): string[] {
+function homeSessionIds(
+	agentDir: string,
+	agentId: string,
+	operation: LinkedSessionOperation,
+	ports: LinkNoticePorts,
+): string[] {
 	const { ids, linked } = botHomeOwnSessionIds(botHomeOf(agentDir, agentId).sessionsDir);
-	if (linked.length > 0) warn(interfaceText().botTeam.botLinkedSessionsJobsLeft(agentId, linked));
+	if (linked.length > 0) {
+		const sentence = interfaceText().botTeam.botLinkedSessionsJobsLeft(agentId, linked);
+		ports.links.tell(agentId, operation, "jobs", linked, sentence, ports.warn);
+	}
 	return ids;
 }
 
 /**
  * The work of bot `agentId`'s session this process has loaded, ended for `reasonCode` as the owner's stop of a hosted bot
  * ends it, for a release of the bot (retired, or off the session path) and for a stop that could not be recorded or taken
- * ({@link endUnrecordedStopWork}): its whole fleet (`cancelOwnFleet`), then the jobs its home's other sessions placed.
- * What it left unended.
+ * ({@link endUnrecordedStopWork}): its whole fleet (`cancelOwnFleet`), then the jobs its home's other sessions placed,
+ * for `operation` (that release, or that stop). What it left unended.
  */
 export function endLoadedBotWork(
 	agentDir: string,
 	agentId: string,
 	session: Pick<AgentSession, "sessionId" | "backgroundLanes">,
 	reasonCode: string,
-	warn: (message: string) => void,
+	operation: LinkedSessionOperation,
+	ports: LinkNoticePorts,
 ): WorkerStopOutcome {
 	const outcome = session.backgroundLanes.cancelOwnFleet(reasonCode);
-	endHomePlacedJobs(agentDir, agentId, (ids) => ids.filter((id) => id !== session.sessionId), reasonCode, warn);
+	const placedBy = (ids: readonly string[]) => ids.filter((id) => id !== session.sessionId);
+	endHomePlacedJobs(agentDir, agentId, placedBy, reasonCode, operation, ports);
 	return outcome;
 }
 
@@ -174,8 +201,9 @@ export function endLoadedBotWork(
  * foreground turn (`stopTurn`) and its own work ({@link endLoadedBotWork}) end all the same. A stop held in memory
  * (`stop`: one that could not be recorded, or whose record no longer reads) also holds the bot's goal, declines its
  * usage wait as of when it was made and refuses the messages sent before it, as a stop taken from its record does; a stop recorded and not taken (`stop` absent)
- * leaves those to its record, which is tried again. What it left unended; undefined when its workers could not be ended.
- * Each failure is told to the owner with its cause.
+ * leaves those to its record, which is tried again. `operation` is the stop made (its record's take, tried again, tells
+ * nothing of its links twice). What it left unended; undefined when its workers could not be ended. Each failure is told
+ * to the owner with its cause.
  */
 export function endUnrecordedStopWork(
 	agentDir: string,
@@ -183,12 +211,13 @@ export function endUnrecordedStopWork(
 	loaded: LoadedBotSession,
 	stopTurn: () => void,
 	stop: OwnerStop | undefined,
+	operation: LinkedSessionOperation,
 	ports: BotStopPorts,
 ): WorkerStopOutcome | undefined {
 	stopTurn();
 	let outcome: WorkerStopOutcome | undefined;
 	try {
-		outcome = endLoadedBotWork(agentDir, agentId, loaded.session, OWNER_STOPPED_REASON, ports.warn);
+		outcome = endLoadedBotWork(agentDir, agentId, loaded.session, OWNER_STOPPED_REASON, operation, ports);
 		if (outcome.failed.length > 0 || outcome.managed.length > 0)
 			ports.warn(interfaceText().botTeam.botStopLeftLanes(agentId, outcome.failed.length, outcome.managed.length));
 	} catch (error) {
@@ -266,13 +295,15 @@ function applyBotStopUnderLock(
 		agentDir,
 		agentId,
 		(stop, warn) => {
-			if ("saved" in session) return stopClosedSession(agentDir, agentId, saved, stop, { warn, now: ports.now });
+			if ("saved" in session) return stopClosedSession(agentDir, agentId, saved, stop, { ...ports, warn });
 			// Nothing is ended through the link: the rest of the stop applies, and the owner is told what it left.
 			warn(interfaceText().botTeam.botStopLinkedSessionLeft(agentId, session.linked));
 			return NOTHING_LEFT;
 		},
-		(stop) =>
-			endHomePlacedJobs(agentDir, agentId, (ids) => (saved ? [...ids, saved.id] : ids), stop.reasonCode, ports.warn),
+		(stop) => {
+			const placedBy = (ids: readonly string[]) => (saved ? [...ids, saved.id] : ids);
+			endHomePlacedJobs(agentDir, agentId, placedBy, stop.reasonCode, stopOperation(stop.at), ports);
+		},
 		ports,
 		memory,
 	);
@@ -507,11 +538,6 @@ export class UnrecordedBotStops {
 		this.held.delete(agentId);
 	}
 
-	/** Whether no stop is held, for any bot. */
-	isEmpty(): boolean {
-		return this.held.size === 0;
-	}
-
 	/**
 	 * {@link applyBotStopUnderLock} under the lock the caller just took, on the bot's session as its home on disk holds it,
 	 * the stop held for the bot taken with the ones waiting while the bot's work stands where it was when the stop was made,
@@ -621,25 +647,30 @@ function closedBundle(
  * has its own work left, the owner told, and the jobs its home's other sessions placed still end. For a release of the bot
  * (retired, or off the session path) with no session of it loaded here, so nothing a later open of it would resume is
  * left. What it left unended. A lock held (by the host of the bot, or by this process opening or closing it) throws the
- * owner's words: the release stays owed and runs again.
+ * owner's words: the release stays owed and runs again, and what it told of the links is told once for the release
+ * however often it runs (`LinkedSessionNotices`).
  */
 export function endClosedBotWork(
 	agentDir: string,
 	agentId: string,
 	session: ClosedBotSession,
 	reasonCode: string,
-	warn: (message: string) => void,
+	ports: LinkNoticePorts,
 ): WorkerStopOutcome {
 	const taken = takeProcessLock(botHostLockFile(agentDir, agentId));
 	if (!taken.held) throw new BotOwnerError(interfaceText().botTeam.botReleaseHeldBy(taken.owner.pid));
 	try {
 		const saved = "saved" in session ? session.saved : undefined;
-		// Nothing is ended through the link: the owner is told, under the lock, so a release owed again tells it once.
-		if ("linked" in session) warn(interfaceText().botTeam.botReleaseWorkersLeft(agentId, session.linked));
+		// Nothing is ended through the link: the owner is told, once for the release however often it runs again.
+		if ("linked" in session) {
+			const sentence = interfaceText().botTeam.botReleaseWorkersLeft(agentId, session.linked);
+			ports.links.tell(agentId, RELEASE_OPERATION, "workers", [session.linked], sentence, ports.warn);
+		}
 		const bundle = closedBundle(agentDir, agentId, saved);
 		const outcome =
 			bundle === undefined ? NOTHING_LEFT : cancelBundleWorkers(bundle.home, bundle.sessionId, reasonCode);
-		endHomePlacedJobs(agentDir, agentId, (ids) => (saved ? [...ids, saved.id] : ids), reasonCode, warn);
+		const placedBy = (ids: readonly string[]) => (saved ? [...ids, saved.id] : ids);
+		endHomePlacedJobs(agentDir, agentId, placedBy, reasonCode, RELEASE_OPERATION, ports);
 		return outcome;
 	} finally {
 		taken.lock.release();
@@ -706,8 +737,9 @@ function cancelBundleWorkers(home: OrchestrationHome, sessionId: string, reasonC
  * failure throws with the stops left waiting, and what it told the owner is dropped, so a retry tells it once); then the
  * stop is taken (the messages it covers refused, every stop read deleted) and what `ownWork` told is told; then the jobs
  * the home's sessions placed are ended by `placedJobs`, which never keeps the stop. A stop that could not be recorded
- * (`memory`) is taken with them, applied when it is the newest; it covers the messages sent before it all the same. A
- * stop that does not read has no date to order it by and stops nothing: it is set aside and told as a stop, or, when it
+ * (`memory`) is taken with them, applied when it is the newest; it covers the messages sent before it all the same.
+ * Once it applied, what the owner was told of the stop's links ends with it (`LinkedSessionNotices.done`): a take of it
+ * tried again after a failure told them already. A stop that does not read has no date to order it by and stops nothing: it is set aside and told as a stop, or, when it
  * could not be set aside, told once as one left in place, a leftover (`bot-home-records.ts`) no listing counts as
  * waiting until its backoff's read is due or it changes, read again then and not told again. The stop applied, if any.
  */
@@ -738,5 +770,6 @@ function takeStops(
 	if (outcome.failed.length > 0 || outcome.managed.length > 0)
 		ports.warn(interfaceText().botTeam.botStopLeftLanes(agentId, outcome.failed.length, outcome.managed.length));
 	placedJobs(newest);
+	ports.links.done(agentId, "stop");
 	return newest;
 }

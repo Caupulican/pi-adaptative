@@ -44,6 +44,7 @@ import { readSessionSnapshot, remoteHostActive, type SavedBotSession } from "./b
 import type { BotSender } from "./bot-session-host.ts";
 import {
 	applyUnhostedBotStop,
+	type BotStopPorts,
 	type OwnerStopRequest,
 	readWorkMark,
 	type UnrecordedBotStops,
@@ -334,6 +335,8 @@ export interface BotOwedWorkPorts {
 	modelRefusal(record: PersistentBotRecord, sender: BotSender): BotModelRefusal | undefined;
 	/** The provider admission's timers: a model refusal's end is due on their clock. */
 	admissionTimers(): TimerPort;
+	/** What applying a stop reads: the owner's warnings, the admission clock, what was told of the bot's links. */
+	stopPorts(): BotStopPorts;
 	/** A refusal's cause may have cleared: the host takes the bot's refused work up again. */
 	retake(agentId: string): void;
 	/** Takes the inbox of a bot the host runs. */
@@ -1008,13 +1011,9 @@ export class BotOwedWork {
 		}
 		if (swept && this.failedStops.get(agentId)?.key === waiting()) return { waits, failed: true, retrying: false };
 		try {
-			const ports = {
-				warn: (message: string) => this.ports.warn(message),
-				now: () => this.ports.admissionTimers().now(),
-			};
 			// Applied, the alarms it held back end, and the usage wait is read again from what the stop wrote to the session the
 			// take read (a saved session that is a symbolic link is left, and the rest of the stop applies all the same).
-			const taken = applyUnhostedBotStop(agentDir, agentId, ports, this.unrecorded);
+			const taken = applyUnhostedBotStop(agentDir, agentId, this.ports.stopPorts(), this.unrecorded);
 			if (taken !== "held" && taken.stop) {
 				this.forgetOwedTimes(agentId);
 				this.armUsageWait(

@@ -17,8 +17,14 @@ import type { AgentSession } from "../../../../src/core/agent-session.ts";
 import { sessionStatePieces } from "../../../../src/core/bots/bot-bundle-move.ts";
 import { type BotHome, botHomeOf } from "../../../../src/core/bots/bot-home.ts";
 import { BOT_HOME_COALESCE_MS } from "../../../../src/core/bots/bot-home-watch.ts";
-import { readBotInbox } from "../../../../src/core/bots/bot-inbox.ts";
-import { BOT_OPEN_RETRY_FIRST_MS } from "../../../../src/core/bots/bot-open-retry.ts";
+import {
+	botInboxStopWaiting,
+	botInboxWaiting,
+	enqueueBotInbox,
+	readBotInbox,
+	readBotInboxRefusals,
+} from "../../../../src/core/bots/bot-inbox.ts";
+import { BOT_OPEN_RETRY_FIRST_MS, BOT_OPEN_RETRY_MAX_MS } from "../../../../src/core/bots/bot-open-retry.ts";
 import { continueBotSession } from "../../../../src/core/bots/bot-session-open.ts";
 import { earlierAwayFleetQueueMetadataPath } from "../../../../src/core/fleet/fleet-queue-store.ts";
 import { interfaceText } from "../../../../src/core/language/interface-text.ts";
@@ -60,6 +66,8 @@ const THIRD_ANSWER = "Two release candidates are cut.";
 const LINKED_QUESTION = "Where is the release calendar kept?";
 const FIFTH_QUESTION = "When does the release freeze start?";
 const FIFTH_ANSWER = "The release freeze starts on Monday.";
+/** Sent just before the owner's stop, which covers it: refused by the stop, so no turn ever carries it. */
+const STOPPED_QUESTION = "Which branch holds the release fixes?";
 /** The fleet queue file an earlier build left beside the bot session's state in the owner's home: a stopped, empty queue. */
 const PLANTED_FLEET = { v: 1, stopped: true, entries: [] };
 
@@ -507,5 +515,84 @@ async function runLeg(world: HarnessWorld, session: AgentSession): Promise<void>
 		requests: 4,
 		warnings: [],
 	});
+
+	// Step 6: the owner's stop of the hosted bot whose take fails (a message it covers cannot leave the inbox) still ends
+	// the bot's work, telling what it left behind a symbolic link in the bot's home; the take tried again after its
+	// backoff applies the stop and tells that link nothing more: the notice is told once for the stop and its links.
+	const linkedSession = join(home.sessionsDir, "linked-elsewhere.jsonl");
+	const linkedTarget = join(home.dir, "linked-elsewhere-target.jsonl");
+	writeFileSync(linkedTarget, "");
+	symlinkSync(linkedTarget, linkedSession);
+	const requestsBeforeStop = keeperRequests();
+	const covered = enqueueBotInbox(world.agentDir, {
+		agentId: KEEPER,
+		text: STOPPED_QUESTION,
+		from: { pid: process.pid, sessionId: session.sessionId, cwd: HARNESS_PROJECT_CWD },
+		at: Date.now(),
+	});
+	const stuck = world.io.denyUntilCleared({
+		name: "j7-home-covered-message-stays",
+		kind: "rm",
+		matches: (operation) => operation.path === covered.file,
+		code: "EACCES",
+	});
+	const linkSentence = words.botLinkedSessionsJobsLeft(KEEPER, [linkedSession]);
+	const [notAppliedHead, notAppliedTail] = words.botStopNotApplied(KEEPER, "\0").split("\0");
+	const stopMark = world.warnings.length;
+	const sessionAlarmsBefore = new Set(world.timers.armedSnapshot("bot-sessions").map((alarm) => alarm.handle));
+	const shapes = (warnings: readonly string[]) =>
+		warnings.map((warning) =>
+			warning === linkSentence
+				? "link"
+				: warning.startsWith(notAppliedHead ?? "") && warning.endsWith(notAppliedTail ?? "")
+					? "notApplied"
+					: warning,
+		);
+	try {
+		session.stopPersistentBot(KEEPER);
+		expect(
+			{
+				stopWaits: botInboxStopWaiting(world.agentDir, KEEPER),
+				coveredWaits: botInboxWaiting(world.agentDir, KEEPER),
+				warnings: shapes(world.warnings.slice(stopMark)),
+			},
+			"a stop whose take failed waits with the message it covers, the owner told of the failure and of the link once",
+		).toEqual({
+			stopWaits: true,
+			coveredWaits: true,
+			warnings: ["notApplied", "link"],
+		});
+	} finally {
+		stuck.clear();
+	}
+	// The take's retry is the alarm the failed takes armed on the host's clock, within the backoff's longest step.
+	const retryDue = world.timers
+		.armedSnapshot("bot-sessions")
+		.filter((alarm) => !sessionAlarmsBefore.has(alarm.handle) && alarm.remainingMs <= BOT_OPEN_RETRY_MAX_MS)
+		.map((alarm) => alarm.remainingMs);
+	expect(retryDue.length, "the failed take armed one retry on the host's clock").toBe(1);
+	const applied = world.io.waitForMutation(
+		() => !botInboxStopWaiting(world.agentDir, KEEPER) && !botInboxWaiting(world.agentDir, KEEPER),
+	);
+	world.timers.advance("bot-sessions", Math.max(...retryDue));
+	await withDeadline(trace, "J7 bot home: the stop's take tried again applied it", applied);
+	const stopWarnings = shapes(world.warnings.splice(stopMark));
+	const refusals = readBotInboxRefusals(world.agentDir, KEEPER, (file, reason) => {
+		throw new Error(`the bot's inbox holds an unreadable refusal ${file}: ${reason}`);
+	});
+	expect(
+		{
+			warnings: stopWarnings,
+			refused: refusals.filter((item) => item.message.id === covered.message.id).map((item) => item.message.reason),
+			requests: keeperRequests() - requestsBeforeStop,
+		},
+		"the take tried again applied the stop and refused the message it covers, the link told once for the stop however often its take ran, no turn started",
+	).toEqual({
+		warnings: ["notApplied", "link"],
+		refused: [words.botTurnAbortReasons.ownerStopped],
+		requests: 0,
+	});
+	unlinkSync(linkedSession);
+	unlinkSync(linkedTarget);
 	await retire("J7 bot home: after the released answer");
 }
