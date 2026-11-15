@@ -313,19 +313,26 @@ export class ToolFailureRecoveryGate {
 	admit(
 		tool: AgentTool<any>,
 		args: unknown,
+		boundArgs: unknown,
 		record: ToolFailureMemoryRecord | undefined,
 		messages: readonly AgentMessage[] = this.transcriptMessages,
 		executionScope?: string,
 	): ToolFailureRecoveryAdmission {
-		const admission = this.reserve(tool, args, record, messages, executionScope);
+		const admission = this.reserve(tool, args, boundArgs, record, messages, executionScope);
 		if (admission.kind === "blocked") return admission;
 		admission.reservation.commit();
 		return { kind: "allowed" };
 	}
 
+	/**
+	 * `args` is the call's identity (the arguments the model sent, validated); `boundArgs` is the form the call is sure to
+	 * run in, whose bound a retry is compared by: a call that may still be moved to the background is bounded by its
+	 * foreground form, which is the one it runs in when the handoff is refused, so moving it is never an escalation.
+	 */
 	reserve(
 		tool: AgentTool<any>,
 		args: unknown,
+		boundArgs: unknown,
 		record: ToolFailureMemoryRecord | undefined,
 		messages: readonly AgentMessage[] = this.transcriptMessages,
 		executionScope?: string,
@@ -335,7 +342,7 @@ export class ToolFailureRecoveryGate {
 		if (this.resolvedBeforeTranscriptCommit.has(executionKey)) {
 			return { kind: "allowed", reservation: UNCHARGED_RESERVATION };
 		}
-		const incomingBound = readEnvelopeBound(args, tool);
+		const incomingBound = readEnvelopeBound(boundArgs, tool);
 		let state = this.getHotState(executionKey);
 		if (
 			!this.pendingRetries.has(executionKey) &&

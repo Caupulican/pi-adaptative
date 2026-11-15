@@ -2145,9 +2145,7 @@ async function prepareToolCall(
 				validationEvent = event;
 			},
 		});
-		if (preparedToolCall.repairNotes) {
-			toolCall.repairNotes = preparedToolCall.repairNotes;
-		}
+		if (preparedToolCall.repairNotes) toolCall.repairNotes = preparedToolCall.repairNotes;
 		if (validatedArgs !== toolCall.arguments) {
 			toolCall.rawArguments ??= toolCall.arguments;
 			toolCall.arguments = validatedArgs;
@@ -2175,6 +2173,7 @@ async function prepareToolCall(
 		const admission = toolFailureRecoveryGate.reserve(
 			tool,
 			validatedArgs,
+			form.arguments,
 			unresolvedRecord,
 			currentContext.messages,
 			binding?.executionScope,
