@@ -10,11 +10,7 @@
  */
 import { type Dirent, existsSync, readdirSync } from "node:fs";
 import { dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
-import {
-	orchestrationHomeHoldsSession,
-	SessionHomeChangedError,
-	type SessionHomeNow,
-} from "../kernel/session/session-bundle-lifecycle.ts";
+import { orchestrationHomeHoldsSession, type SessionHomeNow } from "../kernel/session/session-bundle-lifecycle.ts";
 import {
 	botHomeOrchestrationHome,
 	type OrchestrationHome,
@@ -28,6 +24,7 @@ import { SessionManager } from "../kernel/session/session-manager.ts";
 import { isMissingFileError } from "../kernel/storage/atomic-file.ts";
 import { botsDir } from "./agent-paths.ts";
 import { safeRealpathSync } from "./autonomy/path-scope.ts";
+import { sessionHomeChangeOf } from "./session-switch-failures.ts";
 
 /**
  * The owner's home, then the home of every bot directory that has an orchestration directory (with or without a
@@ -181,11 +178,11 @@ export function botSessionStorageRoots(
 }
 
 /**
- * Runs `attempt` (an AgentSession's creation, which takes the session's lease) on `manager`, and once more on the same
- * file opened again in the roots it derives now, when the lease was refused because the session's state moved between
- * the open and the lease (`SessionHomeChangedError`: a bot session's host moved it into the bot's home). The refused
- * attempt wrote nothing; the second open keeps the first's session id, session directory and working directory, and a
- * file not written yet stays the session's to start. A second refusal,
+ * Runs `attempt` (an AgentSession's creation, or a switch's preparation and commit, which take the session's lease) on
+ * `manager`, and once more on the same file opened again in the roots it derives now, when the lease was refused because
+ * the session's state moved between the open and the lease (`sessionHomeChangeOf`: a bot session's host moved it into
+ * the bot's home). The refused attempt wrote nothing and closed nothing; the second open keeps the first's session id,
+ * session directory and working directory, and a file not written yet stays the session's to start. A second refusal,
  * or any other failure, is thrown.
  */
 export async function retryOnSessionHomeChange<T>(
@@ -196,8 +193,7 @@ export async function retryOnSessionHomeChange<T>(
 		return await attempt(manager);
 	} catch (error) {
 		const file = manager.getSessionFile();
-		if (!(error instanceof SessionHomeChangedError) || error.sessionId !== manager.getSessionId() || !file)
-			throw error;
+		if (sessionHomeChangeOf(error)?.sessionId !== manager.getSessionId() || !file) throw error;
 		const roots = sessionStorageRootsOfFile(manager.getStorageRoots().agentDir, file);
 		return attempt(
 			SessionManager.openOrStart(file, roots, manager.getSessionId(), manager.getSessionDir(), manager.getCwd()),

@@ -11,6 +11,7 @@ import { resolvePath } from "../utils/paths.ts";
 import { interfaceText } from "./language/interface-text.ts";
 import {
 	refuseHostedSession,
+	SessionHomeChangedError,
 	SessionHostedError,
 	type SessionStorageRoots,
 } from "./orchestration/session-bundle-lifecycle.ts";
@@ -86,12 +87,14 @@ export function hostedSessionRefusal(error: SessionHostedError): string {
 }
 
 /**
- * `error` as a session switch reports it: a lease a channel or bot host refused (`SessionHostedError`, taken after the
- * file's check, when a host took the session in between) admitted nothing, so it is a recovered admission failure told
- * in the owner's words; any other error is returned as it is.
+ * The home change that refused a session's lease (`SessionHomeChangedError`): thrown as it is by a session's creation,
+ * or as the recovered admission failure of a switch whose bridge lease it refused before the current session was closed.
+ * Undefined for any other failure, a switch whose cleanup failed too included.
  */
-export function hostedRefusalAsAdmission(error: unknown): unknown {
-	return error instanceof SessionHostedError ? new SessionReplacementRuntimeError("admission", error, true) : error;
+export function sessionHomeChangeOf(error: unknown): SessionHomeChangedError | undefined {
+	if (error instanceof SessionHomeChangedError) return error;
+	const admission = error instanceof SessionReplacementRuntimeError && error.phase === "admission" && error.recovered;
+	return admission && error.transitionError instanceof SessionHomeChangedError ? error.transitionError : undefined;
 }
 
 /**

@@ -465,7 +465,11 @@ export class SessionBundleLeaseReleaseError extends AggregateError {
 	}
 }
 
-/** Bridge retirement and activation, retaining both sessions through rollback and unwinding partial acquisition. */
+/**
+ * Bridge retirement and activation, retaining both sessions through rollback and unwinding partial acquisition. Each
+ * hold refuses a session a channel or bot host holds (`SessionHostedError`), as the AgentSession open it bridges does,
+ * so the refusal comes before the current session is closed.
+ */
 export async function withSessionBundleLeases<T>(
 	/** Each session in the home its manager's roots name, with that home derived again (`homeNow`); one held twice is leased once. */
 	sessions: readonly {
@@ -485,7 +489,7 @@ export async function withSessionBundleLeases<T>(
 			const key = orchestrationSessionDeletionFile(resolvedOrchestrationHome(home), sessionId);
 			if (held.has(key)) continue;
 			held.add(key);
-			leases.push(acquireSessionBundleLease(home, sessionId, { homeNow }));
+			leases.push(acquireSessionBundleLease(home, sessionId, { refuseHosted: true, homeNow }));
 		}
 		result = await operation();
 	} catch (error) {
