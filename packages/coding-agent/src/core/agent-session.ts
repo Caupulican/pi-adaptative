@@ -789,7 +789,8 @@ export class AgentSession {
 			getAgentDir: () => this._agentDir,
 			standing: this._caps,
 			sessionStanding: config.standing,
-			isDelegateToolActive: () => this.getActiveToolNames().includes("delegate"),
+			getForegroundToolNames: () => this.getActiveToolNames(),
+			getSessionConfinement: () => this._runtimeBuilder.sessionConfinement,
 			isDisposed: () => this._disposed,
 			getReflectionAbortSignal: () => this._reflectionAbort.signal,
 			getSystemOneController: () => this._semanticPlane.controller,
@@ -803,8 +804,7 @@ export class AgentSession {
 			getAllTools: () => this.getAllTools(),
 			getToolSourceInfo: (name) => this._runtimeBuilder.getToolSourceInfo(name),
 			getRouterCandidatePool: () => this.getRouterCandidatePool(),
-			withTaskDirectoryContext: (fn, signal, onUnavailable) =>
-				this._runtimeBuilder.withTaskDirectoryContext(fn, signal, onUnavailable),
+			withTaskDirectoryContext: (...args) => this._runtimeBuilder.withTaskDirectoryContext(...args),
 			noteSystemOneTaskDirectoryUnavailable: (err) => this._agentEvents.noteSystemOneTaskDirectoryUnavailable(err),
 			pushPendingNextTurnMessage: (msg) => this._pendingNextTurnMessages.push(msg),
 			setOperatorBlocker: (blocker) => {

@@ -132,9 +132,9 @@ interface DirectorWords {
 /**
  * The root writes agent definitions and instruction files and answers to the owner, approvals included. A bot's writes
  * are confined to its working directory and away from the harness's private roots (its own home among them), so its
- * instruction files go in the project's config directory (`configDir`, `.pi`), the one orchestration directory the
- * delegation gate lets it write, when its write roots hold it, and else where it may write; it holds no approval (it never asks the owner live), so it owns the answers of its own
- * conversation.
+ * instruction files go in the project's config directory (`configDir`, `.pi`) when its write roots hold it, and else
+ * where it may write (`instructionFilePlaces`, the place the delegation gate counts among its orchestration directories);
+ * it holds no approval (it never asks the owner live), so it owns the answers of its own conversation.
  */
 const DIRECTOR_WORDS: Readonly<Record<"root" | "bot", DirectorWords>> = {
 	root: {
@@ -156,7 +156,7 @@ const DIRECTOR_WORDS: Readonly<Record<"root" | "bot", DirectorWords>> = {
  * The director's role in every prompt of a session that can delegate (full class, worker delegation on, `delegate`
  * active): the root's, or a bot's (`root: false`). It states how the session directs; the work-lifecycle rule hook
  * carries only the delegation detail this does not. `plan`: the `plan` tool is active, so the role says when to use
- * it and the glossary carries its codes. `writes`: the session changes files (`sessionChangesFiles`, the rule its
+ * it and the glossary carries its codes. `writes`: the session changes files (`instructionFilePlaces` names a place, the rule its
  * workers' ceiling reads); one that does not writes no instruction file, and its workers change no file either unless it
  * lends them the owner's reach (`root`).
  */

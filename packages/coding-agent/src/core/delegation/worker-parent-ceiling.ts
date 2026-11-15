@@ -139,20 +139,26 @@ function sessionWriteRoots(
 		: [];
 }
 
-/** Whether the session changes files: the rule its workers' ceiling is read-only by, also its director role's wording. */
-export function sessionChangesFiles(
-	source: Pick<WorkerCeilingSource, "getSessionConfinement" | "getForegroundToolNames">,
-): boolean {
-	return sessionWriteRoots(source)?.length !== 0;
-}
-
 /** Whether the session's writes reach `path`: it changes files, and its write roots (unset: host-wide) hold the path. */
-export function sessionWritesAt(
+function sessionWritesAt(
 	source: Pick<WorkerCeilingSource, "getSessionConfinement" | "getForegroundToolNames">,
 	path: string,
 ): boolean {
 	const roots = sessionWriteRoots(source);
 	return roots === undefined || roots.some((root) => isPathWithinScope(path, root));
+}
+
+/**
+ * Where a session writes the instruction files it directs with: the project's config directory `configDir` (absolute)
+ * when its writes reach it, else its write roots; none when it changes no file. A bot's director role names this place
+ * and the delegation gate counts it among the bot's orchestration directories, so the role never names a place the gate
+ * refuses.
+ */
+export function instructionFilePlaces(
+	source: Pick<WorkerCeilingSource, "getSessionConfinement" | "getForegroundToolNames">,
+	configDir: string,
+): readonly string[] {
+	return sessionWritesAt(source, configDir) ? [configDir] : (sessionWriteRoots(source) ?? []);
 }
 
 /** The ceiling of a session that holds its workers to its own reach, from its confinement, held tools and envelope. */

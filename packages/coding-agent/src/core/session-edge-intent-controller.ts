@@ -201,7 +201,6 @@ export interface SessionEdgeIntentControllerDeps extends DirectorySource {
 	getAgentDir(): string;
 	readonly standing: SessionEdgeDeps["standing"] & Readonly<Record<"directsWorkers" | "keepsOwnerFollowUps", boolean>>;
 	/** A worker can be started: the `delegate` tool is active. */
-	isDelegateToolActive(): boolean;
 	isDisposed(): boolean;
 	getReflectionAbortSignal(): AbortSignal;
 	getSystemOneController(): SystemOneController | undefined;
@@ -501,7 +500,7 @@ export class SessionEdgeIntentController {
 			isActive: () =>
 				this.deps.standing.directsWorkers &&
 				this.deps.getSettingsManager().getOrchestratorSettings().delegationGate &&
-				this.deps.isDelegateToolActive(),
+				this.deps.getForegroundToolNames().includes("delegate"),
 			getEngine: () => this.gateEngine(),
 			getRequest: () => this.deps.getLastUserRequest(),
 			getTurnKey: () => this.systemOneTurnKey(),

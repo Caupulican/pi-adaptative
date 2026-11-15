@@ -20,7 +20,7 @@ import type { AgentIdentity } from "./agent-identity.ts";
 import type { SessionConfinement } from "./autonomy/session-confinement.ts";
 import { estimateTokensFromChars } from "./context/context-item.ts";
 import { resolveMemoryPromptBudget } from "./context/memory-prompt-budget.ts";
-import { sessionChangesFiles, sessionWritesAt } from "./delegation/worker-parent-ceiling.ts";
+import { instructionFilePlaces } from "./delegation/worker-parent-ceiling.ts";
 import type { BuildSystemPromptOptions, Extension } from "./extensions/types.ts";
 import type { MemoryManager } from "./memory/memory-manager.ts";
 import { icmGuidance } from "./memory/providers/icm.ts";
@@ -86,7 +86,7 @@ export interface SystemPromptBuilderDeps {
 	 * gates them itself (kill switch, evidence thresholds), so a session passes them through always.
 	 */
 	getToolSelectionHints?(): readonly ToolSelectionHint[];
-	/** Where the session's writes stay (`SessionConfinement`): with its tools, whether it changes files (`sessionChangesFiles`). */
+	/** Where the session's writes stay (`SessionConfinement`): with its tools, whether it changes files (`instructionFilePlaces`). */
 	getSessionConfinement(): SessionConfinement;
 	/** The session's currently active extensions. */
 	getActiveExtensions(): ReadonlyArray<Extension>;
@@ -430,6 +430,9 @@ export class SystemPromptBuilder {
 			getSessionConfinement: () => this.deps.getSessionConfinement(),
 			getForegroundToolNames: () => validToolNames,
 		};
+		// Where a bot writes its instruction files: the place the delegation gate counts as its own (`instructionFilePlaces`).
+		const configDir = join(this.deps.getCwd(), CONFIG_DIR_NAME);
+		const instructionPlaces = instructionFilePlaces(writeSource, configDir);
 		const options: BuildSystemPromptOptions = {
 			modelCapability,
 			cwd: this.deps.getCwd(),
@@ -448,7 +451,7 @@ export class SystemPromptBuilder {
 			steStrictness: this.deps.getSettingsManager().getSteStrictness?.(),
 			// The root carries the owner's reach (agent definitions, approvals); a bot directs inside its own scope. Whether it
 			// writes, and whether its writes reach the project's config directory, is read from the tools this prompt lists and
-			// its write roots, by the rule its workers' ceiling reads.
+			// its write roots, by the rule its workers' ceiling reads (a session with no place to write changes no file).
 			...(modelCapability.class === "full" &&
 			this.deps.standing.directsWorkers &&
 			validToolNames.includes("delegate") &&
@@ -456,8 +459,8 @@ export class SystemPromptBuilder {
 				? {
 						directorRole: {
 							root: this.deps.standing.lendsOwnerReach,
-							writes: sessionChangesFiles(writeSource),
-							writesConfigDir: sessionWritesAt(writeSource, join(this.deps.getCwd(), CONFIG_DIR_NAME)),
+							writes: instructionPlaces.length > 0,
+							writesConfigDir: instructionPlaces.includes(configDir),
 						},
 					}
 				: {}),

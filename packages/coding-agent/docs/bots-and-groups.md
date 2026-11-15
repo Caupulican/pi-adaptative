@@ -138,9 +138,10 @@ profile bot holds `delegate`, `assign` and `plan` when its profile's tools name 
 `delegate` and `plan` runs its steps on the same fleet; a worker of any profile holds none of them. A read-only bot's
 plans name no files: a step that names files is refused (its worker would run read-only under a plan that treats it as a
 writer), so each step is planned as the read-only work its worker does.
-The delegation gate (`orchestrator.delegationGate`) applies to a bot's session as to the main session; the one
-orchestration directory a bot can write is the project's `.pi` in its working directory, since its home `bots/<id>` is
-private to its path scope. A bot is never hosted in a worker process.
+The delegation gate (`orchestrator.delegationGate`) applies to a bot's session as to the main session. The orchestration
+directories it counts as a bot's own are its home `bots/<id>`, which its path scope keeps private (it writes nothing
+there), and the place its director role names for its instruction files: the project's `.pi` in its working directory
+when its write roots hold it, else its write roots, so the role never names a place the gate refuses. A bot is never hosted in a worker process.
 
 A bot waits on its own work with `task_watch`, the tool a worker holds for it: a one-shot watch on a file, a managed
 process, a process id, a port, a command or a page, with an end time at most 24 hours ahead, at most eight at a time
