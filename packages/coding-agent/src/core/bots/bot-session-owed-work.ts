@@ -912,7 +912,8 @@ export class BotOwedWork {
 
 	/**
 	 * Applies the owner's stop waiting for the bot while no process hosts it (`applyUnhostedBotStop`); its usage wait and
-	 * alarms end with it. A stop it could not apply keeps waiting, holding back the work it stops, and the owner is told;
+	 * alarms end with it. A stop it could not apply keeps waiting, holding back the work it stops, and the owner is told
+	 * (not of a held stop the failed take dropped, which no longer waits);
 	 * `swept` (the periodic listing asks) tries it again only once the stops waiting change; a failure that passes on its own
 	 * (`botOpenFailure`) is tried again after the backoff of the bot's next open, and true is returned then. The owner's
 	 * stop of a bot this process does not host writes the stop (`requestBotStop`) and asks the bot open ({@link ownerStopped}),
@@ -923,13 +924,16 @@ export class BotOwedWork {
 	applyOwnerStop(agentId: string, swept = false): boolean {
 		if (this.ports.stopped() || this.ports.hostedHere(agentId)) return false;
 		const agentDir = this.ports.agentDir();
-		const held = this.unrecorded.of(agentId);
-		const heldName = held ? [`held ${held.at}`] : [];
 		// The stop held counts among the ones waiting: a failed application is tried again by the listing once either changes.
 		// Until the stops waiting read, a failure is kept under the reading's own name.
-		let stops = ["unread", ...heldName].join("\n");
+		let inbox: readonly string[] = ["unread"];
+		const waiting = () => {
+			const held = this.unrecorded.of(agentId);
+			return [...inbox, ...(held ? [`held ${held.at}`] : [])].join("\n");
+		};
 		try {
-			stops = [...botInboxStopNames(agentDir, agentId), ...heldName].join("\n");
+			inbox = botInboxStopNames(agentDir, agentId);
+			const stops = waiting();
 			if (stops === "") {
 				this.failedStops.delete(agentId);
 				return false;
@@ -949,6 +953,13 @@ export class BotOwedWork {
 			this.failedStops.delete(agentId);
 			return false;
 		} catch (error) {
+			// The take may have dropped the stop held (its mark moved, or its re-mark after the failure did not read; the owner
+			// was told it was dropped): only the stops that still wait are owed, and with none left nothing waits.
+			const stops = waiting();
+			if (stops === "") {
+				this.failedStops.delete(agentId);
+				return false;
+			}
 			if (swept && this.failedStops.get(agentId) === stops) return false;
 			this.failedStops.set(agentId, stops);
 			const failure = storeFailure(agentId, error, undefined);
