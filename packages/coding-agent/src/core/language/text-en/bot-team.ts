@@ -126,15 +126,17 @@ export const BOT_TEAM = {
 		`Bot ${agentId}: a notice could not be kept in its chat (${reason}): ${text}`,
 	botNoticeNotMarked: (agentId: string, reason: string) =>
 		`Bot ${agentId}: a notice is in its chat, but the roster could not mark it unread (${reason}).`,
-	/** The bot's spend ledger (`bots/<id>/spend.json`) could not be read; it starts over. */
-	botSpendLedgerHeld: (agentId: string, reason: string) =>
-		`Bot ${agentId}: its spend record could not be read (${reason}); it is left as it is and read again with its next spend. Until it reads, its requests' spend is counted from now and its spend is charged to the main session once it does.`,
-	botSpendLedgerNotSetAside: (agentId: string, reason: string, setAsideError: string) =>
-		`Bot ${agentId}: its spend record does not read (${reason}) and could not be set aside (${setAsideError}); it is left as it is and tried again with its next spend. Until then, its requests' spend is counted from now and its spend is charged to the main session once it is set aside.`,
-	botSpendLedgerSetAside: (agentId: string, file: string, reason: string) =>
-		`Bot ${agentId}: its spend record did not read in full (${reason}) and was set aside as ${file}; the requests whose spend did not read count from now, and its charges to the main session continue from its record.`,
-	botSpendLedgerSetAsideChargesRecovered: (agentId: string, file: string, reason: string) =>
-		`Bot ${agentId}: its spend record did not read in full (${reason}) and was set aside as ${file}; the requests whose spend did not read count from now, and its charges to the main session continue from what the main session has recorded of them.`,
+	/**
+	 * The bot's spend ledger (`bots/<id>/spend.json`) is left as it is and read again with its next spend: it could not be
+	 * read, or it does not parse and could not be set aside (`setAsideError`).
+	 */
+	botSpendLedgerHeld: (agentId: string, reason: string, setAsideError: string | undefined) =>
+		setAsideError === undefined
+			? `Bot ${agentId}: its spend record could not be read (${reason}); it is left as it is and read again with its next spend. Until it reads, its requests' spend is counted from now and its spend is charged to the main session once it does.`
+			: `Bot ${agentId}: its spend record does not read (${reason}) and could not be set aside (${setAsideError}); it is left as it is and tried again with its next spend. Until then, its requests' spend is counted from now and its spend is charged to the main session once it is set aside.`,
+	/** The ledger did not parse in full and was set aside; its charge watermark was kept (`chargesKept`) or is recovered from the main session. */
+	botSpendLedgerSetAside: (agentId: string, file: string, reason: string, chargesKept: boolean) =>
+		`Bot ${agentId}: its spend record did not read in full (${reason}) and was set aside as ${file}; the requests whose spend did not read count from now, and its charges to the main session continue from ${chargesKept ? "its record" : "what the main session has recorded of them"}.`,
 	botSpendLedgerNotWritten: (agentId: string, reason: string) =>
 		`Bot ${agentId}: its spend record could not be written (${reason}); it is written again with its next spend, and its spend is charged once it is.`,
 	botNoticeDeliveriesNotKept: (agentId: string, reason: string) =>

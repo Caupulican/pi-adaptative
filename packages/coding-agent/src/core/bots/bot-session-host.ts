@@ -42,7 +42,6 @@ import { SessionManager } from "../../kernel/session/session-manager.ts";
 import type { AgentMessage } from "../../kernel/types.ts";
 import { botHostLockFile } from "../agent-paths.ts";
 import type { AgentSession } from "../agent-session.ts";
-import { unpricedModelRefusal } from "../cost/session-turn-spend-bound.ts";
 import type { SpawnedUsageReceiptDisposition } from "../cost/spawned-usage-receipt.ts";
 import type {
 	BotOperatorMessageDispatchResult,
@@ -83,7 +82,7 @@ import {
 	ownBotSessionKey,
 	profileBotSession,
 } from "./bot-session-profile.ts";
-import { BotSessionSpend, botSpendCeilingsOn } from "./bot-session-spend.ts";
+import { BotSessionSpend } from "./bot-session-spend.ts";
 import { type BotSpendCeiling, observeBotSessionTurns } from "./bot-session-turns.ts";
 import type { BotChargeReport } from "./bot-spend-ledger.ts";
 import type { BotTurnAccounting } from "./bot-turn-report.ts";
@@ -171,8 +170,6 @@ interface BotSessionEntry {
 	readonly builtFor: BotSender;
 	/** What defined the session when it was built (`BotSessionDefinition.key`). */
 	readonly profileKey: string;
-	/** The bot's own dollar ceilings (`BotSessionDefinition.spendBudget`). */
-	readonly spendBudget: BotSessionDefinition["spendBudget"];
 	unsubscribe: () => void;
 	/** Prompts submitted and not yet settled. */
 	inFlight: number;
@@ -252,7 +249,7 @@ export class BotSessionHost {
 			runsAsSession: (record) => this.runsAsSession(record),
 			definedCwd: (record, sender) => this.define(record, sender).cwd,
 			currentKey: (record, sender) => this.currentKey(record, sender),
-			modelRefusal: (record, sender) => this.modelRefusal(record, this.define(record, sender)),
+			modelRefusal: (record, sender) => this.modelRefusal(record, this.define(record, sender).model),
 			admissionTimers: () => ports.timers().port("provider-admission"),
 			retake: (agentId) => this.retakeRefused(agentId),
 			takeInbox: (agentId) => this.takeInbox(agentId),
@@ -435,12 +432,7 @@ export class BotSessionHost {
 	): Promise<BotOperatorMessageDispatchResult> {
 		const { agentId } = entry;
 		// Admitted here as well as at the run's start: a refusal answers the owner's send itself, not a failed turn.
-		this.admit(
-			agentId,
-			entry.session.model,
-			{ key: entry.profileKey, spendBudget: entry.spendBudget },
-			entry.builtFor,
-		);
+		this.admit(agentId, entry.session.model, { key: entry.profileKey }, entry.builtFor);
 		const queued = mode === "queue";
 		const wasRunning = this.isBusy(entry);
 		const continued = entry.session.messages.length > 0;
@@ -494,7 +486,7 @@ export class BotSessionHost {
 
 	/**
 	 * Whether the bot's model may run now: the worker admission's rules for an explicitly requested model (read again each
-	 * time, since the owner's policy changes), and a model that declares a price when a bound applies. Asked before a
+	 * time, since the owner's policy changes). Asked before a
 	 * session is built, and by the session at the start of every run, whatever opened it (the owner, a wake). A bot made
 	 * from a profile is compiled again: a run on a session built from an older definition (a profile, pin or policy that
 	 * changed since, which no record change announces) is refused, and the idle session is rebuilt on the new one. A run
@@ -503,7 +495,7 @@ export class BotSessionHost {
 	private admit(
 		agentId: string,
 		model: Model<Api> | undefined,
-		built: Pick<BotSessionDefinition, "key" | "spendBudget">,
+		built: Pick<BotSessionDefinition, "key">,
 		builtFor: BotSender,
 	): void {
 		const record = this.ports.store().getBot(agentId);
@@ -529,22 +521,16 @@ export class BotSessionHost {
 					`${defined.model.provider}/${defined.model.id}`,
 				),
 			);
-		const refusal = this.modelRefusal(record, { model, spendBudget: built.spendBudget });
+		const refusal = this.modelRefusal(record, model);
 		if (refusal) throw new BotModelRefusedError(agentId, refusal);
 	}
 
-	/** Why the model may not run now under the record's rules and the bound that applies; undefined when it may. */
-	private modelRefusal(
-		record: PersistentBotRecord,
-		{ model, spendBudget }: Pick<BotSessionDefinition, "model" | "spendBudget">,
-	): BotModelRefusal | undefined {
-		if (record.profileId === undefined) {
-			const refused = this.ports.modelRefusal(record, model);
-			if (refused) return refused;
-		}
-		const bounded = botSpendCeilingsOn(this.ports.spendCeilings(), spendBudget, model, this.ports.modelRegistry());
-		const unpriced = bounded.length === 0 ? undefined : unpricedModelRefusal(model);
-		return unpriced === undefined ? undefined : { cause: "model_unpriced", reason: unpriced };
+	/**
+	 * Why the model may not run now under the record's rules; undefined when it may. A model that declares no price runs
+	 * under no dollar bound (`botSpendCeilingsOn`), so no bound refuses it.
+	 */
+	private modelRefusal(record: PersistentBotRecord, model: Model<Api>): BotModelRefusal | undefined {
+		return record.profileId === undefined ? this.ports.modelRefusal(record, model) : undefined;
 	}
 
 	/**
@@ -732,7 +718,6 @@ export class BotSessionHost {
 				sender,
 				builtFor: sender,
 				profileKey: definition.key,
-				spendBudget: definition.spendBudget,
 				unsubscribe: () => {},
 				inFlight: 0,
 				recheckWhenIdle: false,

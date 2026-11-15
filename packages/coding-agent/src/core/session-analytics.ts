@@ -80,6 +80,18 @@ import {
 } from "./tool-recovery-stats.ts";
 
 /** The settings this module reads, declared by the module itself; the composition root passes the SettingsManager. */
+/** How a spawned-usage report is recorded: its label, source session, report id, model, goal, per-model components and the range end it charges up to. */
+export interface SpawnedUsageOptions {
+	label?: string;
+	sourceSessionId?: string;
+	reportId?: string;
+	provider?: string;
+	model?: string;
+	goalId?: string;
+	usageComponents?: readonly UsageComponent[];
+	through?: Usage;
+}
+
 export interface SessionAnalyticsSettingsSource {
 	getTheme(): string | undefined;
 }
@@ -427,19 +439,7 @@ export class SessionAnalytics {
 	 *
 	 * @returns the id of the appended entry, or `undefined` if the report was a duplicate.
 	 */
-	addSpawnedUsage(
-		usage: Usage,
-		opts?: {
-			label?: string;
-			sourceSessionId?: string;
-			reportId?: string;
-			provider?: string;
-			model?: string;
-			goalId?: string;
-			usageComponents?: readonly UsageComponent[];
-			through?: Usage;
-		},
-	): string | undefined {
+	addSpawnedUsage(usage: Usage, opts?: SpawnedUsageOptions): string | undefined {
 		const reportId = opts?.reportId;
 		if (reportId && this.getRawSpawnedReportIds().has(reportId)) {
 			return undefined;

@@ -296,7 +296,7 @@ import {
 } from "./runtime-generation-admission.ts";
 import { RuntimeUpdateController } from "./runtime-update-controller.ts";
 import type { CredentialManager } from "./secrets/credential-manager.ts";
-import { SessionAnalytics } from "./session-analytics.ts";
+import { SessionAnalytics, type SpawnedUsageOptions } from "./session-analytics.ts";
 import { SessionCacheController } from "./session-cache-controller.ts";
 import { SessionEdgeIntentController } from "./session-edge-intent-controller.ts";
 import { SessionImageStore } from "./session-image-store.ts";
@@ -4711,10 +4711,7 @@ export class AgentSession {
 		return this._analytics.getDurableCumulativeUsage();
 	}
 
-	addSpawnedUsage(
-		usage: Usage,
-		opts?: { label?: string; sourceSessionId?: string; reportId?: string },
-	): string | undefined {
+	addSpawnedUsage(usage: Usage, opts?: SpawnedUsageOptions): string | undefined {
 		return this._analytics.addSpawnedUsage(usage, opts);
 	}
 

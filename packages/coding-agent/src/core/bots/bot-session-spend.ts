@@ -45,7 +45,9 @@ function botSpendCeilings(
 
 /**
  * The ceilings that hold spend made on `model`: every one on all spend, and the metered-only ones when that spend is
- * metered. A model the registry does not know (undefined) is held as metered spend, which is never laxer.
+ * metered. A model the registry does not know (undefined) is held as metered spend, which is never laxer. A model that
+ * declares no price is held by none: its spend cannot be priced, so its usage windows hold it, as they hold the bot's
+ * workers on such a model (`RunCostBound.unpriced` "unbounded").
  */
 export function botSpendCeilingsOn(
 	root: readonly BotSpendCeiling[],
@@ -53,6 +55,7 @@ export function botSpendCeilingsOn(
 	model: Model<Api> | undefined,
 	registry: ModelRegistry,
 ): BotSpendCeiling[] {
+	if (model?.costDefaulted) return [];
 	const metered = isMeteredSpend(model, registry);
 	return botSpendCeilings(root, spendBudget).filter((ceiling) => metered || !ceiling.meteredOnly);
 }
@@ -92,18 +95,9 @@ export class BotSessionSpend {
 		const words = () => interfaceText().botTeam;
 		this.ledger = new BotSpendLedger(botSpendLedgerFile(agentDir, agentId), {
 			now: () => ports.now(),
-			held: (reason, setAsideError) =>
-				ports.warn(
-					setAsideError === undefined
-						? words().botSpendLedgerHeld(agentId, reason)
-						: words().botSpendLedgerNotSetAside(agentId, reason, setAsideError),
-				),
+			held: (reason, setAsideError) => ports.warn(words().botSpendLedgerHeld(agentId, reason, setAsideError)),
 			setAside: (file, reason, chargesKept) =>
-				ports.warn(
-					chargesKept
-						? words().botSpendLedgerSetAside(agentId, file, reason)
-						: words().botSpendLedgerSetAsideChargesRecovered(agentId, file, reason),
-				),
+				ports.warn(words().botSpendLedgerSetAside(agentId, file, reason, chargesKept)),
 			notWritten: (reason) => ports.warn(words().botSpendLedgerNotWritten(agentId, reason)),
 		});
 		this.windows = new BotSpendWindows(this.ledger, transcript, {
