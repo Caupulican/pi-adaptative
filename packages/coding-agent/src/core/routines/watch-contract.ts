@@ -147,7 +147,7 @@ export const watchConditionSchema = Type.Union([
 				minLength: 1,
 				maxLength: MAX_WATCH_COMMAND_CHARS,
 				description:
-					"A shell command, admitted at every run by the same rules as the owner's own shell calls (edge classes, credential protection, the session's capability envelope). It runs on the cadence with a timeout and a capped output; one that is refused is skipped and fires nothing.",
+					"A shell command, admitted at every run by the same rules as the session's own shell calls (edge classes, credential protection as the shell applies it, the session's capability envelope). It runs on the cadence with a timeout and a capped output, the excerpt masked as the shell masks it; one that is refused is skipped and fires nothing.",
 			}),
 			everyMs: everyMsField,
 			timeoutMs: Type.Optional(

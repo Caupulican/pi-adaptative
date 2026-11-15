@@ -88,7 +88,8 @@ export async function runSessionRequirementCheck(
 			passed: false,
 			exitCode: null,
 			output: "",
-			reason: `The check could not be prepared: ${messageOf(error)}.`,
+			// A cancel during preparation is the run's cancel, told as runRequirementCheck tells it.
+			reason: signal?.aborted ? "The check was cancelled." : `The check could not be prepared: ${messageOf(error)}.`,
 		};
 	}
 	const result = await runRequirementCheck(check, { cwd, ...(signal ? { signal } : {}), admit: () => refusal, env });
